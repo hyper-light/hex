@@ -543,35 +543,44 @@ fn a_parked_exec_goes_to_the_node_when_its_set_is_whole() {
     drop(agent.join().unwrap());
 }
 
-/// The relay's stdio listener, counting the writes the relay makes on its connections.
+/// What the relay moved through user space on its stdio connections: bytes read and writes made.
+#[derive(Default)]
+struct Moved {
+    read: AtomicUsize,
+    writes: AtomicUsize,
+}
+
+/// The relay's stdio listener, counting what the relay moves through user space on its connections.
 struct Counting {
     listener: UnixListener,
-    writes: Arc<AtomicUsize>,
+    moved: Arc<Moved>,
 }
 
 impl Listen for Counting {
-    fn accept(&self) -> io::Result<Box<dyn Duplex>> {
+    fn accept(&self) -> io::Result<Box<dyn Conn>> {
         Ok(Box::new(CountingConn {
             conn: self.listener.accept()?.0,
-            writes: Arc::clone(&self.writes),
+            moved: Arc::clone(&self.moved),
         }))
     }
 }
 
 struct CountingConn {
     conn: UnixStream,
-    writes: Arc<AtomicUsize>,
+    moved: Arc<Moved>,
 }
 
 impl Read for CountingConn {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.conn.read(buf)
+        let n = self.conn.read(buf)?;
+        self.moved.read.fetch_add(n, Ordering::SeqCst);
+        Ok(n)
     }
 }
 
 impl Write for CountingConn {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.writes.fetch_add(1, Ordering::SeqCst);
+        self.moved.writes.fetch_add(1, Ordering::SeqCst);
         self.conn.write(buf)
     }
 
@@ -580,11 +589,17 @@ impl Write for CountingConn {
     }
 }
 
+impl AsFd for CountingConn {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.conn.as_fd()
+    }
+}
+
 impl Duplex for CountingConn {
     fn try_clone(&self) -> io::Result<Box<dyn Duplex>> {
         Ok(Box::new(CountingConn {
             conn: self.conn.try_clone()?,
-            writes: Arc::clone(&self.writes),
+            moved: Arc::clone(&self.moved),
         }))
     }
 
@@ -601,55 +616,58 @@ impl Duplex for CountingConn {
     }
 }
 
-/// HEX-GUEST-36 (a learned copy unit, kind (a)): exec a program that writes 1 MiB to its stdout in one
-/// write: expect the relay to carry it to the host in units of the pipe's own capacity (F_GETPIPE_SZ),
-/// at most twice the writes that capacity takes, where std's fixed 8 KiB copy takes 128.
+/// HEX-GUEST-36 (no copy through user space, splice(2)): exec `cat` with 1 MiB on its stdin read back from
+/// its stdout: expect every byte to cross the relay by splice, the relay reading nothing from its stdio
+/// connections but each one's name and writing nothing to them, where a copy through a buffer reads and
+/// writes every byte.
 #[test]
-fn stdout_crosses_the_relay_in_units_of_its_pipes_capacity() {
+fn stdio_crosses_the_relay_without_a_copy_through_user_space() {
     const MIB: usize = 1 << 20;
-    let writes = Arc::new(AtomicUsize::new(0));
-    let counted = Arc::clone(&writes);
+    let moved = Arc::new(Moved::default());
+    let counted = Arc::clone(&moved);
     let (lab, _relay) = kept_lab_with(LIMITS, move |listener| {
         Box::new(Counting {
             listener,
-            writes: counted,
+            moved: counted,
         })
     });
-    let (probe, _) = std::io::pipe().unwrap();
-    let capacity = rustix::pipe::fcntl_getpipe_size(&probe).unwrap();
     let node = lab.node.try_clone().unwrap();
     let agent = std::thread::spawn(move || {
         let conn = hello(&node);
         let (h, _, fds) = next_request(&conn);
         answer(&conn, h, &Answer::Started { pid: 11 });
-        let mut stdout = File::from(fds.into_iter().next().unwrap());
-        stdout.write_all(&vec![7u8; MIB]).unwrap();
+        let mut fds = fds.into_iter();
+        let mut stdin = File::from(fds.next().unwrap());
+        let mut stdout = File::from(fds.next().unwrap());
+        std::io::copy(&mut stdin, &mut stdout).unwrap();
         drop(stdout);
         answer(&conn, h, &Answer::Exited(Exit::Code(0)));
         conn
     });
     let client = Client::connect(lab.link()).unwrap();
+    let (in_r, mut in_w) = std::io::pipe().unwrap();
     let (mut out_r, out_w) = std::io::pipe().unwrap();
     let mut proc = client
         .exec(
             &BoxId::new("b").unwrap(),
-            Program::of(&["yes"]),
+            Program::of(&["cat"]),
             Stdio {
-                stdin: None,
+                stdin: Some(in_r),
                 stdout: Some(out_w),
                 stderr: None,
             },
         )
         .unwrap();
+    let writer = std::thread::spawn(move || {
+        in_w.write_all(&vec![7u8; MIB]).unwrap();
+    });
     let mut got = Vec::new();
     out_r.read_to_end(&mut got).unwrap();
+    writer.join().unwrap();
     assert_eq!(got.len(), MIB);
     assert_eq!(proc.wait_for(Duration::MAX).unwrap(), Some(Exit::Code(0)));
-    let made = writes.load(Ordering::SeqCst);
-    assert!(
-        made <= 2 * MIB / capacity,
-        "{made} writes for 1 MiB through a {capacity}-byte pipe"
-    );
+    assert_eq!(moved.read.load(Ordering::SeqCst), 2 * stream::NAME_BYTES);
+    assert_eq!(moved.writes.load(Ordering::SeqCst), 0);
     drop(agent.join().unwrap());
 }
 

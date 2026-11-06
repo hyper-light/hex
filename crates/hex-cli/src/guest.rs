@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use hex_client::guest::Duplex;
 use hex_core::stream;
-use hex_node::relay::{LIMITS, Listen, Relay, STAGED};
+use hex_node::relay::{Conn, LIMITS, Listen, Relay, STAGED};
 use socket2::{Domain, SockAddr, Socket, Type};
 
 /// Runs `hex guest`'s arguments (everything after `guest`); returns the exit status.
@@ -141,13 +141,19 @@ fn vsock(port: u32) -> Result<VsockListener, String> {
 struct VsockListener(Socket);
 
 impl Listen for VsockListener {
-    fn accept(&self) -> io::Result<Box<dyn Duplex>> {
+    fn accept(&self) -> io::Result<Box<dyn Conn>> {
         Ok(Box::new(Vsock(self.0.accept()?.0)))
     }
 }
 
 /// A vsock connection, as the relay's connections are.
 struct Vsock(Socket);
+
+impl std::os::fd::AsFd for Vsock {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.0.as_fd()
+    }
+}
 
 impl Read for Vsock {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {

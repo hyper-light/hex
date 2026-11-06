@@ -76,13 +76,19 @@ pub const STAGED: &str = "/run/hex/staged";
 /// The most streams an exec has: stdin, stdout and stderr (docs/design/shards-guest.md §3a).
 pub const STREAMS: usize = 3;
 
+/// A host connection as the relay takes it: a [`Duplex`] whose descriptor the stdio copiers splice
+/// through.
+pub trait Conn: Duplex + AsFd {}
+
+impl<T: Duplex + AsFd> Conn for T {}
+
 /// What accepts the host's connections: AF_VSOCK in the guest, a Unix socket in tests.
 pub trait Listen: Send + Sync + 'static {
-    fn accept(&self) -> io::Result<Box<dyn Duplex>>;
+    fn accept(&self) -> io::Result<Box<dyn Conn>>;
 }
 
 impl Listen for std::os::unix::net::UnixListener {
-    fn accept(&self) -> io::Result<Box<dyn Duplex>> {
+    fn accept(&self) -> io::Result<Box<dyn Conn>> {
         Ok(Box::new(std::os::unix::net::UnixListener::accept(self)?.0))
     }
 }
@@ -260,7 +266,7 @@ impl Relay {
     /// One stdio connection: its name, read as long as the host takes to write it (the host's end ends
     /// it), its place in its exec's set, then its copy, once its exec has its pipe. A connection that
     /// names nothing, or a stream its set refuses, is closed as it drops.
-    fn stream(self: Arc<Self>, mut conn: Box<dyn Duplex>) {
+    fn stream(self: Arc<Self>, mut conn: Box<dyn Conn>) {
         let named = {
             let _release = Release(&self.unnamed);
             let mut name = [0u8; stream::NAME_BYTES];
@@ -544,35 +550,41 @@ enum Copier {
 }
 
 impl Copier {
-    /// Copies until either side ends. Its unit is the pipe's own capacity (`F_GETPIPE_SZ`, fcntl(2)),
-    /// learned from the pipe it copies through: a read takes as much as the pipe can hold, and a write
-    /// gives it as much, where std's fixed 8 KiB copy would take several calls for each.
-    fn run(self, mut conn: Box<dyn Duplex>) {
+    /// Moves the stream until either side ends, by splice(2) through the pipe, so no byte passes through
+    /// user space. Pipe to connection: the socket's `splice_write` (`splice_to_socket`, net/socket.c).
+    /// Connection to pipe: the socket's `splice_read`, which for vsock, whose `vsock_stream_ops` names none
+    /// (net/vmw_vsock/af_vsock.c), is the kernel's own copy into the pipe (`sock_splice_read` falls back to
+    /// `copy_splice_read`, net/socket.c, Linux 6.18). Each call moves at most the pipe's capacity
+    /// (`F_GETPIPE_SZ`, fcntl(2)), learned from the pipe itself.
+    fn run(self, conn: Box<dyn Conn>) {
         match self {
-            Self::In(mut to) => {
-                let unit = rustix::pipe::fcntl_getpipe_size(&to).map_err(io::Error::from);
-                let _ = unit.and_then(|unit| copy_in_units(&mut conn, &mut to, unit));
+            Self::In(to) => {
+                let _ = splice_all(conn.as_fd(), &to, &to);
             }
-            Self::Out(mut from) => {
-                let unit = rustix::pipe::fcntl_getpipe_size(&from).map_err(io::Error::from);
-                let _ = unit.and_then(|unit| copy_in_units(&mut from, &mut conn, unit));
+            Self::Out(from) => {
+                let _ = splice_all(&from, conn.as_fd(), &from);
                 let _ = conn.shutdown(Shutdown::Write);
             }
         }
     }
 }
 
-/// Copies `from` into `to` until `from` ends, `unit` bytes at most at a time.
-fn copy_in_units(from: &mut dyn Read, to: &mut dyn Write, unit: usize) -> io::Result<()> {
-    let mut buf = vec![0u8; unit];
+/// Splices from `from` into `to` until `from` ends, at most `pipe`'s capacity a call.
+fn splice_all(from: impl AsFd, to: impl AsFd, pipe: impl AsFd) -> io::Result<()> {
+    let unit = rustix::pipe::fcntl_getpipe_size(pipe)?;
     loop {
-        let n = match from.read(&mut buf) {
+        match rustix::pipe::splice(
+            &from,
+            None,
+            &to,
+            None,
+            unit,
+            rustix::pipe::SpliceFlags::MOVE,
+        ) {
             Ok(0) => return Ok(()),
-            Ok(n) => n,
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        };
-        to.write_all(buf.get(..n).unwrap_or_default())?;
+            Ok(_) | Err(Errno::INTR) => {}
+            Err(e) => return Err(e.into()),
+        }
     }
 }
 
