@@ -4,7 +4,6 @@
 //! name (HEX-GUEST-15); and where Shards has no backend, the class refused by name before anything
 //! boots, and one guest booted for every create after (HEX-GUEST-16).
 
-#[cfg(unix)]
 use std::ffi::OsString;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -280,6 +279,7 @@ impl shards_api::Guests for NoGuest {
 
 fn config() -> GuestConfig {
     GuestConfig {
+        binary: PathBuf::from("/shards"),
         kernel: PathBuf::from("/k"),
         initrd: PathBuf::from("/i"),
         vcpus: 1,
@@ -345,4 +345,50 @@ fn the_guests_spec_names_its_init_ports_and_shares() {
     );
     assert_eq!(spec.shares.len(), 1);
     assert!(spec.disks.is_empty());
+}
+
+/// HEX-GUEST-16: read the guest from variables with Shards' binary, the kernel and the initramfs
+/// missing, then with every one missing: expect one refusal naming each missing one, read before
+/// anything boots; then with all given: expect the guest they name, booted with that binary.
+#[test]
+fn every_missing_guest_input_is_named_in_one_refusal() {
+    use std::collections::BTreeMap;
+    let read = |given: &[(&str, &str)]| {
+        let vars: BTreeMap<String, OsString> = given
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), OsString::from(v)))
+            .collect();
+        GuestConfig::from_vars(move |name| vars.get(name).cloned())
+    };
+    let sized = [("HEX_GUEST_CPUS", "2"), ("HEX_GUEST_MEMORY_MIB", "1024")];
+    let Err(Refusal::Invalid { why, .. }) = read(&sized) else {
+        panic!("expected a refusal");
+    };
+    assert!(
+        why.starts_with("SHARDS_BIN, HEX_GUEST_KERNEL, HEX_GUEST_INITRD unset"),
+        "{why}"
+    );
+    let Err(Refusal::Invalid { why, .. }) = read(&[("SHARDS_BIN", "")]) else {
+        panic!("expected a refusal");
+    };
+    assert!(
+        why.starts_with(
+            "SHARDS_BIN, HEX_GUEST_KERNEL, HEX_GUEST_INITRD, HEX_GUEST_CPUS, HEX_GUEST_MEMORY_MIB unset"
+        ),
+        "{why}"
+    );
+    let mut all = sized.to_vec();
+    all.extend([
+        ("SHARDS_BIN", "/opt/shards"),
+        ("HEX_GUEST_KERNEL", "/k"),
+        ("HEX_GUEST_INITRD", "/i"),
+        (
+            "HEX_GUEST_SHARES",
+            if cfg!(windows) { r"C:\data" } else { "/data" },
+        ),
+    ]);
+    let config = read(&all).unwrap();
+    assert_eq!((config.vcpus, config.memory_mib), (2, 1024));
+    assert_eq!(config.spec().binary, Some(PathBuf::from("/opt/shards")));
+    assert_eq!(config.shares.len(), 1);
 }

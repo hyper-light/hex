@@ -478,6 +478,8 @@ fn through_a_simulated_guest(lab: &Lab, agent: &Agent, exe: &str) {
         shards_api::End::Stopped
     });
     let config = GuestConfig {
+        // A simulated guest boots nothing: no binary, kernel or initramfs is read.
+        binary: PathBuf::from("/nonexistent/shards"),
         kernel: PathBuf::from("/nonexistent/kernel"),
         initrd: PathBuf::from("/nonexistent/initrd"),
         vcpus: 1,

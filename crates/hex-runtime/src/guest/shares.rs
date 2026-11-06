@@ -49,7 +49,12 @@ fn numbered(dirs: impl IntoIterator<Item = (PathBuf, bool)>) -> Vec<Share> {
 
 /// The shared roots: `HEX_GUEST_SHARES` when set, else this OS's default.
 pub fn from_env() -> Result<Vec<Share>, Refusal> {
-    match std::env::var_os(ENV) {
+    from_var(std::env::var_os(ENV))
+}
+
+/// The shared roots `HEX_GUEST_SHARES`' value names, or the default where it has none.
+pub fn from_var(list: Option<std::ffi::OsString>) -> Result<Vec<Share>, Refusal> {
+    match list {
         Some(list) => parse(&list),
         None => defaults(),
     }

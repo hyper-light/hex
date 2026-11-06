@@ -8,6 +8,7 @@
 pub mod rewrite;
 pub mod shares;
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -28,6 +29,8 @@ use shares::Share;
 /// memory (the node's to give, §1), and the host folders it shares.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestConfig {
+    /// The `shards` binary that boots it (on macOS the signed build, run where it is installed).
+    pub binary: PathBuf,
     pub kernel: PathBuf,
     pub initrd: PathBuf,
     pub vcpus: u32,
@@ -38,32 +41,53 @@ pub struct GuestConfig {
 }
 
 /// The environment variables a node reads its guest from.
+pub const ENV_SHARDS_BIN: &str = "SHARDS_BIN";
 pub const ENV_KERNEL: &str = "HEX_GUEST_KERNEL";
 pub const ENV_INITRD: &str = "HEX_GUEST_INITRD";
 pub const ENV_CPUS: &str = "HEX_GUEST_CPUS";
 pub const ENV_MEMORY_MIB: &str = "HEX_GUEST_MEMORY_MIB";
 
 impl GuestConfig {
-    /// The guest named by the environment: `HEX_GUEST_KERNEL`, `HEX_GUEST_INITRD`, `HEX_GUEST_CPUS`
-    /// and `HEX_GUEST_MEMORY_MIB`, each needed (the guest's vCPUs and memory are the node's to give
-    /// from its budget, §1, so none is guessed), and `HEX_GUEST_SHARES` (else [`shares::defaults`]).
-    /// Shards refuses vCPUs or memory past the host's (its `Bounds`). Shards' binary is the
-    /// [`shards_api::Guests`] the node is given.
+    /// The guest named by the environment ([`GuestConfig::from_vars`] over the process's).
     pub fn from_env() -> Result<Self, Refusal> {
-        let path = |name: &'static str| {
-            std::env::var_os(name)
-                .map(PathBuf::from)
-                .ok_or_else(|| Refusal::Invalid {
-                    what: name,
-                    why: "it isn't set: the oci class's guest needs it".to_owned(),
-                })
-        };
+        Self::from_vars(|name| std::env::var_os(name))
+    }
+
+    /// The guest named by `var`: `SHARDS_BIN`, `HEX_GUEST_KERNEL`, `HEX_GUEST_INITRD`,
+    /// `HEX_GUEST_CPUS` and `HEX_GUEST_MEMORY_MIB`, each needed (Shards is never taken from `PATH`
+    /// unasked, and the guest's vCPUs and memory are the node's to give from its budget, §1, so none is
+    /// guessed), and `HEX_GUEST_SHARES` (else [`shares::defaults`]). Every one missing is named in one
+    /// refusal, read before anything boots, so an operator fixes them in one go. Shards refuses vCPUs or
+    /// memory past the host's (its `Bounds`) when it boots.
+    pub fn from_vars(var: impl Fn(&str) -> Option<OsString>) -> Result<Self, Refusal> {
+        let needed = [
+            ENV_SHARDS_BIN,
+            ENV_KERNEL,
+            ENV_INITRD,
+            ENV_CPUS,
+            ENV_MEMORY_MIB,
+        ];
+        let missing: Vec<&str> = needed
+            .into_iter()
+            .filter(|name| var(name).is_none_or(|v| v.is_empty()))
+            .collect();
+        if !missing.is_empty() {
+            return Err(Refusal::Invalid {
+                what: "the oci class's guest",
+                why: format!(
+                    "{} unset: the node boots its Linux guest from them",
+                    missing.join(", ")
+                ),
+            });
+        }
+        let path = |name: &str| PathBuf::from(var(name).unwrap_or_default());
         Ok(Self {
-            kernel: path(ENV_KERNEL)?,
-            initrd: path(ENV_INITRD)?,
-            vcpus: number(ENV_CPUS)?,
-            memory_mib: number(ENV_MEMORY_MIB)?,
-            shares: shares::from_env()?,
+            binary: path(ENV_SHARDS_BIN),
+            kernel: path(ENV_KERNEL),
+            initrd: path(ENV_INITRD),
+            vcpus: number(&var, ENV_CPUS)?,
+            memory_mib: number(&var, ENV_MEMORY_MIB)?,
+            shares: shares::from_var(var(shares::ENV))?,
             staged: stage::STAGED.to_owned(),
         })
     }
@@ -80,8 +104,7 @@ impl GuestConfig {
             vcpus: self.vcpus,
             memory_mib: self.memory_mib,
             disks: Vec::new(),
-            // Shards' own choice: `SHARDS_BIN`, else `shards` on `PATH` (shards-api's `GuestSpec`).
-            binary: None,
+            binary: Some(self.binary.clone()),
             ports: vec![stream::CONTROL_PORT, stream::STDIO_PORT, files::FILES_PORT],
             shares: self
                 .shares
@@ -114,14 +137,15 @@ impl GuestConfig {
     }
 }
 
-fn number<T: std::str::FromStr>(name: &'static str) -> Result<T, Refusal>
+fn number<T: std::str::FromStr>(
+    var: &impl Fn(&str) -> Option<OsString>,
+    name: &'static str,
+) -> Result<T, Refusal>
 where
     T::Err: std::fmt::Display,
 {
-    let text = std::env::var(name).map_err(|e| Refusal::Invalid {
-        what: name,
-        why: format!("{e}: the oci class's guest needs it"),
-    })?;
+    let text = var(name).unwrap_or_default();
+    let text = text.to_string_lossy();
     text.parse::<T>().map_err(|e| Refusal::Invalid {
         what: name,
         why: format!("{text:?}: {e}"),

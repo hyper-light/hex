@@ -210,7 +210,9 @@ Hex's tests of the channel, each citing its ID:
   (Docker Desktop's list, never `/`); a bundle's `config.json` and an `OciSpec` rewritten to the staged root and
   each bind source's path under its share, writable binds passing; a source under no share refused by name, naming
   the shared roots (`hex_runtime::guest`).
-- HEX-GUEST-16: the guest runtime: where Shards has no backend the class is refused as the platform's before
+- HEX-GUEST-16: the guest runtime: its inputs (`SHARDS_BIN`, `HEX_GUEST_KERNEL`, `HEX_GUEST_INITRD`,
+  `HEX_GUEST_CPUS`, `HEX_GUEST_MEMORY_MIB`) read before any boot, every missing one named in one refusal;
+  where Shards has no backend the class is refused as the platform's before
   anything boots; the guest's spec names its init, the channel's three ports and its shares (`hex_runtime::guest`).
 - HEX-GUEST-17: the conformance suite on `oci` boxes through `hex_runtime::guest::WithGuest` over
   `shards_api::sim::SimGuests`, whose guest runs `hex guest relay` to a node agent: the real link, staging and
