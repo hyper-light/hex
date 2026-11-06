@@ -356,13 +356,15 @@ fn a_failed_make_stops_the_asking_until_the_next_take() {
     assert_eq!(pool.counts().failed, 1);
 }
 
-/// Doc-truth: the bound in code is the one decision 4 sets.
+/// Doc-truth (Ada's rule, 2026-11-06): decision 4 says the pool's size is learned from its draws, as the node's
+/// default is (`Pool::learning`), and names no picked bound.
 #[test]
-fn the_bound_is_decision_4s() {
+fn decision_4_says_the_pools_size_is_learned() {
     let design =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/design/runtime-architecture.md");
     let design = std::fs::read_to_string(design).unwrap();
-    assert!(design.contains(&format!("The pool holds at most **{BOUND}**")));
+    assert!(design.contains("The pool's size is **learned from its draws**"));
+    assert!(!design.contains("The pool holds at most **32**"));
 }
 
 /// Ada's rule, 2026-11-06 (AC-T7.1.3; goal 5 extended step 4's IPC_UTS_BOUND, a picked 32): a pool made ahead learns

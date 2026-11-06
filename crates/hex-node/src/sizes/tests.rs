@@ -9,8 +9,12 @@ fn host(memory: u64, parallelism: usize) -> Host {
     Host {
         memory,
         parallelism: NonZeroUsize::new(parallelism).unwrap(),
+        threads: FEDORA_THREADS_MAX,
     }
 }
+
+/// fedora's `/proc/sys/kernel/threads-max` (64 GiB of memory), the least of its thread limits as the node runs.
+const FEDORA_THREADS_MAX: u64 = 513_046;
 
 /// Do: size the pools on hosts of any memory. Expect: the pools at their bounds hold at most that memory, but for
 /// the one seed every node keeps.
@@ -48,6 +52,8 @@ fn on_the_bench_host_no_pool_is_smaller_than_the_constant_it_replaced() {
     assert!(s.seeds.get() >= 32, "{s:?}");
     assert!(s.ipc_uts >= 32, "{s:?}");
     assert!(s.ahead >= 32, "{s:?}");
+    assert!(s.netns >= 32, "decision 4's pool: {s:?}");
+    assert!(s.workers >= 128, "the socket's workers: {s:?}");
     assert_eq!(s.procs_alive(), s.idle_cgroups + s.ahead);
 }
 
@@ -68,4 +74,24 @@ fn this_host_gives_its_facts() {
     let h = Host::now().unwrap();
     assert!(h.memory > 0);
     assert!(h.parallelism.get() >= 1);
+}
+
+/// Ada's rule, 2026-11-06 (AC-T7.1.3): `serve::WORKERS`' 128 was twice a picked in-flight bound. Do: size the
+/// socket's workers on hosts of many and of few threads. Expect: a worker for every call the socket admits at once
+/// (its connections times their calls in flight), so no admitted call waits for one, but never more than the
+/// kernel's thread limit leaves.
+#[test]
+fn every_call_the_socket_admits_has_a_worker_within_the_thread_limit() {
+    let admitted = crate::serve::LIMITS.connections * crate::serve::LIMITS.in_flight;
+    assert_eq!(Sizes::of(host(7_500 << 20, 32)).workers, admitted);
+    let few = Host {
+        threads: 100,
+        ..host(7_500 << 20, 32)
+    };
+    assert_eq!(Sizes::of(few).workers, 100);
+    let none = Host {
+        threads: 0,
+        ..host(7_500 << 20, 32)
+    };
+    assert_eq!(Sizes::of(none).workers, 1, "one worker, or no call runs");
 }
