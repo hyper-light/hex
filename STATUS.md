@@ -53,13 +53,12 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
 
 - **CLAUDE.md's unsafe-file lines (§12) and Gates lines: approved by Ada as written, 2026-11-06** ("Approve all
   of them", to the lead). In this tree: the macOS box helper's `helper_sys.rs` (d4252f3, a960732), the helper's child
-  setting `RLIMIT_NOFILE` (caa6e9f), and the Windows calls that find the Shards guest's default shares (0b8bcd1).
-  Approved and coming with their steps' tips: step 4's `windows/oci/sys.rs` call list (c4961c1), which names calls
-  step 4's later commits add and replaces the older line this tree still carries (aadbd4e, not itself approved), and
-  step 7's two Gates lines (1b1fea3, 47a9683), which name clippy targets step 7's `scripts/gates.sh` adds. Two more
-  macOS §12 parts, approved by Ada as written later on 2026-11-06, come with their steps' tips too: the macOS line's
-  `kern.maxprocperuid` (1c701ed) and step 7's `kern.argmax` (08d52a0). Merged, the macOS line names `kern.maxproc`,
-  `kern.maxprocperuid` and `kern.argmax`. Goal 7's
+  setting `RLIMIT_NOFILE` (caa6e9f), the Windows calls that find the Shards guest's default shares (0b8bcd1), and
+  step 7's two Gates lines (1b1fea3, 47a9683, whose clippy targets `scripts/gates.sh` runs) and §12's `kern.argmax`
+  (08d52a0), in with step 7's tip. Approved and coming with their steps' tips: step 4's `windows/oci/sys.rs` call
+  list (c4961c1), which names calls step 4's later commits add and replaces the older line this tree still carries
+  (aadbd4e, not itself approved), and the macOS line's `kern.maxprocperuid` (1c701ed, approved later on
+  2026-11-06). Merged, the macOS line names `kern.maxproc`, `kern.maxprocperuid` and `kern.argmax`. Goal 7's
   clone line (e71daaf) is approved on its own branch. A later commit that changes any of these call lists is new,
   and goes back to Ada.
 
