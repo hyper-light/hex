@@ -35,6 +35,8 @@ hex-runtime.workspace = true
 hex-api.workspace = true
 # The oci class through a Shards guest (docs/design/shards-guest.md): its simulator on Linux
 # (tests/node_socket.rs, HEX-GUEST-14) and the real client where a guest is given (tests/guest_real.rs).
+# HEX-GUEST-20 writes its lab's config.json (tests/guest_validation.rs).
+serde_json.workspace = true
 shards-api.workspace = true
 tempfile.workspace = true
 
