@@ -139,8 +139,10 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
   (`crates/vmm/src/devices/virtio/fs/mod.rs:1-6`, `crates/vmm/src/vm/mod.rs:835`, at `90de623f`), writes going
   both ways on all three host OSes (D38, `docs/design/architecture.md:2774-2853`; Windows D197, `:7482-7518`), and
   a plain `shards run` takes a share another process serves (`--slates-fs-fd N`, `crates/shards/src/vm_run.rs:390-401`).
-  So `shards-api`'s `GuestSpec` carries `shares: Vec<Share { dir, read_only }>`, served from boot (the interface
-  that starts the server is Shards' call, asked 2026-11-06). The node shares the roots it's configured with at the
+  So `shards-api`'s `GuestSpec` carries `shares: Vec<Share { dir, read_only }>`, served from boot (Shards' lead's call, 2026-11-06:
+  `shards run --kernel … --share DIR[:ro]`, repeatable, the i-th served as `shards{i}`; the run process spawns
+  `shards share` for each before its VM process confines itself, so the client holds no server or descriptor and
+  no share outlives its VM). The node shares the roots it's configured with at the
   guest's boot, never the host's `/` by default: that would hand any guest process, a container's escape included,
   everything the node's user can write, and undo the VM boundary (the lead, 2026-11-06). The default is Docker
   Desktop's file-sharing list: on macOS `/Users`, `/Volumes`, `/private`, `/tmp` and `/var/folders`; on Windows the
