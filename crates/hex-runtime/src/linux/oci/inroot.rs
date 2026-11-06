@@ -198,11 +198,12 @@ fn normal(dest: &str) -> String {
 
 /// How many times [`in_root`] tries a path Linux refuses with EAGAIN: a rename or a mount anywhere on the
 /// host crossing a `..` in the walk, where it can't then say the `..` stayed in the root, and leaves the
-/// retry to the caller (openat2(2); fs/namei.c v6.19 :2195-2206). libpathrs's budget (src/syscalls.rs:864-873),
-/// as runc v1.5.2 cites it (`internal/pathrs/retry.go`). Measured on fedora under 16 mount and 16 rename loops,
-/// no resolve needed more than 5 (unit hex-inroot-storm-20261105T130241Z;
-/// docs/research/runtime/inroot-eagain.md).
-const IN_ROOT_TRIES: u32 = 128;
+/// retry to the caller (openat2(2); fs/namei.c v6.19 :2195-2206). Twice the most a resolve was measured to need:
+/// on fedora under 16 mount and 16 rename loops, none needed more than 5 (unit hex-inroot-storm-20261105T130241Z,
+/// 10 runs of 2,007 resolves; docs/research/runtime/inroot-eagain.md §3), and a failure bound takes a margin of 2
+/// (Ada's 2026-11-06 rule). libpathrs's 128 (src/syscalls.rs:864-873) was copied, not measured here. A host that
+/// needs more is refused by name ([`failed`]), the record to re-derive it from.
+const IN_ROOT_TRIES: u32 = 2 * 5;
 
 thread_local! {
     /// The EAGAIN refusals [`in_root`] tried again past, on this thread: the init's count, as it is
@@ -409,7 +410,7 @@ mod tests {
         let e = failed("/up/made/here", "up/made", Errno::AGAIN).to_string();
         assert!(
             e.contains("/up/made/here (up/made)")
-                && e.contains("in 128 tries")
+                && e.contains(&format!("in {IN_ROOT_TRIES} tries"))
                 && e.contains("EAGAIN"),
             "{e}"
         );
