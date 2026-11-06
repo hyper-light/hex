@@ -609,6 +609,35 @@ reuse within one owner no cgroup is torn down, and the pass with it reads under 
 The host's clock (`probes/host_clock.sh`) before: load 16.50, a short burst's p50 0.096 ms on the P-cores and 0.159 on
 the E-cores at rest, 0.107 and 0.172 held awake; after: load 11.27, 0.131 and 0.230 at rest, 0.120 and 0.171 held.
 
+**The same on the Mac Studio, through `docker_pass.sh`** (goal 5 plan step 6, 2026-11-06). Ada's Mac Studio (3)
+(kiln runner `adas-mac-studio-3.local`), Apple M4 Max, its containers in Docker Desktop's Linux VM (kernel
+6.12.65-linuxkit, aarch64, 14 CPUs, the pass pinned to 2-13, 31 GiB). docker_pass.sh (ade0653, 5c3aa9b: the owner
+and reuse handed through, crun's tarball given since that Mac has no route out, checked against the pinned sha256)
+built hex (static-glibc, sha256 9562fabc74ed450d) and seam_oci at 70376d7, the fedora pass's tree, in the pass image.
+A one-shot launchd job (hex.g5rec.pass.20261106T040214Z), no owner and then `HEXBENCH_OWNER=g5rec-owner
+HEXBENCH_REUSE=1`, phases `lifecycle start_true`, N=10000 after 100, best of 2. Every round's file holds its 10,000
+in each phase with no error, no round crashed, and the parked inits were claimed 10,099 times a round in process
+(none failed). Results on that Mac: `~/.cache/hexpass/g5rec-20261106T040214Z/{noowner,reuse}`.
+
+| pass | | create p50 | create p99.9 | create+start of `true` p50 | create+start of `true` p99.9 |
+|---|---|---|---|---|---|
+| no owner (VM load 3.41 to 5.68) | Hex in process | 0.20, 0.107x | 0.48, 0.127x | 0.25, 0.102x | 0.64, 0.103x |
+| | Hex over the socket | 0.28, 0.150x | 0.66, 0.175x | 0.39, 0.160x | 0.81, 0.131x |
+| | libcrun | 1.87 | 3.77 | 2.44 | 6.19 |
+| reuse on (VM load 3.26 to 6.30) | Hex in process | 0.20, 0.107x | 0.48, 0.122x | 0.24, 0.099x | 0.61, 0.108x |
+| | Hex over the socket | 0.26, 0.139x | 0.59, 0.151x | 0.37, 0.152x | 0.76, 0.134x |
+| | libcrun | 1.87 | 3.92 | 2.43 | 5.66 |
+
+- **On the Mac Studio every cell is under the bar, in both columns and both modes**, the bar as written (no owner)
+  included, with libcrun's tail quiet (create p99.9 3.77 and 3.92 ms). Hex's own create p99.9 there is about half a
+  millisecond (0.58 and 0.49 by round in process with no owner, read at sample floor(0.999 n)), against fedora's 2.33
+  with no owner. Why isn't measured here (no trace ran on the Mac). Fedora's no-owner tail is the teardown of the
+  pass's own deleted boxes preempting creates on their CPUs (above), and the pass deletes as many boxes here; what
+  differs is the host around it: the VM ran nothing else (load 3.26 to 6.30 in 14 CPUs, against fedora's 16 to 17
+  with kiln CI beside the pass), and its kernel is 6.12, not 6.19.
+- The Mac's own load was 2.38 at the job's start and 2.73 at its end. jupiter's pass waits on kiln, which refuses this
+  session's runs there since its restart of 2026-11-06 about 02:06Z.
+
 The passes before it, on the way (same method, fedora, noisy; each round read whole): at 6eb38bd (goal 6 merged) no
 owner out/20261105T030924Z 0.286x, 0.191x, 0.255x, 0.251x (libcrun create p99.9 22.15) and reuse on
 out/20261105T034248Z 0.187x, 0.071x, 0.160x, 0.035x (the socket's create p99.9 0.898x); at 2a91371 no owner

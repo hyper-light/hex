@@ -130,8 +130,13 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
     0.160x (0.199x), 0.406x (0.445x). **Not met**: both p99.9 over, Hex's about 2.3 ms against a quiet libcrun's 5.03
     and 5.69. What holds it is the teardown of the box before (cgroup css work preempting creates), which reuse within
     one owner removes.
-  - Open, Ada's: count the bar with an owner, reuse across boxes of no owner, or accept it unmet on 6.19. The pass on
-    the Mac Studio (`docker_pass.sh`) waits on that and on its Docker Desktop. Goal 5 lands from this tree on her word.
+  - The Mac Studio through `docker_pass.sh` (2026-11-06, Docker Desktop's VM, 6.12.65-linuxkit aarch64, the same tree):
+    **every cell under the bar in both columns and both modes**, no owner 0.107x (0.150x), 0.127x (0.175x), 0.102x
+    (0.160x), 0.103x (0.131x); reuse on 0.107x (0.139x), 0.122x (0.151x), 0.099x (0.152x), 0.108x (0.134x), libcrun's
+    create p99.9 3.77 and 3.92 ms. jupiter's pass waits on kiln, which refuses this session's runs there since its
+    2026-11-06 restart.
+  - Open, Ada's: count the bar with an owner, reuse across boxes of no owner, or accept it unmet on 6.19 (fedora's
+    no-owner p99.9). Goal 5 lands from this tree on her word.
 - **Goal 5 extended, one integrated tree** (2026-11-04, `cp/t7-g5x-integrate`, not merged). Steps 1 to 6 of goal 5
   extended in one tree, with main's fd-leak fix (c4963f9), the EAGAIN retry for a `..` in a container's root, the exec
   FIFO's two ends held at start, the CAP_SYS_ADMIN refusal for a spec naming no capabilities, the rootless delete
