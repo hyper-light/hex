@@ -409,32 +409,48 @@ proximity numbers (H21) are an upper bound until they are refit to the measureme
 
 ### H21. Proximity is measured against blind placement on the fast path's own sample
 
-**The choice.** `proximity` runs arrivals and completions over the fit index in virtual time. A
-workload talks to a home node, making its round trips to it in sequence, each after a step of compute,
+**The choice.** `proximity` runs arrivals and completions over the fit index in virtual time. Its
+workloads are Hex's three kinds, as H10 sets them: each is an OCI container, a Firecracker microVM or a
+Shards microVM, its kind its owner's by G2's rule (owners to kinds in thirds of the launches,
+`proximity::classes_by_owner`, `huawei_trace.py:31-35`), and its memory carries its kind's overhead.
+The study's jobs have no owners of their own, so each takes one drawn by its share of the launches in
+G2's recorded workload (`huawei-r5-day30.trace`, 339 owners), and the overheads are that trace's: OCI
+0.42 MiB, Firecracker 5 MiB, Shards 5 MiB, a stand-in until Shards' own is measured. The nodes are H10's
+two models: every node running all three kinds, or Hex's fleet's Linux, Windows and macOS mix. A
+workload is placed only on a node that runs its kind. A workload talks to a home node, making its round trips to it in sequence, each after a step of compute,
 so it runs `round_trips × (step + true RTT)`; round trips are log-normal through TraceLab's p50 25 and
 p99 1,438 tool calls a session. Four policies choose from the same sampled window
 (`FitIndex::sampled_fit`): blind best fit; proximity, the least predicted RTT read as an upper bound
 `rtt × (1 + 2·mean error)` (Hyperscale's `K_SIGMA = 2` on a coordinate's error), best fit breaking
 ties, a soft score that never removes a candidate; proximity only among best fit's ties; and an oracle
 on the true RTT. Goodput is the workloads finished by the last arrival, per second; the tail is the
-p99 of arrival-to-end over every workload.
+p99 of arrival-to-end. Both are reported over every workload and for each kind.
 
 **Sources.** Scheduler design S1 (goodput, not balance) and S4 (proximity a soft score, its falsifier);
+H10 for the kinds, their overheads, the recorded workload and the two node models;
 `agentic-workloads.md` §1 (TraceLab's tool calls a session, AW[5]; tool calls 30-85% of request latency,
 AW[34]); `proximity-and-failure-containment.md` §1.5 (Hyperscale's `rtt_ucb`, PF[33]). Kiln research
 `01a1a9977b2273d0860ac510b8aa0a69`.
 
-**Evidence.** `bench/sched/proximity.md`: on 60 studies of 1,000 nodes and 20,000 workloads (5 seeds,
-uniform and skewed homes, 50% and 90% load, 10 ms, 100 ms and 1 s steps), proximity raises goodput by
-0.9-18.6% and cuts the p99 by 5.7-93.7% against blind on every one, within 1% of the oracle's goodput.
-`proximity_beats_blind_on_every_seed` asserts the direction on 20 smaller studies, and fails with the
-proximity term scored as zero (mutant `no-proximity-term`). `every_policy_runs_every_job_deterministically`,
-`proximity_changes_decisions` and `the_oracle_bounds_the_coordinates` check the study itself.
+**Evidence.** `bench/sched/proximity.md` (commit `9af44c0`, against Shards' 5 MiB stand-in): on 120
+studies of 1,000 nodes and 20,000 workloads (both fleets, 5 seeds, uniform and skewed homes, 50% and
+90% load, 10 ms, 100 ms and 1 s steps), proximity raises goodput by 0.9-18.5% and cuts the p99 by
+7.0-93.9% against blind on every one, within 0.21% of the oracle's goodput. Each kind gains on every
+study too: at the least, OCI containers +1.0% goodput and −4.4% p99, Firecracker microVMs +0.7% and
+−7.4%, Shards microVMs +0.8% and −4.4%. `proximity_beats_blind_on_every_seed` asserts the direction,
+overall and per kind, on 40 smaller studies over both fleets, and fails with the proximity term scored
+as zero (mutant `no-proximity-term`). `kinds_go_to_owners_by_g2s_rule` reproduces the trace's own split
+(8,432, 8,432 and 8,431 launches); `a_studys_kinds_follow_its_owners`, `workloads_are_hexs_three_kinds`
+and `a_kind_no_node_runs_is_refused_not_misplaced` check the kinds; `every_policy_runs_every_job_deterministically`,
+`proximity_changes_decisions` and `the_oracle_bounds_the_coordinates` check the study itself. The
+tie-break gains little (−0.02% to +4.3% goodput): it acts only on best fit's exact ties, which the
+kinds' differing overheads make rare.
 
-**What would falsify it.** A recorded kiln workload (G2 step 3's) whose sessions' round trips don't go
-to one place, or whose compute between them dwarfs the RTT: the gain falls toward the 1 s rows' (about
-1-2% goodput). A real WAN on which hyper-swim's error is far above 10% (H20). Bandwidth, unmodelled
-here, is A2's open gap.
+**What would falsify it.** Recorded microVM sessions whose round trips don't go to one place, or whose
+compute between them dwarfs the RTT: the gain falls toward the 1 s rows' (about 1-2% goodput). A real
+WAN on which hyper-swim's error is far above 10% (H20). Shards' measured overhead, once it replaces the
+stand-in in the recorded workload, changing which nodes fit a Shards microVM enough to cut its gain: the
+run is repeated then. Bandwidth, unmodelled here, is A2's open gap.
 
 ### H5. Bounded everywhere, no recursion
 

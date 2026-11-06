@@ -169,10 +169,12 @@ models inter-node latency and the scheduler's proximity term, and reports the go
 against placement that ignores proximity.
 
 **Measured (G3, `bench/sched/proximity.md`, `hex-sim.md` H20-H21).** On a modelled WAN of Azure's eight
-regions, hyper-swim's coordinates learned to a 9-10% median error, and proximity-scored placement beat
-proximity-blind best fit on all 60 studies: goodput +0.9% to +18.6%, p99 completion time 5.7% to 93.7%
-lower, the gain largest where round trips dominate a workload's steps. The falsifier below was not met,
-so proximity stays a soft score.
+regions, hyper-swim's coordinates learned to a 9-10% median error. Proximity-scored placement of Hex's
+three kinds (OCI containers, Firecracker microVMs and Shards microVMs, kinds by G2's owner rule, on
+both of H10's node models) beat proximity-blind best fit on all 120 studies, overall and for each kind:
+goodput +0.9% to +18.5%, p99 completion time 7.0% to 93.9% lower, the gain largest where round trips
+dominate a workload's steps. Shards' overhead in that run is a 5 MiB stand-in. The falsifier below was
+not met, so proximity stays a soft score.
 
 **What would falsify it.** Proximity-aware placement not improving goodput or the latency tail over
 proximity-blind placement in hex-sim on a modelled WAN — in which case proximity drops to a tie-breaker.
