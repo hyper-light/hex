@@ -603,7 +603,10 @@ lacking any of it "refuses that class by name, saying what's missing", and "Unin
   `fs.nr_open` and dockerd's old value (`docs/research/runtime/nofile-limit.md`). A user unit can't exceed its
   manager's hard limit, so the drop-in also gives `user@.service` `LimitNOFILE=1024:1048576` (everything else
   a user runs keeps systemd's soft 1024). A box whose spec names no `RLIMIT_NOFILE` inherits the node's
-  limit, as crun's containers inherit theirs; Docker 29 gives 1024:524288 (open, the lead's to bring Ada).
+  limit, as crun's containers inherit theirs; Docker 29 gives 1024:524288, which every box naming none gets
+  (Ada, 2026-11-06), capped at the node's hard limit (`hex_core::limits`). On macOS it is set in the member's
+  own process before its image: a forked child sets it and spawns over itself (`POSIX_SPAWN_SETEXEC`), which
+  keeps every spawn attribute (`docs/research/runtime/nofile-limit.md` §6).
   For each `--user` it turns on lingering (their manager, and so their node, runs with no session, as a CI runner's must, §1.5) and
   starts the service, its socket at `$XDG_RUNTIME_DIR/hex/node.sock`. Rootless `oci` boxes need nothing more: each maps
   only the node's own uid (`hex_core::bundle`), so no subordinate id ranges (§1.6). Ubuntu
