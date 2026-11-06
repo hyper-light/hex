@@ -606,6 +606,16 @@ Compute Service, as the OCI runtime spec's Windows section defines it. Sources:
     never finished starting: the silo stopped after one service host, and `HcsStartComputeSystem` ended only when
     cancelled. The same document over a vmcompute scratch started in 0.6 s (note §11). What would falsify this: a
     host where the documented sequence boots a silo, which returns the class to documented calls.
+- **"A device not granted isn't visible" is checked as reachable** (the lead's ruling, 2026-11-06, for Ada's
+  report). The step's words: "A device not granted isn't visible". Under process isolation a silo's PnP listing is
+  the host's: `CM_Get_Device_Interface_ListW` for the display adapter class gives 2 on jupiter's host, 2 in a Hex box
+  and 2 in a Docker `--isolation process` container, none granted. Microsoft's guide says a grant means "all devices
+  which identify as implementing the requested class will be plumbed into the container"
+  (`hardware-devices-in-containers.md:39`): a grant makes devices reachable, not listed. So the probe opens each
+  listed interface (a query open, no access asked): ungranted, USB, keyboard, mouse and disk classes open 0 of n in a
+  box; granted, n of n (note §11). The test uses the USB device class with both cases, since jupiter has none of
+  Microsoft's four supported classes and HCS refuses a display-class grant at create for Docker and Hex alike. Only
+  Hyper-V isolation, which is not this class, would hide the listing itself.
 - **Hex's Windows binaries carry their own C runtime** (`.cargo/config.toml`, `+crt-static` for both Windows
   targets): the launcher runs inside the image, and nanoserver has `ucrtbase.dll` but no Visual C++ runtime, so an
   `hex.exe` importing `VCRUNTIME140.dll` couldn't load there (note §11). It's the Windows twin of the static-glibc

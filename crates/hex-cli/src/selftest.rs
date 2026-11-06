@@ -90,14 +90,19 @@ pub fn run(argv: &[String]) -> Option<u8> {
         // prints its process id, then waits — so a box delete can be shown to end the grandchild too.
         #[cfg(windows)]
         "win-grandchild" => Some(win_grandchild()),
-        // win-devices <class GUID>: prints how many present devices implement that interface class
-        // where this runs, exits 0 — inside an oci box, a class not granted lists none.
+        // win-devices <class GUID>: prints how many present devices implement that interface class where
+        // this runs and how many of them open ("<listed> <reachable>"), exits 0 — inside an oci box, a class
+        // not granted is listed (the host's PnP view) but none opens.
         #[cfg(windows)]
         "win-devices" => Some(
             match hex_runtime::windows::oci::devices(args.first().map(String::as_str).unwrap_or(""))
             {
-                Ok(n) => u8::from(
-                    write_all(&mut std::io::stdout(), format!("{n}\n").as_bytes()).is_err(),
+                Ok(v) => u8::from(
+                    write_all(
+                        &mut std::io::stdout(),
+                        format!("{} {}\n", v.listed, v.reachable).as_bytes(),
+                    )
+                    .is_err(),
                 ),
                 Err(e) => {
                     let _ = write_all(&mut std::io::stderr(), format!("{e}\n").as_bytes());

@@ -391,9 +391,9 @@ pub fn info(b: &OciBox) -> Result<hex_api::BoxInfo, Refusal> {
     })
 }
 
-/// How many present devices implement interface class `class` (a GUID, braces optional) where this
-/// process runs: the probe that a class not granted to a box isn't visible inside it.
-pub fn devices(class: &str) -> Result<usize, Refusal> {
+/// The devices implementing interface class `class` (a GUID, braces optional) where this process runs,
+/// listed and reachable: the probe that a class not granted to a box isn't reachable inside it.
+pub fn devices(class: &str) -> Result<sys::DeviceView, Refusal> {
     let g = hcs::class_guid("device class", class)?;
     let field = |from: usize, to: usize| {
         g.get(from..to)

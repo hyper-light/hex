@@ -29,9 +29,11 @@ use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Runtime, Stdio};
 use hex_runtime::windows::WinRuntime;
 use serde_json::json;
 
-/// The display adapter's device interface class (`GUID_DEVINTERFACE_DISPLAY_ADAPTER`), the DirectX GPU
-/// class Windows grants containers (`hardware-devices-in-containers.md`; `gpu-acceleration.md:37`).
-const DISPLAY_ADAPTER: &str = "5B45201D-F2F2-4F3B-85BB-30FF1F953599";
+/// The USB device interface class (`GUID_DEVINTERFACE_USB_DEVICE`, usbiodef.h): every host has one, and on
+/// jupiter a box opens none of them ungranted and all of them granted (the lead's ruling, 2026-11-06). It
+/// isn't in Microsoft's table of supported classes (hardware-devices-in-containers.md:45-79), whose four
+/// jupiter has none of, and the display class it lists is refused at create by HCS for Docker and Hex alike.
+const USB_DEVICE: &str = "A5DCBF10-6530-11D2-901F-00C04FB951ED";
 
 struct Lab {
     /// The folder holding `hex.exe`, mapped into every box as its launcher.
@@ -187,32 +189,50 @@ fn contract(lab: &Lab) {
     assert!(failures.is_empty(), "conformance failures: {failures:#?}");
 }
 
-/// The step's criterion: a device not granted isn't visible. Do: on a host with a display adapter, list
-/// that class's interfaces from inside a box granted nothing. Expect: the host lists at least one, the box
-/// none.
+/// The step's criterion: "a device not granted isn't visible", read as reachable (the lead's ruling,
+/// 2026-11-06: a process-isolated silo lists the host's devices under every runtime, and a grant plumbs
+/// them in). Do: on a host with USB devices, probe that class from a box granted nothing, then from one
+/// granted it. Expect: ungranted, the host's devices are listed and none opens; granted, they open.
 fn a_device_not_granted_isnt_visible(lab: &Lab) {
-    let host = hex_runtime::windows::oci::devices(DISPLAY_ADAPTER).expect("the host's devices");
+    let host = hex_runtime::windows::oci::devices(USB_DEVICE).expect("the host's devices");
     assert!(
-        host >= 1,
-        "the host lists no display adapter, so a box's view can't be checked against it"
+        host.reachable >= 1,
+        "the host opens no USB device, so a box's view can't be checked against it: {host:?}"
     );
     let rt = lab.runtime();
-    let id = made(
-        &rt,
-        lab.spec_with(
-            BoxId::new("hex-oci-devices").unwrap(),
-            Bounds::default(),
-            &Act::Wait,
-            json!([]),
-        ),
-    );
-    let (exit, out) = run(&rt, lab, &id, &["win-devices", DISPLAY_ADAPTER]);
-    rt.delete(&id).expect("delete");
-    assert_eq!(exit, Exit::Code(0), "the probe failed: {out:?}");
+    let mut seen = Vec::new();
+    for granted in [false, true] {
+        let id = BoxId::new(&format!("hex-oci-devices-{granted}")).unwrap();
+        let mut spec = lab.spec(id.clone(), Bounds::default());
+        if granted {
+            let ClassSpec::Bundle(dir) = &spec.class else {
+                unreachable!()
+            };
+            let path = dir.join("config.json");
+            let mut cfg: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            cfg["windows"]["devices"] = json!([{"id": USB_DEVICE, "idType": "class"}]);
+            std::fs::write(&path, cfg.to_string()).unwrap();
+            spec = BoxSpec {
+                class: ClassSpec::Bundle(dir.clone()),
+                ..spec
+            };
+        }
+        let id = made(&rt, spec);
+        let (exit, out) = run(&rt, lab, &id, &["win-devices", USB_DEVICE]);
+        rt.delete(&id).expect("delete");
+        assert_eq!(exit, Exit::Code(0), "the probe failed: {out:?}");
+        seen.push(out.trim().to_owned());
+    }
     assert_eq!(
-        out.trim(),
-        "0",
-        "a box granted nothing sees {out:?} display adapters"
+        seen[0],
+        format!("{} 0", host.listed),
+        "ungranted: the host's USB devices are listed and none opens"
+    );
+    assert_eq!(
+        seen[1],
+        format!("{} {}", host.listed, host.reachable),
+        "granted: the box opens the host's USB devices"
     );
 }
 

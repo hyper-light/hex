@@ -25,11 +25,13 @@ use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
     CM_Get_Device_Interface_ListW, CR_SUCCESS,
 };
 use windows_sys::Win32::Foundation::{
-    DUPLICATE_SAME_ACCESS, DuplicateHandle, GetLastError, HANDLE, HLOCAL, HMODULE, LocalFree,
+    DUPLICATE_SAME_ACCESS, DuplicateHandle, GetLastError, HANDLE, HLOCAL, HMODULE,
+    INVALID_HANDLE_VALUE, LocalFree,
 };
 use windows_sys::Win32::Security::SECURITY_DESCRIPTOR;
 use windows_sys::Win32::Storage::FileSystem::{
-    GetFileVersionInfoSizeW, GetFileVersionInfoW, VS_FIXEDFILEINFO, VerQueryValueW,
+    CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileVersionInfoSizeW, GetFileVersionInfoW,
+    OPEN_EXISTING, VS_FIXEDFILEINFO, VerQueryValueW,
 };
 use windows_sys::Win32::System::HostComputeSystem::{
     HCS_OPERATION, HCS_OPERATION_COMPLETION, HCS_PROCESS, HCS_PROCESS_INFORMATION, HCS_SYSTEM,
@@ -752,9 +754,10 @@ pub fn file_build(path: &str) -> io::Result<u32> {
     Ok(fixed.dwFileVersionLS >> 16)
 }
 
-/// How many present devices implement interface class `class` (`CM_Get_Device_Interface_List*`), as
-/// seen from where this process runs: the probe for "a device not granted isn't visible".
-pub fn device_interfaces(class: &GUID) -> io::Result<usize> {
+/// The present devices implementing interface class `class` as seen from where this process runs: how
+/// many `CM_Get_Device_Interface_List*` lists, and how many of those open. The probe for "a device not
+/// granted isn't visible", read as reachable (the lead's ruling, 2026-11-06).
+pub fn device_interfaces(class: &GUID) -> io::Result<DeviceView> {
     let mut len = 0u32;
     // SAFETY: class is a valid GUID; len is a valid out-pointer; no device instance filter.
     let cr = unsafe {
@@ -791,6 +794,41 @@ pub fn device_interfaces(class: &GUID) -> io::Result<usize> {
             "CM_Get_Device_Interface_ListW: {cr}"
         )));
     }
-    // A double-NUL-terminated list of NUL-terminated names: count the non-empty ones.
-    Ok(buf.split(|u| *u == 0).filter(|s| !s.is_empty()).count())
+    // A double-NUL-terminated list of NUL-terminated names: each one listed, and opened to see whether
+    // it is reachable from here.
+    let mut view = DeviceView::default();
+    for name in buf.split(|u| *u == 0).filter(|s| !s.is_empty()) {
+        view.listed = view.listed.saturating_add(1);
+        let path: Vec<u16> = name.iter().copied().chain([0]).collect();
+        // A query open (no access asked): it opens a plumbed device and is refused one the container
+        // wasn't given (jupiter, 2026-11-06: USB, keyboard, mouse and disk classes, 0 of n opened ungranted,
+        // n of n granted). SAFETY: path is a NUL-terminated wide string that outlives the call; no security
+        // attributes or template; the result is a handle or INVALID_HANDLE_VALUE, checked.
+        let h = unsafe {
+            CreateFileW(
+                path.as_ptr(),
+                0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                null(),
+                OPEN_EXISTING,
+                0,
+                null_mut(),
+            )
+        };
+        if h != INVALID_HANDLE_VALUE && !h.is_null() {
+            // SAFETY: h is the handle just opened, owned by nothing else; dropping it closes it.
+            drop(unsafe { Handle::own(h) });
+            view.reachable = view.reachable.saturating_add(1);
+        }
+    }
+    Ok(view)
+}
+
+/// A device interface class as seen from where this process runs: how many of its interfaces are listed,
+/// and how many of those open (a process-isolated container lists the host's, and opens only those its
+/// grant plumbed in: the lead's ruling on "visible", 2026-11-06).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceView {
+    pub listed: usize,
+    pub reachable: usize,
 }

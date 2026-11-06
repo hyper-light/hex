@@ -300,7 +300,20 @@ snapshotter, Docker 29.9.3's static engine beside it. Records: `C:\Users\corph\.
   silo: HEX-RT-1..13 pass, the memory and process bounds among them.
 - **Probe 4.** A write to a read-only mapped directory is refused and the read-write one lands on the host. A class
   not granted is still listed inside: `CM_Get_Device_Interface_ListW` for the display adapter class gives 2 on the
-  host, in a Hex box and in a Docker `--isolation process` container alike (open with the lead: what "visible" is).
+  host, in a Hex box and in a Docker `--isolation process` container alike. What a grant changes is whether a
+  listed interface opens (a `CreateFileW` query open, no access asked), in a Hex box on `ltsc2025`:
+
+  | class | host listed/open | box ungranted | box granted |
+  |---|---|---|---|
+  | USB device `A5DCBF10-…` | 4/4 | 4/0 | 4/4 |
+  | keyboard `884B96C3-…` | 3/3 | 3/0 | 3/3 |
+  | mouse `378DE44C-…` | 1/1 | 1/0 | 1/1 |
+  | disk `53F56307-…` | 1/1 | 1/0 | 1/1 |
+  | network `CAC88484-…` | 6/6 | 6/0 | 6/0 |
+
+  Read access separates the same way except for keyboard and mouse (granted, 0 open for read). jupiter has none of
+  the four classes Microsoft supports (GPIO, I2C, COM, SPI: 0 listed), and a display-class grant fails HCS's create
+  with 0x80070003 for Hex and for Docker (`--device class/5B45201D-…`, nanoserver and servercore) alike.
 - **Probe 5.** HCS starts `ltsc2025` (26100) on 26200; `ltsc2019` (17763) is refused by the version table before HCS
   is asked. The host's own `ntdll.dll` is no mismatch here: 25H2's is build 26100.
 - **Probe 6.** No: nanoserver has `ucrtbase.dll` and no `vcruntime140.dll`, and a dynamically linked `hex.exe`
