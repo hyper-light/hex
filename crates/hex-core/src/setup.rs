@@ -121,8 +121,25 @@ impl WindowsFeature {
     }
 }
 
-/// Most bytes of a feature listing [`features_off`] reads: two short lines, far under it.
-pub const FEATURE_LISTING_MAX: usize = 4096;
+/// A listing line's bytes past its feature's name: a space, the one-digit `InstallState` (1-4,
+/// Win32_OptionalFeature's) and the CRLF PowerShell ends each line with.
+const LINE_TAIL: usize = " 1\r\n".len();
+
+/// Most bytes of a feature listing [`features_off`] reads: its format's own size, a line for each feature
+/// it asks for, so a listing longer than Windows writes is refused (the 36 bytes jupiter writes, measured).
+pub const FEATURE_LISTING_MAX: usize = listing_size();
+
+const fn listing_size() -> usize {
+    // Every feature of `ALL`, by its array's shape: a feature added there must be added here. The sums
+    // saturate: a size past usize::MAX (never, for two names) would bound nothing tighter anyway.
+    let [a, b] = WindowsFeature::ALL;
+    line_size(a).saturating_add(line_size(b))
+}
+
+/// One feature's listing line: its name, then [`LINE_TAIL`].
+const fn line_size(f: WindowsFeature) -> usize {
+    f.name().len().saturating_add(LINE_TAIL)
+}
 
 /// The query an unprivileged node runs (PowerShell) for the installer's features' state:
 /// `Win32_OptionalFeature`, one `<name> <InstallState>` line per feature Windows lists.
