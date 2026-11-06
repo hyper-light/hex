@@ -118,7 +118,7 @@ fn main() {
         let now = Instant::now();
         if stalled_at.is_none() && now - start >= warm {
             if let Some(p) = &prober {
-                timeout_at_stall = p.timeout().unwrap();
+                timeout_at_stall = p.timeout().unwrap().unwrap_or_default();
             }
             stalled_at = Some(Instant::now());
             sh(&stall_cmd);

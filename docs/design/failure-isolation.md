@@ -162,9 +162,14 @@ s; or a healthy node suspected when the slowdown is cell-wide.
 
 ### F3. Disk stall: the node's own write-and-flush probe, timed as RFC 6298 times a segment
 
-**The choice.** The node agent writes and flushes a record on its state disk every probe period. The
-write's timeout is RFC 6298's `SRTT + max(G, 4·RTTVAR)` over the probe's own completed latencies, at
-least 1 s and at most 60 s (FI[8]); a probe that outlived its timeout is no sample (Karn). The node is
+**The choice.** The node agent writes and flushes a one-byte record on its state disk every probe
+period. Its first write is the calibration: until it completes nothing is judged and the node takes no
+work, so a disk dead from the start keeps its node out; its latency seeds the timer, so no prior is
+assumed. The timeout is then RFC 6298's `SRTT + max(G, 4·RTTVAR)` over the probe's own completed
+latencies, at least 1 s and with no ceiling (FI[8]); a probe that outlived its timeout is no sample
+(Karn). The 1 s floor is TCP's and stays only until the tolerated false-drain rate is set: replayed on a
+recorded healthy disk, a floor learned from the disk suspects a stall 30 times sooner but drains a
+healthy one on a spike past any it had seen (`bench/health/records/2026-11-06-probe-floor-apfs.md`). The node is
 `Suspect` when the outstanding write outlives one timeout and `Drain` at the timer's second expiry, the
 first doubled (three timeouts), or after 3 completed probes in a row each slower than the timeout. A
 node that can't write its own disk stops being trusted as a crashed one does (hyper-raft's heartbeat
@@ -303,9 +308,7 @@ holds this table to the code.
 
 | Constant | Value | Source |
 |---|---|---|
-| `probe::INITIAL_TIMEOUT_NS` | 1000000000 | RFC 6298 §2.1 (FI[8]) |
 | `probe::MIN_TIMEOUT_NS` | 1000000000 | RFC 6298 §2.4 (FI[8]) |
-| `probe::MAX_TIMEOUT_NS` | 60000000000 | RFC 6298 §2.5 (FI[8]) |
 | `probe::DRAIN_TIMEOUTS` | 3 | RFC 6298 §5.5, the timer doubled once (FI[8]) |
 | `probe::SLOW_STREAK` | 3 | CPI²'s 3 flags (FI[9]) |
 | `grade::WINDOW_NS` | 1000000000 | chosen: 2 and 4 windows fit Panorama's 7 s (FI[4]) |

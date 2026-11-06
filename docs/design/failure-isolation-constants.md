@@ -24,14 +24,14 @@ is a typed refusal.
 |---|---|---|---|---|
 | `swim::gossip_room` | 8 entries, picked | what QUIC's minimum datagram (1,200 B) leaves beside the widest ack | `crates/hex-sim/src/swim.rs` | (c) RFC 9000 §14.1, as hyper-swim's owner sizes it |
 | `disk_probe::RECORD_BYTES` | 4,096, a page | 1 byte: the least write that dirties a block | `crates/hex-node/src/disk_probe.rs:22` | the minimum; nothing chosen |
+| `probe::INITIAL_TIMEOUT_NS` | 1 s, RFC 6298 §2.1's prior | gone: the first probe is a calibration write whose latency seeds the timer; nothing is judged and the node takes no work until it completes | `crates/hex-health/src/probe.rs`, `crates/hex-node/src/disk_probe.rs` | (a) |
+| `probe::MAX_TIMEOUT_NS` | 60 s, RFC 6298 §2.5's "MAY" | gone: no ceiling; a disk steadily slower than 60 s is judged by its own latency | `crates/hex-health/src/probe.rs` | (a) |
 
 ## hex-health, the detectors and penalties
 
 | Name | Value | File:line | Kind | Way out |
 |---|---|---|---|---|
-| `probe::INITIAL_TIMEOUT_NS` | 1 s | `crates/hex-health/src/probe.rs:21` | (d) RFC 6298 §2.1, TCP's prior | A prior is needed before the first sample. (a) at cell level: the cell's measured disk latencies as the prior, once the control plane carries them. |
 | `probe::MIN_TIMEOUT_NS` | 1 s | `probe.rs:23` | (d) RFC 6298 §2.4, made for TCP's delayed ACKs | (a): floor at the longest probe the disk has completed without a drain. Replayed on a recorded healthy trace (`bench/health/records/2026-11-06-probe-floor-apfs.md`): the floor removed drains a healthy disk 5 times in 10 minutes; learned, a stall is suspected at 30 ms and drained at 89 ms, 30x faster, with one warm-up false drain. The warm-up's length follows from the tolerated false-drain rate: **waits on Ada's rate.** |
-| `probe::MAX_TIMEOUT_NS` | 60 s | `probe.rs:25` | (d) RFC 6298 §2.5 "MAY" | (a): no cap; the timeout is what the disk's measured latencies say. A cap only bounds a stall's detection, and the stall is detected by age anyway. |
 | `probe::DRAIN_TIMEOUTS` | 3 | `probe.rs:28` | (d) RFC 6298 §5.5 doubling | (a): the count `k` with `p^k` under the owner's tolerated false-drain rate, `p` the learned rate of a healthy disk's probes outliving one timeout. |
 | `probe::SLOW_STREAK` | 3 | `probe.rs:31` | (d) CPI²'s 3 flags | Same as `DRAIN_TIMEOUTS`. |
 | `grade::WINDOW_NS` | 1 s | `crates/hex-health/src/grade.rs:26` | (d) picked to fit Panorama's 7 s | (a): the time a node's requesters take to report `MIN_OBSERVATIONS`, at each node's learned report rate. |

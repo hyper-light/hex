@@ -5,6 +5,11 @@
 //! timeout over the probe's own completed latencies, as hyper-swim's detector times its peers
 //! (`detector.rs`, `SRTT + max(G, 4·RTTVAR)`, at least a second).
 //!
+//! - Unarmed until the first probe, the calibration write, completes: its latency seeds the timer, so
+//!   no prior is assumed, and nothing is judged before it (the node agent keeps the node out of
+//!   placement until then).
+//! - No ceiling: a disk is judged by its own latencies, however slow it steadily is.
+//!
 //! - Suspect when the outstanding write outlives one timeout.
 //! - Drain when it outlives the timer's second expiry, the first one doubled (RFC 6298 §5.5): three
 //!   timeouts in all.
@@ -16,13 +21,8 @@
 
 use crate::{HealthError, Level};
 
-/// RFC 6298 §2.1: "Until a round-trip time (RTT) measurement has been made ... the sender SHOULD set
-/// RTO <- 1 second".
-pub const INITIAL_TIMEOUT_NS: u64 = 1_000_000_000;
 /// RFC 6298 §2.4: "if it is less than 1 second, then the RTO SHOULD be rounded up to 1 second".
 pub const MIN_TIMEOUT_NS: u64 = 1_000_000_000;
-/// RFC 6298 §2.5: "A maximum value MAY be placed on RTO provided it is at least 60 seconds."
-pub const MAX_TIMEOUT_NS: u64 = 60_000_000_000;
 /// The timer's expiries before a drain: the first at one timeout, the second after it doubled (RFC
 /// 6298 §5.5), so three timeouts from the write.
 pub const DRAIN_TIMEOUTS: u64 = 3;
@@ -53,11 +53,16 @@ impl DiskProbe {
         }
     }
 
-    /// The current timeout: RFC 6298 §2.3's `SRTT + max(G, K·RTTVAR)` with K = 4, clamped to
-    /// [`MIN_TIMEOUT_NS`]..=[`MAX_TIMEOUT_NS`].
-    pub fn timeout_ns(&self) -> Result<u64, HealthError> {
+    /// Whether the calibration write has completed: nothing is judged before.
+    pub fn armed(&self) -> bool {
+        self.srtt_ns.is_some()
+    }
+
+    /// The current timeout: RFC 6298 §2.3's `SRTT + max(G, K·RTTVAR)` with K = 4, at least
+    /// [`MIN_TIMEOUT_NS`]; `None` until armed.
+    pub fn timeout_ns(&self) -> Result<Option<u64>, HealthError> {
         let Some(srtt) = self.srtt_ns else {
-            return Ok(INITIAL_TIMEOUT_NS);
+            return Ok(None);
         };
         let spread = self
             .rttvar_ns
@@ -67,7 +72,7 @@ impl DiskProbe {
         let rto = srtt
             .checked_add(spread)
             .ok_or(HealthError::Overflow("probe timeout"))?;
-        Ok(rto.clamp(MIN_TIMEOUT_NS, MAX_TIMEOUT_NS))
+        Ok(Some(rto.max(MIN_TIMEOUT_NS)))
     }
 
     /// A write and flush began at `now_ns`.
@@ -89,7 +94,8 @@ impl DiskProbe {
             .ok_or(HealthError::Overflow("probe latency"))?;
         let timeout = self.timeout_ns()?;
         self.outstanding = None;
-        if latency > timeout {
+        // Unarmed, this is the calibration write: always a sample.
+        if timeout.is_some_and(|t| latency > t) {
             self.slow_streak = self.slow_streak.saturating_add(1);
             return Ok(latency);
         }
@@ -134,7 +140,9 @@ impl DiskProbe {
                 last_ns: self.last_ns,
             });
         }
-        let timeout = self.timeout_ns()?;
+        let Some(timeout) = self.timeout_ns()? else {
+            return Ok(Level::Healthy);
+        };
         let drain_at = timeout
             .checked_mul(DRAIN_TIMEOUTS)
             .ok_or(HealthError::Overflow("probe drain"))?;
@@ -159,7 +167,9 @@ impl DiskProbe {
         let Some(began) = self.outstanding else {
             return Ok(None);
         };
-        let timeout = self.timeout_ns()?;
+        let Some(timeout) = self.timeout_ns()? else {
+            return Ok(None);
+        };
         let overflow = HealthError::Overflow("probe deadline");
         let suspect = began.checked_add(timeout).ok_or(overflow.clone())?;
         let drain = timeout
@@ -210,7 +220,7 @@ mod tests {
     #[test]
     fn a_stalled_write_suspects_at_one_timeout_and_drains_at_three() {
         let mut p = warmed(2 * MS);
-        assert_eq!(p.timeout_ns().unwrap(), MIN_TIMEOUT_NS);
+        assert_eq!(p.timeout_ns().unwrap(), Some(MIN_TIMEOUT_NS));
         let t0 = 10 * S;
         p.start(t0).unwrap();
         assert_eq!(p.level(t0 + 999 * MS).unwrap(), Level::Healthy);
@@ -266,7 +276,7 @@ mod tests {
     }
 
     /// Hostile input: time going backwards, a second start, a finish with none outstanding, and a
-    /// maximal time are typed refusals, never a panic.
+    /// calibration write taking until the last instant are typed refusals, never a panic.
     #[test]
     fn hostile_times_are_refused_typed() {
         let mut p = DiskProbe::new(MS);
@@ -277,9 +287,43 @@ mod tests {
             Err(HealthError::TimeBackwards { .. })
         ));
         assert!(matches!(p.level(S), Err(HealthError::TimeBackwards { .. })));
+        // The calibration write took until the last instant: its sample is the timer's, and the
+        // timeout it makes passes u64, a typed refusal.
         p.finish(u64::MAX).unwrap();
         assert_eq!(p.finish(u64::MAX), Err(HealthError::NoProbe));
-        assert_eq!(p.level(u64::MAX).unwrap(), Level::Suspect);
+        assert_eq!(
+            p.level(u64::MAX),
+            Err(HealthError::Overflow("probe timeout"))
+        );
+    }
+
+    /// AC-T7.10.3, the calibration write (no prior constant): do start a probe and hold it for 1,000
+    /// s before any probe has completed; expect detection off (`Healthy`, not armed, no wake-up asked);
+    /// once it completes, expect the probe armed with a timeout from that one sample.
+    #[test]
+    fn detection_is_off_until_the_calibration_sample() {
+        let mut p = DiskProbe::new(MS);
+        assert!(!p.armed());
+        assert_eq!(p.timeout_ns().unwrap(), None);
+        p.start(0).unwrap();
+        assert_eq!(p.level(1_000 * S).unwrap(), Level::Healthy);
+        assert_eq!(p.next_change().unwrap(), None);
+        p.finish(1_000 * S + 4 * MS).unwrap();
+        assert!(p.armed());
+        assert!(p.timeout_ns().unwrap().is_some());
+    }
+
+    /// No cap: a disk whose flushes steadily take 70 s is judged by its own latency, not a 60 s ceiling
+    /// (RFC 6298's "MAY", copied from TCP), which would suspect every one of its healthy flushes: its
+    /// timeout is past 60 s, and a 70 s flush is no suspicion.
+    #[test]
+    fn a_very_slow_disk_is_judged_by_its_own_latency() {
+        let mut p = warmed(70 * S);
+        let timeout = p.timeout_ns().unwrap().unwrap();
+        assert!(timeout > 60 * S, "{timeout}");
+        let t0 = 10_000 * S;
+        p.start(t0).unwrap();
+        assert_eq!(p.level(t0 + 70 * S).unwrap(), Level::Healthy);
     }
 
     /// The driver's wake-up: one past the suspect deadline, then one past the drain deadline.

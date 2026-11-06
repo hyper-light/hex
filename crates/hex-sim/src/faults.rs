@@ -152,7 +152,10 @@ pub fn disk_stall(seed: u64) -> Result<(Measured, u64, u64), FaultError> {
         p.finish(add(t, lat)?)?;
         t = add(t, period)?;
     }
-    let timeout = p.timeout_ns()?;
+    // Armed by the first, calibration, probe.
+    let timeout = p
+        .timeout_ns()?
+        .ok_or(FaultError::Health(HealthError::NoProbe))?;
     // The stall: the write the node starts at its next probe after `onset` never finishes.
     let onset = add(t, rng.range(0, period.saturating_sub(1)))?;
     let start = add(t, period)?;

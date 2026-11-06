@@ -143,15 +143,19 @@ impl DiskProber {
     }
 
     /// Whether the node may take new work: false once a judgement saw `Drain`.
+    /// Whether the node may take new work: not before the calibration write has completed (a disk
+    /// dead from the start keeps its node out), and not once a judgement saw `Drain`.
     pub fn schedulable(&self) -> bool {
-        !self.shared.cordoned.load(Ordering::Acquire)
+        let armed = lock(&self.shared.probe).is_ok_and(|p| p.armed());
+        armed && !self.shared.cordoned.load(Ordering::Acquire)
     }
 
-    /// The probe's current timeout, for a record of the drill.
-    pub fn timeout(&self) -> Result<Duration, ProbeError> {
-        Ok(Duration::from_nanos(
-            lock(&self.shared.probe)?.timeout_ns()?,
-        ))
+    /// The probe's current timeout, for a record of the drill; `None` until the calibration write
+    /// completes.
+    pub fn timeout(&self) -> Result<Option<Duration>, ProbeError> {
+        Ok(lock(&self.shared.probe)?
+            .timeout_ns()?
+            .map(Duration::from_nanos))
     }
 
     /// Stop the prober after its current write.
@@ -258,6 +262,10 @@ mod tests {
                 pause(Duration::from_millis(5));
             }
         };
+        // The calibration write arms it: wait on that fact.
+        while prober.timeout().unwrap().is_none() {
+            pause(Duration::from_millis(1));
+        }
         assert_eq!(prober.level().unwrap(), Level::Healthy);
         assert!(prober.schedulable());
         // One timeout (at least RFC 6298's 1 s) to Suspect, three to Drain, with room.
@@ -270,6 +278,46 @@ mod tests {
         thread.join().unwrap().unwrap();
         // Cordoned stays cordoned once the disk answers again.
         assert!(!prober.schedulable());
+    }
+
+    /// AC-T7.10.3, the calibration write: do hold the first write; expect the node unschedulable and
+    /// `Healthy` (detection off) while it blocks, however long, and schedulable once it completes.
+    #[test]
+    fn a_node_takes_no_work_until_its_calibration_write_completes() {
+        let s = shared();
+        let epoch = Instant::now();
+        let (release, held) = mpsc::channel::<()>();
+        let (done, written) = mpsc::channel::<()>();
+        let ours = Arc::clone(&s);
+        let thread = std::thread::spawn(move || {
+            let mut first = true;
+            probe_loop(&ours, epoch, Duration::from_millis(5), || {
+                if first {
+                    first = false;
+                    held.recv().ok();
+                    done.send(()).ok();
+                }
+                Ok(())
+            })
+        });
+        let prober = DiskProber {
+            shared: Arc::clone(&s),
+            epoch,
+            thread: None,
+        };
+        pause(Duration::from_millis(50));
+        assert!(!prober.schedulable());
+        assert_eq!(prober.level().unwrap(), Level::Healthy);
+        assert_eq!(prober.timeout().unwrap(), None);
+        release.send(()).unwrap();
+        written.recv().unwrap();
+        // Armed once its finish is recorded: wait on that fact, not a clock.
+        while prober.timeout().unwrap().is_none() {
+            pause(Duration::from_millis(1));
+        }
+        assert!(prober.schedulable());
+        prober.stop();
+        thread.join().unwrap().unwrap();
     }
 
     /// AC-T7.10.3, hostile input: do start the probe on a directory that doesn't exist; expect a typed
