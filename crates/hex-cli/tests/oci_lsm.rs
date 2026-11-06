@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Runtime, Stdio};
 use hex_node::Node;
-use hex_runtime::linux::oci::lsm::Policy;
+use hex_runtime::linux::oci::lsm::{self, Policy};
 
 /// The label the test mounts with: Fedora's container file type, at the categories runtime-tools uses.
 const DEFAULT_LABEL: &str = "system_u:object_r:container_file_t:s0:c715,c811";
@@ -108,8 +108,8 @@ fn oci_apparmor_profile_is_applied_or_refused_by_name() {
     in_delegated_scope(
         "oci_apparmor_profile_is_applied_or_refused_by_name",
         |own, cache, exe| {
-            let on = std::fs::read("/sys/module/apparmor/parameters/enabled")
-                .is_ok_and(|b| b.first() == Some(&b'Y'));
+            // The kernel asked as a create asks it, not /sys, which a privileged container may not show.
+            let on = lsm::apparmor_runs().expect("asking the kernel whether AppArmor runs");
             let profile = std::env::var("HEX_LSM_APPARMOR_PROFILE").ok();
             let name = match (&profile, on) {
                 (Some(p), true) => p.clone(),
@@ -207,9 +207,10 @@ fn control_runs(own: &Path, cache: &Path, exe: &str) -> bool {
     }
 }
 
-/// Whether SELinux is active: its filesystem is mounted, as the host's own tools read it.
+/// Whether SELinux is active, asked as a create asks the kernel (its seclabel option), not by selinuxfs: a
+/// privileged container on an SELinux host, the root lab's, has none mounted, though its kernel runs SELinux.
 fn selinux_active() -> bool {
-    Path::new("/sys/fs/selinux/enforce").exists()
+    lsm::selinux_runs().expect("asking the kernel whether SELinux runs")
 }
 
 /// Runs `body` with a cgroup of this process's own to subdivide, re-running the test `name` in a transient
