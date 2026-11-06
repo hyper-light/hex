@@ -5,10 +5,52 @@
 //! that no user, group or process holds. Other installers (Nix) share that range, so the helper takes no
 //! more ids than it needs. Pure (CLAUDE.md §9): the helper reads the directory and makes the account.
 
+use std::collections::BTreeSet;
+use std::ops::RangeInclusive;
+
+/// Apple's role-account uids: `sysadminctl`'s usage on macOS 26.4, "Role accounts require name starting with
+/// _ and UID in 450-499 range" (docs/research/runtime/installer-per-os.md §3.1).
+pub const ROLE_UIDS: RangeInclusive<u32> = 450..=499;
+
+/// Every pool user's name is this and its index: `_hexbox1`, `_hexbox2`, …
+pub const POOL_PREFIX: &str = "_hexbox";
+
+/// An account the helper makes: its name and uid, the rest of its attributes the helper's fixed template.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Account {
+    pub name: String,
+    pub uid: u32,
+}
+
+/// The index a pool user's name holds: `_hexbox<n>`, `n` a decimal from 1 with no leading zero that fits a
+/// `u32`; `None` for any other name.
+pub fn pool_index(name: &str) -> Option<u32> {
+    let digits = name.strip_prefix(POOL_PREFIX)?;
+    if digits.is_empty() || digits.starts_with('0') || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// The next account to make for a pool whose users are named `pool`: the name after the highest pool index
+/// among them, at the first role uid not in `taken` (every user's uid, group's gid and running process's
+/// uid the helper read just now). `None` when every role uid is taken, or the index can't grow.
+pub fn next_account(pool: &[String], taken: &BTreeSet<u32>) -> Option<Account> {
+    let index = pool
+        .iter()
+        .filter_map(|n| pool_index(n))
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)?;
+    let uid = ROLE_UIDS.clone().find(|u| !taken.contains(u))?;
+    Some(Account {
+        name: format!("{POOL_PREFIX}{index}"),
+        uid,
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
     use proptest::prelude::*;
 
     use super::*;
