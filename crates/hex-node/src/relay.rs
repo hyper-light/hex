@@ -544,16 +544,35 @@ enum Copier {
 }
 
 impl Copier {
+    /// Copies until either side ends. Its unit is the pipe's own capacity (`F_GETPIPE_SZ`, fcntl(2)),
+    /// learned from the pipe it copies through: a read takes as much as the pipe can hold, and a write
+    /// gives it as much, where std's fixed 8 KiB copy would take several calls for each.
     fn run(self, mut conn: Box<dyn Duplex>) {
         match self {
             Self::In(mut to) => {
-                let _ = io::copy(&mut conn, &mut to);
+                let unit = rustix::pipe::fcntl_getpipe_size(&to).map_err(io::Error::from);
+                let _ = unit.and_then(|unit| copy_in_units(&mut conn, &mut to, unit));
             }
             Self::Out(mut from) => {
-                let _ = io::copy(&mut from, &mut conn);
+                let unit = rustix::pipe::fcntl_getpipe_size(&from).map_err(io::Error::from);
+                let _ = unit.and_then(|unit| copy_in_units(&mut from, &mut conn, unit));
                 let _ = conn.shutdown(Shutdown::Write);
             }
         }
+    }
+}
+
+/// Copies `from` into `to` until `from` ends, `unit` bytes at most at a time.
+fn copy_in_units(from: &mut dyn Read, to: &mut dyn Write, unit: usize) -> io::Result<()> {
+    let mut buf = vec![0u8; unit];
+    loop {
+        let n = match from.read(&mut buf) {
+            Ok(0) => return Ok(()),
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        to.write_all(buf.get(..n).unwrap_or_default())?;
     }
 }
 

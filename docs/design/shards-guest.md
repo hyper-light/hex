@@ -450,6 +450,8 @@ Hex's tests of the channel, each citing its ID:
   only a second hang refuses its caller, by type (`hex_runtime::guest::GuestRuntime`).
 - HEX-GUEST-35: the OCI validation reads its lab's end again after waiting as long as the last read took (step 7's
   learned re-read), no picked interval (`crates/hex-cli/tests/guest_validation.rs`).
+- HEX-GUEST-36: the relay copies an exec's stdio in units of its pipe's own capacity (`F_GETPIPE_SZ`), not std's
+  fixed 8 KiB: 1 MiB of stdout crosses in at most twice the writes that capacity takes (`hex_node::relay`).
 
 ## 7. What would falsify it
 

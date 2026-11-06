@@ -135,14 +135,14 @@ fn hello(node: &OwnedFd) -> OwnedFd {
     conn
 }
 
-/// Whether a message, or its end, is waiting on `conn` within `ms` (0: now).
-fn readable(conn: impl AsFd, ms: i64) -> bool {
+/// Whether a message, or its end, is waiting on `conn` now.
+fn readable(conn: impl AsFd) -> bool {
     let mut ready = [PollFd::new(&conn, PollFlags::IN)];
-    let ts = Timespec {
+    let now = Timespec {
         tv_sec: 0,
-        tv_nsec: ms * 1_000_000,
+        tv_nsec: 0,
     };
-    rustix::event::poll(&mut ready, Some(&ts)).unwrap() == 1
+    rustix::event::poll(&mut ready, Some(&now)).unwrap() == 1
 }
 
 /// HEX-GUEST-6: connect through the relay and inspect a box the node doesn't hold: expect the node's
@@ -391,12 +391,20 @@ fn a_silent_stdio_connection_holds_no_other_exec_up() {
     out_r.read_to_string(&mut out).unwrap();
     assert_eq!(out, "named");
     assert_eq!(proc.wait_for(Duration::MAX).unwrap(), Some(Exit::Code(0)));
-    assert!(!readable(&silent, 0), "the silent connection was closed");
+    assert!(!readable(&silent), "the silent connection was closed");
     drop(agent.join().unwrap());
 }
 
 /// A lab as [`Lab::new`] makes it, with the relay kept for the test to read.
 fn kept_lab(limits: Limits) -> (Lab, Arc<Relay>) {
+    kept_lab_with(limits, |stdio| Box::new(stdio))
+}
+
+/// A kept lab whose stdio listener is `stdio` of the plain one.
+fn kept_lab_with(
+    limits: Limits,
+    stdio: impl FnOnce(UnixListener) -> Box<dyn Listen>,
+) -> (Lab, Arc<Relay>) {
     let cache = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/hex-t7/relay");
     std::fs::create_dir_all(&cache).unwrap();
     let dir = tempfile::Builder::new()
@@ -414,13 +422,13 @@ fn kept_lab(limits: Limits) -> (Lab, Arc<Relay>) {
     rustix::net::bind(&node, &SocketAddrUnix::new(&node_path).unwrap()).unwrap();
     rustix::net::listen(&node, 4).unwrap();
     let control = UnixListener::bind(dir.path().join("control.sock")).unwrap();
-    let stdio = UnixListener::bind(dir.path().join("stdio.sock")).unwrap();
+    let stdio = stdio(UnixListener::bind(dir.path().join("stdio.sock")).unwrap());
     let files = UnixListener::bind(dir.path().join("files.sock")).unwrap();
     let staged = dir.path().join("staged");
     std::fs::create_dir(&staged).unwrap();
     let relay = Relay::new(&node_path, &staged, limits);
     let served = Arc::clone(&relay);
-    std::thread::spawn(move || served.serve(Box::new(control), Box::new(stdio), Box::new(files)));
+    std::thread::spawn(move || served.serve(Box::new(control), stdio, Box::new(files)));
     (Lab { dir, node }, relay)
 }
 
@@ -535,6 +543,116 @@ fn a_parked_exec_goes_to_the_node_when_its_set_is_whole() {
     drop(agent.join().unwrap());
 }
 
+/// The relay's stdio listener, counting the writes the relay makes on its connections.
+struct Counting {
+    listener: UnixListener,
+    writes: Arc<AtomicUsize>,
+}
+
+impl Listen for Counting {
+    fn accept(&self) -> io::Result<Box<dyn Duplex>> {
+        Ok(Box::new(CountingConn {
+            conn: self.listener.accept()?.0,
+            writes: Arc::clone(&self.writes),
+        }))
+    }
+}
+
+struct CountingConn {
+    conn: UnixStream,
+    writes: Arc<AtomicUsize>,
+}
+
+impl Read for CountingConn {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.conn.read(buf)
+    }
+}
+
+impl Write for CountingConn {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        self.conn.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.conn.flush()
+    }
+}
+
+impl Duplex for CountingConn {
+    fn try_clone(&self) -> io::Result<Box<dyn Duplex>> {
+        Ok(Box::new(CountingConn {
+            conn: self.conn.try_clone()?,
+            writes: Arc::clone(&self.writes),
+        }))
+    }
+
+    fn shutdown(&self, how: Shutdown) -> io::Result<()> {
+        self.conn.shutdown(how)
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.conn.set_write_timeout(timeout)
+    }
+
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.conn.set_read_timeout(timeout)
+    }
+}
+
+/// HEX-GUEST-36 (a learned copy unit, kind (a)): exec a program that writes 1 MiB to its stdout in one
+/// write: expect the relay to carry it to the host in units of the pipe's own capacity (F_GETPIPE_SZ),
+/// at most twice the writes that capacity takes, where std's fixed 8 KiB copy takes 128.
+#[test]
+fn stdout_crosses_the_relay_in_units_of_its_pipes_capacity() {
+    const MIB: usize = 1 << 20;
+    let writes = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&writes);
+    let (lab, _relay) = kept_lab_with(LIMITS, move |listener| {
+        Box::new(Counting {
+            listener,
+            writes: counted,
+        })
+    });
+    let (probe, _) = std::io::pipe().unwrap();
+    let capacity = rustix::pipe::fcntl_getpipe_size(&probe).unwrap();
+    let node = lab.node.try_clone().unwrap();
+    let agent = std::thread::spawn(move || {
+        let conn = hello(&node);
+        let (h, _, fds) = next_request(&conn);
+        answer(&conn, h, &Answer::Started { pid: 11 });
+        let mut stdout = File::from(fds.into_iter().next().unwrap());
+        stdout.write_all(&vec![7u8; MIB]).unwrap();
+        drop(stdout);
+        answer(&conn, h, &Answer::Exited(Exit::Code(0)));
+        conn
+    });
+    let client = Client::connect(lab.link()).unwrap();
+    let (mut out_r, out_w) = std::io::pipe().unwrap();
+    let mut proc = client
+        .exec(
+            &BoxId::new("b").unwrap(),
+            Program::of(&["yes"]),
+            Stdio {
+                stdin: None,
+                stdout: Some(out_w),
+                stderr: None,
+            },
+        )
+        .unwrap();
+    let mut got = Vec::new();
+    out_r.read_to_end(&mut got).unwrap();
+    assert_eq!(got.len(), MIB);
+    assert_eq!(proc.wait_for(Duration::MAX).unwrap(), Some(Exit::Code(0)));
+    let made = writes.load(Ordering::SeqCst);
+    assert!(
+        made <= 2 * MIB / capacity,
+        "{made} writes for 1 MiB through a {capacity}-byte pipe"
+    );
+    drop(agent.join().unwrap());
+}
+
 /// HEX-GUEST-7 (CLAUDE.md §2): on a relay bounded at two unnamed stdio connections, connect three that
 /// never name themselves: expect the third refused by type and counted, then closed (its end is what it
 /// reads), the two within the bound still open.
@@ -555,10 +673,7 @@ fn an_unnamed_connection_past_the_bound_is_refused() {
     // Refused by type, counted and logged on `hex.guest` (event `stdio_unnamed`) before it closed.
     assert_eq!(relay.refused_unnamed(), 1);
     for conn in &held {
-        assert!(
-            !readable(conn, 0),
-            "a connection within the bound was closed"
-        );
+        assert!(!readable(conn), "a connection within the bound was closed");
     }
 }
 

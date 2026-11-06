@@ -40,3 +40,10 @@ measured.
 
 Not measured here: the guest's relay (Linux only, crates/hex-node/tests/relay_exec_bench.rs, queued for fedora),
 and Windows hosts (jupiter down).
+
+## The lead's call (2026-11-06)
+
+Accepted as not worse on the Mac (median throughput −0.3%, inside the 8% run-to-run spread; p50 median better;
+p99 18% better). CONDITION: the same interleaved before/after runs on the Linux relay (fedora) and the WHP host
+(jupiter) when they are back; if either shows a throughput loss beyond its own run-to-run spread, the
+one-frame reader goes back to a buffer learned from the descriptor (kind (a)), measured again.
