@@ -379,22 +379,28 @@ fn reread<T>(patience: Duration, mut look: impl FnMut() -> Option<T>) -> Option<
     }
 }
 
-/// HEX-GUEST-35 (the lead's call: the poll follows the read's own time): read with a look that costs a
-/// measurable time and shows nothing until its fourth read. Expect each re-read to wait at least as
-/// long as the read before it took, and the fourth read's answer returned.
+/// HEX-GUEST-35 (the lead's call: the poll follows the read's own time): read with a look whose reads cost
+/// 1.2 s and 50 ms in turn and that shows nothing until its fourth read. Expect each re-read to wait at
+/// least as long as the read before it took, and the fourth read's answer returned.
 #[test]
 fn a_reread_waits_as_long_as_the_last_read_took() {
+    // A long read and a short one: no fixed interval, the old 500 ms with macOS's timer slack included,
+    // waits as long as the long one without the test seeing it.
+    let costs = [1200, 50, 1200, 50].map(Duration::from_millis);
     let mut reads = Vec::new();
     let got = reread(Duration::from_secs(60), || {
         let start = Instant::now();
-        // A read that costs 600 ms, more than the fixed 500 ms the poll had, so that interval, or any
-        // fixed one shorter than a read, fails the relation below.
+        let cost = costs[reads.len()];
         let mut x = 0u64;
-        while start.elapsed() < Duration::from_millis(600) {
+        while start.elapsed() < cost {
             x = std::hint::black_box(x.wrapping_add(1));
         }
         reads.push((start, Instant::now()));
-        (reads.len() == 4).then_some(reads.len())
+        if reads.len() == costs.len() {
+            Some(reads.len())
+        } else {
+            None
+        }
     });
     assert_eq!(got, Some(4));
     for pair in reads.windows(2) {
