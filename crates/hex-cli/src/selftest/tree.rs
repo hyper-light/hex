@@ -58,6 +58,9 @@ pub fn tree(args: &[String]) -> u8 {
 /// box's layered root: overlayfs over the layers' folders, read-only, with no upper, mounted by the new mount
 /// API (fsopen(2), one `lowerdir+` per layer, topmost first, Linux 6.8+; Documentation/filesystems/
 /// overlayfs.rst) and walked through its descriptor, never attached anywhere, so it goes when the walk ends.
+/// One layer is walked as it is: overlayfs mounts no read-only overlay of fewer than two ("at least 2
+/// lowerdir are needed while upperdir nonexistent", fs/overlayfs/params.c), and containerd's view of a
+/// one-layer image is that folder bound read-only (`ctr snapshots mounts` prints `mount -t bind`).
 fn overlay(layers: &str) -> Result<String, String> {
     use std::os::fd::AsRawFd;
 
@@ -65,6 +68,9 @@ fn overlay(layers: &str) -> Result<String, String> {
         FsMountFlags, FsOpenFlags, MountAttrFlags, fsconfig_create, fsconfig_set_string, fsmount,
         fsopen,
     };
+    if !layers.contains(':') {
+        return manifest(Path::new(layers));
+    }
     let fs = fsopen("overlay", FsOpenFlags::FSOPEN_CLOEXEC).map_err(|e| format!("fsopen: {e}"))?;
     for layer in layers.split(':').rev() {
         fsconfig_set_string(&fs, "lowerdir+", layer)
@@ -295,5 +301,17 @@ mod tests {
         );
         assert_eq!((lines[3][1], lines[3][6]), ("l", "\"bin/tool\""));
         assert_eq!((lines[0][1], lines[0][9]), ("d", "-"));
+    }
+
+    /// HEX-GUEST-21's walker on a one-layer image (alpine, debian, ubuntu, fedora), whose overlay
+    /// overlayfs won't mount read-only (fedora 6.19: EINVAL): walk `--layers` naming one folder, unprivileged
+    /// (no mount is made): expect the folder's own manifest, as containerd's read-only bind view of it.
+    #[test]
+    fn one_layer_is_walked_as_its_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("etc")).unwrap();
+        fs::write(dir.path().join("etc/os-release"), b"ID=alpine\n").unwrap();
+        let path = dir.path().to_str().unwrap();
+        assert_eq!(overlay(path).unwrap(), manifest(dir.path()).unwrap());
     }
 }
