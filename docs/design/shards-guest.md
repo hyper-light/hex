@@ -114,6 +114,42 @@ The node agent's socket is `SOCK_SEQPACKET` and carries an exec's stdio as `SCM_
   `hex.guest` (`event = "stdio_unnamed"`). Shards' muxer holds at most 1023 connections (`muxer.rs:42`), so a
   node's concurrent execs are bounded below that, and the next is refused by name.
 
+### 3a. The channel's formats and ports
+
+These define the channel; they are its specification, not tuning, and the code takes each from here (Ada's
+rule, 2026-11-06: each constant learned, measured or a cited limit; these are the last).
+
+**Ports.** vsock(7) gives a port as a `u32` (`svm_port`); ports below 1024 are privileged ("Only a process
+with the `CAP_NET_BIND_SERVICE` capability may bind to these port numbers"), and `VMADDR_PORT_ANY`
+(`-1U`) is reserved. Firecracker's hybrid vsock, which Shards' muxer speaks, names the port in decimal on its
+`CONNECT <port>` line (firecracker `docs/vsock.md`, "Host-Initiated Connections"), any `u32`. Hex assigns its
+ports above 1024, below `VMADDR_PORT_ANY`, each spelling `HEX` and its number so a capture reads them:
+
+| port | value | carries |
+|---|---|---|
+| `CONTROL_PORT` | `0x4845_5800` | a control connection: the relay's token, then framed wire messages |
+| `STDIO_PORT` | `0x4845_5801` | one stdio stream of one exec, named by its first `NAME_BYTES` |
+| `FILES_PORT` | `0x4845_5802` | a staging or removal connection (§4a) |
+
+**Control.** A connection opens with the relay's token, then carries frames:
+
+| field | bytes | encoding |
+|---|---|---|
+| token (`TOKEN_BYTES`) | 8 | `u64`, little-endian as the wire's integers |
+| frame prefix (`PREFIX`) | 4 | the message's length, `u32` big-endian, at most the reader's bound |
+| frame body | the prefix's | one `hex_core::wire` message |
+
+**Stdio name** (`NAME_BYTES` = 24, the sum below):
+
+| field | bytes | value |
+|---|---|---|
+| magic | 4 | `HEXS` |
+| version | 2 | `u16` little-endian, 1; changes append-only |
+| stream | 1 | stdin 0, stdout 1, stderr 2 |
+| zero | 1 | 0 |
+| control connection's token | 8 | `u64` little-endian |
+| exec's request id | 8 | `u64` little-endian |
+
 ## 4. The guest image
 
 - Kernel: Shards' pinned 6.18.48 (`shards-guest.md` §5), which has every option the class needs.

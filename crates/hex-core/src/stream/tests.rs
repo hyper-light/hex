@@ -3,6 +3,9 @@
 //! it; a frame over its bound is refused before its body is buffered; a stdio stream's name reads back
 //! as written and hostile names are refused by type; and an exec's streams are gathered in either order,
 //! within their bound, the strays refused.
+//!
+//! The bounds, sizes and patience given here (a bound of 100 or 256, inputs up to 512 bytes, four sets,
+//! five seconds) are inputs chosen to exercise each bound, not tuning: any values do.
 
 use std::time::{Duration, Instant};
 
@@ -418,4 +421,39 @@ proptest! {
     fn hostile_names_never_panic(bytes in proptest::array::uniform24(any::<u8>())) {
         let _ = read_name(&bytes);
     }
+}
+
+/// The rows of the markdown table in `doc` that follows the line starting with `heading`: each row's cells.
+fn table_after<'a>(doc: &'a str, heading: &str) -> Vec<Vec<&'a str>> {
+    doc.lines()
+        .skip_while(|line| !line.starts_with(heading))
+        .skip(1)
+        .skip_while(|line| !line.starts_with('|'))
+        .take_while(|line| line.starts_with('|'))
+        .skip(2)
+        .map(|row| row.trim_matches('|').split('|').map(str::trim).collect())
+        .collect()
+}
+
+/// HEX-GUEST-30: read §3a's format tables from the design doc: expect each port and width the code
+/// uses to be the one written there, and the stdio name's fields to sum to `NAME_BYTES`.
+#[test]
+fn the_channel_formats_are_the_design_docs() {
+    let doc = include_str!("../../../../docs/design/shards-guest.md");
+    let ports = table_after(doc, "**Ports.**");
+    let port = |name: &str| {
+        let row = ports.iter().find(|r| r[0] == format!("`{name}`")).unwrap();
+        let hex = row[1].trim_matches('`').replace('_', "");
+        u32::from_str_radix(hex.strip_prefix("0x").unwrap(), 16).unwrap()
+    };
+    assert_eq!(port("CONTROL_PORT"), CONTROL_PORT);
+    assert_eq!(port("STDIO_PORT"), STDIO_PORT);
+    assert_eq!(port("FILES_PORT"), files::FILES_PORT);
+    let control = table_after(doc, "**Control.**");
+    assert_eq!(control[0][1], TOKEN_BYTES.to_string());
+    assert_eq!(control[1][1], PREFIX.to_string());
+    let name = table_after(doc, "**Stdio name**");
+    let sum: usize = name.iter().map(|r| r[1].parse::<usize>().unwrap()).sum();
+    assert_eq!(sum, NAME_BYTES);
+    assert!(doc.contains(&format!("`NAME_BYTES` = {NAME_BYTES}")));
 }

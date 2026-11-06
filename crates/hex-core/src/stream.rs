@@ -21,21 +21,32 @@ use crate::wire::{self, Fault};
 pub mod files;
 
 /// The guest's vsock port the host's client dials for its control connection, and the one it dials for
-/// each stdio stream. Above 1024, as the ports of vsock(7) below it take `CAP_NET_BIND_SERVICE` to bind,
-/// and spelling `HEX` so a capture reads them.
+/// each stdio stream: identifiers assigned in docs/design/shards-guest.md §3a, above vsock(7)'s
+/// privileged ports (below 1024 take `CAP_NET_BIND_SERVICE` to bind) and below its `VMADDR_PORT_ANY`,
+/// spelling `HEX` so a capture reads them.
 pub const CONTROL_PORT: u32 = 0x4845_5800;
 pub const STDIO_PORT: u32 = 0x4845_5801;
 
-/// A frame's prefix: the message's length, big-endian.
-const PREFIX: usize = 4;
+/// A frame's prefix: the message's length, a big-endian `u32` (shards-guest.md §3a).
+const PREFIX: usize = size_of::<u32>();
+
+/// The longest frame of a message at the wire's bound: what one read of a control connection takes at
+/// most, the unit it reads.
+pub const MAX_FRAME: usize = wire::MAX_MESSAGE + PREFIX;
 
 /// A control connection's first bytes, the relay's, before any frame: the connection's token (`u64`,
-/// little-endian), which its stdio connections name, as its request ids are its own.
-pub const TOKEN_BYTES: usize = 8;
+/// little-endian), which its stdio connections name, as its request ids are its own (§3a).
+pub const TOKEN_BYTES: usize = size_of::<u64>();
 
 /// A stdio connection's first bytes: `HEXS`, the version (`u16`, little-endian as the wire's
-/// integers), the stream, a zero byte, its control connection's token (`u64`) and the exec's id (`u64`).
-pub const NAME_BYTES: usize = 24;
+/// integers), the stream, a zero byte, its control connection's token (`u64`) and the exec's id (`u64`):
+/// §3a's table, the sum of its fields.
+pub const NAME_BYTES: usize = NAME_MAGIC.len()
+    + size_of::<u16>()
+    + size_of::<u8>()
+    + size_of::<u8>()
+    + TOKEN_BYTES
+    + size_of::<u64>();
 const NAME_MAGIC: [u8; 4] = *b"HEXS";
 /// The stdio name's only version. It changes append-only, as the wire's.
 const NAME_VERSION: u16 = 1;
