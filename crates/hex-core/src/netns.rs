@@ -5,7 +5,8 @@
 //! whose container makes a network namespace of its own takes one, and its container joins it with `setns`. This
 //! decides which, and refuses by type what can't be done.
 //!
-//! - **The bound**: the pool holds at most its bound, decision 4's [`BOUND`] unless the node is given another. A
+//! - **The bound**: the pool holds at most its size: learned from its draws, up to the bound its shell derives,
+//!   unless the node is given a fixed one ([`Pool::learning`], [`Pool::new`]; Ada's rule, 2026-11-06). A
 //!   namespace made past it is refused ([`Refused::Full`]) and handed back for the shell to close.
 //! - **The refill**: the refill mark is one below the bound. The pool asks for more as soon as it holds fewer
 //!   than its bound ([`Pool::wanted`]), as decision 4's one thread refills whenever the pool is below it. A make
@@ -24,20 +25,11 @@
 //! [`Counts`] is what the bench and the node's metrics read.
 //!
 //! The node's ipc and uts namespaces made ahead use this pool too (goal 5 extended, step 4): `T` is then a pair, and
-//! [`IPC_UTS_BOUND`] its bound.
+//! its size is learned from its draws ([`Pool::learning`]; Ada's rule, 2026-11-06).
 
 use std::collections::VecDeque;
 
-/// The most namespaces decision 4's pool holds: the most creates the bench's busiest phase has in flight at once
-/// (concurrency 32), so a burst of its whole width finds a namespace each, at most 24 MiB of kernel memory on
-/// the heavier machine measured (`bench/competitive/probes/netns_pool.md`).
-pub const BOUND: usize = 32;
-
-/// The most ipc and uts namespace pairs a node's pool holds (goal 5 extended, step 4): as [`BOUND`], the most creates
-/// the bench's busiest phase has in flight at once, so a burst of its whole width finds a pair each. It holds at most
-/// 451 KiB of kernel memory (14.1 KiB a pair, the most the host's Slab rose) and 64 descriptors, and one thread makes
-/// about 43,000 pairs a second, measured on fedora (`bench/competitive/probes/netns_pool.md`, goal 5 extended step 4).
-pub const IPC_UTS_BOUND: usize = 32;
+use crate::demand::Depth;
 
 /// What a take is answered with.
 #[derive(Debug, PartialEq, Eq)]
@@ -89,7 +81,8 @@ pub struct Counts {
 /// shell keeps it behind its lock; a take neither allocates nor waits.
 #[derive(Debug)]
 pub struct Pool<T> {
-    bound: usize,
+    /// Its size: fixed ([`Pool::new`]) or learned from its draws ([`Pool::learning`]).
+    bound: Depth,
     /// Fresh namespaces, oldest first, never more than `bound`.
     held: VecDeque<T>,
     /// False from a failed make to the next take: the bound on the refill's retries.
@@ -102,8 +95,16 @@ impl<T> Pool<T> {
     /// An empty pool that holds at most `bound` namespaces and asks for all of them. With a bound of 0 it holds
     /// none, and every take is made on the path, as on a node without a pool.
     pub fn new(bound: usize) -> Self {
+        Self::learning(bound, bound)
+    }
+
+    /// An empty pool of `start` that learns its size from its draws, up to `cap` (Ada's rule, 2026-11-06): a take
+    /// that finds it empty raises it to the takes since it was last full plus one for each found short
+    /// ([`Depth`]), so the next draw as deep finds it full. It never falls, so no draw already seen runs it short
+    /// again.
+    pub fn learning(start: usize, cap: usize) -> Self {
         Self {
-            bound,
+            bound: Depth::new(start, cap),
             held: VecDeque::new(),
             asking: true,
             shut: false,
@@ -120,7 +121,7 @@ impl<T> Pool<T> {
             return 0;
         }
         // `held` never passes the bound, so this is the room left.
-        self.bound.saturating_sub(self.held.len())
+        self.bound.size().saturating_sub(self.held.len())
     }
 
     /// A namespace the shell made ahead: taken in and counted, or, past the bound or after shutdown, refused
@@ -129,13 +130,16 @@ impl<T> Pool<T> {
         if self.shut {
             return Err(Refused::ShutDown { ns });
         }
-        if self.held.len() >= self.bound {
+        if self.held.len() >= self.bound.size() {
             return Err(Refused::Full {
-                bound: self.bound,
+                bound: self.bound.size(),
                 ns,
             });
         }
         self.held.push_back(ns);
+        if self.held.len() >= self.bound.size() {
+            self.bound.full();
+        }
         self.counts.made_ahead = self.counts.made_ahead.saturating_add(1);
         Ok(())
     }
@@ -153,7 +157,9 @@ impl<T> Pool<T> {
             return Err(ShutDown);
         }
         self.asking = true;
-        Ok(match self.held.pop_front() {
+        let taken = self.held.pop_front();
+        self.bound.took(taken.is_none());
+        Ok(match taken {
             Some(ns) => {
                 self.counts.taken = self.counts.taken.saturating_add(1);
                 Take::Pooled(ns)
@@ -186,6 +192,11 @@ impl<T> Pool<T> {
         let n = u64::try_from(held.len()).unwrap_or(u64::MAX);
         self.counts.discarded = self.counts.discarded.saturating_add(n);
         held
+    }
+
+    /// Its size now: the most it holds.
+    pub fn bound(&self) -> usize {
+        self.bound.size()
     }
 
     /// How many namespaces the pool holds.

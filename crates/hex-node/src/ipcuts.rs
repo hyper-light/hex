@@ -1,6 +1,7 @@
 //! The node agent's ipc and uts namespaces made ahead (goal 5 extended, step 4): the shell around
 //! [`hex_core::netns::Pool`], as [`crate::netns`] is for network namespaces. One thread of the agent makes each
-//! pair off the create path once the pool is half full, up to its bound ([`ipcuts::make_ahead`]). A create routed to a pruned
+//! pair off the create path once the pool is down to its mark ([`low`]), up to its size ([`ipcuts::make_ahead`]),
+//! which it learns from its draws (Ada's rule, 2026-11-06). A create routed to a pruned
 //! seed takes one ([`IpcUtsAhead`]), which its init joins in place of its clone making them, and the pool counts
 //! every other container that makes either namespace as made on the path. A pair taken is the container's alone,
 //! so it ends with the container.
@@ -23,13 +24,32 @@ pub struct IpcUtsPool {
 
 struct Shared {
     pool: Mutex<Pool<Pair>>,
-    /// The refill thread waits on it while the pool wants nothing. A take that leaves the pool at [`Shared::low`] or
-    /// under, and shutdown, wake it.
+    /// The refill thread waits on it while the pool wants nothing. A take that leaves the pool at its mark ([`low`])
+    /// or under, and shutdown, wake it.
     wake: Condvar,
-    /// Half the bound: a wake is a system call on create's path (Rust's futex `Condvar` makes one with or without a
-    /// waiter), and the thread makes pairs far faster than creates come (`bench/competitive/probes/netns_pool.md`),
-    /// so most takes need none, and half the bound stands ready when one does.
-    low: usize,
+}
+
+/// The fastest the creates have taken pairs on record: one a create, at the sustained phase's 10,383 a second
+/// without a network namespace, the fastest Hex has run (`bench/competitive/probes/create_serial.md`, run 20).
+const TAKES_PER_SECOND: u64 = 10_383;
+/// The slowest the refill has made pairs on record: one a 0.035 ms, the p99 make on fedora
+/// (`bench/competitive/probes/netns_pool.md`, goal 5 extended step 4), 28,571 a second.
+const MAKES_PER_SECOND: u64 = 28_571;
+
+/// The mark a take wakes the refill at, for a pool of `size`: the fewest pairs that, taken at the fastest rate on
+/// record, outlast the refill's making of the rest at its slowest, `size x T / (T + M)` rounded up, and one at
+/// least in a pool of any. A wake is a system call on create's path (Rust's futex `Condvar` makes one with or
+/// without a waiter), so takes above the mark make none; a draw that still finds the pool short raises its size
+/// ([`hex_core::netns::Pool::learning`]), and the mark with it.
+fn low(size: usize) -> usize {
+    let size64 = u64::try_from(size).unwrap_or(u64::MAX);
+    let whole = TAKES_PER_SECOND.saturating_add(MAKES_PER_SECOND);
+    let mark = size64
+        .saturating_mul(TAKES_PER_SECOND)
+        .saturating_add(whole.saturating_sub(1))
+        .checked_div(whole)
+        .unwrap_or(size64);
+    usize::try_from(mark).unwrap_or(size).min(size)
 }
 
 impl Shared {
@@ -45,15 +65,25 @@ fn shut_down() -> OciError {
 }
 
 impl IpcUtsPool {
-    /// A pool that holds at most `bound` pairs, and the thread that starts filling it at once. With a bound of 0
-    /// there is no thread, and every container's clone makes its own, counted, as a rootless node's do.
+    /// A pool that holds `bound` pairs, and the thread that starts filling it at once. With a bound of 0 there is
+    /// no thread, and every container's clone makes its own, counted, as a rootless node's do.
     pub fn start(bound: usize) -> Result<Self, Refusal> {
+        Self::with_pool(Pool::new(bound), bound)
+    }
+
+    /// A pool that starts at `start` pairs and learns its size from its draws, up to `cap`
+    /// ([`hex_core::netns::Pool::learning`]): a node's default, its start the host's parallelism and its cap the
+    /// node's `ipc_uts` ([`crate::sizes::Sizes`]).
+    pub fn learning(start: usize, cap: usize) -> Result<Self, Refusal> {
+        Self::with_pool(Pool::learning(start, cap), cap)
+    }
+
+    fn with_pool(pool: Pool<Pair>, cap: usize) -> Result<Self, Refusal> {
         let shared = Arc::new(Shared {
-            pool: Mutex::new(Pool::new(bound)),
+            pool: Mutex::new(pool),
             wake: Condvar::new(),
-            low: bound / 2,
         });
-        if bound == 0 {
+        if cap == 0 {
             return Ok(Self {
                 shared,
                 refill: None,
@@ -81,7 +111,7 @@ impl IpcUtsAhead for IpcUtsPool {
     fn take(&self) -> Result<Option<Pair>, OciError> {
         let mut pool = self.shared.pool()?;
         let taken = pool.take().map_err(|_| shut_down())?;
-        let wake = self.refill.is_some() && pool.held() <= self.shared.low;
+        let wake = self.refill.is_some() && pool.held() <= low(pool.bound());
         drop(pool);
         if wake {
             self.shared.wake.notify_one();

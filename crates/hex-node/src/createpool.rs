@@ -6,15 +6,17 @@
 //! `seed::serve_create`), in place of the shim's re-exec of the hex binary. So a seam create spawns no
 //! process of the agent's and re-execs no `hex` binary per call.
 //!
-//! The policy — how many seeds a node keeps ([`hex_core::seeds::SEEDS`]), which one each create is
+//! The policy — how many seeds a node keeps ([`hex_core::seeds::Seeds::growing`], up to the node's bound,
+//! [`crate::sizes::Sizes::seeds`]), which one each create is
 //! handed, how long a create waits, when a seed is taken for dead or hung and restarted, and what it
 //! counts — is the pure core's; this shell holds it behind one lock (no core call waits), and does each
 //! create's socket round-trip with the lock let go, so creates to different seeds run at once. The core's
 //! clock is the shell's monotonic time since the pool opened.
 //!
 //! **Seeds start ahead of the creates, never on one's path.** A thread of the pool's own starts each seed
-//! the core asks for, with the lock let go: it keeps [`SPARE`] seed up and idle beyond the creates
-//! waiting, so a create finds one idle and no create's path holds a seed's exec. The pool starts its
+//! the core asks for, with the lock let go: it keeps a spare up and idle beyond the creates waiting, as many
+//! as the most creates it has seen waiting at once ([`Inner::spare`]), so a create finds one idle and no
+//! create's path holds a seed's exec. The pool starts its
 //! first spare as it opens. A create that finds none idle (a burst) waits in line for a seed to free or
 //! to start, while the thread adds more, up to the bound.
 //!
@@ -32,6 +34,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use hex_api::Refusal;
+use hex_core::demand::Learned;
 use hex_core::seed::{Answer, Create, Failed, MountNamespace, Park};
 use hex_core::seeds::{Admit, Claim, Counts, Limits, Refused, SeedId, Seeds, Stale};
 use hex_runtime::linux::oci::run::{ClassicReason, CloneInit, CloneReq, Parked};
@@ -39,15 +42,6 @@ use hex_runtime::linux::oci::seed as rt_seed;
 use hex_runtime::linux::oci::{OciError, mntns};
 use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::process::{Pid, PidfdFlags, Signal, WaitId, WaitIdOptions};
-
-/// The seeds the pool keeps up and idle beyond the creates waiting: one, so a create finds a seed idle
-/// rather than wait on a seed's exec. A seed is busy for its clone (0.209 ms p50 on fedora at
-/// concurrency 1, `bench/competitive/probes/seed_path.md`), so under a burst the line drains through the
-/// seeds freeing faster than an exec would start one, and the pool grows to the burst's need meanwhile:
-/// on a loaded fedora at concurrency 32 it grew to all 32, and 45 of 10,000 creates waited for a seed.
-/// A stated bound, not a tuning: each spare holds a seed's memory (1.5 to 2.4 MiB resident, measured on
-/// fedora), charged to the node agent's cgroup.
-pub const SPARE: usize = 1;
 
 /// The node agent's create seeds. Dropped, it stops its starting thread and ends and reaps every seed it
 /// started.
@@ -102,6 +96,12 @@ struct Inner {
     start_failure: Option<String>,
     /// Set as the pool is dropped: the starting thread ends.
     shut: bool,
+    /// The seeds kept up and idle beyond the creates waiting (Ada's rule, 2026-11-06): one at first, the fewest
+    /// that lets a create find a seed idle rather than wait on a seed's exec, raised to the most creates seen
+    /// waiting at once, so a burst that waited once finds as many idle the next time; never lowered, at most the
+    /// seeds' bound. Each spare holds a seed's memory, 2,488 KiB at most (`seed_path.md`), within the node's
+    /// share for seeds ([`crate::sizes`]).
+    spare: Learned,
 }
 
 /// One seed process: the agent's end of its socket and the pidfd by which the agent ends and reaps it.
@@ -111,21 +111,28 @@ struct Proc {
 }
 
 impl CreatePool {
-    /// A pool that re-execs `exe` as `hex __oci-seed`, with the node's default bounds
-    /// ([`hex_core::seeds::LIMITS`]), its starting thread up and starting the first spare. `prune`, when
+    /// A pool that re-execs `exe` as `hex __oci-seed`, with the node's bounds on its host (`sizes`: at most its
+    /// `seeds`, slots growing from its `start`, [`Seeds::growing`]) and [`hex_core::seeds::LIMITS`]' others, its
+    /// starting thread up and starting the first spare. `prune`, when
     /// given, is the mountpoint each seed prunes its mount namespace at (a root node, goal 5 plan
     /// step 2); `None` on a rootless node, whose seeds keep the agent's mount namespace. `asked`, when
     /// given, is the way a pruned create's mount namespace is made, in [`mntns::ENV_WAY`]'s words
     /// (decision 6's update); a way this node can't take is refused by type.
     pub fn new(
         exe: PathBuf,
+        sizes: crate::sizes::Sizes,
         prune: Option<PathBuf>,
         asked: Option<&str>,
         #[cfg(debug_assertions)] inject: Option<String>,
     ) -> Result<Self, Refusal> {
-        Self::with_limits(
+        let limits = Limits {
+            seeds: sizes.seeds,
+            ..hex_core::seeds::LIMITS
+        };
+        Self::open(
             exe,
-            hex_core::seeds::LIMITS,
+            Seeds::growing(limits, sizes.start),
+            limits,
             prune,
             asked,
             #[cfg(debug_assertions)]
@@ -133,9 +140,29 @@ impl CreatePool {
         )
     }
 
-    /// A pool with `limits`.
+    /// A pool with `limits`, every slot from the start: the tests', which set each bound.
+    #[cfg(test)]
     pub fn with_limits(
         exe: PathBuf,
+        limits: Limits,
+        prune: Option<PathBuf>,
+        asked: Option<&str>,
+        #[cfg(debug_assertions)] inject: Option<String>,
+    ) -> Result<Self, Refusal> {
+        Self::open(
+            exe,
+            Seeds::new(limits),
+            limits,
+            prune,
+            asked,
+            #[cfg(debug_assertions)]
+            inject,
+        )
+    }
+
+    fn open(
+        exe: PathBuf,
+        seeds: Seeds,
         limits: Limits,
         prune: Option<PathBuf>,
         asked: Option<&str>,
@@ -155,10 +182,11 @@ impl CreatePool {
             inject,
             base: Instant::now(),
             inner: Mutex::new(Inner {
-                seeds: Seeds::new(limits),
+                seeds,
                 procs: (0..slots).map(|_| None).collect(),
                 start_failure: None,
                 shut: false,
+                spare: Learned::new(1, slots),
             }),
             free: Condvar::new(),
             wake: Condvar::new(),
@@ -512,6 +540,10 @@ impl Shared {
             .seeds
             .create(now)
             .map_err(|r| refused(r, inner.start_failure.as_deref()))?;
+        if matches!(admit, Admit::Wait { .. }) {
+            let waiting = inner.seeds.waiting();
+            inner.spare.observe(waiting);
+        }
         if wants_start(&inner) {
             self.wake_starter();
         }
@@ -585,11 +617,12 @@ impl Shared {
 }
 
 /// Whether the starting thread should start a seed: the core asks for one (a vacant slot, its asking not
-/// stopped by a failed start), and fewer than [`SPARE`] beyond the creates waiting are up idle or starting.
+/// stopped by a failed start), and fewer than the spare ([`Inner::spare`]) beyond the creates waiting are up idle or
+/// starting.
 fn wants_start(inner: &Inner) -> bool {
     inner.seeds.wanted() > 0
         && inner.seeds.idle().saturating_add(inner.seeds.starting())
-            < SPARE.saturating_add(inner.seeds.waiting())
+            < inner.spare.size().saturating_add(inner.seeds.waiting())
 }
 
 /// The starting thread: starts each seed [`wants_start`] asks for, one at a time and with the lock let go,
@@ -843,6 +876,7 @@ mod tests {
     fn classic_creates_are_counted_by_reason() {
         let pool = CreatePool::new(
             PathBuf::from("/nonexistent/hex-for-the-test"),
+            crate::sizes::Sizes::now().unwrap(),
             None,
             None,
             #[cfg(debug_assertions)]
@@ -1005,5 +1039,36 @@ mod tests {
             .recv_timeout(Duration::from_secs(60))
             .expect("the create in line was handed the seed given back");
         assert_eq!(handed.unwrap(), id);
+    }
+
+    /// Ada's rule, 2026-11-06 (AC-T7.1.3): `SPARE`'s one seed beyond the creates waiting was picked; the spare is now
+    /// the most creates seen waiting at once. Do: a pool's state with four slots and none up, its spare at one, then
+    /// told three creates waited at once. Expect: one seed is wanted at first, none once one is starting, and with
+    /// three seen waiting, starts are wanted until three are up idle or starting; the spare never passes the slots.
+    #[test]
+    fn the_spare_is_the_most_creates_seen_waiting_at_once() {
+        let limits = Limits {
+            seeds: std::num::NonZeroUsize::new(4).unwrap(),
+            ..hex_core::seeds::LIMITS
+        };
+        let mut inner = Inner {
+            seeds: Seeds::growing(limits, 4),
+            procs: (0..4).map(|_| None).collect(),
+            start_failure: None,
+            shut: false,
+            spare: Learned::new(1, 4),
+        };
+        assert!(wants_start(&inner));
+        let _one = inner.seeds.start().unwrap();
+        assert!(!wants_start(&inner), "one spare starting");
+        inner.spare.observe(3);
+        let mut started = 1;
+        while wants_start(&inner) {
+            let _ = inner.seeds.start().unwrap();
+            started += 1;
+        }
+        assert_eq!(started, 3);
+        inner.spare.observe(9);
+        assert_eq!(inner.spare.size(), 4, "never past the slots");
     }
 }

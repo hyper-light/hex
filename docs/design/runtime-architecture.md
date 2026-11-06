@@ -863,8 +863,11 @@ host moves as well, so an upper bound), and what a pool of them holds:
 | a pool of 32 | | 24384.0 KiB (23.8 MiB) |
 <!-- /record -->
 
-The pool holds at most **32**: the most creates the bench's busiest phase has in flight at once (concurrency 32), so
-a burst of its whole width finds a namespace each, at most 24 MiB of the kernel's memory on the heavier machine. Its
+The pool's size is **learned from its draws** (Ada's rule, 2026-11-06; decision 5, "Pool sizes learned from
+demand"): it starts at the host's parallelism, 32 on fedora, the most creates the bench's busiest phase has in flight
+at once (concurrency 32), so a burst of its whole width finds a namespace each, at most 24 MiB of the kernel's memory
+on the heavier machine; a take that finds it empty raises it, up to the node's memory share at 762 KiB a namespace and
+the seeds' bound. Until then it held at most 32. Its
 32 descriptors sit beside the agent's one pidfd per box, which an exec's copy of the agent's descriptor table
 (`STATUS.md`, Open) hardly notices. One thread refills whenever the pool is below its bound, at 2,280/s or more;
 and it keeps up with sustained churn: no sustained phase of record found the pool dry (above). A make that fails
@@ -1238,9 +1241,10 @@ lifecycle without changing what a box may do.
     any set, or its spec gives no capability sets (it keeps its creator's, all of root's), or it holds CAP_BPF with
     CAP_NET_ADMIN, which load a cgroup device program (`kernel/bpf/syscall.c:2930-2941`, v6.19) and attach it to the
     cgroup it can open. The plan named CAP_SYS_ADMIN; the other two reach the same files.
-  - *Bounds.* Idle cgroups are bounded at `PER_OWNER` 32 for an owner and `PER_NODE` 256 for the node; past either the
-    oldest is evicted. The bench's busiest phase runs 32 boxes at once, and RunD measured the load-tracking walk over
-    cgroups at 7.6% of a node's cycles past 10,000 (f65).
+  - *Bounds.* Idle cgroups are bounded for the node by what its memory holds, and for an owner by a bound learned
+    from its misses, from the host's parallelism up; past either the oldest is evicted ("Pool sizes learned from
+    demand", below; until 2026-11-06 they were `PER_OWNER` 32, the bench's width, and `PER_NODE` 256). RunD measured
+    the load-tracking walk over cgroups at 7.6% of a node's cycles past 10,000 (f65).
   - *Removal.* A thread of the node's removes what the bounds, a failed check or a failed create put out, off create's
     path. It ends anything left in the cgroup, then takes its sub-cgroups apart deepest first; with its queue full, the
     caller removes the cgroup itself.
@@ -1850,6 +1854,73 @@ measures). Each step's work, merged in one tree, each merge's resolutions in its
   files bounded past what both pools of namespaces made ahead hold, and a delete that reads its box's record again
   after forgetting the init, so an exit collected between the two ends the box through its init, not `cgroup.kill`.
 
+#### Pool sizes learned from demand (Ada's rule, 2026-11-06)
+
+Ada, 2026-11-06: "We do not support arbitrary constants. We support learned and data derived values." Latency and
+throughput come before memory: a learned size is never smaller than the demand the node has seen, and a memory cut
+that costs either isn't taken. The lead's conditions the same day: the pools grow ahead of demand with headroom, the
+first burst finds them no smaller than today's constants on the bench host, they shrink only by a rule that can't
+cause a miss under the demand seen, and each counts its cold takes. The pure core is `hex_core::demand`; the bounds are
+`hex_node::sizes`.
+
+- **The start: the host's parallelism** (`std::thread::available_parallelism`, which reads the process's affinity and
+  its cgroup's `cpu.max`; kind (a)). Every learned size starts there: 32 on fedora, so no pool starts under the
+  constant it replaces (32 per owner, 32 seeds, 32 ipc/uts pairs, 8 made ahead, 4 keys of 8 mounts). The seeds' spare
+  starts at one, the fewest by which a create finds a seed idle rather than waits on a seed's exec.
+- **The growth.** Three rules, each in the core with model-based tests (`demand/tests.rs`):
+  - *A pool made ahead* (ipc/uts pairs, cgroups made ahead for boxes of no owner, mounts a `/dev` or proc key keeps):
+    each take since the pool last held its size is drawn; a take that finds it empty raises the size to the draw plus
+    one for each take found short (`Depth`), so the next draw as deep finds it full with that headroom.
+  - *An owner bound, and the keys a mount pool keeps*: an item the bound put out is remembered as a ghost; a take that
+    then finds its owner (or key) with none raises the bound by one (`Ghosts`), as ARC adapts its target on a ghost hit
+    (Megiddo and Modha, "ARC: A Self-Tuning, Low Overhead Replacement Cache", FAST 2003, §4.3).
+  - *Seeds*: a growing pool adds a slot for each create that finds no seed idle and no slot vacant
+    (`Seeds::growing`), and the spare kept idle beyond the creates waiting is the most seen waiting at once.
+- **No shrinking.** No rule that lowers a size can be shown not to cause a miss under the demand already seen, so none
+  lowers. An owner's ghosts are forgotten oldest first past the bound; that forgets a regret, never a size.
+- **The bounds: an even share of the node's memory at each item's recorded cost** (kinds (a) and (b)). The node reads
+  `MemAvailable` (Linux `Documentation/filesystems/proc.rst`) and what each cgroup from its own up leaves under
+  `memory.max` (`Documentation/admin-guide/cgroup-v2.rst`), once a process, and takes the least. The six pools that
+  hold memory split it evenly, so together they hold no more than it (`sizes` tests it on hosts of any memory):
+  | pool | an item's cost | record |
+  |---|---|---|
+  | idle cgroups (the node's bound) | 1,748,992 B residual + 24.7 KB parked init | `reuse_residual.md`, `create_tail.md` |
+  | cgroups made ahead | 262 KB | `create_tail.md` |
+  | idle network namespaces (the node's bound) | 762 KiB | `netns_pool.md` (Mac Studio, the heavier) |
+  | network namespaces made ahead (decision 4) | 762 KiB | `netns_pool.md` |
+  | create seeds | 2,488 KiB | `seed_path.md` |
+  | ipc/uts pairs | 14.1 KiB | `netns_pool.md` |
+
+  The pools a create takes an item from (network namespaces and ipc/uts pairs made ahead, cgroups made ahead, and the
+  `/dev` and proc mounts, in all and by key) are bounded besides by the seeds' bound: a create holds a seed while it
+  takes them. Fedora as its bench units run the node (about 7.5 GiB, 32 threads) gets 738 idle cgroups, 1,679 idle
+  namespaces and 514 seeds, against 256, 256 and 32. The removal queue and the checkers' line hold the node's idle
+  bound; procs alive one a parked init.
+- **The socket's workers: one for every call it admits** (kinds (a) and (c)). Workers start as calls find none idle
+  and are kept, as before; their bound is the socket's connections times their calls in flight, so no admitted call
+  waits for a worker that could exist, at most the threads the kernel lets the node have (the least of `RLIMIT_NPROC`,
+  getrlimit(2), and `/proc/sys/kernel/threads-max`, proc(5)): 4,096 where 128 were. `Sizes::workers` is the one
+  accessor (the seeds' line of waiting creates is set by it). The connections, calls in flight and programs a
+  connection watches stay bounds on input as they were (64, 64, 1,024; programs 64 connections' worth of the
+  supervisor's 65,536 pidfds), for the lead to rule on how the socket's share of the descriptor budget splits.
+- **Derived from a fact the kernel gives.** The removal's walk of a slot's sub-cgroups is bounded by `cgroup.stat`'s
+  `nr_descendants`, read before it (kind (a)); one made during the walk refuses it, by type, for recovery.
+- **Derived, not learned: the wake mark and the record shards** (kind (b)). The ipc/uts refill is woken once a take
+  leaves at most `size x T / (T + M)` pairs, T the fastest take rate recorded (10,383 a second, `create_serial.md` run
+  20) and M the slowest make (0.035 ms p99, `netns_pool.md`), so what is left outlasts the refill of the rest; it was
+  half the size. `store::SHARDS` stays 64: run 20 measured no shard's wait at concurrency 32, and a record's place is
+  its id's hash over the count, so a count that changed with the host would lose the records a restart must find.
+- **What the bounds cost.** The descriptors counted at these bounds (`FilesBound`'s `own`) grow with them: on
+  fedora's sizes 364,442 where the old constants gave 331,086 (the learned pools at their bounds and each worker's
+  takes); a soft limit past that lets kept namespaces hold their files, four each, 640,018 for every one there may be
+  (595,278 before). A larger `/dev` and proc pool holds more
+  superblocks, each two memcg-aware `list_lru`s a memory offline walks (goal 16's finding); it holds them only for the
+  keys and depth demand reached.
+- **What would falsify it**: a cold take counted (reuse `missed`/`Owner`, netns_reuse `fresh`, `made_on_path`,
+  `AheadCounts::dry`, seeds `waited`, devfs `cold`/`dry`) at a draw the pool had already seen; goal 16's A/B against
+  a186d35 (the old constants) showing the learned tree slower at the bar; an idle cgroup holding more than its
+  recorded cost on a node near its bound; or the pools at their bounds holding more than the memory read.
+
 ### 6. Mount namespaces without copying, where the kernel has it
 
 **The choice.** On Linux 7.0 and later, `create` builds the container's mount namespace with
@@ -2085,8 +2156,9 @@ move to the delete, off create's path; the delete's cost is measured beside the 
   nothing of the next box until it is claimed: no spec, no rootfs, no network, ipc or uts namespace, and its fresh pid
   and mount namespaces are empty of the box's. A claim whose spec asks for other namespaces than it was made with is
   refused by type: the init is ended and the create clones a fresh one (CLAUDE.md §3).
-- **The default ships on (the lead, 2026-11-05: the bar measures what ships).** `hex_node::INITS_AHEAD` is 8: one per
-  box in flight at the seam bench's concurrency 8. At the bar's concurrency 1, eight never ran dry but for each round's
+- **The default ships on (the lead, 2026-11-05: the bar measures what ships).** `hex_node::INITS_AHEAD` was 8: one per
+  box in flight at the seam bench's concurrency 8; since 2026-11-06 the node learns it from its draws, from the host's
+  parallelism up ("Pool sizes learned from demand", decision 5). At the bar's concurrency 1, eight never ran dry but for each round's
   first create (1 in 10,100: the A/B below). That is about 2.1 MB a node at about 262 KB an init. It is a pool like
   decision 4's network namespaces made ahead, on by default; `Node::with_inits_ahead(0)` keeps none. The socket's node
   and the bench take the default.

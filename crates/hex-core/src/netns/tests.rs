@@ -202,9 +202,12 @@ fn event() -> impl Strategy<Value = Event> {
     ]
 }
 
-/// Small bounds, which histories fill and drain often, 0 (a pool that holds none), and decision 4's.
+/// The bench's concurrency, the size decision 4's pool had before it was learned and starts at on fedora.
+const BENCH: usize = 32;
+
+/// Small bounds, which histories fill and drain often, 0 (a pool that holds none), and the bench's width.
 fn bound() -> impl Strategy<Value = usize> {
-    prop_oneof![0usize..=6, Just(BOUND)]
+    prop_oneof![0usize..=6, Just(BENCH)]
 }
 
 /// HEX-NETNS-1 to 5, against the oracle: under random takes, made and failed makes, creates the pool can't
@@ -245,7 +248,7 @@ fn against_an_oracle_the_pool_keeps_its_bound_hands_each_namespace_out_once_and_
 /// ahead is taken before the pool runs dry again.
 #[test]
 fn a_take_from_an_empty_pool_is_made_on_the_path_and_counted() {
-    let mut pool = Pool::new(BOUND);
+    let mut pool = Pool::new(BENCH);
     assert_eq!(pool.take(), Ok(Take::MakeOnPath));
     assert_eq!(
         pool.counts(),
@@ -317,7 +320,7 @@ fn a_namespace_made_past_the_bound_is_refused_and_handed_back() {
 /// discarded, a make that was under way is handed back, and nothing more is asked for.
 #[test]
 fn a_take_after_shutdown_is_refused_and_what_the_pool_held_is_handed_back() {
-    let mut pool = Pool::new(BOUND);
+    let mut pool = Pool::new(BENCH);
     pool.made(1).unwrap();
     pool.made(2).unwrap();
     let mut back = pool.shut_down();
@@ -356,11 +359,48 @@ fn a_failed_make_stops_the_asking_until_the_next_take() {
     assert_eq!(pool.counts().failed, 1);
 }
 
-/// Doc-truth: the bound in code is the one decision 4 sets.
+/// Doc-truth (Ada's rule, 2026-11-06): decision 4 says the pool's size is learned from its draws, as the node's
+/// default is (`Pool::learning`), and names no picked bound.
 #[test]
-fn the_bound_is_decision_4s() {
+fn decision_4_says_the_pools_size_is_learned() {
     let design =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/design/runtime-architecture.md");
     let design = std::fs::read_to_string(design).unwrap();
-    assert!(design.contains(&format!("The pool holds at most **{BOUND}**")));
+    assert!(design.contains("The pool's size is **learned from its draws**"));
+    assert!(!design.contains("The pool holds at most **32**"));
+}
+
+/// Ada's rule, 2026-11-06 (AC-T7.1.3; goal 5 extended step 4's IPC_UTS_BOUND, a picked 32): a pool made ahead learns
+/// its size from its draws. Do: a pool starting at 2 of at most 10, filled, then five takes with no make between.
+/// Expect: two pooled and three made on the path, the size raised to the five drawn plus a take for each of the
+/// three short, 8; filled again, eight takes are all pooled, none made on the path. The size never falls, and stops
+/// at its bound.
+#[test]
+fn a_pool_made_ahead_learns_the_deepest_draw_and_never_runs_short_at_it_again() {
+    let mut pool = Pool::learning(2, 10);
+    assert_eq!(pool.wanted(), 2);
+    let mut n = 0;
+    let mut fill = |pool: &mut Pool<u32>| {
+        while pool.wanted() > 0 {
+            n += 1;
+            pool.made(n).unwrap();
+        }
+    };
+    fill(&mut pool);
+    let dry = (0..5)
+        .filter(|_| pool.take() == Ok(Take::MakeOnPath))
+        .count();
+    assert_eq!(dry, 3);
+    assert_eq!(pool.bound(), 8);
+    fill(&mut pool);
+    assert_eq!(pool.held(), 8);
+    for _ in 0..8 {
+        assert!(matches!(pool.take(), Ok(Take::Pooled(_))));
+    }
+    assert_eq!(pool.counts().made_on_path, 3, "no cold take once learned");
+    fill(&mut pool);
+    for _ in 0..30 {
+        let _ = pool.take();
+    }
+    assert_eq!(pool.bound(), 10, "held at its bound");
 }

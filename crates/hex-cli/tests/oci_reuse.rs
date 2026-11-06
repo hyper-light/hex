@@ -1534,10 +1534,14 @@ fn a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(lab: &Lab, o
     }
     // The node holds files within the soft limit it is given, never raising it; a lab's container starts at
     // dockerd's 1024, which holds none, so this test gives it room for the namespaces it keeps, as an installer would.
-    let room = u64::try_from(4 * (2 * hex_core::netns_reuse::PER_OWNER + 8)).unwrap();
-    let Some(_limit) =
-        soft_limit(hex_node::netns::FilesBound::now(hex_node::netns::Pools::ROOT).own + room)
-    else {
+    let per_owner = hex_node::sizes::Sizes::now().unwrap().start;
+    let room = u64::try_from(4 * (2 * per_owner + 8)).unwrap();
+    let Some(_limit) = soft_limit(
+        hex_node::netns::FilesBound::now(hex_node::netns::Pools::root(
+            hex_node::sizes::Sizes::now().unwrap(),
+        ))
+        .own + room,
+    ) else {
         eprintln!(
             "SKIP held files: the hard descriptor limit leaves no room for them past the node's own"
         );
@@ -1692,9 +1696,7 @@ fn a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(lab: &Lab, o
     wait_for(|| held() == 0, "the files of a namespace released closing");
 
     // One past the owner's bound, each namespace with its files: the one put out closes its own.
-    let many: Vec<String> = (0..=hex_core::netns_reuse::PER_OWNER)
-        .map(|n| format!("files-many-{n}"))
-        .collect();
+    let many: Vec<String> = (0..=per_owner).map(|n| format!("files-many-{n}")).collect();
     for id in &many {
         node.create(make(id)).unwrap();
     }
@@ -1704,15 +1706,13 @@ fn a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(lab: &Lab, o
     let filled = ruled();
     assert_eq!(
         held(),
-        files * hex_core::netns_reuse::PER_OWNER,
+        files * per_owner,
         "the namespace the owner's bound put out closed its files: {filled:?}"
     );
     // A checker's directory keeps one hashed dentry a name, so most of the bound's files stand on dentries a later
     // open unhashed (above). Each kept namespace taken by a box and given back is checked through its files all the
     // same.
-    let again: Vec<String> = (0..hex_core::netns_reuse::PER_OWNER)
-        .map(|n| format!("files-again-{n}"))
-        .collect();
+    let again: Vec<String> = (0..per_owner).map(|n| format!("files-again-{n}")).collect();
     for id in &again {
         node.create(make(id)).unwrap();
     }
@@ -1730,7 +1730,7 @@ fn a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(lab: &Lab, o
         "each through its files: {checked:?}"
     );
     assert_eq!(checked.files_failed, 0, "{checked:?}");
-    assert_eq!(held(), files * hex_core::netns_reuse::PER_OWNER);
+    assert_eq!(held(), files * per_owner);
     node.release_idle().unwrap();
     wait_for(|| held() == 0, "the bound's namespaces released closing");
     assert_eq!(counts().files_failed, 0);
@@ -1797,7 +1797,11 @@ fn a_node_past_its_files_bound_checks_by_entering_counted(lab: &Lab, own: &Path)
     let box_root = own.join("hex-reuse-files-bound");
     let (first_node, _first_state) = lab.node(&box_root);
     drop(first_node);
-    let soft = hex_node::netns::FilesBound::now(hex_node::netns::Pools::ROOT).own + 2 * 4 + 3;
+    let soft = hex_node::netns::FilesBound::now(hex_node::netns::Pools::root(
+        hex_node::sizes::Sizes::now().unwrap(),
+    ))
+    .own + 2 * 4
+        + 3;
     let Some(_limit) = soft_limit(soft) else {
         eprintln!("SKIP held files' bound: the hard descriptor limit is under the node's own");
         return;

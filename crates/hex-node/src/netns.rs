@@ -24,12 +24,14 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 use hex_api::{BoxId, BoxOwner, Refusal};
-use hex_core::netns::{BOUND, Counts, IPC_UTS_BOUND, Pool, Take};
+use hex_core::netns::{Counts, Pool, Take};
 use hex_core::netns_reuse::{self, Idle, Refused as Why, Take as Kept, Whose};
 use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::net;
 use hex_runtime::linux::oci::netcheck::{self, Fresh, ProcNet, Scratch};
 use hex_runtime::linux::oci::run::Networks;
+
+use crate::sizes::Sizes;
 
 /// The pool and the thread that fills it, and the namespaces kept for their owners' next boxes (goal 5
 /// extended, step 6) with the thread that checks each as its box goes. Dropped, it shuts the pool down,
@@ -86,10 +88,10 @@ const FDS_BESIDE: u64 = 1_024;
 const FDS_A_REFILL: u64 = 2;
 
 /// The mounts made ahead's (crate::devfs): the prepared `/dev` pool's at its bound, one descriptor each, and the
-/// proc pool's, two each (its pid namespace and its tree), four keys of eight each (`hex_core::devfs::KEYS`,
-/// `PER_KEY`).
-fn devfs_held() -> u64 {
-    let each_pool = hex_core::devfs::KEYS.saturating_mul(hex_core::devfs::PER_KEY);
+/// proc pool's, two each (its pid namespace and its tree), each pool holding at most the seeds' bound
+/// (`hex_core::devfs::Shape::cap`).
+fn devfs_held(sizes: Sizes) -> u64 {
+    let each_pool = sizes.seeds.get();
     of(each_pool, 1).saturating_add(of(each_pool, 2))
 }
 /// The one maker of both pools at its peak, a proc's (init::prepare_proc): the worker's own pid namespace, the one
@@ -111,18 +113,34 @@ pub struct Pools {
     pub ipc_uts: usize,
     /// Whether the node keeps step 3's prepared `/dev` pool, goal 6's prepared proc pool and their mask sources.
     pub devfs: bool,
+    /// The node's pools' bounds on its host, which the kept namespaces and the seeds are counted at.
+    pub sizes: Sizes,
 }
 
 impl Pools {
-    /// A root node's, each pool at its bound unless set.
-    pub const ROOT: Self = Self {
-        netns: BOUND,
-        ipc_uts: IPC_UTS_BOUND,
-        devfs: true,
-    };
+    /// A root node's on a host whose pools' bounds are `sizes`, each pool at its bound unless set: the network
+    /// namespaces and ipc and uts pairs at the most their learned sizes may reach.
+    pub fn root(sizes: Sizes) -> Self {
+        Self {
+            netns: sizes.netns,
+            ipc_uts: sizes.ipc_uts,
+            devfs: true,
+            sizes,
+        }
+    }
+
+    /// A rootless node's, which makes no namespaces or mounts ahead.
+    pub fn rootless(sizes: Sizes) -> Self {
+        Self {
+            netns: 0,
+            ipc_uts: 0,
+            devfs: false,
+            sizes,
+        }
+    }
 
     /// The descriptors the pools hold at their bounds, each pool's refill thread's beside, and the takes of every
-    /// call [`crate::serve::WORKERS`] runs at once, one of each pool's until its box's init joins them. A pool of
+    /// call the socket's workers run at once ([`Sizes::workers`]), one of each pool's until its box's init joins them. A pool of
     /// none has no thread. The mounts made ahead the same, where the node keeps them, their mask sources beside.
     fn descriptors(self) -> u64 {
         let pool = |bound: usize, each: u64| {
@@ -135,16 +153,16 @@ impl Pools {
         let takes =
             u64::from(self.netns > 0).saturating_add(u64::from(self.ipc_uts > 0).saturating_mul(2));
         let devfs = if self.devfs {
-            devfs_held()
+            devfs_held(self.sizes)
                 .saturating_add(FDS_A_DEVFS_MAKE)
                 .saturating_add(FDS_MASK_SOURCES)
-                .saturating_add(of(crate::serve::WORKERS, FDS_DEVFS_TAKES))
+                .saturating_add(of(self.sizes.workers, FDS_DEVFS_TAKES))
         } else {
             0
         };
         pool(self.netns, 1)
             .saturating_add(pool(self.ipc_uts, 2))
-            .saturating_add(of(crate::serve::WORKERS, takes))
+            .saturating_add(of(self.sizes.workers, takes))
             .saturating_add(devfs)
     }
 }
@@ -156,8 +174,8 @@ fn of(count: usize, each: u64) -> u64 {
 }
 
 /// The kept namespaces there may be at once: idle, on the checkers' line, and one for each live box.
-fn kept_at_most() -> u64 {
-    of(netns_reuse::PER_NODE, 2).saturating_add(of(hex_runtime::linux::cgroup::MAX_BOXES, 1))
+fn kept_at_most(sizes: Sizes) -> u64 {
+    of(sizes.idle_netns, 2).saturating_add(of(hex_runtime::linux::cgroup::MAX_BOXES, 1))
 }
 
 /// The descriptors this node may hold at once without the namespaces' `/proc/net` files, each by its bound: the
@@ -167,11 +185,11 @@ fn descriptors_of_the_node(pools: Pools) -> u64 {
     let connections = crate::serve::LIMITS.connections;
     [
         pools.descriptors(),
-        kept_at_most().saturating_mul(FDS_A_KEPT),
+        kept_at_most(pools.sizes).saturating_mul(FDS_A_KEPT),
         of(hex_runtime::linux::cgroup::MAX_BOXES, FDS_A_BOX),
         of(connections, 1),
         of(connections.saturating_mul(crate::serve::LIMITS.programs), 1),
-        of(hex_core::seeds::SEEDS.get(), FDS_A_SEED),
+        of(pools.sizes.seeds.get(), FDS_A_SEED),
         EXEC_SEEDS.saturating_mul(FDS_A_SEED),
         FDS_BESIDE,
     ]
@@ -201,8 +219,8 @@ impl FilesBound {
     pub fn of(limit: &rustix::process::Rlimit, pools: Pools) -> Self {
         let own = descriptors_of_the_node(pools);
         let namespaces = match limit.current {
-            None => kept_at_most(),
-            Some(soft) => (soft.saturating_sub(own) / FILES_A_KEPT).min(kept_at_most()),
+            None => kept_at_most(pools.sizes),
+            Some(soft) => (soft.saturating_sub(own) / FILES_A_KEPT).min(kept_at_most(pools.sizes)),
         };
         Self {
             soft: limit.current,
@@ -249,7 +267,7 @@ struct KeptState {
     given_back: AtomicU64,
     /// Namespaces the checker ruled on, kept idle or closed.
     checked: AtomicU64,
-    /// Namespaces given back with the checkers' line full ([`netns_reuse::PER_NODE`]), or after every checker
+    /// Namespaces given back with the checkers' line full (the node's `idle_netns`), or after every checker
     /// ended,
     /// closed unchecked.
     unchecked: AtomicU64,
@@ -321,13 +339,29 @@ impl Netns {
     /// A pool that holds at most `bound` namespaces, and the thread that starts filling it at once, its kept
     /// namespaces holding their `/proc/net` files under `files`. With a bound of 0 there is no thread, and every
     /// container that makes a network namespace makes it on its create's path, counted, as a rootless node's
-    /// containers do (decision 4).
-    pub fn start(bound: usize, files: FilesBound) -> Result<Self, Refusal> {
+    /// containers do (decision 4). The namespaces kept idle for their owners are bounded by `sizes`: the node's
+    /// `idle_netns`, and each owner's learned from its fresh takes, starting at the host's parallelism.
+    pub fn start(bound: usize, files: FilesBound, sizes: Sizes) -> Result<Self, Refusal> {
+        Self::open(Pool::new(bound), bound, files, sizes)
+    }
+
+    /// As [`Netns::start`], the pool starting at the host's parallelism and learning its size from its draws, up to
+    /// `cap` ([`Pool::learning`]; Ada's rule, 2026-11-06): a root node's default, `cap` its [`Sizes::netns`].
+    pub fn learning(cap: usize, files: FilesBound, sizes: Sizes) -> Result<Self, Refusal> {
+        Self::open(Pool::learning(sizes.start, cap), cap, files, sizes)
+    }
+
+    fn open(
+        pool: Pool<OwnedFd>,
+        cap: usize,
+        files: FilesBound,
+        sizes: Sizes,
+    ) -> Result<Self, Refusal> {
         let shared = Arc::new(Shared {
-            pool: Mutex::new(Pool::new(bound)),
+            pool: Mutex::new(pool),
             wake: Condvar::new(),
         });
-        if bound == 0 {
+        if cap == 0 {
             return Ok(Self {
                 shared,
                 refill: None,
@@ -340,7 +374,7 @@ impl Netns {
             .spawn(move || refill(&filling))
             .map_err(|e| Refusal::os("starting the network-namespace thread", e))?;
         let state = Arc::new(KeptState {
-            idle: Mutex::new(Idle::new(netns_reuse::PER_OWNER, netns_reuse::PER_NODE)),
+            idle: Mutex::new(Idle::new(sizes.start, sizes.idle_netns)),
             held: Mutex::new(BTreeMap::new()),
             given_back: AtomicU64::new(0),
             checked: AtomicU64::new(0),
@@ -355,7 +389,7 @@ impl Netns {
             files_held: Arc::new(AtomicU64::new(0)),
             check_ns: AtomicU64::new(0),
         });
-        let (returns, line) = std::sync::mpsc::sync_channel(netns_reuse::PER_NODE);
+        let (returns, line) = std::sync::mpsc::sync_channel(sizes.idle_netns);
         let line = Arc::new(Mutex::new(line));
         let mut checkers = Vec::with_capacity(CHECKERS);
         for n in 0..CHECKERS {

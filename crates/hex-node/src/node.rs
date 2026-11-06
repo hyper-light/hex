@@ -48,6 +48,7 @@ use crate::ipcuts::IpcUtsPool;
 use crate::netns::{Netns, Pools};
 use crate::remove::remove_tree;
 use crate::seed::SeedPool;
+use crate::sizes::Sizes;
 use crate::store::Store;
 use crate::supervise::{self, Forgotten, Live, Supervisor};
 use crate::turns::{Turn, Turns};
@@ -111,13 +112,6 @@ impl CrashPoint {
 /// program can sit on it without reaching a `process` box (goal 5 extended, step 1; research f44). No
 /// box id starts with `.`, so it can't be a box's.
 pub const OCI_BOXES: &str = ".oci";
-
-/// The cgroups a node makes ahead for boxes of no owner unless [`Node::with_inits_ahead`] says, each with an init
-/// parked in it (decision 8, "The p99.9 that stayed"), about 262 KB each on fedora, so about 2.1 MB a node. Eight:
-/// one per box in flight at the seam bench's concurrency 8, and at the bar's concurrency 1 eight never ran dry but
-/// for each round's first create (1 in 10,100: bench/competitive/probes/create_tail.md, "The parked init, A/B
-/// against 60b2e38"). More in flight than this finds none ready and makes its own, counted dry.
-pub const INITS_AHEAD: usize = 8;
 
 /// A node agent over the `process` and `oci` classes.
 pub struct Node {
@@ -257,16 +251,15 @@ impl Node {
         // containers are in it, a root node's, makes them; a rootless node's containers each have a
         // user namespace of their own (decision 4). The kept ones hold their files within the descriptor
         // limit the node was given, never raised, past what both pools hold.
+        // Every pool's bound is derived from this host, and its size learned from the demand it sees from the
+        // host's parallelism up (Ada's rule, 2026-11-06; crate::sizes).
+        let sizes = Sizes::now()?;
         let pools = match owner {
-            Owner::Root => Pools::ROOT,
-            Owner::Rootless { .. } => Pools {
-                netns: 0,
-                ipc_uts: 0,
-                devfs: false,
-            },
+            Owner::Root => Pools::root(sizes),
+            Owner::Rootless { .. } => Pools::rootless(sizes),
         };
-        let netns = Netns::start(pools.netns, crate::netns::FilesBound::now(pools))?;
-        let ipc_uts = IpcUtsPool::start(pools.ipc_uts)?;
+        let netns = Netns::learning(pools.netns, crate::netns::FilesBound::now(pools), sizes)?;
+        let ipc_uts = IpcUtsPool::learning(sizes.start, pools.ipc_uts)?;
         let oci_boxes = BoxRoot::open(&root.dir().join(OCI_BOXES), root.disks().to_vec())?;
         let devices = device_programs(owner, &oci_boxes, MAX_PROGRAMS)?;
         // Fresh slots are numbered past every slot already under the root, so none is made twice.
@@ -276,8 +269,8 @@ impl Node {
             .ok_or_else(|| {
                 Refusal::Broken("the oci boxes' root holds the last slot a u64 numbers".to_owned())
             })?;
-        let cgroups = Cgroups::start(first)?;
-        cgroups.set_ahead(INITS_AHEAD);
+        let cgroups = Cgroups::start(first, sizes)?;
+        cgroups.learn_ahead(sizes.start, sizes.ahead);
         // Parked procs are a root node's default (decision 8, parked procs; the lead, 2026-11-06): a rootless
         // node's devfs makes none, so it parks none.
         Self {
@@ -423,6 +416,7 @@ impl Node {
         // at the first create, which reports why.
         if let Ok(pool) = CreatePool::new(
             hex_binary.clone(),
+            self.pools.sizes,
             self.seed_prune(),
             self.mount_namespace.as_deref(),
             #[cfg(debug_assertions)]
@@ -446,7 +440,8 @@ impl Node {
         }
     }
 
-    /// Sets the most network namespaces a root node makes ahead, [`netns::BOUND`] unless set, in place
+    /// Sets the network namespaces a root node makes ahead to `bound`, fixed (unless set it learns how many from its
+    /// draws, up to its [`Sizes::netns`]), in place
     /// of the pool it opened with, which closes what it held. With 0 it makes none, and every container
     /// that makes a network namespace makes it on its create's path, counted. A rootless node makes
     /// none (its containers' namespaces belong to user namespaces of their own), so a bound above 0
@@ -461,13 +456,17 @@ impl Node {
             });
         }
         self.pools.netns = bound;
-        self.netns = Netns::start(bound, crate::netns::FilesBound::now(self.pools))?;
+        self.netns = Netns::start(
+            bound,
+            crate::netns::FilesBound::now(self.pools),
+            self.pools.sizes,
+        )?;
         Ok(self)
     }
 
-    /// Sets the most ipc and uts namespace pairs a root node makes ahead, [`netns::IPC_UTS_BOUND`] unless set,
-    /// in place of the pool it opened with, which closes what it held. With 0 it makes none, and every
-    /// container's clone makes its own, counted. A rootless node makes none, so a bound above 0 there is refused.
+    /// Sets the ipc and uts namespace pairs a root node makes ahead to `bound`, fixed, in place of the pool it
+    /// opened with, whose size it learns from its draws (Ada's rule, 2026-11-06), which closes what it held. With 0
+    /// it makes none, and every container's clone makes its own, counted. A rootless node makes none, so a bound above 0 there is refused.
     pub fn with_ipc_uts_bound(mut self, bound: usize) -> Result<Self, Refusal> {
         if bound > 0 && self.owner != Owner::Root {
             return Err(Refusal::Invalid {
@@ -481,13 +480,18 @@ impl Node {
         self.pools.ipc_uts = bound;
         // The kept namespaces' files are bounded past this pool too, so the network-namespace pool starts again
         // with the bound they leave.
-        self.netns = Netns::start(self.pools.netns, crate::netns::FilesBound::now(self.pools))?;
+        self.netns = Netns::start(
+            self.pools.netns,
+            crate::netns::FilesBound::now(self.pools),
+            self.pools.sizes,
+        )?;
         Ok(self)
     }
 
     /// The node keeps at most `bound` cgroups made ahead for boxes of no owner, each with an init parked in it
     /// (decision 8, "The p99.9 that stayed"), so such a box's create takes neither the cgroup's `mkdir` nor its
-    /// init's clone, nor their waits for the host-wide `cgroup_mutex`; [`INITS_AHEAD`] unless set. 0 keeps none:
+    /// init's clone, nor their waits for the host-wide `cgroup_mutex`. Unless set, the node learns how many from its
+    /// draws, from the host's parallelism up ([`crate::sizes::Sizes`]); set, it keeps `bound`. 0 keeps none:
     /// each such box makes its own cgroup, named by its id. Each costs an idle cgroup and a parked process charged
     /// to it.
     pub fn with_inits_ahead(self, bound: usize) -> Self {
@@ -502,7 +506,8 @@ impl Node {
     /// the node's first create.
     pub fn with_parked_procs(self, enabled: bool) -> Result<Self, Refusal> {
         if enabled {
-            self.with_parked_procs_bound(crate::cgroups::PROCS_ALIVE)
+            let bound = self.pools.sizes.procs_alive();
+            self.with_parked_procs_bound(bound)
         } else {
             self.cgroups.stop_parked_procs();
             Ok(self)
@@ -514,8 +519,9 @@ impl Node {
         self.cgroups.makes_parked_procs()
     }
 
-    /// As [`Node::with_parked_procs`] on, with at most `bound` procs alive at once in place of
-    /// [`crate::cgroups::PROCS_ALIVE`]: the dropper's queue holds as many, so a tree handed to it never finds it full.
+    /// As [`Node::with_parked_procs`] on, with at most `bound` procs alive at once in place of the node's
+    /// ([`crate::sizes::Sizes::procs_alive`]): the dropper's queue holds as many, so a tree handed to it never finds it
+    /// full.
     /// Refused when the dropper can't be started.
     pub fn with_parked_procs_bound(self, bound: usize) -> Result<Self, Refusal> {
         if let Some(maker) = self.devfs.proc_maker() {
@@ -530,6 +536,11 @@ impl Node {
     pub fn with_device_program_bound(mut self, bound: usize) -> Result<Self, Refusal> {
         self.devices = device_programs(self.owner, &self.oci_boxes, bound)?;
         Ok(self)
+    }
+
+    /// The node's pools' bounds on its host, and where their learned sizes start (Ada's rule, 2026-11-06).
+    pub fn sizes(&self) -> Sizes {
+        self.pools.sizes
     }
 
     /// What the node's device programs have done since it opened them: the loads, attaches and closes
@@ -1349,6 +1360,7 @@ impl Node {
         };
         let _ = self.create_seeds.set(CreatePool::new(
             exe,
+            self.pools.sizes,
             self.seed_prune(),
             self.mount_namespace.as_deref(),
             #[cfg(debug_assertions)]
