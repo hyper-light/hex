@@ -4,12 +4,13 @@
 //!
 //! It packs the recorded workload (bench/sched/huawei_workload.md), each launch an OCI container, a
 //! Firecracker microVM or a Shards microVM, on each of its two node models: EC2 m5d.metal hosts that
-//! run every class (huawei-r5-day30.trace, the main one) and Hex's fleet's host types, each running
-//! the classes its OS runs (huawei-r5-day30.fleet.trace). On each, it packs the mix and each class
-//! alone (`hex_sim::packing::alone`), from 16 starting arrivals spread evenly over the day (the
-//! seeds), to 90% load through the fast path's sampled choice (`hex_sim::packing::pack`), three ways:
-//! with no completions, so lifetimes don't enter; and with completions, once with lifetimes as
-//! recorded and once with Huawei's one-minute keep-alive added (the `.keepalive.trace` beside each).
+//! run every class (huawei-r5-day30.trace, the main one) and Hex's fleet's host types five times
+//! over, each running the classes its OS runs (huawei-r5-day30.fleet.trace); and, as context, on the
+//! fleet as it is, one of each host. On each, it packs the mix and each class alone
+//! (`hex_sim::packing::alone`), from 16 starting arrivals spread evenly over the day (the seeds), to
+//! 90% load through the fast path's sampled choice (`hex_sim::packing::pack`), three ways: with no
+//! completions, so lifetimes don't enter; and with completions, once with lifetimes as recorded and
+//! once with Huawei's one-minute keep-alive added (the `.keepalive.trace` beside each).
 //! At the recorded speed the day never loads the nodes to 90%, so arrivals come faster: for each
 //! set and trace, the slowest speed of [`LADDER`] at which Hex and both best fits reach 90% on every
 //! seed, so lifetimes enter as far as the nodes allow. It prints the ladder first, each speed's seeds reaching 90% by arm, its fewest completions on the
@@ -88,12 +89,22 @@ fn trace(name: &str) -> Cluster {
 }
 
 fn main() {
-    for (model, name) in [
-        ("m5d.metal", "huawei-r5-day30"),
-        ("fleet", "huawei-r5-day30.fleet"),
+    for (model, name, hosts) in [
+        ("m5d.metal", "huawei-r5-day30", None),
+        ("fleet", "huawei-r5-day30.fleet", None),
+        // The fleet as it is, one of each host, as context (bench/sched/packing.md): the fleet trace
+        // lists its five copies in order, so its first 10 nodes are one of each.
+        ("fleet as it is", "huawei-r5-day30.fleet", Some(10)),
     ] {
-        let recorded = trace(&format!("{name}.trace"));
-        let kept_alive = trace(&format!("{name}.keepalive.trace"));
+        let load = |file: String| {
+            let mut day = trace(&file);
+            if let Some(hosts) = hosts {
+                day.nodes.truncate(hosts);
+            }
+            day
+        };
+        let recorded = load(format!("{name}.trace"));
+        let kept_alive = load(format!("{name}.keepalive.trace"));
         for (set, class) in [
             ("mix", None),
             ("oci", Some(Class::Oci)),

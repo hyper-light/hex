@@ -19,7 +19,8 @@ on a release build, wall-clock:
 - **Nodes.** 10,000 of them, repeating one node model's hosts: 10,000 m5d.metal hosts, each running every
   kind (`huawei-r5-day30.trace`, the main model); or Hex's fleet's host types in their proportions (two
   Linux hosts in ten, one Windows, seven Macs), each running the kinds its OS runs
-  (`huawei-r5-day30.fleet.trace`).
+  (`huawei-r5-day30.fleet.trace`). The fleet as it is, one of each host, repeats to the same 10,000 nodes,
+  so this run covers it too.
 - **Launches.** The recorded workload's, with their needs (each with its kind's overhead) and kinds, in
   arrival order from a different place in the day for each run (the seed), repeated as needed.
 - **Sets.** The mix as recorded, and each kind alone (`packing::alone`).

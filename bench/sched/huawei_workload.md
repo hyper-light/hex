@@ -129,6 +129,10 @@ On the fleet, OCI containers may use 15 of the 50 nodes (480 cores), Firecracker
 cores), and Shards microVMs all 50 (1,105 cores). On either model, a pack's load is measured over the
 nodes its requests may use.
 
+As context, not of record, `packing.md` also reports the fleet as it is, one of each host: the fleet
+trace's first copy, the nodes `--nodes fleet:1` writes. There Firecracker's whole sub-cluster is two
+hosts, so a seed can turn on one node's state, which is why the fleet of record is five copies.
+
 ## What it holds
 
 25,345 cold starts on day 30. 48 name no resource pool in their pod ID and 2 are a second cold start of

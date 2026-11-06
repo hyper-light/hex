@@ -324,6 +324,10 @@ models, under all three clocks, Hex's scorer strands at least 30% less than both
 - The bar doesn't hang on the chosen speeds. Of the 179 ladder rows at which every arm reaches 90% on every
   seed, Hex meets it on every seed of 176. In the other three, one seed has `MostAllocated` stranding
   nothing either, so no cut is possible.
+- As context, on the fleet as it is (10 hosts), Hex meets the bar at each set's clocks on every seed
+  where a best fit strands something. Along the ladder, Firecracker alone at 500x misses on one seed:
+  Firecracker has two hosts there, and which of them holds the last few hundred millicores decides
+  whether 91 or 30 GiB of memory is stranded (`packing.md`).
 
 The bench measures the arms not taken beside it (`packing.md`), and every fragment-aware arm meets the bar.
 - Least stranded then most allocated is Hex's tie without the kinds. On m5d.metal, where every node runs

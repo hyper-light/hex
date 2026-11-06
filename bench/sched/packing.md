@@ -78,6 +78,13 @@ At 2,000x, the speed this measure first used, the keep-alive made completions va
 lives at least 60 s, and the nodes fill to 90% in seconds. The pack reports its completions
 (`PackReport::completions`), and the test fails if any seed under a completions clock has none.
 
+No set runs faster than 500x. At 500x every seed of every set reaches 90%, on both node models and on the
+fleet as it is (below), because each seed wraps round the day. The earlier model's shortfall at 500x (on
+the fleet five times over, the mix on 10 of 16 seeds and Shards on 11) came from seeds that started late in
+the day and ran out of arrivals before 90%; wrapping gives each the whole day. Each set runs slower than
+500x instead, at the slowest speed that still reaches 90%, from 10x to 150x. The table above says how far
+the next speed down falls short.
+
 The bar doesn't hang on these speeds. Of the 179 ladder rows at which Hex and both best fits reach 90% on
 every seed, Hex meets the bar on every seed of 176. In the other three (m5d.metal at 60x, lifetimes as
 recorded: the mix, Firecracker alone and Shards alone), one seed falls short only because `MostAllocated`
@@ -208,6 +215,56 @@ node with room for it; `-` means none ever did.
   they can run. Across both models, Hex's score strands nothing in 23 of the 24 sets and clocks. It passes
   over launches only on the fleet's mix with no completions, never below half load, and never for room.
 
+## Context: the fleet as it is
+
+The lead asked for Hex's fleet as it is beside the two node models: its 10 hosts, one of each. That is
+the fleet trace's first copy; `huawei_trace.py --nodes fleet:1` writes the same nodes. There, OCI
+containers may use 3 hosts (96 cores), Firecracker microVMs 2 (64 cores), and Shards microVMs all 10 (221
+cores). It isn't of record: with Firecracker's whole sub-cluster two hosts, a 90%-load packing bar turns on
+one node's state (the lead, 2026-11-06). The bench measures it the same way, at its own clocks.
+
+| set and clock | `BestFit` | `MostAllocated` | Hex | seeds where Hex meets the bar | passed over: `BestFit`, `MostAllocated`, Hex |
+|---|---|---|---|---|---|
+| mix, no completions | 499-657 | 493-653 | 0-316 | 16/16 (least cuts 38.9%, 38.5%) | 1,423, 2,317, 505 |
+| mix, 20x, as recorded | 118-511 | 107-481 | 0 | 16/16 | 898, 1,462, 7 |
+| mix, 10x, with the keep-alive | 192-536 | 153-518 | 0 | 16/16 | 8,611, 8,943, 272 |
+| OCI, no completions | 115-446 | 115-446 | 0 | 16/16 | 0, 0, 0 |
+| OCI, 10x, as recorded | 0-400 | 0-404 | 0 | 8/16; on the other 8 the best fits strand nothing either | 0, 0, 0 |
+| OCI, 10x, with the keep-alive | 115-446 | 115-446 | 0 | 16/16, but no launch ends on the way | 0, 0, 0 |
+| Firecracker, no completions | 157-687 | 157-687 | 0 | 16/16 | 0, 0, 1 |
+| Firecracker, 10x, as recorded | 0-175 | 0-175 | 0 | 4/16; on the other 12 the best fits strand nothing either | 0, 0, 0 |
+| Firecracker, 10x, with the keep-alive | 157-687 | 157-687 | 0 | 16/16, but no launch ends on the way | 0, 0, 1 |
+| Shards, no completions | 484-623 | 484-623 | 0 | 16/16 | 0, 0, 0 |
+| Shards, 20x, as recorded | 166-475 | 108-329 | 0 | 16/16 | 0, 0, 0 |
+| Shards, 10x, with the keep-alive | 114-613 | 136-607 | 0 | 16/16 | 0, 0, 0 |
+
+What differs from the two node models:
+- **Seeds with nothing to cut.** OCI alone and Firecracker alone, with lifetimes as recorded, leave 8 and 12
+  seeds on which the best fits strand nothing either. The bar can't be met there: there is nothing to cut.
+- **No keep-alive completions.** OCI alone and Firecracker alone, with the keep-alive, fill their 2 or 3
+  hosts before any kept-alive launch ends, even at 10x, the ladder's slowest speed. Those two clocks
+  measure the same as no completions.
+- **One refusal.** On Firecracker alone, with no completions and with the keep-alive, Hex passes over
+  one launch on the way; the best fits pass over none.
+
+Along the ladder, two cases miss the bar with something to cut, and both show why this model isn't of
+record:
+1. **Firecracker alone at 500x, as recorded**, the speed and set of one of the earlier model's two 15/16s
+   (the other, the mix at 500x, now meets the bar on all 16 seeds). 10 seeds meet the bar, and 5 have
+   nothing to cut. On seed 10, Hex strands 493 per-mille against the best fits'
+   161. Firecracker runs only on the two Linux hosts, and the pack stops one launch past 90%, here at 99.4%
+   of their CPU, with 400 millicores left between them. Hex left its last 100 millicores on adacachy,
+   stranding the 91 GiB of memory beside them; the best fits left theirs on fedora, stranding 30 GiB. One
+   node's leftover decides the seed.
+2. **The mix at 20x with the keep-alive**, a speed the measure doesn't use. Seeds 8, 10 and 14 miss against
+   `MostAllocated`: Hex strands 305, 316 and 183 per-mille, `MostAllocated` 372, 426 and 157. Hex fills the
+   10 hosts before any kept-alive launch ends (seeds 8 and 10 have none). `MostAllocated` passes over 122 to
+   207 launches on the way, reaches 90% later, and by then launches it placed have begun to end. Each host
+   is a tenth of the measure.
+
+Its 10,000-node latency is the fleet's above: the same host types in the same proportions make the same
+10,000 nodes (`fast_path.md`).
+
 ## The run of record
 
 - Commit: `5374202` (cp/t7-sched), release (`cargo bench` profile), from a `git archive` of the commit.
@@ -220,6 +277,9 @@ node with room for it; `-` means none ever did.
   tables.
 - The fleet's tables are the same as at `1d72fd5` (hex-sched-ladder-20261106T093934Z and
   hex-sched-packrec-20261106T094936Z): its traces moved to `.fleet.trace` byte for byte.
+- The fleet as it is: unit hex-sched-asis-20261106T102358Z, on `5374202` and the bench's context model
+  (fmt, clippy and this bench, all exit 0). The two node models' tables there are those above, line for
+  line.
 
 ## Side measurement: kiln CI, not of record
 
