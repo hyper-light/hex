@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use hex_api::{Bounds, BoxId, Refusal, Signal, Usage};
 use hex_core::cgroup::{self as core, CONTROLLERS, Dev, UsageFiles};
+use hex_core::setup::{self, Undelegated};
 use rustix::fs::{Mode, OFlags};
 
 use super::os_err;
@@ -50,10 +51,12 @@ pub struct BoxRoot {
 }
 
 impl BoxRoot {
-    /// Opens the box root at `dir`, making it when it's missing: its parent is asked to hand it each
-    /// of [`CONTROLLERS`] it has, and it hands them on to boxes. `disks` are the devices
-    /// `io.latency` and `io.max` apply to. Refused when the parent holds processes of its own (the
-    /// kernel then can't hand controllers down) or isn't writable (not delegated).
+    /// Opens the box root at `dir`, making it when it's missing: its parent is asked to hand it every
+    /// one of [`CONTROLLERS`], and it hands them on to boxes. `disks` are the devices `io.latency` and
+    /// `io.max` apply to. Where the delegation Hex's installer sets up is missing (the parent lacks a
+    /// controller, isn't this user's, or holds processes of its own, so the kernel can't hand
+    /// controllers down), both Linux classes are refused by name, saying what's missing
+    /// ([`setup::undelegated`]).
     pub fn open(dir: &Path, disks: Vec<Dev>) -> Result<Self, Refusal> {
         let parent = dir.parent().ok_or_else(|| Refusal::Invalid {
             what: "box root",
@@ -62,37 +65,33 @@ impl BoxRoot {
         match fs::create_dir(dir) {
             Ok(()) => {}
             Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => {
+                return Err(setup::undelegated(
+                    parent,
+                    Undelegated::NotOurs(e.to_string()),
+                ));
+            }
             Err(e) => return Err(os_err("making the box root", dir, e)),
         }
-        let available = read_set(&parent.join("cgroup.controllers"))?;
-        let wanted: Vec<&str> = CONTROLLERS
-            .iter()
-            .copied()
-            .filter(|c| available.contains(*c))
-            .collect();
-        let enable = wanted
+        setup::check_controllers(parent, &read_set(&parent.join("cgroup.controllers"))?)?;
+        let enable = CONTROLLERS
             .iter()
             .map(|c| format!("+{c}"))
             .collect::<Vec<_>>()
             .join(" ");
-        if !enable.is_empty() {
-            if let Err(e) = write_file(&parent.join("cgroup.subtree_control"), &enable) {
-                let procs = fs::read_to_string(parent.join("cgroup.procs")).unwrap_or_default();
-                let why = if procs.trim().is_empty() {
-                    format!("{e}")
+        if let Err(e) = write_file(&parent.join("cgroup.subtree_control"), &enable) {
+            let procs = fs::read_to_string(parent.join("cgroup.procs")).unwrap_or_default();
+            let why = e.to_string();
+            return Err(setup::undelegated(
+                parent,
+                if procs.trim().is_empty() {
+                    Undelegated::NotOurs(why)
                 } else {
-                    format!(
-                        "{e}: {} holds processes of its own, so cgroup v2 can't hand its controllers to the box root; run the node agent in a leaf cgroup beside it (systemd: Delegate=yes, DelegateSubgroup=)",
-                        parent.display()
-                    )
-                };
-                return Err(Refusal::Os {
-                    op: "enabling controllers for the box root",
-                    why,
-                });
-            }
-            write_file(&dir.join("cgroup.subtree_control"), &enable)?;
+                    Undelegated::Occupied(why)
+                },
+            ));
         }
+        write_file(&dir.join("cgroup.subtree_control"), &enable)?;
         let controllers = read_set(&dir.join("cgroup.subtree_control"))?;
         Ok(Self {
             dir: dir.to_owned(),

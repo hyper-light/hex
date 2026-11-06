@@ -3,8 +3,11 @@
 //! record the node agent keeps of each box, the plan that takes every box back or removes it after
 //! the node agent crashed (T-T7.1.2), the pool of network namespaces it makes ahead for its
 //! containers ([`netns`]), the seeds it keeps to clone them ([`seeds`]), the node agent's socket
-//! as bytes ([`wire`]), the rule a macOS box is bounded by ([`watch`]), how its memory bound is apportioned across its members for the kernel to enforce ([`ledger`]) and macOS's signal numbers
-//! ([`darwin`]). Shells in `hex-runtime`, `hex-node` and `hex-client` do the I/O these decide.
+//! as bytes ([`wire`]), the rules a macOS box is bounded by — rootless by polling ([`watch`]) and
+//! under a privileged helper by the kernel ([`boxuser`]) — how its memory bound is apportioned across
+//! its members for the kernel to enforce ([`ledger`]), macOS's signal numbers ([`darwin`]), the macOS
+//! box helper's protocol ([`helper`]) and what each OS's installer sets up and the refusal where it is
+//! missing ([`setup`]). Shells in `hex-runtime`, `hex-node` and `hex-client` do the I/O these decide.
 
 #![cfg_attr(
     test,
@@ -18,9 +21,11 @@
     )
 )]
 
+pub mod boxuser;
 pub mod bundle;
 pub mod cgroup;
 pub mod darwin;
+pub mod helper;
 pub mod job;
 pub mod ledger;
 pub mod netns;
@@ -28,5 +33,6 @@ pub mod record;
 pub mod recovery;
 pub mod seed;
 pub mod seeds;
+pub mod setup;
 pub mod watch;
 pub mod wire;

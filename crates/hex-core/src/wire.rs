@@ -818,7 +818,7 @@ fn oci(r: &mut Reader<'_>) -> Result<OciSpec, Fault> {
     })
 }
 
-fn put_program(w: &mut Writer, p: &Program) -> Result<(), Fault> {
+pub(crate) fn put_program(w: &mut Writer, p: &Program) -> Result<(), Fault> {
     w.list(&p.args, |w, a| w.string(a))?;
     w.list(&p.env, |w, (k, v)| {
         w.string(k)?;
@@ -835,7 +835,7 @@ fn put_program(w: &mut Writer, p: &Program) -> Result<(), Fault> {
     })
 }
 
-fn program(r: &mut Reader<'_>) -> Result<Program, Fault> {
+pub(crate) fn program(r: &mut Reader<'_>) -> Result<Program, Fault> {
     Ok(Program {
         args: r.list(|r| r.string("argument"))?,
         env: r.list(|r| Ok((r.string("variable")?, r.string("value")?)))?,
@@ -850,7 +850,7 @@ fn program(r: &mut Reader<'_>) -> Result<Program, Fault> {
     })
 }
 
-fn box_id(r: &mut Reader<'_>) -> Result<BoxId, Fault> {
+pub(crate) fn box_id(r: &mut Reader<'_>) -> Result<BoxId, Fault> {
     let s = r.string("box id")?;
     BoxId::new(&s).map_err(|e| Fault::value("box id", e.to_string()))
 }
@@ -887,6 +887,7 @@ fn put_info(w: &mut Writer, info: &BoxInfo) -> Result<(), Fault> {
 
 fn info(r: &mut Reader<'_>) -> Result<BoxInfo, Fault> {
     Ok(BoxInfo {
+        membership: None,
         id: box_id(r)?,
         class: class(r)?,
         state: match r.u8()? {

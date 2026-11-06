@@ -3,11 +3,13 @@
 //! reaps it with `waitpid`. The node is the child's parent (posix_spawn makes a direct child), so its pid
 //! can't be confused with another process's until this reaps it.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use hex_api::{Exit, Proc, Refusal, Signal};
+use hex_api::{BoxId, Exit, Proc, Refusal, Signal};
 use rustix::process::{Pid, WaitId, WaitIdOptions};
 
+use super::helper_client::Helper;
 use super::process::Members;
 use super::sys::{Event, Kqueue};
 
@@ -15,28 +17,33 @@ use super::sys::{Event, Kqueue};
 pub struct BoxProc {
     pid: i32,
     kq: Kqueue,
-    /// The box this program runs in, so reaping a kill at the fatal cap counts it on the box at once
+    /// The process box this program runs in (none for a box-user box, whose helper counts its ends), so reaping a kill at the fatal cap counts it on the box at once
     /// (native plan step 1's `_ext` backstop) — before a caller that waited on this reads the box's usage.
-    members: Members,
+    members: Option<Members>,
     exit: Option<Exit>,
+    /// Whether its end is under way: the kernel refused its watch as already exiting (`ESRCH`), or a wait
+    /// took its exit event. Its reap then waits for the zombie the same exit path makes.
+    exiting: bool,
     events: Vec<Event>,
 }
 
 impl BoxProc {
-    /// Watches child `pid` for its end, in box `members`. It must be this process's child and not yet
+    /// Watches child `pid` for its end, in process box `members` (none for a box-user box). It must be this process's child and not yet
     /// reaped, so its pid is this program's until [`BoxProc`] reaps it.
-    pub fn watch(pid: i32, members: Members) -> Result<Self, Refusal> {
+    pub fn watch(pid: i32, members: Option<Members>) -> Result<Self, Refusal> {
         let kq = Kqueue::new().map_err(|e| Refusal::os("making a program's kqueue", e))?;
-        // Already gone (reaped by a box delete that beat this): its end is then read by `reap` below, or is
-        // no longer knowable.
-        let _ = kq
+        // Already exiting (or reaped by a box delete that beat this): no exit event will come, so its end is
+        // read by a reap that waits for it, or is no longer knowable.
+        let exiting = kq
             .watch(&[pid], 0)
-            .map_err(|e| Refusal::os("watching a program", e))?;
+            .map_err(|e| Refusal::os("watching a program", e))?
+            .contains(&pid);
         Ok(Self {
             pid,
             kq,
             members,
             exit: None,
+            exiting,
             events: Vec::with_capacity(1),
         })
     }
@@ -45,9 +52,12 @@ impl BoxProc {
         self.pid
     }
 
-    /// Reaps the program if it has ended, caching its exit; `Ok(None)` while it still runs. An end its node
-    /// can't collect (reaped elsewhere, e.g. by a box delete) is [`Exit::Unknown`].
-    fn reap(&mut self) -> Result<Option<Exit>, Refusal> {
+    /// Reaps the program if it has ended, caching its exit; `Ok(None)` while it still runs. With `exiting`
+    /// (its exit event was delivered) it waits for the reap: XNU posts `NOTE_EXIT` before it makes the child
+    /// a zombie (`bsd/kern/kern_exit.c:2594-2595`, `p_stat = SZOMB` at :2664, the same exit path), and the
+    /// event fires once, so a reap that found nothing on it would wait out the caller's whole budget. An
+    /// end its node can't collect (reaped elsewhere, e.g. by a box delete) is [`Exit::Unknown`].
+    fn reap(&mut self, exiting: bool) -> Result<Option<Exit>, Refusal> {
         if self.exit.is_some() {
             return Ok(self.exit);
         }
@@ -57,10 +67,12 @@ impl BoxProc {
                 why: format!("{} isn't a process id", self.pid),
             });
         };
-        match rustix::process::waitid(
-            WaitId::Pid(pid),
-            WaitIdOptions::EXITED | WaitIdOptions::NOHANG,
-        ) {
+        let options = if exiting {
+            WaitIdOptions::EXITED
+        } else {
+            WaitIdOptions::EXITED | WaitIdOptions::NOHANG
+        };
+        match rustix::process::waitid(WaitId::Pid(pid), options) {
             Ok(Some(status)) => {
                 let exit = exit_of(&status);
                 // A SIGKILL of a box member is the kernel's fatal cap (or memory pressure on it): tell the
@@ -68,7 +80,9 @@ impl BoxProc {
                 // usage. The box ignores it unless the member was armed and it wasn't the box's own kill.
                 let sigkill = matches!(exit, Exit::Signal(s) if s == Signal::KILL.number());
                 self.exit = Some(exit);
-                self.members.ended(self.pid, sigkill)?;
+                if let Some(members) = &self.members {
+                    members.ended(self.pid, sigkill)?;
+                }
                 Ok(self.exit)
             }
             Ok(None) => Ok(None),
@@ -88,13 +102,13 @@ impl Proc for BoxProc {
     }
 
     fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
-        self.reap()
+        self.reap(self.exiting)
     }
 
     fn wait_for(&mut self, timeout: Duration) -> Result<Option<Exit>, Refusal> {
         let deadline = Instant::now().checked_add(timeout);
         loop {
-            if let Some(exit) = self.reap()? {
+            if let Some(exit) = self.reap(self.exiting)? {
                 return Ok(Some(exit));
             }
             let left = match deadline {
@@ -107,6 +121,119 @@ impl Proc for BoxProc {
             self.kq
                 .wait(None, Some(left), &mut self.events)
                 .map_err(|e| Refusal::os("waiting on a program", e))?;
+            self.exiting = self.exiting || ended_in(&self.events, self.pid);
+        }
+    }
+}
+
+/// Whether `events` carry `pid`'s end: its exit, or a fork coalesced with it.
+fn ended_in(events: &[Event], pid: i32) -> bool {
+    events.iter().any(|e| match e {
+        Event::Exit { pid: p, .. }
+        | Event::Fork {
+            pid: p,
+            exited: true,
+            ..
+        } => *p == pid,
+        _ => false,
+    })
+}
+
+/// A program the box helper started in a box-user box (native plan step 2). The helper is its parent, so
+/// only the helper can reap it: `waitid` answers `ECHILD` to any other caller
+/// (`bsd/kern/kern_exit.c:3194-3361`), which a [`BoxProc`] would read as an end at once. Any process may
+/// watch another's `NOTE_EXIT` (`filt_procattach` checks only `NOTE_EXITSTATUS`,
+/// `bsd/kern/kern_event.c:1116-1133`), so the node waits on the fact on a kqueue of its own, then asks the
+/// helper for the end it reaped. A watch attached once the program is past its `NOTE_EXIT` is refused
+/// (`ESRCH`): the exit path hides it from `proc_find` (`P_REF_DEAD`, `kern_exit.c:2127-2129`, in
+/// `proc_prepareexit`) before `proc_exit` posts the event (:2561), so no end is missed between the two.
+pub struct UserProc {
+    pid: i32,
+    box_id: BoxId,
+    helper: Arc<Helper>,
+    kq: Kqueue,
+    exit: Option<Exit>,
+    /// Whether its end is under way: its exit event was taken, or its watch was refused as exiting.
+    exiting: bool,
+    events: Vec<Event>,
+}
+
+impl UserProc {
+    /// Watches `pid`, which the helper just started in `box_id`, for its end.
+    pub fn watch(pid: i32, box_id: BoxId, helper: Arc<Helper>) -> Result<Self, Refusal> {
+        let kq = Kqueue::new().map_err(|e| Refusal::os("making a program's kqueue", e))?;
+        // NOTE_EXIT alone: the node isn't its parent, and XNU refuses another's NOTE_EXITSTATUS.
+        let exiting = kq
+            .watch_end(pid)
+            .map_err(|e| Refusal::os("watching a program", e))?;
+        Ok(Self {
+            pid,
+            box_id,
+            helper,
+            kq,
+            exit: None,
+            exiting,
+            events: Vec::with_capacity(1),
+        })
+    }
+
+    /// Its end from the helper once it is under way; `None` before.
+    fn ask(&mut self) -> Result<Option<Exit>, Refusal> {
+        if self.exit.is_some() || !self.exiting {
+            return Ok(self.exit);
+        }
+        let exit = match self.helper.wait(&self.box_id, self.pid) {
+            Ok(Some(exit)) => exit,
+            Ok(None) => {
+                return Err(Refusal::Broken(format!(
+                    "the helper holds program {} as running after its exit event",
+                    self.pid
+                )));
+            }
+            // Its box and the ends it kept were dropped (a delete long past): no one holds its end now.
+            Err(Refusal::NoSuchBox(_)) => Exit::Unknown,
+            Err(e) => return Err(e),
+        };
+        self.exit = Some(exit);
+        Ok(self.exit)
+    }
+
+    /// Takes the events waiting on its kqueue for at most `timeout`, noting its end among them.
+    fn take(&mut self, timeout: Duration) -> Result<(), Refusal> {
+        self.kq
+            .wait(None, Some(timeout), &mut self.events)
+            .map_err(|e| Refusal::os("waiting on a program", e))?;
+        self.exiting = self.exiting || ended_in(&self.events, self.pid);
+        Ok(())
+    }
+}
+
+impl Proc for UserProc {
+    fn pid(&self) -> u32 {
+        u32::try_from(self.pid).unwrap_or(0)
+    }
+
+    fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
+        if !self.exiting {
+            self.take(Duration::ZERO)?;
+        }
+        self.ask()
+    }
+
+    fn wait_for(&mut self, timeout: Duration) -> Result<Option<Exit>, Refusal> {
+        let deadline = Instant::now().checked_add(timeout);
+        loop {
+            if let Some(exit) = self.ask()? {
+                return Ok(Some(exit));
+            }
+            let left = match deadline {
+                Some(d) => d.saturating_duration_since(Instant::now()),
+                None => timeout,
+            };
+            if left.is_zero() {
+                return Ok(None);
+            }
+            self.take(left)?;
         }
     }
 }

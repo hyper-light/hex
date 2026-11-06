@@ -86,6 +86,37 @@ fn fixture() -> BinFixture {
 
 /// AC-T7.1.1: the Windows `process` class holds the runtime contract (HEX-RT-1..9; 10..13 are the oci
 /// class's, which this one has nothing to check).
+/// HEX-INST-2 (native plan step 6): an `oci` box on Windows is refused by name, and the refusal comes
+/// from the features' state the node read without elevation (no read error): it names each of the
+/// installer's features that's off and says the installer turns it on, or, with both on, what the class
+/// still waits on. The installer's lab runs this before install and after, and prints which.
+#[test]
+fn an_oci_box_is_refused_naming_the_features_that_are_off() {
+    let rt = runtime();
+    let refused = rt
+        .create(BoxSpec {
+            id: BoxId::new("oci-on-windows").unwrap(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(std::path::PathBuf::from(r"C:\nowhere")),
+        })
+        .unwrap_err();
+    let hex_api::Refusal::Platform {
+        what,
+        platform,
+        why,
+    } = &refused
+    else {
+        panic!("not refused by name: {refused:?}");
+    };
+    assert_eq!((*what, *platform), ("the oci class", "windows"));
+    eprintln!("the oci class: {why}");
+    assert!(
+        why.contains("Hex's installer turns") || why.contains("neither is built yet"),
+        "{why}"
+    );
+    assert!(rt.list().unwrap().is_empty(), "the query's box is left");
+}
+
 #[test]
 fn windows_process_boxes_hold_the_contract() {
     let failures = conformance::run(&runtime(), &fixture());

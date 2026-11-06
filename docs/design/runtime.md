@@ -538,7 +538,21 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
     which is exactly what the step-2 ledger layer catches. CPU is bounded by priority alone: a
     QoS class, and background priority where the box's weight is low. A box that asks for confinement gets App
     Sandbox's, which every child inherits (§3). The class's own purpose is trusted code that must not starve
-    the machine, and that purpose doesn't need it.
+    the machine, and that purpose doesn't need it. Under the helper the ledger limits sum to the bound less a
+    reserve (`hex_core::boxuser`), the fork window's room; the daemon's own sweep is layer three there: each
+    turn of its exception loop (`Daemon::pump`) re-reads every box and ends one past its bound, whether a
+    crossing woke it or its timeout paced it, so a member unarmed in the fork window or a missed exception
+    is still caught (`docs/research/runtime/macos-box-user-and-ledger.md`). A node with no helper runs the
+    class as step 1's, and says so in its inspect (`BoxInfo.membership`).
+
+    **A program's end** is the helper's to collect, since it is the program's parent and `waitid` answers no
+    one else (`docs/research/runtime/native-platforms.md` §3, "A box user's program ends where only the
+    helper can see how"). The helper watches each program it starts from its start and reaps it, in its
+    sweep or when asked, holding each end until the node reads it once: at most `RLIMIT_NPROC` programs a
+    box (a start past that drops the box's oldest unread end, or is refused while all still run), and a
+    deleted box's ends for as many boxes as the pool has users. The node waits on the program's `NOTE_EXIT`
+    on a kqueue of its own and then asks for its end (`Wait`), so a wait is the fact, never a poll, and no
+    end is made up as `Unknown` because the node couldn't reap a program it doesn't parent.
 - **`oci`:**
   - Linux: as today.
   - Windows: Windows images run natively, process-isolated through HCS (the OCI spec's Windows section).
@@ -555,6 +569,98 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
   further step. A node whose machine lacks what its installer sets up refuses the class by name, saying what is
   missing.
 - **What would falsify it:** §6. **Measured before it is built on:** §7.
+
+## Decision (native plan step 6, 2026-11-04): the installer, per OS — admin rights once
+
+The plan's step: "Hex's installer asks for admin rights once", turning on what each OS's classes need, a node
+lacking any of it "refuses that class by name, saying what's missing", and "Uninstall undoes it". The evidence is
+`docs/research/runtime/installer-per-os.md` (§n below are its sections).
+
+- **One script per OS, run once by a person with admin rights:** `scripts/install/linux.sh` (bash, as root),
+  `scripts/install/windows.ps1` (PowerShell, elevating itself once through UAC) and `scripts/install/macos.sh`
+  (bash, as root through `sudo`). Each has the same three verbs: `install`, `uninstall` and `check`, and
+  `--dry-run` on the first two.
+- **The plan is the record:** every thing install makes is one `<kind> <target>` line of a plan computed before
+  anything is made (a file, a link, a folder it made, a feature it turned on, a user, a service). Install
+  writes the plan to its manifest first, so an install cut short is undone too; `--dry-run` prints the plan
+  and makes nothing; uninstall undoes the manifest's lines, Hex's own and nothing else (a folder only once
+  empty, a directory only by Hex's names, a feature only if install turned it on), then lists every line
+  still present, which is none. `check <plan>` is that listing on its own: on a machine fresh of Hex, and
+  after uninstall, it lists nothing (CLAUDE.md §3: nothing is left silently).
+- **Linux** (§1): the classes need a cgroup v2 subtree the node owns with `cpu`, `io`, `memory` and `pids`
+  (`hex_core::cgroup::CONTROLLERS`). systemd's own `user@.service` delegates only `pids memory cpu`, never `io`,
+  in every release from v244 to v259 (§1.3; fedora's systemd 259 ships the same line), so install adds a
+  drop-in for every user's manager, `/etc/systemd/system/user@.service.d/50-hex-delegate.conf`
+  (`Delegate=cpu io memory pids`, which adds to the unit's own list rather than replacing it, §1.2), and a
+  `hex-node` user service (`Delegate=yes`, `DelegateSubgroup=agent`: the node runs in the
+  leaf `agent` and its boxes in `hex` beside it, so cgroup v2's no-internal-processes rule holds, §1.1-1.2;
+  systemd ≥254, refused by name below it), enabled for every user (`systemctl --global enable`). A running user manager reads which
+  controllers it may hand on only when it starts (§1.4), so `daemon-reload` alone leaves it without `io`:
+  measured, the lab's installed node was refused `io` until install re-executed each running user manager
+  (`systemctl reload user@UID.service`, which keeps its processes), as install now does. The node's descriptor limit is
+  the unit's `LimitNOFILE=1048576`, soft and hard: its own descriptors at its bounds (330,112) and every kept
+  namespace's held `/proc/net` files (4 × 66,048) need 594,304; 1,048,576 is the kernel's default
+  `fs.nr_open` and dockerd's old value (`docs/research/runtime/nofile-limit.md`). A user unit can't exceed its
+  manager's hard limit, so the drop-in also gives `user@.service` `LimitNOFILE=1024:1048576` (everything else
+  a user runs keeps systemd's soft 1024). A box whose spec names no `RLIMIT_NOFILE` inherits the node's
+  limit, as crun's containers inherit theirs; Docker 29 gives 1024:524288 (open, the lead's to bring Ada).
+  For each `--user` it turns on lingering (their manager, and so their node, runs with no session, as a CI runner's must, §1.5) and
+  starts the service, its socket at `$XDG_RUNTIME_DIR/hex/node.sock`. Rootless `oci` boxes need nothing more: each maps
+  only the node's own uid (`hex_core::bundle`), so no subordinate id ranges (§1.6). Ubuntu
+  24.04's `apparmor_restrict_unprivileged_userns` (§1.6) would need an AppArmor profile for `hex`; no Ubuntu
+  machine is in this step's bar, so that is a gap the installer doesn't fill yet (STATUS.md).
+- **Windows** (§2): the `process` class's job objects need no admin. Install turns on the `Containers`
+  (Windows images through HCS, plan step 4) and `HypervisorPlatform` (the Shards guest for Linux images,
+  plan step 5) optional features with `Enable-WindowsOptionalFeature -Online -All -NoRestart`, records each
+  feature it turned on (those `-All` brought too), and asks before the one reboot Windows asks for
+  (`RestartNeeded`). It puts `hex.exe` in `%ProgramFiles%\Hex`.
+- **macOS** (§3): install makes the box users' pool as Nix's installer makes its build users (§3.1: `dscl`, a
+  group and hidden users with shell `/sbin/nologin` and home `/var/empty`, from a uid range it checks is free,
+  as Sequoia's move of Apple's own users into 300-304 pushed Nix's to 351) and installs step 2's
+  privileged helper as a launchd daemon (`/Library/LaunchDaemons`, `launchctl bootstrap system`), a plain
+  property list rather than `SMAppService`, which needs a signed app bundle and the user's approval in System
+  Settings (§3.4); an unprivileged node tells it is there by `launchctl print system/<label>` (exit 0, else
+  113) and by its socket answering (§3.5). Without the helper the `process` class still runs, as a process
+  group under step 1's watcher, and its inspect says so: Ada's call in the plan's step 2 (2026-11-01), "Both
+  run on a node with the helper; polling alone runs on one without". The refusal by name covers only what
+  can't run without the helper. Concretely (`scripts/install/macos.sh`): the pool is `_hexbox1`..`_hexbox30` in
+  group `hexbox`, and the users whose nodes may reach the helper are put in a group `hexnode`; their ids start at
+  320 (`hexnode`'s gid, then `hexbox`'s, then the pool's uids 322-351), inside sysadminctl's 200-400 role-user
+  range and between Apple's own (300-308 on macOS 26.2) and Nix's (350-382), measured in §3.1, and any taken id,
+  name or a live process at a pool uid is refused by name before anything is made (`--first-id` moves the
+  range). The helper runs from a root-owned copy of `hex` in `/Library/PrivilegedHelperTools` (Docker's place
+  for its helper, §3.2), never from `/usr/local/bin`, which Homebrew gives the user on Intel Macs, so no user can
+  replace what runs as root. Its socket is `/var/db/hex/box-helper.sock` (persistent, so launchd's start at boot
+  finds its folder), in a folder `root:hexnode 0750`: a new file takes its folder's group (open(2)'s BSD
+  rule) and the plist's `Umask` 7 makes it `0770`, so only root and `hexnode` connect and another local user
+  can't start or end someone's boxes. Uninstall boots the daemon out first, then ends every process left at a
+  pool uid (a box's members outlive the helper that started them) before deleting the users, in rounds
+  bounded by the installer's wait.
+- **A node lacking it refuses the class by name** (`hex_core::setup`): on Linux, a box root whose parent lacks a
+  controller, isn't the node's user's, or holds processes refuses the box root of both classes, naming what's
+  missing and the installer (HEX-INST-1); on Windows, the `oci` class names each feature that's off and says
+  the installer turns it on (HEX-INST-2), the state read without elevation from `Win32_OptionalFeature`
+  (§2.4: Microsoft lists no restriction on reading it, to be measured as a standard user on jupiter) by
+  PowerShell run as the member of a job-object box of its own, so its wait is the class's bounded one and the
+  box's end takes whatever it left; `hex_core::setup::features_off` parses its listing and refuses anything
+  else by name.
+- **Done when** (the plan's criterion): on a machine fresh of Hex the one admin step leaves every class working
+  with no further step, and uninstall leaves nothing of Hex's behind, checked by listing what install made.
+  The bar is not narrowed per OS: on Windows the `oci` class is native plan steps 4 and 5, so Windows' part is
+  met only once they land and its install lab is run again then (the lead, 2026-11-04: sequencing, not a
+  change to the bar).
+  On Linux, `bench/install/linux_lab.sh` boots a fresh Fedora as a container with systemd its init, shows the
+  by-name refusal before install, installs, passes the conformance suite over the installed node's socket for
+  both classes as an ordinary user (HEX-INST-3), uninstalls and lists nothing left (HEX-INST-4).
+  On macOS, `bench/install/macos_lab.sh` (one `sudo` run by an administrator, building as the invoking user)
+  shows nothing of the plan before install and the box-user contract unmet without the helper, installs, passes
+  the box-user HEX-RT contract over the installed helper's socket as that ordinary user, shows a user outside
+  `hexnode` refused the socket (HEX-INST-6), uninstalls, and lists nothing left by the plan and by `dscl` and
+  `launchctl` on their own (HEX-INST-7).
+- **What would falsify it:** a drop-in's `Delegate=` list that replaced rather than merged with the unit's (the
+  lab's installed node got all four); a running user manager that a re-exec didn't give the new delegation,
+  so a logged-in user needed a further step (the lab's user's manager runs before install to show it); a
+  Windows feature whose state an unprivileged node can't read; a box user macOS lets a member drop.
 
 ## Open (STATUS.md)
 
@@ -576,7 +682,11 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
   mechanism"), and is the whole bound on a node with no helper. Step 1's single-member overshoot (0 MiB) and
   held watcher CPU (~0.1%) are met rootless by the `_ext` cap; the multi-member-tree bound at overcommit is
   step 2's.
-  Its box-user (membership a daemonizing member can't escape) follows.
+  **Step 2 (the box user, the helper, the kernel bound) is under way** (`cp/t7-native-s2`): the
+  apportionment core, the node↔helper protocol (`hex_core::helper`, hostile-input tested), its node client,
+  the helper daemon and the box-user backend are built; the root measurements on the Mac Studio (the
+  elastic bound's overshoot and CPU, the `EXC_RESOURCE` path, the box user's listing, `RLIMIT_NPROC` and
+  delete) need Ada.
 - The **Windows `process` class is built** (`hex_runtime::windows`, native plan step 3): a box is a job
   object, its limits the kernel's and hard (`hex_core::job`, `docs/research/runtime/windows-job-objects.md`,
   `bench/native/windows/RESULT.md`). A member is created suspended inside the job
@@ -596,6 +706,14 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
   kernels that keep it (Linux's `pids.events`) — Ada's decision (2026-11-03). Windows'
   `oci` (HCS) and Linux images through a Shards guest follow. Off a platform whose class isn't built yet,
   `process`/`oci` give a typed refusal naming it (CLAUDE.md §12).
+- **The installer** (native plan step 6, the decision above): **Linux's is built** and its fresh-machine lab
+  passes on fedora (`bench/install/linux_lab.sh`: refused by name before, the conformance suite on both classes
+  over the installed node, nothing left after uninstall). **Windows' is built and lint-clean, and open**: it
+  waits on jupiter, an administrator's UAC prompt and a reboot each way (the feature query's standard-user
+  access and time are measured there), and is met only once the `oci` class's steps 4 and 5 land and the
+  install lab runs again. **macOS's is built** (`scripts/install/macos.sh`, step 2's box users and helper)
+  and its lab (`bench/install/macos_lab.sh`) waits on an administrator's one `sudo` run on the Mac Studio. Not
+  covered yet: Ubuntu 24.04's restriction on unprivileged user namespaces (an AppArmor profile for `hex`).
 - The kiln integration's remaining half: **consumer #1 (host CI legs + harness in `process` boxes)
   is built** — kiln's `os::contain` grows a Hex-`BoxRoot` backing behind `KILN_HEX_BOX`, with the
   legs' parent box capped (`memory.high`) and the runner and agents protected (`memory.low`) so a

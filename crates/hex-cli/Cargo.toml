@@ -24,6 +24,11 @@ hex-node.workspace = true
 hex-runtime.workspace = true
 rustix.workspace = true
 
+# macOS: the box helper daemon subcommand (`hex __box-helper`) drives hex-runtime's macOS daemon.
+[target.'cfg(target_os = "macos")'.dependencies]
+hex-api.workspace = true
+hex-runtime.workspace = true
+
 [dev-dependencies]
 hex-api.workspace = true
 tempfile.workspace = true

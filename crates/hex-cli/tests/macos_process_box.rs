@@ -85,6 +85,42 @@ fn macos_process_boxes_hold_the_contract() {
     assert!(failures.is_empty(), "conformance failures: {failures:#?}");
 }
 
+/// AC-T7.1.1 for the box-user class: the same HEX-RT contract, against a `MacRuntime` in box-user mode
+/// talking to a live helper daemon. Ignored by default, since box-user mode needs a root daemon;
+/// `bench/native/macos/boxlab.sh` starts `hex __box-helper` as root, sets `HEX_BOX_HELPER_SOCK`, and runs
+/// this with `--ignored`. The first box's inspect must say `BoxUser`, so a stale helperless fallback to
+/// the process-group class can't pass this as box-user.
+#[test]
+#[ignore = "needs a root helper daemon; run by bench/native/macos/boxlab.sh via HEX_BOX_HELPER_SOCK"]
+fn box_user_boxes_hold_the_contract() {
+    let sock = std::env::var("HEX_BOX_HELPER_SOCK")
+        .expect("HEX_BOX_HELPER_SOCK, set by boxlab.sh to the running helper's socket");
+    let rt = MacRuntime::detect(
+        NonZeroU64::new(256 * GIB).unwrap(),
+        NonZeroU64::new(1_000_000).unwrap(),
+        std::path::Path::new(&sock),
+    )
+    .expect("a box-user macOS runtime");
+    // Confirm the helper answered and the runtime is in box-user mode, not a fallback to process-group.
+    let probe = BoxId::new("boxuser-probe").unwrap();
+    let _ = rt.delete(&probe);
+    let info = rt
+        .create(fixture().spec(probe.clone(), Bounds::default()))
+        .expect("create a box-user box");
+    assert_eq!(
+        info.membership,
+        Some(hex_api::Membership::BoxUser),
+        "the helper must be live, so the runtime is box-user"
+    );
+    rt.delete(&probe).expect("delete the probe box");
+
+    let failures = conformance::run(&rt, &fixture());
+    assert!(
+        failures.is_empty(),
+        "box-user conformance failures: {failures:#?}"
+    );
+}
+
 /// The step's scenario: a box allocating past its 256 MiB bound is ended, its end reported as memory with
 /// the footprint it reached, and a program in it exits by signal.
 #[test]
@@ -250,4 +286,43 @@ fn a_box_takes_a_named_signal() {
         .expect("the program ends");
     rt.delete(&id).expect("delete");
     assert_eq!(exit, Exit::Signal(15), "TERM is 15 on both kernels");
+}
+
+/// HEX-RT-3, HEX-DIFF-5 (AC-T7.1.1): do 60 programs killed at their box's bound, one after another,
+/// expect each wait to return when the program ends, never at the wait's budget. XNU posts a child's
+/// `NOTE_EXIT` before it is a zombie (`bsd/kern/kern_exit.c:2594-2595`, then `p_stat = SZOMB` at :2664),
+/// so a reap made on the event can find nothing yet; the native bench saw 3 of 60 such ends reported 60 s
+/// late (bench/native/macos/RESULT.md).
+#[test]
+fn a_programs_end_is_seen_when_it_ends_not_at_the_waits_budget() {
+    let rt = runtime();
+    let fx = fixture();
+    let id = BoxId::new("mac-end-seen").unwrap();
+    let _ = rt.delete(&id);
+    rt.create(BoxSpec {
+        id: id.clone(),
+        bounds: Bounds {
+            memory_max: Some(256 * MIB),
+            ..Bounds::default()
+        },
+        class: ClassSpec::Process,
+    })
+    .expect("create");
+    let budget = Duration::from_secs(20);
+    let mut late = Vec::new();
+    for i in 0..60 {
+        let mut p = rt
+            .exec(&id, fx.act(&Act::Hog(GIB)), Stdio::null())
+            .expect("exec hog");
+        let t = Instant::now();
+        let exit = p.wait_for(budget).expect("wait");
+        if !matches!(exit, Some(Exit::Signal(_))) || t.elapsed() >= budget / 2 {
+            late.push((i, exit, t.elapsed()));
+        }
+    }
+    rt.delete(&id).expect("delete");
+    assert!(
+        late.is_empty(),
+        "ends not seen as the bound's kill when they happened: {late:?}"
+    );
 }
