@@ -59,20 +59,21 @@ fn a_slow_node_is_suspected_in_2s_and_drained_in_4s() {
     );
 }
 
-/// AC-T7.10.3 in the model (F3): a stalled disk is suspected within one timeout and one probe period,
-/// and drained within three timeouts and one period.
+/// AC-T7.10.3 in the model (F3), Hex's rule for learned waits: a stalled disk is suspected within
+/// the slowest answer its probe holds (the record's, or its own if slower) and one probe period, and
+/// drained within twice that and one period.
 #[test]
 fn a_stalled_disk_is_suspected_then_drained_within_its_bound() {
     for seed in 0..SEEDS {
-        let (m, timeout, period) = faults::disk_stall(seed).unwrap();
-        let (suspect, drain) = faults::disk_stall_bounds(timeout, period);
+        let (m, slowest, period) = faults::disk_stall(seed).unwrap();
+        let (suspect, drain) = faults::disk_stall_bounds(slowest, period);
         let d = m.detected_after_ns.unwrap();
         let i = m.isolated_after_ns.unwrap();
         assert!(d <= suspect, "seed {seed}: {d} > {suspect}");
         assert!(i <= drain, "seed {seed}: {i} > {drain}");
         assert!(
-            d > timeout - period,
-            "seed {seed}: suspected before its timeout"
+            d + period > slowest,
+            "seed {seed}: suspected before its slowest answer"
         );
     }
 }

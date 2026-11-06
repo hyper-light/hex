@@ -138,13 +138,19 @@ pub fn gray_with(seed: u64, mutant: Mutant) -> Result<(Measured, u64), FaultErro
     Ok((m, factor))
 }
 
+/// The slowest probe answer of the recorded healthy disk the model's disk stands for (macOS/APFS,
+/// `bench/health/records/2026-11-06-probe-floor-apfs.md`): the probe's seed, by Hex's rule for learned
+/// waits.
+pub const RECORDED_SLOWEST_NS: u64 = 147_330_000;
+
 /// Disk stall (F3, `AC-T7.10.3`): a node probes its disk every `period` with 1-5 ms flushes; from a
-/// seeded onset the outstanding write never completes. Returns the probe's timeout at the onset.
+/// seeded onset the outstanding write never completes. Returns the slowest answer the probe holds at
+/// the onset (the record's, or the node's if slower) and the period.
 pub fn disk_stall(seed: u64) -> Result<(Measured, u64, u64), FaultError> {
     let mut rng = Rng::new(seed);
     let period = rng.range(100 * MS, 500 * MS);
     let onset_probe = rng.range(20, 200);
-    let mut p = DiskProbe::new(MS);
+    let mut p = DiskProbe::new(RECORDED_SLOWEST_NS)?;
     let mut t: u64 = 0;
     for _ in 0..onset_probe {
         p.start(t)?;
@@ -152,10 +158,7 @@ pub fn disk_stall(seed: u64) -> Result<(Measured, u64, u64), FaultError> {
         p.finish(add(t, lat)?)?;
         t = add(t, period)?;
     }
-    // Armed by the first, calibration, probe.
-    let timeout = p
-        .timeout_ns()?
-        .ok_or(FaultError::Health(HealthError::NoProbe))?;
+    let slowest = p.slowest_ns();
     // The stall: the write the node starts at its next probe after `onset` never finishes.
     let onset = add(t, rng.range(0, period.saturating_sub(1)))?;
     let start = add(t, period)?;
@@ -181,7 +184,7 @@ pub fn disk_stall(seed: u64) -> Result<(Measured, u64, u64), FaultError> {
             return Err(FaultError::StepBudget(steps));
         }
     }
-    Ok((m, timeout, period))
+    Ok((m, slowest, period))
 }
 
 /// Antagonist (F4): a node of 5-10 latency-sensitive tasks of one job and one batch co-tenant,
@@ -723,10 +726,10 @@ pub fn correlated(seed: u64, mutant: Mutant) -> Result<Correlated, FaultError> {
 
 /// The disk stall's bounds (F3): suspect within one timeout and one period of the onset, drain within
 /// three timeouts and one period.
-pub fn disk_stall_bounds(timeout: u64, period: u64) -> (u64, u64) {
-    let suspect = timeout.saturating_add(period).saturating_add(MS);
-    let drain = timeout
-        .saturating_mul(probe::DRAIN_TIMEOUTS)
+pub fn disk_stall_bounds(slowest: u64, period: u64) -> (u64, u64) {
+    let suspect = slowest.saturating_add(period).saturating_add(MS);
+    let drain = slowest
+        .saturating_mul(probe::BOUND_FACTOR)
         .saturating_add(period)
         .saturating_add(MS);
     (suspect, drain)

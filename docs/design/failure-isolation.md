@@ -160,20 +160,26 @@ Perseus compare peers (FI[7], `PF[14]`); a graded verdict each consumer threshol
 **What would falsify it.** A ≥ 2.5x-slow node with evidence not suspected within 2 s or drained within 4
 s; or a healthy node suspected when the slowdown is cell-wide.
 
-### F3. Disk stall: the node's own write-and-flush probe, timed as RFC 6298 times a segment
+### F3. Disk stall: the node's own write-and-flush probe, its wait learned from a record
 
 **The choice.** The node agent writes and flushes a one-byte record on its state disk every probe
-period. Its first write is the calibration: until it completes nothing is judged and the node takes no
-work, so a disk dead from the start keeps its node out; its latency seeds the timer, so no prior is
-assumed. The timeout is then RFC 6298's `SRTT + max(G, 4·RTTVAR)` over the probe's own completed
-latencies, at least 1 s and with no ceiling (FI[8]); a probe that outlived its timeout is no sample
-(Karn). The 1 s floor is TCP's and stays only until the tolerated false-drain rate is set: replayed on a
-recorded healthy disk, a floor learned from the disk suspects a stall 30 times sooner but drains a
-healthy one on a spike past any it had seen (`bench/health/records/2026-11-06-probe-floor-apfs.md`). The node is
-`Suspect` when the outstanding write outlives one timeout and `Drain` at the timer's second expiry, the
-first doubled (three timeouts), or after 3 completed probes in a row each slower than the timeout. A
-node that can't write its own disk stops being trusted as a crashed one does (hyper-raft's heartbeat
-after flush, `PF[26]`).
+period, and its wait is learned by Hex's rule for learned waits (the lead, 2026-11-06). Before any
+answer on this node, the slowest answer is the slowest in the recorded distribution for its host class,
+from a named record (macOS/APFS: 147.3 ms, `bench/health/records/2026-11-06-probe-floor-apfs.md`; a
+class with no record is refused until one is taken; the dm-delay drill records its own disk's healthy
+baseline under its load first and seeds from it). Then the slowest is the greater of the record's and the
+node's own slowest answer, and only rises. The node is `Suspect` (no new placements) once its outstanding
+write is slower than any answer seen, and `Drain` (retired, its work moved) past twice that, the bound.
+No calibration read and no unbounded first wait; no TCP numbers. A write that answers only after
+outliving the bound is no answer: the wait had given up, and taking it would let one stall raise the
+bound for the next (Karn's rule). A disk that answers ever more slowly raises its own bound: that
+fail-slow case is the peer grade's (F2), which judges a node against its peers. A node that can't write
+its own disk stops being trusted as a crashed one does (hyper-raft's heartbeat after flush, `PF[26]`).
+
+Replayed on the recorded healthy trace (12,715 probes, its slowest 34 ms) and seeded from the other
+run's record (147.3 ms): no false suspect, no false drain, and a stall suspected at 147 ms and drained at
+295 ms, where RFC 6298's 1 s floor took 1 s and 3 s (`bench/health/replay_probe.py`, the
+`recorded-2x` rule).
 
 **Sources.** FI[8]; `PF[26]`; FI[6] for why waiting for a human doesn't do (fail-slow found in hours to
 months).
@@ -308,9 +314,7 @@ holds this table to the code.
 
 | Constant | Value | Source |
 |---|---|---|
-| `probe::MIN_TIMEOUT_NS` | 1000000000 | RFC 6298 §2.4 (FI[8]) |
-| `probe::DRAIN_TIMEOUTS` | 3 | RFC 6298 §5.5, the timer doubled once (FI[8]) |
-| `probe::SLOW_STREAK` | 3 | CPI²'s 3 flags (FI[9]) |
+| `probe::BOUND_FACTOR` | 2 | Hex's rule for learned waits (the lead, 2026-11-06) |
 | `grade::WINDOW_NS` | 1000000000 | chosen: 2 and 4 windows fit Panorama's 7 s (FI[4]) |
 | `grade::MIN_OBSERVATIONS` | 5 | chosen: the fewest a median of which one outlier can't move |
 | `grade::MIN_PEERS` | 3 | chosen: two nodes can't say which of them is slow |

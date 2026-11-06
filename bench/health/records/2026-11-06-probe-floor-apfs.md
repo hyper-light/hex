@@ -29,3 +29,17 @@ learned-max  false suspects      8  false drains    1  a stall at the end: suspe
   before the floor has seen the tail. A warm-up long enough to see a 1-in-N tail takes about N probes:
   N follows from the false-drain rate the owner tolerates, which is a requirement to state, not a
   constant to pick.
+
+## Hex's rule for learned waits, replayed (2026-11-06, after the lead's rule)
+
+Seeded from the first run's recorded slowest (147.3 ms), then the slowest only rising with the node's
+answers (Karn: none past the bound), Suspect past the slowest and Drain past twice it, on the second
+run's trace (`replay_probe.py <trace> 147330000`):
+
+```
+recorded-2x (seed 147.3 ms) false suspects      0  false drains    0  a stall at the end: suspected at    147.3 ms, drained at    294.7 ms
+rfc-clamped       false suspects      0  false drains    0  a stall at the end: suspected at   1000.0 ms, drained at   3000.0 ms
+```
+
+The record supplies what the learned floor lacked, a prior and so a warm-up: no false drain, and a
+stall drained 10x sooner than under RFC 6298's floor.

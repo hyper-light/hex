@@ -24,16 +24,14 @@ is a typed refusal.
 |---|---|---|---|---|
 | `swim::gossip_room` | 8 entries, picked | what QUIC's minimum datagram (1,200 B) leaves beside the widest ack | `crates/hex-sim/src/swim.rs` | (c) RFC 9000 §14.1, as hyper-swim's owner sizes it |
 | `disk_probe::RECORD_BYTES` | 4,096, a page | 1 byte: the least write that dirties a block | `crates/hex-node/src/disk_probe.rs:22` | the minimum; nothing chosen |
-| `probe::INITIAL_TIMEOUT_NS` | 1 s, RFC 6298 §2.1's prior | gone: the first probe is a calibration write whose latency seeds the timer; nothing is judged and the node takes no work until it completes | `crates/hex-health/src/probe.rs`, `crates/hex-node/src/disk_probe.rs` | (a) |
+| `probe::INITIAL_TIMEOUT_NS` | 1 s, RFC 6298 §2.1's prior | gone: before any answer the wait is seeded from the host class's recorded slowest answer (Hex's rule for learned waits) | `crates/hex-node/src/disk_probe.rs` `recorded_slowest` | (b) macOS: 147.3 ms, `bench/health/records/2026-11-06-probe-floor-apfs.md`; Linux and Windows: recorded first, refused until then; the drill seeds from its own disk's recorded baseline |
 | `probe::MAX_TIMEOUT_NS` | 60 s, RFC 6298 §2.5's "MAY" | gone: no ceiling; a disk steadily slower than 60 s is judged by its own latency | `crates/hex-health/src/probe.rs` | (a) |
+| `probe::MIN_TIMEOUT_NS`, `DRAIN_TIMEOUTS`, `SLOW_STREAK`, RFC 6298's timer | 1 s, 3, 3 | gone: Suspect past the slowest answer (record's or node's, only rising), Drain past `BOUND_FACTOR` (2) times it | `crates/hex-health/src/probe.rs` | (a)/(b), by Hex's rule for learned waits; the 2 is the rule's. Replayed: 0 false suspects, 0 false drains, a stall drained at 295 ms (was 3 s). A disk that keeps answering ever more slowly raises its own bound: fail-slow is the peer grade's (F2). |
 
 ## hex-health, the detectors and penalties
 
 | Name | Value | File:line | Kind | Way out |
 |---|---|---|---|---|
-| `probe::MIN_TIMEOUT_NS` | 1 s | `probe.rs:23` | (d) RFC 6298 §2.4, made for TCP's delayed ACKs | (a): floor at the longest probe the disk has completed without a drain. Replayed on a recorded healthy trace (`bench/health/records/2026-11-06-probe-floor-apfs.md`): the floor removed drains a healthy disk 5 times in 10 minutes; learned, a stall is suspected at 30 ms and drained at 89 ms, 30x faster, with one warm-up false drain. The warm-up's length follows from the tolerated false-drain rate: **waits on Ada's rate.** |
-| `probe::DRAIN_TIMEOUTS` | 3 | `probe.rs:28` | (d) RFC 6298 §5.5 doubling | (a): the count `k` with `p^k` under the owner's tolerated false-drain rate, `p` the learned rate of a healthy disk's probes outliving one timeout. |
-| `probe::SLOW_STREAK` | 3 | `probe.rs:31` | (d) CPI²'s 3 flags | Same as `DRAIN_TIMEOUTS`. |
 | `grade::WINDOW_NS` | 1 s | `crates/hex-health/src/grade.rs:26` | (d) picked to fit Panorama's 7 s | (a): the time a node's requesters take to report `MIN_OBSERVATIONS`, at each node's learned report rate. |
 | `grade::MIN_OBSERVATIONS` | 5 | `grade.rs:28` | (d) picked | (b)/(a): the sample size at which a window's median separates a node at the slow bar from its peers at the owner's error rate, from the learned spread of healthy medians. |
 | `grade::MIN_PEERS` | 3 | `grade.rs:31` | (c) logic: the fewest nodes in which a majority can single one out | — |

@@ -21,9 +21,18 @@ use hex_health::{HealthError, Level};
 /// The record written each period: one byte, the least write that dirties a block, so the flush
 /// must write that block to the device (fdatasync(2)); nothing about the disk is assumed.
 pub const RECORD_BYTES: usize = 1;
-/// The clock's granularity G (RFC 6298 §2) the judge sees: `Instant` in nanoseconds, read at a
-/// millisecond's resolution by a node agent's timers.
-pub const GRANULARITY_NS: u64 = 1_000_000;
+
+/// The slowest probe answer recorded for this host class: the seed of the probe's learned wait (Hex's
+/// rule for learned waits). macOS: `bench/health/records/2026-11-06-probe-floor-apfs.md`, APFS on an
+/// M4 Max, the slowest of 27,655 probes over two runs. A host class with no record is refused, typed:
+/// its distribution is recorded first (`examples/fsync_latency`).
+pub fn recorded_slowest() -> Result<Duration, ProbeError> {
+    if cfg!(target_os = "macos") {
+        Ok(Duration::from_micros(147_330))
+    } else {
+        Err(ProbeError::NoRecord(std::env::consts::OS))
+    }
+}
 
 /// Every way the probe refuses, typed (CLAUDE.md §3).
 #[derive(Debug, thiserror::Error)]
@@ -45,6 +54,8 @@ pub enum ProbeError {
     Ended(String),
     #[error("the clock passed u64 nanoseconds")]
     Clock,
+    #[error("no recorded disk-probe distribution for {0}: record one first")]
+    NoRecord(&'static str),
 }
 
 /// What the prober and the judge share.
@@ -86,7 +97,13 @@ fn write_record(file: &mut File, record: &[u8]) -> std::io::Result<()> {
 
 impl DiskProber {
     /// Start probing the disk under `state_dir` every `period`, its record at `state_dir/.hex-probe`.
-    pub fn start(state_dir: &Path, period: Duration) -> Result<Self, ProbeError> {
+    pub fn start(
+        state_dir: &Path,
+        period: Duration,
+        recorded_slowest: Duration,
+    ) -> Result<Self, ProbeError> {
+        let seed = u64::try_from(recorded_slowest.as_nanos()).map_err(|_| ProbeError::Clock)?;
+        let probe = DiskProbe::new(seed)?;
         let path = state_dir.join(".hex-probe");
         let mut file = OpenOptions::new()
             .create(true)
@@ -98,7 +115,7 @@ impl DiskProber {
                 source,
             })?;
         let shared = Arc::new(Shared {
-            probe: Mutex::new(DiskProbe::new(GRANULARITY_NS)),
+            probe: Mutex::new(probe),
             cordoned: AtomicBool::new(false),
             stop: Mutex::new(false),
             wake: Condvar::new(),
@@ -143,19 +160,15 @@ impl DiskProber {
     }
 
     /// Whether the node may take new work: false once a judgement saw `Drain`.
-    /// Whether the node may take new work: not before the calibration write has completed (a disk
-    /// dead from the start keeps its node out), and not once a judgement saw `Drain`.
+    /// Whether the node may take new work: false once a judgement saw `Drain`.
     pub fn schedulable(&self) -> bool {
-        let armed = lock(&self.shared.probe).is_ok_and(|p| p.armed());
-        armed && !self.shared.cordoned.load(Ordering::Acquire)
+        !self.shared.cordoned.load(Ordering::Acquire)
     }
 
-    /// The probe's current timeout, for a record of the drill; `None` until the calibration write
-    /// completes.
-    pub fn timeout(&self) -> Result<Option<Duration>, ProbeError> {
-        Ok(lock(&self.shared.probe)?
-            .timeout_ns()?
-            .map(Duration::from_nanos))
+    /// The probe's current bound, past which an outstanding write drains the node, for a record of
+    /// the drill.
+    pub fn bound(&self) -> Result<Duration, ProbeError> {
+        Ok(Duration::from_nanos(lock(&self.shared.probe)?.bound_ns()?))
     }
 
     /// Stop the prober after its current write.
@@ -210,6 +223,10 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
 
+    /// The macOS/APFS record's slowest answer, the seed every test runs on, whatever its host: the
+    /// mechanics under test don't depend on the disk.
+    const SEED_NS: u64 = 147_330_000;
+
     /// Wait `d` between judgements: on a channel nothing sends on, as `thread::sleep` is disallowed.
     fn pause(d: Duration) {
         let (_keep, rx) = mpsc::channel::<()>();
@@ -218,7 +235,7 @@ mod tests {
 
     fn shared() -> Arc<Shared> {
         Arc::new(Shared {
-            probe: Mutex::new(DiskProbe::new(GRANULARITY_NS)),
+            probe: Mutex::new(DiskProbe::new(SEED_NS).unwrap()),
             cordoned: AtomicBool::new(false),
             stop: Mutex::new(false),
             wake: Condvar::new(),
@@ -226,97 +243,79 @@ mod tests {
         })
     }
 
-    /// AC-T7.10.3: do a probe whose writes complete, then stall one (the write blocks until released);
-    /// expect `Healthy` while it answers, then `Suspect`, then `Drain` while the write is still
-    /// blocked, and the node cordoned. Waits on the levels themselves, each by its own deadline.
-    #[test]
-    fn a_stalled_write_is_judged_while_it_blocks_and_cordons_the_node() {
+    /// Run the prober over `write`, stalling its write number `stall_at` (0 the first) until released;
+    /// returns the judge, the release and the thread.
+    fn stalling(
+        stall_at: u32,
+    ) -> (
+        DiskProber,
+        mpsc::Sender<()>,
+        JoinHandle<Result<(), ProbeError>>,
+    ) {
         let s = shared();
         let epoch = Instant::now();
         let (release, held) = mpsc::channel::<()>();
-        let stall_after = 20u32;
         let ours = Arc::clone(&s);
         let thread = std::thread::spawn(move || {
             let mut n = 0u32;
             probe_loop(&ours, epoch, Duration::from_millis(5), || {
-                n += 1;
-                if n > stall_after {
+                if n == stall_at {
                     held.recv().ok();
                 }
+                n += 1;
                 Ok(())
             })
         });
         let prober = DiskProber {
-            shared: Arc::clone(&s),
+            shared: s,
             epoch,
             thread: None,
         };
-        let wait_for = |want: Level, within: Duration| {
-            let end = Instant::now() + within;
-            loop {
-                let level = prober.level().unwrap();
-                if level == want {
-                    return;
-                }
-                assert!(Instant::now() < end, "never reached {want:?}, at {level:?}");
-                pause(Duration::from_millis(5));
+        (prober, release, thread)
+    }
+
+    /// Wait until `prober` judges `want`, failing past `within`.
+    fn wait_for(prober: &DiskProber, want: Level, within: Duration) {
+        let end = Instant::now() + within;
+        loop {
+            let level = prober.level().unwrap();
+            if level == want {
+                return;
             }
-        };
-        // The calibration write arms it: wait on that fact.
-        while prober.timeout().unwrap().is_none() {
-            pause(Duration::from_millis(1));
+            assert!(Instant::now() < end, "never reached {want:?}, at {level:?}");
+            pause(Duration::from_millis(5));
         }
-        assert_eq!(prober.level().unwrap(), Level::Healthy);
+    }
+
+    /// AC-T7.10.3: do a probe whose writes answer, then stall one (it blocks until released); expect
+    /// `Suspect` and then `Drain` while it is still blocked, and the node cordoned, and cordoned still
+    /// once the disk answers again.
+    #[test]
+    fn a_stalled_write_is_judged_while_it_blocks_and_cordons_the_node() {
+        let (prober, release, thread) = stalling(20);
         assert!(prober.schedulable());
-        // One timeout (at least RFC 6298's 1 s) to Suspect, three to Drain, with room.
-        wait_for(Level::Suspect, Duration::from_secs(5));
+        // Suspect past the record's 147 ms, Drain past its 295 ms bound, with room.
+        wait_for(&prober, Level::Suspect, Duration::from_secs(5));
         assert!(prober.schedulable());
-        wait_for(Level::Drain, Duration::from_secs(10));
+        wait_for(&prober, Level::Drain, Duration::from_secs(10));
         assert!(!prober.schedulable());
         prober.stop();
         release.send(()).unwrap();
         thread.join().unwrap().unwrap();
-        // Cordoned stays cordoned once the disk answers again.
         assert!(!prober.schedulable());
     }
 
-    /// AC-T7.10.3, the calibration write: do hold the first write; expect the node unschedulable and
-    /// `Healthy` (detection off) while it blocks, however long, and schedulable once it completes.
+    /// AC-T7.10.3, Hex's rule for learned waits, before any sample: do stall the very first write;
+    /// expect it judged against the record's bound (no calibration, no unbounded first wait): drained
+    /// past twice the record's slowest, the node cordoned.
     #[test]
-    fn a_node_takes_no_work_until_its_calibration_write_completes() {
-        let s = shared();
-        let epoch = Instant::now();
-        let (release, held) = mpsc::channel::<()>();
-        let (done, written) = mpsc::channel::<()>();
-        let ours = Arc::clone(&s);
-        let thread = std::thread::spawn(move || {
-            let mut first = true;
-            probe_loop(&ours, epoch, Duration::from_millis(5), || {
-                if first {
-                    first = false;
-                    held.recv().ok();
-                    done.send(()).ok();
-                }
-                Ok(())
-            })
-        });
-        let prober = DiskProber {
-            shared: Arc::clone(&s),
-            epoch,
-            thread: None,
-        };
-        pause(Duration::from_millis(50));
+    fn the_first_write_is_bounded_by_the_record() {
+        let (prober, release, thread) = stalling(0);
+        assert_eq!(prober.bound().unwrap(), Duration::from_nanos(2 * SEED_NS));
+        wait_for(&prober, Level::Drain, Duration::from_secs(10));
         assert!(!prober.schedulable());
-        assert_eq!(prober.level().unwrap(), Level::Healthy);
-        assert_eq!(prober.timeout().unwrap(), None);
-        release.send(()).unwrap();
-        written.recv().unwrap();
-        // Armed once its finish is recorded: wait on that fact, not a clock.
-        while prober.timeout().unwrap().is_none() {
-            pause(Duration::from_millis(1));
-        }
-        assert!(prober.schedulable());
         prober.stop();
+        release.send(()).unwrap();
         thread.join().unwrap().unwrap();
     }
 
@@ -325,18 +324,31 @@ mod tests {
     #[test]
     fn a_missing_state_dir_is_refused_typed() {
         let dir = tempfile::tempdir().unwrap();
-        let err = DiskProber::start(&dir.path().join("absent"), Duration::from_millis(100));
+        let err = DiskProber::start(
+            &dir.path().join("absent"),
+            Duration::from_millis(100),
+            Duration::from_nanos(SEED_NS),
+        );
         assert!(matches!(err, Err(ProbeError::Record { .. })));
     }
 
-    /// A real disk answers: do probe a temporary directory and judge it across 20 periods; expect
-    /// `Healthy` at every judgement, the node schedulable, and the record one byte, rewritten in place.
+    /// A real disk answers: do probe a temporary directory at this host class's recorded seed across
+    /// 20 periods; expect it never drained, the node schedulable, and the record one byte. A host class
+    /// with no record is refused, typed, naming it (record its distribution first).
     #[test]
-    fn a_disk_that_answers_stays_healthy() {
+    fn a_disk_that_answers_is_never_drained() {
+        let seed = match recorded_slowest() {
+            Ok(seed) => seed,
+            Err(ProbeError::NoRecord(os)) => {
+                assert_eq!(os, std::env::consts::OS);
+                return;
+            }
+            Err(other) => panic!("{other}"),
+        };
         let dir = tempfile::tempdir().unwrap();
-        let p = DiskProber::start(dir.path(), Duration::from_millis(10)).unwrap();
+        let p = DiskProber::start(dir.path(), Duration::from_millis(10), seed).unwrap();
         for _ in 0..20 {
-            assert_eq!(p.level().unwrap(), Level::Healthy);
+            assert_ne!(p.level().unwrap(), Level::Drain);
             pause(Duration::from_millis(10));
         }
         assert!(p.schedulable());

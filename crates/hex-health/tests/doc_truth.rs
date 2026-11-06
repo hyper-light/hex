@@ -21,9 +21,7 @@ const DOC: &str = include_str!("../../../docs/design/failure-isolation.md");
 
 fn code() -> BTreeMap<&'static str, u128> {
     BTreeMap::from([
-        ("probe::MIN_TIMEOUT_NS", u128::from(probe::MIN_TIMEOUT_NS)),
-        ("probe::DRAIN_TIMEOUTS", u128::from(probe::DRAIN_TIMEOUTS)),
-        ("probe::SLOW_STREAK", u128::from(probe::SLOW_STREAK)),
+        ("probe::BOUND_FACTOR", u128::from(probe::BOUND_FACTOR)),
         ("grade::WINDOW_NS", u128::from(grade::WINDOW_NS)),
         (
             "grade::MIN_OBSERVATIONS",
@@ -157,6 +155,6 @@ fn the_designs_constants_are_the_codes() {
         .map(|(k, v)| (k.to_string(), v))
         .collect();
     let doc = doc();
-    assert_eq!(doc.len(), 37, "the table lost or gained a row");
+    assert_eq!(doc.len(), 35, "the table lost or gained a row");
     assert_eq!(doc, code);
 }
