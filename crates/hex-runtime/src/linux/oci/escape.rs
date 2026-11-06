@@ -7,8 +7,8 @@
 //!
 //! - `e0` make a user namespace: expect allowed — a pruned container's root is the namespace's topmost
 //!   mount, so it is not chrooted and may nest a user namespace (`current_chrooted`, f66).
-//! - `e1` the classic chroot escape (`mkdir x; chroot x; chdir ..` ×16; `chroot .`): expect the root stays
-//!   the rootfs, the marker unreachable (`..` can't climb a stack of root mounts, f67).
+//! - `e1` the classic chroot escape (`mkdir x; chroot x`, `..` until a directory is its own parent; `chroot .`):
+//!   expect the root stays the rootfs, the marker unreachable (`..` can't climb a stack of root mounts, f67).
 //! - `e2` unmount the root, then `setns` into the box's own mount namespace, which roots the caller at the
 //!   namespace's topmost mount: expect only the seed's read-only tmpfs beneath, holding nothing, the
 //!   marker unreachable (f69, f78) — where a root in a copy of the host's namespace would reach the host.
@@ -57,13 +57,23 @@ const DIR: OFlags = OFlags::PATH
     .union(OFlags::DIRECTORY)
     .union(OFlags::CLOEXEC);
 
-/// `e1`'s climb: `..` from `from`, 16 times.
+/// Most `..` `e1` climbs: no directory a path can name lies deeper than this, a path being at most `PATH_MAX`
+/// (4,096) bytes with its NUL (include/uapi/linux/limits.h:13) and each component at least two of them (`/x`).
+const MAX_CLIMB: usize = 4096 / 2;
+
+/// `e1`'s climb: `..` from `from` until a directory is its own parent, as `/` is and as the root of a chroot
+/// that holds is, at most [`MAX_CLIMB`] times; past that, `ELOOP`.
 fn climb(from: std::os::fd::OwnedFd) -> rustix::io::Result<std::os::fd::OwnedFd> {
     let mut at = from;
-    for _ in 0..16 {
-        at = rustix::fs::openat(&at, "..", DIR, Mode::empty())?;
+    for _ in 0..=MAX_CLIMB {
+        let up = rustix::fs::openat(&at, "..", DIR, Mode::empty())?;
+        let (here, there) = (rustix::fs::fstat(&at)?, rustix::fs::fstat(&up)?);
+        if (here.st_dev, here.st_ino) == (there.st_dev, there.st_ino) {
+            return Ok(at);
+        }
+        at = up;
     }
-    Ok(at)
+    Err(rustix::io::Errno::LOOP)
 }
 
 /// Runs the escape `mode` against `marker`. Returns the process exit code: 0 when the box held (secure),
