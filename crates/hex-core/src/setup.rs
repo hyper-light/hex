@@ -141,9 +141,11 @@ const fn line_size(f: WindowsFeature) -> usize {
     f.name().len().saturating_add(LINE_TAIL)
 }
 
-/// The slowest recorded run of [`FEATURE_QUERY`]: 1,683 ms of jupiter's 20 at 79% CPU (2026-11-06,
-/// bench/install/records/windows-feature-query-jupiter-20261106.txt). Measured, not picked.
-pub const FEATURE_QUERY_SLOWEST: std::time::Duration = std::time::Duration::from_millis(1_683);
+/// The slowest recorded run of [`FEATURE_QUERY`], over jupiter's 50 (2026-11-06): 2,421 ms, of the Windows
+/// agent's 30 at 14:27Z (cp/t7-native-windows 01217f8, bench/install/windows-constants.md:20); the other 20
+/// peaked at 1,683 ms at 79% CPU (bench/install/records/windows-feature-query-jupiter-20261106.txt).
+/// Measured, not picked: a slower recorded run raises it.
+pub const FEATURE_QUERY_SLOWEST: std::time::Duration = std::time::Duration::from_millis(2_421);
 
 /// The longest the node waits for [`FEATURE_QUERY`] before ending it and refusing by name: the swarm's
 /// failure-bound rule, twice the slowest recorded run, the factor being the false-alarm margin (the Hex

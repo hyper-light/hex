@@ -26,7 +26,7 @@ function Fail([string]$Why) { Write-Output "FAIL: $Why"; exit 1 }
 function Invoke-Test([string]$Name) {
   # Its stderr lines are output here, not errors to stop on.
   $ErrorActionPreference = 'Continue'
-  $out = & $TestBin $Name --exact --nocapture --test-threads=1 2>&1 | Out-String
+  $out = & $TestBin $Name --exact --nocapture 2>&1 | Out-String
   Write-Host $out
   if ($LASTEXITCODE -ne 0) { Fail "$Name (exit $LASTEXITCODE)" }
   return $out
