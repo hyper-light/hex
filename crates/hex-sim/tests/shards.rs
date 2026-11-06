@@ -16,7 +16,7 @@
 use std::time::Instant;
 
 use hex_sim::generate::{self, Shape};
-use hex_sim::model::{Cluster, Kind};
+use hex_sim::model::{Class, Cluster, Kind};
 use hex_sim::sim::{self, Config, ControlPlane, Layout, Nemesis, Run};
 use hex_sim::spec;
 
@@ -27,7 +27,9 @@ const SECOND: u64 = 1_000_000_000;
 /// short and the serial specification's replay stays affordable. No GPU nodes and no benchmarks: at
 /// 20 workloads a node a node's few GPUs are taken and nearly every node runs a build, which leaves
 /// GPU work and benchmarks queued (S3's filters, tested in `tests/sim.rs`), not what this test is
-/// about.
+/// about. Nodes run the generator's classes (six in ten Linux, two Windows, two macOS); workloads take
+/// G2's rule, a third of them each OCI containers, Firecracker and Shards microVMs by owner, at 75
+/// launches an owner, each with its class's overhead (H69).
 fn million() -> Cluster {
     let shape = Shape {
         nodes: 10_000,
@@ -43,6 +45,8 @@ fn million() -> Cluster {
             w.kind = Kind::Plain;
         }
     }
+    generate::owners(&mut cluster, 7, 75).unwrap();
+    generate::by_owner(&mut cluster, generate::overheads()).unwrap();
     cluster
 }
 
@@ -125,9 +129,28 @@ fn check_takeover(cluster: &Cluster, config: &Config, run: &Run) {
     assert!(t.running > 10_000, "{t:?}");
     assert!(t.records > 10_000, "{t:?}");
     assert!(t.committed_after > 10_000, "{t:?}");
+    // By class: every workload of each class done, and each class running on the lost slice when its
+    // shard was lost.
+    let (mut done, mut total, mut on_lost) = ([0u64; 3], [0u64; 3], [0u64; 3]);
+    for (k, w) in cluster.workloads.iter().enumerate() {
+        let c = [Class::Oci, Class::Firecracker, Class::Shards]
+            .iter()
+            .position(|&c| c == w.class)
+            .unwrap();
+        total[c] += 1;
+        let Some(ran) = run.ran[k] else { continue };
+        done[c] += u64::from(ran.ended.is_some());
+        let running = ran.started <= t.lost_at && ran.ended.is_none_or(|e| e > t.lost_at);
+        on_lost[c] += u64::from(running && layout.slice_of(ran.node) == Some(3));
+    }
+    assert_eq!(done, total, "done by class");
+    assert!(
+        on_lost.iter().all(|&n| n > 1_000),
+        "{on_lost:?} running on the lost slice, by class"
+    );
     println!(
         "T-T7.11.1: detection {} ms, rebuild of {} records {} ms, takeover {} ms; {} running on the \
-         lost slice, {} commits after",
+         lost slice (OCI, Firecracker, Shards {on_lost:?}), {} commits after",
         t.detection_ns / 1_000_000,
         t.records,
         t.rebuild_ns / 1_000_000,

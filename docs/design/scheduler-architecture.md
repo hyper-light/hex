@@ -255,6 +255,8 @@ Cells and regions are decided there too:
   deducting what is pending there; the rest refused, typed (`T-T7.12.1`).
 - H67: the differential suite on one node, one cell and three regions (`AC-T7.12.3`).
 - H68: cell selection on 100 simulated cells against Karmada's P99 32 ms.
+- H69: all of G6 and G7 over Hex's three classes: each workload an OCI container, a Firecracker or a
+  Shards microVM by owner (G2's rule), and each node, cell and region declaring the classes it runs.
 
 **What would falsify it.** The differential suite diverging across one node, one cell and three regions
 (`AC-T7.12.3`), or a cell's control-plane loss disturbing another cell's workloads (`AC-T7.12.2`, the

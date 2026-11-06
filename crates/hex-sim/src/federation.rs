@@ -5,7 +5,7 @@
 
 use crate::error::SimError;
 use crate::index::{FitIndex, Sample};
-use crate::model::{Cluster, Demand, NodeId, NodeSpec, Time, WorkloadId, WorkloadSpec};
+use crate::model::{Classes, Cluster, Demand, NodeId, NodeSpec, Time, WorkloadId, WorkloadSpec};
 use crate::sim::{self, Config, Layout, Nemesis, Run};
 use crate::store::Op;
 
@@ -53,6 +53,8 @@ pub struct FedConfig {
 pub struct CellRun {
     pub region: u32,
     pub cell: u32,
+    /// The classes the cell declares: those any of its nodes runs.
+    pub classes: Classes,
     pub cluster: Cluster,
     pub ids: Vec<WorkloadId>,
     pub run: Run,
@@ -139,6 +141,15 @@ impl Topo {
         self.cells
             .get(r)
             .and_then(|l| l.nodes(c))
+            .ok_or(SimError::Config("cell index"))
+    }
+
+    /// The classes cell `at` declares.
+    fn classes(&self, at: usize) -> Result<Classes, SimError> {
+        let (r, c) = self.place(at)?;
+        self.cells
+            .get(r)
+            .and_then(|l| l.classes(c))
             .ok_or(SimError::Config("cell index"))
     }
 
@@ -310,6 +321,7 @@ fn cell_run(
     Ok(CellRun {
         region,
         cell,
+        classes: topo.classes(at)?,
         cluster,
         ids,
         run,
@@ -413,6 +425,9 @@ impl Capacity {
             for j in 0..cells {
                 let c = turn(hc, j, cells)?;
                 let i = self.topo.index(r, c)?;
+                if !self.topo.classes(i)?.has(w.class) {
+                    continue;
+                }
                 let Some(Some(index)) = self.free.get_mut(i) else {
                     continue;
                 };

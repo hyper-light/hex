@@ -82,6 +82,15 @@ report (its [1], [4], [41]); they are cited there by line, not repeated.
    unknown bugs" CR[14] p. 1 (MV). Where the specification leaves a choice open (int widths), Csmith
    compares "within an equivalence class but not across classes" CR[14] §2.6 p. 5 (DE).
 
+8. **Kubernetes holds a pod to the nodes that run its runtime with a node label and a required
+   rule, and charges the runtime's overhead to the pod.** "`requiredDuringSchedulingIgnoredDuringExecution`:
+   The scheduler can't schedule the Pod unless the rule is met. This functions like `nodeSelector`, but
+   with a more expressive syntax" CR[15] `:111-113` (DE). A RuntimeClass names the nodes that support it by
+   "a common label which is then selected by the `runtimeclass.scheduling.nodeSelector` field", merged
+   into the pod's selector in admission CR[16] `:144-147` (DE), and its `overhead` lets "the cluster
+   (including the scheduler) ... account for it" CR[16] `:162-167` (DE). So kube-scheduler can be held
+   to Hex's class constraint, node by node, as Hex's index holds itself.
+
 ## What this means for G7's bars (inference, for the design to decide)
 
 - **Takeover times.** The systems that publish them re-place a lost cluster's work in tens of seconds
@@ -191,3 +200,15 @@ Kinds: DE; MV for the bug count.
 - p. 1: "more than 325 previously unknown bugs" (MV)
 - p. 2 §2.1: "if one has multiple, deterministic implementations of the same specification, all implementations must produce the same result from the same valid input."
 - p. 5 §2.6: "we can perform differential testing within an equivalence class but not across classes"
+
+Kubernetes documents [CR15]-[CR16] are files of kubernetes/website at commit
+380372f60632ed7ce70516ecaaab4710ffb8703a, under
+`https://raw.githubusercontent.com/kubernetes/website/380372f60632ed7ce70516ecaaab4710ffb8703a/`, read on
+2026-11-06. Kind: DE.
+
+[CR15] `content/en/docs/concepts/scheduling-eviction/assign-pod-node.md`.
+- `:111-113`: "`requiredDuringSchedulingIgnoredDuringExecution`: The scheduler can't schedule the Pod unless the rule is met. This functions like `nodeSelector`, but with a more expressive syntax."
+
+[CR16] `content/en/docs/concepts/containers/runtime-class.md`.
+- `:144-147`: "that set of nodes should have a common label which is then selected by the `runtimeclass.scheduling.nodeSelector` field. The RuntimeClass's nodeSelector is merged with the pod's nodeSelector in admission"
+- `:162-167`: "Declaring overhead allows the cluster (including the scheduler) to account for it when making decisions about Pods and resources." ... "Pod overhead is defined in RuntimeClass through the `overhead` field."

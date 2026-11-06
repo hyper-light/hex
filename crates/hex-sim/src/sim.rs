@@ -36,7 +36,9 @@ use std::ops::Bound;
 
 use crate::error::SimError;
 use crate::index::{FitIndex, Key, Refusals, Sample, Sampled};
-use crate::model::{Cluster, Demand, NodeId, NodeSpec, Time, WorkloadId, WorkloadSpec};
+use crate::model::{
+    Class, Classes, Cluster, Demand, NodeId, NodeSpec, Time, WorkloadId, WorkloadSpec,
+};
 use crate::rng::Rng;
 use crate::store::{Outcome, State, Store, Write};
 use crate::trace::{Latencies, TraceHash};
@@ -358,6 +360,8 @@ struct Part {
     nodes: Vec<NodeSpec>,
     /// Its nodes empty, for admission.
     empty: FitIndex,
+    /// The classes any of its nodes runs: what it declares it can place.
+    classes: Classes,
 }
 
 impl Layout {
@@ -393,10 +397,15 @@ impl Layout {
                 node.id =
                     NodeId(u32::try_from(at).map_err(|_| SimError::Config("too many nodes"))?);
             }
+            let classes = [Class::Oci, Class::Firecracker, Class::Shards]
+                .into_iter()
+                .filter(|&c| local.iter().any(|n| n.classes.has(c)))
+                .fold(Classes::NONE, Classes::with);
             parts.push(Part {
                 lo,
                 empty: FitIndex::new(&local)?,
                 nodes: local,
+                classes,
             });
         }
         Ok(Self { parts })
@@ -415,8 +424,8 @@ impl Layout {
         self.parts.get(s).map(|p| p.nodes.as_slice())
     }
 
-    /// The slice a workload goes to: the first, from its id modulo the slices on, whose empty nodes
-    /// admit it; `None` when no slice's would, and it is refused.
+    /// The slice a workload goes to: the first, from its id modulo the slices on, that declares its
+    /// class and whose empty nodes admit it; `None` when no slice's would, and it is refused.
     pub fn route(&self, spec: &WorkloadSpec) -> Option<usize> {
         let n = u64::try_from(self.parts.len()).ok()?;
         let first = spec.id.0.checked_rem(n)?;
@@ -424,10 +433,15 @@ impl Layout {
             .filter_map(|k| first.checked_add(k)?.checked_rem(n))
             .filter_map(|s| usize::try_from(s).ok())
             .find(|&s| {
-                self.parts
-                    .get(s)
-                    .is_some_and(|p| p.empty.admitted_anywhere(&spec.demand()))
+                self.parts.get(s).is_some_and(|p| {
+                    p.classes.has(spec.class) && p.empty.admitted_anywhere(&spec.demand())
+                })
             })
+    }
+
+    /// The classes slice `s` declares: those any of its nodes runs.
+    pub fn classes(&self, s: usize) -> Option<Classes> {
+        self.parts.get(s).map(|p| p.classes)
     }
 
     /// The slice a workload goes to when it is refused: the one its client reaches first.

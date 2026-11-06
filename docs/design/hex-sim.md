@@ -639,7 +639,7 @@ is the drill's). Then:
 its estimator reads a stale snapshot and "may over-commit", which "assume and deduct" closes (CR[4]-[9],
 `cells-and-regions.md:39-63`). MultiKueue re-admits against a global quota that may exceed the workers'
 (CR[10] `:33-38`, `cells-and-regions.md:64-75`). Neither checks that the lost work fits before moving it
-(`cells-and-regions.md:87-91`): `T-T7.12.1` asks for that check.
+(`cells-and-regions.md:96-100`): `T-T7.12.1` asks for that check.
 
 **Evidence.** `T-T7.12.1`'s test, at two capacities: with room, every moved workload is placed in a
 surviving region and none refused; when tight, exactly those for which no surviving node had room are
@@ -666,7 +666,7 @@ the federation must equal `sim::run`, report and trace hash, on every seed (H64)
 **Sources.** Differential testing needs comparable, deterministic implementations, and a difference,
 loop or crash is a candidate bug (McKeeman CR[13] p. 1; Csmith CR[14] §2.1 p. 2,
 `cells-and-regions.md:76-83`). No source applies it across scales of one system
-(`cells-and-regions.md:105-107`): Hex compares configurations of one implementation against one
+(`cells-and-regions.md:114-116`): Hex compares configurations of one implementation against one
 specification, the same rule on another axis.
 
 **Evidence and falsifier.** The suite itself; any seed where a scale breaks an invariant, or one cell
@@ -688,11 +688,56 @@ its nodes are `fake-kubelet` objects and its authors say it isn't a stress test)
 **What would falsify it.** Hex's p99 over 6.4 ms. Karmada's step includes its API objects' handling,
 Hex's selection is in-process; the record says so, as `bench/sched/kube_scheduler_kwok.md` does.
 
+### H69. G6 and G7 over Hex's three classes: every workload a class, every node, cell and region declaring its own
+
+**Why.** Hex's scheduler places OCI containers, Firecracker microVMs and Shards microVMs (Ada,
+2026-11-06: "Your scheduler is for *microvms*." and "we work with OCI containers, Firecracker, and Shards
+Microvms."). G6 and G7 were first measured on workloads of no class; this puts every one of their bars on
+the three.
+
+**The choice.**
+- **Each workload's class is G2's rule** (`bench/sched/huawei_workload.md:79-82`): all of an owner's
+  workloads are one class, and owners are split so each class gets a third of the launches, the owner
+  with the most launches first, each to the class with the fewest so far, ties OCI, Firecracker,
+  Shards. `generate::by_owner` is that rule in Rust, beside `huawei_trace.py`'s `classes_by_owner`.
+  Generated workloads take owners at the recorded day's 75 launches each (25,295 of 339 owners,
+  `huawei_workload.md:81-82`), drawn uniformly (`generate::owners`).
+- **Each class's overhead is in its workload's memory** (`huawei_workload.md:122-127`): OCI 440,402 bytes
+  (0.42 MiB), Firecracker 5 MiB, and Shards 5 MiB, **a stand-in**, until Shards states its own
+  (`generate::overheads`).
+- **Each node declares the classes it runs**, by platform (`huawei_workload.md:112-116`): Linux all three,
+  Windows OCI and Shards, macOS Shards alone, in the generator's proportions, six, two and two in ten
+  (`generate.rs:51-56`; `generate::platform` gives them by node id for the benches' fixed shapes).
+- **Each slice, cell and region declares the union of its nodes' classes** (`Layout::classes`,
+  `CellRun::classes`), and routing passes over one that doesn't declare a workload's class before it
+  asks whether its empty nodes admit it (H60, H64). `Capacity::admit` skips a cell that doesn't run the
+  class (H66). The index already refuses a node that doesn't (H9), and the specification counts any such
+  placement (`FilterReport::class_off_node`).
+- **The drills give regions a platform each**: Linux, Windows, macOS. So a lost region's work can move
+  only to a region that runs its class, and the Linux region's loss leaves Firecracker nowhere to go:
+  every Firecracker microVM is then refused, typed, which `T-T7.12.1`'s capacity check asks for.
+- **kube-scheduler is held to the same constraint** (H63's comparison): each kwok node carries
+  `hex.dev/<class>: "true"` for each class it runs, and each pod a required node affinity on its class's
+  label, and its memory request carries its class's overhead. That is Kubernetes' own way to keep a pod
+  on nodes of its runtime (CR[15] `:111-113`, CR[16] `:144-147`, `cells-and-regions.md:85-92`).
+  RuntimeClass would merge the same selector in admission and add the same overhead (CR[16]
+  `:162-167`); the bench writes them on the pod so the API server's admission path is the same in both
+  configurations.
+
+**Evidence.** Every figure of G6 and G7 is re-measured with classes, per class where it applies, and
+recorded beside the generic figure it replaces: `bench/sched/million.md`, `kube_scheduler_kwok.md`,
+`takeover_rebuild.md`, `cells.md`, and `tests/cells.rs`, `tests/shards.rs`, `tests/memory.rs`.
+
+**What would falsify it.** A workload placed on a node that doesn't run its class, at any scale. A class
+whose work a region or cell is sent but can't run. A moved workload refused while a surviving node of
+its class had room. Or Shards' own overhead, once stated, far from 5 MiB: then the overhead changes and
+every figure here is measured again.
+
 ## What it doesn't do yet
 
 Each goes with the implementation goal that needs it: the nemesis's faults other than crashes (gray, fail-slow, mass
 loss, the agent-specific faults; goal 5), inter-node latency and Vivaldi coordinates (goal 3), provider
-quotas (A3), priorities and fair share (goal 4), sharded control planes (decided in H60-H63, built by goal 6), cells and regions (decided in H64-H68, built by goal 7),
+quotas (A3), priorities and fair share (goal 4), sharded control planes (decided in H60-H63, built by goal 6), cells and regions (decided in H64-H68, built by goal 7; in Hex's three classes, H69),
 heap accounting per workload (`AC-T7.11.4`, H62; `Store::record_bytes` is the record's layout only), and
 wall-clock throughput and tail of the real fast path (goal 2). The virtual costs in `Config::default`
 are chosen for tests, not measured; goal 2 sets them from the measured fast path.

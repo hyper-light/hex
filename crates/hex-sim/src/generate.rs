@@ -7,8 +7,8 @@
 
 use crate::error::SimError;
 use crate::model::{
-    Class, Classes, Cluster, Kind, NodeId, NodeSpec, Resources, Tenancy, Time, WorkloadId,
-    WorkloadSpec,
+    Class, Classes, Cluster, Kind, NodeId, NodeSpec, Overheads, Owner, OwnerId, Resources, Tenancy,
+    Time, WorkloadId, WorkloadSpec,
 };
 use crate::rng::Rng;
 
@@ -135,6 +135,96 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
     Ok(Cluster::single_owner(nodes, workloads))
 }
 
+/// The classes of the `i`th node of a fleet, in the generator's proportions: six nodes in ten Linux
+/// (all three), two Windows (OCI containers and Shards microVMs), two macOS (Shards microVMs alone),
+/// by `i mod 10`, so any ten consecutive nodes hold the mix.
+pub fn platform(i: u32) -> Classes {
+    match i.checked_rem(10).unwrap_or(0) {
+        0..6 => Classes::ALL,
+        6..8 => Classes::NONE.with(Class::Oci).with(Class::Shards),
+        _ => Classes::NONE.with(Class::Shards),
+    }
+}
+
+/// Each class's runtime overhead in bytes of memory, as G2 measured or cited them
+/// (`bench/sched/huawei_workload.md`, "Overheads"): OCI 440,402 (0.42 MiB, Hex's idle container,
+/// `bench/competitive/RESULT.md:95`); Firecracker 5 MiB (its specification's bound on the VMM, and
+/// Agache et al., NSDI 2020); Shards 5 MiB, A STAND-IN: no source states Shards' own yet.
+pub fn overheads() -> Overheads {
+    let mut o = Overheads::default();
+    o.set(Class::Oci, 440_402);
+    o.set(Class::Firecracker, 5 << 20);
+    o.set(Class::Shards, 5 << 20);
+    o
+}
+
+/// Gives each workload an owner, uniformly from `ceil(workloads / per_owner)` owners of weight 1,
+/// from `seed`. G2's recorded day has 75 launches an owner (25,295 of 339 owners,
+/// `bench/sched/huawei_workload.md`, "Each request's kind").
+pub fn owners(cluster: &mut Cluster, seed: u64, per_owner: u64) -> Result<(), SimError> {
+    let n = u64::try_from(cluster.workloads.len())
+        .map_err(|_| SimError::Config("too many workloads"))?;
+    let count = n
+        .checked_add(per_owner.saturating_sub(1))
+        .and_then(|x| x.checked_div(per_owner))
+        .ok_or(SimError::Config("an owner has at least one launch"))?
+        .max(1);
+    let last = count.checked_sub(1).ok_or(SimError::Config("owners"))?;
+    let mut rng = Rng::new(seed ^ 0x0e1e_7e45);
+    for w in &mut cluster.workloads {
+        w.tenancy.owner =
+            OwnerId(u32::try_from(rng.range(0, last)).map_err(|_| SimError::Config("owners"))?);
+    }
+    cluster.owners =
+        vec![Owner::default(); usize::try_from(count).map_err(|_| SimError::Config("owners"))?];
+    Ok(())
+}
+
+/// G2's kind rule (`bench/sched/huawei_trace.py`'s `classes_by_owner`): all of an owner's workloads
+/// are one class, and owners are split so each class gets a third of the launches: the owner with the
+/// most launches first (then the lower id), each to the class with the fewest launches so far, ties
+/// OCI, then Firecracker, then Shards. Each workload's memory then gains its class's overhead. Returns
+/// the launches each class got, OCI, Firecracker, Shards.
+pub fn by_owner(cluster: &mut Cluster, overheads: Overheads) -> Result<[u64; 3], SimError> {
+    let mut launches = vec![0u64; cluster.owners.len()];
+    for w in &cluster.workloads {
+        let at = usize::try_from(w.tenancy.owner.0).map_err(|_| SimError::Config("owner"))?;
+        let n = launches.get_mut(at).ok_or(SimError::Config(
+            "a workload's owner is one of the cluster's",
+        ))?;
+        *n = n.checked_add(1).ok_or(SimError::Config("launches"))?;
+    }
+    let mut order: Vec<usize> = (0..launches.len()).collect();
+    order.sort_by_key(|&o| (std::cmp::Reverse(launches.get(o).copied().unwrap_or(0)), o));
+    const CLASSES: [Class; 3] = [Class::Oci, Class::Firecracker, Class::Shards];
+    let mut got = [0u64; 3];
+    let mut class_of = vec![Class::Oci; launches.len()];
+    for o in order {
+        let k = (0..3)
+            .min_by_key(|&k| (got.get(k).copied().unwrap_or(u64::MAX), k))
+            .ok_or(SimError::Config("classes"))?;
+        let n = launches.get(o).copied().unwrap_or(0);
+        let g = got.get_mut(k).ok_or(SimError::Config("classes"))?;
+        *g = g.checked_add(n).ok_or(SimError::Config("launches"))?;
+        if let (Some(slot), Some(&class)) = (class_of.get_mut(o), CLASSES.get(k)) {
+            *slot = class;
+        }
+    }
+    for w in &mut cluster.workloads {
+        let at = usize::try_from(w.tenancy.owner.0).map_err(|_| SimError::Config("owner"))?;
+        w.class = *class_of.get(at).ok_or(SimError::Config("owner"))?;
+        w.need.mem_bytes =
+            w.need
+                .mem_bytes
+                .checked_add(overheads.of(w.class))
+                .ok_or(SimError::Config(
+                    "a workload's memory with its class's overhead",
+                ))?;
+    }
+    cluster.overheads = overheads;
+    Ok(got)
+}
+
 /// One of the classes `classes` holds, each alike (OCI when it holds none).
 fn one_of(rng: &mut Rng, classes: Classes) -> Class {
     let pick = rng.range(0, u64::from(classes.count().saturating_sub(1)));
@@ -193,5 +283,39 @@ mod tests {
                 .iter()
                 .all(|w| w.need.gpus == 0 || w.class == Class::Oci)
         );
+    }
+
+    /// G2's kind rule (`huawei_trace.py`'s `classes_by_owner`): do owners of 5, 3, 3, 2 and 1
+    /// launches; expect OCI 5, Firecracker 5 (owners 1 and 3), Shards 4 (owners 2 and 4), each
+    /// workload's memory raised by its class's overhead.
+    #[test]
+    fn owners_go_whole_to_the_class_with_fewest_launches() {
+        let mut c = cluster(3, &shape()).unwrap();
+        c.workloads.truncate(14);
+        let counts = [5u32, 3, 3, 2, 1];
+        let mut at = 0;
+        for (o, &n) in counts.iter().enumerate() {
+            for _ in 0..n {
+                c.workloads[at].tenancy.owner = OwnerId(u32::try_from(o).unwrap());
+                at += 1;
+            }
+        }
+        c.owners = vec![Owner::default(); 5];
+        let before: Vec<u64> = c.workloads.iter().map(|w| w.need.mem_bytes).collect();
+        let got = by_owner(&mut c, overheads()).unwrap();
+        assert_eq!(got, [5, 5, 4]);
+        let want = [
+            Class::Oci,
+            Class::Firecracker,
+            Class::Shards,
+            Class::Firecracker,
+            Class::Shards,
+        ];
+        for (w, mem) in c.workloads.iter().zip(before) {
+            let class = want[usize::try_from(w.tenancy.owner.0).unwrap()];
+            assert_eq!(w.class, class);
+            assert_eq!(w.need.mem_bytes, mem + overheads().of(class));
+        }
+        assert_eq!(c.overheads, overheads());
     }
 }

@@ -24,6 +24,13 @@
 //! the store's order, into a store of that slice alone, and the serial specification judges it
 //! (`spec::check_log`, H4 per slice): each placement the slice's sampled best fit at its point, no
 //! queue jumped, nothing left pending that a node holds.
+//!
+//! Every workload is one of Hex's three classes by G2's rule (`docs/design/hex-sim.md` H69): owners
+//! at 75 launches each, each owner's workloads all one class, a third of the launches each OCI
+//! containers, Firecracker microVMs and Shards microVMs, each with its class's overhead in its memory
+//! (OCI 0.42 MiB, Firecracker 5 MiB, Shards 5 MiB, a stand-in). The nodes declare the classes they run,
+//! six in ten Linux (all three), two Windows (OCI and Shards), two macOS (Shards), by node id, and a
+//! workload is placed only on a node that runs its class. Each run reports its placements by class.
 // A bench (not production, CLAUDE.md): it takes the test-style allowances, as the other benches do.
 #![allow(
     clippy::unwrap_used,
@@ -41,9 +48,10 @@ use std::fmt::Write as _;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use hex_sim::generate;
 use hex_sim::index::{FitIndex, Sample};
 use hex_sim::model::{
-    Class, Classes, Kind, NodeId, NodeSpec, Resources, Tenancy, WorkloadId, WorkloadSpec,
+    Class, Cluster, Kind, NodeId, NodeSpec, Resources, Tenancy, WorkloadId, WorkloadSpec,
 };
 use hex_sim::rng::Rng;
 use hex_sim::sim::{Layout, Report, Run};
@@ -68,7 +76,7 @@ enum Row {
 
 fn workloads(row: Row, seed: u64) -> Vec<WorkloadSpec> {
     let mut rng = Rng::new(seed);
-    (0..WORKLOADS)
+    let work = (0..WORKLOADS)
         .map(|id| {
             let (need, kind) = match row {
                 Row::Pods => (
@@ -104,7 +112,13 @@ fn workloads(row: Row, seed: u64) -> Vec<WorkloadSpec> {
                 class: Class::Oci,
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+    // G2's rule (H69): owners at 75 launches each, each owner's workloads one class, a third each,
+    // with its class's overhead in its memory.
+    let mut c = Cluster::single_owner(Vec::new(), work);
+    generate::owners(&mut c, seed, 75).unwrap();
+    generate::by_owner(&mut c, generate::overheads()).unwrap();
+    c.workloads
 }
 
 /// One slice: its first global node id, its nodes (ids dense from 0 within it), and its pending
@@ -117,6 +131,8 @@ struct Slice {
 
 struct Placed {
     placed: usize,
+    /// Placed by class: OCI, Firecracker, Shards.
+    by_class: [usize; 3],
     unplaced: usize,
     began: Instant,
     ended: Instant,
@@ -130,7 +146,7 @@ fn setup(row: Row, seed: u64, slices: u32) -> (Vec<NodeSpec>, Vec<Slice>, Store)
             id: NodeId(id),
             capacity: NODE,
             background_milli: 0,
-            classes: Classes::ALL,
+            classes: generate::platform(id),
         })
         .collect();
     let layout = Layout::new(&nodes, slices).unwrap();
@@ -163,7 +179,7 @@ fn setup(row: Row, seed: u64, slices: u32) -> (Vec<NodeSpec>, Vec<Slice>, Store)
 fn place(slice: &Slice, store: &Mutex<Store>, sample: &Sample) -> Placed {
     let mut index = FitIndex::new(&slice.nodes).unwrap();
     let began = Instant::now();
-    let (mut placed, mut unplaced) = (0, 0);
+    let (mut placed, mut unplaced, mut by_class) = (0, 0, [0usize; 3]);
     for (spec, version) in &slice.pending {
         let demand = spec.demand();
         let Some(best) = index.sampled_fit(&demand, sample).best else {
@@ -184,9 +200,11 @@ fn place(slice: &Slice, store: &Mutex<Store>, sample: &Sample) -> Placed {
         }
         index.take(best.node, &demand).unwrap();
         placed += 1;
+        by_class[spec.class as usize] += 1;
     }
     Placed {
         placed,
+        by_class,
         unplaced,
         began,
         ended: Instant::now(),
@@ -312,13 +330,20 @@ fn main() {
             .unwrap();
         let placed: usize = done.iter().map(|p| p.placed).sum();
         let unplaced: usize = done.iter().map(|p| p.unplaced).sum();
+        let by_class = done.iter().fold([0usize; 3], |a, p| {
+            [
+                a[0] + p.by_class[0],
+                a[1] + p.by_class[1],
+                a[2] + p.by_class[2],
+            ]
+        });
         let routed: Vec<usize> = parts.iter().map(|p| p.pending.len()).collect();
         let in_store = store
             .records()
             .filter(|r| matches!(r.state, State::Placed(_)))
             .count();
         let mut line = format!(
-            "run seed={seed} placed={placed} unplaced={unplaced} store_placed={in_store} wall_s={:.3} slowest_slice_s={:.3} placements_per_s={:.0} setup_s={setup_s:.1} routed={routed:?}",
+            "run seed={seed} placed={placed} placed_oci_firecracker_shards={by_class:?} unplaced={unplaced} store_placed={in_store} wall_s={:.3} slowest_slice_s={:.3} placements_per_s={:.0} setup_s={setup_s:.1} routed={routed:?}",
             wall.as_secs_f64(),
             slowest.as_secs_f64(),
             placed as f64 / wall.as_secs_f64(),

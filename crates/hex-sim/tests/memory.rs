@@ -29,8 +29,9 @@
 use std::alloc::System;
 
 use cap::Cap;
+use hex_sim::generate;
 use hex_sim::model::{
-    Class, Classes, Cluster, Kind, NodeId, NodeSpec, Resources, Tenancy, WorkloadId, WorkloadSpec,
+    Class, Cluster, Kind, NodeId, NodeSpec, Resources, Tenancy, WorkloadId, WorkloadSpec,
 };
 use hex_sim::sim::{self, Config, Run};
 use hex_sim::spec;
@@ -48,7 +49,9 @@ const SHARDS: u32 = 8;
 const MIB: u64 = 1 << 20;
 const GIB: u64 = 1 << 30;
 
-/// H63's shape: `scheduler_perf`'s pause pod (100m CPU, 500Mi) on nodes of 11 CPU and 55 GiB, which
+/// H63's shape, in G2's classes (H69): nodes in the six-Linux, two-Windows, two-macOS mix by index,
+/// and each pod an OCI container, Firecracker or Shards microVM by owner, a third each, with its
+/// class's overhead in its memory. `scheduler_perf`'s pause pod (100m CPU, 500Mi) on nodes of 11 CPU and 55 GiB, which
 /// hold 110 of them; 1,000,000 on 10,000 nodes fill the 1,100,000 slots to 91%. All are submitted at
 /// once and none ends.
 fn h13() -> Cluster {
@@ -61,7 +64,7 @@ fn h13() -> Cluster {
                 gpus: 0,
             },
             background_milli: 0,
-            classes: Classes::ALL,
+            classes: generate::platform(id),
         })
         .collect();
     let workloads = (0..WORKLOADS)
@@ -79,7 +82,10 @@ fn h13() -> Cluster {
             class: Class::Oci,
         })
         .collect();
-    Cluster::single_owner(nodes, workloads)
+    let mut cluster = Cluster::single_owner(nodes, workloads);
+    generate::owners(&mut cluster, 7, 75).unwrap();
+    generate::by_owner(&mut cluster, generate::overheads()).unwrap();
+    cluster
 }
 
 /// H62's non-vacuity for the counter itself: do allocate a buffer of known size and free it; expect
