@@ -10,12 +10,13 @@ each with its sources, evidence and falsifier (CLAUDE.md §5). Sources are
 
 `crates/hex-sim`, a pure core (CLAUDE.md §9) with no I/O, no threads and no clock:
 
-- `model`, `generate`: nodes (CPU, memory, GPUs) and workloads (need, arrival, run time), generated from a
-  seed; every workload's need is drawn inside one node's capacity, so GPU work is drawn only against GPU
-  nodes.
+- `model`, `generate`: nodes (CPU, memory, GPUs and the kinds they run) and workloads (need, arrival, run
+  time, owner, and kind: an OCI container, a Firecracker microVM or a Shards microVM), generated from a
+  seed; every workload's kind and need are drawn against one node, so it fits somewhere, and GPU work is
+  drawn only against GPU nodes, as OCI containers (H9).
 - `index`: best fit as one total order over (free CPU, free memory, free GPUs, node id), so the
-  scheduler and its specification can't disagree on a tie. Best fit is the baseline S1 scores against;
-  implementation goal 2 replaces the order with the goodput score.
+  scheduler and its specification can't disagree on a tie. Best fit is the baseline S1 scores against; a
+  sample ranks the nodes it admits by a `Scorer`, and Hex places by `Scorer::HEX` (H11).
 - `store`: the control plane's durable records, changed only by compare-and-set (S6): a placement names
   the record version it read and the node's capacity is checked in the same write, so a repeated or stale
   commit is a conflict, never a second start or an overcommit.
@@ -25,6 +26,8 @@ each with its sources, evidence and falsifier (CLAUDE.md §5). Sources are
   nemesis crashes the control plane at a chosen write.
 - `spec`: the serial specification (one scheduler, one cycle) as a log oracle, a direct serial run, and
   the end-state count of workloads lost or started twice.
+- `replay`, `packing`: a recorded workload's text, read bounded and typed (H10), and `AC-T7.4.3`'s
+  measure, a workload packed to a load and what it strands counted (H11).
 
 ## Decisions
 
@@ -181,31 +184,192 @@ missed a change that mattered), or a class checked more than once in a stretch w
 window check is conservative, so it can count more conflicts than strictly needed. Step 5's bench is
 what says whether that costs too much.
 
-### H9. Hard filters: GPU, benchmark against build, and the 90% CPU rule
+### H9. Hard filters: kind, GPU, benchmark against build, and the 90% CPU rule
 
-**The choice.** A workload declares its kind: plain, a build (it changes its host), a benchmark
-(interference-sensitive) or an agent session. A node carries its background CPU load (co-tenants
-and the host), beside what Hex placed. A node admits a workload only when:
-- the workload needs no GPU, or the node has GPUs;
+**The choice.** A workload declares its kind, an OCI container, a Firecracker microVM or a Shards microVM
+(`Class`), and its role: plain, a build (it changes its host), a benchmark (interference-sensitive) or an
+agent session (`Kind`). A node carries the kinds it runs and its background CPU load (co-tenants and the
+host), beside what Hex placed. A node admits a workload only when:
+- it runs the workload's kind;
+- the workload needs no GPU, or the node has GPUs and the workload's kind can be given one: only an OCI
+  container can (`Class::takes_gpus`), so a Firecracker or Shards microVM that asks for one is admitted
+  nowhere and refused at admission. The lead approved this on 2026-11-06, until Shards says otherwise:
+  mainline Firecracker passes no device through, and Shards' API names none;
 - it has the room;
-- it isn't a benchmark beside a running build, or a build beside a running benchmark;
+- it isn't a benchmark beside a running build, or a build beside a running benchmark, whatever their
+  kinds;
 - it isn't a session on a node whose CPU in use is above 90%.
 
-The class is need and kind (`Demand`). Each filter's refusals of nodes that had the room are counted
+The equivalence class (H8) is need, role and kind (`Demand`). Each filter's refusals of nodes that had the room are counted
 (`Report::refused`). `spec::check_filters` replays the log against the cluster's facts alone and counts
 every placement that broke a filter, apart from the index's own verdicts.
 
-**Sources.** `scheduler-architecture.md` S3 (hard filters on facts, the declare-and-assign contract);
-`AC-T7.6.3`'s 90%; a GPU is a fact of the node (AW[21]).
+**Sources.** `scheduler-architecture.md` S3 (hard filters on facts, the declare-and-assign contract, GPU
+access a property of the node and runtime class); `AC-T7.6.3`'s 90%; a GPU is a fact of the node (AW[21]);
+mainline Firecracker passes no device through (AW[25]-[28]); Shards' guest spec names disks, shares and
+vsock ports, and no device (shards-api draft, hyper-light/shards `a0cced87`,
+`crates/api/src/lib.rs:41-62`). Where each kind runs: `bench/sched/huawei_workload.md`.
 
-**Evidence.** `the_hard_filters_keep_every_placement_in_bounds`: 500 generated clusters with GPU
-nodes, background load and every kind. Hot sessions, GPU work off GPU nodes and benchmarks beside builds
-are all 0, and every filter refused nodes that had room. The 1,000-cluster, 10,000-crash-seed and
-10,000-node tests check the same on every run. Mutants that switch off the hot or the benchmark/build
-filter fail the test.
+**Evidence.** `the_hard_filters_keep_every_placement_in_bounds`: 500 generated clusters of Linux, Windows
+and macOS nodes, each running the kinds its platform can, with GPU nodes, background load, every role and
+every kind, and one microVM in fifty asking for a GPU. Workloads on a node that can't run their kind, GPU
+work placed where it gets none, benchmarks beside builds and hot sessions are all 0; every microVM that
+asked for a GPU was refused at admission; every filter refused nodes that had room; and each kind placed
+over 100 benchmarks and over 100 sessions. `a_class_the_node_cant_run_is_refused` and
+`only_an_oci_container_is_given_a_gpu` check the two kind filters alone. The 1,000-cluster,
+10,000-crash-seed and 10,000-node tests check the same on every run. Mutants that switch off the hot, the
+benchmark/build or the kind filter, or that let a microVM be given a GPU, fail the test.
 
 **What would falsify it.** A run whose replay counts a violation. A session refused everywhere while
-some node is under 90% with room would also falsify it, and `check_log`'s `LeftPending` refuses that.
+some node is under 90% with room would also falsify it, and `check_log`'s `LeftPending` refuses that. A
+Firecracker release, or a Shards API, that passes a GPU through would make the GPU rule refuse work that
+could be placed; `Class::takes_gpus` changes with it.
+
+### H10. The recorded workload is a day of serverless sandbox launches, each one of Hex's three kinds
+
+**The choice.** Hex's scheduler places microVMs (Ada, 2026-11-06: "Your scheduler is for *microvms*."), of
+three kinds: OCI containers, Firecracker microVMs and Shards microVMs ("we work with OCI containers,
+Firecracker, and Shards Microvms", the same day). T7's plan, version 4, measures `AC-T7.4.3` "by hex-sim
+with a recorded workload of OCI containers, Firecracker microVMs and Shards microVMs". That workload is a
+day of sandbox launches from a production cloud: Huawei Cloud's public serverless traces 2025, Region 5, day
+30 (`bench/sched/huawei-r5-day30.trace`, and `huawei-r5-day30.keepalive.trace` with Huawei's one-minute
+keep-alive added), converted by `bench/sched/huawei_trace.py` from raw files it checks by sha256.
+- Each cold start is one request: its arrival, its lifetime (to the end of its last request, plus the
+  keep-alive in the second trace), its resource pool (millicores and MiB) and its owner (`userID`). The
+  sandboxes are Huawei's pods, which may be containers, taken as requests by shape.
+- Each request's kind is its owner's, the owners split so that each kind has a third of the day's launches.
+- Two node models (the lead, 2026-11-06). The main one is 10 EC2 m5d.metal hosts (48 cores, 384 GiB),
+  Linux x86_64 with KVM, each running all three kinds. Beside it, to exercise where each kind may land,
+  are Hex's own fleet's hosts, five of each: Linux runs all three kinds, x86_64 Windows OCI containers and
+  Shards microVMs, and arm64 macOS Shards microVMs alone.
+- Each kind's runtime overhead is added to its requests' memory: OCI 0.42 MiB, Firecracker 5 MiB, and
+  Shards 5 MiB as a stand-in.
+
+The trace's text, with G4's owner fields and the kinds, is parsed by `replay::parse`, bounded and typed
+(`Limits`, `TraceError`). kiln's own CI, recorded on 2026-11-05 (`bench/sched/kiln_workload.md`), is kept as
+a side measurement, not of record.
+
+**Sources.**
+- Joosen et al., "Serverless Cold Starts and Where to Find Them", EuroSys 2025, and its data at
+  github.com/sir-lab/data-release (CC BY 4.0); its §2 for the one-minute keep-alive.
+- The m5d.metal host: Agache et al., NSDI 2020 §6, the host the Firecracker paper measured on.
+- Where each kind runs: Hex's oci class (Linux, and Windows over HCS), Firecracker (Linux with KVM), and
+  Shards' API draft (`a0cced87`, `crates/api/src/lib.rs:172-178`).
+- Overheads: `bench/competitive/RESULT.md:95` for OCI; Firecracker's specification and Agache et al., NSDI
+  2020 (`docs/research/runtime/substrates-and-sandboxes.md` §3.3).
+- A kind per owner: a pod names its runtime class in its spec (Kubernetes, "Runtime Class").
+- `bench/sched/huawei_workload.md` gives the sources, the mapping of each field, the kind rule, the hosts,
+  the counts, and why this trace over the Azure Functions traces.
+
+**Evidence.**
+- `a_recorded_workload_replays_the_same_twice`: 25,295 launches of 339 owners, all four traces (each node
+  model, with and without the keep-alive). The same hash, report and log come twice from one seed; every
+  launch is done once; `check_log` and `check_filters` are clean. The kind filter refuses nodes on the
+  fleet, and none on m5d.metal, where every node runs every kind.
+- `huawei_trace.py` run again on the recorded raw files gives all four traces byte for byte.
+- The parser reads the kinds and overheads (`classes_are_read_and_default_to_every_class_and_oci`).
+  `malformed_traces_are_refused_by_line`, `traces_past_their_bounds_are_refused` and its proptests refuse
+  malformed, oversized and out-of-order text with a typed error, and none panics.
+
+**What would falsify it.**
+- Hex's own microVM launches packing differently from Huawei's sandboxes: larger, longer, or with devices,
+  none of which this day has.
+- The kinds are given, not recorded. A real split far from thirds, or by function rather than owner, would
+  change the mix's measure; each kind alone doesn't depend on it.
+- Shards' own overhead differing much from the 5 MiB stand-in.
+- The pools' limits are taken as requests; a platform that packs by usage would see smaller ones.
+- A second region or day that packs differently would bound how far this one stands for microVM work.
+
+### H11. Hex packs by least stranded leftover, then the node running the fewest kinds, then most allocated
+
+**The choice.** `Scorer::HEX`, which is `Scorer::Fragment(Tie::Narrowest)`. Among the nodes a sample admits:
+1. the one whose leftover after placing the request still fits some request shape of a kind the node runs
+   (or is empty), so no CPU or memory is left that nothing can use;
+2. between those, the node that runs the fewest kinds, so a node only some kinds can use is spent before
+   one every kind can;
+3. then the node most allocated once the request is placed (Kubernetes' `MostAllocated`), so what isn't
+   stranded packs;
+4. then the node's key.
+
+`AC-T7.4.3` is measured by `packing::pack` on the recorded workload (H10), on both node models, to 90%
+load, the mix of kinds and each kind alone (`packing::alone`: the whole day as that kind, each need moved
+to its overhead).
+- Load is the dominant share placed (the larger of CPU's and memory's) over the nodes the requests may use.
+- Stranded capacity is the free CPU and memory on nodes where no request shape of a kind the node runs
+  fits, each as a share of those nodes', summed (`PackReport::stranded_per_mille`). That is Borg's
+  stranding, with "fully allocated" read against each kind's Pareto-minimal shapes.
+- The seeds are 16 starting arrivals spread evenly over the day, each wrapping round it.
+- Three clocks. With no completions (`Clock::Held`), lifetimes don't enter. With completions
+  (`Clock::Compressed`), once with lifetimes as recorded and once with the keep-alive. At the recorded
+  rate the day never loads the nodes to 90%, so arrivals come faster: for each node model and set, the
+  slowest speed on `sched_packing`'s ladder (10x to 2,000x) at which Hex and both best fits reach 90% on
+  every seed, so lifetimes enter as far as the nodes allow.
+- Best fit alone is measured two ways: by free CPU first (`Scorer::BestFit`) and across resources
+  (`Scorer::MostAllocated`, Kubernetes' bin packing).
+
+The lead approved four of these on 2026-11-06, each for its reason:
+1. **The fewest-kinds tie** keeps eligibility from stranding: a node only some kinds can use is spent on
+   them first, leaving the nodes every kind can use for the kinds that need them. With most allocated as
+   the tie, the fleet's Shards microVMs spread over Linux and Windows, and 11,195 launches of the mix with
+   no completions found no node. Every early refusal the bench lists for it is a Firecracker microVM,
+   which only Linux runs.
+2. **GPUs only for OCI containers**, until Shards says otherwise (H9).
+3. **The completions ladder.** At one fixed speed, 2,000x, the one-minute keep-alive outlived the whole
+   fill, so lifetimes never entered. The slowest speed at which every arm reaches 90% on every seed lets
+   them enter as far as the nodes allow.
+4. **The wrap-around.** Seeds that started late in the day ran out of arrivals before 90%; that was the
+   earlier model's shortfall at 500x. Each seed now draws the whole day, its wrapped arrivals a day's
+   span later.
+
+**Sources.** Borg's stranding, resources "that cannot be used because another resource on the machine is
+fully allocated", and its hybrid of best fit and worst fit, which packs "about 3-5% better" than best fit
+(`docs/research/scheduler/cluster-managers-at-scale.md`, [1] §3.2). Dominant share (DRF,
+`placement-algorithms-and-fairness.md` [18]). Kubernetes' `LeastAllocated` and `MostAllocated` (same note,
+[22]). Tetris's alignment, measured beside it ([19]).
+
+**Evidence.** `the_recorded_workload_strands_at_least_30_percent_less_than_best_fit` and
+`bench/sched/packing.md`. On every one of the 16 seeds of the mix and of each kind alone, on both node
+models, under all three clocks, Hex's scorer strands at least 30% less than both best fits at 90% load.
+- On m5d.metal, Hex strands nothing on any seed, against the best fits' 87-804 per-mille.
+- On the fleet's mix with no completions the least cut is 52.9% against best fit by CPU and 52.6% against
+  `MostAllocated`. Everywhere else on the fleet Hex strands nothing, against the best fits' 36-646
+  per-mille.
+- Every arm reaches 90% on every seed. Under completions, some launches end on the way on every seed.
+- Hex passes over no more launches than either best fit in any set: 2,556 across the seeds on the fleet's
+  mix with no completions, against 6,679 and 11,322, and none anywhere else. It passes over none below
+  half load and none for room.
+- The bar doesn't hang on the chosen speeds. Of the 179 ladder rows at which every arm reaches 90% on every
+  seed, Hex meets it on every seed of 176. In the other three, one seed has `MostAllocated` stranding
+  nothing either, so no cut is possible.
+- As context, on the fleet as it is (10 hosts), Hex meets the bar at each set's clocks on every seed
+  where a best fit strands something. Along the ladder, Firecracker alone at 500x misses on one seed:
+  Firecracker has two hosts there, and which of them holds the last few hundred millicores decides
+  whether 91 or 30 GiB of memory is stranded (`packing.md`).
+
+The bench measures the arms not taken beside it (`packing.md`), and every fragment-aware arm meets the bar.
+- Least stranded then most allocated is Hex's tie without the kinds. On m5d.metal, where every node runs
+  every kind, it is Hex's score. On the fleet it strands a little less on the mix with no completions (a
+  least cut of 54.1%), but it passes over 11,195 launches there, 950 of them below half load: Firecracker
+  microVMs wait for Linux room that the other kinds took.
+- Least stranded then Tetris's alignment (the plan's) passes over 2,397 on the fleet's mix with no
+  completions. Its cuts fall as low as 66.8% on m5d.metal and 31.7% on the fleet (Firecracker alone,
+  lifetimes as recorded), and it passes over launches in every set and clock on m5d.metal, and in all but
+  one on the fleet (Shards alone, lifetimes as recorded).
+
+On kiln's CI trace, a side measurement since Ada's correction, every node runs every kind, so Hex's tie
+there is most allocated too. That arm met the bar on 8 of 16 seeds of kiln's fourteen days, with no
+completions (`packing.md`, the record at `ad3053c`); least stranded then least allocated met it on all 16.
+
+**What would falsify it.**
+- A recorded microVM workload on which Hex's scorer strands no less than best fit, or passes over more
+  arrivals on the way to the same load.
+- The narrowest-node tie spends first the nodes few kinds can use. A workload whose kinds skew against the
+  fleet's could exhaust those nodes and refuse the next launches of their one kind.
+- Where every node runs every kind, the tie can't tell nodes apart and is most allocated. That strands
+  nothing on m5d.metal, but met the bar on only half of kiln's CI seeds.
+
+**Open.** Shards' own overhead and device model replace the stand-ins when Shards states them, and Hex's
+own launch records replace the given kinds once Hex runs microVMs for its users.
 
 ### H5. Bounded everywhere, no recursion
 
@@ -218,9 +382,9 @@ most once; handlers schedule events, never call each other's handlers in a cycle
 
 **Evidence.** `bounds_refuse_typed`: each bound, exceeded, returns its error.
 
-### H10. The control plane as shards: a Plane per node slice, one code path
+### H60. The control plane as shards: a Plane per node slice, one code path
 
-Implementation goal 6 (CP-T7.11). Sources for H10-H13 are cited by path and line in
+Implementation goal 6 (CP-T7.11). Sources for H60-H63 are cited by path and line in
 `docs/research/`. `SS[n]` refers to `docs/research/scheduler/scale-and-shards.md`.
 
 **The choice.** The nodes are split into `slices` contiguous ranges of node ids. Each slice is a
@@ -251,11 +415,11 @@ doubled under H6's nemesis with sharded planes.
 
 **What would falsify it.** A sharded run whose log the per-slice specification refuses, or one losing or
 doubling a workload. Or routing that strands work: a count of workloads pending on their slice while
-another slice could hold them, above 1% of the 1,000,000 at H13's bench. That would make the partition's
+another slice could hold them, above 1% of the 1,000,000 at H63's bench. That would make the partition's
 lost goodput the cost Hydra's falsifier names (`placement-algorithms-and-fairness.md:1335-1336`), and
 routing would then take free capacity into account.
 
-### H11. Shard loss and lease takeover: detection plus rebuild within 5 s
+### H61. Shard loss and lease takeover: detection plus rebuild within 5 s
 
 **The choice.** A shard holds each of its slices under a lease in the store: a record naming the
 holder, an epoch, and the expiry. The shard renews every 100 ms. The lease lapses when `lease_ns`
@@ -299,12 +463,12 @@ lost shard's write accepted after its slice was taken (a fencing defect). Or a w
 or disturbed by a takeover. The first is fixed by making the rebuild faster or the slices smaller,
 never by moving the bar (CLAUDE.md §4).
 
-### H12. Control-plane memory: a counting allocator over the store and the planes
+### H62. Control-plane memory: a counting allocator over the store and the planes
 
 **The choice.** `AC-T7.11.4`'s bytes per workload are measured, not computed from layouts
 (`Store::record_bytes` is the layout alone). The test binary `crates/hex-sim/tests/memory.rs`
 registers a counting global allocator over `System` that keeps live bytes (allocated minus freed). It
-runs 1,000,000 workloads on 10,000 nodes to H13's end state. It then drops the run's store and planes
+runs 1,000,000 workloads on 10,000 nodes to H63's end state. It then drops the run's store and planes
 (`Run.store`, `Run.planes`) and reads the count before and after. The difference, divided by the
 workloads, is the bytes per workload, against 4 KiB.
 
@@ -340,7 +504,7 @@ whose growth with workloads the counter doesn't show when the workload count dou
 resident memory growing by more than 4 KiB per workload while the count stays under. That would mean the
 allocator's overhead matters, and the bar would be re-measured at resident memory.
 
-### H13. The 1,000,000-placement bench and the kwok comparison
+### H63. The 1,000,000-placement bench and the kwok comparison
 
 **The choice.** One cluster shape serves both benches, so the comparison is class for class
 (CLAUDE.md §7). The pod is `scheduler_perf`'s pause pod: 100m CPU and 500Mi. The node is
@@ -398,12 +562,12 @@ Hex, which no cited floor replaces (`scale-and-shards.md:77-78`).
 Hex's side commits to an in-process store and kube-scheduler's to an API server and etcd. When Hex's
 store is Amphora over its seam, the comparison is run again.
 
-### H14. Cells and regions: a federation over independent cells, one code path
+### H64. Cells and regions: a federation over independent cells, one code path
 
 Implementation goal 7 (CP-T7.12, S7). `CR[n]` refers to `docs/research/scheduler/cells-and-regions.md`.
 
 **The choice.** A topology is `regions` regions of `cells` cells each. A cell is today's hex-sim run
-(`sim::run`) over its own nodes, with its own store and its own shards (H10, H11): nothing in one cell
+(`sim::run`) over its own nodes, with its own store and its own shards (H60, H61): nothing in one cell
 reads or writes another's store, plane or nodes. The nodes are split into regions, and each region's
 into cells, as `Layout` splits slices: contiguous ranges of node ids. A pure core,
 `federation::Federation` (sans-IO, CLAUDE.md §9), routes each workload once, when it arrives:
@@ -411,7 +575,7 @@ into cells, as `Layout` splits slices: contiguous ranges of node ids. A pure cor
   Federation does instead of a global allocator making ad hoc choices (CR[2] §7.3 p. 14,
   `cells-and-regions.md:31-38`);
 - in that region, to the first cell, from `(id / regions) mod cells` on, whose empty nodes admit it
-  (H10's rule one level up; the quotient, so that with as many cells as regions, or any shared factor,
+  (H60's rule one level up; the quotient, so that with as many cells as regions, or any shared factor,
   a region's work still spreads over all its cells). None does: it tries the other regions in order; none does: it's refused, typed.
 
 Each cell's workloads keep their arrival order and are numbered densely within it, as `Layout` numbers
@@ -425,20 +589,20 @@ Twine bounds by shards that each manage a small fraction (CR[2] §4 p. 9, `cells
 Explicit per-region capacity over regional planes: CR[2] §7.3 (`cells-and-regions.md:31-38`). Karmada
 spreads across clusters by topology groups (CR[7] `:446-461`, `cells-and-regions.md:62-63`).
 
-**Evidence.** H10's routing is already held by `tests/shards.rs`: a pure function of the spec and the
+**Evidence.** H60's routing is already held by `tests/shards.rs`: a pure function of the spec and the
 cluster, which needs no shared state, so the federation's is too. The one-code-path claim is a test
-(H17): one cell through the federation and `sim::run` give the same report and trace hash.
+(H67): one cell through the federation and `sim::run` give the same report and trace hash.
 
 **What would falsify it.** One cell through the federation differing from `sim::run` on any seed. Or
 any write, read or decision of one cell's touching another's nodes or store.
 
-### H15. A cell's control plane lost: no other cell's workload disturbed
+### H65. A cell's control plane lost: no other cell's workload disturbed
 
 **The choice.** A cell-loss drill loses every shard of one cell for good (`Nemesis::Lose` for each, with
 no live shard left to take over). No other cell's control plane takes over: a cell can't act on
-another's nodes (H14). The lost cell's running work keeps running (H7: node agents outlive the plane),
+another's nodes (H64). The lost cell's running work keeps running (H7: node agents outlive the plane),
 and its pending work waits; the drill doesn't re-route it, because a cell's loss is a repair, not a
-failover (the region's loss is, H16). `AC-T7.12.2`'s count of other cells' workloads disturbed is
+failover (the region's loss is, H66). `AC-T7.12.2`'s count of other cells' workloads disturbed is
 measured two ways: each other cell's run is the same, report and trace hash, as the same run without
 the loss; and `spec::check_kept_running` over them counts 0.
 
@@ -453,7 +617,7 @@ the next cell changes that cell's run, and the test fails.
 **What would falsify it.** Any other cell's report or trace differing with the loss, or a running
 workload in the lost cell stopped.
 
-### H16. A region lost: its work re-placed within the others' capacity, checked before it moves
+### H66. A region lost: its work re-placed within the others' capacity, checked before it moves
 
 **The choice.** A region is lost wholesale at time `at`: its nodes and its cells' planes. The
 federation sees it after `region_grace_ns` without a report (default 40 s, cited: Karmada's
@@ -462,7 +626,7 @@ is the drill's). Then:
 - **What moves:** every workload the federation routed to the lost region and not reported ended. A lost
   region is a total loss, as MultiKueue treats a lost worker (CR[11] `:351-356`). The region is fenced by
   an epoch: the federation refuses its reports after the loss, so a region that comes back can't start a
-  second copy (H11's rule one level up).
+  second copy (H61's rule one level up).
 - **Where it goes:** the federation reads each surviving region's per-node free capacity at the moment
   it acts, from that region's own store, not an estimate. It deducts first what is already pending
   there, then each moved workload as it admits it ("assume and deduct", CR[9] `:14`). A moved workload
@@ -486,7 +650,7 @@ without deducting the pending work overcommits, the test fails.
 **What would falsify it.** A moved workload refused while a surviving region could hold it, a node
 over capacity, or a workload started in two regions.
 
-### H17. The differential suite: one node, one cell, three regions, on one specification
+### H67. The differential suite: one node, one cell, three regions, on one specification
 
 **The choice.** `AC-T7.12.3`'s suite runs each of a set of generated seeds (H1's generator) at three
 scales: one node (the seed's first node, all its workloads), one cell (one region of one cell, the seed's
@@ -497,7 +661,7 @@ lost-or-double 0 (`spec::check_end`), every cell's log accepted by the serial sp
 typed, or waiting where no node of its routing has room. Where a node lands is not compared across
 scales, because capacity per domain differs by configuration: Csmith compares "within an equivalence
 class but not across classes" (CR[14] §2.6 p. 5, `cells-and-regions.md:76-83`). And one cell through
-the federation must equal `sim::run`, report and trace hash, on every seed (H14).
+the federation must equal `sim::run`, report and trace hash, on every seed (H64).
 
 **Sources.** Differential testing needs comparable, deterministic implementations, and a difference,
 loop or crash is a candidate bug (McKeeman CR[13] p. 1; Csmith CR[14] §2.1 p. 2,
@@ -506,13 +670,13 @@ loop or crash is a candidate bug (McKeeman CR[13] p. 1; Csmith CR[14] §2.1 p. 2
 specification, the same rule on another axis.
 
 **Evidence and falsifier.** The suite itself; any seed where a scale breaks an invariant, or one cell
-differs from `sim::run`, falsifies H14's one code path.
+differs from `sim::run`, falsifies H64's one code path.
 
-### H18. Cell selection against Karmada's
+### H68. Cell selection against Karmada's
 
 **The choice.** `crates/hex-bench/benches/sched_cells.rs` times the federation's selection on 100
 simulated cells, Karmada's 100 member clusters: each workload's route to a region and a cell with room,
-read from each cell's live free capacity and deducted as it goes (H16's check, the comparable step to
+read from each cell's live free capacity and deducted as it goes (H66's check, the comparable step to
 Karmada's capacity-weighted `cluster_schedule`). 2,000,000 workloads, Karmada's report's total, each
 timed alone. The record gives p50, p90, p99, p99.9 and max, release, fedora CPUs 4-15 under the timed
 lock, best of 5, in `bench/sched/cells.md`. The bar: p99 at most a fifth of Karmada's 32 ms.
@@ -528,8 +692,8 @@ Hex's selection is in-process; the record says so, as `bench/sched/kube_schedule
 
 Each goes with the implementation goal that needs it: the nemesis's faults other than crashes (gray, fail-slow, mass
 loss, the agent-specific faults; goal 5), inter-node latency and Vivaldi coordinates (goal 3), provider
-quotas (A3), priorities and fair share (goal 4), sharded control planes (decided in H10-H13, built by goal 6), cells and regions (decided in H14-H18, built by goal 7),
-heap accounting per workload (`AC-T7.11.4`, H12; `Store::record_bytes` is the record's layout only), and
+quotas (A3), priorities and fair share (goal 4), sharded control planes (decided in H60-H63, built by goal 6), cells and regions (decided in H64-H68, built by goal 7),
+heap accounting per workload (`AC-T7.11.4`, H62; `Store::record_bytes` is the record's layout only), and
 wall-clock throughput and tail of the real fast path (goal 2). The virtual costs in `Config::default`
 are chosen for tests, not measured; goal 2 sets them from the measured fast path.
 

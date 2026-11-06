@@ -1,4 +1,4 @@
-//! Cells and regions (`docs/design/hex-sim.md` H14-H16): a federation over independent cells, each
+//! Cells and regions (`docs/design/hex-sim.md` H64-H66): a federation over independent cells, each
 //! a hex-sim run of its own, with its own store and shards. A pure core: it routes workloads to
 //! cells, reads a region's capacity from its cells' stores and re-places a lost region's work; each
 //! cell runs as [`sim::run`] runs it alone.
@@ -25,13 +25,13 @@ pub struct Topology {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Loss {
     None,
-    /// Cell `cell` of region `region` loses its control plane for good at `at` (H15).
+    /// Cell `cell` of region `region` loses its control plane for good at `at` (H65).
     Cell {
         region: u32,
         cell: u32,
         at: Time,
     },
-    /// Region `region` is lost wholesale at `at`, its nodes with its cells' planes (H16).
+    /// Region `region` is lost wholesale at `at`, its nodes with its cells' planes (H66).
     Region {
         region: u32,
         at: Time,
@@ -58,7 +58,7 @@ pub struct CellRun {
     pub run: Run,
 }
 
-/// Where a workload moved off a lost region went (H16).
+/// Where a workload moved off a lost region went (H66).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Moved {
     /// To cell `cell` of region `region`, whose free nodes held it.
@@ -104,7 +104,7 @@ impl Topo {
 
     /// The region a workload goes to, and the cell in it: its home region (`id mod regions`) or the
     /// first after whose empty nodes admit it, then that region's first such cell from `(id /
-    /// regions) mod cells` (H14), so the cell doesn't repeat the region's choice. One that nothing
+    /// regions) mod cells` (H64), so the cell doesn't repeat the region's choice. One that nothing
     /// admits goes to its home's home cell, which refuses it.
     fn route(&self, spec: &WorkloadSpec) -> Result<usize, SimError> {
         let r = match self.regions.route(spec) {
@@ -205,7 +205,7 @@ pub fn run(cluster: &Cluster, config: &FedConfig) -> Result<FedRun, SimError> {
     }
     let mut cells = Vec::with_capacity(n);
     for (at, list) in work.iter().enumerate() {
-        cells.push(cell_run(&topo, config, at, list.clone())?);
+        cells.push(cell_run(&topo, cluster, config, at, list.clone())?);
     }
     let Loss::Region { region, at } = config.loss else {
         return Ok(FedRun {
@@ -261,14 +261,16 @@ pub fn run(cluster: &Cluster, config: &FedConfig) -> Result<FedRun, SimError> {
         let mut list = work.get(i).ok_or(SimError::Config("cell index"))?.clone();
         // Moved work arrives at or after `when`, so a stable sort keeps the cell's own order.
         list.sort_by_key(|w| w.arrives);
-        *slot = cell_run(&topo, config, i, list)?;
+        *slot = cell_run(&topo, cluster, config, i, list)?;
     }
     Ok(FedRun { cells, moved })
 }
 
-/// Runs cell `at` over its workloads (cluster ids, in arrival order), numbered densely within it.
+/// Runs cell `at` over its workloads (cluster ids, in arrival order), numbered densely within it,
+/// with the whole cluster's owners, groups and overheads.
 fn cell_run(
     topo: &Topo,
+    whole: &Cluster,
     config: &FedConfig,
     at: usize,
     list: Vec<WorkloadSpec>,
@@ -284,6 +286,9 @@ fn cell_run(
     let cluster = Cluster {
         nodes: topo.nodes(at)?.to_vec(),
         workloads,
+        owners: whole.owners.clone(),
+        groups: whole.groups.clone(),
+        overheads: whole.overheads,
     };
     let lost_at = match config.loss {
         Loss::Cell {
@@ -313,7 +318,7 @@ fn cell_run(
 
 /// A surviving cell's free nodes at `when`, read from its store's log (what it has placed and not
 /// seen done by then), less what waits in its queue then, each on the best fit the cell itself would
-/// give it, in queue order ("assume and deduct", H16).
+/// give it, in queue order ("assume and deduct", H66).
 fn snapshot(c: &CellRun, when: Time, config: &FedConfig) -> Result<FitIndex, SimError> {
     let mut index = FitIndex::new(&c.cluster.nodes)?;
     let mut queued = Vec::new();
@@ -345,7 +350,7 @@ fn snapshot(c: &CellRun, when: Time, config: &FedConfig) -> Result<FitIndex, Sim
 }
 
 /// A lost cell's workloads its store hadn't recorded done by `at`, by their ids in the cluster: a
-/// lost region is a total loss (H16).
+/// lost region is a total loss (H66).
 fn unfinished(c: &CellRun, at: Time) -> Result<Vec<WorkloadSpec>, SimError> {
     let mut done = vec![false; c.cluster.workloads.len()];
     for e in c.run.store.log().iter().take_while(|e| e.at <= at) {
@@ -375,7 +380,7 @@ pub struct Admitted {
 }
 
 /// Each cell's free nodes as the federation sees them, a cell it can't place on held as none, and
-/// the admission over them: H16's re-placement of a lost region's work and H18's selection.
+/// the admission over them: H66's re-placement of a lost region's work and H68's selection.
 #[derive(Debug, Clone)]
 pub struct Capacity {
     topo: Topo,
@@ -397,7 +402,7 @@ impl Capacity {
 
     /// The first region from the workload's home (`id mod regions`) on, and in it the first cell
     /// from `(id / regions) mod cells` on, whose free nodes hold it by the cells' own sampled best
-    /// fit; that node's capacity is deducted ("assume and deduct", H16). `None`: no node of any cell
+    /// fit; that node's capacity is deducted ("assume and deduct", H66). `None`: no node of any cell
     /// holds it.
     pub fn admit(&mut self, w: &WorkloadSpec) -> Result<Option<Admitted>, SimError> {
         let Topology { regions, cells } = self.topo.topology;

@@ -1,8 +1,8 @@
-# Cell selection on 100 simulated cells, against Karmada's (G7, H18)
+# Cell selection on 100 simulated cells, against Karmada's (G7, H68)
 
 **Bar:** the federation's selection of a cell for a workload, on 100 simulated cells, at p99 at most a
 fifth of Karmada's `cluster_schedule` P99 of 32 ms on 100 simulated member clusters, so 6.4 ms
-(`docs/design/hex-sim.md` H18; Karmada's 2022 report, `cluster-managers-at-scale.md:239-245`, [41],
+(`docs/design/hex-sim.md` H68; Karmada's 2022 report, `cluster-managers-at-scale.md:239-245`, [41],
 MV). **Result: MET.** Best p99 of 5 is 3.77 µs, about 8,500x below Karmada's 32 ms. Every run selected
 all 2,000,000, and every cell got exactly 20,000.
 
@@ -20,10 +20,10 @@ Karmada, as reported: P50 12 ms, P90 15 ms, P99 32 ms.
 
 `crates/hex-bench/benches/sched_cells.rs` (its header says how).
 - **The topology** is Karmada's report's: 100 cells (10 regions of 10) of 5,000 nodes each, 500,000
-  nodes, and 2,000,000 workloads, 20,000 a cell. The node and the pod are H13's: 11 CPU and 55 GiB,
+  nodes, and 2,000,000 workloads, 20,000 a cell. The node and the pod are H63's: 11 CPU and 55 GiB,
   and `scheduler_perf`'s pause pod, 100m and 500Mi.
-- **Timed, each workload alone:** `federation::Capacity::admit`, the federation's own selection (H14,
-  H16). It routes the workload to its home region and cell, and on to the first with room. It reads that
+- **Timed, each workload alone:** `federation::Capacity::admit`, the federation's own selection (H64,
+  H66). It routes the workload to its home region and cell, and on to the first with room. It reads that
   cell's live free nodes by the cells' sampled best fit (kube-scheduler's floors of 100 nodes or 5%), and
   deducts the node it takes. Wall-clock, `Instant` around each call, release build.
 - The run of record is the one with the best p99. Every run is above.
@@ -46,7 +46,7 @@ Karmada, as reported: P50 12 ms, P90 15 ms, P99 32 ms.
 At 531f75a (unit hex-sched-g6-cells-20261105T092251Z, same host and method) the best p99 was 6.45 µs,
 but `cells_min=0 cells_max=200000`. The home region was `id mod regions` and the home cell `id mod
 cells`, the same residue on 10 regions of 10, so only the 10 diagonal cells got work. 84485f5 starts
-the cell from `(id / regions) mod cells` (H14), held by
+the cell from `(id / regions) mod cells` (H64), held by
 `every_cell_gets_work_when_regions_and_cells_share_a_factor` in `crates/hex-sim/tests/cells.rs`. That
 run isn't of record.
 

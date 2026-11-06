@@ -1,4 +1,4 @@
-//! AC-T7.11.3's cluster, on both sides of the comparison (`docs/design/hex-sim.md` H13,
+//! AC-T7.11.3's cluster, on both sides of the comparison (`docs/design/hex-sim.md` H63,
 //! `bench/sched/kube_scheduler_kwok.md`): 10,000 nodes of `scheduler_perf`'s node sized to hold its
 //! own 110-pod limit (11 CPU, 55 GiB, 110 pods) and 50,000 of its pause pods (100m CPU, 500Mi).
 //!
@@ -38,7 +38,9 @@ use std::sync::Barrier;
 use std::time::{Duration, Instant};
 
 use hex_sim::index::{FitIndex, Sample};
-use hex_sim::model::{Kind, NodeId, NodeSpec, Resources, WorkloadId, WorkloadSpec};
+use hex_sim::model::{
+    Class, Classes, Kind, NodeId, NodeSpec, Resources, Tenancy, WorkloadId, WorkloadSpec,
+};
 use hex_sim::store::{Outcome, State, Store, Write};
 
 const NODES: u32 = 10_000;
@@ -65,6 +67,7 @@ fn nodes() -> Vec<NodeSpec> {
             id: NodeId(id),
             capacity: NODE,
             background_milli: 0,
+            classes: Classes::ALL,
         })
         .collect()
 }
@@ -77,6 +80,8 @@ fn pods() -> Vec<WorkloadSpec> {
             kind: Kind::Plain,
             arrives: 0,
             runs_for: None,
+            tenancy: Tenancy::default(),
+            class: Class::Oci,
         })
         .collect()
 }

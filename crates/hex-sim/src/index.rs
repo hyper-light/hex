@@ -8,7 +8,7 @@
 //! can't disagree on a tie. Best fit is the baseline the design scores against (Borg's, S1, CM[1]).
 
 use crate::error::SimError;
-use crate::model::{Demand, Kind, NodeId, NodeSpec, Resources};
+use crate::model::{Class, Classes, Demand, Kind, NodeId, NodeSpec, Resources};
 use crate::trace::TraceHash;
 
 /// A session is refused a node whose CPU in use, background and placed, is above this share of
@@ -52,20 +52,20 @@ pub struct Sample {
     pub shapes: Shapes,
 }
 
-/// At most [`Shapes::MAX`] workload shapes, kept in a fixed array so a [`Sample`] stays a plain
-/// value. Past the bound, [`Shapes::of`] keeps the smallest (by CPU, then memory, then GPUs): a free
-/// capacity a larger shape fits, a smaller one fits too, so the smallest are what decide whether a
-/// leftover can still be used.
+/// At most [`Shapes::MAX`] workload shapes, each with the class that asks it, kept in a fixed array
+/// so a [`Sample`] stays a plain value. Past the bound, [`Shapes::of`] keeps the smallest (by CPU,
+/// then memory, then GPUs, then class): a free capacity a larger shape fits, a smaller one fits too,
+/// so the smallest are what decide whether a leftover can still be used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Shapes {
     len: usize,
-    items: [Resources; Shapes::MAX],
+    items: [(Resources, Class); Shapes::MAX],
 }
 
 impl Shapes {
     pub const MAX: usize = 16;
 
-    pub fn of(mut shapes: Vec<Resources>) -> Self {
+    pub fn of(mut shapes: Vec<(Resources, Class)>) -> Self {
         shapes.sort_unstable();
         shapes.dedup();
         let mut out = Self::default();
@@ -76,13 +76,14 @@ impl Shapes {
         out
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &Resources> {
+    pub fn iter(&self) -> impl Iterator<Item = &(Resources, Class)> {
         self.items.iter().take(self.len)
     }
 
-    /// Whether some shape fits `free`.
-    fn usable(&self, free: &Resources) -> bool {
-        self.iter().any(|s| free.holds(s))
+    /// Whether some shape of a class `classes` holds fits `free`.
+    pub fn usable(&self, free: &Resources, classes: Classes) -> bool {
+        self.iter()
+            .any(|(shape, class)| classes.has(*class) && free.holds(shape))
     }
 }
 
@@ -92,14 +93,42 @@ pub enum Scorer {
     /// The least free capacity first ([`Key`]'s order): best fit, the baseline (Borg's, S1).
     #[default]
     BestFit,
+    /// Best fit across resources: the node most allocated once the need is placed, CPU and memory
+    /// each as a share of the node's and weighted alike, as Kubernetes' `MostAllocated` bin-packing
+    /// score is; then [`Key`]'s order. [`Scorer::BestFit`] ranks by free CPU first, which on a
+    /// memory-bound workload stops packing the resource that binds.
+    MostAllocated,
     /// Tetris's alignment (Grandl et al., SIGCOMM 2014): the largest dot product of the need and the
     /// node's free capacity, each resource taken as a share of the node's capacity, ties by
     /// [`Key`]'s order.
     Align,
     /// Least stranded: the node whose leftover after placing the need is either nothing or still
-    /// fits one of the sample's [`Shapes`], so no CPU is left that no workload can use; then
-    /// [`Scorer::Align`]; then [`Key`]'s order.
-    Fragment,
+    /// fits one of the sample's [`Shapes`], so no CPU or memory is left that no workload can use;
+    /// then the [`Tie`]; then [`Key`]'s order. [`Scorer::HEX`] is Hex's packing score.
+    Fragment(Tie),
+}
+
+impl Scorer {
+    /// Hex's packing score: least stranded, then the node that runs the fewest classes, then the most
+    /// allocated, so a node only some classes can use is spent before one that every class can, and
+    /// what isn't stranded packs. On the recorded workload of OCI containers, Firecracker microVMs and
+    /// Shards microVMs it strands at least 30% less than either best fit at 90% load on every seed,
+    /// for the mix and for each class alone, and passes over fewer of them (hex-sim.md H11).
+    pub const HEX: Self = Self::Fragment(Tie::Narrowest);
+}
+
+/// What ranks the nodes [`Scorer::Fragment`] finds equally stranded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tie {
+    /// Tetris's alignment ([`Scorer::Align`]): the plan's alignment score with a fragmentation term.
+    Align,
+    /// The node least allocated once the need is placed (Kubernetes' `LeastAllocated`).
+    LeastAllocated,
+    /// The node most allocated once the need is placed (Kubernetes' `MostAllocated`).
+    MostAllocated,
+    /// The node that runs the fewest classes, then the most allocated: a node every class can use is
+    /// kept for the classes only it can take.
+    Narrowest,
 }
 
 impl Default for Sample {
@@ -109,10 +138,7 @@ impl Default for Sample {
             min_feasible: 100,
             per_mille: 50,
             scorer: Scorer::BestFit,
-            shapes: Shapes {
-                len: 0,
-                items: [Resources::default(); Shapes::MAX],
-            },
+            shapes: Shapes::default(),
         }
     }
 }
@@ -125,10 +151,7 @@ impl Sample {
             min_feasible: u32::MAX,
             per_mille: 0,
             scorer: Scorer::BestFit,
-            shapes: Shapes {
-                len: 0,
-                items: [Resources::default(); Shapes::MAX],
-            },
+            shapes: Shapes::default(),
         }
     }
 
@@ -151,6 +174,7 @@ impl Sample {
             need.mem_bytes,
             u64::from(need.gpus),
             kind_word(demand.kind),
+            class_word(demand.class),
         ] {
             h.word(word);
         }
@@ -159,6 +183,14 @@ impl Sample {
             .and_then(|n| h.finish().checked_rem(n))
             .and_then(|at| usize::try_from(at).ok())
             .unwrap_or(0)
+    }
+}
+
+fn class_word(class: Class) -> u64 {
+    match class {
+        Class::Oci => 0,
+        Class::Firecracker => 1,
+        Class::Shards => 2,
     }
 }
 
@@ -171,6 +203,14 @@ fn kind_word(kind: Kind) -> u64 {
     }
 }
 
+/// `part` as a share of `whole` in millionths; 0 of a whole of 0, and past u64 saturates.
+fn millionths(part: u64, whole: u64) -> u64 {
+    u128::from(part)
+        .checked_mul(1_000_000)
+        .and_then(|x| x.checked_div(u128::from(whole)))
+        .map_or(0, |x| u64::try_from(x).unwrap_or(u64::MAX))
+}
+
 /// Nodes a scan passed over because a filter refused them though they had the room, by filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Refusals {
@@ -180,6 +220,8 @@ pub struct Refusals {
     pub shares: u64,
     /// A session, a node above 90% CPU.
     pub hot: u64,
+    /// A workload of a class the node can't run.
+    pub class: u64,
 }
 
 /// A sampled decision: the best fit among the scanned nodes that admit the demand, the window
@@ -208,6 +250,8 @@ impl Sampled {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     Admits,
+    NoClass,
+    /// The need asks a GPU the node hasn't, or that its class can't be given ([`Class::takes_gpus`]).
     NoGpu,
     NoRoom,
     Shares,
@@ -219,6 +263,7 @@ struct Slot {
     capacity: Resources,
     free: Resources,
     background_milli: u64,
+    classes: Classes,
     builds: u32,
     benchmarks: u32,
 }
@@ -226,7 +271,10 @@ struct Slot {
 impl Slot {
     fn verdict(&self, demand: &Demand) -> Verdict {
         let need = &demand.need;
-        if need.gpus > 0 && self.capacity.gpus == 0 {
+        if !self.classes.has(demand.class) {
+            return Verdict::NoClass;
+        }
+        if need.gpus > 0 && (self.capacity.gpus == 0 || !demand.class.takes_gpus()) {
             return Verdict::NoGpu;
         }
         if !self.free.holds(need) {
@@ -244,14 +292,8 @@ impl Slot {
     /// GPUs of (need / capacity) * (free / capacity), each share in millionths, so each term is at
     /// most 10^12 and the sum fits u64. A resource the node has none of adds nothing.
     fn alignment(&self, need: &Resources) -> u64 {
-        let share = |part: u64, whole: u64| -> u64 {
-            u128::from(part)
-                .checked_mul(1_000_000)
-                .and_then(|x| x.checked_div(u128::from(whole)))
-                .and_then(|x| u64::try_from(x).ok())
-                .unwrap_or(0)
-        };
-        let term = |n: u64, f: u64, c: u64| share(n, c).checked_mul(share(f, c)).unwrap_or(0);
+        let term =
+            |n: u64, f: u64, c: u64| millionths(n, c).checked_mul(millionths(f, c)).unwrap_or(0);
         let (c, f) = (&self.capacity, &self.free);
         [
             term(need.cpu_milli, f.cpu_milli, c.cpu_milli),
@@ -262,17 +304,30 @@ impl Slot {
         .fold(0u64, u64::saturating_add)
     }
 
-    /// The CPU placing `need` here would leave that no shape can use: the leftover's CPU when it
-    /// isn't empty and fits no shape, else nothing.
+    /// What placing `need` here would leave that no shape can use: when the leftover fits no shape,
+    /// its CPU and its memory, each as a share of the node's in millionths, summed; else nothing.
     fn stranded_after(&self, need: &Resources, shapes: &Shapes) -> u64 {
         let Some(left) = self.free.checked_sub(need) else {
             return u64::MAX;
         };
-        if left.cpu_milli == 0 || shapes.usable(&left) {
+        if shapes.usable(&left, self.classes) {
             0
         } else {
-            left.cpu_milli
+            let c = &self.capacity;
+            millionths(left.cpu_milli, c.cpu_milli)
+                .saturating_add(millionths(left.mem_bytes, c.mem_bytes))
         }
+    }
+
+    /// The node's CPU and memory allocated once `need` is placed, each as a share of the node's in
+    /// millionths, summed: Kubernetes' `MostAllocated` score with equal weights, and the inverse of
+    /// its `LeastAllocated`.
+    fn allocated_after(&self, need: &Resources) -> u64 {
+        let (c, f) = (&self.capacity, &self.free);
+        let used = |cap: u64, free: u64, more: u64| cap.saturating_sub(free).saturating_add(more);
+        millionths(used(c.cpu_milli, f.cpu_milli, need.cpu_milli), c.cpu_milli).saturating_add(
+            millionths(used(c.mem_bytes, f.mem_bytes, need.mem_bytes), c.mem_bytes),
+        )
     }
 
     /// CPU in use, background and placed, above 90% of the node's CPU. Compared as
@@ -311,6 +366,7 @@ impl FitIndex {
                 capacity: node.capacity,
                 free: node.capacity,
                 background_milli: node.background_milli,
+                classes: node.classes,
                 builds: 0,
                 benchmarks: 0,
             });
@@ -372,6 +428,10 @@ impl FitIndex {
             match slot.verdict(demand) {
                 Verdict::Admits => {}
                 Verdict::NoRoom => continue,
+                Verdict::NoClass => {
+                    refused.class = refused.class.saturating_add(1);
+                    continue;
+                }
                 Verdict::NoGpu => {
                     refused.gpu = refused.gpu.saturating_add(1);
                     continue;
@@ -388,15 +448,30 @@ impl FitIndex {
             let key = Key::of(NodeId(id), &slot.free);
             let score = match sample.scorer {
                 Scorer::BestFit => 0,
+                Scorer::MostAllocated => u128::from(slot.allocated_after(&demand.need)),
                 Scorer::Align => u128::from(slot.alignment(&demand.need)),
-                Scorer::Fragment => {
-                    // Lexicographic in one number: least stranded CPU in the high word, then
-                    // alignment in the low word.
+                Scorer::Fragment(tie) => {
+                    // Lexicographic in one number: least stranded capacity in the high word, then
+                    // the tie in the low word.
                     let stranded = slot.stranded_after(&demand.need, &sample.shapes);
+                    let then = match tie {
+                        Tie::Align => slot.alignment(&demand.need),
+                        Tie::LeastAllocated => {
+                            u64::MAX.saturating_sub(slot.allocated_after(&demand.need))
+                        }
+                        Tie::MostAllocated => slot.allocated_after(&demand.need),
+                        // Fewer classes in the high bits; the allocation (at most 2,000,000) below.
+                        Tie::Narrowest => {
+                            u64::from(3u32.saturating_sub(slot.classes.count()))
+                                .checked_shl(32)
+                                .unwrap_or(0)
+                                | slot.allocated_after(&demand.need)
+                        }
+                    };
                     u128::from(u64::MAX.saturating_sub(stranded))
                         .checked_mul(1 << 64)
                         .unwrap_or(0)
-                        | u128::from(slot.alignment(&demand.need))
+                        | u128::from(then)
                 }
             };
             // A higher score wins; between equal scores, the least key.
@@ -483,6 +558,7 @@ mod tests {
         Demand {
             need,
             kind: Kind::Plain,
+            class: Class::Oci,
         }
     }
 
@@ -493,6 +569,7 @@ mod tests {
                 id: NodeId(u32::try_from(i).unwrap()),
                 capacity: *c,
                 background_milli: 0,
+                classes: Classes::ALL,
             })
             .collect()
     }
@@ -528,6 +605,61 @@ mod tests {
         assert_eq!(fit(res(1000, 8, 1)), None);
     }
 
+    /// S3's filters in Hex's kinds (AC-T7.4.3's workload): do a Firecracker microVM where one node
+    /// runs only OCI containers and the other every class; expect the first to refuse it as NoClass
+    /// and the scan to count that refusal, and an OCI container still to fit both.
+    #[test]
+    fn a_class_the_node_cant_run_is_refused() {
+        let mut nodes = nodes(&[res(8_000, 8, 0), res(8_000, 8, 0)]);
+        nodes[0].classes = Classes::NONE.with(Class::Oci);
+        let index = FitIndex::new(&nodes).unwrap();
+        let microvm = Demand {
+            need: res(1_000, 1, 0),
+            kind: Kind::Plain,
+            class: Class::Firecracker,
+        };
+        assert_eq!(
+            index.verdict(NodeId(0), &microvm).unwrap(),
+            Verdict::NoClass
+        );
+        assert_eq!(index.verdict(NodeId(1), &microvm).unwrap(), Verdict::Admits);
+        let s = index.sampled_fit(&microvm, &Sample::whole());
+        assert_eq!(
+            (s.best.map(|k| k.node), s.refused.class),
+            (Some(NodeId(1)), 1)
+        );
+        let container = plain(res(1_000, 1, 0));
+        assert_eq!(
+            index.verdict(NodeId(0), &container).unwrap(),
+            Verdict::Admits
+        );
+    }
+
+    /// S3's GPU filter in Hex's kinds: do an OCI container, a Firecracker microVM and a Shards
+    /// microVM, each asking a GPU, on a GPU node that runs every class; expect the container admitted
+    /// and each microVM refused as NoGpu (neither can be given a GPU), so no node admits it and
+    /// admission turns it away.
+    #[test]
+    fn only_an_oci_container_is_given_a_gpu() {
+        let index = FitIndex::new(&nodes(&[res(8_000, 8, 2)])).unwrap();
+        let asking = |class| Demand {
+            need: res(1_000, 1, 1),
+            kind: Kind::Plain,
+            class,
+        };
+        assert_eq!(
+            index.verdict(NodeId(0), &asking(Class::Oci)).unwrap(),
+            Verdict::Admits
+        );
+        for class in [Class::Firecracker, Class::Shards] {
+            assert_eq!(
+                index.verdict(NodeId(0), &asking(class)).unwrap(),
+                Verdict::NoGpu
+            );
+            assert!(!index.admitted_anywhere(&asking(class)));
+        }
+    }
+
     /// AC-T7.6.3 and S3's filters, each alone: a benchmark refused beside a build and a build beside a
     /// benchmark; a session refused a node above 90% CPU, counting its background; GPU work refused a
     /// node without GPUs.
@@ -539,6 +671,7 @@ mod tests {
         let session = Demand {
             need: res(1_000, 1, 0),
             kind: Kind::Session,
+            class: Class::Oci,
         };
         assert_eq!(index.verdict(NodeId(0), &session).unwrap(), Verdict::Hot);
         assert_eq!(index.verdict(NodeId(1), &session).unwrap(), Verdict::Admits);
@@ -547,10 +680,12 @@ mod tests {
         let build = Demand {
             need: res(1, 1, 0),
             kind: Kind::Build,
+            class: Class::Oci,
         };
         let bench = Demand {
             need: res(1, 1, 0),
             kind: Kind::Benchmark,
+            class: Class::Oci,
         };
         index.take(NodeId(1), &build).unwrap();
         assert_eq!(index.verdict(NodeId(1), &bench).unwrap(), Verdict::Shares);
@@ -640,10 +775,10 @@ mod tests {
             let mut index = FitIndex::new(&ns).unwrap();
             for (node, c, m, g, k) in ops {
                 let node = NodeId(node % u32::try_from(caps.len()).unwrap());
-                let _ = index.take(node, &Demand { need: res(c, m, g), kind: kind(k) });
+                let _ = index.take(node, &Demand { need: res(c, m, g), kind: kind(k), class: Class::Oci });
             }
             for (c, m, g, k) in needs {
-                let demand = Demand { need: res(c, m, g), kind: kind(k) };
+                let demand = Demand { need: res(c, m, g), kind: kind(k), class: Class::Oci };
                 proptest::prop_assert_eq!(index.sampled_fit(&demand, &Sample::whole()).best, oracle(&index, &demand));
             }
         }

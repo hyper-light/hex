@@ -1,16 +1,16 @@
 //! AC-T7.11.2's bench: wall time to place 1,000,000 pending workloads on 10,000 nodes, on a release
-//! build, against a bar of 120 s (G6 step 4; the method is `docs/design/hex-sim.md` H13).
+//! build, against a bar of 120 s (G6 step 4; the method is `docs/design/hex-sim.md` H63).
 //!
 //!   cargo bench -p hex-bench --bench sched_million -- [runs] [slices] [pods|mixed] [check]
 //!
-//! The cluster is H13's: 10,000 nodes of 11 CPU and 55 GiB (`scheduler_perf`'s node sized to hold
+//! The cluster is H63's: 10,000 nodes of 11 CPU and 55 GiB (`scheduler_perf`'s node sized to hold
 //! its 110-pod limit of its pod), no co-tenants. Row `pods` is 1,000,000 of `scheduler_perf`'s pause
 //! pod, 100m and 500Mi, filling the 1,100,000 slots to 91%. Row `mixed` draws each need uniformly
 //! from 1-199m and 1-999 MiB (the same means, so the same budget) and its kind as hex-sim's generator
 //! does (40% plain, 25% builds, 15% benchmarks, 20% sessions), so H9's filters run and a one-class
 //! best case never stands alone.
 //!
-//! The control plane is sharded as H10 decides, by hex-sim's own `sim::Layout`: the nodes are split
+//! The control plane is sharded as H60 decides, by hex-sim's own `sim::Layout`: the nodes are split
 //! into `slices` contiguous ranges, and each workload is routed to the first slice, from slice
 //! `id mod slices` on, holding a node that would admit it empty. Every workload is submitted to the one store before the clock starts, so all
 //! 1,000,000 are pending at once and none ends. Then one thread per slice runs hex-sim's own fast path
@@ -42,7 +42,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use hex_sim::index::{FitIndex, Sample};
-use hex_sim::model::{Kind, NodeId, NodeSpec, Resources, WorkloadId, WorkloadSpec};
+use hex_sim::model::{
+    Class, Classes, Kind, NodeId, NodeSpec, Resources, Tenancy, WorkloadId, WorkloadSpec,
+};
 use hex_sim::rng::Rng;
 use hex_sim::sim::{Layout, Report, Run};
 use hex_sim::spec;
@@ -98,6 +100,8 @@ fn workloads(row: Row, seed: u64) -> Vec<WorkloadSpec> {
                 kind,
                 arrives: 0,
                 runs_for: None,
+                tenancy: Tenancy::default(),
+                class: Class::Oci,
             }
         })
         .collect()
@@ -126,6 +130,7 @@ fn setup(row: Row, seed: u64, slices: u32) -> (Vec<NodeSpec>, Vec<Slice>, Store)
             id: NodeId(id),
             capacity: NODE,
             background_milli: 0,
+            classes: Classes::ALL,
         })
         .collect();
     let layout = Layout::new(&nodes, slices).unwrap();

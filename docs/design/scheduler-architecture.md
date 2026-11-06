@@ -75,7 +75,8 @@ on 44 to 256 GPUs or nodes (finding 4). Best-fit packing alone strands capacity 
 (Borg CM[1]); `AC-T7.4.3` holds Hex to ≥30% less stranded capacity than best-fit at 90% load.
 
 **What would falsify it.** A balance-only or best-fit-only scorer matching the goodput objective on the
-recorded kiln workload in hex-sim (`AC-T7.4.3`), or the goodput model costing more to evaluate than the
+recorded workload of OCI containers, Firecracker microVMs and Shards microVMs in hex-sim (`AC-T7.4.3`), or
+the goodput model costing more to evaluate than the
 10 ms p99 budget allows at 10,000/s (`AC-T7.4.2`) — in which case goodput moves to the optimiser tier
 (S2) and the fast path scores a cheap proxy.
 
@@ -238,22 +239,22 @@ over within 5 s) is the shard-failure bound.
 
 The cell's sharding, its shard-loss takeover, its memory accounting and its scale benches are decided in
 `hex-sim.md`:
-- H10: shards as one Plane per contiguous node slice, with workloads routed by a pure function of
+- H60: shards as one Plane per contiguous node slice, with workloads routed by a pure function of
   spec and cluster; `slices = 1` is today's plane.
-- H11: lease takeover. `lease_ns` is 1 s, renewed every 100 ms, from etcd's defaults; the rebuild from
+- H61: lease takeover. `lease_ns` is 1 s, renewed every 100 ms, from etcd's defaults; the rebuild from
   the store is measured within `T-T7.11.1`'s 5 s.
-- H12: a counting allocator over the store and the planes (`AC-T7.11.4`).
-- H13: the 1,000,000-placement bench and the kwok comparison method, with kube-scheduler at its default
+- H62: a counting allocator over the store and the planes (`AC-T7.11.4`).
+- H63: the 1,000,000-placement bench and the kwok comparison method, with kube-scheduler at its default
   and raised QPS, on the same node and pod shapes (`AC-T7.11.2`, `AC-T7.11.3`).
 
 Cells and regions are decided there too:
-- H14: a federation over independent cells, each today's hex-sim run with its own store and shards;
+- H64: a federation over independent cells, each today's hex-sim run with its own store and shards;
   workloads routed to a home region, then a cell, by pure functions; one cell is `sim::run` bit for bit.
-- H15: the cell-loss drill (`AC-T7.12.2`), measured as every other cell's run unchanged.
-- H16: a lost region's work moved only where a surviving region's live free capacity holds it, after
+- H65: the cell-loss drill (`AC-T7.12.2`), measured as every other cell's run unchanged.
+- H66: a lost region's work moved only where a surviving region's live free capacity holds it, after
   deducting what is pending there; the rest refused, typed (`T-T7.12.1`).
-- H17: the differential suite on one node, one cell and three regions (`AC-T7.12.3`).
-- H18: cell selection on 100 simulated cells against Karmada's P99 32 ms.
+- H67: the differential suite on one node, one cell and three regions (`AC-T7.12.3`).
+- H68: cell selection on 100 simulated cells against Karmada's P99 32 ms.
 
 **What would falsify it.** The differential suite diverging across one node, one cell and three regions
 (`AC-T7.12.3`), or a cell's control-plane loss disturbing another cell's workloads (`AC-T7.12.2`, the

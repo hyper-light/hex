@@ -14,7 +14,7 @@
 //! - [`generate`]: generated clusters and workloads from a seed.
 //! - [`replay`]: a recorded workload read from text, for replaying a real day.
 //! - [`packing`]: stranded capacity at a load, the measure of `AC-T7.4.3`.
-//! - [`federation`]: cells and regions, a federation over independent cells (H14-H16).
+//! - [`federation`]: cells and regions, a federation over independent cells (H64-H66).
 
 #![cfg_attr(
     test,

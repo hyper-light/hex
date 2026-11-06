@@ -1,15 +1,15 @@
-//! H18's bench: the federation's cell selection on 100 simulated cells, against Karmada's
-//! `cluster_schedule` P99 of 32 ms on 100 simulated member clusters (`docs/design/hex-sim.md` H18;
+//! H68's bench: the federation's cell selection on 100 simulated cells, against Karmada's
+//! `cluster_schedule` P99 of 32 ms on 100 simulated member clusters (`docs/design/hex-sim.md` H68;
 //! `cluster-managers-at-scale.md:239-245`). The bar is a p99 at most a fifth of Karmada's, 6.4 ms.
 //!
 //!   cargo bench -p hex-bench --bench sched_cells -- [runs]
 //!
 //! The topology is Karmada's report's: 100 cells (10 regions of 10) of 5,000 nodes each, 500,000
-//! nodes, and 2,000,000 workloads, 20,000 a cell. The node and the pod are H13's: 11 CPU and 55 GiB,
+//! nodes, and 2,000,000 workloads, 20,000 a cell. The node and the pod are H63's: 11 CPU and 55 GiB,
 //! and `scheduler_perf`'s pause pod, 100m and 500Mi. Each workload's selection is timed alone,
 //! wall-clock, on a release build: `federation::Capacity::admit`, which routes it to its home region
 //! and cell and on to the first with room, reads that cell's live free nodes by the cells' sampled
-//! best fit, and deducts the node it takes (H16's check, run for every workload). The record gives
+//! best fit, and deducts the node it takes (H66's check, run for every workload). The record gives
 //! p50, p90, p99, p99.9 and max of each run, and the run of record is the one with the best p99.
 // A bench (not production, CLAUDE.md): it takes the test-style allowances, as the other benches do.
 #![allow(
@@ -28,7 +28,9 @@ use std::time::{Duration, Instant};
 
 use hex_sim::federation::{Capacity, Topology};
 use hex_sim::index::Sample;
-use hex_sim::model::{Kind, NodeId, NodeSpec, Resources, WorkloadId, WorkloadSpec};
+use hex_sim::model::{
+    Class, Classes, Kind, NodeId, NodeSpec, Resources, Tenancy, WorkloadId, WorkloadSpec,
+};
 
 const TOPOLOGY: Topology = Topology {
     regions: 10,
@@ -56,6 +58,7 @@ fn nodes() -> Vec<NodeSpec> {
             id: NodeId(id),
             capacity: NODE,
             background_milli: 0,
+            classes: Classes::ALL,
         })
         .collect()
 }
@@ -91,6 +94,8 @@ fn main() {
                 kind: Kind::Plain,
                 arrives: 0,
                 runs_for: None,
+                tenancy: Tenancy::default(),
+                class: Class::Oci,
             };
             let t = Instant::now();
             let got = capacity.admit(&w).unwrap();

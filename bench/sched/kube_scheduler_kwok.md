@@ -2,7 +2,7 @@
 
 **Bar:** Hex's placements per second over kube-scheduler's binds per second, the best configuration of
 each, is at least 10x, on the same node and pod shapes and the same hardware, measured on fedora
-(`AC-T7.11.3`, G6 step 5; the method is `docs/design/hex-sim.md` H13).
+(`AC-T7.11.3`, G6 step 5; the method is `docs/design/hex-sim.md` H63).
 **Result: MET.** kube-scheduler's best is 1,164 binds/s (client QPS raised). Hex's best is 9,308,487
 placements/s (12 shards), 7,998x. Class for class, one scheduler against one (Hex on 1 shard,
 485,025/s), it is 417x. Every pod was bound or placed in every run.
@@ -20,7 +20,7 @@ Over its defaults (50.10), Hex on 1 shard is 9,681x.
 
 ## The cluster, both sides
 
-H13's shape, written once by `crates/hex-bench/examples/sched_kwok.rs`:
+H63's shape, written once by `crates/hex-bench/examples/sched_kwok.rs`:
 - 10,000 nodes of 11 CPU, 55 GiB and 110 pods.
 - 50,000 of `scheduler_perf`'s pause pod (100m CPU, 500Mi), all created pending before the clock.
 

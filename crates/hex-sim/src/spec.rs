@@ -7,7 +7,7 @@
 //! [`check_log`] replays a run's store log and refuses the first write the specification couldn't
 //! have made: the model-based oracle of `T-T7.4.1`, in the shape of QuickCheck's state-machine model
 //! checked at every step (DS[10], DS[11] in `docs/research/scheduler/deterministic-simulation.md`).
-//! [`check_slices`] does the same for each slice of a sharded control plane (H10), on the slice's own
+//! [`check_slices`] does the same for each slice of a sharded control plane (H60), on the slice's own
 //! nodes and the workloads routed to it.
 //! [`check_end`] counts what `AC-T7.3.3` holds to zero: workloads lost or started twice.
 //!
@@ -328,12 +328,15 @@ pub fn check_kept_running(cluster: &Cluster, run: &Run) -> KeptReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FilterReport {
     pub placements: u64,
-    /// GPU work placed on a node without GPUs.
+    /// GPU work placed where it gets none: on a node without GPUs, or of a class a GPU can't be given
+    /// to ([`crate::model::Class::takes_gpus`]).
     pub gpu_off_gpu: u64,
     /// A benchmark placed beside a running build, or a build beside a running benchmark.
     pub benchmark_with_build: u64,
     /// A session placed on a node above 90% CPU while another node had the room and wasn't.
     pub hot_sessions: u64,
+    /// A workload placed on a node that can't run its class.
+    pub class_off_node: u64,
 }
 
 impl FilterReport {
@@ -341,6 +344,7 @@ impl FilterReport {
         self.gpu_off_gpu
             .saturating_add(self.benchmark_with_build)
             .saturating_add(self.hot_sessions)
+            .saturating_add(self.class_off_node)
     }
 }
 
@@ -382,8 +386,11 @@ pub fn check_filters(cluster: &Cluster, run: &Run) -> Result<FilterReport, Viola
         if placing {
             let now = seen.get(i).copied().unwrap_or_default();
             r.placements = r.placements.saturating_add(1);
-            if spec.need.gpus > 0 && facts.capacity.gpus == 0 {
+            if spec.need.gpus > 0 && (facts.capacity.gpus == 0 || !spec.class.takes_gpus()) {
                 r.gpu_off_gpu = r.gpu_off_gpu.saturating_add(1);
+            }
+            if !facts.classes.has(spec.class) {
+                r.class_off_node = r.class_off_node.saturating_add(1);
             }
             let shares = match spec.kind {
                 Kind::Benchmark => now.builds > 0,

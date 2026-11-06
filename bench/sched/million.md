@@ -1,7 +1,7 @@
 # 1,000,000 pending workloads placed on 10,000 nodes (AC-T7.11.2)
 
 **Bar:** the time to place 1,000,000 pending workloads on 10,000 simulated nodes is at most 120 s,
-measured on fedora (`AC-T7.11.2`, G6 step 4; the method is `docs/design/hex-sim.md` H13).
+measured on fedora (`AC-T7.11.2`, G6 step 4; the method is `docs/design/hex-sim.md` H63).
 **Result: MET.** Every run of every row placed all 1,000,000, and the serial specification accepted
 every slice's log. With one plane (`slices = 1`), the best of 5 is 8.13 s for pods and 7.55 s for the
 mixed row. With eight, it is 0.418 s and 0.394 s. The slowest of all 20 runs took 8.85 s.
@@ -9,7 +9,7 @@ mixed row. With eight, it is 0.418 s and 0.394 s. The slowest of all 20 runs too
 ## What was measured
 
 `crates/hex-bench/benches/sched_million.rs` (its header says how).
-- **The cluster** is H13's: 10,000 nodes of 11 CPU and 55 GiB, with no co-tenant CPU.
+- **The cluster** is H63's: 10,000 nodes of 11 CPU and 55 GiB, with no co-tenant CPU.
   - Row `pods` places 1,000,000 of `scheduler_perf`'s pause pod (100m, 500Mi). They fill the
     1,100,000 slots to 91%.
   - Row `mixed` draws each need uniformly from 1-199m and 1-999 MiB, the same means as the pod. It
@@ -17,7 +17,7 @@ mixed row. With eight, it is 0.418 s and 0.394 s. The slowest of all 20 runs too
     H9's filters run.
 - **Before the clock:** every workload is submitted to the one store, so all 1,000,000 are pending at
   once, and none ends during the run. Workloads are routed to slices by hex-sim's own `sim::Layout`
-  (H10).
+  (H60).
 - **Timed:** one thread per slice runs hex-sim's fast path over that slice's pending workloads, in
   submit order:
   - the sampled best fit, `FitIndex::sampled_fit`, which stops at kube-scheduler's floors of 100 nodes
@@ -55,7 +55,7 @@ which runs in virtual time and is what `tests/shards.rs` checks. The bench doesn
   builders, a kind control plane and registry, and minio. Three other hex units were active beside it:
   `hex-g6s3-memory`, `hex-g6s5-series` and `hex-shards-gates`. Nothing was done to quiet the host.
 - **Runs:** 5 seeds per row, best of 5 by wall time. Every run is listed, so the spread can be judged
-  against the bar (H13's falsifier).
+  against the bar (H63's falsifier).
 
 | row | slices | seed 0 s | seed 1 s | seed 2 s | seed 3 s | seed 4 s | best s | best placements/s | spec |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---|
@@ -71,16 +71,16 @@ eight. Setup (generation, routing, submits) took 0.2 s, untimed.
 ## What the numbers say, and what they don't
 
 - **One plane meets the bar by about 14x.** At 8.85 s worst, the pods row runs at 8.1-8.9 µs a placement.
-  That is far inside H13's arithmetic of 120 µs a placement on one plane. Pending workloads are
+  That is far inside H63's arithmetic of 120 µs a placement on one plane. Pending workloads are
   decided back to back, not one at a time against an 85% fill, so it runs well under the 50 µs p50 in
   `fast_path.md`.
 - **Eight slices are about 19x faster than one, not 8x.** Each slice samples its own floor: 100 of its
   1,250 nodes against 500 of 10,000 for one plane (`Sample::want`). So each decision scans a fifth as
-  many nodes, and the eight run in parallel. The price is the routing and the smaller sample that H10
+  many nodes, and the eight run in parallel. The price is the routing and the smaller sample that H60
   decides; its falsifier (work stranded on its slice above 1%) reads 0 here, since nothing was left
   unplaced.
 - **The store is in process.** The commit is a compare-and-set behind a mutex, not Amphora over a
-  network. When the store is Amphora's, the bench runs again, as H13 says of the kwok comparison.
+  network. When the store is Amphora's, the bench runs again, as H63 says of the kwok comparison.
 - **No competitor ran in this record.** kube-scheduler on kwok, class for class, is `AC-T7.11.3` (step
   5, `bench/sched/kube_scheduler_kwok.md`).
 

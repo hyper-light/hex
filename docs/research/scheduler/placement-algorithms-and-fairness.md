@@ -1238,6 +1238,25 @@ record says so); the action order is operator-configured and unchecked; gang sem
 `minMember` and `minResources` on the PodGroup, so partial progress is not modelled; fairness documentation for
 the current DRF plugin is thin.
 
+### Kubernetes' NodeResourcesFit scoring: LeastAllocated and MostAllocated
+
+Sources: [22] (kube-scheduler's source at commit `d9229a7cd1b0`, read 2026-11-05, and the "Resource Bin Packing"
+page). `DESIGN`.
+
+**What it scores.** kube-scheduler's `NodeResourcesFit` plugin ranks the nodes that fit a pod by one of three
+strategies. `LeastAllocated` is the default: "leastResourceScorer favors nodes with fewer requested resources"
+and "The more unused resources the higher the score is" ([22a] `least_allocated.go:24`, `:51`); per resource
+the score is the free share scaled to the maximum score (`:61`), and the node's score is the weighted mean
+(`:45`). `MostAllocated` is its mirror for bin packing: "mostResourceScorer favors nodes with most requested
+resources" ([22b] `most_allocated.go:24`); "The `MostAllocated` strategy scores the nodes based on the
+utilization of resources, favoring the ones with higher allocation. For each resource type, you can set a weight
+to modify its influence in the node score" ([22d]). The defaults weigh CPU and memory alike, weight 1 each, under
+`LeastAllocated` ([22c] `defaults.go:33-35`, `:240`).
+
+**For Hex.** `MostAllocated` is best fit across resources, the baseline a memory-bound workload needs: a best fit
+ranked by free CPU first stops packing the resource that binds. `LeastAllocated` is the spreading half of Borg's
+best+worst-fit mix.
+
 ## Lessons for Hex
 
 Hex must place extremely bursty agent workloads with maximal correctness, on the most suitable node, with urgency
@@ -1578,3 +1597,9 @@ through a page-fetch tool that summarises, and are marked "doc". URLs are the on
     - 21e. [Agent scheduler design record](https://raw.githubusercontent.com/volcano-sh/volcano/master/docs/design/agent-scheduler.md)
     - 21f. [DRF design record](https://raw.githubusercontent.com/volcano-sh/volcano/master/docs/design/drf.md) (describes the kube-batch implementation)
     - 21g. [How to Tune Volcano Performance in Large-Scale Scenarios](https://volcano.sh/en/docs/user-guide/how_to_tune_volcano_performance)
+22. Kubernetes (SIG Scheduling). kube-scheduler's `NodeResourcesFit` scoring, source at commit `d9229a7cd1b0`
+    (master, read 2026-11-05), and documentation. Code and doc.
+    - 22a. [least_allocated.go](https://raw.githubusercontent.com/kubernetes/kubernetes/d9229a7cd1b0893e8385b894c72471005a6fb7eb/pkg/scheduler/framework/plugins/noderesources/least_allocated.go)
+    - 22b. [most_allocated.go](https://raw.githubusercontent.com/kubernetes/kubernetes/d9229a7cd1b0893e8385b894c72471005a6fb7eb/pkg/scheduler/framework/plugins/noderesources/most_allocated.go)
+    - 22c. [defaults.go](https://raw.githubusercontent.com/kubernetes/kubernetes/d9229a7cd1b0893e8385b894c72471005a6fb7eb/pkg/scheduler/apis/config/v1/defaults.go)
+    - 22d. [Resource Bin Packing](https://kubernetes.io/docs/concepts/scheduling-eviction/resource-bin-packing/)

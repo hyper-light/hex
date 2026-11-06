@@ -2,7 +2,7 @@
 //!
 //! - **Clients** submit each workload when it arrives and resubmit it, under the same id, until the
 //!   control plane acknowledges it or refuses it; a resubmit of a stored workload is a duplicate.
-//! - **The control plane** is `shards` shards (H10), each holding a slice of the nodes (contiguous
+//! - **The control plane** is `shards` shards (H60), each holding a slice of the nodes (contiguous
 //!   ids) and the workloads routed to it ([`Layout`]); one shard holds the whole cluster. A slice's
 //!   plane admits workloads (refusing one no empty node could hold), decides
 //!   placements on `workers` parallel deciders against its current view, and commits them through one
@@ -19,11 +19,11 @@
 //!   the store. Node agents and the work they run go on through it (`AC-T7.3.4`), as Borg's tasks do
 //!   when the Borgmaster is down (Verma et al., EuroSys 2015, p. 6). A crash takes down the shard
 //!   that made the write, with every slice it holds.
-//! - **A lost shard** ([`Nemesis::Lose`], H11) never comes back. Its lease on each slice runs out
+//! - **A lost shard** ([`Nemesis::Lose`], H61) never comes back. Its lease on each slice runs out
 //!   `lease_ns` after its last renewal; then the next live shard takes the slice over and rebuilds its
 //!   plane from the store, at `rebuild_ns_per_record` a record read (`T-T7.11.1`). The slice's
 //!   running work goes on through it, as through a crash.
-//! - **A lost cell** ([`Nemesis::LoseCell`], H15) loses every shard at once, and no shard is left to
+//! - **A lost cell** ([`Nemesis::LoseCell`], H65) loses every shard at once, and no shard is left to
 //!   take a slice over; its running work goes on, its pending work waits.
 //!
 //! Every queue and map is bounded by the run's workloads or by a [`Config`] field, and the run by
@@ -77,7 +77,7 @@ pub enum Nemesis {
         at: Time,
     },
     /// Every shard is lost for good at `at`: a cell's control plane, with no shard left to take its
-    /// slices over (H15). Its running work keeps running; its takeovers never complete.
+    /// slices over (H65). Its running work keeps running; its takeovers never complete.
     LoseCell {
         at: Time,
     },
@@ -111,7 +111,7 @@ pub struct Config {
     pub nemesis: Nemesis,
     /// How deciders sample nodes; the serial specification samples the same way.
     pub sample: Sample,
-    /// Shards of the control plane, each first holding one slice of the nodes (H10).
+    /// Shards of the control plane, each first holding one slice of the nodes (H60).
     pub shards: u32,
     /// How long a shard's lease on its slices outlives its last renewal, and how often it renews.
     pub lease_ns: Time,
@@ -182,7 +182,7 @@ pub struct Report {
     pub takeovers: Vec<Takeover>,
 }
 
-/// A lost shard's slice, taken over by a live one (H11).
+/// A lost shard's slice, taken over by a live one (H61).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Takeover {
     pub slice: usize,
@@ -342,7 +342,7 @@ impl PartialOrd for Scheduled {
     }
 }
 
-/// How the cluster's nodes are split among the control plane's slices (H10): contiguous runs of node
+/// How the cluster's nodes are split among the control plane's slices (H60): contiguous runs of node
 /// ids, one a shard, and the rule that routes a workload to one. Nothing in it changes during a run,
 /// so every shard, and the specification, computes the same slice for a workload.
 #[derive(Debug, Clone)]
@@ -857,7 +857,7 @@ impl Sim<'_> {
         Ok(())
     }
 
-    /// The nemesis loses `shard` for good (H11). Its slices' leases run out `lease_ns` after the
+    /// The nemesis loses `shard` for good (H61). Its slices' leases run out `lease_ns` after the
     /// last renewal before the loss; then a live shard takes each over.
     fn lose(&mut self, shard: u32) -> Result<(), SimError> {
         let sh = self.shard(shard)?;
@@ -907,7 +907,7 @@ impl Sim<'_> {
 
     /// A lost shard's lease on slice `s` has run out: the next live shard after it takes the slice
     /// and rebuilds its plane from the store, which takes `rebuild_ns_per_record` a record read. With
-    /// every shard lost (a cell's plane, H15) none does, and its takeover stays without a time.
+    /// every shard lost (a cell's plane, H65) none does, and its takeover stays without a time.
     fn take_over(&mut self, s: usize) -> Result<(), SimError> {
         let lost = slot(&mut self.slices, s)?.owner;
         let shards = u32::try_from(self.shards.len()).map_err(|_| SimError::Config("shards"))?;
@@ -1201,6 +1201,7 @@ impl Sim<'_> {
             (&mut r.gpu, sampled.refused.gpu),
             (&mut r.shares, sampled.refused.shares),
             (&mut r.hot, sampled.refused.hot),
+            (&mut r.class, sampled.refused.class),
         ] {
             tally(total, now, max)?;
         }

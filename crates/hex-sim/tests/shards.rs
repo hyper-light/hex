@@ -1,4 +1,4 @@
-//! The sharded control plane (`docs/design/hex-sim.md` H10, H11): a lost shard's slices taken over
+//! The sharded control plane (`docs/design/hex-sim.md` H60, H61): a lost shard's slices taken over
 //! by a live shard within `T-T7.11.1`'s 5 s, its running work undisturbed.
 
 #![cfg_attr(

@@ -1,7 +1,7 @@
 //! `AC-T7.11.4`: control-plane memory per workload, measured by a counting global allocator
-//! (`docs/design/hex-sim.md` H12). `cap` wraps the system allocator and counts the bytes live on the
+//! (`docs/design/hex-sim.md` H62). `cap` wraps the system allocator and counts the bytes live on the
 //! heap, as the callers' layouts ask for them (not the allocator's own per-chunk overhead). A run's
-//! store and every shard's plane (eight shards, H13's sharded row) are dropped, and what the count
+//! store and every shard's plane (eight shards, H63's sharded row) are dropped, and what the count
 //! falls by is the heap they held.
 //!
 //! What's counted, for a placed workload: the store's record (its spec, queue position, version and
@@ -29,7 +29,9 @@
 use std::alloc::System;
 
 use cap::Cap;
-use hex_sim::model::{Cluster, Kind, NodeId, NodeSpec, Resources, WorkloadId, WorkloadSpec};
+use hex_sim::model::{
+    Class, Classes, Cluster, Kind, NodeId, NodeSpec, Resources, Tenancy, WorkloadId, WorkloadSpec,
+};
 use hex_sim::sim::{self, Config, Run};
 use hex_sim::spec;
 use hex_sim::store::{State, Store};
@@ -46,7 +48,7 @@ const SHARDS: u32 = 8;
 const MIB: u64 = 1 << 20;
 const GIB: u64 = 1 << 30;
 
-/// H13's shape: `scheduler_perf`'s pause pod (100m CPU, 500Mi) on nodes of 11 CPU and 55 GiB, which
+/// H63's shape: `scheduler_perf`'s pause pod (100m CPU, 500Mi) on nodes of 11 CPU and 55 GiB, which
 /// hold 110 of them; 1,000,000 on 10,000 nodes fill the 1,100,000 slots to 91%. All are submitted at
 /// once and none ends.
 fn h13() -> Cluster {
@@ -59,6 +61,7 @@ fn h13() -> Cluster {
                 gpus: 0,
             },
             background_milli: 0,
+            classes: Classes::ALL,
         })
         .collect();
     let workloads = (0..WORKLOADS)
@@ -72,12 +75,14 @@ fn h13() -> Cluster {
             kind: Kind::Plain,
             arrives: 0,
             runs_for: None,
+            tenancy: Tenancy::default(),
+            class: Class::Oci,
         })
         .collect();
-    Cluster { nodes, workloads }
+    Cluster::single_owner(nodes, workloads)
 }
 
-/// H12's non-vacuity for the counter itself: do allocate a buffer of known size and free it; expect
+/// H62's non-vacuity for the counter itself: do allocate a buffer of known size and free it; expect
 /// the count to rise by exactly its bytes and fall back.
 fn counter_counts() {
     let before = ALLOC.allocated();

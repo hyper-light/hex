@@ -1,7 +1,7 @@
 # A takeover's rebuild of a slice's plane (T-T7.11.1)
 
 **What it sets:** `sim::REBUILD_NS_PER_RECORD`, the virtual time hex-sim charges a takeover for each
-store record its rebuild reads (`docs/design/hex-sim.md` H11). **Result: 130 ns a record (best of 5).**
+store record its rebuild reads (`docs/design/hex-sim.md` H61). **Result: 130 ns a record (best of 5).**
 
 ## What was measured
 

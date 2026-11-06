@@ -1,4 +1,4 @@
-//! Cells and regions (`docs/design/hex-sim.md` H14-H17): the differential suite on one node, one
+//! Cells and regions (`docs/design/hex-sim.md` H64-H67): the differential suite on one node, one
 //! cell and three regions, the cell-loss drill, and a lost region's work re-placed within the
 //! others' capacity.
 
@@ -34,7 +34,7 @@ fn fed(topology: Topology, cell: Config, loss: Loss) -> FedConfig {
     }
 }
 
-/// What the specification fixes in every cell of a run (H17): its log one the serial specification
+/// What the specification fixes in every cell of a run (H67): its log one the serial specification
 /// makes, nothing lost or started twice, the hard filters held.
 fn check_cells(cells: &[CellRun], what: &str) {
     for c in cells {
@@ -100,7 +100,7 @@ fn the_differential_suite_passes_on_one_node_one_cell_and_three_regions() {
         for config in [base, crashing(&base, seed, n)] {
             let one_node = Cluster {
                 nodes: cluster.nodes[..1].to_vec(),
-                workloads: cluster.workloads.clone(),
+                ..cluster.clone()
             };
             let scales = [
                 (
@@ -137,7 +137,7 @@ fn the_differential_suite_passes_on_one_node_one_cell_and_three_regions() {
                 crashes += out.cells.iter().map(|x| x.run.report.crashes).sum::<u64>();
                 runs += 1;
                 if topology.cells == 1 {
-                    // One cell is today's hex-sim, bit for bit (H14).
+                    // One cell is today's hex-sim, bit for bit (H64).
                     let alone = sim::run(c, &config).unwrap();
                     assert_eq!(out.cells.len(), 1);
                     assert_eq!(out.cells[0].run.report, alone.report, "{what}");
@@ -352,7 +352,7 @@ fn a_lost_regions_work_is_re_placed_only_within_the_others_capacity() {
     assert!(refused > 100, "{refused} refused");
 }
 
-/// H16's fence: do lose a region; expect every workload the lost region held and hadn't finished by
+/// H66's fence: do lose a region; expect every workload the lost region held and hadn't finished by
 /// the loss moved exactly once, and no workload of the lost region started in two surviving cells.
 #[test]
 fn a_lost_regions_work_moves_once() {
@@ -375,7 +375,7 @@ fn a_lost_regions_work_moves_once() {
     }
 }
 
-/// T-T7.12.1 and H16's "assume and deduct": do lose one of three regions a third full, with 3,000
+/// T-T7.12.1 and H66's "assume and deduct": do lose one of three regions a third full, with 3,000
 /// more workloads arriving in the very instant the federation acts, so the surviving regions have
 /// them queued and not yet placed; expect the moved work placed only in room those queued workloads
 /// leave (each moved one placed where it was sent, each refused one held by no surviving node), and
@@ -411,7 +411,7 @@ fn a_lost_regions_work_waits_behind_what_the_others_have_queued() {
     assert!(refused > 50, "{refused} refused");
 }
 
-/// H14's routing: do route 9,000 small workloads over three regions of three cells (home region
+/// H64's routing: do route 9,000 small workloads over three regions of three cells (home region
 /// `id mod regions`, home cell `(id / regions) mod cells`); expect every one of the nine cells to
 /// get about a ninth, so a region's cell isn't tied to the region the id picked.
 #[test]
