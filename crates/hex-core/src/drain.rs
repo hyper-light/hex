@@ -54,4 +54,30 @@ mod tests {
         }
         assert!(bound(usize::MAX) >= last);
     }
+
+    /// The learned-waits rule (2026-11-06): before any sample the bound is the record's, 2 x its envelope; a
+    /// slower drain on this node raises it, for every size in proportion; a faster one leaves it; it never
+    /// falls. Do read a fresh learner's bound for 8 members, then observe an 8-member drain at 3 x the
+    /// record's envelope, then one at half of it; expect the record's bound, then 3 x it, then still 3 x it,
+    /// and 32 members' bound 3 x the record's too.
+    #[test]
+    fn a_learned_bound_starts_at_the_record_and_only_rises() {
+        let mut learned = Learned::default();
+        assert_eq!(learned.bound(8), bound(8));
+        let envelope = bound(8) / 2;
+        learned.observe(8, envelope * 3);
+        assert_eq!(learned.bound(8), bound(8) * 3);
+        learned.observe(8, envelope / 2);
+        assert_eq!(learned.bound(8), bound(8) * 3);
+        assert_eq!(learned.bound(32), bound(32) * 3);
+    }
+
+    /// The learned bound never overflows, whatever is observed (CLAUDE.md §1). Do observe the longest
+    /// duration there is; expect a finite bound no lower than the record's.
+    #[test]
+    fn a_learned_bound_never_overflows() {
+        let mut learned = Learned::default();
+        learned.observe(1, Duration::MAX);
+        assert!(learned.bound(1_000) >= bound(1_000));
+    }
 }
