@@ -481,12 +481,13 @@ impl Node {
         }
     }
 
-    /// Sets the network namespaces a root node makes ahead to `bound`, fixed (unless set it learns how many from its
-    /// draws, up to its [`Sizes::netns`]), in place
-    /// of the pool it opened with, which closes what it held. With 0 it makes none, and every container
-    /// that makes a network namespace makes it on its create's path, counted. A rootless node makes
-    /// none (its containers' namespaces belong to user namespaces of their own), so a bound above 0
-    /// there is refused.
+    /// A test control, with no production or bench caller: the network namespaces a root node makes ahead fixed at
+    /// `bound` in place of the pool it opened with, which learns how many from its draws up to its [`Sizes::netns`]
+    /// (Ada's rule, 2026-11-06), and which this closes. With 0 it makes none, and every container that makes a
+    /// network namespace makes it on its create's path, counted. HEX-NETNS-9 (oci_box.rs) needs that from the first
+    /// create: a stalled maker would leave dry only a pool that had already made some, so it can't stand in. A
+    /// rootless node makes none (its containers' namespaces belong to user namespaces of their own), so a bound
+    /// above 0 there is refused.
     pub fn with_netns_bound(mut self, bound: usize) -> Result<Self, Refusal> {
         if bound > 0 && self.owner != Owner::Root {
             return Err(Refusal::Invalid {
@@ -505,9 +506,12 @@ impl Node {
         Ok(self)
     }
 
-    /// Sets the ipc and uts namespace pairs a root node makes ahead to `bound`, fixed, in place of the pool it
-    /// opened with, whose size it learns from its draws (Ada's rule, 2026-11-06), which closes what it held. With 0
-    /// it makes none, and every container's clone makes its own, counted. A rootless node makes none, so a bound above 0 there is refused.
+    /// A test control, with no production or bench caller (the bench's drained arm went by Ada's 2026-11-06 rule):
+    /// the ipc and uts namespace pairs a root node makes ahead fixed at `bound`, in place of the pool it opened
+    /// with, whose size it learns from its draws, which this closes. With 0 it makes none, and every container's
+    /// clone makes its own, counted. HEX-IPCUTS-3 (oci_ipcuts.rs) needs a create that finds none from the first
+    /// and pairs it can count exactly; a stalled maker would leave dry only a pool that had already made some. A
+    /// rootless node makes none, so a bound above 0 there is refused.
     pub fn with_ipc_uts_bound(mut self, bound: usize) -> Result<Self, Refusal> {
         if bound > 0 && self.owner != Owner::Root {
             return Err(Refusal::Invalid {
@@ -529,12 +533,13 @@ impl Node {
         Ok(self)
     }
 
-    /// The node keeps at most `bound` cgroups made ahead for boxes of no owner, each with an init parked in it
-    /// (decision 8, "The p99.9 that stayed"), so such a box's create takes neither the cgroup's `mkdir` nor its
-    /// init's clone, nor their waits for the host-wide `cgroup_mutex`. Unless set, the node learns how many from its
-    /// draws, from the host's parallelism up ([`crate::sizes::Sizes`]); set, it keeps `bound`. 0 keeps none:
-    /// each such box makes its own cgroup, named by its id. Each costs an idle cgroup and a parked process charged
-    /// to it.
+    /// A test control, with no production or bench caller (the bench's HEXBENCH_AHEAD pin went by Ada's 2026-11-06
+    /// rule): the node keeps `bound` cgroups made ahead for boxes of no owner, each with an init parked in it
+    /// (decision 8, "The p99.9 that stayed"), in place of the number it learns from its draws, from the host's
+    /// parallelism up ([`crate::sizes::Sizes`]). 0 keeps none: each such box makes its own cgroup, named by its id.
+    /// The tests that read one parked init's claim (oci_reuse.rs, oci_box.rs) need exactly one ready, and those of a
+    /// box of no owner's own cgroup none ever; a learned pool makes as many as the host's parallelism, and a stalled
+    /// refill would leave none only after it had made some.
     pub fn with_inits_ahead(self, bound: usize) -> Self {
         self.cgroups.set_ahead(bound);
         self

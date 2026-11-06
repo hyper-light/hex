@@ -613,8 +613,9 @@ impl Cgroups {
         Ok(())
     }
 
-    /// `bound` cgroups are kept made ahead for boxes of no owner, each with an init in it (decision 8); 0, the
-    /// default, makes none. Set before the node's first create.
+    /// `bound` cgroups are kept made ahead for boxes of no owner, each with an init in it (decision 8), fixed in place
+    /// of the learned number ([`Cgroups::learn_ahead`], the node's): a test control; 0 makes none. Set before the
+    /// node's first create.
     pub fn set_ahead(&self, bound: usize) {
         self.ahead.size(Depth::new(bound, bound));
     }
