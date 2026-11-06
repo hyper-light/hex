@@ -45,12 +45,21 @@ function Get-Hex {
   Die 'reading the Windows features needs -Binary <hex.exe> (no installed hex.exe to ask)'
 }
 
-# Whether an optional feature is on: `hex setup features`, the node's bounded query (one '<name> on|off'
-# line each), read without elevation.
-function Test-Feature([string]$Name) {
+# Every feature's state, from one `hex setup features` (the node's bounded query, one '<name> on|off' line
+# each, read without elevation), asked once a run: a feature turns on or off only across a reboot.
+$script:FeatureStates = $null
+function Get-FeatureStates {
+  if ($null -ne $script:FeatureStates) { return $script:FeatureStates }
   $ErrorActionPreference = 'Continue'
   $said = & (Get-Hex) setup features 2>&1 | Out-String
   if ($LASTEXITCODE -ne 0) { Die "hex setup features failed (exit $LASTEXITCODE): $said" }
+  $script:FeatureStates = $said
+  return $said
+}
+
+# Whether an optional feature is on, by the run's one listing.
+function Test-Feature([string]$Name) {
+  $said = Get-FeatureStates
   foreach ($line in $said -split "`r?`n") {
     if ($line -eq "$Name on") { return $true }
     if ($line -eq "$Name off") { return $false }
