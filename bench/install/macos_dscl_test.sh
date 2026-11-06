@@ -25,13 +25,13 @@ DSCL=$STUB/dscl
 : >"$STUB/calls"
 out=$(dscl_write -create /Users/_hexbox1 2>&1)
 st=$?
-if [ "$st" = 0 ] && [ "$(wc -l <"$STUB/calls")" = 1 ]; then echo "PASS: a write that succeeds is made once"; else echo "FAIL: success: status $st, $(wc -l <"$STUB/calls") calls, $out"; FAILS=1; fi
+if [ "$st" = 0 ] && [ "$(wc -l <"$STUB/calls" | tr -d " ")" = 1 ]; then echo "PASS: a write that succeeds is made once"; else echo "FAIL: success: status $st, $(wc -l <"$STUB/calls" | tr -d " ") calls, $out"; FAILS=1; fi
 
 : >"$STUB/calls"
 touch "$STUB/fail"
 out=$(dscl_write -create /Users/_hexbox1 2>&1)
 st=$?
-calls=$(wc -l <"$STUB/calls")
+calls=$(wc -l <"$STUB/calls" | tr -d " ")
 if [ "$st" != 0 ] && [ "$calls" = 1 ]; then echo "PASS: a failing write is tried once"; else echo "FAIL: failure: status $st, $calls calls"; FAILS=1; fi
 if grep -q 'eNotYetImplemented' <<<"$out" && grep -q -- '-create /Users/_hexbox1' <<<"$out"; then echo "PASS: the refusal names the write and dscl's error"; else echo "FAIL: refusal text: $out"; FAILS=1; fi
 exit "$FAILS"
