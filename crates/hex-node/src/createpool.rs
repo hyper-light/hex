@@ -597,7 +597,15 @@ impl Shared {
 
     /// A parked init's claim failed with `trip`: counted by its kind.
     fn claim_failed(&self, trip: &Trip) {
-        let _ = trip;
+        let i = match trip {
+            Trip::Hung(_) => 0,
+            Trip::Refused(_) | Trip::Broken(_) => 1,
+        };
+        if let Some(count) = self.claims_failed.get(i) {
+            let _ = count.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                Some(n.saturating_add(1))
+            });
+        }
     }
 
     /// Wakes the starting thread, for a seed to start.
