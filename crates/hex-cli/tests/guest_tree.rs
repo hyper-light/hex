@@ -314,9 +314,8 @@ fn guest() -> Option<Guest> {
         .boot(&config.spec())
         .unwrap()
         .into();
-    let link: std::sync::Arc<dyn hex_client::guest::Link> = std::sync::Arc::new(
-        hex_client::guest::shards::ShardsLink::new(guest.clone(), hex_client::ANSWER_PATIENCE),
-    );
+    let link: std::sync::Arc<dyn hex_client::guest::Link> =
+        std::sync::Arc::new(hex_client::guest::shards::ShardsLink::new(guest.clone()));
     let client = hex_client::guest::Client::connect(link.clone()).unwrap();
     Some(Guest {
         link,
