@@ -175,6 +175,13 @@ copy there shows ~20 bench scripts as modified: line endings from the sync, no c
    guest (none regress); two more pass in the guest than on Linux: linux_masked_paths, linux_readonly_paths. HEX-GUEST-19
    at the same tree, its root now a tarball: 1 passed, 2.09 s.
 
+17. gates at 439c00a (the integrate agent's 5007fa1 taken: the routing test's Linux image gets a tarball root, as
+   c230d0a requires on Windows), 2026-11-06T11:59:03Z, C: 86 GB free: windows-gates-439c00a-20261106T115903Z.txt. fmt,
+   clippy -D warnings, cargo test --workspace --no-fail-fast: every crate 0 failed (hex-api 18, doc_truth 7, cli 7,
+   windows_process_box 10, hex-client 11, hex-core 141, hex-node 6, hex-runtime 8). guest_real, guest_validation and
+   windows_oci_box's suite passed BY SKIPPING here (no guest or image inputs in this phase); their real runs are
+   entries 13, 15-16 and (for the oci suite) still to come. PHASE gates: PASS (exit 0).
+
 What HCS reports as a Windows oci box's Exit at its end, against the oracle's Signal(15), for HEX-DIFF-1 step 12
 and HEX-DIFF-2 step 11 (asked by step 7): NOT OBSERVED. windows_oci_boxes_hold_the_contract_and_the_steps_criteria
 skipped in every run above (no HEX_WINDOWS_LAYERS), so no Windows oci box was made; it is read in the first run
