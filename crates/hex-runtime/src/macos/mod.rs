@@ -399,17 +399,7 @@ fn build_spawn(
         cwd: parts.cwd,
         stdio,
         jetsam_mib: memory_max.and_then(sys::jetsam_cap_mib),
-        // No spec of this class names a descriptor limit, so each program gets the default (HEX-INST-6).
-        nofile: Some(default_nofile()),
     })
-}
-
-/// The descriptor limit a box's program gets where its spec names none: Docker 29's, capped at this node's
-/// own hard limit, which an unprivileged process can't raise ([`hex_core::limits`], native plan step 6).
-pub(crate) fn default_nofile() -> hex_core::limits::Nofile {
-    hex_core::limits::default_nofile(
-        rustix::process::getrlimit(rustix::process::Resource::Nofile).maximum,
-    )
 }
 
 /// A program's exec parts, apart from its stdio: the paths to try, its argv and environment, and its

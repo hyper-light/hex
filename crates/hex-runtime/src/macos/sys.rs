@@ -13,8 +13,6 @@ use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::time::Duration;
 
-use hex_core::limits::Nofile;
-
 /// Mach absolute time's units (mach_timebase_info(3)): a tick is `numer / denom` nanoseconds, 125/3 on
 /// Apple silicon and 1/1 on Intel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -349,10 +347,6 @@ pub struct Spawn {
     /// per-process cap at it (native plan step 1's `_ext` backstop), so the kernel bounds a single-member
     /// box with no overshoot. `None` leaves the member uncapped (the watcher's rule bounds the box).
     pub jetsam_mib: Option<c_int>,
-    /// The descriptor limit the program gets, set in its process before its exec: a box whose spec names
-    /// none gets Docker 29's, capped at the node's hard limit (`hex_core::limits`, native plan step 6).
-    /// `None` leaves it the node's own.
-    pub nofile: Option<Nofile>,
 }
 
 /// An errno as posix_spawn returns it.
@@ -401,13 +395,6 @@ pub fn spawn(s: &Spawn, pgroup: i32, clamp: Clamp) -> io::Result<i32> {
         | libc::POSIX_SPAWN_SETSIGMASK
         | libc::POSIX_SPAWN_SETSIGDEF
         | libc::POSIX_SPAWN_CLOEXEC_DEFAULT;
-    // A descriptor limit of its own is set in the program's process before its image is: a forked child
-    // sets it, then spawns over itself (`POSIX_SPAWN_SETEXEC`) with every other attribute as here.
-    let flags = if s.nofile.is_some() {
-        flags | libc::POSIX_SPAWN_SETEXEC
-    } else {
-        flags
-    };
     let flags =
         i16::try_from(flags).map_err(|_| io::Error::other("posix_spawn flags past a short"))?;
     let mut none: libc::sigset_t = 0;
@@ -460,9 +447,6 @@ pub fn spawn(s: &Spawn, pgroup: i32, clamp: Clamp) -> io::Result<i32> {
     }
     let argv = nul_terminated(&s.argv);
     let envp = nul_terminated(&s.envp);
-    if let Some(nofile) = s.nofile {
-        return spawn_in_fork(&attr, &actions, &s.paths, &argv, &envp, nofile);
-    }
     let mut refused = None;
     for path in &s.paths {
         let mut pid: libc::pid_t = 0;
@@ -488,131 +472,6 @@ pub fn spawn(s: &Spawn, pgroup: i32, clamp: Clamp) -> io::Result<i32> {
     Err(io::Error::from_raw_os_error(
         refused.unwrap_or(libc::ENOENT),
     ))
-}
-
-/// Forks, and in the child sets its descriptor limit to `nofile` and spawns over itself with `attr` and
-/// `actions` (`POSIX_SPAWN_SETEXEC`, which `attr` carries), trying `paths` as execvp(3) does: so the program
-/// keeps the forked pid, the node stays its parent, and every attribute (its group, signals, QoS clamp,
-/// fatal memory cap, descriptors) is the one a plain spawn gives. posix_spawn sets no rlimit, so this is
-/// the one way to give the program a limit of its own without changing the node's (which its other
-/// threads' descriptors live under). The child calls only async-signal-safe system calls on what was made
-/// before the fork, and reports a failure's errno to the node over a close-on-exec pipe, which the
-/// spawn's exec closes on success. Returns the program's pid, or the errno its spawn failed with (its child
-/// reaped).
-fn spawn_in_fork(
-    attr: &Attr,
-    actions: &Actions,
-    paths: &[CString],
-    argv: &[*mut c_char],
-    envp: &[*mut c_char],
-    nofile: Nofile,
-) -> io::Result<i32> {
-    // macOS has no pipe2: the window before close-on-exec is set is std's own (process::Command's).
-    let (report, tell) = rustix::pipe::pipe()?;
-    rustix::io::fcntl_setfd(&report, rustix::io::FdFlags::CLOEXEC)?;
-    rustix::io::fcntl_setfd(&tell, rustix::io::FdFlags::CLOEXEC)?;
-    let limit = libc::rlimit {
-        rlim_cur: nofile.soft,
-        rlim_max: nofile.hard,
-    };
-    let tell_fd = tell.as_raw_fd();
-    let attr_ptr = &raw const attr.0;
-    let actions_ptr = &raw const actions.0;
-    let mut all: libc::sigset_t = 0;
-    let mut was: libc::sigset_t = 0;
-    // SAFETY: fills a signal set this frame owns, which outlives the call.
-    errno(unsafe { libc::sigfillset(&raw mut all) })?;
-    // SAFETY: blocks every signal on this thread for the fork, keeping the old mask in `was` (both owned
-    // by this frame), so no handler runs in the child before its spawn resets the mask.
-    errno(unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &raw const all, &raw mut was) })?;
-    // SAFETY: the child runs only async-signal-safe system calls (setrlimit, posix_spawn's __posix_spawn,
-    // write, _exit) on values made before the fork, allocates nothing and runs no destructor, so a lock
-    // another thread held across the fork is never touched.
-    let pid = unsafe { libc::fork() };
-    if pid == 0 {
-        // SAFETY: as above; each call acts on this child alone. posix_spawn with SETEXEC returns only on
-        // failure.
-        unsafe {
-            let mut failed = libc::ENOENT;
-            if libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit) < 0 {
-                failed = *libc::__error();
-            } else {
-                let mut refused = false;
-                for path in paths {
-                    let mut ignored: libc::pid_t = 0;
-                    let r = libc::posix_spawn(
-                        &raw mut ignored,
-                        path.as_ptr(),
-                        actions_ptr,
-                        attr_ptr,
-                        argv.as_ptr(),
-                        envp.as_ptr(),
-                    );
-                    match r {
-                        libc::ENOENT | libc::ENOTDIR => {}
-                        libc::EACCES => refused = true,
-                        e => {
-                            failed = e;
-                            refused = false;
-                            break;
-                        }
-                    }
-                }
-                if refused {
-                    failed = libc::EACCES;
-                }
-            }
-            let bytes = failed.to_ne_bytes();
-            libc::write(tell_fd, bytes.as_ptr().cast::<c_void>(), bytes.len());
-            libc::_exit(127);
-        }
-    }
-    let fork_err = io::Error::last_os_error();
-    // SAFETY: restores this thread's mask from before the fork.
-    errno(unsafe {
-        libc::pthread_sigmask(libc::SIG_SETMASK, &raw const was, std::ptr::null_mut())
-    })?;
-    if pid < 0 {
-        return Err(fork_err);
-    }
-    drop(tell);
-    let failed = read_report(&report)?;
-    let Some(e) = failed else {
-        return Ok(pid);
-    };
-    // The child ended without its program: reap it, so no zombie is left in the box's group.
-    if let Some(child) = rustix::process::Pid::from_raw(pid) {
-        let _ = rustix::process::waitpid(Some(child), rustix::process::WaitOptions::empty());
-    }
-    Err(io::Error::from_raw_os_error(e))
-}
-
-/// The errno a forked spawn's child wrote before ending, or `None` when the pipe closed with nothing: the
-/// spawn's exec closed it, so the program runs. Interrupted reads are tried again within a counted budget.
-fn read_report(report: &OwnedFd) -> io::Result<Option<c_int>> {
-    let mut bytes = [0u8; 4];
-    let mut got = 0usize;
-    for _ in 0..1024 {
-        let Some(rest) = bytes.get_mut(got..) else {
-            break;
-        };
-        if rest.is_empty() {
-            break;
-        }
-        match rustix::io::read(report, rest) {
-            Ok(0) => break,
-            Ok(n) => got = got.saturating_add(n),
-            Err(rustix::io::Errno::INTR) => {}
-            Err(e) => return Err(e.into()),
-        }
-    }
-    match got {
-        0 => Ok(None),
-        4 => Ok(Some(c_int::from_ne_bytes(bytes))),
-        n => Err(io::Error::other(format!(
-            "a spawn's child reported {n} of its errno's 4 bytes"
-        ))),
-    }
 }
 
 /// `strings` as the NULL-terminated list of pointers exec takes; it borrows them.
