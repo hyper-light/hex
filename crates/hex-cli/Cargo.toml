@@ -19,10 +19,12 @@ harness = false
 
 [target.'cfg(target_os = "linux")'.dependencies]
 hex-api.workspace = true
+hex-client.workspace = true
 hex-core.workspace = true
 hex-node.workspace = true
 hex-runtime.workspace = true
 rustix.workspace = true
+socket2.workspace = true
 
 # The Windows oci class's launcher (`hex oci-launch`), which HCS runs inside each container
 # (hex_runtime::windows::oci::launch), and the selftest's device probe.
@@ -31,16 +33,19 @@ hex-runtime.workspace = true
 
 [dev-dependencies]
 hex-api.workspace = true
+# The oci class through a Shards guest (docs/design/shards-guest.md): its simulator on Linux
+# (tests/node_socket.rs, HEX-GUEST-14) and the real client where a guest is given (tests/guest_real.rs).
+shards-api.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-hex-client.workspace = true
 hex-node.workspace = true
 
 # The macOS process class's conformance test (tests/macos_process_box.rs) drives hex-runtime's macOS
 # runtime with the `hex selftest-box` programs this crate's binary provides.
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 hex-core.workspace = true
+hex-client.workspace = true
 hex-runtime.workspace = true
 
 # The Windows process class's conformance test (tests/windows_process_box.rs) drives hex-runtime's
@@ -48,6 +53,7 @@ hex-runtime.workspace = true
 # oci class's test (tests/windows_oci_box.rs) writes its bundles' config.json with serde_json.
 [target.'cfg(target_os = "windows")'.dev-dependencies]
 hex-core.workspace = true
+hex-client.workspace = true
 hex-runtime.workspace = true
 serde_json.workspace = true
 windows-sys.workspace = true

@@ -180,6 +180,8 @@ dependencies = [
  "hex-runtime",
  "rustix",
  "serde_json",
+ "shards-api",
+ "socket2",
  "tempfile",
  "windows-sys",
 ]
@@ -191,6 +193,7 @@ dependencies = [
  "hex-api",
  "hex-core",
  "rustix",
+ "shards-api",
  "tempfile",
 ]
 
@@ -224,6 +227,7 @@ name = "hex-runtime"
 version = "0.1.0"
 dependencies = [
  "hex-api",
+ "hex-client",
  "hex-core",
  "libc",
  "proptest",
@@ -231,6 +235,7 @@ dependencies = [
  "seccompiler",
  "serde",
  "serde_json",
+ "shards-api",
  "tempfile",
  "thiserror",
  "windows-sys",
@@ -448,6 +453,33 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "shards-afunix"
+version = "0.1.0"
+dependencies = [
+ "windows-sys",
+]
+
+[[package]]
+name = "shards-api"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "shards-afunix",
+ "thiserror",
+ "windows-sys",
+]
+
+[[package]]
+name = "socket2"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
+dependencies = [
+ "libc",
+ "windows-sys",
 ]
 
 [[package]]

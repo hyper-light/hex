@@ -25,6 +25,8 @@ mod netns;
 #[cfg(target_os = "linux")]
 mod node;
 #[cfg(target_os = "linux")]
+pub mod relay;
+#[cfg(target_os = "linux")]
 mod remove;
 #[cfg(target_os = "linux")]
 mod seed;
