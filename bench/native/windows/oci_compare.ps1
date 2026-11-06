@@ -91,6 +91,16 @@ $record = [ordered]@{
     warmup   = $W
     load     = @()
 }
+# Leftovers of an earlier run that ended mid-round (jupiter, 2026-11-06: a "hexcmp-40" from a run cut by a
+# wedged kernel collided with this run's round 40), removed by name from this script's own stores; the
+# daemons are oci_setup.ps1's private ones, so nothing else's containers are seen.
+foreach ($c in (& $docker -H $Dock ps -a -q --filter "name=hexcmp-")) { & $docker -H $Dock rm -f $c | Out-Null }
+foreach ($c in ((& $ctr -a $Ctrd containers ls -q) | Where-Object { $_ -like "hexcmp-*" })) {
+    & $ctr -a $Ctrd tasks kill -s SIGKILL $c 2>$null | Out-Null
+    & $ctr -a $Ctrd tasks delete -f $c 2>$null | Out-Null
+    & $ctr -a $Ctrd containers delete $c | Out-Null
+}
+
 $names = @("docker", "containerd", "hex")
 $t = @{}
 foreach ($name in $names) { $t[$name] = @{ create = @(); start = @(); delete = @(); cli = @() } }
