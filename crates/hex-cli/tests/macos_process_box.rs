@@ -275,15 +275,33 @@ fn a_programs_end_is_seen_when_it_ends_not_at_the_waits_budget() {
         class: ClassSpec::Process,
     })
     .expect("create");
-    let budget = Duration::from_secs(20);
+    const RUNS: usize = 60;
+    // The end-seen latency on this Mac, measured here: the slowest of RUNS quick programs from exec to
+    // their reported end, an upper bound on kqueue's NOTE_EXIT latency (it includes the spawn).
+    let mut seen = Duration::ZERO;
+    for _ in 0..RUNS {
+        let t = Instant::now();
+        let mut p = rt
+            .exec(&id, fx.act(&Act::Fail(0)), Stdio::null())
+            .expect("exec a quick program");
+        p.wait_for(hex_api::conformance::PATIENCE)
+            .expect("wait")
+            .expect("the quick program ends");
+        seen = seen.max(t.elapsed());
+    }
+    // Late: past the recorded end maximum of a program killed at this bound (59.6 ms, bench/native/RESULT.md,
+    // macOS at b1ddb89) plus that latency, twice over (the false-alarm margin). The budget is twice late
+    // again, so a wait that sleeps out its budget (the bug) always reads late.
+    let late_after = (Duration::from_micros(59_600) + seen) * 2;
+    let budget = late_after * 2;
     let mut late = Vec::new();
-    for i in 0..60 {
+    for i in 0..RUNS {
         let mut p = rt
             .exec(&id, fx.act(&Act::Hog(GIB)), Stdio::null())
             .expect("exec hog");
         let t = Instant::now();
         let exit = p.wait_for(budget).expect("wait");
-        if !matches!(exit, Some(Exit::Signal(_))) || t.elapsed() >= budget / 2 {
+        if !matches!(exit, Some(Exit::Signal(_))) || t.elapsed() >= late_after {
             late.push((i, exit, t.elapsed()));
         }
     }
