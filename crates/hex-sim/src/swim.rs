@@ -301,11 +301,12 @@ impl World {
         }
         self.requests = requests;
         if let Some(ping) = ping {
+            let room = self.gossip_room;
             let mut batch = std::mem::take(&mut self.batch);
             batch.clear();
             self.member_mut(m)?
                 .detector
-                .ping_gossip_into(ping.to, self.gossip_room, &mut batch);
+                .ping_gossip_into(ping.to, room, &mut batch);
             self.report.pings = self.report.pings.saturating_add(1);
             let gossip = batch.clone();
             self.batch = batch;
@@ -362,13 +363,12 @@ impl World {
                 let member = self.member_mut(to)?;
                 member.detector.apply_gossip(gossip);
                 let ack = member.detector.on_ping(from_host);
+                let room = self.gossip_room;
                 let mut batch = std::mem::take(&mut self.batch);
                 batch.clear();
-                self.member_mut(to)?.detector.ack_gossip_into(
-                    from_host,
-                    self.gossip_room,
-                    &mut batch,
-                );
+                self.member_mut(to)?
+                    .detector
+                    .ack_gossip_into(from_host, room, &mut batch);
                 let gossip = batch.clone();
                 self.batch = batch;
                 self.send(
