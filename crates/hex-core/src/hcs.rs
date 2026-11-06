@@ -56,26 +56,30 @@ pub const FOLDER_UNITS: usize = 32_766;
 /// user-defined environment variable is 32,767 characters" (Microsoft's "Environment Variables").
 pub const ENV_VAR_UNITS: usize = 32_767;
 
-/// The most a Windows program's environment may hold, in UTF-16 units (each `KEY=VALUE` and its NUL),
-/// derived (the lead's decision, 2026-11-06): Windows sets no limit on the block (Vista on), and an `oci`
-/// box's program crosses the launcher's wire in one message, so the block is what [`MAX_WIRE`] leaves
-/// once the fixed part, the worst command line and the worst folder are paid. That leftover is
-/// `3 × MAX_CONFIG_BYTES − (6 × FOLDER_UNITS + 2 − 4)` bytes (a folder's quotes and escapes in place of the
-/// fixed part's `null`), and an entry costs at most six JSON bytes per counted unit (its text at the
-/// `\u00XX` escape's six, its eight bytes of brackets, quotes and comma against its `=` and NUL's two), so
-/// the block is the leftover over six and always fits; `encode`'s refusal by name stays the backstop. The
-/// `process` class takes the same block: one Windows rule for both classes, so a program moves between
-/// them unchanged (a stated policy; nothing in CreateProcessW bounds it).
-pub const ENV_BLOCK_UNITS: usize = (3 * crate::bundle::MAX_CONFIG_BYTES - 6 * FOLDER_UNITS + 2) / 6;
+/// The most a Windows program may take, in [`Program::exec_size`]'s count (UTF-8 bytes of each argument
+/// and `KEY=VALUE` with its NUL, the first argument once more, eight a pointer), the count HEX-RT-14 checks,
+/// derived so the check and the launcher's wire never disagree (the lead's decision and step 7's,
+/// 2026-11-06). Windows sets no limit on the environment block (Vista on), and an `oci` box's program
+/// crosses the wire in one message, so the bound comes from what [`MAX_WIRE`] leaves once its fixed part,
+/// the worst command line and the worst folder are paid: `L = 3 × MAX_CONFIG_BYTES − (6 × FOLDER_UNITS +
+/// 2 − 4)` bytes (a folder's quotes and escapes in place of the fixed part's `null`). A variable of `c`
+/// bytes of text costs `c + 10` in exec_size ('=', its NUL, its pointer) and at most `6c + 8` on the wire
+/// (each byte a six-byte `\u00XX` escape at worst; brackets, quotes and comma), under six per exec_size
+/// byte; the arguments ride in the command line's own term. So `L / 6` admits only programs that fit, and
+/// the exact largest is at most some twenty bytes above it (what the arguments' minimum share frees),
+/// left as stated slack rather than pinned to validity details; `encode`'s refusal by name stays the
+/// backstop. The `process` class takes the same bound: one Windows rule for both classes, so a program
+/// moves between them unchanged (a stated policy; nothing in CreateProcessW bounds it).
+pub const EXEC_BLOCK_BYTES: usize =
+    (3 * crate::bundle::MAX_CONFIG_BYTES - 6 * FOLDER_UNITS + 2) / 6;
 
 /// A Windows program's exec bound (HEX-RT-14), the same for the `process` and `oci` classes: each
 /// NAME=VALUE with its NUL at most [`ENV_VAR_UNITS`] UTF-16 units, and the whole at most
-/// [`ENV_BLOCK_UNITS`] in [`Program::exec_size`]'s count, which is sound because UTF-8 never takes fewer
-/// bytes than UTF-16 takes units, so a program within it fits the wire (and its arguments and pointers
-/// counted too only make it stricter). The command line is bounded apart ([`COMMAND_LINE_UNITS`]).
+/// [`EXEC_BLOCK_BYTES`] in [`Program::exec_size`]'s count, derived so every program it admits crosses
+/// the launcher's wire. The command line is bounded apart ([`COMMAND_LINE_UNITS`]).
 pub fn exec_limit() -> hex_api::ExecLimit {
     hex_api::ExecLimit {
-        block: ENV_BLOCK_UNITS,
+        block: EXEC_BLOCK_BYTES,
         string: Some(ENV_VAR_UNITS),
         unit: hex_api::StringUnit::Utf16,
         source: "Windows (a variable 32,767 UTF-16 units with its NUL; the environment what the launcher's wire leaves)",
@@ -1621,25 +1625,40 @@ mod tests {
         }
     }
 
-    /// HEX-RT-14 on Windows (the lead's decision, 2026-11-06): the environment block's bound is what the
-    /// wire leaves. Do: encode a launch at every worst at once: CreateProcessW's command line, the longest
-    /// folder, and ENV_BLOCK_UNITS of environment (KEY=VALUE and its NUL counted in UTF-16 units), all in
-    /// control characters, JSON's six-byte escape. Expect: it fits MAX_WIRE; and the block is the
-    /// leftover over six, nothing picked.
+    /// HEX-RT-14 on Windows (step 7 and the lead, 2026-11-06): the conformance check and the wire never
+    /// disagree. Do: build the worst program the check admits, at exactly EXEC_BLOCK_BYTES of exec_size,
+    /// in one-byte control characters (each a six-byte escape on the wire), every variable at the
+    /// per-string bound and the last one taking the rest; encode it with the worst command line and the
+    /// worst folder. Expect: the check admits it, and it fits MAX_WIRE.
     #[test]
-    fn the_environment_block_is_what_the_wire_leaves() {
+    fn every_program_the_exec_bound_admits_crosses_the_wire() {
         assert_eq!(
-            ENV_BLOCK_UNITS,
+            EXEC_BLOCK_BYTES,
             (3 * crate::bundle::MAX_CONFIG_BYTES - 6 * FOLDER_UNITS + 2) / 6
         );
-        // One-unit keys and values: KEY=VALUE\0 is four units, its JSON `["k","v"],` 10 bytes plus
-        // the escapes, the worst case per unit.
-        let entries = ENV_BLOCK_UNITS / 4;
+        let limit = exec_limit();
+        let mut p = Program::of(&["a"]);
+        let mut n = 0usize;
+        while p.exec_size() < EXEC_BLOCK_BYTES {
+            // A variable's exec_size cost is its text and 10 ('=', NUL, its pointer); at most
+            // ENV_VAR_UNITS - 2 of text under the per-string bound (NAME=VALUE with its NUL).
+            let room = EXEC_BLOCK_BYTES - p.exec_size();
+            let text = room.saturating_sub(10).clamp(1, ENV_VAR_UNITS - 2);
+            p.env.push(("\u{1}".to_owned(), "\u{1}".repeat(text - 1)));
+            n += 1;
+            assert!(n < 1000, "the construction runs away");
+        }
+        while p.exec_size() > EXEC_BLOCK_BYTES {
+            let (_, v) = p.env.last_mut().unwrap();
+            v.pop();
+        }
+        assert_eq!(p.exec_size(), EXEC_BLOCK_BYTES);
+        assert!(p.fits(&limit).is_ok(), "{:?}", p.fits(&limit));
         let worst = Launch {
             job: u64::MAX,
             stdio: [u64::MAX; 3],
             command_line: "\u{1}".repeat(COMMAND_LINE_UNITS),
-            env: vec![("\u{1}".to_owned(), "\u{1}".to_owned()); entries],
+            env: p.env.clone(),
             cwd: Some("\u{1}".repeat(FOLDER_UNITS)),
         };
         let line = encode(&worst).unwrap();
@@ -1653,7 +1672,7 @@ mod tests {
     #[test]
     fn a_windows_program_is_held_to_its_exec_bound() {
         let limit = exec_limit();
-        assert_eq!(limit.block, ENV_BLOCK_UNITS);
+        assert_eq!(limit.block, EXEC_BLOCK_BYTES);
         assert_eq!(limit.string, Some(ENV_VAR_UNITS));
         assert_eq!(limit.unit, hex_api::StringUnit::Utf16);
         // NAME=VALUE with its NUL at 32,768 units: "K" "=" and 32,765 of "é" (two UTF-8 bytes, one unit).
@@ -1662,7 +1681,7 @@ mod tests {
             ..Program::of(&["a"])
         };
         let block = Program {
-            env: (0..ENV_BLOCK_UNITS / 1000 + 1)
+            env: (0..EXEC_BLOCK_BYTES / 1000 + 1)
                 .map(|i| (format!("V{i}"), "x".repeat(1000)))
                 .collect(),
             ..Program::of(&["a"])
