@@ -408,11 +408,11 @@ mod tests {
     fn a_program_is_counted_as_execve_counts_it_and_refused_past_a_bound() {
         let p = Program {
             args: vec!["sh".into(), "-c".into(), "true".into()],
-            env: vec![("A".into(), "bc".into())],
+            env: vec![("A".into(), "bcdef".into())],
             ..Program::default()
         };
-        // "sh\0" "-c\0" "true\0" = 3 + 3 + 5; the filename "sh\0" = 3; "A=bc\0" = 5; 4 pointers.
-        let size = 11 + 3 + 5 + 4 * size_of::<usize>();
+        // "sh\0" "-c\0" "true\0" = 3 + 3 + 5; the filename "sh\0" = 3; "A=bcdef\0" = 8; 4 pointers.
+        let size = 11 + 3 + 8 + 4 * size_of::<usize>();
         assert_eq!(p.exec_size(), size);
         let fits = ExecLimit {
             block: size,
@@ -428,8 +428,9 @@ mod tests {
             p.fits(&short),
             Err(Refusal::Invalid { what: "program", ref why }) if why.contains("a test")
         ));
+        // Every argument fits in 6 bytes ("true\0" is the longest, 5); the variable's 8 don't.
         let one_string = ExecLimit {
-            string: Some(4),
+            string: Some(6),
             ..fits
         };
         assert!(matches!(
