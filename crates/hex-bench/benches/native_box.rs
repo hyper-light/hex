@@ -350,7 +350,9 @@ mod bench {
             [out, driver, n, warmup, runs, step] => {
                 (out, driver, n, warmup, runs, step.parse().unwrap())
             }
-            _ => panic!("usage: native_box <out.json> <driver> <n> <warmup> <runs> [climb step bytes]"),
+            _ => panic!(
+                "usage: native_box <out.json> <driver> <n> <warmup> <runs> [climb step bytes]"
+            ),
         };
         let (n, warmup, runs): (usize, usize, usize) = (
             n.parse().unwrap(),

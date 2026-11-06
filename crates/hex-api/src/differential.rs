@@ -705,7 +705,12 @@ mod tests {
         for pair in reads.windows(2) {
             let (s0, e0) = pair[0];
             let (s1, _) = pair[1];
-            assert!(s1 - e0 >= e0 - s0, "re-read after {:?}, the read took {:?}", s1 - e0, e0 - s0);
+            assert!(
+                s1 - e0 >= e0 - s0,
+                "re-read after {:?}, the read took {:?}",
+                s1 - e0,
+                e0 - s0
+            );
         }
     }
 
