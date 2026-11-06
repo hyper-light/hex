@@ -1,6 +1,7 @@
 //! Hex's seam (CLAUDE.md §9): the [`Runtime`] trait every runtime class implements, the types it
 //! speaks, a simulator implementation ([`sim::SimRuntime`]) and the conformance suite
-//! ([`conformance`]) that both it and every real runtime pass. Other products reach Hex only through
+//! ([`conformance`]) that both it and every real runtime pass, and the [`differential`] suite that
+//! holds each real class to the simulator's trace. Other products reach Hex only through
 //! this crate.
 //!
 //! A box is the unit Hex runs: a resource bound ([`Bounds`]) holding processes. The `process` class
@@ -20,6 +21,7 @@
 
 mod bounds;
 pub mod conformance;
+pub mod differential;
 mod id;
 mod runtime;
 pub mod sim;
@@ -28,4 +30,7 @@ mod spec;
 pub use bounds::{Bounds, IoRates, MIN_CPU_MILLI, MIN_MEMORY};
 pub use id::BoxId;
 pub use runtime::{BoxInfo, BoxState, Exit, Membership, Proc, Refusal, Runtime, Signal, Usage};
-pub use spec::{BoxSpec, Class, ClassSpec, Mount, Network, OciSpec, Program, Rootfs, Stdio, User};
+pub use spec::{
+    BoxSpec, Class, ClassSpec, Mount, Network, OciSpec, Program, Rootfs, Stdio, User,
+    drive_absolute,
+};

@@ -662,6 +662,123 @@ lacking any of it "refuses that class by name, saying what's missing", and "Unin
   so a logged-in user needed a further step (the lab's user's manager runs before install to show it); a
   Windows feature whose state an unprivileged node can't read; a box user macOS lets a member drop.
 
+## Decision: the Windows `oci` class is an HCS silo holding a Hex job (native plan step 4, 2026-11-04)
+
+The native plan's step 4 builds the `oci` class for Windows images on Windows: process isolation through the Host
+Compute Service, as the OCI runtime spec's Windows section defines it. Sources:
+`docs/research/runtime/windows-hcs.md` (cited below as §n of that note).
+
+- **A box is an HCS compute system, process-isolated, with a job of Hex's nested inside it.** Hex creates the
+  container through HCS v2 (`computecore.dll`, schema 2.1, no hosting system, `ShouldTerminateOnLastHandleClosed` so
+  a node agent that dies takes its containers with it; note §2). Every program Hex runs in the box — its init and
+  each exec — is created *suspended inside a job object Hex owns* and then resumed, as a `process` box's member is
+  (`hex_core::job`, step 3). That job nests under the container's silo (`nested-jobs.md:27,43`, note §5), so the box's
+  `memory_max`, `pids_max` and CPU bound hold on its members by the `process` class's own measured rule, while the
+  container's ~20 system processes (note §5) stay outside the box's count.
+  - **Why not the silo's own job:** HEX-RT-6 bounds a box to 8 processes, and the silo holds more than 20 of its own;
+    the silo's job is reachable only by an implementation-detail name, as SYSTEM, through an unbound NT call (note §5).
+  - **Why a launcher:** HCS can't create a process suspended (note §4), and a member it starts runs at once, so a job
+    assigned afterward races the member's forks. Hex's own `hex` binary is mapped read-only into each box at a fixed
+    path, and HCS starts it as a launcher. The node opens the launcher by pid and duplicates into it the box's job
+    (with only `JOB_OBJECT_ASSIGN_PROCESS`) and the caller's three standard handles (`DuplicateHandle`, note §4).
+    The launcher reads one bounded request on its stdin and creates the member suspended in the job with only those
+    three handles inheritable. It resumes the member, replies with the member's pid, and holds the member's handle
+    until the node has opened it, so the pid can't be reused in between. Then the launcher exits. The node waits on
+    the member's own handle, reads its exit as a `process` box's (`hex_core::job::exit`), and the member reads and
+    writes the caller's pipes directly, with no copier thread. The request and reply are a sans-IO wire in
+    `hex_core::hcs`, bounded, and every malformed one is refused by name.
+  - **The container as a whole** is bounded too, by HCS, as the spec's Windows section says: `Memory.SizeInMB` and
+    `Processor.Maximum`/`Weight` from the bundle's `windows.resources`. A `ClassSpec::Oci` box's container is bounded
+    at its box bound plus the silo's own measured baseline (note §9, probe 3). Neither bound is dropped: a bound the
+    job can't hold is refused by name, as the `process` class refuses it.
+- **Signals and ends are the `process` class's:** KILL and TERM end the box's job (HCS has only console controls,
+  hcsshim maps TERM to a shutdown and KILL to terminate, and Docker ends the container on either; note §4), so TERM
+  ends this class's init, and its fixture says so to the differential suite (`term_ends_init`, true); a member's exit reads as the
+  signal; any other signal is refused by name. An init that has ended leaves the box `Empty` with its exit, and an
+  exec into it is refused `NotRunning`. Delete ends the job, terminates the compute system, detaches the scratch and
+  removes what the box made. Every HCS wait has a deadline, and a timed-out operation is cancelled, never abandoned
+  (note §2).
+- **Layers by the documented storage calls**, not the `vmcompute.dll` exports hcsshim uses (undocumented, unbound,
+  wrapped in a timed retry and a global lock; note §3). The box's scratch VHD is a copy of the base layer's
+  `blank.vhdx`, attached with no drive letter. Its volume comes from `HcsGetLayerVhdMountPath`, then
+  `HcsInitializeWritableLayer` and `HcsAttachLayerStorageFilter` run over the read-only layers, and the volume is the
+  container's `Storage.Path`. No source runs this sequence end to end, so which steps a `blank.vhdx` copy needs is
+  jupiter's to settle (note §9, probe 1). If the documented calls can't make a scratch, the alternative is the
+  `vmcompute.dll` exports resolved at run time — a change brought back to this decision first, not taken silently.
+- **The spec, as the OCI Windows section defines it:** a `ClassSpec::Bundle` reads `config.json`'s `windows` section
+  (`layerFolders` topmost first with the scratch last, `devices`, `resources`) and its mounts. A `ClassSpec::Oci` box
+  renders the same, its `Rootfs::Layers` lowest first. Devices are granted only by interface class, with `class` and
+  `vpci-class-guid` both meaning one. A mount is read-only where its options say `ro`, and nested destinations are
+  refused. A field Hex doesn't render is refused by its name (`hyperv`, which is a Hyper-V container, not this class;
+  `credentialSpec`; `servicing`; `network.endpointList` until Hex holds HNS endpoints; a uid/gid `user`; a
+  `root.readonly` of true; a `Rootfs::Dir`, which a Windows container can't run from). A spec isn't half-applied.
+- **Versions, refused by name before HCS is asked:** the host's build and kind come from `RtlGetVersion`, and the
+  image's build from its base layer's `Files\Windows\System32\ntdll.dll`. Microsoft's table decides (note §7): a
+  Windows Server host runs its own build, and a Server 2025 host runs Server 2022 images too. A Windows 11 host runs
+  Server 2022 images, and Server 2025 images from 24H2 (26100) on. A Windows 10 host runs none process-isolated. Any
+  other pair is refused, naming both builds. HCS's own mismatch code (0x80370101, or 0xC0370101) maps to the same
+  refusal. Production is Windows Server's; Windows 10 and 11 hosts are for development (`hyperv-container.md:76`).
+- **The Containers feature, refused by name:** Hex resolves the HCS, storage and virtual-disk calls at run time
+  (`LoadLibraryExW` from System32, `GetProcAddress`), because windows-sys links them at load time and a missing
+  `computecore.dll` would stop the whole node from starting (note §7). A missing module or export means the class is
+  refused, saying the Containers feature is off and Hex's installer turns it on. `classes()` lists `oci` only where
+  HCS loads.
+- **Unsafe:** the HCS, storage, virtual-disk, process-handle and version calls sit in one file,
+  `crates/hex-runtime/src/windows/oci/sys.rs`, proposed for CLAUDE.md §12 in a commit of its own, held for Ada.
+- **What would falsify it:** a job handed into the silo that doesn't nest, or that the member escapes; the
+  launcher being unopenable for `PROCESS_DUP_HANDLE` from the elevated node; the documented storage calls unable to
+  make a scratch HCS starts; HCS refusing an image the table allows on jupiter, or starting one it forbids (each a
+  probe in note §9, run on jupiter before the class claims it).
+- **Done when (the step's criteria):** HEX-RT-1..9 pass for this class on jupiter with a matching nanoserver or
+  servercore image. A device not granted isn't visible, a read-only mount refuses writes, and every gate passes.
+  Create, start and delete through the seam are measured against Docker's and containerd's (runhcs) on jupiter, with
+  the same image in the same run, and recorded in `bench/`.
+
+## Decision: one differential suite on every OS, the simulator its oracle (native plan step 7)
+
+CLAUDE.md §8 asks that one suite pass on every platform. The conformance suite (`hex_api::conformance`,
+HEX-RT-1..13) checks each call alone; the differential suite (`hex_api::differential`, HEX-DIFF-1..6) adds
+scripts of calls on several boxes and programs at once, played on the class under test and on the
+simulator, and compares what each step shows (`docs/research/runtime/differential-suite.md`).
+
+- **One suite, run as each OS's tests:** `differential::run` is the conformance suite and then every
+  scenario. Each class's own test calls it with its own fixture: Linux `process` (`process_box.rs`), `oci`
+  from bundles and from specs (`oci_box.rs`, `oci_spec_box.rs`) and both over the node's socket
+  (`node_socket.rs`); macOS `process` (`macos_process_box.rs`); Windows `process`
+  (`windows_process_box.rs`). A class that lands later (Windows `oci`, the Shards guest) joins by calling it.
+- **The oracle is the simulator for the same class**, made the same way (process, bundle or spec). A step
+  shows a normalized fact: a refusal's kind, a box's state and its init's exit, a program's exit (or only
+  whether it exited 0, or whether a signal ended it, where OSes differ by design), its output, whether
+  list shows a box, whether a memory kill is counted.
+- **A reading waits for the fact:** a step that reads a box reads again until it shows the oracle's
+  answer or `PATIENCE` passes, so a late report passes and a missing one fails (CLAUDE.md §4).
+- **A divergence is fixed where the contract says.** The first two it found:
+  - A Windows box with nothing running took a signal, where the simulator, Linux and macOS refuse it as
+    `NotRunning`; Windows now refuses it (HEX-DIFF-2).
+  - An `oci` box signalled TERM kept its init running on fedora, where the simulator ended it. The kernel
+    is right: a PID namespace's init takes from an ancestor namespace only the signals it has a handler
+    for, and KILL and STOP, which are forced (pid_namespaces(7), man-pages 6.19); Docker's stop waits out
+    the same rule before it kills. The simulator was wrong, and now models it: a signal other than KILL
+    ends a box's exec'd programs and leaves its init running (HEX-DIFF-1, HEX-DIFF-2).
+  - On the Mac Studio, a macOS box whose members had all ended refused the next program (it was spawned
+    into the dead leader's process group, which no process can join), and took a signal with no member
+    alive (killpg's ESRCH read as success). The next program now leads a new group, and such a signal is
+    refused as `NotRunning`, as on every other class (HEX-DIFF-1, HEX-DIFF-2).
+- **What TERM does to an `oci` box's init is the class's** (the lead's ruling, 2026-11-05). Linux's is the
+  rule above. Windows has no POSIX signals: HCS's ProcessSignal carries console control events only, and
+  hcsshim maps TERM to a shutdown and KILL to terminate (`internal/signals/signal.go:185-197`), so Windows'
+  `oci` class ends the container's job. Both are right for their platform, so the fixture says which
+  (`Fixture::term_ends_init`, false by default), and the oracle is a simulator made with that answer
+  (`SimRuntime::with_term_ending_init`), as HEX-RT-6 checks the effect of a refused fork where the count is
+  not kept. Neither class's behavior changes for the suite.
+- **Non-vacuity:** runtimes that are the simulator but for one lie (a signal of nothing taken, a deleted
+  box kept, a box stuck running, an exec refused after the last program ended) each fail the scenario that
+  shows it, at the step named; one that reports a box late passes; a runtime whose init ends on TERM passes
+  with a fixture that says so and fails HEX-DIFF-2 without (`crates/hex-api/src/differential.rs` tests).
+- **What would falsify it:** a behavior two classes show differently that no scenario reaches (the
+  scenarios grow with it), or the simulator diverging from the design text (then the simulator is fixed
+  and every class re-run).
+
 ## Open (STATUS.md)
 
 - Each OS's own boxes, natively (the decision above, proposed): under way. The **macOS `process` class is

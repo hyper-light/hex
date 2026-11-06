@@ -55,6 +55,19 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
 
 - Both AC benchmarks are now of-record (above). Remaining CP-T7.1 work: the first-consumer default-on
   flip (gated on a full dispatched-leg smoke) and the second consumer (the `hex` CI executor).
+- **The Windows `oci` class** (native plan step 4; `docs/design/runtime.md`, "the Windows `oci` class is an HCS
+  silo holding a Hex job"; `docs/research/runtime/windows-hcs.md`): built, not yet run on Windows.
+  `hex_core::hcs` is the sans-IO core: Microsoft's host/image version table, a bundle's `windows` section or an
+  `OciSpec` to the container, every field honored or refused by name, the HCS v2 document, HCS's error kinds,
+  and the launcher's wire. Its tests pass on Linux. `hex_runtime::windows::oci` makes a process-isolated
+  compute system over the image's layers, with the box's job nested in the silo. Every program starts suspended
+  in that job, through `hex oci-launch`; HCS is loaded at run time. It is cross-checked by the Windows clippy
+  gate. What closes it: jupiter (offline) runs `crates/hex-cli/tests/windows_oci_box.rs` — HEX-RT-1..13, a
+  device not granted isn't visible, a read-only mount refuses writes, a mismatched image refused by name — and
+  settles the research note's §9 probes. Create, start and delete are then measured against Docker's and
+  containerd's runhcs on jupiter, recorded in `bench/`. Open until then: the silo's own memory baseline, which
+  sets an `OciSpec` box's container-wide HCS memory bound (probe 3); until it is measured, such a box's bound
+  holds on its members only.
 - **Consumer #1** (host CI legs + harness in `process` boxes, kiln `cp/t7-hex` behind `KILN_HEX_BOX`):
   the boxed path is e2e-validated under real delegation — the `the_boxed_path_holds_its_bounds_under_
   delegation` lab passes on fedora (vacate to supervisor, cpu/io/memory/pids delegated, fair-share
@@ -330,6 +343,33 @@ three different things (CLAUDE.md "Working here"):
   proximity on hyper-swim, priority/fair-share/gangs/preemption, correctness against a serial
   specification, one code path from a laptop to a region, and fast isolation of bad workloads and
   nodes, all measured in **hex-sim** (built first). Implementation open.
+
+## What works where (native plan step 7; `docs/design/runtime.md`, decision "one differential suite")
+
+One suite, `hex_api::differential` (the conformance cases HEX-RT-1..13 and the scenarios HEX-DIFF-1..6, each
+real class held to the simulator's trace), runs as each OS's own tests. Where it has passed, and on what:
+
+| | `process` | `oci` |
+|---|---|---|
+| Linux amd64 (fedora) | **Passes** (cgroup v2; `process_box.rs`, and over the node's socket) | **Passes** (bundles and specs, rootless; `oci_box.rs`, `oci_spec_box.rs`, over the socket) |
+| Linux arm64 | Not run: no Linux arm64 machine in the lab. Built for it by no gate yet | As `process` |
+| macOS arm64 (the Mac Studio) | **Passes** (rootless; `macos_process_box.rs` 7/7 on adas-mac-studio-2 at abdbfd0, a launchd job outside kiln's pacing) | Linux images through a Shards guest: native step 5, not merged into the native line |
+| macOS amd64 (Intel) | Built and linted for `x86_64-apple-darwin` (clippy `-D warnings` and build exit 0, 1aa735c); not run, no Intel Mac in the lab | Refused by name: Shards has no x86_64 macOS backend |
+| Windows amd64 (jupiter) | **Passes** (job objects; `windows_process_box` 9/9 on jupiter at 1a2e1eb and e322d7b, the Windows agent's record `bench/install/records/windows-jupiter-20261105.txt` on `cp/t7-native-windows`) | Windows images through HCS: native step 4, built, not merged, not run |
+| Windows arm64 | Skipped for now (Ada, 2026-11-03) | Skipped |
+
+The suite's divergences so far, each fixed where the contract says: a Windows box with nothing running took a
+signal the others refuse (`NotRunning`), now refused; the simulator ended an `oci` box's init on TERM, which
+Linux doesn't (a PID namespace's init takes only KILL and STOP unless it handles the signal), now modelled, and
+what TERM does to an init is the class's (`Fixture::term_ends_init`: Windows' `oci` class ends the job, set by
+native step 4); a macOS box refused a program after its last ended and took a signal with none alive, both
+fixed. The competitor bench found one more: a macOS program killed at its bound was sometimes reported at its
+wait's budget (XNU posts the exit event before the zombie), fixed at abdbfd0.
+
+Each OS's `process` class against its competitors, recorded in `bench/native/RESULT.md`: Linux start 11.1x and
+delete 14.7x a systemd scope's, both holding the bound; macOS start 1.87x `taskpolicy -m`'s, delete 0.90x, both
+holding the bound, and a launchd job's limit holds none; Windows start 2.4x and delete 256x Process Governor's,
+both holding the bound. Open: the Windows `oci` suite (waits on Ada's yes to `oci_setup.ps1`), and the macOS `oci` class through a Shards guest when native step 5 lands.
 
 ## Next
 

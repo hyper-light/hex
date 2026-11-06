@@ -29,6 +29,11 @@ rustix.workspace = true
 hex-api.workspace = true
 hex-runtime.workspace = true
 
+# The Windows oci class's launcher (`hex oci-launch`), which HCS runs inside each container
+# (hex_runtime::windows::oci::launch), and the selftest's device probe.
+[target.'cfg(target_os = "windows")'.dependencies]
+hex-runtime.workspace = true
+
 [dev-dependencies]
 hex-api.workspace = true
 tempfile.workspace = true
@@ -44,10 +49,12 @@ hex-core.workspace = true
 hex-runtime.workspace = true
 
 # The Windows process class's conformance test (tests/windows_process_box.rs) drives hex-runtime's
-# Windows runtime; windows-sys is for the test's own check that a deleted box's grandchild is gone.
+# Windows runtime; windows-sys is for the test's own check that a deleted box's grandchild is gone. The
+# oci class's test (tests/windows_oci_box.rs) writes its bundles' config.json with serde_json.
 [target.'cfg(target_os = "windows")'.dev-dependencies]
 hex-core.workspace = true
 hex-runtime.workspace = true
+serde_json.workspace = true
 windows-sys.workspace = true
 
 [lints]

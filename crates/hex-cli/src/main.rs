@@ -19,6 +19,14 @@ fn main() -> ExitCode {
             return ExitCode::from(status);
         }
     }
+    // The Windows `oci` class's launcher, which HCS runs inside a container to start a program in its
+    // box's job (hex_runtime::windows::oci::launch).
+    #[cfg(target_os = "windows")]
+    if let [Some(first)] = args.as_slice()
+        && first == "oci-launch"
+    {
+        return ExitCode::from(hex_runtime::windows::oci::launch::serve());
+    }
     // The `oci` class's command line and its re-exec'd container init (Linux only).
     #[cfg(target_os = "linux")]
     if let [Some(first), rest @ ..] = args.as_slice()

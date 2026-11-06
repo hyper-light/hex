@@ -3,8 +3,9 @@
 //! enforced as the kernel would: past `memory_max` a program is killed and the kill counted; past
 //! `pids_max` a fork is refused and counted. An `oci` box has an init, made at create and waiting
 //! until start. From a [`ClassSpec::Oci`] it runs the spec's init program, so `fail N` ends it with N
-//! at start and `say` with 0; any other init, and a bundle's, runs until it is signalled or the box
-//! is deleted. Once the init has ended the box is empty and inspect reports how it ended, as the node
+//! at start and `say` with 0; any other init, and a bundle's, runs until it is killed or the box is
+//! deleted: as the init of its PID namespace with no handler, it takes no other signal (unless made
+//! [`SimRuntime::with_term_ending_init`], for a class that ends its init on TERM). Once the init has ended the box is empty and inspect reports how it ended, as the node
 //! agent does for a container whose init it reaped.
 
 use std::collections::BTreeMap;
@@ -12,9 +13,10 @@ use std::io::{Read, Write};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use crate::conformance::{Act, Fixture};
 use crate::{
-    BoxId, BoxInfo, BoxSpec, BoxState, Class, ClassSpec, Exit, Proc, Program, Refusal, Runtime,
-    Signal, Stdio, Usage,
+    Bounds, BoxId, BoxInfo, BoxSpec, BoxState, Class, ClassSpec, Exit, Network, OciSpec, Proc,
+    Program, Refusal, Rootfs, Runtime, Signal, Stdio, Usage,
 };
 
 /// Most boxes a [`SimRuntime`] holds; past it `create` is refused with [`Refusal::Full`].
@@ -28,6 +30,9 @@ pub const SIM_ECHO_BYTES: u64 = 1 << 20;
 #[derive(Default)]
 pub struct SimRuntime {
     boxes: Mutex<BTreeMap<BoxId, SimBox>>,
+    /// Whether TERM ends an `oci` box's init, as [`Fixture::term_ends_init`] says of the class it
+    /// stands for.
+    term_ends_init: bool,
 }
 
 struct SimBox {
@@ -70,6 +75,14 @@ fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
 impl SimRuntime {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A simulator whose `oci` inits end on TERM when `ends`, as the class whose oracle it is does.
+    pub fn with_term_ending_init(ends: bool) -> Self {
+        Self {
+            term_ends_init: ends,
+            ..Self::default()
+        }
     }
 
     fn boxes(&self) -> Result<MutexGuard<'_, BTreeMap<BoxId, SimBox>>, Refusal> {
@@ -300,11 +313,22 @@ impl Runtime for SimRuntime {
             .get(id)
             .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
         let mut any = false;
-        for p in b.procs.iter().chain(&b.init) {
+        for p in &b.procs {
             if p.exit()?.is_none() {
                 p.end(Exit::Signal(signal.number()))?;
                 any = true;
             }
+        }
+        // An init is its PID namespace's init, which the kernel gives only KILL (and STOP) unless it has
+        // a handler for the signal (pid_namespaces(7)); the simulator's inits have none. A class with no
+        // POSIX signals ends the init on TERM instead (Windows ends the container's job).
+        if let Some(init) = &b.init
+            && init.exit()?.is_none()
+        {
+            if signal == Signal::KILL || (signal == Signal::TERM && self.term_ends_init) {
+                init.end(Exit::Signal(signal.number()))?;
+            }
+            any = true;
         }
         if any {
             Ok(())
@@ -384,67 +408,67 @@ impl Proc for SimHandle {
     }
 }
 
+/// The simulator's programs, in boxes of either class; an `oci` box made from a bundle or from
+/// the structured spec. The conformance suite's fixture for the simulator, and the oracle's in
+/// [`crate::differential`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimFixture {
+    Process,
+    Bundle,
+    Spec,
+}
+
+impl SimFixture {
+    fn oci(&self, act: &Act) -> ClassSpec {
+        ClassSpec::Oci(Box::new(OciSpec {
+            rootfs: Rootfs::Dir("/rootfs".into()),
+            init: self.program(act),
+            mounts: Vec::new(),
+            hostname: None,
+            network: Network::Private,
+            hosts: Vec::new(),
+        }))
+    }
+}
+
+impl Fixture for SimFixture {
+    fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
+        BoxSpec {
+            id,
+            bounds,
+            class: match self {
+                Self::Process => ClassSpec::Process,
+                Self::Bundle => ClassSpec::Bundle("/bundle".into()),
+                Self::Spec => self.oci(&Act::Wait),
+            },
+        }
+    }
+    fn init(&self, id: BoxId, act: &Act) -> BoxSpec {
+        BoxSpec {
+            id,
+            bounds: Bounds::default(),
+            class: match self {
+                Self::Process => ClassSpec::Process,
+                Self::Bundle | Self::Spec => self.oci(act),
+            },
+        }
+    }
+    fn program(&self, act: &Act) -> Program {
+        match act {
+            Act::Say(words) => Program::of(&["say", words]),
+            Act::Fail(code) => Program::of(&["fail", &code.to_string()]),
+            Act::Wait => Program::of(&["wait"]),
+            Act::Hog(bytes) => Program::of(&["hog", &bytes.to_string()]),
+            Act::Spawn(n) => Program::of(&["spawn", &n.to_string()]),
+            Act::Echo => Program::of(&["echo"]),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conformance::{self, Act, Fixture};
-    use crate::{Bounds, Network, OciSpec, Rootfs};
-
-    /// The simulator's programs, in boxes of either class; an `oci` box made from a bundle or from
-    /// the structured spec.
-    #[derive(Debug, Clone, Copy)]
-    enum SimFixture {
-        Process,
-        Bundle,
-        Spec,
-    }
-
-    impl SimFixture {
-        fn oci(&self, act: &Act) -> ClassSpec {
-            ClassSpec::Oci(Box::new(OciSpec {
-                rootfs: Rootfs::Dir("/rootfs".into()),
-                init: self.program(act),
-                mounts: Vec::new(),
-                hostname: None,
-                network: Network::Private,
-                hosts: Vec::new(),
-            }))
-        }
-    }
-
-    impl Fixture for SimFixture {
-        fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
-            BoxSpec {
-                id,
-                bounds,
-                class: match self {
-                    Self::Process => ClassSpec::Process,
-                    Self::Bundle => ClassSpec::Bundle("/bundle".into()),
-                    Self::Spec => self.oci(&Act::Wait),
-                },
-            }
-        }
-        fn init(&self, id: BoxId, act: &Act) -> BoxSpec {
-            BoxSpec {
-                id,
-                bounds: Bounds::default(),
-                class: match self {
-                    Self::Process => ClassSpec::Process,
-                    Self::Bundle | Self::Spec => self.oci(act),
-                },
-            }
-        }
-        fn program(&self, act: &Act) -> Program {
-            match act {
-                Act::Say(words) => Program::of(&["say", words]),
-                Act::Fail(code) => Program::of(&["fail", &code.to_string()]),
-                Act::Wait => Program::of(&["wait"]),
-                Act::Hog(bytes) => Program::of(&["hog", &bytes.to_string()]),
-                Act::Spawn(n) => Program::of(&["spawn", &n.to_string()]),
-                Act::Echo => Program::of(&["echo"]),
-            }
-        }
-    }
+    use crate::conformance;
 
     #[test]
     fn the_simulator_passes_the_conformance_suite() {
@@ -452,6 +476,53 @@ mod tests {
             let failures = conformance::run(&SimRuntime::new(), &fixture);
             assert!(failures.is_empty(), "{fixture:?}: {failures:#?}");
         }
+    }
+
+    /// HEX-DIFF-1/2's oci half: signal TERM to an oci box ends its exec'd programs and leaves its init
+    /// running, as the kernel does for a PID namespace's init with no handler (pid_namespaces(7)); KILL
+    /// ends the init too.
+    #[test]
+    fn only_kill_ends_an_oci_boxs_init() {
+        let rt = SimRuntime::new();
+        let id = BoxId::new("init").unwrap();
+        rt.create(SimFixture::Bundle.spec(id.clone(), Bounds::default()))
+            .unwrap();
+        rt.start(&id).unwrap();
+        let mut p = rt
+            .exec(&id, SimFixture::Bundle.program(&Act::Wait), Stdio::null())
+            .unwrap();
+        rt.signal(&id, Signal::TERM).unwrap();
+        assert_eq!(p.try_wait().unwrap(), Some(Exit::Signal(15)));
+        let info = rt.inspect(&id).unwrap();
+        assert_eq!((info.state, info.exit), (BoxState::Running, None));
+        rt.signal(&id, Signal::TERM).unwrap();
+        rt.signal(&id, Signal::KILL).unwrap();
+        let info = rt.inspect(&id).unwrap();
+        assert_eq!(
+            (info.state, info.exit),
+            (BoxState::Empty, Some(Exit::Signal(9)))
+        );
+        assert!(matches!(
+            rt.signal(&id, Signal::TERM),
+            Err(Refusal::NotRunning(..))
+        ));
+    }
+
+    /// HEX-DIFF-1/2's oci half where the class ends its init on TERM (Windows has no POSIX signals, so
+    /// its oci class ends the container's job): a simulator told so ends the init on TERM.
+    #[test]
+    fn term_ends_the_init_where_the_class_says_it_does() {
+        let rt = SimRuntime::with_term_ending_init(true);
+        let id = BoxId::new("init").unwrap();
+        rt.create(SimFixture::Bundle.spec(id.clone(), Bounds::default()))
+            .unwrap();
+        rt.start(&id).unwrap();
+        rt.signal(&id, Signal::TERM).unwrap();
+        let info = rt.inspect(&id).unwrap();
+        assert_eq!(
+            (info.state, info.exit),
+            (BoxState::Empty, Some(Exit::Signal(15)))
+        );
     }
 
     #[test]

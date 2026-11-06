@@ -1,0 +1,113 @@
+jupiter, the first native Windows runs of native plan steps 3, 4, 6 and 7 together (bench/install/jupiter.sh)
+
+Host: jupiter (Windows 11, Microsoft Windows NT 10.0.26200.0, AMD Ryzen AI MAX+ 395, 32 CPUs), rustc 1.99.1.
+Windows features before any install by Hex: Containers 1, HypervisorPlatform 1 (Win32_OptionalFeature
+InstallState, both Enabled already). Co-tenant: Amphora's cargo/rustc were running at the same time (one rustc
+at 3.6 GB). CARGO_BUILD_JOBS=8; one job at a time; every run under a kiln time limit. The raw records
+(jupiter.sh's tee of each phase) are on jupiter at C:\Users\corph\.cache\hex-t7-windows\records\. The repository
+copy there shows ~20 bench scripts as modified: line endings from the sync, no content change.
+
+1. build at 563ebff, 2026-11-05T08:17:31Z, load 9% CPU: windows-build-563ebff-20261105T081731Z.txt
+   hex.exe and the windows_process_box and windows_oci_box test binaries built. PHASE build: PASS (exit 0).
+
+2. gates at 563ebff, 2026-11-05T08:18:05Z: windows-gates-563ebff-20261105T081805Z.txt
+   cargo fmt --all --check: pass. cargo clippy --workspace --all-targets --locked -- -D warnings: pass.
+   cargo test --workspace --locked: FAILED in hex-core --lib, 111 passed, 4 failed (cargo stopped there):
+     bundle::tests::layers_with_a_private_network_render_rootless_to_their_golden_config
+     bundle::tests::layers_with_a_private_network_render_as_root_to_their_golden_config
+     bundle::tests::layers_at_overlayfs_bounds_render
+     bundle::tests::hostile_values_are_refused_by_name
+   each: Invalid { what: "oci spec", why: "the box's writable layer \"/var/lib/hex/bundles/box-1\\upper\" holds
+   '\\', which overlayfs reads as a separator" } (the bundle core joined a Linux path with the host's separator).
+   Exit 101. Fixed by b2d855a (test) and 4a6676b (fix): hex-core --lib 115 passed, 0 failed on jupiter.
+
+3. gates at 1a2e1eb (the fix, and --no-fail-fast), 2026-11-05T08:22:47Z, load 19% CPU:
+   windows-gates-1a2e1eb-20261105T082247Z.txt
+   cargo fmt --all --check: pass. cargo clippy --workspace --all-targets --locked -- -D warnings: pass.
+   cargo test --workspace --locked --no-fail-fast: every crate passes, 0 failed:
+     hex-api 18 (differential::tests incl. what_term_does_to_an_init_follows_the_fixture), doc_truth 7, cli 5,
+     hex-core 115, hex-node 6,
+     windows_process_box 9: windows_process_boxes_hold_the_contract (HEX-RT-1..9 and step 7's HEX-DIFF-1..6 on
+       the Windows process class), a_box_past_its_bound_is_refused_at_the_bound,
+       a_member_asking_to_break_away_is_refused, delete_ends_a_boxs_grandchildren,
+       a_box_under_its_bound_runs_and_reports_its_exit, a_box_takes_a_named_signal,
+       a_node_started_process_past_the_bound_is_refused_and_counted,
+       a_windows_image_is_refused_naming_containers_while_it_is_off (HEX-INST-2: Containers on, so no feature
+       named), a_linux_image_is_refused_naming_what_its_guest_waits_on (HEX-INST-2: HypervisorPlatform on, so
+       refused for the Shards guest),
+     windows_oci_box 2: windows_oci_boxes_hold_the_contract_and_the_steps_criteria passed BY SKIPPING (no
+       HEX_WINDOWS_LAYERS: step 4's oci_setup.ps1 hasn't run, so no image's layers), and
+       the_fixture_keeps_each_boxs_files_under_its_root.
+   The Linux- and macOS-only test crates hold no tests on Windows (cfg). PHASE gates: PASS (exit 0).
+
+4. the installer lab's before phase at a745b54, 2026-11-05T08:27:08Z, load 20% CPU, as Jupiter\corph (no admin):
+   windows-before-a745b54-20261105T082708Z.txt
+   fresh of Hex: windows.ps1 check lists nothing ("nothing of Hex's is left").
+   the plan (install -DryRun), 4 lines and no feature, since both are on already:
+     folder C:\Program Files\Hex / file C:\Program Files\Hex\hex.exe / folder C:\ProgramData\Hex /
+     file C:\ProgramData\Hex\manifest
+   HEX-INST-2: "FEATURES: Containers on": a Windows image is past the feature check, refused by step 4's class for
+     its missing layer: Os { op: "reading the image's Windows build from its base layer", why: "The system cannot
+     find the file specified. (os error 2)" }; "FEATURES: HypervisorPlatform on": a Linux image is refused
+     Platform { what: "the oci class", platform: "windows", why: "a Linux image runs in a Shards guest through the
+     Windows Hypervisor Platform (native plan step 5), which this node doesn't boot yet" }.
+   PHASE before: PASS (exit 0). Windows PowerShell 5.1 shows each test's stderr as a NativeCommandError block
+   (cosmetic), and Tee-Object writes the plan as UTF-16 LE, which Get-Content reads back.
+
+5. gates at 48c920d (step 4's 5fcdf98 merged: Windows oci term_ends_init = true), 2026-11-05T08:33:30Z:
+   windows-gates-48c920d-20261105T083330Z.txt
+   fmt, clippy -D warnings, cargo test --workspace --no-fail-fast: every crate 0 failed (hex-api 18, doc_truth 7,
+   cli 5, windows_oci_box 2 (its suite still SKIPs: no layers), windows_process_box 9, hex-core 115, hex-node 6).
+   PHASE gates: PASS (exit 0). The 7 gates on fedora at the same commit: exit 0, 271 tests
+   (unit hex-windows-gates-20261105T083326Z).
+
+6. the installer lab's before phase again at 21cb432 (48c920d plus this record), 2026-11-05T08:45:55Z:
+   windows-before-21cb432-20261105T084555Z.txt. The same as entry 4: fresh of Hex, the same 4-line plan,
+   "FEATURES: Containers on" and "FEATURES: HypervisorPlatform on", both refusals as there. PHASE before: PASS.
+
+7. step 7's suite and its native_box bench at e322d7b (step 7's abdbfd0 merged), for step 7.
+   cargo test -p hex-cli --test windows_process_box -- --nocapture --test-threads=1, 2026-11-05T10:00:00Z, load 83%
+   CPU: 9 passed, 0 failed (windows-s7suite-e322d7b-20261105T100000Z.txt).
+   native_box (release hex.exe as HEX_BIN; args n 500, warmup 50, runs 20), two passes alternating hex and procgov,
+   2026-11-05T10:02:38Z-10:04:08Z, load 58-82% CPU, 10 co-tenant cargo/rustc (raw JSON
+   native_box-e322d7b-20261105T100140Z\). Every box bounded to 256 MiB. Times in ms:
+     driver  pass  create p50/p99    start p50/p99/max      delete p50/p99   bound: past bound, end p50
+     hex     1     0.048/0.182       52.2/85.3/259.3        1.49/4.87        -6 MiB (20/20 at 250), 248
+     hex     2     0.044/0.170       54.9/92.9/237.3        1.73/5.09        -6 MiB (20/20 at 250), 259
+   Each climb ended Code(-1073740791) (0xC0000409: the program aborting on the commit the job refused).
+   procgov (Process Governor 4.1.26190.22, procgov.exe from its GitHub release, unsigned, sha256
+   fa59212a32306ca22c22680a36c047ca3ffea52f511acb09dd9d7145c1673069): BOTH PASSES FAILED, exit 101, because the
+   driver read procgov's banner ("Process Governor v4.1.26190.22 - sets limits on processes") as the program's
+   first line. procgov -q prints only the program's output (checked); sent to step 7 to fix. No procgov figure yet.
+   The 7 gates on fedora at e322d7b: exit 0, 273 tests (unit hex-windows-gates-20261105T095938Z).
+
+8. native_box at b1ddb89 (step 7's own tip, procgov -q; built from a worktree of that commit on jupiter,
+   C:\Users\corph\.cache\hex-t7-windows\wt-b1ddb89), for step 7's bench/native/RESULT.md. Release hex.exe as HEX_BIN;
+   args n 200, warmup 20, runs 20; hex and procgov interleaved, 3 passes, 2026-11-05T11:04:00Z-11:09:25Z.
+   Host: Jupiter, Microsoft Windows NT 10.0.26200.0, AMD RYZEN AI MAX+ 395 w/ Radeon 8060S, 32 logical CPUs.
+   procgov: Process Governor v4.1.26190.22, sha256 fa59212a32306ca22c22680a36c047ca3ffea52f511acb09dd9d7145c1673069.
+   Raw: C:\Users\corph\.cache\hex-t7-windows\records\native_box-b1ddb89-20261105T110322Z\ (runs.txt, <driver>-<pass>.json).
+   Load and co-tenants (CPU % from Win32_Processor; co-tenants = other users' cargo/rustc processes), start / end:
+     pass 1 hex 77% 12 / 11% 9      procgov 77% 9 / 65% 9
+     pass 2 hex 13% 9 / 17% 6       procgov 35% 6 / 24% 6
+     pass 3 hex 33% 6 / 29% 6       procgov 16% 6 / 12% 3
+   Every box bounded to 256 MiB. Times in ms (procgov has no separate create: its start is create and start):
+     driver   pass  create p50/p99   start p50/p99/max     delete p50/p99/max       bound: past bound, end p50/max
+     hex      1     0.042/0.075      43.5/61.5/63.4        0.885/1.95/3.76          -6 MiB (20/20 at 250), 195.9/305.0
+     hex      2     0.036/0.046      38.3/51.8/53.3        0.984/1.64/8.03          -6 MiB (20/20 at 250), 197.6/223.0
+     hex      3     0.028/0.054      21.9/39.6/43.8        0.866/1.26/7.73          -6 MiB (20/20 at 250), 186.8/201.8
+     procgov  1     -                58.5/70.2/84.9        268.9/327.2/340.4        -3 MiB (20/20 at 253), 438.4/6239.0
+     procgov  2     -                57.4/70.1/80.9        256.2/313.7/318.8        -3 MiB (20/20 at 253), 420.1/446.1
+     procgov  3     -                52.0/100.0/165.5      221.6/324.1/4442.2       -3 MiB (20/20 at 253), 406.6/451.4
+   Best of 3 (p50): hex create 0.028, start 21.9, delete 0.866, bound end 186.8; procgov start 52.0, delete 221.6
+   (taskkill /T /F of procgov's process), bound end 406.6. hex's climbs ended Code(-1073740791) (0xC0000409, the
+   program aborting on the refused commit); procgov's ExitStatus(3221226505) (0xC0000409 too). All 6 passes exit 0.
+
+What HCS reports as a Windows oci box's Exit at its end, against the oracle's Signal(15), for HEX-DIFF-1 step 12
+and HEX-DIFF-2 step 11 (asked by step 7): NOT OBSERVED. windows_oci_boxes_hold_the_contract_and_the_steps_criteria
+skipped in every run above (no HEX_WINDOWS_LAYERS), so no Windows oci box was made; it is read in the first run
+with an image.
+
+Not run yet: step 4's oci suite on an image (needs oci_setup.ps1, which waits on Ada's yes), and the installer
+lab's installed and uninstalled phases (the install and uninstall need Ada at jupiter: on jupiter they turn on no
+feature, so a UAC yes each and no reboot).
