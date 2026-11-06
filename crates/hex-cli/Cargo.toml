@@ -38,10 +38,12 @@ hex-client.workspace = true
 hex-node.workspace = true
 
 # The macOS process class's conformance test (tests/macos_process_box.rs) drives hex-runtime's macOS
-# runtime with the `hex selftest-box` programs this crate's binary provides.
+# runtime with the `hex selftest-box` programs this crate's binary provides; rustix reads the node's own
+# descriptor limit, the one its boxes' default is capped at.
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 hex-core.workspace = true
 hex-runtime.workspace = true
+rustix.workspace = true
 
 # The Windows process class's conformance test (tests/windows_process_box.rs) drives hex-runtime's
 # Windows runtime; windows-sys is for the test's own check that a deleted box's grandchild is gone.
