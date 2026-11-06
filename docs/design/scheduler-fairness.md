@@ -156,10 +156,13 @@ in 589 preemptions, candidates passed over for a budget 22,383 times, none refus
 budget (`preemptions_happen_and_budgets_bind`). A crash before and after every write of a contested
 cluster with preemptions (`a_crash_at_every_write_with_preemption_loses_and_doubles_nothing`). The
 mutant ignoring budgets is refused (`the_oracle_refuses_a_preemption_past_a_budget`), as is an inversion
-(`the_oracle_refuses_a_higher_band_left_waiting`). The proptest found one bug: a placement that ended
+(`the_oracle_refuses_a_higher_band_left_waiting`). The proptest found two bugs: a placement that ended
 a disruption left its queue's cursor past work that could then preempt
-(`a_disruption_ended_by_a_placement_reopens_its_queue`). Measured 2026-11-05 on jupiter (Windows x86_64,
-release).
+(`a_disruption_ended_by_a_placement_reopens_its_queue`); and a node reporting a run done after the store
+had preempted it, before the node saw the order to stop it, ended the run in a conflict, where the report
+is now dropped as the stopped run's (`a_run_reported_done_as_it_is_preempted_is_dropped`, counted in
+`reports_superseded`). Measured 2026-11-05 on jupiter (Windows x86_64, release), the second 2026-11-06 on
+fedora.
 
 **What would falsify it.** Any run whose log the specification refuses for a budget or an inversion; or,
 on a recorded day, preemption churn (work preempted and placed again) costing more goodput than the
