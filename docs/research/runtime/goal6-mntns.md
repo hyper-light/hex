@@ -650,3 +650,36 @@ Read:
 - **The shared attach point shows, but too rarely to matter.** Waits on another rwsem are a little more frequent with
   B (0.063-0.089 a create against 0.028-0.073), which fits the shared inode. They're rare and carry no p99 cost here.
 - **Lever (4) stands as built.** Arm C isn't needed.
+
+## 16. The ways interleaved in the 7.2 guest: indicative, NOT of record (2026-11-06)
+
+`bench/competitive/probes/mntns_record.sh`, the one command for the record after fedora's move to Linux 7.2
+(`goal6-fedora-7x-runbook.md`), run in guest mode at cp/t7-g6 0f218cb: unit hex-g6-recguest-20261106T054117Z, run
+`mntns-guest-20261106T054217Z`, timed 05:42:52-05:48:15Z under the lock, fedora's load 10-15. Fedora's kernel
+7.2.15-200.fc44 in the guest, 12 vCPUs on CPUs 4-15. The three ways interleaved, the order rotated each round, 3 rounds
+at 6 and 12 busy loops, 2,000 creates a cell at 8 in flight, 8,000 idle guest threads, owner bundles with reuse on,
+Docker's paths, the `/dev` pool on, procs made ahead on (the default). Each cell's phase ran once untraced (its create
+p50 and p99) and once traced (part 19). Every cell's mount-namespace counts showed the way it was asked, 18 of 18.
+
+| loops | round | create p50, ms: copy / tree / empty | part 19 p99, us: copy / tree / empty |
+|---|---|---|---|
+| 6 | 1 | 0.971 / 0.928 / 0.927 | 839 / 837 / 669 |
+| 6 | 2 | 0.959 / 0.940 / 0.927 | 1,051 / 883 / 935 |
+| 6 | 3 | 1.154 / 0.888 / 0.829 | 1,724 / 737 / 778 |
+| 12 | 1 | 2.246 / 2.203 / 1.841 | 470 / 945 / 535 |
+| 12 | 2 | 2.214 / 2.214 / 2.188 | 2,056 / 1,026 / 446 |
+| 12 | 3 | 2.145 / 2.216 / 2.166 | 1,010 / 281 / 1,012 |
+
+Read:
+- **Create p50:** tree and empty are each below the copy in 5 of 6 pairs, by 0.02-0.27 ms at 6 loops and less at 12.
+  In the median over the cells: copy 1.649 ms, tree 1.571 ms, empty 1.384 ms. So in the guest, the new ways meet goal
+  6's "create p50 below the classic path's in the same run". It's a VM's reading, and the criterion's run is the host's.
+- **Part 19:** its p50 is 66-81 us in all three ways (procs made ahead), tree a little the lowest. Its p99 ranges over
+  281-2,056 us with no consistent order in this guest, as §9 found: a guest's tails mostly reflect the host. So the
+  under-load bar stays unread here.
+- **An earlier run under overload isn't comparable.** Unit hex-g6-recguest-20261106T015822Z ran at fedora's load 30-410
+  and was OOM-killed after 9 of 18 cells. Its partial reading (tree's create p50 above the copy's in 2 of 3 pairs) was
+  the host's: `record-partial.txt` in its run directory.
+
+The record lines above go into `mntns_default.txt` only from a host of record: the default doesn't change on this
+reading. After the move, `bash bench/competitive/probes/mntns_record.sh host`, in a hex-slot unit, is the run of record.
