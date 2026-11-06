@@ -390,18 +390,18 @@ fn a_box_user_programs_end_is_its_own_not_unknown() {
 
 /// CLAUDE.md §5 (the box helper's default process cap is the kernel's, not picked): do read the per-user
 /// process limit; expect what `sysctl kern.maxprocperuid` prints, the limit macOS itself holds each user to
-/// (`bsd/conf/param.c:94`, scaled per device), so a box's user gets what any user of this machine gets.
+/// (`bsd/kern/kern_resource.c:169-170`), so a box's user gets what any user of this machine gets.
 #[test]
 fn the_default_box_process_cap_is_the_kernels_per_user_limit() {
     let out = std::process::Command::new("/usr/sbin/sysctl")
         .args(["-n", "kern.maxprocperuid"])
         .output()
         .expect("sysctl");
-    let want: u32 = String::from_utf8_lossy(&out.stdout)
+    let want: usize = String::from_utf8_lossy(&out.stdout)
         .trim()
         .parse()
         .expect("a number");
-    assert_eq!(super::sys::max_processes_per_user().expect("read"), want);
+    assert_eq!(super::sys::max_processes_per_uid().expect("read"), want);
 }
 
 /// HEX-RT-3 (no wait bound to pick): do watch a running child, then end it; expect `try_wait` to answer

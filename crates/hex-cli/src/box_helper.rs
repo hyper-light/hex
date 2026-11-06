@@ -75,8 +75,13 @@ pub fn main(args: &[String]) -> u8 {
         return 2;
     }
     // A box's user may hold what macOS lets any user hold, unless the installer names another cap.
-    let nproc = match nproc.map_or_else(sys::max_processes_per_user, Ok) {
-        Ok(n) => n,
+    let per_uid = match nproc {
+        Some(n) => Ok(Ok(n)),
+        None => sys::max_processes_per_uid().map(u32::try_from),
+    };
+    let nproc = match per_uid {
+        Ok(Ok(n)) => n,
+        Ok(Err(_)) => u32::MAX,
         Err(e) => {
             let _ = writeln!(
                 std::io::stderr().lock(),
