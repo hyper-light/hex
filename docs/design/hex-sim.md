@@ -444,7 +444,11 @@ as zero (mutant `no-proximity-term`). `kinds_go_to_owners_by_g2s_rule` reproduce
 and `a_kind_no_node_runs_is_refused_not_misplaced` check the kinds; `every_policy_runs_every_job_deterministically`,
 `proximity_changes_decisions` and `the_oracle_bounds_the_coordinates` check the study itself. The
 tie-break gains little (−0.02% to +4.3% goodput): it acts only on best fit's exact ties, which the
-kinds' differing overheads make rare.
+kinds' differing overheads make rare. `the_tie_break_places_nearer_than_blind` shows its effect anyway:
+its placements' mean RTT is below blind's on all 40 small studies, and both tie-break mutants fail it:
+`no-tie-break-term` (144.9 against 144.9 ms) and `random-tie-break` (145.0 against 144.9 ms). Unit
+`hex-sched-g3-tbmut-20261106T144322Z`. `proximity_changes_decisions`' floor for it, a fiftieth of
+decisions, is a sanity check only: it catches the first mutant (0 moved) and not the second.
 
 **What would falsify it.** Recorded microVM sessions whose round trips don't go to one place, or whose
 compute between them dwarfs the RTT: the gain falls toward the 1 s rows' (about 1-2% goodput). A real

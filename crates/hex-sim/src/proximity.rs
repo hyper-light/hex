@@ -820,7 +820,8 @@ mod tests {
     /// never "moved". The tie-break acts only where best fit's free capacity ties exactly, and the
     /// kinds' overheads (0.42 MiB against 5 MiB) leave nodes' free memory apart by odd bytes, so it
     /// finds fewer ties than over generic jobs (235 of 3,000 decisions here, seed 6, against over 300
-    /// before the kinds).
+    /// before the kinds). The fiftieth is a sanity floor: what shows the tie-break's effect can fail is
+    /// `the_tie_break_places_nearer_than_blind`, which both tie-break mutants fail.
     #[test]
     fn proximity_changes_decisions() {
         let study = generate(&small(6, 900, Homes::Skewed));
@@ -865,6 +866,32 @@ mod tests {
                     "{seed} {homes:?}"
                 );
                 assert!(near.mean_rtt_ms() < blind.mean_rtt_ms(), "{seed} {homes:?}");
+            }
+        }
+    }
+
+    /// S4, A2 (G3 step 2): do run blind placement and the tie-break, Hex's three kinds, on five
+    /// seeds, both fleets, homes uniform and skewed, at 50% and 90% load; expect the tie-break to
+    /// place nearer home on average than blind on every one: among best fit's exact ties it takes the
+    /// least predicted RTT, so its placements' mean true RTT is lower. Mutants `no-tie-break-term`
+    /// (its score 0, best fit's own order) and `random-tie-break` (a node's hash, not its RTT) fail it.
+    #[test]
+    fn the_tie_break_places_nearer_than_blind() {
+        for seed in 1..=5 {
+            for fleet in [Fleet::AllKinds, Fleet::Mixed] {
+                for homes in [Homes::Uniform, Homes::Skewed] {
+                    for load in [500, 900] {
+                        let study = generate(&on(seed, load, homes, fleet));
+                        let blind = study.run(Policy::Blind).unwrap();
+                        let tie = study.run(Policy::TieBreak).unwrap();
+                        assert!(
+                            tie.mean_rtt_ms() < blind.mean_rtt_ms(),
+                            "seed {seed} {fleet:?} {homes:?} load {load}: tie-break {:.1} ms, blind {:.1} ms",
+                            tie.mean_rtt_ms(),
+                            blind.mean_rtt_ms()
+                        );
+                    }
+                }
             }
         }
     }
