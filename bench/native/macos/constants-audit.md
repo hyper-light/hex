@@ -42,11 +42,11 @@ asm-generic.
 | Name | Value | Where | Kind | How |
 |---|---|---|---|---|
 | Watcher floor | 250 µs | hex-core watch.rs | (b) | RESULT.md, 9694770 |
-| Watcher ceiling | 100 ms | watch.rs | (b), weak | RESULT.md says a box read this often costs "next to nothing", but no measurement fixes 100. Open: needs a read-cost curve (reads per second against CPU) to derive the ceiling as the slowest pace whose cost is under the stated budget. Step 1's code; the lead's call whether this line measures it |
+| Watcher ceiling | 100 ms | watch.rs | (b), weak | Read-cost curve measured (watcher-readcost-events-a7d13c6: 0.12-0.25 % of a core at 10 reads/s, 11-24 % at the floor); the lateness at 100 ms and the derived ceiling are with the lead (call 1) |
 | RT computation budget | 150 µs per 250 µs | process.rs | (b) | rtbudget on studio-3 |
 | Group drain | 2 x (0.883 ms + 0.298 ms x (n-1)) to start, then raised by this node's slower drains | hex_core::drain::Learned, process.rs | (b)/(a) | Was DRAIN_PATIENCE 10 s. Record killscale-a84e094. ffcec11 test, 9c72dac; only rises (the learned-waits rule): 2bc6963 test, d1c004e, 25652c9 |
 | Listing size | kern.maxproc, or refused naming it | sys::listing | (c) | Was a 4096 fallback at five sites. 54e8ad0 test, 4f41305 |
-| Event batch | EVENTS = 64, also the registration chunk | sys.rs | (d) | A batch size that changes no outcome: more events wait one more call (EV_CLEAR coalesces a process's events, kern_event.c:1139). The second 64 merged into it (c376bc2). Open: derive it from measured events per wait under the largest box, or accept it as a batch size; the lead's call |
+| Event batch | EVENTS = 28 + 2, also the registration chunk | sys.rs | (b) | The most events one wait met in the bench, 28 (one a member of its largest box, all killed at once), plus the timer and user events (record watcher-readcost-events-a7d13c6-20261106T165609Z; `macos_box events`). Was 64. A larger box's further events wait a call, none lost (EV_CLEAR, kern_event.c:1139). 038c607, 1d46147 |
 | Background clamp | cpu_weight < 100 | process.rs | (c) | 100 is cgroup v2's default cpu.weight |
 | Jetsam band | 40 | sys.rs | (b) | jetsam_probe.c |
 | Jetsam cap floor and ceiling | 1 MiB; c_int's max | sys.rs | (c) | The SPI's unit and type |
@@ -72,8 +72,8 @@ asm-generic.
 | Fact waits | HANG_GUARD 39.507 s | macos_process_box.rs, macos/tests.rs, helper_daemon/tests.rs | (b) | 2 x the slowest recorded run of the tests that wait (record test-waits-macos.txt, step 2's 4f09e8f). A guard only ends a hang. This line's per-act 2 x 30-sample waits (e436b28) flaked as latency assertions and were replaced at 84eca3f |
 | A bound kill's lateness | ENDED_AT_BOUND 930.938 ms, budget HANG_GUARD | macos_process_box.rs | (b) | 2 x the max of 30 hog kills (record execexit-a82ce7b-20261106T161405Z); the one test that claims latency |
 | Property-test cases | derived from the rarest case's share | watch, ledger, boxuser, helper tests | (b) | Step 2's f262faf |
-| Pool property test | proptest's default (256 cases) | hex-core pool.rs | (d) | Copied default. Its rare branch (a full range) is pinned by its own deterministic test; to derive the count from the share of pools that hold a pool name |
-| Measurement hang guard | 600 s a sample | macos_process_box.rs measure_exec_to_exit | (d) | A measurement tool's guard under its launchd limit; not a check |
+| Pool property test | 35 cases, from the rarest kind's share 0.08403 | hex-core pool.rs | (b) | Step 2's method (the lead's call 3): four kinds counted, recorded over 100000 cases (case-shares-pool.txt). Drawn from proptest's deterministic RNG: on a fresh seed a run a 0.95 meet fails its non-vacuity check in up to 5% of runs (step 2's boxuser tests: 39/40 and 35/40 on studio-2). c13f8f7 |
+| Measurement sample guard | 2 x 465.469 ms = 0.931 s a sample | macos_process_box.rs measure_exec_to_exit | (b) | x 2 the slowest recorded sample, the hog (execexit-a82ce7b). Was 600 s. A sample past it prints None (the lead's call 4). 56b8f86 |
 | Test inputs | 256 MiB bounds, 2 GiB hogs, 60 programs, rates | tests | inputs | 60 is (b), the bench's 3 of 60; the rates are RESULT.md's |
 
 ## CLAUDE.md §12 lines on this branch
