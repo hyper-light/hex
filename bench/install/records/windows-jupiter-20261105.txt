@@ -158,6 +158,11 @@ copy there shows ~20 bench scripts as modified: line endings from the sync, no c
    found on jupiter first by the integrate agent; step 5 is fixing it test-first. So the workspace's native Windows
    tests are not all green at this tree, though entries 3 and 5 were before step 5's merge.
 
+15. at ae644ff (step 5's 2386d08 merged: the guest unit test's root absolute on every host, and HEX-GUEST-19 asserting
+   one boot), 2026-11-06T10:31:36Z, load 79% CPU, entry 12's initramfs (guest-side code unchanged since bba7340):
+   windows-guest-ae644ff-20261106T103136Z.txt. cargo test -p hex-runtime --lib guest:: 7 passed, 0 failed (entry 14's
+   failure fixed); HEX-GUEST-19 1 passed, 0 failed, 1.27 s, with its one-boot assertion.
+
 What HCS reports as a Windows oci box's Exit at its end, against the oracle's Signal(15), for HEX-DIFF-1 step 12
 and HEX-DIFF-2 step 11 (asked by step 7): NOT OBSERVED. windows_oci_boxes_hold_the_contract_and_the_steps_criteria
 skipped in every run above (no HEX_WINDOWS_LAYERS), so no Windows oci box was made; it is read in the first run
