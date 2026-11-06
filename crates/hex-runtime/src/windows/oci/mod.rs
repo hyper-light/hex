@@ -22,10 +22,6 @@ use super::proc::BoxProc;
 use super::process::JobBox;
 use sys::{HcsFailure, System};
 
-/// The largest `config.json` a bundle may hold: far past any real spec, bounded so a hostile one is never
-/// read whole (CLAUDE.md §2).
-const MAX_CONFIG: u64 = 1 << 20;
-
 /// The scratch file a box's folder holds, a copy of the base layer's `blank.vhdx` (note §3).
 const SANDBOX: &str = "sandbox.vhdx";
 
@@ -109,17 +105,23 @@ pub fn available() -> Result<(), Refusal> {
     sys::available().map_err(|missing| hcs::containers_off(&missing))
 }
 
-/// The container a bundle at `dir` asks for (its `config.json`, read at most [`MAX_CONFIG`] bytes).
+/// The container a bundle at `dir` asks for (its `config.json`, read at most
+/// [`hex_core::bundle::MAX_CONFIG_BYTES`] bytes, the Linux bundle reader's bound: one rule for both).
 pub fn bundle(dir: &Path) -> Result<Container, Refusal> {
+    const MAX_CONFIG: usize = hex_core::bundle::MAX_CONFIG_BYTES;
     let path = dir.join("config.json");
     let mut text = String::new();
     std::fs::File::open(&path)
         .and_then(|f| {
-            f.take(MAX_CONFIG.saturating_add(1))
-                .read_to_string(&mut text)
+            f.take(
+                u64::try_from(MAX_CONFIG)
+                    .unwrap_or(u64::MAX)
+                    .saturating_add(1),
+            )
+            .read_to_string(&mut text)
         })
         .map_err(|e| Refusal::os("reading a bundle's config.json", e))?;
-    if u64::try_from(text.len()).unwrap_or(u64::MAX) > MAX_CONFIG {
+    if text.len() > MAX_CONFIG {
         return Err(Refusal::Invalid {
             what: "oci spec",
             why: format!("config.json is past {MAX_CONFIG} bytes"),

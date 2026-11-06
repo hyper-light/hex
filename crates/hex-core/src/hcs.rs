@@ -28,10 +28,36 @@ pub const OWNER: &str = "hex";
 /// Where every box sees the folder holding Hex's own launcher, mapped read-only (the decision's launcher).
 pub const LAUNCHER_DIR: &str = r"C:\hex";
 
-/// The longest request or reply on the launcher's wire, in bytes: a command line and an environment block
-/// are each at most 32,767 UTF-16 units (CreateProcessW), so 32,767 × 3 bytes of UTF-8 each, JSON-escaped
-/// at most twice over, with room for the handles; anything longer is refused, not read on (CLAUDE.md §2).
-pub const MAX_WIRE: usize = 512 << 10;
+/// The longest command line a member may have, in UTF-16 units: CreateProcessW's lpCommandLine "is
+/// 32,767 characters, including the Unicode terminating null character" (Microsoft's CreateProcessW
+/// reference). Longer is refused by name.
+pub const COMMAND_LINE_UNITS: usize = 32_766;
+
+/// A launch request's fixed part, in bytes: its JSON with every handle `u64::MAX`, an empty command line
+/// and environment, a null folder and the newline (measured from the message's shape by the test that
+/// pins it).
+pub const WIRE_FIXED: usize = 140;
+
+/// The longest request or reply on the launcher's wire, in bytes, derived (Ada's rule on constants,
+/// 2026-11-06): the fixed part; the command line at JSON's worst six bytes a UTF-16 unit (a `\u00XX`
+/// escape); and the environment and folder, which come from a `config.json` of at most
+/// [`crate::bundle::MAX_CONFIG_BYTES`], at most three bytes out per byte in (an entry's text costs no more
+/// escaped here than in valid JSON there, and its five bytes of brackets and quotes against the three of
+/// `"",` keep each entry under three). Windows sets no limit on an environment block (Vista on), so the
+/// config's bound is the one that holds. Longer is refused, not read on (CLAUDE.md §2).
+pub const MAX_WIRE: usize =
+    WIRE_FIXED + 6 * COMMAND_LINE_UNITS + 3 * crate::bundle::MAX_CONFIG_BYTES;
+
+/// Refuses a command line past [`COMMAND_LINE_UNITS`], naming the limit.
+fn command_line_fits(field: &str, line: &str) -> Result<(), Refusal> {
+    let units = line.encode_utf16().count();
+    if units > COMMAND_LINE_UNITS {
+        return Err(invalid(format!(
+            "{field}'s command line is {units} UTF-16 units, past CreateProcessW's 32,766 (32,767 with its NUL)"
+        )));
+    }
+    Ok(())
+}
 
 /// What kind of Windows the host is: a client SKU (Windows 10, 11) or a server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -362,8 +388,10 @@ pub fn process(field: &str, program: &Program) -> Result<Process, Refusal> {
         Some(c) => Some(container_path(&format!("{field}.cwd"), c)?),
         None => None,
     };
+    let command_line = crate::job::command_line(&program.args);
+    command_line_fits(field, &command_line)?;
     Ok(Process {
-        command_line: crate::job::command_line(&program.args),
+        command_line,
         env: program.env.clone(),
         cwd,
         user: None,
@@ -804,6 +832,7 @@ fn bundle_process(p: &Value) -> Result<Process, Refusal> {
             "process's command line is empty or holds a NUL".to_owned(),
         ));
     }
+    command_line_fits("process", &command_line)?;
     let env = match p.get("env") {
         Some(e) => array("process.env", e)?
             .iter()
@@ -1481,6 +1510,64 @@ mod tests {
             a.replace('-', ""),
             format!("{:032x}", layer_guid(r"D:\layers\base"))
         );
+    }
+
+    /// HEX-HCS-7 (Ada's rule on constants, 2026-11-06): MAX_WIRE is derived, not picked. Do: encode the
+    /// largest fixed fields (u64::MAX handles, a null folder). Expect: MAX_WIRE is exactly that, plus the
+    /// command line's limit at JSON's worst six bytes a unit, plus three times the config.json bound the
+    /// environment and folder come from.
+    #[test]
+    fn max_wire_is_derived_from_the_command_line_limit_and_the_config_bound() {
+        let fixed = encode(&Launch {
+            job: u64::MAX,
+            stdio: [u64::MAX; 3],
+            command_line: String::new(),
+            env: Vec::new(),
+            cwd: None,
+        })
+        .unwrap()
+        .len();
+        assert_eq!(fixed, WIRE_FIXED);
+        assert_eq!(
+            MAX_WIRE,
+            WIRE_FIXED + 6 * COMMAND_LINE_UNITS + 3 * crate::bundle::MAX_CONFIG_BYTES
+        );
+    }
+
+    /// HEX-HCS-7: the wire holds the worst a bundle can bring. Do: encode a launch whose command line is
+    /// CreateProcessW's limit of control characters (each a six-byte escape) and whose environment is a
+    /// config.json's worth of empty entries (`"",` each). Expect: both fit MAX_WIRE.
+    #[test]
+    fn the_wire_holds_the_worst_command_line_and_environment() {
+        let worst = Launch {
+            job: u64::MAX,
+            stdio: [u64::MAX; 3],
+            command_line: "\u{1}".repeat(COMMAND_LINE_UNITS),
+            env: vec![(String::new(), String::new()); crate::bundle::MAX_CONFIG_BYTES / 3],
+            cwd: None,
+        };
+        let line = encode(&worst).unwrap();
+        assert!(line.len() <= MAX_WIRE, "{} > {MAX_WIRE}", line.len());
+    }
+
+    /// HEX-HCS-4 (CreateProcessW: lpCommandLine at most 32,767 characters with its NUL): do: a program and
+    /// a bundle whose command line is one unit past the limit. Expect: each refused naming the limit; one
+    /// at the limit is taken.
+    #[test]
+    fn a_command_line_past_createprocessw_s_limit_is_refused_by_name() {
+        let at = "a".repeat(COMMAND_LINE_UNITS);
+        let past = "a".repeat(COMMAND_LINE_UNITS + 1);
+        assert!(process("program", &Program::of(&[at.as_str()])).is_ok());
+        match process("program", &Program::of(&[past.as_str()])) {
+            Err(Refusal::Invalid { why, .. }) => assert!(why.contains("32,766"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        let mut b = bundle();
+        b["process"] = json!({"commandLine": past, "cwd": "C:\\"});
+        match from_bundle(&b) {
+            Err(Refusal::Invalid { why, .. }) => assert!(why.contains("32,766"), "{why}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     /// HEX-HCS-7: the launcher's wire round-trips, and the launcher starts from Hex's folder with a stdin
