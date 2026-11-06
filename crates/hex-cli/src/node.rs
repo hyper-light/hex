@@ -1,15 +1,18 @@
 //! `hex node`: the node agent as a process of its own, serving the `Runtime` seam on its local socket
 //! to callers that don't link Hex (decision 3 of docs/design/runtime-architecture.md):
 //!
-//!   hex node --socket <path> --state <dir> [--box-root <cgroup dir>]
+//!   hex node --socket <path> --state <dir> [--box-root <cgroup dir>] [--parked-procs on|off]
 //!
 //! It opens the node, its boxes in cgroups under `--box-root` (else in a subtree beside its own
 //! cgroup), their records under `--state` and their containers' state on tmpfs under the runtime
 //! directory (`/run/hex-node` as root, `$XDG_RUNTIME_DIR/hex-node` rootless; decision 1), takes back
 //! or cleans up what an agent before it left, saying on stderr each box it removed and why
-//! (T-T7.1.2), raises its soft descriptor limit to the hard one, binds the socket, says
-//! `ready <path>` on stdout, and serves until it is signalled; if serving fails it says why on stderr
-//! and exits 1. A socket an ended agent left at the path is replaced; one a live agent serves is
+//! (T-T7.1.2), raises its soft descriptor limit to the hard one, says on stderr whether it parks procs with
+//! its inits (decision 8, parked procs: a root node's default, `--parked-procs off` turns it off), binds the
+//! socket, says `ready <path>` on stdout, and serves until it is signalled; if serving fails it says why on
+//! stderr and exits 1. On SIGTERM it writes one line of its parked procs' counts on stderr (made, hits, misses,
+//! dry, capped, alive) and exits 143 with nothing else done: its boxes, connections and socket's file are left as
+//! a SIGKILL leaves them, for the next agent's recovery. A socket an ended agent left at the path is replaced; one a live agent serves is
 //! refused. A debug build also takes `--crash-at <cgroup-made|bundle-rendered|record-first-write>`,
 //! which arms the node's crash point there (`hex_node::CrashPoint`) for T-T7.1.2's crash test: from
 //! the agent's own arguments alone, so no container can arm it.
@@ -38,18 +41,20 @@ pub fn main(args: &[String]) -> u8 {
     }
 }
 
-const USAGE: &str = "usage: hex node --socket <path> --state <dir> [--box-root <cgroup dir>]";
+const USAGE: &str = "usage: hex node --socket <path> --state <dir> [--box-root <cgroup dir>] [--parked-procs on|off]";
 
 struct Args {
     socket: PathBuf,
     state: PathBuf,
     box_root: Option<PathBuf>,
+    parked_procs: bool,
     #[cfg(debug_assertions)]
     crash_at: Option<CrashPoint>,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
     let (mut socket, mut state, mut box_root) = (None, None, None);
+    let mut parked_procs = None;
     #[cfg(debug_assertions)]
     let mut crash_at = None;
     let mut rest = args.iter();
@@ -62,6 +67,17 @@ fn parse(args: &[String]) -> Result<Args, String> {
             let point = CrashPoint::named(name)
                 .ok_or_else(|| format!("{flag} names no crash point: {name:?}"))?;
             if crash_at.replace(point).is_some() {
+                return Err(format!("{flag} is given twice\n{USAGE}"));
+            }
+            continue;
+        }
+        if flag == "--parked-procs" {
+            let on = match rest.next().map(String::as_str) {
+                Some("on") => true,
+                Some("off") => false,
+                other => return Err(format!("{flag} takes on or off, not {other:?}\n{USAGE}")),
+            };
+            if parked_procs.replace(on).is_some() {
                 return Err(format!("{flag} is given twice\n{USAGE}"));
             }
             continue;
@@ -83,6 +99,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
         socket: socket.ok_or_else(|| format!("--socket is needed\n{USAGE}"))?,
         state: state.ok_or_else(|| format!("--state is needed\n{USAGE}"))?,
         box_root,
+        parked_procs: parked_procs.unwrap_or(true),
         #[cfg(debug_assertions)]
         crash_at,
     })
@@ -91,6 +108,12 @@ fn parse(args: &[String]) -> Result<Args, String> {
 fn serve(args: &[String]) -> Result<(), (u8, String)> {
     let args = parse(args).map_err(|why| (2, why))?;
     let failed = |e: Refusal| (1, e.to_string());
+    // SIGTERM is read from a signalfd, blocked before the node starts a thread so every thread inherits the block;
+    // each process the node starts has its mask emptied before it execs (the seeds' and execs' `default_signals`,
+    // std's Command), so none inherits it.
+    let term =
+        hex_runtime::linux::oci::sys::forward_signals(&[rustix::process::Signal::TERM.as_raw()])
+            .map_err(|e| (1, format!("reading SIGTERM: {e}")))?;
     raise_descriptor_limit().map_err(failed)?;
     // The state's disk is what the boxes' io bounds apply to, so it exists before the node looks.
     std::fs::create_dir_all(&args.state)
@@ -106,6 +129,7 @@ fn serve(args: &[String]) -> Result<(), (u8, String)> {
         Ok(way) => node.with_mount_namespace(&way),
         Err(_) => node,
     };
+    let node = node.with_parked_procs(args.parked_procs).map_err(failed)?;
     #[cfg(debug_assertions)]
     let node = match args.crash_at {
         Some(point) => node.with_crash_point(point),
@@ -149,7 +173,19 @@ fn serve(args: &[String]) -> Result<(), (u8, String)> {
             );
         }
     }
-    let mut server = Server::bind(&args.socket, Arc::new(node), LIMITS, WORKERS).map_err(failed)?;
+    {
+        let said = if node.parked_procs() {
+            format!("on, at most {} alive", hex_node::cgroups::PROCS_ALIVE)
+        } else if args.parked_procs {
+            "off: a rootless node parks none".to_owned()
+        } else {
+            "off".to_owned()
+        };
+        let _ = writeln!(std::io::stderr().lock(), "hex node: parked procs: {said}");
+    }
+    let node = Arc::new(node);
+    end_on_sigterm(term, Arc::clone(&node)).map_err(failed)?;
+    let mut server = Server::bind(&args.socket, node, LIMITS, WORKERS).map_err(failed)?;
     let mut out = std::io::stdout().lock();
     out.write_all(format!("ready {}\n", args.socket.display()).as_bytes())
         .and_then(|()| out.flush())
@@ -159,6 +195,46 @@ fn serve(args: &[String]) -> Result<(), (u8, String)> {
         .wait()
         .unwrap_or_else(|| "its socket stopped".to_owned());
     Err((1, why))
+}
+
+/// On SIGTERM, from a thread of its own: one line of the node's parked procs' counts on stderr, then the process
+/// exits 143 (128 + SIGTERM, as a shell reports a SIGTERM's end) with no destructor run, so the server, its
+/// connections and its boxes are left as a SIGKILL leaves them, for the next agent's recovery (T-T7.1.2). A
+/// count the node can't read is said as unread, never left out.
+fn end_on_sigterm(
+    term: hex_runtime::linux::oci::sys::ForwardedSignals,
+    node: Arc<Node>,
+) -> Result<(), Refusal> {
+    std::thread::Builder::new()
+        .name("hex-sigterm".to_owned())
+        .spawn(move || {
+            // The signalfd reads only SIGTERM; a read that fails ends the node saying why, never a loop.
+            if let Err(e) = term.next() {
+                let _ = writeln!(std::io::stderr().lock(), "hex node: reading SIGTERM: {e}");
+                std::process::exit(1);
+            }
+            let line = match node.cgroup_reuse() {
+                Ok(c) => {
+                    let p = c.parked;
+                    format!(
+                        "made {}, hits {}, misses {}, dry {}, capped {}, alive {}",
+                        p.procs_made,
+                        p.proc_hits,
+                        p.proc_misses,
+                        p.proc_dry,
+                        p.procs_capped,
+                        p.procs_alive
+                    )
+                }
+                Err(e) => format!("unread: {e}"),
+            };
+            let mut err = std::io::stderr().lock();
+            let _ = writeln!(err, "hex node: parked procs at exit: {line}");
+            let _ = err.flush();
+            std::process::exit(143);
+        })
+        .map(drop)
+        .map_err(|e| Refusal::os("starting the SIGTERM thread", e))
 }
 
 /// Raises the soft limit on open descriptors to the hard one: each connection and watched program

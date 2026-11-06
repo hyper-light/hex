@@ -53,9 +53,12 @@
 //! names (`Trace`, bench/competitive/probes/exec_breakdown.md and create_breakdown.md).
 //! HEXBENCH_AHEAD is how many cgroups the node makes ahead for boxes of no owner, each with an init parked in it
 //! (decision 8, "The p99.9 that stayed"), the node's default (`hex_node::INITS_AHEAD`) unless set; 0 makes none.
-//! HEXBENCH_PARKED_PROCS=1 has each parked init's proc made with it (decision 8, parked procs; the node's default is
-//! off), and the phase's `parked` counts say how many were made, taken by their create (hits), left (misses),
-//! wanted with none made (dry) or failed.
+//! HEXBENCH_PARKED_PROCS=1 has each parked init's proc made with it and 0 has none made (decision 8, parked procs;
+//! unset, the node's default, on for a root node), in process and in the socket driver's `hex node`
+//! (`--parked-procs`). In process the phase's `parked` counts say how many were made, taken by their create (hits),
+//! left (misses), wanted with none made (dry) or failed; the socket driver ends its node with SIGTERM and records
+//! the line of counts it says then as the result's `parked_at_exit` (made, hits, misses, dry, capped, alive), the
+//! run's own node's.
 //! HEXBENCH_OWNER names one owner for every box the run makes (goal 5 extended, step 6): a box's cgroup
 //! is handed to the owner's next box when it reads clean, so its bundles' processes must hold no
 //! CAP_SYS_ADMIN (oci_inside.sh gives them Docker's default capabilities when it's set). In process it
@@ -847,17 +850,36 @@ mod linux {
         Ok(json!({ "ms": timed? }))
     }
 
-    /// A `hex node` serving its socket for the socket driver, its boxes under `box_root`; killed when
-    /// dropped. It takes HEX_OCI_MNTNS alone: HEXBENCH_DEVFS, _PROCFS, _AHEAD, _IPCUTS and _PARKED_PROCS set only the
-    /// in-process node, and it raises its soft descriptor limit to the hard one as it starts, undoing HEXBENCH_NOFILE's
-    /// `ulimit -Sn`; so an A/B of any of them reads the in-process figures, never the socket's.
-    struct Agent(Child);
+    /// HEXBENCH_PARKED_PROCS: `Some(true)` for 1, `Some(false)` for 0, `None` unset (the node's default).
+    fn parked_procs() -> Option<bool> {
+        match std::env::var("HEXBENCH_PARKED_PROCS").as_deref() {
+            Ok("1") => Some(true),
+            Ok("0") => Some(false),
+            Ok(v) => panic!("HEXBENCH_PARKED_PROCS={v:?}: 1 or 0"),
+            Err(_) => None,
+        }
+    }
+
+    /// How long a socket agent has to end on SIGTERM before it's SIGKILLed: its counts line and exit are a
+    /// write and an exit, so seconds are slack under any load the bench meets.
+    const AGENT_END: Duration = Duration::from_secs(30);
+
+    /// A `hex node` serving its socket for the socket driver, its boxes under `box_root`; ended with SIGTERM
+    /// ([`Agent::end`]), else killed when dropped. It takes HEX_OCI_MNTNS and HEXBENCH_PARKED_PROCS
+    /// (`--parked-procs`): HEXBENCH_DEVFS, _PROCFS, _AHEAD and _IPCUTS set only the in-process node, and it raises its
+    /// soft descriptor limit to the hard one as it starts, undoing HEXBENCH_NOFILE's `ulimit -Sn`; so an A/B of any of
+    /// those reads the in-process figures, never the socket's. Its stderr is passed on as it comes and kept.
+    struct Agent {
+        child: Child,
+        said: std::sync::Arc<std::sync::Mutex<String>>,
+        drain: Option<std::thread::JoinHandle<()>>,
+    }
 
     impl Agent {
         fn start(hex: &str, state: &Path, box_root: &Path) -> (Self, PathBuf) {
             let socket = state.join("node.sock");
-            let mut child = Command::new(hex)
-                .arg("node")
+            let mut cmd = Command::new(hex);
+            cmd.arg("node")
                 .arg("--socket")
                 .arg(&socket)
                 .arg("--state")
@@ -865,21 +887,88 @@ mod linux {
                 .arg("--box-root")
                 .arg(box_root)
                 .stdout(Std::piped())
-                .spawn()
-                .expect("start hex node");
+                .stderr(Std::piped());
+            if let Some(on) = parked_procs() {
+                cmd.arg("--parked-procs").arg(if on { "on" } else { "off" });
+            }
+            let mut child = cmd.spawn().expect("start hex node");
+            let said = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+            let drain = {
+                let said = std::sync::Arc::clone(&said);
+                let err = child.stderr.take().expect("hex node's stderr");
+                std::thread::spawn(move || {
+                    for line in BufReader::new(err).lines().map_while(Result::ok) {
+                        eprintln!("{line}");
+                        let mut said = said.lock().expect("hex node's stderr kept");
+                        said.push_str(&line);
+                        said.push('\n');
+                    }
+                })
+            };
             let mut line = String::new();
             BufReader::new(child.stdout.take().expect("hex node's stdout"))
                 .read_line(&mut line)
                 .expect("hex node's ready line");
             assert!(line.starts_with("ready "), "hex node said {line:?}");
-            (Self(child), socket)
+            (
+                Self {
+                    child,
+                    said,
+                    drain: Some(drain),
+                },
+                socket,
+            )
+        }
+
+        /// Ends the node with SIGTERM, waits at most [`AGENT_END`] for it (SIGKILLed past it), and returns the
+        /// parked procs' counts it said as it ended, each by name.
+        fn end(mut self) -> Result<Value, String> {
+            let pid = rustix::process::Pid::from_child(&self.child);
+            rustix::process::kill_process(pid, rustix::process::Signal::TERM)
+                .map_err(|e| format!("SIGTERM to hex node: {e}"))?;
+            let deadline = Instant::now() + AGENT_END;
+            let ended = loop {
+                match self.child.try_wait() {
+                    Ok(Some(status)) => break Some(status),
+                    Ok(None) if Instant::now() < deadline => {
+                        std::thread::park_timeout(Duration::from_millis(20));
+                    }
+                    _ => break None,
+                }
+            };
+            let Some(status) = ended else {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                return Err(format!(
+                    "hex node didn't end in {AGENT_END:?} of SIGTERM: SIGKILLed"
+                ));
+            };
+            if let Some(drain) = self.drain.take() {
+                let _ = drain.join();
+            }
+            let said = self.said.lock().expect("hex node's stderr kept").clone();
+            let line = said
+                .lines()
+                .find_map(|l| l.strip_prefix("hex node: parked procs at exit: "))
+                .ok_or_else(|| format!("hex node ended {status} saying no parked procs line"))?;
+            let mut counts = Map::new();
+            for kv in line.split(", ") {
+                let (k, v) = kv
+                    .split_once(' ')
+                    .ok_or_else(|| format!("hex node's parked procs line {line:?}"))?;
+                let v: u64 = v
+                    .parse()
+                    .map_err(|e| format!("hex node's parked procs line {line:?}: {e}"))?;
+                counts.insert(k.to_owned(), json!(v));
+            }
+            Ok(Value::Object(counts))
         }
     }
 
     impl Drop for Agent {
         fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
+            let _ = self.child.kill();
+            let _ = self.child.wait();
         }
     }
 
@@ -889,7 +978,7 @@ mod linux {
         InProcess(Box<Node>),
         /// A `hex node` of its own, reached through its socket. The client is dropped before the agent
         /// it holds a connection to, which is kept for its drop alone.
-        Socket { client: Client, _agent: Agent },
+        Socket { client: Client, agent: Agent },
     }
 
     impl Driver {
@@ -1193,10 +1282,7 @@ mod linux {
             let (agent, path) = Agent::start(hex, state.path(), &root);
             let client = Client::connect(&path)
                 .unwrap_or_else(|e| panic!("connecting to hex node at {}: {e}", path.display()));
-            Driver::Socket {
-                client,
-                _agent: agent,
-            }
+            Driver::Socket { client, agent }
         } else {
             let node = Node::open(&root, state.path(), state.path())
                 .unwrap_or_else(|e| {
@@ -1217,9 +1303,13 @@ mod linux {
                 .unwrap_or_else(|e| panic!("the prepared /dev pool: {e}"))
                 // HEXBENCH_PROCFS=0: no procs made ahead (decision 6's update, part 2's A/B).
                 .with_prepared_procs(std::env::var("HEXBENCH_PROCFS").as_deref() != Ok("0"))
-                .unwrap_or_else(|e| panic!("the prepared proc pool: {e}"))
-                .with_parked_procs(std::env::var("HEXBENCH_PARKED_PROCS").as_deref() == Ok("1"))
-                .unwrap_or_else(|e| panic!("parked procs: {e}"));
+                .unwrap_or_else(|e| panic!("the prepared proc pool: {e}"));
+            let node = match parked_procs() {
+                Some(on) => node
+                    .with_parked_procs(on)
+                    .unwrap_or_else(|e| panic!("parked procs: {e}")),
+                None => node,
+            };
             // Cgroups made ahead for boxes of no owner, each with an init in it (decision 8): the node's default,
             // as it ships, unless HEXBENCH_AHEAD says.
             let node = match std::env::var("HEXBENCH_AHEAD") {
@@ -1387,12 +1477,25 @@ mod linux {
         {
             errors.insert("release_idle".to_owned(), Value::String(e.to_string()));
         }
-        drop(driver);
+        // The socket's node says its parked procs' counts as it ends on SIGTERM: this run's own.
+        let mut parked_at_exit = Value::Null;
+        if let Driver::Socket { client, agent } = driver {
+            drop(client);
+            match agent.end() {
+                Ok(counts) => parked_at_exit = counts,
+                Err(e) => {
+                    errors.insert("parked_at_exit".to_owned(), Value::String(e));
+                }
+            }
+        } else {
+            drop(driver);
+        }
         let _ = std::fs::remove_dir(root.join(hex_node::OCI_BOXES));
         let _ = std::fs::remove_dir(&root);
         let result = json!({"runtime": runtime, "n": n, "warmup": warmup,
                             "owner": owner.map(|o| o.name),
-                            "phases": phases, "errors": errors, "cgroup": parent});
+                            "phases": phases, "errors": errors, "cgroup": parent,
+                            "parked_at_exit": parked_at_exit});
         std::fs::write(out, result.to_string()).expect("writing the result");
         ExitCode::SUCCESS
     }

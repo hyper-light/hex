@@ -278,7 +278,9 @@ impl Node {
             })?;
         let cgroups = Cgroups::start(first)?;
         cgroups.set_ahead(INITS_AHEAD);
-        Ok(Self {
+        // Parked procs are a root node's default (decision 8, parked procs; the lead, 2026-11-06): a rootless
+        // node's devfs makes none, so it parks none.
+        Self {
             root,
             oci_boxes,
             devices,
@@ -316,7 +318,8 @@ impl Node {
             ),
             #[cfg(debug_assertions)]
             crash_at: None,
-        })
+        }
+        .with_parked_procs(true)
     }
 
     /// Arms a debug-only crash point (T-T7.1.2): at `point` of each `oci` box's create from now on, the
@@ -494,14 +497,21 @@ impl Node {
 
     /// Each init the node parks ahead (decision 8, "The p99.9 that stayed") has the proc of its own pid namespace
     /// made with it when `enabled`, with the masks and read-only paths of the spec it is parked for: a claim whose
-    /// spec has the same key attaches it, mounting no proc of its own (decision 8, parked procs). Off unless set,
-    /// until measured. Root nodes only, as [`Node::with_prepared_procs`]; set before the node's first create.
+    /// spec has the same key attaches it, mounting no proc of its own (decision 8, parked procs). On by default
+    /// (the lead, 2026-11-06); `false` turns it off. Root nodes only, as [`Node::with_prepared_procs`]; set before
+    /// the node's first create.
     pub fn with_parked_procs(self, enabled: bool) -> Result<Self, Refusal> {
         if enabled {
             self.with_parked_procs_bound(crate::cgroups::PROCS_ALIVE)
         } else {
+            self.cgroups.stop_parked_procs();
             Ok(self)
         }
+    }
+
+    /// Whether the node parks procs with its inits now (decision 8, parked procs): a root node unless turned off.
+    pub fn parked_procs(&self) -> bool {
+        self.cgroups.makes_parked_procs()
     }
 
     /// As [`Node::with_parked_procs`] on, with at most `bound` procs alive at once in place of
