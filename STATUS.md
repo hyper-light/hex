@@ -340,9 +340,9 @@ real class held to the simulator's trace), runs as each OS's own tests. Where it
 |---|---|---|
 | Linux amd64 (fedora) | **Passes** (cgroup v2; `process_box.rs`, and over the node's socket) | **Passes** (bundles and specs, rootless; `oci_box.rs`, `oci_spec_box.rs`, over the socket) |
 | Linux arm64 | Not run: no Linux arm64 machine in the lab. Built for it by no gate yet | As `process` |
-| macOS arm64 (the Mac Studio) | **Passes** (rootless; `macos_process_box.rs` 7/7 on adas-mac-studio-2 at abdbfd0, a launchd job outside kiln's pacing) | Linux images through a Shards guest: native step 5, not merged into the native line |
+| macOS arm64 (the Mac Studio) | **Passes** (rootless; `macos_process_box.rs` 7/7 on adas-mac-studio-2 at abdbfd0, a launchd job outside kiln's pacing) | Linux images through a Shards guest: native step 5, integrated into `cp/t7-native` (ebf01f7); its record is step 5's |
 | macOS amd64 (Intel) | Built and linted for `x86_64-apple-darwin` (clippy `-D warnings` and build exit 0, 1aa735c); not run, no Intel Mac in the lab | Refused by name: Shards has no x86_64 macOS backend |
-| Windows amd64 (jupiter) | **Passes** (job objects; `windows_process_box` 9/9 on jupiter at 1a2e1eb and e322d7b, the Windows agent's record `bench/install/records/windows-jupiter-20261105.txt` on `cp/t7-native-windows`) | Windows images through HCS: native step 4, integrated into `cp/t7-native` (5ec923e); its suite not run on jupiter yet (`oci_setup.ps1` approved; the run waits on kiln taking adacachy's runs again) |
+| Windows amd64 (jupiter) | **Passes** (job objects; `windows_process_box` 9/9 on jupiter at 1a2e1eb and e322d7b, the Windows agent's record `bench/install/records/windows-jupiter-20261105.txt` on `cp/t7-native-windows`) | Windows images through HCS (native step 4): conformance and HEX-DIFF-1..6 **pass** on jupiter at `cp/t7-native-s4` 51a487e (step 4's log `suite-20261106T131956Z.log`; TERM ends the init, read as the oracle's `Signal(15)`); its own device criterion fails there, open with step 4 |
 | Windows arm64 | Skipped for now (Ada, 2026-11-03) | Skipped |
 
 The suite's divergences so far, each fixed where the contract says: a Windows box with nothing running took a
@@ -356,8 +356,8 @@ wait's budget (XNU posts the exit event before the zombie), fixed at abdbfd0.
 Each OS's `process` class against its competitors, recorded in `bench/native/RESULT.md`: Linux start 11.1x and
 delete 14.7x a systemd scope's, both holding the bound; macOS start 1.87x `taskpolicy -m`'s, delete 0.90x, both
 holding the bound, and a launchd job's limit holds none; Windows start 2.4x and delete 256x Process Governor's,
-both holding the bound. Open: the Windows `oci` suite (step 4's, on jupiter: `oci_setup.ps1` is approved, the run waits on kiln taking
-adacachy's runs again), which also reads HCS's exit for HEX-DIFF-1/2 against the oracle's; and the macOS `oci` class through a Shards guest when native step 5 lands.
+both holding the bound. Open: step 4's clean run of the Windows `oci` class on jupiter. Its differential suite already passes at 51a487e;
+the device criterion beside it still fails.
 
 ## Next
 
