@@ -14,7 +14,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use hex_api::{
-    BoxId, BoxInfo, BoxSpec, Class, Exit, Proc, Program, Refusal, Runtime, Signal, Stdio, Usage,
+    BoxId, BoxInfo, BoxSpec, Class, ClassSpec, ExecLimit, Exit, Proc, Program, Refusal, Runtime,
+    Signal, Stdio, Usage,
 };
 use hex_core::netns;
 use hex_core::wire::{self, Answer, Call, Header, Limits, Received, Request, Streams};
@@ -461,12 +462,25 @@ fn unexpected(call: &str, answer: &Answer) -> Refusal {
     Refusal::Broken(format!("the node agent answered a {call} with {kind}"))
 }
 
+/// The most of a program's arguments and environment that crosses to the node agent: a program can't pass
+/// the bound on one wire message (`hex_core::wire::MAX_MESSAGE`), so one that would is refused here, as a
+/// program, before it is encoded; the node then holds it to its OS's own exec bound (HEX-RT-14).
+pub const WIRE_EXEC_LIMIT: ExecLimit = ExecLimit {
+    block: wire::MAX_MESSAGE,
+    string: None,
+    unit: hex_api::StringUnit::Bytes,
+    source: "the node agent's wire (one message, hex_core::wire::MAX_MESSAGE)",
+};
+
 impl Runtime for Client {
     fn classes(&self) -> Vec<Class> {
         self.classes.clone()
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
+        if let ClassSpec::Oci(oci) = &spec.class {
+            oci.init.fits(&WIRE_EXEC_LIMIT)?;
+        }
         self.info(Call::Create(spec), "create")
     }
 
@@ -475,6 +489,7 @@ impl Runtime for Client {
     }
 
     fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        program.fits(&WIRE_EXEC_LIMIT)?;
         let streams = Streams {
             stdin: stdio.stdin.is_some(),
             stdout: stdio.stdout.is_some(),

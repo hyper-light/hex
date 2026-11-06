@@ -406,7 +406,8 @@ impl Drop for ProcessBox {
 
 /// Whether process group `pgid` has a member alive (not a zombie).
 fn live(pgid: i32) -> Result<bool, Refusal> {
-    let mut pids = Vec::with_capacity(sys::max_processes().unwrap_or(4096));
+    let max = sys::max_processes().map_err(|e| Refusal::os("reading kern.maxproc", e))?;
+    let mut pids = Vec::with_capacity(max);
     Ok(alive_in(pgid, &mut pids)? > 0)
 }
 

@@ -675,12 +675,45 @@ simulator, and compares what each step shows (`docs/research/runtime/differentia
     for, and KILL and STOP, which are forced (pid_namespaces(7), man-pages 6.19); Docker's stop waits out
     the same rule before it kills. The simulator was wrong, and now models it: a signal other than KILL
     ends a box's exec'd programs and leaves its init running (HEX-DIFF-1, HEX-DIFF-2).
+  - On the Mac Studio, a macOS box whose members had all ended refused the next program (it was spawned
+    into the dead leader's process group, which no process can join), and took a signal with no member
+    alive (killpg's ESRCH read as success). The next program now leads a new group, and such a signal is
+    refused as `NotRunning`, as on every other class (HEX-DIFF-1, HEX-DIFF-2).
+- **What TERM does to an `oci` box's init is the class's** (the lead's ruling, 2026-11-05). Linux's is the
+  rule above. Windows has no POSIX signals: HCS's ProcessSignal carries console control events only, and
+  hcsshim maps TERM to a shutdown and KILL to terminate (`internal/signals/signal.go:185-197`), so Windows'
+  `oci` class ends the container's job. Both are right for their platform, so the fixture says which
+  (`Fixture::term_ends_init`, false by default), and the oracle is a simulator made with that answer
+  (`SimRuntime::with_term_ending_init`), as HEX-RT-6 checks the effect of a refused fork where the count is
+  not kept. Neither class's behavior changes for the suite.
 - **Non-vacuity:** runtimes that are the simulator but for one lie (a signal of nothing taken, a deleted
-  box kept, a box stuck running) each fail the scenario that shows it, at the step named; one that reports
-  a box late passes (`crates/hex-api/src/differential.rs` tests).
+  box kept, a box stuck running, an exec refused after the last program ended) each fail the scenario that
+  shows it, at the step named; one that reports a box late passes; a runtime whose init ends on TERM passes
+  with a fixture that says so and fails HEX-DIFF-2 without (`crates/hex-api/src/differential.rs` tests).
 - **What would falsify it:** a behavior two classes show differently that no scenario reaches (the
   scenarios grow with it), or the simulator diverging from the design text (then the simulator is fixed
   and every class re-run).
+
+## Decision: a program is held to its OS's exec bound, before any spawn (HEX-RT-14)
+
+`Program` carried an environment of any size, and only Linux's execve stopped it (`E2BIG`, after the spawn
+began); Windows bounds no environment block at all. CLAUDE.md §2 and §3 ask a bound and a typed refusal, so every
+class refuses a program past its OS's exec bound as `Invalid` naming the program, the sizes and the bound's source,
+before anything is spawned (`docs/research/runtime/exec-size-bounds.md`).
+
+- **One count:** `Program::exec_size` counts as Linux's execve does (each string and its NUL, the filename again, a
+  pointer per string), which is at least what XNU counts.
+- **Each OS's bound, from its source:** Linux reads the kernel's own formula at run time (a quarter of
+  `RLIMIT_STACK`, capped at three quarters of `_STK_LIM`, never under `ARG_MAX`; 32 pages a string; `fs/exec.c:410-416`,
+  `binfmts.h:15`), not glibc's `sysconf(_SC_ARG_MAX)`, which skips the cap. macOS reads `kern.argmax` (XNU's
+  `NCARGS`). Windows, whose block Microsoft documents as unbounded, takes a census of real container environments with
+  a stated margin, and 32,767 characters a variable (native step 4). The simulator holds Linux's floor, `ARG_MAX`.
+- **Over the node's socket** the wire's one-message bound is tighter than Linux's, so the client refuses past it, as a
+  program, before encoding.
+- **Tested by** HEX-RT-14 on every class's conformance run (a fixture that states no bound fails it), and a unit test of
+  the count against the kernel's arithmetic.
+- **What would falsify it:** a program the count admits that the OS's exec refuses with `E2BIG` (the count is short),
+  or a kernel whose formula changes; either is fixed in the count or the read, and HEX-RT-14 re-run.
 
 ## Open (STATUS.md)
 

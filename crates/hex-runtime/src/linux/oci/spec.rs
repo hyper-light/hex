@@ -466,6 +466,24 @@ impl Spec {
         if self.oci_version.is_empty() {
             return Err(OciError::Config("ociVersion is empty".to_owned()));
         }
+        // The init's arguments and environment, counted as execve counts them and held to this kernel's
+        // bound before anything is made, so no box is left whose init can't start (HEX-RT-14).
+        if let Some(p) = &self.process {
+            let init = hex_api::Program {
+                args: p.args.clone(),
+                env: p
+                    .env
+                    .iter()
+                    .map(|e| {
+                        let (k, v) = e.split_once('=').unwrap_or((e.as_str(), ""));
+                        (k.to_owned(), v.to_owned())
+                    })
+                    .collect(),
+                ..hex_api::Program::default()
+            };
+            init.fits(&crate::linux::process::exec_limit())
+                .map_err(|e| OciError::Config(format!("process: {e}")))?;
+        }
         if self.root.path.is_empty() {
             return Err(OciError::Config("root.path is empty".to_owned()));
         }
@@ -597,6 +615,25 @@ mod tests {
         "mounts": [{"destination": "/proc", "type": "proc", "source": "proc"}],
         "linux": {"namespaces": [{"type": "pid"}, {"type": "mount"}], "maskedPaths": ["/proc/kcore"]}
     }"#;
+
+    /// HEX-RT-14 at create: do parse a config whose init has a variable one byte past this kernel's
+    /// per-string execve bound (read now); expect it refused as the config, naming the bound, before
+    /// anything is made, so no box is left that can't start.
+    #[test]
+    fn an_init_past_the_kernels_exec_bound_is_refused_at_parse() {
+        let most = crate::linux::process::exec_limit().string.unwrap();
+        // "BIG=" and the value with its NUL pass `most` by a byte.
+        let value = "x".repeat(most - "BIG=".len());
+        let json = format!(
+            r#"{{"ociVersion":"1.3.0","root":{{"path":"rootfs"}},"process":{{"args":["/bin/sh"],"cwd":"/","env":["BIG={value}"]}}}}"#
+        );
+        assert!(json.len() <= MAX_CONFIG_BYTES, "the config itself fits");
+        let r = Spec::parse(json.as_bytes());
+        assert!(
+            matches!(r, Err(OciError::Config(ref why)) if why.contains("execve")),
+            "{r:?}"
+        );
+    }
 
     #[test]
     fn a_minimal_config_parses_with_its_fields() {

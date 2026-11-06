@@ -44,6 +44,9 @@ impl BinFixture {
 }
 
 impl Fixture for BinFixture {
+    fn exec_limit(&self) -> Option<hex_api::ExecLimit> {
+        Some(hex_runtime::macos::exec_limit().expect("kern.argmax"))
+    }
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
         BoxSpec {
             id,
@@ -252,4 +255,51 @@ fn a_box_takes_a_named_signal() {
         .expect("the program ends");
     rt.delete(&id).expect("delete");
     assert_eq!(exit, Exit::Signal(15), "TERM is 15 on both kernels");
+}
+
+/// HEX-RT-3, HEX-DIFF-5 (AC-T7.1.1): do 60 programs killed at their box's bound, one after another,
+/// expect each wait to return when the program ends, never at the wait's budget. XNU posts a child's
+/// `NOTE_EXIT` before it is a zombie (`bsd/kern/kern_exit.c:2594-2595`, then `p_stat = SZOMB` at :2664),
+/// so a reap made on the event can find nothing yet; the native bench saw 3 of 60 such ends reported 60 s
+/// late (bench/native/RESULT.md). Sixty runs, from that measured rate: without the fix 3/60, 7/60 and 3/60
+/// missed, at least 5%, so sixty runs see none with probability at most 0.95^60 = 4.6%.
+#[test]
+fn a_programs_end_is_seen_when_it_ends_not_at_the_waits_budget() {
+    let rt = runtime();
+    let fx = fixture();
+    let id = BoxId::new("mac-end-seen").unwrap();
+    let _ = rt.delete(&id);
+    rt.create(BoxSpec {
+        id: id.clone(),
+        bounds: Bounds {
+            memory_max: Some(256 * MIB),
+            ..Bounds::default()
+        },
+        class: ClassSpec::Process,
+    })
+    .expect("create");
+    const RUNS: usize = 60;
+    // A missed exit event makes the wait sleep out its whole budget. Late is past the slowest end on record
+    // across every host and OS (conformance's SLOWEST_RECORDED_END); the budget is conformance's PATIENCE,
+    // twice that, so a legitimate end is never late and a missed one always is. (One host's end maximum
+    // doesn't carry: 59.6 ms on adas-mac-studio-2 at load 2-5 was 550-770 ms on adalundhe-macbook-pro at
+    // load 21, 2026-11-06.)
+    let late_after = hex_api::conformance::SLOWEST_RECORDED_END;
+    let budget = hex_api::conformance::PATIENCE;
+    let mut late = Vec::new();
+    for i in 0..RUNS {
+        let mut p = rt
+            .exec(&id, fx.act(&Act::Hog(GIB)), Stdio::null())
+            .expect("exec hog");
+        let t = Instant::now();
+        let exit = p.wait_for(budget).expect("wait");
+        if !matches!(exit, Some(Exit::Signal(_))) || t.elapsed() >= late_after {
+            late.push((i, exit, t.elapsed()));
+        }
+    }
+    rt.delete(&id).expect("delete");
+    assert!(
+        late.is_empty(),
+        "ends not seen as the bound's kill when they happened: {late:?}"
+    );
 }

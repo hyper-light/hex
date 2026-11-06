@@ -180,13 +180,18 @@ pub fn loadavg() -> Option<f64> {
 
 /// The most processes this kernel holds at once (`kern.maxproc`): no box can list more members.
 pub fn max_processes() -> io::Result<usize> {
+    sysctl_count(c"kern.maxproc")
+}
+
+/// A kernel count read by name (an `int` sysctl), as read now: an administrator may change it.
+fn sysctl_count(name: &std::ffi::CStr) -> io::Result<usize> {
     let mut v: c_int = 0;
     let mut len = size_of::<c_int>();
     // SAFETY: sysctlbyname reads the NUL-terminated name and writes at most `len` bytes, one c_int, into `v`,
     // and the new length into `len`; all three outlive the call, and nothing is set (newp null).
     let r = unsafe {
         libc::sysctlbyname(
-            c"kern.maxproc".as_ptr(),
+            name.as_ptr(),
             (&raw mut v).cast::<c_void>(),
             &raw mut len,
             std::ptr::null_mut(),
@@ -196,7 +201,8 @@ pub fn max_processes() -> io::Result<usize> {
     if r != 0 {
         return Err(io::Error::last_os_error());
     }
-    usize::try_from(v).map_err(|_| io::Error::other(format!("kern.maxproc reads {v}")))
+    usize::try_from(v)
+        .map_err(|_| io::Error::other(format!("{} reads {v}", name.to_string_lossy())))
 }
 
 /// Makes the calling thread a Mach time-constraint thread (`THREAD_TIME_CONSTRAINT_POLICY`,
@@ -236,6 +242,12 @@ pub fn time_constraint(
             "thread_policy_set: kern_return {kr}"
         )))
     }
+}
+
+/// The most bytes execve takes of a program's arguments and environment, their pointers included
+/// (`kern.argmax`, XNU's `NCARGS`: bsd/kern/kern_exec.c:578, :6546-6549; docs/research/runtime/exec-size-bounds.md).
+pub fn arg_max() -> io::Result<usize> {
+    sysctl_count(c"kern.argmax")
 }
 
 /// The QoS a box's processes are clamped to from their first instruction, passed to every process
@@ -482,8 +494,9 @@ pub enum Event {
     Timer,
     /// Another thread triggered it.
     User,
-    /// Process `pid`, watched with tag `tag`, forked.
-    Fork { pid: i32, tag: u64 },
+    /// Process `pid`, watched with tag `tag`, forked; `exited` when it has also ended since (the two
+    /// coalesce into one event until it is taken).
+    Fork { pid: i32, tag: u64, exited: bool },
     /// Process `pid`, watched with tag `tag`, ended with wait `status` (`NOTE_EXITSTATUS`). The node is
     /// the member's parent, so the kernel delivers the status in the event: the watcher reads a member's
     /// death — a jetsam fatal-cap `SIGKILL` among them — without racing the member's own reaper.
@@ -622,7 +635,11 @@ impl Kqueue {
             let event = match e.filter {
                 libc::EVFILT_TIMER => Event::Timer,
                 libc::EVFILT_USER => Event::User,
-                libc::EVFILT_PROC if e.fflags & libc::NOTE_FORK != 0 => Event::Fork { pid, tag },
+                libc::EVFILT_PROC if e.fflags & libc::NOTE_FORK != 0 => Event::Fork {
+                    pid,
+                    tag,
+                    exited: e.fflags & libc::NOTE_EXIT != 0,
+                },
                 // The wait status rides in `data` (NOTE_EXITSTATUS); the terminating signal is its low 7
                 // bits, so a jetsam fatal-cap SIGKILL is told apart here without reading the zombie.
                 libc::EVFILT_PROC => Event::Exit {

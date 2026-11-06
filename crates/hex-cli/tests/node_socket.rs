@@ -267,7 +267,21 @@ fn program(args: &[String]) -> Program {
 /// the create's path rootless (decision 4).
 struct OciBoxes<'a>(&'a Lab, bool);
 
+/// The bound a program crosses the node's socket under: the tighter of the wire's (the client refuses past it)
+/// and Linux's (the node refuses past it).
+fn over_the_socket() -> hex_api::ExecLimit {
+    let linux = hex_runtime::linux::process::exec_limit();
+    if hex_client::WIRE_EXEC_LIMIT.block < linux.block {
+        hex_client::WIRE_EXEC_LIMIT
+    } else {
+        linux
+    }
+}
+
 impl Fixture for OciBoxes<'_> {
+    fn exec_limit(&self) -> Option<hex_api::ExecLimit> {
+        Some(over_the_socket())
+    }
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
         BoxSpec {
             id,
@@ -293,6 +307,9 @@ impl Fixture for OciBoxes<'_> {
 struct ProcessBoxes<'a>(&'a str);
 
 impl Fixture for ProcessBoxes<'_> {
+    fn exec_limit(&self) -> Option<hex_api::ExecLimit> {
+        Some(over_the_socket())
+    }
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
         BoxSpec {
             id,
@@ -598,7 +615,10 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
             return;
         }
     };
-    let id = BoxId::new(&name).unwrap();
+    // The box's id is this run's alone, the case's directory name: a rootless tmpfs case's oci root is the user's
+    // runtime directory's, which every run of this test under that user shares, so a fixed id counts another run's
+    // container state, left or under way, as this one's.
+    let id = BoxId::new(dir.path().file_name().and_then(|n| n.to_str()).unwrap()).unwrap();
     let state = dir.path().join("state");
     let record = state.join(format!("{id}.json"));
     let temp = state.join(format!(".{id}.tmp"));

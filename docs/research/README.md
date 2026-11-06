@@ -38,6 +38,9 @@ implementation" and its numbers are established, before any design or code.
 | [`native-platforms.md`](runtime/native-platforms.md) | Boxes on macOS and Windows natively: why a Linux image needs a Linux kernel (WSL 1→2, Apple's Containerization), Windows containers and job objects, macOS App Sandbox inheritance and its missing tree caps (XNU, the SDK), Linux guests through Shards |
 | [`windows-hcs.md`](runtime/windows-hcs.md) | The Windows `oci` class: the OCI spec's Windows section over HCS v2, layers to a scratch volume (documented vs vmcompute), no suspended start, nested jobs, device grants, read-only mounts, host and image versions, the Containers feature and load-time linking |
 | [`differential-suite.md`](runtime/differential-suite.md) | One differential suite on every OS: differential testing (McKeeman et al., DEC), the simulator as the oracle, and what a comparison across OSes normalizes |
+| [`exec-size-bounds.md`](runtime/exec-size-bounds.md) | How big a program's arguments and environment may be: Linux's execve formula (fs/exec.c, a quarter of RLIMIT_STACK, 32 pages a string), XNU's kern.argmax, Windows' per-variable limit and unbounded block |
+| [`native-process-competitors.md`](runtime/native-process-competitors.md) | The `process` class's competitors on macOS (`taskpolicy -m`, launchd transient jobs) and Windows (Process Governor, HostProcess job containers), class for class |
+| [`inroot-eagain.md`](runtime/inroot-eagain.md) | Why openat2(RESOLVE_IN_ROOT) refuses with EAGAIN (the host's mount and rename seqcounts), how libpathrs, runc and filepath-securejoin try again, and the budget Hex's resolver keeps, measured under a mount and rename storm |
 | [`matrix.md`](runtime/matrix.md) | The cross-system comparison: isolation, start latency, throughput, density, overhead — every cell cited |
 
 ### Scheduler (`scheduler/`)

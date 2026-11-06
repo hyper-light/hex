@@ -16,17 +16,30 @@ use std::os::fd::OwnedFd;
 use std::sync::{Arc, Mutex};
 
 use hex_api::{
-    BoxId, BoxInfo, BoxSpec, BoxState, Class, ClassSpec, Proc, Program, Refusal, Runtime, Signal,
-    Stdio, Usage,
+    BoxId, BoxInfo, BoxSpec, BoxState, Class, ClassSpec, ExecLimit, Proc, Program, Refusal, Runtime,
+    Signal, Stdio, Usage,
 };
 use rustix::fs::{Mode, OFlags};
 
 use process::{ProcessBox, Shared};
 
+/// The bound macOS's execve puts on a program's arguments and environment, read from the kernel now
+/// (`kern.argmax`, kind (a); docs/research/runtime/exec-size-bounds.md). XNU has no bound on one string apart.
+pub fn exec_limit() -> Result<ExecLimit, Refusal> {
+    Ok(ExecLimit {
+        block: sys::arg_max().map_err(|e| Refusal::os("reading kern.argmax", e))?,
+        string: None,
+        unit: hex_api::StringUnit::Bytes,
+        source: "macOS's execve (kern.argmax)",
+    })
+}
+
 /// The macOS node's runtime over the `process` class. Holds its boxes in memory, keyed by id.
 pub struct MacRuntime {
     shared: Arc<Shared>,
     boxes: Mutex<BTreeMap<BoxId, Arc<ProcessBox>>>,
+    /// The kernel's bound on a program's arguments and environment, read at start (`kern.argmax`).
+    exec_limit: ExecLimit,
 }
 
 impl MacRuntime {
@@ -38,6 +51,7 @@ impl MacRuntime {
         Ok(Self {
             shared: Arc::new(shared),
             boxes: Mutex::new(BTreeMap::new()),
+            exec_limit: exec_limit()?,
         })
     }
 
@@ -114,6 +128,7 @@ impl Runtime for MacRuntime {
     }
 
     fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        program.fits(&self.exec_limit)?;
         let b = self.get(id)?;
         // The box's whole memory bound arms each member with a fatal per-process cap (native plan step 1's
         // `_ext` backstop); the box tracks which members carry it.
