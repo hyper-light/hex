@@ -255,7 +255,9 @@ three different things (CLAUDE.md "Working here"):
   nodes, all measured in **hex-sim** (built first). Implementation open.
 - **Scheduler goal 5, failure detection and isolation (S8)** (`docs/design/failure-isolation.md`; built
   on `cp/t7-sched-g5`, not merged): `hex-health`, the pure core of the detectors and penalties; hex-sim's
-  fault nemesis, each fault class within its stated bound over 1,000 seeds (gray drained ≤ 3.9 s);
+  fault nemesis, each fault class within its stated bound over 1,000 seeds (gray drained ≤ 3.9 s; a
+  tripped OCI container moved to a Firecracker or Shards microVM its node runs and that holds it, else
+  refused, and a microVM's trip refused, over 1,000 seeds of each kind);
   the crash class on hyper-swim's own detector, vendored (every crash condemned within the bound its
   condemner stated; at one probe a second, p99 12.1 s, though the stated bound runs to 1,090 s, a
   finding for hyper-swim's owner), memberlist's SWIM+Lifeguard beside it as the competitor, its

@@ -279,7 +279,10 @@ the node's. So those are measured once, for every kind on the node.
 signals should trip is unresearched (FI §8): this is Hex's own choice.
 
 **Evidence.** `hex-sim` `danger` tests (the move counts both overheads, to the byte; refusals typed);
-`faults.rs` over 1,000 seeds of each kind, an oracle from the rule's statement.
+`faults.rs` over 1,000 seeds of each kind against an oracle from the rule's statement, no wrong verdict
+(fedora unit `hex-sched-g5-main-kinds2-20261106T130519Z`): OCI, 500 moved to Firecracker, 209 to
+Shards, 152 refused for a node without a microVM, 139 for none that holds it; Firecracker and Shards,
+1,000 refused each, in a microVM.
 
 **What would falsify it.** A tripped workload started again as an OCI container, or in a kind its node
 doesn't run or that doesn't hold it; a microVM's trip moved; a benign workload refused for errno'd calls.
