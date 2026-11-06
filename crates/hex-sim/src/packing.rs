@@ -20,7 +20,7 @@ use std::collections::{BTreeSet, BinaryHeap};
 
 use crate::error::SimError;
 use crate::index::{FitIndex, Refusals, Sample};
-use crate::model::{Cluster, NodeId, Resources, Time};
+use crate::model::{Class, Classes, Cluster, NodeId, Resources, Time, WorkloadId, WorkloadSpec};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PackReport {
@@ -34,6 +34,9 @@ pub struct PackReport {
     pub stranded_cpu_milli: u64,
     pub stranded_mem_bytes: u64,
     pub placements: u64,
+    /// Workloads that ended and gave their room back before the pack stopped: none under
+    /// [`Clock::Held`], and under [`Clock::Compressed`] whether lifetimes entered at all.
+    pub completions: u64,
     /// Arrivals no node admitted when they came.
     pub passed_over: u64,
     /// Whether the load reached what was asked before the arrivals ran out.
@@ -82,15 +85,37 @@ fn per_mille(part: u64, whole: u64) -> u64 {
         .map_or(0, |x| u64::try_from(x).unwrap_or(u64::MAX))
 }
 
-/// The Pareto-minimal needs: no other need is at most it in every resource. A capacity that holds
-/// any need holds one of these. Bounded by the workloads' count; quadratic in the distinct needs.
-pub fn minimal_shapes(cluster: &Cluster) -> Vec<Resources> {
-    let distinct: BTreeSet<Resources> = cluster.workloads.iter().map(|w| w.need).collect();
-    let all: Vec<Resources> = distinct.into_iter().collect();
+/// Each class's Pareto-minimal needs: no other need of the class is at most it in every resource. A
+/// capacity that holds any need of a class holds one of these. Bounded by the workloads' count;
+/// quadratic in the distinct needs.
+pub fn minimal_shapes(cluster: &Cluster) -> Vec<(Resources, Class)> {
+    let distinct: BTreeSet<(Resources, Class)> = cluster
+        .workloads
+        .iter()
+        .map(|w| (w.need, w.class))
+        .collect();
+    let all: Vec<(Resources, Class)> = distinct.into_iter().collect();
     all.iter()
-        .filter(|&&s| !all.iter().any(|&o| o != s && s.holds(&o)))
+        .filter(|&&(s, c)| !all.iter().any(|&(o, oc)| oc == c && o != s && s.holds(&o)))
         .copied()
         .collect()
+}
+
+/// The same arrivals, every one of `class`: each workload's need moved from its own class's overhead
+/// to `class`'s, so a class can be measured alone on a day recorded with every class.
+pub fn alone(cluster: &Cluster, class: Class) -> Result<Cluster, SimError> {
+    let mut out = cluster.clone();
+    let overheads = cluster.overheads;
+    for w in &mut out.workloads {
+        w.need.mem_bytes = w
+            .need
+            .mem_bytes
+            .checked_sub(overheads.of(w.class))
+            .and_then(|m| m.checked_add(overheads.of(class)))
+            .ok_or(SimError::Need(w.id))?;
+        w.class = class;
+    }
+    Ok(out)
 }
 
 /// How a pack runs through time.
@@ -103,8 +128,8 @@ pub enum Clock {
     Compressed(Time),
 }
 
-/// Packs `cluster`'s arrivals from the `from`th on (none past the last) to `load_per_mille`, then
-/// measures what is stranded.
+/// Packs `cluster`'s arrivals from the `from`th on, round the day (none from past the last), to
+/// `load_per_mille`, then measures what is stranded.
 pub fn pack(
     cluster: &Cluster,
     sample: &Sample,
@@ -117,7 +142,13 @@ pub fn pack(
     }
     let mut index = FitIndex::new(&cluster.nodes)?;
     let mut r = PackReport::default();
-    for node in &cluster.nodes {
+    // The load and what is stranded count only the nodes that can run some workload here.
+    let asked = cluster
+        .workloads
+        .iter()
+        .fold(Classes::NONE, |all, w| all.with(w.class));
+    let eligible = || cluster.nodes.iter().filter(move |n| n.classes.meets(asked));
+    for node in eligible() {
         r.total_cpu_milli = r
             .total_cpu_milli
             .checked_add(node.capacity.cpu_milli)
@@ -127,19 +158,33 @@ pub fn pack(
             .checked_add(node.capacity.mem_bytes)
             .ok_or(SimError::Resources(node.id))?;
     }
-    let arrivals = cluster.workloads.get(from..).unwrap_or_default();
-    let start = arrivals.first().map_or(0, |w| w.arrives);
+    // From the `from`th arrival on, then round the day from its first: each wrapped arrival comes a
+    // day's span later, so a start late in the day still has the whole day to draw on.
+    let all = &cluster.workloads;
+    let none: &[WorkloadSpec] = &[];
+    let (later, earlier) = match (all.get(from..), all.get(..from)) {
+        (Some(later), Some(earlier)) if !later.is_empty() => (later, earlier),
+        _ => (none, none),
+    };
+    let span = match (all.first(), all.last()) {
+        (Some(first), Some(last)) => last.arrives.saturating_sub(first.arrives).saturating_add(1),
+        _ => 0,
+    };
+    let start = later.first().map_or(0, |w| w.arrives);
+    let arrivals = later
+        .iter()
+        .map(|w| (w, w.arrives))
+        .chain(earlier.iter().map(|w| (w, w.arrives.saturating_add(span))));
     // What runs, by when it ends. Bounded by the arrivals: each goes in once, when placed.
-    let mut running: BinaryHeap<Reverse<(Time, usize, NodeId)>> = BinaryHeap::new();
-    for (at, w) in arrivals.iter().enumerate() {
+    let mut running: BinaryHeap<Reverse<(Time, WorkloadId, NodeId)>> = BinaryHeap::new();
+    for (w, arrives) in arrivals {
         if r.load_per_mille() >= load_per_mille {
             r.reached = true;
             break;
         }
         let now = match clock {
             Clock::Held => 0,
-            Clock::Compressed(speed) => w
-                .arrives
+            Clock::Compressed(speed) => arrives
                 .saturating_sub(start)
                 .checked_div(speed)
                 .unwrap_or(0),
@@ -149,12 +194,13 @@ pub fn pack(
                 break;
             }
             running.pop();
-            let Some(done) = arrivals.get(ended) else {
+            let Some(done) = usize::try_from(ended.0).ok().and_then(|at| all.get(at)) else {
                 continue;
             };
             index.give(node, &done.demand())?;
             r.placed_cpu_milli = r.placed_cpu_milli.saturating_sub(done.need.cpu_milli);
             r.placed_mem_bytes = r.placed_mem_bytes.saturating_sub(done.need.mem_bytes);
+            r.completions = r.completions.saturating_add(1);
         }
         let demand = w.demand();
         let sampled = index.sampled_fit(&demand, sample);
@@ -181,12 +227,12 @@ pub fn pack(
         r.placed_mem_bytes = r.placed_mem_bytes.saturating_add(w.need.mem_bytes);
         r.placements = r.placements.saturating_add(1);
         if let (Clock::Compressed(_), Some(life)) = (clock, w.runs_for) {
-            running.push(Reverse((now.saturating_add(life), at, key.node)));
+            running.push(Reverse((now.saturating_add(life), w.id, key.node)));
         }
     }
     r.reached = r.reached || r.load_per_mille() >= load_per_mille;
     let shapes = minimal_shapes(cluster);
-    for node in &cluster.nodes {
+    for node in eligible() {
         let free = index.key(node.id)?;
         let free = Resources {
             cpu_milli: free.cpu_milli,
@@ -195,7 +241,10 @@ pub fn pack(
         };
         r.free_cpu_milli = r.free_cpu_milli.saturating_add(free.cpu_milli);
         r.free_mem_bytes = r.free_mem_bytes.saturating_add(free.mem_bytes);
-        if !shapes.iter().any(|s| free.holds(s)) {
+        if !shapes
+            .iter()
+            .any(|&(shape, class)| node.classes.has(class) && free.holds(&shape))
+        {
             r.stranded_cpu_milli = r.stranded_cpu_milli.saturating_add(free.cpu_milli);
             r.stranded_mem_bytes = r.stranded_mem_bytes.saturating_add(free.mem_bytes);
         }
@@ -206,7 +255,7 @@ pub fn pack(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Class, Classes, Kind, NodeId, NodeSpec, Tenancy, WorkloadId, WorkloadSpec};
+    use crate::model::{Kind, NodeId, NodeSpec, Tenancy, WorkloadId, WorkloadSpec};
 
     fn res(cpu: u64, mem: u64) -> Resources {
         Resources {
@@ -291,8 +340,8 @@ mod tests {
 
     /// Do two arrivals that each fill the node, the first ending before the second comes; expect a held
     /// clock to refuse the second, a clock at the recorded speed to place it in the room the first
-    /// gave back, a clock fast enough that the first hasn't ended to refuse it, and a zero speed
-    /// refused typed.
+    /// gave back, a clock fast enough that the first hasn't ended to refuse it, the one completion
+    /// counted only where it came, and a zero speed refused typed.
     #[test]
     fn a_compressed_clock_gives_back_what_ended() {
         let mut c = cluster(1, res(8000, 8), &[res(8000, 8), res(8000, 8)]);
@@ -303,10 +352,48 @@ mod tests {
         assert_eq!(at(Clock::Compressed(1)).passed_over, 0);
         assert_eq!(at(Clock::Compressed(1)).placed_cpu_milli, 8000);
         assert_eq!(at(Clock::Compressed(100)).passed_over, 1);
+        let completions =
+            [Clock::Held, Clock::Compressed(1), Clock::Compressed(100)].map(|c| at(c).completions);
+        assert_eq!(completions, [0, 1, 0]);
         assert_eq!(
             pack(&c, &Sample::whole(), 2000, 0, Clock::Compressed(0)),
             Err(SimError::Config("a compressed clock runs at least 1x"))
         );
+    }
+
+    /// Do a day of an OCI container and a Shards microVM, overheads 1 and 5, run as Shards alone;
+    /// expect each need moved to Shards' overhead and its class Shards, and a need smaller than its
+    /// own class's overhead refused typed.
+    #[test]
+    fn alone_moves_each_need_to_its_new_class() {
+        let mut c = cluster(1, res(8000, 64), &[res(1000, 3), res(1000, 9)]);
+        c.overheads.set(Class::Oci, 1);
+        c.overheads.set(Class::Shards, 5);
+        c.workloads[1].class = Class::Shards;
+        let a = alone(&c, Class::Shards).unwrap();
+        let got: Vec<_> = a
+            .workloads
+            .iter()
+            .map(|w| (w.need.mem_bytes, w.class))
+            .collect();
+        assert_eq!(got, vec![(7, Class::Shards), (9, Class::Shards)]);
+        c.workloads[0].need.mem_bytes = 0;
+        assert_eq!(alone(&c, Class::Shards), Err(SimError::Need(WorkloadId(0))));
+    }
+
+    /// Do OCI containers on a node that runs every class and on one that runs only Shards; expect
+    /// the Shards-only node, which nothing here can use, left out of the load and of what is
+    /// stranded.
+    #[test]
+    fn a_node_no_workload_here_can_run_isnt_counted() {
+        let mut c = cluster(2, res(4000, 4), &[res(4000, 4)]);
+        c.nodes[1].classes = Classes::NONE.with(Class::Shards);
+        let r = pack(&c, &Sample::whole(), 1000, 0, Clock::Held).unwrap();
+        assert_eq!(
+            (r.total_cpu_milli, r.placements, r.reached),
+            (4000, 1, true)
+        );
+        assert_eq!(r.stranded_per_mille(), 0);
     }
 
     /// Do a pack from a later arrival; expect the arrivals before it left out.

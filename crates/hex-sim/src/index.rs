@@ -52,20 +52,20 @@ pub struct Sample {
     pub shapes: Shapes,
 }
 
-/// At most [`Shapes::MAX`] workload shapes, kept in a fixed array so a [`Sample`] stays a plain
-/// value. Past the bound, [`Shapes::of`] keeps the smallest (by CPU, then memory, then GPUs): a free
-/// capacity a larger shape fits, a smaller one fits too, so the smallest are what decide whether a
-/// leftover can still be used.
+/// At most [`Shapes::MAX`] workload shapes, each with the class that asks it, kept in a fixed array
+/// so a [`Sample`] stays a plain value. Past the bound, [`Shapes::of`] keeps the smallest (by CPU,
+/// then memory, then GPUs, then class): a free capacity a larger shape fits, a smaller one fits too,
+/// so the smallest are what decide whether a leftover can still be used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Shapes {
     len: usize,
-    items: [Resources; Shapes::MAX],
+    items: [(Resources, Class); Shapes::MAX],
 }
 
 impl Shapes {
     pub const MAX: usize = 16;
 
-    pub fn of(mut shapes: Vec<Resources>) -> Self {
+    pub fn of(mut shapes: Vec<(Resources, Class)>) -> Self {
         shapes.sort_unstable();
         shapes.dedup();
         let mut out = Self::default();
@@ -76,13 +76,14 @@ impl Shapes {
         out
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &Resources> {
+    pub fn iter(&self) -> impl Iterator<Item = &(Resources, Class)> {
         self.items.iter().take(self.len)
     }
 
-    /// Whether some shape fits `free`.
-    fn usable(&self, free: &Resources) -> bool {
-        self.iter().any(|s| free.holds(s))
+    /// Whether some shape of a class `classes` holds fits `free`.
+    pub fn usable(&self, free: &Resources, classes: Classes) -> bool {
+        self.iter()
+            .any(|(shape, class)| classes.has(*class) && free.holds(shape))
     }
 }
 
@@ -108,11 +109,12 @@ pub enum Scorer {
 }
 
 impl Scorer {
-    /// Hex's packing score: least stranded, then most allocated, so what isn't stranded packs and the
-    /// nodes best fit would keep empty stay empty for large microVMs. On the recorded microVM workload
-    /// it strands nothing at 90% load on every seed, where either best fit strands most of the
-    /// cluster's memory, and it refuses no microVM on the way (hex-sim.md H11).
-    pub const HEX: Self = Self::Fragment(Tie::MostAllocated);
+    /// Hex's packing score: least stranded, then the node that runs the fewest classes, then the most
+    /// allocated, so a node only some classes can use is spent before one that every class can, and
+    /// what isn't stranded packs. On the recorded workload of OCI containers, Firecracker microVMs and
+    /// Shards microVMs it strands at least 30% less than either best fit at 90% load on every seed,
+    /// for the mix and for each class alone, and passes over fewer of them (hex-sim.md H11).
+    pub const HEX: Self = Self::Fragment(Tie::Narrowest);
 }
 
 /// What ranks the nodes [`Scorer::Fragment`] finds equally stranded.
@@ -124,6 +126,9 @@ pub enum Tie {
     LeastAllocated,
     /// The node most allocated once the need is placed (Kubernetes' `MostAllocated`).
     MostAllocated,
+    /// The node that runs the fewest classes, then the most allocated: a node every class can use is
+    /// kept for the classes only it can take.
+    Narrowest,
 }
 
 impl Default for Sample {
@@ -133,10 +138,7 @@ impl Default for Sample {
             min_feasible: 100,
             per_mille: 50,
             scorer: Scorer::BestFit,
-            shapes: Shapes {
-                len: 0,
-                items: [Resources::default(); Shapes::MAX],
-            },
+            shapes: Shapes::default(),
         }
     }
 }
@@ -149,10 +151,7 @@ impl Sample {
             min_feasible: u32::MAX,
             per_mille: 0,
             scorer: Scorer::BestFit,
-            shapes: Shapes {
-                len: 0,
-                items: [Resources::default(); Shapes::MAX],
-            },
+            shapes: Shapes::default(),
         }
     }
 
@@ -252,6 +251,7 @@ impl Sampled {
 pub enum Verdict {
     Admits,
     NoClass,
+    /// The need asks a GPU the node hasn't, or that its class can't be given ([`Class::takes_gpus`]).
     NoGpu,
     NoRoom,
     Shares,
@@ -274,7 +274,7 @@ impl Slot {
         if !self.classes.has(demand.class) {
             return Verdict::NoClass;
         }
-        if need.gpus > 0 && self.capacity.gpus == 0 {
+        if need.gpus > 0 && (self.capacity.gpus == 0 || !demand.class.takes_gpus()) {
             return Verdict::NoGpu;
         }
         if !self.free.holds(need) {
@@ -310,7 +310,7 @@ impl Slot {
         let Some(left) = self.free.checked_sub(need) else {
             return u64::MAX;
         };
-        if shapes.usable(&left) {
+        if shapes.usable(&left, self.classes) {
             0
         } else {
             let c = &self.capacity;
@@ -460,6 +460,13 @@ impl FitIndex {
                             u64::MAX.saturating_sub(slot.allocated_after(&demand.need))
                         }
                         Tie::MostAllocated => slot.allocated_after(&demand.need),
+                        // Fewer classes in the high bits; the allocation (at most 2,000,000) below.
+                        Tie::Narrowest => {
+                            u64::from(3u32.saturating_sub(slot.classes.count()))
+                                .checked_shl(32)
+                                .unwrap_or(0)
+                                | slot.allocated_after(&demand.need)
+                        }
                     };
                     u128::from(u64::MAX.saturating_sub(stranded))
                         .checked_mul(1 << 64)
@@ -598,12 +605,9 @@ mod tests {
         assert_eq!(fit(res(1000, 8, 1)), None);
     }
 
-    /// AC-T7.6.3 and S3's filters, each alone: a benchmark refused beside a build and a build beside a
-    /// benchmark; a session refused a node above 90% CPU, counting its background; GPU work refused a
-    /// node without GPUs.
-    /// Do a Firecracker microVM where one node runs only OCI containers and the other every class;
-    /// expect the first to refuse it as NoClass and the scan to count that refusal, and an OCI
-    /// container still to fit both.
+    /// S3's filters in Hex's kinds (AC-T7.4.3's workload): do a Firecracker microVM where one node
+    /// runs only OCI containers and the other every class; expect the first to refuse it as NoClass
+    /// and the scan to count that refusal, and an OCI container still to fit both.
     #[test]
     fn a_class_the_node_cant_run_is_refused() {
         let mut nodes = nodes(&[res(8_000, 8, 0), res(8_000, 8, 0)]);
@@ -631,6 +635,34 @@ mod tests {
         );
     }
 
+    /// S3's GPU filter in Hex's kinds: do an OCI container, a Firecracker microVM and a Shards
+    /// microVM, each asking a GPU, on a GPU node that runs every class; expect the container admitted
+    /// and each microVM refused as NoGpu (neither can be given a GPU), so no node admits it and
+    /// admission turns it away.
+    #[test]
+    fn only_an_oci_container_is_given_a_gpu() {
+        let index = FitIndex::new(&nodes(&[res(8_000, 8, 2)])).unwrap();
+        let asking = |class| Demand {
+            need: res(1_000, 1, 1),
+            kind: Kind::Plain,
+            class,
+        };
+        assert_eq!(
+            index.verdict(NodeId(0), &asking(Class::Oci)).unwrap(),
+            Verdict::Admits
+        );
+        for class in [Class::Firecracker, Class::Shards] {
+            assert_eq!(
+                index.verdict(NodeId(0), &asking(class)).unwrap(),
+                Verdict::NoGpu
+            );
+            assert!(!index.admitted_anywhere(&asking(class)));
+        }
+    }
+
+    /// AC-T7.6.3 and S3's filters, each alone: a benchmark refused beside a build and a build beside a
+    /// benchmark; a session refused a node above 90% CPU, counting its background; GPU work refused a
+    /// node without GPUs.
     #[test]
     fn each_filter_refuses_what_it_names() {
         let mut ns = nodes(&[res(10_000, 100, 0), res(10_000, 100, 2)]);

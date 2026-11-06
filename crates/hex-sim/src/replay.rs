@@ -1,11 +1,13 @@
-//! A recorded workload, as text: the cluster it ran on and the work that arrived, so hex-sim can
-//! replay a real day (G2 step 3; `AC-T7.4.3`'s "recorded kiln workload").
+//! A recorded workload, as text: the nodes it lands on and the requests that arrived, each an OCI
+//! container, a Firecracker microVM or a Shards microVM, so hex-sim can replay a real day (G2 step 3;
+//! `AC-T7.4.3`'s recorded workload, bench/sched/huawei_workload.md).
 //!
 //! ```text
 //! # source: <where and when it was recorded>
 //! node,<cpu_milli>,<mem_bytes>,<gpus>,<background_milli>[,<classes>]
 //! owner,<weight>
 //! group,<budget>
+//! overhead,<class>,<mem_bytes>
 //! leg,<arrive_ns>,<runs_for_ns>,<cpu_milli>,<mem_bytes>,<gpus>,<plain|build|benchmark|session>[,<owner>,<band>,<gang|->,<group|->[,<class>]]
 //! ```
 //!
@@ -15,13 +17,15 @@
 //! or none; a leg without them is owner 0's, band 0, alone and in no group, and a trace that names no
 //! owner has one, of weight 1, so a trace written before G4 reads as it did. A class (`oci`,
 //! `firecracker` or `shards`) follows a leg's tenancy, `oci` when absent; a node's classes are
-//! joined by `+` (`oci+firecracker`), every class when absent. The parser is a pure function
+//! joined by `+` (`oci+firecracker`), every class when absent. A class's overhead, at most once each
+//! and before the first leg, is the memory its runtime costs a node; each leg of that class needs it
+//! beside its own, none when absent. The parser is a pure function
 //! over bounded input (CLAUDE.md §2): past [`Limits`], and at the first line it can't read, it refuses
 //! with a typed [`TraceError`] naming the line.
 
 use crate::model::{
-    Class, Classes, Cluster, GangId, Group, GroupId, Kind, NodeId, NodeSpec, Owner, OwnerId,
-    Resources, Tenancy, WorkloadId, WorkloadSpec,
+    Class, Classes, Cluster, GangId, Group, GroupId, Kind, NodeId, NodeSpec, Overheads, Owner,
+    OwnerId, Resources, Tenancy, WorkloadId, WorkloadSpec,
 };
 
 /// What a trace may hold. Past any bound the parse is refused, never truncated.
@@ -35,7 +39,7 @@ pub struct Limits {
 }
 
 impl Default for Limits {
-    /// A day of kiln CI with room to spare: tens of thousands of legs on tens of runners.
+    /// A recorded day with room to spare: the day of record is 25,295 launches on 50 nodes.
     fn default() -> Self {
         Self {
             max_bytes: 64 << 20,
@@ -77,6 +81,8 @@ pub fn parse(text: &str, limits: &Limits) -> Result<Cluster, TraceError> {
     let mut workloads: Vec<WorkloadSpec> = Vec::new();
     let mut owners: Vec<Owner> = Vec::new();
     let mut groups: Vec<Group> = Vec::new();
+    let mut overheads = Overheads::default();
+    let mut overheads_seen = Classes::NONE;
     for (at, raw) in text.lines().enumerate() {
         let line = at.saturating_add(1);
         let row = raw.trim();
@@ -132,6 +138,19 @@ pub fn parse(text: &str, limits: &Limits) -> Result<Cluster, TraceError> {
                 }
                 owners.push(Owner { weight });
             }
+            Some("overhead") => {
+                if !workloads.is_empty() {
+                    return Err(bad(line, "an overhead after the first leg"));
+                }
+                let class = class(fields.next().ok_or(bad(line, "a missing field"))?, line)?;
+                let bytes = number(&mut fields, line)?;
+                end(&mut fields, line)?;
+                if overheads_seen.has(class) {
+                    return Err(bad(line, "a class's overhead given twice"));
+                }
+                overheads_seen = overheads_seen.with(class);
+                overheads.set(class, bytes);
+            }
             Some("group") => {
                 if !workloads.is_empty() {
                     return Err(bad(line, "a group after the first leg"));
@@ -172,6 +191,9 @@ pub fn parse(text: &str, limits: &Limits) -> Result<Cluster, TraceError> {
                     Some(text) => class(text, line)?,
                 };
                 end(&mut fields, line)?;
+                let mem_bytes = mem_bytes
+                    .checked_add(overheads.of(class))
+                    .ok_or(bad(line, "memory past u64 with its class's overhead"))?;
                 if workloads.last().is_some_and(|w| w.arrives > arrives) {
                     return Err(bad(line, "a leg arriving before the one above it"));
                 }
@@ -193,7 +215,10 @@ pub fn parse(text: &str, limits: &Limits) -> Result<Cluster, TraceError> {
                 });
             }
             Some(_) | None => {
-                return Err(bad(line, "a line that is not node, owner, group or leg"));
+                return Err(bad(
+                    line,
+                    "a line that is not node, owner, group, overhead or leg",
+                ));
             }
         }
     }
@@ -208,6 +233,7 @@ pub fn parse(text: &str, limits: &Limits) -> Result<Cluster, TraceError> {
         workloads,
         owners,
         groups,
+        overheads,
     })
 }
 
@@ -315,6 +341,13 @@ mod tests {
             (c.workloads[0].class, c.workloads[1].class),
             (Class::Shards, Class::Oci)
         );
+        let with = "node,8,8,0,0\noverhead,shards,5\nleg,0,1,1,1,0,plain,0,0,-,-,shards\nleg,1,1,1,1,0,plain\n";
+        let c = parse(with, &Limits::default()).unwrap();
+        assert_eq!(
+            (c.workloads[0].need.mem_bytes, c.workloads[1].need.mem_bytes),
+            (6, 1)
+        );
+        assert_eq!(c.overheads.of(Class::Shards), 5);
     }
 
     /// G2 step 3: a well-formed trace reads back as its nodes and legs, ids by position.
@@ -346,6 +379,13 @@ mod tests {
             ("node,1,1,0,0,oci+oci+oci+oci\n", 1),
             ("node,1,1,0,0\nleg,0,1,1,1,0,plain,0,0,-,-,gvisor\n", 2),
             ("node,1,1,0,0\nleg,0,1,1,1,0,plain,0,0,-,-,oci,1\n", 2),
+            ("node,1,1,0,0\noverhead,oci,1\noverhead,oci,2\n", 3),
+            ("node,1,1,0,0\nleg,0,1,1,1,0,plain\noverhead,oci,1\n", 3),
+            ("node,1,1,0,0\noverhead,lxc,1\n", 2),
+            (
+                "node,1,1,0,0\noverhead,oci,1\nleg,0,1,1,18446744073709551615,0,plain\n",
+                3,
+            ),
             ("node,1,1,0\n", 1),
             ("node,1,1,0,0,9\n", 1),
             ("node,-1,1,0,0\n", 1),

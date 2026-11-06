@@ -255,7 +255,8 @@ pub fn check_kept_running(cluster: &Cluster, run: &Run) -> KeptReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FilterReport {
     pub placements: u64,
-    /// GPU work placed on a node without GPUs.
+    /// GPU work placed where it gets none: on a node without GPUs, or of a class a GPU can't be given
+    /// to ([`crate::model::Class::takes_gpus`]).
     pub gpu_off_gpu: u64,
     /// A benchmark placed beside a running build, or a build beside a running benchmark.
     pub benchmark_with_build: u64,
@@ -312,7 +313,7 @@ pub fn check_filters(cluster: &Cluster, run: &Run) -> Result<FilterReport, Viola
         if placing {
             let now = seen.get(i).copied().unwrap_or_default();
             r.placements = r.placements.saturating_add(1);
-            if spec.need.gpus > 0 && facts.capacity.gpus == 0 {
+            if spec.need.gpus > 0 && (facts.capacity.gpus == 0 || !spec.class.takes_gpus()) {
                 r.gpu_off_gpu = r.gpu_off_gpu.saturating_add(1);
             }
             if !facts.classes.has(spec.class) {

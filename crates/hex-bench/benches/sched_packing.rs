@@ -2,17 +2,25 @@
 //!
 //!   cargo bench -p hex-bench --bench sched_packing
 //!
-//! It packs the recorded microVM workload (bench/sched/huawei_workload.md) from 16 starting arrivals
-//! spread evenly over the day (the seeds), to 90% load through the fast path's sampled choice
-//! (`hex_sim::packing::pack`), three ways: with no completions, so lifetimes don't enter; and with
-//! completions, its arrivals 500 times faster than recorded, once with its sandboxes' lifetimes as
-//! recorded (huawei-r5-day30.trace) and once with Huawei's one-minute keep-alive added
-//! (huawei-r5-day30.keepalive.trace). Each runs under each arm: best fit by free CPU first (`BestFit`) and across resources (`MostAllocated`), Tetris's
-//! alignment (`Align`), and least stranded then a tie: Tetris's alignment (the plan's), least
-//! allocated, or most allocated (Hex's, `Scorer::HEX`). For each arm and seed it prints the stranded
-//! capacity, the arrivals passed over on the way, the load at the first refusal for room, and the
-//! arrivals passed over below half load with their needs; then each arm's reduction against both best
-//! fits. It is deterministic: the same trace gives the same tables.
+//! It packs the recorded workload (bench/sched/huawei_workload.md), each launch an OCI container, a
+//! Firecracker microVM or a Shards microVM, as the mix and as each class alone
+//! (`hex_sim::packing::alone`), from 16 starting arrivals spread evenly over the day (the seeds), to
+//! 90% load through the fast path's sampled choice (`hex_sim::packing::pack`), three ways: with no
+//! completions, so lifetimes don't enter; and with completions, once with lifetimes as recorded
+//! (huawei-r5-day30.trace) and once with Huawei's one-minute keep-alive added
+//! (huawei-r5-day30.keepalive.trace). At the recorded speed the day never loads the fleet to 90%,
+//! so arrivals come faster: for each set and trace, the slowest speed of [`LADDER`] at which Hex
+//! and both best fits reach 90% on every seed, so lifetimes enter as far as the fleet allows. It
+//! prints the ladder first, each speed's seeds reaching 90% by arm, its fewest completions on the
+//! way, and the seeds on which Hex meets the bar.
+//!
+//! Each clock runs under each arm: best fit by free CPU first (`BestFit`) and across resources
+//! (`MostAllocated`), Tetris's alignment (`Align`), and least stranded then a tie: Tetris's
+//! alignment (the plan's), least allocated, most allocated, or the fewest classes then most
+//! allocated (Hex's, `Scorer::HEX`). For each arm and seed it prints the stranded capacity, the
+//! arrivals passed over on the way, the completions, the load at the first refusal for room, and the
+//! arrivals passed over below half load with their needs; then each arm's reduction against both
+//! best fits. It is deterministic: the same trace gives the same tables.
 // A bench (not production, CLAUDE.md): it takes the test-style allowances, as the other benches do.
 #![allow(
     clippy::unwrap_used,
@@ -26,20 +34,22 @@
 )]
 
 use hex_sim::index::{Sample, Scorer, Shapes, Tie};
-use hex_sim::model::{Cluster, Time};
-use hex_sim::packing::{Clock, PackReport, minimal_shapes, pack};
+use hex_sim::model::{Class, Cluster, Time};
+use hex_sim::packing::{Clock, PackReport, alone, minimal_shapes, pack};
 
 const SEEDS: usize = 16;
-/// The slowest of 20, 50, 100, 200, 500 and 1,000 times the recorded speed at which every seed reaches
-/// 90% load with lifetimes as recorded (a model of this packing, 2026-11-06).
-const SPEED: Time = 500;
-const ARMS: [(&str, Scorer); 6] = [
+/// The speeds tried, as multiples of the recorded arrival rate.
+const LADDER: [Time; 14] = [
+    10, 20, 30, 40, 50, 60, 75, 100, 150, 200, 300, 500, 1_000, 2_000,
+];
+const ARMS: [(&str, Scorer); 7] = [
     ("best_fit", Scorer::BestFit),
     ("most_allocated", Scorer::MostAllocated),
     ("align", Scorer::Align),
     ("stranded_then_align", Scorer::Fragment(Tie::Align)),
     ("stranded_then_least", Scorer::Fragment(Tie::LeastAllocated)),
-    ("stranded_then_most (Hex)", Scorer::HEX),
+    ("stranded_then_most", Scorer::Fragment(Tie::MostAllocated)),
+    ("stranded_then_narrowest (Hex)", Scorer::HEX),
 ];
 
 fn cut(arm: &PackReport, base: &PackReport) -> f64 {
@@ -77,32 +87,92 @@ fn trace(name: &str) -> Cluster {
 
 fn main() {
     let recorded = trace("huawei-r5-day30.trace");
-    measure("no completions", &recorded, Clock::Held);
-    measure(
-        "completions at 500x, lifetimes as recorded",
-        &recorded,
-        Clock::Compressed(SPEED),
-    );
-    measure(
-        "completions at 500x, with the keep-alive",
-        &trace("huawei-r5-day30.keepalive.trace"),
-        Clock::Compressed(SPEED),
-    );
+    let kept_alive = trace("huawei-r5-day30.keepalive.trace");
+    for (set, class) in [
+        ("mix", None),
+        ("oci", Some(Class::Oci)),
+        ("firecracker", Some(Class::Firecracker)),
+        ("shards", Some(Class::Shards)),
+    ] {
+        let as_set = |day: &Cluster| match class {
+            None => day.clone(),
+            Some(class) => alone(day, class).unwrap(),
+        };
+        let (recorded, kept_alive) = (as_set(&recorded), as_set(&kept_alive));
+        measure(set, "no completions", &recorded, Clock::Held);
+        for (lives, day) in [
+            ("lifetimes as recorded", &recorded),
+            ("with the keep-alive", &kept_alive),
+        ] {
+            let Some(speed) = slowest(set, lives, day) else {
+                println!("{set}, {lives}: no speed on the ladder reaches 90% on every seed");
+                continue;
+            };
+            measure(
+                set,
+                &format!("completions at {speed}x, {lives}"),
+                day,
+                Clock::Compressed(speed),
+            );
+        }
+    }
 }
 
-fn measure(name: &str, cluster: &Cluster, clock: Clock) {
-    let shapes = minimal_shapes(cluster);
-    let sample = Sample {
-        shapes: Shapes::of(shapes.clone()),
+fn sample(cluster: &Cluster) -> Sample {
+    Sample {
+        shapes: Shapes::of(minimal_shapes(cluster)),
         ..Sample::default()
-    };
+    }
+}
+
+/// Walks [`LADDER`], printing each speed's row, and returns the slowest speed at which Hex and both
+/// best fits reach 90% on every seed.
+fn slowest(set: &str, lives: &str, cluster: &Cluster) -> Option<Time> {
     println!(
-        "== {name}: {} nodes, {} sandboxes, minimal shapes {shapes:?}",
+        "ladder, {set}, {lives}: speed | seeds reaching 90% (Hex, best_fit, most_allocated) | fewest completions | seeds where Hex meets the bar"
+    );
+    let sample = sample(cluster);
+    let mut found = None;
+    for speed in LADDER {
+        let mut reached = [0usize; 3];
+        let mut done = [u64::MAX; 3];
+        let mut meets = 0;
+        for seed in 0..SEEDS {
+            let from = seed * cluster.workloads.len() / SEEDS;
+            let runs = [Scorer::HEX, Scorer::BestFit, Scorer::MostAllocated].map(|scorer| {
+                pack(
+                    cluster,
+                    &Sample { scorer, ..sample },
+                    900,
+                    from,
+                    Clock::Compressed(speed),
+                )
+                .unwrap()
+            });
+            for (i, p) in runs.iter().enumerate() {
+                reached[i] += usize::from(p.reached);
+                done[i] = done[i].min(p.completions);
+            }
+            meets += usize::from(runs[1..].iter().all(|b| cut(&runs[0], b) >= 30.0));
+        }
+        println!("{speed:>5}x | {reached:?} | {done:?} | {meets}/{SEEDS}");
+        if found.is_none() && reached == [SEEDS; 3] {
+            found = Some(speed);
+        }
+    }
+    found
+}
+
+fn measure(set: &str, name: &str, cluster: &Cluster, clock: Clock) {
+    let sample = sample(cluster);
+    let shapes = minimal_shapes(cluster);
+    println!(
+        "== {set}, {name}: {} nodes, {} launches, minimal shapes {shapes:?}",
         cluster.nodes.len(),
         cluster.workloads.len()
     );
     println!(
-        "seed from arm | stranded per-mille (* = 90% load not reached) | passed over | first refusal for room at load per-mille | passed over below half load [millicores/MiB@load; f = by a filter]"
+        "seed from arm | stranded per-mille (* = 90% load not reached) | passed over | completions | first refusal for room at load per-mille | passed over below half load [millicores/MiB@load; f = by a filter]"
     );
     let runs: Vec<Vec<PackReport>> = (0..SEEDS)
         .map(|seed| {
@@ -118,10 +188,11 @@ fn measure(name: &str, cluster: &Cluster, clock: Clock) {
         let from = seed * cluster.workloads.len() / SEEDS;
         for ((arm, _), p) in ARMS.iter().zip(arms) {
             println!(
-                "{seed:>4} {from:>5} {arm} | {}{} | {} | {} | {}",
+                "{seed:>4} {from:>5} {arm} | {}{} | {} | {} | {} | {}",
                 p.stranded_per_mille(),
                 if p.reached { "" } else { "*" },
                 p.passed_over,
+                p.completions,
                 p.first_full_per_mille
                     .map_or_else(|| "-".to_string(), |l| l.to_string()),
                 early(p)
@@ -149,7 +220,7 @@ fn measure(name: &str, cluster: &Cluster, clock: Clock) {
             .min();
         let early: u64 = runs.iter().map(|arms| arms[i].early_passed_over).sum();
         println!(
-            "{arm} | {meets}/{SEEDS} | {least_best:.1}%, {least_most:.1}% | {passed} | {} | {early}",
+            "{set}, {name}: {arm} | {meets}/{SEEDS} | {least_best:.1}%, {least_most:.1}% | {passed} | {} | {early}",
             first.map_or_else(|| "-".to_string(), |l| l.to_string())
         );
     }

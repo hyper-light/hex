@@ -63,6 +63,18 @@ pub enum Class {
     Shards,
 }
 
+impl Class {
+    /// Whether it can be given a GPU (docs/research/scheduler/agentic-workloads.md, finding 8: GPU
+    /// access is a property of the node and the class). An OCI container can: its runtime passes the
+    /// device in, as Kubernetes' device plugins and CDI do ([21][55] there). A Firecracker microVM
+    /// can't: its mainline emulates six devices and passes none through ([25]-[28] there). Nor, yet,
+    /// can a Shards microVM: Shards' guest spec names disks, shares and vsock ports, and no device
+    /// (shards-api draft, hyper-light/shards a0cced87, `crates/api/src/lib.rs:41-62`).
+    pub fn takes_gpus(self) -> bool {
+        matches!(self, Class::Oci)
+    }
+}
+
 /// The classes a node can run, a bit each.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Classes(u8);
@@ -79,11 +91,46 @@ impl Classes {
         self.0 & Self::bit(class) != 0
     }
 
+    /// Whether the two share a class.
+    pub fn meets(self, other: Classes) -> bool {
+        self.0 & other.0 != 0
+    }
+
+    /// How many classes it holds.
+    pub fn count(self) -> u32 {
+        self.0.count_ones()
+    }
+
     fn bit(class: Class) -> u8 {
         match class {
             Class::Oci => 1,
             Class::Firecracker => 2,
             Class::Shards => 4,
+        }
+    }
+}
+
+/// What each class costs its node beside what a workload asks, in bytes of memory: its runtime's own
+/// (a container's shim, a microVM's VMM). A workload's need includes its class's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Overheads([u64; 3]);
+
+impl Overheads {
+    pub fn of(self, class: Class) -> u64 {
+        self.0.get(Self::at(class)).copied().unwrap_or(0)
+    }
+
+    pub fn set(&mut self, class: Class, bytes: u64) {
+        if let Some(slot) = self.0.get_mut(Self::at(class)) {
+            *slot = bytes;
+        }
+    }
+
+    fn at(class: Class) -> usize {
+        match class {
+            Class::Oci => 0,
+            Class::Firecracker => 1,
+            Class::Shards => 2,
         }
     }
 }
@@ -191,16 +238,19 @@ pub struct Cluster {
     pub workloads: Vec<WorkloadSpec>,
     pub owners: Vec<Owner>,
     pub groups: Vec<Group>,
+    /// Already counted in each workload's need; kept to change a workload's class.
+    pub overheads: Overheads,
 }
 
 impl Cluster {
-    /// One owner of weight 1 and no groups: every workload's default tenancy.
+    /// One owner of weight 1, no groups and no class overheads: every workload's default tenancy.
     pub fn single_owner(nodes: Vec<NodeSpec>, workloads: Vec<WorkloadSpec>) -> Self {
         Self {
             nodes,
             workloads,
             owners: vec![Owner::default()],
             groups: Vec::new(),
+            overheads: Overheads::default(),
         }
     }
 }
