@@ -32,6 +32,10 @@ const HANG_GUARD: Duration = Duration::from_millis(39_507);
 /// max of 30 measured exec-to-exits of a hog ended at its 256 MiB bound, 465.469 ms
 /// (bench/native/macos/records/execexit-a82ce7b-20261106T161405Z.txt).
 const ENDED_AT_BOUND: Duration = Duration::from_micros(930_938);
+/// How long the exec-to-exit measurement waits on one sample: twice (x 2) the slowest sample recorded, the
+/// hog's 465.469 ms (bench/native/macos/records/execexit-a82ce7b-20261106T161405Z.txt). A sample past it
+/// prints `None`, recorded as slower than every earlier run, never waited out (the lead's call #4, 2026-11-06).
+const SAMPLE_GUARD: Duration = Duration::from_micros(2 * 465_469);
 
 struct BinFixture {
     exe: String,
@@ -394,7 +398,7 @@ fn measure_exec_to_exit() {
             if term {
                 rt.signal(&id, Signal::TERM).expect("signal TERM");
             }
-            let exit = p.wait_for(Duration::from_secs(600)).expect("wait");
+            let exit = p.wait_for(SAMPLE_GUARD).expect("wait");
             println!("EXEC_EXIT {what} {:.6} {exit:?}", t.elapsed().as_secs_f64());
         }
     }
