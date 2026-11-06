@@ -1,12 +1,10 @@
 //! Stranded capacity (`AC-T7.4.3`): what a placement policy leaves free that no workload can use.
 //!
-//! [`whole_requests`] turns a recorded workload's measured needs into the requests a scheduler places
-//! by, at the granularity kiln's own workflows declare. [`pack`] places arrivals in order from one of
-//! them, with no completions, through the fast path's sampled choice ([`FitIndex::sampled_fit`]),
-//! passing over one no node admits, until the load reaches what is asked (90% for `AC-T7.4.3`). The
-//! load is the dominant share of what is placed: the larger of placed CPU over all CPU and placed
-//! memory over all memory, as Dominant Resource Fairness measures a share, so a workload that runs
-//! out of memory first is loaded by its memory.
+//! [`pack`] places a workload's arrivals in order from a given one, with no completions, through the
+//! fast path's sampled choice ([`FitIndex::sampled_fit`]), passing over one no node admits, until the
+//! load reaches what is asked (90% for `AC-T7.4.3`). The load is the dominant share of what is
+//! placed: the larger of placed CPU over all CPU and placed memory over all memory, as Dominant
+//! Resource Fairness measures a share, so a workload that runs out of CPU first is loaded by its CPU.
 //!
 //! It then measures stranded capacity: on each node where no shape of the workload's requests fits
 //! what is free, that node's free CPU and free memory, which nothing can use because another
@@ -22,9 +20,6 @@ use std::collections::BTreeSet;
 use crate::error::SimError;
 use crate::index::{FitIndex, Refusals, Sample};
 use crate::model::{Cluster, Resources};
-
-/// A GiB, the unit kiln's workflows declare memory in.
-pub const GIB: u64 = 1 << 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PackReport {
@@ -84,21 +79,6 @@ fn per_mille(part: u64, whole: u64) -> u64 {
         .checked_mul(1000)
         .and_then(|x| x.checked_div(u128::from(whole)))
         .map_or(0, |x| u64::try_from(x).unwrap_or(u64::MAX))
-}
-
-/// The requests a recorded workload's legs would declare: each need rounded up to a whole core and a
-/// whole GiB, at least one of each. kiln's workflows declare whole cores and GiB, the smallest one
-/// core and 1 GiB (kiln `.kiln/ci.yaml:107`, `resources: { cpu: "1", memory: 1Gi }`), and a scheduler
-/// places by what is declared, not by what was measured.
-pub fn whole_requests(cluster: &Cluster) -> Result<Cluster, SimError> {
-    let mut out = cluster.clone();
-    for w in &mut out.workloads {
-        let cores = w.need.cpu_milli.div_ceil(1000).max(1);
-        let gib = w.need.mem_bytes.div_ceil(GIB).max(1);
-        w.need.cpu_milli = cores.checked_mul(1000).ok_or(SimError::Need(w.id))?;
-        w.need.mem_bytes = gib.checked_mul(GIB).ok_or(SimError::Need(w.id))?;
-    }
-    Ok(out)
 }
 
 /// The Pareto-minimal needs: no other need is at most it in every resource. A capacity that holds
@@ -273,24 +253,5 @@ mod tests {
         assert_eq!((r.placements, r.placed_cpu_milli), (1, 1000));
         let past = pack(&c, &Sample::whole(), 1000, 9).unwrap();
         assert_eq!(past.placements, 0);
-    }
-
-    /// Do whole_requests() on measured needs; expect whole cores and GiB, at least one of each, and
-    /// an overflow refused typed.
-    #[test]
-    fn whole_requests_are_whole_cores_and_gib() {
-        let c = cluster(
-            1,
-            res(8000, 8),
-            &[res(0, 0), res(1001, GIB + 1), res(2000, 2 * GIB)],
-        );
-        let d = whole_requests(&c).unwrap();
-        let needs: Vec<_> = d.workloads.iter().map(|w| w.need).collect();
-        assert_eq!(
-            needs,
-            vec![res(1000, GIB), res(2000, 2 * GIB), res(2000, 2 * GIB)]
-        );
-        let huge = cluster(1, res(8000, 8), &[res(u64::MAX, 1)]);
-        assert_eq!(whole_requests(&huge), Err(SimError::Need(WorkloadId(0))));
     }
 }

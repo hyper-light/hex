@@ -3,15 +3,18 @@
 //!
 //!   cargo bench -p hex-bench --bench sched_fast_path -- [runs] [placements]
 //!
-//! What it times is hex-sim's own fast path, for real: for each workload, the sampled best fit over
-//! the node index (`FitIndex::sampled_fit`, kube-scheduler's floors of 100 nodes or 5%), the commit
-//! by compare-and-set to the store (`Store::apply`), and the index update. Arrivals are open-loop,
-//! one every 100 us by the wall clock. A workload's latency runs from its scheduled arrival to its
-//! commit, so time spent queued behind a slow decision counts. The cluster is first filled until
-//! about 85% of its CPU is placed, untimed. Each timed arrival then retires the oldest running
-//! workload (its completion written and its capacity given back) before it is placed, so the load
-//! holds steady. Single-threaded: the in-order committer is the fast path's serial point
-//! (`docs/design/hex-sim.md` H3), so its cost per placement is what bounds throughput.
+//! What it times is hex-sim's own fast path, for real: for each microVM, Hex's sampled choice over
+//! the node index (`FitIndex::sampled_fit` with `Scorer::HEX`, kube-scheduler's floors of 100 nodes
+//! or 5%), the commit by compare-and-set to the store (`Store::apply`), and the index update. The
+//! microVMs are the recorded microVM workload's sandboxes (bench/sched/huawei-r5-day30.trace), their
+//! shapes in arrival order, from a different place in the day for each run and repeated as needed; the
+//! nodes are 10,000 of the trace's hosts (EC2 m5d.metal). Arrivals are open-loop, one every 100 us by
+//! the wall clock. A microVM's latency runs from its scheduled arrival to its commit, so time spent
+//! queued behind a slow decision counts. The cluster is first filled until about 85% of its CPU is
+//! placed, untimed. Each timed arrival then retires the oldest running microVM (its completion
+//! written and its capacity given back) before it is placed, so the load holds steady.
+//! Single-threaded: the in-order committer is the fast path's serial point (`docs/design/hex-sim.md`
+//! H3), so its cost per placement is what bounds throughput.
 // A bench (not production, CLAUDE.md): it takes the test-style allowances, as the other benches do.
 #![allow(
     clippy::unwrap_used,
@@ -28,9 +31,9 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use hex_sim::generate::{self, Shape};
-use hex_sim::index::{FitIndex, Sample};
-use hex_sim::model::{NodeId, WorkloadSpec};
+use hex_sim::index::{FitIndex, Sample, Scorer, Shapes};
+use hex_sim::model::{Cluster, Kind, NodeId, NodeSpec, Tenancy, WorkloadId, WorkloadSpec};
+use hex_sim::packing::minimal_shapes;
 use hex_sim::store::{Outcome, Store, Write};
 
 const NODES: u32 = 10_000;
@@ -43,17 +46,42 @@ struct Live {
     version: u64,
 }
 
-fn run(seed: u64, placements: usize) -> (Vec<Duration>, usize) {
-    // More workloads than will run: the fill, then one per timed placement.
-    let shape = Shape {
-        nodes: NODES,
-        workloads: (placements * 4) as u64,
-        mean_gap: 0,
-        mean_run: Some(1),
-        gpu_nodes_per_mille: 100,
-        max_share_per_mille: 250,
-    };
-    let cluster = generate::cluster(seed, &shape).unwrap();
+/// 10,000 of the recorded workload's hosts, and enough of its sandboxes for the fill and the timed
+/// placements: its shapes in arrival order from `seed`'s place in the day, repeated as needed.
+fn cluster(recorded: &Cluster, seed: u64, runs: u64, placements: usize) -> Cluster {
+    let host = recorded.nodes[0].capacity;
+    let nodes: Vec<NodeSpec> = (0..NODES)
+        .map(|i| NodeSpec {
+            id: NodeId(i),
+            capacity: host,
+            background_milli: 0,
+        })
+        .collect();
+    let mean_cpu = recorded
+        .workloads
+        .iter()
+        .map(|w| w.need.cpu_milli)
+        .sum::<u64>()
+        / recorded.workloads.len() as u64;
+    let fill = (u64::from(NODES) * host.cpu_milli * FILL_PER_MILLE / 1000 / mean_cpu) as usize;
+    // A quarter to spare for arrivals refused on the way.
+    let total = (fill + placements) * 5 / 4;
+    let from = (seed * recorded.workloads.len() as u64 / runs) as usize;
+    let workloads = (0..total)
+        .map(|i| WorkloadSpec {
+            id: WorkloadId(i as u64),
+            need: recorded.workloads[(from + i) % recorded.workloads.len()].need,
+            kind: Kind::Plain,
+            arrives: i as u64,
+            runs_for: None,
+            tenancy: Tenancy::default(),
+        })
+        .collect();
+    Cluster::single_owner(nodes, workloads)
+}
+
+fn run(recorded: &Cluster, seed: u64, runs: u64, placements: usize) -> (Vec<Duration>, usize) {
+    let cluster = cluster(recorded, seed, runs, placements);
     let mut index = FitIndex::new(&cluster.nodes).unwrap();
     let mut store = Store::new(
         &cluster.nodes,
@@ -61,7 +89,11 @@ fn run(seed: u64, placements: usize) -> (Vec<Duration>, usize) {
         cluster.workloads.len() * 3,
     )
     .unwrap();
-    let sample = Sample::default();
+    let sample = Sample {
+        scorer: Scorer::HEX,
+        shapes: Shapes::of(minimal_shapes(recorded)),
+        ..Sample::default()
+    };
     let total_cpu: u64 = cluster.nodes.iter().map(|n| n.capacity.cpu_milli).sum();
     let mut placed_cpu = 0u64;
     let mut live: VecDeque<Live> = VecDeque::new();
@@ -154,12 +186,19 @@ fn main() {
         .collect();
     let runs: u64 = args.first().and_then(|a| a.parse().ok()).unwrap_or(5);
     let placements: usize = args.get(1).and_then(|a| a.parse().ok()).unwrap_or(100_000);
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../bench/sched/huawei-r5-day30.trace"
+    ))
+    .unwrap();
+    let recorded = hex_sim::replay::parse(&text, &hex_sim::replay::Limits::default()).unwrap();
     println!(
-        "sched_fast_path: {NODES} nodes, {RATE_PER_S}/s open-loop, {placements} timed placements per run, {runs} runs"
+        "sched_fast_path: {NODES} m5d.metal nodes, the recorded microVM workload's {} sandbox shapes, {RATE_PER_S}/s open-loop, {placements} timed placements per run, {runs} runs",
+        recorded.workloads.len()
     );
     let mut best: Option<(Duration, String)> = None;
     for seed in 0..runs {
-        let (mut l, refused) = run(seed, placements);
+        let (mut l, refused) = run(&recorded, seed, runs, placements);
         l.sort_unstable();
         let us = |d: Duration| d.as_secs_f64() * 1e6;
         let (p50, p99, p999, max) = (

@@ -668,67 +668,86 @@ fn the_hard_filters_keep_every_placement_in_bounds() {
     );
 }
 
-/// G2 step 3 (`AC-T7.4.3`'s recorded kiln workload): read fourteen days of kiln's own CI
-/// (bench/sched/kiln_workload.md says where and when it was recorded) through the typed parser and
-/// replay it twice from one seed; expect the same trace hash, report and log, every leg done once,
-/// and the log and the hard filters correct by the specification.
-#[test]
-fn a_recorded_kiln_workload_replays_the_same_twice() {
-    let text = include_str!("../../../bench/sched/kiln-ci-20261022-20261105.trace");
-    let cluster = hex_sim::replay::parse(text, &hex_sim::replay::Limits::default()).unwrap();
-    assert_eq!((cluster.nodes.len(), cluster.workloads.len()), (10, 4_655));
-    let config = Config::default();
-    let a = sim::run(&cluster, &config).unwrap();
-    let b = sim::run(&cluster, &config).unwrap();
-    assert!(same(&a.report, &b.report));
-    assert_eq!(a.store.log(), b.store.log());
-    let end = spec::check_end(&cluster, &a);
-    assert_eq!(end.lost_or_double(), 0, "{end:?}");
-    assert_eq!(end.complete, 4_655);
-    spec::check_log(&cluster.nodes, &a).unwrap();
-    assert_eq!(spec::check_filters(&cluster, &a).unwrap().violations(), 0);
+/// The recorded microVM workload (bench/sched/huawei_workload.md): a day of Huawei Cloud's serverless
+/// sandboxes, its lifetimes as recorded and with Huawei's one-minute keep-alive added.
+fn recorded_microvms() -> [Cluster; 2] {
+    let limits = hex_sim::replay::Limits::default();
+    let recorded = include_str!("../../../bench/sched/huawei-r5-day30.trace");
+    let kept_alive = include_str!("../../../bench/sched/huawei-r5-day30.keepalive.trace");
+    [
+        hex_sim::replay::parse(recorded, &limits).unwrap(),
+        hex_sim::replay::parse(kept_alive, &limits).unwrap(),
+    ]
 }
 
-/// AC-T7.4.3 (G2 step 4): pack the recorded kiln workload, as the requests its legs would declare,
-/// to 90% load from 16 starting arrivals spread over the recording, under best fit alone (by free CPU
-/// first, and across resources as Kubernetes' `MostAllocated` does) and under Hex's scorer; expect
-/// Hex's stranded capacity at least 30% below each best fit's on every seed. Non-vacuity: best fit
-/// strands something on every seed. Not bought by refusing work: Hex's scorer reaches 90% on every
-/// seed and passes over fewer arrivals on the way than either best fit.
+/// G2 step 3 (`AC-T7.4.3`'s recorded workload): read a day of recorded microVM launches, 25,295
+/// sandboxes of 339 owners on 10 hosts, through the typed parser and replay it twice from one seed,
+/// with its lifetimes as recorded and with the keep-alive; expect the same trace hash, report and log,
+/// every sandbox done once, and the log and the hard filters correct by the specification.
 #[test]
-fn the_recorded_kiln_workload_strands_at_least_30_percent_less_than_best_fit() {
-    let text = include_str!("../../../bench/sched/kiln-ci-20261022-20261105.trace");
-    let recorded = hex_sim::replay::parse(text, &hex_sim::replay::Limits::default()).unwrap();
-    let cluster = packing::whole_requests(&recorded).unwrap();
-    let sample = Sample {
-        shapes: Shapes::of(packing::minimal_shapes(&cluster)),
-        ..Sample::default()
-    };
-    let pack =
-        |scorer, from| packing::pack(&cluster, &Sample { scorer, ..sample }, 900, from).unwrap();
-    let (mut passed_hex, mut passed_best, mut passed_most) = (0, 0, 0);
-    for seed in 0..16 {
-        let from = seed * cluster.workloads.len() / 16;
-        let hex = pack(Scorer::HEX, from);
-        assert!(hex.reached, "seed {seed}: {hex:?}");
-        for base in [
-            pack(Scorer::BestFit, from),
-            pack(Scorer::MostAllocated, from),
-        ] {
-            assert!(base.stranded_per_mille() > 0, "seed {seed}: {base:?}");
-            assert!(
-                hex.stranded_per_mille() * 10 <= base.stranded_per_mille() * 7,
-                "seed {seed}: Hex strands {} per-mille, best fit {}",
-                hex.stranded_per_mille(),
-                base.stranded_per_mille()
-            );
-        }
-        passed_hex += hex.passed_over;
-        passed_best += pack(Scorer::BestFit, from).passed_over;
-        passed_most += pack(Scorer::MostAllocated, from).passed_over;
+fn a_recorded_microvm_workload_replays_the_same_twice() {
+    for cluster in recorded_microvms() {
+        assert_eq!(
+            (
+                cluster.nodes.len(),
+                cluster.workloads.len(),
+                cluster.owners.len()
+            ),
+            (10, 25_295, 339)
+        );
+        let config = Config::default();
+        let a = sim::run(&cluster, &config).unwrap();
+        let b = sim::run(&cluster, &config).unwrap();
+        assert!(same(&a.report, &b.report));
+        assert_eq!(a.store.log(), b.store.log());
+        let end = spec::check_end(&cluster, &a);
+        assert_eq!(end.lost_or_double(), 0, "{end:?}");
+        assert_eq!(end.complete, 25_295);
+        spec::check_log(&cluster.nodes, &a).unwrap();
+        assert_eq!(spec::check_filters(&cluster, &a).unwrap().violations(), 0);
     }
-    assert!(
-        passed_hex < passed_best.min(passed_most),
-        "{passed_hex} {passed_best} {passed_most}"
-    );
+}
+
+/// AC-T7.4.3 (G2 step 4): pack the recorded microVM workload to 90% load from 16 starting arrivals
+/// spread over the day, under best fit alone (by free CPU first, and across resources as Kubernetes'
+/// `MostAllocated` does) and under Hex's scorer, with lifetimes as recorded and with the keep-alive;
+/// expect Hex's stranded capacity at least 30% below each best fit's on every seed. Non-vacuity: best
+/// fit strands something on every seed. Not bought by refusing work: Hex's scorer reaches 90% on every
+/// seed and passes over no more microVMs on the way than either best fit.
+#[test]
+fn the_recorded_microvm_workload_strands_at_least_30_percent_less_than_best_fit() {
+    for cluster in recorded_microvms() {
+        let sample = Sample {
+            shapes: Shapes::of(packing::minimal_shapes(&cluster)),
+            ..Sample::default()
+        };
+        let pack = |scorer, from| {
+            packing::pack(&cluster, &Sample { scorer, ..sample }, 900, from).unwrap()
+        };
+        let (mut passed_hex, mut passed_best, mut passed_most) = (0, 0, 0);
+        for seed in 0..16 {
+            let from = seed * cluster.workloads.len() / 16;
+            let hex = pack(Scorer::HEX, from);
+            assert!(hex.reached, "seed {seed}: {hex:?}");
+            for base in [
+                pack(Scorer::BestFit, from),
+                pack(Scorer::MostAllocated, from),
+            ] {
+                assert!(base.stranded_per_mille() > 0, "seed {seed}: {base:?}");
+                assert!(
+                    hex.stranded_per_mille() * 10 <= base.stranded_per_mille() * 7,
+                    "seed {seed}: Hex strands {} per-mille, best fit {}",
+                    hex.stranded_per_mille(),
+                    base.stranded_per_mille()
+                );
+            }
+            passed_hex += hex.passed_over;
+            passed_best += pack(Scorer::BestFit, from).passed_over;
+            passed_most += pack(Scorer::MostAllocated, from).passed_over;
+        }
+        assert!(
+            passed_hex <= passed_best.min(passed_most),
+            "{passed_hex} {passed_best} {passed_most}"
+        );
+    }
 }

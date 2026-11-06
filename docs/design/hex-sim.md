@@ -207,31 +207,35 @@ filter fail the test.
 **What would falsify it.** A run whose replay counts a violation. A session refused everywhere while
 some node is under 90% with room would also falsify it, and `check_log`'s `LeftPending` refuses that.
 
-### H10. The recorded kiln workload: what kiln measured, read through its API
+### H10. The recorded workload is a day of serverless sandbox launches, taken as microVM requests
 
-**The choice.** `AC-T7.4.3`'s recorded kiln workload is fourteen days of kiln's own CI
-(`bench/sched/kiln-ci-20261022-20261105.trace`), read from the running kiln's HTTP API by
-`bench/sched/kiln_export.py` and turned into the trace by `bench/sched/kiln_trace.py`. A leg's need is
-what kiln measured it using (mean cores and peak RSS), capped at the machine it ran on; a leg kiln
-didn't measure takes the median of its own job's measured legs. The nodes are the runners kiln has
-CPU and memory facts for that ran a leg. The trace's text is parsed by `replay::parse`, bounded and
-typed (`Limits`, `TraceError`).
+**The choice.** Hex's scheduler places microVMs (Ada, 2026-11-06: "Your scheduler is for *microvms*."), so
+`AC-T7.4.3`'s recorded workload is a day of sandbox launches from a production cloud: Huawei Cloud's public
+serverless traces 2025, Region 5, day 30 (`bench/sched/huawei-r5-day30.trace`, and
+`huawei-r5-day30.keepalive.trace` with Huawei's one-minute keep-alive added), converted by
+`bench/sched/huawei_trace.py` from raw files it checks by sha256. Each cold start is one sandbox; its arrival,
+lifetime (to the end of its last request, plus the keep-alive in the second trace), resource pool (millicores
+and MiB) and owner (`userID`) make one microVM request. The sandboxes are Huawei's pods, which may be
+containers, and are taken as microVM requests by shape. The nodes are EC2 m5d.metal hosts (48 cores, 384 GiB).
+The trace's text, with G4's owner fields, is parsed by `replay::parse`, bounded and typed (`Limits`,
+`TraceError`). kiln's own CI, recorded on 2026-11-05 (`bench/sched/kiln_workload.md`), is kept as a side
+measurement, not of record.
 
-**Sources.** kiln's `GET /api/runs`, `/api/runs/:id` and `/api/agents` on adacachy, exported
-2026-11-05T21:39:09Z (`bench/sched/kiln_workload.md`, with the export beside it). kiln's jobs carry no
-declared need, so its measurements are the only need on record.
+**Sources.** Joosen et al., "Serverless Cold Starts and Where to Find Them", EuroSys 2025, and its data at
+github.com/sir-lab/data-release (CC BY 4.0); its §2 for the one-minute keep-alive. Agache et al., NSDI 2020 §6
+for the m5d.metal host. `bench/sched/huawei_workload.md` gives the sources, the mapping of each field, the
+counts and why this trace over the Azure Functions traces.
 
-**Evidence.** `a_recorded_kiln_workload_replays_the_same_twice`: 4,655 legs on 10 nodes, the same hash,
-report and log twice from one seed, every leg done once, `check_log` and `check_filters` clean.
-`kiln_trace.py` run again on the committed export gives the committed trace byte for byte. The parser's
-`malformed_traces_are_refused_by_line`, `traces_past_their_bounds_are_refused` and two proptests
-(`any_text_is_read_or_refused`, `any_trace_shaped_text_is_read_or_refused`) refuse malformed,
-oversized and out-of-order text with a typed error, and none panics.
+**Evidence.** `a_recorded_microvm_workload_replays_the_same_twice`: 25,295 sandboxes of 339 owners on 10
+hosts, both traces, the same hash, report and log twice from one seed, every sandbox done once, `check_log`
+and `check_filters` clean. `huawei_trace.py` run again on the recorded raw files gives both traces byte for
+byte. The parser's `malformed_traces_are_refused_by_line`, `traces_past_their_bounds_are_refused` and its
+proptests refuse malformed, oversized and out-of-order text with a typed error, and none panics.
 
-**What would falsify it.** kiln's measurements standing far from what legs used: 26 legs measured
-more CPU than their machine has and are capped, so some measurements are wrong. A sample of legs
-re-measured on their runner that differs systematically from kiln's record would mean the trace's needs
-aren't kiln's work.
+**What would falsify it.** Hex's own microVM launches packing differently from Huawei's sandboxes: larger,
+longer, or with devices, none of which this day has. The pools' limits are taken as requests; a platform that
+packs by usage would see smaller ones. A second region or day that packs differently would bound how far this
+one stands for microVM work.
 
 ### H11. Hex packs by least stranded leftover, then least allocated
 

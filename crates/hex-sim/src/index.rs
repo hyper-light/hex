@@ -108,11 +108,11 @@ pub enum Scorer {
 }
 
 impl Scorer {
-    /// Hex's packing score: least stranded, then least allocated, so work spreads over leftovers that
-    /// stay usable rather than spending one node's memory beside its idle CPU. On the recorded kiln
-    /// workload it strands less than either best fit at 90% load on every seed, where the plan's
-    /// alignment tie and a most-allocated tie don't (hex-sim.md H11).
-    pub const HEX: Self = Self::Fragment(Tie::LeastAllocated);
+    /// Hex's packing score: least stranded, then most allocated, so what isn't stranded packs and the
+    /// nodes best fit would keep empty stay empty for large microVMs. On the recorded microVM workload
+    /// it strands nothing at 90% load on every seed, where either best fit strands most of the
+    /// cluster's memory, and it refuses no microVM on the way (hex-sim.md H11).
+    pub const HEX: Self = Self::Fragment(Tie::MostAllocated);
 }
 
 /// What ranks the nodes [`Scorer::Fragment`] finds equally stranded.
