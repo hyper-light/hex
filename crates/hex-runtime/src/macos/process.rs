@@ -579,7 +579,8 @@ impl Watcher {
             totals.written = totals.written.saturating_add(r.written_bytes);
             if life == Life::Running {
                 // Order-independent so the listing's order doesn't matter; a member and its start time, so a
-                // recycled pid shifts it.
+                // recycled pid shifts it. The multiplier is Fibonacci hashing's 2^32/phi (Knuth, TAOCP vol. 3,
+                // §6.4), which spreads consecutive pids across the word.
                 sig = sig.wrapping_add(
                     (u64::try_from(pid).unwrap_or(0))
                         .wrapping_mul(0x9e37_79b9)

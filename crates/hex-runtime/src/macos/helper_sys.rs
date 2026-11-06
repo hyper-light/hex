@@ -135,6 +135,8 @@ struct ExcMessage {
     exception: c_int,
     code_count: c_uint,
     code: [i64; 2],
+    /// Room for the largest trailer the kernel appends: `MAX_TRAILER_SIZE`, `sizeof(mach_msg_max_trailer_t)`,
+    /// 68 bytes (macOS SDK `mach/message.h:563-564`; measured on studio-2, macOS 26.2).
     trailer: [u8; 68],
 }
 
