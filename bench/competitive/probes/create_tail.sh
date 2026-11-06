@@ -3,7 +3,7 @@
 # create_tail_inside.sh in a container with host.sh's OCI-pass flags, on the given binaries, and beside it a reader
 # container on READER_CPUS (16-31) that streams the run's trace instance to $OUT/trace.txt, so the reading takes no
 # CPU from the pinned run. Then create_tail.py reads it. On fedora:
-#   [HEXBENCH_OWNER=<owner>] [HEXBENCH_PARKED_PROCS=1] [HEXBENCH_DOCKER_CAPS=1] [N=10000] [ROUNDS=1] create_tail.sh <hex release binary> <seam_oci release binary>
+#   [HEXBENCH_OWNER=<owner>] [HEXBENCH_PARKED_PROCS=1] [N=10000] [ROUNDS=1] create_tail.sh <hex release binary> <seam_oci release binary>
 # Not a timed pass: the tracer costs each switch and wake-up some; what it reads is where the slow calls wait.
 # BENCH_MEMORY and BENCH_OOM set the container's --memory (40g) and --oom-score-adj (none) on a shared host.
 set -euo pipefail
@@ -64,7 +64,7 @@ echo "host at start: $(mounts_now)" >> "$OUT/env.txt"
 timeout 7200 docker run --rm --name "$NAME" "${BENCH_LABELS[@]}" --cpuset-cpus="${CPUSET:-4-15}" --memory="${BENCH_MEMORY:-40g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
   --privileged --security-opt label=disable --cgroupns=private --network=none --tmpfs /run:rw,exec,nosuid,size=1g \
   -v /usr:/usr:ro -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
-  -e N -e WARMUP -e ROUNDS -e TRACE_TAG -e HEXBENCH_OWNER -e HEXBENCH_PARKED_PROCS -e HEXBENCH_DOCKER_CAPS -e HEXBENCH_BOX_MEMORY \
+  -e N -e WARMUP -e ROUNDS -e TRACE_TAG -e HEXBENCH_OWNER -e HEXBENCH_PARKED_PROCS \
   registry.fedoraproject.org/fedora:44 bash /opt/lab/probes/create_tail_inside.sh 2>&1 | tee "$OUT/probe.out"
 timeout 600 docker wait "$READER" >/dev/null 2>&1 || true
 { echo "host at end: $(mounts_now)"; echo "load at end: $(cat /proc/loadavg)"

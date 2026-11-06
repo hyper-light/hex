@@ -26,7 +26,7 @@ CSSF="o_mem:mem_cgroup_css_offline o_cpu:cpu_cgroup_css_offline o_blk:blkcg_css_
 # /proc/sys read-only, so a box's cgroup and network namespace may be handed to the owner's next box).
 ALL_NS='[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"}]'
 CAPS='["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FSETID","CAP_FOWNER","CAP_MKNOD","CAP_NET_RAW","CAP_SETGID","CAP_SETUID","CAP_SETFCAP","CAP_SETPCAP","CAP_NET_BIND_SERVICE","CAP_SYS_CHROOT","CAP_KILL","CAP_AUDIT_WRITE"]'
-PROC_CAPS=""; [ -n "${HEXBENCH_OWNER:-}${HEXBENCH_DOCKER_CAPS:-}" ] && PROC_CAPS=",\"capabilities\":{\"bounding\":$CAPS,\"effective\":$CAPS,\"permitted\":$CAPS}"
+PROC_CAPS=""; [ -n "${HEXBENCH_OWNER:-}" ] && PROC_CAPS=",\"capabilities\":{\"bounding\":$CAPS,\"effective\":$CAPS,\"permitted\":$CAPS}"
 RO_PATHS=""; [ -n "${HEXBENCH_OWNER:-}" ] && RO_PATHS=',"readonlyPaths":["/proc/sys"]'
 bundle() { # bundle <dir> <args json>
   local B=$1; mkdir -p "$B/rootfs"/{usr,proc,dev,tmp}
@@ -114,7 +114,7 @@ mkdir -p /run/tailmark; : > /run/tailmark/tracing_on; ln -sfn "$I/trace_marker" 
 { echo "inside: date $(date -u +%FT%TZ), kernel $(uname -r), load $(cat /proc/loadavg)"
   echo "inside: cpus allowed $(sed -n 's/^Cpus_allowed_list:\t*//p' /proc/self/status)"
   echo "inside: the cgroup root's subtree_control: $(cat /sys/fs/cgroup/cgroup.subtree_control)"
-  echo "params: N=$N WARMUP=$WARMUP ROUNDS=$ROUNDS owner=${HEXBENCH_OWNER:-none} parked_procs=${HEXBENCH_PARKED_PROCS:-unset} docker_caps=${HEXBENCH_DOCKER_CAPS:-unset} box_memory=${HEXBENCH_BOX_MEMORY:-256m}"
+  echo "params: N=$N WARMUP=$WARMUP ROUNDS=$ROUNDS owner=${HEXBENCH_OWNER:-none} parked_procs=${HEXBENCH_PARKED_PROCS:-unset}"
 } >> "$OUT/env.txt"
 
 # The reader container (create_tail.sh) waits for this file, then streams the instance; this waits for its word.

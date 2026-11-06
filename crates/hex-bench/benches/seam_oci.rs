@@ -11,8 +11,8 @@
 //! - `sustained`: the throughput lifecycle at concurrency 32 for `HEXBENCH_SUSTAINED` of them
 //!   (10,000), its rate in each window of 1,000 and the last window's against the first's;
 //! - `interleaved`, run only when `HEXBENCH_PHASES` names it: concurrency 1 and 32 in turn,
-//!   `HEXBENCH_INTERLEAVED` pairs of turns (unset, until the ratio is resolved against the 8x bar, 10 to 40
-//!   pairs; the runs of record ran 10), 500 lifecycles at 1 then 4,000 at 32 in each, so the two
+//!   pairs of turns until the ratio is resolved against the 8x bar, 10 to 40 pairs (the runs of record before
+//!   Ada's 2026-11-06 rule ran a fixed 10), 500 lifecycles at 1 then 4,000 at 32 in each, so the two
 //!   meet the host as it is at that moment, its load included: each pair's rates and their ratio, and the
 //!   ratio of the pooled rates (the lead, 2026-11-03T06:01Z, for goal 5 extended step 6's second
 //!   criterion). `HEXBENCH_INTERLEAVED_CPUS1` and `HEXBENCH_INTERLEAVED_CPUS32` (CPU lists, `4-15`) pin
@@ -45,15 +45,9 @@
 //! runs in the OCI pass's privileged container, where the cgroup root is vacated to a leaf and its
 //! controllers handed down, as oci_inside.sh leaves it; off that it refuses, naming why.
 //! In process it reads the node's ipc and uts namespace counts the same way (`Node::ipc_uts`, goal 5 extended
-//! step 4), and HEXBENCH_IPCUTS=0 drains that pool (bound 0), so a run can time creates with it and without it. The
-//! `ipc_uts_pairs` phase, run only when named, in process: the lifecycle on a node with the pool and one with it
-//! drained, interleaved one by one, the first of each pair alternating, so a pair meets one host and a difference
-//! of a percent or two shows under other tenants' load; create, start, exec and delete each, so work that moved
-//! from one to another shows too.
+//! step 4).
 //! HEXBENCH_TRACE turns on the breakdown probes' markers, around the ops HEXBENCH_TRACE_OPS
 //! names (`Trace`, bench/competitive/probes/exec_breakdown.md and create_breakdown.md).
-//! HEXBENCH_AHEAD is how many cgroups the node makes ahead for boxes of no owner, each with an init parked in it
-//! (decision 8, "The p99.9 that stayed"), the node's default (learned from its draws, from the host's parallelism up) unless set; 0 makes none.
 //! HEXBENCH_PARKED_PROCS=1 has each parked init's proc made with it and 0 has none made (decision 8, parked procs;
 //! unset, the node's default, on for a root node), in process and in the socket driver's `hex node`
 //! (`--parked-procs`). In process the phase's `parked` counts say how many were made, taken by their create (hits),
@@ -119,12 +113,12 @@ mod linux {
     /// The bar the interleaved phase's ratio is read against: concurrency 32 at 8x concurrency 1 a minimum (goal 5
     /// extended step 6's second criterion, Ada via the lead, 2026-11-03; reuse_pass.md, run 6).
     const INTERLEAVED_BAR: f64 = 8.0;
-    /// Unless `HEXBENCH_INTERLEAVED` names a count of pairs, a round runs pairs until the mean of their ratios is
-    /// resolved against [`INTERLEAVED_BAR`]: the bar outside the mean's two-sided 95% interval, `z` the normal
+    /// A round runs pairs until the mean of their ratios is resolved against [`INTERLEAVED_BAR`]: the bar outside the mean's two-sided 95% interval, `z` the normal
     /// quantile 1.96, its standard error the pairs' over the square root of their count. A fixed count left
     /// rounds unresolved: step 6 alone read 7.80x (SE 0.41) over 20 pairs (reuse_pass.md, 20261103T170834Z),
-    /// over the socket, the bar inside its interval. Ada's 2026-11-06 rule; it takes effect for runs after it, and the runs of
-    /// record, 10 pairs a round, are run again as they were with `HEXBENCH_INTERLEAVED=10`.
+    /// over the socket, the bar inside its interval. Ada's 2026-11-06 rule; it takes effect for runs after it. The fixed
+    /// count's knob is gone with it (Ada's 2026-11-06 rule on legacy paths): the runs of record that ran 10 pairs stay
+    /// records of the build that made them.
     const RESOLVED_Z: f64 = 1.96;
     /// The fewest pairs a resolved round holds: the fewest a record pooled (reuse_pass.md, run 6's socket row of
     /// 20261103T064217Z, 10 pairs), so the standard error is never read from fewer than a record was.
@@ -132,15 +126,6 @@ mod linux {
     /// The most pairs a round runs before it stops unresolved, and says so: the most a record pooled for one binary
     /// (reuse_pass.md, runs 9, 11 and 12, 40 pairs each). Past it no record shows what more pairs resolve.
     const INTERLEAVED_MOST: usize = 40;
-
-    /// How many interleaved pairs a round runs.
-    #[derive(Clone, Copy)]
-    enum Pairs {
-        /// As many as `HEXBENCH_INTERLEAVED` names, as the runs of record ran.
-        Fixed(usize),
-        /// Until the ratio is resolved against the bar, between [`INTERLEAVED_FEWEST`] and [`INTERLEAVED_MOST`].
-        UntilResolved,
-    }
 
     /// Whether the mean of `ratios` is resolved against [`INTERLEAVED_BAR`]: the bar outside its two-sided 95%
     /// interval.
@@ -156,15 +141,12 @@ mod linux {
 
     /// oci_bench.py's bundles bound every container to nothing of their own; the node bounds each box
     /// the way the competitive pass's do, so the comparison is like for like: the kernel's floor plus
-    /// the workload, not an unbounded cgroup. HEXBENCH_BOX_MEMORY=none leaves the memory bound off, for an
-    /// A/B of what only boxes without one take (goal16_ab.md's lever 4); a figure so made isn't the bar's.
+    /// the workload, not an unbounded cgroup: 256 MiB, the bar's bound. Goal 16's lever 4 (boxes with no memory
+    /// bound) was recorded negative (docs/research/runtime/goal16-teardown.md), so its knob is gone (Ada's 2026-11-06
+    /// rule on legacy paths).
     fn bounds() -> Bounds {
-        let memory_max = match std::env::var("HEXBENCH_BOX_MEMORY").as_deref() {
-            Ok("none") => None,
-            _ => Some(256 << 20),
-        };
         Bounds {
-            memory_max,
+            memory_max: Some(256 << 20),
             pids_max: Some(256),
             ..Bounds::default()
         }
@@ -334,59 +316,6 @@ mod linux {
         start: Vec<f64>,
         exec: Vec<f64>,
         delete: Vec<f64>,
-    }
-
-    /// The p50, the p99 and, against `other`'s lifecycles in the same pairs, the median difference of one operation.
-    fn paired(on: &[f64], drained: &[f64]) -> Value {
-        let at = |sorted: &[f64], pct: usize| sorted[(sorted.len() - 1) * pct / 100];
-        let sorted = |v: &[f64]| {
-            let mut v = v.to_vec();
-            v.sort_by(f64::total_cmp);
-            v
-        };
-        let (a, b) = (sorted(on), sorted(drained));
-        let diffs: Vec<f64> = on.iter().zip(drained).map(|(x, y)| x - y).collect();
-        let faster = diffs.iter().filter(|d| **d < 0.0).count();
-        json!({"on_p50": at(&a, 50), "drained_p50": at(&b, 50), "on_p99": at(&a, 99), "drained_p99": at(&b, 99),
-               "median_difference": at(&sorted(&diffs), 50), "on_faster": faster as f64 / diffs.len() as f64})
-    }
-
-    /// The `ipc_uts_pairs` phase (goal 5 extended, step 4): the module's header says what it times. `on` is the node
-    /// under test, with the pool; the drained node is made here beside it, with its own box root and state.
-    fn ipc_uts_pairs(
-        on: &dyn Runtime,
-        parent: &Path,
-        hex: &str,
-        bundle: &Path,
-        n: usize,
-        warmup: usize,
-    ) -> Result<Value, String> {
-        let state = tempfile::tempdir().map_err(|e| e.to_string())?;
-        let drained = Node::open(
-            &parent.join("hex-oci-seam-drained"),
-            state.path(),
-            state.path(),
-        )
-        .map_err(|e| e.to_string())?
-        .with_oci_helper(PathBuf::from(hex))
-        .with_ipc_uts_bound(0)
-        .map_err(|e| e.to_string())?;
-        let (mut a, mut b) = (Ops::default(), Ops::default());
-        for i in 0..n + warmup {
-            let timed = i >= warmup;
-            let first_on = i % 2 == 0;
-            for with_pool in [first_on, !first_on] {
-                if with_pool {
-                    lifecycle_once(on, bundle, &format!("pa{i}"), &mut a, timed, None)?;
-                } else {
-                    lifecycle_once(&drained, bundle, &format!("pd{i}"), &mut b, timed, None)?;
-                }
-            }
-        }
-        Ok(
-            json!({"pairs": n, "create": paired(&a.create, &b.create), "start": paired(&a.start, &b.start),
-                  "exec": paired(&a.exec, &b.exec), "delete": paired(&a.delete, &b.delete)}),
-        )
     }
 
     /// n timed lifecycles after `warmup` untimed ones, each operation timed alone, its boxes named
@@ -663,19 +592,15 @@ mod linux {
         json!({"load1": load1, "cpu_some_avg10": cpu_some_avg10})
     }
 
-    /// Concurrency 1 and [`SUSTAINED_CONCURRENCY`] in turn, as many times as `pairs` says: [`INTERLEAVED_C1`]
+    /// Concurrency 1 and [`SUSTAINED_CONCURRENCY`] in turn, until the ratio is resolved against the bar
+    /// ([`INTERLEAVED_FEWEST`] to [`INTERLEAVED_MOST`] pairs): [`INTERLEAVED_C1`]
     /// lifecycles at 1, then [`INTERLEAVED_C32`] at 32, as the sustained phase runs them, so both meet the host as it
     /// is then. Each pair's rates and their ratio, with the host's load and CPU pressure at its start and end
     /// and each half's CPU, per lifecycle and as the CPUs it kept busy on average (the agent and its boxes,
     /// `own`'s cpu.stat): whether concurrency 32 is held by the CPUs it has or by waiting. And the ratio of
-    /// the pooled rates, each concurrency's lifecycles over its time, and why the round stopped (`fixed`,
-    /// `resolved` against the bar, or `unresolved` at the most pairs).
-    fn interleaved(
-        node: &dyn Runtime,
-        bundle: &Path,
-        own: &Path,
-        pairs: Pairs,
-    ) -> Result<Value, String> {
+    /// the pooled rates, each concurrency's lifecycles over its time, and why the round stopped (`resolved`
+    /// against the bar, or `unresolved` at the most pairs).
+    fn interleaved(node: &dyn Runtime, bundle: &Path, own: &Path) -> Result<Value, String> {
         let (cpus1, cpus32) = (
             cpu_list("HEXBENCH_INTERLEAVED_CPUS1"),
             cpu_list("HEXBENCH_INTERLEAVED_CPUS32"),
@@ -687,17 +612,9 @@ mod linux {
         };
         let (mut rows, mut ratios) = (Vec::new(), Vec::new());
         let (mut one_s, mut many_s) = (0.0, 0.0);
-        let most = match pairs {
-            Pairs::Fixed(n) => n,
-            Pairs::UntilResolved => INTERLEAVED_MOST,
-        };
-        let mut stopped = match pairs {
-            Pairs::Fixed(_) => "fixed",
-            Pairs::UntilResolved => "unresolved",
-        };
-        for p in 0..most {
-            if matches!(pairs, Pairs::UntilResolved) && p >= INTERLEAVED_FEWEST && resolved(&ratios)
-            {
+        let mut stopped = "unresolved";
+        for p in 0..INTERLEAVED_MOST {
+            if p >= INTERLEAVED_FEWEST && resolved(&ratios) {
                 stopped = "resolved";
                 break;
             }
@@ -736,7 +653,7 @@ mod linux {
         if cpus1.is_some() || cpus32.is_some() {
             pin(&started_on)?;
         }
-        if matches!(pairs, Pairs::UntilResolved) && resolved(&ratios) {
+        if resolved(&ratios) {
             stopped = "resolved";
         }
         ratios.sort_by(f64::total_cmp);
@@ -1031,7 +948,7 @@ mod linux {
 
     /// A `hex node` serving its socket for the socket driver, its boxes under `box_root`; ended with SIGTERM
     /// ([`Agent::end`]), else killed when dropped. It takes HEX_OCI_MNTNS and HEXBENCH_PARKED_PROCS
-    /// (`--parked-procs`): HEXBENCH_DEVFS, _PROCFS, _AHEAD and _IPCUTS set only the in-process node, and it raises its
+    /// (`--parked-procs`): HEXBENCH_DEVFS and _PROCFS set only the in-process node, and it raises its
     /// soft descriptor limit to the hard one as it starts, undoing HEXBENCH_NOFILE's `ulimit -Sn`; so an A/B of any of
     /// those reads the in-process figures, never the socket's. Its stderr is passed on as it comes and kept.
     struct Agent {
@@ -1419,16 +1336,6 @@ mod linux {
                     .parse()
                     .unwrap_or_else(|e| panic!("HEXBENCH_SUSTAINED={v:?}: {e}"))
             });
-        let interleaved_pairs = std::env::var("HEXBENCH_INTERLEAVED")
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .map_or(Pairs::UntilResolved, |v| {
-                Pairs::Fixed(
-                    v.trim()
-                        .parse()
-                        .unwrap_or_else(|e| panic!("HEXBENCH_INTERLEAVED={v:?}: {e}")),
-                )
-            });
         let (sleep_bundle, true_bundle) = (PathBuf::from(sleep_bundle), PathBuf::from(true_bundle));
         // HEXBENCH_REUSE=0: the owner opts out of reuse, its boxes and bundles otherwise as with reuse on, so
         // a pass with it off differs from one with it on in that alone.
@@ -1496,22 +1403,6 @@ mod linux {
                     .unwrap_or_else(|e| panic!("parked procs: {e}")),
                 None => node,
             };
-            // Cgroups made ahead for boxes of no owner, each with an init in it (decision 8): the node's default,
-            // as it ships, unless HEXBENCH_AHEAD says.
-            let node = match std::env::var("HEXBENCH_AHEAD") {
-                Ok(v) => node.with_inits_ahead(
-                    v.trim()
-                        .parse()
-                        .unwrap_or_else(|e| panic!("HEXBENCH_AHEAD={v:?}: {e}")),
-                ),
-                Err(_) => node,
-            };
-            let node = match std::env::var("HEXBENCH_IPCUTS").as_deref() {
-                Ok("0") => node
-                    .with_ipc_uts_bound(0)
-                    .unwrap_or_else(|e| panic!("draining the ipc and uts pool: {e}")),
-                _ => node,
-            };
             Driver::InProcess(Box::new(node))
         };
         let node = driver.runtime();
@@ -1531,7 +1422,6 @@ mod linux {
             "sustained",
             "interleaved",
             "rtt",
-            "ipc_uts_pairs",
             "list",
         ] {
             if !wanted.split_whitespace().any(|w| w == phase) {
@@ -1557,8 +1447,7 @@ mod linux {
                     "start_true" => start_true(node, &true_bundle, n, warmup),
                     "throughput" => throughput(node, &true_bundle, &parent, lifecycles),
                     "sustained" => sustained(node, &true_bundle, &parent, sustained_lifecycles),
-                    "interleaved" => interleaved(node, &true_bundle, &parent, interleaved_pairs),
-                    "ipc_uts_pairs" => ipc_uts_pairs(node, &parent, hex, &sleep_bundle, n, warmup),
+                    "interleaved" => interleaved(node, &true_bundle, &parent),
                     "list" => list(node, &sleep_bundle, n),
                     _ => rtt(node, &sleep_bundle, n, warmup),
                 }?;

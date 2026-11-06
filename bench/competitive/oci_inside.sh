@@ -27,10 +27,9 @@ echo "descriptor limit: soft $(ulimit -Sn), hard $(ulimit -Hn) (HEXBENCH_NOFILE=
 
 ALL_NS='[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"}]'
 [ "${NETNS:-1}" = 0 ] && ALL_NS='[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}]'
-# Docker's default capabilities (moby's oci/caps/defaults.go), given every set when HEXBENCH_OWNER names an owner, or
-# when HEXBENCH_DOCKER_CAPS is set, for boxes of no owner that must not count as privileged (goal16_ab.md's lever 4 A/B).
+# Docker's default capabilities (moby's oci/caps/defaults.go), given every set when HEXBENCH_OWNER names an owner.
 CAPS='["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FSETID","CAP_FOWNER","CAP_MKNOD","CAP_NET_RAW","CAP_SETGID","CAP_SETUID","CAP_SETFCAP","CAP_SETPCAP","CAP_NET_BIND_SERVICE","CAP_SYS_CHROOT","CAP_KILL","CAP_AUDIT_WRITE"]'
-PROC_CAPS=""; [ -n "${HEXBENCH_OWNER:-}${HEXBENCH_DOCKER_CAPS:-}" ] && PROC_CAPS=",\"capabilities\":{\"bounding\":$CAPS,\"effective\":$CAPS,\"permitted\":$CAPS}"
+PROC_CAPS=""; [ -n "${HEXBENCH_OWNER:-}" ] && PROC_CAPS=",\"capabilities\":{\"bounding\":$CAPS,\"effective\":$CAPS,\"permitted\":$CAPS}"
 # With an owner, /proc/sys is read-only too, as Docker's default readonlyPaths make it, so a box may share its
 # owner's network namespaces (goal 5 extended, step 6: it could then change none of its namespace's sysctls).
 RO_PATHS=""; [ -n "${HEXBENCH_OWNER:-}" ] && RO_PATHS=',"readonlyPaths":["/proc/sys"]'

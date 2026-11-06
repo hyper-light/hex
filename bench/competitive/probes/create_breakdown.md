@@ -970,7 +970,8 @@ So it stays on `cp/t7-ext-s3-maskpool`. Every cell, the pairs, the trace and the
 
 ## The ipc and uts namespaces made ahead: the pool on against drained (goal 5 extended plan step 4)
 
-`IPCUTS_AB=1` adds, to every round, the seam and traced items again on a node whose ipc and uts pool is drained
+(A record of the build that ran it: `IPCUTS_AB`, seam_oci's `HEXBENCH_IPCUTS` and its `ipc_uts_pairs` phase are gone since
+the A/B decided the pool on, by Ada's 2026-11-06 rule on legacy paths.) `IPCUTS_AB=1` added, to every round, the seam and traced items again on a node whose ipc and uts pool is drained
 (`seam_drained`, `traced_drained`: seam_oci's `HEXBENCH_IPCUTS=0`), and `pairs`, seam_oci's `ipc_uts_pairs` phase: the
 lifecycle on a node with the pool and one with it drained, interleaved one by one, the first of each pair alternating.
 All on fedora, Linux 6.19.10, `CPUSET=4-15`, N=1000, WARMUP=100, `LOAD_GATE=0` with Focal's and others' containers up
