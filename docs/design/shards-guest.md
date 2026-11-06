@@ -1,7 +1,7 @@
 # Decision (proposed 2026-11-04): Linux images on macOS and Windows run in one Shards guest per node
 
 Native plan step 5 (kiln plan `01a194669ce477718e3b3b8c7be44138`). Status: **proposed; the seam (§2) agreed with
-Shards' owner 2026-11-04** (CLAUDE.md §9), its crate to be drafted by Hex as a pull request Shards reviews.
+Shards' owner 2026-11-04; §4 amended and §4a added 2026-11-06** (CLAUDE.md §9), its crate to be drafted by Hex as a pull request Shards reviews.
 
 Sources: `docs/research/runtime/shards-guest.md` (what Shards offers, at `hyper-light/shards` `b3e5ca27`),
 `docs/research/runtime/native-platforms.md` §1 and §4 (why a Linux image needs a Linux kernel; Shards' backends),
@@ -119,9 +119,39 @@ The node agent's socket is `SOCK_SEQPACKET` and carries an exec's stdio as `SCM_
 - Kernel: Shards' pinned 6.18.48 (`shards-guest.md` §5), which has every option the class needs.
 - PID 1: Hex's own static `hex` binary as the generated initramfs's init (`GuestSpec::init`), which mounts `/proc`,
   `/sys`, cgroup2, `devtmpfs` and a tmpfs `/run`, and starts the node agent and the relay.
-- A disk (ext4) for the node's record and image store, so a guest's boxes survive a relay or node restart as on a
-  Linux host.
+- No disk (amended 2026-11-06): the node's record, its runtime directory and the staged bundles (§4a) live on the
+  guest's tmpfs, charged to the guest's memory, which the node's budget holds (§1). What the record is for is a
+  node's or relay's restart, which tmpfs survives; a guest's own reboot ends every box in it, so a disk would keep
+  only records of boxes that no longer exist. Falsified if a guest must keep boxes across its own reboot (it
+  can't: their processes are gone) or if staged images outgrow the guest's memory budget: then a disk, as first
+  written, holds the store.
 - Its build is a script in `scripts/`, its outputs' SHA-256 recorded in `bench/native/guest/`.
+
+## 4a. Host paths: staged into the guest, never shared live
+
+A box's spec names host paths: a bundle's directory, its `root.path`, a `Rootfs::Dir` or its layers, and each
+bind mount's source. The guest can't see them: Shards' plain `shards run` takes disks and a vsock and no host
+folder (`crates/shards/src/vm_run.rs:388-410`: `--shares N` makes slots its daemon fills, and `--slates-fs-fd`
+takes a share another server serves in that device's framing, D38), and the seam (§2) has no share. So:
+
+- **The host stages each path into the guest before create**, over a third vsock port (`stream::FILES_PORT`): a
+  bounded stream of entries (directories, regular files with their bytes, symlinks as their target text, each with
+  its mode), which the relay unpacks under the guest's `/run/hex/staged/<box id>/` through `RESOLVE_IN_ROOT`,
+  refusing an absolute or `..` name, a device node, a FIFO or a socket by name, and every count past its bound
+  (entries, bytes, path length; CLAUDE.md §2). Its framing is a sans-IO core in `hex_core::stream` beside the
+  channel's (CLAUDE.md §9), with hostile-input tests (§6).
+- **The host rewrites the spec to the staged paths**: a bundle's `config.json` gets `root.path` and each bind
+  mount's `source` pointed at their staged copies; an `OciSpec`'s `rootfs` and mounts the same. A non-bind mount
+  (`proc`, `tmpfs`, …) names no host path and passes unchanged; hooks run in the guest's runtime namespace, so
+  their paths are the guest's.
+- **A writable bind mount of a host path is refused by name** (`Refusal::Unsupported`, naming the mount's
+  destination and that Shards' plain run shares no host folder): a copy would drop the container's writes to
+  it, which CLAUDE.md §3 forbids. Read-only bind mounts are equivalent as copies taken at create.
+- The staged copy is deleted with its box.
+
+Falsified, and replaced by a live share, when `shards-api` offers one (a Shards share the host serves): then the
+staging port goes and writable mounts pass. The copy per create is a cost to measure against a Linux host's
+create on the same image (§7).
 
 ## 5. Where Shards has no backend
 
@@ -148,6 +178,8 @@ Hex's tests of the channel, each citing its ID:
 
 ## 7. What would falsify it
 
+- A create's staging copy (§4a) costing more than the `oci` class's own create on the same image, measured in the
+  guest: then the host keeps a content-addressed store of staged layers in the guest and sends only what's new.
 - Shards' owner choosing another seam (§2): the routing (§1) and channel (§3) stand; the implementation changes.
 - A copy per stdio byte in the relay measurably slowing a program's output against a Linux host's: then the relay
   splices (`splice(2)`) between the socket and the pipe instead of copying.
