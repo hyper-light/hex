@@ -7,8 +7,10 @@
 //!   macos_box [passes]           both measurements, `passes` times each (default 3)
 //!   macos_box readcost [passes]  the watcher's read-cost curve: CPU against reads a second, by box size
 //!   macos_box events [passes]    the most events one kqueue wait takes, by box size
-//!   macos_box fill [passes]      a box's worst aggregate growth: one member per core filling memory, and
-//!                                one member per core spawning, all at once
+//!   macos_box fill [passes]      a box's worst aggregate growth: one, two and four members per core
+//!                                filling memory, and spawning, all at once
+//!   macos_box lateness [passes]  how late the watcher's timer wakes, with no load and with one, two and
+//!                                four members per core churning fresh memory
 //!
 //! `readcost` and `events` size the watcher's ceiling and its event batch (the lead's calls 1 and 2,
 //! 2026-11-06, under Ada's rule): each drives the watcher's own calls (`hex_runtime::macos::sys`) on a group
@@ -47,9 +49,9 @@ mod macos {
     use std::time::{Duration, Instant};
 
     use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Program, Runtime, Stdio};
-    use hex_core::watch::RECORDED;
-    use hex_runtime::macos::MacRuntime;
+    use hex_core::watch::{RECORDED, seed};
     use hex_runtime::macos::sys;
+    use hex_runtime::macos::{MacRuntime, machine_model};
 
     const MIB: u64 = 1 << 20;
     const GIB: u64 = 1 << 30;
@@ -76,10 +78,12 @@ mod macos {
         hex
     }
 
-    /// A runtime reckoning the recorded worst aggregate growth (`hex_core::watch::RECORDED`), so each box
-    /// is read before it can pass its bound by the 64 MiB bar, every member filling at once.
+    /// A runtime seeded, as a node is, with its machine class's recorded worst aggregate growth
+    /// (`hex_core::watch::seed` of this Mac's `hw.model`), so each box is read before it can pass its bound
+    /// by the 64 MiB bar, every member filling at once.
     fn runtime() -> MacRuntime {
-        MacRuntime::new(RECORDED.bytes, RECORDED.processes).expect("a macOS runtime")
+        let rates = seed(&machine_model().expect("this Mac's model"));
+        MacRuntime::new(rates.bytes, rates.processes).expect("a macOS runtime")
     }
 
     fn member(hex: &Path, act: &[&str]) -> Program {
@@ -128,6 +132,13 @@ mod macos {
         };
         rt.delete(&id).expect("delete");
         drop(procs);
+        let (rates, early) = rt.pacing().expect("pacing");
+        println!(
+            "  pacing members={members} bytes_per_s={} spawns_per_s={} early_us={}",
+            rates.bytes,
+            rates.processes,
+            early.as_micros()
+        );
         peak.saturating_sub(BOUND)
     }
 
@@ -169,7 +180,9 @@ mod macos {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let u = rt.usage(&id).expect("usage");
-            if u.memory_bytes >= hold / 100 * 99 {
+            // Held, or ended by the watcher (the members' baseline took it past the bound): measured either
+            // way, and marked held=false.
+            if u.memory_bytes >= hold / 100 * 99 || u.oom_kills >= 1 {
                 break;
             }
             assert!(
@@ -182,6 +195,13 @@ mod macos {
         std::thread::park_timeout(Duration::from_secs(secs));
         let cpu = sys::process_cpu().expect("process cpu").saturating_sub(c0);
         let held = rt.usage(&id).expect("usage").oom_kills == 0;
+        let (rates, early) = rt.pacing().expect("pacing");
+        println!(
+            "  pacing members={members} hold_pct_of_bound={percent} bytes_per_s={} spawns_per_s={} early_us={}",
+            rates.bytes,
+            rates.processes,
+            early.as_micros()
+        );
         rt.delete(&id).expect("delete");
         (cpu.as_secs_f64() / secs as f64 * 100.0, held)
     }
@@ -311,12 +331,102 @@ mod macos {
     const FILL_BYTES: u64 = BOUND;
     /// How many `true`s one spawn member starts, one after another: step 7's growth record's n (20).
     const SPAWNS: usize = 20;
+    /// What a churn member fills and frees each round: the bar's 64 MiB, a box's worth of overshoot.
+    const CHURN_BYTES: u64 = 64 * MIB;
+    /// Timer samples a lateness pass takes at each pace.
+    const LATE_SAMPLES: usize = 300;
+
+    /// How late the watcher's wake comes, as the watcher wakes and reads: on a time-constraint thread, a
+    /// one-shot `NOTE_CRITICAL` timer, then the group of `churners` members read (its listing and each one's
+    /// rusage), the members churning fresh memory meanwhile: `LATE_SAMPLES` wakes at each of the headroom
+    /// paces a 256 MiB box reads at under `hex_core::watch::RECORDED` (at its bound, half full, empty). A
+    /// wake's lateness is the time past its timer to the end of its read, which is when the next wait is
+    /// armed. Returns every lateness, in nanoseconds.
+    fn lateness(churners: usize) -> Vec<u64> {
+        let me = std::env::current_exe().expect("current exe");
+        let mut pgid = 0;
+        let mut kids: Vec<Child> = Vec::new();
+        for _ in 0..churners {
+            let child = Command::new(&me)
+                .arg("churn-member")
+                .stdin(Piped::piped())
+                .stdout(Piped::null())
+                .stderr(Piped::inherit())
+                .process_group(pgid)
+                .spawn()
+                .expect("spawn a churner");
+            if pgid == 0 {
+                pgid = i32::try_from(child.id()).unwrap();
+            }
+            kids.push(child);
+        }
+        let late = std::thread::spawn(move || {
+            let tb = sys::Timebase::get().expect("timebase");
+            let _ = sys::time_constraint(
+                &tb,
+                Duration::from_micros(250),
+                Duration::from_micros(150),
+                Duration::from_micros(250),
+            );
+            let kq = sys::Kqueue::new().expect("kqueue");
+            let mut events = Vec::new();
+            let mut late = Vec::new();
+            let mut pids = sys::listing().expect("listing");
+            for headroom in [64 * MIB, 192 * MIB, 320 * MIB] {
+                let pace = hex_core::watch::wait(headroom, RECORDED.bytes);
+                for _ in 0..LATE_SAMPLES {
+                    let t = Instant::now();
+                    kq.wait(Some(pace), None, &mut events).expect("wait");
+                    if pgid != 0 {
+                        sys::group(pgid, &mut pids).expect("group");
+                        for &pid in &pids {
+                            let _ = sys::rusage(pid).expect("rusage");
+                        }
+                    }
+                    let ns = u64::try_from(t.elapsed().saturating_sub(pace).as_nanos()).unwrap();
+                    late.push(ns);
+                }
+            }
+            late
+        })
+        .join()
+        .expect("the timer thread");
+        for k in &mut kids {
+            drop(k.stdin.take());
+        }
+        for k in &mut kids {
+            let _ = k.wait();
+        }
+        late
+    }
 
     /// A member of the `fill` pass, run as this bench's own child: waits for the go byte on stdin, then
     /// either fills `FILL_BYTES` of fresh memory with an incompressible xorshift stream a u64 at a time (as
     /// step 7's native_box measures one member's fill) or spawns and reaps `/usr/bin/true` `SPAWNS` times,
     /// and prints what it did and its own elapsed nanoseconds.
     fn member_main(what: &str) {
+        if what == "churn-member" {
+            // Fresh memory, filled and freed, round after round, until stdin closes: the page-faulting load
+            // a box of hogs puts on the machine.
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            std::thread::spawn(move || {
+                let mut rest = Vec::new();
+                let _ = std::io::stdin().read_to_end(&mut rest);
+                let _ = tx.send(());
+            });
+            let mut x = 0x9e37_79b9_7f4a_7c15u64;
+            while rx.try_recv().is_err() {
+                let mut touched = vec![0u8; CHURN_BYTES as usize];
+                for word in touched.as_chunks_mut::<{ size_of::<u64>() }>().0 {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    *word = x.to_le_bytes();
+                }
+                std::hint::black_box(&touched);
+            }
+            return;
+        }
         let mut go = [0u8; 1];
         std::io::stdin().read_exact(&mut go).expect("the go byte");
         let t = Instant::now();
@@ -393,9 +503,18 @@ mod macos {
             .skip(1)
             .filter_map(|a| a.into_string().ok())
             .find(|a| {
-                ["readcost", "events", "fill", "fill-member", "spawn-member"].contains(&a.as_str())
+                [
+                    "readcost",
+                    "events",
+                    "fill",
+                    "lateness",
+                    "fill-member",
+                    "spawn-member",
+                    "churn-member",
+                ]
+                .contains(&a.as_str())
             });
-        if let Some(what @ ("fill-member" | "spawn-member")) = mode.as_deref() {
+        if let Some(what @ ("fill-member" | "spawn-member" | "churn-member")) = mode.as_deref() {
             member_main(what);
             return;
         }
@@ -421,19 +540,43 @@ mod macos {
             Some("fill") => {
                 let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
                 println!(
-                    "macos_box fill passes={passes} members={cores} fill_bytes={FILL_BYTES} spawns={SPAWNS}"
+                    "macos_box fill passes={passes} cores={cores} fill_bytes={FILL_BYTES} spawns={SPAWNS}"
                 );
                 for pass in 1..=passes {
-                    let (sum, span) = together("fill-member", cores);
-                    println!(
-                        "pass={pass} fill members={cores} bytes_per_s_sum={sum:.0} bytes_per_s_span={span:.0} load1={:.2}",
-                        sys::loadavg().unwrap_or(-1.0)
-                    );
-                    let (sum, span) = together("spawn-member", cores);
-                    println!(
-                        "pass={pass} spawn members={cores} spawns_per_s_sum={sum:.1} spawns_per_s_span={span:.1} load1={:.2}",
-                        sys::loadavg().unwrap_or(-1.0)
-                    );
+                    for members in [cores, 2 * cores, 4 * cores] {
+                        let (sum, span) = together("fill-member", members);
+                        println!(
+                            "pass={pass} fill members={members} bytes_per_s_sum={sum:.0} bytes_per_s_span={span:.0} load1={:.2}",
+                            sys::loadavg().unwrap_or(-1.0)
+                        );
+                        let (sum, span) = together("spawn-member", members);
+                        println!(
+                            "pass={pass} spawn members={members} spawns_per_s_sum={sum:.1} spawns_per_s_span={span:.1} load1={:.2}",
+                            sys::loadavg().unwrap_or(-1.0)
+                        );
+                    }
+                }
+                return;
+            }
+            Some("lateness") => {
+                let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+                println!(
+                    "macos_box lateness passes={passes} cores={cores} samples_per_pace={LATE_SAMPLES} churn_bytes={CHURN_BYTES}"
+                );
+                for pass in 1..=passes {
+                    for churners in [0, cores, 2 * cores, 4 * cores] {
+                        let mut late = lateness(churners);
+                        late.sort_unstable();
+                        let at = |q: f64| late[((late.len() - 1) as f64 * q) as usize] / 1000;
+                        println!(
+                            "pass={pass} churners={churners} late_us_p50={} p99={} p999={} max={} load1={:.2}",
+                            at(0.5),
+                            at(0.99),
+                            at(0.999),
+                            late.last().copied().unwrap_or(0) / 1000,
+                            sys::loadavg().unwrap_or(-1.0)
+                        );
+                    }
                 }
                 return;
             }

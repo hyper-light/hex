@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use hex_api::conformance::{self, Act, Fixture};
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Runtime, Signal, Stdio};
-use hex_core::watch::RECORDED;
-use hex_runtime::macos::MacRuntime;
+use hex_core::watch::seed;
+use hex_runtime::macos::{MacRuntime, machine_model};
 
 const MIB: u64 = 1 << 20;
 const GIB: u64 = 1 << 30;
@@ -74,10 +74,11 @@ impl Fixture for BinFixture {
     }
 }
 
-/// A runtime reckoning the recorded worst aggregate growth (`hex_core::watch::RECORDED`): one member per
-/// core filling memory and spawning at once, the rates a node's boxes are paced at.
+/// A runtime seeded, as a node is, with its machine class's recorded worst aggregate growth
+/// (`hex_core::watch::seed` of this Mac's `hw.model`), which its watchers then learn up from.
 fn runtime() -> MacRuntime {
-    MacRuntime::new(RECORDED.bytes, RECORDED.processes).expect("a macOS runtime")
+    let rates = seed(&machine_model().expect("this Mac's model"));
+    MacRuntime::new(rates.bytes, rates.processes).expect("a macOS runtime")
 }
 
 fn fixture() -> BinFixture {
@@ -104,12 +105,9 @@ fn macos_process_boxes_hold_the_contract() {
 fn box_user_boxes_hold_the_contract() {
     let sock = std::env::var("HEX_BOX_HELPER_SOCK")
         .expect("HEX_BOX_HELPER_SOCK, set by boxlab.sh to the running helper's socket");
-    let rt = MacRuntime::detect(
-        RECORDED.bytes,
-        RECORDED.processes,
-        std::path::Path::new(&sock),
-    )
-    .expect("a box-user macOS runtime");
+    let rates = seed(&machine_model().expect("this Mac's model"));
+    let rt = MacRuntime::detect(rates.bytes, rates.processes, std::path::Path::new(&sock))
+        .expect("a box-user macOS runtime");
     // Confirm the helper answered and the runtime is in box-user mode, not a fallback to process-group.
     let probe = BoxId::new("boxuser-probe").unwrap();
     let _ = rt.delete(&probe);
@@ -398,4 +396,66 @@ fn measure_exec_to_exit() {
         }
     }
     rt.delete(&id).expect("delete");
+}
+
+/// HEX-MAC-1/HEX-MAC-4, the lead's call (2026-11-06): a box filled by twice and by four times as many members
+/// as the machine has cores, every member allocating at once, ends within step 1's bar, 64 MiB past its
+/// 256 MiB bound, on every pass: the watcher's reads come early by its learned wake lateness, so a late
+/// wake under oversubscription doesn't let the box past the bar. Do fill the box with 2x and 4x the cores'
+/// hogs, three passes each; expect each pass's peak, as the watcher and this test's live reads saw it,
+/// within the bound plus the bar.
+#[test]
+fn an_oversubscribed_box_ends_within_the_bar() {
+    let fx = fixture();
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let mut misses = Vec::new();
+    for members in [2 * cores, 4 * cores] {
+        for pass in 1..=3 {
+            let rt = runtime();
+            let id = BoxId::new(&format!("mac-oversub-{members}-{pass}")).unwrap();
+            let _ = rt.delete(&id);
+            rt.create(BoxSpec {
+                id: id.clone(),
+                bounds: Bounds {
+                    memory_max: Some(256 * MIB),
+                    ..Bounds::default()
+                },
+                class: ClassSpec::Process,
+            })
+            .expect("create");
+            let procs: Vec<_> = (0..members)
+                .map(|_| {
+                    rt.exec(&id, fx.act(&Act::Hog(4 * GIB)), Stdio::null())
+                        .expect("exec hog")
+                })
+                .collect();
+            let deadline = Instant::now() + HANG_GUARD;
+            let peak = loop {
+                let u = rt.usage(&id).expect("usage");
+                if u.oom_kills >= 1 {
+                    break u.memory_peak_bytes;
+                }
+                assert!(Instant::now() < deadline, "the box never ended for memory");
+                std::thread::yield_now();
+            };
+            rt.delete(&id).expect("delete");
+            drop(procs);
+            let over = peak.saturating_sub(256 * MIB);
+            let (rates, early) = rt.pacing().expect("pacing");
+            println!(
+                "OVERSUB members={members} pass={pass} overshoot_mib={:.1} bytes_per_s={} spawns_per_s={} early_us={}",
+                over as f64 / MIB as f64,
+                rates.bytes,
+                rates.processes,
+                early.as_micros()
+            );
+            if over > 64 * MIB {
+                misses.push((members, pass, over / MIB));
+            }
+        }
+    }
+    assert!(
+        misses.is_empty(),
+        "passes past the 64 MiB bar (members, pass, MiB over): {misses:?}"
+    );
 }

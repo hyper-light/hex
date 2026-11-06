@@ -77,31 +77,52 @@ pub struct Status {
 #[derive(Debug, Clone)]
 pub struct Shared {
     tb: Timebase,
-    rates: Rates,
+    /// The fastest a box is taken to grow, as this node learns it: seeded by the caller (its machine class's
+    /// record, hex_core::watch::seed), raised by any faster growth a watcher sees (watch::LearnedRates).
+    rates: Arc<Mutex<watch::LearnedRates>>,
     /// How long a killed group gets to empty, as this node learns it: the record's to start, raised by every
     /// slower drain any box sees (hex_core::drain::Learned; the learned-waits rule, 2026-11-06).
     drain: Arc<Mutex<hex_core::drain::Learned>>,
+    /// How late the watchers' timers wake, as this node learns it: every box's wake under load is the
+    /// machine's, so one learned lateness serves them all (hex_core::watch::Lateness).
+    lateness: Arc<Mutex<watch::Lateness>>,
 }
 
 impl Shared {
-    /// The node's shared timing. `rate_bytes` and `rate_processes` are the fastest a box is taken to grow;
-    /// measured at node start or cited (CLAUDE.md §5), the caller says which.
+    /// The node's shared timing. `rate_bytes` and `rate_processes` seed the fastest a box is taken to grow:
+    /// the node's machine class's record (hex_core::watch::seed), which its watchers then raise as they see
+    /// faster growth.
     pub fn new(
         rate_bytes: std::num::NonZeroU64,
         rate_processes: std::num::NonZeroU64,
     ) -> io::Result<Self> {
         Ok(Self {
             tb: Timebase::get()?,
-            rates: Rates {
+            rates: Arc::new(Mutex::new(watch::LearnedRates::new(Rates {
                 bytes: rate_bytes,
                 processes: rate_processes,
-            },
+            }))),
             drain: Arc::new(Mutex::new(hex_core::drain::Learned::default())),
+            lateness: Arc::new(Mutex::new(watch::Lateness::default())),
         })
     }
 
-    pub fn rates(&self) -> Rates {
-        self.rates
+    /// How early each wait comes, as learned so far (twice the slowest wake seen, the record's included).
+    pub fn lateness(&self) -> Result<Duration, Refusal> {
+        Ok(self
+            .lateness
+            .lock()
+            .map_err(|_| poisoned("the node's wake lateness"))?
+            .bound())
+    }
+
+    /// The rates as learned so far.
+    pub fn rates(&self) -> Result<Rates, Refusal> {
+        Ok(self
+            .rates
+            .lock()
+            .map_err(|_| poisoned("the node's growth rates"))?
+            .rates())
     }
 }
 
@@ -520,11 +541,19 @@ struct Watcher {
     watched: BTreeSet<i32>,
     pids: Vec<i32>,
     events: Vec<Event>,
+    /// When the last read was and what it found (footprint, processes): the growth to the next read is what
+    /// the node's rates learn from.
+    last_read: Option<(Instant, u64, u64)>,
+    /// When the last wait was armed and for how long, if its own timer woke it: the next read's lateness.
+    timer_wake: Option<(Instant, Duration)>,
 }
 
 impl Watcher {
     fn new(state: Arc<State>, shared: Shared) -> io::Result<Self> {
-        let watch = Watch::new(state.limit, shared.rates);
+        let rates = shared
+            .rates()
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        let watch = Watch::new(state.limit, rates);
         Ok(Self {
             state,
             shared,
@@ -534,6 +563,8 @@ impl Watcher {
             watched: BTreeSet::new(),
             pids: sys::listing()?,
             events: Vec::with_capacity(sys::EVENTS),
+            last_read: None,
+            timer_wake: None,
         })
     }
 
@@ -576,7 +607,12 @@ impl Watcher {
             };
             // A timer only where a bound needs one; otherwise the box's next change wakes it: a member's
             // fork or end, a start (exec) or a delete, each a kqueue event.
+            let armed = Instant::now();
             let _ = self.state.kq.wait(next, None, &mut self.events);
+            // A wake by its own timer: how late its read comes is what the next waits come early by.
+            self.timer_wake = next
+                .filter(|_| self.events.iter().any(|e| matches!(e, Event::Timer)))
+                .map(|d| (armed, d));
         }
     }
 
@@ -591,7 +627,22 @@ impl Watcher {
         else {
             return Ok(None);
         };
+        let early = self
+            .shared
+            .lateness
+            .lock()
+            .map_err(|_| poisoned("the node's wake lateness"))?
+            .bound();
+        self.watch.early_by(early);
+        let rates = self.shared.rates()?;
+        self.watch.rated(rates);
         let reading = self.read_members(pgid)?;
+        // How late this read came past its timer, the read included (as the lateness record measures).
+        if let Some((armed, d)) = self.timer_wake.take()
+            && let Ok(mut lateness) = self.shared.lateness.lock()
+        {
+            lateness.observe(armed.elapsed().saturating_sub(d));
+        }
         // The escape check diffs the member lists and allocates; run it only when the running set changed,
         // so a box allocating hard with a steady set of members keeps each read lean enough to finish
         // within the watcher's real-time budget (else it is demoted and overshoots; see process.rs run()).
@@ -600,6 +651,18 @@ impl Watcher {
             self.last_sig = reading.sig;
         }
         let read = self.watch.read(&reading.members);
+        // The growth since the last read: a box faster than the node's rates raises them.
+        let now = Instant::now();
+        if let Some((then, footprint, processes)) = self.last_read
+            && let Ok(mut learned) = self.shared.rates.lock()
+        {
+            learned.observe(
+                read.footprint.saturating_sub(footprint),
+                read.processes.saturating_sub(processes),
+                now.saturating_duration_since(then),
+            );
+        }
+        self.last_read = Some((now, read.footprint, read.processes));
         self.record(&read, &reading.totals)?;
         // Mirror the watcher's own ending for a member's waiter: a SIGKILL the watcher sent isn't a
         // separate kernel cap kill to count.

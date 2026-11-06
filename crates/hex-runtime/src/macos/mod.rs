@@ -55,6 +55,25 @@ struct BoxUser {
 /// under a watcher (step 1); with the privileged helper installed (`helper` `Some`), a box is a user of
 /// its own the helper starts and bounds in the kernel (step 2). `new` is rootless; `detect` picks box-user
 /// when the helper's socket answers. Holds its boxes in memory, keyed by id.
+/// This machine's model, `hw.model` (`Mac16,9`): its class, whose recorded growth rates seed its boxes'
+/// pacing (`hex_core::watch::seed`). Read once at node start by `/usr/sbin/sysctl`, by absolute path with
+/// a fixed argv and no shell, as the helper runs its directory tools.
+pub fn machine_model() -> Result<String, Refusal> {
+    let out = std::process::Command::new("/usr/sbin/sysctl")
+        .args(["-n", "hw.model"])
+        .output()
+        .map_err(|e| Refusal::os("reading the machine's model", e))?;
+    if !out.status.success() {
+        return Err(Refusal::os(
+            "reading the machine's model",
+            std::io::Error::other(format!("sysctl -n hw.model: {}", out.status)),
+        ));
+    }
+    String::from_utf8(out.stdout)
+        .map(|m| m.trim().to_owned())
+        .map_err(|e| Refusal::os("reading the machine's model", std::io::Error::other(e)))
+}
+
 pub struct MacRuntime {
     shared: Arc<Shared>,
     boxes: Mutex<BTreeMap<BoxId, Arc<ProcessBox>>>,
@@ -62,6 +81,12 @@ pub struct MacRuntime {
 }
 
 impl MacRuntime {
+    /// The node's pacing as its watchers have learned it: the growth rates its boxes are reckoned at and how
+    /// early each wait comes for the watcher's wake lateness (observability: what the watchers pace by).
+    pub fn pacing(&self) -> Result<(hex_core::watch::Rates, std::time::Duration), Refusal> {
+        Ok((self.shared.rates()?, self.shared.lateness()?))
+    }
+
     /// A rootless runtime (no helper): boxes are process groups whose bounds a watcher holds, reckoned to
     /// grow at `rate_bytes` bytes and `rate_processes` processes a second (the bound's pacing, CLAUDE.md §5:
     /// measured at node start or cited, the caller says which).
