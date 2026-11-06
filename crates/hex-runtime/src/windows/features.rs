@@ -102,8 +102,8 @@ fn run(
     let late = || Refusal::Os {
         op: "reading the Windows features",
         why: format!(
-            "PowerShell's Win32_OptionalFeature query didn't finish within {} s",
-            PATIENCE.as_secs()
+            "PowerShell's Win32_OptionalFeature query didn't finish within {} ms",
+            PATIENCE.as_millis()
         ),
     };
     let listing = match rx.recv_timeout(left()) {
