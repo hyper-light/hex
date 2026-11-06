@@ -38,6 +38,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use hex_api::{BoxId, Refusal};
+use hex_core::patience::RFC_6298;
 use hex_core::record::BoxRecord;
 
 use crate::turns::{Turn, Turns};
@@ -53,16 +54,10 @@ pub const SHARDS: usize = 64;
 /// The bits of a box id's hash that name its shard, [`SHARDS`] of them.
 const SHARD_MASK: u64 = 0x3f;
 
-/// How long a change to a box's record waits for the change of the same box before it to finish:
-/// that one's write and its fsyncs, which take milliseconds. A minute is far past any real delay, so
-/// missing it is a fault to report (a disk that has stopped answering), not a limit to raise
-/// (CLAUDE.md §4).
-pub const WRITE_PATIENCE: Duration = Duration::from_secs(60);
-
 /// Most boxes whose records are being changed at once: one for each box the node can hold, its box
-/// budget (hex-runtime's `MAX_BOXES`), so the changes of the boxes a node holds never reach it. Past it
+/// budget ([`hex_runtime::MAX_BOXES`]), so the changes of the boxes a node holds never reach it. Past it
 /// a change is refused by type ([`Refusal::Exhausted`]), never kept waiting (CLAUDE.md §2).
-pub const TURNS: usize = 65_536;
+pub const TURNS: usize = hex_runtime::MAX_BOXES;
 
 /// Box records, one file each, named `<id>.json`, in the place each belongs ([`Store`]).
 #[derive(Debug, Clone)]
@@ -132,10 +127,13 @@ impl Store {
             disk_fd: Arc::new(open_directory(disk)?),
             #[cfg(target_os = "linux")]
             run_fd: Arc::new(open_directory(run)?),
+            // A change waits for the change of the same box before it: that one's write and its fsyncs,
+            // which take milliseconds. How long is learned from the changes made (decision 9), so a disk that
+            // has stopped answering is reported as a fault, never waited on for ever (CLAUDE.md §4).
             turns: Arc::new(Turns::new(
                 "changing a box's record",
                 "record changes under way",
-                WRITE_PATIENCE,
+                RFC_6298,
                 TURNS,
             )),
             synced: Arc::default(),
@@ -153,7 +151,8 @@ impl Store {
     }
 
     /// Box `id`'s turn to change its record: waits for a change of the same box under way, never for
-    /// another box's, and refuses past [`WRITE_PATIENCE`], or past [`TURNS`] boxes changed at once.
+    /// another box's, and refuses past the wait the store's changes taught it, or past [`TURNS`] boxes
+    /// changed at once.
     fn claim(&self, id: &BoxId) -> Result<Turn<'_>, Refusal> {
         self.turns.take(id)
     }
@@ -877,7 +876,8 @@ mod tests {
         store.put(&past).unwrap();
     }
 
-    /// Doc-truth (CLAUDE.md §6): the bound on record changes under way is the node's box budget.
+    /// Doc-truth (CLAUDE.md §6): the bound on record changes under way is the node's box budget, the one
+    /// the cgroup root refuses past.
     #[cfg(target_os = "linux")]
     #[test]
     fn the_turns_bound_is_the_box_budget() {

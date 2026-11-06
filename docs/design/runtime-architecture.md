@@ -101,8 +101,8 @@ the node's memory (`crates/hex-node/src/turns.rs`, the record store's per-box tu
 id, or a delete, waits for the create under way and then finds the box made or not. So a second create is refused
 as `Exists` only once a box was made, never while a create that will fail is under way, and a delete removes the box
 the create made rather than answer no such box while it's being made, which would leave a box its caller thinks gone.
-The wait ends at 120 s (`TURN_PATIENCE`, a delete's longest wait for a box to empty and its directories to go),
-refused past it by type, and at most `MAX_BOXES` turns are taken at once, the node's box budget: past it a create
+The wait ends where RFC 6298's timer over how long turns were held says (decision 9: 1 s before any turn and at
+least, at most 60 s), refused past it by type, and at most `MAX_BOXES` turns are taken at once, the node's box budget: past it a create
 is refused as `Full`, as step 6's claim refused it, and a delete as `Exhausted`; other boxes'
 creates and deletes never wait. A box whose owner's create takes a slot-named cgroup (goal 5 extended,
 step 6, decision 5) has no cgroup named by its id either, so its turn is all that says it's being made. Step 6 had

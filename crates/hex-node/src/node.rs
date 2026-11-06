@@ -28,6 +28,7 @@ use hex_api::{
 use hex_core::bundle::{self, Bundle, Owner, Place};
 use hex_core::cgroup::Dev;
 use hex_core::netns;
+use hex_core::patience::RFC_6298;
 use hex_core::record::{BoxRecord, Phase, ProcId, Slot};
 use hex_core::recovery::{self, Decision, Parts, Seen, Why};
 use hex_core::reuse;
@@ -66,11 +67,6 @@ pub const EMPTY_PATIENCE: Duration = Duration::from_secs(60);
 /// a guess at how long a layer takes, so a layer of any size goes, over as many calls as it needs.
 pub const REMOVE_PATIENCE: Duration = Duration::from_secs(60);
 
-/// How long a create or delete of a box waits for the one under way for the same box before it refuses:
-/// a create or delete takes milliseconds, and one that ends a box waits at most [`EMPTY_PATIENCE`] for it
-/// to empty and [`REMOVE_PATIENCE`] for its directories to go, so past their sum is a fault to report,
-/// not a limit to raise (CLAUDE.md §4).
-pub const TURN_PATIENCE: Duration = EMPTY_PATIENCE.saturating_add(REMOVE_PATIENCE);
 
 /// How long [`Node::recover`] spends listing a directory for the parts of boxes before it refuses: the
 /// runtime directory is shared with every node of this user on the host, so its entries are theirs as
@@ -182,8 +178,9 @@ pub struct Node {
     /// step 5), so this is what tells a box being made: a second create of its id, or a delete, waits
     /// for the create under way and then finds the box made or not, rather than make or remove parts at
     /// the paths the id fixes; so neither scrubs what the other is making. At most [`MAX_BOXES`] turns
-    /// at once, the node's box budget, a wait at most [`TURN_PATIENCE`]; past either the call is refused
-    /// by type, a create past the budget as [`Refusal::Full`] ([`create_turn`]).
+    /// at once, the node's box budget, a wait learned from how long creates and deletes held their turns
+    /// (decision 9: RFC 6298's timer, [`RFC_6298`]'s bounds); past either the call is refused by type, a
+    /// create past the budget as [`Refusal::Full`] ([`create_turn`]).
     turns: Turns,
     /// The debug-only crash point the caller armed ([`Node::with_crash_point`]), `None` unless one did.
     #[cfg(debug_assertions)]
@@ -313,7 +310,7 @@ impl Node {
             turns: Turns::new(
                 "making or removing a box",
                 "creates and deletes under way",
-                TURN_PATIENCE,
+                RFC_6298,
                 MAX_BOXES,
             ),
             #[cfg(debug_assertions)]
@@ -1720,7 +1717,7 @@ enum Ending<'a> {
 /// A create's turn for box `id` ([`Node::turns`]): past the turns' bound, [`MAX_BOXES`] creates and deletes at once,
 /// the node's box budget, the create is refused as [`Refusal::Full`], as the node refuses a box past its budget
 /// (CLAUDE.md §2; the bound step 6's claim held creates to). A wait for a create or delete of the same box is refused
-/// past [`TURN_PATIENCE`] as [`Turns::take`] refuses it.
+/// past its learned patience as [`Turns::take`] refuses it.
 fn create_turn<'a>(turns: &'a Turns, id: &BoxId) -> Result<Turn<'a>, Refusal> {
     turns.take(id).map_err(|e| match e {
         Refusal::Exhausted { bound, .. } => Refusal::Full(bound),
@@ -2023,7 +2020,7 @@ mod tests {
         let turns = Turns::new(
             "making or removing a box",
             "creates and deletes under way",
-            TURN_PATIENCE,
+            RFC_6298,
             2,
         );
         let id = |n: &str| BoxId::new(n).unwrap();

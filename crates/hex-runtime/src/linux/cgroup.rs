@@ -21,9 +21,7 @@ use super::os_err;
 
 /// Where cgroup v2 is mounted.
 pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
-/// Most boxes one root holds; past it `create` is refused with [`Refusal::Full`]. The kernel's own
-/// default bound on descendants is unlimited; this is Hex's, well above a node's useful load.
-pub const MAX_BOXES: usize = 65_536;
+pub use crate::MAX_BOXES;
 /// Most processes a signal is sent to one by one in a box (signals other than KILL, which the
 /// kernel delivers to the whole box at once through `cgroup.kill`).
 pub const MAX_SIGNALLED: usize = 1 << 20;
