@@ -9,8 +9,9 @@
 #   Rust image of rust-toolchain.toml's version;
 # - initramfs-<arch>.cpio, whose /init is that `hex` (initramfs.py);
 # - SHA256SUMS, and toolchain-*.txt naming every tool and image.
-# Needs bash, python3 and Docker running Linux containers of ARCH (a Linux host of ARCH, or Docker
-# Desktop on an arm64 Mac for aarch64): guests run their host's architecture. Each container is
+# Needs bash, python3 and Docker running Linux containers of ARCH: natively (a Linux host of ARCH, or
+# Docker Desktop on an arm64 Mac for aarch64), or emulated (QEMU's binfmt handlers), slower but the
+# same inputs. Each container is
 # bounded by BENCH_MEMORY (default 8g) and BENCH_OOM (default 1000), and pinned to GUEST_CPUSET
 # where it is set.
 set -euo pipefail
@@ -21,8 +22,8 @@ shards=${2:?$usage}
 out=${3:?$usage}
 variant=${4:-}
 case $arch in
-x86_64) kernel_name=vmlinux ;;
-aarch64) kernel_name=Image ;;
+x86_64) kernel_name=vmlinux platform=linux/amd64 ;;
+aarch64) kernel_name=Image platform=linux/arm64 ;;
 *)
     echo "$usage" >&2
     exit 2
@@ -34,7 +35,7 @@ hex=$(cd "$here/../.." && pwd)
 shards=$(cd "$shards" && pwd)
 mkdir -p "$out/kernel" "$out/target" "$out/cargo"
 out=$(cd "$out" && pwd)
-limits=(--memory "${BENCH_MEMORY:-8g}" --oom-score-adj "${BENCH_OOM:-1000}")
+limits=(--platform "$platform" --memory "${BENCH_MEMORY:-8g}" --oom-score-adj "${BENCH_OOM:-1000}")
 if [ -n "${GUEST_CPUSET:-}" ]; then
     limits+=(--cpuset-cpus "$GUEST_CPUSET")
 fi
@@ -76,7 +77,7 @@ rust=$(sed -nE 's/^channel = "([0-9.]+)"$/\1/p' "$hex/rust-toolchain.toml")
 image=docker.io/library/rust:$rust-bookworm
 target=$arch-unknown-linux-gnu
 flags_var=CARGO_TARGET_$(echo "$target" | tr 'a-z-' 'A-Z_')_RUSTFLAGS
-docker pull -q "$image" >/dev/null
+docker pull -q --platform "$platform" "$image" >/dev/null
 docker run --rm "${limits[@]}" --user "$user" -v "$hex:/hex:ro" -v "$out/target:/target" \
     -v "$out/cargo:/cargo" -v "$out:/out" -w /hex \
     -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/target -e RUSTUP_TOOLCHAIN="$rust" \
