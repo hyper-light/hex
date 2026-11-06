@@ -52,6 +52,20 @@ fn beneath() -> std::io::Result<Vec<String>> {
     Ok(names)
 }
 
+/// How `e1` opens the directories it climbs through: by descriptor alone.
+const DIR: OFlags = OFlags::PATH
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::CLOEXEC);
+
+/// `e1`'s climb: `..` from `from`, 16 times.
+fn climb(from: std::os::fd::OwnedFd) -> rustix::io::Result<std::os::fd::OwnedFd> {
+    let mut at = from;
+    for _ in 0..16 {
+        at = rustix::fs::openat(&at, "..", DIR, Mode::empty())?;
+    }
+    Ok(at)
+}
+
 /// Runs the escape `mode` against `marker`. Returns the process exit code: 0 when the box held (secure),
 /// 1 when it escaped or an expected refusal didn't happen, 2 when the attempt couldn't be set up.
 pub fn attempt(mode: &str, marker: &str) -> u8 {
@@ -74,8 +88,9 @@ pub fn attempt(mode: &str, marker: &str) -> u8 {
                 say(&format!("E1 chroot escape: chroot /esc refused ({e})"));
                 return 2;
             }
-            for _ in 0..16 {
-                let _ = rustix::process::chdir("..");
+            let top = rustix::fs::open(".", DIR, Mode::empty()).and_then(climb);
+            if let Ok(top) = top {
+                let _ = rustix::process::fchdir(&top);
             }
             let _ = rustix::process::chroot(".");
             if reachable(marker) {
@@ -194,5 +209,26 @@ pub fn attempt(mode: &str, marker: &str) -> u8 {
             say(&format!("escape: unknown mode {other:?}"));
             2
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Goal 5 plan step 2 (T-T7.1.4), E1's climb under Ada's 2026-11-06 rule: do climb from a directory 24 below a
+    /// temporary one, unconfined; expect it to reach `/` (the directory that is its own parent), however deep it
+    /// started, where a fixed count of climbs stopped short of it.
+    #[test]
+    fn the_climb_goes_up_until_a_directory_is_its_own_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let deep = (0..24).fold(tmp.path().to_path_buf(), |p, _| p.join("d"));
+        std::fs::create_dir_all(&deep).unwrap();
+        let top = climb(rustix::fs::open(&deep, DIR, Mode::empty()).unwrap()).unwrap();
+        let (top, root) = (
+            rustix::fs::fstat(&top).unwrap(),
+            rustix::fs::stat("/").unwrap(),
+        );
+        assert_eq!((top.st_dev, top.st_ino), (root.st_dev, root.st_ino));
     }
 }
