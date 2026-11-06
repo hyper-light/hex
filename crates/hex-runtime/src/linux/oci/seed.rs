@@ -95,7 +95,8 @@ fn serve() -> Result<(), OciError> {
     // spawn, so the agent never clears close-on-exec on it. Moved off fd 0 close-on-exec, so it doesn't
     // survive into a program an intermediate's clone execs (the intermediate is a fork, which keeps it;
     // only the workload's execve, which must not hold the agent's socket, closes it), and /dev/null put
-    // on fd 0 in its place.
+    // on fd 0 in its place. It goes to the lowest free descriptor from 3, the first past standard
+    // input, output and error's 0-2 (stdin(3)), so it never takes one of theirs.
     let mut stdin = sys::own_fd(0)?;
     let mut socket = rustix::io::fcntl_dupfd_cloexec(&stdin, 3)
         .map_err(|e| OciError::os("moving the seed's socket off its stdin", e))?;
