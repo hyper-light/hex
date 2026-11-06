@@ -110,6 +110,15 @@ fn relay(args: &[String]) -> Result<(), (u8, String)> {
             Box::new(unix(&dir.join("files.sock")).map_err(|e| (1, e))?),
         ),
     };
+    let stamps: Box<dyn Listen> = match &on {
+        On::Vsock => Box::new(vsock(stream::STAMPS_PORT).map_err(|e| (1, e))?),
+        On::Unix(dir) => Box::new(unix(&dir.join("stamps.sock")).map_err(|e| (1, e))?),
+    };
+    let line = stamps_line(std::env::var(BOOT_STAMPS).ok().as_deref(), boottime_ns());
+    std::thread::Builder::new()
+        .name("hex-relay-stamps".to_owned())
+        .spawn(move || serve_stamps(stamps, line))
+        .map_err(|e| (1, format!("starting the stamps thread: {e}")))?;
     let mut out = std::io::stdout().lock();
     out.write_all(b"ready\n")
         .and_then(|()| out.flush())
@@ -189,6 +198,45 @@ impl Duplex for Vsock {
     }
 }
 
+/// The variables that carry init's boot stamps: its first entry's, across its re-exec from the initramfs,
+/// and all three to the relay (its first entry, its mounts done, its node ready).
+const BOOT_T0: &str = "HEX_BOOT_T0";
+const BOOT_STAMPS: &str = "HEX_BOOT_STAMPS";
+
+/// Nanoseconds since the kernel began keeping time: `CLOCK_BOOTTIME` (clock_gettime(2)), the guest's own
+/// clock from its boot, which the boot split reads phases by.
+fn boottime_ns() -> u128 {
+    let t = rustix::time::clock_gettime(rustix::time::ClockId::Boottime);
+    let (secs, nanos) = (
+        u64::try_from(t.tv_sec).unwrap_or_default(),
+        u32::try_from(t.tv_nsec).unwrap_or_default(),
+    );
+    Duration::new(secs, nanos).as_nanos()
+}
+
+/// The relay's stamps line: init's three stamps as init handed them, then the relay's own; `-` for each of
+/// init's where it handed none (a relay outside a guest) or handed them unreadable.
+fn stamps_line(from_init: Option<&str>, relay_ns: u128) -> String {
+    let init = from_init.filter(|given| {
+        let words: Vec<&str> = given.split(' ').collect();
+        words.len() == 3 && words.iter().all(|w| w.parse::<u128>().is_ok())
+    });
+    format!("{} {relay_ns}\n", init.unwrap_or("- - -"))
+}
+
+/// Serves the boot's stamps on `listener`: each connection is sent `line` and closed, one at a time.
+fn serve_stamps(listener: Box<dyn Listen>, line: String) {
+    loop {
+        match listener.accept() {
+            Ok(mut conn) => {
+                let _ = conn.write_all(line.as_bytes());
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return,
+        }
+    }
+}
+
 /// Where the guest keeps the node's socket, state and boxes.
 const RUN: &str = "/run/hex";
 const STATE: &str = "/run/hex/state";
@@ -224,7 +272,11 @@ pub fn init_main() -> u8 {
 
 fn init() -> Result<(), (u8, String)> {
     let fail = |why: String| (1, why);
-    leave_rootfs().map_err(fail)?;
+    let t0 = std::env::var(BOOT_T0)
+        .ok()
+        .and_then(|t| t.parse::<u128>().ok())
+        .unwrap_or_else(boottime_ns);
+    leave_rootfs(t0).map_err(fail)?;
     mount_all().map_err(fail)?;
     mount_shares().map_err(fail)?;
     std::fs::write("/sys/fs/cgroup/cgroup.subtree_control", CONTROLLERS).map_err(|e| {
@@ -232,6 +284,7 @@ fn init() -> Result<(), (u8, String)> {
             "enabling the cgroup controllers {CONTROLLERS}: {e}"
         ))
     })?;
+    let mounted = boottime_ns();
     let exe = std::env::current_exe().map_err(|e| fail(format!("finding /init: {e}")))?;
     let socket = Path::new(RUN).join("node.sock");
     let state = Path::new(STATE);
@@ -247,8 +300,10 @@ fn init() -> Result<(), (u8, String)> {
             BOX_ROOT.as_ref(),
         ],
         &format!("ready {}\n", socket.display()),
+        None,
     )
     .map_err(fail)?;
+    let node_ready = boottime_ns();
     let relay = start(
         &exe,
         &[
@@ -259,6 +314,7 @@ fn init() -> Result<(), (u8, String)> {
             "--vsock".as_ref(),
         ],
         "ready\n",
+        Some(format!("{t0} {mounted} {node_ready}")),
     )
     .map_err(fail)?;
     let mut out = std::io::stdout().lock();
@@ -318,7 +374,7 @@ const NEW_ROOT: &str = "/hex-root";
 /// Moves `init` off the kernel's initramfs, whose `rootfs` pivot_root(2) can't leave, onto a tmpfs
 /// mounted over `/` (switch_root's way: `MS_MOVE` and `chroot`), and runs it again from there. Returns
 /// only when the root is already not the initramfs.
-fn leave_rootfs() -> Result<(), String> {
+fn leave_rootfs(t0: u128) -> Result<(), String> {
     use rustix::mount::{MountFlags, UnmountFlags, mount, mount_move, unmount};
     let quiet = MountFlags::NOSUID | MountFlags::NOEXEC | MountFlags::NODEV;
     std::fs::create_dir_all("/proc").map_err(|e| format!("making /proc: {e}"))?;
@@ -352,7 +408,9 @@ fn leave_rootfs() -> Result<(), String> {
     mount_move(".", "/").map_err(|e| format!("moving {NEW_ROOT} to /: {e}"))?;
     rustix::process::chroot(".").map_err(|e| format!("entering the new root: {e}"))?;
     std::env::set_current_dir("/").map_err(|e| format!("entering /: {e}"))?;
-    let e = std::os::unix::process::CommandExt::exec(&mut std::process::Command::new("/init"));
+    let e = std::os::unix::process::CommandExt::exec(
+        std::process::Command::new("/init").env(BOOT_T0, t0.to_string()),
+    );
     Err(format!("running /init from the new root: {e}"))
 }
 
@@ -476,14 +534,24 @@ fn mount_all() -> Result<(), String> {
 
 /// Starts `/init` with `args` and waits for its first line, `ready`: read as far as its length and no
 /// further, as nothing else is that line.
-fn start(exe: &Path, args: &[&std::ffi::OsStr], ready: &str) -> Result<u32, String> {
+/// `stamps`, where given, goes to the child as init's boot stamps ([`BOOT_STAMPS`]).
+fn start(
+    exe: &Path,
+    args: &[&std::ffi::OsStr],
+    ready: &str,
+    stamps: Option<String>,
+) -> Result<u32, String> {
     let what = args
         .iter()
         .take(2)
         .map(|a| a.to_string_lossy())
         .collect::<Vec<_>>()
         .join(" ");
-    let mut child = std::process::Command::new(exe)
+    let mut command = std::process::Command::new(exe);
+    if let Some(stamps) = stamps {
+        command.env(BOOT_STAMPS, stamps);
+    }
+    let mut child = command
         .args(args)
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -655,5 +723,15 @@ mod tests {
             );
         }
         assert!(!runs_as_init(1, None));
+    }
+
+    /// HEX-GUEST-37 (the boot split, bench/native/guest/boot-split): the relay's stamps line is init's three
+    /// stamps as init handed them, then the relay's own, in `CLOCK_BOOTTIME` nanoseconds; a relay started
+    /// without init's (outside a guest) says so in their place.
+    #[test]
+    fn the_stamps_line_carries_inits_stamps_then_the_relays() {
+        assert_eq!(stamps_line(Some("10 20 30"), 40), "10 20 30 40\n");
+        assert_eq!(stamps_line(None, 40), "- - - 40\n");
+        assert_eq!(stamps_line(Some("10 x 30"), 40), "- - - 40\n");
     }
 }

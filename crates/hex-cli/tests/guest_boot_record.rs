@@ -3,6 +3,9 @@
 //! `shards_api::Shards` N times, as `hex_runtime::guest::GuestRuntime` does, and prints each boot's time from
 //! `boot` to the relay's first bytes on its control port (the connection's token), and each stop's time
 //! from `stop` to the guest's end. Portable: it is how a host without Python (jupiter) takes its record.
+//! With each boot it prints the guest's own stamps (`STAMPS_PORT`, `CLOCK_BOOTTIME` nanoseconds at init's
+//! start, its mounts, its node ready and its relay listening), which split the boot
+//! (bench/native/guest/boot-split/RECORD.md).
 //!
 //! Ignored by default: `cargo test -p hex-cli --release --test guest_boot_record -- --ignored --nocapture`,
 //! with `SHARDS_BIN`, `HEX_GUEST_KERNEL`, `HEX_GUEST_INITRD` and `BOOT_RECORD_N` (default 40).
@@ -44,23 +47,32 @@ fn boot_to_ready_and_stop() {
     let n: usize = std::env::var("BOOT_RECORD_N").map_or(40, |v| v.parse().unwrap());
     let shards = shards_api::Shards::new();
     println!("RECORD class={CLASS} n={n}");
+    let mut spec = config.spec();
+    spec.ports.push(stream::STAMPS_PORT);
     for i in 1..=n {
         let began = Instant::now();
-        let guest = shards.boot(&config.spec()).unwrap();
+        let guest = shards.boot(&spec).unwrap();
         // The relay's first bytes, its token: the guest is ready (the facts alone; no clock).
         let mut conn = guest.connect(stream::CONTROL_PORT, Duration::MAX).unwrap();
         let mut token = [0u8; stream::TOKEN_BYTES];
         conn.read_exact(&mut token).unwrap();
         let ready = began.elapsed();
         drop(conn);
+        let mut stamps = String::new();
+        guest
+            .connect(stream::STAMPS_PORT, Duration::ZERO)
+            .unwrap()
+            .read_to_string(&mut stamps)
+            .unwrap();
         let stopping = Instant::now();
         guest.stop().unwrap();
         let end = guest.wait_for(Duration::MAX).unwrap();
         let stopped = stopping.elapsed();
         println!(
-            "RECORD {i} boot_ready_us={} stop_us={} end={end:?}",
+            "RECORD {i} boot_ready_us={} stop_us={} end={end:?} stamps_ns={}",
             ready.as_micros(),
-            stopped.as_micros()
+            stopped.as_micros(),
+            stamps.trim()
         );
     }
 }

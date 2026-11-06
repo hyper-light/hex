@@ -30,7 +30,7 @@ flate2 = "1.1.10"
 libc = "0.2.190"
 # AF_VSOCK, for the guest relay: its safe `SockAddr::vsock` needs feature `all` (docs/design/shards-guest.md §3).
 socket2 = { version = "0.6", features = ["all"] }
-rustix = { version = "1.1.5", features = ["fs", "process", "thread", "mount", "pipe", "pty", "net", "termios", "system", "event", "stdio"] }
+rustix = { version = "1.1.5", features = ["fs", "process", "thread", "mount", "pipe", "pty", "net", "termios", "system", "event", "stdio", "time"] }
 # OCI seccomp: compiles a profile to a BPF program and loads it in the container init. Vendored
 # (vendor/seccompiler) so Hex can lean its compile path; patched to that copy below.
 seccompiler = "0.5"

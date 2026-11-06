@@ -435,6 +435,7 @@ fn the_channel_formats_are_the_design_docs() {
     assert_eq!(port("CONTROL_PORT"), CONTROL_PORT);
     assert_eq!(port("STDIO_PORT"), STDIO_PORT);
     assert_eq!(port("FILES_PORT"), files::FILES_PORT);
+    assert_eq!(port("STAMPS_PORT"), STAMPS_PORT);
     let control = table_after(doc, "**Control.**");
     assert_eq!(control[0][1], TOKEN_BYTES.to_string());
     assert_eq!(control[1][1], PREFIX.to_string());

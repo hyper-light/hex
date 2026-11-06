@@ -130,6 +130,7 @@ ports above 1024, below `VMADDR_PORT_ANY`, each spelling `HEX` and its number so
 | `CONTROL_PORT` | `0x4845_5800` | a control connection: the relay's token, then framed wire messages |
 | `STDIO_PORT` | `0x4845_5801` | one stdio stream of one exec, named by its first `NAME_BYTES` |
 | `FILES_PORT` | `0x4845_5802` | a staging or removal connection (§4a) |
+| `STAMPS_PORT` | `0x4845_5803` | the boot's own stamps, one line, then closed (bench/native/guest/boot-split) |
 
 **Control.** A connection opens with the relay's token, then carries frames:
 
@@ -453,6 +454,9 @@ Hex's tests of the channel, each citing its ID:
 - HEX-GUEST-36: the relay moves an exec's stdio by splice(2) through its pipe, both ways, so no byte passes through
   user space (vsock's `splice_read` is the kernel's `copy_splice_read`): 1 MiB through `cat` leaves the relay
   reading only each stream's name and writing nothing (`hex_node::relay`).
+- HEX-GUEST-37: the guest reports its boot's own stamps on `STAMPS_PORT`: `CLOCK_BOOTTIME` at init's first entry
+  (carried across its re-exec), its mounts, its node ready and its relay listening, which split a boot
+  (bench/native/guest/boot-split) (`hex guest`).
 
 ## 7. What would falsify it
 
