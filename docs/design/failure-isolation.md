@@ -18,7 +18,7 @@ many nodes at once, take a cell down. Each decision has its sources, evidence an
 - The node's disk probe and drain, shown by a dm-delay drill (`AC-T7.10.3`).
 
 One graded level per node (`hex_health::Level`): `Suspect` stops new placements, `Drain` moves work
-off. Every verdict goes through the penalties (F6), which cap how much of a cell it may take.
+off. Every verdict goes through the penalties (F6): no ejection leaves work the cell can't re-place.
 
 ## The bounds
 
@@ -238,13 +238,20 @@ suspicions from quota and outages, which must be 0.
 **What would falsify it.** A healthy session's trace with a third identical call and no progress; a node
 suspected for its provider's or account's fault; a provider outage not marked within 2 windows.
 
-### F6. Penalties escalate, forgive and are capped
+### F6. Penalties escalate, forgive and strand no work
 
 **The choice.**
 - A node's `Drain` ejects it from placement for 30 s times its consecutive ejections, up to 300 s,
-  forgiven one multiple per 30 s healthy; never past 10% of the cell, at least one in a cell of two or
-  more (Envoy's defaults and `always_eject_one_host`, FI[10]). A refused ejection leaves the node
-  `Suspect`: no new work, its running work kept.
+  forgiven one multiple per 30 s healthy (Envoy's defaults, FI[10]). It is ejected only when the rest
+  of the cell can re-place its every workload at that moment: the scheduler gives the node's workloads
+  back on a copy of the cell, fences the node, and places each through the fast path, each first asked
+  of `admitted_anywhere`; one that fits nowhere refuses the ejection (`Refusal::NoRoom`). A refused
+  ejection leaves the node `Suspect`: no new work, its running work kept.
+- Restated 2026-11-06 (the lead, under Ada's rule that Hex has no arbitrary constants, only learned and
+  data-derived values): the ejection cap was Envoy's 10% of the cell, a copied default. Its purpose
+  stays, a correlated fault drains no cell; its measurable form is now that no ejection leaves work the
+  cell can't re-place, measured on the cell itself, so a cell with room takes out every bad node and a
+  full one takes out none it can't cover.
 - Moving work off failed nodes is rate-limited: 0.1 nodes/s, 0.01/s once 55% (and at least 3) of a cell
   over 50 nodes are down, none when that happens in a smaller cell (Kubernetes' defaults, FI[11]),
   because a mass failure can't be told from a partition (Borg, FI[12]).
@@ -254,10 +261,13 @@ suspected for its provider's or account's fault; a provider outage not marked wi
   minutes are under 10% of its requests: load grows at most 1.1x (FI[14]).
 
 **Evidence.** `hex-health` `penalty` and `retry` tests; `faults.rs`'s correlated faults (a cell-wide
-gray fault, a partition losing most of a cell) never exceed the cap or the rate.
+gray fault on a loaded cell of G2's node models, a partition losing most of a cell): over 1,000 seeds
+no ejection strands a workload while drains are refused where the cell is full (9,211 ejected, 30,627
+refused, 14,356 re-placed, 0 stranded), and the check switched off strands work on 843 seeds; the
+partition never moves work faster than the rate.
 
-**What would falsify it.** A run in which a cell has more nodes ejected or draining than the cap, or
-moves work faster than the rate; retries growing load past 1.1x.
+**What would falsify it.** An ejection after which one of the node's workloads has no node, or a cell
+that moves work faster than the rate; retries growing load past 1.1x.
 
 ### F7. Dangerous workloads move to a stronger kind or are refused
 
@@ -323,7 +333,6 @@ holds this table to the code.
 | `grade::DRAIN_WINDOWS` | 3 | CPI²'s 3 flags (FI[9]) |
 | `penalty::BASE_EJECTION_NS` | 30000000000 | Envoy `base_ejection_time` (FI[10]) |
 | `penalty::MAX_EJECTION_NS` | 300000000000 | Envoy `max_ejection_time` (FI[10]) |
-| `penalty::MAX_EJECTION_PER_MILLE` | 100 | Envoy `max_ejection_percent` (FI[10]) |
 | `penalty::EVICTION_MILLI_PER_S` | 100 | Kubernetes `--node-eviction-rate` (FI[11]) |
 | `penalty::SECONDARY_EVICTION_MILLI_PER_S` | 10 | Kubernetes `--secondary-node-eviction-rate` (FI[11]) |
 | `penalty::UNHEALTHY_PER_MILLE` | 550 | Kubernetes `--unhealthy-zone-threshold` (FI[11]) |

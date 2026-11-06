@@ -253,7 +253,7 @@ graded into a continuous suspicion, and acted on with escalating, bounded, forgi
 - **Antagonists** by correlation, throttled with a cap (CPI²-style): a workload whose neighbours' CPI
   rises is throttled, not killed, for a bounded window.
 - **Repeat offenders** escalated with a forgiveness window (CrashLoopBackOff, Envoy ejection), the
-  ejection capped so a correlated fault can't drain a cell.
+  a node ejected only where the cell re-places its work, so a correlated fault can't drain a cell.
 - **Mass loss** rate-limited, because a mass failure looks like a partition (Borg); retries budgeted,
   because sustained retries drove more than half of 22 metastable outages (PF[20], `MI`).
 - **Agent-specific** faults — a stuck tool loop, quota exhaustion that looks like slowness, a partial
@@ -281,8 +281,8 @@ before its work fails) is the fail-slow drill.
 **What would falsify it.** A bad workload or node not deprioritised and isolated within the bound hex-sim
 sets for its fault class (implementation goal 5 states each: crash, gray/fail-slow, antagonist,
 agent-specific, dangerous; `AC-T7.10.3`'s disk-stall "before its work fails" is the one already fixed),
-a slow member's self-doubt still accusing healthy peers, or a correlated fault draining a cell past the
-ejection cap — each fixed at its cause.
+a slow member's self-doubt still accusing healthy peers, or a correlated fault ejecting a node whose
+work the cell can't re-place — each fixed at its cause.
 
 ## Where a bar must be measured, not cited
 

@@ -10,8 +10,8 @@
 //! - [`antagonist`]: a co-tenant raises its neighbours' CPI ([`hex_health::antagonist`]).
 //! - [`stuck_loop`], [`quota`], [`provider_outage`]: the agent faults ([`hex_health::agent`]).
 //! - [`dangerous`]: a security signal, per kind Hex places ([`crate::danger`]).
-//! - [`correlated`]: many nodes slow at once, against the ejection cap, and a mass loss against the
-//!   eviction rate ([`hex_health::penalty`]).
+//! - [`correlated`]: many nodes of a loaded cell slow at once, each ejected only where the rest of
+//!   the cell re-places its work, and a mass loss against the eviction rate ([`hex_health::penalty`]).
 
 use hex_health::agent::{Cause, LoopDetector, ProviderError, ProviderHealth, Stuck};
 use hex_health::antagonist::{Antagonists, Sample};
@@ -58,8 +58,8 @@ pub enum Mutant {
     None,
     /// The gray detector off: the grade's verdicts are never acted on.
     NoDetector,
-    /// The ejection cap ignored: every drain ejects.
-    NoEjectionCap,
+    /// The re-placement check ignored: every drain ejects, its work placed where it fits.
+    NoReplacementCheck,
     /// The eviction rate ignored: every dead node's work moves at once.
     NoEvictionRate,
     /// Provider errors fed to the node grade as slowness.
@@ -95,7 +95,7 @@ pub fn gray_with(seed: u64, mutant: Mutant) -> Result<(Measured, u64), FaultErro
     let onset = rng.range(5 * S, 20 * S);
     let end = add(onset, 10 * S)?;
     let mut g = PeerGrade::new(usize::try_from(nodes).unwrap_or(usize::MAX), 0);
-    let mut ejector = Ejector::new(nodes, usize::try_from(nodes).unwrap_or(usize::MAX));
+    let mut ejector = Ejector::new(usize::try_from(nodes).unwrap_or(usize::MAX));
     let mut m = Measured::default();
     let mut changes = Vec::new();
     // Every node reports at 100 ms steps, with a seeded phase each, so windows close in time order.
@@ -123,7 +123,7 @@ pub fn gray_with(seed: u64, mutant: Mutant) -> Result<(Measured, u64), FaultErro
                 }
                 if c.level == Level::Drain
                     && m.isolated_after_ns.is_none()
-                    && ejector.eject(c.node, at)?.is_ok()
+                    && ejector.eject(c.node, at, true)?.is_ok()
                 {
                     m.isolated_after_ns = after(onset, at);
                 }
@@ -446,6 +446,58 @@ pub fn kind_overheads() -> Overheads {
     o
 }
 
+/// One of G2's node models (`hex-sim.md` H10), seeded: an m5d.metal host running all three kinds;
+/// Hex's fleet's Linux hosts, all three; its Windows hosts, OCI and Shards; its macOS hosts, Shards
+/// alone.
+fn g2_node(rng: &mut Rng) -> (Classes, Resources) {
+    const GIB: u64 = 1 << 30;
+    let model = rng.range(0, 3);
+    let classes = match model {
+        0 | 1 => Classes::ALL,
+        2 => Classes::NONE.with(Class::Oci).with(Class::Shards),
+        _ => Classes::NONE.with(Class::Shards),
+    };
+    let capacity = if model == 0 {
+        Resources {
+            cpu_milli: 48_000,
+            mem_bytes: 384 * GIB,
+            gpus: 0,
+        }
+    } else {
+        Resources {
+            cpu_milli: rng.range(4, 48).saturating_mul(1000),
+            mem_bytes: rng.range(8, 384).saturating_mul(GIB),
+            gpus: u32::try_from(rng.range(0, 2)).unwrap_or(0),
+        }
+    };
+    (classes, capacity)
+}
+
+/// A seeded workload of one of the three kinds, its kind's overhead charged.
+fn g2_workload(rng: &mut Rng, overheads: Overheads) -> Result<Demand, FaultError> {
+    const GIB: u64 = 1 << 30;
+    let class = match rng.range(0, 2) {
+        0 => Class::Oci,
+        1 => Class::Firecracker,
+        _ => Class::Shards,
+    };
+    Ok(Demand {
+        need: Resources {
+            cpu_milli: rng.range(1_000, 24_000),
+            mem_bytes: add(rng.range(1, 192).saturating_mul(GIB), overheads.of(class))?,
+            gpus: 0,
+        },
+        kind: Kind::Plain,
+        class,
+    })
+}
+
+fn node_id(id: u64) -> Result<NodeId, FaultError> {
+    u32::try_from(id)
+        .map(NodeId)
+        .map_err(|_| FaultError::Sim(crate::SimError::Config("a node id past u32")))
+}
+
 /// What a dangerous run did: its isolation (the stop) measured, the verdict, and where the scheduler
 /// re-placed it, measured apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -466,7 +518,6 @@ pub struct Dangerous {
 /// refused for the reason that holds, against an oracle on the cell as it stood once stopped.
 pub fn dangerous(seed: u64, kind: Class) -> Result<Dangerous, FaultError> {
     const MIB: u64 = 1 << 20;
-    const GIB: u64 = 1 << 30;
     let mut rng = Rng::new(seed);
     let n = rng.range(4, 32);
     let overheads = kind_overheads();
@@ -477,25 +528,7 @@ pub fn dangerous(seed: u64, kind: Class) -> Result<Dangerous, FaultError> {
     };
     let mut specs = Vec::new();
     for id in 0..n {
-        let model = rng.range(0, 3);
-        let mut classes = match model {
-            0 | 1 => Classes::ALL,
-            2 => Classes::NONE.with(Class::Oci).with(Class::Shards),
-            _ => Classes::NONE.with(Class::Shards),
-        };
-        let mut capacity = if model == 0 {
-            Resources {
-                cpu_milli: 48_000,
-                mem_bytes: 384 * GIB,
-                gpus: 0,
-            }
-        } else {
-            Resources {
-                cpu_milli: rng.range(4, 48).saturating_mul(1000),
-                mem_bytes: rng.range(8, 384).saturating_mul(GIB),
-                gpus: u32::try_from(rng.range(0, 2)).unwrap_or(0),
-            }
-        };
+        let (mut classes, mut capacity) = g2_node(&mut rng);
         if id == 0 {
             // The tripped workload's node runs its kind and holds it.
             classes = classes.with(kind);
@@ -506,10 +539,7 @@ pub fn dangerous(seed: u64, kind: Class) -> Result<Dangerous, FaultError> {
             capacity.gpus = capacity.gpus.max(need.gpus);
         }
         specs.push(NodeSpec {
-            id: NodeId(
-                u32::try_from(id)
-                    .map_err(|_| FaultError::Sim(crate::SimError::Config("a node id past u32")))?,
-            ),
+            id: node_id(id)?,
             capacity,
             background_milli: 0,
             classes,
@@ -534,20 +564,7 @@ pub fn dangerous(seed: u64, kind: Class) -> Result<Dangerous, FaultError> {
     // A seeded load: up to 4 workloads a node, each placed through the fast path where it fits.
     let sample = Placement::default();
     for _ in 0..n.saturating_mul(4) {
-        let class = match rng.range(0, 2) {
-            0 => Class::Oci,
-            1 => Class::Firecracker,
-            _ => Class::Shards,
-        };
-        let filler = Demand {
-            need: Resources {
-                cpu_milli: rng.range(1_000, 24_000),
-                mem_bytes: add(rng.range(1, 192).saturating_mul(GIB), overheads.of(class))?,
-                gpus: 0,
-            },
-            kind: Kind::Plain,
-            class,
-        };
+        let filler = g2_workload(&mut rng, overheads)?;
         if let Some(key) = index.sampled_fit(&filler, &sample).best {
             index.take(key.node, &filler).map_err(FaultError::Sim)?;
         }
@@ -637,11 +654,17 @@ pub fn dangerous(seed: u64, kind: Class) -> Result<Dangerous, FaultError> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Correlated {
     pub nodes: u64,
-    pub cap: u64,
-    /// The most nodes ejected at once.
+    /// Workloads placed in the cell before the fault.
+    pub workloads: u64,
+    /// Nodes ejected, and the most out at once.
+    pub ejected: u64,
     pub max_ejected: u64,
-    /// Drains the cap refused (non-vacuity: the cap was reached).
+    /// Drains refused because the rest of the cell couldn't re-place the node's work (non-vacuity:
+    /// the cell filled).
     pub refused: u64,
+    /// Workloads moved off ejected nodes, and those left with no node (the criterion: none).
+    pub re_placed: u64,
+    pub stranded: u64,
     /// Nodes whose work was moved after a mass loss, and the most moved in any `window` stretch.
     pub moved: u64,
     pub max_moved_in_window: u64,
@@ -649,21 +672,100 @@ pub struct Correlated {
     pub allowed_in_window: u64,
 }
 
-/// Correlated faults (F6): a third to two fifths of a cell turns slow at once (a bad rollout, a
-/// noisy shared dependency), then most of the cell is lost at once (a partition). The slow nodes'
-/// drains go through the ejector, the lost nodes' work through the eviction limiter.
+/// The cell as it would stand with `node` taken out of placement: its workloads given back and its
+/// whole capacity fenced, then each re-placed through the fast path in turn. Returns the cell, where
+/// each went, and how many no node admitted at their turn (`admitted_anywhere`).
+fn without(
+    index: &FitIndex,
+    node: NodeId,
+    work: &[Demand],
+    sample: &Placement,
+) -> Result<(FitIndex, Vec<Option<NodeId>>, u64), FaultError> {
+    let mut rest = index.clone();
+    for w in work {
+        rest.give(node, w).map_err(FaultError::Sim)?;
+    }
+    fence(&mut rest, node)?;
+    let mut to = Vec::with_capacity(work.len());
+    let mut stranded: u64 = 0;
+    for w in work {
+        if !rest.admitted_anywhere(w) {
+            stranded = stranded.saturating_add(1);
+            to.push(None);
+            continue;
+        }
+        let at = rest.sampled_fit(w, sample).best.map(|k| k.node);
+        match at {
+            Some(at) => {
+                rest.take(at, w).map_err(FaultError::Sim)?;
+            }
+            None => stranded = stranded.saturating_add(1),
+        }
+        to.push(at);
+    }
+    Ok((rest, to, stranded))
+}
+
+/// Takes `node`'s whole free capacity, so nothing more is placed there.
+fn fence(index: &mut FitIndex, node: NodeId) -> Result<(), FaultError> {
+    let k = index.key(node).map_err(FaultError::Sim)?;
+    let all = Demand {
+        need: Resources {
+            cpu_milli: k.cpu_milli,
+            mem_bytes: k.mem_bytes,
+            gpus: k.gpus,
+        },
+        kind: Kind::Plain,
+        class: Class::Oci,
+    };
+    index.take(node, &all).map_err(FaultError::Sim)?;
+    Ok(())
+}
+
+/// Correlated faults (F6): a cell of 20-200 of G2's node models carries a seeded load (1-6 workloads
+/// a node asked, of the three kinds, placed through the fast path where they fit); a third to two
+/// fifths of it turns slow at once (a bad rollout, a noisy shared dependency). Each slow node's drain
+/// ejects it only where the rest of the cell re-places its every workload at that moment, measured on
+/// a copy of the cell with the node fenced; otherwise the ejector refuses it ([`Refusal::NoRoom`]) and
+/// it stays in placement, graded. Then most of the cell is lost at once (a partition), its work moved
+/// through the eviction limiter.
+///
+/// [`Refusal::NoRoom`]: hex_health::penalty::Refusal::NoRoom
 pub fn correlated(seed: u64, mutant: Mutant) -> Result<Correlated, FaultError> {
     let mut rng = Rng::new(seed);
     let nodes = rng.range(20, 200);
     let slow_share = rng.range(300, 400);
-    let mut g = PeerGrade::new(usize::try_from(nodes).unwrap_or(usize::MAX), 0);
-    let mut ejector = Ejector::new(nodes, usize::try_from(nodes).unwrap_or(usize::MAX));
+    let overheads = kind_overheads();
+    let mut specs = Vec::new();
+    for id in 0..nodes {
+        let (classes, capacity) = g2_node(&mut rng);
+        specs.push(NodeSpec {
+            id: node_id(id)?,
+            capacity,
+            background_milli: 0,
+            classes,
+        });
+    }
+    let mut index = FitIndex::new(&specs).map_err(FaultError::Sim)?;
+    let mut work: Vec<Vec<Demand>> = vec![Vec::new(); specs.len()];
+    let sample = Placement::default();
+    let asked = nodes.saturating_mul(rng.range(1, 6));
     let mut out = Correlated {
         nodes,
-        cap: ejector.cap(),
         ..Correlated::default()
     };
-    let mut ejected_by_mutant: u64 = 0;
+    for _ in 0..asked {
+        let w = g2_workload(&mut rng, overheads)?;
+        if let Some(k) = index.sampled_fit(&w, &sample).best {
+            index.take(k.node, &w).map_err(FaultError::Sim)?;
+            if let Some(on) = usize::try_from(k.node.0).ok().and_then(|i| work.get_mut(i)) {
+                on.push(w);
+                out.workloads = out.workloads.saturating_add(1);
+            }
+        }
+    }
+    let mut g = PeerGrade::new(specs.len(), 0);
+    let mut ejector = Ejector::new(specs.len());
     let mut changes = Vec::new();
     let mut t: u64 = 0;
     while t < 10 * S {
@@ -678,14 +780,35 @@ pub fn correlated(seed: u64, mutant: Mutant) -> Result<Correlated, FaultError> {
             changes.clear();
             g.observe(n, at, s, &mut changes)?;
             for c in changes.iter().filter(|c| c.level == Level::Drain) {
-                if mutant == Mutant::NoEjectionCap {
-                    ejected_by_mutant = ejected_by_mutant.saturating_add(1);
-                } else if ejector.eject(c.node, at)?.is_err() {
+                if ejector.is_ejected(c.node, at) {
+                    continue;
+                }
+                let node = node_id(c.node)?;
+                let i = usize::try_from(c.node).map_err(|_| {
+                    FaultError::Sim(crate::SimError::Config("a node id past usize"))
+                })?;
+                let on = work.get(i).cloned().unwrap_or_default();
+                let (rest, to, stranded) = without(&index, node, &on, &sample)?;
+                let re_placeable = stranded == 0 || mutant == Mutant::NoReplacementCheck;
+                if ejector.eject(c.node, at, re_placeable)?.is_err() {
                     out.refused = out.refused.saturating_add(1);
+                    continue;
+                }
+                out.ejected = out.ejected.saturating_add(1);
+                out.stranded = out.stranded.saturating_add(stranded);
+                index = rest;
+                if let Some(left) = work.get_mut(i) {
+                    left.clear();
+                }
+                for (w, to) in on.into_iter().zip(to) {
+                    let Some(to) = to else { continue };
+                    if let Some(there) = usize::try_from(to.0).ok().and_then(|j| work.get_mut(j)) {
+                        there.push(w);
+                        out.re_placed = out.re_placed.saturating_add(1);
+                    }
                 }
             }
-            let now = ejector.ejected_at(at).saturating_add(ejected_by_mutant);
-            out.max_ejected = out.max_ejected.max(now);
+            out.max_ejected = out.max_ejected.max(ejector.ejected_at(at));
         }
         t = add(t, 100 * MS)?;
     }

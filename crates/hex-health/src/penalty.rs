@@ -2,8 +2,10 @@
 //! a cell down (S8: repeat offenders, mass loss).
 //!
 //! - [`Ejector`]: a node taken out of placement stays out for the base time multiplied by its
-//!   consecutive ejections, up to a maximum, and never past the cell's ejection cap (Envoy's outlier
-//!   ejection, PF[18]).
+//!   consecutive ejections, up to a maximum (Envoy's outlier ejection, PF[18]), and is taken out only
+//!   when the cell can re-place its work: the scheduler measures that at the moment of ejection
+//!   (re-placing the node's workloads on what the rest of the cell has free), so a correlated fault
+//!   drains no cell, with no copied share of nodes.
 //! - [`EvictionLimiter`]: work moved off failed nodes at a rate that drops when most of the cell has
 //!   failed at once, since a mass failure looks like a partition (Borg PF[37] §3.5; Kubernetes'
 //!   node lifecycle controller).
@@ -20,9 +22,6 @@ const S: u64 = 1_000_000_000;
 pub const BASE_EJECTION_NS: u64 = 30 * S;
 /// Envoy `max_ejection_time` default: 300 s (outlier_detection.proto:157, v1.36.0).
 pub const MAX_EJECTION_NS: u64 = 300 * S;
-/// Envoy `max_ejection_percent` default: "Defaults to 10%" (outlier_detection.proto:45, v1.36.0), with
-/// its `always_eject_one_host` (line 177) so a small cell can still take its one bad node out.
-pub const MAX_EJECTION_PER_MILLE: u64 = 100;
 /// Kubernetes `--node-eviction-rate` default 0.1 nodes/s, in thousandths of a node per second.
 pub const EVICTION_MILLI_PER_S: u64 = 100;
 /// Kubernetes `--secondary-node-eviction-rate` default 0.01 nodes/s, once the cell is unhealthy.
@@ -41,8 +40,8 @@ pub const BACKOFF_RESET_NS: u64 = 600 * S;
 /// Why a penalty was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
-    /// The cell already has `ejected` of its `cap` nodes ejected.
-    EjectionCap { ejected: u64, cap: u64 },
+    /// The rest of the cell can't re-place the node's work, as the scheduler measured it.
+    NoRoom,
     /// No eviction token until `next_ns`; at a rate of 0, never (`None`).
     RateLimited { next_ns: Option<u64> },
 }
@@ -57,32 +56,16 @@ struct Ejection {
 
 #[derive(Debug, Clone)]
 pub struct Ejector {
-    cell_nodes: u64,
     max_tracked: usize,
     nodes: BTreeMap<u64, Ejection>,
 }
 
 impl Ejector {
-    pub fn new(cell_nodes: u64, max_tracked: usize) -> Self {
+    pub fn new(max_tracked: usize) -> Self {
         Self {
-            cell_nodes,
             max_tracked,
             nodes: BTreeMap::new(),
         }
-    }
-
-    /// The most nodes ejected at once: 10% of the cell, at least one in a cell of two or more.
-    pub fn cap(&self) -> u64 {
-        let tenth = self.cell_nodes.saturating_mul(MAX_EJECTION_PER_MILLE) / 1000;
-        if self.cell_nodes >= 2 {
-            tenth.max(1)
-        } else {
-            0
-        }
-    }
-
-    pub fn set_cell_nodes(&mut self, cell_nodes: u64) {
-        self.cell_nodes = cell_nodes;
     }
 
     pub fn ejected_at(&self, now_ns: u64) -> u64 {
@@ -94,18 +77,22 @@ impl Ejector {
         self.nodes.get(&node).is_some_and(|e| e.until_ns > now_ns)
     }
 
-    /// Eject `node` at `now_ns`; returns until when, or the cap's refusal. A node already ejected
-    /// stays as it is.
-    pub fn eject(&mut self, node: u64, now_ns: u64) -> Result<Result<u64, Refusal>, HealthError> {
+    /// Eject `node` at `now_ns`, where `re_placeable` is the scheduler's measure of whether the rest
+    /// of the cell can re-place its work now; returns until when, or [`Refusal::NoRoom`]. A node
+    /// already ejected stays as it is.
+    pub fn eject(
+        &mut self,
+        node: u64,
+        now_ns: u64,
+        re_placeable: bool,
+    ) -> Result<Result<u64, Refusal>, HealthError> {
         if let Some(e) = self.nodes.get(&node)
             && e.until_ns > now_ns
         {
             return Ok(Ok(e.until_ns));
         }
-        let ejected = self.ejected_at(now_ns);
-        let cap = self.cap();
-        if ejected >= cap {
-            return Ok(Err(Refusal::EjectionCap { ejected, cap }));
+        if !re_placeable {
+            return Ok(Err(Refusal::NoRoom));
         }
         if !self.nodes.contains_key(&node) && self.nodes.len() >= self.max_tracked {
             return Err(HealthError::Full {
@@ -254,11 +241,11 @@ mod tests {
     /// the maximum.
     #[test]
     fn ejection_escalates_by_count_and_caps() {
-        let mut e = Ejector::new(100, 1000);
+        let mut e = Ejector::new(1000);
         let mut t = 0;
         let mut spans = Vec::new();
         for _ in 0..12 {
-            let until = e.eject(7, t).unwrap().unwrap();
+            let until = e.eject(7, t, true).unwrap().unwrap();
             spans.push(until - t);
             t = until;
         }
@@ -271,41 +258,31 @@ mod tests {
     /// S8: a healthy node is forgiven one multiple per base time, and forgotten at zero.
     #[test]
     fn healthy_time_forgives() {
-        let mut e = Ejector::new(100, 1000);
-        let u1 = e.eject(7, 0).unwrap().unwrap();
-        let u2 = e.eject(7, u1).unwrap().unwrap();
+        let mut e = Ejector::new(1000);
+        let u1 = e.eject(7, 0, true).unwrap().unwrap();
+        let u2 = e.eject(7, u1, true).unwrap().unwrap();
         assert_eq!(u2 - u1, 60 * S);
         e.healthy(7, u2 + 30 * S);
-        let u3 = e.eject(7, u2 + 30 * S).unwrap().unwrap();
+        let u3 = e.eject(7, u2 + 30 * S, true).unwrap().unwrap();
         assert_eq!(u3 - (u2 + 30 * S), 60 * S);
         e.healthy(7, u3 + 600 * S);
-        let u4 = e.eject(7, u3 + 600 * S).unwrap().unwrap();
+        let u4 = e.eject(7, u3 + 600 * S, true).unwrap().unwrap();
         assert_eq!(u4 - (u3 + 600 * S), 30 * S);
     }
 
-    /// S8 ejection cap: a correlated fault ejects at most 10% of the cell (one in a small cell), and
-    /// the next is refused, typed.
+    /// S8 ejection (F6, the criterion restated 2026-11-06): do eject nodes while the scheduler says
+    /// the cell can re-place their work, then one it says can't; expect the first ejected and the last
+    /// refused, typed, leaving it in placement; a node already out stays out either way.
     #[test]
-    fn a_correlated_fault_ejects_no_more_than_the_cap() {
-        let mut e = Ejector::new(100, 1000);
-        let mut ejected = 0;
-        let mut refused = 0;
-        for n in 0..60 {
-            match e.eject(n, S).unwrap() {
-                Ok(_) => ejected += 1,
-                Err(Refusal::EjectionCap { cap, .. }) => {
-                    assert_eq!(cap, 10);
-                    refused += 1
-                }
-                Err(r) => panic!("{r:?}"),
-            }
+    fn a_node_is_ejected_only_when_its_work_can_be_re_placed() {
+        let mut e = Ejector::new(1000);
+        for n in 0..5 {
+            assert!(e.eject(n, S, true).unwrap().is_ok());
         }
-        assert_eq!((ejected, refused), (10, 50));
-        assert_eq!(e.ejected_at(S), 10);
-        assert_eq!(Ejector::new(5, 10).cap(), 1);
-        assert_eq!(Ejector::new(1, 10).cap(), 0);
-        let mut one = Ejector::new(1, 10);
-        assert!(one.eject(0, 0).unwrap().is_err());
+        assert_eq!(e.eject(5, S, false).unwrap(), Err(Refusal::NoRoom));
+        assert!(!e.is_ejected(5, S));
+        assert_eq!(e.ejected_at(S), 5);
+        assert!(e.eject(0, 2 * S, false).unwrap().is_ok());
     }
 
     /// S8 mass loss: 0.1 evictions/s in a healthy cell, 0.01/s once 55% (and at least 3) are down in

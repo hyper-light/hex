@@ -227,22 +227,31 @@ fn a_dangerous_workload_is_re_placed_in_a_stronger_kind_or_refused_at_its_signal
     }
 }
 
-/// S8 ejection cap and mass loss (F6): a cell-wide fault ejects no more than the cap at once (and does
-/// reach it), and a partition moves work no faster than the eviction rate.
+/// S8 ejection and mass loss (F6, the ejection criterion restated 2026-11-06 under Ada's rule that no
+/// constant is arbitrary): do turn a third to two fifths of a loaded cell of G2's node models slow at
+/// once; expect no ejection to leave work the cell can't re-place (every ejected node's workloads
+/// placed elsewhere, `admitted_anywhere` checked at the moment of ejection), drains refused where the
+/// rest of the cell is full (non-vacuity), some ejected; and a partition to move work no faster than
+/// the eviction rate.
 #[test]
-fn a_correlated_fault_never_passes_the_cap_or_the_rate() {
-    let mut refused = 0;
+fn a_correlated_fault_strands_no_work_and_never_passes_the_rate() {
+    let (mut ejected, mut refused, mut re_placed) = (0, 0, 0);
     for seed in 0..SEEDS {
         let c = faults::correlated(seed, Mutant::None).unwrap();
-        assert!(c.max_ejected <= c.cap, "seed {seed}: {c:?}");
+        assert_eq!(c.stranded, 0, "seed {seed}: {c:?}");
         assert!(
             c.max_moved_in_window <= c.allowed_in_window,
             "seed {seed}: {c:?}"
         );
         assert!(c.moved >= 1, "seed {seed}");
+        ejected += c.ejected;
         refused += c.refused;
+        re_placed += c.re_placed;
     }
-    assert!(refused > 0);
+    assert!(
+        ejected > 0 && refused > 0 && re_placed > 0,
+        "{ejected} {refused} {re_placed}"
+    );
 }
 
 /// Non-vacuity of F2: with the gray detector off, the same slow nodes are never suspected or drained,
@@ -256,18 +265,19 @@ fn without_the_detector_a_slow_node_is_never_caught() {
     }
 }
 
-/// Non-vacuity of F6: with the cap or the rate switched off, the same faults break them.
+/// Non-vacuity of F6: with the re-placement check or the rate switched off, the same faults strand
+/// work or pass the rate.
 #[test]
-fn without_the_cap_or_the_rate_a_correlated_fault_breaks_them() {
-    let over_cap = (0..100).any(|seed| {
-        let c = faults::correlated(seed, Mutant::NoEjectionCap).unwrap();
-        c.max_ejected > c.cap
+fn without_the_check_or_the_rate_a_correlated_fault_breaks_them() {
+    let stranded = (0..100).any(|seed| {
+        let c = faults::correlated(seed, Mutant::NoReplacementCheck).unwrap();
+        c.stranded > 0
     });
     let over_rate = (0..100).any(|seed| {
         let c = faults::correlated(seed, Mutant::NoEvictionRate).unwrap();
         c.max_moved_in_window > c.allowed_in_window
     });
-    assert!(over_cap && over_rate, "{over_cap} {over_rate}");
+    assert!(stranded && over_rate, "{stranded} {over_rate}");
 }
 
 /// H1: a fault run is a function of its seed.

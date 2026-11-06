@@ -46,10 +46,6 @@ fn code() -> BTreeMap<&'static str, u128> {
             u128::from(penalty::MAX_EJECTION_NS),
         ),
         (
-            "penalty::MAX_EJECTION_PER_MILLE",
-            u128::from(penalty::MAX_EJECTION_PER_MILLE),
-        ),
-        (
             "penalty::EVICTION_MILLI_PER_S",
             u128::from(penalty::EVICTION_MILLI_PER_S),
         ),
@@ -155,6 +151,6 @@ fn the_designs_constants_are_the_codes() {
         .map(|(k, v)| (k.to_string(), v))
         .collect();
     let doc = doc();
-    assert_eq!(doc.len(), 35, "the table lost or gained a row");
+    assert_eq!(doc.len(), 34, "the table lost or gained a row");
     assert_eq!(doc, code);
 }
