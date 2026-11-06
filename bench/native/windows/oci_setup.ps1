@@ -6,12 +6,14 @@
 #   - Docker's static Windows engine (dockerd.exe, docker.exe), run with its own data-root and pipe,
 #     process isolation, the same image pulled into it.
 # Each download's version and SHA-256 are written to versions.txt beside the record. Prints the layers
-# ('HEX_WINDOWS_LAYERS=...') and writes them to layers.txt. Stop everything with oci_teardown.ps1.
+# ('HEX_WINDOWS_LAYERS=...') and writes them to layers.txt, and a mismatched image's (Server 2019's) to
+# mismatch-layers.txt ('HEX_WINDOWS_MISMATCH_LAYERS=...'). Stop everything with oci_teardown.ps1.
 #
 #   powershell -NoProfile -File oci_setup.ps1 [-Root <dir>] [-Image <ref>]
 param(
     [string]$Root = "$env:USERPROFILE\.cache\hex-native-s4",
-    [string]$Image = "mcr.microsoft.com/windows/nanoserver:ltsc2025"
+    [string]$Image = "mcr.microsoft.com/windows/nanoserver:ltsc2025",
+    [string]$Mismatch = "mcr.microsoft.com/windows/nanoserver:ltsc2019"
 )
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
@@ -79,25 +81,34 @@ Must "ctr images pull"
 & "$Root\docker\docker.exe" -H $Dock pull $Image
 Must "docker pull"
 
-# The image's layer folders: a prepared snapshot's mount names its parents, topmost first.
-$chain = (& ctr -a $Ctrd images ls --quiet) | Select-Object -First 1
-$top = (& ctr -a $Ctrd snapshots --snapshotter windows ls) | Select-String -Pattern "Committed" |
-    ForEach-Object { ($_ -split '\s+')[0] }
-$key = "hex-native-s4-layers"
-cmd /c "ctr -a $Ctrd snapshots --snapshotter windows rm $key 2>nul"
-# The topmost committed snapshot is the one no other committed snapshot names as its parent.
-$parents = (& ctr -a $Ctrd snapshots --snapshotter windows ls) | ForEach-Object { ($_ -split '\s+')[1] }
-$head = $top | Where-Object { $parents -notcontains $_ } | Select-Object -First 1
-$mount = (& ctr -a $Ctrd snapshots --snapshotter windows prepare --mounts $key $head) -join " "
-Must "ctr snapshots prepare"
-& ctr -a $Ctrd snapshots --snapshotter windows rm $key
-Must "ctr snapshots rm"
-"image $Image chain $chain head $head mount $mount" | Add-Content $versions
-# ctr prints the mounts as JSON; the parents are one option's JSON array, topmost first.
-$opt = (($mount | ConvertFrom-Json) | ForEach-Object { $_.Options }) |
-    Where-Object { $_ -like "parentLayerPaths=*" } | Select-Object -First 1
-if (-not $opt) { throw "no parentLayerPaths in ctr's mount: $mount" }
-$layers = ($opt.Substring("parentLayerPaths=".Length) | ConvertFrom-Json) -join ";"
-if (-not $layers) { throw "ctr's mount names no parent layers: $mount" }
-$layers | Set-Content (Join-Path $Root "layers.txt")
-"HEX_WINDOWS_LAYERS=$layers"
+# An image's layer folders, from its own containerd namespace: a prepared snapshot's mount names its
+# parents, topmost first, and the topmost committed snapshot is the one no other names as its parent.
+function Layers([string]$ns, [string]$img, [string]$file, [string]$name) {
+    $ls = (& ctr -a $Ctrd -n $ns snapshots --snapshotter windows ls)
+    Must "ctr snapshots ls"
+    $top = $ls | Select-String -Pattern "Committed" | ForEach-Object { ($_ -split '\s+')[0] }
+    $parents = $ls | ForEach-Object { ($_ -split '\s+')[1] }
+    $head = $top | Where-Object { $parents -notcontains $_ } | Select-Object -First 1
+    $key = "hex-native-s4-layers"
+    cmd /c "ctr -a $Ctrd -n $ns snapshots --snapshotter windows rm $key 2>nul"
+    $mount = (& ctr -a $Ctrd -n $ns snapshots --snapshotter windows prepare --mounts $key $head) -join " "
+    Must "ctr snapshots prepare"
+    & ctr -a $Ctrd -n $ns snapshots --snapshotter windows rm $key
+    Must "ctr snapshots rm"
+    "image $img namespace $ns head $head mount $mount" | Add-Content $versions
+    # ctr prints the mounts as JSON; the parents are one option's JSON array, topmost first.
+    $opt = (($mount | ConvertFrom-Json) | ForEach-Object { $_.Options }) |
+        Where-Object { $_ -like "parentLayerPaths=*" } | Select-Object -First 1
+    if (-not $opt) { throw "no parentLayerPaths in ctr's mount: $mount" }
+    $layers = ($opt.Substring("parentLayerPaths=".Length) | ConvertFrom-Json) -join ";"
+    if (-not $layers) { throw "ctr's mount names no parent layers: $mount" }
+    $layers | Set-Content (Join-Path $Root $file)
+    "$name=$layers"
+}
+Layers "default" $Image "layers.txt" "HEX_WINDOWS_LAYERS"
+
+# An image this host doesn't run, for the version refusal: Server 2019's, which no Windows 11 runs
+# process-isolated (version-compatibility.md, research note §7). Into containerd only, its own namespace.
+& ctr -a $Ctrd -n hex-mismatch images pull --platform windows/amd64 $Mismatch
+Must "ctr images pull (mismatch)"
+Layers "hex-mismatch" $Mismatch "mismatch-layers.txt" "HEX_WINDOWS_MISMATCH_LAYERS"
