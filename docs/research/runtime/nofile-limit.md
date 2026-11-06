@@ -215,3 +215,32 @@ only a privileged process (here: PID 1 starting `user@UID.service`) can set it.
 Falsifiers: `/proc/<hex-node>/limits` after a fresh install shows a soft limit under 594,304; a
 user-manager unit gets a hard limit above its manager's; or `setrlimit` of `RLIMIT_NOFILE` hard
 1,048,576 fails with `EPERM` on a kernel whose `fs.nr_open` is the default.
+
+## 6. macOS: which boxes get the default, and why plain ones don't
+
+Ada's call (2026-11-06, native plan step 6): a box whose spec names no `RLIMIT_NOFILE` gets Docker 29's
+1024:524288, capped at the node's hard limit (`hex_core::limits`).
+
+- **Box-user boxes get it.** The privileged helper starts each program from a forked child that calls
+  only async-signal-safe libc before `execve`; it sets `RLIMIT_NOFILE` there beside `RLIMIT_NPROC`, capped
+  at the helper's own hard limit (`crates/hex-runtime/src/macos/helper_sys.rs`, `fork_exec_as`). The root
+  lab's `box_user_boxes_hold_the_contract` checks it (HEX-INST-6).
+- **Plain (process-group) boxes keep the embedding process's limit.** There is no macOS `hex node`
+  (`crates/hex-cli/src/lib.rs:23-24`: Linux only), and the installer installs only the helper, so a
+  process box's members inherit whatever process embeds `MacRuntime`. Hex raises no limit on macOS. Measured
+  on adas-mac-studio-2 (macOS 26.2, 2026-11-06), a shell started by kiln's runner: soft 10,240, hard
+  unlimited, with `kern.maxfilesperproc` 138,240 bounding any process's descriptors below 524,288. Not
+  measured: a launchd-started process's (launchd's `maxfiles`).
+- **Why the default isn't applied there.** XNU's `posix_spawn`, which the class uses for its group,
+  signals, QoS clamp and fatal memory cap, has no rlimit attribute (`bsd/kern/kern_exec.c`, `posix_spawn()`;
+  `posix_spawnattr_set_filedesclimit_ext` is a separate descriptor count that notifies, not
+  `RLIMIT_NOFILE`, `bsd/kern/kern_descrip.c` `fd_check_limit_exceeded`; XNU `main` f6217f891ac0). Setting it
+  in a forked child before the spawn means calling `posix_spawn` after a fork of the multi-threaded node,
+  which isn't async-signal-safe (it may take a malloc or libc lock another thread held at the fork): a
+  deadlock hazard (CLAUDE.md §3), so not done (the lead, 2026-11-06). Lowering the node's own limit
+  around a spawn would give its other threads `EMFILE`.
+- **The safe route, if plain boxes must have it:** move their spawn into a single-threaded helper process,
+  as box-user mode does, whose child can call `setrlimit` before `execve`. Not built; the lead's call.
+
+Falsifiers: a box-user program shows other than `min(1024, hard)`:`min(524288, helper hard)`; a macOS
+`hex node` appears that raises its own limit (then plain boxes would inherit the raised one).
