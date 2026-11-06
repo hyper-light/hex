@@ -64,3 +64,35 @@ Of record on generated days: AC-T7.5.2 holds under DRF at 479 ppm from 25% (FIFO
 holds under Hex's policy with the others' p95 unchanged (plain DRF and FIFO miss). On the recorded
 workload day, AC-T7.5.2's precondition can be met only on a cluster smaller than the trace's own
 workloads allow DRF to work in, and T-T7.5.1's burst is too small for the trace's hosts to notice.
+
+## Searching for a recorded day where the bar's precondition holds
+
+AC-T7.5.2's precondition is four owners each asking for more than a quarter of the cluster; for DRF's
+equal shares to mean anything, the cluster should be whole m5d.metal hosts (48 cores, 384 GiB), each
+sandbox small beside one. So a qualifying day needs four owners each asking, on average over the day,
+for more than a quarter of at least one host: 12 cores or 96 GiB. `bench/sched/huawei_owners.py` reads a
+region's cold starts and request logs (lifetimes as `huawei_trace.py` takes them) and prints the
+busiest owners and the largest such cluster.
+
+What the release has (its README, https://github.com/sir-lab/data-release, `README_data_release_2025.md`
+and `README_data_release_2023.md`, read 2026-11-06):
+- request logs, which give lifetimes, exist only for day 30, in all five regions ("event-level logs of
+  individual requests for day 30 of our dataset"); cold starts cover all 31 days;
+- region 1's request logs keep "the top 100 pods per function", and region 3's are "a subsample", which
+  bias lifetimes;
+- the 2023 traces are per-function time series ("Percentage of allocated CPU used per function
+  averaged over all pods", "Number of pods allocated to that function") with no row per sandbox and no
+  owner, so no day of them can carry the bar.
+
+| region, day 30 | owners | busiest four: mean ask as a share of one host | largest qualifying cluster | qualifies |
+|---|---:|---|---:|---|
+| R5 | 339 | 13.3%, 5.3%, 3.4%, 1.4% | 0 hosts | no |
+| R4 | 1,663 | 128.6%, 14.7%, 14.5%, 4.8% | 0 hosts | no |
+| R2 | | not read: Google Drive refused the downloads ("Quota exceeded") after 7 of 10 request files | | pending |
+| R3 | | not read: Drive quota (request logs subsampled) | | pending |
+| R1 | | not read: Drive quota (request logs keep the top 100 pods per function) | | pending |
+
+R5's numbers match `huawei-r5-day30.trace`'s, so the scan reads the release as the trace does. Largest
+sandbox: 6.6 cores in R5 (13.8% of a host), 3.4 in R4 (7.1%). Measured 2026-11-06 on fedora (unit
+`hex-sched-g4-huawei-20261106T113124Z`), with these files' sha256s: R5 requests
+`5825f744…6e60d`; R4 requests `bab840de…ff2bd` (part 2; part 1's is in the run's log).
