@@ -1138,6 +1138,19 @@ mod tests {
         assert_eq!(cg.kill(), Ok(()));
     }
 
+    /// AC-T7.1.4 (delete ends every process), CLAUDE.md §2; Ada's 2026-11-06 rule (no picked constants): the most
+    /// processes a box's signal or sweep is sent to is the kernel's ceiling on pids, so no box this host can make
+    /// holds more. Do: read this host's `pid_max` (proc(5), at most `PID_MAX_LIMIT`). Expect: the bound no lower.
+    #[test]
+    fn the_signal_bound_is_no_lower_than_the_hosts_pid_max() {
+        let pid_max: usize = std::fs::read_to_string("/proc/sys/kernel/pid_max")
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(MAX_SIGNALLED >= pid_max, "{MAX_SIGNALLED} < {pid_max}");
+    }
+
     #[test]
     fn sweep_collects_every_process_in_the_subtree() {
         let tree = Mock {
