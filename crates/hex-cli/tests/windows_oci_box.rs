@@ -376,8 +376,9 @@ fn a_deleted_box_leaves_nothing(lab: &Lab) {
 }
 
 /// Native step 4 (the lead's condition, 2026-11-06): copies of one `blank.vhdx` share a volume identity, so
-/// do: create and start `n` boxes at once (8 and 32, as oci_compare runs them), each writing a file of its
-/// own. Expect: every one starts, and none sees another's file — each runs on a volume of its own.
+/// do: create and start `n` boxes at once, each writing a file of its own. Expect: every one starts, and
+/// none sees another's file — each runs on a volume of its own. `n` is 8 and 32, the plan's concurrency
+/// points (its throughput is measured at 1, 8 and 32: bench/competitive/README.md:24; 1 is every other case).
 fn boxes_started_at_once_each_have_their_own_volume(lab: &Lab, n: usize) {
     let rt = lab.runtime();
     let ids: Vec<BoxId> = (0..n)
