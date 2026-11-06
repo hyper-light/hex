@@ -91,6 +91,8 @@ pub struct Job {
     pub need: Resources,
     pub owner: OwnerId,
     pub class: Class,
+    /// Its recorded workload kind (what the fast path's filters keep apart).
+    pub kind: Kind,
     pub home: NodeId,
     pub round_trips: u64,
     pub arrives: Time,
@@ -238,6 +240,7 @@ impl Study {
                 need: launch.need,
                 owner: launch.tenancy.owner,
                 class: launch.class,
+                kind: launch.kind,
                 home,
                 round_trips,
                 arrives: launch.arrives,
@@ -446,7 +449,7 @@ fn run_ns(round_trips: u64, compute: Time, rtt_ns: Time) -> Result<Time, SimErro
 fn demand(job: &Job) -> Demand {
     Demand {
         need: job.need,
-        kind: Kind::Plain,
+        kind: job.kind,
         class: job.class,
     }
 }
@@ -551,8 +554,8 @@ mod tests {
     }
 
     /// AC-T7.4.3's kinds (H10), S4: do generate a study of each recorded fleet; expect its jobs to be
-    /// the recorded day's launches, every one (owner, kind, need with overhead, arrival, and lifetime
-    /// as compute), its nodes the recorded node rows in order, and on the fleet trace some nodes that
+    /// the recorded day's launches, every one (owner, class, workload kind, need with overhead,
+    /// arrival, and lifetime as compute), its nodes the recorded node rows in order, and on the fleet trace some nodes that
     /// run only some kinds, every kind on some node.
     #[test]
     fn jobs_and_nodes_are_the_recorded_ones() {
@@ -562,12 +565,21 @@ mod tests {
             let mut want: Vec<_> = rec
                 .workloads
                 .iter()
-                .map(|w| (w.arrives, w.tenancy.owner, w.class, w.need, w.runs_for))
+                .map(|w| {
+                    (
+                        w.arrives,
+                        w.tenancy.owner,
+                        w.class,
+                        w.kind,
+                        w.need,
+                        w.runs_for,
+                    )
+                })
                 .collect();
             let mut got: Vec<_> = study
                 .jobs
                 .iter()
-                .map(|j| (j.arrives, j.owner, j.class, j.need, Some(j.compute)))
+                .map(|j| (j.arrives, j.owner, j.class, j.kind, j.need, Some(j.compute)))
                 .collect();
             want.sort();
             got.sort();

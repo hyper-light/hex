@@ -402,7 +402,6 @@ fn median_error(wan: &Wan, coordinates: &Coordinates) -> Result<Option<f64>, Sim
 /// How well the coordinates predict the WAN, over every pair.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Accuracy {
-    pub pairs: usize,
     /// The median of `|predicted − true| / true` over every pair apart.
     pub median_relative_error: f64,
     /// Of every trial of a node, a peer apart from it in its region and a peer outside it, how many
@@ -413,7 +412,6 @@ pub struct Accuracy {
 
 impl Accuracy {
     pub fn measure(wan: &Wan, coordinates: &Coordinates) -> Result<Self, SimError> {
-        let pairs = pairs_apart(wan)?.len();
         let median_relative_error =
             median_error(wan, coordinates)?.ok_or(SimError::Config("no pair of nodes is apart"))?;
         let n = wan.len();
@@ -440,7 +438,6 @@ impl Accuracy {
             }
         }
         Ok(Self {
-            pairs,
             median_relative_error,
             region_ranked_first,
             region_trials,
