@@ -1188,14 +1188,11 @@ struct CaseMade {
 impl Drop for CaseMade {
     fn drop(&mut self) {
         if self.boxes.exists() {
-            let _ = std::fs::write(self.boxes.join("cgroup.kill"), "1");
-            let deadline = Instant::now() + conformance::PATIENCE;
-            while Instant::now() < deadline
-                && std::fs::read_to_string(self.boxes.join("cgroup.events"))
-                    .is_ok_and(|events| events.lines().any(|l| l == "populated 1"))
-            {
-                std::thread::park_timeout(Duration::from_millis(10));
-            }
+            // Waited on cgroup.events' `populated`, as a delete waits for a box to empty, not polled on a picked
+            // period (Ada's 2026-11-06 rule).
+            let cg = hex_runtime::linux::cgroup::BoxCgroup::at(self.boxes.clone());
+            let _ = cg.kill();
+            let _ = cg.wait_empty(conformance::PATIENCE);
             let (mut walk, mut dirs) = (vec![self.boxes.clone()], Vec::new());
             while let Some(dir) = walk.pop() {
                 if let Ok(entries) = std::fs::read_dir(&dir) {

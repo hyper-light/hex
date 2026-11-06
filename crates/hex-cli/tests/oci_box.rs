@@ -99,17 +99,23 @@ fn oci_boxes_report_their_inits_exit_through_the_seam() {
     }
 }
 
-/// How long a delegated re-run may take: it runs this suite once more, each wait of its own already bounded
-/// (conformance's PATIENCE), and the suite took 5.57 s as root and 4.70 s in the gates on fedora at 5e0082e
-/// (hex-g5rec-gates-20261105T113718Z), so past this it is stuck, not slow. As oci_lsm's and oci_seccomp's
-/// (cp/t7-g6-lsm 1cadab7).
-const RERUN_BOUND: Duration = Duration::from_secs(300);
+/// The suite's time as root, recorded: 5.57 s (4.70 s in the gates) on fedora at 5e0082e
+/// (hex-g5rec-gates-20261105T113718Z).
+const SUITE_AS_ROOT: Duration = Duration::from_millis(5_570);
+
+/// How long a delegated re-run may take, derived rather than picked (Ada's 2026-11-06 rule): the suite's recorded
+/// time and one [`conformance::PATIENCE`] more. Each of the re-run's waits is bounded by that patience and fails the
+/// re-run past it, so a re-run that has waited the suite's time and a whole patience beyond it is stuck outside any
+/// bounded wait, not slow. It was 300 s, picked.
+fn rerun_bound() -> Duration {
+    SUITE_AS_ROOT + conformance::PATIENCE
+}
 
 /// Re-runs the test `name` in a transient systemd --user scope with `Delegate=yes`, so it gets a cgroup of its
 /// own to subdivide. Only where a user manager answers (its `$XDG_RUNTIME_DIR/systemd/private` socket is
 /// there): a `systemd-run` binary with no manager running, as in a guest whose PID 1 isn't systemd, would wait
 /// on a manager that never comes. Prints the reason and returns where there's none. The re-run is waited on
-/// for at most [`RERUN_BOUND`], then killed and failed by name.
+/// for at most [`rerun_bound`], then killed and failed by name.
 fn rerun_delegated(name: &str, direct: &str) {
     let manager = std::env::var_os("XDG_RUNTIME_DIR")
         .map(|d| Path::new(&d).join("systemd/private"))
@@ -129,20 +135,21 @@ fn rerun_delegated(name: &str, direct: &str) {
         .spawn()
         .expect("run the test in a delegated scope");
     // The wait runs on a thread that sends the status when the child ends, so the test waits on that fact
-    // for at most RERUN_BOUND, and a hung re-run is killed by its pid.
+    // for at most rerun_bound(), and a hung re-run is killed by its pid.
     let pid = child.id();
     let (sent, ended) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = sent.send(child.wait());
     });
-    let status = match ended.recv_timeout(RERUN_BOUND) {
+    let bound = rerun_bound();
+    let status = match ended.recv_timeout(bound) {
         Ok(status) => status.expect("wait on the delegated re-run"),
         Err(_) => {
             let _ = Command::new("kill")
                 .args(["-KILL", &pid.to_string()])
                 .status();
             panic!(
-                "the delegated re-run of {name} was still running after {RERUN_BOUND:?}, so it was killed"
+                "the delegated re-run of {name} was still running after {bound:?}, so it was killed"
             );
         }
     };
@@ -3542,7 +3549,7 @@ fn program_alone(lab: &Lab, own: &Path) {
     );
     // The node makes inits ahead for boxes of no owner, each the agent's child (decision 8): their refill is
     // waited out first, its queue full (or a make failed), so the diff is the exec's alone.
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + conformance::PATIENCE;
     while Instant::now() < deadline {
         let ahead = node.cgroup_reuse().unwrap().ahead;
         if ahead.ready >= hex_node::INITS_AHEAD || ahead.failed > 0 {
@@ -3576,7 +3583,7 @@ fn program_alone(lab: &Lab, own: &Path) {
     // caller's own Proc, as HEX-RT-7 does) and find it ended by a signal, no zombie left.
     for mut p in [first, second] {
         let exit = p
-            .wait_for(Duration::from_secs(5))
+            .wait_for(conformance::PATIENCE)
             .expect("wait for a deleted program")
             .expect("the program ended with the box");
         assert!(
@@ -3635,7 +3642,7 @@ fn programs_hold_their_stdio_alone(lab: &Lab, own: &Path) {
     }
     drop(stray);
     node.delete(&id).expect("delete ends the programs");
-    exec.wait_for(Duration::from_secs(5))
+    exec.wait_for(conformance::PATIENCE)
         .expect("wait for a deleted program")
         .expect("the program ended with the box");
 }
@@ -3659,7 +3666,7 @@ fn exec_reads_no_state(lab: &Lab, own: &Path) {
             hex_api::Program::of(&["/usr/bin/true"]),
             hex_api::Stdio::null(),
         )
-        .and_then(|mut p| p.wait_for(Duration::from_secs(5)));
+        .and_then(|mut p| p.wait_for(conformance::PATIENCE));
     std::fs::rename(&aside, &file).expect("put the container's state back");
     assert_eq!(
         ran,
@@ -4915,7 +4922,7 @@ fn created_through_a_seed_in_its_cgroup_and_namespaces(lab: &Lab, own: &Path) {
     .expect("create through a seed");
     // The inits the node then makes ahead for boxes of no owner go through its create seeds too (decision 8):
     // their refill is waited out, its queue full (or a make failed), and they are taken out of the counts.
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + conformance::PATIENCE;
     while Instant::now() < deadline {
         let ahead = node.cgroup_reuse().unwrap().ahead;
         if ahead.ready >= hex_node::INITS_AHEAD || ahead.failed > 0 {

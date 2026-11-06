@@ -10,6 +10,7 @@
 set -uo pipefail
 N=${N:-600}; WARMUP=${WARMUP:-60}; ROUNDS=${ROUNDS:-3}; TRACE_N=${TRACE_N:-300}; OUT=/opt/out
 mkdir -p /run/err
+. "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/tracebuf.sh"
 
 # The OCI pass's bundles (oci_inside.sh): a `sleep` container to exec into, and the `true` one seam_oci names.
 ALL_NS='[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"}]'
@@ -73,16 +74,22 @@ untrace() {
   rmdir "$I" 2>/dev/null || echo "the trace instance $I wouldn't go" >&2
 }
 trap untrace EXIT
-for build in $BUILDS; do
+traced_once() { # traced_once <build>: its lifecycle traced, at TRACE_KB a CPU
+  local build=$1
   echo "traced: $build (load $(cut -d' ' -f1-3 /proc/loadavg))"
-  mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo 16384 > "$I/buffer_size_kb" \
-    || { echo "the trace instance $I couldn't be made" >&2; untrace; continue; }
+  mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo "${TRACE_KB:?}" > "$I/buffer_size_kb" \
+    || { echo "the trace instance $I couldn't be made" >&2; untrace; return 1; }
   for ev in $EVENTS; do filter "$ev" > "$I/events/$ev/filter" && echo 1 > "$I/events/$ev/enable"; done
   rm -f /run/hexab.stop
   python3 -I /opt/lab/probes/exec_breakdown.py drain "$I/trace_pipe" "$OUT/$build.trace.txt" /run/hexab.stop &
-  drain=$!
+  local drain=$!
   HEXBENCH_TRACE=$I seam "$build" "$OUT/$build.traced.json" "$TRACE_N" "$WARMUP" || echo "traced: $build FAILED"
   echo 0 > "$I/tracing_on"; touch /run/hexab.stop; wait "$drain"
   for c in "$I"/per_cpu/cpu*; do echo "== ${c##*/}"; cat "$c/stats"; done > "$OUT/$build.trace.stats"
   untrace
+}
+# Each build's buffer starts at 16,384 KiB a CPU, the runs of record's, and grows while its trace lost events
+# (tracebuf.sh); a build whose instance can't be made is skipped, as before.
+for build in $BUILDS; do
+  grown 16384 "$OUT/$build.trace.stats" traced_once "$build"
 done

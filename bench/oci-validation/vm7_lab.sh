@@ -3,7 +3,9 @@
 # copying): 7.1 brought open_tree(OPEN_TREE_NAMESPACE) and clone3(CLONE_EMPTY_MNTNS), which the lab hosts' 6.19
 # lacks, so the tests run as root in a KVM guest booting Fedora's 7.2 kernel build (vm7_build.sh makes it once,
 # under VM_DIR, ~/.cache/hex-t7/g6/vm). QEMU runs in a container from vm7_build.sh's image, held to the shared
-# host's caps (CPUs 16-31, 8 GB, the OOM killer's first pick; VM_CPUS, BENCH_MEMORY, BENCH_OOM), with no
+# host's caps (CPUs 16-31, 8 GB, the OOM killer's first pick; VM_CPUS, BENCH_MEMORY, BENCH_OOM: the shared fedora
+# host's rule for a job's containers, its CPUs off the timed 4-15; 1000 is the kernel's OOM_SCORE_ADJ_MAX,
+# include/uapi/linux/oom.h, the score that makes it the first the OOM killer takes), with no
 # network; the guest has VM_MEM (6G) and VM_SMP (8) vCPUs. Each run boots a fresh guest from the built root,
 # kept as built (-snapshot), and powers it off at the end: a few seconds' boot buys a guest no earlier run
 # touched. The test binaries' target dir is shared into the guest (9p) at the path it was built at, so the

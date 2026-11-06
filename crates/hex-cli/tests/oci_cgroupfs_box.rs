@@ -46,8 +46,9 @@ use hex_node::{Node, OCI_BOXES};
 
 const TEST: &str = "a_rootless_host_network_box_cannot_change_another_boxs_cgroup";
 /// Bounded wait for the box's program that reads its mount table: one that never ends fails rather
-/// than hangs (CLAUDE.md §4).
-const PATIENCE: Duration = Duration::from_secs(30);
+/// than hangs (CLAUDE.md §4). The conformance suite's patience for a program's end, not one of its own
+/// (Ada's 2026-11-06 rule).
+const PATIENCE: Duration = hex_api::conformance::PATIENCE;
 
 #[test]
 fn a_rootless_host_network_box_cannot_change_another_boxs_cgroup() {

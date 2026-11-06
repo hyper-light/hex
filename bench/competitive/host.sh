@@ -8,7 +8,8 @@
 # "boxseam" for the process class through the Runtime seam, with SEAM_BIN naming seam_box's release binary).
 # A later pass in the same run directory: OUT_DIR names it, ROUND_FIRST (1) numbers its rounds after the
 # ones there, HEXBENCH_PHASES picks the drivers' phases (all), HEXBENCH_SUSTAINED sets the sustained phase's
-# lifecycles (10000), HEXBENCH_INTERLEAVED_CPUS1 and _CPUS32 pin the interleaved phase's halves to their CPUs (seam_oci
+# lifecycles (10000), HEXBENCH_INTERLEAVED the interleaved phase's pairs a round (until its ratio is resolved against
+# the bar; the runs of record ran 10), HEXBENCH_INTERLEAVED_CPUS1 and _CPUS32 pin the interleaved phase's halves to their CPUs (seam_oci
 # says how), HEXBENCH_OWNER names one owner for every box seam_oci makes, HEXBENCH_PARKED_PROCS and HEXBENCH_AHEAD
 # reach seam_oci (decision 8: parked procs on, the cgroups made ahead),
 # HEXBENCH_DOCKER_CAPS gives every runtime's bundles Docker's default capabilities with no owner (oci_inside.sh says why),
@@ -60,7 +61,7 @@ done
   echo "cpu: $(lscpu | sed -n 's/^Model name: *//p') ($(nproc) cpus), pinned to $CPUSET"
   echo "memory: $(free -g | awk '/^Mem/ {print $2}') GiB"; echo "load at start: $(cat /proc/loadavg)"
   echo "hex: $HEX ($(sha256sum "$HEX" | cut -c1-16))"; [ -z "${SEAM:-}" ] || echo "seam_box: $SEAM ($(sha256sum "$SEAM" | cut -c1-16))"
-  echo "params: ROUNDS=$ROUNDS ROUND_FIRST=$ROUND_FIRST N=$N WARMUP=$WARMUP N_OVERRIDE=$N_OVERRIDE LIFECYCLES=$LIFECYCLES CAP=$CAP BUDGET_MIB=$BUDGET_MIB BOX_BUDGET_MIB=$BOX_BUDGET_MIB HEXBENCH_PHASES=${HEXBENCH_PHASES:-all} HEXBENCH_SUSTAINED=${HEXBENCH_SUSTAINED:-10000} HEXBENCH_INTERLEAVED=${HEXBENCH_INTERLEAVED:-10} HEXBENCH_INTERLEAVED_CPUS1=${HEXBENCH_INTERLEAVED_CPUS1:-all} HEXBENCH_INTERLEAVED_CPUS32=${HEXBENCH_INTERLEAVED_CPUS32:-all} HEXBENCH_OWNER=${HEXBENCH_OWNER:-none} HEXBENCH_PARKED_PROCS=${HEXBENCH_PARKED_PROCS:-unset} HEXBENCH_DOCKER_CAPS=${HEXBENCH_DOCKER_CAPS:-unset} HEXBENCH_BOX_MEMORY=${HEXBENCH_BOX_MEMORY:-256m} HEXBENCH_AHEAD=${HEXBENCH_AHEAD:-default} HEXBENCH_REUSE=${HEXBENCH_REUSE:-1} HEXBENCH_NOFILE=${HEXBENCH_NOFILE:-given} NETNS=${NETNS:-1} BENCH_MEMORY=${BENCH_MEMORY:-40g} BENCH_OOM=${BENCH_OOM:-none}"
+  echo "params: ROUNDS=$ROUNDS ROUND_FIRST=$ROUND_FIRST N=$N WARMUP=$WARMUP N_OVERRIDE=$N_OVERRIDE LIFECYCLES=$LIFECYCLES CAP=$CAP BUDGET_MIB=$BUDGET_MIB BOX_BUDGET_MIB=$BOX_BUDGET_MIB HEXBENCH_PHASES=${HEXBENCH_PHASES:-all} HEXBENCH_SUSTAINED=${HEXBENCH_SUSTAINED:-10000} HEXBENCH_INTERLEAVED=${HEXBENCH_INTERLEAVED:-until-resolved}HEXBENCH_INTERLEAVED_CPUS1=${HEXBENCH_INTERLEAVED_CPUS1:-all} HEXBENCH_INTERLEAVED_CPUS32=${HEXBENCH_INTERLEAVED_CPUS32:-all} HEXBENCH_OWNER=${HEXBENCH_OWNER:-none} HEXBENCH_PARKED_PROCS=${HEXBENCH_PARKED_PROCS:-unset} HEXBENCH_DOCKER_CAPS=${HEXBENCH_DOCKER_CAPS:-unset} HEXBENCH_BOX_MEMORY=${HEXBENCH_BOX_MEMORY:-256m} HEXBENCH_AHEAD=${HEXBENCH_AHEAD:-default} HEXBENCH_REUSE=${HEXBENCH_REUSE:-1} HEXBENCH_NOFILE=${HEXBENCH_NOFILE:-given} NETNS=${NETNS:-1} BENCH_MEMORY=${BENCH_MEMORY:-40g} BENCH_OOM=${BENCH_OOM:-none}"
 } >> "$OUT/env.txt"
 
 if [ "${FETCH:-1}" = 0 ]; then

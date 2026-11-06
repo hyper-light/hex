@@ -13,6 +13,7 @@
 # css_cost.py reads the trace. Env: N (2000), TRACE_TAG.
 set -uo pipefail
 N=${N:-2000}; OUT=/opt/out; TAG=${TRACE_TAG:?TRACE_TAG}
+. "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/tracebuf.sh"
 T=/sys/kernel/tracing
 mountpoint -q "$T" || mount -t tracefs nodev "$T" || { echo "refusing: no tracefs at $T" >&2; exit 4; }
 I="$T/instances/hexcss-$TAG"; KG="hexcss_$TAG"
@@ -45,7 +46,7 @@ for p in $(cat /sys/fs/cgroup/cgroup.procs); do echo "$p" > /sys/fs/cgroup/lab/c
 for c in cpu memory pids io; do echo "+$c" > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null || true; done
 mkdir -p "$HOME/.cache/hex-t7/ociseam"
 mkdir "$I" || { echo "refusing: no trace instance $I" >&2; exit 4; }
-echo 0 > "$I/tracing_on"; echo 16384 > "$I/buffer_size_kb"
+echo 0 > "$I/tracing_on"
 for f in $FNS; do
   { echo "p:$KG/e_$f $f" >> "$T/kprobe_events" && echo "r:$KG/x_$f $f" >> "$T/kprobe_events"; } \
     || { echo "no kprobe on $f on this kernel" >> "$OUT/env.txt"; continue; }
@@ -63,10 +64,18 @@ echo "superblocks added: ${SUPERBLOCKS:-0}; mounts here: $(wc -l < /proc/self/mo
 mountpoint -q /sys/kernel/debug || mount -t debugfs none /sys/kernel/debug 2>/dev/null
 echo "shrinkers: $(ls /sys/kernel/debug/shrinker 2>/dev/null | wc -l) (0: not shown here)" >> "$OUT/env.txt"
 echo "inside: kernel $(uname -r), load $(cat /proc/loadavg), controllers $(cat /sys/fs/cgroup/cgroup.subtree_control)" >> "$OUT/env.txt"
-echo 1 > "$I/tracing_on"
-HEXBENCH_PHASES=lifecycle /opt/bin/seam_oci "$OUT/seam.json" "$N" 20 0 /opt/bin/hex /run/bundle-sleep /run/bundle-true > "$OUT/seam.log" 2>&1 \
-  || echo "seam_oci failed: $(tail -c 300 "$OUT/seam.log")"
-echo 0 > "$I/tracing_on"
-cat "$I/trace" > "$OUT/trace.txt"
-echo "dropped: $(cat "$I"/per_cpu/cpu*/stats 2>/dev/null | awk '/^overrun:/{s+=$2} END{print s+0}')" >> "$OUT/env.txt"
+# The whole run is read from the buffer once it ends, so the buffer holds all of it: it starts at 16,384 KiB a CPU, the
+# runs of record's, and the run is made again at twice it while the trace lost events (tracebuf.sh).
+css_run() {
+  echo "${TRACE_KB:?}" > "$I/buffer_size_kb" || { echo "a buffer of $TRACE_KB KiB a CPU wasn't taken" >&2; return 1; }
+  : > "$I/trace"
+  echo 1 > "$I/tracing_on"
+  HEXBENCH_PHASES=lifecycle /opt/bin/seam_oci "$OUT/seam.json" "$N" 20 0 /opt/bin/hex /run/bundle-sleep /run/bundle-true > "$OUT/seam.log" 2>&1 \
+    || echo "seam_oci failed: $(tail -c 300 "$OUT/seam.log")"
+  echo 0 > "$I/tracing_on"
+  cat "$I/trace" > "$OUT/trace.txt"
+  for c in "$I"/per_cpu/cpu*; do echo "== ${c##*/}"; cat "$c/stats"; done > "$OUT/trace.stats"
+}
+grown 16384 "$OUT/trace.stats" css_run || echo "refusing: the trace lost events at every buffer the kernel took" >&2
+echo "dropped: $(lost_in "$OUT/trace.stats")" >> "$OUT/env.txt"
 echo DONE
