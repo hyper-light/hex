@@ -39,7 +39,8 @@ fn reachable(marker: &str) -> bool {
     rustix::fs::open(marker, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty()).is_ok()
 }
 
-/// The most names of `/` that `e2` reports: one is enough to fail it, a few say what was there (§2).
+/// The most names of `/` that `e2` reports: a report's width, not a bound the box's security rests on. One
+/// name is enough to fail it; the rest only say what was there, and a listing is cut at this many (§2).
 const BENEATH_NAMES: usize = 8;
 
 /// The names `/` holds, at most [`BENEATH_NAMES`] of them, for `e2` after it unmounted the root.
