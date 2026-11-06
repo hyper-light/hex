@@ -30,7 +30,9 @@ $tag = (Invoke-RestMethod -UseBasicParsing "https://api.github.com/repos/contain
 $v = $tag.TrimStart("v")
 $tgz = Join-Path $Root "containerd-$v-windows-amd64.tar.gz"
 Fetch "https://github.com/containerd/containerd/releases/download/$tag/containerd-$v-windows-amd64.tar.gz" $tgz
+# GitHub serves the .sha256sum as application/octet-stream, so Content is a byte[], read as ASCII here.
 $sum = (Invoke-WebRequest -UseBasicParsing "https://github.com/containerd/containerd/releases/download/$tag/containerd-$v-windows-amd64.tar.gz.sha256sum").Content
+if ($sum -is [byte[]]) { $sum = [Text.Encoding]::ASCII.GetString($sum) }
 if (-not ([string]$sum).ToLower().Contains((Get-FileHash -Algorithm SHA256 $tgz).Hash.ToLower())) {
     throw "containerd $v's archive doesn't match its published sha256"
 }
