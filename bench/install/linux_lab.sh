@@ -19,7 +19,8 @@ IMAGE=${IMAGE:-registry.fedoraproject.org/fedora:44}
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
 REPO=$(realpath "$HERE/../..")
 NAME=hex-native-s6-lab-$(date -u +%Y%m%dT%H%M%SZ)
-# fedora's limits for every container (memory fedora-unit-limits): 8 GiB, first for the OOM killer.
+# Site policy, not a tuning: fedora's co-tenancy limits for every container (the Hex lead's, fedora-unit-limits):
+# 8 GiB, and first for the OOM killer, so a lab never takes a co-tenant's memory.
 MEM=${BENCH_MEMORY:-8g}
 OOM=${BENCH_OOM:-1000}
 # The lab user's home is a host directory of this run's (the container's own root is overlayfs, on
