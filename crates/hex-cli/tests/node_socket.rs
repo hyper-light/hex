@@ -117,29 +117,16 @@ impl Agent {
     /// A `hex node` whose records are in `dir`'s `state` and whose socket is `dir`'s `node.sock`, its
     /// boxes under `box_root`, with `runtime` its `XDG_RUNTIME_DIR` when given; `dir` is the caller's.
     fn over(exe: &str, dir: &Path, box_root: PathBuf, runtime: Option<&Path>) -> Self {
-        Self::armed(exe, dir, box_root, runtime, None, &[])
+        Self::armed(exe, dir, box_root, runtime, None)
     }
 
-    /// As [`Agent::start`], with `flags` among the agent's arguments.
-    fn flagged(exe: &str, cache: &Path, box_root: PathBuf, flags: &[&str]) -> Self {
-        let dir = tempfile::Builder::new()
-            .prefix("agent-")
-            .tempdir_in(cache)
-            .unwrap();
-        let mut agent = Self::armed(exe, dir.path(), box_root, None, None, flags);
-        agent._dir = Some(dir);
-        agent
-    }
-
-    /// As [`Agent::over`], armed at a debug build's crash point (`hex node --crash-at`) when one's given, with
-    /// `flags` among its arguments.
+    /// As [`Agent::over`], armed at a debug build's crash point (`hex node --crash-at`) when one's given.
     fn armed(
         exe: &str,
         dir: &Path,
         box_root: PathBuf,
         runtime: Option<&Path>,
         crash_at: Option<&str>,
-        flags: &[&str],
     ) -> Self {
         let socket = dir.join("node.sock");
         let mut command = Command::new(exe);
@@ -156,7 +143,6 @@ impl Agent {
         if let Some(point) = crash_at {
             command.arg("--crash-at").arg(point);
         }
-        command.args(flags);
         if let Some(runtime) = runtime {
             command.env("XDG_RUNTIME_DIR", runtime);
         }
@@ -421,7 +407,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
         return;
     }
     namespaces_counted(&lab, &client);
-    the_agent_parks_procs_unless_told_not_to(&lab, own, cache, exe);
+    the_agent_parks_procs_as_root_and_none_rootless(&lab, own, cache, exe);
     let failures = conformance::run(&client, &OciBoxes(&lab, false));
     assert!(
         failures.is_empty(),
@@ -440,35 +426,20 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     assert!(client.list().unwrap().is_empty(), "a box is left");
 }
 
-/// Parked procs are the socket agent's default too, and `hex node --parked-procs off` turns them off (decision 8,
-/// parked procs; the lead, 2026-11-06, AC-T7.1.3). Do: an agent started with no setting, then one with
-/// `--parked-procs off`. Expect: the first says on stderr, from its node's own state, that it parks procs (root)
-/// or that a rootless node parks none; the second that it parks none.
-fn the_agent_parks_procs_unless_told_not_to(lab: &Lab, own: &Path, cache: &Path, exe: &str) {
-    let by_default = if lab.rootless {
+/// Parked procs are the socket agent's, with no switch to turn them off (decision 8, parked procs; the lead,
+/// 2026-11-06; Ada's 2026-11-06 rule removed `--parked-procs` once bench/competitive/probes/parked_procs_ab.md decided
+/// them on; AC-T7.1.3). Do: start an agent. Expect: it says on stderr, from its node's own state, that it parks procs
+/// (root) or that a rootless node parks none.
+fn the_agent_parks_procs_as_root_and_none_rootless(lab: &Lab, own: &Path, cache: &Path, exe: &str) {
+    let said = if lab.rootless {
         "hex node: parked procs: off: a rootless node parks none"
     } else {
         "hex node: parked procs: on"
     };
-    for (flags, said) in [
-        (&[][..], by_default),
-        (
-            &["--parked-procs", "off"][..],
-            "hex node: parked procs: off",
-        ),
-    ] {
-        let agent = Agent::flagged(exe, cache, own.join("hex-sock-pp"), flags);
-        wait_for(&format!("hex node {flags:?} saying {said:?}"), || {
-            agent.errors().lines().any(|l| l.starts_with(said))
-        });
-        let said_on = agent.errors().contains("hex node: parked procs: on");
-        assert_eq!(
-            said_on,
-            said.ends_with(": on"),
-            "{flags:?}: {}",
-            agent.errors()
-        );
-    }
+    let agent = Agent::start(exe, cache, own.join("hex-sock-pp"));
+    wait_for(&format!("hex node saying {said:?}"), || {
+        agent.errors().lines().any(|l| l.starts_with(said))
+    });
 }
 
 /// HEX-SOCK-9, the plan's example: a `Bundle` box made, started, and `/usr/bin/true` exec'd in it
@@ -966,7 +937,6 @@ fn crash_case(
         own.join(&name),
         runtime.as_deref(),
         at.armed(),
-        &[],
     );
     if on_tmpfs(&oci_root) != matches!(kept, Kept::Tmpfs) {
         eprintln!("SKIP {name}: {} isn't where it's kept", oci_root.display());

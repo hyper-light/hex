@@ -48,9 +48,9 @@
 //! step 4).
 //! HEXBENCH_TRACE turns on the breakdown probes' markers, around the ops HEXBENCH_TRACE_OPS
 //! names (`Trace`, bench/competitive/probes/exec_breakdown.md and create_breakdown.md).
-//! HEXBENCH_PARKED_PROCS=1 has each parked init's proc made with it and 0 has none made (decision 8, parked procs;
-//! unset, the node's default, on for a root node), in process and in the socket driver's `hex node`
-//! (`--parked-procs`). In process the phase's `parked` counts say how many were made, taken by their create (hits),
+//! Each parked init's proc is made with it on a root node (decision 8, parked procs), in process and in the socket
+//! driver's `hex node`, with no knob to turn it off: Ada's 2026-11-06 rule removed HEXBENCH_PARKED_PROCS once
+//! bench/competitive/probes/parked_procs_ab.md decided them on. In process the phase's `parked` counts say how many were made, taken by their create (hits),
 //! left (misses), wanted with none made (dry) or failed; the socket driver ends its node with SIGTERM and records
 //! the line of counts it says then as the result's `parked_at_exit` (made, hits, misses, dry, capped, alive), the
 //! run's own node's.
@@ -932,24 +932,13 @@ mod linux {
         (Driver::Socket { client, agent }, result)
     }
 
-    /// HEXBENCH_PARKED_PROCS: `Some(true)` for 1, `Some(false)` for 0, `None` unset (the node's default).
-    fn parked_procs() -> Option<bool> {
-        match std::env::var("HEXBENCH_PARKED_PROCS").as_deref() {
-            Ok("1") => Some(true),
-            Ok("0") => Some(false),
-            Ok(v) => panic!("HEXBENCH_PARKED_PROCS={v:?}: 1 or 0"),
-            Err(_) => None,
-        }
-    }
-
     /// How long a socket agent has to end on SIGTERM before it's SIGKILLed: its end is one more exchange with the
     /// agent (a counts line and an exit), so it has the bound each call has, [`CALL_TIMEOUT`], not one of its own.
     const AGENT_END: Duration = CALL_TIMEOUT;
 
     /// A `hex node` serving its socket for the socket driver, its boxes under `box_root`; ended with SIGTERM
-    /// ([`Agent::end`]), else killed when dropped. It takes HEX_OCI_MNTNS and HEXBENCH_PARKED_PROCS
-    /// (`--parked-procs`): HEXBENCH_DEVFS and _PROCFS set only the in-process node, and it raises its
-    /// soft descriptor limit to the hard one as it starts, undoing HEXBENCH_NOFILE's `ulimit -Sn`; so an A/B of any of
+    /// ([`Agent::end`]), else killed when dropped. It runs as a node ships, its pools and ways its own: what this
+    /// bench sets, it sets on the in-process node alone, and the agent raises its soft descriptor limit to the hard one as it starts, undoing HEXBENCH_NOFILE's `ulimit -Sn`; so an A/B of any of
     /// those reads the in-process figures, never the socket's. Its stderr is passed on as it comes and kept.
     struct Agent {
         child: Child,
@@ -970,9 +959,6 @@ mod linux {
                 .arg(box_root)
                 .stdout(Std::piped())
                 .stderr(Std::piped());
-            if let Some(on) = parked_procs() {
-                cmd.arg("--parked-procs").arg(if on { "on" } else { "off" });
-            }
             let mut child = cmd.spawn().expect("start hex node");
             let said = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
             let drain = {
@@ -1397,12 +1383,6 @@ mod linux {
                 // HEXBENCH_PROCFS=0: no procs made ahead (decision 6's update, part 2's A/B).
                 .with_prepared_procs(std::env::var("HEXBENCH_PROCFS").as_deref() != Ok("0"))
                 .unwrap_or_else(|e| panic!("the prepared proc pool: {e}"));
-            let node = match parked_procs() {
-                Some(on) => node
-                    .with_parked_procs(on)
-                    .unwrap_or_else(|e| panic!("parked procs: {e}")),
-                None => node,
-            };
             Driver::InProcess(Box::new(node))
         };
         let node = driver.runtime();

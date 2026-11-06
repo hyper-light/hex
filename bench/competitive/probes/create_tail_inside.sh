@@ -114,7 +114,7 @@ mkdir -p /run/tailmark; : > /run/tailmark/tracing_on; ln -sfn "$I/trace_marker" 
 { echo "inside: date $(date -u +%FT%TZ), kernel $(uname -r), load $(cat /proc/loadavg)"
   echo "inside: cpus allowed $(sed -n 's/^Cpus_allowed_list:\t*//p' /proc/self/status)"
   echo "inside: the cgroup root's subtree_control: $(cat /sys/fs/cgroup/cgroup.subtree_control)"
-  echo "params: N=$N WARMUP=$WARMUP ROUNDS=$ROUNDS owner=${HEXBENCH_OWNER:-none} parked_procs=${HEXBENCH_PARKED_PROCS:-unset}"
+  echo "params: N=$N WARMUP=$WARMUP ROUNDS=$ROUNDS owner=${HEXBENCH_OWNER:-none}"
 } >> "$OUT/env.txt"
 
 # The reader container (create_tail.sh) waits for this file, then streams the instance; this waits for its word.

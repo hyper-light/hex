@@ -1,14 +1,14 @@
 //! `hex node`: the node agent as a process of its own, serving the `Runtime` seam on its local socket
 //! to callers that don't link Hex (decision 3 of docs/design/runtime-architecture.md):
 //!
-//!   hex node --socket <path> --state <dir> [--box-root <cgroup dir>] [--parked-procs on|off]
+//!   hex node --socket <path> --state <dir> [--box-root <cgroup dir>]
 //!
 //! It opens the node, its boxes in cgroups under `--box-root` (else in a subtree beside its own
 //! cgroup), their records under `--state` and their containers' state on tmpfs under the runtime
 //! directory (`/run/hex-node` as root, `$XDG_RUNTIME_DIR/hex-node` rootless; decision 1), takes back
 //! or cleans up what an agent before it left, saying on stderr each box it removed and why
 //! (T-T7.1.2), raises its soft descriptor limit to the hard one, says on stderr whether it parks procs with
-//! its inits (decision 8, parked procs: a root node's default, `--parked-procs off` turns it off), binds the
+//! its inits (decision 8, parked procs: a root node's, never a rootless one's), binds the
 //! socket, says `ready <path>` on stdout, and serves until it is signalled; if serving fails it says why on
 //! stderr and exits 1. On SIGTERM it writes one line of its parked procs' counts on stderr (made, hits, misses,
 //! dry, capped, alive) and exits 143 with nothing else done: its boxes, connections and socket's file are left as
@@ -41,20 +41,18 @@ pub fn main(args: &[String]) -> u8 {
     }
 }
 
-const USAGE: &str = "usage: hex node --socket <path> --state <dir> [--box-root <cgroup dir>] [--parked-procs on|off]";
+const USAGE: &str = "usage: hex node --socket <path> --state <dir> [--box-root <cgroup dir>]";
 
 struct Args {
     socket: PathBuf,
     state: PathBuf,
     box_root: Option<PathBuf>,
-    parked_procs: bool,
     #[cfg(debug_assertions)]
     crash_at: Option<CrashPoint>,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
     let (mut socket, mut state, mut box_root) = (None, None, None);
-    let mut parked_procs = None;
     #[cfg(debug_assertions)]
     let mut crash_at = None;
     let mut rest = args.iter();
@@ -67,17 +65,6 @@ fn parse(args: &[String]) -> Result<Args, String> {
             let point = CrashPoint::named(name)
                 .ok_or_else(|| format!("{flag} names no crash point: {name:?}"))?;
             if crash_at.replace(point).is_some() {
-                return Err(format!("{flag} is given twice\n{USAGE}"));
-            }
-            continue;
-        }
-        if flag == "--parked-procs" {
-            let on = match rest.next().map(String::as_str) {
-                Some("on") => true,
-                Some("off") => false,
-                other => return Err(format!("{flag} takes on or off, not {other:?}\n{USAGE}")),
-            };
-            if parked_procs.replace(on).is_some() {
                 return Err(format!("{flag} is given twice\n{USAGE}"));
             }
             continue;
@@ -99,7 +86,6 @@ fn parse(args: &[String]) -> Result<Args, String> {
         socket: socket.ok_or_else(|| format!("--socket is needed\n{USAGE}"))?,
         state: state.ok_or_else(|| format!("--state is needed\n{USAGE}"))?,
         box_root,
-        parked_procs: parked_procs.unwrap_or(true),
         #[cfg(debug_assertions)]
         crash_at,
     })
@@ -131,7 +117,6 @@ fn serve(args: &[String]) -> Result<(), (u8, String)> {
         Ok(way) => node.with_mount_namespace(&way),
         Err(_) => node,
     };
-    let node = node.with_parked_procs(args.parked_procs).map_err(failed)?;
     #[cfg(debug_assertions)]
     let node = match args.crash_at {
         Some(point) => node.with_crash_point(point),
@@ -178,10 +163,8 @@ fn serve(args: &[String]) -> Result<(), (u8, String)> {
     {
         let said = if node.parked_procs() {
             format!("on, at most {} alive", node.sizes().procs_alive())
-        } else if args.parked_procs {
-            "off: a rootless node parks none".to_owned()
         } else {
-            "off".to_owned()
+            "off: a rootless node parks none".to_owned()
         };
         let _ = writeln!(std::io::stderr().lock(), "hex node: parked procs: {said}");
     }
@@ -284,28 +267,17 @@ mod tests {
             .collect()
     }
 
-    /// `hex node --parked-procs on|off` (decision 8, parked procs; the lead, 2026-11-06, AC-T7.1.3). Do: parse
-    /// with the flag absent, `on`, `off`, a value of neither, and given twice. Expect: on, on, off, and each of
-    /// the last two refused naming the flag.
+    /// Parked procs have no off switch (decision 8, parked procs; Ada's 2026-11-06 rule, once
+    /// bench/competitive/probes/parked_procs_ab.md decided them on; AC-T7.1.3). Do: parse `--parked-procs` with `on`
+    /// and with `off`. Expect: each refused as an unknown argument, naming it.
     #[test]
-    fn parked_procs_are_on_unless_the_flag_says_off() {
-        assert!(parse(&args(&[])).unwrap().parked_procs);
-        assert!(
-            parse(&args(&["--parked-procs", "on"]))
-                .unwrap()
-                .parked_procs
-        );
-        assert!(
-            !parse(&args(&["--parked-procs", "off"]))
-                .unwrap()
-                .parked_procs
-        );
-        for bad in [
-            &["--parked-procs", "yes"][..],
-            &["--parked-procs", "off", "--parked-procs", "on"],
-        ] {
-            let why = parse(&args(bad)).err().unwrap();
-            assert!(why.contains("--parked-procs"), "{bad:?}: {why}");
+    fn parked_procs_have_no_flag() {
+        for value in ["on", "off"] {
+            let why = parse(&args(&["--parked-procs", value])).err().unwrap();
+            assert!(
+                why.starts_with("unknown argument \"--parked-procs\""),
+                "{value}: {why}"
+            );
         }
     }
 }

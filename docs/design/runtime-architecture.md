@@ -2242,12 +2242,12 @@ proc's `fsconfig` and most of part 19's 22 `openat2`, 13 `open_tree` and 17 `mov
   creates clone fresh.
 - **On 7.x with the proc pool on**, a parked init's proc comes from this, not from the pool. The pool keeps serving
   the creates no parked init is ready for: each create goes one way or the other, never both.
-- **A node setting, on by default for a root node** (the lead's decision, 2026-11-06T01:52Z; it was off until then).
-  `Node::with_parked_procs(false)` turns it off, `hex node --parked-procs on|off` sets it for the socket's node, and the
-  bench's `HEXBENCH_PARKED_PROCS` (1 on, 0 off, unset the node's default) reaches both drivers' nodes. A rootless
-  node parks none (its devfs has no mask sources). Off, nothing changes on either kernel. A node keeps one empty
+- **Always on for a root node** (the lead's decision, 2026-11-06T01:52Z, on by default; it was off until then). Its
+  off path went with Ada's 2026-11-06 rule on legacy paths, the A/B (`parked_procs_ab.md`) having decided it:
+  `Node::with_parked_procs(bool)`, `hex node --parked-procs on|off` and the bench's `HEXBENCH_PARKED_PROCS` are gone.
+  A rootless node parks none (its devfs has no mask sources, so it has no proc maker). A node keeps one empty
   tmpfs for its life (`Devfs::restart`), so a parked proc's masks clone the same one every init's do, whichever pools
-  are on. `hex node` says its setting on stderr as it starts, and on SIGTERM one line of its parked procs' counts
+  are on. `hex node` says on stderr as it starts whether it parks them, and on SIGTERM one line of its parked procs' counts
   (made, hits, misses, dry, capped, alive), exiting 143 with its boxes left as a SIGKILL leaves them.
 - **Decided (the lead, 2026-11-05T17:00Z, on the measurements in `parked_procs_ab.md`).** The proc is made on the
   parking thread, and the setting stays off by default (superseded 2026-11-06: on by default, below).

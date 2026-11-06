@@ -223,10 +223,8 @@ struct Parking {
     failed: AtomicU64,
     /// The bytes charged to their cgroups for every init made ahead, summed.
     charged: AtomicU64,
-    /// What makes each parked init's proc, when the node makes them ([`Cgroups::set_parked_procs`]), and whether
-    /// it does now ([`Cgroups::stop_parked_procs`] turns it off; the maker and the dropper stay).
+    /// What makes each parked init's proc, where the node has one ([`Cgroups::set_parked_procs`]: a root node's).
     procs: OnceLock<ProcMaker>,
-    on: AtomicBool,
     procs_made: AtomicU64,
     procs_made_at_delete: AtomicU64,
     procs_made_at_refill: AtomicU64,
@@ -251,7 +249,7 @@ struct Parking {
 impl Parking {
     /// Whether the node makes parked inits' procs now.
     fn makes_procs(&self) -> bool {
-        self.procs.get().is_some() && self.on.load(Ordering::Relaxed)
+        self.procs.get().is_some()
     }
 
     fn slots(&self) -> Result<MutexGuard<'_, Slots>, Refusal> {
@@ -631,8 +629,7 @@ impl Cgroups {
     /// Each init parked from here on has the proc of its own pid namespace made with it, through `maker`, for its
     /// owner's last spec (decision 8, parked procs), at most `bound` alive at once ([`Sizes::procs_alive`]), and the
     /// dropper started with a queue of as many. Set before the node's first create; unset, none is made. Set again once the
-    /// dropper runs, it turns them on with `bound`, refused past the dropper's queue (so a tree handed to it never
-    /// finds it full).
+    /// dropper runs, it sets `bound`, refused past the dropper's queue (so a tree handed to it never finds it full).
     pub fn set_parked_procs(&self, maker: ProcMaker, bound: usize) -> Result<(), Refusal> {
         let parking = &self.parking;
         let bound = u64::try_from(bound).unwrap_or(u64::MAX);
@@ -647,7 +644,6 @@ impl Cgroups {
                 });
             }
             parking.bound.store(bound, Ordering::Relaxed);
-            parking.on.store(true, Ordering::Relaxed);
             return Ok(());
         }
         let (drops, unattached) = mpsc::sync_channel(usize::try_from(bound).unwrap_or(usize::MAX));
@@ -665,14 +661,7 @@ impl Cgroups {
         parking.bound.store(bound, Ordering::Relaxed);
         parking.capacity.store(bound, Ordering::Relaxed);
         let _ = parking.procs.set(maker);
-        parking.on.store(true, Ordering::Relaxed);
         Ok(())
-    }
-
-    /// Parks from here on make no proc (decision 8, parked procs, turned off); those made already stay with their
-    /// inits, and the dropper still takes the unattached.
-    pub fn stop_parked_procs(&self) {
-        self.parking.on.store(false, Ordering::Relaxed);
     }
 
     /// Whether parks make procs now.

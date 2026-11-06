@@ -302,9 +302,10 @@ impl Node {
             })?;
         let cgroups = Cgroups::start(first, sizes)?;
         cgroups.learn_ahead(sizes.starts.ahead, sizes.ahead);
-        // Parked procs are a root node's default (decision 8, parked procs; the lead, 2026-11-06): a rootless
-        // node's devfs makes none, so it parks none.
-        Self {
+        // Parked procs are a root node's, always (decision 8, parked procs; the lead, 2026-11-06; their off path went
+        // by Ada's 2026-11-06 rule once bench/competitive/probes/parked_procs_ab.md decided them on): a rootless node's
+        // devfs makes none, so it parks none.
+        let node = Self {
             root,
             oci_boxes,
             devices,
@@ -354,8 +355,9 @@ impl Node {
             ),
             #[cfg(debug_assertions)]
             crash_at: None,
-        }
-        .with_parked_procs(true)
+        };
+        let bound = node.pools.sizes.procs_alive();
+        node.park_procs(bound)
     }
 
     /// Arms a debug-only crash point (T-T7.1.2): at `point` of each `oci` box's create from now on, the
@@ -543,34 +545,29 @@ impl Node {
     }
 
     /// Each init the node parks ahead (decision 8, "The p99.9 that stayed") has the proc of its own pid namespace
-    /// made with it when `enabled`, with the masks and read-only paths of the spec it is parked for: a claim whose
-    /// spec has the same key attaches it, mounting no proc of its own (decision 8, parked procs). On by default
-    /// (the lead, 2026-11-06); `false` turns it off. Root nodes only, as [`Node::with_prepared_procs`]; set before
-    /// the node's first create.
-    pub fn with_parked_procs(self, enabled: bool) -> Result<Self, Refusal> {
-        if enabled {
-            let bound = self.pools.sizes.procs_alive();
-            self.with_parked_procs_bound(bound)
-        } else {
-            self.cgroups.stop_parked_procs();
-            Ok(self)
-        }
-    }
-
-    /// Whether the node parks procs with its inits now (decision 8, parked procs): a root node unless turned off.
-    pub fn parked_procs(&self) -> bool {
-        self.cgroups.makes_parked_procs()
-    }
-
-    /// As [`Node::with_parked_procs`] on, with at most `bound` procs alive at once in place of the node's
-    /// ([`crate::sizes::Sizes::procs_alive`]): the dropper's queue holds as many, so a tree handed to it never finds it
-    /// full.
-    /// Refused when the dropper can't be started.
-    pub fn with_parked_procs_bound(self, bound: usize) -> Result<Self, Refusal> {
+    /// made with it, with the masks and read-only paths of the spec it is parked for: a claim whose spec has the same
+    /// key attaches it, mounting no proc of its own (decision 8, parked procs). At most `bound` are alive at once: the
+    /// dropper's queue holds as many, so a tree handed to it never finds it full. Where the node has a proc maker (a
+    /// root node's); a rootless node parks none. Refused when the dropper can't be started.
+    fn park_procs(self, bound: usize) -> Result<Self, Refusal> {
         if let Some(maker) = self.devfs.proc_maker() {
             self.cgroups.set_parked_procs(maker, bound)?;
         }
         Ok(self)
+    }
+
+    /// Whether the node parks procs with its inits (decision 8, parked procs): a root node's, never a rootless one's.
+    pub fn parked_procs(&self) -> bool {
+        self.cgroups.makes_parked_procs()
+    }
+
+    /// A test control, with no production or bench caller: at most `bound` parked procs alive at once in place of the
+    /// node's [`crate::sizes::Sizes::procs_alive`], which is derived from the host and so too high for a test to reach.
+    /// The bound test (oci_reuse.rs, AC-T7.1.3) needs the cap itself reached, with a handful of boxes; a stalled maker
+    /// would leave procs unmade, never capped, so it can't stand in. Refused past the dropper's queue, started at the
+    /// node's own bound.
+    pub fn with_parked_procs_bound(self, bound: usize) -> Result<Self, Refusal> {
+        self.park_procs(bound)
     }
 
     /// Sets the most device programs the node holds open, one per policy, [`MAX_PROGRAMS`] unless set,

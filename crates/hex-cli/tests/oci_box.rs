@@ -1416,9 +1416,7 @@ fn a_parked_inits_proc_is_its_own_and_taken_once(lab: &Lab, own: &Path) {
         .node(&own.join("hex-oci-parkproc"), state.path())
         .with_prepared_procs(false)
         .unwrap()
-        .with_inits_ahead(1)
-        .with_parked_procs(true)
-        .unwrap();
+        .with_inits_ahead(1);
     let k = (
         &[
             "/proc/kcore",
@@ -1768,9 +1766,7 @@ fn a_parked_init_takes_a_create_made_each_way(lab: &Lab, own: &Path) {
         .with_oci_helper(PathBuf::from(&lab.exe))
         .with_prepared_procs(false)
         .unwrap()
-        .with_inits_ahead(1)
-        .with_parked_procs(true)
-        .unwrap();
+        .with_inits_ahead(1);
         let create = |id: &BoxId| {
             node.create(BoxSpec {
                 id: id.clone(),
