@@ -8,15 +8,15 @@
 //! A connection opens with [`OPEN_BYTES`] bytes: `HEXF`, the version (`u16`, little-endian as the wire's
 //! integers), the [`Op`], a zero byte and the box id's length (`u16`), then the id. A [`Op::Remove`]
 //! ends there. A [`Op::Stage`] is followed by entries, each a [`HEAD_BYTES`]-byte head (its kind, its
-//! flags (version 1: a zero byte), its mode, its path's length, a link's target's length, a file's size),
-//! its path, a link's target, in version 2 its [`Meta`] when its flags say so ([`META_BYTES`] then its
-//! xattrs), and a file's bytes; an end head (kind 0, every field zero) closes it. The relay answers once,
-//! with a framed [`crate::wire`] answer: `Done`, or `Refused` saying why. From version 2 a stage's opening
-//! is answered first with its budget ([`budget`]): the entries and bytes the staged root's file system has
-//! free, which both sides spend against.
+//! flags, its mode, its path's length, a link's target's length, a file's size), its path, a link's target,
+//! its [`Meta`] when its flags say so ([`META_BYTES`] then its xattrs), and a file's bytes; an end head
+//! (kind 0, every field zero) closes it. A stage's opening is answered first with its budget ([`budget`]):
+//! the entries and bytes the staged root's file system has free, which both sides spend against. The relay
+//! answers once more, with a framed [`crate::wire`] answer: `Done`, or `Refused` saying why.
 //!
-//! Version 2 (docs/design/shards-guest.md §4a) adds, append-only, an entry's owner, mtime and extended
-//! attributes, and hard links to an earlier entry, what Linux's own unpack of a tarball root holds.
+//! Version 2 is the only version (docs/design/shards-guest.md §4a): the host's packer and the guest's
+//! relay ship from one tree in one image, and version 1 was never released, so it isn't read; any other is
+//! refused by name. The stream changes append-only from its first release.
 
 use std::fmt;
 
@@ -25,12 +25,9 @@ use std::fmt;
 pub const FILES_PORT: u32 = 0x4845_5802;
 
 const MAGIC: [u8; 4] = *b"HEXF";
-/// The staging stream's newest version, which this side writes; it reads every one from [`FIRST`]. It
-/// changes append-only, as the wire's.
+/// The staging stream's version, the one this side writes and reads.
 const VERSION: u16 = 2;
-/// The first version: a path, a mode and a link text an entry.
-const FIRST: u16 = 1;
-/// A version-2 head's flag: a [`Meta`] follows the entry's names.
+/// A head's flag: a [`Meta`] follows the entry's names.
 const HAS_META: u8 = 1;
 /// A [`Meta`]'s fixed part: uid, gid (`u32`), mtime and atime each as seconds (`i64`) and nanoseconds
 /// (`u32`), the xattr count (`u16`), a zero `u16`, and the xattrs' bytes (`u32`), little-endian.
@@ -88,13 +85,13 @@ pub enum Kind {
     Dir,
     File,
     Symlink,
-    /// Version 2: another name for an earlier regular file of the same stage.
+    /// Another name for an earlier regular file of the same stage.
     Hardlink,
-    /// Version 2: a layer of an image begins; what follows applies over what came before (§4a).
+    /// A layer of an image begins; what follows applies over what came before (§4a).
     Layer,
-    /// Version 2: an OCI whiteout, `.wh.<name>`: the entry at its path is removed.
+    /// An OCI whiteout, `.wh.<name>`: the entry at its path is removed.
     Whiteout,
-    /// Version 2: an OCI opaque directory, `.wh..wh..opq`: what its directory holds that this layer didn't
+    /// An OCI opaque directory, `.wh..wh..opq`: what its directory holds that this layer didn't
     /// make is removed.
     Opaque,
 }
@@ -112,23 +109,23 @@ impl Kind {
         }
     }
 
-    fn of_tag(tag: u8, version: u16) -> Result<Option<Self>, Refused> {
+    fn of_tag(tag: u8) -> Result<Option<Self>, Refused> {
         match tag {
             0 => Ok(None),
             1 => Ok(Some(Self::Dir)),
             2 => Ok(Some(Self::File)),
             3 => Ok(Some(Self::Symlink)),
-            4 if version >= 2 => Ok(Some(Self::Hardlink)),
-            5 if version >= 2 => Ok(Some(Self::Layer)),
-            6 if version >= 2 => Ok(Some(Self::Whiteout)),
-            7 if version >= 2 => Ok(Some(Self::Opaque)),
+            4 => Ok(Some(Self::Hardlink)),
+            5 => Ok(Some(Self::Layer)),
+            6 => Ok(Some(Self::Whiteout)),
+            7 => Ok(Some(Self::Opaque)),
             other => Err(Refused::Kind(other)),
         }
     }
 }
 
-/// One entry to stage: its path under the box's staged root, its mode, what it is, and (version 2, from a
-/// tarball root) its owner, mtime and extended attributes.
+/// One entry to stage: its path under the box's staged root, its mode, what it is, and (from a tarball
+/// root) its owner, mtime and extended attributes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub path: String,
@@ -205,12 +202,12 @@ impl What {
 pub enum Refused {
     #[error("it doesn't start with HEXF")]
     Magic,
-    #[error("version {got}: this side speaks {FIRST} to {VERSION}")]
+    #[error("staging stream version {got} isn't read; this node speaks version {VERSION}")]
     Version { got: u16 },
     #[error("op {0} is neither stage (1) nor remove (2)")]
     Op(u8),
     #[error(
-        "kind {0} is none of directory (1), file (2), symbolic link (3) and, from version 2, hard link (4): devices, FIFOs and sockets are never staged"
+        "kind {0} is none of directory (1), file (2), symbolic link (3), hard link (4), layer (5), whiteout (6) and opaque (7): devices, FIFOs and sockets are never staged"
     )]
     Kind(u8),
     #[error("a pad byte is {0}, not 0")]
@@ -238,7 +235,7 @@ pub enum Refused {
     Trailing(usize),
 }
 
-/// A version-2 stage's budget message: `HEXB`, then the entries and the bytes (`u64` each, little-endian).
+/// A stage's budget message: `HEXB`, then the entries and the bytes (`u64` each, little-endian).
 const BUDGET_MAGIC: [u8; 4] = *b"HEXB";
 const BUDGET_BYTES: usize = 4 + 8 + 8;
 
@@ -587,8 +584,6 @@ pub struct Unpack {
     limits: Limits,
     at: At,
     op: Option<Op>,
-    /// The stream's version, once its opening is read.
-    version: u16,
     /// An entry whose [`Meta`] is under way: its names read, its owner and xattrs to come.
     pending: Option<Entry>,
     held: Vec<u8>,
@@ -614,7 +609,6 @@ impl Unpack {
             limits,
             at: At::Open,
             op: None,
-            version: VERSION,
             pending: None,
             held: Vec::new(),
             entries: 0,
@@ -641,11 +635,6 @@ impl Unpack {
 
     /// Whether the stream may end here: a remove's opening, or a stage's end head, is whole. Else its
     /// end is refused as [`Refused::Truncated`], saying where.
-    /// The stream's version, once its opening is read (0 before).
-    pub fn version(&self) -> u16 {
-        self.version
-    }
-
     /// Bounds the stage's entries and bytes by its learned budget too, from its opening on.
     pub fn learn(&mut self, entries: u64, bytes: u64) {
         self.limits.entries = self.limits.entries.min(entries);
@@ -753,10 +742,9 @@ impl Unpack {
             return Err(Refused::Magic);
         }
         let version = u16::from_le_bytes([v0, v1]);
-        if !(FIRST..=VERSION).contains(&version) {
+        if version != VERSION {
             return Err(Refused::Version { got: version });
         }
-        self.version = version;
         self.op = Some(match op {
             1 => Op::Stage,
             2 => Op::Remove,
@@ -780,7 +768,7 @@ impl Unpack {
             .get(..HEAD_BYTES)
             .and_then(|b| <[u8; HEAD_BYTES]>::try_from(b).ok())
             .ok_or(Refused::Truncated("in the middle of a head"))?;
-        let Some(kind) = Kind::of_tag(k, self.version)? else {
+        let Some(kind) = Kind::of_tag(k)? else {
             if held.iter().any(|b| *b != 0) {
                 return Err(Refused::Field {
                     what: "the end head",
@@ -790,9 +778,8 @@ impl Unpack {
             self.at = At::Closed;
             return Ok(Some(Step::End));
         };
-        // Version 1's pad byte is version 2's flags, of which [`HAS_META`] alone is defined.
-        let allowed = if self.version >= 2 { HAS_META } else { 0 };
-        if pad & !allowed != 0 {
+        // The head's flags, of which [`HAS_META`] alone is defined.
+        if pad & !HAS_META != 0 {
             return Err(Refused::Pad(pad));
         }
         let head = Head {

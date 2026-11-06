@@ -256,25 +256,8 @@ fn kind(path: &Path, meta: &fs::Metadata) -> Result<Kind, Refusal> {
     Err(never(path, what))
 }
 
-/// Writes `id`'s stage of `items` to `out`: its opening, every entry, and its end, within `limits`.
-/// Each directory is walked flat, a queue of the directories found (CLAUDE.md §11), and every entry
-/// counted against the stage's bound before it is sent.
-pub fn pack(
-    out: &mut dyn Write,
-    id: &BoxId,
-    items: &[Item],
-    limits: &Limits,
-) -> Result<(), Refusal> {
-    let send = |out: &mut dyn Write, bytes: &[u8]| {
-        out.write_all(bytes)
-            .map_err(|e| Refusal::os("sending staged files", e))
-    };
-    send(out, &files::open(Op::Stage, id.as_str()).map_err(refused)?)?;
-    pack_items(out, items, limits)?;
-    send(out, &files::END)
-}
-
-/// Writes every entry of `items` to `out`, within `limits`.
+/// Writes every entry of `items` to `out`, within `limits`: each directory walked flat, a queue of the
+/// directories found (CLAUDE.md §11), and every entry counted against the stage's bound before it is sent.
 fn pack_items(out: &mut dyn Write, items: &[Item], limits: &Limits) -> Result<(), Refusal> {
     let send = |out: &mut dyn Write, bytes: &[u8]| {
         out.write_all(bytes)

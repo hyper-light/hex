@@ -208,8 +208,8 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
     UTF-8 either way; `uid`, `gid` and `mtime` left the list when staging began carrying them, below); any other key (`path`, `linkpath`, `size`, sparse keys, one Hex doesn't know) would apply to
     every later entry, and is refused by name, never ignored (CLAUDE.md §3); a key on neither list is refused naming
     it, so a real archive that meets one shows exactly what to weigh before it is added. `git archive`'s tarballs,
-    which begin with a global record holding only `comment=<commit>`, stage with every entry exact (a real one,
-    git 2.56.0, is the test's fixture: `crates/hex-client/src/guest/stage/fixtures/git-archive.tar`). Refused by name: a PAX
+    which begin with a global record holding only `comment=<commit>`, stage with every entry exact (the test makes
+    one with the host's own `git`, `.tar` and `.tar.gz`; every host the gates run on has git). Refused by name: a PAX
     `size` (a file past a header's 8 GiB), sparse entries (GNU `S` and PAX `GNU.sparse.*`, which none of the
     roots it serves holds: `tar -tv`), and an extension record with no entry after it. An entry written through
     one of the archive's own symbolic links was refused too, until the lead's ruling of 2026-11-06 (below): it
@@ -223,14 +223,17 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
   grafana has 16,280 entries owned by 1000:1000 or 472:0, the shadow group owns `etc/shadow` in debian, ubuntu and
   alpine, and caddy's binary holds `security.capability`. Dropping them would make every non-root image's files
   root's and copies of hard links, and strip capabilities; refusing them would refuse nearly every image. So:
-  - **The staging stream's entry gains, append-only** (its version 2, first released with this follow-up and its
-    layers' kinds below; a version-1 stream reads as before): a numeric
-    uid and gid (names ignored, as containerd does: the layers carry none), an mtime (seconds and nanoseconds), up to
-    a bound of extended attributes (name, value), and a hard-link kind whose target is an earlier entry of the same
-    root, a regular file or a link (below), named as a staged path is and refused if it names its way out, a later
-    or missing entry, or a directory. Bounds (CLAUDE.md §2), from Linux's own: at most 64 xattrs an entry, a name at most 255 bytes
-    (`XATTR_NAME_MAX`), a value at most 64 KiB (`XATTR_SIZE_MAX`) and all of an entry's at most 64 KiB
-    (`XATTR_LIST_MAX`); a link target within the path bound.
+  - **The staging stream's entry carries** (version 2, the stream's only version: version 1 was never released,
+    the host's packer and the guest's relay ship from one tree in one image, so a version-1 opening is refused by
+    name, never read; the stream changes append-only from its first release): a numeric uid and gid (names
+    ignored, as containerd does: the layers carry none), an mtime and atime (seconds and nanoseconds), extended
+    attributes (name, value), a hard-link kind whose target is an earlier entry of the same root, a regular file or
+    a link (below), named as a staged path is and refused if it names its way out, a later or missing entry, or a
+    directory, and the layer, whiteout and opaque kinds (below). Bounds (CLAUDE.md §2), Linux's own
+    (include/uapi/linux/limits.h): a name at most `XATTR_NAME_MAX` (255 bytes), a value at most `XATTR_SIZE_MAX` (64
+    KiB), an entry's names together, each with its NUL, at most `XATTR_LIST_MAX` (64 KiB); the xattr bytes spend the
+    stage's byte budget, learned from the staged folder's free space when the stage opens; a link target within the
+    path bound.
   - **Where they come from:** the tar header's uid, gid and mtime, or PAX `uid`, `gid`, `mtime` past what a header
     holds; xattrs from PAX `SCHILY.xattr.*` and `LIBARCHIVE.xattr.*` (base64 there). Every xattr in a Linux namespace
     (`security.`, `system.`, `trusted.`, `user.`) is carried; one in no Linux namespace (`com.apple.*`, from macOS

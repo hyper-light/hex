@@ -8,6 +8,21 @@ use std::collections::BTreeMap;
 use super::*;
 use hex_core::stream::files::{LIMITS, Step, Unpack};
 
+/// A whole stage of `items` for `id` as the packer sends it to a relay: its opening, every entry, its end.
+pub(super) fn pack(
+    out: &mut dyn Write,
+    id: &BoxId,
+    items: &[Item],
+    limits: &Limits,
+) -> Result<(), Refusal> {
+    let opening = files::open(Op::Stage, id.as_str()).map_err(refused)?;
+    out.write_all(&opening)
+        .map_err(|e| Refusal::os("sending staged files", e))?;
+    pack_items(out, items, limits)?;
+    out.write_all(&files::END)
+        .map_err(|e| Refusal::os("sending staged files", e))
+}
+
 pub(super) fn id() -> BoxId {
     BoxId::new("box-1").unwrap()
 }

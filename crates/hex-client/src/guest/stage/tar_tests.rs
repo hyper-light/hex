@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use super::tests::{id, unpack};
+use super::tests::{id, pack, unpack};
 use super::*;
 use hex_core::stream::files::LIMITS;
 
@@ -571,47 +571,6 @@ fn a_global_pax_record_with_an_unknown_key_is_refused_naming_it() {
     );
 }
 
-/// HEX-GUEST-15 (the lead's 'g' list, 4): pack a real `git archive --format=tar` output (git 2.56.0, a
-/// scratch repo of `bin/hello` 0755, `etc/conf` and a symlink `link` -> `../bin/hello`, commit fc7ebc43;
-/// fixtures/git-archive.tar, sha256 0cbf36b3...), which begins with a global record holding only
-/// `comment=<commit>`: expect it staged, every entry exact (git's tar.umask 002 gives 0775 and 0664).
-#[test]
-fn a_git_archive_tarball_stages_with_every_entry_exact() {
-    let bytes = include_bytes!("fixtures/git-archive.tar");
-    let entries = unpack(&pack_tar("r.tar", bytes, &LIMITS).unwrap());
-    let got: Vec<(String, u16, What, Vec<u8>)> = entries
-        .into_iter()
-        .map(|(e, data)| (e.path, e.mode, e.what, data))
-        .collect();
-    let want = vec![
-        ("root".to_owned(), 0o755, What::Dir, vec![]),
-        ("root".to_owned(), 0, What::Layer, vec![]),
-        ("root/bin".to_owned(), 0o775, What::Dir, vec![]),
-        (
-            "root/bin/hello".to_owned(),
-            0o775,
-            What::File { size: 18 },
-            b"#!/bin/sh\necho hi\n".to_vec(),
-        ),
-        ("root/etc".to_owned(), 0o775, What::Dir, vec![]),
-        (
-            "root/etc/conf".to_owned(),
-            0o664,
-            What::File { size: 9 },
-            b"name=lab\n".to_vec(),
-        ),
-        (
-            "root/link".to_owned(),
-            0o777,
-            What::Symlink {
-                target: "../bin/hello".to_owned(),
-            },
-            vec![],
-        ),
-    ];
-    assert_eq!(got, want);
-}
-
 /// HEX-GUEST-15 (§4a as amended): pack entries owned 472:0 and 1001:1001 by their headers, one whose PAX
 /// record sets a uid, gid, fractional mtime and later atime past what a header holds, and xattrs as SCHILY (raw) and
 /// LIBARCHIVE (percent-encoded name, base64 value), with one in macOS's namespace: expect each staged with
@@ -755,19 +714,10 @@ fn git(dir: &Path, args: &[&str], input: &[u8]) -> Vec<u8> {
 /// symlink (written as git objects, so no host needs filesystem symlinks or modes), commit it, and stage
 /// `git archive --format=tar HEAD` and `--format=tar.gz`, each beginning with a global record holding only
 /// `comment=<commit>`: expect every entry staged exact, its mode as git writes it (tar.umask 002), its bytes
-/// and its link text. Where no `git` runs, the committed fixture's test stands for it.
+/// and its link text. Every host the gates run on has `git` (the gates' vendor check needs it), so this
+/// test needs it too.
 #[test]
 fn a_git_archive_made_here_stages_with_every_entry_exact() {
-    if std::process::Command::new("git")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
-        eprintln!(
-            "SKIP: no git here; a_git_archive_tarball_stages_with_every_entry_exact covers its bytes"
-        );
-        return;
-    }
     let repo = tempfile::tempdir().unwrap();
     let dir = repo.path();
     git(dir, &["init", "-q", "-b", "main", "."], b"");

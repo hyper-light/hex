@@ -126,14 +126,10 @@ fn take(conn: &mut dyn Duplex, staged: &Path, limits: &Limits) -> Result<(), Ref
                             let begun = Stage::begin(staged, id)?;
                             let learned = begun.free;
                             stage = Some(begun);
-                            // From version 2 the packer learns the stage's budget first, and both sides
-                            // spend against it.
+                            // The packer learns the stage's budget first, and both sides spend
+                            // against it.
                             unpack.learn(learned.entries, learned.bytes);
-                            if unpack.version() >= 2 {
-                                send_budget(conn, learned)
-                            } else {
-                                Ok(())
-                            }
+                            send_budget(conn, learned)
                         }
                     }
                 }

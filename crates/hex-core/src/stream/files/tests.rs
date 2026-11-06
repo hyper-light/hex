@@ -1,8 +1,8 @@
 //! The staging stream's tests (docs/design/shards-guest.md §4a, HEX-GUEST-13; native plan step 5): a
 //! stage's entries read back as written however the stream cuts them; hostile names, kinds, modes and
 //! fields are refused by type; and every count past its bound is refused before its bytes are held.
-//! Version 2 (§4a): an entry's owner, mtime and extended attributes, and hard links, read back as written,
-//! hostile ones refused by type; a version-1 stream still reads, and refuses what only version 2 has.
+//! §4a: an entry's owner, mtime and extended attributes, and hard links, read back as written, hostile
+//! ones refused by type; a stream of any version but 2 refused by name.
 
 use super::*;
 use proptest::prelude::*;
@@ -456,40 +456,26 @@ fn hostile_version_2_metadata_and_hard_links_are_refused_by_type() {
     ));
 }
 
-/// HEX-GUEST-13: a version-1 stream (no metadata flag, no hard links) still reads as before; in version 1 a
-/// head's metadata flag is a pad byte and kind 4 is no kind, each refused by type.
+/// HEX-GUEST-13 (Ada's rule: no legacy kept without a named consumer): open a stream as version 1, which was
+/// never released (packer and relay ship from one tree in one image), and as version 3, which isn't one:
+/// expect each refused by name, saying version 2 is the one this node speaks, before any entry is read.
 #[test]
-fn a_version_1_stream_reads_and_refuses_what_only_version_2_has() {
-    let v1 = |body: &[u8]| {
-        let mut out = open(Op::Stage, "b").unwrap();
-        out[4..6].copy_from_slice(&1u16.to_le_bytes());
-        out.extend_from_slice(body);
-        out
-    };
-    let mut plain = head(&entry("d", What::Dir), &LIMITS).unwrap();
-    plain.extend(END);
-    let got = read(LIMITS, &v1(&plain), 3).unwrap();
-    assert_eq!(got[1].0, Step::Entry(entry("d", What::Dir)));
-    let flagged = head(
-        &Entry {
-            meta: Some(meta(1, 1, &[])),
-            ..entry("d", What::Dir)
-        },
-        &LIMITS,
-    )
-    .unwrap();
-    assert_eq!(read(LIMITS, &v1(&flagged), 64), Err(Refused::Pad(HAS_META)));
-    let linked = head(
-        &entry(
-            "l",
-            What::Hardlink {
-                target: "d".to_owned(),
-            },
-        ),
-        &LIMITS,
-    )
-    .unwrap();
-    assert_eq!(read(LIMITS, &v1(&linked), 64), Err(Refused::Kind(4)));
+fn a_stream_of_any_version_but_2_is_refused_by_name() {
+    for version in [1u16, 3, 0] {
+        let mut bytes = open(Op::Stage, "b").unwrap();
+        bytes[4..6].copy_from_slice(&version.to_le_bytes());
+        let mut plain = head(&entry("d", What::Dir), &LIMITS).unwrap();
+        plain.extend(END);
+        bytes.extend(plain);
+        let got = read(LIMITS, &bytes, 64);
+        assert_eq!(got, Err(Refused::Version { got: version }));
+        let why = got.unwrap_err().to_string();
+        assert!(
+            why.contains(&format!("staging stream version {version} isn't read"))
+                && why.contains("this node speaks version 2"),
+            "{why}"
+        );
+    }
 }
 
 /// HEX-GUEST-13 (version 2, §4a's layers): stage two layers of one root, the second with a whiteout and an
