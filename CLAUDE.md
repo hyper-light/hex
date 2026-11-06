@@ -157,7 +157,9 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   `GetExitCodeProcess`), marks its standard handles inheritable (`SetHandleInformation`), reads the job's
   accounting and its guaranteed memory-limit violation (`QueryInformationJobObject`), ends the job
   (`TerminateJobObject`) and closes its handles (`CloseHandle`), and reads the machine's processor count
-  (`GetActiveProcessorCount`). `windows-sys` binds these as `unsafe` foreign functions, and std's own
+  (`GetActiveProcessorCount`). For the `oci` class's Shards guest it reads the default shared roots
+  (docs/design/shards-guest.md §4a): the users folder from its known folder (`SHGetKnownFolderPath` with
+  `FOLDERID_UserProfiles`, its string freed by `CoTaskMemFree`) and the temp folder (`GetTempPath2W`). `windows-sys` binds these as `unsafe` foreign functions, and std's own
   job-object support and its `PROC_THREAD_ATTRIBUTE_JOB_LIST`/`_HANDLE_LIST` process creation are
   unstable; Rust can express none of them safely.
 - `crates/hex-runtime/src/windows/oci/sys.rs`: the Windows `oci` class, a Windows image run process-isolated
