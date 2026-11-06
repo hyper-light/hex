@@ -369,6 +369,15 @@ real class held to the simulator's trace), runs as each OS's own tests. Where it
 | Windows amd64 (jupiter) | **Passes** (job objects; `windows_process_box` 9/9 on jupiter at 1a2e1eb and e322d7b, the Windows agent's record `bench/install/records/windows-jupiter-20261105.txt` on `cp/t7-native-windows`) | **Passes** (HCS, native step 4): `windows_oci_box` 2/2 on jupiter at `cp/t7-native-s4` 5f712ff, real layers, no skips, HEX-RT-14 included (step 4's log `suite-20261106T191231Z.log`); jupiter's `cargo test --workspace` at 5f712ff exits 0 (`wstest-20261106T191231Z.log`): conformance and HEX-DIFF-1..6 match the oracle, TERM ending the init as `Signal(15)`, and the step's criteria pass |
 | Windows arm64 | Skipped for now (Ada, 2026-11-03) | Skipped |
 
+
+The integrated native tree, `cp/t7-native` at fb0716e (2026-11-06; steps 1-3, 5, 6 and 7 through their gated tips, the
+macOS line through a7c9a8c, the Windows line through 702ce7e; step 4 through aff4195, its converted tip to come):
+fedora's 7 gates exit 0 (379 tests, 0 failed) and the root lab passes 8 of 8 as root, in one unit
+(`hex-integrate-native-20261106T210700Z`, 21:07-21:44Z). On adas-mac-studio-2, run as a launchd job outside kiln's
+pacing (`hex-integrate-mac-fb0716e-20261106T210742Z`): clippy for macOS and Windows exit 0, `cargo test --workspace`
+exits 0, and `macos_process_box` passes 7 with 1 ignored (`box_user_boxes_hold_the_contract`, which needs the root
+helper: Ada's boxlab). jupiter's `cargo test` at fb0716e is unread: jupiter refused kiln's runs from ~20:50Z.
+
 The suite's divergences so far, each fixed where the contract says: a Windows box with nothing running took a
 signal the others refuse (`NotRunning`), now refused; the simulator ended an `oci` box's init on TERM, which
 Linux doesn't (a PID namespace's init takes only KILL and STOP unless it handles the signal), now modelled, and
