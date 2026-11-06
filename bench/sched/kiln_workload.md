@@ -89,6 +89,10 @@ of it, and the rest ask for little.
 
 ### The bar on recorded days, measured (2026-11-05, for Ada's call on AC-T7.5.2)
 
+Re-measured 2026-11-06 once `fair::measure` stopped counting a workload refused at admission as
+waiting: (a)'s DRF row below is the new one (it read 14.33 h and 220,640 ppm before); its FIFO row
+and (b) didn't move.
+
 `crates/hex-sim/tests/recorded.rs`, hex-sim run on jupiter (Windows x86_64, release; hex-sim is
 deterministic, so any machine gives these numbers), bands-then-DRF beside submit order (FIFO) on the
 same input. "Parts" are each owner's part of the dominant shares held while every owner had work waiting.
@@ -104,7 +108,7 @@ legs are larger than that node (kiln 165, slates 42, hyper-raft 5) and are refus
 
 | policy | contended | parts: kiln, slates, hyperscale, hyper-raft | worst from 25% | bar (5,000 ppm) |
 |---|---|---|---:|---|
-| DRF | 14.33 h, one stretch | 2.9%, 35.0%, 32.5%, 29.6% | 220,640 ppm | missed |
+| DRF | 7.06 h, 5 stretches | 1.9%, 21.8%, 36.4%, 39.8% | 231,270 ppm | missed |
 | FIFO | 1.46 h, one stretch | 0.1%, 1.7%, 69.9%, 28.3% | 448,998 ppm | missed |
 
 Reading: kiln asks for more than a quarter only through legs too large for the cluster. Those of its

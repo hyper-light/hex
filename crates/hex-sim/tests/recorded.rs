@@ -27,7 +27,7 @@ use hex_sim::model::{NodeId, NodeSpec};
 /// arrivals, run times and needs as recorded) on the largest cluster at which each of the four asks
 /// for more than a quarter of it, under bands-then-DRF and under submit order; expect the
 /// precondition to hold, the four to contend, and legs too large for the cluster refused at
-/// admission. It does not meet the bar (2026-11-05: DRF worst 220,640 ppm from 25%, FIFO 448,999):
+/// admission. It does not meet the bar (2026-11-06: DRF worst 231,270 ppm from 25%, FIFO 448,998):
 /// kiln asks for more than a quarter only through legs the cluster can't hold, and what it can run
 /// asks for under 1% of it.
 #[test]
