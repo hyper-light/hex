@@ -75,8 +75,6 @@ pub const LIMITS: Limits = Limits {
 pub const STAGED: &str = "/run/hex/staged";
 /// Longest a stdio connection takes to name itself: the host writes its name as soon as it connects.
 pub const NAME_PATIENCE: Duration = Duration::from_secs(5);
-/// Each stdio copier's stack: one copy buffer and little else.
-const COPIER_STACK: usize = 64 << 10;
 
 /// What accepts the host's connections: AF_VSOCK in the guest, a Unix socket in tests.
 pub trait Listen: Send + Sync + 'static {
@@ -286,7 +284,8 @@ impl Relay {
         writer: &Mutex<Box<dyn Duplex>>,
     ) {
         let mut deframer = Deframer::new(wire::MAX_MESSAGE);
-        let mut buf = vec![0u8; 64 << 10];
+        // A read takes at most one whole frame, the most the deframer holds.
+        let mut buf = vec![0u8; stream::MAX_FRAME];
         loop {
             let n = match host.read(&mut buf) {
                 Ok(0) => return,
@@ -463,7 +462,6 @@ fn pipes(streams: wire::Streams, conns: Vec<Box<dyn Duplex>>) -> Result<Vec<Owne
         };
         std::thread::Builder::new()
             .name("hex-relay-stdio-copy".to_owned())
-            .stack_size(COPIER_STACK)
             .spawn(move || copy.run(conn))
             .map_err(|e| Refusal::os("starting a stdio copier", e))?;
         fds.push(theirs);

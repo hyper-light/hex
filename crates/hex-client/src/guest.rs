@@ -83,9 +83,6 @@ pub struct Stream {
     end: Box<dyn Duplex>,
 }
 
-/// Each stdio copier's stack: it holds one copy buffer (`std::io::copy`'s 8 KiB) and little else.
-const COPIER_STACK: usize = 64 << 10;
-
 fn os(op: &'static str) -> impl Fn(io::Error) -> Refusal {
     move |e| Refusal::os(op, e)
 }
@@ -93,14 +90,13 @@ fn os(op: &'static str) -> impl Fn(io::Error) -> Refusal {
 impl Stream {
     /// Dials a stdio connection for `named`, says what it is, and starts the thread that copies it.
     fn stream(&self, named: Named, copy: Copier) -> Result<(), Refusal> {
+        // Unbounded in time, as a local exec's stdin is the caller's own pipe: a program that doesn't read
+        // it holds its copier, which ends with the connection, when the exec does (CLAUDE.md §8).
         let mut conn = self.link.dial(stream::STDIO_PORT)?;
-        conn.set_write_timeout(Some(ANSWER_PATIENCE))
-            .map_err(os("bounding a stdio connection's sends"))?;
         conn.write_all(&stream::name(named))
             .map_err(os("naming a stdio connection"))?;
         std::thread::Builder::new()
             .name("hex-client-stdio".to_owned())
-            .stack_size(COPIER_STACK)
             .spawn(move || copy.run(conn))
             .map(drop)
             .map_err(os("starting a stdio copier"))
@@ -193,7 +189,8 @@ impl Transport for Stream {
 /// The reading thread: every message the agent sends, until the connection ends.
 fn read(shared: &Shared<Stream>, mut conn: Box<dyn Duplex>) {
     let mut deframer = Deframer::new(wire::MAX_MESSAGE);
-    let mut buf = vec![0u8; 64 << 10];
+    // A read takes at most one whole frame, the most the deframer holds.
+    let mut buf = vec![0u8; stream::MAX_FRAME];
     let why = 'conn: loop {
         let n = match conn.read(&mut buf) {
             Ok(0) if deframer.at_boundary() => {
