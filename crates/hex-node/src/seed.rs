@@ -21,7 +21,7 @@ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Condvar, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hex_api::Refusal;
 use hex_core::patience::Patience;
@@ -34,10 +34,6 @@ use rustix::process::{Pid, PidfdFlags, WaitId, WaitIdOptions};
 /// of a full pool is a burst that drains in milliseconds, not a wedge.
 pub const WAITERS: usize = 4_096;
 
-/// How long the agent waits for a seed's answer before it takes the seed for wedged, kills it and
-/// refuses the exec. A seed's work is a fork, a few `setns` and a clone — milliseconds; this is a
-/// bound on a wait for a fact (CLAUDE.md §4), not a guess at how long the work takes.
-const ANSWER_PATIENCE: Duration = Duration::from_secs(30);
 
 /// The exec seeds' wait's name, as the waits census records it.
 const ANSWERS: &str = "exec_seeds.answers";
@@ -49,7 +45,9 @@ pub struct SeedPool {
     budget: usize,
     inner: Mutex<Inner>,
     free: Condvar,
-    /// How long an exec waits for a busy seed to free.
+    /// How long an exec waits for a busy seed to free: twice the slowest an exec has held a seed on this node,
+    /// seeded from the clone record ([`hex_core::seeds::CLONE_SLOWEST`], `seed_path.md` run 3), an exec seed's work
+    /// being the same kind of clone with a few `setns` (decision 9; the lead's rule of 2026-11-06).
     answers: Patience,
 }
 
@@ -66,6 +64,8 @@ struct Inner {
 struct Seed {
     socket: OwnedFd,
     pidfd: OwnedFd,
+    /// When its current exec took it: its hold is a sample of the pool's wait.
+    since: Instant,
 }
 
 /// The most exec seeds a node keeps on its host (`sizes`; Ada's rule, 2026-11-06): as many as fit in the
@@ -89,7 +89,7 @@ impl SeedPool {
         Self {
             exe,
             budget: budget.max(1),
-            answers: Patience::measuring(ANSWERS),
+            answers: Patience::seeded(ANSWERS, hex_core::seeds::CLONE_SLOWEST),
             inner: Mutex::new(Inner::default()),
             free: Condvar::new(),
         }
@@ -138,7 +138,8 @@ impl SeedPool {
     fn acquire(&self) -> Result<Seed, Refusal> {
         let mut inner = self.lock()?;
         loop {
-            if let Some(seed) = inner.idle.pop() {
+            if let Some(mut seed) = inner.idle.pop() {
+                seed.since = Instant::now();
                 return Ok(seed);
             }
             if inner.total < self.budget {
@@ -163,7 +164,7 @@ impl SeedPool {
             inner.waiting = inner.waiting.saturating_add(1);
             let (guard, timed_out) = self
                 .free
-                .wait_timeout(inner, ANSWER_PATIENCE)
+                .wait_timeout(inner, self.answers.deadline().unwrap_or(Duration::MAX))
                 .map_err(|_| Refusal::Broken("the seed pool's lock was poisoned".to_owned()))?;
             inner = guard;
             inner.waiting = inner.waiting.saturating_sub(1);
@@ -178,6 +179,7 @@ impl SeedPool {
 
     /// Returns a healthy seed to the pool and wakes one waiter.
     fn release(&self, seed: Seed) {
+        self.answers.answered(seed.since.elapsed());
         if let Ok(mut inner) = self.lock() {
             inner.idle.push(seed);
             self.free.notify_one();
@@ -217,6 +219,7 @@ impl SeedPool {
         let pidfd = rustix::process::pidfd_open(raw, PidfdFlags::empty())
             .map_err(|e| Refusal::os("opening a seed's pidfd", e))?;
         Ok(Seed {
+            since: Instant::now(),
             socket: ours,
             pidfd,
         })
