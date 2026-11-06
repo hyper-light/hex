@@ -35,6 +35,16 @@ pub enum Source {
     Path(PathBuf),
     /// A file of these bytes (a bundle's rewritten `config.json`), mode 0644.
     Bytes(Vec<u8>),
+    /// A tarball (`.tar`, or gzip's `.tar.gz` or `.tgz`), staged from its own entries: their Linux modes
+    /// and symlink texts exact, which a root unpacked on a host that keeps neither would lose (§4a).
+    Tar(PathBuf),
+}
+
+/// Whether `path` names a tarball root, by its name: `.tar`, `.tar.gz` or `.tgz`.
+pub fn is_tarball(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.ends_with(".tar") || n.ends_with(".tar.gz") || n.ends_with(".tgz"))
 }
 
 /// The guest's path of `name` under `id`'s staged root, the relay staging under `staged`.
@@ -227,6 +237,7 @@ pub fn pack(
                 send(out, bytes)?;
             }
             Source::Path(path) => walk(out, &item.name, path, limits, &mut counts)?,
+            Source::Tar(path) => tarball(out, &item.name, path, limits, &mut counts)?,
         }
     }
     send(out, &files::END)
@@ -364,5 +375,167 @@ fn copy(out: &mut dyn Write, path: &Path, size: u64) -> Result<(), Refusal> {
     Ok(())
 }
 
+/// The most bytes read past a tarball's end-of-archive block, to reach a gzip stream's trailer and check
+/// it: tar pads an archive to its record, 10,240 bytes by default (GNU tar's `--blocking-factor` 20), and
+/// one this much longer is refused rather than read without end (CLAUDE.md §2).
+const TRAILING: u64 = 1 << 20;
+
+/// A tarball's bytes, counted as they're read, so its end is checked against its last entry's.
+struct Counted<R> {
+    inner: R,
+    read: u64,
+}
+
+impl<R: Read> Read for Counted<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.read = self
+            .read
+            .saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+        Ok(n)
+    }
+}
+
+/// Sends the tarball at `path` as `name`, a directory holding its entries in the archive's order: each one
+/// counted against the stage's bounds before it is sent, each directory before what it holds, and every
+/// fault refused naming the archive and the entry.
+fn tarball(
+    out: &mut dyn Write,
+    name: &str,
+    path: &Path,
+    limits: &Limits,
+    counts: &mut Counts,
+) -> Result<(), Refusal> {
+    let bad = |what: &str, why: &dyn std::fmt::Display| never(path, &format!("{what}: {why}"));
+    let file = File::open(path).map_err(|e| bad("opening it", &e))?;
+    let gzip = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.ends_with(".gz") || n.ends_with(".tgz"));
+    let reader: Box<dyn Read> = if gzip {
+        Box::new(flate2::read::GzDecoder::new(io::BufReader::new(file)))
+    } else {
+        Box::new(io::BufReader::new(file))
+    };
+    let mut archive = tar::Archive::new(Counted {
+        inner: reader,
+        read: 0,
+    });
+    // The root itself: the archive's own `./` entry, if it has one, names nothing more.
+    counts.add(0, limits)?;
+    let root = Entry {
+        path: name.to_owned(),
+        mode: 0o755,
+        what: What::Dir,
+    };
+    out.write_all(&files::head(&root, limits).map_err(refused)?)
+        .map_err(|e| Refusal::os("sending staged files", e))?;
+    let mut dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    // Where the last entry's data ends: the archive must go on past it to its end-of-archive block.
+    let mut end: u64 = 0;
+    for entry in archive.entries().map_err(|e| bad("reading it", &e))? {
+        let mut entry = entry.map_err(|e| bad("reading an entry", &e))?;
+        let raw = entry.path_bytes().into_owned();
+        let shown = String::from_utf8_lossy(&raw).into_owned();
+        let text = std::str::from_utf8(&raw).map_err(|_| bad(&shown, &"its name isn't UTF-8"))?;
+        if text.starts_with('/') {
+            return Err(bad(&shown, &"its name is absolute"));
+        }
+        let mut rel = text.trim_end_matches('/');
+        while let Some(rest) = rel.strip_prefix("./") {
+            rel = rest;
+        }
+        if rel.split('/').any(|part| part == "..") {
+            return Err(bad(&shown, &"its name has a '..' component"));
+        }
+        let size = entry.size();
+        end = entry
+            .raw_file_position()
+            .checked_add(size.div_ceil(512).saturating_mul(512))
+            .ok_or_else(|| bad(&shown, &"its size is past any archive's"))?;
+        if rel.is_empty() || rel == "." {
+            continue;
+        }
+        let parent = rel.rsplit_once('/').map_or("", |(p, _)| p);
+        if !parent.is_empty() && !dirs.contains(parent) {
+            return Err(bad(&shown, &"it comes before its directory"));
+        }
+        let header = entry.header();
+        let mode = u16::try_from(
+            header.mode().map_err(|e| bad(&shown, &e))? & u32::from(files::MODE_BITS),
+        )
+        .unwrap_or(0o755);
+        let what = match header.entry_type() {
+            tar::EntryType::Directory => What::Dir,
+            tar::EntryType::Regular | tar::EntryType::Continuous => What::File { size },
+            tar::EntryType::Symlink => {
+                let target = entry
+                    .link_name_bytes()
+                    .ok_or_else(|| bad(&shown, &"a symbolic link with no target"))?
+                    .into_owned();
+                let target = String::from_utf8(target)
+                    .map_err(|_| bad(&shown, &"its target isn't UTF-8"))?;
+                What::Symlink { target }
+            }
+            tar::EntryType::Char | tar::EntryType::Block => {
+                return Err(bad(&shown, &"a device node is never staged"));
+            }
+            tar::EntryType::Fifo => return Err(bad(&shown, &"a FIFO is never staged")),
+            tar::EntryType::Link => {
+                return Err(bad(
+                    &shown,
+                    &"a hard link is never staged (none of the roots it serves holds one, §4a)",
+                ));
+            }
+            _ => return Err(bad(&shown, &"an entry of a kind staging carries not")),
+        };
+        let size = match what {
+            What::File { size } => size,
+            What::Dir | What::Symlink { .. } => 0,
+        };
+        counts.add(size, limits)?;
+        let staged = Entry {
+            path: format!("{name}/{rel}"),
+            mode,
+            what,
+        };
+        out.write_all(&files::head(&staged, limits).map_err(refused)?)
+            .map_err(|e| Refusal::os("sending staged files", e))?;
+        match staged.what {
+            What::Dir => {
+                dirs.insert(rel.to_owned());
+            }
+            What::File { size } if size > 0 => {
+                let sent =
+                    io::copy(&mut (&mut entry).take(size), out).map_err(|e| bad(&shown, &e))?;
+                if sent != size {
+                    return Err(bad(&shown, &"the archive ends inside it"));
+                }
+            }
+            What::File { .. } | What::Symlink { .. } => {}
+        }
+    }
+    let mut counted = archive.into_inner();
+    if counted.read < end.saturating_add(512) {
+        return Err(bad("its end", &"it ends without its end-of-archive block"));
+    }
+    // Read to the stream's end, so a gzip trailer that lies about the archive is caught.
+    let trailing = io::copy(
+        &mut (&mut counted).take(TRAILING.saturating_add(1)),
+        &mut io::sink(),
+    )
+    .map_err(|e| bad("its end", &e))?;
+    if trailing > TRAILING {
+        return Err(bad(
+            "its end",
+            &format!("more than {TRAILING} bytes follow its end-of-archive block"),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tar_tests;

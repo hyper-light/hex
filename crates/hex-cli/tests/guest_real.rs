@@ -9,7 +9,7 @@
 //! - `HEX_GUEST_INITRD`: its initramfs, whose `/init` is a static Linux `hex` (as PID 1, `hex` is the guest's init);
 //! - `SHARDS_BIN`: the `shards` binary (on macOS the signed build, where it is installed);
 //! - `HEX_GUEST_LINUX_HEX`: a static Linux `hex` for the guest's architecture, put at `/hex` in each
-//!   box's root so the suite's programs (`hex selftest-box`) run there;
+//!   box's root (a tarball, as §4a's roots may be on every host) so the suite's programs (`hex selftest-box`) run there;
 //! - optionally `HEX_GUEST_CPUS` and `HEX_GUEST_MEMORY_MIB` (else 2 and 1024, this test's own) and
 //!   `HEX_GUEST_SHARES` (else the OS's default roots).
 //!
@@ -23,7 +23,7 @@
     clippy::disallowed_macros
 )]
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -101,10 +101,19 @@ fn the_oci_class_holds_its_contract_through_a_real_shards_guest() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
-    let rootfs = root.path().join("rootfs");
-    std::fs::create_dir_all(&rootfs).unwrap();
-    std::fs::copy(given("HEX_GUEST_LINUX_HEX").unwrap(), rootfs.join("hex")).unwrap();
-    make_executable(&rootfs.join("hex"));
+    // The root as a tarball, its one file `/hex` mode 0755: staged from its own entries on every host,
+    // as a Windows host must (docs/design/shards-guest.md §4a).
+    let rootfs = root.path().join("rootfs.tar");
+    let hex = std::fs::read(given("HEX_GUEST_LINUX_HEX").unwrap()).unwrap();
+    let mut tarball = tar::Builder::new(std::fs::File::create(&rootfs).unwrap());
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Regular);
+    header.set_mode(0o755);
+    header.set_size(u64::try_from(hex.len()).unwrap());
+    tarball
+        .append_data(&mut header, "hex", hex.as_slice())
+        .unwrap();
+    tarball.into_inner().unwrap();
     let number =
         |name: &str, default: u64| std::env::var(name).map_or(default, |v| v.parse().unwrap());
     let config = GuestConfig {
@@ -155,13 +164,3 @@ impl shards_api::Guests for Counted {
         self.shards.boot(spec)
     }
 }
-
-#[cfg(unix)]
-fn make_executable(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-}
-
-/// NTFS holds no mode: the packer stages every file 0755 from Windows.
-#[cfg(not(unix))]
-fn make_executable(_path: &Path) {}
