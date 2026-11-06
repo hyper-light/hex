@@ -5,8 +5,9 @@
 //! containers ([`netns`]), the seeds it keeps to clone them ([`seeds`]), the node agent's socket
 //! as bytes ([`wire`]), the rules a macOS box is bounded by — rootless by polling ([`watch`]) and
 //! under a privileged helper by the kernel ([`boxuser`]) — how its memory bound is apportioned across
-//! its members for the kernel to enforce ([`ledger`]), macOS's signal numbers ([`darwin`]), the macOS
-//! box helper's protocol ([`helper`]) and the box users' pool it grows ([`pool`]), the descriptor
+//! its members for the kernel to enforce ([`ledger`]), macOS's signal numbers ([`darwin`]), how long a
+//! killed group gets to empty ([`drain`]), the macOS box helper's protocol ([`helper`]) and the box
+//! users' pool it grows ([`pool`]), the descriptor
 //! limit a box gets where its spec names none ([`limits`]) and what each OS's installer sets up and the
 //! refusal where it is missing ([`setup`]).
 //! Shells in `hex-runtime`, `hex-node` and `hex-client` do the I/O these decide.
@@ -27,6 +28,7 @@ pub mod boxuser;
 pub mod bundle;
 pub mod cgroup;
 pub mod darwin;
+pub mod drain;
 pub mod helper;
 pub mod job;
 pub mod ledger;
