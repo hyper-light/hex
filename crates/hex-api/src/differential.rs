@@ -469,7 +469,11 @@ impl Play<'_> {
                 let Some(s) = self.started(*p)? else {
                     return Ok(Seen::NeverStarted);
                 };
-                match s.proc.wait_for(conformance::still_running()).map_err(|e| e.to_string())? {
+                match s
+                    .proc
+                    .wait_for(conformance::still_running())
+                    .map_err(|e| e.to_string())?
+                {
                     None => Seen::StillRunning,
                     Some(exit) => Seen::Exit(exit),
                 }

@@ -63,7 +63,6 @@ mod bench {
     pub const BOUND: u64 = 256 * MIB;
     pub const CLIMB: u64 = 1024 * MIB;
 
-
     /// The hex binary whose `selftest-box` acts are the programs: `HEX_BIN`, else the `hex` beside this
     /// bench (cargo puts both under the same profile directory).
     pub fn hex_binary() -> PathBuf {
@@ -221,7 +220,11 @@ mod bench {
         fn ended(&mut self) -> String {
             // The suite's learned wait: twice the slowest end of the record and this run.
             let asked = Instant::now();
-            match self.proc.wait_for(hex_api::conformance::patience()).expect("wait") {
+            match self
+                .proc
+                .wait_for(hex_api::conformance::patience())
+                .expect("wait")
+            {
                 Some(e) => {
                     hex_api::conformance::ENDS.saw(asked.elapsed());
                     format!("{e:?}")
