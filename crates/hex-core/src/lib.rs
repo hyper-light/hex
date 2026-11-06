@@ -19,6 +19,7 @@
 
 pub mod bundle;
 pub mod cgroup;
+pub mod demand;
 pub mod devfs;
 pub mod netns;
 pub mod netns_reuse;
