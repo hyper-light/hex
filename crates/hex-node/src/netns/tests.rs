@@ -9,13 +9,29 @@ use rustix::thread::{LinkNameSpaceType, move_into_link_name_space};
 
 use crate::sizes::{Host, Sizes};
 
-/// The pools' bounds on fedora, the bench host, as its bench units run the node: 32 hardware threads and about
-/// 7.5 GiB of memory to hold (`crate::sizes`).
+/// The pools' bounds on fedora, the bench host, as its bench units run the node: 32 hardware threads, about 7.5 GiB
+/// of memory to hold, and a thread limit past the socket's need (`crate::sizes`).
 fn bench() -> Sizes {
     Sizes::of(Host {
         memory: 7_500 << 20,
         parallelism: std::num::NonZeroUsize::new(32).unwrap(),
+        threads: 500_000,
     })
+}
+
+/// Ada's rule, 2026-11-06 (CLAUDE.md §2; goal 6 step 6's installer reads it): the descriptors a root node holds at
+/// its learned pools' bounds on fedora's figures. Do: bound the files under no limit at the bench host's sizes.
+/// Expect: the node's own 364,442 (331,086 at the old constants), and every kept namespace there may be holding its
+/// files four each past that, 640,018 in all.
+#[test]
+fn the_nodes_own_descriptors_on_fedoras_figures() {
+    let unlimited = rustix::process::Rlimit {
+        current: None,
+        maximum: None,
+    };
+    let b = FilesBound::of(&unlimited, root_pools());
+    assert_eq!(b.own, 364_442, "{:?}", bench());
+    assert_eq!(b.own + b.namespaces * FILES_A_KEPT, 640_018);
 }
 
 /// A root node's pools on the bench host.
@@ -243,16 +259,19 @@ fn the_files_bound_counts_the_namespaces_both_pools_make_ahead() {
     };
     let none = at(0, 0);
     let n = |count: usize| u64::try_from(count).unwrap();
-    let workers = n(crate::serve::WORKERS);
-    assert_eq!(at(BOUND, 0).own - none.own, n(BOUND) + 2 + workers);
+    let workers = n(bench().workers);
+    assert_eq!(
+        at(bench().netns, 0).own - none.own,
+        n(bench().netns) + 2 + workers
+    );
     assert_eq!(
         at(0, bench().ipc_uts).own - none.own,
         2 * (n(bench().ipc_uts) + 2) + 2 * workers
     );
-    let root = at(BOUND, bench().ipc_uts);
+    let root = at(bench().netns, bench().ipc_uts);
     assert_eq!(
         root.own - none.own,
-        n(BOUND) + 2 + 2 * (n(bench().ipc_uts) + 2) + 3 * workers
+        n(bench().netns) + 2 + 2 * (n(bench().ipc_uts) + 2) + 3 * workers
     );
     assert_eq!(
         root,
@@ -267,7 +286,7 @@ fn the_files_bound_counts_the_namespaces_both_pools_make_ahead() {
     let raised = at(4_096, 4_096);
     assert_eq!(
         raised.own - root.own,
-        (4_096 - n(BOUND)) + 2 * (4_096 - n(bench().ipc_uts))
+        (4_096 - n(bench().netns)) + 2 * (4_096 - n(bench().ipc_uts))
     );
     let soft = raised.own + 10 * FILES_A_KEPT + 3;
     let under = |pools| {
@@ -323,7 +342,7 @@ fn the_files_bound_counts_the_mounts_made_ahead() {
     let held = n(bench().seeds.get());
     assert_eq!(
         at(true).own - at(false).own,
-        held + 2 * held + 6 + 2 + 3 * n(crate::serve::WORKERS)
+        held + 2 * held + 6 + 2 + 3 * n(bench().workers)
     );
     assert!(
         root_pools().devfs,
@@ -354,7 +373,7 @@ fn the_files_bound_counts_the_prepared_dev_mounts() {
         )
     };
     let n = |count: usize| u64::try_from(count).unwrap();
-    let dev = n(bench().seeds.get()) + 2 + n(crate::serve::WORKERS);
+    let dev = n(bench().seeds.get()) + 2 + n(bench().workers);
     let grown = at(true).own - at(false).own;
     assert!(
         grown >= dev,

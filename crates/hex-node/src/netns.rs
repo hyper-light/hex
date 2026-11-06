@@ -24,7 +24,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 use hex_api::{BoxId, BoxOwner, Refusal};
-use hex_core::netns::{BOUND, Counts, Pool, Take};
+use hex_core::netns::{Counts, Pool, Take};
 use hex_core::netns_reuse::{self, Idle, Refused as Why, Take as Kept, Whose};
 use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::net;
@@ -118,11 +118,11 @@ pub struct Pools {
 }
 
 impl Pools {
-    /// A root node's on a host whose pools' bounds are `sizes`, each pool at its bound unless set: the ipc and uts
-    /// pairs at the most their learned size may reach.
+    /// A root node's on a host whose pools' bounds are `sizes`, each pool at its bound unless set: the network
+    /// namespaces and ipc and uts pairs at the most their learned sizes may reach.
     pub fn root(sizes: Sizes) -> Self {
         Self {
-            netns: BOUND,
+            netns: sizes.netns,
             ipc_uts: sizes.ipc_uts,
             devfs: true,
             sizes,
@@ -140,7 +140,7 @@ impl Pools {
     }
 
     /// The descriptors the pools hold at their bounds, each pool's refill thread's beside, and the takes of every
-    /// call [`crate::serve::WORKERS`] runs at once, one of each pool's until its box's init joins them. A pool of
+    /// call the socket's workers run at once ([`Sizes::workers`]), one of each pool's until its box's init joins them. A pool of
     /// none has no thread. The mounts made ahead the same, where the node keeps them, their mask sources beside.
     fn descriptors(self) -> u64 {
         let pool = |bound: usize, each: u64| {
@@ -156,13 +156,13 @@ impl Pools {
             devfs_held(self.sizes)
                 .saturating_add(FDS_A_DEVFS_MAKE)
                 .saturating_add(FDS_MASK_SOURCES)
-                .saturating_add(of(crate::serve::WORKERS, FDS_DEVFS_TAKES))
+                .saturating_add(of(self.sizes.workers, FDS_DEVFS_TAKES))
         } else {
             0
         };
         pool(self.netns, 1)
             .saturating_add(pool(self.ipc_uts, 2))
-            .saturating_add(of(crate::serve::WORKERS, takes))
+            .saturating_add(of(self.sizes.workers, takes))
             .saturating_add(devfs)
     }
 }
@@ -342,11 +342,26 @@ impl Netns {
     /// containers do (decision 4). The namespaces kept idle for their owners are bounded by `sizes`: the node's
     /// `idle_netns`, and each owner's learned from its fresh takes, starting at the host's parallelism.
     pub fn start(bound: usize, files: FilesBound, sizes: Sizes) -> Result<Self, Refusal> {
+        Self::open(Pool::new(bound), bound, files, sizes)
+    }
+
+    /// As [`Netns::start`], the pool starting at the host's parallelism and learning its size from its draws, up to
+    /// `cap` ([`Pool::learning`]; Ada's rule, 2026-11-06): a root node's default, `cap` its [`Sizes::netns`].
+    pub fn learning(cap: usize, files: FilesBound, sizes: Sizes) -> Result<Self, Refusal> {
+        Self::open(Pool::learning(sizes.start, cap), cap, files, sizes)
+    }
+
+    fn open(
+        pool: Pool<OwnedFd>,
+        cap: usize,
+        files: FilesBound,
+        sizes: Sizes,
+    ) -> Result<Self, Refusal> {
         let shared = Arc::new(Shared {
-            pool: Mutex::new(Pool::new(bound)),
+            pool: Mutex::new(pool),
             wake: Condvar::new(),
         });
-        if bound == 0 {
+        if cap == 0 {
             return Ok(Self {
                 shared,
                 refill: None,

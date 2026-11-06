@@ -863,8 +863,11 @@ host moves as well, so an upper bound), and what a pool of them holds:
 | a pool of 32 | | 24384.0 KiB (23.8 MiB) |
 <!-- /record -->
 
-The pool holds at most **32**: the most creates the bench's busiest phase has in flight at once (concurrency 32), so
-a burst of its whole width finds a namespace each, at most 24 MiB of the kernel's memory on the heavier machine. Its
+The pool's size is **learned from its draws** (Ada's rule, 2026-11-06; decision 5, "Pool sizes learned from
+demand"): it starts at the host's parallelism, 32 on fedora, the most creates the bench's busiest phase has in flight
+at once (concurrency 32), so a burst of its whole width finds a namespace each, at most 24 MiB of the kernel's memory
+on the heavier machine; a take that finds it empty raises it, up to the node's memory share at 762 KiB a namespace and
+the seeds' bound. Until then it held at most 32. Its
 32 descriptors sit beside the agent's one pidfd per box, which an exec's copy of the agent's descriptor table
 (`STATUS.md`, Open) hardly notices. One thread refills whenever the pool is below its bound, at 2,280/s or more;
 and it keeps up with sustained churn: no sustained phase of record found the pool dry (above). A make that fails
@@ -1877,20 +1880,29 @@ cause a miss under the demand seen, and each counts its cold takes. The pure cor
   lowers. An owner's ghosts are forgotten oldest first past the bound; that forgets a regret, never a size.
 - **The bounds: an even share of the node's memory at each item's recorded cost** (kinds (a) and (b)). The node reads
   `MemAvailable` (Linux `Documentation/filesystems/proc.rst`) and what each cgroup from its own up leaves under
-  `memory.max` (`Documentation/admin-guide/cgroup-v2.rst`), once a process, and takes the least. The five pools that
+  `memory.max` (`Documentation/admin-guide/cgroup-v2.rst`), once a process, and takes the least. The six pools that
   hold memory split it evenly, so together they hold no more than it (`sizes` tests it on hosts of any memory):
   | pool | an item's cost | record |
   |---|---|---|
   | idle cgroups (the node's bound) | 1,748,992 B residual + 24.7 KB parked init | `reuse_residual.md`, `create_tail.md` |
   | cgroups made ahead | 262 KB | `create_tail.md` |
   | idle network namespaces (the node's bound) | 762 KiB | `netns_pool.md` (Mac Studio, the heavier) |
+  | network namespaces made ahead (decision 4) | 762 KiB | `netns_pool.md` |
   | create seeds | 2,488 KiB | `seed_path.md` |
   | ipc/uts pairs | 14.1 KiB | `netns_pool.md` |
 
-  The pools a create takes an item from (ipc/uts pairs, cgroups made ahead, and the `/dev` and proc mounts, in all and
-  by key) are bounded besides by the seeds' bound: a create holds a seed while it takes them. Fedora as its bench units
-  run the node (about 7.5 GiB, 32 threads) gets 886 idle cgroups, 2,016 idle namespaces and 617 seeds, against 256,
-  256 and 32. The removal queue and the checkers' line hold the node's idle bound; procs alive one a parked init.
+  The pools a create takes an item from (network namespaces and ipc/uts pairs made ahead, cgroups made ahead, and the
+  `/dev` and proc mounts, in all and by key) are bounded besides by the seeds' bound: a create holds a seed while it
+  takes them. Fedora as its bench units run the node (about 7.5 GiB, 32 threads) gets 738 idle cgroups, 1,679 idle
+  namespaces and 514 seeds, against 256, 256 and 32. The removal queue and the checkers' line hold the node's idle
+  bound; procs alive one a parked init.
+- **The socket's workers: one for every call it admits** (kinds (a) and (c)). Workers start as calls find none idle
+  and are kept, as before; their bound is the socket's connections times their calls in flight, so no admitted call
+  waits for a worker that could exist, at most the threads the kernel lets the node have (the least of `RLIMIT_NPROC`,
+  getrlimit(2), and `/proc/sys/kernel/threads-max`, proc(5)): 4,096 where 128 were. `Sizes::workers` is the one
+  accessor (the seeds' line of waiting creates is set by it). The connections, calls in flight and programs a
+  connection watches stay bounds on input as they were (64, 64, 1,024; programs 64 connections' worth of the
+  supervisor's 65,536 pidfds), for the lead to rule on how the socket's share of the descriptor budget splits.
 - **Derived from a fact the kernel gives.** The removal's walk of a slot's sub-cgroups is bounded by `cgroup.stat`'s
   `nr_descendants`, read before it (kind (a)); one made during the walk refuses it, by type, for recovery.
 - **Derived, not learned: the wake mark and the record shards** (kind (b)). The ipc/uts refill is woken once a take
@@ -1898,9 +1910,10 @@ cause a miss under the demand seen, and each counts its cold takes. The pure cor
   20) and M the slowest make (0.035 ms p99, `netns_pool.md`), so what is left outlasts the refill of the rest; it was
   half the size. `store::SHARDS` stays 64: run 20 measured no shard's wait at concurrency 32, and a record's place is
   its id's hash over the count, so a count that changed with the host would lose the records a restart must find.
-- **What the bounds cost.** The descriptors counted at these bounds (`FilesBound`) grow with them: on fedora's sizes
-  about 2 x 2,016 kept namespaces, 617 seeds and 617 pairs and mounts more than at the old constants, which the soft
-  limit an installer sets must hold before kept namespaces hold their files. A larger `/dev` and proc pool holds more
+- **What the bounds cost.** The descriptors counted at these bounds (`FilesBound`'s `own`) grow with them: on
+  fedora's sizes 364,442 where the old constants gave 331,086 (the learned pools at their bounds and each worker's
+  takes); a soft limit past that lets kept namespaces hold their files, four each, 640,018 for every one there may be
+  (595,278 before). A larger `/dev` and proc pool holds more
   superblocks, each two memcg-aware `list_lru`s a memory offline walks (goal 16's finding); it holds them only for the
   keys and depth demand reached.
 - **What would falsify it**: a cold take counted (reuse `missed`/`Owner`, netns_reuse `fresh`, `made_on_path`,

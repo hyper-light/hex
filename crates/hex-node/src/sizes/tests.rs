@@ -13,8 +13,10 @@ fn host(memory: u64, parallelism: usize) -> Host {
     }
 }
 
-/// fedora's `/proc/sys/kernel/threads-max` (64 GiB of memory), the least of its thread limits as the node runs.
-const FEDORA_THREADS_MAX: u64 = 513_046;
+/// A thread limit past the socket's need, as a large host's is: Linux sets `threads-max` from memory, one thread's
+/// worth for every eight of its kernel stacks' (kernel/fork.c, `set_max_threads`), so a 64 GiB host has hundreds of
+/// thousands.
+const FEDORA_THREADS_MAX: u64 = 500_000;
 
 /// Do: size the pools on hosts of any memory. Expect: the pools at their bounds hold at most that memory, but for
 /// the one seed every node keeps.

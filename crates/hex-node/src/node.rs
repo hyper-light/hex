@@ -258,7 +258,7 @@ impl Node {
             Owner::Root => Pools::root(sizes),
             Owner::Rootless { .. } => Pools::rootless(sizes),
         };
-        let netns = Netns::start(pools.netns, crate::netns::FilesBound::now(pools), sizes)?;
+        let netns = Netns::learning(pools.netns, crate::netns::FilesBound::now(pools), sizes)?;
         let ipc_uts = IpcUtsPool::learning(sizes.start, pools.ipc_uts)?;
         let oci_boxes = BoxRoot::open(&root.dir().join(OCI_BOXES), root.disks().to_vec())?;
         let devices = device_programs(owner, &oci_boxes, MAX_PROGRAMS)?;
@@ -440,7 +440,8 @@ impl Node {
         }
     }
 
-    /// Sets the most network namespaces a root node makes ahead, [`netns::BOUND`] unless set, in place
+    /// Sets the network namespaces a root node makes ahead to `bound`, fixed (unless set it learns how many from its
+    /// draws, up to its [`Sizes::netns`]), in place
     /// of the pool it opened with, which closes what it held. With 0 it makes none, and every container
     /// that makes a network namespace makes it on its create's path, counted. A rootless node makes
     /// none (its containers' namespaces belong to user namespaces of their own), so a bound above 0

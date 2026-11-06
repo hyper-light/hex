@@ -202,9 +202,12 @@ fn event() -> impl Strategy<Value = Event> {
     ]
 }
 
-/// Small bounds, which histories fill and drain often, 0 (a pool that holds none), and decision 4's.
+/// The bench's concurrency, the size decision 4's pool had before it was learned and starts at on fedora.
+const BENCH: usize = 32;
+
+/// Small bounds, which histories fill and drain often, 0 (a pool that holds none), and the bench's width.
 fn bound() -> impl Strategy<Value = usize> {
-    prop_oneof![0usize..=6, Just(BOUND)]
+    prop_oneof![0usize..=6, Just(BENCH)]
 }
 
 /// HEX-NETNS-1 to 5, against the oracle: under random takes, made and failed makes, creates the pool can't
@@ -245,7 +248,7 @@ fn against_an_oracle_the_pool_keeps_its_bound_hands_each_namespace_out_once_and_
 /// ahead is taken before the pool runs dry again.
 #[test]
 fn a_take_from_an_empty_pool_is_made_on_the_path_and_counted() {
-    let mut pool = Pool::new(BOUND);
+    let mut pool = Pool::new(BENCH);
     assert_eq!(pool.take(), Ok(Take::MakeOnPath));
     assert_eq!(
         pool.counts(),
@@ -317,7 +320,7 @@ fn a_namespace_made_past_the_bound_is_refused_and_handed_back() {
 /// discarded, a make that was under way is handed back, and nothing more is asked for.
 #[test]
 fn a_take_after_shutdown_is_refused_and_what_the_pool_held_is_handed_back() {
-    let mut pool = Pool::new(BOUND);
+    let mut pool = Pool::new(BENCH);
     pool.made(1).unwrap();
     pool.made(2).unwrap();
     let mut back = pool.shut_down();

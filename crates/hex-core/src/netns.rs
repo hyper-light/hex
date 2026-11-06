@@ -5,7 +5,8 @@
 //! whose container makes a network namespace of its own takes one, and its container joins it with `setns`. This
 //! decides which, and refuses by type what can't be done.
 //!
-//! - **The bound**: the pool holds at most its bound, decision 4's [`BOUND`] unless the node is given another. A
+//! - **The bound**: the pool holds at most its size: learned from its draws, up to the bound its shell derives,
+//!   unless the node is given a fixed one ([`Pool::learning`], [`Pool::new`]; Ada's rule, 2026-11-06). A
 //!   namespace made past it is refused ([`Refused::Full`]) and handed back for the shell to close.
 //! - **The refill**: the refill mark is one below the bound. The pool asks for more as soon as it holds fewer
 //!   than its bound ([`Pool::wanted`]), as decision 4's one thread refills whenever the pool is below it. A make
@@ -29,11 +30,6 @@
 use std::collections::VecDeque;
 
 use crate::demand::Depth;
-
-/// The most namespaces decision 4's pool holds: the most creates the bench's busiest phase has in flight at once
-/// (concurrency 32), so a burst of its whole width finds a namespace each, at most 24 MiB of kernel memory on
-/// the heavier machine measured (`bench/competitive/probes/netns_pool.md`).
-pub const BOUND: usize = 32;
 
 /// What a take is answered with.
 #[derive(Debug, PartialEq, Eq)]

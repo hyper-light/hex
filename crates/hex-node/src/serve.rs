@@ -19,8 +19,9 @@
 //!   By construction they number at most `in_flight + programs + 1`: an answer for each call in
 //!   flight (a list's parts go one at a time), an end for each program, and the one refusal read
 //!   before reading stopped;
-//! - workers ([`WORKERS`]): a call past them waits in the queue its connections' in-flight bounds
-//!   hold.
+//! - workers (the node's [`crate::sizes::Sizes::workers`]): one for every call the connections' in-flight
+//!   bounds admit, where the kernel's thread limit allows; a call past them waits in the queue those
+//!   bounds hold.
 //!
 //! The disconnect rule (decision 3): when a connection closes, every program its execs started that it
 //! still watches is sent KILL through its pidfd, reaped, and counted in its box ([`Host::abandoned`]),
@@ -70,10 +71,6 @@ pub const LIMITS: Limits = Limits {
     in_flight: 64,
     programs: 1_024,
 };
-
-/// Most workers running calls at once, started as calls need them and kept: past them, calls wait in
-/// the queue. Twice [`LIMITS`]' in-flight bound, so one connection's calls never wait on another's.
-pub const WORKERS: usize = 128;
 
 /// What [`Refusal::Exhausted`] names for each bound.
 pub const CONNECTIONS: &str = "connections to the node agent's socket";

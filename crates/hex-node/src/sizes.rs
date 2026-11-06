@@ -32,10 +32,12 @@ pub const SEED_BYTES: u64 = 2_547_712;
 pub const IPC_UTS_BYTES: u64 = 14_438;
 
 /// The pools that hold the node's memory, by their items' cost: they split it evenly, so together they hold no
-/// more than it.
-const SHARERS: [u64; 5] = [
+/// more than it. The network namespaces are two pools: those made ahead (decision 4) and those kept idle for their
+/// owners.
+const SHARERS: [u64; 6] = [
     IDLE_CGROUP_BYTES,
     AHEAD_BYTES,
+    NETNS_BYTES,
     NETNS_BYTES,
     SEED_BYTES,
     IPC_UTS_BYTES,
@@ -50,6 +52,9 @@ pub struct Host {
     /// The hardware threads the node may run on (`std::thread::available_parallelism`, which reads the process's
     /// affinity and its cgroup's `cpu.max`).
     pub parallelism: NonZeroUsize,
+    /// The most threads the node may have: the least of its soft `RLIMIT_NPROC`, which counts its user's threads
+    /// (getrlimit(2)), and `/proc/sys/kernel/threads-max`, the host's (proc(5)); `u64::MAX` where neither bounds it.
+    pub threads: u64,
 }
 
 impl Host {
@@ -64,9 +69,18 @@ impl Host {
         let memory = cgroup_headrooms().into_iter().fold(available, u64::min);
         let parallelism = std::thread::available_parallelism()
             .map_err(|e| Refusal::os("reading the host's parallelism", e))?;
+        let nproc = rustix::process::getrlimit(rustix::process::Resource::Nproc).current;
+        let threads_max = std::fs::read_to_string("/proc/sys/kernel/threads-max")
+            .ok()
+            .and_then(|t| t.trim().parse::<u64>().ok());
+        let threads = [nproc, threads_max]
+            .into_iter()
+            .flatten()
+            .fold(u64::MAX, u64::min);
         Ok(Self {
             memory,
             parallelism,
+            threads,
         })
     }
 }
@@ -111,6 +125,13 @@ pub struct Sizes {
     pub ahead: usize,
     /// The most ipc and uts pairs made ahead. No more creates take one at once than hold a seed.
     pub ipc_uts: usize,
+    /// The most network namespaces made ahead (decision 4). No more creates take one at once than hold a seed.
+    pub netns: usize,
+    /// The most workers the node's socket runs calls on, each started as a call finds none idle and kept: one for
+    /// every call the socket admits at once (its connections times their calls in flight, [`crate::serve::LIMITS`]),
+    /// so no admitted call waits for a worker, at most the threads the kernel lets the node have, one at least.
+    /// The bound the seeds' line of waiting creates is set by.
+    pub workers: usize,
 }
 
 impl Sizes {
@@ -125,6 +146,8 @@ impl Sizes {
             seeds,
             ahead: each(AHEAD_BYTES).min(seeds.get()),
             ipc_uts: each(IPC_UTS_BYTES).min(seeds.get()),
+            netns: each(NETNS_BYTES).min(seeds.get()),
+            workers: workers(host.threads),
         }
     }
 
@@ -153,12 +176,23 @@ impl Sizes {
             of(self.idle_cgroups, IDLE_CGROUP_BYTES),
             of(self.ahead, AHEAD_BYTES),
             of(self.idle_netns, NETNS_BYTES),
+            of(self.netns, NETNS_BYTES),
             of(self.seeds.get(), SEED_BYTES),
             of(self.ipc_uts, IPC_UTS_BYTES),
         ]
         .into_iter()
         .fold(0, u64::saturating_add)
     }
+}
+
+/// The socket's workers under a thread limit of `threads` ([`Sizes::workers`]).
+fn workers(threads: u64) -> usize {
+    let limits = crate::serve::LIMITS;
+    let admitted = limits.connections.saturating_mul(limits.in_flight);
+    usize::try_from(threads)
+        .unwrap_or(usize::MAX)
+        .min(admitted)
+        .max(1)
 }
 
 #[cfg(test)]

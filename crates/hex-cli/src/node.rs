@@ -25,7 +25,7 @@ use hex_api::Refusal;
 #[cfg(debug_assertions)]
 use hex_node::CrashPoint;
 use hex_node::Node;
-use hex_node::serve::{LIMITS, Server, WORKERS};
+use hex_node::serve::{LIMITS, Server};
 use rustix::process::Resource;
 
 /// Runs `hex node`'s arguments (everything after `node`); returns the exit status.
@@ -186,7 +186,8 @@ fn serve(args: &[String]) -> Result<(), (u8, String)> {
     let node = Arc::new(node);
     let (ended, end) = std::sync::mpsc::channel();
     end_on_sigterm(term, Arc::clone(&node), ended.clone()).map_err(failed)?;
-    let mut server = Server::bind(&args.socket, node, LIMITS, WORKERS).map_err(failed)?;
+    let workers = node.sizes().workers;
+    let mut server = Server::bind(&args.socket, node, LIMITS, workers).map_err(failed)?;
     let mut out = std::io::stdout().lock();
     out.write_all(format!("ready {}\n", args.socket.display()).as_bytes())
         .and_then(|()| out.flush())
