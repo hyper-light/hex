@@ -51,6 +51,14 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
 - **kiln runner unit** (kiln `cp/t7-hex`): `Delegate=yes`, so the runner's cgroup can be subdivided
   for Hex boxes (the prerequisite; inert until the `hex` binary is deployed to runners).
 
+- **CLAUDE.md's unsafe-file lines (§12) and Gates lines: approved by Ada as written, 2026-11-06.** In this tree:
+  `crates/hex-runtime/src/windows/oci/sys.rs`'s line (aadbd4e), the macOS box helper's `helper_sys.rs` (d4252f3,
+  a960732), the helper's child setting `RLIMIT_NOFILE` (caa6e9f), and the Windows calls that find the Shards guest's
+  default shares (0b8bcd1). Approved and coming with their steps' tips: step 4's revised `windows/oci/sys.rs` call
+  list (c4961c1), which names calls step 4's later commits add, and step 7's two Gates lines (1b1fea3, 47a9683),
+  which name clippy targets step 7's `scripts/gates.sh` adds. Goal 7's clone line (e71daaf) is approved on its own
+  branch. A later change to any of these call lists goes back to Ada.
+
 ## In progress (CP-T7.1; see NOTES.md)
 
 - Both AC benchmarks are now of-record (above). Remaining CP-T7.1 work: the first-consumer default-on
