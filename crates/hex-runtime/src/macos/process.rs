@@ -78,6 +78,9 @@ pub struct Status {
 pub struct Shared {
     tb: Timebase,
     rates: Rates,
+    /// How long a killed group gets to empty, as this node learns it: the record's to start, raised by every
+    /// slower drain any box sees (hex_core::drain::Learned; the learned-waits rule, 2026-11-06).
+    drain: Arc<Mutex<hex_core::drain::Learned>>,
 }
 
 impl Shared {
@@ -93,6 +96,7 @@ impl Shared {
                 bytes: rate_bytes,
                 processes: rate_processes,
             },
+            drain: Arc::new(Mutex::new(hex_core::drain::Learned::default())),
         })
     }
 
@@ -206,6 +210,8 @@ impl Members {
 pub struct ProcessBox {
     state: Arc<State>,
     watcher: Mutex<Option<JoinHandle<()>>>,
+    /// The node's learned drain bound, shared by every box ([`Shared`]).
+    drain: Arc<Mutex<hex_core::drain::Learned>>,
 }
 
 impl ProcessBox {
@@ -232,6 +238,7 @@ impl ProcessBox {
         Ok(Self {
             state,
             watcher: Mutex::new(Some(watcher)),
+            drain: Arc::clone(&shared.drain),
         })
     }
 
@@ -369,16 +376,26 @@ impl ProcessBox {
             .map_err(|_| poisoned("a box's group"))?
         {
             let mut pids = sys::listing().map_err(|e| Refusal::os("listing a box's group", e))?;
-            // The group's size sets how long it gets to empty: the measured kill-to-empty envelope,
-            // doubled (hex_core::drain). Past it the kill didn't take, a fault named (CLAUDE.md §4).
+            // The group's size sets how long it gets to empty: the measured kill-to-empty envelope, doubled,
+            // as this node has learned it (hex_core::drain). Past it the kill didn't take, a fault named
+            // (CLAUDE.md §4); a delete has no other box to try, so the caller gets it.
             let members = alive_in(pgid, &mut pids)?;
+            let patience = self
+                .drain
+                .lock()
+                .map_err(|_| poisoned("the node's drain bound"))?
+                .bound(members);
+            let killed = Instant::now();
             let _ = killpg(
                 pgid,
                 hex_core::darwin::signal_to_macos(Signal::KILL.number()).unwrap_or(9),
             );
-            let deadline = Instant::now().checked_add(hex_core::drain::bound(members));
+            let deadline = killed.checked_add(patience);
             loop {
                 if alive_in(pgid, &mut pids)? == 0 {
+                    if let Ok(mut learned) = self.drain.lock() {
+                        learned.observe(members, killed.elapsed());
+                    }
                     return Ok(());
                 }
                 if deadline.is_none_or(|d| Instant::now() >= d) {

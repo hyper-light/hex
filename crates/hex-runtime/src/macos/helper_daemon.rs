@@ -292,6 +292,9 @@ pub struct Daemon<P: Privileged> {
     /// when its spec names no `pids_max`. Each box has a uid of its own, and XNU's fork counts a uid's
     /// processes against its `RLIMIT_NPROC` (`bsd/kern/kern_fork.c:269-283`).
     per_uid: u32,
+    /// How long a killed user gets to empty, as this node learns it: the record's to start, raised by every
+    /// slower drain (hex_core::drain::Learned; the learned-waits rule, 2026-11-06).
+    drain: Mutex<hex_core::drain::Learned>,
 }
 
 /// How many users a daemon's pool holds now, busy or free.
@@ -317,6 +320,7 @@ impl<P: Privileged> Daemon<P> {
             names: None,
             peak: Mutex::new(0),
             per_uid,
+            drain: Mutex::new(hex_core::drain::Learned::default()),
         }
     }
 
@@ -340,6 +344,7 @@ impl<P: Privileged> Daemon<P> {
             names: Some(Mutex::new(listed.into_iter().map(|(n, _)| n).collect())),
             peak: Mutex::new(peak),
             per_uid,
+            drain: Mutex::new(hex_core::drain::Learned::default()),
         };
         // Counted to the kept peak; a full role range stops it short (the next box is refused by name).
         for _ in listed_len(&daemon)..usize::try_from(peak).unwrap_or(0) {
@@ -689,20 +694,35 @@ impl<P: Privileged> Daemon<P> {
         };
         // Kill every process of the user, then wait for the user to empty before freeing it, so the next
         // box never inherits a live process. KILL is 9; mapped through the table like the rest of Hex. The
-        // user's size sets how long it gets: the measured kill-to-empty envelope, doubled
-        // (hex_core::drain); past it the kill didn't take, a fault named (CLAUDE.md §4).
+        // user's size sets how long it gets: the measured kill-to-empty envelope, doubled, as this node has
+        // learned it (hex_core::drain); past it the kill didn't take, a fault named (CLAUDE.md §4). The user
+        // can't be freed while it holds a process, so the node gets the refusal.
         let members = match self.ops.list(uid) {
             Ok(m) => m.len(),
             Err(e) => return os("listing a box's user", &e),
         };
+        let patience = match self.drain.lock() {
+            Ok(d) => d.bound(members),
+            Err(_) => {
+                return os(
+                    "reading the node's drain bound",
+                    &io::Error::other("poisoned"),
+                );
+            }
+        };
+        let killed = Instant::now();
         if let Err(e) = self.ops.kill(uid, Signal::KILL.number()) {
             return os("ending a box", &e);
         }
-        let patience = hex_core::drain::bound(members);
-        let deadline = Instant::now().checked_add(patience);
+        let deadline = killed.checked_add(patience);
         loop {
             match self.ops.list(uid).map(|m| m.is_empty()) {
-                Ok(true) => break,
+                Ok(true) => {
+                    if let Ok(mut d) = self.drain.lock() {
+                        d.observe(members, killed.elapsed());
+                    }
+                    break;
+                }
                 Ok(false) => {
                     if deadline.is_none_or(|d| Instant::now() >= d) {
                         return os(
@@ -802,7 +822,11 @@ impl<P: Privileged> Daemon<P> {
             };
             // Its box was dropped meanwhile: reap it here rather than leave a zombie.
             if let Err(mut p) = back {
-                let _ = p.wait_for(hex_core::drain::bound(1));
+                let patience = self
+                    .drain
+                    .lock()
+                    .map_or_else(|_| hex_core::drain::bound(1), |d| d.bound(1));
+                let _ = p.wait_for(patience);
             }
         }
         match got {
