@@ -11,7 +11,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use rustix::pipe::PipeFlags;
-use rustix::process::{WaitId, WaitIdOptions};
+use rustix::process::{Resource, Rlimit, WaitId, WaitIdOptions};
 
 /// Ignores SIGINT and SIGTERM in this process, so a wrapper (`hex box run`) outlives the signals
 /// its caller sends the whole process group and stays alive to clean the box up; the boxed child,
@@ -26,17 +26,22 @@ pub fn ignore_int_term() {
     }
 }
 
-/// Makes `cmd`'s child join the cgroup whose `cgroup.procs` is open as `procs` before it executes,
-/// so the program and everything it starts are in the box from their first instruction.
-pub fn join_cgroup_on_exec(cmd: &mut Command, procs: Arc<OwnedFd>) {
+/// Makes `cmd`'s child join the cgroup whose `cgroup.procs` is open as `procs` and take the descriptor
+/// limit `nofile` before it executes, so the program and everything it starts are in the box, under its
+/// limit, from their first instruction.
+pub fn join_cgroup_on_exec(cmd: &mut Command, procs: Arc<OwnedFd>, nofile: Rlimit) {
     // SAFETY: the closure runs in the forked child before exec, where only async-signal-safe calls
     // are allowed. It makes one write(2) on a descriptor opened before the fork (kept open by the
-    // `Arc` the closure owns), allocates nothing, and turns a failure into the errno std reports.
+    // `Arc` the closure owns) and one setrlimit(2) of a value made before it, allocates nothing, and
+    // turns a failure into the errno std reports.
     unsafe {
-        cmd.pre_exec(move || match rustix::io::write(&*procs, b"0") {
-            Ok(1) => Ok(()),
-            Ok(_) => Err(std::io::Error::from(rustix::io::Errno::IO)),
-            Err(e) => Err(std::io::Error::from(e)),
+        cmd.pre_exec(move || {
+            match rustix::io::write(&*procs, b"0") {
+                Ok(1) => {}
+                Ok(_) => return Err(std::io::Error::from(rustix::io::Errno::IO)),
+                Err(e) => return Err(std::io::Error::from(e)),
+            }
+            rustix::process::setrlimit(Resource::Nofile, nofile).map_err(std::io::Error::from)
         });
     }
 }
@@ -79,6 +84,8 @@ pub struct Spawn {
     cwd: Option<CString>,
     /// stdin, stdout and stderr, each at fd 3 or above, so no `dup2` onto 0, 1 or 2 overwrites another.
     stdio: [OwnedFd; 3],
+    /// The descriptor limit the program starts under.
+    nofile: Rlimit,
 }
 
 impl Spawn {
@@ -89,6 +96,7 @@ impl Spawn {
         envp: Vec<CString>,
         cwd: Option<CString>,
         stdio: [OwnedFd; 3],
+        nofile: Rlimit,
     ) -> std::io::Result<Self> {
         let [a, b, c] = stdio;
         // Each stdio fd ends up at 3 or above and close-on-exec, so the child's `dup2` onto 0, 1 and
@@ -109,6 +117,7 @@ impl Spawn {
             envp,
             cwd,
             stdio: [above(a)?, above(b)?, above(c)?],
+            nofile,
         })
     }
 
@@ -261,7 +270,8 @@ fn read_fully(fd: &OwnedFd, buf: &mut [u8]) -> std::io::Result<usize> {
 }
 
 /// The clone's child: stdio onto 0, 1 and 2, the signal state std's `Command` leaves a child (an empty
-/// mask, SIGPIPE back to its default, which Rust ignores), the working folder, then each path through
+/// mask, SIGPIPE back to its default, which Rust ignores), its descriptor limit, the working folder, then
+/// each path through
 /// execve(2), as execvp(3) tries them. Async-signal-safe calls only, on memory made before the clone.
 /// It never returns: it executes, or writes its errno to `err` and `_exit`s.
 ///
@@ -298,6 +308,9 @@ unsafe fn child(spawn: &Spawn, argv: &[*const c_char], envp: &[*const c_char], e
         if libc::signal(libc::SIGPIPE, libc::SIG_DFL) == libc::SIG_ERR {
             fail(err, errno());
         }
+    }
+    if let Err(e) = rustix::process::setrlimit(Resource::Nofile, spawn.nofile) {
+        fail(err, e.raw_os_error());
     }
     if let Some(cwd) = &spawn.cwd {
         // SAFETY: chdir(2) with a valid C string.

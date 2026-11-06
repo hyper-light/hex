@@ -77,7 +77,7 @@ fn the_seam_holds_its_contract_over_the_node_agents_socket() {
 }
 
 /// HEX-INST-3 (native plan step 6): on a machine where Hex's installer ran its one admin step, the
-/// node it installed (the `hex-node` user service) serves every Linux class with no further step: the
+/// node it installed (the user's `hex-node@<user>` service) serves every Linux class with no further step: the
 /// conformance suite passes over its socket, `HEX_INSTALLED_SOCKET`, on `oci` and `process` boxes.
 /// Run by the installer's lab (bench/install/linux_lab.sh); elsewhere it prints SKIP.
 #[test]
@@ -107,6 +107,21 @@ fn an_installed_node_serves_every_class() {
         );
     }
     assert!(client.list().unwrap().is_empty(), "a box is left");
+}
+
+/// HEX-INST-6 (native plan step 6, Ada 2026-11-06): a box whose spec names no RLIMIT_NOFILE, an oci
+/// box from a bundle that names none and a process box, gets Docker 29's 1024:524288, capped at the
+/// node's hard limit, not the node's own (which the installed node raises for the files it holds).
+fn nofile_by_default(lab: &Lab, client: &Client) {
+    let hard = rustix::process::getrlimit(rustix::process::Resource::Nofile).maximum;
+    let want = hex_core::limits::default_nofile(hard);
+    let want = format!("{}:{}", want.soft, want.hard);
+    for (class, spec) in [
+        ("oci", ClassSpec::Bundle(lab.bundle(&Lab::act(&Act::Wait)))),
+        ("process", ClassSpec::Process),
+    ] {
+        assert_eq!(nofile_seen(client, spec), want, "{class} box");
+    }
 }
 
 /// The soft and hard descriptor limits a program sees in a box made from `class`, as `soft:hard`.
@@ -400,6 +415,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
         failures.is_empty(),
         "process boxes over the socket: {failures:#?}"
     );
+    nofile_by_default(&lab, &client);
     disconnect(&lab, &agent, &client);
     crash_at_each_record_write(&lab, own, exe);
     assert!(client.list().unwrap().is_empty(), "a box is left");

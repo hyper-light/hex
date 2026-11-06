@@ -6,9 +6,10 @@
 //! as bytes ([`wire`]), the rule a Windows `oci` box is made by ([`hcs`]), the rules a macOS box is
 //! bounded by — rootless by polling ([`watch`]) and under a privileged helper by the kernel
 //! ([`boxuser`]) — how its memory bound is apportioned across its members for the kernel to enforce
-//! ([`ledger`]), macOS's signal numbers ([`darwin`]), the macOS box helper's protocol ([`helper`]) and
-//! what each OS's installer sets up and the refusal where it is missing ([`setup`]). Shells in
-//! `hex-runtime`, `hex-node` and `hex-client` do the I/O these decide.
+//! ([`ledger`]), macOS's signal numbers ([`darwin`]), the macOS box helper's protocol ([`helper`]), the
+//! descriptor limit a box gets where its spec names none ([`limits`]) and what each OS's installer sets
+//! up and the refusal where it is missing ([`setup`]). Shells in `hex-runtime`, `hex-node` and
+//! `hex-client` do the I/O these decide.
 
 #![cfg_attr(
     test,
@@ -30,6 +31,7 @@ pub mod hcs;
 pub mod helper;
 pub mod job;
 pub mod ledger;
+pub mod limits;
 pub mod netns;
 pub mod record;
 pub mod recovery;

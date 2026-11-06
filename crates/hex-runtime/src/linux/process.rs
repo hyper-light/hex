@@ -57,6 +57,7 @@ pub fn exec(cg: &BoxCgroup, program: &Program, stdio: Stdio) -> Result<PidfdProc
             .collect::<Result<_, _>>()?,
         program.cwd.as_deref().map(c_string).transpose()?,
         stdio,
+        super::default_nofile(),
     )
     .map_err(failed)?;
     let dir = cg.open_dir()?;
@@ -139,9 +140,14 @@ fn null(flags: OFlags) -> Result<OwnedFd, Refusal> {
         .map_err(|e| Refusal::os("opening /dev/null", e))
 }
 
-/// Makes `cmd`'s child start in the box `cg`: for callers that start processes themselves (kiln's
-/// runner keeps its own stdio and process-group handling, CP-T7.1's first consumer).
+/// Makes `cmd`'s child start in the box `cg`, under the descriptor limit a box gets where nothing names
+/// one: for callers that start processes themselves (kiln's runner keeps its own stdio and
+/// process-group handling, CP-T7.1's first consumer).
 pub fn join_on_exec(cg: &BoxCgroup, cmd: &mut Command) -> Result<(), Refusal> {
-    sys::join_cgroup_on_exec(cmd, Arc::new(cg.procs_for_joining()?));
+    sys::join_cgroup_on_exec(
+        cmd,
+        Arc::new(cg.procs_for_joining()?),
+        super::default_nofile(),
+    );
     Ok(())
 }
