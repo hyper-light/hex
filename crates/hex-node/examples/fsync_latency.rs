@@ -4,7 +4,9 @@
 //! quantiles, and every latency above the 99.9th percentile with its time, so the tail's shape (lone
 //! spikes or runs of them) shows.
 //!
-//! Usage: fsync_latency --dir DIR [--period-ms 10] [--run-s 600]
+//! Usage: fsync_latency --dir DIR [--period-ms 10] [--run-s 600] [--dump FILE]
+//!
+//! `--dump` writes every probe as a line `<ms since start> <latency ns>`: a trace a test replays.
 
 #![allow(
     clippy::unwrap_used,
@@ -59,6 +61,13 @@ fn main() {
         pause(period.saturating_sub(began.elapsed()));
     }
     std::fs::remove_file(&path).ok();
+    if let Some(dump) = args.get("dump") {
+        let mut out = String::new();
+        for (at_ms, ns) in &samples {
+            out.push_str(&format!("{at_ms} {ns}\n"));
+        }
+        std::fs::write(dump, out).unwrap();
+    }
     let mut sorted: Vec<u64> = samples.iter().map(|s| s.1).collect();
     sorted.sort_unstable();
     // The quantile at `per_million` of the sorted latencies.
