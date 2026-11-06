@@ -279,6 +279,17 @@ pub(crate) fn selinux_module() -> Result<Module, OciError> {
     )
 }
 
+/// Whether the host's kernel runs SELinux, asked as a create asks it ([`selinux_module`]), so a caller that
+/// checks what a create did reads the same answer.
+pub fn selinux_runs() -> Result<bool, OciError> {
+    Ok(selinux_module()? == Module::Active)
+}
+
+/// Whether the host's kernel runs AppArmor, asked as a create asks it ([`apparmor_module`]).
+pub fn apparmor_runs() -> Result<bool, OciError> {
+    Ok(apparmor_module()? == Module::Active)
+}
+
 /// Asks the kernel for a tmpfs labelled `label` and drops it, where SELinux runs: a label it doesn't know is
 /// refused by name here, before the create makes anything. A rootless agent can't ask (as [`selinux_module`]);
 /// its container's init then sets the label on each filesystem it makes, or is refused by name there.
