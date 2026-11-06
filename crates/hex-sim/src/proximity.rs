@@ -432,10 +432,15 @@ impl Study {
         Ok(Some(node))
     }
 
-    /// hyper-swim's predicted RTT from `node` to `home`, seconds. Unwidened: Hyperscale's
-    /// `rtt_hat + K_SIGMA·σ` with its `K_SIGMA = 2` bought no least gain over the plain prediction on
-    /// the proximity sweep (`hex-sim.md` H21), and a copied multiplier is not taken (Ada, 2026-11-06).
+    /// hyper-swim's predicted RTT from `node` to `home`, seconds, and 0 from a node to itself: a job
+    /// on its own home makes its round trips there, and Vivaldi's `2·height` for a node and itself
+    /// is not a round trip. Unwidened: Hyperscale's `rtt_hat + K_SIGMA·σ` with its `K_SIGMA = 2`
+    /// bought no least gain over the plain prediction on the proximity sweep (`hex-sim.md` H21), and a
+    /// copied multiplier is not taken (Ada, 2026-11-06).
     fn predicted(&self, node: NodeId, home: NodeId) -> Result<f64, SimError> {
+        if node == home {
+            return Ok(0.0);
+        }
         self.coordinates.predict(node, home)
     }
 }
@@ -747,6 +752,20 @@ mod tests {
                     n.done_by_horizon >= b.done_by_horizon,
                     "{fleet:?} {class:?}"
                 );
+            }
+        }
+    }
+
+    /// S4, A2: do ask the study for a node's predicted RTT to itself on every seed the record's
+    /// Shards miss was found on; expect 0, the true RTT of a job placed on its own home, never
+    /// Vivaldi's `2·height` (which on seed 15 put node 6 at 246 ms from itself, above its 195 ms to
+    /// node 4, so proximity never placed a job on its own home there).
+    #[test]
+    fn a_node_is_predicted_zero_from_itself() {
+        for fleet in [Fleet::AllKinds, Fleet::Mixed] {
+            let study = generate(&config(15), fleet);
+            for node in &study.nodes {
+                assert_eq!(study.predicted(node.id, node.id).unwrap(), 0.0, "{fleet:?}");
             }
         }
     }
