@@ -106,6 +106,10 @@ fn serve(args: &[String]) -> Result<(), (u8, String)> {
         Ok(way) => node.with_mount_namespace(&way),
         Err(_) => node,
     };
+    // What a label whose module the host's kernel doesn't run does: its owner's word, else skipped with a
+    // warning.
+    let node = node
+        .with_lsm(hex_runtime::linux::oci::lsm::Policy::from_env().map_err(|e| failed(e.into()))?);
     #[cfg(debug_assertions)]
     let node = match args.crash_at {
         Some(point) => node.with_crash_point(point),

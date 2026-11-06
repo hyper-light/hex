@@ -1,12 +1,15 @@
 //! AC-T7.1.4 (runtime-tools linux_mount_label, linux_process_apparmor_profile) and CLAUDE.md §3: the `oci` class
-//! applies `linux.mountLabel` to every filesystem its mounts make and `process.apparmorProfile` to its process,
-//! and refuses each by name where the host's kernel can't apply it (docs/design/runtime.md, "SELinux mount
+//! applies `linux.mountLabel` to every filesystem its mounts make and `process.apparmorProfile` to its process;
+//! where the host's kernel doesn't run the module, it skips the label with a warning, or refuses it by name under
+//! `HEX_OCI_LSM=strict` (docs/design/runtime.md, "SELinux mount
 //! labels and AppArmor profiles"). "do X, expect Y" (§6):
 //! - Create a container with a mount label. Where SELinux is active, expect its `/tmp` and `/dev` tmpfs and a
-//!   masked directory's to read that label. Where it isn't, expect the create refused, naming `linux.mountLabel`.
+//!   masked directory's to read that label. Where it isn't, expect it to run unlabelled by default, as crun
+//!   runs it, and under the strict policy expect the create refused, naming `linux.mountLabel`.
 //! - Create a container with an AppArmor profile. Where AppArmor is on and `HEX_LSM_APPARMOR_PROFILE` names a
-//!   loaded profile, expect the container's first process to run under it. Where AppArmor is off, expect the
-//!   create refused, naming `process.apparmorProfile`.
+//!   loaded profile, expect the container's first process to run under it. Where AppArmor is off, expect it to
+//!   run without the profile by default, and under the strict policy expect the create refused, naming
+//!   `process.apparmorProfile`.
 //!
 //! Rootless or as root, with a delegated cgroup v2 subtree, as oci_seccomp.rs runs. Where neither is possible,
 //! or AppArmor is on but no profile is named, it prints a reason and returns rather than pass falsely.
@@ -26,6 +29,7 @@ use std::time::Duration;
 
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Runtime, Stdio};
 use hex_node::Node;
+use hex_runtime::linux::oci::lsm::Policy;
 
 /// The label the test mounts with: Fedora's container file type, at the categories runtime-tools uses.
 const DEFAULT_LABEL: &str = "system_u:object_r:container_file_t:s0:c715,c811";
@@ -57,6 +61,7 @@ fn oci_mount_label_is_applied_or_refused_by_name() {
                 "",
                 LABEL_PROBE,
                 ("L", &label),
+                Policy::Skip,
             );
             if selinux_active() {
                 match outcome {
@@ -68,11 +73,30 @@ fn oci_mount_label_is_applied_or_refused_by_name() {
                     Err(e) => panic!("the labelled container failed where SELinux is active: {e}"),
                 }
             } else {
-                let e = outcome
-                    .expect_err("SELinux isn't active, so the label must be refused, not dropped");
+                // As crun does where the module is off: the container runs, unlabelled, and the create
+                // warns, naming the label (the lead's goal-17 bar, docs/design/runtime.md).
+                assert_eq!(
+                    outcome.expect(
+                        "SELinux isn't active, so by default the label is skipped with a warning"
+                    ),
+                    Exit::Code(10),
+                    "the container runs, its tmpfs unlabelled"
+                );
+                let strict = run_probe(
+                    own,
+                    cache,
+                    exe,
+                    "lsm-label-strict",
+                    &field,
+                    "",
+                    LABEL_PROBE,
+                    ("L", &label),
+                    Policy::Strict,
+                )
+                .expect_err("under HEX_OCI_LSM=strict the label is refused, not skipped");
                 assert!(
-                    e.contains("linux.mountLabel"),
-                    "the refusal should name linux.mountLabel: {e}"
+                    strict.contains("linux.mountLabel") && strict.contains("strict"),
+                    "the refusal should name linux.mountLabel and the strict policy: {strict}"
                 );
             }
         },
@@ -110,6 +134,7 @@ fn oci_apparmor_profile_is_applied_or_refused_by_name() {
                 &field,
                 PROFILE_PROBE,
                 ("P", &name),
+                Policy::Skip,
             );
             if on {
                 match outcome {
@@ -121,11 +146,30 @@ fn oci_apparmor_profile_is_applied_or_refused_by_name() {
                     Err(e) => panic!("the profiled container failed where AppArmor is on: {e}"),
                 }
             } else {
-                let e = outcome
-                    .expect_err("AppArmor is off, so the profile must be refused, not dropped");
+                // As crun does where the module is off: the container runs without the profile, and the
+                // create warns, naming it.
+                assert_eq!(
+                    outcome.expect(
+                        "AppArmor is off, so by default the profile is skipped with a warning"
+                    ),
+                    Exit::Code(10),
+                    "the container runs, not under the profile"
+                );
+                let strict = run_probe(
+                    own,
+                    cache,
+                    exe,
+                    "lsm-profile-strict",
+                    "",
+                    &field,
+                    PROFILE_PROBE,
+                    ("P", &name),
+                    Policy::Strict,
+                )
+                .expect_err("under HEX_OCI_LSM=strict the profile is refused, not skipped");
                 assert!(
-                    e.contains("process.apparmorProfile"),
-                    "the refusal should name process.apparmorProfile: {e}"
+                    strict.contains("process.apparmorProfile") && strict.contains("strict"),
+                    "the refusal should name process.apparmorProfile and the strict policy: {strict}"
                 );
             }
         },
@@ -136,7 +180,17 @@ fn oci_apparmor_profile_is_applied_or_refused_by_name() {
 /// the labelled or profiled one is the label's or the profile's; false, with the reason printed, where this
 /// host can't run the container at all (an unprivileged user namespace refused), which the test then skips.
 fn control_runs(own: &Path, cache: &Path, exe: &str) -> bool {
-    match run_probe(own, cache, exe, "lsm-control", "", "", "exit 42", ("C", "")) {
+    match run_probe(
+        own,
+        cache,
+        exe,
+        "lsm-control",
+        "",
+        "",
+        "exit 42",
+        ("C", ""),
+        Policy::Skip,
+    ) {
         Ok(code) => {
             assert_eq!(
                 code,
@@ -187,6 +241,7 @@ fn run_probe(
     process_field: &str,
     probe: &str,
     env: (&str, &str),
+    policy: Policy,
 ) -> Result<Exit, String> {
     let (uid, gid) = (host_id("-u"), host_id("-g"));
     let bundle = tempfile::Builder::new()
@@ -212,7 +267,8 @@ fn run_probe(
         state.path(),
     )
     .map_err(|e| format!("open node: {e}"))?
-    .with_oci_helper(PathBuf::from(exe));
+    .with_oci_helper(PathBuf::from(exe))
+    .with_lsm(policy);
     let id = BoxId::new(name).map_err(|e| e.to_string())?;
     let spec = BoxSpec {
         id: id.clone(),

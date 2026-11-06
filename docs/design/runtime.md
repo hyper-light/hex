@@ -491,7 +491,7 @@ overlayfs.
 runtime doesn't make. Whether OciSpec boxes get the default seccomp profile (Hex compiles containers/common's)
 is a security posture for the person to choose.
 
-## Decision: SELinux mount labels and AppArmor profiles are applied, and refused where the module is off (goal 6, AC-T7.1.4)
+## Decision: SELinux mount labels and AppArmor profiles are applied; where the module is off, skipped with a warning or refused under strict (goal 6, AC-T7.1.4)
 
 Sources and evidence: `docs/research/runtime/goal6-lsm.md`.
 
@@ -508,23 +508,30 @@ Sources and evidence: `docs/research/runtime/goal6-lsm.md`.
   path runs before `execve`: the pruned and classic init, the shim's init, `hex oci exec` and the
   vfork-style exec clone. It comes before the uid change, while the task still owns its `/proc` files. The
   file is checked to be on procfs first. An `ENOENT` from the write is refused as "profile not loaded".
-- Where the module isn't enabled, the spec is refused by name, never run without the label. crun skips the
-  label there (research §3), which CLAUDE.md §3 forbids. runc refuses, and Hex does as runc does. AppArmor
-  is tested through `/proc` alone, so the test holds in a container's init, `/sys` mounted there or not: its
-  scoped `current` attribute reads `EINVAL` where the module isn't active (`fs/proc/base.c:2915-2916`,
-  `security/security.c:3764-3774`). On a kernel without the scoped attributes, Hex reads
-  `/sys/module/apparmor/parameters/enabled` (crun's and runc's test). The AppArmor guest found the need: a
-  `/sys` read in an init with no `/sys` mounted took AppArmor for off. SELinux
-  is tested by the kernel itself: create asks it for a tmpfs with the label before anything is made, and the
-  kernel refuses the `context` key when SELinux isn't active (`fs/fs_context.c:137-148`). That test also works
-  in a container that has no selinuxfs mounted, where crun's `/proc/mounts` test gets it wrong.
-  A rootless agent may make no filesystem in its own namespace (`fsopen` is `EPERM` there), so it can't ask.
-  Its container's init, privileged in its own user namespace, then sets the label on each filesystem it
-  makes, and the kernel's refusal of the `context` key is refused by name there.
+- Where the host's kernel doesn't run the module a label names, the create follows a policy. By default it
+  skips the label: the container runs without it, as crun runs it (research §3), and the create writes a
+  warning naming the field, the value and why (`hex: warning: ...` on the CLI's or the node's stderr), so
+  nothing is dropped unseen (CLAUDE.md §3). Under `HEX_OCI_LSM=strict`, read by the command line and the
+  node (`lsm::ENV_POLICY`), it refuses the spec by name instead, as runc does, for an owner who wants
+  fail-closed. Where the module runs, a label it can't apply is refused under either policy. This is the
+  lead's bar for goal 17 (2026-11-06): the goal reads "all 28 tests crun passes" on each host, and no one
+  kernel runs both modules (research §4). Until then Hex refused under every policy.
+- How the kernel is asked. AppArmor through `/proc` alone, so the answer holds in a container's init, `/sys`
+  mounted there or not: its scoped `current` attribute reads `EINVAL` where the module isn't active
+  (`fs/proc/base.c:2915-2916`, `security/security.c:3764-3774`); on a kernel without the scoped attributes,
+  Hex reads `/sys/module/apparmor/parameters/enabled` (crun's and runc's test). SELinux by a tmpfs's
+  `seclabel` flag, which SELinux claims and ignores (`security/selinux/hooks.c:2851`, `:1016-1018`) and no
+  other module claims (`fs/fs_context.c:137-148`). The `context` key can't tell, since SELinux refuses an
+  invalid label there too (`:1059`). That test works in a container with no selinuxfs mounted, where crun's
+  `/proc/mounts` test gets it wrong. A rootless agent may make no filesystem in its own namespace (`fsopen`
+  is `EPERM` there), so it reads whether selinuxfs is mounted at `/sys/fs/selinux` instead.
+- The create decides, once, before it makes anything (`lsm::admit`). The init and the exec paths apply what
+  the kernel takes and skip a module it doesn't run, which the create has already warned of, or, under
+  strict, refused.
 - `process.selinuxLabel` is still refused by name: nothing in the suite checks it, and no step asks for it yet.
 - Falsified by a run in which a labelled container's tmpfs reads a label other than the spec's, or a
-  profiled container's `/proc/self/attr/current` names another profile, or a spec with either is run on a
-  host without the module.
+  profiled container's `/proc/self/attr/current` names another profile, or a label is skipped with no
+  warning, or one is skipped under strict.
 
 ## Open (STATUS.md)
 

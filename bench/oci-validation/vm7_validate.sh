@@ -17,5 +17,6 @@ cp "$HEX" "$DIR/hex"
 [ "${VM_TAR:-1}" = 0 ] || cp "$(command -v tar)" "$DIR/bin/tar"
 # VM_CRUN: a crun binary for the guest, beside the tar in bin/, for a reference run (aa_lab.sh).
 [ -z "${VM_CRUN:-}" ] || cp "$VM_CRUN" "$DIR/bin/crun"
-printf '#!/bin/sh\nexec %s/hex oci "$@"\n' "$DIR" > "$DIR/out/hex-oci"; chmod +x "$DIR/out/hex-oci"
+# HEX_OCI_LSM, where set, is hex's LSM policy in the guest (lsm::ENV_POLICY).
+printf '#!/bin/sh\n%sexec %s/hex oci "$@"\n' "${HEX_OCI_LSM:+export HEX_OCI_LSM=$HEX_OCI_LSM; }" "$DIR" > "$DIR/out/hex-oci"; chmod +x "$DIR/out/hex-oci"
 VM7_MODE=validate bash "$HERE/vm7_lab.sh" "$DIR" "$DIR/hex"

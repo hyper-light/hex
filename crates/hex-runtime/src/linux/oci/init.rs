@@ -579,7 +579,8 @@ impl Becoming {
             profile: process
                 .apparmor_profile()
                 .map(|p| super::lsm::ProfileOnExec::of(p, process.no_new_privileges))
-                .transpose()?,
+                .transpose()?
+                .flatten(),
         })
     }
 
@@ -1240,7 +1241,12 @@ pub(crate) fn make_fs(
     if let Some(label) = label
         && super::lsm::labelling(fstype) == super::lsm::Labelling::Xattr
     {
-        super::lsm::label_root(mount.as_fd(), label)?;
+        // As for a context: skipped where SELinux doesn't run, which the create warned of.
+        if let Err(e) = super::lsm::label_root(mount.as_fd(), label)
+            && super::lsm::selinux_module()? == super::lsm::Module::Active
+        {
+            return Err(e);
+        }
     }
     Ok(mount)
 }
@@ -1337,8 +1343,13 @@ fn fs_context(
     if let Some(label) = label
         && super::lsm::labelling(fstype) == super::lsm::Labelling::Context
     {
-        rustix::mount::fsconfig_set_string(fs.as_fd(), "context", label)
-            .map_err(|e| super::lsm::refused_label(label, fstype, e))?;
+        if let Err(e) = rustix::mount::fsconfig_set_string(fs.as_fd(), "context", label) {
+            // Where SELinux doesn't run, the label is skipped: the create found that first, warned of it,
+            // and under HEX_OCI_LSM=strict refused (lsm::admit). Where it runs, the refusal is the label's.
+            if super::lsm::selinux_module()? == super::lsm::Module::Active {
+                return Err(super::lsm::refused_label(label, fstype, e));
+            }
+        }
     }
     rustix::mount::fsconfig_create(fs.as_fd()).map_err(|e| match label {
         Some(label) => OciError::os(

@@ -5,7 +5,8 @@
 #      link the guest's own glibc, into <out>/target, which vm7_lab.sh shares into the guest at its path;
 #   3. boots the guest to run oci_lsm as root (vm7_lab.sh's seam mode), with acme_secure_profile loaded;
 #   4. boots it again to run runtime-tools' validation suite against that hex (vm7_validate.sh), leaving
-#      <out>/validate/out/results.tsv and each test's log;
+#      <out>/validate/out/results.tsv and each test's log, then once more under HEX_OCI_LSM=strict into
+#      <out>/validate-strict;
 #   5. and again against crun, the reference on the same kernel, into <out>/crun/out: crun's static release
 #      CRUN_VERSION (1.27, fedora's), its sha256 checked, since Ubuntu 24.04's crun 1.14 refuses the suite's
 #      runtime-spec 1.3.0 ("unknown version specified").
@@ -48,6 +49,8 @@ seam=$?
 say "runtime-tools in the AppArmor guest"
 VM_TAR=0 bash "$HERE/vm7_validate.sh" "$RT" "$TGT/build/release/hex" "$OUT/validate"
 validate=$?
+say "runtime-tools in the AppArmor guest, HEX_OCI_LSM=strict"
+HEX_OCI_LSM=strict VM_TAR=0 bash "$HERE/vm7_validate.sh" "$RT" "$TGT/build/release/hex" "$OUT/validate-strict"
 say "runtime-tools against crun in the AppArmor guest"
 CRUN_VERSION=${CRUN_VERSION:-1.27}
 curl -fsSL -o "$OUT/crun-static" "https://github.com/containers/crun/releases/download/$CRUN_VERSION/crun-$CRUN_VERSION-linux-amd64"
@@ -58,7 +61,7 @@ chmod +x "$OUT/crun-static"
 printf '#!/bin/sh\nshift\nexec "$(dirname "$0")/bin/crun" "$@"\n' > "$OUT/crun-as-hex"; chmod +x "$OUT/crun-as-hex"
 VM_TAR=0 VM_CRUN="$OUT/crun-static" bash "$HERE/vm7_validate.sh" "$RT" "$OUT/crun-as-hex" "$OUT/crun"
 set -e
-for r in validate crun; do
+for r in validate validate-strict crun; do
   echo "$r: $(cut -f2 "$OUT/$r/out/results.tsv" 2>/dev/null | sort | uniq -c | tr '\n' ' ')"
   grep -E 'linux_mount_label|linux_process_apparmor_profile' "$OUT/$r/out/results.tsv" 2>/dev/null
 done
