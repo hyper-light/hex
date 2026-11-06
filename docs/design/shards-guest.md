@@ -206,7 +206,10 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
     carry, so can't get wrong: `mtime`, `atime`, `ctime`, `uid`, `gid`, `uname`, `gname`, `comment`, `charset`,
     `hdrcharset` (staging carries a mode and a link text, never times, owners or names, and a root's texts are
     UTF-8 either way); any other key (`path`, `linkpath`, `size`, sparse keys, one Hex doesn't know) would apply to
-    every later entry, and is refused by name, never ignored (CLAUDE.md §3). Refused by name: an entry written through one of the archive's own symbolic
+    every later entry, and is refused by name, never ignored (CLAUDE.md §3); a key on neither list is refused naming
+    it, so a real archive that meets one shows exactly what to weigh before it is added. `git archive`'s tarballs,
+    which begin with a global record holding only `comment=<commit>`, stage with every entry exact (a real one,
+    git 2.56.0, is the test's fixture: `crates/hex-client/src/guest/stage/fixtures/git-archive.tar`). Refused by name: an entry written through one of the archive's own symbolic
     links (whatever its text, which stays legal: a root's absolute links resolve inside it when used), a PAX
     `size` (a file past a header's 8 GiB), sparse entries (GNU `S` and PAX `GNU.sparse.*`, which none of the
     roots it serves holds: `tar -tv`), and an extension record with no entry after it. The tests that pin this
