@@ -250,8 +250,9 @@ pub fn digest_hex(d: &Digest) -> String {
 }
 
 /// A layer's digest: its blob's sha256 (OCI image-spec descriptor.md, "Digests").
-pub type Digest = [u8; 32];
-const DIGEST_BYTES: usize = 32;
+pub type Digest = [u8; DIGEST_BYTES];
+/// A sha256's bytes (FIPS 180-4 §1: a 256-bit message digest).
+pub const DIGEST_BYTES: usize = 32;
 /// A byte's bits, lowest first: the budget's presence bits in order.
 const BITS: [u8; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
 

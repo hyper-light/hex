@@ -129,8 +129,9 @@ fn mount(source: &str, destination: &str, read_only: bool) -> Mount {
 }
 
 /// HEX-GUEST-16: rewrite an OciSpec with a root folder and with layers, and a writable and a read-only
-/// bind: expect its root named by the staged copy and staged from the host path (an image's tarball
-/// layers one root staged from them all, and tarballs mixed with directories refused), each bind's source
+/// bind: expect its root named by the staged copy and staged from the host path (an image's layer blobs
+/// named by the digests their names give, never read, a layer tarball named otherwise refused by name, and
+/// tarballs mixed with directories refused), each bind's source
 /// its path under its share (writable binds pass), and a bind under no share refused naming it and the
 /// shared roots.
 #[test]
@@ -168,31 +169,24 @@ fn an_oci_spec_is_rewritten_to_the_guests_paths() {
         Source::Tar(PathBuf::from("/Users/ada/rootfs.tar"))
     );
 
-    // Two layer tarballs, their bytes what the store names them by.
-    let held = tempfile::tempdir().unwrap();
-    let tarballs: Vec<PathBuf> = [("l0.tar", &b"layer zero"[..]), ("l1.tar", b"layer one")]
+    // Two layers as an image keeps them, each blob named by its digest (an OCI image layout's
+    // blobs/sha256/<hex>, as containerd's content store's). Neither file exists: a layer's digest is its
+    // name, never read to learn it (§4a; the lead's rule, 2026-11-06: a create never hashes a layer).
+    let digests: Vec<[u8; 32]> = [[0xa0u8; 32], [0x1bu8; 32]].to_vec();
+    let blobs: Vec<PathBuf> = digests
         .iter()
-        .map(|(name, bytes)| {
-            let path = held.path().join(name);
-            std::fs::write(&path, bytes).unwrap();
-            path
+        .map(|d| {
+            PathBuf::from(format!(
+                "/Users/ada/image/blobs/sha256/{}",
+                hex_core::stream::files::digest_hex(d)
+            ))
         })
         .collect();
-    let layered = rewrite(
-        oci(Rootfs::Layers(tarballs.clone()), vec![]),
-        &shared,
-        STAGED,
-    )
-    .unwrap();
+    let layered = rewrite(oci(Rootfs::Layers(blobs.clone()), vec![]), &shared, STAGED).unwrap();
     let ClassSpec::Oci(spec) = &layered.spec.class else {
         panic!("not oci");
     };
-    // An image's tarball layers are named by their digests in the guest's layer store (§4a), each a lower
-    // layer of the box's overlay, lowest first.
-    let digests: Vec<[u8; 32]> = [&b"layer zero"[..], b"layer one"]
-        .iter()
-        .map(|b| <[u8; 32]>::from(<sha2::Sha256 as sha2::Digest>::digest(b)))
-        .collect();
+    // Each is a lower layer of the box's overlay, its folder in the guest's layer store, lowest first.
     assert_eq!(
         spec.rootfs,
         Rootfs::Layers(
@@ -205,7 +199,7 @@ fn an_oci_spec_is_rewritten_to_the_guests_paths() {
     assert_eq!(
         layered.items[0].source,
         Source::Layers(
-            tarballs
+            blobs
                 .iter()
                 .zip(&digests)
                 .map(|(path, digest)| hex_client::guest::stage::Layer {
@@ -214,6 +208,24 @@ fn an_oci_spec_is_rewritten_to_the_guests_paths() {
                 })
                 .collect()
         )
+    );
+    // A layer tarball not named by its digest is refused by name, never hashed to name it.
+    let Err(Refusal::Invalid { why, .. }) = rewrite(
+        oci(
+            Rootfs::Layers(vec![
+                blobs[0].clone(),
+                PathBuf::from("/Users/ada/l1.tar.gz"),
+            ]),
+            vec![],
+        ),
+        &shared,
+        STAGED,
+    ) else {
+        panic!("expected a layer tarball not named by its digest refused");
+    };
+    assert!(
+        why.contains("rootfs.layers[1] /Users/ada/l1.tar.gz") && why.contains("blobs/sha256/"),
+        "{why}"
     );
     let Err(Refusal::Invalid { why, .. }) = rewrite(
         oci(

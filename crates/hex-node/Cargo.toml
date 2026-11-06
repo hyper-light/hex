@@ -22,6 +22,8 @@ rustix.workspace = true
 # The relay's end-to-end staging test builds its tarball (src/relay/tests.rs).
 tar.workspace = true
 tempfile.workspace = true
+# Its layer tests name each tarball by its sha256, as an image does (src/relay/tests.rs).
+sha2.workspace = true
 
 [lints]
 workspace = true

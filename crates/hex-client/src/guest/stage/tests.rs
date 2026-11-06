@@ -33,13 +33,13 @@ pub(super) fn pack(
         .map_err(|e| Refusal::os("sending staged files", e))
 }
 
-/// `paths` as an image's layers, each named by its digest.
+/// `paths` as an image's layers, each named by its digest: its bytes' sha256.
 pub(super) fn layers_of(paths: &[PathBuf]) -> Vec<Layer> {
     paths
         .iter()
         .map(|path| Layer {
             path: path.clone(),
-            digest: digest_of(path).unwrap(),
+            digest: <sha2::Sha256 as sha2::Digest>::digest(std::fs::read(path).unwrap()).into(),
         })
         .collect()
 }

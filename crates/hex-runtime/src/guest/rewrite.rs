@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use hex_api::{BoxId, BoxSpec, ClassSpec, OciSpec, Refusal, Rootfs};
 use hex_client::guest::stage::{
-    Item, Layer, Source, digest_of, is_tarball, layer_path, staged_path,
+    Item, Layer, Source, blob_digest, is_tarball, layer_path, staged_path,
 };
 use serde_json::Value;
 
@@ -129,7 +129,7 @@ fn stage(
 }
 
 /// Adds an image's layers to stage, and returns their paths in the guest. Tarballs are an image's own
-/// layers: each is named by its digest and lives once in the guest's layer store, applied as containerd's
+/// layers, its blobs, each named by its digest ([`blob_digest`]); each lives once in the guest's layer store, applied as containerd's
 /// overlay applier applies one layer, so the guest mounts them as the overlay's lower layers, as a Linux
 /// host's overlayfs snapshotter does, and a layer the guest holds is staged no more (§4a). Directories
 /// are each staged as they are, an overlay's layers already. A list of both is refused by name: a
@@ -156,13 +156,21 @@ fn stage_layers(
                 .to_owned(),
         });
     }
+    // Each layer's digest is its blob's name, never learned by reading it: a create costs a layer the
+    // guest holds its name alone (§4a).
     let layers = layers
         .into_iter()
-        .map(|path| {
-            Ok(Layer {
-                digest: digest_of(&path)?,
-                path,
-            })
+        .enumerate()
+        .map(|(i, path)| match blob_digest(&path) {
+            Some(digest) => Ok(Layer { path, digest }),
+            None => Err(Refusal::Invalid {
+                what: "oci spec",
+                why: format!(
+                    "rootfs.layers[{i}] {}: a layer tarball is named by its digest, as its image keeps \
+                     it (an OCI image layout's or containerd's content store's blobs/sha256/<hex>)",
+                    path.display()
+                ),
+            }),
         })
         .collect::<Result<Vec<Layer>, Refusal>>()?;
     let guests = layers

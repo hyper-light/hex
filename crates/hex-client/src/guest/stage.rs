@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
-use std::io::{self, BufWriter, Read, Write};
+use std::io::{self, BufRead, BufWriter, Read, Write};
 use std::net::Shutdown;
 use std::path::{Path, PathBuf};
 
@@ -53,46 +53,26 @@ pub struct Layer {
     pub digest: files::Digest,
 }
 
-/// The sha256 of the tarball at `path`, a layer's digest (OCI image-spec descriptor.md, "Digests"), read
-/// in its file's own preferred block (st_blksize, stat(2)) where the host says one.
-pub fn digest_of(path: &Path) -> Result<files::Digest, Refusal> {
-    use sha2::{Digest as _, Sha256};
-    let read = |e: io::Error| {
-        Refusal::os(
-            "reading a layer to digest it",
-            format!("{}: {e}", path.display()),
-        )
-    };
-    let mut file = File::open(path).map_err(read)?;
-    let mut hash = Sha256::new();
-    let mut buf = vec![0u8; block_of(&file)];
-    loop {
-        let n = match file.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(read(e)),
-        };
-        hash.update(buf.get(..n).unwrap_or_default());
+/// A layer blob's digest, from its name as its image keeps it: `…/sha256/<64 hex digits>`, an OCI image
+/// layout's `blobs/<alg>/<encoded>` (image-spec image-layout.md, "Blobs") and containerd's content store's
+/// alike. A create takes a layer's digest from its name and never reads the layer to learn it; a layer the
+/// guest lacks is hashed as it is sent, and refused unless its bytes are that digest (§4a).
+pub fn blob_digest(path: &Path) -> Option<files::Digest> {
+    let alg = path.parent()?.file_name()?;
+    let name = path.file_name()?.to_str()?;
+    if alg != "sha256" || name.len() != files::DIGEST_BYTES.checked_mul(2)? {
+        return None;
     }
-    Ok(hash.finalize().into())
-}
-
-/// A file's preferred I/O block (st_blksize, stat(2)), or on a host that says none, a page's 4096 bytes
-/// (the x86_64 and aarch64 base page, as the guest's kernel has it).
-#[cfg(unix)]
-fn block_of(file: &File) -> usize {
-    use std::os::unix::fs::MetadataExt;
-    file.metadata()
-        .ok()
-        .and_then(|m| usize::try_from(m.blksize()).ok())
-        .filter(|b| *b > 0)
-        .unwrap_or(4096)
-}
-
-#[cfg(not(unix))]
-fn block_of(_file: &File) -> usize {
-    4096
+    let mut digest = [0u8; files::DIGEST_BYTES];
+    for (byte, pair) in digest.iter_mut().zip(name.as_bytes().chunks(2)) {
+        let text = std::str::from_utf8(pair).ok()?;
+        // Lowercase alone, as the spec's sha256 encoding is (descriptor.md, "Digests").
+        if text.bytes().any(|b| b.is_ascii_uppercase()) {
+            return None;
+        }
+        *byte = u8::from_str_radix(text, 16).ok()?;
+    }
+    Some(digest)
 }
 
 /// The guest's path of the layer `digest` in its store, the relay staging under `staged`.
@@ -100,11 +80,14 @@ pub fn layer_path(staged: &str, digest: &files::Digest) -> String {
     format!("{staged}/{}/{}", files::STORE, files::digest_hex(digest))
 }
 
-/// Whether `path` names a tarball root, by its name: `.tar`, `.tar.gz` or `.tgz`.
+/// Whether `path` names a tarball, by its name: `.tar`, `.tar.gz` or `.tgz`, or a layer blob named by its
+/// digest ([`blob_digest`]).
 pub fn is_tarball(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n.ends_with(".tar") || n.ends_with(".tar.gz") || n.ends_with(".tgz"))
+    blob_digest(path).is_some()
+        || path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(".tar") || n.ends_with(".tar.gz") || n.ends_with(".tgz"))
 }
 
 /// The guest's path of `name` under `id`'s staged root, the relay staging under `staged`.
@@ -361,17 +344,17 @@ fn pack_items(
                 tarball(
                     out,
                     &item.name,
-                    &[(path.clone(), false)],
+                    &[(path.clone(), None, false)],
                     limits,
                     &mut counts,
                     true,
                 )?;
             }
             Source::Layers(layers) => {
-                let layers: Vec<(PathBuf, bool)> = layers
+                let layers: Vec<(PathBuf, Option<files::Digest>, bool)> = layers
                     .iter()
                     .zip(present.iter().copied().chain(std::iter::repeat(false)))
-                    .map(|(l, held)| (l.path.clone(), held))
+                    .map(|(l, held)| (l.path.clone(), Some(l.digest), held))
                     .collect();
                 tarball(out, &item.name, &layers, limits, &mut counts, false)?;
             }
@@ -991,7 +974,7 @@ impl Tree {
 fn tarball(
     out: &mut dyn Write,
     name: &str,
-    layers: &[(PathBuf, bool)],
+    layers: &[(PathBuf, Option<files::Digest>, bool)],
     limits: &Limits,
     counts: &mut Counts,
     in_place: bool,
@@ -1019,7 +1002,7 @@ fn tarball(
             .map_err(|e| Refusal::os("sending staged files", e))?;
     }
     let mut tree = Tree::default();
-    for (path, held) in layers {
+    for (path, digest, held) in layers {
         if *held {
             continue;
         }
@@ -1033,7 +1016,7 @@ fn tarball(
         out.write_all(&files::head(&marker, limits).map_err(refused)?)
             .map_err(|e| Refusal::os("sending staged files", e))?;
         tree.made = BTreeSet::new();
-        layer(out, name, path, limits, counts, &mut tree)?;
+        layer(out, name, path, digest.as_ref(), limits, counts, &mut tree)?;
     }
     Ok(())
 }
@@ -1047,11 +1030,15 @@ fn later(a: Mtime, b: Mtime) -> Mtime {
     }
 }
 
-/// Sends one layer's entries, the archive at `path`, under `name`.
+/// Sends one layer's entries, the archive at `path`, under `name`: gzip or uncompressed, as its own bytes'
+/// magic says (containerd's `compression.DetectCompression` reads them so). Given its `digest`, its bytes
+/// are hashed as they are read and the layer refused, before anything after it is sent, unless they are
+/// that digest: the relay keeps a layer only once the next one's marker or the stage's end follows it.
 fn layer(
     out: &mut dyn Write,
     name: &str,
     path: &Path,
+    digest: Option<&files::Digest>,
     limits: &Limits,
     counts: &mut Counts,
     tree: &mut Tree,
@@ -1062,14 +1049,24 @@ fn layer(
             .map_err(|e| Refusal::os("sending staged files", e))
     };
     let file = File::open(path).map_err(|e| bad("opening it", &e))?;
-    let gzip = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n.ends_with(".gz") || n.ends_with(".tgz"));
-    let reader: Box<dyn Read> = if gzip {
-        Box::new(flate2::read::GzDecoder::new(io::BufReader::new(file)))
+    // The most bytes past what the archive needs that its digest covers: the file's own length.
+    let length = file.metadata().map_err(|e| bad("opening it", &e))?.len();
+    let mut raw = io::BufReader::new(Hashing {
+        file,
+        hash: digest.map(|_| <sha2::Sha256 as sha2::Digest>::new()),
+    });
+    let head = raw.fill_buf().map_err(|e| bad("reading it", &e))?;
+    let (gzip, zstd) = (head.starts_with(&GZIP_MAGIC), head.starts_with(&ZSTD_MAGIC));
+    if zstd {
+        return Err(bad(
+            "its compression",
+            &"zstd, which the packer doesn't read; give the layer gzip or uncompressed",
+        ));
+    }
+    let reader = if gzip {
+        Unzipped::Gzip(flate2::read::GzDecoder::new(raw))
     } else {
-        Box::new(io::BufReader::new(file))
+        Unzipped::Plain(raw)
     };
     let mut archive = tar::Archive::new(Counted {
         inner: reader,
@@ -1395,7 +1392,73 @@ fn layer(
             &format!("more than {TRAILING} bytes follow its end-of-archive block"),
         ));
     }
+    let Some(want) = digest else {
+        return Ok(());
+    };
+    // The rest of the file, past the stream the archive needed: its digest covers every byte.
+    let mut raw = counted.inner.into_raw();
+    io::copy(&mut (&mut raw).take(length), &mut io::sink()).map_err(|e| bad("its end", &e))?;
+    let Some(hash) = raw.into_inner().hash else {
+        return Err(bad("its digest", &"its bytes weren't hashed"));
+    };
+    let got: files::Digest = sha2::Digest::finalize(hash).into();
+    if &got != want {
+        return Err(bad(
+            "its digest",
+            &format!(
+                "its bytes' sha256 is {}, not {}, the digest it is named by",
+                files::digest_hex(&got),
+                files::digest_hex(want)
+            ),
+        ));
+    }
     Ok(())
+}
+
+/// gzip's magic (RFC 1952 §2.3.1, ID1 and ID2).
+const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
+/// A zstd frame's magic, 0xFD2FB528 little-endian (RFC 8878 §3.1.1).
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
+
+/// A layer's file, its bytes hashed as they are read when its digest is to be checked.
+struct Hashing {
+    file: File,
+    hash: Option<sha2::Sha256>,
+}
+
+impl Read for Hashing {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.file.read(buf)?;
+        if let Some(hash) = self.hash.as_mut() {
+            sha2::Digest::update(hash, buf.get(..n).unwrap_or_default());
+        }
+        Ok(n)
+    }
+}
+
+/// A layer's archive: gzip's stream, or the file's own bytes.
+enum Unzipped {
+    Gzip(flate2::read::GzDecoder<io::BufReader<Hashing>>),
+    Plain(io::BufReader<Hashing>),
+}
+
+impl Read for Unzipped {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Unzipped::Gzip(gz) => gz.read(buf),
+            Unzipped::Plain(raw) => raw.read(buf),
+        }
+    }
+}
+
+impl Unzipped {
+    /// The file under it, read as far as the archive needed (what its buffer holds is hashed already).
+    fn into_raw(self) -> io::BufReader<Hashing> {
+        match self {
+            Unzipped::Gzip(gz) => gz.into_inner(),
+            Unzipped::Plain(raw) => raw,
+        }
+    }
 }
 
 #[cfg(test)]

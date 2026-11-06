@@ -173,13 +173,14 @@ fn now() -> i64 {
     .unwrap()
 }
 
-/// The image's layers, each named by its digest, as the host's node stages them (§4a's layer store).
+/// The image's layers, each named by its digest (its bytes' sha256), as the host's node stages them (§4a's
+/// layer store).
 fn layers(image: &Image) -> Vec<hex_client::guest::stage::Layer> {
     image
         .layers
         .iter()
         .map(|path| hex_client::guest::stage::Layer {
-            digest: hex_client::guest::stage::digest_of(path).unwrap(),
+            digest: <sha2::Sha256 as sha2::Digest>::digest(std::fs::read(path).unwrap()).into(),
             path: path.clone(),
         })
         .collect()

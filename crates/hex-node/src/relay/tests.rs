@@ -980,6 +980,11 @@ fn stage_layers(lab: &Lab, host: &Path, layers: &[(u64, Vec<T>)]) -> Result<Vec<
     stage_as(lab, host, "box-1", layers)
 }
 
+/// The sha256 of the file at `path`: a layer's digest, as its image names it.
+fn sha256(path: &Path) -> hf::Digest {
+    <sha2::Sha256 as sha2::Digest>::digest(std::fs::read(path).unwrap()).into()
+}
+
 /// [`stage_layers`] as box `id`, its layers' tarballs named by their place in `layers`.
 fn stage_as(
     lab: &Lab,
@@ -987,7 +992,7 @@ fn stage_as(
     id: &str,
     layers: &[(u64, Vec<T>)],
 ) -> Result<Vec<PathBuf>, Refusal> {
-    use hex_client::guest::stage::{Item, Layer, Source, digest_of, stage};
+    use hex_client::guest::stage::{Item, Layer, Source, stage};
     let tarballs: Vec<Layer> = layers
         .iter()
         .enumerate()
@@ -995,7 +1000,7 @@ fn stage_as(
             let path = host.join(format!("{id}-layer{i}.tar"));
             layer_tar(&path, *mtime, entries);
             Layer {
-                digest: digest_of(&path).unwrap(),
+                digest: sha256(&path),
                 path,
             }
         })
@@ -1486,7 +1491,7 @@ fn a_later_layer_whites_out_makes_opaque_and_replaces_as_overlayfs_reads_them() 
 /// its own layers.
 #[test]
 fn a_layer_the_guest_holds_is_staged_once_and_shared() {
-    use hex_client::guest::stage::{Item, Layer, Source, digest_of, stage};
+    use hex_client::guest::stage::{Item, Layer, Source, stage};
     use std::os::unix::fs::MetadataExt;
     let (lab, staged) = staged_lab();
     let host = tempfile::tempdir().unwrap();
@@ -1504,14 +1509,14 @@ fn a_layer_the_guest_holds_is_staged_once_and_shared() {
     // A's tarball, as `two` names it: its digest kept, the file itself gone.
     let a = host.path().join("one-layer0.tar");
     let a_layer = Layer {
-        digest: digest_of(&a).unwrap(),
+        digest: sha256(&a),
         path: a.clone(),
     };
     std::fs::remove_file(&a).unwrap();
     let c = host.path().join("c.tar");
     layer_tar(&c, 1_600_000_200, &[T::File("c", b"c")]);
     let c_layer = Layer {
-        digest: digest_of(&c).unwrap(),
+        digest: sha256(&c),
         path: c,
     };
     stage(
@@ -1582,6 +1587,45 @@ fn a_layer_cut_or_crashed_mid_stage_is_never_held() {
     assert!(!partial.exists(), "the crashed partial was left");
     let held = store.join(hf::digest_hex(&digest));
     assert!(held.join("f").exists() && !held.join("junk").exists());
+}
+
+/// HEX-GUEST-14 (§4a; the lead's rule, 2026-11-06: a create never hashes a layer the guest holds, and one it
+/// lacks is hashed as it crosses, to verify it): stage a layer whose tarball changed after its digest was
+/// taken: expect the stage refused naming the bytes' sha256 and the digest it was given, and nothing in the
+/// store, under either digest or as a partial: what the store holds under a digest is only ever its bytes.
+#[test]
+fn a_layer_whose_bytes_arent_its_digest_is_refused_and_never_held() {
+    use hex_client::guest::stage::{Item, Layer, Source, stage};
+    let (lab, staged) = staged_lab();
+    let host = tempfile::tempdir().unwrap();
+    let path = host.path().join("layer.tar");
+    layer_tar(&path, 1_600_000_000, &[T::File("f", b"named")]);
+    let named = sha256(&path);
+    layer_tar(&path, 1_600_000_000, &[T::File("f", b"other")]);
+    let got = sha256(&path);
+    let why = stage(
+        lab.link().as_ref(),
+        &BoxId::new("box-1").unwrap(),
+        &[Item {
+            name: "root".to_owned(),
+            source: Source::Layers(vec![Layer {
+                path,
+                digest: named,
+            }]),
+        }],
+        &hf::LIMITS,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        why.contains(&hf::digest_hex(&got)) && why.contains(&hf::digest_hex(&named)),
+        "{why}"
+    );
+    let left: Vec<String> = std::fs::read_dir(staged.join(hf::STORE))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert!(left.is_empty(), "left in the store: {left:?}");
 }
 
 /// HEX-GUEST-14 (§4a as amended): stage a tarball root, end to end through the host's packer and the relay,

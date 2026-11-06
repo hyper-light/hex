@@ -188,6 +188,64 @@ fn a_tarball_past_its_bounds_is_refused() {
     assert!(pack_tar("r.tar", &long, &short).is_err());
 }
 
+/// HEX-GUEST-15 (§4a; the lead's rule, 2026-11-06: a layer is hashed only as it crosses, to verify it):
+/// pack an image's two layers as its blobs, named by their digests and with no extension, the lower gzip and
+/// the upper plain: expect both packed, each read as its own bytes' magic says. The upper's bytes changed
+/// after its digest was taken: expect the stage refused naming the blob, its bytes' sha256 and the digest it
+/// was given, and nothing sent after its entries (no next layer's marker, no end: the relay never keeps
+/// it). A zstd blob: refused by name, as no compression the packer reads.
+#[test]
+fn layer_blobs_are_read_by_their_magic_and_refused_when_their_bytes_arent_their_digest() {
+    let dir = tempfile::tempdir().unwrap();
+    let blobs = dir.path().join("blobs/sha256");
+    std::fs::create_dir_all(&blobs).unwrap();
+    let lower = gzip(&archive(&[(header(b"a", b'0', 0o644, 1, b""), &b"a"[..])]));
+    let upper = archive(&[(header(b"b", b'0', 0o644, 1, b""), &b"b"[..])]);
+    let blob = |bytes: &[u8]| {
+        let digest: files::Digest = <sha2::Sha256 as sha2::Digest>::digest(bytes).into();
+        let path = blobs.join(files::digest_hex(&digest));
+        std::fs::write(&path, bytes).unwrap();
+        Layer { path, digest }
+    };
+    let layers = vec![blob(&lower), blob(&upper)];
+    let pack_layers = |layers: &[Layer]| {
+        let items = [Item {
+            name: "root".to_owned(),
+            source: Source::Layers(layers.to_vec()),
+        }];
+        let mut out = Vec::new();
+        let packed = pack(&mut out, &id(), &items, &LIMITS);
+        (packed, out)
+    };
+    let (packed, out) = pack_layers(&layers);
+    packed.unwrap();
+    let paths: Vec<String> = unpack(&out).into_iter().map(|e| e.0.path).collect();
+    assert_eq!(paths, ["root", "root/a", "root", "root/b"]);
+
+    // The upper blob's bytes, changed after its digest was taken.
+    let changed = archive(&[(header(b"b", b'0', 0o644, 1, b""), &b"c"[..])]);
+    std::fs::write(&layers[1].path, &changed).unwrap();
+    let got = files::digest_hex(&<sha2::Sha256 as sha2::Digest>::digest(&changed).into());
+    let (packed, out) = pack_layers(&layers);
+    let why = packed.unwrap_err().to_string();
+    assert!(
+        why.contains(&layers[1].path.display().to_string())
+            && why.contains(&got)
+            && why.contains(&files::digest_hex(&layers[1].digest)),
+        "{why}"
+    );
+    assert!(!out.ends_with(&files::END), "an end was sent after it");
+
+    // A zstd frame's magic (RFC 8878 §3.1.1): no compression the packer reads.
+    let zstd = blob(&[0x28, 0xb5, 0x2f, 0xfd, 0, 0, 0, 0]);
+    let (packed, _) = pack_layers(std::slice::from_ref(&zstd));
+    let why = packed.unwrap_err().to_string();
+    assert!(
+        why.contains(&zstd.path.display().to_string()) && why.contains("zstd"),
+        "{why}"
+    );
+}
+
 /// HEX-GUEST-15: pack a gzip tarball whose trailer lies (its length, then its CRC), an archive cut in the
 /// middle of a file, and one cut before its end-of-archive block: expect each refused, never staged as whole.
 #[test]

@@ -293,9 +293,16 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
     (below), and a box of the image mounts them as its overlay's lower layers, as a Linux host does
     (`hex_core::bundle`'s overlay, lowest first). An `OciSpec`'s `Rootfs::Layers` of tarballs reaches the guest
     as `Rootfs::Layers` of those folders.
-    - **What's sent:** the host digests each layer's tarball and names the digests in the stage's opening; the
-      relay answers with the stage's budget and which of the layers it holds; the packer sends only those it
-      lacks, each after a layer marker. A layer the guest holds costs a create nothing but its digest.
+    - **What's sent:** each layer tarball is given as its image keeps it, a blob named by its digest
+      (`…/sha256/<hex>`, an OCI image layout's `blobs/<alg>/<encoded>`, image-spec `image-layout.md`, "Blobs",
+      and containerd's content store's alike); another name is refused by name. The host names the digests in
+      the stage's opening without reading a layer; the relay answers with the stage's budget and which of the
+      layers it holds; the packer sends only those it lacks, each after a layer marker, reading each as gzip or
+      uncompressed by its own magic (containerd's `DetectCompression`; zstd is refused by name) and hashing its
+      bytes as they cross, and refuses it, before the next layer's marker or the stage's end that would let the
+      relay keep it, unless they are its digest. A layer the guest holds costs a create its digest alone, never
+      a read: HEX-GUEST-22's first record had the host hash every tarball at every create, about 0.9 s of a
+      grafana create (480 MB of blobs at 500-560 MB/s on a Mac Studio, sha2 0.10.9), the lead's rule after it.
     - **Applying a layer:** within its own folder, by containerd's rules (`applyNaive`, `pkg/archive/tar.go:161-340`
       at v2.3.6) with its overlay conversion: a layer's entry replaces what this layer put at its path, except a
       directory onto a directory, which merges and takes the later header's owner, mode, xattrs and times

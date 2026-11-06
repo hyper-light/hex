@@ -309,6 +309,7 @@ dependencies = [
  "hex-runtime",
  "rustix",
  "serde_json",
+ "sha2",
  "tar",
  "tempfile",
 ]
@@ -326,7 +327,6 @@ dependencies = [
  "seccompiler",
  "serde",
  "serde_json",
- "sha2",
  "shards-api",
  "tempfile",
  "thiserror",

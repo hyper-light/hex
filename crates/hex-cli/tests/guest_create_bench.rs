@@ -73,6 +73,29 @@ fn a_multi_layer_create_through_a_real_guest_is_timed() {
                 .collect()
         })
         .collect();
+    // Each layer as its image keeps it, a blob named by its digest (an OCI layout's blobs/sha256/<hex>, a hard
+    // link beside its tarball), hashed here once, before any create is timed: a create takes a layer's
+    // digest from its name (§4a).
+    let blobs: Vec<Vec<PathBuf>> = layers
+        .iter()
+        .map(|image| {
+            image
+                .iter()
+                .map(|path| {
+                    let mut hash = <sha2::Sha256 as sha2::Digest>::new();
+                    std::io::copy(&mut std::fs::File::open(path).unwrap(), &mut hash).unwrap();
+                    let digest: [u8; 32] = sha2::Digest::finalize(hash).into();
+                    let dir = path.parent().unwrap().join("blobs/sha256");
+                    std::fs::create_dir_all(&dir).unwrap();
+                    let blob = dir.join(hex_core::stream::files::digest_hex(&digest));
+                    if !blob.exists() {
+                        std::fs::hard_link(path, &blob).unwrap();
+                    }
+                    blob
+                })
+                .collect()
+        })
+        .collect();
     // The guest's tmpfs holds half its memory (tmpfs(5)): twice the images' layers, unpacked, and Shards'
     // least besides, so the largest round fits.
     let unpacked: u64 = layers
@@ -110,7 +133,7 @@ fn a_multi_layer_create_through_a_real_guest_is_timed() {
                 id: id.clone(),
                 bounds: Bounds::default(),
                 class: ClassSpec::Oci(Box::new(OciSpec {
-                    rootfs: Rootfs::Layers(layers[i].clone()),
+                    rootfs: Rootfs::Layers(blobs[i].clone()),
                     init: Program::of(&["/bin/true"]),
                     mounts: Vec::new(),
                     hostname: None,
