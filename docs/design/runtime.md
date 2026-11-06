@@ -524,8 +524,8 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
     bounding the whole tree, and re-arming a forked child, which layer one can't. Layer three is
     **defense-in-depth**, the whole bound on a node with no helper: Hex's own polling rule, a Mach
     time-constraint thread that reads each member's footprint (`proc_pid_rusage`) on `NOTE_CRITICAL` kqueue
-    timers, every (bound - footprint) / the machine's measured allocation rate (floor 250 µs, ceiling 28.1 ms:
-    step 1's 64 MiB overshoot bar at the measured worst rate of 2.39 GB/s), and ends the box past its bound
+    timers, every (bound - footprint) / the machine's measured allocation rate (floor 250 µs, ceiling 25.8 ms:
+    step 1's 64 MiB overshoot bar at the measured worst rate of 2.60 GB/s), and ends the box past its bound
     (an eviction by a stated rule, CLAUDE.md §2). A rootless, kernel-enforced per-process cap thus **does**
     exist — at spawn, layer one — but re-arming a *running* task and apportioning a bound across members need
     root (`memorystatus_control` → `EPERM`, `task_set_phys_footprint_limit` →

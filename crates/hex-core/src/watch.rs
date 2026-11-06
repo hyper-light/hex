@@ -20,14 +20,16 @@ pub const FLOOR: Duration = Duration::from_micros(250);
 /// Longest wait between two reads of a box with a member alive: one far from its bounds is read this
 /// often all the same. A member's fork or end wakes the watcher at once (`NOTE_FORK`/`NOTE_EXIT`), so this
 /// bounds only what a wake misses: a process forked between a listing and its member's watch, or a box
-/// growing faster than the rule's rates. It is how long a box at the measured worst rate, 2.39 GB/s (step
-/// 7's native_box at bench start, adalundhe-macbook-pro, cp/t7-native-s7 549f547), takes to grow by step 1's
-/// overshoot bar, 64 MiB: 64 MiB / 2.39 GB/s = 28,079,022 ns, rounded down (the lead's call 1, 2026-11-06).
-/// At the measured worst spawn rate, 381 a second, a missed wake lets about 10.7 processes in within it, a
-/// stated property, not a bar. Its cost is 0.41-0.76 % of a core per box, from the read-cost curve
-/// (bench/native/macos/records/watcher-readcost-events-a7d13c6-20261106T165609Z.txt), against 0.10-0.25 %
-/// at the 100 ms it was.
-pub const CEILING: Duration = Duration::from_nanos(28_079_022);
+/// growing faster than the rule's rates. It is how long a box at the measured worst rate takes to grow by
+/// step 1's overshoot bar, 64 MiB: 64 MiB / 2,596,898,598 bytes/s = 25,841,927 ns, rounded down (the lead's
+/// call 1, 2026-11-06). The rate is one member's fill of a 256 MiB bound, the fastest of three passes of
+/// step 7's native_box on adalundhe-macbook-pro at 8503dc0
+/// (bench/native/records/native-box-macos-growth-8503dc0-20261106T171108Z.txt). At that record's worst
+/// spawn rate, 426 a second (one member's serial spawn and reap), a missed wake lets about 11.0 processes in
+/// within it, a stated property, not a bar. Its cost is about 0.44-0.83 % of a core per box, from the
+/// read-cost curve (bench/native/macos/records/watcher-readcost-events-a7d13c6-20261106T165609Z.txt),
+/// against 0.10-0.25 % at the 100 ms it was.
+pub const CEILING: Duration = Duration::from_nanos(25_841_927);
 
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
 
