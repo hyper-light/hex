@@ -3,6 +3,7 @@
 //! the frames that carry a state between the runtime and the container's init, which runs the hooks the
 //! spec puts in the container's namespaces (createContainer, startContainer).
 
+use std::cell::Cell;
 use std::io::Write as _;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::process::CommandExt as _;
@@ -42,6 +43,22 @@ pub const START_ABANDONED: u8 = 122;
 /// a FIFO still named, it says the start never took the byte: the node agent stopped during the start
 /// ([`crate::linux::oci::state::start_interrupted`]), so recovery removes the box by that reason.
 pub const START_BEGUN: &str = "start-begun";
+
+thread_local! {
+    /// This thread's wakes while it waits on a hook so far ([`wakes_on_this_thread`]).
+    static WAKES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// How many times this thread has woken while waiting on a hook: once each time it looks again at whether the hook
+/// has taken its state or ended. Tests read it.
+pub fn wakes_on_this_thread() -> u64 {
+    WAKES.with(Cell::get)
+}
+
+/// One more wake on this thread.
+fn woke() {
+    WAKES.with(|n| n.set(n.get().saturating_add(1)));
+}
 
 impl Hooks {
     /// Whether the init stops before its root switch for the runtime: it runs prestart and createRuntime
@@ -152,6 +169,7 @@ fn run_one(op: &'static str, hook: &Hook, state_json: &[u8]) -> Result<(), OciEr
                 }
                 // park_timeout (not the disallowed thread::sleep) yields the CPU between polls.
                 std::thread::park_timeout(Duration::from_millis(5));
+                woke();
             }
         }
     }
@@ -332,6 +350,20 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
+    }
+
+    /// AC-T7.1.4; Ada's 2026-11-06 rule (no picked constants): the runner waits on the facts it needs, the hook
+    /// taking its state and the hook's end, never on a poll interval. Do: run a hook that takes its state and
+    /// then lives on a while. Expect: the runner woke at most once for each of those two facts, however long
+    /// the hook lived. (Its 0.2 s is a fixture: any life longer than a poll interval tells a poll from a
+    /// wait, since a poll wakes once an interval.)
+    #[test]
+    fn a_hook_is_waited_on_not_polled() {
+        let state = State::new("c1", "/bundle");
+        let before = wakes_on_this_thread();
+        run("a hook", &[sh("cat > /dev/null; exec sleep 0.2", None)], &state).unwrap();
+        let wakes = wakes_on_this_thread() - before;
+        assert!(wakes <= 2, "woke {wakes} times");
     }
 
     /// config.md:592. Do: a hook that copies its stdin out, and one that fails. Expect: the state as
