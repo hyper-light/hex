@@ -183,13 +183,7 @@ pub fn max_processes() -> io::Result<usize> {
     sysctl_count(c"kern.maxproc")
 }
 
-/// The most bytes execve takes of a program's arguments and environment, their pointers included
-/// (`kern.argmax`, XNU's `NCARGS`: bsd/kern/kern_exec.c:578, :6546-6549; docs/research/runtime/exec-size-bounds.md).
-pub fn arg_max() -> io::Result<usize> {
-    sysctl_count(c"kern.argmax")
-}
-
-/// A kernel count read by name (`sysctlbyname`, one `int`).
+/// A kernel count read by name (an `int` sysctl), as read now: an administrator may change it.
 fn sysctl_count(name: &std::ffi::CStr) -> io::Result<usize> {
     let mut v: c_int = 0;
     let mut len = size_of::<c_int>();
@@ -207,7 +201,8 @@ fn sysctl_count(name: &std::ffi::CStr) -> io::Result<usize> {
     if r != 0 {
         return Err(io::Error::last_os_error());
     }
-    usize::try_from(v).map_err(|_| io::Error::other(format!("{name:?} reads {v}")))
+    usize::try_from(v)
+        .map_err(|_| io::Error::other(format!("{} reads {v}", name.to_string_lossy())))
 }
 
 /// Makes the calling thread a Mach time-constraint thread (`THREAD_TIME_CONSTRAINT_POLICY`,
@@ -247,6 +242,12 @@ pub fn time_constraint(
             "thread_policy_set: kern_return {kr}"
         )))
     }
+}
+
+/// The most bytes execve takes of a program's arguments and environment, their pointers included
+/// (`kern.argmax`, XNU's `NCARGS`: bsd/kern/kern_exec.c:578, :6546-6549; docs/research/runtime/exec-size-bounds.md).
+pub fn arg_max() -> io::Result<usize> {
+    sysctl_count(c"kern.argmax")
 }
 
 /// The QoS a box's processes are clamped to from their first instruction, passed to every process
