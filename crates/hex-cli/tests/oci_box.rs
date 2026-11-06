@@ -2002,10 +2002,11 @@ fn masked_directories_are_the_nodes_one_empty_filesystem(lab: &Lab, own: &Path) 
 
 /// Goal 6, the seed without a `pivot_root` per start (`goal6-mntns.md` §12, AC-T7.1.4's under-load bar): a node
 /// prunes one mount namespace and every create seed joins it by `setns`, so a seed started after the first never
-/// pivots (each `pivot_root` walks every thread on the host under the mount lock, §11). Do: make six boxes at once
-/// across the node's seeds after a first, then read each live create seed's mount namespace from this process's `/proc`. Expect
-/// at least two create seeds, every one in the same mount namespace and not this process's, and that namespace
-/// holding the pruned two mounts after the six creates as after the first: no seed or init ever mutates it.
+/// pivots (each `pivot_root` walks every thread on the host under the mount lock, §11). Do: make a first box, then
+/// pairs of boxes at once until a second create seed is up, then read each live create seed's mount namespace from
+/// this process's `/proc`. Expect at least two create seeds, every one in the same mount namespace and not this
+/// process's, and that namespace holding the pruned two mounts after the concurrent creates as after the first: no
+/// seed or init ever mutates it.
 fn create_seeds_share_the_nodes_one_pruned_namespace(lab: &Lab, own: &Path) {
     use std::os::unix::fs::MetadataExt;
     if lab.rootless {
@@ -2073,21 +2074,30 @@ fn create_seeds_share_the_nodes_one_pruned_namespace(lab: &Lab, own: &Path) {
         })
         .expect("create a box through a seed");
     };
-    let ids: Vec<BoxId> = (0..7)
-        .map(|n| BoxId::new(&format!("seedns-{n}")).unwrap())
-        .collect();
-    let (first, rest) = ids.split_first().unwrap();
+    let first = BoxId::new("seedns-first").unwrap();
     // The first create is answered by a live seed, so one is up to read the namespace of before the rest.
-    create(first);
+    create(&first);
     let before = create_seeds()
         .into_iter()
         .find_map(mounts)
         .expect("a create seed's mount table after the first create");
-    std::thread::scope(|s| {
-        for id in rest {
-            s.spawn(|| create(id));
+    // Then pairs of creates at once until a second seed is up (the fact the comparison needs), at most one pair
+    // for each of the pool's slots (`hex_core::seeds::SEEDS`), not a count picked to make one likely.
+    let mut ids = vec![first];
+    for round in 0..hex_core::seeds::SEEDS.get() {
+        if create_seeds().len() >= 2 {
+            break;
         }
-    });
+        let pair: Vec<BoxId> = (0..2)
+            .map(|k| BoxId::new(&format!("seedns-{round}-{k}")).unwrap())
+            .collect();
+        std::thread::scope(|s| {
+            for id in &pair {
+                s.spawn(|| create(id));
+            }
+        });
+        ids.extend(pair);
+    }
     let seeds = create_seeds();
     let spaces: BTreeSet<u64> = seeds.iter().filter_map(|&p| namespace(p)).collect();
     let tables: BTreeSet<usize> = seeds.iter().filter_map(|&p| mounts(p)).collect();
