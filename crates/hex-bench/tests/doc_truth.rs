@@ -97,22 +97,47 @@ fn marked(design: &str) -> Vec<(String, String)> {
 /// Decision 5's record: the create breakdown's run on fedora (goal 5 plan step 1).
 const CREATE_RECORD: &str = "bench/competitive/probes/create_breakdown.md";
 
-/// How many figures `spans` quote, and each one the record its span names doesn't hold.
-fn unheld(spans: &[(String, String)]) -> (usize, Vec<String>) {
-    let mut checked = 0;
+/// How many figures each of `spans` quotes, in order, and each one the record its span names doesn't hold.
+fn unheld(spans: &[(String, String)]) -> (Vec<usize>, Vec<String>) {
+    let mut quoted = Vec::new();
     let mut missing = Vec::new();
     for (path, body) in spans {
         let record = std::fs::read_to_string(repo().join(path))
             .unwrap_or_else(|e| panic!("the record {path} the design names: {e}"));
         let record = uncommaed(&record);
-        for n in numbers(body) {
-            checked += 1;
+        let figures = numbers(body);
+        quoted.push(figures.len());
+        for n in figures {
             if !holds(&record, &n) {
                 missing.push(format!("{n} (quoted from {path})"));
             }
         }
     }
-    (checked, missing)
+    (quoted, missing)
+}
+
+/// Non-vacuity, counted from the text rather than a picked floor (Ada's 2026-11-06 rule): every marker `text` opens
+/// is read as a span and closed, and the spans that quote no figure, by record, so a span emptied or one the reading
+/// missed is reported.
+fn vacant(text: &str, spans: &[(String, String)], quoted: &[usize]) -> Result<(), String> {
+    let (opens, closes) = (text.matches(OPEN).count(), text.matches(CLOSE).count());
+    if (opens, closes) != (spans.len(), spans.len()) {
+        return Err(format!(
+            "{opens} record markers open and {closes} close, {} read as spans",
+            spans.len()
+        ));
+    }
+    let empty: Vec<&str> = spans
+        .iter()
+        .zip(quoted)
+        .filter(|&(_, &n)| n == 0)
+        .map(|((path, _), _)| path.as_str())
+        .collect();
+    if empty.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("marked spans that quote no figure: {empty:?}"))
+    }
 }
 
 /// The design's marked spans that name `record`.
@@ -156,12 +181,11 @@ fn every_figure_the_design_marks_is_in_its_record() {
         "decision 4 marks its four tables of record, found {}",
         netns.len()
     );
-    let (checked, missing) = unheld(&spans);
-    // Non-vacuity: the marked spans hold the figures they were written with, not an empty table.
-    assert!(
-        checked >= 60,
-        "the marked spans quote {checked} figures; decision 4's two tables alone hold more"
-    );
+    let (quoted, missing) = unheld(&spans);
+    // Non-vacuity: every marker is read and every span quotes a figure.
+    if let Err(e) = vacant(&design, &spans, &quoted) {
+        panic!("{e}");
+    }
     assert!(
         missing.is_empty(),
         "figures the design quotes that their record doesn't hold: {missing:?}"
@@ -179,11 +203,11 @@ fn decision_5s_figures_are_the_create_breakdowns() {
         "decision 5 marks its three tables of record (the parts by group, the levers, what's left), found {}",
         spans.len()
     );
-    let (checked, missing) = unheld(&spans);
-    // Non-vacuity: the three tables quote 73 figures as written; an emptied one would fall under this.
+    let (quoted, missing) = unheld(&spans);
+    // Non-vacuity: each of decision 5's spans quotes a figure, so an emptied table fails here.
     assert!(
-        checked >= 60,
-        "decision 5's marked spans quote {checked} figures"
+        quoted.iter().all(|&n| n > 0),
+        "figures quoted by each of decision 5's marked spans: {quoted:?}"
     );
     assert!(
         missing.is_empty(),
@@ -209,6 +233,22 @@ fn a_figure_that_drifts_from_its_record_is_reported() {
     *body = first_figure_as(body, drift);
     let (_, missing) = unheld(&spans);
     assert_eq!(missing, [format!("{drift} (quoted from {CREATE_RECORD})")]);
+}
+
+/// The non-vacuity check fails on what it guards (CLAUDE.md §6): a marked span emptied of its figures is reported by
+/// its record, and so is a marker the reading misses; the design as written passes.
+#[test]
+fn an_emptied_span_or_an_unread_marker_is_reported() {
+    let design = std::fs::read_to_string(repo().join(DESIGN)).expect("the design document");
+    let mut spans = marked(&design);
+    let (mut quoted, _) = unheld(&spans);
+    assert_eq!(vacant(&design, &spans, &quoted), Ok(()));
+    quoted[0] = 0;
+    let err = vacant(&design, &spans, &quoted).unwrap_err();
+    assert!(err.contains(&spans[0].0), "{err}");
+    quoted[0] = 1;
+    spans.pop();
+    assert!(vacant(&design, &spans, &quoted).is_err());
 }
 
 #[test]
