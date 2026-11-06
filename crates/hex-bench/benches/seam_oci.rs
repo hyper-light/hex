@@ -11,7 +11,8 @@
 //! - `sustained`: the throughput lifecycle at concurrency 32 for `HEXBENCH_SUSTAINED` of them
 //!   (10,000), its rate in each window of 1,000 and the last window's against the first's;
 //! - `interleaved`, run only when `HEXBENCH_PHASES` names it: concurrency 1 and 32 in turn,
-//!   `HEXBENCH_INTERLEAVED` pairs of turns (10), 500 lifecycles at 1 then 4,000 at 32 in each, so the two
+//!   `HEXBENCH_INTERLEAVED` pairs of turns (unset, until the ratio is resolved against the 8x bar, 10 to 40
+//!   pairs; the runs of record ran 10), 500 lifecycles at 1 then 4,000 at 32 in each, so the two
 //!   meet the host as it is at that moment, its load included: each pair's rates and their ratio, and the
 //!   ratio of the pooled rates (the lead, 2026-11-03T06:01Z, for goal 5 extended step 6's second
 //!   criterion). `HEXBENCH_INTERLEAVED_CPUS1` and `HEXBENCH_INTERLEAVED_CPUS32` (CPU lists, `4-15`) pin
@@ -111,11 +112,47 @@ mod linux {
     const SUSTAINED_WINDOW: usize = 1_000;
     /// The sustained phase's lifecycles unless `HEXBENCH_SUSTAINED` says, as oci_bench.py's.
     const SUSTAINED_DEFAULT: usize = 10_000;
-    /// The interleaved phase's pairs unless `HEXBENCH_INTERLEAVED` says, and each pair's lifecycles at
-    /// concurrency 1 and at 32: about a second of each at the rates of runs 1 to 5 of reuse_pass.md.
-    const INTERLEAVED_DEFAULT: usize = 10;
+    /// Each interleaved pair's lifecycles at concurrency 1 and at 32: about a second of each at the rates of runs 1
+    /// to 5 of reuse_pass.md.
     const INTERLEAVED_C1: usize = 500;
     const INTERLEAVED_C32: usize = 4_000;
+    /// The bar the interleaved phase's ratio is read against: concurrency 32 at 8x concurrency 1 a minimum (goal 5
+    /// extended step 6's second criterion, Ada via the lead, 2026-11-03; reuse_pass.md, run 6).
+    const INTERLEAVED_BAR: f64 = 8.0;
+    /// Unless `HEXBENCH_INTERLEAVED` names a count of pairs, a round runs pairs until the mean of their ratios is
+    /// resolved against [`INTERLEAVED_BAR`]: the bar outside the mean's two-sided 95% interval, `z` the normal
+    /// quantile 1.96, its standard error the pairs' over the square root of their count. A fixed count left
+    /// rounds unresolved: step 6 alone read 7.80x (SE 0.41) over 20 pairs (reuse_pass.md, 20261103T170834Z),
+    /// over the socket, the bar inside its interval. Ada's 2026-11-06 rule; it takes effect for runs after it, and the runs of
+    /// record, 10 pairs a round, are run again as they were with `HEXBENCH_INTERLEAVED=10`.
+    const RESOLVED_Z: f64 = 1.96;
+    /// The fewest pairs a resolved round holds: the fewest a record pooled (reuse_pass.md, run 6's socket row of
+    /// 20261103T064217Z, 10 pairs), so the standard error is never read from fewer than a record was.
+    const INTERLEAVED_FEWEST: usize = 10;
+    /// The most pairs a round runs before it stops unresolved, and says so: the most a record pooled for one binary
+    /// (reuse_pass.md, runs 9, 11 and 12, 40 pairs each). Past it no record shows what more pairs resolve.
+    const INTERLEAVED_MOST: usize = 40;
+
+    /// How many interleaved pairs a round runs.
+    #[derive(Clone, Copy)]
+    enum Pairs {
+        /// As many as `HEXBENCH_INTERLEAVED` names, as the runs of record ran.
+        Fixed(usize),
+        /// Until the ratio is resolved against the bar, between [`INTERLEAVED_FEWEST`] and [`INTERLEAVED_MOST`].
+        UntilResolved,
+    }
+
+    /// Whether the mean of `ratios` is resolved against [`INTERLEAVED_BAR`]: the bar outside its two-sided 95%
+    /// interval.
+    fn resolved(ratios: &[f64]) -> bool {
+        let n = ratios.len() as f64;
+        if ratios.len() < 2 {
+            return false;
+        }
+        let mean = ratios.iter().sum::<f64>() / n;
+        let var = ratios.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0);
+        (mean - INTERLEAVED_BAR).abs() > RESOLVED_Z * (var / n).sqrt()
+    }
 
     /// oci_bench.py's bundles bound every container to nothing of their own; the node bounds each box
     /// the way the competitive pass's do, so the comparison is like for like: the kernel's floor plus
@@ -626,17 +663,18 @@ mod linux {
         json!({"load1": load1, "cpu_some_avg10": cpu_some_avg10})
     }
 
-    /// Concurrency 1 and [`SUSTAINED_CONCURRENCY`] in turn, `pairs` times: [`INTERLEAVED_C1`] lifecycles at
-    /// 1, then [`INTERLEAVED_C32`] at 32, as the sustained phase runs them, so both meet the host as it is
-    /// then. Each pair's rates and their ratio, with the host's load and CPU pressure at its start and end
+    /// Concurrency 1 and [`SUSTAINED_CONCURRENCY`] in turn, as many times as `pairs` says: [`INTERLEAVED_C1`]
+    /// lifecycles at 1, then [`INTERLEAVED_C32`] at 32, as the sustained phase runs them, so both meet the host as it
+    /// is then. Each pair's rates and their ratio, with the host's load and CPU pressure at its start and end
     /// and each half's CPU, per lifecycle and as the CPUs it kept busy on average (the agent and its boxes,
     /// `own`'s cpu.stat): whether concurrency 32 is held by the CPUs it has or by waiting. And the ratio of
-    /// the pooled rates, each concurrency's lifecycles over its time.
+    /// the pooled rates, each concurrency's lifecycles over its time, and why the round stopped (`fixed`,
+    /// `resolved` against the bar, or `unresolved` at the most pairs).
     fn interleaved(
         node: &dyn Runtime,
         bundle: &Path,
         own: &Path,
-        pairs: usize,
+        pairs: Pairs,
     ) -> Result<Value, String> {
         let (cpus1, cpus32) = (
             cpu_list("HEXBENCH_INTERLEAVED_CPUS1"),
@@ -649,7 +687,20 @@ mod linux {
         };
         let (mut rows, mut ratios) = (Vec::new(), Vec::new());
         let (mut one_s, mut many_s) = (0.0, 0.0);
-        for p in 0..pairs {
+        let most = match pairs {
+            Pairs::Fixed(n) => n,
+            Pairs::UntilResolved => INTERLEAVED_MOST,
+        };
+        let mut stopped = match pairs {
+            Pairs::Fixed(_) => "fixed",
+            Pairs::UntilResolved => "unresolved",
+        };
+        for p in 0..most {
+            if matches!(pairs, Pairs::UntilResolved) && p >= INTERLEAVED_FEWEST && resolved(&ratios)
+            {
+                stopped = "resolved";
+                break;
+            }
             let at_start = host_load();
             let c1_pinned = pin_to(&cpus1)?;
             let (one, one_cpu, one_took) =
@@ -685,11 +736,16 @@ mod linux {
         if cpus1.is_some() || cpus32.is_some() {
             pin(&started_on)?;
         }
+        if matches!(pairs, Pairs::UntilResolved) && resolved(&ratios) {
+            stopped = "resolved";
+        }
         ratios.sort_by(f64::total_cmp);
-        let c1 = (pairs * INTERLEAVED_C1) as f64 / one_s;
-        let c32 = (pairs * INTERLEAVED_C32) as f64 / many_s;
+        let ran = rows.len();
+        let c1 = (ran * INTERLEAVED_C1) as f64 / one_s;
+        let c32 = (ran * INTERLEAVED_C32) as f64 / many_s;
         Ok(
-            json!({"pairs": rows, "concurrency": SUSTAINED_CONCURRENCY, "c1_lifecycles": INTERLEAVED_C1,
+            json!({"pairs": rows, "stopped": stopped, "bar": INTERLEAVED_BAR,
+                  "concurrency": SUSTAINED_CONCURRENCY, "c1_lifecycles": INTERLEAVED_C1,
                   "c32_lifecycles": INTERLEAVED_C32, "c1_per_s": c1, "c32_per_s": c32, "ratio": c32 / c1,
                   "ratio_median": ratios.get(ratios.len() / 2), "ratio_min": ratios.first(),
                   "ratio_max": ratios.last(), "c1_cpus": cpus1.map(|(l, _)| l),
@@ -697,8 +753,16 @@ mod linux {
         )
     }
 
-    /// The most tasks a pin walks: this process's threads and its descendants', a few hundred here.
-    const PIN_TASKS: usize = 65_536;
+    /// The most tasks a pin walks: the kernel's own bound on the tasks that can exist at once,
+    /// `/proc/sys/kernel/threads-max` (Documentation/admin-guide/sysctl/kernel.rst, "threads-max"), read on the
+    /// host the bench runs on, so the walk ends however the tree it pins is shaped.
+    fn pin_tasks() -> Result<usize, String> {
+        let raw = std::fs::read_to_string("/proc/sys/kernel/threads-max")
+            .map_err(|e| format!("reading /proc/sys/kernel/threads-max: {e}"))?;
+        raw.trim()
+            .parse()
+            .map_err(|e| format!("/proc/sys/kernel/threads-max {raw:?}: {e}"))
+    }
 
     /// The CPU list in `var` (`4-15`, `4-15,20`) and its set; `None` when it's unset or empty.
     fn cpu_list(var: &str) -> Option<(String, rustix::thread::CpuSet)> {
@@ -730,6 +794,7 @@ mod linux {
     /// `Cpus_allowed_list` back: how many were pinned, and how many hold each list, which should be `cpus`'
     /// alone.
     fn pin(cpus: &rustix::thread::CpuSet) -> Result<Value, String> {
+        let most = pin_tasks()?;
         let mut procs = vec![std::process::id()];
         let mut tasks = Vec::new();
         let mut next = 0;
@@ -746,8 +811,10 @@ mod linux {
                 else {
                     continue;
                 };
-                if tasks.len() >= PIN_TASKS {
-                    return Err(format!("more than {PIN_TASKS} tasks to pin"));
+                if tasks.len() >= most {
+                    return Err(format!(
+                        "more tasks to pin than threads-max's {most}: the walk met tasks again"
+                    ));
                 }
                 match rustix::thread::sched_setaffinity(rustix::process::Pid::from_raw(tid), cpus) {
                     Ok(()) => tasks.push(tid),
@@ -865,9 +932,9 @@ mod linux {
         }
     }
 
-    /// How long a socket agent has to end on SIGTERM before it's SIGKILLed: its counts line and exit are a
-    /// write and an exit, so seconds are slack under any load the bench meets.
-    const AGENT_END: Duration = Duration::from_secs(30);
+    /// How long a socket agent has to end on SIGTERM before it's SIGKILLed: its end is one more exchange with the
+    /// agent (a counts line and an exit), so it has the bound each call has, [`CALL_TIMEOUT`], not one of its own.
+    const AGENT_END: Duration = CALL_TIMEOUT;
 
     /// A `hex node` serving its socket for the socket driver, its boxes under `box_root`; ended with SIGTERM
     /// ([`Agent::end`]), else killed when dropped. It takes HEX_OCI_MNTNS and HEXBENCH_PARKED_PROCS
@@ -925,20 +992,36 @@ mod linux {
             )
         }
 
-        /// Ends the node with SIGTERM, waits at most [`AGENT_END`] for it (SIGKILLed past it), and returns the
-        /// parked procs' counts it said as it ended, each by name.
+        /// Ends the node with SIGTERM, waits at most [`AGENT_END`] for it (SIGKILLed past it) on its pidfd, which
+        /// reads ready the moment it exits, and returns the parked procs' counts it said as it ended, each by name.
         fn end(mut self) -> Result<Value, String> {
             let pid = rustix::process::Pid::from_child(&self.child);
+            let exited = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty())
+                .map_err(|e| format!("hex node's pidfd: {e}"))?;
             rustix::process::kill_process(pid, rustix::process::Signal::TERM)
                 .map_err(|e| format!("SIGTERM to hex node: {e}"))?;
             let deadline = Instant::now() + AGENT_END;
             let ended = loop {
-                match self.child.try_wait() {
-                    Ok(Some(status)) => break Some(status),
-                    Ok(None) if Instant::now() < deadline => {
-                        std::thread::park_timeout(Duration::from_millis(20));
+                let left = deadline.saturating_duration_since(Instant::now());
+                let left = rustix::event::Timespec {
+                    tv_sec: i64::try_from(left.as_secs()).unwrap_or(i64::MAX),
+                    tv_nsec: i64::from(left.subsec_nanos()),
+                };
+                let mut fds = [rustix::event::PollFd::new(
+                    &exited,
+                    rustix::event::PollFlags::IN,
+                )];
+                match rustix::event::poll(&mut fds, Some(&left)) {
+                    Ok(0) => break None,
+                    Ok(_) => {
+                        break Some(
+                            self.child
+                                .wait()
+                                .map_err(|e| format!("reaping hex node: {e}"))?,
+                        );
                     }
-                    _ => break None,
+                    Err(rustix::io::Errno::INTR) => continue,
+                    Err(e) => return Err(format!("waiting on hex node's pidfd: {e}")),
                 }
             };
             let Some(status) = ended else {
@@ -1243,10 +1326,12 @@ mod linux {
         let interleaved_pairs = std::env::var("HEXBENCH_INTERLEAVED")
             .ok()
             .filter(|v| !v.trim().is_empty())
-            .map_or(INTERLEAVED_DEFAULT, |v| {
-                v.trim()
-                    .parse()
-                    .unwrap_or_else(|e| panic!("HEXBENCH_INTERLEAVED={v:?}: {e}"))
+            .map_or(Pairs::UntilResolved, |v| {
+                Pairs::Fixed(
+                    v.trim()
+                        .parse()
+                        .unwrap_or_else(|e| panic!("HEXBENCH_INTERLEAVED={v:?}: {e}")),
+                )
             });
         let (sleep_bundle, true_bundle) = (PathBuf::from(sleep_bundle), PathBuf::from(true_bundle));
         // HEXBENCH_REUSE=0: the owner opts out of reuse, its boxes and bundles otherwise as with reuse on, so
