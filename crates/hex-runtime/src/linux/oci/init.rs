@@ -1987,7 +1987,9 @@ fn cgroupfs_in_mountinfo(
         if chunk.is_empty() {
             break;
         }
-        reads = reads.checked_add(1).ok_or_else(|| OciError::os(WHAT, "reads past u64"))?;
+        reads = reads
+            .checked_add(1)
+            .ok_or_else(|| OciError::os(WHAT, "reads past u64"))?;
         if reads > 1 && max.is_none() {
             max = Some(mount_max()?);
         }
@@ -2065,7 +2067,12 @@ impl MountLine {
     /// The line read whole: its point under `top` added to `found` where it is a cgroup filesystem's, and refused,
     /// naming the bind at `destination`, where that point is past what a remount can reach. A point cut at
     /// [`MAX_POINT_WRITTEN`] is judged beneath `top` or not by what was kept of it, which starts as it does.
-    fn finish(&self, top: &Path, destination: &str, found: &mut Vec<String>) -> Result<(), OciError> {
+    fn finish(
+        &self,
+        top: &Path,
+        destination: &str,
+        found: &mut Vec<String>,
+    ) -> Result<(), OciError> {
         if !matches!(self.fstype.as_slice(), b"cgroup2" | b"cgroup") {
             return Ok(());
         }
@@ -2540,10 +2547,14 @@ fn mask_path(
         match masked_directory {
             Some(empty) => clone_masked_directory(empty.as_fd(), target.as_fd())
                 .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?,
-            None => {
-                rustix::mount::mount("tmpfs", &at, "tmpfs", MountFlags::RDONLY, Some(EMPTY_TMPFS_C))
-                    .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?
-            }
+            None => rustix::mount::mount(
+                "tmpfs",
+                &at,
+                "tmpfs",
+                MountFlags::RDONLY,
+                Some(EMPTY_TMPFS_C),
+            )
+            .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?,
         }
     } else {
         rustix::mount::mount_bind("/dev/null", &at)

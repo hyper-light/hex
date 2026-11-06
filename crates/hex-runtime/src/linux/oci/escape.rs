@@ -53,9 +53,7 @@ fn beneath() -> std::io::Result<Vec<String>> {
 }
 
 /// How `e1` opens the directories it climbs through: by descriptor alone.
-const DIR: OFlags = OFlags::PATH
-    .union(OFlags::DIRECTORY)
-    .union(OFlags::CLOEXEC);
+const DIR: OFlags = OFlags::PATH.union(OFlags::DIRECTORY).union(OFlags::CLOEXEC);
 
 /// Most `..` `e1` climbs: no directory a path can name lies deeper than this, a path being at most `PATH_MAX`
 /// (4,096) bytes with its NUL (include/uapi/linux/limits.h:13) and each component at least two of them (`/x`).
