@@ -1369,10 +1369,11 @@ impl Stage {
 }
 
 /// Whether the store may take more of a stage: what was free when it began, less what it has spent, still
-/// leaves `need` free, the room the largest stage yet has needed.
+/// holds a stage as large as the largest yet (`need`) and as large as this one so far, since this one,
+/// released, is cache too: so the next create always finds the room it needs without evicting.
 fn admits(free: Free, spent: Spend, need: Spend) -> bool {
-    free.entries.saturating_sub(spent.entries) >= need.entries
-        && free.bytes.saturating_sub(spent.bytes) >= need.bytes
+    free.entries.saturating_sub(spent.entries) >= need.entries.max(spent.entries)
+        && free.bytes.saturating_sub(spent.bytes) >= need.bytes.max(spent.bytes)
 }
 
 /// The box's `layers/<i>`, a link to the store's layer `digest` (`../../.layers/<digest>`, relative, so it

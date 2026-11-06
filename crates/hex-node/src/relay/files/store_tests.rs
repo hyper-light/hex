@@ -217,3 +217,27 @@ fn the_reclaimer_takes_the_least_recently_used_unreferenced_layers_until_what_wa
     );
     assert!(names_in(&store).iter().all(|n| !n.starts_with(GONE)));
 }
+
+/// HEX-GUEST-14 (§4a; HEX-GUEST-22's 2x record, f823255: grafana's first stage, nothing learned yet, admitted
+/// all of itself and left alpine 5 MiB, so alpine's create was refused where whole-root staging staged it):
+/// a stage once released is cache, so the store admits it only while what stays free also holds a stage as
+/// large as itself. Free 100 and nothing learned: expect 40 spent admitted (60 left holds 40), 60 not (40
+/// left can't hold 60); with 70 learned, 40 not (60 left can't hold 70); with 30 learned, 20 is (80 left
+/// holds both).
+#[test]
+fn the_store_leaves_room_for_a_stage_as_large_as_the_one_under_way() {
+    let free = Free {
+        entries: 100,
+        bytes: 100,
+        used: 0,
+        capacity: 100,
+    };
+    let spent = |n| Spend {
+        entries: n,
+        bytes: n,
+    };
+    assert!(admits(free, spent(40), Spend::default()));
+    assert!(!admits(free, spent(60), Spend::default()));
+    assert!(!admits(free, spent(40), spent(70)));
+    assert!(admits(free, spent(20), spent(30)));
+}

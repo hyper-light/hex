@@ -315,7 +315,9 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
       grafana create (480 MB of blobs at 500-560 MB/s on a Mac Studio, sha2 0.10.9), the lead's rule after it.
     - **Admission, never eviction on the create's path:** the store admits a layer only into room already
       free: it leaves free, within what the stage's budget learned, the most entries and bytes one stage has
-      spent (`.layers/.need`, learned at each stage's end, rising only). A layer that would cut into that room,
+      spent (`.layers/.need`, learned at each stage's end, rising only), and as much as the stage under way has
+      spent, since it too is cache once its box is released (the first stage of a guest, nothing learned yet,
+      took all its tmpfs's room before this, and the next create was refused). A layer that would cut into that room,
       even part way, goes into the box instead (a partial folder is renamed into it), and so does every later
       layer of its stage, so a create's worst case is whole-root staging's own; a create never evicts.
       HEX-GUEST-22's second record showed why: with eviction on the create's path (least recently used, on
