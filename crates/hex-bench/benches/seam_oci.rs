@@ -922,6 +922,92 @@ mod linux {
         Ok(json!({ "ms": timed? }))
     }
 
+    /// The waits census's list arm (bench/competitive/probes/waits_census.md, `serve.reads`): `boxes` boxes made, then
+    /// `lists` lists of them, each timed, so a list's parts wait for their reader over the socket; the boxes deleted
+    /// after. `HEXBENCH_LIST_BOXES` and `HEXBENCH_LISTS` set them (the phase's N and 100 unset).
+    fn list(node: &dyn Runtime, bundle: &Path, n: usize) -> Result<Value, String> {
+        let count = |var: &str, unset: usize| {
+            std::env::var(var).map_or(unset, |v| {
+                v.trim()
+                    .parse()
+                    .unwrap_or_else(|e| panic!("{var}={v:?}: {e}"))
+            })
+        };
+        let (boxes, lists) = (count("HEXBENCH_LIST_BOXES", n), count("HEXBENCH_LISTS", 100));
+        let ids: Vec<BoxId> = (0..boxes)
+            .map(|i| BoxId::new(&format!("list{i}")).map_err(|e| e.to_string()))
+            .collect::<Result<_, _>>()?;
+        let mut made = 0;
+        let timed = (|| -> Result<Vec<f64>, String> {
+            for id in &ids {
+                node.create(spec(id, bundle))
+                    .map_err(|e| format!("create {id}: {e}"))?;
+                made += 1;
+            }
+            let mut ms = Vec::with_capacity(lists);
+            for _ in 0..lists {
+                let t = Instant::now();
+                let listed = node.list().map_err(|e| format!("list: {e}"))?;
+                ms.push(t.elapsed().as_secs_f64() * 1e3);
+                if listed.len() < boxes {
+                    return Err(format!("a list of {boxes} boxes gave {}", listed.len()));
+                }
+            }
+            Ok(ms)
+        })();
+        for id in ids.iter().take(made) {
+            node.delete(id).map_err(|e| format!("delete {id}: {e}"))?;
+        }
+        Ok(json!({ "boxes": boxes, "ms": timed? }))
+    }
+
+    /// The waits census's restart arm (`node.listing`): over the socket driver, `boxes` boxes made, the agent ended
+    /// with SIGTERM and started again over the same state and box root, so its recovery lists their parts; then the
+    /// boxes, adopted, deleted. `HEXBENCH_RESTART_BOXES` sets `boxes` (the phase's N unset). Returns the driver
+    /// with the new agent, and how long the new agent took to say it was ready.
+    fn restart(
+        driver: Driver,
+        hex: &str,
+        state: &Path,
+        root: &Path,
+        bundle: &Path,
+        n: usize,
+    ) -> (Driver, Result<Value, String>) {
+        let Driver::Socket { client, agent } = driver else {
+            return (driver, Err("the restart arm needs HEXBENCH_DRIVER=socket".to_owned()));
+        };
+        let boxes = std::env::var("HEXBENCH_RESTART_BOXES").map_or(n, |v| {
+            v.trim()
+                .parse()
+                .unwrap_or_else(|e| panic!("HEXBENCH_RESTART_BOXES={v:?}: {e}"))
+        });
+        let ids: Vec<BoxId> = (0..boxes)
+            .map(|i| BoxId::new(&format!("restart{i}")).expect("a box id"))
+            .collect();
+        let mut made = 0;
+        let created = ids.iter().try_for_each(|id| {
+            client
+                .create(spec(id, bundle))
+                .map(|_| made += 1)
+                .map_err(|e| format!("create {id}: {e}"))
+        });
+        drop(client);
+        let ended = agent.end();
+        let t = Instant::now();
+        let (agent, path) = Agent::start(hex, state, root);
+        let ready_ms = t.elapsed().as_secs_f64() * 1e3;
+        let client = Client::connect(&path)
+            .unwrap_or_else(|e| panic!("connecting to hex node at {}: {e}", path.display()));
+        let deleted = ids
+            .iter()
+            .take(made)
+            .try_for_each(|id| client.delete(id).map_err(|e| format!("delete {id}: {e}")));
+        let result = created.and(ended.map(|_| ())).and(deleted).map(|()| {
+            json!({ "boxes": boxes, "ready_ms": ready_ms })
+        });
+        (Driver::Socket { client, agent }, result)
+    }
+
     /// HEXBENCH_PARKED_PROCS: `Some(true)` for 1, `Some(false)` for 0, `None` unset (the node's default).
     fn parked_procs() -> Option<bool> {
         match std::env::var("HEXBENCH_PARKED_PROCS").as_deref() {
@@ -1439,6 +1525,7 @@ mod linux {
             "interleaved",
             "rtt",
             "ipc_uts_pairs",
+            "list",
         ] {
             if !wanted.split_whitespace().any(|w| w == phase) {
                 continue;
@@ -1465,6 +1552,7 @@ mod linux {
                     "sustained" => sustained(node, &true_bundle, &parent, sustained_lifecycles),
                     "interleaved" => interleaved(node, &true_bundle, &parent, interleaved_pairs),
                     "ipc_uts_pairs" => ipc_uts_pairs(node, &parent, hex, &sleep_bundle, n, warmup),
+                    "list" => list(node, &sleep_bundle, n),
                     _ => rtt(node, &sleep_bundle, n, warmup),
                 }?;
                 let rose = rise(before, driver.netns()?);
@@ -1561,6 +1649,18 @@ mod linux {
             match r {
                 Ok(v) => phases.insert(phase.to_owned(), v),
                 Err(e) => errors.insert(phase.to_owned(), Value::String(e)),
+            };
+        }
+        // The restart arm comes after every phase, as it replaces the socket's agent.
+        let mut driver = driver;
+        if wanted.split_whitespace().any(|w| w == "restart") {
+            let t0 = Instant::now();
+            let (restarted, r) = restart(driver, hex, state.path(), &root, &sleep_bundle, n);
+            driver = restarted;
+            println!("{runtime} restart: {:.0}s", t0.elapsed().as_secs_f64());
+            match r {
+                Ok(v) => phases.insert("restart".to_owned(), v),
+                Err(e) => errors.insert("restart".to_owned(), Value::String(e)),
             };
         }
         // The idle cgroups an owner's boxes left go before the box root does; a socket agent's are its

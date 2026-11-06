@@ -8,30 +8,41 @@ answer each wait records, `name nanos`, from the wait's own timing point (`hex_n
 re-implements a wait.
 
 Run on fedora under hex-slot, its timed part under `fedora-timed.lock`:
-`[N=10000] [CPUSET=4-15] bash bench/competitive/probes/waits_census.sh <hex> <seam_oci>`. It runs seam_oci over the
-node's socket (`HEXBENCH_DRIVER=socket`; phases `lifecycle sustained rtt`, N each) in a container with host.sh's
-OCI-pass flags and the bar's no-owner conditions, twice: the node's state on the container's tmpfs `/run`, and on the
-host's own filesystem (fedora's btrfs, `/opt/disk`). `waits_census.py` reads each census into p50, p99, p99.9, max and
-n by wait.
+`[N=10000] [CPUSET=4-15] [LIST_BOXES=N] [LISTS=100] [RESTART_BOXES=N] bash bench/competitive/probes/waits_census.sh <hex> <seam_oci>`.
+It runs seam_oci over the node's socket (`HEXBENCH_DRIVER=socket`) in a container with host.sh's OCI-pass flags, in
+three arms, each with a census file of its own; `waits_census.py` reads each into p50, p99, p99.9, max and n by wait:
 
-## What each row seeds, and where
-
-| census row | the wait | seeds | where |
+| arm | the node's state | owner | phases |
 | --- | --- | --- | --- |
-| `store.turns` (both places) | a record change's wait for the same box's: a turn's hold, its write and fsyncs | `WRITE_PATIENCE`'s seed, the slower place's max | `crates/hex-node/src/store.rs`, `Store::open` |
-| `node.turns` | a create or delete's wait for the same box's | `TURN_PATIENCE`'s seed | `crates/hex-node/src/node.rs`, the node's `Turns` |
-| `node.emptying` | a killed box's emptying, from its kill to `populated 0` | `EMPTY_PATIENCE`'s and serve's `STOP_PATIENCE`'s seed | `node.rs`, `EMPTYING` |
-| `node.listing` | a recovery's listing, per entry | `LIST_PATIENCE`'s seed | `node.rs`, `LISTING` |
-| `serve.reads` | a list's worker's wait for its client to read a part | `READ_PATIENCE`'s seed | `crates/hex-node/src/serve.rs`, `READS` |
-| `client.answer.<kind>` | a client's call's wait for its answer, by kind | each kind's seed | `crates/hex-client/src/linux.rs`, `ANSWERS` |
-| `netcheck.settles`, `netcheck.answers` | a fresh namespace's IPv6 settle; a dump's read | the network check's seeds | `crates/hex-runtime/src/linux/oci/netcheck.rs` |
-| `seeds.hang`, `seeds.wait`, `exec_seeds.answers` | the seeds' waits, seeded from `seed_path.md` run 3 already | a check of that record against the census's | `crates/hex-core/src/seeds.rs`, `crates/hex-node/src/seed.rs` |
+| `tmpfs` | the container's tmpfs `/run` | none (the bar's no-owner conditions) | `lifecycle sustained rtt list restart` |
+| `disk` | the host's own filesystem, fedora's btrfs (`/opt/disk`) | none | the same |
+| `owner` | tmpfs | `HEXBENCH_OWNER=bench`, as host.sh's reuse-on pass | `lifecycle sustained` |
 
-Until a run is recorded here each of those waits stays MEASURING in the code, naming this file's row. What this probe
-can't drive yet, it says so here when a run lands: `serve.reads` needs a list over enough boxes that a part waits for
-its reader (seam_oci has no list phase), `node.listing` sees only the listings of a node starting over an empty state
-(a restart over N boxes is a phase to add), and the netcheck rows need an owner's boxes (`HEXBENCH_OWNER`), which the
-no-owner run leaves out; each such row's n is 0 or small, and its seed waits for the phase that drives it.
+seam_oci's `list` phase makes `LIST_BOXES` boxes and lists them `LISTS` times, so a list's parts wait for their
+reader; its `restart` phase makes `RESTART_BOXES` boxes, ends the agent with SIGTERM and starts it again over the
+same state, so recovery lists their parts, then deletes them. Each is bounded by the node's own: a box past its
+budget is refused, and the arm's error says so.
+
+## What each row seeds, from which arm, and where
+
+A row seeds its wait only with **n of at least 1,000**: the seed is the row's max, and with fewer samples than that the
+nearest-rank p99.9 is the max itself, so the tail the seed must cover hasn't been seen. `waits_census.py` writes no
+seed for a row under it, and names the row's n.
+
+| census row | the wait | arm that seeds it | seeds | where |
+| --- | --- | --- | --- | --- |
+| `store.turns` | a record change's wait for the same box's: a turn's hold, its write and fsyncs | `tmpfs` and `disk`: the slower arm's | `WRITE_PATIENCE` | `crates/hex-node/src/store.rs`, `Store::open` |
+| `node.turns` | a create or delete's wait for the same box's | `tmpfs` | `TURN_PATIENCE` | `crates/hex-node/src/node.rs`, the node's `Turns` |
+| `node.emptying` | a killed box's emptying, from its kill to `populated 0` | `tmpfs` | `EMPTY_PATIENCE`, serve's `STOP_PATIENCE` | `node.rs`, `EMPTYING` |
+| `node.listing` | a recovery's listing, per entry | `tmpfs` and `disk` (`restart`): the slower | `LIST_PATIENCE` | `node.rs`, `LISTING` |
+| `serve.reads` | a list's worker's wait for its client to read a part | `tmpfs` (`list`) | `READ_PATIENCE` | `crates/hex-node/src/serve.rs`, `READS` |
+| `client.answer.<kind>` | a client's call's wait for its answer, by kind | `tmpfs` | each kind's | `crates/hex-client/src/linux.rs`, `ANSWERS` |
+| `netcheck.settles`, `netcheck.answers` | a fresh namespace's IPv6 settle; a dump's read | `owner` | the network check's | `crates/hex-runtime/src/linux/oci/netcheck.rs` |
+| `seeds.hang`, `seeds.wait`, `exec_seeds.answers` | the seeds' waits, seeded from `seed_path.md` run 3 already | `tmpfs` | a check of that record | `crates/hex-core/src/seeds.rs`, `crates/hex-node/src/seed.rs` |
+
+Until a run is recorded here each of those waits stays MEASURING in the code, naming this file's row. Where a row's n
+is short of 1,000 (`client.answer.hello` is one a connection; `node.listing` a restart's entries; `serve.reads` only
+the parts that waited), the run says so and the arm's count is what to raise.
 
 ## Runs
 
