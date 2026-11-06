@@ -462,3 +462,40 @@ fn a_hostile_or_cut_stage_is_refused_and_leaves_nothing() {
     assert!(why.contains("ended before its end head"), "{why}");
     assert!(!staged.join("b").exists());
 }
+
+/// HEX-GUEST-14 with the host's packer (the lead's list, 1): stage a tarball root whose entry is written
+/// through a symbolic link it made (`a` to `/`, then `a/escaped/`), end to end through the relay: expect it
+/// refused naming the link, nothing made outside the box's staged root, and the partial copy gone.
+#[test]
+fn a_tarball_writing_through_its_own_link_is_refused_end_to_end_and_leaves_nothing() {
+    use hex_client::guest::stage::{Item, Source, stage};
+    let (lab, staged) = staged_lab();
+    let host = tempfile::tempdir().unwrap();
+    let tarball = host.path().join("root.tar");
+    {
+        let mut b = tar::Builder::new(File::create(&tarball).unwrap());
+        let mut link = tar::Header::new_gnu();
+        link.set_entry_type(tar::EntryType::Symlink);
+        link.set_mode(0o777);
+        link.set_size(0);
+        b.append_link(&mut link, "a", "/").unwrap();
+        let mut dir = tar::Header::new_gnu();
+        dir.set_entry_type(tar::EntryType::Directory);
+        dir.set_mode(0o755);
+        dir.set_size(0);
+        b.append_data(&mut dir, "a/escaped/", std::io::empty())
+            .unwrap();
+        b.into_inner().unwrap();
+    }
+    let id = BoxId::new("box-1").unwrap();
+    let items = [Item {
+        name: "root".to_owned(),
+        source: Source::Tar(tarball),
+    }];
+    let got = stage(lab.link().as_ref(), &id, &items, &hf::LIMITS);
+    let why = got.unwrap_err().to_string();
+    assert!(why.contains("through the symbolic link \"a\""), "{why}");
+    assert!(!Path::new("/escaped").exists());
+    assert!(!staged.join("escaped").exists());
+    assert!(!staged.join("box-1").exists(), "the partial copy was left");
+}

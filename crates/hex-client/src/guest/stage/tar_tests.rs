@@ -2,8 +2,10 @@
 //! given as a `.tar` or `.tar.gz` packs to its own entries, Linux modes and symlink texts exact; and
 //! hostile archives are refused by name before anything past the fault is sent: absolute names, `..`,
 //! names and counts past the bounds, device, FIFO and hard-link entries, an unknown entry type, an entry
-//! before its directory, a gzip stream whose trailer lies, an archive cut short. A socket has no tar entry
-//! type, so an unknown type stands for it.
+//! before its directory, a gzip stream whose trailer lies, an archive cut short; and, from the lead's list,
+//! an entry written through a link the archive made, hard links whatever their target, GNU and PAX long
+//! names (whole within the path bound, refused past it), a PAX size, a dangling long-name record, sparse
+//! entries. Tar has no entry type for a socket, so an unknown typeflag stands in for one.
 
 use std::collections::BTreeMap;
 
@@ -197,4 +199,281 @@ fn a_lying_or_truncated_tarball_is_refused() {
     assert!(got.contains("end-of-archive"), "{got}");
     let cut_gz = &good[..n / 2];
     assert!(refused("r.tar.gz", cut_gz).contains("r.tar.gz"));
+}
+
+/// A PAX record (`%d key=value\n`, its length counting itself) of `pairs`.
+fn pax(pairs: &[(&str, &str)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (k, v) in pairs {
+        let body = format!(" {k}={v}\n");
+        let mut n = body.len() + 1;
+        while format!("{n}").len() + body.len() != n {
+            n += 1;
+        }
+        out.extend(format!("{n}{body}").into_bytes());
+    }
+    out
+}
+
+/// HEX-GUEST-15 (the lead's list, 1): pack an entry written through a symbolic link the archive made (`a`
+/// to `/`, to `../..`, and through a chain `a` to `b` to `/`): expect each refused by name, naming the
+/// link. The links themselves are legal: a root's absolute links resolve inside it when used.
+#[test]
+fn an_entry_written_through_a_link_in_the_archive_is_refused_by_name() {
+    for entries in [
+        vec![
+            (header(b"a", b'2', 0o777, 0, b"/"), &b""[..]),
+            (header(b"a/x/", b'5', 0o755, 0, b""), b""),
+        ],
+        vec![
+            (header(b"a", b'2', 0o777, 0, b"../.."), &b""[..]),
+            (header(b"a/x", b'0', 0o644, 1, b""), b"x"),
+        ],
+        vec![
+            (header(b"b", b'2', 0o777, 0, b"/"), &b""[..]),
+            (header(b"a", b'2', 0o777, 0, b"b"), b""),
+            (header(b"a/x", b'0', 0o644, 1, b""), b"x"),
+        ],
+    ] {
+        let got = refused("r.tar", &archive(&entries));
+        assert!(got.contains("through the symbolic link \"a\""), "{got}");
+    }
+    // The links alone pack, their texts as written.
+    let links = archive(&[
+        (header(b"b", b'2', 0o777, 0, b"/"), &b""[..]),
+        (header(b"a", b'2', 0o777, 0, b"../.."), b""),
+    ]);
+    assert!(pack_tar("r.tar", &links, &LIMITS).is_ok());
+}
+
+/// HEX-GUEST-15 (2): pack a hard link whose target escapes the root, names a later entry, and names none:
+/// expect each refused the same, by name, whatever its target.
+#[test]
+fn a_hard_link_is_refused_whatever_its_target() {
+    for (target, later) in [(&b"/etc/passwd"[..], false), (b"z", true), (b"nope", false)] {
+        let mut entries = vec![(header(b"x", b'1', 0o644, 0, target), &b""[..])];
+        if later {
+            entries.push((header(b"z", b'0', 0o644, 1, b""), b"z"));
+        }
+        let got = refused("r.tar", &archive(&entries));
+        assert!(
+            got.contains("a hard link is never staged"),
+            "{target:?}: {got}"
+        );
+    }
+}
+
+/// HEX-GUEST-15 (3): pack names and link targets longer than a header holds, as GNU long-name ('L') and
+/// long-link ('K') records and as a PAX record's `path` and `linkpath`: expect each staged with its whole
+/// text exact; past the path bound, refused by name; a PAX `size` refused; and a long-name record with no
+/// entry after it refused.
+#[test]
+fn long_names_and_targets_stage_whole_within_the_bound_and_are_refused_past_it() {
+    let long = format!("dir-{}", "n".repeat(180));
+    let target = format!("/{}", "t".repeat(200));
+    let gnu = archive(&[
+        (
+            header(b"././@LongLink", b'L', 0o644, long.len() as u64 + 1, b""),
+            format!("{long}\0").as_bytes(),
+        ),
+        (header(b"short", b'5', 0o755, 0, b""), b""),
+        (
+            header(b"././@LongLink", b'K', 0o644, target.len() as u64, b""),
+            target.as_bytes(),
+        ),
+        (header(b"link", b'2', 0o777, 0, b"short"), b""),
+    ]);
+    let px = archive(&[
+        (
+            header(
+                b"PaxHeaders/x",
+                b'x',
+                0o644,
+                pax(&[("path", &long)]).len() as u64,
+                b"",
+            ),
+            &pax(&[("path", &long)]),
+        ),
+        (header(b"short", b'5', 0o755, 0, b""), b""),
+        (
+            header(
+                b"PaxHeaders/l",
+                b'x',
+                0o644,
+                pax(&[("linkpath", &target)]).len() as u64,
+                b"",
+            ),
+            &pax(&[("linkpath", &target)]),
+        ),
+        (header(b"link", b'2', 0o777, 0, b"short"), b""),
+    ]);
+    for (what, bytes) in [("gnu", gnu), ("pax", px)] {
+        let entries = unpack(&pack_tar("r.tar", &bytes, &LIMITS).unwrap());
+        let by: BTreeMap<&str, &(Entry, Vec<u8>)> =
+            entries.iter().map(|e| (e.0.path.as_str(), e)).collect();
+        assert_eq!(
+            by[format!("root/{long}").as_str()].0.what,
+            What::Dir,
+            "{what}"
+        );
+        assert_eq!(
+            by["root/link"].0.what,
+            What::Symlink {
+                target: target.clone()
+            },
+            "{what}"
+        );
+    }
+    let short = Limits {
+        path: 100,
+        ..LIMITS
+    };
+    let past = archive(&[
+        (
+            header(b"././@LongLink", b'L', 0o644, long.len() as u64 + 1, b""),
+            format!("{long}\0").as_bytes(),
+        ),
+        (header(b"short", b'5', 0o755, 0, b""), b""),
+    ]);
+    let got = pack_tar("r.tar", &past, &short).unwrap_err().to_string();
+    assert!(got.contains("past the path bound"), "{got}");
+    let sized = archive(&[
+        (
+            header(
+                b"PaxHeaders/s",
+                b'x',
+                0o644,
+                pax(&[("size", "100")]).len() as u64,
+                b"",
+            ),
+            &pax(&[("size", "100")]),
+        ),
+        (header(b"f", b'0', 0o644, 1, b""), b"x"),
+    ]);
+    assert!(refused("r.tar", &sized).contains("a PAX size"), "pax size");
+    let dangling = archive(&[(header(b"././@LongLink", b'L', 0o644, 6, b""), b"name\0\0")]);
+    assert!(
+        refused("r.tar", &dangling).contains("no entry after it"),
+        "dangling long name"
+    );
+}
+
+/// HEX-GUEST-15 (4): pack a GNU sparse entry ('S') and a PAX one (`GNU.sparse.*`): expect each refused by
+/// name; none of the roots it serves holds one (`tar -tv`, docs/design/shards-guest.md §4a).
+#[test]
+fn a_sparse_entry_is_refused_by_name() {
+    let gnu = archive(&[(header(b"s", b'S', 0o644, 0, b""), &b""[..])]);
+    assert!(refused("r.tar", &gnu).contains("a sparse entry"), "gnu");
+    let record = pax(&[("GNU.sparse.major", "1"), ("GNU.sparse.minor", "0")]);
+    let px = archive(&[
+        (
+            header(b"PaxHeaders/s", b'x', 0o644, record.len() as u64, b""),
+            &record,
+        ),
+        (header(b"s", b'0', 0o644, 0, b""), b""),
+    ]);
+    assert!(refused("r.tar", &px).contains("a sparse entry"), "pax");
+}
+
+/// A global PAX record ('g') of `pairs`, then one plain file, as an archive.
+fn global(pairs: &[(&str, &str)]) -> Vec<u8> {
+    let record = pax(pairs);
+    archive(&[
+        (
+            header(b"pax_global_header", b'g', 0o644, record.len() as u64, b""),
+            &record,
+        ),
+        (header(b"f", b'0', 0o644, 1, b""), b"x"),
+    ])
+}
+
+/// HEX-GUEST-15 (the lead's question on global PAX records): pack a global record past 64 KiB, one with
+/// GNU sparse keys, and one setting `path`, `linkpath` or `size`: expect each refused by name, never held
+/// whole nor ignored; and one with only keys that don't change what's staged (times, ids, names, a
+/// comment, charsets) packed.
+#[test]
+fn a_global_pax_record_is_bounded_and_refused_when_it_sets_what_staging_applies() {
+    let big = "c".repeat(70 << 10);
+    let got = refused("r.tar", &global(&[("comment", &big)]));
+    assert!(
+        got.contains("a PAX record") && got.contains("past 65536 bytes"),
+        "{got}"
+    );
+    let got = refused("r.tar", &global(&[("GNU.sparse.major", "1")]));
+    assert!(got.contains("a sparse entry"), "{got}");
+    for key in ["path", "linkpath", "size"] {
+        let got = refused("r.tar", &global(&[(key, "1")]));
+        assert!(
+            got.contains(&format!(
+                "a global PAX record sets {key}, which staging doesn't apply"
+            )),
+            "{key}: {got}"
+        );
+    }
+    let quiet = global(&[
+        ("mtime", "1700000000.5"),
+        ("atime", "1700000000"),
+        ("ctime", "1700000000"),
+        ("uid", "0"),
+        ("gid", "0"),
+        ("uname", "root"),
+        ("gname", "root"),
+        ("comment", "made by git archive"),
+        ("charset", "ISO-IR 10646 2000 UTF-8"),
+        ("hdrcharset", "ISO-IR 10646 2000 UTF-8"),
+    ]);
+    let entries = unpack(&pack_tar("r.tar", &quiet, &LIMITS).unwrap());
+    assert_eq!(entries.len(), 2, "the root and its file");
+}
+
+/// HEX-GUEST-15 (the lead's 'g' list, 5): pack a global record setting a key on neither list (neither one
+/// staging applies nor one it may ignore): expect it refused naming that key, so a real archive that
+/// meets one shows exactly what to weigh.
+#[test]
+fn a_global_pax_record_with_an_unknown_key_is_refused_naming_it() {
+    let got = refused("r.tar", &global(&[("comment", "ok"), ("HEX.made.up", "1")]));
+    assert!(
+        got.contains("a global PAX record sets HEX.made.up, which staging doesn't apply"),
+        "{got}"
+    );
+}
+
+/// HEX-GUEST-15 (the lead's 'g' list, 4): pack a real `git archive --format=tar` output (git 2.56.0, a
+/// scratch repo of `bin/hello` 0755, `etc/conf` and a symlink `link` -> `../bin/hello`, commit fc7ebc43;
+/// fixtures/git-archive.tar, sha256 0cbf36b3...), which begins with a global record holding only
+/// `comment=<commit>`: expect it staged, every entry exact (git's tar.umask 002 gives 0775 and 0664).
+#[test]
+fn a_git_archive_tarball_stages_with_every_entry_exact() {
+    let bytes = include_bytes!("fixtures/git-archive.tar");
+    let entries = unpack(&pack_tar("r.tar", bytes, &LIMITS).unwrap());
+    let got: Vec<(String, u16, What, Vec<u8>)> = entries
+        .into_iter()
+        .map(|(e, data)| (e.path, e.mode, e.what, data))
+        .collect();
+    let want = vec![
+        ("root".to_owned(), 0o755, What::Dir, vec![]),
+        ("root/bin".to_owned(), 0o775, What::Dir, vec![]),
+        (
+            "root/bin/hello".to_owned(),
+            0o775,
+            What::File { size: 18 },
+            b"#!/bin/sh\necho hi\n".to_vec(),
+        ),
+        ("root/etc".to_owned(), 0o775, What::Dir, vec![]),
+        (
+            "root/etc/conf".to_owned(),
+            0o664,
+            What::File { size: 9 },
+            b"name=lab\n".to_vec(),
+        ),
+        (
+            "root/link".to_owned(),
+            0o777,
+            What::Symlink {
+                target: "../bin/hello".to_owned(),
+            },
+            vec![],
+        ),
+    ];
+    assert_eq!(got, want);
 }

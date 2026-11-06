@@ -192,6 +192,31 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
   mid-entry) are refused by name. A hard link is refused by name too: none of the lab's inputs or runtime-tools holds
   one (`tar -tv` on each, 2026-11-06), so nothing needs it; falsified, and staged as a copy of an earlier entry, when
   a root that must run does.
+  - **The reader is the `tar` crate**, 0.4.46 from crates.io (alexcrichton's tar-rs), already a workspace
+    dependency (`Cargo.toml:40`), used as it is rather than a reader of Hex's own; not vendored, since Hex changes
+    nothing in it (CLAUDE.md "Vendoring"). Hex's checks wrap what it yields, and every hostile-input test runs
+    against it. Hex reads it raw (`Entries::raw`, tar 0.4.46 `src/archive.rs:267`) and reads the extension
+    records itself, each within a bound: the crate's own pass over them holds a GNU long-name, long-link or PAX
+    record whole, however long (`src/archive.rs:418,429,440`, `read_all`), and leaves PAX `GNU.sparse.*`
+    entries uninterpreted, so one would stage as a file holding its sparse map. A long name or link is read
+    within the path bound, a PAX record within 64 KiB, and its `path` and `linkpath` taken with the crate's own
+    parser (`tar::PaxExtensions`). Why not the crate's own pass (the lead's ruling, 2026-11-06): its `read_all`
+    preallocates at most 128 KiB but then `read_to_end`s the record's whole declared size (`src/entry.rs:297-301`,
+    `EntryFields::read_all`, called at `src/archive.rs:418,429,440`), so a few MB of gzip can make it buffer
+    gigabytes. tar-rs leaves bounding the stream to its callers, so this is no bug to patch, vendor or report;
+    Hex bounds it. A global PAX record (`g`) is read within the same 64 KiB and may set only keys staging doesn't
+    carry, so can't get wrong: `mtime`, `atime`, `ctime`, `uid`, `gid`, `uname`, `gname`, `comment`, `charset`,
+    `hdrcharset` (staging carries a mode and a link text, never times, owners or names, and a root's texts are
+    UTF-8 either way); any other key (`path`, `linkpath`, `size`, sparse keys, one Hex doesn't know) would apply to
+    every later entry, and is refused by name, never ignored (CLAUDE.md §3); a key on neither list is refused naming
+    it, so a real archive that meets one shows exactly what to weigh before it is added. `git archive`'s tarballs,
+    which begin with a global record holding only `comment=<commit>`, stage with every entry exact (a real one,
+    git 2.56.0, is the test's fixture: `crates/hex-client/src/guest/stage/fixtures/git-archive.tar`). Refused by name: an entry written through one of the archive's own symbolic
+    links (whatever its text, which stays legal: a root's absolute links resolve inside it when used), a PAX
+    `size` (a file past a header's 8 GiB), sparse entries (GNU `S` and PAX `GNU.sparse.*`, which none of the
+    roots it serves holds: `tar -tv`), and an extension record with no entry after it. The tests that pin this
+    handling are `crates/hex-client/src/guest/stage/tar_tests.rs` and the relay's end-to-end
+    `a_tarball_writing_through_its_own_link_is_refused_end_to_end_and_leaves_nothing` (HEX-GUEST-14, -15).
 - A non-bind mount (`proc`, `tmpfs`, …) names no host path and passes unchanged; hooks run in the guest's runtime
   namespace, so their paths are the guest's.
 
