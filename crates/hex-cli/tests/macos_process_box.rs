@@ -16,7 +16,7 @@
 use std::num::NonZeroU64;
 use std::time::{Duration, Instant};
 
-use hex_api::conformance::{Act, Fixture};
+use hex_api::conformance::{self, Act, Fixture};
 use hex_api::differential;
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Runtime, Signal, Stdio};
 use hex_runtime::macos::MacRuntime;
