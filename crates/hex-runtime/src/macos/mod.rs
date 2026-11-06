@@ -16,8 +16,8 @@ use std::os::fd::OwnedFd;
 use std::sync::{Arc, Mutex};
 
 use hex_api::{
-    BoxId, BoxInfo, BoxSpec, BoxState, Class, ClassSpec, ExecLimit, Proc, Program, Refusal, Runtime,
-    Signal, Stdio, Usage,
+    BoxId, BoxInfo, BoxSpec, BoxState, Class, ClassSpec, ExecLimit, Proc, Program, Refusal,
+    Runtime, Signal, Stdio, Usage,
 };
 use rustix::fs::{Mode, OFlags};
 

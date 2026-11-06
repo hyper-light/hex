@@ -304,10 +304,7 @@ impl Program {
             .args
             .iter()
             .fold(0usize, |n, a| n.saturating_add(a.len()).saturating_add(1));
-        let filename = self
-            .args
-            .first()
-            .map_or(1, |a| a.len().saturating_add(1));
+        let filename = self.args.first().map_or(1, |a| a.len().saturating_add(1));
         let env = self.env.iter().fold(0usize, |n, (k, v)| {
             // KEY=VALUE and its NUL.
             n.saturating_add(k.len())
@@ -344,11 +341,7 @@ impl Program {
         let unit = limit.unit;
         // Each string with its NUL, in the OS's own unit.
         let arg_size = |a: &str| unit.of(a).saturating_add(1);
-        let var_size = |k: &str, v: &str| {
-            unit.of(k)
-                .saturating_add(unit.of(v))
-                .saturating_add(2)
-        };
+        let var_size = |k: &str, v: &str| unit.of(k).saturating_add(unit.of(v)).saturating_add(2);
         if let Some(a) = self.args.iter().find(|a| arg_size(a) > most) {
             return Err(Refusal::Invalid {
                 what: "program",
