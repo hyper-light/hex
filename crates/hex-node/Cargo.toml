@@ -19,6 +19,8 @@ serde_json.workspace = true
 rustix.workspace = true
 
 [dev-dependencies]
+# The relay's end-to-end staging test builds its tarball (src/relay/tests.rs).
+tar.workspace = true
 tempfile.workspace = true
 
 [lints]

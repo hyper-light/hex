@@ -259,6 +259,7 @@ dependencies = [
  "hex-runtime",
  "rustix",
  "serde_json",
+ "tar",
  "tempfile",
 ]
 
