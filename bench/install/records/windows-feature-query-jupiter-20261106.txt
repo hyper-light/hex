@@ -1,0 +1,10 @@
+The Windows feature query (crates/hex-runtime/src/windows/features.rs, hex_core::setup::FEATURE_QUERY) timed on
+jupiter, 2026-11-06 (Windows 11 26200, AMD Ryzen AI MAX+ 395, 32 logical processors), as the ordinary kiln user,
+20 runs of Windows PowerShell 5.1 with -NoProfile -NonInteractive -Command <FEATURE_QUERY>, wall clock per run
+(Git Bash date +%s%N around the call). CPU load at the end: 79% (Win32_Processor LoadPercentage), Amphora co-tenant.
+
+first run's bytes:  H y p e r v i s o r P l a t f o r m 1 \r \n C o n t a i n e r s 1 \r \n
+bytes per run: 36 in all 20
+
+ms per run: 1235 1135 1361 1227 1429 1098 1368 1485 1213 1176 1140 1462 1222 1283 1491 1498 1138 1227 1200 1683
+min 1098, median 1231, max 1683

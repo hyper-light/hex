@@ -358,11 +358,11 @@ mod tests {
     }
 
     proptest! {
-        /// HEX-INST-2, hostile input to the parser (CLAUDE.md §6): any bytes, never a panic; what it
-        /// accepts names only features it asked for.
+        /// HEX-INST-2, hostile input to the parser (CLAUDE.md §6): any text up to one byte past the bound
+        /// (so both sides of it are reached), never a panic; what it accepts names only features it asked for.
         #[test]
         fn the_feature_listing_parser_never_panics(text in proptest::string::string_regex(
-            &format!("(?s).{{0,{}}}", 2 * FEATURE_LISTING_MAX)
+            &format!("(?s).{{0,{}}}", FEATURE_LISTING_MAX + 1)
         ).unwrap()) {
             if let Ok(off) = features_off(&text) {
                 prop_assert!(off.iter().all(|f| WindowsFeature::ALL.contains(f)));
