@@ -54,6 +54,21 @@ impl Devfs {
         } else {
             None
         };
+        Self::over(sources, dev, procs, root)
+    }
+
+    /// As [`Devfs::start`], with this one's mask sources: a node keeps one empty tmpfs for its life, so every init's
+    /// masked directories and every parked proc's clone the same one, whichever pools are on.
+    pub fn restart(&self, dev: bool, procs: bool) -> Result<Self, Refusal> {
+        Self::over(self.shared.sources.clone(), dev, procs, self.root)
+    }
+
+    fn over(
+        sources: Option<Arc<ProcSources>>,
+        dev: bool,
+        procs: bool,
+        root: bool,
+    ) -> Result<Self, Refusal> {
         let shared = Arc::new(Shared {
             pool: Mutex::new(Pool::new(dev)),
             procs: Mutex::new(Pool::new(procs)),

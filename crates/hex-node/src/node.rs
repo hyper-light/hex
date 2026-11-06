@@ -365,7 +365,7 @@ impl Node {
     /// Rootless nodes always use ordinary setup in their containers' own user namespaces.
     pub fn with_prepared_dev_mounts(mut self, enabled: bool) -> Result<Self, Refusal> {
         let (_, procs, root) = self.devfs.enabled();
-        self.devfs = Devfs::start(enabled && root, procs, root)?;
+        self.devfs = self.devfs.restart(enabled && root, procs)?;
         Ok(self)
     }
 
@@ -373,7 +373,7 @@ impl Node {
     /// the bench's A/B; disabled creates mount their own proc. Root nodes only, as `/dev`'s.
     pub fn with_prepared_procs(mut self, enabled: bool) -> Result<Self, Refusal> {
         let (dev, _, root) = self.devfs.enabled();
-        self.devfs = Devfs::start(dev, enabled && root, root)?;
+        self.devfs = self.devfs.restart(dev, enabled && root)?;
         Ok(self)
     }
 
