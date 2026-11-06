@@ -574,27 +574,33 @@ lacking any of it "refuses that class by name, saying what's missing", and "Unin
   still present, which is none. `check <plan>` is that listing on its own: on a machine fresh of Hex, and
   after uninstall, it lists nothing (CLAUDE.md §3: nothing is left silently).
 - **Linux** (§1): the classes need a cgroup v2 subtree the node owns with `cpu`, `io`, `memory` and `pids`
-  (`hex_core::cgroup::CONTROLLERS`). systemd's own `user@.service` delegates only `pids memory cpu`, never `io`,
-  in every release from v244 to v259 (§1.3; fedora's systemd 259 ships the same line), so install adds a
-  drop-in for every user's manager, `/etc/systemd/system/user@.service.d/50-hex-delegate.conf`
-  (`Delegate=cpu io memory pids`, which adds to the unit's own list rather than replacing it, §1.2), and a
-  `hex-node` user service (`Delegate=yes`, `DelegateSubgroup=agent`: the node runs in the
-  leaf `agent` and its boxes in `hex` beside it, so cgroup v2's no-internal-processes rule holds, §1.1-1.2;
-  systemd ≥254, refused by name below it), enabled for every user (`systemctl --global enable`). A running user manager reads which
-  controllers it may hand on only when it starts (§1.4), so `daemon-reload` alone leaves it without `io`:
-  measured, the lab's installed node was refused `io` until install re-executed each running user manager
-  (`systemctl reload user@UID.service`, which keeps its processes), as install now does. The node's descriptor limit is
-  the unit's `LimitNOFILE=1048576`, soft and hard: its own descriptors at its bounds (330,112) and every kept
-  namespace's held `/proc/net` files (4 × 66,048) need 594,304; 1,048,576 is the kernel's default
-  `fs.nr_open` and dockerd's old value (`docs/research/runtime/nofile-limit.md`). A user unit can't exceed its
-  manager's hard limit, so the drop-in also gives `user@.service` `LimitNOFILE=1024:1048576` (everything else
-  a user runs keeps systemd's soft 1024). A box whose spec names no `RLIMIT_NOFILE` inherits the node's
-  limit, as crun's containers inherit theirs; Docker 29 gives 1024:524288 (open, the lead's to bring Ada).
-  For each `--user` it turns on lingering (their manager, and so their node, runs with no session, as a CI runner's must, §1.5) and
-  starts the service, its socket at `$XDG_RUNTIME_DIR/hex/node.sock`. Rootless `oci` boxes need nothing more: each maps
-  only the node's own uid (`hex_core::bundle`), so no subordinate id ranges (§1.6). Ubuntu
-  24.04's `apparmor_restrict_unprivileged_userns` (§1.6) would need an AppArmor profile for `hex`; no Ubuntu
-  machine is in this step's bar, so that is a gap the installer doesn't fill yet (STATUS.md).
+  (`hex_core::cgroup::CONTROLLERS`), and the node a descriptor limit of 594,304: its own descriptors at its
+  bounds (330,112) and every kept namespace's held `/proc/net` files (4 × 66,048). Install puts each named
+  user's node in a **system** unit, the template `hex-node@.service`, run as that user (`User=%i`), its cgroup
+  delegated to it (`Delegate=yes`: every controller the system has, §1.2; `DelegateSubgroup=agent`, so the node
+  runs in the leaf `agent` and its boxes in `hex` beside it and cgroup v2's no-internal-processes rule holds,
+  §1.1; systemd ≥254, refused by name below it) and `LimitNOFILE=1048576`, soft and hard (the kernel's default
+  `fs.nr_open` and dockerd's old value, `docs/research/runtime/nofile-limit.md` §2-§3). Its socket is
+  `/run/hex/<user>/node.sock`, its containers' state on the tmpfs under `/run/hex/<user>`, its records under
+  `/var/lib/hex/<user>`. Not a user unit: systemd's own `user@.service` delegates only `pids memory cpu`, never
+  `io` (v244-v259, §1.3); a user manager reads the controllers it may hand on only when it starts (§1.4); and a
+  user unit can't take a hard limit above its manager's (nofile-limit.md §1.3). Measured in the lab: with a user
+  unit, a drop-in raising `user@.service`'s delegation and limit, and the running manager re-executed, the node
+  got `io` but stayed clamped at 524,288 descriptors; only a restart would give it more, and a restart ends
+  everything under the manager, a CI runner's work included (the lead: never). A system unit takes both from
+  root and touches no user's manager (HEX-INST-7: the lab's manager keeps its pid across install). A box whose
+  spec names no `RLIMIT_NOFILE` gets Docker 29's 1024:524288, not the node's own (Ada, 2026-11-06;
+  `hex_core::limits`, capped at the node's hard limit, which an unprivileged process can't raise): the `oci`
+  init and every program exec'd into a container add it where the spec names none, and the Linux `process`
+  class sets it in the child before `execve` (HEX-INST-6). `hex box run` isn't the node but wraps a program
+  for its caller, so its program keeps the caller's limit (the lead, 2026-11-06). A `process` box always gets
+  1024:524288, or the node's hard limit where that is lower: its spec (`BoxSpec`'s `Process` class and
+  `Program`) has no rlimits to name one, and none is added, since the native boxes don't need it and a new
+  field in the process spec is an API and wire change beyond this step (the lead, 2026-11-06). An `oci` box
+  keeps a limit its spec names (end to end in `node_socket.rs`). Rootless `oci` boxes need
+  nothing more: each maps only the node's own uid (`hex_core::bundle`), so no subordinate id ranges (§1.6).
+  Ubuntu 24.04's `apparmor_restrict_unprivileged_userns` (§1.6) would need an AppArmor profile for `hex`; no
+  Ubuntu machine is in this step's bar, so that is a gap the installer doesn't fill yet (STATUS.md).
 - **Windows** (§2): the `process` class's job objects need no admin. Install turns on the `Containers`
   (Windows images through HCS, plan step 4) and `HypervisorPlatform` (the Shards guest for Linux images,
   plan step 5) optional features with `Enable-WindowsOptionalFeature -Online -All -NoRestart`, records each
@@ -626,9 +632,9 @@ lacking any of it "refuses that class by name, saying what's missing", and "Unin
   On Linux, `bench/install/linux_lab.sh` boots a fresh Fedora as a container with systemd its init, shows the
   by-name refusal before install, installs, passes the conformance suite over the installed node's socket for
   both classes as an ordinary user (HEX-INST-3), uninstalls and lists nothing left (HEX-INST-4).
-- **What would falsify it:** a drop-in's `Delegate=` list that replaced rather than merged with the unit's (the
-  lab's installed node got all four); a running user manager that a re-exec didn't give the new delegation,
-  so a logged-in user needed a further step (the lab's user's manager runs before install to show it); a
+- **What would falsify it:** a system unit's `Delegate=yes` with `User=` that didn't hand the user every
+  controller, or its `LimitNOFILE=` that the node didn't get (the lab reads both); an install that disturbed a
+  user's running manager (the lab's runs before install and keeps its pid); a
   Windows feature whose state an unprivileged node can't read; a box user macOS lets a member drop.
 
 ## Decision: the Windows `oci` class is an HCS silo holding a Hex job (native plan step 4, 2026-11-04)

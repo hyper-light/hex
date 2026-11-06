@@ -86,7 +86,7 @@ fn the_seam_holds_its_contract_over_the_node_agents_socket() {
 }
 
 /// HEX-INST-3 (native plan step 6): on a machine where Hex's installer ran its one admin step, the
-/// node it installed (the `hex-node` user service) serves every Linux class with no further step: the
+/// node it installed (the user's `hex-node@<user>` service) serves every Linux class with no further step: the
 /// conformance suite passes over its socket, `HEX_INSTALLED_SOCKET`, on `oci` and `process` boxes.
 /// Run by the installer's lab (bench/install/linux_lab.sh); elsewhere it prints SKIP.
 #[test]
@@ -116,6 +116,49 @@ fn an_installed_node_serves_every_class() {
         );
     }
     assert!(client.list().unwrap().is_empty(), "a box is left");
+}
+
+/// HEX-INST-6 (native plan step 6, Ada 2026-11-06): a box whose spec names no RLIMIT_NOFILE, an oci
+/// box from a bundle that names none and a process box, gets Docker 29's 1024:524288, capped at the
+/// node's hard limit, not the node's own (which the installed node raises for the files it holds).
+fn nofile_by_default(lab: &Lab, client: &Client) {
+    let hard = rustix::process::getrlimit(rustix::process::Resource::Nofile).maximum;
+    let want = hex_core::limits::default_nofile(hard);
+    let want = format!("{}:{}", want.soft, want.hard);
+    for (class, spec) in [
+        ("oci", ClassSpec::Bundle(lab.bundle(&Lab::act(&Act::Wait)))),
+        ("process", ClassSpec::Process),
+    ] {
+        assert_eq!(nofile_seen(client, spec), want, "{class} box");
+    }
+}
+
+/// HEX-INST-6 (native plan step 6): an oci box whose spec names RLIMIT_NOFILE keeps the spec's, not the
+/// default: here one less than the default's soft limit, soft, and the default's soft limit, hard
+/// (1023:1024), below the default in both and a lowering a rootless init may make under any node.
+fn nofile_named(lab: &Lab, client: &Client) {
+    let hard = hex_core::limits::NOFILE_SOFT;
+    let soft = hard - 1;
+    let bundle = lab.bundle(&Lab::act(&Act::Wait));
+    let config = bundle.join("config.json");
+    let text = std::fs::read_to_string(&config).unwrap();
+    let named = text.replacen(
+        r#""noNewPrivileges": true"#,
+        &format!(
+            r#""noNewPrivileges": true, "rlimits": [{{"type": "RLIMIT_NOFILE", "soft": {soft}, "hard": {hard}}}]"#
+        ),
+        1,
+    );
+    assert_ne!(
+        named, text,
+        "the bundle's process has no noNewPrivileges to name the limit beside"
+    );
+    std::fs::write(&config, named).unwrap();
+    assert_eq!(
+        nofile_seen(client, ClassSpec::Bundle(bundle)),
+        format!("{soft}:{hard}"),
+        "oci box"
+    );
 }
 
 /// The soft and hard descriptor limits a program sees in a box made from `class`, as `soft:hard`.
@@ -150,6 +193,45 @@ fn nofile_seen(client: &Client, class: ClassSpec) -> String {
     );
     client.delete(&id).unwrap();
     said.trim().to_owned()
+}
+
+/// HEX-INST-8 (native plan step 6): `hex node` started with `$NOTIFY_SOCKET` (systemd's `Type=notify`) says
+/// `READY=1` there once its socket listens, so the installed unit is up exactly when it serves, within the
+/// start bound systemd gives it (sd_notify(3); systemd.service(5) `TimeoutStartSec=`), and the installer
+/// needs no wait of its own. A client connects right after the datagram arrives.
+fn ready_is_told_to_the_service_manager(own: &Path, cache: &Path, exe: &str) {
+    let dir = tempfile::Builder::new()
+        .prefix("notify-")
+        .tempdir_in(cache)
+        .unwrap();
+    let notify = dir.path().join("notify.sock");
+    let manager = std::os::unix::net::UnixDatagram::bind(&notify).unwrap();
+    manager
+        .set_read_timeout(Some(conformance::PATIENCE))
+        .unwrap();
+    let socket = dir.path().join("node.sock");
+    let mut node = Command::new(exe)
+        .arg("node")
+        .arg("--socket")
+        .arg(&socket)
+        .arg("--state")
+        .arg(dir.path().join("state"))
+        .arg("--box-root")
+        .arg(own.join("hex-notify"))
+        .env("NOTIFY_SOCKET", &notify)
+        .stdout(Std::null())
+        .spawn()
+        .expect("start hex node");
+    let mut said = [0u8; 64];
+    let n = manager.recv(&mut said).expect("READY=1 on $NOTIFY_SOCKET");
+    let said = String::from_utf8_lossy(&said[..n]).into_owned();
+    assert!(
+        said.lines().any(|l| l == "READY=1"),
+        "the node told {said:?}"
+    );
+    Client::connect(&socket).expect("connect once the node has said it's ready");
+    node.kill().unwrap();
+    node.wait().unwrap();
 }
 
 /// A `hex node` process serving its socket, killed when dropped.
@@ -389,6 +471,7 @@ impl Fixture for ProcessBoxes<'_> {
 }
 
 fn exercise(own: &Path, cache: &Path, exe: &str) {
+    ready_is_told_to_the_service_manager(own, cache, exe);
     let lab = Lab::new(cache, exe);
     let agent = Agent::start(exe, cache, own.join("hex-sock"));
     let client = agent.client();
@@ -411,6 +494,8 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     );
     through_the_guest_relay(&lab, &agent, exe);
     through_a_simulated_guest(&lab, &agent, exe);
+    nofile_by_default(&lab, &client);
+    nofile_named(&lab, &client);
     disconnect(&lab, &agent, &client);
     crash_at_each_record_write(&lab, own, exe);
     assert!(client.list().unwrap().is_empty(), "a box is left");

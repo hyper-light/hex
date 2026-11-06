@@ -121,8 +121,36 @@ impl WindowsFeature {
     }
 }
 
-/// Most bytes of a feature listing [`features_off`] reads: two short lines, far under it.
-pub const FEATURE_LISTING_MAX: usize = 4096;
+/// A listing line's bytes past its feature's name: a space, the one-digit `InstallState` (1-4,
+/// Win32_OptionalFeature's) and the CRLF PowerShell ends each line with.
+const LINE_TAIL: usize = " 1\r\n".len();
+
+/// Most bytes of a feature listing [`features_off`] reads: its format's own size, a line for each feature
+/// it asks for, so a listing longer than Windows writes is refused (the 36 bytes jupiter writes, measured).
+pub const FEATURE_LISTING_MAX: usize = listing_size();
+
+const fn listing_size() -> usize {
+    // Every feature of `ALL`, by its array's shape: a feature added there must be added here. The sums
+    // saturate: a size past usize::MAX (never, for two names) would bound nothing tighter anyway.
+    let [a, b] = WindowsFeature::ALL;
+    line_size(a).saturating_add(line_size(b))
+}
+
+/// One feature's listing line: its name, then [`LINE_TAIL`].
+const fn line_size(f: WindowsFeature) -> usize {
+    f.name().len().saturating_add(LINE_TAIL)
+}
+
+/// The slowest recorded run of [`FEATURE_QUERY`], over jupiter's 50 (2026-11-06): 2,421 ms, of the Windows
+/// agent's 30 at 14:27Z (cp/t7-native-windows 01217f8, bench/install/windows-constants.md:20); the other 20
+/// peaked at 1,683 ms at 79% CPU (bench/install/records/windows-feature-query-jupiter-20261106.txt).
+/// Measured, not picked: a slower recorded run raises it.
+pub const FEATURE_QUERY_SLOWEST: std::time::Duration = std::time::Duration::from_millis(2_421);
+
+/// The longest the node waits for [`FEATURE_QUERY`] before ending it and refusing by name: the swarm's
+/// failure-bound rule, twice the slowest recorded run, the factor being the false-alarm margin (the Hex
+/// lead, 2026-11-06). A slower machine is a new record, not a longer guess.
+pub const FEATURE_QUERY_PATIENCE: std::time::Duration = FEATURE_QUERY_SLOWEST.saturating_mul(2);
 
 /// The query an unprivileged node runs (PowerShell) for the installer's features' state:
 /// `Win32_OptionalFeature`, one `<name> <InstallState>` line per feature Windows lists.
@@ -198,6 +226,13 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    /// Every controller fedora's kernel (6.19.10) lists at its cgroup v2 root, as the installer lab's record
+    /// reads it (bench/install/records/linux-fb2e5ca-20261106T054108Z.txt, "/: controllers [...]"): the
+    /// names a parent's `cgroup.controllers` can hold, the model's whole input space.
+    const KERNEL_CONTROLLERS: [&str; 9] = [
+        "cpuset", "cpu", "io", "memory", "hugetlb", "pids", "rdma", "misc", "dmem",
+    ];
+
     fn set(names: &[&str]) -> BTreeSet<String> {
         names.iter().map(|s| (*s).to_owned()).collect()
     }
@@ -267,11 +302,8 @@ mod tests {
         #[test]
         fn the_refusal_names_exactly_the_missing_controllers(
             have in proptest::collection::btree_set(
-                prop_oneof![
-                    Just("cpu"), Just("io"), Just("memory"), Just("pids"),
-                    Just("cpuset"), Just("hugetlb"), Just("rdma"), Just("misc"),
-                ],
-                0..8,
+                proptest::sample::select(&KERNEL_CONTROLLERS[..]),
+                0..=KERNEL_CONTROLLERS.len(),
             )
         ) {
             let available: BTreeSet<String> = have.iter().map(|s| (*s).to_owned()).collect();
@@ -324,11 +356,41 @@ mod tests {
         assert!(features_off(&"x".repeat(FEATURE_LISTING_MAX + 1)).is_err());
     }
 
+    /// HEX-INST-2: the feature query's deadline is the swarm's failure-bound rule over its records: twice
+    /// the slowest recorded run, the factor the false-alarm margin. Of jupiter's 50 runs (20 at 79% CPU,
+    /// bench/install/records/windows-feature-query-jupiter-20261106.txt; 30 by the Windows agent at
+    /// 14:27Z, cp/t7-native-windows 01217f8 bench/install/windows-constants.md:20) the slowest is 2,421 ms.
+    #[test]
+    fn the_feature_querys_deadline_is_twice_its_slowest_recorded_run() {
+        assert_eq!(
+            FEATURE_QUERY_SLOWEST,
+            std::time::Duration::from_millis(2_421)
+        );
+        assert_eq!(
+            FEATURE_QUERY_PATIENCE,
+            std::time::Duration::from_millis(4_842)
+        );
+    }
+
+    /// HEX-INST-2: the listing's bound is its format's own size, every feature's `<name> <state>\r\n`
+    /// line: the 36 bytes jupiter's PowerShell wrote, 20 runs of 20 (2026-11-06, Windows 11 26200), fit
+    /// exactly, and a byte past them is refused rather than read.
+    #[test]
+    fn the_listing_bound_is_the_formats_own_size() {
+        let jupiter = "HypervisorPlatform 1\r\nContainers 1\r\n";
+        assert_eq!(jupiter.len(), 36);
+        assert_eq!(FEATURE_LISTING_MAX, jupiter.len());
+        assert_eq!(features_off(jupiter), Ok(BTreeSet::new()));
+        assert!(features_off(&format!("{jupiter} ")).is_err());
+    }
+
     proptest! {
-        /// HEX-INST-2, hostile input to the parser (CLAUDE.md §6): any bytes, never a panic; what it
-        /// accepts names only features it asked for.
+        /// HEX-INST-2, hostile input to the parser (CLAUDE.md §6): any text up to one byte past the bound
+        /// (so both sides of it are reached), never a panic; what it accepts names only features it asked for.
         #[test]
-        fn the_feature_listing_parser_never_panics(text in "(?s).{0,600}") {
+        fn the_feature_listing_parser_never_panics(text in proptest::string::string_regex(
+            &format!("(?s).{{0,{}}}", FEATURE_LISTING_MAX + 1)
+        ).unwrap()) {
             if let Ok(off) = features_off(&text) {
                 prop_assert!(off.iter().all(|f| WindowsFeature::ALL.contains(f)));
             }

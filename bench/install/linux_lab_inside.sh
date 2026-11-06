@@ -8,24 +8,27 @@ TESTBIN=${2:?node_socket test binary}
 INSTALL=/opt/install/linux.sh
 U=hexlab
 step() { echo; echo "## $*"; }
+# Waits until a command succeeds, at most LAB_BOUND_S (the host systemd's unit start bound, linux_lab.sh).
+# The 0.1 s between tries paces the checks; it bounds nothing.
+wait_until() {
+  local what=$1 until=$((SECONDS + LAB_BOUND_S))
+  shift
+  until "$@"; do
+    [ "$SECONDS" -lt "$until" ] || { echo "FAIL: $what didn't happen within $LAB_BOUND_S s"; return 1; }
+    sleep 0.1
+  done
+}
 
 # docker exec puts this shell in the cgroup namespace's root, where cgroup v2's no-internal-processes
 # rule keeps systemd from handing controllers down: it moves into systemd's own leaf first (once systemd
 # has made it), and systemd enables them when the root is empty.
-for ((i = 0; i < 300; i++)); do [ -d /sys/fs/cgroup/init.scope ] && break; sleep 0.1; done
+wait_until "systemd making init.scope" test -d /sys/fs/cgroup/init.scope
 echo $$ >/sys/fs/cgroup/init.scope/cgroup.procs
 
 step "the machine: $(date -u +%Y-%m-%dT%H:%M:%SZ), $(systemctl --version | head -1), kernel $(uname -r)"
-wait_running() {
-  local i s
-  for ((i = 0; i < 300; i++)); do
-    s=$(systemctl is-system-running 2>/dev/null || true)
-    case $s in running | degraded) echo "systemd: $s"; return 0 ;; esac
-    sleep 0.1
-  done
-  echo "systemd didn't finish starting: $s"; return 1
-}
-wait_running
+running() { case $(systemctl is-system-running 2>/dev/null) in running | degraded) ;; *) return 1 ;; esac; }
+wait_until "systemd finishing its start" running
+echo "systemd: $(systemctl is-system-running)"
 # The image's /etc lacks what Fedora's install makes at enable time from /usr: its system users and
 # the dbus.service aliases (system and user), without which logind, lingering and a user's own
 # systemd-run can't start.
@@ -44,7 +47,7 @@ chown $U: /home/$U
 UID_=$(id -u $U)
 # The user's manager runs before Hex is installed, as a CI runner's does.
 loginctl enable-linger $U
-for ((i = 0; i < 300; i++)); do [ -S /run/user/$UID_/bus ] && break; sleep 0.1; done
+wait_until "$U's manager opening its bus" test -S /run/user/$UID_/bus
 systemctl show user@$UID_.service -p DelegateControllers
 # setpriv, not runuser: the container has no PAM session to give.
 as_user() {
@@ -52,7 +55,7 @@ as_user() {
     HOME=/home/$U "$@"
 }
 # The fact to wait on: the user's manager has finished starting (bounded).
-echo "user manager: $(as_user timeout 30 systemctl --user is-system-running --wait || true)"
+echo "user manager: $(as_user timeout "$LAB_BOUND_S" systemctl --user is-system-running --wait || true)"
 
 step "fresh of Hex: the installer's check lists nothing"
 bash $INSTALL check
@@ -80,16 +83,29 @@ bash $INSTALL install --binary "$HEX" --user $U --dry-run | tee /tmp/plan
 grep -q "^linger " /tmp/plan && { echo "FAIL: the lab's linger isn't install's"; exit 1; }
 
 step "install: the one admin step"
+MANAGER_BEFORE=$(systemctl show -p MainPID --value user@$UID_.service)
 bash $INSTALL install --binary "$HEX" --user $U
-systemctl show user@$UID_.service -p DelegateControllers
 bash $INSTALL check /tmp/plan || true
+
+step "HEX-INST-8: the installed node is up exactly when it serves (Type=notify), no wait of the installer's"
+TYPE=$(systemctl show -p Type --value hex-node@$U.service)
+echo "hex-node@$U.service: Type=$TYPE, start bound $(systemctl show -p TimeoutStartUSec --value hex-node@$U.service)"
+[ "$TYPE" = notify ] || { echo "FAIL: the unit isn't Type=notify"; exit 1; }
+[ -S /run/hex/$U/node.sock ] || { echo "FAIL: install returned before the node served"; exit 1; }
+echo "PASS: up when it serves"
+
+step "HEX-INST-7: install leaves $U's running manager as it was (a CI runner's work runs under it)"
+MANAGER_AFTER=$(systemctl show -p MainPID --value user@$UID_.service)
+echo "user@$UID_.service main pid: $MANAGER_BEFORE before, $MANAGER_AFTER after"
+[ "$MANAGER_BEFORE" = "$MANAGER_AFTER" ] || { echo "FAIL: install restarted $U's manager"; exit 1; }
+echo "PASS: the manager wasn't restarted"
 
 # The node's descriptors at its bounds (330,112) and the four /proc/net files each of up to 66,048 kept
 # network namespaces may hold (cp/t7-ext-s6 crates/hex-node/src/netns.rs, FilesBound: 256 x 2 + 65,536
 # kept, four files each): 330,112 + 264,192.
 NOFILE_NEED=594304
 step "HEX-INST-5: the installed node's soft descriptor limit covers its own and every kept namespace's files"
-NODE_PID=$(as_user systemctl --user show -p MainPID --value hex-node.service)
+NODE_PID=$(systemctl show -p MainPID --value hex-node@$U.service)
 grep "Max open files" /proc/$NODE_PID/limits
 soft=$(awk '/Max open files/ {print $4}' /proc/$NODE_PID/limits)
 if [ "$soft" = unlimited ] || [ "$soft" -ge "$NOFILE_NEED" ]; then
@@ -100,7 +116,7 @@ fi
 
 step "HEX-INST-3: the installed node serves every class to $U with no further step"
 set +e
-as_user env HEX_INSTALLED_SOCKET=/run/user/$UID_/hex/node.sock \
+as_user env HEX_INSTALLED_SOCKET=/run/hex/$U/node.sock \
   "$TESTBIN" an_installed_node_serves_every_class --exact --nocapture --test-threads=1 2>&1 | tail -20
 rc=${PIPESTATUS[0]}
 set -e
