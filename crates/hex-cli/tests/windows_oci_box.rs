@@ -7,8 +7,9 @@
 //!
 //! Runs on Windows with the Containers feature on and an image's layer folders named in
 //! `HEX_WINDOWS_LAYERS` (topmost first, `;`-separated: a matching nanoserver or servercore image's,
-//! e.g. containerd's windows snapshotter folders). Without them it prints SKIP and checks nothing; the
-//! step's recorded run (jupiter) sets them, and its record shows the cases ran.
+//! e.g. containerd's windows snapshotter folders), and a mismatched image's in
+//! `HEX_WINDOWS_MISMATCH_LAYERS` (both written by bench/native/windows/oci_setup.ps1). Without the first
+//! it prints SKIP and checks nothing; the step's recorded run (jupiter) sets them, and a SKIP there fails it.
 #![cfg(target_os = "windows")]
 #![allow(
     clippy::unwrap_used,
@@ -258,30 +259,41 @@ fn a_read_only_mount_refuses_writes(lab: &Lab) {
 }
 
 /// The step's criterion: an image whose version doesn't match the host's is refused by name, before HCS
-/// is asked. Do: make a box from a base layer whose `ntdll.dll` is the host's own (a client's own build
-/// is no Server image's). Expect: create refused as the image, naming both builds, and no box made.
+/// is asked. Do: make a box from the layers in `HEX_WINDOWS_MISMATCH_LAYERS`, an image Microsoft's table
+/// says this host doesn't run (oci_setup.ps1 pulls Server 2019's nanoserver; a client's own `ntdll.dll`
+/// is no mismatch, since Windows 11 25H2's is build 26100, Server 2025's). Expect: create refused as the
+/// image, naming the image's build and the host's, and no box made.
 fn a_mismatched_image_is_refused_by_name(lab: &Lab) {
-    let fake = lab.root.path().join("fake-base");
-    let sys32 = fake.join(r"Files\Windows\System32");
-    std::fs::create_dir_all(&sys32).unwrap();
-    std::fs::copy(r"C:\Windows\System32\ntdll.dll", sys32.join("ntdll.dll")).unwrap();
-    let lab_fake = Lab {
+    let layers: Vec<String> = std::env::var("HEX_WINDOWS_MISMATCH_LAYERS")
+        .expect("HEX_WINDOWS_MISMATCH_LAYERS names a mismatched image's layers (oci_setup.ps1)")
+        .split(';')
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let base = layers.last().expect("a mismatched image's layers");
+    let image = hex_runtime::windows::oci::sys::file_build(&format!(
+        r"{base}\Files\Windows\System32\ntdll.dll"
+    ))
+    .unwrap();
+    let host = hex_runtime::windows::oci::sys::host();
+    assert!(
+        hex_core::hcs::image_runs(host, image).is_err(),
+        "the mismatched image (build {image}) runs on this host ({host:?}): pick another"
+    );
+    let lab_mismatch = Lab {
         bin: lab.bin.clone(),
-        layers: vec![fake.to_str().unwrap().to_owned()],
+        layers,
         root: tempfile::tempdir().unwrap(),
     };
     let rt = lab.runtime();
     let id = BoxId::new("hex-oci-mismatch").unwrap();
-    let got = rt.create(lab_fake.spec(id.clone(), Bounds::default()));
-    // A Windows Server host runs its own build, so only a client's own build is a mismatch to show.
-    if hex_runtime::windows::oci::sys::host().kind == hex_core::hcs::HostKind::Client {
-        match got {
-            Err(hex_api::Refusal::Platform { what, why, .. }) => {
-                assert_eq!(what, "the oci class's image");
-                assert!(why.contains("build"), "{why}");
-            }
-            other => panic!("a client host's own build as an image: {other:?}"),
+    match rt.create(lab_mismatch.spec(id.clone(), Bounds::default())) {
+        Err(hex_api::Refusal::Platform { what, why, .. }) => {
+            assert_eq!(what, "the oci class's image");
+            assert!(why.contains(&image.to_string()), "{why}");
+            assert!(why.contains(&host.build.to_string()), "{why}");
         }
+        other => panic!("a mismatched image (build {image}): {other:?}"),
     }
     assert!(rt.inspect(&id).is_err(), "a refused create made a box");
 }
