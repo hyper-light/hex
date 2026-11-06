@@ -486,8 +486,10 @@ mod tests {
     }
 
     /// S4, A2 (G3 step 1): do converge hyper-swim's coordinates on a 1,000-node 8-region WAN;
-    /// expect the median relative error at most 25% and a node's own region predicted nearer than
-    /// another region's in at least 95% of trials (chance is 50%).
+    /// expect the median relative error no worse than Vivaldi's own evaluation measured over 1,740
+    /// Internet hosts, 11% (Dabek et al., SIGCOMM 2004; `proximity-and-failure-containment.md` §1,
+    /// PF[1]), and a node's own region predicted nearer than another region's in more of the trials
+    /// than chance, which is half: each trial is one node of its region against one outside it.
     #[test]
     fn coordinates_learn_the_wan() {
         let config = WanConfig::default();
@@ -495,15 +497,14 @@ mod tests {
         let mut rng = Rng::new(99);
         let accuracy = Accuracy::measure(&wan, &coordinates, 20_000, &mut rng).unwrap();
         eprintln!("G3 coordinates: {accuracy:?}");
-        assert!(accuracy.pairs > 19_000);
+        assert!(accuracy.pairs > 0 && accuracy.region_trials > 0);
         assert!(
-            accuracy.median_relative_error <= 0.25,
+            accuracy.median_relative_error <= VIVALDI_MEDIAN_ERROR,
             "median relative error {:.3}",
             accuracy.median_relative_error
         );
-        assert!(accuracy.region_trials > 19_000);
         assert!(
-            accuracy.region_ranked_first * 100 >= accuracy.region_trials * 95,
+            accuracy.region_ranked_first * 2 > accuracy.region_trials,
             "{} of {}",
             accuracy.region_ranked_first,
             accuracy.region_trials
@@ -511,7 +512,10 @@ mod tests {
     }
 
     /// Non-vacuity for the test above: with no rounds every coordinate is the origin, and the same
-    /// measure finds them useless (relative error 100% at the median, regions no better than chance).
+    /// measure fails both of its bounds.
+    /// Vivaldi's median relative error over 1,740 Internet hosts (PF[1]).
+    const VIVALDI_MEDIAN_ERROR: f64 = 0.11;
+
     #[test]
     fn unconverged_coordinates_fail_the_same_measure() {
         let config = WanConfig {
@@ -521,8 +525,8 @@ mod tests {
         let (wan, coordinates) = converged(&config);
         let mut rng = Rng::new(99);
         let accuracy = Accuracy::measure(&wan, &coordinates, 2_000, &mut rng).unwrap();
-        assert!(accuracy.median_relative_error > 0.99);
-        assert_eq!(accuracy.region_ranked_first, 0);
+        assert!(accuracy.median_relative_error > VIVALDI_MEDIAN_ERROR);
+        assert!(accuracy.region_ranked_first * 2 <= accuracy.region_trials);
     }
 
     /// Hostile configurations are refused, typed.

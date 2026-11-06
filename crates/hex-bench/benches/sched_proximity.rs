@@ -4,15 +4,16 @@
 //!   cargo bench -p hex-bench --bench sched_proximity
 //!
 //! Every study is 1,000 nodes over Azure's eight regions and 20,000 workloads of Hex's three kinds,
-//! OCI containers, Firecracker microVMs and Shards microVMs (`hex-sim.md` H10): owners drawn by their
-//! launches in G2's recorded workload (`bench/sched/huawei-r5-day30.trace`), kinds by G2's rule (a
-//! kind per owner, in thirds of the launches) and each kind's overhead from that trace (Shards' a
-//! 5 MiB stand-in). Each runs under every policy: blind (the fast path's best fit), proximity
-//! (hyper-swim's coordinates as an upper bound), the tie-break (proximity only among best fit's ties)
-//! and the oracle (the true RTT). It sweeps seeds 1-5, H10's two fleets (every node running all three
-//! kinds, and Hex's Linux, Windows and macOS mix), homes uniform and skewed, 50% and 90% offered load,
-//! and 10 ms, 100 ms and 1 s of compute a round trip. Virtual time: the numbers depend on the seed and
-//! the build, not the host's load.
+//! OCI containers, Firecracker microVMs and Shards microVMs (`hex-sim.md` H10), both drawn from G2's
+//! recorded day: each job one of its launches (owner, kind by G2's rule, and need with its kind's
+//! overhead, Shards' a 5 MiB stand-in), the nodes its node rows repeated. Two fleets, H10's two node
+//! models: `huawei-r5-day30.trace`'s m5d.metal hosts, every one running all three kinds, and
+//! `huawei-r5-day30.fleet.trace`'s, Hex's own Linux, Windows and macOS hosts. Each study runs under
+//! every policy: blind (the fast path's best fit), proximity (hyper-swim's coordinates as an upper
+//! bound), the tie-break (proximity only among best fit's ties) and the oracle (the true RTT). It
+//! sweeps seeds 1-5, both fleets, homes uniform and skewed, 50% and 90% offered load, and 10 ms, 100 ms
+//! and 1 s of compute a round trip. Virtual time: the numbers depend on the seed and the build, not the
+//! host's load.
 // A bench (not production, CLAUDE.md): it takes the test-style allowances, as the other benches do.
 #![allow(
     clippy::unwrap_used,
@@ -26,7 +27,7 @@
 )]
 
 use hex_sim::model::Class;
-use hex_sim::proximity::{CLASSES, Fleet, Homes, Policy, PolicyReport, Study, StudyConfig};
+use hex_sim::proximity::{CLASSES, Homes, Policy, PolicyReport, Study, StudyConfig};
 use hex_sim::replay::{Limits, parse};
 use hex_sim::wan::{Accuracy, WanConfig};
 
@@ -102,24 +103,33 @@ fn gains(blind: &PolicyReport, near: &PolicyReport) -> [(f64, f64); 4] {
 }
 
 fn main() {
-    // G2's recorded workload: its owners (each study draws owners by their launches there, and kinds
-    // by G2's rule) and its kinds' overheads (Shards' a 5 MiB stand-in in it until Shards' is measured).
-    let recorded = parse(
-        include_str!("../../../bench/sched/huawei-r5-day30.trace"),
-        &Limits::default(),
-    )
-    .unwrap();
-    println!(
-        "recorded workload: huawei-r5-day30.trace, {} owners, {} launches; overheads oci {} B, firecracker {} B, shards {} B",
-        recorded.owners.len(),
-        recorded.workloads.len(),
-        recorded.overheads.of(Class::Oci),
-        recorded.overheads.of(Class::Firecracker),
-        recorded.overheads.of(Class::Shards)
-    );
+    // G2's recorded day on each fleet: its launches (owners, kinds, needs with overheads; Shards' a
+    // 5 MiB stand-in until Shards' is measured) and its node rows.
+    let fleets = [
+        (
+            "AllKinds",
+            include_str!("../../../bench/sched/huawei-r5-day30.trace"),
+        ),
+        (
+            "Mixed",
+            include_str!("../../../bench/sched/huawei-r5-day30.fleet.trace"),
+        ),
+    ]
+    .map(|(name, text)| (name, parse(text, &Limits::default()).unwrap()));
+    for (fleet, recorded) in &fleets {
+        println!(
+            "recorded {fleet}: {} node rows, {} owners, {} launches; overheads oci {} B, firecracker {} B, shards {} B",
+            recorded.nodes.len(),
+            recorded.owners.len(),
+            recorded.workloads.len(),
+            recorded.overheads.of(Class::Oci),
+            recorded.overheads.of(Class::Firecracker),
+            recorded.overheads.of(Class::Shards)
+        );
+    }
     // Gains of proximity over blind, per configuration: (goodput %, p99 %), over seeds.
     let mut summary = Vec::new();
-    for fleet in [Fleet::AllKinds, Fleet::Mixed] {
+    for (fleet, recorded) in &fleets {
         for step_ms in [10u64, 100, 1_000] {
             for load in [500u64, 900] {
                 for homes in [Homes::Uniform, Homes::Skewed] {
@@ -135,11 +145,10 @@ fn main() {
                             load_per_mille: load,
                             step_ns: step_ms * 1_000_000,
                             homes,
-                            fleet,
                             seed,
                             ..StudyConfig::default()
                         };
-                        let study = Study::generate(&config, &recorded).unwrap();
+                        let study = Study::generate(&config, recorded).unwrap();
                         let accuracy = Accuracy::measure(
                             &study.wan,
                             &study.coordinates,
@@ -148,7 +157,7 @@ fn main() {
                         )
                         .unwrap();
                         println!(
-                            "== {fleet:?}, step {step_ms} ms, load {load}‰, homes {homes:?}, seed {seed}: horizon {:.1} s, coordinates median error {:.1}%, region ranked first {}/{}",
+                            "== {fleet}, step {step_ms} ms, load {load}‰, homes {homes:?}, seed {seed}: horizon {:.1} s, coordinates median error {:.1}%, region ranked first {}/{}",
                             study.horizon as f64 / 1e9,
                             accuracy.median_relative_error * 100.0,
                             accuracy.region_ranked_first,
@@ -182,7 +191,7 @@ fn main() {
                 })
                 .collect();
             println!(
-                "{fleet:?} step {step_ms:>4} ms load {load}‰ {homes:?} {name:<11}: {}",
+                "{fleet} step {step_ms:>4} ms load {load}‰ {homes:?} {name:<11}: {}",
                 cells.join(" ")
             );
         }
