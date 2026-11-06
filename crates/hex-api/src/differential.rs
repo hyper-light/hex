@@ -651,6 +651,9 @@ mod tests {
     struct TermEnds;
 
     impl Fixture for TermEnds {
+        fn exec_limit(&self) -> Option<crate::ExecLimit> {
+            Some(crate::sim::SIM_EXEC_LIMIT)
+        }
         fn spec(&self, id: BoxId, bounds: crate::Bounds) -> crate::BoxSpec {
             SimFixture::Bundle.spec(id, bounds)
         }
