@@ -135,8 +135,8 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
     (0.160x), 0.103x (0.131x); reuse on 0.107x (0.139x), 0.122x (0.151x), 0.099x (0.152x), 0.108x (0.134x), libcrun's
     create p99.9 3.77 and 3.92 ms.
   - jupiter (2026-11-06, Docker Desktop's WSL2 VM, the same tree), no owner: 0.200x (0.242x), 0.310x (0.489x), 0.208x
-    (0.287x), 0.342x (0.330x): both p99.9 over, as on fedora. Reuse on didn't finish: jupiter's C: drive filled from
-    other writers and Docker Desktop stopped; it waits for space.
+    (0.287x), 0.342x (0.330x): both p99.9 over, as on fedora. Reuse on: 0.200x (0.236x), 0.182x (0.214x), 0.200x
+    (0.265x), 0.166x (0.228x): every in-process cell under, the socket's create+start p50 just over.
   - Open, Ada's: count the bar with an owner, reuse across boxes of no owner, or accept it unmet on 6.19 (fedora's
     no-owner p99.9). Goal 5 lands from this tree on her word.
 - **Goal 5 extended, one integrated tree** (2026-11-04, `cp/t7-g5x-integrate`, not merged). Steps 1 to 6 of goal 5

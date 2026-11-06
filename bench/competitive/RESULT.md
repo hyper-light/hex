@@ -651,12 +651,17 @@ and ran nothing; step 4's own Windows-container dockerd ran beside Docker Deskto
 | no owner (VM load 3.16 to 3.51) | Hex in process | 0.81, 0.200x | 2.00, 0.310x | 0.89, 0.208x | 2.81, 0.342x |
 | | Hex over the socket | 0.98, 0.242x | 3.16, 0.489x | 1.23, 0.287x | 2.71, 0.330x |
 | | libcrun | 4.05 | 6.46 | 4.28 | 8.22 |
+| reuse on (VM load 1.27 to 2.47) | Hex in process | 0.80, 0.200x | 1.42, 0.182x | 0.88, 0.200x | 1.47, 0.166x |
+| | Hex over the socket | 0.94, 0.236x | 1.67, 0.214x | 1.17, 0.265x | 2.02, 0.228x |
+| | libcrun | 3.99 | 7.81 | 4.41 | 8.85 |
 
-Every round's file holds its 10,000 in each phase with no error and none crashed. With no owner, jupiter is as fedora
-is: both p50s under in process, both p99.9s over (and over the socket the create+start p50 too). The reuse-on pass
-didn't finish: jupiter's C: drive, which holds Docker Desktop's VM disk, filled from other writers (5.9 GB free at
-06:00Z, 67 MB at 06:27Z), and Docker Desktop stopped ("Docker Desktop is unable to start") in its first round. Its
-disk wasn't freed for it; reuse on there waits for space.
+Every round's file holds its 10,000 in each phase with no error and none crashed (checked with PowerShell, jupiter
+having no Python). With no owner, jupiter is as fedora is: both p50s under in process, both p99.9s over (and over the
+socket the create+start p50 too). With reuse on, every cell is under in process, and over the socket all but the
+create+start p50 (0.265x). The reuse-on pass ran at 09:15Z (hex sha256 568e107e06b2d915 again): the first try, at
+06:00Z, died when jupiter's C: drive, which holds Docker Desktop's VM disk, filled from other writers (67 MB free at
+06:27Z) and Docker Desktop stopped; its disk wasn't freed. Once the lead had freed room (34.5 GB at 09:12Z, idle build
+folders compressed in place), Docker Desktop was started again and the pass ran with C: at 36 to 38 GB free.
 
 The passes before it, on the way (same method, fedora, noisy; each round read whole): at 6eb38bd (goal 6 merged) no
 owner out/20261105T030924Z 0.286x, 0.191x, 0.255x, 0.251x (libcrun create p99.9 22.15) and reuse on
