@@ -9,7 +9,9 @@
 #   3. with no further step the invoking user's boxes run as pool users: the box-user HEX-RT contract
 #      passes over the installed helper's socket as that ordinary user (HEX-INST-6), the helper is
 #      loaded in launchd's system domain, its socket is root's and hexnode's alone (a user outside
-#      hexnode can't connect), and the pool is listed;
+#      hexnode can't connect), and the pool is listed; and step 2's root checks run against the installed
+#      pool (its C1 membership and its caps, bench/native/macos/boxuser_probe.c), so this one admin run covers
+#      the installer, the pool's growth and step 2's helper together (the lead, 2026-11-06);
 #   4. uninstall leaves nothing of the plan on the machine, listed line by line and by dscl and launchctl
 #      on their own (HEX-INST-7).
 # On any exit before uninstall ran, its EXIT trap uninstalls by the manifest; a watchdog bounds the run.
@@ -69,6 +71,11 @@ HEXBIN=$TARGET/debug/hex
 TESTBIN=$(find "$TARGET/debug/deps" -maxdepth 1 -name 'macos_process_box-*' -type f -perm +111 -print0 |
   xargs -0 ls -t | head -1)
 [ -n "$TESTBIN" ] || { echo "macos_lab: no test binary" >&2; exit 1; }
+# Step 2's root probe (bench/native/macos/boxuser_probe.c), built as the lab user: its membership and cap
+# checks run here against the installed pool, so Ada's one installer run covers step 2's helper too.
+PROBE=$TARGET/boxuser_probe
+as_user cc -O2 -Wall -Wextra -o "$PROBE" "$REPO/bench/native/macos/boxuser_probe.c" ||
+  { echo "macos_lab: probe build failed" >&2; exit 1; }
 
 FAIL=0
 step() { echo; echo "## $*"; }
@@ -108,6 +115,34 @@ outsider_refused() { # a user outside hexnode (nobody) is refused the socket by 
   echo "nobody's connect: $got"
   [ "$got" = "Permission denied" ]
 }
+pool_uid_of() { "$INSTALLED_DSCL" . -read "/Users/$1" UniqueID 2>/dev/null | awk '{print $2}'; }
+INSTALLED_DSCL=/usr/bin/dscl
+# Step 2's C1 (box membership): six members run as the installed pool's first user, one daemonized; the
+# user listing finds all six, RLIMIT_NPROC refuses a seventh in the kernel, and a kill-all leaves none.
+membership_c1() {
+  local uid out
+  uid=$(pool_uid_of _hexbox1)
+  [ -n "$uid" ] || { echo "no _hexbox1"; return 1; }
+  out=$("$PROBE" uid "$uid" 6)
+  echo "$out"
+  grep -q "started 6 members, proc_listpids(PROC_UID_ONLY) found 6" <<<"$out" &&
+    grep -q "bit -> a fork past the cap was refused" <<<"$out" &&
+    grep -q "after delete, 0 processes left" <<<"$out"
+}
+# Step 2's caps: the fatal footprint cap kills at 64 and 256 MiB (SIGKILL), and the soft one notifies
+# (EXC_RESOURCE), as root.
+caps() {
+  local mb out ok=0
+  for mb in 64 256; do
+    out=$("$PROBE" cap fatal "$mb")
+    echo "$out"
+    grep -q "killed by signal 9" <<<"$out" || ok=1
+  done
+  out=$("$PROBE" cap soft 64)
+  echo "$out"
+  grep -q "EXC_RESOURCE after" <<<"$out" || ok=1
+  return "$ok"
+}
 member_connects() { # the lab user, in hexnode, connects
   local got
   got=$(connect_as "$LABUSER")
@@ -141,6 +176,8 @@ echo "$LABUSER's groups (a fresh login): $(as_user id -Gn)"
 expect "$LABUSER (hexnode) connects to the helper's socket" member_connects
 expect "nobody (outside hexnode) is refused the helper's socket" outsider_refused
 expect "the box-user HEX-RT contract passes for $LABUSER over the installed helper (HEX-INST-6)" box_user_contract
+expect "step 2's C1: the installed pool's user holds its members, its cap bites, a kill-all empties it" membership_c1
+expect "step 2's caps: the fatal footprint cap kills at 64 and 256 MiB, the soft one notifies" caps
 expect "the process class still passes HEX-RT-1..9" process_contract
 
 step "4. uninstall"
