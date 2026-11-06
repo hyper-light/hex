@@ -12,13 +12,17 @@ use hex_api::{Bounds, Exit, MIN_MEMORY, Refusal, Signal};
 /// The platform a refusal here names.
 pub const PLATFORM: &str = "windows";
 
+/// The most a job's peak has gone past its commit limit: a job lets a commit that crosses its limit
+/// overshoot it by a bounded amount before it refuses the next, and a sweep of commit steps from 64 KiB to
+/// 256 MiB on jupiter (AMD Ryzen AI MAX+ 395, Windows 11 26200; `bench/native/windows/RESULT.md`, record
+/// `job-events-68e99688-*`) measured at most 1,163,264 bytes (≈1.11 MiB, 284 pages), bounded (it did not
+/// grow with the step past ~1.1 MiB).
+pub const LARGEST_RECORDED_OVERSHOOT: u64 = 1_163_264;
+
 /// How far under the box's memory bound Hex sets the job's commit limit, so the job's peak stays at or
-/// below the bound. A job lets a commit that crosses its limit overshoot it by a bounded amount before
-/// it refuses the next: a sweep of commit steps from 64 KiB to 256 MiB on jupiter (AMD Ryzen AI MAX+
-/// 395, Windows 11 26200; `bench/native/windows/RESULT.md`, record `job-events-68e99688-*`) measured
-/// the peak at most 1,163,264 bytes (≈1.11 MiB) over the limit, the overshoot bounded (it did not grow
-/// with the step past ~1.1 MiB), so 2 MiB holds the peak under the bound with headroom (CLAUDE.md §5).
-pub const OVERSHOOT_MARGIN: u64 = 2 << 20;
+/// below the bound: twice the largest overshoot recorded, the ×2 the false-alarm margin Hex sets every
+/// tolerance past a measured effect by (CLAUDE.md §5).
+pub const OVERSHOOT_MARGIN: u64 = LARGEST_RECORDED_OVERSHOOT.saturating_mul(2);
 
 /// How far under the job's commit limit Hex sets its memory notification, so the box learns through the
 /// class Windows guarantees (`JobObjectNotificationLimitInformation`) that it reached its bound: a
