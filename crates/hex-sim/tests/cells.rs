@@ -234,34 +234,39 @@ fn steady(seed: u64, nodes: u32, workloads: u64, model: NodeModel) -> Cluster {
 }
 
 /// Each class's capacity, measured: `steady`'s workloads on `nodes` nodes of `model`, through
-/// `topology`, offered 100 a node (more of every class than fits: an m5d.metal node holds about 40 of
-/// them all told), and the placements of each class counted. Each drill's size is set from this, so
-/// "room" and "tight" are what the model's nodes hold, not a guess.
+/// `topology`, offered in a quantity that doubles, from one a node, until every class has work left
+/// waiting (so each is saturated, seen rather than assumed), and the placements of each class
+/// counted then. Each drill's size is set from this, so "room" and "tight" are what the model's
+/// nodes hold, not a guess. At most 12 doublings (4,096 a node).
 fn capacity(model: NodeModel, nodes: u32, topology: Topology) -> [u64; 3] {
-    let cluster = steady(99, nodes, 100 * u64::from(nodes), model);
     let config = Config {
-        max_events: 1 << 24,
+        max_events: 1 << 25,
         ..Config::default()
     };
-    let out = federation::run(&cluster, &fed(topology, config, Loss::None)).unwrap();
-    let mut placed = [0u64; 3];
-    for c in &out.cells {
-        for (k, w) in c.cluster.workloads.iter().enumerate() {
-            let id = WorkloadId(u64::try_from(k).unwrap());
-            if matches!(
-                c.run.store.record(id).map(|r| r.state),
-                Some(State::Placed(_))
-            ) {
-                placed[at(w.class)] += 1;
+    let mut offer = u64::from(nodes);
+    for _ in 0..=12 {
+        let cluster = steady(99, nodes, offer, model);
+        let out = federation::run(&cluster, &fed(topology, config, Loss::None)).unwrap();
+        let (mut placed, mut waiting) = ([0u64; 3], [0u64; 3]);
+        for c in &out.cells {
+            for (k, w) in c.cluster.workloads.iter().enumerate() {
+                let id = WorkloadId(u64::try_from(k).unwrap());
+                match c.run.store.record(id).map(|r| r.state) {
+                    Some(State::Placed(_)) => placed[at(w.class)] += 1,
+                    Some(State::Pending) => waiting[at(w.class)] += 1,
+                    _ => {}
+                }
             }
         }
+        if waiting.iter().all(|&w| w > 0) {
+            return placed;
+        }
+        offer *= 2;
     }
-    assert!(
-        placed.iter().all(|&p| p > 0),
-        "{placed:?} on {}",
+    panic!(
+        "{} didn't saturate every class at 4,096 workloads a node",
         model.name()
     );
-    placed
 }
 
 /// Three regions of two cells, the region drills' topology.

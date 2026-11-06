@@ -1,6 +1,6 @@
 //! AC-T7.11.3's cluster, on both sides of the comparison (`docs/design/hex-sim.md` H63, H69,
 //! `bench/sched/kube_scheduler_kwok.md`): 10,000 nodes of one of G2's node models, each with
-//! `scheduler_perf`'s 110-pod limit, and 50,000 of its pause pods (100m CPU, 500Mi). The model is
+//! a pod limit from its own capacity, and 50,000 of its pause pods (100m CPU, 500Mi). The model is
 //! `m5d` (EC2 m5d.metal, 48 cores and 384 GiB, every class; the main one) or `fleet` (Hex's fleet's ten
 //! hosts repeated in G2's order, beside it).
 //!
@@ -28,7 +28,7 @@
 //! with `Scorer::HEX`, H11; kube-scheduler's floors
 //! of 100 nodes or 5%), the compare-and-set commit (`Store::apply`) and the index update, in submit
 //! order. The time runs from the first shard starting to the last one ending. After each run
-//! (untimed) every record must be placed, and no node above its capacity or its 110 pods.
+//! (untimed) every record must be placed, and no node above its capacity or its pod limit.
 // An example (not production, CLAUDE.md): it takes the test-style allowances, as the benches do.
 #![allow(
     clippy::unwrap_used,
@@ -57,7 +57,6 @@ use hex_sim::store::{Outcome, State, Store, Write};
 
 const NODES: u32 = 10_000;
 const PODS: u64 = 50_000;
-const MAX_PODS: u64 = 110;
 const MIB: u64 = 1 << 20;
 /// `scheduler_perf`'s pause pod: 100m CPU, 500Mi.
 const POD: Resources = Resources {
@@ -65,6 +64,20 @@ const POD: Resources = Resources {
     mem_bytes: 500 * MIB,
     gpus: 0,
 };
+/// A node's pod limit, from its own capacity: how many of the pause pod, with the largest class
+/// overhead, its CPU and its memory hold. Both sides keep to it: kube-scheduler as the kwok node's
+/// `pods` capacity, Hex in `check`. (Kubernetes' own default is 110, a copied number; this one is
+/// the node's.)
+fn max_pods(node: &NodeSpec) -> u64 {
+    let o = generate::overheads();
+    let most = [Class::Oci, Class::Firecracker, Class::Shards]
+        .iter()
+        .map(|&c| o.of(c))
+        .max()
+        .unwrap_or(0);
+    (node.capacity.cpu_milli / POD.cpu_milli).min(node.capacity.mem_bytes / (POD.mem_bytes + most))
+}
+
 fn model(name: &str) -> NodeModel {
     match name {
         "m5d" => NodeModel::M5dMetal,
@@ -113,8 +126,10 @@ fn manifests(out: &Path, files: u32, model: NodeModel) {
         let f = &mut w[i % files as usize];
         let name = format!("kwok-node-{}", node.id.0);
         let r = format!(
-            "\n    cpu: {}m\n    memory: \"{}\"\n    pods: \"{MAX_PODS}\"",
-            node.capacity.cpu_milli, node.capacity.mem_bytes
+            "\n    cpu: {}m\n    memory: \"{}\"\n    pods: \"{}\"",
+            node.capacity.cpu_milli,
+            node.capacity.mem_bytes,
+            max_pods(node)
         );
         let classes: String = CLASSES
             .iter()
@@ -305,7 +320,7 @@ fn check(p: &Placed) -> Result<(), String> {
         u.1 += 1;
     }
     for (node, (u, pods)) in p.shard.nodes.iter().zip(&used) {
-        if !node.capacity.holds(u) || *pods > MAX_PODS {
+        if !node.capacity.holds(u) || *pods > max_pods(node) {
             return Err(format!("{:?} holds {u:?} in {pods} pods", node.id));
         }
     }

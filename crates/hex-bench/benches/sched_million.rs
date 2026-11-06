@@ -8,10 +8,9 @@
 //! (`generate::NodeModel`). Row `pods` is 1,000,000 of `scheduler_perf`'s pause pod, 100m and 500Mi
 //! (a fifth of the m5d.metal nodes' CPU). On the fleet a million don't fit (its Linux and Windows
 //! hosts can't hold the OCI and Firecracker thirds), so the fleet's row reports what each class placed,
-//! not the bar. Row `mixed` draws each need uniformly
-//! from 1-199m and 1-999 MiB (the same means, so the same budget) and its kind as hex-sim's generator
-//! does (40% plain, 25% builds, 15% benchmarks, 20% sessions), so H9's filters run and a one-class
-//! best case never stands alone.
+//! not the bar. Row `mixed` draws each need from G2's recorded Huawei Cloud day
+//! (`huawei-r5-day30.trace`), scaled so its means are the pod's (the same budget), so a one-shape best
+//! case never stands alone (`recorded_needs`).
 //!
 //! The control plane is sharded as H60 decides, by hex-sim's own `sim::Layout`: the nodes are split
 //! into `slices` contiguous ranges, and each workload is routed to the first slice, from slice
@@ -72,8 +71,47 @@ enum Row {
     Mixed,
 }
 
+/// The mixed row's needs: the recorded day's launches (`bench/sched/huawei-r5-day30.trace`, G2's
+/// Huawei Cloud day), each less its recorded class overhead, with CPU and memory scaled so their means
+/// are the pause pod's. The day's own means (722m, 669 MiB) times a million exceed what 10,000
+/// m5d.metal nodes hold, which AC-T7.11.2 fixes; the scale keeps the day's spread of shapes at the
+/// pod's fill. Its launches are all plain, so the row is too.
+fn recorded_needs() -> Vec<Resources> {
+    let path = format!(
+        "{}/../../bench/sched/huawei-r5-day30.trace",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let text = std::fs::read_to_string(path).unwrap();
+    let day = hex_sim::replay::parse(&text, &hex_sim::replay::Limits::default()).unwrap();
+    let raw: Vec<(u64, u64)> = day
+        .workloads
+        .iter()
+        .map(|w| {
+            (
+                w.need.cpu_milli,
+                w.need.mem_bytes - day.overheads.of(w.class),
+            )
+        })
+        .collect();
+    let n = raw.len() as u128;
+    let cpu_mean = raw.iter().map(|r| u128::from(r.0)).sum::<u128>() / n;
+    let mem_mean = raw.iter().map(|r| u128::from(r.1)).sum::<u128>() / n;
+    raw.iter()
+        .map(|&(c, m)| Resources {
+            cpu_milli: ((u128::from(c) * 100 / cpu_mean) as u64).max(1),
+            mem_bytes: ((u128::from(m) * u128::from(500 * MIB) / mem_mean) as u64).max(1),
+            gpus: 0,
+        })
+        .collect()
+}
+
 fn workloads(row: Row, seed: u64) -> Vec<WorkloadSpec> {
     let mut rng = Rng::new(seed);
+    let recorded = if row == Row::Mixed {
+        recorded_needs()
+    } else {
+        Vec::new()
+    };
     let work = (0..WORKLOADS)
         .map(|id| {
             let (need, kind) = match row {
@@ -86,18 +124,8 @@ fn workloads(row: Row, seed: u64) -> Vec<WorkloadSpec> {
                     Kind::Plain,
                 ),
                 Row::Mixed => {
-                    let need = Resources {
-                        cpu_milli: rng.range(1, 199),
-                        mem_bytes: rng.range(1, 999) * MIB,
-                        gpus: 0,
-                    };
-                    let kind = match rng.range(0, 999) {
-                        0..400 => Kind::Plain,
-                        400..650 => Kind::Build,
-                        650..800 => Kind::Benchmark,
-                        _ => Kind::Session,
-                    };
-                    (need, kind)
+                    let at = rng.range(0, recorded.len() as u64 - 1) as usize;
+                    (recorded[at], Kind::Plain)
                 }
             };
             WorkloadSpec {
