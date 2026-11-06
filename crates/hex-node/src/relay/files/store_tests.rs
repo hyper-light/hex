@@ -228,28 +228,26 @@ fn room(n: u64, block: u64) -> Free {
     }
 }
 
-/// HEX-GUEST-14 (§4a; HEX-GUEST-22's 2x records): a stage once released is cache, so the store admits it only
-/// while what stays free holds a stage as large as the largest yet (`need`) and as large as this one so far
-/// (at f823255 grafana's first stage, nothing learned, admitted all of itself and alpine was refused); and
-/// what a stage has taken is the file system's own drop in free room, not its files' bytes (at 899f086 a
-/// tmpfs's whole pages per file made grafana's 17834 entries take more than their bytes, the room it needed
-/// was undercounted, and its create hit ENOSPC). Free 100 when the stage began:
-/// - now 100, an entry of 40: expect it admitted (60 left holds 40); of 60: not (40 can't hold 60);
-/// - now 100, 70 learned: an entry of 40 not (60 can't hold 70), of 20 yes (80 holds 70);
-/// - now 50, though the stage's files hold far fewer bytes, an entry of 1: not (49 left can't hold the 51
-///   this stage has taken).
+/// HEX-GUEST-14 (§4a; HEX-GUEST-22's records): the store admits an entry only while what its file system has
+/// free now, less the entry, still holds the largest stage learned (`need`, the most a stage has taken of
+/// the file system, so a tmpfs's whole pages count: at 899f086 counting bytes undercounted grafana and its
+/// create hit ENOSPC). It leaves nothing more: at 0edcefd it also left room for a stage as large as the one
+/// under way, which held the cache to half the room, so with room for every image grafana never cached whole
+/// (4x: 1.8-2.5 s a round against 2 ms); a guest's first stage, nothing learned, is admitted whole, and a
+/// next create it crowds is the last resort's (`room`). Free now 100:
+/// - nothing learned: an entry of 60 admitted (40 left);
+/// - 70 learned: an entry of 40 not (60 can't hold 70), of 20 yes (80 holds 70);
+/// - 50 free now, 49 learned: an entry of 2 not (48 can't hold 49).
 #[test]
-fn the_store_leaves_room_for_a_stage_as_large_as_the_one_under_way() {
-    let begin = room(100, 1);
+fn the_store_leaves_the_room_the_largest_stage_learned_needs() {
     let entry = |n| Spend {
         entries: n,
         bytes: n,
     };
-    assert!(admits(begin, room(100, 1), entry(40), Spend::default()));
-    assert!(!admits(begin, room(100, 1), entry(60), Spend::default()));
-    assert!(!admits(begin, room(100, 1), entry(40), entry(70)));
-    assert!(admits(begin, room(100, 1), entry(20), entry(70)));
-    assert!(!admits(begin, room(50, 1), entry(1), Spend::default()));
+    assert!(admits(room(100, 1), entry(60), Spend::default()));
+    assert!(!admits(room(100, 1), entry(40), entry(70)));
+    assert!(admits(room(100, 1), entry(20), entry(70)));
+    assert!(!admits(room(50, 1), entry(2), entry(49)));
 }
 
 /// HEX-GUEST-14 (§4a): an entry's room is its bytes in whole blocks of its file system (a tmpfs page, a block),

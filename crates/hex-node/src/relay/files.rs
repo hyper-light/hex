@@ -915,7 +915,7 @@ impl Stage {
         if layer.store.is_none() {
             return Ok(());
         }
-        if admits(self.free, free(&self.staged)?, entry, self.need) {
+        if admits(free(&self.staged)?, entry, self.need) {
             return Ok(());
         }
         let (Some(pending), Some(dir)) = (layer.store.take(), self.layers.as_ref()) else {
@@ -1163,12 +1163,10 @@ impl Stage {
             .ok_or_else(|| invalid("a layer out of the stage's list".to_owned()))?;
         self.seq = self.seq.saturating_add(1);
         let admitted = match digest {
-            Some(d) if admits(self.free, free(&self.staged)?, Spend::default(), self.need) => {
-                Some(Pending {
-                    partial: format!("{PARTIAL}{}-{}-{d}", std::process::id(), self.seq),
-                    digest: d,
-                })
-            }
+            Some(d) if admits(free(&self.staged)?, Spend::default(), self.need) => Some(Pending {
+                partial: format!("{PARTIAL}{}-{}-{d}", std::process::id(), self.seq),
+                digest: d,
+            }),
             Some(_) | None => None,
         };
         let (parent, name) = match &admitted {
@@ -1409,14 +1407,13 @@ impl Stage {
 }
 
 /// Whether the store may take a stage's next `entry`: what its file system has free `now`, less the entry,
-/// still holds a stage as large as the largest yet (`need`) and as large as this one so far with the entry
-/// (what's free fell by since it began, `begin`), since this one, released, is cache too: so the next create
-/// always finds the room it needs without evicting. What a stage has taken is the file system's own count,
-/// not its files' bytes: a tmpfs charges whole pages a file.
-fn admits(begin: Free, now: Free, entry: Spend, need: Spend) -> bool {
-    let taken = taken(begin, now).plus(entry);
-    now.entries.saturating_sub(entry.entries) >= need.entries.max(taken.entries)
-        && now.bytes.saturating_sub(entry.bytes) >= need.bytes.max(taken.bytes)
+/// still holds the largest stage learned (`need`, what a stage has taken of the file system, not its files'
+/// bytes: a tmpfs charges whole pages a file), so the next create finds the room it needs without evicting.
+/// A stage larger than any learned, and a guest's first, can still crowd the next: that one's is the last
+/// resort ([`Stage::room`]), once, and it raises what's learned.
+fn admits(now: Free, entry: Spend, need: Spend) -> bool {
+    now.entries.saturating_sub(entry.entries) >= need.entries
+        && now.bytes.saturating_sub(entry.bytes) >= need.bytes
 }
 
 /// What a file system's free room fell by between `begin` and `now`.

@@ -315,9 +315,10 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
       grafana create (480 MB of blobs at 500-560 MB/s on a Mac Studio, sha2 0.10.9), the lead's rule after it.
     - **Admission, eviction only as a last resort:** the store admits a layer only into room already free: it
       leaves free the most entries and bytes one stage has taken of the file system (`.layers/.need`, the drop
-      in its free room across a stage, learned at each stage's end, rising only), and as much as the stage
-      under way has taken, since it too is cache once its box is released (the first stage of a guest,
-      nothing learned yet, took all its tmpfs's room before this, and the next create was refused). What's
+      in its free room across a stage, learned at each stage's end, rising only), and no more: leaving room
+      for a stage as large as the one under way too (0edcefd) held the cache to half the room, and with room
+      for every image grafana never cached whole. A guest's first stage, nothing learned, is admitted whole;
+      a next create it crowds is the last resort's, below, once. What's
       free is the file system's own count (fstatvfs(2) at each entry), and an entry is charged its bytes in
       whole blocks: a tmpfs charges whole pages a file, so counting bytes undercounted grafana's 17834 entries
       and its create hit `ENOSPC`. A layer that would cut into that room, even part way, goes into the box
