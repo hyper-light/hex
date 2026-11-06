@@ -258,7 +258,8 @@ fn a_box_takes_a_named_signal() {
 /// expect each wait to return when the program ends, never at the wait's budget. XNU posts a child's
 /// `NOTE_EXIT` before it is a zombie (`bsd/kern/kern_exit.c:2594-2595`, then `p_stat = SZOMB` at :2664),
 /// so a reap made on the event can find nothing yet; the native bench saw 3 of 60 such ends reported 60 s
-/// late (bench/native/macos/RESULT.md).
+/// late (bench/native/RESULT.md). Sixty runs, from that measured rate: without the fix 3/60, 7/60 and 3/60
+/// missed, at least 5%, so sixty runs see none with probability at most 0.95^60 = 4.6%.
 #[test]
 fn a_programs_end_is_seen_when_it_ends_not_at_the_waits_budget() {
     let rt = runtime();

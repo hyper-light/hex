@@ -629,9 +629,15 @@ mod tests {
                 ran: std::sync::Mutex::default(),
             };
             let s = SCENARIOS.iter().find(|s| s.id == scenario).unwrap();
-            let quick = Duration::from_millis(50);
-            let why =
-                differ(&liar, &SimFixture::Process, &SimFixture::Process, s, quick).unwrap_err();
+            // The simulator answers each call at once, so no reading needs to wait: no patience at all.
+            let why = differ(
+                &liar,
+                &SimFixture::Process,
+                &SimFixture::Process,
+                s,
+                Duration::ZERO,
+            )
+            .unwrap_err();
             assert!(why.contains(step), "{lie:?}: {why}");
         }
     }
