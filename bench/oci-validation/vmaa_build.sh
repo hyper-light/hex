@@ -53,7 +53,9 @@ mount -t securityfs securityfs /sys/kernel/security
 modprobe 9pnet_virtio 2>/dev/null; modprobe 9p 2>/dev/null
 mkdir -p /opt/lab /job
 mount -t 9p -o trans=virtio,version=9p2000.L,ro lab /opt/lab
-mount -t 9p -o trans=virtio,version=9p2000.L,msize=1048576 job /job
+# msize 512000: the virtio-9p transport maximum, PAGE_SIZE (4,096 on x86_64) x (VIRTQUEUE_NUM 128 - 3) (Linux v7.2
+# net/9p/trans_virtio.c:38, :807); the client limits any larger msize to it (net/9p/client.c:900).
+mount -t 9p -o trans=virtio,version=9p2000.L,msize=512000 job /job
 echo "apparmor enabled: $(cat /sys/module/apparmor/parameters/enabled)"
 apparmor_parser -r -W /etc/apparmor.d/hex-lab/acme_secure_profile && echo "loaded acme_secure_profile"
 export HEX_LSM_APPARMOR_PROFILE=acme_secure_profile
