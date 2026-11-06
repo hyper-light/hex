@@ -56,6 +56,7 @@ impl Drop for Turn<'_> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         held.boxes.remove(&self.id);
+        held.patience.answered(self.since.elapsed());
         drop(held);
         self.turns.free.notify_all();
     }
@@ -93,6 +94,7 @@ impl Turns {
                 d.saturating_duration_since(Instant::now())
             });
             if left.is_zero() {
+                held.patience.expired();
                 return Err(Refusal::Os {
                     op: self.op,
                     why: format!(
