@@ -89,8 +89,11 @@ Must "docker pull"
 function Layers([string]$ns, [string]$img, [string]$file, [string]$name) {
     $ls = (& ctr -a $Ctrd -n $ns snapshots --snapshotter windows ls)
     Must "ctr snapshots ls"
-    $top = $ls | Select-String -Pattern "Committed" | ForEach-Object { ($_ -split '\s+')[0] }
-    $parents = $ls | ForEach-Object { ($_ -split '\s+')[1] }
+    # Only committed snapshots count: an active one (a container's scratch) names the image's head as its
+    # parent too, and would hide it.
+    $committed = $ls | Select-String -Pattern "Committed"
+    $top = $committed | ForEach-Object { ($_ -split '\s+')[0] }
+    $parents = $committed | ForEach-Object { ($_ -split '\s+')[1] }
     $head = $top | Where-Object { $parents -notcontains $_ } | Select-Object -First 1
     $key = "hex-native-s4-layers"
     cmd /c "ctr -a $Ctrd -n $ns snapshots --snapshotter windows rm $key 2>nul"
