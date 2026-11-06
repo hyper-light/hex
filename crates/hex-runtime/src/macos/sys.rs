@@ -582,7 +582,8 @@ impl Kqueue {
 
     fn watch_with(&self, pids: &[i32], tag: u64, fflags: u32) -> io::Result<Vec<i32>> {
         let mut gone = Vec::new();
-        for chunk in pids.chunks(64) {
+        // One registration call per EVENTS processes: the same batch the waits take.
+        for chunk in pids.chunks(EVENTS) {
             let changes: Vec<libc::kevent> = chunk
                 .iter()
                 .filter_map(|pid| usize::try_from(*pid).ok())
