@@ -43,7 +43,7 @@ use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio as Std};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use hex_api::conformance::{self, Act, Fixture};
 use hex_api::{
@@ -1732,12 +1732,12 @@ fn zombies_of(agent: i32) -> Vec<String> {
 }
 
 fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = Instant::now() + conformance::PATIENCE;
-    while Instant::now() < deadline {
+    let deadline = Instant::now().checked_add(conformance::PATIENCE);
+    while deadline.is_none_or(|d| Instant::now() < d) {
         if cond() {
             return;
         }
-        std::thread::park_timeout(Duration::from_millis(10));
+        std::thread::yield_now();
     }
     panic!("timed out waiting for {what}");
 }

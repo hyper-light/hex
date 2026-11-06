@@ -53,9 +53,19 @@ pub struct Failure {
     pub why: String,
 }
 
-/// Longest a case waits for a program it expects to end: a bound on a wait for a fact, so a
-/// runtime that never reports an end fails the case instead of hanging the suite.
-pub const PATIENCE: Duration = Duration::from_secs(60);
+/// The slowest recorded end of a program the suites wait for: a container's exec of `true`, from its
+/// exec to its end. MEASURING: the record to come is `bench/competitive/probes/waits_census.md`'s
+/// `lifecycle.exec` row (seam_oci's lifecycle phase in the census's tmpfs arm, its max), which then
+/// sets this (decision 9; the lead's rule of 2026-11-06 for test patiences).
+pub const PROGRAM_END: Option<Duration> = None;
+
+/// Longest a case waits for a program it expects to end: twice [`PROGRAM_END`], so a runtime that
+/// never reports an end fails the case instead of hanging the suite. While it is measuring, the longest
+/// a `Duration` holds: a deadline from it is none (`Instant::checked_add`), and the wait is the fact's.
+pub const PATIENCE: Duration = match PROGRAM_END {
+    Some(slowest) => slowest.saturating_mul(2),
+    None => Duration::MAX,
+};
 /// How long a case watches a program it expects to keep running.
 pub const STILL_RUNNING: Duration = Duration::from_millis(200);
 

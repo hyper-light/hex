@@ -747,12 +747,12 @@ fn procs(cg: &Path) -> Vec<u32> {
 /// marks changed (`POLLPRI`) when the cgroup is populated (cgroup-v2.rst, "cgroup.events"); whatever it holds
 /// at `patience`'s end, perhaps none.
 fn populated_within(cg: &Path, patience: Duration) -> Vec<u32> {
-    let deadline = Instant::now() + patience;
+    let deadline = Instant::now().checked_add(patience);
     loop {
         // Opened before the read, so a change after the read is seen by the poll.
         let events = std::fs::File::open(cg.join("cgroup.events")).unwrap();
         let now = procs(cg);
-        let left = deadline.saturating_duration_since(Instant::now());
+        let left = deadline.map_or(patience, |d| d.saturating_duration_since(Instant::now()));
         if !now.is_empty() || left.is_zero() {
             return now;
         }
@@ -1045,8 +1045,10 @@ fn a_box_of_no_owner_is_made_by_an_init_parked_in_a_cgroup_made_ahead(lab: &Lab,
         .unwrap()
         .to_path_buf();
     node.delete(&n1).unwrap();
-    let deadline = Instant::now() + PATIENCE;
-    while node.cgroup_reuse().unwrap().ahead.ready == 0 && Instant::now() < deadline {
+    let deadline = Instant::now().checked_add(PATIENCE);
+    while node.cgroup_reuse().unwrap().ahead.ready == 0
+        && deadline.is_none_or(|d| Instant::now() < d)
+    {
         std::thread::yield_now();
     }
     let before = node.cgroup_reuse().unwrap();
@@ -1184,7 +1186,7 @@ fn recovery_removes_an_init_parked_by_a_node_that_crashed(lab: &Lab, own: &Path)
     assert!(!slot.exists(), "recovery removed the idle slot");
     let mut fds = [PollFd::new(&init, PollFlags::IN)];
     let patience = Timespec {
-        tv_sec: i64::try_from(PATIENCE.as_secs()).unwrap(),
+        tv_sec: i64::try_from(PATIENCE.as_secs()).unwrap_or(i64::MAX),
         tv_nsec: 0,
     };
     let _ = rustix::event::poll(&mut fds, Some(&patience));
@@ -2187,12 +2189,12 @@ fn soft_limit(soft: u64) -> Option<LimitPutBack> {
 }
 
 fn wait_for(mut cond: impl FnMut() -> bool, what: &str) {
-    let deadline = Instant::now() + PATIENCE;
-    while Instant::now() < deadline {
+    let deadline = Instant::now().checked_add(PATIENCE);
+    while deadline.is_none_or(|d| Instant::now() < d) {
         if cond() {
             return;
         }
-        std::thread::park_timeout(Duration::from_millis(10));
+        std::thread::yield_now();
     }
     panic!("timed out waiting for {what}");
 }

@@ -1016,9 +1016,12 @@ mod tests {
     /// Waits for `fact`, giving the CPU up between looks rather than sleeping a picked period, for at most
     /// [`PATIENCE`], the longest a case waits for a fact: past it the test fails naming `what`.
     fn until(what: &str, mut fact: impl FnMut() -> bool) {
-        let deadline = Instant::now() + PATIENCE;
+        let deadline = Instant::now().checked_add(PATIENCE);
         while !fact() {
-            assert!(Instant::now() < deadline, "no {what} within {PATIENCE:?}");
+            assert!(
+                deadline.is_none_or(|d| Instant::now() < d),
+                "no {what} within {PATIENCE:?}"
+            );
             std::thread::yield_now();
         }
     }

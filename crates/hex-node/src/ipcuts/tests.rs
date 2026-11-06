@@ -11,8 +11,8 @@ use std::time::Instant;
 /// [`PATIENCE`], the longest a case waits for a fact: a thread that never makes it true fails the test instead
 /// of hanging it.
 fn wait_for(what: &str, mut fact: impl FnMut() -> bool) {
-    let deadline = Instant::now() + PATIENCE;
-    while Instant::now() < deadline {
+    let deadline = Instant::now().checked_add(PATIENCE);
+    while deadline.is_none_or(|d| Instant::now() < d) {
         if fact() {
             return;
         }

@@ -320,8 +320,8 @@ fn sweep(box_root: &Path) {
 }
 
 fn wait_for(mut fact: impl FnMut() -> bool, what: &str) {
-    let deadline = Instant::now() + PATIENCE;
-    while Instant::now() < deadline {
+    let deadline = Instant::now().checked_add(PATIENCE);
+    while deadline.is_none_or(|d| Instant::now() < d) {
         if fact() {
             return;
         }

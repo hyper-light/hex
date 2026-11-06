@@ -238,9 +238,12 @@ mod tests {
         let took = Instant::now();
         std::thread::scope(|s| {
             let waiter = s.spawn(|| turns.take(&id("a")).map(drop));
-            let deadline = Instant::now() + hex_api::conformance::PATIENCE;
+            let deadline = Instant::now().checked_add(hex_api::conformance::PATIENCE);
             while turns.waited() == 0 || took.elapsed() < Duration::from_millis(30) {
-                assert!(Instant::now() < deadline, "the second take never waited");
+                assert!(
+                    deadline.is_none_or(|d| Instant::now() < d),
+                    "the second take never waited"
+                );
                 std::thread::yield_now();
             }
             drop(held);

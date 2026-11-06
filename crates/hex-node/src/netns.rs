@@ -42,6 +42,10 @@ pub struct Netns {
     kept: Option<Keeping>,
 }
 
+/// How long the refill thread's make of a network namespace takes: no wait in the node is bounded by it, but the
+/// waits census records it here (`waits_census.md`'s `netns.make` row), which seeds the netns tests' patience.
+static MAKES: hex_core::patience::Patience = hex_core::patience::Patience::measuring("netns.make");
+
 /// How many threads check the namespaces given back. With one, [`netcheck::check`] took 127 to 131 us a
 /// namespace at concurrency 32 on fedora, so it checked at most about 7,700 a second while that concurrency gave
 /// back 8,364, and 12% of its boxes found none of their owner's idle and were given a fresh one
@@ -816,10 +820,14 @@ fn refill(shared: &Shared) {
         }
         // Made with the lock let go, so a take never waits on a make.
         drop(pool);
+        let began = std::time::Instant::now();
         let made = match &home {
             Ok(home) => net::make_ahead(home.as_fd()),
             Err(e) => Err(e.clone()),
         };
+        if made.is_ok() {
+            MAKES.answered(began.elapsed());
+        }
         let Ok(mut pool) = shared.pool.lock() else {
             return;
         };

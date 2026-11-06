@@ -12,9 +12,17 @@ use hex_api::sim::SimRuntime;
 use hex_api::{Bounds, BoxInfo, BoxSpec, ClassSpec, Signal as HexSignal, Usage};
 use hex_client::Client;
 
-/// Longest a test waits for a fact it needs: a bound, so a server that never makes it true fails the
-/// test instead of hanging it.
-const PATIENCE: Duration = Duration::from_secs(30);
+/// The slowest recorded answer of the server to a call over its socket. MEASURING: the record to come is
+/// `bench/competitive/probes/waits_census.md`'s `client.answer.inspect` row (the census's rtt phase), which
+/// then sets this (the lead's rule of 2026-11-06 for test patiences).
+const ANSWER_RECORDED: Option<Duration> = None;
+
+/// Longest a test waits for the server's next message or a gate's change: twice [`ANSWER_RECORDED`], so a
+/// server that never makes it true fails the test instead of hanging it; unbounded while measuring.
+const PATIENCE: Duration = match ANSWER_RECORDED {
+    Some(slowest) => slowest.saturating_mul(2),
+    None => Duration::MAX,
+};
 
 /// Shuts a host's inspect until opened: holds calls in flight on purpose.
 #[derive(Default)]
@@ -30,9 +38,9 @@ impl Gate {
     }
 
     fn pass(&self) {
-        let deadline = Instant::now() + PATIENCE;
+        let deadline = Instant::now().checked_add(PATIENCE);
         let mut shut = self.shut.lock().unwrap();
-        while *shut && Instant::now() < deadline {
+        while *shut && deadline.is_none_or(|d| Instant::now() < d) {
             shut = self.opened.wait_timeout(shut, PATIENCE).unwrap().0;
         }
     }
@@ -199,7 +207,7 @@ fn send_raw(fd: &OwnedFd, bytes: &[u8], fds: &[BorrowedFd<'_>]) {
 fn answer_of(fd: &OwnedFd) -> (Header, Answer) {
     let mut fds = [PollFd::new(fd, PollFlags::IN)];
     let ts = Timespec {
-        tv_sec: i64::try_from(PATIENCE.as_secs()).unwrap(),
+        tv_sec: i64::try_from(PATIENCE.as_secs()).unwrap_or(i64::MAX),
         tv_nsec: 0,
     };
     assert_eq!(
@@ -242,10 +250,13 @@ fn b() -> BoxId {
 }
 
 fn wait_until(what: &str, mut fact: impl FnMut() -> bool) {
-    let deadline = Instant::now() + PATIENCE;
+    let deadline = Instant::now().checked_add(PATIENCE);
     while !fact() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::park_timeout(Duration::from_millis(5));
+        assert!(
+            deadline.is_none_or(|d| Instant::now() < d),
+            "timed out waiting for {what}"
+        );
+        std::thread::yield_now();
     }
 }
 
@@ -724,7 +735,7 @@ fn a_release_sent_before_a_reset_is_honoured() {
     send_raw(&fd, &request(2, Call::Inspect(b())), &[]);
     let mut readable = [PollFd::new(&fd, PollFlags::IN)];
     let ts = Timespec {
-        tv_sec: i64::try_from(PATIENCE.as_secs()).unwrap(),
+        tv_sec: i64::try_from(PATIENCE.as_secs()).unwrap_or(i64::MAX),
         tv_nsec: 0,
     };
     assert_eq!(rustix::event::poll(&mut readable, Some(&ts)).unwrap(), 1);

@@ -38,6 +38,9 @@ seed for a row under it, and names the row's n.
 | `serve.reads` | a list's worker's wait for its client to read a part | `tmpfs` (`list`) | `READ_PATIENCE` | `crates/hex-node/src/serve.rs`, `READS` |
 | `client.answer.<kind>` | a client's call's wait for its answer, by kind | `tmpfs` | each kind's | `crates/hex-client/src/linux.rs`, `ANSWERS` |
 | `netcheck.settles`, `netcheck.answers` | a fresh namespace's IPv6 settle; a dump's read | `owner` | the network check's | `crates/hex-runtime/src/linux/oci/netcheck.rs` |
+| `netns.make` | the pool's refill thread's make of a network namespace (no node wait; the census's timing point) | `tmpfs` | the netns tests' patience | `crates/hex-node/src/netns/tests.rs`, `MAKE_RECORDED` |
+| `lifecycle.exec` (from `seam-tmpfs.json`) | a container's exec of `true`, to the program's end | `tmpfs` | the conformance suites' patience, and every test that takes it | `crates/hex-api/src/conformance.rs`, `PROGRAM_END` |
+| `client.answer.inspect` | the server's answer to a call over its socket | `tmpfs` (`rtt`) | the socket's tests' patience | `crates/hex-node/src/serve/tests.rs`, `ANSWER_RECORDED` |
 | `seeds.hang`, `seeds.wait`, `exec_seeds.answers` | the seeds' waits, seeded from `seed_path.md` run 3 already | `tmpfs` | a check of that record | `crates/hex-core/src/seeds.rs`, `crates/hex-node/src/seed.rs` |
 
 Until a run is recorded here each of those waits stays MEASURING in the code, naming this file's row. Where a row's n

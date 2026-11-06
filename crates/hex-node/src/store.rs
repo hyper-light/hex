@@ -849,8 +849,8 @@ mod tests {
 
         std::thread::scope(|s| {
             let second = s.spawn(|| store.put(&held));
-            let deadline = Instant::now() + hex_api::conformance::PATIENCE;
-            while store.waited() == 0 && Instant::now() < deadline {
+            let deadline = Instant::now().checked_add(hex_api::conformance::PATIENCE);
+            while store.waited() == 0 && deadline.is_none_or(|d| Instant::now() < d) {
                 std::thread::yield_now();
             }
             assert_eq!(store.waited(), 1, "the second write of the held box waits");

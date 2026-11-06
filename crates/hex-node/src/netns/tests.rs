@@ -2,9 +2,18 @@
 //! kernel this test runs on, privileged or not.
 
 use super::*;
-use hex_api::conformance::PATIENCE;
+/// The slowest recorded make of a network namespace by the pool's refill thread. MEASURING: the record to come
+/// is `bench/competitive/probes/waits_census.md`'s `netns.make` row, which then sets this (the lead's rule of
+/// 2026-11-06 for test patiences).
+const MAKE_RECORDED: Option<Duration> = None;
+
+/// Longest a test waits for the refill thread's fact: twice [`MAKE_RECORDED`]; unbounded while measuring.
+const PATIENCE: Duration = match MAKE_RECORDED {
+    Some(slowest) => slowest.saturating_mul(2),
+    None => Duration::MAX,
+};
 use std::os::fd::AsRawFd;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rustix::thread::{LinkNameSpaceType, move_into_link_name_space};
 
@@ -50,8 +59,8 @@ fn root_pools() -> Pools {
 /// [`PATIENCE`], the longest a case waits for a fact: a thread that never makes it true fails the test
 /// instead of hanging it.
 fn wait_for(what: &str, mut fact: impl FnMut() -> bool) {
-    let deadline = Instant::now() + PATIENCE;
-    while Instant::now() < deadline {
+    let deadline = Instant::now().checked_add(PATIENCE);
+    while deadline.is_none_or(|d| Instant::now() < d) {
         if fact() {
             return;
         }
