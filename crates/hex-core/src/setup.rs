@@ -345,6 +345,21 @@ mod tests {
         assert!(features_off(&"x".repeat(FEATURE_LISTING_MAX + 1)).is_err());
     }
 
+    /// HEX-INST-2: the feature query's deadline is the swarm's failure-bound rule over its record: twice
+    /// the slowest of jupiter's 20 runs (1,683 ms at 79% CPU,
+    /// bench/install/records/windows-feature-query-jupiter-20261106.txt), the factor the false-alarm margin.
+    #[test]
+    fn the_feature_querys_deadline_is_twice_its_slowest_recorded_run() {
+        assert_eq!(
+            FEATURE_QUERY_SLOWEST,
+            std::time::Duration::from_millis(1_683)
+        );
+        assert_eq!(
+            FEATURE_QUERY_PATIENCE,
+            std::time::Duration::from_millis(3_366)
+        );
+    }
+
     /// HEX-INST-2: the listing's bound is its format's own size, every feature's `<name> <state>\r\n`
     /// line: the 36 bytes jupiter's PowerShell wrote, 20 runs of 20 (2026-11-06, Windows 11 26200), fit
     /// exactly, and a byte past them is refused rather than read.
