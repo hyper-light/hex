@@ -34,7 +34,7 @@ impl Patience {
 
     /// An answer came `took` after its wait began: the slowest recorded if it is slower than any before.
     pub fn answered(&mut self, took: Duration) {
-        let _ = took;
+        self.slowest = Some(self.slowest.map_or(took, |slowest| slowest.max(took)));
     }
 
     /// The slowest answer recorded: what the node's metrics read.
