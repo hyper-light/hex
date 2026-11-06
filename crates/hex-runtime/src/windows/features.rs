@@ -20,7 +20,8 @@ use super::{build_spawn, proc};
 
 /// The slowest the query has taken, PowerShell's start and one WMI read: 2,421 ms, the max of 30 runs on
 /// jupiter (AMD Ryzen AI MAX+ 395, Windows 11 26200; bench/install/records/windows-jupiter-20261105.txt
-/// entry 19: min 1,048, p50 1,183, p90 1,398 ms).
+/// entry 19: min 1,048, p50 1,183, p90 1,398 ms); also
+/// bench/install/records/windows-feature-query-jupiter-20261106.txt: 20 runs, max 1,683 ms at 79% CPU.
 const SLOWEST_RECORDED_QUERY: Duration = Duration::from_millis(2_421);
 
 /// The longest the query may take before its box is ended and the read refused by name: a bound on a
