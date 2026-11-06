@@ -366,3 +366,53 @@ Body: `~/.cache/hex-t7/g5tail/vm-pp-20261105T151759Z`.
 - The init's holds are 29.0 a create off and 5.0 on; the node's are 2.0 a box off and 31.0 on.
 - Part 19's p50 falls about 5x, and its p99 falls in all 4 pairs. The whole create's p99 doesn't settle: B is lower
   in 2 of 4 pairs, and B-L6-r2 (5.72 ms) and B-L12-r2 (9.05 ms) are over their pairs' A.
+
+## On by default: the socket A/B (the lead's decision, 2026-11-06T01:52Z)
+
+**Run.** fedora (Linux 6.19.10), 2026-11-06 08:58:21Z-09:00:50Z, under `fedora-timed.lock`, unit
+`hex-ppd-ab-20261106T085438Z`. One release build of cp/t7-g5-parkproc-default b5681e6: hex sha256 325a78e9867e74de,
+seam_oci 2b74ba6ab342da64. The harness is g6's mounts cell (cp/t7-g6 ac4ab24, by git archive), with one change by
+hand: create_breakdown.sh's `docker run` passes `-e HEXBENCH_DRIVER`, so the cell can run over the socket. Body,
+logs and each cell's out dir (its trace kept zstd-compressed): `~/.cache/hex-t7/ppdefault/ab-20261106T085438Z` on
+fedora, its `reduced.txt` the table below.
+
+**Gate 6 at this tree (b5681e6):** unit hex-ppd-full-20261106T061238Z, gates 7/7 exit 0 (361 passed, 0 failed) and the
+root lab 7 of 7 test binaries, in one unit.
+
+- `HEXBENCH_DRIVER=socket`: each cell's seam_oci starts its own `hex node`, ends it with SIGTERM, and records the
+  line of parked procs' counts it says then (`parked_at_exit`), so each cell's counts are its own node's.
+- A: parked procs off (`HEXBENCH_PARKED_PROCS=0`, `hex node --parked-procs off`). B: on (`=1`, the default). Both
+  with parked inits (owner bundles); the socket's node takes its own defaults for the pools and reuse, as
+  `HEXBENCH_DEVFS` and `HEXBENCH_REUSE` set only the in-process node.
+- The under-load bar's conditions, as above: the mounts trace of part 19, 2,000 creates at 8 in flight, 8,000 idle
+  threads, Docker's paths, 6 or 12 busy loops on CPUs 4-15 at nice 0. No priority change for Hex.
+- 4 rounds, A then B in odd rounds, B then A in even. Load at start 6.47, 646 a minute later (the 12 loops and the
+  host's other tenants), 169 at the end. Noisy host, as run.
+
+| cell | part 19 p50/p99 (µs) | create p50/p99 (ms) | delete p50/p99 (ms) | made, hits, misses, dry, capped, alive |
+|---|---|---|---|---|
+| A-L6-r1 | 194/553 | 0.690/1.852 | 0.469/1.125 | 0, 0, 0, 0, 0, 0 |
+| B-L6-r1 | 32/234 | 0.526/1.449 | 0.676/1.402 | 2000, 1992, 0, 0, 0, 8 |
+| A-L6-r2 | 188/558 | 0.671/1.617 | 0.462/1.065 | 0, 0, 0, 0, 0, 0 |
+| B-L6-r2 | 31/208 | 0.531/1.657 | 0.664/1.585 | 2000, 1992, 0, 0, 0, 8 |
+| A-L6-r3 | 190/667 | 0.677/1.920 | 0.462/1.360 | 0, 0, 0, 0, 0, 0 |
+| B-L6-r3 | 32/208 | 0.539/1.542 | 0.704/1.456 | 2000, 1992, 0, 0, 0, 8 |
+| A-L6-r4 | 202/563 | 0.721/1.795 | 0.500/1.219 | 0, 0, 0, 0, 0, 0 |
+| B-L6-r4 | 31/212 | 0.535/1.276 | 0.695/1.380 | 2000, 1992, 0, 0, 0, 8 |
+| A-L12-r1 | 198/535 | 0.704/1.744 | 0.493/1.171 | 0, 0, 0, 0, 0, 0 |
+| B-L12-r1 | 32/181 | 0.522/1.538 | 0.655/1.666 | 2000, 1992, 0, 0, 0, 8 |
+| A-L12-r2 | 191/505 | 0.676/1.785 | 0.460/1.261 | 0, 0, 0, 0, 0, 0 |
+| B-L12-r2 | 32/111 | 0.523/1.554 | 0.667/1.354 | 2000, 1992, 0, 0, 0, 8 |
+| A-L12-r3 | 202/495 | 0.716/1.848 | 0.504/1.203 | 0, 0, 0, 0, 0, 0 |
+| B-L12-r3 | 32/230 | 0.540/1.801 | 0.720/1.915 | 2000, 1978, 14, 0, 0, 8 |
+| A-L12-r4 | 208/607 | 0.731/2.018 | 0.509/1.458 | 0, 0, 0, 0, 0, 0 |
+| B-L12-r4 | 33/242 | 0.545/1.562 | 0.724/1.513 | 2000, 1992, 0, 0, 0, 8 |
+
+- Part 19's p50 falls about 6x (188-208 µs off, 31-33 on) and its p99 2-5x (495-667 off, 111-242 on), in every pair.
+- The create's p50 falls about 24% (0.671-0.731 ms off, 0.522-0.545 on) in every pair, and its p99 in 7 of 8.
+- The delete pays for it: its p50 rises about 40% (0.460-0.509 ms off, 0.655-0.724 on) in every pair, and its p99 in
+  7 of 8. The proc is made at the delete (reuse on), so its work moves off the create, as the in-process runs found.
+- Each B node: 2,000 procs made, every claim but the 8 idle slots' a hit, none dry; 8 alive at its end, the idle
+  slots' own. B-L12-r3's 14 misses are as B-L6-r3's at 1e5e956: by the reading there, its ipc and uts pair pool ran dry
+  and those creates' flags no longer matched the parked init's (decision 8's flag match, not the proc). Not
+  separately checked here: the socket's node doesn't report its pair pool's counts.

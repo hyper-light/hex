@@ -2074,7 +2074,7 @@ move to the delete, off create's path; the delete's cost is measured beside the 
   host decision for Ada, not Hex's.
 
 **Parked procs: a parked init with its proc made ahead (the tail agent's design, built behind a node setting, off by default
-until measured; the g6 agent reviews and owns part 19's measurement; 2026-11-05).** On `cp/t7-g5-record` (26aafad), a parked init can't take goal 6's prepared proc.
+until measured, on by default for a root node since 2026-11-06; the g6 agent reviews and owns part 19's measurement; 2026-11-05).** On `cp/t7-g5-record` (26aafad), a parked init can't take goal 6's prepared proc.
 That proc is made with a pid namespace of its own, which the seed clones the init into, and a parked init is pid 1 of
 the pid namespace it was parked in. So on 7.x with prepared procs on, every create clones fresh. On 6.19 there is no
 prepared proc at all: through 7.0 the kernel won't hand over a pid namespace with no process in it (`goal6-mntns.md`
@@ -2125,10 +2125,15 @@ proc's `fsconfig` and most of part 19's 22 `openat2`, 13 `open_tree` and 17 `mov
   creates clone fresh.
 - **On 7.x with the proc pool on**, a parked init's proc comes from this, not from the pool. The pool keeps serving
   the creates no parked init is ready for: each create goes one way or the other, never both.
-- **A node setting, off by default.** `Node::with_parked_procs(bool)`; the bench's `HEXBENCH_PARKED_PROCS`. Off,
-  nothing changes on either kernel.
+- **A node setting, on by default for a root node** (the lead's decision, 2026-11-06T01:52Z; it was off until then).
+  `Node::with_parked_procs(false)` turns it off, `hex node --parked-procs on|off` sets it for the socket's node, and the
+  bench's `HEXBENCH_PARKED_PROCS` (1 on, 0 off, unset the node's default) reaches both drivers' nodes. A rootless
+  node parks none (its devfs has no mask sources). Off, nothing changes on either kernel. A node keeps one empty
+  tmpfs for its life (`Devfs::restart`), so a parked proc's masks clone the same one every init's do, whichever pools
+  are on. `hex node` says its setting on stderr as it starts, and on SIGTERM one line of its parked procs' counts
+  (made, hits, misses, dry, capped, alive), exiting 143 with its boxes left as a SIGKILL leaves them.
 - **Decided (the lead, 2026-11-05T17:00Z, on the measurements in `parked_procs_ab.md`).** The proc is made on the
-  parking thread, and the setting stays off by default.
+  parking thread, and the setting stays off by default (superseded 2026-11-06: on by default, below).
   - On, part 19's p50 is about 5.6x faster and the create's p50 0.10-0.40 ms faster at 8 in flight (1e5e956), with
     every claim a hit. The under-load bar's part 19 p99 (0.5 ms) is approached, not met.
   - The cost moves to the delete: its p50 is up in 6 of 8 pairs at 8 in flight, and serially it is flat with the c32
@@ -2140,8 +2145,9 @@ proc's `fsconfig` and most of part 19's 22 `openat2`, 13 `open_tree` and 17 `mov
     rate. It falls short only at its dry claims (22-36% at 8 in flight), where the same caller's next create arrives
     before its after-reply turn: create p50 0.06-0.25 ms worse than on-park, and part 19 p99 higher in 6 of 8 rounds,
     the under-load bar's own measure (the lead, 2026-11-05T19:19Z).
-  - Whether it goes on by default (a faster create and part 19, against a slower delete) is Ada's call. Nothing
-    changes by default until she says.
+  - On by default since 2026-11-06 (the lead), on the socket driver's A/B (`parked_procs_ab.md`, "On by default:
+    the socket A/B"): part 19's p50 about 6x faster and the create's p50 about 24% faster, the delete's p50 about 40%
+    slower, at 8 in flight.
 - **Dropped off the path (the g6 agent's review).** A detached tree dropped unattached is unmounted, masks and
   all, on its last close. That takes the host's `namespace_sem` for write, then waits for an expedited RCU grace
   period (`namespace_unlock`, v6.19 `fs/namespace.c:1680-1721`; the wait at `:1715`). So no create's thread drops
