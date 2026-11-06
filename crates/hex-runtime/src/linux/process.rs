@@ -170,3 +170,25 @@ pub fn join_on_exec(cg: &BoxCgroup, cmd: &mut Command) -> Result<(), Refusal> {
     sys::join_cgroup_on_exec(cmd, Arc::new(cg.procs_for_joining()?));
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// HEX-RT-14: the bound a box's exec is held to comes from the box's own RLIMIT_STACK, and reading it
+    /// takes no system call: the node reads its own limit once. Do: the bound for a box whose spec sets a
+    /// 1 MiB stack, a hundred times, after the node's bound has been read. Expect a quarter of it (256
+    /// KiB, above Linux's 128 KiB floor and under the node's default), and no getrlimit among the hundred.
+    #[test]
+    fn a_box_with_a_smaller_stack_gets_the_smaller_bound_and_no_read_per_exec() {
+        let node = exec_limit();
+        let reads = stack_reads();
+        for _ in 0..100 {
+            let bound = exec_limit_for(1 << 20);
+            assert_eq!(bound.block, 256 << 10);
+            let _ = exec_limit();
+        }
+        assert_eq!(stack_reads(), reads, "a getrlimit per exec");
+        assert!(node.block >= 256 << 10, "{node:?}");
+    }
+}

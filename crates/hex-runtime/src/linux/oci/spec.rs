@@ -616,6 +616,22 @@ mod tests {
         "linux": {"namespaces": [{"type": "pid"}, {"type": "mount"}], "maskedPaths": ["/proc/kcore"]}
     }"#;
 
+    /// HEX-RT-14 at create, from the box's own stack: do parse a config whose process sets RLIMIT_STACK to
+    /// 1 MiB (a 256 KiB exec bound) and has a 300 KiB variable, which the node's own default stack would take.
+    /// Expect it refused against the box's stack, by name.
+    #[test]
+    fn an_init_is_held_to_its_own_stack_limit() {
+        let value = "x".repeat(300 << 10);
+        let json = format!(
+            r#"{{"ociVersion":"1.3.0","root":{{"path":"rootfs"}},"process":{{"args":["/bin/sh"],"cwd":"/","env":["BIG={value}"],"rlimits":[{{"type":"RLIMIT_STACK","hard":1048576,"soft":1048576}}]}}}}"#
+        );
+        let r = Spec::parse(json.as_bytes());
+        assert!(
+            matches!(r, Err(OciError::Config(ref why)) if why.contains("allows 262144")),
+            "{r:?}"
+        );
+    }
+
     /// HEX-RT-14 at create: do parse a config whose init has a variable one byte past this kernel's
     /// per-string execve bound (read now); expect it refused as the config, naming the bound, before
     /// anything is made, so no box is left that can't start.
