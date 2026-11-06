@@ -30,13 +30,16 @@ $tag = (Invoke-RestMethod -UseBasicParsing "https://api.github.com/repos/contain
 $v = $tag.TrimStart("v")
 $tgz = Join-Path $Root "containerd-$v-windows-amd64.tar.gz"
 Fetch "https://github.com/containerd/containerd/releases/download/$tag/containerd-$v-windows-amd64.tar.gz" $tgz
+# GitHub serves the .sha256sum as application/octet-stream, so Content is a byte[], read as ASCII here.
 $sum = (Invoke-WebRequest -UseBasicParsing "https://github.com/containerd/containerd/releases/download/$tag/containerd-$v-windows-amd64.tar.gz.sha256sum").Content
+if ($sum -is [byte[]]) { $sum = [Text.Encoding]::ASCII.GetString($sum) }
 if (-not ([string]$sum).ToLower().Contains((Get-FileHash -Algorithm SHA256 $tgz).Hash.ToLower())) {
     throw "containerd $v's archive doesn't match its published sha256"
 }
 $cbin = Join-Path $Root "containerd"
 New-Item -ItemType Directory -Force -Path $cbin | Out-Null
-tar.exe -xzf $tgz -C $cbin
+# System32's bsdtar by path: under kiln's Git Bash, PATH finds GNU tar first, which reads "C:" as a remote host.
+& "$env:SystemRoot\System32\tar.exe" -xzf $tgz -C $cbin
 foreach ($exe in "containerd.exe", "ctr.exe", "containerd-shim-runhcs-v1.exe") {
     if (-not (Test-Path (Join-Path $cbin "bin\$exe"))) { throw "containerd $v's archive has no bin\$exe" }
 }

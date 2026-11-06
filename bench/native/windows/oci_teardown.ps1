@@ -17,12 +17,12 @@ foreach ($p in @(@{ file = "dockerd.pid"; exe = "dockerd" }, @{ file = "containe
         Stop-Process -Id $id
         "stopped $($p.exe) $id"
     } else {
-        "skipped $($p.exe) $id: not the process oci_setup.ps1 started"
+        "skipped $($p.exe) ${id}: not the process oci_setup.ps1 started"
     }
     Remove-Item $f
 }
 if ($Remove) {
-    if (-not $Root -or -not (Test-Path (Join-Path $Root "versions.txt"))) { throw "refusing to remove $Root: not oci_setup.ps1's folder" }
+    if (-not $Root -or -not (Test-Path (Join-Path $Root "versions.txt"))) { throw "refusing to remove ${Root}: not oci_setup.ps1's folder" }
     Remove-Item -Recurse -Force $Root
     "removed $Root"
 }

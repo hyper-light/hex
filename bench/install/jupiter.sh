@@ -34,7 +34,9 @@ build() {
   cargo build --locked -p hex-cli --bin hex
   : > "$bins"
   for t in windows_process_box windows_oci_box; do
+    # The test target's own artifact: cargo also lists the hex binary the test runs, last when it's rebuilt.
     exe=$(cargo test --locked -p hex-cli --test "$t" --no-run --message-format=json \
+      | grep -F "\"kind\":[\"test\"]" | grep -F "\"name\":\"$t\"" \
       | grep -o '"executable":"[^"]*"' | tail -1 | sed 's/^"executable":"//; s/"$//; s/\\\\/\\/g')
     [ -n "$exe" ] || { echo "no test binary for $t"; return 1; }
     echo "$t $exe" >> "$bins"
