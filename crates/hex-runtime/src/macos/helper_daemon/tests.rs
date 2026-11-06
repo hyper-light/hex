@@ -422,10 +422,12 @@ fn members_lists_the_users_live_processes() {
         .map(|c| i32::try_from(c.id()).expect("a pid"))
         .collect();
 
-    // Wait on the fact, not the clock (CLAUDE.md §4): poll the listing on a counted budget until every
-    // child is in it. The kernel knows a child at fork, so the first read usually already has them.
+    // Wait on the fact, not the clock (CLAUDE.md §4): read the listing until every child is in it, within a
+    // program's measured cold start doubled (2 x 227.814 ms, bench/native/macos/records/execexit-a82ce7b-20261106T161405Z.txt). The kernel knows a child at fork, so the
+    // first read usually already has them.
     let mut pids = std::collections::BTreeSet::new();
-    for _ in 0..100_000u32 {
+    let deadline = std::time::Instant::now() + Duration::from_micros(455_628);
+    while std::time::Instant::now() < deadline {
         pids = members(uid)
             .expect("list the user's members")
             .iter()

@@ -188,9 +188,9 @@ impl Proc for ShellProc {
     }
 
     /// The helper asks only once the node saw the program's exit, and the real reap then waits for the
-    /// zombie (`proc::BoxProc`); so does this, up to a bound past any test's run.
-    fn wait_for(&mut self, _timeout: Duration) -> Result<Option<Exit>, Refusal> {
-        Ok(self.end.recv_timeout(Duration::from_secs(30)).ok())
+    /// zombie (`proc::BoxProc`); so does this, for the time it is given.
+    fn wait_for(&mut self, timeout: Duration) -> Result<Option<Exit>, Refusal> {
+        Ok(self.end.recv_timeout(timeout).ok())
     }
 }
 
@@ -294,20 +294,18 @@ fn a_box_user_programs_end_is_its_own_not_unknown() {
         user: None,
     };
     let mut sleeper = rt.exec(&id, sh("sleep 0.5"), Stdio::null()).expect("exec");
+    // The sleeper's own 0.5 s, then a program's measured end.
     assert_eq!(
         sleeper.try_wait().unwrap(),
         None,
         "a running program read as ended"
     );
     assert_eq!(
-        sleeper.wait_for(Duration::from_secs(10)).unwrap(),
+        sleeper.wait_for(SLEEP + EXITS_AT_ONCE).unwrap(),
         Some(Exit::Code(0))
     );
     let mut three = rt.exec(&id, sh("exit 3"), Stdio::null()).expect("exec");
-    assert_eq!(
-        three.wait_for(Duration::from_secs(10)).unwrap(),
-        Some(Exit::Code(3))
-    );
+    assert_eq!(three.wait_for(EXITS_AT_ONCE).unwrap(), Some(Exit::Code(3)));
 }
 
 /// A box-user program runs as its pool user, which the unprivileged node may not signal, and XNU attaches
@@ -349,3 +347,9 @@ fn a_listing_is_sized_by_kern_maxproc_or_refused() {
     let sized = super::sys::listing_from(Ok(7)).expect("a listing for 7");
     assert!(sized.capacity() >= 7 && sized.is_empty());
 }
+
+/// A program that exits at once, from a cold start, as the macOS class measures it: 2 x the max of 30, 227.814
+/// ms (bench/native/macos/records/execexit-a82ce7b-20261106T161405Z.txt; Ada's rule, 2026-11-06).
+const EXITS_AT_ONCE: Duration = Duration::from_micros(455_628);
+/// The sleeper's own sleep.
+const SLEEP: Duration = Duration::from_millis(500);
