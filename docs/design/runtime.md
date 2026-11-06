@@ -532,10 +532,13 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
       ends the box past its bound (an eviction by a rule, §2); it holds a 256 MiB bound to ≤54 MiB with up to
       one member per core (RESULT.md, 459ded2) for ~12-15% of a core, and being a rule not a kernel cap it
       can't tightly bound a box past every core (28 members overshot 56-587 MiB) — which the spawn cap (each
-      process) and the helper (the whole tree) catch. With the helper, the daemon's own sweep is this layer:
-      each turn of its exception loop (`Daemon::pump`) re-reads every box and ends one past its bound,
-      whether a crossing woke it (the ledger's event) or its timeout paced it (the poll), so a box the
-      kernel ledger didn't hold — a member unarmed in the fork window, a missed exception — is still caught.
+      process) and the helper (the whole tree) catch. With the helper, this layer is event-driven, with no
+      period (the lead's call, 2026-11-06, under Ada's rule that no constant is picked): the daemon watches
+      every member for its forks and its end (`EVFILT_PROC`, which root may place on any process), and each
+      fork or end, like each crossing, wakes a sweep that re-reads every box, arms a forked member at once,
+      and ends a box past its bound (`Daemon::pump_members`, `Daemon::pump_crossings`). A member that forks
+      before its watch is placed is caught by the sweep listing the box again after each watch, until a
+      listing finds no member it hadn't watched; from then on every fork posts an event.
     - **A program's end** is the helper's to collect, since it is the program's parent and `waitid` answers no
       one else (`docs/research/runtime/native-platforms.md` §3, "A box user's program ends where only the
       helper can see how"). The helper watches each program it starts from its start and reaps it, in its

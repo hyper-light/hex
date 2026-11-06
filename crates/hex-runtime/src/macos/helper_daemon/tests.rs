@@ -3,9 +3,10 @@
 //! which a daemonizing member can't escape. `kill_user` is not exercised here (it would signal this test's
 //! whole user); it is measured as root on a dedicated pool user by `bench/native/macos/boxlab.sh`.
 
+use std::collections::BTreeSet;
 use std::os::fd::{AsFd, OwnedFd};
 use std::process::{Child, Command};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -61,6 +62,8 @@ fn reapportion_arms_the_changed_and_ends_when_over() {
 #[derive(Default)]
 struct Sim {
     inner: Arc<Mutex<SimState>>,
+    /// Signalled when a member event is posted (`fork`).
+    posted: Arc<Condvar>,
 }
 
 #[derive(Default)]
@@ -70,6 +73,25 @@ struct SimState {
     arm_calls: u32,
     /// Programs whose end a watch read (the stand-in's reap).
     reaped: u32,
+    /// Each pid armed, in order.
+    armed: Vec<i32>,
+    /// The members watched for their forks and ends.
+    watched: BTreeSet<i32>,
+    /// Member events posted and not yet taken.
+    events: u32,
+    /// A member that forks between the daemon's listing and its watch, once (the race the re-list closes).
+    fork_in_watch: Option<i32>,
+}
+
+/// The stand-in's fork: member `child` joins the box, and its parent's watch posts the event.
+fn fork(state: &Arc<Mutex<SimState>>, posted: &Condvar, child: i32) {
+    let mut s = state.lock().expect("sim lock");
+    s.members.push(Member {
+        pid: child,
+        footprint: 0,
+    });
+    s.events += 1;
+    posted.notify_all();
 }
 
 /// The stand-in's watch: a program has ended (by KILL, the stand-in's only end) once it is no member.
@@ -122,13 +144,44 @@ impl Privileged for Sim {
         }))
     }
 
-    fn arm(&self, _pid: i32, _cap_mib: u32) -> std::io::Result<()> {
-        self.inner.lock().expect("sim lock").arm_calls += 1;
+    fn arm(&self, pid: i32, _cap_mib: u32) -> std::io::Result<()> {
+        let mut s = self.inner.lock().expect("sim lock");
+        s.arm_calls += 1;
+        s.armed.push(pid);
         Ok(())
     }
 
     fn list(&self, _uid: u32) -> std::io::Result<Vec<Member>> {
         Ok(self.inner.lock().expect("sim lock").members.clone())
+    }
+
+    fn watch_members(&self, pids: &[i32]) -> std::io::Result<Vec<i32>> {
+        let mut s = self.inner.lock().expect("sim lock");
+        s.watched.extend(pids.iter().copied());
+        // A fork that lands after the daemon listed the members and before this watch reached the child.
+        if let Some(child) = s.fork_in_watch.take() {
+            s.members.push(Member {
+                pid: child,
+                footprint: 0,
+            });
+        }
+        Ok(Vec::new())
+    }
+
+    fn next_member_event(&self) -> std::io::Result<()> {
+        let mut s = self.inner.lock().expect("sim lock");
+        while s.events == 0 {
+            s = self.posted.wait(s).expect("sim lock");
+        }
+        s.events -= 1;
+        Ok(())
+    }
+
+    fn next_crossing(&self) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "the stand-in has no exception port",
+        ))
     }
 
     fn kill(&self, _uid: u32, signal: i32) -> std::io::Result<usize> {
@@ -344,6 +397,76 @@ fn a_box_holds_at_most_its_process_cap_of_programs() {
     assert_eq!(client.wait(&b1, pid1).unwrap(), Some(Exit::Unknown));
     drop(client);
     handle.join().expect("daemon thread");
+}
+
+/// A connected client, the daemon (shared so a test drives its pumps), and the stand-in's state and signal.
+type Shared = (Helper, Arc<Daemon<Sim>>, Arc<Mutex<SimState>>, Arc<Condvar>);
+
+/// A daemon over the stand-in, shared so a test drives its member pump beside the socket it serves, with
+/// the stand-in's state and event signal kept for the test.
+fn shared(nproc: u32) -> Shared {
+    let (client, server) = rustix::net::socketpair(
+        AddressFamily::UNIX,
+        SocketType::STREAM,
+        SocketFlags::empty(),
+        None,
+    )
+    .expect("socketpair");
+    let _ = rustix::net::sockopt::set_socket_nosigpipe(&client, true);
+    let _ = rustix::net::sockopt::set_socket_nosigpipe(&server, true);
+    let sim = Sim::default();
+    let (state, posted) = (Arc::clone(&sim.inner), Arc::clone(&sim.posted));
+    let daemon = Arc::new(Daemon::new(sim, vec![7000], nproc));
+    let serving = Arc::clone(&daemon);
+    thread::spawn(move || {
+        let _ = serving.serve(server.as_fd());
+    });
+    (Helper::over(client, VERSION), daemon, state, posted)
+}
+
+/// HEX-MAC-14, CLAUDE.md §5 (no poll period): do start a member, then fork it; expect the started member
+/// watched for its forks, and the child armed and watched on the fork's event, the daemon waking on that
+/// event alone, with no period to pick.
+#[test]
+fn a_forked_member_is_armed_on_its_fork_event() {
+    let (client, daemon, state, posted) = shared(64);
+    let b1 = BoxId::new("b1").expect("box id");
+    client.acquire(&b1, 256 * MIB, 16 * MIB).unwrap();
+    let leader = start(&client, &b1, true);
+    assert!(state.lock().unwrap().watched.contains(&leader));
+    let pumping = Arc::clone(&daemon);
+    let turn = thread::spawn(move || pumping.pump_members());
+    fork(&state, &posted, 4242);
+    turn.join().expect("pump thread").expect("one turn");
+    let s = state.lock().unwrap();
+    assert!(
+        s.armed.contains(&4242),
+        "the child wasn't armed: {:?}",
+        s.armed
+    );
+    assert!(
+        s.watched.contains(&4242),
+        "the child isn't watched for its own forks"
+    );
+}
+
+/// HEX-MAC-14 (the fork window's race): do fork a member after the daemon lists the box and before its
+/// watch is placed; expect the daemon's re-list to find the child and watch it too, so no member is left
+/// whose forks would post no event.
+#[test]
+fn a_member_forked_before_its_watch_is_caught_by_the_relist() {
+    let (client, _daemon, state, _posted) = shared(64);
+    let b1 = BoxId::new("b1").expect("box id");
+    client.acquire(&b1, 256 * MIB, 16 * MIB).unwrap();
+    state.lock().unwrap().fork_in_watch = Some(5151);
+    start(&client, &b1, true);
+    let s = state.lock().unwrap();
+    assert!(
+        s.watched.contains(&5151),
+        "a member was left unwatched: {:?}",
+        s.watched
+    );
+    assert!(s.armed.contains(&5151));
 }
 
 /// A few sleeping children of this process, killed when dropped.

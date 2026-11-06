@@ -96,13 +96,30 @@ pub fn main(args: &[String]) -> u8 {
         }
     };
     let daemon = std::sync::Arc::new(Daemon::new(ops, users, nproc));
-    // Rebalance on EXC_RESOURCE crossings on a thread beside the socket (event-driven, no polling).
-    let pumper = std::sync::Arc::clone(&daemon);
+    // Re-apportion on each member crossing (the ledger) and on each member's fork or end, each on a thread
+    // beside the socket that wakes on its event alone.
+    let crossings = std::sync::Arc::clone(&daemon);
     std::thread::spawn(move || {
-        while let Ok(()) = pumper.pump(500) {}
+        let why = loop {
+            if let Err(e) = crossings.pump_crossings() {
+                break e;
+            }
+        };
         let _ = writeln!(
             std::io::stderr().lock(),
-            "hex __box-helper: the crossing pump stopped"
+            "hex __box-helper: the crossing pump stopped: {why}"
+        );
+    });
+    let members = std::sync::Arc::clone(&daemon);
+    std::thread::spawn(move || {
+        let why = loop {
+            if let Err(e) = members.pump_members() {
+                break e;
+            }
+        };
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "hex __box-helper: the member pump stopped: {why}"
         );
     });
     match daemon.listen(Path::new(&socket)) {

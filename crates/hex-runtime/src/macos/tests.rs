@@ -61,6 +61,24 @@ impl Privileged for Sim {
         }))
     }
 
+    fn watch_members(&self, _pids: &[i32]) -> io::Result<Vec<i32>> {
+        Ok(Vec::new())
+    }
+
+    fn next_member_event(&self) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the stand-in posts no member events",
+        ))
+    }
+
+    fn next_crossing(&self) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the stand-in has no exception port",
+        ))
+    }
+
     fn arm(&self, _pid: i32, _cap_mib: u32) -> io::Result<()> {
         Ok(())
     }
@@ -272,6 +290,24 @@ impl Privileged for Shells {
             exiting,
             events: Vec::new(),
         }))
+    }
+
+    fn watch_members(&self, _pids: &[i32]) -> io::Result<Vec<i32>> {
+        Ok(Vec::new())
+    }
+
+    fn next_member_event(&self) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the stand-in posts no member events",
+        ))
+    }
+
+    fn next_crossing(&self) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the stand-in has no exception port",
+        ))
     }
 
     fn arm(&self, _pid: i32, _cap_mib: u32) -> io::Result<()> {
