@@ -23,8 +23,24 @@ fn limits(seeds: usize, waiting: usize, wait: u64, hang: u64) -> Limits {
     Limits {
         seeds: NonZeroUsize::new(seeds).unwrap(),
         waiting,
-        wait: ms(wait),
-        hang: ms(hang),
+        wait: Bounds::fixed(ms(wait)),
+        hang: Bounds::fixed(ms(hang)),
+    }
+}
+
+/// Bounds learned from the pool's answers on the test's millisecond clock: the first wait `first`, at least 1 ms,
+/// at most `ceiling`, so the ticks below cross them, back them off and bring them down within a history.
+fn learned(seeds: usize, waiting: usize, first: u64, ceiling: u64) -> Limits {
+    let bounds = Bounds {
+        first: ms(first),
+        floor: ms(1),
+        ceiling: ms(ceiling.max(1)),
+    };
+    Limits {
+        seeds: NonZeroUsize::new(seeds).unwrap(),
+        waiting,
+        wait: bounds,
+        hang: bounds,
     }
 }
 
@@ -78,6 +94,7 @@ enum Phase {
         served: bool,
     },
     Busy {
+        since: Duration,
         until: Duration,
         unclaimed: Option<Ticket>,
     },
@@ -91,11 +108,16 @@ struct Oracle {
     limits: Limits,
     seeds: Vec<Option<(SeedId, Phase)>>,
     up_before: Vec<bool>,
-    line: Vec<(Ticket, Duration)>,
+    line: Vec<(Ticket, Duration, Duration)>,
     answered: Vec<(Ticket, Result<SeedId, Refused>)>,
     asking: bool,
     counts: Counts,
     handed: Vec<u64>,
+    /// The line's wait and the hang bound, learned as RFC 6298 says (`crate::patience`'s own tests hold it to an
+    /// oracle of the RFC): from each wait that ends in a seed and each create a seed is done with, backed off at each
+    /// wait's end and each hang.
+    wait: Patience,
+    hang: Patience,
 }
 
 impl Oracle {
@@ -110,6 +132,8 @@ impl Oracle {
             asking: true,
             counts: Counts::default(),
             handed: vec![0; slots],
+            wait: Patience::new(limits.wait),
+            hang: Patience::new(limits.hang),
         }
     }
 
@@ -144,8 +168,15 @@ impl Oracle {
     }
 
     fn hand(&mut self, seed: SeedId, now: Duration, unclaimed: Option<Ticket>) {
-        let until = now + self.limits.hang;
-        self.set(seed, Some(Phase::Busy { until, unclaimed }));
+        let until = now + self.hang.deadline();
+        self.set(
+            seed,
+            Some(Phase::Busy {
+                since: now,
+                until,
+                unclaimed,
+            }),
+        );
         self.counts.handed += 1;
         self.handed[seed.slot] += 1;
         let busy = self.with(|p| matches!(p, Phase::Busy { .. })).len() as u64;
@@ -161,15 +192,17 @@ impl Oracle {
         seen: &mut Paths,
     ) -> Option<Ticket> {
         while !self.line.is_empty() {
-            let (ticket, until) = self.line.remove(0);
+            let (ticket, since, until) = self.line.remove(0);
             if now < until {
+                self.wait.answered(now - since);
                 self.hand(seed, now, Some(ticket));
                 self.answered.push((ticket, Ok(seed)));
                 return Some(ticket);
             }
             self.counts.refused_waited += 1;
             seen.refused_in_line += 1;
-            let wait = self.limits.wait;
+            self.wait.expired();
+            let wait = until - since;
             self.answered.push((ticket, Err(Refused::Waited { wait })));
         }
         self.set(seed, Some(Phase::Idle { served }));
@@ -373,8 +406,8 @@ fn play(limits: Limits, events: &[Event], paths: &Cell<Paths>) -> Result<(), Tes
                         "ticket {} doesn't come after every earlier one",
                         ticket
                     );
-                    prop_assert_eq!(until, now + limits.wait);
-                    oracle.line.push((ticket, until));
+                    prop_assert_eq!(until, now + oracle.wait.deadline());
+                    oracle.line.push((ticket, now, until));
                     oracle.counts.waited += 1;
                     tickets.push(ticket);
                     seen.waited += 1;
@@ -389,7 +422,7 @@ fn play(limits: Limits, events: &[Event], paths: &Cell<Paths>) -> Result<(), Tes
                 let held: Vec<Ticket> = oracle
                     .line
                     .iter()
-                    .map(|(t, _)| *t)
+                    .map(|(t, _, _)| *t)
                     .chain(oracle.answered.iter().map(|(t, _)| *t))
                     .collect();
                 let Some(ticket) = pick(k, &held, &tickets) else {
@@ -399,13 +432,20 @@ fn play(limits: Limits, events: &[Event], paths: &Cell<Paths>) -> Result<(), Tes
                 if let Some(i) = oracle.answered.iter().position(|(t, _)| *t == ticket) {
                     match oracle.answered.remove(i).1 {
                         Ok(seed) => {
-                            let Some(Phase::Busy { until, .. }) = oracle.phase(seed) else {
+                            let Some(Phase::Busy { since, until, .. }) = oracle.phase(seed) else {
                                 return Err(TestCaseError::fail(format!(
                                     "ticket {ticket} was handed {seed}, which serves nothing"
                                 )));
                             };
                             let unclaimed = None;
-                            oracle.set(seed, Some(Phase::Busy { until, unclaimed }));
+                            oracle.set(
+                                seed,
+                                Some(Phase::Busy {
+                                    since,
+                                    until,
+                                    unclaimed,
+                                }),
+                            );
                             seen.claim_seed += 1;
                             prop_assert_eq!(got, Ok(Claim::Seed(seed)));
                         }
@@ -418,8 +458,8 @@ fn play(limits: Limits, events: &[Event], paths: &Cell<Paths>) -> Result<(), Tes
                             prop_assert_eq!(got, Ok(Claim::Refused(refused)));
                         }
                     }
-                } else if let Some(i) = oracle.line.iter().position(|(t, _)| *t == ticket) {
-                    let until = oracle.line[i].1;
+                } else if let Some(i) = oracle.line.iter().position(|(t, _, _)| *t == ticket) {
+                    let (_, since, until) = oracle.line[i];
                     if now < until {
                         seen.claim_waits += 1;
                         prop_assert_eq!(got, Ok(Claim::Wait { until }));
@@ -427,7 +467,8 @@ fn play(limits: Limits, events: &[Event], paths: &Cell<Paths>) -> Result<(), Tes
                         oracle.line.remove(i);
                         oracle.counts.refused_waited += 1;
                         seen.refused_at_claim += 1;
-                        let wait = limits.wait;
+                        oracle.wait.expired();
+                        let wait = until - since;
                         prop_assert_eq!(got, Ok(Claim::Refused(Refused::Waited { wait })));
                     }
                 } else {
@@ -455,9 +496,12 @@ fn play(limits: Limits, events: &[Event], paths: &Cell<Paths>) -> Result<(), Tes
                         prop_assert_eq!(got, Err(Stale::Gone(seed)));
                     }
                     Some(Phase::Busy {
-                        unclaimed: None, ..
+                        since,
+                        unclaimed: None,
+                        ..
                     }) => {
                         oracle.counts.done += 1;
+                        oracle.hang.answered(now - since);
                         prop_assert!(serving.remove(&seed));
                         let want = oracle.free(seed, now, true, &mut seen);
                         prop_assert_eq!(got, Ok(want));
@@ -526,12 +570,18 @@ fn play(limits: Limits, events: &[Event], paths: &Cell<Paths>) -> Result<(), Tes
                         "took {} for hung, but it isn't past its bound",
                         seed
                     );
-                    let Some(Phase::Busy { unclaimed, .. }) = oracle.phase(seed) else {
+                    let Some(Phase::Busy {
+                        since,
+                        until,
+                        unclaimed,
+                    }) = oracle.phase(seed)
+                    else {
                         return Err(TestCaseError::fail(format!(
                             "{seed} was hung serving nothing"
                         )));
                     };
-                    let hang = limits.hang;
+                    oracle.hang.expired();
+                    let hang = until - since;
                     prop_assert_eq!(refused, Refused::Hung { seed, hang });
                     oracle.set(seed, None);
                     oracle.counts.hung += 1;
@@ -550,6 +600,10 @@ fn play(limits: Limits, events: &[Event], paths: &Cell<Paths>) -> Result<(), Tes
         let counts = pool.counts();
         prop_assert_eq!(counts, oracle.counts);
         prop_assert_eq!(pool.handed(), &oracle.handed[..]);
+        prop_assert_eq!(
+            pool.deadlines(),
+            (oracle.wait.deadline(), oracle.hang.deadline())
+        );
         prop_assert_eq!(pool.wanted(), oracle.wanted());
         prop_assert_eq!(pool.starting(), starting.len());
         prop_assert_eq!(pool.idle() + pool.busy(), up.len());
@@ -613,12 +667,20 @@ fn event() -> impl Strategy<Value = Event> {
     ]
 }
 
-/// Small pools, short lines and short bounds, which histories fill, cross and drain often; and the node's own.
+/// Small pools, short lines and short bounds, which histories fill, cross and drain often, fixed and learned; and the
+/// node's own, RFC 6298's.
 fn bounds() -> impl Strategy<Value = Limits> {
     prop_oneof![
-        8 => (1usize..=4, 0usize..=3, 0u64..=20, 0u64..=40)
+        4 => (1usize..=4, 0usize..=3, 0u64..=20, 0u64..=40)
             .prop_map(|(seeds, waiting, wait, hang)| limits(seeds, waiting, wait, hang)),
-        1 => Just(LIMITS),
+        4 => (1usize..=4, 0usize..=3, 0u64..=20, 0u64..=80)
+            .prop_map(|(seeds, waiting, first, ceiling)| learned(seeds, waiting, first, ceiling)),
+        1 => (0usize..=256).prop_map(|waiting| Limits {
+            seeds: SEEDS,
+            waiting,
+            wait: crate::patience::RFC_6298,
+            hang: crate::patience::RFC_6298,
+        }),
     ]
 }
 
@@ -907,4 +969,43 @@ fn a_late_or_out_of_order_report_is_refused_by_type() {
     assert_eq!(pool.started(new, ms(2)), Ok(None));
     assert_eq!(pool.create(ms(2)), Ok(Admit::Seed(new)));
     assert_eq!(pool.claim(Ticket(7), ms(2)), Err(Stale::Ticket(Ticket(7))));
+}
+
+/// Decision 9 (Ada's 2026-11-06 rule; AC-T7.1.3): the line's wait and the hang bound are learned from the pool's own
+/// answers, RFC 6298's timer each, and a wait that runs out backs its timer off. Do: on a pool of one seed whose
+/// waits start at 10 ms, serve a create for 4 ms while another waits 3 ms in line; let the second's seed pass its
+/// bound; then let a create's wait in line end. Expect: the hang bound 4 + 4·2 = 12 ms and the line's wait
+/// 3 + 4·1.5 = 9 ms; the seed taken for hung at 12 ms and not before, the bound then 24 ms; the create refused after
+/// 9 ms, the line's wait then 18 ms.
+#[test]
+fn the_wait_and_the_hang_bound_are_learned_from_the_pools_answers() {
+    let mut pool = Seeds::new(learned(1, 4, 10, 1_000));
+    let seed = up(&mut pool, ms(0));
+    assert_eq!(pool.deadlines(), (ms(10), ms(10)));
+    assert_eq!(pool.create(ms(0)), Ok(Admit::Seed(seed)));
+    let Ok(Admit::Wait { ticket, until }) = pool.create(ms(1)) else {
+        panic!("a create with its only seed busy didn't wait");
+    };
+    assert_eq!(until, ms(11));
+    assert_eq!(pool.done(seed, ms(4)), Ok(Some(ticket)));
+    assert_eq!(pool.deadlines(), (ms(9), ms(12)));
+    assert_eq!(pool.claim(ticket, ms(4)), Ok(Claim::Seed(seed)));
+    assert_eq!(pool.until(seed), Some(ms(16)));
+    assert_eq!(pool.hung(ms(15)), None);
+    let hung = Refused::Hung { seed, hang: ms(12) };
+    assert_eq!(pool.hung(ms(16)), Some((seed, hung)));
+    assert_eq!(pool.deadlines(), (ms(9), ms(24)));
+
+    let next = pool.start().unwrap();
+    assert_eq!(pool.started(next, ms(16)), Ok(None));
+    assert_eq!(pool.create(ms(16)), Ok(Admit::Seed(next)));
+    let Ok(Admit::Wait { ticket, until }) = pool.create(ms(16)) else {
+        panic!("a create with its only seed busy didn't wait");
+    };
+    assert_eq!(until, ms(25));
+    assert_eq!(
+        pool.claim(ticket, ms(25)),
+        Ok(Claim::Refused(Refused::Waited { wait: ms(9) }))
+    );
+    assert_eq!(pool.deadlines(), (ms(18), ms(24)));
 }
