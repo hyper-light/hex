@@ -318,6 +318,23 @@ mod tests {
         }
     }
 
+    /// HEX-MAC-4 and the lead's call 1 (2026-11-06): the ceiling is how long a box at the measured worst rate,
+    /// 2.39 GB/s, takes to grow by step 1's overshoot bar, 64 MiB, in whole nanoseconds rounded down; at the
+    /// measured worst spawn rate, 381 a second, a missed wake lets about 10.7 processes in within it. Do derive
+    /// both from the bar and the rates; expect the ceiling's value and a lateness under 11 processes.
+    #[test]
+    fn the_ceiling_is_the_overshoot_bar_at_the_worst_rate() {
+        const BAR: u128 = 64 * (MIB as u128);
+        const WORST_BYTES_PER_S: u128 = 2_390_000_000;
+        const WORST_SPAWNS_PER_S: u128 = 381;
+        assert_eq!(CEILING.as_nanos(), BAR * 1_000_000_000 / WORST_BYTES_PER_S);
+        let lateness_milli = WORST_SPAWNS_PER_S * CEILING.as_nanos() / 1_000_000;
+        assert_eq!(
+            lateness_milli, 10_698,
+            "processes x 1000 let in within one ceiling"
+        );
+    }
+
     /// HEX-MAC-4: a box at 95% of a 256 MiB bound is read at the floor; one at 1 MiB waits as long as its
     /// 255 MiB of headroom lasts at 256 GiB/s; one with no bound waits the ceiling.
     #[test]
