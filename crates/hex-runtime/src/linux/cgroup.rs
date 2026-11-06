@@ -1154,6 +1154,21 @@ mod tests {
         assert!(MAX_SIGNALLED >= pid_max, "{MAX_SIGNALLED} < {pid_max}");
     }
 
+    /// AC-T7.1.4, CLAUDE.md §2; Ada's 2026-11-06 rule (no picked constants): a box's `cgroup.procs` is bounded by the
+    /// most processes a box can hold, not by the bound on the files of a few lines beside it. Do: list a box's
+    /// processes when its `cgroup.procs` holds 10,000 of the widest pids there are, 80,000 bytes, past the 64 KiB once
+    /// picked for every cgroup file. Expect: every one listed.
+    #[test]
+    fn a_box_with_many_processes_has_them_all_listed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let widest = PID_MAX_LIMIT - 1;
+        let text = format!("{widest}\n").repeat(10_000);
+        assert!(text.len() > 64 << 10);
+        std::fs::write(tmp.path().join("cgroup.procs"), text).unwrap();
+        let procs = BoxCgroup::at(tmp.path().to_owned()).procs().unwrap();
+        assert_eq!(procs.len(), 10_000);
+    }
+
     #[test]
     fn sweep_collects_every_process_in_the_subtree() {
         let tree = Mock {
