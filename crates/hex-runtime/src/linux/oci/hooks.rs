@@ -14,12 +14,26 @@ use rustix::event::{PollFd, PollFlags};
 use rustix::fs::OFlags;
 
 use crate::linux::oci::OciError;
+use crate::linux::oci::run::MAX_ID_BYTES;
 use crate::linux::oci::spec::{Hook, Hooks, MAX_CONFIG_BYTES};
 use crate::linux::oci::state::State;
 
-/// The most a state handed to the init may hold: its annotations are the config's (at most
-/// [`MAX_CONFIG_BYTES`]), and its other fields are an id, a path and numbers, which the second half bounds.
-pub const MAX_STATE_BYTES: usize = 2 * MAX_CONFIG_BYTES;
+/// The most a state handed to the init may hold: its annotations, which take no more than the config's text of
+/// them (serde_json escapes nothing a config could write shorter, RFC 8259 §7), so at most [`MAX_CONFIG_BYTES`];
+/// and its other fields at their widest: the shape of a state with those strings taken out
+/// ([`STATE_SHAPE`]), a container id (at most [`MAX_ID_BYTES`], none of whose characters is escaped), and its
+/// bundle and cgroup paths, each at most `PATH_MAX` less its NUL, every byte at worst a six-byte `\u00XX`.
+pub const MAX_STATE_BYTES: usize = MAX_CONFIG_BYTES
+    + STATE_SHAPE.len()
+    + (MAX_ID_BYTES + 2)
+    + 2 * ((PATH_MAX - 1) * 6 + 2);
+
+/// A state's JSON at its widest with its id, its paths and its annotations taken out: every key, the longest
+/// status, and each number its widest (`i32::MIN`, `u64::MAX`), in the order serde writes them ([`State`]).
+const STATE_SHAPE: &str = r#"{"ociVersion":"1.3.0","id":,"status":"creating","pid":-2147483648,"bundle":,"annotations":,"cgroup":,"startTime":18446744073709551615,"poststart":false,"pidNamespace":false,"startContainer":18446744073709551615}"#;
+
+/// `PATH_MAX`, a path's most bytes with its NUL (include/uapi/linux/limits.h).
+const PATH_MAX: usize = 4096;
 
 /// The most a startContainer failure written on the exec FIFO holds, its tag byte included: `PIPE_BUF`
 /// (pipe(7)), so the init's one write lands whole and `start` reads it whole without taking it.
