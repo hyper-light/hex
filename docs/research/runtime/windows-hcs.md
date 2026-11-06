@@ -272,6 +272,43 @@ What only a Windows host can settle is marked **(probe)** and is measured on jup
 6. Whether a Rust binary built against the static C runtime runs in nanoserver as the launcher (nanoserver's VC
    runtime is not in these sources).
 
+## 11. What jupiter showed (2026-11-06)
+
+jupiter: Windows 11 25H2, `RtlGetVersion` build 26200 (its `ntdll.dll` is 10.0.26100.9711), images
+`mcr.microsoft.com/windows/nanoserver:ltsc2025` (26100) and `:ltsc2019` (17763) from containerd 2.4.2's windows
+snapshotter, Docker 29.9.3's static engine beside it. Records: `C:\Users\corph\.cache\hex-native-s4\suite-*.log`,
+`trace-*.log`, and HCS's own `Microsoft-Windows-Hyper-V-Compute-Operational` log.
+
+- **Probe 1, the scratch.** With the documented sequence (§3), create succeeds and `HcsStartComputeSystem` never
+  completes: the log shows "Start compute system, result 0xC0370103" (pending) and "Container started" only when the
+  operation is cancelled (0x800704C7) or the caller exits. Inside, the silo has csrss, wininit, services, lsass and one
+  svchost; runhcs's silo on the same image runs CExecSvc and about twelve. Ruled out one at a time with a single-box
+  probe: the volume path's trailing backslash (`HcsGetLayerVhdMountPath` gives none; fixed anyway, de04be9), the
+  launcher's mapped folder, `Networking` with and without an HNS namespace, `RegistryChanges`, `Processor`, runhcs's
+  layer id, a permanent-lifetime attach with Hex's handle closed, and a fresh `HcsFormatWritableLayerVhd` disk in
+  place of the `blank.vhdx` copy. Both documented steps are needed for the start to get that far: without
+  `HcsInitializeWritableLayer` create fails 0x80070003, without the filter start fails 0x80070287. runhcs (`ctr run`,
+  v2 document) and Docker (v1) start the same image in about a second. A scratch made by vmcompute's
+  `ActivateLayer`, `PrepareLayer` (descriptors `{id, 0, path}`, driver info `{1, ""}`, as
+  `hcsshim/internal/wclayer/layerutils.go:35-103`) and `GetLayerMountPath` starts in 0.6 s with Hex's own document
+  and Hex's own layer id (so a unique id is enough, and no `NameToGuid` is needed).
+- **Teardown.** With no container, `UnprepareLayer` and `DeactivateLayer` both succeed. After one ran,
+  `UnprepareLayer` returns 0x801F0010, `ERROR_FLT_DO_NOT_DETACH`, every time over 7 s with no compute system left,
+  and `DeactivateLayer` then succeeds and the volume is gone (Win32_Volume no longer lists it). `fltmc instances`
+  still shows a wcifs line for each gone volume, as it does for Docker's and runhcs's own (platform behaviour).
+- **Probe 2.** HCS's pids are host pids, the launcher opens for `PROCESS_DUP_HANDLE`, and the box's job nests in the
+  silo: HEX-RT-1..13 pass, the memory and process bounds among them.
+- **Probe 4.** A write to a read-only mapped directory is refused and the read-write one lands on the host. A class
+  not granted is still listed inside: `CM_Get_Device_Interface_ListW` for the display adapter class gives 2 on the
+  host, in a Hex box and in a Docker `--isolation process` container alike (open with the lead: what "visible" is).
+- **Probe 5.** HCS starts `ltsc2025` (26100) on 26200; `ltsc2019` (17763) is refused by the version table before HCS
+  is asked. The host's own `ntdll.dll` is no mismatch here: 25H2's is build 26100.
+- **Probe 6.** No: nanoserver has `ucrtbase.dll` and no `vcruntime140.dll`, and a dynamically linked `hex.exe`
+  can't load there (the launcher ended without replying). Built with `+crt-static`, it runs as the launcher.
+- **Concurrency.** Copies of one `blank.vhdx` attached by hand come up with one volume GUID (`7b88d036-…` again and
+  again); through `ActivateLayer`, 8 and then 32 boxes started at once each ran on a volume of its own (none saw
+  another's file).
+
 ## 10. Each new test fails when its code is broken (mutation record)
 
 Each row is one scratch commit on `357bb83`: one file changed by one exact-text mutation, signed, kept under

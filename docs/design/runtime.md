@@ -592,13 +592,24 @@ Compute Service, as the OCI runtime spec's Windows section defines it. Sources:
   exec into it is refused `NotRunning`. Delete ends the job, terminates the compute system, detaches the scratch and
   removes what the box made. Every HCS wait has a deadline, and a timed-out operation is cancelled, never abandoned
   (note §2).
-- **Layers by the documented storage calls**, not the `vmcompute.dll` exports hcsshim uses (undocumented, unbound,
-  wrapped in a timed retry and a global lock; note §3). The box's scratch VHD is a copy of the base layer's
-  `blank.vhdx`, attached with no drive letter. Its volume comes from `HcsGetLayerVhdMountPath`, then
-  `HcsInitializeWritableLayer` and `HcsAttachLayerStorageFilter` run over the read-only layers, and the volume is the
-  container's `Storage.Path`. No source runs this sequence end to end, so which steps a `blank.vhdx` copy needs is
-  jupiter's to settle (note §9, probe 1). If the documented calls can't make a scratch, the alternative is the
-  `vmcompute.dll` exports resolved at run time — a change brought back to this decision first, not taken silently.
+- **Layers by `vmcompute.dll`'s layer calls, as hcsshim, runhcs and Docker make them** (changed 2026-11-06 on
+  jupiter's evidence, the lead's approval; note §11). The box's scratch is a folder holding a copy of the base layer's
+  `blank.vhdx`; `ActivateLayer` attaches it as a volume, `PrepareLayer` puts the storage filter over it with the
+  read-only layers as its parents (each named by `hex_core::hcs::layer_guid`, the id the document gives it),
+  `GetLayerMountPath` gives the volume, and the volume's root is the container's `Storage.Path`. Teardown is
+  `UnprepareLayer` then `DeactivateLayer`; after a container has run, `UnprepareLayer` answers
+  `ERROR_FLT_DO_NOT_DETACH` (the container's end took the filter), matched alone. The calls are undocumented, so
+  they're resolved at run time like HCS's, and a missing one refuses the class by name. hcsshim's timed retry and
+  global lock are not copied (CLAUDE.md §4); 32 boxes started at once on jupiter each got their own volume.
+  - **Why not the documented calls:** on Windows 11 25H2 (26200), a scratch made by them (a `blank.vhdx` copy or a
+    fresh `HcsFormatWritableLayerVhd` disk, attached, `HcsInitializeWritableLayer`, `HcsAttachLayerStorageFilter`)
+    never finished starting: the silo stopped after one service host, and `HcsStartComputeSystem` ended only when
+    cancelled. The same document over a vmcompute scratch started in 0.6 s (note §11). What would falsify this: a
+    host where the documented sequence boots a silo, which returns the class to documented calls.
+- **Hex's Windows binaries carry their own C runtime** (`.cargo/config.toml`, `+crt-static` for both Windows
+  targets): the launcher runs inside the image, and nanoserver has `ucrtbase.dll` but no Visual C++ runtime, so an
+  `hex.exe` importing `VCRUNTIME140.dll` couldn't load there (note §11). It's the Windows twin of the static-glibc
+  decision, and `crates/hex-cli/tests/windows_static_crt.rs` refuses a build importing `VCRUNTIME*`/`MSVCP*`.
 - **The spec, as the OCI Windows section defines it:** a `ClassSpec::Bundle` reads `config.json`'s `windows` section
   (`layerFolders` topmost first with the scratch last, `devices`, `resources`) and its mounts. A `ClassSpec::Oci` box
   renders the same, its `Rootfs::Layers` lowest first. Devices are granted only by interface class, with `class` and
