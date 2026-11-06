@@ -24,6 +24,7 @@ use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
 use hex_api::Refusal;
+use hex_core::patience::Patience;
 use hex_core::seed::{Answer, Failed, Request};
 use hex_runtime::linux::oci::seed as rt_seed;
 use rustix::process::{Pid, PidfdFlags, WaitId, WaitIdOptions};
@@ -38,6 +39,9 @@ pub const WAITERS: usize = 4_096;
 /// bound on a wait for a fact (CLAUDE.md §4), not a guess at how long the work takes.
 const ANSWER_PATIENCE: Duration = Duration::from_secs(30);
 
+/// The exec seeds' wait's name, as the waits census records it.
+const ANSWERS: &str = "exec_seeds.answers";
+
 /// A pool of reusable exec seeds, grown on demand to [`budget`](Self::budget).
 pub struct SeedPool {
     /// The `hex` binary re-exec'd as `hex __oci-seed`.
@@ -45,6 +49,8 @@ pub struct SeedPool {
     budget: usize,
     inner: Mutex<Inner>,
     free: Condvar,
+    /// How long an exec waits for a busy seed to free.
+    answers: Patience,
 }
 
 #[derive(Default)]
@@ -83,6 +89,7 @@ impl SeedPool {
         Self {
             exe,
             budget: budget.max(1),
+            answers: Patience::measuring(ANSWERS),
             inner: Mutex::new(Inner::default()),
             free: Condvar::new(),
         }
@@ -282,5 +289,23 @@ fn round_trip(
                 Failed::Request | Failed::Start | Failed::Unable => Err(Trip::Refused(refusal)),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Decision 9 (the lead's failure-bound rule of 2026-11-06; AC-T7.1.3): an exec's wait for a busy seed to free
+    /// is seeded from the clone record, an exec seed's work being a clone with a few `setns` (`seed_path.md` run 3).
+    /// Do: open an exec seed pool and ask its wait before any exec. Expect: twice the record's slowest clone,
+    /// armed at once, no picked 30 s.
+    #[test]
+    fn an_execs_wait_for_a_seed_is_seeded_from_the_clone_record() {
+        let pool = SeedPool::with_budget(PathBuf::from("/nonexistent/hex-for-the-test"), 1);
+        assert_eq!(
+            pool.answers.deadline(),
+            Some(hex_core::seeds::CLONE_SLOWEST * 2)
+        );
     }
 }
