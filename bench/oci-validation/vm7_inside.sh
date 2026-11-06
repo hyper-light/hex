@@ -38,4 +38,5 @@ echo "VM7_EXIT=$rc"
 sync
 umount /job "$TGT"
 echo o > /proc/sysrq-trigger
-sleep 60
+# PID 1 must outlive the power-off it asked for; vm7_lab.sh's VM_TIMEOUT bounds the guest.
+exec sleep infinity

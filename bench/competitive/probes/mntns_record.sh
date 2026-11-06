@@ -65,13 +65,16 @@ cell() { # cell <way> <loops> <round>
   local way=$1 L=$2 r=$3 name=$1-L$2-r$3 pids=() p rc res
   if [ "$MODE" = host ]; then
     for _ in $(seq 1 "$L"); do taskset -c 4-15 bash -c 'while :; do :; done' & pids+=("$!"); done
-    sleep 2
     { echo "== $name $(date -u +%FT%TZ) uptime: $(uptime)"; echo "  docker ps: $(docker ps -q | wc -l) containers"; } >> "$O/context.txt"
     ( cd "$SRC" && HEX_OCI_MNTNS=$way MOUNTS=$MOUNTS MOUNTS_CONC=8 MOUNTS_PATH=pruned MOUNTS_UNTRACED=1 IDLE_THREADS=8000 \
         CPUSET=4-15 LOAD_GATE=0 BENCH_HOST_OK="$(hostname)" BENCH_MEMORY=8g BENCH_OOM=1000 HEXBENCH_DEVFS=1 \
         HEXBENCH_OWNER=bench-owner HEXBENCH_REUSE=1 HEXBENCH_DOCKER_PATHS=1 \
         timeout 900 bash bench/competitive/probes/create_breakdown.sh "$O/hex" "$O/seam_oci" ) > "$O/$name.log" 2>&1
     rc=$?
+    # No wait for the loops before the cell: its container, node and 8,000 threads come first. Each loop's CPU time
+    # at the end (utime + stime, clock ticks) shows it ran throughout.
+    for p in "${pids[@]}"; do read -ra f < "/proc/$p/stat" && echo "$p $(( f[13] + f[14] ))"; done 2>/dev/null \
+      | paste -sd' ' | sed "s/^/  loops' CPU ticks by pid (CLK_TCK $(getconf CLK_TCK)): /" >> "$O/context.txt"
     for p in "${pids[@]}"; do kill "$p" 2>/dev/null; done
     for p in "${pids[@]}"; do wait "$p" 2>/dev/null; done
     res=$(grep -o 'results: .*' "$O/$name.log" | tail -1 | cut -d' ' -f2)
