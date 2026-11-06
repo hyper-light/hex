@@ -1,7 +1,10 @@
 HEX-GUEST-21, Hex's side on Linux (HEX_GUEST21_LOCAL=1: the relay in-process, as root in a privileged
-fedora:44 container), against fedora-reference.txt's walks. 2026-11-06 ~13:16Z, fedora (kernel
-6.19.10-300.fc44), unit hex-ns5route-g21e2, tree = this commit's parent plus the walker (debug build).
-HEX_GUEST21_SINCE=1793968800 (2026-11-06T12:40:00Z, before the first pull or import).
+fedora:44 container whose /tmp, where it stages, is a tmpfs, as the guest's staged folder is), walked through
+the REAL read-only overlay of the store's layer folders (`hex selftest-box tree --layers`; a one-layer image's
+folder as it is), against fedora-reference.txt's walks. 2026-11-06 22:07Z, fedora (kernel 6.19.10-300.fc44),
+unit hex-ns5route-g21f-20261106T220705Z, tree 8582162 plus this commit (debug build). HEX_GUEST21_SINCE=1794002826,
+before the reference's first pull or import; the reference unpacked every image fresh (snapshots left: 0).
+Containers: 75 recorded (CONTAINERS.txt beside the reference, --cidfile), 0 left after.
 
 docker.io_grafana_grafana_latest: 17834 entries in ctr's, 17834 in Hex's, 0 differences past the stated ones; stated: 0 directory mtimes both sides stamped, 35668 host-assigned labels left out
 docker.io_library_alpine_latest: 515 entries in ctr's, 515 in Hex's, 0 differences past the stated ones; stated: 0 directory mtimes both sides stamped, 1030 host-assigned labels left out
@@ -11,12 +14,4 @@ docker.io_library_ubuntu_24.04: 3443 entries in ctr's, 3443 in Hex's, 0 differen
 lab-file: 3 entries in ctr's, 3 in Hex's, 0 differences past the stated ones; stated: 1 directory mtimes both sides stamped, 6 host-assigned labels left out
 lab-tree: 26 entries in ctr's, 26 in Hex's, 0 differences past the stated ones; stated: 4 directory mtimes both sides stamped, 52 host-assigned labels left out
 registry.fedoraproject.org_fedora_44: 9033 entries in ctr's, 9033 in Hex's, 0 differences past the stated ones; stated: 0 directory mtimes both sides stamped, 18066 host-assigned labels left out
-test result: ok (117.84 s)
-
-The labels left out are fedora's SELinux labels on both sides (the reference's snapshot files and the local
-run's staged files); no image's layers carry security.selinux. In a guest, which has no SELinux, Hex's side
-has none.
-
-Mutation (unit hex-ns5route-g21m, its own target dir): the relay following an earlier layer's links
-(`Ok(FileType::Symlink) if made` -> `Ok(FileType::Symlink)`): lab-tree 7 differences past the stated ones,
-every other image 0; test result FAILED, images that differ: ["lab-tree"].
+test result: ok. 1 passed; 0 failed (196.55 s). lab:hardlink: ctr refuses its unpack (fedora-reference.txt), as overlay's applier does.

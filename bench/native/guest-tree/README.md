@@ -40,3 +40,5 @@ The lab images (`lab_image.py`, Python's tarfile, PAX, gzip mtime 0) hold what n
 `cargo test -p hex-cli --test guest_tree` (crates/hex-cli/tests/guest_tree.rs) stages each image's layers and
 walks the staged root with the same walker: in a real guest (the Mac, jupiter), or on Linux as root with
 `HEX_GUEST21_LOCAL=1` (the relay in-process; the check before a guest run). Its header says what it takes.
+Run in a container, its `/tmp` (where it stages) is a tmpfs, as the guest's staged folder is: a container's
+own overlayfs root refuses overlayfs's 0/0 whiteout device ("Operation not permitted", fedora 6.19).

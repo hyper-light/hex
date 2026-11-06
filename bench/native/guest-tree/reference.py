@@ -156,7 +156,10 @@ def one(hex_bin, out, image, record):
         f" mkdir -p /mnt/r && eval \"$p\" && /hex selftest-box tree /mnt/r > '{tree}'; s=$?; umount /mnt/r;"
         + (f" if [ $s = 0 ]; then eval \"$m\" && /hex selftest-box tree /mnt/r > '{tree}.ctr-options'; s=$?;"
            " umount /mnt/r; fi;" if check else "")
-        + f" ctr -n {NS} snapshots rm {view} >/dev/null; exit $s"
+        # The collector may have removed the view already, its lease ended with the ctr that made it (fedora,
+        # grafana's long walk): the mount held the committed layers below it, which the image holds.
+        + f" r=$(ctr -n {NS} snapshots rm {view} 2>&1) || case \"$r\" in *'not found'*) ;;"
+        " *) printf '%s\\n' \"$r\" >&2; exit 1;; esac; exit $s"
     ))
     printed, mounted = open(printed_at).read().splitlines()[:2]
     record.append(f"{name} view mounts (ctr's): {printed}")
@@ -182,6 +185,13 @@ def main(hex_bin, out, images):
     record.append("ctr: " + ctr(hex_bin, out, "version").decode().replace("\n", " | "))
     record.append("snapshotter: " + root(hex_bin, out, "ctr plugins ls | grep -E 'snapshotter.*overlayfs'").decode().strip())
     record.append("kernel: " + os.uname().release)
+    # Every image of this namespace removed first, its snapshots with it (--sync waits for the collector), so
+    # each image is unpacked now, after the SINCE the Hex side is given: a snapshot kept from an earlier run,
+    # or one a later image shares (alpine's base under caddy), would carry that run's mkparent times.
+    root(hex_bin, out, f"ctr -n {NS} images ls -q | xargs -r ctr -n {NS} images rm --sync >/dev/null")
+    # ctr 2.3.6's `snapshots ls` has no -q: its table, less its header.
+    left = root(hex_bin, out, f"ctr -n {NS} snapshots ls | tail -n +2 | wc -l").decode().strip()
+    record.append(f"fresh: every {NS} image removed (images rm --sync); snapshots left: {left}")
     for image in images:
         one(hex_bin, out, image, record)
     with open(os.path.join(out, "RECORD.txt"), "w") as f:
