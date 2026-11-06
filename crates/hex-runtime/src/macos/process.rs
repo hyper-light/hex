@@ -5,7 +5,7 @@
 //! bounds by Hex's own rule ([`hex_core::watch`]): it lists the box's members (`proc_listpids` of its
 //! process group), reads each footprint (`proc_pid_rusage`), and ends the box (killpg, then the members'
 //! own waiters reap) once it passes a bound. The rule is the pure core; this shell does the listing, the
-//! reading, the waiting and the killing, from a Mach time-constraint thread on `NOTE_CRITICAL` kqueue
+//! reading, the waiting and the killing, from a timeshare thread on `NOTE_CRITICAL` kqueue
 //! timers so a box filling every core can't hold its watcher off (RESULT.md).
 //!
 //! Each member Hex spawns is also armed with a fatal per-process memory cap at the box's whole bound
@@ -83,9 +83,6 @@ pub struct Shared {
     /// How long a killed group gets to empty, as this node learns it: the record's to start, raised by every
     /// slower drain any box sees (hex_core::drain::Learned; the learned-waits rule, 2026-11-06).
     drain: Arc<Mutex<hex_core::drain::Learned>>,
-    /// How late the watchers' timers wake, as this node learns it: every box's wake under load is the
-    /// machine's, so one learned lateness serves them all (hex_core::watch::Lateness).
-    lateness: Arc<Mutex<watch::Lateness>>,
 }
 
 impl Shared {
@@ -103,17 +100,7 @@ impl Shared {
                 processes: rate_processes,
             }))),
             drain: Arc::new(Mutex::new(hex_core::drain::Learned::default())),
-            lateness: Arc::new(Mutex::new(watch::Lateness::default())),
         })
-    }
-
-    /// How early each wait comes, as learned so far (twice the slowest wake seen, the record's included).
-    pub fn lateness(&self) -> Result<Duration, Refusal> {
-        Ok(self
-            .lateness
-            .lock()
-            .map_err(|_| poisoned("the node's wake lateness"))?
-            .bound())
     }
 
     /// The rates as learned so far.
@@ -525,7 +512,7 @@ fn alive_in(pgid: i32, pids: &mut Vec<i32>) -> Result<usize, Refusal> {
     Ok(alive)
 }
 
-/// The watcher of one box: a Mach time-constraint thread that reads the box every (bound − footprint) /
+/// The watcher of one box: a thread that reads the box every (bound − footprint) /
 /// rate, holds its bounds, and ends it when it passes one.
 struct Watcher {
     state: Arc<State>,
@@ -544,8 +531,6 @@ struct Watcher {
     /// When the last read was and what it found (footprint, processes): the growth to the next read is what
     /// the node's rates learn from.
     last_read: Option<(Instant, u64, u64)>,
-    /// When the last wait was armed and for how long, if its own timer woke it: the next read's lateness.
-    timer_wake: Option<(Instant, Duration)>,
 }
 
 impl Watcher {
@@ -564,7 +549,6 @@ impl Watcher {
             pids: sys::listing()?,
             events: Vec::with_capacity(sys::EVENTS),
             last_read: None,
-            timer_wake: None,
         })
     }
 
@@ -575,20 +559,8 @@ impl Watcher {
     }
 
     fn run(&mut self) {
-        // Best-effort: a real-time thread reads on time even when the box fills every core (RESULT.md).
-        // Without it the watcher still runs, only later under full load, so a failure isn't fatal. The
-        // computation budget is 150 µs, not the floor's 50 µs: a read of a 28-member box (one
-        // `proc_listpids` and a `proc_pid_rusage` each) runs slower under the members' memory-bandwidth
-        // contention, and a budget below the read's cost gets the thread demoted mid-period and then
-        // starved behind the members, overshooting the bound by hundreds of MiB. At 150 µs (per 250 µs) a
-        // 28-member box held to ≤42 MiB, measured by `bench/native/macos/rtbudget` on adas-mac-studio-3,
-        // 2026-11-01 (CLAUDE.md §5).
-        let _ = sys::time_constraint(
-            &self.shared.tb,
-            watch::FLOOR,
-            Duration::from_micros(150),
-            watch::FLOOR,
-        );
+        // A plain timeshare thread: the watcher holds a box's bound by reading it, never by taking priority
+        // over other programs (Ada's rule, 2026-11-03; the lead, 2026-11-06).
         loop {
             if self.state.stop.load(Ordering::SeqCst) {
                 self.finish();
@@ -607,12 +579,7 @@ impl Watcher {
             };
             // A timer only where a bound needs one; otherwise the box's next change wakes it: a member's
             // fork or end, a start (exec) or a delete, each a kqueue event.
-            let armed = Instant::now();
             let _ = self.state.kq.wait(next, None, &mut self.events);
-            // A wake by its own timer: how late its read comes is what the next waits come early by.
-            self.timer_wake = next
-                .filter(|_| self.events.iter().any(|e| matches!(e, Event::Timer)))
-                .map(|d| (armed, d));
         }
     }
 
@@ -627,22 +594,9 @@ impl Watcher {
         else {
             return Ok(None);
         };
-        let early = self
-            .shared
-            .lateness
-            .lock()
-            .map_err(|_| poisoned("the node's wake lateness"))?
-            .bound();
-        self.watch.early_by(early);
         let rates = self.shared.rates()?;
         self.watch.rated(rates);
         let reading = self.read_members(pgid)?;
-        // How late this read came past its timer, the read included (as the lateness record measures).
-        if let Some((armed, d)) = self.timer_wake.take()
-            && let Ok(mut lateness) = self.shared.lateness.lock()
-        {
-            lateness.observe(armed.elapsed().saturating_sub(d));
-        }
         // The escape check diffs the member lists and allocates; run it only when the running set changed,
         // so a box allocating hard with a steady set of members keeps each read lean enough to finish
         // within the watcher's real-time budget (else it is demoted and overshoots; see process.rs run()).

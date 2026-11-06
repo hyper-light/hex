@@ -53,10 +53,11 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' TERM INT
 MAINPID=$$
-# Twice the lab's recorded phases (18.950 s) plus each unrecorded phase's own guard, step 2's probe waits
-# (10.700 s): bench/native/macos/records/labphases-40454fe-20261106T165836Z.txt (the lead's call 5, 2026-11-06).
-# Ada's run prints every phase's time (TIME: lines); her record sets it after.
-WATCHDOG_SECS=29.650
+# Twice the lab's recorded phases (18.950 s) plus each unrecorded phase's own guard: step 2's probe waits
+# (10.700 s) and the oversubscribed box-user test's six passes, each ended by its first hog's wait, bounded by
+# the test's HANG_GUARD (6 x 39.507 = 237.042 s): bench/native/macos/records/labphases-40454fe-20261106T165836Z.txt
+# (the lead's call 5, 2026-11-06). Ada's run prints every phase's time (TIME: lines); her record sets it after.
+WATCHDOG_SECS=266.692
 (sleep "$WATCHDOG_SECS"; echo "macos_lab: watchdog fired after ${WATCHDOG_SECS} s" >&2; kill -TERM "$MAINPID") &
 WATCHDOG_PID=$!
 
@@ -93,6 +94,16 @@ expect() { # <what> <command...>: records PASS when the command succeeds, else F
   echo "TIME: $(perl -e "printf '%.3f', $(now) - $t0") s: $what"
 }
 box_user_contract() { as_user env HEX_BOX_HELPER_SOCK="$SOCK" "$TESTBIN" --exact --ignored box_user_boxes_hold_the_contract --test-threads 1 2>&1 | tail -n 15; return "${PIPESTATUS[0]}"; }
+# Ada's two-layer bound (2026-11-01): the helper's ledger holds a box of 2x and 4x the cores' hogs within 64
+# MiB of its bound (the lead, 2026-11-06), as the lab user over the installed helper.
+# It must run, not match nothing: libtest passes a filter that names no test.
+oversubscribed_box_user() {
+  local out st
+  out=$(as_user env HEX_BOX_HELPER_SOCK="$SOCK" "$TESTBIN" --exact --ignored a_box_user_box_holds_the_bar_oversubscribed --nocapture --test-threads 1 2>&1)
+  st=$?
+  grep -E 'OVERSHOOT|test result|panicked|passes past' <<<"$out"
+  [ "$st" = 0 ] && grep -q 'test result: ok. 1 passed' <<<"$out"
+}
 process_contract() { as_user "$TESTBIN" --exact macos_process_boxes_hold_the_contract 2>&1 | tail -n 3; return "${PIPESTATUS[0]}"; }
 nothing_left_listed() {
   local n
@@ -184,6 +195,7 @@ echo "$LABUSER's groups (a fresh login): $(as_user id -Gn)"
 expect "$LABUSER (hexnode) connects to the helper's socket" member_connects
 expect "nobody (outside hexnode) is refused the helper's socket" outsider_refused
 expect "the box-user HEX-RT contract passes for $LABUSER over the installed helper (HEX-INST-6)" box_user_contract
+expect "the helper's ledger holds a box of 2x and 4x the cores' hogs within 64 MiB of its bound, every pass" oversubscribed_box_user
 expect "step 2's C1: the installed pool's user holds its members, its cap bites, a kill-all empties it" membership_c1
 expect "step 2's caps: the fatal footprint cap kills at 64 and 256 MiB, the soft one notifies" caps
 expect "the process class still passes HEX-RT-1..9" process_contract

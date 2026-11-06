@@ -522,14 +522,16 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
     members so the limits sum to the bound, so the kernel fires a Mach `EXC_RESOURCE` the instant the tree
     crosses it (by pigeonhole some member crosses its share) — near-zero overshoot, ~zero watcher CPU,
     bounding the whole tree, and re-arming a forked child, which layer one can't. Layer three is
-    **defense-in-depth**, the whole bound on a node with no helper: Hex's own polling rule, a Mach
-    time-constraint thread that reads each member's footprint (`proc_pid_rusage`) on `NOTE_CRITICAL` kqueue
-    timers, every (bound + 64 MiB - footprint) / the recorded worst aggregate rate (47.46 GB/s, one member per
-    core filling at once; floor 250 µs, no ceiling), so no box passes its bound by more than step 1's 64 MiB
-    bar between reads, and ends the box past its bound
-    (an eviction by a stated rule, CLAUDE.md §2). A rootless, kernel-enforced per-process cap thus **does**
-    exist — at spawn, layer one — but re-arming a *running* task and apportioning a bound across members need
-    root (`memorystatus_control` → `EPERM`, `task_set_phys_footprint_limit` →
+    **defense-in-depth**, the whole bound on a node with no helper: Hex's own polling rule, a timeshare
+    thread (no priority over other programs, Ada's rule 2026-11-03) that reads each member's footprint
+    (`proc_pid_rusage`) on `NOTE_CRITICAL` kqueue timers, every (bound + 64 MiB - footprint) / the node's
+    machine class's recorded worst aggregate rate, learned up as it sees faster growth (51.05 GB/s for the
+    M4 Max; floor 250 µs, no ceiling), and ends the box past its bound (an eviction by a stated rule,
+    CLAUDE.md §2). It holds step 1's 64 MiB bar up to one member per core, its recorded limit; past that its
+    thread doesn't run often enough, and the ledger layer holds the box (Ada's two-layer bound, 2026-11-01;
+    the lead, 2026-11-06). A rootless, kernel-enforced per-process cap thus **does** exist — at spawn, layer
+    one — but re-arming a *running* task and apportioning a bound across members need root
+    (`memorystatus_control` → `EPERM`, `task_set_phys_footprint_limit` →
     `KERN_NO_ACCESS` unprivileged; `RLIMIT_AS`/`RLIMIT_RSS` → `EINVAL` and unenforced, `EVFILT_MEMORYSTATUS`
     absent, `proc_rlimit_control` has no memory cap; `bench/native/macos/mem_bound_probe.c`,
     `docs/research/runtime/macos-spawn-jetsam-cap.md`). Built and measured on the Mac Studio through the

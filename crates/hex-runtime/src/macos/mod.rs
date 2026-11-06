@@ -81,10 +81,10 @@ pub struct MacRuntime {
 }
 
 impl MacRuntime {
-    /// The node's pacing as its watchers have learned it: the growth rates its boxes are reckoned at and how
-    /// early each wait comes for the watcher's wake lateness (observability: what the watchers pace by).
-    pub fn pacing(&self) -> Result<(hex_core::watch::Rates, std::time::Duration), Refusal> {
-        Ok((self.shared.rates()?, self.shared.lateness()?))
+    /// The growth rates the node's boxes are paced at, as its watchers have learned them (observability:
+    /// what the watchers pace by).
+    pub fn pacing(&self) -> Result<hex_core::watch::Rates, Refusal> {
+        self.shared.rates()
     }
 
     /// A rootless runtime (no helper): boxes are process groups whose bounds a watcher holds, reckoned to

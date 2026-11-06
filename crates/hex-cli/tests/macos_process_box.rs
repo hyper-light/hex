@@ -398,67 +398,101 @@ fn measure_exec_to_exit() {
     rt.delete(&id).expect("delete");
 }
 
-/// HEX-MAC-1/HEX-MAC-4, the lead's call (2026-11-06): a box filled by twice and by four times as many members
-/// as the machine has cores, every member allocating at once, ends within step 1's bar, 64 MiB past its
-/// 256 MiB bound, on every pass: the watcher's reads come early by its learned wake lateness, so a late
-/// wake under oversubscription doesn't let the box past the bar. Do fill the box with 2x and 4x the cores'
-/// hogs, three passes each; expect each pass's peak, as the watcher and this test's live reads saw it,
-/// within the bound plus the bar.
+/// Fills a fresh 256 MiB box on `rt` with `members` hogs allocating at once (4 GiB each, far past the whole
+/// bound), waits for every hog to end, and returns how far past the bound its footprint got: the peak the
+/// runtime reports, which for a rootless box this test's own live reads raise up to the members' deaths
+/// after the kill. Prints the pass, with the footprint the watcher read when it ended a rootless box.
+fn overshoot(rt: &MacRuntime, fx: &BinFixture, what: &str, members: usize, pass: usize) -> u64 {
+    let id = BoxId::new(&format!("mac-over-{what}-{members}-{pass}")).unwrap();
+    let _ = rt.delete(&id);
+    rt.create(BoxSpec {
+        id: id.clone(),
+        bounds: Bounds {
+            memory_max: Some(256 * MIB),
+            ..Bounds::default()
+        },
+        class: ClassSpec::Process,
+    })
+    .expect("create");
+    let procs: Vec<_> = (0..members)
+        .map(|_| {
+            rt.exec(&id, fx.act(&Act::Hog(4 * GIB)), Stdio::null())
+                .expect("exec hog")
+        })
+        .collect();
+    let mut peak = 0;
+    for mut p in procs {
+        let exit = p.wait_for(HANG_GUARD).expect("wait");
+        assert!(
+            exit.is_some(),
+            "a hog never ended: the box didn't end for memory"
+        );
+        peak = peak.max(rt.usage(&id).expect("usage").memory_peak_bytes);
+    }
+    let at_end = match rt.status(&id).map(|s| s.ended) {
+        Ok(Some(hex_runtime::macos::process::Ended::Over(hex_core::watch::Over::Memory {
+            footprint,
+            ..
+        }))) => footprint.saturating_sub(256 * MIB),
+        _ => 0,
+    };
+    rt.delete(&id).expect("delete");
+    let over = peak.saturating_sub(256 * MIB);
+    println!(
+        "OVERSHOOT {what} members={members} pass={pass} overshoot_mib={:.1} at_end_mib={:.1}",
+        over as f64 / MIB as f64,
+        at_end as f64 / MIB as f64
+    );
+    over
+}
+
+/// HEX-MAC-1/HEX-MAC-4, Ada's two-layer bound (2026-11-01, bench/native/macos/RESULT.md; the lead,
+/// 2026-11-06): on a node with no helper, polling is the whole bound at its recorded limit, one member per
+/// core. Do fill a rootless box with one member, with half the cores' and with one per core, three passes
+/// each; expect every pass within 64 MiB of its 256 MiB bound. Do fill one with twice and four times the
+/// cores'; expect it still ends for memory, its overshoot printed (the kernel's ledger, step 2, holds those).
 #[test]
-fn an_oversubscribed_box_ends_within_the_bar() {
+fn a_rootless_box_holds_the_bar_up_to_one_member_per_core() {
+    let fx = fixture();
+    let rt = runtime();
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let mut misses = Vec::new();
+    for members in [1, cores / 2, cores] {
+        for pass in 1..=3 {
+            let over = overshoot(&rt, &fx, "rootless", members, pass);
+            if over > 64 * MIB {
+                misses.push((members, pass, over / MIB));
+            }
+        }
+    }
+    for members in [2 * cores, 4 * cores] {
+        let _ = overshoot(&rt, &fx, "rootless", members, 1);
+    }
+    assert!(
+        misses.is_empty(),
+        "passes past the 64 MiB bar (members, pass, MiB over): {misses:?}"
+    );
+}
+
+/// HEX-MAC-1/HEX-MAC-7, Ada's two-layer bound: on a node with the helper, its ledger layer holds the bar
+/// whatever the box's size, every member (forks included) armed with an apportioned share and rebalanced.
+/// Do fill a box-user box with twice and four times the cores' hogs, three passes each, on the installed
+/// helper; expect every pass within 64 MiB of its 256 MiB bound. Ignored: it needs the root helper, so the
+/// installer lab runs it (bench/install/macos_lab.sh) with HEX_BOX_HELPER_SOCK set.
+#[test]
+#[ignore = "needs the installed root helper; the installer lab runs it via HEX_BOX_HELPER_SOCK"]
+fn a_box_user_box_holds_the_bar_oversubscribed() {
+    let sock = std::env::var("HEX_BOX_HELPER_SOCK")
+        .expect("HEX_BOX_HELPER_SOCK, set by the lab to the installed helper's socket");
+    let rates = seed(&machine_model().expect("this Mac's model"));
+    let rt = MacRuntime::detect(rates.bytes, rates.processes, std::path::Path::new(&sock))
+        .expect("a box-user macOS runtime");
     let fx = fixture();
     let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
     let mut misses = Vec::new();
     for members in [2 * cores, 4 * cores] {
         for pass in 1..=3 {
-            let rt = runtime();
-            let id = BoxId::new(&format!("mac-oversub-{members}-{pass}")).unwrap();
-            let _ = rt.delete(&id);
-            rt.create(BoxSpec {
-                id: id.clone(),
-                bounds: Bounds {
-                    memory_max: Some(256 * MIB),
-                    ..Bounds::default()
-                },
-                class: ClassSpec::Process,
-            })
-            .expect("create");
-            let procs: Vec<_> = (0..members)
-                .map(|_| {
-                    rt.exec(&id, fx.act(&Act::Hog(4 * GIB)), Stdio::null())
-                        .expect("exec hog")
-                })
-                .collect();
-            let deadline = Instant::now() + HANG_GUARD;
-            let peak = loop {
-                let u = rt.usage(&id).expect("usage");
-                if u.oom_kills >= 1 {
-                    break u.memory_peak_bytes;
-                }
-                assert!(Instant::now() < deadline, "the box never ended for memory");
-                std::thread::yield_now();
-            };
-            // What the watcher read when it ended the box, beside the peak (which this test's own live reads
-            // raise, up to the members' deaths after the kill).
-            let at_end = match rt.status(&id).expect("status").ended {
-                Some(hex_runtime::macos::process::Ended::Over(hex_core::watch::Over::Memory {
-                    footprint,
-                    ..
-                })) => footprint,
-                _ => 0,
-            };
-            rt.delete(&id).expect("delete");
-            drop(procs);
-            let over = peak.saturating_sub(256 * MIB);
-            let (rates, early) = rt.pacing().expect("pacing");
-            println!(
-                "OVERSUB members={members} pass={pass} overshoot_mib={:.1} at_end_mib={:.1} bytes_per_s={} spawns_per_s={} early_us={}",
-                over as f64 / MIB as f64,
-                at_end.saturating_sub(256 * MIB) as f64 / MIB as f64,
-                rates.bytes,
-                rates.processes,
-                early.as_micros()
-            );
+            let over = overshoot(&rt, &fx, "box-user", members, pass);
             if over > 64 * MIB {
                 misses.push((members, pass, over / MIB));
             }
@@ -467,5 +501,63 @@ fn an_oversubscribed_box_ends_within_the_bar() {
     assert!(
         misses.is_empty(),
         "passes past the 64 MiB bar (members, pass, MiB over): {misses:?}"
+    );
+}
+
+/// Ada's rule (2026-11-03, "Slowing other programs down is a hack. We get that fast by being even faster";
+/// the lead, 2026-11-06): the watcher holds a box's bound by reading it, never by taking priority over other
+/// programs. Do watch a box with a running member; expect every thread of the node's process scheduled
+/// timeshare, as `ps -M` shows a thread's policy (`T` timeshare; `R` and `F` round-robin and fixed, which a
+/// Mach time-constraint thread reports).
+#[test]
+fn the_watcher_takes_no_priority_over_other_programs() {
+    let rt = runtime();
+    let fx = fixture();
+    let id = BoxId::new("mac-no-priority").unwrap();
+    let _ = rt.delete(&id);
+    rt.create(BoxSpec {
+        id: id.clone(),
+        bounds: Bounds {
+            memory_max: Some(256 * MIB),
+            ..Bounds::default()
+        },
+        class: ClassSpec::Process,
+    })
+    .expect("create");
+    let mut p = rt
+        .exec(&id, fx.act(&Act::Wait), Stdio::null())
+        .expect("exec");
+    // The watcher has read the box once a read has recorded its member.
+    let deadline = Instant::now() + HANG_GUARD;
+    while rt.status(&id).expect("status").running == 0 {
+        assert!(Instant::now() < deadline, "the watcher never read the box");
+        std::thread::yield_now();
+    }
+    let out = std::process::Command::new("/bin/ps")
+        .args(["-M", "-p", &std::process::id().to_string()])
+        .output()
+        .expect("ps -M");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    rt.delete(&id).expect("delete");
+    let _ = p.wait_for(HANG_GUARD);
+    // Each thread's PRI is the token after its STAT: digits and a policy letter.
+    let policies: Vec<char> = text
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            line.split_whitespace()
+                .find(|t| {
+                    let (letter, digits) = t.as_bytes().split_last().unwrap_or((&b'0', &[]));
+                    !digits.is_empty()
+                        && letter.is_ascii_alphabetic()
+                        && digits.iter().all(u8::is_ascii_digit)
+                })
+                .and_then(|t| t.chars().last())
+        })
+        .collect();
+    assert!(!policies.is_empty(), "ps -M listed no thread: {text}");
+    assert!(
+        policies.iter().all(|&c| c == 'T'),
+        "a thread runs with priority over other programs:\n{text}"
     );
 }

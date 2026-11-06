@@ -48,14 +48,6 @@ impl Timebase {
             .and_then(|n| n.checked_div(u128::from(self.denom)))
             .map_or(u64::MAX, |n| u64::try_from(n).unwrap_or(u64::MAX))
     }
-
-    /// `d` in ticks of Mach absolute time, saturating at `u32::MAX`, the width a thread policy takes.
-    pub fn ticks32(&self, d: Duration) -> u32 {
-        d.as_nanos()
-            .checked_mul(u128::from(self.denom))
-            .and_then(|n| n.checked_div(u128::from(self.numer)))
-            .map_or(u32::MAX, |n| u32::try_from(n).unwrap_or(u32::MAX))
-    }
 }
 
 /// A process's use as `proc_pid_rusage(RUSAGE_INFO_V4)` reads it (`libproc.h`). Times are Mach absolute
@@ -230,45 +222,6 @@ fn sysctl_count(name: &std::ffi::CStr) -> io::Result<usize> {
     }
     usize::try_from(v)
         .map_err(|_| io::Error::other(format!("{} reads {v}", name.to_string_lossy())))
-}
-
-/// Makes the calling thread a Mach time-constraint thread (`THREAD_TIME_CONSTRAINT_POLICY`,
-/// `mach/thread_policy.h`), so a box's members filling every core don't hold its watcher off: it needs
-/// `computation` of every `period`, done within `constraint`, and can be preempted.
-pub fn time_constraint(
-    tb: &Timebase,
-    period: Duration,
-    computation: Duration,
-    constraint: Duration,
-) -> io::Result<()> {
-    let mut policy = libc::thread_time_constraint_policy_data_t {
-        period: tb.ticks32(period),
-        computation: tb.ticks32(computation),
-        constraint: tb.ticks32(constraint),
-        preemptible: 1,
-    };
-    // The flavor constant is an `i32` in libc but the parameter a `u32` (`thread_policy_flavor_t`); it is a
-    // small positive tag, so the conversion never fails.
-    let flavor = u32::try_from(libc::THREAD_TIME_CONSTRAINT_POLICY)
-        .map_err(|_| io::Error::other("THREAD_TIME_CONSTRAINT_POLICY is negative"))?;
-    // SAFETY: pthread_mach_thread_np names the calling thread's own port without taking a reference to
-    // release. thread_policy_set reads THREAD_TIME_CONSTRAINT_POLICY_COUNT integers, the struct's size,
-    // from the policy given, which outlives the call.
-    let kr = unsafe {
-        libc::thread_policy_set(
-            libc::pthread_mach_thread_np(libc::pthread_self()),
-            flavor,
-            (&raw mut policy).cast::<libc::integer_t>(),
-            libc::THREAD_TIME_CONSTRAINT_POLICY_COUNT,
-        )
-    };
-    if kr == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
-            "thread_policy_set: kern_return {kr}"
-        )))
-    }
 }
 
 /// The QoS a box's processes are clamped to from their first instruction, passed to every process

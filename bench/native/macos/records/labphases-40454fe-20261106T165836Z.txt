@@ -26,6 +26,8 @@ uninstall_dry_run               0.018 0.015 0.015 0.017 0.016            0.018
 #   fatal caps at 64 and 256 MiB: a 2,000 x 1 ms poll each = 4.000 s
 #   soft cap at 64 MiB: 100 ms + a 5,000 ms receive + a 1,000 ms receive = 6.100 s
 #   = 10.700 s
-# watchdog = 18.950 + 10.700 = 29.650 s. The two connect probes and the dscl writes inside install and uninstall
+#   the oversubscribed box-user test (a_box_user_box_holds_the_bar_oversubscribed, added 2026-11-06): six passes,
+#   each ended by its first hog's wait, bounded by the test's HANG_GUARD = 6 x 39.507 = 237.042 s
+# watchdog = 18.950 + 10.700 + 237.042 = 266.692 s (was 29.650 s before the box-user test). The two connect probes and the dscl writes inside install and uninstall
 # have neither a record nor a guard of their own; the x 2 on the install and uninstall proxies is their margin.
 # Ada's run prints every phase's time (TIME: lines), and her record sets the watchdog after.
