@@ -134,6 +134,10 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
     teardown alone, is superseded.) The lock wait is now gone (cp/t7-g16-prefetch 1190a2c, merged at 309e62b: a
     no-owner create looks up nothing in cgroupfs); it moved the no-owner p99.9 about 2% (0.36x and 0.40x in its A/B),
     so what holds the tail is the kernel's teardown of the pass's own earlier boxes, 1.3-1.4 ms of the slowest 0.1%.
+  - Goal 16's finding (2026-11-06, fedora 6.19.10; RESULT.md "Goal 16's finding"): the path is the deleted box's
+    memory-cgroup offline (`mem_cgroup_css_offline`, 128-256 us a box most often), run by a per-CPU kworker
+    (`cgroup_offline_wq`, `WQ_PERCPU`) on the very CPU whose RCU callback queued it, a create CPU, preempting the next
+    create there (256 us to 2 ms); not a lock the create waits on. Being cut by doing less (goal 16).
   - The Mac Studio through `docker_pass.sh` (2026-11-06, Docker Desktop's VM, 6.12.65-linuxkit aarch64, the same tree):
     **every cell under the bar in both columns and both modes**, no owner 0.107x (0.150x), 0.127x (0.175x), 0.102x
     (0.160x), 0.103x (0.131x); reuse on 0.107x (0.139x), 0.122x (0.151x), 0.099x (0.152x), 0.108x (0.134x), libcrun's

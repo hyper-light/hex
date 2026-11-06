@@ -601,6 +601,32 @@ Best of 2, ms (Hex over libcrun in the same pass):
   So the bar as written stays unmet on fedora; that is now the kernel's teardown cost, 1.3 to 1.4 ms of the slowest
   0.1%, which only fewer cgroups torn down (reuse) removes. No pass of record followed the fix.
 
+**Goal 16's finding: the kernel path that delays the slowest 0.1% of no-owner creates** (2026-11-06, fedora,
+Linux 6.19.10; not of record: the tracers cost some). It is CPU preemption by the deleted box's memory-cgroup offline,
+run by a per-CPU kworker on the next create's own CPU; not a lock the create waits on. Unit
+hex-g5rec-g16trace-20261106T130219Z at a186d35 (the prefetch fix in, parked procs on): `probes/create_tail.sh` at the
+bar's conditions (no owner, 2 x 10,000, CPUs 4-15 under the lock; out create-tail-20261106T130528Z, traced create p99.9
+1.926 ms), with a bpftrace program beside it in a privileged container on CPUs 16-31 (fedora has no host perf or
+bpftrace; the program and its maps under `~/.cache/hex-t7/g5rec/g16/` there). The path, in Linux v6.19:
+1. An earlier delete's `rmdir` runs on a create CPU: `cgroup_rmdir` → `kill_css` → `percpu_ref_kill_and_confirm`, which
+   calls `call_rcu_hurry` on that CPU (`lib/percpu-refcount.c:233`).
+2. After the grace period its RCU callback runs in softirq on the same CPU. Traced, every `css_killed_work_fn` item was
+   queued by `ksoftirqd/N` on CPUs 4-15 (11,900 to 14,300 a CPU on the even ones, 3,100 to 5,000 on the odd).
+3. `css_killed_ref_fn` queues the offline with `queue_work(cgroup_offline_wq)` (`kernel/cgroup/cgroup.c:6062-6070`), a
+   per-CPU workqueue (`alloc_workqueue("cgroup_offline", WQ_PERCPU, 1)`, `:6457`): a kworker bound to that create CPU.
+4. `css_killed_work_fn` (`:6044-6059`) takes `cgroup_mutex` and takes each controller offline. The memory controller's
+   `mem_cgroup_css_offline` is the cost: 128 to 256 us most often, 64 us to 1 ms, about 20,000 calls; cpu, blkcg and
+   lru_gen offline 0 to 1 us each. It kept each create CPU busy 0.25 to 0.94 s over the run.
+5. That kworker preempts the next create's thread (seam_oci, the seed, the init) on that CPU: 110 preemptions while it
+   ran, 256 us to 2 ms (most 512 us to 1 ms), against 2 to 16 us for most other preemptions.
+6. `create_tail_attr.py`'s per-create walk agrees: the slowest 0.1% add +1.368 ms of `css_*_work_fn` preemption over the
+   middle band, +0.271 ms run queue, +0.086 ms Hex's own runs, and nothing waiting on `cgroup_mutex`.
+
+`cgroup_mutex`, which `css_killed_work_fn` holds across the memcg offline, is contended too: Hex's threads waited 925
+ms (seam_oci), 478 ms (the seed and inits) and 336 ms (the refill) in all, most 64 to 256 us, in `clone3`
+(`CLONE_INTO_CGROUP`, `cgroup_css_set_fork`, `:6694`), `cgroup_rmdir` and the refill's `cgroup_mkdir`: parks, execs,
+deletes and the refill, not the create, whose init is parked. `cgroup_threadgroup_rwsem`: 0.35 ms in all.
+
 **What the slowest 0.1% of no-owner creates wait on: the first reading, superseded** (the lead, 2026-11-05T14:20Z;
 not of record: the tracer costs each switch some). Its figures stand; its conclusion doesn't. `create_tail_attr.py`
 charged only the runtime thread's own state, so the runtime's wait in `ppoll` for its init (+0.552 ms below) hid what
