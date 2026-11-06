@@ -374,3 +374,106 @@ fn a_sparse_entry_is_refused_by_name() {
     ]);
     assert!(refused("r.tar", &px).contains("a sparse entry"), "pax");
 }
+
+/// A global PAX record ('g') of `pairs`, then one plain file, as an archive.
+fn global(pairs: &[(&str, &str)]) -> Vec<u8> {
+    let record = pax(pairs);
+    archive(&[
+        (
+            header(b"pax_global_header", b'g', 0o644, record.len() as u64, b""),
+            &record,
+        ),
+        (header(b"f", b'0', 0o644, 1, b""), b"x"),
+    ])
+}
+
+/// HEX-GUEST-15 (the lead's question on global PAX records): pack a global record past 64 KiB, one with
+/// GNU sparse keys, and one setting `path`, `linkpath` or `size`: expect each refused by name, never held
+/// whole nor ignored; and one with only keys that don't change what's staged (times, ids, names, a
+/// comment, charsets) packed.
+#[test]
+fn a_global_pax_record_is_bounded_and_refused_when_it_sets_what_staging_applies() {
+    let big = "c".repeat(70 << 10);
+    let got = refused("r.tar", &global(&[("comment", &big)]));
+    assert!(
+        got.contains("a PAX record") && got.contains("past 65536 bytes"),
+        "{got}"
+    );
+    let got = refused("r.tar", &global(&[("GNU.sparse.major", "1")]));
+    assert!(got.contains("a sparse entry"), "{got}");
+    for key in ["path", "linkpath", "size"] {
+        let got = refused("r.tar", &global(&[(key, "1")]));
+        assert!(
+            got.contains(&format!(
+                "a global PAX record sets {key}, which staging doesn't apply"
+            )),
+            "{key}: {got}"
+        );
+    }
+    let quiet = global(&[
+        ("mtime", "1700000000.5"),
+        ("atime", "1700000000"),
+        ("ctime", "1700000000"),
+        ("uid", "0"),
+        ("gid", "0"),
+        ("uname", "root"),
+        ("gname", "root"),
+        ("comment", "made by git archive"),
+        ("charset", "ISO-IR 10646 2000 UTF-8"),
+        ("hdrcharset", "ISO-IR 10646 2000 UTF-8"),
+    ]);
+    let entries = unpack(&pack_tar("r.tar", &quiet, &LIMITS).unwrap());
+    assert_eq!(entries.len(), 2, "the root and its file");
+}
+
+/// HEX-GUEST-15 (the lead's 'g' list, 5): pack a global record setting a key on neither list (neither one
+/// staging applies nor one it may ignore): expect it refused naming that key, so a real archive that
+/// meets one shows exactly what to weigh.
+#[test]
+fn a_global_pax_record_with_an_unknown_key_is_refused_naming_it() {
+    let got = refused("r.tar", &global(&[("comment", "ok"), ("HEX.made.up", "1")]));
+    assert!(
+        got.contains("a global PAX record sets HEX.made.up, which staging doesn't apply"),
+        "{got}"
+    );
+}
+
+/// HEX-GUEST-15 (the lead's 'g' list, 4): pack a real `git archive --format=tar` output (git 2.56.0, a
+/// scratch repo of `bin/hello` 0755, `etc/conf` and a symlink `link` -> `../bin/hello`, commit fc7ebc43;
+/// fixtures/git-archive.tar, sha256 0cbf36b3...), which begins with a global record holding only
+/// `comment=<commit>`: expect it staged, every entry exact (git's tar.umask 002 gives 0775 and 0664).
+#[test]
+fn a_git_archive_tarball_stages_with_every_entry_exact() {
+    let bytes = include_bytes!("fixtures/git-archive.tar");
+    let entries = unpack(&pack_tar("r.tar", bytes, &LIMITS).unwrap());
+    let got: Vec<(String, u16, What, Vec<u8>)> = entries
+        .into_iter()
+        .map(|(e, data)| (e.path, e.mode, e.what, data))
+        .collect();
+    let want = vec![
+        ("root".to_owned(), 0o755, What::Dir, vec![]),
+        ("root/bin".to_owned(), 0o775, What::Dir, vec![]),
+        (
+            "root/bin/hello".to_owned(),
+            0o775,
+            What::File { size: 18 },
+            b"#!/bin/sh\necho hi\n".to_vec(),
+        ),
+        ("root/etc".to_owned(), 0o775, What::Dir, vec![]),
+        (
+            "root/etc/conf".to_owned(),
+            0o664,
+            What::File { size: 9 },
+            b"name=lab\n".to_vec(),
+        ),
+        (
+            "root/link".to_owned(),
+            0o777,
+            What::Symlink {
+                target: "../bin/hello".to_owned(),
+            },
+            vec![],
+        ),
+    ];
+    assert_eq!(got, want);
+}
