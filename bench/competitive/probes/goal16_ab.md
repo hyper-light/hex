@@ -174,3 +174,44 @@ whose callbacks weren't probed, none by another tenant's cgroups. Its largest si
   owner is named);
 - and, largest, its own refill's `mkdir` holding up the create's cgroup file lookups, 1.38 ms, while that `mkdir` waits
   on the host-wide notification work.
+
+## No cgroupfs lookup on a no-owner create's path (cp/t7-g16-prefetch, the lead, 2026-11-06T09:47Z)
+
+The biggest wait above, 1.38 ms of the slowest 0.1%, was the create's own lookups of its cgroup's files, queued behind
+the refill's `mkdir`. bpftrace on `kernfs_iop_lookup` found 14 such lookups a create (7 bounds, 4 counters, `memory.peak`,
+2 of the box's id), and oci_reuse's red counted 20 on the creating thread (2842286). The fix (1190a2c), on by default:
+- the refill opens those files when it makes the cgroup ahead;
+- a box root keeps the id-named cgroups it may hold, so the id's absence needs no lookup;
+- the refill is woken after the create's file work.
+The count is 0. Gate 6 at 1190a2c: unit hex-g5tail-g16pfgates-20261106T094401Z, gates 7/7, the root lab and the 7.2
+guest exit 0, one unit, its own target dir.
+
+**A/B at the bar's conditions** (unit hex-g5tail-g16pfab-20261106T094401Z): A cp/t7-g16-record 13214b6 (hex
+619b6bf5d6aa0973, seam_oci 6af462e4248fc994), B cp/t7-g16-prefetch 1190a2c (hex 0307ce5541d10960, seam_oci
+4656f14dd6731c34), each as it ships (parked procs on for the root node). host.sh PHASES=oci, no owner, 2 rounds of 10,000
+after 100, A B B A, CPUs 4-15 under the lock, noisy:
+
+| pass | side | out | Hex create p99.9 (ms) | Hex create+start of `true` p99.9 (ms) | libcrun create p99.9 (ms) |
+|---|---|---|---|---|---|
+| 1 | A | 20261106T094720Z | 1.72 | 2.59 | 17.86 |
+| 2 | B | 20261106T095745Z | 1.60 | 2.46 | 4.58 |
+| 3 | B | 20261106T101757Z | 1.81 | 2.44 | 4.50 |
+| 4 | A | 20261106T102834Z | 1.75 | 2.49 | 7.19 |
+
+Create p99.9: a mean of 1.735 ms (A) against 1.705 (B), 2%. create+start: 2.54 against 2.45, 3.5%. Both are within the
+passes' spread. Every pool was full; parked procs hit 10,098 to 10,100 a phase in both arms. Against libcrun's 4.50 and
+4.58 in B's passes, B's create is 0.36x and 0.40x, not 0.25x.
+
+**create_tail** (3 rounds, 15,000 traced creates each):
+- B (create-tail-20261106T103911Z): create p99.9 1.92 ms. The slowest 0.1% have no cgroupfs lock wait. 1.40 ms of their
+  mean is preemption by `css_killed_work_fn` tearing down this run's own boxes; the rest is Hex running (0.53) and RCU
+  softirqs.
+- A (create-tail-20261106T104104Z): create p99.9 2.20 ms. In the slowest 0.1%:
+  - 1.26 ms is this run's boxes' teardown;
+  - the lookup wait is still there, but only 0.17 ms this time (1.38 in the earlier trace: it varies with what else holds
+    the hierarchy's lock);
+  - 0.26 ms is a btrfs directory lookup, the state directory's, the bench container's overlay on the host's btrfs.
+- Host: 126 to 132 mount namespaces, 5,780 to 6,013 mounts, 1,947 to 1,989 superblocks mounted.
+
+So the lock wait is gone. What's left in the no-owner tail is the kernel's teardown of Hex's own earlier boxes,
+preempting the next create on its CPU, which this rule leaves Hex to make less of, not to move.
