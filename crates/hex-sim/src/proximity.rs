@@ -23,10 +23,8 @@
 //! **Policies**, each over the fast path's own sample ([`FitIndex::sampled_fit`]'s window and its
 //! admitting nodes, so they see the same candidates):
 //! - [`Policy::Blind`]: the fast path's best fit, proximity ignored.
-//! - [`Policy::Proximity`]: the least predicted RTT to the workload's home from hyper-swim's
-//!   coordinates, read as an upper bound, `rtt × (1 + K_SIGMA·(e_node + e_home)/2)`, with Vivaldi's
-//!   relative errors standing in for σ (Hyperscale's `rtt_ucb = rtt_hat + K_SIGMA·σ`, `K_SIGMA = 2`,
-//!   `proximity-and-failure-containment.md` §1.5); best fit breaks ties. A soft score: every admitting
+//! - [`Policy::Proximity`]: the least RTT to the workload's home that hyper-swim's coordinates
+//!   predict; best fit breaks ties. A soft score: every admitting
 //!   node stays a candidate.
 //! - [`Policy::TieBreak`]: best fit, and among the nodes whose free capacity ties the best, the
 //!   least predicted RTT: what S4's falsifier would leave.
@@ -50,8 +48,6 @@ use crate::rng::Rng;
 use crate::trace::{Latencies, Quantiles, TraceHash};
 use crate::wan::{Coordinates, Wan, WanConfig, node_id};
 
-/// Hyperscale's confidence multiplier on a coordinate's error (`K_SIGMA = 2`, its [33]).
-pub const K_SIGMA: f64 = 2.0;
 /// TraceLab's tool calls per session, p50 and p99 (agentic-workloads.md §1, [5]).
 pub const ROUND_TRIPS_P50: f64 = 25.0;
 pub const ROUND_TRIPS_P99: f64 = 1_438.0;
@@ -454,7 +450,7 @@ impl Study {
             let key = index.key(node)?;
             let score = match policy {
                 Policy::Blind => 0.0,
-                Policy::Proximity => self.upper_bound(node, home)?,
+                Policy::Proximity => self.predicted(node, home)?,
                 Policy::Oracle => self.wan.rtt_ns(node, home)? as f64 / 1e9,
                 Policy::TieBreak => {
                     if (key.cpu_milli, key.mem_bytes, key.gpus)
@@ -462,7 +458,7 @@ impl Study {
                     {
                         continue;
                     }
-                    self.upper_bound(node, home)?
+                    self.predicted(node, home)?
                 }
             };
             let wins = chosen.is_none_or(|(s, k)| score < s || (score == s && key < k));
@@ -477,13 +473,11 @@ impl Study {
         Ok(Some(node))
     }
 
-    /// The predicted RTT from `node` to `home`, seconds, widened by both coordinates' errors.
-    fn upper_bound(&self, node: NodeId, home: NodeId) -> Result<f64, SimError> {
-        let predicted = self.coordinates.predict(node, home)?;
-        let error = (self.coordinates.coordinate(node)?.error
-            + self.coordinates.coordinate(home)?.error)
-            / 2.0;
-        Ok(predicted * (1.0 + K_SIGMA * error))
+    /// hyper-swim's predicted RTT from `node` to `home`, seconds. Unwidened: Hyperscale's
+    /// `rtt_hat + K_SIGMA·σ` with its `K_SIGMA = 2` bought no least gain over the plain prediction on
+    /// the proximity sweep (`hex-sim.md` H21), and a copied multiplier is not taken (Ada, 2026-11-06).
+    fn predicted(&self, node: NodeId, home: NodeId) -> Result<f64, SimError> {
+        self.coordinates.predict(node, home)
     }
 }
 
@@ -771,7 +765,7 @@ mod tests {
                     {
                         continue;
                     }
-                    let score = study.upper_bound(node, job.home).unwrap();
+                    let score = study.predicted(node, job.home).unwrap();
                     if want.is_none_or(|(s, k)| score < s || (score == s && key < k)) {
                         want = Some((score, key));
                     }

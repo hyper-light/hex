@@ -420,9 +420,9 @@ two models: every node running all three kinds, or Hex's fleet's Linux, Windows 
 workload is placed only on a node that runs its kind. A workload talks to a home node, making its round trips to it in sequence, each after a step of compute,
 so it runs `round_trips × (step + true RTT)`; round trips are log-normal through TraceLab's p50 25 and
 p99 1,438 tool calls a session. Four policies choose from the same sampled window
-(`FitIndex::sampled_fit`): blind best fit; proximity, the least predicted RTT read as an upper bound
-`rtt × (1 + 2·mean error)` (Hyperscale's `K_SIGMA = 2` on a coordinate's error), best fit breaking
-ties, a soft score that never removes a candidate; proximity only among best fit's ties; and an oracle
+(`FitIndex::sampled_fit`): blind best fit; proximity, the least RTT hyper-swim's coordinates predict,
+best fit breaking ties, a soft score that never removes a candidate (the prediction is not widened by
+the coordinates' error: Hyperscale's `K_SIGMA = 2` bound bought no least gain, below); proximity only among best fit's ties; and an oracle
 on the true RTT. Goodput is the workloads finished by the last arrival, per second; the tail is the
 p99 of arrival-to-end. Both are reported over every workload and for each kind.
 
@@ -449,6 +449,17 @@ its placements' mean RTT is below blind's on all 40 small studies, and both tie-
 `no-tie-break-term` (144.9 against 144.9 ms) and `random-tie-break` (145.0 against 144.9 ms). Unit
 `hex-sched-g3-tbmut-20261106T144322Z`. `proximity_changes_decisions`' floor for it, a fiftieth of
 decisions, is a sanity check only: it catches the first mutant (0 moved) and not the second.
+
+**Why the prediction is not widened.** Hyperscale's bound, the prediction widened by the coordinates'
+errors as `rtt × (1 + K_SIGMA·mean error)` with its `K_SIGMA = 2`, was measured against the plain
+prediction (`K_SIGMA = 0`) on the same 120-study sweep of recorded nodes and launches (commit
+`5920b50`, adas-mac-studio.local-2, 2026-11-06, virtual time; not yet the run of record, which is
+fedora's). The least gains over blind were identical: all workloads goodput +3.1% and p99 −9.3%; OCI
++3.0% and −6.8%; Firecracker +3.1% and −6.5%; Shards +2.7% with −4.0% (`K = 2`) against −3.9% (`K = 0`).
+The bound's only edges were the tie-break nearer than blind on 116 against 112 of 120 studies, and
+proximity's largest goodput gap to the oracle 0.88% against 0.91%. A copied multiplier that buys no
+least gain is not taken (Ada, 2026-11-06: "We do not support arbitrary constants"), so the score is
+the plain prediction (the lead's ruling, 2026-11-06).
 
 **What would falsify it.** Recorded microVM sessions whose round trips don't go to one place, or whose
 compute between them dwarfs the RTT: the gain falls toward the 1 s rows' (about 1-2% goodput). A real
