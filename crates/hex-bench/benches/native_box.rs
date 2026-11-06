@@ -62,8 +62,7 @@ mod bench {
     /// four times over.
     pub const BOUND: u64 = 256 * MIB;
     pub const CLIMB: u64 = 1024 * MIB;
-    /// A wait for a program's end: the suite's own failure bound, twice the slowest end on record.
-    const PATIENCE: Duration = hex_api::conformance::PATIENCE;
+
 
     /// The hex binary whose `selftest-box` acts are the programs: `HEX_BIN`, else the `hex` beside this
     /// bench (cargo puts both under the same profile directory).
@@ -220,8 +219,13 @@ mod bench {
             s
         }
         fn ended(&mut self) -> String {
-            match self.proc.wait_for(PATIENCE).expect("wait") {
-                Some(e) => format!("{e:?}"),
+            // The suite's learned wait: twice the slowest end of the record and this run.
+            let asked = Instant::now();
+            match self.proc.wait_for(hex_api::conformance::patience()).expect("wait") {
+                Some(e) => {
+                    hex_api::conformance::ENDS.saw(asked.elapsed());
+                    format!("{e:?}")
+                }
                 None => "running".to_owned(),
             }
         }
