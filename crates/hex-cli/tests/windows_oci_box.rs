@@ -7,8 +7,9 @@
 //!
 //! Runs on Windows with the Containers feature on and an image's layer folders named in
 //! `HEX_WINDOWS_LAYERS` (topmost first, `;`-separated: a matching nanoserver or servercore image's,
-//! e.g. containerd's windows snapshotter folders). Without them it prints SKIP and checks nothing; the
-//! step's recorded run (jupiter) sets them, and its record shows the cases ran.
+//! e.g. containerd's windows snapshotter folders), and a mismatched image's in
+//! `HEX_WINDOWS_MISMATCH_LAYERS` (both written by bench/native/windows/oci_setup.ps1). Without the first
+//! it prints SKIP and checks nothing; the step's recorded run (jupiter) sets them, and a SKIP there fails it.
 #![cfg(target_os = "windows")]
 #![allow(
     clippy::unwrap_used,
@@ -28,9 +29,11 @@ use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Runtime, Stdio};
 use hex_runtime::windows::WinRuntime;
 use serde_json::json;
 
-/// The display adapter's device interface class (`GUID_DEVINTERFACE_DISPLAY_ADAPTER`), the DirectX GPU
-/// class Windows grants containers (`hardware-devices-in-containers.md`; `gpu-acceleration.md:37`).
-const DISPLAY_ADAPTER: &str = "5B45201D-F2F2-4F3B-85BB-30FF1F953599";
+/// The USB device interface class (`GUID_DEVINTERFACE_USB_DEVICE`, usbiodef.h): every host has one, and on
+/// jupiter a box opens none of them ungranted and all of them granted (the lead's ruling, 2026-11-06). It
+/// isn't in Microsoft's table of supported classes (hardware-devices-in-containers.md:45-79), whose four
+/// jupiter has none of, and the display class it lists is refused at create by HCS for Docker and Hex alike.
+const USB_DEVICE: &str = "A5DCBF10-6530-11D2-901F-00C04FB951ED";
 
 struct Lab {
     /// The folder holding `hex.exe`, mapped into every box as its launcher.
@@ -186,32 +189,50 @@ fn contract(lab: &Lab) {
     assert!(failures.is_empty(), "conformance failures: {failures:#?}");
 }
 
-/// The step's criterion: a device not granted isn't visible. Do: on a host with a display adapter, list
-/// that class's interfaces from inside a box granted nothing. Expect: the host lists at least one, the box
-/// none.
+/// The step's criterion: "a device not granted isn't visible", read as reachable (the lead's ruling,
+/// 2026-11-06: a process-isolated silo lists the host's devices under every runtime, and a grant plumbs
+/// them in). Do: on a host with USB devices, probe that class from a box granted nothing, then from one
+/// granted it. Expect: ungranted, the host's devices are listed and none opens; granted, they open.
 fn a_device_not_granted_isnt_visible(lab: &Lab) {
-    let host = hex_runtime::windows::oci::devices(DISPLAY_ADAPTER).expect("the host's devices");
+    let host = hex_runtime::windows::oci::devices(USB_DEVICE).expect("the host's devices");
     assert!(
-        host >= 1,
-        "the host lists no display adapter, so a box's view can't be checked against it"
+        host.reachable >= 1,
+        "the host opens no USB device, so a box's view can't be checked against it: {host:?}"
     );
     let rt = lab.runtime();
-    let id = made(
-        &rt,
-        lab.spec_with(
-            BoxId::new("hex-oci-devices").unwrap(),
-            Bounds::default(),
-            &Act::Wait,
-            json!([]),
-        ),
-    );
-    let (exit, out) = run(&rt, lab, &id, &["win-devices", DISPLAY_ADAPTER]);
-    rt.delete(&id).expect("delete");
-    assert_eq!(exit, Exit::Code(0), "the probe failed: {out:?}");
+    let mut seen = Vec::new();
+    for granted in [false, true] {
+        let id = BoxId::new(&format!("hex-oci-devices-{granted}")).unwrap();
+        let mut spec = lab.spec(id.clone(), Bounds::default());
+        if granted {
+            let ClassSpec::Bundle(dir) = &spec.class else {
+                panic!("the lab makes bundle boxes")
+            };
+            let path = dir.join("config.json");
+            let mut cfg: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            cfg["windows"]["devices"] = json!([{"id": USB_DEVICE, "idType": "class"}]);
+            std::fs::write(&path, cfg.to_string()).unwrap();
+            spec = BoxSpec {
+                class: ClassSpec::Bundle(dir.clone()),
+                ..spec
+            };
+        }
+        let id = made(&rt, spec);
+        let (exit, out) = run(&rt, lab, &id, &["win-devices", USB_DEVICE]);
+        rt.delete(&id).expect("delete");
+        assert_eq!(exit, Exit::Code(0), "the probe failed: {out:?}");
+        seen.push(out.trim().to_owned());
+    }
     assert_eq!(
-        out.trim(),
-        "0",
-        "a box granted nothing sees {out:?} display adapters"
+        seen[0],
+        format!("{} 0", host.listed),
+        "ungranted: the host's USB devices are listed and none opens"
+    );
+    assert_eq!(
+        seen[1],
+        format!("{} {}", host.listed, host.reachable),
+        "granted: the box opens the host's USB devices"
     );
 }
 
@@ -258,32 +279,136 @@ fn a_read_only_mount_refuses_writes(lab: &Lab) {
 }
 
 /// The step's criterion: an image whose version doesn't match the host's is refused by name, before HCS
-/// is asked. Do: make a box from a base layer whose `ntdll.dll` is the host's own (a client's own build
-/// is no Server image's). Expect: create refused as the image, naming both builds, and no box made.
+/// is asked. Do: make a box from the layers in `HEX_WINDOWS_MISMATCH_LAYERS`, an image Microsoft's table
+/// says this host doesn't run (oci_setup.ps1 pulls Server 2019's nanoserver; a client's own `ntdll.dll`
+/// is no mismatch, since Windows 11 25H2's is build 26100, Server 2025's). Expect: create refused as the
+/// image, naming the image's build and the host's, and no box made.
 fn a_mismatched_image_is_refused_by_name(lab: &Lab) {
-    let fake = lab.root.path().join("fake-base");
-    let sys32 = fake.join(r"Files\Windows\System32");
-    std::fs::create_dir_all(&sys32).unwrap();
-    std::fs::copy(r"C:\Windows\System32\ntdll.dll", sys32.join("ntdll.dll")).unwrap();
-    let lab_fake = Lab {
+    let layers: Vec<String> = std::env::var("HEX_WINDOWS_MISMATCH_LAYERS")
+        .expect("HEX_WINDOWS_MISMATCH_LAYERS names a mismatched image's layers (oci_setup.ps1)")
+        .split(';')
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let base = layers.last().expect("a mismatched image's layers");
+    let image = hex_runtime::windows::oci::sys::file_build(&format!(
+        r"{base}\Files\Windows\System32\ntdll.dll"
+    ))
+    .unwrap();
+    let host = hex_runtime::windows::oci::sys::host();
+    assert!(
+        hex_core::hcs::image_runs(host, image).is_err(),
+        "the mismatched image (build {image}) runs on this host ({host:?}): pick another"
+    );
+    let lab_mismatch = Lab {
         bin: lab.bin.clone(),
-        layers: vec![fake.to_str().unwrap().to_owned()],
+        layers,
         root: tempfile::tempdir().unwrap(),
     };
     let rt = lab.runtime();
     let id = BoxId::new("hex-oci-mismatch").unwrap();
-    let got = rt.create(lab_fake.spec(id.clone(), Bounds::default()));
-    // A Windows Server host runs its own build, so only a client's own build is a mismatch to show.
-    if hex_runtime::windows::oci::sys::host().kind == hex_core::hcs::HostKind::Client {
-        match got {
-            Err(hex_api::Refusal::Platform { what, why, .. }) => {
-                assert_eq!(what, "the oci class's image");
-                assert!(why.contains("build"), "{why}");
-            }
-            other => panic!("a client host's own build as an image: {other:?}"),
+    match rt.create(lab_mismatch.spec(id.clone(), Bounds::default())) {
+        Err(hex_api::Refusal::Platform { what, why, .. }) => {
+            assert_eq!(what, "the oci class's image");
+            assert!(why.contains(&image.to_string()), "{why}");
+            assert!(why.contains(&host.build.to_string()), "{why}");
         }
+        other => panic!("a mismatched image (build {image}): {other:?}"),
     }
     assert!(rt.inspect(&id).is_err(), "a refused create made a box");
+}
+
+/// The volumes attached on this host (`mountvol`'s `\\?\Volume{..}` lines).
+fn volumes() -> Vec<String> {
+    let out = std::process::Command::new("mountvol").output().unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with(r"\\?\Volume{"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Whether HCS holds a compute system named `id` (`hcsdiag list`).
+fn hcs_holds(id: &BoxId) -> bool {
+    let out = std::process::Command::new("hcsdiag")
+        .arg("list")
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).contains(id.as_str())
+}
+
+/// Native step 4's teardown (the lead's condition, 2026-11-06): do: start a box, write in it, delete it.
+/// Expect: nothing left — no compute system, no volume beyond those attached before, no scratch folder;
+/// `UnprepareLayer`'s ERROR_FLT_DO_NOT_DETACH is matched alone, so any other failure fails the delete.
+fn a_deleted_box_leaves_nothing(lab: &Lab) {
+    let before = volumes();
+    let rt = lab.runtime();
+    let id = made(
+        &rt,
+        lab.spec(BoxId::new("hex-oci-teardown").unwrap(), Bounds::default()),
+    );
+    let wrote = run(&rt, lab, &id, &["write", r"C:\scratch-was-here"]);
+    assert_eq!(wrote.0, Exit::Code(0), "{wrote:?}");
+    assert!(
+        volumes().len() > before.len(),
+        "the started box shows no volume of its own"
+    );
+    rt.delete(&id).expect("delete");
+    assert!(!hcs_holds(&id), "HCS still holds {id}");
+    assert_eq!(volumes(), before, "a volume outlived its box");
+    assert!(
+        !lab.root.path().join(format!("scratch-{id}")).exists(),
+        "the scratch folder outlived its box"
+    );
+}
+
+/// Native step 4 (the lead's condition, 2026-11-06): copies of one `blank.vhdx` share a volume identity, so
+/// do: create and start `n` boxes at once (8 and 32, as oci_compare runs them), each writing a file of its
+/// own. Expect: every one starts, and none sees another's file — each runs on a volume of its own.
+fn boxes_started_at_once_each_have_their_own_volume(lab: &Lab, n: usize) {
+    let rt = lab.runtime();
+    let ids: Vec<BoxId> = (0..n)
+        .map(|i| BoxId::new(&format!("hex-oci-at-once-{n}-{i}")).unwrap())
+        .collect();
+    let specs: Vec<BoxSpec> = ids
+        .iter()
+        .map(|id| lab.spec(id.clone(), Bounds::default()))
+        .collect();
+    std::thread::scope(|s| {
+        let started: Vec<_> = specs
+            .into_iter()
+            .map(|spec| {
+                let rt = &rt;
+                s.spawn(move || {
+                    let id = spec.id.clone();
+                    let _ = rt.delete(&id);
+                    rt.create(spec).and_then(|_| rt.start(&id))
+                })
+            })
+            .collect();
+        for (id, h) in ids.iter().zip(started) {
+            let got = h.join().unwrap();
+            assert!(got.is_ok(), "box {id} of {n} started at once: {got:?}");
+        }
+    });
+    for (i, id) in ids.iter().enumerate() {
+        let wrote = run(&rt, lab, id, &["write", &format!(r"C:\mark-{i}")]);
+        assert_eq!(wrote.0, Exit::Code(0), "{id}: {wrote:?}");
+    }
+    for (i, id) in ids.iter().enumerate() {
+        let other = (i + 1) % n;
+        let (exit, seen) = run(&rt, lab, id, &["exists", &format!(r"C:\mark-{other}")]);
+        assert_eq!(exit, Exit::Code(0));
+        assert_eq!(
+            seen.trim(),
+            "no",
+            "{id} sees box {other}'s file: they share a volume"
+        );
+    }
+    for id in &ids {
+        rt.delete(id).expect("delete");
+    }
 }
 
 /// AC-T7.1.1 and native step 4: the Windows oci class end to end on this host's image, in order (one
@@ -296,9 +421,12 @@ fn windows_oci_boxes_hold_the_contract_and_the_steps_criteria() {
     };
     eprintln!("RUN: layers {:?}", lab.layers);
     a_mismatched_image_is_refused_by_name(&lab);
+    a_deleted_box_leaves_nothing(&lab);
+    boxes_started_at_once_each_have_their_own_volume(&lab, 8);
+    boxes_started_at_once_each_have_their_own_volume(&lab, 32);
     contract(&lab);
-    a_device_not_granted_isnt_visible(&lab);
     a_read_only_mount_refuses_writes(&lab);
+    a_device_not_granted_isnt_visible(&lab);
     eprintln!("PASS: HEX-RT-1..13, device, read-only mount, version refusal");
 }
 

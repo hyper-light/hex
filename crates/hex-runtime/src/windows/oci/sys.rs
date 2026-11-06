@@ -25,18 +25,13 @@ use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
     CM_Get_Device_Interface_ListW, CR_SUCCESS,
 };
 use windows_sys::Win32::Foundation::{
-    DUPLICATE_SAME_ACCESS, DuplicateHandle, GetLastError, HANDLE, HLOCAL, HMODULE, LocalFree,
+    DUPLICATE_SAME_ACCESS, DuplicateHandle, GetLastError, HANDLE, HLOCAL, HMODULE,
+    INVALID_HANDLE_VALUE, LocalFree,
 };
 use windows_sys::Win32::Security::SECURITY_DESCRIPTOR;
 use windows_sys::Win32::Storage::FileSystem::{
-    GetFileVersionInfoSizeW, GetFileVersionInfoW, VS_FIXEDFILEINFO, VerQueryValueW,
-};
-use windows_sys::Win32::Storage::Vhd::{
-    ATTACH_VIRTUAL_DISK_FLAG, ATTACH_VIRTUAL_DISK_FLAG_NO_DRIVE_LETTER,
-    ATTACH_VIRTUAL_DISK_PARAMETERS, ATTACH_VIRTUAL_DISK_VERSION_1, OPEN_VIRTUAL_DISK_FLAG,
-    OPEN_VIRTUAL_DISK_FLAG_NONE, OPEN_VIRTUAL_DISK_PARAMETERS, OPEN_VIRTUAL_DISK_VERSION_2,
-    VIRTUAL_DISK_ACCESS_MASK, VIRTUAL_DISK_ACCESS_NONE, VIRTUAL_STORAGE_TYPE,
-    VIRTUAL_STORAGE_TYPE_DEVICE_VHDX, VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT,
+    CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileVersionInfoSizeW, GetFileVersionInfoW,
+    OPEN_EXISTING, VS_FIXEDFILEINFO, VerQueryValueW,
 };
 use windows_sys::Win32::System::HostComputeSystem::{
     HCS_OPERATION, HCS_OPERATION_COMPLETION, HCS_PROCESS, HCS_PROCESS_INFORMATION, HCS_SYSTEM,
@@ -133,28 +128,29 @@ type CreateProcess = unsafe extern "system" fn(
 ) -> HRESULT;
 type CloseProcess = unsafe extern "system" fn(HCS_PROCESS);
 type ServiceProperties = unsafe extern "system" fn(PCWSTR, *mut PWSTR) -> HRESULT;
-type LayerVhdMountPath = unsafe extern "system" fn(HANDLE, *mut PWSTR) -> HRESULT;
-type InitializeWritableLayer = unsafe extern "system" fn(PCWSTR, PCWSTR, PCWSTR) -> HRESULT;
-type AttachFilter = unsafe extern "system" fn(PCWSTR, PCWSTR) -> HRESULT;
-type DetachFilter = unsafe extern "system" fn(PCWSTR) -> HRESULT;
-type OpenVirtualDisk = unsafe extern "system" fn(
-    *const VIRTUAL_STORAGE_TYPE,
-    PCWSTR,
-    VIRTUAL_DISK_ACCESS_MASK,
-    OPEN_VIRTUAL_DISK_FLAG,
-    *const OPEN_VIRTUAL_DISK_PARAMETERS,
-    *mut HANDLE,
-) -> u32;
-type AttachVirtualDisk = unsafe extern "system" fn(
-    HANDLE,
-    *mut c_void,
-    ATTACH_VIRTUAL_DISK_FLAG,
-    u32,
-    *const ATTACH_VIRTUAL_DISK_PARAMETERS,
-    *const c_void,
-) -> u32;
+/// vmcompute's `DRIVER_INFO`: the filter driver (flavour 1) and an empty home folder, as hcsshim passes it
+/// (`hcsshim/internal/wclayer/layerutils.go:35-43`).
+#[repr(C)]
+struct DriverInfo {
+    flavour: i32,
+    home: PCWSTR,
+}
 
-/// The HCS, storage and virtual-disk calls, resolved once. The modules are never unloaded, so each pointer
+/// vmcompute's `WC_LAYER_DESCRIPTOR` (`hcsshim/internal/wclayer/layerutils.go:45-80`).
+#[repr(C)]
+struct LayerDescriptor {
+    id: GUID,
+    flags: u32,
+    path: PCWSTR,
+}
+
+type LayerOp = unsafe extern "system" fn(*const DriverInfo, PCWSTR) -> HRESULT;
+type PrepareLayer =
+    unsafe extern "system" fn(*const DriverInfo, PCWSTR, *const LayerDescriptor, u32) -> HRESULT;
+type LayerMountPath =
+    unsafe extern "system" fn(*const DriverInfo, PCWSTR, *mut usize, *mut u16) -> HRESULT;
+
+/// The HCS calls and vmcompute's layer calls, resolved once. The modules are never unloaded, so each pointer
 /// stays valid for the process's life.
 struct Api {
     create_operation: CreateOperation,
@@ -169,12 +165,11 @@ struct Api {
     create_process: CreateProcess,
     close_process: CloseProcess,
     service_properties: ServiceProperties,
-    layer_vhd_mount_path: LayerVhdMountPath,
-    initialize_writable_layer: InitializeWritableLayer,
-    attach_filter: AttachFilter,
-    detach_filter: DetachFilter,
-    open_virtual_disk: OpenVirtualDisk,
-    attach_virtual_disk: AttachVirtualDisk,
+    activate_layer: LayerOp,
+    prepare_layer: PrepareLayer,
+    layer_mount_path: LayerMountPath,
+    unprepare_layer: LayerOp,
+    deactivate_layer: LayerOp,
 }
 
 /// A module from System32, or what is missing.
@@ -209,8 +204,7 @@ macro_rules! export {
 impl Api {
     fn load() -> Result<Api, String> {
         let core = module("computecore.dll")?;
-        let storage = module("computestorage.dll")?;
-        let vhd = module("virtdisk.dll")?;
+        let layers = module("vmcompute.dll")?;
         Ok(Api {
             create_operation: export!(
                 core,
@@ -264,37 +258,11 @@ impl Api {
                 "HcsGetServiceProperties",
                 ServiceProperties
             ),
-            layer_vhd_mount_path: export!(
-                storage,
-                "computestorage.dll",
-                "HcsGetLayerVhdMountPath",
-                LayerVhdMountPath
-            ),
-            initialize_writable_layer: export!(
-                storage,
-                "computestorage.dll",
-                "HcsInitializeWritableLayer",
-                InitializeWritableLayer
-            ),
-            attach_filter: export!(
-                storage,
-                "computestorage.dll",
-                "HcsAttachLayerStorageFilter",
-                AttachFilter
-            ),
-            detach_filter: export!(
-                storage,
-                "computestorage.dll",
-                "HcsDetachLayerStorageFilter",
-                DetachFilter
-            ),
-            open_virtual_disk: export!(vhd, "virtdisk.dll", "OpenVirtualDisk", OpenVirtualDisk),
-            attach_virtual_disk: export!(
-                vhd,
-                "virtdisk.dll",
-                "AttachVirtualDisk",
-                AttachVirtualDisk
-            ),
+            activate_layer: export!(layers, "vmcompute.dll", "ActivateLayer", LayerOp),
+            prepare_layer: export!(layers, "vmcompute.dll", "PrepareLayer", PrepareLayer),
+            layer_mount_path: export!(layers, "vmcompute.dll", "GetLayerMountPath", LayerMountPath),
+            unprepare_layer: export!(layers, "vmcompute.dll", "UnprepareLayer", LayerOp),
+            deactivate_layer: export!(layers, "vmcompute.dll", "DeactivateLayer", LayerOp),
         })
     }
 }
@@ -548,117 +516,103 @@ impl Drop for HcsProcessHandle {
     }
 }
 
-/// A virtual disk opened and attached with no drive letter; detached when its handle closes (dropped),
-/// so a node that dies leaves no disk attached.
-pub struct AttachedVhd(Handle);
+/// The longest mount path `GetLayerMountPath` may give, in UTF-16 units: a volume GUID path is 49, and
+/// the longest Windows path 32,767 (CLAUDE.md §2: a longer answer is refused, not allocated).
+const MAX_MOUNT_PATH: usize = 32_767;
 
-/// Opens the VHDX at `path` and attaches it with no drive letter, its lifetime the handle's.
-pub fn attach_vhd(path: &str) -> io::Result<AttachedVhd> {
-    let api = api().map_err(io::Error::other)?;
-    let p = wide(path);
-    let storage = VIRTUAL_STORAGE_TYPE {
-        DeviceId: VIRTUAL_STORAGE_TYPE_DEVICE_VHDX,
-        VendorId: VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT,
-    };
-    // SAFETY: OPEN_VIRTUAL_DISK_PARAMETERS is plain data; all-zero then the version set is a valid
-    // version-2 value (read-write, not info-only, no resiliency GUID).
-    let mut open: OPEN_VIRTUAL_DISK_PARAMETERS = unsafe { zeroed() };
-    open.Version = OPEN_VIRTUAL_DISK_VERSION_2;
-    let mut h: HANDLE = null_mut();
-    // SAFETY: storage, p and open outlive the call; access must be NONE with version-2 parameters
-    // (OpenVirtualDisk's documentation); h receives the handle.
-    let rc = unsafe {
-        (api.open_virtual_disk)(
-            &storage,
-            p.as_ptr(),
-            VIRTUAL_DISK_ACCESS_NONE,
-            OPEN_VIRTUAL_DISK_FLAG_NONE,
-            &open,
-            &mut h,
-        )
-    };
-    if rc != 0 {
-        return Err(io::Error::from_raw_os_error(
-            i32::try_from(rc).unwrap_or(-1),
-        ));
-    }
-    // SAFETY: h is the virtual-disk handle just opened, owned by nothing else.
-    let disk = unsafe { Handle::own(h) };
-    // SAFETY: ATTACH_VIRTUAL_DISK_PARAMETERS is plain data; all-zero then version 1 is valid.
-    let mut attach: ATTACH_VIRTUAL_DISK_PARAMETERS = unsafe { zeroed() };
-    attach.Version = ATTACH_VIRTUAL_DISK_VERSION_1;
-    // SAFETY: disk is an open virtual disk; no security descriptor or overlapped; attach outlives the
-    // call. Without PERMANENT_LIFETIME the attachment ends when the handle closes.
-    let rc = unsafe {
-        (api.attach_virtual_disk)(
-            disk.raw(),
-            null_mut(),
-            ATTACH_VIRTUAL_DISK_FLAG_NO_DRIVE_LETTER,
-            0,
-            &attach,
-            null(),
-        )
-    };
-    if rc != 0 {
-        return Err(io::Error::from_raw_os_error(
-            i32::try_from(rc).unwrap_or(-1),
-        ));
-    }
-    Ok(AttachedVhd(disk))
-}
-
-impl AttachedVhd {
-    /// Its volume's path (`HcsGetLayerVhdMountPath`), `\\?\Volume{GUID}\`.
-    pub fn volume(&self) -> Result<String, HcsFailure> {
-        let api = api().map_err(|m| HcsFailure {
-            code: 0x8037_0114,
-            message: Some(m.to_owned()),
-        })?;
-        let mut path: PWSTR = null_mut();
-        // SAFETY: self.0 is an attached virtual disk; path receives a string HCS allocates, freed by take.
-        let hr = unsafe { (api.layer_vhd_mount_path)(self.0.raw(), &mut path) };
-        let p = take(path);
-        if hr < 0 {
-            return Err(HcsFailure::of(hr, p));
-        }
-        p.ok_or(HcsFailure {
-            code: 0x8037_011A,
-            message: Some("HcsGetLayerVhdMountPath returned no path".to_owned()),
-        })
-    }
-}
-
-fn storage_call(f: impl FnOnce(&Api) -> HRESULT) -> Result<(), HcsFailure> {
+fn layer_call(f: impl FnOnce(&Api, &DriverInfo) -> HRESULT) -> Result<(), HcsFailure> {
     let api = api().map_err(|m| HcsFailure {
         code: 0x8037_0114,
         message: Some(m.to_owned()),
     })?;
-    let hr = f(api);
+    let home = [0u16];
+    let info = DriverInfo {
+        flavour: 1,
+        home: home.as_ptr(),
+    };
+    let hr = f(api, &info);
     if hr < 0 {
         return Err(HcsFailure::of(hr, None));
     }
     Ok(())
 }
 
-/// `HcsInitializeWritableLayer(volume, layer_data, NULL)`.
-pub fn initialize_writable_layer(volume: &str, layer_data: &str) -> Result<(), HcsFailure> {
-    let (v, d) = (wide(volume), wide(layer_data));
-    // SAFETY: v and d are NUL-terminated wide strings that outlive the call; options are reserved (null).
-    storage_call(|api| unsafe { (api.initialize_writable_layer)(v.as_ptr(), d.as_ptr(), null()) })
+/// `ActivateLayer`: attaches scratch folder `scratch`'s `sandbox.vhdx` as a volume (note §3).
+pub fn activate_layer(scratch: &str) -> Result<(), HcsFailure> {
+    let id = wide(scratch);
+    // SAFETY: info and id are valid for the call: a DRIVER_INFO whose home is a NUL-terminated empty wide
+    // string, and a NUL-terminated wide string.
+    layer_call(|api, info| unsafe { (api.activate_layer)(info, id.as_ptr()) })
 }
 
-/// `HcsAttachLayerStorageFilter(volume, layer_data)`.
-pub fn attach_filter(volume: &str, layer_data: &str) -> Result<(), HcsFailure> {
-    let (v, d) = (wide(volume), wide(layer_data));
-    // SAFETY: v and d are NUL-terminated wide strings that outlive the call.
-    storage_call(|api| unsafe { (api.attach_filter)(v.as_ptr(), d.as_ptr()) })
+/// `PrepareLayer`: puts the storage filter over activated scratch `scratch`, its parents `parents`
+/// topmost first, each named by [`hex_core::hcs::layer_guid`] as the container's document names it.
+pub fn prepare_layer(scratch: &str, parents: &[String]) -> Result<(), HcsFailure> {
+    let id = wide(scratch);
+    let paths: Vec<Vec<u16>> = parents.iter().map(|p| wide(p)).collect();
+    let descriptors: Vec<LayerDescriptor> = parents
+        .iter()
+        .zip(&paths)
+        .map(|(p, w)| LayerDescriptor {
+            id: GUID::from_u128(hex_core::hcs::layer_guid(p)),
+            flags: 0,
+            path: w.as_ptr(),
+        })
+        .collect();
+    let count = u32::try_from(descriptors.len()).map_err(|_| HcsFailure {
+        code: 0x8007_0057,
+        message: Some(format!(
+            "{} layers is more than PrepareLayer takes",
+            descriptors.len()
+        )),
+    })?;
+    // SAFETY: info and id as in activate_layer; descriptors holds count descriptors whose paths point into
+    // paths, NUL-terminated wide strings, all of which outlive the call.
+    layer_call(|api, info| unsafe {
+        (api.prepare_layer)(info, id.as_ptr(), descriptors.as_ptr(), count)
+    })
 }
 
-/// `HcsDetachLayerStorageFilter(volume)`.
-pub fn detach_filter(volume: &str) -> Result<(), HcsFailure> {
-    let v = wide(volume);
-    // SAFETY: v is a NUL-terminated wide string that outlives the call.
-    storage_call(|api| unsafe { (api.detach_filter)(v.as_ptr()) })
+/// `GetLayerMountPath`: the prepared scratch's volume path, `\\?\Volume{GUID}` (its root without the
+/// trailing backslash; `hex_core::hcs::volume_root` adds it).
+pub fn layer_mount_path(scratch: &str) -> Result<String, HcsFailure> {
+    let id = wide(scratch);
+    let mut len = 0usize;
+    // SAFETY: info and id as in activate_layer; len is a valid out-pointer, and a null buffer asks for
+    // the length alone (hcsshim/internal/wclayer/getlayermountpath.go:26-30).
+    layer_call(|api, info| unsafe {
+        (api.layer_mount_path)(info, id.as_ptr(), &mut len, null_mut())
+    })?;
+    if len == 0 || len > MAX_MOUNT_PATH {
+        return Err(HcsFailure {
+            code: 0x8007_000D,
+            message: Some(format!("GetLayerMountPath gave a length of {len}")),
+        });
+    }
+    let mut buf = vec![0u16; len];
+    // SAFETY: as above, with buf a buffer of len UTF-16 units, the length the call just gave.
+    layer_call(|api, info| unsafe {
+        (api.layer_mount_path)(info, id.as_ptr(), &mut len, buf.as_mut_ptr())
+    })?;
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    String::from_utf16(buf.get(..end).unwrap_or_default()).map_err(|_| HcsFailure {
+        code: 0x8007_000D,
+        message: Some("GetLayerMountPath gave a path that isn't UTF-16".to_owned()),
+    })
+}
+
+/// `UnprepareLayer`: takes the storage filter off scratch `scratch`.
+pub fn unprepare_layer(scratch: &str) -> Result<(), HcsFailure> {
+    let id = wide(scratch);
+    // SAFETY: info and id as in activate_layer.
+    layer_call(|api, info| unsafe { (api.unprepare_layer)(info, id.as_ptr()) })
+}
+
+/// `DeactivateLayer`: detaches scratch `scratch`'s volume.
+pub fn deactivate_layer(scratch: &str) -> Result<(), HcsFailure> {
+    let id = wide(scratch);
+    // SAFETY: info and id as in activate_layer.
+    layer_call(|api, info| unsafe { (api.deactivate_layer)(info, id.as_ptr()) })
 }
 
 /// Opens process `pid` for `access`.
@@ -800,9 +754,10 @@ pub fn file_build(path: &str) -> io::Result<u32> {
     Ok(fixed.dwFileVersionLS >> 16)
 }
 
-/// How many present devices implement interface class `class` (`CM_Get_Device_Interface_List*`), as
-/// seen from where this process runs: the probe for "a device not granted isn't visible".
-pub fn device_interfaces(class: &GUID) -> io::Result<usize> {
+/// The present devices implementing interface class `class` as seen from where this process runs: how
+/// many `CM_Get_Device_Interface_List*` lists, and how many of those open. The probe for "a device not
+/// granted isn't visible", read as reachable (the lead's ruling, 2026-11-06).
+pub fn device_interfaces(class: &GUID) -> io::Result<DeviceView> {
     let mut len = 0u32;
     // SAFETY: class is a valid GUID; len is a valid out-pointer; no device instance filter.
     let cr = unsafe {
@@ -839,6 +794,41 @@ pub fn device_interfaces(class: &GUID) -> io::Result<usize> {
             "CM_Get_Device_Interface_ListW: {cr}"
         )));
     }
-    // A double-NUL-terminated list of NUL-terminated names: count the non-empty ones.
-    Ok(buf.split(|u| *u == 0).filter(|s| !s.is_empty()).count())
+    // A double-NUL-terminated list of NUL-terminated names: each one listed, and opened to see whether
+    // it is reachable from here.
+    let mut view = DeviceView::default();
+    for name in buf.split(|u| *u == 0).filter(|s| !s.is_empty()) {
+        view.listed = view.listed.saturating_add(1);
+        let path: Vec<u16> = name.iter().copied().chain([0]).collect();
+        // A query open (no access asked): it opens a plumbed device and is refused one the container
+        // wasn't given (jupiter, 2026-11-06: USB, keyboard, mouse and disk classes, 0 of n opened ungranted,
+        // n of n granted). SAFETY: path is a NUL-terminated wide string that outlives the call; no security
+        // attributes or template; the result is a handle or INVALID_HANDLE_VALUE, checked.
+        let h = unsafe {
+            CreateFileW(
+                path.as_ptr(),
+                0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                null(),
+                OPEN_EXISTING,
+                0,
+                null_mut(),
+            )
+        };
+        if h != INVALID_HANDLE_VALUE && !h.is_null() {
+            // SAFETY: h is the handle just opened, owned by nothing else; dropping it closes it.
+            drop(unsafe { Handle::own(h) });
+            view.reachable = view.reachable.saturating_add(1);
+        }
+    }
+    Ok(view)
+}
+
+/// A device interface class as seen from where this process runs: how many of its interfaces are listed,
+/// and how many of those open (a process-isolated container lists the host's, and opens only those its
+/// grant plumbed in: the lead's ruling on "visible", 2026-11-06).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceView {
+    pub listed: usize,
+    pub reachable: usize,
 }

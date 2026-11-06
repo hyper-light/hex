@@ -1,0 +1,10 @@
+# Windows builds carry their own C runtime: a Windows `oci` box maps hex.exe in as its launcher, and
+# nanoserver has ucrtbase.dll but no Visual C++ runtime, so a dynamically linked hex.exe can't load there
+# (jupiter, 2026-11-06; docs/design/runtime.md, the Windows twin of the static-glibc decision).
+# crates/hex-cli/tests/windows_static_crt.rs refuses a build that imports one. A RUSTFLAGS or
+# CARGO_TARGET_<triple>_RUSTFLAGS set for these targets replaces this, so one must carry +crt-static too.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -37,14 +37,16 @@ function Stats([double[]]$v) {
 
 $runs = [ordered]@{
     docker = @{
-        create = { param($i) & $docker -H $Dock create --isolation process --name "hexcmp-$i" `
+        # ContainerAdministrator, as HCS runs Hex's launcher for a spec naming no user: nanoserver's default
+        # ContainerUser can't read the mapped folder (jupiter, 2026-11-06: "Access is denied").
+        create = { param($i) & $docker -H $Dock create --isolation process --user ContainerAdministrator --name "hexcmp-$i" `
                 -v "${HexBin}:C:\hex:ro" $Image 'C:\hex\hex.exe' selftest-box wait | Out-Null }
         start  = { param($i) & $docker -H $Dock start "hexcmp-$i" | Out-Null }
         delete = { param($i) & $docker -H $Dock rm -f "hexcmp-$i" | Out-Null }
         cli    = { & $docker -H $Dock version | Out-Null }
     }
     containerd = @{
-        create = { param($i) & $ctr -a $Ctrd containers create --runtime io.containerd.runhcs.v1 `
+        create = { param($i) & $ctr -a $Ctrd containers create --runtime io.containerd.runhcs.v1 --user ContainerAdministrator `
                 --mount "type=bind,src=$HexBin,dst=C:\hex,options=rbind:ro" $Image "hexcmp-$i" `
                 'C:\hex\hex.exe' selftest-box wait | Out-Null }
         start  = { param($i) & $ctr -a $Ctrd tasks start -d "hexcmp-$i" | Out-Null }

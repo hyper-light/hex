@@ -667,13 +667,34 @@ Compute Service, as the OCI runtime spec's Windows section defines it. Sources:
   exec into it is refused `NotRunning`. Delete ends the job, terminates the compute system, detaches the scratch and
   removes what the box made. Every HCS wait has a deadline, and a timed-out operation is cancelled, never abandoned
   (note §2).
-- **Layers by the documented storage calls**, not the `vmcompute.dll` exports hcsshim uses (undocumented, unbound,
-  wrapped in a timed retry and a global lock; note §3). The box's scratch VHD is a copy of the base layer's
-  `blank.vhdx`, attached with no drive letter. Its volume comes from `HcsGetLayerVhdMountPath`, then
-  `HcsInitializeWritableLayer` and `HcsAttachLayerStorageFilter` run over the read-only layers, and the volume is the
-  container's `Storage.Path`. No source runs this sequence end to end, so which steps a `blank.vhdx` copy needs is
-  jupiter's to settle (note §9, probe 1). If the documented calls can't make a scratch, the alternative is the
-  `vmcompute.dll` exports resolved at run time — a change brought back to this decision first, not taken silently.
+- **Layers by `vmcompute.dll`'s layer calls, as hcsshim, runhcs and Docker make them** (changed 2026-11-06 on
+  jupiter's evidence, the lead's approval; note §11). The box's scratch is a folder holding a copy of the base layer's
+  `blank.vhdx`; `ActivateLayer` attaches it as a volume, `PrepareLayer` puts the storage filter over it with the
+  read-only layers as its parents (each named by `hex_core::hcs::layer_guid`, the id the document gives it),
+  `GetLayerMountPath` gives the volume, and the volume's root is the container's `Storage.Path`. Teardown is
+  `UnprepareLayer` then `DeactivateLayer`; after a container has run, `UnprepareLayer` answers
+  `ERROR_FLT_DO_NOT_DETACH` (the container's end took the filter), matched alone. The calls are undocumented, so
+  they're resolved at run time like HCS's, and a missing one refuses the class by name. hcsshim's timed retry and
+  global lock are not copied (CLAUDE.md §4); 32 boxes started at once on jupiter each got their own volume.
+  - **Why not the documented calls:** on Windows 11 25H2 (26200), a scratch made by them (a `blank.vhdx` copy or a
+    fresh `HcsFormatWritableLayerVhd` disk, attached, `HcsInitializeWritableLayer`, `HcsAttachLayerStorageFilter`)
+    never finished starting: the silo stopped after one service host, and `HcsStartComputeSystem` ended only when
+    cancelled. The same document over a vmcompute scratch started in 0.6 s (note §11). What would falsify this: a
+    host where the documented sequence boots a silo, which returns the class to documented calls.
+- **"A device not granted isn't visible" is checked as reachable** (the lead's ruling, 2026-11-06, for Ada's
+  report). The step's words: "A device not granted isn't visible". Under process isolation a silo's PnP listing is
+  the host's: `CM_Get_Device_Interface_ListW` for the display adapter class gives 2 on jupiter's host, 2 in a Hex box
+  and 2 in a Docker `--isolation process` container, none granted. Microsoft's guide says a grant means "all devices
+  which identify as implementing the requested class will be plumbed into the container"
+  (`hardware-devices-in-containers.md:39`): a grant makes devices reachable, not listed. So the probe opens each
+  listed interface (a query open, no access asked): ungranted, USB, keyboard, mouse and disk classes open 0 of n in a
+  box; granted, n of n (note §11). The test uses the USB device class with both cases, since jupiter has none of
+  Microsoft's four supported classes and HCS refuses a display-class grant at create for Docker and Hex alike. Only
+  Hyper-V isolation, which is not this class, would hide the listing itself.
+- **Hex's Windows binaries carry their own C runtime** (`.cargo/config.toml`, `+crt-static` for both Windows
+  targets): the launcher runs inside the image, and nanoserver has `ucrtbase.dll` but no Visual C++ runtime, so an
+  `hex.exe` importing `VCRUNTIME140.dll` couldn't load there (note §11). It's the Windows twin of the static-glibc
+  decision, and `crates/hex-cli/tests/windows_static_crt.rs` refuses a build importing `VCRUNTIME*`/`MSVCP*`.
 - **The spec, as the OCI Windows section defines it:** a `ClassSpec::Bundle` reads `config.json`'s `windows` section
   (`layerFolders` topmost first with the scratch last, `devices`, `resources`) and its mounts. A `ClassSpec::Oci` box
   renders the same, its `Rootfs::Layers` lowest first. Devices are granted only by interface class, with `class` and
