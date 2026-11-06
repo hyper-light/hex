@@ -175,7 +175,7 @@ fn serve(args: &[String]) -> Result<(), (u8, String)> {
     }
     {
         let said = if node.parked_procs() {
-            format!("on, at most {} alive", hex_node::cgroups::PROCS_ALIVE)
+            format!("on, at most {} alive", node.sizes().procs_alive())
         } else if args.parked_procs {
             "off: a rootless node parks none".to_owned()
         } else {

@@ -554,7 +554,7 @@ fn prepared_devs_preserve_order_and_are_never_shared(lab: &Lab, own: &Path) {
     create(&pooled, &id, &prime).unwrap();
     pooled.delete(&id).unwrap();
     wait_for(
-        || pooled.dev_mounts().unwrap().made >= hex_core::devfs::PER_KEY as u64,
+        || pooled.dev_mounts().unwrap().made >= pooled.sizes().start as u64,
         "the prepared /dev pool to fill after its first key",
     );
     assert_eq!(pooled.dev_mounts().unwrap().failed, 0);
@@ -3545,7 +3545,7 @@ fn program_alone(lab: &Lab, own: &Path) {
     let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
         let ahead = node.cgroup_reuse().unwrap().ahead;
-        if ahead.ready >= hex_node::INITS_AHEAD || ahead.failed > 0 {
+        if ahead.ready >= ahead.size || ahead.failed > 0 {
             break;
         }
         std::thread::yield_now();
@@ -4918,7 +4918,7 @@ fn created_through_a_seed_in_its_cgroup_and_namespaces(lab: &Lab, own: &Path) {
     let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
         let ahead = node.cgroup_reuse().unwrap().ahead;
-        if ahead.ready >= hex_node::INITS_AHEAD || ahead.failed > 0 {
+        if ahead.ready >= ahead.size || ahead.failed > 0 {
             break;
         }
         std::thread::yield_now();

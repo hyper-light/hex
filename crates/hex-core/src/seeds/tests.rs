@@ -932,5 +932,9 @@ fn a_growing_pool_adds_a_slot_for_each_create_that_finds_none_free_up_to_its_bou
     assert!(matches!(pool.create(ms(4)), Ok(Admit::Wait { .. })));
     assert_eq!(pool.wanted(), 0, "past the bound no slot is added");
     assert_eq!(pool.handed().len(), 3);
-    assert_eq!(pool.counts().waited, 3, "each create that found none free is counted");
+    assert_eq!(
+        pool.counts().waited,
+        3,
+        "each create that found none free is counted"
+    );
 }

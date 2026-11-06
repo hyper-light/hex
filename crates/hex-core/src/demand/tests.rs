@@ -140,7 +140,8 @@ fn a_burst_past_the_start_teaches_the_pool_the_burst() {
 
 #[test]
 fn mem_available_reads_the_kernels_line_and_refuses_the_rest() {
-    let meminfo = "MemTotal:       65536000 kB\nMemFree:         1000 kB\nMemAvailable:   32768000 kB\n";
+    let meminfo =
+        "MemTotal:       65536000 kB\nMemFree:         1000 kB\nMemAvailable:   32768000 kB\n";
     assert_eq!(mem_available(meminfo), Some(32_768_000 * 1024));
     for bad in [
         "",
@@ -157,7 +158,10 @@ fn mem_available_reads_the_kernels_line_and_refuses_the_rest() {
 
 #[test]
 fn headroom_is_what_memory_max_leaves_and_none_without_a_bound() {
-    assert_eq!(cgroup_headroom("8589934592\n", "1073741824\n"), Some(7_516_192_768));
+    assert_eq!(
+        cgroup_headroom("8589934592\n", "1073741824\n"),
+        Some(7_516_192_768)
+    );
     assert_eq!(cgroup_headroom("100\n", "200\n"), Some(0));
     assert_eq!(cgroup_headroom("max\n", "200\n"), None);
     assert_eq!(cgroup_headroom("100\n", ""), None);
@@ -168,5 +172,8 @@ fn a_share_splits_memory_evenly_and_names_no_item_of_no_size() {
     assert_eq!(share(1_000, 2, 100), 5);
     assert_eq!(share(1_000, 0, 100), 0);
     assert_eq!(share(1_000, 2, 0), 0);
-    assert_eq!(share(u64::MAX, 1, 1), usize::try_from(u64::MAX).unwrap_or(usize::MAX));
+    assert_eq!(
+        share(u64::MAX, 1, 1),
+        usize::try_from(u64::MAX).unwrap_or(usize::MAX)
+    );
 }

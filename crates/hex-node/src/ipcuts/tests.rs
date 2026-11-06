@@ -117,7 +117,10 @@ fn the_refill_is_woken_while_what_is_left_outlasts_its_refill() {
     for size in 1..=4_096usize {
         let mark = low(size);
         assert!(mark >= 1 && mark <= size, "{size}: {mark}");
-        let (above, at) = (u64::try_from(size - mark).unwrap(), u64::try_from(mark).unwrap());
+        let (above, at) = (
+            u64::try_from(size - mark).unwrap(),
+            u64::try_from(mark).unwrap(),
+        );
         // Time to make what's above the mark against time to take what's at or under it, in common units.
         assert!(
             above * TAKES_PER_SECOND <= at * MAKES_PER_SECOND,

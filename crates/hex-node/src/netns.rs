@@ -88,10 +88,10 @@ const FDS_BESIDE: u64 = 1_024;
 const FDS_A_REFILL: u64 = 2;
 
 /// The mounts made ahead's (crate::devfs): the prepared `/dev` pool's at its bound, one descriptor each, and the
-/// proc pool's, two each (its pid namespace and its tree), four keys of eight each (`hex_core::devfs::KEYS`,
-/// `PER_KEY`).
-fn devfs_held() -> u64 {
-    let each_pool = hex_core::devfs::KEYS.saturating_mul(hex_core::devfs::PER_KEY);
+/// proc pool's, two each (its pid namespace and its tree), each pool holding at most the seeds' bound
+/// (`hex_core::devfs::Shape::cap`).
+fn devfs_held(sizes: Sizes) -> u64 {
+    let each_pool = sizes.seeds.get();
     of(each_pool, 1).saturating_add(of(each_pool, 2))
 }
 /// The one maker of both pools at its peak, a proc's (init::prepare_proc): the worker's own pid namespace, the one
@@ -153,7 +153,7 @@ impl Pools {
         let takes =
             u64::from(self.netns > 0).saturating_add(u64::from(self.ipc_uts > 0).saturating_mul(2));
         let devfs = if self.devfs {
-            devfs_held()
+            devfs_held(self.sizes)
                 .saturating_add(FDS_A_DEVFS_MAKE)
                 .saturating_add(FDS_MASK_SOURCES)
                 .saturating_add(of(crate::serve::WORKERS, FDS_DEVFS_TAKES))

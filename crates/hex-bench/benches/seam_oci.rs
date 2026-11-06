@@ -52,7 +52,7 @@
 //! HEXBENCH_TRACE turns on the breakdown probes' markers, around the ops HEXBENCH_TRACE_OPS
 //! names (`Trace`, bench/competitive/probes/exec_breakdown.md and create_breakdown.md).
 //! HEXBENCH_AHEAD is how many cgroups the node makes ahead for boxes of no owner, each with an init parked in it
-//! (decision 8, "The p99.9 that stayed"), the node's default (`hex_node::INITS_AHEAD`) unless set; 0 makes none.
+//! (decision 8, "The p99.9 that stayed"), the node's default (learned from its draws, from the host's parallelism up) unless set; 0 makes none.
 //! HEXBENCH_PARKED_PROCS=1 has each parked init's proc made with it and 0 has none made (decision 8, parked procs;
 //! unset, the node's default, on for a root node), in process and in the socket driver's `hex node`
 //! (`--parked-procs`). In process the phase's `parked` counts say how many were made, taken by their create (hits),

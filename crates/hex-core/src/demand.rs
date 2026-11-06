@@ -48,8 +48,8 @@ impl Learned {
 /// A pool made ahead's size, learned from its draws: each take since the pool last held its size is one drawn,
 /// and a take that finds the pool empty (a cold take) raises the size to what was drawn plus every cold take of
 /// that draw, so the next draw as deep finds the pool full with that many to spare. The headroom grows with each
-/// take found short, as the lead's condition of 2026-11-06 asks, and the size never falls.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// take found short, as the lead's condition of 2026-11-06 asks, and the size never falls. The default holds none.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Depth {
     size: Learned,
     drawn: usize,

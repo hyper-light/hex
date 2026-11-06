@@ -495,10 +495,7 @@ impl Seeds {
     /// A create found no seed idle: a vacant slot is added for a seed to start, unless one is vacant already or the
     /// slots are at the bound.
     fn grow(&mut self) {
-        let vacant = self
-            .slots
-            .iter()
-            .any(|s| matches!(s.holds, Holds::Nothing));
+        let vacant = self.slots.iter().any(|s| matches!(s.holds, Holds::Nothing));
         if !vacant && self.slots.len() < self.limits.seeds.get() {
             self.slots.push(Slot {
                 holds: Holds::Nothing,

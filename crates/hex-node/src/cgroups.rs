@@ -17,7 +17,8 @@ use std::time::Duration;
 
 use hex_api::{Bounds, BoxId, BoxOwner, Refusal, Usage};
 use hex_core::cgroup::Baseline;
-use hex_core::reuse::{self, PER_NODE, PER_OWNER, Pool, Refused, Take, Whose};
+use hex_core::demand::Depth;
+use hex_core::reuse::{self, Pool, Refused, Take, Whose};
 use hex_runtime::linux::cgroup::{BoxCgroup, BoxRoot};
 use hex_runtime::linux::oci::init::PreparedProc;
 use hex_runtime::linux::oci::resources::Insn;
@@ -26,6 +27,7 @@ use hex_runtime::linux::oci::{OciError, procmount};
 
 use crate::createpool::Parker;
 use crate::devfs::ProcMaker;
+use crate::sizes::Sizes;
 
 /// Most memory an idle cgroup may still have charged to be handed on (research f27-f30), measured
 /// (bench/competitive/probes/reuse_residual.md). A box whose processes have all ended leaves the charge
@@ -38,16 +40,6 @@ use crate::devfs::ProcMaker;
 /// f27), which the next box would be charged for, so its cgroup goes. 16 MiB sits above the first two
 /// and under the third (the lead, 2026-11-03T04:50Z).
 pub const RESIDUAL: u64 = 16 << 20;
-
-/// How many cgroups may wait for the remover at once: every idle cgroup the pool can put out at one time
-/// ([`PER_NODE`]). Past it the caller removes the cgroup itself, as every delete did before.
-const REMOVALS: usize = PER_NODE;
-
-/// The most procs the node keeps alive at once, held with parked inits or waiting for the dropper (decision 8,
-/// parked procs): one an idle slot ([`PER_NODE`]) unless [`Cgroups::set_parked_procs`] is given another. The
-/// dropper's queue holds as many, so a tree handed to it never finds it full: a proc past the bound isn't made,
-/// counted (`procs_capped`), and its init parks without one.
-pub const PROCS_ALIVE: usize = PER_NODE;
 
 /// How long the remover waits for a cgroup it ended to empty, as [`crate::node::EMPTY_PATIENCE`].
 const REMOVE_PATIENCE: Duration = Duration::from_secs(60);
@@ -152,6 +144,8 @@ pub struct AheadCounts {
     pub dry: u64,
     pub failed: u64,
     pub ready: usize,
+    /// How many the node keeps ready now: learned from its draws unless set (Ada's rule, 2026-11-06).
+    pub size: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -198,6 +192,8 @@ impl Removal {
 /// The node's slots, idle and held, and how its boxes were ended.
 pub struct Cgroups {
     pool: Arc<Mutex<Pool<Policy>>>,
+    /// The most idle cgroups the pool keeps ([`Sizes::idle_cgroups`]).
+    most_idle: usize,
     held: Mutex<BTreeMap<BoxId, Held>>,
     remover: SyncSender<BoxCgroup>,
     removal: Arc<Removal>,
@@ -247,7 +243,7 @@ struct Parking {
     queued: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
     dropped_inline: Arc<AtomicU64>,
-    /// Procs alive and their bound ([`PROCS_ALIVE`]): a make reserves one first, and a drop or a claim's hit gives
+    /// Procs alive and their bound ([`Sizes::procs_alive`] unless set): a make reserves one first, and a drop or a claim's hit gives
     /// it back.
     alive: Arc<AtomicU64>,
     bound: AtomicU64,
@@ -370,7 +366,10 @@ enum MadeBy {
 /// owner takes the oldest; with none ready it makes its cgroup and clones its init as before, counted dry.
 #[derive(Default)]
 struct Ahead {
+    /// How many the refill keeps ready, read without the lock: `depth`'s size, 0 once drained.
     bound: AtomicU64,
+    /// The size learned from the takes' draws ([`Depth`]), or fixed where the node was given one.
+    depth: Mutex<Depth>,
     flags: AtomicU64,
     /// The prepared-proc key of the last box of no owner to choose its cgroup, which each init parked ahead has its
     /// proc made for: set before that box takes one, so the refill its take wakes reads it.
@@ -388,6 +387,40 @@ struct Ahead {
 }
 
 impl Ahead {
+    /// The refill keeps `depth`'s size ready from here on.
+    fn size(&self, depth: Depth) {
+        if let Ok(mut d) = self.depth.lock() {
+            *d = depth;
+        }
+        self.bound.store(
+            u64::try_from(depth.size()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+    }
+
+    /// A take, `dry` when it found none ready: the size learns from the draw.
+    fn took(&self, dry: bool) {
+        let Ok(mut d) = self.depth.lock() else { return };
+        if d.took(dry)
+            && !self.shut.load(Ordering::Relaxed)
+            && self.bound.load(Ordering::Relaxed) > 0
+        {
+            self.bound.store(
+                u64::try_from(d.size()).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
+        }
+    }
+
+    /// `ready` cgroups are ready: the size's draw ends once they fill it.
+    fn filled(&self, ready: usize) {
+        if let Ok(mut d) = self.depth.lock()
+            && ready >= d.size()
+        {
+            d.full();
+        }
+    }
+
     fn ready(&self) -> Result<MutexGuard<'_, VecDeque<(u64, BoxCgroup)>>, Refusal> {
         self.ready.lock().map_err(|_| {
             Refusal::Broken("the node's cgroups made ahead lock was poisoned".to_owned())
@@ -401,6 +434,7 @@ impl Ahead {
             dry: self.dry.load(Ordering::Relaxed),
             failed: self.failed.load(Ordering::Relaxed),
             ready: self.ready().map_or(0, |r| r.len()),
+            size: usize::try_from(self.bound.load(Ordering::Relaxed)).unwrap_or(usize::MAX),
         }
     }
 }
@@ -481,6 +515,7 @@ fn refill_ahead(
                     slots.insert(n, p);
                 }
                 ready.push_back((n, cg));
+                ahead.filled(ready.len());
             }
             Err(_) => {
                 ahead.failed.fetch_add(1, Ordering::Relaxed);
@@ -525,10 +560,12 @@ fn memory_current(dir: &std::path::Path) -> u64 {
 }
 
 impl Cgroups {
-    /// The node's cgroups, fresh slots numbered from `first` ([`Pool::new`]), with the remover's thread
-    /// started; it ends when the node does.
-    pub fn start(first: u64) -> Result<Self, Refusal> {
-        let (remover, queue) = mpsc::sync_channel(REMOVALS);
+    /// The node's cgroups, fresh slots numbered from `first` ([`Pool::new`]), bounded by `sizes`: at most its
+    /// `idle_cgroups` idle, and each owner's bound learned from its misses from `start` up. The remover's thread
+    /// starts with a queue of as many, every idle cgroup the pool can put out at one time, past which the caller
+    /// removes the cgroup itself, as every delete did before; it ends when the node does.
+    pub fn start(first: u64, sizes: Sizes) -> Result<Self, Refusal> {
+        let (remover, queue) = mpsc::sync_channel(sizes.idle_cgroups);
         let removal = Arc::new(Removal::default());
         let theirs = Arc::clone(&removal);
         std::thread::Builder::new()
@@ -537,7 +574,12 @@ impl Cgroups {
             .map_err(|e| Refusal::os("starting the cgroup remover", e))?;
         let parking = Parking::default();
         Ok(Self {
-            pool: Arc::new(Mutex::new(Pool::new(PER_OWNER, PER_NODE, first))),
+            pool: Arc::new(Mutex::new(Pool::new(
+                sizes.start,
+                sizes.idle_cgroups,
+                first,
+            ))),
+            most_idle: sizes.idle_cgroups,
             held: Mutex::new(BTreeMap::new()),
             remover,
             removal,
@@ -576,16 +618,21 @@ impl Cgroups {
         Ok(())
     }
 
-    /// At most `bound` cgroups are made ahead for boxes of no owner, each with an init in it (decision 8); 0, the
+    /// `bound` cgroups are kept made ahead for boxes of no owner, each with an init in it (decision 8); 0, the
     /// default, makes none. Set before the node's first create.
     pub fn set_ahead(&self, bound: usize) {
-        self.ahead
-            .bound
-            .store(u64::try_from(bound).unwrap_or(u64::MAX), Ordering::Relaxed);
+        self.ahead.size(Depth::new(bound, bound));
+    }
+
+    /// The cgroups made ahead for boxes of no owner start at `start` and learn their number from the takes' draws,
+    /// up to `cap` (Ada's rule, 2026-11-06): a take that finds none ready raises it to the draw's takes plus one
+    /// for each found none ([`Depth`]), and it never falls. Set before the node's first create.
+    pub fn learn_ahead(&self, start: usize, cap: usize) {
+        self.ahead.size(Depth::new(start, cap));
     }
 
     /// Each init parked from here on has the proc of its own pid namespace made with it, through `maker`, for its
-    /// owner's last spec (decision 8, parked procs), at most `bound` alive at once ([`PROCS_ALIVE`]), and the dropper
+    /// owner's last spec (decision 8, parked procs), at most `bound` alive at once ([`Sizes::procs_alive`]), and the dropper
     /// started with a queue of as many. Set before the node's first create; unset, none is made. Set again once the
     /// dropper runs, it turns them on with `bound`, refused past the dropper's queue (so a tree handed to it never
     /// finds it full).
@@ -658,6 +705,7 @@ impl Cgroups {
         // A take wakes the refill once its create has done its cgroup's file work ([`Cgroups::wake_refill`]): the refill's
         // mkdir takes the hierarchy's lock to write, and a lookup the create made after it would queue behind it
         // (goal16_ab.md, "Whose work the no-owner tail waits on"). With none ready it is woken now.
+        self.ahead.took(taken.is_none());
         match &taken {
             Some(_) => {
                 self.ahead.taken.fetch_add(1, Ordering::Relaxed);
@@ -808,7 +856,7 @@ impl Cgroups {
         let out = self.pool()?.drain();
         let mut first = None;
         // None is made ahead from here on, and what is is removed.
-        self.ahead.bound.store(0, Ordering::Relaxed);
+        self.ahead.size(Depth::new(0, 0));
         let _made = self.ahead.busy.lock().map_err(|_| {
             Refusal::Broken("the cgroups-ahead refill's lock was poisoned".to_owned())
         })?;
@@ -906,10 +954,16 @@ fn remove_each(queue: &Receiver<BoxCgroup>, removal: &Removal) {
     }
 }
 
-/// Most sub-cgroups [`end_and_remove`] takes apart under one cgroup: a box that may change its cgroup
-/// never holds a slot, so a slot's are what something outside the node made in it while it was idle;
-/// past this many the removal is refused, by type, and recovery finishes it.
-const REMOVE_DIRS: usize = 256;
+/// The most sub-cgroups [`end_and_remove`] takes apart under a cgroup whose `cgroup.stat` reads `stat`: the kernel's
+/// own count of its live descendants, `nr_descendants` (Linux Documentation/admin-guide/cgroup-v2.rst,
+/// "cgroup.stat"; v6.19 kernel/cgroup/cgroup.c `cgroup_stat_show`), read before the walk, itself bounded by the
+/// cgroup's `cgroup.max.descendants`. A box that may change its cgroup never holds a slot, so a slot's are what
+/// something outside the node made in it while it was idle; one made during the walk takes it past the count, and
+/// the removal is refused, by type, for recovery to finish (Ada's rule, 2026-11-06: no picked bound). `None` when
+/// the text gives no count.
+fn sub_cgroups(stat: &str) -> Option<usize> {
+    hex_core::cgroup::flat(stat, "nr_descendants").and_then(|n| usize::try_from(n).ok())
+}
 
 /// Ends whatever runs in `cg` (a cgroup no box holds now: idle, refused, or a failed create's) and
 /// removes it with any sub-cgroups it holds, deepest first: a flat walk, bounded (CLAUDE.md §2, §11).
@@ -929,6 +983,16 @@ fn end_and_remove(cg: &BoxCgroup) -> Result<(), Refusal> {
             });
         }
     }
+    let stat = match std::fs::read_to_string(cg.dir().join("cgroup.stat")) {
+        Ok(stat) => stat,
+        // Removed meanwhile: nothing is left to take apart.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(Refusal::os("reading an idle cgroup's cgroup.stat", e)),
+    };
+    let most = sub_cgroups(&stat).ok_or_else(|| Refusal::Os {
+        op: "reading an idle cgroup's cgroup.stat",
+        why: format!("{} counts no nr_descendants", cg.dir().display()),
+    })?;
     let mut found = Vec::new();
     let mut queue = vec![cg.dir().to_path_buf()];
     while let Some(dir) = queue.pop() {
@@ -941,8 +1005,8 @@ fn end_and_remove(cg: &BoxCgroup) -> Result<(), Refusal> {
             let entry =
                 entry.map_err(|e| Refusal::os("listing an idle cgroup's sub-cgroups", e))?;
             if entry.file_type().is_ok_and(|t| t.is_dir()) {
-                if found.len() >= REMOVE_DIRS {
-                    return Err(Refusal::Full(REMOVE_DIRS));
+                if found.len() >= most {
+                    return Err(Refusal::Full(most));
                 }
                 found.push(entry.path());
                 queue.push(entry.path());
@@ -1152,8 +1216,9 @@ impl Choose for Choice<'_> {
             reuse: self.owner.is_some_and(|o| o.reuse),
             privileged: wants.privileged,
         };
-        // Each refused idle cgroup leaves the pool, so the takes end within the owner's bound.
-        for _ in 0..=PER_OWNER {
+        // Each refused idle cgroup leaves the pool, so the takes end within the node's bound on them.
+        let most = self.cgroups.most_idle;
+        for _ in 0..=most {
             let take = self
                 .cgroups
                 .pool()
@@ -1251,7 +1316,7 @@ impl Choose for Choice<'_> {
             }
         }
         Err(OciError::Broken(format!(
-            "box {} found more than {PER_OWNER} of its owner's idle cgroups refused in one create",
+            "box {} found more than {most} of its owner's idle cgroups refused in one create",
             self.id
         )))
     }
@@ -1290,5 +1355,25 @@ impl Choose for Choice<'_> {
             ParkedProc::Dry => return,
         };
         count.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ada's rule, 2026-11-06 (T-T7.1.2): `REMOVE_DIRS`' 256 was picked; the walk's bound is the kernel's count of the
+    /// cgroup's sub-cgroups. Do: read the counts as the kernel writes `cgroup.stat`, and hostile text. Expect: the
+    /// live descendants' count, and none where the text gives none.
+    #[test]
+    fn the_walks_bound_is_the_kernels_count_of_sub_cgroups() {
+        assert_eq!(
+            sub_cgroups("nr_descendants 3\nnr_subsys_cpu 1\nnr_dying_descendants 7\n"),
+            Some(3)
+        );
+        assert_eq!(sub_cgroups("nr_descendants 0\n"), Some(0));
+        for bad in ["", "nr_descendants x\n", "nr_dying_descendants 2\n"] {
+            assert_eq!(sub_cgroups(bad), None, "{bad:?}");
+        }
     }
 }

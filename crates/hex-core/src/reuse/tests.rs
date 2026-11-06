@@ -347,10 +347,7 @@ fn a_burst_the_owner_bound_cut_is_kept_whole_the_next_round() {
                 Take::Own(why) => panic!("{why:?}"),
             })
             .collect();
-        slots
-            .into_iter()
-            .flat_map(|n| pool.give("o", n, 0))
-            .count()
+        slots.into_iter().flat_map(|n| pool.give("o", n, 0)).count()
     };
     assert_eq!(round(&mut pool), 2, "the first round's two past the bound");
     assert_eq!(round(&mut pool), 0, "two misses raised the bound to 4");

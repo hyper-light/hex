@@ -357,12 +357,20 @@ fn a_burst_the_owner_bound_cut_is_kept_whole_the_next_round() {
             .collect();
         taken.into_iter().flat_map(|n| pool.give("o", n)).count()
     };
-    assert_eq!(round(&mut pool), 2, "four fresh, two past the bound given back");
+    assert_eq!(
+        round(&mut pool),
+        2,
+        "four fresh, two past the bound given back"
+    );
     assert_eq!(round(&mut pool), 0, "two taken fresh raised the bound to 4");
     assert_eq!(pool.counts().per_owner, 4);
     let fresh_learned = pool.counts().fresh;
     assert_eq!(round(&mut pool), 0);
-    assert_eq!(pool.counts().fresh, fresh_learned, "no cold take once learned");
+    assert_eq!(
+        pool.counts().fresh,
+        fresh_learned,
+        "no cold take once learned"
+    );
 }
 
 /// Every reason has a name of its own, and `ALL` lists each once.

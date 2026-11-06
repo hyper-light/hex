@@ -2,7 +2,7 @@
 //! proc with its masks and read-only paths, for a pid namespace made ahead (decision 6's update, part 2).
 //! Each prepared mount is detached and owned by one create; nothing is cloned or returned after use.
 use hex_api::Refusal;
-use hex_core::devfs::{Counts, MakeFailure, Pool};
+use hex_core::devfs::{Counts, MakeFailure, Pool, Shape};
 use hex_runtime::linux::oci::init::{PreparedProc, ProcSources};
 use hex_runtime::linux::oci::run::DevMounts;
 use hex_runtime::linux::oci::{OciError, devmount::Key, init, procmount};
@@ -69,9 +69,17 @@ impl Devfs {
         procs: bool,
         root: bool,
     ) -> Result<Self, Refusal> {
+        // Each pool's keys and mounts a key start at the host's parallelism and are learned from its misses, up to
+        // the seeds' bound, which is also the most it holds (Ada's rule, 2026-11-06).
+        let sizes = crate::sizes::Sizes::now()?;
+        let shape = Shape {
+            keys: sizes.start,
+            per_key: sizes.start,
+            cap: sizes.seeds.get(),
+        };
         let shared = Arc::new(Shared {
-            pool: Mutex::new(Pool::new(dev)),
-            procs: Mutex::new(Pool::new(procs)),
+            pool: Mutex::new(Pool::new(dev, shape)),
+            procs: Mutex::new(Pool::new(procs, shape)),
             sources,
             wake: Condvar::new(),
         });
