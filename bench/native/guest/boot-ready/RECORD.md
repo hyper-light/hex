@@ -9,7 +9,7 @@ added, and its load is recorded.
 
 ## HVF (macOS aarch64)
 
-The class's slowest: **0.214 s** (adas-mac-studio-2.local's first boot), so the seed is 2 × 0.214 = 0.428 s
+The class's slowest: **0.265 s** (adas-mac-studio-2.local's second run, its first boot), so the seed is 2 × 0.265 = 0.530 s
 (`hex_runtime::guest::RECORDED_BOOT`).
 
 ### adas-mac-studio.local-2
@@ -49,6 +49,14 @@ Runs, in order: 0.170 0.162 0.170 0.174 0.172 0.161 0.167 0.169 0.161 0.169 0.15
 Runs, in order: 0.214 0.124 0.109 0.117 0.114 0.119 0.132 0.120 0.135 0.130 0.115 0.117 0.124 0.125 0.133 0.128
 0.136 0.127 0.123 0.128 0.126 0.133 0.131 0.134 0.131 0.134 0.129 0.121 0.124 0.123 0.120 0.121 0.112 0.131
 0.122 0.110 0.123 0.121 0.118 0.117.
+
+### adas-mac-studio-2.local, second run
+
+- launchd one-shot hex.ns5.dstop.20261106T175847Z (the stop record's run, bench/native/guest/stop), 2026-11-06
+  17:58Z, load 6.40-7.89 under its own co-tenants; tree fffbc27, the same image and Shards build
+- N = 40: min 0.111, p50 0.126, max 0.265 s (boot 1, again a series' first)
+
+Runs, in order: 0.265 0.165 0.177 0.129 0.126 0.114 0.123 0.125 0.128 0.134 0.124 0.135 0.119 0.122 0.120 0.123 0.127 0.114 0.119 0.124 0.123 0.127 0.130 0.127 0.126 0.137 0.111 0.125 0.129 0.119 0.129 0.120 0.126 0.115 0.128 0.130 0.116 0.126 0.129 0.130.
 
 ## KVM (Linux x86_64), WHP (Windows x86_64)
 

@@ -163,7 +163,7 @@ struct Booted {
 /// record, quiet and under its hosts' own load, across both Mac Studios (N=40 each;
 /// bench/native/guest/boot-ready/RECORD.md). KVM and WHP aren't recorded yet, so they take it too, as
 /// that record states.
-pub const RECORDED_BOOT: Duration = Duration::from_millis(214);
+pub const RECORDED_BOOT: Duration = Duration::from_millis(265);
 
 /// Boots of one guest: the first, and one more where the first hung alive past its bound, as a hung
 /// boot has another guest to try before its caller is refused.
@@ -197,7 +197,7 @@ impl GuestRuntime {
         }
     }
 
-    /// How long a boot may take to be ready (the lead's rule for learned waits): twice the slowest of
+    /// How long a boot may take to be ready (the lead's rule for learned waits): twice (the margin) the slowest of
     /// the record's and this node's own, so it only rises; before any boot here, twice the record's.
     pub fn first_dial_bound(&self) -> Result<Duration, Refusal> {
         let seen = *self.slowest.lock().map_err(poisoned)?;

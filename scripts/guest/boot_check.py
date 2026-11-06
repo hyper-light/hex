@@ -66,6 +66,11 @@ def handshake(path):
 PEAK_MIB = 284
 
 
+# How long a VM may take to end after SIGTERM before it is killed: twice (the margin) the slowest stop on
+# record (bench/native/guest/stop/RECORD.md), the lead's rule for a timeout that can't wait on a fact.
+STOP_GRACE = 2 * 0.013
+
+
 def guest_memory_mib():
     """Shards' least guest and twice the measured peak, as hex-cli's guest_real takes."""
     least = 64 if platform.machine() in ("arm64", "aarch64") else 128
@@ -121,17 +126,18 @@ def main(argv):
         print(f"READY after {time.monotonic() - start:.3f} s: {ok}, token {token.hex()}", flush=True)
         return 0
     finally:
+        stopping = time.monotonic()
         vm.terminate()
-        # Shards' own grace for a run's stop (crates/shards/src/daemon.rs:231, `STOP_GRACE`), then
-        # SIGKILL; the console is drained meanwhile so the VM never blocks writing it.
+        # SIGTERM, then SIGKILL past STOP_GRACE; the console is drained meanwhile so the VM never blocks
+        # writing it.
         try:
-            rest, _ = vm.communicate(timeout=10)
+            rest, _ = vm.communicate(timeout=STOP_GRACE)
         except subprocess.TimeoutExpired:
             vm.kill()
             rest, _ = vm.communicate()
         log.write(rest or b"")
         log.close()
-        print(f"the VM ended: exit {vm.returncode}", flush=True)
+        print(f"the VM ended: exit {vm.returncode}, {time.monotonic() - stopping:.3f} s after SIGTERM", flush=True)
 
 
 if __name__ == "__main__":

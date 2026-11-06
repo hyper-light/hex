@@ -40,9 +40,11 @@ use hex_runtime::guest::{GuestConfig, GuestRuntime};
 /// (HEX-GUEST-20 on adas-mac-studio.local-2, aarch64 HVF, 2026-11-06; bench/native/guest/peak-rss/RECORD.md).
 const PEAK_MIB: u64 = 975;
 
-/// The most inside.sh gives one test (`timeout 60`, bench/oci-validation/inside.sh:16): the suite's
-/// longest run is this for each test the Linux record holds, the lab's own bound.
-const PER_TEST: Duration = Duration::from_secs(60);
+/// How long the lab may run before the test fails: twice (the margin) the slowest run of this test on
+/// record, jupiter's 75.5 s under WHP (bench/native/guest/validation-runs/RECORD.md), the lead's rule for
+/// a wait that can't end on a fact alone. Each run's time includes its boot and staging, so the lab's
+/// own is less.
+const SUITE: Duration = Duration::from_millis(2 * 75_500);
 
 /// Every capability Hex's runtime names (crates/hex-runtime/src/linux/oci/caps.rs), as a privileged
 /// container holds them.
@@ -274,10 +276,7 @@ fn the_oci_runtime_spec_validation_passes_in_the_guest_as_on_linux() {
     .expect("create the lab in the guest");
     node.start(&id).expect("start the lab");
     // The fact waited on is the lab's end, which the node reports with its exit.
-    let linux = results(include_str!(
-        "../../../bench/oci-validation/results-hex-linux.tsv"
-    ));
-    let suite = PER_TEST * u32::try_from(linux.len()).unwrap();
+    let suite = SUITE;
     let read = || node.inspect(&id).expect("inspect the lab").exit;
     let exit =
         reread(suite, read).unwrap_or_else(|| panic!("the lab ran past the suite's {suite:?}"));
@@ -286,6 +285,9 @@ fn the_oci_runtime_spec_validation_passes_in_the_guest_as_on_linux() {
 
     let got = std::fs::read_to_string(out.join("results.tsv")).expect("the lab's results.tsv");
     let guest = results(&got);
+    let linux = results(include_str!(
+        "../../../bench/oci-validation/results-hex-linux.tsv"
+    ));
     eprintln!("{got}");
     let lost: Vec<&String> = linux
         .iter()
