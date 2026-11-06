@@ -839,7 +839,7 @@ mod tests {
             let second = s.spawn(|| store.put(&held));
             let deadline = Instant::now() + hex_api::conformance::PATIENCE;
             while store.waited() == 0 && Instant::now() < deadline {
-                std::thread::park_timeout(Duration::from_millis(1));
+                std::thread::yield_now();
             }
             assert_eq!(store.waited(), 1, "the second write of the held box waits");
             assert_eq!(
@@ -1007,7 +1007,8 @@ mod tests {
 
     /// Goal 5 extended step 6: the runtime directory's records are spread over its shards by their box's id, each
     /// where [`runtime_record`] says, none in the directory itself, so the boxes made and deleted at once rarely
-    /// take one directory's lock; got, listed and removed from there. Non-vacuity: 256 ids reach most shards.
+    /// take one directory's lock; got, listed and removed from there. Non-vacuity: 256 ids reach most shards,
+    /// at least [`shards_256_ids_reach`] of them.
     #[test]
     fn records_are_spread_over_the_shards_by_their_ids() {
         let dir = tempfile::tempdir().unwrap();
@@ -1030,9 +1031,10 @@ mod tests {
             .iter()
             .filter_map(|id| runtime_record(&run, id).parent().map(Path::to_owned))
             .collect();
+        let least = shards_256_ids_reach();
         assert!(
-            used.len() >= 48,
-            "256 ids took {} of the shards",
+            used.len() >= least,
+            "256 ids took {} of the shards, fewer than {least}",
             used.len()
         );
         assert_eq!(store.all().unwrap().len(), 256);
@@ -1042,6 +1044,36 @@ mod tests {
             assert!(!runtime_record(&run, id).exists());
         }
         assert!(sharded(&run).is_empty());
+    }
+
+    /// The fewest of the [`SHARDS`] shards 256 ids reach but once in 2^32 sets of ids, were the id hash
+    /// uniform. Each shard is missed by all 256 with chance (63/64)^256, so the missed shards number μ =
+    /// 64·(63/64)^256 ≈ 1.14 on average and the ids reach 64·(1 − (63/64)^256) ≈ 62.9. The misses are
+    /// negatively associated (balls in bins: Dubhashi and Ranjan, "Balls and Bins: A Study in Negative
+    /// Dependence", Random Structures & Algorithms 13(2), 1998, §2), so Chernoff's bound holds for their count:
+    /// P(misses ≥ t) ≤ (e^δ / (1+δ)^(1+δ))^μ with t = (1+δ)μ. This is the least t that bound puts under 2^-32,
+    /// taken from [`SHARDS`]. Derived, not picked: a hash that spreads ids worse than chance fails it.
+    fn shards_256_ids_reach() -> usize {
+        let shards = SHARDS as f64;
+        let mu = shards * ((shards - 1.0) / shards).powi(256);
+        let tail = |t: f64| {
+            let delta = t / mu - 1.0;
+            mu * (delta - (1.0 + delta) * (1.0 + delta).ln())
+        };
+        let misses = (1..SHARDS)
+            .find(|&t| t as f64 > mu && tail(t as f64) <= -32.0 * std::f64::consts::LN_2)
+            .unwrap();
+        SHARDS - misses
+    }
+
+    /// Doc-truth for the bound above (CLAUDE.md §6): do derive it; expect the ids' average reach, about 62.9 of
+    /// 64, and a least reach of 50: 14 shards missed is the first count Chernoff's bound puts under 2^-32.
+    #[test]
+    fn the_shards_256_ids_reach_follow_from_the_hash_being_uniform() {
+        let shards = SHARDS as f64;
+        let reach = shards * (1.0 - ((shards - 1.0) / shards).powi(256));
+        assert!((reach - 62.86).abs() < 0.01, "{reach}");
+        assert_eq!(shards_256_ids_reach(), 50);
     }
 
     /// Goal 5 extended step 6, T-T7.1.2 across the shards' upgrade: a node before them kept the runtime
