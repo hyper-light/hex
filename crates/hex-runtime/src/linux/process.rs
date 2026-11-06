@@ -89,7 +89,12 @@ fn exec_forked(
     if let Some(cwd) = &program.cwd {
         cmd.current_dir(cwd);
     }
-    join_on_exec(cg, &mut cmd)?;
+    // A box the node starts gets the default limit, not the node's own (HEX-INST-6).
+    sys::join_cgroup_on_exec(
+        &mut cmd,
+        Arc::new(cg.procs_for_joining()?),
+        Some(super::default_nofile()),
+    );
     let child = cmd.spawn().map_err(|e| Refusal::Os {
         op: "starting a program in a box",
         why: format!("{first}: {e}"),
@@ -140,14 +145,11 @@ fn null(flags: OFlags) -> Result<OwnedFd, Refusal> {
         .map_err(|e| Refusal::os("opening /dev/null", e))
 }
 
-/// Makes `cmd`'s child start in the box `cg`, under the descriptor limit a box gets where nothing names
-/// one: for callers that start processes themselves (kiln's runner keeps its own stdio and
-/// process-group handling, CP-T7.1's first consumer).
+/// Makes `cmd`'s child start in the box `cg`: for callers that start processes themselves (kiln's
+/// runner keeps its own stdio and process-group handling, CP-T7.1's first consumer, and `hex box run`).
+/// The program keeps its caller's descriptor limit: such a caller wraps a program for itself, and isn't
+/// the node, whose raised limit the default for the node's own boxes keeps them from (HEX-INST-6).
 pub fn join_on_exec(cg: &BoxCgroup, cmd: &mut Command) -> Result<(), Refusal> {
-    sys::join_cgroup_on_exec(
-        cmd,
-        Arc::new(cg.procs_for_joining()?),
-        super::default_nofile(),
-    );
+    sys::join_cgroup_on_exec(cmd, Arc::new(cg.procs_for_joining()?), None);
     Ok(())
 }

@@ -26,13 +26,13 @@ pub fn ignore_int_term() {
     }
 }
 
-/// Makes `cmd`'s child join the cgroup whose `cgroup.procs` is open as `procs` and take the descriptor
-/// limit `nofile` before it executes, so the program and everything it starts are in the box, under its
-/// limit, from their first instruction.
-pub fn join_cgroup_on_exec(cmd: &mut Command, procs: Arc<OwnedFd>, nofile: Rlimit) {
+/// Makes `cmd`'s child join the cgroup whose `cgroup.procs` is open as `procs` before it executes, and
+/// take the descriptor limit `nofile` where one is given (else it keeps the one it inherits), so the
+/// program and everything it starts are in the box, under its limit, from their first instruction.
+pub fn join_cgroup_on_exec(cmd: &mut Command, procs: Arc<OwnedFd>, nofile: Option<Rlimit>) {
     // SAFETY: the closure runs in the forked child before exec, where only async-signal-safe calls
     // are allowed. It makes one write(2) on a descriptor opened before the fork (kept open by the
-    // `Arc` the closure owns) and one setrlimit(2) of a value made before it, allocates nothing, and
+    // `Arc` the closure owns) and at most one setrlimit(2) of a value made before it, allocates nothing, and
     // turns a failure into the errno std reports.
     unsafe {
         cmd.pre_exec(move || {
@@ -41,7 +41,11 @@ pub fn join_cgroup_on_exec(cmd: &mut Command, procs: Arc<OwnedFd>, nofile: Rlimi
                 Ok(_) => return Err(std::io::Error::from(rustix::io::Errno::IO)),
                 Err(e) => return Err(std::io::Error::from(e)),
             }
-            rustix::process::setrlimit(Resource::Nofile, nofile).map_err(std::io::Error::from)
+            match nofile {
+                Some(limit) => rustix::process::setrlimit(Resource::Nofile, limit)
+                    .map_err(std::io::Error::from),
+                None => Ok(()),
+            }
         });
     }
 }
