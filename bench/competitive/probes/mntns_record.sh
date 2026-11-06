@@ -61,15 +61,23 @@ shutil.copyfile(p[0], sys.argv[2]); shutil.copymode(p[0], sys.argv[2])
 PY
 st "built $(sha256sum "$O/hex" "$O/seam_oci" | cut -c1-16 | paste -sd' ')"
 
+# A cell is called hung past twice the slowest recorded cell (the false-alarm margin of a failure bound: it never
+# changes what's measured, only when a hung cell is called hung; the lead's call, 2026-11-06). Recorded so far, the
+# slowest cell is bounded by its run's whole timed window: the guest's 18 cells (mntns-guest-20261106T054217Z, §16)
+# ran in 323 s, so 646 s; on the host, 16 single-phase cells of the same load ran in 177 s
+# (hex-g6-givenab-20261106T093407Z, §14), and a record cell runs two phases, so 2 x 2 x 177 = 708 s. Each cell's own
+# seconds now go into `exits`, so the host record's slowest cell sets this from its own run.
+case $MODE in host) CELL_BOUND=708 ;; guest) CELL_BOUND=646 ;; esac
+
 cell() { # cell <way> <loops> <round>
-  local way=$1 L=$2 r=$3 name=$1-L$2-r$3 pids=() p rc res
+  local way=$1 L=$2 r=$3 name=$1-L$2-r$3 pids=() p rc res t0=$SECONDS
   if [ "$MODE" = host ]; then
     for _ in $(seq 1 "$L"); do taskset -c 4-15 bash -c 'while :; do :; done' & pids+=("$!"); done
     { echo "== $name $(date -u +%FT%TZ) uptime: $(uptime)"; echo "  docker ps: $(docker ps -q | wc -l) containers"; } >> "$O/context.txt"
     ( cd "$SRC" && HEX_OCI_MNTNS=$way MOUNTS=$MOUNTS MOUNTS_CONC=8 MOUNTS_PATH=pruned MOUNTS_UNTRACED=1 IDLE_THREADS=8000 \
         CPUSET=4-15 LOAD_GATE=0 BENCH_HOST_OK="$(hostname)" BENCH_MEMORY=8g BENCH_OOM=1000 HEXBENCH_DEVFS=1 \
         HEXBENCH_OWNER=bench-owner HEXBENCH_REUSE=1 HEXBENCH_DOCKER_PATHS=1 \
-        timeout 900 bash bench/competitive/probes/create_breakdown.sh "$O/hex" "$O/seam_oci" ) > "$O/$name.log" 2>&1
+        timeout "$CELL_BOUND" bash bench/competitive/probes/create_breakdown.sh "$O/hex" "$O/seam_oci" ) > "$O/$name.log" 2>&1
     rc=$?
     # No wait for the loops before the cell: its container, node and 8,000 threads come first. Each loop's CPU time
     # at the end (utime + stime, clock ticks) shows it ran throughout.
@@ -81,12 +89,13 @@ cell() { # cell <way> <loops> <round>
   else
     ( cd "$SRC" && HEX_OCI_MNTNS=$way MOUNTS=$MOUNTS MOUNTS_CONC=8 MOUNTS_SPAN=root MOUNTS_UNTRACED=1 IDLE_THREADS=8000 \
         LOOPS=$L HEXBENCH_DEVFS=1 HEXBENCH_OWNER=bench-owner HEXBENCH_REUSE=1 HEXBENCH_DOCKER_PATHS=1 \
-        VM_CPUS=4-15 VM_SMP=12 VM_MEM=6G VM_TIMEOUT=1500 BENCH_MEMORY=8g BENCH_OOM=1000 OUT_DIR="$O/runs/$name" \
-        timeout 1800 bash bench/oci-validation/vm7_breakdown.sh "$O/hex" "$O/seam_oci" ) > "$O/$name.log" 2>&1
+        VM_CPUS=4-15 VM_SMP=12 VM_MEM=6G VM_TIMEOUT="$CELL_BOUND" BENCH_MEMORY=8g BENCH_OOM=1000 OUT_DIR="$O/runs/$name" \
+        timeout "$CELL_BOUND" bash bench/oci-validation/vm7_breakdown.sh "$O/hex" "$O/seam_oci" ) > "$O/$name.log" 2>&1
     rc=$?
     res=$O/runs/$name/out
   fi
-  echo "$(date -u +%FT%TZ) $name $rc $res" >> "$O/exits"
+  [ "$rc" = 124 ] && st "cell $name called hung past $CELL_BOUND s"
+  echo "$(date -u +%FT%TZ) $name $rc $res $(( SECONDS - t0 ))" >> "$O/exits"
 }
 
 timed() {
@@ -100,7 +109,7 @@ timed() {
   st "TIMED end load $(cut -d' ' -f1-3 /proc/loadavg)"
 }
 export -f st cell timed
-export O MODE SRC MOUNTS ROUNDS LOOPS_SET
+export O MODE SRC MOUNTS ROUNDS LOOPS_SET CELL_BOUND
 # The timed lock is waited on itself: it frees when its holder exits, and this run's unit bounds the wait.
 flock /home/adalundhe/.cache/hex-t7/fedora-timed.lock bash -c timed || { st "refusing: the timed lock or the run failed"; exit 5; }
 
