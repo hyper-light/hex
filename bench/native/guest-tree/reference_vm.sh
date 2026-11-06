@@ -8,6 +8,7 @@
 # usage (in the container): reference_vm.sh OUT IMAGE...   (the walker at /hex; this tree at /src)
 set -euo pipefail
 OUT=$1; shift
+mkdir -p "$OUT"
 V=2.3.6
 ARCH=$(uname -m | sed 's/aarch64/arm64/; s/x86_64/amd64/')
 T=containerd-static-$V-linux-$ARCH.tar.gz
