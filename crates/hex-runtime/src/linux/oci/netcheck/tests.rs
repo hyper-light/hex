@@ -441,3 +441,27 @@ proptest! {
         let _ = links(&text);
     }
 }
+
+/// CLAUDE.md §2; Ada's 2026-11-06 rule (no picked constants): a dump's reads are bounded by its bytes, each read
+/// that isn't refused holding at least a message's header, not by a count picked beside them. Do: answer a dump in
+/// 65 reads of one header-only message each (one past the 64 once picked), then `NLMSG_DONE`, through a
+/// socket pair that keeps each read apart. Expect: the answer read whole, every message of it kept.
+#[test]
+fn a_dumps_reads_are_bounded_by_its_bytes() {
+    let (ours, theirs) = rustix::net::socketpair(
+        AddressFamily::UNIX,
+        SocketType::SEQPACKET,
+        SocketFlags::CLOEXEC,
+        None,
+    )
+    .unwrap();
+    let reads = 65;
+    for _ in 0..reads {
+        rustix::net::send(&theirs, &msg(20, 1, &[]), SendFlags::empty()).unwrap();
+    }
+    let done = msg(NLMSG_DONE, 1, &[0, 0, 0, 0]);
+    rustix::net::send(&theirs, &done, SendFlags::empty()).unwrap();
+    let mut scratch = Scratch::default();
+    assert_eq!(ask(&ours, &[0; NLMSG_HDR], &mut scratch), Ok(()));
+    assert_eq!(scratch.answer.len(), reads * NLMSG_HDR + done.len());
+}
