@@ -207,6 +207,29 @@ copy there shows ~20 bench scripts as modified: line endings from the sync, no c
    30 runs of exactly setup::FEATURE_QUERY, each a fresh Windows PowerShell started as features.rs starts it
    (-NoProfile -Command), timed from the shell around each run: min 1,048, p50 1,183, p90 1,398, max 2,421 ms.
 
+20. the process class's live count, and the feature query past its deadline, 2026-11-06T19:20-19:55Z on jupiter, from
+   kiln (idle: 25-31 of 32 cores idle), tree babd701 plus the working change to crates/hex-runtime/src/windows/sys.rs.
+   At babd701 (dda3f36's two-read count): windows_process_box 10/10 twice;
+   windows::features::tests::a_query_past_the_bound_is_refused_by_name 1/1;
+   cli setup_features_prints_each_features_state_or_refuses_off_windows 1/1.
+   What NumberOfAssignedProcesses holds (new test an_ended_member_whose_handle_is_held_leaves_the_id_list):
+   `cmd /c exit 0` in a job, waited to its end, its handle held. The member's own id is not listed, and the
+   two counts agree in one read (3 runs: both 1, the one id another process's, gone before tasklist could
+   name it, so the console host Windows starts for a console program with no console; then 5 of 5 passing).
+   dda3f36 said 219df52's count (NumberOfAssignedProcesses) broke the memory-bound cases because it keeps
+   ended members. That is not so: with 219df52's count forced, windows_process_box passed 3 of 3 (3 of 3 with
+   dda3f36's too), and the failing assert ("memory bound not counted") reads oom_kills, not the live count. The
+   memory-bound failure did not recur in 29 complete suite runs (23 idle; 6 beside 3 more suite copies). It is
+   not reproduced, so it is not explained.
+   The feature query past its deadline: runs 2-5 of the idle loop, back to back, each refused every one of its
+   three tests' queries (setup::FEATURE_QUERY_PATIENCE, 4,842 ms: "PowerShell's Win32_OptionalFeature query
+   didn't finish within 4 s"). Every later run passed (24 of 24 that finished), 4 suite copies (12 concurrent
+   queries) included. So for about a minute a single query took over 4,842 ms on idle jupiter, past twice
+   entry 19's slowest. The query, the deadline and the test are step 6's; reported to it and the lead, unchanged
+   here.
+   With the count taken as one read (the working change): windows_process_box 10/10 three times;
+   an_ended_member_whose_handle_is_held_leaves_the_id_list 5 of 5; fmt and native clippy -D warnings exit 0.
+
 What HCS reports as a Windows oci box's Exit at its end, against the oracle's Signal(15), for HEX-DIFF-1 step 12
 and HEX-DIFF-2 step 11 (asked by step 7): NOT OBSERVED. windows_oci_boxes_hold_the_contract_and_the_steps_criteria
 skipped in every run above (no HEX_WINDOWS_LAYERS), so no Windows oci box was made; it is read in the first run

@@ -317,31 +317,24 @@ impl Job {
         })
     }
 
-    /// How many processes are live in the job right now (`JobObjectBasicProcessIdList`'s
-    /// `NumberOfProcessIdsInList`). This counts running processes, not the job's accounting
-    /// `ActiveProcesses`, which lingers while a terminated member's handle is still held — so a box
-    /// whose member has exited reads as empty here even while the node still holds its process handle.
-    /// The list is sized from the job itself: a first read with room for one id learns the job's
-    /// `NumberOfAssignedProcesses` (filled in even when the ids don't fit, `ERROR_MORE_DATA`), the second
-    /// reads that many. Ids that joined between the two reads don't fit; the box is running with at least
-    /// the ids listed, which is all a caller needs (CLAUDE.md §2: the read is bounded by the job's own
-    /// count, not a picked one).
+    /// How many processes are live in the job right now: `JobObjectBasicProcessIdList`'s
+    /// `NumberOfAssignedProcesses`, which Windows fills in even when the buffer holds fewer ids
+    /// (`ERROR_MORE_DATA`; jobobject_basic_process_id_list.md: "The number of process identifiers to be
+    /// stored in ProcessIdList"), so one read with room for one id learns the job's whole count at any
+    /// size (CLAUDE.md §2: bounded by the job's own count, not a picked one). An ended member leaves the
+    /// list though the node still holds its process handle, and this count agrees with the ids listed
+    /// (`an_ended_member_whose_handle_is_held_leaves_the_id_list`, run on jupiter), so a box whose member
+    /// has exited reads as empty. The job's accounting `ActiveProcesses` is not used.
     pub fn live_processes(&self) -> io::Result<u64> {
         let header = size_of::<u32>().saturating_mul(2);
-        let first = self.process_ids(header.saturating_add(size_of::<usize>()))?;
-        if first.listed >= first.assigned {
-            return Ok(u64::from(first.listed));
-        }
-        let ids = usize::try_from(first.assigned).unwrap_or(usize::MAX);
-        let second =
-            self.process_ids(header.saturating_add(ids.saturating_mul(size_of::<usize>())))?;
-        Ok(u64::from(second.listed))
+        self.assigned_processes(header.saturating_add(size_of::<usize>()))
+            .map(u64::from)
     }
 
-    /// One read of the job's process id list into a buffer of `len` bytes: its two counts, the ids
-    /// themselves unread. `ERROR_MORE_DATA` (the ids don't all fit) still fills both counts.
-    fn process_ids(&self, len: usize) -> io::Result<IdCounts> {
-        // usize-aligned, as the list's ids are; the counts are its first 8 bytes.
+    /// One read of the job's process id list into a buffer of `len` bytes, for its
+    /// `NumberOfAssignedProcesses`. `ERROR_MORE_DATA` (the ids don't all fit) still fills it in.
+    fn assigned_processes(&self, len: usize) -> io::Result<u32> {
+        // usize-aligned, as the list's ids are; the count is its first 4 bytes.
         let mut buf = vec![0usize; len.div_ceil(size_of::<usize>())];
         let bytes = u32::try_from(buf.len().saturating_mul(size_of::<usize>()))
             .map_err(|_| io::Error::other("a job's process id list past 4 GiB"))?;
@@ -362,17 +355,8 @@ impl Job {
                 return Err(err);
             }
         }
-        // The header's 8 bytes, whatever usize's width.
-        let head: Vec<u8> = buf.iter().flat_map(|w| w.to_ne_bytes()).take(8).collect();
-        let count = |at: usize| {
-            head.get(at..at.saturating_add(4))
-                .and_then(|b| <[u8; 4]>::try_from(b).ok())
-                .map_or(0, u32::from_ne_bytes)
-        };
-        Ok(IdCounts {
-            assigned: count(0),
-            listed: count(4),
-        })
+        let head: Vec<u8> = buf.iter().flat_map(|w| w.to_ne_bytes()).take(4).collect();
+        Ok(<[u8; 4]>::try_from(head.as_slice()).map_or(0, u32::from_ne_bytes))
     }
 
     /// Whether the job's memory notification limit has been violated since this was last read: the
@@ -391,14 +375,6 @@ impl Job {
         }
         Ok(())
     }
-}
-
-/// A job process id list's two counts (`JOBOBJECT_BASIC_PROCESS_ID_LIST`'s header).
-struct IdCounts {
-    /// `NumberOfAssignedProcesses`: the ids the list would hold.
-    assigned: u32,
-    /// `NumberOfProcessIdsInList`: the ids it holds.
-    listed: u32,
 }
 
 /// A job's resource accounting, read whole.
@@ -576,4 +552,75 @@ fn zeroed_struct<T>() -> T {
     // SAFETY: T is a `#[repr(C)]` Windows structure of integers, pointers and unions of them; all-zero
     // is a valid bit pattern (null pointers, zero counts, empty flags). Only such types are passed here.
     unsafe { zeroed() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nul() -> OwnedHandle {
+        OwnedHandle::from(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("NUL")
+                .unwrap(),
+        )
+    }
+
+    /// The job's id list read whole, with room for `room` ids: its `NumberOfAssignedProcesses`,
+    /// `NumberOfProcessIdsInList` and the ids listed.
+    fn id_list(job: &Job, room: usize) -> (u32, u32, Vec<usize>) {
+        let mut buf = vec![0usize; room + 1];
+        let bytes = u32::try_from(buf.len() * size_of::<usize>()).unwrap();
+        // SAFETY: QueryInformationJobObject writes at most `bytes` bytes into `buf`, alive and that long
+        // for the call; the header is two u32s in the first usize (x86_64), then the ids.
+        let ok = unsafe {
+            QueryInformationJobObject(
+                job.raw(),
+                JobObjectBasicProcessIdList,
+                buf.as_mut_ptr().cast(),
+                bytes,
+                null_mut(),
+            )
+        };
+        assert_ne!(ok, 0, "{}", last_error());
+        let head = buf[0].to_ne_bytes();
+        let assigned = u32::from_ne_bytes(head[..4].try_into().unwrap());
+        let listed = u32::from_ne_bytes(head[4..8].try_into().unwrap());
+        (assigned, listed, buf[1..=listed as usize].to_vec())
+    }
+
+    /// HEX-WIN-1 (native plan step 3): a member that has ended leaves the job's id list, which
+    /// `live_processes` counts, though the node still holds its process handle. Do: run `cmd /c exit 0`
+    /// in a job, wait for its end, keep its handle, read the list with room for every id. Expect: the
+    /// member's id isn't listed, and the list's two counts agree in one read (so
+    /// `NumberOfAssignedProcesses`, the count `live_processes` returns, keeps no ended member either).
+    /// Another id may be listed: the console host Windows starts for a console program with no console,
+    /// which ends after its client.
+    #[test]
+    fn an_ended_member_whose_handle_is_held_leaves_the_id_list() {
+        let job = Job::create().unwrap();
+        let system = std::env::var("SystemRoot").unwrap();
+        let mut spawn = Spawn {
+            command_line: format!("{system}\\System32\\cmd.exe /c exit 0")
+                .encode_utf16()
+                .chain([0])
+                .collect(),
+            environment: hex_core::job::environment(&[("SystemRoot".to_owned(), system)]),
+            cwd: None,
+            stdio: [nul(), nul(), nul()],
+        };
+        let started = create(&mut spawn, &[job.raw()]).unwrap();
+        resume(&started.thread).unwrap();
+        assert!(wait(&started.process, u32::MAX).unwrap());
+        let (assigned, listed, ids) = id_list(&job, 64);
+        assert!(
+            !ids.contains(&(started.pid as usize)),
+            "ended member {} still listed: {ids:?}",
+            started.pid
+        );
+        assert_eq!(assigned, listed);
+        drop(started);
+    }
 }
