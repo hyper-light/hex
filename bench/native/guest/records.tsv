@@ -7,3 +7,5 @@ boot_ready	macOS-HVF	265000	bench/native/guest/boot-ready/RECORD.md
 stop	macOS-HVF	13000	bench/native/guest/stop/RECORD.md
 validation_run	macOS-HVF	73750000	bench/native/guest/validation-runs/RECORD.md
 validation_run	Windows-WHP	75500000	bench/native/guest/validation-runs/RECORD.md
+boot_ready	Windows-WHP	2712939	bench/native/guest/boot-ready/RECORD.md
+stop	Windows-WHP	4377	bench/native/guest/stop/RECORD.md

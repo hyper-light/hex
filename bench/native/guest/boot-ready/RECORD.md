@@ -58,8 +58,30 @@ Runs, in order: 0.214 0.124 0.109 0.117 0.114 0.119 0.132 0.120 0.135 0.130 0.11
 
 Runs, in order: 0.265 0.165 0.177 0.129 0.126 0.114 0.123 0.125 0.128 0.134 0.124 0.135 0.119 0.122 0.120 0.123 0.127 0.114 0.119 0.124 0.123 0.127 0.130 0.127 0.126 0.137 0.111 0.125 0.129 0.119 0.129 0.120 0.126 0.115 0.128 0.130 0.116 0.126 0.129 0.130.
 
-## KVM (Linux x86_64), WHP (Windows x86_64)
+## WHP (Windows x86_64)
 
-Not yet recorded: fedora and jupiter were unreachable for this pass. Shards' own fedora/KVM boot record
-(p99 114-194 ms) times Shards' boot, not a Hex relay's first `OK`, so it isn't this measure. Until each is
-recorded, those classes take HVF's record, stated where it is used.
+The class's slowest: **2.713 s** (boot 17), so the seed is 2 × 2.713 s.
+
+- machine: jupiter (Windows x86_64, WHP), detached scheduled task hex-d-whp-record-20261106T111613 (S4U),
+  2026-11-06 11:16-11:17 local, under its own co-tenants (agent C's HEX-GUEST-21 work on the same host; kiln
+  reported 16-32 of 32 cores idle around the run), nothing added
+- tool: crates/hex-cli/tests/guest_boot_record.rs at Hex 0353a37, release, which boots through shards_api as
+  GuestRuntime does: boot to the relay's token on its control port, then `stop` to the guest's end (on a class
+  with no stop record, shards_api's stop kills at once, so this is the kill's time)
+- image: Shards' vmlinux-6.18.48-x86_64-hyperv, initramfs-x86_64.cpio sha256 f40353b35ec7aeb… (hex c5aa681);
+  shards.exe sha256 6bcdb44a2e0e08e… (the Windows agent's debug build); all of the host's vCPUs, 128 + 2 x 284 MiB
+- N = 40; the raw lines: bench/native/guest/boot-ready/runs/whp-jupiter-20261106T111613.txt
+
+| | seconds |
+|---|---|
+| min | 1.237 |
+| p50 | 1.450 |
+| max | 2.713 |
+
+Runs, in order: 1.401 1.237 1.479 1.445 1.471 1.322 1.419 1.397 1.421 1.466 1.618 1.454 1.753 1.618 1.829 1.840 2.713 1.443 1.470 1.423 1.469 1.420 1.544 1.457 1.470 1.431 1.328 1.417 1.362 1.394 1.392 1.473 1.497 1.450 1.405 1.308 1.467 1.463 1.448 1.450.
+
+## KVM (Linux x86_64)
+
+Not yet recorded: fedora was unreachable for this pass. Shards' own fedora/KVM boot record (p99 114-194 ms)
+times Shards' boot, not a Hex relay's first `OK`, so it isn't this measure. Until it is recorded, KVM has no
+row in records.tsv and so no seed: a guest there is refused by name.

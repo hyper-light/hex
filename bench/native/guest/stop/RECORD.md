@@ -20,4 +20,24 @@ margin) the slowest stop here, after which the VM is killed (the lead's rule for
 
 Runs, in order: 0.013 0.002 0.002 0.001 0.002 0.002 0.001 0.002 0.002 0.002 0.002 0.001 0.001 0.002 0.002 0.002 0.002 0.002 0.002 0.002 0.002 0.002 0.002 0.002 0.001 0.002 0.002 0.002 0.002 0.002 0.001 0.002 0.002 0.002 0.001 0.002 0.002 0.002 0.001 0.002.
 
-KVM and WHP: not yet recorded (fedora and jupiter unreachable); they take this record until they are.
+## WHP (Windows x86_64)
+
+- machine: jupiter (Windows x86_64, WHP), detached scheduled task hex-d-whp-record-20261106T111613 (S4U),
+  2026-11-06 11:16-11:17 local, under its own co-tenants (agent C's HEX-GUEST-21 work on the same host; kiln
+  reported 16-32 of 32 cores idle around the run), nothing added
+- tool: crates/hex-cli/tests/guest_boot_record.rs at Hex 0353a37, release, which boots through shards_api as
+  GuestRuntime does: boot to the relay's token on its control port, then `stop` to the guest's end (on a class
+  with no stop record, shards_api's stop kills at once, so this is the kill's time)
+- image: Shards' vmlinux-6.18.48-x86_64-hyperv, initramfs-x86_64.cpio sha256 f40353b35ec7aeb… (hex c5aa681);
+  shards.exe sha256 6bcdb44a2e0e08e… (the Windows agent's debug build); all of the host's vCPUs, 128 + 2 x 284 MiB
+- N = 40; the raw lines: bench/native/guest/boot-ready/runs/whp-jupiter-20261106T111613.txt
+
+| | seconds |
+|---|---|
+| min | 0.0024 |
+| p50 | 0.0031 |
+| max (the class's slowest) | 0.0044 (stop 13) |
+
+Runs, in order: 0.0035 0.0036 0.0032 0.0033 0.0029 0.0029 0.0034 0.0029 0.0030 0.0030 0.0037 0.0031 0.0044 0.0030 0.0034 0.0030 0.0033 0.0036 0.0033 0.0030 0.0032 0.0032 0.0027 0.0031 0.0031 0.0035 0.0035 0.0032 0.0031 0.0026 0.0031 0.0037 0.0029 0.0026 0.0024 0.0033 0.0031 0.0032 0.0030 0.0028.
+
+KVM: not yet recorded (fedora unreachable); it has no row, so it has no seed.
