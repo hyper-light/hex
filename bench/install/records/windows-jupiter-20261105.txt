@@ -202,6 +202,11 @@ copy there shows ~20 bench scripts as modified: line endings from the sync, no c
    delete path), with the oci suite on layers.txt among the installed checks (the lead, 12:08Z). The Linux-image class's runs through the guest are
    entries 13, 15-16 (the test binaries', not the installed hex.exe's).
 
+19. the installer's feature query, timed, for features.rs's PATIENCE (Ada's rule on derived values), 2026-11-06T14:27:01Z
+   on jupiter, from kiln (Win32_Processor's load counter failed to read at the time: CimException 0x80080005).
+   30 runs of exactly setup::FEATURE_QUERY, each a fresh Windows PowerShell started as features.rs starts it
+   (-NoProfile -Command), timed from the shell around each run: min 1,048, p50 1,183, p90 1,398, max 2,421 ms.
+
 What HCS reports as a Windows oci box's Exit at its end, against the oracle's Signal(15), for HEX-DIFF-1 step 12
 and HEX-DIFF-2 step 11 (asked by step 7): NOT OBSERVED. windows_oci_boxes_hold_the_contract_and_the_steps_criteria
 skipped in every run above (no HEX_WINDOWS_LAYERS), so no Windows oci box was made; it is read in the first run
