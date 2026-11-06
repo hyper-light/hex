@@ -11,6 +11,16 @@ use rustix::thread::{LinkNameSpaceType, move_into_link_name_space};
 /// test instead of hanging it.
 const PATIENCE: Duration = Duration::from_secs(30);
 
+/// The most descriptors a process on this host may raise its limit to (`/proc/sys/fs/nr_open`; the kernel's
+/// Documentation/admin-guide/sysctl/fs.rst), so a limit the files' bound is read under is one this host allows.
+fn nr_open() -> u64 {
+    std::fs::read_to_string("/proc/sys/fs/nr_open")
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
 fn wait_for(what: &str, mut fact: impl FnMut() -> bool) {
     let deadline = Instant::now() + PATIENCE;
     while Instant::now() < deadline {
@@ -214,8 +224,8 @@ fn the_files_bound_counts_the_namespaces_both_pools_make_ahead() {
     let at = |netns: usize, ipc_uts: usize| {
         FilesBound::of(
             &Rlimit {
-                current: Some(1 << 22),
-                maximum: Some(1 << 22),
+                current: Some(nr_open()),
+                maximum: Some(nr_open()),
             },
             Pools {
                 netns,
@@ -241,17 +251,15 @@ fn the_files_bound_counts_the_namespaces_both_pools_make_ahead() {
         root,
         FilesBound::of(
             &Rlimit {
-                current: Some(1 << 22),
-                maximum: Some(1 << 22)
+                current: Some(nr_open()),
+                maximum: Some(nr_open())
             },
             Pools::ROOT
         )
     );
-    let raised = at(4_096, 4_096);
-    assert_eq!(
-        raised.own - root.own,
-        (4_096 - n(BOUND)) + 2 * (4_096 - n(IPC_UTS_BOUND))
-    );
+    // Each pool's bound raised past a root node's: twice its own.
+    let raised = at(2 * BOUND, 2 * IPC_UTS_BOUND);
+    assert_eq!(raised.own - root.own, n(BOUND) + 2 * n(IPC_UTS_BOUND));
     let soft = raised.own + 10 * FILES_A_KEPT + 3;
     let under = |pools| {
         FilesBound::of(
@@ -265,8 +273,8 @@ fn the_files_bound_counts_the_namespaces_both_pools_make_ahead() {
     };
     assert_eq!(
         under(Pools {
-            netns: 4_096,
-            ipc_uts: 4_096,
+            netns: 2 * BOUND,
+            ipc_uts: 2 * IPC_UTS_BOUND,
             devfs: true,
         }),
         10,
@@ -290,8 +298,8 @@ fn the_files_bound_counts_the_prepared_dev_mounts() {
     let at = |devfs: bool| {
         FilesBound::of(
             &Rlimit {
-                current: Some(1 << 22),
-                maximum: Some(1 << 22),
+                current: Some(nr_open()),
+                maximum: Some(nr_open()),
             },
             Pools {
                 devfs,
