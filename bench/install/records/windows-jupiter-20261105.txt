@@ -148,6 +148,11 @@ copy there shows ~20 bench scripts as modified: line endings from the sync, no c
    (HEX-RT-1 on). The 7 gates on fedora at 702ce7e: exit 0, 330 tests, 0 failed (unit hex-windows-gates-20261106T101529Z,
    load 13-17, 7 co-tenant containers).
 
+13. HEX-GUEST-19 three times in a row (asked by step 5, for a flake), the tree c32e45c (= 702ce7e's code), entry 12's
+   initramfs (hex 2d07ecbe..., cpio 63a7cd96...), kernel and shards.exe: windows-guestreal3-c32e45c-20261106T101948Z.txt.
+   run 1 10:19:48Z load 36%: ok, 1.12 s; run 2 10:20:10Z load 19%: ok, 1.25 s; run 3 10:20:13Z load 39%: ok, 1.11 s.
+   3 of 3 passed, 0 failed.
+
 What HCS reports as a Windows oci box's Exit at its end, against the oracle's Signal(15), for HEX-DIFF-1 step 12
 and HEX-DIFF-2 step 11 (asked by step 7): NOT OBSERVED. windows_oci_boxes_hold_the_contract_and_the_steps_criteria
 skipped in every run above (no HEX_WINDOWS_LAYERS), so no Windows oci box was made; it is read in the first run
