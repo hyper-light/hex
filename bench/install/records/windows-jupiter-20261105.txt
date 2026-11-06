@@ -140,6 +140,29 @@ copy there shows ~20 bench scripts as modified: line endings from the sync, no c
    case fails "create: connecting to the guest failed: the guest did not boot: ... no-such-kernel: The system cannot
    find the file specified" (HEX-RT-1 on), so the pass above booted the guest.
 
+12. HEX-GUEST-19 again at 702ce7e (step 5's fixed route bba7340 merged), 2026-11-06T10:16:46Z, load 40% CPU:
+   windows-guestreal-702ce7e-20261106T101627Z.txt. A fresh initramfs and static musl hex built on jupiter at 702ce7e
+   (hex sha256 2d07ecbe72582eb2..., initramfs 63a7cd9640b6abef..., C:\Users\corph\.cache\hex-t7-windows\guest-x86_64\702ce7e),
+   the same kernel and shards.exe as entry 11: the_oci_class_holds_its_contract_through_a_real_shards_guest ... ok,
+   1 passed, 0 failed, 1.10 s. The control in the same record, HEX_GUEST_KERNEL naming no file: every case fails
+   (HEX-RT-1 on). The 7 gates on fedora at 702ce7e: exit 0, 330 tests, 0 failed (unit hex-windows-gates-20261106T101529Z,
+   load 13-17, 7 co-tenant containers).
+
+13. HEX-GUEST-19 three times in a row (asked by step 5, for a flake), the tree c32e45c (= 702ce7e's code), entry 12's
+   initramfs (hex 2d07ecbe..., cpio 63a7cd96...), kernel and shards.exe: windows-guestreal3-c32e45c-20261106T101948Z.txt.
+   run 1 10:19:48Z load 36%: ok, 1.12 s; run 2 10:20:10Z load 19%: ok, 1.25 s; run 3 10:20:13Z load 39%: ok, 1.11 s.
+   3 of 3 passed, 0 failed.
+
+14. cargo test -p hex-runtime --lib guest:: at 1c35111 (code = 702ce7e), 2026-11-06T10:2xZ: 6 passed, 1 FAILED:
+   guest::tests::where_shards_has_no_backend_the_class_is_refused_before_anything_boots (tests.rs:308), step 5's test,
+   found on jupiter first by the integrate agent; step 5 is fixing it test-first. So the workspace's native Windows
+   tests are not all green at this tree, though entries 3 and 5 were before step 5's merge.
+
+15. at ae644ff (step 5's 2386d08 merged: the guest unit test's root absolute on every host, and HEX-GUEST-19 asserting
+   one boot), 2026-11-06T10:31:36Z, load 79% CPU, entry 12's initramfs (guest-side code unchanged since bba7340):
+   windows-guest-ae644ff-20261106T103136Z.txt. cargo test -p hex-runtime --lib guest:: 7 passed, 0 failed (entry 14's
+   failure fixed); HEX-GUEST-19 1 passed, 0 failed, 1.27 s, with its one-boot assertion.
+
 What HCS reports as a Windows oci box's Exit at its end, against the oracle's Signal(15), for HEX-DIFF-1 step 12
 and HEX-DIFF-2 step 11 (asked by step 7): NOT OBSERVED. windows_oci_boxes_hold_the_contract_and_the_steps_criteria
 skipped in every run above (no HEX_WINDOWS_LAYERS), so no Windows oci box was made; it is read in the first run
