@@ -43,13 +43,12 @@ COUNT=30
 ROLE_FIRST=450
 ROLE_LAST=499
 FIRST_ID=
-# The most processes a box's user may hold (RLIMIT_NPROC, native plan step 2's helper default).
-NPROC=1024
 # How long launchd gets to start the helper: a bounded wait, counted in 0.1 s steps.
 WAIT_STEPS=300
-# dscl fails at times with eNotYetImplemented and succeeds when asked again (Nix's
-# install-darwin-multi-user.sh:149): each write is tried at most this many times.
-DSCL_TRIES=3
+# The directory tool, by absolute path. A write is made once: any failure is refused naming dscl's own
+# error. Nix retries eNotYetImplemented (install-darwin-multi-user.sh:149), never seen here (§3.1); a
+# retry comes only with a measured case of it.
+DSCL=/usr/bin/dscl
 
 die() { echo "macos.sh: $*" >&2; exit 1; }
 
@@ -59,11 +58,8 @@ usage() {
 }
 
 dscl_write() {
-  local i
-  for ((i = 1; i <= DSCL_TRIES; i++)); do
-    dscl . "$@" && return 0
-  done
-  die "dscl . $* failed $DSCL_TRIES times"
+  local out
+  out=$("$DSCL" . "$@" 2>&1) || die "dscl . $* failed: $out"
 }
 
 # The first id f in [first, last] with f..f+need-1 all free of the taken ids (one per line on stdin), or a
@@ -89,8 +85,8 @@ free_run() { # <need> <first> <last>
 
 # The ids the machine holds: every user's uid, group's gid and running process's uid.
 taken_ids() {
-  dscl . -list /Users UniqueID | awk '{print $2}'
-  dscl . -list /Groups PrimaryGroupID | awk '{print $2}'
+  "$DSCL" . -list /Users UniqueID | awk '{print $2}'
+  "$DSCL" . -list /Groups PrimaryGroupID | awk '{print $2}'
   ps -axo uid= | tr -d ' '
 }
 
@@ -128,8 +124,8 @@ present() {
   case $kind in
     file) [ -f "$target" ] ;;
     dir | folder) [ -d "$target" ] ;;
-    group) dscl . -read "/Groups/$target" PrimaryGroupID >/dev/null 2>&1 ;;
-    user) dscl . -read "/Users/$target" UniqueID >/dev/null 2>&1 ;;
+    group) "$DSCL" . -read "/Groups/$target" PrimaryGroupID >/dev/null 2>&1 ;;
+    user) "$DSCL" . -read "/Users/$target" UniqueID >/dev/null 2>&1 ;;
     # launchctl print's exit is 0 for a loaded service and 113 for none; its output is not API (§3.3).
     daemon) launchctl print "system/$target" >/dev/null 2>&1 ;;
     *) die "unknown plan line kind $kind" ;;
@@ -159,14 +155,14 @@ preflight() {
   fi
   echo "macos.sh: ids $FIRST_ID-$((FIRST_ID + COUNT + 1)): gid $(node_gid) $NODE_GROUP, gid $(pool_gid) $POOL_GROUP, uids $(pool_uid 1)-$(pool_uid "$COUNT")" >&2
   local uids gids taken=0 id i name
-  uids=$(dscl . -list /Users UniqueID | awk '{print $2}')
-  gids=$(dscl . -list /Groups PrimaryGroupID | awk '{print $2}')
+  uids=$("$DSCL" . -list /Users UniqueID | awk '{print $2}')
+  gids=$("$DSCL" . -list /Groups PrimaryGroupID | awk '{print $2}')
   for id in "$(node_gid)" "$(pool_gid)"; do
-    if grep -qx "$id" <<<"$gids"; then echo "macos.sh: gid $id is taken: $(dscl . -search /Groups PrimaryGroupID "$id" | awk 'NR==1 {print $1}')" >&2; taken=1; fi
+    if grep -qx "$id" <<<"$gids"; then echo "macos.sh: gid $id is taken: $("$DSCL" . -search /Groups PrimaryGroupID "$id" | awk 'NR==1 {print $1}')" >&2; taken=1; fi
   done
   for ((i = 1; i <= COUNT; i++)); do
     id=$(pool_uid "$i")
-    if grep -qx "$id" <<<"$uids"; then echo "macos.sh: uid $id is taken: $(dscl . -search /Users UniqueID "$id" | awk 'NR==1 {print $1}')" >&2; taken=1; fi
+    if grep -qx "$id" <<<"$uids"; then echo "macos.sh: uid $id is taken: $("$DSCL" . -search /Users UniqueID "$id" | awk 'NR==1 {print $1}')" >&2; taken=1; fi
     # A live process at a pool uid would be ended by a box's delete: the uid must be no one's.
     if ps -axo uid= | tr -d ' ' | grep -qx "$id"; then echo "macos.sh: a process runs as uid $id" >&2; taken=1; fi
   done
@@ -255,8 +251,6 @@ install_hex() {
     <string>$SOCK</string>
     <string>--users</string>
     <string>$(pool_uids)</string>
-    <string>--nproc</string>
-    <string>$NPROC</string>
   </array>
   <key>Umask</key>
   <integer>7</integer>
@@ -303,7 +297,7 @@ uninstall_hex() {
     [ "$kind" = user ] || continue
     case $target in "$POOL_PREFIX"*) ;; *) die "refusing to remove user $target: not one of Hex's" ;; esac
     if present user "$target"; then
-      uid=$(dscl . -read "/Users/$target" UniqueID | awk '{print $2}')
+      uid=$("$DSCL" . -read "/Users/$target" UniqueID | awk '{print $2}')
       end_pool_processes "$uid" || die "$target's processes didn't end"
       dscl_write -delete "/Users/$target"
     fi
