@@ -1,0 +1,34 @@
+# The OCI validation lab's inputs (docs/design/shards-guest.md §6a): Alpine 3.24.4's minirootfs and the packages
+# that give it util-linux's unshare and bash, per arch, from dl-cdn.alpinelinux.org, pinned by SHA-256.
+# Downloaded 2026-11-06 on adacachy; the minirootfs hashes match Alpine's latest-releases.yaml. Columns: sha256, path
+# under https://dl-cdn.alpinelinux.org/alpine/v3.24/, file.
+4b14c18f7e90a063b61462ea1462a5732c154bf6adad594974fe6487cd98a8de releases/aarch64/alpine-minirootfs-3.24.4-aarch64.tar.gz alpine-minirootfs-3.24.4-aarch64.tar.gz
+cdaa38cb8de3537967ee5b6c9b6cd00cc962da2b018e6eea48696bb274923012 releases/x86_64/alpine-minirootfs-3.24.4-x86_64.tar.gz alpine-minirootfs-3.24.4-x86_64.tar.gz
+95f4f976bdf2f4ca18ff41c32916eb6d7b12a0dae12504d55d04427460d6542f main/aarch64/bash-5.3.9-r1.apk aarch64/bash-5.3.9-r1.apk
+9d0f24976c575c53c12526b6e078edf34c980c153bc8e5f1c1053cbece5b8cfa main/aarch64/libblkid-2.42.3-r1.apk aarch64/libblkid-2.42.3-r1.apk
+cf0899d49ded0a6891e3cdf1b37887f2ecd77293afe1d8f3cb8937763c83f183 main/aarch64/libeconf-0.8.3-r0.apk aarch64/libeconf-0.8.3-r0.apk
+061e5c9c82eff00f806bd51bdd414d3ff6aaec99de02ed4c1b60f3e13578e2b7 main/aarch64/libfdisk-2.42.3-r1.apk aarch64/libfdisk-2.42.3-r1.apk
+a2a6fc6aab7a59c70ec060f5fb8c950be42d1a017934bf32e5dd6984eaab15cc main/aarch64/libmount-2.42.3-r1.apk aarch64/libmount-2.42.3-r1.apk
+51a7aa4b3ec40b144d0801c0544e0a9f62e2a41d04b6067bb5e95786040741c6 main/aarch64/libncursesw-6.6_p20260516-r0.apk aarch64/libncursesw-6.6_p20260516-r0.apk
+e2a4b6c2e2f493100305b0e62b9b10454611a49625534b1b06a3bc8aa0087818 main/aarch64/libsmartcols-2.42.3-r1.apk aarch64/libsmartcols-2.42.3-r1.apk
+9ce20c7ffe2ccaa7c321893c10564abbca13c3f2edb82f60a35f1f68e004f86c main/aarch64/libuuid-2.42.3-r1.apk aarch64/libuuid-2.42.3-r1.apk
+e0c546b9461bdce206a90bc720cb69aa4628b5a5b8d908c3e5084e00f28f6a9d main/aarch64/ncurses-terminfo-base-6.6_p20260516-r0.apk aarch64/ncurses-terminfo-base-6.6_p20260516-r0.apk
+9f0ae0923c02b0d6aba62e9173542b65396ba3f0efefcbf087ea32f1120e7b34 main/aarch64/readline-8.3.3-r1.apk aarch64/readline-8.3.3-r1.apk
+10c2df054ee731b9cd9da771ef64d1275ff37385a53eaf71db798e756d9501e3 main/aarch64/setarch-2.42.3-r1.apk aarch64/setarch-2.42.3-r1.apk
+7ea58fb512067402b519079fcce8a48381eb2b9c690341c4a017aa15f719c198 main/aarch64/skalibs-libs-2.15.0.0-r0.apk aarch64/skalibs-libs-2.15.0.0-r0.apk
+b04d1b39317348f03872bcafb5f5662d0e3f957b44469bef70a688c8a54a7e71 main/aarch64/util-linux-misc-2.42.3-r1.apk aarch64/util-linux-misc-2.42.3-r1.apk
+d6487b6f260728969191314f6706d4cc62527370e757ec3ac6f7fee8ed38cf88 main/aarch64/utmps-libs-0.1.3.3-r0.apk aarch64/utmps-libs-0.1.3.3-r0.apk
+4ad962f26fb3c68365171233fe61e3c51bbee1cab35e8dc661198233daeab0dd main/x86_64/bash-5.3.9-r1.apk x86_64/bash-5.3.9-r1.apk
+2512c2bff496ac2b8561a3c814d21d35ce10cda579b3d410f9f96da93a5aaac1 main/x86_64/libblkid-2.42.3-r1.apk x86_64/libblkid-2.42.3-r1.apk
+2a791c7957961f830cf31b04f35f814a63afcf633badc9052425ff1cf2f64380 main/x86_64/libeconf-0.8.3-r0.apk x86_64/libeconf-0.8.3-r0.apk
+9775aae10e103c128e6b8424585f5d2dac6d8e8e386cc8365a46358ccd6aa7d0 main/x86_64/libfdisk-2.42.3-r1.apk x86_64/libfdisk-2.42.3-r1.apk
+e2ae003260f2c1ec13666c6e108d5e8e3d64974b0667166a02432bd3be263a7a main/x86_64/libmount-2.42.3-r1.apk x86_64/libmount-2.42.3-r1.apk
+cf8caa8a88bc4ce9d9e395567fefaf9ef7fbd55c50ae6155b35c1b58f3755023 main/x86_64/libncursesw-6.6_p20260516-r0.apk x86_64/libncursesw-6.6_p20260516-r0.apk
+5e3a457257d9c0e6799ab5d544ca4f172c4e19e02adcde94c72343ed3f6d8b26 main/x86_64/libsmartcols-2.42.3-r1.apk x86_64/libsmartcols-2.42.3-r1.apk
+8306e5bb577696c9069fe1dfd9e1dcc39d2d481c6a1b0e707fd03c3e21aa6aa2 main/x86_64/libuuid-2.42.3-r1.apk x86_64/libuuid-2.42.3-r1.apk
+ce83be6d0bd10584a53c3a5868cc1595ce5f0f8e0b621f8f7f70b6144e521fc9 main/x86_64/ncurses-terminfo-base-6.6_p20260516-r0.apk x86_64/ncurses-terminfo-base-6.6_p20260516-r0.apk
+766911ecb986a6c5cf0841a6b556cd1e9dbbf22b3559726de32416486cd15c81 main/x86_64/readline-8.3.3-r1.apk x86_64/readline-8.3.3-r1.apk
+14098fdd87c4247acbee0513147eb2defd17fb850913e45a6dad6cb3e9a4d6b1 main/x86_64/setarch-2.42.3-r1.apk x86_64/setarch-2.42.3-r1.apk
+3301f6ccbeaea49cdd966c7e636898a8612fb8fe964a15f24f6d204b3944c3f3 main/x86_64/skalibs-libs-2.15.0.0-r0.apk x86_64/skalibs-libs-2.15.0.0-r0.apk
+8cba67c052d9932c61db6b32f3a6042b62cca642f16479ba066c59a5a97ffc55 main/x86_64/util-linux-misc-2.42.3-r1.apk x86_64/util-linux-misc-2.42.3-r1.apk
+497f0f1cb51f0e6c1acc338fded0dc7722b1d43ea17bdb749f0d556794f8b2d8 main/x86_64/utmps-libs-0.1.3.3-r0.apk x86_64/utmps-libs-0.1.3.3-r0.apk

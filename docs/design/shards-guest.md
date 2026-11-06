@@ -154,8 +154,10 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
   (`crates/vmm/src/devices/virtio/fs/mod.rs:1-6`, `crates/vmm/src/vm/mod.rs:835`, at `90de623f`), writes going
   both ways on all three host OSes (D38, `docs/design/architecture.md:2774-2853`; Windows D197, `:7482-7518`), and
   a plain `shards run` takes a share another process serves (`--slates-fs-fd N`, `crates/shards/src/vm_run.rs:390-401`).
-  So `shards-api`'s `GuestSpec` carries `shares: Vec<Share { dir, read_only }>`, served from boot (the interface
-  that starts the server is Shards' call, asked 2026-11-06). The node shares the roots it's configured with at the
+  So `shards-api`'s `GuestSpec` carries `shares: Vec<Share { dir, read_only }>`, served from boot (Shards' lead's call, 2026-11-06:
+  `shards run --kernel … --share DIR[:ro]`, repeatable, the i-th served as `shards{i}`; the run process spawns
+  `shards share` for each before its VM process confines itself, so the client holds no server or descriptor and
+  no share outlives its VM). The node shares the roots it's configured with at the
   guest's boot, never the host's `/` by default: that would hand any guest process, a container's escape included,
   everything the node's user can write, and undo the VM boundary (the lead, 2026-11-06). The default is Docker
   Desktop's file-sharing list: on macOS `/Users`, `/Volumes`, `/private`, `/tmp` and `/var/folders`; on Windows the
@@ -176,6 +178,20 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
   `hex_core::stream` (CLAUDE.md §9), with hostile-input tests (§6). A container's root is the guest's own copy, as
   a Linux host's is its own disk: a root over virtio-fs would put every exec's page cache and the overlay's upper
   layer across the share. The host rewrites `root.path` (or `Rootfs`) to the copy; the copy is deleted with its box.
+- **A root may be a tarball** (`.tar`, `.tar.gz` or `.tgz`; amended 2026-11-06): a bundle's `root.path`, a
+  `Rootfs::Dir` or a layer naming one is staged from the archive's own entries, each with its Linux mode and a
+  symbolic link's target text exactly as written. A Linux root unpacked into a Windows directory can't be staged
+  faithfully: unpacking the OCI validation lab's Alpine root (§6a) with Git Bash's tar on jupiter turned its 322
+  absolute links into Windows ones (`bin/ls` → `C:\Program Files\Git\usr\bin\busybox`, MSYS's translation of
+  `/usr/bin/busybox`), and NTFS keeps no Unix modes at all, so the copy would hold broken links and guessed modes, a
+  silent corruption (CLAUDE.md §3). So on Windows a directory root is refused by name (`Refusal::Platform`), pointing
+  at the tarball form; on macOS and Linux, whose file systems keep both, a directory stays a root. OCI image layers
+  are tarballs to begin with. The archive is read flat, one entry at a time, within the stage's bounds (entries,
+  bytes, path length); an absolute name or a `..` component, a device, FIFO or socket entry, an entry before its
+  directory, a corrupt or truncated archive (a gzip stream whose CRC or length doesn't match, an archive ending
+  mid-entry) are refused by name. A hard link is refused by name too: none of the lab's inputs or runtime-tools holds
+  one (`tar -tv` on each, 2026-11-06), so nothing needs it; falsified, and staged as a copy of an earlier entry, when
+  a root that must run does.
 - A non-bind mount (`proc`, `tmpfs`, …) names no host path and passes unchanged; hooks run in the guest's runtime
   namespace, so their paths are the guest's.
 

@@ -1,0 +1,41 @@
+# HEX-GUEST-19 and HEX-GUEST-20 on macOS (native plan step 5, criterion 2; docs/design/shards-guest.md §6, §6a)
+# The oci class's conformance suite and the OCI runtime-spec validation (opencontainers/runtime-tools bd3b0bd),
+# in a Shards guest, reached from the host's node through the seam.
+
+machine   adas-mac-studio.local-2: Mac15,14 (Mac Studio), macOS 26.4, aarch64, Hypervisor.framework
+run       launchd one-shot hex.ns5.real.20261106T110909Z, 2026-11-06T11:42Z, load average 5.19
+          (started by the step's parent agent; job script xfer/m2.sh on adacachy; full log on that Mac at
+          ~/.cache/hex-t7/native-s5/m2/keep/hex.ns5.real.20261106T110909Z.out.txt)
+tree      cp/t7-native-s5-route 61bb22a
+
+inputs, each built or fetched on that Mac and pinned:
+  shards       built there from hyper-light/shards hex/shards-api a0cced87, with zig 0.16.0 from ziglang.org's
+               index (sha256 b23d70de...)
+  kernel       Shards' released Image-6.18.48-aarch64, sha256 87fbe8c0114522cdeb80686050911db0c1b6cf62b5b8544857b373e2f53571a6
+               (pinned in Shards' crates/shards/src/kernel.rs), its config 66c40d3d...
+  image        scripts/guest/image.sh from 61bb22a: hex d8471926..., initramfs-aarch64.cpio 1663fec9...
+  lab          bench/native/oci-validation/fetch.sh (all 30 inputs of inputs.txt checked) and lab.sh aarch64:
+               705 entries, given as a directory (APFS keeps the root's modes and links)
+  suite        runtime-tools bd3b0bd for arm64 by runtime_tools.sh on fedora, runtime-tools-arm64.tar.gz
+               sha256 9b20ede2997cdad4d7ead5cfb1f262885200e667ed5f4975b637abb61e3aeb6b
+  guest        2 vCPUs, 4096 MiB
+
+shares (the run's only two, §6a)
+  0  the runtime-tools checkout, read-only, bound at the lab's /opt/runtime-tools
+  1  the out directory, read-write, bound at the lab's /opt/out (results.tsv lands there)
+  The host's /etc is not shared: the suite's mounts test binds /etc of the runtime's own host, which in the
+  guest is the lab's own /etc, as on Linux.
+
+results
+  HEX-GUEST-19 (crates/hex-cli/tests/guest_real.rs)        ok, 3.54 s (its root a tarball)
+  HEX-GUEST-20 (crates/hex-cli/tests/guest_validation.rs)  ok, 48.18 s
+  mac-guestval-61bb22a-results.tsv, sha256 faf30873d4f7b92162f8fdfd4dd8e12a6778cb54618ced8d6890113ac21ce71f:
+  pass 28 fail 30 skip 0 of 58. Against the Linux reference (bench/oci-validation/results-hex-linux.tsv, pass 26):
+  no test that passes on Linux fails in the guest; linux_masked_paths and linux_readonly_paths pass in the guest
+  and fail on Linux, where the suite runs under docker's own masked /proc and read-only paths.
+
+beside it
+  jupiter (Windows x86_64, WHP): HEX-GUEST-20 ok, 75.5 s, 2026-11-06T11:00:42Z, the same 28 pass; HEX-GUEST-19 ok,
+  2.09 s; recorded by the Windows agent at cp/t7-native-windows 44e8b02,
+  bench/install/records/windows-guestval-73e4d3b-results.tsv (sha256 70937565...).
+  Earlier, HEX-GUEST-19 passed on adas-mac-studio-2 (M4 Max) at bba7340, 4 of 4 runs.

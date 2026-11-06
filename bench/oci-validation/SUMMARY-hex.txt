@@ -22,3 +22,8 @@ crun  pass=28 (reference)
 # linux.seccomp and the security labels. 80fa5e3 (2026-10-27) passed 16: every container with a
 # seccomp filter ran with no_new_privs set, which 92b3b91 fixed (docs/design/runtime.md, "The seccomp
 # filter and no_new_privs").
+# Per test (2026-11-06, for HEX-GUEST-20's comparison, docs/design/shards-guest.md §6a): results-hex-linux.tsv,
+# a fresh run_hex.sh on fedora (6.19.10-300.fc44.x86_64, image fedora:44, load ~9) of hex 2386d08 + 1d74320's
+# scripts (release binary 19026bdf), runtime-tools bd3b0bd built by bench/native/oci-validation/runtime_tools.sh,
+# unit hex-ns5route-ref-20261106T103156Z, container --memory 8g --oom-score-adj 1000: pass 26 fail 32 skip 0,
+# the same counts as the 2026-10-27 run above.
