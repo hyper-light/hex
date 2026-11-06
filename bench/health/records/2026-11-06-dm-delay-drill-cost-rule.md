@@ -29,3 +29,31 @@ looks dear and the rule drains inside the healthy tail. The record's ~10,000 hea
 disk are stall-free observations the prior leaves out; counting them puts `pi` near 5e-5 and the drain
 age near the record's slowest. That change is the lead's to rule on (their 19:03Z (a): the node's own
 probes).
+
+## With the record's probes counted in the prior (cp/t7-sched-g5-prior)
+
+The same drill and host, the probe's prior counting the record's healthy probes (`probes` starts at the
+record's count). Replayed on APFS run 2 against run 3's record first: 0 false drains at 2 ms (was 2), a
+stall drained at 100.7 ms; 0 at 194 ms, drained at 671.1 ms.
+
+Run 3, 21:13:21Z, load 31.9:
+
+```
+baseline fsync count=11746 p50_us=4073 p90_us=6387 p99_us=13995 p999_us=24266 p9999_us=100996 max_us=161037
+drill probe=on units=8 deadline_ms=10000 period_ms=100 drain_age_at_stall_ms=167 cordoned_before_stall=false marked_ms=228 drained_ms=239 moved=8 writes=4457 failed=0
+drill probe=off units=8 deadline_ms=10000 period_ms=100 drain_age_at_stall_ms=0 cordoned_before_stall=false marked_ms=none drained_ms=none moved=0 writes=1232 failed=8
+```
+
+Run 4, 21:16:39Z, load 21.9:
+
+```
+baseline fsync count=11469 p50_us=7079 p90_us=10653 p99_us=17834 p999_us=28066 p9999_us=77940 max_us=83899
+drill probe=on units=8 deadline_ms=10000 period_ms=100 drain_age_at_stall_ms=100 cordoned_before_stall=true marked_ms=170 drained_ms=9 moved=8 writes=4206 failed=0
+drill probe=off units=8 deadline_ms=10000 period_ms=100 drain_age_at_stall_ms=0 cordoned_before_stall=false marked_ms=none drained_ms=none moved=0 writes=1114 failed=8
+```
+
+Run 3 is clean. Run 4 still drained the healthy disk in warm-up: its drain age (100 ms, the top of the
+bucket holding the record's slowest, 84 ms) sat below a warm-up write the record never saw. The record,
+taken a minute before under other co-tenants' load, wasn't drawn from the run's distribution, and the
+cost rule has nothing for a tail its record lacks beyond the half-count; the learned-wait rule's 2x was
+that margin. Not landed: the prior and the margin are the lead's to rule on.

@@ -13,8 +13,9 @@
 //!   a real stall blocks it. The probe drains at the `T` minimizing the expected loss per probe,
 //!   `(1 - pi) * S(T) * C + pi * T`, where `S(T)` is the share of healthy answers slower than `T` (the
 //!   record's and the node's, with a Jeffreys half-count past the slowest, so never zero) and `pi` the
-//!   Jeffreys posterior of a stall per probe, `1/2 / (n + 1)` over the node's `n` probes: the fleet has
-//!   no recorded stall incidents to seed it with. The candidate ages are the healthy answers'
+//!   Jeffreys posterior of a stall per probe, `1/2 / (n + 1)` over `n` stall-free probes: the
+//!   record's, healthy probes of the host class, and then the node's own. A fleet record of stall
+//!   incidents would seed its numerator; none exists yet. The candidate ages are the healthy answers'
 //!   histogram buckets (25%); `bench/health/replay_probe.py`'s `cost_rule` is the exact form, replayed
 //!   on the recorded traces.
 //!
@@ -35,7 +36,8 @@ pub struct DiskProbe {
     slowest_ns: u64,
     /// The measured re-placement time of one workload, nanoseconds: what a false drain costs.
     replace_ns: u64,
-    /// Probes this node has finished.
+    /// Probes the prior counts: the record's healthy ones, stall-free evidence of the host class, then
+    /// every one this node finishes.
     probes: u64,
     outstanding: Option<u64>,
     last_ns: u64,
@@ -52,7 +54,7 @@ impl DiskProbe {
             ));
         }
         let mut healthy = Histogram::new();
-        let mut slowest_ns = 0;
+        let mut slowest_ns: u64 = 0;
         for &(ns, n) in record.iter().filter(|(ns, n)| *ns > 0 && *n > 0) {
             healthy.record_n(ns, n)?;
             slowest_ns = slowest_ns.max(ns);
@@ -62,11 +64,12 @@ impl DiskProbe {
                 "a disk probe needs its host class's recorded answers",
             ));
         }
+        let probes = u64::from(healthy.total());
         Ok(Self {
             healthy,
             slowest_ns,
             replace_ns,
-            probes: 0,
+            probes,
             outstanding: None,
             last_ns: 0,
         })
@@ -278,9 +281,10 @@ mod tests {
             let buckets: Vec<_> = p.healthy.counted().collect();
             let age = p.drain_age_ns().unwrap();
             assert!(buckets.iter().any(|b| b.0 == age));
-            let at = loss(&buckets, probes, replace, age);
+            let n = probes + rec.iter().map(|r| u64::from(r.1)).sum::<u64>();
+            let at = loss(&buckets, n, replace, age);
             for b in &buckets {
-                let other = loss(&buckets, probes, replace, b.0);
+                let other = loss(&buckets, n, replace, b.0);
                 assert!(
                     at <= other * (1.0 + 1e-12),
                     "{age}: {at} > {}: {other}",
@@ -304,6 +308,31 @@ mod tests {
         assert_eq!(p.level(drain + 1).unwrap(), Level::Drain);
     }
 
+    /// AC-T7.10.3, the drill's false drain (`bench/health/records/2026-11-06-dm-delay-drill-cost-rule.md`):
+    /// do seed a probe with a record shaped as fedora's loaded baseline (10,000 answers, p99.9 175 ms,
+    /// slowest 384 ms), answer 100 warm-up probes, then hold one write as long as the record's p99.9;
+    /// expect no drain: the record's healthy probes are stall-free evidence the prior counts.
+    #[test]
+    fn a_healthy_answer_inside_the_record_is_no_drain_after_warm_up() {
+        let rec = vec![
+            (5 * MS, 9_000),
+            (10 * MS, 900),
+            (65 * MS, 90),
+            (175 * MS, 9),
+            (384 * MS, 1),
+        ];
+        let mut p = DiskProbe::new(&rec, SHARDS).unwrap();
+        let mut t = 0;
+        for _ in 0..100 {
+            p.start(t).unwrap();
+            t += 5 * MS;
+            p.finish(t).unwrap();
+            t += 100 * MS;
+        }
+        p.start(t).unwrap();
+        assert_ne!(p.level(t + 175 * MS).unwrap(), Level::Drain);
+    }
+
     /// Ada's rule, the price of a false drain: do judge one record with a cheap re-placement (an OCI
     /// start) and a dear one (a Shards boot); expect the dear one to wait longer before draining.
     #[test]
@@ -313,16 +342,34 @@ mod tests {
         assert!(cheap.drain_age_ns().unwrap() < dear.drain_age_ns().unwrap());
     }
 
-    /// Ada's rule, the learned stall prior: do answer many healthy probes; expect the drain age not
-    /// to fall (a stall grows less likely per probe, so waiting grows cheaper), and to have risen.
+    /// Ada's rule, the learned stall prior: every healthy answer is stall-free evidence and a point of
+    /// the healthy tail at once, so do answer many fast probes; expect the drain age to stay where the
+    /// record put it (the chance of a stall and of a healthy write past it fall together), at either
+    /// price; and a dear re-placement to wait longer.
     #[test]
-    fn healthy_probes_make_waiting_cheaper() {
-        let (p0, _) = answered(SHARDS, 4 * MS, 0);
-        let (p1, _) = answered(SHARDS, 4 * MS, 100);
-        let (p2, _) = answered(SHARDS, 4 * MS, 10_000);
-        let ages = [p0, p1, p2].map(|p| p.drain_age_ns().unwrap());
-        assert!(ages[0] <= ages[1] && ages[1] <= ages[2], "{ages:?}");
-        assert!(ages[0] < ages[2], "{ages:?}");
+    fn fast_answers_leave_the_drain_age_to_the_tail() {
+        let thin = [(4 * MS, 10), (8 * MS, 5), (16 * MS, 1), (64 * MS, 1)];
+        for replace in [OCI, SHARDS] {
+            let ages = [0u32, 100, 10_000].map(|n| {
+                let mut p = DiskProbe::new(&thin, replace).unwrap();
+                let mut t = 0;
+                for _ in 0..n {
+                    p.start(t).unwrap();
+                    t += 4 * MS;
+                    p.finish(t).unwrap();
+                    t += 100 * MS;
+                }
+                p.drain_age_ns().unwrap()
+            });
+            assert!(ages.iter().all(|a| *a == ages[0]), "{ages:?}");
+        }
+        let at = |replace| {
+            DiskProbe::new(&thin, replace)
+                .unwrap()
+                .drain_age_ns()
+                .unwrap()
+        };
+        assert!(at(OCI) < at(SHARDS));
     }
 
     /// AC-T7.10.3, Karn: a write that answers only after outliving the drain age (a stall that
