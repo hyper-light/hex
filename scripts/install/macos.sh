@@ -44,9 +44,14 @@ COUNT=1
 ROLE_FIRST=450
 ROLE_LAST=499
 FIRST_ID=
-# Uninstall's wait for a pool user's processes to end after SIGKILL, counted in 0.1 s steps: picked, not yet
-# measured (bench/native/macos/constants-audit.md, to be derived from measured kill-to-empty times).
-WAIT_STEPS=300
+# The tools uninstall ends a pool user's processes with, by absolute path.
+PGREP=/usr/bin/pgrep
+PKILL=/usr/bin/pkill
+# How long a user's processes get to end after SIGKILL: the measured kill-to-empty envelope, doubled, for the
+# user's size, the same bound as hex_core::drain::bound: 0.883 ms for one member and 0.298 ms for each past
+# it (bench/native/macos/records/killscale-a84e094-20261106T160339Z.txt; the x2 is the lead's margin).
+DRAIN_FIXED_S=0.000883
+DRAIN_PER_MEMBER_S=0.000298
 # The directory tool, by absolute path. A write is made once: any failure is refused naming dscl's own
 # error. Nix retries eNotYetImplemented (install-darwin-multi-user.sh:149), never seen here (§3.1); a
 # retry comes only with a measured case of it.
@@ -235,16 +240,10 @@ wait_serving() {
   done
 }
 
-# Waits (bounded) for a condition; says which and fails when it doesn't come.
-wait_for() {
-  local what=$1 i
-  shift
-  for ((i = 0; i < WAIT_STEPS; i++)); do
-    "$@" && return 0
-    sleep 0.1
-  done
-  echo "macos.sh: $what didn't happen within $((WAIT_STEPS / 10)) s" >&2
-  return 1
+# The drain bound in seconds for a user of <members> processes (an empty listing counts one).
+drain_bound_s() { # <members>
+  perl -e 'my $n = $ARGV[0] > 1 ? $ARGV[0] : 1; printf "%.6f\n", 2 * ($ARGV[1] + $ARGV[2] * ($n - 1))' \
+    "$1" "$DRAIN_FIXED_S" "$DRAIN_PER_MEMBER_S"
 }
 
 install_hex() {
@@ -325,11 +324,23 @@ EOF
   echo "installed; uninstall with: sudo bash $0 uninstall"
 }
 
-# Ends every process of a pool user (a box's members outlive the helper that started them), by uid, in
-# rounds counted against WAIT_STEPS. The uids are Hex's own, refused at install if anyone held them.
+# Ends every process of a pool user (a box's members outlive the helper that started them), by uid: kills
+# them and waits on the fact, pgrep finding none, within the drain bound for how many there were. The uids
+# are Hex's own, refused at install if anyone held them.
 end_pool_processes() { # <uid>
-  local uid=$1
-  wait_for "uid $uid's processes ending" sh -c "pkill -KILL -U $uid; ! pgrep -U $uid >/dev/null"
+  local uid=$1 members bound t0 elapsed
+  members=$("$PGREP" -U "$uid" | wc -l | tr -d ' ')
+  bound=$(drain_bound_s "$members")
+  t0=$(now)
+  while :; do
+    "$PKILL" -KILL -U "$uid" 2>/dev/null
+    "$PGREP" -U "$uid" >/dev/null || return 0
+    elapsed=$(perl -e "printf '%.6f', $(now) - $t0")
+    if perl -e "exit !($elapsed >= $bound)"; then
+      echo "macos.sh: uid $uid still holds processes $elapsed s after SIGKILL (bound $bound s for $members)" >&2
+      return 1
+    fi
+  done
 }
 
 uninstall_hex() {
