@@ -114,6 +114,32 @@ copy there shows ~20 bench scripts as modified: line endings from the sync, no c
    clippy for Windows, Linux and macOS exit 0 (unit hex-windows-xclippy-20261106T092715Z); cargo test at the merge
    2359062 fails one of step 5's hex-node relay tests (sent to step 5).
 
+10. Shards' shards for Windows, from Shards hex/shards-api a0cced87 (p/internal-local b8270370 plus step 5's six
+   commits, from its bundle shards-api-a0cced87.bundle), for step 5's guest lab. Built as a detached scheduled task
+   (hex-windows-shards-build-20261106T095707Z, S4U, 8 h limit; log and exit in C:\Users\corph\.cache\hex-t7-windows\logs),
+   `cargo build -p shards` (debug, Shards' pinned cargo 1.98.1): exit 0 in 2 min 29 s, 2026-11-06T09:57-09:59Z,
+   C:\Users\corph\.cache\hex-t7-windows\target-shards\debug\shards.exe. What Windows lacked, taken without installing
+   anything: NASM (AWS_LC_SYS_NO_ASM_x86_64_pc_windows_msvc=1, the Windows host's aws-lc in debug without its
+   assembly, unlike Shards' release build; the guest's musl aws-lc keeps it); CMake and Ninja from Visual Studio 2022
+   Build Tools' own folder, on the task's PATH; zig 0.16.0 (zig-x86_64-windows-0.16.0.zip from ziglang.org, sha256
+   68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e, the download index's, unpacked into
+   C:\Users\corph\.cache\hex-t7-windows\zig-0.16.0). Earlier attempts failed on each of these in turn (logs kept).
+   Shards' own check, cargo test -p shards --test boot -- a_direct_boot_writes_through_a_share --nocapture
+   (hex-windows-shards-boottest-20261106T100553Z, load 54% CPU): a_direct_boot_writes_through_a_share_and_not_through_a_read_only_one
+   ... ok, 1 passed, 0 failed, 105.8 s, through the Windows Hypervisor Platform.
+
+11. HEX-GUEST-19 at aca1789 (step 5's route 925f39c merged), 2026-11-06T10:13:44Z, load 50% CPU, C: 40 GB free:
+   cargo test -p hex-cli --test guest_real -- --nocapture --test-threads=1 (hex-windows-guestreal-20261106T101339Z):
+   the_oci_class_holds_its_contract_through_a_real_shards_guest ... ok, 1 passed, 0 failed, 2.75 s: the oci class's
+   conformance suite through a real Shards guest booted by entry 10's shards.exe. Inputs: HEX_GUEST_KERNEL Shards'
+   vmlinux-6.18.48-x86_64-hyperv (sha256 d04b68b9...), HEX_GUEST_INITRD and HEX_GUEST_LINUX_HEX a static x86_64 musl
+   hex built on jupiter at aca1789 (rust-lld, toolchain 1.99.1 with the x86_64-unknown-linux-musl target added) and
+   its initramfs (scripts/guest/initramfs.py under uv's Python 3.12): hex sha256 a714c72b08427914..., initramfs
+   8bf843f342fb0eeb... (C:\Users\corph\.cache\hex-t7-windows\guest-x86_64\aca1789), HEX_GUEST_CPUS 2,
+   HEX_GUEST_MEMORY_MIB 1024, default shares. Non-vacuity, the same run with HEX_GUEST_KERNEL naming no file: every
+   case fails "create: connecting to the guest failed: the guest did not boot: ... no-such-kernel: The system cannot
+   find the file specified" (HEX-RT-1 on), so the pass above booted the guest.
+
 What HCS reports as a Windows oci box's Exit at its end, against the oracle's Signal(15), for HEX-DIFF-1 step 12
 and HEX-DIFF-2 step 11 (asked by step 7): NOT OBSERVED. windows_oci_boxes_hold_the_contract_and_the_steps_criteria
 skipped in every run above (no HEX_WINDOWS_LAYERS), so no Windows oci box was made; it is read in the first run
