@@ -121,3 +121,37 @@ of `c230d0a` never committed, and its test run and seen to fail, then restored. 
 | a Windows directory root not refused | `a_tarball_root_stages_everywhere_and_a_directory_root_is_refused_on_windows` (`crates/hex-runtime/src/guest/tests.rs`), on jupiter | `tests.rs:457:13`, "expected a Windows directory root refused, got Ok(…)" |
 
 Each test passed again with the check restored.
+
+## 9. What real image layers hold that a tarball root must carry (2026-11-06)
+
+`bench/native/tarball-census/census.py` over each layer of `docker save` output (Python's tarfile, which decodes PAX and GNU
+records), run on fedora by `bench/native/tarball-census/run.sh`, unit `hex-ns5route-census-20261106T120325Z`. Images,
+pinned by the digest each tag resolved to:
+
+| image | digest | entries | hard links (groups) | non-root uid/gid | xattrs | setuid/setgid | distinct mtimes |
+|---|---|---|---|---|---|---|---|
+| debian:bookworm-slim | `sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc` | 4,226 | 2 (2) | 10 | 0 | 13 | 139 |
+| ubuntu:24.04 | `sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852` | 3,443 | 2 (2) | 18 | 0 | 14 | 230 |
+| alpine:latest | `sha256:3f4d6b32e26703c6082839234f43769d5046b3ac7c910033911d1e71d8cd630a` | 515 | 0 | 1 | 0 | 0 | 11 |
+| fedora:44 | `sha256:b3e011d47e686a89781495c9a87bc80349af742965e5d51e79cd51711982e4a2` | 9,033 | 1,281 (551) | 1 | 0 | 9 | 203 |
+| caddy:latest | `sha256:ce773ec7a742ce15ee6bf2bb5f65882b9e2a4487b10733e6f1484f86e6b5d8bc` | 949 | 0 | 2 | 1 | 0 | 30 |
+| grafana/grafana:latest | `sha256:488984b716c0862639f91a698adbe2862677a5a07bad42da5f03f3030883b205` | 17,883 | 254 (111) | 16,280 | 0 | 1 | 91 |
+
+What each is, by example:
+- Hard links: debian's and ubuntu's `usr/bin/perl` = `usr/bin/perl5.36.0` / `perl5.38.2` (perl-base) and `usr/bin/gunzip` =
+  `usr/bin/uncompress`; fedora's rpm platform macros (`usr/lib/rpm/platform/{amd64,ia32e,x86_64}-linux/macros`, 551
+  groups); grafana's (Alpine-based) `usr/share/zoneinfo` aliases (111 groups). Every hard link names an earlier entry of
+  its own layer.
+- Owners: the shadow group (gid 42) on `etc/shadow`, `etc/gshadow`, `usr/bin/chage`, `usr/sbin/unix_chkpwd` in debian,
+  ubuntu, alpine; tty (5), mail (8, 12), staff (50) elsewhere; ubuntu's `home/ubuntu` 1000:1000; grafana's whole
+  application 1000:1000 and its data 472:0; caddy's binary 1001:1001. Names (uname/gname) are empty in every image:
+  the layers carry numeric ids only.
+- Xattrs: one, caddy's `usr/bin/caddy` `security.capability` (20 bytes, `cap_net_bind_service=+ep`), as
+  `SCHILY.xattr.security.capability`; no `LIBARCHIVE.xattr.*` in any.
+- Times: every entry has a non-zero mtime (none 0), from 1996 (debian) to the build day; no layer has atime or ctime.
+- None has a sparse entry (GNU `S` or `GNU.sparse.*`), a device node or FIFO, or a whiteout (each is a single-layer
+  base or adds files only); the only PAX keys are `path` and `linkpath` (long names).
+
+So owners, hard links, mtimes and capabilities are in nearly every image, and a staged root without them differs
+from what Linux's own unpack holds: every non-root image's files would be root's, perl and fedora's macros would be
+copies, and caddy would lose `cap_net_bind_service`.
