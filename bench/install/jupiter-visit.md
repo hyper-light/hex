@@ -12,9 +12,9 @@ This is every admin action left on jupiter, in order, with who does each, every 
   `before` phase, records windows-before-21cb432-20261105T084555Z).
 - **kiln's shell on jupiter is already elevated**: `net session` succeeds and the token is in the Administrators
   role (checked 2026-11-06). So everything below can run from kiln with no UAC prompt at all (option A).
-- Staged, nothing to build at the visit: `C:\Users\corph\.cache\hex-t7-windows\stage\6be64c2\` holds `hex.exe`,
+- Staged, nothing to build at the visit: `C:\Users\corph\.cache\hex-t7-windows\stage\b20f1d5\` holds `hex.exe`,
   `windows_process_box.exe`, `windows_oci_box.exe`, `oci_setup.ps1`, `oci_teardown.ps1`,
-  `scripts\install\windows.ps1`, `bench\install\windows_lab.ps1` and `SHA256SUMS` (commit 6be64c2).
+  `scripts\install\windows.ps1`, `bench\install\windows_lab.ps1` and `SHA256SUMS` (commit b20f1d5, with step 4's fixed scripts from 33d1f17).
 
 ## Option A (recommended): no visit
 
@@ -36,7 +36,7 @@ Ada says "yes, run them from kiln". Then, one after the other, from kiln (alread
    → **Yes**. Keep this window open to the end; nothing below asks again.
 2. Step 4's setup (no further prompt; no reboot):
    ```
-   cd C:\Users\corph\.cache\hex-t7-windows\stage\6be64c2
+   cd C:\Users\corph\.cache\hex-t7-windows\stage\b20f1d5
    powershell -NoProfile -ExecutionPolicy Bypass -File .\oci_setup.ps1
    ```
    It prints `HEX_WINDOWS_LAYERS=...` at the end. Then tell the lead "setup done"; step 4 runs its suite from kiln.
