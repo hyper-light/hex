@@ -235,18 +235,21 @@ impl Privileged for Shells {
         &self,
         _uid: u32,
         program: &Program,
-        _fds: [OwnedFd; START_FDS],
+        fds: [OwnedFd; START_FDS],
         _leader: bool,
         _cap_mib: u32,
         _nproc: u32,
     ) -> io::Result<i32> {
+        // The program's stdin is the one the node passed, as the helper's `dup2` makes it.
+        let [stdin, _, _] = fds;
         let mut shell: Child = Command::new("/bin/sh")
             .args([
                 "-c",
-                "\"$@\" </dev/null >/dev/null 2>&1 & echo $!; wait $!; echo $?",
+                "\"$@\" >/dev/null 2>&1 & echo $!; wait $!; echo $?",
                 "sh",
             ])
             .args(&program.args)
+            .stdin(Piped::from(stdin))
             .stdout(Piped::piped())
             .spawn()?;
         let mut lines = BufReader::new(shell.stdout.take().expect("piped")).lines();
@@ -325,7 +328,8 @@ impl Privileged for Shells {
 
 /// HEX-RT-3, AC-T7.1.1 (box-user mode, end to end): a node in box-user mode, through a daemon on a real
 /// socket, starts programs that are another process's children, as the root helper's are. Do run one that
-/// sleeps, then one that exits 3; expect the first not ended while it runs and both ends as they were,
+/// waits on its stdin, then one that exits 3; expect the first not ended until its stdin closes and both
+/// ends as they were,
 /// never an end the node made up because it couldn't reap a program it doesn't parent.
 #[test]
 fn a_box_user_programs_end_is_its_own_not_unknown() {
@@ -355,14 +359,27 @@ fn a_box_user_programs_end_is_its_own_not_unknown() {
         cwd: None,
         user: None,
     };
-    let mut sleeper = rt.exec(&id, sh("sleep 0.5"), Stdio::null()).expect("exec");
+    // A program that runs until the test closes its stdin: running is a fact here, not a delay.
+    let (stdin, hold) = std::io::pipe().expect("pipe");
+    let mut held = rt
+        .exec(
+            &id,
+            sh("read _; exit 0"),
+            Stdio {
+                stdin: Some(stdin),
+                stdout: None,
+                stderr: None,
+            },
+        )
+        .expect("exec");
     assert_eq!(
-        sleeper.try_wait().unwrap(),
+        held.try_wait().unwrap(),
         None,
         "a running program read as ended"
     );
+    drop(hold);
     assert_eq!(
-        sleeper.wait_for(Duration::from_secs(10)).unwrap(),
+        held.wait_for(Duration::from_secs(10)).unwrap(),
         Some(Exit::Code(0))
     );
     let mut three = rt.exec(&id, sh("exit 3"), Stdio::null()).expect("exec");

@@ -25,6 +25,8 @@ pub mod bundle;
 pub mod cgroup;
 pub mod darwin;
 pub mod helper;
+#[cfg(test)]
+mod meet;
 pub mod netns;
 pub mod record;
 pub mod recovery;

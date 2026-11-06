@@ -304,7 +304,8 @@ impl Privileged for RealPriv {
                 }
             }
         }
-        // Reply KERN_SUCCESS so the kernel's exception path completes (the id + 100 is the reply id).
+        // Reply KERN_SUCCESS so the kernel's exception path completes. A MIG reply's id is its request's plus
+        // 100, as the kernel's own MIG replies set it (xnu `osfmk/kern/ipc_kobject.c:402`, f6217f891ac0).
         let mut reply = ExcReply {
             header: MsgHeader {
                 bits: msg.header.bits & MACH_MSGH_BITS_REMOTE_MASK,
@@ -355,7 +356,10 @@ fn fork_exec_as(uid: u32, spawn: &Spawn, leader: bool, nproc: u32) -> io::Result
         return Err(io::Error::last_os_error());
     }
     if pid == 0 {
-        // Child. From here only async-signal-safe calls, ending in execve or _exit.
+        // Child. From here only async-signal-safe calls, ending in execve or _exit. Every failure exits 127,
+        // POSIX's status for a command that could not be executed (XCU 2.8.2, "Exit Status for Commands": "If
+        // a command is not found, the exit status shall be 127"; posix_spawn's children and system() use it
+        // alike), so a start that never reached the program reads as one.
         // SAFETY: each call acts on this child alone with the values prepared before the fork.
         unsafe {
             if leader && libc::setsid() < 0 {
