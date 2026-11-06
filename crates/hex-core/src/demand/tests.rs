@@ -197,7 +197,7 @@ fn peaks_outlive_a_node_and_a_bad_record_is_a_first_start() {
         takes: [1, 2, 3, 4, 5, u64::MAX],
     };
     let text = p.encode();
-    assert!(text.len() <= Peaks::MOST_BYTES, "{}", text.len());
+    assert!(text.len() <= Peaks::most_bytes(), "{}", text.len());
     assert_eq!(Peaks::decode(&text), Ok(p));
     let torn = &text[..text.len() / 2];
     assert!(Peaks::decode(torn).is_err(), "a torn record is no record");
