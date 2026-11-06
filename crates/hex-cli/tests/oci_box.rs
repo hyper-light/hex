@@ -463,7 +463,6 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     orphans_are_reaped(&lab, own);
     held_record_write(&lab, own);
     two_nodes_one_box_id(&lab, own);
-    a_node_upgraded_over_boxes_at_the_old_place_recovers_both_places(&lab, own);
     a_node_upgraded_over_state_dirs_in_the_one_parent_recovers_both_layouts(&lab, own);
     records_in_both_places_are_found_after_a_restart(&lab, own);
     a_delete_racing_a_create_of_one_id_leaves_the_node_consistent(&lab, own);
@@ -4766,94 +4765,6 @@ fn records_in_both_places_are_found_after_a_restart(lab: &Lab, own: &Path) {
     );
 }
 
-/// T-T7.1.2 across goal 5 extended step 1's move of the `oci` boxes under `<box root>/.oci`: a node upgraded
-/// over boxes its older self made at `<box root>/<id>`, beside boxes of its own at `<box root>/.oci/<id>`, finds
-/// both places in its recovery. Do: with today's node, make a box whose init waits (`.oci/new-live`), and leave a
-/// cgroup there with no record (`.oci/new-orphan`); as the node before the move left boxes, its cgroup under the box
-/// root itself, leave a cgroup there with no record (`old-orphan`) and one whose record says it was being made
-/// (`old-mid`); then open today's node again and recover. Expect: the live box taken back where it was; the other
-/// three removed, their cgroups gone; and, it deleted, nothing of any box left at either place. (A live box at the
-/// old place was made with `Runtime::create_in_cgroup`, removed with no consumer left, Ada's 2026-11-06 rule.)
-fn a_node_upgraded_over_boxes_at_the_old_place_recovers_both_places(lab: &Lab, own: &Path) {
-    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
-    let box_root = own.join("hex-oci-upgrade");
-    let oci_dir = box_root.join(OCI_BOXES);
-    let id = |n: &str| BoxId::new(n).unwrap();
-    let (old_orphan, old_mid) = (id("old-orphan"), id("old-mid"));
-    let (new_live, new_orphan) = (id("new-live"), id("new-orphan"));
-
-    // Today's node first: a box of its own, and where it keeps a box's container.
-    let first = lab.node(&box_root, state.path());
-    first
-        .create(lab.running(new_live.clone(), &Lab::act(&Act::Wait)))
-        .expect("create at the new place");
-    drop(first);
-    let oci_boxes = BoxRoot::open(&oci_dir, disks::under(state.path()).unwrap()).unwrap();
-    let _new = Killing(&oci_boxes, new_live.clone());
-    oci_boxes.create(&new_orphan, &Bounds::default()).unwrap();
-
-    // What the node before the move left, made as it made it: each cgroup under the box root itself.
-    let root = BoxRoot::open(&box_root, disks::under(state.path()).unwrap()).unwrap();
-    let bundle = lab.bundle(&Lab::act(&Act::Wait));
-    let spec = |id: &BoxId| BoxSpec {
-        id: id.clone(),
-        bounds: Bounds::default(),
-        class: ClassSpec::Bundle(bundle.clone()),
-        owner: None,
-    };
-    root.create(&old_orphan, &Bounds::default()).unwrap();
-    root.create(&old_mid, &Bounds::default()).unwrap();
-    as_an_older_node_wrote(
-        state.path(),
-        &BoxRecord::new(spec(&old_mid), Phase::Creating, Vec::new()),
-    );
-
-    let node = lab.node(&box_root, state.path());
-    let summary = node.recover().expect("recover");
-    let adopted: BTreeSet<BoxId> = summary.adopted.iter().cloned().collect();
-    let removed: BTreeSet<BoxId> = summary.removed.iter().map(|(id, _)| id.clone()).collect();
-    assert_eq!(
-        (adopted, removed),
-        (
-            [new_live.clone()].into_iter().collect(),
-            [old_orphan.clone(), old_mid.clone(), new_orphan.clone()]
-                .into_iter()
-                .collect()
-        ),
-        "{summary:?}"
-    );
-    for (gone, place) in [
-        (&old_orphan, &box_root),
-        (&old_mid, &box_root),
-        (&new_orphan, &oci_dir),
-    ] {
-        assert!(
-            !place.join(gone.as_str()).exists(),
-            "{gone}'s cgroup is left"
-        );
-    }
-    assert!(
-        oci_dir.join(new_live.as_str()).exists(),
-        "the live box taken back where it was"
-    );
-    assert_eq!(
-        node.inspect(&new_live).unwrap().state,
-        BoxState::Created,
-        "{new_live}"
-    );
-    node.delete(&new_live)
-        .unwrap_or_else(|e| panic!("delete {new_live}: {e}"));
-    assert!(
-        !oci_dir.join(new_live.as_str()).exists(),
-        "{new_live}'s cgroup is left"
-    );
-    assert!(node.list().unwrap().is_empty(), "a box is left");
-    eprintln!(
-        "oci_box upgrade: adopted {new_live} at .oci; removed {old_orphan} and {old_mid} at the old place and \
-         {new_orphan}; nothing left after the delete"
-    );
-}
-
 /// T-T7.1.2 across goal 5 extended step 6's shards of the containers' state directories (lever 3): a node before
 /// them kept each container's directory in the runtime directory itself, `<runtime>/<key>-<id>`; today's keeps it
 /// in one of the runtime directory's shards, `<runtime>/<shard>/<key>-<id>`. Do: with today's node, make a box
@@ -5191,18 +5102,6 @@ fn start_ticks(pid: u32) -> u64 {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
     let (_, rest) = stat.rsplit_once(')').unwrap();
     rest.split_whitespace().nth(19).unwrap().parse().unwrap()
-}
-
-/// Kills whatever is left in a box's cgroup when dropped, so a check that fails leaves no container
-/// running, holding this test's output open.
-struct Killing<'a>(&'a BoxRoot, BoxId);
-
-impl Drop for Killing<'_> {
-    fn drop(&mut self) {
-        if let Some(cg) = self.0.get(&self.1) {
-            let _ = cg.kill();
-        }
-    }
 }
 
 fn sorted_ms(latencies: &[Duration]) -> Vec<Duration> {

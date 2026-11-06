@@ -263,7 +263,8 @@ containers' state costing more than 0.015 ms of filesystem work in the create br
       construction, as before. The start asks once which program the root carries (`BPF_PROG_QUERY` takes
       `cgroup_mutex`, f61): one attached with OVERRIDE whose translation is the default's stays, so an agent
       restarted over its boxes leaves it; anything else is replaced in one attach. A rootless node loads
-      nothing, as before. An `oci` box made before its node kept them apart is still found under the box root.
+      nothing, as before. An `oci` box is looked for only there: one under the box root was a node's from before the move, and none such
+      was ever deployed (the lead's ruling of 2026-11-06 under Ada's rule).
     - **The command line looks before it loads.** A process per container, it keeps the hints file in its
       state root (`.device-programs.json`: at most 64 programs, read up to 64 KiB), keyed by the same digest.
       A create opens the program a hint names and attaches it only when the kernel shows a cgroup device

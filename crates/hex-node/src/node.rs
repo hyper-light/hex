@@ -140,8 +140,7 @@ pub const OCI_BOXES: &str = ".oci";
 pub struct Node {
     /// The `process` boxes' cgroups, and the `oci` boxes' root among them ([`OCI_BOXES`]).
     root: BoxRoot,
-    /// The `oci` boxes' cgroups: under the box root, but apart from the `process` boxes. An `oci` box
-    /// made before its node kept them apart is still found under the box root ([`Node::cgroup`]).
+    /// The `oci` boxes' cgroups: under the box root, but apart from the `process` boxes.
     oci_boxes: BoxRoot,
     /// The `oci` boxes' device programs: one held open per policy, and on a root node the default
     /// policy's on [`Node::oci_boxes`]'s root.
@@ -688,14 +687,28 @@ impl Node {
         self.netns.reuse_counts()
     }
 
-    /// Box `id`'s cgroup: a slot's for a live box given one, else an `oci` box's under the oci boxes'
-    /// root, else (a `process` box, or an `oci` box made before its node kept them apart) under the box
-    /// root.
+    /// Box `id`'s cgroup, its class unknown (no record to say): a slot's for a live box given one, else an `oci`
+    /// box's under the oci boxes' root, else a `process` box's under the box root.
     fn cgroup(&self, id: &BoxId) -> Option<BoxCgroup> {
         if let Ok(Some(n)) = self.cgroups.slot_of(id) {
             return self.oci_boxes.slot(n);
         }
         self.oci_boxes.get(id).or_else(|| self.root.get(id))
+    }
+
+    /// Box `id`'s cgroup where a box of `class` keeps it: an `oci` box's under the oci boxes' root (a slot's for a
+    /// live box given one), a `process` box's under the box root, never the other's. An `oci` box at the box root
+    /// was a node's from before goal 5 extended step 1 moved them, and none such was ever deployed (no Hex node
+    /// runs outside ephemeral labs; kiln vendors and runs none), so nothing looks for one there (Ada's 2026-11-06
+    /// rule; the lead's ruling of 2026-11-06).
+    fn cgroup_of(&self, id: &BoxId, class: Class) -> Option<BoxCgroup> {
+        match class {
+            Class::Oci => match self.cgroups.slot_of(id) {
+                Ok(Some(n)) => self.oci_boxes.slot(n),
+                _ => self.oci_boxes.get(id),
+            },
+            Class::Process => self.root.get(id),
+        }
     }
 
     /// The `oci` runtime, over the node's state root and helper binary.
@@ -932,10 +945,15 @@ impl Node {
                 Some(Ok(r)) => r.slot.map(|slot| slot.n),
                 _ => None,
             };
+            let class = match &s.record {
+                Some(Ok(r)) => Some(r.spec.class.class()),
+                _ => None,
+            };
             s.parts = Parts {
-                cgroup: match slot {
-                    Some(n) => slots.contains(&n),
-                    None => self.cgroup(id).is_some(),
+                cgroup: match (slot, class) {
+                    (Some(n), _) => slots.contains(&n),
+                    (None, Some(class)) => self.cgroup_of(id, class).is_some(),
+                    (None, None) => self.cgroup(id).is_some(),
                 },
                 state_dir: state_dirs.contains(id),
                 bundle: bundles.contains(id),
@@ -1019,9 +1037,10 @@ impl Node {
             .and_then(|r| r.slot)
             .map(|slot| slot.n)
             .or_else(|| held.as_ref().map(|h| h.slot));
-        let cg = match slot {
-            Some(n) => self.oci_boxes.slot(n),
-            None => self.cgroup(id),
+        let cg = match (slot, &record) {
+            (Some(n), _) => self.oci_boxes.slot(n),
+            (None, Some(r)) => self.cgroup_of(id, r.spec.class.class()),
+            (None, None) => self.cgroup(id),
         };
         if let Some(cg) = &cg {
             if self.end(id, cg, ending)?
