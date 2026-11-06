@@ -27,7 +27,7 @@ use std::time::Duration;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
-pub use linux::Client;
+pub use linux::{Client, WIRE_EXEC_LIMIT};
 
 #[cfg(not(target_os = "linux"))]
 mod other;

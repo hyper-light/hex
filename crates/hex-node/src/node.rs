@@ -631,6 +631,7 @@ impl Node {
         stdio: Stdio,
     ) -> Result<Box<dyn Proc>, Refusal> {
         program.check()?;
+        program.fits(&process::exec_limit())?;
         let env = program
             .env
             .iter()
@@ -755,6 +756,7 @@ impl Runtime for Node {
         // be rendered is refused by name whether or not the id is taken (HEX-RT-13).
         if let ClassSpec::Oci(oci) = &spec.class {
             oci.check()?;
+            oci.init.fits(&process::exec_limit())?;
         }
         if self.record(&spec.id)?.is_some() || self.root.get(&spec.id).is_some() {
             return Err(Refusal::Exists(spec.id));

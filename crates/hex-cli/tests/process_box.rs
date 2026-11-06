@@ -40,6 +40,9 @@ impl BinFixture {
 }
 
 impl Fixture for BinFixture {
+    fn exec_limit(&self) -> Option<hex_api::ExecLimit> {
+        Some(hex_runtime::linux::process::exec_limit())
+    }
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
         BoxSpec {
             id,
