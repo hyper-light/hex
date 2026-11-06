@@ -14,7 +14,7 @@ Two more outcomes appear below. **fact**: the clock or bound is gone, and the wa
 The audit before conversion is commit 015d32c (Hex `cp/t7-native-s5-route` `2660759`, Shards `hex/shards-api`
 `a0cced87`). This revision is the conversion:
 - task D's rows at Hex `cp/t7-native-s5-consts`, with line numbers at its tip;
-- Shards' `crates/api` at `hex/shards-api-constants` `d325030e` (local, not pushed, off the pushed `a0cced87`;
+- Shards' `crates/api` at `hex/shards-api-constants` `e72c551b` (local, not pushed, off the pushed `a0cced87`;
   Hex's `vendor/shards-api-draft` carries it on this branch only).
 
 The rows in agent C's files are marked **C** and are merged from C's branch:
@@ -163,14 +163,17 @@ Behaviour fixed on the way:
 | `EXAMPLES` 5, `most_common(10)` | — | bench/native/tarball-census/census.py:13, :83 | input | Report sizes, not bounds: the census counts everything |
 | `BENCH_MEMORY` / `BENCH_OOM` | 8g / 1000 | bench/oci-validation/run_hex.sh:5 | c | the operator's, as above |
 
-## Shards' `crates/api` (hex/shards-api-constants d325030e)
+## Shards' `crates/api` (hex/shards-api-constants e72c551b)
+
+Every recorded bound is keyed by host class at compile time (`shards_api::record`). macOS-HVF uses its record. Linux-KVM and Windows-WHP get `record::Pending`, which names the record to take: `stop()` is refused by name there, and the clocked tests fail by name. PM M462/M463 are in Shards' docs/research/platform-measurements.md.
+
 
 | name | value | file:line | kind | source or record |
 |---|---|---|---|---|
 | `TAIL` | 59 + 4096×6 + 1 = 24,636 | crates/api/src/client.rs:50 | c | The longest report shards writes as it ends: a reset's console page (`serial.rs:57`) escaped at most 6× (`vm_run.rs:2730-2737`) |
-| `STOP_GRACE` | 10 s | lib.rs:114 | c | Shards' daemon.rs:228-231 (dockerd's default) |
+| `STOP_GRACE` | HVF 2 × 13 ms; KVM/WHP pending | lib.rs:155 | b | Twice (the margin) the slowest stop on record: Hex bench/native/guest/stop/RECORD.md; shards-api's own stop() in PM M463 peaked at 6.6 ms |
 | `DRAIN_GRACE` | gone | — | fact | an end mark written after shards exits; the drain reads to it |
-| `FIRST_BACKOFF` / `LAST_BACKOFF` | gone: pause √(2·c·w) | client.rs:513 | a | c = the last refused dial's cost, w = the wait so far |
+| `FIRST_BACKOFF` / `LAST_BACKOFF` | gone: pause √(2·c·w) | client.rs | a | c = the last refused dial's cost, w = the wait so far. It paces retries; the deadline is the caller's. Whether the lead's timeout rule covers a pacing rule is with the lead |
 | `ANSWER` | 14 | client.rs:57 | c | Firecracker docs/vsock.md; Shards' conn.rs:372 |
 | `SOCKET_PATH` | 103 | client.rs:180 | c | sun_path 104 (xnu bsd/sys/un.h) / 108 (unix(7)) |
 | PrivateDir 64 tries | gone | client.rs:204 | c | The name now carries a per-process random value, so an existing name is refused, never retried |
@@ -179,9 +182,9 @@ Behaviour fixed on the way:
 | `min_memory_mib`, `max_vcpus`, `MAX_PORTS`, memory even | — | lib.rs:199, :207, :215, :236 | c / a / c / c | shards-vmm, cited at file:line |
 | conformance payload | 64 KiB + 1 | conformance.rs:158 | input | one byte past the device's per-connection buffer (conn.rs:21) |
 | conformance `take(4096)` | `MAX_PORTS + 1` | conformance.rs:215 | c | pigeonhole |
-| unserved patience / slack | 200 ms / `OVERSHOOT` 160 ms | conformance.rs:249, :255 | input / b | PM M462: measured max 150.9 ms (macOS timer slack), macOS only (fedora down) |
-| sim tests | `STOP_GRACE`; 100 ms, 4096 inputs; 50 ms → `ZERO` | tests/sim.rs | c / input / fact | |
-| real test | 60 s; max(min, 256) / 1 vCPU | tests/real.rs:53, :39 | c | Shards' own E2E guard and boot-test size (`tests/boot.rs:14, :42-43`). Neither is measured by Shards itself |
+| unserved patience / slack | 200 ms / `OVERSHOOT` HVF 2 × 150.9 ms; KVM/WHP pending | conformance.rs:259 | input / b | PM M462: the slowest overshoot on record, ×2 the margin |
+| sim tests | `PATIENCE` HVF 2 × 1.715 s, `REFUSED_AFTER_END` HVF 2 × 2.89 ms; 100 ms, 4096 inputs | tests/sim.rs:31, :158 | b / input | PM M463 (harness `the_waits_of_these_tests`); KVM/WHP pending |
+| real test | `PATIENCE` HVF 2 × 207.6 ms; max(min, 256) / 1 vCPU | tests/real.rs:54, :39 | b / c | PM M463: the slowest wait a real HVF guest takes, its boot to an answering port; KVM/WHP pending |
 | test ports 1234 / 1236 | — | sim.rs, real.rs | c | identifiers: the test guest's `ECHO_PORT` |
 | unit-test specs | — | client.rs, lib.rs, stream.rs | input | stated in each test |
 
