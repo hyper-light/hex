@@ -74,7 +74,7 @@ fn four_equal_weight_owners_each_hold_a_quarter_under_contention() {
     let mut worst = Vec::new();
     for policy in [Policy::Drf, Policy::Fifo] {
         let run = sim::run(&day, &Config { policy, ..base }).unwrap();
-        let shares = fair::measure(&day, &run.ran, run.report.end).unwrap();
+        let shares = fair::measure(&day, &run.ran, &run.refused, run.report.end).unwrap();
         eprintln!(
             "AC-T7.5.2 {policy:?}: microVMs {} placements {} contended {:.2} h shares_ppm {:?} of_cluster_ppm {:?} worst {} ppm",
             day.workloads.len(),
@@ -216,7 +216,7 @@ fn four_equal_weight_owners_over_a_recorded_day() {
         let text = std::fs::read_to_string(&path).unwrap();
         let day = replay::parse(&text, &replay::Limits::default()).unwrap();
         let run = sim::run(&day, &config).unwrap();
-        let shares = fair::measure(&day, &run.ran, run.report.end).unwrap();
+        let shares = fair::measure(&day, &run.ran, &run.refused, run.report.end).unwrap();
         let equal = 1_000_000 / shares.shares_ppm.len() as u64;
         eprintln!(
             "AC-T7.5.2 recorded {path}: microVMs {} owners {} contended {:.2} h shares_ppm {:?} worst {} ppm (bar {})",
@@ -235,6 +235,6 @@ fn four_equal_weight_owners_over_a_recorded_day() {
     let read = replay::parse(&as_trace(&day), &replay::Limits::default()).unwrap();
     assert_eq!(read, day);
     let run = sim::run(&read, &config).unwrap();
-    let shares = fair::measure(&read, &run.ran, run.report.end).unwrap();
+    let shares = fair::measure(&read, &run.ran, &run.refused, run.report.end).unwrap();
     assert!(shares.worst_from_equal_ppm() <= 5_000, "{shares:?}");
 }

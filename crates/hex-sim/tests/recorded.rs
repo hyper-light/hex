@@ -16,106 +16,11 @@
     )
 )]
 
-use hex_sim::fair::{self, Policy, ShareReport};
-use hex_sim::generate;
-use hex_sim::model::{Cluster, NodeId, NodeSpec, OwnerId, Resources, Time};
-use hex_sim::replay;
-use hex_sim::sim::{self, Config};
+mod common;
 
-const DAY: u128 = 86_400_000_000_000;
-const GIB: f64 = (1u64 << 30) as f64;
-
-fn recorded(name: &str) -> Cluster {
-    let text = std::fs::read_to_string(format!("../../bench/sched/{name}")).unwrap();
-    replay::parse(&text, &replay::Limits::default()).unwrap()
-}
-
-/// Each owner's CPU (millicore-ns) and memory (byte-ns) asked for over the day.
-fn asked(day: &Cluster) -> Vec<(u128, u128)> {
-    let mut out = vec![(0u128, 0u128); day.owners.len()];
-    for w in &day.workloads {
-        let runs = u128::from(w.runs_for.unwrap());
-        let o = &mut out[usize::try_from(w.tenancy.owner.0).unwrap()];
-        o.0 += u128::from(w.need.cpu_milli) * runs;
-        o.1 += u128::from(w.need.mem_bytes) * runs;
-    }
-    out
-}
-
-/// The largest cluster of one node at which every owner asks, on average over the day, for more
-/// than a quarter of it in CPU or in memory: each owner `o` allows CPU up to `cpu_o` (just under four
-/// times its mean millicores) or memory up to `mem_o`. Choosing which owners CPU satisfies (those
-/// whose `cpu_o` is at least the CPU chosen) leaves the rest to memory, so the candidates are each
-/// owner's `cpu_o` as the CPU, with the least `mem_o` of the owners it leaves as the memory (the
-/// recorded cluster's memory if it leaves none). The largest is the one whose smaller fraction of
-/// the recorded cluster (CPU or memory) is largest.
-fn quarter_cluster(day: &Cluster) -> Resources {
-    let total = day.nodes.iter().fold(Resources::default(), |a, n| {
-        a.checked_add(&n.capacity).unwrap()
-    });
-    let limits: Vec<(u128, u128)> = asked(day)
-        .iter()
-        .map(|&(c, m)| ((4 * c - 1) / DAY, (4 * m - 1) / DAY))
-        .collect();
-    let mut best: Option<(u128, u128)> = None;
-    for &(cpu, _) in &limits {
-        let mem = limits
-            .iter()
-            .filter(|(c, _)| *c < cpu)
-            .map(|&(_, m)| m)
-            .min()
-            .unwrap_or(u128::from(total.mem_bytes));
-        let frac = |(c, m): (u128, u128)| {
-            // The smaller of c / total cpu and m / total mem, compared by cross-multiplication.
-            (c * u128::from(total.mem_bytes)).min(m * u128::from(total.cpu_milli))
-        };
-        if best.is_none_or(|b| frac((cpu, mem)) > frac(b)) {
-            best = Some((cpu, mem));
-        }
-    }
-    let (cpu, mem) = best.unwrap();
-    Resources {
-        cpu_milli: u64::try_from(cpu).unwrap(),
-        mem_bytes: u64::try_from(mem).unwrap(),
-        gpus: 0,
-    }
-}
-
-fn hours(ns: Time) -> f64 {
-    ns as f64 / 3.6e12
-}
-
-fn describe(label: &str, s: &ShareReport) {
-    let mut iv = s.intervals.clone();
-    iv.sort_unstable();
-    eprintln!(
-        "{label}: contended {:.3} h in {} intervals (median {:.1} s, longest {:.1} min); parts of the held share ppm {:?}; dominant share of the cluster ppm {:?}; worst from equal {} ppm",
-        hours(s.contended_ns),
-        iv.len(),
-        iv.get(iv.len() / 2).map_or(0.0, |&t| t as f64 / 1e9),
-        iv.last().map_or(0.0, |&t| t as f64 / 6e10),
-        s.shares_ppm,
-        s.of_cluster_ppm,
-        s.worst_from_equal_ppm()
-    );
-}
-
-fn run(day: &Cluster, policy: Policy) -> (ShareReport, u64) {
-    let run = sim::run(
-        day,
-        &Config {
-            policy,
-            max_events: 1 << 22,
-            ..Config::default()
-        },
-    )
-    .unwrap();
-    let refused = u64::try_from(run.refused.iter().filter(|&&r| r).count()).unwrap();
-    (
-        fair::measure(day, &run.ran, run.report.end).unwrap(),
-        refused,
-    )
-}
+use common::{DAY, GIB, asked, burst_rows, describe, holds, quarter_cluster, recorded, run};
+use hex_sim::fair::Policy;
+use hex_sim::model::{NodeId, NodeSpec};
 
 /// Side measurement (kiln CI, not of record): AC-T7.5.2 over a recorded CI day, measured (`bench/sched/kiln_workload.md`): do
 /// 2026-10-25 of kiln's CI (kiln, slates, hyperscale and hyper-raft as four equal-weight owners;
@@ -180,41 +85,6 @@ fn kiln_and_slates_at_the_recorded_runners() {
     );
 }
 
-/// Each of the first `owners` owners' 95th-percentile leg-start latency (first start less arrival; a
-/// leg never started counts as waiting for ever).
-fn p95s(day: &Cluster, started: &[Option<Time>], owners: u32) -> Vec<Time> {
-    (0..owners)
-        .map(|o| {
-            let mut waits: Vec<Time> = day
-                .workloads
-                .iter()
-                .zip(started)
-                .filter(|(w, _)| w.tenancy.owner == OwnerId(o))
-                .map(|(w, s)| s.map_or(Time::MAX, |s| s - w.arrives))
-                .collect();
-            waits.sort_unstable();
-            waits[(waits.len() * 95).div_ceil(100) - 1]
-        })
-        .collect()
-}
-
-fn starts(day: &Cluster, policy: Policy, preemptions: u64) -> (Vec<Option<Time>>, u64) {
-    let run = sim::run(
-        day,
-        &Config {
-            policy,
-            preemptions,
-            max_events: 1 << 22,
-            ..Config::default()
-        },
-    )
-    .unwrap();
-    (
-        run.ran.iter().map(|r| r.map(|r| r.started)).collect(),
-        run.report.preempted,
-    )
-}
-
 /// Side measurement (kiln CI, not of record): T-T7.5.1 on a recorded CI day: do 2026-10-30 of kiln's CI as recorded (focal, hyperscale, kiln and
 /// slates as owners, on the 10 runners kiln ran it on), then the same day with 1,000 legs from a
 /// repository that ran nothing that day, all arriving at the start of the day's busiest hour (the
@@ -227,38 +97,16 @@ fn starts(day: &Cluster, policy: Policy, preemptions: u64) -> (Vec<Option<Time>>
 /// by that; plain DRF delays kiln by 167 s and slates by 87 s; FIFO by 3.5 h and 1.5 h.
 #[test]
 fn a_burst_on_a_recorded_day_leaves_the_others_start_p95_as_it_was() {
-    const HOUR: Time = 3_600_000_000_000;
     let usual = recorded("kiln-ci-20261030.trace");
-    let owners = u32::try_from(usual.owners.len()).unwrap();
-    let mut per_hour = std::collections::BTreeMap::<Time, u64>::new();
-    for w in &usual.workloads {
-        *per_hour.entry(w.arrives / HOUR).or_default() += 1;
-    }
-    let (&busiest, &count) = per_hour
-        .iter()
-        .max_by_key(|(h, n)| (**n, std::cmp::Reverse(**h)))
-        .unwrap();
-    let burst =
-        generate::burst_from(usual.clone(), 7, OwnerId(owners), busiest * HOUR, 1_000).unwrap();
-    eprintln!(
-        "kiln-CI side: T-T7.5.1 2026-10-30: {} legs of {owners} repositories, busiest hour {busiest} ({count} legs); with the burst {} legs",
-        usual.workloads.len(),
-        burst.workloads.len()
-    );
-    let mut rows = Vec::new();
-    for (name, policy, preemptions) in [
-        ("hex", Policy::Drf, 100_000),
-        ("drf", Policy::Drf, 0),
-        ("fifo", Policy::Fifo, 0),
-    ] {
-        let (without, _) = starts(&usual, policy, preemptions);
-        let (with, preempted) = starts(&burst, policy, preemptions);
-        let (a, b) = (p95s(&usual, &without, owners), p95s(&burst, &with, owners));
-        let holds = b.iter().zip(&a).all(|(w, wo)| w <= wo);
+    let rows = burst_rows(&usual, "kiln-CI side: T-T7.5.1 2026-10-30");
+    for (name, a, b, preempted) in &rows {
         eprintln!(
-            "kiln-CI side: T-T7.5.1 {name}: p95 ns without {a:?} with {b:?}; preempted {preempted}; holds {holds}"
+            "kiln-CI side: T-T7.5.1 {name}: p95 ns without {a:?} with {b:?}; preempted {preempted}; holds {}",
+            holds(a, b)
         );
-        rows.push(holds);
     }
-    assert!(!rows[2], "FIFO kept the bar: the test can't fail");
+    assert!(
+        !holds(&rows[2].1, &rows[2].2),
+        "FIFO kept the bar: the test can't fail"
+    );
 }

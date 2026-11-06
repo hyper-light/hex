@@ -330,8 +330,14 @@ impl ShareReport {
 
 /// Each owner's share while every owner had work waiting: a sweep over the run's starts, ends and
 /// arrivals, so bounded by four events per workload. A workload waits from its arrival until it
-/// first starts (or the run ends); it holds its need from its start until its end (or the run ends).
-pub fn measure(cluster: &Cluster, ran: &[Option<Ran>], end: Time) -> Result<ShareReport, SimError> {
+/// first starts (or the run ends), unless it was refused at admission (`refused`, by index), when it
+/// never waits; it holds its need from its start until its end (or the run ends).
+pub fn measure(
+    cluster: &Cluster,
+    ran: &[Option<Ran>],
+    refused: &[bool],
+    end: Time,
+) -> Result<ShareReport, SimError> {
     let owners = cluster.owners.len();
     let total = Shares::of(cluster)?.total;
     // (time, what, workload index): 0 an end, 1 a start, 2 a wait begun, 3 a wait over; at one
@@ -339,6 +345,10 @@ pub fn measure(cluster: &Cluster, ran: &[Option<Ran>], end: Time) -> Result<Shar
     let mut events: Vec<(Time, u8, usize)> = Vec::new();
     for (at, w) in cluster.workloads.iter().enumerate() {
         let r = ran.get(at).copied().flatten();
+        if r.is_none() && refused.get(at).copied().unwrap_or(false) {
+            // Refused at admission: it never waits for capacity.
+            continue;
+        }
         let started = r.map_or(end, |r| r.started);
         events.push((w.arrives.min(started), 2, at));
         events.push((started, 3, at));
@@ -445,6 +455,47 @@ mod tests {
             },
             background_milli: 0,
         }
+    }
+
+    /// AC-T7.5.2's measure: a workload refused at admission never runs and is not waiting for
+    /// capacity. Do two owners on one node, owner 0's workload waiting 10 ns before it runs and owner
+    /// 1's refused; expect no contention, as owner 1 never had work waiting.
+    #[test]
+    fn a_refused_workload_is_not_waiting() {
+        let work = |id, owner| WorkloadSpec {
+            id: WorkloadId(id),
+            need: Resources {
+                cpu_milli: 1,
+                mem_bytes: 1,
+                gpus: 0,
+            },
+            kind: crate::model::Kind::Plain,
+            arrives: 0,
+            runs_for: Some(10),
+            tenancy: crate::model::Tenancy {
+                owner: OwnerId(owner),
+                ..crate::model::Tenancy::default()
+            },
+        };
+        let cluster = Cluster {
+            nodes: vec![node(10, 10)],
+            workloads: vec![work(0, 0), work(1, 1)],
+            owners: vec![crate::model::Owner::default(); 2],
+            groups: Vec::new(),
+        };
+        let ran = [
+            Some(Ran {
+                node: NodeId(0),
+                started: 10,
+                ended: Some(20),
+            }),
+            None,
+        ];
+        let shares = measure(&cluster, &ran, &[false, true], 30).unwrap();
+        assert_eq!(shares.contended_ns, 0);
+        // Not refused, owner 1's workload waits the whole run: the two contend for 10 ns.
+        let shares = measure(&cluster, &ran, &[false, false], 30).unwrap();
+        assert_eq!(shares.contended_ns, 10);
     }
 
     /// AC-T7.5.2 (DRF's order, NSDI 2011 §4): the owner with the lower dominant share over its
