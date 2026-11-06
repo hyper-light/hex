@@ -47,6 +47,11 @@ pub trait Fixture {
     fn refused_forks_counted(&self) -> bool {
         true
     }
+    /// The bound this class's exec puts on a program's arguments and environment, read as the class reads
+    /// it (CLAUDE.md §2). `None` states none, and HEX-RT-14 fails on it: every class bounds a program.
+    fn exec_limit(&self) -> Option<crate::ExecLimit> {
+        None
+    }
     /// Whether TERM ends an `oci` box's init that has no handler for it. False for Linux: the kernel
     /// gives a PID namespace's init only KILL and STOP from outside it (pid_namespaces(7)). True for a
     /// class with no POSIX signals, which ends the container instead: HCS's ProcessSignal carries only
@@ -153,6 +158,11 @@ pub const CASES: &[Case] = &[
         says: "create of an oci box whose spec names a value that can't be rendered is refused as Invalid naming the field, and makes nothing",
         run: unrenderable,
     },
+    Case {
+        id: "HEX-RT-14",
+        says: "exec of a program whose arguments and environment pass the class's exec bound is refused as Invalid naming the program, before any spawn",
+        run: oversized_program,
+    },
 ];
 
 /// Runs every case on fresh boxes; returns the failures.
@@ -239,6 +249,38 @@ fn say(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     rt.delete(&id).map_err(|e| e.to_string())?;
     ensure(exit == Exit::Code(0), || format!("exit {exit:?}"))?;
     ensure(out == "hello from a box\n", || format!("stdout {out:?}"))
+}
+
+fn oversized_program(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
+    let limit = fx
+        .exec_limit()
+        .ok_or("the class states no bound on a program's arguments and environment (CLAUDE.md §2)")?;
+    let id = made(rt, fx, "oversized", Bounds::default())?;
+    let mut program = fx.program(&Act::Say("never"));
+    // Strings each under the OS's per-string bound (half of it, or of the block where there is none), as
+    // many as pass the block: only passing it matters, and any split under the string bound does. Each
+    // grows the program by at least a byte, so the loop ends.
+    let piece = limit
+        .string
+        .unwrap_or(limit.block)
+        .min(limit.block)
+        .div_ceil(2)
+        .max(1);
+    let mut n = 0usize;
+    while program.exec_size() <= limit.block {
+        program.env.push((format!("HEX_RT_14_{n}"), "x".repeat(piece)));
+        n = n.saturating_add(1);
+    }
+    let refused = rt.exec(&id, program, Stdio::null());
+    rt.delete(&id).map_err(|e| e.to_string())?;
+    match refused {
+        Err(Refusal::Invalid { what: "program", .. }) => Ok(()),
+        Err(e) => Err(format!("refused, but not as an invalid program: {e}")),
+        Ok(_) => Err(format!(
+            "a program past the class's bound ({} bytes, {}) was taken",
+            limit.block, limit.source
+        )),
+    }
 }
 
 fn fail(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {

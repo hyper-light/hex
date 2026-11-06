@@ -274,6 +274,92 @@ impl Program {
         }
         Ok(())
     }
+
+    /// The bytes an exec takes for this program, counted as Linux's `execve` counts them
+    /// (docs/research/runtime/exec-size-bounds.md), which is at least what XNU counts: each argument and
+    /// each `KEY=VALUE` string with its NUL, the first argument once more for the filename, and a pointer
+    /// for each string (one argument at least). Saturates at `usize::MAX`, which no bound admits.
+    pub fn exec_size(&self) -> usize {
+        let args = self
+            .args
+            .iter()
+            .fold(0usize, |n, a| n.saturating_add(a.len()).saturating_add(1));
+        let filename = self
+            .args
+            .first()
+            .map_or(1, |a| a.len().saturating_add(1));
+        let env = self.env.iter().fold(0usize, |n, (k, v)| {
+            // KEY=VALUE and its NUL.
+            n.saturating_add(k.len())
+                .saturating_add(v.len())
+                .saturating_add(2)
+        });
+        let pointers = self
+            .args
+            .len()
+            .max(1)
+            .saturating_add(self.env.len())
+            .saturating_mul(size_of::<usize>());
+        args.saturating_add(filename)
+            .saturating_add(env)
+            .saturating_add(pointers)
+    }
+
+    /// Whether this OS's exec takes it: refused as `Invalid` naming the sizes and the bound's source when it
+    /// doesn't, before any spawn (CLAUDE.md §2, §3).
+    pub fn fits(&self, limit: &ExecLimit) -> Result<(), Refusal> {
+        let size = self.exec_size();
+        if size > limit.block {
+            return Err(Refusal::Invalid {
+                what: "program",
+                why: format!(
+                    "its arguments and environment take {size} bytes; {} allows {}",
+                    limit.source, limit.block
+                ),
+            });
+        }
+        let Some(most) = limit.string else {
+            return Ok(());
+        };
+        let long = |len: usize| len.saturating_add(1) > most;
+        if let Some(a) = self.args.iter().find(|a| long(a.len())) {
+            return Err(Refusal::Invalid {
+                what: "program",
+                why: format!(
+                    "an argument of {} bytes; {} allows {most} for one string",
+                    a.len().saturating_add(1),
+                    limit.source
+                ),
+            });
+        }
+        if let Some((k, v)) = self
+            .env
+            .iter()
+            .find(|(k, v)| long(k.len().saturating_add(v.len()).saturating_add(1)))
+        {
+            return Err(Refusal::Invalid {
+                what: "program",
+                why: format!(
+                    "environment variable {k:?} takes {} bytes; {} allows {most} for one string",
+                    k.len().saturating_add(v.len()).saturating_add(2),
+                    limit.source
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// The most an OS's exec takes of a program's arguments and environment
+/// (docs/research/runtime/exec-size-bounds.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecLimit {
+    /// Bytes for every string and its pointer together, as [`Program::exec_size`] counts them.
+    pub block: usize,
+    /// Bytes for any one string with its NUL, where the OS bounds that too.
+    pub string: Option<usize>,
+    /// Where the bound was read, for the refusal.
+    pub source: &'static str,
 }
 
 /// A user and its groups in a container.
@@ -312,6 +398,44 @@ mod tests {
         p.env.push(("A=B".to_owned(), "c".to_owned()));
         assert!(p.check().is_err());
         assert_eq!(Program::of(&["sh", "-c", "true"]).check(), Ok(()));
+    }
+
+    /// docs/research/runtime/exec-size-bounds.md: do count `sh -c true` with one variable, expect Linux's
+    /// count (each string and its NUL, the filename again, a pointer per string); do fit it against a block one
+    /// byte short, expect a refusal naming the program and the bound's source; do a variable past the
+    /// per-string bound, expect it named.
+    #[test]
+    fn a_program_is_counted_as_execve_counts_it_and_refused_past_a_bound() {
+        let p = Program {
+            args: vec!["sh".into(), "-c".into(), "true".into()],
+            env: vec![("A".into(), "bc".into())],
+            ..Program::default()
+        };
+        // "sh\0" "-c\0" "true\0" = 3 + 3 + 5; the filename "sh\0" = 3; "A=bc\0" = 5; 4 pointers.
+        let size = 11 + 3 + 5 + 4 * size_of::<usize>();
+        assert_eq!(p.exec_size(), size);
+        let fits = ExecLimit {
+            block: size,
+            string: None,
+            source: "a test",
+        };
+        assert_eq!(p.fits(&fits), Ok(()));
+        let short = ExecLimit {
+            block: size - 1,
+            ..fits
+        };
+        assert!(matches!(
+            p.fits(&short),
+            Err(Refusal::Invalid { what: "program", ref why }) if why.contains("a test")
+        ));
+        let one_string = ExecLimit {
+            string: Some(4),
+            ..fits
+        };
+        assert!(matches!(
+            p.fits(&one_string),
+            Err(Refusal::Invalid { what: "program", ref why }) if why.contains("\"A\"")
+        ));
     }
 
     fn spec() -> OciSpec {
