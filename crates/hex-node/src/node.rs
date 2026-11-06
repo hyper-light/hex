@@ -673,21 +673,7 @@ impl Node {
         };
         let (pid, pidfd) = match direct {
             Direct::Started(pid, pidfd) => (pid, pidfd),
-            // A seed started under a lower stack limit than this node's reading refuses the program by
-            // its own (HEX-RT-14): the node reads its limit again, once, on that refusal alone, and holds
-            // the next exec to it before any seed is asked.
-            Direct::Unable(init) => match self.seed_pool()?.exec(&request, fds, init) {
-                Ok(started) => started,
-                Err(
-                    refusal @ Refusal::Invalid {
-                        what: "program", ..
-                    },
-                ) => {
-                    process::relearn_stack();
-                    return Err(refusal);
-                }
-                Err(refusal) => return Err(refusal),
-            },
+            Direct::Unable(init) => self.seed_pool()?.exec(&request, fds, init)?,
         };
         drop((stdio, cgroup));
         // The agent keeps a duplicate pidfd so it can reap the program on this box's delete: the

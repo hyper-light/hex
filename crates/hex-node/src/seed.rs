@@ -25,6 +25,7 @@ use std::time::Duration;
 
 use hex_api::Refusal;
 use hex_core::seed::{Answer, Failed, Request};
+use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::seed as rt_seed;
 use rustix::process::{Pid, PidfdFlags, WaitId, WaitIdOptions};
 
@@ -254,9 +255,12 @@ fn round_trip(
     let [stdin, stdout, stderr] = stdio;
     let fds = [stdin, stdout, stderr, init.as_fd()];
     // The agent↔seed wire lives once in `hex-runtime`'s seed module, used by the seed, its
-    // intermediate and here (CLAUDE.md §13). A broken socket is the seed's death: take it for broken.
-    rt_seed::send_request(seed.socket.as_fd(), req, fds)
-        .map_err(|e| Trip::Broken(Refusal::from(e)))?;
+    // intermediate and here (CLAUDE.md §13). A broken socket is the seed's death: take it for broken. A
+    // program too big for the wire was never sent, and the seed is whole.
+    rt_seed::send_request(seed.socket.as_fd(), req, fds).map_err(|e| match e {
+        e @ OciError::Program(_) => Trip::Refused(Refusal::from(e)),
+        e => Trip::Broken(Refusal::from(e)),
+    })?;
     // The seed holds its own copy of the init's pidfd now.
     drop(init);
     let (answer, pidfd) =
@@ -268,13 +272,19 @@ fn round_trip(
                 "a seed said a program started but sent no pidfd".to_owned(),
             ))),
         },
+        // A seed started under a lower stack limit than the node's reading refuses the program by its own
+        // (HEX-RT-14): the node reads its limit again, once, on this refusal alone, and holds the next exec
+        // to it before any seed is asked.
         Answer::Refused {
             failed: Failed::Program,
             why,
-        } => Err(Trip::Refused(Refusal::Invalid {
-            what: "program",
-            why,
-        })),
+        } => {
+            hex_runtime::linux::process::relearn_stack();
+            Err(Trip::Refused(Refusal::Invalid {
+                what: "program",
+                why,
+            }))
+        }
         Answer::Refused { failed, why } => {
             let refusal = Refusal::Os {
                 op: "exec in a container",

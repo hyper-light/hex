@@ -1049,8 +1049,13 @@ pub fn send_request(
     req: &Request,
     fds: [BorrowedFd<'_>; seed::REQUEST_FDS],
 ) -> Result<(), OciError> {
-    let bytes = seed::request(req)
-        .map_err(|f| OciError::Broken(format!("encoding an exec request: {f}")))?;
+    // A request past the wire's one message is a program no seed can be handed: refused as that.
+    let bytes = seed::request(req).map_err(|f| match f {
+        hex_core::wire::Fault::Oversized { .. } => OciError::Program(format!(
+            "the exec request past the seed wire's one message: {f}"
+        )),
+        f => OciError::Broken(format!("encoding an exec request: {f}")),
+    })?;
     let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(seed::REQUEST_FDS))];
     let mut control = SendAncillaryBuffer::new(&mut space);
     if !control.push(SendAncillaryMessage::ScmRights(&fds)) {

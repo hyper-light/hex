@@ -621,7 +621,8 @@ before anything is spawned (`docs/research/runtime/exec-size-bounds.md`).
   `E2BIG` through memory the two share, and the agent reaps it and refuses the program; rootless, the seed (started
   under the lower limit, which its programs inherit) refuses the program by its own reading with a refusal of its own
   on the seed wire (code 5, appended). Either way the node reads its limit again, once, and refuses the next exec
-  itself.
+  itself. Rootless, the seed wire's one request (160 KiB, `hex_core::seed::MAX_REQUEST`) bounds a program too: one
+  past it is refused by name before it is sent, and the seed kept.
 - **Over the node's socket** the wire's one-message bound is tighter than Linux's, so the client refuses past it, as a
   program, before encoding.
 - **Tested by** HEX-RT-14 on every class's conformance run (a fixture that states no bound fails it), and a unit test of
