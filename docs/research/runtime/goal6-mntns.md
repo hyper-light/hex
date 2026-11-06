@@ -498,24 +498,38 @@ threads, Docker's paths, the whole create's p99 improving with it, and no priori
   namespaces hold their `/proc/net` files. An in-process node at the container's 1,024 holds none, and enters each
   namespace to check it.
 
-**In process, at the container's descriptor limit (1,024), it isn't met**: part 19's p99 was 351-761 us at 2caebe2
-and 508-1,373 us at 1e5e956 (below). **At the shipped node's limit it is, in process too**, so the gap was the limit,
-and both readings meet the bar for the node as it ships:
-- The run: cp/t7-g6 0e09a57 (parked procs on by default merged in), unit hex-g6-nofileab-20261106T092741Z.
-  - The unit first ran all 7 gates, every one exit 0, then the root lab as root: oci_box, oci_spec_box, oci_lsm and
-    oci_seccomp all pass.
-  - Then, timed 09:29:51-09:32:15Z under the lock, at load 16-28: one release binary, in process, at
-    `HEXBENCH_NOFILE=hard` (soft 524,288, as the installer sets a node's; each cell's `nofile.txt` says it).
-  - Parked procs off (A) against on (B), 4 interleaved rounds at 6 and 12 loops, 2,000 creates at 8 in flight,
-    8,000 idle threads, owner bundles with reuse on, Docker's paths, the `/dev` pool on.
-- Part 19's p99: **175-263 us in all 8 B cells** (off: 468-583). Its p50: 32-35 us (off: 194-212). Its unpreempted p99:
-  79-225 us (off: 335-476).
-- The create's p99 is lower in 6 of 8 pairs (1.108-1.704 ms on, 1.251-1.878 off).
-- The delete's p50 is about 40% higher (0.655-0.700 ms on; off 0.451-0.520, one cell 0.873).
-- Every B cell: 1,992 hits, 0 misses, 0 dry.
-- Why the limit matters: at 1,024 an in-process node's kept network namespaces hold no `/proc/net` files, and every
-  check enters its namespace instead. Even the off arm's p99 here (468-583 us) is well under the earlier in-process
-  runs' 1,018-2,132.
+**In process it is met too, at this code, at either descriptor limit.** The older in-process figures (part 19's p99
+351-761 us at 2caebe2, 508-1,373 us at 1e5e956, below) came from older trees, not from the limit. The lead asked
+which it was (2026-11-06 09:23Z), and two A/Bs answer it:
+- **The runs:** cp/t7-g6 0e09a57, which carries 66dbfb4's code (b5681e6's) with goal 6's merged in; one release
+  binary; in process. Parked procs off (A) against on (B), 4 interleaved rounds at 6 and 12 loops, 2,000 creates at 8
+  in flight, 8,000 idle threads, owner bundles with reuse on, Docker's paths, the `/dev` pool on. Each cell's
+  `nofile.txt` says the limit it ran at.
+  - At the shipped node's limit (`HEXBENCH_NOFILE=hard`, soft 524,288): unit hex-g6-nofileab-20261106T092741Z, timed
+    09:29:51-09:32:15Z, load 16-28. The same unit first ran all 7 gates, every one exit 0, then the root lab as root
+    (oci_box, oci_spec_box, oci_lsm and oci_seccomp all pass).
+  - At the container's own (soft 1,024): unit hex-g6-givenab-20261106T093407Z, timed 09:34:19-09:37:16Z, load 5-11,
+    the same binaries.
+
+| | at the shipped limit | at the container's 1,024 |
+|---|---|---|
+| part 19 p99, on | 175-263 us, 8 of 8 under 0.5 ms | 182-291 us, 8 of 8 under 0.5 ms |
+| part 19 p99, off | 468-583 us | 476-587 us |
+| part 19 p50, on / off | 32-35 / 194-212 us | 32-36 / 197-215 us |
+| create p99 lower with B | 6 of 8 pairs | 8 of 8 pairs |
+| delete p50, on / off | 0.655-0.700 / 0.451-0.520 ms (one A cell 0.873) | 0.660-0.760 / 0.468-0.504 ms (one A cell 0.875) |
+| delete p99 higher with B | (not read) | 7 of 8 pairs; one B cell 12.148 ms |
+| B's claims | 1,992 hits, 0 dry, in every cell | 1,992 hits, 0 dry, in every cell |
+
+Read:
+- At this code the limit makes no difference to part 19, on or off.
+- The difference from 2caebe2's in-process run is the tree. That run's load (6-16) was close to these, and its part
+  19 p99 with parked procs on was 351-761 us; here it's 175-291. 1e5e956 also ran under heavier load (43-53).
+- What differs between those trees and this one is in the commits since: goal 6's lever (4), the masked directories
+  cloned from the node's one empty tmpfs, and b5681e6's one tmpfs for the node's life. The run doesn't single out which
+  one counts.
+- So the bar is met in process as well as over the socket, for the node as it ships and at the container's default
+  alike.
 
 The run of record is still the 7.2 host's, after Ada's upgrade (`mntns_record.sh host`, with parked procs and the
 faster mount way as defaults). What follows is the record as it stood before the socket A/B.
