@@ -631,11 +631,11 @@ mod os {
         let t = Instant::now();
         let mut touched = vec![0u8; super::bench::BOUND as usize];
         let mut x = 0x9e37_79b9_7f4a_7c15u64;
-        for word in touched.chunks_exact_mut(size_of::<u64>()) {
+        for word in touched.as_chunks_mut::<{ size_of::<u64>() }>().0 {
             x ^= x << 13;
             x ^= x >> 7;
             x ^= x << 17;
-            word.copy_from_slice(&x.to_le_bytes());
+            *word = x.to_le_bytes();
         }
         std::hint::black_box(&touched);
         let bytes = (super::bench::BOUND as f64 / t.elapsed().as_secs_f64()) as u64;
