@@ -364,3 +364,38 @@ fn the_bound_is_decision_4s() {
     let design = std::fs::read_to_string(design).unwrap();
     assert!(design.contains(&format!("The pool holds at most **{BOUND}**")));
 }
+
+/// Ada's rule, 2026-11-06 (AC-T7.1.3; goal 5 extended step 4's IPC_UTS_BOUND, a picked 32): a pool made ahead learns
+/// its size from its draws. Do: a pool starting at 2 of at most 10, filled, then five takes with no make between.
+/// Expect: two pooled and three made on the path, the size raised to the five drawn plus a take for each of the
+/// three short, 8; filled again, eight takes are all pooled, none made on the path. The size never falls, and stops
+/// at its bound.
+#[test]
+fn a_pool_made_ahead_learns_the_deepest_draw_and_never_runs_short_at_it_again() {
+    let mut pool = Pool::learning(2, 10);
+    assert_eq!(pool.wanted(), 2);
+    let mut n = 0;
+    let mut fill = |pool: &mut Pool<u32>| {
+        while pool.wanted() > 0 {
+            n += 1;
+            pool.made(n).unwrap();
+        }
+    };
+    fill(&mut pool);
+    let dry = (0..5)
+        .filter(|_| pool.take() == Ok(Take::MakeOnPath))
+        .count();
+    assert_eq!(dry, 3);
+    assert_eq!(pool.bound(), 8);
+    fill(&mut pool);
+    assert_eq!(pool.held(), 8);
+    for _ in 0..8 {
+        assert!(matches!(pool.take(), Ok(Take::Pooled(_))));
+    }
+    assert_eq!(pool.counts().made_on_path, 3, "no cold take once learned");
+    fill(&mut pool);
+    for _ in 0..30 {
+        let _ = pool.take();
+    }
+    assert_eq!(pool.bound(), 10, "held at its bound");
+}
