@@ -6,6 +6,7 @@
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use hex_api::Refusal;
@@ -49,25 +50,36 @@ impl Duplex for ShardsStream {
     }
 }
 
-/// A guest's ports, each dial a `connect` within `patience`: Shards' client retries a guest that
-/// isn't listening yet until then, so the first dial is also the wait for the guest to be ready.
+/// A guest's ports. Until a dial has connected, a dial waits on the facts alone: Shards' client retries
+/// a guest that isn't listening yet until it listens or ends (`Duration::MAX`), so the first dial is the
+/// wait for the guest to be ready, its boot however long it takes. Once one has, the guest's relay
+/// listens, so each later dial is one try (`Duration::ZERO`): a refusal then is the relay's end.
 pub struct ShardsLink {
     guest: Arc<dyn shards_api::Guest>,
-    patience: Duration,
+    listened: AtomicBool,
 }
 
 impl ShardsLink {
-    pub fn new(guest: Arc<dyn shards_api::Guest>, patience: Duration) -> Self {
-        Self { guest, patience }
+    pub fn new(guest: Arc<dyn shards_api::Guest>) -> Self {
+        Self {
+            guest,
+            listened: AtomicBool::new(false),
+        }
     }
 }
 
 impl Link for ShardsLink {
     fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+        let patience = if self.listened.load(Ordering::Acquire) {
+            Duration::ZERO
+        } else {
+            Duration::MAX
+        };
         let stream = self
             .guest
-            .connect(port, self.patience)
+            .connect(port, patience)
             .map_err(|why| refusal("connecting to the guest", &why))?;
+        self.listened.store(true, Ordering::Release);
         Ok(Box::new(ShardsStream(stream)))
     }
 }

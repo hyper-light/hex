@@ -317,8 +317,8 @@ fn leave_rootfs() -> Result<(), String> {
     let quiet = MountFlags::NOSUID | MountFlags::NOEXEC | MountFlags::NODEV;
     std::fs::create_dir_all("/proc").map_err(|e| format!("making /proc: {e}"))?;
     mount("proc", "/proc", "proc", quiet, None).map_err(|e| format!("mounting /proc: {e}"))?;
-    let root = std::fs::File::open("/proc/self/mountinfo")
-        .and_then(|f| root_fs(io::BufReader::new(f)));
+    let root =
+        std::fs::File::open("/proc/self/mountinfo").and_then(|f| root_fs(io::BufReader::new(f)));
     unmount("/proc", UnmountFlags::empty()).map_err(|e| format!("unmounting /proc: {e}"))?;
     let root = root.map_err(|e| format!("reading /proc/self/mountinfo: {e}"))?;
     if root.as_deref() != Some("rootfs") {

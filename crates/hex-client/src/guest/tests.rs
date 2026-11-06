@@ -174,10 +174,7 @@ fn an_execs_stdio_rides_named_connections_and_its_end_comes_back() {
     let mut out = String::new();
     out_r.read_to_string(&mut out).unwrap();
     assert_eq!(out, "hello through the guest\n");
-    assert_eq!(
-        proc.wait_for(Duration::MAX).unwrap(),
-        Some(Exit::Code(0))
-    );
+    assert_eq!(proc.wait_for(Duration::MAX).unwrap(), Some(Exit::Code(0)));
     drop(proc);
     let _ = client.inspect(&BoxId::new("b").unwrap());
     agent.join().unwrap();
@@ -347,5 +344,88 @@ fn a_stdio_connection_waits_on_its_program_as_a_local_pipe_does() {
     assert!(
         bounds.contains(&(stream::CONTROL_PORT, Some(ANSWER_PATIENCE))),
         "{bounds:?}"
+    );
+}
+
+/// A stream over loopback, as Shards' is over its device.
+struct Looped(TcpStream);
+
+impl Read for Looped {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl Write for Looped {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+impl shards_api::Stream for Looped {
+    fn try_clone(&self) -> std::io::Result<Box<dyn shards_api::Stream>> {
+        Ok(Box::new(Looped(self.0.try_clone()?)))
+    }
+
+    fn shutdown(&self, how: Shutdown) -> std::io::Result<()> {
+        self.0.shutdown(how)
+    }
+
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.0.set_read_timeout(timeout)
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.0.set_write_timeout(timeout)
+    }
+}
+
+/// A guest that records the patience each dial is given and answers every one on loopback.
+struct Patient {
+    listener: TcpListener,
+    given: std::sync::Mutex<Vec<Duration>>,
+}
+
+impl shards_api::Guest for Patient {
+    fn connect(
+        &self,
+        _port: u32,
+        patience: Duration,
+    ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        self.given.lock().unwrap().push(patience);
+        let conn = TcpStream::connect(self.listener.local_addr().unwrap()).unwrap();
+        Ok(Box::new(Looped(conn)))
+    }
+
+    fn stop(&self) -> Result<(), shards_api::Refusal> {
+        Ok(())
+    }
+
+    fn wait_for(&self, _: Duration) -> Result<Option<shards_api::End>, shards_api::Refusal> {
+        Ok(None)
+    }
+}
+
+/// HEX-GUEST-33 (§2, CLAUDE.md §4): dial a booted guest three times: expect the first dial to wait on
+/// the facts alone, the guest listening or ending (`Duration::MAX`, Shards' "until it connects or the
+/// guest ends"), and each later one a single try (`Duration::ZERO`), as the guest's relay already
+/// listens and a refusal then is its end, not its boot.
+#[test]
+fn the_first_dial_waits_for_the_guest_and_later_ones_try_once() {
+    let guest = Arc::new(Patient {
+        listener: TcpListener::bind("127.0.0.1:0").unwrap(),
+        given: std::sync::Mutex::new(Vec::new()),
+    });
+    let link = shards::ShardsLink::new(guest.clone());
+    for port in [stream::CONTROL_PORT, stream::STDIO_PORT, stream::STDIO_PORT] {
+        link.dial(port).unwrap();
+    }
+    assert_eq!(
+        *guest.given.lock().unwrap(),
+        [Duration::MAX, Duration::ZERO, Duration::ZERO]
     );
 }

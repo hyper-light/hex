@@ -17,7 +17,6 @@ use hex_api::{
     BoxId, BoxInfo, BoxSpec, Class, ClassSpec, Proc, Program, Refusal, Runtime, Signal, Stdio,
     Usage,
 };
-use hex_client::ANSWER_PATIENCE;
 use hex_client::guest::shards::{ShardsLink, refusal};
 use hex_client::guest::stage::{self, Item};
 use hex_client::guest::{Client, Link};
@@ -163,8 +162,6 @@ struct Booted {
 pub struct GuestRuntime {
     guests: Arc<dyn shards_api::Guests>,
     config: GuestConfig,
-    /// How long a dial waits for the guest's port: its boot, the first time.
-    patience: Duration,
     booted: Mutex<Option<Arc<Booted>>>,
 }
 
@@ -173,13 +170,12 @@ fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
 }
 
 impl GuestRuntime {
-    /// The class over `guests`, booting `config`'s guest when first asked. Each dial waits at most the
-    /// client's answer patience ([`ANSWER_PATIENCE`]), the boot included.
+    /// The class over `guests`, booting `config`'s guest when first asked. Its first dial waits for the
+    /// guest to listen or end, however long its boot takes ([`ShardsLink`]).
     pub fn new(guests: Arc<dyn shards_api::Guests>, config: GuestConfig) -> Self {
         Self {
             guests,
             config,
-            patience: ANSWER_PATIENCE,
             booted: Mutex::new(None),
         }
     }
@@ -206,7 +202,7 @@ impl GuestRuntime {
             .boot(&self.config.spec())
             .map_err(|why| refusal("booting the node's guest", &why))?
             .into();
-        let link: Arc<dyn Link> = Arc::new(ShardsLink::new(Arc::clone(&guest), self.patience));
+        let link: Arc<dyn Link> = Arc::new(ShardsLink::new(Arc::clone(&guest)));
         let client = match Client::connect(Arc::clone(&link)) {
             Ok(client) => client,
             Err(why) => {

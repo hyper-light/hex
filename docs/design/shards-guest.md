@@ -436,6 +436,14 @@ Hex's tests of the channel, each citing its ID:
 - HEX-GUEST-20: the OCI runtime-spec validation in the guest (§6a): the host's node boots the guest, makes the lab
   and runs `inside.sh` in it through the seam; each test's result matches the Linux record's
   (`crates/hex-cli/tests/guest_validation.rs`, run where its inputs are set, skipped elsewhere).
+- HEX-GUEST-30: §3a's tables are the code's: each port, the token and prefix widths, and the stdio name's
+  fields summing to `NAME_BYTES` (`hex_core::stream`'s tests, a doc-truth test).
+- HEX-GUEST-31: init reads mountinfo to its end, a line at a time, so a root listed past any fixed cut is still
+  the one read (`hex guest`).
+- HEX-GUEST-32: an exec's stdio connections carry no send bound, as a local exec's stdin is the caller's own
+  pipe; only the control connection is bounded, as the local client's socket is (`hex_client::guest`).
+- HEX-GUEST-33: the first dial to a booted guest waits on the facts, its listening or its end, however long the
+  boot; each later dial is one try (`hex_client::guest::shards::ShardsLink`).
 
 ## 7. What would falsify it
 
