@@ -431,7 +431,7 @@ impl Seeds {
         };
         bump(&mut self.counts.done);
         // An answer the shell waited for and got: a sample of the hang bound (RFC 6298 (2.2), (2.3)).
-        let _ = since;
+        self.hang.answered(now.saturating_sub(since));
         Ok(self.free(seed, now, true))
     }
 
@@ -482,6 +482,7 @@ impl Seeds {
                 })?;
         self.slots.get_mut(seed.slot)?.holds = Holds::Nothing;
         // The create it served had no answer within the bound: the next seed's bound backs off (RFC 6298 (5.5)).
+        self.hang.expired();
         let refused = Refused::Hung {
             seed,
             hang: until.saturating_sub(since),
@@ -552,6 +553,7 @@ impl Seeds {
     fn free(&mut self, seed: SeedId, now: Duration, served: bool) -> Option<Ticket> {
         while let Some((ticket, (since, until))) = self.line.pop_first() {
             if now < until {
+                self.wait.answered(now.saturating_sub(since));
                 self.hand(seed, now, Some(ticket));
                 self.answered.insert(ticket, Ok(seed));
                 return Some(ticket);
@@ -587,6 +589,7 @@ impl Seeds {
     /// (RFC 6298 (5.5)).
     fn waited_out(&mut self, since: Duration, until: Duration) -> Refused {
         bump(&mut self.counts.refused_waited);
+        self.wait.expired();
         Refused::Waited {
             wait: until.saturating_sub(since),
         }
