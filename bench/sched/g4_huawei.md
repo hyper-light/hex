@@ -149,3 +149,56 @@ and plain DRF's numbers are the same. Under submit order the four owners are all
 only an instant, as the VMs alive at the day's start arrive together and fill the cluster in VM order
 before some owners have anything left waiting; so FIFO misses the bar with almost nothing measured.
 Measured 2026-11-06 on fedora (unit `hex-sched-g4-test-20261106T124405Z`).
+
+**Every Packing 2020 day.** `azure_trace.py --day D` converts each of the 14 days with every other rule
+unchanged; they all take the same four tenants and the same 431 hosts, whose VMs live the whole trace
+(their asks are the same each day: 144.5, 116.3, 116.3, 107.8 hosts). Measured 2026-11-06 on
+adas-mac-studio-2 (hex-sim is deterministic; run r48), through `HEX_SIM_AZURE_DAYS`:
+
+| day | their starts and ends | Hex | plain DRF | FIFO | contended (Hex = DRF / FIFO) |
+|---:|---:|---:|---:|---:|---|
+| 0 | 0 | 166 ppm | 166 | 750,000 | 24.0 h / 0.000 h |
+| 1 | 44 | 166 | 166 | 750,000 | 24.0 h / 0.000 h |
+| 2 | 20 | 131 | 131 | 750,000 | 24.0 h / 0.000 h |
+| 3 | 0 | 146 | 146 | 750,000 | 24.0 h / 0.000 h |
+| 4 | 8 | 138 | 138 | 750,000 | 24.0 h / 0.000 h |
+| 5 | 8 | 166 | 166 | 750,000 | 24.0 h / 0.000 h |
+| 6 | 36 | 160 | 160 | 750,000 | 24.0 h / 0.000 h |
+| 7 | 12 | 129 | 129 | 750,000 | 24.0 h / 0.000 h |
+| 8 | 32 | 166 | 166 | 750,000 | 24.0 h / 0.000 h |
+| 9 | 0 | 166 | 166 | 750,000 | 24.0 h / 0.000 h |
+| 10 | 0 | 166 | 166 | 750,000 | 24.0 h / 0.000 h |
+| 11 | 28 | 166 | 166 | 750,000 | 24.0 h / 0.000 h |
+| 12 | 0 | 166 | 166 | 750,000 | 24.0 h / 0.000 h |
+| 13 | 8 | 166 | 166 | 750,000 | 24.0 h / 0.000 h |
+
+Hex's policy holds on every day, but no Packing day can make the test fail: under FIFO the four are
+never all waiting at once, so its miss measures nothing.
+
+## A churning day: Azure's VM trace 2019, day 2
+
+`bench/sched/azure_vm_trace.py` converts the VM trace 2019 by rules fixed before replay (its
+docstring): an m5d.metal host; each VM's size its buckets' labels (their upper bounds), a VM in an
+open bucket (">24" cores, ">64" GiB) left out with its owner; the four subscriptions asking most over
+the 30 days whose every VM is at most a quarter of a host; the day of most starts and ends of their VMs
+inside the trace; the largest whole number of hosts at which each asks for more than a quarter; kinds
+by G2's rule, with overheads. A first version counted creations at the trace's first second as
+starts, and picked day 0 (6,805 "starts and ends", nearly all VMs already running when the trace
+began); the rule now counts only starts and ends inside the trace, and picks day 2 (286). Both were
+measured: day 0 gave Hex 1 ppm over 6.25 contended hours, FIFO 146,710 ppm over 24.0 h.
+
+`azure-vm2019-day2.trace` (raw vmtable sha256 `e8c9a0ab…de3e5`; trace sha256 `4b35313f…ddaef`): 6,931
+VMs of four subscriptions on 355 hosts; their asks that day 188.0, 94.8, 104.8 and 88.8 hosts; owner 0
+Shards microVMs, owner 1 Firecracker microVMs, owner 2 OCI containers, owner 3 Shards microVMs.
+Measured by `crates/hex-sim/tests/azure.rs` (2026-11-06, adas-mac-studio-2):
+
+| policy | contended | parts of the held share (owners 0-3) | worst from 25% | bar (5,000 ppm) |
+|---|---|---|---:|---|
+| Hex: bands, weighted DRF, preemption | 19.4 h, 2 stretches | 25.02%, 25.00%, 24.99%, 24.99% | 234 ppm | met |
+| plain DRF | the same | the same | 234 ppm | met |
+| submit order (FIFO) | 24.0 h, one stretch | 39.95%, 20.20%, 20.97%, 18.88% | 149,530 ppm | missed |
+
+**Reading.** On a recorded day of churning VMs, Hex's policy holds each owner within 234 ppm of a
+quarter while FIFO misses by 15 percentage points over a whole day of contention: the test can fail,
+and on this day it fails for FIFO. Plain DRF matches Hex's policy, as expected: preemption is for
+work over its share that a lower-share owner needs (F4), and DRF's order alone keeps these four level.

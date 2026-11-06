@@ -27,9 +27,12 @@ The rules, applied in this order and each fixed before any replay (bench/sched/g
     owner with the most requests first, each to the kind with the fewest so far, ties OCI, then
     Firecracker, then Shards; each request's memory counts its kind's overhead, as G2's traces do.
 
-  azure_trace.py PACKING_ZIP OUT
+  azure_trace.py PACKING_ZIP OUT [--day D]
+
+With --day, that day is converted in place of the day of most churn; every other rule is the same.
 """
 
+import argparse
 import collections
 import hashlib
 import sqlite3
@@ -48,7 +51,7 @@ OVERHEAD = {"oci": 440_402, "firecracker": 5 * MIB, "shards": 5 * MIB}
 CAP_DAYS = 90.0
 
 
-def main(zip_path, out):
+def main(zip_path, out, only_day=None):
     h = hashlib.sha256()
     with open(zip_path, "rb") as fh:
         for block in iter(lambda: fh.read(1 << 20), b""):
@@ -105,7 +108,7 @@ def main(zip_path, out):
             for t in (start, end):
                 if t is not None and 0 <= t < 14:
                     churn[int(t)] += 1
-    day = max(range(14), key=lambda d: (churn[d], -d))
+    day = max(range(14), key=lambda d: (churn[d], -d)) if only_day is None else only_day
     ask = ask_on(day, set(four))
     fourth = min(ask[t] for t in four)
     hosts = int(4 * fourth) - (1 if 4 * fourth == int(4 * fourth) else 0)
@@ -140,7 +143,7 @@ def main(zip_path, out):
         "m5d.metal (48 cores, 384 GiB); requests of other VM types left out: " + str(left_out),
         f"# owners: tenants {four}, the four asking most over the 14 days whose every request is at most "
         "a quarter of a host, each of weight 1, in that order",
-        f"# day: {day} (most starts and ends of the four owners' requests: {churn[day]}); their asks that "
+        f"# day: {day} ({'most' if only_day is None else 'given; its'} starts and ends of the four owners' requests: {churn[day]}); their asks that "
         "day in hosts: " + ", ".join(f"{ask[t]:.2f}" for t in four),
         f"# hosts: {hosts}, the largest whole number at which each of the four asks for more than a quarter",
         f"# requests: {len(legs)}; kinds by owner (G2's rule): " + ", ".join(f"owner {o} {kind[o]}" for o in sorted(kind)),
@@ -159,4 +162,9 @@ def main(zip_path, out):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1], sys.argv[2]))
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("zip")
+    ap.add_argument("out")
+    ap.add_argument("--day", type=int, choices=range(14))
+    a = ap.parse_args()
+    sys.exit(main(a.zip, a.out, a.day))
