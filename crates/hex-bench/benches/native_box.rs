@@ -616,8 +616,9 @@ mod os {
     /// How fast a member can grow on this Mac, measured at bench start (the runtime's pacing rates,
     /// CLAUDE.md §5): bytes a second, from taking one box's bound in this process and filling every byte
     /// with an incompressible stream, as the bench's climbing program does; processes a second, from
-    /// spawning and reaping `n` programs one after another.
-    fn growth_rates(hex: &Path, n: usize) -> (NonZeroU64, NonZeroU64) {
+    /// spawning and reaping `n` of the smallest program, `true`, one after another (a member's own spawn
+    /// rate, not its program's start-up).
+    fn growth_rates(n: usize) -> (NonZeroU64, NonZeroU64) {
         let t = Instant::now();
         let mut touched = vec![0u8; super::bench::BOUND as usize];
         let mut x = 0x9e37_79b9_7f4a_7c15u64;
@@ -632,8 +633,8 @@ mod os {
         drop(touched);
         let t = Instant::now();
         for _ in 0..n {
-            Command::new(hex)
-                .args(["selftest-box", "fail", "0"])
+            Command::new("true")
+                .stdout(std::process::Stdio::null())
                 .status()
                 .expect("spawn a program");
         }
@@ -647,13 +648,13 @@ mod os {
     pub fn run(
         driver: &str,
         args: &[String],
-        hex: &Path,
+        _hex: &Path,
         go: impl FnOnce(&mut dyn Driver) -> Value,
     ) -> Option<Value> {
         match driver {
             "hex" => {
                 let n: usize = args[2].parse().expect("n");
-                let (bytes, procs) = growth_rates(hex, n);
+                let (bytes, procs) = growth_rates(n);
                 let mut v = go(&mut Hex {
                     rt: MacRuntime::new(bytes, procs).expect("a macOS runtime"),
                     prefix: "native".to_owned(),

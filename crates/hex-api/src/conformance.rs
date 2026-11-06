@@ -74,7 +74,7 @@ pub struct Failure {
 
 /// The slowest end recorded across every driver and OS of the native bench, from a program's start to
 /// its reported end: Process Governor's 6,239 ms on jupiter (bench/native/RESULT.md, Windows, pass 1).
-const SLOWEST_RECORDED_END: Duration = Duration::from_millis(6_239);
+pub const SLOWEST_RECORDED_END: Duration = Duration::from_millis(6_239);
 /// Longest a case waits for a program it expects to end: a bound on a wait for a fact, so a runtime that
 /// never reports an end fails the case instead of hanging the suite. Twice [`SLOWEST_RECORDED_END`]: the
 /// x2 is the false-alarm margin, so a run as slow as the slowest on record still passes.

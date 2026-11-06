@@ -276,24 +276,13 @@ fn a_programs_end_is_seen_when_it_ends_not_at_the_waits_budget() {
     })
     .expect("create");
     const RUNS: usize = 60;
-    // The end-seen latency on this Mac, measured here: the slowest of RUNS quick programs from exec to
-    // their reported end, an upper bound on kqueue's NOTE_EXIT latency (it includes the spawn).
-    let mut seen = Duration::ZERO;
-    for _ in 0..RUNS {
-        let t = Instant::now();
-        let mut p = rt
-            .exec(&id, fx.act(&Act::Fail(0)), Stdio::null())
-            .expect("exec a quick program");
-        p.wait_for(hex_api::conformance::PATIENCE)
-            .expect("wait")
-            .expect("the quick program ends");
-        seen = seen.max(t.elapsed());
-    }
-    // Late: past the recorded end maximum of a program killed at this bound (59.6 ms, bench/native/RESULT.md,
-    // macOS at b1ddb89) plus that latency, twice over (the false-alarm margin). The budget is twice late
-    // again, so a wait that sleeps out its budget (the bug) always reads late.
-    let late_after = (Duration::from_micros(59_600) + seen) * 2;
-    let budget = late_after * 2;
+    // A missed exit event makes the wait sleep out its whole budget. Late is past the slowest end on record
+    // across every host and OS (conformance's SLOWEST_RECORDED_END); the budget is conformance's PATIENCE,
+    // twice that, so a legitimate end is never late and a missed one always is. (One host's end maximum
+    // doesn't carry: 59.6 ms on adas-mac-studio-2 at load 2-5 was 550-770 ms on adalundhe-macbook-pro at
+    // load 21, 2026-11-06.)
+    let late_after = hex_api::conformance::SLOWEST_RECORDED_END;
+    let budget = hex_api::conformance::PATIENCE;
     let mut late = Vec::new();
     for i in 0..RUNS {
         let mut p = rt
