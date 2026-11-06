@@ -79,6 +79,8 @@ pub struct Runtime {
     /// subcommands. A library caller whose binary doesn't — the node agent linked into another
     /// program, the bench — names the `hex` binary explicitly ([`Runtime::with_helper`]).
     helper: Option<PathBuf>,
+    /// What a create does with a label whose module the host's kernel doesn't run ([`Runtime::with_lsm`]).
+    lsm: super::lsm::Policy,
 }
 
 /// One container's create as its shim is started: its id, bundle, state directory and the pid file
@@ -399,7 +401,18 @@ pub trait Choose {
 
 impl Runtime {
     pub fn new(root: PathBuf) -> Self {
-        Self { root, helper: None }
+        Self {
+            root,
+            helper: None,
+            lsm: super::lsm::Policy::default(),
+        }
+    }
+
+    /// The runtime with `policy` for a label whose module the host's kernel doesn't run: the command line's
+    /// and a node's owner choose it by [`super::lsm::ENV_POLICY`].
+    pub fn with_lsm(mut self, policy: super::lsm::Policy) -> Self {
+        self.lsm = policy;
+        self
     }
 
     /// The runtime with its container init and exec helper re-exec'd from `helper` (the `hex`
@@ -409,6 +422,7 @@ impl Runtime {
         Self {
             root,
             helper: Some(helper),
+            lsm: super::lsm::Policy::default(),
         }
     }
 
@@ -586,15 +600,13 @@ impl Runtime {
         let config = std::fs::read(bundle.join("config.json"))
             .map_err(|e| OciError::os("reading config.json", e))?;
         let spec = Spec::parse(&config)?;
-        // A label or profile the host can't apply is refused here, before anything is made (CLAUDE.md §3).
-        if let Some(label) = spec.mount_label() {
-            super::lsm::check_mount_label(label)?;
+        // A label the host's kernel runs the module for and can't apply is refused here, before anything is
+        // made; one whose module it doesn't run is skipped with a warning, or refused under strict (lsm::admit).
+        let mut err = std::io::stderr().lock();
+        for warning in super::lsm::admit(&spec, self.lsm)? {
+            let _ = writeln!(err, "hex: warning: {warning}");
         }
-        if let Some(process) = &spec.process
-            && let Some(profile) = process.apparmor_profile()
-        {
-            super::lsm::ProfileOnExec::of(profile, process.no_new_privileges)?;
-        }
+        drop(err);
         // A labelled container takes nothing the node made ahead, which it made unlabelled: its init makes
         // its own /dev, proc masks and masked-directory tmpfs, each with the label.
         let dev_mounts = match dev_mounts {

@@ -43,7 +43,12 @@ fn run(args: &[String]) -> Result<String, OciError> {
     match verb.as_str() {
         "create" => {
             let (id, bundle, pid_file) = parse_create(rest)?;
-            rt.create(&id, &bundle, pid_file.as_deref())?;
+            // What a label whose module the host's kernel doesn't run does: its owner's word, else skipped
+            // with a warning (lsm::ENV_POLICY).
+            let policy = hex_runtime::linux::oci::lsm::Policy::from_env()?;
+            Runtime::new(Runtime::default_root())
+                .with_lsm(policy)
+                .create(&id, &bundle, pid_file.as_deref())?;
             Ok(String::new())
         }
         "start" => {

@@ -164,6 +164,8 @@ pub struct Node {
     /// [`hex_runtime::linux::oci::mntns::ENV_WAY`]'s words ([`Node::with_mount_namespace`]); `None` takes
     /// the node's default (decision 6's update).
     mount_namespace: Option<String>,
+    /// What a create does with a label whose module the host's kernel doesn't run ([`Node::with_lsm`]).
+    lsm: hex_runtime::linux::oci::lsm::Policy,
     /// The network namespaces the node makes ahead for its containers, and what it counts of every
     /// container's (decision 4; [`Node::netns`]).
     netns: Netns,
@@ -271,6 +273,7 @@ impl Node {
             #[cfg(debug_assertions)]
             inject: None,
             mount_namespace: None,
+            lsm: hex_runtime::linux::oci::lsm::Policy::default(),
             specs: Mutex::new(Specs::default()),
             netns,
             devfs: Devfs::start(
@@ -367,6 +370,14 @@ impl Node {
     /// refused by type at its first create.
     pub fn with_mount_namespace(mut self, way: &str) -> Self {
         self.mount_namespace = Some(way.to_owned());
+        self
+    }
+
+    /// The policy for a label whose module the host's kernel doesn't run: skipped with a warning (the
+    /// default), or refused by name ([`hex_runtime::linux::oci::lsm::Policy::Strict`]), the words of
+    /// [`hex_runtime::linux::oci::lsm::ENV_POLICY`].
+    pub fn with_lsm(mut self, policy: hex_runtime::linux::oci::lsm::Policy) -> Self {
+        self.lsm = policy;
         self
     }
 
@@ -509,6 +520,7 @@ impl Node {
             Some(exe) => OciRuntime::with_helper(root, exe.clone()),
             None => OciRuntime::new(root),
         }
+        .with_lsm(self.lsm)
     }
 
     /// Where `record`'s box keeps its container's state, as the record names it: the runtime over the
