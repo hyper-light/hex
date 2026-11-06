@@ -21,9 +21,12 @@
 //! probe schedule: one probe a protocol period, each round a fresh shuffled permutation of the other
 //! members, so every member is probed once a round (its detector's `RandomizedOrder`, SWIM §4.3).
 //! Each probe moves the prober by its sample against the peer's coordinate as it stood. Rounds run
-//! until the median relative error over every pair stops falling from one round to the next
-//! ([`Coordinates::history`] holds it after each), so no round count is chosen; [`MAX_ROUNDS`] only
-//! bounds it. A seed names the result.
+//! with scale-free patience (the lead, 2026-11-06): the lowest median relative error over every pair
+//! so far is tracked, and the convergence stops once as many rounds have passed without a new low as
+//! it took to reach that low (best at round 4, stop at round 8 if nothing lower), so a noisy uptick
+//! doesn't stop it and no round count is chosen ([`Coordinates::history`] holds the error after each
+//! round; [`MAX_ROUNDS`] only bounds it). The coordinates held are the lowest round's, as patience
+//! keeps its best. A seed names the result.
 
 use std::time::Duration;
 
@@ -77,8 +80,8 @@ pub const CENSUS_NODE_ROWS: usize = 50;
 /// The most nodes a WAN holds, by the input-bound rule.
 pub const MAX_NODES: usize = CENSUS_NODE_ROWS * INPUT_MARGIN;
 /// The census's longest convergence: the most rounds any convergence of the record and its
-/// sensitivity runs took before its median error stopped falling, 22 (`bench/sched/proximity.md`).
-pub const CENSUS_ROUNDS: usize = 22;
+/// sensitivity runs took before patience stopped it, 6,350 (`bench/sched/proximity.md`).
+pub const CENSUS_ROUNDS: usize = 6_350;
 /// The most rounds a convergence runs, by the input-bound rule; past it, a typed refusal.
 pub const MAX_ROUNDS: usize = CENSUS_ROUNDS * INPUT_MARGIN;
 const NS_PER_MS: u64 = 1_000_000;
@@ -237,11 +240,13 @@ fn set(terms: &mut [[u64; ZONES]; ZONES], a: usize, b: usize, term: u64) -> Resu
 /// Every node's coordinate engine after a convergence.
 pub struct Coordinates {
     engines: Vec<CoordinateEngine>,
+    /// The coordinates predictions read: each engine's as it stood at the round with the lowest
+    /// median error.
+    held: Vec<NetworkCoordinate>,
     /// Samples taken (the engine's `update` said so), and offered.
     pub taken: u64,
     pub offered: u64,
-    /// The median relative error over every pair after each round run, the first entry before any:
-    /// it falls each round but the last, which did not.
+    /// The median relative error over every pair after each round run, the first entry before any.
     pub history: Vec<f64>,
 }
 
@@ -253,27 +258,33 @@ impl Coordinates {
             let id = u64::try_from(node).map_err(|_| SimError::Config("node ids"))?;
             engines.push(CoordinateEngine::new(seed ^ id.rotate_left(32)));
         }
+        let held = engines.iter().map(|e| *e.coordinate()).collect();
         Ok(Self {
             engines,
+            held,
             taken: 0,
             offered: 0,
             history: Vec::new(),
         })
     }
 
-    /// Runs hyper-swim's schedule from the origin, round after round, until the median relative
-    /// error over every pair stops falling; refused past [`MAX_ROUNDS`].
+    /// Runs hyper-swim's schedule from the origin, round after round, until as many rounds have
+    /// passed without a new lowest median error as it took to reach the lowest, and holds the
+    /// coordinates of that lowest round; refused past [`MAX_ROUNDS`].
     pub fn converge(wan: &Wan, seed: u64, rng: &mut Rng) -> Result<Self, SimError> {
         let n = wan.len();
         let mut coordinates = Self::fresh(n, seed)?;
-        let Some(mut last) = median_error(wan, &coordinates)? else {
+        let Some(origin) = median_error(wan, &coordinates)? else {
             // No pair is apart: nothing to learn.
             return Ok(coordinates);
         };
-        coordinates.history.push(last);
+        coordinates.history.push(origin);
+        // The lowest median error so far, the round it came at, and the coordinates then.
+        let (mut best_round, mut best) = (0usize, origin);
+        let mut best_held = coordinates.held.clone();
         let probes = n.saturating_sub(1);
         let mut order: Vec<NodeId> = Vec::with_capacity(probes);
-        for _ in 0..MAX_ROUNDS {
+        for round in 1..=MAX_ROUNDS {
             for node in 0..n {
                 let me = node_id(node)?;
                 order.clear();
@@ -283,7 +294,11 @@ impl Coordinates {
                 shuffle(&mut order, rng)?;
                 for &peer in &order {
                     let rtt = Duration::from_nanos(wan.sample_ns(me, peer, rng)?);
-                    let theirs = *coordinates.coordinate(peer)?;
+                    let theirs = *coordinates
+                        .engines
+                        .get(usize::try_from(peer.0).map_err(|_| SimError::UnknownNode(peer))?)
+                        .ok_or(SimError::UnknownNode(peer))?
+                        .coordinate();
                     let engine = coordinates
                         .engines
                         .get_mut(node)
@@ -295,12 +310,22 @@ impl Coordinates {
                     }
                 }
             }
+            for (held, engine) in coordinates.held.iter_mut().zip(&coordinates.engines) {
+                *held = *engine.coordinate();
+            }
             let now = median_error(wan, &coordinates)?.ok_or(SimError::Config("pairs"))?;
             coordinates.history.push(now);
-            if now >= last {
+            if now < best {
+                (best_round, best) = (round, now);
+                best_held.clone_from(&coordinates.held);
+            }
+            let since = round
+                .checked_sub(best_round)
+                .ok_or(SimError::Config("rounds"))?;
+            if since >= best_round {
+                coordinates.held = best_held;
                 return Ok(coordinates);
             }
-            last = now;
         }
         Err(SimError::StepBudget(
             u64::try_from(MAX_ROUNDS).unwrap_or(u64::MAX),
@@ -315,8 +340,7 @@ impl Coordinates {
     pub fn coordinate(&self, node: NodeId) -> Result<&NetworkCoordinate, SimError> {
         usize::try_from(node.0)
             .ok()
-            .and_then(|i| self.engines.get(i))
-            .map(CoordinateEngine::coordinate)
+            .and_then(|i| self.held.get(i))
             .ok_or(SimError::UnknownNode(node))
     }
 
@@ -331,8 +355,7 @@ impl Coordinates {
     /// A hash of every coordinate's bits, in node order.
     pub fn hash(&self) -> u64 {
         let mut h = TraceHash::default();
-        for engine in &self.engines {
-            let c = engine.coordinate();
+        for c in &self.held {
             for x in c.position {
                 h.word(x.to_bits());
             }
@@ -561,8 +584,8 @@ mod tests {
         assert_eq!(a.taken, u64::try_from(a.rounds()).unwrap() * apart * 2);
     }
 
-    /// S4, A2 (G3 step 1): do converge on each node model's WAN; expect the median relative error to
-    /// fall every round but the last, which didn't (the stopping rule), to end no worse than
+    /// S4, A2 (G3 step 1): do converge on each node model's WAN; expect the patience rule to have
+    /// stopped it at twice its best round with nothing lower after the best, the error to end no worse than
     /// Vivaldi's own evaluation over 1,740 Internet hosts, 11% (Dabek et al., SIGCOMM 2004;
     /// `proximity-and-failure-containment.md` §1, PF[1]), and a node's own region predicted nearer
     /// than another region's in more of the trials than chance, which is half.
@@ -571,11 +594,17 @@ mod tests {
         for nodes in [10, CENSUS_NODE_ROWS] {
             let (wan, coordinates) = converged(&record(nodes, 1));
             let h = &coordinates.history;
-            assert!(coordinates.rounds() > 0);
-            for w in h.windows(2).take(h.len() - 2) {
-                assert!(w[1] < w[0], "{nodes}: {h:?}");
-            }
-            assert!(h[h.len() - 1] >= h[h.len() - 2], "{nodes}: {h:?}");
+            let (best_round, best) = h
+                .iter()
+                .enumerate()
+                .min_by(|a, b| a.1.total_cmp(b.1))
+                .unwrap();
+            assert!(best_round > 0, "{nodes}: {h:?}");
+            assert_eq!(coordinates.rounds(), 2 * best_round, "{nodes}: {h:?}");
+            assert!(
+                h[best_round + 1..].iter().all(|e| e >= best),
+                "{nodes}: {h:?}"
+            );
             let accuracy = Accuracy::measure(&wan, &coordinates).unwrap();
             eprintln!(
                 "G3 coordinates {nodes} nodes, {} rounds: {accuracy:?}",
@@ -594,6 +623,35 @@ mod tests {
                 accuracy.region_trials
             );
         }
+    }
+
+    /// S4, A2 (G3 step 1), the stopping rule: do converge the record's AllKinds WAN of seed 15, whose
+    /// median error rises once by noise (25.4% at round 3, 26.4% at round 4); expect the convergence to
+    /// run on past that uptick, by patience: it stops once as many rounds have passed without a new
+    /// low as it took to reach the low, so it ends at twice the best round, with nothing after the
+    /// best lower than it, holding the best round's coordinates, so its error is below the 26.4% the
+    /// first uptick stopped at.
+    #[test]
+    fn patience_runs_past_a_noise_uptick() {
+        let (_, coordinates) = converged(&record(10, 15));
+        let h = &coordinates.history;
+        eprintln!("G3 seed 15: {h:?}");
+        assert!(h.len() > 5 && h[4] > h[3], "the uptick: {h:?}");
+        let (best_round, best) = h
+            .iter()
+            .enumerate()
+            .min_by(|a, b| a.1.total_cmp(b.1))
+            .unwrap();
+        assert!(best < &h[4], "{h:?}");
+        assert_eq!(coordinates.rounds(), 2 * best_round, "{h:?}");
+        assert!(h[best_round + 1..].iter().all(|e| e >= best), "{h:?}");
+        let wan = Wan::generate(&record(10, 15), &mut Rng::new(15)).unwrap();
+        let held = Accuracy::measure(&wan, &coordinates).unwrap();
+        assert_eq!(
+            held.median_relative_error, *best,
+            "the held coordinates are the best round's"
+        );
+        assert!(held.median_relative_error < h[4], "{h:?}");
     }
 
     /// Non-vacuity for the test above: coordinates still at the origin fail both of its bounds.
