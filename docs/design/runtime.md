@@ -639,7 +639,7 @@ Compute Service, as the OCI runtime spec's Windows section defines it. Sources:
   refused, saying the Containers feature is off and Hex's installer turns it on. `classes()` lists `oci` only where
   HCS loads.
 - **Unsafe:** the HCS, storage, virtual-disk, process-handle and version calls sit in one file,
-  `crates/hex-runtime/src/windows/oci/sys.rs`, proposed for CLAUDE.md §12 in a commit of its own, held for Ada.
+  `crates/hex-runtime/src/windows/oci/sys.rs`, named in CLAUDE.md §12 by a commit of its own (c4961c1, which replaced aadbd4e's list), approved by Ada as written on 2026-11-06.
 - **What would falsify it:** a job handed into the silo that doesn't nest, or that the member escapes; the
   launcher being unopenable for `PROCESS_DUP_HANDLE` from the elevated node; the documented storage calls unable to
   make a scratch HCS starts; HCS refusing an image the table allows on jupiter, or starting one it forbids (each a
