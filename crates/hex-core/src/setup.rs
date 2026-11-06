@@ -199,6 +199,22 @@ pub fn features_off(listing: &str) -> Result<BTreeSet<WindowsFeature>, Refusal> 
         .collect())
 }
 
+/// The features' state as `hex setup features` prints it for the Windows installer: one `<name> on|off`
+/// line per feature of [`WindowsFeature::ALL`], in its order, `off` for each in `off`.
+#[must_use]
+pub fn render_features(off: &BTreeSet<WindowsFeature>) -> String {
+    WindowsFeature::ALL
+        .iter()
+        .map(|f| {
+            format!(
+                "{} {}\n",
+                f.name(),
+                if off.contains(f) { "off" } else { "on" }
+            )
+        })
+        .collect()
+}
+
 /// The Windows `oci` class's refusal: the features it needs that are `off`, by name, and that the
 /// installer turns them on; with none off, that the class itself is still to build (`not_built`).
 #[must_use]

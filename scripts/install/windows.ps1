@@ -10,8 +10,10 @@
 # turned off finishes at the reboot Windows asks for).
 #
 # usage: windows.ps1 install -Binary <hex.exe> [-DryRun] [-NoRestart]
-#        windows.ps1 uninstall [-DryRun] [-NoRestart]
-#        windows.ps1 check [<plan file>]
+#        windows.ps1 uninstall [-Binary <hex.exe>] [-DryRun] [-NoRestart]
+#        windows.ps1 check [<plan file>] [-Binary <hex.exe>]
+# The features' state comes from `hex setup features`, the node's own bounded query, run by -Binary, else by
+# the installed %ProgramFiles%\Hex\hex.exe: this script holds no query and no wait of its own.
 # Run from a PowerShell; install and uninstall ask for elevation once (UAC) when not already elevated.
 # -DryRun prints the plan and makes nothing; check lists what of a plan (default: the manifest's, else
 # the fixed paths) is still on the machine and exits 1 when anything is.
@@ -36,10 +38,24 @@ function Die([string]$Why) {
   exit 1
 }
 
-# Whether an optional feature is on, read without elevation (Win32_OptionalFeature, InstallState 1).
+# The hex binary that reads the features: -Binary where given, else the installed one.
+function Get-Hex {
+  if ($Binary) { return (Resolve-Path -LiteralPath $Binary).Path }
+  if (Test-Path -LiteralPath $Bin -PathType Leaf) { return $Bin }
+  Die 'reading the Windows features needs -Binary <hex.exe> (no installed hex.exe to ask)'
+}
+
+# Whether an optional feature is on: `hex setup features`, the node's bounded query (one '<name> on|off'
+# line each), read without elevation.
 function Test-Feature([string]$Name) {
-  $f = Get-CimInstance -ClassName Win32_OptionalFeature -Filter "Name='$Name'"
-  return ($null -ne $f) -and ($f.InstallState -eq 1)
+  $ErrorActionPreference = 'Continue'
+  $said = & (Get-Hex) setup features 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { Die "hex setup features failed (exit $LASTEXITCODE): $said" }
+  foreach ($line in $said -split "`r?`n") {
+    if ($line -eq "$Name on") { return $true }
+    if ($line -eq "$Name off") { return $false }
+  }
+  Die "hex setup features named no state for $Name`: $said"
 }
 
 # The plan: every thing install makes, one "<kind> <target>" line each.
