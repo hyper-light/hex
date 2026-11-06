@@ -382,12 +382,28 @@ root lab 7 of 7 test binaries, in one unit.
 - `HEXBENCH_DRIVER=socket`: each cell's seam_oci starts its own `hex node`, ends it with SIGTERM, and records the
   line of parked procs' counts it says then (`parked_at_exit`), so each cell's counts are its own node's.
 - A: parked procs off (`HEXBENCH_PARKED_PROCS=0`, `hex node --parked-procs off`). B: on (`=1`, the default). Both
-  with parked inits (owner bundles); the socket's node takes its own defaults for the pools and reuse, as
-  `HEXBENCH_DEVFS` and `HEXBENCH_REUSE` set only the in-process node.
+  with parked inits (owner bundles).
+- **The socket node's settings against the bar's in-process runs (g6's review).** They match in each but one:
+  - The `/dev` pool and the proc pool: on. A root node takes `Pools::ROOT` (hex-node `node.rs:261`), whose `devfs` is
+    true (`netns.rs:118-122`), and starts both pools from it (`node.rs:306`, `Devfs::start(pools.devfs, pools.devfs,
+    pools.devfs)`). The in-process runs set them with `HEXBENCH_DEVFS=1` and `HEXBENCH_PROCFS` unset
+    (seam_oci `seam_oci.rs:1302`), both on.
+  - The ipc and uts pool: at its bound, `IPC_UTS_BOUND` (`netns.rs:120`), in both: the in-process runs leave
+    `HEXBENCH_IPCUTS` unset (`seam_oci.rs:1323`).
+  - Reuse: on. It is the owner's, chosen in each box's spec (`HEXBENCH_OWNER` with `HEXBENCH_REUSE=1`,
+    `seam_oci.rs:1249`), which the wire carries to the socket's node (its version 3 owner byte).
+  - Inits ahead: `INITS_AHEAD` (8, `node.rs:120`) in both, `HEXBENCH_AHEAD` unset.
+  - The one difference: `hex node` raises its soft descriptor limit to the hard one as it starts (hex-cli
+    `node.rs:117`, `:256`), so its kept network namespaces hold their `/proc/net` files (its log: at most 48,300 of
+    them, the soft limit 524,288), where an in-process node at the cell container's given 1,024 holds none and each
+    check enters the namespace instead, counted. That changes how a kept namespace is checked, not part 19.
 - The under-load bar's conditions, as above: the mounts trace of part 19, 2,000 creates at 8 in flight, 8,000 idle
   threads, Docker's paths, 6 or 12 busy loops on CPUs 4-15 at nice 0. No priority change for Hex.
-- 4 rounds, A then B in odd rounds, B then A in even. Load at start 6.47, 646 a minute later (the 12 loops and the
-  host's other tenants), 169 at the end. Noisy host, as run.
+- 4 rounds, A then B in odd rounds, B then A in even. Noisy host, as run. The 1-minute load at each cell's start
+  (`context.txt`): A-L6-r1 6.47, B-L6-r1 5.68; then the peak, A-L12-r1 646, B-L12-r1 547, B-L6-r2 464, A-L6-r2 393,
+  B-L12-r2 333, A-L12-r2 306; round 3 382, 324, 275, 233; round 4 198, 182, 142, 199; 169 at the end. So the first
+  round's L12 pair ran inside the peak, A first then B, and round 2's cells on its fall, both arms alike: no arm was
+  spared it. Part 19's and the create's figures in those cells sit inside their arm's range in the table.
 
 | cell | part 19 p50/p99 (µs) | create p50/p99 (ms) | delete p50/p99 (ms) | made, hits, misses, dry, capped, alive |
 |---|---|---|---|---|
