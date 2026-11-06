@@ -56,6 +56,11 @@
 # capabilities, libcrun's alike, since a box that keeps all of root's never shares a cgroup).
 set -uo pipefail
 SUSTAINED=${SUSTAINED:-5000}; MODE=${MODE:-offcpu}
+# The profiles' sampling rates: the checker's, devfs's and oncpu's, and threads'. Each program says its rate in its
+# output (@profile_hz), which create_serial.py reads, so the rate is stated here alone. Odd rates off the timer tick's
+# 1000 Hz, so the samples don't fall in step with the tick's own work: a convention (bpftrace's and perf's examples
+# sample at 99, 999 or 4999 Hz for it), not a measure.
+PROFILE_HZ=4999; THREADS_HZ=999
 # The soft descriptor limit everything here runs with (HEXBENCH_NOFILE): `hard` for the hard limit the container was
 # given, as Hex's installer sets a node's (the lead, 2026-11-04), a number for that, unset for the container's own
 # (dockerd's 1024), at which a Hex node holds no /proc/net files. Said here and in nofile.txt.
@@ -144,7 +149,8 @@ tracepoint:raw_syscalls:sys_exit
 		delete(@n[(uint64)curtask->pid]);
 	}
 }
-profile:hz:4999
+BEGIN { @profile_hz = $PROFILE_HZ; }
+profile:hz:$PROFILE_HZ
 {
 	\$c = comm;
 	if ($f) {
@@ -163,7 +169,8 @@ threads(){ # threads <filter on a comm value $c>: each of the filter's threads' 
   # outside the probe container's (as checker()'s keys say).
   local f=$1 lo=${CPUSET%%-*} hi=${CPUSET##*-}
   cat <<BT
-profile:hz:999
+BEGIN { @profile_hz = $THREADS_HZ; }
+profile:hz:$THREADS_HZ
 {
 	\$c = comm;
 	if ($f) { @thread[comm] = count(); @ours = count(); }

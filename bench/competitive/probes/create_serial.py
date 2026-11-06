@@ -23,7 +23,7 @@ ms buckets in which the runtime made or removed at least half the median bucket'
 
 A MODE=checker run (and MODE=devfs, the same for the /dev pool's thread, per /dev made), each figure per namespace checked (its out.<label>.json's netns_reuse.checked, which stands in
 for <lifecycles>): the checker threads' system calls (@sys[number]: stats), their futex waits for the next namespace
-left out of the sum, and their on-CPU profile at 4999 Hz (@samples), by the system call each sample fell in or user
+left out of the sum, and their on-CPU profile at the rate the run says (@profile_hz; @samples), by the system call each sample fell in or user
 mode (@on_sys[number], @on_user: count) and by the kernel work its stack names (@cpu[kstack, ustack]: count), and
 the samples allocating netlink's answers.
 
@@ -32,7 +32,7 @@ exec), each figure per lifecycle: their system calls by number, their on-CPU sam
 and by kernel stack, and the samples spinning on a lock (an MCS or queued spinlock, a mutex's or an rwsem's optimistic
 spin) by the stack above the spin.
 
-A MODE=threads run, each figure per lifecycle: the runtime's threads' CPU by name, sampled at 999 Hz (@thread[comm]:
+A MODE=threads run, each figure per lifecycle: the runtime's threads' CPU by name, sampled at the rate the run says (@profile_hz; @thread[comm]:
 count), and the other tasks on the probe's CPUs by name (@beside[comm]: count).
 
   create_serial.py <label>=<bt file>:<lifecycles> ...
@@ -96,7 +96,16 @@ SPIN = r'^(osq_lock|native_queued_spin_lock_slowpath|queued_spin_lock_slowpath|_
        r'mutex_spin_on_owner|mutex_optimistic_spin|rwsem_spin_on_owner|rwsem_optimistic_spin|' \
        r'queued_read_lock_slowpath|queued_write_lock_slowpath)$'
 CLONE_SUFFIX = r'\.(constprop|isra|part|cold)(\.\d+)?$'
-PROFILE_HZ = 4999
+
+
+def profile_hz(txt, before):
+    """The rate the run's profile sampled at, as its program says it (@profile_hz, create_serial_inside.sh's), so the
+    reader holds no copy of it (Ada's 2026-11-06 rule). A run made before the programs said it ran at `before`, the
+    rate its program was written with then (create_serial_inside.sh at 53ac40d: 4999 Hz for the checker's, devfs's
+    and oncpu's profile, 999 Hz for threads')."""
+    m = re.search(r'^@profile_hz: (\d+)$', txt, re.M)
+    return int(m.group(1)) if m else before
+
 # A checker's kernel stack's work, by the first rule any of whose frames match, innermost first.
 CHECKER_WORK = [
     ("reading /proc/net/protocols", r'proto_seq_'),
@@ -371,7 +380,7 @@ def report_checker(label, n, path, txt):
         print(f"{label}: no namespace was checked")
         return
     samples = int(re.search(r'@samples: (\d+)', txt).group(1))
-    us = 1e6 / PROFILE_HZ / checked
+    us = 1e6 / profile_hz(txt, 4999) / checked
     work_of, user, skb, skb_clear = defaultdict(int), 0, 0, 0
     for m in re.finditer(r'@cpu\[\n(.*?)\n\]: (\d+)', txt, re.S):
         lines = m.group(1).split('\n')
@@ -414,7 +423,7 @@ def report_devfs(label, out, txt):
         print(f"{label}: the pool made no /dev")
         return
     samples = int(re.search(r'@samples: (\d+)', txt).group(1))
-    us = 1e6 / PROFILE_HZ / made
+    us = 1e6 / profile_hz(txt, 4999) / made
     calls = {int(k[0]): v for k, v in stats(txt, 'sys', 1).items()}
     futex = calls.get(next((k for k, v in SYSCALLS.items() if v == "futex"), -1), (0, 0))
     print(f"{label}: {made} /dev made, {taken} taken; on-CPU {samples * us:.1f} us a /dev made ({samples} samples); "
@@ -449,7 +458,7 @@ def report_oncpu(label, n, txt):
     call each fell in and by kernel stack, and the samples spinning on a lock by the stack above the spin."""
     samples = int(re.search(r'@samples: (\d+)', txt).group(1))
     user = int(m.group(1)) if (m := re.search(r'@on_user: (\d+)', txt)) else 0
-    us = 1e6 / PROFILE_HZ / n
+    us = 1e6 / profile_hz(txt, 4999) / n
     print(f"{label}: on-CPU {samples * us:.1f} us a lifecycle ({samples} samples, {n} lifecycles), user mode "
           f"{user * us:.1f} us")
     calls = {int(k[0]): v for k, v in stats(txt, 'sys', 1).items()}
@@ -477,7 +486,7 @@ def report_oncpu(label, n, txt):
 
 def report_threads(label, n, txt):
     """A MODE=threads run, per lifecycle."""
-    us = 1e6 / 999 / n
+    us = 1e6 / profile_hz(txt, 999) / n
     thread = {m.group(1): int(m.group(2)) for m in re.finditer(r'@thread\[(.*?)\]: (\d+)', txt)}
     beside = {m.group(1): int(m.group(2)) for m in re.finditer(r'@beside\[(.*?)\]: (\d+)', txt)}
     print(f"{label}: {sum(thread.values()) * us:.1f} us of CPU a lifecycle in the runtime's threads ({n} lifecycles)")
