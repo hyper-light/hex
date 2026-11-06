@@ -292,7 +292,7 @@ impl Node {
                 devfs: false,
             },
         };
-        let netns = Netns::start(pools.netns, crate::netns::FilesBound::now(pools))?;
+        let netns = Netns::start(pools.netns, crate::netns::FilesBound::now(pools)?)?;
         let ipc_uts = IpcUtsPool::start(pools.ipc_uts)?;
         let oci_boxes = BoxRoot::open(&root.dir().join(OCI_BOXES), root.disks().to_vec())?;
         let devices = device_programs(owner, &oci_boxes, MAX_PROGRAMS)?;
@@ -488,7 +488,7 @@ impl Node {
             });
         }
         self.pools.netns = bound;
-        self.netns = Netns::start(bound, crate::netns::FilesBound::now(self.pools))?;
+        self.netns = Netns::start(bound, crate::netns::FilesBound::now(self.pools)?)?;
         Ok(self)
     }
 
@@ -508,7 +508,7 @@ impl Node {
         self.pools.ipc_uts = bound;
         // The kept namespaces' files are bounded past this pool too, so the network-namespace pool starts again
         // with the bound they leave.
-        self.netns = Netns::start(self.pools.netns, crate::netns::FilesBound::now(self.pools))?;
+        self.netns = Netns::start(self.pools.netns, crate::netns::FilesBound::now(self.pools)?)?;
         Ok(self)
     }
 

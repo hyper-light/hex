@@ -1522,7 +1522,12 @@ fn a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(lab: &Lab, o
     // dockerd's 1024, which holds none, so this test gives it room for the namespaces it keeps, as an installer would.
     let room = u64::try_from(4 * (2 * hex_core::netns_reuse::PER_OWNER + 8)).unwrap();
     let Some(_limit) =
-        soft_limit(hex_node::netns::FilesBound::now(hex_node::netns::Pools::ROOT).own + room)
+        soft_limit(
+            hex_node::netns::FilesBound::now(hex_node::netns::Pools::ROOT)
+                .unwrap()
+                .own
+                + room,
+        )
     else {
         eprintln!(
             "SKIP held files: the hard descriptor limit leaves no room for them past the node's own"
@@ -1783,7 +1788,11 @@ fn a_node_past_its_files_bound_checks_by_entering_counted(lab: &Lab, own: &Path)
     let box_root = own.join("hex-reuse-files-bound");
     let (first_node, _first_state) = lab.node(&box_root);
     drop(first_node);
-    let soft = hex_node::netns::FilesBound::now(hex_node::netns::Pools::ROOT).own + 2 * 4 + 3;
+    let soft = hex_node::netns::FilesBound::now(hex_node::netns::Pools::ROOT)
+        .unwrap()
+        .own
+        + 2 * 4
+        + 3;
     let Some(_limit) = soft_limit(soft) else {
         eprintln!("SKIP held files' bound: the hard descriptor limit is under the node's own");
         return;

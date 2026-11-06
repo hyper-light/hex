@@ -2,22 +2,22 @@
 //! kernel this test runs on, privileged or not.
 
 use super::*;
+use hex_api::conformance::PATIENCE;
 use std::os::fd::AsRawFd;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use rustix::thread::{LinkNameSpaceType, move_into_link_name_space};
 
-/// Longest a test waits for a fact it needs: a bound, so a thread that never makes it true fails the
-/// test instead of hanging it.
-const PATIENCE: Duration = Duration::from_secs(30);
-
+/// Waits for `fact`, giving the CPU up between looks rather than sleeping a picked period, for at most
+/// [`PATIENCE`], the longest a case waits for a fact: a thread that never makes it true fails the test
+/// instead of hanging it.
 fn wait_for(what: &str, mut fact: impl FnMut() -> bool) {
     let deadline = Instant::now() + PATIENCE;
     while Instant::now() < deadline {
         if fact() {
             return;
         }
-        std::thread::park_timeout(Duration::from_millis(1));
+        std::thread::yield_now();
     }
     panic!("no {what} within {PATIENCE:?}");
 }
@@ -46,7 +46,7 @@ fn loopback_up_in(ns: &OwnedFd) -> bool {
 /// and is counted too.
 #[test]
 fn the_refill_thread_fills_the_pool_or_counts_each_make_that_fails() {
-    let pool = Netns::start(2, FilesBound::now(Pools::ROOT)).unwrap();
+    let pool = Netns::start(2, FilesBound::now(Pools::ROOT).unwrap()).unwrap();
     wait_for("first make", || {
         let c = pool.counts().unwrap();
         c.made_ahead + c.failed > 0
@@ -102,7 +102,7 @@ fn a_dry_take_for_an_owners_box_is_made_by_the_node_and_counted() {
         through_files: AtomicU64::new(0),
         files_failed: AtomicU64::new(0),
         files_bounded: AtomicU64::new(0),
-        files_bound: FilesBound::now(Pools::ROOT),
+        files_bound: FilesBound::now(Pools::ROOT).unwrap(),
         files_held: Arc::new(AtomicU64::new(0)),
         check_ns: AtomicU64::new(0),
     });
@@ -154,6 +154,34 @@ fn a_dry_take_for_an_owners_box_is_made_by_the_node_and_counted() {
     }
 }
 
+/// systemd's default soft limit on a service's descriptors: `DefaultLimitNOFILE=` is `1024:524288`
+/// (systemd-system.conf(5), "DefaultLimitNOFILE=", since v240), the soft half the one a unit gets unless set.
+const SYSTEMD_SOFT_NOFILE: u64 = 1_024;
+
+/// Ada's 2026-11-06 rule (CLAUDE.md §2): the descriptors the agent holds past its bounds are counted, not
+/// stated. Do: hold eight files open and count; count under a soft limit of none. Expect: at least the eight;
+/// the count refused by type, naming the limit, since more are listed than it allows.
+#[test]
+fn the_descriptors_beside_the_bounds_are_counted() {
+    use rustix::process::Rlimit;
+
+    let held: Vec<std::fs::File> = (0..8)
+        .map(|_| std::fs::File::open("/proc/self/stat").unwrap())
+        .collect();
+    let limit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
+    let counted = open_descriptors(&limit).unwrap();
+    assert!(counted >= 8, "{counted} counted with eight held");
+    let none = Rlimit {
+        current: Some(0),
+        maximum: Some(0),
+    };
+    assert!(
+        matches!(open_descriptors(&none), Err(Refusal::Os { why, .. }) if why.contains("soft limit's 0")),
+        "past the soft limit the count is refused by type"
+    );
+    drop(held);
+}
+
 /// Goal 5 extended step 6, the lead's second condition for a kept namespace's files as he restated it
 /// (2026-11-03T23:07Z, 2026-11-04T09:15Z; CLAUDE.md §2, §3): the limit the node was given stays as it is, and what
 /// it leaves past the node's own descriptors at its bounds is how many namespaces may hold their four files. Do: ask
@@ -164,6 +192,8 @@ fn a_dry_take_for_an_owners_box_is_made_by_the_node_and_counted() {
 fn the_files_bound_is_what_the_soft_limit_leaves_past_the_node_four_a_namespace() {
     use rustix::process::Rlimit;
 
+    let beside = open_descriptors(&rustix::process::getrlimit(rustix::process::Resource::Nofile)).unwrap();
+
     let at = |soft: Option<u64>| {
         FilesBound::of(
             &Rlimit {
@@ -171,15 +201,17 @@ fn the_files_bound_is_what_the_soft_limit_leaves_past_the_node_four_a_namespace(
                 maximum: soft,
             },
             Pools::ROOT,
+            beside,
         )
     };
-    let own = at(Some(1_024)).own;
+    let own = at(Some(SYSTEMD_SOFT_NOFILE)).own;
+    let boxes = u64::try_from(hex_runtime::MAX_BOXES).unwrap();
     assert!(
-        own >= 65_536 * 4,
+        own >= boxes * 4,
         "each live box's own descriptors and its kept namespace's are in it: {own}"
     );
     assert_eq!(
-        at(Some(1_024)).namespaces,
+        at(Some(SYSTEMD_SOFT_NOFILE)).namespaces,
         0,
         "systemd's default holds none"
     );
@@ -193,7 +225,7 @@ fn the_files_bound_is_what_the_soft_limit_leaves_past_the_node_four_a_namespace(
     let unlimited = at(None);
     assert_eq!(unlimited.soft, None);
     assert_eq!(unlimited.own, own);
-    assert!(unlimited.namespaces >= 65_536, "{unlimited:?}");
+    assert!(unlimited.namespaces >= boxes, "{unlimited:?}");
     assert_eq!(
         at(Some(u64::MAX)).namespaces,
         unlimited.namespaces,
@@ -211,6 +243,8 @@ fn the_files_bound_is_what_the_soft_limit_leaves_past_the_node_four_a_namespace(
 fn the_files_bound_counts_the_namespaces_both_pools_make_ahead() {
     use rustix::process::Rlimit;
 
+    let beside = open_descriptors(&rustix::process::getrlimit(rustix::process::Resource::Nofile)).unwrap();
+
     let at = |netns: usize, ipc_uts: usize| {
         FilesBound::of(
             &Rlimit {
@@ -222,6 +256,7 @@ fn the_files_bound_counts_the_namespaces_both_pools_make_ahead() {
                 ipc_uts,
                 devfs: true,
             },
+            beside,
         )
     };
     let none = at(0, 0);
@@ -244,7 +279,8 @@ fn the_files_bound_counts_the_namespaces_both_pools_make_ahead() {
                 current: Some(1 << 22),
                 maximum: Some(1 << 22)
             },
-            Pools::ROOT
+            Pools::ROOT,
+            beside
         )
     );
     let raised = at(4_096, 4_096);
@@ -260,6 +296,7 @@ fn the_files_bound_counts_the_namespaces_both_pools_make_ahead() {
                 maximum: Some(soft),
             },
             pools,
+            beside,
         )
         .namespaces
     };
@@ -289,6 +326,8 @@ fn the_files_bound_counts_the_namespaces_both_pools_make_ahead() {
 fn the_files_bound_counts_the_mounts_made_ahead() {
     use rustix::process::Rlimit;
 
+    let beside = open_descriptors(&rustix::process::getrlimit(rustix::process::Resource::Nofile)).unwrap();
+
     let at = |devfs: bool| {
         FilesBound::of(
             &Rlimit {
@@ -299,6 +338,7 @@ fn the_files_bound_counts_the_mounts_made_ahead() {
                 devfs,
                 ..Pools::ROOT
             },
+            beside,
         )
     };
     let n = |count: usize| u64::try_from(count).unwrap();
@@ -320,6 +360,8 @@ fn the_files_bound_counts_the_mounts_made_ahead() {
 fn the_files_bound_counts_the_prepared_dev_mounts() {
     use rustix::process::Rlimit;
 
+    let beside = open_descriptors(&rustix::process::getrlimit(rustix::process::Resource::Nofile)).unwrap();
+
     let at = |devfs: bool| {
         FilesBound::of(
             &Rlimit {
@@ -330,6 +372,7 @@ fn the_files_bound_counts_the_prepared_dev_mounts() {
                 devfs,
                 ..Pools::ROOT
             },
+            beside,
         )
     };
     let n = |count: usize| u64::try_from(count).unwrap();

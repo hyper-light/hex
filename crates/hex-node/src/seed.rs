@@ -62,14 +62,19 @@ struct Seed {
     pidfd: OwnedFd,
 }
 
+/// The most exec seeds a node keeps: one for each call its socket runs at once
+/// ([`crate::serve::WORKERS`]). An exec holds its seed only for its call, so a seed past them would
+/// never serve one; this is the bound, derived, not a tuning.
+pub(crate) const MOST: usize = crate::serve::WORKERS;
+
 /// The default seed budget: one per hardware thread, so a node that runs many execs at once rarely
-/// waits, clamped to a range that keeps a laptop's memory small and a big node's seed set bounded. An
-/// idle seed holds little (a `hex` process's pages, shared copy-on-write with the agent).
+/// waits, clamped to a range that keeps a laptop's memory small and a big node's seed set bounded
+/// ([`MOST`]). An idle seed holds little (a `hex` process's pages, shared copy-on-write with the agent).
 fn default_budget() -> usize {
     std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(4)
-        .clamp(4, 128)
+        .clamp(4, MOST)
 }
 
 impl SeedPool {
