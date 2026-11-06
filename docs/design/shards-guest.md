@@ -313,13 +313,20 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
       relay keep it, unless they are its digest. A layer the guest holds costs a create its digest alone, never
       a read: HEX-GUEST-22's first record had the host hash every tarball at every create, about 0.9 s of a
       grafana create (480 MB of blobs at 500-560 MB/s on a Mac Studio, sha2 0.10.9), the lead's rule after it.
-    - **Admission, never eviction on the create's path:** the store admits a layer only into room already
-      free: it leaves free, within what the stage's budget learned, the most entries and bytes one stage has
-      spent (`.layers/.need`, learned at each stage's end, rising only), and as much as the stage under way has
-      spent, since it too is cache once its box is released (the first stage of a guest, nothing learned yet,
-      took all its tmpfs's room before this, and the next create was refused). A layer that would cut into that room,
-      even part way, goes into the box instead (a partial folder is renamed into it), and so does every later
-      layer of its stage, so a create's worst case is whole-root staging's own; a create never evicts.
+    - **Admission, eviction only as a last resort:** the store admits a layer only into room already free: it
+      leaves free the most entries and bytes one stage has taken of the file system (`.layers/.need`, the drop
+      in its free room across a stage, learned at each stage's end, rising only), and as much as the stage
+      under way has taken, since it too is cache once its box is released (the first stage of a guest,
+      nothing learned yet, took all its tmpfs's room before this, and the next create was refused). What's
+      free is the file system's own count (fstatvfs(2) at each entry), and an entry is charged its bytes in
+      whole blocks: a tmpfs charges whole pages a file, so counting bytes undercounted grafana's 17834 entries
+      and its create hit `ENOSPC`. A layer that would cut into that room, even part way, goes into the box
+      instead (a partial folder is renamed into it), and so does every later layer of its stage, so a
+      create's worst case is whole-root staging's own. A stage larger than any yet can still find the cache
+      holding the room it needs, before the room learned has caught up: then, and only on `ENOSPC`, it takes
+      the least recently used unreferenced layer on its own path and tries again (the lead's rule: a create
+      never fails where whole-root staging would have staged it); that stage raises the room learned, so it
+      happens once per new largest stage.
       HEX-GUEST-22's second record showed why: with eviction on the create's path (least recently used, on
       `ENOSPC`), a guest whose store couldn't hold its three images evicted a peer's layers at every create,
       and alpine's create took 52 ms against whole-root staging's 30 (LRU's loop on a working set past its

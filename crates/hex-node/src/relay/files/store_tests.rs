@@ -84,13 +84,8 @@ fn a_stage_without_room_stages_into_the_box_and_evicts_nothing() {
     let (mut stage, budget) =
         Stage::begin(dir.path(), BoxId::new("b").unwrap(), &[Some([0xb0; 32])]).unwrap();
     assert_eq!(budget.present, [false]);
-    assert_eq!(
-        one_layer(&mut stage, 3),
-        Spend {
-            entries: 1,
-            bytes: 3
-        }
-    );
+    let block = stage.free.block;
+    assert_eq!(one_layer(&mut stage, 3), charge(3, block));
     let own = dir.path().join("b").join(BOX_LAYERS).join("0");
     assert!(
         std::fs::symlink_metadata(&own).unwrap().is_dir(),
@@ -141,8 +136,8 @@ fn a_layer_that_would_cut_into_the_room_a_stage_needs_moves_into_the_box() {
 
 /// HEX-GUEST-14 (§4a): with room, stage a named layer, then a second box of the same layer: expect the
 /// first admitted (the store holds it, the box's `layers/0` a link to it, nothing bypassed), the second told
-/// it's held and linked to the same folder; and the room a stage needs raised to what the first spent, never
-/// lowered by the second, which spent nothing.
+/// it's held and linked to the same folder; and the room a stage needs, learned from what each took of the
+/// file system, never lowered by the second, which took nothing.
 #[test]
 fn an_admitted_layer_is_linked_from_its_box_and_the_room_a_stage_needs_only_rises() {
     let dir = lab();
@@ -156,13 +151,17 @@ fn an_admitted_layer_is_linked_from_its_box_and_the_room_a_stage_needs_only_rise
     let link =
         |id: &str| std::fs::read_link(dir.path().join(id).join(BOX_LAYERS).join("0")).unwrap();
     assert_eq!(link("one"), Path::new("../../.layers").join(&hex));
-    assert_eq!(std::fs::read_to_string(store.join(NEED)).unwrap(), "1 5\n");
+    let need = read_spend(&std::fs::File::open(&store).unwrap().into(), NEED);
     let (mut two, budget) =
         Stage::begin(dir.path(), BoxId::new("two").unwrap(), &[Some(digest)]).unwrap();
     assert_eq!(budget.present, [true]);
     assert_eq!(two.end().unwrap(), Spend::default());
     assert_eq!(link("two"), link("one"));
-    assert_eq!(std::fs::read_to_string(store.join(NEED)).unwrap(), "1 5\n");
+    let after = read_spend(&std::fs::File::open(&store).unwrap().into(), NEED);
+    assert!(
+        after.entries >= need.entries && after.bytes >= need.bytes,
+        "{after:?} < {need:?}"
+    );
 }
 
 /// HEX-GUEST-14 (§4a, the reclaimer): a store of layers A (used first, 10 bytes), B (later, 10 bytes) and C
@@ -218,26 +217,104 @@ fn the_reclaimer_takes_the_least_recently_used_unreferenced_layers_until_what_wa
     assert!(names_in(&store).iter().all(|n| !n.starts_with(GONE)));
 }
 
-/// HEX-GUEST-14 (§4a; HEX-GUEST-22's 2x record, f823255: grafana's first stage, nothing learned yet, admitted
-/// all of itself and left alpine 5 MiB, so alpine's create was refused where whole-root staging staged it):
-/// a stage once released is cache, so the store admits it only while what stays free also holds a stage as
-/// large as itself. Free 100 and nothing learned: expect 40 spent admitted (60 left holds 40), 60 not (40
-/// left can't hold 60); with 70 learned, 40 not (60 left can't hold 70); with 30 learned, 20 is (80 left
-/// holds both).
+/// A file system's free room as `learned` reads it: `n` entries and bytes free, in blocks of `block` bytes.
+fn room(n: u64, block: u64) -> Free {
+    Free {
+        entries: n,
+        bytes: n,
+        used: 0,
+        capacity: n,
+        block,
+    }
+}
+
+/// HEX-GUEST-14 (§4a; HEX-GUEST-22's 2x records): a stage once released is cache, so the store admits it only
+/// while what stays free holds a stage as large as the largest yet (`need`) and as large as this one so far
+/// (at f823255 grafana's first stage, nothing learned, admitted all of itself and alpine was refused); and
+/// what a stage has taken is the file system's own drop in free room, not its files' bytes (at 899f086 a
+/// tmpfs's whole pages per file made grafana's 17834 entries take more than their bytes, the room it needed
+/// was undercounted, and its create hit ENOSPC). Free 100 when the stage began:
+/// - now 100, an entry of 40: expect it admitted (60 left holds 40); of 60: not (40 can't hold 60);
+/// - now 100, 70 learned: an entry of 40 not (60 can't hold 70), of 20 yes (80 holds 70);
+/// - now 50, though the stage's files hold far fewer bytes, an entry of 1: not (49 left can't hold the 51
+///   this stage has taken).
 #[test]
 fn the_store_leaves_room_for_a_stage_as_large_as_the_one_under_way() {
-    let free = Free {
-        entries: 100,
-        bytes: 100,
-        used: 0,
-        capacity: 100,
-    };
-    let spent = |n| Spend {
+    let begin = room(100, 1);
+    let entry = |n| Spend {
         entries: n,
         bytes: n,
     };
-    assert!(admits(free, spent(40), Spend::default()));
-    assert!(!admits(free, spent(60), Spend::default()));
-    assert!(!admits(free, spent(40), spent(70)));
-    assert!(admits(free, spent(20), spent(30)));
+    assert!(admits(begin, room(100, 1), entry(40), Spend::default()));
+    assert!(!admits(begin, room(100, 1), entry(60), Spend::default()));
+    assert!(!admits(begin, room(100, 1), entry(40), entry(70)));
+    assert!(admits(begin, room(100, 1), entry(20), entry(70)));
+    assert!(!admits(begin, room(50, 1), entry(1), Spend::default()));
+}
+
+/// HEX-GUEST-14 (§4a): an entry's room is its bytes in whole blocks of its file system (a tmpfs page, a block),
+/// at least one block for a file holding any: expect 1 byte one 4096-byte block, 4097 two, 0 none.
+#[test]
+fn an_entry_takes_its_bytes_in_whole_blocks() {
+    assert_eq!(
+        charge(1, 4096),
+        Spend {
+            entries: 1,
+            bytes: 4096
+        }
+    );
+    assert_eq!(
+        charge(4097, 4096),
+        Spend {
+            entries: 1,
+            bytes: 8192
+        }
+    );
+    assert_eq!(
+        charge(0, 4096),
+        Spend {
+            entries: 1,
+            bytes: 0
+        }
+    );
+}
+
+/// HEX-GUEST-14 (§4a; the lead's rule, 2026-11-06: a create never fails where whole-root staging would have
+/// staged it): a store whose cache holds the room, layers A (used first) and B (later) unreferenced and C
+/// named by box `kept`'s record, as when a new image larger than any seen meets a cache the room it needs
+/// hasn't learned yet; a stage's write the file system refuses ENOSPC once, then always: expect A evicted
+/// on the stage's path and the write done, then B evicted, and then ENOSPC refused with C still held.
+#[test]
+fn a_stage_out_of_room_evicts_unreferenced_layers_as_a_last_resort() {
+    let dir = lab();
+    let store = dir.path().join(STORE);
+    let a = layer(&store, 'a', 1_000, 1);
+    let b = layer(&store, 'b', 2_000, 1);
+    let c = layer(&store, 'c', 500, 1);
+    std::fs::create_dir(dir.path().join("kept")).unwrap();
+    std::fs::write(dir.path().join("kept").join(RECORD), format!("{c}\n")).unwrap();
+    let (stage, _) = Stage::begin(dir.path(), BoxId::new("t").unwrap(), &[]).unwrap();
+    let refusals = std::cell::Cell::new(1);
+    let write = || {
+        if refusals.get() == 0 {
+            return Ok(());
+        }
+        refusals.set(refusals.get() - 1);
+        Err(Errno::NOSPC)
+    };
+    assert_eq!(stage.room(write), Ok(()));
+    assert!(
+        !store.join(&a).exists(),
+        "the least recently used went first"
+    );
+    assert!(store.join(&b).exists() && store.join(&c).exists());
+    assert_eq!(
+        stage.room(|| -> Result<(), Errno> { Err(Errno::NOSPC) }),
+        Err(Errno::NOSPC)
+    );
+    assert!(!store.join(&b).exists(), "the next least recently used");
+    assert!(
+        store.join(&c).exists(),
+        "a layer a box names is never evicted"
+    );
 }

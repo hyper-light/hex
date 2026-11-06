@@ -10,6 +10,7 @@ use std::io::{self, Write};
 use std::net::Shutdown;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use hex_api::{BoxId, Refusal};
 use hex_client::guest::Duplex;
@@ -171,6 +172,8 @@ struct Free {
     /// The most layers its store can hold, each at least its folder: its inodes (`f_files`), or where it
     /// keeps no count, its bytes.
     capacity: u64,
+    /// Its block (`f_frsize`; 1 where it says 0): a file's bytes take whole blocks of it.
+    block: u64,
 }
 
 /// The fields of statvfs(3) a stage's budget is learned from.
@@ -207,6 +210,7 @@ fn learned(st: &Stat) -> Free {
             bytes,
             used: st.blocks.saturating_sub(st.bfree).saturating_mul(st.frsize),
             capacity: st.blocks.saturating_mul(st.frsize),
+            block: st.frsize.max(1),
         };
     }
     Free {
@@ -214,6 +218,7 @@ fn learned(st: &Stat) -> Free {
         bytes,
         used: st.files.saturating_sub(st.ffree),
         capacity: st.files,
+        block: st.frsize.max(1),
     }
 }
 
@@ -298,11 +303,6 @@ struct Spend {
 }
 
 impl Spend {
-    fn add(&mut self, entries: u64, bytes: u64) {
-        self.entries = self.entries.saturating_add(entries);
-        self.bytes = self.bytes.saturating_add(bytes);
-    }
-
     fn plus(self, other: Spend) -> Spend {
         Spend {
             entries: self.entries.saturating_add(other.entries),
@@ -330,13 +330,12 @@ struct Stage {
     layers: Option<OwnedFd>,
     wanted: Vec<Option<String>>,
     absent: VecDeque<usize>,
-    /// What the staged folder's file system had free when the stage began, what this stage has spent since,
-    /// and what the store leaves free for a stage: the most one has spent (learned, rising only). A layer
-    /// is admitted to the store only while what's free stays at least that; past it, it and every later
-    /// layer of the stage go into the box (what's free less what's spent only falls), and what those named
-    /// layers spent is `bypassed`, what the reclaimer frees once the stage is answered.
+    /// What the staged folder's file system had free when the stage began, and what the store leaves free
+    /// for a stage: the most one has taken of it (learned, rising only). A layer is admitted to the store
+    /// only while what's free stays at least that ([`admits`]); past it, it and every later layer of the
+    /// stage go into the box (what's free only falls), and what those named layers hold is `bypassed`, what
+    /// the reclaimer frees once the stage is answered.
     free: Free,
-    spent: Spend,
     need: Spend,
     bypassed: Spend,
     /// The file being written, with what's applied once its last byte is (§4a's order).
@@ -683,7 +682,6 @@ impl Stage {
                 wanted,
                 absent,
                 free,
-                spent: Spend::default(),
                 need,
                 bypassed: Spend::default(),
                 file: None,
@@ -813,8 +811,10 @@ impl Stage {
                     )));
                 }
                 Err(Errno::NOENT) => {
-                    rustix::fs::mkdirat(&fd, part.as_str(), Mode::from_raw_mode(MKPARENT_MODE))
-                        .map_err(|e| invalid(format!("making {below:?}, a parent: {e}")))?;
+                    self.room(|| {
+                        rustix::fs::mkdirat(&fd, part.as_str(), Mode::from_raw_mode(MKPARENT_MODE))
+                    })
+                    .map_err(|e| invalid(format!("making {below:?}, a parent: {e}")))?;
                     let dir = rustix::fs::openat(
                         &fd,
                         part.as_str(),
@@ -874,6 +874,24 @@ impl Stage {
         })
     }
 
+    /// Runs `op`, a write of this stage's, and when the file system has no room for it (`ENOSPC`) takes the
+    /// least recently used layer no box names out of the store and tries again, until it fits or none is
+    /// left, when `ENOSPC` is the refusal: a last resort, so a create never fails where whole-root staging
+    /// would have staged it (the lead's rule, 2026-11-06). Admission leaves the room a stage needs, so this
+    /// runs only for a stage larger than any yet, once: that stage raises the room learned. Bounded by the
+    /// store's layers: each retry follows one taken.
+    fn room<T>(&self, mut op: impl FnMut() -> Result<T, Errno>) -> Result<T, Errno> {
+        loop {
+            match op() {
+                Err(Errno::NOSPC) => match evict_one(&self.staged, &self.store) {
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(_) => return Err(Errno::NOSPC),
+                },
+                done => return done,
+            }
+        }
+    }
+
     /// The layer under way and `path` within its root, when `path` is under it.
     fn in_layer<'p>(&self, path: &'p str) -> Option<(&Layer, &'p str)> {
         let layer = self.layer.as_ref()?;
@@ -884,16 +902,20 @@ impl Stage {
         Some((layer, rest.strip_prefix('/')?))
     }
 
-    /// Counts an entry and its bytes into what the stage spent and the layer under way holds. A layer in the
-    /// store whose stage would leave less free than a stage needs is moved into the box, where the rest of
-    /// it and every later layer of the stage go: the store admits a layer only into room already free.
+    /// Counts an entry of `bytes` (a file's and its xattrs'), in whole blocks, into what the layer under way
+    /// holds. A layer in the store whose entry would leave less free than a stage needs ([`admits`], from
+    /// the file system's free room now) is moved into the box, where the rest of it and every later layer of
+    /// the stage go: the store admits a layer only into room already free.
     fn count(&mut self, bytes: u64) -> Result<(), Refusal> {
-        self.spent.add(1, bytes);
+        let entry = charge(bytes, self.free.block);
         let Some(layer) = self.layer.as_mut() else {
             return Ok(());
         };
-        layer.held.add(1, bytes);
-        if layer.store.is_none() || admits(self.free, self.spent, self.need) {
+        layer.held = layer.held.plus(entry);
+        if layer.store.is_none() {
+            return Ok(());
+        }
+        if admits(self.free, free(&self.staged)?, entry, self.need) {
             return Ok(());
         }
         let (Some(pending), Some(dir)) = (layer.store.take(), self.layers.as_ref()) else {
@@ -945,14 +967,17 @@ impl Stage {
             // (containerd's `OverlayConvertWhiteout`, pkg/archive/tar_opts_linux.go; Documentation/
             // filesystems/overlayfs.rst, "Whiteouts and opaque directories"); one over a name this layer
             // made is refused, as its mknod fails there (EEXIST).
-            return rustix::fs::mknodat(
-                &parent,
-                leaf,
-                FileType::CharacterDevice,
-                Mode::empty(),
-                rustix::fs::makedev(0, 0),
-            )
-            .map_err(|e| invalid(format!("whiteout {:?}: {e}", entry.path)));
+            return self
+                .room(|| {
+                    rustix::fs::mknodat(
+                        &parent,
+                        leaf,
+                        FileType::CharacterDevice,
+                        Mode::empty(),
+                        rustix::fs::makedev(0, 0),
+                    )
+                })
+                .map_err(|e| invalid(format!("whiteout {:?}: {e}", entry.path)));
         }
         if layered {
             // A layer's entry replaces what this layer put at its path, but a directory onto a directory
@@ -982,7 +1007,9 @@ impl Stage {
         match &entry.what {
             What::Dir => {
                 // Writable by the relay until its layer ends, whatever its mode: its entries come after it.
-                match rustix::fs::mkdirat(&parent, leaf, Mode::from_raw_mode(OWNER_DIR)) {
+                match self
+                    .room(|| rustix::fs::mkdirat(&parent, leaf, Mode::from_raw_mode(OWNER_DIR)))
+                {
                     Err(Errno::EXIST) if layered => {}
                     done => done.map_err(exists)?,
                 }
@@ -1000,17 +1027,20 @@ impl Stage {
                     .insert((base, at.clone()), (entry.mode, meta.map(times)));
             }
             What::File { size } => {
-                let fd = rustix::fs::openat(
-                    &parent,
-                    leaf,
-                    OFlags::CREATE
-                        | OFlags::EXCL
-                        | OFlags::WRONLY
-                        | OFlags::NOFOLLOW
-                        | OFlags::CLOEXEC,
-                    Mode::from_raw_mode(OWNER_FILE),
-                )
-                .map_err(exists)?;
+                let fd = self
+                    .room(|| {
+                        rustix::fs::openat(
+                            &parent,
+                            leaf,
+                            OFlags::CREATE
+                                | OFlags::EXCL
+                                | OFlags::WRONLY
+                                | OFlags::NOFOLLOW
+                                | OFlags::CLOEXEC,
+                            Mode::from_raw_mode(OWNER_FILE),
+                        )
+                    })
+                    .map_err(exists)?;
                 if *size > 0 {
                     self.file = Some((
                         std::fs::File::from(fd),
@@ -1023,7 +1053,8 @@ impl Stage {
                 }
             }
             What::Symlink { target } => {
-                rustix::fs::symlinkat(target.as_str(), &parent, leaf).map_err(exists)?;
+                self.room(|| rustix::fs::symlinkat(target.as_str(), &parent, leaf))
+                    .map_err(exists)?;
                 if let Some(meta) = meta {
                     let (uid, gid) = owner(meta);
                     rustix::fs::chownat(&parent, leaf, uid, gid, AtFlags::SYMLINK_NOFOLLOW)
@@ -1085,7 +1116,7 @@ impl Stage {
                         entry.path
                     )));
                 }
-                rustix::fs::linkat(&from, from_leaf, &parent, leaf, AtFlags::empty())
+                self.room(|| rustix::fs::linkat(&from, from_leaf, &parent, leaf, AtFlags::empty()))
                     .map_err(exists)?;
             }
             What::Layer | What::Whiteout | What::Opaque => {}
@@ -1132,17 +1163,19 @@ impl Stage {
             .ok_or_else(|| invalid("a layer out of the stage's list".to_owned()))?;
         self.seq = self.seq.saturating_add(1);
         let admitted = match digest {
-            Some(d) if admits(self.free, self.spent, self.need) => Some(Pending {
-                partial: format!("{PARTIAL}{}-{}-{d}", std::process::id(), self.seq),
-                digest: d,
-            }),
+            Some(d) if admits(self.free, free(&self.staged)?, Spend::default(), self.need) => {
+                Some(Pending {
+                    partial: format!("{PARTIAL}{}-{}-{d}", std::process::id(), self.seq),
+                    digest: d,
+                })
+            }
             Some(_) | None => None,
         };
         let (parent, name) = match &admitted {
             Some(pending) => (&self.store, pending.partial.clone()),
             None => (dir, i.to_string()),
         };
-        rustix::fs::mkdirat(parent, name.as_str(), Mode::from_raw_mode(OWNER_DIR))
+        self.room(|| rustix::fs::mkdirat(parent, name.as_str(), Mode::from_raw_mode(OWNER_DIR)))
             .map_err(os("making a layer's folder"))?;
         let fd = rustix::fs::openat(
             parent,
@@ -1292,6 +1325,12 @@ impl Stage {
                 Ok(0) => return Err(invalid("a staged file took no bytes".to_owned())),
                 Ok(n) => rest = rest.get(n..).unwrap_or_default(),
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                // Out of room: a last resort takes an unreferenced layer and the write is tried again.
+                Err(e) if e.raw_os_error() == Some(Errno::NOSPC.raw_os_error()) => {
+                    if evict_one(&self.staged, &self.store)?.is_none() {
+                        return Err(Refusal::os("writing a staged file", e));
+                    }
+                }
                 Err(e) => return Err(Refusal::os("writing a staged file", e)),
             }
         }
@@ -1327,8 +1366,8 @@ impl Stage {
     }
 
     /// Finishes the last layer, and the stage: every layer the guest lacked sent, and the root's mode. What
-    /// it spent raises the room the store leaves free for a stage, never lowers it. Returns what it bypassed
-    /// the store by, for the reclaimer.
+    /// it took of its file system (the drop in its free room since it began) raises the room the store
+    /// leaves free for a stage, never lowers it. Returns what it bypassed the store by, for the reclaimer.
     fn end(&mut self) -> Result<Spend, Refusal> {
         self.end_layer()?;
         if !self.absent.is_empty() {
@@ -1340,11 +1379,12 @@ impl Stage {
         rustix::fs::fchmod(&self.root, Mode::from_raw_mode(ROOT_MODE.into()))
             .map_err(os("setting a staged root's mode"))?;
         if self.layers.is_some() {
+            let taken = taken(self.free, free(&self.staged)?);
             let _lock = lock(&self.store)?;
             let need = read_spend(&self.store, NEED);
             let rises = Spend {
-                entries: need.entries.max(self.spent.entries),
-                bytes: need.bytes.max(self.spent.bytes),
+                entries: need.entries.max(taken.entries),
+                bytes: need.bytes.max(taken.bytes),
             };
             if rises != need {
                 write_whole(
@@ -1368,12 +1408,31 @@ impl Stage {
     }
 }
 
-/// Whether the store may take more of a stage: what was free when it began, less what it has spent, still
-/// holds a stage as large as the largest yet (`need`) and as large as this one so far, since this one,
-/// released, is cache too: so the next create always finds the room it needs without evicting.
-fn admits(free: Free, spent: Spend, need: Spend) -> bool {
-    free.entries.saturating_sub(spent.entries) >= need.entries.max(spent.entries)
-        && free.bytes.saturating_sub(spent.bytes) >= need.bytes.max(spent.bytes)
+/// Whether the store may take a stage's next `entry`: what its file system has free `now`, less the entry,
+/// still holds a stage as large as the largest yet (`need`) and as large as this one so far with the entry
+/// (what's free fell by since it began, `begin`), since this one, released, is cache too: so the next create
+/// always finds the room it needs without evicting. What a stage has taken is the file system's own count,
+/// not its files' bytes: a tmpfs charges whole pages a file.
+fn admits(begin: Free, now: Free, entry: Spend, need: Spend) -> bool {
+    let taken = taken(begin, now).plus(entry);
+    now.entries.saturating_sub(entry.entries) >= need.entries.max(taken.entries)
+        && now.bytes.saturating_sub(entry.bytes) >= need.bytes.max(taken.bytes)
+}
+
+/// What a file system's free room fell by between `begin` and `now`.
+fn taken(begin: Free, now: Free) -> Spend {
+    Spend {
+        entries: begin.entries.saturating_sub(now.entries),
+        bytes: begin.bytes.saturating_sub(now.bytes),
+    }
+}
+
+/// An entry of `bytes` (a file's and its xattrs'): one entry, its bytes in whole blocks of `block`.
+fn charge(bytes: u64, block: u64) -> Spend {
+    Spend {
+        entries: 1,
+        bytes: bytes.div_ceil(block.max(1)).saturating_mul(block.max(1)),
+    }
 }
 
 /// The box's `layers/<i>`, a link to the store's layer `digest` (`../../.layers/<digest>`, relative, so it
@@ -1457,44 +1516,58 @@ fn reclaim(staged: &Path, amount: Spend) -> Result<Spend, Refusal> {
     .map_err(os("opening the staged folder"))?;
     let store = open_store(&staged)?;
     let mut freed = Spend::default();
-    let passes = names(&store)?.len();
-    for pass in 0..passes {
+    for _ in 0..names(&store)?.len() {
         if freed.entries >= amount.entries && freed.bytes >= amount.bytes {
             break;
         }
-        let gone = format!("{GONE}{}-{pass}", std::process::id());
-        let taken = {
-            let _lock = lock(&store)?;
-            let held = referenced(&staged)?;
-            let mut oldest: Option<((i64, i64), String)> = None;
-            for name in names(&store)? {
-                if !is_layer_name(&name) || held.contains(&name) {
-                    continue;
-                }
-                let Ok(st) = rustix::fs::statat(&store, name.as_str(), AtFlags::SYMLINK_NOFOLLOW)
-                else {
-                    continue;
-                };
-                let when = (st.st_mtime, i64::try_from(st.st_mtime_nsec).unwrap_or(0));
-                if oldest.as_ref().is_none_or(|(w, _)| when < *w) {
-                    oldest = Some((when, name));
-                }
-            }
-            let Some((_, name)) = oldest else {
-                break;
-            };
-            let size = read_spend(&store, &format!("{name}{SIZE}"));
-            rustix::fs::renameat(&store, name.as_str(), &store, gone.as_str())
-                .map_err(os("taking a layer out of the store"))?;
-            let _ =
-                rustix::fs::unlinkat(&store, format!("{name}{SIZE}").as_str(), AtFlags::empty());
-            size
+        let Some(taken) = evict_one(&staged, &store)? else {
+            break;
         };
-        let mut budget = fs_budget(&store);
-        remove_tree(&store, &gone, &mut budget)?;
         freed = freed.plus(taken);
     }
     Ok(freed)
+}
+
+/// Layers taken out of the store by this process, counted, so each `.gone-<pid>-<n>` is its own.
+static GONE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Takes the least recently used layer no box's record names out of the store (under its lock, renamed to
+/// `.gone-<pid>-<n>`, so no stage counts it as held after), then removes it; returns what its size file said
+/// it held, or none when there is no such layer.
+fn evict_one(staged: &OwnedFd, store: &OwnedFd) -> Result<Option<Spend>, Refusal> {
+    let gone = format!(
+        "{GONE}{}-{}",
+        std::process::id(),
+        GONE_SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    let taken = {
+        let _lock = lock(store)?;
+        let held = referenced(staged)?;
+        let mut oldest: Option<((i64, i64), String)> = None;
+        for name in names(store)? {
+            if !is_layer_name(&name) || held.contains(&name) {
+                continue;
+            }
+            let Ok(st) = rustix::fs::statat(store, name.as_str(), AtFlags::SYMLINK_NOFOLLOW) else {
+                continue;
+            };
+            let when = (st.st_mtime, i64::try_from(st.st_mtime_nsec).unwrap_or(0));
+            if oldest.as_ref().is_none_or(|(w, _)| when < *w) {
+                oldest = Some((when, name));
+            }
+        }
+        let Some((_, name)) = oldest else {
+            return Ok(None);
+        };
+        let size = read_spend(store, &format!("{name}{SIZE}"));
+        rustix::fs::renameat(store, name.as_str(), store, gone.as_str())
+            .map_err(os("taking a layer out of the store"))?;
+        let _ = rustix::fs::unlinkat(store, format!("{name}{SIZE}").as_str(), AtFlags::empty());
+        size
+    };
+    let mut budget = fs_budget(store);
+    remove_tree(store, &gone, &mut budget)?;
+    Ok(Some(taken))
 }
 
 /// What mkparent copies to a directory it makes from the one below (`copyDirInfo`, `copyUpXAttrs`,
