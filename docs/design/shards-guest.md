@@ -128,7 +128,19 @@ The node agent's socket is `SOCK_SEQPACKET` and carries an exec's stdio as `SCM_
   only records of boxes that no longer exist. Falsified if a guest must keep boxes across its own reboot (it
   can't: their processes are gone) or if staged images outgrow the guest's memory budget: then a disk, as first
   written, holds the store.
-- Its build is a script in `scripts/`, its outputs' SHA-256 recorded in `bench/native/guest/`.
+- Its build is `scripts/guest/build.sh`, its outputs' SHA-256 recorded in `bench/native/guest/<arch>/RECORD.md`.
+  Two paths, both recorded there:
+  - **From source** (build.sh): the kernel by Shards' own `scripts/build-kernel.sh` in Shards' pinned builder,
+    checked against `scripts/guest/kernel-needs.config`; `hex` static against glibc, the runtime's choice for the
+    `oci` class's start (static glibc spawned 0.22 ms against 0.34 ms dynamic, and musl gained nothing over it).
+  - **The bring-up's** (2026-11-06, while no Linux host could build): the kernel is Shards' release of the same
+    pinned build (`crates/shards/src/kernel.rs:21-61` pins each URL and SHA-256), its released config checked
+    against the same list; `hex` is static **musl**, linked by the `rust-lld` Rust ships, built on the Mac Studio
+    as Shards builds its own Linux guests there (Shards' `.cargo/config.toml:21-27`), so no cross C toolchain is
+    needed. This departs from static glibc: musl's allocator and its thread and process start are the unknowns
+    the runtime chose glibc to avoid. Falsified, and replaced by the from-source glibc build, if the guest's
+    `oci` create-to-start or exec measures slower with the musl `hex` than with a static-glibc `hex` on the same
+    guest kernel.
 
 ## 4a. Host paths: the bundle and rootfs copied in, bind mounts through Shards' shares
 
