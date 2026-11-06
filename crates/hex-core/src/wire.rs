@@ -443,6 +443,28 @@ pub fn boxes(
 
 /// The request a received message holds, at most `bound` bytes, or why it holds none.
 pub fn read_request(msg: &Received<'_>, bound: usize) -> Result<(Header, Request), Bad> {
+    parse_request(msg, bound, true)
+}
+
+/// The request `bytes` hold, at most `bound` bytes, from a transport whose exec's stdio travels apart
+/// from its message ([`crate::stream`]'s, on connections of its own): the message carries no
+/// descriptors, and an exec's streams are what it names.
+pub fn read_request_apart(bytes: &[u8], bound: usize) -> Result<(Header, Request), Bad> {
+    let msg = Received {
+        bytes,
+        size: bytes.len(),
+        descriptors: 0,
+        descriptors_cut: false,
+    };
+    parse_request(&msg, bound, false)
+}
+
+/// A request, its descriptors counted against its exec's streams when they ride with it (`carried`).
+fn parse_request(
+    msg: &Received<'_>,
+    bound: usize,
+    carried: bool,
+) -> Result<(Header, Request), Bad> {
     let mut r = Reader::new(msg.bytes);
     let (version, kind, id) = r.header().map_err(|fault| Bad {
         version: FIRST,
@@ -496,7 +518,7 @@ pub fn read_request(msg: &Received<'_>, bound: usize) -> Result<(Header, Request
         }
     };
     let want = match &request {
-        Request::Call(Call::Exec { streams, .. }) => streams.count(),
+        Request::Call(Call::Exec { streams, .. }) if carried => streams.count(),
         _ => 0,
     };
     if msg.descriptors != want {

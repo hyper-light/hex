@@ -103,6 +103,17 @@ copy there shows ~20 bench scripts as modified: line endings from the sync, no c
    (taskkill /T /F of procgov's process), bound end 406.6. hex's climbs ended Code(-1073740791) (0xC0000409, the
    program aborting on the refused commit); procgov's ExitStatus(3221226505) (0xC0000409 too). All 6 passes exit 0.
 
+9. the Windows node's routing to step 5's guest at 3ebf484 (cp/t7-native-s5-route 925f39c merged at 2359062),
+   2026-11-06T09:28:08Z, load 43% CPU, C: 40 GB free: cargo test -p hex-cli --test windows_process_box --
+   --nocapture --test-threads=1: 10 passed, 0 failed (windows-route-3ebf484-20261106T092808Z.txt).
+   a_windows_image_stays_the_hosts_and_a_linux_image_goes_to_the_guest (HEX-INST-2), on WithGuest::routing by
+   WinRuntime::oci_side over a simulated guest that counts its boots: a Windows image stays the host's (step 4's
+   class refuses its missing layer: Os { op: "reading the image's Windows build from its base layer", ... }) and
+   boots nothing; a Linux image goes to the guest, booted once (it ends at once: Os { op: "connecting to the
+   guest", why: "the guest has ended: Stopped" }); "FEATURES: HypervisorPlatform on". Fedora at 3ebf484: fmt and
+   clippy for Windows, Linux and macOS exit 0 (unit hex-windows-xclippy-20261106T092715Z); cargo test at the merge
+   2359062 fails one of step 5's hex-node relay tests (sent to step 5).
+
 What HCS reports as a Windows oci box's Exit at its end, against the oracle's Signal(15), for HEX-DIFF-1 step 12
 and HEX-DIFF-2 step 11 (asked by step 7): NOT OBSERVED. windows_oci_boxes_hold_the_contract_and_the_steps_criteria
 skipped in every run above (no HEX_WINDOWS_LAYERS), so no Windows oci box was made; it is read in the first run

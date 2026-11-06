@@ -8,6 +8,11 @@ fn main() -> ExitCode {
         .skip(1)
         .map(|a| a.into_string().ok())
         .collect();
+    // The kernel's first process, `hex` is a Shards guest's init, whatever words the kernel passes it.
+    #[cfg(target_os = "linux")]
+    if hex_cli::guest::runs_as_init(std::process::id(), std::env::args_os().next().as_deref()) {
+        return ExitCode::from(hex_cli::guest::init_main());
+    }
     // `hex selftest-box <act> …` runs a small program inside a box (hex_cli::selftest); it ends the
     // process itself rather than returning text, so it is handled before the text replies.
     if let [Some(first), rest @ ..] = args.as_slice()
@@ -49,6 +54,11 @@ fn main() -> ExitCode {
         if first == "node" {
             let rest: Vec<String> = rest.iter().flatten().cloned().collect();
             return ExitCode::from(hex_cli::node::main(&rest));
+        }
+        // `hex guest relay …` relays a Shards guest's vsock to its node agent's socket.
+        if first == "guest" {
+            let rest: Vec<String> = rest.iter().flatten().cloned().collect();
+            return ExitCode::from(hex_cli::guest::main(&rest));
         }
         // `hex box run <limits> -- program args…` runs a program in a process box.
         if first == "box"

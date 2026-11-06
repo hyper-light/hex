@@ -1024,3 +1024,33 @@ fn every_bit_flip_is_read_or_refused() {
         }
     }
 }
+
+/// HEX-GUEST-1 (docs/design/shards-guest.md §3): an exec naming stdin and stdout, sent with no
+/// descriptors: expect it read whole where its stdio travels apart (a stream transport), and refused by
+/// type where descriptors ride with the message.
+#[test]
+fn an_exec_whose_stdio_travels_apart_carries_no_descriptors() {
+    let exec = Request::Call(Call::Exec {
+        id: id("b"),
+        program: Program::of(&["cat"]),
+        streams: Streams {
+            stdin: true,
+            stdout: true,
+            stderr: false,
+        },
+    });
+    let bytes = request(VERSION, 7, &exec, MAX_MESSAGE).unwrap();
+    let (h, read) = read_request_apart(&bytes, MAX_MESSAGE).unwrap();
+    assert_eq!((h.id, read), (7, exec));
+    assert!(matches!(
+        read_request(&received(&bytes, 0), MAX_MESSAGE),
+        Err(Bad {
+            fault: Fault::Descriptors {
+                want: 2,
+                got: 0,
+                ..
+            },
+            ..
+        })
+    ));
+}

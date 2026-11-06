@@ -166,6 +166,108 @@ fn a_linux_image_is_refused_naming_what_its_guest_waits_on() {
     }
 }
 
+/// HEX-INST-2 (native plan steps 4, 5 and 6): on the Windows node, whose Linux images are its Shards guest's
+/// (`WithGuest::routing` by `WinRuntime::oci_side`), each image goes where it runs. Do: create a Windows
+/// image's box and then a Linux image's, on a node whose guest is simulated and counts its boots. Expect:
+/// the Windows image stays the host's (step 4's class refuses its missing layer) and boots no guest; the
+/// Linux image, while HypervisorPlatform is off, is refused naming it and boots nothing, and once it is on
+/// boots the guest for it; neither box is left.
+#[test]
+fn a_windows_image_stays_the_hosts_and_a_linux_image_goes_to_the_guest() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use hex_runtime::guest::shares::Share;
+    use hex_runtime::guest::{GuestConfig, GuestRuntime, WithGuest};
+
+    let root = tempfile::tempdir().unwrap();
+    let boots = Arc::new(AtomicUsize::new(0));
+    let booted = Arc::clone(&boots);
+    let guests = shards_api::sim::SimGuests::new(move |_host| {
+        booted.fetch_add(1, Ordering::SeqCst);
+        shards_api::End::Stopped
+    });
+    let config = GuestConfig {
+        // A simulated guest boots nothing real: no binary, kernel or initramfs is read.
+        binary: root.path().join("no-shards.exe"),
+        kernel: root.path().join("no-kernel"),
+        initrd: root.path().join("no-initrd"),
+        vcpus: 1,
+        memory_mib: 256,
+        shares: vec![Share {
+            dir: root.path().to_path_buf(),
+            read_only: false,
+            at: "/run/hex/shares/0".to_owned(),
+        }],
+        staged: "/run/hex/staged".to_owned(),
+    };
+    let node = WithGuest::routing(
+        runtime(),
+        GuestRuntime::new(Arc::new(guests), config),
+        WinRuntime::oci_side,
+    );
+    let bundle = |name: &str, config: serde_json::Value| {
+        let dir = root.path().join(name);
+        std::fs::create_dir_all(dir.join("rootfs")).unwrap();
+        std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
+        BoxSpec {
+            id: BoxId::new(name).unwrap(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(dir),
+        }
+    };
+
+    let windows = node
+        .create(bundle(
+            "windows-image",
+            serde_json::json!({
+                "ociVersion": "1.2.0",
+                "process": {"args": ["cmd.exe", "/c", "exit 0"], "cwd": "C:\\"},
+                "windows": {"layerFolders": ["C:\\hex-no-such-layer", "C:\\hex-no-such-scratch"]},
+            }),
+        ))
+        .unwrap_err();
+    eprintln!("a Windows image: {windows:?}");
+    assert_eq!(
+        boots.load(Ordering::SeqCst),
+        0,
+        "a Windows image booted the guest"
+    );
+
+    let linux = node
+        .create(bundle(
+            "linux-image",
+            serde_json::json!({
+                "ociVersion": "1.2.0",
+                "process": {"args": ["/bin/true"], "cwd": "/"},
+                "root": {"path": "rootfs"},
+                "linux": {},
+            }),
+        ))
+        .unwrap_err();
+    eprintln!("a Linux image: {linux:?}");
+    match &linux {
+        hex_api::Refusal::Platform { why, .. } if why.contains("Hex's installer turns") => {
+            assert!(why.contains("HypervisorPlatform"), "{why}");
+            assert_eq!(
+                boots.load(Ordering::SeqCst),
+                0,
+                "booted with HypervisorPlatform off"
+            );
+            eprintln!("FEATURES: HypervisorPlatform off");
+        }
+        _ => {
+            assert_eq!(
+                boots.load(Ordering::SeqCst),
+                1,
+                "the Linux image didn't reach the guest"
+            );
+            eprintln!("FEATURES: HypervisorPlatform on");
+        }
+    }
+    assert!(node.list().unwrap().is_empty(), "a refused box is left");
+}
+
 /// AC-T7.1.1: the Windows `process` class holds the runtime contract (HEX-RT-1..9; 10..13 are the oci
 /// class's, which this one has nothing to check), and the differential suite holds it to the simulator's
 /// trace (HEX-DIFF-1..6, CLAUDE.md §8).

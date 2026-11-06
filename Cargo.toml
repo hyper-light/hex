@@ -22,8 +22,14 @@ hex-core = { path = "crates/hex-core", version = "0.1.0" }
 hex-runtime = { path = "crates/hex-runtime", version = "0.1.0" }
 hex-node = { path = "crates/hex-node", version = "0.1.0" }
 hex-client = { path = "crates/hex-client", version = "0.1.0" }
+# Shards' guests (docs/design/shards-guest.md §2, Appendix A): the oci class's Linux guest on macOS and
+# Windows. By name and version, patched below to a copy of Shards' draft until Shards lands it, then to
+# vendor/shards as every other vendored project (vendor/shards-api-draft/Cargo.toml says which).
+shards-api = "0.1"
 flate2 = "1.1.10"
 libc = "0.2.190"
+# AF_VSOCK, for the guest relay: its safe `SockAddr::vsock` needs feature `all` (docs/design/shards-guest.md §3).
+socket2 = { version = "0.6", features = ["all"] }
 rustix = { version = "1.1.5", features = ["fs", "process", "thread", "mount", "pipe", "pty", "net", "termios", "system", "event", "stdio"] }
 # OCI seccomp: compiles a profile to a BPF program and loads it in the container init. Vendored
 # (vendor/seccompiler) so Hex can lean its compile path; patched to that copy below.
@@ -40,7 +46,8 @@ ureq = "3"
 # is for the SECURITY_ATTRIBUTES the process- and job-creation signatures name (Hex passes null). The
 # Windows `oci` class (crates/hex-runtime/src/windows/oci) adds the Host Compute Service's and the virtual
 # disk's types (their calls are resolved at run time, docs/research/runtime/windows-hcs.md §7), the
-# loader, RtlGetVersion, file version resources, device interface lists and the job access rights.
+# loader, RtlGetVersion, file version resources, device interface lists and the job access rights. UI_Shell
+# and System_Com read the users folder from its known folder and free it, the oci guest's default share.
 windows-sys = { version = "0.61.2", features = [
     "Wdk_System_SystemServices",
     "Win32_Devices_DeviceAndDriverInstallation",
@@ -48,6 +55,7 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_Storage_Vhd",
+    "Win32_System_Com",
     "Win32_System_HostComputeSystem",
     "Win32_System_IO",
     "Win32_System_JobObjects",
@@ -55,6 +63,7 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_SystemInformation",
     "Win32_System_SystemServices",
     "Win32_System_Threading",
+    "Win32_UI_Shell",
 ] }
 
 # The no-panic rule and the rest of CLAUDE.md as lints. Production code is checked again by
@@ -103,3 +112,4 @@ inherits = "release"
 # workspace (excluded above); the patch points at the crate directory inside it.
 [patch.crates-io]
 seccompiler = { path = "vendor/seccompiler" }
+shards-api = { path = "vendor/shards-api-draft/crates/api" }

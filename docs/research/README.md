@@ -42,6 +42,7 @@ implementation" and its numbers are established, before any design or code.
 | [`differential-suite.md`](runtime/differential-suite.md) | One differential suite on every OS: differential testing (McKeeman et al., DEC), the simulator as the oracle, and what a comparison across OSes normalizes |
 | [`native-process-competitors.md`](runtime/native-process-competitors.md) | The `process` class's competitors on macOS (`taskpolicy -m`, launchd transient jobs) and Windows (Process Governor, HostProcess job containers), class for class |
 | [`inroot-eagain.md`](runtime/inroot-eagain.md) | Why openat2(RESOLVE_IN_ROOT) refuses with EAGAIN (the host's mount and rename seqcounts), how libpathrs, runc and filepath-securejoin try again, and the budget Hex's resolver keeps, measured under a mount and rename storm |
+| [`shards-guest.md`](runtime/shards-guest.md) | What Shards offers a host program for a Linux guest: no `-api` crate yet, `shards-vmm`'s boot, stop and end, its vsock (Firecracker's AF_UNIX mapping, AF_UNIX on Windows too), its backends, and the guest kernel's options for the `oci` class |
 | [`matrix.md`](runtime/matrix.md) | The cross-system comparison: isolation, start latency, throughput, density, overhead — every cell cited |
 
 ### Scheduler (`scheduler/`)
