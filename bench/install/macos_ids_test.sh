@@ -30,5 +30,5 @@ case_is "a need larger than the range is refused" none 51 450 499
 
 ROLE=$((ROLE_LAST - ROLE_FIRST + 1))
 if [ "$ROLE_FIRST" = 450 ] && [ "$ROLE_LAST" = 499 ]; then echo "PASS: the role range is Apple's 450-499"; else echo "FAIL: role range $ROLE_FIRST-$ROLE_LAST"; FAILS=1; fi
-if [ $((COUNT + 2)) -le "$ROLE" ]; then echo "PASS: the pool and its two groups fit the role range"; else echo "FAIL: $((COUNT + 2)) ids don't fit $ROLE"; FAILS=1; fi
+if [ $IDS -le "$ROLE" ]; then echo "PASS: the two groups fit the role range"; else echo "FAIL: $IDS ids don't fit $ROLE"; FAILS=1; fi
 exit "$FAILS"

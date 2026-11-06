@@ -642,11 +642,12 @@ lacking any of it "refuses that class by name, saying what's missing", and "Unin
   113) and by its socket answering (§3.5). Without the helper the `process` class still runs, as a process
   group under step 1's watcher, and its inspect says so: Ada's call in the plan's step 2 (2026-11-01), "Both
   run on a node with the helper; polling alone runs on one without". The refusal by name covers only what
-  can't run without the helper. Concretely (`scripts/install/macos.sh`): the pool is `_hexbox1`..`_hexbox30` in
-  group `hexbox`, and the users whose nodes may reach the helper are put in a group `hexnode`; their ids
-  (`hexnode`'s gid, then `hexbox`'s, then the pool's uids) are learned at install time: the first run of 32
-  ids in Apple's role-account range, 450-499 (`sysadminctl`'s usage on macOS 26.4, §3.1), that no user, group
-  or process holds, 450-481 on the measured Mac. Any taken name is refused by name before anything is made,
+  can't run without the helper. Concretely (`scripts/install/macos.sh`): the pool's group is `hexbox`, and the users
+  whose nodes may reach the helper are put in a group `hexnode`; the two gids are learned at install time:
+  the first run of 2 ids in Apple's role-account range, 450-499 (`sysadminctl`'s usage on macOS 26.4, §3.1),
+  that no user, group or process holds. The helper makes the pool's users (`_hexbox1`, `_hexbox2`, …) on
+  demand, each at the first role uid then free, recorded in the manifest before it is made (the lead's
+  call, 2026-11-06: no picked pool size; one account path, the helper's). Any taken name is refused by name before anything is made,
   and so is a range with no free run (`--first-id` names a start instead). The helper runs from a root-owned copy of `hex` in `/Library/PrivilegedHelperTools` (Docker's place
   for its helper, §3.2), never from `/usr/local/bin`, which Homebrew gives the user on Intel Macs, so no user can
   replace what runs as root. Its socket is `/var/db/hex/box-helper.sock` (persistent, so launchd's start at boot

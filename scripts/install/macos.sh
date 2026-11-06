@@ -3,9 +3,9 @@
 # "the installer, per OS"; sources in docs/research/runtime/installer-per-os.md §3). It sets up what the
 # process class's box-user mode needs (native plan step 2), so a user's boxes run as users of their own
 # with no further step:
-#   - the box users' pool, as Nix's installer makes its build users (§3.1): a group `hexbox` and its first
-#     hidden user `_hexbox1` (shell /sbin/nologin, home /var/empty) at ids learned free in Apple's role
-#     range; the helper grows the pool from there as boxes need users, recording each in the manifest;
+#   - the box users' pool's group `hexbox` (§3.1), at an id learned free in Apple's role range; the helper
+#     makes the pool's users, as Nix's installer makes its build users, one when a box needs one and every
+#     user it has is busy, each recorded in the manifest before it is made (one account path, the helper's);
 #   - a group `hexnode` holding each --user: the users whose nodes may reach the helper;
 #   - the privileged helper (`hex __box-helper`) as a launchd daemon (§3.2-3.4): its binary in
 #     /Library/PrivilegedHelperTools (root's, so no user can replace what runs as root), a plain plist in
@@ -34,12 +34,11 @@ MANIFEST=$STATE/manifest
 NODE_GROUP=hexnode
 POOL_GROUP=hexbox
 POOL_PREFIX=_hexbox
-# The pool's first user, the one the installer makes; the helper grows the pool on demand from it (the
-# lead's call, 2026-11-06: no picked pool size), recording each account in the manifest.
-COUNT=1
+# The ids install takes: hexnode's gid and hexbox's. The helper makes the pool's users on demand (the
+# lead's call, 2026-11-06: no picked pool size), each at a role uid free when it makes it.
+IDS=2
 # Apple's role-account range: sysadminctl's usage, macOS 26.4, "Role accounts require name starting with _
-# and UID in 450-499 range" (§3.1). The pool's ids, hexnode's gid then hexbox's then the users' uids, are
-# learned at install time: the first run of COUNT+2 ids there that no user, group or process holds
+# and UID in 450-499 range" (§3.1). The groups' ids, hexnode's gid then hexbox's, are learned at install time: the first run of IDS ids there that no user, group or process holds
 # (free_run), so no release's new system ids are reused. --first-id names a start instead.
 ROLE_FIRST=450
 ROLE_LAST=499
@@ -110,7 +109,6 @@ taken_ids() {
 
 node_gid() { echo "$FIRST_ID"; }
 pool_gid() { echo $((FIRST_ID + 1)); }
-pool_uid() { echo $((FIRST_ID + 1 + $1)); }
 
 # The plan: every thing install makes, one "<kind> <target>" line each.
 plan() {
@@ -120,7 +118,6 @@ plan() {
   done
   echo "group $NODE_GROUP"
   echo "group $POOL_GROUP"
-  for ((i = 1; i <= COUNT; i++)); do echo "user $POOL_PREFIX$i"; done
   echo "file $BIN"
   echo "file $HELPER"
   echo "dir $SOCKDIR"
@@ -170,46 +167,23 @@ check() {
 preflight() {
   [ "$(uname -s)" = Darwin ] || die "this is macOS' installer; this machine is $(uname -s)"
   if [ -z "$FIRST_ID" ]; then
-    FIRST_ID=$(taken_ids | free_run $((COUNT + 2)) "$ROLE_FIRST" "$ROLE_LAST") ||
-      die "no run of $((COUNT + 2)) free ids in Apple's role range $ROLE_FIRST-$ROLE_LAST; name one with --first-id"
+    FIRST_ID=$(taken_ids | free_run "$IDS" "$ROLE_FIRST" "$ROLE_LAST") ||
+      die "no run of $IDS free ids in Apple's role range $ROLE_FIRST-$ROLE_LAST; name one with --first-id"
   fi
-  echo "macos.sh: ids $FIRST_ID-$((FIRST_ID + COUNT + 1)): gid $(node_gid) $NODE_GROUP, gid $(pool_gid) $POOL_GROUP, uids $(pool_uid 1)-$(pool_uid "$COUNT")" >&2
-  local uids gids taken=0 id i name
-  uids=$("$DSCL" . -list /Users UniqueID | awk '{print $2}')
+  echo "macos.sh: ids $FIRST_ID-$((FIRST_ID + IDS - 1)): gid $(node_gid) $NODE_GROUP, gid $(pool_gid) $POOL_GROUP" >&2
+  local gids taken=0 id name
   gids=$("$DSCL" . -list /Groups PrimaryGroupID | awk '{print $2}')
   for id in "$(node_gid)" "$(pool_gid)"; do
     if grep -qx "$id" <<<"$gids"; then echo "macos.sh: gid $id is taken: $("$DSCL" . -search /Groups PrimaryGroupID "$id" | awk 'NR==1 {print $1}')" >&2; taken=1; fi
   done
-  for ((i = 1; i <= COUNT; i++)); do
-    id=$(pool_uid "$i")
-    if grep -qx "$id" <<<"$uids"; then echo "macos.sh: uid $id is taken: $("$DSCL" . -search /Users UniqueID "$id" | awk 'NR==1 {print $1}')" >&2; taken=1; fi
-    # A live process at a pool uid would be ended by a box's delete: the uid must be no one's.
-    if ps -axo uid= | tr -d ' ' | grep -qx "$id"; then echo "macos.sh: a process runs as uid $id" >&2; taken=1; fi
-  done
   for name in "$NODE_GROUP" "$POOL_GROUP"; do
     if present group "$name"; then echo "macos.sh: group $name exists" >&2; taken=1; fi
-  done
-  for ((i = 1; i <= COUNT; i++)); do
-    if present user "$POOL_PREFIX$i"; then echo "macos.sh: user $POOL_PREFIX$i exists" >&2; taken=1; fi
   done
   [ "$taken" = 0 ] || die "the ids above are taken; pick a free range with --first-id"
 }
 
 make_group() { # <name> <gid> <real name>
   dseditgroup -o create -r "$3" -i "$2" "$1" || die "making group $1"
-}
-
-make_pool_user() { # <index>
-  local name=$POOL_PREFIX$1 uid
-  uid=$(pool_uid "$1")
-  dscl_write -create "/Users/$name"
-  dscl_write -create "/Users/$name" UniqueID "$uid"
-  dscl_write -create "/Users/$name" PrimaryGroupID "$(pool_gid)"
-  dscl_write -create "/Users/$name" IsHidden 1
-  dscl_write -create "/Users/$name" NFSHomeDirectory /var/empty
-  dscl_write -create "/Users/$name" UserShell /sbin/nologin
-  dscl_write -create "/Users/$name" RealName "Hex box user $1"
-  dseditgroup -o edit -t user -a "$name" "$POOL_GROUP" || die "adding $name to $POOL_GROUP"
 }
 
 now() { perl -MTime::HiRes=time -e 'printf "%.6f\n", time'; }
@@ -270,7 +244,6 @@ install_hex() {
     dseditgroup -o edit -t user -a "$u" "$NODE_GROUP" || die "adding $u to $NODE_GROUP"
   done
   make_group "$POOL_GROUP" "$(pool_gid)" "Hex box users"
-  for ((i = 1; i <= COUNT; i++)); do make_pool_user "$i"; done
   install -d -m 0755 "$(dirname "$BIN")" "$(dirname "$HELPER")"
   install -m 0755 -o root -g wheel "$BINARY" "$BIN"
   install -m 0755 -o root -g wheel "$BINARY" "$HELPER"
