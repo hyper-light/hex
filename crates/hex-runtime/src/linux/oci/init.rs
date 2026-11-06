@@ -51,7 +51,9 @@ pub const ENV_DEV_MOUNT: &str = "HEX_OCI_DEV_MOUNT";
 pub const ENV_CONFIG: &str = "HEX_OCI_CONFIG";
 /// The node's one empty read-only tmpfs (decision 6's update), by the path of the runtime's descriptor for it,
 /// which the shim opens as it opens the `/dev` made ahead: the container clones it for each masked directory in
-/// place of a tmpfs of its own.
+/// place of a tmpfs of its own. Plumbing, as the entries above are, not a switch: the runtime sets it on the shim it
+/// spawns to hand that descriptor down (`run.rs`, `start_shim`), and no caller sets it to choose a behaviour; unset,
+/// the shim has no empty tmpfs handed to it and makes one per masked directory, as a rootless container must.
 pub const ENV_MASKED_DIRECTORY: &str = "HEX_OCI_MASKED_DIRECTORY";
 
 /// The default device nodes a runtime makes in `/dev` (OCI spec §Default Devices), as
