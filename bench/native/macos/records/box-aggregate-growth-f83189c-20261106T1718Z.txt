@@ -35,6 +35,16 @@ pass=4 spawn members=18 spawns_per_s_sum=836.1 spawns_per_s_span=830.3
 pass=5 fill members=18 bytes_per_s_sum=7496935343 bytes_per_s_span=7195549556
 pass=5 spawn members=18 spawns_per_s_sum=970.3 spawns_per_s_span=936.1
 
+## adalundhe-macbook-pro again, 20 passes, 2026-11-06T17:21:18Z, load 55.96-63.57 (a VM at 363 % CPU, rustc and a
+## browser; noisy, as runs here are). launchd hex-macos-fill20-20261106T172118Z. Fastest pass 18:
+pass=18 fill members=18 bytes_per_s_sum=15731537707 bytes_per_s_span=14054028403
+pass=18 spawn members=18 spawns_per_s_sum=3240.7 spawns_per_s_span=3140.3
+# the other 19 passes: fill sums 1.78-10.10 GB/s, spawn sums 589-1,237/s (full log on the Mac,
+# ~/.cache/hex-t7/macos/logs/hex-macos-fill20-20261106T172118Z.log). Under this load the Mac's quiet worst is
+# unmeasured and higher than these.
+# On step 7's Mac (its one-member record's): fill 15,731,537,707 B/s and 3,240.7 spawns/s, so 64 MiB in
+# 4,265,880 ns, about 13.8 processes within it.
+
 # Worst: adas-mac-studio-2, fill 47,464,532,324 bytes/s (sum; 41,520,498,033 span), spawn 10,436.4/s (sum).
 # The ceiling these give at step 1's 64 MiB bar: 64 MiB / 47,464,532,324 B/s = 1,413,873 ns (1,616,282 ns at
 # the span rate); a missed wake within it at 10,436.4 spawns/s lets about 14.8 processes in.
