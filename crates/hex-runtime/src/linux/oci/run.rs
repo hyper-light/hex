@@ -39,7 +39,7 @@ const DEFAULT_CONTROLLERS: [&str; 4] = hex_core::cgroup::CONTROLLERS;
 
 /// The longest container id: a file name's limit (`NAME_MAX`, 255 bytes), since the id names the
 /// container's state directory.
-const MAX_ID_BYTES: usize = 255;
+pub(crate) const MAX_ID_BYTES: usize = 255;
 
 /// Refuses an id that isn't a plain name, before anything is touched. The id names the container's
 /// state directory and its default cgroup, so a `/` or `..` would reach outside the state root, and

@@ -356,6 +356,39 @@ mod tests {
         }
     }
 
+    /// AC-T7.1.4; Ada's 2026-11-06 rule (no picked constants): the state's bound is the config's, which holds its
+    /// annotations, and the widest every other field may be, not twice the config's. Do: write the widest state there
+    /// is with no annotations: its id the longest a container's may be, its bundle and cgroup paths `PATH_MAX`'s
+    /// bytes less its NUL, each byte one JSON escapes to six (`\u0001`), its numbers their widest. Expect: the bound is
+    /// the config's and that state's bytes, less the empty annotations' `{}`.
+    #[test]
+    fn the_states_bound_is_the_configs_and_its_widest_other_fields() {
+        let path = "\u{1}".repeat(usize::try_from(libc::PATH_MAX).unwrap() - 1);
+        let mut widest = State::new(&"a".repeat(crate::linux::oci::run::MAX_ID_BYTES), &path);
+        widest.status = crate::linux::oci::state::Status::Creating;
+        widest.pid = i32::MIN;
+        widest.cgroup = Some(path);
+        widest.start_time = Some(u64::MAX);
+        widest.poststart = Some(false);
+        widest.pid_namespace = Some(false);
+        widest.start_container = Some(u64::MAX);
+        let others = serde_json::to_vec(&widest).unwrap().len() - "{}".len();
+        assert_eq!(MAX_STATE_BYTES, MAX_CONFIG_BYTES + others);
+    }
+
+    /// A state's annotations take no more bytes than the config's text of them: serde_json escapes no character a
+    /// config could hold in fewer bytes (RFC 8259 §7). Do: parse a config whose annotations use every escape and
+    /// raw UTF-8, and write its state. Expect: the state's annotations no longer than the config's text of them.
+    #[test]
+    fn a_states_annotations_take_no_more_than_the_configs_text_of_them() {
+        let config = r#"{"ociVersion":"1.3.0","root":{"path":"rootfs"},"annotations":{"k\u0001":"\"\\\/\b\f\n\r\t\u001féé","k":"v","k":"w"}}"#;
+        let spec = crate::linux::oci::spec::Spec::parse(config.as_bytes()).unwrap();
+        let key = r#""annotations":"#;
+        let text = &config[config.find(key).unwrap() + key.len()..config.len() - 1];
+        let annotations = serde_json::to_vec(&spec.annotations).unwrap();
+        assert!(annotations.len() <= text.len(), "{} > {}", annotations.len(), text.len());
+    }
+
     /// Do: a startContainer failure whose reason is longer than a pipe's atomic write, peeked from a FIFO,
     /// then peeked again. Expect: the reason, cut at a character's edge to fit, both times (nothing taken),
     /// and a taken start reads as none.
