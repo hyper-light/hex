@@ -79,13 +79,12 @@ pub const SLOWEST_RECORDED_END: Duration = Duration::from_millis(6_239);
 /// never reports an end fails the case instead of hanging the suite. Twice [`SLOWEST_RECORDED_END`]: the
 /// x2 is the false-alarm margin, so a run as slow as the slowest on record still passes.
 pub const PATIENCE: Duration = SLOWEST_RECORDED_END.saturating_mul(2);
-/// The slowest recorded end-seen time: 59.6 ms from a program's start to its reported end, for programs
-/// killed at their bound (bench/native/RESULT.md, macOS at b1ddb89, the slowest of 60). It bounds the time
-/// from an end to its being seen from above, since it includes the program's own run.
-const SLOWEST_END_SEEN: Duration = Duration::from_micros(59_600);
-/// How long a case watches a program it expects to keep running. An end within the watch would be seen
-/// within [`SLOWEST_END_SEEN`]; twice that is the false-alarm margin.
-pub const STILL_RUNNING: Duration = SLOWEST_END_SEEN.saturating_mul(2);
+/// How long a case watches a program it expects to keep running: the negative watch, "this does not end".
+/// It rests on the same record across hosts as [`PATIENCE`]: an end can come as late as
+/// [`SLOWEST_RECORDED_END`] (one host's end maximum doesn't carry: 59.6 ms on adas-mac-studio-2 was 550-770 ms
+/// on adalundhe-macbook-pro at load 21, 2026-11-06), so the watch is twice that, the x2 the same
+/// false-alarm margin. Each such watch costs that long; the suite has a handful per class.
+pub const STILL_RUNNING: Duration = SLOWEST_RECORDED_END.saturating_mul(2);
 
 /// Every case, in order.
 pub const CASES: &[Case] = &[
