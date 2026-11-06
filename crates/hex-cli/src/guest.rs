@@ -1,14 +1,17 @@
 //! `hex guest`: what runs in a Shards guest (docs/design/shards-guest.md §3 and §4).
 //!
-//!   hex guest init [--state-disk <device>]
+//!   hex guest init
 //!   hex guest relay --node <socket> (--vsock | --unix <dir>)
 //!
 //! `init` is the guest's PID 1, the `hex` binary itself as its initramfs's `/init`, the kernel's command
-//! line ending `-- guest init`. It mounts what a Linux node needs (`/proc`, `/sys`, cgroup2, `/dev`, a
-//! tmpfs `/run` and `/tmp`, and the node's state: the ext4 `--state-disk` where given, else a tmpfs),
-//! starts `hex node` and then `hex guest relay --vsock`, says `hex guest ready` on the console, and reaps
-//! every process that ends, as PID 1 must. When the node or the relay ends, it says why and powers the
-//! guest off, so the host sees the guest end.
+//! line ending `-- guest init`. It first moves itself off the kernel's initramfs onto a tmpfs root, as
+//! switch_root does, since a container's start pivots its root and pivot_root(2) refuses to leave the
+//! initramfs ("EINVAL The current root directory is on the rootfs"). It then mounts what a Linux node
+//! needs (`/proc`, `/sys`, cgroup2, `/dev`, a tmpfs `/run` and `/tmp`; the node's state is under `/run`,
+//! as the guest has no disk: docs/design/shards-guest.md §4), starts `hex node` and then
+//! `hex guest relay --vsock`, says `hex guest ready` on the console, and reaps every process that ends,
+//! as PID 1 must. When the node or the relay ends, it says why and powers the guest off, so the host sees
+//! the guest end.
 //!
 //! With `--vsock` it listens on the guest's vsock ports ([`hex_core::stream::CONTROL_PORT`] and
 //! [`hex_core::stream::STDIO_PORT`], any CID); with `--unix` on `control.sock` and `stdio.sock` in `<dir>`,
@@ -43,7 +46,8 @@ pub fn main(args: &[String]) -> u8 {
     }
 }
 
-const USAGE: &str = "usage: hex guest init [--state-disk <device>]\n       hex guest relay --node <socket> (--vsock | --unix <dir>)";
+const USAGE: &str =
+    "usage: hex guest init\n       hex guest relay --node <socket> (--vsock | --unix <dir>)";
 
 /// Where the relay listens.
 enum On {
@@ -166,25 +170,26 @@ impl Duplex for Vsock {
 
 /// Where the guest keeps the node's socket, state and boxes.
 const RUN: &str = "/run/hex";
-const STATE: &str = "/var/lib/hex";
+const STATE: &str = "/run/hex/state";
 const BOX_ROOT: &str = "/sys/fs/cgroup/hex";
 /// The controllers the node's boxes are bounded by (`docs/design/runtime.md`), enabled for the root's
 /// children.
 const CONTROLLERS: &str = "+cpu +io +memory +pids";
 
-/// `init`'s arguments: the state disk, if one is given.
-fn init_args(args: &[String]) -> Result<Option<PathBuf>, String> {
-    match args {
-        [] => Ok(None),
-        [flag, device] if flag == "--state-disk" => Ok(Some(PathBuf::from(device))),
-        _ => Err(USAGE.to_owned()),
+/// `init` takes no arguments: a guest has no disk (§4), so nothing to choose.
+fn init_args(args: &[String]) -> Result<(), String> {
+    if args.is_empty() {
+        Ok(())
+    } else {
+        Err(USAGE.to_owned())
     }
 }
 
 fn init(args: &[String]) -> Result<(), (u8, String)> {
-    let state_disk = init_args(args).map_err(|why| (2, why))?;
+    init_args(args).map_err(|why| (2, why))?;
     let fail = |why: String| (1, why);
-    mount_all(state_disk.as_deref()).map_err(fail)?;
+    leave_rootfs().map_err(fail)?;
+    mount_all().map_err(fail)?;
     std::fs::write("/sys/fs/cgroup/cgroup.subtree_control", CONTROLLERS).map_err(|e| {
         fail(format!(
             "enabling the cgroup controllers {CONTROLLERS}: {e}"
@@ -192,7 +197,7 @@ fn init(args: &[String]) -> Result<(), (u8, String)> {
     })?;
     let exe = std::env::current_exe().map_err(|e| fail(format!("finding /init: {e}")))?;
     let socket = Path::new(RUN).join("node.sock");
-    let state = Path::new(STATE).join("state");
+    let state = Path::new(STATE);
     let node = start(
         &exe,
         &[
@@ -232,72 +237,116 @@ fn init(args: &[String]) -> Result<(), (u8, String)> {
 
 /// One file system `init` mounts: its source, target, type and flags.
 struct Mount {
-    source: PathBuf,
+    source: &'static str,
     target: &'static str,
     fs: &'static str,
     flags: rustix::mount::MountFlags,
 }
 
 /// What `init` mounts, in order.
-fn mounts(state_disk: Option<&Path>) -> [Mount; 7] {
+fn mounts() -> [Mount; 6] {
     use rustix::mount::MountFlags;
     let quiet = MountFlags::NOSUID | MountFlags::NOEXEC | MountFlags::NODEV;
-    let mount = |source: &Path, target, fs, flags| Mount {
-        source: source.to_owned(),
+    let mount = |source, target, fs, flags| Mount {
+        source,
         target,
         fs,
         flags,
     };
-    let state_fs = if state_disk.is_some() {
-        "ext4"
-    } else {
-        "tmpfs"
-    };
-    let state_source = state_disk.unwrap_or(Path::new("tmpfs"));
     [
-        mount(Path::new("proc"), "/proc", "proc", quiet),
-        mount(Path::new("sysfs"), "/sys", "sysfs", quiet),
-        mount(Path::new("cgroup2"), "/sys/fs/cgroup", "cgroup2", quiet),
+        mount("proc", "/proc", "proc", quiet),
+        mount("sysfs", "/sys", "sysfs", quiet),
+        mount("cgroup2", "/sys/fs/cgroup", "cgroup2", quiet),
+        mount("devtmpfs", "/dev", "devtmpfs", MountFlags::NOSUID),
         mount(
-            Path::new("devtmpfs"),
-            "/dev",
-            "devtmpfs",
-            MountFlags::NOSUID,
-        ),
-        mount(
-            Path::new("tmpfs"),
+            "tmpfs",
             "/run",
             "tmpfs",
             MountFlags::NOSUID | MountFlags::NODEV,
         ),
         mount(
-            Path::new("tmpfs"),
+            "tmpfs",
             "/tmp",
             "tmpfs",
-            MountFlags::NOSUID | MountFlags::NODEV,
-        ),
-        mount(
-            state_source,
-            STATE,
-            state_fs,
             MountFlags::NOSUID | MountFlags::NODEV,
         ),
     ]
 }
 
+/// The most of `/proc/self/mountinfo` read: a fresh guest's lists a handful of mounts.
+const MOUNTINFO_BOUND: u64 = 64 * 1024;
+
+/// Where `init` mounts the tmpfs that becomes the root.
+const NEW_ROOT: &str = "/hex-root";
+
+/// Moves `init` off the kernel's initramfs, whose `rootfs` pivot_root(2) can't leave, onto a tmpfs
+/// mounted over `/` (switch_root's way: `MS_MOVE` and `chroot`), and runs it again from there. Returns
+/// only when the root is already not the initramfs.
+fn leave_rootfs() -> Result<(), String> {
+    use rustix::mount::{MountFlags, UnmountFlags, mount, mount_move, unmount};
+    let quiet = MountFlags::NOSUID | MountFlags::NOEXEC | MountFlags::NODEV;
+    std::fs::create_dir_all("/proc").map_err(|e| format!("making /proc: {e}"))?;
+    mount("proc", "/proc", "proc", quiet, None).map_err(|e| format!("mounting /proc: {e}"))?;
+    let mut info = String::new();
+    let read = std::fs::File::open("/proc/self/mountinfo")
+        .and_then(|f| f.take(MOUNTINFO_BOUND).read_to_string(&mut info));
+    unmount("/proc", UnmountFlags::empty()).map_err(|e| format!("unmounting /proc: {e}"))?;
+    read.map_err(|e| format!("reading /proc/self/mountinfo: {e}"))?;
+    if root_fs(&info) != Some("rootfs") {
+        return Ok(());
+    }
+    std::fs::create_dir_all(NEW_ROOT).map_err(|e| format!("making {NEW_ROOT}: {e}"))?;
+    mount(
+        "tmpfs",
+        NEW_ROOT,
+        "tmpfs",
+        MountFlags::empty(),
+        c"mode=0755",
+    )
+    .map_err(|e| format!("mounting the root's tmpfs: {e}"))?;
+    let init = Path::new(NEW_ROOT).join("init");
+    std::fs::copy("/init", &init).map_err(|e| format!("copying /init: {e}"))?;
+    // The initramfs is unreachable once the tmpfs covers it, so its copy goes now; this process keeps
+    // its pages until the exec below.
+    std::fs::remove_file("/init").map_err(|e| format!("removing the initramfs's /init: {e}"))?;
+    std::env::set_current_dir(NEW_ROOT).map_err(|e| format!("entering {NEW_ROOT}: {e}"))?;
+    mount_move(".", "/").map_err(|e| format!("moving {NEW_ROOT} to /: {e}"))?;
+    rustix::process::chroot(".").map_err(|e| format!("entering the new root: {e}"))?;
+    std::env::set_current_dir("/").map_err(|e| format!("entering /: {e}"))?;
+    let e = std::os::unix::process::CommandExt::exec(
+        std::process::Command::new("/init").args(["guest", "init"]),
+    );
+    Err(format!("running /init from the new root: {e}"))
+}
+
+/// The file system mounted at `/` in `mountinfo` (proc(5)): the last mount on `/`, as each covers the
+/// one before; `None` where no line names `/`.
+fn root_fs(mountinfo: &str) -> Option<&str> {
+    mountinfo
+        .lines()
+        .filter_map(|line| {
+            let (mount, fs) = line.split_once(" - ")?;
+            (mount.split(' ').nth(4)? == "/").then(|| fs.split(' ').next())?
+        })
+        .next_back()
+}
+
 /// Mounts what the node needs, each on a directory made for it.
-fn mount_all(state_disk: Option<&Path>) -> Result<(), String> {
-    for m in mounts(state_disk) {
+fn mount_all() -> Result<(), String> {
+    for m in mounts() {
         let (target, fs) = (m.target, m.fs);
         std::fs::create_dir_all(target).map_err(|e| format!("making {target}: {e}"))?;
-        rustix::mount::mount(&m.source, target, fs, m.flags, None)
+        rustix::mount::mount(m.source, target, fs, m.flags, None)
             .map_err(|e| format!("mounting {fs} on {target}: {e}"))?;
     }
-    for dir in [RUN, BOX_ROOT] {
+    for dir in [RUN, STATE, BOX_ROOT] {
         std::fs::create_dir_all(dir).map_err(|e| format!("making {dir}: {e}"))?;
     }
     Ok(())
 }
+
+/// The most read of a started process's first line: `ready` and its socket's path.
+const LINE_BOUND: u64 = 4096;
 
 /// Starts `/init` with `args` and waits for its `ready` line.
 fn start(exe: &Path, args: &[&std::ffi::OsStr]) -> Result<u32, String> {
@@ -317,7 +366,7 @@ fn start(exe: &Path, args: &[&std::ffi::OsStr]) -> Result<u32, String> {
         .take()
         .ok_or_else(|| format!("hex {what}'s stdout wasn't kept"))?;
     let mut line = String::new();
-    io::BufRead::read_line(&mut io::BufReader::new(stdout), &mut line)
+    io::BufRead::read_line(&mut io::BufReader::new(stdout.take(LINE_BOUND)), &mut line)
         .map_err(|e| format!("reading hex {what}'s first line: {e}"))?;
     if !line.starts_with("ready") {
         return Err(format!("hex {what} said {line:?}, not ready"));
@@ -358,7 +407,7 @@ mod tests {
     /// `/run` may run programs, since the staged bundles under it are containers' roots.
     #[test]
     fn init_mounts_section_4s_file_systems_and_keeps_state_on_tmpfs() {
-        let all = mounts(None);
+        let all = mounts();
         for (target, fs) in [
             ("/proc", "proc"),
             ("/sys", "sysfs"),
@@ -382,6 +431,29 @@ mod tests {
             );
         }
         assert!(Path::new(STATE).starts_with(RUN), "the state is at {STATE}");
+    }
+
+    /// HEX-GUEST-10 (§4): `init` reads the root's file system from mountinfo, so it leaves the
+    /// initramfs (`rootfs`) once and never again; hostile or short lines name no root.
+    #[test]
+    fn the_root_file_system_is_read_from_mountinfo() {
+        let initramfs = "1 1 0:2 / / rw - rootfs rootfs rw,size=1000k\n";
+        assert_eq!(root_fs(initramfs), Some("rootfs"));
+        let moved = "1 1 0:2 / / rw - rootfs rootfs rw\n\
+                     20 1 0:20 / / rw,relatime - tmpfs tmpfs rw,mode=755\n\
+                     21 20 0:21 / /proc rw - proc proc rw\n";
+        assert_eq!(root_fs(moved), Some("tmpfs"));
+        for hostile in [
+            "",
+            "\n\n",
+            "1 1 0:2 / /\n",
+            "1 1 0:2 / /run rw - tmpfs tmpfs rw\n",
+            " - - - - - \n",
+            "1 1 0:2 / / rw -rootfs\n",
+        ] {
+            assert_eq!(root_fs(hostile), None, "{hostile:?}");
+        }
+        assert_eq!(root_fs("1 1 0:2 / / rw - \n"), Some(""));
     }
 
     /// HEX-GUEST-9: a guest has no disk (§4, amended), so `init` takes no state disk, and refuses any

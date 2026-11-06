@@ -118,7 +118,10 @@ The node agent's socket is `SOCK_SEQPACKET` and carries an exec's stdio as `SCM_
 
 - Kernel: Shards' pinned 6.18.48 (`shards-guest.md` §5), which has every option the class needs.
 - PID 1: Hex's own static `hex` binary as the generated initramfs's init (`GuestSpec::init`), which mounts `/proc`,
-  `/sys`, cgroup2, `devtmpfs` and a tmpfs `/run`, and starts the node agent and the relay.
+  `/sys`, cgroup2, `devtmpfs` and a tmpfs `/run`, and starts the node agent and the relay. It first moves
+  itself off the initramfs onto a tmpfs root (`MS_MOVE` over `/`, then `chroot`, as switch_root does), since
+  each container's start pivots its root and pivot_root(2) refuses to leave the initramfs ("EINVAL The
+  current root directory is on the rootfs (initial ramfs) filesystem", pivot_root(2), ERRORS).
 - No disk (amended 2026-11-06): the node's record, its runtime directory and the staged bundles (§4a) live on the
   guest's tmpfs, charged to the guest's memory, which the node's budget holds (§1). What the record is for is a
   node's or relay's restart, which tmpfs survives; a guest's own reboot ends every box in it, so a disk would keep
@@ -172,6 +175,10 @@ Hex's tests of the channel, each citing its ID:
 - HEX-GUEST-4..5: the guest client's calls, stdio and end over a stream; an agent's bad bytes refused
   (`hex_client::guest`).
 - HEX-GUEST-6..7: the relay to the node's own socket; its bounds refused by type (`hex_node::relay`).
+- HEX-GUEST-9: `hex guest init` mounts §4's file systems, keeps the node's state on the tmpfs `/run`, and
+  takes no disk (`crates/hex-cli/src/guest.rs`).
+- HEX-GUEST-10: `hex guest init` reads the root's file system from mountinfo, so it leaves the initramfs
+  once; hostile lines name no root (`crates/hex-cli/src/guest.rs`).
 - HEX-GUEST-8: the conformance suite, every case, on `oci` and `process` boxes, through `hex guest relay` and the
   guest client, Unix sockets standing in for vsock (`crates/hex-cli/tests/node_socket.rs`): passed on fedora,
   rootless, 2026-11-04 (unit `hex-native-s5-test-20261104T091420Z`, tree `2f93b9d`).
