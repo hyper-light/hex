@@ -23,8 +23,6 @@
 //! - [`Policy::Proximity`]: the least RTT to the workload's home that hyper-swim's coordinates
 //!   predict; best fit breaks ties. A soft score: every admitting
 //!   node stays a candidate.
-//! - [`Policy::TieBreak`]: best fit, and among the nodes whose free capacity ties the best, the
-//!   least predicted RTT: what S4's falsifier would leave.
 //! - [`Policy::Oracle`]: as `Proximity` with the true RTT: the most a perfect coordinate could buy.
 //!
 //! **Load and compute are the day's own.** Every launch of the recorded day runs, in its order, at
@@ -65,7 +63,6 @@ pub const CLASSES: [Class; 3] = [Class::Oci, Class::Firecracker, Class::Shards];
 pub enum Policy {
     Blind,
     Proximity,
-    TieBreak,
     Oracle,
 }
 
@@ -411,14 +408,6 @@ impl Study {
                 Policy::Blind => 0.0,
                 Policy::Proximity => self.predicted(node, home)?,
                 Policy::Oracle => self.wan.rtt_ns(node, home)? as f64 / 1e9,
-                Policy::TieBreak => {
-                    if (key.cpu_milli, key.mem_bytes, key.gpus)
-                        != (best.cpu_milli, best.mem_bytes, best.gpus)
-                    {
-                        continue;
-                    }
-                    self.predicted(node, home)?
-                }
             };
             let wins = chosen.is_none_or(|(s, k)| score < s || (score == s && key < k));
             if wins {
@@ -492,12 +481,7 @@ mod tests {
     use super::*;
     use crate::model::Classes;
 
-    const POLICIES: [Policy; 4] = [
-        Policy::Blind,
-        Policy::Proximity,
-        Policy::TieBreak,
-        Policy::Oracle,
-    ];
+    const POLICIES: [Policy; 3] = [Policy::Blind, Policy::Proximity, Policy::Oracle];
 
     /// H10's two node models, each G2's recorded day on its own hosts.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -663,8 +647,7 @@ mod tests {
 
     /// S4, A2 (G3 step 2): do run blind placement; expect it never to count a decision as moved
     /// from itself. (That each other policy's effect can fail its test is shown by its mutants alone:
-    /// `no-proximity-term` fails `proximity_beats_blind`; `no-tie-break-term` and
-    /// `random-tie-break` fail `the_tie_break_takes_the_nearest_of_best_fits_ties`.)
+    /// `no-proximity-term` fails `proximity_beats_blind`.)
     #[test]
     fn blind_never_moves_from_itself() {
         let study = generate(&config(6), Fleet::AllKinds);
@@ -678,57 +661,9 @@ mod tests {
     fn proximity_and_the_oracle_place_nearer_than_blind() {
         for fleet in [Fleet::AllKinds, Fleet::Mixed] {
             let study = generate(&config(1), fleet);
-            let [blind, near, _, oracle] = POLICIES.map(|p| study.run(p).unwrap());
+            let [blind, near, oracle] = POLICIES.map(|p| study.run(p).unwrap());
             assert!(near.mean_rtt_ms() < blind.mean_rtt_ms(), "{fleet:?}");
             assert!(oracle.mean_rtt_ms() < blind.mean_rtt_ms(), "{fleet:?}");
-        }
-    }
-
-    /// S4, A2 (G3 step 2), an oracle test: do place a study's jobs one after another on each
-    /// recorded fleet, and at every decision find best fit's exact ties in the fast path's window
-    /// independently; expect the tie-break to choose the one of them with the least predicted RTT to
-    /// the job's home (the lower key among equals). Mutants `no-tie-break-term` (its score 0) and
-    /// `random-tie-break` (a node's hash, not its RTT) fail it. Whether the tie-break then places
-    /// nearer than blind over a whole run is measured, not asserted (`bench/sched/proximity.md`).
-    #[test]
-    fn the_tie_break_takes_the_nearest_of_best_fits_ties() {
-        for fleet in [Fleet::AllKinds, Fleet::Mixed] {
-            let study = generate(&config(1), fleet);
-            let mut report = study.run(Policy::Blind).unwrap();
-            let mut index = FitIndex::new(&study.nodes).unwrap();
-            let mut decisions = 0u64;
-            for job in &study.jobs {
-                let demand = demand(job);
-                let sampled = index.sampled_fit(&demand, &study.config.sample);
-                let Some(best) = sampled.best else {
-                    break;
-                };
-                let mut want: Option<(f64, Key)> = None;
-                for offset in 0..sampled.span {
-                    let node = node_id((sampled.start + offset) % index.len()).unwrap();
-                    if index.verdict(node, &demand).unwrap() != Verdict::Admits {
-                        continue;
-                    }
-                    let key = index.key(node).unwrap();
-                    if (key.cpu_milli, key.mem_bytes, key.gpus)
-                        != (best.cpu_milli, best.mem_bytes, best.gpus)
-                    {
-                        continue;
-                    }
-                    let score = study.predicted(node, job.home).unwrap();
-                    if want.is_none_or(|(s, k)| score < s || (score == s && key < k)) {
-                        want = Some((score, key));
-                    }
-                }
-                let got = study
-                    .choose(Policy::TieBreak, &index, &demand, job.home, &mut report)
-                    .unwrap()
-                    .unwrap();
-                assert_eq!(got, want.unwrap().1.node, "{fleet:?} decision {decisions}");
-                index.take(got, &demand).unwrap();
-                decisions += 1;
-            }
-            assert!(decisions > 0, "{fleet:?}");
         }
     }
 

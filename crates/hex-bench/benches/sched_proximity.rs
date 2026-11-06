@@ -9,8 +9,7 @@
 //! macOS hosts). Homes uniform; the WAN Azure's table with every zone pair at Azure's stated bound and
 //! no heights or jitter (`Access::Bound`); coordinates converged on hyper-swim's schedule until their
 //! median error stops falling. Each study runs under every policy: blind (the fast path's best fit),
-//! proximity (hyper-swim's predicted RTT), the tie-break (proximity only among best fit's ties) and
-//! the oracle (the true RTT). The seeds are as many as the claim needs (`SEEDS`). Then, labelled and
+//! proximity (hyper-swim's predicted RTT) and the oracle (the true RTT). The seeds are as many as the claim needs (`SEEDS`). Then, labelled and
 //! not of record, two sensitivity runs over the same seeds: skewed homes, and the modelled WAN
 //! (`Access::Modelled`). Virtual time: the numbers depend on the seed and the build, not the host's
 //! load.
@@ -45,12 +44,7 @@ fn seeds() -> u64 {
     ((1.0 - CLAIM_CONFIDENCE).ln() / (1.0 - CLAIM_FRACTION).ln()).ceil() as u64
 }
 
-const POLICIES: [Policy; 4] = [
-    Policy::Blind,
-    Policy::Proximity,
-    Policy::TieBreak,
-    Policy::Oracle,
-];
+const POLICIES: [Policy; 3] = [Policy::Blind, Policy::Proximity, Policy::Oracle];
 
 fn ms(ns: u64) -> f64 {
     ns as f64 / 1e6
@@ -163,7 +157,7 @@ fn main() {
     for (label, homes, access) in runs {
         // Least gains of proximity over blind (goodput %, p99 cut %): all workloads, then each kind.
         let mut least = [(f64::MAX, f64::MAX); 4];
-        let (mut tie_nearer, mut studies, mut max_rounds) = (0u64, 0u64, 0usize);
+        let (mut studies, mut max_rounds) = (0u64, 0usize);
         let mut oracle_gap: f64 = 0.0;
         for (fleet, recorded) in &fleets {
             for seed in 1..=seeds {
@@ -204,15 +198,12 @@ fn main() {
                     least[k] = (least[k].0.min(*gp), least[k].1.min(*p));
                 }
                 studies += 1;
-                if reports[2].mean_rtt_ms() < reports[0].mean_rtt_ms() {
-                    tie_nearer += 1;
-                }
                 oracle_gap = oracle_gap
-                    .max(100.0 * (reports[3].goodput_per_s() / reports[1].goodput_per_s() - 1.0));
+                    .max(100.0 * (reports[2].goodput_per_s() / reports[1].goodput_per_s() - 1.0));
             }
         }
         println!(
-            "\nSUMMARY {label}: {studies} studies; most convergence rounds {max_rounds}; tie-break nearer than blind on {tie_nearer}; oracle's goodput over proximity's at most {oracle_gap:.2}%"
+            "\nSUMMARY {label}: {studies} studies; most convergence rounds {max_rounds}; oracle's goodput over proximity's at most {oracle_gap:.2}%"
         );
         for (k, name) in ["all", "Oci", "Firecracker", "Shards"].iter().enumerate() {
             println!(
