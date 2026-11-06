@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Shards and Hex's guest on an x86_64 Linux host with KVM, everything fetched or built pinned by SHA-256 as
-# native step 5's job does on macOS (its m2.sh): zig 0.16.0 by its index's hash; Shards at p/internal-local
-# b8270370 plus hex/shards-api a0cced87 (from step 5's bundle), built as it ships (release) or as step 5 ran
-# (debug); Shards' released x86_64 kernel and config, pinned by Shards' crates/shards/src/kernel.rs; and
-# Hex's guest image from cp/t7-native-s5 by its scripts/guest/image.sh. For bench/sched/shards_overhead.py
+# Shards, Firecracker and Hex's guest on an x86_64 Linux host with KVM, everything fetched or built pinned by
+# SHA-256 as native step 5's job does on macOS (its m2.sh): zig 0.16.0 by its index's hash; Shards at
+# p/internal-local b8270370 plus hex/shards-api a0cced87 (from step 5's bundle), built as it ships (release)
+# or as step 5 ran (debug); Firecracker's v1.17.0 release by its published SHA-256; Shards' released x86_64
+# kernel and config, pinned by Shards' crates/shards/src/kernel.rs; and Hex's guest image from
+# cp/t7-native-s5 by its scripts/guest/image.sh. For bench/sched/shards_overhead.py
 # (bench/sched/shards_overhead.md).
 #   shards_guest.sh OUT SHARDS_BUNDLE HEX_REPO [release|debug]
 set -euo pipefail
@@ -59,11 +60,26 @@ done
 need "$k/vmlinux-6.18.48-x86_64" e23c31e89580f2fb8524cb0f560cbd356c22f2de6ae82081352d809151434261
 (cd "$k" && grep -E ' (vmlinux|config)-6\.18\.48-x86_64$' SHA256SUMS | sha256sum -c -)
 
+echo "== firecracker"
+f=$out/firecracker
+fv=v1.17.0
+if ! [ -x "$f/firecracker" ]; then
+    mkdir -p "$f"
+    curl -fsSL -o "$f/firecracker.tgz" "https://github.com/firecracker-microvm/firecracker/releases/download/$fv/firecracker-$fv-x86_64.tgz"
+    need "$f/firecracker.tgz" 06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558
+    tar -xzf "$f/firecracker.tgz" -C "$f"
+    cp "$f/release-$fv-x86_64/firecracker-$fv-x86_64" "$f/firecracker"
+fi
+echo "firecracker $fv $(sha "$f/firecracker")"
+
 echo "== hex's guest image"
 h=$out/hex
 [ -d "$h/.git" ] || git clone -q --no-checkout "$hex_repo" "$h"
 git -C "$h" fetch -q "$hex_repo" +cp/t7-native-s5:refs/remotes/src/s5
 git -C "$h" checkout -q -B s5 src/s5
 git -C "$h" log --oneline -1
-(cd "$h" && cargo fetch --locked -q)
-CARGO_TARGET_DIR=$out/target-musl bash "$h/scripts/guest/image.sh" x86_64 "$k/vmlinux-6.18.48-x86_64" "$k/config-6.18.48-x86_64" "$out/guest-x86_64"
+if ! [ -f "$out/guest-x86_64/initramfs-x86_64.cpio" ]; then
+    (cd "$h" && cargo fetch --locked -q)
+    CARGO_TARGET_DIR=$out/target-musl bash "$h/scripts/guest/image.sh" x86_64 "$k/vmlinux-6.18.48-x86_64" "$k/config-6.18.48-x86_64" "$out/guest-x86_64"
+fi
+sha256sum "$out/guest-x86_64/hex" "$out/guest-x86_64/initramfs-x86_64.cpio"

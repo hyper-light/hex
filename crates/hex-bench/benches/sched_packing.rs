@@ -310,12 +310,21 @@ fn measure(set: &str, name: &str, cluster: &Cluster, clock: Clock) {
     }
 }
 
+/// Whether Hex and both best fits reach 90% on every seed at `clock`.
+fn reaches(cluster: &Cluster, sample: Sample, clock: Clock) -> bool {
+    hex_and_best_fits(cluster, sample, clock)
+        .iter()
+        .all(|runs| runs.iter().all(|p| p.reached))
+}
+
 /// The sample's floor from data (Ada's rule, 2026-11-06; the lead, 17:14Z): on `copies` copies of a
 /// node model's hosts (one of each: m5d.metal's one, the fleet's ten), the fewest admitting nodes a
 /// decision can sample with Hex still meeting `AC-T7.4.3`'s bar on every seed, set and clock, at that
-/// sample and every larger one. Each set runs at its slowest speeds with every node scanned. From the
-/// whole cluster down, it prints each sample's least cut against the two best fits sampled alike and
-/// the most Hex strands, until a sample misses; the fewest is the one above it.
+/// sample and every larger one. Each set runs with no completions and at its slowest speeds, as the
+/// record does: found with every node scanned, then for each sample the slowest from there up at which
+/// every arm reaches 90% on every seed, since a sample packs less tightly. From the whole cluster down,
+/// it prints each sample's least cut against the two best fits sampled alike, the most Hex strands and
+/// the speeds, until a sample misses; the fewest is the one above it.
 fn floors(model: &str, copies: usize) {
     let (name, hosts) = match model {
         "m5d.metal" => ("huawei-r5-day30", 1),
@@ -339,13 +348,13 @@ fn floors(model: &str, copies: usize) {
         grow(trace(&format!("{name}.keepalive.trace"))),
     );
     let nodes = recorded.nodes.len();
-    let whole = |day: &Cluster| Sample {
-        min_feasible: u32::try_from(nodes).unwrap(),
+    let sampled = |day: &Cluster, want: usize| Sample {
+        min_feasible: u32::try_from(want).unwrap(),
         per_mille: 0,
         ..sample(day)
     };
-    // Each set's three runs: no completions, and its slowest speeds, every node scanned.
-    let mut runs: Vec<(String, Cluster, Clock)> = Vec::new();
+    // Each set's days, with no completions and with each lifetime's slowest speed, every node scanned.
+    let mut sets: Vec<(String, Vec<(Cluster, Option<Time>)>)> = Vec::new();
     for (set, class) in [
         ("mix", None),
         ("oci", Some(Class::Oci)),
@@ -358,57 +367,71 @@ fn floors(model: &str, copies: usize) {
             Some(class) => alone(day, class).unwrap(),
         };
         let (recorded, kept_alive) = (as_set(&recorded), as_set(&kept_alive));
-        runs.push((
-            format!("{set}, no completions"),
-            recorded.clone(),
-            Clock::Held,
-        ));
+        let mut days = vec![(recorded.clone(), None)];
         for (lives, day) in [
             ("lifetimes as recorded", recorded),
             ("with the keep-alive", kept_alive),
         ] {
-            let speed = slowest(&set, lives, &day, whole(&day)).expect("a speed reaching 90%");
-            runs.push((
-                format!("{set}, {speed}x, {lives}"),
-                day,
-                Clock::Compressed(speed),
-            ));
+            let speed = slowest(&set, lives, &day, sampled(&day, nodes))
+                .expect("a speed reaching 90%");
+            days.push((day, Some(speed)));
         }
+        sets.push((set, days));
     }
     println!(
-        "floors, {model} x{copies}, {nodes} nodes: sample | least cut vs best_fit and most_allocated, any set, clock and seed | most Hex strands, per-mille | misses"
+        "floors, {model} x{copies}, {nodes} nodes: sample | least cut vs best_fit and most_allocated, any set, clock and seed | most Hex strands, per-mille | speeds | misses"
     );
     for want in (1..=nodes).rev() {
-        let (mut least, mut most, mut misses) = (f64::INFINITY, 0u64, Vec::new());
-        for (run, day, clock) in &runs {
-            let sampled = Sample {
-                min_feasible: u32::try_from(want).unwrap(),
-                ..whole(day)
-            };
-            for (seed, [hex, best, most_allocated]) in
-                (0..SEEDS).zip(hex_and_best_fits(day, sampled, *clock))
-            {
-                most = most.max(hex.stranded_per_mille());
-                let ended = |p: &PackReport| *clock == Clock::Held || p.completions > 0;
-                for base in [&best, &most_allocated] {
-                    least = least.min(cut(&hex, base));
-                    let why = if !(hex.reached && base.reached) {
-                        "90% not reached"
-                    } else if !(ended(&hex) && ended(base)) {
-                        "no completions"
-                    } else if base.stranded_per_mille() == 0 {
-                        "a best fit strands nothing"
-                    } else if cut(&hex, base) < 30.0 {
-                        "under 30%"
-                    } else {
-                        continue;
-                    };
-                    misses.push(format!("{run} seed {seed}: {why}"));
+        let (mut least, mut most, mut speeds, mut misses) =
+            (f64::INFINITY, 0u64, Vec::new(), Vec::new());
+        for (set, days) in &sets {
+            for (day, whole_speed) in days {
+                let sample = sampled(day, want);
+                let clock = match *whole_speed {
+                    None => Clock::Held,
+                    Some(from) => {
+                        // Doubling from the whole scan's speed finds one that reaches, once no
+                        // completions at all does; then the first from there up that does.
+                        let speed = reaches(day, sample, Clock::Held).then(|| {
+                            let mut up = from;
+                            while !reaches(day, sample, Clock::Compressed(up)) {
+                                up = up.saturating_mul(2);
+                            }
+                            (from..=up)
+                                .find(|&speed| reaches(day, sample, Clock::Compressed(speed)))
+                                .unwrap_or(up)
+                        });
+                        let Some(speed) = speed else {
+                            misses.push(format!("{set}: 90% not reached with no completions"));
+                            continue;
+                        };
+                        speeds.push(speed);
+                        Clock::Compressed(speed)
+                    }
+                };
+                for (seed, [hex, best, most_allocated]) in
+                    (0..SEEDS).zip(hex_and_best_fits(day, sample, clock))
+                {
+                    most = most.max(hex.stranded_per_mille());
+                    let ended = |p: &PackReport| clock == Clock::Held || p.completions > 0;
+                    for base in [&best, &most_allocated] {
+                        least = least.min(cut(&hex, base));
+                        let why = if !(ended(&hex) && ended(base)) {
+                            "no completions"
+                        } else if base.stranded_per_mille() == 0 {
+                            "a best fit strands nothing"
+                        } else if cut(&hex, base) < 30.0 {
+                            "under 30%"
+                        } else {
+                            continue;
+                        };
+                        misses.push(format!("{set}, {clock:?}, seed {seed}: {why}"));
+                    }
                 }
             }
         }
         println!(
-            "{want:>6} | {least:.1}% | {most} | {}",
+            "{want:>6} | {least:.1}% | {most} | {speeds:?} | {}",
             if misses.is_empty() {
                 "none".to_string()
             } else {

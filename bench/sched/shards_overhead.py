@@ -5,7 +5,9 @@ recorded workload uses, the host memory an idle guest holds and its boot-to-read
         [--memory-runs RUNS]   (0: boot-to-ready alone)
 
 Reads SHARDS_BIN, HEX_GUEST_KERNEL and HEX_GUEST_INITRD and boots as Hex's scripts/guest/boot_check.py does
-(`shards run vm`, `console=ttyS0 panic=-1`, no console). READY is boot_check's: a CONNECT to the relay's
+(`shards run vm`, `console=ttyS0 panic=-1`, no console). With HEX_VMM=firecracker it boots the same guest,
+kernel and command line under Firecracker instead (FIRECRACKER_BIN, `--no-api`, a config file naming the
+kernel, initrd, vCPUs, memory and a vsock), for Firecracker's own overhead. READY is boot_check's: a CONNECT to the relay's
 control port answered OK, then the connection's 8-byte token, tried every millisecond from the moment the
 VM process is started. A boot not READY by its bound is a failure, counted: the bound follows Hex's rule
 for learned waits (the lead, 2026-11-06), twice the slowest boot to ready on record for this host class,
@@ -23,6 +25,7 @@ waited for, which the kernel ends without a bound of ours.
   guest on a node, is a cost per node, not per guest, so the figure doesn't depend on how many share it.
 """
 
+import json
 import os
 import re
 import socket
@@ -89,9 +92,18 @@ def boot(work, cpus, mib):
     vsock = os.path.join(work, "vsock.sock")
     if os.path.exists(vsock):
         os.unlink(vsock)
-    args = [os.environ["SHARDS_BIN"], "run", "vm", "--kernel", os.environ["HEX_GUEST_KERNEL"], "--initrd",
-            os.environ["HEX_GUEST_INITRD"], "--vsock", vsock, "--cpus", str(cpus), "--memory", str(mib),
-            "--cmdline", CMDLINE, "--no-console"]
+    if os.environ.get("HEX_VMM", "shards") == "firecracker":
+        config = os.path.join(work, "vm.json")
+        with open(config, "w") as f:
+            json.dump({"boot-source": {"kernel_image_path": os.environ["HEX_GUEST_KERNEL"],
+                                       "initrd_path": os.environ["HEX_GUEST_INITRD"], "boot_args": CMDLINE},
+                       "drives": [], "machine-config": {"vcpu_count": cpus, "mem_size_mib": mib},
+                       "vsock": {"guest_cid": 3, "uds_path": vsock}}, f)
+        args = [os.environ["FIRECRACKER_BIN"], "--no-api", "--config-file", config]
+    else:
+        args = [os.environ["SHARDS_BIN"], "run", "vm", "--kernel", os.environ["HEX_GUEST_KERNEL"], "--initrd",
+                os.environ["HEX_GUEST_INITRD"], "--vsock", vsock, "--cpus", str(cpus), "--memory", str(mib),
+                "--cmdline", CMDLINE, "--no-console"]
     log = open(os.path.join(work, "vm.log"), "wb")
     start = time.monotonic()
     vm = subprocess.Popen(args, stdout=log, stderr=subprocess.STDOUT)
