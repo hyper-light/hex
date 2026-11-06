@@ -410,22 +410,22 @@ impl shards_api::Guest for Patient {
     }
 }
 
-/// HEX-GUEST-33 (§2, CLAUDE.md §4): dial a booted guest three times: expect the first dial to wait on
-/// the facts alone, the guest listening or ending (`Duration::MAX`, Shards' "until it connects or the
-/// guest ends"), and each later one a single try (`Duration::ZERO`), as the guest's relay already
-/// listens and a refusal then is its end, not its boot.
+/// HEX-GUEST-33 (§2, CLAUDE.md §4): dial a booted guest three times: expect the first dial given the
+/// caller's bound on the boot, and each later one a single try (`Duration::ZERO`), as the guest's relay
+/// already listens and a refusal then is its end, not its boot.
 #[test]
 fn the_first_dial_waits_for_the_guest_and_later_ones_try_once() {
     let guest = Arc::new(Patient {
         listener: TcpListener::bind("127.0.0.1:0").unwrap(),
         given: std::sync::Mutex::new(Vec::new()),
     });
-    let link = shards::ShardsLink::new(guest.clone());
+    let first = Duration::from_millis(354);
+    let link = shards::ShardsLink::new(guest.clone(), first);
     for port in [stream::CONTROL_PORT, stream::STDIO_PORT, stream::STDIO_PORT] {
         link.dial(port).unwrap();
     }
     assert_eq!(
         *guest.given.lock().unwrap(),
-        [Duration::MAX, Duration::ZERO, Duration::ZERO]
+        [first, Duration::ZERO, Duration::ZERO]
     );
 }

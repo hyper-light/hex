@@ -50,19 +50,21 @@ impl Duplex for ShardsStream {
     }
 }
 
-/// A guest's ports. Until a dial has connected, a dial waits on the facts alone: Shards' client retries
-/// a guest that isn't listening yet until it listens or ends (`Duration::MAX`), so the first dial is the
-/// wait for the guest to be ready, its boot however long it takes. Once one has, the guest's relay
-/// listens, so each later dial is one try (`Duration::ZERO`): a refusal then is the relay's end.
+/// A guest's ports. Until a dial has connected, a dial waits for the guest to listen, retried by
+/// Shards' client until it listens, ends, or `first` passes, the caller's bound on a boot (learned,
+/// `hex_runtime::guest::GuestRuntime::first_dial_bound`). Once one has, the guest's relay listens, so
+/// each later dial is one try (`Duration::ZERO`): a refusal then is the relay's end.
 pub struct ShardsLink {
     guest: Arc<dyn shards_api::Guest>,
+    first: Duration,
     listened: AtomicBool,
 }
 
 impl ShardsLink {
-    pub fn new(guest: Arc<dyn shards_api::Guest>) -> Self {
+    pub fn new(guest: Arc<dyn shards_api::Guest>, first: Duration) -> Self {
         Self {
             guest,
+            first,
             listened: AtomicBool::new(false),
         }
     }
@@ -73,7 +75,7 @@ impl Link for ShardsLink {
         let patience = if self.listened.load(Ordering::Acquire) {
             Duration::ZERO
         } else {
-            Duration::MAX
+            self.first
         };
         let stream = self
             .guest

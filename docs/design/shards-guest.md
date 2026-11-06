@@ -442,8 +442,12 @@ Hex's tests of the channel, each citing its ID:
   the one read (`hex guest`).
 - HEX-GUEST-32: an exec's stdio connections carry no send bound, as a local exec's stdin is the caller's own
   pipe; only the control connection is bounded, as the local client's socket is (`hex_client::guest`).
-- HEX-GUEST-33: the first dial to a booted guest waits on the facts, its listening or its end, however long the
-  boot; each later dial is one try (`hex_client::guest::shards::ShardsLink`).
+- HEX-GUEST-33: the first dial to a booted guest is given the caller's bound on the boot; each later dial is one
+  try (`hex_client::guest::shards::ShardsLink`).
+- HEX-GUEST-34: a boot's first dial is bounded, never unbounded: twice the slowest boot to ready on record before
+  any boot is seen (bench/native/guest/boot-ready/RECORD.md), then twice the slowest of the record's and the
+  node's own, only rising; a guest alive and not ready within it is stopped, counted and booted once more, and
+  only a second hang refuses its caller, by type (`hex_runtime::guest::GuestRuntime`).
 
 ## 7. What would falsify it
 

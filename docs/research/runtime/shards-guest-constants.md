@@ -83,7 +83,7 @@ Behaviour fixed on the way:
 | reader buffer | `stream::MAX_FRAME` | guest.rs:193 | c | One whole frame at the wire's bound: the unit the deframer takes |
 | stdio send timeout = `ANSWER_PATIENCE` | gone | guest.rs:93 | fact | The copier ends with its connection, when the exec does, as a local exec's pipe does (HEX-GUEST-32; this was a bug) |
 | control send timeout = `ANSWER_PATIENCE` (relied on) | 300 s | guest.rs:245 | relied | The use is right: it is the local client's own socket bound (crates/hex-client/src/linux.rs:132), so both paths agree (CLAUDE.md §8). `ANSWER_PATIENCE` is the client's (goal 1) and is (d) there |
-| dial patience = `ANSWER_PATIENCE` | gone: `Duration::MAX`, then `ZERO` | crates/hex-client/src/guest/shards.rs:54 | fact | The first dial waits until the guest listens or ends; later dials make one try (HEX-GUEST-33; Shards' semantics at d325030e) |
+| dial patience = `ANSWER_PATIENCE` | gone: the first dial `GuestRuntime::first_dial_bound`, later `ZERO` | crates/hex-client/src/guest/shards.rs:54, crates/hex-runtime/src/guest/mod.rs (`RECORDED_BOOT`) | b, then a | The lead's rule for learned waits. Before any boot, 2 × the record's slowest boot to ready (HVF N=40, max 177 ms: bench/native/guest/boot-ready/RECORD.md). Then 2 × max(record, this node's slowest), only rising. A hung guest is stopped, counted and booted once more; a second hang is refused by type (HEX-GUEST-33, -34). KVM and WHP records are pending (fedora and jupiter down), so they take HVF's for now |
 | stage rows | — | crates/hex-client/src/guest/stage.rs | C | C's |
 | `ANSWER_PATIENCE` call wait (relied on) | 300 s | calls.rs:296 | relied | goal 1's. The use is the client's own, unchanged by step 5 |
 | `MAX_LIST` (relied on) | 1<<20 | calls.rs:102 | relied | goal 1's. Unused by step 5 |
@@ -130,7 +130,7 @@ Behaviour fixed on the way:
 | name | value | file:line | kind | source or record |
 |---|---|---|---|---|
 | guest cmdline `panic=-1` | -1 | crates/hex-runtime/src/guest/mod.rs:131 | c | kernel-parameters.txt `panic=`: a negative timeout reboots at once (kernel/panic.c `panic_timeout`) |
-| dial/boot patience = `ANSWER_PATIENCE` | gone | mod.rs (ShardsLink) | fact | HEX-GUEST-33 |
+| dial/boot patience = `ANSWER_PATIENCE` | gone: learned, as above | mod.rs | b, then a | HEX-GUEST-34 |
 | `files::LIMITS` (relied on) | — | mod.rs | C | C's |
 | `MAX_CONFIG_BYTES` | `hex_core::bundle::MAX_CONFIG_BYTES` | crates/hex-runtime/src/guest/rewrite.rs:16 | relied | It is now the oci class's own bound, not a copy (goal 1's; (d) there: "a spec is a few kilobytes"). The use is right: the guest's node parses under the same bound |
 | `MAX_SHARES` | 17 / 31 | crates/hex-runtime/src/guest/shares.rs:27 | c | as hex-cli's above |

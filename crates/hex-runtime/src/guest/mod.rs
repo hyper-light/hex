@@ -10,8 +10,9 @@ pub mod shares;
 
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hex_api::{
     BoxId, BoxInfo, BoxSpec, Class, ClassSpec, Proc, Program, Refusal, Runtime, Signal, Stdio,
@@ -158,11 +159,24 @@ struct Booted {
     client: Client,
 }
 
+/// The slowest boot to ready on record before this node has seen one: HVF's, the most of N=40 on
+/// adas-mac-studio.local-2 (bench/native/guest/boot-ready/RECORD.md). KVM and WHP aren't recorded yet,
+/// so they take it too, as that record states.
+pub const RECORDED_BOOT: Duration = Duration::from_millis(177);
+
+/// Boots of one guest: the first, and one more where the first hung alive past its bound, as a hung
+/// boot has another guest to try before its caller is refused.
+const BOOTS: usize = 2;
+
 /// The `oci` class through a Shards guest.
 pub struct GuestRuntime {
     guests: Arc<dyn shards_api::Guests>,
     config: GuestConfig,
     booted: Mutex<Option<Arc<Booted>>>,
+    /// The slowest boot to ready this node has seen, the learned half of the first dial's bound.
+    slowest: Mutex<Duration>,
+    /// Guests stopped for hanging alive past the bound, never ready.
+    retired: AtomicU64,
 }
 
 fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
@@ -170,14 +184,35 @@ fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
 }
 
 impl GuestRuntime {
-    /// The class over `guests`, booting `config`'s guest when first asked. Its first dial waits for the
-    /// guest to listen or end, however long its boot takes ([`ShardsLink`]).
+    /// The class over `guests`, booting `config`'s guest when first asked. A boot's first dial waits at
+    /// most [`Self::first_dial_bound`] for the guest to listen ([`ShardsLink`]).
     pub fn new(guests: Arc<dyn shards_api::Guests>, config: GuestConfig) -> Self {
         Self {
             guests,
             config,
             booted: Mutex::new(None),
+            slowest: Mutex::new(Duration::ZERO),
+            retired: AtomicU64::new(0),
         }
+    }
+
+    /// How long a boot may take to be ready (the lead's rule for learned waits): twice the slowest of
+    /// the record's and this node's own, so it only rises; before any boot here, twice the record's.
+    pub fn first_dial_bound(&self) -> Result<Duration, Refusal> {
+        let seen = *self.slowest.lock().map_err(poisoned)?;
+        Ok(seen.max(RECORDED_BOOT).saturating_mul(2))
+    }
+
+    /// A boot to ready this node has seen, taking `took`: the bound rises with it, never falls.
+    pub fn learn(&self, took: Duration) {
+        if let Ok(mut slowest) = self.slowest.lock() {
+            *slowest = (*slowest).max(took);
+        }
+    }
+
+    /// Guests stopped because they stayed alive past the bound without being ready.
+    pub fn retired(&self) -> u64 {
+        self.retired.load(Ordering::Relaxed)
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, Option<Arc<Booted>>>, Refusal> {
@@ -197,26 +232,49 @@ impl GuestRuntime {
         self.guests
             .backend()
             .map_err(|why| refusal("finding Shards' backend", &why))?;
-        let guest: Arc<dyn shards_api::Guest> = self
-            .guests
-            .boot(&self.config.spec())
-            .map_err(|why| refusal("booting the node's guest", &why))?
-            .into();
-        let link: Arc<dyn Link> = Arc::new(ShardsLink::new(Arc::clone(&guest)));
-        let client = match Client::connect(Arc::clone(&link)) {
-            Ok(client) => client,
-            Err(why) => {
-                let _ = guest.stop();
-                return Err(why);
+        let mut hung = Vec::with_capacity(BOOTS);
+        for _ in 0..BOOTS {
+            let bound = self.first_dial_bound()?;
+            let began = Instant::now();
+            let guest: Arc<dyn shards_api::Guest> = self
+                .guests
+                .boot(&self.config.spec())
+                .map_err(|why| refusal("booting the node's guest", &why))?
+                .into();
+            let patience = bound.saturating_sub(began.elapsed());
+            let link: Arc<dyn Link> = Arc::new(ShardsLink::new(Arc::clone(&guest), patience));
+            match Client::connect(Arc::clone(&link)) {
+                Ok(client) => {
+                    self.learn(began.elapsed());
+                    let b = Arc::new(Booted {
+                        guest,
+                        link,
+                        client,
+                    });
+                    *booted = Some(Arc::clone(&b));
+                    return Ok(b);
+                }
+                Err(why) => {
+                    // Alive and not ready within the bound: a hang, retired for another boot. Ended,
+                    // or refused otherwise, the boot's failure is its caller's.
+                    let alive = matches!(guest.wait_for(Duration::ZERO), Ok(None));
+                    let _ = guest.stop();
+                    if !alive {
+                        return Err(why);
+                    }
+                    self.retired.fetch_add(1, Ordering::Relaxed);
+                    hung.push(format!("not ready within {bound:?}: {why}"));
+                }
             }
-        };
-        let b = Arc::new(Booted {
-            guest,
-            link,
-            client,
-        });
-        *booted = Some(Arc::clone(&b));
-        Ok(b)
+        }
+        Err(Refusal::Os {
+            op: "booting the node's guest",
+            why: format!(
+                "{BOOTS} guests booted, each alive and not ready within twice the slowest boot to \
+                 ready seen (bench/native/guest/boot-ready/RECORD.md): {}",
+                hung.join("; ")
+            ),
+        })
     }
 
     /// The guest if it is booted: a call about a box needs no boot, as there's no box before one.

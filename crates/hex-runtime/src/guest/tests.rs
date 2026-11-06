@@ -483,3 +483,232 @@ fn a_tarball_root_stages_everywhere_and_a_directory_root_is_refused_on_windows()
         assert_eq!(got.unwrap().items[0].source, Source::Path(dir));
     }
 }
+
+/// How a stand-in guest answers its first dial.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Boots {
+    /// Its relay answers: the token, then the node's hello.
+    Ready,
+    /// Alive, its relay never listening: the dial's patience runs out.
+    Hung,
+}
+
+/// A stand-in for Shards whose guests boot as `plan` says, one entry a boot, recording each first
+/// dial's patience and each stop.
+struct Planned {
+    plan: Mutex<Vec<Boots>>,
+    patience: Arc<Mutex<Vec<Duration>>>,
+    stops: Arc<AtomicUsize>,
+    boots: AtomicUsize,
+}
+
+impl Planned {
+    fn new(plan: &[Boots]) -> Self {
+        Self {
+            plan: Mutex::new(plan.iter().rev().copied().collect()),
+            patience: Arc::new(Mutex::new(Vec::new())),
+            stops: Arc::new(AtomicUsize::new(0)),
+            boots: AtomicUsize::new(0),
+        }
+    }
+}
+
+struct PlannedGuest {
+    boots: Boots,
+    patience: Arc<Mutex<Vec<Duration>>>,
+    stops: Arc<AtomicUsize>,
+}
+
+/// A loopback stream as Shards' guest stream.
+struct Looped(std::net::TcpStream);
+
+impl std::io::Read for Looped {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl std::io::Write for Looped {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+impl shards_api::Stream for Looped {
+    fn try_clone(&self) -> std::io::Result<Box<dyn shards_api::Stream>> {
+        Ok(Box::new(Looped(self.0.try_clone()?)))
+    }
+
+    fn shutdown(&self, how: std::net::Shutdown) -> std::io::Result<()> {
+        self.0.shutdown(how)
+    }
+
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.0.set_read_timeout(timeout)
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.0.set_write_timeout(timeout)
+    }
+}
+
+/// A relay and node agent in one: the connection's token, then the answer to its hello.
+fn ready_relay() -> std::net::TcpStream {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        conn.write_all(&7u64.to_le_bytes()).unwrap();
+        let mut d = stream::Deframer::new(hex_core::wire::MAX_MESSAGE);
+        let mut byte = [0u8; 1];
+        let message = loop {
+            conn.read_exact(&mut byte).unwrap();
+            if let (_, Some(m)) = d.take(&byte).unwrap() {
+                break m;
+            }
+        };
+        let (h, _) =
+            hex_core::wire::read_request_apart(&message, hex_core::wire::MAX_MESSAGE).unwrap();
+        let hello = hex_core::wire::Answer::Hello(hex_core::wire::Hello {
+            version: hex_core::wire::VERSION,
+            classes: vec![hex_api::Class::Oci],
+            limits: hex_core::wire::Limits {
+                connections: 1,
+                message_bytes: hex_core::wire::MAX_MESSAGE,
+                in_flight: 1,
+                programs: 1,
+            },
+        });
+        let bytes = hex_core::wire::answer(
+            hex_core::wire::FIRST,
+            h.id,
+            &hello,
+            hex_core::wire::MAX_MESSAGE,
+        )
+        .unwrap();
+        conn.write_all(&stream::frame(&bytes, hex_core::wire::MAX_MESSAGE).unwrap())
+            .unwrap();
+        // Held until the client goes, as a relay's connection is.
+        let _ = conn.read(&mut byte);
+    });
+    std::net::TcpStream::connect(addr).unwrap()
+}
+
+impl shards_api::Guest for PlannedGuest {
+    fn connect(
+        &self,
+        port: u32,
+        patience: Duration,
+    ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        self.patience.lock().unwrap().push(patience);
+        match self.boots {
+            Boots::Ready => Ok(Box::new(Looped(ready_relay()))),
+            Boots::Hung => Err(shards_api::Refusal::Channel {
+                port,
+                why: format!("unanswered in {patience:?}"),
+            }),
+        }
+    }
+
+    fn stop(&self) -> Result<(), shards_api::Refusal> {
+        self.stops.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn wait_for(&self, _: Duration) -> Result<Option<shards_api::End>, shards_api::Refusal> {
+        Ok(None)
+    }
+}
+
+impl shards_api::Guests for Planned {
+    fn backend(&self) -> Result<shards_api::Backend, shards_api::Refusal> {
+        shards_api::backend()
+    }
+
+    fn boot(
+        &self,
+        _spec: &shards_api::GuestSpec,
+    ) -> Result<Box<dyn shards_api::Guest>, shards_api::Refusal> {
+        self.boots.fetch_add(1, Ordering::SeqCst);
+        let boots = self.plan.lock().unwrap().pop().unwrap();
+        Ok(Box::new(PlannedGuest {
+            boots,
+            patience: Arc::clone(&self.patience),
+            stops: Arc::clone(&self.stops),
+        }))
+    }
+}
+
+/// HEX-GUEST-34 (the lead's rule for learned waits): boot a guest before any boot is seen: expect its
+/// first dial bounded by twice the record's slowest boot to ready, never unbounded.
+#[test]
+fn the_first_boot_is_bounded_by_the_record() {
+    if shards_api::backend().is_err() {
+        return;
+    }
+    let guests = Arc::new(Planned::new(&[Boots::Ready]));
+    let rt = GuestRuntime::new(guests.clone(), config());
+    rt.guest().unwrap();
+    let given = guests.patience.lock().unwrap()[0];
+    assert!(
+        given <= 2 * RECORDED_BOOT && given > RECORDED_BOOT,
+        "{given:?}"
+    );
+}
+
+/// HEX-GUEST-34: tell the runtime of a boot slower than the record, then a faster one, and boot: expect
+/// the first dial bounded by twice the slowest seen, the bound only rising.
+#[test]
+fn the_bound_rises_with_a_slow_boot_and_never_falls() {
+    if shards_api::backend().is_err() {
+        return;
+    }
+    let guests = Arc::new(Planned::new(&[Boots::Ready]));
+    let rt = GuestRuntime::new(guests.clone(), config());
+    let slow = 3 * RECORDED_BOOT;
+    rt.learn(slow);
+    rt.learn(RECORDED_BOOT / 2);
+    assert_eq!(rt.first_dial_bound().unwrap(), 2 * slow);
+    rt.guest().unwrap();
+    let given = guests.patience.lock().unwrap()[0];
+    assert!(given <= 2 * slow && given > slow, "{given:?}");
+}
+
+/// HEX-GUEST-34 (no caller fails where an alternative exists): boot a guest that stays alive and never
+/// listens, then one that does: expect the first stopped and counted, the second booted and used.
+#[test]
+fn a_hung_guest_is_retired_and_booted_again() {
+    if shards_api::backend().is_err() {
+        return;
+    }
+    let guests = Arc::new(Planned::new(&[Boots::Hung, Boots::Ready]));
+    let rt = GuestRuntime::new(guests.clone(), config());
+    rt.guest().unwrap();
+    assert_eq!(guests.boots.load(Ordering::SeqCst), 2);
+    assert_eq!(guests.stops.load(Ordering::SeqCst), 1);
+    assert_eq!(rt.retired(), 1);
+}
+
+/// HEX-GUEST-34: boot two guests that both hang: expect the caller refused by type, naming the boot and
+/// its bound, after exactly two boots, both stopped.
+#[test]
+fn a_second_hang_is_refused_by_type() {
+    if shards_api::backend().is_err() {
+        return;
+    }
+    let guests = Arc::new(Planned::new(&[Boots::Hung, Boots::Hung]));
+    let rt = GuestRuntime::new(guests.clone(), config());
+    let Err(Refusal::Os { op, why }) = rt.guest().map(|_| ()) else {
+        panic!("expected the boot refused");
+    };
+    assert_eq!(op, "booting the node's guest");
+    assert!(why.contains("ready"), "{why}");
+    assert_eq!(guests.boots.load(Ordering::SeqCst), 2);
+    assert_eq!(guests.stops.load(Ordering::SeqCst), 2);
+    assert_eq!(rt.retired(), 2);
+}
