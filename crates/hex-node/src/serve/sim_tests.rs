@@ -638,7 +638,7 @@ fn an_exec_whose_program_cant_be_watched_is_refused() {
 }
 
 /// HEX-SOCK-8 (the core): a client that stops reading stops being read: its answers wait for room, and once
-/// it has room again they go, in order, and its requests are read again.
+/// it has room again they go, and only then are its later requests read.
 #[test]
 fn a_client_that_doesnt_read_stops_being_read_until_it_has_room() {
     let lab = Lab::new();
@@ -661,7 +661,15 @@ fn a_client_that_doesnt_read_stops_being_read_until_it_has_room() {
     lab.os.put(&sock, request(3, Call::Inspect(b())));
     lab.os.give_room(&sock, 64);
     let ids: Vec<u64> = (0..3).map(|_| answer_of(&sock).0.id).collect();
-    assert_eq!(ids, [1, 2, 3]);
+    // Calls 1 and 2 ran on two workers, which answer in the order they finish (the wire matches answers
+    // to requests by id); 3 wasn't read until their answers had room, so it comes after both.
+    let mut first: Vec<u64> = ids.get(..2).unwrap().to_vec();
+    first.sort_unstable();
+    assert_eq!(
+        (first.as_slice(), ids[2]),
+        ([1, 2].as_slice(), 3),
+        "{ids:?}"
+    );
 }
 
 /// The core when the OS runs out of descriptors: accepting pauses, and a connection that closes resumes it,

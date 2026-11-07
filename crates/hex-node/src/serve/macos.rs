@@ -9,14 +9,15 @@
 //!   descriptors with the read that began at their message), so a read that brings descriptors begins at
 //!   the message they belong to; descriptors that come while a frame is under way are misplaced, and that
 //!   message is refused;
-//! - a connection is watched by poll(2), level-triggered as the core asks; a program's end by kqueue's
-//!   `EVFILT_PROC` (`hex_runtime::macos::sys::Kqueue`, its safe wrapper) on one thread, which wakes the poll
-//!   through a pipe; [`Os::wake`] writes the same pipe;
+//! - one kqueue on the I/O thread watches everything (the lead's call, 2026-11-07: latency first, no thread
+//!   hop on a program's end and no scan of every descriptor on a wake): `EVFILT_READ` and `EVFILT_WRITE` on
+//!   the listener and the connections, level-triggered as the core asks; `EVFILT_PROC` on exec'd programs;
+//!   `EVFILT_USER` for [`Os::wake`] (`hex_runtime::macos::sys::Kqueue`, the macOS class's wrapper of it);
 //! - a message the stream takes only part of is finished here when the socket has room again, and until
 //!   then the core's next sends would block, so to the core every send is whole or nothing;
-//! - only this user or root can connect: the socket's file is this user's, mode 0600, and XNU checks write
-//!   permission on it for a connect (`bsd/kern/uipc_usrreq.c`, `unp_connect`: `vnode_authorize` with
-//!   `KAUTH_VNODE_WRITE_DATA`), the rule Linux's peer check applies.
+//! - only this user or root is served: the socket's file is this user's, mode 0600, which XNU checks for a
+//!   connect (`bsd/kern/uipc_usrreq.c`, `unp_connect`: `vnode_authorize` with `KAUTH_VNODE_WRITE_DATA`),
+//!   and each peer's effective uid is read (getpeereid(3)) and refused by name otherwise, as Linux's is.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io::IoSliceMut;
@@ -24,9 +25,8 @@ use std::mem::MaybeUninit;
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::thread::JoinHandle;
 use std::time::Duration;
 
 use hex_api::{Refusal, Stdio};
@@ -49,9 +49,14 @@ const BACKLOG: i32 = 64;
 /// A frame's prefix, its body's length (`hex_core::stream`'s `u32`).
 const PREFIX: usize = size_of::<u32>();
 
-/// One connection: its socket, and the framing between its bytes and the core's messages.
+/// A [`Stream`]'s token before the core watches it.
+const UNWATCHED: u64 = u64::MAX;
+
+/// One connection: its socket, its token once watched, and the framing between its bytes and the core's
+/// messages.
 pub struct Stream {
     fd: OwnedFd,
+    token: AtomicU64,
     framing: Mutex<Framing>,
 }
 
@@ -77,39 +82,36 @@ struct Message {
     cut: bool,
 }
 
-/// What the I/O thread watches beside the sockets.
+/// The listener's tag in the kqueue; the core's tokens start above it.
+const LISTENER: u64 = 0;
+
+/// What the I/O thread watches: the connections, by token, and what for.
 #[derive(Default)]
 struct Watching {
-    accepting: bool,
-    listening: bool,
     conns: BTreeMap<u64, (Arc<Stream>, Interest)>,
 }
 
-/// What the kqueue thread and [`Os::wake`] leave for the next wait.
+/// What [`Os::wake`] and a program already gone leave for the next wait.
 #[derive(Default)]
 struct Woken {
     wake: bool,
-    /// Tokens of watched programs that have ended.
+    /// Tokens of watched programs that ended before they could be watched.
     ended: VecDeque<u64>,
 }
 
-/// The listener, the wake pipe, the kqueue that watches programs and its thread.
+/// The listener and the kqueue that watches it, the connections and the programs.
 pub struct MacOs {
     listener: OwnedFd,
-    wake_r: OwnedFd,
-    wake_w: Arc<OwnedFd>,
+    kq: Kqueue,
     watching: Mutex<Watching>,
-    woken: Arc<Mutex<Woken>>,
-    kq: Arc<Kqueue>,
-    stopping: Arc<AtomicBool>,
-    procs: Mutex<Option<JoinHandle<()>>>,
+    woken: Mutex<Woken>,
 }
 
 fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
     Refusal::Broken("a socket lock was poisoned".to_owned())
 }
 
-/// Descriptors made close-on-exec and non-blocking: macOS's `socket`, `accept` and `pipe` take no flags.
+/// Descriptors made close-on-exec and non-blocking: macOS's `socket` and `accept` take no flags.
 fn own(fd: &OwnedFd, what: &'static str) -> Result<(), Refusal> {
     rustix::io::fcntl_setfd(fd, FdFlags::CLOEXEC).map_err(|e| Refusal::os(what, e))?;
     let flags = rustix::fs::fcntl_getfl(fd).map_err(|e| Refusal::os(what, e))?;
@@ -117,9 +119,9 @@ fn own(fd: &OwnedFd, what: &'static str) -> Result<(), Refusal> {
 }
 
 impl MacOs {
-    /// A socket at `path`, readable and writable by this user alone, and the thread that watches
-    /// programs' ends. A socket left at `path` by an agent that has ended is replaced; one an agent
-    /// still serves, or a file that isn't a socket, is refused.
+    /// A socket at `path`, readable and writable by this user alone, and its kqueue. A socket left at
+    /// `path` by an agent that has ended is replaced; one an agent still serves, or a file that isn't a
+    /// socket, is refused.
     pub fn bind(path: &Path) -> Result<Self, Refusal> {
         super::unix::clear(path, SocketType::STREAM)?;
         let addr = SocketAddrUnix::new(path).map_err(|e| Refusal::Invalid {
@@ -137,78 +139,19 @@ impl MacOs {
             .map_err(|e| Refusal::os("restricting the node agent's socket to its user", e))?;
         rustix::net::listen(&listener, BACKLOG)
             .map_err(|e| Refusal::os("listening on the node agent's socket", e))?;
-        let (wake_r, wake_w) =
-            rustix::pipe::pipe().map_err(|e| Refusal::os("making the socket's wake pipe", e))?;
-        own(&wake_r, "making the socket's wake pipe")?;
-        own(&wake_w, "making the socket's wake pipe")?;
-        let kq = Arc::new(Kqueue::new().map_err(|e| Refusal::os("making the socket's kqueue", e))?);
-        let os = Self {
+        let kq = Kqueue::new().map_err(|e| Refusal::os("making the socket's kqueue", e))?;
+        kq.fd(&listener, LISTENER, false, false)
+            .map_err(|e| Refusal::os("watching the node agent's socket", e))?;
+        Ok(Self {
             listener,
-            wake_r,
-            wake_w: Arc::new(wake_w),
-            watching: Mutex::new(Watching {
-                listening: true,
-                ..Watching::default()
-            }),
-            woken: Arc::new(Mutex::new(Woken::default())),
             kq,
-            stopping: Arc::new(AtomicBool::new(false)),
-            procs: Mutex::new(None),
-        };
-        let thread = {
-            let (kq, woken, wake_w, stopping) = (
-                Arc::clone(&os.kq),
-                Arc::clone(&os.woken),
-                Arc::clone(&os.wake_w),
-                Arc::clone(&os.stopping),
-            );
-            std::thread::Builder::new()
-                .name("hex-socket-procs".to_owned())
-                .spawn(move || watch_ends(&kq, &woken, &wake_w, &stopping))
-                .map_err(|e| Refusal::os("starting the socket's program watch", e))?
-        };
-        *os.procs.lock().map_err(poisoned)? = Some(thread);
-        Ok(os)
+            watching: Mutex::new(Watching::default()),
+            woken: Mutex::new(Woken::default()),
+        })
     }
 
     fn watching(&self) -> Result<MutexGuard<'_, Watching>, Refusal> {
         self.watching.lock().map_err(poisoned)
-    }
-}
-
-/// The kqueue thread: each watched program's end goes to the next wait, which the pipe wakes.
-fn watch_ends(kq: &Kqueue, woken: &Mutex<Woken>, wake_w: &OwnedFd, stopping: &AtomicBool) {
-    let mut events = Vec::with_capacity(sys::EVENTS);
-    while !stopping.load(Ordering::SeqCst) {
-        if kq.wait(None, None, &mut events).is_err() {
-            return;
-        }
-        let ended: Vec<u64> = events
-            .iter()
-            .filter_map(|e| match e {
-                sys::Event::Exit { tag, .. } => Some(*tag),
-                _ => None,
-            })
-            .collect();
-        if ended.is_empty() {
-            continue;
-        }
-        let Ok(mut w) = woken.lock() else {
-            return;
-        };
-        w.ended.extend(ended);
-        drop(w);
-        let _ = rustix::io::write(wake_w, &[1]);
-    }
-}
-
-impl Drop for MacOs {
-    fn drop(&mut self) {
-        self.stopping.store(true, Ordering::SeqCst);
-        let _ = self.kq.trigger();
-        if let Some(t) = self.procs.get_mut().ok().and_then(Option::take) {
-            let _ = t.join();
-        }
     }
 }
 
@@ -224,82 +167,85 @@ impl Os for MacOs {
     type Passed = OwnedFd;
 
     fn wait(&self, events: &mut Vec<Event>, timeout: Option<Duration>) -> Result<(), Refusal> {
-        let (listening, conns): (bool, Vec<(u64, Arc<Stream>, Interest)>) = {
-            let w = self.watching()?;
-            (
-                w.listening && w.accepting,
-                w.conns
-                    .iter()
-                    .map(|(t, (s, i))| (*t, Arc::clone(s), *i))
-                    .collect(),
-            )
-        };
-        // What is ready without a poll: messages read whole and not taken, a wake, programs' ends.
+        let conns: BTreeMap<u64, (Arc<Stream>, Interest)> = self
+            .watching()?
+            .conns
+            .iter()
+            .map(|(t, (s, i))| (*t, (Arc::clone(s), *i)))
+            .collect();
+        // What is ready without a wait: a wake, programs gone before they were watched, and messages read
+        // whole and not yet taken.
         let now = self.ready_now(&conns, events)?;
-        let mut fds = Vec::with_capacity(conns.len().saturating_add(2));
-        fds.push(PollFd::new(&self.wake_r, PollFlags::IN));
-        if listening {
-            fds.push(PollFd::new(&self.listener, PollFlags::IN));
-        }
-        for (_, s, interest) in &conns {
-            let unsent = !s.framing.lock().map_err(poisoned)?.unsent.is_empty();
-            let mut flags = match interest {
-                Interest::Read => PollFlags::IN,
-                Interest::Write => PollFlags::OUT,
+        let mut got = Vec::with_capacity(sys::EVENTS);
+        self.kq
+            .wait(
+                None,
+                if now { Some(Duration::ZERO) } else { timeout },
+                &mut got,
+            )
+            .map_err(|e| Refusal::os("waiting on the socket's kqueue", e))?;
+        for e in &got {
+            let (token, readable, writable, hung_up) = match *e {
+                sys::Event::User => {
+                    if std::mem::take(&mut self.woken.lock().map_err(poisoned)?.wake)
+                        && !events.contains(&Event::Wake)
+                    {
+                        events.push(Event::Wake);
+                    }
+                    continue;
+                }
+                sys::Event::Readable { tag: LISTENER, .. } => {
+                    events.push(Event::Listener);
+                    continue;
+                }
+                sys::Event::Exit { tag, .. } => (tag, true, false, false),
+                sys::Event::Readable { tag, ended } => {
+                    let read = conns
+                        .get(&tag)
+                        .is_some_and(|(_, i)| matches!(i, Interest::Read));
+                    (tag, read, false, ended)
+                }
+                sys::Event::Writable { tag, ended } => {
+                    let Some((conn, interest)) = conns.get(&tag) else {
+                        continue;
+                    };
+                    let flushed = finish_unsent(conn)?;
+                    if flushed && matches!(interest, Interest::Read) {
+                        // Its rest sent: back to watching only its reads.
+                        self.kq
+                            .fd(&conn.fd, tag, true, false)
+                            .map_err(|e| Refusal::os("watching a connection", e))?;
+                    }
+                    (
+                        tag,
+                        false,
+                        flushed && matches!(interest, Interest::Write),
+                        ended,
+                    )
+                }
+                sys::Event::Timer | sys::Event::Fork { .. } => continue,
             };
-            if unsent {
-                flags |= PollFlags::OUT;
-            }
-            fds.push(PollFd::new(&s.fd, flags));
-        }
-        let ts = if now {
-            Some(Timespec {
-                tv_sec: 0,
-                tv_nsec: 0,
-            })
-        } else {
-            timeout.map(|left| Timespec {
-                tv_sec: i64::try_from(left.as_secs()).unwrap_or(i64::MAX),
-                tv_nsec: i64::from(left.subsec_nanos()),
-            })
-        };
-        match rustix::event::poll(&mut fds, ts.as_ref()) {
-            Ok(_) | Err(Errno::INTR) => {}
-            Err(e) => return Err(Refusal::os("waiting on the socket's poll set", e)),
-        }
-        let revents: Vec<PollFlags> = fds.iter().map(PollFd::revents).collect();
-        let mut at = revents.iter();
-        if at.next().is_some_and(|r| r.contains(PollFlags::IN)) {
-            let mut sink = [0u8; 64];
-            while matches!(rustix::io::read(&self.wake_r, &mut sink), Ok(n) if n > 0) {}
-            if !now {
-                self.ready_now(&conns, events)?;
-            }
-        }
-        if listening && at.next().is_some_and(|r| r.contains(PollFlags::IN)) {
-            events.push(Event::Listener);
-        }
-        for ((token, s, interest), r) in conns.iter().zip(at) {
-            let hung_up = r.intersects(PollFlags::HUP | PollFlags::ERR);
-            let mut writable = false;
-            if r.contains(PollFlags::OUT) {
-                writable = finish_unsent(s)? && matches!(interest, Interest::Write);
-            }
-            let readable = matches!(interest, Interest::Read) && r.contains(PollFlags::IN);
-            if (readable || writable || hung_up)
-                && !events
-                    .iter()
-                    .any(|e| matches!(e, Event::Ready { token: t, .. } if t == token))
+            match events
+                .iter_mut()
+                .find(|ev| matches!(ev, Event::Ready { token: t, .. } if *t == token))
             {
-                events.push(Event::Ready {
-                    token: *token,
+                Some(Event::Ready {
+                    readable: r,
+                    writable: w,
+                    hung_up: h,
+                    ..
+                }) => {
+                    *r |= readable;
+                    *w |= writable;
+                    *h |= hung_up;
+                }
+                _ if readable || writable || hung_up => events.push(Event::Ready {
+                    token,
                     readable,
                     writable,
                     hung_up,
-                });
-            }
-            if events.len() >= EVENTS {
-                break;
+                }),
+                _ => {}
             }
         }
         Ok(())
@@ -307,10 +253,9 @@ impl Os for MacOs {
 
     fn wake(&self) -> Result<(), Refusal> {
         self.woken.lock().map_err(poisoned)?.wake = true;
-        match rustix::io::write(self.wake_w.as_ref(), &[1]) {
-            Ok(_) | Err(Errno::AGAIN) => Ok(()),
-            Err(e) => Err(Refusal::os("waking the socket's thread", e)),
-        }
+        self.kq
+            .trigger()
+            .map_err(|e| Refusal::os("waking the socket's thread", e))
     }
 
     fn accept(&self) -> Accepted<Arc<Stream>> {
@@ -322,6 +267,7 @@ impl Os for MacOs {
                 }) {
                     Ok(()) => Accepted::Conn(Arc::new(Stream {
                         fd,
+                        token: AtomicU64::new(UNWATCHED),
                         framing: Mutex::new(Framing {
                             deframer: Deframer::new(wire::MAX_MESSAGE),
                             ready: VecDeque::new(),
@@ -342,26 +288,38 @@ impl Os for MacOs {
     }
 
     fn accepting(&self, on: bool) -> Result<(), Refusal> {
-        self.watching()?.accepting = on;
-        Ok(())
+        self.kq
+            .fd(&self.listener, LISTENER, on, false)
+            .map_err(|e| Refusal::os("pausing or resuming the node agent's socket", e))
     }
 
     fn stop_listening(&self) {
-        if let Ok(mut w) = self.watching.lock() {
-            w.listening = false;
+        let _ = self.kq.forget_fd(&self.listener);
+    }
+
+    fn peer(&self, conn: &Arc<Stream>) -> Peer {
+        let me = rustix::process::geteuid().as_raw();
+        match sys::peer_euid(&conn.fd) {
+            Ok(uid) if uid == me || uid == 0 => Peer::Allowed,
+            Ok(uid) => Peer::Refused(format!("uid {uid} isn't the node agent's user ({me})")),
+            Err(_) => Peer::Gone,
         }
     }
 
-    fn peer(&self, _conn: &Arc<Stream>) -> Peer {
-        // The socket's file admits only this user and root (the module's note).
-        Peer::Allowed
-    }
-
     fn watch(&self, conn: &Arc<Stream>, token: u64, interest: Interest) -> Result<(), Refusal> {
+        conn.token.store(token, Ordering::SeqCst);
+        let unsent = !conn.framing.lock().map_err(poisoned)?.unsent.is_empty();
         self.watching()?
             .conns
             .insert(token, (Arc::clone(conn), interest));
-        Ok(())
+        self.kq
+            .fd(
+                &conn.fd,
+                token,
+                matches!(interest, Interest::Read),
+                matches!(interest, Interest::Write) || unsent,
+            )
+            .map_err(|e| Refusal::os("watching a connection", e))
     }
 
     fn rewatch(&self, conn: &Arc<Stream>, token: u64, interest: Interest) -> Result<(), Refusal> {
@@ -372,6 +330,7 @@ impl Os for MacOs {
         if let Ok(mut w) = self.watching.lock() {
             w.conns.retain(|_, (s, _)| !Arc::ptr_eq(s, conn));
         }
+        let _ = self.kq.forget_fd(&conn.fd);
     }
 
     fn recv(&self, conn: &Arc<Stream>, buf: &mut [u8]) -> Recv<OwnedFd> {
@@ -420,8 +379,13 @@ impl Os for MacOs {
             return match rustix::net::send(&conn.fd, &framed, SendFlags::DONTWAIT) {
                 Ok(n) if n >= framed.len() => Sent::Sent,
                 Ok(n) => {
-                    // Taken in part: the rest goes when the socket has room ([`finish_unsent`]).
+                    // Taken in part: the rest goes when the socket has room ([`finish_unsent`]), which
+                    // its write filter now reports.
                     f.unsent = framed.get(n..).unwrap_or_default().to_vec();
+                    let token = conn.token.load(Ordering::SeqCst);
+                    if token != UNWATCHED && self.kq.fd(&conn.fd, token, true, true).is_err() {
+                        return Sent::Gone;
+                    }
                     Sent::Sent
                 }
                 Err(Errno::INTR) => continue,
@@ -469,12 +433,22 @@ impl Os for MacOs {
             .kq
             .watch(&[pid], token)
             .map_err(|e| unwatched(e.to_string()))?;
-        if gone.contains(&pid) {
-            // Ended before it could be watched: its end is the next wait's.
+        // XNU's EVFILT_PROC catches only what comes after its attach (`bsd/kern/kern_event.c`,
+        // `filt_procattach`), so a program that ended before it (a short one often does, and a zombie isn't
+        // refused with ESRCH) would never be reported. Its own record says whether it has ended: read after
+        // the attach, an end before it is reported here and one after it by the kqueue; both is one end the
+        // core takes once.
+        let ended = gone.contains(&pid)
+            || match sys::rusage(pid) {
+                Ok(Some(r)) => r.ended || r.started != started,
+                Ok(None) => true,
+                Err(_) => false,
+            };
+        if ended {
             if let Ok(mut w) = self.woken.lock() {
                 w.ended.push_back(token);
             }
-            let _ = rustix::io::write(self.wake_w.as_ref(), &[1]);
+            let _ = self.kq.trigger();
         }
         Ok(Watch { pid, started })
     }
@@ -500,11 +474,11 @@ impl Os for MacOs {
 }
 
 impl MacOs {
-    /// Puts in `events` what is ready without a poll: a wake, programs' ends, and connections with
-    /// messages read whole and not taken. Whether there was any.
+    /// Puts in `events` what is ready without a wait: a wake, programs gone before they were watched, and
+    /// connections with messages read whole and not taken. Whether there was any.
     fn ready_now(
         &self,
-        conns: &[(u64, Arc<Stream>, Interest)],
+        conns: &BTreeMap<u64, (Arc<Stream>, Interest)>,
         events: &mut Vec<Event>,
     ) -> Result<bool, Refusal> {
         let before = events.len();
@@ -525,7 +499,7 @@ impl MacOs {
                 });
             }
         }
-        for (token, s, interest) in conns {
+        for (token, (s, interest)) in conns {
             if events.len() >= EVENTS {
                 break;
             }

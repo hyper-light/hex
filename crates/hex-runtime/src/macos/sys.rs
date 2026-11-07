@@ -488,6 +488,11 @@ pub enum Event {
     /// the member's parent, so the kernel delivers the status in the event: the watcher reads a member's
     /// death — a jetsam fatal-cap `SIGKILL` among them — without racing the member's own reaper.
     Exit { pid: i32, tag: u64, status: i32 },
+    /// A descriptor watched with tag `tag` ([`Kqueue::fd`]) has bytes to read, or its peer has gone
+    /// (`ended`, `EV_EOF`): the node socket's connections and listener (`hex_node::serve::macos`).
+    Readable { tag: u64, ended: bool },
+    /// A descriptor watched with tag `tag` has room to write, or its peer has gone (`ended`).
+    Writable { tag: u64, ended: bool },
 }
 
 /// `NOTE_EXITSTATUS` (`sys/event.h`, macOS 26 SDK): a watched child's exit event carries its wait status
@@ -565,6 +570,41 @@ impl Kqueue {
         Ok(gone)
     }
 
+    /// Watches descriptor `fd` under `tag` for reads (`read`) and room to write (`write`), level-triggered
+    /// (`EVFILT_READ` and `EVFILT_WRITE` without `EV_CLEAR`: reported while true, kevent(2)), each filter
+    /// added and then enabled or disabled, so changing what `fd` is watched for is this call again. The
+    /// caller keeps `fd` open while it is watched; closing it takes it out (kqueue(2)).
+    pub fn fd(&self, fd: impl AsFd, tag: u64, read: bool, write: bool) -> io::Result<()> {
+        let ident = usize::try_from(fd.as_fd().as_raw_fd())
+            .map_err(|_| io::Error::other("a descriptor isn't one"))?;
+        let on = |on: bool| {
+            libc::EV_ADD
+                | if on {
+                    libc::EV_ENABLE
+                } else {
+                    libc::EV_DISABLE
+                }
+        };
+        self.change(&[
+            kevent(ident, libc::EVFILT_READ, on(read), 0, 0, tag),
+            kevent(ident, libc::EVFILT_WRITE, on(write), 0, 0, tag),
+        ])
+    }
+
+    /// Stops watching descriptor `fd`, if it was watched.
+    pub fn forget_fd(&self, fd: impl AsFd) -> io::Result<()> {
+        let Ok(ident) = usize::try_from(fd.as_fd().as_raw_fd()) else {
+            return Ok(());
+        };
+        for filter in [libc::EVFILT_READ, libc::EVFILT_WRITE] {
+            match self.change(&[kevent(ident, filter, libc::EV_DELETE, 0, 0, 0)]) {
+                Err(e) if e.raw_os_error() == Some(libc::ENOENT) => {}
+                other => other?,
+            }
+        }
+        Ok(())
+    }
+
     /// Stops watching process `pid`, if it was watched.
     pub fn unwatch(&self, pid: i32) -> io::Result<()> {
         let Ok(ident) = usize::try_from(pid) else {
@@ -630,6 +670,14 @@ impl Kqueue {
                     tag,
                     status: i32::try_from(e.data).unwrap_or(0),
                 },
+                libc::EVFILT_READ => Event::Readable {
+                    tag,
+                    ended: e.flags & libc::EV_EOF != 0,
+                },
+                libc::EVFILT_WRITE => Event::Writable {
+                    tag,
+                    ended: e.flags & libc::EV_EOF != 0,
+                },
                 _ => continue,
             };
             out.push(event);
@@ -671,6 +719,20 @@ impl Kqueue {
         };
         usize::try_from(n).map_err(|_| io::Error::last_os_error())
     }
+}
+
+/// The effective user id of the process at the other end of local socket `fd` (getpeereid(3)): who
+/// connected to the node's socket, which admits this user and root (`hex_node::serve::macos`).
+pub fn peer_euid(fd: impl AsFd) -> io::Result<u32> {
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    // SAFETY: getpeereid reads the descriptor and writes one uid_t and one gid_t through the two pointers,
+    // each to a local alive for the call.
+    let r = unsafe { libc::getpeereid(fd.as_fd().as_raw_fd(), &raw mut uid, &raw mut gid) };
+    if r != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(uid)
 }
 
 /// An `EV_SET` (`sys/event.h`), its tag carried in `udata` as a number.
