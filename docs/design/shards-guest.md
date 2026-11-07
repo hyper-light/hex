@@ -310,7 +310,11 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
       marker, reading each as gzip or uncompressed by its own magic (containerd's `DetectCompression`; zstd,
       which whole-root staging never took either, is refused by name, an open gap), hashing its bytes as they
       cross, and refusing a named one, before the next layer's marker or the stage's end that would let the
-      relay keep it, unless they are its digest. A layer the guest holds costs a create its digest alone, never
+      relay keep it, unless they are its digest. Only a stage that may admit checks: the relay says at its
+      opening whether the store may admit any of its layers (`admitting`, the room a stage needs is free),
+      and one that may not stages them all into the box, never cached, as whole-root staging did, unchecked
+      (the check cost alpine 1 ms and caddy 6 ms a create under pressure); a layer whose digest is being
+      learned is hashed either way. A layer the guest holds costs a create its digest alone, never
       a read: HEX-GUEST-22's first record had the host hash every tarball at every create, about 0.9 s of a
       grafana create (480 MB of blobs at 500-560 MB/s on a Mac Studio, sha2 0.10.9), the lead's rule after it.
     - **Admission, eviction only as a last resort:** the store admits a layer only into room already free: it
@@ -345,7 +349,7 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
       apply is refused by name. At most 500 layers (`hex_core::bundle::MAX_LAYERS`, overlayfs's `OVL_MAX_STACK`).
     - **Crash safety:** a layer is staged into `.layers/.partial-<relay pid>-<n>-<digest>` and renamed to its
       digest only once whole, so a stage cut or crashed mid-layer leaves nothing that counts as held; a partial
-      another relay process left, and a layer it was reclaiming (`.gone-<pid>-<n>`), is removed when a stage
+      another relay process left, and a layer it was evicting (`.gone-<pid>-<n>`), is removed when a stage
       opens, and what this process left with its stage.
     - **The budget:** the relay answers a stage's opening with what its staged folder's file system has free
       (statvfs(3)), with what the layers no box names hold (their size files), which its last resort can
@@ -356,20 +360,21 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
       undefined for a particular filesystem are set to 0") bounds entries by its bytes instead, free, in use
       and in all, since every entry takes at least one byte of it: fedora's btrfs `/home` refused every stage as
       "entries in one stage, bound 0" before this.
-    - **References and the reclaimer:** a box's record, `<staged>/<box id>/.layers`, names its layers,
-      written when its stage opens under the store's lock (flock(2) on `.layers/.lock`), so no reclaim takes a
-      layer it counted as held; removing the box removes its record. A layer no record names becomes evictable
-      and stays, a cache for the next create. After a stage bypassed the store for want of room, once its
-      answer is sent, its own thread frees at least what the bypassed layers hold, off the create's path and
-      the delete's, as plain background work at its own priority (Ada's rule: Hex changes no priority, either
-      way; the work is bounded by what the bypass used):
-      the least recently used unreferenced layer (its folder's mtime, set at each use) is taken out of the store
-      under the lock (renamed to `.gone-…`, its size file with it), then removed under a lock of its own,
-      until that much is freed or none is left. A layer being removed so still counts in a stage's budget, and
-      a stage out of room with no layer left to take waits for that removal (or finishes one whose remover
-      ended), rather than refusing: at d51a4da grafana's create was refused while one ran, its room neither
-      free nor counted. A stage takes the store's lock at its opening, and again only to raise the room
-      learned.
+    - **References, and eviction only on the path of a stage out of room:** a box's record, `<staged>/<box
+      id>/.layers`, names its layers, written when its stage opens under the store's lock (flock(2) on
+      `.layers/.lock`), so no eviction takes a layer it counted as held; removing the box removes its record.
+      A layer no record names becomes evictable and stays, a cache for the next create. Nothing takes it but
+      a stage that runs out of room (`ENOSPC`, above): the least recently used unreferenced layer (its
+      folder's mtime, set at each use) is taken out of the store under the lock (renamed to `.gone-…`, its
+      size file with it), then removed under a lock of its own, until the stage fits. A stage that goes into
+      the box takes nothing. A reclaimer that, after a stage bypassed the store, freed what the bypass held
+      was built and measured and dropped (the lead's call, 2026-11-07): under pressure it took cached layers
+      that would have been hits for layers never admitted, and grafana's create took 4,483 ms with it against
+      2,629 without (HEX-GUEST-22, 2x, launchd hex.ns5route.g22diag.20261107T003038Z). A layer being removed
+      still counts in a stage's budget, and a stage out of room with no layer left to take waits for that
+      removal (or finishes one whose remover ended), rather than refusing: at d51a4da grafana's create was
+      refused while one ran, its room neither free nor counted. A stage takes the store's lock at its
+      opening, and again only to raise the room learned.
     - **One copy roots:** a bundle's `root.path` and a `Rootfs::Dir` are one directory its container writes into,
       not an overlay, so a tarball given for one is applied in place, into the box's own folder, as one layer
       with nothing below; a directory root (macOS, Linux) is copied as it is. Neither is a layered image's root.

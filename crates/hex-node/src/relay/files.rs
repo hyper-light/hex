@@ -70,12 +70,11 @@ fn os(op: &'static str) -> impl Fn(Errno) -> Refusal {
 /// with the host's stream still unread; closing on it then would reset the connection, which over vsock
 /// discards the answer in flight, and the host would see a broken pipe, never why (CLAUDE.md §3). So a
 /// refused connection is half-closed after its answer and read to its end, within what a stage may still
-/// send ([`unread_bound`]), before it closes. A stage that bypassed the layer store for want of room is
-/// answered first, then its thread reclaims that much room ([`reclaim`]) before it closes.
+/// send ([`unread_bound`]), before it closes.
 pub fn serve(mut conn: Box<dyn Duplex>, staged: &Path, limits: &Limits) {
-    let (answer, bypassed) = match take(conn.as_mut(), staged, limits) {
-        Ok(bypassed) => (Answer::Done, bypassed),
-        Err(why) => (Answer::Refused(why), Spend::default()),
+    let answer = match take(conn.as_mut(), staged, limits) {
+        Ok(()) => Answer::Done,
+        Err(why) => Answer::Refused(why),
     };
     let refused = matches!(answer, Answer::Refused(_));
     if let Some(bytes) = wire::answer(wire::FIRST, 0, &answer, wire::MAX_MESSAGE)
@@ -88,9 +87,6 @@ pub fn serve(mut conn: Box<dyn Duplex>, staged: &Path, limits: &Limits) {
         let _ = conn.shutdown(Shutdown::Write);
         drain(conn.as_mut(), unread_bound(staged, limits));
     }
-    if !bypassed.is_zero() {
-        let _ = reclaim(staged, bypassed);
-    }
     let _ = conn.shutdown(Shutdown::Both);
 }
 
@@ -101,12 +97,11 @@ fn refused(why: files::Refused) -> Refusal {
     }
 }
 
-/// Reads the connection to its end and does what it asks; a stage returns what it bypassed the store by.
-fn take(conn: &mut dyn Duplex, staged: &Path, limits: &Limits) -> Result<Spend, Refusal> {
+/// Reads the connection to its end and does what it asks.
+fn take(conn: &mut dyn Duplex, staged: &Path, limits: &Limits) -> Result<(), Refusal> {
     let mut unpack = Unpack::new(*limits);
     let mut buf = vec![0u8; 64 << 10];
     let mut stage: Option<Stage> = None;
-    let mut bypassed = Spend::default();
     loop {
         let n = match conn.read(&mut buf) {
             Ok(0) => break,
@@ -140,7 +135,7 @@ fn take(conn: &mut dyn Duplex, staged: &Path, limits: &Limits) -> Result<Spend, 
                 }
                 (Step::Entry(entry), Some(s)) => s.entry(&entry),
                 (Step::Data { done }, Some(s)) => s.data(data, done),
-                (Step::End, Some(s)) => s.end().map(|b| bypassed = b),
+                (Step::End, Some(s)) => s.end(),
                 _ => Err(Refusal::Invalid {
                     what: "staged files",
                     why: "a step came out of order".to_owned(),
@@ -154,7 +149,7 @@ fn take(conn: &mut dyn Duplex, staged: &Path, limits: &Limits) -> Result<Spend, 
     if let Err(why) = unpack.finish() {
         return fail(stage, refused(why));
     }
-    Ok(bypassed)
+    Ok(())
 }
 
 /// What a file system has free and holds, as statvfs(3) reads it: what a stage may spend, learned when
@@ -286,7 +281,7 @@ const RECORD: &str = ".layers";
 const PARTIAL: &str = ".partial-";
 /// Beside a layer `<digest>`, its `<digest>.size`: the entries and bytes it holds, what its eviction frees.
 const SIZE: &str = ".size";
-/// A layer the reclaimer took out of the store, being removed: `.gone-<relay pid>-<n>`.
+/// A layer a stage out of room took out of the store, being removed: `.gone-<relay pid>-<n>`.
 const GONE: &str = ".gone-";
 /// In the store, the room it leaves free for a stage: the most entries and bytes one has spent (`.need`),
 /// and its lock (`.lock`).
@@ -309,10 +304,6 @@ impl Spend {
             bytes: self.bytes.saturating_add(other.bytes),
         }
     }
-
-    fn is_zero(self) -> bool {
-        self == Spend::default()
-    }
 }
 
 /// A stage under way: its root, the layer being applied, the file being written, and the directories whose
@@ -333,11 +324,10 @@ struct Stage {
     /// What the staged folder's file system had free when the stage began, and what the store leaves free
     /// for a stage: the most one has taken of it (learned, rising only). A layer is admitted to the store
     /// only while what's free stays at least that ([`admits`]); past it, it and every later layer of the
-    /// stage go into the box (what's free only falls), and what those named layers hold is `bypassed`, what
-    /// the reclaimer frees once the stage is answered.
+    /// stage go into the box (what's free only falls). Nothing cached is taken for a stage that goes into the
+    /// box: only one that runs out of room takes any ([`Stage::room`]).
     free: Free,
     need: Spend,
-    bypassed: Spend,
     /// Whether this stage may admit any layer: it began with the room a stage needs. One that began without
     /// it admits none, so its packer, told so in the budget, need not verify what it sends.
     admitting: bool,
@@ -392,7 +382,7 @@ struct Layer {
     /// overlayfs's own) rather than a root of one copy applied in place.
     index: usize,
     overlay: bool,
-    /// What it holds so far: what its eviction frees, or, staged into the box, what it bypassed the store by.
+    /// What it holds so far: what its eviction frees.
     held: Spend,
     /// Admitted to the store: its digest and its partial name.
     store: Option<Pending>,
@@ -587,7 +577,7 @@ impl Stage {
     /// Makes `<staged>/<id>`, which must not exist: one there is another box's, or a copy the host
     /// hasn't removed, and staging over it would change what that box runs. Records the layers `layers`
     /// names in it and links each the store holds from its `layers` folder, under the store's lock, so no
-    /// reclaim takes one it counted as held; says which the store holds and what the stage may spend.
+    /// eviction takes one it counted as held; says which the store holds and what the stage may spend.
     fn begin(
         staged: &Path,
         id: BoxId,
@@ -638,12 +628,12 @@ impl Stage {
         let mut spare = Spend::default();
         {
             let _lock = lock(&store)?;
-            // The record first, so no reclaim takes a layer this stage names while it stages.
+            // The record first, so no eviction takes a layer this stage names while it stages.
             let named: Vec<&str> = wanted.iter().flatten().map(String::as_str).collect();
             if !named.is_empty() {
                 write_whole(&root, RECORD, &(named.join("\n") + "\n"))?;
             }
-            // What another relay process left part way (a layer, a reclaimed one going) is no layer: removed.
+            // What another relay process left part way (a layer, an evicted one going) is no layer: removed.
             let me = std::process::id().to_string();
             for name in names(&store)? {
                 let mine = [PARTIAL, GONE].iter().any(|p| {
@@ -711,7 +701,6 @@ impl Stage {
                 absent,
                 free,
                 need,
-                bypassed: Spend::default(),
                 admitting,
                 last: free,
                 since: Spend::default(),
@@ -1286,8 +1275,7 @@ impl Stage {
 
     /// Finishes the layer under way: its directories' modes and times, and, admitted to the store, its
     /// commit: its size beside it, its partial folder renamed to its digest, whole, and the box's link to it.
-    /// Another stage's commit of the same layer first leaves this one's partial to go. A named layer staged
-    /// into the box adds what it holds to what this stage bypassed the store by.
+    /// Another stage's commit of the same layer first leaves this one's partial to go.
     fn end_layer(&mut self) -> Result<(), Refusal> {
         self.finish_dirs()?;
         let Some(layer) = self.layer.take() else {
@@ -1299,9 +1287,6 @@ impl Stage {
         rustix::fs::fchmod(&layer.fd, Mode::from_raw_mode(ROOT_MODE.into()))
             .map_err(os("setting a layer's root mode"))?;
         let Some(pending) = layer.store else {
-            if self.wanted.get(layer.index).is_some_and(Option::is_some) {
-                self.bypassed = self.bypassed.plus(layer.held);
-            }
             return Ok(());
         };
         write_whole(
@@ -1440,8 +1425,8 @@ impl Stage {
 
     /// Finishes the last layer, and the stage: every layer the guest lacked sent, and the root's mode. What
     /// it took of its file system (the drop in its free room since it began) raises the room the store
-    /// leaves free for a stage, never lowers it. Returns what it bypassed the store by, for the reclaimer.
-    fn end(&mut self) -> Result<Spend, Refusal> {
+    /// leaves free for a stage, never lowers it.
+    fn end(&mut self) -> Result<(), Refusal> {
         self.end_layer()?;
         if !self.absent.is_empty() {
             return Err(invalid(format!(
@@ -1455,7 +1440,7 @@ impl Stage {
             let taken = taken(self.free, free(&self.staged)?);
             self.reads = self.reads.saturating_add(1);
             if taken.entries <= self.need.entries && taken.bytes <= self.need.bytes {
-                return Ok(self.bypassed);
+                return Ok(());
             }
             let _lock = lock(&self.store)?;
             self.locks = self.locks.saturating_add(1);
@@ -1472,7 +1457,7 @@ impl Stage {
                 )?;
             }
         }
-        Ok(self.bypassed)
+        Ok(())
     }
 
     fn abandon(mut self) -> Result<(), Refusal> {
@@ -1539,8 +1524,8 @@ fn open_store(staged: &OwnedFd) -> Result<OwnedFd, Refusal> {
 }
 
 /// The store's lock (flock(2) on `.layers/.lock`), held while a stage records its layers and counts which
-/// the store holds, while one raises the room a stage needs, and while the reclaimer takes a layer out of
-/// the store: so a reclaim never takes a layer a stage counted as held. Each holds it for a bounded few
+/// the store holds, while one raises the room a stage needs, and while a stage out of room takes a layer out
+/// of the store: so an eviction never takes a layer a stage counted as held. Each holds it for a bounded few
 /// metadata calls, never for a layer's bytes; it's released when the guard drops.
 fn lock(store: &OwnedFd) -> Result<OwnedFd, Refusal> {
     let fd = rustix::fs::openat(
@@ -1576,33 +1561,6 @@ fn read_spend(store: &OwnedFd, name: &str) -> Spend {
         entries: parts.next().unwrap_or(0),
         bytes: parts.next().unwrap_or(0),
     }
-}
-
-/// The reclaimer (§4a): after a stage bypassed the store for want of room, frees at least what it bypassed
-/// by, taking unreferenced layers, the least recently used first, until that much is freed or none is left.
-/// It runs on the stage's own thread once the host has its answer, off the create's path and the delete's,
-/// as plain background work at the thread's own priority (Ada's rule: Hex changes no priority, either way);
-/// its work is bounded by what the bypassed stage used. Each layer is taken out of the store under its lock (renamed to `.gone-<pid>-<n>`, so no stage counts it as
-/// held after), then removed outside the lock. Bounded by the store's own entries: each pass takes one.
-fn reclaim(staged: &Path, amount: Spend) -> Result<Spend, Refusal> {
-    let staged = rustix::fs::open(
-        staged,
-        OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(os("opening the staged folder"))?;
-    let store = open_store(&staged)?;
-    let mut freed = Spend::default();
-    for _ in 0..names(&store)?.len() {
-        if freed.entries >= amount.entries && freed.bytes >= amount.bytes {
-            break;
-        }
-        let Some(taken) = evict_one(&staged, &store)? else {
-            break;
-        };
-        freed = freed.plus(taken);
-    }
-    Ok(freed)
 }
 
 /// Layers taken out of the store by this process, counted, so each `.gone-<pid>-<n>` is its own.

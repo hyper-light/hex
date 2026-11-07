@@ -1672,13 +1672,14 @@ fn a_layer_of_no_known_digest_is_staged_into_its_box_and_its_digest_learned() {
     assert!(layers_left(&staged.join(hf::STORE)).is_empty());
 }
 
-/// HEX-GUEST-14 (§4a; the lead's rule, 2026-11-06: a create never evicts; the reclaimer frees what a bypass
-/// used, off the create's path): stage box `one` of layer A and remove it, so A is cached unreferenced; make
-/// the room a stage needs more than is free; stage box `b` of layer B, raw, reading the relay to its end:
-/// expect `b` answered `Done` with B in its own folder, never the store, and once the relay closes (it
-/// reclaims after answering), A taken from the store, the least recently used unreferenced layer.
+/// HEX-GUEST-14 (§4a; the lead's call after HEX-GUEST-22's 2x diagnosis, 2026-11-07: no reclaimer; with one,
+/// grafana's create under pressure took 4,483 ms, without it 2,629, as a bypass's reclaim took cached layers
+/// that would have been hits for layers never admitted): stage box `one` of layer A and remove it, so A is
+/// cached unreferenced; make the room a stage needs more than is free; stage box `b` of layer B, raw, reading
+/// the relay to its end: expect `b` answered `Done` with B in its own folder, never the store, and once the
+/// relay closes, A still cached: a bypassing stage never evicts.
 #[test]
-fn a_stage_without_room_is_answered_then_its_bypass_is_reclaimed() {
+fn a_bypassing_stage_never_evicts_a_cached_layer() {
     let (lab, staged) = staged_lab();
     let host = tempfile::tempdir().unwrap();
     let one = stage_as(
@@ -1708,7 +1709,7 @@ fn a_stage_without_room_is_answered_then_its_bypass_is_reclaimed() {
             .is_dir()
     );
     assert!(!staged.join(hf::STORE).join(hf::digest_hex(&b)).exists());
-    assert!(!one[0].exists(), "the bypass was reclaimed");
+    assert!(one[0].exists(), "a bypassing stage evicted a cached layer");
 }
 
 /// HEX-GUEST-14 (§4a as amended): stage a tarball root, end to end through the host's packer and the relay,

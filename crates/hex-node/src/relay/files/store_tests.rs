@@ -1,8 +1,8 @@
-//! The guest's layer store (docs/design/shards-guest.md §4a, the lead's rule of 2026-11-06): a create never
-//! evicts. A layer is admitted to the store only into room already free, leaving free what the largest stage
-//! yet has needed; a stage past that stages the rest of its layers into the box, as whole-root staging did,
-//! and once it's answered the reclaimer frees what it bypassed by, taking the least recently used layers no
-//! box names, never one a box names.
+//! The guest's layer store (docs/design/shards-guest.md §4a, the lead's rules of 2026-11-06 and -07): a layer is
+//! admitted to the store only into room already free, leaving free what the largest stage yet has taken; a
+//! stage past that stages the rest of its layers into the box, as whole-root staging did, and evicts nothing.
+//! Only a stage that runs out of room takes cached layers, the least recently used no box names, never one a
+//! box names, until it fits.
 
 use std::path::PathBuf;
 
@@ -54,12 +54,12 @@ fn entry(path: &str, what: What) -> Entry {
 }
 
 /// Stages one layer of a file `f` of `size` bytes through `stage`, its stream's root `root`.
-fn one_layer(stage: &mut Stage, size: u64) -> Spend {
+fn one_layer(stage: &mut Stage, size: u64) {
     stage.entry(&entry("root", What::Layer)).unwrap();
     stage.entry(&entry("root/f", What::File { size })).unwrap();
     let bytes = vec![b'x'; usize::try_from(size).unwrap()];
     stage.data(&bytes, true).unwrap();
-    stage.end().unwrap()
+    stage.end().unwrap();
 }
 
 fn names_in(dir: &Path) -> Vec<String> {
@@ -74,7 +74,7 @@ fn names_in(dir: &Path) -> Vec<String> {
 /// HEX-GUEST-14 (§4a; the lead's rule: a create never evicts, a miss with no free room is staged straight
 /// into the box): a store holding an unreferenced layer `a`, and the room a stage needs past what's free;
 /// stage a named layer: expect it a folder of the box's own (`layers/0`, no link), nothing of it in the store,
-/// `a` untouched, and what it holds returned as what the stage bypassed the store by.
+/// and `a` untouched.
 #[test]
 fn a_stage_without_room_stages_into_the_box_and_evicts_nothing() {
     let dir = lab();
@@ -84,8 +84,7 @@ fn a_stage_without_room_stages_into_the_box_and_evicts_nothing() {
     let (mut stage, budget) =
         Stage::begin(dir.path(), BoxId::new("b").unwrap(), &[Some([0xb0; 32])]).unwrap();
     assert_eq!(budget.present, [false]);
-    let block = stage.free.block;
-    assert_eq!(one_layer(&mut stage, 3), charge(3, block));
+    one_layer(&mut stage, 3);
     let own = dir.path().join("b").join(BOX_LAYERS).join("0");
     assert!(
         std::fs::symlink_metadata(&own).unwrap().is_dir(),
@@ -121,7 +120,7 @@ fn a_layer_that_would_cut_into_the_room_a_stage_needs_moves_into_the_box() {
         entries: 0,
         bytes: stage.free.bytes - (512 << 10),
     };
-    assert_eq!(one_layer(&mut stage, 1 << 20).bytes, 1 << 20);
+    one_layer(&mut stage, 1 << 20);
     let own = dir.path().join("b").join(BOX_LAYERS).join("0");
     assert!(std::fs::symlink_metadata(&own).unwrap().is_dir());
     assert_eq!(std::fs::metadata(own.join("f")).unwrap().len(), 1 << 20);
@@ -135,7 +134,7 @@ fn a_layer_that_would_cut_into_the_room_a_stage_needs_moves_into_the_box() {
 }
 
 /// HEX-GUEST-14 (§4a): with room, stage a named layer, then a second box of the same layer: expect the
-/// first admitted (the store holds it, the box's `layers/0` a link to it, nothing bypassed), the second told
+/// first admitted (the store holds it, the box's `layers/0` a link to it), the second told
 /// it's held and linked to the same folder; and the room a stage needs, learned from what each took of the
 /// file system, never lowered by the second, which took nothing.
 #[test]
@@ -145,7 +144,7 @@ fn an_admitted_layer_is_linked_from_its_box_and_the_room_a_stage_needs_only_rise
     let digest = [0xd0; 32];
     let (mut one, _) =
         Stage::begin(dir.path(), BoxId::new("one").unwrap(), &[Some(digest)]).unwrap();
-    assert_eq!(one_layer(&mut one, 5), Spend::default());
+    one_layer(&mut one, 5);
     let hex = files::digest_hex(&digest);
     assert!(store.join(&hex).join("f").exists());
     let link =
@@ -155,66 +154,13 @@ fn an_admitted_layer_is_linked_from_its_box_and_the_room_a_stage_needs_only_rise
     let (mut two, budget) =
         Stage::begin(dir.path(), BoxId::new("two").unwrap(), &[Some(digest)]).unwrap();
     assert_eq!(budget.present, [true]);
-    assert_eq!(two.end().unwrap(), Spend::default());
+    two.end().unwrap();
     assert_eq!(link("two"), link("one"));
     let after = read_spend(&std::fs::File::open(&store).unwrap().into(), NEED);
     assert!(
         after.entries >= need.entries && after.bytes >= need.bytes,
         "{after:?} < {need:?}"
     );
-}
-
-/// HEX-GUEST-14 (§4a, the reclaimer): a store of layers A (used first, 10 bytes), B (later, 10 bytes) and C
-/// (oldest, named by box `kept`'s record); reclaim 5 bytes, then 100: expect A taken first and alone (its
-/// 10 bytes cover 5), then B, never C, and no `.gone-` folder left; what each pass freed returned.
-#[test]
-fn the_reclaimer_takes_the_least_recently_used_unreferenced_layers_until_what_was_bypassed_is_freed()
- {
-    let dir = lab();
-    let store = dir.path().join(STORE);
-    let a = layer(&store, 'a', 1_000, 10);
-    let b = layer(&store, 'b', 2_000, 10);
-    let c = layer(&store, 'c', 500, 10);
-    std::fs::create_dir(dir.path().join("kept")).unwrap();
-    std::fs::write(dir.path().join("kept").join(RECORD), format!("{c}\n")).unwrap();
-    let freed = reclaim(
-        dir.path(),
-        Spend {
-            entries: 0,
-            bytes: 5,
-        },
-    )
-    .unwrap();
-    assert_eq!(
-        freed,
-        Spend {
-            entries: 1,
-            bytes: 10
-        }
-    );
-    assert!(!store.join(&a).exists() && !store.join(format!("{a}{SIZE}")).exists());
-    assert!(store.join(&b).exists() && store.join(&c).exists());
-    let freed = reclaim(
-        dir.path(),
-        Spend {
-            entries: 0,
-            bytes: 100,
-        },
-    )
-    .unwrap();
-    assert_eq!(
-        freed,
-        Spend {
-            entries: 1,
-            bytes: 10
-        }
-    );
-    assert!(!store.join(&b).exists(), "the next least recently used");
-    assert!(
-        store.join(&c).exists(),
-        "a layer a box names is never taken"
-    );
-    assert!(names_in(&store).iter().all(|n| !n.starts_with(GONE)));
 }
 
 /// A file system's free room as `learned` reads it: `n` entries and bytes free, in blocks of `block` bytes.
@@ -348,7 +294,7 @@ fn a_stages_budget_counts_what_the_last_resort_can_take() {
 }
 
 /// Stages one layer of `n` one-byte files through `stage`, its stream's root `root`.
-fn many_files(stage: &mut Stage, n: usize) -> Spend {
+fn many_files(stage: &mut Stage, n: usize) {
     stage.entry(&entry("root", What::Layer)).unwrap();
     for i in 0..n {
         stage
@@ -356,7 +302,7 @@ fn many_files(stage: &mut Stage, n: usize) -> Spend {
             .unwrap();
         stage.data(b"x", true).unwrap();
     }
-    stage.end().unwrap()
+    stage.end().unwrap();
 }
 
 /// HEX-GUEST-14 (§4a; the lead's rule after HEX-GUEST-22's 4x run at d51a4da, alpine +1.1 ms: the bypass and
@@ -407,14 +353,14 @@ fn free_room_is_read_only_as_the_margin_nears_and_the_lock_only_to_learn() {
     );
 }
 
-/// HEX-GUEST-14 (§4a; HEX-GUEST-22's 2x run at d51a4da: grafana refused, its budget 1.1 GB, while the
-/// reclaimer removed a layer it had taken, room neither free nor counted): a layer the reclaimer took and is
-/// still removing (`.gone-<pid>-<n>`, its size file beside it, 3 entries and 8192 bytes): expect a stage's
+/// HEX-GUEST-14 (§4a; HEX-GUEST-22's 2x run at d51a4da: grafana refused, its budget 1.1 GB, while a layer
+/// taken out of the store was being removed, room neither free nor counted): a layer another stage out of
+/// room took and is still removing (`.gone-<pid>-<n>`, its size file beside it, 3 entries and 8192 bytes): expect a stage's
 /// budget to count it; and a write the file system refuses ENOSPC while it's there, with no layer left to
 /// evict: expect the stage to finish that removal (no one holds its lock, as when its remover ended) and the
 /// write done, the folder and its size file gone.
 #[test]
-fn an_in_flight_reclaim_counts_in_the_budget_and_a_stage_out_of_room_finishes_it() {
+fn an_in_flight_eviction_counts_in_the_budget_and_a_stage_out_of_room_finishes_it() {
     let dir = lab();
     let store = dir.path().join(STORE);
     let gone = format!("{GONE}{}-{}", std::process::id(), u64::MAX);
