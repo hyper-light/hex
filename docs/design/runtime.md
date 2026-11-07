@@ -804,6 +804,14 @@ before anything is spawned (`docs/research/runtime/exec-size-bounds.md`).
   `binfmts.h:15`), not glibc's `sysconf(_SC_ARG_MAX)`, which skips the cap. macOS reads `kern.argmax` (XNU's
   `NCARGS`). Windows, whose block Microsoft documents as unbounded, takes a census of real container environments with
   a stated margin, and 32,767 characters a variable (native step 4). The simulator holds Linux's floor, `ARG_MAX`.
+- **Whose stack limit, and when it is read:** a box's own (its spec's `process.rlimits` `RLIMIT_STACK`), else the
+  node's, read once and kept, so an exec makes no system call for it. A limit lowered after that reading is learned
+  where the program meets it, on the failure path alone: as root, the agent's vfork-style child reports the kernel's
+  `E2BIG` through memory the two share, and the agent reaps it and refuses the program; rootless, the seed (started
+  under the lower limit, which its programs inherit) refuses the program by its own reading with a refusal of its own
+  on the seed wire (code 5, appended). Either way the node reads its limit again, once, and refuses the next exec
+  itself. Rootless, the seed wire's one request (160 KiB, `hex_core::seed::MAX_REQUEST`) bounds a program too: one
+  past it is refused by name before it is sent, and the seed kept.
 - **Over the node's socket** the wire's one-message bound is tighter than Linux's, so the client refuses past it, as a
   program, before encoding.
 - **Tested by** HEX-RT-14 on every class's conformance run (a fixture that states no bound fails it), and a unit test of
