@@ -405,3 +405,35 @@ fn a_stage_without_room_says_so_and_admits_none() {
         Stage::begin(dir.path(), BoxId::new("u").unwrap(), &[Some([0xf1; 32])]).unwrap();
     assert!(budget.admitting);
 }
+
+/// HEX-GUEST-14 (§4a; the lead's rule after HEX-GUEST-22's interleaved 2x run at 5dc783c: alpine +0.2 ms and
+/// caddy +0.7 ms a create over whole-root staging, every layer into the box): a stage's opening does its
+/// bookkeeping in one listing of the store (5dc783c listed it twice), and a stage that admits nothing and
+/// holds nothing writes no record (it names no layer the store holds: none to keep from eviction). Count:
+/// two listings at an opening (the store once, the staged folder for the boxes' records; 5dc783c: three);
+/// with no room and nothing held, no `.layers` record; with room, the record.
+#[test]
+fn a_stages_opening_lists_the_store_once_and_records_only_what_it_could_hold() {
+    let dir = lab();
+    let store = dir.path().join(STORE);
+    let _a = layer(&store, 'a', 1_000, 1);
+    std::fs::write(store.join(NEED), format!("0 {}\n", u64::MAX)).unwrap();
+    let before = LISTINGS.with(std::cell::Cell::get);
+    let (_tight, budget) =
+        Stage::begin(dir.path(), BoxId::new("t").unwrap(), &[Some([0xa1; 32])]).unwrap();
+    assert!(!budget.admitting);
+    assert_eq!(
+        LISTINGS.with(std::cell::Cell::get) - before,
+        2,
+        "the store once, and the staged folder for the boxes' records"
+    );
+    assert!(
+        !dir.path().join("t").join(RECORD).exists(),
+        "no record for a stage that can hold nothing"
+    );
+    std::fs::write(store.join(NEED), "0 0\n").unwrap();
+    let (_room, budget) =
+        Stage::begin(dir.path(), BoxId::new("u").unwrap(), &[Some([0xa2; 32])]).unwrap();
+    assert!(budget.admitting);
+    assert!(dir.path().join("u").join(RECORD).exists());
+}

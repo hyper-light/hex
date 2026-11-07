@@ -516,9 +516,16 @@ fn now() -> Timestamps {
     }
 }
 
+thread_local! {
+    /// This thread's directory listings ([`names`]), counted for HEX-GUEST-14's check that a stage's
+    /// opening lists the store once.
+    static LISTINGS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// The names in the directory `dir`, read whole: a store or a staged folder, bounded by the file system's
 /// own entries.
 fn names(dir: &OwnedFd) -> Result<Vec<String>, Refusal> {
+    LISTINGS.with(|n| n.set(n.get().saturating_add(1)));
     let mut out = Vec::new();
     for entry in Dir::read_from(dir).map_err(os("listing a staged folder"))? {
         let entry = entry.map_err(os("listing a staged folder"))?;
@@ -624,37 +631,52 @@ impl Stage {
         };
         let mut present = Vec::with_capacity(wanted.len());
         let mut absent = VecDeque::new();
-        let need;
-        let mut spare = Spend::default();
-        {
+        let (free, need, admitting, spare) = {
             let _lock = lock(&store)?;
-            // The record first, so no eviction takes a layer this stage names while it stages.
-            let named: Vec<&str> = wanted.iter().flatten().map(String::as_str).collect();
-            if !named.is_empty() {
-                write_whole(&root, RECORD, &(named.join("\n") + "\n"))?;
-            }
-            // What another relay process left part way (a layer, an evicted one going) is no layer: removed.
+            // One listing of the store: what another relay process left part way (a layer, an evicted one
+            // going) is removed; the rest says which layers it holds and what the last resort can take.
             let me = std::process::id().to_string();
+            let mut layers_held = BTreeSet::new();
+            let mut going = Spend::default();
             for name in names(&store)? {
-                let mine = [PARTIAL, GONE].iter().any(|p| {
-                    name.strip_prefix(p)
-                        .is_some_and(|r| r.starts_with(&format!("{me}-")))
-                });
-                if (name.starts_with(PARTIAL) || name.starts_with(GONE)) && !mine {
-                    if name.ends_with(SIZE) {
-                        let _ = rustix::fs::unlinkat(&store, name.as_str(), AtFlags::empty());
-                    } else {
-                        let mut budget = fs_budget(&store);
-                        let _ = remove_tree(&store, &name, &mut budget);
+                if name.starts_with(PARTIAL) || name.starts_with(GONE) {
+                    let mine = [PARTIAL, GONE].iter().any(|p| {
+                        name.strip_prefix(p)
+                            .is_some_and(|r| r.starts_with(&format!("{me}-")))
+                    });
+                    if !mine {
+                        if name.ends_with(SIZE) {
+                            let _ = rustix::fs::unlinkat(&store, name.as_str(), AtFlags::empty());
+                        } else {
+                            let mut budget = fs_budget(&store);
+                            let _ = remove_tree(&store, &name, &mut budget);
+                        }
+                    } else if name.starts_with(GONE) && name.ends_with(SIZE) {
+                        // A layer being taken out, its room soon free: a stage out of room finishes it.
+                        going = going.plus(read_spend(&store, &name));
                     }
+                } else if is_layer_name(&name) {
+                    layers_held.insert(name);
                 }
             }
+            let need = read_spend(&store, NEED);
+            let free = free(&staged)?;
+            let admitting = admits(free, Spend::default(), need);
+            for digest in &wanted {
+                present.push(digest.as_ref().is_some_and(|d| layers_held.contains(d)));
+            }
+            // The record before any link, so no eviction takes a layer this stage names while it stages;
+            // a stage that admits nothing and holds nothing names no layer the store holds, and writes none.
+            let named: Vec<&str> = wanted.iter().flatten().map(String::as_str).collect();
+            if !named.is_empty() && (admitting || present.iter().any(|p| *p)) {
+                write_whole(&root, RECORD, &(named.join("\n") + "\n"))?;
+            }
             for (i, digest) in wanted.iter().enumerate() {
-                let held = digest.as_ref().is_some_and(|d| {
-                    rustix::fs::statat(&store, d.as_str(), AtFlags::SYMLINK_NOFOLLOW)
-                        .is_ok_and(|st| FileType::from_raw_mode(st.st_mode) == FileType::Directory)
-                });
-                match (held, digest, layers_dir.as_ref()) {
+                match (
+                    present.get(i).copied().unwrap_or(false),
+                    digest,
+                    layers_dir.as_ref(),
+                ) {
                     (true, Some(d), Some(dir)) => {
                         // Its last use, for the least recently used to go first, and the box's link to it.
                         let _ = rustix::fs::utimensat(
@@ -667,23 +689,18 @@ impl Stage {
                     }
                     _ => absent.push_back(i),
                 }
-                present.push(held);
             }
-            need = read_spend(&store, NEED);
-            // What the last resort can take for this stage: every layer no box names (this stage's own
-            // record is written, so its layers aren't among them), as their size files say.
+            // What the last resort can take for this stage: every layer no box names (this stage's own record
+            // is written if it names any the store holds), as their size files say, and what's going.
             let held = referenced(&staged)?;
-            for name in names(&store)? {
-                if is_layer_name(&name) && !held.contains(&name) {
+            let mut spare = going;
+            for name in &layers_held {
+                if !held.contains(name) {
                     spare = spare.plus(read_spend(&store, &format!("{name}{SIZE}")));
-                } else if name.starts_with(GONE) && name.ends_with(SIZE) {
-                    // A layer being taken out, its room soon free: a stage out of room finishes it.
-                    spare = spare.plus(read_spend(&store, &name));
                 }
             }
-        }
-        let free = free(&staged)?;
-        let admitting = admits(free, Spend::default(), need);
+            (free, need, admitting, spare)
+        };
         let opaque_xattr = if rustix::process::geteuid().is_root() {
             "trusted.overlay.opaque"
         } else {
