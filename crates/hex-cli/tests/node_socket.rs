@@ -504,7 +504,8 @@ fn through_a_simulated_guest(lab: &Lab, agent: &Agent, exe: &str) {
     let node = WithGuest::new(
         hex_api::sim::SimRuntime::new(),
         GuestRuntime::new(Arc::new(guests), config),
-    );
+    )
+    .unwrap();
     assert_eq!(node.classes(), [Class::Process, Class::Oci]);
     let failures = conformance::run(&node, &OciBoxes(lab, false));
     assert!(

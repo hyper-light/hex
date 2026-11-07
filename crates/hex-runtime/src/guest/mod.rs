@@ -244,6 +244,26 @@ pub struct GuestRuntime {
     retired: AtomicU64,
     /// The digests learned for layer tarballs not named by theirs, as they crossed (§4a).
     digests: Mutex<Digests>,
+    /// The Shards binary's identity when the running guest booted it.
+    booted_binary: Mutex<Option<stage::Identity>>,
+    /// The warm-up of a Shards binary that changed while the guest ran ([`GuestRuntime::warm_if_changed`]).
+    warm: Mutex<Warm>,
+}
+
+/// A throwaway guest booted on a Shards binary that changed while the node's guest ran, so the node's next boot
+/// of it is warm: an upgrade's first boot pays the host's first-run checks of its new code, 1.5-5.3 s against a
+/// warm boot's 0.17 s, once per binary and for every process after it
+/// (bench/native/guest/boot-ready/RECORD.md). At most one is in flight.
+#[derive(Default)]
+struct Warm {
+    /// The binary warmed, or being warmed.
+    identity: Option<stage::Identity>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+/// The Shards binary's identity, if it can be read (a binary that can't is the next boot's to refuse).
+fn binary_identity(binary: &std::path::Path) -> Option<stage::Identity> {
+    std::fs::metadata(binary).ok().map(|m| stage::identity(&m))
 }
 
 /// The digests learned for layer tarballs not named by theirs (docker save's `<id>/layer.tar`), each with the
@@ -319,6 +339,65 @@ impl GuestRuntime {
             slowest: Mutex::new(Duration::ZERO),
             retired: AtomicU64::new(0),
             digests: Mutex::new(Digests::default()),
+            booted_binary: Mutex::new(None),
+            warm: Mutex::new(Warm::default()),
+        }
+    }
+
+    /// Boots the node's guest now, so no create pays a boot, an upgrade's first least of all (HEX-GUEST-39): the
+    /// node calls it when it starts, before it accepts a box ([`WithGuest::new`]). Where Shards has no backend
+    /// there is no guest to boot, and the `oci` class is refused at create by name (§5).
+    pub fn boot(&self) -> Result<(), Refusal> {
+        if self.guests.backend().is_err() {
+            return Ok(());
+        }
+        self.guest().map(drop)
+    }
+
+    /// Where the Shards binary changed since the running guest booted it, boots one throwaway guest on it in the
+    /// background, at Shards' least memory and with no shares, and stops it, so the node's next boot is warm
+    /// (HEX-GUEST-40). The running guest is never booted again for it: that would end its boxes. At most one
+    /// warm-up is in flight, and a binary is warmed once. Called on each create: a stat, no polling.
+    fn warm_if_changed(&self) -> Result<(), Refusal> {
+        let Some(now) = binary_identity(&self.config.binary) else {
+            return Ok(());
+        };
+        let booted = *self.booted_binary.lock().map_err(poisoned)?;
+        if booted.is_none_or(|b| b == now) {
+            return Ok(());
+        }
+        let mut warm = self.warm.lock().map_err(poisoned)?;
+        if warm.identity == Some(now) || warm.thread.as_ref().is_some_and(|t| !t.is_finished()) {
+            return Ok(());
+        }
+        let mut least = self.config.clone();
+        least.vcpus = 1;
+        least.memory_mib = shards_api::min_memory_mib(std::env::consts::ARCH);
+        least.shares.clear();
+        let spec = least.spec();
+        let guests = Arc::clone(&self.guests);
+        let bound = self.first_dial_bound()?;
+        let thread = std::thread::Builder::new()
+            .name("hex-guest-warm".to_owned())
+            .spawn(move || {
+                // Ready, so its VM process ran too; then gone. A warm-up that fails leaves the next boot to
+                // pay the first run, as it would have.
+                if let Ok(guest) = guests.boot(&spec) {
+                    let _ = guest.connect(stream::CONTROL_PORT, bound);
+                    let _ = guest.stop();
+                }
+            })
+            .map_err(|e| Refusal::os("starting a guest warm-up", e))?;
+        warm.identity = Some(now);
+        warm.thread = Some(thread);
+        Ok(())
+    }
+
+    /// Waits for a warm-up in flight to end: its boot and dial are bounded by the first dial's bound.
+    fn finish_warm(&self) {
+        let thread = self.warm.lock().ok().and_then(|mut w| w.thread.take());
+        if let Some(t) = thread {
+            let _ = t.join();
         }
     }
 
@@ -358,6 +437,7 @@ impl GuestRuntime {
         self.guests
             .backend()
             .map_err(|why| refusal("finding Shards' backend", &why))?;
+        let binary = binary_identity(&self.config.binary);
         let mut hung = Vec::with_capacity(BOOTS);
         for _ in 0..BOOTS {
             let bound = self.first_dial_bound()?;
@@ -372,6 +452,7 @@ impl GuestRuntime {
             match Client::connect(Arc::clone(&link)) {
                 Ok(client) => {
                     self.learn(began.elapsed());
+                    *self.booted_binary.lock().map_err(poisoned)? = binary;
                     let b = Arc::new(Booted {
                         guest,
                         link,
@@ -439,6 +520,7 @@ impl GuestRuntime {
 
 impl Drop for GuestRuntime {
     fn drop(&mut self) {
+        self.finish_warm();
         if let Ok(Some(b)) = self.booted.get_mut().map(Option::take) {
             let _ = b.guest.stop();
         }
@@ -472,6 +554,7 @@ impl Runtime for GuestRuntime {
         };
         let rewritten = rewrite::rewrite(spec, &self.config.shares, &self.config.staged, &known)?;
         let b = self.guest()?;
+        self.warm_if_changed()?;
         // An id the guest's node already holds is refused as the node refuses it, before anything is
         // staged: staging first would send a box's whole root only to be refused (CLAUDE.md §3).
         match b.client.inspect(&id) {
@@ -538,8 +621,11 @@ pub struct WithGuest<P> {
 }
 
 impl<P: Runtime> WithGuest<P> {
-    pub fn new(process: P, oci: GuestRuntime) -> Self {
-        Self { process, oci }
+    /// The node's runtime, its guest booted before it returns, so it accepts no box before that boot
+    /// ([`GuestRuntime::boot`]); a guest that can't boot refuses the node by type.
+    pub fn new(process: P, oci: GuestRuntime) -> Result<Self, Refusal> {
+        oci.boot()?;
+        Ok(Self { process, oci })
     }
 
     /// The runtime holding `id`, or [`Refusal::NoSuchBox`]: the host's, asked first as it answers

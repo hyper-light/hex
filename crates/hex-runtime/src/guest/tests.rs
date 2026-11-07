@@ -596,6 +596,8 @@ struct Planned {
     patience: Arc<Mutex<Vec<Duration>>>,
     stops: Arc<AtomicUsize>,
     boots: AtomicUsize,
+    /// Each boot's memory, in MiB.
+    memory: Mutex<Vec<u64>>,
 }
 
 impl Planned {
@@ -605,6 +607,7 @@ impl Planned {
             patience: Arc::new(Mutex::new(Vec::new())),
             stops: Arc::new(AtomicUsize::new(0)),
             boots: AtomicUsize::new(0),
+            memory: Mutex::new(Vec::new()),
         }
     }
 }
@@ -729,9 +732,10 @@ impl shards_api::Guests for Planned {
 
     fn boot(
         &self,
-        _spec: &shards_api::GuestSpec,
+        spec: &shards_api::GuestSpec,
     ) -> Result<Box<dyn shards_api::Guest>, shards_api::Refusal> {
         self.boots.fetch_add(1, Ordering::SeqCst);
+        self.memory.lock().unwrap().push(spec.memory_mib);
         let boots = self.plan.lock().unwrap().pop().unwrap();
         Ok(Box::new(PlannedGuest {
             boots,
@@ -871,5 +875,122 @@ fn a_records_row_is_what_turns_a_class_on() {
     assert_eq!(
         seed_in(&kvm, "boot_ready", "Linux-KVM"),
         Some(Duration::from_millis(180))
+    );
+}
+
+/// HEX-GUEST-39 (the lead, 2026-11-07: an upgrade's first boot costs 1.5-5.3 s of the host's first-run checks
+/// before the guest's kernel runs, bench/native/guest/boot-ready/RECORD.md, and is no user's create's to pay):
+/// make the node's runtime: expect its guest booted before it returns, and the guest a create asks for that one,
+/// no second boot.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn the_node_boots_its_guest_before_it_accepts_a_box() {
+    if shards_api::backend().is_err() {
+        return;
+    }
+    let guests = Arc::new(Planned::new(&[Boots::Ready]));
+    let node = WithGuest::new(
+        hex_api::sim::SimRuntime::new(),
+        GuestRuntime::new(guests.clone(), config()),
+    )
+    .unwrap();
+    assert_eq!(
+        guests.boots.load(Ordering::SeqCst),
+        1,
+        "booted as it was made"
+    );
+    node.oci.guest().unwrap();
+    assert_eq!(
+        guests.boots.load(Ordering::SeqCst),
+        1,
+        "a create boots none"
+    );
+}
+
+/// HEX-GUEST-39: make a node whose guest can't boot: expect the node refused by type, naming the boot; and
+/// one where Shards has no backend made, its `oci` class refused at create by name as before (§5), its
+/// `process` class serving.
+#[test]
+fn a_node_whose_guest_cant_boot_is_refused_and_one_with_no_backend_is_made() {
+    let failing = Arc::new(NoGuest {
+        backend: Ok(shards_api::Backend::Kvm),
+        boots: AtomicUsize::new(0),
+    });
+    let refused = WithGuest::new(
+        hex_api::sim::SimRuntime::new(),
+        GuestRuntime::new(failing.clone(), config()),
+    )
+    .err()
+    .expect("a node whose guest can't boot is refused");
+    assert!(
+        refused.to_string().contains("booting the node's guest"),
+        "{refused}"
+    );
+    assert_eq!(failing.boots.load(Ordering::SeqCst), 1);
+    let none = Arc::new(NoGuest {
+        backend: Err(shards_api::Refusal::NoBackend {
+            os: "macos",
+            arch: "x86_64",
+        }),
+        boots: AtomicUsize::new(0),
+    });
+    let node = WithGuest::new(
+        hex_api::sim::SimRuntime::new(),
+        GuestRuntime::new(none.clone(), config()),
+    )
+    .unwrap();
+    assert_eq!(none.boots.load(Ordering::SeqCst), 0);
+    assert_eq!(node.classes(), [Class::Process, Class::Oci]);
+}
+
+/// HEX-GUEST-40 (the lead, 2026-11-07): replace the Shards binary while the guest runs, then create twice: expect
+/// one throwaway guest booted in the background on the new binary at Shards' least memory and stopped, so the
+/// node's next boot is warm, the running guest left serving its boxes, and nothing more for a binary already
+/// warmed.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn a_changed_binary_is_warmed_once_in_the_background_and_the_guest_kept() {
+    if shards_api::backend().is_err() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let binary = dir.path().join("shards");
+    std::fs::write(&binary, b"a build").unwrap();
+    let mut given = config();
+    given.binary = binary.clone();
+    let guests = Arc::new(Planned::new(&[Boots::Ready, Boots::Ready]));
+    let rt = GuestRuntime::new(guests.clone(), given);
+    rt.boot().unwrap();
+    rt.warm_if_changed().unwrap();
+    assert_eq!(
+        guests.boots.load(Ordering::SeqCst),
+        1,
+        "an unchanged binary warms nothing"
+    );
+    std::fs::write(&binary, b"the next build, an upgrade").unwrap();
+    rt.warm_if_changed().unwrap();
+    rt.warm_if_changed().unwrap();
+    rt.finish_warm();
+    assert_eq!(
+        guests.boots.load(Ordering::SeqCst),
+        2,
+        "one throwaway, however many creates"
+    );
+    assert_eq!(
+        guests.stops.load(Ordering::SeqCst),
+        1,
+        "the throwaway stopped"
+    );
+    assert_eq!(
+        guests.memory.lock().unwrap()[1],
+        shards_api::min_memory_mib(std::env::consts::ARCH),
+        "the throwaway at Shards' least memory"
+    );
+    rt.warm_if_changed().unwrap();
+    rt.guest().unwrap();
+    assert_eq!(
+        guests.boots.load(Ordering::SeqCst),
+        2,
+        "the warmed binary and the running guest kept"
     );
 }

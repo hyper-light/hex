@@ -556,6 +556,16 @@ Hex's tests of the channel, each citing its ID:
 - HEX-GUEST-38: init mounts cgroup2 alone with RCU's grace periods expedited (`/sys/kernel/rcu_expedited`, after
   sysfs), as the kernel expedites them until it starts init: its first mount otherwise waits out grace periods, about
   20 ms of an HVF boot (`hex guest`).
+- HEX-GUEST-39: the node boots its guest when it is made, before it accepts a box (`WithGuest::new`, which a guest
+  that can't boot refuses by type; where Shards has no backend the node is made and its `oci` class refused at
+  create, §5), so no create pays a boot. An upgrade's first boot costs 1.5-5.3 s of the host's first-run checks of
+  its new code before the guest's kernel runs, against a warm boot's 0.17 s; one boot absorbs it whole, for every
+  later process too (bench/native/guest/boot-ready/RECORD.md, the under-load record: every series' second boot
+  is warm). The lead's choice of 2026-11-07 over a throwaway boot at start: fewer boots, one path, latency first.
+- HEX-GUEST-40: on each create (a stat, no polling) the node compares the Shards binary's identity with the one its
+  running guest booted. If it changed, one throwaway guest boots on it in the background, at Shards' least memory
+  with no shares, and stops, so the node's next boot is warm; at most one is in flight, a binary is warmed once,
+  and the running guest is never booted again for it, which would end its boxes (`GuestRuntime`).
 
 ## 7. What would falsify it
 
