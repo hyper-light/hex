@@ -111,13 +111,14 @@ impl HostClass {
     /// - Linux: 957 ms, the slowest of 294 answers in each of three first runs of process_box, oci_box,
     ///   oci_spec_box and node_socket after a rebuild on fedora at load 20-108
     ///   (bench/native/records/firstrun-linux-e34d48d-20261107T173109Z.txt).
-    /// - macOS: 534 ms, the slowest of 44 answers in each of three first runs of macos_process_box after a
-    ///   rebuild on adas-mac-studio-2 (bench/native/records/firstrun-macos-9908a6da-20261107T1823Z.txt).
+    /// - macOS: 770 ms, an end seen on adalundhe-macbook-pro at load 21 (2026-11-06, [`still_running`]),
+    ///   above the slowest of 44 answers in each of three first runs of macos_process_box after a rebuild
+    ///   on adas-mac-studio-2, 534 ms (bench/native/records/firstrun-macos-9908a6da-20261107T1823Z.txt).
     pub const fn slowest_recorded_end(self) -> Option<Duration> {
         match self {
             HostClass::Windows => Some(Duration::from_millis(34_837)),
             HostClass::Linux => Some(Duration::from_millis(957)),
-            HostClass::Macos => Some(Duration::from_millis(534)),
+            HostClass::Macos => Some(Duration::from_millis(770)),
         }
     }
 }
@@ -426,7 +427,9 @@ fn signal(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     let mut p = rt
         .exec(&id, fx.program(&Act::Wait), Stdio::null())
         .map_err(|e| format!("exec: {e}"))?;
-    let early = p.wait_for(still_running()).map_err(|e| e.to_string())?;
+    // Running now, at the signal: its Signal(15) end below then proves it hadn't ended on its own (that
+    // would be Code(0)), so no watch is waited out.
+    let early = p.wait_for(Duration::ZERO).map_err(|e| e.to_string())?;
     ensure(early.is_none(), || {
         format!("a waiting program ended: {early:?}")
     })?;

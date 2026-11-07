@@ -71,8 +71,13 @@ pub enum Step {
     Wait(usize, End),
     /// Read all program `p` wrote to stdout (after it ended).
     Read(usize),
-    /// Watch program `p` for the suite's learned watch ([`conformance::still_running`]).
+    /// Watch program `p` for the suite's learned watch ([`conformance::still_running`]): for a liveness
+    /// no later step proves, such as a program in another box surviving a signal or a delete, whose end
+    /// (by any signal) would read the same as its own box's delete.
     Running(usize),
+    /// Whether program `p` runs now, with no watch: for a liveness a later step proves, since a program that
+    /// had ended on its own would show a different end or output there.
+    Alive(usize),
     /// Signal box `b`.
     Signal(usize, Signal),
     /// Inspect box `b`: its state and its init's exit.
@@ -150,8 +155,8 @@ pub const SCENARIOS: &[Scenario] = &[
             Step::Exec(0, Act::Wait),
             Step::Exec(0, Act::Fail(3)),
             Step::Wait(2, End::Exact),
-            Step::Running(0),
-            Step::Running(1),
+            Step::Alive(0),
+            Step::Alive(1),
             Step::Look(0),
             Step::Signal(0, Signal::TERM),
             Step::Wait(0, End::Exact),
@@ -223,7 +228,7 @@ pub const SCENARIOS: &[Scenario] = &[
             Step::Exec(0, Act::Say("beside the echo")),
             Step::Wait(1, End::Exact),
             Step::Read(1),
-            Step::Running(0),
+            Step::Alive(0),
             Step::Feed(0, "fed to the echo"),
             Step::Wait(0, End::Exact),
             Step::Read(0),
@@ -364,7 +369,11 @@ impl Play<'_> {
                 | Step::Listed(b)
                 | Step::Killed(b)
                 | Step::Delete(b) => *b,
-                Step::Feed(..) | Step::Wait(..) | Step::Read(_) | Step::Running(_) => continue,
+                Step::Feed(..)
+                | Step::Wait(..)
+                | Step::Read(_)
+                | Step::Running(_)
+                | Step::Alive(_) => continue,
             };
             let id = self.id(b)?;
             if !ids.contains(&id) {
@@ -465,15 +474,15 @@ impl Play<'_> {
                     .map_err(|e| format!("read: {e}"))?;
                 Seen::Out(out)
             }
-            Step::Running(p) => {
+            Step::Running(p) | Step::Alive(p) => {
                 let Some(s) = self.started(*p)? else {
                     return Ok(Seen::NeverStarted);
                 };
-                match s
-                    .proc
-                    .wait_for(conformance::still_running())
-                    .map_err(|e| e.to_string())?
-                {
+                let watch = match step {
+                    Step::Running(_) => conformance::still_running(),
+                    _ => Duration::ZERO,
+                };
+                match s.proc.wait_for(watch).map_err(|e| e.to_string())? {
                     None => Seen::StillRunning,
                     Some(exit) => Seen::Exit(exit),
                 }

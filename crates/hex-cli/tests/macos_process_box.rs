@@ -279,12 +279,11 @@ fn a_programs_end_is_seen_when_it_ends_not_at_the_waits_budget() {
     })
     .expect("create");
     const RUNS: usize = 60;
-    // A missed exit event makes the wait sleep out its whole budget. Late is past the slowest end on record
-    // across every host and OS (conformance's SLOWEST_RECORDED_END); the budget is the suite's learned
-    // patience, at least twice that, so a legitimate end is never late and a missed one always is. (One host's end maximum
-    // doesn't carry: 59.6 ms on adas-mac-studio-2 at load 2-5 was 550-770 ms on adalundhe-macbook-pro at
-    // load 21, 2026-11-06.)
-    let late_after = hex_api::conformance::SLOWEST_RECORDED_END;
+    // A missed exit event makes the wait sleep out its whole budget. Late is past the slowest end on macOS's
+    // record across its hosts (conformance's seed for this host, which counts 770 ms on adalundhe-macbook-pro
+    // at load 21 where adas-mac-studio-2 at load 2-5 saw 59.6 ms); the budget is the suite's learned
+    // patience, at least twice that, so a legitimate end is never late and a missed one always is.
+    let late_after = hex_api::conformance::seed(hex_api::conformance::HostClass::THIS);
     let budget = hex_api::conformance::patience();
     let mut late = Vec::new();
     for i in 0..RUNS {
