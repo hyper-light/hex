@@ -700,6 +700,35 @@ mod tests {
         );
     }
 
+    /// Hex's rule for a learned wait's seed (the lead, 2026-11-07): a host class seeds from its own slowest
+    /// end on record, a record that holds a first run after a rebuild; a class with no such record seeds
+    /// from the slowest of any class's, never refused; and the fixed wait is twice this host's
+    /// seed (`conformance::PATIENCE`). Do: ask each class's seed and a host of no class's. Expect: Windows its own record; Linux,
+    /// macOS (no record yet holds a first run after a rebuild) and no class the slowest of any class's,
+    /// which no class's record passes.
+    #[test]
+    fn a_class_with_no_record_seeds_from_the_slowest_of_any_class() {
+        use conformance::{HostClass, SLOWEST_RECORDED_END, seed};
+        let windows = HostClass::Windows
+            .slowest_recorded_end()
+            .expect("Windows has a record");
+        assert_eq!(seed(Some(HostClass::Windows)), windows);
+        for class in [Some(HostClass::Linux), Some(HostClass::Macos), None] {
+            assert_eq!(seed(class), SLOWEST_RECORDED_END, "{class:?}");
+        }
+        for class in HostClass::ALL {
+            assert!(
+                class
+                    .slowest_recorded_end()
+                    .is_none_or(|r| r <= SLOWEST_RECORDED_END)
+            );
+        }
+        assert_eq!(
+            conformance::PATIENCE,
+            seed(HostClass::THIS).saturating_mul(2)
+        );
+    }
+
     /// The rule for a learned wait: before any sample its bound is twice the slowest answer on record;
     /// then twice the slowest of the record and what it has seen; and it only rises. Do: seed one at
     /// 100 ms, see 30 ms, then 300 ms, then 50 ms. Expect 200 ms, 200 ms, 600 ms, 600 ms.
