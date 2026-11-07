@@ -363,7 +363,9 @@ Intel macOS built on adalundhe-macbook-pro at a7670e0, and the musl aarch64 `hex
 Windows arm64 is skipped (Ada). Every OS's `process` class is benchmarked against its competitors (`bench/native/RESULT.md`).
 Its CLAUDE.md changes are approved by Ada, 2026-11-06, as written: the Gates block's Linux and macOS lint lines
 (1b1fea3, 47a9683) and §12's `sysctlbyname("kern.argmax")` for the exec bound (08d52a0).
-Final once fedora's 7 gates pass at 5f712ff (step 4's run; 6 of 7 already pass on adas-mac-studio-2, all but Linux `cargo test`).
+**Final** at 5f712ff (`cp/t7-native-s4`), on three results at that one commit: fedora's 7 gates exit 0 (unit
+hex-native-s4-gates-20261106T215342Z, its exact tree), `windows_oci_box` on jupiter (`suite-20261106T191231Z.log`) and
+jupiter's `cargo test --workspace` exit 0 (`wstest-20261106T191231Z.log`).
 
 ## Next
 
