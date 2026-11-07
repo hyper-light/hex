@@ -305,6 +305,13 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
     overlay mounts those as its lower layers, as a Linux host does (`hex_core::bundle`'s overlay, lowest
     first; overlayfs follows the links), so an `OciSpec`'s `Rootfs::Layers` of tarballs reaches the guest as
     `Rootfs::Layers` of those paths whichever each is.
+    - **Why a store, not a fix elsewhere** (Ada's rule: fix the fault, don't hide it behind a cache): the
+      fault is that a macOS or Windows host can't keep a Linux layer faithfully where the guest could read it
+      in place (APFS folds case and normalization, NTFS keeps no Linux modes or owners), so the guest copies
+      every layer. The store makes that copy once per digest, content-addressed, verified as it's admitted,
+      and evicted by the room it learns. Its worth and what would falsify it (a no-copy path, per-layer EROFS
+      images over a read-only share, measured against it) are `bench/native/guest/create-life/RECORD.md`,
+      "Why a store, under Ada's rule".
     - **What's sent:** a layer is named by its digest without being read: by its blob's name as its image
       keeps it (`…/sha256/<hex>`, an OCI image layout's `blobs/<alg>/<encoded>`, image-spec
       `image-layout.md`, "Blobs", and containerd's content store's alike), or by a digest the host learned

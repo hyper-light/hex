@@ -69,6 +69,42 @@ job ran beside 4× or 6×. The p99 columns are the **max of 30**.
 The hit cost, at room: a box's life of about 2 ms (create about 1 ms, delete about 1 ms), against 31.6 ms
 (alpine), 207 ms (caddy) and 4.25 s (grafana) staged whole.
 
+## Why a store, under Ada's rule (fix the fault; a cache is no fix for one)
+
+**The fault.** A guest on macOS or Windows can't run a Linux image's layers where the host keeps them. APFS
+is case- and normalization-insensitive, so a layer holding `a` and `A`, or two normalizations of one name,
+unpacks onto the host as one file (Shards' `docs/design/image-storage.md` §2.2, point 5). NTFS keeps no Linux
+modes or owners. A host folder shared over virtio-fs keeps ownership only in a side xattr
+(`com.docker.grpcfuse.ownership`) or WSL's `$LX` EAs. So the guest must hold each layer in a Linux file system
+of its own, and whole-root staging copied every layer across at every create: 31.6 ms for alpine, 207 ms for
+caddy and 4.25 s for grafana above, the same work again for the same bytes.
+
+**What the store is.** It doesn't hide the copy, it does it once per layer. That is sound for three reasons:
+
+- **Content-addressed.** A layer is named by its blob's SHA-256, the name an OCI image layout gives it
+  (image-spec `image-layout.md`, "Blobs"). One digest is one set of bytes, so a hit is the layer itself,
+  never a stale copy. A digest the host learned for a `docker save` tarball is tied to its file's identity
+  (device, inode, size, mtime, ctime) and is hashed again if any of these changes, never trusted.
+- **Verified admission.** A named layer's bytes are hashed as they cross. The relay keeps the layer only if
+  they are its digest, refusing it by name otherwise. A layer is admitted only into room already free, the
+  learned room of the largest stage left over. A layer that would cut into that room goes into the box, so a
+  create's worst case is whole-root staging's own (2× above: alpine +0.0 ms, caddy −0.4 ms paired).
+- **Adaptive eviction.** The room the store leaves rises with the largest stage the guest has seen
+  (`.layers/.need`). It evicts only when a stage hits `ENOSPC`, taking the least recently used layer no box
+  names. It has no reclaimer, because one measured worse (a03dec9: grafana 4,483 ms with it, 2,629 without).
+
+**Its worth** is this record, at 079e268. With room, a box's life is about 2 ms against 31.6 ms, 207 ms and
+4.25 s staged whole. Under pressure (299 pairs) it is no worse for alpine and caddy and 1.8 s shorter for
+grafana, at p50 and p99 alike.
+
+**What would falsify it** is a path with no copy at all that does no worse. The lead's diagnosis (2026-11-07)
+is per-layer EROFS images built once per digest on the host, read in place over one read-only virtio-fs share
+and mounted file-backed under the guest's overlay. That keeps Linux's own metadata in an image file, so APFS
+and NTFS never see a Linux name, and it removes both the guest's copy and its admission and eviction. It is
+measured against this store, interleaved, at 299 pairs on macOS HVF and Windows WHP, first creates included
+with their image builds. If it is no worse at p50 and p99 everywhere, it replaces the store. If it loses, the
+store stands for the reasons above.
+
 ## How it got here (each measured, each a commit)
 
 - 22b26ba: the store; first record (studio-2, 7fc4aa4 → 22b26ba): no better, and alpine 2.2× slower.
