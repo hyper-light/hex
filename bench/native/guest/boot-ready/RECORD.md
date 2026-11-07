@@ -9,7 +9,42 @@ added, and its load is recorded.
 
 ## HVF (macOS aarch64)
 
-**Since cut 2 (2026-11-07 00:43Z, Hex 7cbe9f5): 0.249 s**, the slowest of the current image's record
+**Since 2026-11-07 17:24Z: 5.264 s**, the slowest of the under-load record below, an upgrade's first boot (the
+lead's ruling of 2026-11-07: the fault was the record, taken at lighter load, not the margin; Hex's records are
+taken under real co-tenant load). The bound is the learned-wait rule's: 2 × max(this record's slowest, the
+node's own slowest), only rising. What it replaced: at load ~10 a guest's boots were refused at 2 × 0.249 s
+(studio-2, 2026-11-07 17:03Z, HEX-GUEST-22's store arm: "2 guests booted, each alive and not ready within
+twice the slowest boot to ready seen … 497.164ms").
+
+### adas-mac-studio-2.local, under load, N = 299 (of record)
+
+- launchd one-shot hex.ns5route.boot299.20261107T172146Z, 2026-11-07 17:24-17:26Z; adas-mac-studio-2 (Apple
+  M4 Max, 14 cores, 36 GiB, macOS 26.2), under its own co-tenants, nothing added and nothing waited for:
+  load 9.51-12.68 (p50 11.4), with HEX-GUEST-22's EROFS A/B running beside it (its own load recorded) and other
+  agents' work (an `overload-…` process at 195% CPU, `mkfs.erofs`, `shards-vm`)
+- tree: Hex cp/t7-native-s5-route 00efb51, initramfs sha256 a2e0e05a18fcd54a…; Shards hex/shards-api a0cced87
+  debug build (shards a27060f8c30cba02…, its VM process 56680b1893c88d24…); the tool
+  crates/hex-cli/tests/guest_boot_record.rs, release, all of the host's vCPUs, 632 MiB
+- N = 299 (a p99 claim at 95%: 0.99ⁿ ≤ 0.05), **each boot its own process**, as a node's first boot is (no
+  learned value of its own yet), in 13 series of 23. **Each series starts as an upgrade does**: a fresh copy of
+  `shards` and of its VM process, each re-signed under a new identifier (the VM process with Shards'
+  `resources/vm.entitlements` and Hardened Runtime, as its build.rs signs it), so new code hashes, and a fresh
+  `SHARDS_CACHE`, so its first process writes its helpers out; then 22 boots of that build, warm
+- before each boot, the host's load, its running Hex launchd jobs and its top CPU users, beside it; no boot dropped
+  or failed. Raw: `runs/hvf-studio2-20261107T172411Z.txt` (sha256 706aff018c62d61f…)
+
+| | seconds |
+|---|---|
+| warm boots (N = 286): min / p50 / p99 / max | 0.087 / 0.173 / 0.409 / 0.478 |
+| an upgrade's first boots (N = 13) | 1.480 1.553 1.736 1.753 1.806 1.896 1.952 1.988 2.005 2.299 2.567 3.050 5.264 |
+| **all 299: max (the record's slowest)** | **5.264** (boot 47, series 3's first) |
+
+Where a first boot's time goes: the guest's own stamps put its init at 25-31 ms and its relay listening at 27-34 ms
+of the guest's clock in every first boot, as in warm ones, so the 1.5-5.3 s is the host's, before the guest's
+kernel runs: the first exec of a newly signed `shards` (a 130 MB debug build) and VM process, and the write-out
+of the helpers.
+
+### Before: cut 2 (2026-11-07 00:43Z, Hex 7cbe9f5): 0.249 s, the slowest of that image's record
 (bench/native/guest/boot-split/RECORD.md, hex.ns5.dsplit3.20261107T003310Z, load 2.9-4.4, N=40: 83-249 ms, p50 92 ms;
 the maximum a series' first boots, which rose above the stripped image's 0.191 s while the median held). Before that,
 since the strip: 0.191 s, the slowest of the stripped image's run
