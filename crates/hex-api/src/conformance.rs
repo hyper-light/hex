@@ -111,13 +111,13 @@ impl HostClass {
     /// - Linux: 957 ms, the slowest of 294 answers in each of three first runs of process_box, oci_box,
     ///   oci_spec_box and node_socket after a rebuild on fedora at load 20-108
     ///   (bench/native/records/firstrun-linux-e34d48d-20261107T173109Z.txt).
-    /// - macOS: its bench record (313.2 ms on adas-mac-studio-2, bench/native/records) holds no first run
-    ///   after a rebuild, so it seeds as a class with no record.
+    /// - macOS: 534 ms, the slowest of 44 answers in each of three first runs of macos_process_box after a
+    ///   rebuild on adas-mac-studio-2 (bench/native/records/firstrun-macos-9908a6da-20261107T1823Z.txt).
     pub const fn slowest_recorded_end(self) -> Option<Duration> {
         match self {
             HostClass::Windows => Some(Duration::from_millis(34_837)),
             HostClass::Linux => Some(Duration::from_millis(957)),
-            HostClass::Macos => None,
+            HostClass::Macos => Some(Duration::from_millis(534)),
         }
     }
 }
@@ -140,14 +140,19 @@ const fn slower(a: Duration, b: Option<Duration>) -> Duration {
 }
 
 /// What a learned wait on a host of `class` seeds from (Hex's rule for learned waits): its class's slowest
-/// end on record, or for a class with none (or a host of no class), the slowest on any class's record,
-/// rather than refusing to wait.
+/// end on record ([`seed_from`]).
 pub const fn seed(class: Option<HostClass>) -> Duration {
     match class {
-        Some(c) => match c.slowest_recorded_end() {
-            Some(record) => record,
-            None => SLOWEST_RECORDED_END,
-        },
+        Some(c) => seed_from(c.slowest_recorded_end()),
+        None => seed_from(None),
+    }
+}
+
+/// What a learned wait seeds from given its class's `record`: that record, or for a class with none (or a
+/// host of no class), the slowest on any class's record, rather than refusing to wait.
+pub const fn seed_from(record: Option<Duration>) -> Duration {
+    match record {
+        Some(r) => r,
         None => SLOWEST_RECORDED_END,
     }
 }

@@ -701,32 +701,23 @@ mod tests {
     }
 
     /// Hex's rule for a learned wait's seed (the lead, 2026-11-07): a host class seeds from its own slowest
-    /// end on record, a record that holds a first run after a rebuild; a class with no such record seeds
-    /// from the slowest of any class's, never refused; and the fixed wait is twice this host's
-    /// seed (`conformance::PATIENCE`). Do: ask each class's seed and a host of no class's. Expect: Windows
-    /// and Linux their own records; macOS (no record yet holds a first run after a rebuild) and no class
-    /// the slowest of any class's, which no class's record passes.
+    /// end on record, a record that holds a first run after a rebuild; a class with no such record (or a
+    /// host of no class) seeds from the slowest of any class's, never refused; and the fixed wait is twice
+    /// this host's seed (`conformance::PATIENCE`). Do: ask each class's seed, a class with no record's, and
+    /// a host of no class's. Expect: each class its own record, none past the slowest of any; no record and
+    /// no class the slowest of any class's.
     #[test]
     fn a_class_with_no_record_seeds_from_the_slowest_of_any_class() {
-        use conformance::{HostClass, SLOWEST_RECORDED_END, seed};
-        let windows = HostClass::Windows
-            .slowest_recorded_end()
-            .expect("Windows has a record");
-        assert_eq!(seed(Some(HostClass::Windows)), windows);
-        let linux = HostClass::Linux
-            .slowest_recorded_end()
-            .expect("Linux has a record");
-        assert_eq!(seed(Some(HostClass::Linux)), linux);
-        for class in [Some(HostClass::Macos), None] {
-            assert_eq!(seed(class), SLOWEST_RECORDED_END, "{class:?}");
-        }
+        use conformance::{HostClass, SLOWEST_RECORDED_END, seed, seed_from};
         for class in HostClass::ALL {
-            assert!(
-                class
-                    .slowest_recorded_end()
-                    .is_none_or(|r| r <= SLOWEST_RECORDED_END)
-            );
+            let record = class
+                .slowest_recorded_end()
+                .expect("each class has a record");
+            assert_eq!(seed(Some(class)), record, "{class:?}");
+            assert!(record <= SLOWEST_RECORDED_END, "{class:?}");
         }
+        assert_eq!(seed_from(None), SLOWEST_RECORDED_END);
+        assert_eq!(seed(None), SLOWEST_RECORDED_END);
         assert_eq!(
             conformance::PATIENCE,
             seed(HostClass::THIS).saturating_mul(2)
