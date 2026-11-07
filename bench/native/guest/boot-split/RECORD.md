@@ -57,6 +57,27 @@ the kernel does for its own boot. The guest's run otherwise keeps RCU as the ker
 on, trading an interrupt to every CPU per grace period for faster cgroup and namespace teardown in the boxes, is a
 separate measured question. Its 40-boot record with the committed tree is pending: studio-2 stopped answering.
 
+### Cut 2's record (the committed tree)
+
+launchd hex.ns5.dsplit3.20261107T003310Z, 2026-11-07 00:43Z, adas-mac-studio-2, load 2.92-4.40 (C's run had ended),
+Hex 7cbe9f5 (cut 1 + cut 2), initramfs 2,177,528 bytes (sha256 531813f58da81d2d…), N=40;
+runs/hvf-studio2-rcu-20261107T003310Z.txt. Medians / maxima, ms:
+
+| phase | after cut 1 | after cut 2 |
+|---|---|---|
+| total, host-side | 91.41 / 190.80 | 91.78 / 248.58 |
+| (ii) kernel to init | 24.65 / 25.40 | 23.70 / 30.33 |
+| (iii) init: re-exec, mounts, cgroup | 20.79 / 30.68 | **0.75 / 0.87** |
+| (iii) node ready | 0.54 / 0.60 | 0.44 / 0.66 |
+| (iii) relay listening | 0.12 / 0.18 | 0.11 / 0.13 |
+| (i)+(iv) host | 44.55 / 140.76 | 66.42 / 222.85 |
+
+Reading: init's phase fell from 20.8 ms to 0.75 ms; the relay now listens at about 25 ms of the guest's boot.
+The host's total didn't move (p50 91.8 ms): the host-side share rose by about what the guest saved, so the
+guest is now ready before the host's first successful CONNECT. The critical path is Shards' (the VMM's start,
+and when its vsock muxer accepts a CONNECT), (i)+(iv), about 66 ms, which goes to Shards' lead. The
+first-boot maxima (238-249 ms) are a series' first boots, as in every HVF record.
+
 ## WHP (Windows x86_64, jupiter)
 
 Pending: jupiter's runner wasn't answering when this was taken.

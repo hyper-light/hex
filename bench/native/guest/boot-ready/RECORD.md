@@ -9,7 +9,10 @@ added, and its load is recorded.
 
 ## HVF (macOS aarch64)
 
-**Since the strip (2026-11-06 21:11Z): 0.191 s**, the slowest of the stripped image's run
+**Since cut 2 (2026-11-07 00:43Z, Hex 7cbe9f5): 0.249 s**, the slowest of the current image's record
+(bench/native/guest/boot-split/RECORD.md, hex.ns5.dsplit3.20261107T003310Z, load 2.9-4.4, N=40: 83-249 ms, p50 92 ms;
+the maximum a series' first boots, which rose above the stripped image's 0.191 s while the median held). Before that,
+since the strip: 0.191 s, the slowest of the stripped image's run
 (bench/native/guest/boot-split/RECORD.md, launchd hex.ns5.dsplit2.20261106T211043Z, adas-mac-studio-2, load 14.5,
 N=40: 84-191 ms, p50 91 ms). The seed falls with the cut; the runs below are of the unstripped image, kept as
 its history.

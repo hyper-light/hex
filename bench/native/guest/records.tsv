@@ -4,7 +4,7 @@
 # Read at build time by hex_runtime::guest (include_str!) and at run time by scripts/guest/boot_check.py.
 # Windows-WHP rows: shards.exe a debug build, AWS-LC without assembly (AWS_LC_SYS_NO_ASM), as its records say.
 # measure	class	slowest_us	record
-boot_ready	macOS-HVF	190803	bench/native/guest/boot-ready/RECORD.md
+boot_ready	macOS-HVF	248582	bench/native/guest/boot-ready/RECORD.md
 stop	macOS-HVF	13000	bench/native/guest/stop/RECORD.md
 validation_run	macOS-HVF	73750000	bench/native/guest/validation-runs/RECORD.md
 validation_run	Windows-WHP	75500000	bench/native/guest/validation-runs/RECORD.md
