@@ -18,7 +18,7 @@ use std::io::Read;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use hex_api::conformance::{Act, Fixture};
+use hex_api::conformance::{self, Act, Fixture};
 use hex_api::differential;
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Runtime, Signal, Stdio};
 use hex_runtime::windows::WinRuntime;
@@ -308,10 +308,7 @@ fn a_box_past_its_bound_is_refused_at_the_bound() {
     let mut p = rt
         .exec(&id, fx.act(&Act::Hog(2 * GIB)), Stdio::null())
         .expect("exec hog");
-    let exit = p
-        .wait_for(Duration::from_secs(30))
-        .expect("wait")
-        .expect("the hog ends");
+    let exit = end_of(&mut *p, "the hog ends");
     let usage = rt.usage(&id).expect("usage");
     rt.delete(&id).expect("delete");
     assert_ne!(exit, Exit::Code(0), "a hog over the bound exited 0");
@@ -342,10 +339,7 @@ fn a_box_under_its_bound_runs_and_reports_its_exit() {
     let mut p = rt
         .exec(&id, fx.act(&Act::Fail(7)), Stdio::null())
         .expect("exec");
-    let exit = p
-        .wait_for(Duration::from_secs(30))
-        .expect("wait")
-        .expect("the program ends");
+    let exit = end_of(&mut *p, "the program ends");
     assert_eq!(exit, Exit::Code(7));
     // Once the member has ended and its exit is read, the box is empty (wait on the fact: the ended
     // process leaves the job once its handle is closed).
@@ -382,10 +376,7 @@ fn a_box_takes_a_named_signal() {
         "the box runs",
     );
     rt.signal(&id, Signal::TERM).expect("signal TERM");
-    let exit = p
-        .wait_for(Duration::from_secs(30))
-        .expect("wait")
-        .expect("the program ends");
+    let exit = end_of(&mut *p, "the program ends");
     rt.delete(&id).expect("delete");
     assert_eq!(exit, Exit::Signal(15), "TERM is 15 on the seam");
 }
@@ -412,10 +403,7 @@ fn a_member_asking_to_break_away_is_refused() {
             },
         )
         .expect("exec win-breakaway");
-    let exit = p
-        .wait_for(Duration::from_secs(30))
-        .expect("wait")
-        .expect("the act ends");
+    let exit = end_of(&mut *p, "the act ends");
     let mut out = String::new();
     r.read_to_string(&mut out).expect("read");
     rt.delete(&id).expect("delete");
@@ -503,10 +491,7 @@ fn delete_ends_a_boxs_grandchildren() {
         "the grandchild {grandchild} isn't running"
     );
     rt.delete(&id).expect("delete");
-    let exit = p
-        .wait_for(Duration::from_secs(30))
-        .expect("wait")
-        .expect("the member ends");
+    let exit = end_of(&mut *p, "the member ends");
     assert!(matches!(exit, Exit::Signal(_)), "member exit {exit:?}");
     // The grandchild is ended too: wait on the fact (its pid gone), not a guessed delay.
     wait_until(|| !alive(grandchild), "the grandchild ends with the box");
@@ -515,7 +500,7 @@ fn delete_ends_a_boxs_grandchildren() {
 /// The grandchild's pid from the member's `grandchild=<pid>` line, read from the pipe (blocking until
 /// the member writes and flushes it).
 fn read_grandchild_pid(r: &mut std::io::PipeReader) -> u32 {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + conformance::patience();
     let mut buf = Vec::new();
     let mut chunk = [0u8; 256];
     loop {
@@ -543,8 +528,22 @@ fn alive(pid: u32) -> bool {
     text.contains(&format!("\"{pid}\""))
 }
 
+/// `p`'s end, waited for within the suite's learned wait ([`conformance::patience`]), which the end's
+/// time teaches (Hex's rule for learned waits); the time is printed, so a run's ends can be recorded.
+fn end_of(p: &mut dyn hex_api::Proc, what: &str) -> Exit {
+    let asked = Instant::now();
+    let exit = p
+        .wait_for(conformance::patience())
+        .expect("wait")
+        .unwrap_or_else(|| panic!("{what}: no end within {:?}", conformance::patience()));
+    let took = asked.elapsed();
+    conformance::ENDS.saw(took);
+    eprintln!("END {what} {} ms", took.as_millis());
+    exit
+}
+
 fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + conformance::patience();
     while Instant::now() < deadline {
         if cond() {
             return;

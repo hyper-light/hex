@@ -78,14 +78,81 @@ pub struct Failure {
     pub why: String,
 }
 
-/// The slowest end recorded across every driver and OS of the native bench, from a program's start to
-/// its reported end: Process Governor's 6,239 ms on jupiter (bench/native/RESULT.md, Windows, pass 1).
-pub const SLOWEST_RECORDED_END: Duration = Duration::from_millis(6_239);
-/// The learned wait's bound before any sample, twice [`SLOWEST_RECORDED_END`] (the x2 the false-alarm margin):
-/// a fixed wait for a program's end, for the tests that wait outside the suite's learned waits
+/// The class of host a suite runs on, by its OS: each keeps its own record of how slow a program's end has
+/// been, from its start to its reported end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostClass {
+    Linux,
+    Macos,
+    Windows,
+}
+
+impl HostClass {
+    /// Every class.
+    pub const ALL: [HostClass; 3] = [HostClass::Linux, HostClass::Macos, HostClass::Windows];
+
+    /// The class of the host this is built for, if it is one of them.
+    pub const THIS: Option<HostClass> = if cfg!(target_os = "linux") {
+        Some(HostClass::Linux)
+    } else if cfg!(target_os = "macos") {
+        Some(HostClass::Macos)
+    } else if cfg!(target_os = "windows") {
+        Some(HostClass::Windows)
+    } else {
+        None
+    };
+
+    /// The slowest end on this class's record, across every driver of the native bench and the suites,
+    /// counting a first run after a rebuild (every upgrade's first run is one, and a fresh binary is
+    /// scanned before it runs), or `None` where no record holds one yet.
+    /// - Windows: 34,837 ms, the hog's end in a first run of windows_process_box after a rebuild on jupiter
+    ///   at 100% CPU (bench/install/records/windows-jupiter-20261105.txt entry 23), above Process Governor's
+    ///   6,239 ms (bench/native/RESULT.md, Windows, pass 1).
+    /// - Linux and macOS: their bench records (132.9 ms on fedora, 313.2 ms on adas-mac-studio-2,
+    ///   bench/native/records) hold no first run after a rebuild, so they seed as a class with no record.
+    pub const fn slowest_recorded_end(self) -> Option<Duration> {
+        match self {
+            HostClass::Windows => Some(Duration::from_millis(34_837)),
+            HostClass::Linux | HostClass::Macos => None,
+        }
+    }
+}
+
+/// The slowest end on any class's record ([`HostClass::slowest_recorded_end`]).
+pub const SLOWEST_RECORDED_END: Duration = slower(
+    slower(
+        slower(Duration::ZERO, HostClass::Linux.slowest_recorded_end()),
+        HostClass::Macos.slowest_recorded_end(),
+    ),
+    HostClass::Windows.slowest_recorded_end(),
+);
+
+/// The slower of `a` and the record `b`, where there is one.
+const fn slower(a: Duration, b: Option<Duration>) -> Duration {
+    match b {
+        Some(record) if record.as_nanos() > a.as_nanos() => record,
+        _ => a,
+    }
+}
+
+/// What a learned wait on a host of `class` seeds from (Hex's rule for learned waits): its class's slowest
+/// end on record, or for a class with none (or a host of no class), the slowest on any class's record,
+/// rather than refusing to wait.
+pub const fn seed(class: Option<HostClass>) -> Duration {
+    match class {
+        Some(c) => match c.slowest_recorded_end() {
+            Some(record) => record,
+            None => SLOWEST_RECORDED_END,
+        },
+        None => SLOWEST_RECORDED_END,
+    }
+}
+
+/// The learned wait's bound before any sample on this host, twice its [`seed`] (the x2 the false-alarm
+/// margin): a fixed wait for a program's end, for the tests that wait outside the suite's learned waits
 /// (hex-cli's oci_box, oci_spec_box and node_socket on every native line). The suite itself waits on
 /// [`patience`], which learns.
-pub const PATIENCE: Duration = SLOWEST_RECORDED_END.saturating_mul(2);
+pub const PATIENCE: Duration = seed(HostClass::THIS).saturating_mul(2);
 
 /// A wait whose bound is learned (Hex's rule for learned waits): before any sample, twice the slowest
 /// answer on its record; then twice the slowest of the record and what it has seen; and it only rises, so a
@@ -117,9 +184,9 @@ impl LearnedWait {
     }
 }
 
-/// The suite's waits for a program's end or a box's answer, seeded from [`SLOWEST_RECORDED_END`]; each wait
+/// The suite's waits for a program's end or a box's answer, seeded from this host's [`seed`]; each wait
 /// that gets its answer teaches it. [`PATIENCE`] is its bound before any sample.
-pub static ENDS: LearnedWait = LearnedWait::new(SLOWEST_RECORDED_END);
+pub static ENDS: LearnedWait = LearnedWait::new(seed(HostClass::THIS));
 
 /// How long a case waits now for a program it expects to end: [`ENDS`]' bound.
 pub fn patience() -> Duration {
