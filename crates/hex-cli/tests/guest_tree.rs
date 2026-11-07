@@ -328,44 +328,74 @@ fn given(name: &str) -> Option<PathBuf> {
     std::env::var_os(name).map(PathBuf::from)
 }
 
-/// The bytes of `layers` unpacked: their tar streams' lengths, at least what the staged root's files hold.
-fn unpacked(layers: &[PathBuf]) -> u64 {
+/// A guest's page: 4 KiB, both guest kernels' (`CONFIG_PAGE_SIZE_4KB`, scripts/guest/kernel-needs.config).
+const GUEST_PAGE: u64 = 4096;
+
+/// The room `layers` take staged in the guest: each regular file's bytes in whole pages, as its tmpfs charges
+/// them (§4a: "an entry is charged its bytes in whole blocks").
+fn footprint(layers: &[PathBuf]) -> u64 {
     layers
         .iter()
         .map(|l| {
-            std::io::copy(
-                &mut flate2::read::GzDecoder::new(std::fs::File::open(l).unwrap()),
-                &mut std::io::sink(),
-            )
-            .unwrap()
+            let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(
+                std::fs::File::open(l).unwrap(),
+            ));
+            archive
+                .entries()
+                .unwrap()
+                .map(Result::unwrap)
+                .filter(|e| e.header().entry_type().is_file())
+                .map(|e| e.size().div_ceil(GUEST_PAGE) * GUEST_PAGE)
+                .sum::<u64>()
         })
         .sum()
 }
 
-/// A guest of Shards' least size (one vCPU, `min_memory_mib`), and memory for the largest image staged in
-/// it: the guest's staged folder is a tmpfs, which holds half its memory by default (tmpfs(5)), so twice
-/// that image's unpacked bytes more.
+/// A guest of Shards' least size (one vCPU, `min_memory_mib`) with room for the largest image staged in it.
+/// Its staged folder is a tmpfs of half its memory (tmpfs(5)) less what the guest holds back from it, so the
+/// room is measured, not assumed. Booted with twice that image's footprint more than the least, the guest
+/// reads its staged folder's free bytes (`selftest-box room`). If short, what it held back is that read's
+/// shortfall from half its memory, and it boots again with room for both, at most three boots.
+/// (HEX-GUEST-21 at 6c5fb78 refused grafana's stage sized by half the memory: a 2,868 MiB guest had
+/// 1,429,372,928 bytes free for 1,497,251,840 bytes of pages.)
 fn guest(images: &[Image]) -> Option<Guest> {
-    use shards_api::Guests;
     let (kernel, initrd, binary) = (
         given("HEX_GUEST_KERNEL")?,
         given("HEX_GUEST_INITRD")?,
         given("SHARDS_BIN")?,
     );
+    let need = images
+        .iter()
+        .map(|i| footprint(&i.layers))
+        .max()
+        .unwrap_or(0);
+    let least = shards_api::min_memory_mib(std::env::consts::ARCH);
+    let mut held_back = 0u64;
+    for boot in 1..=3 {
+        let memory_mib = (least + (2 * (need + held_back)).div_ceil(1 << 20)).next_multiple_of(2);
+        let guest = boot_guest(&kernel, &initrd, &binary, memory_mib);
+        let room = guest.room();
+        eprintln!(
+            "guest boot {boot}: {memory_mib} MiB, its staged folder's room {room} bytes, the largest \
+             image's pages {need} bytes"
+        );
+        if room >= need {
+            return Some(guest);
+        }
+        held_back = ((memory_mib << 20) / 2).saturating_sub(room);
+        guest._guest.stop().unwrap();
+    }
+    panic!("three guest sizes gave no room for {need} bytes of pages");
+}
+
+fn boot_guest(kernel: &Path, initrd: &Path, binary: &Path, memory_mib: u64) -> Guest {
+    use shards_api::Guests;
     let config = hex_runtime::guest::GuestConfig {
-        binary,
-        kernel,
-        initrd,
+        binary: binary.to_path_buf(),
+        kernel: kernel.to_path_buf(),
+        initrd: initrd.to_path_buf(),
         vcpus: 1,
-        memory_mib: {
-            let largest = images
-                .iter()
-                .map(|i| unpacked(&i.layers))
-                .max()
-                .unwrap_or(0);
-            let mib = (2 * largest).div_ceil(1 << 20);
-            (shards_api::min_memory_mib(std::env::consts::ARCH) + mib).next_multiple_of(2)
-        },
+        memory_mib,
         shares: Vec::new(),
         staged: hex_client::guest::stage::STAGED.to_owned(),
     };
@@ -380,11 +410,61 @@ fn guest(images: &[Image]) -> Option<Guest> {
                 .expect("this host class's boot-to-ready record"),
         ));
     let client = hex_client::guest::Client::connect(link.clone()).unwrap();
-    Some(Guest {
+    Guest {
         link,
         client,
         _guest: guest,
-    })
+    }
+}
+
+impl Guest {
+    /// The bytes its staged folder's file system has free, read in the guest by a `process` box.
+    fn room(&self) -> u64 {
+        use hex_api::{Bounds, BoxSpec, ClassSpec, Exit, Program, Runtime, Stdio};
+        let id = BoxId::new("g21-room").unwrap();
+        let _ = self.client.delete(&id);
+        self.client
+            .create(BoxSpec {
+                id: id.clone(),
+                bounds: Bounds::default(),
+                class: ClassSpec::Process,
+            })
+            .unwrap();
+        let (mut r, w) = std::io::pipe().unwrap();
+        let reader = std::thread::spawn(move || {
+            let mut text = String::new();
+            r.read_to_string(&mut text).unwrap();
+            text
+        });
+        let mut p = self
+            .client
+            .exec(
+                &id,
+                Program::of(&[
+                    "/init",
+                    "selftest-box",
+                    "room",
+                    hex_client::guest::stage::STAGED,
+                ]),
+                Stdio {
+                    stdout: Some(w),
+                    ..Stdio::null()
+                },
+            )
+            .unwrap();
+        let text = reader.join().unwrap();
+        let exit = p
+            .wait_for(hex_client::ANSWER_PATIENCE)
+            .unwrap()
+            .expect("the room read ended");
+        self.client.delete(&id).unwrap();
+        assert_eq!(exit, Exit::Code(0), "the room read: {text}");
+        text.trim()
+            .strip_prefix("bytes=")
+            .unwrap_or_else(|| panic!("the room read said {text:?}"))
+            .parse()
+            .unwrap()
+    }
 }
 
 #[test]
