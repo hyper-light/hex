@@ -416,7 +416,7 @@ fn try_wait_answers_at_once_running_or_ended() {
         .spawn()
         .expect("spawn");
     let pid = i32::try_from(child.id()).expect("pid");
-    let mut p = super::proc::BoxProc::watch(pid).expect("watch");
+    let mut p = super::proc::BoxProc::watch(pid, None).expect("watch");
     assert_eq!(
         p.try_wait().expect("try_wait"),
         None,
