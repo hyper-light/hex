@@ -389,7 +389,19 @@ in 4 of 5 runs.
 The integrated native tree at ac8959b (2026-11-07; step 7 through ea8bda6, step 2 through 45dcc79, and ac8959b's fix of
 step 2's HEX-RT-3 test to the macOS line's `BoxProc::watch(pid, members)`): fedora's 7 gates exit 0 (382 tests, 0
 failed) and the root lab passes 8 of 8 as root, in one unit (`hex-integrate-native-20261107T011029Z`, 01:10-01:49Z).
-The Mac Studio's suite at ac8959b is running (`hex-integrate-mac-ac8959b-20261107T020027Z`).
+The Mac Studio's suite at ac8959b is running (`hex-integrate-mac-ac8959b-20261107T020027Z`): clippy for macOS and
+Windows exit 0.
+
+A note for Mac runs: a launchd job (`launchctl submit`) must keep the kiln run that submitted it alive until it ends.
+The jobs at 6ac27d6 and ac8959b (`…-6ac27d6-20261107T005156Z`, `…-ac8959b-20261107T011052Z`) died within half a
+second of their submitting runs ending. macOS's AppleSystemPolicy refused to execute the job's own script (6ac27d6,
+48 ms after launchd spawned it), then cargo's build scripts (ac8959b: libc, serde_core, proc-macro2 and quote, all in
+one millisecond); launchd then marked the job inactive and removed it. Nothing on disk differed: no quarantine xattr on
+the source copy (`git archive | tar`) or the target dir, the build scripts linker-signed ad hoc as always, and the same
+script, source and target dir ran clean (0 denials) from a run kept alive until the job wrote `done`. fb0716e's job
+outlived its run at 13:07 local, before kiln's headroom guard restarted on a new build (4dfd3bb19754) at 13:20; every
+job since that outlived its run was denied. That points at how the guard's build attributes a job's processes, not
+proven. The same denials hit other agents' fresh binaries on that Mac today (Shards' tests, kiln-runner-fan's builds).
 
 The suite's divergences so far, each fixed where the contract says: a Windows box with nothing running took a
 signal the others refuse (`NotRunning`), now refused; the simulator ended an `oci` box's init on TERM, which
