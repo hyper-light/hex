@@ -5,7 +5,12 @@
 
 use super::*;
 use std::io::{Read, Write as _};
-use std::os::fd::{AsFd, BorrowedFd};
+use std::mem::MaybeUninit;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+
+use rustix::event::{PollFd, PollFlags, Timespec};
+use rustix::net::{AddressFamily, SendFlags, SocketAddrUnix, SocketFlags, SocketType};
+use rustix::process::{Pid, Signal};
 
 use hex_api::sim::SimRuntime;
 use hex_api::{Bounds, BoxInfo, BoxSpec, ClassSpec, Signal as HexSignal, Usage};
