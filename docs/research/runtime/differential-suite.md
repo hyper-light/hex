@@ -33,8 +33,8 @@ it at a step either breaks the contract or shows the model wrong, and the design
   that reads a box therefore reads again until it shows the oracle's answer or `PATIENCE` passes
   (crates/hex-api/src/conformance.rs, `PATIENCE`), as CLAUDE.md §4 asks (wait on the fact, bounded).
 - How a bound ends a program: Linux and the simulator end a program over its memory bound by KILL;
-  Windows refuses the commit and the program exits with a failure (bench/native/windows/RESULT.md, "The
-  memory peak overshoots the commit limit by a bounded amount"). Both are "didn't exit 0".
+  Windows refuses the commit and the program exits with a failure (bench/native/windows/RESULT.md, "A
+  commit that would cross the commit limit is refused whole"). Both are "didn't exit 0".
 - How delete ends a program: KILL everywhere, which Windows reports through its own exit code mapping
   (crates/hex-runtime/src/windows/process.rs, `delete`). The comparison asks only "ended by a signal".
 - A member's own refused fork: Windows keeps no §3-clean count

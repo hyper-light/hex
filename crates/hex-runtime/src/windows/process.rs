@@ -186,13 +186,15 @@ impl JobBox {
         let a = self.accounting()?;
         let live = self.live_processes()?;
         // On Windows a commit past the bound is refused, not killed: oom_kills says the box reached its
-        // bound, once, from the job's peak (HEX-RT-5).
+        // bound, once, from the job's peak (HEX-RT-5). The peak counts a refused commit's ask, so the
+        // memory the box reports is the peak at most its bound ([`job::committed_peak`]).
         let oom_kills = u64::from(job::reached_bound(a.peak_memory, &self.state.limits));
+        let peak = job::committed_peak(a.peak_memory, &self.state.limits);
         // pids_refused is the count the box saw synchronously (node-mediated exec refusals, [`exec`]).
         let pids_refused = self.state.counts()?.pids_refused;
         Ok(Usage {
-            memory_bytes: a.peak_memory,
-            memory_peak_bytes: a.peak_memory,
+            memory_bytes: peak,
+            memory_peak_bytes: peak,
             oom_kills,
             pids: live,
             pids_refused,

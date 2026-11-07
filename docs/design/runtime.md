@@ -803,11 +803,12 @@ simulator, and compares what each step shows (`docs/research/runtime/differentia
   object, its limits the kernel's and hard (`hex_core::job`, `docs/research/runtime/windows-job-objects.md`,
   `bench/native/windows/RESULT.md`). A member is created suspended inside the job
   (`PROC_THREAD_ATTRIBUTE_JOB_LIST`, so nothing runs outside it) and resumed; breakaway is refused; delete
-  (kill-on-close / `TerminateJobObject`) ends the tree. The job lets a commit that crosses its limit
-  overshoot by a bounded ≈1.1 MiB, so Hex sets the commit limit a 2 MiB margin under the box's bound and
-  the job's peak stays at or below the bound; reaching the bound is the job's peak commit at or past its
-  commit limit (`hex_core::job::reached_bound`), from the job's accounting with no completion port (no
-  message queue to bound). It was the `JobObjectNotificationLimitInformation` violation until that was
+  (kill-on-close / `TerminateJobObject`) ends the tree. The job refuses whole a commit that would cross
+  its commit limit, so the limit is the box's bound itself; its peak (`PeakJobMemoryUsed`) counts the
+  refused ask, so the box reports its committed peak as that peak at most the bound, and reaching the
+  bound is the peak past the limit (`hex_core::job::reached_bound`, `committed_peak`; `job_events` e20,
+  bench/install/records/windows-jupiter-20261105.txt entry 22), from the job's accounting with no completion port (no message queue to
+  bound). It was the `JobObjectNotificationLimitInformation` violation until that was
   shown late or lost under load: on jupiter, a member refused at the cap and ended at once left it unset in
   nearly every pass, and one held past the line saw it after up to 26 s or not within 30 s
   (`job_events` e18; bench/install/records/windows-jupiter-20261105.txt entry 21). The peak can't fall, so a box reads as having reached its bound

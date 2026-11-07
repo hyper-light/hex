@@ -74,9 +74,10 @@ not guaranteed ... Notifications for limits set with JobObjectNotificationLimitI
 guaranteed to arrive at the completion port." CLAUDE.md §3 forbids a silent drop, so a box's limit
 events come from the job's accounting (`QueryInformationJobObject`), read when they are asked for.
 
-- **Memory, from the peak.** The job admits no commit past its commit limit but the one that crosses it
-  (`job_events` e16: the overshoot is bounded at ≈1.11 MiB), so its peak commit
-  (`PeakJobMemoryUsed`) reaches the limit exactly when a member reached the bound. Hex reads that
+- **Memory, from the peak.** The job refuses whole a commit that would cross its commit limit, and counts
+  the refused ask in its peak (`PeakJobMemoryUsed`; `job_events` e20, bench/install/records/windows-jupiter-20261105.txt entry 22), so the
+  job's commit never passes the limit and its peak does exactly when a member was refused at the bound.
+  Hex reads that
   (`hex_core::job::reached_bound`) and keeps no completion port, so no message queue to bound
   (CLAUDE.md §2). The "guaranteed" notification class doesn't do: a notification limit set under the cap
   records its violation late or not at all. On jupiter (build 26200.9711, 2026-11-07), a member refused
@@ -116,17 +117,16 @@ weakly and noisily (`job_events` e11): the hard cap is the real CPU bound.
 
 Two measured facts drive design calls the lead takes to the owner:
 
-- **The commit peak overshoots the limit by a bounded amount.** A job lets a commit that crosses its
-  limit overshoot before it refuses the next. A sweep of commit steps from 64 KiB to 256 MiB measured
-  the peak at most 1,163,264 bytes (≈1.11 MiB) over the limit, the overshoot **bounded** (it did not
-  grow with the step past ~1.1 MiB; `job_events` e16). So Hex sets the job's commit limit a margin
-  (2 MiB, headroom over the measured 1.11 MiB) under the box's bound, holding the job's peak at or below
-  the bound (`hex_core::job::OVERSHOOT_MARGIN`). A box smaller than that margin above the floor can't be
-  held under its bound; a Windows process needs about that much to exist, so such a box can't run a
-  member anyway. **Falsifier:** a commit step (in `job_events` e16's sweep, or a new step added to it)
-  whose peak overshoots the limit by more than 2 MiB — then the margin is too small and must grow to the
-  new measured bound (or the overshoot isn't a bounded constant after all, which would be a plan call).
-  Keep e16's step sweep in the record so the bound stays checkable on new hardware or Windows builds.
+- **A crossing commit is refused whole; the peak counts its ask.** A member committed to within half a
+  commit of a 256 MiB limit, asking for one commit of 64 MiB down to 64 KiB, was refused every time with
+  the job's commit unchanged, while `PeakJobMemoryUsed` rose by the ask (`job_events` e20). e16's
+  sweep, read on 2026-11-03 as a bounded ≈1.1 MiB overshoot admitted past the limit, is that ask landing
+  at the limit plus the member's base commit (each step divides 256 MiB). So Hex sets the job's commit
+  limit at the box's bound itself, with no margin (`hex_core::job::limits`), reports the committed peak
+  as the job's peak at most the bound, and counts the bound reached when the peak is past it.
+  **Falsifier:** a job whose commit (not its peak) passes its limit, or a peak past the limit with no
+  refused commit. Keep e16 and e20 in the record so this stays checkable on new hardware or Windows
+  builds.
 - **A refused fork is enforced but not counted.** The active-process limit refuses a fork synchronously
   in the forking process (`CreateProcess` → `ERROR_NOT_ENOUGH_QUOTA`, 1816), the limit hard and the
   kernel's. But the job's accounting never moved across 25 refusals, and failed assignments didn't

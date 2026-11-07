@@ -269,6 +269,41 @@ copy there shows ~20 bench scripts as modified: line endings from the sync, no c
    commit is larger than the room left is refused outright and leaves the peak below; the old notification
    didn't count that either), or a peak at the limit with no member reaching the bound.
 
+22. what the job's commit limit does with a commit that would cross it, 2026-11-07T02:20-03:05Z on jupiter
+   (same machine and load as entry 21), bench/native/windows/job_events e20 (new) and e16 (rerun).
+   e20: a job limited to 256 MiB (268,435,456 B), no notification; the member commits 64 KiB at a time until
+   the job's own commit (JobObjectLimitViolationInformation.JobMemory, the current commit) is within half
+   of each size of the limit, then asks for ONE commit of that size. 3 passes each:
+     size 64 MiB:  before 234,909,696-234,917,888  admitted 0 of 3 (1455)  commit after = before  peak - limit 33,714,176-33,722,368
+     size 16 MiB:  before 260,063,232              admitted 0 of 3          commit after = before  peak - limit 8,437,760
+     size  4 MiB:  before 266,358,784-266,371,072  admitted 0 of 3          commit after = before  peak - limit 2,125,824-2,138,112
+     size  1 MiB:  before 267,931,648-267,935,744  admitted 0 of 3          commit after = before  peak - limit 548,864-552,960
+     size 256 KiB: before 268,333,056-268,337,152  admitted 0 of 3          commit after = before  peak - limit 159,744-163,840
+     size 64 KiB:  before 268,398,592-268,402,688  admitted 0 of 3          commit after = before  peak - limit 28,672-32,768
+   So a commit that would cross the limit is refused whole, the job's commit never passes the limit, and
+   PeakJobMemoryUsed counts the refused ask: the peak is before + the ask (+0 to 131,072 B).
+   e16 rerun (steps 64 KiB-256 MiB, commit_until_refused from the member's base): peak past the limit by
+   24,576-36,864 B at 64 KiB steps and 1,003,520-1,019,904 B at every step from 1 MiB to 256 MiB, as on
+   2026-11-03. Each step divides 256 MiB, so the refused ask always lands at the limit plus the member's own
+   base commit (~1 MiB). The 2026-11-03 reading, "a crossing commit admitted past the limit by a bounded
+   ~1.1 MiB", was wrong, and OVERSHOOT_MARGIN (2 x 1,163,264 B under the bound) rested on it.
+   The change (test first): the job's commit limit is the box's bound itself; the box reports its
+   committed peak as the job's peak at most the bound (hex_core::job::committed_peak); it reached its bound
+   when the peak is PAST the limit (reached_bound, now strict, since only a refused ask takes it there).
+   OVERSHOOT_MARGIN and LARGEST_RECORDED_OVERSHOOT are removed.
+   The test windows::sys::tests::a_box_commits_up_to_its_bound_and_is_refused_past_it (a member committing
+   1 MiB at a time until refused; the job's raw peak must pass the bound by at most the 1 MiB ask and the
+   131,072 B e20 saw beside one) FAILED 3 of 3 at 3f16fc5 (raw peak 266,113,024-266,162,176, refused about
+   2.3 MiB short of its 268,435,456 bound), and passes 3 of 3 with the change. With it: windows::sys::tests
+   5/5 three times, hex-core job:: 13/13, clippy -D warnings exit 0, and windows_process_box passed 7 of 8.
+   The one failure was a_box_past_its_bound's own 30 s wait for the hog to end ("the hog ends"), with the
+   contract test failing beside it, in a first run after a rebuild that took 98.9 s in all. A later series'
+   first run took 81.7 s and passed. After 120 s idle, each test alone ran in 1.3-6.0 s and the suite in
+   7.0 s. So something slows the first run on this machine, and it isn't shown to be this change; the 30 s
+   wait is the test's picked constant, already listed to become hex_api::conformance::PATIENCE.
+   What would falsify it: a job whose commit, not just its peak, passes the limit; or a peak past the limit
+   with no refused commit.
+
 What HCS reports as a Windows oci box's Exit at its end, against the oracle's Signal(15), for HEX-DIFF-1 step 12
 and HEX-DIFF-2 step 11 (asked by step 7): NOT OBSERVED. windows_oci_boxes_hold_the_contract_and_the_steps_criteria
 skipped in every run above (no HEX_WINDOWS_LAYERS), so no Windows oci box was made; it is read in the first run
