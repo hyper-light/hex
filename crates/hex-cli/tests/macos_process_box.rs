@@ -85,6 +85,63 @@ fn macos_process_boxes_hold_the_contract() {
     assert!(failures.is_empty(), "conformance failures: {failures:#?}");
 }
 
+/// A `hex node` of this build serving a fresh state folder, ended when dropped.
+struct NodeProcess {
+    child: std::process::Child,
+    socket: std::path::PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+impl NodeProcess {
+    fn start() -> Self {
+        use std::io::BufRead;
+        let dir = tempfile::Builder::new().prefix("node-").tempdir().unwrap();
+        let socket = dir.path().join("node.sock");
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_hex"))
+            .arg("node")
+            .arg("--socket")
+            .arg(&socket)
+            .arg("--state")
+            .arg(dir.path().join("state"))
+            .env_remove("SHARDS_BIN")
+            .env_remove("HEX_GUEST_KERNEL")
+            .env_remove("HEX_GUEST_INITRD")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("start hex node");
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert_eq!(line.trim(), format!("ready {}", socket.display()));
+        Self {
+            child,
+            socket,
+            _dir: dir,
+        }
+    }
+}
+
+impl Drop for NodeProcess {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Native plan step 8, the suite through the node's socket (HEX-RT-1..9): a `hex node` on macOS serving the
+/// `process` class over its socket, driven by `hex-client`, holds the contract with the same results as
+/// the class in process.
+#[test]
+fn macos_process_boxes_hold_the_contract_through_the_nodes_socket() {
+    let node = NodeProcess::start();
+    let client = hex_client::Client::connect(&node.socket).expect("connect to hex node");
+    let through = conformance::run(&client, &fixture());
+    let in_process = conformance::run(&runtime(), &fixture());
+    assert!(through.is_empty(), "through the socket: {through:#?}");
+    assert_eq!(through, in_process);
+}
+
 /// The step's scenario: a box allocating past its 256 MiB bound is ended, its end reported as memory with
 /// the footprint it reached, and a program in it exits by signal.
 #[test]

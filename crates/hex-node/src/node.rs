@@ -11,12 +11,11 @@
 //! crash takes it with the container, so a box's record that names nothing else isn't fsynced
 //! (decision 1; [`crate::store`]).
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::os::fd::AsFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use hex_api::{
@@ -36,6 +35,7 @@ use hex_runtime::linux::oci::state::{State, Status, start_time};
 use hex_runtime::linux::proc::PidfdProc;
 use hex_runtime::linux::{disks, process};
 
+use crate::abandoned::Abandoned;
 use crate::createpool::CreatePool;
 use crate::netns::Netns;
 use crate::remove::remove_tree;
@@ -72,11 +72,8 @@ pub struct Node {
     oci_helper: Option<PathBuf>,
     /// The `oci` boxes' inits, watched and reaped; orphaned box processes, reaped.
     supervisor: Arc<Supervisor>,
-    /// Abandoned programs ([`Node::abandoned`]) counted but not yet in their box's record, by box:
-    /// kept and reported until a record write takes them, never dropped (§3). Each box's count has a
-    /// lock of its own, held across the write that takes it, so one box's durable write holds up no
-    /// other box's inspect or create (goal 5 plan step 2). An entry goes with its box's delete.
-    abandoned: Mutex<Pending>,
+    /// Abandoned programs ([`Node::abandoned`]) counted but not yet in their box's record.
+    abandoned: Abandoned,
     /// Where each box made from an [`OciSpec`] has its bundle: `<bundles>/<id>`, its writable layer
     /// in it.
     bundles: PathBuf,
@@ -98,9 +95,6 @@ pub struct Node {
     /// container's (decision 4; [`Node::netns`]).
     netns: Netns,
 }
-
-/// Each box's abandoned programs not yet in its record ([`Node::abandoned`]).
-type Pending = BTreeMap<BoxId, Arc<Mutex<u64>>>;
 
 /// Where an `oci` box's bundle comes from.
 enum Source {
@@ -167,7 +161,7 @@ impl Node {
             key,
             oci_helper: None,
             supervisor,
-            abandoned: Mutex::new(BTreeMap::new()),
+            abandoned: Abandoned::default(),
             bundles,
             owner,
             masked: thermal_throttle()?,
@@ -326,7 +320,9 @@ impl Node {
             bounds: record.spec.bounds.clone(),
             adopted,
             exit,
-            abandoned: record.abandoned.saturating_add(self.unrecorded(id)?),
+            abandoned: record
+                .abandoned
+                .saturating_add(self.abandoned.unrecorded(id)?),
         })
     }
 
@@ -336,30 +332,7 @@ impl Node {
     /// can't take now is kept, reported all the same, and written with the next; a box with no
     /// readable record (deleted since) has none to take it.
     pub fn abandoned(&self, id: &BoxId) -> Result<(), Refusal> {
-        let count = Arc::clone(self.pending()?.entry(id.clone()).or_default());
-        let mut count = count.lock().map_err(|_| counts_poisoned())?;
-        // Saturating: 2^64 programs is past any box's life, so the cap is never met.
-        *count = count.saturating_add(1);
-        let add = *count;
-        self.store.update(id, |r| {
-            r.abandoned = r.abandoned.saturating_add(add);
-            true
-        })?;
-        *count = 0;
-        Ok(())
-    }
-
-    fn pending(&self) -> Result<MutexGuard<'_, Pending>, Refusal> {
-        self.abandoned.lock().map_err(|_| counts_poisoned())
-    }
-
-    /// Box `id`'s abandoned programs not yet in its record; waits only for a write of its own count.
-    fn unrecorded(&self, id: &BoxId) -> Result<u64, Refusal> {
-        let Some(count) = self.pending()?.get(id).map(Arc::clone) else {
-            return Ok(0);
-        };
-        let count = count.lock().map_err(|_| counts_poisoned())?;
-        Ok(*count)
+        self.abandoned.count(&self.store, id)
     }
 
     /// How an `oci` box's init ended: as the supervisor reaped it, or as the box's record holds it
@@ -897,9 +870,7 @@ impl Runtime for Node {
             self.store.put(&record)?;
         }
         self.scrub(id)?;
-        if let Ok(mut pending) = self.abandoned.lock() {
-            pending.remove(id);
-        }
+        self.abandoned.forget(id);
         // The box is empty, so its init has ended: reaped here, leaving no zombie of it.
         init.as_ref().map_or(Ok(()), supervise::reap)
     }
@@ -1104,10 +1075,6 @@ fn init_alive(init: ProcId) -> bool {
         None => false,
         Some(now) => init.start_ticks == 0 || now == init.start_ticks,
     }
-}
-
-fn counts_poisoned() -> Refusal {
-    Refusal::Broken("the node's abandoned-program counts' lock was poisoned".to_owned())
 }
 
 /// Where a node keeps its containers' state: on tmpfs, where a host crash takes it with the
