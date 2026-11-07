@@ -9,8 +9,16 @@ added, and its load is recorded.
 
 ## HVF (macOS aarch64)
 
-The class's slowest: **0.265 s** (adas-mac-studio-2.local's second run, its first boot), so the seed is 2 × 0.265 = 0.530 s
-(`hex_runtime::guest::RECORDED_BOOT`).
+**Since cut 2 (2026-11-07 00:43Z, Hex 7cbe9f5): 0.249 s**, the slowest of the current image's record
+(bench/native/guest/boot-split/RECORD.md, hex.ns5.dsplit3.20261107T003310Z, load 2.9-4.4, N=40: 83-249 ms, p50 92 ms;
+the maximum a series' first boots, which rose above the stripped image's 0.191 s while the median held). Before that,
+since the strip: 0.191 s, the slowest of the stripped image's run
+(bench/native/guest/boot-split/RECORD.md, launchd hex.ns5.dsplit2.20261106T211043Z, adas-mac-studio-2, load 14.5,
+N=40: 84-191 ms, p50 91 ms). The seed falls with the cut; the runs below are of the unstripped image, kept as
+its history.
+
+
+Before the strip, the unstripped image's slowest was 0.265 s (adas-mac-studio-2's second run, its first boot).
 
 ### adas-mac-studio.local-2
 
@@ -69,7 +77,7 @@ The class's slowest: **2.713 s** (boot 17), so the seed is 2 × 2.713 s.
   GuestRuntime does: boot to the relay's token on its control port, then `stop` to the guest's end (on a class
   with no stop record, shards_api's stop kills at once, so this is the kill's time)
 - image: Shards' vmlinux-6.18.48-x86_64-hyperv, initramfs-x86_64.cpio sha256 f40353b35ec7aeb… (hex c5aa681);
-  shards.exe sha256 6bcdb44a2e0e08e… (the Windows agent's debug build); all of the host's vCPUs, 128 + 2 x 284 MiB
+  shards.exe sha256 6bcdb44a2e0e08e…: debug build, AWS-LC without assembly (AWS_LC_SYS_NO_ASM, the Windows agent's; Shards' lead, 2026-11-06: a boot doesn't run AWS-LC's crypto); all of the host's vCPUs, 128 + 2 x 284 MiB
 - N = 40; the raw lines: bench/native/guest/boot-ready/runs/whp-jupiter-20261106T111613.txt
 
 | | seconds |

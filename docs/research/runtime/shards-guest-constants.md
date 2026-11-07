@@ -29,8 +29,7 @@ Relied-on constants are other steps'. Each is listed with its owner, and with wh
 ## Seeds by host class
 
 Every seeded bound reads one table, bench/native/guest/records.tsv: each measure's slowest recorded value
-by host class (macOS-HVF, Linux-KVM, Windows-WHP). `hex_runtime::guest` reads it at build time and
-scripts/guest/boot_check.py at run time. A class with no row has no seed and is refused by name ("record one
+by host class (macOS-HVF, Linux-KVM, Windows-WHP). `hex_runtime::guest` reads it at build time. A class with no row has no seed and is refused by name ("record one
 first"). Taking its record and adding its row turns it on, with no code change (HEX-GUEST-34,
 `a_records_row_is_what_turns_a_class_on`).
 
@@ -160,7 +159,7 @@ Behaviour fixed on the way:
 | backoff 0.01→0.5 s | gone | boot_check.py | fact | no retries: the console line says the relay listens |
 | OK line cap 64 B | `len("OK 4294967295\n")` = 14 | boot_check.py:25 | c | Firecracker docs/vsock.md, "Host-Initiated Connections" |
 | VM size | the host's CPUs / least + 2 × 284 MiB | scripts/guest/boot_check.py (`PEAK_MIB`, `guest_memory_mib`) | a / b | `os.cpu_count()`; HEX-GUEST-19's peak record, as a boot is part of that workload |
-| terminate grace 10 s | per class: macOS 2 × 0.013 s | boot_check.py (records.tsv `stop`) | b | Twice (the margin) the slowest stop on record for the host's class: SIGTERM to the VM's end, N=40 on HVF, max 13 ms (bench/native/guest/stop/RECORD.md), then SIGKILL. Windows (WHP): its own record, 2 × 4.4 ms (jupiter, N=40; a stop there is a kill). Linux: **record pending**. The script refuses there except with `--record`, which waits on the VM's end alone to take the record |
+| terminate grace 10 s | gone: killed at once | scripts/guest/boot_check.py | fact | Shards' lead: the VMM has no host-to-guest power-off (shards vm/runtime.rs:1371/1559), so a SIGTERM does nothing. The VM is killed; this guest keeps nothing on a writable disk. bench/native/guest/stop/RECORD.md stays as history, read by nothing |
 | `panic=-1` copy | -1 | boot_check.py:31 | c | kernel-parameters.txt |
 | `BENCH_MEMORY` 8g / `BENCH_OOM` 1000 / `CARGO_BUILD_JOBS` 4 | — | scripts/guest/build.sh:41, :87 | c | The lead's shared fedora limits (hex-slot; the T7 fedora-unit-limits rule): an operator's limit on a shared host |
 | `Acquire::Retries` 5 | gone | build.sh | fact | CLAUDE.md §4: no retry. A failed fetch fails the build and is rerun by the operator |
@@ -179,7 +178,7 @@ Every recorded bound is keyed by host class at compile time (`shards_api::record
 | name | value | file:line | kind | source or record |
 |---|---|---|---|---|
 | `TAIL` | 59 + 4096×6 + 1 = 24,636 | crates/api/src/client.rs:50 | c | The longest report shards writes as it ends: a reset's console page (`serial.rs:57`) escaped at most 6× (`vm_run.rs:2730-2737`) |
-| `STOP_GRACE` | HVF 2 × 13 ms; KVM/WHP: no record, no grace, killed at once | lib.rs:155, client.rs:658 | b | Twice (the margin) the slowest stop on record (Hex bench/native/guest/stop/RECORD.md; shards-api's own stop() peaked at 6.6 ms in PM M463). A class with no record isn't given a borrowed number: it skips the grace and kills |
+| `STOP_GRACE` | gone | client.rs | fact | Shards' lead: dropped. stop() ends the VM process at once (no host-to-guest power-off). A clean stop is the client's: the guest syncs and powers itself off through its own channel, then `wait_for` |
 | `DRAIN_GRACE` | gone | — | fact | an end mark written after shards exits; the drain reads to it |
 | `FIRST_BACKOFF` / `LAST_BACKOFF` | gone: pause √(2·c·w) | client.rs | a | c = the last refused dial's cost, w = the wait so far. It paces retries; the deadline is the caller's. Whether the lead's timeout rule covers a pacing rule is with the lead |
 | `ANSWER` | 14 | client.rs:57 | c | Firecracker docs/vsock.md; Shards' conn.rs:372 |

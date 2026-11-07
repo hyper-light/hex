@@ -5,11 +5,11 @@ HEX_GUEST_KERNEL and HEX_GUEST_INITRD. Every wait is on a fact, never a clock (C
 console's line or the VM's end, which a guest that can't start brings (init powers off, and a panic
 reboots at once, `panic=-1`).
 
-    python3 -I scripts/guest/boot_check.py WORKDIR [--console] [--record] [--share DIR[:ro]]...
+    python3 -I scripts/guest/boot_check.py WORKDIR [--console] [--share DIR[:ro]]...
         [--cmdline-extra WORDS]
 
-The VM is stopped by SIGTERM and killed past twice the slowest stop on record for this host's class. A class
-with no record yet is refused unless --record is given, which waits on the VM's end alone, to take that record.
+The VM is then killed: shards' VMM has no host-to-guest power-off, so a SIGTERM would change nothing, and the
+guest keeps nothing on a writable disk.
 
 The console is kept in WORKDIR/vm.log; --console echoes it too. Each --share is given to Shards and
 named on the command line (`hex.shares=`), so READY proves init mounted it: a share init can't mount
@@ -69,23 +69,6 @@ def handshake(path):
 PEAK_MIB = 284
 
 
-# This host's class, as bench/native/guest/records.tsv names it: the hypervisor Shards boots guests with.
-CLASSES = {"Darwin": "macOS-HVF", "Linux": "Linux-KVM", "Windows": "Windows-WHP"}
-RECORDS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../bench/native/guest/records.tsv")
-
-
-def recorded(measure):
-    """The slowest value records.tsv holds for `measure` on this host's class, in seconds, or None: the
-    table is the input that turns a class on, read here at run time."""
-    cls = CLASSES.get(platform.system())
-    with open(RECORDS) as f:
-        for line in f:
-            row = line.rstrip("\n").split("\t")
-            if not line.startswith("#") and len(row) >= 3 and row[0] == measure and row[1] == cls:
-                return int(row[2]) / 1e6
-    return None
-
-
 def guest_memory_mib():
     """Shards' least guest and twice the measured peak, as hex-cli's guest_real takes."""
     least = 64 if platform.machine() in ("arm64", "aarch64") else 128
@@ -99,14 +82,6 @@ def values(argv, flag):
 def main(argv):
     if not argv:
         sys.exit(__doc__)
-    record = "--record" in argv
-    # How long a VM may take to end after SIGTERM before it is killed: twice (the margin) the slowest stop
-    # on record for this host's class (its `stop` row), the lead's rule for a timeout that can't wait on a
-    # fact. A class with no row borrows none: it takes its record first, with --record.
-    slowest_stop = recorded("stop")
-    if slowest_stop is None and not record:
-        sys.exit(f"no stop record for {CLASSES.get(platform.system())} yet ({RECORDS}): "
-                 "take it first with --record")
     work = argv[0]
     console = "--console" in argv
     shares = values(argv, "--share")
@@ -149,19 +124,14 @@ def main(argv):
         print(f"READY after {time.monotonic() - start:.3f} s: {ok}, token {token.hex()}", flush=True)
         return 0
     finally:
+        # Killed at once, as shards_api's stop does: the VMM has no host-to-guest power-off, and this guest
+        # keeps nothing on a writable disk. The console is drained to the VM's end.
         stopping = time.monotonic()
-        vm.terminate()
-        # SIGTERM, then SIGKILL past the stop grace; the console is drained meanwhile so the VM never blocks
-        # writing it.
-        try:
-            # --record takes the record: it waits on the VM's end alone, the time it prints the sample.
-            rest, _ = vm.communicate(timeout=None if record else 2 * slowest_stop)
-        except subprocess.TimeoutExpired:
-            vm.kill()
-            rest, _ = vm.communicate()
+        vm.kill()
+        rest, _ = vm.communicate()
         log.write(rest or b"")
         log.close()
-        print(f"the VM ended: exit {vm.returncode}, {time.monotonic() - stopping:.3f} s after SIGTERM", flush=True)
+        print(f"the VM ended: exit {vm.returncode}, {time.monotonic() - stopping:.3f} s after its kill", flush=True)
 
 
 if __name__ == "__main__":

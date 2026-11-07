@@ -26,6 +26,10 @@ pub mod files;
 /// spelling `HEX` so a capture reads them.
 pub const CONTROL_PORT: u32 = 0x4845_5800;
 pub const STDIO_PORT: u32 = 0x4845_5801;
+/// The guest's vsock port that reports its boot's own stamps (§3a): what a boot-time record splits a boot
+/// by, a line of `CLOCK_BOOTTIME` nanoseconds at init's start, its mounts, its node ready and its relay
+/// listening.
+pub const STAMPS_PORT: u32 = 0x4845_5803;
 
 /// A frame's prefix: the message's length, a big-endian `u32` (shards-guest.md §3a).
 const PREFIX: usize = size_of::<u32>();

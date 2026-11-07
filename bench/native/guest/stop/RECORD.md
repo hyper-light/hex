@@ -1,7 +1,8 @@
 # A guest VM's stop: SIGTERM to the `shards run vm` process's end (native plan step 5, constants)
 
-What bounds a stop that can't wait on a fact alone: scripts/guest/boot_check.py's `STOP_GRACE`, twice (the
-margin) the slowest stop here, after which the VM is killed (the lead's rule for timeouts, 2026-11-06).
+HISTORY, read by nothing (2026-11-07): this record seeded a stop grace, which is gone. Shards' lead's decision: the
+VMM has no host-to-guest power-off, so a SIGTERM changes nothing and shards_api's stop() ends the VM process at once.
+It was: what bounded a stop that couldn't wait on a fact alone, twice the slowest stop here.
 
 ## HVF (macOS aarch64)
 
@@ -29,7 +30,7 @@ Runs, in order: 0.013 0.002 0.002 0.001 0.002 0.002 0.001 0.002 0.002 0.002 0.00
   GuestRuntime does: boot to the relay's token on its control port, then `stop` to the guest's end (on a class
   with no stop record, shards_api's stop kills at once, so this is the kill's time)
 - image: Shards' vmlinux-6.18.48-x86_64-hyperv, initramfs-x86_64.cpio sha256 f40353b35ec7aeb… (hex c5aa681);
-  shards.exe sha256 6bcdb44a2e0e08e… (the Windows agent's debug build); all of the host's vCPUs, 128 + 2 x 284 MiB
+  shards.exe sha256 6bcdb44a2e0e08e…: debug build, AWS-LC without assembly (AWS_LC_SYS_NO_ASM, the Windows agent's; Shards' lead, 2026-11-06: a boot doesn't run AWS-LC's crypto); all of the host's vCPUs, 128 + 2 x 284 MiB
 - N = 40; the raw lines: bench/native/guest/boot-ready/runs/whp-jupiter-20261106T111613.txt
 
 | | seconds |

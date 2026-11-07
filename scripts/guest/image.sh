@@ -41,7 +41,11 @@ target=$arch-unknown-linux-musl
 upper=$(echo "$target" | tr 'a-z-' 'A-Z_')
 export "CARGO_TARGET_${upper}_LINKER=rust-lld"
 target_dir=${CARGO_TARGET_DIR:-$out/target}
-(cd "$hex" && CARGO_TARGET_DIR=$target_dir cargo build --offline --release --locked --target "$target" -p hex-cli --bin hex)
+# The guest's /init carries no debug info or symbols: the kernel unpacks it from the initramfs, init copies it
+# to the root's tmpfs and runs it again from there (hex guest init), each in proportion to its size, which
+# is the guest's boot (bench/native/guest/boot-split/RECORD.md); the workspace keeps them for profilers.
+(cd "$hex" && CARGO_PROFILE_RELEASE_DEBUG=false CARGO_PROFILE_RELEASE_STRIP=symbols CARGO_TARGET_DIR=$target_dir \
+    cargo build --offline --release --locked --target "$target" -p hex-cli --bin hex)
 cp "$target_dir/$target/release/hex" "$out/hex"
 python3 -I "$here/initramfs.py" "$out/hex" "$out/initramfs-$arch.cpio"
 {

@@ -130,6 +130,7 @@ ports above 1024, below `VMADDR_PORT_ANY`, each spelling `HEX` and its number so
 | `CONTROL_PORT` | `0x4845_5800` | a control connection: the relay's token, then framed wire messages |
 | `STDIO_PORT` | `0x4845_5801` | one stdio stream of one exec, named by its first `NAME_BYTES` |
 | `FILES_PORT` | `0x4845_5802` | a staging or removal connection (§4a) |
+| `STAMPS_PORT` | `0x4845_5803` | the boot's own stamps, one line, then closed (bench/native/guest/boot-split) |
 
 **Control.** A connection opens with the relay's token, then carries frames:
 
@@ -177,6 +178,13 @@ ports above 1024, below `VMADDR_PORT_ANY`, each spelling `HEX` and its number so
     the runtime chose glibc to avoid. Falsified, and replaced by the from-source glibc build, if the guest's
     `oci` create-to-start or exec measures slower with the musl `hex` than with a static-glibc `hex` on the same
     guest kernel.
+
+**Stopping the guest.** `GuestRuntime` ends its guest with shards_api's `stop()`, an immediate end of the VM
+process. Shards' VMM has no host-to-guest power-off: it follows only a guest that powers itself off, so a SIGTERM
+would change nothing. A kill loses what the guest held in its page cache for a writable disk. Hex's guest has
+none: its state, its boxes' records and their staged layers are all on its tmpfs and go with it by design, and
+its shares are the host's own directories over virtio-fs, which init mounts without its `writeback` option, so
+a write reaches the host's file before it returns. So an immediate kill loses nothing Hex keeps.
 
 ## 4a. Host paths: the bundle and rootfs copied in, bind mounts through Shards' shares
 
@@ -535,6 +543,12 @@ Hex's tests of the channel, each citing its ID:
 - HEX-GUEST-36: the relay moves an exec's stdio by splice(2) through its pipe, both ways, so no byte passes through
   user space (vsock's `splice_read` is the kernel's `copy_splice_read`): 1 MiB through `cat` leaves the relay
   reading only each stream's name and writing nothing (`hex_node::relay`).
+- HEX-GUEST-37: the guest reports its boot's own stamps on `STAMPS_PORT`: `CLOCK_BOOTTIME` at init's first entry
+  (carried across its re-exec), its mounts, its node ready and its relay listening, which split a boot
+  (bench/native/guest/boot-split) (`hex guest`).
+- HEX-GUEST-38: init mounts cgroup2 alone with RCU's grace periods expedited (`/sys/kernel/rcu_expedited`, after
+  sysfs), as the kernel expedites them until it starts init: its first mount otherwise waits out grace periods, about
+  20 ms of an HVF boot (`hex guest`).
 
 ## 7. What would falsify it
 
