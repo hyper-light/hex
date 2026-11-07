@@ -766,3 +766,22 @@ fn unrenderable(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sim::{SimFixture, SimRuntime};
+
+    /// HEX-RT-4 checks that a waiting program runs at the moment it signals the box: its Signal(15) end
+    /// then proves it hadn't ended on its own (that would be Code(0)), so the case waits out no watch (the
+    /// lead, 2026-11-07). Do: run HEX-RT-4 against the simulator, timed. Expect: it passes in less than one
+    /// [`still_running`] watch.
+    #[test]
+    fn the_signal_case_waits_out_no_watch() {
+        let case = CASES.iter().find(|c| c.id == "HEX-RT-4").unwrap();
+        let t = std::time::Instant::now();
+        (case.run)(&SimRuntime::new(), &SimFixture::Process).unwrap();
+        let took = t.elapsed();
+        assert!(took < still_running(), "HEX-RT-4 took {took:?}");
+    }
+}

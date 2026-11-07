@@ -845,6 +845,29 @@ mod tests {
         }
     }
 
+    /// A program's liveness that a later step proves costs no watch (the lead, 2026-11-07): HEX-DIFF-2's
+    /// programs, still running after a sibling exits, are ended by TERM (a program that had ended on its own
+    /// would show Code(0), not Signal(15)), and HEX-DIFF-6's echo hands back what it is fed, so each checks
+    /// liveness at the moment. Do: run both against the simulator, timed. Expect: each passes in less than
+    /// one [`conformance::still_running`] watch.
+    #[test]
+    fn a_liveness_a_later_step_proves_waits_out_no_watch() {
+        for id in ["HEX-DIFF-2", "HEX-DIFF-6"] {
+            let s = SCENARIOS.iter().find(|s| s.id == id).unwrap();
+            let t = Instant::now();
+            differ(
+                &SimRuntime::new(),
+                &SimFixture::Process,
+                &SimFixture::Process,
+                s,
+                conformance::patience(),
+            )
+            .unwrap();
+            let took = t.elapsed();
+            assert!(took < conformance::still_running(), "{id} took {took:?}");
+        }
+    }
+
     /// HEX-DIFF-1 (the negative watch rests on the record across hosts): do a runtime whose waiting
     /// programs end 770 ms after they start, a real end seen under load. Expect HEX-DIFF-1 to fail at its
     /// first `Running(1)`: a watch that says a program does not end must outlast the slowest end on record.
