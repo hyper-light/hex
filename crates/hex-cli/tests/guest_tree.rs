@@ -351,13 +351,21 @@ fn footprint(layers: &[PathBuf]) -> u64 {
         .sum()
 }
 
+/// What a guest holds back from its staged tmpfs for each byte more of its memory, as a divisor. The kernel's
+/// own pages take 64 bytes of `struct page` for each 4 KiB page, and a tmpfs of half the memory loses half of
+/// that, 1/128. Measured on studio-2 (HVF, Shards' 6.18.48 aarch64, 2026-11-07, launchd
+/// hex.ns5route.g21r.20261107T182252Z): 142 MiB more memory, 2,920 to 3,062 MiB, held back 1,196,032 bytes
+/// more, 1/124.5, taken as 1/124.
+const HELD_BACK_DIVISOR: u64 = 124;
+
 /// A guest of Shards' least size (one vCPU, `min_memory_mib`) with room for the largest image staged in it.
-/// Its staged folder is a tmpfs of half its memory (tmpfs(5)) less what the guest holds back from it, so the
-/// room is measured, not assumed. Booted with twice that image's footprint more than the least, the guest
-/// reads its staged folder's free bytes (`selftest-box room`). If short, what it held back is that read's
-/// shortfall from half its memory, and it boots again with room for both, at most three boots.
-/// (HEX-GUEST-21 at 6c5fb78 refused grafana's stage sized by half the memory: a 2,868 MiB guest had
-/// 1,429,372,928 bytes free for 1,497,251,840 bytes of pages.)
+/// Its staged folder is a tmpfs of half its memory (tmpfs(5)) less what the guest holds back, so the room is
+/// measured, not assumed. Booted with twice that image's footprint more than the least, the guest reads its
+/// staged folder's free bytes (`selftest-box room`). If short, it boots once more, sized by that shortfall:
+/// each MiB more gives half a MiB of tmpfs less what the guest holds back for it ([`HELD_BACK_DIVISOR`]).
+/// Still short is a measurement fault, said as one, not retried. (HEX-GUEST-21 at 6c5fb78 refused grafana's
+/// stage, sized by half the memory: a 2,868 MiB guest had 1,429,372,928 bytes free for 1,497,251,840 bytes
+/// of pages.)
 fn guest(images: &[Image]) -> Option<Guest> {
     let (kernel, initrd, binary) = (
         given("HEX_GUEST_KERNEL")?,
@@ -370,22 +378,28 @@ fn guest(images: &[Image]) -> Option<Guest> {
         .max()
         .unwrap_or(0);
     let least = shards_api::min_memory_mib(std::env::consts::ARCH);
-    let mut held_back = 0u64;
-    for boot in 1..=3 {
-        let memory_mib = (least + (2 * (need + held_back)).div_ceil(1 << 20)).next_multiple_of(2);
-        let guest = boot_guest(&kernel, &initrd, &binary, memory_mib);
-        let room = guest.room();
-        eprintln!(
-            "guest boot {boot}: {memory_mib} MiB, its staged folder's room {room} bytes, the largest \
-             image's pages {need} bytes"
-        );
-        if room >= need {
-            return Some(guest);
-        }
-        held_back = ((memory_mib << 20) / 2).saturating_sub(room);
-        guest._guest.stop().unwrap();
+    let first = (least + (2 * need).div_ceil(1 << 20)).next_multiple_of(2);
+    let guest = boot_guest(&kernel, &initrd, &binary, first);
+    let room = guest.room();
+    eprintln!(
+        "guest at {first} MiB: its staged folder's room {room} bytes, the largest image's pages {need}"
+    );
+    if room >= need {
+        return Some(guest);
     }
-    panic!("three guest sizes gave no room for {need} bytes of pages");
+    guest._guest.stop().unwrap();
+    let per_mib = (1u64 << 20) / 2 - (1u64 << 20) / HELD_BACK_DIVISOR;
+    let second = (first + (need - room).div_ceil(per_mib)).next_multiple_of(2);
+    let guest = boot_guest(&kernel, &initrd, &binary, second);
+    let resized = guest.room();
+    eprintln!("guest at {second} MiB: its staged folder's room {resized} bytes");
+    assert!(
+        resized >= need,
+        "a measurement fault: {second} MiB, sized by {first} MiB's shortfall of {} bytes at {per_mib} \
+         bytes of room a MiB, gave {resized} bytes of room for {need}",
+        need - room
+    );
+    Some(guest)
 }
 
 fn boot_guest(kernel: &Path, initrd: &Path, binary: &Path, memory_mib: u64) -> Guest {
