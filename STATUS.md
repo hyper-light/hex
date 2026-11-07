@@ -376,7 +376,20 @@ fedora's 7 gates exit 0 (379 tests, 0 failed) and the root lab passes 8 of 8 as 
 (`hex-integrate-native-20261106T210700Z`, 21:07-21:44Z). On adas-mac-studio-2, run as a launchd job outside kiln's
 pacing (`hex-integrate-mac-fb0716e-20261106T210742Z`): clippy for macOS and Windows exit 0, `cargo test --workspace`
 exits 0, and `macos_process_box` passes 7 with 1 ignored (`box_user_boxes_hold_the_contract`, which needs the root
-helper: Ada's boxlab). jupiter's `cargo test` at fb0716e is unread: jupiter refused kiln's runs from ~20:50Z.
+helper: Ada's boxlab). jupiter's `cargo test --workspace` at fb0716e's code (run at 8ba39bd, which adds only this
+file; 23:33-23:46Z) exits 101: every binary passes but `windows_process_box`, which fails 2 of 10. HEX-RT-14 fails
+because step 7's exec-bound case reached the tree before step 4's 3c35f15, which states Windows' exec bound for both
+Windows classes; it clears when step 4's tip merges. HEX-DIFF-5 (step 6) and `a_box_past_its_bound_is_refused_at_the_bound`
+read no memory-bound crossing (`oom_kills` 0) with the peak past the notification line: under load Windows records
+the job's memory-limit violation late or never (339 of 340 passes on jupiter, `bench/install/records/windows-jupiter-20261105.txt`
+entry 21). The Windows line fixes it at `cp/t7-native-windows` 3f16fc5 (the bound read from the job's peak commit at
+its commit limit, the notification gone), which merges with step 4's final tip. Rerun at 6ac27d6, the same two fail
+in 4 of 5 runs.
+
+The integrated native tree at ac8959b (2026-11-07; step 7 through ea8bda6, step 2 through 45dcc79, and ac8959b's fix of
+step 2's HEX-RT-3 test to the macOS line's `BoxProc::watch(pid, members)`): fedora's 7 gates exit 0 (382 tests, 0
+failed) and the root lab passes 8 of 8 as root, in one unit (`hex-integrate-native-20261107T011029Z`, 01:10-01:49Z).
+The Mac Studio's suite at ac8959b is running (`hex-integrate-mac-ac8959b-20261107T020027Z`).
 
 The suite's divergences so far, each fixed where the contract says: a Windows box with nothing running took a
 signal the others refuse (`NotRunning`), now refused; the simulator ended an `oci` box's init on TERM, which
