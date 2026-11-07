@@ -105,6 +105,14 @@ measured against this store, interleaved, at 299 pairs on macOS HVF and Windows 
 with their image builds. If it is no worse at p50 and p99 everywhere, it replaces the store. If it loses, the
 store stands for the reasons above.
 
+**Measured on macOS HVF (2026-11-07), it loses, so the store stands.** Ten interleaved runs of 299 pairs on
+studio-2 (cp/t7-native-s5-erofs-diag 4323e94, its EROFS-DIAG.md). It wins every image at 2× by 10-450× at p50,
+and every p99 at 6× and 4× once its own lookups were cut. It loses on first creates under co-tenant load:
+grafana 12-25 s against the store's 5.6-6.0 s at load 9-82, its `mkfs.erofs` builds contending in the
+create's path. It also trails by 0.1-0.2 ms at p50 where the store has room (grafana, caddy). Through its
+overlay, HEX-GUEST-21 holds 0 differences on the five real images; `mkfs.erofs` as the writer fails both lab
+cases. Windows WHP wasn't run: the Mac verdict closed it first.
+
 ## How it got here (each measured, each a commit)
 
 - 22b26ba: the store; first record (studio-2, 7fc4aa4 → 22b26ba): no better, and alpine 2.2× slower.
