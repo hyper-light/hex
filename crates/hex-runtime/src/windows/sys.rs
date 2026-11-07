@@ -671,4 +671,84 @@ mod tests {
         assert!(live >= 2, "two waiting members read as {live}");
         assert_eq!(reads, 1, "{reads} id-list reads for one live count");
     }
+
+    /// Not a check on its own: run inside a box by
+    /// `a_member_reaching_its_bound_is_counted_though_no_notification_comes`, it commits 1 MiB at a
+    /// time until the box refuses (`HEX_TEST_COMMIT_TO_REFUSAL` set); otherwise it does nothing.
+    #[test]
+    fn commits_until_refused_when_asked() {
+        if std::env::var_os("HEX_TEST_COMMIT_TO_REFUSAL").is_none() {
+            return;
+        }
+        let mut held: Vec<Vec<u8>> = Vec::with_capacity(4096);
+        while held.len() < 4096 {
+            let mut chunk = Vec::new();
+            if chunk.try_reserve_exact(1 << 20).is_err() {
+                break;
+            }
+            chunk.resize(1 << 20, 1u8);
+            held.push(chunk);
+        }
+    }
+
+    /// HEX-RT-5 (native plan step 3): a member that reaches its box's memory bound and ends at once is
+    /// counted, whether or not the job's memory notification is ever delivered. Under load Windows sets
+    /// that notification seconds late, or never once the member's commit has fallen back (bench record
+    /// windows-jupiter-20261105.txt entry 21, experiment e18). Do: make a 256 MiB box, switch its job's
+    /// notification limit off (the notification that doesn't come), run a member that commits until the
+    /// box refuses, wait for its end, read the box's usage. Expect: the job's peak past its commit limit,
+    /// and oom_kills at least 1.
+    #[test]
+    fn a_member_reaching_its_bound_is_counted_though_no_notification_comes() {
+        let bound = 256u64 << 20;
+        let bx = super::super::process::JobBox::create(
+            hex_api::BoxId::new("sys-bound").unwrap(),
+            &hex_api::Bounds {
+                memory_max: Some(bound),
+                ..hex_api::Bounds::default()
+            },
+            std::num::NonZeroU32::MIN,
+        )
+        .unwrap();
+        let off: JOBOBJECT_NOTIFICATION_LIMIT_INFORMATION = zeroed_struct();
+        // SAFETY: SetInformationJobObject reads one JOBOBJECT_NOTIFICATION_LIMIT_INFORMATION, alive for
+        // the call, and sets it on the box's job, which `bx` owns for the test.
+        let ok = unsafe {
+            SetInformationJobObject(
+                bx.job().as_raw_handle() as HANDLE,
+                JobObjectNotificationLimitInformation,
+                (&off as *const JOBOBJECT_NOTIFICATION_LIMIT_INFORMATION).cast(),
+                u32::try_from(size_of::<JOBOBJECT_NOTIFICATION_LIMIT_INFORMATION>()).unwrap(),
+            )
+        };
+        assert_ne!(ok, 0, "switching the notification off: {}", last_error());
+        let exe = std::env::current_exe().unwrap();
+        let system = std::env::var("SystemRoot").unwrap();
+        let spawn = Spawn {
+            command_line: format!(
+                "\"{}\" windows::sys::tests::commits_until_refused_when_asked --exact --test-threads=1",
+                exe.display()
+            )
+            .encode_utf16()
+            .chain([0])
+            .collect(),
+            environment: hex_core::job::environment(&[
+                ("SystemRoot".to_owned(), system),
+                ("HEX_TEST_COMMIT_TO_REFUSAL".to_owned(), "1".to_owned()),
+            ]),
+            cwd: None,
+            stdio: [nul(), nul(), nul()],
+        };
+        let started = bx.exec(spawn).unwrap();
+        assert!(wait(&started.process, u32::MAX).unwrap());
+        let usage = bx.usage().unwrap();
+        assert!(
+            usage.memory_peak_bytes > bound - hex_core::job::OVERSHOOT_MARGIN,
+            "the member never reached the commit limit: {usage:?}"
+        );
+        assert!(
+            usage.oom_kills >= 1,
+            "the bound reached isn't counted: {usage:?}"
+        );
+    }
 }
