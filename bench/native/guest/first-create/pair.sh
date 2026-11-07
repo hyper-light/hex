@@ -26,7 +26,7 @@ turn() { # arm pair
     cp "$vm" "$u/shards-vm" && codesign --force -s - -i "shards-vm-upgrade-$n" --entitlements "$ent" -o runtime "$u/shards-vm" 2> /dev/null
     echo "pair $r $arm upgrade $n $(cotenants)" >> "$out/load.txt"
     line=$(HEX_GUEST_INITRD=$initrd HEX_FIRST_IMAGE=$image SHARDS_BIN=$u/shards SHARDS_VM_BINARY=$u/shards-vm \
-        SHARDS_CACHE=$u/cache "$bin" --nocapture --test-threads=1 2>&1 | tee "$u.txt" | grep -m1 '^FIRST ')
+        SHARDS_CACHE=$u/cache "$bin" --nocapture --test-threads=1 2>&1 | tee "$u.txt" | grep -m1 -o 'FIRST .*')
     echo "pair $r $arm ${line:-FAILED: $(grep -m1 -E 'panicked|error' "$u.txt")}" >> "$out/turns.txt"
     rm -rf "${u:?}"
 }
