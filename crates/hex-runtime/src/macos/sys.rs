@@ -191,6 +191,12 @@ pub fn max_processes() -> io::Result<usize> {
     sysctl_count(c"kern.maxproc")
 }
 
+/// The most processes one uid may hold (`kern.maxprocperuid`, `bsd/kern/kern_resource.c:169-170`): a
+/// box-user box's process cap when its spec names none, each box having a uid of its own.
+pub fn max_processes_per_uid() -> io::Result<usize> {
+    sysctl_count(c"kern.maxprocperuid")
+}
+
 /// A kernel count read by name (an `int` sysctl), as read now: an administrator may change it.
 fn sysctl_count(name: &std::ffi::CStr) -> io::Result<usize> {
     let mut v: c_int = 0;

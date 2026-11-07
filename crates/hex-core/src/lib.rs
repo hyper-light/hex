@@ -32,6 +32,8 @@ pub mod helper;
 pub mod job;
 pub mod ledger;
 pub mod limits;
+#[cfg(test)]
+mod meet;
 pub mod netns;
 pub mod record;
 pub mod recovery;

@@ -23,6 +23,11 @@ use hex_core::helper::START_FDS;
 use super::MacRuntime;
 use super::helper_daemon::{self, Daemon, Member, Privileged};
 
+/// How long a test waits for a fact before calling it a hang: twice the slowest recorded run of the tests
+/// that wait (19.753 s, a kiln pacing stall, which stops a whole run tree and so can meet any wait;
+/// bench/native/macos/records/test-waits-macos.txt). A guard only ends a hang; a passing test waits on its fact.
+const HANG_GUARD: Duration = Duration::from_millis(39_507);
+
 /// A stand-in for the daemon's privileged backend: it tracks a box's members in memory instead of
 /// spawning or arming real processes, so the node→daemon path runs without root or side effects.
 #[derive(Default)]
@@ -59,6 +64,24 @@ impl Privileged for Sim {
             pid,
             state: Arc::clone(&self.inner),
         }))
+    }
+
+    fn watch_members(&self, _pids: &[i32], _uid: u32) -> io::Result<Vec<i32>> {
+        Ok(Vec::new())
+    }
+
+    fn next_member_event(&self) -> io::Result<Vec<u32>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the stand-in posts no member events",
+        ))
+    }
+
+    fn next_crossing(&self) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the stand-in has no exception port",
+        ))
     }
 
     fn arm(&self, _pid: i32, _cap_mib: u32) -> io::Result<()> {
@@ -176,6 +199,10 @@ struct Shells {
 struct ShellProc {
     pid: i32,
     end: mpsc::Receiver<Exit>,
+    /// Its own watch of the program's exit, as the real helper's `BoxProc` holds one.
+    kq: super::sys::Kqueue,
+    exiting: bool,
+    events: Vec<super::sys::Event>,
 }
 
 impl Proc for ShellProc {
@@ -183,14 +210,28 @@ impl Proc for ShellProc {
         u32::try_from(self.pid).unwrap_or(0)
     }
 
+    /// As the real one: take the exit event if its watch holds it, then the end, which follows it at once
+    /// (here the shell's status line; there the zombie), up to the hang guard.
     fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
-        Ok(self.end.try_recv().ok())
+        if !self.exiting {
+            self.kq
+                .wait(None, Some(Duration::ZERO), &mut self.events)
+                .map_err(|e| Refusal::os("kevent", e))?;
+            let me = self.pid;
+            self.exiting = self
+                .events
+                .iter()
+                .any(|e| matches!(e, super::sys::Event::Exit { pid, .. } if *pid == me));
+        }
+        if self.exiting {
+            Ok(self.end.recv_timeout(HANG_GUARD).ok())
+        } else {
+            Ok(self.end.try_recv().ok())
+        }
     }
 
-    /// The helper asks only once the node saw the program's exit, and the real reap then waits for the
-    /// zombie (`proc::BoxProc`); so does this, up to a bound past any test's run.
     fn wait_for(&mut self, _timeout: Duration) -> Result<Option<Exit>, Refusal> {
-        Ok(self.end.recv_timeout(Duration::from_secs(30)).ok())
+        self.try_wait()
     }
 }
 
@@ -199,18 +240,21 @@ impl Privileged for Shells {
         &self,
         _uid: u32,
         program: &Program,
-        _fds: [OwnedFd; START_FDS],
+        fds: [OwnedFd; START_FDS],
         _leader: bool,
         _cap_mib: u32,
         _nproc: u32,
     ) -> io::Result<i32> {
+        // The program's stdin is the one the node passed, as the helper's `dup2` makes it.
+        let [stdin, _, _] = fds;
         let mut shell: Child = Command::new("/bin/sh")
             .args([
                 "-c",
-                "\"$@\" </dev/null >/dev/null 2>&1 & echo $!; wait $!; echo $?",
+                "\"$@\" >/dev/null 2>&1 & echo $!; wait $!; echo $?",
                 "sh",
             ])
             .args(&program.args)
+            .stdin(Piped::from(stdin))
             .stdout(Piped::piped())
             .spawn()?;
         let mut lines = BufReader::new(shell.stdout.take().expect("piped")).lines();
@@ -245,7 +289,33 @@ impl Privileged for Shells {
             .unwrap()
             .remove(&pid)
             .ok_or_else(|| io::Error::other("no such program"))?;
-        Ok(Box::new(ShellProc { pid, end }))
+        let kq = super::sys::Kqueue::new()?;
+        let exiting = kq.watch(&[pid], 0)?.contains(&pid);
+        Ok(Box::new(ShellProc {
+            pid,
+            end,
+            kq,
+            exiting,
+            events: Vec::new(),
+        }))
+    }
+
+    fn watch_members(&self, _pids: &[i32], _uid: u32) -> io::Result<Vec<i32>> {
+        Ok(Vec::new())
+    }
+
+    fn next_member_event(&self) -> io::Result<Vec<u32>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the stand-in posts no member events",
+        ))
+    }
+
+    fn next_crossing(&self) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the stand-in has no exception port",
+        ))
     }
 
     fn arm(&self, _pid: i32, _cap_mib: u32) -> io::Result<()> {
@@ -263,7 +333,8 @@ impl Privileged for Shells {
 
 /// HEX-RT-3, AC-T7.1.1 (box-user mode, end to end): a node in box-user mode, through a daemon on a real
 /// socket, starts programs that are another process's children, as the root helper's are. Do run one that
-/// sleeps, then one that exits 3; expect the first not ended while it runs and both ends as they were,
+/// waits on its stdin, then one that exits 3; expect the first not ended until its stdin closes and both
+/// ends as they were,
 /// never an end the node made up because it couldn't reap a program it doesn't parent.
 #[test]
 fn a_box_user_programs_end_is_its_own_not_unknown() {
@@ -293,21 +364,79 @@ fn a_box_user_programs_end_is_its_own_not_unknown() {
         cwd: None,
         user: None,
     };
-    let mut sleeper = rt.exec(&id, sh("sleep 0.5"), Stdio::null()).expect("exec");
+    // A program that runs until the test closes its stdin: running is a fact here, not a delay.
+    let (stdin, hold) = std::io::pipe().expect("pipe");
+    let mut held = rt
+        .exec(
+            &id,
+            sh("read _; exit 0"),
+            Stdio {
+                stdin: Some(stdin),
+                stdout: None,
+                stderr: None,
+            },
+        )
+        .expect("exec");
     assert_eq!(
-        sleeper.try_wait().unwrap(),
+        held.try_wait().unwrap(),
         None,
         "a running program read as ended"
     );
-    assert_eq!(
-        sleeper.wait_for(Duration::from_secs(10)).unwrap(),
-        Some(Exit::Code(0))
-    );
+    drop(hold);
+    assert_eq!(held.wait_for(HANG_GUARD).unwrap(), Some(Exit::Code(0)));
     let mut three = rt.exec(&id, sh("exit 3"), Stdio::null()).expect("exec");
+    assert_eq!(three.wait_for(HANG_GUARD).unwrap(), Some(Exit::Code(3)));
+}
+
+/// CLAUDE.md §5 (the box helper's default process cap is the kernel's, not picked): do read the per-user
+/// process limit; expect what `sysctl kern.maxprocperuid` prints, the limit macOS itself holds each user to
+/// (`bsd/kern/kern_resource.c:169-170`), so a box's user gets what any user of this machine gets.
+#[test]
+fn the_default_box_process_cap_is_the_kernels_per_user_limit() {
+    let out = std::process::Command::new("/usr/sbin/sysctl")
+        .args(["-n", "kern.maxprocperuid"])
+        .output()
+        .expect("sysctl");
+    let want: usize = String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .expect("a number");
+    assert_eq!(super::sys::max_processes_per_uid().expect("read"), want);
+}
+
+/// HEX-RT-3 (no wait bound to pick): do watch a running child, then end it; expect `try_wait` to answer
+/// it runs at once while it does, and its end at once after its exit event, with no wait between (it
+/// takes the event its watch holds and then reaps the zombie the same exit path makes), so the box
+/// helper answers a node's `Wait` without bounding a wait.
+#[test]
+fn try_wait_answers_at_once_running_or_ended() {
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "read _; exit 3"])
+        .stdin(Piped::piped())
+        .spawn()
+        .expect("spawn");
+    let pid = i32::try_from(child.id()).expect("pid");
+    let mut p = super::proc::BoxProc::watch(pid).expect("watch");
     assert_eq!(
-        three.wait_for(Duration::from_secs(10)).unwrap(),
-        Some(Exit::Code(3))
+        p.try_wait().expect("try_wait"),
+        None,
+        "a running child read as ended"
     );
+    drop(child.stdin.take());
+    // Wait on the fact: the child's exit event, on a kqueue of the test's own.
+    let kq = super::sys::Kqueue::new().expect("kqueue");
+    let mut events = Vec::new();
+    if !kq.watch(&[pid], 0).expect("watch").contains(&pid) {
+        while !events
+            .iter()
+            .any(|e| matches!(e, super::sys::Event::Exit { pid: p, .. } if *p == pid))
+        {
+            kq.wait(None, Some(HANG_GUARD), &mut events).expect("wait");
+        }
+    }
+    assert_eq!(p.try_wait().expect("try_wait"), Some(Exit::Code(3)));
+    // `try_wait` reaped it; this wait finds no child left (ECHILD) and leaves no zombie either way.
+    let _ = child.wait();
 }
 
 /// A box-user program runs as its pool user, which the unprivileged node may not signal, and XNU attaches

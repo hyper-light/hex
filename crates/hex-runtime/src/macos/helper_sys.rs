@@ -91,12 +91,9 @@ const THREAD_STATE_NONE: c_int = 0;
 /// `MACH_PORT_RIGHT_RECEIVE` (`mach/port.h`) and `MACH_MSG_TYPE_MAKE_SEND` (`mach/message.h`).
 const MACH_PORT_RIGHT_RECEIVE: c_int = 1;
 const MACH_MSG_TYPE_MAKE_SEND: c_uint = 20;
-/// `mach_msg` options (`mach/message.h`): receive a message, send one, and time the receive out.
+/// `mach_msg` options (`mach/message.h`): receive a message, and send one.
 const MACH_RCV_MSG: c_int = 2;
 const MACH_SEND_MSG: c_int = 1;
-const MACH_RCV_TIMEOUT: c_int = 0x100;
-/// `MACH_RCV_TIMED_OUT` (`mach/message.h`): the receive's timeout elapsed with no message.
-const MACH_RCV_TIMED_OUT: KernReturn = 0x1000_4003;
 /// The remote-bits mask of `msgh_bits` (`MACH_MSGH_BITS_REMOTE_MASK`), carried back on the reply.
 const MACH_MSGH_BITS_REMOTE_MASK: u32 = 0x1f;
 
@@ -153,6 +150,10 @@ struct ExcReply {
 pub struct RealPriv {
     /// The daemon's exception receive port.
     recv: MachPort,
+    /// Every box member, watched for its forks and its end ([`Privileged::watch_members`]).
+    members: super::sys::Kqueue,
+    /// The member events taken by the last wait, kept so a wait allocates nothing.
+    events: std::sync::Mutex<Vec<super::sys::Event>>,
 }
 
 impl RealPriv {
@@ -172,7 +173,11 @@ impl RealPriv {
         if kr != KERN_SUCCESS {
             return Err(io::Error::other(format!("mach_port_insert_right: {kr}")));
         }
-        Ok(Self { recv })
+        Ok(Self {
+            recv,
+            members: super::sys::Kqueue::new()?,
+            events: std::sync::Mutex::new(Vec::with_capacity(super::sys::EVENTS)),
+        })
     }
 }
 
@@ -252,10 +257,42 @@ impl Privileged for RealPriv {
             .map_err(|e| io::Error::other(e.to_string()))
     }
 
-    /// Waits up to `timeout_ms` for a member's `EXC_RESOURCE` on the daemon's port; `Ok(true)` when one
-    /// arrived (a crossing: the daemon re-apportions every box), `Ok(false)` on timeout. The message's
-    /// carried thread and task send rights are freed, and the kernel's handler is replied `KERN_SUCCESS`.
-    fn next_crossing(&self, timeout_ms: u32) -> io::Result<bool> {
+    /// Root may watch any process: `EVFILT_PROC` with `NOTE_FORK | NOTE_EXIT` (`EV_ADD` on a watched pid
+    /// changes nothing).
+    fn watch_members(&self, pids: &[i32], uid: u32) -> io::Result<Vec<i32>> {
+        self.members.watch(pids, u64::from(uid))
+    }
+
+    /// Waits, with no timeout, until a watched member forks or ends; returns the users whose members did,
+    /// each read from its watch's tag.
+    fn next_member_event(&self) -> io::Result<Vec<u32>> {
+        let mut events = self
+            .events
+            .lock()
+            .map_err(|_| io::Error::other("the member events lock is poisoned"))?;
+        loop {
+            self.members.wait(None, None, &mut events)?;
+            let mut users: Vec<u32> = events
+                .iter()
+                .filter_map(|e| match e {
+                    super::sys::Event::Fork { tag, .. } | super::sys::Event::Exit { tag, .. } => {
+                        u32::try_from(*tag).ok()
+                    }
+                    _ => None,
+                })
+                .collect();
+            if !users.is_empty() {
+                users.sort_unstable();
+                users.dedup();
+                return Ok(users);
+            }
+        }
+    }
+
+    /// Waits, with no timeout, for a member's `EXC_RESOURCE` on the daemon's port (a crossing: the daemon
+    /// re-apportions every box). The message's carried thread and task send rights are freed, and the
+    /// kernel's handler is replied `KERN_SUCCESS`.
+    fn next_crossing(&self) -> io::Result<()> {
         let mut msg = MaybeUninit::<ExcMessage>::zeroed();
         let size = u32::try_from(size_of::<ExcMessage>()).unwrap_or(u32::MAX);
         // SAFETY: mach_msg receives at most `size` bytes into the ExcMessage buffer, which is that size and
@@ -263,17 +300,14 @@ impl Privileged for RealPriv {
         let kr = unsafe {
             mach_msg(
                 msg.as_mut_ptr().cast::<MsgHeader>(),
-                MACH_RCV_MSG | MACH_RCV_TIMEOUT,
+                MACH_RCV_MSG,
                 0,
                 size,
                 self.recv,
-                timeout_ms,
+                0,
                 0,
             )
         };
-        if kr == MACH_RCV_TIMED_OUT {
-            return Ok(false);
-        }
         if kr != KERN_SUCCESS {
             return Err(io::Error::other(format!("mach_msg receive: {kr}")));
         }
@@ -288,7 +322,8 @@ impl Privileged for RealPriv {
                 }
             }
         }
-        // Reply KERN_SUCCESS so the kernel's exception path completes (the id + 100 is the reply id).
+        // Reply KERN_SUCCESS so the kernel's exception path completes. A MIG reply's id is its request's plus
+        // 100, as the kernel's own MIG replies set it (xnu `osfmk/kern/ipc_kobject.c:402`, f6217f891ac0).
         let mut reply = ExcReply {
             header: MsgHeader {
                 bits: msg.header.bits & MACH_MSGH_BITS_REMOTE_MASK,
@@ -313,7 +348,7 @@ impl Privileged for RealPriv {
                 0,
             )
         };
-        Ok(true)
+        Ok(())
     }
 }
 
@@ -346,7 +381,10 @@ fn fork_exec_as(
         return Err(io::Error::last_os_error());
     }
     if pid == 0 {
-        // Child. From here only async-signal-safe calls, ending in execve or _exit.
+        // Child. From here only async-signal-safe calls, ending in execve or _exit. Every failure exits 127,
+        // POSIX's status for a command that could not be executed (XCU 2.8.2, "Exit Status for Commands": "If
+        // a command is not found, the exit status shall be 127"; posix_spawn's children and system() use it
+        // alike), so a start that never reached the program reads as one.
         // SAFETY: each call acts on this child alone with the values prepared before the fork.
         unsafe {
             if leader && libc::setsid() < 0 {

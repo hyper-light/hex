@@ -5,9 +5,9 @@
 
 use hex_api::{BoxId, Exit, Program, User};
 use proptest::prelude::*;
-use proptest::test_runner::TestRunner;
 
 use super::*;
+use crate::meet::{cases_to_meet, sized_runner};
 
 fn box_id(s: &str) -> BoxId {
     BoxId::new(s).expect("a valid box id")
@@ -240,9 +240,15 @@ fn malformed_headers_and_bodies_are_typed_faults() {
 /// HEX-MAC-11 (hostile input, CLAUDE.md §6): no bytes make the parser panic. Random bytes, and valid
 /// framings with a random body, each read as a request or a typed fault — never a crash, never a silent
 /// accept of trailing bytes.
+///
+/// Each run's count follows from its strategy ([`crate::meet`]): any bytes are shorter than a header in 16
+/// of their 2048 lengths, the rarer kind of that run; a framed message names one of the protocol's 15 kinds
+/// (7 requests, their 7 answers, a refusal) in 15 of its 0x9000 kinds, the rarer kind of that one.
 #[test]
 fn the_parser_never_panics_on_hostile_input() {
-    let mut runner = TestRunner::new(ProptestConfig::with_cases(4096));
+    let short = cases_to_meet(16.0 / 2048.0);
+    let known_kind = cases_to_meet(15.0 / f64::from(0x9000_u32));
+    let mut runner = sized_runner(short);
     // Any bytes at all.
     runner
         .run(&prop::collection::vec(any::<u8>(), 0..2048), |bytes| {
@@ -264,6 +270,7 @@ fn the_parser_never_panics_on_hostile_input() {
             m.extend_from_slice(&body);
             m
         });
+    let mut runner = sized_runner(known_kind);
     runner
         .run(&framed, |bytes| {
             let _ = read_request(&bytes, 0);
@@ -271,4 +278,32 @@ fn the_parser_never_panics_on_hostile_input() {
             Ok(())
         })
         .unwrap();
+}
+
+/// HEX-MAC-10, CLAUDE.md §5 (the bound is macOS's, not picked): do encode the largest Start a macOS exec
+/// would take: an argument filling `ARG_MAX` as the kernel charges it (its bytes, its NUL and its argv
+/// pointer, `bsd/kern/kern_exec.c:6108-6112`), a `PATH_MAX` working folder, `NGROUPS_MAX` groups and a
+/// longest box id; expect it within the message bound and read back unchanged. A program past that is
+/// one exec refuses (`E2BIG`), so the helper's bound need hold no more.
+#[test]
+fn the_largest_program_a_macos_exec_takes_fits_one_message() {
+    let pointer = 8;
+    let start = Request::Start {
+        box_id: box_id(&"b".repeat(BoxId::MAX_LEN)),
+        program: Program {
+            args: vec!["a".repeat(ARG_MAX - 1 - pointer)],
+            env: vec![],
+            cwd: Some("c".repeat(PATH_MAX)),
+            user: Some(User {
+                uid: 501,
+                gid: 20,
+                groups: vec![12; NGROUPS_MAX],
+            }),
+        },
+        leader: true,
+    };
+    let bytes = encode_request(VERSION, 1, &start).expect("within the bound");
+    assert!(bytes.len() <= MAX_MESSAGE);
+    let (_, _, got) = read_request(&bytes, START_FDS).expect("read back");
+    assert_eq!(got, start);
 }

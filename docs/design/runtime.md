@@ -507,7 +507,8 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
     messages may be lost (CLAUDE.md §3).
   - macOS: a box runs as a user of its own, from a pool made at install, as Nix's build users are. A user
     is the only marker macOS lists that a member inherits and can't drop, since macOS can't follow forks
-    (§3). So a privileged helper starts each box, and `RLIMIT_NPROC` caps its processes in the kernel.
+    (§3). So a privileged helper starts each box, and `RLIMIT_NPROC` of the box's user caps its processes in
+    the kernel.
     macOS's memory bound has **three layers** (Ada, 2026-11-01). Layer one is **rootless and
     kernel-enforced** (step 1's `_ext` backstop): every member Hex spawns is armed at `posix_spawn` with a
     *fatal* per-process physical-footprint cap at the box's **whole** bound (`posix_spawnattr_setjetsam_ext`,
@@ -539,10 +540,17 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
     QoS class, and background priority where the box's weight is low. A box that asks for confinement gets App
     Sandbox's, which every child inherits (§3). The class's own purpose is trusted code that must not starve
     the machine, and that purpose doesn't need it. Under the helper the ledger limits sum to the bound less a
-    reserve (`hex_core::boxuser`), the fork window's room; the daemon's own sweep is layer three there: each
-    turn of its exception loop (`Daemon::pump`) re-reads every box and ends one past its bound, whether a
-    crossing woke it or its timeout paced it, so a member unarmed in the fork window or a missed exception
-    is still caught (`docs/research/runtime/macos-box-user-and-ledger.md`). A node with no helper runs the
+    reserve (`hex_core::boxuser`), the fork window's room; layer three there is event-driven, with no
+    period (the lead's call, 2026-11-06, under Ada's rule that no constant is picked): the daemon watches every
+    member for its forks and its end (`EVFILT_PROC`, which root may place on any process), and each fork or end
+    wakes a sweep of its own box (its watch's tag names the box), while a crossing, whose corpse doesn't name
+    one, re-reads every box; each sweep arms a forked member at once and ends a box past its bound
+    (`Daemon::pump_members`, `Daemon::pump_crossings`). A member that forks before its watch is placed is
+    caught by the sweep listing the box again after each watch, until a listing finds no member it hadn't
+    watched; from then on every fork posts an event (`docs/research/runtime/macos-box-user-and-ledger.md`).
+    The helper's privileged calls are `crates/hex-runtime/src/macos/helper_sys.rs`, CLAUDE.md §12: its lines
+    `d4252f3` (the file and its fork, user drop, ledger and exception arming) and `a960732` (the `mach_msg`
+    crossing receive) were approved by Ada on 2026-11-06, as written. A node with no helper runs the
     class as step 1's, and says so in its inspect (`BoxInfo.membership`).
 
     **A program's end** is the helper's to collect, since it is the program's parent and `waitid` answers no
