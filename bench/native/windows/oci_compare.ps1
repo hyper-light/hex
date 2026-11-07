@@ -19,6 +19,10 @@ param(
     # ln(0.05)/ln(0.99) = 298.07 gives 95% confidence that the reported p99 is not under the true one.
     [int]$N = 299,
     [int]$W = 3,
+    # Seconds this segment may run before it stops after the round under way (0: no budget). A kiln run
+    # ends what it leaves behind, so the record is made in segments within kiln's run cap, each resuming
+    # after the last round in <Out>.rounds.jsonl (the lead, 2026-11-07).
+    [int]$Budget = 0,
     [string]$Root = "$env:USERPROFILE\.cache\hex-native-s4",
     [string]$Image = "mcr.microsoft.com/windows/nanoserver:ltsc2025"
 )
@@ -104,21 +108,21 @@ foreach ($c in ((& $ctr -a $Ctrd containers ls -q) | Where-Object { $_ -like "he
 }
 
 $names = @("docker", "containerd", "hex")
-$t = @{}
-foreach ($name in $names) { $t[$name] = @{ create = @(); start = @(); delete = @(); cli = @() } }
-$t.hex.copy = @(); $t.hex.exec = @()
-# A failed call is data, not the end of the run: it is counted per runtime with its message, the round's
+# A failed call is data, not the end of the run: it is recorded per runtime with its message, the round's
 # container removed, and the run goes on (jupiter, 2026-11-06: Docker's create failed at round ~96 with
-# "ExpandScratchSize ... semaphore timeout" and aborted the whole record). Each round is appended to
-# <Out>.rounds.jsonl as it ends, so a run cut short keeps every finished round.
-$failures = @{}
-foreach ($name in $names) { $failures[$name] = @() }
+# "ExpandScratchSize ... semaphore timeout"). Each round is appended to <Out>.rounds.jsonl as it ends, with
+# everything the record needs, and a segment resumes after the file's last round.
 $roundsOut = "$Out.rounds.jsonl"
-Remove-Item -ErrorAction SilentlyContinue $roundsOut
-for ($i = 0; $i -lt $W + $N; $i++) {
-    $load = Load
-    if ($i -ge $W) { $record.load += $load }
-    $round = [ordered]@{ round = $i; load = $load }
+$first = 0
+if (Test-Path $roundsOut) {
+    $last = Get-Content $roundsOut | Where-Object { $_ } | Select-Object -Last 1 | ConvertFrom-Json
+    if ($last) { $first = [int]$last.round + 1 }
+}
+$began = Get-Date
+$i = $first
+for (; $i -lt $W + $N; $i++) {
+    if ($Budget -gt 0 -and ((Get-Date) - $began).TotalSeconds -gt $Budget) { break }
+    $round = [ordered]@{ round = $i; load = (Load) }
     for ($k = 0; $k -lt $names.Count; $k++) {
         $name = $names[($i + $k) % $names.Count]
         $r = $runs[$name]
@@ -126,20 +130,17 @@ for ($i = 0; $i -lt $W + $N; $i++) {
             if ($name -eq "hex") {
                 & $r.create $i
                 if ($LASTEXITCODE -ne 0) { throw "Hex's bench exited $LASTEXITCODE" }
-                $c = $script:hexRound.create; $s = $script:hexRound.start; $d = $script:hexRound.delete; $q = 0
-                if ($i -ge $W) { $t.hex.copy += $script:hexRound.copy; $t.hex.exec += $script:hexRound.exec }
+                $round[$name] = [ordered]@{ create = $script:hexRound.create; start = $script:hexRound.start
+                    delete = $script:hexRound.delete; copy = $script:hexRound.copy; exec = $script:hexRound.exec }
             } else {
                 $c = Timed { & $r.create $i }
                 $s = Timed { & $r.start $i }
                 $d = Timed { & $r.delete $i }
                 $q = Timed { & $r.cli }
+                $round[$name] = [ordered]@{ create = $c; start = $s; delete = $d; cli = $q }
             }
-            if ($i -ge $W) { $t[$name].create += $c; $t[$name].start += $s; $t[$name].delete += $d; $t[$name].cli += $q }
-            $round[$name] = [ordered]@{ create = $c; start = $s; delete = $d }
         } catch {
-            $why = "$_"
-            if ($i -ge $W) { $failures[$name] += [ordered]@{ round = $i; why = $why } }
-            $round[$name] = [ordered]@{ failed = $why }
+            $round[$name] = [ordered]@{ failed = "$_" }
             # Its container, if one was made, goes before the next round reuses no name.
             if ($name -eq "docker") { & $docker -H $Dock rm -f "hexcmp-$i" 2>$null | Out-Null }
             if ($name -eq "containerd") {
@@ -151,14 +152,24 @@ for ($i = 0; $i -lt $W + $N; $i++) {
     }
     $round | ConvertTo-Json -Depth 5 -Compress | Add-Content $roundsOut
 }
+"segment rounds $first..$($i - 1) began $($began.ToString('o')) ended $((Get-Date).ToString('o'))" | Add-Content "$Out.segments"
+if ($i -lt $W + $N) { "segment ended at its budget: $i of $($W + $N) rounds"; exit 3 }
+
+# The record, from every round in the file (all segments), the W untimed rounds left out.
+$all = Get-Content $roundsOut | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.round -ge $W }
+$record.load = @($all | ForEach-Object { $_.load })
+$record.segments = @(Get-Content "$Out.segments")
 foreach ($name in $names) {
+    $ok = @($all | ForEach-Object { $_.$name } | Where-Object { $_ -and -not $_.failed })
     $record[$name] = [ordered]@{
-        create_ms = Stats $t[$name].create; start_ms = Stats $t[$name].start; delete_ms = Stats $t[$name].delete
-        cli_alone_ms = Stats $t[$name].cli
+        create_ms = Stats ($ok | ForEach-Object { $_.create }); start_ms = Stats ($ok | ForEach-Object { $_.start })
+        delete_ms = Stats ($ok | ForEach-Object { $_.delete })
+        failures = @($all | Where-Object { $_.$name.failed } | ForEach-Object { [ordered]@{ round = $_.round; why = $_.$name.failed } })
     }
+    if ($name -ne "hex") { $record[$name].cli_alone_ms = Stats ($ok | ForEach-Object { $_.cli }) }
 }
-foreach ($name in $names) { $record[$name].failures = $failures[$name] }
-$record.hex.blank_copy_ms = Stats $t.hex.copy
-$record.hex.exec_ms = Stats $t.hex.exec
+$hexOk = @($all | ForEach-Object { $_.hex } | Where-Object { $_ -and -not $_.failed })
+$record.hex.blank_copy_ms = Stats ($hexOk | ForEach-Object { $_.copy })
+$record.hex.exec_ms = Stats ($hexOk | ForEach-Object { $_.exec })
 $record | ConvertTo-Json -Depth 6 | Set-Content $Out
 Get-Content $Out
