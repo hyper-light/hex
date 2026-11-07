@@ -384,9 +384,10 @@ fn through_the_guest_relay(lab: &Lab, agent: &Agent, exe: &str) {
         .arg(dir.path().join("staged"))
         .stdout(Std::piped())
         .spawn()
+        .map(Reaped)
         .expect("start hex guest relay");
     let mut line = String::new();
-    BufReader::new(relay.stdout.take().unwrap())
+    BufReader::new(relay.0.stdout.take().unwrap())
         .read_line(&mut line)
         .unwrap();
     assert_eq!(line.trim(), "ready", "hex guest relay said {line:?}");
@@ -405,8 +406,18 @@ fn through_the_guest_relay(lab: &Lab, agent: &Agent, exe: &str) {
         "process boxes through the guest relay: {failures:#?}"
     );
     drop(guest);
-    relay.kill().unwrap();
-    relay.wait().unwrap();
+    drop(relay);
+}
+
+/// A child ended and reaped when dropped, so a failing assertion leaves no relay running (one held a gate's
+/// output pipe open for 80 minutes after its test failed, 2026-11-07).
+struct Reaped(Child);
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 /// Copies `from` into `to` until `from` ends, then ends `to`'s sending half: one direction of a bridged
@@ -450,9 +461,10 @@ fn through_a_simulated_guest(lab: &Lab, agent: &Agent, exe: &str) {
         .arg(&staged)
         .stdout(Std::piped())
         .spawn()
+        .map(Reaped)
         .expect("start hex guest relay");
     let mut line = String::new();
-    BufReader::new(relay.stdout.take().unwrap())
+    BufReader::new(relay.0.stdout.take().unwrap())
         .read_line(&mut line)
         .unwrap();
     assert_eq!(line.trim(), "ready", "hex guest relay said {line:?}");
@@ -518,7 +530,12 @@ fn through_a_simulated_guest(lab: &Lab, agent: &Agent, exe: &str) {
         "the guest booted more than once"
     );
     assert!(node.list().unwrap().is_empty(), "a box is left");
-    let left: Vec<_> = std::fs::read_dir(&staged).unwrap().collect();
+    // Every box's copy goes with its box; the layer store (§4a) stays, a cache for the next create.
+    let left: Vec<_> = std::fs::read_dir(&staged)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .filter(|n| n != stream::files::STORE)
+        .collect();
     assert!(left.is_empty(), "staged copies left: {left:?}");
     // HEX-GUEST-18 (CLAUDE.md §3; HEX-GUEST-19's HEX-RT-1 in a real guest): a second create of an id the
     // guest's node holds is refused as `Exists` before anything is staged: one stage for the two creates.
@@ -538,8 +555,7 @@ fn through_a_simulated_guest(lab: &Lab, agent: &Agent, exe: &str) {
     );
     node.delete(&id).unwrap();
     drop(node);
-    relay.kill().unwrap();
-    relay.wait().unwrap();
+    drop(relay);
 }
 
 /// HEX-SOCK-9, the plan's example: a `Bundle` box made, started, and `/usr/bin/true` exec'd in it
