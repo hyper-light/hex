@@ -108,12 +108,16 @@ impl HostClass {
     /// - Windows: 34,837 ms, the hog's end in a first run of windows_process_box after a rebuild on jupiter
     ///   at 100% CPU (bench/install/records/windows-jupiter-20261105.txt entry 23), above Process Governor's
     ///   6,239 ms (bench/native/RESULT.md, Windows, pass 1).
-    /// - Linux and macOS: their bench records (132.9 ms on fedora, 313.2 ms on adas-mac-studio-2,
-    ///   bench/native/records) hold no first run after a rebuild, so they seed as a class with no record.
+    /// - Linux: 957 ms, the slowest of 294 answers in each of three first runs of process_box, oci_box,
+    ///   oci_spec_box and node_socket after a rebuild on fedora at load 20-108
+    ///   (bench/native/records/firstrun-linux-e34d48d-20261107T173109Z.txt).
+    /// - macOS: its bench record (313.2 ms on adas-mac-studio-2, bench/native/records) holds no first run
+    ///   after a rebuild, so it seeds as a class with no record.
     pub const fn slowest_recorded_end(self) -> Option<Duration> {
         match self {
             HostClass::Windows => Some(Duration::from_millis(34_837)),
-            HostClass::Linux | HostClass::Macos => None,
+            HostClass::Linux => Some(Duration::from_millis(957)),
+            HostClass::Macos => None,
         }
     }
 }
