@@ -120,7 +120,8 @@ copy there shows ~20 bench scripts as modified: line endings from the sync, no c
    `cargo build -p shards` (debug, Shards' pinned cargo 1.98.1): exit 0 in 2 min 29 s, 2026-11-06T09:57-09:59Z,
    C:\Users\corph\.cache\hex-t7-windows\target-shards\debug\shards.exe. What Windows lacked, taken without installing
    anything: NASM (AWS_LC_SYS_NO_ASM_x86_64_pc_windows_msvc=1, the Windows host's aws-lc in debug without its
-   assembly, unlike Shards' release build; the guest's musl aws-lc keeps it); CMake and Ninja from Visual Studio 2022
+   assembly, unlike Shards' release build; the guest's musl aws-lc keeps it. aws-lc-sys allows no-asm in debug only, so it fits this
+   test build and never a shards anyone runs; Shards' Windows build needs NASM (Shards' lead, through step 5, 2026-11-06)); CMake and Ninja from Visual Studio 2022
    Build Tools' own folder, on the task's PATH; zig 0.16.0 (zig-x86_64-windows-0.16.0.zip from ziglang.org, sha256
    68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e, the download index's, unpacked into
    C:\Users\corph\.cache\hex-t7-windows\zig-0.16.0). Earlier attempts failed on each of these in turn (logs kept).
@@ -161,7 +162,7 @@ copy there shows ~20 bench scripts as modified: line endings from the sync, no c
 15. at ae644ff (step 5's 2386d08 merged: the guest unit test's root absolute on every host, and HEX-GUEST-19 asserting
    one boot), 2026-11-06T10:31:36Z, load 79% CPU, entry 12's initramfs (guest-side code unchanged since bba7340):
    windows-guest-ae644ff-20261106T103136Z.txt. cargo test -p hex-runtime --lib guest:: 7 passed, 0 failed (entry 14's
-   failure fixed); HEX-GUEST-19 1 passed, 0 failed, 1.27 s, with its one-boot assertion.
+   failure fixed); HEX-GUEST-19 1 passed, 0 failed, 1.27 s (the test's run time with entry 10's debug shards.exe, built without AWS-LC's assembly, which aws-lc-sys allows in debug only; not a timing of record), with its one-boot assertion.
 
 16. HEX-GUEST-20, the OCI runtime-spec validation in the guest through the seam, at 73e4d3b (step 5's c230d0a
    merged: tarball roots), 2026-11-06T11:00:42Z, load 56% CPU: windows-guestval-73e4d3b-20261106T110042Z.txt.
