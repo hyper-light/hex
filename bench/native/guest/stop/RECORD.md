@@ -1,7 +1,8 @@
 # A guest VM's stop: SIGTERM to the `shards run vm` process's end (native plan step 5, constants)
 
-What bounds a stop that can't wait on a fact alone: scripts/guest/boot_check.py's `STOP_GRACE`, twice (the
-margin) the slowest stop here, after which the VM is killed (the lead's rule for timeouts, 2026-11-06).
+HISTORY, read by nothing (2026-11-07): this record seeded a stop grace, which is gone. Shards' lead's decision: the
+VMM has no host-to-guest power-off, so a SIGTERM changes nothing and shards_api's stop() ends the VM process at once.
+It was: what bounded a stop that couldn't wait on a fact alone, twice the slowest stop here.
 
 ## HVF (macOS aarch64)
 

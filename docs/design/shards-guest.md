@@ -179,6 +179,13 @@ ports above 1024, below `VMADDR_PORT_ANY`, each spelling `HEX` and its number so
     `oci` create-to-start or exec measures slower with the musl `hex` than with a static-glibc `hex` on the same
     guest kernel.
 
+**Stopping the guest.** `GuestRuntime` ends its guest with shards_api's `stop()`, an immediate end of the VM
+process. Shards' VMM has no host-to-guest power-off: it follows only a guest that powers itself off, so a SIGTERM
+would change nothing. A kill loses what the guest held in its page cache for a writable disk. Hex's guest has
+none: its state, its boxes' records and their staged layers are all on its tmpfs and go with it by design, and
+its shares are the host's own directories over virtio-fs, which init mounts without its `writeback` option, so
+a write reaches the host's file before it returns. So an immediate kill loses nothing Hex keeps.
+
 ## 4a. Host paths: the bundle and rootfs copied in, bind mounts through Shards' shares
 
 A box's spec names host paths: a bundle's directory, its `root.path`, a `Rootfs::Dir` or its layers, and each

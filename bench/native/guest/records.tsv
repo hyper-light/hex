@@ -1,12 +1,10 @@
 # The slowest recorded value of each wait that seeds a bound, by host class: the input that turns a class on.
 # A bound is twice (the margin) its row's value; a class with no row for a measure has no seed, and what
 # needs it is refused by name until its record is taken and its row added here (no code change).
-# Read at build time by hex_runtime::guest (include_str!) and at run time by scripts/guest/boot_check.py.
+# Read at build time by hex_runtime::guest (include_str!).
 # Windows-WHP rows: shards.exe a debug build, AWS-LC without assembly (AWS_LC_SYS_NO_ASM), as its records say.
 # measure	class	slowest_us	record
 boot_ready	macOS-HVF	248582	bench/native/guest/boot-ready/RECORD.md
-stop	macOS-HVF	13000	bench/native/guest/stop/RECORD.md
 validation_run	macOS-HVF	73750000	bench/native/guest/validation-runs/RECORD.md
 validation_run	Windows-WHP	75500000	bench/native/guest/validation-runs/RECORD.md
 boot_ready	Windows-WHP	2712939	bench/native/guest/boot-ready/RECORD.md
-stop	Windows-WHP	4377	bench/native/guest/stop/RECORD.md
