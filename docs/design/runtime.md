@@ -778,6 +778,38 @@ simulator, and compares what each step shows (`docs/research/runtime/differentia
   scenarios grow with it), or the simulator diverging from the design text (then the simulator is fixed
   and every class re-run).
 
+## Decision: a program is held to its OS's exec bound, before any spawn (HEX-RT-14)
+
+`Program` carried an environment of any size, and only Linux's execve stopped it (`E2BIG`, after the spawn
+began); Windows bounds no environment block at all. CLAUDE.md §2 and §3 ask a bound and a typed refusal, so every
+class refuses a program past its OS's exec bound as `Invalid` naming the program, the sizes and the bound's source,
+before anything is spawned (`docs/research/runtime/exec-size-bounds.md`).
+
+- **One count:** `Program::exec_size` counts as Linux's execve does (each string and its NUL, the filename again, a
+  pointer per string), which is at least what XNU counts.
+- **Each OS's bound, from its source:** Linux reads the kernel's own formula at run time (a quarter of
+  `RLIMIT_STACK`, capped at three quarters of `_STK_LIM`, never under `ARG_MAX`; 32 pages a string; `fs/exec.c:410-416`,
+  `binfmts.h:15`), not glibc's `sysconf(_SC_ARG_MAX)`, which skips the cap. macOS reads `kern.argmax` (XNU's
+  `NCARGS`). Windows, whose block Microsoft documents as unbounded, takes a census of real container environments with
+  a stated margin, and 32,767 characters a variable (native step 4). The simulator holds Linux's floor, `ARG_MAX`.
+- **Whose stack limit, and when it is read:** a box's own (its spec's `process.rlimits` `RLIMIT_STACK`), else the
+  node's, read once and kept, so an exec makes no system call for it. A limit lowered after that reading is learned
+  where the program meets it, on the failure path alone: as root, the agent's vfork-style child reports the kernel's
+  `E2BIG` through memory the two share, and the agent reaps it and refuses the program; rootless, the seed (started
+  under the lower limit, which its programs inherit) refuses the program by its own reading with a refusal of its own
+  on the seed wire (code 5, appended). Either way the node reads its limit again, once, and refuses the next exec
+  itself. Rootless, the seed wire's one request (160 KiB, `hex_core::seed::MAX_REQUEST`) bounds a program too: one
+  past it is refused by name before it is sent, and the seed kept. **Open gap:** a rootless program between that
+  request and the kernel's own bound (a quarter of `RLIMIT_STACK`, 2 MiB at an 8 MiB stack) is refused, where runc and
+  crun, bounded only by the kernel, run it; as root it meets only the kernel's. Closing it needs a request carried over
+  several `SOCK_SEQPACKET` records, a kind appended to the seed wire (STATUS.md, native step 7).
+- **Over the node's socket** the wire's one-message bound is tighter than Linux's, so the client refuses past it, as a
+  program, before encoding.
+- **Tested by** HEX-RT-14 on every class's conformance run (a fixture that states no bound fails it), and a unit test of
+  the count against the kernel's arithmetic.
+- **What would falsify it:** a program the count admits that the OS's exec refuses with `E2BIG` (the count is short),
+  or a kernel whose formula changes; either is fixed in the count or the read, and HEX-RT-14 re-run.
+
 ## Open (STATUS.md)
 
 - Each OS's own boxes, natively (the decision above, proposed): under way. The **macOS `process` class is

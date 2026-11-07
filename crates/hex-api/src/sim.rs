@@ -21,6 +21,16 @@ use crate::{
 
 /// Most boxes a [`SimRuntime`] holds; past it `create` is refused with [`Refusal::Full`].
 pub const SIM_BOXES: usize = 10_000;
+/// The simulator's exec bound: Linux's floor, `ARG_MAX`, 131,072 bytes
+/// (`include/uapi/linux/limits.h:8`, v6.19), the least any Linux's execve takes whatever its stack limit, so a
+/// program the simulator takes runs on every Linux (docs/research/runtime/exec-size-bounds.md).
+pub const SIM_EXEC_LIMIT: crate::ExecLimit = crate::ExecLimit {
+    block: 131_072,
+    counts: crate::BlockCount::Execve,
+    string: None,
+    unit: crate::StringUnit::Bytes,
+    source: "the simulator (Linux's ARG_MAX floor, include/uapi/linux/limits.h:8)",
+};
 /// Most programs a simulated box holds, running or ended; past it `exec` is refused.
 pub const SIM_PROCS: usize = 1_000;
 /// Most bytes the `echo` program copies; past it, it stops and exits 1.
@@ -163,6 +173,7 @@ impl Runtime for SimRuntime {
         spec.bounds.check()?;
         if let ClassSpec::Oci(oci) = &spec.class {
             oci.check()?;
+            oci.init.fits(&SIM_EXEC_LIMIT)?;
         }
         let mut boxes = self.boxes()?;
         if boxes.contains_key(&spec.id) {
@@ -220,6 +231,7 @@ impl Runtime for SimRuntime {
         mut stdio: Stdio,
     ) -> Result<Box<dyn Proc>, Refusal> {
         program.check()?;
+        program.fits(&SIM_EXEC_LIMIT)?;
         let mut boxes = self.boxes()?;
         let b = boxes
             .get_mut(id)
@@ -431,6 +443,9 @@ impl SimFixture {
 }
 
 impl Fixture for SimFixture {
+    fn exec_limit(&self) -> Option<crate::ExecLimit> {
+        Some(SIM_EXEC_LIMIT)
+    }
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
         BoxSpec {
             id,

@@ -356,12 +356,26 @@ pub(crate) fn unexpected(call: &str, answer: &Answer) -> Refusal {
     Refusal::Broken(format!("the node agent answered a {call} with {kind}"))
 }
 
+/// The most of a program's arguments and environment that crosses to the node agent: a program can't pass
+/// the bound on one wire message (`hex_core::wire::MAX_MESSAGE`), so one that would is refused here, as a
+/// program, before it is encoded; the node then holds it to its OS's own exec bound (HEX-RT-14).
+pub const WIRE_EXEC_LIMIT: hex_api::ExecLimit = hex_api::ExecLimit {
+    block: wire::MAX_MESSAGE,
+    counts: hex_api::BlockCount::Execve,
+    string: None,
+    unit: hex_api::StringUnit::Bytes,
+    source: "the node agent's wire (one message, hex_core::wire::MAX_MESSAGE)",
+};
+
 impl<T: Transport> Runtime for Core<T> {
     fn classes(&self) -> Vec<Class> {
         self.classes.clone()
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
+        if let hex_api::ClassSpec::Oci(oci) = &spec.class {
+            oci.init.fits(&WIRE_EXEC_LIMIT)?;
+        }
         self.info(Call::Create(spec), "create")
     }
 
@@ -370,6 +384,7 @@ impl<T: Transport> Runtime for Core<T> {
     }
 
     fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        program.fits(&WIRE_EXEC_LIMIT)?;
         let streams = Streams {
             stdin: stdio.stdin.is_some(),
             stdout: stdio.stdout.is_some(),

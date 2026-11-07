@@ -44,6 +44,9 @@ impl BinFixture {
 }
 
 impl Fixture for BinFixture {
+    fn exec_limit(&self) -> Option<hex_api::ExecLimit> {
+        Some(hex_runtime::macos::exec_limit().expect("kern.argmax"))
+    }
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
         BoxSpec {
             id,
@@ -61,13 +64,13 @@ impl Fixture for BinFixture {
     }
 }
 
-/// The Mac Studio's measured allocation rate (bench/native/macos/RESULT.md): 256 GiB/s, the pacing the
-/// footprint bound is reckoned against. The process rate is set high so the process bound reads at the
-/// 250 µs floor near it; a box forks far slower than this.
+/// The runtime's pacing rates from the record of one member's growth, the fastest of its passes
+/// (bench/native/records/native-box-macos-growth-8503dc0-20261106T171108Z.txt): every box here holds one
+/// member at a time.
 fn runtime() -> MacRuntime {
     MacRuntime::new(
-        NonZeroU64::new(256 * GIB).unwrap(),
-        NonZeroU64::new(1_000_000).unwrap(),
+        NonZeroU64::new(2_596_898_598).unwrap(),
+        NonZeroU64::new(426).unwrap(),
     )
     .expect("a macOS runtime")
 }
@@ -258,7 +261,8 @@ fn a_box_takes_a_named_signal() {
 /// expect each wait to return when the program ends, never at the wait's budget. XNU posts a child's
 /// `NOTE_EXIT` before it is a zombie (`bsd/kern/kern_exit.c:2594-2595`, then `p_stat = SZOMB` at :2664),
 /// so a reap made on the event can find nothing yet; the native bench saw 3 of 60 such ends reported 60 s
-/// late (bench/native/macos/RESULT.md).
+/// late (bench/native/RESULT.md). Sixty runs, from that measured rate: without the fix 3/60, 7/60 and 3/60
+/// missed, at least 5%, so sixty runs see none with probability at most 0.95^60 = 4.6%.
 #[test]
 fn a_programs_end_is_seen_when_it_ends_not_at_the_waits_budget() {
     let rt = runtime();
@@ -274,15 +278,22 @@ fn a_programs_end_is_seen_when_it_ends_not_at_the_waits_budget() {
         class: ClassSpec::Process,
     })
     .expect("create");
-    let budget = Duration::from_secs(20);
+    const RUNS: usize = 60;
+    // A missed exit event makes the wait sleep out its whole budget. Late is past the slowest end on record
+    // across every host and OS (conformance's SLOWEST_RECORDED_END); the budget is the suite's learned
+    // patience, at least twice that, so a legitimate end is never late and a missed one always is. (One host's end maximum
+    // doesn't carry: 59.6 ms on adas-mac-studio-2 at load 2-5 was 550-770 ms on adalundhe-macbook-pro at
+    // load 21, 2026-11-06.)
+    let late_after = hex_api::conformance::SLOWEST_RECORDED_END;
+    let budget = hex_api::conformance::patience();
     let mut late = Vec::new();
-    for i in 0..60 {
+    for i in 0..RUNS {
         let mut p = rt
             .exec(&id, fx.act(&Act::Hog(GIB)), Stdio::null())
             .expect("exec hog");
         let t = Instant::now();
         let exit = p.wait_for(budget).expect("wait");
-        if !matches!(exit, Some(Exit::Signal(_))) || t.elapsed() >= budget / 2 {
+        if !matches!(exit, Some(Exit::Signal(_))) || t.elapsed() >= late_after {
             late.push((i, exit, t.elapsed()));
         }
     }

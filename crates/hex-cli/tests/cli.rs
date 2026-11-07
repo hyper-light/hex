@@ -68,13 +68,31 @@ fn an_argument_that_isnt_unicode_is_refused_not_a_panic() {
     assert!(hex_cli::reply(&[None]).text.contains("isn't Unicode"));
 }
 
-/// The native bench's acts (native plan step 7): do `climb` 3 MiB, expect it to report each MiB it
-/// touched, one line each, and exit 0, so a bound's overshoot is read from the program itself.
+/// The native bench's acts (native plan step 7): do `climb` 3 MiB, expect it to report the KiB it has
+/// touched after each 1 MiB step (its default, the instrument's resolution), one line each, and exit 0, so
+/// a bound's overshoot is read from the program itself.
 #[test]
-fn climb_reports_each_mib_it_touches() {
+fn climb_reports_each_step_it_touches() {
     let out = run(&["selftest-box", "climb", &(3u64 << 20).to_string()]);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
-    assert_eq!(String::from_utf8(out.stdout).unwrap(), "1\n2\n3\n");
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "1024\n2048\n3072\n");
+}
+
+/// Do `climb` 2 MiB at half the default step, expect a line every 512 KiB: the bench reads a bound's
+/// verdict at half its resolution with it.
+#[test]
+fn climb_takes_a_finer_step() {
+    let out = run(&[
+        "selftest-box",
+        "climb",
+        &(2u64 << 20).to_string(),
+        &(512u64 << 10).to_string(),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "512\n1024\n1536\n2048\n"
+    );
 }
 
 /// Do `serve`, expect "up" on stdout once it runs, and it to keep running until it is killed: a start

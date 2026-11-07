@@ -425,7 +425,21 @@ fn program(args: &[String]) -> Program {
 /// the create's path rootless (decision 4).
 struct OciBoxes<'a>(&'a Lab, bool);
 
+/// The bound a program crosses the node's socket under: the tighter of the wire's (the client refuses past it)
+/// and Linux's (the node refuses past it).
+fn over_the_socket() -> hex_api::ExecLimit {
+    let linux = hex_runtime::linux::process::exec_limit();
+    if hex_client::WIRE_EXEC_LIMIT.block < linux.block {
+        hex_client::WIRE_EXEC_LIMIT
+    } else {
+        linux
+    }
+}
+
 impl Fixture for OciBoxes<'_> {
+    fn exec_limit(&self) -> Option<hex_api::ExecLimit> {
+        Some(over_the_socket())
+    }
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
         BoxSpec {
             id,
@@ -451,6 +465,9 @@ impl Fixture for OciBoxes<'_> {
 struct ProcessBoxes<'a>(&'a str);
 
 impl Fixture for ProcessBoxes<'_> {
+    fn exec_limit(&self) -> Option<hex_api::ExecLimit> {
+        Some(over_the_socket())
+    }
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
         BoxSpec {
             id,
@@ -492,10 +509,10 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
         failures.is_empty(),
         "process boxes over the socket: {failures:#?}"
     );
-    through_the_guest_relay(&lab, &agent, exe);
-    through_a_simulated_guest(&lab, &agent, exe);
     nofile_by_default(&lab, &client);
     nofile_named(&lab, &client);
+    through_the_guest_relay(&lab, &agent, exe);
+    through_a_simulated_guest(&lab, &agent, exe);
     disconnect(&lab, &agent, &client);
     crash_at_each_record_write(&lab, own, exe);
     assert!(client.list().unwrap().is_empty(), "a box is left");

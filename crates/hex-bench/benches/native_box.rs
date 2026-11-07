@@ -12,11 +12,11 @@
 //! - `lifecycle`: create, start (to the program's "up" line: `serve`) and delete (to the program's end),
 //!   each timed alone, `n` times after `warmup`; a competitor with no separate create times its create
 //!   and start together as start, and records create as absent;
-//! - `bound`: `runs` programs climbing to 1 GiB (`climb`), each reporting the MiB it has touched: the
+//! - `bound`: `runs` programs climbing to 1 GiB (`climb`), each reporting the KiB it has touched: the
 //!   last it reported is how far it got past the bound, and the time from start to its end how fast the
 //!   bound ended it.
 //!
-//!   native_box <out.json> <driver> <n> <warmup> <runs>
+//!   native_box <out.json> <driver> <n> <warmup> <runs> [climb step bytes, 1 MiB unless given]
 //!
 //! (`cargo bench -p hex-bench --bench native_box -- ...`). `HEX_BIN` names the `hex` binary, else the one
 //! beside this bench. The records are in bench/native/.
@@ -55,9 +55,13 @@ mod bench {
     use serde_json::{Value, json};
 
     pub const MIB: u64 = 1 << 20;
+    /// Test inputs, not tunings: every driver gets the same box and the same climb, and only the order
+    /// footprint < bound < climb matters. The bound is the native bar's 256 MiB box
+    /// (bench/native/macos/RESULT.md); the program's own footprint is at most 6 MiB (its climbs stopped at
+    /// 250-254 MiB in that box on all three OSes, bench/native/RESULT.md), and the climb passes the bound
+    /// four times over.
     pub const BOUND: u64 = 256 * MIB;
     pub const CLIMB: u64 = 1024 * MIB;
-    const PATIENCE: Duration = Duration::from_secs(60);
 
     /// The hex binary whose `selftest-box` acts are the programs: `HEX_BIN`, else the `hex` beside this
     /// bench (cargo puts both under the same profile directory).
@@ -152,8 +156,8 @@ mod bench {
         json!({"create": stats(create), "start": stats(start), "delete": stats(delete)})
     }
 
-    fn bound(d: &mut dyn Driver, hex: &Path, runs: usize, first: usize) -> Value {
-        let climb = act(hex, &["climb", &CLIMB.to_string()]);
+    fn bound(d: &mut dyn Driver, hex: &Path, runs: usize, first: usize, step: usize) -> Value {
+        let climb = act(hex, &["climb", &CLIMB.to_string(), &step.to_string()]);
         let mut each = Vec::new();
         let (mut reached, mut took) = (Vec::new(), Vec::new());
         for r in 0..runs {
@@ -165,13 +169,14 @@ mod bench {
             let exit = s.ended();
             let end = t.elapsed();
             d.delete(i, s.as_mut());
-            let mib: u64 = out
+            let kib: u64 = out
                 .lines()
                 .rev()
                 .find_map(|l| l.trim().parse().ok())
                 .unwrap_or(0);
+            let mib = kib as f64 / 1024.0;
             each.push(json!({"reached_mib": mib, "ms": ms(end), "exit": exit}));
-            reached.push(mib as f64);
+            reached.push(mib);
             took.push(ms(end));
         }
         let bound_mib = (BOUND / MIB) as f64;
@@ -182,6 +187,7 @@ mod bench {
         json!({
             "bound_mib": bound_mib,
             "climb_mib": CLIMB / MIB,
+            "step_bytes": step,
             "most_past_bound_mib": over,
             "bounded_runs": reached.iter().filter(|m| **m < (CLIMB / MIB) as f64).count(),
             "end_ms": stats(took),
@@ -212,8 +218,17 @@ mod bench {
             s
         }
         fn ended(&mut self) -> String {
-            match self.proc.wait_for(PATIENCE).expect("wait") {
-                Some(e) => format!("{e:?}"),
+            // The suite's learned wait: twice the slowest end of the record and this run.
+            let asked = Instant::now();
+            match self
+                .proc
+                .wait_for(hex_api::conformance::patience())
+                .expect("wait")
+            {
+                Some(e) => {
+                    hex_api::conformance::ENDS.saw(asked.elapsed());
+                    format!("{e:?}")
+                }
                 None => "running".to_owned(),
             }
         }
@@ -337,8 +352,14 @@ mod bench {
             .map(|a| a.into_string().expect("Unicode arguments"))
             .filter(|a| a != "--bench")
             .collect();
-        let [out, driver, n, warmup, runs] = args.as_slice() else {
-            panic!("usage: native_box <out.json> <driver> <n> <warmup> <runs>");
+        let (out, driver, n, warmup, runs, step) = match args.as_slice() {
+            [out, driver, n, warmup, runs] => (out, driver, n, warmup, runs, MIB as usize),
+            [out, driver, n, warmup, runs, step] => {
+                (out, driver, n, warmup, runs, step.parse().unwrap())
+            }
+            _ => panic!(
+                "usage: native_box <out.json> <driver> <n> <warmup> <runs> [climb step bytes]"
+            ),
         };
         let (n, warmup, runs): (usize, usize, usize) = (
             n.parse().unwrap(),
@@ -353,7 +374,7 @@ mod bench {
         let before = context();
         let Some(result) = super::os::run(driver, &args, &hex, |d| {
             let l = lifecycle(d, &hex, n, warmup);
-            let b = bound(d, &hex, runs, warmup + n);
+            let b = bound(d, &hex, runs, warmup + n, step);
             json!({"lifecycle": l, "bound": b})
         }) else {
             return ExitCode::SUCCESS;
@@ -487,9 +508,10 @@ mod os {
     use std::num::NonZeroU64;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::time::Instant;
 
     use hex_runtime::macos::MacRuntime;
-    use serde_json::Value;
+    use serde_json::{Value, json};
 
     use super::bench::{ChildProc, Driver, Hex, MIB, Started};
 
@@ -594,23 +616,60 @@ mod os {
         }
     }
 
+    /// How fast a member can grow on this Mac, measured at bench start (the runtime's pacing rates,
+    /// CLAUDE.md §5): bytes a second, from taking one box's bound in this process and filling every byte
+    /// with an incompressible stream, as the bench's climbing program does; processes a second, from
+    /// spawning and reaping `n` of the smallest program, `true`, one after another (a member's own spawn
+    /// rate, not its program's start-up).
+    fn growth_rates(n: usize) -> (NonZeroU64, NonZeroU64) {
+        let t = Instant::now();
+        let mut touched = vec![0u8; super::bench::BOUND as usize];
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        for word in touched.as_chunks_mut::<{ size_of::<u64>() }>().0 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *word = x.to_le_bytes();
+        }
+        std::hint::black_box(&touched);
+        let bytes = (super::bench::BOUND as f64 / t.elapsed().as_secs_f64()) as u64;
+        drop(touched);
+        let t = Instant::now();
+        for _ in 0..n {
+            Command::new("true")
+                .stdout(std::process::Stdio::null())
+                .status()
+                .expect("spawn a program");
+        }
+        let procs = (n as f64 / t.elapsed().as_secs_f64()) as u64;
+        (
+            NonZeroU64::new(bytes).expect("a measured byte rate"),
+            NonZeroU64::new(procs).expect("a measured process rate"),
+        )
+    }
+
     pub fn run(
         driver: &str,
-        _args: &[String],
+        args: &[String],
         _hex: &Path,
         go: impl FnOnce(&mut dyn Driver) -> Value,
     ) -> Option<Value> {
         match driver {
-            // As macos_box: 256 GiB/s and a high process rate, so the watcher reads at its floor near
-            // the bound; layer one (the fatal cap at spawn) bounds a one-member box whatever the rate.
-            "hex" => Some(go(&mut Hex {
-                rt: MacRuntime::new(
-                    NonZeroU64::new(256 << 30).unwrap(),
-                    NonZeroU64::new(1_000_000).unwrap(),
-                )
-                .expect("a macOS runtime"),
-                prefix: "native".to_owned(),
-            })),
+            "hex" => {
+                let n: usize = args[2].parse().expect("n");
+                let (bytes, procs) = growth_rates(n);
+                let mut v = go(&mut Hex {
+                    rt: MacRuntime::new(bytes, procs).expect("a macOS runtime"),
+                    prefix: "native".to_owned(),
+                });
+                if let Value::Object(m) = &mut v {
+                    m.insert(
+                        "growth_rates".to_owned(),
+                        json!({"bytes_per_second": bytes.get(), "processes_per_second": procs.get()}),
+                    );
+                }
+                Some(v)
+            }
             "taskpolicy" => Some(go(&mut Taskpolicy)),
             "launchd" => {
                 let uid = Command::new("id").arg("-u").output().expect("id -u");

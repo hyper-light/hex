@@ -3,21 +3,19 @@
 //! of calls on several boxes and programs at once, played on the class under test and on the
 //! simulator, whose trace is the oracle. A real class passes a scenario when what it shows at each
 //! step (a refusal's kind, a box's state and exit, a program's end and output) is what the simulator
-//! shows for the same class. A step that reads a box waits up to [`PATIENCE`] for the oracle's answer,
+//! shows for the same class. A step that reads a box waits up to the suite's learned patience
+//! ([`conformance::patience`]) for the oracle's answer,
 //! so a runtime that reports a fact late passes and one that never reports it fails (§4: the wait is on
 //! the fact, bounded). Each scenario cites `HEX-DIFF-n`.
 
 use std::io::{PipeReader, PipeWriter, Read, Write};
 use std::time::{Duration, Instant};
 
-use crate::conformance::{self, Act, Failure, Fixture, PATIENCE, STILL_RUNNING};
+use crate::conformance::{self, Act, Failure, Fixture};
 use crate::sim::{SimFixture, SimRuntime};
 use crate::{
     Bounds, BoxId, BoxState, Class, ClassSpec, Exit, Proc, Refusal, Runtime, Signal, Stdio,
 };
-
-/// How often a step that waits for the oracle's answer reads again.
-const POLL: Duration = Duration::from_millis(10);
 
 /// A box's bound, as a scenario names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,11 +66,12 @@ pub enum Step {
     Exec(usize, Act),
     /// Write these words and a newline to program `p`'s stdin, then close it.
     Feed(usize, &'static str),
-    /// Wait up to [`PATIENCE`] (in a suite run) for program `p` to end, and read its end so.
+    /// Wait up to the suite's learned patience ([`conformance::patience`]) for program `p` to end, and read
+    /// its end so.
     Wait(usize, End),
     /// Read all program `p` wrote to stdout (after it ended).
     Read(usize),
-    /// Watch program `p` for [`STILL_RUNNING`].
+    /// Watch program `p` for the suite's learned watch ([`conformance::still_running`]).
     Running(usize),
     /// Signal box `b`.
     Signal(usize, Signal),
@@ -201,6 +200,10 @@ pub const SCENARIOS: &[Scenario] = &[
         id: "HEX-DIFF-5",
         says: "a box bounded to 256 MiB: a program using 16 MiB exits 0 and none is killed; one using 1 GiB doesn't exit 0 and the kill is counted",
         steps: &[
+            // Test inputs, not tunings: only the order under < bound < over matters. The bound is the
+            // native bar's 256 MiB box (bench/native/macos/RESULT.md). The program's own footprint is at
+            // most 6 MiB (a climb stopped at 250-254 MiB in that box on all three OSes, bench/native/RESULT.md),
+            // so 16 MiB stays under with 234 MiB of margin and 1 GiB passes it four times over.
             Step::Create(0, Bound::Memory(256 * MIB)),
             Step::Exec(0, Act::Hog(16 * MIB)),
             Step::Wait(0, End::Ok),
@@ -244,7 +247,7 @@ pub fn run(rt: &dyn Runtime, fx: &dyn Fixture) -> Vec<Failure> {
         }
     };
     for s in SCENARIOS {
-        if let Err(why) = differ(rt, fx, &oracle, s, PATIENCE) {
+        if let Err(why) = differ(rt, fx, &oracle, s, conformance::patience()) {
             failures.push(Failure { case: s.id, why });
         }
     }
@@ -436,13 +439,17 @@ impl Play<'_> {
                 let Some(s) = self.started(*p)? else {
                     return Ok(Seen::NeverStarted);
                 };
+                let asked = Instant::now();
                 match s.proc.wait_for(patience).map_err(|e| e.to_string())? {
                     None => Seen::StillRunning,
-                    Some(exit) => match end {
-                        End::Exact => Seen::Exit(exit),
-                        End::Ok => Seen::Ok(exit == Exit::Code(0)),
-                        End::Signalled => Seen::Signalled(matches!(exit, Exit::Signal(_))),
-                    },
+                    Some(exit) => {
+                        conformance::ENDS.saw(asked.elapsed());
+                        match end {
+                            End::Exact => Seen::Exit(exit),
+                            End::Ok => Seen::Ok(exit == Exit::Code(0)),
+                            End::Signalled => Seen::Signalled(matches!(exit, Exit::Signal(_))),
+                        }
+                    }
                 }
             }
             Step::Read(p) => {
@@ -462,7 +469,11 @@ impl Play<'_> {
                 let Some(s) = self.started(*p)? else {
                     return Ok(Seen::NeverStarted);
                 };
-                match s.proc.wait_for(STILL_RUNNING).map_err(|e| e.to_string())? {
+                match s
+                    .proc
+                    .wait_for(conformance::still_running())
+                    .map_err(|e| e.to_string())?
+                {
                     None => Seen::StillRunning,
                     Some(exit) => Seen::Exit(exit),
                 }
@@ -492,16 +503,26 @@ impl Play<'_> {
     }
 }
 
-/// Reads with `look` until it shows `want`, or `patience` has passed; returns the last reading.
+/// Reads with `look` until it shows `want`, or `patience` has passed; returns the last reading. A box's
+/// state has no event to wait on, so it is read again after waiting as long as the last read took: at most
+/// half the time reading, at whatever a read costs on this platform.
 fn until(want: Option<&Seen>, patience: Duration, mut look: impl FnMut() -> Seen) -> Seen {
-    let deadline = Instant::now().checked_add(patience);
+    let asked = Instant::now();
+    let deadline = asked.checked_add(patience);
     loop {
+        let read = Instant::now();
         let seen = look();
-        let late = deadline.is_none_or(|d| Instant::now() >= d);
-        if want.is_none_or(|w| *w == seen) || late {
+        let took = read.elapsed();
+        if want.is_some_and(|w| *w == seen) {
+            // The answer came: it teaches the suite's learned wait how long a box's answer takes.
+            conformance::ENDS.saw(asked.elapsed());
             return seen;
         }
-        std::thread::park_timeout(POLL);
+        let late = deadline.is_none_or(|d| Instant::now() >= d);
+        if want.is_none() || late {
+            return seen;
+        }
+        conformance::rest(took);
     }
 }
 
@@ -629,9 +650,15 @@ mod tests {
                 ran: std::sync::Mutex::default(),
             };
             let s = SCENARIOS.iter().find(|s| s.id == scenario).unwrap();
-            let quick = Duration::from_millis(50);
-            let why =
-                differ(&liar, &SimFixture::Process, &SimFixture::Process, s, quick).unwrap_err();
+            // The simulator answers each call at once, so no reading needs to wait: no patience at all.
+            let why = differ(
+                &liar,
+                &SimFixture::Process,
+                &SimFixture::Process,
+                s,
+                Duration::ZERO,
+            )
+            .unwrap_err();
             assert!(why.contains(step), "{lie:?}: {why}");
         }
     }
@@ -640,6 +667,9 @@ mod tests {
     struct TermEnds;
 
     impl Fixture for TermEnds {
+        fn exec_limit(&self) -> Option<crate::ExecLimit> {
+            Some(crate::sim::SIM_EXEC_LIMIT)
+        }
         fn spec(&self, id: BoxId, bounds: crate::Bounds) -> crate::BoxSpec {
             SimFixture::Bundle.spec(id, bounds)
         }
@@ -668,6 +698,144 @@ mod tests {
                 .any(|f| f.case == "HEX-DIFF-2" && f.why.contains("at step 11 (Look(0)")),
             "{failures:#?}"
         );
+    }
+
+    /// The rule for a learned wait: before any sample its bound is twice the slowest answer on record;
+    /// then twice the slowest of the record and what it has seen; and it only rises. Do: seed one at
+    /// 100 ms, see 30 ms, then 300 ms, then 50 ms. Expect 200 ms, 200 ms, 600 ms, 600 ms.
+    #[test]
+    fn a_learned_wait_starts_at_twice_its_record_and_only_rises() {
+        let ms = Duration::from_millis;
+        let wait = conformance::LearnedWait::new(ms(100));
+        assert_eq!(wait.bound(), ms(200));
+        wait.saw(ms(30));
+        assert_eq!(wait.bound(), ms(200));
+        wait.saw(ms(300));
+        assert_eq!(wait.bound(), ms(600));
+        wait.saw(ms(50));
+        assert_eq!(wait.bound(), ms(600));
+    }
+
+    /// Do: read with a look that takes a measurable time and never shows the oracle's answer, for a
+    /// patience. Expect: each re-read waits at least as long as the read before it took, so reading holds
+    /// at most half the time, at whatever a read costs on this platform (no picked interval).
+    #[test]
+    fn a_reread_waits_as_long_as_the_last_read_took() {
+        let reads = std::cell::RefCell::new(Vec::new());
+        let want = Seen::Listed(true);
+        until(Some(&want), Duration::from_millis(600), || {
+            let start = Instant::now();
+            // A read that costs five times the fixed re-read interval the suite had (10 ms), so a fixed
+            // interval fails even where the OS's timer oversleeps it (macOS under load did, at 20 ms):
+            // the relation tested holds for any cost, and the patience fits at least three reads.
+            let mut x = 0u64;
+            while start.elapsed() < Duration::from_millis(50) {
+                x = std::hint::black_box(x.wrapping_add(1));
+            }
+            reads.borrow_mut().push((start, Instant::now()));
+            Seen::Listed(false)
+        });
+        let reads = reads.into_inner();
+        assert!(reads.len() >= 3, "{} reads", reads.len());
+        for pair in reads.windows(2) {
+            let (s0, e0) = pair[0];
+            let (s1, _) = pair[1];
+            assert!(
+                s1 - e0 >= e0 - s0,
+                "re-read after {:?}, the read took {:?}",
+                s1 - e0,
+                e0 - s0
+            );
+        }
+    }
+
+    /// A program that is the simulator's, but ends on its own `after` its start (as a waiting program
+    /// that is killed late, or a box that ends slowly under load, would look).
+    struct EndsAfter {
+        inner: Box<dyn Proc>,
+        started: Instant,
+        after: Duration,
+    }
+
+    impl Proc for EndsAfter {
+        fn pid(&self) -> u32 {
+            self.inner.pid()
+        }
+        fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
+            match self.inner.try_wait()? {
+                Some(e) => Ok(Some(e)),
+                None if self.started.elapsed() >= self.after => Ok(Some(Exit::Signal(9))),
+                None => Ok(None),
+            }
+        }
+        fn wait_for(&mut self, timeout: Duration) -> Result<Option<Exit>, Refusal> {
+            if let Some(e) = self.try_wait()? {
+                return Ok(Some(e));
+            }
+            let left = self.after.saturating_sub(self.started.elapsed());
+            if timeout < left {
+                conformance::rest(timeout);
+                return self.try_wait();
+            }
+            conformance::rest(left);
+            self.try_wait()
+        }
+    }
+
+    /// The simulator, but every program it starts ends on its own 770 ms after its start.
+    struct LateEnds(SimRuntime);
+
+    impl Runtime for LateEnds {
+        fn classes(&self) -> Vec<Class> {
+            self.0.classes()
+        }
+        fn create(&self, spec: crate::BoxSpec) -> Result<BoxInfo, Refusal> {
+            self.0.create(spec)
+        }
+        fn start(&self, id: &BoxId) -> Result<(), Refusal> {
+            self.0.start(id)
+        }
+        fn exec(&self, id: &BoxId, p: Program, s: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+            Ok(Box::new(EndsAfter {
+                inner: self.0.exec(id, p, s)?,
+                started: Instant::now(),
+                // The slowest end measured on adalundhe-macbook-pro at load 21 (2026-11-06): a real end
+                // that late, well inside the slowest on record, must not read as still running.
+                after: Duration::from_millis(770),
+            }))
+        }
+        fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
+            self.0.signal(id, signal)
+        }
+        fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
+            self.0.inspect(id)
+        }
+        fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
+            self.0.usage(id)
+        }
+        fn list(&self) -> Result<Vec<BoxInfo>, Refusal> {
+            self.0.list()
+        }
+        fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
+            self.0.delete(id)
+        }
+    }
+
+    /// HEX-DIFF-1 (the negative watch rests on the record across hosts): do a runtime whose waiting
+    /// programs end 770 ms after they start, a real end seen under load. Expect HEX-DIFF-1 to fail at its
+    /// first `Running(1)`: a watch that says a program does not end must outlast the slowest end on record.
+    #[test]
+    fn a_program_that_ends_late_is_not_read_as_still_running() {
+        let s = SCENARIOS.iter().find(|s| s.id == "HEX-DIFF-1").unwrap();
+        let why = differ(
+            &LateEnds(SimRuntime::new()),
+            &SimFixture::Process,
+            &SimFixture::Process,
+            s,
+            Duration::ZERO,
+        )
+        .unwrap_err();
+        assert!(why.contains("(Running(1))"), "{why}");
     }
 
     /// Do a scenario whose box the runtime shows late; expect it to pass, since a reading waits for the
@@ -723,7 +891,7 @@ mod tests {
             &SimFixture::Process,
             &SimFixture::Process,
             s,
-            PATIENCE,
+            conformance::patience(),
         )
         .unwrap();
         // HEX-DIFF-2 reads the box twice; the second read waited out two lagging readings.

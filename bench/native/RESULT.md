@@ -26,6 +26,10 @@ with 7 containers running (noisy, as recorded).
 | bound held | 20/20 per pass, 2 MiB under | 20/20 per pass, 2 MiB under | equal |
 | bound's end p50 | 99.5 (99.5-106.2) | 117.5 (117.5-123.2) | 1.18x |
 
+The bound's verdict reads to the climb's step, 1 MiB, the instrument's resolution. At half the step (512 KiB) it
+holds: both drivers stopped all 20 climbs at 253 MiB, 3 MiB under the bound (fedora, commit a82d47a, 2026-11-06,
+unit hex-native-s7-s7w-20261106T203241Z, `native_box <out> <driver> 5 1 20 524288`; a verdict check, not timed).
+
 ## macOS: Hex vs `taskpolicy -m` and a launchd job
 
 Record `records/native-box-macos-b1ddb89-20261105T110227Z.txt`: adas-mac-studio-2 (Apple M4 Max, macOS 26.2),
