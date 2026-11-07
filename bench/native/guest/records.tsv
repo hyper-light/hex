@@ -1,6 +1,7 @@
 # The slowest recorded value of each wait that seeds a bound, by host class: the input that turns a class on.
-# A bound is twice (the margin) its row's value; a class with no row for a measure has no seed, and what
-# needs it is refused by name until its record is taken and its row added here (no code change).
+# A bound is twice (the margin) its row's value. A class with no row for a measure seeds from twice the slowest
+# row of any class (the lead's seed rule, 2026-11-07), then rises with its node's own; its own row, once its
+# record is taken and added here, becomes its seed (no code change). A measure no class records is refused.
 # Read at build time by hex_runtime::guest (include_str!) and at run time by scripts/guest/boot_check.py.
 # measure	class	slowest_us	record
 boot_ready	macOS-HVF	265000	bench/native/guest/boot-ready/RECORD.md

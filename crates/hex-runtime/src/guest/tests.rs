@@ -583,7 +583,9 @@ fn a_tarball_root_stages_everywhere_and_a_directory_root_is_refused_on_windows()
 enum Boots {
     /// Its relay answers: the token, then the node's hello.
     Ready,
-    /// Alive, its relay never listening: the dial's patience runs out.
+    /// Alive, its relay never listening: the dial's patience runs out (the hung-guest tests, which need a
+    /// Shards backend: macOS and Windows).
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     Hung,
 }
 
@@ -696,14 +698,15 @@ fn ready_relay() -> std::net::TcpStream {
 impl shards_api::Guest for PlannedGuest {
     fn connect(
         &self,
-        port: u32,
+        _port: u32,
         patience: Duration,
     ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
         self.patience.lock().unwrap().push(patience);
         match self.boots {
             Boots::Ready => Ok(Box::new(Looped(ready_relay()))),
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             Boots::Hung => Err(shards_api::Refusal::Channel {
-                port,
+                port: _port,
                 why: format!("unanswered in {patience:?}"),
             }),
         }
@@ -811,26 +814,36 @@ fn a_second_hang_is_refused_by_type() {
     assert_eq!(rt.retired(), 2);
 }
 
-/// HEX-GUEST-34 (the parent's rule: a host class without a record doesn't seed its bound): on Linux (KVM),
-/// whose boot-to-ready record is pending (records.tsv holds HVF's and WHP's rows alone), ask for a guest:
-/// expect it refused by type, naming the pending record, before anything boots, never a bound borrowed from
-/// another class.
+/// HEX-GUEST-34 (the lead's seed rule, 2026-11-07: a host class with no record seeds from 2 × the slowest record
+/// of any class, then rises with the node's own): on Linux (KVM), whose boot-to-ready row isn't in
+/// records.tsv yet, expect the first dial's bound twice that seed (twice the margin over the slowest
+/// boot_ready of any class), never a refusal; then tell it of a boot slower than the seed: expect the bound
+/// twice that boot, risen.
 #[cfg(target_os = "linux")]
 #[test]
-fn a_host_class_without_a_record_refuses_by_name() {
-    let guests = Arc::new(Planned::new(&[Boots::Ready, Boots::Hung]));
-    let rt = GuestRuntime::new(guests.clone(), config());
-    let got = rt.guest().map(|_| ());
-    let Err(Refusal::Platform { why, .. }) = got else {
-        panic!("expected the pending record named, got {got:?}");
-    };
-    assert!(why.contains("records.tsv") && why.contains(CLASS), "{why}");
-    assert_eq!(guests.boots.load(Ordering::SeqCst), 0);
+fn an_unrecorded_class_seeds_from_twice_the_slowest_of_any_class_and_rises() {
+    let slowest_any = RECORDS
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(|l| {
+            let row: Vec<&str> = l.split('\t').collect();
+            (row.first() == Some(&"boot_ready")).then(|| row[2].parse::<u64>().unwrap())
+        })
+        .max()
+        .unwrap();
+    let seed = 2 * Duration::from_micros(slowest_any);
+    let rt = GuestRuntime::new(Arc::new(Planned::new(&[Boots::Ready])), config());
+    assert_eq!(recorded_boot().unwrap(), seed);
+    assert_eq!(rt.first_dial_bound().unwrap(), 2 * seed);
+    let slow = 3 * seed;
+    rt.learn(slow);
+    assert_eq!(rt.first_dial_bound().unwrap(), 2 * slow);
 }
 
-/// HEX-GUEST-34 (the lead: the record is the input that turns a class on): read a records table with
-/// HVF's rows alone, then with a KVM row added: expect KVM to have no seed from the first (HVF's never
-/// borrowed) and its own from the second, with no code between them.
+/// HEX-GUEST-34 (the lead: the record is the input that turns a class on; the lead's seed rule, 2026-11-07): read
+/// a records table with HVF's and WHP's rows: expect HVF its own row, and KVM, with none, twice the slowest of
+/// any class (WHP's); a measure no class records has no seed. Add a KVM row: expect KVM its own, with no code
+/// between them.
 #[test]
 fn a_records_row_is_what_turns_a_class_on() {
     let hvf = "# measure\tclass\tslowest_us\trecord\nboot_ready\tmacOS-HVF\t265000\tr.md\n";
@@ -839,10 +852,24 @@ fn a_records_row_is_what_turns_a_class_on() {
         Some(Duration::from_millis(265))
     );
     assert_eq!(slowest_in(hvf, "boot_ready", "Linux-KVM"), None);
+    let two = format!("{hvf}boot_ready\tWindows-WHP\t2712939\tr.md\n");
+    assert_eq!(
+        seed_in(&two, "boot_ready", "macOS-HVF"),
+        Some(Duration::from_millis(265))
+    );
+    assert_eq!(
+        seed_in(&two, "boot_ready", "Linux-KVM"),
+        Some(2 * Duration::from_micros(2_712_939))
+    );
+    assert_eq!(seed_in(&two, "stop", "Linux-KVM"), None);
     let kvm = format!("{hvf}boot_ready\tLinux-KVM\t180000\tr.md\n");
     assert_eq!(
         slowest_in(&kvm, "boot_ready", "Linux-KVM"),
         Some(Duration::from_millis(180))
     );
     assert_eq!(slowest_in(&kvm, "stop", "Linux-KVM"), None);
+    assert_eq!(
+        seed_in(&kvm, "boot_ready", "Linux-KVM"),
+        Some(Duration::from_millis(180))
+    );
 }

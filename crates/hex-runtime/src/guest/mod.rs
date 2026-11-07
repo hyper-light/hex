@@ -160,8 +160,9 @@ struct Booted {
 }
 
 /// The slowest recorded value of each wait that seeds a bound, by host class
-/// (bench/native/guest/records.tsv): the input that turns a class on. A class with no row for a measure
-/// has no seed; adding its row, once its record is taken, turns it on with no code change.
+/// (bench/native/guest/records.tsv). A class with no row for a measure seeds from twice the slowest row of
+/// any class ([`seed_in`]); adding its own row, once its record is taken, makes that its seed, with no code
+/// change.
 const RECORDS: &str = include_str!("../../../../bench/native/guest/records.tsv");
 
 /// This host's class, as the records name it: the hypervisor Shards boots its guests with here.
@@ -186,20 +187,44 @@ pub fn slowest_in(table: &str, measure: &str, class: &str) -> Option<Duration> {
         })
 }
 
-/// The slowest value recorded for `measure` on this host's class, or the refusal naming the record to take.
+/// The seed `table` gives `measure` on host class `class`: its own slowest row where it has one; else, by the
+/// lead's seed rule (2026-11-07), twice the slowest row of any class, a class with no record of its own
+/// starting from the slowest the others have seen with room to spare, then rising with its node's own (the
+/// learned bounds take the max with what the node sees). `None` where no class records the measure.
+pub fn seed_in(table: &str, measure: &str, class: &str) -> Option<Duration> {
+    if let Some(own) = slowest_in(table, measure, class) {
+        return Some(own);
+    }
+    table
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| {
+            let mut row = line.split('\t');
+            if row.next()? != measure {
+                return None;
+            }
+            row.next()?;
+            row.next()?.parse().ok().map(Duration::from_micros)
+        })
+        .max()
+        .map(|slowest| slowest.saturating_mul(2))
+}
+
+/// The seed for `measure` on this host's class ([`seed_in`] over records.tsv), or the refusal naming the
+/// record to take where no class records it.
 pub fn recorded(measure: &str) -> Result<Duration, Refusal> {
-    slowest_in(RECORDS, measure, CLASS).ok_or_else(|| Refusal::Platform {
+    seed_in(RECORDS, measure, CLASS).ok_or_else(|| Refusal::Platform {
         what: "the oci class's guest",
         platform: std::env::consts::OS,
         why: format!(
-            "no {measure} record for {CLASS} yet (bench/native/guest/records.tsv): record one first; \
-             no other class's is borrowed"
+            "no {measure} record for any host class yet (bench/native/guest/records.tsv): record one first"
         ),
     })
 }
 
-/// The slowest boot to ready on record for this host's class, the seed of the first dial's bound before
-/// this node has seen a boot (bench/native/guest/boot-ready/RECORD.md, its row in records.tsv).
+/// The seed of the first dial's bound before this node has seen a boot: the slowest boot to ready on record
+/// for this host's class, or with none, twice the slowest of any class (bench/native/guest/boot-ready/
+/// RECORD.md, its rows in records.tsv).
 pub fn recorded_boot() -> Result<Duration, Refusal> {
     recorded("boot_ready")
 }
