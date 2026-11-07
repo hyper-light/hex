@@ -80,4 +80,27 @@ first-boot maxima (238-249 ms) are a series' first boots, as in every HVF record
 
 ## WHP (Windows x86_64, jupiter)
 
-Pending: jupiter's runner wasn't answering when this was taken.
+Detached S4U task hex-d-whp-split-20261106T164636, 2026-11-06 16:48-17:07 PST, N=40 each, under HEAVY co-tenant
+load: other agents' builds held the host (7 cargo and 2 cargo-clippy processes, kiln reporting 0-15 of 32 cores
+idle); no other guest was booting. The same shards.exe as the WHP records (debug build, AWS-LC without assembly),
+Shards' vmlinux-6.18.48-x86_64-hyperv. Images built there from each tree (x86_64-unknown-linux-musl, rust-lld; the
+cpio by a Rust port of initramfs.py, jupiter having no Python): before = f581970 (hex with debug info, initramfs
+14,018,216 bytes, sha256 71788884…), after = b3c994e (cut 1 + cut 2, initramfs 2,617,392 bytes, sha256 dc0f8f11…).
+Raw log on jupiter: %USERPROFILE%\.cache\hex-t7\native-s5\d\whp-split-20261106T164636.log (its per-boot phases in
+whp-split.tsv beside it).
+
+Medians / maxima, ms:
+
+| phase | before | after cuts 1 + 2 |
+|---|---|---|
+| total, host-side | 12,294 / 31,042 | 13,383 / 22,672 |
+| (ii) kernel to init | 1,832 / 5,125 | 1,714 / 3,919 |
+| (iii) init: re-exec, mounts, cgroup | **75.5 / 382** | **9.4 / 117** |
+| (iii) node ready | 2.8 / 19.8 | 3.1 / 18.3 |
+| (iii) relay listening | 0.8 / 3.9 | 1.1 / 22.5 |
+| (i)+(iv) host | 10,625 / 25,848 | 11,970 / 19,696 |
+
+Reading: cut 2 is larger on WHP (init 75 -> 9 ms: the cgroup2 mount's RCU wait is longer there). The totals, 10-20x
+the morning's WHP record, are the host side's under this load: the guest is listening within ~2 s, and the host's
+paced dial (sqrt(2cw), its pause growing with the wait) lands long after; readiness as an event removes that wait. A
+re-take at the host's ordinary load, before and after, goes with that change.
