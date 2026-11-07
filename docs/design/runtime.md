@@ -503,8 +503,9 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
   - Linux: cgroup v2, as today.
   - Windows: a job object per box, nested under the node's. Memory is the job's memory limit; CPU a weight
     or a hard cap; processes the active-process limit; delete is kill-on-close (§2). Limit events come from
-    the notification class Windows guarantees, or from the job's accounting, since other completion-port
-    messages may be lost (CLAUDE.md §3).
+    the job's accounting, read synchronously: completion-port messages may be lost, and the memory
+    notification Windows calls guaranteed is set seconds late under load, or never once the member's
+    commit has fallen back (CLAUDE.md §3; bench/install/records/windows-jupiter-20261105.txt entry 21).
   - macOS: a box runs as a user of its own, from a pool made at install, as Nix's build users are. A user
     is the only marker macOS lists that a member inherits and can't drop, since macOS can't follow forks
     (§3). So a privileged helper starts each box, and `RLIMIT_NPROC` caps its processes in the kernel.
@@ -804,9 +805,13 @@ simulator, and compares what each step shows (`docs/research/runtime/differentia
   (`PROC_THREAD_ATTRIBUTE_JOB_LIST`, so nothing runs outside it) and resumed; breakaway is refused; delete
   (kill-on-close / `TerminateJobObject`) ends the tree. The job lets a commit that crosses its limit
   overshoot by a bounded ≈1.1 MiB, so Hex sets the commit limit a 2 MiB margin under the box's bound and
-  the job's peak stays at or below the bound; reaching the bound is the guaranteed
-  `JobObjectNotificationLimitInformation` violation, read from the job with no completion port (no message
-  queue to bound). CPU is a weight or a hard cap of the whole machine (`milli × 10 / processors`).
+  the job's peak stays at or below the bound; reaching the bound is the job's peak commit at or past its
+  commit limit (`hex_core::job::reached_bound`), from the job's accounting with no completion port (no
+  message queue to bound). It was the `JobObjectNotificationLimitInformation` violation until that was
+  shown late or lost under load: on jupiter, a member refused at the cap and ended at once left it unset in
+  nearly every pass, and one held past the line saw it after up to 26 s or not within 30 s
+  (`job_events` e18; bench/install/records/windows-jupiter-20261105.txt entry 21). The peak can't fall, so a box reads as having reached its bound
+  once, not once per refused commit, which the job doesn't count. CPU is a weight or a hard cap of the whole machine (`milli × 10 / processors`).
   HEX-RT-1..9 pass on jupiter. **`pids_refused` on Windows** counts only what Hex observes synchronously —
   the node's own `exec` into a full box returns `ERROR_NOT_ENOUGH_QUOTA` (surfaced as `Exhausted`) — since
   Windows gives no guaranteed count of a member's own refused forks: its accounting doesn't move, and the

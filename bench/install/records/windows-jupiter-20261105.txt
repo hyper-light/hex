@@ -231,6 +231,44 @@ copy there shows ~20 bench scripts as modified: line endings from the sync, no c
    With the count taken as one read (the working change): windows_process_box 10/10 three times;
    an_ended_member_whose_handle_is_held_leaves_the_id_list 5 of 5; fmt and native clippy -D warnings exit 0.
 
+21. the process class's memory-bound count, root-caused, 2026-11-07T01:10-02:10Z on jupiter (Windows 11 Pro
+   build 26200.9711, last update 2026-10-14, booted 2026-11-06T19:02Z; heavy load throughout: 0-16 of 32
+   cores idle, the System process at ~356,000 CPU-s since boot, ~15 cores in the kernel), from kiln with
+   sync:false (a clean clone at 52b298c in ~/.cache/hex-t7-windows/xfer, patches carried by hash).
+   The fault: integrate's runs saw windows_process_box's memory cases read oom_kills = 0 (HEX-DIFF-5 step 6,
+   a_box_past_its_bound_is_refused_at_the_bound). At 52b298c the latter failed 10 of 10 here, each with the
+   job's peak past its commit limit (266,551,296-266,645,504 B over 266,108,928).
+   The cause, measured with bench/native/windows/job_events (experiments e18, e19 added): the box counted
+   reaching its bound only from the job's memory notification violation (JobObjectLimitViolationInformation,
+   the class Microsoft calls guaranteed), and Windows sets that late or never:
+   - e18 at Hex's numbers (256 MiB bound, cap 266,108,928, notification 4 MiB under it, members started in
+     the job by JOB_LIST), a member committing 1 MiB at a time until refused:
+     `exit` (member ends at once, the box's case): unset in 200 of 200, then 120 of 120 across Assign or
+     JOB_LIST and a 64 or 256 MiB bound, polled up to 200 ms after the end: never set.
+     `hold` (member stays, past the line): read at once, unset in 200 of 200 (JobMemory 265.4 MB, over the
+     line); polled while held, set after 1 ms (2 of 4), 25,895 ms (1 of 4), not within 30,000 ms (1 of 4);
+     not within 3,000 ms in 8 of 8.
+   - e5 and e17, unchanged since 2026-11-03 when the record says every pass tripped: now 0 of 12 (e17) and
+     0 of 12 (e5's four cases, three passes each) set, and the completion port carries JOB_MEMORY_LIMIT
+     (the hard cap's lossy message) but never NOTIFICATION_LIMIT, even with no hard cap and the job at
+     twice the notification line.
+   - e19: the command runs in kiln's job (flags 0x2020) or, from a scheduled task, in the Task Scheduler's
+     (0x1800), neither with a memory or notification limit; e18 gives the same from both (exit 0 or 1 of
+     10 set), so the runner's job isn't the cause.
+   So the notification is a late, lossy signal on this machine under load, not a count the box can rest
+   on: a box that reached its bound and ended was not counted. The job's peak commit is synchronous
+   accounting and passed the cap in every refused pass above.
+   The fix (test first): the box reads reaching its bound from the job's peak at or past its commit limit
+   (hex_core::job::reached_bound), and the notification, its margin and its read are gone. The test
+   windows::sys::tests::a_member_reaching_its_bound_is_counted_though_no_notification_comes clears the
+   job's notification (the one that doesn't come), runs a member committing until refused, and reads the
+   box's usage: at 52b298c FAILED 3 of 3 (oom_kills 0, peak 266,113,024-267,149,312); with the fix passed 3
+   of 3. With the fix: hex-core job:: 13/13, windows_process_box 10/10 three times (HEX-DIFF-5 inside the
+   contract test), clippy -D warnings exit 0, all on the clean clone under the same load.
+   What would falsify it: a refused commit with the job's peak under its commit limit (a member whose one
+   commit is larger than the room left is refused outright and leaves the peak below; the old notification
+   didn't count that either), or a peak at the limit with no member reaching the bound.
+
 What HCS reports as a Windows oci box's Exit at its end, against the oracle's Signal(15), for HEX-DIFF-1 step 12
 and HEX-DIFF-2 step 11 (asked by step 7): NOT OBSERVED. windows_oci_boxes_hold_the_contract_and_the_steps_criteria
 skipped in every run above (no HEX_WINDOWS_LAYERS), so no Windows oci box was made; it is read in the first run

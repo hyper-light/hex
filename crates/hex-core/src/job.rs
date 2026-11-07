@@ -24,13 +24,6 @@ pub const LARGEST_RECORDED_OVERSHOOT: u64 = 1_163_264;
 /// tolerance past a measured effect by (CLAUDE.md §5).
 pub const OVERSHOOT_MARGIN: u64 = LARGEST_RECORDED_OVERSHOOT.saturating_mul(2);
 
-/// How far under the job's commit limit Hex sets its memory notification, so the box learns through the
-/// class Windows guarantees (`JobObjectNotificationLimitInformation`) that it reached its bound: a
-/// notification at the hard limit never fires (the commit is refused before the sum exceeds it), and one
-/// 4 MiB under fired in every pass (`bench/native/windows/RESULT.md`, record `job-events-68e99688-*`,
-/// experiment e17; CLAUDE.md §5).
-pub const NOTIFY_MARGIN: u64 = 4 << 20;
-
 /// The exit code Hex ends a box's job with for a signal (`TerminateJobObject`'s `uExitCode`), the
 /// signal's number in its low byte: NTSTATUS-shaped, severity error with the customer bit (bit 29) set
 /// and facility 0x048, so no status of Windows' own is one of these (MS-ERREF §2.3).
@@ -51,11 +44,6 @@ pub struct Limits {
     /// [`OVERSHOOT_MARGIN`] under the box's bound (floored at [`MIN_MEMORY`]) so the job's peak, which
     /// overshoots the limit by a bounded amount, stays at or below the bound.
     pub memory: Option<u64>,
-    /// The memory the job notifies at (`JobObjectNotificationLimitInformation`, the guaranteed class),
-    /// [`NOTIFY_MARGIN`] under [`Limits::memory`]: the box reads its violation from the job's accounting
-    /// to count reaching its bound (CLAUDE.md §3). `None` when the commit limit is too low to notify
-    /// below.
-    pub memory_notify: Option<u64>,
     /// The job's active-process limit (`ActiveProcessLimit` with `JOB_OBJECT_LIMIT_ACTIVE_PROCESS`).
     /// Windows counts processes, not their threads, which `pids.max` counts too on Linux.
     pub processes: Option<u32>,
@@ -120,20 +108,26 @@ pub fn limits(bounds: &Bounds, processors: NonZeroU32) -> Result<Limits, Refusal
         (None, Some(milli)) => Some(Cpu::Cap(cap(milli, processors)?)),
         (None, None) => None,
     };
-    let (memory, memory_notify) = match bounds.memory_max {
-        Some(bound) => {
-            let limit = bound.saturating_sub(OVERSHOOT_MARGIN).max(MIN_MEMORY);
-            let notify = limit.checked_sub(NOTIFY_MARGIN).filter(|n| *n > 0);
-            (Some(limit), notify)
-        }
-        None => (None, None),
-    };
+    let memory = bounds
+        .memory_max
+        .map(|bound| bound.saturating_sub(OVERSHOOT_MARGIN).max(MIN_MEMORY));
     Ok(Limits {
         memory,
-        memory_notify,
         processes: bounds.pids_max,
         cpu,
     })
+}
+
+/// Whether a box's job reached its memory bound: its peak commit (`PeakJobMemoryUsed`, the job's own
+/// accounting, read synchronously) at or past its commit limit. The job admits no commit past the limit
+/// but the one that crosses it, so its peak gets there only when a member reached the bound, and the
+/// next commit is refused. The job's memory notification can't tell this: under load Windows sets it
+/// seconds late, and never once the member's commit has fallen back (bench/install/records/
+/// windows-jupiter-20261105.txt entry 21, experiment e18). The peak doesn't fall, so a box reads as
+/// having reached its bound from then on: once, not once per refused commit, which the job doesn't
+/// count.
+pub fn reached_bound(peak: u64, limits: &Limits) -> bool {
+    limits.memory.is_some_and(|limit| peak >= limit)
 }
 
 /// The hard cap for `milli` thousandths of a CPU on a machine of `processors`: cycles per
@@ -346,7 +340,7 @@ mod tests {
     }
 
     /// HEX-WIN-1: each bound a job holds becomes its job's limit: memory_max the commit limit a margin
-    /// under the bound (with its notification under that), pids_max the active-process limit,
+    /// under the bound, pids_max the active-process limit,
     /// cpu_max_milli a hard cap of the whole machine.
     #[test]
     fn each_bound_a_job_holds_becomes_its_limit() {
@@ -360,7 +354,6 @@ mod tests {
             limits(&b, cpus(32)),
             Ok(Limits {
                 memory: Some(256 * MIB - OVERSHOOT_MARGIN),
-                memory_notify: Some(256 * MIB - OVERSHOOT_MARGIN - NOTIFY_MARGIN),
                 processes: Some(8),
                 // 1.5 CPUs of 32 is 4.6875% of the machine: 468 per 10,000, rounded down.
                 cpu: Some(Cpu::Cap(468)),
@@ -370,8 +363,8 @@ mod tests {
     }
 
     /// HEX-WIN-2: the job's commit limit sits [`OVERSHOOT_MARGIN`] under the bound (so the peak, which
-    /// overshoots the limit by a bounded amount, stays at or below the bound), its notification under
-    /// that; a bound too small to leave room floors at [`MIN_MEMORY`] with no notification.
+    /// overshoots the limit by a bounded amount, stays at or below the bound); a bound too small to leave
+    /// room floors at [`MIN_MEMORY`].
     #[test]
     fn the_commit_limit_sits_a_margin_under_the_bound() {
         let at = |bound| {
@@ -383,28 +376,39 @@ mod tests {
                 cpus(32),
             )
             .expect("limits");
-            (l.memory, l.memory_notify)
+            l.memory
         };
-        assert_eq!(
-            at(256 * MIB),
-            (
-                Some(256 * MIB - OVERSHOOT_MARGIN),
-                Some(256 * MIB - OVERSHOOT_MARGIN - NOTIFY_MARGIN)
-            )
-        );
+        assert_eq!(at(256 * MIB), Some(256 * MIB - OVERSHOOT_MARGIN));
         // The commit limit is always under the bound, so a job's peak within the margin is under it.
         for bound in [MIN_MEMORY, 2 * MIB, 8 * MIB, 64 * MIB, 1 << 30] {
-            let (limit, notify) = at(bound);
-            let limit = limit.expect("a bounded box has a commit limit");
+            let limit = at(bound).expect("a bounded box has a commit limit");
             assert!(limit <= bound, "limit {limit} over bound {bound}");
             assert!(limit >= MIN_MEMORY, "limit {limit} under the floor");
-            if let Some(n) = notify {
-                assert!(n < limit, "notify {n} not under limit {limit}");
-            }
         }
-        // A bound at the floor can't leave an overshoot margin, so the limit is the floor and there is
-        // no room to notify below it.
-        assert_eq!(at(MIN_MEMORY), (Some(MIN_MEMORY), None));
+        // A bound at the floor can't leave an overshoot margin, so the limit is the floor.
+        assert_eq!(at(MIN_MEMORY), Some(MIN_MEMORY));
+    }
+
+    /// HEX-RT-5 (native plan step 3): a box reached its memory bound exactly when its job's peak commit
+    /// is at or past the job's commit limit; a box with no memory bound never has. Do: ask for a 256 MiB
+    /// box's limits and judge peaks around its commit limit, and any peak with no bound. Expect: under the
+    /// limit not reached; at it and past it reached; unbounded never.
+    #[test]
+    fn a_box_reached_its_bound_when_its_peak_is_at_its_commit_limit() {
+        let l = limits(
+            &Bounds {
+                memory_max: Some(256 * MIB),
+                ..Bounds::default()
+            },
+            cpus(32),
+        )
+        .expect("limits");
+        let limit = l.memory.expect("a commit limit");
+        assert!(!reached_bound(16 * MIB, &l));
+        assert!(!reached_bound(limit - 1, &l));
+        assert!(reached_bound(limit, &l));
+        assert!(reached_bound(limit + LARGEST_RECORDED_OVERSHOOT, &l));
+        assert!(!reached_bound(u64::MAX, &Limits::default()));
     }
 
     /// HEX-WIN-1: what a job can't hold is refused by name, never dropped (CLAUDE.md §3).

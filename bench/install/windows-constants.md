@@ -10,7 +10,7 @@ source, (d) picked or copied.
 | Name | Value | file:line | Kind | Source, or why it stays (d) |
 |---|---|---|---|---|
 | `OVERSHOOT_MARGIN` | 2,326,528 bytes | crates/hex-core/src/job.rs | (b) | 2 × `LARGEST_RECORDED_OVERSHOOT` = 1,163,264 bytes, the measured max over a 64 KiB-256 MiB step sweep (`bench/native/windows/RESULT.md`, record `job-events-68e99688-*`); ×2 is Hex's false-alarm margin (3fc48ee). |
-| `NOTIFY_MARGIN` | 4 MiB | crates/hex-core/src/job.rs:28 | (b) | Measured: a notification at the hard limit never fires, and one 4 MiB under fired in every pass (same record, experiment e17). Only 4 MiB was measured, not the smallest margin that fires. |
+| `NOTIFY_MARGIN` | 4 MiB → removed | was crates/hex-core/src/job.rs | was (b) | The memory notification it placed is no longer used: under load Windows set it late or never (record entry 21), so the class reads reaching its bound from the job's peak at or past its commit limit (`hex_core::job::reached_bound`), which needs no margin. |
 | `TERMINATED` | 0xE048_0000 | crates/hex-core/src/job.rs:33 | (c) | MS-ERREF §2.3: severity error, customer bit 29, facility 0x048, so no status of Windows' own collides. |
 | `DEFAULT_WEIGHT` | 5 | crates/hex-core/src/job.rs:37 | (c) | `jobobject_cpu_rate_control_information.md:147`: "The default is 5". |
 | `RATE_SCALE` | 10,000 | crates/hex-core/src/job.rs:40 | (c) | `jobobject_cpu_rate_control_information.md:132`: a hard cap is cycles per 10,000. |

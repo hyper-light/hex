@@ -79,10 +79,12 @@ A job lets a commit that crosses its limit overshoot before it refuses the next,
 ~1.1 MiB. So Hex sets the job's commit limit `OVERSHOOT_MARGIN` = 2 MiB (headroom over the measured
 1.11 MiB) under the box's bound (`hex_core::job`), holding the job's peak at or below the bound. A commit
 past the box's bound is refused (`VirtualAlloc` → `ERROR_COMMITMENT_LIMIT`), and the class counts the box
-reaching its bound from the one notification class Windows guarantees
-(`JobObjectNotificationLimitInformation`), whose violation is queryable from the job **with or without** a
-completion port — so the class keeps no completion port and no message queue (CLAUDE.md §2, §3). A
-notification at the hard cap never trips; 4 MiB under it trips every pass, so `NOTIFY_MARGIN` = 4 MiB.
+reaching its bound from the job's own accounting: its peak commit at or past its commit limit, which only
+a member that reached the bound gets it to (the overshoot above). So the class keeps no completion port and
+no message queue (CLAUDE.md §2, §3). It first read the `JobObjectNotificationLimitInformation` violation,
+set 4 MiB under the cap, which e5 and e17 saw trip on 2026-11-03; on 2026-11-07 the same probe saw it in
+none of their passes, and e18 at Hex's own numbers found it set late (up to 26 s) or never, so a box that
+ended at its bound wasn't counted (bench/install/records/windows-jupiter-20261105.txt entry 21).
 
 ### Processes, CPU, breakaway, delete
 

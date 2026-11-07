@@ -3,9 +3,8 @@
 //! `PROC_THREAD_ATTRIBUTE_JOB_LIST`/`_HANDLE_LIST` process-creation support is unstable. Each `unsafe`
 //! block states the invariant that makes it sound. A box is a job object: this file creates one, sets
 //! its limits, starts a member suspended inside it (`PROC_THREAD_ATTRIBUTE_JOB_LIST`, so nothing runs
-//! outside it) and resumes it, reads the job's accounting and its guaranteed memory-limit violation,
-//! and ends the job. Names, structures and flags are Windows' own (`windows-sys`;
-//! docs/research/runtime/windows-job-objects.md).
+//! outside it) and resumes it, reads the job's accounting, and ends the job. Names, structures and
+//! flags are Windows' own (`windows-sys`; docs/research/runtime/windows-job-objects.md).
 
 // The Windows class's one place `unsafe` is allowed (CLAUDE.md §12); every block below carries its
 // SAFETY comment.
@@ -25,11 +24,9 @@ use windows_sys::Win32::System::JobObjects::{
     JOB_OBJECT_CPU_RATE_CONTROL_WEIGHT_BASED, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
     JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION, JOBOBJECT_CPU_RATE_CONTROL_INFORMATION,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOBOBJECT_LIMIT_VIOLATION_INFORMATION,
-    JOBOBJECT_NOTIFICATION_LIMIT_INFORMATION, JobObjectBasicAndIoAccountingInformation,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAndIoAccountingInformation,
     JobObjectBasicProcessIdList, JobObjectCpuRateControlInformation,
-    JobObjectExtendedLimitInformation, JobObjectLimitViolationInformation,
-    JobObjectNotificationLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
     TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
@@ -192,10 +189,6 @@ pub struct Limits {
     pub memory: Option<u64>,
     pub processes: Option<u32>,
     pub cpu: Option<Cpu>,
-    /// The memory the job notifies at: a guaranteed `NotificationLimit` below the hard `memory` cap, so
-    /// the box learns it reached its bound through the class Windows guarantees, never a lossy message
-    /// (CLAUDE.md §3). `None` when the box has no memory bound.
-    pub memory_notify: Option<u64>,
 }
 
 /// A box's job: created, limited, its member started inside it, its accounting read, and ended. The
@@ -225,8 +218,8 @@ impl Job {
     }
 
     /// Sets the job's limits: a hard commit cap, an active-process cap, kill-on-close (so closing the
-    /// last handle ends the tree), the CPU weight or hard cap, and the guaranteed memory notification
-    /// threshold. Breakaway is never allowed (neither `BREAKAWAY_OK` nor `SILENT_BREAKAWAY_OK` is set),
+    /// last handle ends the tree), and the CPU weight or hard cap. Breakaway is never allowed (neither
+    /// `BREAKAWAY_OK` nor `SILENT_BREAKAWAY_OK` is set),
     /// so no member can leave the job.
     pub fn configure(&self, limits: &Limits) -> io::Result<()> {
         let mut ext: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed_struct();
@@ -256,12 +249,6 @@ impl Job {
                 }
             }
             self.set(JobObjectCpuRateControlInformation, &rate)?;
-        }
-        if let Some(notify) = limits.memory_notify {
-            let mut n: JOBOBJECT_NOTIFICATION_LIMIT_INFORMATION = zeroed_struct();
-            n.LimitFlags = JOB_OBJECT_LIMIT_JOB_MEMORY;
-            n.JobMemoryLimit = notify;
-            self.set(JobObjectNotificationLimitInformation, &n)?;
         }
         Ok(())
     }
@@ -359,14 +346,6 @@ impl Job {
         }
         let head: Vec<u8> = buf.iter().flat_map(|w| w.to_ne_bytes()).take(4).collect();
         Ok(<[u8; 4]>::try_from(head.as_slice()).map_or(0, u32::from_ne_bytes))
-    }
-
-    /// Whether the job's memory notification limit has been violated since this was last read: the
-    /// guaranteed accounting of the guaranteed notification class. Reading it re-arms the notification.
-    pub fn memory_violated(&self) -> io::Result<bool> {
-        let v: JOBOBJECT_LIMIT_VIOLATION_INFORMATION =
-            self.query(JobObjectLimitViolationInformation)?;
-        Ok(v.ViolationLimitFlags & JOB_OBJECT_LIMIT_JOB_MEMORY != 0)
     }
 
     /// Ends every process in the job with `code`, at once. Idempotent: an already-empty job is fine.
@@ -560,6 +539,9 @@ fn zeroed_struct<T>() -> T {
 mod tests {
     use super::*;
     use std::cell::Cell;
+    use windows_sys::Win32::System::JobObjects::{
+        JOBOBJECT_NOTIFICATION_LIMIT_INFORMATION, JobObjectNotificationLimitInformation,
+    };
 
     thread_local! {
         /// The job id-list reads [`Job::live_processes`] made on this thread.
@@ -694,10 +676,11 @@ mod tests {
     /// HEX-RT-5 (native plan step 3): a member that reaches its box's memory bound and ends at once is
     /// counted, whether or not the job's memory notification is ever delivered. Under load Windows sets
     /// that notification seconds late, or never once the member's commit has fallen back (bench record
-    /// windows-jupiter-20261105.txt entry 21, experiment e18). Do: make a 256 MiB box, switch its job's
-    /// notification limit off (the notification that doesn't come), run a member that commits until the
-    /// box refuses, wait for its end, read the box's usage. Expect: the job's peak past its commit limit,
-    /// and oom_kills at least 1.
+    /// windows-jupiter-20261105.txt entry 21, experiment e18). Do: make a 256 MiB box, clear its job's
+    /// notification limit (52b298c's box set one and counted only its violation, so this is the
+    /// notification that doesn't come), run a member that commits until the box refuses, wait for its
+    /// end, read the box's usage. Expect: the job's peak at or past its commit limit, and oom_kills at
+    /// least 1.
     #[test]
     fn a_member_reaching_its_bound_is_counted_though_no_notification_comes() {
         let bound = 256u64 << 20;
@@ -743,7 +726,7 @@ mod tests {
         assert!(wait(&started.process, u32::MAX).unwrap());
         let usage = bx.usage().unwrap();
         assert!(
-            usage.memory_peak_bytes > bound - hex_core::job::OVERSHOOT_MARGIN,
+            usage.memory_peak_bytes >= bound - hex_core::job::OVERSHOOT_MARGIN,
             "the member never reached the commit limit: {usage:?}"
         );
         assert!(

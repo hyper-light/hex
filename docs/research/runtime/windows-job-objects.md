@@ -65,19 +65,25 @@ A box forbids a member leaving its job: Hex sets neither `JOB_OBJECT_LIMIT_BREAK
 asking for `CREATE_BREAKAWAY_FROM_JOB` is refused. Measured: the child's `CreateProcess` fails with
 access denied (error 5) in every pass (`job_events` e8).
 
-## 4. Limit events: the guaranteed class and the accounting, never a lossy message
+## 4. Limit events: the job's accounting, never a message
 
 A job's I/O completion port carries limit events, but most are lossy (`job-objects.md:63`,
 `ns-winnt-jobobject_associate_completion_port.md:77`): "except for limits set with the
 JobObjectNotificationLimitInformation information class, messages ... delivery to the completion port is
 not guaranteed ... Notifications for limits set with JobObjectNotificationLimitInformation are
 guaranteed to arrive at the completion port." CLAUDE.md §3 forbids a silent drop, so a box's limit
-events come only from that guaranteed class or from the job's accounting (`QueryInformationJobObject`).
+events come from the job's accounting (`QueryInformationJobObject`), read when they are asked for.
 
-- **Memory, counted from the guaranteed class.** A notification limit set under the commit cap records a
-  violation, read with `JobObjectLimitViolationInformation`. Measured: querying it returns the memory
-  violation **with or without** an associated completion port (`job_events` e17), so Hex reads it from
-  the job and keeps no completion port — and so no message queue to bound (CLAUDE.md §2).
+- **Memory, from the peak.** The job admits no commit past its commit limit but the one that crosses it
+  (`job_events` e16: the overshoot is bounded at ≈1.11 MiB), so its peak commit
+  (`PeakJobMemoryUsed`) reaches the limit exactly when a member reached the bound. Hex reads that
+  (`hex_core::job::reached_bound`) and keeps no completion port, so no message queue to bound
+  (CLAUDE.md §2). The "guaranteed" notification class doesn't do: a notification limit set under the cap
+  records its violation late or not at all. On jupiter (build 26200.9711, 2026-11-07), a member refused
+  at the cap and ended at once left it unset in 339 of 340 passes, a member held past the line saw it
+  set after 1 ms, 25,895 ms, or not within 30 s, and neither its completion-port message nor the
+  violation came with no hard cap at all; e17 and e5, which saw it in every pass on 2026-11-03, see it
+  in none now (`job_events` e5, e17, e18; bench/install/records/windows-jupiter-20261105.txt entry 21).
 - **The process count has no guaranteed event.** The violation class covers only memory, I/O bytes, job
   time and CPU-rate (`ns-winnt-jobobject_limit_violation_information.md`); there is no active-process
   notification limit, and `JOB_OBJECT_MSG_ACTIVE_PROCESS_LIMIT` is one of the lossy completion messages.
@@ -101,8 +107,8 @@ weakly and noisily (`job_events` e11): the hard cap is the real CPU bound.
 
 | A box needs | how, on Windows | §3-clean source |
 |---|---|---|
-| memory bound | job commit limit, refused past it | peak (accounting) and the guaranteed notification violation |
-| reached the bound | the notification violation | `JobObjectLimitViolationInformation` (accounting) |
+| memory bound | job commit limit, refused past it | peak (accounting) |
+| reached the bound | the peak at or past the commit limit | `PeakJobMemoryUsed` (accounting) |
 | CPU | weight, or a hard cap of the whole machine | set only |
 | processes | active-process limit (hard) | — refusals have no guaranteed count (below) |
 | membership, no escape | the job, breakaway refused | the job's process-id list (accounting) |
