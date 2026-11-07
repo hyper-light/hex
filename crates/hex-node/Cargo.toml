@@ -15,7 +15,7 @@ hex-core.workspace = true
 hex-runtime.workspace = true
 serde_json.workspace = true
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 rustix.workspace = true
 
 [dev-dependencies]

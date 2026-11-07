@@ -96,6 +96,11 @@ impl Deframer {
         }
     }
 
+    /// Whether a frame is under way: some of it has come and the rest hasn't.
+    pub fn in_frame(&self) -> bool {
+        self.have_prefix > 0 || self.body.is_some()
+    }
+
     /// Takes bytes from `input`, at most to the end of the frame under way, and returns how many it took
     /// (at least one, when `input` has any) and the message, once whole. The caller takes again with
     /// what is left.

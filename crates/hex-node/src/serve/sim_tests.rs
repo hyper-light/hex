@@ -217,12 +217,14 @@ impl Os for SimOs {
                 buf[..n].copy_from_slice(&bytes[..n]);
                 Recv::Message {
                     size: bytes.len(),
+                    got: n,
                     passed: Vec::new(),
                     cut: false,
                 }
             }
             None if conn.0.client_gone.load(Ordering::SeqCst) => Recv::Message {
                 size: 0,
+                got: 0,
                 passed: Vec::new(),
                 cut: false,
             },

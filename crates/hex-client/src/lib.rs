@@ -7,8 +7,9 @@
 //! its one connection, which closes once the client and the last `Proc` it returned are dropped; the
 //! agent then ends the programs it still watches for it (the disconnect rule).
 //!
-//! Linux only: the socket passes descriptors over `SOCK_SEQPACKET` (unix(7)), which macOS's and
-//! Windows' local sockets lack; elsewhere [`Client::connect`] refuses, naming the platform. On every
+//! On Linux the socket is `SOCK_SEQPACKET` (unix(7)); macOS has none, so there each message is framed over
+//! a `SOCK_STREAM` socket, its descriptors at its first byte (native plan step 8). Elsewhere
+//! [`Client::connect`] refuses, naming the platform, until its transport lands. On every
 //! platform, [`guest::Client`] reaches a node agent in a Shards guest over a byte stream
 //! (docs/design/shards-guest.md §3), the same calls on another transport.
 
@@ -34,9 +35,14 @@ mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::Client;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::Client;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod other;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub use other::Client;
 
 /// Longest a call waits for the node agent's answer, and a send for room in its socket: five times the

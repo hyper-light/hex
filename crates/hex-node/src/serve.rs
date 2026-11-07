@@ -50,13 +50,19 @@ pub use hex_core::wire::Limits;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+pub mod macos;
+#[cfg(unix)]
+mod unix;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod unsupported;
 
 /// This OS's event sources and local socket.
 #[cfg(target_os = "linux")]
 pub type Native = linux::Linux;
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+pub type Native = macos::MacOs;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub type Native = unsupported::Unsupported;
 
 /// The node agent's bounds on its socket unless set ([`Server::bind`]'s `limits`):
@@ -157,10 +163,11 @@ pub enum Peer {
 
 /// What [`Os::recv`] read: one whole message, as the client sent it.
 pub enum Recv<P> {
-    /// A message of `size` bytes, its first `buf.len()` in the buffer, and what came with it (`cut`:
-    /// more came than a message takes).
+    /// A message of `size` bytes, its first `got` in the buffer (fewer when it is past the buffer), and
+    /// what came with it (`cut`: more came than a message takes, or came where none belongs).
     Message {
         size: usize,
+        got: usize,
         passed: Vec<P>,
         cut: bool,
     },
@@ -721,8 +728,13 @@ impl<O: Os> Shared<O> {
                 }
                 turn = turn.saturating_add(1);
             }
-            let (size, passed, cut) = match self.os.recv(&conn.sock, buf) {
-                Recv::Message { size, passed, cut } => (size, passed, cut),
+            let (size, got, passed, cut) = match self.os.recv(&conn.sock, buf) {
+                Recv::Message {
+                    size,
+                    got,
+                    passed,
+                    cut,
+                } => (size, got, passed, cut),
                 Recv::WouldBlock => return Ok(gone),
                 Recv::Reset if !reset => {
                     reset = true;
@@ -737,7 +749,7 @@ impl<O: Os> Shared<O> {
             if size == 0 && passed.is_empty() && (gone || self.os.hung_up(&conn.sock)) {
                 return Ok(true);
             }
-            let bytes = buf.get(..size.min(buf.len())).unwrap_or_default();
+            let bytes = buf.get(..got.min(size).min(buf.len())).unwrap_or_default();
             let received = Received {
                 bytes,
                 size,
@@ -1282,5 +1294,7 @@ impl<O: Os> Shared<O> {
 
 #[cfg(all(test, target_os = "linux"))]
 mod linux_tests;
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests;
 #[cfg(test)]
 mod sim_tests;

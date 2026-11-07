@@ -2,10 +2,10 @@
 //! (unix(7)), which keeps each message whole; an exec's stdio passed as descriptors (`SCM_RIGHTS`); and one
 //! epoll set over the listener, the connections, the programs' pidfds and an eventfd that wakes it.
 
-use std::io::{IoSliceMut, PipeReader, PipeWriter};
+use std::io::IoSliceMut;
 use std::mem::MaybeUninit;
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
@@ -14,7 +14,6 @@ use hex_core::wire::{self, Streams};
 use rustix::buffer::spare_capacity;
 use rustix::event::epoll::{self, CreateFlags, EventData, EventFlags};
 use rustix::event::{EventfdFlags, PollFd, PollFlags, Timespec};
-use rustix::fs::{FileType, OFlags};
 use rustix::io::Errno;
 use rustix::net::{
     AddressFamily, RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags, SendFlags,
@@ -43,7 +42,7 @@ impl Linux {
     /// at `path` by an agent that has ended is replaced; one an agent still serves, or a file that
     /// isn't a socket, is refused.
     pub fn bind(path: &Path) -> Result<Self, Refusal> {
-        clear(path)?;
+        super::unix::clear(path, SocketType::SEQPACKET)?;
         let addr = SocketAddrUnix::new(path).map_err(|e| Refusal::Invalid {
             what: "socket path",
             why: format!("{}: {e}", path.display()),
@@ -81,45 +80,6 @@ impl Linux {
             listener,
             wake,
         })
-    }
-}
-
-/// Makes room for a socket at `path`: a socket no agent serves (one that ended) is removed; one an
-/// agent serves, or anything that isn't a socket, is refused.
-fn clear(path: &Path) -> Result<(), Refusal> {
-    let meta = match std::fs::symlink_metadata(path) {
-        Ok(meta) => meta,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(Refusal::os("looking at the node agent's socket path", e)),
-    };
-    if !meta.file_type().is_socket() {
-        return Err(Refusal::Invalid {
-            what: "socket path",
-            why: format!("{} exists and isn't a socket", path.display()),
-        });
-    }
-    let probe = rustix::net::socket_with(
-        AddressFamily::UNIX,
-        SocketType::SEQPACKET,
-        SocketFlags::CLOEXEC,
-        None,
-    )
-    .map_err(|e| Refusal::os("probing the node agent's socket", e))?;
-    let addr = SocketAddrUnix::new(path).map_err(|e| Refusal::Invalid {
-        what: "socket path",
-        why: format!("{}: {e}", path.display()),
-    })?;
-    match rustix::net::connect(&probe, &addr) {
-        Ok(()) => Err(Refusal::Invalid {
-            what: "socket path",
-            why: format!("{} is served by a node agent already", path.display()),
-        }),
-        Err(Errno::CONNREFUSED) => std::fs::remove_file(path)
-            .map_err(|e| Refusal::os("removing an ended node agent's socket", e)),
-        Err(e) => Err(Refusal::Os {
-            op: "probing the node agent's socket",
-            why: format!("{}: {e}", path.display()),
-        }),
     }
 }
 
@@ -269,6 +229,7 @@ impl Os for Linux {
                 .collect();
             return Recv::Message {
                 size: msg.bytes,
+                got: msg.bytes.min(buf.len()),
                 passed,
                 cut: msg.flags.contains(ReturnFlags::CTRUNC),
             };
@@ -348,64 +309,6 @@ impl Os for Linux {
     }
 
     fn stdio(&self, streams: Streams, passed: Vec<OwnedFd>) -> Result<Stdio, Refusal> {
-        stdio_of(streams, passed)
-    }
-}
-
-/// A program's stdio from the descriptors its exec carried, in the order `streams` names them: each
-/// the right end of a pipe, as the seam's `Stdio` holds; anything else is refused by name.
-fn stdio_of(streams: Streams, fds: Vec<OwnedFd>) -> Result<Stdio, Refusal> {
-    let mut fds = fds.into_iter();
-    let mut take = |on: bool, name: &str, reads: bool| -> Result<Option<OwnedFd>, Refusal> {
-        if !on {
-            return Ok(None);
-        }
-        let fd = fds.next().ok_or_else(|| Refusal::Invalid {
-            what: "stdio",
-            why: format!("{name}'s descriptor didn't come"),
-        })?;
-        pipe_end(&fd, name, reads)?;
-        Ok(Some(fd))
-    };
-    let stdin = take(streams.stdin, "stdin", true)?.map(PipeReader::from);
-    let stdout = take(streams.stdout, "stdout", false)?.map(PipeWriter::from);
-    let stderr = take(streams.stderr, "stderr", false)?.map(PipeWriter::from);
-    Ok(Stdio {
-        stdin,
-        stdout,
-        stderr,
-    })
-}
-
-/// That `fd` is a pipe's end the program can read (`reads`) or write.
-fn pipe_end(fd: &OwnedFd, name: &str, reads: bool) -> Result<(), Refusal> {
-    let invalid = |why: String| Refusal::Invalid {
-        what: "stdio",
-        why: format!("{name} {why}"),
-    };
-    let stat = rustix::fs::fstat(fd).map_err(|e| invalid(format!("can't be looked at: {e}")))?;
-    if FileType::from_raw_mode(stat.st_mode) != FileType::Fifo {
-        return Err(invalid("isn't a pipe".to_owned()));
-    }
-    let mode = rustix::fs::fcntl_getfl(fd)
-        .map_err(|e| invalid(format!("can't be looked at: {e}")))?
-        & OFlags::RWMODE;
-    let fits = mode == OFlags::RDWR
-        || mode
-            == if reads {
-                OFlags::RDONLY
-            } else {
-                OFlags::WRONLY
-            };
-    if fits {
-        Ok(())
-    } else if reads {
-        Err(invalid(
-            "is a pipe's write end, which a program can't read".to_owned(),
-        ))
-    } else {
-        Err(invalid(
-            "is a pipe's read end, which a program can't write".to_owned(),
-        ))
+        super::unix::stdio_of(streams, passed)
     }
 }
