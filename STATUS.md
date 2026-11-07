@@ -389,8 +389,11 @@ in 4 of 5 runs.
 The integrated native tree at ac8959b (2026-11-07; step 7 through ea8bda6, step 2 through 45dcc79, and ac8959b's fix of
 step 2's HEX-RT-3 test to the macOS line's `BoxProc::watch(pid, members)`): fedora's 7 gates exit 0 (382 tests, 0
 failed) and the root lab passes 8 of 8 as root, in one unit (`hex-integrate-native-20261107T011029Z`, 01:10-01:49Z).
-The Mac Studio's suite at ac8959b is running (`hex-integrate-mac-ac8959b-20261107T020027Z`): clippy for macOS and
-Windows exit 0.
+On adas-mac-studio-2 at ac8959b (`hex-integrate-mac-ac8959b-20261107T020027Z`, 02:00-02:15Z): clippy for macOS and
+Windows exit 0, `cargo test --workspace` exits 0 (269 passed, 0 failed, 2 ignored), and `macos_process_box` passes 7 with
+1 ignored in two more runs (the box-user case: Ada's boxlab). Open: AppleSystemPolicy refused to execute the built
+`hex` twice in each of those two runs (two processes in one millisecond, 18:10:23 and 18:12:42 local), and every test
+still passed, so which test spawns them and why its refusal doesn't fail it is still to find (CLAUDE.md §3).
 
 A note for Mac runs: a launchd job (`launchctl submit`) must keep the kiln run that submitted it alive until it ends.
 The jobs at 6ac27d6 and ac8959b (`…-6ac27d6-20261107T005156Z`, `…-ac8959b-20261107T011052Z`) died within half a
