@@ -622,7 +622,10 @@ before anything is spawned (`docs/research/runtime/exec-size-bounds.md`).
   under the lower limit, which its programs inherit) refuses the program by its own reading with a refusal of its own
   on the seed wire (code 5, appended). Either way the node reads its limit again, once, and refuses the next exec
   itself. Rootless, the seed wire's one request (160 KiB, `hex_core::seed::MAX_REQUEST`) bounds a program too: one
-  past it is refused by name before it is sent, and the seed kept.
+  past it is refused by name before it is sent, and the seed kept. **Open gap:** a rootless program between that
+  request and the kernel's own bound (a quarter of `RLIMIT_STACK`, 2 MiB at an 8 MiB stack) is refused, where runc and
+  crun, bounded only by the kernel, run it; as root it meets only the kernel's. Closing it needs a request carried over
+  several `SOCK_SEQPACKET` records, a kind appended to the seed wire (STATUS.md, native step 7).
 - **Over the node's socket** the wire's one-message bound is tighter than Linux's, so the client refuses past it, as a
   program, before encoding.
 - **Tested by** HEX-RT-14 on every class's conformance run (a fixture that states no bound fails it), and a unit test of
