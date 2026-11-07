@@ -12,7 +12,10 @@
 //!   (the image's own `layer<i>.tar.gz`) unless set (`blobs.txt`: the same files linked as `blobs/sha256/<hex>`);
 //! - `HEX_GUEST22_ROUNDS`: how many rounds, the record's N;
 //! - `HEX_GUEST22_MEMX`: the guest's memory past Shards' least, in multiples of the images' layers unpacked
-//!   (2 unless set: its tmpfs, half its memory, holds them once).
+//!   (2 unless set: its tmpfs, half its memory, holds them once);
+//! - `HEX_GUEST22_TURN`, optional: a folder holding FIFOs `go` and `done`. Before each round the bench reads
+//!   a byte from `go`, and after it writes one to `done`, so a driver can interleave two arms' benches round
+//!   by round, whatever load comes hitting both alike (bench/native/guest/create-life/pair.sh).
 //!
 //! The file needs nothing of the store's own API, so the same file measures whole-root staging's commit and
 //! the store's. Run: `cargo test --release -p hex-cli --test guest_create_bench -- --nocapture` with those set.
@@ -111,7 +114,16 @@ fn a_multi_layer_create_through_a_real_guest_is_timed() {
     let node = GuestRuntime::new(Arc::new(shards_api::Shards::new()), config);
     // Per image, each round's create, delete, and the two together, in ms.
     let mut times: Vec<[Vec<f64>; 3]> = vec![Default::default(); names.len()];
+    let turn = given("HEX_GUEST22_TURN");
     for round in 0..rounds {
+        if let Some(turn) = &turn {
+            let mut byte = [0u8; 1];
+            std::io::Read::read_exact(
+                &mut std::fs::File::open(turn.join("go")).unwrap(),
+                &mut byte,
+            )
+            .unwrap();
+        }
         for (i, name) in names.iter().enumerate() {
             let id = BoxId::new(&format!("b{round}-{i}")).unwrap();
             let spec = BoxSpec {
@@ -143,6 +155,16 @@ fn a_multi_layer_create_through_a_real_guest_is_timed() {
             {
                 times[i][k].push(ms);
             }
+        }
+        if let Some(turn) = &turn {
+            std::io::Write::write_all(
+                &mut std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(turn.join("done"))
+                    .unwrap(),
+                b".",
+            )
+            .unwrap();
         }
     }
     for (i, name) in names.iter().enumerate() {
