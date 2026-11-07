@@ -241,7 +241,7 @@ pub enum Refused {
 
 /// A stage's budget message: `HEXB`, the entries and the bytes (`u64` each, little-endian), the count of the
 /// opening's layers (`u16`) and one bit each, lowest first, set when the guest holds that layer, then the
-/// layers its store can hold (`u64`).
+/// layers its store can hold (`u64`) and whether it may admit any (a byte, 0 or 1).
 const BUDGET_MAGIC: [u8; 4] = *b"HEXB";
 /// The folder under the guest's staged folder holding its layers by digest, `<STORE>/<64 hex digits>` each
 /// (§4a's layer store); a box id never starts with '.' (`hex_api::BoxId`), so none is ever named so.
@@ -267,12 +267,16 @@ const BITS: [u8; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
 /// guest already holds, and how many layers its store can hold: one each per inode its file system holds
 /// (`f_files`; its bytes where it keeps no count), since a layer is at least its folder. The host bounds what
 /// it remembers of layers' digests by it.
+/// Whether the store may admit any of this stage's layers (`admitting`): it has the room a stage needs. A
+/// stage that starts without it stages every layer into the box and admits none, so its packer need not
+/// verify their digests: nothing it sends is cached.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Budget {
     pub entries: u64,
     pub bytes: u64,
     pub present: Vec<bool>,
     pub capacity: u64,
+    pub admitting: bool,
 }
 
 /// A budget as the relay sends it.
@@ -291,6 +295,7 @@ pub fn budget(b: &Budget) -> Vec<u8> {
         out.push(byte);
     }
     out.extend_from_slice(&b.capacity.to_le_bytes());
+    out.push(u8::from(b.admitting));
     out
 }
 
@@ -303,7 +308,13 @@ pub fn read_budget(message: &[u8]) -> Option<Budget> {
     let end = 18usize.checked_add(count.div_ceil(8))?;
     let bits = rest.get(18..end)?;
     let tail = rest.get(end..)?;
-    let capacity = u64::from_le_bytes(tail.try_into().ok()?);
+    let [c0, c1, c2, c3, c4, c5, c6, c7, admitting] = <[u8; 9]>::try_from(tail).ok()?;
+    let capacity = u64::from_le_bytes([c0, c1, c2, c3, c4, c5, c6, c7]);
+    let admitting = match admitting {
+        0 => false,
+        1 => true,
+        _ => return None,
+    };
     let present = bits
         .iter()
         .flat_map(|byte| BITS.iter().map(move |bit| byte & bit != 0))
@@ -314,6 +325,7 @@ pub fn read_budget(message: &[u8]) -> Option<Budget> {
         bytes,
         present,
         capacity,
+        admitting,
     })
 }
 

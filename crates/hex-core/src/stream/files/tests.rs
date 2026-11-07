@@ -584,6 +584,7 @@ fn a_stages_learned_budget_bounds_it() {
         bytes: 1 << 40,
         present: vec![],
         capacity: 1 << 20,
+        admitting: true,
     };
     assert_eq!(read_budget(&budget(&want)), Some(want.clone()));
     assert_eq!(read_budget(b"HEXB"), None);
@@ -679,7 +680,12 @@ fn a_stages_layers_are_named_by_digest_or_unnamed_and_the_guest_says_which_it_ho
         bytes: 2,
         present: vec![true, false, true, true, false, false, false, true, true],
         capacity: 3,
+        admitting: false,
     };
     assert_eq!(read_budget(&budget(&held)), Some(held.clone()));
+    // Its admitting byte is 0 or 1, else it isn't a budget.
+    let mut odd = budget(&held);
+    *odd.last_mut().unwrap() = 2;
+    assert_eq!(read_budget(&odd), None);
     assert_eq!(read_budget(&budget(&held)[..budget(&held).len() - 1]), None);
 }

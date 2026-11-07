@@ -434,3 +434,28 @@ fn an_in_flight_reclaim_counts_in_the_budget_and_a_stage_out_of_room_finishes_it
     assert_eq!(stage.room(write), Ok(()));
     assert!(!store.join(&gone).exists() && !store.join(format!("{gone}{SIZE}")).exists());
 }
+
+/// HEX-GUEST-14 (§4a; the lead's rule after HEX-GUEST-22's 2x diagnosis): a stage that begins without the room a
+/// stage needs says so in its budget (`admitting` false), so its packer checks no digest, and admits none of its
+/// layers, even if room frees meanwhile: nothing unchecked is ever cached. With room: `admitting` true.
+#[test]
+fn a_stage_without_room_says_so_and_admits_none() {
+    let dir = lab();
+    let store = dir.path().join(STORE);
+    std::fs::write(store.join(NEED), format!("0 {}\n", u64::MAX)).unwrap();
+    let (mut tight, budget) =
+        Stage::begin(dir.path(), BoxId::new("t").unwrap(), &[Some([0xf0; 32])]).unwrap();
+    assert!(!budget.admitting);
+    tight.need = Spend::default();
+    one_layer(&mut tight, 3);
+    assert!(
+        std::fs::symlink_metadata(dir.path().join("t").join(BOX_LAYERS).join("0"))
+            .unwrap()
+            .is_dir(),
+        "into the box, though room freed"
+    );
+    std::fs::write(store.join(NEED), "0 0\n").unwrap();
+    let (_, budget) =
+        Stage::begin(dir.path(), BoxId::new("u").unwrap(), &[Some([0xf1; 32])]).unwrap();
+    assert!(budget.admitting);
+}

@@ -249,6 +249,36 @@ fn layer_blobs_are_read_by_their_magic_and_refused_when_their_bytes_arent_their_
     );
 }
 
+/// HEX-GUEST-15 (§4a; the lead's rule after HEX-GUEST-22's 2x diagnosis: verify only what the store may
+/// admit): pack a layer whose bytes aren't its digest for a stage that admits nothing (every layer into the
+/// box, as whole-root staging, which checked none): expect it packed, unchecked; for a stage that may admit:
+/// expect it refused, its digest checked.
+#[test]
+fn only_a_stage_that_may_admit_checks_its_layers_digests() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("layer.tar");
+    std::fs::write(
+        &path,
+        archive(&[(header(b"a", b'0', 0o644, 1, b""), &b"a"[..])]),
+    )
+    .unwrap();
+    let items = [Item {
+        name: "root".to_owned(),
+        source: Source::Layers(vec![Layer {
+            path,
+            digest: Some([0x0b; 32]),
+        }]),
+    }];
+    assert_eq!(
+        pack_items(&mut Vec::new(), &items, &LIMITS, &[false], false),
+        Ok(vec![])
+    );
+    let why = pack_items(&mut Vec::new(), &items, &LIMITS, &[false], true)
+        .unwrap_err()
+        .to_string();
+    assert!(why.contains(&files::digest_hex(&[0x0b; 32])), "{why}");
+}
+
 /// HEX-GUEST-15 (§4a; the lead's check, 2026-11-06: what whole-root staging took, the store takes): pack a
 /// layer as `docker save` writes it, `<id>/layer.tar`, its name no digest and none known: expect it packed,
 /// and its digest learned as it crossed, its bytes' sha256, with its file's identity, for the next create
@@ -268,7 +298,7 @@ fn a_layer_of_no_known_digest_is_hashed_as_it_crosses_and_its_digest_learned() {
         }]),
     }];
     let mut out = Vec::new();
-    let learned = pack_items(&mut out, &items, &LIMITS, &[false]).unwrap();
+    let learned = pack_items(&mut out, &items, &LIMITS, &[false], false).unwrap();
     assert_eq!(
         learned,
         [Learned {

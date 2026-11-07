@@ -338,6 +338,9 @@ struct Stage {
     free: Free,
     need: Spend,
     bypassed: Spend,
+    /// Whether this stage may admit any layer: it began with the room a stage needs. One that began without
+    /// it admits none, so its packer, told so in the budget, need not verify what it sends.
+    admitting: bool,
     /// The file system's free room as last read, and what this stage has charged since: free room is read
     /// again only once that nears the margin over `need` ([`Stage::admits_now`]), not at every entry.
     last: Free,
@@ -690,6 +693,7 @@ impl Stage {
             }
         }
         let free = free(&staged)?;
+        let admitting = admits(free, Spend::default(), need);
         let opaque_xattr = if rustix::process::geteuid().is_root() {
             "trusted.overlay.opaque"
         } else {
@@ -708,6 +712,7 @@ impl Stage {
                 free,
                 need,
                 bypassed: Spend::default(),
+                admitting,
                 last: free,
                 since: Spend::default(),
                 reads: 0,
@@ -728,6 +733,7 @@ impl Stage {
                 bytes: free.bytes.saturating_add(spare.bytes),
                 present,
                 capacity: free.capacity,
+                admitting,
             },
         ))
     }
@@ -1228,7 +1234,7 @@ impl Stage {
             .ok_or_else(|| invalid("a layer out of the stage's list".to_owned()))?;
         self.seq = self.seq.saturating_add(1);
         let admitted = match digest {
-            Some(d) if self.admits_now(Spend::default())? => Some(Pending {
+            Some(d) if self.admitting && self.admits_now(Spend::default())? => Some(Pending {
                 partial: format!("{PARTIAL}{}-{}-{d}", std::process::id(), self.seq),
                 digest: d,
             }),

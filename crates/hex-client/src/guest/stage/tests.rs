@@ -28,7 +28,8 @@ pub(super) fn pack(
     out.write_all(&opening)
         .map_err(|e| Refusal::os("sending staged files", e))?;
     // A guest that holds none of the layers.
-    pack_items(out, items, limits, &vec![false; digests.len()])?;
+    // A guest that admits what it lacks: every named layer is checked.
+    pack_items(out, items, limits, &vec![false; digests.len()], true)?;
     out.write_all(&files::END)
         .map_err(|e| Refusal::os("sending staged files", e))
 }
@@ -206,6 +207,7 @@ impl super::super::Link for Budgeted {
                     bytes,
                     present: vec![],
                     capacity: 1,
+                    admitting: true,
                 }),
                 wire::MAX_MESSAGE,
             )

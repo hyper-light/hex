@@ -198,12 +198,14 @@ pub fn stage(
     };
     let sent = {
         let mut out = BufWriter::with_capacity(64 << 10, Writer(conn.as_mut()));
-        pack_items(&mut out, items, &learned, &budget.present).and_then(|hashed| {
-            out.write_all(&files::END)
-                .and_then(|()| out.flush())
-                .map(|()| hashed)
-                .map_err(|e| Refusal::os("sending staged files", e))
-        })
+        pack_items(&mut out, items, &learned, &budget.present, budget.admitting).and_then(
+            |hashed| {
+                out.write_all(&files::END)
+                    .and_then(|()| out.flush())
+                    .map(|()| hashed)
+                    .map_err(|e| Refusal::os("sending staged files", e))
+            },
+        )
     };
     // The relay answers even when it refused part way, and its answer says why better than a broken
     // pipe: read it first.
@@ -383,11 +385,17 @@ fn kind(path: &Path, meta: &fs::Metadata) -> Result<Kind, Refusal> {
 
 /// Writes every entry of `items` to `out`, within `limits`: each directory walked flat, a queue of the
 /// directories found (CLAUDE.md §11), and every entry counted against the stage's bound before it is sent.
+/// Packs `items`, sending only the layers the guest lacks (`present`). A named layer's bytes are checked
+/// against its digest only when the stage is `admitting`: a stage that admits nothing stages every layer
+/// into the box, never the store, as whole-root staging did, which checked none (the lead's rule after
+/// HEX-GUEST-22's 2x diagnosis: the check cost alpine 1 ms and caddy 6 ms a create). A layer of no known
+/// digest is hashed either way, to learn it.
 fn pack_items(
     out: &mut dyn Write,
     items: &[Item],
     limits: &Limits,
     present: &[bool],
+    admitting: bool,
 ) -> Result<Vec<Learned>, Refusal> {
     let send = |out: &mut dyn Write, bytes: &[u8]| {
         out.write_all(bytes)
@@ -425,11 +433,12 @@ fn pack_items(
                     .iter()
                     .zip(present.iter().copied().chain(std::iter::repeat(false)))
                     .map(|(l, held)| {
-                        (
-                            l.path.clone(),
-                            l.digest.map_or(Hash::Learn, Hash::Verify),
-                            held,
-                        )
+                        let hash = match l.digest {
+                            Some(d) if admitting => Hash::Verify(d),
+                            Some(_) => Hash::No,
+                            None => Hash::Learn,
+                        };
+                        (l.path.clone(), hash, held)
                     })
                     .collect();
                 learned.extend(tarball(
