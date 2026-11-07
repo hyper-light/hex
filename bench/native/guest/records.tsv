@@ -2,6 +2,7 @@
 # A bound is twice (the margin) its row's value; a class with no row for a measure has no seed, and what
 # needs it is refused by name until its record is taken and its row added here (no code change).
 # Read at build time by hex_runtime::guest (include_str!) and at run time by scripts/guest/boot_check.py.
+# Windows-WHP rows: shards.exe a debug build, AWS-LC without assembly (AWS_LC_SYS_NO_ASM), as its records say.
 # measure	class	slowest_us	record
 boot_ready	macOS-HVF	190803	bench/native/guest/boot-ready/RECORD.md
 stop	macOS-HVF	13000	bench/native/guest/stop/RECORD.md
