@@ -734,4 +734,66 @@ mod tests {
             "the bound reached isn't counted: {usage:?}"
         );
     }
+
+    /// HEX-WIN-2 (native plan step 3): a box commits up to its memory bound itself, and a commit that
+    /// would cross it is refused whole. Windows' job refuses such a commit whole and counts its ask in the
+    /// job's peak (`PeakJobMemoryUsed`), so the peak passes the commit limit by the refused ask (bench
+    /// record windows-jupiter-20261105.txt entry 22, experiment e20). Do: make a 256 MiB box, run a member
+    /// that commits 1 MiB at a time until the box refuses, read the job's raw peak. Expect: past the bound
+    /// (the member was refused at the bound, not short of it) by at most the refused 1 MiB ask and the
+    /// 131,072 bytes e20 measured beside one.
+    #[test]
+    fn a_box_commits_up_to_its_bound_and_is_refused_past_it() {
+        let bound = 256u64 << 20;
+        let bx = super::super::process::JobBox::create(
+            hex_api::BoxId::new("sys-up-to-bound").unwrap(),
+            &hex_api::Bounds {
+                memory_max: Some(bound),
+                ..hex_api::Bounds::default()
+            },
+            std::num::NonZeroU32::MIN,
+        )
+        .unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let system = std::env::var("SystemRoot").unwrap();
+        let spawn = Spawn {
+            command_line: format!(
+                "\"{}\" windows::sys::tests::commits_until_refused_when_asked --exact --test-threads=1",
+                exe.display()
+            )
+            .encode_utf16()
+            .chain([0])
+            .collect(),
+            environment: hex_core::job::environment(&[
+                ("SystemRoot".to_owned(), system),
+                ("HEX_TEST_COMMIT_TO_REFUSAL".to_owned(), "1".to_owned()),
+            ]),
+            cwd: None,
+            stdio: [nul(), nul(), nul()],
+        };
+        let started = bx.exec(spawn).unwrap();
+        assert!(wait(&started.process, u32::MAX).unwrap());
+        let mut x: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed_struct();
+        // SAFETY: QueryInformationJobObject writes at most one JOBOBJECT_EXTENDED_LIMIT_INFORMATION into
+        // `x`, alive for the call, for the box's job, which `bx` owns for the test.
+        let ok = unsafe {
+            QueryInformationJobObject(
+                bx.job().as_raw_handle() as HANDLE,
+                JobObjectExtendedLimitInformation,
+                (&mut x as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                u32::try_from(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>()).unwrap(),
+                null_mut(),
+            )
+        };
+        assert_ne!(ok, 0, "reading the job's peak: {}", last_error());
+        let peak = u64::try_from(x.PeakJobMemoryUsed).unwrap();
+        assert!(
+            peak > bound,
+            "refused short of its bound: peak {peak}, bound {bound}"
+        );
+        assert!(
+            peak <= bound + (1 << 20) + 131_072,
+            "past its bound by more than one refused ask: peak {peak}, bound {bound}"
+        );
+    }
 }
