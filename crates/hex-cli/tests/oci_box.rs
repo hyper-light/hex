@@ -324,6 +324,25 @@ fn a_program_past_the_kernels_bound_is_refused_by_name_and_learned(lab: &Lab, ow
         program
     };
     let program = padded(low + (wire - low) / 8);
+    setrlimit(
+        Resource::Stack,
+        Rlimit {
+            current: Some(lower),
+            maximum: was.maximum,
+        },
+    )
+    .expect("lower this node's stack limit");
+    let reads = stack_reads();
+    let first = node.exec(&id, program.clone(), hex_api::Stdio::null());
+    let after = stack_reads();
+    let second = node.exec(&id, program, hex_api::Stdio::null());
+    let small = node
+        .exec(&id, lab.program(&Act::Say("small")), hex_api::Stdio::null())
+        .map(|mut p| p.wait_for(conformance::patience()));
+    let last = stack_reads();
+    setrlimit(Resource::Stack, was).expect("restore this node's stack limit");
+    relearn_stack();
+    // After the stack case, whose seed must start under the lower limit: asking for one starts it.
     if lab.rootless {
         // Two pages past, since the wire counts each string's length where execve counts a pointer and a NUL.
         let reads = stack_reads();
@@ -345,24 +364,6 @@ fn a_program_past_the_kernels_bound_is_refused_by_name_and_learned(lab: &Lab, ow
             "the wire's bound reads no stack limit"
         );
     }
-    setrlimit(
-        Resource::Stack,
-        Rlimit {
-            current: Some(lower),
-            maximum: was.maximum,
-        },
-    )
-    .expect("lower this node's stack limit");
-    let reads = stack_reads();
-    let first = node.exec(&id, program.clone(), hex_api::Stdio::null());
-    let after = stack_reads();
-    let second = node.exec(&id, program, hex_api::Stdio::null());
-    let small = node
-        .exec(&id, lab.program(&Act::Say("small")), hex_api::Stdio::null())
-        .map(|mut p| p.wait_for(conformance::patience()));
-    let last = stack_reads();
-    setrlimit(Resource::Stack, was).expect("restore this node's stack limit");
-    relearn_stack();
     assert!(
         matches!(
             first,
