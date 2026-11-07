@@ -1092,6 +1092,44 @@ fn e19() {
     );
 }
 
+/// The committed memory of the job this process runs in (its innermost), from the job's own accounting.
+fn job_commit_now() -> usize {
+    let mut v: JOBOBJECT_LIMIT_VIOLATION_INFORMATION = unsafe { zeroed() };
+    let ok = unsafe {
+        QueryInformationJobObject(
+            null_mut(),
+            JobObjectLimitViolationInformation,
+            (&mut v as *mut JOBOBJECT_LIMIT_VIOLATION_INFORMATION).cast(),
+            size_of_val(&v) as u32,
+            null_mut(),
+        )
+    };
+    if ok == 0 { 0 } else { v.JobMemory as usize }
+}
+
+/// e20: is a commit that would cross a job's commit limit refused whole, or admitted past it? A job
+/// limited to 256 MiB (no notification); a member commits to within half of each size of the limit, then
+/// asks for one commit of that size. Per size: whether it was admitted, and the job's peak against the
+/// limit.
+fn e20() {
+    let limit = 256 * MIB;
+    for size in [64 * MIB, 16 * MIB, 4 * MIB, MIB, 256 << 10, 64 << 10] {
+        for rep in 0..3 {
+            let job = Job::new();
+            job.limit(KILL | JOB_OBJECT_LIMIT_JOB_MEMORY, limit, 0, 0);
+            let mut m = Member::start(&format!("cross {limit} {size}"), Place::JobList(&[&job]), 0).expect("m");
+            let said = m.line(LINE);
+            let peak = job.ext().PeakJobMemoryUsed;
+            m.release();
+            let _ = m.wait(LINE);
+            println!(
+                "e20 size={size} rep={rep} member[{said}] peak={peak} peak_minus_limit={}",
+                peak as i64 - limit as i64
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------- members
 
 fn commit_until_refused(step: usize, cap: usize) -> (usize, u32) {
@@ -1141,6 +1179,33 @@ fn member(args: &[String]) -> ! {
             std::thread::park();
         },
         "hold" => hold(),
+        // cross <limit> <size>: commits 64 KiB at a time until the job's own commit is within size/2 of
+        // <limit>, then asks for one <size> commit that would cross it, and says whether it was admitted.
+        "cross" => {
+            let (limit, size) = (num(1), num(2));
+            let mut base_refused = 0u32;
+            while job_commit_now() + size / 2 < limit {
+                let p = unsafe { VirtualAlloc(null(), 64 << 10, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) };
+                if p.is_null() {
+                    base_refused = last();
+                    break;
+                }
+                unsafe { (p as *mut u8).write_volatile(1) };
+            }
+            let before = job_commit_now();
+            let p = unsafe { VirtualAlloc(null(), size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) };
+            let (ok, err) = if p.is_null() { (false, last()) } else { (true, 0) };
+            if ok {
+                let mut off = 0;
+                while off < size {
+                    unsafe { (p as *mut u8).add(off).write_volatile(1) };
+                    off += 4096;
+                }
+            }
+            let after = job_commit_now();
+            say(&format!("base_refused={base_refused} before={before} admitted={ok} err={err} after={after}"));
+            hold()
+        }
         "commit" => {
             let (total, err) = commit_until_refused(num(1), num(2));
             say(&format!("refused_after={total} err={err}"));
@@ -1261,7 +1326,7 @@ fn main() {
     if args.first().map(String::as_str) == Some("member") {
         member(&args[1..]);
     }
-    let all = ["e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8", "e9", "e10", "e11", "e12", "e13", "e14", "e15", "e16", "e17", "e18", "e19"];
+    let all = ["e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8", "e9", "e10", "e11", "e12", "e13", "e14", "e15", "e16", "e17", "e18", "e19", "e20"];
     let chosen: Vec<&str> = if args.is_empty() || args.iter().any(|a| a == "all") {
         all.to_vec()
     } else {
@@ -1291,6 +1356,7 @@ fn main() {
             "e17" => e17(),
             "e18" => e18(),
             "e19" => e19(),
+            "e20" => e20(),
             other => println!("unknown experiment {other}"),
         }
         println!("{e} took_ms={}", t.elapsed().as_millis());
