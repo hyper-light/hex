@@ -346,3 +346,91 @@ fn a_stages_budget_counts_what_the_last_resort_can_take() {
         free.bytes
     );
 }
+
+/// Stages one layer of `n` one-byte files through `stage`, its stream's root `root`.
+fn many_files(stage: &mut Stage, n: usize) -> Spend {
+    stage.entry(&entry("root", What::Layer)).unwrap();
+    for i in 0..n {
+        stage
+            .entry(&entry(&format!("root/f{i}"), What::File { size: 1 }))
+            .unwrap();
+        stage.data(b"x", true).unwrap();
+    }
+    stage.end().unwrap()
+}
+
+/// HEX-GUEST-14 (§4a; the lead's rule after HEX-GUEST-22's 4x run at d51a4da, alpine +1.1 ms: the bypass and
+/// admission paths cost no more than whole-root staging): count the file system reads (fstatvfs) and store
+/// lock takes a stage makes. A layer of 515 one-byte files (alpine's entries) admitted with room to spare:
+/// expect at most 3 reads (d51a4da read once an entry, 516), and the lock taken at the stage's opening and at
+/// most once more, to raise the room learned; a second stage of the same 515 files that takes no more: the lock
+/// at its opening alone. A layer the store has no room for, 515 files into the box: one read, to find there's
+/// no room, and none an entry.
+#[test]
+fn free_room_is_read_only_as_the_margin_nears_and_the_lock_only_to_learn() {
+    let dir = lab();
+    let (mut one, _) =
+        Stage::begin(dir.path(), BoxId::new("one").unwrap(), &[Some([0xe0; 32])]).unwrap();
+    many_files(&mut one, 515);
+    assert!(one.reads <= 3, "{} reads for 515 entries", one.reads);
+    assert!(
+        one.locks <= 2,
+        "the opening, and to raise what's learned: {}",
+        one.locks
+    );
+    let (mut two, _) =
+        Stage::begin(dir.path(), BoxId::new("two").unwrap(), &[Some([0xe1; 32])]).unwrap();
+    two.need = Spend {
+        entries: 0,
+        bytes: 1,
+    };
+    many_files(&mut two, 515);
+    assert!(two.reads <= 3, "{} reads", two.reads);
+    let (mut three, _) = Stage::begin(
+        dir.path(),
+        BoxId::new("three").unwrap(),
+        &[Some([0xe2; 32])],
+    )
+    .unwrap();
+    three.need = Spend {
+        entries: u64::MAX,
+        bytes: u64::MAX,
+    };
+    many_files(&mut three, 515);
+    assert_eq!(
+        three.reads, 2,
+        "one to find no room, one to learn what it took"
+    );
+    assert_eq!(
+        three.locks, 1,
+        "the opening alone: it took less than the room learned"
+    );
+}
+
+/// HEX-GUEST-14 (§4a; HEX-GUEST-22's 2x run at d51a4da: grafana refused, its budget 1.1 GB, while the
+/// reclaimer removed a layer it had taken, room neither free nor counted): a layer the reclaimer took and is
+/// still removing (`.gone-<pid>-<n>`, its size file beside it, 3 entries and 8192 bytes): expect a stage's
+/// budget to count it; and a write the file system refuses ENOSPC while it's there, with no layer left to
+/// evict: expect the stage to finish that removal (no one holds its lock, as when its remover ended) and the
+/// write done, the folder and its size file gone.
+#[test]
+fn an_in_flight_reclaim_counts_in_the_budget_and_a_stage_out_of_room_finishes_it() {
+    let dir = lab();
+    let store = dir.path().join(STORE);
+    let gone = format!("{GONE}{}-{}", std::process::id(), u64::MAX);
+    std::fs::create_dir(store.join(&gone)).unwrap();
+    std::fs::write(store.join(&gone).join("f"), b"f").unwrap();
+    std::fs::write(store.join(format!("{gone}{SIZE}")), "3 8192\n").unwrap();
+    let (stage, budget) = Stage::begin(dir.path(), BoxId::new("t").unwrap(), &[]).unwrap();
+    assert!(budget.entries >= stage.free.entries + 3, "{budget:?}");
+    assert!(budget.bytes >= stage.free.bytes + 8192, "{budget:?}");
+    let write = || {
+        if store.join(&gone).exists() {
+            Err(Errno::NOSPC)
+        } else {
+            Ok(())
+        }
+    };
+    assert_eq!(stage.room(write), Ok(()));
+    assert!(!store.join(&gone).exists() && !store.join(format!("{gone}{SIZE}")).exists());
+}

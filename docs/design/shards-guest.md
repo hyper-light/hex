@@ -319,8 +319,10 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
       for a stage as large as the one under way too (0edcefd) held the cache to half the room, and with room
       for every image grafana never cached whole. A guest's first stage, nothing learned, is admitted whole;
       a next create it crowds is the last resort's, below, once. What's
-      free is the file system's own count (fstatvfs(2) at each entry), and an entry is charged its bytes in
-      whole blocks: a tmpfs charges whole pages a file, so counting bytes undercounted grafana's 17834 entries
+      free is the file system's own count (fstatvfs(2), read again only once what a stage has charged since
+      the last read reaches half the margin that read left over the room learned, or no margin is left: 515
+      entries read it at most 3 times, not 517, which had cost alpine's create 1.1 ms), and an entry is
+      charged its bytes in whole blocks: a tmpfs charges whole pages a file, so counting bytes undercounted grafana's 17834 entries
       and its create hit `ENOSPC`. A layer that would cut into that room, even part way, goes into the box
       instead (a partial folder is renamed into it), and so does every later layer of its stage, so a
       create's worst case is whole-root staging's own. A stage larger than any yet can still find the cache
@@ -362,7 +364,12 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
       the delete's, as plain background work at its own priority (Ada's rule: Hex changes no priority, either
       way; the work is bounded by what the bypass used):
       the least recently used unreferenced layer (its folder's mtime, set at each use) is taken out of the store
-      under the lock (renamed to `.gone-…`), then removed, until that much is freed or none is left.
+      under the lock (renamed to `.gone-…`, its size file with it), then removed under a lock of its own,
+      until that much is freed or none is left. A layer being removed so still counts in a stage's budget, and
+      a stage out of room with no layer left to take waits for that removal (or finishes one whose remover
+      ended), rather than refusing: at d51a4da grafana's create was refused while one ran, its room neither
+      free nor counted. A stage takes the store's lock at its opening, and again only to raise the room
+      learned.
     - **One copy roots:** a bundle's `root.path` and a `Rootfs::Dir` are one directory its container writes into,
       not an overlay, so a tarball given for one is applied in place, into the box's own folder, as one layer
       with nothing below; a directory root (macOS, Linux) is copied as it is. Neither is a layered image's root.

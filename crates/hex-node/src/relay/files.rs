@@ -338,6 +338,14 @@ struct Stage {
     free: Free,
     need: Spend,
     bypassed: Spend,
+    /// The file system's free room as last read, and what this stage has charged since: free room is read
+    /// again only once that nears the margin over `need` ([`Stage::admits_now`]), not at every entry.
+    last: Free,
+    since: Spend,
+    /// Counted for HEX-GUEST-14's check that admission costs a bounded few: the file system's free room
+    /// read (fstatvfs) during the stage, and the store's lock taken.
+    reads: u64,
+    locks: u64,
     /// The file being written, with what's applied once its last byte is (§4a's order).
     file: Option<(std::fs::File, String, u16, Option<Meta>)>,
     /// Each directory's mode and times, by where it is (in the layer under way, or under the box's root)
@@ -640,8 +648,12 @@ impl Stage {
                         .is_some_and(|r| r.starts_with(&format!("{me}-")))
                 });
                 if (name.starts_with(PARTIAL) || name.starts_with(GONE)) && !mine {
-                    let mut budget = fs_budget(&store);
-                    let _ = remove_tree(&store, &name, &mut budget);
+                    if name.ends_with(SIZE) {
+                        let _ = rustix::fs::unlinkat(&store, name.as_str(), AtFlags::empty());
+                    } else {
+                        let mut budget = fs_budget(&store);
+                        let _ = remove_tree(&store, &name, &mut budget);
+                    }
                 }
             }
             for (i, digest) in wanted.iter().enumerate() {
@@ -671,6 +683,9 @@ impl Stage {
             for name in names(&store)? {
                 if is_layer_name(&name) && !held.contains(&name) {
                     spare = spare.plus(read_spend(&store, &format!("{name}{SIZE}")));
+                } else if name.starts_with(GONE) && name.ends_with(SIZE) {
+                    // A layer being taken out, its room soon free: a stage out of room finishes it.
+                    spare = spare.plus(read_spend(&store, &name));
                 }
             }
         }
@@ -693,6 +708,10 @@ impl Stage {
                 free,
                 need,
                 bypassed: Spend::default(),
+                last: free,
+                since: Spend::default(),
+                reads: 0,
+                locks: 1,
                 file: None,
                 dirs: BTreeMap::new(),
                 layer: None,
@@ -885,6 +904,32 @@ impl Stage {
         })
     }
 
+    /// Whether the store may take `entry` ([`admits`]), from the free room last read less what this stage has
+    /// charged since, read again only once those charges reach half the margin the last read left over
+    /// `need`, or that estimate finds no room: as exact as reading at every entry while what's charged is
+    /// well inside the margin, and a few reads a stage, not one an entry (alpine's 515 cost +1.1 ms, d51a4da).
+    /// Another stage taking room meanwhile is the last resort's ([`Stage::room`]).
+    fn admits_now(&mut self, entry: Spend) -> Result<bool, Refusal> {
+        let charged = self.since.plus(entry);
+        // The margin the last read left over `need`; none (it held less than `need`) is a read.
+        let margin = self
+            .last
+            .entries
+            .checked_sub(self.need.entries)
+            .zip(self.last.bytes.checked_sub(self.need.bytes));
+        if let Some((entries, bytes)) = margin
+            && charged.entries <= entries / 2
+            && charged.bytes <= bytes / 2
+        {
+            self.since = charged;
+            return Ok(true);
+        }
+        self.last = free(&self.staged)?;
+        self.reads = self.reads.saturating_add(1);
+        self.since = entry;
+        Ok(admits(self.last, entry, self.need))
+    }
+
     /// Runs `op`, a write of this stage's, and when the file system has no room for it (`ENOSPC`) takes the
     /// least recently used layer no box names out of the store and tries again, until it fits or none is
     /// left, when `ENOSPC` is the refusal: a last resort, so a create never fails where whole-root staging
@@ -896,7 +941,11 @@ impl Stage {
             match op() {
                 Err(Errno::NOSPC) => match evict_one(&self.staged, &self.store) {
                     Ok(Some(_)) => {}
-                    Ok(None) | Err(_) => return Err(Errno::NOSPC),
+                    Ok(None) => match finish_gone(&self.store) {
+                        Ok(true) => {}
+                        Ok(false) | Err(_) => return Err(Errno::NOSPC),
+                    },
+                    Err(_) => return Err(Errno::NOSPC),
                 },
                 done => return done,
             }
@@ -924,11 +973,16 @@ impl Stage {
         };
         layer.held = layer.held.plus(entry);
         if layer.store.is_none() {
+            // Into the box: charged, with no read and no admission to decide.
+            self.since = self.since.plus(entry);
             return Ok(());
         }
-        if admits(free(&self.staged)?, entry, self.need) {
+        if self.admits_now(entry)? {
             return Ok(());
         }
+        let Some(layer) = self.layer.as_mut() else {
+            return Ok(());
+        };
         let (Some(pending), Some(dir)) = (layer.store.take(), self.layers.as_ref()) else {
             return Ok(());
         };
@@ -1141,7 +1195,7 @@ impl Stage {
     /// root of one copy, it applies in place, into `path`, a directory already staged, with nothing below.
     fn layer(&mut self, path: &str) -> Result<(), Refusal> {
         self.end_layer()?;
-        let Some(dir) = self.layers.as_ref() else {
+        if self.layers.is_none() {
             // A root of one copy (a bundle's, a `Rootfs::Dir`'s) is one tarball: one layer.
             if self.seq > 0 {
                 return Err(invalid(
@@ -1162,7 +1216,7 @@ impl Stage {
                 store: None,
             });
             return Ok(());
-        };
+        }
         let i = self
             .absent
             .pop_front()
@@ -1174,11 +1228,14 @@ impl Stage {
             .ok_or_else(|| invalid("a layer out of the stage's list".to_owned()))?;
         self.seq = self.seq.saturating_add(1);
         let admitted = match digest {
-            Some(d) if admits(free(&self.staged)?, Spend::default(), self.need) => Some(Pending {
+            Some(d) if self.admits_now(Spend::default())? => Some(Pending {
                 partial: format!("{PARTIAL}{}-{}-{d}", std::process::id(), self.seq),
                 digest: d,
             }),
             Some(_) | None => None,
+        };
+        let Some(dir) = self.layers.as_ref() else {
+            return Err(invalid("a layer of a root staged as one copy".to_owned()));
         };
         let (parent, name) = match &admitted {
             Some(pending) => (&self.store, pending.partial.clone()),
@@ -1336,7 +1393,8 @@ impl Stage {
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 // Out of room: a last resort takes an unreferenced layer and the write is tried again.
                 Err(e) if e.raw_os_error() == Some(Errno::NOSPC.raw_os_error()) => {
-                    if evict_one(&self.staged, &self.store)?.is_none() {
+                    if evict_one(&self.staged, &self.store)?.is_none() && !finish_gone(&self.store)?
+                    {
                         return Err(Refusal::os("writing a staged file", e));
                     }
                 }
@@ -1389,7 +1447,12 @@ impl Stage {
             .map_err(os("setting a staged root's mode"))?;
         if self.layers.is_some() {
             let taken = taken(self.free, free(&self.staged)?);
+            self.reads = self.reads.saturating_add(1);
+            if taken.entries <= self.need.entries && taken.bytes <= self.need.bytes {
+                return Ok(self.bypassed);
+            }
             let _lock = lock(&self.store)?;
+            self.locks = self.locks.saturating_add(1);
             let need = read_spend(&self.store, NEED);
             let rises = Spend {
                 entries: need.entries.max(taken.entries),
@@ -1570,12 +1633,59 @@ fn evict_one(staged: &OwnedFd, store: &OwnedFd) -> Result<Option<Spend>, Refusal
         let size = read_spend(store, &format!("{name}{SIZE}"));
         rustix::fs::renameat(store, name.as_str(), store, gone.as_str())
             .map_err(os("taking a layer out of the store"))?;
-        let _ = rustix::fs::unlinkat(store, format!("{name}{SIZE}").as_str(), AtFlags::empty());
-        size
+        // Its size goes with it, so a budget counts its room until it's free.
+        let _ = rustix::fs::renameat(
+            store,
+            format!("{name}{SIZE}").as_str(),
+            store,
+            format!("{gone}{SIZE}").as_str(),
+        );
+        // Held while it's removed: a stage out of room waits on it ([`finish_gone`]).
+        let remover = gone_lock(store, &gone)?;
+        (size, remover)
     };
+    let (size, _remover) = taken;
     let mut budget = fs_budget(store);
     remove_tree(store, &gone, &mut budget)?;
-    Ok(Some(taken))
+    let _ = rustix::fs::unlinkat(store, format!("{gone}{SIZE}").as_str(), AtFlags::empty());
+    Ok(Some(size))
+}
+
+/// The lock on a layer being taken out of the store (flock(2) on its `.gone-` folder), held by its remover.
+fn gone_lock(store: &OwnedFd, gone: &str) -> Result<OwnedFd, Refusal> {
+    let fd = rustix::fs::openat(
+        store,
+        gone,
+        OFlags::DIRECTORY | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(os("opening a layer being taken out"))?;
+    rustix::fs::flock(&fd, rustix::fs::FlockOperation::LockExclusive)
+        .map_err(os("locking a layer being taken out"))?;
+    Ok(fd)
+}
+
+/// For a stage out of room with no layer left to take: waits for each layer another thread is taking out
+/// of the store to be gone (its remover's lock; bounded by that removal), and finishes one whose remover
+/// ended part way. Whether there was any, and so room may now be free.
+fn finish_gone(store: &OwnedFd) -> Result<bool, Refusal> {
+    let mut any = false;
+    for name in names(store)? {
+        if !name.starts_with(GONE) || name.ends_with(SIZE) {
+            continue;
+        }
+        any = true;
+        let Ok(_waited) = gone_lock(store, &name) else {
+            // Gone already: its room is free.
+            continue;
+        };
+        if rustix::fs::statat(store, name.as_str(), AtFlags::SYMLINK_NOFOLLOW).is_ok() {
+            let mut budget = fs_budget(store);
+            remove_tree(store, &name, &mut budget)?;
+            let _ = rustix::fs::unlinkat(store, format!("{name}{SIZE}").as_str(), AtFlags::empty());
+        }
+    }
+    Ok(any)
 }
 
 /// What mkparent copies to a directory it makes from the one below (`copyDirInfo`, `copyUpXAttrs`,
