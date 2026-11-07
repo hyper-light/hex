@@ -399,6 +399,12 @@ Its CLAUDE.md changes are approved by Ada, 2026-11-06, as written: the Gates blo
 **Final** at 5f712ff (`cp/t7-native-s4`), on three results at that one commit: fedora's 7 gates exit 0 (unit
 hex-native-s4-gates-20261106T215342Z, its exact tree), `windows_oci_box` on jupiter (`suite-20261106T191231Z.log`) and
 jupiter's `cargo test --workspace` exit 0 (`wstest-20261106T191231Z.log`).
+**Open gap (recorded, not built):** a rootless exec whose arguments and environment lie between the seed wire's one
+request (160 KiB, `hex_core::seed::MAX_REQUEST`, under the kernel's bound on one `SOCK_SEQPACKET` record) and the
+kernel's own exec bound (a quarter of `RLIMIT_STACK`, 2 MiB at an 8 MiB stack) is refused as `Invalid` "program", where
+runc and crun, bounded only by the kernel, run it. As root the exec is cloned from the agent's thread and meets only
+the kernel's bound. Closing it needs a request carried over several records, a kind appended to the seed wire; not
+this step's to build.
 
 ## Next
 
