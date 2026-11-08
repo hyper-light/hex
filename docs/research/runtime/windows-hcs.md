@@ -395,5 +395,8 @@ crash; the container is HCS's, so the next node reopens it by its id.
 - With the flag on, HCS ended a killed node's system between 59 ms and 2 s after the kill on jupiter
   (`bench/native/records/hcs-end-under-load-8d8c36c-20261108T0036Z.txt`; to be retaken after a clean boot). So an
   outliving box needs the flag off: otherwise the container is gone before the next node can reopen it.
-- Not yet run on jupiter (it waits on the lead's word): that a reopened handle starts processes and terminates as
-  the creating node's did, which the sample implies (it queries properties through one) but doesn't show.
+- Run on jupiter (2026-11-08): a handle reopened by id ends the container as the creating node's would
+  (kiln run r105, `windows_oci_box`'s `an_outliving_box_s_container_and_scratch_wait_for_its_next_node`) and
+  starts processes in it, a program run through Hex's launcher in a box taken back by the next node (kiln run
+  r160, `a_nodes_oci_box_outlives_its_runtime_and_the_next_takes_it_back`). The sample implies both (it queries
+  properties through a reopened handle) but doesn't show them.
