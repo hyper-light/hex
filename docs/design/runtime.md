@@ -810,6 +810,78 @@ before anything is spawned (`docs/research/runtime/exec-size-bounds.md`).
 - **What would falsify it:** a program the count admits that the OS's exec refuses with `E2BIG` (the count is short),
   or a kernel whose formula changes; either is fixed in the count or the read, and HEX-RT-14 re-run.
 
+## Decision (proposed, native plan step 8): the Windows node, on one completion port, its boxes outliving it
+
+Step 8 puts Hex's node agent on Windows over the one socket core every OS shares (`hex_node::serve`, its `Os`
+trait; step 8a, `cp/t7-native-s8` 6c900ccc). This proposes Windows' `Os`, how an exec's stdio reaches its caller,
+and how a box outlives its node so a restarted node takes it back (T-T7.1.2). It's proposed: the parts marked
+*to measure* are checked on jupiter before the code lands, and the stdio part waits on its record.
+
+**Events: one I/O completion port, every source on it by a documented call.** The core's `Os::wait` is
+level-triggered readiness (epoll, kqueue); a completion port reports finished operations. The Windows `Os`
+turns each source into a completion on the one port (`GetQueuedCompletionStatusEx`):
+- *Wake*: `PostQueuedCompletionStatus` with the wake's key.
+- *A program's end*: `RegisterWaitForSingleObject` on the member's process handle, its callback posting the
+  program's token to the port. Not the job's `JOBOBJECT_ASSOCIATE_COMPLETION_PORT` messages, which the plan
+  names: Microsoft documents that, but for notification limits, their delivery "is not guaranteed", a lossy
+  source CLAUDE.md §3 forbids (`docs/research/runtime/windows-job-objects.md` §4). The process handle's
+  signal is the kernel's own end of the process, so no end is missed, and a pid given out again can't be
+  mistaken for it (the handle names the process, not the pid).
+- *A connection readable*: a zero-byte overlapped `WSARecv`, re-armed after each read; its completion says
+  data or the peer's end is waiting. *To measure*: that Windows' AF_UNIX completes a zero-byte receive this
+  way, as TCP does.
+- *A connection writable*: `Os::send` (a whole message or none) issues one overlapped `WSASend` that owns
+  the message; while one is outstanding the next send is `WouldBlock`, and its completion is "writable".
+  The bound on a connection's waiting answers stays the core's.
+- *A connection waiting*: overlapped `AcceptEx` on the listener. *To measure*: that afunix.sys supports it;
+  if not, `WSAEventSelect` on the listener and a registered wait on its event, posting to the port.
+- *Who the peer is*: `SIO_AF_UNIX_GETPEERPID`, then the process's user from its token, as Linux's
+  `SO_PEERCRED`.
+Messages are framed over the stream (`hex_core::stream`), as on macOS: Windows' AF_UNIX is `SOCK_STREAM`
+alone. **Falsifier:** a completion that never comes for a source that fired (a lost end or read), shown by a
+test that counts every program's end and every message against the port's completions.
+
+**An exec's stdio: a transport of its own, chosen by measurement (step 8's record, to be committed).**
+Windows' AF_UNIX passes no handles, so the four candidates are measured on jupiter by
+`bench/native/windows/stdio_probe` (first byte and throughput, N >= 299 interleaved, the machine's load over
+the last second recorded each round): the streams framed over the caller's own connection; a connection per
+stream; a named pipe per stream; and an anonymous pipe whose read end the node duplicates into the caller's
+process (`DuplicateHandle`, the caller named by `SIO_AF_UNIX_GETPEERPID`). Only the caller may read or write
+its streams. Framed and duplicated streams have no door a second process can knock on: they're the caller's
+own connection or handle. A connection per stream and a named pipe per stream are doors, so the node takes
+them only from the caller's pid (`SIO_AF_UNIX_GETPEERPID`; `GetNamedPipeClientProcessId`, the pipe first
+instance only and remote clients refused). The probe's refusal check gives a second process of the caller's
+user the door first: the node refused it for both and still served the caller every byte (jupiter,
+2026-11-07, `stdio_probe refuse`). A process of another user needs a second account on jupiter (asked of Ada).
+What no transport can stop: a process of the caller's own user may open the caller's process and take any
+handle in it (`PROCESS_DUP_HANDLE`), its own connection included, so "only the caller" means only through
+the node, as Linux's `SCM_RIGHTS` means it. The fastest candidate that passes is chosen when the timed run of
+record is in.
+
+**Recovery: a box outlives its node, and the restarted node takes it back (T-T7.1.2).** Today a Windows box
+ends with the node's last handle: its job is kill-on-close (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`), and an
+`oci` box's compute system is made with `ShouldTerminateOnLastHandleClosed` (the HCS decision above). That
+is clean up by construction, but recovery as on Linux takes a live box back, so both change:
+- A box's job is a *named* job object (`CreateJobObjectW` with a name under the node's own namespace,
+  `Local\hex-<node>-<box>`, its DACL the node's user and SYSTEM only), without kill-on-close. The restarted
+  node opens it by name (`OpenJobObjectW`) from the box's record. Delete ends it as now (`TerminateJobObject`);
+  a crash leaves it running for the next node, which takes it back or ends it.
+- An `oci` box's compute system is made without `ShouldTerminateOnLastHandleClosed`, and the restarted node
+  opens it by its id (`HcsOpenComputeSystem`). The HCS side is step 4's agent's to confirm.
+- A box's record names each member by its pid and its creation time (`GetProcessTimes`), so the restarted
+  node, opening the pid, tells the member from a process given its pid since, as macOS uses a process's
+  start time.
+- The record's phases stay Linux's (`creating`/`ready`/`deleting`, written before the machine changes), so
+  a node killed mid-create or mid-delete leaves a box recovery finishes or removes.
+- The node's own job (the boxes' parent) is kill-on-close today too, so a box nested under it would end with
+  it. *To measure*: whether a box's job can stay nested under a node job that ends, or whether boxes nest
+  under a job the installer's service holds; the test is the node killed with `TerminateProcess` and its boxes
+  still running.
+What it costs: a node that dies and never restarts leaves its boxes running, where kill-on-close ended them;
+the installer's service restarts the node, and its first act is recovery. **Falsifier:** the crash-restart
+tests (step 8's): the node killed with boxes running, mid-create and mid-delete, then restarted on the same
+state directory; each must fail on the tree before this change and pass after.
+
 ## Open (STATUS.md)
 
 - Each OS's own boxes, natively (the decision above, proposed): under way. The **macOS `process` class is
