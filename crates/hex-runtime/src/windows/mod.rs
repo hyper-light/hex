@@ -875,6 +875,36 @@ mod tests {
         }
     }
 
+    /// T-T7.1.2 (native plan step 8): do end a node's keeper, then make a box on the node's runtime before
+    /// anything replaces the keeper; expect the create to finish, the box held by a new keeper, rather than
+    /// wait forever on its own runtime's box-map lock (found by s4), and the box to outlive the runtime.
+    #[test]
+    fn a_box_made_after_its_keeper_ended_is_made_and_held_by_a_new_keeper() {
+        let (name, state) = (node("late"), tempfile::tempdir().unwrap());
+        let spec = process_box("late");
+        let rt = Arc::new(WinRuntime::outliving(&name, state.path(), &keeper("late")).unwrap());
+        let first = rt.keeper_pid().expect("a keeper holds the node's boxes");
+        crash(first);
+        wait_for("the keeper to end", || !alive(first));
+        let (made, making) = std::sync::mpsc::channel();
+        let (runtime, asked) = (Arc::clone(&rt), spec.clone());
+        let maker = std::thread::spawn(move || {
+            let _ = made.send(runtime.create(asked).map(drop));
+        });
+        making
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("the create never finished: it waits on its own runtime's lock")
+            .unwrap();
+        maker.join().unwrap();
+        let pid = rt.exec(&spec.id, waiting(), Stdio::null()).unwrap().pid();
+        let second = rt.keeper_pid().expect("a new keeper holds the box");
+        assert_ne!(second, first);
+        drop(rt);
+        assert!(alive(pid), "the box's program ended with its runtime");
+        crash(second);
+        wait_for("kill-on-close to end the program", || !alive(pid));
+    }
+
     /// A runtime driven in process keeps kill-on-close: do make a box, run a program, drop the runtime;
     /// expect the program ended with it.
     #[test]
