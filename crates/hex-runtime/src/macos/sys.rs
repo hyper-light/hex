@@ -224,19 +224,19 @@ fn sysctl_count(name: &std::ffi::CStr) -> io::Result<usize> {
         .map_err(|_| io::Error::other(format!("{} reads {v}", name.to_string_lossy())))
 }
 
-/// The QoS a box's processes are clamped to from their first instruction, passed to every process
-/// they start (XNU's task policy copies the clamp to a forked child, `osfmk/kern/task_policy.c:746`).
+/// The QoS a box's processes run at from their first instruction, as its declared CPU weight asks (a box's
+/// CPU share follows its `cpu.weight` on Linux): passed to every process they start (XNU's task policy
+/// copies the clamp to a forked child, `osfmk/kern/task_policy.c:746`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Clamp {
-    /// `QOS_CLASS_UTILITY` (`sys/qos.h`): below the user's own work and the watcher.
-    Utility,
-    /// `QOS_CLASS_BACKGROUND`, which also puts the box in darwin background (lowest CPU priority, I/O
-    /// throttled; `task_policy.c:946-950`).
+    /// No clamp: the default weight, the QoS the node's own programs run at.
+    Unclamped,
+    /// `QOS_CLASS_BACKGROUND` for a weight under the default, which also puts the box in darwin
+    /// background (lowest CPU priority, I/O throttled; `task_policy.c:946-950`).
     Background,
 }
 
-/// `QOS_CLASS_UTILITY` and `QOS_CLASS_BACKGROUND` (`sys/qos.h`, macOS 26 SDK).
-const QOS_CLASS_UTILITY: u32 = 0x11;
+/// `QOS_CLASS_BACKGROUND` (`sys/qos.h`, macOS 26 SDK).
 const QOS_CLASS_BACKGROUND: u32 = 0x09;
 
 // SAFETY: declared as `pthread/spawn.h` (macOS 26 SDK, line 64) declares it: it sets the spawn attribute's
@@ -377,10 +377,6 @@ pub fn spawn(s: &Spawn, pgroup: i32, clamp: Clamp) -> io::Result<i32> {
         i16::try_from(flags).map_err(|_| io::Error::other("posix_spawn flags past a short"))?;
     let mut none: libc::sigset_t = 0;
     let mut all: libc::sigset_t = 0;
-    let qos = match clamp {
-        Clamp::Utility => QOS_CLASS_UTILITY,
-        Clamp::Background => QOS_CLASS_BACKGROUND,
-    };
     // SAFETY: each call takes the attribute object initialized above and reads or writes only the signal
     // sets given, which outlive the calls.
     unsafe {
@@ -396,7 +392,12 @@ pub fn spawn(s: &Spawn, pgroup: i32, clamp: Clamp) -> io::Result<i32> {
             &raw mut attr.0,
             &raw const all,
         ))?;
-        errno(posix_spawnattr_set_qos_class_np(&raw mut attr.0, qos))?;
+        if clamp == Clamp::Background {
+            errno(posix_spawnattr_set_qos_class_np(
+                &raw mut attr.0,
+                QOS_CLASS_BACKGROUND,
+            ))?;
+        }
     }
     // Arm the box's whole memory bound as a fatal per-process cap, so the kernel bounds this member with
     // no overshoot (native plan step 1's `_ext` backstop). The watcher tracks it as armed.

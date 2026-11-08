@@ -1,6 +1,6 @@
 //! The `process` class on macOS (docs/design/runtime.md, decision "each OS runs its own boxes
-//! natively"): a box is a process group Hex spawns (posix_spawn, a new process group) under a QoS clamp,
-//! with background priority when its weight is low. macOS has no public cap on a process tree's memory or
+//! natively"): a box is a process group Hex spawns (posix_spawn, a new process group), at background QoS
+//! when its declared weight is under the default and unclamped otherwise. macOS has no public cap on a process tree's memory or
 //! its process count (docs/research/runtime/native-platforms.md §3), so a watcher thread holds the box's
 //! bounds by Hex's own rule ([`hex_core::watch`]): it lists the box's members (`proc_listpids` of its
 //! process group), reads each footprint (`proc_pid_rusage`), and ends the box (killpg, then the members'
@@ -867,11 +867,13 @@ fn limit(bounds: &Bounds) -> Limit {
     }
 }
 
-/// A box's QoS clamp: background where its weight is low (under the default 100), utility otherwise.
+/// A box's QoS clamp, from its declared CPU weight as `cpu.weight` sets a box's share on Linux: background
+/// where its weight is under the default 100, none otherwise (the lead, 2026-11-06: no clamp to keep the
+/// watcher ahead of a box).
 fn clamp(bounds: &Bounds) -> Clamp {
     match bounds.cpu_weight {
         Some(w) if w < 100 => Clamp::Background,
-        _ => Clamp::Utility,
+        _ => Clamp::Unclamped,
     }
 }
 

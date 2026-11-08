@@ -542,13 +542,12 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
     which is exactly what the step-2 ledger layer catches. Paced by headroom plus the bar at the recorded
     worst aggregate rate (no ceiling, 2026-11-06), layer three costs a many-member 256 MiB box 1.5-2.5% of a
     core far from its bound and 4-7.5% near it, and a one-member armed box nothing
-    (`records/watcher-headroom-cpu-f18e6ee-20261106T1737Z.txt`). A possible later design, not built: a
-    rootless box could have the kernel hold its total by arming each member at spawn with an equal share of
-    its bound (`_ext` caps summing to the bound, as step 2's ledger shares do), which needs the box to declare
-    its member count up front (a spec field, or a refusal past it), since a spawn-time cap can't be lowered
-    on a running task and a fork escapes it. CPU is bounded by priority alone: a
-    QoS class, and background priority where the box's weight is low. A box that asks for confinement gets App
-    Sandbox's, which every child inherits (§3). The class's own purpose is trusted code that must not starve
+    (`records/watcher-headroom-cpu-f18e6ee-20261106T1737Z.txt`). CPU follows the box's declared weight, as
+    `cpu.weight` sets a box's share on Linux: a box at the default weight runs unclamped, at the QoS the
+    node's own programs run at, and one whose weight is under the default runs at background QoS (darwin
+    background: lowest CPU priority, I/O throttled). No clamp keeps the watcher ahead of a box (the lead,
+    2026-11-06, under Ada's 2026-11-03 rule). A box that asks for confinement gets App Sandbox's, which every
+    child inherits (§3). The class's own purpose is trusted code that must not starve
     the machine, and that purpose doesn't need it. Under the helper the ledger limits sum to the bound less a
     reserve (`hex_core::boxuser`), the fork window's room; the daemon's own sweep is layer three there, and
     it is event-driven, with no period (the lead's call, 2026-11-06, under Ada's rule that no constant is

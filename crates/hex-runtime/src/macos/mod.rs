@@ -1,6 +1,6 @@
 //! The macOS runtime: [`hex_api::Runtime`] over the `process` class (docs/design/runtime.md). A box is a
-//! process group under a QoS clamp, its bounds held by a watcher thread reading each member's footprint
-//! (`process`, `sys`, `watch`); the `oci` class is a Linux kernel's, refused by name here until a Shards
+//! process group at the QoS its declared weight asks, its bounds held by a watcher thread reading each
+//! member's footprint (`process`, `sys`, `watch`); the `oci` class is a Linux kernel's, refused by name here until a Shards
 //! guest carries it (the native plan's step 5). This is the node's runtime seam on macOS; the records,
 //! recovery and socket that wrap it on Linux (`hex-node`) are not yet cross-OS, so this holds its boxes
 //! in memory and is driven in process.

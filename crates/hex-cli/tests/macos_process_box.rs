@@ -607,3 +607,114 @@ fn a_steady_box_redoes_no_membership_work_per_read() {
         status.reads
     );
 }
+
+/// This process's scheduling priority as `ps` shows it (`pri`): the base its QoS sets.
+fn pri(pid: u32) -> i64 {
+    let out = std::process::Command::new("/bin/ps")
+        .args(["-o", "pri=", "-p", &pid.to_string()])
+        .output()
+        .expect("ps -o pri");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let digits: String = text
+        .trim()
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits
+        .parse()
+        .unwrap_or_else(|_| panic!("ps -o pri for {pid}: {text}"))
+}
+
+/// The lead's call (2026-11-06): a box's members run at the QoS its declared CPU weight asks, as a box's
+/// CPU share follows its `cpu.weight` on Linux: at the default weight no clamp, and only a weight under the
+/// default the background clamp it gets today. Do start a member in a default-weight box and one in a box of
+/// weight 50, beside an unclamped program this test starts; expect the first at the unclamped program's
+/// priority and the second below it.
+#[test]
+fn a_box_runs_at_the_qos_its_declared_weight_asks() {
+    let rt = runtime();
+    let fx = fixture();
+    let mut sibling = std::process::Command::new("/bin/sleep")
+        .arg("30")
+        .spawn()
+        .expect("an unclamped program");
+    let base = pri(sibling.id());
+    let mut member_pri = Vec::new();
+    for (name, weight) in [("default", None), ("low", Some(50))] {
+        let id = BoxId::new(&format!("mac-weight-{name}")).unwrap();
+        let _ = rt.delete(&id);
+        rt.create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds {
+                cpu_weight: weight,
+                ..Bounds::default()
+            },
+            class: ClassSpec::Process,
+        })
+        .expect("create");
+        let mut p = rt
+            .exec(&id, fx.act(&Act::Wait), Stdio::null())
+            .expect("exec");
+        member_pri.push(pri(p.pid()));
+        rt.delete(&id).expect("delete");
+        let _ = p.wait_for(HANG_GUARD);
+    }
+    let _ = sibling.kill();
+    let _ = sibling.wait();
+    println!(
+        "PRI unclamped={base} default_weight={} low_weight={}",
+        member_pri[0], member_pri[1]
+    );
+    assert_eq!(
+        member_pri[0], base,
+        "a default-weight box's member is clamped"
+    );
+    assert!(
+        member_pri[1] < base,
+        "a low-weight box's member isn't clamped"
+    );
+}
+
+/// The lead's call (2026-11-06): what a CPU-bound member gets, on a machine whose every core is busy with
+/// unclamped programs, in a box of the default weight: the CPU it was given over 2 s, in cores. Ignored: a
+/// measurement, run by hand before and after the clamp follows the declared weight.
+#[test]
+#[ignore = "a measurement; run by hand and recorded in bench/native/macos/records"]
+fn measure_a_cpu_bound_members_work_rate() {
+    let rt = runtime();
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let mut load: Vec<_> = (0..cores)
+        .map(|_| {
+            std::process::Command::new("/usr/bin/yes")
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .expect("a load program")
+        })
+        .collect();
+    let id = BoxId::new("mac-cpu-rate").unwrap();
+    let _ = rt.delete(&id);
+    rt.create(BoxSpec {
+        id: id.clone(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Process,
+    })
+    .expect("create");
+    let mut p = rt
+        .exec(&id, Program::of(&["/usr/bin/yes"]), Stdio::null())
+        .expect("exec yes");
+    let c0 = rt.usage(&id).expect("usage").cpu_usec;
+    let t0 = Instant::now();
+    std::thread::park_timeout(Duration::from_secs(2));
+    let used = rt.usage(&id).expect("usage").cpu_usec.saturating_sub(c0);
+    let secs = t0.elapsed().as_secs_f64();
+    rt.delete(&id).expect("delete");
+    let _ = p.wait_for(HANG_GUARD);
+    for l in &mut load {
+        let _ = l.kill();
+        let _ = l.wait();
+    }
+    println!(
+        "CPU_BOUND cores={cores} member_cores={:.3}",
+        used as f64 / 1e6 / secs
+    );
+}
