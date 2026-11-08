@@ -157,8 +157,8 @@ impl shards_api::Stream for Looped {
         Ok(Box::new(Looped(self.0.try_clone()?)))
     }
 
-    fn handle(&self) -> shards_api::Handle {
-        std::os::fd::AsRawFd::as_raw_fd(&self.0)
+    fn handle(&self) -> shards_api::Handle<'_> {
+        std::os::fd::AsFd::as_fd(&self.0)
     }
 
     fn set_nonblocking(&self, on: bool) -> std::io::Result<()> {
@@ -324,18 +324,18 @@ fn a_call_its_guest_holds_holds_no_other_clients_call_through_the_guest_client()
     let _server = Server::bind(&socket, Arc::new(node), LIMITS, 1).unwrap();
     gate.hold(true);
     let a = hex_client::Client::connect(&socket).unwrap();
-    let held = std::thread::spawn(move || a.inspect(&BoxId::new("there").unwrap()));
+    let held = std::thread::spawn(move || a.inspect(&BoxId::new("there").unwrap()).err());
     gate.wait_holding(1);
     let b = hex_client::Client::connect(&socket).unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
-    let other = std::thread::spawn(move || tx.send(b.inspect(&here)));
+    let other = std::thread::spawn(move || tx.send(b.inspect(&here).is_ok()));
     let answered = rx.recv_timeout(PATIENCE);
     gate.hold(false);
     let _ = other.join();
     let held = held.join().unwrap();
     assert!(
-        matches!(answered, Ok(Ok(_))),
+        answered == Ok(true),
         "B's inspect of a host box waited on the guest's answer to A's: {answered:?}"
     );
-    assert_eq!(held, Err(Refusal::NoSuchBox(BoxId::new("there").unwrap())));
+    assert_eq!(held, Some(Refusal::NoSuchBox(BoxId::new("there").unwrap())));
 }

@@ -311,4 +311,28 @@ impl Os for Linux {
     fn stdio(&self, streams: Streams, passed: Vec<OwnedFd>) -> Result<Stdio, Refusal> {
         super::unix::stdio_of(streams, passed)
     }
+
+    fn watch_source(
+        &self,
+        handle: super::Handle<'_>,
+        token: u64,
+        write: bool,
+    ) -> Result<(), Refusal> {
+        let flags = if write {
+            EventFlags::IN | EventFlags::OUT | EventFlags::RDHUP
+        } else {
+            EventFlags::IN | EventFlags::RDHUP
+        };
+        match epoll::modify(&self.epoll, handle, EventData::new_u64(token), flags) {
+            Err(rustix::io::Errno::NOENT) => {
+                epoll::add(&self.epoll, handle, EventData::new_u64(token), flags)
+            }
+            other => other,
+        }
+        .map_err(|e| Refusal::os("watching the node's guest connection", e))
+    }
+
+    fn unwatch_source(&self, handle: super::Handle<'_>, _token: u64) {
+        let _ = epoll::delete(&self.epoll, handle);
+    }
 }

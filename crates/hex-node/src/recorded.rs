@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use hex_api::{
     BoxId, BoxInfo, BoxSpec, Class, Proc, Program, Refusal, Runtime, Signal, Stdio, Usage,
@@ -17,8 +17,9 @@ use hex_core::record::{BoxRecord, Phase, ProcId};
 use hex_core::recovery::{self, Decision, Seen, Why};
 
 use crate::abandoned::Abandoned;
-use crate::serve::Host;
+use crate::serve::{self, Forward, Forwarded, Host, Loop, Reply};
 use crate::store::Store;
+use hex_core::wire::{Answer, Call};
 
 /// What a recovery did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -64,11 +65,26 @@ pub trait Recover: Runtime {
         let _ = spec;
         Ok(())
     }
+    /// The core's loop, for connections of its own ([`Host::attach`]). By default it has none.
+    fn attach(&self, lp: Arc<dyn Loop>) -> Result<(), Refusal> {
+        let _ = lp;
+        Ok(())
+    }
+    /// A call it answers later ([`Host::forward`]). By default every call runs on the worker.
+    fn forward(&self, call: Call, stdio: Stdio, reply: Reply, ended: serve::Ended) -> Forward {
+        let _ = (reply, ended);
+        Forward::Back(Box::new((call, stdio)))
+    }
 }
 
 /// A runtime whose boxes' records the node keeps.
 pub struct Recorded<R> {
     runtime: R,
+    books: Arc<Books>,
+}
+
+/// The node's records of its boxes, shared with the completions of calls its guest answers.
+struct Books {
     store: Store,
     abandoned: Abandoned,
     /// Boxes a recovery took back, which inspect reports as adopted.
@@ -80,9 +96,11 @@ impl<R: Recover> Recorded<R> {
     pub fn open(runtime: R, state_dir: &Path) -> Result<Self, Refusal> {
         Ok(Self {
             runtime,
-            store: Store::open(state_dir)?,
-            abandoned: Abandoned::default(),
-            adopted: Mutex::new(BTreeSet::new()),
+            books: Arc::new(Books {
+                store: Store::open(state_dir)?,
+                abandoned: Abandoned::default(),
+                adopted: Mutex::new(BTreeSet::new()),
+            }),
         })
     }
 
@@ -93,9 +111,9 @@ impl<R: Recover> Recorded<R> {
     /// a crash during it: ending a box tolerates its processes being gone already.
     pub fn recover(&self) -> Result<RecoverySummary, Refusal> {
         // What a crash at a record write left: a temp file never renamed into place.
-        self.store.remove_strays()?;
+        self.books.store.remove_strays()?;
         let mut summary = RecoverySummary::default();
-        let records = self.store.all()?;
+        let records = self.books.store.all()?;
         let mut seen: BTreeMap<BoxId, Seen> = BTreeMap::new();
         for (id, record) in &records {
             let alive = match record {
@@ -119,7 +137,8 @@ impl<R: Recover> Recorded<R> {
                     if let Some(r) = record {
                         self.runtime.adopt(&r.spec, trace)?;
                     }
-                    self.adopted
+                    self.books
+                        .adopted
                         .lock()
                         .map_err(|_| poisoned())?
                         .insert(id.clone());
@@ -130,7 +149,7 @@ impl<R: Recover> Recorded<R> {
                     if let Some(r) = record {
                         self.runtime.discard(&r.spec)?;
                     }
-                    self.store.remove(&id)?;
+                    self.books.store.remove(&id)?;
                     summary.removed.push((id, why_text(&why)));
                 }
             }
@@ -138,6 +157,12 @@ impl<R: Recover> Recorded<R> {
         Ok(summary)
     }
 
+    fn counted(&self, info: BoxInfo) -> Result<BoxInfo, Refusal> {
+        self.books.counted(info)
+    }
+}
+
+impl Books {
     /// `info` with the abandoned programs counted for its box, recorded and not yet, and whether a recovery
     /// took it back.
     fn counted(&self, mut info: BoxInfo) -> Result<BoxInfo, Refusal> {
@@ -168,16 +193,16 @@ impl<R: Recover> Runtime for Recorded<R> {
     /// one (T-T7.1.2), then as made once the runtime has made it; a refused create leaves no record.
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
         let mut record = BoxRecord::new(spec.clone(), Phase::Creating, Vec::new());
-        self.store.put(&record)?;
+        self.books.store.put(&record)?;
         let info = match self.runtime.create(spec) {
             Ok(info) => info,
             Err(why) => {
-                let _ = self.store.remove(&record.spec.id);
+                let _ = self.books.store.remove(&record.spec.id);
                 return Err(why);
             }
         };
         record.phase = Phase::Ready;
-        self.store.put(&record)?;
+        self.books.store.put(&record)?;
         self.counted(info)
     }
 
@@ -188,11 +213,11 @@ impl<R: Recover> Runtime for Recorded<R> {
     /// Runs `program`, and once the box has processes, records what names them after a crash.
     fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
         let proc = self.runtime.exec(id, program, stdio)?;
-        if let Some(Ok(record)) = self.store.get(id)?
+        if let Some(Ok(record)) = self.books.store.get(id)?
             && record.init.is_none()
             && let Some(trace) = self.runtime.trace(id)?
         {
-            self.store.update(id, |r| {
+            self.books.store.update(id, |r| {
                 r.init = Some(trace);
                 true
             })?;
@@ -223,14 +248,14 @@ impl<R: Recover> Runtime for Recorded<R> {
     /// Records the box as being deleted, deletes it, then removes its record: a crash between leaves a
     /// record recovery finishes.
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
-        if let Some(Ok(mut record)) = self.store.get(id)? {
+        if let Some(Ok(mut record)) = self.books.store.get(id)? {
             record.phase = Phase::Deleting;
-            self.store.put(&record)?;
+            self.books.store.put(&record)?;
         }
         self.runtime.delete(id)?;
-        self.store.remove(id)?;
-        self.abandoned.forget(id);
-        if let Ok(mut adopted) = self.adopted.lock() {
+        self.books.store.remove(id)?;
+        self.books.abandoned.forget(id);
+        if let Ok(mut adopted) = self.books.adopted.lock() {
             adopted.remove(id);
         }
         Ok(())
@@ -238,8 +263,36 @@ impl<R: Recover> Runtime for Recorded<R> {
 }
 
 impl<R: Recover> Host for Recorded<R> {
+    fn attach(&self, lp: Arc<dyn Loop>) -> Result<(), Refusal> {
+        self.runtime.attach(lp)
+    }
+
+    /// The calls its runtime answers later go there: an inspect's answer counted as any inspect's is
+    /// ([`Books::counted`]). A create or a delete, which write the box's record and stage or remove its
+    /// root, runs on the worker.
+    fn forward(&self, call: Call, stdio: Stdio, reply: Reply, ended: serve::Ended) -> Forward {
+        match call {
+            Call::Inspect(_) => {
+                let books = Arc::clone(&self.books);
+                let counted: Reply = Box::new(move |got| {
+                    reply(match got {
+                        Ok(Forwarded::Answer(Answer::Info(info))) => books
+                            .counted(info)
+                            .map(|info| Forwarded::Answer(Answer::Info(info))),
+                        other => other,
+                    })
+                });
+                self.runtime.forward(call, stdio, counted, ended)
+            }
+            Call::Start(_) | Call::Signal { .. } | Call::Usage(_) | Call::Exec { .. } => {
+                self.runtime.forward(call, stdio, reply, ended)
+            }
+            call => Forward::Back(Box::new((call, stdio))),
+        }
+    }
+
     fn abandoned(&self, id: &BoxId) -> Result<(), Refusal> {
-        self.abandoned.count(&self.store, id)
+        self.books.abandoned.count(&self.books.store, id)
     }
 
     /// Network namespaces are Linux's: a node elsewhere has none to count.
@@ -325,5 +378,107 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
             },
             Class::Process => self.host().discard(spec),
         }
+    }
+
+    /// Its guest's control connection, in the event form, joins the core's loop: a call through it holds no
+    /// thread while the guest answers (native plan step 8 (1)). With no guest running there is none.
+    fn attach(&self, lp: Arc<dyn Loop>) -> Result<(), Refusal> {
+        let token = lp.token()?;
+        let room: Arc<dyn Fn() + Send + Sync> = {
+            let lp = Arc::clone(&lp);
+            Arc::new(move || lp.room(token))
+        };
+        match self.guest().connect_evented(room)? {
+            Some(pump) => lp.add(token, Box::new(Pumped(pump))),
+            None => Ok(()),
+        }
+    }
+
+    /// A call about a box its guest holds goes there through the event form's client and is answered
+    /// from the loop; one about a host box, or with no such client (no guest, or the guest booted again
+    /// since), runs on the worker.
+    fn forward(&self, call: Call, stdio: Stdio, reply: Reply, ended: serve::Ended) -> Forward {
+        let id = match &call {
+            Call::Inspect(id) | Call::Start(id) | Call::Usage(id) => id,
+            Call::Signal { id, .. } | Call::Exec { id, .. } => id,
+            _ => return Forward::Back(Box::new((call, stdio))),
+        };
+        match self.host().inspect(id) {
+            Err(Refusal::NoSuchBox(_)) => {}
+            Ok(_) | Err(_) => return Forward::Back(Box::new((call, stdio))),
+        }
+        let Some(client) = self.guest().evented() else {
+            return Forward::Back(Box::new((call, stdio)));
+        };
+        let started = Arc::clone(&client);
+        let then: hex_client::Then = Box::new(move |exec, got| {
+            reply(match got {
+                Ok(Answer::Started { pid }) => Ok(Forwarded::Started {
+                    pid,
+                    program: Box::new(GuestProgram {
+                        client: started,
+                        exec,
+                    }),
+                }),
+                Ok(Answer::Refused(why)) | Err(why) => Err(why),
+                Ok(answer) => Ok(Forwarded::Answer(answer)),
+            })
+        });
+        // Refused before it was sent: `then` is dropped unrun, and the caller hears why.
+        match client.begin(call, stdio, then, ended) {
+            Ok(_) => Forward::Taken,
+            Err(why) => Forward::Refused(why),
+        }
+    }
+}
+
+/// The guest's control connection's reading side, as a source of the core's loop.
+struct Pumped(hex_client::guest::Pump);
+
+impl serve::Source for Pumped {
+    fn handle(&self) -> serve::Handle<'_> {
+        self.0.handle()
+    }
+
+    fn ready(&mut self) -> serve::Want {
+        match self.0.ready() {
+            hex_client::guest::Pumped::Read => serve::Want::Read,
+            hex_client::guest::Pumped::ReadWrite => serve::Want::ReadWrite,
+            hex_client::guest::Pumped::Ended => serve::Want::Done,
+        }
+    }
+}
+
+/// A program in the guest, by its exec's id on the event form's connection.
+struct GuestProgram {
+    client: Arc<hex_client::guest::Client>,
+    exec: u64,
+}
+
+impl serve::Remote for GuestProgram {
+    fn kill(&self, done: serve::Killed) {
+        let done = Arc::new(Mutex::new(Some(done)));
+        let answered = Arc::clone(&done);
+        let then: hex_client::Then = Box::new(move |_, got| {
+            let sent = match got {
+                Ok(Answer::Done) => Ok(()),
+                Ok(Answer::Refused(why)) | Err(why) => Err(why),
+                Ok(_) => Err(Refusal::Broken(
+                    "the guest's node answered a kill with something but done".to_owned(),
+                )),
+            };
+            if let Some(done) = answered.lock().ok().and_then(|mut d| d.take()) {
+                done(sent);
+            }
+        });
+        if let Err(why) = self.client.kill_then(self.exec, then)
+            && let Some(done) = done.lock().ok().and_then(|mut d| d.take())
+        {
+            done(Err(why));
+        }
+    }
+
+    fn release(&self) {
+        self.client.release(self.exec);
     }
 }

@@ -271,6 +271,14 @@ impl Duplex for Recorded {
     fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
         self.conn.set_read_timeout(timeout)
     }
+
+    fn handle(&self) -> super::Handle<'_> {
+        Duplex::handle(&self.conn)
+    }
+
+    fn set_nonblocking(&self, on: bool) -> std::io::Result<()> {
+        self.conn.set_nonblocking(on)
+    }
 }
 
 struct Recording {
@@ -371,11 +379,11 @@ impl shards_api::Stream for Looped {
         Ok(Box::new(Looped(self.0.try_clone()?)))
     }
 
-    fn handle(&self) -> shards_api::Handle {
+    fn handle(&self) -> shards_api::Handle<'_> {
         #[cfg(unix)]
-        return std::os::fd::AsRawFd::as_raw_fd(&self.0);
+        return std::os::fd::AsFd::as_fd(&self.0);
         #[cfg(windows)]
-        std::os::windows::io::AsRawSocket::as_raw_socket(&self.0)
+        std::os::windows::io::AsSocket::as_socket(&self.0)
     }
 
     fn set_nonblocking(&self, on: bool) -> std::io::Result<()> {

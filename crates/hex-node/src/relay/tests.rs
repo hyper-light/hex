@@ -269,6 +269,14 @@ impl Duplex for Told {
     fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         self.conn.set_read_timeout(timeout)
     }
+
+    fn handle(&self) -> hex_client::guest::Handle<'_> {
+        std::os::fd::AsFd::as_fd(&self.conn)
+    }
+
+    fn set_nonblocking(&self, on: bool) -> io::Result<()> {
+        self.conn.set_nonblocking(on)
+    }
 }
 
 /// The relay's control port, its client's writes told and the connection held for the test to end;
@@ -495,6 +503,14 @@ impl Duplex for Late {
     fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         self.conn.set_read_timeout(timeout)
     }
+
+    fn handle(&self) -> hex_client::guest::Handle<'_> {
+        std::os::fd::AsFd::as_fd(&self.conn)
+    }
+
+    fn set_nonblocking(&self, on: bool) -> io::Result<()> {
+        self.conn.set_nonblocking(on)
+    }
 }
 
 /// The relay's ports, each stdio connection [`Late`].
@@ -613,6 +629,14 @@ impl Duplex for CountingConn {
 
     fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         self.conn.set_read_timeout(timeout)
+    }
+
+    fn handle(&self) -> hex_client::guest::Handle<'_> {
+        std::os::fd::AsFd::as_fd(&self.conn)
+    }
+
+    fn set_nonblocking(&self, on: bool) -> io::Result<()> {
+        self.conn.set_nonblocking(on)
     }
 }
 

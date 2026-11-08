@@ -30,6 +30,8 @@ use std::time::Duration;
 mod calls;
 pub mod guest;
 
+pub use calls::{Ended, Then};
+
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]

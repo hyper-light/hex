@@ -91,4 +91,12 @@ impl Os for Unsupported {
             None => match self.never {},
         }
     }
+
+    fn watch_source(&self, _: super::Handle<'_>, _: u64, _: bool) -> Result<(), Refusal> {
+        match self.never {}
+    }
+
+    fn unwatch_source(&self, _: super::Handle<'_>, _: u64) {
+        match self.never {}
+    }
 }

@@ -299,6 +299,14 @@ impl Os for SimOs {
     fn stop_listening(&self) {
         self.lock().accepting = false;
     }
+
+    fn watch_source(&self, _: super::Handle<'_>, _: u64, _: bool) -> Result<(), Refusal> {
+        Err(Refusal::Broken(
+            "the simulated OS watches no host connection".to_owned(),
+        ))
+    }
+
+    fn unwatch_source(&self, _: super::Handle<'_>, _: u64) {}
 }
 
 /// A program that ends when the simulated OS says it has.

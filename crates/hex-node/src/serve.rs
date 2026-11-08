@@ -120,6 +120,8 @@ pub enum Forward {
     Taken,
     /// The host runs it itself, on the worker: the call and its exec's stdio, as they were given.
     Back(Box<(Call, Stdio)>),
+    /// The host couldn't send it (its reply spent with the attempt): refused, saying why.
+    Refused(Refusal),
 }
 
 /// A forwarded call's answer.
@@ -133,16 +135,63 @@ pub enum Forwarded {
 
 /// A program that runs where the node's host isn't (its guest): the OS can't watch it, so its end comes as
 /// a message, and it is killed or let go by message too.
-/// Neither call gives its answer or the program's end before it returns: both come later, as messages.
+/// Neither gives the program's end before it returns: that comes later, as a message.
 pub trait Remote: Send + Sync {
-    /// KILL to it alone; `done` hears whether that was sent.
+    /// KILL to it alone; `done` hears whether that was sent: later, or before this returns, on the
+    /// caller's thread, when it can't be sent at all.
     fn kill(&self, done: Killed);
     /// No one waits for its end any longer: it runs on, as a released in-process program does.
     fn release(&self);
 }
 
+/// A host's own connection's OS handle, borrowed from it, for the core's event set: a file descriptor on
+/// Unix, a Winsock socket on Windows.
+#[cfg(unix)]
+pub type Handle<'a> = std::os::fd::BorrowedFd<'a>;
+#[cfg(windows)]
+pub type Handle<'a> = std::os::windows::io::BorrowedSocket<'a>;
+#[cfg(not(any(unix, windows)))]
+pub type Handle<'a> = std::marker::PhantomData<&'a ()>;
+
+/// A host's connection to a node behind it (its guest), watched in the core's one event set, so its answers
+/// arrive as events on the core's thread and no thread waits in its reads.
+pub trait Source: Send {
+    /// Its OS handle, borrowed: open while the source is, and out of the event set before it drops.
+    fn handle(&self) -> Handle<'_>;
+    /// It is ready: reads what has come and writes what waits, never waiting; what to watch it for
+    /// next. Runs on the core's thread, and its completions with it.
+    fn ready(&mut self) -> Want;
+}
+
+/// What a [`Source`] wants watched next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Want {
+    Read,
+    /// Readable, and writable: bytes wait to be written.
+    ReadWrite,
+    /// Nothing: its connection has ended; it is let go.
+    Done,
+}
+
+/// The core's loop as a host sees it ([`Host::attach`]).
+pub trait Loop: Send + Sync {
+    /// A token for a source to come, so what is made before it is added can name it ([`Loop::room`]).
+    fn token(&self) -> Result<u64, Refusal>;
+    /// Watches `source` under `token` from now, for reading.
+    fn add(&self, token: u64, source: Box<dyn Source>) -> Result<(), Refusal>;
+    /// Source `token` has bytes waiting to be written: watched for room too. Safe from any thread.
+    fn room(&self, token: u64);
+}
+
 /// What the socket needs of the runtime it serves, beyond the seam.
 pub trait Host: Runtime {
+    /// Hands the host the core's loop, before the socket serves, so connections of its own (its guest's)
+    /// are watched there ([`Source`]). By default it has none.
+    fn attach(&self, lp: Arc<dyn Loop>) -> Result<(), Refusal> {
+        let _ = lp;
+        Ok(())
+    }
+
     /// Takes `call` to answer through `reply` once its answer comes, or gives it back to run on the
     /// worker. A host takes the calls about boxes a node behind a connection holds (the node's guest):
     /// what must be done here first (staging a box's root) is done on the worker, then the request goes
@@ -289,6 +338,11 @@ pub trait Os: Send + Sync + 'static {
     /// A program's stdio from what its exec carried, in the order `streams` names them; anything that
     /// isn't a stream's right end is refused by name.
     fn stdio(&self, streams: Streams, passed: Vec<Self::Passed>) -> Result<Stdio, Refusal>;
+    /// Watches a host's own connection ([`Source`]) under `token`, or changes its watch: reported
+    /// readable while bytes wait or it has ended, and writable too with `write`.
+    fn watch_source(&self, handle: Handle<'_>, token: u64, write: bool) -> Result<(), Refusal>;
+    /// Stops watching a host's own connection.
+    fn unwatch_source(&self, handle: Handle<'_>, token: u64);
 }
 
 impl<O: Os> Os for Arc<O> {
@@ -347,6 +401,12 @@ impl<O: Os> Os for Arc<O> {
     fn stdio(&self, streams: Streams, passed: Vec<Self::Passed>) -> Result<Stdio, Refusal> {
         (**self).stdio(streams, passed)
     }
+    fn watch_source(&self, handle: Handle<'_>, token: u64, write: bool) -> Result<(), Refusal> {
+        (**self).watch_source(handle, token, write)
+    }
+    fn unwatch_source(&self, handle: Handle<'_>, token: u64) {
+        (**self).unwatch_source(handle, token)
+    }
 }
 
 /// The socket, served until dropped.
@@ -368,6 +428,8 @@ struct Shared<O: Os> {
     table: Mutex<Table<O>>,
     /// Signalled when a remote program's end is taken, for a stopping server that waits on them.
     remote_ended: Condvar,
+    /// The host's own connections watched in the event set, by token ([`Source`]).
+    sources: Mutex<BTreeMap<u64, Sourced>>,
     jobs: Mutex<Jobs<O>>,
     work: Condvar,
     /// Why the I/O thread stopped, if it failed.
@@ -454,6 +516,66 @@ enum Run<O: Os> {
     Remote(Arc<dyn Remote>),
 }
 
+/// A host's source in the event set: out of it while its `ready` runs, and whether room was asked for meanwhile.
+#[derive(Default)]
+struct Sourced {
+    source: Option<Box<dyn Source>>,
+    room: bool,
+}
+
+/// The core's loop as its host sees it: the server, held weakly, as the server holds the host.
+struct CoreLoop<O: Os>(std::sync::Weak<Shared<O>>);
+
+impl<O: Os> CoreLoop<O> {
+    fn shared(&self) -> Result<Arc<Shared<O>>, Refusal> {
+        self.0
+            .upgrade()
+            .ok_or_else(|| Refusal::Broken("the node agent's socket has stopped".to_owned()))
+    }
+}
+
+impl<O: Os> Loop for CoreLoop<O> {
+    fn token(&self) -> Result<u64, Refusal> {
+        self.shared()?.table()?.token()
+    }
+
+    fn add(&self, token: u64, source: Box<dyn Source>) -> Result<(), Refusal> {
+        let shared = self.shared()?;
+        let mut sources = shared.sources.lock().map_err(poisoned)?;
+        shared.os.watch_source(source.handle(), token, false)?;
+        sources.insert(
+            token,
+            Sourced {
+                source: Some(source),
+                room: false,
+            },
+        );
+        Ok(())
+    }
+
+    fn room(&self, token: u64) {
+        let Ok(shared) = self.shared() else { return };
+        let Ok(mut sources) = shared.sources.lock() else {
+            return;
+        };
+        if let Some(entry) = sources.get_mut(&token) {
+            match &entry.source {
+                Some(source) => {
+                    if shared
+                        .os
+                        .watch_source(source.handle(), token, true)
+                        .is_err()
+                    {
+                        entry.room = true;
+                    }
+                }
+                // Its ready runs now, and is watched again as it ends: for room too.
+                None => entry.room = true,
+            }
+        }
+    }
+}
+
 /// A program just started: the token its exec took, its box, and its pid.
 struct Start {
     token: u64,
@@ -534,10 +656,15 @@ impl<O: Os> Server<O> {
             stopping: AtomicBool::new(false),
             table: Mutex::new(Table::default()),
             remote_ended: Condvar::new(),
+            sources: Mutex::new(BTreeMap::new()),
             jobs: Mutex::new(Jobs::default()),
             work: Condvar::new(),
             fault: Mutex::new(None),
         });
+        // The host's own connections join the event set before the socket serves.
+        shared
+            .host
+            .attach(Arc::new(CoreLoop(Arc::downgrade(&shared))))?;
         let io = {
             let shared = Arc::clone(&shared);
             std::thread::Builder::new()
@@ -671,9 +798,40 @@ impl<O: Os> Shared<O> {
                 } else if watched {
                     self.ended(token)
                 } else {
-                    // A connection or program removed since the event was queued.
-                    Ok(())
+                    // A host's own connection, or one removed since the event was queued.
+                    self.source(token)
                 }
+            }
+        }
+    }
+
+    /// A host's own connection is ready: its `ready` runs here, out of the table of sources, so a completion
+    /// it runs may ask for room ([`Loop::room`]); then it is watched as it says, or let go.
+    fn source(&self, token: u64) -> Result<(), Refusal> {
+        let taken = self
+            .sources
+            .lock()
+            .map_err(poisoned)?
+            .get_mut(&token)
+            .and_then(|s| s.source.take());
+        let Some(mut source) = taken else {
+            return Ok(());
+        };
+        let want = source.ready();
+        let mut sources = self.sources.lock().map_err(poisoned)?;
+        match want {
+            Want::Done => {
+                self.os.unwatch_source(source.handle(), token);
+                sources.remove(&token);
+                drop(source);
+                Ok(())
+            }
+            Want::Read | Want::ReadWrite => {
+                let entry = sources.entry(token).or_default();
+                let write = want == Want::ReadWrite || std::mem::take(&mut entry.room);
+                let watched = self.os.watch_source(source.handle(), token, write);
+                entry.source = Some(source);
+                watched
             }
         }
     }
@@ -1322,6 +1480,12 @@ impl<O: Os> Shared<O> {
         };
         let call = match self.host.forward(call, stdio, forwarded, ended) {
             Forward::Taken => return Ok(()),
+            Forward::Refused(why) => {
+                if program.is_some() {
+                    self.unreserve(conn)?;
+                }
+                return reply(Answer::Refused(why));
+            }
             Forward::Back(back) => match (*back, program) {
                 ((Call::Exec { id, program, .. }, stdio), Some((token, _))) => {
                     return self.exec(conn, header, token, id, program, stdio);
@@ -1580,8 +1744,9 @@ impl<O: Os> Shared<O> {
                 .filter(|(_, w)| matches!(w.run, Run::Local { .. }))
                 .map(|(token, _)| *token)
                 .collect();
-            if tokens.is_empty() {
-                // Only remote programs are left, whose ends come as their host's messages.
+            let sourced = self.sources.lock().is_ok_and(|s| !s.is_empty());
+            if tokens.is_empty() && !sourced {
+                // Only remote programs are left, whose ends come from their host's own thread.
                 if self.remote_ended.wait_timeout(table, left).is_err() {
                     break;
                 }
@@ -1593,10 +1758,20 @@ impl<O: Os> Shared<O> {
                 break;
             }
             for event in &events {
-                if let Event::Ready { token, .. } = event
-                    && tokens.contains(token)
-                {
-                    let _ = self.ended(*token);
+                if let Event::Ready { token, .. } = event {
+                    if tokens.contains(token) {
+                        let _ = self.ended(*token);
+                    } else {
+                        // A host's own connection, on which its remote programs' ends come.
+                        let _ = self.source(*token);
+                    }
+                }
+            }
+        }
+        if let Ok(mut sources) = self.sources.lock() {
+            for (token, entry) in std::mem::take(&mut *sources) {
+                if let Some(source) = entry.source {
+                    self.os.unwatch_source(source.handle(), token);
                 }
             }
         }

@@ -251,6 +251,9 @@ pub struct GuestRuntime {
     warm: Mutex<Warm>,
     /// Where the guest it holds is recorded ([`GuestRuntime::recorded_at`]).
     record: Option<PathBuf>,
+    /// The event form's client of the guest's node ([`GuestRuntime::connect_evented`]): its answers are
+    /// read by the node's loop, so a call through it holds no thread while the guest answers.
+    evented: Mutex<Option<Arc<Client>>>,
 }
 
 /// A throwaway guest booted on a Shards binary that changed while the node's guest ran, so the node's next boot
@@ -345,6 +348,7 @@ impl GuestRuntime {
             booted_binary: Mutex::new(None),
             warm: Mutex::new(Warm::default()),
             record: None,
+            evented: Mutex::new(None),
         }
     }
 
@@ -409,6 +413,29 @@ impl GuestRuntime {
                 held::remove(path)
             }
         }
+    }
+
+    /// Opens the event form's connection to the running guest's node ([`Client::connect_evented`]) and keeps
+    /// its client for [`GuestRuntime::evented`]; the reading side is the caller's loop's to watch.
+    /// `None` when no guest runs (no backend here, say).
+    pub fn connect_evented(
+        &self,
+        wants_room: Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<Option<hex_client::guest::Pump>, Refusal> {
+        let Some(b) = self.running()? else {
+            return Ok(None);
+        };
+        let (client, pump) = Client::connect_evented(Arc::clone(&b.link), wants_room)?;
+        *self.evented.lock().map_err(poisoned)? = Some(Arc::new(client));
+        Ok(Some(pump))
+    }
+
+    /// The event form's client, while its connection holds: a call through it is answered on the loop
+    /// that reads it. `None` once its guest has gone (booted again since, say): a call then takes the
+    /// waiting form.
+    pub fn evented(&self) -> Option<Arc<Client>> {
+        let evented = self.evented.lock().ok()?;
+        evented.as_ref().filter(|c| !c.closed()).map(Arc::clone)
     }
 
     /// Records `guest` as the one this node holds, where a record is kept: one whose identity Shards can't
