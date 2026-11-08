@@ -331,7 +331,8 @@ pub trait Os: Send + Sync + 'static {
     fn hung_up(&self, conn: &Self::Conn) -> bool;
     /// Watches the program `pid` under `token` until it ends.
     fn watch_program(&self, pid: u32, token: u64) -> Result<Self::Watch, Unwatched>;
-    /// Sends the watched program KILL; one that has ended already is reaped and counted just the same.
+    /// Sends the watched program KILL, for the disconnect rule; one that has ended already is reaped and
+    /// counted just the same. A caller's own kill goes through the program's runtime instead (`Proc::kill`).
     fn kill(&self, watch: &Self::Watch);
     /// Stops watching a program.
     fn unwatch_program(&self, watch: Self::Watch);
@@ -1234,10 +1235,11 @@ impl<O: Os> Shared<O> {
         Ok(())
     }
 
-    /// KILL to the program exec `exec` of `conn` started: through the OS's watch as the disconnect rule's
-    /// is, so it can't reach a process given its pid since, or by its host for a remote one, answered once
-    /// the host says it was sent. Its end is then sent as any end is; one that has ended (or was released)
-    /// is no longer the connection's, and there is nothing to kill.
+    /// KILL to the program exec `exec` of `conn` started: by the program's own runtime, its held `Proc::kill`,
+    /// which never reaches a process given its pid since and ends the program as its class does (Windows'
+    /// with KILL's job code, so it reads `Signal(9)`; macOS's telling its box's watcher first), or by its host
+    /// for a remote one, answered once the host says it was sent. Its end is then sent as any end is; one that
+    /// has ended (or was released) is no longer the connection's, and there is nothing to kill.
     fn kill(
         self: &Arc<Self>,
         conn: &Arc<Conn<O>>,
@@ -1245,7 +1247,7 @@ impl<O: Os> Shared<O> {
         exec: u64,
     ) -> Result<(), Refusal> {
         let remote = {
-            let table = self.table()?;
+            let mut table = self.table()?;
             let token = conn
                 .out
                 .lock()
@@ -1253,20 +1255,25 @@ impl<O: Os> Shared<O> {
                 .programs
                 .get(&exec)
                 .copied();
-            match token.and_then(|t| table.watched.get(&t)).map(|w| &w.run) {
-                Some(Run::Local {
-                    watch: Some(watch), ..
-                }) => {
-                    self.os.kill(watch);
-                    None
-                }
-                Some(Run::Remote(program)) => Some(Arc::clone(program)),
-                Some(Run::Local { watch: None, .. }) | None => None,
+            match token
+                .and_then(|t| table.watched.get_mut(&t))
+                .map(|w| &mut w.run)
+            {
+                Some(Run::Local { proc, .. }) => proc.kill().map(|()| None),
+                Some(Run::Remote(program)) => Ok(Some(Arc::clone(program))),
+                None => Ok(None),
             }
         };
-        let Some(program) = remote else {
-            self.done(conn)?;
-            return self.answer(conn, header.version, header.id, &Answer::Done);
+        let program = match remote {
+            Ok(Some(program)) => program,
+            local => {
+                self.done(conn)?;
+                let answer = match local {
+                    Ok(_) => Answer::Done,
+                    Err(why) => Answer::Refused(why),
+                };
+                return self.answer(conn, header.version, header.id, &answer);
+            }
         };
         let shared = Arc::clone(self);
         let conn = Arc::clone(conn);
