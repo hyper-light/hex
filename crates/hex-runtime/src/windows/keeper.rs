@@ -10,9 +10,9 @@
 //!   in a job no one can open.
 //!
 //! The keeper does nothing itself: the node duplicates job handles into it (`sys::duplicate_into`) and
-//! closes them there on delete (`sys::close_in`). It waits until its node ends or it is told to stop, then
-//! holds the handles for a bound time for the next node to take them, and exits. It is `hex keep`, started
-//! by the node ([`super::WinRuntime`]); this module is the keeper's body and the node's handle on it.
+//! closes them there on delete (`sys::close_in`). It holds them, with no timer, until its stop is asked. It
+//! is `hex keep`, started by the node ([`super::WinRuntime`]); this module is the keeper's body and the
+//! node's handle on it.
 
 use std::io;
 use std::path::{Path, PathBuf};

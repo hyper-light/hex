@@ -39,7 +39,7 @@ use windows_sys::Win32::System::Threading::{
     PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_DUP_HANDLE,
     PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, ResumeThread,
     STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, SetEvent, TerminateProcess,
-    WaitForMultipleObjects, WaitForSingleObject,
+    WaitForSingleObject,
 };
 
 use hex_core::job::Cpu;
@@ -579,30 +579,6 @@ pub fn duplicate_into(source: usize, into: &Handle) -> io::Result<usize> {
     Ok(theirs as usize)
 }
 
-/// A copy, in this process, of the handle `value` of `from`'s process, with the same access, owned here.
-pub fn duplicate_from(from: &Handle, value: usize) -> io::Result<Handle> {
-    let mut mine: HANDLE = null_mut();
-    // SAFETY: `from` is a process handle opened with PROCESS_DUP_HANDLE; `value` names a handle in it (a
-    // stale value is refused by the call, ERROR_INVALID_HANDLE, or names whatever handle has it, which the
-    // caller checks); the handle written is this process's, owned below.
-    let ok = unsafe {
-        DuplicateHandle(
-            from.raw(),
-            value as HANDLE,
-            GetCurrentProcess(),
-            &raw mut mine,
-            0,
-            0,
-            DUPLICATE_SAME_ACCESS,
-        )
-    };
-    if ok == 0 {
-        return Err(last_error());
-    }
-    // SAFETY: a handle this call made in this process, owned from here.
-    Ok(unsafe { Handle::own(mine) })
-}
-
 /// Closes the handle `value` in `into`'s process (`DUPLICATE_CLOSE_SOURCE`, no copy made).
 pub fn close_in(into: &Handle, value: usize) -> io::Result<()> {
     // SAFETY: `into` is a process handle opened with PROCESS_DUP_HANDLE; with DUPLICATE_CLOSE_SOURCE and no
@@ -693,17 +669,6 @@ pub fn set(event: &Handle) -> io::Result<()> {
         return Err(last_error());
     }
     Ok(())
-}
-
-/// Waits, without end, for the first of `a` and `b` to be signalled: `true` for `a`.
-pub fn first_of(a: &Handle, b: &Handle) -> io::Result<bool> {
-    let both = [a.raw(), b.raw()];
-    // SAFETY: two live handles, waited on without end for either.
-    match unsafe { WaitForMultipleObjects(2, both.as_ptr(), 0, u32::MAX) } {
-        WAIT_OBJECT_0 => Ok(true),
-        r if r == WAIT_OBJECT_0.saturating_add(1) => Ok(false),
-        _ => Err(last_error()),
-    }
 }
 
 /// Whether `process` ended within `timeout_ms` (`u32::MAX` is forever).
