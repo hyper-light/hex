@@ -166,17 +166,20 @@ impl State {
 
     /// Counts member `pid`'s death as a memory end — once — if the box armed it with the fatal cap, isn't
     /// being deleted, and isn't being ended by the watcher's own rule (whose End verdict counts that
-    /// bound). The caller establishes the member died by the kernel's hand (a `SIGKILL`: its cap, or
-    /// memory pressure on a box member). `peak` is the member's footprint at death when known (its
-    /// zombie's, read before it was reaped), else the cap is a sound floor — reaching the fatal cap is
-    /// death. Dropping `pid` from the armed set makes the count idempotent across the member's waiter
-    /// (on reap) and the watcher (on the exit event): whoever removes it first counts it (native plan
-    /// step 1's `_ext` backstop; HEX-MAC-1, the figure HEX-RT-5's memory case and the overshoot bench read).
+    /// bound), and only when its `peak` (its zombie's lifetime peak, read before it was reaped) reached the
+    /// cap: the kernel's fatal cap kills a member at it, so a `SIGKILL` of a member under it was another
+    /// hand's (AppleSystemPolicy's refusal of an exec kills it so before it runs, CLAUDE.md §3: never a
+    /// memory kill it wasn't). Dropping `pid` from the armed set makes the count idempotent across the
+    /// member's waiter (on reap) and the watcher (on the exit event): whoever brings its peak first decides.
+    /// A call with no peak decides nothing and leaves `pid` armed: the watcher reads an exit event's member
+    /// when it wakes, which can be after the waiter reaped it, and the waiter read the zombie's peak before
+    /// that reap (native plan step 1's `_ext` backstop; HEX-MAC-1, the figure HEX-RT-5's memory case and the
+    /// overshoot bench read).
     fn killed_by_cap(&self, pid: i32, peak: Option<u64>) -> Result<(), Refusal> {
         if self.stop.load(Ordering::SeqCst) || self.ending.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let Some(cap) = self.cap_bytes else {
+        let (Some(cap), Some(peak)) = (self.cap_bytes, peak) else {
             return Ok(());
         };
         if !self
@@ -185,10 +188,12 @@ impl State {
             .map_err(|_| poisoned("a box's armed set"))?
             .remove(&pid)
         {
-            // Not an armed member, or already counted: the armed-set removal is the dedup point.
+            // Not an armed member, or already decided: the armed-set removal is the dedup point.
             return Ok(());
         }
-        let peak = peak.unwrap_or(cap).max(cap);
+        if peak < cap {
+            return Ok(());
+        }
         let bound = self.limit.memory.unwrap_or(peak);
         let mut status = self.status()?;
         status.memory_kills = status.memory_kills.saturating_add(1);
@@ -210,12 +215,12 @@ impl State {
 pub struct Members(Arc<State>);
 
 impl Members {
-    /// Tells the box a member ended: when `sigkill` (the kernel killed it, at its cap or under memory
-    /// pressure), counts a memory end once ([`State::killed_by_cap`]). A clean exit or another signal is
-    /// not a memory end. The member is reaped, so its exact peak is gone and the cap is the floor.
-    pub fn ended(&self, pid: i32, sigkill: bool) -> Result<(), Refusal> {
+    /// Tells the box a member ended: when `sigkill` and its `peak` (read from its zombie before the reap)
+    /// reached the cap, counts a memory end once ([`State::killed_by_cap`]). A clean exit, another signal,
+    /// or a SIGKILL under the cap is not a memory end.
+    pub fn ended(&self, pid: i32, sigkill: bool, peak: Option<u64>) -> Result<(), Refusal> {
         if sigkill {
-            self.0.killed_by_cap(pid, None)
+            self.0.killed_by_cap(pid, peak)
         } else {
             Ok(())
         }
@@ -786,10 +791,15 @@ impl Watcher {
             if let Event::Exit { pid, status, .. } = *e
                 && (status & 0x7f) == kill_signal()
             {
-                // The member is a fresh zombie (not yet reaped by its waiter): read its lifetime peak for
-                // the exact figure; `killed_by_cap` falls back to the cap when it is gone, and guards the
-                // box being deleted or the watcher's own kill, and counts each death once.
-                let peak = sys::rusage(pid).ok().flatten().map(|r| r.peak);
+                // Its zombie's lifetime peak, while its waiter hasn't reaped it: a pid gone, or already
+                // another process's, gives none, and `killed_by_cap` leaves the decision to the waiter,
+                // which read the peak before its reap. It guards the box being deleted or the watcher's own
+                // kill, and counts each death once.
+                let peak = sys::rusage(pid)
+                    .ok()
+                    .flatten()
+                    .filter(|r| r.ended)
+                    .map(|r| r.peak);
                 self.state.killed_by_cap(pid, peak)?;
             }
         }

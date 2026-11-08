@@ -429,6 +429,12 @@ fn overshoot(rt: &MacRuntime, fx: &BinFixture, what: &str, members: usize, pass:
         );
         peak = peak.max(rt.usage(&id).expect("usage").memory_peak_bytes);
     }
+    // The box ended for memory: a hog killed by another hand (a refused exec dies by SIGKILL) is no bound.
+    let kills = rt.usage(&id).expect("usage").oom_kills;
+    assert!(
+        kills >= 1,
+        "the box's hogs ended but no memory kill was counted"
+    );
     let at_end = match rt.status(&id).map(|s| s.ended) {
         Ok(Some(hex_runtime::macos::process::Ended::Over(hex_core::watch::Over::Memory {
             footprint,
@@ -716,5 +722,67 @@ fn measure_a_cpu_bound_members_work_rate() {
     println!(
         "CPU_BOUND cores={cores} member_cores={:.3}",
         used as f64 / 1e6 / secs
+    );
+}
+
+/// Starts `program` in box `id` and waits up to `budget` for it to end; returns how long it took when its end
+/// was the box's bound's kill: a signal, with the box's memory kills risen by one. Anything else (a program
+/// that ended on its own, or one killed by another hand, as the kernel's AppleSystemPolicy kills a refused
+/// exec with SIGKILL before it runs) is an error saying so, so a refused spawn can't pass for a bound's kill.
+fn bound_end(
+    rt: &MacRuntime,
+    id: &BoxId,
+    program: Program,
+    budget: Duration,
+) -> Result<Duration, String> {
+    let kills = |rt: &MacRuntime| {
+        rt.usage(id)
+            .map(|u| u.oom_kills)
+            .map_err(|e| format!("usage: {e}"))
+    };
+    let before = kills(rt)?;
+    let mut p = rt
+        .exec(id, program, Stdio::null())
+        .map_err(|e| format!("exec: {e}"))?;
+    let t = Instant::now();
+    let exit = p.wait_for(budget).map_err(|e| format!("wait: {e}"))?;
+    let took = t.elapsed();
+    let after = kills(rt)?;
+    match exit {
+        Some(Exit::Signal(_)) if after == before + 1 => Ok(took),
+        other => Err(format!(
+            "ended {other:?} after {took:?}, memory kills {before} -> {after}"
+        )),
+    }
+}
+
+/// CLAUDE.md §3, the lead (2026-11-07): AppleSystemPolicy refused four executions of hex during a
+/// macos_process_box run and every test passed, since a refused exec dies by SIGKILL, which reads as a
+/// bound's kill. Do run a program that kills itself with SIGKILL at its start, as a refused exec dies, in a
+/// box with a memory bound; expect the end-is-seen check to count it as no bound's end.
+#[test]
+fn a_program_killed_outside_the_bound_is_no_bounds_end() {
+    let rt = runtime();
+    let id = BoxId::new("mac-not-the-bound").unwrap();
+    let _ = rt.delete(&id);
+    rt.create(BoxSpec {
+        id: id.clone(),
+        bounds: Bounds {
+            memory_max: Some(256 * MIB),
+            ..Bounds::default()
+        },
+        class: ClassSpec::Process,
+    })
+    .expect("create");
+    let killed = bound_end(
+        &rt,
+        &id,
+        Program::of(&["/bin/sh", "-c", "kill -KILL $$"]),
+        HANG_GUARD,
+    );
+    rt.delete(&id).expect("delete");
+    assert!(
+        killed.is_err(),
+        "a SIGKILL outside the bound passed for the bound's kill: {killed:?}"
     );
 }

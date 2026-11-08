@@ -468,3 +468,47 @@ fn a_listing_is_sized_by_kern_maxproc_or_refused() {
     let sized = super::sys::listing_from(Ok(7)).expect("a listing for 7");
     assert!(sized.capacity() >= 7 && sized.is_empty());
 }
+
+/// HEX-MAC-1, CLAUDE.md §3: a member killed at its fatal cap is counted once, by whichever of its waiter and
+/// the watcher reads its zombie's peak. The watcher reads an exit event's member when it wakes, which can be
+/// after the member's waiter has reaped it, and then has no peak to decide by; the waiter read the peak
+/// before its reap. Do tell a box that an armed member died by SIGKILL, first with no peak (the watcher, the
+/// member reaped under it) and then with its peak at the cap (its waiter); expect one memory kill.
+#[test]
+fn a_cap_kill_the_watcher_finds_reaped_is_counted_by_its_waiter() {
+    let rates = hex_core::watch::seed(&super::machine_model().expect("this Mac's model"));
+    let rt = MacRuntime::new(rates.bytes, rates.processes).expect("a macOS runtime");
+    let id = BoxId::new("mac-cap-kill-reaped").expect("an id");
+    let bound: u64 = 256 << 20;
+    let _ = rt.delete(&id);
+    rt.create(BoxSpec {
+        id: id.clone(),
+        bounds: Bounds {
+            memory_max: Some(bound),
+            ..Bounds::default()
+        },
+        class: ClassSpec::Process,
+    })
+    .expect("create");
+    // A member that lives no longer than the hang guard, armed with the box's cap as every member is.
+    let guard = HANG_GUARD.as_secs().to_string();
+    let p = rt
+        .exec(&id, Program::of(&["/bin/sleep", &guard]), Stdio::null())
+        .expect("exec");
+    let pid = i32::try_from(p.pid()).expect("a pid");
+    let cap = super::sys::jetsam_cap_bytes(bound).expect("a cap for the bound");
+    let members = rt.get(&id).expect("the box").members();
+    members
+        .ended(pid, true, None)
+        .expect("the watcher's account");
+    members
+        .ended(pid, true, Some(cap))
+        .expect("the waiter's account");
+    let kills = rt.usage(&id).expect("usage").oom_kills;
+    rt.delete(&id).expect("delete");
+    drop(p);
+    assert_eq!(
+        kills, 1,
+        "a cap kill the watcher found reaped went uncounted"
+    );
+}

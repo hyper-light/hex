@@ -72,6 +72,13 @@ impl BoxProc {
         } else {
             WaitIdOptions::EXITED | WaitIdOptions::NOHANG
         };
+        // Peek first (NOWAIT): the zombie's lifetime peak is readable only until the reap, and it tells a cap
+        // kill from another hand's SIGKILL (State::killed_by_cap).
+        let peak = match rustix::process::waitid(WaitId::Pid(pid), options | WaitIdOptions::NOWAIT)
+        {
+            Ok(Some(_)) => super::sys::rusage(self.pid).ok().flatten().map(|r| r.peak),
+            _ => None,
+        };
         match rustix::process::waitid(WaitId::Pid(pid), options) {
             Ok(Some(status)) => {
                 let exit = exit_of(&status);
@@ -81,7 +88,7 @@ impl BoxProc {
                 let sigkill = matches!(exit, Exit::Signal(s) if s == Signal::KILL.number());
                 self.exit = Some(exit);
                 if let Some(members) = &self.members {
-                    members.ended(self.pid, sigkill)?;
+                    members.ended(self.pid, sigkill, peak)?;
                 }
                 Ok(self.exit)
             }
