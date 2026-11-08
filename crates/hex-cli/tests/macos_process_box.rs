@@ -341,13 +341,9 @@ fn a_programs_end_is_seen_when_it_ends_not_at_the_waits_budget() {
     let budget = HANG_GUARD;
     let mut late = Vec::new();
     for i in 0..60 {
-        let mut p = rt
-            .exec(&id, fx.act(&Act::Hog(GIB)), Stdio::null())
-            .expect("exec hog");
-        let t = Instant::now();
-        let exit = p.wait_for(budget).expect("wait");
-        if !matches!(exit, Some(Exit::Signal(_))) || t.elapsed() >= late_after {
-            late.push((i, exit, t.elapsed()));
+        match bound_end(&rt, &id, fx.act(&Act::Hog(GIB)), budget) {
+            Ok(took) if took < late_after => {}
+            other => late.push((i, other)),
         }
     }
     rt.delete(&id).expect("delete");
