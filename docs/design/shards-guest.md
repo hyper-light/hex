@@ -577,6 +577,10 @@ Hex's tests of the channel, each citing its ID:
   caller's own pipes, the client copies between them, and the node keeps none of the caller's pipes; a client of
   wire version 2 carrying pipes is refused before the guest is sent anything (`crates/hex-node/tests/guest_loop.rs`,
   over a stand-in guest whose programs' pids name no host process; `hex_client`'s Linux tests, the client's copy).
+- HEX-GUEST-42: the conformance suite on `oci` boxes through a host node's socket served over
+  `Recorded<WithGuest<…>>`, as the macOS and Windows nodes serve their guests, HEX-GUEST-18's simulated guest
+  behind it: the guest reached from the host's node through the seam (native plan step 5), both stdio forms
+  among its cases (`crates/hex-cli/tests/node_socket.rs`).
 
 ## 7. What would falsify it
 
