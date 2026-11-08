@@ -127,19 +127,8 @@ fn guest_given() -> Result<(), String> {
 
 #[test]
 fn the_oci_class_holds_its_contract_through_a_real_shards_guest() {
-    let needed = [
-        "HEX_GUEST_KERNEL",
-        "HEX_GUEST_INITRD",
-        "SHARDS_BIN",
-        "HEX_GUEST_LINUX_HEX",
-    ];
-    let missing: Vec<&str> = needed
-        .iter()
-        .copied()
-        .filter(|n| std::env::var_os(n).is_none())
-        .collect();
-    if !missing.is_empty() {
-        eprintln!("SKIP: no Shards guest given ({} unset)", missing.join(", "));
+    if let Err(why) = guest_given() {
+        eprintln!("SKIP: {why}");
         return;
     }
     let root = tempfile::tempdir().unwrap();
