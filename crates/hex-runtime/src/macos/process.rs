@@ -208,6 +208,17 @@ impl Members {
             Ok(())
         }
     }
+
+    /// Member `pid` is about to be sent KILL by its node (`Proc::kill`): its death is not the kernel's cap,
+    /// so it leaves the armed set, which is where a cap kill is counted once ([`State::killed_by_cap`]).
+    pub fn killing(&self, pid: i32) -> Result<(), Refusal> {
+        self.0
+            .armed
+            .lock()
+            .map_err(|_| poisoned("a box's armed set"))?
+            .remove(&pid);
+        Ok(())
+    }
 }
 
 /// A macOS `process` box. Dropping it ends the box and joins its watcher.

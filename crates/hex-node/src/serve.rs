@@ -945,6 +945,27 @@ impl<O: Os> Shared<O> {
         self.resume_accepting(&mut table)
     }
 
+    /// KILL to the program exec `exec` of `conn` started, through the OS's watch as the disconnect rule's
+    /// is, so it can't reach a process given its pid since. Its end is then sent as any end is; one that has
+    /// ended (or was released) is no longer the connection's, and there is nothing to kill.
+    fn kill(&self, conn: &Conn<O>, exec: u64) -> Result<(), Refusal> {
+        let table = self.table()?;
+        let token = conn
+            .out
+            .lock()
+            .map_err(poisoned)?
+            .programs
+            .get(&exec)
+            .copied();
+        if let Some(watch) = token
+            .and_then(|t| table.watched.get(&t))
+            .and_then(|w| w.watch.as_ref())
+        {
+            self.os.kill(watch);
+        }
+        Ok(())
+    }
+
     /// A watched program's watch is ready: it has ended. Reaped, and its end sent to its connection,
     /// or counted in its box when the connection closed (the disconnect rule).
     fn ended(self: &Arc<Self>, token: u64) -> Result<(), Refusal> {
@@ -1115,6 +1136,7 @@ impl<O: Os> Shared<O> {
             Call::Usage(id) => host.usage(&id).map(Answer::Usage),
             Call::Delete(id) => host.delete(&id).map(|()| Answer::Done),
             Call::Netns => host.netns().map(Answer::Netns),
+            Call::Kill { exec } => self.kill(conn, exec).map(|()| Answer::Done),
         };
         self.done(conn)?;
         let answer = answer.unwrap_or_else(Answer::Refused);

@@ -47,6 +47,13 @@ impl Proc for ChildProc {
             std::thread::park_timeout(Duration::from_millis(1));
         }
     }
+    fn kill(&mut self) -> Result<(), Refusal> {
+        self.0
+            .lock()
+            .map_err(poisoned)?
+            .kill()
+            .map_err(|e| Refusal::os("kill", e))
+    }
 }
 
 /// Boxes in the simulator; programs real processes of this test, started on the request's stdio.

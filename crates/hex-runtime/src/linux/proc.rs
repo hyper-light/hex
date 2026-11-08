@@ -101,4 +101,16 @@ impl Proc for PidfdProc {
             }
         }
     }
+
+    /// KILL through the pidfd, which names this process alone, so it can't reach one given its pid since.
+    fn kill(&mut self) -> Result<(), Refusal> {
+        if self.exit.is_some() {
+            return Ok(());
+        }
+        match rustix::process::pidfd_send_signal(&self.pidfd, rustix::process::Signal::KILL) {
+            // ESRCH: it has ended already (pidfd_send_signal(2)).
+            Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
+            Err(e) => Err(Refusal::os("pidfd_send_signal", e)),
+        }
+    }
 }

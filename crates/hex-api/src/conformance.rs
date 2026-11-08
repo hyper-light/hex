@@ -136,6 +136,11 @@ pub const CASES: &[Case] = &[
         says: "create of an oci box whose spec names a value that can't be rendered is refused as Invalid naming the field, and makes nothing",
         run: unrenderable,
     },
+    Case {
+        id: "HEX-RT-16",
+        says: "of two waiting programs in a box, the one killed through its Proc ends with Signal(9) and the other runs on; a second kill of the ended one is Ok",
+        run: kill,
+    },
 ];
 
 /// Runs every case on fresh boxes; returns the failures.
@@ -252,6 +257,32 @@ fn signal(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     let exit = ended(&mut p)?;
     rt.delete(&id).map_err(|e| e.to_string())?;
     ensure(exit == Exit::Signal(15), || format!("exit {exit:?}"))
+}
+
+fn kill(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
+    let id = made(rt, fx, "kill", Bounds::default())?;
+    let mut killed = rt
+        .exec(&id, fx.program(&Act::Wait), Stdio::null())
+        .map_err(|e| format!("exec: {e}"))?;
+    let mut other = rt
+        .exec(&id, fx.program(&Act::Wait), Stdio::null())
+        .map_err(|e| format!("exec: {e}"))?;
+    let early = killed.wait_for(STILL_RUNNING).map_err(|e| e.to_string())?;
+    ensure(early.is_none(), || {
+        format!("a waiting program ended: {early:?}")
+    })?;
+    killed.kill().map_err(|e| format!("kill: {e}"))?;
+    let exit = ended(&mut killed)?;
+    let again = killed.kill();
+    let on = other.wait_for(STILL_RUNNING).map_err(|e| e.to_string())?;
+    rt.delete(&id).map_err(|e| e.to_string())?;
+    ensure(exit == Exit::Signal(9), || format!("exit {exit:?}"))?;
+    ensure(again.is_ok(), || {
+        format!("a kill of the ended program: {again:?}")
+    })?;
+    ensure(on.is_none(), || {
+        format!("the other program ended with the kill: {on:?}")
+    })
 }
 
 fn memory_bound(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {

@@ -109,6 +109,26 @@ impl Proc for BoxProc {
                 .map_err(|e| Refusal::os("waiting on a program", e))?;
         }
     }
+
+    /// KILL by pid: the program is this node's child and not yet reaped (a reaped one has its exit cached),
+    /// so its pid is still its own, a zombie's at worst.
+    fn kill(&mut self) -> Result<(), Refusal> {
+        if self.reap()?.is_some() {
+            return Ok(());
+        }
+        let Some(pid) = Pid::from_raw(self.pid) else {
+            return Err(Refusal::Invalid {
+                what: "pid",
+                why: format!("{} isn't a process id", self.pid),
+            });
+        };
+        self.members.killing(self.pid)?;
+        match rustix::process::kill_process(pid, rustix::process::Signal::KILL) {
+            // ESRCH: reaped elsewhere since (a box delete); it has ended.
+            Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
+            Err(e) => Err(Refusal::os("kill", e)),
+        }
+    }
 }
 
 /// How a program ended, from its wait status, with any terminating signal carried as Linux's number so a

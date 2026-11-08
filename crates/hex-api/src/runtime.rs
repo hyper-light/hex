@@ -50,6 +50,11 @@ pub trait Proc: Send {
 
     /// Waits at most `timeout` for its end; `Ok(None)` when it is still running.
     fn wait_for(&mut self, timeout: Duration) -> Result<Option<Exit>, Refusal>;
+
+    /// Ends this program, and only it (its box and the box's other programs run on), as KILL does: its end
+    /// then reads as `Exit::Signal(9)`, unless it had ended first. `Ok` once it is sent, or when the program
+    /// has ended already; it never reaches a process given the program's pid since.
+    fn kill(&mut self) -> Result<(), Refusal>;
 }
 
 /// How a program ended.

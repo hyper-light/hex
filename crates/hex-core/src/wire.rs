@@ -28,6 +28,9 @@
 //!
 //! Version 2 (goal 4 plan step 2) adds one request and its answer: the node agent's network namespace
 //! counts ([`Call::Netns`], [`Answer::Netns`]). Every version 1 kind reads the same in it.
+//!
+//! Version 3 (native plan step 8) adds one request: a program's kill ([`Call::Kill`], `Proc::kill` through
+//! the socket), answered as every call is. Every earlier kind reads the same in it.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -43,7 +46,7 @@ use crate::netns;
 /// Every message's first bytes.
 pub const MAGIC: [u8; 4] = *b"HEXW";
 /// The highest version this side speaks; it reads and writes every one from [`FIRST`].
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 /// The first version, which every side reads: a client's hello goes in it, and so does a refusal of a
 /// message whose version this side can't tell or doesn't speak.
 pub const FIRST: u16 = 1;
@@ -84,12 +87,15 @@ mod kind {
     // Version 2's.
     pub const NETNS: u16 = 0x000b;
     pub const NETNS_ANSWER: u16 = 0x8009;
+    // Version 3's.
+    pub const KILL: u16 = 0x000c;
 
     /// The version that added `kind`: a message of an earlier version is never of it. A kind no
     /// version defines is refused by the reader's match, whatever this says.
     pub fn since(kind: u16) -> u16 {
         match kind {
             NETNS | NETNS_ANSWER => 2,
+            KILL => 3,
             _ => 1,
         }
     }
@@ -137,6 +143,11 @@ pub enum Call {
     Delete(BoxId),
     /// The node agent's network namespace counts ([`netns::Counts`]), version 2's.
     Netns,
+    /// Version 3's: KILL to the program exec `exec` of this connection started (`Proc::kill`), and only it.
+    /// Answered `Done` once sent, or when that program has ended already.
+    Kill {
+        exec: u64,
+    },
 }
 
 /// Which of a program's standard streams travel with its exec, in this order; the rest are the null
@@ -509,6 +520,9 @@ fn parse_request(
         kind::LIST => Request::Call(Call::List),
         kind::DELETE => Request::Call(Call::Delete(box_id(&mut r).map_err(bad)?)),
         kind::NETNS => Request::Call(Call::Netns),
+        kind::KILL => Request::Call(Call::Kill {
+            exec: r.u64().map_err(bad)?,
+        }),
         _ => {
             return Err(bad(Fault::Kind {
                 kind,
@@ -654,6 +668,7 @@ fn request_name(kind: u16) -> &'static str {
         kind::DELETE => "a delete",
         kind::RELEASE => "a release",
         kind::NETNS => "a netns",
+        kind::KILL => "a kill",
         _ => "a request",
     }
 }
@@ -706,6 +721,12 @@ fn put_call(w: &mut Writer, version: u16, id: u64, call: &Call) -> Result<(), Fa
         Call::Netns => {
             defines(version, kind::NETNS, "a request")?;
             w.header(version, kind::NETNS, id);
+            Ok(())
+        }
+        Call::Kill { exec } => {
+            defines(version, kind::KILL, "a request")?;
+            w.header(version, kind::KILL, id);
+            w.u64(*exec);
             Ok(())
         }
     }

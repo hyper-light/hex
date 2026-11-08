@@ -381,6 +381,9 @@ impl Proc for SimHandle {
             exit = self.0.ended.wait_timeout(exit, left).map_err(poisoned)?.0;
         }
     }
+    fn kill(&mut self) -> Result<(), Refusal> {
+        self.0.end(Exit::Signal(Signal::KILL.number()))
+    }
 }
 
 #[cfg(test)]

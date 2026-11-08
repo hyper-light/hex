@@ -38,7 +38,7 @@ use windows_sys::Win32::System::Threading::{
     GetActiveProcessorCount, GetExitCodeProcess, InitializeProcThreadAttributeList,
     LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
     PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES,
-    STARTUPINFOEXW, STARTUPINFOW, WaitForSingleObject,
+    STARTUPINFOEXW, STARTUPINFOW, TerminateProcess, WaitForSingleObject,
 };
 
 use hex_core::job::Cpu;
@@ -525,6 +525,16 @@ pub fn wait(process: &Handle, timeout_ms: u32) -> io::Result<bool> {
         WAIT_TIMEOUT => Ok(false),
         _ => Err(last_error()),
     }
+}
+
+/// Ends `process` alone with exit code `code` (`Proc::kill`: its job and the job's other members run on).
+/// A process that has ended already is refused `ERROR_ACCESS_DENIED`; the caller reads its exit to tell.
+pub fn terminate_process(process: &Handle, code: u32) -> io::Result<()> {
+    // SAFETY: process is a valid, owned process handle; TerminateProcess ends that process and returns.
+    if unsafe { TerminateProcess(process.raw(), code) } == 0 {
+        return Err(last_error());
+    }
+    Ok(())
 }
 
 /// `process`'s exit code, once it has ended (`STILL_ACTIVE`, 259, while it runs).

@@ -171,6 +171,89 @@ impl<T: Transport> Drop for Conn<T> {
     }
 }
 
+impl<T: Transport> Conn<T> {
+    /// Sends `request`, with what `with` makes for its id to travel with it, and waits for its
+    /// answer. With `program`, a `Proc`'s place for the end of the program an exec starts is made
+    /// before the exec goes, so the end can't come first.
+    fn call(
+        &self,
+        version: u16,
+        bound: usize,
+        request: &Request,
+        with: impl FnOnce(u64) -> Result<Option<T::Stdio>, Refusal>,
+        program: Option<Arc<Ending>>,
+    ) -> Result<(u64, Answer), Refusal> {
+        let shared = &self.shared;
+        let (tx, rx) = sync_channel(1);
+        let id = {
+            let mut state = shared.state()?;
+            if let Some(why) = &state.closed {
+                return Err(why.clone());
+            }
+            let id = state
+                .next
+                .checked_add(1)
+                .ok_or_else(|| Refusal::Broken("the client's request ids ran out".to_owned()))?;
+            state.next = id;
+            state.calls.insert(
+                id,
+                Waiting {
+                    answer: tx,
+                    boxes: Vec::new(),
+                },
+            );
+            if let Some(program) = program {
+                state.programs.insert(id, program);
+            }
+            id
+        };
+        let forget = |shared: &Shared<T>| {
+            if let Ok(mut state) = shared.state() {
+                state.calls.remove(&id);
+                state.programs.remove(&id);
+            }
+        };
+        let sent = wire::request(version, id, request, bound)
+            .map_err(|fault| Sent::Refused(fault.into()))
+            .and_then(|bytes| {
+                let with = with(id).map_err(Sent::Refused)?;
+                shared.transport.send(&bytes, with)
+            });
+        match sent {
+            Ok(()) => {}
+            // The agent has gone, or closed the connection: why reaches the waiting call through
+            // the reading side, which sees the end.
+            Err(Sent::Gone) => {}
+            Err(Sent::Refused(r)) => {
+                forget(shared);
+                return Err(r);
+            }
+        }
+        let answer = match rx.recv_timeout(ANSWER_PATIENCE) {
+            Ok(answer) => answer,
+            Err(RecvTimeoutError::Timeout) => {
+                forget(shared);
+                return Err(Refusal::Os {
+                    op: "waiting for the node agent's answer",
+                    why: format!("none came in {ANSWER_PATIENCE:?}"),
+                });
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                Err(shared.state()?.closed.clone().unwrap_or_else(|| {
+                    Refusal::Broken("the node agent's answer was lost".to_owned())
+                }))
+            }
+        };
+        match answer {
+            Ok(answer) => Ok((id, answer)),
+            Err(r) => {
+                forget(shared);
+                Err(r)
+            }
+        }
+    }
+}
+
 /// A node agent, reached through a transport.
 pub struct Core<T: Transport> {
     conn: Arc<Conn<T>>,
@@ -238,83 +321,20 @@ impl<T: Transport> Core<T> {
         }
     }
 
-    /// Sends `request`, with what `with` makes for its id to travel with it, and waits for its
-    /// answer. With `program`, a `Proc`'s place for the end of the program an exec starts is made
-    /// before the exec goes, so the end can't come first.
+    /// Sends `request` on the connection, with what `with` makes for its id, and waits for its answer.
     fn call(
         &self,
         request: &Request,
         with: impl FnOnce(u64) -> Result<Option<T::Stdio>, Refusal>,
         program: Option<Arc<Ending>>,
     ) -> Result<(u64, Answer), Refusal> {
-        let shared = &self.conn.shared;
-        let (tx, rx) = sync_channel(1);
-        let id = {
-            let mut state = shared.state()?;
-            if let Some(why) = &state.closed {
-                return Err(why.clone());
-            }
-            let id = state
-                .next
-                .checked_add(1)
-                .ok_or_else(|| Refusal::Broken("the client's request ids ran out".to_owned()))?;
-            state.next = id;
-            state.calls.insert(
-                id,
-                Waiting {
-                    answer: tx,
-                    boxes: Vec::new(),
-                },
-            );
-            if let Some(program) = program {
-                state.programs.insert(id, program);
-            }
-            id
-        };
-        let forget = |shared: &Shared<T>| {
-            if let Ok(mut state) = shared.state() {
-                state.calls.remove(&id);
-                state.programs.remove(&id);
-            }
-        };
-        let sent = wire::request(self.version, id, request, self.limits.message_bytes)
-            .map_err(|fault| Sent::Refused(fault.into()))
-            .and_then(|bytes| {
-                let with = with(id).map_err(Sent::Refused)?;
-                shared.transport.send(&bytes, with)
-            });
-        match sent {
-            Ok(()) => {}
-            // The agent has gone, or closed the connection: why reaches the waiting call through
-            // the reading side, which sees the end.
-            Err(Sent::Gone) => {}
-            Err(Sent::Refused(r)) => {
-                forget(shared);
-                return Err(r);
-            }
-        }
-        let answer = match rx.recv_timeout(ANSWER_PATIENCE) {
-            Ok(answer) => answer,
-            Err(RecvTimeoutError::Timeout) => {
-                forget(shared);
-                return Err(Refusal::Os {
-                    op: "waiting for the node agent's answer",
-                    why: format!("none came in {ANSWER_PATIENCE:?}"),
-                });
-            }
-            Err(RecvTimeoutError::Disconnected) => {
-                Err(shared.state()?.closed.clone().unwrap_or_else(|| {
-                    Refusal::Broken("the node agent's answer was lost".to_owned())
-                }))
-            }
-        };
-        match answer {
-            Ok(answer) => Ok((id, answer)),
-            Err(r) => {
-                forget(shared);
-                Err(r)
-            }
-        }
+        self.conn.call(
+            self.version,
+            self.limits.message_bytes,
+            request,
+            with,
+            program,
+        )
     }
 
     /// A call that carries nothing beside its message.
@@ -391,6 +411,7 @@ impl<T: Transport> Runtime for Core<T> {
             Answer::Started { pid } => Ok(Box::new(RemoteProc {
                 conn: Arc::clone(&self.conn),
                 version: self.version,
+                bound: self.limits.message_bytes,
                 exec,
                 pid,
                 ending,
@@ -446,8 +467,9 @@ impl<T: Transport> Runtime for Core<T> {
 /// A program a node agent started for this client: its end comes as a message.
 struct RemoteProc<T: Transport> {
     conn: Arc<Conn<T>>,
-    /// The wire version its client writes, which its release goes in.
+    /// The wire version its client writes, which its release and kill go in, and the agent's message bound.
     version: u16,
+    bound: usize,
     exec: u64,
     pid: u32,
     ending: Arc<Ending>,
@@ -501,6 +523,24 @@ impl<T: Transport> Proc for RemoteProc<T> {
 
     fn wait_for(&mut self, timeout: Duration) -> Result<Option<Exit>, Refusal> {
         self.wait(Some(timeout))
+    }
+
+    /// A kill request naming its exec, answered once the agent has sent KILL; its end then comes as any
+    /// end does. An agent of wire version 2 or earlier has no kill: refused by type before it is sent.
+    fn kill(&mut self) -> Result<(), Refusal> {
+        if self.wait(None)?.is_some() {
+            return Ok(());
+        }
+        let kill = Request::Call(Call::Kill { exec: self.exec });
+        match self
+            .conn
+            .call(self.version, self.bound, &kill, |_| Ok(None), None)?
+            .1
+        {
+            Answer::Done => Ok(()),
+            Answer::Refused(r) => Err(r),
+            other => Err(unexpected("kill", &other)),
+        }
     }
 }
 

@@ -125,6 +125,7 @@ fn requests() -> Vec<(u64, Request, usize)> {
         (11, Request::Call(Call::Delete(b)), 0),
         (6, Request::Release, 0),
         (12, Request::Call(Call::Netns), 0),
+        (13, Request::Call(Call::Kill { exec: 6 }), 0),
     ]
 }
 
@@ -322,10 +323,9 @@ fn version_2_messages_are_the_bytes_recorded() {
         bytes[4..6].copy_from_slice(&1u16.to_le_bytes());
         bytes
     };
-    for (n, req, _) in requests()
-        .into_iter()
-        .filter(|(_, r, _)| *r != Request::Call(Call::Netns))
-    {
+    for (n, req, _) in requests().into_iter().filter(|(_, r, _)| {
+        *r != Request::Call(Call::Netns) && !matches!(r, Request::Call(Call::Kill { .. }))
+    }) {
         assert_eq!(
             as_v1(request(2, n, &req, MAX_MESSAGE).unwrap()),
             request(1, n, &req, MAX_MESSAGE).unwrap(),
@@ -339,6 +339,60 @@ fn version_2_messages_are_the_bytes_recorded() {
         assert_eq!(
             as_v1(answer(2, n, &ans, MAX_MESSAGE).unwrap()),
             answer(1, n, &ans, MAX_MESSAGE).unwrap(),
+            "{ans:?}"
+        );
+    }
+}
+
+/// HEX-SOCK-2, append-only: version 3 adds one request, a program's kill by its exec's id (answered as any
+/// call is), whose bytes are the ones recorded here; it is no kind of version 2, refused in it before it is
+/// written and when read; and every earlier kind is written in version 3 as in version 2 but for the
+/// version in its header.
+#[test]
+fn version_3_messages_are_the_bytes_recorded() {
+    let kill = Request::Call(Call::Kill { exec: 6 });
+    assert_eq!(
+        hex(&request(3, 13, &kill, MAX_MESSAGE).unwrap()),
+        "4845585703000c000d000000000000000600000000000000"
+    );
+    assert_eq!(
+        request(2, 13, &kill, MAX_MESSAGE),
+        Err(Fault::Kind {
+            kind: 0x000c,
+            version: 2,
+            expected: "a request"
+        })
+    );
+    let as_v = |v: u16, mut bytes: Vec<u8>| {
+        bytes[4..6].copy_from_slice(&v.to_le_bytes());
+        bytes
+    };
+    assert_eq!(
+        read_request(
+            &received(&as_v(2, request(3, 13, &kill, MAX_MESSAGE).unwrap()), 0),
+            MAX_MESSAGE
+        ),
+        Err(Bad {
+            version: 2,
+            id: 13,
+            fault: Fault::Kind {
+                kind: 0x000c,
+                version: 2,
+                expected: "a request"
+            }
+        })
+    );
+    for (n, req, _) in requests().into_iter().filter(|(_, r, _)| *r != kill) {
+        assert_eq!(
+            as_v(2, request(3, n, &req, MAX_MESSAGE).unwrap()),
+            request(2, n, &req, MAX_MESSAGE).unwrap(),
+            "{req:?}"
+        );
+    }
+    for (n, ans) in answers() {
+        assert_eq!(
+            as_v(2, answer(3, n, &ans, MAX_MESSAGE).unwrap()),
+            answer(2, n, &ans, MAX_MESSAGE).unwrap(),
             "{ans:?}"
         );
     }
@@ -528,7 +582,7 @@ fn unknown_versions_and_kinds_are_refused() {
     // version this side speaks.
     for version in FIRST..=VERSION {
         let hello = request(version, 5, &Request::Hello, MAX_MESSAGE).unwrap();
-        for kind in [0u16, 0x000c, 0x7fff, 0x8001, 0x8009, 0xffff] {
+        for kind in [0u16, 0x000d, 0x7fff, 0x8001, 0x8009, 0xffff] {
             let mut bytes = hello.clone();
             bytes[6..8].copy_from_slice(&kind.to_le_bytes());
             let got = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
@@ -985,7 +1039,7 @@ proptest! {
     /// HEX-SOCK-1: bodies of random bytes behind a valid header of each version, so every kind's
     /// decoder meets them, are a message or a typed refusal, never a panic.
     #[test]
-    fn any_body_behind_a_header_is_read_or_refused(version in FIRST..=VERSION, kind in prop_oneof![0u16..0x000d, 0x8000u16..0x800b], body in proptest::collection::vec(any::<u8>(), 0..256), fds in 0usize..4) {
+    fn any_body_behind_a_header_is_read_or_refused(version in FIRST..=VERSION, kind in prop_oneof![0u16..0x000e, 0x8000u16..0x800b], body in proptest::collection::vec(any::<u8>(), 0..256), fds in 0usize..4) {
         let mut bytes = MAGIC.to_vec();
         bytes.extend_from_slice(&version.to_le_bytes());
         bytes.extend_from_slice(&kind.to_le_bytes());

@@ -309,7 +309,9 @@ impl Proc for SimProc {
         self.pid
     }
     fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
-        Ok(if self.os.ended(self.pid) {
+        Ok(if self.os.lock().killed.contains(&self.pid) {
+            Some(Exit::Signal(9))
+        } else if self.os.ended(self.pid) {
             Some(Exit::Code(0))
         } else {
             None
@@ -317,6 +319,10 @@ impl Proc for SimProc {
     }
     fn wait_for(&mut self, _timeout: Duration) -> Result<Option<Exit>, Refusal> {
         self.try_wait()
+    }
+    fn kill(&mut self) -> Result<(), Refusal> {
+        self.os.kill(&self.pid);
+        Ok(())
     }
 }
 
@@ -618,6 +624,39 @@ fn a_program_whose_client_goes_is_killed_and_counted_and_the_bound_holds() {
     wait_until("the connection and watches to go", || {
         lab.connections() == 0 && lab.watched() == 0
     });
+}
+
+/// HEX-SOCK-7 (the core), `Proc::kill` through the socket: a kill naming a program's exec is answered done,
+/// sends KILL through the OS's watch to that program alone, and its end, `Signal(9)`, comes as its exec's
+/// message, not counted as abandoned; a kill naming no running program of the connection is done too.
+#[test]
+fn a_kill_ends_its_program_alone_and_its_end_is_sent() {
+    let lab = Lab::new();
+    let sock = lab.os.connect(true, 64);
+    let mut pids = Vec::new();
+    for id in [7, 8] {
+        lab.os.put(&sock, exec(id));
+        match answer_of(&sock) {
+            (Header { id: got, .. }, Answer::Started { pid }) if got == id => pids.push(pid),
+            other => panic!("{other:?}"),
+        }
+    }
+    lab.os.put(&sock, request(9, Call::Kill { exec: 7 }));
+    let mut got = [answer_of(&sock), answer_of(&sock)].map(|(h, a)| (h.id, a));
+    got.sort_by_key(|(id, _)| *id);
+    assert_eq!(
+        got,
+        [(7, Answer::Exited(Exit::Signal(9))), (9, Answer::Done)]
+    );
+    assert_eq!(
+        lab.os.lock().killed.iter().copied().collect::<Vec<_>>(),
+        [pids[0]]
+    );
+    assert!(!lab.os.ended(pids[1]), "the other program was ended");
+    lab.os.put(&sock, request(10, Call::Kill { exec: 7 }));
+    let (h, again) = answer_of(&sock);
+    assert_eq!((h.id, again), (10, Answer::Done));
+    assert!(lab.host.abandoned.lock().unwrap().is_empty());
 }
 
 /// HEX-SOCK-7 (the core): an exec whose program the OS can't watch is refused, saying the node ended it.

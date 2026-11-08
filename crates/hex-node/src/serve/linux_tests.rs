@@ -277,6 +277,7 @@ fn hostile_messages_are_refused_and_the_connection_is_served_after() {
     };
     let mut trailing = request(5, Call::Inspect(b()));
     trailing.push(0);
+    let trailing_says = format!("follow what version {} defines", wire::VERSION);
     let mut oversized = request(6, Call::Inspect(b()));
     oversized.resize(4097, 0);
     let (pipe_r, _pipe_w) = std::io::pipe().unwrap();
@@ -310,8 +311,8 @@ fn hostile_messages_are_refused_and_the_connection_is_served_after() {
             0,
             "HEXW",
         ),
-        Hostile("version 3", with(4, [3, 0]), vec![], 9, "version 3"),
-        Hostile("unknown kind", with(6, [0x0c, 0]), vec![], 9, "kind 0x000c"),
+        Hostile("version 4", with(4, [4, 0]), vec![], 9, "version 4"),
+        Hostile("unknown kind", with(6, [0x0d, 0]), vec![], 9, "kind 0x000d"),
         Hostile(
             "a version 2 kind in version 1",
             with(6, [0x0b, 0]),
@@ -326,13 +327,7 @@ fn hostile_messages_are_refused_and_the_connection_is_served_after() {
             9,
             "kind 0x8003",
         ),
-        Hostile(
-            "trailing bytes",
-            trailing,
-            vec![],
-            5,
-            "follow what version 2 defines",
-        ),
+        Hostile("trailing bytes", trailing, vec![], 5, &trailing_says),
         Hostile(
             "oversized",
             oversized,
