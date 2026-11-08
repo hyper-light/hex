@@ -117,31 +117,39 @@ pub fn rusage(pid: i32) -> io::Result<Option<Rusage>> {
 
 /// `PROC_PGRP_ONLY` (`sys/proc_info.h:52`): `proc_listpids` lists one process group.
 const PROC_PGRP_ONLY: u32 = 2;
+/// `PROC_UID_ONLY` (`sys/proc_info.h:54`): `proc_listpids` lists one user's processes. A box's user,
+/// the only marker a member inherits and can't drop (native-platforms.md §3), so this finds every member
+/// — including one that daemonized (`setsid`) out of its process group (the box helper's listing, step 2).
+const PROC_UID_ONLY: u32 = 4;
 
 /// The members of process group `pgid`, written over `pids` up to its capacity, its zombies included
 /// (XNU walks `zombproc` after `allproc`, `bsd/kern/proc_info.c:470-473`). Returns whether the listing may
 /// have been cut short: it filled `pids`.
 pub fn group(pgid: i32, pids: &mut Vec<i32>) -> io::Result<bool> {
+    let group = u32::try_from(pgid)
+        .map_err(|_| io::Error::other(format!("{pgid} isn't a process group")))?;
+    list_pids(PROC_PGRP_ONLY, group, pids)
+}
+
+/// The processes of user `uid`, written over `pids` up to its capacity (the box helper's membership
+/// listing, step 2); returns whether the listing may have been cut short.
+pub fn user_pids(uid: u32, pids: &mut Vec<i32>) -> io::Result<bool> {
+    list_pids(PROC_UID_ONLY, uid, pids)
+}
+
+/// `proc_listpids` for one `flavor` and its `arg`, written over `pids` up to its capacity.
+fn list_pids(flavor: u32, arg: u32, pids: &mut Vec<i32>) -> io::Result<bool> {
     pids.clear();
     let room = pids.capacity();
     let bytes = room
         .checked_mul(size_of::<i32>())
         .and_then(|b| c_int::try_from(b).ok())
         .ok_or_else(|| {
-            io::Error::other("a group listing's buffer is past what proc_listpids takes")
+            io::Error::other("a pid listing's buffer is past what proc_listpids takes")
         })?;
-    let group = u32::try_from(pgid)
-        .map_err(|_| io::Error::other(format!("{pgid} isn't a process group")))?;
     // SAFETY: proc_listpids writes at most `bytes` bytes of pids into the buffer it is given, which has
     // room for `room` i32s: exactly `bytes`.
-    let n = unsafe {
-        libc::proc_listpids(
-            PROC_PGRP_ONLY,
-            group,
-            pids.as_mut_ptr().cast::<c_void>(),
-            bytes,
-        )
-    };
+    let n = unsafe { libc::proc_listpids(flavor, arg, pids.as_mut_ptr().cast::<c_void>(), bytes) };
     let written = usize::try_from(n).map_err(|_| io::Error::last_os_error())?;
     let count = written.checked_div(size_of::<i32>()).unwrap_or(0).min(room);
     // SAFETY: the kernel wrote the first `count` pids, and `count` is at most the capacity.
@@ -181,6 +189,12 @@ pub fn loadavg() -> Option<f64> {
 /// The most processes this kernel holds at once (`kern.maxproc`): no box can list more members.
 pub fn max_processes() -> io::Result<usize> {
     sysctl_count(c"kern.maxproc")
+}
+
+/// The most processes one uid may hold (`kern.maxprocperuid`, `bsd/kern/kern_resource.c:169-170`): a
+/// box-user box's process cap when its spec names none, each box having a uid of its own.
+pub fn max_processes_per_uid() -> io::Result<usize> {
+    sysctl_count(c"kern.maxprocperuid")
 }
 
 /// A kernel count read by name (an `int` sysctl), as read now: an administrator may change it.
@@ -545,11 +559,26 @@ impl Kqueue {
     }
 
     /// Watches each of `pids` for its forks and its end with the end's wait status (`EVFILT_PROC` with
-    /// `NOTE_FORK | NOTE_EXIT | NOTE_EXITSTATUS`; XNU attaches either to any process, its parent or not,
-    /// `bsd/kern/kern_event.c:1099-1155`), tagged `tag`. The status is valid for a process the watcher's
-    /// own process is the parent of (the box's members). Returns those that have ended already (`ESRCH`),
-    /// which can't be watched.
+    /// `NOTE_FORK | NOTE_EXIT | NOTE_EXITSTATUS`, `bsd/kern/kern_event.c:1099-1155`), tagged `tag`. XNU
+    /// attaches `NOTE_EXITSTATUS` only for the process's parent (`EACCES` otherwise, :1116-1133), so each
+    /// of `pids` must be this process's child (the box's members); [`Kqueue::watch_end`] watches another's.
+    /// Returns those that have ended already (`ESRCH`), which can't be watched.
     pub fn watch(&self, pids: &[i32], tag: u64) -> io::Result<Vec<i32>> {
+        self.watch_with(
+            pids,
+            tag,
+            libc::NOTE_FORK | libc::NOTE_EXIT | NOTE_EXITSTATUS,
+        )
+    }
+
+    /// Watches process `pid`, which needn't be this process's child (a box-user program is the helper's),
+    /// for its end alone (`NOTE_EXIT`, which XNU attaches to any process), tagged 0. True when it has ended
+    /// already (`ESRCH`), so no event will come.
+    pub fn watch_end(&self, pid: i32) -> io::Result<bool> {
+        Ok(self.watch_with(&[pid], 0, libc::NOTE_EXIT)?.contains(&pid))
+    }
+
+    fn watch_with(&self, pids: &[i32], tag: u64, fflags: u32) -> io::Result<Vec<i32>> {
         let mut gone = Vec::new();
         for chunk in pids.chunks(64) {
             let changes: Vec<libc::kevent> = chunk
@@ -560,7 +589,7 @@ impl Kqueue {
                         pid,
                         libc::EVFILT_PROC,
                         libc::EV_ADD | libc::EV_RECEIPT,
-                        libc::NOTE_FORK | libc::NOTE_EXIT | NOTE_EXITSTATUS,
+                        fflags,
                         0,
                         tag,
                     )

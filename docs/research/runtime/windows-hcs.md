@@ -311,7 +311,11 @@ snapshotter, Docker 29.9.3's static engine beside it. Records: `C:\Users\corph\.
   | disk `53F56307-…` | 1/1 | 1/0 | 1/1 |
   | network `CAC88484-…` | 6/6 | 6/0 | 6/0 |
 
-  Read access separates the same way except for keyboard and mouse (granted, 0 open for read). jupiter has none of
+  Read access separates the same way except for keyboard and mouse (granted, 0 open for read). The same
+  probe (USB device class, query open) under the competitors, nanoserver:ltsc2025, process isolation, after
+  jupiter's reboot (2026-11-06 19:08Z): Docker 29.9.3 ungranted 4/0, granted (`--device class/…`) 4/4;
+  containerd 2.4.2 through runhcs (`ctr run`) ungranted 4/0, granted (`--device class://…`) 4/4. So all
+  three runtimes list the host's interfaces and open only a grant's: reachability is what isolation gives. jupiter has none of
   the four classes Microsoft supports (GPIO, I2C, COM, SPI: 0 listed), and a display-class grant fails HCS's create
   with 0x80070003 for Hex and for Docker (`--device class/5B45201D-…`, nanoserver and servercore) alike.
 - **Probe 5.** HCS starts `ltsc2025` (26100) on 26200; `ltsc2019` (17763) is refused by the version table before HCS
@@ -367,3 +371,32 @@ Row 8's first mutation didn't compile, so it showed nothing; it was replaced by 
 One method note: an earlier pass (`-092334Z`) restored the commit timestamps when it extracted each tree into
 one shared target directory, so cargo re-ran the previous mutant's binary. That pass is discarded, and every
 row above comes from trees extracted with fresh mtimes.
+
+## 12. Reopening a container by id, for a box that outlives its node (native plan step 8)
+
+The keeper (the Windows agent's decision, the lead's (A), 2026-11-08) keeps a box's job alive across a node's
+crash; the container is HCS's, so the next node reopens it by its id.
+
+- HCS's own sample, of a VM it made: it "will still be running even after closing the handle and even after the
+  current process exits" (`VD/hcs/Reference/ComputeSystemSample.md:24`). That holds for a system made without
+  `ShouldTerminateOnLastHandleClosed`, which otherwise ends it with its last handle (`SchemaReference.md:1353`, §2
+  above). And "you can always get a new handle to the system via
+  ::HcsOpenComputeSystem (assuming the system is still running/created and hasn't been removed)" (`:25-26`), as
+  `HcsOpenComputeSystem(L"Sample", GENERIC_ALL, &system)` (`:38`). The reference has no page of its own for
+  the call at this revision.
+- Its signature: `fn HcsOpenComputeSystem(id : windows_sys::core::PCWSTR, requestedaccess : u32, computesystem :
+  *mut HCS_SYSTEM) -> windows_sys::core::HRESULT` (`windows-sys/src/Windows/Win32/System/HostComputeSystem/mod.rs:45`),
+  synchronous: no operation handle, unlike create and start. hcsshim binds the same export
+  (`hcsshim/internal/computecore/computecore.go:47`); its own containers reopen through vmcompute's older call
+  (`hcsshim/internal/hcs/system.go:115-120`, "OpenComputeSystem opens an existing compute system by ID").
+- An id HCS doesn't hold is `HCS_E_SYSTEM_NOT_FOUND`, "A virtual machine or container with the specified identifier
+  does not exist", `0x8037010E` (`VD/hcs/Reference/HCSHResult.md:39`), which Hex reads as "nothing to take back",
+  not a failure.
+- With the flag on, HCS ended a killed node's system between 59 ms and 2 s after the kill on jupiter
+  (`bench/native/records/hcs-end-under-load-8d8c36c-20261108T0036Z.txt`; to be retaken after a clean boot). So an
+  outliving box needs the flag off: otherwise the container is gone before the next node can reopen it.
+- Run on jupiter (2026-11-08): a handle reopened by id ends the container as the creating node's would
+  (kiln run r105, `windows_oci_box`'s `an_outliving_box_s_container_and_scratch_wait_for_its_next_node`) and
+  starts processes in it, a program run through Hex's launcher in a box taken back by the next node (kiln run
+  r160, `a_nodes_oci_box_outlives_its_runtime_and_the_next_takes_it_back`). The sample implies both (it queries
+  properties through a reopened handle) but doesn't show them.

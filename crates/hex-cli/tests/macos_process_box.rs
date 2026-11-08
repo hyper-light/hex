@@ -90,6 +90,68 @@ fn macos_process_boxes_hold_the_contract() {
     assert!(failures.is_empty(), "conformance failures: {failures:#?}");
 }
 
+/// AC-T7.1.1 for the box-user class: the same HEX-RT contract, against a `MacRuntime` in box-user mode
+/// talking to a live helper daemon. Ignored by default, since box-user mode needs a root daemon;
+/// `bench/native/macos/boxlab.sh` starts `hex __box-helper` as root, sets `HEX_BOX_HELPER_SOCK`, and runs
+/// this with `--ignored`. The first box's inspect must say `BoxUser`, so a stale helperless fallback to
+/// the process-group class can't pass this as box-user.
+#[test]
+#[ignore = "needs a root helper daemon; run by bench/native/macos/boxlab.sh via HEX_BOX_HELPER_SOCK"]
+fn box_user_boxes_hold_the_contract() {
+    let sock = std::env::var("HEX_BOX_HELPER_SOCK")
+        .expect("HEX_BOX_HELPER_SOCK, set by boxlab.sh to the running helper's socket");
+    let rt = MacRuntime::detect(
+        NonZeroU64::new(256 * GIB).unwrap(),
+        NonZeroU64::new(1_000_000).unwrap(),
+        std::path::Path::new(&sock),
+    )
+    .expect("a box-user macOS runtime");
+    // Confirm the helper answered and the runtime is in box-user mode, not a fallback to process-group.
+    let probe = BoxId::new("boxuser-probe").unwrap();
+    let _ = rt.delete(&probe);
+    let info = rt
+        .create(fixture().spec(probe.clone(), Bounds::default()))
+        .expect("create a box-user box");
+    assert_eq!(
+        info.membership,
+        Some(hex_api::Membership::BoxUser),
+        "the helper must be live, so the runtime is box-user"
+    );
+    // HEX-INST-6 (native plan step 6, Ada 2026-11-06), as on Linux: a program in a box naming no
+    // RLIMIT_NOFILE gets Docker 29's 1024:524288, which the helper's child sets before its exec. The
+    // installed helper runs under launchd's unlimited hard limit, so nothing caps the default.
+    let (mut out, w) = std::io::pipe().expect("pipe");
+    let mut p = rt
+        .exec(
+            &probe,
+            Program::of(&["/bin/sh", "-c", r#"echo "$(ulimit -Sn):$(ulimit -Hn)""#]),
+            Stdio {
+                stdout: Some(w),
+                ..Stdio::null()
+            },
+        )
+        .expect("exec in the probe box");
+    let mut seen = String::new();
+    std::io::Read::read_to_string(&mut out, &mut seen).expect("read");
+    assert_eq!(
+        p.wait_for(Duration::from_secs(10)).expect("wait"),
+        Some(Exit::Code(0))
+    );
+    let want = hex_core::limits::default_nofile(None);
+    assert_eq!(
+        seen.trim(),
+        format!("{}:{}", want.soft, want.hard),
+        "a box-user program's descriptor limits"
+    );
+    rt.delete(&probe).expect("delete the probe box");
+
+    let failures = conformance::run(&rt, &fixture());
+    assert!(
+        failures.is_empty(),
+        "box-user conformance failures: {failures:#?}"
+    );
+}
+
 /// A `hex node` of this build serving a fresh state folder, ended when dropped.
 struct NodeProcess {
     child: std::process::Child,

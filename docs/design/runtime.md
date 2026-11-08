@@ -508,7 +508,8 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
     commit has fallen back (CLAUDE.md §3; bench/install/records/windows-jupiter-20261105.txt entry 21).
   - macOS: a box runs as a user of its own, from a pool made at install, as Nix's build users are. A user
     is the only marker macOS lists that a member inherits and can't drop, since macOS can't follow forks
-    (§3). So a privileged helper starts each box, and `RLIMIT_NPROC` caps its processes in the kernel.
+    (§3). So a privileged helper starts each box, and `RLIMIT_NPROC` of the box's user caps its processes in
+    the kernel.
     macOS's memory bound has **three layers** (Ada, 2026-11-01). Layer one is **rootless and
     kernel-enforced** (step 1's `_ext` backstop): every member Hex spawns is armed at `posix_spawn` with a
     *fatal* per-process physical-footprint cap at the box's **whole** bound (`posix_spawnattr_setjetsam_ext`,
@@ -539,7 +540,28 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
     which is exactly what the step-2 ledger layer catches. CPU is bounded by priority alone: a
     QoS class, and background priority where the box's weight is low. A box that asks for confinement gets App
     Sandbox's, which every child inherits (§3). The class's own purpose is trusted code that must not starve
-    the machine, and that purpose doesn't need it.
+    the machine, and that purpose doesn't need it. Under the helper the ledger limits sum to the bound less a
+    reserve (`hex_core::boxuser`), the fork window's room; layer three there is event-driven, with no
+    period (the lead's call, 2026-11-06, under Ada's rule that no constant is picked): the daemon watches every
+    member for its forks and its end (`EVFILT_PROC`, which root may place on any process), and each fork or end
+    wakes a sweep of its own box (its watch's tag names the box), while a crossing, whose corpse doesn't name
+    one, re-reads every box; each sweep arms a forked member at once and ends a box past its bound
+    (`Daemon::pump_members`, `Daemon::pump_crossings`). A member that forks before its watch is placed is
+    caught by the sweep listing the box again after each watch, until a listing finds no member it hadn't
+    watched; from then on every fork posts an event (`docs/research/runtime/macos-box-user-and-ledger.md`).
+    The helper's privileged calls are `crates/hex-runtime/src/macos/helper_sys.rs`, CLAUDE.md §12: its lines
+    `d4252f3` (the file and its fork, user drop, ledger and exception arming) and `a960732` (the `mach_msg`
+    crossing receive) were approved by Ada on 2026-11-06, as written. A node with no helper runs the
+    class as step 1's, and says so in its inspect (`BoxInfo.membership`).
+
+    **A program's end** is the helper's to collect, since it is the program's parent and `waitid` answers no
+    one else (`docs/research/runtime/native-platforms.md` §3, "A box user's program ends where only the
+    helper can see how"). The helper watches each program it starts from its start and reaps it, in its
+    sweep or when asked, holding each end until the node reads it once: at most `RLIMIT_NPROC` programs a
+    box (a start past that drops the box's oldest unread end, or is refused while all still run), and a
+    deleted box's ends for as many boxes as the pool has users. The node waits on the program's `NOTE_EXIT`
+    on a kqueue of its own and then asks for its end (`Wait`), so a wait is the fact, never a poll, and no
+    end is made up as `Unknown` because the node couldn't reap a program it doesn't parent.
 - **`oci`:**
   - Linux: as today.
   - Windows: Windows images run natively, process-isolated through HCS (the OCI spec's Windows section).
@@ -598,7 +620,10 @@ lacking any of it "refuses that class by name, saying what's missing", and "Unin
   1024:524288, or the node's hard limit where that is lower: its spec (`BoxSpec`'s `Process` class and
   `Program`) has no rlimits to name one, and none is added, since the native boxes don't need it and a new
   field in the process spec is an API and wire change beyond this step (the lead, 2026-11-06). An `oci` box
-  keeps a limit its spec names (end to end in `node_socket.rs`). Rootless `oci` boxes need
+  keeps a limit its spec names (end to end in `node_socket.rs`). On macOS only box-user boxes get the default
+  (the helper's child sets it before `execve`); plain boxes keep the embedding process's, since posix_spawn
+  sets no rlimit and a fork in the threaded node isn't safe (`docs/research/runtime/nofile-limit.md` §6).
+  Rootless `oci` boxes need
   nothing more: each maps only the node's own uid (`hex_core::bundle`), so no subordinate id ranges (§1.6).
   Ubuntu 24.04's `apparmor_restrict_unprivileged_userns` (§1.6) would need an AppArmor profile for `hex`; no
   Ubuntu machine is in this step's bar, so that is a gap the installer doesn't fill yet (STATUS.md).
@@ -616,7 +641,19 @@ lacking any of it "refuses that class by name, saying what's missing", and "Unin
   113) and by its socket answering (§3.5). Without the helper the `process` class still runs, as a process
   group under step 1's watcher, and its inspect says so: Ada's call in the plan's step 2 (2026-11-01), "Both
   run on a node with the helper; polling alone runs on one without". The refusal by name covers only what
-  can't run without the helper.
+  can't run without the helper. Concretely (`scripts/install/macos.sh`): the pool is `_hexbox1`..`_hexbox30` in
+  group `hexbox`, and the users whose nodes may reach the helper are put in a group `hexnode`; their ids start at
+  320 (`hexnode`'s gid, then `hexbox`'s, then the pool's uids 322-351), inside sysadminctl's 200-400 role-user
+  range and between Apple's own (300-308 on macOS 26.2) and Nix's (350-382), measured in §3.1, and any taken id,
+  name or a live process at a pool uid is refused by name before anything is made (`--first-id` moves the
+  range). The helper runs from a root-owned copy of `hex` in `/Library/PrivilegedHelperTools` (Docker's place
+  for its helper, §3.2), never from `/usr/local/bin`, which Homebrew gives the user on Intel Macs, so no user can
+  replace what runs as root. Its socket is `/var/db/hex/box-helper.sock` (persistent, so launchd's start at boot
+  finds its folder), in a folder `root:hexnode 0750`: a new file takes its folder's group (open(2)'s BSD
+  rule) and the plist's `Umask` 7 makes it `0770`, so only root and `hexnode` connect and another local user
+  can't start or end someone's boxes. Uninstall boots the daemon out first, then ends every process left at a
+  pool uid (a box's members outlive the helper that started them) before deleting the users, in rounds
+  bounded by the installer's wait.
 - **A node lacking it refuses the class by name** (`hex_core::setup`): on Linux, a box root whose parent lacks a
   controller, isn't the node's user's, or holds processes refuses the box root of both classes, naming what's
   missing and the installer (HEX-INST-1); on Windows, the `oci` class names each feature that's off and says
@@ -635,6 +672,11 @@ lacking any of it "refuses that class by name, saying what's missing", and "Unin
   On Linux, `bench/install/linux_lab.sh` boots a fresh Fedora as a container with systemd its init, shows the
   by-name refusal before install, installs, passes the conformance suite over the installed node's socket for
   both classes as an ordinary user (HEX-INST-3), uninstalls and lists nothing left (HEX-INST-4).
+  On macOS, `bench/install/macos_lab.sh` (one `sudo` run by an administrator, building as the invoking user)
+  shows nothing of the plan before install and the box-user contract unmet without the helper, installs, passes
+  the box-user HEX-RT contract over the installed helper's socket as that ordinary user, shows a user outside
+  `hexnode` refused the socket (HEX-INST-6), uninstalls, and lists nothing left by the plan and by `dscl` and
+  `launchctl` on their own (HEX-INST-7).
 - **What would falsify it:** a system unit's `Delegate=yes` with `User=` that didn't hand the user every
   controller, or its `LimitNOFILE=` that the node didn't get (the lab reads both); an install that disturbed a
   user's running manager (the lab's runs before install and keeps its pid); a
@@ -722,8 +764,8 @@ Compute Service, as the OCI runtime spec's Windows section defines it. Sources:
   `computecore.dll` would stop the whole node from starting (note §7). A missing module or export means the class is
   refused, saying the Containers feature is off and Hex's installer turns it on. `classes()` lists `oci` only where
   HCS loads.
-- **Unsafe:** the HCS, storage, virtual-disk, process-handle and version calls sit in one file,
-  `crates/hex-runtime/src/windows/oci/sys.rs`, proposed for CLAUDE.md §12 in a commit of its own, held for Ada.
+- **Unsafe:** the HCS, vmcompute layer, process-handle, version and device calls sit in one file,
+  `crates/hex-runtime/src/windows/oci/sys.rs`, named in CLAUDE.md §12 by a commit of its own (c4961c1, which replaced aadbd4e's list), approved by Ada as written on 2026-11-06.
 - **What would falsify it:** a job handed into the silo that doesn't nest, or that the member escapes; the
   launcher being unopenable for `PROCESS_DUP_HANDLE` from the elevated node; the documented storage calls unable to
   make a scratch HCS starts; HCS refusing an image the table allows on jupiter, or starting one it forbids (each a
@@ -958,13 +1000,35 @@ guarantee that no box outlives Hex. Both facts force the shape:
   case, and the SCM runs a service in *no* job unless the service makes one, so a keeper the service starts
   is in no job and outlives any node; that is measured for real when the service exists (step 6). No
   temporary service is made on jupiter (an admin change not approved).
-- An `oci` box's compute system is made without `ShouldTerminateOnLastHandleClosed`, and the restarted node
-  opens it by its id (`HcsOpenComputeSystem`). The HCS side is step 4's agent's. *From it*: a box's scratch
-  survives a node kill — the crash test asserts `sandbox.vhdx` is still there after the kill, in the created
-  and the started phase (green, jupiter 2026-11-08 00:12Z); and with the flag on, HCS ends a killed node's
-  compute system up to 2 s on record (one idle sample at 1 s resolution), to be retaken on a clean jupiter
-  (`cp/t7-native-s4`). The next node's scratch reclaim must skip a box whose record says live, so a taken-back
-  box keeps its scratch.
+- *The `oci` side* (step 4's agent, `cp/t7-native-s8-oci`). An outliving node's `oci` box is its named job,
+  held by the keeper as a `process` box's is, and its compute system is made without
+  `ShouldTerminateOnLastHandleClosed` (`hcs::Lifetime::Outlives`), so the container runs on past the node's
+  last handle; the next node reopens it by its id (`HcsOpenComputeSystem`; HCS naming no such system is
+  nothing to take back). The box's scratch marker is its record (`hcs::BoxRecord`): its scratch folder and
+  what Hex made, that it outlives, its system's id, that a start was asked (written before HCS starts the
+  container), and its init's pid and creation time (`GetProcessTimes`, written once it runs), each write
+  whole (a `.next` file moved over the marker), its size bound derived as `MAX_WIRE` counts a folder. The
+  scratch becomes the container's only once HCS has made the container, so a create that fails before that
+  undoes it and leaves nothing attached. At a node's start, reclaim leaves an outliving box's record and
+  scratch while HCS still holds its system (`hcs::at_start`) and reclaims every other. `adopt` takes the box
+  back (`hcs::take_back`) only while HCS holds its system: as made when no start was asked, and with its
+  init only when the process at the init's pid has the recorded creation time and still runs. A start its
+  node didn't finish recording, an ended init, or a pid given to another process since is lost, and `end`
+  ends its container, scratch and record (`oci::end`). An outliving node keeps these records under its own
+  state folder (`<state>\boxes`): every runtime made in process keeps its records in the machine's shared
+  `%ProgramData%\hex\boxes` and reclaims that whole folder when made, so a node or a suite starting beside a
+  running bench would detach a live bench box's scratch. *From step 4*: a box's scratch survives a node kill
+  (the crash test asserts `sandbox.vhdx` is still there after the kill, in the created and the started
+  phase; green, jupiter 2026-11-08 00:12Z), and with the flag on HCS ends a killed node's compute system
+  up to 2 s on record (one idle sample at 1 s resolution), to be retaken on a clean jupiter
+  (`cp/t7-native-s4`); with the flag off it holds the
+  container all through that bound (`windows_oci_box`'s `outlived`). *Built and measured* (jupiter,
+  2026-11-08, `windows_oci_box`): an outliving box's container and scratch wait for its next node, and a
+  container reopened by id is ended through the reopened handle (kiln run r105); a node's `oci` box outlives
+  its runtime, the next runtime on the node's name takes it back running and runs a program in it through
+  the reopened container, and its delete leaves nothing; a box no node takes back is ended with its
+  container, scratch and record (kiln run r160, 3/3; the tree before fails each at `outlived`, HCS ending the
+  container 315-753 µs after its last handle).
 - A box's record names each member by its pid and its creation time (`GetProcessTimes`), so the restarted
   node, opening the pid, tells the member from a process given its pid since, as macOS uses a process's
   start time. The record names the keeper the same way (its pid and creation time), so the next node adopts
@@ -1002,7 +1066,11 @@ pass after.
   mechanism"), and is the whole bound on a node with no helper. Step 1's single-member overshoot (0 MiB) and
   held watcher CPU (~0.1%) are met rootless by the `_ext` cap; the multi-member-tree bound at overcommit is
   step 2's.
-  Its box-user (membership a daemonizing member can't escape) follows.
+  **Step 2 (the box user, the helper, the kernel bound) is under way** (`cp/t7-native-s2`): the
+  apportionment core, the node↔helper protocol (`hex_core::helper`, hostile-input tested), its node client,
+  the helper daemon and the box-user backend are built; the root measurements on the Mac Studio (the
+  elastic bound's overshoot and CPU, the `EXC_RESOURCE` path, the box user's listing, `RLIMIT_NPROC` and
+  delete) need Ada.
 - The **Windows `process` class is built** (`hex_runtime::windows`, native plan step 3): a box is a job
   object, its limits the kernel's and hard (`hex_core::job`, `docs/research/runtime/windows-job-objects.md`,
   `bench/native/windows/RESULT.md`). A member is created suspended inside the job
@@ -1032,7 +1100,8 @@ pass after.
   over the installed node, nothing left after uninstall). **Windows' is built and lint-clean, and open**: it
   waits on jupiter, an administrator's UAC prompt and a reboot each way (the feature query's standard-user
   access and time are measured there), and is met only once the `oci` class's steps 4 and 5 land and the
-  install lab runs again. **macOS's** installs step 2's box users and helper, and waits on step 2. Not
+  install lab runs again. **macOS's is built** (`scripts/install/macos.sh`, step 2's box users and helper)
+  and its lab (`bench/install/macos_lab.sh`) waits on an administrator's one `sudo` run on the Mac Studio. Not
   covered yet: Ubuntu 24.04's restriction on unprivileged user namespaces (an AppArmor profile for `hex`).
 - The kiln integration's remaining half: **consumer #1 (host CI legs + harness in `process` boxes)
   is built** — kiln's `os::contain` grows a Hex-`BoxRoot` backing behind `KILN_HEX_BOX`, with the

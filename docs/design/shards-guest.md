@@ -101,8 +101,14 @@ The node agent's socket is `SOCK_SEQPACKET` and carries an exec's stdio as `SCM_
   connection's own. The node takes only a
   pipe's end as a program's stream (`crates/hex-node/src/serve.rs:1208`: "the right end of a pipe, as the
   seam's `Stdio` holds; anything else is refused by name"), so the relay makes a pipe per stream, passes its end
-  to the node with the exec, and copies between the pipe and the vsock connection; on the host, the client
-  copies between the caller's pipes and its connections. One bounded buffer per stream on each side.
+  to the node with the exec, and copies between the pipe and the vsock connection. On the host (native plan step
+  8, the lead's ruling of 2026-11-08), a stream the caller asks for (`Stdio::ask`) is that connection itself: the
+  caller holds its socket and no byte is copied on the host. A pipe the caller gives of its own is copied between
+  it and the connection in the caller's process, one bounded buffer per stream: by the guest client in process,
+  or, through the host node's socket, by the caller's socket client, to which the node gives the connection's end
+  with the exec's answer (wire version 3's `Given`). The node copies no stream and keeps none of the caller's
+  pipes; a client of an earlier wire version carrying pipes to a guest's program is refused before the guest is
+  sent anything.
 - **In the guest**, a relay (`hex guest relay`) accepts the host's vsock connections and speaks the node's own
   socket, one node connection per host control connection, so the node, its wire and its disconnect rule stay
   as they are (CLAUDE.md §8). Its framing, stream names and gathering of an exec's streams are a sans-IO core
@@ -198,8 +204,10 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
   (`crates/vmm/src/devices/virtio/fs/mod.rs:1-6`, `crates/vmm/src/vm/mod.rs:835`, at `90de623f`), writes going
   both ways on all three host OSes (D38, `docs/design/architecture.md:2774-2853`; Windows D197, `:7482-7518`), and
   a plain `shards run` takes a share another process serves (`--slates-fs-fd N`, `crates/shards/src/vm_run.rs:390-401`).
-  So `shards-api`'s `GuestSpec` carries `shares: Vec<Share { dir, read_only }>`, served from boot (the interface
-  that starts the server is Shards' call, asked 2026-11-06). The node shares the roots it's configured with at the
+  So `shards-api`'s `GuestSpec` carries `shares: Vec<Share { dir, read_only }>`, served from boot (Shards' lead's call, 2026-11-06:
+  `shards run --kernel … --share DIR[:ro]`, repeatable, the i-th served as `shards{i}`; the run process spawns
+  `shards share` for each before its VM process confines itself, so the client holds no server or descriptor and
+  no share outlives its VM). The node shares the roots it's configured with at the
   guest's boot, never the host's `/` by default: that would hand any guest process, a container's escape included,
   everything the node's user can write, and undo the VM boundary (the lead, 2026-11-06). The default is Docker
   Desktop's file-sharing list: on macOS `/Users`, `/Volumes`, `/private`, `/tmp` and `/var/folders`; on Windows the
@@ -566,6 +574,15 @@ Hex's tests of the channel, each citing its ID:
   running guest booted. If it changed, one throwaway guest boots on it in the background, at Shards' least memory
   with no shares, and stops, so the node's next boot is warm; at most one is in flight, a binary is warmed once,
   and the running guest is never booted again for it, which would end its boxes (`GuestRuntime`).
+- HEX-GUEST-41: a guest program's streams through the host node's socket are the guest's own stdio connections,
+  whose ends ride the exec's answer to the caller's client: asked for, they are the caller's; given as the
+  caller's own pipes, the client copies between them, and the node keeps none of the caller's pipes; a client of
+  wire version 2 carrying pipes is refused before the guest is sent anything (`crates/hex-node/tests/guest_loop.rs`,
+  over a stand-in guest whose programs' pids name no host process; `hex_client`'s Linux tests, the client's copy).
+- HEX-GUEST-42: the conformance suite on `oci` boxes through a host node's socket served over
+  `Recorded<WithGuest<…>>`, as the macOS and Windows nodes serve their guests, HEX-GUEST-18's simulated guest
+  behind it: the guest reached from the host's node through the seam (native plan step 5), both stdio forms
+  among its cases (`crates/hex-cli/tests/node_socket.rs`).
 
 ## 7. What would falsify it
 
@@ -574,6 +591,9 @@ Hex's tests of the channel, each citing its ID:
 - Shards' owner choosing another seam (§2): the routing (§1) and channel (§3) stand; the implementation changes.
 - A copy per stdio byte in the relay measurably slowing a program's output against a Linux host's: then the relay
   splices (`splice(2)`) between the socket and the pipe instead of copying.
+- The caller's client's copy, for a guest program's stream it gives as its own pipe, measurably slowing the
+  program's output against the same stream asked for (the connection's own end, no host copy): then the client
+  copies by splice(2) where the host has it, as the relay does.
 - The guest's interpreted BPF (`CONFIG_BPF_JIT` unset) making a device check measurably slower than the bar: then
   the guest kernel adds the JIT, with Shards.
 

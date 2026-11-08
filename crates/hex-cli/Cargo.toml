@@ -28,7 +28,8 @@ rustix.workspace = true
 sha2.workspace = true
 socket2.workspace = true
 
-# `hex node` on macOS (native plan step 8b): the node over the macOS runtime and its Shards guest.
+# macOS: the box helper daemon subcommand (`hex __box-helper`) drives hex-runtime's macOS daemon, and
+# `hex node` on macOS (native plan step 8b) runs the node over the macOS runtime and its Shards guest.
 [target.'cfg(target_os = "macos")'.dependencies]
 hex-api.workspace = true
 hex-node.workspace = true
@@ -36,11 +37,11 @@ hex-runtime.workspace = true
 rustix.workspace = true
 shards-api.workspace = true
 
-# `hex node` on Windows (native plan step 8): the node over the Windows runtime. The Windows oci class's
-# launcher (`hex oci-launch`), which HCS runs inside each container (hex_runtime::windows::oci::launch), and
-# the selftest's device probe. `hex setup features` runs the Windows node's own bounded feature query for the
-# installer.
-[target.'cfg(windows)'.dependencies]
+# `hex node` on Windows (native plan step 8): the node over the Windows runtime, and `hex keep`, its
+# keeper. The Windows oci class's launcher (`hex oci-launch`), which HCS runs inside each container
+# (hex_runtime::windows::oci::launch), the selftest's device probe, and `hex setup features`, the Windows
+# node's own bounded feature query for the installer.
+[target.'cfg(target_os = "windows")'.dependencies]
 hex-api.workspace = true
 hex-core.workspace = true
 hex-node.workspace = true

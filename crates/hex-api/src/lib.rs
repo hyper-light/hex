@@ -29,7 +29,9 @@ mod spec;
 
 pub use bounds::{Bounds, IoRates, MIN_CPU_MILLI, MIN_MEMORY};
 pub use id::BoxId;
-pub use runtime::{Asked, BoxInfo, BoxState, Exit, Proc, Refusal, Runtime, Signal, Usage};
+pub use runtime::{
+    Asked, BoxInfo, BoxState, Exit, Membership, Proc, Refusal, Runtime, Signal, Usage,
+};
 pub use spec::{
     Ask, BlockCount, BoxSpec, Class, ClassSpec, End, ExecLimit, Given, Mount, Network, OciSpec,
     Program, Rootfs, Stdio, StringUnit, User, drive_absolute,

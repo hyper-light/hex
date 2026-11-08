@@ -38,6 +38,16 @@ enum Held {
     Oci(Arc<OciBox>),
 }
 
+impl Held {
+    /// The box's job handle value, for the node's keeper to hold a second handle to it.
+    fn job_token(&self) -> usize {
+        match self {
+            Held::Process(b) => b.job_token(),
+            Held::Oci(b) => b.job_token(),
+        }
+    }
+}
+
 /// A node's keeper and the state folder its boxes' jobs are recorded in. The keeper is started by
 /// [`Keeping::start`] (or an existing one adopted from the state folder) and holds a second handle to each
 /// box's job, so a box outlives the node (`keeper`).
@@ -166,6 +176,9 @@ pub struct WinRuntime {
     /// How many times [`features::off`] ran, for the test that no create runs it.
     #[cfg(test)]
     feature_reads: std::sync::atomic::AtomicU32,
+    /// What reclaiming a killed node's scratch at start failed to do, each typed (its markers kept for
+    /// the next start).
+    reclaim_failures: Vec<Refusal>,
 }
 
 impl WinRuntime {
@@ -176,12 +189,13 @@ impl WinRuntime {
     }
 
     /// A runtime told the machine has `processors` logical processors (at least one), keeping `oci`
-    /// scratch under `scratch_root`. The installer's features are read here, before any box, so the
-    /// first `oci` create doesn't wait on PowerShell's query (p50 1,183 ms on jupiter,
-    /// bench/install/records/windows-jupiter-20261105.txt entry 19). A read that fails here isn't
-    /// lost: the first box that needs the features reads them again, and is refused by name if that
-    /// fails too.
+    /// scratch under `scratch_root`, first reclaiming what a killed node left there ([`oci::reclaim`]).
+    /// The installer's features are read here, before any box, so the first `oci` create doesn't wait
+    /// on PowerShell's query (p50 1,183 ms on jupiter, bench/install/records/windows-jupiter-20261105.txt
+    /// entry 19). A read that fails here isn't lost: the first box that needs the features reads them
+    /// again, and is refused by name if that fails too.
     pub fn with(processors: u32, scratch_root: PathBuf) -> Self {
+        let reclaim_failures = oci::reclaim(&scratch_root);
         let runtime = Self {
             processors: NonZeroU32::new(processors).unwrap_or(NonZeroU32::MIN),
             scratch_root,
@@ -192,23 +206,27 @@ impl WinRuntime {
             features_off: OnceLock::new(),
             #[cfg(test)]
             feature_reads: std::sync::atomic::AtomicU32::new(0),
+            reclaim_failures,
         };
         // Read now so no create waits on it; a failure is read again, and refused, at the first ask.
         let _ = runtime.features_off();
         runtime
     }
 
-    /// A node's runtime on this machine whose `process` boxes outlive it: each is the job named for `node`
+    /// A node's runtime on this machine whose boxes outlive it: each box's job is the one named for `node`
     /// and the box, kill-on-close, held by the node and by a keeper (`keeper`, a command line started apart
-    /// from the node, its state in `dir`), so a node killed with boxes running leaves them to the keeper,
+    /// from the node, its state in `dir`), and an `oci` box's container outlives the node with it (HCS
+    /// doesn't end it with its last handle), so a node killed with boxes running leaves them to the keeper,
     /// and the next node on the same name takes them back ([`WinRuntime::adopt`]) or ends them
     /// ([`WinRuntime::end`]). With node and keeper both gone, kill-on-close ends them. `node` names one
-    /// node's boxes apart from another's in the session.
+    /// node's boxes apart from another's in the session. Its `oci` boxes' records and spec-made scratch are
+    /// its own, under `dir\boxes`, so its start-time reclaim sweeps no other runtime's boxes (the machine's
+    /// shared `%ProgramData%\hex\boxes` holds those of runtimes driven in process, a bench's among them).
     pub fn outliving(node: &str, dir: &Path, keeper: &[String]) -> Result<Self, Refusal> {
         std::fs::create_dir_all(dir)
             .map_err(|e| Refusal::os("making the node's state folder", e))?;
         let keeping = Keeping::start(dir, keeper)?;
-        let mut runtime = Self::new();
+        let mut runtime = Self::with(sys::active_processors(), dir.join("boxes"));
         runtime.node = Some(node.to_owned());
         runtime.keeper = Some(keeping);
         Ok(runtime)
@@ -238,11 +256,9 @@ impl WinRuntime {
         *held = keeping.spawn()?;
         // Re-duplicate every live box's job into the new keeper.
         for (id, h) in self.boxes()?.iter() {
-            if let Held::Process(b) = h {
-                let value = held.hold(b.job_token())?;
-                keeper::write_held(&keeping.state, id.as_str(), value)
-                    .map_err(|e| Refusal::os("recording a box's keeper handle", e))?;
-            }
+            let value = held.hold(h.job_token())?;
+            keeper::write_held(&keeping.state, id.as_str(), value)
+                .map_err(|e| Refusal::os("recording a box's keeper handle", e))?;
         }
         Ok(())
     }
@@ -256,16 +272,17 @@ impl WinRuntime {
         Ok(Some(keeping))
     }
 
-    /// The job name a node's `process` box `id` has (`Local\hex-<node>-<box>`), where its boxes outlive it.
+    /// The job name a node's box `id` has (`Local\hex-<node>-<box>`), where its boxes outlive it.
     fn job_name(&self, id: &BoxId) -> Option<String> {
         self.node
             .as_ref()
             .map(|node| format!("Local\\hex-{node}-{id}"))
     }
 
-    /// Takes back `process` box `spec` a node before this one made, with whatever runs in it (made again,
-    /// empty, where nothing does). Refused for a runtime whose boxes don't outlive it, and for an `oci` box,
-    /// whose compute system went with its node.
+    /// Takes back box `spec` a node before this one made: a `process` box with whatever runs in it (made
+    /// again, empty, where nothing does); an `oci` box with its container, scratch and init, refused by name
+    /// where any of them is gone ([`OciBox::take_back`]), for recovery to end it. Refused for a runtime whose
+    /// boxes don't outlive it.
     pub fn adopt(&self, spec: &BoxSpec) -> Result<(), Refusal> {
         let Some(name) = self.job_name(&spec.id) else {
             return Err(Refusal::Invalid {
@@ -276,17 +293,18 @@ impl WinRuntime {
                 ),
             });
         };
-        if !matches!(spec.class, ClassSpec::Process) {
-            return Err(Refusal::Invalid {
-                what: "adopt",
-                why: format!(
-                    "box {} is an oci box, whose compute system ends with its node",
-                    spec.id
-                ),
-            });
-        }
         spec.bounds.check()?;
-        let b = JobBox::take_back(spec.id.clone(), &spec.bounds, self.processors, &name)?;
+        let b = match &spec.class {
+            ClassSpec::Process => Held::Process(Arc::new(JobBox::take_back(
+                spec.id.clone(),
+                &spec.bounds,
+                self.processors,
+                &name,
+            )?)),
+            ClassSpec::Oci(_) | ClassSpec::Bundle(_) => {
+                Held::Oci(Arc::new(self.take_back_oci(spec, &name)?))
+            }
+        };
         // The keeper already holds this box's job from the node that made it (the handle value is recorded
         // under the state folder), so taking it back keeps that handle; where none is recorded (a box this
         // runtime never kept), the current keeper holds it so a delete can close it.
@@ -305,7 +323,7 @@ impl WinRuntime {
         if boxes.contains_key(&spec.id) {
             return Err(Refusal::Exists(spec.id.clone()));
         }
-        boxes.insert(spec.id.clone(), Held::Process(Arc::new(b)));
+        boxes.insert(spec.id.clone(), b);
         Ok(())
     }
 
@@ -325,12 +343,14 @@ impl WinRuntime {
         Ok(())
     }
 
-    /// Ends what still runs of `process` box `id` a node before this one made, for a box recovery removes;
-    /// one that left nothing has nothing to end. A runtime whose boxes end with it has none to end.
+    /// Ends what still runs of box `id` a node before this one made, for a box recovery removes: its job's
+    /// members, and an `oci` box's container, scratch and record too ([`oci::end`]); one that left nothing
+    /// has nothing to end. A runtime whose boxes end with it has none to end.
     pub fn end(&self, id: &BoxId) -> Result<(), Refusal> {
         match self.job_name(id) {
             Some(name) => {
                 JobBox::end_named(&name)?;
+                oci::end(&self.marker(id))?;
                 // Close the keeper's handle too, so nothing holds the ended job; idempotent (a second end
                 // finds no recorded value).
                 self.drop_from_keeper(id)
@@ -390,6 +410,11 @@ impl WinRuntime {
         Ok(())
     }
 
+    /// What this runtime's start-time reclaim of a killed node's scratch couldn't do.
+    pub fn reclaim_failures(&self) -> &[Refusal] {
+        &self.reclaim_failures
+    }
+
     /// This runtime with `oci` boxes' launcher taken from `dir` (which holds `hex.exe`), not the node's
     /// own folder: for a node run from another binary, as a test is.
     pub fn with_launcher(self, dir: PathBuf) -> Self {
@@ -429,6 +454,7 @@ impl WinRuntime {
                 },
                 bounds: b.bounds(),
                 adopted: false,
+                membership: None,
                 // A process box has no init, so no container exit to report (HEX-RT-11).
                 exit: None,
                 abandoned: 0,
@@ -437,9 +463,9 @@ impl WinRuntime {
         }
     }
 
-    /// The `oci` box `spec` asks for, made.
-    fn create_oci(&self, spec: &BoxSpec) -> Result<OciBox, Refusal> {
-        let container = match &spec.class {
+    /// The container `oci` box `spec` asks for, refused by name where a feature it needs is off.
+    fn container(&self, spec: &BoxSpec) -> Result<hex_core::hcs::Container, Refusal> {
+        Ok(match &spec.class {
             ClassSpec::Oci(o) => {
                 self.refused_without(WindowsFeature::Containers)?;
                 hex_core::hcs::from_spec(o, &oci::scratch_folder(&self.scratch_root, &spec.id)?)?
@@ -457,21 +483,58 @@ impl WinRuntime {
                     "a process spec reached the oci class".to_owned(),
                 ));
             }
-        };
-        let launcher = match &self.launcher {
-            Some(d) => d.clone(),
+        })
+    }
+
+    /// The folder holding the `hex` every `oci` box maps read-only as its launcher.
+    fn launcher(&self) -> Result<PathBuf, Refusal> {
+        match &self.launcher {
+            Some(d) => Ok(d.clone()),
             None => std::env::current_exe()
                 .ok()
                 .and_then(|e| e.parent().map(std::path::Path::to_path_buf))
-                .ok_or_else(|| Refusal::Broken("the node can't name its own folder".to_owned()))?,
+                .ok_or_else(|| Refusal::Broken("the node can't name its own folder".to_owned())),
+        }
+    }
+
+    /// Where `oci` box `id`'s record is kept: its scratch marker under the runtime's scratch root.
+    fn marker(&self, id: &BoxId) -> PathBuf {
+        self.scratch_root.join(format!("{id}.scratch.json"))
+    }
+
+    /// The `oci` box `spec` asks for, made. Where this node's boxes outlive it, its job is the one named for
+    /// the node and the box (the keeper holds it too: [`Runtime::create`]) and its container outlives the
+    /// node with it; otherwise both end with the node.
+    fn create_oci(&self, spec: &BoxSpec) -> Result<OciBox, Refusal> {
+        let container = self.container(spec)?;
+        let launcher = self.launcher()?;
+        let (job, lifetime) = match self.job_name(&spec.id) {
+            Some(name) => (
+                JobBox::create_named(spec.id.clone(), &spec.bounds, self.processors, &name)?,
+                hex_core::hcs::Lifetime::Outlives,
+            ),
+            None => (
+                JobBox::create(spec.id.clone(), &spec.bounds, self.processors)?,
+                hex_core::hcs::Lifetime::EndsWithNode,
+            ),
         };
         OciBox::create(
-            spec.id.clone(),
-            &spec.bounds,
-            self.processors,
+            job,
             &container,
             &launcher,
+            Some(self.marker(&spec.id)),
+            lifetime,
         )
+    }
+
+    /// Takes back `oci` box `spec` a node before this one made on the same name: its record from its
+    /// marker, its job by name, then its container, scratch and init ([`OciBox::take_back`]).
+    fn take_back_oci(&self, spec: &BoxSpec, name: &str) -> Result<OciBox, Refusal> {
+        let container = self.container(spec)?;
+        let marker = self.marker(&spec.id);
+        let record = oci::read_marker(&marker)?;
+        let job = JobBox::take_back(spec.id.clone(), &spec.bounds, self.processors, name)?;
+        OciBox::take_back(job, &container, marker, record)
     }
 }
 
@@ -510,12 +573,12 @@ impl Runtime for WinRuntime {
         // Hand the box's job to the keeper before the box is visible, holding no box-map lock across it: a
         // keeper found dead is replaced, which reads the box map ([`WinRuntime::ensure_keeper`]), so doing
         // this under the box lock would deadlock the runtime against itself (std's `Mutex` isn't reentrant).
-        if let (Some(keeping), Held::Process(b)) = (self.keeping()?, &held) {
+        if let Some(keeping) = self.keeping()? {
             let value = keeping
                 .keeper
                 .lock()
                 .map_err(|_| Refusal::Broken("the node's keeper lock is poisoned".to_owned()))?
-                .hold(b.job_token())?;
+                .hold(held.job_token())?;
             keeper::write_held(&keeping.state, spec.id.as_str(), value)
                 .map_err(|e| Refusal::os("recording a box's keeper handle", e))?;
         }
@@ -652,6 +715,8 @@ fn std_handles(stdio: Stdio) -> Result<[OwnedHandle; 3], Refusal> {
 /// three standard handles (each the NUL device where the caller gave none).
 fn build_spawn(program: &Program, stdio: Stdio) -> Result<Spawn, Refusal> {
     program.check()?;
+    // One Windows exec bound for both classes, so a program moves between them unchanged (HEX-RT-14).
+    program.fits(&hex_core::hcs::exec_limit())?;
     if program.user.is_some() {
         return Err(Refusal::Invalid {
             what: "program",
@@ -915,6 +980,20 @@ mod tests {
         assert!(alive(pid), "the box's program ended with its runtime");
         crash(second);
         wait_for("kill-on-close to end the program", || !alive(pid));
+    }
+
+    /// T-T7.1.2: do make a node's runtime on a state folder; expect its `oci` boxes' records and scratch
+    /// kept inside that folder, so its start-time reclaim sweeps only its own boxes, not the machine's shared
+    /// folder where a runtime driven in process (a bench's) keeps the records of boxes it is running.
+    #[test]
+    fn an_outliving_nodes_records_are_in_its_own_folder() {
+        let (name, state) = (node("own"), tempfile::tempdir().unwrap());
+        let rt = WinRuntime::outliving(&name, state.path(), &keeper("own")).unwrap();
+        let own = rt.scratch_root.starts_with(state.path());
+        if let Some(k) = rt.keeper_pid() {
+            crash(k);
+        }
+        assert!(own, "the node keeps its records in {:?}", rt.scratch_root);
     }
 
     /// A runtime driven in process keeps kill-on-close: do make a box, run a program, drop the runtime;

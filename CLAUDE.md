@@ -116,15 +116,16 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   inherited, `posix_spawnattr_set_qos_class_np` to clamp its QoS, `posix_spawnattr_setjetsam_ext` to arm a
   fatal per-process memory cap at the box's whole bound (step 1's `_ext` backstop: the kernel SIGKILLs a
   member that crosses it, rootless, with no overshoot), and `adddup2`/`addchdir` file actions);
-  `proc_listpids(PROC_PGRP_ONLY)` lists the group and `proc_pid_rusage` reads each member's footprint,
-  start time and exit; `thread_policy_set(THREAD_TIME_CONSTRAINT_POLICY)` makes the watcher a Mach
+  `proc_listpids(PROC_PGRP_ONLY)` lists the group (and `PROC_UID_ONLY` a user, for the box helper's
+  membership, step 2) and `proc_pid_rusage` reads each member's footprint, start time and exit; `thread_policy_set(THREAD_TIME_CONSTRAINT_POLICY)` makes the watcher a Mach
   time-constraint thread; `kqueue`/`kevent` carry its one-shot `NOTE_CRITICAL` timer, a user event to wake
   it, and `EVFILT_PROC` (`NOTE_FORK`/`NOTE_EXIT`/`NOTE_EXITSTATUS`, the dead member's wait status in the
   event, so a cap kill is told from an ordinary SIGKILL without racing its reaper) on members, and, for the
   node's socket on macOS (native plan step 8, `hex-node`'s `serve::macos`, one kqueue on its I/O thread),
   level-triggered `EVFILT_READ`/`EVFILT_WRITE` on the listener and connections; `getpeereid` names the
-  socket's peer, so only the node's user and root are served; `mach_timebase_info` converts Mach ticks; `sysctlbyname("kern.maxproc")` bounds a listing and
-  `sysctlbyname("kern.argmax")` a program's arguments and environment; `getrusage`
+  socket's peer, so only the node's user and root are served; `mach_timebase_info` converts Mach ticks;
+  `sysctlbyname("kern.maxproc")` bounds a listing and `sysctlbyname("kern.argmax")` a program's arguments
+  and environment; `getrusage`
   and `getloadavg` read the node's own cost for the bench and observability. rustix wraps the `kqueue`,
   `kill`/`killpg` and `waitid` beside these, which the class calls through it; libc binds the rest as
   `unsafe` foreign functions, and `posix_spawnattr_set_qos_class_np` and `posix_spawnattr_setjetsam_ext`
@@ -132,6 +133,22 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   xnu's `bsd/sys/spawn_internal.h`, though libSystem exports the symbols). Rust can express none of these
   foreign calls, nor the raw `posix_spawnattr_t` the spawn-attribute setters write, safely, and macOS
   offers no safe wrapper.
+- `crates/hex-runtime/src/macos/helper_sys.rs`: the macOS box helper daemon's privileged syscalls (the
+  `process` class's box-user mode, decision "each OS runs its own boxes natively"; step 2). The daemon,
+  as root, starts a box's programs as the box's pool user: a `fork` whose child drops to the user
+  (`setgid`/`setuid`), opens a session for a leader (`setsid`), caps the user's processes
+  (`setrlimit(RLIMIT_NPROC)`) and the program's descriptors (`RLIMIT_NOFILE`), puts the three stdio descriptors on 0/1/2 (`dup2`), closes the rest
+  (`getdtablesize` then `close`, there being no `closefrom` in libc) and `execve`s the program — every
+  call async-signal-safe, as the Linux runtime's `pre_exec` is, since between fork and exec a
+  multi-threaded process may touch no lock. It then arms each member: `task_for_pid` for the member's
+  task, `task_set_phys_footprint_limit` for its ledger limit, and
+  `task_set_exception_ports`(`EXC_MASK_RESOURCE`) to route a crossing to the daemon's port
+  (`mach_port_allocate`/`mach_port_insert_right`), so a crossing notifies rather than kills. The daemon
+  receives those crossings with `mach_msg` on that port and replies, freeing the thread and task send
+  rights the message carried with `mach_port_deallocate`, and re-apportions the box (the event-driven
+  rebalance, no polling). `posix_spawn` can't change uid, so the start is a fork, not a spawn; libc binds
+  the POSIX calls and the Mach routines are declared as `unsafe` foreign functions, macOS offering no safe
+  wrapper.
 - `crates/hex-runtime/src/windows/sys.rs`: the Windows `process` class, whose box is a job object nested
   under the node's. It creates the job (`CreateJobObjectW`), sets its hard limits
   (`SetInformationJobObject`: the commit cap, active-process cap, kill-on-close and no breakaway, and the
@@ -145,7 +162,10 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   accounting (`QueryInformationJobObject`), ends the job
   (`TerminateJobObject`) or one member alone (`TerminateProcess`, a program's own kill) and closes its
   handles (`CloseHandle`), and reads the machine's processor count
-  (`GetActiveProcessorCount`). Where its boxes outlive the node (the keeper, `super::keeper`; decision
+  (`GetActiveProcessorCount`). For the `oci` class's Shards guest it reads the default shared roots
+  (docs/design/shards-guest.md §4a): the users folder from its known folder (`SHGetKnownFolderPath` with
+  `FOLDERID_UserProfiles`, its string freed by `CoTaskMemFree`) and the temp folder (`GetTempPath2W`).
+  Where its boxes outlive the node (the keeper, `super::keeper`; decision
   "the Windows node, on one completion port"), it names each box's job (`CreateJobObjectW` with a name,
   reopened by the next node with `OpenJobObjectW`), and a keeper holds a second handle to each: the node
   duplicates the job into the keeper and closes it there on delete (`DuplicateHandle` into another process
@@ -160,7 +180,8 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   an HCS silo holding a Hex job"). It resolves at run time (`LoadLibraryExW` from System32, `GetProcAddress`)
   and calls HCS's operation, compute-system and process calls (`HcsCreateOperation`,
   `HcsWaitForOperationResult[AndProcessInfo]`, `HcsCancelOperation`, `HcsCloseOperation`,
-  `HcsCreateComputeSystem`, `HcsStartComputeSystem`, `HcsTerminateComputeSystem`, `HcsCloseComputeSystem`,
+  `HcsCreateComputeSystem`, `HcsOpenComputeSystem` (by which the next node reopens a box a killed node left
+  running, to take it back), `HcsStartComputeSystem`, `HcsTerminateComputeSystem`, `HcsCloseComputeSystem`,
   `HcsCreateProcess`, `HcsCloseProcess`, `HcsGetServiceProperties`), freeing HCS's strings (`LocalFree`), and
   vmcompute's layer calls that make and remove a box's scratch as hcsshim and runhcs do (`ActivateLayer`,
   `PrepareLayer`, `GetLayerMountPath`, `UnprepareLayer`, `DeactivateLayer`: undocumented; the documented

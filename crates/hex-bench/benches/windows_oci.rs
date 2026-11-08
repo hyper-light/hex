@@ -67,7 +67,11 @@ fn main() {
         std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
         dir
     };
-    let mut times: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    // create, start, delete; then the two parts the lead asked broken out (2026-11-06): the copy of the base
+    // layer's blank.vhdx that create makes (timed alone, the same file to the same disk), and an exec into
+    // the started box (its launcher's start through HCS and the member's).
+    let mut times: [Vec<f64>; 5] = std::array::from_fn(|_| Vec::new());
+    let blank = std::path::Path::new(layers.last().unwrap()).join("blank.vhdx");
     for i in 0..warmup + n {
         let id = BoxId::new(&format!("hex-bench-{i}")).unwrap();
         let spec = BoxSpec {
@@ -82,10 +86,20 @@ fn main() {
         rt.start(&id).expect("start");
         let start = t.elapsed();
         let t = Instant::now();
+        let program = hex_api::Program::of(&[r"C:\hex\hex.exe", "selftest-box", "wait"]);
+        let member = rt.exec(&id, program, hex_api::Stdio::null()).expect("exec");
+        let exec = t.elapsed();
+        drop(member);
+        let t = Instant::now();
         rt.delete(&id).expect("delete");
         let delete = t.elapsed();
+        let copy_to = root.path().join(format!("copy{i}.vhdx"));
+        let t = Instant::now();
+        std::fs::copy(&blank, &copy_to).expect("copy blank.vhdx");
+        let copy = t.elapsed();
+        std::fs::remove_file(&copy_to).unwrap();
         if i >= warmup {
-            for (k, d) in [create, start, delete].iter().enumerate() {
+            for (k, d) in [create, start, delete, copy, exec].iter().enumerate() {
                 times[k].push(d.as_secs_f64() * 1000.0);
             }
         }
@@ -105,6 +119,8 @@ fn main() {
         "create_ms": stats(&times[0]),
         "start_ms": stats(&times[1]),
         "delete_ms": stats(&times[2]),
+        "blank_copy_ms": stats(&times[3]),
+        "exec_ms": stats(&times[4]),
     });
     std::fs::write(out, serde_json::to_string_pretty(&record).unwrap()).unwrap();
     println!("{record}");

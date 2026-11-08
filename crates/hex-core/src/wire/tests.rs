@@ -63,6 +63,7 @@ fn oci_spec() -> BoxSpec {
 
 fn info() -> BoxInfo {
     BoxInfo {
+        membership: None,
         id: id("b-1"),
         class: Class::Oci,
         state: BoxState::Running,
@@ -222,6 +223,7 @@ fn answers() -> Vec<(u64, Answer)> {
                 infos: vec![
                     info(),
                     BoxInfo {
+                        membership: None,
                         id: id("p"),
                         class: Class::Process,
                         state: BoxState::Empty,
@@ -436,6 +438,19 @@ fn version_3_messages_are_the_bytes_recorded() {
     }
 }
 
+/// Native plan step 8, guest stdio (HEX-GUEST-41): an answer gives a started program's streams' ends from version
+/// 3 on, and in no earlier version, which defines no given answer.
+#[test]
+fn a_programs_ends_ride_its_answer_from_version_3_on() {
+    assert!(!gives_ends(1) && !gives_ends(2));
+    assert!((3..=VERSION).all(gives_ends));
+    let given = Answer::Given {
+        pid: 1,
+        given: Streams::default(),
+    };
+    assert!(answer(2, 1, &given, MAX_MESSAGE).is_err());
+}
+
 /// HEX-SOCK-2, version 3's exec asking for streams and its answer: their bytes are the ones recorded here
 /// (the exec's body is version 1's recorded exec's, under its own header, with its streams and ask bytes);
 /// a given answer carries a descriptor for each stream it names and is refused, naming the count, with any
@@ -517,6 +532,7 @@ const GOLDEN_NETNS: &str = concat!(
 fn a_long_list_is_split_into_messages_within_the_bound() {
     let infos: Vec<BoxInfo> = (0..5_000)
         .map(|n| BoxInfo {
+            membership: None,
             id: id(&format!("box-{n:06}")),
             ..info()
         })
@@ -1046,6 +1062,7 @@ fn any_info() -> impl Strategy<Value = BoxInfo> {
     )
         .prop_map(
             |(id, oci, state, bounds, adopted, exit, abandoned)| BoxInfo {
+                membership: None,
                 id,
                 class: if oci { Class::Oci } else { Class::Process },
                 state: match state {

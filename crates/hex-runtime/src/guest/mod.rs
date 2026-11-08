@@ -789,15 +789,14 @@ impl<P: Runtime> WithGuest<P> {
         &self.oci
     }
 
-    /// The node's runtime routed by class ([`by_class`]), its guest booted before it returns
-    /// ([`WithGuest::routing`]).
+    /// The node's runtime, routed by class ([`by_class`]), its guest booted before it returns, so it accepts
+    /// no box before that boot ([`GuestRuntime::boot`]); a guest that can't boot refuses the node by type.
     pub fn new(process: P, oci: GuestRuntime) -> Result<Self, Refusal> {
         Self::routing(process, oci, by_class)
     }
 
-    /// The node's runtime routed by `route`, which a box it refuses is refused by. Its guest is booted
-    /// before it returns, so it accepts no box before that boot ([`GuestRuntime::boot`]); a guest that
-    /// can't boot refuses the node by type.
+    /// Routed by `route`, which a box it refuses is refused by; its guest booted before it returns, as
+    /// [`WithGuest::new`]'s is.
     pub fn routing(
         process: P,
         oci: GuestRuntime,

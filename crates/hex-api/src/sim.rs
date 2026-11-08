@@ -114,6 +114,7 @@ impl SimRuntime {
             None => None,
         };
         Ok(BoxInfo {
+            membership: None,
             id: b.spec.id.clone(),
             class: b.spec.class.class(),
             state: if waiting {

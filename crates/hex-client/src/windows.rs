@@ -10,12 +10,12 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use hex_afunix::{self as socket, Socket as Raw};
-use hex_api::{Refusal, Stdio};
+use hex_api::Refusal;
 use hex_core::stream::{self, Deframer};
 use hex_core::wire::{self, Received};
 
 use crate::ANSWER_PATIENCE;
-use crate::calls::{Core, Sent, Shared, Transport};
+use crate::calls::{Core, Lent, Sent, Shared, Transport};
 
 /// A node agent, reached through its socket.
 pub type Client = Core<Socket>;
@@ -28,23 +28,20 @@ pub struct Socket {
 }
 
 impl Transport for Socket {
-    type Stdio = ();
-
-    fn stdio(&self, _exec: u64, stdio: Stdio) -> Result<(), Refusal> {
-        if stdio.stdin.is_some() || stdio.stdout.is_some() || stdio.stderr.is_some() {
-            return Err(Refusal::Platform {
+    /// Sends `bytes` framed. Windows' AF_UNIX carries no descriptors, so a message that lends any is
+    /// refused by name: an exec's stdio through the node agent's socket waits on its transport, step 8's
+    /// measured decision. (A guest makes its own stdio connections, [`Transport::MAKES_ASKED`], not this.)
+    fn send(&self, bytes: &[u8], lent: &[Lent<'_>]) -> Result<(), Sent> {
+        if !lent.is_empty() {
+            return Err(Sent::Refused(Refusal::Platform {
                 what: "an exec's stdio through the node agent's socket",
                 platform: std::env::consts::OS,
                 why:
                     "Windows' AF_UNIX passes no handles, and the transport that carries an exec's \
                       streams to its caller waits on its measured decision (native plan step 8)"
                         .to_owned(),
-            });
+            }));
         }
-        Ok(())
-    }
-
-    fn send(&self, bytes: &[u8], _with: Option<()>) -> Result<(), Sent> {
         let _whole = self.sending.lock().map_err(|_| {
             Sent::Refused(Refusal::Broken(
                 "the client's send lock was poisoned".to_owned(),

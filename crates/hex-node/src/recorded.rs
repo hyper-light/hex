@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use hex_api::{
-    BoxId, BoxInfo, BoxSpec, Class, Proc, Program, Refusal, Runtime, Signal, Stdio, Usage,
+    Ask, BoxId, BoxInfo, BoxSpec, Class, Proc, Program, Refusal, Runtime, Signal, Stdio, Usage,
 };
 use hex_core::netns;
 use hex_core::record::{BoxRecord, Phase, ProcId};
@@ -71,8 +71,15 @@ pub trait Recover: Runtime {
         Ok(())
     }
     /// A call it answers later ([`Host::forward`]). By default every call runs on the worker.
-    fn forward(&self, call: Call, stdio: Stdio, reply: Reply, ended: serve::Ended) -> Forward {
-        let _ = (reply, ended);
+    fn forward(
+        &self,
+        call: Call,
+        stdio: Stdio,
+        ends: bool,
+        reply: Reply,
+        ended: serve::Ended,
+    ) -> Forward {
+        let _ = (ends, reply, ended);
         Forward::Back(Box::new((call, stdio)))
     }
 }
@@ -270,7 +277,14 @@ impl<R: Recover> Host for Recorded<R> {
     /// The calls its runtime answers later go there: an inspect's answer counted as any inspect's is
     /// ([`Books::counted`]). A create or a delete, which write the box's record and stage or remove its
     /// root, runs on the worker.
-    fn forward(&self, call: Call, stdio: Stdio, reply: Reply, ended: serve::Ended) -> Forward {
+    fn forward(
+        &self,
+        call: Call,
+        stdio: Stdio,
+        ends: bool,
+        reply: Reply,
+        ended: serve::Ended,
+    ) -> Forward {
         match call {
             Call::Inspect(_) => {
                 let books = Arc::clone(&self.books);
@@ -282,11 +296,13 @@ impl<R: Recover> Host for Recorded<R> {
                         other => other,
                     })
                 });
-                self.runtime.forward(call, stdio, counted, ended)
+                self.runtime.forward(call, stdio, ends, counted, ended)
             }
-            Call::Start(_) | Call::Signal { .. } | Call::Usage(_) | Call::Exec { .. } => {
-                self.runtime.forward(call, stdio, reply, ended)
-            }
+            Call::Start(_)
+            | Call::Signal { .. }
+            | Call::Usage(_)
+            | Call::Exec { .. }
+            | Call::ExecStreams { .. } => self.runtime.forward(call, stdio, ends, reply, ended),
             call => Forward::Back(Box::new((call, stdio))),
         }
     }
@@ -409,10 +425,23 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
     /// A call about a box its guest holds goes there through the event form's client and is answered
     /// from the loop; one about a host box runs on the worker. With no guest running the box is no box; a
     /// guest whose connection can't be joined to the loop refuses the call, naming why.
-    fn forward(&self, call: Call, stdio: Stdio, reply: Reply, ended: serve::Ended) -> Forward {
+    ///
+    /// A guest program can't take the caller's own pipes, and the node copies no byte between them (native
+    /// plan step 8): each stream an exec carries or asks for is the guest's own stdio connection, whose end
+    /// goes to the caller's client with the answer, and the caller's pipes are let go here. Its client
+    /// copies between those it carried and their ends; one of a wire version that takes no ends with an
+    /// answer is refused before anything is sent.
+    fn forward(
+        &self,
+        call: Call,
+        stdio: Stdio,
+        ends: bool,
+        reply: Reply,
+        ended: serve::Ended,
+    ) -> Forward {
         let id = match &call {
             Call::Inspect(id) | Call::Start(id) | Call::Usage(id) => id,
-            Call::Signal { id, .. } | Call::Exec { id, .. } => id,
+            Call::Signal { id, .. } | Call::Exec { id, .. } | Call::ExecStreams { id, .. } => id,
             _ => return Forward::Back(Box::new((call, stdio))),
         };
         match self.host().inspect(id) {
@@ -424,11 +453,44 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
             Ok(None) => return Forward::Refused(Refusal::NoSuchBox(id.clone())),
             Err(why) => return Forward::Refused(why),
         };
+        let (call, stdio) = match call {
+            Call::Exec { id, program, .. } | Call::ExecStreams { id, program, .. } => {
+                if let Err(why) = stdio.check() {
+                    return Forward::Refused(why);
+                }
+                let ask = Ask {
+                    stdin: stdio.stdin.is_some() || stdio.ask.stdin,
+                    stdout: stdio.stdout.is_some() || stdio.ask.stdout,
+                    stderr: stdio.stderr.is_some() || stdio.ask.stderr,
+                };
+                if ask != Ask::default() && !ends {
+                    return Forward::Refused(Refusal::Invalid {
+                        what: "stdio",
+                        why: "a program in the node's guest takes its streams as the guest's own connections, whose ends ride its answer from wire version 3 on; this client's exec is of an earlier version".to_owned(),
+                    });
+                }
+                // The caller's own pipes, let go here: its client keeps its own.
+                drop(stdio);
+                let streams = hex_core::wire::Streams::default();
+                let exec = Call::Exec {
+                    id,
+                    program,
+                    streams,
+                };
+                let asked = Stdio {
+                    ask,
+                    ..Stdio::null()
+                };
+                (exec, asked)
+            }
+            call => (call, stdio),
+        };
         let started = Arc::clone(&client);
         let then: hex_client::Then = Box::new(move |exec, got| {
             reply(match got {
                 Ok(Answer::Started { pid }) => Ok(Forwarded::Started {
                     pid,
+                    given: started.given(exec),
                     program: Box::new(GuestProgram {
                         client: started,
                         exec,

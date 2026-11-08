@@ -165,6 +165,20 @@ pub fn run(argv: &[String]) -> Option<u8> {
     }
 }
 
+/// Creates `path` and writes a line to it: 0 and "wrote" when it could, 1 and "refused <os error code>"
+/// when it couldn't (a read-only mount's refusal).
+fn write_probe(path: &str) -> u8 {
+    let wrote = std::fs::File::create(path).and_then(|mut f| f.write_all(b"written in a box\n"));
+    match wrote {
+        Ok(()) => u8::from(write_all(&mut std::io::stdout(), b"wrote\n").is_err()),
+        Err(e) => {
+            let line = format!("refused {}\n", e.raw_os_error().unwrap_or(-1));
+            let _ = write_all(&mut std::io::stdout(), line.as_bytes());
+            1
+        }
+    }
+}
+
 /// Prints `bytes=<n>`, what `dir`'s file system has free to an unprivileged writer; 1 when it can't be read.
 #[cfg(target_os = "linux")]
 fn room(dir: &str) -> u8 {
@@ -183,20 +197,6 @@ fn room(dir: &str) -> u8 {
         )
         .is_err(),
     )
-}
-
-/// Creates `path` and writes a line to it: 0 and "wrote" when it could, 1 and "refused <os error code>"
-/// when it couldn't (a read-only mount's refusal).
-fn write_probe(path: &str) -> u8 {
-    let wrote = std::fs::File::create(path).and_then(|mut f| f.write_all(b"written in a box\n"));
-    match wrote {
-        Ok(()) => u8::from(write_all(&mut std::io::stdout(), b"wrote\n").is_err()),
-        Err(e) => {
-            let line = format!("refused {}\n", e.raw_os_error().unwrap_or(-1));
-            let _ = write_all(&mut std::io::stdout(), line.as_bytes());
-            1
-        }
-    }
 }
 
 /// Windows: a child started with `CREATE_BREAKAWAY_FROM_JOB` from inside a job that forbids breakaway.

@@ -102,8 +102,8 @@ fn run(
     let late = || Refusal::Os {
         op: "reading the Windows features",
         why: format!(
-            "PowerShell's Win32_OptionalFeature query didn't finish within {} s",
-            PATIENCE.as_secs()
+            "PowerShell's Win32_OptionalFeature query didn't finish within {} ms",
+            PATIENCE.as_millis()
         ),
     };
     let listing = match rx.recv_timeout(left()) {
@@ -125,8 +125,8 @@ mod tests {
     use super::*;
 
     /// HEX-INST-9 (native plan step 6): a query that runs past the bound is ended and refused by name, not
-    /// waited on. The fake query is PowerShell sleeping twice [`PATIENCE`], so the case derives from the
-    /// bound itself.
+    /// waited on, and the refusal states the bound as it is (in ms: whole seconds read 4,842 ms as 4 s).
+    /// The fake query is PowerShell sleeping twice [`PATIENCE`], so the case derives from the bound itself.
     #[test]
     fn a_query_past_the_bound_is_refused_by_name() {
         let processors = NonZeroU32::new(super::super::sys::active_processors()).unwrap();
@@ -135,6 +135,11 @@ mod tests {
         assert!(
             matches!(&refused, Refusal::Os { why, .. } if why.contains("didn't finish within")),
             "{refused:?}"
+        );
+        let bound = format!("within {} ms", PATIENCE.as_millis());
+        assert!(
+            matches!(&refused, Refusal::Os { why, .. } if why.contains(&bound)),
+            "{refused:?} doesn't name {bound}"
         );
     }
 }

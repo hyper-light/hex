@@ -470,6 +470,13 @@ impl Drop for ProcessBox {
     }
 }
 
+/// Whether process group `pgid` has a member alive (not a zombie).
+fn live(pgid: i32) -> Result<bool, Refusal> {
+    let max = sys::max_processes().map_err(|e| Refusal::os("reading kern.maxproc", e))?;
+    let mut pids = Vec::with_capacity(max);
+    Ok(alive_in(pgid, &mut pids)? > 0)
+}
+
 /// Whether process group `pgid`, its leader started at `started`, is still that box's group: its leader
 /// still runs with that start time, or no process has the leader's pid now (it ended, and its group's other
 /// members are left). A live process with that pid and another start time was given it since, and leads a
@@ -507,13 +514,6 @@ pub fn end_group(pgid: i32, started: u64) -> Result<(), Refusal> {
         }
         std::thread::yield_now();
     }
-}
-
-/// Whether process group `pgid` has a member alive (not a zombie).
-fn live(pgid: i32) -> Result<bool, Refusal> {
-    let max = sys::max_processes().map_err(|e| Refusal::os("reading kern.maxproc", e))?;
-    let mut pids = Vec::with_capacity(max);
-    Ok(alive_in(pgid, &mut pids)? > 0)
 }
 
 /// How many of process group `pgid`'s members are alive (not a zombie), by reading each one's rusage.

@@ -15,6 +15,7 @@ use hex_api::{
 use hex_core::netns;
 use hex_core::wire::{self, Answer, Call, Header, Limits, Request, Streams};
 
+use crate::copy::copy;
 use crate::{ANSWER_PATIENCE, MAX_LIST};
 
 /// What takes a call's answer in the event form ([`Core::begin`]), with its request's id (an exec's names
@@ -30,20 +31,35 @@ pub enum Sent {
     Refused(Refusal),
 }
 
+/// A descriptor lent to a message as it is sent (an exec's stdio, a pipe's end of the caller's): the agent gets
+/// its own, and this one stays the caller's.
+#[cfg(unix)]
+pub type Lent<'a> = std::os::fd::BorrowedFd<'a>;
+#[cfg(windows)]
+pub type Lent<'a> = std::os::windows::io::BorrowedHandle<'a>;
+
+/// No descriptors: what lends nothing to a message.
+const NONE: &[Lent<'static>] = &[];
+
 /// What carries a client's messages to its node agent.
 pub trait Transport: Send + Sync + 'static {
-    /// What travels with an exec: its stdio as the transport carries it.
-    type Stdio: Send;
-
-    /// An exec's stdio for the request `exec`, made ready to travel with it.
-    fn stdio(&self, exec: u64, stdio: Stdio) -> Result<Self::Stdio, Refusal>;
-    /// Sends one message, with what travels with it.
-    fn send(&self, bytes: &[u8], with: Option<Self::Stdio>) -> Result<(), Sent>;
+    /// Sends one message, with the descriptors lent to it.
+    fn send(&self, bytes: &[u8], lent: &[Lent<'_>]) -> Result<(), Sent>;
     /// Ends the connection both ways: the reading side sees the end.
     fn shutdown(&self);
-    /// Whether it makes the streams an exec asks for itself ([`Transport::asks`]), rather than asking the
-    /// agent, which gives their ends with its answer ([`Answer::Given`]).
+    /// Whether every stream of an exec is a connection of its own that it makes, and no descriptor rides with a
+    /// message: a guest's. It makes those an exec asks for ([`Transport::asks`]) and takes the pipes the caller
+    /// carries ([`Transport::carries`]); elsewhere the carried pipes ride with the exec, and a stream asked for
+    /// is the agent's to make, which gives its end with its answer ([`Answer::Given`]).
     const MAKES_ASKED: bool = false;
+    /// The caller's own pipes for exec `exec`, each copied between it and a connection of its own made for it,
+    /// here in the caller's client: only where [`Transport::MAKES_ASKED`].
+    fn carries(&self, exec: u64, stdio: Stdio) -> Result<(), Refusal> {
+        let _ = (exec, stdio);
+        Err(Refusal::Broken(
+            "this transport lends an exec's pipes to its message".to_owned(),
+        ))
+    }
     /// The streams `ask` names for exec `exec`, made here, its program's ends the agent's to find (a
     /// guest's stdio connections, named for it): only where [`Transport::MAKES_ASKED`].
     fn asks(&self, exec: u64, ask: hex_api::Ask) -> Result<hex_api::Given, Refusal> {
@@ -75,7 +91,9 @@ struct State {
     closed: Option<Refusal>,
     /// Why the agent won't serve the connection, when it said (an answer to no request, id 0).
     refused: Option<Refusal>,
-    /// The streams a given answer's descriptors are, by its request's id, until its exec takes them.
+    /// Each exec's streams' ends, by its request's id, until its exec takes them: those its transport made (a
+    /// guest's connections), or those its agent's answer gave as its descriptors. An exec refused has its ends
+    /// closed with its answer.
     given: BTreeMap<u64, hex_api::Given>,
 }
 
@@ -205,12 +223,13 @@ impl<T> Shared<T> {
                     }
                 }
                 answer => {
-                    // An exec that started no program has no end to come: a completion waiting
-                    // for one is let go.
-                    if !matches!(answer, Answer::Started { .. } | Answer::Given { .. })
-                        && matches!(state.programs.get(&header.id), Some(Watching::Then(_)))
-                    {
-                        state.programs.remove(&header.id);
+                    // An exec that started no program has no end to come, and no streams: a
+                    // completion waiting for its end is let go, and the ends made for it close.
+                    if !matches!(answer, Answer::Started { .. } | Answer::Given { .. }) {
+                        if matches!(state.programs.get(&header.id), Some(Watching::Then(_))) {
+                            state.programs.remove(&header.id);
+                        }
+                        state.given.remove(&header.id);
                     }
                     if let Some(mut waiting) = state.calls.remove(&header.id) {
                         let answer = match answer {
@@ -290,16 +309,16 @@ impl<T: Transport> Drop for Conn<T> {
 }
 
 impl<T: Transport> Conn<T> {
-    /// Sends `request`, with what `with` makes for its id to travel with it, its answer to go to
-    /// `answer` and an exec's program's end to `program`, whose place is made before the exec goes, so
-    /// the end can't come first. Its id, once sent (or gone with the connection, whose end then reaches
-    /// the taker); a request that can't be sent is refused and forgotten.
-    fn send(
+    /// Sends `request` with the descriptors `with` lends it, once `with` has made what its id names (an exec's
+    /// streams its transport makes), its answer to go to `answer` and an exec's program's end to `program`, whose
+    /// place is made before the exec goes, so the end can't come first. Its id, once sent (or gone with the
+    /// connection, whose end then reaches the taker); a request that can't be sent is refused and forgotten.
+    fn send<'l>(
         &self,
         version: u16,
         bound: usize,
         request: &Request,
-        with: impl FnOnce(u64) -> Result<Option<T::Stdio>, Refusal>,
+        with: impl FnOnce(u64) -> Result<&'l [Lent<'l>], Refusal>,
         answer: Taker,
         program: Option<Watching>,
     ) -> Result<u64, Refusal> {
@@ -329,8 +348,8 @@ impl<T: Transport> Conn<T> {
         let sent = wire::request(version, id, request, bound)
             .map_err(|fault| Sent::Refused(fault.into()))
             .and_then(|bytes| {
-                let with = with(id).map_err(Sent::Refused)?;
-                shared.transport.send(&bytes, with)
+                let lent = with(id).map_err(Sent::Refused)?;
+                shared.transport.send(&bytes, lent)
             });
         match sent {
             // The agent has gone, or closed the connection: why reaches the taker through the
@@ -343,21 +362,22 @@ impl<T: Transport> Conn<T> {
         }
     }
 
-    /// Forgets call `id` and its program's place: no answer or end of it is taken from now.
+    /// Forgets call `id`, its program's place and its streams' ends: no answer or end of it is taken from now.
     fn forget(&self, id: u64) {
         if let Ok(mut state) = self.shared.state() {
             state.calls.remove(&id);
             state.programs.remove(&id);
+            state.given.remove(&id);
         }
     }
 
     /// Sends `request` and waits for its answer, as [`Conn::send`] does with a caller waiting.
-    fn call(
+    fn call<'l>(
         &self,
         version: u16,
         bound: usize,
         request: &Request,
-        with: impl FnOnce(u64) -> Result<Option<T::Stdio>, Refusal>,
+        with: impl FnOnce(u64) -> Result<&'l [Lent<'l>], Refusal>,
         program: Option<Arc<Ending>>,
     ) -> Result<(u64, Answer), Refusal> {
         let (tx, rx) = sync_channel(1);
@@ -409,7 +429,7 @@ impl<T: Transport> Core<T> {
     /// its bounds.
     pub(crate) fn hello(shared: Arc<Shared<T>>, reader: JoinHandle<()>) -> Result<Self, Refusal> {
         let client = Self::unknown(shared, Some(reader));
-        let answer = client.call(&Request::Hello, |_| Ok(None), None)?.1;
+        let answer = client.call(&Request::Hello, |_| Ok(NONE), None)?.1;
         client.greeted(answer)
     }
 
@@ -434,7 +454,7 @@ impl<T: Transport> Core<T> {
             wire::FIRST,
             wire::MAX_MESSAGE,
             &Request::Hello,
-            |_| Ok(None),
+            |_| Ok(NONE),
             Taker::Wait(tx),
             None,
         )?;
@@ -495,8 +515,10 @@ impl<T: Transport> Core<T> {
 
     /// The event form of a call: sends `call`, an exec's with `stdio`, and returns its request's id at
     /// once. `then` gets its answer on the thread that reads the connection, and an exec's program's end
-    /// goes to `ended` once its start has come. A call that can't be sent is refused here, and `then`
-    /// never runs.
+    /// goes to `ended` once its start has come; the ends of the streams it asked for are taken with
+    /// [`Core::given`]. The event form copies no stream: where the transport makes an exec's streams (a
+    /// guest's), each is asked for, and a pipe of the caller's own is refused. A call that can't be sent is
+    /// refused here, and `then` never runs.
     pub fn begin(
         &self,
         call: Call,
@@ -504,38 +526,70 @@ impl<T: Transport> Core<T> {
         then: Then,
         ended: Ended,
     ) -> Result<u64, Refusal> {
-        let transport = &self.conn.shared.transport;
-        let (request, program) = match call {
-            Call::Exec { id, program, .. } => {
-                let streams = Streams {
-                    stdin: stdio.stdin.is_some(),
-                    stdout: stdio.stdout.is_some(),
-                    stderr: stdio.stderr.is_some(),
-                };
-                let request = Request::Call(Call::Exec {
-                    id,
-                    program,
-                    streams,
-                });
+        let shared = &self.conn.shared;
+        let (id, program) = match call {
+            Call::Exec { id, program, .. } | Call::ExecStreams { id, program, .. } => (id, program),
+            call => {
                 return self.conn.send(
                     self.version,
                     self.limits.message_bytes,
-                    &request,
-                    move |exec| transport.stdio(exec, stdio).map(Some),
+                    &Request::Call(call),
+                    |_| Ok(NONE),
                     Taker::Then(then),
-                    Some(Watching::Then(ended)),
+                    None,
                 );
             }
-            call => (Request::Call(call), None),
         };
+        stdio.check()?;
+        let (carried, asked) = (carried(&stdio), streams(stdio.ask));
+        let (request, made) = if T::MAKES_ASKED {
+            if carried != Streams::default() {
+                return Err(Refusal::Invalid {
+                    what: "stdio",
+                    why: "the event form copies no stream: ask for each of a guest program's streams, whose ends are the caller's".to_owned(),
+                });
+            }
+            let exec = Call::Exec {
+                id,
+                program,
+                streams: asked,
+            };
+            (exec, asked)
+        } else if asked == Streams::default() {
+            let exec = Call::Exec {
+                id,
+                program,
+                streams: carried,
+            };
+            (exec, Streams::default())
+        } else {
+            let exec = Call::ExecStreams {
+                id,
+                program,
+                streams: carried,
+                ask: asked,
+            };
+            (exec, Streams::default())
+        };
+        let lent = lend(&stdio);
         self.conn.send(
             self.version,
             self.limits.message_bytes,
-            &request,
-            |_| Ok(None),
+            &Request::Call(request),
+            |exec| {
+                make(shared, exec, made)?;
+                Ok(&lent[..])
+            },
             Taker::Then(then),
-            program,
+            Some(Watching::Then(ended)),
         )
+    }
+
+    /// The ends of exec `exec`'s streams once its start has come, taken once: those its transport made (a
+    /// guest's connections) or its agent's answer gave. The event form's completion ([`Then`]) takes them
+    /// here; `None` when there are none, or they were taken.
+    pub fn given(&self, exec: u64) -> Option<hex_api::Given> {
+        self.conn.shared.state().ok()?.given.remove(&exec)
     }
 
     /// The event form's release of exec `exec`'s program: its end is no longer taken, and the agent lets
@@ -552,7 +606,7 @@ impl<T: Transport> Core<T> {
             &Request::Release,
             self.limits.message_bytes,
         ) {
-            let _ = shared.transport.send(&bytes, None);
+            let _ = shared.transport.send(&bytes, &[]);
         }
     }
 
@@ -571,7 +625,7 @@ impl<T: Transport> Core<T> {
     /// sent, as a kind version 1 doesn't define.
     pub fn netns(&self) -> Result<netns::Counts, Refusal> {
         match self
-            .call(&Request::Call(Call::Netns), |_| Ok(None), None)?
+            .call(&Request::Call(Call::Netns), |_| Ok(NONE), None)?
             .1
         {
             Answer::Netns(counts) => Ok(counts),
@@ -580,11 +634,12 @@ impl<T: Transport> Core<T> {
         }
     }
 
-    /// Sends `request` on the connection, with what `with` makes for its id, and waits for its answer.
-    fn call(
+    /// Sends `request` on the connection with what `with` makes for its id and lends it, and waits for its
+    /// answer.
+    fn call<'l>(
         &self,
         request: &Request,
-        with: impl FnOnce(u64) -> Result<Option<T::Stdio>, Refusal>,
+        with: impl FnOnce(u64) -> Result<&'l [Lent<'l>], Refusal>,
         program: Option<Arc<Ending>>,
     ) -> Result<(u64, Answer), Refusal> {
         self.conn.call(
@@ -598,7 +653,7 @@ impl<T: Transport> Core<T> {
 
     /// A call that carries nothing beside its message.
     fn plain(&self, call: Call) -> Result<Answer, Refusal> {
-        Ok(self.call(&Request::Call(call), |_| Ok(None), None)?.1)
+        Ok(self.call(&Request::Call(call), |_| Ok(NONE), None)?.1)
     }
 
     /// A call whose answer is `Done`.
@@ -647,6 +702,121 @@ pub const WIRE_EXEC_LIMIT: hex_api::ExecLimit = hex_api::ExecLimit {
     source: "the node agent's wire (one message, hex_core::wire::MAX_MESSAGE)",
 };
 
+/// The streams an exec carries: the caller's own pipes.
+fn carried(stdio: &Stdio) -> Streams {
+    Streams {
+        stdin: stdio.stdin.is_some(),
+        stdout: stdio.stdout.is_some(),
+        stderr: stdio.stderr.is_some(),
+    }
+}
+
+/// The streams `ask` names.
+fn streams(ask: hex_api::Ask) -> Streams {
+    Streams {
+        stdin: ask.stdin,
+        stdout: ask.stdout,
+        stderr: ask.stderr,
+    }
+}
+
+/// The streams in `a` or `b`.
+fn union(a: Streams, b: Streams) -> Streams {
+    Streams {
+        stdin: a.stdin || b.stdin,
+        stdout: a.stdout || b.stdout,
+        stderr: a.stderr || b.stderr,
+    }
+}
+
+/// Makes the streams `made` names for exec `exec`, where its transport makes them (a guest's connections), kept
+/// for its exec to take once its start comes; nothing when it names none.
+fn make<T: Transport>(shared: &Shared<T>, exec: u64, made: Streams) -> Result<(), Refusal> {
+    if made == Streams::default() {
+        return Ok(());
+    }
+    let ask = hex_api::Ask {
+        stdin: made.stdin,
+        stdout: made.stdout,
+        stderr: made.stderr,
+    };
+    let given = shared.transport.asks(exec, ask)?;
+    shared.state()?.given.insert(exec, given);
+    Ok(())
+}
+
+/// The descriptors of the pipes an exec carries, lent to its message, in the wire's order.
+#[cfg(unix)]
+fn lend(stdio: &Stdio) -> Vec<Lent<'_>> {
+    use std::os::fd::AsFd;
+    [
+        stdio.stdin.as_ref().map(AsFd::as_fd),
+        stdio.stdout.as_ref().map(AsFd::as_fd),
+        stdio.stderr.as_ref().map(AsFd::as_fd),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+#[cfg(windows)]
+fn lend(stdio: &Stdio) -> Vec<Lent<'_>> {
+    use std::os::windows::io::AsHandle;
+    [
+        stdio.stdin.as_ref().map(AsHandle::as_handle),
+        stdio.stdout.as_ref().map(AsHandle::as_handle),
+        stdio.stderr.as_ref().map(AsHandle::as_handle),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// The ends an exec's start gave, each settled: a stream the caller carried as a pipe of its own is copied between
+/// that pipe and its end, here in the caller's client (the one copy left, native plan step 8); a stream it asked
+/// for is the caller's to take ([`Proc::streams`]). A carried pipe whose program took it has no end, and is let go
+/// here. An end of a stream the exec neither carried nor asked for is the agent's fault, refused.
+fn settle(stdio: Stdio, ends: hex_api::Given) -> Result<hex_api::Given, Refusal> {
+    let Stdio {
+        stdin,
+        stdout,
+        stderr,
+        ask,
+    } = stdio;
+    let unasked = |name: &str| {
+        Refusal::Broken(format!(
+            "the node agent gave {name}'s end, which its exec neither carried nor asked for"
+        ))
+    };
+    let mut given = hex_api::Given::default();
+    match (stdin, ends.stdin) {
+        (Some(pipe), Some(end)) => copy(pipe, std::fs::File::from(end), end_sending)?,
+        (None, Some(end)) if ask.stdin => given.stdin = Some(end),
+        (None, Some(_)) => return Err(unasked("stdin")),
+        (_, None) => {}
+    }
+    for (pipe, end, asked, name, to) in [
+        (stdout, ends.stdout, ask.stdout, "stdout", &mut given.stdout),
+        (stderr, ends.stderr, ask.stderr, "stderr", &mut given.stderr),
+    ] {
+        match (pipe, end) {
+            (Some(pipe), Some(end)) => copy(std::fs::File::from(end), pipe, drop)?,
+            (None, Some(end)) if asked => *to = Some(end),
+            (None, Some(_)) => return Err(unasked(name)),
+            (_, None) => {}
+        }
+    }
+    Ok(given)
+}
+
+/// A stream's end its stdin was copied into: its sending half ends, so the program sees its stdin end even while
+/// another holds the connection.
+fn end_sending(to: std::fs::File) {
+    #[cfg(unix)]
+    let _ = rustix::net::shutdown(&to, rustix::net::Shutdown::Write);
+    drop(to);
+}
+
 impl<T: Transport> Runtime for Core<T> {
     fn classes(&self) -> Vec<Class> {
         self.classes.clone()
@@ -663,88 +833,98 @@ impl<T: Transport> Runtime for Core<T> {
         self.done(Call::Start(id.clone()), "start")
     }
 
-    /// Streams asked for are made by the transport where it can (a guest's, no copy) or asked of the
-    /// agent, which gives their ends with its answer (wire version 3's [`Call::ExecStreams`]).
+    /// The caller's own pipes ride with the exec as descriptors, which a local program takes as its streams. A
+    /// stream asked for is made where the program's streams are: by the transport, where they are connections of
+    /// its own (a guest's), or by the agent, which gives its end with its answer (wire version 3's
+    /// [`Call::ExecStreams`]). A program that can't take the caller's own pipe (a guest's) has its stream's
+    /// connection copied to and from that pipe here: by the transport where it makes the connection, or once the
+    /// agent's answer gives its end. The one copy left is this client's, the caller's, never the node's (native
+    /// plan step 8).
     fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
         program.fits(&WIRE_EXEC_LIMIT)?;
         stdio.check()?;
-        let ask = stdio.ask;
-        let asking = ask != hex_api::Ask::default();
-        let mut streams = Streams {
-            stdin: stdio.stdin.is_some(),
-            stdout: stdio.stdout.is_some(),
-            stderr: stdio.stderr.is_some(),
-        };
+        let (carried, asked) = (carried(&stdio), streams(stdio.ask));
         let ending = Arc::new(Ending::default());
-        let transport = &self.conn.shared.transport;
-        // Made here, the asked streams ride beside the exec as its own do; asked of the agent, they come
-        // back with its answer.
-        let made = std::cell::Cell::new(None);
-        let ask_streams = Streams {
-            stdin: ask.stdin,
-            stdout: ask.stdout,
-            stderr: ask.stderr,
-        };
-        let request = |exec_streams: Streams, agent_makes: bool| {
-            if agent_makes {
-                Request::Call(Call::ExecStreams {
-                    id: id.clone(),
-                    program: program.clone(),
-                    streams: exec_streams,
-                    ask: ask_streams,
-                })
-            } else {
-                Request::Call(Call::Exec {
-                    id: id.clone(),
-                    program: program.clone(),
-                    streams: exec_streams,
-                })
-            }
-        };
-        // Whether the transport makes them is known only once the exec's id is: asked with it.
-        let (exec, answer) = if asking {
-            let local = T::MAKES_ASKED;
-            if local {
-                streams.stdin |= ask.stdin;
-                streams.stdout |= ask.stdout;
-                streams.stderr |= ask.stderr;
-            }
-            let req = request(streams, !local);
-            self.call(
-                &req,
+        let shared = &self.conn.shared;
+        let (exec, answer, kept) = if T::MAKES_ASKED {
+            let request = Request::Call(Call::Exec {
+                id: id.clone(),
+                program,
+                streams: union(carried, asked),
+            });
+            let Stdio {
+                stdin,
+                stdout,
+                stderr,
+                ask,
+            } = stdio;
+            let pipes = Stdio {
+                stdin,
+                stdout,
+                stderr,
+                ..Stdio::null()
+            };
+            let (exec, answer) = self.call(
+                &request,
                 |exec| {
-                    if local {
-                        made.set(Some(transport.asks(exec, ask)?));
-                    }
-                    transport.stdio(exec, stdio).map(Some)
+                    make(shared, exec, asked)?;
+                    shared.transport.carries(exec, pipes)?;
+                    Ok(NONE)
                 },
                 Some(Arc::clone(&ending)),
-            )?
+            )?;
+            let kept = Stdio {
+                ask,
+                ..Stdio::null()
+            };
+            (exec, answer, kept)
         } else {
-            let req = request(streams, false);
-            self.call(
-                &req,
-                |exec| transport.stdio(exec, stdio).map(Some),
-                Some(Arc::clone(&ending)),
-            )?
-        };
-        let given = match &answer {
-            Answer::Given { .. } => self.conn.shared.state()?.given.remove(&exec),
-            _ => made.take(),
+            let request = if asked == Streams::default() {
+                Request::Call(Call::Exec {
+                    id: id.clone(),
+                    program,
+                    streams: carried,
+                })
+            } else {
+                Request::Call(Call::ExecStreams {
+                    id: id.clone(),
+                    program,
+                    streams: carried,
+                    ask: asked,
+                })
+            };
+            let (exec, answer) = {
+                let lent = lend(&stdio);
+                self.call(&request, |_| Ok(&lent[..]), Some(Arc::clone(&ending)))?
+            };
+            (exec, answer, stdio)
         };
         match answer {
-            Answer::Started { pid } | Answer::Given { pid, .. } => Ok(Box::new(RemoteProc {
-                conn: Arc::clone(&self.conn),
-                version: self.version,
-                bound: self.limits.message_bytes,
-                exec,
-                pid,
-                ending,
-                exit: None,
-                given,
-            })),
+            Answer::Started { pid } | Answer::Given { pid, .. } => {
+                let ends = shared.state()?.given.remove(&exec).unwrap_or_default();
+                let mut proc = RemoteProc {
+                    conn: Arc::clone(&self.conn),
+                    version: self.version,
+                    bound: self.limits.message_bytes,
+                    exec,
+                    pid,
+                    ending,
+                    exit: None,
+                    given: None,
+                };
+                match settle(kept, ends) {
+                    Ok(given) => {
+                        proc.given = Some(given);
+                        Ok(Box::new(proc))
+                    }
+                    Err(why) => {
+                        let _ = proc.kill();
+                        Err(why)
+                    }
+                }
+            }
             other => {
-                if let Ok(mut state) = self.conn.shared.state() {
+                if let Ok(mut state) = shared.state() {
                     state.programs.remove(&exec);
                     state.given.remove(&exec);
                 }
@@ -863,7 +1043,7 @@ impl<T: Transport> Proc for RemoteProc<T> {
         let kill = Request::Call(Call::Kill { exec: self.exec });
         match self
             .conn
-            .call(self.version, self.bound, &kill, |_| Ok(None), None)?
+            .call(self.version, self.bound, &kill, |_| Ok(NONE), None)?
             .1
         {
             Answer::Done => Ok(()),
@@ -901,7 +1081,7 @@ impl<T: Transport> Drop for RemoteProc<T> {
                 wire::MAX_MESSAGE,
             )
         {
-            let _ = shared.transport.send(&bytes, None);
+            let _ = shared.transport.send(&bytes, &[]);
         }
     }
 }

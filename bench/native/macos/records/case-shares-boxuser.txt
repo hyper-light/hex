@@ -1,0 +1,25 @@
+# hex-core boxuser model tests: the share of each kind of case their generators make
+# recorder: crates/hex-core/src/boxuser.rs records_the_rarest_case_shares (cargo test --release -p hex-core --lib
+#   records_the_rarest_case_shares -- --ignored --nocapture), 100000 cases a test, so the rarest share
+#   (about 0.016) is known to about 2.5% relative (its standard error, sqrt((1 - p) / (n p))).
+# host Adas-MacBook-Pro-2 (macOS, aarch64), tree 5761315 + the recorder, 2026-11-06T15:54:20Z.
+# The shares are the generators' (proptest strategies), not the machine's.
+apportioning_holds_its_invariants: an empty arm: 4245 of 100000 (0.04245)
+apportioning_holds_its_invariants: a one-member arm: 3897 of 100000 (0.03897)
+apportioning_holds_its_invariants: a many-member arm: 27822 of 100000 (0.27822)
+apportioning_holds_its_invariants: an arm with a remainder: 21816 of 100000 (0.21816)
+apportioning_holds_its_invariants: an end: 64036 of 100000 (0.64036)
+apportioning_holds_its_invariants: rarest share 0.03897 -> 76 cases
+the_armed_tree_never_passes_the_bound: a box ended at its start: 1562 of 100000 (0.01562)
+the_armed_tree_never_passes_the_bound: a box ended as it grew: 7850 of 100000 (0.07850)
+the_armed_tree_never_passes_the_bound: a box held through its growth: 90588 of 100000 (0.90588)
+the_armed_tree_never_passes_the_bound: rarest share 0.01562 -> 191 cases
+
+# proptest's deterministic sequence (TestRng::deterministic_rng, the one the tests draw from since the
+# lead's 2026-11-06 call): the case by which it has met every kind. Same recorder, extended;
+# Adas-MacBook-Pro-2, 2026-11-06T17:11Z, tree da097e2 + the deterministic runner. (Its random-seed shares that
+# run: apportioning 0.03709, armed tree 0.01540, within the 100000-case record's error of the above.)
+apportioning_holds_its_invariants: the deterministic sequence meets every kind by case Some(93)
+the_armed_tree_never_passes_the_bound: the deterministic sequence meets every kind by case Some(27)
+# Each test runs max(cases_to_meet(rarest share), that case): apportioning max(76, 93) = 93; the armed tree
+# max(191, 27) = 191.

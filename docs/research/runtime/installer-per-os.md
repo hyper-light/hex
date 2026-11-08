@@ -354,6 +354,24 @@ above, exit 0, 133 users); `dscl.1:38` "-list path [key]", `:49` "-delete path".
 print system/<label>` exit 0 vs 113, then a connect to its socket (the authoritative check that it
 answers).
 
+### 3.6 Who may reach the helper's socket
+
+The helper runs as root, so its socket must answer only the users whose nodes may use it.
+
+- A new file's group: `open.2:117` (macOS 26.2 25C56, adas-mac-studio-2) "When a new file is created, it is
+  given the group of the directory which" (the BSD rule; a socket `bind(2)` makes is such a file). So a socket
+  bound in a folder of group `hexnode` is `hexnode`'s, whatever the daemon's own group.
+- Its mode: `launchd.plist.5:293-296` "Umask <integer or string>" / "This optional key specifies what value
+  should be passed to umask(2)" / "before running the job. If the value specified is an integer, it must be" /
+  "a decimal representation of the desired umask". `Umask` 7 makes the bound socket `0770`.
+- `/Library/PrivilegedHelperTools` is `root:wheel 0755` on the same Mac (MEASURED-OWN, `ls -ld`), so a helper
+  binary there is replaceable by root alone; `/usr/local/bin` is too on that Mac, but Homebrew on Intel Macs
+  makes it the user's, so the helper never runs from there.
+
+Both are checked by the lab (`bench/install/macos_lab.sh`): it records the socket's mode and group, and that
+a user outside `hexnode` (`nobody`) can't connect. **Falsified if** the socket comes up another group's or
+wider than `0770`, or `nobody` connects.
+
 ## What Hex does
 
 | OS | Install makes | Unprivileged detection | Uninstall removes | "Nothing left" check (by listing) |

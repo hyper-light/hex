@@ -73,6 +73,11 @@ impl Fixture for BinFixture {
     fn refused_forks_counted(&self) -> bool {
         false
     }
+
+    /// HEX-RT-14: Windows' exec bound, one for both Windows classes (hex_core::hcs::exec_limit).
+    fn exec_limit(&self) -> Option<hex_api::ExecLimit> {
+        Some(hex_core::hcs::exec_limit())
+    }
 }
 
 fn runtime() -> WinRuntime {
@@ -167,20 +172,78 @@ fn a_linux_image_is_refused_naming_what_its_guest_waits_on() {
 }
 
 /// HEX-INST-2 (native plan steps 4, 5 and 6): on the Windows node, whose Linux images are its Shards guest's
-/// (`WithGuest::routing` by `WinRuntime::oci_side`), each image goes where it runs. Do: create a Windows
-/// image's box and then a Linux image's, on a node whose guest is simulated and counts its boots. Expect:
-/// the Windows image stays the host's (step 4's class refuses its missing layer) and boots no guest; the
-/// Linux image, while HypervisorPlatform is off, is refused naming it and boots nothing, and once it is on
-/// boots the guest for it; neither box is left.
+/// (`WithGuest::routing` by `WinRuntime::oci_side`), each image goes where it runs, and the node boots its
+/// guest before it accepts a box (HEX-GUEST-39). Do: route a Windows image's box and a Linux image's, then
+/// make the node on a simulated guest that counts its boots and ends at once. Expect: the Windows image is
+/// the host's, and the Linux image the guest's once HypervisorPlatform is on, refused naming it before then.
+/// While it is off the node is made with no guest booted, the Windows image stays the host's (step 4's class
+/// refuses its missing layer), the Linux image is refused naming it, and no box is left. Once it is on the
+/// node boots its guest as it is made, so a guest that ends at once refuses the node after its one boot.
 #[test]
 fn a_windows_image_stays_the_hosts_and_a_linux_image_goes_to_the_guest() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use hex_runtime::guest::shares::Share;
-    use hex_runtime::guest::{GuestConfig, GuestRuntime, WithGuest};
+    use hex_runtime::guest::{GuestConfig, GuestRuntime, Side, WithGuest};
 
     let root = tempfile::tempdir().unwrap();
+    let bundle = |name: &str, config: serde_json::Value| {
+        let dir = root.path().join(name);
+        std::fs::create_dir_all(dir.join("rootfs")).unwrap();
+        std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
+        BoxSpec {
+            id: BoxId::new(name).unwrap(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(dir),
+        }
+    };
+    let windows = bundle(
+        "windows-image",
+        serde_json::json!({
+            "ociVersion": "1.2.0",
+            "process": {"args": ["cmd.exe", "/c", "exit 0"], "cwd": "C:\\"},
+            "windows": {"layerFolders": ["C:\\hex-no-such-layer", "C:\\hex-no-such-scratch"]},
+        }),
+    );
+    // A Linux image's root as a tarball: on Windows a directory root is refused by name, NTFS keeping
+    // neither its modes nor its links' texts (docs/design/shards-guest.md §4a).
+    let linux_root = root.path().join("linux-rootfs.tar");
+    tar::Builder::new(std::fs::File::create(&linux_root).unwrap())
+        .into_inner()
+        .unwrap();
+    let linux = bundle(
+        "linux-image",
+        serde_json::json!({
+            "ociVersion": "1.2.0",
+            "process": {"args": ["/bin/true"], "cwd": "/"},
+            "root": {"path": linux_root.to_str().unwrap()},
+            "linux": {},
+        }),
+    );
+
+    let host = runtime();
+    assert_eq!(
+        host.oci_side(&windows.class).unwrap(),
+        Side::Host,
+        "a Windows image left the host"
+    );
+    let hypervisor = match host.oci_side(&linux.class) {
+        Ok(side) => {
+            assert_eq!(side, Side::Guest, "a Linux image stayed on the host");
+            true
+        }
+        Err(hex_api::Refusal::Platform { why, .. }) if why.contains("Hex's installer turns") => {
+            assert!(why.contains("HypervisorPlatform"), "{why}");
+            false
+        }
+        Err(other) => panic!("a Linux image's side: {other:?}"),
+    };
+    eprintln!(
+        "FEATURES: HypervisorPlatform {}",
+        if hypervisor { "on" } else { "off" }
+    );
+
     let boots = Arc::new(AtomicUsize::new(0));
     let booted = Arc::clone(&boots);
     let guests = shards_api::sim::SimGuests::new(move |_host| {
@@ -204,77 +267,40 @@ fn a_windows_image_stays_the_hosts_and_a_linux_image_goes_to_the_guest() {
         }],
         staged: "/run/hex/staged".to_owned(),
     };
-    let node = WithGuest::routing(
+    let made = WithGuest::routing(
         runtime(),
         GuestRuntime::new(Arc::new(guests), config),
         WinRuntime::oci_side,
-    )
-    .unwrap();
-    let bundle = |name: &str, config: serde_json::Value| {
-        let dir = root.path().join(name);
-        std::fs::create_dir_all(dir.join("rootfs")).unwrap();
-        std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
-        BoxSpec {
-            id: BoxId::new(name).unwrap(),
-            bounds: Bounds::default(),
-            class: ClassSpec::Bundle(dir),
-        }
-    };
-
-    let windows = node
-        .create(bundle(
-            "windows-image",
-            serde_json::json!({
-                "ociVersion": "1.2.0",
-                "process": {"args": ["cmd.exe", "/c", "exit 0"], "cwd": "C:\\"},
-                "windows": {"layerFolders": ["C:\\hex-no-such-layer", "C:\\hex-no-such-scratch"]},
-            }),
-        ))
-        .unwrap_err();
-    eprintln!("a Windows image: {windows:?}");
+    );
+    if hypervisor {
+        let refused = made
+            .err()
+            .expect("a node whose guest ends at once is refused");
+        assert!(
+            matches!(&refused, hex_api::Refusal::Os { why, .. } if why.contains("the guest has ended")),
+            "{refused:?}"
+        );
+        assert_eq!(
+            boots.load(Ordering::SeqCst),
+            1,
+            "the node didn't boot its guest as it was made"
+        );
+        return;
+    }
+    let node = made.unwrap();
     assert_eq!(
         boots.load(Ordering::SeqCst),
         0,
-        "a Windows image booted the guest"
+        "booted with HypervisorPlatform off"
     );
-
-    // A Linux image's root as a tarball: on Windows a directory root is refused by name, NTFS keeping
-    // neither its modes nor its links' texts (docs/design/shards-guest.md §4a).
-    let linux_root = root.path().join("linux-rootfs.tar");
-    tar::Builder::new(std::fs::File::create(&linux_root).unwrap())
-        .into_inner()
-        .unwrap();
-    let linux = node
-        .create(bundle(
-            "linux-image",
-            serde_json::json!({
-                "ociVersion": "1.2.0",
-                "process": {"args": ["/bin/true"], "cwd": "/"},
-                "root": {"path": linux_root.to_str().unwrap()},
-                "linux": {},
-            }),
-        ))
-        .unwrap_err();
-    eprintln!("a Linux image: {linux:?}");
-    match &linux {
-        hex_api::Refusal::Platform { why, .. } if why.contains("Hex's installer turns") => {
-            assert!(why.contains("HypervisorPlatform"), "{why}");
-            assert_eq!(
-                boots.load(Ordering::SeqCst),
-                0,
-                "booted with HypervisorPlatform off"
-            );
-            eprintln!("FEATURES: HypervisorPlatform off");
-        }
-        _ => {
-            assert_eq!(
-                boots.load(Ordering::SeqCst),
-                1,
-                "the Linux image didn't reach the guest"
-            );
-            eprintln!("FEATURES: HypervisorPlatform on");
-        }
-    }
+    let windows = node.create(windows).unwrap_err();
+    eprintln!("a Windows image: {windows:?}");
+    let linux = node.create(linux).unwrap_err();
+    assert!(
+        matches!(&linux, hex_api::Refusal::Platform { why, .. } if why.contains("HypervisorPlatform")),
+        "{linux:?}"
+    );
+    assert_eq!(boots.load(Ordering::SeqCst), 0, "a create booted the guest");
     assert!(node.list().unwrap().is_empty(), "a refused box is left");
 }
 

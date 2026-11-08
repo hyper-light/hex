@@ -331,6 +331,7 @@ impl Node {
             ClassSpec::Oci(_) | ClassSpec::Bundle(_) => self.init_exit(record, state)?,
         };
         Ok(BoxInfo {
+            membership: None,
             id: id.clone(),
             class: record.spec.class.class(),
             // An oci box is its init: once that has ended, the box is empty.
@@ -855,6 +856,7 @@ impl Runtime for Node {
                 // A box whose record can't be read is reported as its id with an empty state rather
                 // than hidden; recovery is what cleans it up.
                 out.push(BoxInfo {
+                    membership: None,
                     id,
                     class: Class::Process,
                     state: BoxState::Empty,
