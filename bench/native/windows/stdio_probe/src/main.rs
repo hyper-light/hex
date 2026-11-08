@@ -22,6 +22,7 @@ use std::ptr::{null, null_mut};
 use std::time::Instant;
 
 mod iocp;
+mod other;
 
 use shards_afunix::{UnixListener, UnixStream};
 use windows_sys::Win32::Foundation::{
@@ -51,8 +52,10 @@ fn main() {
         Some("caller") => caller(Path::new(&args[1]), arg(&args, 2, 300), arg(&args, 3, 4 << 20)),
         Some("refuse") => refuse(),
         Some("iocp") => iocp::iocp(),
-        Some("intrude") => intrude(&args[1], &args[2], &args[3]),
-        _ => eprintln!("usage: stdio_probe bench <rounds> <bytes> | refuse | iocp"),
+        Some("intrude") => intrude(&args[1], &args[2], &args[3], args.get(4).map(String::as_str)),
+        Some("refuse-as") => other::refuse_as(&args[1], args.get(2).map(String::as_str)),
+        Some("knock") => other::knock(&args[1], &args[2]),
+        _ => eprintln!("usage: stdio_probe bench <rounds> <bytes> | refuse | iocp | refuse-as <user> [node socket] (password on stdin)"),
     }
 }
 
@@ -104,7 +107,7 @@ fn serve(
     size: usize,
     payload: &[u8],
     n: &mut u32,
-    intruder: Option<&dyn Fn(&str) -> Child>,
+    intruder: Option<&dyn Fn(&str) -> Box<dyn Waits>>,
 ) -> bool {
     let mut refused = false;
     match CANDIDATES[c as usize] {
@@ -130,7 +133,7 @@ fn serve(
                 let presented = s.read_exact(&mut got).is_ok() && got == token.as_bytes();
                 refused = presented && peer_pid(&s) != caller;
                 drop(s);
-                let _ = ch.wait();
+                ch.wait();
             }
             send_str(ctl, &token);
             loop {
@@ -192,7 +195,7 @@ fn serve(
                     CloseHandle(h);
                 }
                 if let Some(ch) = intruding.as_mut() {
-                    let _ = ch.wait();
+                    ch.wait();
                 }
             }
         }
@@ -409,7 +412,7 @@ fn refuse() {
         assert_eq!(peer_pid(&ctl), me);
         let p = path.to_str().unwrap().to_owned();
         let name = CANDIDATES[c as usize];
-        let intruder = move |door: &str| spawn(&["intrude", name, &p, door]);
+        let intruder = move |door: &str| -> Box<dyn Waits> { Box::new(spawn(&["intrude", name, &p, door])) };
         let served = std::thread::scope(|sc| {
             let h = sc.spawn(|| {
                 let mut buf = vec![0u8; CHUNK];
@@ -428,8 +431,20 @@ fn refuse() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// A second process of the caller's user, given a door: it tries to read the stream.
-fn intrude(candidate: &str, path: &str, door: &str) {
+/// An intruder the node waits out: a child of this user, or one started as another user.
+pub trait Waits {
+    fn wait(&mut self);
+}
+
+impl Waits for Child {
+    fn wait(&mut self) {
+        let _ = Child::wait(self);
+    }
+}
+
+/// A process other than the caller, given a door: it tries to read the stream, and says how many bytes it
+/// got on stderr, or in `result` where given (one started as another user has no stderr here).
+fn intrude(candidate: &str, path: &str, door: &str, result: Option<&str>) {
     let mut buf = [0u8; 4096];
     let got = match candidate {
         "conn" => UnixStream::connect(path)
@@ -441,5 +456,9 @@ fn intrude(candidate: &str, path: &str, door: &str) {
         "pipe" => open_pipe(door).and_then(|mut f| f.read(&mut buf)).unwrap_or(0),
         _ => 0,
     };
-    eprintln!("intruder {candidate}: read {got} bytes");
+    let line = format!("intruder {candidate}: read {got} bytes");
+    match result {
+        Some(r) => std::fs::write(r, &line).unwrap(),
+        None => eprintln!("{line}"),
+    }
 }
