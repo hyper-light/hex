@@ -305,19 +305,23 @@ copy there shows ~20 bench scripts as modified: line endings from the sync, no c
    with no refused commit.
 
 23. how slow a program's end is in a first run after a rebuild, for the learned wait's Windows record
-   (hex_api::conformance::HostClass::Windows), 2026-11-07T07:34-09:10Z on jupiter. Load: 0-1 of 32 cores
-   idle, 100% CPU, beside s4's criterion-2 run.
-   Each test alone, straight after a relink of hex.exe and the test exe (3 cycles at 046778b, process start
-   to exit): a_box_past_its_bound 7,443 ms in the first cycle, 2,760 and 2,677 ms after; the contract test
-   6,578 / 5,915 / 6,433 ms; the others 0.9-2.1 s.
-   The whole suite after each rebuild (4 cycles at e34d48d plus the learned-wait change, a copy whose
-   LearnedWait::saw printed every answer and whose own five ends could wait 300 s): the slowest end per
-   cycle 8,701 / 14,507 / 24,411 / 34,837 ms (cycle 4: the hog, the >30 s case entry 22 saw once), 47-49
-   answers a cycle, the suite 215 / 375 / 395 / 902 s. So the Windows record is 34,837 ms, and the
-   learned wait seeds there (patience 69.7 s before any sample). Every cycle also refused the feature query
-   at step 6's 4,842 ms deadline, and failed HEX-RT-14 (waits on step 4's 3c35f15); HEX-RT-13 (cycle 2) and
-   HEX-RT-2 (cycle 4) failed under the copy's 12.5 s seed, their reasons not read before jupiter stopped
-   answering. Logs on jupiter: ~/.cache/hex-t7-windows/logs/firstrun.txt, ends.1-4.
+   (hex_api::conformance::HostClass::Windows).
+   Of record, 2026-11-08T00:40-01:05Z on jupiter, after D's reboot at 00:06Z (kernel time 1.8%, the System
+   process at 613 threads): 4 cycles at ac08c9b3, each a relink of hex.exe and the test exe then the whole
+   suite, in a copy whose LearnedWait::saw printed every answer and whose own five ends could wait 300 s.
+     cycle 1: CPU 35% before, 49 answers, slowest 764 ms (the hog 750 ms)
+     cycle 2: CPU 9%, 49 answers, slowest 2,305 ms (the hog 784 ms)
+     cycle 3: CPU 100%, 45 answers, slowest 2,132 ms (the hog 2,132 ms)
+     cycle 4: CPU 100%, 49 answers, slowest 2,495 ms (the hog 2,495 ms)
+   Every cycle failed only HEX-RT-14 (waits on step 4's 3c35f15); the feature query didn't time out. The
+   slowest first-run end is 2,495 ms, under Process Governor's 6,239 ms on jupiter (bench/native/RESULT.md),
+   so Windows' record is 6,239 ms (patience 12.5 s before any sample). Each suite took ~285 s, its
+   negative watches waiting out the 69.7 s bound the provisional 34,837 ms record gave.
+   Not of record: 2026-11-07T07:34-09:10Z, the same method beside D's orphaned whole-suite lane on jupiter
+   (16:21Z to ~20:00Z, our own load, the kernel at ~97%; the lead, 2026-11-08). It measured 8,701 / 14,507 /
+   24,411 / 34,837 ms and the feature query timing out every cycle, and gave the provisional 34,837 ms
+   record, now replaced. Each test alone after a rebuild there (3 cycles at 046778b): a_box_past_its_bound
+   7,443 ms first, 2,760 and 2,677 ms after.
 
 What HCS reports as a Windows oci box's Exit at its end, against the oracle's Signal(15), for HEX-DIFF-1 step 12
 and HEX-DIFF-2 step 11 (asked by step 7): NOT OBSERVED. windows_oci_boxes_hold_the_contract_and_the_steps_criteria
