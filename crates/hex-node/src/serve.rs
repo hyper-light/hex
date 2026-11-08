@@ -128,9 +128,14 @@ pub enum Forward {
 pub enum Forwarded {
     /// Any call's answer but a started exec's.
     Answer(Answer),
-    /// An exec's program started where the host isn't: its pid there, which names no process here, and
-    /// what kills it or lets it go. Its end comes to the exec's [`Ended`].
-    Started { pid: u32, program: Box<dyn Remote> },
+    /// An exec's program started where the host isn't: its pid there, which names no process here, what
+    /// kills it or lets it go, and the caller's ends of its streams (its guest's own connections, for those
+    /// the exec carried or asked for), which go with its answer. Its end comes to the exec's [`Ended`].
+    Started {
+        pid: u32,
+        program: Box<dyn Remote>,
+        given: Option<hex_api::Given>,
+    },
 }
 
 /// A program that runs where the node's host isn't (its guest): the OS can't watch it, so its end comes as
@@ -196,9 +201,11 @@ pub trait Host: Runtime {
     /// worker. A host takes the calls about boxes a node behind a connection holds (the node's guest):
     /// what must be done here first (staging a box's root) is done on the worker, then the request goes
     /// without waiting for its answer, so the worker is free and no other client's call waits on that
-    /// node. An exec's program's end goes to `ended`. By default every call runs here.
-    fn forward(&self, call: Call, stdio: Stdio, reply: Reply, ended: Ended) -> Forward {
-        let _ = (reply, ended);
+    /// node. An exec's program's end goes to `ended`. `ends` says whether the caller's client takes a
+    /// started program's streams' ends with its answer (wire version 3's [`Answer::Given`]). By default
+    /// every call runs here.
+    fn forward(&self, call: Call, stdio: Stdio, ends: bool, reply: Reply, ended: Ended) -> Forward {
+        let _ = (ends, reply, ended);
         Forward::Back(Box::new((call, stdio)))
     }
 
@@ -1534,7 +1541,8 @@ impl<O: Os> Shared<O> {
                 let _ = shared.forwarded(&conn, header, program, got);
             })
         };
-        let call = match self.host.forward(call, stdio, forwarded, ended) {
+        let ends = wire::gives_ends(header.version);
+        let call = match self.host.forward(call, stdio, ends, forwarded, ended) {
             Forward::Taken => return Ok(()),
             Forward::Refused(why) => {
                 if program.is_some() {
@@ -1588,13 +1596,20 @@ impl<O: Os> Shared<O> {
         got: Result<Forwarded, Refusal>,
     ) -> Result<(), Refusal> {
         let answer = match (got, program) {
-            (Ok(Forwarded::Started { pid, program }), Some((token, box_id))) => {
+            (
+                Ok(Forwarded::Started {
+                    pid,
+                    program,
+                    given,
+                }),
+                Some((token, box_id)),
+            ) => {
                 let table = self.table()?;
                 let start = Start {
                     token,
                     box_id,
                     pid,
-                    given: None,
+                    given,
                 };
                 return self.started(table, conn, header, start, Run::Remote(Arc::from(program)));
             }

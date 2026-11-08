@@ -517,7 +517,14 @@ impl Runtime for SimHost {
 
 impl Host for SimHost {
     /// Box [`g`]'s inspects and execs are its guest's; every other call runs here.
-    fn forward(&self, call: Call, stdio: Stdio, reply: Reply, ended: Ended) -> Forward {
+    fn forward(
+        &self,
+        call: Call,
+        stdio: Stdio,
+        _ends: bool,
+        reply: Reply,
+        ended: Ended,
+    ) -> Forward {
         match call {
             Call::Inspect(id) if id == g() => {
                 let info = self.sim.inspect(&id);
@@ -536,7 +543,11 @@ impl Host for SimHost {
                     guest: Arc::clone(&self.guest),
                 });
                 self.guest.answer(Box::new(move || {
-                    reply(Ok(Forwarded::Started { pid, program }));
+                    reply(Ok(Forwarded::Started {
+                        pid,
+                        program,
+                        given: None,
+                    }));
                 }));
                 Forward::Taken
             }

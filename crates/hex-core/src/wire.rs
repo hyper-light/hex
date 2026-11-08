@@ -32,7 +32,10 @@
 //! Version 3 (native plan step 8) adds a program's kill ([`Call::Kill`], `Proc::kill` through the socket),
 //! answered as every call is, and an exec that asks the node to make some of its streams
 //! ([`Call::ExecStreams`], `Stdio::ask`), answered [`Answer::Given`]: the program's pid, and the caller's
-//! ends of the streams it asked for as the answer's descriptors. Every earlier kind reads the same in it.
+//! ends of the streams it asked for as the answer's descriptors. An exec whose program can't take the pipes
+//! it carries (one in the node's guest, whose streams are the guest's own connections) is answered so too,
+//! with those streams' ends, between which and its pipes the caller's client copies. Every earlier kind reads
+//! the same in it.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -227,9 +230,9 @@ pub enum Answer {
     Exited(Exit),
     /// netns's, version 2's.
     Netns(netns::Counts),
-    /// Version 3's: an exec that asked for streams ([`Call::ExecStreams`]) runs, with this process id; the
-    /// caller's ends of the streams `given` names ride as the message's descriptors, in order. Its end comes
-    /// later as [`Answer::Exited`].
+    /// Version 3's: an exec that asked for streams ([`Call::ExecStreams`]), or whose program can't take the
+    /// pipes it carried (a guest's), runs, with this process id; the caller's ends of the streams `given` names
+    /// ride as the message's descriptors, in order. Its end comes later as [`Answer::Exited`].
     Given {
         pid: u32,
         given: Streams,
@@ -586,6 +589,11 @@ fn parse_request(
     }
     r.end(kind, version).map_err(bad)?;
     Ok((Header { version, kind, id }, request))
+}
+
+/// Whether an answer in `version` can give a started program's streams' ends ([`Answer::Given`]).
+pub fn gives_ends(version: u16) -> bool {
+    version >= kind::since(kind::GIVEN)
 }
 
 /// The answer a received message holds, at most `bound` bytes, or why it holds none. An answer carries

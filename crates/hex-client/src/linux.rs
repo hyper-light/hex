@@ -5,11 +5,11 @@
 
 use std::io::{IoSlice, IoSliceMut};
 use std::mem::MaybeUninit;
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::fd::{BorrowedFd, OwnedFd};
 use std::path::Path;
 use std::sync::Arc;
 
-use hex_api::{Refusal, Stdio};
+use hex_api::Refusal;
 use hex_core::wire::{self, Received};
 use rustix::io::Errno;
 use rustix::net::sockopt::Timeout;
@@ -20,7 +20,7 @@ use rustix::net::{
 };
 
 use crate::ANSWER_PATIENCE;
-use crate::calls::{Core, Sent, Shared, Transport};
+use crate::calls::{Core, Lent, Sent, Shared, Transport};
 
 /// A node agent, reached through its socket.
 pub type Client = Core<Socket>;
@@ -31,22 +31,9 @@ pub struct Socket {
 }
 
 impl Transport for Socket {
-    type Stdio = Vec<OwnedFd>;
-
-    fn stdio(&self, _exec: u64, stdio: Stdio) -> Result<Self::Stdio, Refusal> {
-        Ok([
-            stdio.stdin.map(OwnedFd::from),
-            stdio.stdout.map(OwnedFd::from),
-            stdio.stderr.map(OwnedFd::from),
-        ]
-        .into_iter()
-        .flatten()
-        .collect())
-    }
-
-    /// Sends `bytes` with `fds`, closing this side's copies of them once sent.
-    fn send(&self, bytes: &[u8], fds: Option<Vec<OwnedFd>>) -> Result<(), Sent> {
-        send(&self.fd, bytes, &fds.unwrap_or_default())
+    /// Sends `bytes` with the descriptors lent to it, which stay the caller's.
+    fn send(&self, bytes: &[u8], lent: &[Lent<'_>]) -> Result<(), Sent> {
+        send(&self.fd, bytes, lent)
     }
 
     fn shutdown(&self) {
@@ -148,16 +135,15 @@ impl Client {
     }
 }
 
-fn send(fd: &OwnedFd, bytes: &[u8], fds: &[OwnedFd]) -> Result<(), Sent> {
-    let borrowed: Vec<BorrowedFd<'_>> = fds.iter().map(AsFd::as_fd).collect();
+fn send(fd: &OwnedFd, bytes: &[u8], fds: &[BorrowedFd<'_>]) -> Result<(), Sent> {
     let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(wire::MAX_FDS))];
     let mut control = SendAncillaryBuffer::new(&mut space);
-    if !borrowed.is_empty() && !control.push(SendAncillaryMessage::ScmRights(&borrowed)) {
+    if !fds.is_empty() && !control.push(SendAncillaryMessage::ScmRights(fds)) {
         return Err(Sent::Refused(Refusal::Invalid {
             what: "stdio",
             why: format!(
                 "{} descriptors, past the {} a message carries",
-                borrowed.len(),
+                fds.len(),
                 wire::MAX_FDS
             ),
         }));

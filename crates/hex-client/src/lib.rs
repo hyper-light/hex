@@ -3,7 +3,10 @@
 //! agent's in another process, reached through its Unix `SOCK_SEQPACKET` socket in
 //! [`hex_core::wire`]'s format, so a caller that doesn't link Hex holds the same contract as one that
 //! does (the conformance suite, HEX-RT-1 on). An exec's stdio goes to the agent as descriptors, and
-//! its `Proc` waits for the program's end, which the agent sends. Every thread sharing a client shares
+//! its `Proc` waits for the program's end, which the agent sends. A stream the caller asks for comes back as
+//! its end with the answer; one whose program can't take the caller's own pipe (a guest's) comes back as its
+//! end too, and the client copies between it and the pipe: the one copy left is the caller's (native plan
+//! step 8). Every thread sharing a client shares
 //! its one connection, which closes once the client and the last `Proc` it returned are dropped; the
 //! agent then ends the programs it still watches for it (the disconnect rule).
 //!
@@ -28,6 +31,7 @@
 use std::time::Duration;
 
 mod calls;
+mod copy;
 pub mod guest;
 
 pub use calls::{Ended, Then};

@@ -7,11 +7,11 @@
 
 use std::io::{IoSlice, IoSliceMut};
 use std::mem::MaybeUninit;
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::fd::{BorrowedFd, OwnedFd};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use hex_api::{Refusal, Stdio};
+use hex_api::Refusal;
 use hex_core::stream::{self, Deframer};
 use hex_core::wire::{self, Received};
 use rustix::io::{Errno, FdFlags};
@@ -22,7 +22,7 @@ use rustix::net::{
 };
 
 use crate::ANSWER_PATIENCE;
-use crate::calls::{Core, Sent, Shared, Transport};
+use crate::calls::{Core, Lent, Sent, Shared, Transport};
 
 /// A node agent, reached through its socket.
 pub type Client = Core<Socket>;
@@ -35,27 +35,14 @@ pub struct Socket {
 }
 
 impl Transport for Socket {
-    type Stdio = Vec<OwnedFd>;
-
-    fn stdio(&self, _exec: u64, stdio: Stdio) -> Result<Self::Stdio, Refusal> {
-        Ok([
-            stdio.stdin.map(OwnedFd::from),
-            stdio.stdout.map(OwnedFd::from),
-            stdio.stderr.map(OwnedFd::from),
-        ]
-        .into_iter()
-        .flatten()
-        .collect())
-    }
-
-    /// Sends `bytes` framed with `fds`, closing this side's copies of them once sent.
-    fn send(&self, bytes: &[u8], fds: Option<Vec<OwnedFd>>) -> Result<(), Sent> {
+    /// Sends `bytes` framed with the descriptors lent to it, which stay the caller's.
+    fn send(&self, bytes: &[u8], lent: &[Lent<'_>]) -> Result<(), Sent> {
         let _whole = self.sending.lock().map_err(|_| {
             Sent::Refused(Refusal::Broken(
                 "the client's send lock was poisoned".to_owned(),
             ))
         })?;
-        send(&self.fd, bytes, &fds.unwrap_or_default())
+        send(&self.fd, bytes, lent)
     }
 
     fn shutdown(&self) {
@@ -176,22 +163,21 @@ impl Client {
 }
 
 /// Sends one framed message whole, `fds` at its first byte.
-fn send(fd: &OwnedFd, bytes: &[u8], fds: &[OwnedFd]) -> Result<(), Sent> {
+fn send(fd: &OwnedFd, bytes: &[u8], fds: &[BorrowedFd<'_>]) -> Result<(), Sent> {
     let framed = stream::frame(bytes, wire::MAX_MESSAGE).map_err(|fault| {
         Sent::Refused(Refusal::Invalid {
             what: "message",
             why: fault.to_string(),
         })
     })?;
-    let borrowed: Vec<BorrowedFd<'_>> = fds.iter().map(AsFd::as_fd).collect();
     let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(wire::MAX_FDS))];
     let mut control = SendAncillaryBuffer::new(&mut space);
-    if !borrowed.is_empty() && !control.push(SendAncillaryMessage::ScmRights(&borrowed)) {
+    if !fds.is_empty() && !control.push(SendAncillaryMessage::ScmRights(fds)) {
         return Err(Sent::Refused(Refusal::Invalid {
             what: "stdio",
             why: format!(
                 "{} descriptors, past the {} a message carries",
-                borrowed.len(),
+                fds.len(),
                 wire::MAX_FDS
             ),
         }));

@@ -1,12 +1,15 @@
 //! The client of a node agent in a Shards guest (docs/design/shards-guest.md §3): the same calls as the
 //! local socket's, over a byte stream that carries no descriptors. Its control connection carries the
 //! wire's messages framed by length ([`hex_core::stream`]); each exec's stdin, stdout and stderr ride a
-//! connection of their own, named by its first bytes, and this side copies between the caller's pipes and
-//! them, one thread and one buffer per stream. A [`Link`] dials the guest's ports: vsock through Shards
-//! in production, a loopback socket in tests.
+//! connection of their own, named by its first bytes. One asked for is the caller's to hold, its socket the
+//! stream's end; one the caller gives as a pipe of its own is copied between that pipe and the connection in
+//! the caller's process, one thread and one buffer per stream: here, or, through a node's socket, by the
+//! caller's socket client, which the node gives the connection's end (native plan step 8). The event form, a
+//! node's, copies none. A [`Link`] dials the guest's ports: vsock through Shards in production, a loopback
+//! socket in tests.
 
 use std::collections::VecDeque;
-use std::io::{self, PipeReader, PipeWriter, Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -16,7 +19,8 @@ use hex_core::stream::{self, Deframer, Exec, Named};
 use hex_core::wire::{self, Received};
 
 use crate::ANSWER_PATIENCE;
-use crate::calls::{Core, Sent, Shared, Transport, poisoned};
+use crate::calls::{Core, Lent, Sent, Shared, Transport, poisoned};
+use crate::copy::copy;
 
 /// The OS handle under a guest connection, which an event loop waits on: a file descriptor on Unix, a
 /// Winsock socket on Windows.
@@ -131,48 +135,17 @@ fn os(op: &'static str) -> impl Fn(io::Error) -> Refusal {
 }
 
 impl Stream {
-    /// Dials a stdio connection for `named`, says what it is, and starts the thread that copies it.
-    fn stream(&self, named: Named, copy: Copier) -> Result<(), Refusal> {
-        // Unbounded in time, as a local exec's stdin is the caller's own pipe: a program that doesn't read
-        // it holds its copier, which ends with the connection, when the exec does (CLAUDE.md §8).
+    /// A stdio connection of its own to the guest, named for `named`, so the guest's relay hands it to that exec's
+    /// program as its stream.
+    fn dial_named(&self, named: Named) -> Result<Box<dyn Duplex>, Refusal> {
         let mut conn = self.link.dial(stream::STDIO_PORT)?;
         conn.write_all(&stream::name(named))
             .map_err(os("naming a stdio connection"))?;
-        std::thread::Builder::new()
-            .name("hex-client-stdio".to_owned())
-            .spawn(move || copy.run(conn))
-            .map(drop)
-            .map_err(os("starting a stdio copier"))
-    }
-}
-
-/// What one stdio copier copies.
-enum Copier {
-    /// From the caller's pipe into the connection, which then ends its sending half.
-    In(PipeReader),
-    /// From the connection into the caller's pipe.
-    Out(PipeWriter),
-}
-
-impl Copier {
-    /// Copies until either side ends. Its end is the stream's: the program sees stdin end, the caller
-    /// sees stdout end, as with a pipe; there is no one else to tell.
-    fn run(self, mut conn: Box<dyn Duplex>) {
-        match self {
-            Self::In(mut from) => {
-                let _ = io::copy(&mut from, &mut conn);
-                let _ = conn.shutdown(Shutdown::Write);
-            }
-            Self::Out(mut to) => {
-                let _ = io::copy(&mut conn, &mut to);
-            }
-        }
+        Ok(conn)
     }
 }
 
 impl Transport for Stream {
-    type Stdio = ();
-
     const MAKES_ASKED: bool = true;
 
     /// Each stream asked for is a stdio connection of its own to the guest, named for the exec, and the
@@ -188,9 +161,7 @@ impl Transport for Stream {
             if !on {
                 return Ok(None);
             }
-            let mut conn = self.link.dial(stream::STDIO_PORT)?;
-            conn.write_all(&stream::name(Named { exec, stream }))
-                .map_err(os("naming a stdio connection"))?;
+            let conn = self.dial_named(Named { exec, stream })?;
             // The caller's own descriptor of the connection; this side's closes as `conn` drops.
             conn.handle()
                 .try_clone_to_owned()
@@ -213,25 +184,36 @@ impl Transport for Stream {
         })
     }
 
-    fn stdio(&self, exec: u64, stdio: Stdio) -> Result<(), Refusal> {
+    /// Each pipe of the caller's own is copied between it and a stdio connection of its own to the guest, named
+    /// for the exec: here, in the caller's process, whose client this is (native plan step 8).
+    fn carries(&self, exec: u64, stdio: Stdio) -> Result<(), Refusal> {
         let exec = Exec {
             conn: self.token,
             id: exec,
         };
         let named = |stream| Named { exec, stream };
         if let Some(r) = stdio.stdin {
-            self.stream(named(stream::Stdio::In), Copier::In(r))?;
+            let conn = self.dial_named(named(stream::Stdio::In))?;
+            copy(r, conn, |conn| {
+                let _ = conn.shutdown(Shutdown::Write);
+            })?;
         }
         if let Some(w) = stdio.stdout {
-            self.stream(named(stream::Stdio::Out), Copier::Out(w))?;
+            copy(self.dial_named(named(stream::Stdio::Out))?, w, drop)?;
         }
         if let Some(w) = stdio.stderr {
-            self.stream(named(stream::Stdio::Err), Copier::Out(w))?;
+            copy(self.dial_named(named(stream::Stdio::Err))?, w, drop)?;
         }
         Ok(())
     }
 
-    fn send(&self, bytes: &[u8], _with: Option<()>) -> Result<(), Sent> {
+    /// Sends one message framed. It carries no descriptor: its streams are connections of their own.
+    fn send(&self, bytes: &[u8], lent: &[Lent<'_>]) -> Result<(), Sent> {
+        if !lent.is_empty() {
+            return Err(Sent::Refused(Refusal::Broken(
+                "a guest's connection carries no descriptors".to_owned(),
+            )));
+        }
         let framed =
             stream::frame(bytes, wire::MAX_MESSAGE).map_err(|f| Sent::Refused(f.into()))?;
         let mut write = self.write.lock().map_err(|e| Sent::Refused(poisoned(e)))?;
