@@ -208,12 +208,14 @@ impl WinRuntime {
     /// from the node, its state in `dir`), so a node killed with boxes running leaves them to the keeper,
     /// and the next node on the same name takes them back ([`WinRuntime::adopt`]) or ends them
     /// ([`WinRuntime::end`]). With node and keeper both gone, kill-on-close ends them. `node` names one
-    /// node's boxes apart from another's in the session.
+    /// node's boxes apart from another's in the session. Its `oci` boxes' records and spec-made scratch are
+    /// its own, under `dir\boxes`, so its start-time reclaim sweeps no other runtime's boxes (the machine's
+    /// shared `%ProgramData%\hex\boxes` holds those of runtimes driven in process, a bench's among them).
     pub fn outliving(node: &str, dir: &Path, keeper: &[String]) -> Result<Self, Refusal> {
         std::fs::create_dir_all(dir)
             .map_err(|e| Refusal::os("making the node's state folder", e))?;
         let keeping = Keeping::start(dir, keeper)?;
-        let mut runtime = Self::new();
+        let mut runtime = Self::with(sys::active_processors(), dir.join("boxes"));
         runtime.node = Some(node.to_owned());
         runtime.keeper = Some(keeping);
         Ok(runtime)
