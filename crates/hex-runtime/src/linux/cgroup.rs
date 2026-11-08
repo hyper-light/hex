@@ -3,12 +3,13 @@
 //! to every box; cgroup v2's no-internal-processes rule means neither may hold a process itself, so
 //! the node agent runs beside the root, never in it.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::cell::Cell;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::io::ErrorKind;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use hex_api::{Bounds, BoxId, Refusal, Signal, Usage};
@@ -31,6 +32,24 @@ pub const MAX_SIGNALLED: usize = 1 << 20;
 /// bounds the walk (its pending queue included) well above any real box (CLAUDE.md §2). Past it the
 /// sweep refuses ([`Refusal::Full`]) rather than stop silently (§3).
 pub const MAX_SWEEP_CGROUPS: usize = 4_096;
+
+thread_local! {
+    /// This thread's cgroupfs lookups so far ([`lookups_on_this_thread`]).
+    static LOOKUPS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// How many cgroupfs lookups this thread has made through this module: each open, stat, mkdir or rmdir of a cgroup's
+/// file or directory by name. Each takes the hierarchy's kernfs root lock to read (`kernfs_iop_lookup`,
+/// `kernfs_dop_revalidate`), so it queues behind any writer waiting on it, another box's `mkdir` among them
+/// (bench/competitive/probes/goal16_ab.md, "Whose work the no-owner tail waits on"). Tests read it.
+pub fn lookups_on_this_thread() -> u64 {
+    LOOKUPS.with(Cell::get)
+}
+
+/// One more cgroupfs lookup on this thread.
+fn looked_up() {
+    LOOKUPS.with(|n| n.set(n.get().saturating_add(1)));
+}
 
 /// The cgroup this process is in, as a path under [`CGROUP_ROOT`].
 pub fn own_cgroup() -> Result<PathBuf, Refusal> {
@@ -61,6 +80,10 @@ pub struct BoxRoot {
     fd: Arc<OwnedFd>,
     controllers: BTreeSet<String>,
     disks: Vec<Dev>,
+    /// The cgroups under the root a box's id may name: those there when it was opened and those made through it since,
+    /// slots apart, less those found gone or forgotten ([`BoxRoot::forget`]), so [`BoxRoot::get`] answers a name not
+    /// among them without a lookup. At most [`MAX_BOXES`]; past it, `None`, and every name is looked up.
+    named: Arc<Mutex<Option<BTreeSet<String>>>>,
 }
 
 impl BoxRoot {
@@ -114,12 +137,22 @@ impl BoxRoot {
             Mode::empty(),
         )
         .map_err(|e| os_err("opening the box root", dir, e))?;
-        Ok(Self {
+        let root = Self {
             dir: dir.to_owned(),
             fd: Arc::new(fd),
             controllers,
             disks,
-        })
+            named: Arc::new(Mutex::new(None)),
+        };
+        let named: BTreeSet<String> = root
+            .boxes()?
+            .into_iter()
+            .filter(|n| reuse::slot_of(n).is_none())
+            .collect();
+        if let Ok(mut set) = root.named.lock() {
+            *set = Some(named);
+        }
+        Ok(root)
     }
 
     /// The box root beside this process's own cgroup: `<parent of own cgroup>/hex`. The node agent
@@ -182,11 +215,13 @@ impl BoxRoot {
             return Err(Refusal::Full(MAX_BOXES));
         }
         let dir = self.dir.join(name);
+        looked_up();
         match rustix::fs::mkdirat(self.fd.as_fd(), name, Mode::from_raw_mode(0o777)) {
             Ok(()) => {}
             Err(rustix::io::Errno::EXIST) => return Err(exists()),
             Err(e) => return Err(os_err("making a box's cgroup", &dir, e)),
         }
+        self.made(name);
         let cg = match self.child(name) {
             Some(cg) => cg,
             None => {
@@ -272,11 +307,64 @@ impl BoxRoot {
 
     /// Box `id`'s cgroup, when it exists.
     pub fn get(&self, id: &BoxId) -> Option<BoxCgroup> {
-        self.child(id.as_str())
+        let name = id.as_str();
+        // A name the root never had answers without a lookup: a lookup queues behind every cgroup made or removed on
+        // the host meanwhile (bench/competitive/probes/goal16_ab.md, "Whose work the no-owner tail waits on").
+        if let Ok(set) = self.named.lock()
+            && let Some(set) = set.as_ref()
+            && !set.contains(name)
+        {
+            return None;
+        }
+        let found = self.child(name);
+        if found.is_none() {
+            self.forget(name);
+        }
+        found
+    }
+
+    /// The cgroup `name` under the root is gone, removed by its box's delete or found so.
+    pub fn forget(&self, name: &str) {
+        if let Ok(mut set) = self.named.lock()
+            && let Some(set) = set.as_mut()
+        {
+            set.remove(name);
+        }
+    }
+
+    /// The cgroup `name` was made under the root: one a box's id may name, a slot's apart. Past [`MAX_BOXES`] names the
+    /// root stops keeping them, and every name is looked up.
+    fn made(&self, name: &str) {
+        if reuse::slot_of(name).is_some() {
+            return;
+        }
+        if let Ok(mut set) = self.named.lock() {
+            let full = set.as_ref().is_some_and(|s| s.len() >= MAX_BOXES);
+            if full {
+                *set = None;
+            } else if let Some(s) = set.as_mut() {
+                s.insert(name.to_owned());
+            }
+        }
+    }
+
+    /// Every file a box's create reads or writes in a cgroup made ahead for it, by name: each bound's
+    /// ([`core::writes_all`] over the root's disks), its counters' ([`BoxCgroup::baseline`]) and `memory.peak`. The
+    /// refill opens them when it makes the cgroup ([`BoxCgroup::open_ahead`]), so the create looks none up.
+    pub fn ahead_files(&self) -> Vec<&'static str> {
+        let mut files: Vec<&'static str> = core::writes_all(&Bounds::default(), &self.disks)
+            .map(|ws| ws.iter().map(|w| w.file).collect())
+            .unwrap_or_default();
+        files.extend(BASELINE_FILES);
+        files.push("memory.peak");
+        files.sort_unstable();
+        files.dedup();
+        files
     }
 
     /// The cgroup `name` under the root, when it's there, opened relative to the root.
     fn child(&self, name: &str) -> Option<BoxCgroup> {
+        looked_up();
         let fd = rustix::fs::openat(
             self.fd.as_fd(),
             name,
@@ -287,6 +375,7 @@ impl BoxRoot {
         Some(BoxCgroup {
             dir: self.dir.join(name),
             fd: Some(Arc::new(fd)),
+            opened: None,
         })
     }
 
@@ -331,14 +420,65 @@ impl BoxRoot {
 pub struct BoxCgroup {
     dir: PathBuf,
     fd: Option<Arc<OwnedFd>>,
+    /// Its files opened ahead ([`BoxCgroup::open_ahead`]), so they're read and written without a lookup.
+    opened: Option<Arc<Opened>>,
 }
+
+/// A cgroup's files opened ahead, by name: each the descriptor and whether it was opened for writing, or `None` where
+/// the cgroup has no such file (its controller not handed down). A file not here is opened by name as before.
+#[derive(Debug, Default)]
+struct Opened(BTreeMap<&'static str, Option<(OwnedFd, bool)>>);
+
+/// The counters a box's usage is reported from, which [`BoxCgroup::baseline`] reads.
+const BASELINE_FILES: [&str; 4] = ["memory.events", "pids.events", "cpu.stat", "io.stat"];
 
 impl BoxCgroup {
     /// The cgroup at `dir`, wherever it is: an `oci` container's cgroup goes where its spec puts it,
     /// not under a box root, and is killed, waited out and removed as a box's is. Its files are opened
     /// by their paths.
     pub fn at(dir: PathBuf) -> Self {
-        Self { dir, fd: None }
+        Self {
+            dir,
+            fd: None,
+            opened: None,
+        }
+    }
+
+    /// This cgroup with `files` opened now, each for reading and writing where the kernel lets it, else for reading:
+    /// the refill's, as it makes a cgroup ahead, so the create that takes it looks none of them up (goal 16; the
+    /// lookups queued behind the next cgroup's `mkdir`). A file the cgroup doesn't have is known absent; one that
+    /// fails to open otherwise is left to be opened by name.
+    pub fn open_ahead(mut self, files: &[&'static str]) -> Self {
+        let mut opened = Opened::default();
+        for &file in files {
+            match self.open_file(file, OFlags::RDWR) {
+                Ok(fd) => {
+                    opened.0.insert(file, Some((fd, true)));
+                }
+                Err(rustix::io::Errno::NOENT) => {
+                    opened.0.insert(file, None);
+                }
+                Err(_) => {
+                    if let Ok(fd) = self.open_file(file, OFlags::RDONLY) {
+                        opened.0.insert(file, Some((fd, false)));
+                    }
+                }
+            }
+        }
+        self.opened = Some(Arc::new(opened));
+        self
+    }
+
+    /// Its file `file` as opened ahead: `Some(Some(fd))` opened (a copy of the descriptor, its open file shared),
+    /// `Some(None)` known absent, `None` not opened ahead, or not for writing where `write` asks it.
+    fn opened(&self, file: &str, write: bool) -> Option<Option<OwnedFd>> {
+        match self.opened.as_ref()?.0.get(file)? {
+            None => Some(None),
+            Some((fd, rw)) if *rw || !write => {
+                rustix::io::fcntl_dupfd_cloexec(fd, 0).ok().map(Some)
+            }
+            Some(_) => None,
+        }
     }
 
     pub fn dir(&self) -> &Path {
@@ -348,6 +488,11 @@ impl BoxCgroup {
     /// The cgroup's file `file`, opened with `flags` (close-on-exec): relative to its directory where it's
     /// held open, else by its path.
     fn open_file(&self, file: &str, flags: OFlags) -> rustix::io::Result<OwnedFd> {
+        let write = flags.intersects(OFlags::WRONLY | OFlags::RDWR);
+        if let Some(found) = self.opened(file, write) {
+            return found.ok_or(rustix::io::Errno::NOENT);
+        }
+        looked_up();
         match &self.fd {
             Some(fd) => {
                 rustix::fs::openat(fd.as_fd(), file, flags | OFlags::CLOEXEC, Mode::empty())
@@ -358,6 +503,10 @@ impl BoxCgroup {
 
     /// Whether the cgroup has the file `file`: a controller not handed down has none of its files.
     fn has(&self, file: &str) -> bool {
+        if let Some(known) = self.opened.as_ref().and_then(|o| o.0.get(file)) {
+            return known.is_some();
+        }
+        looked_up();
         match &self.fd {
             Some(fd) => rustix::fs::statat(fd.as_fd(), file, AtFlags::empty()).is_ok(),
             None => self.dir.join(file).exists(),
@@ -522,6 +671,7 @@ impl BoxCgroup {
 
     /// Removes the box's cgroup: it must be empty. Absent already is removed.
     pub fn remove(&self) -> Result<(), Refusal> {
+        looked_up();
         match fs::remove_dir(&self.dir) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
@@ -660,8 +810,11 @@ fn cpu_max_holds(cg: &BoxCgroup, want: &str) -> bool {
 fn read_fd(fd: BorrowedFd<'_>, path: impl Fn() -> PathBuf) -> Result<String, Refusal> {
     let mut out = Vec::new();
     let mut buf = [0u8; 4096];
+    // From the file's start whatever its offset: a descriptor opened ahead is read more than once, through copies that
+    // share it ([`BoxCgroup::open_ahead`]).
     loop {
-        let n = rustix::io::read(fd, &mut buf)
+        let at = u64::try_from(out.len()).unwrap_or(u64::MAX);
+        let n = rustix::io::pread(fd, &mut buf, at)
             .map_err(|e| os_err("reading a cgroup file", &path(), e))?;
         if n == 0 {
             break;

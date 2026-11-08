@@ -122,6 +122,39 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   `docs/research/runtime/goal5-mounts.md` §11). The masked directories' tmpfs made ahead was built and measured: part 19's p50
   about 15% lower with Docker's paths, no gain on either p99 or the whole create, so it stays on `cp/t7-ext-s3-maskpool` (§13).
 
+- **Goal 5 of record, its pass on fedora** (2026-11-05, `cp/t7-g5-record` 70376d7, not merged; `bench/competitive/
+  RESULT.md`, "Goal 5 of record"; decision 5). The tree: goal 5 extended's integrated one, goal 6, the state directories
+  in shards and the tail cut (inits parked ahead, decision 8), gates 7/7 and the root lab 8/8. host.sh's OCI pass, best
+  of 2, Hex over libcrun in process (over the socket), every round read whole, none crashed, noisy (load 11 to 17):
+  - reuse on (out/20261105T135855Z): create p50 0.152x (0.157x), p99.9 0.060x (0.060x); create+start of `true` p50
+    0.133x (0.156x), p99.9 0.064x (0.069x). **Met in both columns**, Hex's create p99.9 under 1 ms in each round, so it
+    holds against a quiet libcrun too (libcrun's create p99.9 here 15.38 ms).
+  - no owner (out/20261105T134534Z), host.sh's default and so the bar as written: 0.189x (0.200x), 0.463x (0.421x),
+    0.160x (0.199x), 0.406x (0.445x). **Not met**: both p99.9 over, Hex's about 2.3 ms against a quiet libcrun's 5.03
+    and 5.69. What holds it is mostly Hex's own lock: the create's cgroupfs lookups queued behind Hex's own refill's
+    `mkdir` (1.377 ms of the slowest 0.1%), then the teardown of the pass's own boxes (0.3-0.85 ms), no other tenant's
+    (`probes/goal16_ab.md`, cp/t7-g16-memslot acf45f9). Reuse within one owner removes both. (The first reading, the
+    teardown alone, is superseded.) The lock wait is now gone (cp/t7-g16-prefetch 1190a2c, merged at 309e62b: a
+    no-owner create looks up nothing in cgroupfs); it moved the no-owner p99.9 about 2% (0.36x and 0.40x in its A/B),
+    so what holds the tail is the kernel's teardown of the pass's own earlier boxes, 1.3-1.4 ms of the slowest 0.1%.
+  - Goal 16's finding (2026-11-06, fedora 6.19.10; RESULT.md "Goal 16's finding"): the path is the deleted box's
+    memory-cgroup offline (`mem_cgroup_css_offline`, 128-256 us a box most often), run by a per-CPU kworker
+    (`cgroup_offline_wq`, `WQ_PERCPU`) on the very CPU whose RCU callback queued it, a create CPU, preempting the next
+    create there (256 us to 2 ms); not a lock the create waits on. Being cut by doing less (goal 16).
+  - What's left, measured (2026-11-06; RESULT.md "What's left of goal 16's tail"): the offline is the kernel's walk of
+    every memcg-aware list_lru on the host (85-87% of it), 43-75 ns a list_lru on 6.19 and 56 ns on 7.2 at the same
+    count, so 7.2 alone doesn't move it; Hex holds at most 2.5% of fedora's ~1,950 superblocks. Hex can cut at most
+    about 0.4 ms of the slowest 0.1% (its releases), against the 0.6-0.7 ms 0.25x needs. Open: the levers' pass, and a
+    guest-only kernel change that walks only the dying memcg's lists.
+  - The Mac Studio through `docker_pass.sh` (2026-11-06, Docker Desktop's VM, 6.12.65-linuxkit aarch64, the same tree):
+    **every cell under the bar in both columns and both modes**, no owner 0.107x (0.150x), 0.127x (0.175x), 0.102x
+    (0.160x), 0.103x (0.131x); reuse on 0.107x (0.139x), 0.122x (0.151x), 0.099x (0.152x), 0.108x (0.134x), libcrun's
+    create p99.9 3.77 and 3.92 ms.
+  - jupiter (2026-11-06, Docker Desktop's WSL2 VM, the same tree), no owner: 0.200x (0.242x), 0.310x (0.489x), 0.208x
+    (0.287x), 0.342x (0.330x): both p99.9 over, as on fedora. Reuse on: 0.200x (0.236x), 0.182x (0.214x), 0.200x
+    (0.265x), 0.166x (0.228x): every in-process cell under, the socket's create+start p50 just over.
+  - Open, Ada's: count the bar with an owner, reuse across boxes of no owner, or accept it unmet on 6.19 (fedora's
+    no-owner p99.9). Goal 5 lands from this tree on her word.
 - **Goal 5 extended, one integrated tree** (2026-11-04, `cp/t7-g5x-integrate`, not merged). Steps 1 to 6 of goal 5
   extended in one tree, with main's fd-leak fix (c4963f9), the EAGAIN retry for a `..` in a container's root, the exec
   FIFO's two ends held at start, the CAP_SYS_ADMIN refusal for a spec naming no capabilities, the rootless delete

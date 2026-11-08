@@ -37,7 +37,7 @@ done
 echo "busy loops: ${LOOPS:-0}; pids ${PIDS[*]:-none}" | tee -a /opt/out/guest.txt
 guest | tee -a /opt/out/guest.txt
 bash -c 'echo $$ > /sys/fs/cgroup/bench/cgroup.procs
-  exec unshare -m -C --propagation private bash -c "mount -t cgroup2 cgroup2 /sys/fs/cgroup && mount --bind /opt/comp /opt/lab && exec bash /opt/lab/probes/create_breakdown_inside.sh"' \
+  exec unshare -m -C --propagation private bash -c "mount -t cgroup2 cgroup2 /sys/fs/cgroup && mount --bind /opt/comp /opt/lab && exec bash /opt/lab/probes/${PROBE:-create_breakdown_inside.sh}"' \
   2>&1 | tee /opt/out/probe.out
 rc=${PIPESTATUS[0]}
 guest | tee -a /opt/out/guest.txt

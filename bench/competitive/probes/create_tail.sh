@@ -3,7 +3,7 @@
 # create_tail_inside.sh in a container with host.sh's OCI-pass flags, on the given binaries, and beside it a reader
 # container on READER_CPUS (16-31) that streams the run's trace instance to $OUT/trace.txt, so the reading takes no
 # CPU from the pinned run. Then create_tail.py reads it. On fedora:
-#   [HEXBENCH_OWNER=<owner>] [N=10000] [ROUNDS=1] create_tail.sh <hex release binary> <seam_oci release binary>
+#   [HEXBENCH_OWNER=<owner>] [HEXBENCH_PARKED_PROCS=1] [HEXBENCH_DOCKER_CAPS=1] [N=10000] [ROUNDS=1] create_tail.sh <hex release binary> <seam_oci release binary>
 # Not a timed pass: the tracer costs each switch and wake-up some; what it reads is where the slow calls wait.
 # BENCH_MEMORY and BENCH_OOM set the container's --memory (40g) and --oom-score-adj (none) on a shared host.
 set -euo pipefail
@@ -49,13 +49,25 @@ docker run -d --name "$READER" "${BENCH_LABELS[@]}" --cpuset-cpus="${READER_CPUS
     I=$(cat /opt/out/instance) || exit 5
     exec 3< "$I/trace_pipe"; touch /opt/out/reading
     awk "{print} /hexbd D/{exit}" <&3 > /opt/out/trace.txt; touch /opt/out/read' >/dev/null
+# The run container's id, which its cgroup's path on the host names (create_tail.py: this run's boxes, by that).
+( for _ in $(seq 1 300); do id=$(docker inspect -f '{{.Id}}' "$NAME" 2>/dev/null) && { echo "$id" > "$OUT/container_id"; break; }; sleep 0.2; done ) &
+# The host's mounts and superblocks, every mount namespace's (one process of each read), a superblock counted once by
+# its device number: each a memory cgroup's offline walks two list_lrus of (goal16_ab.md, lever 2). Counts only.
+mounts_now() {
+  docker run --rm "${BENCH_LABELS[@]}" --cpuset-cpus="${READER_CPUS:-16-31}" --memory=1g --privileged --pid=host \
+    --security-opt label=disable --network=none -v /usr:/usr:ro registry.fedoraproject.org/fedora:44 bash -c '
+      for p in /proc/[0-9]*; do n=$(readlink $p/ns/mnt 2>/dev/null) && echo "$n ${p#/proc/}"; done | sort -u -k1,1 > /tmp/ns
+      while read -r _ p; do cat /proc/$p/mountinfo 2>/dev/null; done < /tmp/ns \
+        | awk -v ns="$(wc -l < /tmp/ns)" "{m++; d[\$3]=1} END {printf \"%d mount namespaces, %d mounts, %d superblocks mounted (distinct devices)\", ns, m, length(d)}"' 2>&1
+}
+echo "host at start: $(mounts_now)" >> "$OUT/env.txt"
 timeout 7200 docker run --rm --name "$NAME" "${BENCH_LABELS[@]}" --cpuset-cpus="${CPUSET:-4-15}" --memory="${BENCH_MEMORY:-40g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
   --privileged --security-opt label=disable --cgroupns=private --network=none --tmpfs /run:rw,exec,nosuid,size=1g \
   -v /usr:/usr:ro -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
-  -e N -e WARMUP -e ROUNDS -e TRACE_TAG -e HEXBENCH_OWNER \
+  -e N -e WARMUP -e ROUNDS -e TRACE_TAG -e HEXBENCH_OWNER -e HEXBENCH_PARKED_PROCS -e HEXBENCH_DOCKER_CAPS -e HEXBENCH_BOX_MEMORY \
   registry.fedoraproject.org/fedora:44 bash /opt/lab/probes/create_tail_inside.sh 2>&1 | tee "$OUT/probe.out"
 timeout 600 docker wait "$READER" >/dev/null 2>&1 || true
-{ echo "load at end: $(cat /proc/loadavg)"
+{ echo "host at end: $(mounts_now)"; echo "load at end: $(cat /proc/loadavg)"
   for r in cpu memory io; do echo "pressure at end, $r: $(head -1 "/proc/pressure/$r")"; done
   echo "containers at end, every one up: $(containers)"
   echo "trace: $(wc -l < "$OUT/trace.txt") lines, $(du -h "$OUT/trace.txt" | cut -f1)"; } >> "$OUT/env.txt"

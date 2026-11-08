@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bench/competitive/probes: what the seam's slowest creates and starts wait on, inside the bench container
 # (create_tail.sh starts it with host.sh's OCI-pass flags). One ftrace instance of this run's own records, for the
-# runtime's processes (seam_oci, its threads hex-*, the seeds and inits hex), every switch in and out (with the
+# runtime's processes (seam_oci, its threads hex-*, the seeds and inits hex, the bundles' programs sleep and true), every switch in and out (with the
 # kernel stack of each switch out that blocks), every wake-up and fork; seam_oci's breakdown markers bracket every
 # other timed create and start of its lifecycle phase (HEXBENCH_TRACE pointed at a directory whose trace_marker is
 # the instance's and whose tracing_on is a plain file, so the instance records throughout). A reader container on
@@ -16,12 +16,17 @@ mountpoint -q "$T" || mount -t tracefs nodev "$T" || { echo "refusing: no tracef
 I="$T/instances/hextail-$TAG"
 KG="hextail_$TAG"  # this run's kprobes: rcu_sync_enter's entry (rse) and return (rsx), every task's
 CGEV="cgroup/cgroup_attach_task cgroup/cgroup_mkdir cgroup/cgroup_rmdir cgroup/cgroup_release"
+# Whose cgroup each teardown work item takes apart: an fprobe on each controller's offline and release callback, every
+# task's, with the id of the cgroup its css is of (BTF member access; offline_css itself is inlined, with no BTF entry,
+# on fedora's 6.19). create_tail.py joins the id to cgroup_rmdir's path (Linux v6.19 mm/memcontrol.c, kernel/sched/
+# core.c, block/blk-cgroup.c: the callbacks css_killed_work_fn and css_release_work_fn run).
+CSSF="o_mem:mem_cgroup_css_offline o_cpu:cpu_cgroup_css_offline o_blk:blkcg_css_offline r_mem:mem_cgroup_css_released r_cpu:cpu_cgroup_css_released"
 
 # The OCI pass's bundles, as create_breakdown_inside.sh makes them (an owner's: Docker's default capabilities and
 # /proc/sys read-only, so a box's cgroup and network namespace may be handed to the owner's next box).
 ALL_NS='[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"}]'
 CAPS='["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FSETID","CAP_FOWNER","CAP_MKNOD","CAP_NET_RAW","CAP_SETGID","CAP_SETUID","CAP_SETFCAP","CAP_SETPCAP","CAP_NET_BIND_SERVICE","CAP_SYS_CHROOT","CAP_KILL","CAP_AUDIT_WRITE"]'
-PROC_CAPS=""; [ -n "${HEXBENCH_OWNER:-}" ] && PROC_CAPS=",\"capabilities\":{\"bounding\":$CAPS,\"effective\":$CAPS,\"permitted\":$CAPS}"
+PROC_CAPS=""; [ -n "${HEXBENCH_OWNER:-}${HEXBENCH_DOCKER_CAPS:-}" ] && PROC_CAPS=",\"capabilities\":{\"bounding\":$CAPS,\"effective\":$CAPS,\"permitted\":$CAPS}"
 RO_PATHS=""; [ -n "${HEXBENCH_OWNER:-}" ] && RO_PATHS=',"readonlyPaths":["/proc/sys"]'
 bundle() { # bundle <dir> <args json>
   local B=$1; mkdir -p "$B/rootfs"/{usr,proc,dev,tmp}
@@ -50,6 +55,7 @@ untrace() {
   echo '!stacktrace' > "$I/events/sched/sched_switch/trigger" 2>/dev/null
   for ev in $CGEV; do echo '!stacktrace' > "$I/events/$ev/trigger" 2>/dev/null; done
   for ev in rse rsx; do echo 0 > "$I/events/$KG/$ev/enable" 2>/dev/null; done
+  for e in $CSSF; do echo 0 > "$I/events/$KG/${e%%:*}/enable" 2>/dev/null; done
   for ev in sched/sched_switch sched/sched_waking sched/sched_wakeup_new sched/sched_process_fork \
             sched/sched_process_exit irq/softirq_entry irq/softirq_exit irq/irq_handler_entry irq/irq_handler_exit \
             workqueue/workqueue_execute_start workqueue/workqueue_execute_end cgroup/cgroup_attach_task \
@@ -58,6 +64,7 @@ untrace() {
   done
   rmdir "$I" 2>/dev/null || echo "the trace instance $I wouldn't go" >&2
   for ev in rse rsx; do echo "-:$KG/$ev" >> "$T/kprobe_events" 2>/dev/null; done
+  for e in $CSSF; do echo "-:$KG/${e%%:*}" >> "$T/dynamic_events" 2>/dev/null; done
 }
 trap untrace EXIT
 [ "${UNTRACE_ONLY:-0}" = 1 ] && exit 0
@@ -65,17 +72,17 @@ trap untrace EXIT
 mkdir "$I" || { echo "refusing: no trace instance $I" >&2; exit 4; }
 echo 0 > "$I/tracing_on"
 echo 8192 > "$I/buffer_size_kb"
-OURS='comm == "seam_oci" || comm ~ "hex*"'
-echo "prev_comm == \"seam_oci\" || prev_comm ~ \"hex*\" || next_comm == \"seam_oci\" || next_comm ~ \"hex*\"" \
+OURS='comm == "seam_oci" || comm == "sleep" || comm == "true" || comm ~ "hex*"'
+echo "prev_comm == \"seam_oci\" || prev_comm == \"sleep\" || prev_comm == \"true\" || prev_comm ~ \"hex*\" || next_comm == \"seam_oci\" || next_comm == \"sleep\" || next_comm == \"true\" || next_comm ~ \"hex*\"" \
   > "$I/events/sched/sched_switch/filter"
 echo "$OURS" > "$I/events/sched/sched_waking/filter"
 echo "$OURS" > "$I/events/sched/sched_wakeup_new/filter"
-echo 'comm == "seam_oci" || comm ~ "hex*" || child_comm == "seam_oci" || child_comm ~ "hex*"' \
+echo 'comm == "seam_oci" || comm == "sleep" || comm == "true" || comm ~ "hex*" || child_comm == "seam_oci" || child_comm ~ "hex*"' \
   > "$I/events/sched/sched_process_fork/filter" 2>/dev/null \
   || echo "$OURS" > "$I/events/sched/sched_process_fork/filter"
 echo "$OURS" > "$I/events/sched/sched_process_exit/filter"
 # A blocking switch out's kernel stack: what the task waits in (a preempted one, state R, has none).
-echo 'stacktrace if (prev_comm == "seam_oci" || prev_comm ~ "hex*") && prev_state & 3' \
+echo 'stacktrace if (prev_comm == "seam_oci" || prev_comm == "sleep" || prev_comm == "true" || prev_comm ~ "hex*") && prev_state & 3' \
   > "$I/events/sched/sched_switch/trigger" || { echo "refusing: the stacktrace trigger wasn't taken" >&2; exit 4; }
 for ev in sched_switch sched_waking sched_wakeup_new sched_process_fork sched_process_exit; do
   echo 1 > "$I/events/sched/$ev/enable" || { echo "refusing: sched/$ev wasn't enabled" >&2; exit 4; }
@@ -87,9 +94,14 @@ done
 { echo "p:$KG/rse rcu_sync_enter" >> "$T/kprobe_events" && echo "r:$KG/rsx rcu_sync_enter" >> "$T/kprobe_events"; } \
   || { echo "refusing: rcu_sync_enter's kprobes weren't taken" >&2; exit 4; }
 for ev in $CGEV; do echo stacktrace > "$I/events/$ev/trigger" || { echo "refusing: $ev's stacktrace trigger" >&2; exit 4; }; done
+CSSEV=""
+for e in $CSSF; do
+  if echo "f:$KG/${e%%:*} ${e#*:} cg=css->cgroup->kn->id:u64" >> "$T/dynamic_events" 2>/dev/null; then CSSEV="$CSSEV $KG/${e%%:*}"
+  else echo "no fprobe on ${e#*:} on this kernel: its work items are named by their function alone" >> "$OUT/env.txt"; fi
+done
 for ev in irq/softirq_entry irq/softirq_exit irq/irq_handler_entry irq/irq_handler_exit \
           workqueue/workqueue_execute_start workqueue/workqueue_execute_end \
-          $CGEV $KG/rse $KG/rsx; do
+          $CGEV $KG/rse $KG/rsx $CSSEV; do
   echo 1 > "$I/events/$ev/enable" || { echo "refusing: $ev wasn't enabled" >&2; exit 4; }
 done
 # seam_oci's markers into the instance, with tracing_on a plain file so its toggles leave the instance on.
@@ -98,7 +110,7 @@ mkdir -p /run/tailmark; : > /run/tailmark/tracing_on; ln -sfn "$I/trace_marker" 
 { echo "inside: date $(date -u +%FT%TZ), kernel $(uname -r), load $(cat /proc/loadavg)"
   echo "inside: cpus allowed $(sed -n 's/^Cpus_allowed_list:\t*//p' /proc/self/status)"
   echo "inside: the cgroup root's subtree_control: $(cat /sys/fs/cgroup/cgroup.subtree_control)"
-  echo "params: N=$N WARMUP=$WARMUP ROUNDS=$ROUNDS owner=${HEXBENCH_OWNER:-none}"
+  echo "params: N=$N WARMUP=$WARMUP ROUNDS=$ROUNDS owner=${HEXBENCH_OWNER:-none} parked_procs=${HEXBENCH_PARKED_PROCS:-unset} docker_caps=${HEXBENCH_DOCKER_CAPS:-unset} box_memory=${HEXBENCH_BOX_MEMORY:-256m}"
 } >> "$OUT/env.txt"
 
 # The reader container (create_tail.sh) waits for this file, then streams the instance; this waits for its word.

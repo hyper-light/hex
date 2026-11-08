@@ -119,10 +119,15 @@ mod linux {
 
     /// oci_bench.py's bundles bound every container to nothing of their own; the node bounds each box
     /// the way the competitive pass's do, so the comparison is like for like: the kernel's floor plus
-    /// the workload, not an unbounded cgroup.
+    /// the workload, not an unbounded cgroup. HEXBENCH_BOX_MEMORY=none leaves the memory bound off, for an
+    /// A/B of what only boxes without one take (goal16_ab.md's lever 4); a figure so made isn't the bar's.
     fn bounds() -> Bounds {
+        let memory_max = match std::env::var("HEXBENCH_BOX_MEMORY").as_deref() {
+            Ok("none") => None,
+            _ => Some(256 << 20),
+        };
         Bounds {
-            memory_max: Some(256 << 20),
+            memory_max,
             pids_max: Some(256),
             ..Bounds::default()
         }
