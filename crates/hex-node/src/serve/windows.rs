@@ -424,10 +424,8 @@ impl Os for Windows {
         self.accept_on(&mut l);
         match taken {
             None => Accepted::None,
-            Some(Ok(s)) => match self.port.add(&s) {
-                Ok(()) => Accepted::Conn(Arc::new(Stream::new(s))),
-                Err(e) => Accepted::Failed(Refusal::os("accepting on the node agent's socket", e)),
-            },
+            // On the port already: an accept's socket joins it before the accept starts.
+            Some(Ok(s)) => Accepted::Conn(Arc::new(Stream::new(s))),
             Some(Err(e)) if socket::is_spent(&e) => Accepted::Spent,
             Some(Err(e)) => {
                 Accepted::Failed(Refusal::os("accepting on the node agent's socket", e))

@@ -502,6 +502,7 @@ fn started(rc: i32) -> io::Result<()> {
 }
 
 /// Starts accepting one connection on `listener`, reported on `port` as [`Done::Accepted`] under `tag`.
+/// The connection's socket is on `port` already (a socket joins a port once: a second join is refused).
 pub fn accept(port: &Port, listener: &Socket, tag: u64) -> io::Result<()> {
     let socket = Socket::new()?;
     port.add(&socket)?;
