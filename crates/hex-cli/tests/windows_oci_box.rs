@@ -511,8 +511,8 @@ fn crash_child_node() {
 /// Native step 4 (the lead, 2026-11-06): a node killed with boxes made leaves no scratch behind once a
 /// node starts again on the same scratch root. Do: run a child node that creates a box (and, once, starts
 /// it), kill it, and start a new runtime on its scratch root. Expect: no sandbox.vhdx copy, no activated
-/// volume (vmcompute names no mount path for the scratch), no scratch marker, and no HCS system of the
-/// box's id. The container ends with the node by design (ShouldTerminateOnLastHandleClosed, kill-on-close);
+/// volume (vmcompute names no mount path for the scratch), no scratch marker, and HCS ending the box's
+/// system without being asked. The container ends with the node by design (ShouldTerminateOnLastHandleClosed, kill-on-close);
 /// the scratch is what a crash leaves (CLAUDE.md §2).
 fn a_killed_nodes_scratch_is_reclaimed_at_the_next_start(lab: &Lab) {
     let exe = std::env::current_exe().unwrap();
@@ -545,6 +545,18 @@ fn a_killed_nodes_scratch_is_reclaimed_at_the_next_start(lab: &Lab) {
         child.kill().unwrap();
         child.wait().unwrap();
         let id = format!("hex-crash-{phase}");
+        // HCS ends a system whose last handle closed on its own time, not before kill returns (jupiter,
+        // 2026-11-07 15:24Z: still listed when the next runtime had reclaimed; 2026-11-08 00:11Z: gone 2 s
+        // after the kill). So the test waits on that fact, the box ending with its node, before the next
+        // node starts; the deadline bounds the wait and is not what passes it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while hcs_holds(&BoxId::new(&id).unwrap()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{phase}: HCS still holds {id} 120 s after its node was killed"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
         let scratch = root.join("bundles").join(format!("{id}-scratch"));
         assert!(
             scratch.join("sandbox.vhdx").exists(),
@@ -569,9 +581,5 @@ fn a_killed_nodes_scratch_is_reclaimed_at_the_next_start(lab: &Lab) {
             .map(|d| d.filter_map(Result::ok).map(|e| e.path()).collect())
             .unwrap_or_default();
         assert!(markers.is_empty(), "{phase}: markers left {markers:?}");
-        assert!(
-            !hcs_holds(&BoxId::new(&id).unwrap()),
-            "{phase}: HCS still holds {id}"
-        );
     }
 }
