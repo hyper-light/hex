@@ -1,0 +1,40 @@
+# How long HCS takes to end a killed node's compute system (ShouldTerminateOnLastHandleClosed): ms from
+# taskkill of the node returning to `hcsdiag list` no longer naming the box. jupiter (Windows 11 25H2,
+# build 26200, 32 logical processors), tree 8d8c36c + the crash child's `reclaim` phase, debug test binary
+# windows_oci_box-feaceb5c5d7c2b9f.exe, the node a crash_child_node in phase `created` or `started`.
+# Load: criterion 2's oci_compare segment 2 (kiln run r6: Docker, containerd and Hex creating, starting and
+# deleting containers in turn) ran alongside every sample; cpu_pct is Win32_Processor's LoadPercentage just
+# after the sample. Each sample's scratch reclaimed by a `reclaim` child before the next.
+# Native plan step 4; the lead, 2026-11-08: the crash test's wait on this end is 2 x the slowest here.
+#
+# ms   phase    cpu_pct  at_utc (2026-11-08)
+517    created  100      00:23:43
+465    started  100      00:23:46
+64     created  78       00:36:22
+140    started  57       00:36:27
+61     created  65       00:36:30
+88     started  70       00:36:36
+106    created  62       00:36:38
+119    started  72       00:36:44
+59     created  61       00:36:46
+140    started  63       00:36:52
+142    created  84       00:36:54
+214    started  79       00:37:01
+240    created  99       00:37:04
+780    started  100      00:37:10
+162    created  100      00:37:14
+#
+# The 00:23 pair ran in an earlier probe whose own cleanup was wrong (it removed the scratch markers;
+# reclaimed by hand, 00:30Z); its two samples are timed the same way. At 00:37:16 a `started` child didn't
+# say READY within the probe's 120 s under this load, so the series stopped there; it was reclaimed with
+# no failures.
+# One earlier sample, the host just rebooted and otherwise idle (00:11:11Z, phase started, the same
+# binary): the probe polled `hcsdiag list` once a second and saw the box gone at its second look, so the
+# end came between 1 and 2 s after the kill; at that resolution it reads as 2,000 ms.
+# Slowest on this record: 2,000 ms (the idle sample, read at its upper bound); the slowest under load is
+# 780 ms (started, cpu 100%).
+#
+# Caveat (the lead, 2026-11-08 ~00:50Z): jupiter's NTFS stall came back after its 00:06Z boot (kernel ~75%
+# at 00:45Z), and rounds from 00:12Z until the next clean boot are dropped from criterion 2. The 15 samples
+# above (00:23-00:37Z) fall in that window, so they are retaken after the next clean boot; the 2,000 ms
+# slowest is the 00:11Z sample, before it.

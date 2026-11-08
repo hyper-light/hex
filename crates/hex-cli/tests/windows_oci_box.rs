@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use hex_api::conformance::{self, Act, Fixture};
 use hex_api::differential;
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Runtime, Stdio};
-use hex_runtime::windows::WinRuntime;
+use hex_runtime::windows::{WinRuntime, oci};
 use serde_json::json;
 
 /// The USB device interface class (`GUID_DEVINTERFACE_USB_DEVICE`, usbiodef.h): every host has one, and on
@@ -356,10 +356,9 @@ fn hcs_holds(id: &BoxId) -> bool {
 }
 
 /// Native step 4's teardown (the lead's condition, 2026-11-06): do: start a box, write in it, delete it.
-/// Expect: nothing left — no compute system, no volume beyond those attached before, no scratch folder;
+/// Expect: nothing left — no compute system, the box's own volume gone, no scratch folder;
 /// `UnprepareLayer`'s ERROR_FLT_DO_NOT_DETACH is matched alone, so any other failure fails the delete.
 fn a_deleted_box_leaves_nothing(lab: &Lab) {
-    let before = volumes();
     let rt = lab.runtime();
     let id = made(
         &rt,
@@ -367,15 +366,34 @@ fn a_deleted_box_leaves_nothing(lab: &Lab) {
     );
     let wrote = run(&rt, lab, &id, &["write", r"C:\scratch-was-here"]);
     assert_eq!(wrote.0, Exit::Code(0), "{wrote:?}");
+    // The box's own volume, by its scratch folder, not a count of the host's: other work on the host makes
+    // and removes volumes too (jupiter, 2026-11-08: criterion 2's bench beside this suite).
+    let folder = lab
+        .root
+        .path()
+        .join(format!("scratch-{id}"))
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let own =
+        oci::sys::layer_mount_path(&folder).expect("the started box shows no volume of its own");
+    let listed = format!("{own}\\");
     assert!(
-        volumes().len() > before.len(),
-        "the started box shows no volume of its own"
+        volumes().contains(&listed),
+        "the box's volume {own} isn't mounted"
     );
     rt.delete(&id).expect("delete");
     assert!(!hcs_holds(&id), "HCS still holds {id}");
-    assert_eq!(volumes(), before, "a volume outlived its box");
     assert!(
-        !lab.root.path().join(format!("scratch-{id}")).exists(),
+        oci::sys::layer_mount_path(&folder).is_err(),
+        "the box's scratch is still activated"
+    );
+    assert!(
+        !volumes().contains(&listed),
+        "the box's volume {own} outlived it"
+    );
+    assert!(
+        !std::path::Path::new(&folder).exists(),
         "the scratch folder outlived its box"
     );
 }
@@ -481,7 +499,8 @@ fn crash_bundle(root: &std::path::Path, id: &str, layers: &[String]) -> (PathBuf
 
 /// The child half of the crash test: when HEX_CRASH_NODE is `<phase>;<root>`, act as a node that
 /// creates (phase `created`) or creates and starts (phase `started`) one box under `root`, say READY, and
-/// wait to be killed. Without it, nothing.
+/// wait to be killed; or (phase `reclaim`) as the next node, which reclaims what a killed one left under
+/// `root` and says RECLAIMED with its failures. Without it, nothing.
 #[test]
 fn crash_child_node() {
     let Ok(arg) = std::env::var("HEX_CRASH_NODE") else {
@@ -489,6 +508,11 @@ fn crash_child_node() {
     };
     let (phase, root) = arg.split_once(';').unwrap();
     let root = PathBuf::from(root);
+    if phase == "reclaim" {
+        let rt = WinRuntime::with(4, root.join("scratch"));
+        println!("RECLAIMED {:?}", rt.reclaim_failures());
+        return;
+    }
     let lab = Lab::new().expect("the crash test runs with HEX_WINDOWS_LAYERS");
     let rt = WinRuntime::with(4, root.join("scratch")).with_launcher(lab.bin.clone());
     let id = BoxId::new(&format!("hex-crash-{phase}")).unwrap();
@@ -507,6 +531,15 @@ fn crash_child_node() {
         std::thread::park();
     }
 }
+
+/// The slowest end on record of a killed node's compute system, from the kill to HCS no longer listing it:
+/// 2,000 ms (bench/native/records/hcs-end-under-load-8d8c36c-20261108T0036Z.txt; 780 ms the slowest of 15
+/// under criterion 2's load, the idle host's one sample read at its 1 s resolution's upper bound).
+const HCS_END_RECORD: std::time::Duration = std::time::Duration::from_millis(2_000);
+
+/// The crash test's wait for HCS to end a killed node's system: Hex's learned wait, seeded from
+/// [`HCS_END_RECORD`] (the lead, 2026-11-08).
+static HCS_ENDS: conformance::LearnedWait = conformance::LearnedWait::new(HCS_END_RECORD);
 
 /// Native step 4 (the lead, 2026-11-06): a node killed with boxes made leaves no scratch behind once a
 /// node starts again on the same scratch root. Do: run a child node that creates a box (and, once, starts
@@ -546,17 +579,18 @@ fn a_killed_nodes_scratch_is_reclaimed_at_the_next_start(lab: &Lab) {
         child.wait().unwrap();
         let id = format!("hex-crash-{phase}");
         // HCS ends a system whose last handle closed on its own time, not before kill returns (jupiter,
-        // 2026-11-07 15:24Z: still listed when the next runtime had reclaimed; 2026-11-08 00:11Z: gone 2 s
-        // after the kill). So the test waits on that fact, the box ending with its node, before the next
-        // node starts; the deadline bounds the wait and is not what passes it.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        // 2026-11-07 15:24Z: still listed when the next runtime had reclaimed). So the test waits on that
+        // fact, the box ending with its node, before the next node starts; HCS_ENDS bounds the wait and is
+        // not what passes it.
+        let began = std::time::Instant::now();
         while hcs_holds(&BoxId::new(&id).unwrap()) {
             assert!(
-                std::time::Instant::now() < deadline,
-                "{phase}: HCS still holds {id} 120 s after its node was killed"
+                began.elapsed() < HCS_ENDS.bound(),
+                "{phase}: HCS still holds {id} {:?} after its node was killed",
+                HCS_ENDS.bound()
             );
-            std::thread::sleep(std::time::Duration::from_millis(100));
         }
+        HCS_ENDS.saw(began.elapsed());
         let scratch = root.join("bundles").join(format!("{id}-scratch"));
         assert!(
             scratch.join("sandbox.vhdx").exists(),
@@ -574,7 +608,7 @@ fn a_killed_nodes_scratch_is_reclaimed_at_the_next_start(lab: &Lab) {
             "{phase}: the scratch copy outlived its node"
         );
         assert!(
-            hex_runtime::windows::oci::sys::layer_mount_path(scratch.to_str().unwrap()).is_err(),
+            oci::sys::layer_mount_path(scratch.to_str().unwrap()).is_err(),
             "{phase}: the scratch volume is still activated"
         );
         let markers: Vec<_> = std::fs::read_dir(root.join("scratch"))
