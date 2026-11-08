@@ -984,9 +984,26 @@ pub fn volume_root(volume: &str) -> String {
     format!("{}\\", volume.trim_end_matches('\\'))
 }
 
+/// Whether a box's container outlives the node that made it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lifetime {
+    /// HCS ends the container when its last handle closes: a killed node leaves no container (a runtime
+    /// whose boxes end with it).
+    EndsWithNode,
+    /// The container runs on after its last handle closes, for the next node to reopen by id while the
+    /// node's keeper holds the box's job (native plan step 8, T-T7.1.2).
+    Outlives,
+}
+
 /// The HCS v2 document for `container` on `storage`, Hex's launcher folder `launcher` mapped read-only at
-/// [`LAUNCHER_DIR`] (note §2): schema 2.1, no hosting system, terminated when its last handle closes.
-pub fn document(container: &Container, storage: &Storage, launcher: &str) -> Value {
+/// [`LAUNCHER_DIR`] (note §2): schema 2.1, no hosting system, terminated when its last handle closes
+/// unless it outlives its node (`lifetime`).
+pub fn document(
+    container: &Container,
+    storage: &Storage,
+    launcher: &str,
+    lifetime: Lifetime,
+) -> Value {
     let mut mapped: Vec<Value> = container
         .mounts
         .iter()
@@ -1032,7 +1049,7 @@ pub fn document(container: &Container, storage: &Storage, launcher: &str) -> Val
     json!({
         "Owner": OWNER,
         "SchemaVersion": {"Major": 2, "Minor": 1},
-        "ShouldTerminateOnLastHandleClosed": true,
+        "ShouldTerminateOnLastHandleClosed": lifetime == Lifetime::EndsWithNode,
         "Container": c,
     })
 }
@@ -1147,6 +1164,157 @@ pub fn hosts_lines(hosts: &[(String, String)]) -> String {
     s
 }
 
+/// What a node keeps of an `oci` box on disk, written before Hex makes anything for it and rewritten as it
+/// grows (the box's scratch marker): the scratch folder vmcompute activates and what of it Hex made, and,
+/// for a box that outlives its node (native plan step 8, T-T7.1.2), its compute system's id and its init,
+/// so the next node takes the box back or ends it. A record written before these fields reads as a box that
+/// ends with its node (each defaults), so the format only grows (CLAUDE.md, wire formats append-only).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoxRecord {
+    pub folder: String,
+    pub made: Vec<String>,
+    #[serde(default)]
+    pub outlives: bool,
+    #[serde(default)]
+    pub system: Option<hex_api::BoxId>,
+    /// A start was asked: written before HCS starts the container, so a record naming no init with it is
+    /// a start its node didn't finish.
+    #[serde(default)]
+    pub started: bool,
+    #[serde(default)]
+    pub init: Option<InitRecord>,
+}
+
+/// A box's init as its record names it: its pid and its creation time (100 ns units since 1601, as
+/// `GetProcessTimes` gives it), so a process given that pid since is never taken for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InitRecord {
+    pub pid: u32,
+    pub created: u64,
+}
+
+/// A record's JSON around its strings, in bytes: every key, bracket, comma and quote, `outlives` and
+/// `started` at their longest (`false`) and the init's numbers at theirs (`u32::MAX`, `u64::MAX`), with
+/// its three paths and its id empty (measured from the record's shape by the test that pins
+/// [`MAX_RECORD`]).
+pub const RECORD_FIXED: usize = 130;
+
+/// The longest record a box that can be made writes (CLAUDE.md §2): its three paths (the folder, and the
+/// folder and its `sandbox.vhdx` as what Hex made) each at most Windows' longest, [`FOLDER_UNITS`] UTF-16
+/// units, every unit at most a six-byte `\u00XX` JSON escape (as [`MAX_WIRE`] counts a folder), its id at
+/// [`hex_api::BoxId::MAX_LEN`] ASCII bytes, and [`RECORD_FIXED`]. A longer record names a path past
+/// Windows' longest, where nothing can be made: [`write_record`] refuses it, and [`read_record`] reads no
+/// more.
+pub const MAX_RECORD: usize = RECORD_FIXED + 3 * 6 * FOLDER_UNITS + hex_api::BoxId::MAX_LEN;
+
+/// A box's record as its marker holds it, refused by name past [`MAX_RECORD`]: such a box names a path
+/// past Windows' longest, so it can't be made, and no node would read its record back.
+pub fn write_record(record: &BoxRecord) -> Result<Vec<u8>, Refusal> {
+    let bytes = serde_json::to_vec(record)
+        .map_err(|e| Refusal::Broken(format!("a box record didn't encode: {e}")))?;
+    if bytes.len() > MAX_RECORD {
+        return Err(Refusal::Invalid {
+            what: "oci spec",
+            why: format!(
+                "the box's scratch names a path past Windows' longest ({FOLDER_UNITS} UTF-16 units): its record is {} bytes, past {MAX_RECORD}",
+                bytes.len()
+            ),
+        });
+    }
+    Ok(bytes)
+}
+
+/// Reads a box's record from `bytes`, refused past [`MAX_RECORD`] or malformed.
+pub fn read_record(bytes: &[u8]) -> Result<BoxRecord, Refusal> {
+    if bytes.len() > MAX_RECORD {
+        return Err(Refusal::Invalid {
+            what: "box record",
+            why: format!("past {MAX_RECORD} bytes"),
+        });
+    }
+    serde_json::from_slice(bytes).map_err(|e| Refusal::Invalid {
+        what: "box record",
+        why: e.to_string(),
+    })
+}
+
+/// What a starting node does with a box's record before it reads its own: reclaim the scratch (its box
+/// ended with the node that made it), or leave it for the node's recovery to take back or end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtStart {
+    Reclaim,
+    Leave,
+}
+
+/// A box that outlives its node is left while HCS still runs its compute system (`system_runs`), its init
+/// alive or not, for recovery to take back or end ([`take_back`]); every other box's scratch is reclaimed:
+/// it ended with its node, or its container is gone.
+pub fn at_start(record: &BoxRecord, system_runs: bool) -> AtStart {
+    if record.outlives && record.system.is_some() && system_runs {
+        AtStart::Leave
+    } else {
+        AtStart::Reclaim
+    }
+}
+
+/// What a node finds of a recorded box's container: whether HCS still holds its compute system
+/// (`HcsOpenComputeSystem` opened it), and the process now at its init's pid, if one is there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Found {
+    pub system: bool,
+    pub init: Option<SeenProcess>,
+}
+
+/// A process found at a recorded pid: its creation time, as [`InitRecord::created`] counts it, and whether
+/// it still runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SeenProcess {
+    pub created: u64,
+    pub running: bool,
+}
+
+/// How a recorded box is taken back: its compute system and its scratch reopened, and its init with them
+/// where it started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TakeBack {
+    /// Made and not started: it waits for its start, as it did.
+    Created,
+    /// Started, its init the very process the record names, still running.
+    Running(InitRecord),
+}
+
+/// Why a recorded box isn't taken back, so the node's recovery ends what is left of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lost {
+    /// It ended with the node that made it: that runtime's boxes don't outlive their node.
+    EndsWithNode,
+    /// HCS holds no compute system of its id.
+    NoSystem,
+    /// Its init has ended, or its pid is another process's now (one created at another time), or its start
+    /// was under way when its node went and its record names no init.
+    InitEnded,
+}
+
+/// Whether the box `record` names is taken back, given what the node `found` of it (native plan step 8,
+/// T-T7.1.2): only while HCS holds its system; as made only if no start was asked; and once started, only
+/// with the very init it recorded, told from a process given that pid since by its creation time.
+pub fn take_back(record: &BoxRecord, found: Found) -> Result<TakeBack, Lost> {
+    if !record.outlives {
+        return Err(Lost::EndsWithNode);
+    }
+    if record.system.is_none() || !found.system {
+        return Err(Lost::NoSystem);
+    }
+    match record.init {
+        None if record.started => Err(Lost::InitEnded),
+        None => Ok(TakeBack::Created),
+        Some(init) => match found.init {
+            Some(p) if p.created == init.created && p.running => Ok(TakeBack::Running(init)),
+            _ => Err(Lost::InitEnded),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use hex_api::{Mount, Network, Program};
@@ -1205,6 +1373,180 @@ mod tests {
         match image_runs(client(19_045), WS2022) {
             Err(Refusal::Platform { why, .. }) => assert!(why.contains("Windows 10"), "{why}"),
             other => panic!("{other:?}"),
+        }
+    }
+
+    /// T-T7.1.2: do: read a record written before step 8 (folder and made alone). Expect: a box that ends
+    /// with its node, reclaimed at the next start whether or not HCS still lists its system, and never taken
+    /// back.
+    #[test]
+    fn a_record_from_before_step_8_is_a_box_that_ends_with_its_node() {
+        let r =
+            read_record(br#"{"folder":"C:\\b\\x-scratch","made":["C:\\b\\x-scratch"]}"#).unwrap();
+        assert!(!r.outlives);
+        assert_eq!(r.system, None);
+        assert_eq!(r.init, None);
+        assert_eq!(at_start(&r, true), AtStart::Reclaim);
+        assert_eq!(at_start(&r, false), AtStart::Reclaim);
+        let found = Found {
+            system: true,
+            init: None,
+        };
+        assert_eq!(take_back(&r, found), Err(Lost::EndsWithNode));
+    }
+
+    /// The record of an outliving box `x` whose node made its scratch folder and sandbox.
+    fn outliving(init: Option<InitRecord>) -> BoxRecord {
+        BoxRecord {
+            folder: r"C:\b\x-scratch".to_owned(),
+            made: vec![
+                r"C:\b\x-scratch".to_owned(),
+                r"C:\b\x-scratch\sandbox.vhdx".to_owned(),
+            ],
+            outlives: true,
+            system: Some(hex_api::BoxId::new("x").unwrap()),
+            started: init.is_some(),
+            init,
+        }
+    }
+
+    /// T-T7.1.2: do: decide at a node's start for an outliving box whose system HCS still runs, and for one
+    /// whose system is gone. Expect: the first is left for recovery to take back or end; the second's
+    /// scratch is reclaimed, there being no container to take back.
+    #[test]
+    fn an_outliving_box_is_left_while_its_system_runs() {
+        let r = outliving(Some(InitRecord { pid: 4, created: 7 }));
+        assert_eq!(at_start(&r, true), AtStart::Leave);
+        assert_eq!(at_start(&r, false), AtStart::Reclaim);
+        // Round-trips as written.
+        assert_eq!(read_record(&write_record(&r).unwrap()).unwrap(), r);
+        // Outliving but naming no system: nothing to reopen.
+        let unnamed = BoxRecord { system: None, ..r };
+        assert_eq!(at_start(&unnamed, true), AtStart::Reclaim);
+    }
+
+    /// T-T7.1.2: do: take back an outliving box made and never started, its system held, then gone.
+    /// Expect: taken back as made, waiting for its start, only while HCS holds its system.
+    #[test]
+    fn a_box_never_started_is_taken_back_as_made_while_its_system_runs() {
+        let r = outliving(None);
+        let held = Found {
+            system: true,
+            init: None,
+        };
+        assert_eq!(take_back(&r, held), Ok(TakeBack::Created));
+        let gone = Found {
+            system: false,
+            init: None,
+        };
+        assert_eq!(take_back(&r, gone), Err(Lost::NoSystem));
+    }
+
+    /// T-T7.1.2: do: take back an outliving box whose record says a start was asked but names no init
+    /// (its node went between asking HCS to start it and recording its init), its system held. Expect: not
+    /// taken back, its init unknown, so recovery ends what is left rather than start it a second time.
+    #[test]
+    fn a_box_whose_start_its_node_didnt_finish_isnt_taken_back() {
+        let r = BoxRecord {
+            started: true,
+            ..outliving(None)
+        };
+        let held = Found {
+            system: true,
+            init: None,
+        };
+        assert_eq!(take_back(&r, held), Err(Lost::InitEnded));
+    }
+
+    /// T-T7.1.2, native plan step 8 (a node "tells a box's process from one given its pid since (...
+    /// Windows: its creation time)"): do: take back a started box whose pid holds its init still running,
+    /// its init ended, a process created since, or nothing. Expect: taken back with its init in the first
+    /// case alone; in every other its init has ended and it isn't taken back; with its system gone, never.
+    #[test]
+    fn a_started_box_is_taken_back_only_with_the_very_init_it_recorded() {
+        let init = InitRecord {
+            pid: 4_242,
+            created: 133_000_000_000_000_000,
+        };
+        let r = outliving(Some(init));
+        let at = |p: Option<SeenProcess>| {
+            take_back(
+                &r,
+                Found {
+                    system: true,
+                    init: p,
+                },
+            )
+        };
+        let same = SeenProcess {
+            created: init.created,
+            running: true,
+        };
+        assert_eq!(at(Some(same)), Ok(TakeBack::Running(init)));
+        let ended = SeenProcess {
+            running: false,
+            ..same
+        };
+        assert_eq!(at(Some(ended)), Err(Lost::InitEnded));
+        let since = SeenProcess {
+            created: init.created + 1,
+            ..same
+        };
+        assert_eq!(at(Some(since)), Err(Lost::InitEnded));
+        assert_eq!(at(None), Err(Lost::InitEnded));
+        let gone = Found {
+            system: false,
+            init: Some(same),
+        };
+        assert_eq!(take_back(&r, gone), Err(Lost::NoSystem));
+    }
+
+    /// T-T7.1.2, CLAUDE.md §2: do: write the longest record a box can make (three paths at Windows' longest,
+    /// every unit JSON's six-byte escape; the longest id; the init's numbers at their longest), then one
+    /// whose folder is a unit past it. Expect: the first is MAX_RECORD bytes exactly and reads back the
+    /// same; the second is refused by name before anything is written.
+    #[test]
+    fn the_longest_record_a_box_writes_is_its_bound() {
+        let path = "\u{1}".repeat(FOLDER_UNITS);
+        let worst = BoxRecord {
+            folder: path.clone(),
+            made: vec![path.clone(), path.clone()],
+            outlives: false,
+            system: Some(hex_api::BoxId::new(&"x".repeat(hex_api::BoxId::MAX_LEN)).unwrap()),
+            started: false,
+            init: Some(InitRecord {
+                pid: u32::MAX,
+                created: u64::MAX,
+            }),
+        };
+        let bytes = write_record(&worst).unwrap();
+        assert_eq!(bytes.len(), MAX_RECORD);
+        assert_eq!(read_record(&bytes).unwrap(), worst);
+        let past = BoxRecord {
+            folder: format!("{path}\u{1}"),
+            ..worst
+        };
+        match write_record(&past) {
+            Err(Refusal::Invalid {
+                what: "oci spec",
+                why,
+            }) => assert!(why.contains("past Windows' longest"), "{why}"),
+            other => panic!("a record past its bound: {other:?}"),
+        }
+    }
+
+    /// T-T7.1.2, CLAUDE.md §2: do: read a record past MAX_RECORD. Expect: refused by its bound.
+    #[test]
+    fn a_record_past_its_bound_is_refused() {
+        let big = format!(r#"{{"folder":"{}","made":[]}}"#, "a".repeat(MAX_RECORD));
+        match read_record(big.as_bytes()) {
+            Err(Refusal::Invalid {
+                what: "box record",
+                why,
+            }) => {
+                assert!(why.contains(&format!("past {MAX_RECORD}")), "{why}")
+            }
+            other => panic!("an oversized record: {other:?}"),
         }
     }
 
@@ -1489,7 +1831,12 @@ mod tests {
             volume: r"\\?\Volume{7b88d036-aeb7-4880-9530-fdfaff8337a0}".to_owned(),
             layers: vec![("L1".to_owned(), r"D:\layers\app".to_owned())],
         };
-        let d = document(&c, &s, r"C:\Users\corph/.cache/hex-native-s4/target\debug");
+        let d = document(
+            &c,
+            &s,
+            r"C:\Users\corph/.cache/hex-native-s4/target\debug",
+            Lifetime::EndsWithNode,
+        );
         let k = &d["Container"];
         assert_eq!(
             k["Storage"]["Path"],
@@ -1515,7 +1862,7 @@ mod tests {
             volume: r"\\?\Volume{ec84d99e-3f02-11e7-ac6c-00155d7682cf}\".to_owned(),
             layers: vec![("L1".to_owned(), r"D:\layers\app".to_owned())],
         };
-        let d = document(&c, &s, r"C:\Program Files\hex");
+        let d = document(&c, &s, r"C:\Program Files\hex", Lifetime::EndsWithNode);
         assert_eq!(d["Owner"], "hex");
         assert_eq!(d["SchemaVersion"], json!({"Major": 2, "Minor": 1}));
         assert_eq!(d["ShouldTerminateOnLastHandleClosed"], true);
@@ -1543,10 +1890,37 @@ mod tests {
         let mut bare = c.clone();
         bare.devices.clear();
         assert!(
-            document(&bare, &s, "C:\\h")["Container"]
+            document(&bare, &s, "C:\\h", Lifetime::EndsWithNode)["Container"]
                 .get("AssignedDevices")
                 .is_none()
         );
+    }
+
+    /// T-T7.1.2 (native plan step 8, the lead's keeper, 2026-11-08): do: make the document for a box whose
+    /// node's boxes outlive it, and for one whose don't. Expect: the outliving box's container isn't ended
+    /// when its last handle closes, so a killed node leaves it for the next to reopen by id; the other's is,
+    /// so a killed node leaves no container.
+    #[test]
+    fn an_outliving_box_s_container_survives_its_last_handle() {
+        let c = from_bundle(&bundle()).unwrap();
+        let s = Storage {
+            volume: r"\\?\Volume{ec84d99e-3f02-11e7-ac6c-00155d7682cf}\".to_owned(),
+            layers: vec![("L1".to_owned(), r"D:\layers\app".to_owned())],
+        };
+        let outlives = document(&c, &s, "C:\\h", Lifetime::Outlives);
+        assert_eq!(outlives["ShouldTerminateOnLastHandleClosed"], false);
+        let ends = document(&c, &s, "C:\\h", Lifetime::EndsWithNode);
+        assert_eq!(ends["ShouldTerminateOnLastHandleClosed"], true);
+        // Nothing else differs.
+        let mut a = outlives.clone();
+        let mut b = ends.clone();
+        a.as_object_mut()
+            .unwrap()
+            .remove("ShouldTerminateOnLastHandleClosed");
+        b.as_object_mut()
+            .unwrap()
+            .remove("ShouldTerminateOnLastHandleClosed");
+        assert_eq!(a, b);
     }
 
     /// HEX-HCS-6: a layer's id is a well-formed version 8 GUID, the same for one folder however it is
@@ -1817,6 +2191,79 @@ mod tests {
     }
 
     proptest! {
+        /// T-T7.1.2 (model-based, native plan step 8): take_back decides as its rule reads, for every
+        /// record and finding: taken back while HCS holds the system of an outliving box, as made when it
+        /// never started and with its init when that very process still runs; and a starting node leaves
+        /// exactly the boxes recovery takes back or ends with their system running, reclaiming every other.
+        #[test]
+        fn take_back_follows_its_rule(
+            outlives in any::<bool>(),
+            named in any::<bool>(),
+            started in any::<bool>(),
+            init in proptest::option::of((any::<u32>(), 0u64..3)),
+            system in any::<bool>(),
+            seen in proptest::option::of((0u64..3, any::<bool>())),
+        ) {
+            let record = BoxRecord {
+                folder: r"C:\b\x".to_owned(),
+                made: vec![],
+                outlives,
+                system: named.then(|| hex_api::BoxId::new("x").unwrap()),
+                started,
+                init: init.map(|(pid, created)| InitRecord { pid, created }),
+            };
+            let found = Found {
+                system,
+                init: seen.map(|(created, running)| SeenProcess { created, running }),
+            };
+            let held = outlives && named && system;
+            let very_init = matches!((record.init, found.init),
+                (Some(i), Some(p)) if p.created == i.created && p.running);
+            let expect = if held && record.init.is_none() && !started {
+                Ok(TakeBack::Created)
+            } else if held && very_init {
+                Ok(TakeBack::Running(record.init.unwrap()))
+            } else if !outlives {
+                Err(Lost::EndsWithNode)
+            } else if !held {
+                Err(Lost::NoSystem)
+            } else {
+                Err(Lost::InitEnded)
+            };
+            prop_assert_eq!(take_back(&record, found), expect);
+            let left = at_start(&record, system) == AtStart::Leave;
+            prop_assert_eq!(left, !matches!(expect, Err(Lost::EndsWithNode | Lost::NoSystem)));
+        }
+
+        /// T-T7.1.2: every record a box writes, whatever its paths hold, reads back the same.
+        #[test]
+        fn a_written_record_reads_back(
+            folder in any::<String>(),
+            made in proptest::collection::vec(any::<String>(), 0..3),
+            outlives in any::<bool>(),
+            started in any::<bool>(),
+            init in proptest::option::of((any::<u32>(), any::<u64>())),
+        ) {
+            let record = BoxRecord {
+                folder,
+                made,
+                outlives,
+                system: outlives.then(|| hex_api::BoxId::new("x").unwrap()),
+                started,
+                init: init.map(|(pid, created)| InitRecord { pid, created }),
+            };
+            prop_assert_eq!(read_record(&write_record(&record).unwrap()).unwrap(), record);
+        }
+
+        /// T-T7.1.2 (hostile input to every parser, CLAUDE.md §6): no bytes make the record reader panic;
+        /// whatever it accepts writes back to a record it reads the same.
+        #[test]
+        fn read_record_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..512)) {
+            if let Ok(r) = read_record(&bytes) {
+                prop_assert_eq!(read_record(&serde_json::to_vec(&r).unwrap()).unwrap(), r);
+            }
+        }
+
         /// HEX-HCS-7 (hostile input): no bytes make decode panic; whatever it accepts re-encodes to a
         /// message it accepts again.
         #[test]

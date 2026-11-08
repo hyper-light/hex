@@ -176,7 +176,8 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   an HCS silo holding a Hex job"). It resolves at run time (`LoadLibraryExW` from System32, `GetProcAddress`)
   and calls HCS's operation, compute-system and process calls (`HcsCreateOperation`,
   `HcsWaitForOperationResult[AndProcessInfo]`, `HcsCancelOperation`, `HcsCloseOperation`,
-  `HcsCreateComputeSystem`, `HcsStartComputeSystem`, `HcsTerminateComputeSystem`, `HcsCloseComputeSystem`,
+  `HcsCreateComputeSystem`, `HcsOpenComputeSystem` (by which the next node reopens a box a killed node left
+  running, to take it back), `HcsStartComputeSystem`, `HcsTerminateComputeSystem`, `HcsCloseComputeSystem`,
   `HcsCreateProcess`, `HcsCloseProcess`, `HcsGetServiceProperties`), freeing HCS's strings (`LocalFree`), and
   vmcompute's layer calls that make and remove a box's scratch as hcsshim and runhcs do (`ActivateLayer`,
   `PrepareLayer`, `GetLayerMountPath`, `UnprepareLayer`, `DeactivateLayer`: undocumented; the documented

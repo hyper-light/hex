@@ -955,13 +955,35 @@ guarantee that no box outlives Hex. Both facts force the shape:
   case, and the SCM runs a service in *no* job unless the service makes one, so a keeper the service starts
   is in no job and outlives any node; that is measured for real when the service exists (step 6). No
   temporary service is made on jupiter (an admin change not approved).
-- An `oci` box's compute system is made without `ShouldTerminateOnLastHandleClosed`, and the restarted node
-  opens it by its id (`HcsOpenComputeSystem`). The HCS side is step 4's agent's. *From it*: a box's scratch
-  survives a node kill — the crash test asserts `sandbox.vhdx` is still there after the kill, in the created
-  and the started phase (green, jupiter 2026-11-08 00:12Z); and with the flag on, HCS ends a killed node's
-  compute system up to 2 s on record (one idle sample at 1 s resolution), to be retaken on a clean jupiter
-  (`cp/t7-native-s4`). The next node's scratch reclaim must skip a box whose record says live, so a taken-back
-  box keeps its scratch.
+- *The `oci` side* (step 4's agent, `cp/t7-native-s8-oci`). An outliving node's `oci` box is its named job,
+  held by the keeper as a `process` box's is, and its compute system is made without
+  `ShouldTerminateOnLastHandleClosed` (`hcs::Lifetime::Outlives`), so the container runs on past the node's
+  last handle; the next node reopens it by its id (`HcsOpenComputeSystem`; HCS naming no such system is
+  nothing to take back). The box's scratch marker is its record (`hcs::BoxRecord`): its scratch folder and
+  what Hex made, that it outlives, its system's id, that a start was asked (written before HCS starts the
+  container), and its init's pid and creation time (`GetProcessTimes`, written once it runs), each write
+  whole (a `.next` file moved over the marker), its size bound derived as `MAX_WIRE` counts a folder. The
+  scratch becomes the container's only once HCS has made the container, so a create that fails before that
+  undoes it and leaves nothing attached. At a node's start, reclaim leaves an outliving box's record and
+  scratch while HCS still holds its system (`hcs::at_start`) and reclaims every other. `adopt` takes the box
+  back (`hcs::take_back`) only while HCS holds its system: as made when no start was asked, and with its
+  init only when the process at the init's pid has the recorded creation time and still runs. A start its
+  node didn't finish recording, an ended init, or a pid given to another process since is lost, and `end`
+  ends its container, scratch and record (`oci::end`). An outliving node keeps these records under its own
+  state folder (`<state>\boxes`): every runtime made in process keeps its records in the machine's shared
+  `%ProgramData%\hex\boxes` and reclaims that whole folder when made, so a node or a suite starting beside a
+  running bench would detach a live bench box's scratch. *From step 4*: a box's scratch survives a node kill
+  (the crash test asserts `sandbox.vhdx` is still there after the kill, in the created and the started
+  phase; green, jupiter 2026-11-08 00:12Z), and with the flag on HCS ends a killed node's compute system
+  up to 2 s on record (one idle sample at 1 s resolution), to be retaken on a clean jupiter
+  (`cp/t7-native-s4`); with the flag off it holds the
+  container all through that bound (`windows_oci_box`'s `outlived`). *Built and measured* (jupiter,
+  2026-11-08, `windows_oci_box`): an outliving box's container and scratch wait for its next node, and a
+  container reopened by id is ended through the reopened handle (kiln run r105); a node's `oci` box outlives
+  its runtime, the next runtime on the node's name takes it back running and runs a program in it through
+  the reopened container, and its delete leaves nothing; a box no node takes back is ended with its
+  container, scratch and record (kiln run r160, 3/3; the tree before fails each at `outlived`, HCS ending the
+  container 315-753 µs after its last handle).
 - A box's record names each member by its pid and its creation time (`GetProcessTimes`), so the restarted
   node, opening the pid, tells the member from a process given its pid since, as macOS uses a process's
   start time. The record names the keeper the same way (its pid and creation time), so the next node adopts
