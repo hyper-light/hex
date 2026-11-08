@@ -50,6 +50,8 @@ struct SimState {
     /// Programs watched, by pid: their token, and whether they have ended.
     programs: BTreeMap<u32, (u64, bool)>,
     killed: BTreeSet<u32>,
+    /// Every pid the core asked to watch as a host process.
+    ever_watched: BTreeSet<u32>,
     unwatchable: bool,
 }
 
@@ -272,6 +274,7 @@ impl Os for SimOs {
             });
         }
         s.programs.insert(pid, (token, false));
+        s.ever_watched.insert(pid);
         Ok(pid)
     }
 
@@ -326,6 +329,92 @@ impl Proc for SimProc {
     }
 }
 
+/// A simulated node in a guest: box [`g`]'s calls are its, held at its gate while the test says so (a guest
+/// slow to answer), and its programs' pids are the guest's, which no host process has.
+#[derive(Default)]
+struct Guest {
+    held: Mutex<bool>,
+    /// Calls waiting at the gate.
+    holding: Mutex<usize>,
+    opened: Condvar,
+    /// Its programs' ends, by guest pid: none while one runs.
+    programs: Mutex<BTreeMap<u32, Option<Exit>>>,
+    ended: Condvar,
+}
+
+impl Guest {
+    fn hold(&self, held: bool) {
+        *self.held.lock().unwrap() = held;
+        self.opened.notify_all();
+    }
+
+    fn holding(&self) -> usize {
+        *self.holding.lock().unwrap()
+    }
+
+    /// Waits at the gate while it is held, at most [`PATIENCE`].
+    fn gate(&self) {
+        let deadline = Instant::now() + PATIENCE;
+        let mut held = self.held.lock().unwrap();
+        *self.holding.lock().unwrap() += 1;
+        while *held && Instant::now() < deadline {
+            held = self.opened.wait_timeout(held, PATIENCE).unwrap().0;
+        }
+        *self.holding.lock().unwrap() -= 1;
+    }
+
+    /// Its program `pid` ends with `exit`, unless it has ended already.
+    fn end(&self, pid: u32, exit: Exit) {
+        self.programs
+            .lock()
+            .unwrap()
+            .entry(pid)
+            .or_insert(None)
+            .get_or_insert(exit);
+        self.ended.notify_all();
+    }
+}
+
+/// A program in the guest, by its guest pid.
+struct GuestProc {
+    pid: u32,
+    guest: Arc<Guest>,
+}
+
+impl Proc for GuestProc {
+    fn pid(&self) -> u32 {
+        self.pid
+    }
+    fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
+        Ok(self
+            .guest
+            .programs
+            .lock()
+            .unwrap()
+            .get(&self.pid)
+            .copied()
+            .flatten())
+    }
+    fn wait_for(&mut self, timeout: Duration) -> Result<Option<Exit>, Refusal> {
+        let deadline = Instant::now() + timeout;
+        let mut programs = self.guest.programs.lock().unwrap();
+        loop {
+            if let Some(exit) = programs.get(&self.pid).copied().flatten() {
+                return Ok(Some(exit));
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(None);
+            }
+            programs = self.guest.ended.wait_timeout(programs, left).unwrap().0;
+        }
+    }
+    fn kill(&mut self) -> Result<(), Refusal> {
+        self.guest.end(self.pid, Exit::Signal(9));
+        Ok(())
+    }
+}
+
 /// Boxes in the simulator; each exec a [`SimProc`]; inspect held shut on purpose to keep calls in flight.
 struct SimHost {
     sim: SimRuntime,
@@ -334,6 +423,7 @@ struct SimHost {
     shut: Mutex<bool>,
     opened: Condvar,
     abandoned: Mutex<Vec<BoxId>>,
+    guest: Arc<Guest>,
 }
 
 impl SimHost {
@@ -345,14 +435,17 @@ impl SimHost {
             shut: Mutex::new(false),
             opened: Condvar::new(),
             abandoned: Mutex::new(Vec::new()),
+            guest: Arc::default(),
         });
-        host.sim
-            .create(BoxSpec {
-                id: b(),
-                bounds: Bounds::default(),
-                class: ClassSpec::Process,
-            })
-            .unwrap();
+        for id in [b(), g()] {
+            host.sim
+                .create(BoxSpec {
+                    id,
+                    bounds: Bounds::default(),
+                    class: ClassSpec::Process,
+                })
+                .unwrap();
+        }
         host
     }
 
@@ -375,6 +468,16 @@ impl Runtime for SimHost {
     fn exec(&self, id: &BoxId, _program: Program, _stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
         self.sim.inspect(id)?;
         let pid = u32::try_from(self.next_pid.fetch_add(1, Ordering::SeqCst)).unwrap();
+        if *id == g() {
+            self.guest.gate();
+            // A guest pid: no host process has it.
+            let pid = pid + GUEST_PIDS;
+            self.guest.programs.lock().unwrap().insert(pid, None);
+            return Ok(Box::new(GuestProc {
+                pid,
+                guest: Arc::clone(&self.guest),
+            }));
+        }
         Ok(Box::new(SimProc {
             pid,
             os: Arc::clone(&self.os),
@@ -384,6 +487,10 @@ impl Runtime for SimHost {
         self.sim.signal(id, signal)
     }
     fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
+        if *id == g() {
+            self.guest.gate();
+            return self.sim.inspect(id);
+        }
         let deadline = Instant::now() + PATIENCE;
         let mut shut = self.shut.lock().unwrap();
         while *shut && Instant::now() < deadline {
@@ -421,13 +528,17 @@ struct Lab {
 
 impl Lab {
     fn new() -> Self {
+        Self::with_workers(8)
+    }
+
+    fn with_workers(workers: usize) -> Self {
         let os = Arc::new(SimOs::default());
         let host = SimHost::new(&os);
         let server = Server::with_os(
             Arc::clone(&os),
             Arc::clone(&host) as Arc<dyn Host>,
             limits(),
-            8,
+            workers,
             Path::new("/nonexistent/hex-sim.sock"),
         )
         .unwrap();
@@ -456,6 +567,14 @@ fn b() -> BoxId {
     BoxId::new("b").unwrap()
 }
 
+/// The box the simulated guest holds.
+fn g() -> BoxId {
+    BoxId::new("g").unwrap()
+}
+
+/// Where the simulated guest's pids start: past any the host gives.
+const GUEST_PIDS: u32 = 1 << 20;
+
 fn request(id: u64, call: Call) -> Vec<u8> {
     wire::request(wire::VERSION, id, &Request::Call(call), wire::MAX_MESSAGE).unwrap()
 }
@@ -465,10 +584,14 @@ fn hello() -> Vec<u8> {
 }
 
 fn exec(id: u64) -> Vec<u8> {
+    exec_in(id, b())
+}
+
+fn exec_in(id: u64, b: BoxId) -> Vec<u8> {
     request(
         id,
         Call::Exec {
-            id: b(),
+            id: b,
             program: Program::of(&["p"]),
             streams: Streams::default(),
         },
@@ -657,6 +780,54 @@ fn a_kill_ends_its_program_alone_and_its_end_is_sent() {
     let (h, again) = answer_of(&sock);
     assert_eq!((h.id, again), (10, Answer::Done));
     assert!(lab.host.abandoned.lock().unwrap().is_empty());
+}
+
+/// HEX-SOCK-5 (the core), native plan step 8 (1): a call its guest is slow to answer holds no other client's
+/// call, even with one worker: client A's inspect of a guest box waits at the guest while client B's inspect
+/// of a host box is answered; A's is answered once the guest answers.
+#[test]
+fn a_call_its_guest_holds_holds_no_other_clients_call() {
+    let lab = Lab::with_workers(1);
+    lab.host.guest.hold(true);
+    let a = lab.os.connect(true, 64);
+    let other = lab.os.connect(true, 64);
+    lab.os.put(&a, request(1, Call::Inspect(g())));
+    wait_until("the guest to hold A's call", || {
+        lab.host.guest.holding() == 1
+    });
+    lab.os.put(&other, request(2, Call::Inspect(b())));
+    let (h, answer) = answer_of(&other);
+    assert!(
+        matches!((h.id, &answer), (2, Answer::Info(_))),
+        "{answer:?}"
+    );
+    lab.host.guest.hold(false);
+    let (h, answer) = answer_of(&a);
+    assert!(
+        matches!((h.id, &answer), (1, Answer::Info(_))),
+        "{answer:?}"
+    );
+}
+
+/// HEX-SOCK-7 (the core), native plan step 8 (1): a program in the guest has a guest pid, which names no host
+/// process, so the core never watches it as one; its end comes from the guest and goes to its exec as any
+/// end does.
+#[test]
+fn a_guest_programs_end_comes_from_its_guest_and_no_host_pid_is_watched() {
+    let lab = Lab::new();
+    let sock = lab.os.connect(true, 64);
+    lab.os.put(&sock, exec_in(7, g()));
+    let pid = match answer_of(&sock) {
+        (Header { id: 7, .. }, Answer::Started { pid }) => pid,
+        other => panic!("{other:?}"),
+    };
+    assert!(
+        !lab.os.lock().ever_watched.contains(&pid),
+        "the core watched guest pid {pid} as a host process"
+    );
+    lab.host.guest.end(pid, Exit::Code(3));
+    let (h, end) = answer_of(&sock);
+    assert_eq!((h.id, end), (7, Answer::Exited(Exit::Code(3))));
 }
 
 /// HEX-SOCK-7 (the core): an exec whose program the OS can't watch is refused, saying the node ended it.
