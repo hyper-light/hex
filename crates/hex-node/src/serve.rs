@@ -54,15 +54,19 @@ pub mod linux;
 pub mod macos;
 #[cfg(unix)]
 mod unix;
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 mod unsupported;
+#[cfg(windows)]
+pub mod windows;
 
 /// This OS's event sources and local socket.
 #[cfg(target_os = "linux")]
 pub type Native = linux::Linux;
 #[cfg(target_os = "macos")]
 pub type Native = macos::MacOs;
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
+pub type Native = windows::Windows;
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub type Native = unsupported::Unsupported;
 
 /// The node agent's bounds on its socket unless set ([`Server::bind`]'s `limits`):

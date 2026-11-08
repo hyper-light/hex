@@ -7,7 +7,9 @@
 //! records kept in `--state` ([`hex_node::recorded::Recorded`]), and, where a Shards guest is configured
 //! (`SHARDS_BIN`, `HEX_GUEST_KERNEL`, `HEX_GUEST_INITRD`, ...,
 //! [`hex_runtime::guest::GuestConfig::from_env`]), Linux images in that guest, booted before the node
-//! accepts a box (HEX-GUEST-39); `--box-root` (cgroups) is Linux's. On Linux:
+//! accepts a box (HEX-GUEST-39); `--box-root` (cgroups) is Linux's. On Windows (native plan step 8) the
+//! node is the Windows runtime's `process` class, its boxes' records kept in `--state` as macOS's are,
+//! its socket an AF_UNIX stream on one completion port (`hex_node::serve::windows`). On Linux:
 //!
 //! It opens the node, its boxes in cgroups under `--box-root` (else in a subtree beside its own
 //! cgroup), their records under `--state` and their containers' state on tmpfs under the runtime
@@ -24,6 +26,7 @@ use std::sync::Arc;
 
 use hex_api::Refusal;
 use hex_node::serve::{Host, LIMITS, Server, WORKERS};
+#[cfg(unix)]
 use rustix::process::Resource;
 
 /// Runs `hex node`'s arguments (everything after `node`); returns the exit status.
@@ -74,6 +77,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
 fn serve(args: &[String]) -> Result<(), (u8, String)> {
     let args = parse(args).map_err(|why| (2, why))?;
     let failed = |e: Refusal| (1, e.to_string());
+    #[cfg(unix)]
     raise_descriptor_limit().map_err(failed)?;
     // The state's disk is what the boxes' io bounds apply to, so it exists before the node looks.
     std::fs::create_dir_all(&args.state)
@@ -148,10 +152,28 @@ fn host(args: &Args) -> Result<Arc<dyn Host>, (u8, String)> {
     Ok(Arc::new(node))
 }
 
+/// The Windows node: the `process` class, its boxes' records in `--state`.
+#[cfg(windows)]
+fn host(args: &Args) -> Result<Arc<dyn Host>, (u8, String)> {
+    use hex_node::recorded::Recorded;
+    let failed = |e: Refusal| (1, e.to_string());
+    if args.box_root.is_some() {
+        return Err((
+            2,
+            format!("--box-root names a cgroup directory, which is Linux's\n{USAGE}"),
+        ));
+    }
+    let node =
+        Recorded::open(hex_runtime::windows::WinRuntime::new(), &args.state).map_err(failed)?;
+    node.recover().map_err(failed)?;
+    Ok(Arc::new(node))
+}
+
 /// Raises the soft limit on open descriptors to the hard one: each connection and watched program
 /// holds descriptors, and a service's soft limit stays 1,024 for `select(2)`'s sake while its hard
 /// limit is 524,288 (systemd-system.conf(5), `DefaultLimitNOFILE=`), which a program that needs
 /// more raises its soft limit to.
+#[cfg(unix)]
 fn raise_descriptor_limit() -> Result<(), Refusal> {
     let limit = rustix::process::getrlimit(Resource::Nofile);
     if limit.current < limit.maximum {

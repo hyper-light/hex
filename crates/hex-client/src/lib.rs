@@ -40,9 +40,14 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::Client;
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::Client;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 mod other;
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub use other::Client;
 
 /// Longest a call waits for the node agent's answer, and a send for room in its socket: five times the

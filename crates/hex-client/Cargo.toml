@@ -21,6 +21,10 @@ sha2.workspace = true
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true
 
+# Windows' AF_UNIX socket calls (CLAUDE.md §12).
+[target.'cfg(windows)'.dependencies]
+hex-afunix.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 

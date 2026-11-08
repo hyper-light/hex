@@ -15,6 +15,10 @@ hex-core.workspace = true
 hex-runtime.workspace = true
 serde_json.workspace = true
 
+# Windows' AF_UNIX socket and completion port (CLAUDE.md §12).
+[target.'cfg(windows)'.dependencies]
+hex-afunix.workspace = true
+
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true
 

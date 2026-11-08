@@ -20,7 +20,7 @@ pub mod selftest;
 pub mod box_run;
 #[cfg(target_os = "linux")]
 pub mod guest;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub mod node;
 #[cfg(target_os = "linux")]
 pub mod oci;

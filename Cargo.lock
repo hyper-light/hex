@@ -232,6 +232,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
+name = "hex-afunix"
+version = "0.1.0"
+dependencies = [
+ "windows-sys",
+]
+
+[[package]]
 name = "hex-api"
 version = "0.1.0"
 dependencies = [
@@ -278,6 +285,7 @@ name = "hex-client"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "hex-afunix",
  "hex-api",
  "hex-core",
  "rustix",
@@ -303,6 +311,7 @@ dependencies = [
 name = "hex-node"
 version = "0.1.0"
 dependencies = [
+ "hex-afunix",
  "hex-api",
  "hex-client",
  "hex-core",

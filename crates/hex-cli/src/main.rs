@@ -25,7 +25,7 @@ fn main() -> ExitCode {
         }
     }
     // `hex node --socket …` serves the Runtime seam on the node agent's local socket.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     if let [Some(first), rest @ ..] = args.as_slice()
         && first == "node"
         && rest.iter().all(Option::is_some)

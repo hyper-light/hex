@@ -36,6 +36,12 @@ hex-runtime.workspace = true
 rustix.workspace = true
 shards-api.workspace = true
 
+# `hex node` on Windows (native plan step 8): the node over the Windows runtime.
+[target.'cfg(windows)'.dependencies]
+hex-api.workspace = true
+hex-node.workspace = true
+hex-runtime.workspace = true
+
 [dev-dependencies]
 hex-api.workspace = true
 # The oci class through a Shards guest (docs/design/shards-guest.md): its simulator on Linux

@@ -22,6 +22,7 @@ hex-core = { path = "crates/hex-core", version = "0.1.0" }
 hex-runtime = { path = "crates/hex-runtime", version = "0.1.0" }
 hex-node = { path = "crates/hex-node", version = "0.1.0" }
 hex-client = { path = "crates/hex-client", version = "0.1.0" }
+hex-afunix = { path = "crates/hex-afunix", version = "0.1.0" }
 # Shards' guests (docs/design/shards-guest.md §2, Appendix A): the oci class's Linux guest on macOS and
 # Windows. By name and version, patched below to a copy of Shards' draft until Shards lands it, then to
 # vendor/shards as every other vendored project (vendor/shards-api-draft/Cargo.toml says which).
@@ -45,7 +46,9 @@ ureq = "3"
 # the job's accounting and guaranteed memory-limit violation (crates/hex-runtime/src/windows). Security
 # is for the SECURITY_ATTRIBUTES the process- and job-creation signatures name (Hex passes null). UI_Shell and
 # System_Com read the users folder from its known folder and free it, the oci guest's default share.
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_UI_Shell"] }
+# Networking_WinSock and System_IO are the node agent's socket: AF_UNIX streams on one completion port
+# (crates/hex-afunix).
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Networking_WinSock", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_UI_Shell"] }
 
 # The no-panic rule and the rest of CLAUDE.md as lints. Production code is checked again by
 # scripts/check-production.sh, without the test allowances.

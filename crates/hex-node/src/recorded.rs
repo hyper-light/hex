@@ -264,6 +264,25 @@ fn group(trace: Option<ProcId>) -> Option<(i32, u64)> {
     trace.and_then(|t| Some((i32::try_from(t.pid).ok()?, t.start_ticks)))
 }
 
+/// The Windows `process` class: a box is a job object that ends with the node's last handle to it
+/// (kill-on-close), so nothing of a box outlives its node. A box made is taken back empty, its job made
+/// again; one removed has nothing left to end. (Boxes that outlive their node are native plan step 8's
+/// change, the decision "the Windows node, on one completion port".)
+#[cfg(windows)]
+impl Recover for hex_runtime::windows::WinRuntime {
+    fn trace(&self, _id: &BoxId) -> Result<Option<ProcId>, Refusal> {
+        Ok(None)
+    }
+
+    fn adopt(&self, spec: &BoxSpec, _trace: Option<ProcId>) -> Result<(), Refusal> {
+        self.create(spec.clone()).map(drop)
+    }
+
+    fn end(&self, _trace: Option<ProcId>) -> Result<(), Refusal> {
+        Ok(())
+    }
+}
+
 /// A node whose Linux images are its Shards guest's: its `process` boxes are taken back through the host's
 /// runtime. Its `oci` boxes lived in the guest the node booted, which went with the node (the node boots a
 /// new one when it starts, HEX-GUEST-39), so their records are removed (`hex_core::recovery`: their init has
