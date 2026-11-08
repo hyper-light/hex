@@ -67,6 +67,7 @@ fn shut_down() -> OciError {
 impl IpcUtsPool {
     /// A pool that holds `bound` pairs, and the thread that starts filling it at once. With a bound of 0 there is
     /// no thread, and every container's clone makes its own, counted, as a rootless node's do.
+    #[cfg(feature = "test-controls")]
     pub fn start(bound: usize) -> Result<Self, Refusal> {
         Self::with_pool(Pool::new(bound), bound)
     }

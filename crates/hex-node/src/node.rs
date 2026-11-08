@@ -402,6 +402,7 @@ impl Node {
     /// Ada's 2026-11-06 rule. The parked-proc and masked-directory tests (oci_box.rs, AC-T7.1.4) use it to read a
     /// create's own proc, which on 7.1 and later the pool would otherwise serve; a stalled maker would only make the
     /// pool dry after it had made some, never from the first create. Root nodes only.
+    #[cfg(feature = "test-controls")]
     pub fn with_prepared_procs(mut self, enabled: bool) -> Result<Self, Refusal> {
         let (dev, _, root) = self.devfs.enabled();
         self.devfs = self.devfs.restart(dev, enabled && root)?;
@@ -422,6 +423,7 @@ impl Node {
 
     /// Sets how many `oci` boxes' inits the node watches at once, [`Sizes::inits`] unless set: past it `create` of an `oci` box is refused with [`Refusal::Exhausted`]. A test
     /// control, with no production caller: the budget-exhausted test needs a budget it can reach.
+    #[cfg(feature = "test-controls")]
     pub fn with_init_budget(self, budget: usize) -> Result<Self, Refusal> {
         self.supervisor.set_budget(budget)?;
         Ok(self)
@@ -486,6 +488,7 @@ impl Node {
     /// create: a stalled maker would leave dry only a pool that had already made some, so it can't stand in. A
     /// rootless node makes none (its containers' namespaces belong to user namespaces of their own), so a bound
     /// above 0 there is refused.
+    #[cfg(feature = "test-controls")]
     pub fn with_netns_bound(mut self, bound: usize) -> Result<Self, Refusal> {
         if bound > 0 && self.owner != Owner::Root {
             return Err(Refusal::Invalid {
@@ -510,6 +513,7 @@ impl Node {
     /// clone makes its own, counted. HEX-IPCUTS-3 (oci_ipcuts.rs) needs a create that finds none from the first
     /// and pairs it can count exactly; a stalled maker would leave dry only a pool that had already made some. A
     /// rootless node makes none, so a bound above 0 there is refused.
+    #[cfg(feature = "test-controls")]
     pub fn with_ipc_uts_bound(mut self, bound: usize) -> Result<Self, Refusal> {
         if bound > 0 && self.owner != Owner::Root {
             return Err(Refusal::Invalid {
@@ -538,6 +542,7 @@ impl Node {
     /// The tests that read one parked init's claim (oci_reuse.rs, oci_box.rs) need exactly one ready, and those of a
     /// box of no owner's own cgroup none ever; a learned pool makes as many as the host's parallelism, and a stalled
     /// refill would leave none only after it had made some.
+    #[cfg(feature = "test-controls")]
     pub fn with_inits_ahead(self, bound: usize) -> Self {
         self.cgroups.set_ahead(bound);
         self
@@ -565,6 +570,7 @@ impl Node {
     /// The bound test (oci_reuse.rs, AC-T7.1.3) needs the cap itself reached, with a handful of boxes; a stalled maker
     /// would leave procs unmade, never capped, so it can't stand in. Refused past the dropper's queue, started at the
     /// node's own bound.
+    #[cfg(feature = "test-controls")]
     pub fn with_parked_procs_bound(self, bound: usize) -> Result<Self, Refusal> {
         self.park_procs(bound)
     }
@@ -573,6 +579,7 @@ impl Node {
     /// set to `bound` in place of [`Sizes::programs`], derived from the host and so past a test's reach (the eviction
     /// test, oci_devices.rs, needs it reached with a few policies), replacing those it opened with, which it closes
     /// (each lives on in the cgroups it's attached to). A root node's oci boxes' root keeps its program.
+    #[cfg(feature = "test-controls")]
     pub fn with_device_program_bound(mut self, bound: usize) -> Result<Self, Refusal> {
         self.devices = device_programs(self.owner, &self.oci_boxes, bound)?;
         Ok(self)

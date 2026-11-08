@@ -13,11 +13,11 @@ use std::thread::JoinHandle;
 pub struct Devfs {
     shared: Arc<Shared>,
     worker: Option<JoinHandle<()>>,
-    /// Whether each pool makes ahead, as started: `/dev`'s and the procs'.
+    /// Whether each pool makes ahead, as started: `/dev`'s and the procs'; what a test control restarts from.
+    #[cfg(feature = "test-controls")]
     enabled: (bool, bool),
-    /// Whether this is a root node's, which keeps the mask sources.
-    root: bool,
     /// Where each pool's keys and mounts a key start and their bound.
+    #[cfg(feature = "test-controls")]
     shape: Shape,
 }
 struct Shared {
@@ -57,26 +57,20 @@ impl Devfs {
         } else {
             None
         };
-        Self::over(sources, dev, procs, root, shape)
+        Self::over(sources, dev, procs, shape)
     }
 
     /// As [`Devfs::start`], with this one's mask sources: a node keeps one empty tmpfs for its life, so every init's
     /// masked directories and every parked proc's clone the same one, whichever pools are on.
+    #[cfg(feature = "test-controls")]
     pub fn restart(&self, dev: bool, procs: bool) -> Result<Self, Refusal> {
-        Self::over(
-            self.shared.sources.clone(),
-            dev,
-            procs,
-            self.root,
-            self.shape,
-        )
+        Self::over(self.shared.sources.clone(), dev, procs, self.shape)
     }
 
     fn over(
         sources: Option<Arc<ProcSources>>,
         dev: bool,
         procs: bool,
-        root: bool,
         shape: Shape,
     ) -> Result<Self, Refusal> {
         let shared = Arc::new(Shared {
@@ -99,8 +93,9 @@ impl Devfs {
         Ok(Self {
             shared,
             worker,
+            #[cfg(feature = "test-controls")]
             enabled: (dev, procs),
-            root,
+            #[cfg(feature = "test-controls")]
             shape,
         })
     }
@@ -121,8 +116,14 @@ impl Devfs {
     }
 
     /// Whether the `/dev` pool and the proc pool make ahead, as started, and whether the node is root's.
+    #[cfg(feature = "test-controls")]
     pub fn enabled(&self) -> (bool, bool, bool) {
-        (self.enabled.0, self.enabled.1, self.root)
+        // A root node's is the one that keeps the mask sources.
+        (
+            self.enabled.0,
+            self.enabled.1,
+            self.shared.sources.is_some(),
+        )
     }
 
     /// What makes parked inits' procs, on a root node, which alone has the mask sources.
