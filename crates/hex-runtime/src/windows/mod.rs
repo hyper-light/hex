@@ -477,12 +477,11 @@ impl WinRuntime {
                 .ok_or_else(|| Refusal::Broken("the node can't name its own folder".to_owned()))?,
         };
         OciBox::create(
-            spec.id.clone(),
-            &spec.bounds,
-            self.processors,
+            JobBox::create(spec.id.clone(), &spec.bounds, self.processors)?,
             &container,
             &launcher,
             Some(self.scratch_root.join(format!("{}.scratch.json", spec.id))),
+            hex_core::hcs::Lifetime::EndsWithNode,
         )
     }
 }

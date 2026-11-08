@@ -447,6 +447,16 @@ fn boxes_started_at_once_each_have_their_own_volume(lab: &Lab, n: usize) {
     }
 }
 
+/// The lab's tests one at a time, as the ordered suite runs its cases: one runtime's boxes at a time, so
+/// the cases don't contend for one container image's scratch copies, and each can still run alone.
+static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// AC-T7.1.1 and native step 4: the Windows oci class end to end on this host's image, in order (one
 /// runtime's boxes at a time, so the cases don't contend for one container image's scratch copies).
 #[test]
@@ -455,6 +465,7 @@ fn windows_oci_boxes_hold_the_contract_and_the_steps_criteria() {
         eprintln!("SKIP: HEX_WINDOWS_LAYERS names no image layers");
         return;
     };
+    let _one = one_at_a_time();
     eprintln!("RUN: layers {:?}", lab.layers);
     a_mismatched_image_is_refused_by_name(&lab);
     a_deleted_box_leaves_nothing(&lab);
@@ -616,4 +627,110 @@ fn a_killed_nodes_scratch_is_reclaimed_at_the_next_start(lab: &Lab) {
             .unwrap_or_default();
         assert!(markers.is_empty(), "{phase}: markers left {markers:?}");
     }
+}
+
+/// What a test of an outliving box leaves, ended however the test ends: its container, by id, and its
+/// record and scratch, by the next node's reclaim, so no scratch stays attached on the host (jupiter's
+/// NTFS stall of 2026-11-08 most likely followed a scratch left attached by a crash test's red run).
+struct Leftover<'a> {
+    id: &'a BoxId,
+    markers: &'a std::path::Path,
+}
+
+impl Leftover<'_> {
+    /// Ends the box's container through a handle reopened by its id, as its next node would.
+    fn end_container(&self) {
+        if let Ok(Some(system)) = oci::sys::open_system(self.id.as_str()) {
+            let _ = system.terminate(oci::launch::PATIENCE);
+        }
+    }
+}
+
+impl Drop for Leftover<'_> {
+    fn drop(&mut self) {
+        self.end_container();
+        let _ = oci::reclaim(self.markers);
+    }
+}
+
+/// T-T7.1.2, native plan step 8: do: make an `oci` box whose container outlives its node, drop it without
+/// a delete, as a node going down does, and run the next node's reclaim on its markers; then end its
+/// container by its id and reclaim again. Expect: HCS still holds the container after the drop, and the
+/// reclaim leaves the box's record and its scratch (the sandbox attached) while it does; once the container
+/// is ended through the reopened handle, the next reclaim leaves no record, no scratch and nothing
+/// attached.
+#[test]
+fn an_outliving_box_s_container_and_scratch_wait_for_its_next_node() {
+    let Some(lab) = Lab::new() else {
+        eprintln!("SKIP: HEX_WINDOWS_LAYERS names no image layers");
+        return;
+    };
+    let _one = one_at_a_time();
+    let id = BoxId::new("hex-oci-outlives").unwrap();
+    let markers = lab.root.path().join("markers");
+    let marker = markers.join(format!("{id}.scratch.json"));
+    let folder = lab.root.path().join(format!("scratch-{id}"));
+    let scratch = folder.to_str().unwrap().to_owned();
+    let left = Leftover {
+        id: &id,
+        markers: &markers,
+    };
+    let dir = lab.bundle(&id, &Lab::args(&Act::Wait), json!([]));
+    let container = hex_core::hcs::from_bundle(&oci::bundle_config(&dir).unwrap()).unwrap();
+    // Default bounds set no CPU cap, so the processor count isn't read.
+    let job = hex_runtime::windows::process::JobBox::create(
+        id.clone(),
+        &Bounds::default(),
+        std::num::NonZeroU32::MIN,
+    )
+    .expect("the box's job");
+    let made = oci::OciBox::create(
+        job,
+        &container,
+        &lab.bin,
+        Some(marker.clone()),
+        hex_core::hcs::Lifetime::Outlives,
+    )
+    .expect("create");
+    // Its node goes down: the box is dropped, not deleted. HCS ends a container made to end with its last
+    // handle on its own time, within HCS_ENDS' bound (the crash test's learned wait), so this one outlived
+    // its node only if HCS still holds it all that while.
+    drop(made);
+    let dropped = std::time::Instant::now();
+    while dropped.elapsed() < HCS_ENDS.bound() {
+        assert!(
+            oci::sys::open_system(id.as_str())
+                .expect("asking HCS for the box's container")
+                .is_some(),
+            "HCS ended the outliving box's container with its node's last handle, {:?} after",
+            dropped.elapsed()
+        );
+    }
+    let failures = oci::reclaim(&markers);
+    assert!(failures.is_empty(), "{failures:?}");
+    assert!(
+        marker.exists(),
+        "the next node's reclaim took the record of a box whose container runs"
+    );
+    assert!(
+        folder.join("sandbox.vhdx").exists(),
+        "the next node's reclaim removed the scratch of a box whose container runs"
+    );
+    assert!(
+        oci::sys::layer_mount_path(&scratch).is_ok(),
+        "the scratch was detached from under its running container"
+    );
+    // Its container ended by id, the next reclaim removes what is left.
+    left.end_container();
+    let failures = oci::reclaim(&markers);
+    assert!(failures.is_empty(), "{failures:?}");
+    assert!(!marker.exists(), "the record outlived its container");
+    assert!(
+        oci::sys::layer_mount_path(&scratch).is_err(),
+        "the scratch is still attached"
+    );
+    assert!(
+        !folder.exists(),
+        "the scratch folder outlived its container"
+    );
 }

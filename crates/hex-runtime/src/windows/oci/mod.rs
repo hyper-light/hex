@@ -10,7 +10,6 @@ pub mod launch;
 pub mod sys;
 
 use std::io::Read;
-use std::num::NonZeroU32;
 use std::os::windows::io::OwnedHandle;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -36,19 +35,11 @@ struct Mounted {
     /// The marker naming this scratch for a node that starts after this one was killed ([`reclaim`]),
     /// removed last, once everything else is.
     marker: Option<PathBuf>,
+    /// Set once the box's container exists and outlives its node: dropped without a delete (the node going
+    /// down), its scratch stays the container's, for the next node to take back. Until then a failed create
+    /// undoes it as any box's, so no create leaves a scratch attached without a container.
+    outlives: bool,
 }
-
-/// What a box's scratch marker records, written before Hex makes anything: the folder vmcompute activates,
-/// and what of it Hex made (removed at delete, or by the next node's [`reclaim`]).
-#[derive(serde::Serialize, serde::Deserialize)]
-struct ScratchMarker {
-    folder: String,
-    made: Vec<PathBuf>,
-}
-
-/// The largest marker a reclaim reads: a folder and two paths, each at most Windows' longest path in
-/// UTF-8 (32,767 units × 3 bytes), with the JSON around them (CLAUDE.md §2).
-const MAX_MARKER: u64 = 3 * 3 * 32_767 + 4096;
 
 /// The scratch markers under `root`, one per box, `<id>.scratch.json`.
 const MARKER_SUFFIX: &str = ".scratch.json";
@@ -99,8 +90,9 @@ impl Mounted {
 /// Reclaims the scratch a killed node left under `root` (each `<id>.scratch.json` marker's folder):
 /// detaches its volume where it is still activated (UnprepareLayer, then DeactivateLayer, which detaches it
 /// whether or not the unprepare took: jupiter, 2026-11-06) and removes what Hex made, then the marker. The
-/// containers ended with the node (ShouldTerminateOnLastHandleClosed, the job's kill-on-close), so the
-/// scratch is all a crash leaves. Bounded by `root`'s entries, read once; each failure is returned, typed,
+/// containers of boxes that end with their node ended with it (ShouldTerminateOnLastHandleClosed, the
+/// job's kill-on-close), so the scratch is all a crash leaves; an outliving box whose container HCS still
+/// runs is left for the node's recovery to take back or end (`hcs::at_start`). Bounded by `root`'s entries, read once; each failure is returned, typed,
 /// and its marker kept so the next start tries again.
 pub fn reclaim(root: &Path) -> Vec<Refusal> {
     let mut failures = Vec::new();
@@ -135,13 +127,23 @@ pub fn reclaim(root: &Path) -> Vec<Refusal> {
 }
 
 fn reclaim_one(marker: &Path) -> Result<(), Refusal> {
-    let mut text = String::new();
+    let mut bytes = Vec::new();
     std::fs::File::open(marker)
-        .and_then(|f| f.take(MAX_MARKER).read_to_string(&mut text))
+        .and_then(|f| {
+            f.take(
+                u64::try_from(hcs::MAX_RECORD)
+                    .unwrap_or(u64::MAX)
+                    .saturating_add(1),
+            )
+            .read_to_end(&mut bytes)
+        })
         .map_err(|e| Refusal::os("reading a scratch marker", e))?;
-    let m: ScratchMarker = serde_json::from_str(&text).map_err(|e| Refusal::Invalid {
-        what: "scratch marker",
-        why: format!("{}: {e}", marker.display()),
+    let m = hcs::read_record(&bytes).map_err(|r| match r {
+        Refusal::Invalid { what, why } => Refusal::Invalid {
+            what,
+            why: format!("{}: {why}", marker.display()),
+        },
+        other => other,
     })?;
     if sys::layer_mount_path(&m.folder).is_ok() {
         let unprepared = sys::unprepare_layer(&m.folder);
@@ -158,7 +160,7 @@ fn reclaim_one(marker: &Path) -> Result<(), Refusal> {
             )
         })?;
     }
-    for p in m.made.iter().rev() {
+    for p in m.made.iter().rev().map(Path::new) {
         let gone = if p.is_dir() {
             std::fs::remove_dir(p)
         } else {
@@ -175,8 +177,11 @@ fn reclaim_one(marker: &Path) -> Result<(), Refusal> {
 
 impl Drop for Mounted {
     fn drop(&mut self) {
-        // The backstop for a box dropped without its delete; delete reports these failures.
-        let _ = self.undo();
+        // The backstop for a box dropped without its delete; delete reports these failures. An outliving
+        // box's scratch is its container's while that runs on.
+        if !self.outlives {
+            let _ = self.undo();
+        }
     }
 }
 
@@ -194,7 +199,8 @@ struct Life {
 /// A Windows `oci` box.
 pub struct OciBox {
     job: JobBox,
-    /// Dropped before the scratch: closing its last handle ends the container (it was created to).
+    /// Dropped before the scratch: closing its last handle ends the container where it ends with its node
+    /// (it was created to), and leaves it running where it outlives it.
     system: Mutex<Option<System>>,
     mounted: Mutex<Option<Mounted>>,
     user: Option<String>,
@@ -236,16 +242,17 @@ pub fn bundle_config(dir: &Path) -> Result<serde_json::Value, Refusal> {
 }
 
 impl OciBox {
-    /// Makes box `id` for `container`, bounded by `bounds` on a machine of `processors`, Hex's launcher
-    /// mapped in from the folder `launcher`: checks the image runs on this host, makes the box's job, prepares the scratch, and creates the compute system,
-    /// which waits for [`OciBox::start`].
+    /// Makes the box `job` is for, for `container`, Hex's launcher mapped in from the folder `launcher`:
+    /// checks the image runs on this host, prepares the scratch, and creates the compute system, which
+    /// waits for [`OciBox::start`]. The node makes the box's job (named and held by its keeper where the box
+    /// outlives it), so the class never names one. Its record (`marker`, an [`hcs::BoxRecord`]) and its
+    /// container outlive its node where `lifetime` says so.
     pub fn create(
-        id: BoxId,
-        bounds: &Bounds,
-        processors: NonZeroU32,
+        job: JobBox,
         container: &Container,
         launcher: &Path,
         marker: Option<PathBuf>,
+        lifetime: hcs::Lifetime,
     ) -> Result<Self, Refusal> {
         available()?;
         let host = sys::host();
@@ -257,8 +264,8 @@ impl OciBox {
         let image = sys::file_build(&ntdll)
             .map_err(|e| Refusal::os("reading the image's Windows build from its base layer", e))?;
         hcs::image_runs(host, image)?;
-        let job = JobBox::create(id.clone(), bounds, processors)?;
-        let mut mounted = scratch(container, base, marker)?;
+        let id = job.id().clone();
+        let mut mounted = scratch(container, base, marker, &id, lifetime)?;
         if !container.hosts.is_empty() {
             append_hosts(&mounted.volume, &hcs::hosts_lines(&container.hosts))?;
         }
@@ -426,7 +433,14 @@ impl OciBox {
 /// a volume and puts the storage filter over, the layers its parents, as hcsshim and runhcs do; the
 /// documented storage calls made a writable layer no container finished starting on (note §3, §9); a
 /// volume the caller mounted is used as it is.
-fn scratch(container: &Container, base: &str, marker: Option<PathBuf>) -> Result<Mounted, Refusal> {
+fn scratch(
+    container: &Container,
+    base: &str,
+    marker: Option<PathBuf>,
+    id: &BoxId,
+    lifetime: hcs::Lifetime,
+) -> Result<Mounted, Refusal> {
+    let outlives = lifetime == hcs::Lifetime::Outlives;
     let folder = match &container.scratch {
         Scratch::Volume(v) => {
             return Ok(Mounted {
@@ -435,6 +449,7 @@ fn scratch(container: &Container, base: &str, marker: Option<PathBuf>) -> Result
                 prepared: false,
                 made: Vec::new(),
                 marker: None,
+                outlives: false,
             });
         }
         Scratch::Folder(f) => PathBuf::from(f),
@@ -445,6 +460,7 @@ fn scratch(container: &Container, base: &str, marker: Option<PathBuf>) -> Result
         prepared: false,
         made: Vec::new(),
         marker: None,
+        outlives: false,
     };
     let sandbox = folder.join(SANDBOX);
     // The marker first, naming what Hex is about to make, so a node killed at any later point leaves
@@ -457,19 +473,26 @@ fn scratch(container: &Container, base: &str, marker: Option<PathBuf>) -> Result
         if !sandbox.exists() {
             made.push(sandbox.clone());
         }
-        let record = ScratchMarker {
-            folder: folder
-                .to_str()
-                .ok_or_else(|| Refusal::os("naming a container's scratch", "not UTF-8"))?
-                .to_owned(),
-            made,
+        let path = |p: &Path| {
+            p.to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| Refusal::os("naming a container's scratch", "not UTF-8"))
         };
-        let text = serde_json::to_string(&record)
-            .map_err(|e| Refusal::os("writing a scratch marker", e))?;
+        let record = hcs::BoxRecord {
+            folder: path(&folder)?,
+            made: made
+                .iter()
+                .map(|p| path(p.as_path()))
+                .collect::<Result<_, _>>()?,
+            outlives,
+            system: outlives.then(|| id.clone()),
+            init: None,
+        };
+        let bytes = hcs::write_record(&record)?;
         if let Some(dir) = m.parent() {
             std::fs::create_dir_all(dir).map_err(|e| Refusal::os("writing a scratch marker", e))?;
         }
-        std::fs::write(&m, text).map_err(|e| Refusal::os("writing a scratch marker", e))?;
+        std::fs::write(&m, bytes).map_err(|e| Refusal::os("writing a scratch marker", e))?;
         mounted.marker = Some(m);
     }
     if !folder.exists() {
