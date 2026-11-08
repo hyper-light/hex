@@ -513,6 +513,64 @@ fn a_cap_kill_the_watcher_finds_reaped_is_counted_by_its_waiter() {
     );
 }
 
+/// Waits until process `pid` is in run state `want`, as the kernel reads it, up to the hang guard.
+fn wait_for_run_state(pid: i32, want: super::sys::Run) {
+    let deadline = std::time::Instant::now() + HANG_GUARD;
+    while super::sys::run_state(pid).expect("run state") != Some(want) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{pid} never became {want:?}"
+        );
+        thread::yield_now();
+    }
+}
+
+/// CLAUDE.md §3, a stop isn't an end: macOS answers `waitid`'s `WEXITED` with a stopped child's report too
+/// (measured on adas-mac-studio-3, Mac16,9, macOS 26.2, 2026-11-08: a stopped child read by
+/// `waitid(P_PID, WEXITED | WNOHANG)`, the reap taking the report), and a program's waiter took that report
+/// for its end, `Exit::Unknown`, while it lived on stopped. Do stop a running program its waiter watches, ask
+/// for its end, continue it and ask again, then end it; expect it running both times, then its own exit.
+#[test]
+fn a_stopped_program_is_running_to_its_waiter_not_ended() {
+    let mut child = Reaped(
+        Command::new("/bin/sh")
+            .args(["-c", "read _; exit 3"])
+            .stdin(Piped::piped())
+            .spawn()
+            .expect("spawn"),
+    );
+    let pid = i32::try_from(child.0.id()).expect("pid");
+    let raw = rustix::process::Pid::from_raw(pid).expect("a pid");
+    let mut p = super::proc::BoxProc::watch(pid, None).expect("watch");
+    rustix::process::kill_process(raw, rustix::process::Signal::STOP).expect("stop");
+    wait_for_run_state(pid, super::sys::Run::Stopped);
+    assert_eq!(
+        p.try_wait().expect("try_wait"),
+        None,
+        "a stopped program read as ended"
+    );
+    rustix::process::kill_process(raw, rustix::process::Signal::CONT).expect("continue");
+    wait_for_run_state(pid, super::sys::Run::Live);
+    assert_eq!(
+        p.try_wait().expect("try_wait"),
+        None,
+        "a continued program read as ended"
+    );
+    drop(child.0.stdin.take());
+    assert_eq!(p.wait_for(HANG_GUARD).expect("wait"), Some(Exit::Code(3)));
+}
+
+/// A child a test started, killed and reaped when the test ends, a failed assert included, so a stopped
+/// child isn't left holding the test's stdio open.
+struct Reaped(Child);
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 /// c-route's finding (2026-11-07): XNU's EVFILT_PROC reports only what follows its attach and doesn't refuse
 /// a zombie, so a member that ends between the watcher's listing and its watch posts no exit event, and a box
 /// left to its events would wait on a change that already happened. Do end a child (a zombie, not reaped),

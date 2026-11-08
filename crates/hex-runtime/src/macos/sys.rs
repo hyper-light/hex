@@ -107,6 +107,57 @@ pub fn rusage(pid: i32) -> io::Result<Option<Rusage>> {
     }))
 }
 
+/// Where a process is in its life, as `proc_pidinfo(PROC_PIDTBSDINFO)` reads it: XNU copies the process's
+/// `p_stat` into `pbi_status` (`bsd/kern/proc_info.c`), whose values are `sys/proc.h`'s (`SSTOP` 4, `SZOMB`
+/// 5), and a stop signal sets `SSTOP` (`bsd/kern/kern_sig.c`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Run {
+    /// Stopped by a signal: it runs again only once continued.
+    Stopped,
+    /// Ended, waiting to be reaped.
+    Ended,
+    /// Being made, runnable or asleep: each can run.
+    Live,
+}
+
+/// Process `pid`'s run state, or `None` when no process has that pid (`ESRCH`).
+pub fn run_state(pid: i32) -> io::Result<Option<Run>> {
+    let mut info = MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let size = c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>())
+        .map_err(|_| io::Error::other("a proc_bsdinfo past an int's bytes"))?;
+    // SAFETY: for PROC_PIDTBSDINFO proc_pidinfo writes at most `size` bytes, one proc_bsdinfo, into the
+    // buffer it is given, which is one proc_bsdinfo, alive for the call.
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast::<c_void>(),
+            size,
+        )
+    };
+    if n <= 0 {
+        let e = io::Error::last_os_error();
+        return match e.raw_os_error() {
+            Some(libc::ESRCH) => Ok(None),
+            _ => Err(e),
+        };
+    }
+    if n != size {
+        return Err(io::Error::other(format!(
+            "proc_pidinfo(PROC_PIDTBSDINFO) of {pid} wrote {n} of {size} bytes"
+        )));
+    }
+    // SAFETY: zeroed above and written whole by the kernel; every field is an integer or an array of them,
+    // so any bytes are valid.
+    let info = unsafe { info.assume_init() };
+    Ok(Some(match info.pbi_status {
+        libc::SSTOP => Run::Stopped,
+        libc::SZOMB => Run::Ended,
+        _ => Run::Live,
+    }))
+}
+
 /// `PROC_PGRP_ONLY` (`sys/proc_info.h:52`): `proc_listpids` lists one process group.
 const PROC_PGRP_ONLY: u32 = 2;
 /// `PROC_UID_ONLY` (`sys/proc_info.h:54`): `proc_listpids` lists one user's processes. A box's user,
