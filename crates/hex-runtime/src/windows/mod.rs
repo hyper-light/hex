@@ -59,6 +59,9 @@ pub struct WinRuntime {
     /// How many times [`features::off`] ran, for the test that no create runs it.
     #[cfg(test)]
     feature_reads: std::sync::atomic::AtomicU32,
+    /// What reclaiming a killed node's scratch at start failed to do, each typed (its markers kept for
+    /// the next start).
+    reclaim_failures: Vec<Refusal>,
 }
 
 impl WinRuntime {
@@ -69,12 +72,13 @@ impl WinRuntime {
     }
 
     /// A runtime told the machine has `processors` logical processors (at least one), keeping `oci`
-    /// scratch under `scratch_root`. The installer's features are read here, before any box, so the
-    /// first `oci` create doesn't wait on PowerShell's query (p50 1,183 ms on jupiter,
-    /// bench/install/records/windows-jupiter-20261105.txt entry 19). A read that fails here isn't
-    /// lost: the first box that needs the features reads them again, and is refused by name if that
-    /// fails too.
+    /// scratch under `scratch_root`, first reclaiming what a killed node left there ([`oci::reclaim`]).
+    /// The installer's features are read here, before any box, so the first `oci` create doesn't wait
+    /// on PowerShell's query (p50 1,183 ms on jupiter, bench/install/records/windows-jupiter-20261105.txt
+    /// entry 19). A read that fails here isn't lost: the first box that needs the features reads them
+    /// again, and is refused by name if that fails too.
     pub fn with(processors: u32, scratch_root: PathBuf) -> Self {
+        let reclaim_failures = oci::reclaim(&scratch_root);
         let runtime = Self {
             processors: NonZeroU32::new(processors).unwrap_or(NonZeroU32::MIN),
             scratch_root,
@@ -83,6 +87,7 @@ impl WinRuntime {
             features_off: OnceLock::new(),
             #[cfg(test)]
             feature_reads: std::sync::atomic::AtomicU32::new(0),
+            reclaim_failures,
         };
         // Read now so no create waits on it; a failure is read again, and refused, at the first ask.
         let _ = runtime.features_off();
@@ -138,6 +143,11 @@ impl WinRuntime {
             return Err(self.refused(feature, "")?);
         }
         Ok(())
+    }
+
+    /// What this runtime's start-time reclaim of a killed node's scratch couldn't do.
+    pub fn reclaim_failures(&self) -> &[Refusal] {
+        &self.reclaim_failures
     }
 
     /// This runtime with `oci` boxes' launcher taken from `dir` (which holds `hex.exe`), not the node's
@@ -222,6 +232,7 @@ impl WinRuntime {
             self.processors,
             &container,
             &launcher,
+            Some(self.scratch_root.join(format!("{}.scratch.json", spec.id))),
         )
     }
 }
@@ -366,6 +377,8 @@ fn std_handles(stdio: Stdio) -> Result<[OwnedHandle; 3], Refusal> {
 /// three standard handles (each the NUL device where the caller gave none).
 fn build_spawn(program: &Program, stdio: Stdio) -> Result<Spawn, Refusal> {
     program.check()?;
+    // One Windows exec bound for both classes, so a program moves between them unchanged (HEX-RT-14).
+    program.fits(&hex_core::hcs::exec_limit())?;
     if program.user.is_some() {
         return Err(Refusal::Invalid {
             what: "program",

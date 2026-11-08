@@ -8,14 +8,21 @@
 # alone) and recorded beside, never subtracted silently; the background load is recorded per round.
 #
 #   powershell -NoProfile -File oci_compare.ps1 -HexBin <dir with hex.exe> -HexBench <windows_oci.exe>
-#       -Layers <layer;...> -Out <json> [-N 50] [-W 3]
+#       -Layers <layer;...> -Out <json> [-N 299] [-W 3]
 param(
     [Parameter(Mandatory = $true)][string]$HexBin,
     [Parameter(Mandatory = $true)][string]$HexBench,
     [Parameter(Mandatory = $true)][string]$Layers,
     [Parameter(Mandatory = $true)][string]$Out,
-    [int]$N = 50,
+    # N for a stated p99 confidence (Ada's rule on constants, 2026-11-06): the largest of N samples is at
+    # or above the true p99 unless all N fall below it, which happens with probability 0.99^N, so N >=
+    # ln(0.05)/ln(0.99) = 298.07 gives 95% confidence that the reported p99 is not under the true one.
+    [int]$N = 299,
     [int]$W = 3,
+    # Seconds this segment may run before it stops after the round under way (0: no budget). A kiln run
+    # ends what it leaves behind, so the record is made in segments within kiln's run cap, each resuming
+    # after the last round in <Out>.rounds.jsonl (the lead, 2026-11-07).
+    [int]$Budget = 0,
     [string]$Root = "$env:USERPROFILE\.cache\hex-native-s4",
     [string]$Image = "mcr.microsoft.com/windows/nanoserver:ltsc2025"
 )
@@ -69,13 +76,19 @@ $runs["hex"] = @{
     create = { param($i)
         & $HexBench $hexOut 1 1 $HexBin $Layers | Out-Null
         $j = Get-Content $hexOut -Raw | ConvertFrom-Json
-        $script:hexRound = @{ create = $j.create_ms.samples[0]; start = $j.start_ms.samples[0]; delete = $j.delete_ms.samples[0] } }
+        $script:hexRound = @{ create = $j.create_ms.samples[0]; start = $j.start_ms.samples[0]; delete = $j.delete_ms.samples[0]
+            copy = $j.blank_copy_ms.samples[0]; exec = $j.exec_ms.samples[0] } }
 }
+
+# A reading that fails is data, not the end of the segment (jupiter, 2026-11-07 15:39Z: WMI answered
+# Win32_Processor with "Server execution failed", 0x80080005, and the segment ended after one round).
+function Reading([scriptblock]$read) { try { & $read } catch { "failed: $_" } }
 
 function Load() {
     [ordered]@{
-        cpu_pct = (Get-CimInstance Win32_Processor | Measure-Object LoadPercentage -Average).Average
-        system_pct = [int]((Get-Counter '\Process(System)\% Processor Time' -SampleInterval 1 -MaxSamples 1).CounterSamples[0].CookedValue / [Environment]::ProcessorCount)
+        cpu_pct = Reading { (Get-CimInstance Win32_Processor | Measure-Object LoadPercentage -Average).Average }
+        system_pct = Reading { [int]((Get-Counter '\Process(System)\% Processor Time' -SampleInterval 1 -MaxSamples 1).CounterSamples[0].CookedValue / [Environment]::ProcessorCount) }
+        c_free_gb = Reading { [math]::Round((Get-PSDrive C).Free / 1GB, 1) }
     }
 }
 
@@ -88,32 +101,85 @@ $record = [ordered]@{
     warmup   = $W
     load     = @()
 }
+# Leftovers of an earlier run that ended mid-round (jupiter, 2026-11-06: a "hexcmp-40" from a run cut by a
+# wedged kernel collided with this run's round 40), removed by name from this script's own stores; the
+# daemons are oci_setup.ps1's private ones, so nothing else's containers are seen.
+foreach ($c in (& $docker -H $Dock ps -a -q --filter "name=hexcmp-")) { & $docker -H $Dock rm -f $c | Out-Null }
+foreach ($c in ((& $ctr -a $Ctrd containers ls -q) | Where-Object { $_ -like "hexcmp-*" })) {
+    & $ctr -a $Ctrd tasks kill -s SIGKILL $c 2>$null | Out-Null
+    & $ctr -a $Ctrd tasks delete -f $c 2>$null | Out-Null
+    & $ctr -a $Ctrd containers delete $c | Out-Null
+}
+
 $names = @("docker", "containerd", "hex")
-$t = @{}
-foreach ($name in $names) { $t[$name] = @{ create = @(); start = @(); delete = @(); cli = @() } }
-for ($i = 0; $i -lt $W + $N; $i++) {
-    if ($i -ge $W) { $record.load += (Load) }
+# A failed call is data, not the end of the run: it is recorded per runtime with its message, the round's
+# container removed, and the run goes on (jupiter, 2026-11-06: Docker's create failed at round ~96 with
+# "ExpandScratchSize ... semaphore timeout"). Each round is appended to <Out>.rounds.jsonl as it ends, with
+# everything the record needs, and a segment resumes after the file's last round.
+$roundsOut = "$Out.rounds.jsonl"
+$first = 0
+if (Test-Path $roundsOut) {
+    $last = Get-Content $roundsOut | Where-Object { $_ } | Select-Object -Last 1 | ConvertFrom-Json
+    if ($last) { $first = [int]$last.round + 1 }
+}
+$began = Get-Date
+$i = $first
+# Each round carries when it began and ended (UTC), so a window of the host's history can be taken out of
+# the record by time (the lead, 2026-11-08: rounds from 16:21Z to 00:06Z on 11-07/08 are retaken).
+try {
+for (; $i -lt $W + $N; $i++) {
+    if ($Budget -gt 0 -and ((Get-Date) - $began).TotalSeconds -gt $Budget) { break }
+    $round = [ordered]@{ round = $i; began = (Get-Date).ToUniversalTime().ToString('o'); load = (Load) }
     for ($k = 0; $k -lt $names.Count; $k++) {
         $name = $names[($i + $k) % $names.Count]
         $r = $runs[$name]
-        if ($name -eq "hex") {
-            & $r.create $i
-            if ($LASTEXITCODE -ne 0) { throw "Hex's bench failed ($LASTEXITCODE) at round $i" }
-            $c = $script:hexRound.create; $s = $script:hexRound.start; $d = $script:hexRound.delete; $q = 0
-        } else {
-            $c = Timed { & $r.create $i }
-            $s = Timed { & $r.start $i }
-            $d = Timed { & $r.delete $i }
-            $q = Timed { & $r.cli }
+        try {
+            if ($name -eq "hex") {
+                & $r.create $i
+                if ($LASTEXITCODE -ne 0) { throw "Hex's bench exited $LASTEXITCODE" }
+                $round[$name] = [ordered]@{ create = $script:hexRound.create; start = $script:hexRound.start
+                    delete = $script:hexRound.delete; copy = $script:hexRound.copy; exec = $script:hexRound.exec }
+            } else {
+                $c = Timed { & $r.create $i }
+                $s = Timed { & $r.start $i }
+                $d = Timed { & $r.delete $i }
+                $q = Timed { & $r.cli }
+                $round[$name] = [ordered]@{ create = $c; start = $s; delete = $d; cli = $q }
+            }
+        } catch {
+            $round[$name] = [ordered]@{ failed = "$_" }
+            # Its container, if one was made, goes before the next round reuses no name.
+            if ($name -eq "docker") { & $docker -H $Dock rm -f "hexcmp-$i" 2>$null | Out-Null }
+            if ($name -eq "containerd") {
+                & $ctr -a $Ctrd tasks kill -s SIGKILL "hexcmp-$i" 2>$null | Out-Null
+                & $ctr -a $Ctrd tasks delete -f "hexcmp-$i" 2>$null | Out-Null
+                & $ctr -a $Ctrd containers delete "hexcmp-$i" 2>$null | Out-Null
+            }
         }
-        if ($i -ge $W) { $t[$name].create += $c; $t[$name].start += $s; $t[$name].delete += $d; $t[$name].cli += $q }
     }
+    $round.ended = (Get-Date).ToUniversalTime().ToString('o')
+    $round | ConvertTo-Json -Depth 5 -Compress | Add-Content $roundsOut
 }
+} finally {
+    "segment rounds $first..$($i - 1) began $($began.ToUniversalTime().ToString('o')) ended $((Get-Date).ToUniversalTime().ToString('o'))" | Add-Content "$Out.segments"
+}
+if ($i -lt $W + $N) { "segment ended at its budget: $i of $($W + $N) rounds"; exit 3 }
+
+# The record, from every round in the file (all segments), the W untimed rounds left out.
+$all = Get-Content $roundsOut | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.round -ge $W }
+$record.load = @($all | ForEach-Object { $_.load })
+$record.segments = @(Get-Content "$Out.segments")
 foreach ($name in $names) {
+    $ok = @($all | ForEach-Object { $_.$name } | Where-Object { $_ -and -not $_.failed })
     $record[$name] = [ordered]@{
-        create_ms = Stats $t[$name].create; start_ms = Stats $t[$name].start; delete_ms = Stats $t[$name].delete
-        cli_alone_ms = Stats $t[$name].cli
+        create_ms = Stats ($ok | ForEach-Object { $_.create }); start_ms = Stats ($ok | ForEach-Object { $_.start })
+        delete_ms = Stats ($ok | ForEach-Object { $_.delete })
+        failures = @($all | Where-Object { $_.$name.failed } | ForEach-Object { [ordered]@{ round = $_.round; why = $_.$name.failed } })
     }
+    if ($name -ne "hex") { $record[$name].cli_alone_ms = Stats ($ok | ForEach-Object { $_.cli }) }
 }
+$hexOk = @($all | ForEach-Object { $_.hex } | Where-Object { $_ -and -not $_.failed })
+$record.hex.blank_copy_ms = Stats ($hexOk | ForEach-Object { $_.copy })
+$record.hex.exec_ms = Stats ($hexOk | ForEach-Object { $_.exec })
 $record | ConvertTo-Json -Depth 6 | Set-Content $Out
 Get-Content $Out

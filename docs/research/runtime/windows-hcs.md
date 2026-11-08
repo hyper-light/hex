@@ -311,7 +311,11 @@ snapshotter, Docker 29.9.3's static engine beside it. Records: `C:\Users\corph\.
   | disk `53F56307-…` | 1/1 | 1/0 | 1/1 |
   | network `CAC88484-…` | 6/6 | 6/0 | 6/0 |
 
-  Read access separates the same way except for keyboard and mouse (granted, 0 open for read). jupiter has none of
+  Read access separates the same way except for keyboard and mouse (granted, 0 open for read). The same
+  probe (USB device class, query open) under the competitors, nanoserver:ltsc2025, process isolation, after
+  jupiter's reboot (2026-11-06 19:08Z): Docker 29.9.3 ungranted 4/0, granted (`--device class/…`) 4/4;
+  containerd 2.4.2 through runhcs (`ctr run`) ungranted 4/0, granted (`--device class://…`) 4/4. So all
+  three runtimes list the host's interfaces and open only a grant's: reachability is what isolation gives. jupiter has none of
   the four classes Microsoft supports (GPIO, I2C, COM, SPI: 0 listed), and a display-class grant fails HCS's create
   with 0x80070003 for Hex and for Docker (`--device class/5B45201D-…`, nanoserver and servercore) alike.
 - **Probe 5.** HCS starts `ltsc2025` (26100) on 26200; `ltsc2019` (17763) is refused by the version table before HCS
