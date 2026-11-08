@@ -49,7 +49,10 @@ struct SimState {
     conns: BTreeMap<u64, (Arc<Sock>, Interest)>,
     /// Programs watched, by pid: their token, and whether they have ended.
     programs: BTreeMap<u32, (u64, bool)>,
+    /// Programs the OS's watch sent KILL ([`Os::kill`]).
     killed: BTreeSet<u32>,
+    /// Programs killed by their own runtime ([`Proc::kill`]).
+    proc_killed: BTreeSet<u32>,
     /// Every pid the core asked to watch as a host process.
     ever_watched: BTreeSet<u32>,
     unwatchable: bool,
@@ -98,6 +101,17 @@ impl SimOs {
         if let Some(p) = self.lock().programs.get_mut(&pid) {
             p.1 = true;
         }
+        self.poke();
+    }
+
+    /// The program `pid` is killed by its own runtime, as its `Proc::kill` does.
+    fn proc_kill(&self, pid: u32) {
+        let mut s = self.lock();
+        s.proc_killed.insert(pid);
+        if let Some(p) = s.programs.get_mut(&pid) {
+            p.1 = true;
+        }
+        drop(s);
         self.poke();
     }
 
@@ -309,7 +323,10 @@ impl Os for SimOs {
     fn unwatch_source(&self, _: super::Handle<'_>, _: u64) {}
 }
 
-/// A program that ends when the simulated OS says it has.
+/// A program that ends when the simulated OS says it has. Killed by its own runtime ([`Proc::kill`]), it ends
+/// `Signal(9)`; killed through the OS's watch, it ends as an OS's own kill can read, not as its runtime's
+/// (Windows' `TerminateProcess` with exit code 1 reads `Code(1)`), so a core that kills a program through its
+/// watch rather than its `Proc` is seen.
 struct SimProc {
     pid: u32,
     os: Arc<SimOs>,
@@ -320,9 +337,12 @@ impl Proc for SimProc {
         self.pid
     }
     fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
-        Ok(if self.os.lock().killed.contains(&self.pid) {
+        let s = self.os.lock();
+        Ok(if s.proc_killed.contains(&self.pid) {
             Some(Exit::Signal(9))
-        } else if self.os.ended(self.pid) {
+        } else if s.killed.contains(&self.pid) {
+            Some(Exit::Code(1))
+        } else if s.programs.get(&self.pid).is_none_or(|p| p.1) {
             Some(Exit::Code(0))
         } else {
             None
@@ -332,7 +352,7 @@ impl Proc for SimProc {
         self.try_wait()
     }
     fn kill(&mut self) -> Result<(), Refusal> {
-        self.os.kill(&self.pid);
+        self.os.proc_kill(self.pid);
         Ok(())
     }
     fn streams(&mut self) -> Result<hex_api::Given, Refusal> {
@@ -762,9 +782,11 @@ fn a_program_whose_client_goes_is_killed_and_counted_and_the_bound_holds() {
     });
 }
 
-/// HEX-SOCK-7 (the core), `Proc::kill` through the socket: a kill naming a program's exec is answered done,
-/// sends KILL through the OS's watch to that program alone, and its end, `Signal(9)`, comes as its exec's
-/// message, not counted as abandoned; a kill naming no running program of the connection is done too.
+/// HEX-SOCK-7 (the core), `Proc::kill` through the socket (HEX-RT-16): a kill naming a program's exec is
+/// answered done, kills that program alone by its own runtime's kill (its `Proc::kill`: Windows' ends it with
+/// KILL's job code, macOS's tells its box's watcher first), never the OS's watch, and its end, `Signal(9)`,
+/// comes as its exec's message, not counted as abandoned; a kill naming no running program of the connection is
+/// done too.
 #[test]
 fn a_kill_ends_its_program_alone_and_its_end_is_sent() {
     let lab = Lab::new();
@@ -785,8 +807,17 @@ fn a_kill_ends_its_program_alone_and_its_end_is_sent() {
         [(7, Answer::Exited(Exit::Signal(9))), (9, Answer::Done)]
     );
     assert_eq!(
-        lab.os.lock().killed.iter().copied().collect::<Vec<_>>(),
+        lab.os
+            .lock()
+            .proc_killed
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
         [pids[0]]
+    );
+    assert!(
+        lab.os.lock().killed.is_empty(),
+        "a program was killed through the OS's watch"
     );
     assert!(!lab.os.ended(pids[1]), "the other program was ended");
     lab.os.put(&sock, request(10, Call::Kill { exec: 7 }));
