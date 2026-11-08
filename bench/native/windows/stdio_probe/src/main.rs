@@ -21,6 +21,8 @@ use std::process::{Child, Command, Stdio};
 use std::ptr::{null, null_mut};
 use std::time::Instant;
 
+mod iocp;
+
 use shards_afunix::{UnixListener, UnixStream};
 use windows_sys::Win32::Foundation::{
     CloseHandle, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, DuplicateHandle, FILETIME, GENERIC_READ,
@@ -48,8 +50,9 @@ fn main() {
         Some("bench") => bench(arg(&args, 1, 300), arg(&args, 2, 4 << 20)),
         Some("caller") => caller(Path::new(&args[1]), arg(&args, 2, 300), arg(&args, 3, 4 << 20)),
         Some("refuse") => refuse(),
+        Some("iocp") => iocp::iocp(),
         Some("intrude") => intrude(&args[1], &args[2], &args[3]),
-        _ => eprintln!("usage: stdio_probe bench <rounds> <bytes> | refuse"),
+        _ => eprintln!("usage: stdio_probe bench <rounds> <bytes> | refuse | iocp"),
     }
 }
 
