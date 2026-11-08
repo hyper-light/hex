@@ -11,7 +11,8 @@
 //!   answer, a running maximum, so it only rises. A wait runs out only for an answer more than twice slower than any
 //!   recorded or seen.
 //! - **Measuring**: a wait whose distribution has no record yet says so ([`Patience::measuring`], with the record to
-//!   come named at the wait). Its bound is unarmed until this node's first answer: no value is picked for it.
+//!   come named at the wait). It is never armed: its answers are only recorded, for the census that seeds it, so no
+//!   value is picked for it and no first answer becomes its bound. A tree with a measuring wait doesn't land.
 //! - **Karn's point**: a wait that ran out is no sample, nor is an answer from a server taken for dead or hung; the
 //!   shell reports only answers it waited for and got.
 //! - **The census**: each wait is named, and every answer it records goes to the census sink as well, where a shell
@@ -57,8 +58,8 @@ impl Patience {
         }
     }
 
-    /// The wait `name`, with no record yet (MEASURING, the record to come named at the caller): unarmed until its
-    /// first answer.
+    /// The wait `name`, with no record yet (MEASURING, the record to come named at the caller): never armed, its
+    /// answers only recorded.
     pub const fn measuring(name: &'static str) -> Self {
         Self {
             name,
@@ -87,8 +88,11 @@ impl Patience {
         slowest.checked_sub(1).map(Duration::from_nanos)
     }
 
-    /// How long the next wait lasts: [`TIMES_SLOWEST`] times [`Patience::slowest`], `None` while unarmed.
+    /// How long the next wait lasts: [`TIMES_SLOWEST`] times [`Patience::slowest`], `None` for a measuring wait.
     pub fn deadline(&self) -> Option<Duration> {
+        if self.recorded == 0 {
+            return None;
+        }
         self.slowest()
             .map(|slowest| slowest.saturating_mul(TIMES_SLOWEST))
     }

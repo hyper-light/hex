@@ -1044,27 +1044,27 @@ fn a_growing_pool_adds_a_slot_for_each_create_that_finds_none_free_up_to_its_bou
     );
 }
 
-/// Decision 9 (Ada's 2026-11-06 rule, the lead's failure-bound rule; AC-T7.1.3): measuring, with no record, the
-/// line's wait and the hang bound are each twice the slowest answer the pool has seen, unarmed until the first. Do:
-/// on a pool of one seed whose waits measure, serve a create for 4 ms while another waits 3 ms in line; let the
-/// second's seed pass its bound; then let a create's wait in line end. Expect: the first waits unarmed, then the
-/// hang bound 8 ms and the line's wait 6 ms; the seed taken for hung at 8 ms and not before; the create refused after
-/// 6 ms; neither wait moved by the hang or the refusal, which are no samples.
+/// Decision 9 (Ada's 2026-11-06 rule, the lead's failure-bound rule; AC-T7.1.3): the line's wait and the hang bound
+/// are each twice the larger of the record's slowest answer and the slowest the pool has seen. Do: on a pool of one
+/// seed whose record's slowest is 2 ms, serve a create for 4 ms while another waits 3 ms in line; let the second's
+/// seed pass its bound; then let a create's wait in line end. Expect: the first waits within the record's 4 ms, then
+/// the hang bound 8 ms and the line's wait 6 ms; the seed taken for hung at 8 ms and not before; the create refused
+/// after 6 ms; neither wait moved by the hang or the refusal, which are no samples.
 #[test]
 fn the_wait_and_the_hang_bound_are_twice_the_slowest_answer() {
-    let mut pool = setup(1, 4, None, None).pool();
+    let mut pool = seeds(1, 4, 4, 4);
     let seed = up(&mut pool, ms(0));
-    assert_eq!(pool.deadlines(), (None, None));
+    assert_eq!(pool.deadlines(), (Some(ms(4)), Some(ms(4))));
     assert_eq!(pool.create(ms(0)), Ok(Admit::Seed(seed)));
     assert_eq!(
         pool.until(seed),
-        Ok(None),
-        "measuring, the first clone's wait is unarmed"
+        Ok(Some(ms(4))),
+        "the first clone's wait is the record's"
     );
     let Ok(Admit::Wait { ticket, until }) = pool.create(ms(1)) else {
         panic!("a create with its only seed busy didn't wait");
     };
-    assert_eq!(until, None);
+    assert_eq!(until, Some(ms(5)));
     assert_eq!(pool.done(seed, ms(4)), Ok(Some(ticket)));
     assert_eq!(pool.deadlines(), (Some(ms(6)), Some(ms(8))));
     assert_eq!(pool.claim(ticket, ms(4)), Ok(Claim::Seed(seed)));
