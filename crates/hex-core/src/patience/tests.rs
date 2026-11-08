@@ -124,3 +124,17 @@ fn every_answer_reaches_the_census_by_its_waits_name() {
         .collect();
     assert_eq!(told, [ms(7), ms(9)]);
 }
+
+/// Seeds by build profile (the lead, 2026-11-08: a debug build reads the debug record; production builds carry only
+/// release seeds). Do: in this build, a debug one, make a wait whose release record is 5 ms and whose debug record
+/// is 3 ms, and one with no debug record. Expect: the first armed at twice the debug record, 6 ms; the second
+/// measuring, never armed.
+#[test]
+fn a_debug_build_reads_the_debug_record() {
+    assert!(cfg!(debug_assertions), "this test is of a debug build");
+    let p = Patience::by_profile("test", ms(5), Some(ms(3)));
+    assert_eq!(p.deadline(), Some(ms(6)));
+    let q = Patience::by_profile("test", ms(5), None);
+    q.answered(ms(1));
+    assert_eq!(q.deadline(), None);
+}
