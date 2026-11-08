@@ -873,6 +873,10 @@ is clean up by construction, but recovery as on Linux takes a live box back, so 
   start time.
 - The record's phases stay Linux's (`creating`/`ready`/`deleting`, written before the machine changes), so
   a node killed mid-create or mid-delete leaves a box recovery finishes or removes.
+- Linux images in the WHP guest: the guest outlives its node, as on macOS, and is taken back the same way:
+  the restarted node re-attaches to the running guest, then the guest's own node recovers its boxes from
+  its own records (T-T7.1.2 inside the guest). The macOS decision on `cp/t7-native-s8` (step 8's core) sets
+  how; the Windows guest follows it, so a guest box is no longer removed because its guest went with the node.
 - The node's own job (the boxes' parent) is kill-on-close today too, so a box nested under it would end with
   it. *To measure*: whether a box's job can stay nested under a node job that ends, or whether boxes nest
   under a job the installer's service holds; the test is the node killed with `TerminateProcess` and its boxes
