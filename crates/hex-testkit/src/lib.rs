@@ -4,6 +4,9 @@
 //! which libtest's capture can't reach. scripts/gates.sh points `HEX_SKIPS` at [`RECORD`] under the
 //! target directory, empties it before `cargo test` and prints it after, pass or fail, so a CI log
 //! names every skipped test, what it lacked and why (HEX-GATE-1, docs/design/README.md).
+//!
+//! A test's wait for a fact takes its own fact's record ([`waits`]): twice the slowest answer the waits census
+//! recorded for it, or measuring where no row records it yet, its answers then recorded for the census.
 
 #![cfg_attr(
     test,
@@ -16,6 +19,8 @@
         clippy::disallowed_macros
     )
 )]
+
+pub mod waits;
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};

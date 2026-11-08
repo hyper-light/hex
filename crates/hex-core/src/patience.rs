@@ -50,6 +50,18 @@ pub fn census(sink: fn(&'static str, Duration)) -> bool {
     CENSUS.set(sink).is_ok()
 }
 
+/// One answer as the census's file keeps it, `name nanos` and a newline, the line every census sink writes (the
+/// node's, `hex_node::census`, and the tests', `hex_testkit::waits`), so `waits_census.py` reads one form.
+pub fn census_line(name: &str, took: Duration) -> String {
+    format!("{name} {}\n", took.as_nanos())
+}
+
+/// The line a census sink writes once it has written its `max` lines, then nothing more: the record says it was
+/// cut (CLAUDE.md §3), and `waits_census.py` says so for the arm.
+pub fn census_full_line(max: u64) -> String {
+    format!("census full at {max} lines\n")
+}
+
 /// A wait's bound, seeded from a record and learned from its answers ([module docs](self)).
 #[derive(Debug)]
 pub struct Patience {

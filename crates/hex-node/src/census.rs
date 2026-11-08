@@ -63,9 +63,9 @@ fn record(name: &'static str, took: Duration) {
     let n = LINES.fetch_add(1, Ordering::Relaxed);
     let max = MAX.load(Ordering::Relaxed);
     let line = if n < max {
-        format!("{name} {}\n", took.as_nanos())
+        hex_core::patience::census_line(name, took)
     } else if n == max {
-        format!("census full at {max} lines\n")
+        hex_core::patience::census_full_line(max)
     } else {
         return;
     };
