@@ -254,11 +254,17 @@ impl WinRuntime {
         // The old keeper is gone (that is why it is replaced); its stop event is shared by the state folder,
         // so signalling it would stop the new keeper too. Just replace it.
         *held = keeping.spawn()?;
-        // Re-duplicate every live box's job into the new keeper.
+        // Re-duplicate every live box's job into the new keeper, recorded against it.
         for (id, h) in self.boxes()?.iter() {
             let value = held.hold(h.job_token())?;
-            keeper::write_held(&keeping.state, id.as_str(), value)
-                .map_err(|e| Refusal::os("recording a box's keeper handle", e))?;
+            keeper::write_held(
+                &keeping.state,
+                id.as_str(),
+                held.pid(),
+                held.created(),
+                value,
+            )
+            .map_err(|e| Refusal::os("recording a box's keeper handle", e))?;
         }
         Ok(())
     }
@@ -305,19 +311,30 @@ impl WinRuntime {
                 Held::Oci(Arc::new(self.take_back_oci(spec, &name)?))
             }
         };
-        // The keeper already holds this box's job from the node that made it (the handle value is recorded
-        // under the state folder), so taking it back keeps that handle; where none is recorded (a box this
-        // runtime never kept), the current keeper holds it so a delete can close it.
-        if let Some(keeping) = self.keeping()?
-            && keeper::read_held(&keeping.state, spec.id.as_str()).is_none()
-        {
-            let value = keeping
+        // The current keeper must hold this box's job. Where a handle is recorded against this very keeper,
+        // it still holds it (the node that made the box and this one share the keeper), so nothing is done.
+        // Where none is recorded, or one is recorded against a keeper that isn't this one — a box taken back
+        // after node and keeper both went, its job outliving them (an `oci` box's; a `process` box's ends
+        // with them), so a fresh keeper holds nothing of it — the current keeper takes the job, recorded
+        // against it, so a later delete closes it in the keeper that has it.
+        if let Some(keeping) = self.keeping()? {
+            let keeper = keeping
                 .keeper
                 .lock()
-                .map_err(|_| Refusal::Broken("the node's keeper lock is poisoned".to_owned()))?
-                .hold(b.job_token())?;
-            keeper::write_held(&keeping.state, spec.id.as_str(), value)
+                .map_err(|_| Refusal::Broken("the node's keeper lock is poisoned".to_owned()))?;
+            let current = keeper::read_held(&keeping.state, spec.id.as_str())
+                .is_some_and(|h| h.held_by(keeper.pid(), keeper.created()));
+            if !current {
+                let value = keeper.hold(b.job_token())?;
+                keeper::write_held(
+                    &keeping.state,
+                    spec.id.as_str(),
+                    keeper.pid(),
+                    keeper.created(),
+                    value,
+                )
                 .map_err(|e| Refusal::os("recording a box's keeper handle", e))?;
+            }
         }
         let mut boxes = self.boxes()?;
         if boxes.contains_key(&spec.id) {
@@ -331,13 +348,17 @@ impl WinRuntime {
     /// after this the box's last handle is the node's, so kill-on-close ends it with the node.
     fn drop_from_keeper(&self, id: &BoxId) -> Result<(), Refusal> {
         if let Some(keeping) = self.keeping()?
-            && let Some(value) = keeper::read_held(&keeping.state, id.as_str())
+            && let Some(held) = keeper::read_held(&keeping.state, id.as_str())
         {
-            keeping
+            let keeper = keeping
                 .keeper
                 .lock()
-                .map_err(|_| Refusal::Broken("the node's keeper lock is poisoned".to_owned()))?
-                .drop_held(value)?;
+                .map_err(|_| Refusal::Broken("the node's keeper lock is poisoned".to_owned()))?;
+            // Close the handle only in the keeper the record names; a value recorded against a keeper that
+            // is gone names a handle no live keeper has, so there is nothing to close — just forget it.
+            if held.held_by(keeper.pid(), keeper.created()) {
+                keeper.drop_held(held.value)?;
+            }
             keeper::forget_held(&keeping.state, id.as_str());
         }
         Ok(())
@@ -574,13 +595,19 @@ impl Runtime for WinRuntime {
         // keeper found dead is replaced, which reads the box map ([`WinRuntime::ensure_keeper`]), so doing
         // this under the box lock would deadlock the runtime against itself (std's `Mutex` isn't reentrant).
         if let Some(keeping) = self.keeping()? {
-            let value = keeping
+            let keeper = keeping
                 .keeper
                 .lock()
-                .map_err(|_| Refusal::Broken("the node's keeper lock is poisoned".to_owned()))?
-                .hold(held.job_token())?;
-            keeper::write_held(&keeping.state, spec.id.as_str(), value)
-                .map_err(|e| Refusal::os("recording a box's keeper handle", e))?;
+                .map_err(|_| Refusal::Broken("the node's keeper lock is poisoned".to_owned()))?;
+            let value = keeper.hold(held.job_token())?;
+            keeper::write_held(
+                &keeping.state,
+                spec.id.as_str(),
+                keeper.pid(),
+                keeper.created(),
+                value,
+            )
+            .map_err(|e| Refusal::os("recording a box's keeper handle", e))?;
         }
         // Insert under the box lock alone. A create that lost a race to the same id undoes its keeper hold
         // and its box once the lock is released, so neither is done under it.
@@ -1019,9 +1046,14 @@ mod tests {
         drop(rt);
         crash(first);
         wait_for("the first keeper to end", || !alive(first));
-        assert!(alive(pid), "the box's program ended though its job was still held");
+        assert!(
+            alive(pid),
+            "the box's program ended though its job was still held"
+        );
         let rt = WinRuntime::outliving(&name, state.path(), &keeper("regone")).unwrap();
-        let second = rt.keeper_pid().expect("a new keeper holds the node's boxes");
+        let second = rt
+            .keeper_pid()
+            .expect("a new keeper holds the node's boxes");
         assert_ne!(second, first, "the new node adopted the gone keeper");
         rt.adopt(&spec).unwrap();
         assert_eq!(rt.inspect(&spec.id).unwrap().state, BoxState::Running);
