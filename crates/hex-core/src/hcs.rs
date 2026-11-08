@@ -113,6 +113,10 @@ pub enum HcsError {
     Timeout,
     /// The compute service isn't there (`HCS_E_SERVICE_NOT_AVAILABLE`).
     ServiceUnavailable,
+    /// The layer's filter won't be detached (`ERROR_FLT_DO_NOT_DETACH`): what `UnprepareLayer` answers
+    /// once a container has run on the layer, whose end took the filter with it (jupiter, 2026-11-06;
+    /// `DeactivateLayer` then succeeds and the volume is gone, note §3).
+    FilterHeld,
     /// Any other failure, its code kept for the refusal.
     Other,
 }
@@ -126,6 +130,7 @@ pub fn hcs_error(code: u32) -> HcsError {
         0x0037_010E => HcsError::NotFound,
         0x0037_0118 => HcsError::Timeout,
         0x0037_0114 => HcsError::ServiceUnavailable,
+        0x001F_0010 => HcsError::FilterHeld,
         _ => HcsError::Other,
     }
 }
@@ -388,7 +393,7 @@ pub fn from_spec(spec: &OciSpec, scratch: &str) -> Result<Container, Refusal> {
     if spec.network == Network::Host {
         return Err(unsupported(
             "network",
-            "a process-isolated container has a network compartment of its own, not the host's",
+            "Hex asks HCS for no network for a Windows container (it holds no HNS endpoints), so it can't give one the host's",
         ));
     }
     let mounts = spec
@@ -855,13 +860,27 @@ pub struct Storage {
     pub layers: Vec<(String, String)>,
 }
 
-/// The id HCS knows a read-only layer by: a GUID derived from its folder's path, the same for the same
-/// folder in every box and different for different folders. hcsshim derives it from the folder's name
-/// with HCS's undocumented `NameToGuid`, and its CIM path uses any unique GUID (note §3); that a unique,
-/// stable one is enough is jupiter's to confirm (note §9, probe 1). The path is compared case-insensitively,
+/// The id HCS knows a read-only layer by, in the container's document and in `PrepareLayer`'s
+/// descriptors: a GUID derived from its folder's path, the same for the same folder in every box and
+/// different for different folders. hcsshim derives it from the folder's name with vmcompute's
+/// `NameToGuid`, and its CIM path uses any unique GUID (note §3); a container started on jupiter with this
+/// one (note §9, probe 1), so Hex needs no `NameToGuid`. The path is compared case-insensitively,
 /// as Windows compares it; the hash is FNV-1a over 128 bits (a fixed, documented function, so the id is
 /// stable across Rust releases, unlike std's hasher), shaped as an RFC 9562 version 8 GUID.
 pub fn layer_id(folder: &str) -> String {
+    let hex = format!("{:032x}", layer_guid(folder));
+    format!(
+        "{}-{}-{}-{}-{}",
+        hex.get(0..8).unwrap_or_default(),
+        hex.get(8..12).unwrap_or_default(),
+        hex.get(12..16).unwrap_or_default(),
+        hex.get(16..20).unwrap_or_default(),
+        hex.get(20..32).unwrap_or_default()
+    )
+}
+
+/// [`layer_id`]'s GUID as the 128-bit value a `GUID` is made from (`GUID::from_u128`).
+pub fn layer_guid(folder: &str) -> u128 {
     const OFFSET: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
     const PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
     let mut h = OFFSET;
@@ -873,24 +892,14 @@ pub fn layer_id(folder: &str) -> String {
     const VERSION_8: u128 = 0x0000_0000_0000_8000_0000_0000_0000_0000;
     const VARIANT_BITS: u128 = 0x0000_0000_0000_0000_c000_0000_0000_0000;
     const VARIANT_10: u128 = 0x0000_0000_0000_0000_8000_0000_0000_0000;
-    let h = (h & !VERSION_BITS & !VARIANT_BITS) | VERSION_8 | VARIANT_10;
-    let hex = format!("{h:032x}");
-    format!(
-        "{}-{}-{}-{}-{}",
-        hex.get(0..8).unwrap_or_default(),
-        hex.get(8..12).unwrap_or_default(),
-        hex.get(12..16).unwrap_or_default(),
-        hex.get(16..20).unwrap_or_default(),
-        hex.get(20..32).unwrap_or_default()
-    )
+    (h & !VERSION_BITS & !VARIANT_BITS) | VERSION_8 | VARIANT_10
 }
 
-/// The `LayerData` the storage calls take (`SchemaReference.md:2252-2259`, note §3).
-pub fn layer_data(layers: &[(String, String)]) -> Value {
-    json!({
-        "SchemaVersion": {"Major": 2, "Minor": 1},
-        "Layers": layers.iter().map(|(id, path)| json!({"Id": id, "Path": path})).collect::<Vec<_>>(),
-    })
+/// A volume's root, `\\?\Volume{GUID}\`, with its trailing backslash whether `volume` had one or not:
+/// `HcsGetLayerVhdMountPath` gives the volume without it (jupiter, 2026-11-06), runhcs passes HCS the root
+/// with it, and a path joined under the root needs it.
+pub fn volume_root(volume: &str) -> String {
+    format!("{}\\", volume.trim_end_matches('\\'))
 }
 
 /// The HCS v2 document for `container` on `storage`, Hex's launcher folder `launcher` mapped read-only at
@@ -901,10 +910,12 @@ pub fn document(container: &Container, storage: &Storage, launcher: &str) -> Val
         .iter()
         .map(|m| json!({"HostPath": m.host, "ContainerPath": m.container, "ReadOnly": m.read_only}))
         .collect();
+    // A host path HCS maps is a Windows path: `/` (a Git Bash or Cargo path's) is `\`.
+    let launcher = launcher.replace('/', "\\");
     mapped.push(json!({"HostPath": launcher, "ContainerPath": LAUNCHER_DIR, "ReadOnly": true}));
     let mut c = json!({
         "Storage": {
-            "Path": storage.volume,
+            "Path": volume_root(&storage.volume),
             "Layers": storage.layers.iter().map(|(id, path)| json!({"Id": id, "Path": path})).collect::<Vec<_>>(),
         },
         "MappedDirectories": mapped,
@@ -1142,6 +1153,9 @@ mod tests {
         assert_eq!(hcs_error(0xC037_010E), HcsError::NotFound);
         assert_eq!(hcs_error(0x8037_0118), HcsError::Timeout);
         assert_eq!(hcs_error(0x8007_0005), HcsError::Other);
+        // UnprepareLayer after the container ran (jupiter, 2026-11-06): ERROR_FLT_DO_NOT_DETACH alone.
+        assert_eq!(hcs_error(0x801F_0010), HcsError::FilterHeld);
+        assert_eq!(hcs_error(0x801F_0015), HcsError::Other);
         let host = client(26_200);
         assert!(matches!(
             refusal("creating a container", 0xC037_0101, host, None),
@@ -1381,6 +1395,34 @@ mod tests {
         }
     }
 
+    /// HEX-HCS-6 (note §2, jupiter 2026-11-06): do: render a document on the volume path
+    /// `HcsGetLayerVhdMountPath` gave (no trailing backslash) with a launcher folder holding `/` (as a
+    /// Git Bash CARGO_TARGET_DIR leaves it). Expect: `Storage.Path` is the volume's root, with its trailing
+    /// backslash as runhcs passes it, and the launcher's host path uses `\` only; a root given with its
+    /// backslash keeps exactly one.
+    #[test]
+    fn the_document_names_the_volume_root_and_a_windows_launcher_path() {
+        let c = from_bundle(&bundle()).unwrap();
+        let s = Storage {
+            volume: r"\\?\Volume{7b88d036-aeb7-4880-9530-fdfaff8337a0}".to_owned(),
+            layers: vec![("L1".to_owned(), r"D:\layers\app".to_owned())],
+        };
+        let d = document(&c, &s, r"C:\Users\corph/.cache/hex-native-s4/target\debug");
+        let k = &d["Container"];
+        assert_eq!(
+            k["Storage"]["Path"],
+            r"\\?\Volume{7b88d036-aeb7-4880-9530-fdfaff8337a0}\"
+        );
+        assert_eq!(
+            k["MappedDirectories"][2]["HostPath"],
+            r"C:\Users\corph\.cache\hex-native-s4\target\debug"
+        );
+        assert_eq!(
+            volume_root(r"\\?\Volume{7b88d036-aeb7-4880-9530-fdfaff8337a0}\"),
+            r"\\?\Volume{7b88d036-aeb7-4880-9530-fdfaff8337a0}\"
+        );
+    }
+
     /// HEX-HCS-6 (note §2): the document is HCS v2's for a process-isolated container: schema 2.1, Hex's
     /// owner, terminated with its last handle, the scratch volume and layers, mounts read-only where asked
     /// and the launcher's folder read-only, devices by class, and the container's memory and CPU.
@@ -1435,6 +1477,10 @@ mod tests {
         assert!(class_guid("id", &a).is_ok(), "{a}");
         assert_eq!(a.get(14..15), Some("8"), "{a}");
         assert!(matches!(a.get(19..20), Some("8" | "9" | "a" | "b")), "{a}");
+        assert_eq!(
+            a.replace('-', ""),
+            format!("{:032x}", layer_guid(r"D:\layers\base"))
+        );
     }
 
     /// HEX-HCS-7: the launcher's wire round-trips, and the launcher starts from Hex's folder with a stdin

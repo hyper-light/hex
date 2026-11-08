@@ -3,9 +3,8 @@
 //! `PROC_THREAD_ATTRIBUTE_JOB_LIST`/`_HANDLE_LIST` process-creation support is unstable. Each `unsafe`
 //! block states the invariant that makes it sound. A box is a job object: this file creates one, sets
 //! its limits, starts a member suspended inside it (`PROC_THREAD_ATTRIBUTE_JOB_LIST`, so nothing runs
-//! outside it) and resumes it, reads the job's accounting and its guaranteed memory-limit violation,
-//! and ends the job. Names, structures and flags are Windows' own (`windows-sys`;
-//! docs/research/runtime/windows-job-objects.md).
+//! outside it) and resumes it, reads the job's accounting, and ends the job. Names, structures and
+//! flags are Windows' own (`windows-sys`; docs/research/runtime/windows-job-objects.md).
 
 // The Windows class's one place `unsafe` is allowed (CLAUDE.md §12); every block below carries its
 // SAFETY comment.
@@ -25,11 +24,9 @@ use windows_sys::Win32::System::JobObjects::{
     JOB_OBJECT_CPU_RATE_CONTROL_WEIGHT_BASED, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
     JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION, JOBOBJECT_CPU_RATE_CONTROL_INFORMATION,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOBOBJECT_LIMIT_VIOLATION_INFORMATION,
-    JOBOBJECT_NOTIFICATION_LIMIT_INFORMATION, JobObjectBasicAndIoAccountingInformation,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAndIoAccountingInformation,
     JobObjectBasicProcessIdList, JobObjectCpuRateControlInformation,
-    JobObjectExtendedLimitInformation, JobObjectLimitViolationInformation,
-    JobObjectNotificationLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
     TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
@@ -192,10 +189,6 @@ pub struct Limits {
     pub memory: Option<u64>,
     pub processes: Option<u32>,
     pub cpu: Option<Cpu>,
-    /// The memory the job notifies at: a guaranteed `NotificationLimit` below the hard `memory` cap, so
-    /// the box learns it reached its bound through the class Windows guarantees, never a lossy message
-    /// (CLAUDE.md §3). `None` when the box has no memory bound.
-    pub memory_notify: Option<u64>,
 }
 
 /// A box's job: created, limited, its member started inside it, its accounting read, and ended. The
@@ -225,8 +218,8 @@ impl Job {
     }
 
     /// Sets the job's limits: a hard commit cap, an active-process cap, kill-on-close (so closing the
-    /// last handle ends the tree), the CPU weight or hard cap, and the guaranteed memory notification
-    /// threshold. Breakaway is never allowed (neither `BREAKAWAY_OK` nor `SILENT_BREAKAWAY_OK` is set),
+    /// last handle ends the tree), and the CPU weight or hard cap. Breakaway is never allowed (neither
+    /// `BREAKAWAY_OK` nor `SILENT_BREAKAWAY_OK` is set),
     /// so no member can leave the job.
     pub fn configure(&self, limits: &Limits) -> io::Result<()> {
         let mut ext: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed_struct();
@@ -256,12 +249,6 @@ impl Job {
                 }
             }
             self.set(JobObjectCpuRateControlInformation, &rate)?;
-        }
-        if let Some(notify) = limits.memory_notify {
-            let mut n: JOBOBJECT_NOTIFICATION_LIMIT_INFORMATION = zeroed_struct();
-            n.LimitFlags = JOB_OBJECT_LIMIT_JOB_MEMORY;
-            n.JobMemoryLimit = notify;
-            self.set(JobObjectNotificationLimitInformation, &n)?;
         }
         Ok(())
     }
@@ -317,53 +304,48 @@ impl Job {
         })
     }
 
-    /// How many processes are live in the job right now (`JobObjectBasicProcessIdList`'s
-    /// `NumberOfProcessIdsInList`). This counts running processes, not the job's accounting
-    /// `ActiveProcesses`, which lingers while a terminated member's handle is still held — so a box
-    /// whose member has exited reads as empty here even while the node still holds its process handle.
-    /// A box with more live processes than [`LIVE_CAP`] reads as that many (a bounded read, CLAUDE.md
-    /// §2); such a box is already running, which is all the caller needs.
+    /// How many processes are live in the job right now: `JobObjectBasicProcessIdList`'s
+    /// `NumberOfAssignedProcesses`, which Windows fills in even when the buffer holds fewer ids
+    /// (`ERROR_MORE_DATA`; jobobject_basic_process_id_list.md: "The number of process identifiers to be
+    /// stored in ProcessIdList"), so one read with room for one id learns the job's whole count at any
+    /// size (CLAUDE.md §2: bounded by the job's own count, not a picked one). An ended member leaves the
+    /// list though the node still holds its process handle, and this count agrees with the ids listed
+    /// (`an_ended_member_whose_handle_is_held_leaves_the_id_list`, run on jupiter), so a box whose member
+    /// has exited reads as empty. The job's accounting `ActiveProcesses` is not used.
     pub fn live_processes(&self) -> io::Result<u64> {
-        /// The pid list, header plus a bounded array of process ids.
-        #[repr(C)]
-        struct List {
-            assigned: u32,
-            listed: u32,
-            ids: [usize; LIVE_CAP],
-        }
-        let mut list = List {
-            assigned: 0,
-            listed: 0,
-            ids: [0; LIVE_CAP],
-        };
-        let len = u32::try_from(size_of::<List>()).unwrap_or(u32::MAX);
-        // SAFETY: QueryInformationJobObject writes at most `len` bytes (one List) into `list`, alive for
-        // the call, for the job self owns; the class names the structure.
+        let header = size_of::<u32>().saturating_mul(2);
+        self.assigned_processes(header.saturating_add(size_of::<usize>()))
+            .map(u64::from)
+    }
+
+    /// One read of the job's process id list into a buffer of `len` bytes, for its
+    /// `NumberOfAssignedProcesses`. `ERROR_MORE_DATA` (the ids don't all fit) still fills it in.
+    fn assigned_processes(&self, len: usize) -> io::Result<u32> {
+        #[cfg(test)]
+        tests::ID_LIST_READS.with(|n| n.set(n.get() + 1));
+        // usize-aligned, as the list's ids are; the count is its first 4 bytes.
+        let mut buf = vec![0usize; len.div_ceil(size_of::<usize>())];
+        let bytes = u32::try_from(buf.len().saturating_mul(size_of::<usize>()))
+            .map_err(|_| io::Error::other("a job's process id list past 4 GiB"))?;
+        // SAFETY: QueryInformationJobObject writes at most `bytes` bytes into `buf`, alive and that long
+        // for the call, for the job self owns; the class names the structure, whose header is two u32s.
         let ok = unsafe {
             QueryInformationJobObject(
                 self.0.raw(),
                 JobObjectBasicProcessIdList,
-                (&mut list as *mut List).cast(),
-                len,
+                buf.as_mut_ptr().cast(),
+                bytes,
                 null_mut(),
             )
         };
         if ok == 0 {
-            // More live processes than the buffer holds: the box is running, with at least LIVE_CAP.
-            if last_error().raw_os_error() == i32::try_from(ERROR_MORE_DATA).ok() {
-                return Ok(u64::try_from(LIVE_CAP).unwrap_or(u64::MAX));
+            let err = last_error();
+            if err.raw_os_error() != i32::try_from(ERROR_MORE_DATA).ok() {
+                return Err(err);
             }
-            return Err(last_error());
         }
-        Ok(u64::from(list.listed))
-    }
-
-    /// Whether the job's memory notification limit has been violated since this was last read: the
-    /// guaranteed accounting of the guaranteed notification class. Reading it re-arms the notification.
-    pub fn memory_violated(&self) -> io::Result<bool> {
-        let v: JOBOBJECT_LIMIT_VIOLATION_INFORMATION =
-            self.query(JobObjectLimitViolationInformation)?;
-        Ok(v.ViolationLimitFlags & JOB_OBJECT_LIMIT_JOB_MEMORY != 0)
+        let head: Vec<u8> = buf.iter().flat_map(|w| w.to_ne_bytes()).take(4).collect();
+        Ok(<[u8; 4]>::try_from(head.as_slice()).map_or(0, u32::from_ne_bytes))
     }
 
     /// Ends every process in the job with `code`, at once. Idempotent: an already-empty job is fine.
@@ -375,10 +357,6 @@ impl Job {
         Ok(())
     }
 }
-
-/// The most live process ids [`Job::live_processes`] reads at once; past it a box reads as running with
-/// this many (a box of this many processes is far past any Hex sets, bounded for the read, CLAUDE.md §2).
-const LIVE_CAP: usize = 1024;
 
 /// A job's resource accounting, read whole.
 #[derive(Debug, Clone, Copy, Default)]
@@ -555,4 +533,266 @@ fn zeroed_struct<T>() -> T {
     // SAFETY: T is a `#[repr(C)]` Windows structure of integers, pointers and unions of them; all-zero
     // is a valid bit pattern (null pointers, zero counts, empty flags). Only such types are passed here.
     unsafe { zeroed() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use windows_sys::Win32::System::JobObjects::{
+        JOBOBJECT_NOTIFICATION_LIMIT_INFORMATION, JobObjectNotificationLimitInformation,
+    };
+
+    thread_local! {
+        /// The job id-list reads [`Job::live_processes`] made on this thread.
+        pub(super) static ID_LIST_READS: Cell<u32> = const { Cell::new(0) };
+    }
+
+    fn nul() -> OwnedHandle {
+        OwnedHandle::from(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("NUL")
+                .unwrap(),
+        )
+    }
+
+    /// The job's id list read whole, with room for `room` ids: its `NumberOfAssignedProcesses`,
+    /// `NumberOfProcessIdsInList` and the ids listed.
+    fn id_list(job: &Job, room: usize) -> (u32, u32, Vec<usize>) {
+        let mut buf = vec![0usize; room + 1];
+        let bytes = u32::try_from(buf.len() * size_of::<usize>()).unwrap();
+        // SAFETY: QueryInformationJobObject writes at most `bytes` bytes into `buf`, alive and that long
+        // for the call; the header is two u32s in the first usize (x86_64), then the ids.
+        let ok = unsafe {
+            QueryInformationJobObject(
+                job.raw(),
+                JobObjectBasicProcessIdList,
+                buf.as_mut_ptr().cast(),
+                bytes,
+                null_mut(),
+            )
+        };
+        assert_ne!(ok, 0, "{}", last_error());
+        let head = buf[0].to_ne_bytes();
+        let assigned = u32::from_ne_bytes(head[..4].try_into().unwrap());
+        let listed = u32::from_ne_bytes(head[4..8].try_into().unwrap());
+        (assigned, listed, buf[1..=listed as usize].to_vec())
+    }
+
+    /// HEX-WIN-1 (native plan step 3): a member that has ended leaves the job's id list, which
+    /// `live_processes` counts, though the node still holds its process handle. Do: run `cmd /c exit 0`
+    /// in a job, wait for its end, keep its handle, read the list with room for every id. Expect: the
+    /// member's id isn't listed, and the list's two counts agree in one read (so
+    /// `NumberOfAssignedProcesses`, the count `live_processes` returns, keeps no ended member either).
+    /// Another id may be listed: the console host Windows starts for a console program with no console,
+    /// which ends after its client.
+    #[test]
+    fn an_ended_member_whose_handle_is_held_leaves_the_id_list() {
+        let job = Job::create().unwrap();
+        let system = std::env::var("SystemRoot").unwrap();
+        let mut spawn = Spawn {
+            command_line: format!("{system}\\System32\\cmd.exe /c exit 0")
+                .encode_utf16()
+                .chain([0])
+                .collect(),
+            environment: hex_core::job::environment(&[("SystemRoot".to_owned(), system)]),
+            cwd: None,
+            stdio: [nul(), nul(), nul()],
+        };
+        let started = create(&mut spawn, &[job.raw()]).unwrap();
+        resume(&started.thread).unwrap();
+        assert!(wait(&started.process, u32::MAX).unwrap());
+        let (assigned, listed, ids) = id_list(&job, 64);
+        assert!(
+            !ids.contains(&(started.pid as usize)),
+            "ended member {} still listed: {ids:?}",
+            started.pid
+        );
+        assert_eq!(assigned, listed);
+        drop(started);
+    }
+
+    /// HEX-WIN-1 (native plan step 3): a box's live count is one read of its job, however many members
+    /// it holds. Do: start two members that wait on stdin in a job, count the job's id-list reads one
+    /// `live_processes` makes. Expect: one read, and a count of at least the two members (each console
+    /// member may bring its console host).
+    #[test]
+    fn a_live_count_of_many_members_is_one_read() {
+        let job = Job::create().unwrap();
+        let system = std::env::var("SystemRoot").unwrap();
+        let mut writers = Vec::new();
+        let mut members = Vec::new();
+        for _ in 0..2 {
+            let (reader, writer) = std::io::pipe().unwrap();
+            writers.push(writer);
+            let mut spawn = Spawn {
+                command_line: format!("{system}\\System32\\cmd.exe /c set /p x=")
+                    .encode_utf16()
+                    .chain([0])
+                    .collect(),
+                environment: hex_core::job::environment(&[(
+                    "SystemRoot".to_owned(),
+                    system.clone(),
+                )]),
+                cwd: None,
+                stdio: [OwnedHandle::from(reader), nul(), nul()],
+            };
+            let started = create(&mut spawn, &[job.raw()]).unwrap();
+            resume(&started.thread).unwrap();
+            members.push(started);
+        }
+        ID_LIST_READS.with(|n| n.set(0));
+        let live = job.live_processes().unwrap();
+        let reads = ID_LIST_READS.with(Cell::get);
+        drop(writers);
+        for m in &members {
+            assert!(wait(&m.process, u32::MAX).unwrap());
+        }
+        assert!(live >= 2, "two waiting members read as {live}");
+        assert_eq!(reads, 1, "{reads} id-list reads for one live count");
+    }
+
+    /// Not a check on its own: run inside a box by
+    /// `a_member_reaching_its_bound_is_counted_though_no_notification_comes`, it commits 1 MiB at a
+    /// time until the box refuses (`HEX_TEST_COMMIT_TO_REFUSAL` set); otherwise it does nothing.
+    #[test]
+    fn commits_until_refused_when_asked() {
+        if std::env::var_os("HEX_TEST_COMMIT_TO_REFUSAL").is_none() {
+            return;
+        }
+        let mut held: Vec<Vec<u8>> = Vec::with_capacity(4096);
+        while held.len() < 4096 {
+            let mut chunk = Vec::new();
+            if chunk.try_reserve_exact(1 << 20).is_err() {
+                break;
+            }
+            chunk.resize(1 << 20, 1u8);
+            held.push(chunk);
+        }
+    }
+
+    /// HEX-RT-5 (native plan step 3): a member that reaches its box's memory bound and ends at once is
+    /// counted, whether or not the job's memory notification is ever delivered. Under load Windows sets
+    /// that notification seconds late, or never once the member's commit has fallen back (bench record
+    /// windows-jupiter-20261105.txt entry 21, experiment e18). Do: make a 256 MiB box, clear its job's
+    /// notification limit (52b298c's box set one and counted only its violation, so this is the
+    /// notification that doesn't come), run a member that commits until the box refuses, wait for its
+    /// end, read the box's usage. Expect: oom_kills at least 1, and the peak it reports within the bound.
+    #[test]
+    fn a_member_reaching_its_bound_is_counted_though_no_notification_comes() {
+        let bound = 256u64 << 20;
+        let bx = super::super::process::JobBox::create(
+            hex_api::BoxId::new("sys-bound").unwrap(),
+            &hex_api::Bounds {
+                memory_max: Some(bound),
+                ..hex_api::Bounds::default()
+            },
+            std::num::NonZeroU32::MIN,
+        )
+        .unwrap();
+        let off: JOBOBJECT_NOTIFICATION_LIMIT_INFORMATION = zeroed_struct();
+        // SAFETY: SetInformationJobObject reads one JOBOBJECT_NOTIFICATION_LIMIT_INFORMATION, alive for
+        // the call, and sets it on the box's job, which `bx` owns for the test.
+        let ok = unsafe {
+            SetInformationJobObject(
+                bx.job().as_raw_handle() as HANDLE,
+                JobObjectNotificationLimitInformation,
+                (&off as *const JOBOBJECT_NOTIFICATION_LIMIT_INFORMATION).cast(),
+                u32::try_from(size_of::<JOBOBJECT_NOTIFICATION_LIMIT_INFORMATION>()).unwrap(),
+            )
+        };
+        assert_ne!(ok, 0, "switching the notification off: {}", last_error());
+        let exe = std::env::current_exe().unwrap();
+        let system = std::env::var("SystemRoot").unwrap();
+        let spawn = Spawn {
+            command_line: format!(
+                "\"{}\" windows::sys::tests::commits_until_refused_when_asked --exact --test-threads=1",
+                exe.display()
+            )
+            .encode_utf16()
+            .chain([0])
+            .collect(),
+            environment: hex_core::job::environment(&[
+                ("SystemRoot".to_owned(), system),
+                ("HEX_TEST_COMMIT_TO_REFUSAL".to_owned(), "1".to_owned()),
+            ]),
+            cwd: None,
+            stdio: [nul(), nul(), nul()],
+        };
+        let started = bx.exec(spawn).unwrap();
+        assert!(wait(&started.process, u32::MAX).unwrap());
+        let usage = bx.usage().unwrap();
+        assert!(
+            usage.memory_peak_bytes <= bound,
+            "the box reports more committed than its bound: {usage:?}"
+        );
+        assert!(
+            usage.oom_kills >= 1,
+            "the bound reached isn't counted: {usage:?}"
+        );
+    }
+
+    /// HEX-WIN-2 (native plan step 3): a box commits up to its memory bound itself, and a commit that
+    /// would cross it is refused whole. Windows' job refuses such a commit whole and counts its ask in the
+    /// job's peak (`PeakJobMemoryUsed`), so the peak passes the commit limit by the refused ask (bench
+    /// record windows-jupiter-20261105.txt entry 22, experiment e20). Do: make a 256 MiB box, run a member
+    /// that commits 1 MiB at a time until the box refuses, read the job's raw peak. Expect: past the bound
+    /// (the member was refused at the bound, not short of it) by at most the refused 1 MiB ask and the
+    /// 131,072 bytes e20 measured beside one.
+    #[test]
+    fn a_box_commits_up_to_its_bound_and_is_refused_past_it() {
+        let bound = 256u64 << 20;
+        let bx = super::super::process::JobBox::create(
+            hex_api::BoxId::new("sys-up-to-bound").unwrap(),
+            &hex_api::Bounds {
+                memory_max: Some(bound),
+                ..hex_api::Bounds::default()
+            },
+            std::num::NonZeroU32::MIN,
+        )
+        .unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let system = std::env::var("SystemRoot").unwrap();
+        let spawn = Spawn {
+            command_line: format!(
+                "\"{}\" windows::sys::tests::commits_until_refused_when_asked --exact --test-threads=1",
+                exe.display()
+            )
+            .encode_utf16()
+            .chain([0])
+            .collect(),
+            environment: hex_core::job::environment(&[
+                ("SystemRoot".to_owned(), system),
+                ("HEX_TEST_COMMIT_TO_REFUSAL".to_owned(), "1".to_owned()),
+            ]),
+            cwd: None,
+            stdio: [nul(), nul(), nul()],
+        };
+        let started = bx.exec(spawn).unwrap();
+        assert!(wait(&started.process, u32::MAX).unwrap());
+        let mut x: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed_struct();
+        // SAFETY: QueryInformationJobObject writes at most one JOBOBJECT_EXTENDED_LIMIT_INFORMATION into
+        // `x`, alive for the call, for the box's job, which `bx` owns for the test.
+        let ok = unsafe {
+            QueryInformationJobObject(
+                bx.job().as_raw_handle() as HANDLE,
+                JobObjectExtendedLimitInformation,
+                (&mut x as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                u32::try_from(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>()).unwrap(),
+                null_mut(),
+            )
+        };
+        assert_ne!(ok, 0, "reading the job's peak: {}", last_error());
+        let peak = u64::try_from(x.PeakJobMemoryUsed).unwrap();
+        assert!(
+            peak > bound,
+            "refused short of its bound: peak {peak}, bound {bound}"
+        );
+        assert!(
+            peak <= bound + (1 << 20) + 131_072,
+            "past its bound by more than one refused ask: peak {peak}, bound {bound}"
+        );
+    }
 }

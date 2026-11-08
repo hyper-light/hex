@@ -20,7 +20,7 @@ use hex_core::hcs::{self, Container, HcsError, Process, Scratch, Storage};
 
 use super::proc::BoxProc;
 use super::process::JobBox;
-use sys::{AttachedVhd, HcsFailure, System};
+use sys::{HcsFailure, System};
 
 /// The largest `config.json` a bundle may hold: far past any real spec, bounded so a hostile one is never
 /// read whole (CLAUDE.md §2).
@@ -29,28 +29,36 @@ const MAX_CONFIG: u64 = 1 << 20;
 /// The scratch file a box's folder holds, a copy of the base layer's `blank.vhdx` (note §3).
 const SANDBOX: &str = "sandbox.vhdx";
 
-/// What the box made for its scratch, undone at delete: the attached disk, whether the storage filter is
-/// on its volume, and the files Hex created.
+/// What the box made for its scratch, undone at delete: the scratch folder vmcompute activated (its
+/// `sandbox.vhdx` attached as the volume), whether the storage filter was put over it, and the files Hex
+/// created.
 struct Mounted {
     volume: String,
-    filter: bool,
-    vhd: Option<AttachedVhd>,
+    activated: Option<String>,
+    prepared: bool,
     made: Vec<PathBuf>,
 }
 
 impl Mounted {
-    /// Detaches the filter and the disk and removes what Hex made; the first failure is returned, every
-    /// step is still tried.
+    /// Takes the filter off, detaches the volume and removes what Hex made; the first failure is returned,
+    /// every step is still tried. `UnprepareLayer` answering `ERROR_FLT_DO_NOT_DETACH` is the container's
+    /// end having taken the filter (note §3), matched alone; `DeactivateLayer` then detaches the volume.
     fn undo(&mut self) -> Result<(), Refusal> {
         let mut first = None;
-        if self.filter {
-            self.filter = false;
-            if let Err(f) = sys::detach_filter(&self.volume) {
-                first.get_or_insert(failure("detaching a container's storage filter", f));
+        if let Some(scratch) = self.activated.take() {
+            if std::mem::take(&mut self.prepared)
+                && let Err(f) = sys::unprepare_layer(&scratch)
+                && hcs::hcs_error(f.code) != HcsError::FilterHeld
+            {
+                first.get_or_insert(failure(
+                    "taking the storage filter off a container's scratch",
+                    f,
+                ));
+            }
+            if let Err(f) = sys::deactivate_layer(&scratch) {
+                first.get_or_insert(failure("detaching a container's scratch", f));
             }
         }
-        // Closing the disk's handle detaches it (attached without a permanent lifetime).
-        self.vhd = None;
         for p in self.made.drain(..).rev() {
             let gone = if p.is_dir() {
                 std::fs::remove_dir(&p)
@@ -308,16 +316,17 @@ impl OciBox {
 }
 
 /// Prepares `container`'s scratch over its layers, `base` the bottom-most: a scratch folder gets a copy of
-/// the base layer's `blank.vhdx` (unless it holds a `sandbox.vhdx` already), attached with no drive letter,
-/// its volume made the container's writable layer and filtered over the layers (note §3); a volume the
-/// caller mounted is used as it is.
+/// the base layer's `blank.vhdx` (unless it holds a `sandbox.vhdx` already), which vmcompute activates as
+/// a volume and puts the storage filter over, the layers its parents, as hcsshim and runhcs do; the
+/// documented storage calls made a writable layer no container finished starting on (note §3, §9); a
+/// volume the caller mounted is used as it is.
 fn scratch(container: &Container, base: &str) -> Result<Mounted, Refusal> {
     let folder = match &container.scratch {
         Scratch::Volume(v) => {
             return Ok(Mounted {
                 volume: v.clone(),
-                filter: false,
-                vhd: None,
+                activated: None,
+                prepared: false,
                 made: Vec::new(),
             });
         }
@@ -325,8 +334,8 @@ fn scratch(container: &Container, base: &str) -> Result<Mounted, Refusal> {
     };
     let mut mounted = Mounted {
         volume: String::new(),
-        filter: false,
-        vhd: None,
+        activated: None,
+        prepared: false,
         made: Vec::new(),
     };
     if !folder.exists() {
@@ -340,33 +349,27 @@ fn scratch(container: &Container, base: &str) -> Result<Mounted, Refusal> {
             .map_err(|e| Refusal::os("copying the base layer's blank.vhdx as a scratch", e))?;
         mounted.made.push(sandbox.clone());
     }
-    let sandbox = sandbox
+    let scratch = folder
         .to_str()
-        .ok_or_else(|| Refusal::os("naming a container's scratch", "not UTF-8"))?;
-    let vhd =
-        sys::attach_vhd(sandbox).map_err(|e| Refusal::os("attaching a container's scratch", e))?;
-    mounted.volume = vhd
-        .volume()
+        .ok_or_else(|| Refusal::os("naming a container's scratch", "not UTF-8"))?
+        .to_owned();
+    sys::activate_layer(&scratch).map_err(|f| failure("attaching a container's scratch", f))?;
+    mounted.activated = Some(scratch.clone());
+    sys::prepare_layer(&scratch, &container.layers)
+        .map_err(|f| failure("putting the storage filter over a container's scratch", f))?;
+    mounted.prepared = true;
+    mounted.volume = sys::layer_mount_path(&scratch)
         .map_err(|f| failure("reading a container's scratch volume", f))?;
-    mounted.vhd = Some(vhd);
-    let layers: Vec<(String, String)> = container
-        .layers
-        .iter()
-        .map(|l| (hcs::layer_id(l), l.clone()))
-        .collect();
-    let data = hcs::layer_data(&layers).to_string();
-    sys::initialize_writable_layer(&mounted.volume, &data)
-        .map_err(|f| failure("making a container's writable layer", f))?;
-    sys::attach_filter(&mounted.volume, &data)
-        .map_err(|f| failure("attaching a container's storage filter", f))?;
-    mounted.filter = true;
     Ok(mounted)
 }
 
 /// Appends `lines` to the container's `hosts` file on its scratch volume, before it starts.
 fn append_hosts(volume: &str, lines: &str) -> Result<(), Refusal> {
     use std::io::Write;
-    let path = format!(r"{}Windows\System32\drivers\etc\hosts", volume);
+    let path = format!(
+        r"{}Windows\System32\drivers\etc\hosts",
+        hcs::volume_root(volume)
+    );
     std::fs::OpenOptions::new()
         .append(true)
         .open(&path)
@@ -388,9 +391,9 @@ pub fn info(b: &OciBox) -> Result<hex_api::BoxInfo, Refusal> {
     })
 }
 
-/// How many present devices implement interface class `class` (a GUID, braces optional) where this
-/// process runs: the probe that a class not granted to a box isn't visible inside it.
-pub fn devices(class: &str) -> Result<usize, Refusal> {
+/// The devices implementing interface class `class` (a GUID, braces optional) where this process runs,
+/// listed and reachable: the probe that a class not granted to a box isn't reachable inside it.
+pub fn devices(class: &str) -> Result<sys::DeviceView, Refusal> {
     let g = hcs::class_guid("device class", class)?;
     let field = |from: usize, to: usize| {
         g.get(from..to)

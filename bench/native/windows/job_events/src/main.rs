@@ -990,6 +990,146 @@ fn e17() {
     }
 }
 
+/// e18: how often a member refused at Hex's commit cap leaves the job's memory notification violated,
+/// and when, at Hex's own numbers (a 256 MiB bound, the cap OVERSHOOT_MARGIN under it, the notification
+/// NOTIFY_MARGIN under the cap), placed as Hex places members (JOB_LIST). Per rep: the violation read
+/// while the refused member still lives (`alive`), then after it ends (`ended`); where a read is 0, it
+/// is read again every millisecond for 200 ms (`late_ms`, the first read that saw it, or `never`).
+fn e18() {
+    let bound = std::env::var("E18_BOUND_MIB").ok().and_then(|b| b.parse::<usize>().ok()).unwrap_or(256) * MIB;
+    let assign = std::env::var("E18_PLACE").is_ok_and(|p| p == "assign");
+    let limit = bound - 2 * 1_163_264;
+    let notify = (limit - 4 * MIB) as u64;
+    let cap = 2048 * MIB;
+    let reps: usize = std::env::var("E18_REPS").ok().and_then(|r| r.parse().ok()).unwrap_or(200);
+    for mode in ["hold", "exit"] {
+        let (mut set_alive, mut set_ended, mut late, mut never) = (0, 0, 0, 0);
+        for rep in 0..reps {
+            let job = Job::new();
+            job.limit(KILL | JOB_OBJECT_LIMIT_JOB_MEMORY, limit, 0, 0);
+            job.notify_memory(notify).expect("notify");
+            let place = if assign { Place::Assign(&[&job]) } else { Place::JobList(&[&job]) };
+            let mut m = Member::start(&format!("commit {MIB} {cap} {mode}"), place, 0).expect("m");
+            let said = m.line(LINE);
+            let peak = job.ext().PeakJobMemoryUsed;
+            let mut alive_ms = None;
+            let first = if mode == "hold" {
+                let mut v = job.violation().map(|v| (v.ViolationLimitFlags, v.JobMemory));
+                let held = std::time::Instant::now();
+                while held.elapsed() < Duration::from_millis(3000) {
+                    if matches!(v, Ok((f, _)) if f & JOB_OBJECT_LIMIT_JOB_MEMORY != 0) {
+                        alive_ms = Some(held.elapsed().as_millis());
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                    v = job.violation().map(|v| (v.ViolationLimitFlags, v.JobMemory));
+                }
+                m.release();
+                v
+            } else {
+                Ok((0, 0))
+            };
+            let _ = m.wait(LINE);
+            let ended = job.violation().map(|v| (v.ViolationLimitFlags, v.JobMemory));
+            let seen = |r: &Result<(u32, u64), u32>| matches!(r, Ok((f, _)) if f & JOB_OBJECT_LIMIT_JOB_MEMORY != 0);
+            let mut late_ms = None;
+            if !seen(&first) && !seen(&ended) {
+                for ms in 1..=200u32 {
+                    std::thread::sleep(Duration::from_millis(1));
+                    if seen(&job.violation().map(|v| (v.ViolationLimitFlags, v.JobMemory))) {
+                        late_ms = Some(ms);
+                        break;
+                    }
+                }
+            }
+            if seen(&first) {
+                set_alive += 1;
+            } else if seen(&ended) {
+                set_ended += 1;
+            } else if late_ms.is_some() {
+                late += 1;
+            } else {
+                never += 1;
+            }
+            if !seen(&first) || !seen(&ended) || late_ms.is_some() || alive_ms.is_some() {
+                println!(
+                    "e18 {mode} rep={rep} member[{said}] peak={peak} peak_under_notify={} alive={first:?} alive_ms={alive_ms:?} ended={ended:?} late_ms={late_ms:?}",
+                    (peak as i64) - (notify as i64)
+                );
+            }
+        }
+        println!(
+            "e18 {mode} assign={assign} reps={reps} limit={limit} notify={notify} set_while_alive={set_alive} set_only_after_end={set_ended} set_late={late} never={never}"
+        );
+    }
+}
+
+/// e19: the job this process itself runs in, if any (a runner may start its commands in one, and a
+/// box's job then nests under it): whether it is in a job, and that job's limits and notification limits.
+fn e19() {
+    let mut inside = 0i32;
+    let ok = unsafe { IsProcessInJob(GetCurrentProcess(), null_mut(), &mut inside) };
+    println!("e19 in_a_job={} (ok={ok})", inside != 0);
+    if inside == 0 {
+        return;
+    }
+    let mut x: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
+    let r1 = unsafe {
+        QueryInformationJobObject(null_mut(), JobObjectExtendedLimitInformation, (&mut x as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(), size_of_val(&x) as u32, null_mut())
+    };
+    let mut n: JOBOBJECT_NOTIFICATION_LIMIT_INFORMATION = unsafe { zeroed() };
+    let r2 = unsafe {
+        QueryInformationJobObject(null_mut(), JobObjectNotificationLimitInformation, (&mut n as *mut JOBOBJECT_NOTIFICATION_LIMIT_INFORMATION).cast(), size_of_val(&n) as u32, null_mut())
+    };
+    let mut v: JOBOBJECT_LIMIT_VIOLATION_INFORMATION = unsafe { zeroed() };
+    let r3 = unsafe {
+        QueryInformationJobObject(null_mut(), JobObjectLimitViolationInformation, (&mut v as *mut JOBOBJECT_LIMIT_VIOLATION_INFORMATION).cast(), size_of_val(&v) as u32, null_mut())
+    };
+    println!(
+        "e19 own_job ext(ok={r1}): flags={:#x} job_memory_limit={} process_memory_limit={} active={} | notify(ok={r2}): flags={:#x} job_memory={} | violation(ok={r3}): flags={:#x} violated={:#x} job_memory={}",
+        x.BasicLimitInformation.LimitFlags, x.JobMemoryLimit, x.ProcessMemoryLimit, x.BasicLimitInformation.ActiveProcessLimit,
+        n.LimitFlags, n.JobMemoryLimit, v.LimitFlags, v.ViolationLimitFlags, v.JobMemory
+    );
+}
+
+/// The committed memory of the job this process runs in (its innermost), from the job's own accounting.
+fn job_commit_now() -> usize {
+    let mut v: JOBOBJECT_LIMIT_VIOLATION_INFORMATION = unsafe { zeroed() };
+    let ok = unsafe {
+        QueryInformationJobObject(
+            null_mut(),
+            JobObjectLimitViolationInformation,
+            (&mut v as *mut JOBOBJECT_LIMIT_VIOLATION_INFORMATION).cast(),
+            size_of_val(&v) as u32,
+            null_mut(),
+        )
+    };
+    if ok == 0 { 0 } else { v.JobMemory as usize }
+}
+
+/// e20: is a commit that would cross a job's commit limit refused whole, or admitted past it? A job
+/// limited to 256 MiB (no notification); a member commits to within half of each size of the limit, then
+/// asks for one commit of that size. Per size: whether it was admitted, and the job's peak against the
+/// limit.
+fn e20() {
+    let limit = 256 * MIB;
+    for size in [64 * MIB, 16 * MIB, 4 * MIB, MIB, 256 << 10, 64 << 10] {
+        for rep in 0..3 {
+            let job = Job::new();
+            job.limit(KILL | JOB_OBJECT_LIMIT_JOB_MEMORY, limit, 0, 0);
+            let mut m = Member::start(&format!("cross {limit} {size}"), Place::JobList(&[&job]), 0).expect("m");
+            let said = m.line(LINE);
+            let peak = job.ext().PeakJobMemoryUsed;
+            m.release();
+            let _ = m.wait(LINE);
+            println!(
+                "e20 size={size} rep={rep} member[{said}] peak={peak} peak_minus_limit={}",
+                peak as i64 - limit as i64
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------- members
 
 fn commit_until_refused(step: usize, cap: usize) -> (usize, u32) {
@@ -1039,6 +1179,33 @@ fn member(args: &[String]) -> ! {
             std::thread::park();
         },
         "hold" => hold(),
+        // cross <limit> <size>: commits 64 KiB at a time until the job's own commit is within size/2 of
+        // <limit>, then asks for one <size> commit that would cross it, and says whether it was admitted.
+        "cross" => {
+            let (limit, size) = (num(1), num(2));
+            let mut base_refused = 0u32;
+            while job_commit_now() + size / 2 < limit {
+                let p = unsafe { VirtualAlloc(null(), 64 << 10, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) };
+                if p.is_null() {
+                    base_refused = last();
+                    break;
+                }
+                unsafe { (p as *mut u8).write_volatile(1) };
+            }
+            let before = job_commit_now();
+            let p = unsafe { VirtualAlloc(null(), size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) };
+            let (ok, err) = if p.is_null() { (false, last()) } else { (true, 0) };
+            if ok {
+                let mut off = 0;
+                while off < size {
+                    unsafe { (p as *mut u8).add(off).write_volatile(1) };
+                    off += 4096;
+                }
+            }
+            let after = job_commit_now();
+            say(&format!("base_refused={base_refused} before={before} admitted={ok} err={err} after={after}"));
+            hold()
+        }
         "commit" => {
             let (total, err) = commit_until_refused(num(1), num(2));
             say(&format!("refused_after={total} err={err}"));
@@ -1159,7 +1326,7 @@ fn main() {
     if args.first().map(String::as_str) == Some("member") {
         member(&args[1..]);
     }
-    let all = ["e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8", "e9", "e10", "e11", "e12", "e13", "e14", "e15", "e16", "e17"];
+    let all = ["e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8", "e9", "e10", "e11", "e12", "e13", "e14", "e15", "e16", "e17", "e18", "e19", "e20"];
     let chosen: Vec<&str> = if args.is_empty() || args.iter().any(|a| a == "all") {
         all.to_vec()
     } else {
@@ -1187,6 +1354,9 @@ fn main() {
             "e15" => e15(),
             "e16" => e16(),
             "e17" => e17(),
+            "e18" => e18(),
+            "e19" => e19(),
+            "e20" => e20(),
             other => println!("unknown experiment {other}"),
         }
         println!("{e} took_ms={}", t.elapsed().as_millis());

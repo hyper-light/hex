@@ -13,14 +13,15 @@
 #                   image is refused only for the Shards guest (native plan step 5) until that lands;
 #   uninstalled     check lists none of the plan's lines.
 # usage: windows_lab.ps1 <before|asks|installed|uninstalled> -Plan <file> [-Binary <hex.exe>]
-#          [-TestBin <windows_process_box test exe>] [-OciTestBin <windows_oci_box test exe>] [-Layers <a;b;...>]
+#          [-TestBin <windows_process_box test exe>] [-OciTestBin <windows_oci_box test exe>] [-Layers <a;b;...>] [-MismatchLayers <a;b;...>]
 param(
   [Parameter(Mandatory = $true, Position = 0)][ValidateSet('before', 'asks', 'installed', 'uninstalled')][string]$Phase,
   [Parameter(Mandatory = $true)][string]$Plan,
   [string]$Binary,
   [string]$TestBin,
   [string]$OciTestBin,
-  [string]$Layers
+  [string]$Layers,
+  [string]$MismatchLayers
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 3
@@ -34,7 +35,7 @@ function Fail([string]$Why) { Write-Output "FAIL: $Why"; exit 1 }
 function Invoke-Test([string]$Name, [string]$Bin = $TestBin) {
   # Its stderr lines are output here, not errors to stop on.
   $ErrorActionPreference = 'Continue'
-  $out = & $Bin $Name --exact --nocapture --test-threads=1 2>&1 | Out-String
+  $out = & $Bin $Name --exact --nocapture 2>&1 | Out-String
   Write-Host $out
   if ($LASTEXITCODE -ne 0) { Fail "$Name (exit $LASTEXITCODE)" }
   return $out
@@ -106,8 +107,9 @@ switch ($Phase) {
     Step 'the process class holds its contract'
     Invoke-Test 'windows_process_boxes_hold_the_contract' | Out-Null
     Step "the oci class holds its contract and step 4's criteria on a matching image"
-    if (-not $OciTestBin -or -not $Layers) { Fail 'the oci class needs -OciTestBin and -Layers (oci_setup.ps1 prints them)' }
+    if (-not $OciTestBin -or -not $Layers -or -not $MismatchLayers) { Fail 'the oci class needs -OciTestBin, -Layers and -MismatchLayers (oci_setup.ps1 writes them)' }
     $env:HEX_WINDOWS_LAYERS = $Layers
+    $env:HEX_WINDOWS_MISMATCH_LAYERS = $MismatchLayers
     $said = Invoke-Test 'windows_oci_boxes_hold_the_contract_and_the_steps_criteria' $OciTestBin
     if ($said -match 'SKIP:') { Fail 'the oci suite skipped: it was given no image layers' }
     Write-Output 'PASS'

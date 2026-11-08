@@ -4,8 +4,11 @@
 //! bounds without a watcher enforcing them (`sys`, [`hex_core::job`]). A member is created suspended
 //! inside the job (`PROC_THREAD_ATTRIBUTE_JOB_LIST`) and resumed, so nothing runs outside it.
 //!
-//! Reaching the memory bound is read from the one notification class Windows guarantees, queried from
-//! the job (`JobObjectNotificationLimitInformation`). A fork refused at the active-process limit is a
+//! Reaching the memory bound is read from the job's own accounting: its peak commit at or past its
+//! commit limit ([`hex_core::job::reached_bound`]). The job's memory notification, the class Windows
+//! calls guaranteed, is set late under load and never once the member's commit has fallen back, so it
+//! can't tell a box that ended at its bound (bench/install/records/windows-jupiter-20261105.txt entry
+//! 21). A fork refused at the active-process limit is a
 //! hard, kernel-enforced refusal delivered synchronously to the forking process. Windows has no §3-clean
 //! count of such refusals for the job's owner: its accounting doesn't move on a refusal, and the only
 //! job-side signal is the completion-port active-process-limit message, which Microsoft documents as not
@@ -27,14 +30,10 @@ use hex_core::job::{self, Sent};
 
 use super::sys::{self, Job, Spawn, Started};
 
-/// What the box counts beyond what the job's accounting gives: whether it reached its memory bound, how
-/// many forks it saw refused at its process limit, and which signals Hex has ended the job for.
+/// What the box counts beyond what the job's accounting gives: how many forks it saw refused at its
+/// process limit, and which signals Hex has ended the job for.
 #[derive(Debug, Default)]
 struct Counts {
-    /// Times the box reached its memory bound: the guaranteed memory notification was violated. On
-    /// Windows a commit past the bound is refused, not killed; this is what `Usage::oom_kills` reports
-    /// (HEX-RT-5).
-    oom_kills: u64,
     /// Forks the box saw refused at its active-process limit — the node's own `exec` into a full box,
     /// observed synchronously ([`JobBox::exec`]). A member's internal fork, refused in that member, has
     /// no §3-clean job-side signal and is not counted here (`Usage::pids_refused`).
@@ -52,8 +51,8 @@ pub struct State {
     id: BoxId,
     bounds: Bounds,
     job: Job,
-    /// Whether the box has a memory bound, so its notification violation is worth querying.
-    bounded_memory: bool,
+    /// The job's limits, against which its accounting says whether the box reached its memory bound.
+    limits: job::Limits,
     counts: Mutex<Counts>,
     /// Whether the box is being deleted; a member started after this is refused (the job is ending).
     stopping: AtomicBool,
@@ -96,7 +95,7 @@ impl JobBox {
                 id,
                 bounds: bounds.clone(),
                 job,
-                bounded_memory: limits.memory_notify.is_some(),
+                limits,
                 counts: Mutex::new(Counts::default()),
                 stopping: AtomicBool::new(false),
             }),
@@ -181,31 +180,21 @@ impl JobBox {
             .map_err(|e| Refusal::os("reading a box's live processes", e))
     }
 
-    /// What the box has used and holds now: the job's accounting and peak, the memory-bound count from
-    /// the guaranteed notification violation, and the refused-fork count tallied from the job's port.
+    /// What the box has used and holds now: the job's accounting and peak, whether it reached its memory
+    /// bound (from the peak), and the refused-fork count the box saw.
     pub fn usage(&self) -> Result<Usage, Refusal> {
-        // Reaching the memory bound: the guaranteed notification violation, from the job's accounting.
-        // Reading it re-arms the notification, so each crossing is counted once.
-        if self.state.bounded_memory
-            && self
-                .state
-                .job
-                .memory_violated()
-                .map_err(|e| Refusal::os("reading a box's limit violation", e))?
-        {
-            let mut c = self.state.counts()?;
-            c.oom_kills = c.oom_kills.saturating_add(1);
-        }
         let a = self.accounting()?;
         let live = self.live_processes()?;
+        // On Windows a commit past the bound is refused, not killed: oom_kills says the box reached its
+        // bound, once, from the job's peak (HEX-RT-5). The peak counts a refused commit's ask, so the
+        // memory the box reports is the peak at most its bound ([`job::committed_peak`]).
+        let oom_kills = u64::from(job::reached_bound(a.peak_memory, &self.state.limits));
+        let peak = job::committed_peak(a.peak_memory, &self.state.limits);
         // pids_refused is the count the box saw synchronously (node-mediated exec refusals, [`exec`]).
-        let (oom_kills, pids_refused) = {
-            let c = self.state.counts()?;
-            (c.oom_kills, c.pids_refused)
-        };
+        let pids_refused = self.state.counts()?.pids_refused;
         Ok(Usage {
-            memory_bytes: a.peak_memory,
-            memory_peak_bytes: a.peak_memory,
+            memory_bytes: peak,
+            memory_peak_bytes: peak,
             oom_kills,
             pids: live,
             pids_refused,
@@ -267,6 +256,5 @@ fn sys_limits(limits: &job::Limits) -> sys::Limits {
         memory: limits.memory,
         processes: limits.processes,
         cpu: limits.cpu,
-        memory_notify: limits.memory_notify,
     }
 }

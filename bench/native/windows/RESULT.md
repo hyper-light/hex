@@ -61,11 +61,11 @@ tells for Hex's class, and `crates/hex-cli/tests/windows_process_box.rs` runs HE
 step's scenarios against the real class. Both on jupiter, 2026-11-03; record
 `records/job-events-20261103T074519Z.txt`, sources `docs/research/runtime/windows-job-objects.md`.
 
-### The memory peak overshoots the commit limit by a bounded amount
+### A commit that would cross the commit limit is refused whole
 
-A member committing at several step sizes into a 256 MiB job, born in the job (`JOB_LIST`):
+A member committing at several step sizes into a 256 MiB job, born in the job (`JOB_LIST`), e16:
 
-| commit step | peak over the limit |
+| commit step | job's peak over the limit |
 |---|---|
 | 64 KiB | 28-49 KiB |
 | 1 MiB | 92-104 KiB |
@@ -74,15 +74,22 @@ A member committing at several step sizes into a 256 MiB job, born in the job (`
 | 64 MiB | 1.09-1.11 MiB |
 | 256 MiB | 1.09-1.11 MiB |
 
-A job lets a commit that crosses its limit overshoot before it refuses the next, but the overshoot is
-**bounded** — at most 1,163,264 bytes (≈1.11 MiB), and it does **not** grow with the commit step past
-~1.1 MiB. So Hex sets the job's commit limit `OVERSHOOT_MARGIN` = 2 MiB (headroom over the measured
-1.11 MiB) under the box's bound (`hex_core::job`), holding the job's peak at or below the bound. A commit
-past the box's bound is refused (`VirtualAlloc` → `ERROR_COMMITMENT_LIMIT`), and the class counts the box
-reaching its bound from the one notification class Windows guarantees
-(`JobObjectNotificationLimitInformation`), whose violation is queryable from the job **with or without** a
-completion port — so the class keeps no completion port and no message queue (CLAUDE.md §2, §3). A
-notification at the hard cap never trips; 4 MiB under it trips every pass, so `NOTIFY_MARGIN` = 4 MiB.
+This was first read as a crossing commit admitted past the limit by a bounded ≈1.1 MiB, and Hex set the
+job's commit limit a margin under the box's bound for it. e20 (2026-11-07) shows otherwise. Each member
+first commits to within half a commit of the limit, then asks for one commit (64 MiB down to 64 KiB) that
+would cross it. **Every such commit is refused whole** (`ERROR_COMMITMENT_LIMIT`, the job's commit
+unchanged), and the job's `PeakJobMemoryUsed` still rises by the refused ask: 64 MiB asked from
+33,521,664 bytes short of the limit leaves the peak 33,718,272 bytes past it. e16's flat ≈1.1 MiB is that ask landing at the
+limit plus the member's own base commit, since each of its steps divides 256 MiB. So the job never commits
+past its limit, and its commit limit is the box's bound itself (`hex_core::job`, no margin). The peak
+counts a refused ask, so the class reports the box's committed peak as that peak at most its bound
+(`job::committed_peak`), and counts the box reaching its bound when the peak is past the limit
+(`job::reached_bound`): only a refused ask takes it there. That is the job's own accounting, so the class
+keeps no completion port and no message queue (CLAUDE.md §2, §3). It first read the
+`JobObjectNotificationLimitInformation` violation, set 4 MiB under the cap, which e5 and e17 saw trip on
+2026-11-03. On 2026-11-07 the same probes saw it in none of their passes, and e18 at Hex's own numbers
+found it set late (up to 26 s) or never, so a box that ended at its bound wasn't counted
+(bench/install/records/windows-jupiter-20261105.txt entries 21 and 22).
 
 ### Processes, CPU, breakaway, delete
 

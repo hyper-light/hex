@@ -120,7 +120,8 @@ copy there shows ~20 bench scripts as modified: line endings from the sync, no c
    `cargo build -p shards` (debug, Shards' pinned cargo 1.98.1): exit 0 in 2 min 29 s, 2026-11-06T09:57-09:59Z,
    C:\Users\corph\.cache\hex-t7-windows\target-shards\debug\shards.exe. What Windows lacked, taken without installing
    anything: NASM (AWS_LC_SYS_NO_ASM_x86_64_pc_windows_msvc=1, the Windows host's aws-lc in debug without its
-   assembly, unlike Shards' release build; the guest's musl aws-lc keeps it); CMake and Ninja from Visual Studio 2022
+   assembly, unlike Shards' release build; the guest's musl aws-lc keeps it. aws-lc-sys allows no-asm in debug only, so it fits this
+   test build and never a shards anyone runs; Shards' Windows build needs NASM (Shards' lead, through step 5, 2026-11-06)); CMake and Ninja from Visual Studio 2022
    Build Tools' own folder, on the task's PATH; zig 0.16.0 (zig-x86_64-windows-0.16.0.zip from ziglang.org, sha256
    68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e, the download index's, unpacked into
    C:\Users\corph\.cache\hex-t7-windows\zig-0.16.0). Earlier attempts failed on each of these in turn (logs kept).
@@ -161,7 +162,173 @@ copy there shows ~20 bench scripts as modified: line endings from the sync, no c
 15. at ae644ff (step 5's 2386d08 merged: the guest unit test's root absolute on every host, and HEX-GUEST-19 asserting
    one boot), 2026-11-06T10:31:36Z, load 79% CPU, entry 12's initramfs (guest-side code unchanged since bba7340):
    windows-guest-ae644ff-20261106T103136Z.txt. cargo test -p hex-runtime --lib guest:: 7 passed, 0 failed (entry 14's
-   failure fixed); HEX-GUEST-19 1 passed, 0 failed, 1.27 s, with its one-boot assertion.
+   failure fixed); HEX-GUEST-19 1 passed, 0 failed, 1.27 s (the test's run time with entry 10's debug shards.exe, built without AWS-LC's assembly, which aws-lc-sys allows in debug only; not a timing of record), with its one-boot assertion.
+
+16. HEX-GUEST-20, the OCI runtime-spec validation in the guest through the seam, at 73e4d3b (step 5's c230d0a
+   merged: tarball roots), 2026-11-06T11:00:42Z, load 56% CPU: windows-guestval-73e4d3b-20261106T110042Z.txt.
+   cargo test -p hex-cli --test guest_validation -- --nocapture --test-threads=1: the_oci_runtime_spec_validation_passes_in_the_guest_as_on_linux
+   ... ok, 1 passed, 0 failed, 75.5 s. Inputs: a fresh initramfs from 73e4d3b (hex 4e0eba3d1ba4108c..., cpio
+   8578fdfacadd1f00...), Shards' vmlinux-6.18.48-x86_64-hyperv, entry 10's shards.exe, HEX_GUEST_LAB the Linux-made
+   lab-x86_64.tar.gz (2296b019415a4a3f...), HEX_GUEST_RUNTIME_TOOLS rt-amd64 (unpacked runtime-tools, a read-only
+   virtio-fs share of an NTFS folder, whose tests ran), CPUs 2, memory 4096 MiB. results.tsv (sha256 70937565358d254e...,
+   kept as windows-guestval-73e4d3b-results.tsv beside this record): 28 pass, 30 fail of 58, against the Linux
+   reference bench/oci-validation/results-hex-linux.tsv's 26 pass, 32 fail. Every test passing on Linux passes in the
+   guest (none regress); two more pass in the guest than on Linux: linux_masked_paths, linux_readonly_paths. HEX-GUEST-19
+   at the same tree, its root now a tarball: 1 passed, 2.09 s.
+
+17. gates at 439c00a (the integrate agent's 5007fa1 taken: the routing test's Linux image gets a tarball root, as
+   c230d0a requires on Windows), 2026-11-06T11:59:03Z, C: 86 GB free: windows-gates-439c00a-20261106T115903Z.txt. fmt,
+   clippy -D warnings, cargo test --workspace --no-fail-fast: every crate 0 failed (hex-api 18, doc_truth 7, cli 7,
+   windows_process_box 10, hex-client 11, hex-core 141, hex-node 6, hex-runtime 8). guest_real, guest_validation and
+   windows_oci_box's suite passed BY SKIPPING here (no guest or image inputs in this phase); their real runs are
+   entries 13, 15-16 and (for the oci suite) still to come. PHASE gates: PASS (exit 0).
+
+18. step 6's Windows install, the installer's one admin step, at 2e1ab3f, 2026-11-06T12:07:04Z, from kiln on jupiter
+   (as corph, elevated: no UAC prompt), from the stage C:\Users\corph\.cache\hex-t7-windows\stage\2e1ab3f (SHA256SUMS
+   checked): windows-install-2e1ab3f-20261106T120703Z.txt. The lab's before phase first, at 2e1ab3f
+   (windows-before-2e1ab3f-20261106T120643Z): fresh of Hex, the 4-line plan, both features on; PASS.
+   windows.ps1 install -Binary hex.exe -NoRestart: "installed: C:\Program Files\Hex\hex.exe", exit 0, no reboot asked
+   (no feature to turn on). check of the plan: all 4 lines on the machine. The installed hex.exe is the staged one,
+   byte for byte; the manifest holds the plan's 4 lines.
+   The installed checks but the oci suite, each passing: a_windows_image_is_refused_naming_containers_while_it_is_off
+   ("FEATURES: Containers on"), a_linux_image_is_refused_naming_what_its_guest_waits_on ("FEATURES: HypervisorPlatform
+   on"), a_windows_image_stays_the_hosts_and_a_linux_image_goes_to_the_guest, windows_process_boxes_hold_the_contract.
+   NOT RUN: step 4's oci suite on the image (windows_oci_boxes_hold_the_contract_and_the_steps_criteria): step 4 found
+   it stalls after HEX-DIFF-2's TERM and is tracing it.
+   Uninstall at 2e1ab3f, 2026-11-06T12:08:31Z, from kiln (elevated, no prompt): windows.ps1 uninstall -NoRestart:
+   "nothing of Hex's is left", exit 0, no reboot; C:\Program Files\Hex and C:\ProgramData\Hex gone
+   (windows-uninstall-2e1ab3f-20261106T120831Z.txt). The lab's uninstalled phase (HEX-INST-4,
+   windows-uninstalled-d515078-20261106T120832Z): none of the plan's lines on the machine; PASS.
+   The run of record repeats every phase at one SHA, from a stage with step 4's fix (its stall is likely in hex.exe's
+   delete path), with the oci suite on layers.txt among the installed checks (the lead, 12:08Z). The Linux-image class's runs through the guest are
+   entries 13, 15-16 (the test binaries', not the installed hex.exe's).
+
+19. the installer's feature query, timed, for features.rs's PATIENCE (Ada's rule on derived values), 2026-11-06T14:27:01Z
+   on jupiter, from kiln (Win32_Processor's load counter failed to read at the time: CimException 0x80080005).
+   30 runs of exactly setup::FEATURE_QUERY, each a fresh Windows PowerShell started as features.rs starts it
+   (-NoProfile -Command), timed from the shell around each run: min 1,048, p50 1,183, p90 1,398, max 2,421 ms.
+
+20. the process class's live count, and the feature query past its deadline, 2026-11-06T19:20-19:55Z on jupiter, from
+   kiln (idle: 25-31 of 32 cores idle), tree babd701 plus the working change to crates/hex-runtime/src/windows/sys.rs.
+   At babd701 (dda3f36's two-read count): windows_process_box 10/10 twice;
+   windows::features::tests::a_query_past_the_bound_is_refused_by_name 1/1;
+   cli setup_features_prints_each_features_state_or_refuses_off_windows 1/1.
+   What NumberOfAssignedProcesses holds (new test an_ended_member_whose_handle_is_held_leaves_the_id_list):
+   `cmd /c exit 0` in a job, waited to its end, its handle held. The member's own id is not listed, and the
+   two counts agree in one read (3 runs: both 1, the one id another process's, gone before tasklist could
+   name it, so the console host Windows starts for a console program with no console; then 5 of 5 passing).
+   dda3f36 said 219df52's count (NumberOfAssignedProcesses) broke the memory-bound cases because it keeps
+   ended members. That is not so: with 219df52's count forced, windows_process_box passed 3 of 3 (3 of 3 with
+   dda3f36's too), and the failing assert ("memory bound not counted") reads oom_kills, not the live count. The
+   memory-bound failure did not recur in 29 complete suite runs (23 idle; 6 beside 3 more suite copies). It is
+   not reproduced, so it is not explained.
+   The feature query past its deadline: runs 2-5 of the idle loop, back to back, each refused every one of its
+   three tests' queries (setup::FEATURE_QUERY_PATIENCE, 4,842 ms: "PowerShell's Win32_OptionalFeature query
+   didn't finish within 4 s"). Every later run passed (24 of 24 that finished), 4 suite copies (12 concurrent
+   queries) included. So for about a minute a single query took over 4,842 ms on idle jupiter, past twice
+   entry 19's slowest. The query, the deadline and the test are step 6's; reported to it and the lead, unchanged
+   here.
+   With the count taken as one read (the working change): windows_process_box 10/10 three times;
+   an_ended_member_whose_handle_is_held_leaves_the_id_list 5 of 5; fmt and native clippy -D warnings exit 0.
+
+21. the process class's memory-bound count, root-caused, 2026-11-07T01:10-02:10Z on jupiter (Windows 11 Pro
+   build 26200.9711, last update 2026-10-14, booted 2026-11-06T19:02Z; heavy load throughout: 0-16 of 32
+   cores idle, the System process at ~356,000 CPU-s since boot, ~15 cores in the kernel), from kiln with
+   sync:false (a clean clone at 52b298c in ~/.cache/hex-t7-windows/xfer, patches carried by hash).
+   The fault: integrate's runs saw windows_process_box's memory cases read oom_kills = 0 (HEX-DIFF-5 step 6,
+   a_box_past_its_bound_is_refused_at_the_bound). At 52b298c the latter failed 10 of 10 here, each with the
+   job's peak past its commit limit (266,551,296-266,645,504 B over 266,108,928).
+   The cause, measured with bench/native/windows/job_events (experiments e18, e19 added): the box counted
+   reaching its bound only from the job's memory notification violation (JobObjectLimitViolationInformation,
+   the class Microsoft calls guaranteed), and Windows sets that late or never:
+   - e18 at Hex's numbers (256 MiB bound, cap 266,108,928, notification 4 MiB under it, members started in
+     the job by JOB_LIST), a member committing 1 MiB at a time until refused:
+     `exit` (member ends at once, the box's case): unset in 200 of 200, then 120 of 120 across Assign or
+     JOB_LIST and a 64 or 256 MiB bound, polled up to 200 ms after the end: never set.
+     `hold` (member stays, past the line): read at once, unset in 200 of 200 (JobMemory 265.4 MB, over the
+     line); polled while held, set after 1 ms (2 of 4), 25,895 ms (1 of 4), not within 30,000 ms (1 of 4);
+     not within 3,000 ms in 8 of 8.
+   - e5 and e17, unchanged since 2026-11-03 when the record says every pass tripped: now 0 of 12 (e17) and
+     0 of 12 (e5's four cases, three passes each) set, and the completion port carries JOB_MEMORY_LIMIT
+     (the hard cap's lossy message) but never NOTIFICATION_LIMIT, even with no hard cap and the job at
+     twice the notification line.
+   - e19: the command runs in kiln's job (flags 0x2020) or, from a scheduled task, in the Task Scheduler's
+     (0x1800), neither with a memory or notification limit; e18 gives the same from both (exit 0 or 1 of
+     10 set), so the runner's job isn't the cause.
+   So the notification is a late, lossy signal on this machine under load, not a count the box can rest
+   on: a box that reached its bound and ended was not counted. The job's peak commit is synchronous
+   accounting and passed the cap in every refused pass above.
+   The fix (test first): the box reads reaching its bound from the job's peak at or past its commit limit
+   (hex_core::job::reached_bound), and the notification, its margin and its read are gone. The test
+   windows::sys::tests::a_member_reaching_its_bound_is_counted_though_no_notification_comes clears the
+   job's notification (the one that doesn't come), runs a member committing until refused, and reads the
+   box's usage: at 52b298c FAILED 3 of 3 (oom_kills 0, peak 266,113,024-267,149,312); with the fix passed 3
+   of 3. With the fix: hex-core job:: 13/13, windows_process_box 10/10 three times (HEX-DIFF-5 inside the
+   contract test), clippy -D warnings exit 0, all on the clean clone under the same load.
+   What would falsify it: a refused commit with the job's peak under its commit limit (a member whose one
+   commit is larger than the room left is refused outright and leaves the peak below; the old notification
+   didn't count that either), or a peak at the limit with no member reaching the bound.
+
+22. what the job's commit limit does with a commit that would cross it, 2026-11-07T02:20-03:05Z on jupiter
+   (same machine and load as entry 21), bench/native/windows/job_events e20 (new) and e16 (rerun).
+   e20: a job limited to 256 MiB (268,435,456 B), no notification; the member commits 64 KiB at a time until
+   the job's own commit (JobObjectLimitViolationInformation.JobMemory, the current commit) is within half
+   of each size of the limit, then asks for ONE commit of that size. 3 passes each:
+     size 64 MiB:  before 234,909,696-234,917,888  admitted 0 of 3 (1455)  commit after = before  peak - limit 33,714,176-33,722,368
+     size 16 MiB:  before 260,063,232              admitted 0 of 3          commit after = before  peak - limit 8,437,760
+     size  4 MiB:  before 266,358,784-266,371,072  admitted 0 of 3          commit after = before  peak - limit 2,125,824-2,138,112
+     size  1 MiB:  before 267,931,648-267,935,744  admitted 0 of 3          commit after = before  peak - limit 548,864-552,960
+     size 256 KiB: before 268,333,056-268,337,152  admitted 0 of 3          commit after = before  peak - limit 159,744-163,840
+     size 64 KiB:  before 268,398,592-268,402,688  admitted 0 of 3          commit after = before  peak - limit 28,672-32,768
+   So a commit that would cross the limit is refused whole, the job's commit never passes the limit, and
+   PeakJobMemoryUsed counts the refused ask: the peak is before + the ask (+0 to 131,072 B).
+   e16 rerun (steps 64 KiB-256 MiB, commit_until_refused from the member's base): peak past the limit by
+   24,576-36,864 B at 64 KiB steps and 1,003,520-1,019,904 B at every step from 1 MiB to 256 MiB, as on
+   2026-11-03. Each step divides 256 MiB, so the refused ask always lands at the limit plus the member's own
+   base commit (~1 MiB). The 2026-11-03 reading, "a crossing commit admitted past the limit by a bounded
+   ~1.1 MiB", was wrong, and OVERSHOOT_MARGIN (2 x 1,163,264 B under the bound) rested on it.
+   The change (test first): the job's commit limit is the box's bound itself; the box reports its
+   committed peak as the job's peak at most the bound (hex_core::job::committed_peak); it reached its bound
+   when the peak is PAST the limit (reached_bound, now strict, since only a refused ask takes it there).
+   OVERSHOOT_MARGIN and LARGEST_RECORDED_OVERSHOOT are removed.
+   The test windows::sys::tests::a_box_commits_up_to_its_bound_and_is_refused_past_it (a member committing
+   1 MiB at a time until refused; the job's raw peak must pass the bound by at most the 1 MiB ask and the
+   131,072 B e20 saw beside one) FAILED 3 of 3 at 3f16fc5 (raw peak 266,113,024-266,162,176, refused about
+   2.3 MiB short of its 268,435,456 bound), and passes 3 of 3 with the change. With it: windows::sys::tests
+   5/5 three times, hex-core job:: 13/13, clippy -D warnings exit 0, and windows_process_box passed 7 of 8.
+   The one failure was a_box_past_its_bound's own 30 s wait for the hog to end ("the hog ends"), with the
+   contract test failing beside it, in a first run after a rebuild that took 98.9 s in all. A later series'
+   first run took 81.7 s and passed. After 120 s idle, each test alone ran in 1.3-6.0 s and the suite in
+   7.0 s. So something slows the first run on this machine, and it isn't shown to be this change; the 30 s
+   wait is the test's picked constant, already listed to become hex_api::conformance::PATIENCE.
+   What would falsify it: a job whose commit, not just its peak, passes the limit; or a peak past the limit
+   with no refused commit.
+
+23. how slow a program's end is in a first run after a rebuild, for the learned wait's Windows record
+   (hex_api::conformance::HostClass::Windows).
+   NOT OF RECORD (the lead, 2026-11-08): these runs, 2026-11-08T00:40-01:05Z, overlap the NTFS stall's
+   onset. D's run of Shards' Windows suite (00:12-00:41Z) set the stall off again, kernel time 66-71% by
+   00:41Z, so runs after 00:12Z aren't of record. The 1.8% below was D's reading at the 00:06Z boot, not
+   during these runs. The patience stands either way: Windows' record is Process Governor's 6,239 ms
+   (bench/native/RESULT.md, 2026-11-05), and these runs' slowest end (2,495 ms) is below it, so patience is
+   2 x 6,239 = 12.5 s. A retake on a clean jupiter waits on the lead's word. The correctness results stand
+   (only HEX-RT-14 failed; the feature query didn't time out).
+   Taken 2026-11-08T00:40-01:05Z on jupiter, after D's reboot at 00:06Z (kernel time 1.8%, D's reading at
+   the boot; the System process at 613 threads): 4 cycles at ac08c9b3, each a relink of hex.exe and the test exe then the whole
+   suite, in a copy whose LearnedWait::saw printed every answer and whose own five ends could wait 300 s.
+     cycle 1: CPU 35% before, 49 answers, slowest 764 ms (the hog 750 ms)
+     cycle 2: CPU 9%, 49 answers, slowest 2,305 ms (the hog 784 ms)
+     cycle 3: CPU 100%, 45 answers, slowest 2,132 ms (the hog 2,132 ms)
+     cycle 4: CPU 100%, 49 answers, slowest 2,495 ms (the hog 2,495 ms)
+   Every cycle failed only HEX-RT-14 (waits on step 4's 3c35f15); the feature query didn't time out. The
+   slowest first-run end is 2,495 ms, under Process Governor's 6,239 ms on jupiter (bench/native/RESULT.md),
+   so Windows' record is 6,239 ms (patience 12.5 s before any sample). Each suite took ~285 s, its
+   negative watches waiting out the 69.7 s bound the provisional 34,837 ms record gave.
+   Not of record: 2026-11-07T07:34-09:10Z, the same method beside D's orphaned whole-suite lane on jupiter
+   (16:21Z to ~20:00Z, our own load, the kernel at ~97%; the lead, 2026-11-08). It measured 8,701 / 14,507 /
+   24,411 / 34,837 ms and the feature query timing out every cycle, and gave the provisional 34,837 ms
+   record, now replaced. Each test alone after a rebuild there (3 cycles at 046778b): a_box_past_its_bound
+   7,443 ms first, 2,760 and 2,677 ms after.
 
 What HCS reports as a Windows oci box's Exit at its end, against the oracle's Signal(15), for HEX-DIFF-1 step 12
 and HEX-DIFF-2 step 11 (asked by step 7): NOT OBSERVED. windows_oci_boxes_hold_the_contract_and_the_steps_criteria

@@ -1,0 +1,25 @@
+# How an exec's stdio should reach its caller from a Windows node (native plan step 8): Windows' AF_UNIX passes
+# no handles, so the probe measures the candidates for an exec's first byte and its throughput, interleaved, the
+# load recorded each round, and checks which give the streams to the caller only. Its own workspace, outside
+# Hex's (a probe, as job_events is). Built and run on jupiter:
+#   cargo run --release -- bench <rounds> <bytes>     (CSV on stdout)
+#   cargo run --release -- refuse                     (each candidate's refusal of a second process)
+[package]
+name = "stdio_probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+shards-afunix = { path = "../../../../vendor/shards-api-draft/crates/afunix" }
+windows-sys = { version = "=0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Networking_WinSock",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_IO",
+  "Win32_System_Pipes",
+  "Win32_System_Threading",
+] }

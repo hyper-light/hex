@@ -71,8 +71,13 @@ pub enum Step {
     Wait(usize, End),
     /// Read all program `p` wrote to stdout (after it ended).
     Read(usize),
-    /// Watch program `p` for the suite's learned watch ([`conformance::still_running`]).
+    /// Watch program `p` for the suite's learned watch ([`conformance::still_running`]): for a liveness
+    /// no later step proves, such as a program in another box surviving a signal or a delete, whose end
+    /// (by any signal) would read the same as its own box's delete.
     Running(usize),
+    /// Whether program `p` runs now, with no watch: for a liveness a later step proves, since a program that
+    /// had ended on its own would show a different end or output there.
+    Alive(usize),
     /// Signal box `b`.
     Signal(usize, Signal),
     /// Inspect box `b`: its state and its init's exit.
@@ -150,8 +155,8 @@ pub const SCENARIOS: &[Scenario] = &[
             Step::Exec(0, Act::Wait),
             Step::Exec(0, Act::Fail(3)),
             Step::Wait(2, End::Exact),
-            Step::Running(0),
-            Step::Running(1),
+            Step::Alive(0),
+            Step::Alive(1),
             Step::Look(0),
             Step::Signal(0, Signal::TERM),
             Step::Wait(0, End::Exact),
@@ -223,7 +228,7 @@ pub const SCENARIOS: &[Scenario] = &[
             Step::Exec(0, Act::Say("beside the echo")),
             Step::Wait(1, End::Exact),
             Step::Read(1),
-            Step::Running(0),
+            Step::Alive(0),
             Step::Feed(0, "fed to the echo"),
             Step::Wait(0, End::Exact),
             Step::Read(0),
@@ -364,7 +369,11 @@ impl Play<'_> {
                 | Step::Listed(b)
                 | Step::Killed(b)
                 | Step::Delete(b) => *b,
-                Step::Feed(..) | Step::Wait(..) | Step::Read(_) | Step::Running(_) => continue,
+                Step::Feed(..)
+                | Step::Wait(..)
+                | Step::Read(_)
+                | Step::Running(_)
+                | Step::Alive(_) => continue,
             };
             let id = self.id(b)?;
             if !ids.contains(&id) {
@@ -465,15 +474,15 @@ impl Play<'_> {
                     .map_err(|e| format!("read: {e}"))?;
                 Seen::Out(out)
             }
-            Step::Running(p) => {
+            Step::Running(p) | Step::Alive(p) => {
                 let Some(s) = self.started(*p)? else {
                     return Ok(Seen::NeverStarted);
                 };
-                match s
-                    .proc
-                    .wait_for(conformance::still_running())
-                    .map_err(|e| e.to_string())?
-                {
+                let watch = match step {
+                    Step::Running(_) => conformance::still_running(),
+                    _ => Duration::ZERO,
+                };
+                match s.proc.wait_for(watch).map_err(|e| e.to_string())? {
                     None => Seen::StillRunning,
                     Some(exit) => Seen::Exit(exit),
                 }
@@ -700,6 +709,30 @@ mod tests {
         );
     }
 
+    /// Hex's rule for a learned wait's seed (the lead, 2026-11-07): a host class seeds from its own slowest
+    /// end on record, a record that holds a first run after a rebuild; a class with no such record (or a
+    /// host of no class) seeds from the slowest of any class's, never refused; and the fixed wait is twice
+    /// this host's seed (`conformance::PATIENCE`). Do: ask each class's seed, a class with no record's, and
+    /// a host of no class's. Expect: each class its own record, none past the slowest of any; no record and
+    /// no class the slowest of any class's.
+    #[test]
+    fn a_class_with_no_record_seeds_from_the_slowest_of_any_class() {
+        use conformance::{HostClass, SLOWEST_RECORDED_END, seed, seed_from};
+        for class in HostClass::ALL {
+            let record = class
+                .slowest_recorded_end()
+                .expect("each class has a record");
+            assert_eq!(seed(Some(class)), record, "{class:?}");
+            assert!(record <= SLOWEST_RECORDED_END, "{class:?}");
+        }
+        assert_eq!(seed_from(None), SLOWEST_RECORDED_END);
+        assert_eq!(seed(None), SLOWEST_RECORDED_END);
+        assert_eq!(
+            conformance::PATIENCE,
+            seed(HostClass::THIS).saturating_mul(2)
+        );
+    }
+
     /// The rule for a learned wait: before any sample its bound is twice the slowest answer on record;
     /// then twice the slowest of the record and what it has seen; and it only rises. Do: seed one at
     /// 100 ms, see 30 ms, then 300 ms, then 50 ms. Expect 200 ms, 200 ms, 600 ms, 600 ms.
@@ -818,6 +851,29 @@ mod tests {
         }
         fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
             self.0.delete(id)
+        }
+    }
+
+    /// A program's liveness that a later step proves costs no watch (the lead, 2026-11-07): HEX-DIFF-2's
+    /// programs, still running after a sibling exits, are ended by TERM (a program that had ended on its own
+    /// would show Code(0), not Signal(15)), and HEX-DIFF-6's echo hands back what it is fed, so each checks
+    /// liveness at the moment. Do: run both against the simulator, timed. Expect: each passes in less than
+    /// one [`conformance::still_running`] watch.
+    #[test]
+    fn a_liveness_a_later_step_proves_waits_out_no_watch() {
+        for id in ["HEX-DIFF-2", "HEX-DIFF-6"] {
+            let s = SCENARIOS.iter().find(|s| s.id == id).unwrap();
+            let t = Instant::now();
+            differ(
+                &SimRuntime::new(),
+                &SimFixture::Process,
+                &SimFixture::Process,
+                s,
+                conformance::patience(),
+            )
+            .unwrap();
+            let took = t.elapsed();
+            assert!(took < conformance::still_running(), "{id} took {took:?}");
         }
     }
 

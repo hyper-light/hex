@@ -78,14 +78,93 @@ pub struct Failure {
     pub why: String,
 }
 
-/// The slowest end recorded across every driver and OS of the native bench, from a program's start to
-/// its reported end: Process Governor's 6,239 ms on jupiter (bench/native/RESULT.md, Windows, pass 1).
-pub const SLOWEST_RECORDED_END: Duration = Duration::from_millis(6_239);
-/// The learned wait's bound before any sample, twice [`SLOWEST_RECORDED_END`] (the x2 the false-alarm margin):
-/// a fixed wait for a program's end, for the tests that wait outside the suite's learned waits
+/// The class of host a suite runs on, by its OS: each keeps its own record of how slow a program's end has
+/// been, from its start to its reported end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostClass {
+    Linux,
+    Macos,
+    Windows,
+}
+
+impl HostClass {
+    /// Every class.
+    pub const ALL: [HostClass; 3] = [HostClass::Linux, HostClass::Macos, HostClass::Windows];
+
+    /// The class of the host this is built for, if it is one of them.
+    pub const THIS: Option<HostClass> = if cfg!(target_os = "linux") {
+        Some(HostClass::Linux)
+    } else if cfg!(target_os = "macos") {
+        Some(HostClass::Macos)
+    } else if cfg!(target_os = "windows") {
+        Some(HostClass::Windows)
+    } else {
+        None
+    };
+
+    /// The slowest end on this class's record, across every driver of the native bench and the suites,
+    /// counting a first run after a rebuild (every upgrade's first run is one, and a fresh binary is
+    /// scanned before it runs), or `None` where no record holds one yet.
+    /// - Windows: Process Governor's 6,239 ms on jupiter (bench/native/RESULT.md, Windows, pass 1). It is
+    ///   above every end in four first runs of windows_process_box after a rebuild there, the slowest
+    ///   2,495 ms, though those runs overlap the NTFS stall's onset and aren't of record
+    ///   (bench/install/records/windows-jupiter-20261105.txt entry 23).
+    /// - Linux: 957 ms, the slowest of 294 answers in each of three first runs of process_box, oci_box,
+    ///   oci_spec_box and node_socket after a rebuild on fedora at load 20-108
+    ///   (bench/native/records/firstrun-linux-e34d48d-20261107T173109Z.txt).
+    /// - macOS: 939 ms, a hog's end on adas-mac-studio.local-2 at load 15-20, the first program a rebuilt
+    ///   macos_process_box ran (bench/native/records/firstrun-macos-9908a6da-20261107T1823Z.txt,
+    ///   2026-11-08), above the 839 ms seen there before it, the 770 ms seen on adalundhe-macbook-pro at load
+    ///   21 (2026-11-06, [`still_running`]) and adas-mac-studio-2's 534 ms.
+    pub const fn slowest_recorded_end(self) -> Option<Duration> {
+        match self {
+            HostClass::Windows => Some(Duration::from_millis(6_239)),
+            HostClass::Linux => Some(Duration::from_millis(957)),
+            HostClass::Macos => Some(Duration::from_millis(939)),
+        }
+    }
+}
+
+/// The slowest end on any class's record ([`HostClass::slowest_recorded_end`]).
+pub const SLOWEST_RECORDED_END: Duration = slower(
+    slower(
+        slower(Duration::ZERO, HostClass::Linux.slowest_recorded_end()),
+        HostClass::Macos.slowest_recorded_end(),
+    ),
+    HostClass::Windows.slowest_recorded_end(),
+);
+
+/// The slower of `a` and the record `b`, where there is one.
+const fn slower(a: Duration, b: Option<Duration>) -> Duration {
+    match b {
+        Some(record) if record.as_nanos() > a.as_nanos() => record,
+        _ => a,
+    }
+}
+
+/// What a learned wait on a host of `class` seeds from (Hex's rule for learned waits): its class's slowest
+/// end on record ([`seed_from`]).
+pub const fn seed(class: Option<HostClass>) -> Duration {
+    match class {
+        Some(c) => seed_from(c.slowest_recorded_end()),
+        None => seed_from(None),
+    }
+}
+
+/// What a learned wait seeds from given its class's `record`: that record, or for a class with none (or a
+/// host of no class), the slowest on any class's record, rather than refusing to wait.
+pub const fn seed_from(record: Option<Duration>) -> Duration {
+    match record {
+        Some(r) => r,
+        None => SLOWEST_RECORDED_END,
+    }
+}
+
+/// The learned wait's bound before any sample on this host, twice its [`seed`] (the x2 the false-alarm
+/// margin): a fixed wait for a program's end, for the tests that wait outside the suite's learned waits
 /// (hex-cli's oci_box, oci_spec_box and node_socket on every native line). The suite itself waits on
 /// [`patience`], which learns.
-pub const PATIENCE: Duration = SLOWEST_RECORDED_END.saturating_mul(2);
+pub const PATIENCE: Duration = seed(HostClass::THIS).saturating_mul(2);
 
 /// A wait whose bound is learned (Hex's rule for learned waits): before any sample, twice the slowest
 /// answer on its record; then twice the slowest of the record and what it has seen; and it only rises, so a
@@ -117,9 +196,9 @@ impl LearnedWait {
     }
 }
 
-/// The suite's waits for a program's end or a box's answer, seeded from [`SLOWEST_RECORDED_END`]; each wait
+/// The suite's waits for a program's end or a box's answer, seeded from this host's [`seed`]; each wait
 /// that gets its answer teaches it. [`PATIENCE`] is its bound before any sample.
-pub static ENDS: LearnedWait = LearnedWait::new(SLOWEST_RECORDED_END);
+pub static ENDS: LearnedWait = LearnedWait::new(seed(HostClass::THIS));
 
 /// How long a case waits now for a program it expects to end: [`ENDS`]' bound.
 pub fn patience() -> Duration {
@@ -350,7 +429,9 @@ fn signal(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     let mut p = rt
         .exec(&id, fx.program(&Act::Wait), Stdio::null())
         .map_err(|e| format!("exec: {e}"))?;
-    let early = p.wait_for(still_running()).map_err(|e| e.to_string())?;
+    // Running now, at the signal: its Signal(15) end below then proves it hadn't ended on its own (that
+    // would be Code(0)), so no watch is waited out.
+    let early = p.wait_for(Duration::ZERO).map_err(|e| e.to_string())?;
     ensure(early.is_none(), || {
         format!("a waiting program ended: {early:?}")
     })?;
@@ -689,4 +770,23 @@ fn unrenderable(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
         })?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sim::{SimFixture, SimRuntime};
+
+    /// HEX-RT-4 checks that a waiting program runs at the moment it signals the box: its Signal(15) end
+    /// then proves it hadn't ended on its own (that would be Code(0)), so the case waits out no watch (the
+    /// lead, 2026-11-07). Do: run HEX-RT-4 against the simulator, timed. Expect: it passes in less than one
+    /// [`still_running`] watch.
+    #[test]
+    fn the_signal_case_waits_out_no_watch() {
+        let case = CASES.iter().find(|c| c.id == "HEX-RT-4").unwrap();
+        let t = std::time::Instant::now();
+        (case.run)(&SimRuntime::new(), &SimFixture::Process).unwrap();
+        let took = t.elapsed();
+        assert!(took < still_running(), "HEX-RT-4 took {took:?}");
+    }
 }
