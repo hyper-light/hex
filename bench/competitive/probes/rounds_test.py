@@ -180,6 +180,35 @@ class Processes(unittest.TestCase):
                 with open(os.path.join(own, "cgroup.subtree_control")) as f:
                     self.assertEqual(f.read(), "+cpu +memory")
 
+    def test_a_libcrun_arm_given_a_cgroup_gives_each_container_its_own_beneath_it(self):
+        """Do a burst of two on a libcrun arm with ROUNDS_LIBCRUN_CGROUP set, expect each create handed a bundle of
+        its own whose cgroupsPath is that cgroup and its id, its root the base bundle's rootfs, and each bundle gone
+        after its delete."""
+        with tempfile.TemporaryDirectory() as d:
+            base = os.path.join(d, "bundle-true")
+            os.makedirs(os.path.join(base, "rootfs"))
+            with open(os.path.join(base, "config.json"), "w") as f:
+                json.dump({"root": {"path": "rootfs"}, "linux": {"namespaces": [{"type": "user"}]}}, f)
+            seen = os.path.join(d, "seen")
+            driver = stand_in(d, "driver", DRIVER.replace(
+                'verb = line.split()[0]',
+                f'verb = line.split()[0]\n    if verb == "create": open({seen!r}, "a").write(open(line.split()[1] + '
+                f'"/config.json").read() + "\\n")'))
+            env = dict(os.environ, ROUNDS_LIBCRUN=driver, ROUNDS_LIBCRUN_ROOT=d, ROUNDS_TRUE=base,
+                       ROUNDS_LIBCRUN_CGROUP="/user.slice/s.scope/libcrun")
+            arm = rd.LibcrunArm(2, os.path.join(d, "out"), env)
+            try:
+                creates, deletes = arm.burst(2, 2)
+            finally:
+                arm.close()
+            self.assertEqual((creates, deletes), ([2.0, 2.0], [1.0, 1.0]))
+            with open(seen) as f:
+                configs = [json.loads(line) for line in f]
+            self.assertEqual(sorted(c["linux"]["cgroupsPath"] for c in configs),
+                             ["/user.slice/s.scope/libcrun/lc000000-000", "/user.slice/s.scope/libcrun/lc000000-001"])
+            self.assertTrue(all(c["root"]["path"] == os.path.join(base, "rootfs") for c in configs))
+            self.assertEqual(os.listdir(os.path.join(d, "out", "arm-libcrun", "bundles")), [])
+
     def test_an_arm_that_refuses_a_burst_fails_the_run_naming_it(self):
         """Do a burst of 3 against the stand-in seam_oci, which refuses it, expect exit 3 and the refusal in the
         summary."""

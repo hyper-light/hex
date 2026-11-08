@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
 # Runs in the privileged container (run.sh): moves every process out of the cgroup namespace's root so
-# the root can hand its controllers down (cgroup v2's no-internal-processes rule), then runs each test.
+# the root can hand its controllers down (cgroup v2's no-internal-processes rule), then runs each test. Rootless, in a
+# delegated systemd --user scope (rootless_validate.sh), CGROUP_ROOT is the scope's cgroup, split the same way.
 # results.tsv: name, pass|fail|skip, the first failing TAP line, the checks the suite skipped.
 set -uo pipefail
-mkdir -p /sys/fs/cgroup/lab
-for p in $(cat /sys/fs/cgroup/cgroup.procs); do echo "$p" > /sys/fs/cgroup/lab/cgroup.procs 2>/dev/null; done
-for c in $(cat /sys/fs/cgroup/cgroup.controllers); do echo "+$c" > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null; done
+C=${CGROUP_ROOT:-/sys/fs/cgroup}
+mkdir -p "$C/lab"
+for p in $(cat "$C/cgroup.procs"); do echo "$p" > "$C/lab/cgroup.procs" 2>/dev/null; done
+for c in $(cat "$C/cgroup.controllers"); do echo "+$c" > "$C/cgroup.subtree_control" 2>/dev/null; done
 # Rows go to a local file and are copied to $OUT once: appends over the guest's 9p share (vm7_lab.sh,
 # cache=loose) came back repeated, 1711 rows for 58 tests (aa_lab.sh, 2026-11-05).
 RESULTS=$(mktemp)
 cd "$RT" || exit 1
-export RUNTIME=${RUNTIME:-/opt/runtime} TMPDIR=/tmp
+# TMPDIR: the container's /tmp, unless a rootless run names one off the host's shared /tmp (rootless_validate.sh).
+export RUNTIME=${RUNTIME:-/opt/runtime} TMPDIR=${TMPDIR:-/tmp}
 for dir in validation/*/; do
   name=$(basename "$dir")
   [ -x "validation/$name/$name.t" ] || continue

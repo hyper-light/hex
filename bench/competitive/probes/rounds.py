@@ -19,7 +19,9 @@ The first <warmup> rounds are marked and summarized apart: each arm's first burs
 Env: ROUNDS_SEAM, ROUNDS_HEX, ROUNDS_SLEEP and ROUNDS_TRUE (seam_oci's binary, the hex binary, and the `sleep` and
 `true` bundles) for hex arms, and ROUNDS_CGROUP, a cgroup with controllers to hand down, under which each hex arm's
 node gets a cgroup of its own for its box root; ROUNDS_LIBCRUN and ROUNDS_LIBCRUN_ROOT (the driver and its state root)
-and ROUNDS_TRUE for libcrun. Every other variable reaches each arm as it is (the node's HEXBENCH_* settings among them).
+and ROUNDS_TRUE for libcrun, and ROUNDS_LIBCRUN_CGROUP, beneath which each libcrun container gets a cgroup of its own
+(rootless, where libcrun makes none unless the bundle names one). Every other variable reaches each arm as it is (the
+node's HEXBENCH_* settings among them).
 
 Writes into <out dir>: rounds.jsonl, a line a round; arms.json, what each arm said of itself at its end (a hex arm's
 seam_oci result, the node's counts over the phase among it); summary.json and summary.md, each arm's creates and
@@ -30,6 +32,7 @@ import json
 import math
 import os
 import select
+import shutil
 import signal
 import subprocess
 import sys
@@ -207,14 +210,36 @@ class Driver:
 
 
 class LibcrunArm:
-    """libcrun in process: one driver per concurrency slot, each a slot's lifecycles in turn."""
+    """libcrun in process: one driver per concurrency slot, each a slot's lifecycles in turn. With
+    ROUNDS_LIBCRUN_CGROUP (a cgroup's path in the hierarchy, as linux.cgroupsPath names one), each container gets a
+    cgroup of its own beneath it, as each of Hex's boxes has: rootless, libcrun makes one only where the bundle names
+    a path the user may write, so each lifecycle gets a bundle of its own naming `<that path>/<its id>`, written before
+    its create and removed after its delete, both untimed."""
 
     def __init__(self, conc, out_dir, env):
         self.name, self.out = "libcrun", os.path.join(out_dir, "arm-libcrun")
         os.makedirs(self.out)
         self.bundle, self.bursts = env["ROUNDS_TRUE"], 0
+        self.cgroup = env.get("ROUNDS_LIBCRUN_CGROUP") or None
+        if self.cgroup:
+            with open(os.path.join(self.bundle, "config.json")) as f:
+                self.config = json.load(f)
+            self.config["root"]["path"] = os.path.join(self.bundle, self.config["root"]["path"])
+            self.bundles = os.path.join(self.out, "bundles")
+            os.mkdir(self.bundles)
         self.drivers = [Driver(env["ROUNDS_LIBCRUN"], env["ROUNDS_LIBCRUN_ROOT"],
                                os.path.join(self.out, f"driver{i}.err")) for i in range(conc)]
+
+    def bundle_for(self, cid):
+        """The bundle a create of `cid` takes: the shared one, or one of its own naming its cgroup."""
+        if not self.cgroup:
+            return self.bundle
+        d = os.path.join(self.bundles, cid)
+        os.mkdir(d)
+        config = dict(self.config, linux=dict(self.config.get("linux", {}), cgroupsPath=f"{self.cgroup}/{cid}"))
+        with open(os.path.join(d, "config.json"), "w") as f:
+            json.dump(config, f)
+        return d
 
     def burst(self, lifecycles, conc):
         if conc > len(self.drivers):
@@ -231,8 +256,9 @@ class LibcrunArm:
                         return
                     claimed[0] = j + 1
                 cid = f"lc{self.bursts:06}-{j:03}"
+                bundle = self.bundle_for(cid)
                 try:
-                    create = self.drivers[i].ask("create", self.bundle, cid)
+                    create = self.drivers[i].ask("create", bundle, cid)
                     try:
                         self.drivers[i].ask("start", cid)
                     finally:
@@ -240,6 +266,9 @@ class LibcrunArm:
                 except ArmError as e:
                     errors.append(str(e))
                     return
+                finally:
+                    if bundle != self.bundle:
+                        shutil.rmtree(bundle)
                 results[i].append((create, delete))
 
         threads = [threading.Thread(target=slot, args=(i,)) for i in range(conc)]
