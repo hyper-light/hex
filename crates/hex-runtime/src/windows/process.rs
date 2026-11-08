@@ -212,6 +212,11 @@ impl JobBox {
         self.state.job.borrowed()
     }
 
+    /// The box's job handle value, for the keeper to duplicate (`super::keeper`); the box keeps the handle.
+    pub fn job_token(&self) -> usize {
+        self.state.job.raw() as usize
+    }
+
     /// Whether the box is being deleted, so no member is started in it.
     pub fn stopping(&self) -> bool {
         self.state.stopping.load(Ordering::SeqCst)

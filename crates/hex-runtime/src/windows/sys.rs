@@ -16,9 +16,10 @@ use std::os::windows::io::{AsRawHandle, OwnedHandle};
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA,
-    ERROR_NOT_ENOUGH_QUOTA, GetLastError, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
-    SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, DuplicateHandle,
+    ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_NOT_ENOUGH_QUOTA, FILETIME,
+    GetLastError, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
+    WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::System::JobObjects::{
     CreateJobObjectW, JOB_OBJECT_CPU_RATE_CONTROL_ENABLE, JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
@@ -32,11 +33,13 @@ use windows_sys::Win32::System::JobObjects::{
 };
 use windows_sys::Win32::System::Threading::{
     ALL_PROCESSOR_GROUPS, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
-    CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
-    GetActiveProcessorCount, GetExitCodeProcess, InitializeProcThreadAttributeList,
-    LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-    PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES,
-    STARTUPINFOEXW, STARTUPINFOW, WaitForSingleObject,
+    CreateEventW, CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
+    GetActiveProcessorCount, GetCurrentProcess, GetExitCodeProcess, GetProcessTimes,
+    InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcess,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_DUP_HANDLE,
+    PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, ResumeThread,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, SetEvent, WaitForMultipleObjects,
+    WaitForSingleObject,
 };
 
 use hex_core::job::Cpu;
@@ -551,6 +554,156 @@ pub fn resume(thread: &Handle) -> io::Result<()> {
         return Err(last_error());
     }
     Ok(())
+}
+
+/// A copy of `source` (a handle of this process's) made in `into`'s process, with the same access: its
+/// value there, which only `into` uses (a node's keeper, `super::keeper`). Not inheritable.
+pub fn duplicate_into(source: usize, into: &Handle) -> io::Result<usize> {
+    let mut theirs: HANDLE = null_mut();
+    // SAFETY: `source` is a handle value of this process, `into` a process handle opened with
+    // PROCESS_DUP_HANDLE (owned by the caller for the call); the value written is `into`'s, a number here.
+    let ok = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            source as HANDLE,
+            into.raw(),
+            &raw mut theirs,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    if ok == 0 {
+        return Err(last_error());
+    }
+    Ok(theirs as usize)
+}
+
+/// A copy, in this process, of the handle `value` of `from`'s process, with the same access, owned here.
+pub fn duplicate_from(from: &Handle, value: usize) -> io::Result<Handle> {
+    let mut mine: HANDLE = null_mut();
+    // SAFETY: `from` is a process handle opened with PROCESS_DUP_HANDLE; `value` names a handle in it (a
+    // stale value is refused by the call, ERROR_INVALID_HANDLE, or names whatever handle has it, which the
+    // caller checks); the handle written is this process's, owned below.
+    let ok = unsafe {
+        DuplicateHandle(
+            from.raw(),
+            value as HANDLE,
+            GetCurrentProcess(),
+            &raw mut mine,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    if ok == 0 {
+        return Err(last_error());
+    }
+    // SAFETY: a handle this call made in this process, owned from here.
+    Ok(unsafe { Handle::own(mine) })
+}
+
+/// Closes the handle `value` in `into`'s process (`DUPLICATE_CLOSE_SOURCE`, no copy made).
+pub fn close_in(into: &Handle, value: usize) -> io::Result<()> {
+    // SAFETY: `into` is a process handle opened with PROCESS_DUP_HANDLE; with DUPLICATE_CLOSE_SOURCE and no
+    // target the call closes `value` there and makes nothing here.
+    let ok = unsafe {
+        DuplicateHandle(
+            into.raw(),
+            value as HANDLE,
+            null_mut(),
+            null_mut(),
+            0,
+            0,
+            DUPLICATE_CLOSE_SOURCE,
+        )
+    };
+    if ok == 0 {
+        return Err(last_error());
+    }
+    Ok(())
+}
+
+/// Process `pid` opened for waiting on, handing handles to and from, and reading its times; `None` where
+/// no process has the pid.
+pub fn open_process(pid: u32) -> io::Result<Option<Handle>> {
+    // SAFETY: opens `pid` with the rights named; the handle returned is owned below.
+    let h = unsafe {
+        OpenProcess(
+            PROCESS_SYNCHRONIZE | PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION,
+            0,
+            pid,
+        )
+    };
+    if h.is_null() {
+        let e = last_error();
+        // ERROR_INVALID_PARAMETER: no process has that pid.
+        if e.raw_os_error() == Some(87) {
+            return Ok(None);
+        }
+        return Err(e);
+    }
+    // SAFETY: a handle just opened, owned from here.
+    Ok(Some(unsafe { Handle::own(h) }))
+}
+
+/// When `process` was created (100 ns ticks since 1601), which with its pid names it: a process given
+/// the pid since has another.
+pub fn created(process: &Handle) -> io::Result<u64> {
+    let (mut c, mut e, mut k, mut u): (FILETIME, FILETIME, FILETIME, FILETIME) = (
+        zeroed_struct(),
+        zeroed_struct(),
+        zeroed_struct(),
+        zeroed_struct(),
+    );
+    // SAFETY: a process handle with PROCESS_QUERY_LIMITED_INFORMATION; four FILETIMEs written.
+    let ok = unsafe {
+        GetProcessTimes(
+            process.raw(),
+            &raw mut c,
+            &raw mut e,
+            &raw mut k,
+            &raw mut u,
+        )
+    };
+    if ok == 0 {
+        return Err(last_error());
+    }
+    Ok((u64::from(c.dwHighDateTime) << 32) | u64::from(c.dwLowDateTime))
+}
+
+/// A manual-reset event named `name` (NUL-terminated wide, in the session's `Local\\` namespace),
+/// unsignalled: made if new, else the one of that name opened. The node and its keeper share it by name so
+/// either side makes it.
+pub fn named_event(name: &[u16]) -> io::Result<Handle> {
+    // SAFETY: no attributes; manual-reset, unsignalled; `name` is NUL-terminated and alive for the call.
+    // CreateEventW returns a handle to a new event or to one of that name already, owned below.
+    let h = unsafe { CreateEventW(null(), 1, 0, name.as_ptr()) };
+    if h.is_null() {
+        return Err(last_error());
+    }
+    // SAFETY: a handle just made or opened, owned from here.
+    Ok(unsafe { Handle::own(h) })
+}
+
+/// Signals `event`.
+pub fn set(event: &Handle) -> io::Result<()> {
+    // SAFETY: an event handle this process owns.
+    if unsafe { SetEvent(event.raw()) } == 0 {
+        return Err(last_error());
+    }
+    Ok(())
+}
+
+/// Waits, without end, for the first of `a` and `b` to be signalled: `true` for `a`.
+pub fn first_of(a: &Handle, b: &Handle) -> io::Result<bool> {
+    let both = [a.raw(), b.raw()];
+    // SAFETY: two live handles, waited on without end for either.
+    match unsafe { WaitForMultipleObjects(2, both.as_ptr(), 0, u32::MAX) } {
+        WAIT_OBJECT_0 => Ok(true),
+        r if r == WAIT_OBJECT_0.saturating_add(1) => Ok(false),
+        _ => Err(last_error()),
+    }
 }
 
 /// Whether `process` ended within `timeout_ms` (`u32::MAX` is forever).
