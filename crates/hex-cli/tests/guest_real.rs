@@ -193,6 +193,7 @@ impl shards_api::Guests for Counted {
         self.boots.fetch_add(1, Ordering::SeqCst);
         self.shards.boot(spec)
     }
+
     fn attach(
         &self,
         identity: &shards_api::Identity,
@@ -321,8 +322,9 @@ fn the_oci_class_holds_its_contract_through_the_nodes_socket() {
 
 /// Native plan step 8 (T-T7.1.2): `hex node` killed (SIGKILL) with an oci box running in its guest, then
 /// restarted on the same state: the guest outlived the node (its VM is a process of its own), so the node
-/// takes it back, and with it the box, still running, a program still exec'd in it; no second guest is
-/// booted and the first isn't left orphaned.
+/// takes it back (`shards_api::Guests::attach` of the identity it recorded), and with it the box, still
+/// running, a program still exec'd in it; no second guest is booted, and no VM is left orphaned: none of
+/// the first guest's VM processes runs beside a guest the restarted node booted instead.
 #[cfg(target_os = "macos")]
 #[test]
 fn an_oci_box_in_the_guest_outlives_its_node_and_is_taken_back() {
@@ -352,6 +354,7 @@ fn an_oci_box_in_the_guest_outlives_its_node_and_is_taken_back() {
     );
     let node = GuestNode::start(dir.path());
     let booted_again = node.descendants();
+    let first_alive: Vec<u32> = vm.iter().copied().filter(|p| alive(*p)).collect();
     let client = node.client();
     let back = client.inspect(&id);
     let ran = back.as_ref().ok().map(|_| {
@@ -387,7 +390,13 @@ fn an_oci_box_in_the_guest_outlives_its_node_and_is_taken_back() {
         "an exec in the taken-back box"
     );
     assert!(
+        booted_again.is_empty() || first_alive.is_empty(),
+        "an orphan VM: the first guest's processes {first_alive:?} ran on beside the guest the restarted \
+         node booted ({booted_again:?})"
+    );
+    assert!(
         booted_again.is_empty(),
-        "the restarted node booted another guest ({booted_again:?}) beside the one that outlived it"
+        "the restarted node booted another guest ({booted_again:?}) rather than take back the one that \
+         outlived it"
     );
 }
