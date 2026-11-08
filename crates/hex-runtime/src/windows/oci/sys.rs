@@ -25,7 +25,7 @@ use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
     CM_Get_Device_Interface_ListW, CR_SUCCESS,
 };
 use windows_sys::Win32::Foundation::{
-    DUPLICATE_SAME_ACCESS, DuplicateHandle, GetLastError, HANDLE, HLOCAL, HMODULE,
+    DUPLICATE_SAME_ACCESS, DuplicateHandle, GENERIC_ALL, GetLastError, HANDLE, HLOCAL, HMODULE,
     INVALID_HANDLE_VALUE, LocalFree,
 };
 use windows_sys::Win32::Security::SECURITY_DESCRIPTOR;
@@ -48,7 +48,7 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::core::{GUID, HRESULT, PCWSTR, PWSTR};
 
-use hex_core::hcs::{Host, HostKind};
+use hex_core::hcs::{self, Host, HostKind};
 
 use crate::windows::sys::Handle;
 
@@ -117,6 +117,7 @@ type CreateSystem = unsafe extern "system" fn(
     *const SECURITY_DESCRIPTOR,
     *mut HCS_SYSTEM,
 ) -> HRESULT;
+type OpenSystem = unsafe extern "system" fn(PCWSTR, u32, *mut HCS_SYSTEM) -> HRESULT;
 type SystemOp = unsafe extern "system" fn(HCS_SYSTEM, HCS_OPERATION, PCWSTR) -> HRESULT;
 type CloseSystem = unsafe extern "system" fn(HCS_SYSTEM);
 type CreateProcess = unsafe extern "system" fn(
@@ -159,6 +160,7 @@ struct Api {
     wait_result: WaitResult,
     wait_result_and_process: WaitResultAndProcess,
     create_system: CreateSystem,
+    open_system: OpenSystem,
     start_system: SystemOp,
     terminate_system: SystemOp,
     close_system: CloseSystem,
@@ -237,6 +239,7 @@ impl Api {
                 "HcsCreateComputeSystem",
                 CreateSystem
             ),
+            open_system: export!(core, "computecore.dll", "HcsOpenComputeSystem", OpenSystem),
             start_system: export!(core, "computecore.dll", "HcsStartComputeSystem", SystemOp),
             terminate_system: export!(
                 core,
@@ -415,6 +418,29 @@ pub fn create_system(id: &str, document: &str, patience: Duration) -> Result<Sys
         }
     })?;
     Ok(System(system))
+}
+
+/// Opens compute system `id` a node before this one made, where it still runs (`HcsOpenComputeSystem`,
+/// with `GENERIC_ALL` as HCS's own sample reopens one: `VD/hcs/Reference/ComputeSystemSample.md:24-38`);
+/// `None` where HCS has no system of that id. The handle takes every call the creating node's did.
+pub fn open_system(id: &str) -> Result<Option<System>, HcsFailure> {
+    let api = api().map_err(|m| HcsFailure {
+        code: 0x8037_0114,
+        message: Some(m.to_owned()),
+    })?;
+    let id = wide(id);
+    let mut system: HCS_SYSTEM = null_mut();
+    // SAFETY: id is a NUL-terminated wide string that outlives the call, which is synchronous (no
+    // operation); system receives the handle, owned below on success.
+    let hr = unsafe { (api.open_system)(id.as_ptr(), GENERIC_ALL, &mut system) };
+    if hr < 0 {
+        let f = HcsFailure::of(hr, None);
+        return match hcs::hcs_error(f.code) {
+            hcs::HcsError::NotFound => Ok(None),
+            _ => Err(f),
+        };
+    }
+    Ok(Some(System(system)))
 }
 
 impl System {
