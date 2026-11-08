@@ -431,7 +431,8 @@ fn exit_of(rt: &dyn Runtime, id: &BoxId, patience: Duration) -> Result<crate::Bo
         if info.exit.is_some() {
             return Ok(info);
         }
-        if deadline.is_none_or(|d| std::time::Instant::now() >= d) {
+        // No deadline is a measuring patience's: the wait is the fact's alone.
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             return Err(format!("no exit reported after {patience:?}: {info:?}"));
         }
         // park_timeout (thread::sleep is disallowed) yields between looks at the fact.
