@@ -125,6 +125,18 @@ class Record(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn("part 19 p99 700 us, best of 2 (p1): misses the bar (500 us)", out)
 
+    def test_a_record_whose_copy_is_fastest_says_so_and_sets_no_way_against_itself(self):
+        """Do the copy fastest in every cell, expect the record to name the copy the default, say no new way's create
+        p50 is below it, and set no create p99 of the copy against its own."""
+        slow_new = {"copy": 0.7, "tree": 0.9, "empty": 1.0}
+        with tempfile.TemporaryDirectory() as d:
+            cells = [(f"p{p}-L{L}", cell(d, f"p{p}-L{L}", slow_new, P19)) for L in (6, 12) for p in (1, 2)]
+            rc, out = record(d, cells)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("- the default way is the copy: neither new way's create p50 is below it (the medians of its "
+                      "cells: copy 0.700, tree 0.900, empty 1.000 ms).", out)
+        self.assertNotIn("the default way's create p99 below the copy's", out)
+
     def test_a_cell_whose_arm_took_another_way_is_refused(self):
         """Do a tree arm whose creates were all copies, expect the run refused, naming the cell and the arm."""
         with tempfile.TemporaryDirectory() as d:

@@ -178,6 +178,9 @@ def main(argv):
     print()
     print(f"## Verdicts (best of {max(len(v) for v in cells.values())} per load, summarize.py's)")
     print()
+    if default == "copy":
+        print("- the default way is the copy: neither new way's create p50 is below it (the medians of its cells: "
+              + ", ".join(f"{w} {lines[w]:.3f}" for w in WAYS) + " ms).")
     for L in sorted(cells):
         by_pass = cells[L]
         for new in ("tree", "empty"):
@@ -190,9 +193,10 @@ def main(argv):
               f"{len(by_pass)} ({bp}): {bar} the bar ({BAR_US} us); in each pass "
               + ", ".join(f"{p} {c['part19'].get(default, {}).get('p99')}" for p, c in sorted(by_pass.items()))
               + ".")
-        lower = [p for p, c in by_pass.items() if c["create"][default]["p99"] < c["create"]["copy"]["p99"]]
-        print(f"- {L} loops: the default way's create p99 below the copy's in {len(lower)} of {len(by_pass)} "
-              f"passes ({', '.join(sorted(lower)) or 'none'}).")
+        if default != "copy":
+            lower = [p for p, c in by_pass.items() if c["create"][default]["p99"] < c["create"]["copy"]["p99"]]
+            print(f"- {L} loops: the default way's create p99 below the copy's in {len(lower)} of {len(by_pass)} "
+                  f"passes ({', '.join(sorted(lower)) or 'none'}).")
     if rt_dir:
         crun, missed, more = runtime_tools(rt_dir)
         print(f"- runtime-tools: hex passes {len(crun) - len(missed)} of the {len(crun)} tests crun passes"
