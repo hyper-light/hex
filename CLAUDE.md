@@ -160,7 +160,15 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   (`TerminateJobObject`) and closes its handles (`CloseHandle`), and reads the machine's processor count
   (`GetActiveProcessorCount`). For the `oci` class's Shards guest it reads the default shared roots
   (docs/design/shards-guest.md §4a): the users folder from its known folder (`SHGetKnownFolderPath` with
-  `FOLDERID_UserProfiles`, its string freed by `CoTaskMemFree`) and the temp folder (`GetTempPath2W`). `windows-sys` binds these as `unsafe` foreign functions, and std's own
+  `FOLDERID_UserProfiles`, its string freed by `CoTaskMemFree`) and the temp folder (`GetTempPath2W`).
+  Where its boxes outlive the node (the keeper, `super::keeper`; decision
+  "the Windows node, on one completion port"), it names each box's job (`CreateJobObjectW` with a name,
+  reopened by the next node with `OpenJobObjectW`), and a keeper holds a second handle to each: the node
+  duplicates the job into the keeper and closes it there on delete (`DuplicateHandle` into another process
+  and with `DUPLICATE_CLOSE_SOURCE`, the keeper opened by `OpenProcess` with `PROCESS_DUP_HANDLE`), names
+  a process by its creation time (`GetProcessTimes`) so a reused pid is told apart, waits on a process or
+  the keeper's stop (`WaitForMultipleObjects`), and makes and signals that stop (`CreateEventW` named,
+  `SetEvent`). `windows-sys` binds these as `unsafe` foreign functions, and std's own
   job-object support and its `PROC_THREAD_ATTRIBUTE_JOB_LIST`/`_HANDLE_LIST` process creation are
   unstable; Rust can express none of them safely.
 - `crates/hex-runtime/src/windows/oci/sys.rs`: the Windows `oci` class, a Windows image run process-isolated
