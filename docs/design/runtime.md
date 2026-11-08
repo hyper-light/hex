@@ -904,9 +904,15 @@ guarantee that no box outlives Hex. Both facts force the shape:
   restarts the node; here the bound is the backstop). The node signals a stop event only on a clean
   shutdown, never on a respawn: the stop is shared by the state folder, so signalling it would also stop the
   new keeper.
-- *Breakaway.* The keeper holds handles only; it need not be a member of the node's own job. *To measure*
-  (on a clean jupiter): whether the keeper can run outside the node's job under kiln's runs and under the
-  installer's service, and this record will say what holds where.
+- *Breakaway.* The keeper holds handles only; it need not be a member of the node's own job. A child
+  inherits the node's job membership unless it is made to break away, so the keeper's lifetime is that job's.
+  Under a kiln run the node (and so the keeper) sits in kiln's job, which kiln holds: the node can die inside
+  the run and the keeper lives on, and the run ending ends them both (a dev/test node's boxes don't outlive
+  the run, as a crashed Linux node's wait on the service). *To measure* (under a kiln run on a clean
+  jupiter): that the keeper survives the node's death within the run. The installer's service is the real
+  case, and the SCM runs a service in *no* job unless the service makes one, so a keeper the service starts
+  is in no job and outlives any node; that is measured for real when the service exists (step 6). No
+  temporary service is made on jupiter (an admin change not approved).
 - An `oci` box's compute system is made without `ShouldTerminateOnLastHandleClosed`, and the restarted node
   opens it by its id (`HcsOpenComputeSystem`). The HCS side is step 4's agent's. *From it*: a box's scratch
   survives a node kill — the crash test asserts `sandbox.vhdx` is still there after the kill, in the created
