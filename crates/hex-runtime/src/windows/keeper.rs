@@ -78,13 +78,25 @@ pub fn run(args: &Args) -> Result<(), Refusal> {
 /// The keeper's stop event's name, one per state folder (`Local\hex-keep-<hash of path>-stop`): the node
 /// and its keeper reach the same event by the folder they share.
 fn stop_name(state: &Path) -> Vec<u16> {
-    let mut h: u64 = 1469598103934665603;
-    for b in state.to_string_lossy().bytes() {
-        h = (h ^ u64::from(b)).wrapping_mul(1099511628211);
-    }
-    format!("Local\\hex-keep-{h:016x}-stop\0")
+    format!("Local\\hex-keep-{:016x}-stop\0", path_hash(state))
         .encode_utf16()
         .collect()
+}
+
+/// A name for the node keeping its state in `dir`, apart from another node's in the session: a hash of the
+/// folder, so the same node (the same state folder) names the same box jobs across its restarts, and hex,
+/// so it is safe in a job object's name (`Local\hex-<node>-<box>`, [`super::WinRuntime::job_name`]).
+pub fn node_name(dir: &Path) -> String {
+    format!("{:016x}", path_hash(dir))
+}
+
+/// FNV-1a of a path's bytes, for the names a node and its keeper derive from the folder they share.
+fn path_hash(p: &Path) -> u64 {
+    let mut h: u64 = 1469598103934665603;
+    for b in p.to_string_lossy().bytes() {
+        h = (h ^ u64::from(b)).wrapping_mul(1099511628211);
+    }
+    h
 }
 
 fn write_ready(path: &Path, pid: u32, created: u64) -> io::Result<()> {

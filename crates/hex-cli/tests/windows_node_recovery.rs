@@ -110,6 +110,36 @@ fn record(dir: &Path, id: &BoxId) -> PathBuf {
     dir.join("state").join(format!("{id}.json"))
 }
 
+/// Stops the keeper a node of the test's state folder left running (`hex keep` outlives its node, which is
+/// the point), so a test leaves none behind. It reads `state/keeper/keeper.owner` (the keeper's pid and
+/// start time) and asks it to stop, as a node going down cleanly does. Declared first in a test, so it
+/// drops after every `Node`.
+struct Keepers(PathBuf);
+
+impl Keepers {
+    fn of(dir: &Path) -> Self {
+        Self(dir.join("state").join("keeper"))
+    }
+}
+
+impl Drop for Keepers {
+    fn drop(&mut self) {
+        let Ok(text) = std::fs::read_to_string(self.0.join("keeper.owner")) else {
+            return;
+        };
+        let mut words = text.split_whitespace();
+        let (Some(Ok(pid)), Some(Ok(created))) = (
+            words.next().map(str::parse::<u32>),
+            words.next().map(str::parse::<u64>),
+        ) else {
+            return;
+        };
+        if let Ok(keeper) = hex_runtime::windows::keeper::NodeKeeper::open(pid, created, &self.0) {
+            keeper.stop();
+        }
+    }
+}
+
 /// Ends every process of the box's member left running if the test fails before its delete does: the
 /// test's own cleanup, so a red run leaves nothing behind.
 struct Leftover(u32);
@@ -130,6 +160,7 @@ impl Drop for Leftover {
 #[test]
 fn boxes_made_are_taken_back_after_a_kill() {
     let dir = tempfile::Builder::new().prefix("rec-").tempdir().unwrap();
+    let _keepers = Keepers::of(dir.path());
     let (running, empty) = (BoxId::new("running").unwrap(), BoxId::new("empty").unwrap());
     let node = Node::start(dir.path());
     let client = node.client();
@@ -166,6 +197,7 @@ fn boxes_made_are_taken_back_after_a_kill() {
 #[test]
 fn a_box_killed_mid_delete_is_cleaned_up() {
     let dir = tempfile::Builder::new().prefix("rec-").tempdir().unwrap();
+    let _keepers = Keepers::of(dir.path());
     let id = BoxId::new("mid-delete").unwrap();
     let node = Node::start(dir.path());
     let client = node.client();

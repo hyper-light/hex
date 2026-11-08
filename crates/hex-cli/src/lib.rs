@@ -49,6 +49,30 @@ pub fn version_line() -> String {
     format!("hex {} ({commit})\n", env!("CARGO_PKG_VERSION"))
 }
 
+/// `hex keep`: the Windows node's keeper (`hex_runtime::windows::keeper`), a passive process holding its
+/// boxes' job handles so they outlive the node. Its state folder and ready path come as flags or from the
+/// environment the node starts it with; it runs until its stop is asked. 0 when it stopped cleanly, 2 for a
+/// bad argument, 1 when it couldn't run.
+#[cfg(windows)]
+#[must_use]
+pub fn keep(args: &[String]) -> u8 {
+    use std::io::Write;
+    let parsed = match hex_runtime::windows::keeper::Args::parse(args) {
+        Ok(a) => a,
+        Err(why) => {
+            let _ = writeln!(std::io::stderr(), "hex keep: {why}");
+            return 2;
+        }
+    };
+    match hex_runtime::windows::keeper::run(&parsed) {
+        Ok(()) => 0,
+        Err(why) => {
+            let _ = writeln!(std::io::stderr(), "hex keep: {why}");
+            1
+        }
+    }
+}
+
 /// The reply to the binary's arguments; `None` stands for an argument that isn't Unicode.
 #[must_use]
 pub fn reply(args: &[Option<String>]) -> Reply {

@@ -179,10 +179,15 @@ fn host(args: &Args) -> Result<Arc<dyn Host>, (u8, String)> {
     Ok(Arc::new(node))
 }
 
-/// The Windows node: the `process` class, its boxes' records in `--state`.
+/// The Windows node: the `process` and `oci` classes, its boxes outliving it through a keeper (`hex keep`,
+/// started apart from the node and holding a second handle to each box's job), their records in `--state`,
+/// taken back or cleaned up after a crash (T-T7.1.2, native plan step 8). The node and the box jobs are
+/// named for the state folder, so the next node on the same `--state` finds and takes back the keeper and
+/// the boxes. `--box-root` is Linux's.
 #[cfg(windows)]
 fn host(args: &Args) -> Result<Arc<dyn Host>, (u8, String)> {
     use hex_node::recorded::Recorded;
+    use hex_runtime::windows::{WinRuntime, keeper};
     let failed = |e: Refusal| (1, e.to_string());
     if args.box_root.is_some() {
         return Err((
@@ -190,8 +195,14 @@ fn host(args: &Args) -> Result<Arc<dyn Host>, (u8, String)> {
             format!("--box-root names a cgroup directory, which is Linux's\n{USAGE}"),
         ));
     }
-    let node =
-        Recorded::open(hex_runtime::windows::WinRuntime::new(), &args.state).map_err(failed)?;
+    let exe = std::env::current_exe()
+        .map_err(|e| (1, format!("the node can't name its own binary: {e}")))?;
+    // `hex keep`, started by the runtime with its state folder and ready path in the environment.
+    let keep = vec![exe.to_string_lossy().into_owned(), "keep".to_owned()];
+    let keeper_dir = args.state.join("keeper");
+    let name = keeper::node_name(&keeper_dir);
+    let runtime = WinRuntime::outliving(&name, &keeper_dir, &keep).map_err(failed)?;
+    let node = Recorded::open(runtime, &args.state).map_err(failed)?;
     node.recover().map_err(failed)?;
     Ok(Arc::new(node))
 }

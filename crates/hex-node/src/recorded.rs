@@ -358,12 +358,23 @@ impl Recover for hex_runtime::windows::WinRuntime {
         Ok(None)
     }
 
+    /// Takes box `spec` back on this node: a `process` box by its named job, an `oci` box with its
+    /// container, scratch and init ([`hex_runtime::windows::WinRuntime::adopt`]). A box's job is named for
+    /// the node and the box, so it needs no per-process trace to find.
     fn adopt(&self, spec: &BoxSpec, _trace: Option<ProcId>) -> Result<(), Refusal> {
-        self.create(spec.clone()).map(drop)
+        hex_runtime::windows::WinRuntime::adopt(self, spec)
     }
 
+    /// Windows ends a box recovery removes by its name, in [`Recover::discard`], which has its spec; a
+    /// trace names nothing of a Windows box.
     fn end(&self, _trace: Option<ProcId>) -> Result<(), Refusal> {
         Ok(())
+    }
+
+    /// Ends box `spec` a recovery removes: its named job's members, and an `oci` box's container, scratch
+    /// and record ([`hex_runtime::windows::WinRuntime::end`]).
+    fn discard(&self, spec: &BoxSpec) -> Result<(), Refusal> {
+        hex_runtime::windows::WinRuntime::end(self, &spec.id)
     }
 }
 
