@@ -329,89 +329,77 @@ impl Proc for SimProc {
     }
 }
 
-/// A simulated node in a guest: box [`g`]'s calls are its, held at its gate while the test says so (a guest
-/// slow to answer), and its programs' pids are the guest's, which no host process has.
+/// A simulated node in a guest: box [`g`]'s calls are forwarded to it ([`Host::forward`]) and answered when
+/// its gate is open (held, a guest slow to answer), and its programs' pids are the guest's, which no host
+/// process has; their ends come from it, as messages.
+/// An answer the simulated guest gives once its gate is open.
+type Waiting = Box<dyn FnOnce() + Send>;
+
 #[derive(Default)]
 struct Guest {
-    held: Mutex<bool>,
-    /// Calls waiting at the gate.
-    holding: Mutex<usize>,
-    opened: Condvar,
-    /// Its programs' ends, by guest pid: none while one runs.
-    programs: Mutex<BTreeMap<u32, Option<Exit>>>,
-    ended: Condvar,
+    /// Whether its gate is shut, and the answers waiting behind it, oldest first.
+    gate: Mutex<(bool, Vec<Waiting>)>,
+    /// What takes each running program's end, by guest pid.
+    programs: Mutex<BTreeMap<u32, Ended>>,
 }
 
 impl Guest {
     fn hold(&self, held: bool) {
-        *self.held.lock().unwrap() = held;
-        self.opened.notify_all();
+        let waiting = {
+            let mut gate = self.gate.lock().unwrap();
+            gate.0 = held;
+            if held {
+                Vec::new()
+            } else {
+                std::mem::take(&mut gate.1)
+            }
+        };
+        for answer in waiting {
+            answer();
+        }
     }
 
     fn holding(&self) -> usize {
-        *self.holding.lock().unwrap()
+        self.gate.lock().unwrap().1.len()
     }
 
-    /// Waits at the gate while it is held, at most [`PATIENCE`].
-    fn gate(&self) {
-        let deadline = Instant::now() + PATIENCE;
-        let mut held = self.held.lock().unwrap();
-        *self.holding.lock().unwrap() += 1;
-        while *held && Instant::now() < deadline {
-            held = self.opened.wait_timeout(held, PATIENCE).unwrap().0;
+    /// Gives `answer` now, or once the gate opens.
+    fn answer(&self, answer: Waiting) {
+        let mut gate = self.gate.lock().unwrap();
+        if gate.0 {
+            gate.1.push(answer);
+        } else {
+            drop(gate);
+            answer();
         }
-        *self.holding.lock().unwrap() -= 1;
     }
 
-    /// Its program `pid` ends with `exit`, unless it has ended already.
+    /// Its program `pid` ends with `exit`, unless it has ended or been let go.
     fn end(&self, pid: u32, exit: Exit) {
-        self.programs
-            .lock()
-            .unwrap()
-            .entry(pid)
-            .or_insert(None)
-            .get_or_insert(exit);
-        self.ended.notify_all();
+        let taker = self.programs.lock().unwrap().remove(&pid);
+        if let Some(ended) = taker {
+            ended(Ok(exit));
+        }
     }
 }
 
 /// A program in the guest, by its guest pid.
-struct GuestProc {
+struct GuestProgram {
     pid: u32,
     guest: Arc<Guest>,
 }
 
-impl Proc for GuestProc {
-    fn pid(&self) -> u32 {
-        self.pid
+impl Remote for GuestProgram {
+    fn kill(&self, done: Killed) {
+        let (pid, guest) = (self.pid, Arc::clone(&self.guest));
+        // Answered later, as a guest's answer comes on its connection.
+        std::thread::spawn(move || {
+            done(Ok(()));
+            guest.end(pid, Exit::Signal(9));
+        });
     }
-    fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
-        Ok(self
-            .guest
-            .programs
-            .lock()
-            .unwrap()
-            .get(&self.pid)
-            .copied()
-            .flatten())
-    }
-    fn wait_for(&mut self, timeout: Duration) -> Result<Option<Exit>, Refusal> {
-        let deadline = Instant::now() + timeout;
-        let mut programs = self.guest.programs.lock().unwrap();
-        loop {
-            if let Some(exit) = programs.get(&self.pid).copied().flatten() {
-                return Ok(Some(exit));
-            }
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return Ok(None);
-            }
-            programs = self.guest.ended.wait_timeout(programs, left).unwrap().0;
-        }
-    }
-    fn kill(&mut self) -> Result<(), Refusal> {
-        self.guest.end(self.pid, Exit::Signal(9));
-        Ok(())
+    fn release(&self) {
+        self.guest.programs.lock().unwrap().remove(&self.pid);
     }
 }
 
@@ -468,16 +456,6 @@ impl Runtime for SimHost {
     fn exec(&self, id: &BoxId, _program: Program, _stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
         self.sim.inspect(id)?;
         let pid = u32::try_from(self.next_pid.fetch_add(1, Ordering::SeqCst)).unwrap();
-        if *id == g() {
-            self.guest.gate();
-            // A guest pid: no host process has it.
-            let pid = pid + GUEST_PIDS;
-            self.guest.programs.lock().unwrap().insert(pid, None);
-            return Ok(Box::new(GuestProc {
-                pid,
-                guest: Arc::clone(&self.guest),
-            }));
-        }
         Ok(Box::new(SimProc {
             pid,
             os: Arc::clone(&self.os),
@@ -487,10 +465,6 @@ impl Runtime for SimHost {
         self.sim.signal(id, signal)
     }
     fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
-        if *id == g() {
-            self.guest.gate();
-            return self.sim.inspect(id);
-        }
         let deadline = Instant::now() + PATIENCE;
         let mut shut = self.shut.lock().unwrap();
         while *shut && Instant::now() < deadline {
@@ -511,6 +485,34 @@ impl Runtime for SimHost {
 }
 
 impl Host for SimHost {
+    /// Box [`g`]'s inspects and execs are its guest's; every other call runs here.
+    fn forward(&self, call: Call, stdio: Stdio, reply: Reply, ended: Ended) -> Forward {
+        match call {
+            Call::Inspect(id) if id == g() => {
+                let info = self.sim.inspect(&id);
+                self.guest.answer(Box::new(move || {
+                    reply(info.map(|i| Forwarded::Answer(Answer::Info(i))));
+                }));
+                Forward::Taken
+            }
+            Call::Exec { id, .. } if id == g() => {
+                // A guest pid: no host process has it.
+                let pid = u32::try_from(self.next_pid.fetch_add(1, Ordering::SeqCst)).unwrap()
+                    + GUEST_PIDS;
+                self.guest.programs.lock().unwrap().insert(pid, ended);
+                let program = Box::new(GuestProgram {
+                    pid,
+                    guest: Arc::clone(&self.guest),
+                });
+                self.guest.answer(Box::new(move || {
+                    reply(Ok(Forwarded::Started { pid, program }));
+                }));
+                Forward::Taken
+            }
+            call => Forward::Back(Box::new((call, stdio))),
+        }
+    }
+
     fn abandoned(&self, id: &BoxId) -> Result<(), Refusal> {
         self.abandoned.lock().unwrap().push(id.clone());
         Ok(())
@@ -828,6 +830,43 @@ fn a_guest_programs_end_comes_from_its_guest_and_no_host_pid_is_watched() {
     lab.host.guest.end(pid, Exit::Code(3));
     let (h, end) = answer_of(&sock);
     assert_eq!((h.id, end), (7, Answer::Exited(Exit::Code(3))));
+}
+
+/// HEX-SOCK-7 (the core), native plan step 8 (1): a kill of a guest program goes to its guest, is answered
+/// once the guest says it was sent, and its end, `Signal(9)`, comes as its exec's message; the OS is asked to
+/// kill nothing.
+#[test]
+fn a_guest_programs_kill_goes_to_its_guest() {
+    let lab = Lab::new();
+    let sock = lab.os.connect(true, 64);
+    lab.os.put(&sock, exec_in(7, g()));
+    assert!(matches!(answer_of(&sock).1, Answer::Started { .. }));
+    lab.os.put(&sock, request(8, Call::Kill { exec: 7 }));
+    let mut got = [answer_of(&sock), answer_of(&sock)].map(|(h, a)| (h.id, a));
+    got.sort_by_key(|(id, _)| *id);
+    assert_eq!(
+        got,
+        [(7, Answer::Exited(Exit::Signal(9))), (8, Answer::Done)]
+    );
+    assert!(lab.os.lock().killed.is_empty());
+}
+
+/// HEX-SOCK-6 (the core), native plan step 8 (1), the disconnect rule for a guest program: its client goes,
+/// so it is killed through its guest, and its end is counted in its box, not sent.
+#[test]
+fn a_guest_program_whose_client_goes_is_killed_by_its_guest_and_counted() {
+    let lab = Lab::new();
+    let sock = lab.os.connect(true, 64);
+    lab.os.put(&sock, exec_in(7, g()));
+    assert!(matches!(answer_of(&sock).1, Answer::Started { .. }));
+    lab.os.leave(&sock);
+    wait_until("the guest program to be counted in its box", || {
+        lab.host.abandoned.lock().unwrap().as_slice() == [g()]
+    });
+    wait_until("the connection and its program to go", || {
+        lab.connections() == 0 && lab.watched() == 0
+    });
+    assert!(lab.os.lock().killed.is_empty());
 }
 
 /// HEX-SOCK-7 (the core): an exec whose program the OS can't watch is refused, saying the node ended it.

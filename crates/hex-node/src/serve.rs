@@ -106,8 +106,53 @@ const STOP_PATIENCE: Duration = Duration::from_secs(60);
 /// The first token a connection or program takes: below it are the listener's and the wake's.
 const FIRST_TOKEN: u64 = 2;
 
+/// A forwarded call's answer, given once, from whichever thread it comes on.
+pub type Reply = Box<dyn FnOnce(Result<Forwarded, Refusal>) + Send>;
+/// A remote program's end, given once, from whichever thread it comes on: its exit, or why it can't be
+/// known (its guest's connection ended first).
+pub type Ended = Box<dyn FnOnce(Result<Exit, Refusal>) + Send>;
+/// Whether a remote program's kill was sent, given once.
+pub type Killed = Box<dyn FnOnce(Result<(), Refusal>) + Send>;
+
+/// What a host does with a call ([`Host::forward`]).
+pub enum Forward {
+    /// Its answer comes later, through the reply it was given.
+    Taken,
+    /// The host runs it itself, on the worker: the call and its exec's stdio, as they were given.
+    Back(Box<(Call, Stdio)>),
+}
+
+/// A forwarded call's answer.
+pub enum Forwarded {
+    /// Any call's answer but a started exec's.
+    Answer(Answer),
+    /// An exec's program started where the host isn't: its pid there, which names no process here, and
+    /// what kills it or lets it go. Its end comes to the exec's [`Ended`].
+    Started { pid: u32, program: Box<dyn Remote> },
+}
+
+/// A program that runs where the node's host isn't (its guest): the OS can't watch it, so its end comes as
+/// a message, and it is killed or let go by message too.
+/// Neither call gives its answer or the program's end before it returns: both come later, as messages.
+pub trait Remote: Send + Sync {
+    /// KILL to it alone; `done` hears whether that was sent.
+    fn kill(&self, done: Killed);
+    /// No one waits for its end any longer: it runs on, as a released in-process program does.
+    fn release(&self);
+}
+
 /// What the socket needs of the runtime it serves, beyond the seam.
 pub trait Host: Runtime {
+    /// Takes `call` to answer through `reply` once its answer comes, or gives it back to run on the
+    /// worker. A host takes the calls about boxes a node behind a connection holds (the node's guest):
+    /// what must be done here first (staging a box's root) is done on the worker, then the request goes
+    /// without waiting for its answer, so the worker is free and no other client's call waits on that
+    /// node. An exec's program's end goes to `ended`. By default every call runs here.
+    fn forward(&self, call: Call, stdio: Stdio, reply: Reply, ended: Ended) -> Forward {
+        let _ = (reply, ended);
+        Forward::Back(Box::new((call, stdio)))
+    }
+
     /// Counts in box `id` a program exec'd in it that the node ended because the connection watching
     /// it closed (the disconnect rule): reported as [`hex_api::BoxInfo::abandoned`].
     fn abandoned(&self, id: &BoxId) -> Result<(), Refusal>;
@@ -321,6 +366,8 @@ struct Shared<O: Os> {
     path: PathBuf,
     stopping: AtomicBool,
     table: Mutex<Table<O>>,
+    /// Signalled when a remote program's end is taken, for a stopping server that waits on them.
+    remote_ended: Condvar,
     jobs: Mutex<Jobs<O>>,
     work: Condvar,
     /// Why the I/O thread stopped, if it failed.
@@ -336,6 +383,9 @@ struct Table<O: Os> {
     /// Accepting paused: the agent ran out of descriptors, so a closed connection or a reaped program
     /// resumes it.
     accept_paused: bool,
+    /// Remote programs' ends that came before their start was registered, by token: at most one for each
+    /// exec under way, which the connections' program bounds hold.
+    early: BTreeMap<u64, Result<Exit, Refusal>>,
 }
 
 impl<O: Os> Default for Table<O> {
@@ -345,6 +395,7 @@ impl<O: Os> Default for Table<O> {
             watched: BTreeMap::new(),
             next: FIRST_TOKEN,
             accept_paused: false,
+            early: BTreeMap::new(),
         }
     }
 }
@@ -380,17 +431,34 @@ struct Out {
     reading: bool,
 }
 
-/// A program a connection's exec started, watched by the OS.
+/// A program a connection's exec started.
 struct Watched<O: Os> {
     conn: Arc<Conn<O>>,
     /// Its exec's id and version, which its end is sent with.
     exec: u64,
     version: u16,
     box_id: BoxId,
-    proc: Box<dyn Proc>,
-    watch: Option<O::Watch>,
+    run: Run<O>,
     /// Sent KILL because its connection closed: its end is counted in its box, not sent.
     killed: bool,
+}
+
+/// Where a watched program runs, and so what its end is seen through.
+enum Run<O: Os> {
+    /// Here: the OS's watch reports its end.
+    Local {
+        proc: Box<dyn Proc>,
+        watch: Option<O::Watch>,
+    },
+    /// Where the host isn't (its guest): its end comes as a message.
+    Remote(Arc<dyn Remote>),
+}
+
+/// A program just started: the token its exec took, its box, and its pid.
+struct Start {
+    token: u64,
+    box_id: BoxId,
+    pid: u32,
 }
 
 struct Jobs<O: Os> {
@@ -417,6 +485,12 @@ enum Job<O: Os> {
         passed: Vec<O::Passed>,
     },
     Abandoned(BoxId),
+    /// A forwarded list's answer, sent in its parts.
+    List {
+        conn: Arc<Conn<O>>,
+        header: Header,
+        infos: Vec<hex_api::BoxInfo>,
+    },
 }
 
 fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
@@ -459,6 +533,7 @@ impl<O: Os> Server<O> {
             path: path.to_owned(),
             stopping: AtomicBool::new(false),
             table: Mutex::new(Table::default()),
+            remote_ended: Condvar::new(),
             jobs: Mutex::new(Jobs::default()),
             work: Condvar::new(),
             fault: Mutex::new(None),
@@ -933,36 +1008,77 @@ impl<O: Os> Shared<O> {
     }
 
     /// The client no longer waits for exec `exec`'s program: it runs on, unwatched by the socket,
-    /// and the node's sweep reaps it once it ends, as with a dropped in-process `Proc`.
+    /// and the node's sweep reaps it once it ends, as with a dropped in-process `Proc`; a remote one is let
+    /// go by its host.
     fn release(&self, conn: &Conn<O>, exec: u64) -> Result<(), Refusal> {
-        let mut table = self.table()?;
-        let token = conn.out.lock().map_err(poisoned)?.programs.remove(&exec);
-        if let Some(mut w) = token.and_then(|t| table.watched.remove(&t))
-            && let Some(watch) = w.watch.take()
-        {
-            self.os.unwatch_program(watch);
+        let remote = {
+            let mut table = self.table()?;
+            let token = conn.out.lock().map_err(poisoned)?.programs.remove(&exec);
+            let remote = match token.and_then(|t| table.watched.remove(&t)).map(|w| w.run) {
+                Some(Run::Local {
+                    watch: Some(watch), ..
+                }) => {
+                    self.os.unwatch_program(watch);
+                    None
+                }
+                Some(Run::Remote(program)) => Some(program),
+                Some(Run::Local { watch: None, .. }) | None => None,
+            };
+            self.resume_accepting(&mut table)?;
+            remote
+        };
+        // Outside the table, so a host that answers at once can't wait on it.
+        if let Some(program) = remote {
+            program.release();
         }
-        self.resume_accepting(&mut table)
+        Ok(())
     }
 
-    /// KILL to the program exec `exec` of `conn` started, through the OS's watch as the disconnect rule's
-    /// is, so it can't reach a process given its pid since. Its end is then sent as any end is; one that has
-    /// ended (or was released) is no longer the connection's, and there is nothing to kill.
-    fn kill(&self, conn: &Conn<O>, exec: u64) -> Result<(), Refusal> {
-        let table = self.table()?;
-        let token = conn
-            .out
-            .lock()
-            .map_err(poisoned)?
-            .programs
-            .get(&exec)
-            .copied();
-        if let Some(watch) = token
-            .and_then(|t| table.watched.get(&t))
-            .and_then(|w| w.watch.as_ref())
-        {
-            self.os.kill(watch);
-        }
+    /// KILL to the program exec `exec` of `conn` started: through the OS's watch as the disconnect rule's
+    /// is, so it can't reach a process given its pid since, or by its host for a remote one, answered once
+    /// the host says it was sent. Its end is then sent as any end is; one that has ended (or was released)
+    /// is no longer the connection's, and there is nothing to kill.
+    fn kill(
+        self: &Arc<Self>,
+        conn: &Arc<Conn<O>>,
+        header: Header,
+        exec: u64,
+    ) -> Result<(), Refusal> {
+        let remote = {
+            let table = self.table()?;
+            let token = conn
+                .out
+                .lock()
+                .map_err(poisoned)?
+                .programs
+                .get(&exec)
+                .copied();
+            match token.and_then(|t| table.watched.get(&t)).map(|w| &w.run) {
+                Some(Run::Local {
+                    watch: Some(watch), ..
+                }) => {
+                    self.os.kill(watch);
+                    None
+                }
+                Some(Run::Remote(program)) => Some(Arc::clone(program)),
+                Some(Run::Local { watch: None, .. }) | None => None,
+            }
+        };
+        let Some(program) = remote else {
+            self.done(conn)?;
+            return self.answer(conn, header.version, header.id, &Answer::Done);
+        };
+        let shared = Arc::clone(self);
+        let conn = Arc::clone(conn);
+        program.kill(Box::new(move |sent| {
+            let answer = match sent {
+                Ok(()) => Answer::Done,
+                Err(why) => Answer::Refused(why),
+            };
+            let _ = shared
+                .done(&conn)
+                .and_then(|()| shared.answer(&conn, header.version, header.id, &answer));
+        }));
         Ok(())
     }
 
@@ -977,21 +1093,54 @@ impl<O: Os> Shared<O> {
             self.resume_accepting(&mut table)?;
             w
         };
-        let exit = match w.proc.try_wait() {
-            Ok(Some(exit)) => exit,
-            // Ready but not yet waitable can't happen on an OS whose watch reports the end (pidfd_open(2));
-            // watched again rather than lost.
-            Ok(None) => {
-                let mut table = self.table()?;
-                table.watched.insert(token, w);
-                return Ok(());
-            }
-            // Reaped elsewhere in this process: how it ended is no longer known.
-            Err(_) => Exit::Unknown,
+        let exit = match &mut w.run {
+            Run::Local { proc, .. } => match proc.try_wait() {
+                Ok(Some(exit)) => Some(exit),
+                // Ready but not yet waitable can't happen on an OS whose watch reports the end
+                // (pidfd_open(2)); watched again rather than lost.
+                Ok(None) => None,
+                // Reaped elsewhere in this process: how it ended is no longer known.
+                Err(_) => Some(Exit::Unknown),
+            },
+            // A remote program's end comes as its host's message, never as this OS's event.
+            Run::Remote(_) => None,
         };
-        if let Some(watch) = w.watch.take() {
+        let Some(exit) = exit else {
+            self.table()?.watched.insert(token, w);
+            return Ok(());
+        };
+        if let Run::Local { watch, .. } = &mut w.run
+            && let Some(watch) = watch.take()
+        {
             self.os.unwatch_program(watch);
         }
+        self.finish(w, exit)
+    }
+
+    /// A remote program's end came, on whichever thread its host reads it on: sent or counted as any end
+    /// is. Its end unknowable (its host's connection to it ended first) reads as a program reaped
+    /// elsewhere's. One that comes before its start is registered is kept for it.
+    fn remote_ended(
+        self: &Arc<Self>,
+        token: u64,
+        end: Result<Exit, Refusal>,
+    ) -> Result<(), Refusal> {
+        let w = {
+            let mut table = self.table()?;
+            let Some(w) = table.watched.remove(&token) else {
+                table.early.insert(token, end);
+                return Ok(());
+            };
+            self.resume_accepting(&mut table)?;
+            w
+        };
+        self.remote_ended.notify_all();
+        self.finish(w, end.unwrap_or(Exit::Unknown))
+    }
+
+    /// A program's end, taken from the table: sent to its connection, or counted in its box when the
+    /// connection closed or the disconnect rule killed it.
+    fn finish(self: &Arc<Self>, w: Watched<O>, exit: Exit) -> Result<(), Refusal> {
         let open = {
             let mut out = w.conn.out.lock().map_err(poisoned)?;
             out.programs.remove(&w.exec);
@@ -1015,10 +1164,15 @@ impl<O: Os> Shared<O> {
     }
 
     /// Ends a program whose connection closed: KILL through the OS's watch, so it can't reach a process
-    /// given its pid since; its end, reaped when the watch is ready, is counted in its box.
+    /// given its pid since, or by its host for a remote one; its end, when it comes, is counted in its box.
+    /// A remote kill its host can't send leaves the program to end of itself, counted then all the same.
     fn end(&self, w: &mut Watched<O>) {
-        if let Some(watch) = &w.watch {
-            self.os.kill(watch);
+        match &w.run {
+            Run::Local {
+                watch: Some(watch), ..
+            } => self.os.kill(watch),
+            Run::Local { watch: None, .. } => {}
+            Run::Remote(program) => program.kill(Box::new(|_| {})),
         }
         w.killed = true;
     }
@@ -1053,6 +1207,11 @@ impl<O: Os> Shared<O> {
                             let _ = self.host.abandoned(&id);
                             Ok(())
                         }
+                        Some(Job::List {
+                            conn,
+                            header,
+                            infos,
+                        }) => self.list(&conn, header, &infos),
                         None => Ok(()),
                     };
                 }
@@ -1101,26 +1260,81 @@ impl<O: Os> Shared<O> {
                 Job::Abandoned(id) => {
                     let _ = self.host.abandoned(&id);
                 }
+                Job::List {
+                    conn,
+                    header,
+                    infos,
+                } => {
+                    let _ = self.list(&conn, header, &infos);
+                }
             }
         }
     }
 
-    /// Runs one call and answers it; its place in flight is given back before the answer goes, so a
-    /// client that sends its next call on reading the answer never meets the bound.
+    /// Runs one call and answers it, or hands it to the host to answer later ([`Host::forward`]); its place
+    /// in flight is given back before the answer goes, so a client that sends its next call on reading
+    /// the answer never meets the bound. An exec takes its place among the connection's programs, its stdio
+    /// and its token first, so a forwarded one is held to the same bound.
     fn call(
-        &self,
+        self: &Arc<Self>,
         conn: &Arc<Conn<O>>,
         header: Header,
         call: Call,
         passed: Vec<O::Passed>,
     ) -> Result<(), Refusal> {
+        let reply = |answer: Answer| -> Result<(), Refusal> {
+            self.done(conn)?;
+            self.answer(conn, header.version, header.id, &answer)
+        };
+        let (stdio, program) = match &call {
+            Call::Exec { id, streams, .. } => {
+                if !self.reserve(conn)? {
+                    return reply(Answer::Refused(Refusal::Exhausted {
+                        what: PROGRAMS,
+                        bound: self.limits.programs,
+                    }));
+                }
+                let stdio = match self.os.stdio(*streams, passed) {
+                    Ok(stdio) => stdio,
+                    Err(r) => {
+                        self.unreserve(conn)?;
+                        return reply(Answer::Refused(r));
+                    }
+                };
+                (stdio, Some((self.table()?.token()?, id.clone())))
+            }
+            _ => (Stdio::null(), None),
+        };
+        let ended: Ended = match &program {
+            Some((token, _)) => {
+                let (shared, token) = (Arc::clone(self), *token);
+                Box::new(move |end| {
+                    let _ = shared.remote_ended(token, end);
+                })
+            }
+            None => Box::new(|_| {}),
+        };
+        let forwarded: Reply = {
+            let (shared, conn, program) = (Arc::clone(self), Arc::clone(conn), program.clone());
+            Box::new(move |got| {
+                let _ = shared.forwarded(&conn, header, program, got);
+            })
+        };
+        let call = match self.host.forward(call, stdio, forwarded, ended) {
+            Forward::Taken => return Ok(()),
+            Forward::Back(back) => match (*back, program) {
+                ((Call::Exec { id, program, .. }, stdio), Some((token, _))) => {
+                    return self.exec(conn, header, token, id, program, stdio);
+                }
+                ((call, _), _) => call,
+            },
+        };
         let host = &self.host;
         let answer = match call {
-            Call::Exec {
-                id,
-                program,
-                streams,
-            } => return self.exec(conn, header, id, program, streams, passed),
+            Call::Exec { .. } => Err(Refusal::Broken(
+                "an exec came back from its host without its place".to_owned(),
+            )),
+            Call::Kill { exec } => return self.kill(conn, header, exec),
             Call::List => {
                 let listed = host.list();
                 self.done(conn)?;
@@ -1136,16 +1350,79 @@ impl<O: Os> Shared<O> {
             Call::Usage(id) => host.usage(&id).map(Answer::Usage),
             Call::Delete(id) => host.delete(&id).map(|()| Answer::Done),
             Call::Netns => host.netns().map(Answer::Netns),
-            Call::Kill { exec } => self.kill(conn, exec).map(|()| Answer::Done),
+        };
+        reply(answer.unwrap_or_else(Answer::Refused))
+    }
+
+    /// A forwarded call's answer, on whichever thread its host gives it: sent to its client, or, for a
+    /// program started remotely, registered under the token its exec took and announced. A list's parts
+    /// go from a worker, as they may wait on their client.
+    fn forwarded(
+        self: &Arc<Self>,
+        conn: &Arc<Conn<O>>,
+        header: Header,
+        program: Option<(u64, BoxId)>,
+        got: Result<Forwarded, Refusal>,
+    ) -> Result<(), Refusal> {
+        let answer = match (got, program) {
+            (Ok(Forwarded::Started { pid, program }), Some((token, box_id))) => {
+                let table = self.table()?;
+                let start = Start { token, box_id, pid };
+                return self.started(table, conn, header, start, Run::Remote(Arc::from(program)));
+            }
+            (Ok(Forwarded::Started { program, .. }), None) => {
+                program.release();
+                Answer::Refused(Refusal::Broken(
+                    "the node's host started a program for a call that isn't an exec".to_owned(),
+                ))
+            }
+            (got, program) => {
+                if let Some((token, _)) = program {
+                    self.unreserve(conn)?;
+                    self.table()?.early.remove(&token);
+                }
+                match got {
+                    Ok(Forwarded::Answer(Answer::Boxes { infos, .. })) => {
+                        self.done(conn)?;
+                        return self.enqueue(Job::List {
+                            conn: Arc::clone(conn),
+                            header,
+                            infos,
+                        });
+                    }
+                    Ok(Forwarded::Answer(answer)) => answer,
+                    Ok(Forwarded::Started { .. }) => Answer::Refused(Refusal::Broken(
+                        "the node's host started a program twice for one exec".to_owned(),
+                    )),
+                    Err(why) => Answer::Refused(why),
+                }
+            }
         };
         self.done(conn)?;
-        let answer = answer.unwrap_or_else(Answer::Refused);
         self.answer(conn, header.version, header.id, &answer)
     }
 
     fn done(&self, conn: &Conn<O>) -> Result<(), Refusal> {
         let mut out = conn.out.lock().map_err(poisoned)?;
         out.in_flight = out.in_flight.saturating_sub(1);
+        Ok(())
+    }
+
+    /// Takes a place among the programs `conn` watches, before a program starts, so none starts that
+    /// can't be watched; false when none is left.
+    fn reserve(&self, conn: &Conn<O>) -> Result<bool, Refusal> {
+        let mut out = conn.out.lock().map_err(poisoned)?;
+        let held = out.programs.len().checked_add(out.reserved);
+        if held.is_none_or(|h| h >= self.limits.programs) {
+            return Ok(false);
+        }
+        out.reserved = out.reserved.saturating_add(1);
+        Ok(true)
+    }
+
+    fn unreserve(&self, conn: &Conn<O>) -> Result<(), Refusal> {
+        let mut out = conn.out.lock().map_err(poisoned)?;
+        out.reserved = out.reserved.saturating_sub(1);
         Ok(())
     }
 
@@ -1176,56 +1453,32 @@ impl<O: Os> Shared<O> {
         Ok(())
     }
 
-    /// An exec: the program started with its stdio from what the request carried, then watched by the
-    /// OS, announced, and its end sent after.
+    /// An exec the host runs here: the program started on its stdio, then watched by the OS, announced,
+    /// and its end sent after.
     fn exec(
-        &self,
+        self: &Arc<Self>,
         conn: &Arc<Conn<O>>,
         header: Header,
+        token: u64,
         id: BoxId,
         program: Program,
-        streams: Streams,
-        passed: Vec<O::Passed>,
+        stdio: Stdio,
     ) -> Result<(), Refusal> {
         let reply = |answer: Answer| -> Result<(), Refusal> {
             self.done(conn)?;
             self.answer(conn, header.version, header.id, &answer)
         };
-        // A place among the programs the connection watches, taken before the program starts, so
-        // none starts that can't be watched.
-        {
-            let mut out = conn.out.lock().map_err(poisoned)?;
-            let held = out.programs.len().checked_add(out.reserved);
-            if held.is_none_or(|h| h >= self.limits.programs) {
-                drop(out);
-                return reply(Answer::Refused(Refusal::Exhausted {
-                    what: PROGRAMS,
-                    bound: self.limits.programs,
-                }));
-            }
-            out.reserved = out.reserved.saturating_add(1);
-        }
-        let unreserve = || -> Result<(), Refusal> {
-            let mut out = conn.out.lock().map_err(poisoned)?;
-            out.reserved = out.reserved.saturating_sub(1);
-            Ok(())
-        };
-        let proc = match self
-            .os
-            .stdio(streams, passed)
-            .and_then(|stdio| self.host.exec(&id, program, stdio))
-        {
+        let proc = match self.host.exec(&id, program, stdio) {
             Ok(proc) => proc,
             Err(r) => {
-                unreserve()?;
+                self.unreserve(conn)?;
                 return reply(Answer::Refused(r));
             }
         };
         let pid = proc.pid();
         // Announced and watched under the table, so the I/O thread can't send its end before its
         // start: it looks the program up under the same lock.
-        let mut table = self.table()?;
-        let token = table.token()?;
+        let table = self.table()?;
         let watch = match self.os.watch_program(pid, token) {
             Ok(watch) => watch,
             Err(Unwatched { why, killed }) => {
@@ -1234,16 +1487,39 @@ impl<O: Os> Shared<O> {
                     let mut proc = proc;
                     let _ = proc.wait_for(STOP_PATIENCE);
                 }
-                unreserve()?;
+                self.unreserve(conn)?;
                 return reply(Answer::Refused(why));
             }
         };
+        let start = Start {
+            token,
+            box_id: id,
+            pid,
+        };
+        let run = Run::Local {
+            proc,
+            watch: Some(watch),
+        };
+        self.started(table, conn, header, start, run)
+    }
+
+    /// A program started: watched from now under `table`, held since its watch began, its place among
+    /// `conn`'s programs taken from its reservation, and announced; one whose connection closed while it
+    /// started is ended by the disconnect rule. A remote end that came before is taken now.
+    fn started(
+        self: &Arc<Self>,
+        mut table: MutexGuard<'_, Table<O>>,
+        conn: &Arc<Conn<O>>,
+        header: Header,
+        start: Start,
+        run: Run<O>,
+    ) -> Result<(), Refusal> {
         let open = {
             let mut out = conn.out.lock().map_err(poisoned)?;
             out.reserved = out.reserved.saturating_sub(1);
             out.in_flight = out.in_flight.saturating_sub(1);
             if out.open {
-                out.programs.insert(header.id, token);
+                out.programs.insert(header.id, start.token);
             }
             out.open
         };
@@ -1251,20 +1527,29 @@ impl<O: Os> Shared<O> {
             conn: Arc::clone(conn),
             exec: header.id,
             version: header.version,
-            box_id: id,
-            proc,
-            watch: Some(watch),
+            box_id: start.box_id,
+            run,
             killed: false,
         };
         if !open {
             // Its connection closed while it started: ended by the disconnect rule.
             self.end(&mut watched);
         }
-        table.watched.insert(token, watched);
+        let early = table.early.remove(&start.token);
+        table.watched.insert(start.token, watched);
         if open {
-            self.answer(conn, header.version, header.id, &Answer::Started { pid })?;
+            self.answer(
+                conn,
+                header.version,
+                header.id,
+                &Answer::Started { pid: start.pid },
+            )?;
         }
-        Ok(())
+        drop(table);
+        match early {
+            Some(end) => self.remote_ended(start.token, end),
+            None => Ok(()),
+        }
     }
 
     /// The server stops: every connection closes, ending its programs, and the thread waits a bounded
@@ -1282,19 +1567,27 @@ impl<O: Os> Shared<O> {
         let deadline = Instant::now().checked_add(STOP_PATIENCE);
         let mut events = Vec::with_capacity(EVENTS);
         loop {
-            let tokens: Vec<u64> = match self.table() {
-                Ok(table) => table.watched.keys().copied().collect(),
-                Err(_) => break,
-            };
-            if tokens.is_empty() {
-                break;
-            }
             let left = deadline.map_or(Duration::ZERO, |d| {
                 d.saturating_duration_since(Instant::now())
             });
-            if left.is_zero() {
+            let Ok(table) = self.table() else { break };
+            if table.watched.is_empty() || left.is_zero() {
                 break;
             }
+            let tokens: Vec<u64> = table
+                .watched
+                .iter()
+                .filter(|(_, w)| matches!(w.run, Run::Local { .. }))
+                .map(|(token, _)| *token)
+                .collect();
+            if tokens.is_empty() {
+                // Only remote programs are left, whose ends come as their host's messages.
+                if self.remote_ended.wait_timeout(table, left).is_err() {
+                    break;
+                }
+                continue;
+            }
+            drop(table);
             events.clear();
             if self.os.wait(&mut events, Some(left)).is_err() {
                 break;
