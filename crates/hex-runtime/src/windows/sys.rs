@@ -16,8 +16,9 @@ use std::os::windows::io::{AsRawHandle, OwnedHandle};
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_MORE_DATA, ERROR_NOT_ENOUGH_QUOTA, GetLastError, HANDLE,
-    HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA,
+    ERROR_NOT_ENOUGH_QUOTA, GetLastError, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::System::JobObjects::{
     CreateJobObjectW, JOB_OBJECT_CPU_RATE_CONTROL_ENABLE, JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
@@ -26,8 +27,8 @@ use windows_sys::Win32::System::JobObjects::{
     JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION, JOBOBJECT_CPU_RATE_CONTROL_INFORMATION,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAndIoAccountingInformation,
     JobObjectBasicProcessIdList, JobObjectCpuRateControlInformation,
-    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
-    TerminateJobObject,
+    JobObjectExtendedLimitInformation, OpenJobObjectW, QueryInformationJobObject,
+    SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
     ALL_PROCESSOR_GROUPS, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
@@ -189,7 +190,15 @@ pub struct Limits {
     pub memory: Option<u64>,
     pub processes: Option<u32>,
     pub cpu: Option<Cpu>,
+    /// Whether closing the job's last handle ends what runs in it: a box of a runtime driven in process
+    /// ends with it; a node's named box outlives the node, for the next to take back.
+    pub kill_on_close: bool,
 }
+
+/// The rights a node takes on a box's job it opens by name (winnt.h's `JOB_OBJECT_ASSIGN_PROCESS`,
+/// `_SET_ATTRIBUTES`, `_QUERY`, `_TERMINATE`; windows-sys has them only under
+/// `Win32_System_SystemServices`): start members in it, set its limits, read it, end it.
+const JOB_RIGHTS: u32 = 0x0001 | 0x0002 | 0x0004 | 0x0008;
 
 /// A box's job: created, limited, its member started inside it, its accounting read, and ended. The
 /// handle is closed on drop; with kill-on-close set, that ends every process still in the job.
@@ -208,6 +217,48 @@ impl Job {
         Ok(Job(unsafe { Handle::own(h) }))
     }
 
+    /// A new, empty job object named `name` (in the session's `Local\` namespace), its security the
+    /// creator's default: this user and SYSTEM. One of that name held already is refused
+    /// (`ERROR_ALREADY_EXISTS`): it is a box a node made before, which [`Job::open`] takes back.
+    pub fn create_named(name: &str) -> io::Result<Job> {
+        let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+        // SAFETY: null attributes; `wide` is a NUL-terminated name alive for the call. The handle returned
+        // (to a new job, or to one of that name already, which GetLastError then says) is owned below.
+        let h = unsafe { CreateJobObjectW(null(), wide.as_ptr()) };
+        if h.is_null() {
+            return Err(last_error());
+        }
+        let existed = last_error().raw_os_error() == i32::try_from(ERROR_ALREADY_EXISTS).ok();
+        // SAFETY: h is a job handle this call returned, owned from here, closed as the value drops.
+        let job = Job(unsafe { Handle::own(h) });
+        if existed {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("a job named {name} is held already: a box a node made before"),
+            ));
+        }
+        Ok(job)
+    }
+
+    /// The job named `name`, if one is: a box a node before this one made, which outlived it. `None` where
+    /// no job holds the name (the box's members all ended and its last handle closed, or the machine
+    /// restarted).
+    pub fn open(name: &str) -> io::Result<Option<Job>> {
+        let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+        // SAFETY: `wide` is a NUL-terminated name alive for the call; not inherited. The handle returned
+        // is owned below.
+        let h = unsafe { OpenJobObjectW(JOB_RIGHTS, 0, wide.as_ptr()) };
+        if h.is_null() {
+            let e = last_error();
+            if e.raw_os_error() == i32::try_from(ERROR_FILE_NOT_FOUND).ok() {
+                return Ok(None);
+            }
+            return Err(e);
+        }
+        // SAFETY: h is a job handle this call returned, owned from here.
+        Ok(Some(Job(unsafe { Handle::own(h) })))
+    }
+
     /// The job's handle, borrowed.
     pub fn borrowed(&self) -> std::os::windows::io::BorrowedHandle<'_> {
         self.0.borrowed()
@@ -217,13 +268,16 @@ impl Job {
         self.0.raw()
     }
 
-    /// Sets the job's limits: a hard commit cap, an active-process cap, kill-on-close (so closing the
-    /// last handle ends the tree), and the CPU weight or hard cap. Breakaway is never allowed (neither
-    /// `BREAKAWAY_OK` nor `SILENT_BREAKAWAY_OK` is set),
-    /// so no member can leave the job.
+    /// Sets the job's limits: a hard commit cap, an active-process cap, kill-on-close where asked (so
+    /// closing the last handle ends the tree), and the CPU weight or hard cap. Breakaway is never allowed
+    /// (neither `BREAKAWAY_OK` nor `SILENT_BREAKAWAY_OK` is set), so no member can leave the job.
     pub fn configure(&self, limits: &Limits) -> io::Result<()> {
         let mut ext: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed_struct();
-        let mut flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let mut flags = if limits.kill_on_close {
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        } else {
+            0
+        };
         if let Some(bytes) = limits.memory {
             flags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
             ext.JobMemoryLimit = usize::try_from(bytes).unwrap_or(usize::MAX);
@@ -612,6 +666,56 @@ mod tests {
         );
         assert_eq!(assigned, listed);
         drop(started);
+    }
+
+    /// T-T7.1.2 (native plan step 8), the evidence for how a Windows box outlives its node: do make a named
+    /// job without kill-on-close, start a member in it, open the job by name while a handle is held, then
+    /// close every handle to the job. Expect: the open finds it while held; the member runs on after the
+    /// last handle closes; and the name is gone then (Windows' object manager drops a temporary object's
+    /// name with its last handle, though its processes still hold the job), so a node that held the only
+    /// handle can't be followed by one that opens its box by name.
+    #[test]
+    fn a_named_jobs_name_lapses_with_its_last_handle_though_its_member_runs() {
+        let name = format!("Local\\hex-test-{}-lapse", std::process::id());
+        let job = Job::create_named(&name).unwrap();
+        job.configure(&Limits {
+            memory: None,
+            processes: None,
+            cpu: None,
+            kill_on_close: false,
+        })
+        .unwrap();
+        let system = std::env::var("SystemRoot").unwrap();
+        let mut spawn = Spawn {
+            command_line: format!("{system}\\System32\\PING.EXE -n 600 127.0.0.1")
+                .encode_utf16()
+                .chain([0])
+                .collect(),
+            environment: hex_core::job::environment(&[("SystemRoot".to_owned(), system)]),
+            cwd: None,
+            stdio: [nul(), nul(), nul()],
+        };
+        let started = create(&mut spawn, &[job.raw()]).unwrap();
+        resume(&started.thread).unwrap();
+        let held = Job::open(&name).unwrap();
+        assert!(
+            held.is_some(),
+            "a named job wasn't found by its name while held"
+        );
+        drop(held);
+        drop(job);
+        let running = !wait(&started.process, 0).unwrap();
+        let after = Job::open(&name).unwrap();
+        // No job is left to end it by: it is ended as any process is.
+        std::process::Command::new("taskkill")
+            .args(["/PID", &started.pid.to_string(), "/F"])
+            .output()
+            .unwrap();
+        assert!(running, "the member ended with the job's last handle");
+        assert!(
+            after.is_none(),
+            "the job was found by its name after its last handle closed"
+        );
     }
 
     /// HEX-WIN-1 (native plan step 3): a box's live count is one read of its job, however many members

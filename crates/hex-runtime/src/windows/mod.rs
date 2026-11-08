@@ -52,6 +52,10 @@ pub struct WinRuntime {
     /// own folder unless told otherwise.
     launcher: Option<PathBuf>,
     boxes: Mutex<BTreeMap<BoxId, Held>>,
+    /// The node's name for its boxes' jobs, where its `process` boxes outlive it ([`WinRuntime::outliving`]):
+    /// a box is the job `Local\hex-<node>-<box>`, which a node on the same name takes back. `None`: a
+    /// runtime driven in process, whose boxes end with it (kill-on-close).
+    node: Option<String>,
     /// The installer's features that are off, read when the runtime is made (node start), so no box's
     /// create waits on the query: a feature turns on or off only across a reboot, which starts the
     /// node again.
@@ -80,6 +84,7 @@ impl WinRuntime {
             scratch_root,
             launcher: None,
             boxes: Mutex::new(BTreeMap::new()),
+            node: None,
             features_off: OnceLock::new(),
             #[cfg(test)]
             feature_reads: std::sync::atomic::AtomicU32::new(0),
@@ -87,6 +92,64 @@ impl WinRuntime {
         // Read now so no create waits on it; a failure is read again, and refused, at the first ask.
         let _ = runtime.features_off();
         runtime
+    }
+
+    /// A node's runtime on this machine whose `process` boxes outlive it: each is the job named for `node`
+    /// and the box, without kill-on-close, so a node killed with boxes running leaves them running, and the
+    /// next node on the same name takes them back ([`WinRuntime::adopt`]) or ends them
+    /// ([`WinRuntime::end`]). `node` names one node's boxes apart from another's in the session.
+    pub fn outliving(node: &str) -> Self {
+        let mut runtime = Self::new();
+        runtime.node = Some(node.to_owned());
+        runtime
+    }
+
+    /// The job name a node's `process` box `id` has (`Local\hex-<node>-<box>`), where its boxes outlive it.
+    fn job_name(&self, id: &BoxId) -> Option<String> {
+        self.node
+            .as_ref()
+            .map(|node| format!("Local\\hex-{node}-{id}"))
+    }
+
+    /// Takes back `process` box `spec` a node before this one made, with whatever runs in it (made again,
+    /// empty, where nothing does). Refused for a runtime whose boxes don't outlive it, and for an `oci` box,
+    /// whose compute system went with its node.
+    pub fn adopt(&self, spec: &BoxSpec) -> Result<(), Refusal> {
+        let Some(name) = self.job_name(&spec.id) else {
+            return Err(Refusal::Invalid {
+                what: "adopt",
+                why: format!(
+                    "box {}: this runtime's boxes end with it, so none outlives a node to take back",
+                    spec.id
+                ),
+            });
+        };
+        if !matches!(spec.class, ClassSpec::Process) {
+            return Err(Refusal::Invalid {
+                what: "adopt",
+                why: format!(
+                    "box {} is an oci box, whose compute system ends with its node",
+                    spec.id
+                ),
+            });
+        }
+        spec.bounds.check()?;
+        let b = JobBox::take_back(spec.id.clone(), &spec.bounds, self.processors, &name)?;
+        let mut boxes = self.boxes()?;
+        if boxes.contains_key(&spec.id) {
+            return Err(Refusal::Exists(spec.id.clone()));
+        }
+        boxes.insert(spec.id.clone(), Held::Process(Arc::new(b)));
+        Ok(())
+    }
+
+    /// Ends what still runs of `process` box `id` a node before this one made, for a box recovery removes;
+    /// one that left nothing has nothing to end. A runtime whose boxes end with it has none to end.
+    pub fn end(&self, id: &BoxId) -> Result<(), Refusal> {
+        match self.job_name(id) {
+            Some(name) => JobBox::end_named(&name),
+            None => Ok(()),
+        }
     }
 
     /// The installer's features that are off, read once ([`features::off`]), at the runtime's making; a
@@ -246,11 +309,12 @@ impl Runtime for WinRuntime {
             return Err(Refusal::Exists(spec.id));
         }
         let held = match spec.class {
-            ClassSpec::Process => Held::Process(Arc::new(JobBox::create(
-                spec.id.clone(),
-                &spec.bounds,
-                self.processors,
-            )?)),
+            ClassSpec::Process => Held::Process(Arc::new(match self.job_name(&spec.id) {
+                Some(name) => {
+                    JobBox::create_named(spec.id.clone(), &spec.bounds, self.processors, &name)?
+                }
+                None => JobBox::create(spec.id.clone(), &spec.bounds, self.processors)?,
+            })),
             ClassSpec::Oci(_) | ClassSpec::Bundle(_) => {
                 Held::Oci(Arc::new(self.create_oci(&spec)?))
             }
@@ -328,9 +392,9 @@ impl Runtime for WinRuntime {
             .boxes()?
             .remove(id)
             .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
-        // Ends the box; dropping the last Arc closes its job (kill-on-close) and, for an oci box, its
-        // container's last handle (terminate-on-close) as a backstop, so deleting a box a caller still
-        // holds through `list` is safe.
+        // Ends the box; dropping the last Arc closes its job (kill-on-close, for a box that doesn't outlive
+        // its node) and, for an oci box, its container's last handle (terminate-on-close) as a backstop, so
+        // deleting a box a caller still holds through `list` is safe.
         match b {
             Held::Process(b) => b.delete(),
             Held::Oci(b) => b.delete(),
@@ -435,5 +499,96 @@ mod tests {
         .unwrap();
         let _ = rt.oci_side(&ClassSpec::Bundle(bundle.path().to_path_buf()));
         assert_eq!(rt.feature_reads.load(Ordering::SeqCst), 1);
+    }
+
+    /// A program that runs until it is ended (PING's 600 one-second echoes to this machine).
+    fn waiting() -> Program {
+        let system = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_owned());
+        let ping = format!("{system}\\System32\\PING.EXE");
+        Program::of(&[ping.as_str(), "-n", "600", "127.0.0.1"])
+    }
+
+    /// Whether process `pid` runs, by `tasklist` (its output names the pid only while it runs).
+    fn alive(pid: u32) -> bool {
+        let out = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\""))
+    }
+
+    fn wait_for(what: &str, mut fact: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !fact() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {what}"
+            );
+            std::thread::park_timeout(std::time::Duration::from_millis(20));
+        }
+    }
+
+    fn process_box(id: &str) -> BoxSpec {
+        BoxSpec {
+            id: BoxId::new(id).unwrap(),
+            bounds: hex_api::Bounds::default(),
+            class: ClassSpec::Process,
+        }
+    }
+
+    /// A node name no other test run holds in this session.
+    fn node(test: &str) -> String {
+        format!("t{}-{test}", std::process::id())
+    }
+
+    /// T-T7.1.2 (native plan step 8): do make a box on a node's runtime, run a program in it, and drop the
+    /// runtime (every handle the node held closed, as when it is killed); expect the program still
+    /// running, the next runtime on the node's name taking the box back as running, and its delete ending
+    /// the program.
+    #[test]
+    fn a_nodes_box_outlives_its_runtime_and_the_next_takes_it_back() {
+        let name = node("back");
+        let spec = process_box("kept");
+        let rt = WinRuntime::outliving(&name);
+        rt.create(spec.clone()).unwrap();
+        let pid = rt.exec(&spec.id, waiting(), Stdio::null()).unwrap().pid();
+        drop(rt);
+        assert!(alive(pid), "the box's program ended with its runtime");
+        let rt = WinRuntime::outliving(&name);
+        rt.adopt(&spec).unwrap();
+        assert_eq!(rt.inspect(&spec.id).unwrap().state, BoxState::Running);
+        rt.delete(&spec.id).unwrap();
+        wait_for("the taken-back box's delete to end its program", || {
+            !alive(pid)
+        });
+    }
+
+    /// T-T7.1.2: do leave a node's box running past its runtime, then end it by name from the next runtime
+    /// (a box recovery removes); expect its program ended, and a second end, of nothing, accepted.
+    #[test]
+    fn a_box_no_node_takes_back_is_ended_by_name() {
+        let name = node("end");
+        let spec = process_box("left");
+        let rt = WinRuntime::outliving(&name);
+        rt.create(spec.clone()).unwrap();
+        let pid = rt.exec(&spec.id, waiting(), Stdio::null()).unwrap().pid();
+        drop(rt);
+        assert!(alive(pid), "the box's program ended with its runtime");
+        let rt = WinRuntime::outliving(&name);
+        rt.end(&spec.id).unwrap();
+        wait_for("the end to end the box's program", || !alive(pid));
+        rt.end(&spec.id).unwrap();
+    }
+
+    /// A runtime driven in process keeps kill-on-close: do make a box, run a program, drop the runtime;
+    /// expect the program ended with it.
+    #[test]
+    fn an_in_process_runtimes_box_ends_with_it() {
+        let spec = process_box("in-process");
+        let rt = WinRuntime::new();
+        rt.create(spec.clone()).unwrap();
+        let pid = rt.exec(&spec.id, waiting(), Stdio::null()).unwrap().pid();
+        drop(rt);
+        wait_for("the program to end with its runtime", || !alive(pid));
     }
 }

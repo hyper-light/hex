@@ -56,6 +56,9 @@ pub struct State {
     counts: Mutex<Counts>,
     /// Whether the box is being deleted; a member started after this is refused (the job is ending).
     stopping: AtomicBool,
+    /// Whether the box outlives its node: a named job without kill-on-close, which dropping the box
+    /// leaves running for the next node to take back ([`JobBox::take_back`]).
+    outlives: bool,
 }
 
 impl State {
@@ -71,8 +74,9 @@ impl State {
     }
 }
 
-/// A Windows `process` box. Dropping it closes the job's last handle, which (kill-on-close) ends every
-/// process still in it.
+/// A Windows `process` box. Dropping one made in process ([`JobBox::create`]) closes the job's last
+/// handle, which (kill-on-close) ends every process still in it; one a node made by name
+/// ([`JobBox::create_named`]) outlives the node, and dropping it leaves it running.
 pub struct JobBox {
     state: std::sync::Arc<State>,
 }
@@ -86,9 +90,59 @@ impl JobBox {
         bounds: &Bounds,
         processors: std::num::NonZeroU32,
     ) -> Result<Self, Refusal> {
-        let limits = job::limits(bounds, processors)?;
         let job = Job::create().map_err(|e| Refusal::os("creating a box's job", e))?;
-        job.configure(&sys_limits(&limits))
+        Self::held(id, bounds, processors, job, false)
+    }
+
+    /// A box that outlives its node: its job named `name` (a node's own name for the box), without
+    /// kill-on-close, so a node killed with it running leaves it running for the next node to take back.
+    /// A job of that name held already is refused: that box is a node's before, to be taken back.
+    pub fn create_named(
+        id: BoxId,
+        bounds: &Bounds,
+        processors: std::num::NonZeroU32,
+        name: &str,
+    ) -> Result<Self, Refusal> {
+        let job = Job::create_named(name).map_err(|e| Refusal::os("creating a box's job", e))?;
+        Self::held(id, bounds, processors, job, true)
+    }
+
+    /// Takes back the box a node before this one made as `name`, with whatever runs in it, its limits set
+    /// again from `bounds`; where no job holds the name (its members all ended, or the machine restarted),
+    /// the box is made again, empty.
+    pub fn take_back(
+        id: BoxId,
+        bounds: &Bounds,
+        processors: std::num::NonZeroU32,
+        name: &str,
+    ) -> Result<Self, Refusal> {
+        match Job::open(name).map_err(|e| Refusal::os("opening a box's job", e))? {
+            Some(job) => Self::held(id, bounds, processors, job, true),
+            None => Self::create_named(id, bounds, processors, name),
+        }
+    }
+
+    /// Ends what runs in the box a node before this one made as `name`, for a box recovery removes. One no
+    /// job holds has nothing left to end.
+    pub fn end_named(name: &str) -> Result<(), Refusal> {
+        if let Some(job) = Job::open(name).map_err(|e| Refusal::os("opening a box's job", e))? {
+            job.terminate(job::terminated_code(Signal::KILL))
+                .map_err(|e| Refusal::os("ending a box's job", e))?;
+        }
+        Ok(())
+    }
+
+    /// A box over `job`, its limits set from `bounds` while it holds nothing new; `outlives` leaves
+    /// kill-on-close off, so the box outlives the handles to it.
+    fn held(
+        id: BoxId,
+        bounds: &Bounds,
+        processors: std::num::NonZeroU32,
+        job: Job,
+        outlives: bool,
+    ) -> Result<Self, Refusal> {
+        let limits = job::limits(bounds, processors)?;
+        job.configure(&sys_limits(&limits, !outlives))
             .map_err(|e| Refusal::os("setting a box's job limits", e))?;
         Ok(Self {
             state: std::sync::Arc::new(State {
@@ -98,6 +152,7 @@ impl JobBox {
                 limits,
                 counts: Mutex::new(Counts::default()),
                 stopping: AtomicBool::new(false),
+                outlives,
             }),
         })
     }
@@ -245,16 +300,20 @@ impl JobBox {
 
 impl Drop for JobBox {
     fn drop(&mut self) {
-        let _ = self.delete();
+        // One that outlives its node is left running for the next node: only a delete ends it.
+        if !self.state.outlives {
+            let _ = self.delete();
+        }
     }
 }
 
 /// The job limits for `limits` ([`hex_core::job`] already sets the commit limit a margin under the
 /// bound and the notification under that).
-fn sys_limits(limits: &job::Limits) -> sys::Limits {
+fn sys_limits(limits: &job::Limits, kill_on_close: bool) -> sys::Limits {
     sys::Limits {
         memory: limits.memory,
         processes: limits.processes,
         cpu: limits.cpu,
+        kill_on_close,
     }
 }
