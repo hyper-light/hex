@@ -1205,16 +1205,31 @@ pub const MAX_RECORD: usize = RECORD_FIXED + 3 * 6 * FOLDER_UNITS + hex_api::Box
 /// A box's record as its marker holds it, refused by name past [`MAX_RECORD`]: such a box names a path
 /// past Windows' longest, so it can't be made, and no node would read its record back.
 pub fn write_record(record: &BoxRecord) -> Result<Vec<u8>, Refusal> {
-    let _ = record;
-    Ok(Vec::new())
+    let bytes = serde_json::to_vec(record)
+        .map_err(|e| Refusal::Broken(format!("a box record didn't encode: {e}")))?;
+    if bytes.len() > MAX_RECORD {
+        return Err(Refusal::Invalid {
+            what: "oci spec",
+            why: format!(
+                "the box's scratch names a path past Windows' longest ({FOLDER_UNITS} UTF-16 units): its record is {} bytes, past {MAX_RECORD}",
+                bytes.len()
+            ),
+        });
+    }
+    Ok(bytes)
 }
 
 /// Reads a box's record from `bytes`, refused past [`MAX_RECORD`] or malformed.
 pub fn read_record(bytes: &[u8]) -> Result<BoxRecord, Refusal> {
-    let _ = bytes;
-    Err(Refusal::Invalid {
+    if bytes.len() > MAX_RECORD {
+        return Err(Refusal::Invalid {
+            what: "box record",
+            why: format!("past {MAX_RECORD} bytes"),
+        });
+    }
+    serde_json::from_slice(bytes).map_err(|e| Refusal::Invalid {
         what: "box record",
-        why: "not read yet".to_owned(),
+        why: e.to_string(),
     })
 }
 
@@ -1230,8 +1245,11 @@ pub enum AtStart {
 /// alive or not, for recovery to take back or end ([`take_back`]); every other box's scratch is reclaimed:
 /// it ended with its node, or its container is gone.
 pub fn at_start(record: &BoxRecord, system_runs: bool) -> AtStart {
-    let _ = (record, system_runs);
-    AtStart::Reclaim
+    if record.outlives && record.system.is_some() && system_runs {
+        AtStart::Leave
+    } else {
+        AtStart::Reclaim
+    }
 }
 
 /// What a node finds of a recorded box's container: whether HCS still holds its compute system
@@ -1275,8 +1293,19 @@ pub enum Lost {
 /// T-T7.1.2): only while HCS holds its system, and, once it started, only with the very init it recorded,
 /// told from a process given that pid since by its creation time.
 pub fn take_back(record: &BoxRecord, found: Found) -> Result<TakeBack, Lost> {
-    let _ = (record, found);
-    Err(Lost::NoSystem)
+    if !record.outlives {
+        return Err(Lost::EndsWithNode);
+    }
+    if record.system.is_none() || !found.system {
+        return Err(Lost::NoSystem);
+    }
+    match record.init {
+        None => Ok(TakeBack::Created),
+        Some(init) => match found.init {
+            Some(p) if p.created == init.created && p.running => Ok(TakeBack::Running(init)),
+            _ => Err(Lost::InitEnded),
+        },
+    }
 }
 
 #[cfg(test)]
