@@ -2,9 +2,11 @@
 //! kernel this test runs on, privileged or not.
 
 use super::*;
-/// The slowest recorded make of a network namespace by the pool's refill thread. MEASURING: the record to come
-/// is `bench/competitive/probes/waits_census.md`'s `netns.make` row, which then sets this (the lead's rule of
-/// 2026-11-06 for test patiences).
+/// The slowest recorded make of a network namespace by the pool's refill thread, in these tests (the lead's rule
+/// of 2026-11-06 for test patiences).
+/// MEASURING: the record is the tests' own (debug builds, the whole suite at once, under the gates' load), not yet
+/// recorded. The bench's release-build census (`bench/competitive/probes/waits_census.md` run 1) isn't it: seeded
+/// from that run, the socket's tests' waits ran out (2026-11-08).
 const MAKE_RECORDED: Option<Duration> = None;
 
 /// Longest a test waits for the refill thread's fact: twice [`MAKE_RECORDED`]; unbounded while measuring.

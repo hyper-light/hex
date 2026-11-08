@@ -1110,9 +1110,10 @@ fn a_failed_start_with_no_seed_left_refuses_the_line() {
 }
 
 /// Decision 9 (the lead's failure-bound rule; AC-T7.1.3): before any answer of its own, a node's pool bounds its waits
-/// from the record. Do: open a pool with the node's seeds, serve a create for 1 ms, then one for 5 ms. Expect: both
-/// waits armed at once at twice the record's slowest clone (`seed_path.md` run 3, 1.918 ms), no calibration read;
-/// the fast answer leaving the hang bound there, the slow one raising it to 10 ms; the line's wait untouched.
+/// from the record. Do: open a pool with the node's seeds, serve a create for 1 ms, then one 5 ms slower than the
+/// record's slowest. Expect: both waits armed at once at twice the record's slowest answer ([`CLONE_SLOWEST`], the
+/// waits census's run 1), no calibration read; the fast answer leaving the hang bound there, the slow one raising it
+/// to twice its own; the line's wait untouched.
 #[test]
 fn a_pools_waits_are_seeded_from_the_record_and_only_rise() {
     let record = Some(CLONE_SLOWEST * 2);
@@ -1123,7 +1124,8 @@ fn a_pools_waits_are_seeded_from_the_record_and_only_rise() {
     assert_eq!(pool.until(seed), Ok(record));
     assert_eq!(pool.done(seed, ms(1)), Ok(None));
     assert_eq!(pool.deadlines(), (record, record));
+    let slow = CLONE_SLOWEST + ms(5);
     assert_eq!(pool.create(ms(1)), Ok(Admit::Seed(seed)));
-    assert_eq!(pool.done(seed, ms(6)), Ok(None));
-    assert_eq!(pool.deadlines(), (record, Some(ms(10))));
+    assert_eq!(pool.done(seed, ms(1) + slow), Ok(None));
+    assert_eq!(pool.deadlines(), (record, Some(slow * 2)));
 }

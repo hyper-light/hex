@@ -12,9 +12,11 @@ use hex_api::sim::SimRuntime;
 use hex_api::{Bounds, BoxInfo, BoxSpec, ClassSpec, Signal as HexSignal, Usage};
 use hex_client::Client;
 
-/// The slowest recorded answer of the server to a call over its socket. MEASURING: the record to come is
-/// `bench/competitive/probes/waits_census.md`'s `client.answer.inspect` row (the census's rtt phase), which
-/// then sets this (the lead's rule of 2026-11-06 for test patiences).
+/// The slowest recorded answer of the server to a call over its socket, in these tests (the lead's rule of
+/// 2026-11-06 for test patiences).
+/// MEASURING: the record is the tests' own (debug builds, the whole suite at once, under the gates' load), not yet
+/// recorded. The bench's release-build census (`bench/competitive/probes/waits_census.md` run 1) isn't it: seeded
+/// from that run, the socket's tests' waits ran out (2026-11-08).
 const ANSWER_RECORDED: Option<Duration> = None;
 
 /// Longest a test waits for the server's next message or a gate's change: twice [`ANSWER_RECORDED`], so a

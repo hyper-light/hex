@@ -35,6 +35,7 @@ use std::sync::Arc;
 #[cfg(all(debug_assertions, target_os = "linux"))]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use hex_api::{BoxId, Refusal};
 use hex_core::patience::Patience;
@@ -135,14 +136,13 @@ impl Store {
             // A change waits for the change of the same box before it: that one's write and its fsyncs.
             // How long is learned from the changes made (decision 9), so a disk that has stopped answering is
             // reported as a fault, refused by type, never waited on for ever (CLAUDE.md §4): a record write has
-            // no other path. MEASURING: `bench/competitive/probes/levers.md` times a record write and rename but
-            // not its fsyncs, and gives no max; the record to come is `waits_census.md`'s `store.turns` row, its
-            // slower place's max (tmpfs and fedora's btrfs), which then seeds it.
+            // no other path. Seeded from the `store.turns` row of `bench/competitive/probes/waits_census.md` run 1 (waits-census-20261108T023331Z, fedora, 91abf3a): its slower
+            // place's max, 7.825 ms of 120,644 (fedora's btrfs).
             turns: Arc::new(Turns::new(
                 "changing a box's record",
                 "record changes under way",
                 TURNS,
-                Patience::measuring("store.turns"),
+                Patience::seeded("store.turns", Duration::from_micros(7_825)),
             )),
             synced: Arc::default(),
             #[cfg(all(debug_assertions, target_os = "linux"))]

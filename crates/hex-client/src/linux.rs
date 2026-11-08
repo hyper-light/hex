@@ -33,19 +33,20 @@ use crate::MAX_LIST;
 /// How long a call waits for the node agent's answer, and its send for room in the agent's socket, one wait a kind
 /// of call, since a delete waits on its box's emptying and a list on its parts, so a fast inspect's answer says
 /// nothing of theirs: twice the slowest answer this process has had to a call of that kind (decision 9; the lead's
-/// failure-bound rule of 2026-11-06), past which the call is refused by type, the only way left to it. MEASURING: the
-/// record to come is `bench/competitive/probes/waits_census.md`'s `client.answer.*` rows (seam_oci's socket phases on
-/// fedora), which then seed each. Until then a kind's first call waits for its answer unbounded.
+/// failure-bound rule of 2026-11-06), past which the call is refused by type, the only way left to it. Each kind is
+/// seeded from its `client.answer.<kind>` row of `bench/competitive/probes/waits_census.md` run 1 (waits-census-20261108T023331Z, fedora, 91abf3a), its
+/// slowest arm's max; the kinds whose rows came short of 1,000 answers (hello, signal, usage, list, netns) stay
+/// MEASURING, never armed, until the census's next run drives them.
 static ANSWERS: [Patience; 10] = [
     Patience::measuring("client.answer.hello"),
-    Patience::measuring("client.answer.create"),
-    Patience::measuring("client.answer.start"),
-    Patience::measuring("client.answer.exec"),
+    Patience::seeded("client.answer.create", Duration::from_micros(63_058)),
+    Patience::seeded("client.answer.start", Duration::from_micros(8_402)),
+    Patience::seeded("client.answer.exec", Duration::from_micros(24_421)),
     Patience::measuring("client.answer.signal"),
-    Patience::measuring("client.answer.inspect"),
+    Patience::seeded("client.answer.inspect", Duration::from_micros(26_205)),
     Patience::measuring("client.answer.usage"),
     Patience::measuring("client.answer.list"),
-    Patience::measuring("client.answer.delete"),
+    Patience::seeded("client.answer.delete", Duration::from_micros(77_759)),
     Patience::measuring("client.answer.netns"),
 ];
 

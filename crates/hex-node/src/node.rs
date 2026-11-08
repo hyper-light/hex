@@ -62,11 +62,9 @@ const OVERLAYFS_SUPER_MAGIC: i128 = 0x794c_7630;
 /// failure-bound rule): twice the slowest emptying recorded by this process's nodes, from every delete, scrub
 /// and removal, since all wait on one kernel. A wait that runs out is a fault to report (the kernel is
 /// wedged), not a limit to raise (CLAUDE.md §4). Its programs' reaping and its init's end, which a box's
-/// emptying waits on, share the wait. MEASURING: no record times a box's emptying from its kill (the delete
-/// records, `bench/competitive/probes/oci_breakdown.md`'s among them, time the whole delete); the record to come is
-/// `bench/competitive/probes/waits_census.md`'s `node.emptying` row, which then seeds this. Until then a node's
-/// first emptying is waited out, and arms the bound.
-static EMPTYING: Patience = Patience::measuring("node.emptying");
+/// emptying waits on, share the wait. Seeded from the `node.emptying` row of `bench/competitive/probes/waits_census.md` run 1 (waits-census-20261108T023331Z, fedora, 91abf3a), its slowest
+/// arm's max, 42.798 ms of 10,276 (a box's kill to `populated 0`, state on tmpfs).
+static EMPTYING: Patience = Patience::seeded("node.emptying", Duration::from_micros(42_798));
 
 /// What is left at the time of asking of the wait for a box killed at `killed` to empty ([`EMPTYING`]):
 /// `Duration::MAX`, unbounded, while it is measuring with no emptying seen.
@@ -346,9 +344,9 @@ impl Node {
                 "making or removing a box",
                 "creates and deletes under way",
                 MAX_BOXES,
-                // MEASURING: the record to come is `bench/competitive/probes/waits_census.md`'s `node.turns`
-                // row, which then seeds it.
-                Patience::measuring("node.turns"),
+                // Seeded from the `node.turns` row of `bench/competitive/probes/waits_census.md` run 1 (waits-census-20261108T023331Z, fedora, 91abf3a),
+                // its slowest arm's max, 77.426 ms of 80,042.
+                Patience::seeded("node.turns", Duration::from_micros(77_426)),
             ),
             #[cfg(debug_assertions)]
             crash_at: None,

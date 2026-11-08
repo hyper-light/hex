@@ -221,12 +221,12 @@ mod tests {
         assert_eq!(turns.patience(), Some(Duration::from_millis(50)));
     }
 
-    /// Decision 9 (Ada's 2026-11-06 rule; T-T7.1.2): measuring, a wait for a turn lasts until it is let go, and
-    /// the hold teaches the next. Do: on new turns, hold box a's turn while another thread takes it, until that take
-    /// waits; hold on for at least 30 ms and let go. Expect: the waiting take given the turn, and the wait then at
-    /// least twice the hold.
+    /// Decision 9 (Ada's 2026-11-06 rule; T-T7.1.2): measuring, a wait for a turn lasts until it is let go, and the
+    /// hold is recorded, never arming it. Do: on new turns, hold box a's turn while another thread takes it, until that
+    /// take waits; hold on for at least 30 ms and let go. Expect: the waiting take given the turn; the wait still
+    /// unarmed.
     #[test]
-    fn a_measuring_wait_lasts_until_the_turn_is_let_go_and_the_hold_arms_it() {
+    fn a_measuring_wait_lasts_until_the_turn_is_let_go_and_stays_unarmed() {
         let turns = Turns::new(
             "op",
             "turns under way",
@@ -249,10 +249,6 @@ mod tests {
             drop(held);
             waiter.join().unwrap().unwrap();
         });
-        let patience = turns.patience().unwrap();
-        assert!(
-            patience >= Duration::from_millis(60),
-            "learned {patience:?} from a hold of 30 ms or more"
-        );
+        assert_eq!(turns.patience(), None, "a measuring wait is never armed");
     }
 }

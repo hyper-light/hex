@@ -39,13 +39,13 @@ use std::time::Duration;
 use crate::patience::Patience;
 
 /// The slowest answer in a seed's recorded distribution on the bench's host class (x86_64 Linux, fedora's Core
-/// i9-14900HX): a seed's clone of an init, request to the init's first run, max 1.918 ms of 320
-/// (`bench/competitive/probes/seed_path.md`, run 3, under a 1-minute load of 25.5 to 29.6). Run 1's max of 15.778 ms
-/// is no clone's: its first create's, timed from its seed's own start, as the record says. It seeds a pool's hang
+/// i9-14900HX): a seed's answer to a create, the `seeds.hang` row of `bench/competitive/probes/waits_census.md` run 1 (waits-census-20261108T023331Z, fedora, 91abf3a), its slowest arm's max, 36.925 ms of
+/// 40,025 (the bar's no-owner creates over the socket, state on btrfs). It replaces seed_path.md run 3's 1.918 ms,
+/// a clone timed alone, which under the bar's load would have taken about 1% of healthy seeds for hung. It seeds a pool's hang
 /// bound before the node has an answer of its own, and the line's wait, since a create in line waits for a busy
 /// seed's answer (decision 9: twice the slowest, recorded or seen). Another host class has no record yet; it starts
 /// from this one's and learns its own.
-pub const CLONE_SLOWEST: Duration = Duration::from_micros(1_918);
+pub const CLONE_SLOWEST: Duration = Duration::from_micros(36_925);
 
 /// The line's wait's name, as the waits census records it.
 pub const WAIT: &str = "seeds.wait";
