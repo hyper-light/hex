@@ -70,6 +70,10 @@ const PROPAGATION_ENV: &str = "HEX_OCI_BOX_SHARED_SOURCES";
 /// Set by hand to run HEX-MNTNS-8's case alone, as root: a focused run on a kernel that differs (a guest's lab),
 /// where a refusal's own text is the record.
 const MASKED_DIRS_ENV: &str = "HEX_OCI_BOX_MASKED_DIRS";
+/// Runs the rootless command line's cgroup case alone through the lab's fixture, rootless, in a fresh process.
+const ROOTLESS_CLI_CGROUP_ENV: &str = "HEX_OCI_BOX_ROOTLESS_CLI_CGROUP";
+const ROOTLESS_CLI_CGROUP_PASS: &str =
+    "rootless command line: the container's cgroup was made beside the command line's own";
 const PROPAGATION_PASS: &str =
     "shared-source propagation oracle completed with four pruned creates";
 /// Both entry points can move the test process between cgroups. Serialize their parent fixtures;
@@ -190,6 +194,46 @@ fn prepared_devs_match_ordinary_setup_and_isolate_containers() {
         log.lines().any(|line| line == PREPARED_DEV_PASS),
         "the root oracle did not run; a skipped delegation is not evidence"
     );
+}
+
+/// AC-T7.1.4 (runtime-tools' rootless subset, goal 17's rootless variant): a rootless `hex oci create` of a spec that
+/// names no cgroupsPath makes the container's cgroup beside the command line's own, as crun's does. Do: run the case
+/// alone through the lab's fixture, rootless. Expect it to pass, or to say why it was skipped. As root it is no case:
+/// a root runtime writes the hierarchy's root, as before.
+#[test]
+fn a_rootless_command_line_create_makes_its_cgroup_beside_its_own() {
+    if host_id("-u") == 0 {
+        eprintln!(
+            "SKIP: the rootless command line's cgroup case runs rootless; as root /<id> is the root's to make"
+        );
+        return;
+    }
+    let _serial = LAB_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let output = Command::new(std::env::current_exe().expect("test binary path"))
+        .args([TEST, "--exact", "--nocapture", "--test-threads=1"])
+        .env(ROOTLESS_CLI_CGROUP_ENV, "1")
+        .output()
+        .expect("run the rootless command line's cgroup case through the lab's fixture");
+    let log = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    eprint!("{log}");
+    assert!(
+        output.status.success(),
+        "the rootless command line's cgroup case failed"
+    );
+    if !log.lines().any(|line| line == ROOTLESS_CLI_CGROUP_PASS) {
+        // The fixture says why where it can't run a rootless container here (no delegation, no user namespaces).
+        assert!(
+            log.lines().any(|line| line.starts_with("SKIP")),
+            "the rootless command line's cgroup case neither ran nor said why it was skipped"
+        );
+        eprintln!(
+            "SKIP: the rootless command line's cgroup case was skipped by the lab's fixture, as it says above"
+        );
+    }
 }
 
 /// AC-T7.1.4: rootfs and bind sources are deliberately shared; every mount stays in the box.
@@ -438,6 +482,15 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     if std::env::var_os(MASKED_DIRS_ENV).is_some() {
         assert!(!lab.rootless, "HEX-MNTNS-8's case needs root");
         masked_directories_are_the_nodes_one_empty_filesystem(&lab, own);
+        return;
+    }
+    if std::env::var_os(ROOTLESS_CLI_CGROUP_ENV).is_some() {
+        assert!(
+            lab.rootless,
+            "the rootless command line's cgroup case runs rootless"
+        );
+        rootless_cli_create_makes_its_cgroup_beside_its_own(&lab, own);
+        eprintln!("{ROOTLESS_CLI_CGROUP_PASS}");
         return;
     }
     // First, while this process is no node's and so no subreaper; it also finds out whether a
@@ -1249,6 +1302,56 @@ fn mount_namespaces_made_each_way(lab: &Lab, own: &Path) {
         agent_mount_points(),
         agent_before,
         "the agent's mount table is unchanged by every way"
+    );
+}
+
+/// AC-T7.1.4 (runtime-tools' rootless subset; goal 17's rootless variant): through the command line, rootless, make a
+/// container whose spec names no cgroupsPath, then delete it. Expect the create to succeed with the container's cgroup
+/// beside the command line's own (the agent's leaf's sibling under the cgroup delegated to this user, `<own>/<id>`),
+/// holding its init, as crun 1.30.1's cgroupfs driver makes one where the hierarchy's root can't be written
+/// (`make_new_sibling_cgroup`, src/libcrun/cgroup-cgroupfs.c:96-110, taken at :128-155); and gone after the delete.
+/// The hierarchy's root is root's alone, so `/<id>` there is refused to every rootless runtime (EACCES).
+fn rootless_cli_create_makes_its_cgroup_beside_its_own(lab: &Lab, own: &Path) {
+    let root = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let id = "cli-rootless-cg";
+    let bundle = lab.bundle(&Lab::act(&Act::Wait));
+    let log = root.path().join("create.log");
+    // The command line's create passes its streams on to the container's init, as runc's does: the null device and a
+    // file here, so no pipe the waiting init holds keeps this test waiting.
+    let created = Command::new(&lab.exe)
+        .args(["oci", "create", "--bundle", bundle.to_str().unwrap(), id])
+        .env("HEX_OCI_ROOT", root.path())
+        .stdin(Std::null())
+        .stdout(Std::null())
+        .stderr(std::fs::File::create(&log).unwrap())
+        .status()
+        .unwrap();
+    let made = own.join(id);
+    let procs = std::fs::read_to_string(made.join("cgroup.procs"));
+    let deleted = Command::new(&lab.exe)
+        .args(["oci", "delete", "--force", id])
+        .env("HEX_OCI_ROOT", root.path())
+        .output()
+        .unwrap();
+    assert!(
+        created.success(),
+        "a rootless create of a spec naming no cgroupsPath: {}",
+        std::fs::read_to_string(&log).unwrap_or_default()
+    );
+    assert!(
+        procs.as_ref().is_ok_and(|p| !p.trim().is_empty()),
+        "the container's cgroup beside the command line's own, {}, holds its init: {procs:?}",
+        made.display()
+    );
+    assert!(
+        deleted.status.success(),
+        "hex oci delete: {}",
+        String::from_utf8_lossy(&deleted.stderr)
+    );
+    assert!(
+        !made.exists(),
+        "the delete removed the container's cgroup {}",
+        made.display()
     );
 }
 
