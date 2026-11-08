@@ -26,7 +26,7 @@ use hex_core::bundle::{self, Bundle, Owner, Place};
 use hex_core::cgroup::Dev;
 use hex_core::netns;
 use hex_core::record::{BoxRecord, Phase, ProcId};
-use hex_core::recovery::{self, Decision, Seen, Why};
+use hex_core::recovery::{self, Decision, Seen};
 use hex_runtime::linux::cgroup::BoxRoot;
 use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::run::Runtime as OciRuntime;
@@ -38,6 +38,7 @@ use hex_runtime::linux::{disks, process};
 use crate::abandoned::Abandoned;
 use crate::createpool::CreatePool;
 use crate::netns::Netns;
+use crate::recorded::{RecoverySummary, why_text};
 use crate::remove::remove_tree;
 use crate::seed::SeedPool;
 use crate::store::Store;
@@ -102,15 +103,6 @@ enum Source {
     Given(PathBuf),
     /// Rendered from the box's [`OciSpec`], to be written in this directory of the box's own.
     Rendered(PathBuf, Bundle),
-}
-
-/// What a recovery did.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RecoverySummary {
-    /// Boxes taken back as they were.
-    pub adopted: Vec<BoxId>,
-    /// Boxes removed, each with why.
-    pub removed: Vec<(BoxId, String)>,
 }
 
 impl Node {
@@ -973,17 +965,6 @@ fn survivors(cg: &hex_runtime::linux::cgroup::BoxCgroup) -> String {
             " (populated, but no process or thread listed: the last ended as they were read)"
                 .to_owned()
         }
-    }
-}
-
-fn why_text(why: &Why) -> String {
-    match why {
-        Why::MidCreate => "the node agent stopped while it was being made".to_owned(),
-        Why::MidDelete => "the node agent stopped while it was being removed".to_owned(),
-        Why::InitGone => "its container's init had ended".to_owned(),
-        Why::NoCgroup => "its record had no cgroup".to_owned(),
-        Why::NoRecord => "its cgroup had no record".to_owned(),
-        Why::Unreadable(w) => format!("its record couldn't be read: {w}"),
     }
 }
 

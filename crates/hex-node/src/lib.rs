@@ -37,4 +37,5 @@ pub mod serve;
 pub mod supervise;
 
 #[cfg(target_os = "linux")]
-pub use node::{Node, RecoverySummary};
+pub use node::Node;
+pub use recorded::RecoverySummary;

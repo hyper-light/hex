@@ -621,6 +621,12 @@ pub struct WithGuest<P> {
 }
 
 impl<P: Runtime> WithGuest<P> {
+    /// The host's own runtime, which runs the `process` class: a node's recovery takes its boxes back
+    /// through it (native plan step 8).
+    pub fn host(&self) -> &P {
+        &self.process
+    }
+
     /// The node's runtime, its guest booted before it returns, so it accepts no box before that boot
     /// ([`GuestRuntime::boot`]); a guest that can't boot refuses the node by type.
     pub fn new(process: P, oci: GuestRuntime) -> Result<Self, Refusal> {

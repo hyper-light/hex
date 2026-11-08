@@ -41,6 +41,33 @@ impl MacRuntime {
         })
     }
 
+    /// Box `id`'s process group and its leader's start time, once its first member has started: what names
+    /// its members after the node is gone, for the node's record (native plan step 8, T-T7.1.2).
+    pub fn group(&self, id: &BoxId) -> Result<Option<(i32, u64)>, Refusal> {
+        self.get(id)?.group()
+    }
+
+    /// Takes back box `spec` after the node was gone, on `group` where it is still the box's
+    /// ([`ProcessBox::adopt`]).
+    pub fn adopt(&self, spec: &BoxSpec, group: Option<(i32, u64)>) -> Result<(), Refusal> {
+        let mut boxes = self.boxes()?;
+        if boxes.contains_key(&spec.id) {
+            return Err(Refusal::Exists(spec.id.clone()));
+        }
+        let b = ProcessBox::adopt(spec.id.clone(), &spec.bounds, self.shared.as_ref(), group)?;
+        boxes.insert(spec.id.clone(), Arc::new(b));
+        Ok(())
+    }
+
+    /// Ends what still runs of a box the node's recovery removes, named by `group`
+    /// ([`process::end_group`]).
+    pub fn end(group: Option<(i32, u64)>) -> Result<(), Refusal> {
+        match group {
+            Some((pgid, started)) => process::end_group(pgid, started),
+            None => Ok(()),
+        }
+    }
+
     fn boxes(
         &self,
     ) -> Result<std::sync::MutexGuard<'_, BTreeMap<BoxId, Arc<ProcessBox>>>, Refusal> {

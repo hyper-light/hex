@@ -133,9 +133,9 @@ fn host(args: &Args) -> Result<Arc<dyn Host>, (u8, String)> {
     .iter()
     .any(|v| std::env::var_os(v).is_some());
     if !guest {
-        return Ok(Arc::new(
-            Recorded::open(process, &args.state).map_err(failed)?,
-        ));
+        let node = Recorded::open(process, &args.state).map_err(failed)?;
+        node.recover().map_err(failed)?;
+        return Ok(Arc::new(node));
     }
     let config = GuestConfig::from_env().map_err(failed)?;
     let node = WithGuest::new(
@@ -143,7 +143,9 @@ fn host(args: &Args) -> Result<Arc<dyn Host>, (u8, String)> {
         GuestRuntime::new(Arc::new(shards_api::Shards::new()), config),
     )
     .map_err(failed)?;
-    Ok(Arc::new(Recorded::open(node, &args.state).map_err(failed)?))
+    let node = Recorded::open(node, &args.state).map_err(failed)?;
+    node.recover().map_err(failed)?;
+    Ok(Arc::new(node))
 }
 
 /// Raises the soft limit on open descriptors to the hard one: each connection and watched program

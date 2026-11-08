@@ -122,6 +122,9 @@ struct State {
     cap_bytes: Option<u64>,
     /// The box's process group id: the pid of its leader, the first program [`ProcessBox::exec`] spawns.
     pgid: Mutex<Option<i32>>,
+    /// The leader's start time (`proc_pid_rusage`), read when it was spawned: with the group id, what names
+    /// the box's members after its node is gone (native plan step 8, T-T7.1.2).
+    leader_started: Mutex<Option<u64>>,
     status: Mutex<Status>,
     /// The pids the box armed with the fatal per-process cap — members it spawned, each kernel-bounded.
     /// The watcher reads it to pace a fully-armed one-member box at the ceiling and to attribute a
@@ -217,13 +220,40 @@ impl ProcessBox {
     /// A box with `bounds`, its members clamped by `weight` (a low weight runs the box at background
     /// priority), watched at the node's `rates`. Nothing runs in it until [`ProcessBox::exec`].
     pub fn create(id: BoxId, bounds: &Bounds, shared: &Shared) -> Result<Self, Refusal> {
+        Self::made(id, bounds, shared, None)
+    }
+
+    /// A box taken back after its node was gone (native plan step 8, T-T7.1.2), its watcher on `group` (its
+    /// group id and leader's start time, as [`ProcessBox::group`] named them) where that group is still the
+    /// box's ([`owned`]); else empty, as a box nothing runs in yet. Its members aren't this node's children,
+    /// so their waits are launchd's; the watcher lists, reads and ends them as it does its own.
+    pub fn adopt(
+        id: BoxId,
+        bounds: &Bounds,
+        shared: &Shared,
+        group: Option<(i32, u64)>,
+    ) -> Result<Self, Refusal> {
+        let group = match group {
+            Some((pgid, started)) if owned(pgid, started)? => Some((pgid, started)),
+            _ => None,
+        };
+        Self::made(id, bounds, shared, group)
+    }
+
+    fn made(
+        id: BoxId,
+        bounds: &Bounds,
+        shared: &Shared,
+        group: Option<(i32, u64)>,
+    ) -> Result<Self, Refusal> {
         let state = Arc::new(State {
             id,
             clamp: clamp(bounds),
             bounds: bounds.clone(),
             limit: limit(bounds),
             cap_bytes: bounds.memory_max.and_then(sys::jetsam_cap_bytes),
-            pgid: Mutex::new(None),
+            pgid: Mutex::new(group.map(|(pgid, _)| pgid)),
+            leader_started: Mutex::new(group.map(|(_, started)| started)),
             status: Mutex::new(Status::default()),
             armed: Mutex::new(BTreeSet::new()),
             ending: AtomicBool::new(false),
@@ -272,6 +302,15 @@ impl ProcessBox {
             .map_err(|e| Refusal::os("spawning a program in a box", e))?;
         if pgid.is_none() {
             *pgid = Some(pid);
+            // Read now, while the leader is the node's unreaped child, so its start time names it.
+            let started = sys::rusage(pid)
+                .map_err(|e| Refusal::os("reading a box's leader", e))?
+                .map(|r| r.started);
+            *self
+                .state
+                .leader_started
+                .lock()
+                .map_err(|_| poisoned("a box's leader"))? = started;
         }
         drop(pgid);
         // The member carries the fatal kernel cap: track it so the watcher paces by it and attributes a
@@ -285,6 +324,22 @@ impl ProcessBox {
         }
         self.state.wake();
         Ok(pid)
+    }
+
+    /// The box's process group and its leader's start time, once its first member has started: what names
+    /// its members after its node is gone, for the node to record (native plan step 8, T-T7.1.2).
+    pub fn group(&self) -> Result<Option<(i32, u64)>, Refusal> {
+        let pgid = *self
+            .state
+            .pgid
+            .lock()
+            .map_err(|_| poisoned("a box's group"))?;
+        let started = *self
+            .state
+            .leader_started
+            .lock()
+            .map_err(|_| poisoned("a box's leader"))?;
+        Ok(pgid.zip(started))
     }
 
     /// The box as it is now.
@@ -390,6 +445,45 @@ impl ProcessBox {
 impl Drop for ProcessBox {
     fn drop(&mut self) {
         let _ = self.delete();
+    }
+}
+
+/// Whether process group `pgid`, its leader started at `started`, is still that box's group: its leader
+/// still runs with that start time, or no process has the leader's pid now (it ended, and its group's other
+/// members are left). A live process with that pid and another start time was given it since, and leads a
+/// group of its own (the rootless gap the module's note states; box users close it).
+pub fn owned(pgid: i32, started: u64) -> Result<bool, Refusal> {
+    Ok(
+        match sys::rusage(pgid).map_err(|e| Refusal::os("reading a box's leader", e))? {
+            Some(r) => r.started == started,
+            None => true,
+        },
+    )
+}
+
+/// Ends what runs of box group `pgid` (its leader started at `started`), for a box its node's recovery
+/// removes: killpg KILL where the group is still the box's ([`owned`]), and its members waited out.
+pub fn end_group(pgid: i32, started: u64) -> Result<(), Refusal> {
+    if !owned(pgid, started)? {
+        return Ok(());
+    }
+    let _ = killpg(
+        pgid,
+        hex_core::darwin::signal_to_macos(Signal::KILL.number()).unwrap_or(9),
+    );
+    let deadline = Instant::now().checked_add(DRAIN_PATIENCE);
+    let mut pids = Vec::with_capacity(sys::max_processes().unwrap_or(4096));
+    loop {
+        if alive_in(pgid, &mut pids)? == 0 {
+            return Ok(());
+        }
+        if deadline.is_none_or(|d| Instant::now() >= d) {
+            return Err(Refusal::os(
+                "ending a box's group",
+                io::Error::other(format!("group {pgid} still holds a live member")),
+            ));
+        }
+        std::thread::yield_now();
     }
 }
 
