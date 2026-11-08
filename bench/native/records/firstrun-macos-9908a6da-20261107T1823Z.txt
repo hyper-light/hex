@@ -12,3 +12,7 @@ cycle 3 exit 0 suite 774735 ms answers 44 slowest 285 318 529  load { 5.45 6.84 
 # suite's time is mostly its negative watches, each waiting out the 69.7 s bound macOS had while it seeded from
 # Windows' record. AppleSystemPolicy refused two processes of the freshly built hex at cycle 3's start
 # (10:50:36, "Security policy would not allow process"); the cycle still passed 7 of 7.
+# 2026-11-08 (gates at 6b6db914, adas-mac-studio.local-2, Apple M-series, 32 CPUs, load 15-20, a launchd job
+# outside kiln's run tree): macos_process_box after a rebuild, three runs. Run 3 failed
+# a_programs_end_is_seen_when_it_ends_not_at_the_waits_budget: its first hog's end, Signal(9), came 839.38 ms
+# after its start, past the 770 ms record then. macOS's record is 839 ms from this run.
