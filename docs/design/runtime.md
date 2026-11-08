@@ -827,14 +827,24 @@ turns each source into a completion on the one port (`GetQueuedCompletionStatusE
   source CLAUDE.md §3 forbids (`docs/research/runtime/windows-job-objects.md` §4). The process handle's
   signal is the kernel's own end of the process, so no end is missed, and a pid given out again can't be
   mistaken for it (the handle names the process, not the pid).
-- *A connection readable*: a zero-byte overlapped `WSARecv`, re-armed after each read; its completion says
-  data or the peer's end is waiting. *To measure*: that Windows' AF_UNIX completes a zero-byte receive this
-  way, as TCP does.
+- *A connection readable*: one overlapped `WSARecv` into the connection's buffer, posted only while the
+  core reads the connection and no message read from it waits, so a client the core has stopped reading
+  holds one buffer and what was decoded from it. Its completion is the bytes (or the peer's end, a read of
+  0). *Measured* (jupiter, 2026-11-08, `stdio_probe iocp`, record
+  `bench/native/records/iocp-jupiter-07da2bc9-*`): a zero-byte `WSARecv` is a readiness signal on AF_UNIX
+  as on TCP, pending while quiet and completing without taking bytes, on data and on the peer's end. The
+  node posts real reads, which need none of that, so it reads in one step what readiness would take two
+  for.
 - *A connection writable*: `Os::send` (a whole message or none) issues one overlapped `WSASend` that owns
   the message; while one is outstanding the next send is `WouldBlock`, and its completion is "writable".
-  The bound on a connection's waiting answers stays the core's.
-- *A connection waiting*: overlapped `AcceptEx` on the listener. *To measure*: that afunix.sys supports it;
-  if not, `WSAEventSelect` on the listener and a registered wait on its event, posting to the port.
+  The bound on a connection's waiting answers stays the core's. *Measured* (the same record): one 8 MiB
+  overlapped send is taken whole at once, before its peer reads anything, so a send's completion says the
+  kernel holds the bytes, not that the peer read them, and the socket doesn't push back at that size: the
+  core's bound on waiting answers is what bounds them.
+- *A connection waiting*: overlapped `AcceptEx` on the listener, one at a time. *Measured* (the same record):
+  afunix.sys completes it on the port when a client connects, and the socket it took reads its peer's pid
+  once `SO_UPDATE_ACCEPT_CONTEXT` is set. The accepted socket joins the port before the accept starts, and
+  once only (a second join is refused, `ERROR_INVALID_PARAMETER`: `tests/windows_node.rs` found it).
 - *Who the peer is*: `SIO_AF_UNIX_GETPEERPID`, then the process's user from its token, as Linux's
   `SO_PEERCRED`.
 Messages are framed over the stream (`hex_core::stream`), as on macOS: Windows' AF_UNIX is `SOCK_STREAM`
@@ -865,7 +875,15 @@ is clean up by construction, but recovery as on Linux takes a live box back, so 
 - A box's job is a *named* job object (`CreateJobObjectW` with a name under the node's own namespace,
   `Local\hex-<node>-<box>`, its DACL the node's user and SYSTEM only), without kill-on-close. The restarted
   node opens it by name (`OpenJobObjectW`) from the box's record. Delete ends it as now (`TerminateJobObject`);
-  a crash leaves it running for the next node, which takes it back or ends it.
+  a crash leaves it running for the next node, which takes it back or ends it. *Measured* (jupiter,
+  2026-11-08, `sys::tests::a_named_jobs_name_lapses_with_its_last_handle_though_its_member_runs`,
+  `cp/t7-native-windows-outlive`): a named job opens by name while a handle to it is held, but once its last
+  handle closes its member runs on and its name is gone. The object manager drops a temporary object's name
+  with its last handle, though processes still hold the object. So the node's handle alone can't carry a
+  box past the node: something that outlives the node must hold a handle to each box's job, or the next node
+  finds nothing and the box's processes are left in a job no one can open. *Open, for the lead*: what holds
+  them (a keeper process per node, the installer's service, or a handle in each member; proposed: the
+  keeper).
 - An `oci` box's compute system is made without `ShouldTerminateOnLastHandleClosed`, and the restarted node
   opens it by its id (`HcsOpenComputeSystem`). The HCS side is step 4's agent's to confirm.
 - A box's record names each member by its pid and its creation time (`GetProcessTimes`), so the restarted
