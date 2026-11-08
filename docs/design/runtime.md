@@ -862,47 +862,73 @@ own connection or handle. A connection per stream and a named pipe per stream ar
 them only from the caller's pid (`SIO_AF_UNIX_GETPEERPID`; `GetNamedPipeClientProcessId`, the pipe first
 instance only and remote clients refused). The probe's refusal check gives a second process of the caller's
 user the door first: the node refused it for both and still served the caller every byte (jupiter,
-2026-11-07, `stdio_probe refuse`). A process of another user needs a second account on jupiter (asked of Ada).
+2026-11-07, `stdio_probe refuse`). A process of *another* user, on a temporary account Ada approved, is
+refused before any node code by the socket file's own permissions (`WSAEACCES`), and, granted the file, by
+each door's check, while the caller gets every byte; `hex node` refuses such a connection by name (jupiter,
+2026-11-08, `stdio_probe refuse-as`, `bench/native/records/other-user-jupiter-20261108T0220Z.txt`).
 What no transport can stop: a process of the caller's own user may open the caller's process and take any
 handle in it (`PROCESS_DUP_HANDLE`), its own connection included, so "only the caller" means only through
 the node, as Linux's `SCM_RIGHTS` means it. The fastest candidate that passes is chosen when the timed run of
 record is in.
 
-**Recovery: a box outlives its node, and the restarted node takes it back (T-T7.1.2).** Today a Windows box
-ends with the node's last handle: its job is kill-on-close (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`), and an
-`oci` box's compute system is made with `ShouldTerminateOnLastHandleClosed` (the HCS decision above). That
-is clean up by construction, but recovery as on Linux takes a live box back, so both change:
-- A box's job is a *named* job object (`CreateJobObjectW` with a name under the node's own namespace,
-  `Local\hex-<node>-<box>`, its DACL the node's user and SYSTEM only), without kill-on-close. The restarted
-  node opens it by name (`OpenJobObjectW`) from the box's record. Delete ends it as now (`TerminateJobObject`);
-  a crash leaves it running for the next node, which takes it back or ends it. *Measured* (jupiter,
-  2026-11-08, `sys::tests::a_named_jobs_name_lapses_with_its_last_handle_though_its_member_runs`,
+**Recovery: a box outlives its node through a keeper, and the restarted node takes it back (T-T7.1.2;
+the lead's decision, 2026-11-08).** Today a Windows box ends with the node's last handle: its job is
+kill-on-close (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`), and an `oci` box's compute system is made with
+`ShouldTerminateOnLastHandleClosed` (the HCS decision above). That is clean up by construction. Recovery as
+on Linux takes a live box back, which needs the box's job to outlive the node *without* losing the
+guarantee that no box outlives Hex. Both facts force the shape:
+- *A named job's name lapses with its last handle.* *Measured* (jupiter, 2026-11-08,
+  `sys::tests::a_named_jobs_name_lapses_with_its_last_handle_though_its_member_runs`,
   `cp/t7-native-windows-outlive`): a named job opens by name while a handle to it is held, but once its last
   handle closes its member runs on and its name is gone. The object manager drops a temporary object's name
-  with its last handle, though processes still hold the object. So the node's handle alone can't carry a
-  box past the node: something that outlives the node must hold a handle to each box's job, or the next node
-  finds nothing and the box's processes are left in a job no one can open. *Open, for the lead*: what holds
-  them (a keeper process per node, the installer's service, or a handle in each member; proposed: the
-  keeper).
+  with its last handle, though processes still hold the object. So a name alone can't carry a box past the
+  node: something that outlives the node must hold a handle to each box's job, or the next node finds nothing
+  and the box's processes are left in a job no one can open (a §3 leak).
+- *The holder is a keeper, and kill-on-close stays.* Each box's job is a *named* job object (`CreateJobObjectW`
+  with a name under the node's own namespace, `Local\hex-<node>-<box>`), kept kill-on-close, and the node
+  **and** a keeper process each hold a handle to it (the node duplicates the job into the keeper,
+  `DuplicateHandle` with `PROCESS_DUP_HANDLE`, and closes it there on delete, `DUPLICATE_CLOSE_SOURCE`).
+  Then: the node crashes → the keeper's handle keeps the job and its name, and the next node reopens it by
+  name (`OpenJobObjectW`) and takes the box back, or ends it (`TerminateJobObject`); the keeper dies while
+  the node lives → the node sees its end on its port and starts another, duplicating the handles again; both
+  are gone → the last handle closes and kill-on-close ends the boxes, so nothing is left in a job no one can
+  open. The keeper is wholly passive — it only holds handles — so it needs no trust and no logic of its own;
+  it is `hex keep`, started by the node. This replaces "refuse by name with boxes recorded": kill-on-close is
+  the backstop, not a refusal. *Built and measured* (jupiter, 2026-11-08, `cp/t7-native-windows-outlive`,
+  `windows::tests` 6/6): a box outlives its runtime and the next takes it back as running; a box no node
+  takes back is ended by name; a box whose node and keeper are both gone is ended by kill-on-close; a keeper
+  that dies while its node lives is replaced.
+- *The keeper's own lifetime.* The keeper polls which node owns its name (a `node.owner` file the current
+  node writes, its pid and creation time) and exits once no live node has owned it for five minutes, so an
+  orphaned keeper — a node that dies and never restarts — doesn't hold boxes forever (on Linux the service
+  restarts the node; here the bound is the backstop). The node signals a stop event only on a clean
+  shutdown, never on a respawn: the stop is shared by the state folder, so signalling it would also stop the
+  new keeper.
+- *Breakaway.* The keeper holds handles only; it need not be a member of the node's own job. *To measure*
+  (on a clean jupiter): whether the keeper can run outside the node's job under kiln's runs and under the
+  installer's service, and this record will say what holds where.
 - An `oci` box's compute system is made without `ShouldTerminateOnLastHandleClosed`, and the restarted node
-  opens it by its id (`HcsOpenComputeSystem`). The HCS side is step 4's agent's to confirm.
+  opens it by its id (`HcsOpenComputeSystem`). The HCS side is step 4's agent's. *From it*: a box's scratch
+  survives a node kill — the crash test asserts `sandbox.vhdx` is still there after the kill, in the created
+  and the started phase (green, jupiter 2026-11-08 00:12Z); and with the flag on, HCS ends a killed node's
+  compute system up to 2 s on record (one idle sample at 1 s resolution), to be retaken on a clean jupiter
+  (`cp/t7-native-s4`). The next node's scratch reclaim must skip a box whose record says live, so a taken-back
+  box keeps its scratch.
 - A box's record names each member by its pid and its creation time (`GetProcessTimes`), so the restarted
   node, opening the pid, tells the member from a process given its pid since, as macOS uses a process's
-  start time.
+  start time. The record names the keeper the same way (its pid and creation time), so the next node adopts
+  the live keeper or starts a new one.
 - The record's phases stay Linux's (`creating`/`ready`/`deleting`, written before the machine changes), so
   a node killed mid-create or mid-delete leaves a box recovery finishes or removes.
 - Linux images in the WHP guest: the guest outlives its node, as on macOS, and is taken back the same way:
   the restarted node re-attaches to the running guest, then the guest's own node recovers its boxes from
   its own records (T-T7.1.2 inside the guest). The macOS decision on `cp/t7-native-s8` (step 8's core) sets
   how; the Windows guest follows it, so a guest box is no longer removed because its guest went with the node.
-- The node's own job (the boxes' parent) is kill-on-close today too, so a box nested under it would end with
-  it. *To measure*: whether a box's job can stay nested under a node job that ends, or whether boxes nest
-  under a job the installer's service holds; the test is the node killed with `TerminateProcess` and its boxes
-  still running.
-What it costs: a node that dies and never restarts leaves its boxes running, where kill-on-close ended them;
-the installer's service restarts the node, and its first act is recovery. **Falsifier:** the crash-restart
-tests (step 8's): the node killed with boxes running, mid-create and mid-delete, then restarted on the same
-state directory; each must fail on the tree before this change and pass after.
+What it costs: one idle keeper process per node, and a handle duplicated into it per box; a node that dies
+and never restarts holds its boxes for the keeper's five-minute bound before kill-on-close ends them.
+**Falsifier:** the crash-restart tests (step 8's): the node killed with boxes running, mid-create and
+mid-delete, then restarted on the same state directory; each must fail on the tree before this change and
+pass after.
 
 ## Open (STATUS.md)
 
