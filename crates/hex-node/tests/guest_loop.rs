@@ -70,12 +70,13 @@ impl Gate {
 
 /// A guest's relay and node agent, on loopback: the connection's token, a hello's answer, and every
 /// inspect answered `NoSuchBox` once the gate lets it pass. Each dial is served on a thread of its own.
-fn relay(gate: Arc<Gate>) -> std::net::SocketAddr {
+fn relay(gate: Arc<Gate>, conns: Arc<Mutex<Vec<TcpStream>>>) -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || {
         for conn in listener.incoming() {
             let Ok(conn) = conn else { return };
+            conns.lock().unwrap().push(conn.try_clone().unwrap());
             let gate = Arc::clone(&gate);
             std::thread::spawn(move || serve(conn, &gate));
         }
@@ -94,10 +95,15 @@ fn serve(mut conn: TcpStream, gate: &Gate) {
         };
         let mut input = &buf[..n];
         while !input.is_empty() {
-            let (took, whole) = deframer.take(input).unwrap();
+            // A connection that isn't the control protocol's (a stage's, say) is let go.
+            let Ok((took, whole)) = deframer.take(input) else {
+                return;
+            };
             input = &input[took..];
             let Some(message) = whole else { continue };
-            let (h, request) = wire::read_request_apart(&message, wire::MAX_MESSAGE).unwrap();
+            let Ok((h, request)) = wire::read_request_apart(&message, wire::MAX_MESSAGE) else {
+                return;
+            };
             let answer = match request {
                 wire::Request::Hello => wire::Answer::Hello(wire::Hello {
                     version: wire::VERSION,
@@ -178,8 +184,8 @@ impl shards_api::Stream for Looped {
     }
 }
 
-/// A guest whose every port is the stand-in relay.
-struct LoopGuest(std::net::SocketAddr);
+/// A guest whose every port is the stand-in relay; ended once the test says so.
+struct LoopGuest(std::net::SocketAddr, Arc<std::sync::atomic::AtomicBool>);
 
 impl shards_api::Guest for LoopGuest {
     fn connect(
@@ -195,7 +201,11 @@ impl shards_api::Guest for LoopGuest {
     }
 
     fn wait_for(&self, _: Duration) -> Result<Option<shards_api::End>, shards_api::Refusal> {
-        Ok(None)
+        Ok(if self.1.load(std::sync::atomic::Ordering::SeqCst) {
+            Some(shards_api::End::Stopped)
+        } else {
+            None
+        })
     }
 
     fn identity(&self) -> Result<shards_api::Identity, shards_api::Refusal> {
@@ -206,9 +216,40 @@ impl shards_api::Guest for LoopGuest {
     }
 }
 
-struct LoopGuests(std::net::SocketAddr);
+/// One booted stand-in guest: whether it has ended, and its relay's connections, which end with it.
+type Booted = (
+    Arc<std::sync::atomic::AtomicBool>,
+    Arc<Mutex<Vec<TcpStream>>>,
+);
 
-impl shards_api::Guests for LoopGuests {
+/// Guests each on a stand-in relay of its own, behind one gate; each one's end the test can bring about,
+/// as a guest that dies: its connections end with it.
+struct LoopGuests(Arc<Gate>, Mutex<Vec<Booted>>);
+
+impl LoopGuests {
+    fn new(gate: Arc<Gate>) -> Self {
+        Self(gate, Mutex::new(Vec::new()))
+    }
+
+    /// Ends every guest booted so far, and its connections.
+    fn end_all(&self) {
+        for (ended, conns) in self.1.lock().unwrap().iter() {
+            ended.store(true, std::sync::atomic::Ordering::SeqCst);
+            for conn in conns.lock().unwrap().drain(..) {
+                let _ = conn.shutdown(Shutdown::Both);
+            }
+        }
+    }
+
+    fn boots(&self) -> usize {
+        self.1.lock().unwrap().len()
+    }
+}
+
+/// The guests as the runtime takes them, shared with the test that ends them.
+struct Shared(Arc<LoopGuests>);
+
+impl shards_api::Guests for Shared {
     fn backend(&self) -> Result<shards_api::Backend, shards_api::Refusal> {
         shards_api::backend()
     }
@@ -217,7 +258,11 @@ impl shards_api::Guests for LoopGuests {
         &self,
         _spec: &shards_api::GuestSpec,
     ) -> Result<Box<dyn shards_api::Guest>, shards_api::Refusal> {
-        Ok(Box::new(LoopGuest(self.0)))
+        let ended = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let conns = Arc::new(Mutex::new(Vec::new()));
+        let addr = relay(Arc::clone(&self.0.0), Arc::clone(&conns));
+        self.0.1.lock().unwrap().push((Arc::clone(&ended), conns));
+        Ok(Box::new(LoopGuest(addr, ended)))
     }
 
     fn attach(
@@ -282,6 +327,28 @@ impl Recover for Host {
     }
 }
 
+/// With one worker: client A's inspect of a box in the guest is held by the guest while client B's inspect
+/// of host box `here` is answered; then A's is answered once the guest lets it go.
+fn held_holds_no_other(socket: &std::path::Path, gate: &Gate, here: &BoxId) {
+    gate.hold(true);
+    let a = hex_client::Client::connect(socket).unwrap();
+    let held = std::thread::spawn(move || a.inspect(&BoxId::new("there").unwrap()).err());
+    gate.wait_holding(1);
+    let b = hex_client::Client::connect(socket).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let here = here.clone();
+    let other = std::thread::spawn(move || tx.send(b.inspect(&here).is_ok()));
+    let answered = rx.recv_timeout(PATIENCE);
+    gate.hold(false);
+    let _ = other.join();
+    let held = held.join().unwrap();
+    assert!(
+        answered == Ok(true),
+        "B's inspect of a host box waited on the guest's answer to A's: {answered:?}"
+    );
+    assert_eq!(held, Some(Refusal::NoSuchBox(BoxId::new("there").unwrap())));
+}
+
 fn config() -> GuestConfig {
     GuestConfig {
         binary: PathBuf::from("/shards"),
@@ -299,13 +366,13 @@ fn config() -> GuestConfig {
 /// answered (NoSuchBox, the stand-in's) once the guest lets it go.
 #[test]
 fn a_call_its_guest_holds_holds_no_other_clients_call_through_the_guest_client() {
+    let _ = held_holds_no_other;
     if shards_api::backend().is_err() {
         eprintln!("SKIP: Shards has no backend on this host, so no guest boots");
         return;
     }
     let dir = tempfile::Builder::new().prefix("gl-").tempdir().unwrap();
     let gate = Arc::new(Gate::default());
-    let addr = relay(Arc::clone(&gate));
     let host = Host(hex_api::sim::SimRuntime::new());
     let here = BoxId::new("here").unwrap();
     host.create(BoxSpec {
@@ -316,7 +383,10 @@ fn a_call_its_guest_holds_holds_no_other_clients_call_through_the_guest_client()
     .unwrap();
     let node = WithGuest::new(
         host,
-        GuestRuntime::new(Arc::new(LoopGuests(addr)), config()),
+        GuestRuntime::new(
+            Arc::new(Shared(Arc::new(LoopGuests::new(Arc::clone(&gate))))),
+            config(),
+        ),
     )
     .unwrap();
     let node = Recorded::open(node, &dir.path().join("state")).unwrap();
@@ -338,4 +408,56 @@ fn a_call_its_guest_holds_holds_no_other_clients_call_through_the_guest_client()
         "B's inspect of a host box waited on the guest's answer to A's: {answered:?}"
     );
     assert_eq!(held, Some(Refusal::NoSuchBox(BoxId::new("there").unwrap())));
+}
+
+/// Native plan step 8 (1): a guest that ends is booted again on the node's next create, and the new guest's
+/// control connection joins the core's loop as the first's did: with one worker, a call the new guest holds
+/// holds no other client's call either.
+#[test]
+fn a_guest_booted_again_answers_on_the_loop_too() {
+    if shards_api::backend().is_err() {
+        eprintln!("SKIP: Shards has no backend on this host, so no guest boots");
+        return;
+    }
+    let dir = tempfile::Builder::new().prefix("gl-").tempdir().unwrap();
+    let gate = Arc::new(Gate::default());
+    let guests = Arc::new(LoopGuests::new(Arc::clone(&gate)));
+    let host = Host(hex_api::sim::SimRuntime::new());
+    let here = BoxId::new("here").unwrap();
+    host.create(BoxSpec {
+        id: here.clone(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Process,
+    })
+    .unwrap();
+    let node = WithGuest::new(
+        host,
+        GuestRuntime::new(Arc::new(Shared(Arc::clone(&guests))), config()),
+    )
+    .unwrap();
+    let node = Recorded::open(node, &dir.path().join("state")).unwrap();
+    let socket = dir.path().join("s");
+    let _server = Server::bind(&socket, Arc::new(node), LIMITS, 1).unwrap();
+    held_holds_no_other(&socket, &gate, &here);
+    // The guest ends; the next create boots another (and is then refused by the stand-in, which stages
+    // nothing: the boot is what the test needs).
+    guests.end_all();
+    let client = hex_client::Client::connect(&socket).unwrap();
+    let rootfs = dir.path().join("root");
+    std::fs::create_dir_all(&rootfs).unwrap();
+    let _ = client.create(BoxSpec {
+        id: BoxId::new("anew").unwrap(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Oci(Box::new(hex_api::OciSpec {
+            rootfs: hex_api::Rootfs::Dir(rootfs),
+            init: hex_api::Program::of(&["/bin/true"]),
+            mounts: Vec::new(),
+            hostname: None,
+            network: hex_api::Network::Private,
+            hosts: Vec::new(),
+        })),
+    });
+    drop(client);
+    assert_eq!(guests.boots(), 2, "the ended guest wasn't booted again");
+    held_holds_no_other(&socket, &gate, &here);
 }
