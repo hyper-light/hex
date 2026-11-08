@@ -1179,8 +1179,10 @@ impl<'a> Choice<'a> {
 
     /// Slot `n`'s cgroup, made ahead with `parked` in it, given the box's bounds: the slot as the box holds it, its
     /// policy `None` so it is removed with the box and never handed on, or the cgroup back when it can't be bounded.
+    /// The slot is fresh, made with no bound ([`refill_ahead`]), so the box's own bounds are all it is given, as a
+    /// cgroup made on the create's path is ([`BoxRoot::bound`]); a cgroup an earlier box left is rebound instead.
     fn ready_ahead(&self, n: u64, cg: BoxCgroup) -> Result<(BoxCgroup, Held), BoxCgroup> {
-        if self.root.rebound(&cg, self.bounds).is_err() {
+        if self.root.bound(&cg, self.bounds).is_err() {
             return Err(cg);
         }
         let baseline = cg.baseline();

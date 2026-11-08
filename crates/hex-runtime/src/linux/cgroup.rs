@@ -278,6 +278,19 @@ impl BoxRoot {
         Ok(())
     }
 
+    /// Writes `bounds` into `cg`, a fresh cgroup no box has used, made with no bound (one made ahead): the box's own
+    /// bounds alone, as [`BoxRoot::make`] gives a cgroup made on a create's path ([`core::writes`]), since a fresh
+    /// cgroup holds the kernel's default for every other file already. Every default written again is a cgroupfs call
+    /// on the create's path that changes nothing, `cpu.weight`'s walking every CPU's run queue and each disk's
+    /// `io.latency` and `io.max` among them (goal 16). A cgroup an earlier box left takes [`BoxRoot::rebound`].
+    pub fn bound(&self, cg: &BoxCgroup, bounds: &Bounds) -> Result<(), Refusal> {
+        self.controllers_for(bounds)?;
+        for w in core::writes(bounds, &self.disks)? {
+            cg.write_bound(&w)?;
+        }
+        Ok(())
+    }
+
     /// Writes every bound again into `cg`, a cgroup an earlier box left, so it holds `bounds` and
     /// nothing of the earlier box's ([`core::writes_all`]; goal 5 extended, step 6). None of these files'
     /// writes takes the kernel's `cgroup_mutex` (research f25). A default for a file the kernel doesn't
