@@ -5,6 +5,7 @@
 //! call over [`hex_client::guest::Client`]. Where Shards has no backend (macOS x86_64, Windows arm64) the
 //! class is refused by name before anything is booted.
 
+pub mod held;
 pub mod rewrite;
 pub mod shares;
 
@@ -248,6 +249,8 @@ pub struct GuestRuntime {
     booted_binary: Mutex<Option<stage::Identity>>,
     /// The warm-up of a Shards binary that changed while the guest ran ([`GuestRuntime::warm_if_changed`]).
     warm: Mutex<Warm>,
+    /// Where the guest it holds is recorded ([`GuestRuntime::recorded_at`]).
+    record: Option<PathBuf>,
 }
 
 /// A throwaway guest booted on a Shards binary that changed while the node's guest ran, so the node's next boot
@@ -341,7 +344,17 @@ impl GuestRuntime {
             digests: Mutex::new(Digests::default()),
             booted_binary: Mutex::new(None),
             warm: Mutex::new(Warm::default()),
+            record: None,
         }
+    }
+
+    /// Records the guest it boots at `path` ([`held`]), and takes back the guest recorded there when the
+    /// node starts ([`GuestRuntime::boot`]): a guest outlives its node's crash (its VM is a process of its
+    /// own, reparented), so the next node holds it, and the boxes in it, rather than boot another beside it
+    /// and leave it an orphan (native plan step 8, T-T7.1.2).
+    pub fn recorded_at(mut self, path: PathBuf) -> Self {
+        self.record = Some(path);
+        self
     }
 
     /// Boots the node's guest now, so no create pays a boot, an upgrade's first least of all (HEX-GUEST-39): the
@@ -351,7 +364,63 @@ impl GuestRuntime {
         if self.guests.backend().is_err() {
             return Ok(());
         }
+        self.attach_recorded()?;
         self.guest().map(drop)
+    }
+
+    /// Takes back the guest a node before this one recorded, if there is one: attached, dialed and
+    /// greeted as a boot's is, its boxes then the node's. One gone or ended is forgotten, and the node boots
+    /// its own; one that runs and won't answer is stopped first, so none is left beside the next. A guest
+    /// that can't be told gone or taken back refuses the node by type, naming why, rather than boot
+    /// another beside one that may run.
+    fn attach_recorded(&self) -> Result<(), Refusal> {
+        let Some(path) = &self.record else {
+            return Ok(());
+        };
+        let Some(identity) = held::read(path)? else {
+            return Ok(());
+        };
+        let guest: Arc<dyn shards_api::Guest> =
+            match self.guests.attach(&identity, &self.config.spec()) {
+                Ok(guest) => guest.into(),
+                Err(shards_api::Refusal::Gone { .. } | shards_api::Refusal::Ended(_)) => {
+                    return held::remove(path);
+                }
+                Err(why) => return Err(refusal("taking back the node's guest", &why)),
+            };
+        let link: Arc<dyn Link> = Arc::new(ShardsLink::new(
+            Arc::clone(&guest),
+            self.first_dial_bound()?,
+        ));
+        match Client::connect(Arc::clone(&link)) {
+            Ok(client) => {
+                // The binary that booted it isn't known here: no warm-up is asked for it.
+                *self.lock()? = Some(Arc::new(Booted {
+                    guest,
+                    link,
+                    client,
+                }));
+                Ok(())
+            }
+            Err(_) => {
+                guest.stop().map_err(|why| {
+                    refusal("stopping a guest taken back that won't answer", &why)
+                })?;
+                held::remove(path)
+            }
+        }
+    }
+
+    /// Records `guest` as the one this node holds, where a record is kept: one whose identity Shards can't
+    /// give leaves no record, so a node after a crash finds none to take back.
+    fn record(&self, guest: &dyn shards_api::Guest) -> Result<(), Refusal> {
+        let Some(path) = &self.record else {
+            return Ok(());
+        };
+        match guest.identity() {
+            Ok(identity) => held::write(path, &identity),
+            Err(_) => held::remove(path),
+        }
     }
 
     /// Where the Shards binary changed since the running guest booted it, boots one throwaway guest on it in the
@@ -452,6 +521,11 @@ impl GuestRuntime {
             match Client::connect(Arc::clone(&link)) {
                 Ok(client) => {
                     self.learn(began.elapsed());
+                    if let Err(why) = self.record(guest.as_ref()) {
+                        // Unrecorded, a crash would leave it an orphan: ended, and the boot refused.
+                        let _ = guest.stop();
+                        return Err(why);
+                    }
                     *self.booted_binary.lock().map_err(poisoned)? = binary;
                     let b = Arc::new(Booted {
                         guest,
@@ -523,6 +597,9 @@ impl Drop for GuestRuntime {
         self.finish_warm();
         if let Ok(Some(b)) = self.booted.get_mut().map(Option::take) {
             let _ = b.guest.stop();
+            if let Some(path) = &self.record {
+                let _ = held::remove(path);
+            }
         }
     }
 }
@@ -625,6 +702,11 @@ impl<P: Runtime> WithGuest<P> {
     /// through it (native plan step 8).
     pub fn host(&self) -> &P {
         &self.process
+    }
+
+    /// The guest's runtime, which runs the `oci` class: a node's recovery asks it which boxes it still holds.
+    pub fn guest(&self) -> &GuestRuntime {
+        &self.oci
     }
 
     /// The node's runtime, its guest booted before it returns, so it accepts no box before that boot

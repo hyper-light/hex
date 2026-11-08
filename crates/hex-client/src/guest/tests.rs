@@ -408,6 +408,13 @@ impl shards_api::Guest for Patient {
     fn wait_for(&self, _: Duration) -> Result<Option<shards_api::End>, shards_api::Refusal> {
         Ok(None)
     }
+
+    fn identity(&self) -> Result<shards_api::Identity, shards_api::Refusal> {
+        Err(shards_api::Refusal::Unsupported {
+            what: "identity",
+            why: "a loopback stand-in names no VM".into(),
+        })
+    }
 }
 
 /// HEX-GUEST-33 (§2, CLAUDE.md §4): dial a booted guest three times: expect the first dial given the

@@ -140,7 +140,9 @@ fn host(args: &Args) -> Result<Arc<dyn Host>, (u8, String)> {
     let config = GuestConfig::from_env().map_err(failed)?;
     let node = WithGuest::new(
         process,
-        GuestRuntime::new(Arc::new(shards_api::Shards::new()), config),
+        // `@` is in no box id, so neither the record nor its temporary is read as a box's.
+        GuestRuntime::new(Arc::new(shards_api::Shards::new()), config)
+            .recorded_at(args.state.join("@guest")),
     )
     .map_err(failed)?;
     let node = Recorded::open(node, &args.state).map_err(failed)?;

@@ -50,6 +50,20 @@ pub trait Recover: Runtime {
     fn adopt(&self, spec: &BoxSpec, trace: Option<ProcId>) -> Result<(), Refusal>;
     /// Ends what still runs of what `trace` names, for a box recovery removes.
     fn end(&self, trace: Option<ProcId>) -> Result<(), Refusal>;
+    /// For an `oci` box: whether its init still runs, so recovery takes it back; `None` for a class with
+    /// no init. By default an `oci` box's init went with the node.
+    fn alive(&self, spec: &BoxSpec) -> Result<Option<bool>, Refusal> {
+        Ok(match spec.class.class() {
+            Class::Oci => Some(false),
+            Class::Process => None,
+        })
+    }
+    /// Removes what is left of box `spec` that `trace` doesn't name, for a box recovery removes. By
+    /// default there is nothing.
+    fn discard(&self, spec: &BoxSpec) -> Result<(), Refusal> {
+        let _ = spec;
+        Ok(())
+    }
 }
 
 /// A runtime whose boxes' records the node keeps.
@@ -82,23 +96,21 @@ impl<R: Recover> Recorded<R> {
         self.store.remove_strays()?;
         let mut summary = RecoverySummary::default();
         let records = self.store.all()?;
-        let seen: BTreeMap<BoxId, Seen> = records
-            .iter()
-            .map(|(id, record)| {
-                let alive = match record {
-                    Ok(r) if r.spec.class.class() == Class::Oci => Some(false),
-                    _ => None,
-                };
-                (
-                    id.clone(),
-                    Seen {
-                        record: Some(record.clone()),
-                        cgroup: true,
-                        init_alive: alive,
-                    },
-                )
-            })
-            .collect();
+        let mut seen: BTreeMap<BoxId, Seen> = BTreeMap::new();
+        for (id, record) in &records {
+            let alive = match record {
+                Ok(r) => self.runtime.alive(&r.spec)?,
+                Err(_) => None,
+            };
+            seen.insert(
+                id.clone(),
+                Seen {
+                    record: Some(record.clone()),
+                    cgroup: true,
+                    init_alive: alive,
+                },
+            );
+        }
         for (id, decision) in recovery::plan(&seen) {
             let record = records.get(&id).and_then(|r| r.as_ref().ok());
             let trace = record.and_then(|r| r.init);
@@ -115,6 +127,9 @@ impl<R: Recover> Recorded<R> {
                 }
                 Decision::Remove(why) => {
                     self.runtime.end(trace)?;
+                    if let Some(r) = record {
+                        self.runtime.discard(&r.spec)?;
+                    }
                     self.store.remove(&id)?;
                     summary.removed.push((id, why_text(&why)));
                 }
@@ -265,9 +280,11 @@ fn group(trace: Option<ProcId>) -> Option<(i32, u64)> {
 }
 
 /// A node whose Linux images are its Shards guest's: its `process` boxes are taken back through the host's
-/// runtime. Its `oci` boxes lived in the guest the node booted, which went with the node (the node boots a
-/// new one when it starts, HEX-GUEST-39), so their records are removed (`hex_core::recovery`: their init has
-/// ended) and they have no host processes to end.
+/// runtime. Its `oci` boxes live in its guest, which outlives the node's crash and which the node takes back
+/// when it starts (`GuestRuntime::recorded_at`): one the guest holds is taken back as it is, and one it
+/// doesn't (the guest was gone, and the node booted another) is removed (`hex_core::recovery`: its init has
+/// ended). Neither has host processes to end; a box recovery removes that the guest still holds is deleted
+/// there.
 impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
     fn trace(&self, id: &BoxId) -> Result<Option<ProcId>, Refusal> {
         match self.host().inspect(id) {
@@ -278,10 +295,35 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
     }
 
     fn adopt(&self, spec: &BoxSpec, trace: Option<ProcId>) -> Result<(), Refusal> {
-        self.host().adopt(spec, trace)
+        match spec.class.class() {
+            // Its guest holds it already.
+            Class::Oci => Ok(()),
+            Class::Process => self.host().adopt(spec, trace),
+        }
     }
 
     fn end(&self, trace: Option<ProcId>) -> Result<(), Refusal> {
         self.host().end(trace)
+    }
+
+    fn alive(&self, spec: &BoxSpec) -> Result<Option<bool>, Refusal> {
+        match spec.class.class() {
+            Class::Oci => match self.guest().inspect(&spec.id) {
+                Ok(_) => Ok(Some(true)),
+                Err(Refusal::NoSuchBox(_)) => Ok(Some(false)),
+                Err(why) => Err(why),
+            },
+            Class::Process => self.host().alive(spec),
+        }
+    }
+
+    fn discard(&self, spec: &BoxSpec) -> Result<(), Refusal> {
+        match spec.class.class() {
+            Class::Oci => match self.guest().delete(&spec.id) {
+                Ok(()) | Err(Refusal::NoSuchBox(_)) => Ok(()),
+                Err(why) => Err(why),
+            },
+            Class::Process => self.host().discard(spec),
+        }
     }
 }
