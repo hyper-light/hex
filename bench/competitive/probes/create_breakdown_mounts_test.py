@@ -90,6 +90,13 @@ class MountLockHolds(unittest.TestCase):
         self.assertIsNone(summary["nssem_write_per_create"])
         self.assertIn("The mount lock's holds weren't traced", report)
 
+    def test_each_creates_part_19_is_listed_by_its_start_on_the_traces_clock(self):
+        """Goal 17's record (rounds.py interleaves the ways in one trace): expect each create's part 19 listed as its
+        start on the trace's clock in us, its span and its time preempted, so a burst's window can claim it."""
+        rc, summary, _ = run(trace())
+        self.assertEqual(rc, 0)
+        self.assertEqual(summary["spans"], [[1_000_020, 80, 0], [1_000_120, 80, 0]])
+
 
 def lines_of(events):
     """An ftrace text of (us, pid, comm, body) events."""

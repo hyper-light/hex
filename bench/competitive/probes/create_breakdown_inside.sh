@@ -310,8 +310,14 @@ for l in open("/proc/kallsyms"):
   echo 1 > "$I/tracing_on"
   local true_bundle=/run/bundle-true
   [ "${MOUNTS_PATH:-pruned}" = classic ] && true_bundle=/run/bundle-true-classic
-  HEXBENCH_PHASES=throughput HEXBENCH_THROUGHPUT_CONC=$conc /opt/bin/seam_oci "$OUT/$name.json" 0 0 "$lc" \
-    /opt/bin/hex /run/bundle-sleep "$true_bundle" 2>&1 | tee -a "$OUT/mounts.log" || rc=1
+  # A command given after the three arguments is what's traced (goal 17's record: rounds.py's arms), else the
+  # throughput phase.
+  if [ "$#" -gt 3 ]; then
+    "${@:4}" 2>&1 | tee -a "$OUT/mounts.log" || rc=1
+  else
+    HEXBENCH_PHASES=throughput HEXBENCH_THROUGHPUT_CONC=$conc /opt/bin/seam_oci "$OUT/$name.json" 0 0 "$lc" \
+      /opt/bin/hex /run/bundle-sleep "$true_bundle" 2>&1 | tee -a "$OUT/mounts.log" || rc=1
+  fi
   echo 0 > "$I/tracing_on"
   touch /run/hexcb.stop
   wait "$drain" || rc=1
@@ -388,6 +394,35 @@ fi
 # by mount; with MOUNTS_PATH=classic its creates take the classic path, through the shim. With MOUNTS_SPAN=root
 # (goal 6) each span is the root in place, to the init's chdir, its mount namespace's join counted (create_breakdown.py
 # mounts). No libcrun, no rounds.
+if [ "${MOUNTS:-0}" -gt 0 ] && [ -n "${MOUNTS_ARMS:-}" ]; then
+  # MOUNTS_ARMS (goal 17's record, mntns_record.sh): rounds.py's arms ("hex:copy hex:tree hex:empty", libcrun too if
+  # named), interleaved round by round, MOUNTS_ROUNDS rounds after MOUNTS_WARMUP, each burst MOUNTS lifecycles at each
+  # concurrency in MOUNTS_CONC: once untraced (the arms' creates), then once with every call of the hex processes
+  # traced, cut into part 19 by create_breakdown.py mounts, each span claimed by the burst whose window holds its start.
+  rc=0
+  true_bundle=/run/bundle-true
+  [ "${MOUNTS_PATH:-pruned}" = classic ] && true_bundle=/run/bundle-true-classic
+  arms() { # arms <out dir> <concurrency>
+    ROUNDS_SEAM=/opt/bin/seam_oci ROUNDS_HEX=/opt/bin/hex ROUNDS_SLEEP=/run/bundle-sleep ROUNDS_TRUE=$true_bundle \
+      ROUNDS_CGROUP=/sys/fs/cgroup ROUNDS_LIBCRUN=/opt/bin/libcrun-driver ROUNDS_LIBCRUN_ROOT=/run/libcrun \
+      python3 -I /opt/lab/probes/rounds.py "$1" "${MOUNTS_ROUNDS:?MOUNTS_ROUNDS}" "${MOUNTS_WARMUP:?MOUNTS_WARMUP}" \
+      "$MOUNTS" "$2" $MOUNTS_ARMS
+  }
+  mkdir -p /run/libcrun
+  for conc in ${MOUNTS_CONC:-8}; do
+    echo "arms: $MOUNTS_ARMS, $conc in flight, untraced, load $(cut -d' ' -f1-3 /proc/loadavg)"
+    arms "$OUT/rounds.c$conc.untraced" "$conc" >> "$OUT/mounts.log" 2>&1 \
+      || { echo "refusing: the untraced rounds at $conc failed ($OUT/mounts.log)" >&2; rc=8; continue; }
+    echo "arms: $MOUNTS_ARMS, $conc in flight, every call traced, load $(cut -d' ' -f1-3 /proc/loadavg)"
+    mounts_trace "mounts.c$conc" 0 "$conc" arms "$OUT/rounds.c$conc.traced" "$conc" \
+      || { echo "refusing: the traced rounds at $conc failed ($OUT/mounts.log)" >&2; rc=6; continue; }
+    python3 -I /opt/lab/probes/create_breakdown.py mounts "$OUT/mounts.c$conc.txt" "$OUT/mounts.c$conc.stats" \
+      /usr/include/asm/unistd_64.h "${MOUNTS_PATH:-pruned}" "${MOUNTS_SPAN:-switch}" > "$OUT/mounts.c$conc.md" || rc=7
+  done
+  echo "arms done (inside), load $(cut -d' ' -f1-3 /proc/loadavg)" >> "$OUT/env.txt"
+  echo done > "$OUT/inside.done"
+  exit "$rc"
+fi
 if [ "${MOUNTS:-0}" -gt 0 ]; then
   rc=0
   for conc in ${MOUNTS_CONC:-1 8}; do

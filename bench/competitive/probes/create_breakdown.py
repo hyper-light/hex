@@ -1541,6 +1541,9 @@ def mounts(trace, stats, header, path="pruned", span="switch"):
                    "other_rwsem_waits_per_create": sum(w.get("rwsem_waits", 0) for w in creates) / n,
                    "nssem_write_outside_per_create": by_holder if probed else None,
                    "nssem_holds_by_holder": holders if hold_times else None,
+                   # Each create's part 19: its start on the trace's clock (us), its span and its time preempted,
+                   # so a run that interleaves arms in one trace cuts part 19 by each burst's window (rounds.py).
+                   "spans": [[w["start"], w["span"], w["sys_run"] + w["user_run"]] for w in creates],
                    "span": span}, f, indent=1)
     if n_lost:
         print(f"refusing: the trace lost {n_lost} events", file=sys.stderr)
