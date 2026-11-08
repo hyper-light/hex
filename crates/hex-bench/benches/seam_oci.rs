@@ -92,7 +92,7 @@ mod linux {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
-    use hex_api::{Bounds, BoxId, BoxOwner, BoxSpec, ClassSpec, Exit, Program, Runtime, Stdio};
+    use hex_api::{Bounds, BoxId, BoxOwner, BoxSpec, ClassSpec, Exit, Program, Runtime, Signal, Stdio};
     use hex_client::Client;
     use hex_core::{netns, seeds};
     use hex_node::Node;
@@ -818,7 +818,9 @@ mod linux {
 
     /// Inspect of one running `sleep` container, `n` times after `warmup`, each timed alone: a call
     /// whose work (the box's record and its container's state, read) is the same through either
-    /// driver, so the drivers' difference is the socket's cost per call.
+    /// driver, so the drivers' difference is the socket's cost per call. Then, untimed, `n` usage reads and `n`
+    /// SIGCONTs (which a running `sleep` ignores), so the waits census's `client.answer.usage` and `.signal` rows have
+    /// their answers (bench/competitive/probes/waits_census.md).
     fn rtt(node: &dyn Runtime, bundle: &Path, n: usize, warmup: usize) -> Result<Value, String> {
         let id = BoxId::new("rtt").map_err(|e| e.to_string())?;
         node.create(spec(&id, bundle))
@@ -832,6 +834,11 @@ mod linux {
                 if i >= warmup {
                     ms.push(t.elapsed().as_secs_f64() * 1e3);
                 }
+            }
+            let cont = Signal::new(18).map_err(|e| e.to_string())?;
+            for _ in 0..n {
+                node.usage(&id).map_err(|e| format!("usage rtt: {e}"))?;
+                node.signal(&id, cont).map_err(|e| format!("signal rtt: {e}"))?;
             }
             Ok(ms)
         })();
@@ -1398,6 +1405,7 @@ mod linux {
             "interleaved",
             "rtt",
             "list",
+            "counts",
         ] {
             if !wanted.split_whitespace().any(|w| w == phase) {
                 continue;
@@ -1424,6 +1432,10 @@ mod linux {
                     "sustained" => sustained(node, &true_bundle, &parent, sustained_lifecycles),
                     "interleaved" => interleaved(node, &true_bundle, &parent),
                     "list" => list(node, &sleep_bundle, n),
+                    // The waits census's `client.answer.netns` row: the node's counts, asked `n` times.
+                    "counts" => (0..n)
+                        .try_for_each(|_| driver.netns().map(drop))
+                        .map(|()| json!({ "calls": n })),
                     _ => rtt(node, &sleep_bundle, n, warmup),
                 }?;
                 let rose = rise(before, driver.netns()?);
@@ -1522,17 +1534,46 @@ mod linux {
                 Err(e) => errors.insert(phase.to_owned(), Value::String(e)),
             };
         }
-        // The restart arm comes after every phase, as it replaces the socket's agent.
+        // The waits census's `client.answer.hello` row: `n` connections to the socket's agent, each its hello.
+        if wanted.split_whitespace().any(|w| w == "hellos") {
+            let socket = state.path().join("node.sock");
+            let r = match &driver {
+                Driver::Socket { .. } => (0..n).try_for_each(|_| {
+                    Client::connect(&socket)
+                        .map(drop)
+                        .map_err(|e| format!("connecting to {}: {e}", socket.display()))
+                }),
+                Driver::InProcess(_) => Err("the hellos arm needs HEXBENCH_DRIVER=socket".to_owned()),
+            };
+            match r {
+                Ok(()) => phases.insert("hellos".to_owned(), json!({ "connections": n })),
+                Err(e) => errors.insert("hellos".to_owned(), Value::String(e)),
+            };
+        }
+        // The restart arm comes after every phase, as it replaces the socket's agent; `HEXBENCH_RESTARTS` times (once
+        // unset), so the waits census's `node.listing` row has its recoveries' listings.
         let mut driver = driver;
         if wanted.split_whitespace().any(|w| w == "restart") {
+            let restarts = std::env::var("HEXBENCH_RESTARTS").map_or(1, |v| {
+                v.trim()
+                    .parse()
+                    .unwrap_or_else(|e| panic!("HEXBENCH_RESTARTS={v:?}: {e}"))
+            });
+            let mut runs = Vec::with_capacity(restarts);
             let t0 = Instant::now();
-            let (restarted, r) = restart(driver, hex, state.path(), &root, &sleep_bundle, n);
-            driver = restarted;
+            for _ in 0..restarts {
+                let (restarted, r) = restart(driver, hex, state.path(), &root, &sleep_bundle, n);
+                driver = restarted;
+                match r {
+                    Ok(v) => runs.push(v),
+                    Err(e) => {
+                        errors.insert("restart".to_owned(), Value::String(e));
+                        break;
+                    }
+                }
+            }
             println!("{runtime} restart: {:.0}s", t0.elapsed().as_secs_f64());
-            match r {
-                Ok(v) => phases.insert("restart".to_owned(), v),
-                Err(e) => errors.insert("restart".to_owned(), Value::String(e)),
-            };
+            phases.insert("restart".to_owned(), Value::Array(runs));
         }
         // The idle cgroups an owner's boxes left go before the box root does; a socket agent's are its
         // next start's to remove (T-T7.1.2).

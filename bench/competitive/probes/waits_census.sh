@@ -4,7 +4,9 @@
 # append each answer to the file HEX_WAITS_CENSUS names (hex_node::census). Runs seam_oci over the node's socket, in a
 # container with host.sh's OCI-pass flags, under the bar's no-owner conditions, twice: the node's state on the
 # container's tmpfs /run, and on the host's own filesystem (fedora's btrfs). On fedora, under hex-slot:
-#   [N=10000] [CPUSET=4-15] waits_census.sh <hex release binary> <seam_oci release binary>
+#   [N=10000] [CPUSET=4-15] waits_census.sh <hex release binary> <seam_oci release binary> [<hex debug> <seam_oci debug>]
+# With the debug builds given, a fourth arm runs the tmpfs arm's phases on them: the record debug builds' waits are
+# seeded from. Run the suites (gate 6) beside it, as the gates do, for their load; the caller does, and says so.
 # The timed part takes fedora-timed.lock, as the bench's timed passes do. waits_census.py reads the census.
 set -euo pipefail
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")"); LAB=$(dirname "$HERE")
@@ -15,6 +17,7 @@ BASE=${HEX_BENCH:-$HOME/.cache/hex-bench}
 STAMP=$(date -u +%Y%m%dT%H%M%SZ); OUT="$BASE/out/waits-census-$STAMP"
 mkdir -p "$BASE/out"; mkdir "$OUT" || { echo "refusing: $OUT is there already" >&2; exit 3; }
 mkdir "$OUT/bin" "$OUT/disk"; cp "$HEX" "$OUT/bin/hex"; cp "$SEAM" "$OUT/bin/seam_oci"
+if [ -n "${3:-}" ]; then cp "$(realpath "$3")" "$OUT/bin/hex-debug"; cp "$(realpath "${4:?seam_oci debug binary}")" "$OUT/bin/seam_oci-debug"; fi
 { echo "host: $(hostname)"; echo "date: $(date -u +%FT%TZ)"; echo "kernel: $(uname -r)"; echo "pinned to ${CPUSET:-4-15}"
   echo "load at start: $(cat /proc/loadavg)"
   echo "state on disk: $(stat -f -c %T "$OUT/disk")"
