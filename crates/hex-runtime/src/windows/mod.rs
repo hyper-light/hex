@@ -507,16 +507,9 @@ impl Runtime for WinRuntime {
             }
         };
         let info = self.info(&held)?;
-        let mut boxes = self.boxes()?;
-        if boxes.contains_key(&spec.id) {
-            // Made beside another create of the same id: this one is ended, the first kept.
-            if let Held::Oci(b) = &held {
-                let _ = b.delete();
-            }
-            return Err(Refusal::Exists(spec.id));
-        }
-        // Where the box outlives the node, the keeper holds a second handle to its job, so a crashed node
-        // leaves it running for the next node; its handle value is recorded for delete and for a restart.
+        // Hand the box's job to the keeper before the box is visible, holding no box-map lock across it: a
+        // keeper found dead is replaced, which reads the box map ([`WinRuntime::ensure_keeper`]), so doing
+        // this under the box lock would deadlock the runtime against itself (std's `Mutex` isn't reentrant).
         if let (Some(keeping), Held::Process(b)) = (self.keeping()?, &held) {
             let value = keeping
                 .keeper
@@ -526,7 +519,26 @@ impl Runtime for WinRuntime {
             keeper::write_held(&keeping.state, spec.id.as_str(), value)
                 .map_err(|e| Refusal::os("recording a box's keeper handle", e))?;
         }
-        boxes.insert(spec.id, held);
+        // Insert under the box lock alone. A create that lost a race to the same id undoes its keeper hold
+        // and its box once the lock is released, so neither is done under it.
+        let dup = {
+            let mut boxes = self.boxes()?;
+            match boxes.entry(spec.id.clone()) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(held.clone());
+                    false
+                }
+                std::collections::btree_map::Entry::Occupied(_) => true,
+            }
+        };
+        if dup {
+            // Made beside another create of the same id: this one is ended, the first kept.
+            self.drop_from_keeper(&spec.id)?;
+            if let Held::Oci(b) = &held {
+                let _ = b.delete();
+            }
+            return Err(Refusal::Exists(spec.id));
+        }
         Ok(info)
     }
 
