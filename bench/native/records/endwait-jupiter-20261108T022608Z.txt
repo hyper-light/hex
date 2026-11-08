@@ -1,3 +1,8 @@
+VOID AS TIMING (the lead, 2026-11-08 ~02:50Z): jupiter's NTFS stall was on (kernel 75-95%) and every timing
+on jupiter from 00:12Z on is void; this run (02:26Z) is in that window. The numbers below are kept as what
+was seen. The method choice they support (packet over pool) is provisional until a retake on a clean
+jupiter, which the lead calls.
+
 stdio_probe endwait 300 (native plan step 8, the lead's measurement on the decision "the Windows node, on one
 completion port"): how soon a completion port hears a watched object was signalled, two ways:
   pool:   RegisterWaitForSingleObject, its thread-pool callback posting to the port (a pool thread's hop)

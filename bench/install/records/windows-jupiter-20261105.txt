@@ -306,8 +306,14 @@ copy there shows ~20 bench scripts as modified: line endings from the sync, no c
 
 23. how slow a program's end is in a first run after a rebuild, for the learned wait's Windows record
    (hex_api::conformance::HostClass::Windows).
-   Of record, 2026-11-08T00:40-01:05Z on jupiter, after D's reboot at 00:06Z (kernel time 1.8%, the System
-   process at 613 threads): 4 cycles at ac08c9b3, each a relink of hex.exe and the test exe then the whole
+   VOID AS TIMING (the lead, 2026-11-08 ~02:50Z): jupiter's NTFS stall came back within ~30 min of its
+   00:06Z boot (kernel ~75% by 00:45Z; Shards' Windows suite sets it off, and D is finding the trigger), so
+   every timing on jupiter from 00:12Z on is void. These runs (00:40-01:05Z) are in that window. The
+   Windows record stays 6,239 ms (Process Governor's, 2026-11-05) as PROVISIONAL: that first runs end
+   under it waits on a retake once the lead says jupiter is clean. The correctness results stand (only
+   HEX-RT-14 failed; the feature query didn't time out).
+   Taken 2026-11-08T00:40-01:05Z on jupiter, after D's reboot at 00:06Z (kernel time 1.8% at the reboot,
+   the System process at 613 threads): 4 cycles at ac08c9b3, each a relink of hex.exe and the test exe then the whole
    suite, in a copy whose LearnedWait::saw printed every answer and whose own five ends could wait 300 s.
      cycle 1: CPU 35% before, 49 answers, slowest 764 ms (the hog 750 ms)
      cycle 2: CPU 9%, 49 answers, slowest 2,305 ms (the hog 784 ms)
