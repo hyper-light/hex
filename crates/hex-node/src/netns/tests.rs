@@ -53,6 +53,31 @@ fn the_nodes_own_descriptors_on_fedoras_figures() {
     assert_eq!(b.own + b.namespaces * FILES_A_KEPT, 679_682);
 }
 
+/// Goal 6 step 6's HEX-INST-5 (Ada's 2026-11-06 constants rule): what a node needs of its soft descriptor limit is the
+/// node's to say, from its own bounds. Do: ask what a root node and a rootless one need on fedora's figures, nothing
+/// held beside. Expect: the root node the bound's own figures under no limit, its own and four files for each of its
+/// kept namespaces, 679,682 in all; the rootless node its own alone, keeping no namespaces.
+#[test]
+fn a_node_says_the_descriptors_it_needs() {
+    let unlimited = rustix::process::Rlimit {
+        current: None,
+        maximum: None,
+    };
+    let bound = FilesBound::of(&unlimited, root_pools(), 0);
+    let root = FilesBound::needed(root_pools(), 0);
+    assert_eq!(
+        root,
+        Needed {
+            own: bound.own,
+            files: bound.namespaces * FILES_A_KEPT
+        }
+    );
+    assert_eq!(root.total(), 679_682);
+    let rootless = FilesBound::needed(Pools::rootless(bench()), 0);
+    assert_eq!(rootless.files, 0, "a rootless node keeps no namespaces");
+    assert_eq!(rootless.total(), rootless.own);
+}
+
 /// A root node's pools on the bench host.
 fn root_pools() -> Pools {
     Pools::root(bench())

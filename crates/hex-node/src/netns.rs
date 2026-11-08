@@ -242,6 +242,41 @@ impl FilesBound {
         let limit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
         Ok(Self::of(&limit, pools, open_descriptors(&limit)?))
     }
+
+    /// What a node whose pools are `pools`, holding `beside` past its bounds, needs of its soft descriptor limit to
+    /// hold every namespace it may keep with its files: its own descriptors at its bounds, as [`FilesBound::of`]
+    /// counts them, and four for each namespace a root node may keep; a rootless node keeps none, its own alone. The
+    /// node says it (`hex node --descriptors`), so an installer gives its service that and the install lab checks it,
+    /// never a figure copied from one host's (goal 6 step 6's HEX-INST-5; Ada's 2026-11-06 constants rule).
+    pub fn needed(pools: Pools, beside: u64) -> Needed {
+        // The namespaces kept for owners: none on a node without a pool (a rootless node's containers make theirs in
+        // user namespaces of their own), so none of their files either.
+        let kept = if pools.netns > 0 {
+            kept_at_most(pools.sizes)
+        } else {
+            0
+        };
+        Needed {
+            own: descriptors_of_the_node(pools, beside),
+            files: kept.saturating_mul(FILES_A_KEPT),
+        }
+    }
+}
+
+/// The descriptors a node needs, by what holds them ([`FilesBound::needed`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Needed {
+    /// Its own at its bounds, those it held beside them among them.
+    pub own: u64,
+    /// Every namespace it may keep, holding its `/proc/net` files.
+    pub files: u64,
+}
+
+impl Needed {
+    /// The soft limit that holds both.
+    pub fn total(self) -> u64 {
+        self.own.saturating_add(self.files)
+    }
 }
 
 /// How many descriptors this process holds now: the entries of `/proc/self/fd` (proc(5)), less the one the

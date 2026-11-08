@@ -32,6 +32,9 @@ use rustix::process::Resource;
 
 /// Runs `hex node`'s arguments (everything after `node`); returns the exit status.
 pub fn main(args: &[String]) -> u8 {
+    if args == ["--descriptors"] {
+        return descriptors();
+    }
     match serve(args) {
         Ok(()) => 0,
         Err((status, why)) => {
@@ -43,7 +46,39 @@ pub fn main(args: &[String]) -> u8 {
     }
 }
 
-const USAGE: &str = "usage: hex node --socket <path> --state <dir> [--box-root <cgroup dir>]";
+const USAGE: &str = "usage: hex node --socket <path> --state <dir> [--box-root <cgroup dir>] | hex node --descriptors";
+
+/// `hex node --descriptors`: what a node of this process's owner needs of its soft descriptor limit on this host, at a
+/// first start's bounds, its own and every kept namespace's files (`FilesBound::needed`), said as `own N files M need
+/// T`: what an installer gives the node's service and the install lab checks, never a figure copied from one host's
+/// (goal 6 step 6's HEX-INST-5). What this process holds now stands for what the node holds beside its bounds.
+fn descriptors() -> u8 {
+    use hex_node::netns::{FilesBound, Pools, open_descriptors};
+    let needed = hex_node::sizes::Sizes::now().and_then(|sizes| {
+        let pools = if rustix::process::geteuid().is_root() {
+            Pools::root(sizes)
+        } else {
+            Pools::rootless(sizes)
+        };
+        let limit = rustix::process::getrlimit(Resource::Nofile);
+        Ok(FilesBound::needed(pools, open_descriptors(&limit)?))
+    });
+    match needed {
+        Ok(n) => {
+            let line = format!("own {} files {} need {}\n", n.own, n.files, n.total());
+            match std::io::stdout().lock().write_all(line.as_bytes()) {
+                Ok(()) => 0,
+                Err(_) => 1,
+            }
+        }
+        Err(e) => {
+            let _ = std::io::stderr()
+                .lock()
+                .write_all(format!("hex node: {e}\n").as_bytes());
+            1
+        }
+    }
+}
 
 struct Args {
     socket: PathBuf,
