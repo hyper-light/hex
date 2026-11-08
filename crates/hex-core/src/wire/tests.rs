@@ -696,7 +696,8 @@ fn unknown_versions_and_kinds_are_refused() {
         assert!(read_answer(&received(&bytes, 0), MAX_MESSAGE).is_err());
     }
     // Requests and answers each refuse the other's kinds, and kinds no version defines, in every
-    // version this side speaks.
+    // version this side speaks. 0x000c is version 3's, native's `Call::Kill`: reserved until native lands and is
+    // merged here (the lead, 2026-11-08), so until then this side refuses it as a kind it doesn't know.
     for version in FIRST..=VERSION {
         let hello = request(version, 5, &Request::Hello, MAX_MESSAGE).unwrap();
         for kind in [0u16, 0x000c, 0x7fff, 0x8001, 0x8009, 0xffff] {
