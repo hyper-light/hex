@@ -151,8 +151,9 @@ impl CreatePool {
         )
     }
 
-    /// A pool with `limits`, every slot from the start, its waits seeded from the tests' own patience
-    /// ([`hex_api::conformance::PATIENCE`]): the tests', which set each bound and hold seeds as long as they need.
+    /// A pool with `limits`, every slot from the start, its waits seeded from the seeds' own record for this build, as
+    /// a node's are (decision 9, by build profile): a test's wait for a seed takes the record of the seeds' answers,
+    /// never another fact's.
     #[cfg(test)]
     pub fn with_limits(
         exe: PathBuf,
@@ -163,7 +164,7 @@ impl CreatePool {
     ) -> Result<Self, Refusal> {
         Self::open(
             exe,
-            Seeds::new(limits).seeded(hex_api::conformance::PATIENCE),
+            Seeds::new(limits),
             limits,
             1,
             prune,
@@ -1016,24 +1017,22 @@ fn stale(s: Stale) -> OciError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hex_api::conformance::PATIENCE;
+    use hex_core::patience::Patience;
+    use hex_testkit::waits::until;
 
     /// The calls this host's node runs at once, the line's room ([`crate::sizes::Sizes::workers`]).
     fn workers() -> usize {
         crate::sizes::Sizes::now().unwrap().workers
     }
 
-    /// Waits for `fact`, giving the CPU up between looks rather than sleeping a picked period, for at most
-    /// [`PATIENCE`], the longest a case waits for a fact: past it the test fails naming `what`.
-    fn until(what: &str, mut fact: impl FnMut() -> bool) {
-        let deadline = Instant::now().checked_add(PATIENCE);
-        while !fact() {
-            assert!(
-                deadline.is_none_or(|d| Instant::now() < d),
-                "no {what} within {PATIENCE:?}"
-            );
-            std::thread::yield_now();
-        }
+    /// A create's wait in line for a seed, on the line's own record for this build: the seeds' answers'
+    /// (`hex_core::seeds`, decision 9), as the pool's line wait starts from.
+    fn in_line() -> Patience {
+        Patience::by_profile(
+            "test.createpool.in_line",
+            hex_core::seeds::CLONE_SLOWEST,
+            Some(hex_core::seeds::CLONE_SLOWEST_DEBUG),
+        )
     }
 
     /// Goal 5 plan step 2 (AC-T7.1.4; CLAUDE.md §10): classic-path creates are counted by a fixed set
@@ -1080,9 +1079,13 @@ mod tests {
             None,
         )
         .unwrap();
-        until("the pool tried a start", || {
+        // The pool's starting thread tries its first start once the pool opens, no recorded operation making it:
+        // measuring, for the fact alone (the census's row is to come, from the suites run under it).
+        let tried = Patience::measuring("test.createpool.start_tried");
+        until(&tried, "the pool's first start tried", || {
             pool.counts().unwrap().start_failed > 0
-        });
+        })
+        .unwrap();
         let Err(OciError::Os { why, .. }) = pool.shared.acquire() else {
             panic!("a pool with no seed refuses its create by type, naming why");
         };
@@ -1122,11 +1125,15 @@ mod tests {
         )
         .unwrap();
         let shared = &pool.shared;
-        until("the pool had both seeds up", || {
+        // The starting thread brings the seeds up as the takes ask for them, no recorded operation making both: measuring,
+        // for the fact alone (the census's row is to come, from the suites run under it).
+        let up = Patience::measuring("test.createpool.seeds_up");
+        until(&up, "both of the pool's seeds up", || {
             let (id, proc, _) = shared.acquire().unwrap();
             shared.done(id, proc);
             shared.lock().unwrap().seeds.idle() == 2
-        });
+        })
+        .unwrap();
         let (starter, line) = (
             shared.woke[0].load(Ordering::Relaxed),
             shared.woke[1].load(Ordering::Relaxed),
@@ -1202,12 +1209,20 @@ mod tests {
             });
             tx.send(handed).unwrap();
         });
-        until("the second create waited in line", || {
+        // The second create joins the line within its own call, and is handed the seed given back as the line's wait
+        // answers: both within the line's record.
+        let line = in_line();
+        until(&line, "the second create waiting in line", || {
             pool.shared.lock().unwrap().seeds.waiting() > 0
-        });
+        })
+        .unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "a create in line is handed no seed before one is given back"
+        );
         pool.shared.done(id, proc);
         let handed = rx
-            .recv_timeout(PATIENCE)
+            .recv_timeout(line.deadline().unwrap_or(Duration::MAX))
             .expect("the create in line was handed the seed given back");
         assert_eq!(handed.unwrap(), id);
     }

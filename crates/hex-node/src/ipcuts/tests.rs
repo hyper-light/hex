@@ -2,23 +2,16 @@
 //! test runs on, privileged or not.
 
 use super::*;
-use hex_api::conformance::PATIENCE;
+use hex_core::patience::Patience;
+use hex_testkit::waits::until;
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::path::PathBuf;
-use std::time::Instant;
 
-/// Waits for `fact`, giving the CPU up between looks rather than sleeping a picked period, for at most
-/// [`PATIENCE`], the longest a case waits for a fact: a thread that never makes it true fails the test instead
-/// of hanging it.
-fn wait_for(what: &str, mut fact: impl FnMut() -> bool) {
-    let deadline = Instant::now().checked_add(PATIENCE);
-    while deadline.is_none_or(|d| Instant::now() < d) {
-        if fact() {
-            return;
-        }
-        std::thread::yield_now();
-    }
-    panic!("no {what} within {PATIENCE:?}");
+/// Waits for `fact`, one the refill thread makes on its own: no recorded operation makes it and no census row times
+/// it yet, so the wait is measuring, for the fact alone, its answer recorded under `name` for the census to come, from
+/// the suites run under it (hex_testkit::waits).
+fn wait_for(name: &'static str, what: &str, fact: impl FnMut() -> bool) {
+    until(&Patience::measuring(name), what, fact).unwrap();
 }
 
 fn ns_of(fd: &OwnedFd) -> PathBuf {
@@ -50,7 +43,7 @@ fn refill_thread_in(kind: &str) -> PathBuf {
 #[test]
 fn the_refill_thread_fills_the_pool_or_counts_each_make_that_fails() {
     let pool = IpcUtsPool::start(2).unwrap();
-    wait_for("first make", || {
+    wait_for("test.ipcuts.first_outcome", "first make", || {
         let c = pool.counts().unwrap();
         c.made_ahead + c.failed > 0
     });
@@ -64,10 +57,14 @@ fn the_refill_thread_fills_the_pool_or_counts_each_make_that_fails() {
         assert_eq!((c.made_ahead, c.failed), (0, 1), "{c:?}");
         assert!(pool.take().unwrap().is_none(), "a dry take");
         assert_eq!(pool.counts().unwrap().made_on_path, 1);
-        wait_for("second failed make", || pool.counts().unwrap().failed == 2);
+        wait_for(
+            "test.ipcuts.second_failed_make",
+            "second failed make",
+            || pool.counts().unwrap().failed == 2,
+        );
         return;
     }
-    wait_for("the pool's bound", || {
+    wait_for("test.ipcuts.filled", "the pool's bound", || {
         pool.counts().unwrap().made_ahead == 2
     });
     let first = pool.take().unwrap().expect("a pair made ahead");
@@ -80,13 +77,17 @@ fn the_refill_thread_fills_the_pool_or_counts_each_make_that_fails() {
         assert_ne!(ns_of(b), own(kind), "a {kind} namespace of its own");
         assert_ne!(ns_of(a), ns_of(b), "no two pairs share a {kind} namespace");
     }
-    wait_for("makes in the taken ones' places", || {
-        pool.counts().unwrap().made_ahead == 4
-    });
+    wait_for(
+        "test.ipcuts.refilled",
+        "makes in the taken ones' places",
+        || pool.counts().unwrap().made_ahead == 4,
+    );
     for kind in ["ipc", "uts"] {
-        wait_for("the refill thread back home", || {
-            refill_thread_in(kind) == own(kind)
-        });
+        wait_for(
+            "test.ipcuts.back_home",
+            "the refill thread back home",
+            || refill_thread_in(kind) == own(kind),
+        );
     }
     let c = pool.counts().unwrap();
     assert_eq!((c.taken, c.made_on_path, c.failed), (2, 0, 0), "{c:?}");

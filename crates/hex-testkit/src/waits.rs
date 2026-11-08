@@ -23,6 +23,10 @@ use std::time::{Duration, Instant};
 
 use hex_core::patience::Patience;
 
+/// `lifecycle.exec`: a program's run to its end (39.131 ms of 10,000), the record of `hex_api::conformance::PROGRAM_END`
+/// too, here for a program a test runs as a child of its own (`std::process::Child`) rather than through a `Proc`:
+/// its end, and what it does on its way there.
+pub const PROGRAM: Duration = Duration::from_nanos(39_130_836);
 /// `node.emptying`: a box's kill to its cgroup's `populated 0` (127.753 ms of 22,092), what a test waits on for a
 /// killed box's processes to end, its emptying or the end of a process killed with it.
 pub const EMPTYING: Duration = Duration::from_nanos(127_752_710);
@@ -31,6 +35,9 @@ pub const NETNS_MAKE: Duration = Duration::from_nanos(120_814_130);
 /// `store.turns`: a record change's wait for the same box's, a held turn's write and its fsyncs (54.401 ms of
 /// 139,118).
 pub const STORE_TURN: Duration = Duration::from_nanos(54_401_152);
+/// `node.turns`: a create's or delete's wait for the same box's, the one under way's hold of its turn (305.809 ms of
+/// 92,042).
+pub const NODE_TURN: Duration = Duration::from_nanos(305_809_337);
 /// `client.answer.create`: a create's answer over the node's socket (220.155 ms of 46,021), which bounds an
 /// in-process create's, and every fact a create makes within itself.
 pub const CREATE: Duration = Duration::from_nanos(220_155_458);
@@ -87,6 +94,13 @@ pub fn until(wait: &Patience, what: &str, mut fact: impl FnMut() -> bool) -> Res
         }
         std::thread::yield_now();
     }
+}
+
+/// An answer a test timed itself, a fact it waited for its own way, told to `wait` and to the census where the probe
+/// runs the suites, as [`until`] tells it.
+pub fn answered(wait: &Patience, took: Duration) {
+    census();
+    wait.answered(took);
 }
 
 /// The variable naming the census's file, and the one bounding its lines: the node's (`hex_node::census`).

@@ -42,6 +42,7 @@ use hex_api::{
     Bounds, BoxId, BoxSpec, BoxState, ClassSpec, Exit, Mount, Network, OciSpec, Program, Refusal,
     Rootfs, Runtime, Stdio, User,
 };
+use hex_core::patience::Patience;
 use hex_core::record::{BoxRecord, Phase};
 use hex_node::{Node, OCI_BOXES, records_dir};
 
@@ -840,21 +841,20 @@ fn boxes_namespaces(node: &Node) -> (u64, u64) {
     (counts.taken, counts.made_on_path)
 }
 
+/// The pool's refill thread's make of a network namespace: the `netns.make` record (hex_testkit::waits).
+static POOL_HOLDS: Patience = Patience::seeded(
+    "test.oci_spec_box.pool_holds",
+    hex_testkit::waits::NETNS_MAKE,
+);
+
 /// Waits for the fact a create from the pool needs: a root node's pool holds a namespace, which its
 /// thread makes as soon as the node opens.
 fn pool_holds_one(node: &Node) {
-    let deadline = std::time::Instant::now() + conformance::PATIENCE;
-    while std::time::Instant::now() < deadline {
+    hex_testkit::waits::until(&POOL_HOLDS, "a namespace in the node's pool", || {
         let c = node.netns().unwrap();
-        if c.made_ahead > c.taken + c.discarded {
-            return;
-        }
-        std::thread::park_timeout(std::time::Duration::from_millis(1));
-    }
-    panic!(
-        "the node's pool made no namespace in {:?}",
-        conformance::PATIENCE
-    );
+        c.made_ahead > c.taken + c.discarded
+    })
+    .unwrap();
 }
 
 fn snapshot(dir: &Path) -> BTreeMap<PathBuf, (String, u32, Vec<u8>)> {

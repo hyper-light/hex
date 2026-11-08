@@ -83,17 +83,6 @@ impl Turns {
         }
     }
 
-    /// A hold of `took` recorded as if a turn had been let go: what a test whose own hold is long arms its wait
-    /// with.
-    #[cfg(test)]
-    pub(crate) fn held_for(&self, took: Duration) {
-        self.held
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .patience
-            .answered(took);
-    }
-
     /// Box `id`'s turn: waits for a turn of the same box under way, never for another box's, and
     /// refuses past the patience learned now, or past the bound of turns taken at once. The wait is for
     /// the turn under way: it ends at the patience past the time its holder took it, and starts again for
@@ -165,6 +154,7 @@ impl Turns {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hex_testkit::waits::until;
 
     fn id(n: &str) -> BoxId {
         BoxId::new(n).unwrap()
@@ -238,12 +228,11 @@ mod tests {
         let took = Instant::now();
         std::thread::scope(|s| {
             let waiter = s.spawn(|| turns.take(&id("a")).map(drop));
-            let deadline = Instant::now().checked_add(hex_api::conformance::PATIENCE);
-            while turns.waited() == 0 || took.elapsed() < Duration::from_millis(30) {
-                assert!(
-                    deadline.is_none_or(|d| Instant::now() < d),
-                    "the second take never waited"
-                );
+            // No record times a take's wait starting on turns of their own (the census's row is to come, from the
+            // suites run under it): measuring, for the fact alone.
+            let waits = Patience::measuring("test.turns.second_take_waits");
+            until(&waits, "the second take waiting", || turns.waited() > 0).unwrap();
+            while took.elapsed() < Duration::from_millis(30) {
                 std::thread::yield_now();
             }
             drop(held);

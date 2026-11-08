@@ -562,11 +562,11 @@ fn on_tmpfs(_dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::time::Instant;
 
     use super::*;
     use hex_api::{Bounds, BoxSpec, ClassSpec};
     use hex_core::record::Phase;
+    use hex_testkit::waits::{STORE_TURN, until};
 
     fn record(id: &str) -> BoxRecord {
         let spec = BoxSpec {
@@ -708,14 +708,16 @@ mod tests {
     /// Goal 5 plan step 2: writes of two boxes never wait on each other; two of one box do. While one
     /// box's turn is held, as its write holds it across the fsyncs, 31 other boxes' records are written
     /// from 31 threads at once, none of them waiting; a second write of the held box waits, its record
-    /// not written, until the turn is let go, and then is. The test holds the turn as long as it takes to
-    /// see the second write wait, so the turns are armed with the test's own patience, within which
-    /// the hold ends (decision 9: a hold past twice the slowest recorded is a fault the store refuses).
+    /// not written, until the turn is let go, and then is. Every wait here is a write's, bounded by twice the
+    /// `store.turns` record (hex_testkit::waits::STORE_TURN, the store's own bound in this build): each other box's
+    /// write is answered within it; and the held box's turn is taken again just before its second write, so the hold
+    /// that write waits on is that write's own wait starting, within the record, never the test's whole first half
+    /// (decision 9: a hold past twice the slowest recorded is a fault the store refuses).
     #[test]
     fn writes_of_two_boxes_never_wait_on_each_other_and_of_one_box_do() {
+        let write = STORE_TURN.saturating_mul(2);
         let dir = tempfile::tempdir().unwrap();
         let store = store_in(dir.path());
-        store.turns.held_for(hex_api::conformance::PATIENCE);
         let held = record("held");
         let turn = store.claim(&held.spec.id).unwrap();
         let (done, written) = std::sync::mpsc::channel();
@@ -726,21 +728,28 @@ mod tests {
             }
             for _ in 0..31 {
                 let put = written
-                    .recv_timeout(hex_api::conformance::PATIENCE)
+                    .recv_timeout(write)
                     .expect("a write waited on the held box's turn");
                 put.unwrap();
             }
         });
         assert_eq!(store.all().unwrap().len(), 31);
         assert_eq!(store.waited(), 0, "no write of another box waited");
+        drop(turn);
 
+        let turn = store.claim(&held.spec.id).unwrap();
         std::thread::scope(|s| {
             let second = s.spawn(|| store.put(&held));
-            let deadline = Instant::now().checked_add(hex_api::conformance::PATIENCE);
-            while store.waited() == 0 && deadline.is_none_or(|d| Instant::now() < d) {
-                std::thread::yield_now();
-            }
-            assert_eq!(store.waited(), 1, "the second write of the held box waits");
+            // The second write's wait starts within its own call: its record bounds it.
+            let waits = Patience::seeded("test.store.second_write_waits", STORE_TURN);
+            until(&waits, "the second write of the held box waiting", || {
+                store.waited() == 1
+            })
+            .unwrap();
+            assert!(
+                !second.is_finished(),
+                "a write waiting on its box's turn ends only once the turn is let go"
+            );
             assert_eq!(
                 store.get(&held.spec.id).unwrap(),
                 None,

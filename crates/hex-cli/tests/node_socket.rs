@@ -44,7 +44,6 @@ use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio as Std};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use hex_api::conformance::{self, Act, Fixture};
 use hex_api::{
@@ -54,9 +53,31 @@ use hex_api::{
 #[cfg(debug_assertions)]
 use hex_api::{Network, OciSpec, Rootfs};
 use hex_client::Client;
+use hex_core::patience::Patience;
 use hex_core::record::{BoxRecord, Phase};
 use hex_core::wire::{self, Answer, Call, Request, Streams};
 use hex_node::OCI_BOXES;
+use hex_testkit::waits::{CREATE, EMPTYING, EXEC, NETNS_MAKE, PROGRAM, START, until};
+
+/// Each wait here takes its own fact's record (hex_testkit::waits; the lead's rule of 2026-11-08), or measures where no
+/// recorded operation makes its fact. The pool's refill thread's make of a network namespace: `netns.make`.
+static POOL_HOLDS: Patience = Patience::seeded("test.node_socket.pool_holds", NETNS_MAKE);
+/// An exec's program in its box: made within the exec, before it answers, so the exec's record bounds it.
+static RUNNING: Patience = Patience::seeded("test.node_socket.running", EXEC);
+/// The agent's ending of a program whose caller went away, its kill, its reaping and its count in its box: a box's
+/// emptying's work, whose record the server's own wait for the programs it ends takes (decision 9: `node.emptying`).
+static ABANDONED: Patience = Patience::seeded("test.node_socket.abandoned", EMPTYING);
+/// A create's answer, and what a create makes within itself: its hooks holding it, the agent waiting opening its FIFO.
+static CREATING: Patience = Patience::seeded("test.node_socket.create", CREATE);
+/// A start's startContainer hook holding it, made within the start.
+static STARTING: Patience = Patience::seeded("test.node_socket.start", START);
+/// The crash hook, a program this test runs itself: its run to its end, and its pipe opened on the way.
+static HOOK: Patience = Patience::seeded("test.node_socket.hook", PROGRAM);
+/// A line the agent wrote before it answered or ended, delivered by this test's own stderr reader: no recorded
+/// operation makes the delivery, so measuring, for the fact alone, each answer recorded for the census to come.
+static SAID: Patience = Patience::measuring("test.node_socket.said");
+/// Longest the test waits for the agent's answer to an exec over a raw connection: twice the exec answer's record.
+const ANSWERED: std::time::Duration = EXEC.saturating_mul(2);
 
 const TEST: &str = "the_seam_holds_its_contract_over_the_node_agents_socket";
 
@@ -453,7 +474,7 @@ fn the_agent_parks_procs_as_root_and_none_rootless(lab: &Lab, own: &Path, cache:
         "hex node: parked procs: on"
     };
     let agent = Agent::start(exe, cache, own.join("hex-sock-pp"));
-    wait_for(&format!("hex node saying {said:?}"), || {
+    wait_for(&SAID, &format!("hex node saying {said:?}"), || {
         agent.errors().lines().any(|l| l.starts_with(said))
     });
 }
@@ -525,7 +546,7 @@ fn namespaces_counted(lab: &Lab, client: &Client) {
         "the example's box has no network namespace of its own"
     );
     if !lab.rootless {
-        wait_for("the agent's pool to hold a namespace", || {
+        wait_for(&POOL_HOLDS, "the agent's pool to hold a namespace", || {
             let c = client.netns().unwrap();
             c.made_ahead > c.taken + c.discarded
         });
@@ -553,7 +574,7 @@ fn namespaces_counted(lab: &Lab, client: &Client) {
 /// is made on its create's path and none is taken.
 fn conformance_with_namespaces(lab: &Lab, client: &Client) {
     if !lab.rootless {
-        wait_for("the agent's pool to hold a namespace", || {
+        wait_for(&POOL_HOLDS, "the agent's pool to hold a namespace", || {
             let c = client.netns().unwrap();
             c.made_ahead > c.taken + c.discarded
         });
@@ -630,26 +651,39 @@ fn disconnect(lab: &Lab, agent: &Agent, client: &Client) {
             other => panic!("exec in {id}: {other:?}"),
         }
     }
-    wait_for("each program to run in its box", || {
+    wait_for(&RUNNING, "each program to run in its box", || {
         procs_in(&oci_cg).len() == 2 && procs(&agent.box_root, &process).len() == 1
     });
     drop(caller);
     for id in [&oci, &process] {
-        wait_for(&format!("{id} to count its abandoned program"), || {
-            client.inspect(id).unwrap().abandoned == 1
-        });
+        wait_for(
+            &ABANDONED,
+            &format!("{id} to count its abandoned program"),
+            || client.inspect(id).unwrap().abandoned == 1,
+        );
     }
-    wait_for("the programs to be ended", || {
+    // The count is the last of the agent's ending of a program, after its kill and reaping: once both are counted,
+    // each fact of that ending holds at its first look, made within it.
+    let ended = wait_for(&ABANDONED, "the programs to be ended", || {
         procs_in(&oci_cg) == init && procs(&agent.box_root, &process).is_empty()
     });
+    assert_eq!(
+        ended, 1,
+        "a program counted abandoned was ended before its count"
+    );
     for pid in &pids {
-        wait_for(&format!("program {pid} to be reaped"), || {
+        let reaped = wait_for(&ABANDONED, &format!("program {pid} to be reaped"), || {
             !Path::new(&format!("/proc/{pid}")).exists()
         });
+        assert_eq!(
+            reaped, 1,
+            "a program counted abandoned was reaped before its count"
+        );
     }
-    wait_for("no zombie under the agent", || {
+    let reaped = wait_for(&ABANDONED, "no zombie under the agent", || {
         zombies_of(agent.pid()).is_empty()
     });
+    assert_eq!(reaped, 1, "no zombie is left once the programs are counted");
     assert_eq!(
         client.inspect(&oci).unwrap().state,
         BoxState::Running,
@@ -991,30 +1025,45 @@ fn crash_case(
         }
         At::StateDir => {}
         At::Init | At::CreateContainer => {
-            wait_for("the create's hook to hold it", || hooked.exists())
+            wait_for(&CREATING, "the create's hook to hold it", || {
+                hooked.exists()
+            });
+            assert!(!create.is_finished(), "{name}: the hook holds the create");
         }
         At::Ready => {
-            wait_for("the create's hook to hold it", || hooked.exists());
+            wait_for(&CREATING, "the create's hook to hold it", || {
+                hooked.exists()
+            });
+            assert!(!create.is_finished(), "{name}: the hook holds the create");
             mkfifo(&temp);
             hook_release.as_mut().unwrap().write_all(b"\n").unwrap();
         }
-        At::Made => wait_for("the create", || create.is_finished()),
+        At::Made => {
+            wait_for(&CREATING, "the create", || create.is_finished());
+        }
         At::StartContainer => {
-            wait_for("the create", || create.is_finished());
+            wait_for(&CREATING, "the create", || create.is_finished());
             let socket = agent.socket.clone();
             let id = id.clone();
             start = Some(std::thread::spawn(move || {
                 Client::connect(&socket).and_then(|c| c.start(&id))
             }));
-            wait_for("the start's startContainer hook to hold it", || {
-                hooked.exists()
-            });
+            wait_for(
+                &STARTING,
+                "the start's startContainer hook to hold it",
+                || hooked.exists(),
+            );
+            assert!(
+                !start.as_ref().unwrap().is_finished(),
+                "{name}: the hook holds the start"
+            );
         }
     }
     if matches!(at, At::StateDir | At::Ready) {
-        wait_for("the agent to wait opening a FIFO", || {
+        wait_for(&CREATING, "the agent to wait opening a FIFO", || {
             waits_opening_a_fifo(agent.pid())
         });
+        assert!(!create.is_finished(), "{name}: the FIFO holds the create");
     }
     // What the kill leaves, as the point says: a record only once the box is made, its container's
     // state directory from the runtime's create on, its state written once its init is past its hooks.
@@ -1117,21 +1166,29 @@ fn crash_case(
     // A start cut in its startContainer hooks: recovery removed the box by that reason, and said so
     // (hex_core::recovery's Why::StartInterrupted), never as a box merely stopped.
     if at == At::StartContainer {
-        wait_for("recovery to report the box's start interrupted", || {
-            agent
-                .errors()
-                .lines()
-                .any(|l| l.contains(id.as_str()) && l.contains("startContainer hooks"))
-        });
+        wait_for(
+            &SAID,
+            "recovery to report the box's start interrupted",
+            || {
+                agent
+                    .errors()
+                    .lines()
+                    .any(|l| l.contains(id.as_str()) && l.contains("startContainer hooks"))
+            },
+        );
     }
     #[cfg(debug_assertions)]
     if at == At::TornRecord {
-        wait_for("recovery to report the box removed as unreadable", || {
-            agent
-                .errors()
-                .lines()
-                .any(|l| l.contains(id.as_str()) && l.contains("couldn't be read"))
-        });
+        wait_for(
+            &SAID,
+            "recovery to report the box removed as unreadable",
+            || {
+                agent
+                    .errors()
+                    .lines()
+                    .any(|l| l.contains(id.as_str()) && l.contains("couldn't be read"))
+            },
+        );
     }
     assert!(client.list().unwrap().is_empty(), "{name}: a box is left");
     for place in [&state, &records] {
@@ -1178,7 +1235,7 @@ impl Drop for CaseMade {
             // period (Ada's 2026-11-06 rule).
             let cg = hex_runtime::linux::cgroup::BoxCgroup::at(self.boxes.clone());
             let _ = cg.kill();
-            let _ = cg.wait_empty(conformance::PATIENCE);
+            let _ = cg.wait_empty(EMPTYING.saturating_mul(2));
             let (mut walk, mut dirs) = (vec![self.boxes.clone()], Vec::new());
             while let Some(dir) = walk.pop() {
                 if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -1256,7 +1313,7 @@ fn a_crash_hook_waits_for_a_line_and_ends_when_its_writer_closes() {
                 .unwrap(),
         );
         let mut writer = None;
-        wait_for("the hook to open its release pipe", || {
+        wait_for(&HOOK, "the hook to open its release pipe", || {
             assert!(
                 hook.0.try_wait().unwrap().is_none(),
                 "the crash hook ended before its pipe was released"
@@ -1279,9 +1336,11 @@ fn a_crash_hook_waits_for_a_line_and_ends_when_its_writer_closes() {
             writer.as_mut().unwrap().write_all(b"\n").unwrap();
         }
         drop(writer);
-        wait_for("the hook to end after release or writer close", || {
-            hook.0.try_wait().unwrap().is_some()
-        });
+        wait_for(
+            &HOOK,
+            "the hook to end after release or writer close",
+            || hook.0.try_wait().unwrap().is_some(),
+        );
     }
 }
 
@@ -1397,7 +1456,7 @@ fn a_sigterm_says_the_parked_procs_and_leaves_the_boxes_as_a_sigkill_does(
         Some(143),
         "hex node ended on SIGTERM: {ended:?}"
     );
-    wait_for("the agent's parked procs line", || {
+    wait_for(&SAID, "the agent's parked procs line", || {
         agent.errors().contains("hex node: parked procs at exit:")
     });
     let said = agent.errors();
@@ -1511,6 +1570,7 @@ fn a_crash_with_idle_cgroups_and_live_boxes_leaves_nothing(lab: &Lab, own: &Path
     drop(agent);
     let again = Agent::over(exe, dir.path(), box_root.clone(), None);
     wait_for(
+        &SAID,
         "the restarted agent to say it removed the idle slot",
         || again.errors().contains("removed idle cgroup"),
     );
@@ -1629,8 +1689,8 @@ fn send(fd: &std::os::fd::OwnedFd, bytes: &[u8]) {
 fn answer(fd: &std::os::fd::OwnedFd) -> (wire::Header, Answer) {
     let mut ready = [rustix::event::PollFd::new(fd, rustix::event::PollFlags::IN)];
     let ts = rustix::event::Timespec {
-        tv_sec: 60,
-        tv_nsec: 0,
+        tv_sec: i64::try_from(ANSWERED.as_secs()).unwrap_or(i64::MAX),
+        tv_nsec: i64::from(ANSWERED.subsec_nanos()),
     };
     assert_eq!(
         rustix::event::poll(&mut ready, Some(&ts)).unwrap(),
@@ -1717,15 +1777,9 @@ fn zombies_of(agent: i32) -> Vec<String> {
     out
 }
 
-fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = Instant::now().checked_add(conformance::PATIENCE);
-    while deadline.is_none_or(|d| Instant::now() < d) {
-        if cond() {
-            return;
-        }
-        std::thread::yield_now();
-    }
-    panic!("timed out waiting for {what}");
+/// Waits for `cond` on `wait`, its own fact's record or measuring (hex_testkit::waits): says how many looks it took.
+fn wait_for(wait: &Patience, what: &str, cond: impl FnMut() -> bool) -> u64 {
+    until(wait, what, cond).unwrap()
 }
 
 /// The capability sets the node renders a bundle with (Docker's defaults, `hex_core::bundle`). A spec

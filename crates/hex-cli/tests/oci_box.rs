@@ -53,10 +53,12 @@ use hex_api::{
     Bounds, BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, ClassSpec, Exit, Network, OciSpec,
     Refusal, Rootfs, Runtime,
 };
+use hex_core::patience::Patience;
 use hex_node::{Node, OCI_BOXES, records_dir};
 use hex_runtime::linux::cgroup::BoxRoot;
 use hex_runtime::linux::disks;
 use hex_runtime::linux::oci::run::ClassicReason;
+use hex_testkit::waits::{CREATE, EMPTYING, EXEC, NETNS_MAKE, NODE_TURN, PROGRAM, until};
 
 const TEST: &str = "oci_boxes_report_their_inits_exit_through_the_seam";
 /// Runs just the prepared-device oracle through the existing root/delegation fixture, in a fresh
@@ -101,23 +103,44 @@ fn oci_boxes_report_their_inits_exit_through_the_seam() {
     }
 }
 
-/// The suite's time as root, recorded: 5.57 s (4.70 s in the gates) on fedora at 5e0082e
-/// (hex-g5rec-gates-20261105T113718Z).
-const SUITE_AS_ROOT: Duration = Duration::from_millis(5_570);
+/// A delegated re-run of a test, to its end: no recorded operation makes it, and no census row times it yet, so the
+/// wait is measuring, for the fact alone, each re-run's time recorded for the census to come, from the suites run under
+/// it (hex_testkit::waits; the lead's ruling of 2026-11-08). It was the suite's recorded time and one program-end
+/// patience more, a program's record taken for a whole suite.
+static RERUN: Patience = Patience::measuring("test.oci_box.rerun");
 
-/// How long a delegated re-run may take, derived rather than picked (Ada's 2026-11-06 rule): the suite's recorded
-/// time and one [`conformance::PATIENCE`] more. Each of the re-run's waits is bounded by that patience and fails the
-/// re-run past it, so a re-run that has waited the suite's time and a whole patience beyond it is stuck outside any
-/// bounded wait, not slow. It was 300 s, picked.
-fn rerun_bound() -> Duration {
-    SUITE_AS_ROOT + conformance::PATIENCE
-}
+// Each other wait here takes its own fact's record (hex_testkit::waits; the lead's rule of 2026-11-08), or measures
+// where no recorded operation makes its fact, its answers recorded for the census to come.
+/// A program's run, to its end or to what it does on its way (an init exec'ing its program, a program it runs writing
+/// its mark, a program reaped once ended): the program-run record.
+static PROGRAM_RUN: Patience = Patience::seeded("test.oci_box.program", PROGRAM);
+/// A killed process's end, and its reaping: `node.emptying`.
+static KILLED: Patience = Patience::seeded("test.oci_box.killed", EMPTYING);
+/// What a create makes within itself, while the test holds it or as it answers (a create blocked reading its config or
+/// writing its record, handed a seed, an init's stack mapped): the create's record. Each such test then asserts the
+/// create still held, the fact made within it.
+static CREATING: Patience = Patience::seeded("test.oci_box.create", CREATE);
+/// An exec'd program running: made within the exec, before it answers.
+static EXECUTING: Patience = Patience::seeded("test.oci_box.exec", EXEC);
+/// A create's or delete's wait for the same box's call under way: `node.turns`.
+static TURN: Patience = Patience::seeded("test.oci_box.turn", NODE_TURN);
+/// Two namespaces made by the pool's refill thread, one after the other: two of `netns.make`'s.
+static TWO_NAMESPACES: Patience =
+    Patience::seeded("test.oci_box.two_namespaces", NETNS_MAKE.saturating_mul(2));
+/// What the node's own threads make on their own, no recorded operation making it: the /dev pool filled, procs and
+/// inits made ahead, procs dropped by the dropper, a dead seed's slot started again, an exec'd program's loader closing
+/// its descriptors. Measuring, for the fact alone.
+static DEVFS: Patience = Patience::measuring("test.oci_box.devfs");
+static AHEAD: Patience = Patience::measuring("test.oci_box.ahead");
+static DROPPED: Patience = Patience::measuring("test.oci_box.dropped");
+static SEED_RESTARTED: Patience = Patience::measuring("test.oci_box.seed_restarted");
+static LOADER: Patience = Patience::measuring("test.oci_box.loader");
 
 /// Re-runs the test `name` in a transient systemd --user scope with `Delegate=yes`, so it gets a cgroup of its
 /// own to subdivide. Only where a user manager answers (its `$XDG_RUNTIME_DIR/systemd/private` socket is
 /// there): a `systemd-run` binary with no manager running, as in a guest whose PID 1 isn't systemd, would wait
 /// on a manager that never comes. Prints the reason and returns where there's none. The re-run is waited on
-/// for at most [`rerun_bound`], then killed and failed by name.
+/// for at most [`RERUN`]'s deadline (none while it measures), then killed and failed by name.
 fn rerun_delegated(name: &str, direct: &str) {
     let manager = std::env::var_os("XDG_RUNTIME_DIR")
         .map(|d| Path::new(&d).join("systemd/private"))
@@ -142,15 +165,19 @@ fn rerun_delegated(name: &str, direct: &str) {
         .spawn()
         .expect("run the test in a delegated scope");
     // The wait runs on a thread that sends the status when the child ends, so the test waits on that fact
-    // for at most rerun_bound(), and a hung re-run is killed by its pid.
+    // for at most RERUN's deadline, and a hung re-run is killed by its pid.
     let pid = child.id();
     let (sent, ended) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = sent.send(child.wait());
     });
-    let bound = rerun_bound();
+    let began = Instant::now();
+    let bound = RERUN.deadline().unwrap_or(Duration::MAX);
     let status = match ended.recv_timeout(bound) {
-        Ok(status) => status.expect("wait on the delegated re-run"),
+        Ok(status) => {
+            hex_testkit::waits::answered(&RERUN, began.elapsed());
+            status.expect("wait on the delegated re-run")
+        }
         Err(_) => {
             let _ = Command::new("kill")
                 .args(["-KILL", &pid.to_string()])
@@ -641,6 +668,7 @@ fn prepared_devs_preserve_order_and_are_never_shared(lab: &Lab, own: &Path) {
     create(&pooled, &id, &prime).unwrap();
     pooled.delete(&id).unwrap();
     wait_for(
+        &DEVFS,
         || pooled.dev_mounts().unwrap().made >= pooled.sizes().start as u64,
         "the prepared /dev pool to fill after its first key",
     );
@@ -735,6 +763,7 @@ fn prepared_devs_preserve_order_and_are_never_shared(lab: &Lab, own: &Path) {
         let through_shim = pooled.creates_through_shim();
         if case != "parent" {
             wait_for(
+                &DEVFS,
                 || {
                     let c = pooled.dev_mounts().unwrap();
                     c.made > c.taken + c.discarded
@@ -777,6 +806,7 @@ fn prepared_devs_preserve_order_and_are_never_shared(lab: &Lab, own: &Path) {
     let first = BoxId::new("isolated-a").unwrap();
     let second = BoxId::new("isolated-b").unwrap();
     wait_for(
+        &DEVFS,
         || {
             let c = pooled.dev_mounts().unwrap();
             c.made >= c.taken + c.discarded + 2
@@ -1448,6 +1478,7 @@ fn procs_made_ahead_carry_their_masks(lab: &Lab, own: &Path) {
     let before = node.proc_mounts().unwrap();
     let first = view(&BoxId::new("procs-a").unwrap());
     wait_for(
+        &AHEAD,
         || {
             let c = node.proc_mounts().unwrap();
             if ahead {
@@ -1646,6 +1677,7 @@ fn a_parked_inits_proc_is_its_own_and_taken_once(lab: &Lab, own: &Path) {
     };
     let ready = |made: u64| {
         wait_for(
+            &AHEAD,
             || {
                 let c = node.cgroup_reuse().unwrap();
                 c.ahead.ready == 1 && c.parked.procs_made + c.parked.procs_failed >= made
@@ -1771,6 +1803,7 @@ fn a_parked_inits_proc_is_its_own_and_taken_once(lab: &Lab, own: &Path) {
         "N3's create queued its missed proc: {after:?}"
     );
     wait_for(
+        &DROPPED,
         || node.cgroup_reuse().unwrap().parked.procs_dropped == before.procs_dropped + 1,
         "the missed proc dropped by the node's dropper",
     );
@@ -1798,6 +1831,7 @@ fn a_parked_inits_proc_is_its_own_and_taken_once(lab: &Lab, own: &Path) {
     node.release_idle().unwrap();
     // Every proc no init attached is dropped by the dropper, none where it was.
     wait_for(
+        &DROPPED,
         || {
             let c = node.cgroup_reuse().unwrap().parked;
             c.procs_dropped + c.procs_dropped_inline == c.procs_made - c.proc_hits
@@ -1816,6 +1850,7 @@ fn a_parked_inits_proc_is_its_own_and_taken_once(lab: &Lab, own: &Path) {
         "no proc root is open in the node"
     );
     wait_for(
+        &KILLED,
         || {
             let mut fds = [rustix::event::PollFd::new(
                 &last,
@@ -1908,6 +1943,7 @@ fn a_parked_init_takes_a_create_made_each_way(lab: &Lab, own: &Path) {
             .to_path_buf();
         node.delete(&n1).unwrap();
         wait_for(
+            &AHEAD,
             || {
                 let c = node.cgroup_reuse().unwrap();
                 c.ahead.ready == 1 && c.parked.procs_made + c.parked.procs_failed >= 1
@@ -2630,7 +2666,11 @@ fn create_and_start_container_hooks_run_in_the_containers_namespaces(lab: &Lab, 
     );
 
     node.start(&id).expect("start the hooked box");
-    wait_for(|| obs.join("program").exists(), "the program to run");
+    wait_for(
+        &PROGRAM_RUN,
+        || obs.join("program").exists(),
+        "the program to run",
+    );
     assert_eq!(
         read(obs.join("program")).trim(),
         "after",
@@ -2671,7 +2711,11 @@ fn create_and_start_container_hooks_run_in_the_containers_namespaces(lab: &Lab, 
         "a startContainer hook takes the classic path"
     );
     node.start(&id).expect("start it");
-    wait_for(|| obs.join("program").exists(), "the program to run");
+    wait_for(
+        &PROGRAM_RUN,
+        || obs.join("program").exists(),
+        "the program to run",
+    );
     assert_eq!(
         read(obs.join("program")).trim(),
         "after",
@@ -3366,7 +3410,11 @@ fn crash_and_restart(lab: &Lab, own: &Path) -> Result<(), String> {
     agent.kill().unwrap();
     agent.wait().unwrap();
     // Orphaned again: its new parent is the agent's nearest subreaper, not this process.
-    wait_for(|| parent_of(init) != agent_pid, "the init to be reparented");
+    wait_for(
+        &PROGRAM_RUN,
+        || parent_of(init) != agent_pid,
+        "the init to be reparented",
+    );
 
     let restarted = lab.node(&box_root, &state);
     let id = BoxId::new("crash").unwrap();
@@ -3387,6 +3435,7 @@ fn crash_and_restart(lab: &Lab, own: &Path) -> Result<(), String> {
         "once its init has ended"
     );
     wait_for(
+        &KILLED,
         || !Path::new(&format!("/proc/{init}")).exists(),
         "the ended init to be reaped by its parent",
     );
@@ -3539,6 +3588,7 @@ fn network_namespaces(lab: &Lab, own: &Path) {
     let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
     let node = lab.node(&own.join("hex-oci-netns"), state.path());
     wait_for(
+        &TWO_NAMESPACES,
         || {
             let c = node.netns().unwrap();
             c.made_ahead >= c.taken + c.discarded + 2
@@ -3664,14 +3714,14 @@ fn program_alone(lab: &Lab, own: &Path) {
     );
     // The node makes inits ahead for boxes of no owner, each the agent's child (decision 8): their refill is
     // waited out first, its queue full (or a make failed), so the diff is the exec's alone.
-    let deadline = Instant::now() + conformance::PATIENCE;
-    while Instant::now() < deadline {
-        let ahead = node.cgroup_reuse().unwrap().ahead;
-        if ahead.ready >= ahead.size || ahead.failed > 0 {
-            break;
-        }
-        std::thread::yield_now();
-    }
+    wait_for(
+        &AHEAD,
+        || {
+            let ahead = node.cgroup_reuse().unwrap().ahead;
+            ahead.ready >= ahead.size || ahead.failed > 0
+        },
+        "the inits made ahead to fill their queue, or a make to fail",
+    );
     let children = children_of(agent);
     let before: std::collections::BTreeSet<u32> = children.into_iter().collect();
     let second = node
@@ -3738,22 +3788,19 @@ fn programs_hold_their_stdio_alone(lab: &Lab, own: &Path) {
     ] {
         // Its loader holds a descriptor for a moment after the exec, so what's waited for is their end; a
         // stray stays.
-        let deadline = Instant::now() + conformance::PATIENCE;
-        loop {
-            let held: Vec<String> = std::fs::read_dir(format!("/proc/{pid}/fd"))
+        let held = || -> Vec<String> {
+            std::fs::read_dir(format!("/proc/{pid}/fd"))
                 .unwrap()
                 .map(|fd| fd.unwrap().file_name().to_string_lossy().into_owned())
                 .filter(|fd| !["0", "1", "2"].contains(&fd.as_str()))
-                .collect();
-            if cmdline_has(pid, "/usr/bin/sleep") && held.is_empty() {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "program {pid} also holds {held:?}, or never became its program"
-            );
-            std::thread::yield_now();
-        }
+                .collect()
+        };
+        until(
+            &LOADER,
+            &format!("program {pid} to become its program and hold its stdio alone"),
+            || cmdline_has(pid, "/usr/bin/sleep") && held().is_empty(),
+        )
+        .unwrap();
     }
     drop(stray);
     node.delete(&id).expect("delete ends the programs");
@@ -3880,12 +3927,13 @@ fn orphans_are_reaped(lab: &Lab, own: &Path) {
         let mut text = String::new();
         let _ = got.send(std::io::Read::read_to_string(&mut out, &mut text).map(|_| text));
     });
+    // The program ended (waited for above), so its stdout ends with it: within a program's run's record.
+    let ended = PROGRAM.saturating_mul(2);
     let text = read
-        .recv_timeout(conformance::PATIENCE)
+        .recv_timeout(ended)
         .unwrap_or_else(|_| {
             panic!(
-                "the program's stdout didn't end within {:?}: the orphan holds the pipe the test reads",
-                conformance::PATIENCE
+                "the program's stdout didn't end within {ended:?}: the orphan holds the pipe the test reads"
             )
         })
         .unwrap();
@@ -3897,6 +3945,7 @@ fn orphans_are_reaped(lab: &Lab, own: &Path) {
     );
     std::fs::write(&fifo, b"go\n").unwrap();
     wait_for(
+        &PROGRAM_RUN,
         || !Path::new(&format!("/proc/{orphan}")).exists(),
         "the ended orphan to be reaped",
     );
@@ -3935,7 +3984,7 @@ fn held_record_write(lab: &Lab, own: &Path) {
                 });
             }
             (0..n)
-                .map_while(|_| made.recv_timeout(conformance::PATIENCE).ok())
+                .map_while(|_| made.recv_timeout(CREATE.saturating_mul(2)).ok())
                 .map(|m| m.expect("create"))
                 .collect()
         })
@@ -3979,6 +4028,7 @@ fn held_record_write(lab: &Lab, own: &Path) {
     let (beside, synced_beside, held_made) = std::thread::scope(|s| {
         let holder = s.spawn(|| node.create(held_spec));
         wait_for(
+            &CREATING,
             blocked_opening_a_fifo,
             "the held create to block in its record write",
         );
@@ -3992,7 +4042,7 @@ fn held_record_write(lab: &Lab, own: &Path) {
             });
         }
         let beside: Vec<Result<Duration, Refusal>> = (0..31)
-            .map_while(|_| made.recv_timeout(conformance::PATIENCE).ok())
+            .map_while(|_| made.recv_timeout(CREATE.saturating_mul(2)).ok())
             .collect();
         let synced_beside = node.record_syncs();
         // Let the held write go on: its open completes, and it writes the record into the FIFO.
@@ -4141,6 +4191,7 @@ fn a_config_swapped_after_the_check_never_makes_the_container(lab: &Lab, own: &P
             })
         });
         wait_for(
+            &CREATING,
             blocked_opening_a_fifo,
             "the create to wait reading its config",
         );
@@ -4181,6 +4232,7 @@ fn a_config_swapped_after_the_check_never_makes_the_container(lab: &Lab, own: &P
             })
         });
         wait_for(
+            &CREATING,
             blocked_opening_a_fifo,
             "the shim's create to wait reading its config",
         );
@@ -4235,6 +4287,7 @@ fn an_exec_takes_the_checked_spec_not_the_bundle_swapped_after_create(lab: &Lab,
     let held = exec.as_ref().ok().map(|exec| {
         let pid = exec.pid();
         wait_for(
+            &EXECUTING,
             || cmdline_has(pid, "/usr/bin/sleep"),
             "the exec'd program to run",
         );
@@ -4352,6 +4405,7 @@ fn a_create_or_delete_of_a_box_being_made_waits_for_it(lab: &Lab, own: &Path) {
         let (made, then, both_waited) = std::thread::scope(|s| {
             let first = s.spawn(|| node.create(spec));
             wait_for(
+                &CREATING,
                 blocked_opening_a_fifo,
                 "the create to wait reading its config",
             );
@@ -4362,6 +4416,7 @@ fn a_create_or_delete_of_a_box_being_made_waits_for_it(lab: &Lab, own: &Path) {
             // The second waits, or (a node without the turn) ends at once; either way the first is let
             // go before anything is asserted, so a failure is reported rather than leaving it blocked.
             wait_for(
+                &TURN,
                 || node.waited_for_a_box() > waited || then.is_finished(),
                 "the second call to wait for the create under way, or end",
             );
@@ -4465,6 +4520,7 @@ fn a_second_create_of_an_owned_box_being_made_waits_and_takes_no_slot(lab: &Lab,
     let (made, then, both_waited) = std::thread::scope(|s| {
         let first = s.spawn(|| node.create(spec));
         wait_for(
+            &CREATING,
             blocked_opening_a_fifo,
             "the create to wait reading its config",
         );
@@ -4479,6 +4535,7 @@ fn a_second_create_of_an_owned_box_being_made_waits_and_takes_no_slot(lab: &Lab,
         // The second waits, or (a node without the turn) ends at once; either way the first is let go below,
         // so a failure is reported rather than leaving it blocked.
         wait_for(
+            &TURN,
             || node.waited_for_a_box() > waited || then.is_finished(),
             "the second create to wait for the one under way, or end",
         );
@@ -4569,6 +4626,7 @@ fn a_delete_racing_a_create_of_one_id_leaves_the_node_consistent(lab: &Lab, own:
         let (created, deleted) = std::thread::scope(|s| {
             let create = s.spawn(|| node.create(spec));
             wait_for(
+                &CREATING,
                 blocked_opening_a_fifo,
                 "the create to block reading its config",
             );
@@ -4578,6 +4636,7 @@ fn a_delete_racing_a_create_of_one_id_leaves_the_node_consistent(lab: &Lab, own:
             // node), or it ended. Only then is the create let go, so the race is always forced, and it is let
             // go before anything is asserted, so a failure is reported rather than leaving it blocked.
             wait_for(
+                &TURN,
                 || !cgroup.exists() || node.waited_for_a_box() > waited || delete.is_finished(),
                 "the delete to take the box's cgroup, wait for the create's turn, or end",
             );
@@ -4803,14 +4862,14 @@ fn created_through_a_seed_in_its_cgroup_and_namespaces(lab: &Lab, own: &Path) {
     .expect("create through a seed");
     // The inits the node then makes ahead for boxes of no owner go through its create seeds too (decision 8):
     // their refill is waited out, its queue full (or a make failed), and they are taken out of the counts.
-    let deadline = Instant::now() + conformance::PATIENCE;
-    while Instant::now() < deadline {
-        let ahead = node.cgroup_reuse().unwrap().ahead;
-        if ahead.ready >= ahead.size || ahead.failed > 0 {
-            break;
-        }
-        std::thread::yield_now();
-    }
+    wait_for(
+        &AHEAD,
+        || {
+            let ahead = node.cgroup_reuse().unwrap().ahead;
+            ahead.ready >= ahead.size || ahead.failed > 0
+        },
+        "the inits made ahead to fill their queue, or a make to fail",
+    );
     let parks = node.cgroup_reuse().unwrap().parked.parked;
     let after = node.create_seeds().unwrap();
     assert_eq!(
@@ -4827,6 +4886,7 @@ fn created_through_a_seed_in_its_cgroup_and_namespaces(lab: &Lab, own: &Path) {
     // Wait until the init has exec'd its program, so `exe`, the namespaces and the cgroup are the
     // container's and not the seed's clone mid-setup.
     wait_for(
+        &PROGRAM_RUN,
         || std::fs::read_link(format!("/proc/{init}/exe")).is_ok_and(|p| p.ends_with("sleep")),
         "the init to exec its program",
     );
@@ -4887,6 +4947,7 @@ fn each_seed_cloned_container_is_randomized_afresh(lab: &Lab, own: &Path) {
     let agent = std::process::id();
     let base = |pid: u32| {
         wait_for(
+            &CREATING,
             || stack_base(pid).is_some(),
             "a process to have a readable stack mapping",
         );
@@ -4899,6 +4960,7 @@ fn each_seed_cloned_container_is_randomized_afresh(lab: &Lab, own: &Path) {
         node.start(&bid).expect("start");
         let init = u32::try_from(init_pid(&node.container_dir(&bid))).unwrap();
         wait_for(
+            &PROGRAM_RUN,
             || std::fs::read_link(format!("/proc/{init}/exe")).is_ok_and(|p| p.ends_with("sleep")),
             "the init to exec its program",
         );
@@ -4960,6 +5022,7 @@ fn a_seed_that_dies_mid_create_is_refused_and_restarted(lab: &Lab, own: &Path) {
         let creating =
             scope.spawn(|| node.create(lab.running(dead.clone(), &Lab::act(&Act::Wait))));
         wait_for(
+            &CREATING,
             || node.create_seeds().unwrap().handed > before.handed,
             "the second create to be handed the stopped seed",
         );
@@ -4999,6 +5062,7 @@ fn a_seed_that_dies_mid_create_is_refused_and_restarted(lab: &Lab, own: &Path) {
     node.start(&next).expect("start the next box");
     assert_eq!(node.inspect(&next).unwrap().state, BoxState::Running);
     wait_for(
+        &SEED_RESTARTED,
         || node.create_seeds().unwrap().restarted > before.restarted,
         "the dead seed's slot to be started again",
     );
@@ -5086,6 +5150,7 @@ fn on_tmpfs(dir: &Path) -> bool {
 fn wait_exit(rt: &dyn Runtime, id: &BoxId) -> BoxInfo {
     let mut last = None;
     wait_for(
+        &PROGRAM_RUN,
         || {
             let info = rt.inspect(id).unwrap();
             let done = info.exit.is_some();
@@ -5097,15 +5162,9 @@ fn wait_exit(rt: &dyn Runtime, id: &BoxId) -> BoxInfo {
     last.unwrap()
 }
 
-fn wait_for(mut cond: impl FnMut() -> bool, what: &str) {
-    let deadline = Instant::now() + conformance::PATIENCE;
-    while Instant::now() < deadline {
-        if cond() {
-            return;
-        }
-        std::thread::park_timeout(Duration::from_millis(10));
-    }
-    panic!("timed out waiting for {what}");
+/// Waits for `cond` on `wait`, its own fact's record or measuring (hex_testkit::waits): says how many looks it took.
+fn wait_for(wait: &Patience, cond: impl FnMut() -> bool, what: &str) -> u64 {
+    until(wait, what, cond).unwrap()
 }
 
 /// The init's pid, from the state (`"pid":<n>`) in its container's state dir.

@@ -61,8 +61,10 @@ use std::time::{Duration, Instant};
 use hex_api::conformance::{Act, PATIENCE};
 use hex_api::{Bounds, BoxId, BoxOwner, BoxSpec, ClassSpec, Exit, Program, Runtime, Stdio};
 use hex_core::netns_reuse::Refused as NetRefused;
+use hex_core::patience::Patience;
 use hex_core::reuse::Refused;
 use hex_node::Node;
+use hex_testkit::waits::{DELETE, EMPTYING, PROGRAM, until};
 use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::fs::inotify;
 use rustix::process::{Pid, PidfdFlags};
@@ -459,7 +461,7 @@ fn a_delete_ends_a_box_through_its_inits_pidfd(lab: &Lab, own: &Path) {
         Some(false),
         "the fallback wrote no cgroup.kill"
     );
-    wait_for(|| has_ended(&outside_fd), "the outsider killed");
+    wait_for(&KILLED, || has_ended(&outside_fd), "the outsider killed");
     // Reaped here unless the node's sweep reaped it first.
     let _ = outside.wait();
     assert!(!cg.exists(), "the box's cgroup is gone");
@@ -512,6 +514,7 @@ fn a_delete_ends_a_box_through_its_inits_pidfd(lab: &Lab, own: &Path) {
     .unwrap();
     node.start(&id).unwrap();
     wait_for(
+        &INIT_ENDS,
         || {
             node.inspect(&id)
                 .is_ok_and(|info| info.exit == Some(Exit::Code(0)))
@@ -796,7 +799,12 @@ fn an_owners_next_box_is_made_by_the_init_parked_in_its_idle_cgroup(lab: &Lab, o
             "A's delete made the parked init's proc before it returned: {made:?}"
         );
     }
-    let parked = populated_within(&slot, PATIENCE);
+    // Its delete parks the slot's init before it answers (Cgroups::give_back): the slot is held at the first look.
+    assert!(
+        !procs(&slot).is_empty(),
+        "the delete parked the slot's init before it answered"
+    );
+    let parked = populated_within(&slot, PARKED.deadline().unwrap_or(Duration::MAX));
     assert_eq!(
         parked.len(),
         1,
@@ -873,7 +881,12 @@ fn a_parked_init_made_with_other_namespaces_is_ended_and_counted(lab: &Lab, own:
         .unwrap();
     let slot = node.cgroup_dir(&a).expect("A's cgroup");
     node.delete(&a).unwrap();
-    let parked = populated_within(&slot, PATIENCE);
+    // Its delete parks the slot's init before it answers (Cgroups::give_back): the slot is held at the first look.
+    assert!(
+        !procs(&slot).is_empty(),
+        "the delete parked the slot's init before it answered"
+    );
+    let parked = populated_within(&slot, PARKED.deadline().unwrap_or(Duration::MAX));
     assert_eq!(
         parked.len(),
         1,
@@ -979,6 +992,7 @@ fn parked_procs_stop_at_their_bound_and_none_drops_inline(lab: &Lab, own: &Path)
     );
     node.release_idle().unwrap();
     wait_for(
+        &DROPPED,
         || node.cgroup_reuse().unwrap().parked.procs_dropped == 2,
         "the two trees dropped by the dropper",
     );
@@ -1040,12 +1054,11 @@ fn a_box_of_no_owner_is_made_by_an_init_parked_in_a_cgroup_made_ahead(lab: &Lab,
         .unwrap()
         .to_path_buf();
     node.delete(&n1).unwrap();
-    let deadline = Instant::now().checked_add(PATIENCE);
-    while node.cgroup_reuse().unwrap().ahead.ready == 0
-        && deadline.is_none_or(|d| Instant::now() < d)
-    {
-        std::thread::yield_now();
-    }
+    wait_for(
+        &MADE_AHEAD,
+        || node.cgroup_reuse().unwrap().ahead.ready != 0,
+        "a cgroup made ahead",
+    );
     let before = node.cgroup_reuse().unwrap();
     assert_eq!(
         before.ahead.ready, 1,
@@ -1111,6 +1124,7 @@ fn a_box_of_no_owner_made_ahead_looks_up_nothing_in_cgroupfs(lab: &Lab, own: &Pa
         .unwrap();
     node.delete(&n1).unwrap();
     wait_for(
+        &MADE_AHEAD,
         || node.cgroup_reuse().unwrap().ahead.ready >= 1,
         "a cgroup made ahead",
     );
@@ -1162,7 +1176,12 @@ fn recovery_removes_an_init_parked_by_a_node_that_crashed(lab: &Lab, own: &Path)
         .unwrap();
     let slot = node.cgroup_dir(&a).unwrap();
     node.delete(&a).unwrap();
-    let parked = populated_within(&slot, PATIENCE);
+    // Its delete parks the slot's init before it answers (Cgroups::give_back): the slot is held at the first look.
+    assert!(
+        !procs(&slot).is_empty(),
+        "the delete parked the slot's init before it answered"
+    );
+    let parked = populated_within(&slot, PARKED.deadline().unwrap_or(Duration::MAX));
     assert_eq!(
         parked.len(),
         1,
@@ -1178,10 +1197,12 @@ fn recovery_removes_an_init_parked_by_a_node_that_crashed(lab: &Lab, own: &Path)
     node.recover().unwrap();
     assert!(!slot.exists(), "recovery removed the idle slot");
     let mut fds = [PollFd::new(&init, PollFlags::IN)];
-    // Whole seconds and the nanoseconds past them: the seconds alone make a patience under a second a zero poll.
+    // Recovery's kill of the parked init, then its end: a killed process's, `node.emptying`'s record. Whole seconds and
+    // the nanoseconds past them: the seconds alone make a bound under a second a zero poll.
+    let killed = EMPTYING.saturating_mul(2);
     let patience = Timespec {
-        tv_sec: i64::try_from(PATIENCE.as_secs()).unwrap_or(i64::MAX),
-        tv_nsec: PATIENCE.subsec_nanos().into(),
+        tv_sec: i64::try_from(killed.as_secs()).unwrap_or(i64::MAX),
+        tv_nsec: killed.subsec_nanos().into(),
     };
     let _ = rustix::event::poll(&mut fds, Some(&patience));
     assert!(has_ended(&init), "recovery ended the parked init");
@@ -1283,6 +1304,7 @@ fn a_boxs_network_namespace_is_reused_within_its_owner_when_clean(lab: &Lab, own
     // ruling on every one given back so far, the one just given back among them.
     let ruled = || {
         wait_for(
+            &CHECKED,
             || {
                 let c = counts();
                 c.checked + c.unchecked == c.given_back
@@ -1570,6 +1592,7 @@ fn a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(lab: &Lab, o
     };
     let ruled = || {
         wait_for(
+            &CHECKED,
             || {
                 let c = counts();
                 c.checked + c.unchecked == c.given_back
@@ -1589,6 +1612,7 @@ fn a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(lab: &Lab, o
     let settled = |id: &str| {
         let sockstat = format!("/proc/{}/net/sockstat", init_of(id));
         wait_for(
+            &SOCKETS,
             || {
                 std::fs::read_to_string(&sockstat)
                     .unwrap()
@@ -1690,7 +1714,11 @@ fn a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(lab: &Lab, o
     ruled();
     assert_eq!(held(), files);
     node.release_idle().unwrap();
-    wait_for(|| held() == 0, "the files of a namespace released closing");
+    wait_for(
+        &RELEASED,
+        || held() == 0,
+        "the files of a namespace released closing",
+    );
 
     // One past the owner's bound, each namespace with its files: the one put out closes its own.
     let many: Vec<String> = (0..=per_owner).map(|n| format!("files-many-{n}")).collect();
@@ -1729,7 +1757,11 @@ fn a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(lab: &Lab, o
     assert_eq!(checked.files_failed, 0, "{checked:?}");
     assert_eq!(held(), files * per_owner);
     node.release_idle().unwrap();
-    wait_for(|| held() == 0, "the bound's namespaces released closing");
+    wait_for(
+        &RELEASED,
+        || held() == 0,
+        "the bound's namespaces released closing",
+    );
     assert_eq!(counts().files_failed, 0);
 
     // The node let go with a box's namespace held, its files among what it holds: they close with it, the box runs
@@ -1740,7 +1772,7 @@ fn a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(lab: &Lab, o
     node.create(make("files-h")).unwrap();
     assert_eq!(held(), files, "the box's namespace holds them");
     drop(node);
-    wait_for(|| held() == 0, "the files closing with the node");
+    wait_for(&RELEASED, || held() == 0, "the files closing with the node");
     let restarted = Node::open(&box_root, state.path(), state.path())
         .expect("reopen the node")
         .with_oci_helper(PathBuf::from(&lab.exe));
@@ -1750,6 +1782,7 @@ fn a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(lab: &Lab, o
     assert_eq!(held(), 0);
     drop(restarted);
     wait_for(
+        &RELEASED,
         || open_fds() <= before_all,
         "every descriptor the nodes held closing",
     );
@@ -1821,6 +1854,7 @@ fn a_node_past_its_files_bound_checks_by_entering_counted(lab: &Lab, own: &Path)
     };
     let ruled = || {
         wait_for(
+            &CHECKED,
             || {
                 let c = counts();
                 c.checked + c.unchecked == c.given_back
@@ -1865,6 +1899,7 @@ fn a_node_past_its_files_bound_checks_by_entering_counted(lab: &Lab, own: &Path)
                 .expect("the box's init")
             );
             wait_for(
+                &SETTLED,
                 || {
                     std::fs::read_to_string(&sockstat)
                         .unwrap()
@@ -1894,12 +1929,14 @@ fn a_node_past_its_files_bound_checks_by_entering_counted(lab: &Lab, own: &Path)
     }
     node.release_idle().unwrap();
     wait_for(
+        &RELEASED,
         || held() == 0,
         "the namespaces released closing their files",
     );
     assert_eq!(counts().files_held, 0);
     drop(node);
     wait_for(
+        &RELEASED,
         || open_fds() <= before_all,
         "every descriptor the node held let go",
     );
@@ -1935,6 +1972,7 @@ fn a_box_can_not_send_to_the_socket_the_check_keeps_in_its_namespace(lab: &Lab, 
     };
     let ruled = || {
         wait_for(
+            &CHECKED,
             || {
                 let c = counts();
                 c.checked + c.unchecked == c.given_back
@@ -2151,7 +2189,6 @@ fn new_route() -> Vec<u8> {
     nl_request(24, &body)
 }
 
-/// Waits for `cond`, a fact, at most [`PATIENCE`].
 /// This process's descriptor limit as it was, put back as this drops.
 struct LimitPutBack(rustix::process::Rlimit);
 
@@ -2182,16 +2219,32 @@ fn soft_limit(soft: u64) -> Option<LimitPutBack> {
     Some(LimitPutBack(given))
 }
 
-fn wait_for(mut cond: impl FnMut() -> bool, what: &str) {
-    let deadline = Instant::now().checked_add(PATIENCE);
-    while deadline.is_none_or(|d| Instant::now() < d) {
-        if cond() {
-            return;
-        }
-        std::thread::yield_now();
-    }
-    panic!("timed out waiting for {what}");
+/// Waits for `cond` on `wait`, its own fact's record or measuring (hex_testkit::waits): says how many looks it took.
+fn wait_for(wait: &Patience, cond: impl FnMut() -> bool, what: &str) -> u64 {
+    until(wait, what, cond).unwrap()
 }
+
+// Each wait here takes its own fact's record (hex_testkit::waits; the lead's rule of 2026-11-08), or measures where no
+// recorded operation makes its fact, its answers recorded for the census to come, from the suites run under it.
+/// A killed box's processes ending: `node.emptying`.
+static KILLED: Patience = Patience::seeded("test.oci_reuse.killed", EMPTYING);
+/// An init's run to its end: the program-run record.
+static INIT_ENDS: Patience = Patience::seeded("test.oci_reuse.init_ends", PROGRAM);
+/// An owner's idle slot given its parked init: made within the delete (`Cgroups::give_back`), whose record bounds it.
+static PARKED: Patience = Patience::seeded("test.oci_reuse.parked", DELETE);
+/// Trees queued to the parked procs' dropper, dropped by its thread: no recorded operation makes it.
+static DROPPED: Patience = Patience::measuring("test.oci_reuse.dropped");
+/// A cgroup made ahead by the cgroups' refill thread: no recorded operation makes it.
+static MADE_AHEAD: Patience = Patience::measuring("test.oci_reuse.made_ahead");
+/// A refused idle cgroup removed by the cgroups' remover thread, off the create's path: no recorded operation makes it.
+static REMOVED: Patience = Patience::measuring("test.oci_reuse.removed");
+/// The network check's ruling on every namespace given back, by its checker threads: no recorded operation makes it.
+static CHECKED: Patience = Patience::measuring("test.oci_reuse.checked");
+/// A kept namespace's sockets down to the check's own, and its count settled: no recorded operation makes either.
+static SOCKETS: Patience = Patience::measuring("test.oci_reuse.sockets");
+static SETTLED: Patience = Patience::measuring("test.oci_reuse.settled");
+/// Namespaces' files and the nodes' descriptors released as they close: no recorded operation makes it.
+static RELEASED: Patience = Patience::measuring("test.oci_reuse.released");
 
 /// One state guard's case: A of owner O made, started, given `work`, deleted; `leave` done to its idle
 /// cgroup; B of O created. Expect B a fresh cgroup, A's removed, `reason` counted once more.
@@ -2241,7 +2294,11 @@ fn a_state_guard(
         "{case}: counted as {}: {after:?}",
         reason.name()
     );
-    wait_for(|| !slot.exists(), &format!("{case}: A's cgroup removed"));
+    wait_for(
+        &REMOVED,
+        || !slot.exists(),
+        &format!("{case}: A's cgroup removed"),
+    );
     node.delete(&b).unwrap();
     eprintln!(
         "test 3, {case}: B fresh, A's removed, counted {}",
@@ -2282,6 +2339,7 @@ fn each_guard_gives_a_fresh_cgroup_and_counts_why(lab: &Lab, own: &Path) {
         Refused::Populated,
     );
     wait_for(
+        &KILLED,
         || has_ended(&outside_fd),
         "the process left in A's cgroup ended with it",
     );
@@ -2313,6 +2371,7 @@ fn each_guard_gives_a_fresh_cgroup_and_counts_why(lab: &Lab, own: &Path) {
     let slot = node.cgroup_dir(&a).unwrap();
     node.signal(&a, hex_api::Signal::KILL).unwrap();
     wait_for(
+        &KILLED,
         || {
             node.inspect(&a)
                 .is_ok_and(|info| info.exit == Some(Exit::Signal(9)))
