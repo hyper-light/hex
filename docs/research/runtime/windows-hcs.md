@@ -371,3 +371,29 @@ Row 8's first mutation didn't compile, so it showed nothing; it was replaced by 
 One method note: an earlier pass (`-092334Z`) restored the commit timestamps when it extracted each tree into
 one shared target directory, so cargo re-ran the previous mutant's binary. That pass is discarded, and every
 row above comes from trees extracted with fresh mtimes.
+
+## 12. Reopening a container by id, for a box that outlives its node (native plan step 8)
+
+The keeper (the Windows agent's decision, the lead's (A), 2026-11-08) keeps a box's job alive across a node's
+crash; the container is HCS's, so the next node reopens it by its id.
+
+- HCS's own sample, of a VM it made: it "will still be running even after closing the handle and even after the
+  current process exits" (`VD/hcs/Reference/ComputeSystemSample.md:24`). That holds for a system made without
+  `ShouldTerminateOnLastHandleClosed`, which otherwise ends it with its last handle (`SchemaReference.md:1353`, §2
+  above). And "you can always get a new handle to the system via
+  ::HcsOpenComputeSystem (assuming the system is still running/created and hasn't been removed)" (`:25-26`), as
+  `HcsOpenComputeSystem(L"Sample", GENERIC_ALL, &system)` (`:38`). The reference has no page of its own for
+  the call at this revision.
+- Its signature: `fn HcsOpenComputeSystem(id : windows_sys::core::PCWSTR, requestedaccess : u32, computesystem :
+  *mut HCS_SYSTEM) -> windows_sys::core::HRESULT` (`windows-sys/src/Windows/Win32/System/HostComputeSystem/mod.rs:45`),
+  synchronous: no operation handle, unlike create and start. hcsshim binds the same export
+  (`hcsshim/internal/computecore/computecore.go:47`); its own containers reopen through vmcompute's older call
+  (`hcsshim/internal/hcs/system.go:115-120`, "OpenComputeSystem opens an existing compute system by ID").
+- An id HCS doesn't hold is `HCS_E_SYSTEM_NOT_FOUND`, "A virtual machine or container with the specified identifier
+  does not exist", `0x8037010E` (`VD/hcs/Reference/HCSHResult.md:39`), which Hex reads as "nothing to take back",
+  not a failure.
+- With the flag on, HCS ended a killed node's system between 59 ms and 2 s after the kill on jupiter
+  (`bench/native/records/hcs-end-under-load-8d8c36c-20261108T0036Z.txt`; to be retaken after a clean boot). So an
+  outliving box needs the flag off: otherwise the container is gone before the next node can reopen it.
+- Not yet run on jupiter (it waits on the lead's word): that a reopened handle starts processes and terminates as
+  the creating node's did, which the sample implies (it queries properties through one) but doesn't show.
