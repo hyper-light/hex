@@ -984,9 +984,26 @@ pub fn volume_root(volume: &str) -> String {
     format!("{}\\", volume.trim_end_matches('\\'))
 }
 
+/// Whether a box's container outlives the node that made it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lifetime {
+    /// HCS ends the container when its last handle closes: a killed node leaves no container (a runtime
+    /// whose boxes end with it).
+    EndsWithNode,
+    /// The container runs on after its last handle closes, for the next node to reopen by id while the
+    /// node's keeper holds the box's job (native plan step 8, T-T7.1.2).
+    Outlives,
+}
+
 /// The HCS v2 document for `container` on `storage`, Hex's launcher folder `launcher` mapped read-only at
-/// [`LAUNCHER_DIR`] (note §2): schema 2.1, no hosting system, terminated when its last handle closes.
-pub fn document(container: &Container, storage: &Storage, launcher: &str) -> Value {
+/// [`LAUNCHER_DIR`] (note §2): schema 2.1, no hosting system, terminated when its last handle closes
+/// unless it outlives its node (`lifetime`).
+pub fn document(
+    container: &Container,
+    storage: &Storage,
+    launcher: &str,
+    lifetime: Lifetime,
+) -> Value {
     let mut mapped: Vec<Value> = container
         .mounts
         .iter()
@@ -1032,7 +1049,7 @@ pub fn document(container: &Container, storage: &Storage, launcher: &str) -> Val
     json!({
         "Owner": OWNER,
         "SchemaVersion": {"Major": 2, "Minor": 1},
-        "ShouldTerminateOnLastHandleClosed": true,
+        "ShouldTerminateOnLastHandleClosed": lifetime == Lifetime::EndsWithNode,
         "Container": c,
     })
 }
@@ -1489,7 +1506,12 @@ mod tests {
             volume: r"\\?\Volume{7b88d036-aeb7-4880-9530-fdfaff8337a0}".to_owned(),
             layers: vec![("L1".to_owned(), r"D:\layers\app".to_owned())],
         };
-        let d = document(&c, &s, r"C:\Users\corph/.cache/hex-native-s4/target\debug");
+        let d = document(
+            &c,
+            &s,
+            r"C:\Users\corph/.cache/hex-native-s4/target\debug",
+            Lifetime::EndsWithNode,
+        );
         let k = &d["Container"];
         assert_eq!(
             k["Storage"]["Path"],
@@ -1515,7 +1537,7 @@ mod tests {
             volume: r"\\?\Volume{ec84d99e-3f02-11e7-ac6c-00155d7682cf}\".to_owned(),
             layers: vec![("L1".to_owned(), r"D:\layers\app".to_owned())],
         };
-        let d = document(&c, &s, r"C:\Program Files\hex");
+        let d = document(&c, &s, r"C:\Program Files\hex", Lifetime::EndsWithNode);
         assert_eq!(d["Owner"], "hex");
         assert_eq!(d["SchemaVersion"], json!({"Major": 2, "Minor": 1}));
         assert_eq!(d["ShouldTerminateOnLastHandleClosed"], true);
@@ -1543,10 +1565,37 @@ mod tests {
         let mut bare = c.clone();
         bare.devices.clear();
         assert!(
-            document(&bare, &s, "C:\\h")["Container"]
+            document(&bare, &s, "C:\\h", Lifetime::EndsWithNode)["Container"]
                 .get("AssignedDevices")
                 .is_none()
         );
+    }
+
+    /// T-T7.1.2 (native plan step 8, the lead's keeper, 2026-11-08): do: make the document for a box whose
+    /// node's boxes outlive it, and for one whose don't. Expect: the outliving box's container isn't ended
+    /// when its last handle closes, so a killed node leaves it for the next to reopen by id; the other's is,
+    /// so a killed node leaves no container.
+    #[test]
+    fn an_outliving_box_s_container_survives_its_last_handle() {
+        let c = from_bundle(&bundle()).unwrap();
+        let s = Storage {
+            volume: r"\\?\Volume{ec84d99e-3f02-11e7-ac6c-00155d7682cf}\".to_owned(),
+            layers: vec![("L1".to_owned(), r"D:\layers\app".to_owned())],
+        };
+        let outlives = document(&c, &s, "C:\\h", Lifetime::Outlives);
+        assert_eq!(outlives["ShouldTerminateOnLastHandleClosed"], false);
+        let ends = document(&c, &s, "C:\\h", Lifetime::EndsWithNode);
+        assert_eq!(ends["ShouldTerminateOnLastHandleClosed"], true);
+        // Nothing else differs.
+        let mut a = outlives.clone();
+        let mut b = ends.clone();
+        a.as_object_mut()
+            .unwrap()
+            .remove("ShouldTerminateOnLastHandleClosed");
+        b.as_object_mut()
+            .unwrap()
+            .remove("ShouldTerminateOnLastHandleClosed");
+        assert_eq!(a, b);
     }
 
     /// HEX-HCS-6: a layer's id is a well-formed version 8 GUID, the same for one folder however it is

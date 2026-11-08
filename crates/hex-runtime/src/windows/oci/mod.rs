@@ -273,7 +273,8 @@ impl OciBox {
         let launcher = launcher
             .to_str()
             .ok_or_else(|| Refusal::os("naming the launcher's folder", "not UTF-8"))?;
-        let document = hcs::document(container, &storage, launcher).to_string();
+        let document =
+            hcs::document(container, &storage, launcher, hcs::Lifetime::EndsWithNode).to_string();
         let system = match sys::create_system(id.as_str(), &document, launch::PATIENCE) {
             Ok(s) => s,
             Err(f) => {
