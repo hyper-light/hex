@@ -2,9 +2,9 @@
 //! (`shards_api::Guests::attach`) rather than boot another beside it (native plan step 8, T-T7.1.2): its
 //! VM's pid, that process's start time, and its vsock socket ([`shards_api::Identity`]).
 //!
-//! One small text file, written whole to a temporary file beside it, synced, renamed over it and its
-//! folder synced (rename(2) replaces it atomically), so a crash leaves the last record or the next, never
-//! a torn one; a temporary left by a crash is overwritten by the next write. Read back, anything but a
+//! One small text file, written whole to a temporary file beside it, synced, renamed over it (rename(2),
+//! MoveFileEx on Windows, replaces it atomically) and, on Unix, its folder synced, so a crash leaves the
+//! last record or the next, never a torn one; a temporary left by a crash is overwritten by the next write. Read back, anything but a
 //! record this writes is refused by type, naming the file, and so is a file past [`MAX_BYTES`].
 
 use std::io::Write;
@@ -53,9 +53,21 @@ pub fn write(path: &Path, identity: &shards_api::Identity) -> Result<(), Refusal
         .map_err(os("writing the node's guest record"))?;
     drop(file);
     std::fs::rename(&temp, path).map_err(os("placing the node's guest record"))?;
-    std::fs::File::open(dir)
-        .and_then(|d| d.sync_all())
-        .map_err(os("syncing the node's guest record's folder"))
+    sync_folder(dir).map_err(os("syncing the node's guest record's folder"))
+}
+
+/// Makes the rename into `dir` durable: the folder's own fsync(2).
+#[cfg(unix)]
+fn sync_folder(dir: &Path) -> std::io::Result<()> {
+    std::fs::File::open(dir).and_then(|d| d.sync_all())
+}
+
+/// Windows syncs no folder: one opens as a file only with backup semantics, and NTFS journals the rename
+/// itself, so a crash leaves the record before it or the one after, as the Windows class's own box records
+/// are left (`windows::oci`'s `write_marker`). The guest it names goes with the host in any case.
+#[cfg(not(unix))]
+fn sync_folder(_dir: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// The identity recorded at `path`, `None` when there is no record.
