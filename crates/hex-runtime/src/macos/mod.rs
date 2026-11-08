@@ -87,11 +87,22 @@ impl MacRuntime {
         self.shared.rates()
     }
 
+    /// How late the node's watchers have woken past their waits, at the latest (its class's record to
+    /// start; observability: what the boxes' holds reckon with).
+    pub fn lateness(&self) -> Result<std::time::Duration, Refusal> {
+        self.shared.lateness()
+    }
+
     /// A rootless runtime (no helper): boxes are process groups whose bounds a watcher holds, reckoned to
-    /// grow at `rate_bytes` bytes and `rate_processes` processes a second (the bound's pacing, CLAUDE.md §5:
-    /// measured at node start or cited, the caller says which).
-    pub fn new(rate_bytes: NonZeroU64, rate_processes: NonZeroU64) -> Result<Self, Refusal> {
-        let shared = Shared::new(rate_bytes, rate_processes)
+    /// grow at `rate_bytes` bytes and `rate_processes` processes a second, and its watchers to wake up to
+    /// `lateness` past their waits (the bound's pacing and its hold, CLAUDE.md §5: measured at node start or
+    /// cited, the caller says which).
+    pub fn new(
+        rate_bytes: NonZeroU64,
+        rate_processes: NonZeroU64,
+        lateness: std::time::Duration,
+    ) -> Result<Self, Refusal> {
+        let shared = Shared::new(rate_bytes, rate_processes, lateness)
             .map_err(|e| Refusal::os("reading the machine's timebase", e))?;
         Ok(Self {
             shared: Arc::new(shared),
@@ -105,11 +116,12 @@ impl MacRuntime {
     pub fn detect(
         rate_bytes: NonZeroU64,
         rate_processes: NonZeroU64,
+        lateness: std::time::Duration,
         helper_socket: &std::path::Path,
     ) -> Result<Self, Refusal> {
         match helper_client::Helper::connect(helper_socket)? {
             Some(helper) => {
-                let shared = Shared::new(rate_bytes, rate_processes)
+                let shared = Shared::new(rate_bytes, rate_processes, lateness)
                     .map_err(|e| Refusal::os("reading the machine's timebase", e))?;
                 Ok(Self {
                     shared: Arc::new(shared),
@@ -120,7 +132,7 @@ impl MacRuntime {
                     }),
                 })
             }
-            None => Self::new(rate_bytes, rate_processes),
+            None => Self::new(rate_bytes, rate_processes, lateness),
         }
     }
 

@@ -47,7 +47,7 @@ mod macos {
     use std::time::{Duration, Instant};
 
     use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Program, Runtime, Stdio};
-    use hex_core::watch::seed;
+    use hex_core::watch::{lateness_seed, seed};
     use hex_runtime::macos::sys;
     use hex_runtime::macos::{MacRuntime, machine_model};
 
@@ -80,8 +80,10 @@ mod macos {
     /// (`hex_core::watch::seed` of this Mac's `hw.model`), so each box is read before it can pass its bound
     /// by the 64 MiB bar, every member filling at once.
     fn runtime() -> MacRuntime {
-        let rates = seed(&machine_model().expect("this Mac's model"));
-        MacRuntime::new(rates.bytes, rates.processes).expect("a macOS runtime")
+        let model = machine_model().expect("this Mac's model");
+        let rates = seed(&model);
+        MacRuntime::new(rates.bytes, rates.processes, lateness_seed(&model))
+            .expect("a macOS runtime")
     }
 
     fn member(hex: &Path, act: &[&str]) -> Program {

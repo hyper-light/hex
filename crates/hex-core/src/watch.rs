@@ -5,7 +5,9 @@
 //! refuses the allocation or the fork itself. A box can pass its bound by what it grows between two
 //! reads, so each wait is the time its headroom, plus the [`OVERSHOOT`] it may pass its bound by, lasts at
 //! the fastest the box can grow ([`Rates`], seeded from its machine class's record, [`seed`], and learned), at least the [`FLOOR`]. A box with no
-//! bound to pace by waits for its next change (a fork, an end, a start, a delete). Pure (CLAUDE.md §9): the shell (`hex_runtime::macos`) lists the
+//! bound to pace by waits for its next change (a fork, an end, a start, a delete). A box whose growth could
+//! pass its bar before the next read, given how late the node's watchers wake ([`Lateness`]), is held
+//! stopped across the wait ([`Watch::holds`]). Pure (CLAUDE.md §9): the shell (`hex_runtime::macos`) lists the
 //! members, reads their footprints, waits and kills; this says when to read next, whether to end the
 //! box, and what it holds.
 
@@ -61,6 +63,77 @@ pub fn seed(model: &str) -> Rates {
     )
 }
 
+/// Each machine class's latest recorded watcher wake, by its `hw.model`: the widest gap past its armed wait
+/// a box's watcher showed, its timeshare thread waiting for a core beside the box's own members and other
+/// programs at equal priority (Ada's rule, 2026-11-03: no priority over other programs). What a node's holds
+/// reckon a wake can be late by to start ([`lateness_seed`], [`Watch::holds`]).
+/// - `Mac16,9` (M4 Max, 14 cores, adas-mac-studio-3): 79,308 µs, a 28-member box's read armed for the 250 µs
+///   floor and made 79,558 µs after the read before, one bound of the gap past the wait
+///   (bench/native/macos/records/watcher-wakes-load-0cb6e11-20261108T2114Z.txt).
+pub const LATENESS: [(&str, Duration); 1] = [("Mac16,9", Duration::from_micros(79_308))];
+
+/// The wake lateness a node of model `model` seeds its holds with: its class's record, else twice the latest
+/// on record (saturating), the safe side, as [`seed`] seeds its rates.
+pub fn lateness_seed(model: &str) -> Duration {
+    LATENESS.iter().find(|(m, _)| *m == model).map_or_else(
+        || {
+            LATENESS
+                .iter()
+                .map(|(_, l)| *l)
+                .max()
+                .unwrap_or(Duration::ZERO)
+                .saturating_mul(2)
+        },
+        |(_, l)| *l,
+    )
+}
+
+/// How late a node's watchers wake, as it learns it (the learned-waits rule, 2026-11-06): its class's
+/// record to start ([`lateness_seed`]), raised to any later wake a watcher sees, never lowered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Lateness {
+    worst: Duration,
+}
+
+impl Lateness {
+    pub fn new(seed: Duration) -> Self {
+        Self { worst: seed }
+    }
+
+    /// The latest wake seen.
+    pub fn worst(&self) -> Duration {
+        self.worst
+    }
+
+    /// Notes a wake `late` past its armed wait: the worst rises to it, when later.
+    pub fn observe(&mut self, late: Duration) {
+        self.worst = self.worst.max(late);
+    }
+}
+
+/// Whether a box growing at `rate` bytes a second, for `wait` and then `lateness` more, could use up
+/// `headroom` bytes: the hold's rule ([`Watch::holds`]). Whole bytes, rounded down; saturating, as a growth
+/// past 2^128 bytes uses up any headroom.
+pub fn hold(headroom: u64, rate: u64, wait: Duration, lateness: Duration) -> bool {
+    let grown = u128::from(rate)
+        .saturating_mul(wait.saturating_add(lateness).as_nanos())
+        .checked_div(NANOS_PER_SECOND)
+        .unwrap_or(u128::MAX);
+    grown >= u128::from(headroom)
+}
+
+/// The rate of `grown` over `over`, a second, rounded down: 0 for no growth, and the most a `u64` holds for
+/// growth in no time (or past 2^64 a second), the safe side.
+pub fn per_second(grown: u64, over: Duration) -> u64 {
+    if grown == 0 {
+        return 0;
+    }
+    u128::from(grown)
+        .checked_mul(NANOS_PER_SECOND)
+        .and_then(|n| n.checked_div(over.as_nanos()))
+        .map_or(u64::MAX, |n| u64::try_from(n).unwrap_or(u64::MAX))
+}
+
 /// A node's box growth rates as it learns them (the learned-waits rule, 2026-11-06): its class's record to
 /// start ([`seed`]), raised to whatever growth a watcher sees between two reads that is faster, and never
 /// lowered.
@@ -81,22 +154,15 @@ impl LearnedRates {
     /// Notes a box that grew by `bytes` and `processes` over `elapsed`: each rate rises to what that
     /// growth was, when faster. Nothing is learned from no time.
     pub fn observe(&mut self, bytes: u64, processes: u64, elapsed: Duration) {
-        let nanos = elapsed.as_nanos();
-        if nanos == 0 {
+        if elapsed.is_zero() {
             return;
         }
-        let per_second = |grown: u64| {
-            u128::from(grown)
-                .checked_mul(NANOS_PER_SECOND)
-                .and_then(|n| n.checked_div(nanos))
-                .map_or(u64::MAX, |n| u64::try_from(n).unwrap_or(u64::MAX))
-        };
-        if let Some(b) = NonZeroU64::new(per_second(bytes))
+        if let Some(b) = NonZeroU64::new(per_second(bytes, elapsed))
             && b > self.rates.bytes
         {
             self.rates.bytes = b;
         }
-        if let Some(p) = NonZeroU64::new(per_second(processes))
+        if let Some(p) = NonZeroU64::new(per_second(processes, elapsed))
             && p > self.rates.processes
         {
             self.rates.processes = p;
@@ -209,6 +275,11 @@ pub struct Watch {
     /// (a node starts a box's processes one after another), each beginning to allocate before the next is
     /// there, so the read paces at the floor rather than by a headroom the next new member would blow past.
     last_running: u64,
+    /// Whether the last read found the box taking on members (its running count rose), so the hold
+    /// reckons it at the recorded rate ([`Watch::holds`]).
+    taking_on: bool,
+    /// The rate the box is held at while it is held, 0 while it isn't ([`Watch::holds`]).
+    held_rate: u64,
 }
 
 impl Watch {
@@ -220,6 +291,8 @@ impl Watch {
             peak: 0,
             reads: 0,
             last_running: 0,
+            taking_on: false,
+            held_rate: 0,
         }
     }
 
@@ -246,6 +319,7 @@ impl Watch {
             .all(|m| m.armed);
         let taking_on = running > self.last_running;
         self.last_running = running;
+        self.taking_on = taking_on;
         self.peak = self.peak.max(footprint);
         let verdict = if running == 0 {
             self.ending = None;
@@ -310,6 +384,40 @@ impl Watch {
     /// How many reads the box has had.
     pub fn reads(&self) -> u64 {
         self.reads
+    }
+
+    /// Whether the box must be held stopped across the wait `read` decided (the lead, 2026-11-08: the box's
+    /// own bound enforced, as Linux's `memory.high` throttles a cgroup near its limit, slowing no other
+    /// program): its watcher's next read can come `lateness` past that wait, and a box growing meanwhile
+    /// could pass its bar before it. So it is held when growing at `rate_seen` (bytes a second, what it was
+    /// seen growing at while it ran), or at the recorded rate while it takes on members (a new member
+    /// begins allocating at once), for the wait and the lateness could use up its headroom plus the bar.
+    /// A box held stays held at the rate that held it while its runs show it growing at all: a member just
+    /// continued may not run its whole run, so a slower run alone isn't the box slowing; one run with no
+    /// growth lets it go. Only a memory bound's wait is held across: an end, an idle box, one left to
+    /// events, or a box with no memory bound is not.
+    pub fn holds(&mut self, read: &Read, rate_seen: u64, lateness: Duration) -> bool {
+        let seen = if self.held_rate > 0 && rate_seen > 0 {
+            rate_seen.max(self.held_rate)
+        } else {
+            rate_seen
+        };
+        let held = match (read.verdict, self.limit.memory) {
+            (Verdict::Wait(wait), Some(bound)) => {
+                let headroom = bound
+                    .saturating_add(OVERSHOOT)
+                    .saturating_sub(read.footprint);
+                let rate = if self.taking_on {
+                    seen.max(self.rates.bytes.get())
+                } else {
+                    seen
+                };
+                hold(headroom, rate, wait, lateness)
+            }
+            _ => false,
+        };
+        self.held_rate = if held { seen.max(1) } else { 0 };
+        held
     }
 }
 
@@ -445,6 +553,145 @@ mod tests {
         for (model, rates) in CLASSES {
             assert_eq!(seed(model), rates, "{model}");
         }
+    }
+
+    /// A box of `bound` settled at `footprint` (read twice, so it isn't taking on members) at the recorded
+    /// rates, and its second read.
+    fn settled(bound: u64, footprint: u64) -> (Watch, Read) {
+        let limit = Limit {
+            memory: Some(bound),
+            processes: None,
+        };
+        let mut w = Watch::new(limit, RECORDED);
+        let two = [
+            member(1, footprint, Life::Running),
+            member(2, 0, Life::Running),
+        ];
+        let _ = w.read(&two);
+        let read = w.read(&two);
+        (w, read)
+    }
+
+    /// HEX-MAC-4, the hold (the lead, 2026-11-08: the box's own bound enforced, as Linux's memory.high
+    /// throttles a cgroup near its limit): a box seen growing at the recorded rate reaches its bar by the
+    /// read its wait asks for, so any lateness of that read would carry it past. Do ask whether a settled
+    /// box growing at the recorded rate is held for a wake 1 µs late, and one growing at none for a wake a
+    /// day late; expect the first held and the second not.
+    #[test]
+    fn a_box_growing_at_the_recorded_rate_is_held_for_any_lateness() {
+        let (mut w, read) = settled(256 * MIB, 39 * MIB);
+        assert_eq!(
+            read.verdict,
+            Verdict::Wait(next(&w.limit(), &RECORDED, 39 * MIB, 2).unwrap())
+        );
+        assert!(w.holds(&read, RECORDED.bytes.get(), Duration::from_micros(1)));
+        let (mut still, read) = settled(256 * MIB, 39 * MIB);
+        assert!(!still.holds(&read, 0, Duration::from_secs(86_400)));
+    }
+
+    /// HEX-MAC-4, the hold: a held box keeps the rate that held it while its runs show it growing, since a
+    /// member just continued may not run its whole run, and one run with no growth lets it go. Do hold a box
+    /// growing at the recorded rate, then show it a run 100 times slower, then one with none, then the
+    /// slower one again; expect it held, held, let go, and not held again at the slower rate.
+    #[test]
+    fn a_held_box_stays_held_while_it_grows_and_is_let_go_by_a_run_with_none() {
+        let (mut w, read) = settled(256 * MIB, 39 * MIB);
+        let late = Duration::from_millis(1);
+        let slow = RECORDED.bytes.get() / 100;
+        assert!(w.holds(&read, RECORDED.bytes.get(), late));
+        assert!(w.holds(&read, slow, late));
+        assert!(!w.holds(&read, 0, late));
+        assert!(!w.holds(&read, slow, late));
+    }
+
+    /// HEX-MAC-4, the hold: a box taking on members is reckoned at the recorded rate whatever it was seen
+    /// doing, since a new member begins allocating at once. Do read one member, then two (taking on, so
+    /// the floor), and ask whether it is held with no growth seen; expect it held when the lateness and the
+    /// floor at the recorded rate would carry it past its bar, and not when they wouldn't.
+    #[test]
+    fn a_box_taking_on_members_is_held_when_the_lateness_could_carry_it_past_its_bar() {
+        let limit = Limit {
+            memory: Some(256 * MIB),
+            processes: None,
+        };
+        let mut w = Watch::new(limit, RECORDED);
+        let _ = w.read(&[member(1, MIB, Life::Running)]);
+        let read = w.read(&[member(1, MIB, Life::Running), member(2, 0, Life::Running)]);
+        assert_eq!(read.verdict, Verdict::Wait(FLOOR));
+        // 319 MiB of headroom to the bar lasts 6.55 ms at the recorded rate; the floor is 250 µs of it.
+        assert!(w.holds(&read, 0, Duration::from_millis(7)));
+        assert!(!w.holds(&read, 0, Duration::from_millis(6)));
+    }
+
+    /// HEX-MAC-4, the hold: only a wait is held across. Do ask of a box past its bound (end), an idle one and
+    /// one left to events; expect none held.
+    #[test]
+    fn only_a_wait_is_held_across() {
+        let limit = Limit {
+            memory: Some(256 * MIB),
+            processes: None,
+        };
+        let mut w = Watch::new(limit, RECORDED);
+        let over = w.read(&[member(1, 300 * MIB, Life::Running)]);
+        assert!(matches!(over.verdict, Verdict::End(_)));
+        assert!(!w.holds(&over, u64::MAX, Duration::MAX));
+        let mut idle = Watch::new(limit, RECORDED);
+        let none = idle.read(&[]);
+        assert_eq!(none.verdict, Verdict::Idle);
+        assert!(!idle.holds(&none, u64::MAX, Duration::MAX));
+        let mut one = Watch::new(limit, RECORDED);
+        let events = one.read(&[armed(1, MIB, Life::Running)]);
+        assert_eq!(events.verdict, Verdict::Events);
+        assert!(!one.holds(&events, u64::MAX, Duration::MAX));
+    }
+
+    proptest! {
+        /// HEX-MAC-4, the hold (model-based): a box is held exactly when its rate over the wait plus the
+        /// lateness could use up its headroom: rate x (wait + lateness) >= headroom, in whole bytes. Do ask
+        /// any headroom, rate, wait and lateness; expect the oracle's answer.
+        #[test]
+        fn the_hold_is_the_oracles(
+            headroom in 0u64..(1u64 << 44),
+            rate in 0u64..(1u64 << 40),
+            wait_ns in 0u64..(1u64 << 36),
+            late_ns in 0u64..(1u64 << 36),
+        ) {
+            let grown = u128::from(rate) * u128::from(wait_ns + late_ns) / 1_000_000_000;
+            prop_assert_eq!(
+                hold(headroom, rate, Duration::from_nanos(wait_ns), Duration::from_nanos(late_ns)),
+                grown >= u128::from(headroom)
+            );
+        }
+    }
+
+    /// HEX-MAC-4, the learned-waits rule: a node reckons its holds with its class's recorded wake lateness
+    /// to start, raised to any later wake its watchers see, never lowered; a model with no record starts
+    /// at twice the highest on record. Do seed Mac16,9 and observe a shorter, a longer, then a shorter wake;
+    /// expect the record, then the longer kept; and an unrecorded model at twice the record.
+    #[test]
+    fn the_lateness_seeds_from_the_class_record_and_only_rises() {
+        assert_eq!(lateness_seed("Mac16,9"), Duration::from_micros(79_308));
+        let highest = LATENESS.iter().map(|(_, l)| *l).max().unwrap();
+        assert_eq!(lateness_seed("Mac99,1"), highest * 2);
+        let mut l = Lateness::new(lateness_seed("Mac16,9"));
+        l.observe(Duration::from_millis(1));
+        assert_eq!(l.worst(), Duration::from_micros(79_308));
+        l.observe(Duration::from_millis(100));
+        assert_eq!(l.worst(), Duration::from_millis(100));
+        l.observe(Duration::from_millis(1));
+        assert_eq!(l.worst(), Duration::from_millis(100));
+    }
+
+    /// HEX-MAC-4: a box's growth rate from what it grew over how long. Do ask 47 MiB over 1 ms, nothing over
+    /// no time, and something over no time; expect 49,283,072,000 B/s, 0 and the most a u64 holds.
+    #[test]
+    fn a_growth_rate_is_its_growth_over_its_time() {
+        assert_eq!(
+            per_second(47 * MIB, Duration::from_millis(1)),
+            49_283_072_000
+        );
+        assert_eq!(per_second(0, Duration::ZERO), 0);
+        assert_eq!(per_second(1, Duration::ZERO), u64::MAX);
     }
 
     /// HEX-MAC-4, the learned-waits rule: a box seen filling or spawning faster than the rates raises them

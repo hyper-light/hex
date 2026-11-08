@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use hex_api::conformance::{self, Act, Fixture};
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Runtime, Signal, Stdio};
-use hex_core::watch::seed;
+use hex_core::watch::{lateness_seed, seed};
 use hex_runtime::macos::{MacRuntime, machine_model};
 
 const MIB: u64 = 1 << 20;
@@ -74,11 +74,13 @@ impl Fixture for BinFixture {
     }
 }
 
-/// A runtime seeded, as a node is, with its machine class's recorded worst aggregate growth
-/// (`hex_core::watch::seed` of this Mac's `hw.model`), which its watchers then learn up from.
+/// A runtime seeded, as a node is, with its machine class's recorded worst aggregate growth and latest
+/// watcher wake (`hex_core::watch::seed` and `lateness_seed` of this Mac's `hw.model`), which its watchers
+/// then learn up from.
 fn runtime() -> MacRuntime {
-    let rates = seed(&machine_model().expect("this Mac's model"));
-    MacRuntime::new(rates.bytes, rates.processes).expect("a macOS runtime")
+    let model = machine_model().expect("this Mac's model");
+    let rates = seed(&model);
+    MacRuntime::new(rates.bytes, rates.processes, lateness_seed(&model)).expect("a macOS runtime")
 }
 
 fn fixture() -> BinFixture {
@@ -105,9 +107,15 @@ fn macos_process_boxes_hold_the_contract() {
 fn box_user_boxes_hold_the_contract() {
     let sock = std::env::var("HEX_BOX_HELPER_SOCK")
         .expect("HEX_BOX_HELPER_SOCK, set by boxlab.sh to the running helper's socket");
-    let rates = seed(&machine_model().expect("this Mac's model"));
-    let rt = MacRuntime::detect(rates.bytes, rates.processes, std::path::Path::new(&sock))
-        .expect("a box-user macOS runtime");
+    let model = machine_model().expect("this Mac's model");
+    let rates = seed(&model);
+    let rt = MacRuntime::detect(
+        rates.bytes,
+        rates.processes,
+        lateness_seed(&model),
+        std::path::Path::new(&sock),
+    )
+    .expect("a box-user macOS runtime");
     // Confirm the helper answered and the runtime is in box-user mode, not a fallback to process-group.
     let probe = BoxId::new("boxuser-probe").unwrap();
     let _ = rt.delete(&probe);
@@ -417,30 +425,34 @@ fn overshoot(rt: &MacRuntime, fx: &BinFixture, what: &str, members: usize, pass:
         })
         .collect();
     let mut peak = 0;
+    let mut exits = Vec::with_capacity(members);
     for mut p in procs {
         let exit = p.wait_for(HANG_GUARD).expect("wait");
         assert!(
             exit.is_some(),
             "a hog never ended: the box didn't end for memory"
         );
+        exits.push(exit);
         peak = peak.max(rt.usage(&id).expect("usage").memory_peak_bytes);
     }
     // The box ended for memory: a hog killed by another hand (a refused exec dies by SIGKILL) is no bound.
     let kills = rt.usage(&id).expect("usage").oom_kills;
     assert!(
         kills >= 1,
-        "the box's hogs ended but no memory kill was counted"
+        "the box's hogs ended but no memory kill was counted: exits {exits:?}, peak {} MiB, status {:?}",
+        peak / MIB,
+        rt.status(&id)
     );
     // A rootless box's end, taken apart: wait for the watcher's read that found it empty, then print the read
     // that ended it. A box the kernel's cap ended (its one member armed) has no such read: the last read
     // finds no member running and no end decided.
     if rt.status(&id).is_ok() {
         let deadline = Instant::now() + HANG_GUARD;
-        let trace = loop {
+        let (trace, holds) = loop {
             let status = rt.status(&id).expect("status");
             match status.end_trace {
-                Some(t) if t.to_empty.is_some() => break Some(t),
-                None if status.running == 0 => break None,
+                Some(t) if t.to_empty.is_some() => break (Some(t), status.holds),
+                None if status.running == 0 => break (None, status.holds),
                 _ => {
                     assert!(
                         Instant::now() < deadline,
@@ -451,10 +463,13 @@ fn overshoot(rt: &MacRuntime, fx: &BinFixture, what: &str, members: usize, pass:
             }
         };
         let mib = |b: u64| b as f64 / MIB as f64;
+        let lateness_us = rt.lateness().expect("lateness").as_micros();
         match trace {
-            None => println!("TRACE {what} members={members} pass={pass} ended_by=cap"),
+            None => println!(
+                "TRACE {what} members={members} pass={pass} ended_by=cap holds={holds} lateness_us={lateness_us}"
+            ),
             Some(trace) => println!(
-                "TRACE {what} members={members} pass={pass} armed_us={} gap_us={} read_us={} read_members={} before_mib={:.1} at_end_mib={:.1} grew_mib={:.1} to_empty_us={}",
+                "TRACE {what} members={members} pass={pass} armed_us={} gap_us={} read_us={} read_members={} before_mib={:.1} at_end_mib={:.1} grew_mib={:.1} to_empty_us={} held={} holds={holds} lateness_us={lateness_us}",
                 trace.armed.as_micros(),
                 trace.gap.as_micros(),
                 trace.read_cost.as_micros(),
@@ -464,7 +479,8 @@ fn overshoot(rt: &MacRuntime, fx: &BinFixture, what: &str, members: usize, pass:
                 mib(trace
                     .footprint_at_end
                     .saturating_sub(trace.footprint_before)),
-                trace.to_empty.map_or(0, |d| d.as_micros())
+                trace.to_empty.map_or(0, |d| d.as_micros()),
+                trace.held
             ),
         }
     }
@@ -516,9 +532,15 @@ fn a_rootless_box_holds_the_bar_up_to_one_member_per_core() {
 fn a_box_user_box_holds_the_bar_oversubscribed() {
     let sock = std::env::var("HEX_BOX_HELPER_SOCK")
         .expect("HEX_BOX_HELPER_SOCK, set by the lab to the installed helper's socket");
-    let rates = seed(&machine_model().expect("this Mac's model"));
-    let rt = MacRuntime::detect(rates.bytes, rates.processes, std::path::Path::new(&sock))
-        .expect("a box-user macOS runtime");
+    let model = machine_model().expect("this Mac's model");
+    let rates = seed(&model);
+    let rt = MacRuntime::detect(
+        rates.bytes,
+        rates.processes,
+        lateness_seed(&model),
+        std::path::Path::new(&sock),
+    )
+    .expect("a box-user macOS runtime");
     let fx = fixture();
     let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
     let mut misses = Vec::new();

@@ -1,0 +1,89 @@
+# How late a rootless box's watcher wakes past its armed wait, under load (the hold's lateness record,
+# hex_core::watch::LATENESS; the lead, 2026-11-08). macos_process_box's
+# a_rootless_box_holds_the_bar_up_to_one_member_per_core at tree 0cb6e110 (no hold yet), hogs at opt-level 3,
+# run as launchd one-shot hex-macos-resume-load-20261108T211433Z (ProcessType Interactive) on
+# adas-mac-studio-3 (Mac16,9, Apple M4 Max, 14 cores, macOS 26.2), 2026-11-08T21:14:33Z-21:14:38Z. Two rounds,
+# each run beside K = 0, 7 and 14 CPU-bound /usr/bin/yes programs started by the job (1-min load
+# 1.06-3.78; each run lasts under 2 s, so the 1-min average lags it). Each TRACE line is the read that ended a
+# box: the wait armed after the read before (armed_us), the time from the read before's start to this read's
+# start (gap_us), this read's cost, the members it listed, the footprint at both reads and how long the box
+# took to empty after the decision. gap_us - armed_us bounds the wake's lateness from above (the gap also holds
+# the read before's own time).
+# Latest wake: 79,558 - 250 = 79,308 us (round 2, K=0, 28 members): LATENESS's Mac16,9 entry. Within one
+# member per core: 70,959 - 250 = 70,709 us (round 2, K=7, 14 members).
+== round=1 K=0
+TRACE rootless members=4 pass=1 armed_us=1896 gap_us=1945 read_us=15 read_members=4 before_mib=227.7 at_end_mib=260.7 grew_mib=33.0 to_empty_us=343
+TRACE rootless members=4 pass=2 armed_us=1800 gap_us=1842 read_us=16 read_members=4 before_mib=232.4 at_end_mib=264.0 grew_mib=31.6 to_empty_us=334
+TRACE rootless members=4 pass=3 armed_us=1774 gap_us=1822 read_us=15 read_members=4 before_mib=233.6 at_end_mib=264.8 grew_mib=31.2 to_empty_us=356
+TRACE rootless members=8 pass=1 armed_us=2180 gap_us=2246 read_us=21 read_members=8 before_mib=213.8 at_end_mib=287.6 grew_mib=73.8 to_empty_us=379
+TRACE rootless members=8 pass=2 armed_us=2073 gap_us=2132 read_us=26 read_members=8 before_mib=219.0 at_end_mib=290.3 grew_mib=71.2 to_empty_us=384
+TRACE rootless members=8 pass=3 armed_us=2092 gap_us=2143 read_us=20 read_members=8 before_mib=218.1 at_end_mib=289.6 grew_mib=71.5 to_empty_us=364
+TRACE rootless members=14 pass=1 armed_us=5387 gap_us=5495 read_us=116 read_members=14 before_mib=57.7 at_end_mib=311.1 grew_mib=253.4 to_empty_us=356
+TRACE rootless members=14 pass=2 armed_us=5016 gap_us=5123 read_us=101 read_members=14 before_mib=75.7 at_end_mib=321.4 grew_mib=245.6 to_empty_us=318
+TRACE rootless members=14 pass=3 armed_us=4983 gap_us=6869 read_us=53 read_members=14 before_mib=77.3 at_end_mib=404.6 grew_mib=327.3 to_empty_us=635
+TRACE rootless members=28 pass=1 armed_us=250 gap_us=58058 read_us=210 read_members=28 before_mib=30.3 at_end_mib=2819.6 grew_mib=2789.2 to_empty_us=1290
+TRACE rootless members=56 pass=1 armed_us=3233 gap_us=3362 read_us=106 read_members=13 before_mib=162.6 at_end_mib=316.3 grew_mib=153.8 to_empty_us=540
+== round=1 K=7
+TRACE rootless members=4 pass=1 armed_us=1340 gap_us=1410 read_us=21 read_members=4 before_mib=254.7 at_end_mib=277.6 grew_mib=22.9 to_empty_us=405
+TRACE rootless members=4 pass=2 armed_us=1344 gap_us=1383 read_us=26 read_members=4 before_mib=254.5 at_end_mib=277.5 grew_mib=22.9 to_empty_us=394
+TRACE rootless members=4 pass=3 armed_us=1346 gap_us=1396 read_us=28 read_members=4 before_mib=254.5 at_end_mib=277.6 grew_mib=23.1 to_empty_us=386
+TRACE rootless members=8 pass=1 armed_us=250 gap_us=12538 read_us=104 read_members=8 before_mib=0.8 at_end_mib=268.6 grew_mib=267.8 to_empty_us=596
+TRACE rootless members=8 pass=2 armed_us=1924 gap_us=4270 read_us=81 read_members=8 before_mib=226.3 at_end_mib=347.1 grew_mib=120.8 to_empty_us=717
+TRACE rootless members=8 pass=3 armed_us=4303 gap_us=9409 read_us=96 read_members=8 before_mib=110.5 at_end_mib=344.8 grew_mib=234.4 to_empty_us=775
+TRACE rootless members=14 pass=1 armed_us=250 gap_us=45012 read_us=135 read_members=14 before_mib=1.2 at_end_mib=1391.2 grew_mib=1390.0 to_empty_us=5948
+TRACE rootless members=14 pass=2 armed_us=250 gap_us=14715 read_us=118 read_members=14 before_mib=2.1 at_end_mib=419.0 grew_mib=416.9 to_empty_us=790
+TRACE rootless members=14 pass=3 armed_us=250 gap_us=19224 read_us=32 read_members=14 before_mib=5.0 at_end_mib=533.3 grew_mib=528.3 to_empty_us=559
+TRACE rootless members=28 pass=1 armed_us=250 gap_us=38074 read_us=137 read_members=22 before_mib=1.1 at_end_mib=1293.2 grew_mib=1292.1 to_empty_us=6010
+TRACE rootless members=56 pass=1 armed_us=2378 gap_us=6279 read_us=127 read_members=17 before_mib=204.2 at_end_mib=424.3 grew_mib=220.1 to_empty_us=821
+== round=1 K=14
+TRACE rootless members=4 pass=1 armed_us=1614 gap_us=1666 read_us=16 read_members=4 before_mib=241.4 at_end_mib=268.5 grew_mib=27.2 to_empty_us=370
+TRACE rootless members=4 pass=2 armed_us=1398 gap_us=1427 read_us=14 read_members=4 before_mib=251.9 at_end_mib=275.9 grew_mib=24.0 to_empty_us=364
+TRACE rootless members=4 pass=3 armed_us=1468 gap_us=1501 read_us=17 read_members=4 before_mib=248.5 at_end_mib=273.4 grew_mib=24.9 to_empty_us=370
+TRACE rootless members=8 pass=1 armed_us=2200 gap_us=2310 read_us=71 read_members=8 before_mib=212.8 at_end_mib=277.1 grew_mib=64.3 to_empty_us=482
+TRACE rootless members=8 pass=2 armed_us=2230 gap_us=2494 read_us=74 read_members=8 before_mib=211.4 at_end_mib=280.7 grew_mib=69.3 to_empty_us=486
+TRACE rootless members=8 pass=3 armed_us=1413 gap_us=1517 read_us=64 read_members=8 before_mib=251.2 at_end_mib=293.4 grew_mib=42.2 to_empty_us=658
+TRACE rootless members=14 pass=1 armed_us=250 gap_us=10776 read_us=106 read_members=10 before_mib=13.8 at_end_mib=303.6 grew_mib=289.8 to_empty_us=1448
+TRACE rootless members=14 pass=2 armed_us=5820 gap_us=16567 read_us=132 read_members=14 before_mib=36.6 at_end_mib=512.1 grew_mib=475.4 to_empty_us=773
+TRACE rootless members=14 pass=3 armed_us=2580 gap_us=3374 read_us=56 read_members=14 before_mib=194.4 at_end_mib=276.7 grew_mib=82.4 to_empty_us=541
+TRACE rootless members=28 pass=1 armed_us=2457 gap_us=33771 read_us=403 read_members=24 before_mib=200.3 at_end_mib=1495.2 grew_mib=1294.8 to_empty_us=7549
+TRACE rootless members=56 pass=1 armed_us=1438 gap_us=1531 read_us=51 read_members=5 before_mib=250.0 at_end_mib=279.0 grew_mib=29.0 to_empty_us=422
+== round=2 K=0
+TRACE rootless members=4 pass=1 armed_us=1833 gap_us=1880 read_us=15 read_members=4 before_mib=230.7 at_end_mib=262.1 grew_mib=31.4 to_empty_us=343
+TRACE rootless members=4 pass=2 armed_us=1831 gap_us=1869 read_us=15 read_members=4 before_mib=230.8 at_end_mib=262.4 grew_mib=31.5 to_empty_us=340
+TRACE rootless members=4 pass=3 armed_us=1828 gap_us=1874 read_us=17 read_members=4 before_mib=231.0 at_end_mib=262.5 grew_mib=31.6 to_empty_us=337
+TRACE rootless members=8 pass=1 armed_us=2147 gap_us=2212 read_us=20 read_members=8 before_mib=215.4 at_end_mib=287.8 grew_mib=72.4 to_empty_us=367
+TRACE rootless members=8 pass=2 armed_us=2119 gap_us=2165 read_us=25 read_members=8 before_mib=216.8 at_end_mib=288.3 grew_mib=71.5 to_empty_us=398
+TRACE rootless members=8 pass=3 armed_us=2124 gap_us=2183 read_us=40 read_members=8 before_mib=216.6 at_end_mib=288.5 grew_mib=71.9 to_empty_us=412
+TRACE rootless members=14 pass=1 armed_us=2996 gap_us=6706 read_us=119 read_members=14 before_mib=174.1 at_end_mib=506.1 grew_mib=332.0 to_empty_us=649
+TRACE rootless members=14 pass=2 armed_us=5939 gap_us=6034 read_us=111 read_members=14 before_mib=29.8 at_end_mib=304.4 grew_mib=274.7 to_empty_us=330
+TRACE rootless members=14 pass=3 armed_us=4793 gap_us=4877 read_us=91 read_members=14 before_mib=85.8 at_end_mib=314.5 grew_mib=228.7 to_empty_us=507
+TRACE rootless members=28 pass=1 armed_us=250 gap_us=79558 read_us=206 read_members=28 before_mib=19.8 at_end_mib=3866.9 grew_mib=3847.2 to_empty_us=1783
+TRACE rootless members=56 pass=1 armed_us=250 gap_us=64086 read_us=139 read_members=56 before_mib=9.5 at_end_mib=3008.7 grew_mib=2999.2 to_empty_us=1935
+== round=2 K=7
+TRACE rootless members=4 pass=1 armed_us=1346 gap_us=1382 read_us=18 read_members=4 before_mib=254.4 at_end_mib=277.5 grew_mib=23.0 to_empty_us=379
+TRACE rootless members=4 pass=2 armed_us=1340 gap_us=1369 read_us=17 read_members=4 before_mib=254.8 at_end_mib=277.4 grew_mib=22.7 to_empty_us=377
+TRACE rootless members=4 pass=3 armed_us=1329 gap_us=1401 read_us=23 read_members=4 before_mib=255.3 at_end_mib=277.8 grew_mib=22.5 to_empty_us=383
+TRACE rootless members=8 pass=1 armed_us=2838 gap_us=3964 read_us=32 read_members=8 before_mib=181.8 at_end_mib=287.5 grew_mib=105.7 to_empty_us=444
+TRACE rootless members=8 pass=2 armed_us=2424 gap_us=4663 read_us=96 read_members=8 before_mib=202.0 at_end_mib=304.1 grew_mib=102.1 to_empty_us=653
+TRACE rootless members=8 pass=3 armed_us=2656 gap_us=9989 read_us=70 read_members=8 before_mib=190.6 at_end_mib=458.3 grew_mib=267.7 to_empty_us=690
+TRACE rootless members=14 pass=1 armed_us=250 gap_us=70959 read_us=148 read_members=14 before_mib=1.8 at_end_mib=1996.3 grew_mib=1994.4 to_empty_us=926
+TRACE rootless members=14 pass=2 armed_us=250 gap_us=35900 read_us=132 read_members=14 before_mib=2.1 at_end_mib=937.1 grew_mib=934.9 to_empty_us=795
+TRACE rootless members=14 pass=3 armed_us=250 gap_us=21974 read_us=123 read_members=14 before_mib=2.2 at_end_mib=678.3 grew_mib=676.1 to_empty_us=771
+TRACE rootless members=28 pass=1 armed_us=1558 gap_us=1719 read_us=88 read_members=11 before_mib=244.1 at_end_mib=303.5 grew_mib=59.4 to_empty_us=4380
+TRACE rootless members=56 pass=1 armed_us=1395 gap_us=1489 read_us=56 read_members=7 before_mib=252.0 at_end_mib=290.0 grew_mib=37.9 to_empty_us=454
+== round=2 K=14
+TRACE rootless members=4 pass=1 armed_us=1863 gap_us=1913 read_us=17 read_members=4 before_mib=229.3 at_end_mib=261.3 grew_mib=32.1 to_empty_us=372
+TRACE rootless members=4 pass=2 armed_us=1395 gap_us=1425 read_us=17 read_members=4 before_mib=252.1 at_end_mib=276.2 grew_mib=24.1 to_empty_us=382
+TRACE rootless members=4 pass=3 armed_us=1912 gap_us=1973 read_us=19 read_members=4 before_mib=226.9 at_end_mib=259.0 grew_mib=32.1 to_empty_us=360
+TRACE rootless members=8 pass=1 armed_us=0 gap_us=22228 read_us=99 read_members=8 before_mib=0.1 at_end_mib=277.2 grew_mib=277.1 to_empty_us=270
+TRACE rootless members=8 pass=2 armed_us=1342 gap_us=1540 read_us=62 read_members=8 before_mib=254.6 at_end_mib=297.5 grew_mib=42.9 to_empty_us=479
+TRACE rootless members=8 pass=3 armed_us=1365 gap_us=1457 read_us=60 read_members=8 before_mib=253.5 at_end_mib=296.5 grew_mib=43.0 to_empty_us=491
+TRACE rootless members=14 pass=1 armed_us=250 gap_us=23405 read_us=119 read_members=14 before_mib=0.9 at_end_mib=469.5 grew_mib=468.5 to_empty_us=761
+TRACE rootless members=14 pass=2 armed_us=1604 gap_us=1684 read_us=52 read_members=6 before_mib=241.9 at_end_mib=279.4 grew_mib=37.5 to_empty_us=423
+TRACE rootless members=14 pass=3 armed_us=1519 gap_us=1586 read_us=47 read_members=3 before_mib=246.0 at_end_mib=260.8 grew_mib=14.8 to_empty_us=397
+TRACE rootless members=28 pass=1 armed_us=250 gap_us=30596 read_us=152 read_members=13 before_mib=0.5 at_end_mib=744.9 grew_mib=744.4 to_empty_us=3665
+TRACE rootless members=56 pass=1 armed_us=1540 gap_us=1587 read_us=17 read_members=4 before_mib=245.0 at_end_mib=271.0 grew_mib=25.9 to_empty_us=685
+# Overshoot past 256 MiB (MiB) at one member per core, 14 members, per round and K (passes 1 2 3):
+#   round 1: K=0 55.1 65.4 148.6 | K=7 1135.2 163.0 277.3 | K=14 47.6 256.1 20.7
+#   round 2: K=0 250.1 48.4 58.5 | K=7 1740.3 681.1 422.3 | K=14 213.5 23.4 80.6
+# 1 member 0.0 every pass (the kernel's cap); 4 members 3.0-21.8; 8 members 12.6-202.3.

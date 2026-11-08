@@ -140,7 +140,9 @@ fn box_user_mode_routes_through_the_helper() {
     });
 
     let rate = NonZeroU64::new(256 << 30).expect("nonzero");
-    let rt = MacRuntime::detect(rate, rate, &sock).expect("detect box-user mode");
+    let lateness =
+        hex_core::watch::lateness_seed(&super::machine_model().expect("this Mac's model"));
+    let rt = MacRuntime::detect(rate, rate, lateness, &sock).expect("detect box-user mode");
     let id = BoxId::new("b1").expect("box id");
 
     let spec = BoxSpec {
@@ -348,6 +350,7 @@ fn a_box_user_programs_end_is_its_own_not_unknown() {
     let rt = MacRuntime::detect(
         NonZeroU64::new(1 << 40).unwrap(),
         NonZeroU64::new(1_000_000).unwrap(),
+        hex_core::watch::lateness_seed(&super::machine_model().expect("this Mac's model")),
         &sock,
     )
     .expect("a box-user runtime");
@@ -476,8 +479,14 @@ fn a_listing_is_sized_by_kern_maxproc_or_refused() {
 /// member reaped under it) and then with its peak at the cap (its waiter); expect one memory kill.
 #[test]
 fn a_cap_kill_the_watcher_finds_reaped_is_counted_by_its_waiter() {
-    let rates = hex_core::watch::seed(&super::machine_model().expect("this Mac's model"));
-    let rt = MacRuntime::new(rates.bytes, rates.processes).expect("a macOS runtime");
+    let model = super::machine_model().expect("this Mac's model");
+    let rates = hex_core::watch::seed(&model);
+    let rt = MacRuntime::new(
+        rates.bytes,
+        rates.processes,
+        hex_core::watch::lateness_seed(&model),
+    )
+    .expect("a macOS runtime");
     let id = BoxId::new("mac-cap-kill-reaped").expect("an id");
     let bound: u64 = 256 << 20;
     let _ = rt.delete(&id);
@@ -569,6 +578,59 @@ impl Drop for Reaped {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
+}
+
+/// The lead's call (2026-11-08): a box's watcher continues only the members it held, so a member the box's
+/// own programs stopped stays stopped. Do stop a box's member from outside the watcher, as one of the box's
+/// programs would, then start a second, which the box holds until its watcher's next read continues it;
+/// expect the second continued and the first still stopped.
+#[test]
+fn a_member_its_own_programs_stopped_stays_stopped_when_the_watcher_continues_the_box() {
+    let model = super::machine_model().expect("this Mac's model");
+    let rates = hex_core::watch::seed(&model);
+    let rt = MacRuntime::new(
+        rates.bytes,
+        rates.processes,
+        hex_core::watch::lateness_seed(&model),
+    )
+    .expect("a macOS runtime");
+    let id = BoxId::new("mac-own-stop").expect("an id");
+    let _ = rt.delete(&id);
+    rt.create(BoxSpec {
+        id: id.clone(),
+        bounds: Bounds {
+            memory_max: Some(256 << 20),
+            ..Bounds::default()
+        },
+        class: ClassSpec::Process,
+    })
+    .expect("create");
+    // Members that live no longer than the hang guard.
+    let guard = HANG_GUARD.as_secs().to_string();
+    let first = rt
+        .exec(&id, Program::of(&["/bin/sleep", &guard]), Stdio::null())
+        .expect("exec the first");
+    let first_pid = i32::try_from(first.pid()).expect("a pid");
+    rustix::process::kill_process(
+        rustix::process::Pid::from_raw(first_pid).expect("a pid"),
+        rustix::process::Signal::STOP,
+    )
+    .expect("stop the first");
+    wait_for_run_state(first_pid, super::sys::Run::Stopped);
+    let second = rt
+        .exec(&id, Program::of(&["/bin/sleep", &guard]), Stdio::null())
+        .expect("exec the second");
+    let second_pid = i32::try_from(second.pid()).expect("a pid");
+    // Only the watcher's read continues the second, which the box held from its start.
+    wait_for_run_state(second_pid, super::sys::Run::Live);
+    let first_now = super::sys::run_state(first_pid).expect("run state");
+    rt.delete(&id).expect("delete");
+    drop((first, second));
+    assert_eq!(
+        first_now,
+        Some(super::sys::Run::Stopped),
+        "the watcher continued a member the box's own programs stopped"
+    );
 }
 
 /// c-route's finding (2026-11-07): XNU's EVFILT_PROC reports only what follows its attach and doesn't refuse
