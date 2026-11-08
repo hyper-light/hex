@@ -196,6 +196,14 @@ impl Duplex for Vsock {
     fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         self.0.set_read_timeout(timeout)
     }
+
+    fn handle(&self) -> hex_client::guest::Handle<'_> {
+        std::os::fd::AsFd::as_fd(&self.0)
+    }
+
+    fn set_nonblocking(&self, on: bool) -> io::Result<()> {
+        self.0.set_nonblocking(on)
+    }
 }
 
 /// The variables that carry init's boot stamps: its first entry's, across its re-exec from the initramfs,

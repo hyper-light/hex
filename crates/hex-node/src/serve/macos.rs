@@ -89,6 +89,8 @@ const LISTENER: u64 = 0;
 #[derive(Default)]
 struct Watching {
     conns: BTreeMap<u64, (Arc<Stream>, Interest)>,
+    /// The host's own connections' tokens ([`super::Source`]): reported as they are ready.
+    sources: std::collections::BTreeSet<u64>,
 }
 
 /// What [`Os::wake`] and a program already gone leave for the next wait.
@@ -167,12 +169,15 @@ impl Os for MacOs {
     type Passed = OwnedFd;
 
     fn wait(&self, events: &mut Vec<Event>, timeout: Option<Duration>) -> Result<(), Refusal> {
-        let conns: BTreeMap<u64, (Arc<Stream>, Interest)> = self
-            .watching()?
-            .conns
-            .iter()
-            .map(|(t, (s, i))| (*t, (Arc::clone(s), *i)))
-            .collect();
+        let (conns, sources): (BTreeMap<u64, (Arc<Stream>, Interest)>, _) = {
+            let watching = self.watching()?;
+            let conns = watching
+                .conns
+                .iter()
+                .map(|(t, (s, i))| (*t, (Arc::clone(s), *i)))
+                .collect();
+            (conns, watching.sources.clone())
+        };
         // What is ready without a wait: a wake, programs gone before they were watched, and messages read
         // whole and not yet taken.
         let now = self.ready_now(&conns, events)?;
@@ -200,10 +205,14 @@ impl Os for MacOs {
                 }
                 sys::Event::Exit { tag, .. } => (tag, true, false, false),
                 sys::Event::Readable { tag, ended } => {
-                    let read = conns
-                        .get(&tag)
-                        .is_some_and(|(_, i)| matches!(i, Interest::Read));
+                    let read = sources.contains(&tag)
+                        || conns
+                            .get(&tag)
+                            .is_some_and(|(_, i)| matches!(i, Interest::Read));
                     (tag, read, false, ended)
+                }
+                sys::Event::Writable { tag, ended } if sources.contains(&tag) => {
+                    (tag, false, true, ended)
                 }
                 sys::Event::Writable { tag, ended } => {
                     let Some((conn, interest)) = conns.get(&tag) else {
@@ -365,7 +374,8 @@ impl Os for MacOs {
         }
     }
 
-    fn send(&self, conn: &Arc<Stream>, bytes: &[u8]) -> Sent {
+    /// One whole frame, `fds` riding at its first byte (a given answer's streams), as the client reads them.
+    fn send(&self, conn: &Arc<Stream>, bytes: &[u8], fds: &[hex_api::End]) -> Sent {
         let Ok(mut f) = conn.framing.lock() else {
             return Sent::Gone;
         };
@@ -375,8 +385,27 @@ impl Os for MacOs {
         let Ok(framed) = stream::frame(bytes, wire::MAX_MESSAGE) else {
             return Sent::Gone;
         };
+        let borrowed: Vec<std::os::fd::BorrowedFd<'_>> =
+            fds.iter().map(std::os::fd::AsFd::as_fd).collect();
+        let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(wire::MAX_FDS))];
+        let mut control = rustix::net::SendAncillaryBuffer::new(&mut space);
+        if !borrowed.is_empty()
+            && !control.push(rustix::net::SendAncillaryMessage::ScmRights(&borrowed))
+        {
+            return Sent::Gone;
+        }
         loop {
-            return match rustix::net::send(&conn.fd, &framed, SendFlags::DONTWAIT) {
+            let sent = if borrowed.is_empty() {
+                rustix::net::send(&conn.fd, &framed, SendFlags::DONTWAIT)
+            } else {
+                rustix::net::sendmsg(
+                    &conn.fd,
+                    &[std::io::IoSlice::new(&framed)],
+                    &mut control,
+                    SendFlags::DONTWAIT,
+                )
+            };
+            return match sent {
                 Ok(n) if n >= framed.len() => Sent::Sent,
                 Ok(n) => {
                     // Taken in part: the rest goes when the socket has room ([`finish_unsent`]), which
@@ -470,6 +499,25 @@ impl Os for MacOs {
 
     fn stdio(&self, streams: Streams, passed: Vec<OwnedFd>) -> Result<Stdio, Refusal> {
         super::unix::stdio_of(streams, passed)
+    }
+
+    fn watch_source(
+        &self,
+        handle: super::Handle<'_>,
+        token: u64,
+        write: bool,
+    ) -> Result<(), Refusal> {
+        self.watching()?.sources.insert(token);
+        self.kq
+            .fd(handle, token, true, write)
+            .map_err(|e| Refusal::os("watching the node's guest connection", e))
+    }
+
+    fn unwatch_source(&self, handle: super::Handle<'_>, token: u64) {
+        if let Ok(mut w) = self.watching.lock() {
+            w.sources.remove(&token);
+        }
+        let _ = self.kq.forget_fd(handle);
     }
 }
 

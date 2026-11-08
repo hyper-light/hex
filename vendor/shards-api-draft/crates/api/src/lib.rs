@@ -178,6 +178,25 @@ pub enum Refusal {
     /// The guest is gone.
     #[error("the guest has ended: {0:?}")]
     Ended(End),
+    /// No guest runs as the [`Identity`] names: its VM's process has ended, or its pid now names
+    /// another process (its start time differs).
+    #[error("no guest runs as pid {pid}: {why}")]
+    Gone { pid: u32, why: String },
+}
+
+/// What names a booted guest beyond its client's process, so a client that restarts (crashed, say)
+/// takes it back with [`Guests::attach`]: its VM's process, by pid and the start time that tells it
+/// from a process given that pid since, and the socket its vsock is reached at. A client records it
+/// durably once the guest is booted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Identity {
+    pub pid: u32,
+    /// The VM process's start, as its OS counts it: Linux's `/proc/<pid>/stat` starttime (clock
+    /// ticks since boot, proc(5)); macOS's `proc_pid_rusage` `ri_proc_start_abstime` (Mach absolute
+    /// time); Windows' `GetProcessTimes` creation time (a FILETIME, 100 ns since 1601).
+    pub started: u64,
+    /// Where its vsock is reached (`--vsock`'s socket).
+    pub vsock: PathBuf,
 }
 
 /// A connection to a guest's vsock port: a Unix stream socket, on Windows shards' own
@@ -189,6 +208,16 @@ pub enum Refusal {
 pub trait Stream: Read + Write + Send + Sync {
     /// Another handle to the same connection.
     fn try_clone(&self) -> io::Result<Box<dyn Stream>>;
+    /// The OS handle under it, for a caller that waits in its own event loop (epoll, kqueue,
+    /// IOCP) rather than in a read: readable when a read won't wait, writable when a write
+    /// won't, both once the connection has ended. Borrowed: it stays the stream's, open for as
+    /// long as the borrow, so a caller waits on it without `unsafe` and never closes it; one that
+    /// adds it to an event set takes it out before the stream drops.
+    fn handle(&self) -> Handle<'_>;
+    /// With `on`, a read or a write that would wait fails `WouldBlock` at once, for a caller
+    /// that waits on [`handle`](Stream::handle); else each waits to its timeout, as by
+    /// default. Shared by its clones, as its timeouts are.
+    fn set_nonblocking(&self, on: bool) -> io::Result<()>;
     /// Ends one way or both; both, one way at a time (D175).
     fn shutdown(&self, how: Shutdown) -> io::Result<()>;
     /// A read waits at most this long (`None`: for ever), then fails as std's would.
@@ -197,6 +226,13 @@ pub trait Stream: Read + Write + Send + Sync {
     fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
 }
 
+/// The OS handle under a [`Stream`], borrowed from it: a file descriptor on Unix, a Winsock socket
+/// on Windows.
+#[cfg(unix)]
+pub type Handle<'a> = std::os::fd::BorrowedFd<'a>;
+#[cfg(windows)]
+pub type Handle<'a> = std::os::windows::io::BorrowedSocket<'a>;
+
 /// What boots guests.
 pub trait Guests: Send + Sync {
     /// What this host boots with, or the refusal naming the backend it lacks.
@@ -204,6 +240,15 @@ pub trait Guests: Send + Sync {
     /// Boots a guest; refused before boot past this host's bounds. It is the caller's
     /// until it drops, which ends it.
     fn boot(&self, spec: &GuestSpec) -> Result<Box<dyn Guest>, Refusal>;
+    /// Takes back the guest `identity` names, booted from `spec` by a client whose process has
+    /// gone since (a crash: nothing of it ran on, so nothing ended the guest), as [`boot`]'s
+    /// own: the caller's until it drops, which ends it. Refused [`Refusal::Gone`] when no guest
+    /// runs as `identity` names, [`Refusal::Ended`] when that guest has ended. On Windows a
+    /// guest's VM is in a job object that ends with the process that booted it (D141), so no
+    /// guest outlives its client there, and attach finds it gone.
+    ///
+    /// [`boot`]: Guests::boot
+    fn attach(&self, identity: &Identity, spec: &GuestSpec) -> Result<Box<dyn Guest>, Refusal>;
 }
 
 /// A booted guest. Dropping it ends it.
@@ -219,6 +264,8 @@ pub trait Guest: Send + Sync {
     /// Its end, once it has come, waiting at most `timeout` (`Duration::MAX`: until it
     /// comes).
     fn wait_for(&self, timeout: Duration) -> Result<Option<End>, Refusal>;
+    /// What names it for [`Guests::attach`].
+    fn identity(&self) -> Result<Identity, Refusal>;
 }
 
 /// The backend shards boots Linux guests with on `os` and `arch` (`std::env::consts`'):

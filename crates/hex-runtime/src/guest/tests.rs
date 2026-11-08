@@ -381,6 +381,17 @@ impl shards_api::Guests for NoGuest {
             "a stand-in boots nothing".to_owned(),
         ))
     }
+
+    fn attach(
+        &self,
+        identity: &shards_api::Identity,
+        _spec: &shards_api::GuestSpec,
+    ) -> Result<Box<dyn shards_api::Guest>, shards_api::Refusal> {
+        Err(shards_api::Refusal::Gone {
+            pid: identity.pid,
+            why: "a stand-in boots no guest to take back".to_owned(),
+        })
+    }
 }
 
 fn config() -> GuestConfig {
@@ -642,6 +653,17 @@ impl shards_api::Stream for Looped {
         Ok(Box::new(Looped(self.0.try_clone()?)))
     }
 
+    fn handle(&self) -> shards_api::Handle<'_> {
+        #[cfg(unix)]
+        return std::os::fd::AsFd::as_fd(&self.0);
+        #[cfg(windows)]
+        std::os::windows::io::AsSocket::as_socket(&self.0)
+    }
+
+    fn set_nonblocking(&self, on: bool) -> std::io::Result<()> {
+        self.0.set_nonblocking(on)
+    }
+
     fn shutdown(&self, how: std::net::Shutdown) -> std::io::Result<()> {
         self.0.shutdown(how)
     }
@@ -723,6 +745,13 @@ impl shards_api::Guest for PlannedGuest {
     fn wait_for(&self, _: Duration) -> Result<Option<shards_api::End>, shards_api::Refusal> {
         Ok(None)
     }
+
+    fn identity(&self) -> Result<shards_api::Identity, shards_api::Refusal> {
+        Err(shards_api::Refusal::Unsupported {
+            what: "identity",
+            why: "a planned stand-in names no VM".into(),
+        })
+    }
 }
 
 impl shards_api::Guests for Planned {
@@ -742,6 +771,17 @@ impl shards_api::Guests for Planned {
             patience: Arc::clone(&self.patience),
             stops: Arc::clone(&self.stops),
         }))
+    }
+
+    fn attach(
+        &self,
+        identity: &shards_api::Identity,
+        _spec: &shards_api::GuestSpec,
+    ) -> Result<Box<dyn shards_api::Guest>, shards_api::Refusal> {
+        Err(shards_api::Refusal::Gone {
+            pid: identity.pid,
+            why: "a stand-in boots no guest to take back".to_owned(),
+        })
     }
 }
 
@@ -993,4 +1033,212 @@ fn a_changed_binary_is_warmed_once_in_the_background_and_the_guest_kept() {
         2,
         "the warmed binary and the running guest kept"
     );
+}
+
+/// Guests whose VMs outlive a lost handle, as Shards' do on macOS: each booted guest runs until stopped,
+/// named by its identity, and `attach` of one still running gives it back. Counts boots, attaches and
+/// stops; `answers` says whether a guest's relay answers a dial.
+struct Kept {
+    running: Mutex<std::collections::BTreeSet<u32>>,
+    boots: AtomicUsize,
+    attaches: AtomicUsize,
+    stops: Arc<AtomicUsize>,
+    answers: bool,
+}
+
+impl Kept {
+    fn new(answers: bool) -> Arc<Self> {
+        Arc::new(Self {
+            running: Mutex::new(std::collections::BTreeSet::new()),
+            boots: AtomicUsize::new(0),
+            attaches: AtomicUsize::new(0),
+            stops: Arc::new(AtomicUsize::new(0)),
+            answers,
+        })
+    }
+
+    fn guest(self: &Arc<Self>, pid: u32) -> Box<dyn shards_api::Guest> {
+        Box::new(KeptGuest {
+            pid,
+            kept: Arc::clone(self),
+        })
+    }
+}
+
+fn kept_identity(pid: u32) -> shards_api::Identity {
+    shards_api::Identity {
+        pid,
+        started: u64::from(pid) * 10,
+        vsock: PathBuf::from(format!("/kept/{pid}.sock")),
+    }
+}
+
+struct KeptGuest {
+    pid: u32,
+    kept: Arc<Kept>,
+}
+
+impl shards_api::Guest for KeptGuest {
+    fn connect(
+        &self,
+        port: u32,
+        _patience: Duration,
+    ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        if self.kept.answers {
+            Ok(Box::new(Looped(ready_relay())))
+        } else {
+            Err(shards_api::Refusal::Channel {
+                port,
+                why: "a stand-in that won't answer".to_owned(),
+            })
+        }
+    }
+
+    fn stop(&self) -> Result<(), shards_api::Refusal> {
+        self.kept.stops.fetch_add(1, Ordering::SeqCst);
+        self.kept.running.lock().unwrap().remove(&self.pid);
+        Ok(())
+    }
+
+    fn wait_for(&self, _: Duration) -> Result<Option<shards_api::End>, shards_api::Refusal> {
+        let running = self.kept.running.lock().unwrap().contains(&self.pid);
+        Ok(if running {
+            None
+        } else {
+            Some(shards_api::End::Stopped)
+        })
+    }
+
+    fn identity(&self) -> Result<shards_api::Identity, shards_api::Refusal> {
+        Ok(kept_identity(self.pid))
+    }
+}
+
+/// Wraps an Arc'd `Kept` as the runtime's `Guests`.
+struct KeptGuests(Arc<Kept>);
+
+impl shards_api::Guests for KeptGuests {
+    fn backend(&self) -> Result<shards_api::Backend, shards_api::Refusal> {
+        shards_api::backend()
+    }
+
+    fn boot(
+        &self,
+        _spec: &shards_api::GuestSpec,
+    ) -> Result<Box<dyn shards_api::Guest>, shards_api::Refusal> {
+        let n = self.0.boots.fetch_add(1, Ordering::SeqCst);
+        let pid = 100 + u32::try_from(n).unwrap();
+        self.0.running.lock().unwrap().insert(pid);
+        Ok(self.0.guest(pid))
+    }
+
+    fn attach(
+        &self,
+        identity: &shards_api::Identity,
+        _spec: &shards_api::GuestSpec,
+    ) -> Result<Box<dyn shards_api::Guest>, shards_api::Refusal> {
+        self.0.attaches.fetch_add(1, Ordering::SeqCst);
+        let running = self.0.running.lock().unwrap().contains(&identity.pid);
+        if running && *identity == kept_identity(identity.pid) {
+            Ok(self.0.guest(identity.pid))
+        } else {
+            Err(shards_api::Refusal::Gone {
+                pid: identity.pid,
+                why: "no stand-in guest runs as it".to_owned(),
+            })
+        }
+    }
+}
+
+/// A node on `kept`'s guests recording its guest at `record`.
+fn kept_node(kept: &Arc<Kept>, record: &Path) -> GuestRuntime {
+    GuestRuntime::new(Arc::new(KeptGuests(Arc::clone(kept))), config())
+        .recorded_at(record.to_owned())
+}
+
+/// Native plan step 8 (T-T7.1.2): a node boots its guest and records it; the node is lost without its drop
+/// (a crash: nothing of it stops the guest); the next node on the same record takes that guest back and
+/// boots none, stops none.
+#[test]
+fn a_node_takes_back_the_guest_it_recorded_and_boots_none() {
+    if shards_api::backend().is_err() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let record = dir.path().join("@guest");
+    let kept = Kept::new(true);
+    let first = kept_node(&kept, &record);
+    first.boot().unwrap();
+    assert_eq!(held::read(&record).unwrap(), Some(kept_identity(100)));
+    // Lost without its drop, as a crash loses it.
+    let _lost = std::mem::ManuallyDrop::new(first);
+    let next = kept_node(&kept, &record);
+    next.boot().unwrap();
+    assert_eq!(
+        kept.boots.load(Ordering::SeqCst),
+        1,
+        "a second guest booted"
+    );
+    assert_eq!(kept.attaches.load(Ordering::SeqCst), 1);
+    assert_eq!(kept.stops.load(Ordering::SeqCst), 0);
+    assert_eq!(held::read(&record).unwrap(), Some(kept_identity(100)));
+}
+
+/// Native plan step 8 (T-T7.1.2): a node whose recorded guest is gone forgets it and boots its own, which it
+/// records in its place.
+#[test]
+fn a_recorded_guest_that_is_gone_is_forgotten_and_another_booted() {
+    if shards_api::backend().is_err() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let record = dir.path().join("@guest");
+    held::write(&record, &kept_identity(7)).unwrap();
+    let kept = Kept::new(true);
+    let node = kept_node(&kept, &record);
+    node.boot().unwrap();
+    assert_eq!(kept.attaches.load(Ordering::SeqCst), 1);
+    assert_eq!(kept.boots.load(Ordering::SeqCst), 1);
+    assert_eq!(held::read(&record).unwrap(), Some(kept_identity(100)));
+}
+
+/// Native plan step 8 (no orphan VM): a guest taken back that won't answer is stopped before the node boots
+/// another, so none runs beside the next.
+#[test]
+fn a_taken_back_guest_that_wont_answer_is_stopped_before_another_boots() {
+    if shards_api::backend().is_err() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let record = dir.path().join("@guest");
+    let kept = Kept::new(false);
+    kept.running.lock().unwrap().insert(7);
+    held::write(&record, &kept_identity(7)).unwrap();
+    let node = kept_node(&kept, &record);
+    // Its own boot won't answer either: refused, as a boot that never readies is.
+    let _ = node.boot();
+    assert_eq!(kept.attaches.load(Ordering::SeqCst), 1);
+    assert!(
+        !kept.running.lock().unwrap().contains(&7),
+        "the guest taken back runs on: an orphan"
+    );
+    assert!(kept.stops.load(Ordering::SeqCst) >= 1);
+}
+
+/// Native plan step 8: a node that stops its guest (dropped) removes its record, so the next node takes
+/// back nothing.
+#[test]
+fn a_node_that_stops_its_guest_leaves_no_record() {
+    if shards_api::backend().is_err() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let record = dir.path().join("@guest");
+    let kept = Kept::new(true);
+    let node = kept_node(&kept, &record);
+    node.boot().unwrap();
+    assert!(held::read(&record).unwrap().is_some());
+    drop(node);
+    assert_eq!(held::read(&record).unwrap(), None);
+    assert!(kept.running.lock().unwrap().is_empty());
 }

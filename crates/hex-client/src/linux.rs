@@ -81,14 +81,15 @@ fn read(shared: &Shared<Socket>) {
             }
             Err(e) => break Refusal::Broken(format!("reading the node agent's socket: {e}")),
         };
-        // An answer carries no descriptors: any that came are counted, closed, and refused below.
-        let descriptors: usize = control
-            .drain()
-            .map(|m| match m {
-                RecvAncillaryMessage::ScmRights(fds) => fds.count(),
-                _ => 0,
-            })
-            .sum();
+        // Only a given answer carries descriptors: any that came with another are counted, closed, and
+        // refused below.
+        let mut fds = Vec::new();
+        for m in control.drain() {
+            if let RecvAncillaryMessage::ScmRights(came) = m {
+                fds.extend(came);
+            }
+        }
+        let descriptors = fds.len();
         if msg.bytes == 0 && descriptors == 0 {
             break reset.unwrap_or_else(|| {
                 Refusal::Broken("the node agent closed the connection".to_owned())
@@ -106,7 +107,7 @@ fn read(shared: &Shared<Socket>) {
                     "the node agent sent a message that isn't an answer: {fault}"
                 ))
             })
-            .and_then(|(header, answer)| shared.deliver(header, answer));
+            .and_then(|(header, answer)| shared.deliver_with(header, answer, fds));
         if let Err(why) = delivered {
             break why;
         }

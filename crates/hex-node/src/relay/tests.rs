@@ -208,6 +208,7 @@ fn an_execs_streams_reach_the_node_as_pipe_ends() {
                 stdin: Some(in_r),
                 stdout: Some(out_w),
                 stderr: None,
+                ..Stdio::null()
             },
         )
         .unwrap();
@@ -269,6 +270,14 @@ impl Duplex for Told {
     fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         self.conn.set_read_timeout(timeout)
     }
+
+    fn handle(&self) -> hex_client::guest::Handle<'_> {
+        std::os::fd::AsFd::as_fd(&self.conn)
+    }
+
+    fn set_nonblocking(&self, on: bool) -> io::Result<()> {
+        self.conn.set_nonblocking(on)
+    }
 }
 
 /// The relay's control port, its client's writes told and the connection held for the test to end;
@@ -304,6 +313,7 @@ fn exec_stdin(client: &Client) -> Result<Box<dyn hex_api::Proc>, Refusal> {
             stdin: Some(in_r),
             stdout: None,
             stderr: None,
+            ..Stdio::null()
         },
     )
 }
@@ -384,6 +394,7 @@ fn a_silent_stdio_connection_holds_no_other_exec_up() {
                 stdin: None,
                 stdout: Some(out_w),
                 stderr: None,
+                ..Stdio::null()
             },
         )
         .unwrap();
@@ -494,6 +505,14 @@ impl Duplex for Late {
 
     fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         self.conn.set_read_timeout(timeout)
+    }
+
+    fn handle(&self) -> hex_client::guest::Handle<'_> {
+        std::os::fd::AsFd::as_fd(&self.conn)
+    }
+
+    fn set_nonblocking(&self, on: bool) -> io::Result<()> {
+        self.conn.set_nonblocking(on)
     }
 }
 
@@ -614,6 +633,14 @@ impl Duplex for CountingConn {
     fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         self.conn.set_read_timeout(timeout)
     }
+
+    fn handle(&self) -> hex_client::guest::Handle<'_> {
+        std::os::fd::AsFd::as_fd(&self.conn)
+    }
+
+    fn set_nonblocking(&self, on: bool) -> io::Result<()> {
+        self.conn.set_nonblocking(on)
+    }
 }
 
 /// HEX-GUEST-36 (no copy through user space, splice(2)): exec `cat` with 1 MiB on its stdin read back from
@@ -655,6 +682,7 @@ fn stdio_crosses_the_relay_without_a_copy_through_user_space() {
                 stdin: Some(in_r),
                 stdout: Some(out_w),
                 stderr: None,
+                ..Stdio::null()
             },
         )
         .unwrap();

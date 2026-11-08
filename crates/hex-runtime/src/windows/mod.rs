@@ -542,6 +542,16 @@ impl Runtime for WinRuntime {
     }
 
     fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        stdio.check()?;
+        if stdio.ask != hex_api::Ask::default() {
+            return Err(Refusal::Platform {
+                what: "stdio streams made by the runtime",
+                platform: "windows",
+                why: "the Windows classes take the caller's own handles; the stream form is the Windows \
+                      agent's to add, by its stdio record's winner"
+                    .to_owned(),
+            });
+        }
         match self.get(id)? {
             Held::Process(b) => {
                 let spawn = build_spawn(&program, stdio)?;

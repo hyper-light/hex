@@ -236,7 +236,30 @@ impl Os for Linux {
         }
     }
 
-    fn send(&self, conn: &OwnedFd, bytes: &[u8]) -> Sent {
+    /// One whole record, with `fds` as its `SCM_RIGHTS` (a given answer's streams).
+    fn send(&self, conn: &OwnedFd, bytes: &[u8], fds: &[hex_api::End]) -> Sent {
+        if !fds.is_empty() {
+            let borrowed: Vec<std::os::fd::BorrowedFd<'_>> =
+                fds.iter().map(std::os::fd::AsFd::as_fd).collect();
+            let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(wire::MAX_FDS))];
+            let mut control = rustix::net::SendAncillaryBuffer::new(&mut space);
+            if !control.push(rustix::net::SendAncillaryMessage::ScmRights(&borrowed)) {
+                return Sent::Gone;
+            }
+            loop {
+                return match rustix::net::sendmsg(
+                    conn,
+                    &[std::io::IoSlice::new(bytes)],
+                    &mut control,
+                    SendFlags::DONTWAIT | SendFlags::NOSIGNAL,
+                ) {
+                    Ok(_) => Sent::Sent,
+                    Err(Errno::INTR) => continue,
+                    Err(Errno::AGAIN) => Sent::WouldBlock,
+                    Err(_) => Sent::Gone,
+                };
+            }
+        }
         loop {
             return match rustix::net::send(conn, bytes, SendFlags::DONTWAIT | SendFlags::NOSIGNAL) {
                 Ok(_) => Sent::Sent,
@@ -310,5 +333,29 @@ impl Os for Linux {
 
     fn stdio(&self, streams: Streams, passed: Vec<OwnedFd>) -> Result<Stdio, Refusal> {
         super::unix::stdio_of(streams, passed)
+    }
+
+    fn watch_source(
+        &self,
+        handle: super::Handle<'_>,
+        token: u64,
+        write: bool,
+    ) -> Result<(), Refusal> {
+        let flags = if write {
+            EventFlags::IN | EventFlags::OUT | EventFlags::RDHUP
+        } else {
+            EventFlags::IN | EventFlags::RDHUP
+        };
+        match epoll::modify(&self.epoll, handle, EventData::new_u64(token), flags) {
+            Err(rustix::io::Errno::NOENT) => {
+                epoll::add(&self.epoll, handle, EventData::new_u64(token), flags)
+            }
+            other => other,
+        }
+        .map_err(|e| Refusal::os("watching the node's guest connection", e))
+    }
+
+    fn unwatch_source(&self, handle: super::Handle<'_>, _token: u64) {
+        let _ = epoll::delete(&self.epoll, handle);
     }
 }

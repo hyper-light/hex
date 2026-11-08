@@ -117,4 +117,7 @@ impl Proc for BoxProc {
             Err(e) => Err(Refusal::os("TerminateProcess", e)),
         }
     }
+    fn streams(&mut self) -> Result<hex_api::Given, Refusal> {
+        Ok(hex_api::Given::default())
+    }
 }

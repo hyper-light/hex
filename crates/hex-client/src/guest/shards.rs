@@ -48,6 +48,13 @@ impl Duplex for ShardsStream {
     fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         self.0.set_read_timeout(timeout)
     }
+    fn handle(&self) -> super::Handle<'_> {
+        self.0.handle()
+    }
+
+    fn set_nonblocking(&self, on: bool) -> io::Result<()> {
+        self.0.set_nonblocking(on)
+    }
 }
 
 /// A guest's ports. Until a dial has connected, a dial waits for the guest to listen, retried by

@@ -288,6 +288,7 @@ fn an_exec_with_a_stream_is_refused_by_name_until_the_stdio_transport_is_decided
         stdin: None,
         stdout: Some(write),
         stderr: None,
+        ..Stdio::null()
     };
     match client.exec(&id, act(&["say", "hi"]), stdio) {
         Err(Refusal::Platform { what, .. }) => {

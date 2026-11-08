@@ -5,6 +5,7 @@
 //! call over [`hex_client::guest::Client`]. Where Shards has no backend (macOS x86_64, Windows arm64) the
 //! class is refused by name before anything is booted.
 
+pub mod held;
 pub mod rewrite;
 pub mod shares;
 
@@ -233,6 +234,18 @@ pub fn recorded_boot() -> Result<Duration, Refusal> {
 /// boot has another guest to try before its caller is refused.
 const BOOTS: usize = 2;
 
+/// What tells a node's loop that bytes wait to be written on a connection it watches.
+pub type Room = Arc<dyn Fn() + Send + Sync>;
+
+/// What joins a guest's control connection, in the event form, to its node's loop: the node gives one
+/// ([`GuestRuntime::join_loop`]), and every guest booted or taken back from then is joined through it.
+pub trait Joins: Send + Sync {
+    /// A token for a connection to come, and what tells the loop that bytes wait to be written on it.
+    fn reserve(&self) -> Result<(u64, Room), Refusal>;
+    /// Watches `pump` under `token` from now.
+    fn join(&self, token: u64, pump: hex_client::guest::Pump) -> Result<(), Refusal>;
+}
+
 /// The `oci` class through a Shards guest.
 pub struct GuestRuntime {
     guests: Arc<dyn shards_api::Guests>,
@@ -248,6 +261,13 @@ pub struct GuestRuntime {
     booted_binary: Mutex<Option<stage::Identity>>,
     /// The warm-up of a Shards binary that changed while the guest ran ([`GuestRuntime::warm_if_changed`]).
     warm: Mutex<Warm>,
+    /// Where the guest it holds is recorded ([`GuestRuntime::recorded_at`]).
+    record: Option<PathBuf>,
+    /// The event form's client of the guest's node: its answers are read by the node's loop, so a call
+    /// through it holds no thread while the guest answers.
+    evented: Mutex<Option<Arc<Client>>>,
+    /// What joins each guest's evented connection to the node's loop ([`GuestRuntime::join_loop`]).
+    joins: Mutex<Option<Arc<dyn Joins>>>,
 }
 
 /// A throwaway guest booted on a Shards binary that changed while the node's guest ran, so the node's next boot
@@ -341,7 +361,19 @@ impl GuestRuntime {
             digests: Mutex::new(Digests::default()),
             booted_binary: Mutex::new(None),
             warm: Mutex::new(Warm::default()),
+            record: None,
+            evented: Mutex::new(None),
+            joins: Mutex::new(None),
         }
+    }
+
+    /// Records the guest it boots at `path` ([`held`]), and takes back the guest recorded there when the
+    /// node starts ([`GuestRuntime::boot`]): a guest outlives its node's crash (its VM is a process of its
+    /// own, reparented), so the next node holds it, and the boxes in it, rather than boot another beside it
+    /// and leave it an orphan (native plan step 8, T-T7.1.2).
+    pub fn recorded_at(mut self, path: PathBuf) -> Self {
+        self.record = Some(path);
+        self
     }
 
     /// Boots the node's guest now, so no create pays a boot, an upgrade's first least of all (HEX-GUEST-39): the
@@ -351,7 +383,102 @@ impl GuestRuntime {
         if self.guests.backend().is_err() {
             return Ok(());
         }
+        self.attach_recorded()?;
         self.guest().map(drop)
+    }
+
+    /// Takes back the guest a node before this one recorded, if there is one: attached, dialed and
+    /// greeted as a boot's is, its boxes then the node's. One gone or ended is forgotten, and the node boots
+    /// its own; one that runs and won't answer is stopped first, so none is left beside the next. A guest
+    /// that can't be told gone or taken back refuses the node by type, naming why, rather than boot
+    /// another beside one that may run.
+    fn attach_recorded(&self) -> Result<(), Refusal> {
+        let Some(path) = &self.record else {
+            return Ok(());
+        };
+        let Some(identity) = held::read(path)? else {
+            return Ok(());
+        };
+        let guest: Arc<dyn shards_api::Guest> =
+            match self.guests.attach(&identity, &self.config.spec()) {
+                Ok(guest) => guest.into(),
+                Err(shards_api::Refusal::Gone { .. } | shards_api::Refusal::Ended(_)) => {
+                    return held::remove(path);
+                }
+                Err(why) => return Err(refusal("taking back the node's guest", &why)),
+            };
+        let link: Arc<dyn Link> = Arc::new(ShardsLink::new(
+            Arc::clone(&guest),
+            self.first_dial_bound()?,
+        ));
+        match Client::connect(Arc::clone(&link)) {
+            Ok(client) => {
+                // The binary that booted it isn't known here: no warm-up is asked for it.
+                let b = Arc::new(Booted {
+                    guest,
+                    link,
+                    client,
+                });
+                self.join(&b)?;
+                *self.lock()? = Some(b);
+                Ok(())
+            }
+            Err(_) => {
+                guest.stop().map_err(|why| {
+                    refusal("stopping a guest taken back that won't answer", &why)
+                })?;
+                held::remove(path)
+            }
+        }
+    }
+
+    /// Joins the guest's control connection, in the event form, to the node's loop through `joins`, and
+    /// every guest's booted or taken back after: a call through it is answered from the loop, holding no
+    /// thread while the guest answers (native plan step 8 (1)). With no guest running, the next boot joins.
+    pub fn join_loop(&self, joins: Arc<dyn Joins>) -> Result<(), Refusal> {
+        *self.joins.lock().map_err(poisoned)? = Some(joins);
+        match self.running()? {
+            Some(b) => self.join(&b),
+            None => Ok(()),
+        }
+    }
+
+    /// Opens booted guest `b`'s evented connection and joins it to the loop, where one is given.
+    fn join(&self, b: &Booted) -> Result<(), Refusal> {
+        let joins = self.joins.lock().map_err(poisoned)?.clone();
+        let Some(joins) = joins else {
+            return Ok(());
+        };
+        let (token, room) = joins.reserve()?;
+        let (client, pump) = Client::connect_evented(Arc::clone(&b.link), room)?;
+        *self.evented.lock().map_err(poisoned)? = Some(Arc::new(client));
+        joins.join(token, pump)
+    }
+
+    /// The event form's client of the running guest, joined to the loop: one whose connection ended while
+    /// its guest runs is joined again first. `None` with no guest running.
+    pub fn evented(&self) -> Result<Option<Arc<Client>>, Refusal> {
+        let Some(b) = self.running()? else {
+            return Ok(None);
+        };
+        let held = self.evented.lock().map_err(poisoned)?.clone();
+        if let Some(client) = held.filter(|c| !c.closed()) {
+            return Ok(Some(client));
+        }
+        self.join(&b)?;
+        Ok(self.evented.lock().map_err(poisoned)?.clone())
+    }
+
+    /// Records `guest` as the one this node holds, where a record is kept: one whose identity Shards can't
+    /// give leaves no record, so a node after a crash finds none to take back.
+    fn record(&self, guest: &dyn shards_api::Guest) -> Result<(), Refusal> {
+        let Some(path) = &self.record else {
+            return Ok(());
+        };
+        match guest.identity() {
+            Ok(identity) => held::write(path, &identity),
+            Err(_) => held::remove(path),
+        }
     }
 
     /// Where the Shards binary changed since the running guest booted it, boots one throwaway guest on it in the
@@ -452,12 +579,19 @@ impl GuestRuntime {
             match Client::connect(Arc::clone(&link)) {
                 Ok(client) => {
                     self.learn(began.elapsed());
+                    if let Err(why) = self.record(guest.as_ref()) {
+                        // Unrecorded, a crash would leave it an orphan: ended, and the boot refused.
+                        let _ = guest.stop();
+                        return Err(why);
+                    }
                     *self.booted_binary.lock().map_err(poisoned)? = binary;
                     let b = Arc::new(Booted {
                         guest,
                         link,
                         client,
                     });
+                    // The new guest's control connection joins the loop as the one before's did.
+                    self.join(&b)?;
                     *booted = Some(Arc::clone(&b));
                     return Ok(b);
                 }
@@ -523,6 +657,9 @@ impl Drop for GuestRuntime {
         self.finish_warm();
         if let Ok(Some(b)) = self.booted.get_mut().map(Option::take) {
             let _ = b.guest.stop();
+            if let Some(path) = &self.record {
+                let _ = held::remove(path);
+            }
         }
     }
 }
@@ -645,6 +782,11 @@ impl<P: Runtime> WithGuest<P> {
     /// through it (native plan step 8).
     pub fn host(&self) -> &P {
         &self.process
+    }
+
+    /// The guest's runtime, which runs the `oci` class: a node's recovery asks it which boxes it still holds.
+    pub fn guest(&self) -> &GuestRuntime {
+        &self.oci
     }
 
     /// The node's runtime routed by class ([`by_class`]), its guest booted before it returns

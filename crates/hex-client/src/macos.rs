@@ -68,8 +68,9 @@ fn read(shared: &Shared<Socket>) {
     let fd = &shared.transport.fd;
     let mut buf = vec![0u8; stream::MAX_FRAME];
     let mut deframer = Deframer::new(wire::MAX_MESSAGE);
-    // Descriptors that came: an answer carries none, so the next message is refused for them.
-    let mut descriptors = 0usize;
+    // Descriptors that came, at the first byte of the message they ride with (XNU stops a stream read before a
+    // record that carries them): a given answer's, kept for its exec; any other answer is refused for them.
+    let mut fds: Vec<std::os::fd::OwnedFd> = Vec::new();
     let mut reset = None;
     let why = 'reading: loop {
         let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(wire::MAX_FDS))];
@@ -90,14 +91,13 @@ fn read(shared: &Shared<Socket>) {
             }
             Err(e) => break Refusal::Broken(format!("reading the node agent's socket: {e}")),
         };
-        let came: usize = control
-            .drain()
-            .map(|m| match m {
-                RecvAncillaryMessage::ScmRights(fds) => fds.count(),
-                _ => 0,
-            })
-            .sum();
-        descriptors = descriptors.saturating_add(came);
+        let before = fds.len();
+        for m in control.drain() {
+            if let RecvAncillaryMessage::ScmRights(came) = m {
+                fds.extend(came);
+            }
+        }
+        let came = fds.len().saturating_sub(before);
         if msg.bytes == 0 && came == 0 {
             break reset.unwrap_or_else(|| {
                 Refusal::Broken("the node agent closed the connection".to_owned())
@@ -117,10 +117,11 @@ fn read(shared: &Shared<Socket>) {
                 }
             };
             let Some(message) = message else { continue };
+            let these = std::mem::take(&mut fds);
             let received = Received {
                 bytes: &message,
                 size: message.len(),
-                descriptors: std::mem::take(&mut descriptors),
+                descriptors: these.len(),
                 descriptors_cut: false,
             };
             let delivered = wire::read_answer(&received, wire::MAX_MESSAGE)
@@ -129,7 +130,7 @@ fn read(shared: &Shared<Socket>) {
                         "the node agent sent a message that isn't an answer: {fault}"
                     ))
                 })
-                .and_then(|(header, answer)| shared.deliver(header, answer));
+                .and_then(|(header, answer)| shared.deliver_with(header, answer, these));
             if let Err(why) = delivered {
                 break 'reading why;
             }

@@ -682,6 +682,10 @@ impl Proc for Owned {
     fn kill(&mut self) -> Result<(), Refusal> {
         self.proc.kill()
     }
+
+    fn streams(&mut self) -> Result<hex_api::Given, Refusal> {
+        self.proc.streams()
+    }
 }
 
 impl Drop for Owned {
@@ -765,6 +769,9 @@ impl Proc for ProgramProc {
             return Ok(());
         }
         self.proc.kill()
+    }
+    fn streams(&mut self) -> Result<hex_api::Given, Refusal> {
+        self.proc.streams()
     }
 }
 

@@ -126,6 +126,24 @@ fn requests() -> Vec<(u64, Request, usize)> {
         (6, Request::Release, 0),
         (12, Request::Call(Call::Netns), 0),
         (13, Request::Call(Call::Kill { exec: 6 }), 0),
+        (
+            14,
+            Request::Call(Call::ExecStreams {
+                id: id("b-1"),
+                program: program(),
+                streams: Streams {
+                    stdin: true,
+                    stdout: false,
+                    stderr: false,
+                },
+                ask: Streams {
+                    stdin: false,
+                    stdout: true,
+                    stderr: true,
+                },
+            }),
+            1,
+        ),
     ]
 }
 
@@ -224,6 +242,13 @@ fn answers() -> Vec<(u64, Answer)> {
             },
         ),
         (12, Answer::Netns(counts())),
+        (
+            14,
+            Answer::Given {
+                pid: 4243,
+                given: Streams::default(),
+            },
+        ),
     ];
     out.extend(refusals().into_iter().map(|r| (11, Answer::Refused(r))));
     for exit in [
@@ -324,7 +349,11 @@ fn version_2_messages_are_the_bytes_recorded() {
         bytes
     };
     for (n, req, _) in requests().into_iter().filter(|(_, r, _)| {
-        *r != Request::Call(Call::Netns) && !matches!(r, Request::Call(Call::Kill { .. }))
+        *r != Request::Call(Call::Netns)
+            && !matches!(
+                r,
+                Request::Call(Call::Kill { .. } | Call::ExecStreams { .. })
+            )
     }) {
         assert_eq!(
             as_v1(request(2, n, &req, MAX_MESSAGE).unwrap()),
@@ -334,7 +363,7 @@ fn version_2_messages_are_the_bytes_recorded() {
     }
     for (n, ans) in answers()
         .into_iter()
-        .filter(|(_, a)| !matches!(a, Answer::Netns(_)))
+        .filter(|(_, a)| !matches!(a, Answer::Netns(_) | Answer::Given { .. }))
     {
         assert_eq!(
             as_v1(answer(2, n, &ans, MAX_MESSAGE).unwrap()),
@@ -382,20 +411,75 @@ fn version_3_messages_are_the_bytes_recorded() {
             }
         })
     );
-    for (n, req, _) in requests().into_iter().filter(|(_, r, _)| *r != kill) {
+    let v3 = |r: &Request| {
+        matches!(
+            r,
+            Request::Call(Call::Kill { .. } | Call::ExecStreams { .. })
+        )
+    };
+    for (n, req, _) in requests().into_iter().filter(|(_, r, _)| !v3(r)) {
         assert_eq!(
             as_v(2, request(3, n, &req, MAX_MESSAGE).unwrap()),
             request(2, n, &req, MAX_MESSAGE).unwrap(),
             "{req:?}"
         );
     }
-    for (n, ans) in answers() {
+    for (n, ans) in answers()
+        .into_iter()
+        .filter(|(_, a)| !matches!(a, Answer::Given { .. }))
+    {
         assert_eq!(
             as_v(2, answer(3, n, &ans, MAX_MESSAGE).unwrap()),
             answer(2, n, &ans, MAX_MESSAGE).unwrap(),
             "{ans:?}"
         );
     }
+}
+
+/// HEX-SOCK-2, version 3's exec asking for streams and its answer: their bytes are the ones recorded here
+/// (the exec's body is version 1's recorded exec's, under its own header, with its streams and ask bytes);
+/// a given answer carries a descriptor for each stream it names and is refused, naming the count, with any
+/// other; neither is a kind of version 2.
+#[test]
+fn version_3_streams_are_the_bytes_recorded_and_their_descriptors_counted() {
+    let asking = requests()[14].1.clone();
+    let body = GOLDEN_EXEC.get(32..GOLDEN_EXEC.len() - 2).unwrap();
+    assert_eq!(
+        hex(&request(3, 14, &asking, MAX_MESSAGE).unwrap()),
+        format!("4845585703000d000e00000000000000{body}0106")
+    );
+    let given = Answer::Given {
+        pid: 4243,
+        given: Streams {
+            stdin: false,
+            stdout: true,
+            stderr: true,
+        },
+    };
+    let bytes = answer(3, 14, &given, MAX_MESSAGE).unwrap();
+    assert_eq!(hex(&bytes), "4845585703000a800e000000000000009310000006");
+    assert_eq!(
+        read_answer(&received(&bytes, 2), MAX_MESSAGE).map(|(_, a)| a),
+        Ok(given.clone())
+    );
+    for fds in [0, 1, 3] {
+        assert_eq!(
+            read_answer(&received(&bytes, fds), MAX_MESSAGE),
+            Err(Fault::Descriptors {
+                what: "a given answer",
+                want: 2,
+                got: fds
+            })
+        );
+    }
+    assert!(matches!(
+        request(2, 14, &asking, MAX_MESSAGE),
+        Err(Fault::Kind { kind: 0x000d, .. })
+    ));
+    assert!(matches!(
+        answer(2, 14, &given, MAX_MESSAGE),
+        Err(Fault::Kind { kind: 0x800a, .. })
+    ));
 }
 
 // Exec of /usr/bin/true with stdin and stdout, an env, a cwd and a user; a create from an OciSpec;
@@ -582,7 +666,7 @@ fn unknown_versions_and_kinds_are_refused() {
     // version this side speaks.
     for version in FIRST..=VERSION {
         let hello = request(version, 5, &Request::Hello, MAX_MESSAGE).unwrap();
-        for kind in [0u16, 0x000d, 0x7fff, 0x8001, 0x8009, 0xffff] {
+        for kind in [0u16, 0x000e, 0x7fff, 0x8001, 0x8009, 0xffff] {
             let mut bytes = hello.clone();
             bytes[6..8].copy_from_slice(&kind.to_le_bytes());
             let got = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
@@ -591,7 +675,7 @@ fn unknown_versions_and_kinds_are_refused() {
                 "{got:?}"
             );
         }
-        for kind in [0u16, 0x0001, 0x000b, 0x8000, 0x800a, 0xffff] {
+        for kind in [0u16, 0x0001, 0x000b, 0x8000, 0x800b, 0xffff] {
             let mut bytes = answer(version, 5, &Answer::Done, MAX_MESSAGE).unwrap();
             bytes[6..8].copy_from_slice(&kind.to_le_bytes());
             assert!(matches!(
@@ -1039,7 +1123,7 @@ proptest! {
     /// HEX-SOCK-1: bodies of random bytes behind a valid header of each version, so every kind's
     /// decoder meets them, are a message or a typed refusal, never a panic.
     #[test]
-    fn any_body_behind_a_header_is_read_or_refused(version in FIRST..=VERSION, kind in prop_oneof![0u16..0x000e, 0x8000u16..0x800b], body in proptest::collection::vec(any::<u8>(), 0..256), fds in 0usize..4) {
+    fn any_body_behind_a_header_is_read_or_refused(version in FIRST..=VERSION, kind in prop_oneof![0u16..0x000f, 0x8000u16..0x800c], body in proptest::collection::vec(any::<u8>(), 0..256), fds in 0usize..4) {
         let mut bytes = MAGIC.to_vec();
         bytes.extend_from_slice(&version.to_le_bytes());
         bytes.extend_from_slice(&kind.to_le_bytes());

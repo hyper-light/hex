@@ -67,7 +67,7 @@ impl Os for Unsupported {
     fn recv(&self, conn: &Never, _: &mut [u8]) -> Recv<Never> {
         match *conn {}
     }
-    fn send(&self, conn: &Never, _: &[u8]) -> Sent {
+    fn send(&self, conn: &Never, _: &[u8], _: &[hex_api::End]) -> Sent {
         match *conn {}
     }
     fn shutdown(&self, conn: &Never) {
@@ -90,5 +90,13 @@ impl Os for Unsupported {
             Some(never) => match never {},
             None => match self.never {},
         }
+    }
+
+    fn watch_source(&self, _: super::Handle<'_>, _: u64, _: bool) -> Result<(), Refusal> {
+        match self.never {}
+    }
+
+    fn unwatch_source(&self, _: super::Handle<'_>, _: u64) {
+        match self.never {}
     }
 }

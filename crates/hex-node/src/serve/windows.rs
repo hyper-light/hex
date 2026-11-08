@@ -515,7 +515,14 @@ impl Os for Windows {
         Recv::WouldBlock
     }
 
-    fn send(&self, conn: &Arc<Stream>, bytes: &[u8]) -> Sent {
+    /// Ends to pass can't go: Windows' AF_UNIX carries no handles, and no Windows host gives any (its
+    /// runtimes refuse streams they'd make by name, before an exec). A message that carries some is never
+    /// sent without them: its connection ends, which its client sees.
+    fn send(&self, conn: &Arc<Stream>, bytes: &[u8], fds: &[hex_api::End]) -> Sent {
+        if !fds.is_empty() {
+            conn.socket.shutdown();
+            return Sent::Gone;
+        }
         let Ok(mut st) = conn.state.lock() else {
             return Sent::Gone;
         };
@@ -581,10 +588,21 @@ impl Os for Windows {
                         .to_owned(),
             });
         }
-        Ok(Stdio {
-            stdin: None,
-            stdout: None,
-            stderr: None,
+        Ok(Stdio::null())
+    }
+
+    /// A host's own connection in the port isn't built on Windows yet: the IOCP source (a zero-byte
+    /// overlapped receive as readiness) is native plan step 8's next change, and no Windows host has a
+    /// source to add until then (its guest's connection isn't evented). Refused by name.
+    fn watch_source(&self, _: super::Handle<'_>, _: u64, _: bool) -> Result<(), Refusal> {
+        Err(Refusal::Platform {
+            what: "a host's own connection in the node's event set",
+            platform: std::env::consts::OS,
+            why: "the completion port's source for it is native plan step 8's next change"
+                .to_owned(),
         })
     }
+
+    /// Nothing is watched as a source on Windows yet ([`Os::watch_source`]).
+    fn unwatch_source(&self, _: super::Handle<'_>, _: u64) {}
 }

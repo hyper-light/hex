@@ -165,6 +165,7 @@ fn an_execs_stdio_rides_named_connections_and_its_end_comes_back() {
                 stdin: Some(in_r),
                 stdout: Some(out_w),
                 stderr: None,
+                ..Stdio::null()
             },
         )
         .unwrap();
@@ -271,6 +272,14 @@ impl Duplex for Recorded {
     fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
         self.conn.set_read_timeout(timeout)
     }
+
+    fn handle(&self) -> super::Handle<'_> {
+        Duplex::handle(&self.conn)
+    }
+
+    fn set_nonblocking(&self, on: bool) -> std::io::Result<()> {
+        self.conn.set_nonblocking(on)
+    }
 }
 
 struct Recording {
@@ -329,6 +338,7 @@ fn a_stdio_connection_waits_on_its_program_as_a_local_pipe_does() {
                 stdin: Some(in_r),
                 stdout: None,
                 stderr: None,
+                ..Stdio::null()
             },
         )
         .unwrap();
@@ -371,6 +381,17 @@ impl shards_api::Stream for Looped {
         Ok(Box::new(Looped(self.0.try_clone()?)))
     }
 
+    fn handle(&self) -> shards_api::Handle<'_> {
+        #[cfg(unix)]
+        return std::os::fd::AsFd::as_fd(&self.0);
+        #[cfg(windows)]
+        std::os::windows::io::AsSocket::as_socket(&self.0)
+    }
+
+    fn set_nonblocking(&self, on: bool) -> std::io::Result<()> {
+        self.0.set_nonblocking(on)
+    }
+
     fn shutdown(&self, how: Shutdown) -> std::io::Result<()> {
         self.0.shutdown(how)
     }
@@ -408,6 +429,13 @@ impl shards_api::Guest for Patient {
     fn wait_for(&self, _: Duration) -> Result<Option<shards_api::End>, shards_api::Refusal> {
         Ok(None)
     }
+
+    fn identity(&self) -> Result<shards_api::Identity, shards_api::Refusal> {
+        Err(shards_api::Refusal::Unsupported {
+            what: "identity",
+            why: "a loopback stand-in names no VM".into(),
+        })
+    }
 }
 
 /// HEX-GUEST-33 (§2, CLAUDE.md §4): dial a booted guest three times: expect the first dial given the
@@ -427,5 +455,110 @@ fn the_first_dial_waits_for_the_guest_and_later_ones_try_once() {
     assert_eq!(
         *guest.given.lock().unwrap(),
         [first, Duration::ZERO, Duration::ZERO]
+    );
+}
+
+/// Native plan step 8 (1), CLAUDE.md §2: the event form's writes queue behind a backlog bounded in bytes.
+/// To a peer that never reads, frames go while the socket and the backlog have room; the one that wouldn't
+/// fit is refused whole, `Exhausted` naming the backlog and its bound, nothing past the bound is ever
+/// held, and the loop is told once, when bytes first wait.
+#[test]
+fn the_event_forms_writes_are_bounded_and_refused_whole_past_the_bound() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut writer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    // Held, never read.
+    let (_peer, _) = listener.accept().unwrap();
+    writer.set_nonblocking(true).unwrap();
+    let told = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let telling = Arc::clone(&told);
+    let mut backlog = Backlog {
+        bytes: VecDeque::new(),
+        bound: 4096,
+        wants_room: Arc::new(move || {
+            telling.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }),
+    };
+    let frame = vec![7u8; 1000];
+    let mut refused = None;
+    // Bounded: 20 MB, past any loopback socket's buffers, so the backlog fills well before it ends.
+    for _ in 0..20_000 {
+        match backlog.send(&mut writer, &frame) {
+            Ok(()) => assert!(backlog.bytes.len() <= 4096, "{} held", backlog.bytes.len()),
+            Err(Sent::Refused(why)) => {
+                refused = Some(why);
+                break;
+            }
+            Err(Sent::Gone) => panic!("the peer went"),
+        }
+    }
+    assert_eq!(
+        refused,
+        Some(Refusal::Exhausted {
+            what: BACKLOG,
+            bound: 4096
+        })
+    );
+    assert!(backlog.bytes.len() <= 4096);
+    assert_eq!(told.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// Native plan step 8 (1): the event form's pump, its connection ended by the agent, says `Ended`, and
+/// every call waiting through it hears why, as a typed refusal; a call begun after is refused at once,
+/// never left waiting.
+#[cfg(unix)]
+#[test]
+fn a_pumps_end_reaches_every_call_waiting_through_it() {
+    let (control, _stdio, link) = listeners();
+    let agent = std::thread::spawn(move || {
+        let (mut conn, _) = control.accept().unwrap();
+        hello(&mut conn);
+        // Reads the inspect, and closes without answering it.
+        let _ = next_request(&mut conn);
+    });
+    let (client, mut pump) = Client::connect_evented(link, Arc::new(|| {})).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    client
+        .begin(
+            Call::Inspect(BoxId::new("b").unwrap()),
+            Stdio::null(),
+            Box::new(move |_, got| tx.send(got).unwrap()),
+            Box::new(|_| {}),
+        )
+        .unwrap();
+    agent.join().unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if pump.ready() == Pumped::Ended {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the pump never saw its end"
+        );
+        let handle = pump.handle();
+        let mut fds = [rustix::event::PollFd::new(
+            &handle,
+            rustix::event::PollFlags::IN,
+        )];
+        let wait = rustix::event::Timespec {
+            tv_sec: 1,
+            tv_nsec: 0,
+        };
+        let _ = rustix::event::poll(&mut fds, Some(&wait));
+    }
+    let got = rx.recv_timeout(Duration::from_secs(30)).unwrap();
+    assert!(
+        matches!(&got, Err(Refusal::Broken(why)) if why.contains("closed")),
+        "{got:?}"
+    );
+    assert!(
+        client
+            .begin(
+                Call::Inspect(BoxId::new("c").unwrap()),
+                Stdio::null(),
+                Box::new(|_, _| {}),
+                Box::new(|_| {}),
+            )
+            .is_err()
     );
 }

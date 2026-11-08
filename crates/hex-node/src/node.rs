@@ -106,6 +106,36 @@ enum Source {
 }
 
 impl Node {
+    /// The program started, its stdio as given: an oci box whose init runs is known to the supervisor,
+    /// with what its exec needs, so the hot path reads nothing from disk; any other box's record says what
+    /// it is.
+    fn exec_given(
+        &self,
+        id: &BoxId,
+        program: Program,
+        stdio: Stdio,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        match self.supervisor.live(id)? {
+            Some(live) => self.exec_oci(id, live, program, stdio),
+            None => match self.record(id)?.map(|r| r.spec.class) {
+                None => Err(Refusal::NoSuchBox(id.clone())),
+                Some(ClassSpec::Process) => {
+                    let cg = self
+                        .root
+                        .get(id)
+                        .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
+                    let _spawning = self.supervisor.spawning()?;
+                    self.supervisor
+                        .own(Box::new(process::exec(&cg, &program, stdio)?))
+                }
+                // An oci box with no running init: mid-create, stopped, or its create failed.
+                Some(ClassSpec::Oci(_) | ClassSpec::Bundle(_)) => {
+                    Err(Refusal::NotRunning(id.clone(), "exec"))
+                }
+            },
+        }
+    }
+
     /// Opens a node agent whose boxes live under cgroup `box_root` with their records in `state_dir`,
     /// the `io` bounds applying to the disks under `disk_path`. Does not recover; call [`Node::recover`].
     pub fn open(box_root: &Path, state_dir: &Path, disk_path: &Path) -> Result<Self, Refusal> {
@@ -780,28 +810,16 @@ impl Runtime for Node {
         }
     }
 
-    fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
-        // An oci box whose init runs is known to the supervisor, with what its exec needs, so the hot
-        // path reads nothing from disk; any other box's record says what it is.
-        match self.supervisor.live(id)? {
-            Some(live) => self.exec_oci(id, live, program, stdio),
-            None => match self.record(id)?.map(|r| r.spec.class) {
-                None => Err(Refusal::NoSuchBox(id.clone())),
-                Some(ClassSpec::Process) => {
-                    let cg = self
-                        .root
-                        .get(id)
-                        .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
-                    let _spawning = self.supervisor.spawning()?;
-                    self.supervisor
-                        .own(Box::new(process::exec(&cg, &program, stdio)?))
-                }
-                // An oci box with no running init: mid-create, stopped, or its create failed.
-                Some(ClassSpec::Oci(_) | ClassSpec::Bundle(_)) => {
-                    Err(Refusal::NotRunning(id.clone(), "exec"))
-                }
-            },
-        }
+    /// Streams asked for are made as pipes, the program's ends its stdio, the caller's held by its `Proc`.
+    fn exec(
+        &self,
+        id: &BoxId,
+        program: Program,
+        mut stdio: Stdio,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        let given = stdio.make_asked()?;
+        let proc = self.exec_given(id, program, stdio)?;
+        Ok(Box::new(hex_api::Asked::new(proc, given)))
     }
 
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {

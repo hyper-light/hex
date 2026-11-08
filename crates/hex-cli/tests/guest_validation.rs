@@ -185,6 +185,14 @@ impl shards_api::Guests for Counted {
         self.boots.fetch_add(1, Ordering::SeqCst);
         self.shards.boot(spec)
     }
+
+    fn attach(
+        &self,
+        identity: &shards_api::Identity,
+        spec: &shards_api::GuestSpec,
+    ) -> Result<Box<dyn shards_api::Guest>, shards_api::Refusal> {
+        self.shards.attach(identity, spec)
+    }
 }
 
 #[test]

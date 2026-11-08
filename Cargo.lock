@@ -320,6 +320,7 @@ dependencies = [
  "rustix",
  "serde_json",
  "sha2",
+ "shards-api",
  "tar",
  "tempfile",
 ]

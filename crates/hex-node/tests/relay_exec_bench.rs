@@ -157,6 +157,7 @@ fn relay_exec_start_and_throughput() {
                     stdin: Some(input),
                     stdout: Some(output),
                     stderr: None,
+                    ..Stdio::null()
                 },
             )
             .unwrap()

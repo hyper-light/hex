@@ -414,6 +414,7 @@ impl Play<'_> {
                     stdin: Some(in_r),
                     stdout: Some(out_w),
                     stderr: None,
+                    ..Stdio::null()
                 };
                 match rt.exec(&id, self.fx.program(act), stdio) {
                     Ok(proc) => {
@@ -815,6 +816,9 @@ mod tests {
         }
         fn kill(&mut self) -> Result<(), Refusal> {
             self.inner.kill()
+        }
+        fn streams(&mut self) -> Result<crate::Given, Refusal> {
+            self.inner.streams()
         }
     }
 
