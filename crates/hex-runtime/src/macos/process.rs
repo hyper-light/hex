@@ -70,6 +70,11 @@ pub struct Status {
     pub escaped: u64,
     /// Set once the box has ended, with why.
     pub ended: Option<Ended>,
+    /// Reads the watcher has made of the box.
+    pub reads: u64,
+    /// Reads that also redid the box's membership work (its kqueue watches, the escape check): one per
+    /// change in its running members, not one per read (observability: the watcher's work per read).
+    pub membership_passes: u64,
 }
 
 /// What every box on the node shares, read once at node start: the machine's timebase and the allocation
@@ -527,6 +532,8 @@ struct Watcher {
     /// child) or a member's death wakes the watcher at once rather than at its next timer.
     watched: BTreeSet<i32>,
     pids: Vec<i32>,
+    /// The last read's listing, to tell whether this one changed.
+    last_listing: Vec<i32>,
     events: Vec<Event>,
     /// When the last read was and what it found (footprint, processes): the growth to the next read is what
     /// the node's rates learn from.
@@ -548,6 +555,7 @@ impl Watcher {
             watched: BTreeSet::new(),
             pids: sys::listing()?,
             events: Vec::with_capacity(sys::EVENTS),
+            last_listing: Vec::new(),
             last_read: None,
         })
     }
@@ -597,10 +605,11 @@ impl Watcher {
         let rates = self.shared.rates()?;
         self.watch.rated(rates);
         let reading = self.read_members(pgid)?;
-        // The escape check diffs the member lists and allocates; run it only when the running set changed,
-        // so a box allocating hard with a steady set of members keeps each read lean enough to finish
-        // within the watcher's real-time budget (else it is demoted and overshoots; see process.rs run()).
-        if reading.sig != self.last_sig {
+        // The membership work (the escape check, which diffs the member lists and allocates, and the
+        // kqueue rewatch) runs only when the running set changed: a box with steady members costs a listing
+        // and a rusage a member per read, nothing more (the lead, 2026-11-06: less work per read).
+        let membership_changed = reading.sig != self.last_sig;
+        if membership_changed {
             self.count_escapes(&reading.members)?;
             self.last_sig = reading.sig;
         }
@@ -624,7 +633,9 @@ impl Watcher {
             .ending
             .store(self.watch.ending().is_some(), Ordering::SeqCst);
         // Watch the current members for their forks and ends, so the next membership change wakes at once.
-        self.rewatch(&reading.members)?;
+        if membership_changed {
+            self.rewatch(&reading.members)?;
+        }
         self.last = reading.members;
         match read.verdict {
             Verdict::Wait(d) => Ok(Some(d)),
@@ -642,11 +653,16 @@ impl Watcher {
     /// gone, so it stays bounded by the live members (CLAUDE.md §2).
     fn read_members(&mut self, pgid: i32) -> Result<Reading, Refusal> {
         sys::group(pgid, &mut self.pids).map_err(|e| Refusal::os("listing a box's group", e))?;
-        let last_pids: BTreeSet<i32> = self
-            .last
-            .iter()
-            .filter_map(|m| i32::try_from(m.pid).ok())
-            .collect();
+        // The armed set's pruning needs the listing's pids as sets: built only when the listing changed.
+        let listing_changed = self.pids != self.last_listing;
+        let last_pids: BTreeSet<i32> = if listing_changed {
+            self.last
+                .iter()
+                .filter_map(|m| i32::try_from(m.pid).ok())
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
         let mut armed = self
             .state
             .armed
@@ -662,7 +678,9 @@ impl Watcher {
             else {
                 continue;
             };
-            present.insert(pid);
+            if listing_changed {
+                present.insert(pid);
+            }
             // The leader's zombie, while other members run, is the node holding the pid so the group id
             // can't be recycled: not the box's own process. Any other ended member is counted until reaped,
             // as Linux's `pids.max` counts a task until it is reaped.
@@ -694,7 +712,10 @@ impl Watcher {
         }
         // Prune armed pids that were listed before and are gone now (reaped): keeps the set bounded by the
         // live members, without dropping a just-spawned pid the listing hasn't caught up with yet.
-        armed.retain(|p| present.contains(p) || !last_pids.contains(p));
+        if listing_changed {
+            armed.retain(|p| present.contains(p) || !last_pids.contains(p));
+            self.last_listing.clone_from(&self.pids);
+        }
         drop(armed);
         Ok(Reading {
             members,
@@ -733,6 +754,7 @@ impl Watcher {
         // before this read, and the watcher's own peak (summed live footprints) can be lower — a box read
         // only on its events may never have seen the member near its cap while it was alive.
         status.peak = status.peak.max(self.watch.peak());
+        status.reads = self.watch.reads();
         // In microseconds, from the machine's timebase (`cpu` is Mach ticks).
         status.cpu_ticks = self.shared.tb.nanos(totals.cpu) / 1000;
         // Monotonic: a member gone since last read no longer reports its I/O, so keep the most seen.
@@ -780,6 +802,10 @@ impl Watcher {
     /// Members gone since the last read are unwatched (the kernel already dropped an exited member's knote,
     /// so that unwatch is a no-op it tolerates).
     fn rewatch(&mut self, members: &[Member]) -> Result<(), Refusal> {
+        {
+            let mut status = self.state.status()?;
+            status.membership_passes = status.membership_passes.saturating_add(1);
+        }
         let running: BTreeSet<i32> = members
             .iter()
             .filter(|m| m.life == Life::Running)

@@ -561,3 +561,49 @@ fn the_watcher_takes_no_priority_over_other_programs() {
         "a thread runs with priority over other programs:\n{text}"
     );
 }
+
+/// The lead's call (2026-11-06): less work per read, never priority. The watcher redoes a box's membership
+/// work (its kqueue watches, the escape check) only when the box's running members change, not on every
+/// read. Do watch a steady two-member box for 50 reads; expect at most three membership passes (the box
+/// starting and each member joining).
+#[test]
+fn a_steady_box_redoes_no_membership_work_per_read() {
+    let rt = runtime();
+    let fx = fixture();
+    let id = BoxId::new("mac-steady-reads").unwrap();
+    let _ = rt.delete(&id);
+    rt.create(BoxSpec {
+        id: id.clone(),
+        bounds: Bounds {
+            memory_max: Some(256 * MIB),
+            ..Bounds::default()
+        },
+        class: ClassSpec::Process,
+    })
+    .expect("create");
+    let mut procs: Vec<_> = (0..2)
+        .map(|_| {
+            rt.exec(&id, fx.act(&Act::Wait), Stdio::null())
+                .expect("exec")
+        })
+        .collect();
+    let deadline = Instant::now() + HANG_GUARD;
+    let status = loop {
+        let s = rt.status(&id).expect("status");
+        if s.reads >= 50 {
+            break s;
+        }
+        assert!(Instant::now() < deadline, "the watcher never made 50 reads");
+        std::thread::yield_now();
+    };
+    rt.delete(&id).expect("delete");
+    for p in &mut procs {
+        let _ = p.wait_for(HANG_GUARD);
+    }
+    assert!(
+        status.membership_passes <= 3,
+        "{} membership passes in {} reads of a steady box",
+        status.membership_passes,
+        status.reads
+    );
+}
