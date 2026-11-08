@@ -477,18 +477,19 @@ fn overshoot(rt: &MacRuntime, fx: &BinFixture, what: &str, members: usize, pass:
     over
 }
 
-/// HEX-MAC-1/HEX-MAC-4, Ada's two-layer bound (2026-11-01, bench/native/macos/RESULT.md; the lead,
-/// 2026-11-06): on a node with no helper, polling is the whole bound at its recorded limit, one member per
-/// core. Do fill a rootless box with one member, with half the cores' and with one per core, three passes
-/// each; expect every pass within 64 MiB of its 256 MiB bound. Do fill one with twice and four times the
-/// cores'; expect it still ends for memory, its overshoot printed (the kernel's ledger, step 2, holds those).
+/// HEX-MAC-1/HEX-MAC-4, step 1's criterion and Ada's two-layer bound (2026-11-01,
+/// bench/native/macos/RESULT.md; the lead, 2026-11-07): on a node with no helper, polling is the whole bound,
+/// and holds a box to at most 64 MiB past it with 1, 4, 8 and up to one member per core allocating at full
+/// speed. Do fill a rootless box with each, three passes each, at release-speed fills; expect every pass ended
+/// for memory and within 64 MiB of its 256 MiB bound. Do fill one with twice and four times the cores'; expect
+/// it still ends for memory, its overshoot printed (the kernel's ledger, step 2, holds those).
 #[test]
 fn a_rootless_box_holds_the_bar_up_to_one_member_per_core() {
     let fx = fixture();
     let rt = runtime();
     let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
     let mut misses = Vec::new();
-    for members in [1, cores / 2, cores] {
+    for members in [1, 4, 8, cores] {
         for pass in 1..=3 {
             let over = overshoot(&rt, &fx, "rootless", members, pass);
             if over > 64 * MIB {
