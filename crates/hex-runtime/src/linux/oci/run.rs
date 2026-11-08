@@ -2178,7 +2178,24 @@ fn make_cgroup(
             format!("no cgroup v2 hierarchy at {CGROUP_ROOT}; Hex's oci class runs on cgroup v2"),
         ));
     }
-    let rel = resources::cgroup_path(spec.linux.cgroups_path.as_deref(), id)?;
+    // A rootless runtime may not write the hierarchy's root: a container of a spec naming no cgroupsPath goes beside the
+    // runtime's own cgroup, as crun's does ([`resources::cgroup_path_for`]). As root, where it went before.
+    let rootless_own = if rustix::process::geteuid().is_root() {
+        None
+    } else {
+        let own = crate::linux::cgroup::own_cgroup().map_err(from_refusal)?;
+        Some(own.strip_prefix(root).map(Path::to_path_buf).map_err(|_| {
+            OciError::os(
+                "finding the runtime's own cgroup",
+                format!("{} isn't under {CGROUP_ROOT}", own.display()),
+            )
+        })?)
+    };
+    let rel = resources::cgroup_path_for(
+        spec.linux.cgroups_path.as_deref(),
+        id,
+        rootless_own.as_deref(),
+    )?;
     let name = rel
         .file_name()
         .ok_or_else(|| OciError::Config(format!("linux.cgroupsPath: {rel:?} names no cgroup")))?;

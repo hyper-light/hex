@@ -6,7 +6,7 @@
 //! cgroup v2 files, written as given after the converted values, so they win.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::linux::oci::OciError;
 use crate::linux::oci::spec::{BlockIo, Cpu, DeviceRule, Memory, Resources};
@@ -729,6 +729,25 @@ pub fn cgroup_path(cgroups_path: Option<&str>, id: &str) -> Result<PathBuf, OciE
     Ok(out)
 }
 
+/// Where a container's cgroup goes, relative to the cgroup v2 mount point, for a runtime that runs as root
+/// (`rootless_own` `None`): [`cgroup_path`]'s place. For one that runs rootless (`rootless_own` its own cgroup, relative
+/// to the mount point), a spec that names no cgroupsPath puts it beside the runtime's own cgroup, the parent's child
+/// named by the id, as crun 1.30.1's cgroupfs driver makes it where the generated path can't be used
+/// (`make_new_sibling_cgroup`, src/libcrun/cgroup-cgroupfs.c:96-110, taken at :128-155): the hierarchy's root is
+/// root's alone, so `/<id>` there is refused to every rootless runtime, and a rootless runtime's own cgroup is beneath
+/// the one delegated to it. A cgroupsPath the spec names goes where [`cgroup_path`] puts it, either way.
+pub fn cgroup_path_for(
+    cgroups_path: Option<&str>,
+    id: &str,
+    rootless_own: Option<&Path>,
+) -> Result<PathBuf, OciError> {
+    let place = cgroup_path(cgroups_path, id)?;
+    Ok(match (cgroups_path, rootless_own.and_then(Path::parent)) {
+        (None, Some(beside)) => beside.join(place),
+        _ => place,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1266,6 +1285,46 @@ mod tests {
         ] {
             assert!(
                 matches!(cgroup_path(Some(bad), "c1"), Err(OciError::Config(_))),
+                "{bad:?}"
+            );
+        }
+    }
+
+    // AC-T7.1.4 (runtime-tools' rootless subset): a rootless runtime's container of a spec naming no cgroupsPath goes
+    // beside the runtime's own cgroup, as crun's does where the hierarchy's root can't be written; as root, and for a
+    // path the spec names, the place is cgroup_path's.
+    #[test]
+    fn a_rootless_runtimes_container_goes_beside_its_own_cgroup_and_roots_where_it_went() {
+        let own = Path::new("user.slice/user-1000.slice/user@1000.service/app.slice/s.scope/lab");
+        assert_eq!(
+            cgroup_path_for(None, "c1", None).unwrap(),
+            PathBuf::from("c1")
+        );
+        assert_eq!(
+            cgroup_path_for(None, "c1", Some(own)).unwrap(),
+            PathBuf::from("user.slice/user-1000.slice/user@1000.service/app.slice/s.scope/c1")
+        );
+        // A runtime at its cgroup namespace's root (its own cgroup `/`), and one a level below it.
+        assert_eq!(
+            cgroup_path_for(None, "c1", Some(Path::new(""))).unwrap(),
+            PathBuf::from("c1")
+        );
+        assert_eq!(
+            cgroup_path_for(None, "c1", Some(Path::new("lab"))).unwrap(),
+            PathBuf::from("c1")
+        );
+        for rootless in [None, Some(own)] {
+            assert_eq!(
+                cgroup_path_for(Some("/a/b"), "c1", rootless).unwrap(),
+                PathBuf::from("a/b")
+            );
+        }
+        for bad in ["..", "a:b", ""] {
+            assert!(
+                matches!(
+                    cgroup_path_for(None, bad, Some(own)),
+                    Err(OciError::Config(_))
+                ),
                 "{bad:?}"
             );
         }
