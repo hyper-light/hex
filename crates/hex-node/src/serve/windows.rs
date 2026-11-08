@@ -4,8 +4,8 @@
 //! - the socket is AF_UNIX `SOCK_STREAM` (afunix.sys has no other kind), so each message is framed
 //!   ([`hex_core::stream`]) and the core gets them whole, as on macOS;
 //! - one completion port carries every source: the listener's one overlapped `AcceptEx` at a time, each
-//!   connection's one overlapped receive and one overlapped send, a program's end (a registered wait on
-//!   its process handle posts it), and [`Os::wake`]. The core's event set is level-triggered readiness, so
+//!   connection's one overlapped receive and one overlapped send, a program's end (a wait completion packet
+//!   on its process handle, which the kernel queues to the port itself), and [`Os::wake`]. The core's event set is level-triggered readiness, so
 //!   a connection watched for reads is reported while a message read whole waits or its client has gone,
 //!   and one watched for writes while no send of it is under way;
 //! - a connection is read one buffer at a time, and only while the core reads it and no message read from

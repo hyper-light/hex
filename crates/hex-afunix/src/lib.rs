@@ -3,9 +3,10 @@
 //! decision "the Windows node, on one completion port" in docs/design/runtime.md): one I/O completion
 //! port that every source reports on, Windows' AF_UNIX stream sockets (afunix.sys, Windows 10 1803 on),
 //! each connection's overlapped receive and send and the listener's overlapped `AcceptEx`, a program's
-//! end by a registered wait on its process handle, and who a connection's peer is (its pid by
-//! `SIO_AF_UNIX_GETPEERPID`, then its process's user). `windows-sys` binds these as `unsafe` foreign
-//! functions; std has no AF_UNIX socket on Windows and no completion port. Each `unsafe` block states the
+//! end by a wait completion packet on its process handle, queued to the port by the kernel, and who a
+//! connection's peer is (its pid by `SIO_AF_UNIX_GETPEERPID`, then its process's user). `windows-sys` binds
+//! these as `unsafe` foreign functions, but for ntdll's wait completion packet calls, which Hex declares
+//! itself; std has no AF_UNIX socket on Windows and no completion port. Each `unsafe` block states the
 //! invariant that makes it sound.
 //!
 //! An overlapped operation's `OVERLAPPED` and buffer are the kernel's from its start until its
@@ -48,8 +49,7 @@ use windows_sys::Win32::System::IO::{
 };
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, INFINITE, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
-    PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, RegisterWaitForSingleObject, TerminateProcess,
-    UnregisterWaitEx, WT_EXECUTEONLYONCE,
+    PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess,
 };
 
 /// `SIO_AF_UNIX_GETPEERPID`: `_WSAIOR(IOC_VENDOR, 256)` (afunix.h), which windows-sys doesn't define.
@@ -606,41 +606,40 @@ pub fn send_all(socket: &Socket, tag: u64, bytes: Vec<u8>) -> Result<(), (io::Er
     })
 }
 
-/// What a program watch's callback needs: the port it posts to, and the token it posts.
-struct Waiting {
-    port: Port,
-    tag: usize,
+// ntdll's wait completion packets, which windows-sys doesn't bind (undocumented in the SDK; the Windows
+// thread pool and Go's runtime use them): a packet associated with an object and a port, which the kernel
+// queues to the port itself once the object is signalled, with no thread between.
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    fn NtCreateWaitCompletionPacket(
+        packet: *mut HANDLE,
+        access: u32,
+        attributes: *const c_void,
+    ) -> i32;
+    fn NtAssociateWaitCompletionPacket(
+        packet: HANDLE,
+        port: HANDLE,
+        target: HANDLE,
+        key: *const c_void,
+        apc: *const c_void,
+        status: i32,
+        information: usize,
+        already: *mut u8,
+    ) -> i32;
+    fn NtCancelWaitCompletionPacket(packet: HANDLE, remove_signaled: u8) -> i32;
 }
+
+/// The access a packet is made with (`GENERIC_ALL`, as Go's runtime makes its packets).
+const PACKET_ACCESS: u32 = 0x1000_0000;
 
 /// A watched program: its process handle (which names it, not its pid, so a kill can't reach a process
-/// given the pid since) and the registered wait that posts its end.
+/// given the pid since) and the wait completion packet that queues its end to the port. Chosen over a
+/// registered wait (`RegisterWaitForSingleObject`, a pool thread's hop on every end) by measurement:
+/// signal to notice p50 12.9 against 28.2 us, p99 0.82 against 2.43 ms, faster in 281 of 300 paired rounds
+/// under load (bench/native/records/endwait-jupiter-20261108T022608Z.txt).
 pub struct ProgramWatch {
     process: OwnedHandle,
-    wait: HANDLE,
-    waiting: *mut Waiting,
-}
-
-// SAFETY: the wait handle and the callback's context are this value's alone; the context is read only by
-// the callback, which `Drop` waits out before freeing it, and the process handle may be used anywhere.
-unsafe impl Send for ProgramWatch {}
-// SAFETY: as above; `kill` only reads the process handle.
-unsafe impl Sync for ProgramWatch {}
-
-/// Called once on a thread-pool thread when the watched process ends.
-unsafe extern "system" fn ended(context: *mut c_void, _timed_out: bool) {
-    // SAFETY: `context` is the `Waiting` its `ProgramWatch` made, alive until that watch's drop has waited
-    // this callback out (UnregisterWaitEx with INVALID_HANDLE_VALUE).
-    let waiting = unsafe { &*context.cast::<Waiting>() };
-    // SAFETY: the port is alive (the context holds it); the "pointer" posted is the token, which the
-    // port's KEY_PROGRAM tells its wait never to take as an `Op`.
-    unsafe {
-        PostQueuedCompletionStatus(
-            waiting.port.0.0,
-            0,
-            KEY_PROGRAM,
-            waiting.tag as *const OVERLAPPED,
-        )
-    };
+    packet: OwnedHandle,
 }
 
 /// Watches the program `pid` until it ends, reported on `port` as [`Done::Program`] under `tag`. One that
@@ -663,35 +662,44 @@ pub fn watch_program(port: &Port, pid: u32, tag: u64) -> io::Result<ProgramWatch
     }
     // SAFETY: a handle just opened, owned from here.
     let process = unsafe { OwnedHandle::from_raw_handle(h) };
-    let waiting = Box::into_raw(Box::new(Waiting {
-        port: port.clone(),
-        tag,
-    }));
-    let mut wait: HANDLE = null_mut();
-    // SAFETY: the process handle is alive while the wait is registered (both are this watch's; `Drop`
-    // unregisters first); `ended` is called once (WT_EXECUTEONLYONCE) with `waiting`, which lives until
-    // the wait is unregistered and its callback done.
-    let ok = unsafe {
-        RegisterWaitForSingleObject(
-            &raw mut wait,
+    let mut raw: HANDLE = null_mut();
+    // SAFETY: the packet's handle is written on success; no attributes.
+    let status = unsafe { NtCreateWaitCompletionPacket(&raw mut raw, PACKET_ACCESS, null()) };
+    if status < 0 {
+        return Err(io::Error::other(format!(
+            "NtCreateWaitCompletionPacket ended NTSTATUS {status:#x}"
+        )));
+    }
+    // SAFETY: a handle just made, owned from here.
+    let packet = unsafe { OwnedHandle::from_raw_handle(raw) };
+    let mut already = 0u8;
+    // SAFETY: the packet, the port and the process are live handles (the port's for as long as the watch
+    // is, the Os owning both); the key and the token are posted back as values, which the port's
+    // KEY_PROGRAM tells its wait never to take as an `Op`.
+    let status = unsafe {
+        NtAssociateWaitCompletionPacket(
+            packet.as_raw_handle(),
+            port.0.0,
             process.as_raw_handle(),
-            Some(ended),
-            waiting.cast_const().cast(),
-            INFINITE,
-            WT_EXECUTEONLYONCE,
+            KEY_PROGRAM as *const c_void,
+            tag as *const c_void,
+            0,
+            0,
+            &raw mut already,
         )
     };
-    if ok == 0 {
-        let e = last_error();
-        // SAFETY: no wait was registered, so nothing else holds `waiting`.
-        drop(unsafe { Box::from_raw(waiting) });
-        return Err(e);
+    if status < 0 {
+        return Err(io::Error::other(format!(
+            "NtAssociateWaitCompletionPacket ended NTSTATUS {status:#x}"
+        )));
     }
-    Ok(ProgramWatch {
-        process,
-        wait,
-        waiting,
-    })
+    if already != 0 {
+        // Ended before the watch: said to the port here as well, so its end can't go unreported; an end
+        // reported twice is taken once (the core's watch is gone after the first).
+        // SAFETY: this port; the "pointer" is the token, as above.
+        unsafe { PostQueuedCompletionStatus(port.0.0, 0, KEY_PROGRAM, tag as *const OVERLAPPED) };
+    }
+    Ok(ProgramWatch { process, packet })
 }
 
 impl ProgramWatch {
@@ -706,11 +714,10 @@ impl ProgramWatch {
 
 impl Drop for ProgramWatch {
     fn drop(&mut self) {
-        // SAFETY: the wait this watch registered, unregistered once; INVALID_HANDLE_VALUE makes the call
-        // wait until a callback under way has returned, so `waiting` is no one's after it.
-        unsafe { UnregisterWaitEx(self.wait, INVALID_HANDLE_VALUE) };
-        // SAFETY: made by `Box::into_raw` in `watch_program`, freed once, after the wait's last callback.
-        drop(unsafe { Box::from_raw(self.waiting) });
+        // The packet's wait is cancelled, and a completion it queued already removed from the port, so an
+        // unwatched program's end comes to no one; then both handles close.
+        // SAFETY: the packet this watch made, cancelled once before it closes.
+        unsafe { NtCancelWaitCompletionPacket(self.packet.as_raw_handle(), 1) };
     }
 }
 
