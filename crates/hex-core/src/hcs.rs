@@ -1290,13 +1290,14 @@ pub enum Lost {
     EndsWithNode,
     /// HCS holds no compute system of its id.
     NoSystem,
-    /// Its init has ended, or its pid is another process's now (one created at another time).
+    /// Its init has ended, or its pid is another process's now (one created at another time), or its start
+    /// was under way when its node went and its record names no init.
     InitEnded,
 }
 
 /// Whether the box `record` names is taken back, given what the node `found` of it (native plan step 8,
-/// T-T7.1.2): only while HCS holds its system, and, once it started, only with the very init it recorded,
-/// told from a process given that pid since by its creation time.
+/// T-T7.1.2): only while HCS holds its system; as made only if no start was asked; and once started, only
+/// with the very init it recorded, told from a process given that pid since by its creation time.
 pub fn take_back(record: &BoxRecord, found: Found) -> Result<TakeBack, Lost> {
     if !record.outlives {
         return Err(Lost::EndsWithNode);
@@ -1305,6 +1306,7 @@ pub fn take_back(record: &BoxRecord, found: Found) -> Result<TakeBack, Lost> {
         return Err(Lost::NoSystem);
     }
     match record.init {
+        None if record.started => Err(Lost::InitEnded),
         None => Ok(TakeBack::Created),
         Some(init) => match found.init {
             Some(p) if p.created == init.created && p.running => Ok(TakeBack::Running(init)),
