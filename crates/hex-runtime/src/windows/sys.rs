@@ -190,9 +190,6 @@ pub struct Limits {
     pub memory: Option<u64>,
     pub processes: Option<u32>,
     pub cpu: Option<Cpu>,
-    /// Whether closing the job's last handle ends what runs in it: a box of a runtime driven in process
-    /// ends with it; a node's named box outlives the node, for the next to take back.
-    pub kill_on_close: bool,
 }
 
 /// The rights a node takes on a box's job it opens by name (winnt.h's `JOB_OBJECT_ASSIGN_PROCESS`,
@@ -268,16 +265,12 @@ impl Job {
         self.0.raw()
     }
 
-    /// Sets the job's limits: a hard commit cap, an active-process cap, kill-on-close where asked (so
-    /// closing the last handle ends the tree), and the CPU weight or hard cap. Breakaway is never allowed
-    /// (neither `BREAKAWAY_OK` nor `SILENT_BREAKAWAY_OK` is set), so no member can leave the job.
+    /// Sets the job's limits: a hard commit cap, an active-process cap, kill-on-close (so closing the
+    /// last handle ends the tree), and the CPU weight or hard cap. Breakaway is never allowed (neither
+    /// `BREAKAWAY_OK` nor `SILENT_BREAKAWAY_OK` is set), so no member can leave the job.
     pub fn configure(&self, limits: &Limits) -> io::Result<()> {
         let mut ext: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed_struct();
-        let mut flags = if limits.kill_on_close {
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        } else {
-            0
-        };
+        let mut flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         if let Some(bytes) = limits.memory {
             flags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
             ext.JobMemoryLimit = usize::try_from(bytes).unwrap_or(usize::MAX);
@@ -678,13 +671,11 @@ mod tests {
     fn a_named_jobs_name_lapses_with_its_last_handle_though_its_member_runs() {
         let name = format!("Local\\hex-test-{}-lapse", std::process::id());
         let job = Job::create_named(&name).unwrap();
-        job.configure(&Limits {
-            memory: None,
-            processes: None,
-            cpu: None,
-            kill_on_close: false,
-        })
-        .unwrap();
+        // Kill-on-close off for this check alone, so the member's running past the last handle shows the
+        // name lapsing and not the job ending it.
+        let mut ext: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed_struct();
+        ext.BasicLimitInformation.LimitFlags = 0;
+        job.set(JobObjectExtendedLimitInformation, &ext).unwrap();
         let system = std::env::var("SystemRoot").unwrap();
         let mut spawn = Spawn {
             command_line: format!("{system}\\System32\\PING.EXE -n 600 127.0.0.1")

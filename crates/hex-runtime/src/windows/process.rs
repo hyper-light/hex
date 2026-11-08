@@ -56,8 +56,9 @@ pub struct State {
     counts: Mutex<Counts>,
     /// Whether the box is being deleted; a member started after this is refused (the job is ending).
     stopping: AtomicBool,
-    /// Whether the box outlives its node: a named job without kill-on-close, which dropping the box
-    /// leaves running for the next node to take back ([`JobBox::take_back`]).
+    /// Whether the box outlives its node: a named job whose other handle a keeper holds
+    /// (`super::keeper`), so dropping the box leaves it running for the next node to take back
+    /// ([`JobBox::take_back`]).
     outlives: bool,
 }
 
@@ -94,8 +95,9 @@ impl JobBox {
         Self::held(id, bounds, processors, job, false)
     }
 
-    /// A box that outlives its node: its job named `name` (a node's own name for the box), without
-    /// kill-on-close, so a node killed with it running leaves it running for the next node to take back.
+    /// A box that outlives its node: its job named `name` (a node's own name for the box), held by the node
+    /// and by its keeper, so a node killed with it running leaves it running for the next node to take
+    /// back; with both gone, kill-on-close ends it.
     /// A job of that name held already is refused: that box is a node's before, to be taken back.
     pub fn create_named(
         id: BoxId,
@@ -132,8 +134,8 @@ impl JobBox {
         Ok(())
     }
 
-    /// A box over `job`, its limits set from `bounds` while it holds nothing new; `outlives` leaves
-    /// kill-on-close off, so the box outlives the handles to it.
+    /// A box over `job`, its limits set from `bounds` while it holds nothing new; `outlives` says dropping
+    /// it leaves it to the keeper's handle.
     fn held(
         id: BoxId,
         bounds: &Bounds,
@@ -142,7 +144,7 @@ impl JobBox {
         outlives: bool,
     ) -> Result<Self, Refusal> {
         let limits = job::limits(bounds, processors)?;
-        job.configure(&sys_limits(&limits, !outlives))
+        job.configure(&sys_limits(&limits))
             .map_err(|e| Refusal::os("setting a box's job limits", e))?;
         Ok(Self {
             state: std::sync::Arc::new(State {
@@ -309,11 +311,10 @@ impl Drop for JobBox {
 
 /// The job limits for `limits` ([`hex_core::job`] already sets the commit limit a margin under the
 /// bound and the notification under that).
-fn sys_limits(limits: &job::Limits, kill_on_close: bool) -> sys::Limits {
+fn sys_limits(limits: &job::Limits) -> sys::Limits {
     sys::Limits {
         memory: limits.memory,
         processes: limits.processes,
         cpu: limits.cpu,
-        kill_on_close,
     }
 }

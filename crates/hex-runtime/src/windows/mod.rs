@@ -16,7 +16,7 @@ pub mod sys;
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::os::windows::io::OwnedHandle;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use hex_api::{
@@ -95,13 +95,21 @@ impl WinRuntime {
     }
 
     /// A node's runtime on this machine whose `process` boxes outlive it: each is the job named for `node`
-    /// and the box, without kill-on-close, so a node killed with boxes running leaves them running, and the
-    /// next node on the same name takes them back ([`WinRuntime::adopt`]) or ends them
-    /// ([`WinRuntime::end`]). `node` names one node's boxes apart from another's in the session.
-    pub fn outliving(node: &str) -> Self {
+    /// and the box, kill-on-close, held by the node and by a keeper (`keeper`, a command line started apart
+    /// from the node, its state in `dir`), so a node killed with boxes running leaves them to the keeper,
+    /// and the next node on the same name takes them back ([`WinRuntime::adopt`]) or ends them
+    /// ([`WinRuntime::end`]). With node and keeper both gone, kill-on-close ends them. `node` names one
+    /// node's boxes apart from another's in the session.
+    pub fn outliving(node: &str, dir: &Path, keeper: &[String]) -> Result<Self, Refusal> {
+        let _ = (dir, keeper);
         let mut runtime = Self::new();
         runtime.node = Some(node.to_owned());
-        runtime
+        Ok(runtime)
+    }
+
+    /// The pid of the keeper holding this node's boxes' jobs, where its boxes outlive it.
+    pub fn keeper_pid(&self) -> Option<u32> {
+        None
     }
 
     /// The job name a node's `process` box `id` has (`Local\hex-<node>-<box>`), where its boxes outlive it.
@@ -541,43 +549,112 @@ mod tests {
         format!("t{}-{test}", std::process::id())
     }
 
+    /// A keeper for the tests: `waitfor`, which waits (a day at most) for a signal no one sends, so it runs
+    /// on, holding what is duplicated into it, as `hex keep` does for a node.
+    fn keeper(test: &str) -> Vec<String> {
+        let system = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_owned());
+        vec![
+            format!("{system}\\System32\\waitfor.exe"),
+            "/T".to_owned(),
+            "86400".to_owned(),
+            format!("hexkeep{}{test}", std::process::id()),
+        ]
+    }
+
+    /// Ends process `pid` as a crash would (taskkill /F, TerminateProcess).
+    fn crash(pid: u32) {
+        std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .output()
+            .unwrap();
+    }
+
     /// T-T7.1.2 (native plan step 8): do make a box on a node's runtime, run a program in it, and drop the
-    /// runtime (every handle the node held closed, as when it is killed); expect the program still
-    /// running, the next runtime on the node's name taking the box back as running, and its delete ending
-    /// the program.
+    /// runtime (the node's every handle closed, as when it is killed); expect the program still running,
+    /// held by the keeper, the next runtime on the node's name taking the box back as running, and its
+    /// delete ending the program.
     #[test]
     fn a_nodes_box_outlives_its_runtime_and_the_next_takes_it_back() {
-        let name = node("back");
+        let (name, state) = (node("back"), tempfile::tempdir().unwrap());
         let spec = process_box("kept");
-        let rt = WinRuntime::outliving(&name);
+        let rt = WinRuntime::outliving(&name, state.path(), &keeper("back")).unwrap();
         rt.create(spec.clone()).unwrap();
         let pid = rt.exec(&spec.id, waiting(), Stdio::null()).unwrap().pid();
         drop(rt);
         assert!(alive(pid), "the box's program ended with its runtime");
-        let rt = WinRuntime::outliving(&name);
+        let rt = WinRuntime::outliving(&name, state.path(), &keeper("back")).unwrap();
         rt.adopt(&spec).unwrap();
         assert_eq!(rt.inspect(&spec.id).unwrap().state, BoxState::Running);
         rt.delete(&spec.id).unwrap();
         wait_for("the taken-back box's delete to end its program", || {
             !alive(pid)
         });
+        if let Some(k) = rt.keeper_pid() {
+            crash(k);
+        }
     }
 
     /// T-T7.1.2: do leave a node's box running past its runtime, then end it by name from the next runtime
     /// (a box recovery removes); expect its program ended, and a second end, of nothing, accepted.
     #[test]
     fn a_box_no_node_takes_back_is_ended_by_name() {
-        let name = node("end");
+        let (name, state) = (node("end"), tempfile::tempdir().unwrap());
         let spec = process_box("left");
-        let rt = WinRuntime::outliving(&name);
+        let rt = WinRuntime::outliving(&name, state.path(), &keeper("end")).unwrap();
         rt.create(spec.clone()).unwrap();
         let pid = rt.exec(&spec.id, waiting(), Stdio::null()).unwrap().pid();
         drop(rt);
         assert!(alive(pid), "the box's program ended with its runtime");
-        let rt = WinRuntime::outliving(&name);
+        let rt = WinRuntime::outliving(&name, state.path(), &keeper("end")).unwrap();
         rt.end(&spec.id).unwrap();
         wait_for("the end to end the box's program", || !alive(pid));
         rt.end(&spec.id).unwrap();
+        if let Some(k) = rt.keeper_pid() {
+            crash(k);
+        }
+    }
+
+    /// T-T7.1.2: do run a program in a node's box, let the node go, then end its keeper too; expect
+    /// kill-on-close to end the program with the job's last handle, so nothing is left running in a job no
+    /// one can open.
+    #[test]
+    fn a_box_whose_node_and_keeper_are_both_gone_is_ended() {
+        let (name, state) = (node("both"), tempfile::tempdir().unwrap());
+        let spec = process_box("orphan");
+        let rt = WinRuntime::outliving(&name, state.path(), &keeper("both")).unwrap();
+        rt.create(spec.clone()).unwrap();
+        let pid = rt.exec(&spec.id, waiting(), Stdio::null()).unwrap().pid();
+        let kept = rt.keeper_pid().expect("a keeper holds the node's boxes");
+        drop(rt);
+        assert!(alive(pid), "the box's program ended with its runtime");
+        crash(kept);
+        wait_for("kill-on-close to end the program", || !alive(pid));
+    }
+
+    /// T-T7.1.2: do end a node's keeper while the node lives; expect the node to start another and give it
+    /// the boxes' jobs, so a box still outlives the node afterwards and the next node takes it back.
+    #[test]
+    fn a_keeper_that_dies_while_its_node_lives_is_replaced() {
+        let (name, state) = (node("again"), tempfile::tempdir().unwrap());
+        let spec = process_box("rekept");
+        let rt = WinRuntime::outliving(&name, state.path(), &keeper("again")).unwrap();
+        rt.create(spec.clone()).unwrap();
+        let pid = rt.exec(&spec.id, waiting(), Stdio::null()).unwrap().pid();
+        let first = rt.keeper_pid().expect("a keeper holds the node's boxes");
+        crash(first);
+        wait_for("a new keeper", || {
+            rt.keeper_pid().is_some_and(|k| k != first && alive(k))
+        });
+        drop(rt);
+        assert!(alive(pid), "the box's program ended with its runtime");
+        let rt = WinRuntime::outliving(&name, state.path(), &keeper("again")).unwrap();
+        rt.adopt(&spec).unwrap();
+        assert_eq!(rt.inspect(&spec.id).unwrap().state, BoxState::Running);
+        rt.delete(&spec.id).unwrap();
+        wait_for("the delete to end the program", || !alive(pid));
+        if let Some(k) = rt.keeper_pid() {
+            crash(k);
+        }
     }
 
     /// A runtime driven in process keeps kill-on-close: do make a box, run a program, drop the runtime;
