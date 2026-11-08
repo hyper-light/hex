@@ -5,7 +5,8 @@
 # round runs one lifecycle of each, the order rotating by round, so none gets a quieter machine (the lead,
 # 2026-11-06). The program is the same (`C:\hex\hex.exe selftest-box wait`), from the same folder mapped
 # read-only at C:\hex. Each CLI call is a process start, so the CLIs' own cost is timed too (`version`
-# alone) and recorded beside, never subtracted silently; the background load is recorded per round.
+# alone) and recorded beside, never subtracted silently; the background load is recorded before and after
+# each round, with the two readings of jupiter's NTFS stall, and a segment stops at the stall's bar.
 #
 #   powershell -NoProfile -File oci_compare.ps1 -HexBin <dir with hex.exe> -HexBench <windows_oci.exe>
 #       -Layers <layer;...> -Out <json> [-N 299] [-W 3]
@@ -23,6 +24,12 @@ param(
     # ends what it leaves behind, so the record is made in segments within kiln's run cap, each resuming
     # after the last round in <Out>.rounds.jsonl (the lead, 2026-11-07).
     [int]$Budget = 0,
+    # The lead's bar for a host in jupiter's NTFS stall (2026-11-08): System's threads waiting on free pages
+    # and the machine's privileged time. The stall read 2,787-4,029 System threads in Wait/FreePage and
+    # 66-96% kernel time (11-07/08), the clean boot of 02:51Z 28 threads and 2.8% (11-08 20:39Z). A round
+    # read past either isn't of record: it goes to <Out>.stalled.jsonl and the segment stops (exit 4).
+    [int]$StallFreePage = 500,
+    [double]$StallPrivileged = 30,
     [string]$Root = "$env:USERPROFILE\.cache\hex-native-s4",
     [string]$Image = "mcr.microsoft.com/windows/nanoserver:ltsc2025"
 )
@@ -84,12 +91,40 @@ $runs["hex"] = @{
 # Win32_Processor with "Server execution failed", 0x80080005, and the segment ended after one round).
 function Reading([scriptblock]$read) { try { & $read } catch { "failed: $_" } }
 
+# System's share of the machine and the machine's privileged time, from one second's counter sample.
+function Counters() {
+    $s = (Get-Counter -Counter @('\Processor(_Total)\% Privileged Time', '\Process(System)\% Processor Time') `
+            -SampleInterval 1 -MaxSamples 1).CounterSamples
+    $of = { param($like)
+        $v = ($s | Where-Object { $_.Path -like $like } | Select-Object -First 1).CookedValue
+        if ($null -eq $v) { throw "no counter $like in the sample" }
+        $v }
+    @{ privileged = [math]::Round((& $of '*\% privileged time'), 1)
+        system = [int]((& $of '*process(system)*') / [Environment]::ProcessorCount) }
+}
+
 function Load() {
+    $k = Reading { Counters }
     [ordered]@{
         cpu_pct = Reading { (Get-CimInstance Win32_Processor | Measure-Object LoadPercentage -Average).Average }
-        system_pct = Reading { [int]((Get-Counter '\Process(System)\% Processor Time' -SampleInterval 1 -MaxSamples 1).CounterSamples[0].CookedValue / [Environment]::ProcessorCount) }
+        system_pct = if ($k -is [string]) { $k } else { $k.system }
+        privileged_pct = if ($k -is [string]) { $k } else { $k.privileged }
+        # .NET's FreePage is the kernel's FreePage and WrFreePage alike.
+        system_freepage = Reading { @((Get-Process -Id 4).Threads |
+                Where-Object { $_.ThreadState -eq 'Wait' -and $_.WaitReason -eq 'FreePage' }).Count }
         c_free_gb = Reading { [math]::Round((Get-PSDrive C).Free / 1GB, 1) }
     }
+}
+
+# Why a reading puts the host past the stall bar, or $null when it's clean. A reading that failed says
+# nothing of the host, so it doesn't count as clean.
+function Stalled($load) {
+    $fp = $load.system_freepage
+    $pr = $load.privileged_pct
+    if ($fp -is [string] -or $pr -is [string]) { return "the host's state wasn't read (FreePage: $fp; privileged: $pr)" }
+    if ($fp -gt $StallFreePage) { return "$fp System threads wait on free pages, past $StallFreePage" }
+    if ($pr -gt $StallPrivileged) { return "privileged time $pr%, past $StallPrivileged%" }
+    $null
 }
 
 $record = [ordered]@{
@@ -124,12 +159,18 @@ if (Test-Path $roundsOut) {
 }
 $began = Get-Date
 $i = $first
+$stalled = $null
 # Each round carries when it began and ended (UTC), so a window of the host's history can be taken out of
-# the record by time (the lead, 2026-11-08: rounds from 16:21Z to 00:06Z on 11-07/08 are retaken).
+# the record by time (the lead, 2026-11-08: rounds from 16:21Z to 00:06Z on 11-07/08 are retaken), and the
+# host's state read before it (`load`) and after it (`load_end`), one reading between two rounds serving
+# both. A round whose after-reading passes the stall bar is set aside, so the next segment runs it again.
+$before = Load
 try {
-for (; $i -lt $W + $N; $i++) {
+$why = Stalled $before
+if ($why) { $stalled = "before round ${i}: $why" }
+for (; -not $stalled -and $i -lt $W + $N; $i++) {
     if ($Budget -gt 0 -and ((Get-Date) - $began).TotalSeconds -gt $Budget) { break }
-    $round = [ordered]@{ round = $i; began = (Get-Date).ToUniversalTime().ToString('o'); load = (Load) }
+    $round = [ordered]@{ round = $i; began = (Get-Date).ToUniversalTime().ToString('o'); load = $before }
     for ($k = 0; $k -lt $names.Count; $k++) {
         $name = $names[($i + $k) % $names.Count]
         $r = $runs[$name]
@@ -158,16 +199,28 @@ for (; $i -lt $W + $N; $i++) {
         }
     }
     $round.ended = (Get-Date).ToUniversalTime().ToString('o')
+    $before = Load
+    $round.load_end = $before
+    $why = Stalled $before
+    if ($why) {
+        $round.stalled = $why
+        $round | ConvertTo-Json -Depth 5 -Compress | Add-Content "$Out.stalled.jsonl"
+        $stalled = "round ${i}: $why"
+        break
+    }
     $round | ConvertTo-Json -Depth 5 -Compress | Add-Content $roundsOut
 }
 } finally {
-    "segment rounds $first..$($i - 1) began $($began.ToUniversalTime().ToString('o')) ended $((Get-Date).ToUniversalTime().ToString('o'))" | Add-Content "$Out.segments"
+    $why = if ($stalled) { " stopped at the stall bar, $stalled" } else { "" }
+    "segment rounds $first..$($i - 1) began $($began.ToUniversalTime().ToString('o')) ended $((Get-Date).ToUniversalTime().ToString('o'))$why" | Add-Content "$Out.segments"
 }
+if ($stalled) { "segment stopped at the stall bar: $stalled (set aside in $Out.stalled.jsonl)"; exit 4 }
 if ($i -lt $W + $N) { "segment ended at its budget: $i of $($W + $N) rounds"; exit 3 }
 
 # The record, from every round in the file (all segments), the W untimed rounds left out.
 $all = Get-Content $roundsOut | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.round -ge $W }
 $record.load = @($all | ForEach-Object { $_.load })
+$record.load_end = @($all | ForEach-Object { $_.load_end })
 $record.segments = @(Get-Content "$Out.segments")
 foreach ($name in $names) {
     $ok = @($all | ForEach-Object { $_.$name } | Where-Object { $_ -and -not $_.failed })
