@@ -1,7 +1,7 @@
 //! The learned wait's tests (decision 9; Ada's 2026-11-06 rule and the lead's failure-bound rule; AC-T7.1.1,
 //! AC-T7.1.3: every wait a node makes is bounded and learned). Against random records and answers, the wait is twice
 //! the larger of the record's slowest and the slowest seen, never shrinks, and lets through every answer no more
-//! than twice slower than those, and no other; a measuring wait is unarmed until its first answer.
+//! than twice slower than those, and no other; a measuring wait is never armed, its answers only recorded.
 
 use std::time::Duration;
 
@@ -15,8 +15,9 @@ fn ms(n: u64) -> Duration {
 
 proptest! {
     /// Do: seed a wait from a random record (or none, measuring), record random answers, then ask whether a new
-    /// answer would come within it. Expect: after each answer the wait is twice the larger of the record's slowest
-    /// and the slowest so far, never less than before; a new answer comes within it exactly when it is at most that.
+    /// answer would come within it. Expect: a seeded wait, after each answer, is twice the larger of the record's
+    /// slowest and the slowest so far, never less than before, and a new answer comes within it exactly when it is at
+    /// most that; a measuring one is never armed, while it keeps the slowest it has seen.
     #[test]
     fn the_wait_is_twice_the_slowest_recorded_or_seen(
         record in proptest::option::of(0u64..86_400_000_000_000),
@@ -34,12 +35,19 @@ proptest! {
             patience.answered(answer);
             slowest = Some(slowest.map_or(answer, |s| s.max(answer)));
             let got = patience.deadline();
+            prop_assert_eq!(patience.slowest(), slowest);
+            if record.is_none() {
+                prop_assert_eq!(got, None);
+                continue;
+            }
             prop_assert_eq!(got, slowest.map(|s| s * 2));
             prop_assert!(got >= before, "the wait shrank from {:?} to {:?}", before, got);
             before = got;
         }
-        let next = Duration::from_nanos(next);
-        prop_assert_eq!(next <= patience.deadline().unwrap(), next <= slowest.unwrap() * 2);
+        if record.is_some() {
+            let next = Duration::from_nanos(next);
+            prop_assert_eq!(next <= patience.deadline().unwrap(), next <= slowest.unwrap() * 2);
+        }
     }
 }
 
@@ -64,13 +72,16 @@ fn fast_answers_never_shrink_the_wait_and_a_slower_one_raises_it() {
     assert_eq!(p.deadline(), Some(ms(100)));
 }
 
-/// Measuring. Do: ask a wait with no record and no answer, then answer once in 3 ms. Expect: unarmed, then 6 ms.
+/// Measuring (the waits census, run 2026-11-08: a listing armed by its first fast answer refused the next one, so
+/// the census could not measure). Do: ask a wait with no record and no answer, then answer it in 3 ms and in 1 ms.
+/// Expect: never armed, while its slowest, 3 ms, is kept for the census.
 #[test]
-fn a_measuring_wait_is_unarmed_until_its_first_answer() {
+fn a_measuring_wait_is_never_armed() {
     let p = Patience::measuring("test");
     assert_eq!((p.deadline(), p.slowest()), (None, None));
     p.answered(ms(3));
-    assert_eq!(p.deadline(), Some(ms(6)));
+    p.answered(ms(1));
+    assert_eq!((p.deadline(), p.slowest()), (None, Some(ms(3))));
 }
 
 /// Shared by threads. Do: from eight threads, answer 1 to 800 ms between them. Expect: the slowest, 800 ms, kept.
