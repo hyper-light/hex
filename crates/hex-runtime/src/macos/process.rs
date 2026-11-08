@@ -503,6 +503,28 @@ fn read_live(pgid: i32) -> Result<Live, Refusal> {
     Ok(live)
 }
 
+/// Watches `pids` for their forks and ends on `kq`; returns those already ended. XNU's `EVFILT_PROC` reports
+/// only what happens after it attaches (`filt_procattach`, `bsd/kern/kern_event.c`), and refuses a gone
+/// process (`ESRCH`) but not a zombie: a member that ended between the listing and its watch posts no exit
+/// event (c-route's finding on the node's socket, 2026-11-07).
+pub(crate) fn watch_members(kq: &Kqueue, pids: &[i32]) -> Result<Vec<i32>, Refusal> {
+    let mut ended = kq
+        .watch(pids, 0)
+        .map_err(|e| Refusal::os("watching a box's members", e))?;
+    // Read each one again after the attach: one ended (a zombie) or gone by now posted its end before the
+    // watch could see it. One that ends after this read posts its exit to the watch.
+    for &pid in pids {
+        if ended.contains(&pid) {
+            continue;
+        }
+        match sys::rusage(pid).map_err(|e| Refusal::os("reading a member's rusage", e))? {
+            Some(r) if !r.ended => {}
+            _ => ended.push(pid),
+        }
+    }
+    Ok(ended)
+}
+
 /// Whether process group `pgid` has a member alive (not a zombie).
 fn live(pgid: i32) -> Result<bool, Refusal> {
     let mut pids = sys::listing().map_err(|e| Refusal::os("listing a box's group", e))?;
@@ -823,10 +845,12 @@ impl Watcher {
             .collect();
         let to_watch: Vec<i32> = running.difference(&self.watched).copied().collect();
         if !to_watch.is_empty() {
-            self.state
-                .kq
-                .watch(&to_watch, 0)
-                .map_err(|e| Refusal::os("watching a box's members", e))?;
+            let ended = watch_members(&self.state.kq, &to_watch)?;
+            // A member that ended before its watch attached posts no exit event: wake the watcher for a
+            // read that finds it ended, rather than wait for a change that already happened.
+            if !ended.is_empty() {
+                self.state.wake()?;
+            }
         }
         let to_unwatch: Vec<i32> = self.watched.difference(&running).copied().collect();
         for pid in to_unwatch {

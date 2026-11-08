@@ -512,3 +512,29 @@ fn a_cap_kill_the_watcher_finds_reaped_is_counted_by_its_waiter() {
         "a cap kill the watcher found reaped went uncounted"
     );
 }
+
+/// c-route's finding (2026-11-07): XNU's EVFILT_PROC reports only what follows its attach and doesn't refuse
+/// a zombie, so a member that ends between the watcher's listing and its watch posts no exit event, and a box
+/// left to its events would wait on a change that already happened. Do end a child (a zombie, not reaped),
+/// then watch it as the watcher watches a new member; expect the watch to report it ended.
+#[test]
+fn a_member_that_ended_before_its_watch_is_reported() {
+    let mut child = Command::new("/usr/bin/true").spawn().expect("spawn true");
+    let pid = i32::try_from(child.id()).expect("a pid");
+    let deadline = std::time::Instant::now() + HANG_GUARD;
+    while !super::sys::rusage(pid)
+        .expect("rusage")
+        .is_some_and(|r| r.ended)
+    {
+        assert!(std::time::Instant::now() < deadline, "true never ended");
+        thread::yield_now();
+    }
+    let kq = super::sys::Kqueue::new().expect("kqueue");
+    let ended = super::process::watch_members(&kq, &[pid]).expect("watch");
+    let _ = child.wait();
+    assert_eq!(
+        ended,
+        vec![pid],
+        "a member ended before its watch wasn't reported"
+    );
+}
