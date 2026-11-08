@@ -83,6 +83,8 @@ const FILES_A_KEPT: u64 = 4;
 const FDS_A_BOX: u64 = 2;
 /// A seed's: its socket and its pidfd.
 const FDS_A_SEED: u64 = 2;
+/// A root node's create seeds' one pruned mount namespace, held for the node's life (`goal6-mntns.md` §12).
+const FDS_PRUNED: u64 = 1;
 /// A pool's descriptors past what it holds: its refill thread's own namespace, which it goes back to, and the one
 /// it is making.
 const FDS_A_REFILL: u64 = 2;
@@ -179,28 +181,49 @@ fn kept_at_most(sizes: Sizes) -> u64 {
     of(sizes.idle_netns, 2).saturating_add(of(hex_runtime::linux::cgroup::MAX_BOXES, 1))
 }
 
-/// The descriptors this node may hold at once without the namespaces' `/proc/net` files, each by its bound: the
+/// The descriptors this node may hold at once without the namespaces' `/proc/net` files, each by its bound and named: the
 /// kept namespaces; each live box's own; the programs its socket watches, a pidfd each, at the node's budget for
 /// them ([`crate::serve::limits`]); the seeds of both pools (the exec seeds at their most, [`crate::seed::most`]);
-/// the namespaces and the mounts made ahead under `pools`; and `beside`, what the agent held open as the bound was
-/// taken (its listener, its polls, its standard streams). The socket's connections aren't among them: each is one
-/// of what remains, which the kernel refuses an accept past (`EMFILE`), the socket then pausing its accepts until
-/// one closes (the lead, 2026-11-06).
-fn descriptors_of_the_node(pools: Pools, beside: u64) -> u64 {
+/// the namespaces and the mounts made ahead under `pools`; the create seeds' one pruned mount namespace, which a root
+/// node holds for its life (`goal6-mntns.md` §12), counted for every node, as a rootless node holds none and a bound
+/// may be one over, never under; and `beside`, what the agent held open as the bound was taken (its listener, its
+/// polls, its standard streams). The socket's connections aren't among them: each is one of what remains, which the
+/// kernel refuses an accept past (`EMFILE`), the socket then pausing its accepts until one closes (the lead,
+/// 2026-11-06).
+fn descriptor_terms(pools: Pools, beside: u64) -> [(&'static str, u64); 9] {
     [
-        pools.descriptors(),
-        kept_at_most(pools.sizes).saturating_mul(FDS_A_KEPT),
-        of(hex_runtime::linux::cgroup::MAX_BOXES, FDS_A_BOX),
-        of(crate::serve::limits(&pools.sizes).programs, 1),
+        ("the pools made ahead", pools.descriptors()),
+        (
+            "kept namespaces",
+            kept_at_most(pools.sizes).saturating_mul(FDS_A_KEPT),
+        ),
+        (
+            "live boxes",
+            of(hex_runtime::linux::cgroup::MAX_BOXES, FDS_A_BOX),
+        ),
+        (
+            "programs watched",
+            of(crate::serve::limits(&pools.sizes).programs, 1),
+        ),
         // The device programs held, a descriptor each at their bound. A rootless node loads none, so its count is an
         // over-bound there, and harmless: it keeps no namespaces whose files this bounds.
-        of(pools.sizes.programs, 1),
-        of(pools.sizes.seeds.get(), FDS_A_SEED),
-        of(crate::seed::most(&pools.sizes), FDS_A_SEED),
-        beside,
+        ("device programs", of(pools.sizes.programs, 1)),
+        ("create seeds", of(pools.sizes.seeds.get(), FDS_A_SEED)),
+        (
+            "exec seeds",
+            of(crate::seed::most(&pools.sizes), FDS_A_SEED),
+        ),
+        ("the create seeds' pruned mount namespace", FDS_PRUNED),
+        ("beside those", beside),
     ]
-    .into_iter()
-    .fold(0, u64::saturating_add)
+}
+
+/// All the descriptors this node may hold at once without the namespaces' files ([`descriptor_terms`]).
+fn descriptors_of_the_node(pools: Pools, beside: u64) -> u64 {
+    descriptor_terms(pools, beside)
+        .into_iter()
+        .map(|(_, n)| n)
+        .fold(0, u64::saturating_add)
 }
 
 /// How many kept namespaces may hold their `/proc/net` files at once: what the soft descriptor limit the node was

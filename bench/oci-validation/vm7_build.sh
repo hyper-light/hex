@@ -14,6 +14,9 @@
 # BENCH_MEMORY, BENCH_OOM; the OOM score 1000 is the kernel's OOM_SCORE_ADJ_MAX, include/uapi/linux/oom.h).
 # Usage: vm7_build.sh
 set -euo pipefail
+# Its containers carry the run's labels and go with the run, however it ends (containers.sh).
+. "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/../competitive/containers.sh"
+bench_trap :
 KVER=${KVER:-7.2.15-200.fc44.x86_64}
 VM_DIR=${VM_DIR:-$HOME/.cache/hex-t7/g6/vm}
 IMG=hexlab-vm7:44
@@ -24,8 +27,8 @@ mkdir -p "$VM_DIR/rpms"
 
 say "image $IMG"
 if ! docker image inspect "$IMG" > /dev/null 2>&1; then
-  NAME=hexlab-vm7-image-$$; trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
-  docker run --name "$NAME" --cpuset-cpus "${VM_CPUS:-16-31}" --memory "${BENCH_MEMORY:-8g}" \
+  NAME=hexlab-vm7-image-$$; bench_trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true'
+  docker run --name "$NAME" "${BENCH_LABELS[@]}" --cpuset-cpus "${VM_CPUS:-16-31}" --memory "${BENCH_MEMORY:-8g}" \
     --oom-score-adj "${BENCH_OOM:-1000}" registry.fedoraproject.org/fedora:44 sh -c \
     "dnf -y -q install --setopt=install_weak_deps=False qemu-system-x86-core qemu-img e2fsprogs rpm cpio && dnf clean all" > /dev/null
   docker commit --change "CMD [\"bash\"]" "$NAME" "$IMG" > /dev/null
@@ -43,7 +46,7 @@ done
 if [ ! -s "$VM_DIR/rootfs.ext4" ] || [ ! -s "$VM_DIR/initramfs.img" ] || [ ! -s "$VM_DIR/vmlinuz" ]; then
   say "guest root, initramfs and kernel for $KVER"
   # Privileged for the chroot's /proc, which dracut reads; the build's root is a directory in the container.
-  docker run --rm --privileged --security-opt label=disable \
+  docker run --rm "${BENCH_LABELS[@]}" --privileged --security-opt label=disable \
     --cpuset-cpus "${VM_CPUS:-16-31}" --memory "${BENCH_MEMORY:-8g}" --oom-score-adj "${BENCH_OOM:-1000}" -v "$VM_DIR:/vm" -e KVER="$KVER" "$IMG" bash -euc '
     rpm -K /vm/rpms/kernel-*.rpm  # koji builds are unsigned: digests checked, KERNEL keeps the sha256
     R=/build/root; mkdir -p $R
@@ -62,7 +65,9 @@ if [ ! -s "$VM_DIR/rootfs.ext4" ] || [ ! -s "$VM_DIR/initramfs.img" ] || [ ! -s 
 mount -t proc proc /proc; mount -t sysfs sys /sys; mount -t devtmpfs dev /dev 2>/dev/null
 mkdir -p /opt/lab /job
 mount -t 9p -o trans=virtio,version=9p2000.L,ro lab /opt/lab
-mount -t 9p -o trans=virtio,version=9p2000.L,msize=1048576 job /job
+# msize 512000: the virtio-9p transport maximum, PAGE_SIZE (4,096 on x86_64) x (VIRTQUEUE_NUM 128 - 3) (Linux v7.2
+# net/9p/trans_virtio.c:38, :807); the client limits any larger msize to it (net/9p/client.c:900).
+mount -t 9p -o trans=virtio,version=9p2000.L,msize=512000 job /job
 exec bash /opt/lab/vm7_inside.sh
 echo "VM7_EXIT=125 (vm7_inside.sh did not run)"; echo o > /proc/sysrq-trigger
 EOF

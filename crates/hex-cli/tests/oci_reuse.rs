@@ -8,8 +8,9 @@
 //!   end read as SIGKILL. A box with a process from outside its namespace moved into its cgroup: expect
 //!   the delete to fall back to `cgroup.kill` (the watch sees the write), counted, and the outsider
 //!   killed. A `process` box: expect `cgroup.kill` (the watch sees it), counted. A box whose init ended
-//!   before its delete, read first, and 2,048 of one owner whose inits end at once, each deleted right after
-//!   its start from 32 threads: expect each ended through its init, none by `cgroup.kill`;
+//!   before its delete, read first, and enough of one owner whose inits end at once (as many as catch the old
+//!   delete's measured kill rate with 99% odds), each deleted right after its start from 32 threads: expect
+//!   each ended through its init, none by `cgroup.kill`;
 //! - test 2, a cgroup reused within one owner: box A of owner O burns CPU, holds 64 MiB, has a program
 //!   OOM-killed and forks refused, and is deleted; box B of owner O is created: expect B in A's slot, B's
 //!   reported CPU under 1% of A's, its peak under A's and its event counts its own (0) while the cgroup's
@@ -571,7 +572,18 @@ fn a_delete_ends_a_box_through_its_inits_pidfd(lab: &Lab, own: &Path) {
     // record (supervise.rs, collect).
     let o = BoxOwner::named("owner-ends").unwrap();
     let bundle = lab.bundle_running(Caps::Docker, &["/hex", "selftest-box", "fail", "0"]);
-    let (threads, each) = (32, 64);
+    // How many: enough that the old delete, at the rate it was measured to kill, fails this case with 99%
+    // odds. The A/B (unit hex-integrate-ab3a-20261106T092743Z, as root, 32 threads) saw the old delete kill
+    // 2, 2 and 4 of 2,048 boxes, 8 in 6,144; a case of n boxes misses every kill with odds (1 - rate)^n,
+    // under 1% once n >= ln(100) / rate. Thirty-two threads, the concurrency the rate was measured at.
+    let threads: u64 = 32;
+    let rate = 8.0_f64 / 6_144.0;
+    let (mut boxes, mut missed) = (0_u64, 1.0_f64);
+    while missed >= 0.01 {
+        missed *= 1.0 - rate;
+        boxes += 1;
+    }
+    let each = boxes.div_ceil(threads);
     let before = node.kills();
     std::thread::scope(|s| {
         for t in 0..threads {

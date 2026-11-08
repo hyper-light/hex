@@ -12,7 +12,8 @@
 # IDLE_AB, that many idle threads around a seam
 # and a libcrun item in every round (`seam_idle`, `libcrun_idle`), the threads' ratio the run's own the same way;
 # IDLE_THREADS, EXTRA_MOUNTS and AC_E, goal 5 plan step 2's (below); MOUNTS, MOUNTS_CONC and MOUNTS_PATH, plan step 3's
-# per-call trace of the init's mounts (create_breakdown_inside.sh's mounts_trace); and CLASSIC=1, its rounds on the
+# per-call trace of the init's mounts (create_breakdown_inside.sh's mounts_trace), with MOUNTS_ARMS, MOUNTS_ROUNDS and
+# MOUNTS_WARMUP its arms interleaved round by round by rounds.py (goal 17's record); and CLASSIC=1, its rounds on the
 # classic path (every create through the shim, by a createRuntime hook); LOAD_GATE=0 skips the wait for
 # load under 2, as host.sh allows: this probe's comparisons are within one run (the parts against their creates,
 # Hex's create against libcrun's), which cancel other people's CPU load. BENCH_HOST_OK names another host, as
@@ -27,6 +28,8 @@ BASE=${HEX_BENCH:-$HOME/.cache/hex-bench}
 # the mounts trace (plan step 3), so each needs only hex and seam_oci; every other run needs host.sh's crun and its
 # libcrun driver.
 ALONE=0; [ "${AC_E:-0}" = 0 ] && [ "${MOUNTS:-0}" = 0 ] || ALONE=1
+# Goal 17's record names libcrun among MOUNTS_ARMS (rounds.py) to run it beside Hex's arms: its driver is staged.
+case " ${MOUNTS_ARMS:-} " in *" libcrun "*) ALONE=0 ;; esac
 if [ "$ALONE" = 0 ]; then
   for f in crun libcrun-driver; do
     [ -x "$BASE/bin/$f" ] || { echo "refusing: no $BASE/bin/$f (host.sh fetches crun and builds the libcrun driver)" >&2; exit 4; }
@@ -117,7 +120,7 @@ bench_trap untag
 timeout 7200 docker run --rm --name "$NAME" "${BENCH_LABELS[@]}" --cpuset-cpus="${CPUSET:-4-31}" --memory="${BENCH_MEMORY:-40g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
   --privileged --security-opt label=disable --cgroupns=private --network=none --tmpfs /run:rw,exec,nosuid,size=1g \
   -v /usr:/usr:ro -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
-  -e N -e WARMUP -e ROUNDS -e PROBE_ONLY -e TRACE_TAG -e EXTRA_MOUNTS -e AC_E -e IDLE_AB -e MOUNTS -e MOUNTS_CONC -e MOUNTS_PATH -e CLASSIC -e AC_E_MOUNTS -e HEXBENCH_OWNER -e HEXBENCH_REUSE -e HEXBENCH_DOCKER_PATHS -e HEX_OCI_MNTNS \
+  -e N -e WARMUP -e ROUNDS -e PROBE_ONLY -e TRACE_TAG -e EXTRA_MOUNTS -e AC_E -e IDLE_AB -e MOUNTS -e MOUNTS_CONC -e MOUNTS_PATH -e MOUNTS_SPAN -e CLASSIC -e AC_E_MOUNTS -e HEXBENCH_OWNER -e HEXBENCH_REUSE -e HEXBENCH_DOCKER_PATHS -e HEX_OCI_MNTNS -e MOUNTS_UNTRACED -e HEXBENCH_DRIVER -e HEXBENCH_NOFILE -e MOUNTS_ARMS -e MOUNTS_ROUNDS -e MOUNTS_WARMUP \
   registry.fedoraproject.org/fedora:44 bash /opt/lab/probes/create_breakdown_inside.sh 2>&1 | tee "$OUT/probe.out"
 { echo "load at end: $(cat /proc/loadavg)"
   for r in cpu memory io; do echo "pressure at end, $r: $(head -1 "/proc/pressure/$r")"; done

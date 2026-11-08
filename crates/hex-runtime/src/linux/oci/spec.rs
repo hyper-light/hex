@@ -107,13 +107,20 @@ pub struct Process {
     pub no_new_privileges: bool,
     #[serde(default)]
     pub oom_score_adj: Option<i32>,
-    /// The AppArmor profile to switch to on exec. Hex does not yet apply it, so `Spec::check` refuses a
-    /// spec that sets it rather than run the container without the profile it asked for (CLAUDE.md §3).
+    /// The AppArmor profile the process takes at its `execve`, which `init::Becoming` applies, refused by name
+    /// where AppArmor isn't on ([`super::lsm`]). Read through [`Process::apparmor_profile`].
     #[serde(default)]
     pub apparmor_profile: Option<String>,
     /// The SELinux process label. Same: refused until Hex applies it, never silently dropped (§3).
     #[serde(default)]
     pub selinux_label: Option<String>,
+}
+
+impl Process {
+    /// The AppArmor profile, where one is set: an empty one is none.
+    pub fn apparmor_profile(&self) -> Option<&str> {
+        self.apparmor_profile.as_deref().filter(|p| !p.is_empty())
+    }
 }
 
 fn root_cwd() -> String {
@@ -189,7 +196,8 @@ pub struct Linux {
     /// is refused there, by name (CLAUDE.md §3), never run unfiltered.
     #[serde(default)]
     pub seccomp: Option<Seccomp>,
-    /// `linux.mountLabel`: the SELinux label for the container's mounts. Refused until applied (§3).
+    /// `linux.mountLabel`: the SELinux label of every filesystem the container's mounts make, refused by name
+    /// where the kernel can't apply it ([`super::lsm`]). Read through [`Spec::mount_label`].
     #[serde(default)]
     pub mount_label: Option<String>,
 }
@@ -495,17 +503,6 @@ impl Spec {
             // A spec that names a security control Hex can't yet apply is refused by name, never run
             // without it (CLAUDE.md §3: a dropped security control is a silent failure).
             if process
-                .apparmor_profile
-                .as_deref()
-                .is_some_and(|s| !s.is_empty())
-            {
-                return Err(OciError::Config(
-                    "process.apparmorProfile is set: Hex does not yet apply an AppArmor profile, and \
-                     refuses rather than run the container without the one it asked for"
-                        .to_owned(),
-                ));
-            }
-            if process
                 .selinux_label
                 .as_deref()
                 .is_some_and(|s| !s.is_empty())
@@ -519,19 +516,8 @@ impl Spec {
         }
         // linux.seccomp is honoured: the container init compiles it and loads the BPF filter before
         // execve (super::seccomp). A profile the compiler can't honour is refused there, by name, so
-        // the refusal is no longer blanket here.
-        if self
-            .linux
-            .mount_label
-            .as_deref()
-            .is_some_and(|s| !s.is_empty())
-        {
-            return Err(OciError::Config(
-                "linux.mountLabel is set: Hex does not yet apply a SELinux mount label, and refuses \
-                 rather than run without it"
-                    .to_owned(),
-            ));
-        }
+        // the refusal is no longer blanket here. linux.mountLabel and process.apparmorProfile are applied
+        // too, and refused where the host can't apply them (super::lsm).
         // A container in a user namespace that doesn't make a network namespace of its own can't mount a
         // sysfs (the network namespace's owner must), so its /sys is a bind of one, the host's where it
         // shares the host's network. Holding CAP_SYS_ADMIN, it could unmount the mounts over that bind
@@ -659,6 +645,11 @@ impl Spec {
     /// Whether the container runs in a user namespace of its own or one it joins by `path`: either way
     /// it is outside the initial user namespace, where `mknod` of a device is refused and a device policy
     /// is enforced by construction rather than by a cgroup device program the runtime loads.
+    /// The mount label, where one is set: an empty one is none.
+    pub fn mount_label(&self) -> Option<&str> {
+        self.linux.mount_label.as_deref().filter(|l| !l.is_empty())
+    }
+
     pub fn in_user_namespace(&self) -> bool {
         self.linux.namespaces.iter().any(|n| n.kind == "user")
     }
@@ -796,33 +787,40 @@ mod tests {
     #[test]
     fn a_security_control_hex_cannot_yet_apply_is_refused_not_dropped() {
         // CLAUDE.md §3: a security control Hex can't honour is refused by name, never run without
-        // (a dropped LSM control is a silent security failure). Parse runs check. linux.seccomp is
-        // no longer here: Hex compiles and loads it (the compiler refuses an unsupported profile by
-        // name, super::seccomp), so a settable seccomp profile is honoured, not refused wholesale.
-        let cases = [
-            (
-                "process.apparmorProfile",
-                r#"{"ociVersion":"1.0.0","root":{"path":"rootfs"},
-                    "process":{"args":["/bin/sh"],"apparmorProfile":"docker-default"},"linux":{}}"#,
-            ),
-            (
-                "process.selinuxLabel",
-                r#"{"ociVersion":"1.0.0","root":{"path":"rootfs"},
-                    "process":{"args":["/bin/sh"],"selinuxLabel":"system_u:system_r:container_t:s0"}}"#,
-            ),
-            (
-                "linux.mountLabel",
-                r#"{"ociVersion":"1.0.0","root":{"path":"rootfs"},"process":{"args":["/bin/sh"]},
-                    "linux":{"mountLabel":"system_u:object_r:container_file_t:s0"}}"#,
-            ),
-        ];
-        for (field, json) in cases {
-            let r = Spec::parse(json.as_bytes());
-            assert!(
-                matches!(&r, Err(OciError::Config(why)) if why.contains(field)),
-                "{field} should be refused with a Config error naming it, got {r:?}"
-            );
-        }
+        // (a dropped LSM control is a silent security failure). Parse runs check. linux.seccomp,
+        // linux.mountLabel and process.apparmorProfile are no longer here: Hex applies them, and refuses
+        // where the host can't (super::lsm); process.selinuxLabel it doesn't yet apply.
+        let json = r#"{"ociVersion":"1.0.0","root":{"path":"rootfs"},
+            "process":{"args":["/bin/sh"],"selinuxLabel":"system_u:system_r:container_t:s0"}}"#;
+        let r = Spec::parse(json.as_bytes());
+        assert!(
+            matches!(&r, Err(OciError::Config(why)) if why.contains("process.selinuxLabel")),
+            "process.selinuxLabel should be refused with a Config error naming it, got {r:?}"
+        );
+    }
+
+    // AC-T7.1.4 (runtime-tools linux_mount_label, linux_process_apparmor_profile): parse a spec that sets
+    // linux.mountLabel or process.apparmorProfile, expect it accepted with the label kept for the init to
+    // apply, not refused as before (docs/design/runtime.md, "SELinux mount labels and AppArmor profiles").
+    #[test]
+    fn a_mount_label_and_an_apparmor_profile_are_parsed_to_be_applied() {
+        let json = r#"{"ociVersion":"1.0.0","root":{"path":"rootfs"},
+            "process":{"args":["/bin/sh"],"apparmorProfile":"acme_secure_profile"},
+            "linux":{"mountLabel":"system_u:object_r:svirt_sandbox_file_t:s0:c715,c811"}}"#;
+        let s = Spec::parse(json.as_bytes()).expect("both are applied, so the spec parses");
+        assert_eq!(
+            s.mount_label(),
+            Some("system_u:object_r:svirt_sandbox_file_t:s0:c715,c811")
+        );
+        assert_eq!(
+            s.process.as_ref().and_then(|p| p.apparmor_profile()),
+            Some("acme_secure_profile")
+        );
+        let empty = r#"{"ociVersion":"1.0.0","root":{"path":"rootfs"},
+            "process":{"args":["/bin/sh"],"apparmorProfile":""},"linux":{"mountLabel":""}}"#;
+        let s = Spec::parse(empty.as_bytes()).expect("empty is unset");
+        assert_eq!(s.mount_label(), None, "an empty label is no label");
+        assert_eq!(s.process.as_ref().and_then(|p| p.apparmor_profile()), None);
     }
 
     // T-T7.1.4: a container in a user namespace that doesn't make a network namespace of its own can't

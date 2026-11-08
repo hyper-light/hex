@@ -16,7 +16,9 @@ mount -t tmpfs -o rw,nosuid,nodev,mode=1777 tmp /tmp
 ip link set lo up
 TGT=$(cat /job/tgt)
 mkdir -p "$TGT"
-mount -t 9p -o trans=virtio,version=9p2000.L,msize=1048576,cache=loose tgt "$TGT"
+# msize 512000: the virtio-9p transport maximum, PAGE_SIZE (4,096 on x86_64) x (VIRTQUEUE_NUM 128 - 3) (Linux v7.2
+# net/9p/trans_virtio.c:38, :807); the client limits any larger msize to it (net/9p/client.c:900).
+mount -t 9p -o trans=virtio,version=9p2000.L,msize=512000,cache=loose tgt "$TGT"
 export HOME=/root PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
 echo "guest kernel: $(uname -r)"
 python3 -I /opt/lab/vm7_probe.py
@@ -38,4 +40,5 @@ echo "VM7_EXIT=$rc"
 sync
 umount /job "$TGT"
 echo o > /proc/sysrq-trigger
-sleep 60
+# PID 1 must outlive the power-off it asked for; vm7_lab.sh's VM_TIMEOUT bounds the guest.
+exec sleep infinity

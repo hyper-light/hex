@@ -21,6 +21,16 @@ use rustix::thread::{LinkNameSpaceType, move_into_link_name_space};
 
 use crate::sizes::{Host, Sizes};
 
+/// The most descriptors a process on this host may raise its limit to (`/proc/sys/fs/nr_open`; the kernel's
+/// Documentation/admin-guide/sysctl/fs.rst), so a limit the files' bound is read under is one this host allows.
+fn nr_open() -> u64 {
+    std::fs::read_to_string("/proc/sys/fs/nr_open")
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
 /// The pools' bounds on fedora, the bench host, as its bench units run the node: 32 hardware threads, about 7.5 GiB
 /// of memory to hold, and a thread limit past the socket's need (`crate::sizes`).
 fn bench() -> Sizes {
@@ -37,11 +47,11 @@ fn bench() -> Sizes {
 
 /// Ada's rule and the lead's calls, 2026-11-06 (CLAUDE.md §2; goal 6 step 6's installer reads it): the descriptors a
 /// root node holds at its learned pools' bounds on fedora's figures, a first start's. Do: bound the files under no
-/// limit at the bench host's sizes, nothing held beside its bounds. Expect: the node's own 406,026 (342,634 with six
+/// limit at the bench host's sizes, nothing held beside its bounds. Expect: the node's own 406,027 (342,634 with six
 /// memory pools and the device programs uncounted; 331,086 at the old constants, the socket's connections then among
 /// them): the pools' shares a seventh each with the device programs among them (440 seeds, 1,439 idle namespaces),
 /// and the programs held, 65,536 at their bound, now counted; and every kept namespace there may be holding its files
-/// four each past that, 679,682 in all.
+/// four each past that, and the create seeds' one pruned mount namespace (`goal6-mntns.md` §12), 679,683 in all.
 #[test]
 fn the_nodes_own_descriptors_on_fedoras_figures() {
     let unlimited = rustix::process::Rlimit {
@@ -49,14 +59,14 @@ fn the_nodes_own_descriptors_on_fedoras_figures() {
         maximum: None,
     };
     let b = FilesBound::of(&unlimited, root_pools(), 0);
-    assert_eq!(b.own, 406_026, "{:?}", bench());
-    assert_eq!(b.own + b.namespaces * FILES_A_KEPT, 679_682);
+    assert_eq!(b.own, 406_027, "{:?}", bench());
+    assert_eq!(b.own + b.namespaces * FILES_A_KEPT, 679_683);
 }
 
 /// Goal 6 step 6's HEX-INST-5 (Ada's 2026-11-06 constants rule): what a node needs of its soft descriptor limit is the
 /// node's to say, from its own bounds. Do: ask what a root node and a rootless one need on fedora's figures, nothing
 /// held beside. Expect: the root node the bound's own figures under no limit, its own and four files for each of its
-/// kept namespaces, 679,682 in all; the rootless node its own alone, keeping no namespaces.
+/// kept namespaces, 679,683 in all; the rootless node its own alone, keeping no namespaces.
 #[test]
 fn a_node_says_the_descriptors_it_needs() {
     let unlimited = rustix::process::Rlimit {
@@ -72,7 +82,7 @@ fn a_node_says_the_descriptors_it_needs() {
             files: bound.namespaces * FILES_A_KEPT
         }
     );
-    assert_eq!(root.total(), 679_682);
+    assert_eq!(root.total(), 679_683);
     let rootless = FilesBound::needed(Pools::rootless(bench()), 0);
     assert_eq!(rootless.files, 0, "a rootless node keeps no namespaces");
     assert_eq!(rootless.total(), rootless.own);
@@ -211,6 +221,20 @@ fn the_refill_thread_fills_the_pool_or_counts_each_make_that_fails() {
     });
     let c = pool.counts().unwrap();
     assert_eq!((c.taken, c.made_on_path, c.failed), (1, 0, 0), "{c:?}");
+}
+
+/// Goal 6 (`goal6-mntns.md` §12): a root node holds its create seeds' one pruned mount namespace for its life, so
+/// descriptors_of_the_node counts it. Do: read the node's named descriptor terms under a root node's pools. Expect the
+/// pruned namespace among them, one descriptor, and the total the terms' sum.
+#[test]
+fn the_seeds_pruned_namespace_is_counted_in_what_a_node_may_hold() {
+    let root = descriptor_terms(root_pools(), 0);
+    assert!(
+        root.contains(&("the create seeds' pruned mount namespace", 1)),
+        "{root:?}"
+    );
+    let sum = root.iter().map(|(_, n)| *n).fold(0, u64::saturating_add);
+    assert_eq!(descriptors_of_the_node(root_pools(), 0), sum);
 }
 
 /// Goal 5 extended step 3 (AC-e's reader; T-T7.1.4): a create of an owner's box that finds the pool dry is
@@ -386,8 +410,8 @@ fn the_files_bound_counts_the_namespaces_both_pools_make_ahead() {
     let at = |netns: usize, ipc_uts: usize| {
         FilesBound::of(
             &Rlimit {
-                current: Some(1 << 22),
-                maximum: Some(1 << 22),
+                current: Some(nr_open()),
+                maximum: Some(nr_open()),
             },
             Pools {
                 netns,
@@ -418,8 +442,8 @@ fn the_files_bound_counts_the_namespaces_both_pools_make_ahead() {
         root,
         FilesBound::of(
             &Rlimit {
-                current: Some(1 << 22),
-                maximum: Some(1 << 22)
+                current: Some(nr_open()),
+                maximum: Some(nr_open())
             },
             root_pools(),
             beside
@@ -517,8 +541,8 @@ fn the_files_bound_counts_the_prepared_dev_mounts() {
     let at = |devfs: bool| {
         FilesBound::of(
             &Rlimit {
-                current: Some(1 << 22),
-                maximum: Some(1 << 22),
+                current: Some(nr_open()),
+                maximum: Some(nr_open()),
             },
             Pools {
                 devfs,

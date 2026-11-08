@@ -11,6 +11,8 @@ S=${1:?share}
 . "$S/env"
 rm -rf /opt/bin /opt/comp /opt/out; mkdir -p /opt/bin /opt/comp /opt/out
 cp "$S"/bin/* /opt/bin/; cp -r "$S"/lab/. /opt/comp/
+# The mounts trace's call names: the host's header, where the guest has none (its root is a snapshot, so this is undone).
+[ -s /usr/include/asm/unistd_64.h ] || { mkdir -p /usr/include/asm && cp /opt/comp/unistd_64.h /usr/include/asm/; }
 C=/sys/fs/cgroup
 for c in cpu memory pids io; do echo "+$c" > "$C/cgroup.subtree_control"; done
 mkdir -p "$C/load" "$C/bench"
@@ -33,13 +35,16 @@ for _ in $(seq 1 "${LOOPS:-0}"); do
   PIDS+=("$!")
 done
 echo "busy loops: ${LOOPS:-0}; pids ${PIDS[*]:-none}" | tee -a /opt/out/guest.txt
-sleep 2
 guest | tee -a /opt/out/guest.txt
 bash -c 'echo $$ > /sys/fs/cgroup/bench/cgroup.procs
   exec unshare -m -C --propagation private bash -c "mount -t cgroup2 cgroup2 /sys/fs/cgroup && mount --bind /opt/comp /opt/lab && exec bash /opt/lab/probes/${PROBE:-create_breakdown_inside.sh}"' \
   2>&1 | tee /opt/out/probe.out
 rc=${PIPESTATUS[0]}
 guest | tee -a /opt/out/guest.txt
+# No wait for the loops before the probe: its container, node and creates come after them. What shows they ran
+# throughout is each one's CPU time at the end (utime + stime, in clock ticks, USER_HZ a second).
+for p in "${PIDS[@]}"; do read -ra f < "/proc/$p/stat" && echo "$p $(( f[13] + f[14] ))"; done 2>/dev/null \
+  | paste -sd' ' | sed "s/^/busy loops' CPU ticks by pid at the end: /" | tee -a /opt/out/guest.txt
 kill "${PIDS[@]}" 2>/dev/null; wait "${PIDS[@]}" 2>/dev/null
 cp -r /opt/out/. "$S/out/"
 chown -R "$(stat -c %u:%g "$S")" "$S/out"

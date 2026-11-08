@@ -22,6 +22,15 @@
 set -uo pipefail
 N=${N:-1000}; WARMUP=${WARMUP:-100}; ROUNDS=${ROUNDS:-3}
 OUT=/opt/out; mkdir -p /run/err
+# The soft descriptor limit everything here runs with (HEXBENCH_NOFILE), as create_serial_inside.sh sets it: `hard`
+# for the hard limit the container was given, as Hex's installer sets a node's, a number for that, unset for the
+# container's own (dockerd's 1024), at which an in-process node holds no /proc/net files. Said in nofile.txt.
+case "${HEXBENCH_NOFILE:-given}" in
+  given) ;;
+  hard) ulimit -Sn "$(ulimit -Hn)" ;;
+  *) ulimit -Sn "$HEXBENCH_NOFILE" ;;
+esac
+echo "descriptor limit: soft $(ulimit -Sn), hard $(ulimit -Hn) (HEXBENCH_NOFILE=${HEXBENCH_NOFILE:-given})" > "$OUT/nofile.txt"
 . "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/tracebuf.sh"
 
 # The OCI pass's bundles (oci_inside.sh): the `sleep` container seam_oci's lifecycle creates, and the `true` one
@@ -232,29 +241,65 @@ switch() { grown 8192 "$OUT/$1.stats" switch_once "$@"; }
 # are the softirqs run on a hex process as an interrupt returns, which take its CPU without a switch.
 mounts_trace_once() {
   local name=$1 lc=$2 conc=$3 rc=0 ev f nssem
-  local MT="raw_syscalls/sys_enter raw_syscalls/sys_exit sched/sched_switch sched/sched_process_fork
+  local MT="raw_syscalls/sys_enter raw_syscalls/sys_exit sched/sched_switch sched/sched_process_fork sched/sched_waking
     irq/softirq_entry irq/softirq_exit workqueue/workqueue_execute_start workqueue/workqueue_execute_end"
   [ -d "$T/events/exceptions/page_fault_user" ] && MT="$MT exceptions/page_fault_user"
   # The kernel's one mount lock, each hold of it counted (goal 5 extended step 3): a kprobe on down_write and one on
   # down_read, filtered to namespace_sem's address and to hex's processes, so each init's span counts its own holds
   # and the call it took each in. Every write hold is namespace_lock's down_write, every shared one down_read
   # (v6.19 fs/namespace.c:1723-1726, the namespace_shared guard at :97, the mount table's iterator at :1541).
-  nssem=$(awk '$3 == "namespace_sem" {print "0x" $1; exit}' /proc/kallsyms)
+  # Read by python3: the 7.2 guest has python3 but no awk (goal 6's first guest trace,
+  # hex-g6-mttimed-20261105T031100Z, lost both probes to "awk: command not found").
+  nssem=$(python3 -I -c 'import sys
+for l in open("/proc/kallsyms"):
+    f = l.split()
+    if len(f) > 2 and f[2] == "namespace_sem":
+        print("0x" + f[0]); sys.exit()')
   case $nssem in
     ""|0x0000000000000000) echo "namespace_sem's address isn't readable here: its holds go uncounted" >&2 ;;
     *) for ev in nsw nsr; do echo "-:hexcb/$ev" >> "$T/kprobe_events" 2>/dev/null; done
        { echo "p:hexcb/nsw down_write sem=%di:x64" >> "$T/kprobe_events" \
            && echo "p:hexcb/nsr down_read sem=%di:x64" >> "$T/kprobe_events"; } \
          || { echo "the namespace_sem probes couldn't be made" >&2; return 1; }
-       MT="$MT hexcb/nsw hexcb/nsr" ;;
+       MT="$MT hexcb/nsw hexcb/nsr"
+       # A wait for the lock (goal 6): the rwsem's slowpaths, taken only when the lock can't be had at once. Where
+       # the kernel inlined them away they can't be probed, and the report's lock waits read 0: said here.
+       for ev in nsww nsrw; do echo "-:hexcb/$ev" >> "$T/kprobe_events" 2>/dev/null; done
+       if { echo "p:hexcb/nsww rwsem_down_write_slowpath sem=%di:x64" >> "$T/kprobe_events" \
+            && echo "p:hexcb/nsrw rwsem_down_read_slowpath sem=%di:x64" >> "$T/kprobe_events"; } 2>/dev/null; then
+         MT="$MT hexcb/nsww hexcb/nsrw"
+         # Each write hold timed (goal 6, the lead's 10:47Z ask): up_write ends it, and the write slowpath's return
+         # grants a contended one (v6.19 kernel/locking/rwsem.c); create_breakdown.py times it from its grant.
+         for ev in nsu nswwr rww; do echo "-:hexcb/$ev" >> "$T/kprobe_events" 2>/dev/null; done
+         # Any other rwsem's write slowpath an init enters (goal 6, lever (4)): the mountpoint inode's lock among them.
+         echo "p:hexcb/rww rwsem_down_write_slowpath sem=%di:x64" >> "$T/kprobe_events" 2>/dev/null \
+           && MT="$MT hexcb/rww"
+         if { echo "p:hexcb/nsu up_write sem=%di:x64" >> "$T/kprobe_events" \
+              && echo "r:hexcb/nswwr rwsem_down_write_slowpath" >> "$T/kprobe_events"; } 2>/dev/null; then
+           MT="$MT hexcb/nsu hexcb/nswwr"
+         else
+           echo "the mount lock's releases can't be probed here: its holds go untimed" >&2
+         fi
+       else
+         echo "the mount lock's slowpaths can't be probed here: its waits go uncounted" >&2
+       fi ;;
   esac
   mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo "${TRACE_KB:?}" > "$I/buffer_size_kb" \
     || { echo "the trace instance $I couldn't be made" >&2; untrace; return 1; }
   for ev in $MT; do
     case $ev in
+      # Every write hold, whoever holds it: a span's wait can be behind the pools' maker, the node or a co-tenant
+      # as much as another init (goal6-mntns.md §10). The slowpath's return carries no address: the reader takes
+      # it only for a pid whose write wait on the lock it saw begin.
+      hexcb/nsw|hexcb/nsww|hexcb/nsu) f="sem == $nssem" ;;
+      hexcb/nswwr) f="common_pid > 0" ;;
+      hexcb/rww) f="sem != $nssem && comm == \"hex\"" ;;
+      hexcb/nsr) f="sem == $nssem && (comm == \"hex\" || comm == \"hex-devfs\" || comm == \"seam_oci\")" ;;
       hexcb/*) f="sem == $nssem && comm == \"hex\"" ;;
-      sched/sched_switch) f='prev_comm == "hex" || next_comm == "hex"' ;;
+      # Hex's holders off their CPU mid-hold: the inits, the pools' maker and the node.
+      sched/sched_switch) f='prev_comm == "hex" || next_comm == "hex" || prev_comm == "hex-devfs" || next_comm == "hex-devfs" || prev_comm == "seam_oci" || next_comm == "seam_oci"' ;;
       sched/sched_process_fork) f='parent_comm == "hex"' ;;
+      sched/sched_waking) f='comm == "hex"' ;;
       irq/*) f='comm ~ "ksoftirqd*" || comm == "hex"' ;;
       workqueue/*) f='comm ~ "kworker*"' ;;
       *) f='comm == "hex"' ;;
@@ -268,15 +313,21 @@ mounts_trace_once() {
   echo 1 > "$I/tracing_on"
   local true_bundle=/run/bundle-true
   [ "${MOUNTS_PATH:-pruned}" = classic ] && true_bundle=/run/bundle-true-classic
-  HEXBENCH_PHASES=throughput HEXBENCH_THROUGHPUT_CONC=$conc /opt/bin/seam_oci "$OUT/$name.json" 0 0 "$lc" \
-    /opt/bin/hex /run/bundle-sleep "$true_bundle" 2>&1 | tee -a "$OUT/mounts.log" || rc=1
+  # A command given after the three arguments is what's traced (goal 17's record: rounds.py's arms), else the
+  # throughput phase.
+  if [ "$#" -gt 3 ]; then
+    "${@:4}" 2>&1 | tee -a "$OUT/mounts.log" || rc=1
+  else
+    HEXBENCH_PHASES=throughput HEXBENCH_THROUGHPUT_CONC=$conc /opt/bin/seam_oci "$OUT/$name.json" 0 0 "$lc" \
+      /opt/bin/hex /run/bundle-sleep "$true_bundle" 2>&1 | tee -a "$OUT/mounts.log" || rc=1
+  fi
   echo 0 > "$I/tracing_on"
   touch /run/hexcb.stop
   wait "$drain" || rc=1
   for c in "$I"/per_cpu/cpu*; do echo "== ${c##*/}"; cat "$c/stats"; done > "$OUT/$name.stats"
   for ev in $MT; do echo 0 > "$I/events/$ev/enable" 2>/dev/null; done
   untrace
-  for ev in nsw nsr; do echo "-:hexcb/$ev" >> "$T/kprobe_events" 2>/dev/null; done
+  for ev in nsw nsr nsww nsrw nsu nswwr rww; do echo "-:hexcb/$ev" >> "$T/kprobe_events" 2>/dev/null; done
   return $rc
 }
 # Its buffer starts at 16,384 KiB a CPU, the runs of record's, and grows while the trace lost events (tracebuf.sh).
@@ -291,7 +342,7 @@ mkdir -p "$HOME/.cache/hex-t7/ociseam"
     "($(findmnt -n -o FSTYPE,OPTIONS -T "$HOME/.cache/hex-t7/ociseam" | cut -c1-160))"
   echo "inside: /run on $(stat -f -c %T /run); the cgroup root's subtree_control: $(cat /sys/fs/cgroup/cgroup.subtree_control)"
   echo "params: N=$N WARMUP=$WARMUP ROUNDS=$ROUNDS AC_E=${AC_E:-0} IDLE_AB=${IDLE_AB:-0} MOUNTS=${MOUNTS:-0}" \
-    "MOUNTS_CONC=${MOUNTS_CONC:-1 8} MOUNTS_PATH=${MOUNTS_PATH:-pruned} CLASSIC=${CLASSIC:-0} AC_E_MOUNTS=${AC_E_MOUNTS:-0}"
+    "MOUNTS_CONC=${MOUNTS_CONC:-1 8} MOUNTS_PATH=${MOUNTS_PATH:-pruned} MOUNTS_SPAN=${MOUNTS_SPAN:-switch} CLASSIC=${CLASSIC:-0} AC_E_MOUNTS=${AC_E_MOUNTS:-0}"
 } >> "$OUT/env.txt"
 
 # with_idle <command...>: the command run while IDLE_AB idle threads are up in this container (idlethreads.c, built
@@ -345,15 +396,55 @@ fi
 # MOUNTS (goal 5 plan step 3): a focused run of its own, not the rounds. For each concurrency in MOUNTS_CONC (1 and
 # 8), one throughput phase of MOUNTS lifecycles with every call of the hex processes traced (mounts_trace), cut by
 # create_breakdown.py mounts into part 19's calls, the time between them, the time off the CPU and the page faults,
-# by mount; with MOUNTS_PATH=classic its creates take the classic path, through the shim. No libcrun, no rounds.
+# by mount; with MOUNTS_PATH=classic its creates take the classic path, through the shim. With MOUNTS_SPAN=root
+# (goal 6) each span is the root in place, to the init's chdir, its mount namespace's join counted (create_breakdown.py
+# mounts). No libcrun, no rounds.
+if [ "${MOUNTS:-0}" -gt 0 ] && [ -n "${MOUNTS_ARMS:-}" ]; then
+  # MOUNTS_ARMS (goal 17's record, mntns_record.sh): rounds.py's arms ("hex:copy hex:tree hex:empty", libcrun too if
+  # named), interleaved round by round, MOUNTS_ROUNDS rounds after MOUNTS_WARMUP, each burst MOUNTS lifecycles at each
+  # concurrency in MOUNTS_CONC: once untraced (the arms' creates), then once with every call of the hex processes
+  # traced, cut into part 19 by create_breakdown.py mounts, each span claimed by the burst whose window holds its start.
+  rc=0
+  true_bundle=/run/bundle-true
+  [ "${MOUNTS_PATH:-pruned}" = classic ] && true_bundle=/run/bundle-true-classic
+  arms() { # arms <out dir> <concurrency>
+    ROUNDS_SEAM=/opt/bin/seam_oci ROUNDS_HEX=/opt/bin/hex ROUNDS_SLEEP=/run/bundle-sleep ROUNDS_TRUE=$true_bundle \
+      ROUNDS_CGROUP=/sys/fs/cgroup ROUNDS_LIBCRUN=/opt/bin/libcrun-driver ROUNDS_LIBCRUN_ROOT=/run/libcrun \
+      python3 -I /opt/lab/probes/rounds.py "$1" "${MOUNTS_ROUNDS:?MOUNTS_ROUNDS}" "${MOUNTS_WARMUP:?MOUNTS_WARMUP}" \
+      "$MOUNTS" "$2" $MOUNTS_ARMS
+  }
+  mkdir -p /run/libcrun
+  for conc in ${MOUNTS_CONC:-8}; do
+    echo "arms: $MOUNTS_ARMS, $conc in flight, untraced, load $(cut -d' ' -f1-3 /proc/loadavg)"
+    arms "$OUT/rounds.c$conc.untraced" "$conc" >> "$OUT/mounts.log" 2>&1 \
+      || { echo "refusing: the untraced rounds at $conc failed ($OUT/mounts.log)" >&2; rc=8; continue; }
+    echo "arms: $MOUNTS_ARMS, $conc in flight, every call traced, load $(cut -d' ' -f1-3 /proc/loadavg)"
+    mounts_trace "mounts.c$conc" 0 "$conc" arms "$OUT/rounds.c$conc.traced" "$conc" \
+      || { echo "refusing: the traced rounds at $conc failed ($OUT/mounts.log)" >&2; rc=6; continue; }
+    python3 -I /opt/lab/probes/create_breakdown.py mounts "$OUT/mounts.c$conc.txt" "$OUT/mounts.c$conc.stats" \
+      /usr/include/asm/unistd_64.h "${MOUNTS_PATH:-pruned}" "${MOUNTS_SPAN:-switch}" > "$OUT/mounts.c$conc.md" || rc=7
+  done
+  echo "arms done (inside), load $(cut -d' ' -f1-3 /proc/loadavg)" >> "$OUT/env.txt"
+  echo done > "$OUT/inside.done"
+  exit "$rc"
+fi
 if [ "${MOUNTS:-0}" -gt 0 ]; then
   rc=0
   for conc in ${MOUNTS_CONC:-1 8}; do
+    # MOUNTS_UNTRACED=1 (goal 6's record, mntns_record.sh): the same phase once untraced first, so its create p50 is
+    # free of the trace's cost; part 19 still comes from the traced phase after it.
+    if [ "${MOUNTS_UNTRACED:-0}" = 1 ]; then
+      untraced_true=/run/bundle-true
+      [ "${MOUNTS_PATH:-pruned}" = classic ] && untraced_true=/run/bundle-true-classic
+      HEXBENCH_PHASES=throughput HEXBENCH_THROUGHPUT_CONC=$conc /opt/bin/seam_oci "$OUT/untraced.c$conc.json" 0 0 \
+        "$MOUNTS" /opt/bin/hex /run/bundle-sleep "$untraced_true" >> "$OUT/mounts.log" 2>&1 \
+        || { echo "refusing: the untraced phase at $conc failed ($OUT/mounts.log)" >&2; rc=8; continue; }
+    fi
     echo "mounts: every call traced, $conc in flight, $MOUNTS lifecycles, load $(cut -d' ' -f1-3 /proc/loadavg)"
     mounts_trace "mounts.c$conc" "$MOUNTS" "$conc" \
       || { echo "refusing: the mounts trace at $conc failed ($OUT/mounts.log)" >&2; rc=6; continue; }
     python3 -I /opt/lab/probes/create_breakdown.py mounts "$OUT/mounts.c$conc.txt" "$OUT/mounts.c$conc.stats" \
-      /usr/include/asm/unistd_64.h "${MOUNTS_PATH:-pruned}" > "$OUT/mounts.c$conc.md" || rc=7
+      /usr/include/asm/unistd_64.h "${MOUNTS_PATH:-pruned}" "${MOUNTS_SPAN:-switch}" > "$OUT/mounts.c$conc.md" || rc=7
     cat "$OUT/mounts.c$conc.md"
   done
   echo "mounts done (inside), load $(cut -d' ' -f1-3 /proc/loadavg)" >> "$OUT/env.txt"

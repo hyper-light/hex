@@ -69,6 +69,10 @@ const PROPAGATION_ENV: &str = "HEX_OCI_BOX_SHARED_SOURCES";
 /// Set by hand to run HEX-MNTNS-8's case alone, as root: a focused run on a kernel that differs (a guest's lab),
 /// where a refusal's own text is the record.
 const MASKED_DIRS_ENV: &str = "HEX_OCI_BOX_MASKED_DIRS";
+/// Runs the rootless command line's cgroup case alone through the lab's fixture, rootless, in a fresh process.
+const ROOTLESS_CLI_CGROUP_ENV: &str = "HEX_OCI_BOX_ROOTLESS_CLI_CGROUP";
+const ROOTLESS_CLI_CGROUP_PASS: &str =
+    "rootless command line: the container's cgroup was made beside the command line's own";
 const PROPAGATION_PASS: &str =
     "shared-source propagation oracle completed with four pruned creates";
 /// Both entry points can move the test process between cgroups. Serialize their parent fixtures;
@@ -231,6 +235,46 @@ fn prepared_devs_match_ordinary_setup_and_isolate_containers() {
         log.lines().any(|line| line == PREPARED_DEV_PASS),
         "the root oracle did not run; a skipped delegation is not evidence"
     );
+}
+
+/// AC-T7.1.4 (runtime-tools' rootless subset, goal 17's rootless variant): a rootless `hex oci create` of a spec that
+/// names no cgroupsPath makes the container's cgroup beside the command line's own, as crun's does. Do: run the case
+/// alone through the lab's fixture, rootless. Expect it to pass, or to say why it was skipped. As root it is no case:
+/// a root runtime writes the hierarchy's root, as before.
+#[test]
+fn a_rootless_command_line_create_makes_its_cgroup_beside_its_own() {
+    if host_id("-u") == 0 {
+        eprintln!(
+            "SKIP: the rootless command line's cgroup case runs rootless; as root /<id> is the root's to make"
+        );
+        return;
+    }
+    let _serial = LAB_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let output = Command::new(std::env::current_exe().expect("test binary path"))
+        .args([TEST, "--exact", "--nocapture", "--test-threads=1"])
+        .env(ROOTLESS_CLI_CGROUP_ENV, "1")
+        .output()
+        .expect("run the rootless command line's cgroup case through the lab's fixture");
+    let log = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    eprint!("{log}");
+    assert!(
+        output.status.success(),
+        "the rootless command line's cgroup case failed"
+    );
+    if !log.lines().any(|line| line == ROOTLESS_CLI_CGROUP_PASS) {
+        // The fixture says why where it can't run a rootless container here (no delegation, no user namespaces).
+        assert!(
+            log.lines().any(|line| line.starts_with("SKIP")),
+            "the rootless command line's cgroup case neither ran nor said why it was skipped"
+        );
+        eprintln!(
+            "SKIP: the rootless command line's cgroup case was skipped by the lab's fixture, as it says above"
+        );
+    }
 }
 
 /// AC-T7.1.4: rootfs and bind sources are deliberately shared; every mount stays in the box.
@@ -481,6 +525,15 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
         masked_directories_are_the_nodes_one_empty_filesystem(&lab, own);
         return;
     }
+    if std::env::var_os(ROOTLESS_CLI_CGROUP_ENV).is_some() {
+        assert!(
+            lab.rootless,
+            "the rootless command line's cgroup case runs rootless"
+        );
+        rootless_cli_create_makes_its_cgroup_beside_its_own(&lab, own);
+        eprintln!("{ROOTLESS_CLI_CGROUP_PASS}");
+        return;
+    }
     // First, while this process is no node's and so no subreaper; it also finds out whether a
     // container runs here at all (rootless needs unprivileged user namespaces).
     if let Err(e) = crash_and_restart(&lab, own) {
@@ -521,6 +574,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     a_parked_inits_proc_is_its_own_and_taken_once(&lab, own);
     a_parked_init_takes_a_create_made_each_way(&lab, own);
     masked_directories_are_the_nodes_one_empty_filesystem(&lab, own);
+    create_seeds_share_the_nodes_one_pruned_namespace(&lab, own);
     a_bind_and_a_volume_are_present_the_host_unreachable(&lab, own);
     classic_reasons_are_counted(&lab, own);
     create_and_start_container_hooks_run_in_the_containers_namespaces(&lab, own);
@@ -1319,7 +1373,7 @@ fn mount_namespaces_made_each_way(lab: &Lab, own: &Path) {
                 None
             },
         ),
-        ("default", Some(mntns::default_way(probe))),
+        ("default", Some(mntns::default_way(probe).unwrap())),
     ] {
         let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
         let node = Node::open(
@@ -1407,6 +1461,56 @@ fn mount_namespaces_made_each_way(lab: &Lab, own: &Path) {
         agent_mount_points(),
         agent_before,
         "the agent's mount table is unchanged by every way"
+    );
+}
+
+/// AC-T7.1.4 (runtime-tools' rootless subset; goal 17's rootless variant): through the command line, rootless, make a
+/// container whose spec names no cgroupsPath, then delete it. Expect the create to succeed with the container's cgroup
+/// beside the command line's own (the agent's leaf's sibling under the cgroup delegated to this user, `<own>/<id>`),
+/// holding its init, as crun 1.30.1's cgroupfs driver makes one where the hierarchy's root can't be written
+/// (`make_new_sibling_cgroup`, src/libcrun/cgroup-cgroupfs.c:96-110, taken at :128-155); and gone after the delete.
+/// The hierarchy's root is root's alone, so `/<id>` there is refused to every rootless runtime (EACCES).
+fn rootless_cli_create_makes_its_cgroup_beside_its_own(lab: &Lab, own: &Path) {
+    let root = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let id = "cli-rootless-cg";
+    let bundle = lab.bundle(&Lab::act(&Act::Wait));
+    let log = root.path().join("create.log");
+    // The command line's create passes its streams on to the container's init, as runc's does: the null device and a
+    // file here, so no pipe the waiting init holds keeps this test waiting.
+    let created = Command::new(&lab.exe)
+        .args(["oci", "create", "--bundle", bundle.to_str().unwrap(), id])
+        .env("HEX_OCI_ROOT", root.path())
+        .stdin(Std::null())
+        .stdout(Std::null())
+        .stderr(std::fs::File::create(&log).unwrap())
+        .status()
+        .unwrap();
+    let made = own.join(id);
+    let procs = std::fs::read_to_string(made.join("cgroup.procs"));
+    let deleted = Command::new(&lab.exe)
+        .args(["oci", "delete", "--force", id])
+        .env("HEX_OCI_ROOT", root.path())
+        .output()
+        .unwrap();
+    assert!(
+        created.success(),
+        "a rootless create of a spec naming no cgroupsPath: {}",
+        std::fs::read_to_string(&log).unwrap_or_default()
+    );
+    assert!(
+        procs.as_ref().is_ok_and(|p| !p.trim().is_empty()),
+        "the container's cgroup beside the command line's own, {}, holds its init: {procs:?}",
+        made.display()
+    );
+    assert!(
+        deleted.status.success(),
+        "hex oci delete: {}",
+        String::from_utf8_lossy(&deleted.stderr)
+    );
+    assert!(
+        !made.exists(),
+        "the delete removed the container's cgroup {}",
+        made.display()
     );
 }
 
@@ -2158,6 +2262,139 @@ fn masked_directories_are_the_nodes_one_empty_filesystem(lab: &Lab, own: &Path) 
         }
     }
     eprintln!("masked directories: {masked} across 4 boxes, on {devs:?}");
+}
+
+/// Goal 6, the seed without a `pivot_root` per start (`goal6-mntns.md` §12, AC-T7.1.4's under-load bar): a node
+/// prunes one mount namespace and every create seed joins it by `setns`, so a seed started after the first never
+/// pivots (each `pivot_root` walks every thread on the host under the mount lock, §11). Do: make a first box, then
+/// pairs of boxes at once until a second create seed is up, then read each live create seed's mount namespace from
+/// this process's `/proc`. Expect at least two create seeds, every one in the same mount namespace and not this
+/// process's, and that namespace holding the pruned two mounts after the concurrent creates as after the first: no
+/// seed or init ever mutates it.
+fn create_seeds_share_the_nodes_one_pruned_namespace(lab: &Lab, own: &Path) {
+    use std::os::unix::fs::MetadataExt;
+    if lab.rootless {
+        return;
+    }
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-seedns"), state.path());
+    // A create seed is a child of this process re-exec'd as `__oci-seed` that joins the node's pruned namespace,
+    // as its environment says; an exec seed doesn't. A box's init
+    // made and not yet started is a child of this process too (cloned with `CLONE_PARENT`) and still the seed's
+    // image, but in its box's pid namespace: its `NSpid` names two pids, a seed's one (proc_pid_status(5)).
+    let create_seeds = || -> Vec<u32> {
+        let me = std::process::id().to_string();
+        let mut seeds = Vec::new();
+        for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+            let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+                continue;
+            };
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            let ppid = stat.rsplit(") ").next().and_then(|r| r.split(' ').nth(1));
+            let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+            let environ = std::fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
+            let has = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).any(|w| w == needle);
+            let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
+            let in_our_pid_namespace = status
+                .lines()
+                .find_map(|l| l.strip_prefix("NSpid:"))
+                .is_some_and(|pids| pids.split_whitespace().count() == 1);
+            if ppid == Some(me.as_str())
+                && in_our_pid_namespace
+                && has(&cmdline, b"__oci-seed")
+                && has(&environ, b"HEX_OCI_SEED_JOIN=")
+            {
+                seeds.push(pid);
+            }
+        }
+        seeds
+    };
+    let namespace = |pid: u32| {
+        std::fs::metadata(format!("/proc/{pid}/ns/mnt"))
+            .map(|m| m.ino())
+            .ok()
+    };
+    let mounts = |pid: u32| {
+        std::fs::read_to_string(format!("/proc/{pid}/mountinfo"))
+            .map(|t| t.lines().count())
+            .ok()
+    };
+    let create = |id: &BoxId| {
+        let dir = tempfile::Builder::new()
+            .prefix("bundle-")
+            .tempdir_in(lab.bundles.path())
+            .unwrap()
+            .keep();
+        std::fs::write(
+            dir.join("config.json"),
+            lab.config(&Lab::act(&Act::Wait), false),
+        )
+        .unwrap();
+        node.create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(dir),
+            owner: None,
+        })
+        .expect("create a box through a seed");
+    };
+    let first = BoxId::new("seedns-first").unwrap();
+    // The first create is answered by a live seed, so one is up to read the namespace of before the rest.
+    create(&first);
+    let before = create_seeds()
+        .into_iter()
+        .find_map(mounts)
+        .expect("a create seed's mount table after the first create");
+    // Then pairs of creates at once until a second seed is up (the fact the comparison needs), at most one pair
+    // for each of the pool's slots (the node's `seeds`, `Node::sizes`), not a count picked to make one likely.
+    let mut ids = vec![first];
+    for round in 0..node.sizes().seeds.get() {
+        if create_seeds().len() >= 2 {
+            break;
+        }
+        let pair: Vec<BoxId> = (0..2)
+            .map(|k| BoxId::new(&format!("seedns-{round}-{k}")).unwrap())
+            .collect();
+        std::thread::scope(|s| {
+            for id in &pair {
+                s.spawn(|| create(id));
+            }
+        });
+        ids.extend(pair);
+    }
+    let seeds = create_seeds();
+    let spaces: BTreeSet<u64> = seeds.iter().filter_map(|&p| namespace(p)).collect();
+    let tables: BTreeSet<usize> = seeds.iter().filter_map(|&p| mounts(p)).collect();
+    for id in &ids {
+        node.delete(id).expect("delete");
+    }
+    assert!(
+        seeds.len() >= 2,
+        "several create seeds to compare: {seeds:?}"
+    );
+    assert_eq!(
+        spaces.len(),
+        1,
+        "every create seed in one mount namespace: {spaces:?}"
+    );
+    let own_space = std::fs::metadata("/proc/self/ns/mnt").unwrap().ino();
+    assert!(
+        !spaces.contains(&own_space),
+        "the seeds' namespace is pruned, not the node's own"
+    );
+    assert_eq!(
+        tables,
+        BTreeSet::from([before]),
+        "the pruned namespace unchanged by the creates"
+    );
+    assert!(
+        before <= 2,
+        "the pruned namespace holds its tmpfs root and no more: {before} mounts"
+    );
+    eprintln!(
+        "create seeds: {} in one pruned namespace of {before} mounts",
+        seeds.len()
+    );
 }
 
 /// Whether `open_tree(OPEN_TREE_CLONE)` clones a mount outside the caller's namespace, a detached tmpfs's: Linux

@@ -491,6 +491,48 @@ overlayfs.
 runtime doesn't make. Whether OciSpec boxes get the default seccomp profile (Hex compiles containers/common's)
 is a security posture for the person to choose.
 
+## Decision: SELinux mount labels and AppArmor profiles are applied; where the module is off, skipped with a warning or refused under strict (goal 6, AC-T7.1.4)
+
+Sources and evidence: `docs/research/runtime/goal6-lsm.md`.
+
+- `linux.mountLabel` goes on every filesystem the container's mounts make, as crun and runc label them
+  (research §1). Hex sets it as the `context` parameter of the filesystem's context (`fsconfig`), so an MLS
+  label's commas need no quoting. mqueue takes it as the `security.selinux` xattr on its root. proc, sysfs and
+  cgroup2 take none, and binds make no filesystem. That covers the spec's own mounts, `/dev`, and the tmpfs
+  that masks a directory, on the pruned path and the classic one alike. The node's ready-made `/dev`s, procs
+  and its one empty masking tmpfs were made with no label, so a labelled container takes none of them. Each
+  miss is counted as `Unpooled::MountLabel`.
+- `process.apparmorProfile` is written to `/proc/thread-self/attr/apparmor/exec`, or to `attr/exec` on a kernel
+  without the scoped file, as `exec <profile>`. When no_new_privs is set and the process is already confined,
+  Hex writes `stack <profile>`, as crun does (research §2). The write is part of `init::Becoming`, which every
+  path runs before `execve`: the pruned and classic init, the shim's init, `hex oci exec` and the
+  vfork-style exec clone. It comes before the uid change, while the task still owns its `/proc` files. The
+  file is checked to be on procfs first. An `ENOENT` from the write is refused as "profile not loaded".
+- Where the host's kernel doesn't run the module a label names, the create follows a policy. By default it
+  skips the label: the container runs without it, as crun runs it (research §3), and the create writes a
+  warning naming the field, the value and why (`hex: warning: ...` on the CLI's or the node's stderr), so
+  nothing is dropped unseen (CLAUDE.md §3). Under `HEX_OCI_LSM=strict`, read by the command line and the
+  node (`lsm::ENV_POLICY`), it refuses the spec by name instead, as runc does, for an owner who wants
+  fail-closed. Where the module runs, a label it can't apply is refused under either policy. This is the
+  lead's bar for goal 17 (2026-11-06): the goal reads "all 28 tests crun passes" on each host, and no one
+  kernel runs both modules (research §4). Until then Hex refused under every policy.
+- How the kernel is asked. AppArmor through `/proc` alone, so the answer holds in a container's init, `/sys`
+  mounted there or not: its scoped `current` attribute reads `EINVAL` where the module isn't active
+  (`fs/proc/base.c:2915-2916`, `security/security.c:3764-3774`); on a kernel without the scoped attributes,
+  Hex reads `/sys/module/apparmor/parameters/enabled` (crun's and runc's test). SELinux by a tmpfs's
+  `seclabel` flag, which SELinux claims and ignores (`security/selinux/hooks.c:2851`, `:1016-1018`) and no
+  other module claims (`fs/fs_context.c:137-148`). The `context` key can't tell, since SELinux refuses an
+  invalid label there too (`:1059`). That test works in a container with no selinuxfs mounted, where crun's
+  `/proc/mounts` test gets it wrong. A rootless agent may make no filesystem in its own namespace (`fsopen`
+  is `EPERM` there), so it reads whether selinuxfs is mounted at `/sys/fs/selinux` instead.
+- The create decides, once, before it makes anything (`lsm::admit`). The init and the exec paths apply what
+  the kernel takes and skip a module it doesn't run, which the create has already warned of, or, under
+  strict, refused.
+- `process.selinuxLabel` is still refused by name: nothing in the suite checks it, and no step asks for it yet.
+- Falsified by a run in which a labelled container's tmpfs reads a label other than the spec's, or a
+  profiled container's `/proc/self/attr/current` names another profile, or a label is skipped with no
+  warning, or one is skipped under strict.
+
 ## Decision: createContainer and startContainer hooks run in the container, at the spec's points (AC-T7.1.4)
 
 **What.** Before this decision, the runtime ran prestart, createRuntime, poststart and poststop, and parsed but

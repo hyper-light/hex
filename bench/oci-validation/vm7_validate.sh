@@ -13,6 +13,10 @@ HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
 mkdir -p "$DIR/bin" "$DIR/out"
 cp -a "$RT" "$DIR/rt"
 cp "$HEX" "$DIR/hex"
-cp "$(command -v tar)" "$DIR/bin/tar"
-printf '#!/bin/sh\nexec %s/hex oci "$@"\n' "$DIR" > "$DIR/out/hex-oci"; chmod +x "$DIR/out/hex-oci"
+# The Fedora guest has no tar, so the host's goes in; a guest with its own (vmaa_build.sh's) sets VM_TAR=0.
+[ "${VM_TAR:-1}" = 0 ] || cp "$(command -v tar)" "$DIR/bin/tar"
+# VM_CRUN: a crun binary for the guest, beside the tar in bin/, for a reference run (aa_lab.sh).
+[ -z "${VM_CRUN:-}" ] || cp "$VM_CRUN" "$DIR/bin/crun"
+# HEX_OCI_LSM, where set, is hex's LSM policy in the guest (lsm::ENV_POLICY).
+printf '#!/bin/sh\n%sexec %s/hex oci "$@"\n' "${HEX_OCI_LSM:+export HEX_OCI_LSM=$HEX_OCI_LSM; }" "$DIR" > "$DIR/out/hex-oci"; chmod +x "$DIR/out/hex-oci"
 VM7_MODE=validate bash "$HERE/vm7_lab.sh" "$DIR" "$DIR/hex"

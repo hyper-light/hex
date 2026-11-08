@@ -27,7 +27,7 @@
 //! and leaves its slot, which the thread starts again, counted.
 
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -57,10 +57,11 @@ struct Shared {
     retries: usize,
     /// The `hex` binary re-exec'd as `hex __oci-seed`.
     exe: PathBuf,
-    /// The mountpoint a create seed prunes its mount namespace at (goal 5 plan step 2), passed to each
-    /// seed as [`rt_seed::ENV_PRUNE`]; `None` on a rootless node, whose seeds don't prune and whose
+    /// The node's one pruned mount namespace (goal 5 plan step 2), made as the pool opens and joined by
+    /// each create seed ([`rt_seed::ENV_JOIN`]), so the node pivots once, not once per seed
+    /// (`goal6-mntns.md` §12); `None` on a rootless node, whose seeds don't prune and whose
     /// creates take the classic root path in the init.
-    prune: Option<PathBuf>,
+    pruned: Option<OwnedFd>,
     /// A debug-only crash point the node arms on each seed it spawns (its [`rt_seed::ENV_INJECT`]), for
     /// the crash-safety test of the pruned init's root build; `None` unless a test arms it, and absent
     /// from release builds (CLAUDE.md §6).
@@ -123,10 +124,10 @@ impl CreatePool {
     /// A pool that re-execs `exe` as `hex __oci-seed`, with the node's bounds on its host (`sizes`: at most its
     /// `seeds`, slots growing from its `start`, [`Seeds::growing`], and a line of at most its `workers`, the most
     /// calls its socket runs at once, so no create over the socket is refused for want of room in line), its
-    /// starting thread up and starting the first spare. `prune`, when
-    /// given, is the mountpoint each seed prunes its mount namespace at (a root node, goal 5 plan
-    /// step 2); `None` on a rootless node, whose seeds keep the agent's mount namespace. `asked`, when
-    /// given, is the way a pruned create's mount namespace is made (`copy`, `empty` or `tree`)
+    /// starting thread up and starting the first spare. `prune`, when given, is the mountpoint the node prunes its
+    /// seeds' one mount namespace at, once, as the pool opens (a root node, goal 5 plan step 2, `goal6-mntns.md`
+    /// §12); `None` on a rootless node, whose seeds keep the agent's mount namespace. `asked`, when given, is the
+    /// way a pruned create's mount namespace is made (`copy`, `empty` or `tree`)
     /// (decision 6's update); a way this node can't take is refused by type.
     pub fn new(
         exe: PathBuf,
@@ -189,11 +190,15 @@ impl CreatePool {
             Some(_) => mntns::choose(mntns::probe()?, asked)?,
             None => MountNamespace::Copy,
         };
+        let pruned = match prune {
+            Some(mountpoint) => Some(prune_once(mountpoint)?),
+            None => None,
+        };
         let slots = limits.seeds.get();
         let shared = Arc::new(Shared {
             retries: slots,
             exe,
-            prune,
+            pruned,
             #[cfg(debug_assertions)]
             inject,
             base: Instant::now(),
@@ -289,7 +294,7 @@ impl CreatePool {
 
 impl CloneInit for CreatePool {
     fn prunes_root(&self) -> bool {
-        self.shared.prune.is_some()
+        self.shared.pruned.is_some()
     }
 
     fn mount_namespace(&self) -> MountNamespace {
@@ -797,7 +802,7 @@ fn start_seeds(shared: &Shared) {
         drop(inner);
         let spawned = spawn(
             &shared.exe,
-            shared.prune.as_deref(),
+            shared.pruned.as_ref().map(AsFd::as_fd),
             #[cfg(debug_assertions)]
             shared.inject.as_deref(),
         );
@@ -841,11 +846,11 @@ fn start_seeds(shared: &Shared) {
 }
 
 /// Spawns a seed: a `hex __oci-seed` child of the agent, holding one end of a fresh socket; the agent
-/// keeps the other and the child's pidfd, by which it ends and reaps it. On a root node `prune` names
-/// the mountpoint the seed prunes its mount namespace at (goal 5 plan step 2).
+/// keeps the other and the child's pidfd, by which it ends and reaps it. On a root node `pruned` is the
+/// node's pruned mount namespace, sent as the seed's first record for it to join (goal 5 plan step 2).
 fn spawn(
     exe: &std::path::Path,
-    prune: Option<&Path>,
+    pruned: Option<BorrowedFd<'_>>,
     #[cfg(debug_assertions)] inject: Option<&str>,
 ) -> Result<Proc, OciError> {
     let (ours, theirs) = rt_seed::socketpair()?;
@@ -858,8 +863,8 @@ fn spawn(
         .stdin(std::process::Stdio::from(theirs))
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    if let Some(mountpoint) = prune {
-        cmd.env(rt_seed::ENV_PRUNE, mountpoint);
+    if pruned.is_some() {
+        cmd.env(rt_seed::ENV_JOIN, "1");
     }
     // The seed's init looks for a crash point only when a test arms one on the seed; otherwise it is
     // cleared from the inherited environment, so nothing but this node arms it (CLAUDE.md §6). Debug only.
@@ -881,10 +886,34 @@ fn spawn(
         .ok_or_else(|| OciError::os("starting a create seed", "the seed's pid isn't a pid"))?;
     let pidfd = rustix::process::pidfd_open(pid, PidfdFlags::empty())
         .map_err(|e| OciError::os("opening a create seed's pidfd", e))?;
-    Ok(Proc {
+    let proc = Proc {
         socket: ours,
         pidfd,
-    })
+    };
+    if let Some(namespace) = pruned
+        && let Err(e) = rt_seed::send_namespace(proc.socket.as_fd(), namespace)
+    {
+        end(&proc);
+        return Err(e);
+    }
+    Ok(proc)
+}
+
+/// The node's one pruned mount namespace (`goal6-mntns.md` §12), made at `mountpoint` by a thread of its
+/// own, which the prune leaves in that namespace and which then ends, so no other thread of the agent's
+/// changes.
+fn prune_once(mountpoint: PathBuf) -> Result<OwnedFd, Refusal> {
+    let pruning = std::thread::Builder::new()
+        .name("hex-prune".to_owned())
+        .spawn(move || rt_seed::prune_namespace(&mountpoint))
+        .map_err(|e| Refusal::os("starting the pruning thread", e))?;
+    match pruning.join() {
+        Ok(made) => Ok(made?),
+        Err(_) => Err(Refusal::os(
+            "pruning the create seeds' mount namespace",
+            "the pruning thread ended without an answer",
+        )),
+    }
 }
 
 /// The seed's process checked out of its slot for a create (the core has marked it busy, so no other

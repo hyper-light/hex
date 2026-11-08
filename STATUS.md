@@ -17,9 +17,10 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   box; pidfd waits; the io bounds target the right disks. Real-cgroup conformance + crash recovery
   pass (`hex-cli/tests/process_box.rs`).
 - **The `oci` class** (`hex-runtime`, Linux): Hex's own OCI runtime (`hex oci …`), passing **every
-  opencontainers/runtime-tools test crun passes on fedora but two it refuses by decision** (26/58
-  against crun's 28, 2026-10-27, 92b3b91; AC-T7.1.4): a mount label and an AppArmor profile the
-  suite's container can't apply, which crun drops (below), recorded in `bench/oci-validation/`. Each container has its own cgroup, with `linux.resources` and
+  opencontainers/runtime-tools test crun passes, on each host** (AC-T7.1.4; goal 17's bar, 2026-11-06,
+  cp/t7-g6-lsm, built, not merged): 28 of crun's 28 on SELinux-enforcing fedora, 30 of crun 1.27's 30 in an Ubuntu
+  24.04 AppArmor guest. On each host one of the two LSM tests passes with its label applied, and the other
+  passes with the label skipped and warned of, as crun runs it; `HEX_OCI_LSM=strict` refuses it instead (below), recorded in `bench/oci-validation/`. Each container has its own cgroup, with `linux.resources` and
   its device list in force, and is born in it. `hex oci exec` runs a program in the foreground inside a
   created or running container: born in its cgroup, in its namespaces, as its process, with the
   program's status as exec's and the caller's signals passed on, also where cgroup2 is mounted
@@ -67,7 +68,7 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   (persistent container + `hex oci exec` per step, like the docker executor shells to `docker`).
   `hex oci exec` is built (2026-10-24); next come the re-vendor and the dispatch wiring (mapped in
   NOTES.md).
-- **Seccomp is applied; apparmor/SELinux/mountLabel are refused, not dropped** (CLAUDE.md §3; was: the
+- **Seccomp, the mount label and the AppArmor profile are applied; selinuxLabel is refused, not dropped** (CLAUDE.md §3; was: the
   `oci` class ignored all four, found 2026-10-24). `spec.rs` now reads all four. The class compiles a
   spec's `linux.seccomp` to a BPF program (vendored seccompiler, `oci/seccomp.rs`) and loads it in the
   container init before `execve`: before the user and capabilities change when the spec leaves
@@ -77,14 +78,16 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   `AF_NETLINK`+`NETLINK_AUDIT` with EINVAL while allowing every other `socket` — and a behavioral test
   proves a denied syscall is refused inside a rootless container while the rest run
   (`hex-cli/tests/oci_seccomp.rs`, through the seam: probe exits 42 with the profile, 10 without). An
-  unsupported profile is a typed refusal. `process.apparmorProfile`, `process.selinuxLabel` and
-  `linux.mountLabel` stay refused by name in `Spec::check` (their apply path is LSM-host-dependent,
-  unvalidatable on the bench hosts) — a typed refusal until each is implemented, never a silent drop.
-  That costs two runtime-tools tests crun passes on fedora, `linux_mount_label` and
-  `linux_process_apparmor_profile`: in the suite's container neither SELinux nor AppArmor is visible,
-  and crun runs the container without the label or profile. Ada's call (2026-10-27): keep refusing,
-  and count those two as deliberate differences. The competitive bench is unaffected: its bundles name
-  none of them.
+  unsupported profile is a typed refusal. `linux.mountLabel` goes on every filesystem the container's mounts
+  make, as the `context` of its fsconfig (mqueue by its `security.selinux` xattr), and
+  `process.apparmorProfile` is written to the AppArmor exec attribute before `execve`, on every path (goal 6,
+  `oci/lsm.rs`). Where the kernel runs the module, a label it can't apply is refused by name. Where it doesn't,
+  the create skips the label and warns, naming it, as crun runs such a container, and `HEX_OCI_LSM=strict`, read
+  by the command line and the node, refuses it by name instead. Hex's own test reads both labels back from
+  inside a container (`hex-cli/tests/oci_lsm.rs`), on fedora and in the AppArmor guest
+  (`bench/oci-validation/goal6-lsm.md`). `process.selinuxLabel` stays refused by name. Skipping by default is
+  the lead's bar for goal 17 (2026-11-06); Ada's 2026-10-27 call had counted the two tests as deliberate
+  differences.
 - **Rootless device policy, enforced by construction** (`docs/design/runtime.md`, "Rootless devices"):
   a rootless runtime can't load the cgroup device program (CAP_BPF, which it lacks), so a deny-by-default
   allow-list is enforced by construction instead — only its devices get nodes, `mknod` is refused across

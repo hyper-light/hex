@@ -1,0 +1,14 @@
+# The way a root node makes a pruned create's mount namespace by default follows this record (decision 6's update,
+# "the faster path is the default"). hex-runtime reads this file at build time (mntns::RECORD); change the record
+# and the default follows, with nothing else to edit.
+#
+# One line per way: the way (copy, empty, tree), then its create p50 through the seam in ms on a Linux 7.1+ bench
+# host of record and the run that measured it, or `unmeasured`. All three measured in one interleaved run: the
+# default is the fastest the node can take. Otherwise it is the prediction, in order of preference, with its basis.
+copy unmeasured
+empty unmeasured
+tree unmeasured
+prediction: tree copy empty
+# basis: mount-lock holds a lifecycle, tree 3, copy 5, empty 5 (docs/research/runtime/goal6-mntns.md §4); empty
+# last, since a 7.0 kernel serves it with the copy after a refused clone. No 7.x bench host of record yet (Ada's
+# call); the 7.2 guest's create p50, tree against copy, didn't differ (goal6-mntns.md §9, not of record).

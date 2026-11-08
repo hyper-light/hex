@@ -22,6 +22,8 @@ set -euo pipefail
 TGT=$(realpath "${1:?target dir}"); shift
 [ "$#" -gt 0 ] || { echo "usage: vm7_lab.sh <target dir> <test binary>..." >&2; exit 2; }
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
+# Its container carries the run's labels and goes with the run, however it ends (containers.sh).
+. "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/../competitive/containers.sh"
 VM_DIR=${VM_DIR:-$HOME/.cache/hex-t7/g6/vm}
 IMG=hexlab-vm7:44
 for f in vmlinuz initramfs.img rootfs.ext4 KERNEL; do
@@ -39,12 +41,15 @@ printf '%s\n' "${VM7_MODE:-seam}" > "$JOB/mode"
 echo "vm7 lab run $RUN"
 cat "$VM_DIR/KERNEL"
 NAME=hexlab-vm7-$RUN
-trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
+bench_trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true'
 set +e
-docker run --rm --init --name "$NAME" --device /dev/kvm --security-opt label=disable --network=none \
+# A guest is called hung past twice the slowest recorded guest of any mode (the false-alarm margin of a failure bound):
+# 121 s, a breakdown at 8,000 idle threads (fedora ~/.cache/hex-t7/g6/vm/runs/20261106T065455Z-1382710, from its
+# directory's start to its last write, over 136 runs: seam <=34 s, validate 62 s), so 242 s. A run sets its own.
+docker run --rm --init --name "$NAME" "${BENCH_LABELS[@]}" --device /dev/kvm --security-opt label=disable --network=none \
   --cpuset-cpus "${VM_CPUS:-16-31}" --memory "${BENCH_MEMORY:-8g}" --oom-score-adj "${BENCH_OOM:-1000}" \
   -v "$VM_DIR:/vm:ro" -v "$HERE:/opt/lab:ro" -v "$JOB:/job" -v "$TGT:$TGT" "$IMG" \
-  timeout "${VM_TIMEOUT:-3600}" qemu-system-x86_64 -machine q35,accel=kvm -cpu host \
+  timeout "${VM_TIMEOUT:-242}" qemu-system-x86_64 -machine q35,accel=kvm -cpu host \
     -smp "${VM_SMP:-8}" -m "${VM_MEM:-6G}" -nodefaults -display none -serial stdio -no-reboot -snapshot \
     -kernel /vm/vmlinuz -initrd /vm/initramfs.img \
     -append "console=ttyS0 root=/dev/vda rw init=/sbin/vm7-boot panic=-1 quiet loglevel=3 systemd.show_status=0 rd.udev.log_level=3" \

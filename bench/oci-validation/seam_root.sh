@@ -15,9 +15,12 @@ TGT=$(realpath "${1:?target dir}"); shift
 [ "$#" -gt 0 ] || { echo "usage: seam_root.sh <target dir> <test binary>..." >&2; exit 2; }
 IMAGE=${IMAGE:-registry.fedoraproject.org/fedora:44}
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
+# Its container carries the run's labels and goes with the run, however it ends (containers.sh).
+. "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/../competitive/containers.sh"
+bench_trap :
 LAB_HOME=${LAB_HOME:-$HOME/.cache/hex-t7/seam-root-home}
 mkdir -p "$LAB_HOME"
-docker run --rm --privileged --security-opt label=disable --cgroupns=private --network=none \
+docker run --rm "${BENCH_LABELS[@]}" --privileged --security-opt label=disable --cgroupns=private --network=none \
   ${BENCH_MEMORY:+--memory="$BENCH_MEMORY"} ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
   --tmpfs /run:rw,exec,nosuid,size=1g \
   -v /usr:/usr:ro -v "$TGT:$TGT" -v "$HERE:/opt/lab:ro" -v "$LAB_HOME:/root" -e HOME=/root \

@@ -6,12 +6,14 @@
 //! Layering, sans-IO core first (CLAUDE.md §9): [`spec`] parses `config.json`, [`state`] is the
 //! on-disk container state, [`mount`] turns a spec's mounts and paths into an ordered plan of
 //! operations, [`resources`] turns `linux.resources` into cgroup v2 writes and a device program,
-//! [`seccomp`] compiles `linux.seccomp` into a BPF program the init loads before `execve`, and
+//! [`seccomp`] compiles `linux.seccomp` into a BPF program the init loads before `execve`, [`lsm`]
+//! applies `linux.mountLabel` and `process.apparmorProfile` or refuses them by name, and
 //! [`devshare`] lets containers with one device policy share one loaded device program. The
 //! imperative shell that makes the cgroup and namespaces, pivots the root and runs the init is in
-//! [`run`] and [`init`], which resolves every path in the container's root inside it ([`inroot`]) and
-//! brings up the loopback of a network namespace it makes ([`net`]); a node agent's device programs,
-//! held open one per policy, are [`programs`]; the system calls that need `unsafe` are in [`sys`].
+//! [`run`] and [`init`], which resolves every path in the container's root inside it ([`inroot`])
+//! and brings up the loopback of a network namespace it makes ([`net`]); a node agent's device
+//! programs, held open one per policy, are [`programs`]; the system calls that need `unsafe` are in
+//! [`sys`].
 
 pub mod caps;
 pub mod checked;
@@ -23,6 +25,7 @@ pub mod hooks;
 pub mod init;
 pub mod inroot;
 pub mod ipcuts;
+pub mod lsm;
 pub mod mntns;
 pub mod mount;
 pub mod net;

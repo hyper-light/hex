@@ -21,7 +21,10 @@
 //!   agent's create seeds, the boxes' inits) is pinned, and each task's `Cpus_allowed_list` read back
 //!   and recorded with the pair;
 //! - `rtt`: inspect of a running box, timed alone, whose work is the same either way, so the socket's
-//!   cost per call is the two drivers' difference in one run.
+//!   cost per call is the two drivers' difference in one run;
+//! - `serve`, run only when `HEXBENCH_PHASES` names it: bursts of the throughput lifecycle on request, a line on
+//!   stdin each, every lifecycle's create and delete timed and replied as a line on stdout, so a coordinator
+//!   (bench/competitive/probes/rounds.py) interleaves this node with others round by round (goal 17's record).
 //!
 //! Around every phase it reads the node's network namespace counts (made ahead, taken from its pool,
 //! made on a create's path because the pool was dry or the node keeps none, discarded, failed), in
@@ -567,6 +570,108 @@ mod linux {
             took.sort_by(f64::total_cmp);
             errs.into_iter().next().map_or(Ok((wall, cpu_s, took)), Err)
         })
+    }
+
+    /// `lifecycles` of the throughput lifecycle at concurrency `conc`, as [`at_concurrency`] runs them, with each
+    /// one's create and delete timed alone, as the throughput phase times them: the creates' ms and the deletes'.
+    fn burst(
+        node: &dyn Runtime,
+        bundle: &Path,
+        conc: usize,
+        lifecycles: usize,
+        tag: &str,
+    ) -> Result<(Vec<f64>, Vec<f64>), String> {
+        let (next, failed) = (AtomicUsize::new(0), AtomicBool::new(false));
+        let start = Barrier::new(conc + 1);
+        std::thread::scope(|s| {
+            let threads: Vec<_> = (0..conc)
+                .map(|_| {
+                    s.spawn(|| {
+                        let (mut creates, mut deletes) = (Vec::new(), Vec::new());
+                        start.wait();
+                        while !failed.load(Ordering::Relaxed) {
+                            let i = next.fetch_add(1, Ordering::Relaxed);
+                            if i >= lifecycles {
+                                break;
+                            }
+                            match run_true_container_timed(node, bundle, &format!("{tag}{i:03}")) {
+                                Ok((create, delete)) => {
+                                    creates.push(create.as_secs_f64() * 1e3);
+                                    deletes.push(delete.as_secs_f64() * 1e3);
+                                }
+                                Err(e) => {
+                                    failed.store(true, Ordering::Relaxed);
+                                    return Err(e);
+                                }
+                            }
+                        }
+                        Ok((creates, deletes))
+                    })
+                })
+                .collect();
+            start.wait();
+            let (mut creates, mut deletes, mut errs) = (
+                Vec::with_capacity(lifecycles),
+                Vec::with_capacity(lifecycles),
+                Vec::new(),
+            );
+            for t in threads {
+                match t
+                    .join()
+                    .unwrap_or_else(|_| Err("a thread panicked".to_owned()))
+                {
+                    Ok((c, d)) => {
+                        creates.extend(c);
+                        deletes.extend(d);
+                    }
+                    Err(e) => errs.push(e),
+                }
+            }
+            errs.into_iter().next().map_or(Ok((creates, deletes)), Err)
+        })
+    }
+
+    /// The `serve` phase (goal 17's record, bench/competitive/probes/rounds.py): bursts on request, so a coordinator
+    /// can interleave this node with other runtimes round by round, each burst meeting the host as it is then (Ada's
+    /// rule: a p99 claim stands on at least 299 interleaved rounds, the load recorded each round). A request is one
+    /// line on stdin, `burst <lifecycles> <concurrency>`. Its reply is one JSON line on stdout: each lifecycle's create
+    /// and delete in ms, `{"create_ms":[..],"delete_ms":[..]}`, or `{"error":".."}`, after which the phase ends with
+    /// that error. Stdin's end ends it, with the bursts and lifecycles it served. A burst's boxes are named by its
+    /// number, so no box id comes twice.
+    fn serve(node: &dyn Runtime, bundle: &Path) -> Result<Value, String> {
+        let (mut bursts, mut lifecycles) = (0usize, 0usize);
+        let reply = |v: &Value| {
+            let mut out = std::io::stdout().lock();
+            writeln!(out, "{v}")
+                .and_then(|()| out.flush())
+                .map_err(|e| format!("replying: {e}"))
+        };
+        for line in std::io::stdin().lock().lines() {
+            let line = line.map_err(|e| format!("reading a request: {e}"))?;
+            let asked = match line.split_whitespace().collect::<Vec<_>>().as_slice() {
+                ["burst", n, conc] => n.parse::<usize>().ok().zip(conc.parse::<usize>().ok()),
+                _ => None,
+            };
+            let Some((n, conc)) = asked.filter(|&(n, conc)| n > 0 && conc > 0) else {
+                let e = format!(
+                    "a request {line:?} isn't `burst <lifecycles> <concurrency>`, each above 0"
+                );
+                reply(&json!({"error": e}))?;
+                return Err(e);
+            };
+            match burst(node, bundle, conc, n, &format!("v{bursts:06}-")) {
+                Ok((create_ms, delete_ms)) => {
+                    reply(&json!({"create_ms": create_ms, "delete_ms": delete_ms}))?
+                }
+                Err(e) => {
+                    reply(&json!({"error": e}))?;
+                    return Err(e);
+                }
+            }
+            bursts += 1;
+            lifecycles += n;
+        }
+        Ok(json!({"bursts": bursts, "lifecycles": lifecycles}))
     }
 
     /// The `per_mille` quantile of `sorted`, ascending, by its nearest rank; `None` for none.
@@ -1409,6 +1514,7 @@ mod linux {
             "rtt",
             "list",
             "counts",
+            "serve",
         ] {
             if !wanted.split_whitespace().any(|w| w == phase) {
                 continue;
@@ -1433,12 +1539,13 @@ mod linux {
                     "start_true" => start_true(node, &true_bundle, n, warmup),
                     "throughput" => throughput(node, &true_bundle, &parent, lifecycles),
                     "sustained" => sustained(node, &true_bundle, &parent, sustained_lifecycles),
-                    "interleaved" => interleaved(node, &true_bundle, &parent),
-                    "list" => list(node, &sleep_bundle, n),
-                    // The waits census's `client.answer.netns` row: the node's counts, asked `n` times.
-                    "counts" => (0..n)
-                        .try_for_each(|_| driver.netns().map(drop))
-                        .map(|()| json!({ "calls": n })),
+                        "interleaved" => interleaved(node, &true_bundle, &parent),
+                        "list" => list(node, &sleep_bundle, n),
+                        // The waits census's `client.answer.netns` row: the node's counts, asked `n` times.
+                        "counts" => (0..n)
+                            .try_for_each(|_| driver.netns().map(drop))
+                            .map(|()| json!({ "calls": n })),
+                        "serve" => serve(node, &true_bundle),
                     _ => rtt(node, &sleep_bundle, n, warmup),
                 }?;
                 let rose = rise(before, driver.netns()?);

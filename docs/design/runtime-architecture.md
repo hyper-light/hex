@@ -2020,10 +2020,13 @@ made in two parts.
 
   The node probes for `OPEN_TREE_NAMESPACE` once at start with an `open_tree` that makes nothing (an empty path at
   descriptor -1: `EBADF` where the call is there, `EINVAL` where it isn't, `EPERM` where the agent may not;
-  `goal6-mntns.md` §6). The default is the path the record shows fastest. Until a 7.x host has measured them, it is
-  `OpenTree` where the probe finds it, by the hold count above. The bench and the lab may ask a node they build for another
-  (`Node::with_mount_namespace`: `copy`, `empty` or `tree`; seam_oci's `HEX_OCI_MNTNS`, the A/B's, until the 7.1/7.2
-  host record decides it); the node agent reads no environment for it (Ada's 2026-11-06 rule). A namespace from its tree asked where the probe doesn't find it is
+  `goal6-mntns.md` §6). The default follows its record, `bench/competitive/probes/mntns_default.txt`, which the
+  runtime reads at build (`mntns::RECORD`). Once all three ways have a create p50 from one interleaved run on a 7.1+
+  bench host of record, the default is the fastest this node can take. Until then it is the record's stated
+  prediction, `OpenTree` first by the hold count above. Changing the record changes the default, with nothing else
+  to edit. The record's A/B asks a node it builds for each way in turn (`Node::with_mount_namespace`: `copy`, `empty`
+  or `tree`; seam_oci's `HEX_OCI_MNTNS`, read by the bench's node alone); a `hex node` takes its default and reads no
+  environment for it (Ada's 2026-11-06 rule), with no switch back to an older way. A namespace from its tree asked where the probe doesn't find it is
   refused by type at the first create. Empty asked where the kernel lacks the flag is served by the seed's copy. Each
   create is counted under the way its seed answers it was made (`Node::mount_namespaces_made`), so that fallback
   shows, beside `ClassicReason`'s counts.
@@ -2094,6 +2097,8 @@ made in two parts.
   `oci_box`).
 - HEX-MNTNS-8, masked directories: every masked directory of every box on a root node is one filesystem, the
   node's, on the pruned path and through the shim (`oci_box`, as root, on 6.19 and 7.2).
+- HEX-MNTNS-9, the default follows its record: a measured record orders the ways by create p50; an unmeasured one
+  takes its prediction; a hostile record is refused by type; the record built in names today's default (unit).
 - HEX-MNTNS-7, Ada's under-load bar: part 19's p99 at most 0.5 ms at 8 in flight with 8,000 idle threads, at 6 and 12
   busy loops at nice 0 on the same cores, with Docker's default paths, and the whole create's p99 lower with it; no
   priority, nice, RT or slice change.

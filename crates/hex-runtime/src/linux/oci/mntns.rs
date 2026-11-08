@@ -62,6 +62,71 @@ pub fn probe() -> Result<OpenTreeNamespace, OciError> {
     classify(rustix::mount::open_tree(&not_a_dir, "probe", flags).map(drop))
 }
 
+/// The record the default follows (`bench/competitive/probes/mntns_default.txt`): each way's create p50 on a
+/// 7.1+ bench host of record, or the prediction until all three are measured.
+pub const RECORD: &str = include_str!("../../../../../bench/competitive/probes/mntns_default.txt");
+
+/// The ways in `record`'s order of preference: by create p50, fastest first, where all three are measured;
+/// else its prediction. A record that names a way twice, misses one, or says what this reading doesn't cover is
+/// refused by type.
+pub fn order(record: &str) -> Result<Vec<MountNamespace>, OciError> {
+    let bad = |why: String| OciError::Config(format!("the mount-namespace record: {why}"));
+    let way = |word: &str| match word {
+        "copy" => Ok(MountNamespace::Copy),
+        "empty" => Ok(MountNamespace::Empty),
+        "tree" => Ok(MountNamespace::FromTree),
+        other => Err(bad(format!("{other:?} names no way"))),
+    };
+    let mut measured: Vec<(MountNamespace, Option<f64>)> = Vec::new();
+    let mut prediction = None;
+    for line in record.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("prediction:") {
+            let ways = rest
+                .split_whitespace()
+                .map(way)
+                .collect::<Result<Vec<_>, _>>()?;
+            prediction = Some(ways);
+            continue;
+        }
+        let mut words = line.split_whitespace();
+        let (Some(w), Some(p50)) = (words.next(), words.next()) else {
+            return Err(bad(format!("{line:?} is no way and p50")));
+        };
+        let w = way(w)?;
+        let p50 = match p50 {
+            "unmeasured" => None,
+            ms => Some(
+                ms.parse::<f64>()
+                    .ok()
+                    .filter(|v| v.is_finite() && *v > 0.0)
+                    .ok_or_else(|| bad(format!("{ms:?} is no p50 in ms")))?,
+            ),
+        };
+        if measured.iter().any(|(m, _)| *m == w) {
+            return Err(bad(format!("{w:?} is named twice")));
+        }
+        measured.push((w, p50));
+    }
+    let prediction = prediction.ok_or_else(|| bad("no prediction".to_owned()))?;
+    if measured.len() != 3 {
+        return Err(bad(format!("{} ways, not 3", measured.len())));
+    }
+    // All measured: fastest first, a tie kept in the prediction's order (a stable sort over it).
+    let mut all = Vec::with_capacity(measured.len());
+    for (w, p50) in &measured {
+        match p50 {
+            Some(ms) => all.push((*w, *ms)),
+            None => return Ok(prediction),
+        }
+    }
+    let rank = |w: &MountNamespace| prediction.iter().position(|p| p == w).unwrap_or(usize::MAX);
+    all.sort_by(|a, b| a.1.total_cmp(&b.1).then(rank(&a.0).cmp(&rank(&b.0))));
+    Ok(all.into_iter().map(|(w, _)| w).collect())
+}
+
 /// The `clone3` namespace flags of an init whose mount namespace is made `way`, from the spec's `flags`, which hold
 /// `CLONE_NEWNS` (the seed's namespace copied): from its tree, the init is cloned without it and joins the namespace
 /// the agent made; empty, `CLONE_EMPTY_MNTNS` takes its place. What a fresh clone takes ([`super::seed`]'s
@@ -75,14 +140,28 @@ pub fn clone_flags(flags: u64, way: MountNamespace) -> u64 {
     }
 }
 
-/// The way a node takes unless asked for another: from its tree where this process may make one, else the
-/// copy. `Empty` makes the same holds of the mount lock as the copy (`goal6-mntns.md` §4), so it isn't the
-/// default until a 7.1 host's record shows it faster.
-pub fn default_way(open_tree: OpenTreeNamespace) -> MountNamespace {
-    match open_tree {
-        OpenTreeNamespace::Available => MountNamespace::FromTree,
-        OpenTreeNamespace::NotPermitted | OpenTreeNamespace::Absent => MountNamespace::Copy,
-    }
+/// The way a node takes unless asked for another: the first in `record`'s order ([`order`]) that this node can
+/// take. The copy it always can; from its tree where the probe finds the call; empty where the probe finds
+/// Linux 7.0's call too, since a 7.0 kernel serves it with the copy after one refused clone a seed.
+pub fn default_from(
+    record: &str,
+    open_tree: OpenTreeNamespace,
+) -> Result<MountNamespace, OciError> {
+    let takeable = |w: &MountNamespace| match w {
+        MountNamespace::Copy => true,
+        MountNamespace::FromTree | MountNamespace::Empty => {
+            open_tree == OpenTreeNamespace::Available
+        }
+    };
+    Ok(order(record)?
+        .into_iter()
+        .find(takeable)
+        .unwrap_or(MountNamespace::Copy))
+}
+
+/// [`default_from`] the record built in ([`RECORD`]).
+pub fn default_way(open_tree: OpenTreeNamespace) -> Result<MountNamespace, OciError> {
+    default_from(RECORD, open_tree)
 }
 
 /// The way a node takes: `asked` (`copy`, `empty` or `tree`) where given, else [`default_way`]. A namespace
@@ -94,7 +173,7 @@ pub fn choose(
     asked: Option<&str>,
 ) -> Result<MountNamespace, OciError> {
     match asked {
-        None => Ok(default_way(open_tree)),
+        None => default_way(open_tree),
         Some("copy") => Ok(MountNamespace::Copy),
         Some("empty") => Ok(MountNamespace::Empty),
         Some("tree") if open_tree == OpenTreeNamespace::Available => Ok(MountNamespace::FromTree),
@@ -133,6 +212,77 @@ mod tests {
             assert!(classify(Err(other)).is_err(), "{other:?} is refused");
         }
         assert!(classify(Ok(())).is_err());
+    }
+
+    /// HEX-MNTNS-9 ("the faster path is the default"): read a record with all three ways measured, then one with
+    /// any unmeasured. Expect the fastest the node can take as the default in the first, wherever its line sits,
+    /// and the prediction's first takeable in the second; a 6.19 node (no call) the copy either way.
+    #[test]
+    fn the_default_follows_its_record() {
+        use OpenTreeNamespace::*;
+        let measured = "# a run\ntree 1.20 run-a\ncopy 0.95 run-a\nempty 1.10 run-a\nprediction: tree copy empty\n";
+        assert_eq!(
+            order(measured).unwrap(),
+            [
+                MountNamespace::Copy,
+                MountNamespace::Empty,
+                MountNamespace::FromTree
+            ]
+        );
+        assert_eq!(
+            default_from(measured, Available).unwrap(),
+            MountNamespace::Copy
+        );
+        let empty_fastest = "tree 1.2 r\ncopy 1.3 r\nempty 0.9 r\nprediction: tree copy empty\n";
+        assert_eq!(
+            default_from(empty_fastest, Available).unwrap(),
+            MountNamespace::Empty
+        );
+        assert_eq!(
+            default_from(empty_fastest, Absent).unwrap(),
+            MountNamespace::Copy
+        );
+        let predicted = "tree 1.2 r\ncopy unmeasured\nempty 0.9 r\nprediction: tree copy empty\n";
+        assert_eq!(
+            default_from(predicted, Available).unwrap(),
+            MountNamespace::FromTree
+        );
+        assert_eq!(
+            default_from(predicted, NotPermitted).unwrap(),
+            MountNamespace::Copy
+        );
+    }
+
+    /// HEX-MNTNS-9: hostile records. Expect each refused by type, never read as a default: a way named twice, one
+    /// missing, an unknown word, a p50 that isn't a positive number of ms, no prediction.
+    #[test]
+    fn a_record_that_says_nothing_valid_is_refused() {
+        for bad in [
+            "tree 1 r\ntree 2 r\ncopy 1 r\nprediction: tree\n",
+            "tree 1 r\ncopy 1 r\nprediction: tree copy\n",
+            "tree 1 r\ncopy 1 r\nfast 1 r\nprediction: tree\n",
+            "tree -1 r\ncopy 1 r\nempty 1 r\nprediction: tree\n",
+            "tree NaN r\ncopy 1 r\nempty 1 r\nprediction: tree\n",
+            "tree 1 r\ncopy 1 r\nempty 1 r\n",
+            "tree\ncopy 1 r\nempty 1 r\nprediction: tree\n",
+            "tree 1 r\ncopy 1 r\nempty 1 r\nprediction: tree sideways\n",
+        ] {
+            assert!(matches!(order(bad), Err(OciError::Config(_))), "{bad:?}");
+        }
+    }
+
+    /// HEX-MNTNS-9, doc truth: read the record built in. Expect it valid, and its default on a 7.x node the one
+    /// decision 6's update names today (from its tree, predicted), the copy on 6.19.
+    #[test]
+    fn the_record_built_in_reads_and_names_todays_default() {
+        assert_eq!(
+            default_way(OpenTreeNamespace::Available).unwrap(),
+            MountNamespace::FromTree
+        );
+        assert_eq!(
+            default_way(OpenTreeNamespace::Absent).unwrap(),
+            MountNamespace::Copy
+        );
     }
 
     /// HEX-MNTNS-1: choose with and without a way asked, on each probe's answer; expect from its tree by

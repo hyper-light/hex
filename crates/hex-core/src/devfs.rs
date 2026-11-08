@@ -47,6 +47,7 @@ pub struct Counts {
     pub unpooled_user_namespace: u64,
     pub unpooled_pid_namespace: u64,
     pub unpooled_beneath: u64,
+    pub unpooled_mount_label: u64,
     /// Fixed preparation stages; their sum is `failed`.
     pub failed_filesystem: u64,
     pub failed_device: u64,
@@ -93,6 +94,9 @@ pub enum Unpooled {
     /// A prepared proc: another mount at or beneath `/proc`, or a mask or read-only path of `/proc` itself
     /// or reached through `..`, which ordinary construction orders against the proc.
     Beneath,
+    /// A container with a mount label (`linux.mountLabel`): the node made its pieces unlabelled, so the
+    /// init makes its own, each with the label (goal 6, docs/design/runtime.md).
+    MountLabel,
 }
 
 #[derive(Clone, Copy)]
@@ -255,6 +259,7 @@ impl<K: Clone + Eq, T> Pool<K, T> {
             Unpooled::UserNamespace => &mut self.counts.unpooled_user_namespace,
             Unpooled::PidNamespace => &mut self.counts.unpooled_pid_namespace,
             Unpooled::Beneath => &mut self.counts.unpooled_beneath,
+            Unpooled::MountLabel => &mut self.counts.unpooled_mount_label,
         };
         *count = count.saturating_add(1);
         Ok(())
@@ -557,6 +562,7 @@ mod tests {
             Unpooled::KeyBytes,
             Unpooled::Capacity,
             Unpooled::UserNamespace,
+            Unpooled::MountLabel,
         ] {
             p.unpooled(reason).unwrap();
         }
@@ -571,9 +577,10 @@ mod tests {
                 c.unpooled_inodes,
                 c.unpooled_key_bytes,
                 c.unpooled_capacity,
-                c.unpooled_user_namespace
+                c.unpooled_user_namespace,
+                c.unpooled_mount_label
             ],
-            [1; 9]
+            [1; 10]
         );
         assert_eq!(
             c.on_path,
@@ -590,6 +597,7 @@ mod tests {
                 + c.unpooled_key_bytes
                 + c.unpooled_capacity
                 + c.unpooled_user_namespace
+                + c.unpooled_mount_label
         );
         assert!(p.entries.is_empty());
         assert_eq!(p.held(), 0);

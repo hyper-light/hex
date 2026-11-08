@@ -51,12 +51,14 @@ use crate::linux::oci::ipcuts::Pair;
 use crate::linux::oci::spec::{Namespace, Process, Spec};
 use crate::linux::oci::{Failure, OciError, exec, init, sys};
 
-/// The environment entry by which the node agent tells a create seed to prune its mount namespace at
-/// start (goal 5 plan step 2): its value is a directory the agent ensured exists, which the seed
-/// mounts a fresh tmpfs over and pivots into, so its namespace then holds only that read-only tmpfs,
-/// holding nothing. Set only for a root node's create seeds; absent for an exec seed and a rootless node,
-/// which keep the agent's mount namespace and take the classic root path.
-pub const ENV_PRUNE: &str = "HEX_OCI_SEED_PRUNE";
+/// The environment entry by which the node agent tells a create seed to join the node's one pruned mount
+/// namespace at start (goal 5 plan step 2): the agent sends that namespace as the first record on the
+/// seed's socket ([`send_namespace`]) and the seed joins it by `setns`, so its namespace holds only the
+/// pruned read-only tmpfs, holding nothing. The node prunes once for all its seeds ([`prune_namespace`]),
+/// since each `pivot_root` walks every thread on the host under the mount lock (`goal6-mntns.md` §11,
+/// §12). Set only for a root node's create seeds; absent for an exec seed and a rootless node, which keep
+/// the agent's mount namespace and take the classic root path.
+pub const ENV_JOIN: &str = "HEX_OCI_SEED_JOIN";
 
 /// A debug-only crash point the node agent arms on a create seed (its `with_inject`, never a container's
 /// config, which reaches the init only at `execve`, after the root is built): its value names a point in
@@ -113,13 +115,13 @@ fn serve() -> Result<(), OciError> {
     // The seed's own pid namespace is opened before any prune: once pruned there is no `/proc` to open
     // it through. A create seed never uses it (it never execs), but the serve loop is shared.
     let mut pid_for = PidFor::open()?;
-    // A create seed on a root node prunes its mount namespace once, here, off every create's path, so
-    // every init it clones copies a two-mount namespace holding nothing of the host (goal 5 plan step 2).
-    if let Some(mountpoint) = std::env::var_os(ENV_PRUNE) {
+    // A create seed on a root node joins the node's pruned mount namespace once, here, off every create's
+    // path, so every init it clones copies a namespace holding nothing of the host (goal 5 plan step 2).
+    if std::env::var_os(ENV_JOIN).is_some() {
         // The namespace's mount cap, read while there is a `/proc` to read it from, for every init this seed
         // clones to bound its walks of the namespace's mounts by (init::MOUNT_MAX).
         init::mount_max()?;
-        prune(Path::new(&mountpoint))?;
+        join_pruned(socket.as_fd())?;
     }
     let mut specs = Specs::default();
     let mut buf = vec![0u8; seed::MAX_REQUEST];
@@ -141,22 +143,34 @@ fn serve() -> Result<(), OciError> {
 /// remounted read-only; a container's root is attached on it, which takes no block.
 pub(crate) const ROOT_TMPFS: &std::ffi::CStr = c"nr_blocks=1,mode=755";
 
-/// Prunes the create seed's mount namespace once, at start (goal 5 plan step 2): unshare a mount
-/// namespace, make `/` private, mount a small tmpfs over `mountpoint`, pivot into it, detach the old
-/// root and make the tmpfs read-only. The namespace then holds exactly two mounts — its root and that
-/// tmpfs on it, holding nothing — and nothing of the host: no proc, no sysfs (f78). The init attaches
-/// the container's root on the tmpfs's own root (plan step 3), so the tmpfs needs no place in it.
-/// Every init the seed clones (`clone3` with `CLONE_NEWNS`) copies this, so the init builds the
-/// container's root from the descriptors the agent hands it, with nothing of the host beneath it. `mountpoint` is a directory the
-/// agent ensured exists; after the pivot and detach the host path it was is gone from this namespace.
-/// This is the one `pivot_root` on the pruned path, off every create's path and once per seed's life.
-fn prune(mountpoint: &Path) -> Result<(), OciError> {
+/// Prunes a mount namespace for the node's create seeds, once per node (goal 5 plan step 2,
+/// `goal6-mntns.md` §12): unshare a mount namespace, make `/` private, mount a small tmpfs over
+/// `mountpoint`, pivot into it, detach the old root and make the tmpfs read-only. The namespace then
+/// holds exactly two mounts — its root and that tmpfs on it, holding nothing — and nothing of the host:
+/// no proc, no sysfs (f78). The init attaches the container's root on the tmpfs's own root (plan step 3),
+/// so the tmpfs needs no place in it. Every seed joins it ([`ENV_JOIN`]) and every init a seed clones
+/// (`clone3` with `CLONE_NEWNS`) copies it, so the init builds the container's root from the descriptors
+/// the agent hands it, with nothing of the host beneath it. `mountpoint` is a directory the agent ensured
+/// exists; after the pivot and detach the host path it was is gone from this namespace.
+///
+/// The caller is a thread of the agent's of its own, which this leaves in the pruned namespace: `unshare`
+/// gives it a mount namespace and root of its own (`CLONE_NEWNS` implies `CLONE_FS`), so no other thread's
+/// changes. The namespace is opened before the pivot, while `/proc` is there to open it by. This is the one
+/// `pivot_root` on the pruned path: each walks every thread on the host under the mount lock
+/// (`fs/fs_struct.c:54-80`, `goal6-mntns.md` §11), so one per node, not one per seed.
+pub fn prune_namespace(mountpoint: &Path) -> Result<OwnedFd, OciError> {
     sys::unshare(rustix::thread::UnshareFlags::NEWNS)?;
+    let namespace = rustix::fs::open(
+        "/proc/thread-self/ns/mnt",
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| OciError::os("opening the pruned mount namespace", e))?;
     rustix::mount::mount_change(
         "/",
         MountPropagationFlags::PRIVATE | MountPropagationFlags::REC,
     )
-    .map_err(|e| OciError::os("making the seed's mounts private", e))?;
+    .map_err(|e| OciError::os("making the pruned namespace's mounts private", e))?;
     // A fresh small tmpfs over the mountpoint (made first if the agent didn't), left empty.
     let _ = rustix::fs::mkdir(mountpoint, Mode::from_bits_truncate(0o755));
     rustix::mount::mount(
@@ -166,16 +180,42 @@ fn prune(mountpoint: &Path) -> Result<(), OciError> {
         MountFlags::NOSUID,
         Some(ROOT_TMPFS),
     )
-    .map_err(|e| OciError::os("the seed's root tmpfs", e))?;
-    rustix::process::chdir(mountpoint).map_err(|e| OciError::os("chdir the seed's root", e))?;
+    .map_err(|e| OciError::os("the pruned namespace's root tmpfs", e))?;
+    rustix::process::chdir(mountpoint)
+        .map_err(|e| OciError::os("chdir the pruned namespace's root", e))?;
     rustix::process::pivot_root(c".", c".")
-        .map_err(|e| OciError::os("the seed's pivot_root", e))?;
+        .map_err(|e| OciError::os("the pruned namespace's pivot_root", e))?;
     rustix::mount::unmount(".", UnmountFlags::DETACH)
-        .map_err(|e| OciError::os("detaching the seed's old root", e))?;
+        .map_err(|e| OciError::os("detaching the pruned namespace's old root", e))?;
     rustix::process::chdir("/").map_err(|e| OciError::os("chdir /", e))?;
     rustix::mount::mount_remount("/", MountFlags::RDONLY | MountFlags::BIND, "")
-        .map_err(|e| OciError::os("remounting the seed's root read-only", e))?;
-    Ok(())
+        .map_err(|e| OciError::os("remounting the pruned namespace's root read-only", e))?;
+    Ok(namespace)
+}
+
+/// Joins the node's pruned mount namespace, the first record on the seed's socket ([`send_namespace`]):
+/// `setns(CLONE_NEWNS)` sets this process's root and working directory to the namespace's root and takes
+/// no mount lock (`mntns_install`, v6.19 `fs/namespace.c:6218-6258`). The seed is single-threaded here, as
+/// it must be (`fs->users == 1`). Anything but one byte and one descriptor is refused by type.
+fn join_pruned(socket: BorrowedFd<'_>) -> Result<(), OciError> {
+    let mut buf = [0u8; 1];
+    match recv_request(socket, &mut buf)? {
+        Received::Message { size: 1, stdio } => match <[OwnedFd; 1]>::try_from(stdio) {
+            Ok([namespace]) => {
+                sys::setns(namespace.as_fd(), libc::CLONE_NEWNS).map_err(OciError::from)
+            }
+            Err(fds) => Err(OciError::Broken(format!(
+                "the pruned namespace came with {} descriptors, not 1",
+                fds.len()
+            ))),
+        },
+        Received::Message { size, .. } => Err(OciError::Broken(format!(
+            "the pruned namespace's record is {size} bytes, not 1"
+        ))),
+        Received::Closed => Err(OciError::Broken(
+            "the agent closed the seed's socket before sending the pruned namespace".to_owned(),
+        )),
+    }
 }
 
 /// The pid namespace the seed's children are born in: its own, or the container's the last single
@@ -1845,6 +1885,21 @@ fn descriptors(control: &mut RecvAncillaryBuffer<'_>) -> Vec<OwnedFd> {
         })
         .flatten()
         .collect()
+}
+
+/// Sends the node's pruned mount namespace on a new create seed's socket as its first record: one byte,
+/// the namespace's descriptor riding with it (`SCM_RIGHTS`), which the seed joins ([`ENV_JOIN`]).
+pub fn send_namespace(socket: BorrowedFd<'_>, namespace: BorrowedFd<'_>) -> Result<(), OciError> {
+    let fds = [namespace];
+    let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+    let mut control = SendAncillaryBuffer::new(&mut space);
+    if !control.push(SendAncillaryMessage::ScmRights(&fds)) {
+        return Err(OciError::os(
+            "sending the pruned namespace",
+            "no room for its descriptor",
+        ));
+    }
+    send(socket, &[1], &mut control)
 }
 
 /// Sends `bytes` as one record with `control`'s descriptors, retrying an interrupted call.

@@ -80,6 +80,8 @@ pub struct Runtime {
     /// subcommands. A library caller whose binary doesn't — the node agent linked into another
     /// program, the bench — names the `hex` binary explicitly ([`Runtime::with_helper`]).
     helper: Option<PathBuf>,
+    /// What a create does with a label whose module the host's kernel doesn't run ([`Runtime::with_lsm`]).
+    lsm: super::lsm::Policy,
 }
 
 /// One container's create as its shim is started: its id, bundle, state directory and the pid file
@@ -683,7 +685,18 @@ impl Drop for Parked {
 
 impl Runtime {
     pub fn new(root: PathBuf) -> Self {
-        Self { root, helper: None }
+        Self {
+            root,
+            helper: None,
+            lsm: super::lsm::Policy::default(),
+        }
+    }
+
+    /// The runtime with `policy` for a label whose module the host's kernel doesn't run: the command line's
+    /// and a node's owner choose it by [`super::lsm::ENV_POLICY`].
+    pub fn with_lsm(mut self, policy: super::lsm::Policy) -> Self {
+        self.lsm = policy;
+        self
     }
 
     /// The runtime with its container init and exec helper re-exec'd from `helper` (the `hex`
@@ -693,6 +706,7 @@ impl Runtime {
         Self {
             root,
             helper: Some(helper),
+            lsm: super::lsm::Policy::default(),
         }
     }
 
@@ -851,6 +865,23 @@ impl Runtime {
         let config = std::fs::read(bundle.join("config.json"))
             .map_err(|e| OciError::os("reading config.json", e))?;
         let spec = Spec::parse(&config)?;
+        // A label the host's kernel runs the module for and can't apply is refused here, before anything is
+        // made; one whose module it doesn't run is skipped with a warning, or refused under strict (lsm::admit).
+        let mut err = std::io::stderr().lock();
+        for warning in super::lsm::admit(&spec, self.lsm)? {
+            let _ = writeln!(err, "hex: warning: {warning}");
+        }
+        drop(err);
+        // A labelled container takes nothing the node made ahead, which it made unlabelled: its init makes
+        // its own /dev, proc masks and masked-directory tmpfs, each with the label.
+        let dev_mounts = match dev_mounts {
+            Some(pool) if spec.mount_label().is_some() => {
+                pool.unpooled(hex_core::devfs::Unpooled::MountLabel)?;
+                pool.unpooled_proc(hex_core::devfs::Unpooled::MountLabel)?;
+                None
+            }
+            pools => pools,
+        };
         // Kept with the container's state, so its execs and its start's and delete's hooks take this spec too,
         // never the bundle as it is by then (checked::spec_of).
         checked::keep(dir.path(), &config)?;
@@ -1340,9 +1371,21 @@ impl Runtime {
         };
         let rootfs = match plan.iter().find(|op| op.destination == "/") {
             Some(op) if !op.is_bind => if from_tree {
-                init::make_fs_namespace(&op.kind_source, &op.fstype, &op.data, op.flags)
+                init::make_fs_namespace(
+                    &op.kind_source,
+                    &op.fstype,
+                    &op.data,
+                    op.flags,
+                    spec.mount_label(),
+                )
             } else {
-                init::make_fs(&op.kind_source, &op.fstype, &op.data, op.flags)
+                init::make_fs(
+                    &op.kind_source,
+                    &op.fstype,
+                    &op.data,
+                    op.flags,
+                    spec.mount_label(),
+                )
             }
             .map_err(|_| ClassicReason::Source)?,
             Some(op) => tree(Path::new(&op.kind_source)).map_err(|_| ClassicReason::Source)?,
@@ -2106,7 +2149,24 @@ fn make_cgroup(
             format!("no cgroup v2 hierarchy at {CGROUP_ROOT}; Hex's oci class runs on cgroup v2"),
         ));
     }
-    let rel = resources::cgroup_path(spec.linux.cgroups_path.as_deref(), id)?;
+    // A rootless runtime may not write the hierarchy's root: a container of a spec naming no cgroupsPath goes beside the
+    // runtime's own cgroup, as crun's does ([`resources::cgroup_path_for`]). As root, where it went before.
+    let rootless_own = if rustix::process::geteuid().is_root() {
+        None
+    } else {
+        let own = crate::linux::cgroup::own_cgroup().map_err(from_refusal)?;
+        Some(own.strip_prefix(root).map(Path::to_path_buf).map_err(|_| {
+            OciError::os(
+                "finding the runtime's own cgroup",
+                format!("{} isn't under {CGROUP_ROOT}", own.display()),
+            )
+        })?)
+    };
+    let rel = resources::cgroup_path_for(
+        spec.linux.cgroups_path.as_deref(),
+        id,
+        rootless_own.as_deref(),
+    )?;
     let name = rel
         .file_name()
         .ok_or_else(|| OciError::Config(format!("linux.cgroupsPath: {rel:?} names no cgroup")))?;
