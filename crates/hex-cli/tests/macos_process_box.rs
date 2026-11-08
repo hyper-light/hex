@@ -431,19 +431,48 @@ fn overshoot(rt: &MacRuntime, fx: &BinFixture, what: &str, members: usize, pass:
         kills >= 1,
         "the box's hogs ended but no memory kill was counted"
     );
-    let at_end = match rt.status(&id).map(|s| s.ended) {
-        Ok(Some(hex_runtime::macos::process::Ended::Over(hex_core::watch::Over::Memory {
-            footprint,
-            ..
-        }))) => footprint.saturating_sub(256 * MIB),
-        _ => 0,
-    };
+    // A rootless box's end, taken apart: wait for the watcher's read that found it empty, then print the read
+    // that ended it. A box the kernel's cap ended (its one member armed) has no such read: the last read
+    // finds no member running and no end decided.
+    if rt.status(&id).is_ok() {
+        let deadline = Instant::now() + HANG_GUARD;
+        let trace = loop {
+            let status = rt.status(&id).expect("status");
+            match status.end_trace {
+                Some(t) if t.to_empty.is_some() => break Some(t),
+                None if status.running == 0 => break None,
+                _ => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the watcher never found the box empty"
+                    );
+                    std::thread::yield_now();
+                }
+            }
+        };
+        let mib = |b: u64| b as f64 / MIB as f64;
+        match trace {
+            None => println!("TRACE {what} members={members} pass={pass} ended_by=cap"),
+            Some(trace) => println!(
+                "TRACE {what} members={members} pass={pass} armed_us={} gap_us={} read_us={} read_members={} before_mib={:.1} at_end_mib={:.1} grew_mib={:.1} to_empty_us={}",
+                trace.armed.as_micros(),
+                trace.gap.as_micros(),
+                trace.read_cost.as_micros(),
+                trace.members,
+                mib(trace.footprint_before),
+                mib(trace.footprint_at_end),
+                mib(trace
+                    .footprint_at_end
+                    .saturating_sub(trace.footprint_before)),
+                trace.to_empty.map_or(0, |d| d.as_micros())
+            ),
+        }
+    }
     rt.delete(&id).expect("delete");
     let over = peak.saturating_sub(256 * MIB);
     println!(
-        "OVERSHOOT {what} members={members} pass={pass} overshoot_mib={:.1} at_end_mib={:.1}",
-        over as f64 / MIB as f64,
-        at_end as f64 / MIB as f64
+        "OVERSHOOT {what} members={members} pass={pass} overshoot_mib={:.1}",
+        over as f64 / MIB as f64
     );
     over
 }

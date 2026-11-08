@@ -75,6 +75,28 @@ pub struct Status {
     /// Reads that also redid the box's membership work (its kqueue watches, the escape check): one per
     /// change in its running members, not one per read (observability: the watcher's work per read).
     pub membership_passes: u64,
+    /// How the read that ended the box for a bound came about, once one has (observability: what an
+    /// overshoot is made of).
+    pub end_trace: Option<EndTrace>,
+}
+
+/// The read that ended a box for a bound, taken apart: the wait armed before it, how long after the read
+/// before it it came, what it cost, the footprint at both, and how long the members took to end after it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EndTrace {
+    /// The wait the watcher armed after the read before (its headroom at the rates).
+    pub armed: Duration,
+    /// From the read before's start to this read's start: the armed wait plus how late the wake came.
+    pub gap: Duration,
+    /// This read's own time: the group listed and each member's rusage read.
+    pub read_cost: Duration,
+    /// The members this read listed.
+    pub members: u64,
+    /// The footprint the read before found, and this one.
+    pub footprint_before: u64,
+    pub footprint_at_end: u64,
+    /// From this read's decision to the read that found no member running; `None` until then.
+    pub to_empty: Option<Duration>,
 }
 
 /// What every box on the node shares, read once at node start: the machine's timebase and the allocation
@@ -565,6 +587,10 @@ struct Watcher {
     /// When the last read was and what it found (footprint, processes): the growth to the next read is what
     /// the node's rates learn from.
     last_read: Option<(Instant, u64, u64)>,
+    /// The last read's start, the wait it armed and the footprint it found: the end trace's "before".
+    before: Option<(Instant, Duration, u64)>,
+    /// When the watcher decided to end the box, until the read that finds it empty.
+    ending_since: Option<Instant>,
 }
 
 impl Watcher {
@@ -584,6 +610,8 @@ impl Watcher {
             events: Vec::with_capacity(sys::EVENTS),
             last_listing: Vec::new(),
             last_read: None,
+            before: None,
+            ending_since: None,
         })
     }
 
@@ -631,7 +659,9 @@ impl Watcher {
         };
         let rates = self.shared.rates()?;
         self.watch.rated(rates);
+        let started = Instant::now();
         let reading = self.read_members(pgid)?;
+        let read_cost = started.elapsed();
         // The membership work (the escape check, which diffs the member lists and allocates, and the
         // kqueue rewatch) runs only when the running set changed: a box with steady members costs a listing
         // and a rusage a member per read, nothing more (the lead, 2026-11-06: less work per read).
@@ -663,15 +693,41 @@ impl Watcher {
         if membership_changed {
             self.rewatch(&reading.members)?;
         }
+        let members = u64::try_from(reading.members.len()).unwrap_or(u64::MAX);
         self.last = reading.members;
-        match read.verdict {
-            Verdict::Wait(d) => Ok(Some(d)),
+        if let Verdict::End(_) = read.verdict {
+            let (armed, gap, footprint_before) = self
+                .before
+                .map_or((Duration::ZERO, Duration::ZERO, 0), |(at, armed, fp)| {
+                    (armed, started.saturating_duration_since(at), fp)
+                });
+            self.state.status()?.end_trace = Some(EndTrace {
+                armed,
+                gap,
+                read_cost,
+                members,
+                footprint_before,
+                footprint_at_end: read.footprint,
+                to_empty: None,
+            });
+            self.ending_since = Some(started);
+        }
+        if read.verdict == Verdict::Idle
+            && let Some(since) = self.ending_since.take()
+            && let Some(trace) = self.state.status()?.end_trace.as_mut()
+        {
+            trace.to_empty = Some(since.elapsed());
+        }
+        let next = match read.verdict {
+            Verdict::Wait(d) => Some(d),
             Verdict::End(_) | Verdict::Kill => {
                 let _ = killpg(pgid, kill_signal());
-                Ok(Some(watch::FLOOR))
+                Some(watch::FLOOR)
             }
-            Verdict::Idle | Verdict::Events => Ok(None),
-        }
+            Verdict::Idle | Verdict::Events => None,
+        };
+        self.before = Some((started, next.unwrap_or(Duration::ZERO), read.footprint));
+        Ok(next)
     }
 
     /// The box's members now and their summed CPU and I/O: each listed pid with its footprint, start time,
