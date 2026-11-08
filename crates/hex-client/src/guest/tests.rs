@@ -371,6 +371,17 @@ impl shards_api::Stream for Looped {
         Ok(Box::new(Looped(self.0.try_clone()?)))
     }
 
+    fn handle(&self) -> shards_api::Handle {
+        #[cfg(unix)]
+        return std::os::fd::AsRawFd::as_raw_fd(&self.0);
+        #[cfg(windows)]
+        std::os::windows::io::AsRawSocket::as_raw_socket(&self.0)
+    }
+
+    fn set_nonblocking(&self, on: bool) -> std::io::Result<()> {
+        self.0.set_nonblocking(on)
+    }
+
     fn shutdown(&self, how: Shutdown) -> std::io::Result<()> {
         self.0.shutdown(how)
     }
