@@ -145,6 +145,16 @@ fn reclaim_one(marker: &Path) -> Result<(), Refusal> {
         },
         other => other,
     })?;
+    // An outliving box whose container HCS still runs is the next node's recovery's to take back or end.
+    let system_runs = match &m.system {
+        Some(id) => sys::open_system(id.as_str())
+            .map_err(|f| failure("reopening a killed node's container", f))?
+            .is_some(),
+        None => false,
+    };
+    if hcs::at_start(&m, system_runs) == hcs::AtStart::Leave {
+        return Ok(());
+    }
     if sys::layer_mount_path(&m.folder).is_ok() {
         let unprepared = sys::unprepare_layer(&m.folder);
         sys::deactivate_layer(&m.folder).map_err(|f| {
@@ -280,8 +290,7 @@ impl OciBox {
         let launcher = launcher
             .to_str()
             .ok_or_else(|| Refusal::os("naming the launcher's folder", "not UTF-8"))?;
-        let document =
-            hcs::document(container, &storage, launcher, hcs::Lifetime::EndsWithNode).to_string();
+        let document = hcs::document(container, &storage, launcher, lifetime).to_string();
         let system = match sys::create_system(id.as_str(), &document, launch::PATIENCE) {
             Ok(s) => s,
             Err(f) => {
@@ -290,6 +299,8 @@ impl OciBox {
                 return Err(refused);
             }
         };
+        // From here the scratch is the container's: where it outlives its node, a node going down leaves both.
+        mounted.outlives = lifetime == hcs::Lifetime::Outlives;
         Ok(Self {
             job,
             system: Mutex::new(Some(system)),
