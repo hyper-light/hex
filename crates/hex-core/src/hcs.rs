@@ -1177,6 +1177,10 @@ pub struct BoxRecord {
     pub outlives: bool,
     #[serde(default)]
     pub system: Option<hex_api::BoxId>,
+    /// A start was asked: written before HCS starts the container, so a record naming no init with it is
+    /// a start its node didn't finish.
+    #[serde(default)]
+    pub started: bool,
     #[serde(default)]
     pub init: Option<InitRecord>,
 }
@@ -1189,10 +1193,11 @@ pub struct InitRecord {
     pub created: u64,
 }
 
-/// A record's JSON around its strings, in bytes: every key, bracket, comma and quote, `outlives` at its
-/// longest (`false`) and the init's numbers at theirs (`u32::MAX`, `u64::MAX`), with its three paths and
-/// its id empty (measured from the record's shape by the test that pins [`MAX_RECORD`]).
-pub const RECORD_FIXED: usize = 114;
+/// A record's JSON around its strings, in bytes: every key, bracket, comma and quote, `outlives` and
+/// `started` at their longest (`false`) and the init's numbers at theirs (`u32::MAX`, `u64::MAX`), with
+/// its three paths and its id empty (measured from the record's shape by the test that pins
+/// [`MAX_RECORD`]).
+pub const RECORD_FIXED: usize = 130;
 
 /// The longest record a box that can be made writes (CLAUDE.md §2): its three paths (the folder, and the
 /// folder and its `sandbox.vhdx` as what Hex made) each at most Windows' longest, [`FOLDER_UNITS`] UTF-16
@@ -1398,6 +1403,7 @@ mod tests {
             ],
             outlives: true,
             system: Some(hex_api::BoxId::new("x").unwrap()),
+            started: init.is_some(),
             init,
         }
     }
@@ -1432,6 +1438,22 @@ mod tests {
             init: None,
         };
         assert_eq!(take_back(&r, gone), Err(Lost::NoSystem));
+    }
+
+    /// T-T7.1.2: do: take back an outliving box whose record says a start was asked but names no init
+    /// (its node went between asking HCS to start it and recording its init), its system held. Expect: not
+    /// taken back, its init unknown, so recovery ends what is left rather than start it a second time.
+    #[test]
+    fn a_box_whose_start_its_node_didnt_finish_isnt_taken_back() {
+        let r = BoxRecord {
+            started: true,
+            ..outliving(None)
+        };
+        let held = Found {
+            system: true,
+            init: None,
+        };
+        assert_eq!(take_back(&r, held), Err(Lost::InitEnded));
     }
 
     /// T-T7.1.2, native plan step 8 (a node "tells a box's process from one given its pid since (...
@@ -1489,6 +1511,7 @@ mod tests {
             made: vec![path.clone(), path.clone()],
             outlives: false,
             system: Some(hex_api::BoxId::new(&"x".repeat(hex_api::BoxId::MAX_LEN)).unwrap()),
+            started: false,
             init: Some(InitRecord {
                 pid: u32::MAX,
                 created: u64::MAX,
@@ -2174,6 +2197,7 @@ mod tests {
         fn take_back_follows_its_rule(
             outlives in any::<bool>(),
             named in any::<bool>(),
+            started in any::<bool>(),
             init in proptest::option::of((any::<u32>(), 0u64..3)),
             system in any::<bool>(),
             seen in proptest::option::of((0u64..3, any::<bool>())),
@@ -2183,6 +2207,7 @@ mod tests {
                 made: vec![],
                 outlives,
                 system: named.then(|| hex_api::BoxId::new("x").unwrap()),
+                started,
                 init: init.map(|(pid, created)| InitRecord { pid, created }),
             };
             let found = Found {
@@ -2192,7 +2217,7 @@ mod tests {
             let held = outlives && named && system;
             let very_init = matches!((record.init, found.init),
                 (Some(i), Some(p)) if p.created == i.created && p.running);
-            let expect = if held && record.init.is_none() {
+            let expect = if held && record.init.is_none() && !started {
                 Ok(TakeBack::Created)
             } else if held && very_init {
                 Ok(TakeBack::Running(record.init.unwrap()))
@@ -2214,6 +2239,7 @@ mod tests {
             folder in any::<String>(),
             made in proptest::collection::vec(any::<String>(), 0..3),
             outlives in any::<bool>(),
+            started in any::<bool>(),
             init in proptest::option::of((any::<u32>(), any::<u64>())),
         ) {
             let record = BoxRecord {
@@ -2221,6 +2247,7 @@ mod tests {
                 made,
                 outlives,
                 system: outlives.then(|| hex_api::BoxId::new("x").unwrap()),
+                started,
                 init: init.map(|(pid, created)| InitRecord { pid, created }),
             };
             prop_assert_eq!(read_record(&write_record(&record).unwrap()).unwrap(), record);

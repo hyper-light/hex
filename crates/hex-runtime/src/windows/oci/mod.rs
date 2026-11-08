@@ -497,6 +497,7 @@ fn scratch(
                 .collect::<Result<_, _>>()?,
             outlives,
             system: outlives.then(|| id.clone()),
+            started: false,
             init: None,
         };
         let bytes = hcs::write_record(&record)?;
