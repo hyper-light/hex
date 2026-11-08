@@ -19,8 +19,7 @@ fn ms(n: u64) -> Duration {
     Duration::from_millis(n)
 }
 
-/// A pool's bounds and its waits' seeds, in milliseconds: `None` for a wait left measuring, so its first wait is
-/// unarmed and its first answer arms it.
+/// A pool's bounds and its waits' seeds, in milliseconds: `None` for a wait left measuring, which is never armed.
 #[derive(Debug, Clone, Copy)]
 struct Setup {
     limits: Limits,
