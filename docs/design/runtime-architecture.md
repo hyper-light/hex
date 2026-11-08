@@ -1944,8 +1944,15 @@ cause a miss under the demand seen, and each counts its cold takes. The pure cor
     hold, within its hard `RLIMIT_NOFILE` read at run time (getrlimit(2); `Sizes::inits`).
   - connections: the node's hard `RLIMIT_NOFILE` (or `/proc/sys/fs/nr_open` where that is unlimited), one descriptor
     each; the kernel refuses an accept past what remains (`EMFILE`), and the socket pauses accepting until one closes.
-  `wire::Limits`' `in_flight` and `programs` name node-wide budgets from here on, a bound no stricter for a client to
-  keep than the per-connection one it named before.
+  Of each budget the node keeps one for every connection it admits (`serve::KEPT`, the fewest by which a connection
+  can do anything): what is in flight and what is kept for the open connections that have none never pass the
+  budget, so a connection is admitted only if its one fits, and past it a connection's calls and programs share what
+  is left. A hello's `wire::Limits` keeps its meaning, each connection's own (the lead's ruling: no field's meaning
+  changes), and tells exactly what is kept, one call and one program, so a client of any version within it is never
+  refused however much other connections hold. That is less than the 64 and 1,024 it told before, which were caps the
+  node no longer keeps; keeping that much for every connection would cap connections at the budgets over it (64 at
+  65,536 pidfds). Wire version 4 appends the node's budgets to a hello (`Hello::budgets`), refused in earlier
+  versions, never sent without them.
 - **Derived from a fact the kernel gives.** The removal's walk of a slot's sub-cgroups is bounded by `cgroup.stat`'s
   `nr_descendants`, read before it (kind (a)); one made during the walk refuses it, by type, for recovery.
 - **Derived, not learned: the wake mark and the record shards** (kind (b)). The ipc/uts refill is woken once a take

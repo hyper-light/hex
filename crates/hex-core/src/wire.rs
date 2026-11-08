@@ -45,6 +45,11 @@
 //! Version 6 (ci-followups) appends the latest reason a make failed for at each step ([`netns::Counts`]'s `last_failed`): for
 //! each [`netns::Step`] in order an option of the reason, which is an option of its errno (an `i32`) and its
 //! text, a string of at most [`netns::MAX_REASON`] bytes. Every version 5 message reads the same in it.
+//!
+//! Version 7 (the lead's ruling, 2026-11-06) appends to a hello's answer the node's budgets ([`Budgets`]): calls in
+//! flight and programs watched on all its connections together, as an option after the limits, whose meaning stays
+//! each connection's own. A hello's answer of a version before it names none, and one that names budgets can't be written
+//! in them: refused before it is written (§3).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -60,7 +65,7 @@ use crate::netns;
 /// Every message's first bytes.
 pub const MAGIC: [u8; 4] = *b"HEXW";
 /// The highest version this side speaks; it reads and writes every one from [`FIRST`].
-pub const VERSION: u16 = 6;
+pub const VERSION: u16 = 7;
 /// The first version, which every side reads: a client's hello goes in it, and so does a refusal of a
 /// message whose version this side can't tell or doesn't speak.
 pub const FIRST: u16 = 1;
@@ -229,7 +234,22 @@ pub struct Hello {
     pub version: u16,
     pub classes: Vec<Class>,
     pub limits: Limits,
+    /// The node's budgets, from version 4; `None` in an earlier version's.
+    pub budgets: Option<Budgets>,
 }
+
+/// The node agent's budgets on all its connections together (version 4's): past either, a call or an exec is refused
+/// by type, whichever connection it comes on, but for what each connection's limits keep for it ([`Limits`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budgets {
+    /// Requests asked and not yet answered, on every connection together.
+    pub in_flight: usize,
+    /// Programs execs started that the connections still watch, together.
+    pub programs: usize,
+}
+
+/// The version whose hello's answer carries the node's budgets.
+pub const BUDGETS: u16 = 7;
 
 /// The node agent's bounds on its socket, each refused past by type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,10 +258,10 @@ pub struct Limits {
     pub connections: usize,
     /// Bytes in one message, at most [`MAX_MESSAGE`].
     pub message_bytes: usize,
-    /// Requests asked and not yet answered, on the node's connections together (a node-wide budget since
-    /// 2026-11-06; a node before it counted them per connection, a bound no stricter for a client to keep).
+    /// Requests one connection may have asked and not yet had answered: the node keeps this many for each
+    /// connection it admits, so one within it is never refused.
     pub in_flight: usize,
-    /// Programs execs started that the node's connections still watch, together (node-wide likewise).
+    /// Programs one connection's execs started that it may still watch: kept for each connection likewise.
     pub programs: usize,
 }
 
@@ -352,6 +372,17 @@ pub fn answer(version: u16, id: u64, answer: &Answer, bound: usize) -> Result<Ve
                 h.limits.programs,
             ] {
                 w.usize(n)?;
+            }
+            if version >= BUDGETS {
+                w.option_with(h.budgets.as_ref(), |w, b| {
+                    w.usize(b.in_flight)?;
+                    w.usize(b.programs)
+                })?;
+            } else if h.budgets.is_some() {
+                return Err(Fault::value(
+                    "a hello's node budgets",
+                    format!("version {version} carries none; version {BUDGETS} does"),
+                ));
             }
         }
         Answer::Info(info) => {
@@ -571,18 +602,31 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
     }
     let answer = match kind {
         kind::HELLO_ANSWER => {
-            let version = r.u16()?;
+            // The version the agent speaks, not this message's, which says what the message holds.
+            let speaks = r.u16()?;
             let classes = r.list(class)?;
             let mut limit = || r.usize();
+            let limits = Limits {
+                connections: limit()?,
+                message_bytes: limit()?,
+                in_flight: limit()?,
+                programs: limit()?,
+            };
+            let budgets = if version >= BUDGETS {
+                r.option(|r| {
+                    Ok(Budgets {
+                        in_flight: r.usize()?,
+                        programs: r.usize()?,
+                    })
+                })?
+            } else {
+                None
+            };
             Answer::Hello(Hello {
-                version,
+                version: speaks,
                 classes,
-                limits: Limits {
-                    connections: limit()?,
-                    message_bytes: limit()?,
-                    in_flight: limit()?,
-                    programs: limit()?,
-                },
+                limits,
+                budgets,
             })
         }
         kind::INFO => Answer::Info(info(&mut r)?),

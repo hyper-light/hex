@@ -815,6 +815,7 @@ mod tests {
                             in_flight: 1,
                             programs: 1,
                         },
+                        budgets: None,
                     }),
                     Request::Call(Call::Inspect(id)) => Answer::Refused(Refusal::NoSuchBox(id)),
                     other => panic!("a version 1 agent was sent {other:?}"),

@@ -215,6 +215,7 @@ fn answers() -> Vec<(u64, Answer)> {
                     in_flight: 64,
                     programs: 1024,
                 },
+                budgets: None,
             }),
         ),
         (2, Answer::Info(info())),
@@ -843,6 +844,72 @@ fn version_3_messages_are_the_bytes_recorded() {
     assert_eq!(
         read_request(&received(&v2, 0), MAX_MESSAGE).unwrap().1,
         unowned
+    );
+}
+
+/// HEX-SOCK-2, append-only (the lead's ruling, 2026-11-06): version 4 appends to a hello's answer the node's budgets,
+/// calls in flight and programs watched on all its connections together, as an option after the limits, which keep
+/// their meaning (each connection's own). Do: write every message in version 4, and a hello's answer naming budgets
+/// in each version. Expect: every message as in version 3 but for the version in its header, and a hello's answer
+/// with its option's none byte after; with budgets, a one byte and the two counts as 64-bit numbers, read back the
+/// same; a hello's answer naming budgets refused in versions 1 to 3, never sent without them; and a version 3
+/// hello's answer read by a version 4 side naming none.
+#[test]
+fn version_4_messages_are_the_bytes_recorded() {
+    let as_v4 = |mut bytes: Vec<u8>| {
+        bytes[4..6].copy_from_slice(&4u16.to_le_bytes());
+        bytes
+    };
+    for (n, req, _) in requests() {
+        assert_eq!(
+            request(4, n, &req, MAX_MESSAGE).unwrap(),
+            as_v4(request(3, n, &req, MAX_MESSAGE).unwrap()),
+            "{req:?}"
+        );
+    }
+    for (n, ans) in answers() {
+        let mut want = as_v4(answer(3, n, &ans, MAX_MESSAGE).unwrap());
+        if matches!(ans, Answer::Hello(_)) {
+            want.push(0);
+        }
+        assert_eq!(answer(4, n, &ans, MAX_MESSAGE).unwrap(), want, "{ans:?}");
+    }
+    let Answer::Hello(plain) = answers()[0].1.clone() else {
+        panic!("the first answer is a hello's")
+    };
+    let budgeted = Answer::Hello(Hello {
+        budgets: Some(Budgets {
+            in_flight: 500_000,
+            programs: 65_536,
+        }),
+        ..plain.clone()
+    });
+    let mut want = as_v4(answer(3, 1, &Answer::Hello(plain.clone()), MAX_MESSAGE).unwrap());
+    want.push(1);
+    want.extend_from_slice(&500_000u64.to_le_bytes());
+    want.extend_from_slice(&65_536u64.to_le_bytes());
+    let bytes = answer(4, 1, &budgeted, MAX_MESSAGE).unwrap();
+    assert_eq!(bytes, want);
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        budgeted
+    );
+    for older in [1u16, 2, 3] {
+        assert!(
+            matches!(
+                answer(older, 1, &budgeted, MAX_MESSAGE),
+                Err(Fault::Value {
+                    what: "a hello's node budgets",
+                    ..
+                })
+            ),
+            "version {older} wrote budgets"
+        );
+    }
+    let v3 = answer(3, 1, &Answer::Hello(plain.clone()), MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&v3, 0), MAX_MESSAGE).unwrap().1,
+        Answer::Hello(plain)
     );
 }
 
