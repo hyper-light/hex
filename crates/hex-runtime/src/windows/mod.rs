@@ -208,14 +208,6 @@ impl WinRuntime {
         std::fs::create_dir_all(dir)
             .map_err(|e| Refusal::os("making the node's state folder", e))?;
         let keeping = Keeping::start(dir, keeper)?;
-        // Say this node owns the name now, so the keeper's poll sees a live node ([`keeper::run`]).
-        let me = sys::open_process(std::process::id())
-            .map_err(|e| Refusal::os("reading the node's own identity", e))?
-            .ok_or_else(|| Refusal::Broken("the node can't open itself".to_owned()))?;
-        let created =
-            sys::created(&me).map_err(|e| Refusal::os("reading the node's start time", e))?;
-        keeper::write_node(dir, std::process::id(), created)
-            .map_err(|e| Refusal::os("claiming the node's name", e))?;
         let mut runtime = Self::new();
         runtime.node = Some(node.to_owned());
         runtime.keeper = Some(keeping);

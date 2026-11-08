@@ -16,20 +16,13 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
 use hex_api::Refusal;
 
 use super::sys::{self, Handle};
 
-/// How long a keeper whose node has ended holds its boxes' jobs for the next node to adopt it, before it
-/// exits and kill-on-close ends them: five times the node's own longest wait (a delete's 60 s), so only a
-/// node that never restarts lets it lapse, as on Linux a crashed node's boxes wait on the service to
-/// restart it.
-const HOLD_AFTER_NODE: Duration = Duration::from_secs(300);
-
-/// What `hex keep` is given: the folder its node keeps its state in (where the node writes which node pid
-/// owns the name, [`node_file`]), and the path it writes its own identity to once ready.
+/// What `hex keep` is given: the folder its node keeps its state in, and the path it writes its own
+/// identity to once ready.
 pub struct Args {
     pub state: PathBuf,
     pub ready: PathBuf,
@@ -60,19 +53,11 @@ impl Args {
     }
 }
 
-/// The file a node writes to say it owns the name now: its pid and creation time. The keeper polls it; a
-/// node absent or ended for [`HOLD_AFTER_NODE`] lets the keeper exit, and kill-on-close ends the boxes.
-pub fn node_file(state: &Path) -> PathBuf {
-    state.join("node.owner")
-}
-
-/// How often the keeper polls for a live node: a second, finer than the hold, coarse enough to cost
-/// nothing. A bounded loop (CLAUDE.md §2): each tick does one liveness check.
-const POLL: Duration = Duration::from_secs(1);
-
-/// Runs the keeper: it holds whatever the node duplicates into it, and polls [`node_file`]; while a live
-/// node owns the name it waits, and once none has for [`HOLD_AFTER_NODE`] it exits (the stop is immediate).
-/// It never touches the handles itself.
+/// Runs the keeper: it holds whatever the node duplicates into it and waits, without a timer, until its
+/// stop is asked (a node going down cleanly, or being replaced). It never touches the handles itself, and
+/// never exits on its own: a node that never returns leaves its boxes running, as a box on Linux waits for
+/// its node with no timer. When the keeper is gone (stopped, or killed with the node gone too), each box's
+/// job has no handle left and kill-on-close ends it.
 pub fn run(args: &Args) -> Result<(), Refusal> {
     let stop = sys::named_event(&stop_name(&args.state))
         .map_err(|e| Refusal::os("making the keeper's stop", e))?;
@@ -83,27 +68,11 @@ pub fn run(args: &Args) -> Result<(), Refusal> {
         sys::created(&me).map_err(|e| Refusal::os("reading the keeper's start time", e))?;
     write_ready(&args.ready, std::process::id(), created)
         .map_err(|e| Refusal::os("saying the keeper is ready", e))?;
-    let mut absent_since: Option<Instant> = None;
-    loop {
-        // Stop set: the node is going down cleanly or replacing this keeper.
-        if sys::wait(&stop, 0).map_err(|e| Refusal::os("reading the keeper's stop", e))? {
-            return Ok(());
-        }
-        if node_alive(&args.state) {
-            absent_since = None;
-        } else {
-            let since = *absent_since.get_or_insert_with(Instant::now);
-            if since.elapsed() >= HOLD_AFTER_NODE {
-                return Ok(());
-            }
-        }
-        // Wait a tick, or wake at once if the stop is set meanwhile.
-        let _ = sys::wait(&stop, millis(POLL));
+    // Until the stop is asked. No deadline: parity with Linux, where a box waits for its node.
+    if sys::wait(&stop, u32::MAX).map_err(|e| Refusal::os("waiting on the keeper's stop", e))? {
+        return Ok(());
     }
-}
-
-fn millis(d: Duration) -> u32 {
-    u32::try_from(d.as_millis()).unwrap_or(u32::MAX)
+    Ok(())
 }
 
 /// The keeper's stop event's name, one per state folder (`Local\hex-keep-<hash of path>-stop`): the node
@@ -120,26 +89,6 @@ fn stop_name(state: &Path) -> Vec<u16> {
 
 fn write_ready(path: &Path, pid: u32, created: u64) -> io::Result<()> {
     std::fs::write(path, format!("{pid} {created}"))
-}
-
-/// Whether a live node owns the name (its pid and creation time in [`node_file`] name a running process).
-fn node_alive(state: &Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(node_file(state)) else {
-        return false;
-    };
-    let mut parts = text.split_whitespace();
-    let (Some(pid), Some(created)) = (
-        parts.next().and_then(|p| p.parse::<u32>().ok()),
-        parts.next().and_then(|c| c.parse::<u64>().ok()),
-    ) else {
-        return false;
-    };
-    matches!(sys::open_process(pid), Ok(Some(p)) if sys::created(&p).ok() == Some(created))
-}
-
-/// Writes which node owns the name now, for the keeper to see ([`node_alive`]).
-pub fn write_node(state: &Path, pid: u32, created: u64) -> io::Result<()> {
-    std::fs::write(node_file(state), format!("{pid} {created}"))
 }
 
 /// The node's handle on the keeper it started: its process, for watching and duplicating handles into, and

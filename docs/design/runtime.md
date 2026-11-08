@@ -898,12 +898,12 @@ guarantee that no box outlives Hex. Both facts force the shape:
   `windows::tests` 6/6): a box outlives its runtime and the next takes it back as running; a box no node
   takes back is ended by name; a box whose node and keeper are both gone is ended by kill-on-close; a keeper
   that dies while its node lives is replaced.
-- *The keeper's own lifetime.* The keeper polls which node owns its name (a `node.owner` file the current
-  node writes, its pid and creation time) and exits once no live node has owned it for five minutes, so an
-  orphaned keeper — a node that dies and never restarts — doesn't hold boxes forever (on Linux the service
-  restarts the node; here the bound is the backstop). The node signals a stop event only on a clean
-  shutdown, never on a respawn: the stop is shared by the state folder, so signalling it would also stop the
-  new keeper.
+- *The keeper's own lifetime.* The keeper holds its handles and waits, with no timer, until its stop is
+  asked — a node going down cleanly, or a node replacing it. It never exits on its own: a node that never
+  returns leaves its boxes running, as a box on Linux waits for its node with no timer (the installer's
+  service restarts the node, and recovery is its first act). No picked hold constant. The node signals the
+  stop event only on a clean shutdown, never on a respawn: the stop is shared by the state folder, so
+  signalling it would also stop the new keeper.
 - *Breakaway.* The keeper holds handles only; it need not be a member of the node's own job. A child
   inherits the node's job membership unless it is made to break away, so the keeper's lifetime is that job's.
   Under a kiln run the node (and so the keeper) sits in kiln's job, which kiln holds: the node can die inside
@@ -931,7 +931,8 @@ guarantee that no box outlives Hex. Both facts force the shape:
   its own records (T-T7.1.2 inside the guest). The macOS decision on `cp/t7-native-s8` (step 8's core) sets
   how; the Windows guest follows it, so a guest box is no longer removed because its guest went with the node.
 What it costs: one idle keeper process per node, and a handle duplicated into it per box; a node that dies
-and never restarts holds its boxes for the keeper's five-minute bound before kill-on-close ends them.
+and never restarts leaves its boxes running (the keeper holds them), as a crashed Linux node's boxes wait
+for the service to bring it back.
 **Falsifier:** the crash-restart tests (step 8's): the node killed with boxes running, mid-create and
 mid-delete, then restarted on the same state directory; each must fail on the tree before this change and
 pass after.
