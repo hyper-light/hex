@@ -222,15 +222,20 @@ fn send_raw(fd: &OwnedFd, bytes: &[u8], fds: &[BorrowedFd<'_>]) {
     .unwrap();
 }
 
+/// [`PATIENCE`] as poll(2) takes it: its whole seconds and the nanoseconds past them. Its seconds alone would make a
+/// patience under a second zero, a poll that looks once and returns.
+fn patience() -> Timespec {
+    Timespec {
+        tv_sec: i64::try_from(PATIENCE.as_secs()).unwrap_or(i64::MAX),
+        tv_nsec: i64::from(PATIENCE.subsec_nanos()),
+    }
+}
+
 /// The next message the server sends, waiting at most [`PATIENCE`] for it.
 fn answer_of(fd: &OwnedFd) -> (Header, Answer) {
     let mut fds = [PollFd::new(fd, PollFlags::IN)];
-    let ts = Timespec {
-        tv_sec: i64::try_from(PATIENCE.as_secs()).unwrap_or(i64::MAX),
-        tv_nsec: 0,
-    };
     assert_eq!(
-        rustix::event::poll(&mut fds, Some(&ts)).unwrap(),
+        rustix::event::poll(&mut fds, Some(&patience())).unwrap(),
         1,
         "no answer came"
     );
@@ -753,11 +758,10 @@ fn a_release_sent_before_a_reset_is_honoured() {
     // An answer left unread at close is what makes the kernel report a reset to the server.
     send_raw(&fd, &request(2, Call::Inspect(b())), &[]);
     let mut readable = [PollFd::new(&fd, PollFlags::IN)];
-    let ts = Timespec {
-        tv_sec: i64::try_from(PATIENCE.as_secs()).unwrap_or(i64::MAX),
-        tv_nsec: 0,
-    };
-    assert_eq!(rustix::event::poll(&mut readable, Some(&ts)).unwrap(), 1);
+    assert_eq!(
+        rustix::event::poll(&mut readable, Some(&patience())).unwrap(),
+        1
+    );
     {
         // The I/O thread takes the table on every event, so while it is held here the release and
         // the close both land before the server reads either: the reset comes first.

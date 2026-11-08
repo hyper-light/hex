@@ -1178,9 +1178,10 @@ fn recovery_removes_an_init_parked_by_a_node_that_crashed(lab: &Lab, own: &Path)
     node.recover().unwrap();
     assert!(!slot.exists(), "recovery removed the idle slot");
     let mut fds = [PollFd::new(&init, PollFlags::IN)];
+    // Whole seconds and the nanoseconds past them: the seconds alone make a patience under a second a zero poll.
     let patience = Timespec {
         tv_sec: i64::try_from(PATIENCE.as_secs()).unwrap_or(i64::MAX),
-        tv_nsec: 0,
+        tv_nsec: PATIENCE.subsec_nanos().into(),
     };
     let _ = rustix::event::poll(&mut fds, Some(&patience));
     assert!(has_ended(&init), "recovery ended the parked init");
