@@ -380,23 +380,16 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
         }
     }
 
-    /// Its guest's control connection, in the event form, joins the core's loop: a call through it holds no
-    /// thread while the guest answers (native plan step 8 (1)). With no guest running there is none.
+    /// Its guest's control connection, in the event form, joins the core's loop, and so does every guest's
+    /// it boots or takes back after: a call through it holds no thread while the guest answers (native plan
+    /// step 8 (1)).
     fn attach(&self, lp: Arc<dyn Loop>) -> Result<(), Refusal> {
-        let token = lp.token()?;
-        let room: Arc<dyn Fn() + Send + Sync> = {
-            let lp = Arc::clone(&lp);
-            Arc::new(move || lp.room(token))
-        };
-        match self.guest().connect_evented(room)? {
-            Some(pump) => lp.add(token, Box::new(Pumped(pump))),
-            None => Ok(()),
-        }
+        self.guest().join_loop(Arc::new(LoopJoins(lp)))
     }
 
     /// A call about a box its guest holds goes there through the event form's client and is answered
-    /// from the loop; one about a host box, or with no such client (no guest, or the guest booted again
-    /// since), runs on the worker.
+    /// from the loop; one about a host box runs on the worker. With no guest running the box is no box; a
+    /// guest whose connection can't be joined to the loop refuses the call, naming why.
     fn forward(&self, call: Call, stdio: Stdio, reply: Reply, ended: serve::Ended) -> Forward {
         let id = match &call {
             Call::Inspect(id) | Call::Start(id) | Call::Usage(id) => id,
@@ -407,8 +400,10 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
             Err(Refusal::NoSuchBox(_)) => {}
             Ok(_) | Err(_) => return Forward::Back(Box::new((call, stdio))),
         }
-        let Some(client) = self.guest().evented() else {
-            return Forward::Back(Box::new((call, stdio)));
+        let client = match self.guest().evented() {
+            Ok(Some(client)) => client,
+            Ok(None) => return Forward::Refused(Refusal::NoSuchBox(id.clone())),
+            Err(why) => return Forward::Refused(why),
         };
         let started = Arc::clone(&client);
         let then: hex_client::Then = Box::new(move |exec, got| {
@@ -429,6 +424,21 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
             Ok(_) => Forward::Taken,
             Err(why) => Forward::Refused(why),
         }
+    }
+}
+
+/// The core's loop as the guest's runtime joins its connections to it.
+struct LoopJoins(Arc<dyn Loop>);
+
+impl hex_runtime::guest::Joins for LoopJoins {
+    fn reserve(&self) -> Result<(u64, hex_runtime::guest::Room), Refusal> {
+        let token = self.0.token()?;
+        let lp = Arc::clone(&self.0);
+        Ok((token, Arc::new(move || lp.room(token))))
+    }
+
+    fn join(&self, token: u64, pump: hex_client::guest::Pump) -> Result<(), Refusal> {
+        self.0.add(token, Box::new(Pumped(pump)))
     }
 }
 

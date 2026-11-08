@@ -234,6 +234,18 @@ pub fn recorded_boot() -> Result<Duration, Refusal> {
 /// boot has another guest to try before its caller is refused.
 const BOOTS: usize = 2;
 
+/// What tells a node's loop that bytes wait to be written on a connection it watches.
+pub type Room = Arc<dyn Fn() + Send + Sync>;
+
+/// What joins a guest's control connection, in the event form, to its node's loop: the node gives one
+/// ([`GuestRuntime::join_loop`]), and every guest booted or taken back from then is joined through it.
+pub trait Joins: Send + Sync {
+    /// A token for a connection to come, and what tells the loop that bytes wait to be written on it.
+    fn reserve(&self) -> Result<(u64, Room), Refusal>;
+    /// Watches `pump` under `token` from now.
+    fn join(&self, token: u64, pump: hex_client::guest::Pump) -> Result<(), Refusal>;
+}
+
 /// The `oci` class through a Shards guest.
 pub struct GuestRuntime {
     guests: Arc<dyn shards_api::Guests>,
@@ -251,9 +263,11 @@ pub struct GuestRuntime {
     warm: Mutex<Warm>,
     /// Where the guest it holds is recorded ([`GuestRuntime::recorded_at`]).
     record: Option<PathBuf>,
-    /// The event form's client of the guest's node ([`GuestRuntime::connect_evented`]): its answers are
-    /// read by the node's loop, so a call through it holds no thread while the guest answers.
+    /// The event form's client of the guest's node: its answers are read by the node's loop, so a call
+    /// through it holds no thread while the guest answers.
     evented: Mutex<Option<Arc<Client>>>,
+    /// What joins each guest's evented connection to the node's loop ([`GuestRuntime::join_loop`]).
+    joins: Mutex<Option<Arc<dyn Joins>>>,
 }
 
 /// A throwaway guest booted on a Shards binary that changed while the node's guest ran, so the node's next boot
@@ -349,6 +363,7 @@ impl GuestRuntime {
             warm: Mutex::new(Warm::default()),
             record: None,
             evented: Mutex::new(None),
+            joins: Mutex::new(None),
         }
     }
 
@@ -399,11 +414,13 @@ impl GuestRuntime {
         match Client::connect(Arc::clone(&link)) {
             Ok(client) => {
                 // The binary that booted it isn't known here: no warm-up is asked for it.
-                *self.lock()? = Some(Arc::new(Booted {
+                let b = Arc::new(Booted {
                     guest,
                     link,
                     client,
-                }));
+                });
+                self.join(&b)?;
+                *self.lock()? = Some(b);
                 Ok(())
             }
             Err(_) => {
@@ -415,27 +432,41 @@ impl GuestRuntime {
         }
     }
 
-    /// Opens the event form's connection to the running guest's node ([`Client::connect_evented`]) and keeps
-    /// its client for [`GuestRuntime::evented`]; the reading side is the caller's loop's to watch.
-    /// `None` when no guest runs (no backend here, say).
-    pub fn connect_evented(
-        &self,
-        wants_room: Arc<dyn Fn() + Send + Sync>,
-    ) -> Result<Option<hex_client::guest::Pump>, Refusal> {
+    /// Joins the guest's control connection, in the event form, to the node's loop through `joins`, and
+    /// every guest's booted or taken back after: a call through it is answered from the loop, holding no
+    /// thread while the guest answers (native plan step 8 (1)). With no guest running, the next boot joins.
+    pub fn join_loop(&self, joins: Arc<dyn Joins>) -> Result<(), Refusal> {
+        *self.joins.lock().map_err(poisoned)? = Some(joins);
+        match self.running()? {
+            Some(b) => self.join(&b),
+            None => Ok(()),
+        }
+    }
+
+    /// Opens booted guest `b`'s evented connection and joins it to the loop, where one is given.
+    fn join(&self, b: &Booted) -> Result<(), Refusal> {
+        let joins = self.joins.lock().map_err(poisoned)?.clone();
+        let Some(joins) = joins else {
+            return Ok(());
+        };
+        let (token, room) = joins.reserve()?;
+        let (client, pump) = Client::connect_evented(Arc::clone(&b.link), room)?;
+        *self.evented.lock().map_err(poisoned)? = Some(Arc::new(client));
+        joins.join(token, pump)
+    }
+
+    /// The event form's client of the running guest, joined to the loop: one whose connection ended while
+    /// its guest runs is joined again first. `None` with no guest running.
+    pub fn evented(&self) -> Result<Option<Arc<Client>>, Refusal> {
         let Some(b) = self.running()? else {
             return Ok(None);
         };
-        let (client, pump) = Client::connect_evented(Arc::clone(&b.link), wants_room)?;
-        *self.evented.lock().map_err(poisoned)? = Some(Arc::new(client));
-        Ok(Some(pump))
-    }
-
-    /// The event form's client, while its connection holds: a call through it is answered on the loop
-    /// that reads it. `None` once its guest has gone (booted again since, say): a call then takes the
-    /// waiting form.
-    pub fn evented(&self) -> Option<Arc<Client>> {
-        let evented = self.evented.lock().ok()?;
-        evented.as_ref().filter(|c| !c.closed()).map(Arc::clone)
+        let held = self.evented.lock().map_err(poisoned)?.clone();
+        if let Some(client) = held.filter(|c| !c.closed()) {
+            return Ok(Some(client));
+        }
+        self.join(&b)?;
+        Ok(self.evented.lock().map_err(poisoned)?.clone())
     }
 
     /// Records `guest` as the one this node holds, where a record is kept: one whose identity Shards can't
@@ -559,6 +590,8 @@ impl GuestRuntime {
                         link,
                         client,
                     });
+                    // The new guest's control connection joins the loop as the one before's did.
+                    self.join(&b)?;
                     *booted = Some(Arc::clone(&b));
                     return Ok(b);
                 }
