@@ -6,7 +6,9 @@
 # container's tmpfs /run, and on the host's own filesystem (fedora's btrfs). On fedora, under hex-slot:
 #   [N=10000] [CPUSET=4-15] waits_census.sh <hex release binary> <seam_oci release binary> [<hex debug> <seam_oci debug>]
 # With the debug builds given, a fourth arm runs the tmpfs arm's phases on them: the record debug builds' waits are
-# seeded from. Run the suites (gate 6) beside it, as the gates do, for their load; the caller does, and says so.
+# seeded from. SUITES=<source tree> runs the suites arm beside the probe (waits_census_suites.sh: gate 6's suites in a
+# loop, every suite through, their own census on, each loop's exit recorded), the tests' waits' record and the suites'
+# load the debug arm meets; SUITES_CPUS pins it (taskset), CARGO_TARGET_DIR is the tree's own.
 # The timed part takes fedora-timed.lock, as the bench's timed passes do. waits_census.py reads the census.
 set -euo pipefail
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")"); LAB=$(dirname "$HERE")
@@ -25,13 +27,22 @@ if [ -n "${3:-}" ]; then cp "$(realpath "$3")" "$OUT/bin/hex-debug"; cp "$(realp
   echo "harness: bench/competitive at $(git -C "$LAB" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 } > "$OUT/env.txt"
 NAME=hexbench-waits-$$
-bench_trap true
+# However this ends, the suites arm stops after the loop under way.
+STOP="$OUT/suites.stop"
+bench_trap "touch '$STOP'"
+if [ -n "${SUITES:-}" ]; then
+  echo "suites arm: $(realpath "$SUITES") at $(git -C "$SUITES" rev-parse --short HEAD 2>/dev/null || echo unknown), CPUs ${SUITES_CPUS:-all}" >> "$OUT/env.txt"
+  ${SUITES_CPUS:+taskset -c "$SUITES_CPUS"} bash "$HERE/waits_census_suites.sh" "$SUITES" "$OUT" "$STOP" &
+  SUITES_PID=$!
+fi
 LOCK=${TIMED_LOCK:-$HOME/.cache/hex-t7/fedora-timed.lock}
 flock "$LOCK" timeout 7200 docker run --rm --name "$NAME" "${BENCH_LABELS[@]}" --cpuset-cpus="${CPUSET:-4-15}" \
   --memory="${BENCH_MEMORY:-8g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
   --privileged --security-opt label=disable --cgroupns=private --network=none --tmpfs /run:rw,exec,nosuid,size=1g \
   -v /usr:/usr:ro -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" -v "$OUT/disk:/opt/disk" -e N \
   registry.fedoraproject.org/fedora:44 bash /opt/lab/probes/waits_census_inside.sh 2>&1 | tee "$OUT/probe.out"
+# The suites arm ends with the probe: the loop under way finishes, so its record and its exit are whole.
+if [ -n "${SUITES_PID:-}" ]; then touch "$STOP"; wait "$SUITES_PID"; fi
 echo "load at end: $(cat /proc/loadavg)" >> "$OUT/env.txt"
 python3 -I "$HERE/waits_census.py" "$OUT" > "$OUT/summary.md" 2> "$OUT/summary.err" || echo "the reader failed: $(tail -c 300 "$OUT/summary.err")"
 echo "results: $OUT"

@@ -10,13 +10,20 @@ re-implements a wait.
 Run on fedora under hex-slot, its timed part under `fedora-timed.lock`:
 `[N=10000] [CPUSET=4-15] [LIST_BOXES=N] [LISTS=100] [RESTART_BOXES=N] bash bench/competitive/probes/waits_census.sh <hex> <seam_oci>`.
 It runs seam_oci over the node's socket (`HEXBENCH_DRIVER=socket`) in a container with host.sh's OCI-pass flags, in
-three arms, each with a census file of its own; `waits_census.py` reads each into p50, p99, p99.9, max and n by wait:
+its arms, each with a census file of its own (the suites arm's on the host, beside it); `waits_census.py` reads each into p50, p99, p99.9, max and n by wait:
 
 | arm | the node's state | owner | phases |
 | --- | --- | --- | --- |
 | `tmpfs` | the container's tmpfs `/run` | none (the bar's no-owner conditions) | `lifecycle sustained rtt list restart` |
 | `disk` | the host's own filesystem, fedora's btrfs (`/opt/disk`) | none | the same |
 | `owner` | tmpfs | `HEXBENCH_OWNER=bench`, as host.sh's reuse-on pass | `lifecycle sustained` |
+| `debug` | tmpfs, debug builds | none | the tmpfs arm's, on the debug binaries given |
+| `suites` | the suites' own (`SUITES=<tree>`, waits_census_suites.sh) | each test's | gate 6's `cargo test --workspace`, every suite through, in a loop beside the probe |
+
+The `suites` arm is the tests' own waits, each named `test.<crate>.<fact>` (`hex_testkit::waits`: a test process with
+`HEX_WAITS_CENSUS` set records every answer its waits, and the node's waits in it, get, and disarms none), and the
+suites' load the `debug` arm meets, as the gates' is. Each loop's exit status is recorded in `suites.txt`, read before
+anything else runs; run 3's launcher logged `date`'s instead and stopped each loop at its first failing suite.
 
 seam_oci's `list` phase makes `LIST_BOXES` boxes and lists them `LISTS` times, so a list's parts wait for their
 reader; its `restart` phase makes `RESTART_BOXES` boxes, ends the agent with SIGTERM and starts it again over the
@@ -42,6 +49,8 @@ seed for a row under it, and names the row's n.
 | `lifecycle.exec` (from `seam-<arm>.json`) | a container's exec of `true`, to the program's end | `debug` | the conformance suites' patience, and every test that takes it | `crates/hex-api/src/conformance.rs`, `PROGRAM_END` |
 | `client.answer.exec` and `lifecycle.exec` | the server's answer to a call over its socket (an exec's the slowest kind the socket's tests ask) and a program's end | `debug`: the larger, since one patience bounds both | the socket's tests' patience | `crates/hex-node/src/serve/tests.rs`, `RECORDED` |
 | `seeds.hang` | a seed's answer to a create, which `seeds.wait` and `exec_seeds.answers` share by design | every release arm; `debug` | `CLONE_SLOWEST`, `CLONE_SLOWEST_DEBUG` | `crates/hex-core/src/seeds.rs`, `crates/hex-node/src/seed.rs` |
+| `node.emptying`, `netns.make`, `store.turns`, `node.turns`, `client.answer.create`, `.start`, `.delete`, `.exec`, `node.listing`, `lifecycle.exec` | the facts the tests wait for that these rows record, or that one operation with a row makes within itself | `debug` | the tests' patiences for those facts | `crates/hex-testkit/src/waits.rs`, `crates/hex-api/src/conformance.rs` |
+| `test.<crate>.<fact>` | a test's wait for a fact no recorded operation makes (a refill thread's, a checker's, a line delivered by the test's reader) | `suites` | that wait, measuring until its row has 1,000 samples | the test's own `Patience::measuring` (`hex_testkit::waits::until`) |
 
 From run 3 the arm column is run 1's method: a release build's seed is the largest max of every release arm with a
 row's 1,000 samples, in runs 1 and 3; a debug build's is the debug arm's (`Patience::by_profile`). Each is the census's
