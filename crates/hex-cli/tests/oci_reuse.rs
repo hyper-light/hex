@@ -51,6 +51,7 @@
     clippy::disallowed_macros
 )]
 
+use std::collections::BTreeSet;
 use std::io::Read;
 use std::mem::MaybeUninit;
 use std::os::fd::OwnedFd;
@@ -324,6 +325,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     parked_procs_are_a_root_nodes_and_a_rootless_node_makes_none(&lab, own);
     a_box_of_no_owner_is_made_by_an_init_parked_in_a_cgroup_made_ahead(&lab, own);
     a_box_of_no_owner_made_ahead_looks_up_nothing_in_cgroupfs(&lab, own);
+    a_box_of_no_owner_made_ahead_is_given_its_own_bounds_alone(&lab, own);
     a_reused_cgroups_cpu_max_is_written_only_when_its_values_differ(&lab, own);
     each_guard_gives_a_fresh_cgroup_and_counts_why(&lab, own);
     a_boxs_network_namespace_is_reused_within_its_owner_when_clean(&lab, own);
@@ -382,6 +384,26 @@ impl WriteWatch {
                 }
                 Ok(_) => {}
                 Err(rustix::io::Errno::AGAIN) => return Some(false),
+                Err(e) => panic!("reading the cgroup's watch: {e}"),
+            }
+        }
+    }
+
+    /// Every file in the cgroup's directory written since the watch began, by name; `None` where nothing watched it.
+    fn files_written(&self) -> Option<BTreeSet<String>> {
+        let fd = self.fd.as_ref()?;
+        let mut buf = [MaybeUninit::<u8>::uninit(); 4096];
+        let mut events = inotify::Reader::new(fd, &mut buf);
+        let mut written = BTreeSet::new();
+        loop {
+            match events.next() {
+                Ok(e) if e.events().contains(inotify::ReadFlags::MODIFY) => {
+                    if let Some(name) = e.file_name() {
+                        written.insert(name.to_string_lossy().into_owned());
+                    }
+                }
+                Ok(_) => {}
+                Err(rustix::io::Errno::AGAIN) => return Some(written),
                 Err(e) => panic!("reading the cgroup's watch: {e}"),
             }
         }
@@ -1154,6 +1176,69 @@ fn a_box_of_no_owner_made_ahead_looks_up_nothing_in_cgroupfs(lab: &Lab, own: &Pa
     node.delete(&n2).unwrap();
     node.release_idle().unwrap();
     eprintln!("test 2f: a create in a cgroup made ahead, no cgroupfs lookup on its thread");
+}
+
+/// Goal 16 (AC-T7.1.3): a cgroup made ahead is fresh, made with no bound (`refill_ahead`), so it holds the kernel's
+/// defaults, as a cgroup a create makes on its path does; a box of no owner given one has its own bounds written there
+/// alone, as that create's are, never every default as a cgroup an earlier box left must have (`BoxRoot::rebound`).
+/// For a memory and a pids bound that is three files where `rebound` writes about ten, `cpu.weight`'s write walking
+/// every CPU's run queue and each disk's `io.latency` and `io.max` among them. Do: on a node keeping one cgroup ahead,
+/// N1 of no owner created and deleted so the refill makes one, its slot watched for writes, then N2 of no owner created
+/// with a memory and a pids bound. Expect: N2 in the watched slot, the files written there its bounds' (`memory.max`,
+/// `memory.swap.max` where the kernel has it, `pids.max`) and its peak's reset (`memory.peak`), and no other.
+fn a_box_of_no_owner_made_ahead_is_given_its_own_bounds_alone(lab: &Lab, own: &Path) {
+    let (node, _state) = lab.node(&own.join("hex-reuse-ownbounds"));
+    let node = node.with_inits_ahead(1);
+    let n1 = BoxId::new("w1").unwrap();
+    node.create(lab.oci("w1", None, Caps::Docker, Bounds::default()))
+        .unwrap();
+    let root = node
+        .cgroup_dir(&n1)
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    node.delete(&n1).unwrap();
+    wait_for(
+        &MADE_AHEAD,
+        || node.cgroup_reuse().unwrap().ahead.ready != 0,
+        "a cgroup made ahead",
+    );
+    let ready = populated_slots(&root);
+    assert_eq!(
+        ready.len(),
+        1,
+        "the one made ahead holds its parked init: {ready:?}"
+    );
+    let slot = ready[0].0.clone();
+    let watch = WriteWatch::on(&slot, "memory.max");
+    let bounds = Bounds {
+        memory_max: Some(256 << 20),
+        pids_max: Some(256),
+        ..Bounds::default()
+    };
+    node.create(lab.oci("w2", None, Caps::Docker, bounds))
+        .unwrap();
+    let n2 = BoxId::new("w2").unwrap();
+    assert_eq!(
+        node.cgroup_dir(&n2).as_deref(),
+        Some(slot.as_path()),
+        "N2 took the cgroup made ahead"
+    );
+    if let Some(written) = watch.files_written() {
+        let own: BTreeSet<String> = ["memory.max", "memory.swap.max", "pids.max", "memory.peak"]
+            .into_iter()
+            .filter(|f| slot.join(f).exists())
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            written, own,
+            "the files N2's create wrote in the slot made ahead"
+        );
+    }
+    node.delete(&n2).unwrap();
+    node.release_idle().unwrap();
+    eprintln!("test 2g: a box of no owner made ahead given its own bounds alone");
 }
 
 /// Decision 8, "The p99.9 that stayed" (AC-T7.1.3): recovery removes the inits a node parked. Do: A of O created and
