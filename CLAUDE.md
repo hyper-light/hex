@@ -150,9 +150,9 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   reopened by the next node with `OpenJobObjectW`), and a keeper holds a second handle to each: the node
   duplicates the job into the keeper and closes it there on delete (`DuplicateHandle` into another process
   and with `DUPLICATE_CLOSE_SOURCE`, the keeper opened by `OpenProcess` with `PROCESS_DUP_HANDLE`), names
-  a process by its creation time (`GetProcessTimes`) so a reused pid is told apart, waits on a process or
-  the keeper's stop (`WaitForMultipleObjects`), and makes and signals that stop (`CreateEventW` named,
-  `SetEvent`). `windows-sys` binds these as `unsafe` foreign functions, and std's own
+  a process by its creation time (`GetProcessTimes`) so a reused pid is told apart, and makes and signals
+  the keeper's stop (`CreateEventW` named, `SetEvent`). `windows-sys` binds these as `unsafe` foreign
+  functions, and std's own
   job-object support and its `PROC_THREAD_ATTRIBUTE_JOB_LIST`/`_HANDLE_LIST` process creation are
   unstable; Rust can express none of them safely.
 - `crates/hex-runtime/src/windows/oci/sys.rs`: the Windows `oci` class, a Windows image run process-isolated
