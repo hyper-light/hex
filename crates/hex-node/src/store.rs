@@ -142,7 +142,7 @@ impl Store {
                 "changing a box's record",
                 "record changes under way",
                 TURNS,
-                Patience::seeded("store.turns", Duration::from_micros(7_825)),
+                Patience::by_profile("store.turns", Duration::from_micros(7_825), None),
             )),
             synced: Arc::default(),
             #[cfg(all(debug_assertions, target_os = "linux"))]

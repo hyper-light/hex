@@ -1,6 +1,7 @@
 //! The waits census measures every wait unarmed (decision 9; the census's run 2 of 2026-11-08, whose waits ran out at
 //! their bounds and so never recorded the answers past them: a wait that runs out is no sample). Its own process, as
 //! [`hex_core::patience::measure_all`] holds for the whole of it.
+#![allow(clippy::disallowed_macros)]
 
 use std::time::Duration;
 

@@ -1116,8 +1116,13 @@ fn a_failed_start_with_no_seed_left_refuses_the_line() {
 /// to twice its own; the line's wait untouched.
 #[test]
 fn a_pools_waits_are_seeded_from_the_record_and_only_rise() {
+    // A node's pool in this build, a debug one, has no record yet (decision 9, by build profile): measuring.
+    assert_eq!(
+        Seeds::new(setup(1, 4, None, None).limits).deadlines(),
+        (None, None)
+    );
     let record = Some(CLONE_SLOWEST * 2);
-    let mut pool = Seeds::new(setup(1, 4, None, None).limits);
+    let mut pool = Seeds::new(setup(1, 4, None, None).limits).seeded(CLONE_SLOWEST);
     assert_eq!(pool.deadlines(), (record, record));
     let seed = up(&mut pool, ms(0));
     assert_eq!(pool.create(ms(0)), Ok(Admit::Seed(seed)));

@@ -39,14 +39,14 @@ use crate::MAX_LIST;
 /// MEASURING, never armed, until the census's next run drives them.
 static ANSWERS: [Patience; 10] = [
     Patience::measuring("client.answer.hello"),
-    Patience::seeded("client.answer.create", Duration::from_micros(63_058)),
-    Patience::seeded("client.answer.start", Duration::from_micros(8_402)),
-    Patience::seeded("client.answer.exec", Duration::from_micros(24_421)),
+    Patience::by_profile("client.answer.create", Duration::from_micros(63_058), None),
+    Patience::by_profile("client.answer.start", Duration::from_micros(8_402), None),
+    Patience::by_profile("client.answer.exec", Duration::from_micros(24_421), None),
     Patience::measuring("client.answer.signal"),
-    Patience::seeded("client.answer.inspect", Duration::from_micros(26_205)),
+    Patience::by_profile("client.answer.inspect", Duration::from_micros(26_205), None),
     Patience::measuring("client.answer.usage"),
     Patience::measuring("client.answer.list"),
-    Patience::seeded("client.answer.delete", Duration::from_micros(77_759)),
+    Patience::by_profile("client.answer.delete", Duration::from_micros(77_759), None),
     Patience::measuring("client.answer.netns"),
 ];
 

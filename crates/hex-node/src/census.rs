@@ -50,6 +50,8 @@ pub fn install_from_env() -> Result<bool, Refusal> {
         .map_err(|e| Refusal::os("opening the waits census", e))?;
     MAX.store(max, Ordering::Relaxed);
     let _ = OUT.set(Mutex::new(out));
+    // The census records every answer, the tail past a wait's bound too: no wait arms while it runs.
+    hex_core::patience::measure_all();
     Ok(hex_core::patience::census(record))
 }
 

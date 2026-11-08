@@ -13,6 +13,9 @@
 //! - **Measuring**: a wait whose distribution has no record yet says so ([`Patience::measuring`], with the record to
 //!   come named at the wait). It is never armed: its answers are only recorded, for the census that seeds it, so no
 //!   value is picked for it and no first answer becomes its bound. A tree with a measuring wait doesn't land.
+//! - **By build profile**: a wait's record is of the build it runs in ([`Patience::by_profile`]): a release build
+//!   is seeded from the release census, a debug build (the suites') from the debug one, measuring until it has
+//!   one, since a debug build's answers are slower and the release record isn't theirs (the lead, 2026-11-08).
 //! - **Karn's point**: a wait that ran out is no sample, nor is an answer from a server taken for dead or hung; the
 //!   shell reports only answers it waited for and got.
 //! - **The census**: each wait is named, and every answer it records goes to the census sink as well, where a shell
@@ -20,7 +23,7 @@
 //!   (`bench/competitive/probes/waits_census.md`), from the code's own timing points.
 
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 /// How many times the slowest answer a wait lasts: twice, so a wait runs out only for an answer more than twice
@@ -29,6 +32,17 @@ pub const TIMES_SLOWEST: u32 = 2;
 
 /// Where every named wait's answers go besides its own maximum, once a shell installs it: none unless one does.
 static CENSUS: OnceLock<fn(&'static str, Duration)> = OnceLock::new();
+
+/// Whether every wait in this process measures, unarmed: the waits census's, so it records the answers past a bound,
+/// which a wait that runs out never gives (Karn's point).
+static MEASURE_ALL: AtomicBool = AtomicBool::new(false);
+
+/// Every wait in this process measures from now on, never armed, its answers only recorded: the waits census's
+/// (`bench/competitive/probes/waits_census.md`), whose shell calls it as it installs its sink, so the distribution it
+/// records has its tail.
+pub fn measure_all() {
+    MEASURE_ALL.store(true, Ordering::Relaxed);
+}
 
 /// Installs `sink` to be told every answer every wait records, by the wait's name: the waits census probe's. Only
 /// the first install takes; says whether this one did.
@@ -55,6 +69,24 @@ impl Patience {
             name,
             recorded: stored(slowest),
             seen: AtomicU64::new(0),
+        }
+    }
+
+    /// The wait `name` seeded from its record for this build's profile: `release`'s slowest answer in a release build,
+    /// `debug`'s in a debug one (`None`: measuring, until the census's debug arm records it), each cited at the caller.
+    /// The choice is made as the wait is built, so a release build holds only its release seed.
+    pub const fn by_profile(
+        name: &'static str,
+        release: Duration,
+        debug: Option<Duration>,
+    ) -> Self {
+        if cfg!(debug_assertions) {
+            match debug {
+                Some(slowest) => Self::seeded(name, slowest),
+                None => Self::measuring(name),
+            }
+        } else {
+            Self::seeded(name, release)
         }
     }
 
@@ -90,7 +122,7 @@ impl Patience {
 
     /// How long the next wait lasts: [`TIMES_SLOWEST`] times [`Patience::slowest`], `None` for a measuring wait.
     pub fn deadline(&self) -> Option<Duration> {
-        if self.recorded == 0 {
+        if self.recorded == 0 || MEASURE_ALL.load(Ordering::Relaxed) {
             return None;
         }
         self.slowest()

@@ -64,7 +64,8 @@ const OVERLAYFS_SUPER_MAGIC: i128 = 0x794c_7630;
 /// wedged), not a limit to raise (CLAUDE.md §4). Its programs' reaping and its init's end, which a box's
 /// emptying waits on, share the wait. Seeded from the `node.emptying` row of `bench/competitive/probes/waits_census.md` run 1 (waits-census-20261108T023331Z, fedora, 91abf3a), its slowest
 /// arm's max, 42.798 ms of 10,276 (a box's kill to `populated 0`, state on tmpfs).
-static EMPTYING: Patience = Patience::seeded("node.emptying", Duration::from_micros(42_798));
+static EMPTYING: Patience =
+    Patience::by_profile("node.emptying", Duration::from_micros(42_798), None);
 
 /// What is left at the time of asking of the wait for a box killed at `killed` to empty ([`EMPTYING`]):
 /// `Duration::MAX`, unbounded, while it is measuring with no emptying seen.
@@ -346,7 +347,7 @@ impl Node {
                 MAX_BOXES,
                 // Seeded from the `node.turns` row of `bench/competitive/probes/waits_census.md` run 1 (waits-census-20261108T023331Z, fedora, 91abf3a),
                 // its slowest arm's max, 77.426 ms of 80,042.
-                Patience::seeded("node.turns", Duration::from_micros(77_426)),
+                Patience::by_profile("node.turns", Duration::from_micros(77_426), None),
             ),
             #[cfg(debug_assertions)]
             crash_at: None,

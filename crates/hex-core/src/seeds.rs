@@ -291,8 +291,9 @@ impl Seeds {
             next_ticket: 0,
             counts: Counts::default(),
             handed: vec![0; slots],
-            wait: Patience::seeded(WAIT, CLONE_SLOWEST),
-            hang: Patience::seeded(HANG, CLONE_SLOWEST),
+            // The debug build's record is to come (waits_census.md's debug arm): measuring there.
+            wait: Patience::by_profile(WAIT, CLONE_SLOWEST, None),
+            hang: Patience::by_profile(HANG, CLONE_SLOWEST, None),
         }
     }
 
