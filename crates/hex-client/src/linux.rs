@@ -447,4 +447,63 @@ mod tests {
         drop(client);
         agent.join().unwrap();
     }
+
+    /// Native plan step 8, guest stdio (HEX-GUEST-41): an agent that answers an exec with the end of a stream the
+    /// exec neither carried nor asked for: expect the exec refused as broken, naming the stream, and its program
+    /// killed, never an end handed to a caller that didn't ask for it.
+    #[test]
+    fn an_end_of_a_stream_its_exec_neither_carried_nor_asked_for_is_refused() {
+        let (_dir, path, listener) = agent_socket();
+        let agent = std::thread::spawn(move || {
+            let conn = rustix::net::accept_with(&listener, SocketFlags::CLOEXEC).unwrap();
+            let (h, _, _) = next_request_with(&conn);
+            let hello = Answer::Hello(wire::Hello {
+                version: wire::VERSION,
+                classes: vec![Class::Oci],
+                limits: Limits {
+                    connections: 1,
+                    message_bytes: wire::MAX_MESSAGE,
+                    in_flight: 1,
+                    programs: 1,
+                },
+            });
+            answer_with(&conn, h, &hello, &[]);
+            let (exec, request, _) = next_request_with(&conn);
+            assert!(
+                matches!(&request, Request::Call(Call::Exec { streams, .. }) if *streams == Streams::default()),
+                "{request:?}"
+            );
+            let (_here, end) = rustix::net::socketpair(
+                AddressFamily::UNIX,
+                SocketType::STREAM,
+                SocketFlags::CLOEXEC,
+                None,
+            )
+            .unwrap();
+            let given = Answer::Given {
+                pid: 42,
+                given: Streams {
+                    stdout: true,
+                    ..Streams::default()
+                },
+            };
+            answer_with(&conn, exec, &given, &[end.as_fd()]);
+            let (k, kill, _) = next_request_with(&conn);
+            answer_with(&conn, k, &Answer::Done, &[]);
+            (exec.id, kill)
+        });
+        let client = Client::connect(&path).unwrap();
+        let got = client.exec(
+            &BoxId::new("g").unwrap(),
+            Program::of(&["true"]),
+            Stdio::null(),
+        );
+        assert!(
+            matches!(&got, Err(Refusal::Broken(why)) if why.contains("stdout") && why.contains("neither carried nor asked")),
+            "{:?}",
+            got.as_ref().err()
+        );
+        let (exec, kill) = agent.join().unwrap();
+        assert_eq!(kill, Request::Call(Call::Kill { exec }));
+    }
 }

@@ -562,3 +562,48 @@ fn a_pumps_end_reaches_every_call_waiting_through_it() {
             .is_err()
     );
 }
+
+/// Native plan step 8, guest stdio (HEX-GUEST-41): the event form, a node's, copies no stream: an exec begun with
+/// a pipe of the caller's own is refused as invalid stdio and nothing goes to the guest, so the guest's next
+/// request is the inspect begun after it.
+#[test]
+fn the_event_form_takes_no_pipe_of_the_callers_own() {
+    let (control, _stdio, link) = listeners();
+    let agent = std::thread::spawn(move || {
+        let (mut conn, _) = control.accept().unwrap();
+        hello(&mut conn);
+        let (_, request) = next_request(&mut conn);
+        request
+    });
+    let (client, _pump) = Client::connect_evented(link, Arc::new(|| {})).unwrap();
+    let (r, _w) = std::io::pipe().unwrap();
+    let carried = client.begin(
+        Call::Exec {
+            id: BoxId::new("b").unwrap(),
+            program: Program::of(&["cat"]),
+            streams: wire::Streams::default(),
+        },
+        Stdio {
+            stdin: Some(r),
+            ..Stdio::null()
+        },
+        Box::new(|_, _| {}),
+        Box::new(|_| {}),
+    );
+    assert!(
+        matches!(&carried, Err(Refusal::Invalid { what: "stdio", .. })),
+        "{carried:?}"
+    );
+    client
+        .begin(
+            Call::Inspect(BoxId::new("b").unwrap()),
+            Stdio::null(),
+            Box::new(|_, _| {}),
+            Box::new(|_| {}),
+        )
+        .unwrap();
+    assert_eq!(
+        agent.join().unwrap(),
+        Request::Call(Call::Inspect(BoxId::new("b").unwrap()))
+    );
+}
