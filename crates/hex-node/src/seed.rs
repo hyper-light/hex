@@ -302,16 +302,20 @@ fn round_trip(
 mod tests {
     use super::*;
 
-    /// Decision 9 (the lead's failure-bound rule of 2026-11-06; AC-T7.1.3): an exec's wait for a busy seed to free
-    /// is seeded from the clone record, an exec seed's work being a clone with a few `setns` (`seed_path.md` run 3).
-    /// Do: open an exec seed pool and ask its wait before any exec. Expect: twice the record's slowest clone,
-    /// armed at once, no picked 30 s.
+    /// Decision 9 (the lead's failure-bound rule of 2026-11-06, by build profile; AC-T7.1.3): an exec's wait for a
+    /// busy seed to free is seeded from the seeds' record, an exec seed's work being a clone with a few `setns`: the
+    /// `seeds.hang` rows of `bench/competitive/probes/waits_census.md`, its build's. Do: open an exec seed pool and ask
+    /// its wait before any exec. Expect: twice its build's slowest recorded answer
+    /// ([`hex_core::seeds::CLONE_SLOWEST_DEBUG`] in a debug build, [`hex_core::seeds::CLONE_SLOWEST`] in a release
+    /// one), armed at once, no picked 30 s.
     #[test]
     fn an_execs_wait_for_a_seed_is_seeded_from_the_clone_record() {
         let pool = SeedPool::with_budget(PathBuf::from("/nonexistent/hex-for-the-test"), 1);
-        assert_eq!(
-            pool.answers.deadline(),
-            Some(hex_core::seeds::CLONE_SLOWEST * 2)
-        );
+        let built = if cfg!(debug_assertions) {
+            hex_core::seeds::CLONE_SLOWEST_DEBUG
+        } else {
+            hex_core::seeds::CLONE_SLOWEST
+        };
+        assert_eq!(pool.answers.deadline(), Some(built * 2));
     }
 }
