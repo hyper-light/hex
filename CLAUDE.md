@@ -142,7 +142,8 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   resumes it (`ResumeThread`), waits on it and reads its end (`WaitForSingleObject`,
   `GetExitCodeProcess`), marks its standard handles inheritable (`SetHandleInformation`), reads the job's
   accounting and its guaranteed memory-limit violation (`QueryInformationJobObject`), ends the job
-  (`TerminateJobObject`) and closes its handles (`CloseHandle`), and reads the machine's processor count
+  (`TerminateJobObject`) or one member alone (`TerminateProcess`, a program's own kill) and closes its
+  handles (`CloseHandle`), and reads the machine's processor count
   (`GetActiveProcessorCount`). `windows-sys` binds these as `unsafe` foreign functions, and std's own
   job-object support and its `PROC_THREAD_ATTRIBUTE_JOB_LIST`/`_HANDLE_LIST` process creation are
   unstable; Rust can express none of them safely.
