@@ -21,6 +21,7 @@ use std::process::{Child, Command, Stdio};
 use std::ptr::{null, null_mut};
 use std::time::Instant;
 
+mod endwait;
 mod iocp;
 mod other;
 
@@ -55,7 +56,11 @@ fn main() {
         Some("intrude") => intrude(&args[1], &args[2], &args[3], args.get(4).map(String::as_str)),
         Some("refuse-as") => other::refuse_as(&args[1], args.get(2).map(String::as_str)),
         Some("knock") => other::knock(&args[1], &args[2]),
-        _ => eprintln!("usage: stdio_probe bench <rounds> <bytes> | refuse | iocp | refuse-as <user> [node socket] (password on stdin)"),
+        Some("endwait") => endwait::endwait(arg(&args, 1, 300)),
+        Some("linger") => loop {
+            std::thread::sleep(std::time::Duration::from_secs(3600));
+        },
+        _ => eprintln!("usage: stdio_probe bench <rounds> <bytes> | refuse | iocp | refuse-as <user> [node socket] (password on stdin) | endwait <rounds>"),
     }
 }
 
@@ -290,6 +295,20 @@ fn cpu() -> (u64, u64) {
     (all - t(idle), all)
 }
 
+/// The machine's CPU load (percent) over the last second at the call: `samples` keeps the CPU-time readings
+/// back to the newest at least a second old (a round is milliseconds, finer than the ~15 ms tick
+/// GetSystemTimes counts in).
+fn load_over_last_second(samples: &mut std::collections::VecDeque<(Instant, u64, u64)>) -> f64 {
+    let (b1, a1) = cpu();
+    let now = Instant::now();
+    samples.push_back((now, b1, a1));
+    while samples.len() > 1 && now.duration_since(samples[1].0).as_secs_f64() >= 1.0 {
+        samples.pop_front();
+    }
+    let (_, b0, a0) = samples[0];
+    100.0 * (b1 - b0) as f64 / (a1 - a0).max(1) as f64
+}
+
 /// The caller: `rounds` rounds, each a stream from every candidate, the order rotated by the round.
 fn caller(path: &Path, rounds: usize, bytes: usize) {
     let mut ctl = UnixStream::connect(path).unwrap();
@@ -310,14 +329,7 @@ fn caller(path: &Path, rounds: usize, bytes: usize) {
             assert_eq!(got, bytes, "{} gave {got} of {bytes}", CANDIDATES[c]);
             rows.push((c, first, last));
         }
-        let (b1, a1) = cpu();
-        let now = Instant::now();
-        samples.push_back((now, b1, a1));
-        while samples.len() > 1 && now.duration_since(samples[1].0).as_secs_f64() >= 1.0 {
-            samples.pop_front();
-        }
-        let (_, b0, a0) = samples[0];
-        let load = 100.0 * (b1 - b0) as f64 / (a1 - a0).max(1) as f64;
+        let load = load_over_last_second(&mut samples);
         for (c, first, last) in rows {
             let span = (last - first).as_secs_f64().max(1e-9);
             println!(
