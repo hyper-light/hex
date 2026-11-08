@@ -9,7 +9,10 @@ use std::io::{Read as _, Write as _};
 use std::net::Shutdown;
 use std::time::{Duration, Instant};
 
-use crate::{Backend, End, Guest, GuestSpec, Guests, Refusal, backend_of, max_vcpus, min_memory_mib};
+use crate::record::Pending;
+use crate::{
+    Backend, End, Guest, GuestSpec, Guests, Identity, MAX_PORTS, Refusal, backend_of, max_vcpus, min_memory_mib,
+};
 
 /// What the suite runs against.
 pub struct Subject<'a> {
@@ -63,7 +66,8 @@ pub fn run(s: &Subject<'_>) -> Result<(), Failure> {
     a_served_port_carries_bytes_and_a_half_close(s)?;
     an_unserved_port_is_refused(s)?;
     stop_ends_it_and_later_connects_are_refused(s)?;
-    a_guest_that_powers_off_ends_as_power_off(s)
+    a_guest_that_powers_off_ends_as_power_off(s)?;
+    a_guest_its_client_lost_is_taken_back_by_attach(s)
 }
 
 /// `backend()` is this host's, and macOS x86_64 and Windows arm64 have none, by name.
@@ -149,7 +153,11 @@ pub fn a_served_port_carries_bytes_and_a_half_close(s: &Subject<'_>) -> Result<(
         .map_err(|e| fail(CASE, format!("connect: {e}")))?;
     conn.set_read_timeout(Some(s.patience))
         .map_err(|e| fail(CASE, format!("its read timeout: {e}")))?;
-    let sent: Vec<u8> = (0..64 * 1024u32).map(|i| (i % 251) as u8).collect();
+    // An input, sized to exercise a bound: one byte more than shards' device holds of a
+    // connection's (`BUF_ALLOC`, 64 KiB, `crates/vmm/src/devices/virtio/vsock/conn.rs:21`),
+    // so the echo goes through only as the device's credit updates let it. 251, a prime, so
+    // no power-of-two-sized piece repeats another.
+    let sent: Vec<u8> = (0..64 * 1024 + 1u32).map(|i| (i % 251) as u8).collect();
     let mut writer = conn
         .try_clone()
         .map_err(|e| fail(CASE, format!("a clone: {e}")))?;
@@ -204,8 +212,9 @@ pub fn an_unserved_port_is_refused(s: &Subject<'_>) -> Result<(), Failure> {
             .connect(s.port, s.patience)
             .map_err(|e| fail(CASE, format!("connect to the served port: {e}")))?,
     );
+    // A spec allows at most MAX_PORTS ports, so one of the first MAX_PORTS + 1 is off it.
     let off = (0..=u32::MAX)
-        .take(4096)
+        .take(MAX_PORTS.saturating_add(1))
         .find(|p| !s.serving.ports.contains(p))
         .ok_or_else(|| fail(CASE, "every port is allowed"))?;
     match guest.connect(off, s.patience) {
@@ -217,7 +226,7 @@ pub fn an_unserved_port_is_refused(s: &Subject<'_>) -> Result<(), Failure> {
             ));
         }
     }
-    let patience = Duration::from_millis(200);
+    let patience = UNSERVED_PATIENCE;
     let start = Instant::now();
     let refused = guest.connect(s.unserved, patience);
     let took = start.elapsed();
@@ -225,8 +234,10 @@ pub fn an_unserved_port_is_refused(s: &Subject<'_>) -> Result<(), Failure> {
         Err(Refusal::Channel { port, .. }) if port == s.unserved => {}
         other => return Err(fail(CASE, format!("port {}: {:?}", s.unserved, other.err()))),
     }
-    // A handshake under way when patience runs out ends at it; a second is past any.
-    if took < patience || took > patience.saturating_add(Duration::from_secs(1)) {
+    // A handshake under way when patience runs out ends at it (its timeouts are what is
+    // left), so a refusal comes at the patience and its thread's wake.
+    let overshoot = OVERSHOOT.map_err(|pending| fail(CASE, pending.to_string()))?;
+    if took < patience || took > patience.saturating_add(overshoot) {
         return Err(fail(
             CASE,
             format!("refused after {took:?}, with patience {patience:?}"),
@@ -235,6 +246,20 @@ pub fn an_unserved_port_is_refused(s: &Subject<'_>) -> Result<(), Failure> {
     let _ = guest.stop();
     Ok(())
 }
+
+/// The patience an unserved port is asked with: an input, as any shows the patience kept;
+/// short, so the case is.
+pub const UNSERVED_PATIENCE: Duration = Duration::from_millis(200);
+
+/// How long past its patience an unserved port's refusal may come, by host class (`record`).
+/// macOS-HVF: twice (the margin) the slowest recorded, 150.85425 ms (the simulator's, its
+/// timer leeway on a 200 ms wait; `docs/research/platform-measurements.md` M462, above
+/// M463's real guests' 138.7 ms). Linux-KVM and Windows-WHP: pending their records, and the
+/// case fails naming them.
+#[cfg(target_os = "macos")]
+pub const OVERSHOOT: Result<Duration, Pending> = Ok(Duration::from_nanos(2 * 150_854_250));
+#[cfg(not(target_os = "macos"))]
+pub const OVERSHOOT: Result<Duration, Pending> = Err(Pending::of("OVERSHOOT"));
 
 /// `stop` ends a guest as `Stopped`, and a `connect` after it is refused `Ended(Stopped)`.
 pub fn stop_ends_it_and_later_connects_are_refused(s: &Subject<'_>) -> Result<(), Failure> {
@@ -253,6 +278,62 @@ pub fn stop_ends_it_and_later_connects_are_refused(s: &Subject<'_>) -> Result<()
     match guest.connect(s.port, s.patience) {
         Err(Refusal::Ended(End::Stopped)) => Ok(()),
         other => Err(fail(CASE, format!("connect after stop: {:?}", other.err()))),
+    }
+}
+
+/// A guest whose client's handle is lost without its drop (a crashed client's: nothing of it ran
+/// on) is taken back by `attach` of its identity: the attached guest serves its port and stops as
+/// any guest does; once it has ended, attach of it is refused `Ended` or `Gone`, and attach of an
+/// identity whose start time differs (its pid since given another process) is refused `Gone`. On
+/// Windows, where a guest's VM ends with its client's process (D141), no client survives to attach,
+/// but in one process the guest still runs, so the case holds there too.
+pub fn a_guest_its_client_lost_is_taken_back_by_attach(s: &Subject<'_>) -> Result<(), Failure> {
+    const CASE: &str = "a guest its client lost is taken back by attach";
+    let guest = boot(CASE, s, &s.serving)?;
+    let identity = guest
+        .identity()
+        .map_err(|e| fail(CASE, format!("identity: {e}")))?;
+    // The client's crash: its handle goes without its drop, which would end the guest.
+    std::mem::forget(guest);
+    let other = Identity {
+        started: identity.started.wrapping_add(1),
+        ..identity.clone()
+    };
+    match s.guests.attach(&other, &s.serving) {
+        Err(Refusal::Gone { .. }) => {}
+        other => {
+            return Err(fail(
+                CASE,
+                format!("attach of a start time that isn't its: {:?}", other.err()),
+            ));
+        }
+    }
+    let back = s
+        .guests
+        .attach(&identity, &s.serving)
+        .map_err(|e| fail(CASE, format!("attach: {e}")))?;
+    let mut conn = back
+        .connect(s.port, s.patience)
+        .map_err(|e| fail(CASE, format!("connect after attach: {e}")))?;
+    conn.set_read_timeout(Some(s.patience))
+        .map_err(|e| fail(CASE, format!("its read timeout: {e}")))?;
+    conn.write_all(b"back")
+        .and_then(|()| conn.shutdown(Shutdown::Write))
+        .map_err(|e| fail(CASE, format!("writing after attach: {e}")))?;
+    let mut got = Vec::new();
+    conn.read_to_end(&mut got)
+        .map_err(|e| fail(CASE, format!("reading after attach: {e}")))?;
+    if got != b"back" {
+        return Err(fail(CASE, format!("echoed {got:?} after attach")));
+    }
+    back.stop().map_err(|e| fail(CASE, format!("stop: {e}")))?;
+    match back.wait_for(s.patience) {
+        Ok(Some(End::Stopped)) => {}
+        other => return Err(fail(CASE, format!("its end: {other:?}"))),
+    }
+    match s.guests.attach(&identity, &s.serving) {
+        Err(Refusal::Ended(_) | Refusal::Gone { .. }) => Ok(()),
+        other => Err(fail(CASE, format!("attach of an ended guest: {:?}", other.err()))),
     }
 }
 

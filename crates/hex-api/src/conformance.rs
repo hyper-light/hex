@@ -285,6 +285,16 @@ pub const CASES: &[Case] = &[
         says: "exec of a program whose arguments and environment pass the class's exec bound is refused as Invalid naming the program, before any spawn",
         run: oversized_program,
     },
+    Case {
+        id: "HEX-RT-16",
+        says: "of two waiting programs in a box, the one killed through its Proc ends with Signal(9) and the other runs on; a second kill of the ended one is Ok",
+        run: kill,
+    },
+    Case {
+        id: "HEX-RT-17",
+        says: "stdio asked of the runtime: a program that echoes stdin gives back what is written to its stdin end on its stdout end, to its end; a stream both given and asked for is refused as Invalid",
+        run: streams,
+    },
 ];
 
 /// Runs every case on fresh boxes; returns the failures.
@@ -446,6 +456,99 @@ fn signal(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     ensure(exit == Exit::Signal(15), || format!("exit {exit:?}"))
 }
 
+fn kill(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
+    let id = made(rt, fx, "kill", Bounds::default())?;
+    let mut killed = rt
+        .exec(&id, fx.program(&Act::Wait), Stdio::null())
+        .map_err(|e| format!("exec: {e}"))?;
+    let mut other = rt
+        .exec(&id, fx.program(&Act::Wait), Stdio::null())
+        .map_err(|e| format!("exec: {e}"))?;
+    let early = killed.wait_for(STILL_RUNNING).map_err(|e| e.to_string())?;
+    ensure(early.is_none(), || {
+        format!("a waiting program ended: {early:?}")
+    })?;
+    killed.kill().map_err(|e| format!("kill: {e}"))?;
+    let exit = ended(&mut killed)?;
+    let again = killed.kill();
+    let on = other.wait_for(STILL_RUNNING).map_err(|e| e.to_string())?;
+    rt.delete(&id).map_err(|e| e.to_string())?;
+    ensure(exit == Exit::Signal(9), || format!("exit {exit:?}"))?;
+    ensure(again.is_ok(), || {
+        format!("a kill of the ended program: {again:?}")
+    })?;
+    ensure(on.is_none(), || {
+        format!("the other program ended with the kill: {on:?}")
+    })
+}
+
+fn streams(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
+    let id = made(rt, fx, "streams", Bounds::default())?;
+    let (_r, w) = piped()?;
+    let both = rt.exec(
+        &id,
+        fx.program(&Act::Echo),
+        Stdio {
+            stdout: Some(w),
+            ask: crate::Ask {
+                stdout: true,
+                ..crate::Ask::default()
+            },
+            ..Stdio::null()
+        },
+    );
+    let ask = crate::Ask {
+        stdin: true,
+        stdout: true,
+        stderr: false,
+    };
+    let mut p = rt
+        .exec(
+            &id,
+            fx.program(&Act::Echo),
+            Stdio {
+                ask,
+                ..Stdio::null()
+            },
+        )
+        .map_err(|e| format!("exec: {e}"))?;
+    let given = p.streams().map_err(|e| format!("streams: {e}"))?;
+    let again = p.streams().map_err(|e| format!("streams again: {e}"))?;
+    let (Some(stdin), Some(stdout)) = (given.stdin, given.stdout) else {
+        rt.delete(&id).map_err(|e| e.to_string())?;
+        return Err("the streams asked for weren't given".to_owned());
+    };
+    let mut stdin = std::fs::File::from(stdin);
+    stdin
+        .write_all(b"round trip\n")
+        .map_err(|e| format!("write: {e}"))?;
+    drop(stdin);
+    let mut out = String::new();
+    std::fs::File::from(stdout)
+        .read_to_string(&mut out)
+        .map_err(|e| format!("read: {e}"))?;
+    let exit = ended(&mut p)?;
+    rt.delete(&id).map_err(|e| e.to_string())?;
+    ensure(
+        matches!(
+            both.as_ref().err(),
+            Some(Refusal::Invalid { what: "stdio", .. })
+        ),
+        || {
+            format!(
+                "a stream both given and asked for: {:?}",
+                both.as_ref().err()
+            )
+        },
+    )?;
+    ensure(given.stderr.is_none(), || "stderr given unasked".to_owned())?;
+    ensure(again.stdin.is_none() && again.stdout.is_none(), || {
+        "the streams were given twice".to_owned()
+    })?;
+    ensure(exit == Exit::Code(0), || format!("exit {exit:?}"))?;
+    ensure(out == "round trip\n", || format!("stdout {out:?}"))
+}
+
 fn memory_bound(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     let bounds = Bounds {
         memory_max: Some(64 << 20),
@@ -562,6 +665,7 @@ fn stdin(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
                 stdin: Some(in_r),
                 stdout: Some(out_w),
                 stderr: None,
+                ..Stdio::null()
             },
         )
         .map_err(|e| format!("exec: {e}"))?;

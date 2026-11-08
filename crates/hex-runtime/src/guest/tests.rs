@@ -8,7 +8,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::rewrite::rewrite;
+use super::rewrite::{Known, rewrite};
 use super::shares::{self, Share};
 use super::*;
 use hex_api::{Bounds, Mount, Network, OciSpec, Rootfs};
@@ -129,7 +129,10 @@ fn mount(source: &str, destination: &str, read_only: bool) -> Mount {
 }
 
 /// HEX-GUEST-16: rewrite an OciSpec with a root folder and with layers, and a writable and a read-only
-/// bind: expect its root named by the staged copy and staged from the host path, each bind's source
+/// bind: expect its root named by the staged copy and staged from the host path (an image's layer blobs
+/// named by the digests their names give, never read; docker save's `<id>/layer.tar` by a digest learned
+/// before, or none; each layer the box's `layers/<i>`; tarballs mixed with directories refused), each
+/// bind's source
 /// its path under its share (writable binds pass), and a bind under no share refused naming it and the
 /// shared roots.
 #[test]
@@ -145,6 +148,7 @@ fn an_oci_spec_is_rewritten_to_the_guests_paths() {
         ),
         &shared,
         STAGED,
+        &Known::new(),
     )
     .unwrap();
     let ClassSpec::Oci(spec) = &got.spec.class else {
@@ -167,28 +171,82 @@ fn an_oci_spec_is_rewritten_to_the_guests_paths() {
         Source::Tar(PathBuf::from("/Users/ada/rootfs.tar"))
     );
 
+    // Two layers as an image keeps them, each blob named by its digest (an OCI image layout's
+    // blobs/sha256/<hex>, as containerd's content store's). Neither file exists: a layer's digest is its
+    // name, never read to learn it (§4a; the lead's rule, 2026-11-06: a create never hashes a layer).
+    let digests: Vec<[u8; 32]> = [[0xa0u8; 32], [0x1bu8; 32]].to_vec();
+    let blobs: Vec<PathBuf> = digests
+        .iter()
+        .map(|d| {
+            PathBuf::from(format!(
+                "/Users/ada/image/blobs/sha256/{}",
+                hex_core::stream::files::digest_hex(d)
+            ))
+        })
+        .collect();
+    // And a layer as `docker save` writes it, `<id>/layer.tar`, its name no digest: whole-root staging took
+    // it, and so does the store (the lead's check, 2026-11-06), named by a digest learned when it last
+    // crossed (`known`), or else by none, staged into the box and hashed as it crosses.
+    let saved = PathBuf::from("/Users/ada/save/0f3e/layer.tar");
+    let mut layers = blobs.clone();
+    layers.push(saved.clone());
     let layered = rewrite(
-        oci(
-            Rootfs::Layers(vec![
-                PathBuf::from("/Users/l0.tar"),
-                PathBuf::from("/Users/l1.tar"),
-            ]),
-            vec![],
-        ),
+        oci(Rootfs::Layers(layers.clone()), vec![]),
         &shared,
         STAGED,
+        &Known::new(),
     )
     .unwrap();
     let ClassSpec::Oci(spec) = &layered.spec.class else {
         panic!("not oci");
     };
+    // Each is a lower layer of the box's overlay, by the box's own name for it, lowest first.
     assert_eq!(
         spec.rootfs,
-        Rootfs::Layers(vec![
-            PathBuf::from("/run/hex/staged/box-1/layer0"),
-            PathBuf::from("/run/hex/staged/box-1/layer1"),
-        ])
+        Rootfs::Layers(
+            (0..3)
+                .map(|i| PathBuf::from(format!("{STAGED}/box-1/layers/{i}")))
+                .collect()
+        )
     );
+    let named = |saved: Option<[u8; 32]>| {
+        Source::Layers(
+            layers
+                .iter()
+                .zip(digests.iter().copied().map(Some).chain([saved]))
+                .map(|(path, digest)| hex_client::guest::stage::Layer {
+                    path: path.clone(),
+                    digest,
+                })
+                .collect(),
+        )
+    };
+    assert_eq!(layered.items[0].source, named(None));
+    let learned = [0x5au8; 32];
+    let known: Known = [(saved.clone(), learned)].into_iter().collect();
+    let again = rewrite(
+        oci(Rootfs::Layers(layers.clone()), vec![]),
+        &shared,
+        STAGED,
+        &known,
+    )
+    .unwrap();
+    assert_eq!(again.items[0].source, named(Some(learned)));
+    let Err(Refusal::Invalid { why, .. }) = rewrite(
+        oci(
+            Rootfs::Layers(vec![
+                PathBuf::from("/Users/l0.tar"),
+                PathBuf::from("/Users/l1"),
+            ]),
+            vec![],
+        ),
+        &shared,
+        STAGED,
+        &Known::new(),
+    ) else {
+        panic!("expected tarballs and directories together refused");
+    };
+    assert!(why.contains("mixes tarballs and directories"), "{why}");
 
     let Err(Refusal::Platform { why, .. }) = rewrite(
         oci(
@@ -197,12 +255,57 @@ fn an_oci_spec_is_rewritten_to_the_guests_paths() {
         ),
         &shared,
         STAGED,
+        &Known::new(),
     ) else {
         panic!("expected the unshared bind refused");
     };
     assert!(
         why.contains("/x's source /opt/x") && why.contains("[/Users, /etc]"),
         "{why}"
+    );
+}
+
+/// HEX-GUEST-16 (§4a; the lead's conditions, 2026-11-06): learn the digests of three layer files from a
+/// stage whose guest's store holds two layers: expect the least recently learned forgotten, and the other
+/// two known by path while their files are as they were read. Rewrite one (its identity changes): expect it
+/// unknown, so it's hashed again when it next crosses, never trusted.
+#[test]
+fn a_learned_digest_is_trusted_while_its_file_is_the_same_within_what_the_store_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths: Vec<PathBuf> = ["a", "b", "c"]
+        .iter()
+        .map(|n| {
+            let path = dir.path().join(n).join("layer.tar");
+            std::fs::create_dir(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, n.as_bytes()).unwrap();
+            path
+        })
+        .collect();
+    let learned = paths
+        .iter()
+        .enumerate()
+        .map(|(i, path)| hex_client::guest::stage::Learned {
+            path: path.clone(),
+            digest: [u8::try_from(i).unwrap(); 32],
+            identity: hex_client::guest::stage::identity(&std::fs::metadata(path).unwrap()),
+        })
+        .collect();
+    let mut digests = Digests::default();
+    digests.learn(hex_client::guest::stage::Staged {
+        learned,
+        capacity: 2,
+    });
+    let known = digests.known(&paths);
+    assert_eq!(
+        known,
+        [(paths[1].clone(), [1; 32]), (paths[2].clone(), [2; 32])]
+            .into_iter()
+            .collect::<Known>()
+    );
+    std::fs::write(&paths[2], b"changed").unwrap();
+    assert!(
+        digests.known(&paths[2..]).is_empty(),
+        "a changed file is never trusted"
     );
 }
 
@@ -233,7 +336,7 @@ fn a_bundles_config_is_rewritten_to_the_guests_paths() {
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(bundle.clone()),
     };
-    let got = rewrite(spec.clone(), &shared, STAGED).unwrap();
+    let got = rewrite(spec.clone(), &shared, STAGED, &Known::new()).unwrap();
     assert_eq!(
         got.spec.class,
         ClassSpec::Bundle(PathBuf::from("/run/hex/staged/box-1"))
@@ -252,7 +355,7 @@ fn a_bundles_config_is_rewritten_to_the_guests_paths() {
         "/run/hex/shares/1/bundle/data"
     );
     assert!(matches!(
-        rewrite(spec, &[share(0, "/etc", false)], STAGED),
+        rewrite(spec, &[share(0, "/etc", false)], STAGED, &Known::new()),
         Err(Refusal::Platform { .. })
     ));
 }
@@ -278,6 +381,17 @@ impl shards_api::Guests for NoGuest {
             "a stand-in boots nothing".to_owned(),
         ))
     }
+
+    fn attach(
+        &self,
+        identity: &shards_api::Identity,
+        _spec: &shards_api::GuestSpec,
+    ) -> Result<Box<dyn shards_api::Guest>, shards_api::Refusal> {
+        Err(shards_api::Refusal::Gone {
+            pid: identity.pid,
+            why: "a stand-in boots no guest to take back".to_owned(),
+        })
+    }
 }
 
 fn config() -> GuestConfig {
@@ -285,8 +399,9 @@ fn config() -> GuestConfig {
         binary: PathBuf::from("/shards"),
         kernel: PathBuf::from("/k"),
         initrd: PathBuf::from("/i"),
+        // Shards' least guest: one vCPU and its architecture's least memory (`shards_api::check`).
         vcpus: 1,
-        memory_mib: 256,
+        memory_mib: shards_api::min_memory_mib(std::env::consts::ARCH),
         shares: vec![share(0, "/", false)],
         staged: STAGED.to_owned(),
     }
@@ -362,6 +477,7 @@ fn every_missing_guest_input_is_named_in_one_refusal() {
             .collect();
         GuestConfig::from_vars(move |name| vars.get(name).cloned())
     };
+    // Inputs to the parse, not a guest's size: any numbers do.
     let sized = [("HEX_GUEST_CPUS", "2"), ("HEX_GUEST_MEMORY_MIB", "1024")];
     let Err(Refusal::Invalid { why, .. }) = read(&sized) else {
         panic!("expected a refusal");
@@ -448,10 +564,21 @@ fn an_unrenderable_spec_is_refused_by_its_field_before_its_shares_or_a_boot() {
 fn a_tarball_root_stages_everywhere_and_a_directory_root_is_refused_on_windows() {
     let host = tempfile::tempdir().unwrap();
     let tarball = host.path().join("rootfs.tar.gz");
-    let got = rewrite(oci(Rootfs::Dir(tarball.clone()), vec![]), &[], STAGED).unwrap();
+    let got = rewrite(
+        oci(Rootfs::Dir(tarball.clone()), vec![]),
+        &[],
+        STAGED,
+        &Known::new(),
+    )
+    .unwrap();
     assert_eq!(got.items[0].source, Source::Tar(tarball));
     let dir = host.path().join("rootfs");
-    let got = rewrite(oci(Rootfs::Dir(dir.clone()), vec![]), &[], STAGED);
+    let got = rewrite(
+        oci(Rootfs::Dir(dir.clone()), vec![]),
+        &[],
+        STAGED,
+        &Known::new(),
+    );
     if cfg!(windows) {
         let Err(Refusal::Platform { why, .. }) = got else {
             panic!("expected a Windows directory root refused, got {got:?}");
@@ -460,4 +587,658 @@ fn a_tarball_root_stages_everywhere_and_a_directory_root_is_refused_on_windows()
     } else {
         assert_eq!(got.unwrap().items[0].source, Source::Path(dir));
     }
+}
+
+/// How a stand-in guest answers its first dial.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Boots {
+    /// Its relay answers: the token, then the node's hello.
+    Ready,
+    /// Alive, its relay never listening: the dial's patience runs out (the hung-guest tests, which need a
+    /// Shards backend: macOS and Windows).
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    Hung,
+}
+
+/// A stand-in for Shards whose guests boot as `plan` says, one entry a boot, recording each first
+/// dial's patience and each stop.
+struct Planned {
+    plan: Mutex<Vec<Boots>>,
+    patience: Arc<Mutex<Vec<Duration>>>,
+    stops: Arc<AtomicUsize>,
+    boots: AtomicUsize,
+    /// Each boot's memory, in MiB.
+    memory: Mutex<Vec<u64>>,
+}
+
+impl Planned {
+    fn new(plan: &[Boots]) -> Self {
+        Self {
+            plan: Mutex::new(plan.iter().rev().copied().collect()),
+            patience: Arc::new(Mutex::new(Vec::new())),
+            stops: Arc::new(AtomicUsize::new(0)),
+            boots: AtomicUsize::new(0),
+            memory: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+struct PlannedGuest {
+    boots: Boots,
+    patience: Arc<Mutex<Vec<Duration>>>,
+    stops: Arc<AtomicUsize>,
+}
+
+/// A loopback stream as Shards' guest stream.
+struct Looped(std::net::TcpStream);
+
+impl std::io::Read for Looped {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl std::io::Write for Looped {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+impl shards_api::Stream for Looped {
+    fn try_clone(&self) -> std::io::Result<Box<dyn shards_api::Stream>> {
+        Ok(Box::new(Looped(self.0.try_clone()?)))
+    }
+
+    fn handle(&self) -> shards_api::Handle<'_> {
+        #[cfg(unix)]
+        return std::os::fd::AsFd::as_fd(&self.0);
+        #[cfg(windows)]
+        std::os::windows::io::AsSocket::as_socket(&self.0)
+    }
+
+    fn set_nonblocking(&self, on: bool) -> std::io::Result<()> {
+        self.0.set_nonblocking(on)
+    }
+
+    fn shutdown(&self, how: std::net::Shutdown) -> std::io::Result<()> {
+        self.0.shutdown(how)
+    }
+
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.0.set_read_timeout(timeout)
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.0.set_write_timeout(timeout)
+    }
+}
+
+/// A relay and node agent in one: the connection's token, then the answer to its hello.
+fn ready_relay() -> std::net::TcpStream {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        conn.write_all(&7u64.to_le_bytes()).unwrap();
+        let mut d = stream::Deframer::new(hex_core::wire::MAX_MESSAGE);
+        let mut byte = [0u8; 1];
+        let message = loop {
+            conn.read_exact(&mut byte).unwrap();
+            if let (_, Some(m)) = d.take(&byte).unwrap() {
+                break m;
+            }
+        };
+        let (h, _) =
+            hex_core::wire::read_request_apart(&message, hex_core::wire::MAX_MESSAGE).unwrap();
+        let hello = hex_core::wire::Answer::Hello(hex_core::wire::Hello {
+            version: hex_core::wire::VERSION,
+            classes: vec![hex_api::Class::Oci],
+            limits: hex_core::wire::Limits {
+                connections: 1,
+                message_bytes: hex_core::wire::MAX_MESSAGE,
+                in_flight: 1,
+                programs: 1,
+            },
+        });
+        let bytes = hex_core::wire::answer(
+            hex_core::wire::FIRST,
+            h.id,
+            &hello,
+            hex_core::wire::MAX_MESSAGE,
+        )
+        .unwrap();
+        conn.write_all(&stream::frame(&bytes, hex_core::wire::MAX_MESSAGE).unwrap())
+            .unwrap();
+        // Held until the client goes, as a relay's connection is.
+        let _ = conn.read(&mut byte);
+    });
+    std::net::TcpStream::connect(addr).unwrap()
+}
+
+impl shards_api::Guest for PlannedGuest {
+    fn connect(
+        &self,
+        _port: u32,
+        patience: Duration,
+    ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        self.patience.lock().unwrap().push(patience);
+        match self.boots {
+            Boots::Ready => Ok(Box::new(Looped(ready_relay()))),
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            Boots::Hung => Err(shards_api::Refusal::Channel {
+                port: _port,
+                why: format!("unanswered in {patience:?}"),
+            }),
+        }
+    }
+
+    fn stop(&self) -> Result<(), shards_api::Refusal> {
+        self.stops.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn wait_for(&self, _: Duration) -> Result<Option<shards_api::End>, shards_api::Refusal> {
+        Ok(None)
+    }
+
+    fn identity(&self) -> Result<shards_api::Identity, shards_api::Refusal> {
+        Err(shards_api::Refusal::Unsupported {
+            what: "identity",
+            why: "a planned stand-in names no VM".into(),
+        })
+    }
+}
+
+impl shards_api::Guests for Planned {
+    fn backend(&self) -> Result<shards_api::Backend, shards_api::Refusal> {
+        shards_api::backend()
+    }
+
+    fn boot(
+        &self,
+        spec: &shards_api::GuestSpec,
+    ) -> Result<Box<dyn shards_api::Guest>, shards_api::Refusal> {
+        self.boots.fetch_add(1, Ordering::SeqCst);
+        self.memory.lock().unwrap().push(spec.memory_mib);
+        let boots = self.plan.lock().unwrap().pop().unwrap();
+        Ok(Box::new(PlannedGuest {
+            boots,
+            patience: Arc::clone(&self.patience),
+            stops: Arc::clone(&self.stops),
+        }))
+    }
+
+    fn attach(
+        &self,
+        identity: &shards_api::Identity,
+        _spec: &shards_api::GuestSpec,
+    ) -> Result<Box<dyn shards_api::Guest>, shards_api::Refusal> {
+        Err(shards_api::Refusal::Gone {
+            pid: identity.pid,
+            why: "a stand-in boots no guest to take back".to_owned(),
+        })
+    }
+}
+
+/// HEX-GUEST-34 (the lead's rule for learned waits): boot a guest before any boot is seen: expect its
+/// first dial bounded by twice the record's slowest boot to ready, never unbounded.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn the_first_boot_is_bounded_by_the_record() {
+    if shards_api::backend().is_err() {
+        return;
+    }
+    let guests = Arc::new(Planned::new(&[Boots::Ready]));
+    let rt = GuestRuntime::new(guests.clone(), config());
+    rt.guest().unwrap();
+    let given = guests.patience.lock().unwrap()[0];
+    assert!(
+        given <= 2 * recorded_boot().unwrap() && given > recorded_boot().unwrap(),
+        "{given:?}"
+    );
+}
+
+/// HEX-GUEST-34: tell the runtime of a boot slower than the record, then a faster one, and boot: expect
+/// the first dial bounded by twice the slowest seen, the bound only rising.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn the_bound_rises_with_a_slow_boot_and_never_falls() {
+    if shards_api::backend().is_err() {
+        return;
+    }
+    let guests = Arc::new(Planned::new(&[Boots::Ready]));
+    let rt = GuestRuntime::new(guests.clone(), config());
+    let slow = 3 * recorded_boot().unwrap();
+    rt.learn(slow);
+    rt.learn(recorded_boot().unwrap() / 2);
+    assert_eq!(rt.first_dial_bound().unwrap(), 2 * slow);
+    rt.guest().unwrap();
+    let given = guests.patience.lock().unwrap()[0];
+    assert!(given <= 2 * slow && given > slow, "{given:?}");
+}
+
+/// HEX-GUEST-34 (no caller fails where an alternative exists): boot a guest that stays alive and never
+/// listens, then one that does: expect the first stopped and counted, the second booted and used.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn a_hung_guest_is_retired_and_booted_again() {
+    if shards_api::backend().is_err() {
+        return;
+    }
+    let guests = Arc::new(Planned::new(&[Boots::Hung, Boots::Ready]));
+    let rt = GuestRuntime::new(guests.clone(), config());
+    rt.guest().unwrap();
+    assert_eq!(guests.boots.load(Ordering::SeqCst), 2);
+    assert_eq!(guests.stops.load(Ordering::SeqCst), 1);
+    assert_eq!(rt.retired(), 1);
+}
+
+/// HEX-GUEST-34: boot two guests that both hang: expect the caller refused by type, naming the boot and
+/// its bound, after exactly two boots, both stopped.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn a_second_hang_is_refused_by_type() {
+    if shards_api::backend().is_err() {
+        return;
+    }
+    let guests = Arc::new(Planned::new(&[Boots::Hung, Boots::Hung]));
+    let rt = GuestRuntime::new(guests.clone(), config());
+    let Err(Refusal::Os { op, why }) = rt.guest().map(|_| ()) else {
+        panic!("expected the boot refused");
+    };
+    assert_eq!(op, "booting the node's guest");
+    assert!(why.contains("ready"), "{why}");
+    assert_eq!(guests.boots.load(Ordering::SeqCst), 2);
+    assert_eq!(guests.stops.load(Ordering::SeqCst), 2);
+    assert_eq!(rt.retired(), 2);
+}
+
+/// HEX-GUEST-34 (the lead's seed rule, 2026-11-07: a host class with no record seeds from 2 × the slowest record
+/// of any class, then rises with the node's own): on Linux (KVM), whose boot-to-ready row isn't in
+/// records.tsv yet, expect the first dial's bound twice that seed (twice the margin over the slowest
+/// boot_ready of any class), never a refusal; then tell it of a boot slower than the seed: expect the bound
+/// twice that boot, risen.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_unrecorded_class_seeds_from_twice_the_slowest_of_any_class_and_rises() {
+    let slowest_any = RECORDS
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(|l| {
+            let row: Vec<&str> = l.split('\t').collect();
+            (row.first() == Some(&"boot_ready")).then(|| row[2].parse::<u64>().unwrap())
+        })
+        .max()
+        .unwrap();
+    let seed = 2 * Duration::from_micros(slowest_any);
+    let rt = GuestRuntime::new(Arc::new(Planned::new(&[Boots::Ready])), config());
+    assert_eq!(recorded_boot().unwrap(), seed);
+    assert_eq!(rt.first_dial_bound().unwrap(), 2 * seed);
+    let slow = 3 * seed;
+    rt.learn(slow);
+    assert_eq!(rt.first_dial_bound().unwrap(), 2 * slow);
+}
+
+/// HEX-GUEST-34 (the lead: the record is the input that turns a class on; the lead's seed rule, 2026-11-07): read
+/// a records table with HVF's and WHP's rows: expect HVF its own row, and KVM, with none, twice the slowest of
+/// any class (WHP's); a measure no class records has no seed. Add a KVM row: expect KVM its own, with no code
+/// between them.
+#[test]
+fn a_records_row_is_what_turns_a_class_on() {
+    let hvf = "# measure\tclass\tslowest_us\trecord\nboot_ready\tmacOS-HVF\t265000\tr.md\n";
+    assert_eq!(
+        slowest_in(hvf, "boot_ready", "macOS-HVF"),
+        Some(Duration::from_millis(265))
+    );
+    assert_eq!(slowest_in(hvf, "boot_ready", "Linux-KVM"), None);
+    let two = format!("{hvf}boot_ready\tWindows-WHP\t2712939\tr.md\n");
+    assert_eq!(
+        seed_in(&two, "boot_ready", "macOS-HVF"),
+        Some(Duration::from_millis(265))
+    );
+    assert_eq!(
+        seed_in(&two, "boot_ready", "Linux-KVM"),
+        Some(2 * Duration::from_micros(2_712_939))
+    );
+    assert_eq!(seed_in(&two, "stop", "Linux-KVM"), None);
+    let kvm = format!("{hvf}boot_ready\tLinux-KVM\t180000\tr.md\n");
+    assert_eq!(
+        slowest_in(&kvm, "boot_ready", "Linux-KVM"),
+        Some(Duration::from_millis(180))
+    );
+    assert_eq!(slowest_in(&kvm, "stop", "Linux-KVM"), None);
+    assert_eq!(
+        seed_in(&kvm, "boot_ready", "Linux-KVM"),
+        Some(Duration::from_millis(180))
+    );
+}
+
+/// HEX-GUEST-39 (the lead, 2026-11-07: an upgrade's first boot costs 1.5-5.3 s of the host's first-run checks
+/// before the guest's kernel runs, bench/native/guest/boot-ready/RECORD.md, and is no user's create's to pay):
+/// make the node's runtime: expect its guest booted before it returns, and the guest a create asks for that one,
+/// no second boot.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn the_node_boots_its_guest_before_it_accepts_a_box() {
+    if shards_api::backend().is_err() {
+        return;
+    }
+    let guests = Arc::new(Planned::new(&[Boots::Ready]));
+    let node = WithGuest::new(
+        hex_api::sim::SimRuntime::new(),
+        GuestRuntime::new(guests.clone(), config()),
+    )
+    .unwrap();
+    assert_eq!(
+        guests.boots.load(Ordering::SeqCst),
+        1,
+        "booted as it was made"
+    );
+    node.oci.guest().unwrap();
+    assert_eq!(
+        guests.boots.load(Ordering::SeqCst),
+        1,
+        "a create boots none"
+    );
+}
+
+/// HEX-GUEST-39: make a node whose guest can't boot: expect the node refused by type, naming the boot; and
+/// one where Shards has no backend made, its `oci` class refused at create by name as before (§5), its
+/// `process` class serving.
+#[test]
+fn a_node_whose_guest_cant_boot_is_refused_and_one_with_no_backend_is_made() {
+    let failing = Arc::new(NoGuest {
+        backend: Ok(shards_api::Backend::Kvm),
+        boots: AtomicUsize::new(0),
+    });
+    let refused = WithGuest::new(
+        hex_api::sim::SimRuntime::new(),
+        GuestRuntime::new(failing.clone(), config()),
+    )
+    .err()
+    .expect("a node whose guest can't boot is refused");
+    assert!(
+        refused.to_string().contains("booting the node's guest"),
+        "{refused}"
+    );
+    assert_eq!(failing.boots.load(Ordering::SeqCst), 1);
+    let none = Arc::new(NoGuest {
+        backend: Err(shards_api::Refusal::NoBackend {
+            os: "macos",
+            arch: "x86_64",
+        }),
+        boots: AtomicUsize::new(0),
+    });
+    let node = WithGuest::new(
+        hex_api::sim::SimRuntime::new(),
+        GuestRuntime::new(none.clone(), config()),
+    )
+    .unwrap();
+    assert_eq!(none.boots.load(Ordering::SeqCst), 0);
+    assert_eq!(node.classes(), [Class::Process, Class::Oci]);
+}
+
+/// HEX-GUEST-40 (the lead, 2026-11-07): replace the Shards binary while the guest runs, then create twice: expect
+/// one throwaway guest booted in the background on the new binary at Shards' least memory and stopped, so the
+/// node's next boot is warm, the running guest left serving its boxes, and nothing more for a binary already
+/// warmed.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn a_changed_binary_is_warmed_once_in_the_background_and_the_guest_kept() {
+    if shards_api::backend().is_err() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let binary = dir.path().join("shards");
+    std::fs::write(&binary, b"a build").unwrap();
+    let mut given = config();
+    given.binary = binary.clone();
+    let guests = Arc::new(Planned::new(&[Boots::Ready, Boots::Ready]));
+    let rt = GuestRuntime::new(guests.clone(), given);
+    rt.boot().unwrap();
+    rt.warm_if_changed().unwrap();
+    assert_eq!(
+        guests.boots.load(Ordering::SeqCst),
+        1,
+        "an unchanged binary warms nothing"
+    );
+    std::fs::write(&binary, b"the next build, an upgrade").unwrap();
+    rt.warm_if_changed().unwrap();
+    rt.warm_if_changed().unwrap();
+    rt.finish_warm();
+    assert_eq!(
+        guests.boots.load(Ordering::SeqCst),
+        2,
+        "one throwaway, however many creates"
+    );
+    assert_eq!(
+        guests.stops.load(Ordering::SeqCst),
+        1,
+        "the throwaway stopped"
+    );
+    assert_eq!(
+        guests.memory.lock().unwrap()[1],
+        shards_api::min_memory_mib(std::env::consts::ARCH),
+        "the throwaway at Shards' least memory"
+    );
+    rt.warm_if_changed().unwrap();
+    rt.guest().unwrap();
+    assert_eq!(
+        guests.boots.load(Ordering::SeqCst),
+        2,
+        "the warmed binary and the running guest kept"
+    );
+}
+
+/// Guests whose VMs outlive a lost handle, as Shards' do on macOS: each booted guest runs until stopped,
+/// named by its identity, and `attach` of one still running gives it back. Counts boots, attaches and
+/// stops; `answers` says whether a guest's relay answers a dial.
+struct Kept {
+    running: Mutex<std::collections::BTreeSet<u32>>,
+    boots: AtomicUsize,
+    attaches: AtomicUsize,
+    stops: Arc<AtomicUsize>,
+    answers: bool,
+}
+
+impl Kept {
+    fn new(answers: bool) -> Arc<Self> {
+        Arc::new(Self {
+            running: Mutex::new(std::collections::BTreeSet::new()),
+            boots: AtomicUsize::new(0),
+            attaches: AtomicUsize::new(0),
+            stops: Arc::new(AtomicUsize::new(0)),
+            answers,
+        })
+    }
+
+    fn guest(self: &Arc<Self>, pid: u32) -> Box<dyn shards_api::Guest> {
+        Box::new(KeptGuest {
+            pid,
+            kept: Arc::clone(self),
+        })
+    }
+}
+
+fn kept_identity(pid: u32) -> shards_api::Identity {
+    shards_api::Identity {
+        pid,
+        started: u64::from(pid) * 10,
+        vsock: PathBuf::from(format!("/kept/{pid}.sock")),
+    }
+}
+
+struct KeptGuest {
+    pid: u32,
+    kept: Arc<Kept>,
+}
+
+impl shards_api::Guest for KeptGuest {
+    fn connect(
+        &self,
+        port: u32,
+        _patience: Duration,
+    ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        if self.kept.answers {
+            Ok(Box::new(Looped(ready_relay())))
+        } else {
+            Err(shards_api::Refusal::Channel {
+                port,
+                why: "a stand-in that won't answer".to_owned(),
+            })
+        }
+    }
+
+    fn stop(&self) -> Result<(), shards_api::Refusal> {
+        self.kept.stops.fetch_add(1, Ordering::SeqCst);
+        self.kept.running.lock().unwrap().remove(&self.pid);
+        Ok(())
+    }
+
+    fn wait_for(&self, _: Duration) -> Result<Option<shards_api::End>, shards_api::Refusal> {
+        let running = self.kept.running.lock().unwrap().contains(&self.pid);
+        Ok(if running {
+            None
+        } else {
+            Some(shards_api::End::Stopped)
+        })
+    }
+
+    fn identity(&self) -> Result<shards_api::Identity, shards_api::Refusal> {
+        Ok(kept_identity(self.pid))
+    }
+}
+
+/// Wraps an Arc'd `Kept` as the runtime's `Guests`.
+struct KeptGuests(Arc<Kept>);
+
+impl shards_api::Guests for KeptGuests {
+    fn backend(&self) -> Result<shards_api::Backend, shards_api::Refusal> {
+        shards_api::backend()
+    }
+
+    fn boot(
+        &self,
+        _spec: &shards_api::GuestSpec,
+    ) -> Result<Box<dyn shards_api::Guest>, shards_api::Refusal> {
+        let n = self.0.boots.fetch_add(1, Ordering::SeqCst);
+        let pid = 100 + u32::try_from(n).unwrap();
+        self.0.running.lock().unwrap().insert(pid);
+        Ok(self.0.guest(pid))
+    }
+
+    fn attach(
+        &self,
+        identity: &shards_api::Identity,
+        _spec: &shards_api::GuestSpec,
+    ) -> Result<Box<dyn shards_api::Guest>, shards_api::Refusal> {
+        self.0.attaches.fetch_add(1, Ordering::SeqCst);
+        let running = self.0.running.lock().unwrap().contains(&identity.pid);
+        if running && *identity == kept_identity(identity.pid) {
+            Ok(self.0.guest(identity.pid))
+        } else {
+            Err(shards_api::Refusal::Gone {
+                pid: identity.pid,
+                why: "no stand-in guest runs as it".to_owned(),
+            })
+        }
+    }
+}
+
+/// A node on `kept`'s guests recording its guest at `record`.
+fn kept_node(kept: &Arc<Kept>, record: &Path) -> GuestRuntime {
+    GuestRuntime::new(Arc::new(KeptGuests(Arc::clone(kept))), config())
+        .recorded_at(record.to_owned())
+}
+
+/// Native plan step 8 (T-T7.1.2): a node boots its guest and records it; the node is lost without its drop
+/// (a crash: nothing of it stops the guest); the next node on the same record takes that guest back and
+/// boots none, stops none.
+#[test]
+fn a_node_takes_back_the_guest_it_recorded_and_boots_none() {
+    if shards_api::backend().is_err() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let record = dir.path().join("@guest");
+    let kept = Kept::new(true);
+    let first = kept_node(&kept, &record);
+    first.boot().unwrap();
+    assert_eq!(held::read(&record).unwrap(), Some(kept_identity(100)));
+    // Lost without its drop, as a crash loses it.
+    let _lost = std::mem::ManuallyDrop::new(first);
+    let next = kept_node(&kept, &record);
+    next.boot().unwrap();
+    assert_eq!(
+        kept.boots.load(Ordering::SeqCst),
+        1,
+        "a second guest booted"
+    );
+    assert_eq!(kept.attaches.load(Ordering::SeqCst), 1);
+    assert_eq!(kept.stops.load(Ordering::SeqCst), 0);
+    assert_eq!(held::read(&record).unwrap(), Some(kept_identity(100)));
+}
+
+/// Native plan step 8 (T-T7.1.2): a node whose recorded guest is gone forgets it and boots its own, which it
+/// records in its place.
+#[test]
+fn a_recorded_guest_that_is_gone_is_forgotten_and_another_booted() {
+    if shards_api::backend().is_err() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let record = dir.path().join("@guest");
+    held::write(&record, &kept_identity(7)).unwrap();
+    let kept = Kept::new(true);
+    let node = kept_node(&kept, &record);
+    node.boot().unwrap();
+    assert_eq!(kept.attaches.load(Ordering::SeqCst), 1);
+    assert_eq!(kept.boots.load(Ordering::SeqCst), 1);
+    assert_eq!(held::read(&record).unwrap(), Some(kept_identity(100)));
+}
+
+/// Native plan step 8 (no orphan VM): a guest taken back that won't answer is stopped before the node boots
+/// another, so none runs beside the next.
+#[test]
+fn a_taken_back_guest_that_wont_answer_is_stopped_before_another_boots() {
+    if shards_api::backend().is_err() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let record = dir.path().join("@guest");
+    let kept = Kept::new(false);
+    kept.running.lock().unwrap().insert(7);
+    held::write(&record, &kept_identity(7)).unwrap();
+    let node = kept_node(&kept, &record);
+    // Its own boot won't answer either: refused, as a boot that never readies is.
+    let _ = node.boot();
+    assert_eq!(kept.attaches.load(Ordering::SeqCst), 1);
+    assert!(
+        !kept.running.lock().unwrap().contains(&7),
+        "the guest taken back runs on: an orphan"
+    );
+    assert!(kept.stops.load(Ordering::SeqCst) >= 1);
+}
+
+/// Native plan step 8: a node that stops its guest (dropped) removes its record, so the next node takes
+/// back nothing.
+#[test]
+fn a_node_that_stops_its_guest_leaves_no_record() {
+    if shards_api::backend().is_err() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let record = dir.path().join("@guest");
+    let kept = Kept::new(true);
+    let node = kept_node(&kept, &record);
+    node.boot().unwrap();
+    assert!(held::read(&record).unwrap().is_some());
+    drop(node);
+    assert_eq!(held::read(&record).unwrap(), None);
+    assert!(kept.running.lock().unwrap().is_empty());
 }

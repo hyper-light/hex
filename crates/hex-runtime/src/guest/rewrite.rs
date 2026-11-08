@@ -6,13 +6,16 @@
 use std::path::{Path, PathBuf};
 
 use hex_api::{BoxId, BoxSpec, ClassSpec, OciSpec, Refusal, Rootfs};
-use hex_client::guest::stage::{Item, Source, is_tarball, staged_path};
+use hex_client::guest::stage::{
+    Item, Layer, Source, blob_digest, box_layer_path, is_tarball, staged_path,
+};
 use serde_json::Value;
 
 use super::shares::{self, Share};
 
-/// The most `config.json` a bundle's rewrite reads: the `oci` class's own (`hex_core::bundle`).
-const MAX_CONFIG_BYTES: u64 = 1 << 20;
+// The most `config.json` a bundle's rewrite reads is the `oci` class's own, the one the guest's node
+// parses it under, so no spec passes here that the guest refuses for its size.
+use hex_core::bundle::MAX_CONFIG_BYTES;
 
 /// A spec for the guest, and what to stage for it first.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,8 +24,18 @@ pub struct Rewritten {
     pub items: Vec<Item>,
 }
 
-/// `spec` rewritten for a guest whose shares are `shared` and whose relay stages under `staged`.
-pub fn rewrite(spec: BoxSpec, shared: &[Share], staged: &str) -> Result<Rewritten, Refusal> {
+/// The digests the host learned for layer tarballs not named by theirs, by path, each trusted only while
+/// its file's identity is the one it was learned with (the caller checks).
+pub type Known = std::collections::BTreeMap<PathBuf, hex_core::stream::files::Digest>;
+
+/// `spec` rewritten for a guest whose shares are `shared` and whose relay stages under `staged`, its layer
+/// tarballs' digests their blob names' or `known`'s.
+pub fn rewrite(
+    spec: BoxSpec,
+    shared: &[Share],
+    staged: &str,
+    known: &Known,
+) -> Result<Rewritten, Refusal> {
     let BoxSpec { id, bounds, class } = spec;
     let mut items = Vec::new();
     let class = match class {
@@ -32,15 +45,9 @@ pub fn rewrite(spec: BoxSpec, shared: &[Share], staged: &str) -> Result<Rewritte
                 Rootfs::Dir(dir) => {
                     Rootfs::Dir(stage(staged, &id, &mut items, "root".to_owned(), dir)?)
                 }
-                Rootfs::Layers(layers) => Rootfs::Layers(
-                    layers
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, layer)| {
-                            stage(staged, &id, &mut items, format!("layer{i}"), layer)
-                        })
-                        .collect::<Result<_, _>>()?,
-                ),
+                Rootfs::Layers(layers) => {
+                    Rootfs::Layers(stage_layers(staged, &id, &mut items, layers, known)?)
+                }
             };
             for mount in &mut oci.mounts {
                 let guest = shares::in_guest(shared, &mount.source)
@@ -131,6 +138,56 @@ fn stage(
     Ok(guest)
 }
 
+/// Adds an image's layers to stage, and returns their paths in the guest. Tarballs are an image's own
+/// layers, each applied as containerd's overlay applier applies one layer, so the guest mounts them as the
+/// overlay's lower layers, as a Linux host's overlayfs snapshotter does: each in the guest's layer store by
+/// its digest where the store has room, a layer the guest holds staged no more, else in the box (§4a). The
+/// box names each `layers/<i>` either way. Directories are each staged as they are, an overlay's layers
+/// already. A list of both is refused by name: a tarball's whiteouts would have to apply over a directory
+/// staged apart from it.
+fn stage_layers(
+    staged: &str,
+    id: &BoxId,
+    items: &mut Vec<Item>,
+    layers: Vec<PathBuf>,
+    known: &Known,
+) -> Result<Vec<PathBuf>, Refusal> {
+    let tarballs = layers.iter().filter(|l| is_tarball(l)).count();
+    if tarballs == 0 {
+        return layers
+            .into_iter()
+            .enumerate()
+            .map(|(i, layer)| stage(staged, id, items, format!("layer{i}"), layer))
+            .collect();
+    }
+    if tarballs != layers.len() {
+        return Err(Refusal::Invalid {
+            what: "oci spec",
+            why: "rootfs.layers mixes tarballs and directories; give an image's layers as one or \
+                  the other"
+                .to_owned(),
+        });
+    }
+    // Each layer's digest is its blob's name, or one learned when it last crossed (`known`), never learned
+    // by reading it here: a create costs a layer the guest holds its name alone. A layer of neither is
+    // staged into the box, hashed as it crosses, for the next create to know (§4a).
+    let layers: Vec<Layer> = layers
+        .into_iter()
+        .map(|path| Layer {
+            digest: blob_digest(&path).or_else(|| known.get(&path).copied()),
+            path,
+        })
+        .collect();
+    let guests = (0..layers.len())
+        .map(|i| PathBuf::from(box_layer_path(staged, id, i)))
+        .collect();
+    items.push(Item {
+        name: "root".to_owned(),
+        source: Source::Layers(layers),
+    });
+    Ok(guests)
+}
+
 /// What the root at `path` is staged from (§4a): a tarball's own entries (`.tar`, `.tar.gz`, `.tgz`), or
 /// the directory as this host reads it. On Windows a directory root is refused by name: NTFS keeps no
 /// Unix modes, and a Linux symbolic link unpacked there loses its target's text (Git Bash's tar on
@@ -169,10 +226,13 @@ fn bundle(dir: &Path, shared: &[Share]) -> Result<(PathBuf, Vec<u8>), Refusal> {
     let file = std::fs::File::open(&path)
         .map_err(|e| invalid(format!("reading {}: {e}", path.display())))?;
     let mut text = Vec::new();
-    file.take(MAX_CONFIG_BYTES.saturating_add(1))
+    let past = u64::try_from(MAX_CONFIG_BYTES)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    file.take(past)
         .read_to_end(&mut text)
         .map_err(|e| invalid(format!("reading {}: {e}", path.display())))?;
-    if u64::try_from(text.len()).unwrap_or(u64::MAX) > MAX_CONFIG_BYTES {
+    if text.len() > MAX_CONFIG_BYTES {
         return Err(invalid(format!(
             "{} is over the {MAX_CONFIG_BYTES} bytes the runtime reads",
             path.display()

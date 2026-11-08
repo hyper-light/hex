@@ -1001,6 +1001,44 @@ for the service to bring it back.
 mid-delete, then restarted on the same state directory; each must fail on the tree before this change and
 pass after.
 
+## Decision (native plan step 8, 2026-11-08): a macOS rootless box outlives its node and is taken back with a new watcher
+
+T-T7.1.2 asks that a node restarted after a crash take each live box back, as Linux's does; the step names "macOS
+rootless boxes left with no watcher" as what must change to meet it. Linux's boxes are cgroups, which outlive the
+node by construction. A macOS rootless box is its process group (the leader's pid), held by a watcher thread in
+the node, so the node's death leaves the members running without a bound.
+
+- **What survives.** The members do: when a process's parent exits, XNU reparents its children to launchd
+  (`bsd/kern/kern_exit.c`, `proc_reparentlocked` to `initproc`), which reaps them, so they run on, unbounded,
+  until the node is back. Their process group is unchanged.
+- **What names them.** The group id with its leader's start time (`proc_pid_rusage`, `ri_proc_start_abstime`),
+  read at the leader's spawn while it is the node's unreaped child, and recorded with the box in the node's
+  state (the record's `init`, a `ProcId`, its `start_ticks` holding the Mach start time). The group is still the
+  box's when its leader runs with that start time, or when no process has the leader's pid. A live process with
+  that pid and another start time was given it since and leads a group of its own: the box is then taken back
+  empty, and the rootless gap the class already states (a recycled leader pid) is why box users close it.
+- **Taken back.** The restarted node runs Linux's decisions (`hex_core::recovery`) over its records
+  (`hex_node::recorded::Recorded::recover`). A record made is taken back: the class makes a box on the recorded
+  group (`ProcessBox::adopt`), and its watcher lists, measures and ends the members as it does its own, since none
+  of that needs parenthood. The members' own ends are launchd's to reap, and their exit statuses aren't the
+  node's. A record being made or removed is removed, and what its group still runs is killed
+  (`process::end_group`).
+- **The fact it waits on.** XNU's `EVFILT_PROC` catches only events after its attach (`bsd/kern/kern_event.c`,
+  `filt_procattach`). So the node's socket re-reads a watched program's `proc_pid_rusage` after attaching and
+  reports an end that came before. Measured on adas-mac-studio.local-2 through `hex node`: without it, 2 of 12
+  suite runs stalled 60 s on a lost end; with it, 0 of 12.
+- **Evidence.** crates/hex-cli/tests/macos_node_recovery.rs: `hex node` killed (SIGKILL) with a box running, one
+  empty, one mid-create (held in its record write by a FIFO at the write's temp path, and seen held there by
+  `sample(1)`) and one mid-delete (its record deleting, its member running). Restarted on the same state, it takes
+  back the running box with its member still running, which a delete then ends, and the empty one. It leaves
+  nothing of the others: no record, no temp file, no member. The tests failed on the tree before the change
+  (NoSuchBox; the temp file left; the member not ended) and pass after.
+- **What would falsify it.** A rootless member that changes its process group without `setsid` (`setpgid` into
+  another group) leaves the box as a daemonizing one does, and is lost to recovery as it is to the watcher. A
+  macOS that stopped reparenting orphans to launchd, or reaped a group's members with its leader, would end
+  boxes with their node. Box users name a box by its uid, which recovery reads the same way, so neither gap is
+  theirs.
+
 ## Open (STATUS.md)
 
 - Each OS's own boxes, natively (the decision above, proposed): under way. The **macOS `process` class is

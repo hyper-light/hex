@@ -1,0 +1,600 @@
+# launchd hex.ns5route.boot299.20261107T172146Z, adas-mac-studio-2, 26.2, Hex 00efb51; see bench/native/guest/boot-ready/RECORD.md
+RECORD 1 series=1 first=yes boot_ready_us=3049670 stop_us=1462 end=Some(Stopped) stamps_ns=29245374 30264791 30794583 30915124
+RECORD 2 series=1 first=no boot_ready_us=142199 stop_us=1215 end=Some(Stopped) stamps_ns=44871916 46102916 46861749 47109082
+RECORD 3 series=1 first=no boot_ready_us=109355 stop_us=1346 end=Some(Stopped) stamps_ns=25905707 27009957 27512166 27651707
+RECORD 4 series=1 first=no boot_ready_us=109096 stop_us=1142 end=Some(Stopped) stamps_ns=29073291 30216082 30733707 30846457
+RECORD 5 series=1 first=no boot_ready_us=108751 stop_us=1461 end=Some(Stopped) stamps_ns=27488541 28494666 29334166 29537249
+RECORD 6 series=1 first=no boot_ready_us=208543 stop_us=2968 end=Some(Stopped) stamps_ns=33767582 35293457 36277541 36485874
+RECORD 7 series=1 first=no boot_ready_us=142147 stop_us=1602 end=Some(Stopped) stamps_ns=33896666 35069791 35970582 36231791
+RECORD 8 series=1 first=no boot_ready_us=131321 stop_us=1399 end=Some(Stopped) stamps_ns=26823166 28047166 28640499 28774124
+RECORD 9 series=1 first=no boot_ready_us=265444 stop_us=3888 end=Some(Stopped) stamps_ns=27734208 28733874 29233083 29352416
+RECORD 10 series=1 first=no boot_ready_us=156404 stop_us=1130 end=Some(Stopped) stamps_ns=28810250 30083583 30602500 30722791
+RECORD 11 series=1 first=no boot_ready_us=134693 stop_us=1842 end=Some(Stopped) stamps_ns=30635791 31583458 32100416 32230291
+RECORD 12 series=1 first=no boot_ready_us=207209 stop_us=1259 end=Some(Stopped) stamps_ns=25025958 26156333 27069083 27442583
+RECORD 13 series=1 first=no boot_ready_us=119146 stop_us=2511 end=Some(Stopped) stamps_ns=30902750 31673916 32193166 32326125
+RECORD 14 series=1 first=no boot_ready_us=163169 stop_us=1171 end=Some(Stopped) stamps_ns=30020375 30819083 31361375 31468041
+RECORD 15 series=1 first=no boot_ready_us=115441 stop_us=1283 end=Some(Stopped) stamps_ns=27778957 28780666 29287707 29420791
+RECORD 16 series=1 first=no boot_ready_us=146935 stop_us=1257 end=Some(Stopped) stamps_ns=26390125 27365041 29262416 29499750
+RECORD 17 series=1 first=no boot_ready_us=126234 stop_us=2441 end=Some(Stopped) stamps_ns=27420791 28434874 29158999 29394083
+RECORD 18 series=1 first=no boot_ready_us=120432 stop_us=1282 end=Some(Stopped) stamps_ns=26835208 27601666 28164041 28276375
+RECORD 19 series=1 first=no boot_ready_us=130779 stop_us=1327 end=Some(Stopped) stamps_ns=31431583 32536208 33237916 33423249
+RECORD 20 series=1 first=no boot_ready_us=184837 stop_us=1159 end=Some(Stopped) stamps_ns=28780082 31499041 32281666 32505874
+RECORD 21 series=1 first=no boot_ready_us=145813 stop_us=1383 end=Some(Stopped) stamps_ns=27283541 28058916 28659999 28776457
+RECORD 22 series=1 first=no boot_ready_us=195031 stop_us=1355 end=Some(Stopped) stamps_ns=25417708 26451083 26990458 27138333
+RECORD 23 series=1 first=no boot_ready_us=147694 stop_us=1854 end=Some(Stopped) stamps_ns=29553250 31264375 32255541 32554041
+RECORD 24 series=2 first=yes boot_ready_us=1987850 stop_us=1206 end=Some(Stopped) stamps_ns=26888333 27713250 28253458 28376083
+RECORD 25 series=2 first=no boot_ready_us=310535 stop_us=7033 end=Some(Stopped) stamps_ns=26179625 27350458 27869916 28066958
+RECORD 26 series=2 first=no boot_ready_us=122818 stop_us=1307 end=Some(Stopped) stamps_ns=27124416 28297624 29313333 29723666
+RECORD 27 series=2 first=no boot_ready_us=168868 stop_us=2028 end=Some(Stopped) stamps_ns=30584458 31564874 32407041 32680458
+RECORD 28 series=2 first=no boot_ready_us=174694 stop_us=1357 end=Some(Stopped) stamps_ns=32254125 33265666 34186458 34410125
+RECORD 29 series=2 first=no boot_ready_us=114220 stop_us=1607 end=Some(Stopped) stamps_ns=28432208 29693124 30398249 30617416
+RECORD 30 series=2 first=no boot_ready_us=272542 stop_us=2920 end=Some(Stopped) stamps_ns=32702416 33706999 34265957 34409332
+RECORD 31 series=2 first=no boot_ready_us=145290 stop_us=1684 end=Some(Stopped) stamps_ns=33425041 34549166 35560999 35794833
+RECORD 32 series=2 first=no boot_ready_us=148772 stop_us=2439 end=Some(Stopped) stamps_ns=28045957 29211957 29787541 29918582
+RECORD 33 series=2 first=no boot_ready_us=141011 stop_us=2283 end=Some(Stopped) stamps_ns=26893416 27857832 28702249 28996791
+RECORD 34 series=2 first=no boot_ready_us=131859 stop_us=1499 end=Some(Stopped) stamps_ns=29134541 30452832 31522999 31800666
+RECORD 35 series=2 first=no boot_ready_us=303407 stop_us=4299 end=Some(Stopped) stamps_ns=30846916 32343124 33093666 33223749
+RECORD 36 series=2 first=no boot_ready_us=235025 stop_us=1422 end=Some(Stopped) stamps_ns=27789083 29162250 30094541 30302791
+RECORD 37 series=2 first=no boot_ready_us=157687 stop_us=1410 end=Some(Stopped) stamps_ns=27311583 28149999 28675749 28806083
+RECORD 38 series=2 first=no boot_ready_us=190946 stop_us=1331 end=Some(Stopped) stamps_ns=29150125 30070666 30835541 31057291
+RECORD 39 series=2 first=no boot_ready_us=157493 stop_us=1224 end=Some(Stopped) stamps_ns=32296749 33807749 34626249 34955041
+RECORD 40 series=2 first=no boot_ready_us=234110 stop_us=1398 end=Some(Stopped) stamps_ns=27410541 28580666 29420832 29654082
+RECORD 41 series=2 first=no boot_ready_us=242395 stop_us=2868 end=Some(Stopped) stamps_ns=26782333 27663791 28232916 28339208
+RECORD 42 series=2 first=no boot_ready_us=270648 stop_us=4562 end=Some(Stopped) stamps_ns=27439750 28783583 29398416 29547625
+RECORD 43 series=2 first=no boot_ready_us=218910 stop_us=1289 end=Some(Stopped) stamps_ns=28127249 29198458 29701166 29828749
+RECORD 44 series=2 first=no boot_ready_us=170268 stop_us=1638 end=Some(Stopped) stamps_ns=26289999 27190082 27660707 27784791
+RECORD 45 series=2 first=no boot_ready_us=477736 stop_us=3698 end=Some(Stopped) stamps_ns=28075875 28980166 29509041 29632083
+RECORD 46 series=2 first=no boot_ready_us=213885 stop_us=1220 end=Some(Stopped) stamps_ns=27348791 28143958 28650874 28775541
+RECORD 47 series=3 first=yes boot_ready_us=5263901 stop_us=2328 end=Some(Stopped) stamps_ns=28022999 29067041 29583041 29711416
+RECORD 48 series=3 first=no boot_ready_us=225918 stop_us=2022 end=Some(Stopped) stamps_ns=28364000 29574583 30128541 30343333
+RECORD 49 series=3 first=no boot_ready_us=269060 stop_us=3632 end=Some(Stopped) stamps_ns=33515499 34492832 35608207 35841624
+RECORD 50 series=3 first=no boot_ready_us=284109 stop_us=2859 end=Some(Stopped) stamps_ns=31782791 32911291 33428291 33550666
+RECORD 51 series=3 first=no boot_ready_us=132661 stop_us=1499 end=Some(Stopped) stamps_ns=27404041 28227833 28781041 28934166
+RECORD 52 series=3 first=no boot_ready_us=168247 stop_us=2427 end=Some(Stopped) stamps_ns=30096916 30971166 31791332 31926249
+RECORD 53 series=3 first=no boot_ready_us=166453 stop_us=1397 end=Some(Stopped) stamps_ns=29355958 30426500 30988583 31136166
+RECORD 54 series=3 first=no boot_ready_us=146962 stop_us=1418 end=Some(Stopped) stamps_ns=27969541 28800749 29308833 29481833
+RECORD 55 series=3 first=no boot_ready_us=179070 stop_us=2209 end=Some(Stopped) stamps_ns=31277749 32248166 32767958 32898749
+RECORD 56 series=3 first=no boot_ready_us=188836 stop_us=2149 end=Some(Stopped) stamps_ns=26535833 27504625 28071291 28201166
+RECORD 57 series=3 first=no boot_ready_us=155047 stop_us=1228 end=Some(Stopped) stamps_ns=34463457 35284666 35801082 35928874
+RECORD 58 series=3 first=no boot_ready_us=183656 stop_us=1311 end=Some(Stopped) stamps_ns=31507666 32715874 33433416 33562791
+RECORD 59 series=3 first=no boot_ready_us=264056 stop_us=2437 end=Some(Stopped) stamps_ns=27705833 28674083 29221999 29433749
+RECORD 60 series=3 first=no boot_ready_us=270965 stop_us=2351 end=Some(Stopped) stamps_ns=27791458 28865583 29403666 29611999
+RECORD 61 series=3 first=no boot_ready_us=225590 stop_us=1535 end=Some(Stopped) stamps_ns=25864583 26729333 27304458 27502833
+RECORD 62 series=3 first=no boot_ready_us=153531 stop_us=1312 end=Some(Stopped) stamps_ns=31929083 33629291 34799625 35037208
+RECORD 63 series=3 first=no boot_ready_us=263506 stop_us=4439 end=Some(Stopped) stamps_ns=31262458 32176666 32856083 33043041
+RECORD 64 series=3 first=no boot_ready_us=193272 stop_us=1186 end=Some(Stopped) stamps_ns=25266916 26023916 26498707 26611666
+RECORD 65 series=3 first=no boot_ready_us=228445 stop_us=1372 end=Some(Stopped) stamps_ns=29967791 31312291 32286499 32532082
+RECORD 66 series=3 first=no boot_ready_us=142382 stop_us=1347 end=Some(Stopped) stamps_ns=28325708 29274208 29863333 30026166
+RECORD 67 series=3 first=no boot_ready_us=105774 stop_us=1300 end=Some(Stopped) stamps_ns=29489458 30474458 31135166 31266666
+RECORD 68 series=3 first=no boot_ready_us=138677 stop_us=1100 end=Some(Stopped) stamps_ns=25910791 26976166 27619207 27747957
+RECORD 69 series=3 first=no boot_ready_us=191847 stop_us=1383 end=Some(Stopped) stamps_ns=28866374 29999166 30560291 30687582
+RECORD 70 series=4 first=yes boot_ready_us=2004606 stop_us=1299 end=Some(Stopped) stamps_ns=27583333 28391374 28930749 29065124
+RECORD 71 series=4 first=no boot_ready_us=254188 stop_us=4258 end=Some(Stopped) stamps_ns=31984749 32778624 33310957 33440749
+RECORD 72 series=4 first=no boot_ready_us=284976 stop_us=4013 end=Some(Stopped) stamps_ns=27527166 28483333 29051166 29193458
+RECORD 73 series=4 first=no boot_ready_us=132472 stop_us=1305 end=Some(Stopped) stamps_ns=33484791 34978499 35722749 36008833
+RECORD 74 series=4 first=no boot_ready_us=206163 stop_us=1345 end=Some(Stopped) stamps_ns=34096041 34988708 35638749 35812166
+RECORD 75 series=4 first=no boot_ready_us=166199 stop_us=1901 end=Some(Stopped) stamps_ns=32552208 34219999 34889208 35074249
+RECORD 76 series=4 first=no boot_ready_us=162875 stop_us=1105 end=Some(Stopped) stamps_ns=30086582 31211499 32194999 32323832
+RECORD 77 series=4 first=no boot_ready_us=161664 stop_us=2052 end=Some(Stopped) stamps_ns=27998416 28793833 29306749 29468708
+RECORD 78 series=4 first=no boot_ready_us=268713 stop_us=4363 end=Some(Stopped) stamps_ns=27683666 28673541 29215833 29334958
+RECORD 79 series=4 first=no boot_ready_us=86650 stop_us=1213 end=Some(Stopped) stamps_ns=27954000 28790250 29314833 29469750
+RECORD 80 series=4 first=no boot_ready_us=140241 stop_us=1189 end=Some(Stopped) stamps_ns=29403000 30180958 30659875 30796000
+RECORD 81 series=4 first=no boot_ready_us=109526 stop_us=1308 end=Some(Stopped) stamps_ns=27806749 28706832 29174624 29333791
+RECORD 82 series=4 first=no boot_ready_us=210457 stop_us=1359 end=Some(Stopped) stamps_ns=28898749 29997791 30588582 30731124
+RECORD 83 series=4 first=no boot_ready_us=212057 stop_us=1974 end=Some(Stopped) stamps_ns=29896166 31155666 31708750 31852708
+RECORD 84 series=4 first=no boot_ready_us=107860 stop_us=2075 end=Some(Stopped) stamps_ns=30188208 31151000 31825375 32073208
+RECORD 85 series=4 first=no boot_ready_us=180560 stop_us=1527 end=Some(Stopped) stamps_ns=35734332 36737082 49383874 49664916
+RECORD 86 series=4 first=no boot_ready_us=211029 stop_us=1375 end=Some(Stopped) stamps_ns=30938791 32293833 33048458 33260124
+RECORD 87 series=4 first=no boot_ready_us=278562 stop_us=3887 end=Some(Stopped) stamps_ns=27971624 28811624 29351457 29490832
+RECORD 88 series=4 first=no boot_ready_us=121262 stop_us=1351 end=Some(Stopped) stamps_ns=30885083 31770749 32305083 32423583
+RECORD 89 series=4 first=no boot_ready_us=335838 stop_us=4118 end=Some(Stopped) stamps_ns=32553124 33503582 33987416 34145124
+RECORD 90 series=4 first=no boot_ready_us=279589 stop_us=2939 end=Some(Stopped) stamps_ns=29910666 31061041 31556791 31700458
+RECORD 91 series=4 first=no boot_ready_us=199672 stop_us=1333 end=Some(Stopped) stamps_ns=32377791 33352250 33876250 34039750
+RECORD 92 series=4 first=no boot_ready_us=152754 stop_us=1842 end=Some(Stopped) stamps_ns=29992083 31277083 32196250 32525916
+RECORD 93 series=5 first=yes boot_ready_us=1552913 stop_us=1339 end=Some(Stopped) stamps_ns=27227791 28047791 28550249 28673832
+RECORD 94 series=5 first=no boot_ready_us=264889 stop_us=3134 end=Some(Stopped) stamps_ns=30404875 31370375 31872875 31977208
+RECORD 95 series=5 first=no boot_ready_us=269852 stop_us=3051 end=Some(Stopped) stamps_ns=28275291 29462708 29981125 30178125
+RECORD 96 series=5 first=no boot_ready_us=149895 stop_us=1273 end=Some(Stopped) stamps_ns=28328583 29565666 30150124 30285291
+RECORD 97 series=5 first=no boot_ready_us=138143 stop_us=1771 end=Some(Stopped) stamps_ns=26595041 27451374 27948499 28076666
+RECORD 98 series=5 first=no boot_ready_us=212420 stop_us=1594 end=Some(Stopped) stamps_ns=30135999 31136374 31627707 31767791
+RECORD 99 series=5 first=no boot_ready_us=170467 stop_us=2905 end=Some(Stopped) stamps_ns=31384666 32686374 33692999 34142291
+RECORD 100 series=5 first=no boot_ready_us=209360 stop_us=1376 end=Some(Stopped) stamps_ns=29972583 30931791 32023833 32392041
+RECORD 101 series=5 first=no boot_ready_us=197762 stop_us=1450 end=Some(Stopped) stamps_ns=28109166 29267916 29935374 30087291
+RECORD 102 series=5 first=no boot_ready_us=161901 stop_us=1573 end=Some(Stopped) stamps_ns=24828249 25955041 26499958 26698249
+RECORD 103 series=5 first=no boot_ready_us=142459 stop_us=1524 end=Some(Stopped) stamps_ns=27580666 28931333 29467708 29600458
+RECORD 104 series=5 first=no boot_ready_us=159696 stop_us=1330 end=Some(Stopped) stamps_ns=27782832 28756124 29289832 29494916
+RECORD 105 series=5 first=no boot_ready_us=225676 stop_us=1355 end=Some(Stopped) stamps_ns=35062458 36302958 37097999 37331583
+RECORD 106 series=5 first=no boot_ready_us=128735 stop_us=2584 end=Some(Stopped) stamps_ns=33821458 34697583 35284666 35492541
+RECORD 107 series=5 first=no boot_ready_us=201255 stop_us=1403 end=Some(Stopped) stamps_ns=27655207 28606624 30147666 30545332
+RECORD 108 series=5 first=no boot_ready_us=109533 stop_us=1310 end=Some(Stopped) stamps_ns=32649582 34064124 34928582 35375666
+RECORD 109 series=5 first=no boot_ready_us=213375 stop_us=1321 end=Some(Stopped) stamps_ns=30103333 31010708 31552416 31777375
+RECORD 110 series=5 first=no boot_ready_us=129888 stop_us=1413 end=Some(Stopped) stamps_ns=37537666 38774708 39521791 39682874
+RECORD 111 series=5 first=no boot_ready_us=221946 stop_us=1356 end=Some(Stopped) stamps_ns=25982749 27224124 27746416 27891249
+RECORD 112 series=5 first=no boot_ready_us=183351 stop_us=1653 end=Some(Stopped) stamps_ns=30667957 31775916 32392124 32601791
+RECORD 113 series=5 first=no boot_ready_us=320117 stop_us=2859 end=Some(Stopped) stamps_ns=26849791 28616249 29287416 29585999
+RECORD 114 series=5 first=no boot_ready_us=114887 stop_us=1334 end=Some(Stopped) stamps_ns=28348249 29801957 31275082 31766832
+RECORD 115 series=5 first=no boot_ready_us=188868 stop_us=1258 end=Some(Stopped) stamps_ns=27394208 28370416 28907624 29047041
+RECORD 116 series=6 first=yes boot_ready_us=2566735 stop_us=1372 end=Some(Stopped) stamps_ns=29053833 30084833 30670916 30822625
+RECORD 117 series=6 first=no boot_ready_us=209057 stop_us=1737 end=Some(Stopped) stamps_ns=28313749 29172416 29652458 29801083
+RECORD 118 series=6 first=no boot_ready_us=183359 stop_us=1275 end=Some(Stopped) stamps_ns=32051499 33179207 34433707 34728041
+RECORD 119 series=6 first=no boot_ready_us=264410 stop_us=2401 end=Some(Stopped) stamps_ns=30018125 31026500 31547916 31761916
+RECORD 120 series=6 first=no boot_ready_us=234317 stop_us=1293 end=Some(Stopped) stamps_ns=30898791 32080000 32950000 33315541
+RECORD 121 series=6 first=no boot_ready_us=192582 stop_us=1469 end=Some(Stopped) stamps_ns=32325583 33466833 34434708 34532375
+RECORD 122 series=6 first=no boot_ready_us=128424 stop_us=1238 end=Some(Stopped) stamps_ns=31027708 31797333 32369041 32490749
+RECORD 123 series=6 first=no boot_ready_us=465396 stop_us=2366 end=Some(Stopped) stamps_ns=70153208 72310208 72827375 72921833
+RECORD 124 series=6 first=no boot_ready_us=184894 stop_us=1775 end=Some(Stopped) stamps_ns=28145416 28995499 29550458 29662333
+RECORD 125 series=6 first=no boot_ready_us=141107 stop_us=1104 end=Some(Stopped) stamps_ns=35977166 36935541 37591416 37811625
+RECORD 126 series=6 first=no boot_ready_us=299225 stop_us=2457 end=Some(Stopped) stamps_ns=31827958 33257250 34267500 34421000
+RECORD 127 series=6 first=no boot_ready_us=143792 stop_us=1730 end=Some(Stopped) stamps_ns=29790249 31243874 31843291 32020791
+RECORD 128 series=6 first=no boot_ready_us=187198 stop_us=1510 end=Some(Stopped) stamps_ns=30843874 31719208 32263583 32411499
+RECORD 129 series=6 first=no boot_ready_us=408536 stop_us=3799 end=Some(Stopped) stamps_ns=27553499 28547208 29369499 29579708
+RECORD 130 series=6 first=no boot_ready_us=155786 stop_us=2434 end=Some(Stopped) stamps_ns=29153832 30115832 30654666 30814832
+RECORD 131 series=6 first=no boot_ready_us=219472 stop_us=1430 end=Some(Stopped) stamps_ns=31748916 32741499 33272041 33412083
+RECORD 132 series=6 first=no boot_ready_us=139453 stop_us=1637 end=Some(Stopped) stamps_ns=30019708 30870333 31449666 31583458
+RECORD 133 series=6 first=no boot_ready_us=120213 stop_us=2356 end=Some(Stopped) stamps_ns=28956916 29978833 30512249 30720624
+RECORD 134 series=6 first=no boot_ready_us=200967 stop_us=1128 end=Some(Stopped) stamps_ns=30285791 31237249 31786582 31935416
+RECORD 135 series=6 first=no boot_ready_us=147049 stop_us=1314 end=Some(Stopped) stamps_ns=26577416 27495666 28010208 28163541
+RECORD 136 series=6 first=no boot_ready_us=148458 stop_us=1232 end=Some(Stopped) stamps_ns=26321583 27213541 27729624 27913958
+RECORD 137 series=6 first=no boot_ready_us=226361 stop_us=2409 end=Some(Stopped) stamps_ns=34970041 36322874 37335707 37476082
+RECORD 138 series=6 first=no boot_ready_us=158114 stop_us=2312 end=Some(Stopped) stamps_ns=28502541 29598374 30128249 30293707
+RECORD 139 series=7 first=yes boot_ready_us=1805726 stop_us=2170 end=Some(Stopped) stamps_ns=27786583 29032000 29586458 29787750
+RECORD 140 series=7 first=no boot_ready_us=289234 stop_us=13414 end=Some(Stopped) stamps_ns=31441374 32630749 33386666 33603541
+RECORD 141 series=7 first=no boot_ready_us=239598 stop_us=1322 end=Some(Stopped) stamps_ns=28241333 29243833 29790083 29971000
+RECORD 142 series=7 first=no boot_ready_us=260264 stop_us=3541 end=Some(Stopped) stamps_ns=26312708 27193791 27767083 28081708
+RECORD 143 series=7 first=no boot_ready_us=184045 stop_us=1556 end=Some(Stopped) stamps_ns=26313458 27054166 27546124 27660374
+RECORD 144 series=7 first=no boot_ready_us=194810 stop_us=1463 end=Some(Stopped) stamps_ns=27080083 28120958 28653958 28805749
+RECORD 145 series=7 first=no boot_ready_us=224363 stop_us=1534 end=Some(Stopped) stamps_ns=29259874 30161333 30625708 30808833
+RECORD 146 series=7 first=no boot_ready_us=301912 stop_us=2119 end=Some(Stopped) stamps_ns=26279666 27184916 27718124 27898666
+RECORD 147 series=7 first=no boot_ready_us=174259 stop_us=2656 end=Some(Stopped) stamps_ns=32517207 33716707 34808499 35103916
+RECORD 148 series=7 first=no boot_ready_us=151944 stop_us=1851 end=Some(Stopped) stamps_ns=28964999 30005874 30598333 30744374
+RECORD 149 series=7 first=no boot_ready_us=196884 stop_us=1467 end=Some(Stopped) stamps_ns=43092332 43880957 44418749 44583457
+RECORD 150 series=7 first=no boot_ready_us=129540 stop_us=1131 end=Some(Stopped) stamps_ns=30848374 31789333 32685624 32977999
+RECORD 151 series=7 first=no boot_ready_us=270630 stop_us=4164 end=Some(Stopped) stamps_ns=31730916 32607291 33099125 33223500
+RECORD 152 series=7 first=no boot_ready_us=116581 stop_us=1488 end=Some(Stopped) stamps_ns=27714875 28552500 29034208 29157875
+RECORD 153 series=7 first=no boot_ready_us=172912 stop_us=1381 end=Some(Stopped) stamps_ns=25828582 26887166 27456791 27621249
+RECORD 154 series=7 first=no boot_ready_us=229818 stop_us=1551 end=Some(Stopped) stamps_ns=32937416 34124666 34642874 34761707
+RECORD 155 series=7 first=no boot_ready_us=114599 stop_us=1713 end=Some(Stopped) stamps_ns=27350458 28759374 30534249 30842666
+RECORD 156 series=7 first=no boot_ready_us=235660 stop_us=1417 end=Some(Stopped) stamps_ns=32560707 33606457 34847124 35661291
+RECORD 157 series=7 first=no boot_ready_us=117960 stop_us=2962 end=Some(Stopped) stamps_ns=27406125 28473291 29134583 29288250
+RECORD 158 series=7 first=no boot_ready_us=145176 stop_us=1394 end=Some(Stopped) stamps_ns=25463875 26573166 27173291 27352916
+RECORD 159 series=7 first=no boot_ready_us=148809 stop_us=1745 end=Some(Stopped) stamps_ns=32168375 33173000 34032041 34161500
+RECORD 160 series=7 first=no boot_ready_us=161140 stop_us=1401 end=Some(Stopped) stamps_ns=27301499 28144499 29268541 29523583
+RECORD 161 series=7 first=no boot_ready_us=293553 stop_us=3584 end=Some(Stopped) stamps_ns=31507124 32490916 33049458 33180874
+RECORD 162 series=8 first=yes boot_ready_us=1951903 stop_us=1265 end=Some(Stopped) stamps_ns=28027041 28902083 29402166 29591625
+RECORD 163 series=8 first=no boot_ready_us=197276 stop_us=1623 end=Some(Stopped) stamps_ns=27176541 28365207 28829749 28936624
+RECORD 164 series=8 first=no boot_ready_us=114852 stop_us=1400 end=Some(Stopped) stamps_ns=28037791 29238708 29926166 30081500
+RECORD 165 series=8 first=no boot_ready_us=164375 stop_us=1931 end=Some(Stopped) stamps_ns=34459582 35673041 36593249 36821791
+RECORD 166 series=8 first=no boot_ready_us=167205 stop_us=1634 end=Some(Stopped) stamps_ns=28552333 29621083 30732708 31064125
+RECORD 167 series=8 first=no boot_ready_us=258557 stop_us=1731 end=Some(Stopped) stamps_ns=28127666 29312166 29874291 30063624
+RECORD 168 series=8 first=no boot_ready_us=253449 stop_us=3128 end=Some(Stopped) stamps_ns=27198458 28119625 28622208 28754583
+RECORD 169 series=8 first=no boot_ready_us=100130 stop_us=1643 end=Some(Stopped) stamps_ns=25537332 26413374 26954499 27094041
+RECORD 170 series=8 first=no boot_ready_us=97688 stop_us=1349 end=Some(Stopped) stamps_ns=26839374 27752332 28209124 28347707
+RECORD 171 series=8 first=no boot_ready_us=153779 stop_us=2309 end=Some(Stopped) stamps_ns=31038124 32122416 32677458 32814583
+RECORD 172 series=8 first=no boot_ready_us=267435 stop_us=2396 end=Some(Stopped) stamps_ns=31656583 32504083 33134416 33270541
+RECORD 173 series=8 first=no boot_ready_us=159819 stop_us=2358 end=Some(Stopped) stamps_ns=31874582 32879124 33994916 34514124
+RECORD 174 series=8 first=no boot_ready_us=152732 stop_us=1846 end=Some(Stopped) stamps_ns=31123457 32235957 32896291 33193124
+RECORD 175 series=8 first=no boot_ready_us=176455 stop_us=1273 end=Some(Stopped) stamps_ns=29439416 30317458 30883708 30994291
+RECORD 176 series=8 first=no boot_ready_us=120422 stop_us=1406 end=Some(Stopped) stamps_ns=31323791 32363083 33027041 33209458
+RECORD 177 series=8 first=no boot_ready_us=109384 stop_us=2221 end=Some(Stopped) stamps_ns=32418541 33639541 34314082 34504332
+RECORD 178 series=8 first=no boot_ready_us=180546 stop_us=1319 end=Some(Stopped) stamps_ns=33840166 34829958 35385750 35535291
+RECORD 179 series=8 first=no boot_ready_us=177660 stop_us=1351 end=Some(Stopped) stamps_ns=30354457 31581916 32143749 32275082
+RECORD 180 series=8 first=no boot_ready_us=160542 stop_us=1732 end=Some(Stopped) stamps_ns=28931375 30071416 30607083 30766208
+RECORD 181 series=8 first=no boot_ready_us=163233 stop_us=1294 end=Some(Stopped) stamps_ns=27439041 28326708 28923916 29156083
+RECORD 182 series=8 first=no boot_ready_us=151284 stop_us=1456 end=Some(Stopped) stamps_ns=27029541 28769041 29578833 29860166
+RECORD 183 series=8 first=no boot_ready_us=150923 stop_us=1596 end=Some(Stopped) stamps_ns=27559875 28542666 29013500 29164500
+RECORD 184 series=8 first=no boot_ready_us=145569 stop_us=3610 end=Some(Stopped) stamps_ns=26264708 27023583 27499500 27642041
+RECORD 185 series=9 first=yes boot_ready_us=1480064 stop_us=1249 end=Some(Stopped) stamps_ns=31346625 32326875 32993958 33287333
+RECORD 186 series=9 first=no boot_ready_us=191316 stop_us=1351 end=Some(Stopped) stamps_ns=27587124 28352791 28813624 29035041
+RECORD 187 series=9 first=no boot_ready_us=163506 stop_us=2380 end=Some(Stopped) stamps_ns=36852791 38016457 38768957 38988874
+RECORD 188 series=9 first=no boot_ready_us=173228 stop_us=1863 end=Some(Stopped) stamps_ns=32189958 33423541 34076458 34198916
+RECORD 189 series=9 first=no boot_ready_us=265148 stop_us=2167 end=Some(Stopped) stamps_ns=28340249 29315999 29827957 29975041
+RECORD 190 series=9 first=no boot_ready_us=287928 stop_us=3855 end=Some(Stopped) stamps_ns=25716249 26806874 27320749 27418457
+RECORD 191 series=9 first=no boot_ready_us=155947 stop_us=2003 end=Some(Stopped) stamps_ns=26035458 27403000 28167208 28425041
+RECORD 192 series=9 first=no boot_ready_us=236048 stop_us=1290 end=Some(Stopped) stamps_ns=30124541 31167916 31708208 31856375
+RECORD 193 series=9 first=no boot_ready_us=249435 stop_us=1206 end=Some(Stopped) stamps_ns=25622250 26593041 27164583 27306250
+RECORD 194 series=9 first=no boot_ready_us=160390 stop_us=1969 end=Some(Stopped) stamps_ns=29852374 30890457 31762999 32019082
+RECORD 195 series=9 first=no boot_ready_us=156876 stop_us=1382 end=Some(Stopped) stamps_ns=28381958 29498916 30076500 30229541
+RECORD 196 series=9 first=no boot_ready_us=200951 stop_us=1127 end=Some(Stopped) stamps_ns=28170708 28999625 29593708 29759666
+RECORD 197 series=9 first=no boot_ready_us=119806 stop_us=1490 end=Some(Stopped) stamps_ns=32936707 34089166 35339082 35470916
+RECORD 198 series=9 first=no boot_ready_us=167279 stop_us=2022 end=Some(Stopped) stamps_ns=40798707 41705374 42297707 42461166
+RECORD 199 series=9 first=no boot_ready_us=122462 stop_us=1567 end=Some(Stopped) stamps_ns=33158457 34255499 34900541 35065791
+RECORD 200 series=9 first=no boot_ready_us=276273 stop_us=2232 end=Some(Stopped) stamps_ns=26593416 27945250 28985000 29333458
+RECORD 201 series=9 first=no boot_ready_us=226330 stop_us=1558 end=Some(Stopped) stamps_ns=30573791 31470874 32012166 32146124
+RECORD 202 series=9 first=no boot_ready_us=267691 stop_us=4000 end=Some(Stopped) stamps_ns=34135833 35015874 35536833 35654749
+RECORD 203 series=9 first=no boot_ready_us=269907 stop_us=4612 end=Some(Stopped) stamps_ns=30873250 32066875 32942416 33183375
+RECORD 204 series=9 first=no boot_ready_us=124972 stop_us=1231 end=Some(Stopped) stamps_ns=27726791 28746666 29271833 29420249
+RECORD 205 series=9 first=no boot_ready_us=167969 stop_us=1942 end=Some(Stopped) stamps_ns=31405249 32462166 33064249 33193124
+RECORD 206 series=9 first=no boot_ready_us=195275 stop_us=3351 end=Some(Stopped) stamps_ns=28298375 29125333 29728958 29837000
+RECORD 207 series=9 first=no boot_ready_us=159433 stop_us=2138 end=Some(Stopped) stamps_ns=29781666 30783916 31298083 31504833
+RECORD 208 series=10 first=yes boot_ready_us=1752738 stop_us=6116 end=Some(Stopped) stamps_ns=25812374 26922082 27444041 27590957
+RECORD 209 series=10 first=no boot_ready_us=126442 stop_us=1314 end=Some(Stopped) stamps_ns=28601625 30010458 30826041 31016583
+RECORD 210 series=10 first=no boot_ready_us=252040 stop_us=1277 end=Some(Stopped) stamps_ns=30979624 32288916 32964374 33269166
+RECORD 211 series=10 first=no boot_ready_us=163058 stop_us=1123 end=Some(Stopped) stamps_ns=27844416 28607333 29132333 29304208
+RECORD 212 series=10 first=no boot_ready_us=150603 stop_us=1401 end=Some(Stopped) stamps_ns=29504666 30481416 30993625 31169458
+RECORD 213 series=10 first=no boot_ready_us=271716 stop_us=4853 end=Some(Stopped) stamps_ns=29310583 30196791 30794208 31106416
+RECORD 214 series=10 first=no boot_ready_us=162010 stop_us=1275 end=Some(Stopped) stamps_ns=29963874 30986499 31840208 32322833
+RECORD 215 series=10 first=no boot_ready_us=128196 stop_us=1495 end=Some(Stopped) stamps_ns=27397083 28506166 29046541 29155416
+RECORD 216 series=10 first=no boot_ready_us=169540 stop_us=2112 end=Some(Stopped) stamps_ns=35363541 36583249 37509916 37672249
+RECORD 217 series=10 first=no boot_ready_us=216125 stop_us=1404 end=Some(Stopped) stamps_ns=31913541 32847541 33401041 33612583
+RECORD 218 series=10 first=no boot_ready_us=144287 stop_us=2112 end=Some(Stopped) stamps_ns=29573791 30690041 31765124 32008124
+RECORD 219 series=10 first=no boot_ready_us=212926 stop_us=1293 end=Some(Stopped) stamps_ns=27096374 28124166 28847083 29099499
+RECORD 220 series=10 first=no boot_ready_us=171559 stop_us=1157 end=Some(Stopped) stamps_ns=28114583 28975166 29580000 29795875
+RECORD 221 series=10 first=no boot_ready_us=173325 stop_us=1302 end=Some(Stopped) stamps_ns=27098541 27878166 28404666 28547500
+RECORD 222 series=10 first=no boot_ready_us=101393 stop_us=1159 end=Some(Stopped) stamps_ns=27630625 28620166 29230541 29345375
+RECORD 223 series=10 first=no boot_ready_us=108895 stop_us=1200 end=Some(Stopped) stamps_ns=27100249 27865166 28368207 28526416
+RECORD 224 series=10 first=no boot_ready_us=131102 stop_us=1107 end=Some(Stopped) stamps_ns=29920166 30756833 31310291 31436250
+RECORD 225 series=10 first=no boot_ready_us=183017 stop_us=1158 end=Some(Stopped) stamps_ns=28976874 30059666 30599166 30755374
+RECORD 226 series=10 first=no boot_ready_us=251508 stop_us=3435 end=Some(Stopped) stamps_ns=27607332 28720624 29295541 29592957
+RECORD 227 series=10 first=no boot_ready_us=233403 stop_us=1380 end=Some(Stopped) stamps_ns=31328874 32416958 32973999 33205666
+RECORD 228 series=10 first=no boot_ready_us=148756 stop_us=1836 end=Some(Stopped) stamps_ns=28946874 30061916 30594874 30811249
+RECORD 229 series=10 first=no boot_ready_us=142554 stop_us=1274 end=Some(Stopped) stamps_ns=35262708 36128875 36647083 36763291
+RECORD 230 series=10 first=no boot_ready_us=180130 stop_us=1738 end=Some(Stopped) stamps_ns=32745916 34067166 34811875 35038750
+RECORD 231 series=11 first=yes boot_ready_us=1736406 stop_us=2543 end=Some(Stopped) stamps_ns=29977124 31119541 31663791 31772457
+RECORD 232 series=11 first=no boot_ready_us=289476 stop_us=2234 end=Some(Stopped) stamps_ns=32922958 33920416 34624791 35026208
+RECORD 233 series=11 first=no boot_ready_us=168318 stop_us=1429 end=Some(Stopped) stamps_ns=30171166 31061791 31618833 31738666
+RECORD 234 series=11 first=no boot_ready_us=256716 stop_us=3589 end=Some(Stopped) stamps_ns=31858916 33225333 34225374 34491583
+RECORD 235 series=11 first=no boot_ready_us=111390 stop_us=1198 end=Some(Stopped) stamps_ns=31216874 32160416 32692624 32805166
+RECORD 236 series=11 first=no boot_ready_us=202242 stop_us=1389 end=Some(Stopped) stamps_ns=27659624 28758582 29294374 29443832
+RECORD 237 series=11 first=no boot_ready_us=127064 stop_us=1360 end=Some(Stopped) stamps_ns=29189749 30895374 31889166 32184291
+RECORD 238 series=11 first=no boot_ready_us=127729 stop_us=2181 end=Some(Stopped) stamps_ns=30588624 31367207 31813416 31933749
+RECORD 239 series=11 first=no boot_ready_us=265590 stop_us=2443 end=Some(Stopped) stamps_ns=28661208 29466833 29970416 30159416
+RECORD 240 series=11 first=no boot_ready_us=212324 stop_us=1764 end=Some(Stopped) stamps_ns=28867166 30490458 31124333 31297041
+RECORD 241 series=11 first=no boot_ready_us=246983 stop_us=2520 end=Some(Stopped) stamps_ns=31934291 32865333 33573125 33790958
+RECORD 242 series=11 first=no boot_ready_us=165811 stop_us=1352 end=Some(Stopped) stamps_ns=30582249 31932708 33084208 33394291
+RECORD 243 series=11 first=no boot_ready_us=117638 stop_us=2143 end=Some(Stopped) stamps_ns=28237333 29156999 29759624 29949166
+RECORD 244 series=11 first=no boot_ready_us=172978 stop_us=1372 end=Some(Stopped) stamps_ns=26132916 27247333 27754458 27909958
+RECORD 245 series=11 first=no boot_ready_us=321750 stop_us=2985 end=Some(Stopped) stamps_ns=26727833 27992000 28672666 28826916
+RECORD 246 series=11 first=no boot_ready_us=134974 stop_us=1458 end=Some(Stopped) stamps_ns=30635249 32052874 32671416 32822749
+RECORD 247 series=11 first=no boot_ready_us=239844 stop_us=2198 end=Some(Stopped) stamps_ns=29106458 30085249 30660833 30830124
+RECORD 248 series=11 first=no boot_ready_us=137146 stop_us=1934 end=Some(Stopped) stamps_ns=35414500 36661208 37380250 37528750
+RECORD 249 series=11 first=no boot_ready_us=161363 stop_us=2595 end=Some(Stopped) stamps_ns=31712708 32786249 34053874 34387624
+RECORD 250 series=11 first=no boot_ready_us=268774 stop_us=3222 end=Some(Stopped) stamps_ns=29938957 31277874 32117582 32372874
+RECORD 251 series=11 first=no boot_ready_us=251178 stop_us=1269 end=Some(Stopped) stamps_ns=33401499 34498499 35167582 35633416
+RECORD 252 series=11 first=no boot_ready_us=128173 stop_us=1324 end=Some(Stopped) stamps_ns=28946958 29749124 30261583 30378249
+RECORD 253 series=11 first=no boot_ready_us=129146 stop_us=1929 end=Some(Stopped) stamps_ns=28193541 29025833 29561250 29715458
+RECORD 254 series=12 first=yes boot_ready_us=2298850 stop_us=3001 end=Some(Stopped) stamps_ns=28401249 29231249 29802791 29944124
+RECORD 255 series=12 first=no boot_ready_us=257171 stop_us=2468 end=Some(Stopped) stamps_ns=28287166 29247541 29764499 29879041
+RECORD 256 series=12 first=no boot_ready_us=267401 stop_us=2879 end=Some(Stopped) stamps_ns=30043625 31245625 31830958 32109333
+RECORD 257 series=12 first=no boot_ready_us=214185 stop_us=1168 end=Some(Stopped) stamps_ns=27827458 28759958 29311166 29513916
+RECORD 258 series=12 first=no boot_ready_us=205990 stop_us=1417 end=Some(Stopped) stamps_ns=27794250 28670250 29172541 29414000
+RECORD 259 series=12 first=no boot_ready_us=264091 stop_us=2654 end=Some(Stopped) stamps_ns=33463291 34796249 35354874 35524499
+RECORD 260 series=12 first=no boot_ready_us=224316 stop_us=1310 end=Some(Stopped) stamps_ns=29974124 30734874 31335666 31483541
+RECORD 261 series=12 first=no boot_ready_us=120015 stop_us=1271 end=Some(Stopped) stamps_ns=30488207 31574416 32108707 32271374
+RECORD 262 series=12 first=no boot_ready_us=179161 stop_us=2352 end=Some(Stopped) stamps_ns=26621499 27485458 28053416 28188874
+RECORD 263 series=12 first=no boot_ready_us=259223 stop_us=2667 end=Some(Stopped) stamps_ns=27238249 28187916 28698208 28880958
+RECORD 264 series=12 first=no boot_ready_us=154568 stop_us=1530 end=Some(Stopped) stamps_ns=29708166 30523666 31062666 31205583
+RECORD 265 series=12 first=no boot_ready_us=292618 stop_us=3728 end=Some(Stopped) stamps_ns=25457874 26354416 26864708 27029249
+RECORD 266 series=12 first=no boot_ready_us=196842 stop_us=1305 end=Some(Stopped) stamps_ns=27482582 28569166 29110666 29257041
+RECORD 267 series=12 first=no boot_ready_us=129568 stop_us=1527 end=Some(Stopped) stamps_ns=28693999 29874666 30851541 31141207
+RECORD 268 series=12 first=no boot_ready_us=189181 stop_us=1759 end=Some(Stopped) stamps_ns=29635791 30697082 31482416 31686791
+RECORD 269 series=12 first=no boot_ready_us=173503 stop_us=1821 end=Some(Stopped) stamps_ns=31346624 32428583 33059499 33198458
+RECORD 270 series=12 first=no boot_ready_us=261484 stop_us=2811 end=Some(Stopped) stamps_ns=27711083 28832958 29442458 29600416
+RECORD 271 series=12 first=no boot_ready_us=120703 stop_us=1269 end=Some(Stopped) stamps_ns=24666541 25975749 26732833 26880374
+RECORD 272 series=12 first=no boot_ready_us=157891 stop_us=1419 end=Some(Stopped) stamps_ns=34550457 35415416 35977707 36351291
+RECORD 273 series=12 first=no boot_ready_us=150924 stop_us=1332 end=Some(Stopped) stamps_ns=28481333 29467166 30257458 30468458
+RECORD 274 series=12 first=no boot_ready_us=141139 stop_us=1175 end=Some(Stopped) stamps_ns=28429458 29456666 30136416 30303083
+RECORD 275 series=12 first=no boot_ready_us=166479 stop_us=1284 end=Some(Stopped) stamps_ns=28181458 29459125 40656125 40819500
+RECORD 276 series=12 first=no boot_ready_us=149249 stop_us=1450 end=Some(Stopped) stamps_ns=28869791 29786333 30533625 30846875
+RECORD 277 series=13 first=yes boot_ready_us=1896396 stop_us=3606 end=Some(Stopped) stamps_ns=31970375 33721000 34610041 34859625
+RECORD 278 series=13 first=no boot_ready_us=146337 stop_us=1611 end=Some(Stopped) stamps_ns=25299707 26052041 26602207 26739457
+RECORD 279 series=13 first=no boot_ready_us=179000 stop_us=1199 end=Some(Stopped) stamps_ns=27366083 28369000 28907083 29036125
+RECORD 280 series=13 first=no boot_ready_us=191265 stop_us=1198 end=Some(Stopped) stamps_ns=26641791 28119749 29143374 29713791
+RECORD 281 series=13 first=no boot_ready_us=121293 stop_us=1337 end=Some(Stopped) stamps_ns=26042374 26894707 27535291 27761957
+RECORD 282 series=13 first=no boot_ready_us=300994 stop_us=3406 end=Some(Stopped) stamps_ns=27934958 29135541 29670875 29800458
+RECORD 283 series=13 first=no boot_ready_us=218575 stop_us=1453 end=Some(Stopped) stamps_ns=33575874 35754582 37308999 37854749
+RECORD 284 series=13 first=no boot_ready_us=129334 stop_us=1795 end=Some(Stopped) stamps_ns=31208708 32854958 33730999 34065958
+RECORD 285 series=13 first=no boot_ready_us=133147 stop_us=3674 end=Some(Stopped) stamps_ns=29437083 30658250 31416458 31696416
+RECORD 286 series=13 first=no boot_ready_us=215216 stop_us=2206 end=Some(Stopped) stamps_ns=28798499 29714166 30335166 30649791
+RECORD 287 series=13 first=no boot_ready_us=182891 stop_us=1299 end=Some(Stopped) stamps_ns=27593999 28550999 29080249 29213082
+RECORD 288 series=13 first=no boot_ready_us=288758 stop_us=6258 end=Some(Stopped) stamps_ns=28518291 29813124 31032249 31309916
+RECORD 289 series=13 first=no boot_ready_us=316410 stop_us=3036 end=Some(Stopped) stamps_ns=30897958 32015000 32674666 32852916
+RECORD 290 series=13 first=no boot_ready_us=316224 stop_us=3879 end=Some(Stopped) stamps_ns=32473874 33424624 33948416 34165874
+RECORD 291 series=13 first=no boot_ready_us=125040 stop_us=1708 end=Some(Stopped) stamps_ns=27578249 28580124 29111208 29259916
+RECORD 292 series=13 first=no boot_ready_us=117359 stop_us=1524 end=Some(Stopped) stamps_ns=30604416 31661833 32215458 32369458
+RECORD 293 series=13 first=no boot_ready_us=321717 stop_us=2753 end=Some(Stopped) stamps_ns=36648749 37996207 38917332 39089499
+RECORD 294 series=13 first=no boot_ready_us=220329 stop_us=1323 end=Some(Stopped) stamps_ns=29192874 30323749 31370749 31642374
+RECORD 295 series=13 first=no boot_ready_us=192249 stop_us=2090 end=Some(Stopped) stamps_ns=27085333 28100500 28642250 28790583
+RECORD 296 series=13 first=no boot_ready_us=156966 stop_us=2064 end=Some(Stopped) stamps_ns=32990041 34011749 34568083 34687249
+RECORD 297 series=13 first=no boot_ready_us=157254 stop_us=2566 end=Some(Stopped) stamps_ns=28351832 29153124 29707457 29892957
+RECORD 298 series=13 first=no boot_ready_us=276249 stop_us=2753 end=Some(Stopped) stamps_ns=39837500 40596125 41125375 41274916
+RECORD 299 series=13 first=no boot_ready_us=268412 stop_us=2687 end=Some(Stopped) stamps_ns=31432916 32465916 33041832 33167332
+# load before each boot
+boot 1 series 1 first_of_series yes load 10.80 9.54 8.49 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 195.5%, mkfs.erofs 99.0%, XprotectService 34.9%, 
+boot 2 series 1 first_of_series no load 10.10 9.41 8.45 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 190.2%, StorageManagementService 37.1%, XprotectService 37.0%, 
+boot 3 series 1 first_of_series no load 10.10 9.41 8.45 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 188.8%, XprotectService 57.1%, WindowServer 32.1%, 
+boot 4 series 1 first_of_series no load 10.10 9.41 8.45 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 187.3%, idle_spin-146c39a5f727327b 72.3%, XprotectService 40.1%, 
+boot 5 series 1 first_of_series no load 10.10 9.41 8.45 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 186.7%, idle_spin-146c39a5f727327b 100.9%, Finder 47.8%, 
+boot 6 series 1 first_of_series no load 10.10 9.41 8.45 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 188.6%, idle_spin-146c39a5f727327b 72.3%, Finder 54.9%, 
+boot 7 series 1 first_of_series no load 10.10 9.41 8.45 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 185.8%, Finder 71.2%, StorageManagementService 44.4%, 
+boot 8 series 1 first_of_series no load 10.10 9.41 8.45 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 185.7%, Finder 81.8%, StorageManagementService 59.6%, 
+boot 9 series 1 first_of_series no load 10.10 9.41 8.45 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 183.4%, Finder 82.4%, StorageManagementService 74.2%, 
+boot 10 series 1 first_of_series no load 10.10 9.41 8.45 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 188.3%, Finder 49.0%, StorageManagementService 42.5%, 
+boot 11 series 1 first_of_series no load 10.10 9.41 8.45 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 186.6%, XprotectService 59.2%, Finder 38.5%, 
+boot 12 series 1 first_of_series no load 10.10 9.41 8.45 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 185.9%, local-0ee9471423c04bbd 43.5%, XprotectService 36.8%, 
+boot 13 series 1 first_of_series no load 10.10 9.41 8.45 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 188.6%, StorageManagementService 37.5%, WindowServer 28.9%, 
+boot 14 series 1 first_of_series no load 10.10 9.41 8.45 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 187.2%, StorageManagementService 31.3%, WindowServer 29.2%, 
+boot 15 series 1 first_of_series no load 9.69 9.34 8.43 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 186.7%, XprotectService 42.5%, StorageManagementService 41.4%, 
+boot 16 series 1 first_of_series no load 9.69 9.34 8.43 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 184.7%, StorageManagementService 47.8%, XprotectService 31.0%, 
+boot 17 series 1 first_of_series no load 9.69 9.34 8.43 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 186.1%, XprotectService 53.7%, rustc 32.5%, 
+boot 18 series 1 first_of_series no load 9.69 9.34 8.43 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 186.1%, manual_park_readiness-bcaadf973eab123a 41.9%, rustc 37.8%, 
+boot 19 series 1 first_of_series no load 9.69 9.34 8.43 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 186.3%, manual_park_readiness-bcaadf973eab123a 75.7%, StorageManagementService 45.1%, 
+boot 20 series 1 first_of_series no load 9.69 9.34 8.43 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 186.5%, manual_park_readiness-bcaadf973eab123a 83.3%, rustc 43.8%, 
+boot 21 series 1 first_of_series no load 9.69 9.34 8.43 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 187.9%, manual_park_readiness-bcaadf973eab123a 91.6%, rustc 38.6%, 
+boot 22 series 1 first_of_series no load 9.69 9.34 8.43 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 189.7%, rustc 37.4%, WindowServer 31.0%, 
+boot 23 series 1 first_of_series no load 9.69 9.34 8.43 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 190.8%, WindowServer 29.9%, rustc 28.8%, 
+boot 24 series 2 first_of_series yes load 9.69 9.34 8.43 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 191.7%, mkfs.erofs 59.5%, WindowServer 35.4%, 
+boot 25 series 2 first_of_series no load 9.69 9.34 8.43 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 194.3%, WindowServer 32.7%, XprotectService 25.8%, 
+boot 26 series 2 first_of_series no load 9.55 9.31 8.42 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 191.8%, StorageManagementService 35.5%, WindowServer 27.9%, 
+boot 27 series 2 first_of_series no load 9.55 9.31 8.42 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 188.0%, XprotectService 50.4%, Finder 41.6%, 
+boot 28 series 2 first_of_series no load 9.55 9.31 8.42 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 182.8%, XprotectService 58.9%, Finder 43.6%, 
+boot 29 series 2 first_of_series no load 9.55 9.31 8.42 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 184.2%, shards-vm 36.9%, WindowServer 33.8%, 
+boot 30 series 2 first_of_series no load 9.55 9.31 8.42 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 182.0%, XprotectService 64.7%, shards-vm 53.9%, 
+boot 31 series 2 first_of_series no load 9.55 9.31 8.42 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: overload-4d928f6c70f52b56 186.2%, shards-vm 69.3%, guest_create_bench-30194d863d88281a 63.5%, 
+boot 32 series 2 first_of_series no load 9.55 9.31 8.42 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 89.2%, guest_create_bench-30194d863d88281a 64.6%, rustc 40.7%, 
+boot 33 series 2 first_of_series no load 9.55 9.31 8.42 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 80.4%, guest_create_bench-30194d863d88281a 69.6%, rustc 32.6%, 
+boot 34 series 2 first_of_series no load 9.55 9.31 8.42 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 85.3%, guest_create_bench-30194d863d88281a 69.6%, XprotectService 40.3%, 
+boot 35 series 2 first_of_series no load 9.55 9.31 8.42 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 81.1%, guest_create_bench-30194d863d88281a 68.7%, owned_loop_readiness-4d121d04d2c7d4bb 52.5%, 
+boot 36 series 2 first_of_series no load 9.55 9.31 8.42 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 86.9%, owned_loop_readiness-4d121d04d2c7d4bb 86.6%, guest_create_bench-30194d863d88281a 67.7%, 
+boot 37 series 2 first_of_series no load 9.55 9.31 8.42 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 97.7%, (owned_loop_readi) 95.2%, guest_create_bench-30194d863d88281a 72.1%, 
+boot 38 series 2 first_of_series no load 9.55 9.31 8.42 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 90.4%, guest_create_bench-30194d863d88281a 71.8%, git 53.0%, 
+boot 39 series 2 first_of_series no load 9.55 9.31 8.42 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 83.1%, guest_create_bench-30194d863d88281a 72.7%, rustc 36.7%, 
+boot 40 series 2 first_of_series no load 9.55 9.31 8.42 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 82.2%, guest_create_bench-30194d863d88281a 70.2%, StorageManagementService 47.8%, 
+boot 41 series 2 first_of_series no load 9.55 9.31 8.42 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 79.9%, guest_create_bench-30194d863d88281a 70.5%, Finder 47.2%, 
+boot 42 series 2 first_of_series no load 9.55 9.31 8.42 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 67.2%, guest_create_bench-30194d863d88281a 63.6%, XprotectService 41.2%, 
+boot 43 series 2 first_of_series no load 9.55 9.31 8.42 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: guest_create_bench-30194d863d88281a 62.7%, shards-vm 56.6%, XprotectService 54.0%, 
+boot 44 series 2 first_of_series no load 9.55 9.31 8.42 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: guest_create_bench-30194d863d88281a 70.5%, shards-vm 60.3%, XprotectService 50.2%, 
+boot 45 series 2 first_of_series no load 9.51 9.31 8.43 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: guest_create_bench-30194d863d88281a 72.4%, shards-vm 59.0%, XprotectService 31.4%, 
+boot 46 series 2 first_of_series no load 9.51 9.31 8.43 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: guest_create_bench-30194d863d88281a 73.6%, shards-vm 65.5%, rustc 31.4%, 
+boot 47 series 3 first_of_series yes load 9.51 9.31 8.43 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 61.5%, guest_create_bench-30194d863d88281a 52.1%, Finder 35.3%, 
+boot 48 series 3 first_of_series no load 9.79 9.37 8.45 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: guest_create_bench-30194d863d88281a 68.5%, shards-vm 65.0%, Finder 59.5%, 
+boot 49 series 3 first_of_series no load 9.79 9.37 8.45 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: rustc 71.4%, shards-vm 71.1%, guest_create_bench-30194d863d88281a 67.9%, 
+boot 50 series 3 first_of_series no load 9.79 9.37 8.45 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: rustc 80.8%, shards-vm 71.1%, guest_create_bench-30194d863d88281a 66.2%, 
+boot 51 series 3 first_of_series no load 9.79 9.37 8.45 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 70.8%, clippy-driver 69.2%, clippy-driver 68.4%, 
+boot 52 series 3 first_of_series no load 9.79 9.37 8.45 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 89.1%, (rustc) 73.5%, guest_create_bench-30194d863d88281a 71.9%, 
+boot 53 series 3 first_of_series no load 9.79 9.37 8.45 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 83.7%, Finder 71.5%, clippy-driver 64.2%, 
+boot 54 series 3 first_of_series no load 9.79 9.37 8.45 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 77.7%, Finder 70.8%, (rustc) 66.1%, 
+boot 55 series 3 first_of_series no load 9.79 9.37 8.45 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: Finder 88.4%, shards-vm 78.5%, rustc 76.3%, 
+boot 56 series 3 first_of_series no load 11.09 9.65 8.56 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: Finder 127.9%, shards-vm 78.0%, clippy-driver 73.9%, 
+boot 57 series 3 first_of_series no load 11.09 9.65 8.56 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: Finder 147.0%, shards-vm 77.5%, clippy-driver 74.1%, 
+boot 58 series 3 first_of_series no load 11.09 9.65 8.56 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: Finder 151.8%, clippy-driver 80.1%, clippy-driver 78.1%, 
+boot 59 series 3 first_of_series no load 11.09 9.65 8.56 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: Finder 136.7%, shards-vm 72.0%, clippy-driver 70.5%, 
+boot 60 series 3 first_of_series no load 11.09 9.65 8.56 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: Finder 149.6%, clippy-driver 71.7%, clippy-driver 63.9%, 
+boot 61 series 3 first_of_series no load 11.09 9.65 8.56 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: Finder 123.6%, rustc 84.7%, guest_create_bench-30194d863d88281a 59.4%, 
+boot 62 series 3 first_of_series no load 11.09 9.65 8.56 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: Finder 119.3%, rustc 77.7%, shards-vm 70.3%, 
+boot 63 series 3 first_of_series no load 11.09 9.65 8.56 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: Finder 95.1%, rustc 81.6%, clippy-driver 76.2%, 
+boot 64 series 3 first_of_series no load 11.09 9.65 8.56 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: rustc 84.9%, Finder 84.3%, shards-vm 72.3%, 
+boot 65 series 3 first_of_series no load 11.09 9.65 8.56 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: Finder 89.4%, rustc 87.4%, clippy-driver 77.2%, 
+boot 66 series 3 first_of_series no load 11.09 9.65 8.56 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: Finder 93.6%, clippy-driver 89.7%, rustc 88.8%, 
+boot 67 series 3 first_of_series no load 11.09 9.65 8.56 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 93.5%, Finder 91.2%, rustc 86.1%, 
+boot 68 series 3 first_of_series no load 11.09 9.65 8.56 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: Finder 103.3%, clippy-driver 93.8%, rustc 89.1%, 
+boot 69 series 3 first_of_series no load 11.09 9.65 8.56 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: Finder 100.7%, shards-vm 96.7%, clippy-driver 94.5%, 
+boot 70 series 4 first_of_series yes load 11.09 9.65 8.56 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: Finder 100.1%, shards-vm 83.7%, guest_create_bench-30194d863d88281a 73.8%, 
+boot 71 series 4 first_of_series no load 11.64 9.78 8.61 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 90.3%, rustc 88.8%, guest_create_bench-30194d863d88281a 70.5%, 
+boot 72 series 4 first_of_series no load 11.64 9.78 8.61 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: rustc 90.4%, clippy-driver 89.2%, shards-vm 82.6%, 
+boot 73 series 4 first_of_series no load 11.64 9.78 8.61 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 92.1%, rustc 91.8%, clippy-driver 89.5%, 
+boot 74 series 4 first_of_series no load 11.64 9.78 8.61 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: rustc 93.0%, clippy-driver 92.2%, shards-vm 84.6%, 
+boot 75 series 4 first_of_series no load 11.64 9.78 8.61 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 88.7%, biomesyncd 84.3%, rustc 84.1%, 
+boot 76 series 4 first_of_series no load 11.64 9.78 8.61 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 88.9%, rustc 87.1%, biomesyncd 83.6%, 
+boot 77 series 4 first_of_series no load 11.64 9.78 8.61 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 87.7%, rustc 87.0%, biomesyncd 82.7%, 
+boot 78 series 4 first_of_series no load 11.64 9.78 8.61 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 83.7%, biomesyncd 83.5%, rustc 83.2%, 
+boot 79 series 4 first_of_series no load 11.64 9.78 8.61 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 90.0%, rustc 84.7%, biomesyncd 71.2%, 
+boot 80 series 4 first_of_series no load 11.64 9.78 8.61 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 77.5%, rustc 71.8%, biomesyncd 68.6%, 
+boot 81 series 4 first_of_series no load 11.64 9.78 8.61 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: rustc 78.4%, biomesyncd 78.1%, guest_create_bench-30194d863d88281a 67.8%, 
+boot 82 series 4 first_of_series no load 11.64 9.78 8.61 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: rustc 86.0%, biomesyncd 78.0%, guest_create_bench-30194d863d88281a 71.5%, 
+boot 83 series 4 first_of_series no load 11.64 9.78 8.61 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: rustc 92.5%, guest_create_bench-30194d863d88281a 73.0%, shards-vm 64.6%, 
+boot 84 series 4 first_of_series no load 11.64 9.78 8.61 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: rustc 95.8%, guest_create_bench-30194d863d88281a 72.9%, shards-vm 68.6%, 
+boot 85 series 4 first_of_series no load 11.64 9.78 8.61 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: rustc 94.0%, shards-vm 74.0%, guest_create_bench-30194d863d88281a 68.9%, 
+boot 86 series 4 first_of_series no load 11.64 9.78 8.61 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: rustc 89.2%, shards-vm 69.1%, guest_create_bench-30194d863d88281a 68.9%, 
+boot 87 series 4 first_of_series no load 11.35 9.75 8.61 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: rustc 91.8%, shards-vm 72.9%, Finder 68.9%, 
+boot 88 series 4 first_of_series no load 11.35 9.75 8.61 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 100.6%, rustc 91.6%, Finder 91.4%, 
+boot 89 series 4 first_of_series no load 11.35 9.75 8.61 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: Finder 94.6%, rustc 91.2%, shards-vm 89.9%, 
+boot 90 series 4 first_of_series no load 11.35 9.75 8.61 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: rustc 91.4%, shards-vm 82.5%, tcp-be222e2968e67c7f 80.1%, 
+boot 91 series 4 first_of_series no load 11.35 9.75 8.61 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: tcp-be222e2968e67c7f 90.7%, rustc 87.7%, shards-vm 80.5%, 
+boot 92 series 4 first_of_series no load 11.35 9.75 8.61 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: tcp-be222e2968e67c7f 92.1%, shards-vm 76.3%, rustc 74.6%, 
+boot 93 series 5 first_of_series yes load 11.35 9.75 8.61 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: tcp-be222e2968e67c7f 99.4%, WindowServer 36.4%, StorageManagementService 16.9%, 
+boot 94 series 5 first_of_series no load 11.35 9.75 8.61 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: Finder 102.9%, tcp-be222e2968e67c7f 97.4%, shards-vm 72.3%, 
+boot 95 series 5 first_of_series no load 11.35 9.75 8.61 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 101.1%, tcp-be222e2968e67c7f 96.6%, guest_create_bench-30194d863d88281a 70.3%, 
+boot 96 series 5 first_of_series no load 11.40 9.79 8.63 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: tcp-be222e2968e67c7f 96.9%, shards-vm 86.6%, guest_create_bench-30194d863d88281a 71.7%, 
+boot 97 series 5 first_of_series no load 11.40 9.79 8.63 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: tcp-be222e2968e67c7f 96.1%, shards-vm 83.9%, guest_create_bench-30194d863d88281a 68.8%, 
+boot 98 series 5 first_of_series no load 11.40 9.79 8.63 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: tcp-be222e2968e67c7f 95.5%, shards-vm 78.6%, guest_create_bench-30194d863d88281a 67.9%, 
+boot 99 series 5 first_of_series no load 11.40 9.79 8.63 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 78.2%, guest_create_bench-30194d863d88281a 67.0%, clippy-driver 54.9%, 
+boot 100 series 5 first_of_series no load 11.40 9.79 8.63 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 75.7%, clippy-driver 68.3%, guest_create_bench-30194d863d88281a 50.8%, 
+boot 101 series 5 first_of_series no load 11.40 9.79 8.63 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 76.3%, shards-vm 64.8%, guest_create_bench-30194d863d88281a 62.2%, 
+boot 102 series 5 first_of_series no load 11.40 9.79 8.63 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 85.5%, XprotectService 56.1%, guest_create_bench-30194d863d88281a 43.7%, 
+boot 103 series 5 first_of_series no load 11.40 9.79 8.63 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 82.9%, guest_create_bench-30194d863d88281a 63.5%, shards-vm 56.0%, 
+boot 104 series 5 first_of_series no load 11.40 9.79 8.63 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 84.3%, guest_create_bench-30194d863d88281a 67.2%, shards-vm 61.5%, 
+boot 105 series 5 first_of_series no load 11.40 9.79 8.63 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 84.6%, guest_create_bench-30194d863d88281a 71.1%, shards-vm 63.9%, 
+boot 106 series 5 first_of_series no load 11.40 9.79 8.63 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 87.4%, guest_create_bench-30194d863d88281a 72.3%, shards-vm 66.1%, 
+boot 107 series 5 first_of_series no load 11.40 9.79 8.63 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 89.3%, guest_create_bench-30194d863d88281a 70.5%, shards-vm 70.0%, 
+boot 108 series 5 first_of_series no load 11.40 9.79 8.63 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 85.2%, guest_create_bench-30194d863d88281a 72.6%, shards-vm 66.8%, 
+boot 109 series 5 first_of_series no load 11.40 9.79 8.63 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 88.2%, guest_create_bench-30194d863d88281a 71.4%, shards-vm 67.0%, 
+boot 110 series 5 first_of_series no load 11.40 9.79 8.63 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 91.0%, shards-vm 90.8%, guest_create_bench-30194d863d88281a 69.8%, 
+boot 111 series 5 first_of_series no load 11.40 9.79 8.63 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 92.4%, clippy-driver 86.4%, guest_create_bench-30194d863d88281a 67.0%, 
+boot 112 series 5 first_of_series no load 11.40 9.79 8.63 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 86.1%, shards-vm 81.9%, guest_create_bench-30194d863d88281a 69.1%, 
+boot 113 series 5 first_of_series no load 11.40 9.79 8.63 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 92.5%, shards-vm 84.1%, guest_create_bench-30194d863d88281a 70.9%, 
+boot 114 series 5 first_of_series no load 11.40 9.79 8.63 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 91.0%, shards-vm 79.7%, guest_create_bench-30194d863d88281a 68.0%, 
+boot 115 series 5 first_of_series no load 11.40 9.79 8.63 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 94.5%, shards-vm 78.7%, guest_create_bench-30194d863d88281a 60.1%, 
+boot 116 series 6 first_of_series yes load 11.05 9.75 8.62 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: guest_create_bench-30194d863d88281a 70.2%, shards-vm 59.9%, StorageManagementService 31.9%, 
+boot 117 series 6 first_of_series no load 11.05 9.75 8.62 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: XprotectService 54.3%, Finder 34.8%, shards-vm 30.1%, 
+boot 118 series 6 first_of_series no load 11.05 9.75 8.62 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: guest_create_bench-30194d863d88281a 49.4%, shards-vm 48.0%, iconservicesagent 44.5%, 
+boot 119 series 6 first_of_series no load 11.05 9.75 8.62 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: iconservicesagent 57.5%, guest_create_bench-30194d863d88281a 51.8%, shards-vm 50.1%, 
+boot 120 series 6 first_of_series no load 11.05 9.75 8.62 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: guest_create_bench-30194d863d88281a 66.8%, shards-vm 59.3%, clippy-driver 44.0%, 
+boot 121 series 6 first_of_series no load 11.05 9.75 8.62 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 74.2%, guest_create_bench-30194d863d88281a 69.7%, clippy-driver 62.5%, 
+boot 122 series 6 first_of_series no load 11.05 9.75 8.62 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: guest_create_bench-30194d863d88281a 71.1%, shards-vm 69.1%, clippy-driver 61.8%, 
+boot 123 series 6 first_of_series no load 11.05 9.75 8.62 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 70.7%, guest_create_bench-30194d863d88281a 69.7%, clippy-driver 56.5%, 
+boot 124 series 6 first_of_series no load 11.60 9.88 8.67 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 75.3%, guest_create_bench-30194d863d88281a 71.9%, shards-vm 70.8%, 
+boot 125 series 6 first_of_series no load 11.60 9.88 8.67 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 96.3%, clippy-driver 87.9%, guest_create_bench-30194d863d88281a 71.6%, 
+boot 126 series 6 first_of_series no load 11.60 9.88 8.67 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 91.7%, shards-vm 89.4%, guest_create_bench-30194d863d88281a 70.5%, 
+boot 127 series 6 first_of_series no load 11.60 9.88 8.67 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 91.3%, shards-vm 85.4%, guest_create_bench-30194d863d88281a 69.6%, 
+boot 128 series 6 first_of_series no load 11.60 9.88 8.67 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 91.7%, shards-vm 84.3%, Finder 71.1%, 
+boot 129 series 6 first_of_series no load 11.60 9.88 8.67 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 85.7%, shards-vm 78.9%, guest_create_bench-30194d863d88281a 65.2%, 
+boot 130 series 6 first_of_series no load 11.60 9.88 8.67 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 71.2%, guest_create_bench-30194d863d88281a 51.8%, shards-vm 50.4%, 
+boot 131 series 6 first_of_series no load 11.60 9.88 8.67 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 79.2%, guest_create_bench-30194d863d88281a 56.2%, shards-vm 52.0%, 
+boot 132 series 6 first_of_series no load 11.60 9.88 8.67 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 89.2%, guest_create_bench-30194d863d88281a 68.1%, shards-vm 60.1%, 
+boot 133 series 6 first_of_series no load 11.60 9.88 8.67 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 76.3%, guest_create_bench-30194d863d88281a 72.7%, shards-vm 64.6%, 
+boot 134 series 6 first_of_series no load 11.60 9.88 8.67 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 80.8%, guest_create_bench-30194d863d88281a 72.6%, shards-vm 68.9%, 
+boot 135 series 6 first_of_series no load 11.60 9.88 8.67 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 79.2%, guest_create_bench-30194d863d88281a 72.9%, shards-vm 69.3%, 
+boot 136 series 6 first_of_series no load 11.60 9.88 8.67 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 86.4%, guest_create_bench-30194d863d88281a 74.2%, shards-vm 65.5%, 
+boot 137 series 6 first_of_series no load 11.60 9.88 8.67 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 82.9%, guest_create_bench-30194d863d88281a 72.6%, shards-vm 68.0%, 
+boot 138 series 6 first_of_series no load 11.60 9.88 8.67 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 90.3%, shards-vm 74.1%, guest_create_bench-30194d863d88281a 71.0%, 
+boot 139 series 7 first_of_series yes load 11.60 9.88 8.67 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 56.5%, guest_create_bench-30194d863d88281a 49.9%, clippy-driver 40.6%, 
+boot 140 series 7 first_of_series no load 12.68 10.13 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: connection_memory-bd0beb465fac5b8c 99.8%, guest_create_bench-30194d863d88281a 71.2%, clippy-driver 70.0%, 
+boot 141 series 7 first_of_series no load 12.68 10.13 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 90.2%, clippy-driver 73.6%, spindump 69.7%, 
+boot 142 series 7 first_of_series no load 12.68 10.13 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 89.5%, guest_create_bench-30194d863d88281a 67.8%, clippy-driver 63.4%, 
+boot 143 series 7 first_of_series no load 12.68 10.13 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 77.1%, guest_create_bench-30194d863d88281a 67.8%, WindowServer 32.0%, 
+boot 144 series 7 first_of_series no load 12.68 10.13 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 79.1%, guest_create_bench-30194d863d88281a 69.8%, XprotectService 59.1%, 
+boot 145 series 7 first_of_series no load 12.68 10.13 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 78.5%, guest_create_bench-30194d863d88281a 66.9%, clippy-driver 45.6%, 
+boot 146 series 7 first_of_series no load 12.68 10.13 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: exchanges-e309cc6e77f6c418 83.9%, shards-vm 73.9%, clippy-driver 64.7%, 
+boot 147 series 7 first_of_series no load 12.68 10.13 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: exchanges-e309cc6e77f6c418 91.9%, clippy-driver 75.1%, StorageManagementService 57.3%, 
+boot 148 series 7 first_of_series no load 12.68 10.13 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: exchanges-e309cc6e77f6c418 92.7%, clippy-driver 81.0%, guest_create_bench-30194d863d88281a 62.1%, 
+boot 149 series 7 first_of_series no load 12.68 10.13 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: exchanges-e309cc6e77f6c418 92.8%, clippy-driver 88.8%, shards-vm 69.5%, 
+boot 150 series 7 first_of_series no load 12.68 10.13 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: exchanges-e309cc6e77f6c418 94.6%, clippy-driver 86.8%, shards-vm 74.5%, 
+boot 151 series 7 first_of_series no load 12.68 10.13 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: exchanges-e309cc6e77f6c418 94.6%, clippy-driver 82.1%, shards-vm 78.7%, 
+boot 152 series 7 first_of_series no load 12.22 10.08 8.76 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: exchanges-e309cc6e77f6c418 94.9%, clippy-driver 80.6%, shards-vm 72.8%, 
+boot 153 series 7 first_of_series no load 12.22 10.08 8.76 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: exchanges-e309cc6e77f6c418 94.0%, clippy-driver 81.1%, guest_create_bench-30194d863d88281a 70.2%, 
+boot 154 series 7 first_of_series no load 12.22 10.08 8.76 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: exchanges-e309cc6e77f6c418 94.5%, clippy-driver 76.6%, shards-vm 70.4%, 
+boot 155 series 7 first_of_series no load 12.22 10.08 8.76 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: exchanges-e309cc6e77f6c418 95.1%, shards-vm 91.9%, clippy-driver 83.4%, 
+boot 156 series 7 first_of_series no load 12.22 10.08 8.76 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 98.7%, clippy-driver 87.8%, guest_create_bench-30194d863d88281a 71.1%, 
+boot 157 series 7 first_of_series no load 12.22 10.08 8.76 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 84.4%, shards-vm 81.4%, guest_create_bench-30194d863d88281a 72.2%, 
+boot 158 series 7 first_of_series no load 12.22 10.08 8.76 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 87.9%, shards-vm 78.4%, guest_create_bench-30194d863d88281a 72.6%, 
+boot 159 series 7 first_of_series no load 12.22 10.08 8.76 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 90.6%, shards-vm 76.8%, guest_create_bench-30194d863d88281a 72.9%, 
+boot 160 series 7 first_of_series no load 12.22 10.08 8.76 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 91.2%, shards-vm 82.7%, guest_create_bench-30194d863d88281a 70.2%, 
+boot 161 series 7 first_of_series no load 12.22 10.08 8.76 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 92.8%, shards-vm 76.4%, guest_create_bench-30194d863d88281a 60.4%, 
+boot 162 series 8 first_of_series yes load 12.22 10.08 8.76 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: simulation-b0cce9b44f99fb27 81.3%, guest_create_bench-30194d863d88281a 75.9%, shards-vm 68.9%, 
+boot 163 series 8 first_of_series no load 11.80 10.03 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 80.6%, shards-vm 61.6%, guest_create_bench-30194d863d88281a 54.3%, 
+boot 164 series 8 first_of_series no load 11.80 10.03 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 85.8%, shards-vm 49.5%, guest_create_bench-30194d863d88281a 47.6%, 
+boot 165 series 8 first_of_series no load 11.80 10.03 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 88.7%, guest_create_bench-30194d863d88281a 63.5%, shards-vm 58.3%, 
+boot 166 series 8 first_of_series no load 11.80 10.03 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 87.7%, guest_create_bench-30194d863d88281a 64.6%, shards-vm 63.2%, 
+boot 167 series 8 first_of_series no load 11.80 10.03 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 92.3%, guest_create_bench-30194d863d88281a 70.6%, shards-vm 67.8%, 
+boot 168 series 8 first_of_series no load 11.80 10.03 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: guest_create_bench-30194d863d88281a 72.1%, shards-vm 59.8%, XprotectService 44.6%, 
+boot 169 series 8 first_of_series no load 11.80 10.03 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: world-474eec3f21363580 92.3%, shards-vm 81.2%, guest_create_bench-30194d863d88281a 75.4%, 
+boot 170 series 8 first_of_series no load 11.80 10.03 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: world-474eec3f21363580 93.3%, shards-vm 85.5%, guest_create_bench-30194d863d88281a 73.8%, 
+boot 171 series 8 first_of_series no load 11.80 10.03 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: world-474eec3f21363580 94.9%, shards-vm 79.7%, iconservicesagent 75.7%, 
+boot 172 series 8 first_of_series no load 11.80 10.03 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: world-474eec3f21363580 94.9%, clippy-driver 81.3%, shards-vm 79.5%, 
+boot 173 series 8 first_of_series no load 11.80 10.03 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: world-474eec3f21363580 96.1%, clippy-driver 88.8%, shards-vm 81.7%, 
+boot 174 series 8 first_of_series no load 11.80 10.03 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: world-474eec3f21363580 95.4%, clippy-driver 89.1%, shards-vm 74.9%, 
+boot 175 series 8 first_of_series no load 11.80 10.03 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: world-474eec3f21363580 95.2%, clippy-driver 87.5%, StorageManagementService 78.2%, 
+boot 176 series 8 first_of_series no load 11.80 10.03 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: world-474eec3f21363580 95.6%, clippy-driver 83.7%, StorageManagementService 65.4%, 
+boot 177 series 8 first_of_series no load 11.80 10.03 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: world-474eec3f21363580 96.3%, clippy-driver 86.4%, guest_create_bench-30194d863d88281a 64.0%, 
+boot 178 series 8 first_of_series no load 11.80 10.03 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: world-474eec3f21363580 95.5%, clippy-driver 88.6%, guest_create_bench-30194d863d88281a 66.3%, 
+boot 179 series 8 first_of_series no load 11.80 10.03 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: world-474eec3f21363580 95.5%, clippy-driver 90.9%, shards-vm 68.6%, 
+boot 180 series 8 first_of_series no load 11.80 10.03 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: world-474eec3f21363580 96.9%, clippy-driver 91.6%, shards-vm 70.1%, 
+boot 181 series 8 first_of_series no load 11.80 10.03 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: world-474eec3f21363580 94.5%, clippy-driver 88.6%, shards-vm 74.1%, 
+boot 182 series 8 first_of_series no load 11.58 10.01 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: world-474eec3f21363580 95.7%, clippy-driver 92.8%, shards-vm 71.6%, 
+boot 183 series 8 first_of_series no load 11.58 10.01 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: world-474eec3f21363580 96.2%, clippy-driver 90.7%, shards-vm 70.9%, 
+boot 184 series 8 first_of_series no load 11.58 10.01 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: world-474eec3f21363580 96.3%, clippy-driver 93.8%, shards-vm 77.6%, 
+boot 185 series 9 first_of_series yes load 11.58 10.01 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: world-474eec3f21363580 98.8%, shards-vm 84.3%, guest_create_bench-30194d863d88281a 75.6%, 
+boot 186 series 9 first_of_series no load 11.58 10.01 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: world-474eec3f21363580 97.1%, clippy-driver 93.9%, shards-vm 71.8%, 
+boot 187 series 9 first_of_series no load 11.58 10.01 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: world-474eec3f21363580 97.5%, clippy-driver 93.0%, shards-vm 75.4%, 
+boot 188 series 9 first_of_series no load 11.58 10.01 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: world-474eec3f21363580 94.7%, clippy-driver 92.1%, shards-vm 81.1%, 
+boot 189 series 9 first_of_series no load 11.58 10.01 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: world-474eec3f21363580 94.9%, clippy-driver 89.4%, shards-vm 73.8%, 
+boot 190 series 9 first_of_series no load 11.58 10.01 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: world-474eec3f21363580 96.9%, clippy-driver 89.4%, shards-vm 74.7%, 
+boot 191 series 9 first_of_series no load 11.58 10.01 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: world-474eec3f21363580 97.2%, shards-vm 90.8%, clippy-driver 85.2%, 
+boot 192 series 9 first_of_series no load 11.58 10.01 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: world-474eec3f21363580 98.2%, shards-vm 76.4%, guest_create_bench-30194d863d88281a 74.0%, 
+boot 193 series 9 first_of_series no load 11.45 10.01 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: world-474eec3f21363580 97.8%, shards-vm 81.1%, guest_create_bench-30194d863d88281a 72.1%, 
+boot 194 series 9 first_of_series no load 11.45 10.01 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: world-474eec3f21363580 96.7%, shards-vm 80.5%, clippy-driver 71.7%, 
+boot 195 series 9 first_of_series no load 11.45 10.01 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: world-474eec3f21363580 96.0%, clippy-driver 84.9%, shards-vm 63.8%, 
+boot 196 series 9 first_of_series no load 11.45 10.01 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: world-474eec3f21363580 95.4%, clippy-driver 85.9%, shards-vm 63.2%, 
+boot 197 series 9 first_of_series no load 11.45 10.01 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: spindump 107.4%, world-474eec3f21363580 94.9%, clippy-driver 89.7%, 
+boot 198 series 9 first_of_series no load 11.45 10.01 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: spindump 105.0%, world-474eec3f21363580 94.9%, clippy-driver 89.8%, 
+boot 199 series 9 first_of_series no load 11.45 10.01 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: spindump 127.2%, world-474eec3f21363580 95.0%, clippy-driver 86.1%, 
+boot 200 series 9 first_of_series no load 11.45 10.01 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: spindump 138.1%, world-474eec3f21363580 95.9%, clippy-driver 82.7%, 
+boot 201 series 9 first_of_series no load 11.45 10.01 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: spindump 139.0%, world-474eec3f21363580 96.1%, shards-vm 73.0%, 
+boot 202 series 9 first_of_series no load 11.45 10.01 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: world-474eec3f21363580 96.0%, spindump 81.3%, shards-vm 72.5%, 
+boot 203 series 9 first_of_series no load 11.45 10.01 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 93.2%, spindump 77.0%, guest_create_bench-30194d863d88281a 69.7%, 
+boot 204 series 9 first_of_series no load 11.45 10.01 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 84.5%, spindump 83.9%, clippy-driver 73.3%, 
+boot 205 series 9 first_of_series no load 11.45 10.01 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: spindump 120.1%, shards-vm 81.9%, clippy-driver 76.3%, 
+boot 206 series 9 first_of_series no load 11.45 10.01 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: spindump 100.1%, clippy-driver 80.1%, shards-vm 74.9%, 
+boot 207 series 9 first_of_series no load 11.45 10.01 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: spindump 119.2%, clippy-driver 90.4%, shards-vm 76.8%, 
+boot 208 series 10 first_of_series yes load 11.45 10.01 8.75 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: sim-32c1156f733b52e7 178.3%, clippy-driver 42.3%, spindump 36.2%, 
+boot 209 series 10 first_of_series no load 11.50 10.04 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: sim-32c1156f733b52e7 97.2%, shards-vm 88.2%, clippy-driver 83.6%, 
+boot 210 series 10 first_of_series no load 11.50 10.04 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: sim-32c1156f733b52e7 93.5%, shards-vm 90.1%, clippy-driver 83.7%, 
+boot 211 series 10 first_of_series no load 11.50 10.04 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: sim-32c1156f733b52e7 94.6%, clippy-driver 83.8%, shards-vm 79.3%, 
+boot 212 series 10 first_of_series no load 11.50 10.04 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: sim-32c1156f733b52e7 93.4%, shards-vm 80.0%, clippy-driver 70.5%, 
+boot 213 series 10 first_of_series no load 11.50 10.04 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: sim-32c1156f733b52e7 95.1%, shards-vm 64.8%, clippy-driver 55.4%, 
+boot 214 series 10 first_of_series no load 11.50 10.04 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: iconservicesagent 73.5%, shards-vm 53.2%, guest_create_bench-30194d863d88281a 49.9%, 
+boot 215 series 10 first_of_series no load 11.50 10.04 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: iconservicesagent 73.6%, clippy-driver 65.3%, fseventsd 47.4%, 
+boot 216 series 10 first_of_series no load 11.50 10.04 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 77.0%, fseventsd 63.2%, shards-vm 48.5%, 
+boot 217 series 10 first_of_series no load 11.50 10.04 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 76.3%, fseventsd 65.3%, ApplicationsStorageExtension 64.4%, 
+boot 218 series 10 first_of_series no load 11.50 10.04 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: fseventsd 116.8%, Finder 85.0%, shards-vm 69.9%, 
+boot 219 series 10 first_of_series no load 11.50 10.04 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: Finder 88.1%, ApplicationsStorageExtension 72.1%, shards-vm 69.3%, 
+boot 220 series 10 first_of_series no load 11.50 10.04 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: ApplicationsStorageExtension 81.3%, clippy-driver 76.6%, shards-vm 75.8%, 
+boot 221 series 10 first_of_series no load 11.50 10.04 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 83.0%, shards-vm 78.3%, ApplicationsStorageExtension 75.0%, 
+boot 222 series 10 first_of_series no load 11.50 10.04 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 147.4%, clippy-driver 91.8%, ApplicationsStorageExtension 87.6%, 
+boot 223 series 10 first_of_series no load 11.50 10.04 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 165.9%, clippy-driver 87.3%, ApplicationsStorageExtension 83.1%, 
+boot 224 series 10 first_of_series no load 11.30 10.03 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 183.0%, shards-vm 88.7%, guest_create_bench-30194d863d88281a 71.1%, 
+boot 225 series 10 first_of_series no load 11.30 10.03 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 185.5%, shards-vm 92.2%, guest_create_bench-30194d863d88281a 72.3%, 
+boot 226 series 10 first_of_series no load 11.30 10.03 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 190.6%, shards-vm 83.4%, guest_create_bench-30194d863d88281a 73.2%, 
+boot 227 series 10 first_of_series no load 11.30 10.03 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 193.3%, shards-vm 85.1%, guest_create_bench-30194d863d88281a 72.3%, 
+boot 228 series 10 first_of_series no load 11.30 10.03 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 192.5%, shards-vm 82.9%, guest_create_bench-30194d863d88281a 70.9%, 
+boot 229 series 10 first_of_series no load 11.30 10.03 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 190.8%, ApplicationsStorageExtension 84.5%, shards-vm 79.7%, 
+boot 230 series 10 first_of_series no load 11.30 10.03 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 190.1%, clippy-driver 79.4%, shards-vm 77.2%, 
+boot 231 series 11 first_of_series yes load 11.30 10.03 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 199.1%, guest_create_bench-30194d863d88281a 73.5%, shards-vm 62.7%, 
+boot 232 series 11 first_of_series no load 11.30 10.03 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 195.1%, shards-vm 85.4%, clippy-driver 82.8%, 
+boot 233 series 11 first_of_series no load 11.30 10.03 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 193.2%, clippy-driver 81.3%, shards-vm 78.8%, 
+boot 234 series 11 first_of_series no load 11.30 10.03 8.77 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 187.1%, shards-vm 78.0%, clippy-driver 76.9%, 
+boot 235 series 11 first_of_series no load 10.63 9.91 8.74 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 191.3%, shards-vm 71.1%, clippy-driver 65.5%, 
+boot 236 series 11 first_of_series no load 10.63 9.91 8.74 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 187.9%, clippy-driver 72.5%, shards-vm 62.2%, 
+boot 237 series 11 first_of_series no load 10.63 9.91 8.74 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 192.6%, clippy-driver 76.8%, guest_create_bench-30194d863d88281a 67.2%, 
+boot 238 series 11 first_of_series no load 10.63 9.91 8.74 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 192.7%, guest_create_bench-30194d863d88281a 69.6%, shards-vm 69.2%, 
+boot 239 series 11 first_of_series no load 10.63 9.91 8.74 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 187.0%, clippy-driver 74.1%, guest_create_bench-30194d863d88281a 68.3%, 
+boot 240 series 11 first_of_series no load 10.63 9.91 8.74 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 191.7%, shards-vm 72.9%, clippy-driver 72.3%, 
+boot 241 series 11 first_of_series no load 10.63 9.91 8.74 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 189.2%, shards-vm 79.5%, guest_create_bench-30194d863d88281a 66.5%, 
+boot 242 series 11 first_of_series no load 10.63 9.91 8.74 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 192.7%, shards-vm 71.1%, guest_create_bench-30194d863d88281a 69.8%, 
+boot 243 series 11 first_of_series no load 10.63 9.91 8.74 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 191.1%, shards-vm 71.1%, guest_create_bench-30194d863d88281a 67.7%, 
+boot 244 series 11 first_of_series no load 10.63 9.91 8.74 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 191.0%, shards-vm 89.3%, guest_create_bench-30194d863d88281a 67.8%, 
+boot 245 series 11 first_of_series no load 10.63 9.91 8.74 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 192.8%, shards-vm 87.6%, guest_create_bench-30194d863d88281a 69.6%, 
+boot 246 series 11 first_of_series no load 10.63 9.91 8.74 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 194.6%, shards-vm 81.2%, clippy-driver 76.0%, 
+boot 247 series 11 first_of_series no load 10.63 9.91 8.74 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 190.0%, Finder 92.9%, shards-vm 79.8%, 
+boot 248 series 11 first_of_series no load 10.63 9.91 8.74 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 191.5%, Finder 127.1%, clippy-driver 84.8%, 
+boot 249 series 11 first_of_series no load 10.63 9.91 8.74 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 188.8%, Finder 144.6%, clippy-driver 89.8%, 
+boot 250 series 11 first_of_series no load 10.63 9.91 8.74 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 188.1%, clippy-driver 91.0%, shards-vm 78.4%, 
+boot 251 series 11 first_of_series no load 10.63 9.91 8.74 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 192.0%, clippy-driver 72.1%, StorageManagementService 58.3%, 
+boot 252 series 11 first_of_series no load 10.63 9.91 8.74 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 190.3%, guest_create_bench-30194d863d88281a 64.3%, shards-vm 62.6%, 
+boot 253 series 11 first_of_series no load 10.63 9.91 8.74 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 188.3%, clippy-driver 75.9%, guest_create_bench-30194d863d88281a 68.5%, 
+boot 254 series 12 first_of_series yes load 10.26 9.85 8.72 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 198.6%, guest_create_bench-30194d863d88281a 74.3%, shards-vm 72.4%, 
+boot 255 series 12 first_of_series no load 10.26 9.85 8.72 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 98.3%, guest_create_bench-30194d863d88281a 73.7%, shards-vm 70.4%, 
+boot 256 series 12 first_of_series no load 10.26 9.85 8.72 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: replay-7811aff346f68aba 96.7%, shards-vm 74.7%, guest_create_bench-30194d863d88281a 71.9%, 
+boot 257 series 12 first_of_series no load 10.26 9.85 8.72 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 73.8%, guest_create_bench-30194d863d88281a 73.8%, WindowServer 36.0%, 
+boot 258 series 12 first_of_series no load 10.26 9.85 8.72 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 81.8%, guest_create_bench-30194d863d88281a 70.2%, StorageManagementService 48.9%, 
+boot 259 series 12 first_of_series no load 10.26 9.85 8.72 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 89.3%, guest_create_bench-30194d863d88281a 73.8%, WindowServer 39.4%, 
+boot 260 series 12 first_of_series no load 10.26 9.85 8.72 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 76.5%, guest_create_bench-30194d863d88281a 76.1%, XprotectService 59.9%, 
+boot 261 series 12 first_of_series no load 10.26 9.85 8.72 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: hyper_tls-31f709d151e79e25 104.7%, shards-vm 74.1%, guest_create_bench-30194d863d88281a 68.0%, 
+boot 262 series 12 first_of_series no load 10.26 9.85 8.72 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: hyper_tls-31f709d151e79e25 78.8%, shards-vm 76.4%, guest_create_bench-30194d863d88281a 68.1%, 
+boot 263 series 12 first_of_series no load 10.16 9.83 8.73 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: hyper_tls-31f709d151e79e25 90.4%, shards-vm 71.1%, clippy-driver 64.8%, 
+boot 264 series 12 first_of_series no load 10.16 9.83 8.73 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: hyper_tls-31f709d151e79e25 94.0%, clippy-driver 59.9%, shards-vm 52.5%, 
+boot 265 series 12 first_of_series no load 10.16 9.83 8.73 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: hyper_tls-31f709d151e79e25 95.7%, guest_create_bench-30194d863d88281a 64.3%, clippy-driver 63.3%, 
+boot 266 series 12 first_of_series no load 10.16 9.83 8.73 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: hyper_tls-31f709d151e79e25 97.0%, guest_create_bench-30194d863d88281a 71.3%, clippy-driver 65.4%, 
+boot 267 series 12 first_of_series no load 10.16 9.83 8.73 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: hyper_tls-31f709d151e79e25 96.6%, guest_create_bench-30194d863d88281a 69.9%, shards-vm 67.0%, 
+boot 268 series 12 first_of_series no load 10.16 9.83 8.73 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: hyper_tls-31f709d151e79e25 96.9%, guest_create_bench-30194d863d88281a 70.3%, shards-vm 69.4%, 
+boot 269 series 12 first_of_series no load 10.16 9.83 8.73 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: hyper_tls-31f709d151e79e25 97.3%, shards-vm 73.9%, guest_create_bench-30194d863d88281a 71.1%, 
+boot 270 series 12 first_of_series no load 10.16 9.83 8.73 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 71.5%, guest_create_bench-30194d863d88281a 70.3%, clippy-driver 67.2%, 
+boot 271 series 12 first_of_series no load 10.16 9.83 8.73 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 86.3%, guest_create_bench-30194d863d88281a 69.6%, clippy-driver 33.0%, 
+boot 272 series 12 first_of_series no load 10.16 9.83 8.73 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 82.8%, guest_create_bench-30194d863d88281a 72.6%, XprotectService 55.0%, 
+boot 273 series 12 first_of_series no load 10.16 9.83 8.73 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 75.1%, guest_create_bench-30194d863d88281a 70.9%, clippy-driver 57.9%, 
+boot 274 series 12 first_of_series no load 10.16 9.83 8.73 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 76.9%, guest_create_bench-30194d863d88281a 66.9%, alloc_per_handshake-573aaa4a00486d28 64.7%, 
+boot 275 series 12 first_of_series no load 10.16 9.83 8.73 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: alloc_per_handshake-573aaa4a00486d28 83.5%, shards-vm 76.0%, guest_create_bench-30194d863d88281a 71.3%, 
+boot 276 series 12 first_of_series no load 10.16 9.83 8.73 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: alloc_per_handshake-573aaa4a00486d28 88.8%, shards-vm 76.3%, clippy-driver 71.3%, 
+boot 277 series 13 first_of_series yes load 10.16 9.83 8.73 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 46.7%, guest_create_bench-30194d863d88281a 44.8%, clippy-driver 38.1%, 
+boot 278 series 13 first_of_series no load 11.75 10.17 8.85 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: api-b023464a1a70bd46 394.1%, shards-vm 81.5%, guest_create_bench-30194d863d88281a 63.1%, 
+boot 279 series 13 first_of_series no load 11.75 10.17 8.85 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: api-b023464a1a70bd46 440.6%, shards-vm 88.8%, guest_create_bench-30194d863d88281a 62.4%, 
+boot 280 series 13 first_of_series no load 11.75 10.17 8.85 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: api-b023464a1a70bd46 379.1%, shards-vm 81.1%, guest_create_bench-30194d863d88281a 61.0%, 
+boot 281 series 13 first_of_series no load 11.75 10.17 8.85 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: api-b023464a1a70bd46 397.8%, Finder 78.3%, shards-vm 74.4%, 
+boot 282 series 13 first_of_series no load 11.75 10.17 8.85 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: api-b023464a1a70bd46 235.0%, Finder 84.2%, shards-vm 73.5%, 
+boot 283 series 13 first_of_series no load 11.75 10.17 8.85 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: api-b023464a1a70bd46 143.0%, shards-vm 77.6%, guest_create_bench-30194d863d88281a 61.5%, 
+boot 284 series 13 first_of_series no load 11.75 10.17 8.85 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 71.5%, XprotectService 62.0%, clippy-driver 61.5%, 
+boot 285 series 13 first_of_series no load 11.75 10.17 8.85 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 73.3%, XprotectService 55.4%, shards-vm 54.1%, 
+boot 286 series 13 first_of_series no load 11.75 10.17 8.85 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 73.9%, rustc 56.0%, rustc 55.8%, 
+boot 287 series 13 first_of_series no load 11.75 10.17 8.85 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 87.1%, XprotectService 64.8%, shards-vm 59.5%, 
+boot 288 series 13 first_of_series no load 11.75 10.17 8.85 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: clippy-driver 90.1%, shards-vm 67.3%, guest_create_bench-30194d863d88281a 63.9%, 
+boot 289 series 13 first_of_series no load 11.75 10.17 8.85 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 80.3%, rustc 73.7%, clippy-driver 72.4%, 
+boot 290 series 13 first_of_series no load 11.75 10.17 8.85 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: rustc 82.6%, shards-vm 79.8%, rustc 77.4%, 
+boot 291 series 13 first_of_series no load 11.75 10.17 8.85 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 92.7%, rustc 82.8%, guest_create_bench-30194d863d88281a 70.4%, 
+boot 292 series 13 first_of_series no load 12.17 10.28 8.90 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 86.7%, rustc 76.3%, guest_create_bench-30194d863d88281a 60.5%, 
+boot 293 series 13 first_of_series no load 12.17 10.28 8.90 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 83.3%, rustc 67.2%, clippy-driver 59.1%, 
+boot 294 series 13 first_of_series no load 12.17 10.28 8.90 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 79.5%, Finder 78.3%, clippy-driver 67.4%, 
+boot 295 series 13 first_of_series no load 12.17 10.28 8.90 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 79.0%, Finder 73.1%, guest_create_bench-30194d863d88281a 65.8%, 
+boot 296 series 13 first_of_series no load 12.17 10.28 8.90 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: client_cert_verifier-cd6bc74e15abc131 84.8%, shards-vm 77.7%, guest_create_bench-30194d863d88281a 66.8%, 
+boot 297 series 13 first_of_series no load 12.17 10.28 8.90 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: client_cert_verifier-cd6bc74e15abc131 115.9%, shards-vm 82.1%, rustc 62.5%, 
+boot 298 series 13 first_of_series no load 12.17 10.28 8.90 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: shards-vm 76.1%, rustc 69.0%, rustc 67.8%, 
+boot 299 series 13 first_of_series no load 12.17 10.28 8.90 | hex: hex.ns5route.boot299.20261107T172146Z hex.ns5route.pairse3.20261107T171947Z  | top: rustc 88.3%, rustc 85.8%, rustc 75.8%, 

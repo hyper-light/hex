@@ -11,31 +11,46 @@
 //!   the exec (its request's id, which is its connection's own) and the stream. In the guest, that
 //!   connection's socket is the descriptor the relay passes the node as the program's stream.
 //! - **Gather:** the relay holds an exec, or the streams that came before it, until the set its exec
-//!   names is whole ([`Gather`]), at most a bound of sets at once and each at most a patience long.
+//!   names is whole ([`Gather`]), at most a bound of sets at once, each until it is whole or its control
+//!   connection ends.
 
 use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
 
 use crate::wire::{self, Fault};
 
 pub mod files;
 
 /// The guest's vsock port the host's client dials for its control connection, and the one it dials for
-/// each stdio stream. Above 1024, as the ports of vsock(7) below it take `CAP_NET_BIND_SERVICE` to bind,
-/// and spelling `HEX` so a capture reads them.
+/// each stdio stream: identifiers assigned in docs/design/shards-guest.md §3a, above vsock(7)'s
+/// privileged ports (below 1024 take `CAP_NET_BIND_SERVICE` to bind) and below its `VMADDR_PORT_ANY`,
+/// spelling `HEX` so a capture reads them.
 pub const CONTROL_PORT: u32 = 0x4845_5800;
 pub const STDIO_PORT: u32 = 0x4845_5801;
+/// The guest's vsock port that reports its boot's own stamps (§3a): what a boot-time record splits a boot
+/// by, a line of `CLOCK_BOOTTIME` nanoseconds at init's start, its mounts, its node ready and its relay
+/// listening.
+pub const STAMPS_PORT: u32 = 0x4845_5803;
 
-/// A frame's prefix: the message's length, big-endian.
-const PREFIX: usize = 4;
+/// A frame's prefix: the message's length, a big-endian `u32` (shards-guest.md §3a).
+const PREFIX: usize = size_of::<u32>();
+
+/// The longest frame of a message at the wire's bound: what one read of a control connection takes at
+/// most, the unit it reads.
+pub const MAX_FRAME: usize = wire::MAX_MESSAGE + PREFIX;
 
 /// A control connection's first bytes, the relay's, before any frame: the connection's token (`u64`,
-/// little-endian), which its stdio connections name, as its request ids are its own.
-pub const TOKEN_BYTES: usize = 8;
+/// little-endian), which its stdio connections name, as its request ids are its own (§3a).
+pub const TOKEN_BYTES: usize = size_of::<u64>();
 
 /// A stdio connection's first bytes: `HEXS`, the version (`u16`, little-endian as the wire's
-/// integers), the stream, a zero byte, its control connection's token (`u64`) and the exec's id (`u64`).
-pub const NAME_BYTES: usize = 24;
+/// integers), the stream, a zero byte, its control connection's token (`u64`) and the exec's id (`u64`):
+/// §3a's table, the sum of its fields.
+pub const NAME_BYTES: usize = NAME_MAGIC.len()
+    + size_of::<u16>()
+    + size_of::<u8>()
+    + size_of::<u8>()
+    + TOKEN_BYTES
+    + size_of::<u64>();
 const NAME_MAGIC: [u8; 4] = *b"HEXS";
 /// The stdio name's only version. It changes append-only, as the wire's.
 const NAME_VERSION: u16 = 1;
@@ -79,6 +94,11 @@ impl Deframer {
             body: None,
             broken: None,
         }
+    }
+
+    /// Whether a frame is under way: some of it has come and the rest hasn't.
+    pub fn in_frame(&self) -> bool {
+        self.have_prefix > 0 || self.body.is_some()
     }
 
     /// Takes bytes from `input`, at most to the end of the frame under way, and returns how many it took
@@ -312,8 +332,6 @@ struct Set<C> {
     /// What the exec asked for, once it has come.
     want: Option<wire::Streams>,
     have: BTreeMap<Stdio, C>,
-    /// When the set began: its patience runs from here.
-    since: Instant,
 }
 
 impl<C> Set<C> {
@@ -343,14 +361,13 @@ impl<C> Gather<C> {
         self.sets.is_empty()
     }
 
-    fn set(&mut self, exec: Exec, now: Instant) -> Result<&mut Set<C>, Why> {
+    fn set(&mut self, exec: Exec) -> Result<&mut Set<C>, Why> {
         if !self.sets.contains_key(&exec) && self.sets.len() >= self.bound {
             return Err(Why::Full { bound: self.bound });
         }
         Ok(self.sets.entry(exec).or_insert_with(|| Set {
             want: None,
             have: BTreeMap::new(),
-            since: now,
         }))
     }
 
@@ -365,13 +382,12 @@ impl<C> Gather<C> {
         &mut self,
         exec: Exec,
         streams: wire::Streams,
-        now: Instant,
     ) -> Result<Option<Complete<C>>, Refused<C>> {
         let refused = |why| Refused {
             why,
             conns: Vec::new(),
         };
-        let set = self.set(exec, now).map_err(refused)?;
+        let set = self.set(exec).map_err(refused)?;
         if set.want.is_some() {
             return Err(refused(Why::Twice));
         }
@@ -393,13 +409,8 @@ impl<C> Gather<C> {
 
     /// A stream named `named` has come on `conn`: its exec's set, once whole, or the stream handed back
     /// with why it is refused.
-    pub fn arrive(
-        &mut self,
-        named: Named,
-        conn: C,
-        now: Instant,
-    ) -> Result<Option<Complete<C>>, Stray<C>> {
-        let set = match self.set(named.exec, now) {
+    pub fn arrive(&mut self, named: Named, conn: C) -> Result<Option<Complete<C>>, Stray<C>> {
+        let set = match self.set(named.exec) {
             Ok(set) => set,
             Err(why) => return Err(Stray { conn, why }),
         };
@@ -419,16 +430,16 @@ impl<C> Gather<C> {
         Ok(self.finish(named.exec))
     }
 
-    /// Sets begun more than `patience` before `now`, taken out with the connections they held, for the
-    /// shell to refuse and close.
-    pub fn expire(&mut self, now: Instant, patience: Duration) -> Vec<Complete<C>> {
-        let late: Vec<Exec> = self
+    /// The sets of control connection `conn`, which has ended, taken out with the connections they
+    /// held, for the shell to close: none of its execs can come now, nor be answered.
+    pub fn forget(&mut self, conn: u64) -> Vec<Complete<C>> {
+        let ended: Vec<Exec> = self
             .sets
-            .iter()
-            .filter(|(_, set)| now.saturating_duration_since(set.since) > patience)
+            .range(Exec { conn, id: 0 }..=Exec { conn, id: u64::MAX })
             .map(|(exec, _)| *exec)
             .collect();
-        late.into_iter()
+        ended
+            .into_iter()
             .filter_map(|exec| {
                 self.sets
                     .remove(&exec)

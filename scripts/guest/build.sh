@@ -35,6 +35,9 @@ hex=$(cd "$here/../.." && pwd)
 shards=$(cd "$shards" && pwd)
 mkdir -p "$out/kernel" "$out/target" "$out/cargo"
 out=$(cd "$out" && pwd)
+# The lead's shared fedora limits for a build or bench container (memory 8g, OOM score 1000, cargo -j 4;
+# hex-slot and the T7 fedora-unit-limits rule): an operator's limit on a shared host, not tuning. Set them
+# to override.
 limits=(--platform "$platform" --memory "${BENCH_MEMORY:-8g}" --oom-score-adj "${BENCH_OOM:-1000}")
 if [ -n "${GUEST_CPUSET:-}" ]; then
     limits+=(--cpuset-cpus "$GUEST_CPUSET")
@@ -50,9 +53,9 @@ docker run --rm "${limits[@]}" -v "$shards:/src:ro" -v "$out/kernel:/out" \
         rm -f /etc/apt/sources.list.d/*
         echo "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/$SNAPSHOT bookworm main" \
             > /etc/apt/sources.list
-        apt-get -o Acquire::Check-Valid-Until=false -o Acquire::Retries=5 update -q
+        apt-get -o Acquire::Check-Valid-Until=false update -q
         # shellcheck disable=SC2086
-        apt-get -o Acquire::Retries=5 install -y -q --no-install-recommends $PACKAGES
+        apt-get install -y -q --no-install-recommends $PACKAGES
         {
             gcc --version | head -1
             ld --version | head -1

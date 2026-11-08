@@ -3,20 +3,31 @@
 //! [`Shards`](crate::Shards) refuses (the same [`check`] and allowlist), and ends as a guest
 //! does: as its closure returns, or as it is stopped.
 
-use std::collections::{BTreeSet, VecDeque};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::path::PathBuf;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use crate::stream::{self, Socket};
-use crate::{End, Guest, GuestSpec, Guests, MAX_PORTS, Refusal, Stream, allowed, backend, check};
+use crate::{End, Guest, GuestSpec, Guests, Identity, MAX_PORTS, Refusal, Stream, allowed, backend, check};
 
 /// A guest's program: given its side of the guest, it returns how the guest ends
 /// ([`End::PowerOff`], say).
 pub type Program = dyn Fn(&SimHost) -> End + Send + Sync;
 
-/// Guests whose PID 1 is `program`.
+/// Guests whose PID 1 is `program`, and those booted so far by their simulated VM's pid, for
+/// [`Guests::attach`].
 pub struct SimGuests {
     program: Arc<Program>,
+    booted: Mutex<Booted>,
+}
+
+/// The guests a simulator booted: each one's identity's start, and its state while anything holds
+/// it. One entry per boot, the bound a test's boots set.
+#[derive(Default)]
+struct Booted {
+    next: u32,
+    guests: BTreeMap<u32, (u64, Weak<Shared>)>,
 }
 
 impl std::fmt::Debug for SimGuests {
@@ -29,6 +40,7 @@ impl SimGuests {
     pub fn new(program: impl Fn(&SimHost) -> End + Send + Sync + 'static) -> SimGuests {
         SimGuests {
             program: Arc::new(program),
+            booted: Mutex::new(Booted::default()),
         }
     }
 }
@@ -122,9 +134,53 @@ impl Guests for SimGuests {
                 host.shared.changed.notify_all();
             })
             .map_err(|e| Refusal::Boot(format!("the simulated guest's thread: {e}")))?;
+        let identity = {
+            let mut booted = self.booted.lock().unwrap_or_else(PoisonError::into_inner);
+            // A simulated pid and start: each boot's its own, a start no other boot has.
+            booted.next = booted.next.wrapping_add(1);
+            let pid = booted.next;
+            let started = u64::from(pid);
+            booted.guests.insert(pid, (started, Arc::downgrade(&shared)));
+            Identity {
+                pid,
+                started,
+                vsock: PathBuf::from(format!("sim-vsock-{pid}")),
+            }
+        };
         Ok(Box::new(SimGuest {
             ports: spec.ports.clone(),
             shared,
+            identity,
+        }))
+    }
+
+    fn attach(&self, identity: &Identity, spec: &GuestSpec) -> Result<Box<dyn Guest>, Refusal> {
+        check(spec)?;
+        let gone = |why: String| Refusal::Gone {
+            pid: identity.pid,
+            why,
+        };
+        let shared = {
+            let booted = self.booted.lock().unwrap_or_else(PoisonError::into_inner);
+            match booted.guests.get(&identity.pid) {
+                None => return Err(gone("this simulator booted no guest as it".into())),
+                Some((started, _)) if *started != identity.started => {
+                    return Err(gone(format!(
+                        "it started at {started}, not {}: another process",
+                        identity.started
+                    )));
+                }
+                Some((_, shared)) => shared.upgrade(),
+            }
+        };
+        let shared = shared.ok_or_else(|| gone("its VM's process has ended".into()))?;
+        if let Some(end) = &lock(&shared).end {
+            return Err(Refusal::Ended(end.clone()));
+        }
+        Ok(Box::new(SimGuest {
+            ports: spec.ports.clone(),
+            shared,
+            identity: identity.clone(),
         }))
     }
 }
@@ -134,11 +190,13 @@ impl Guests for SimGuests {
 struct SimGuest {
     ports: Vec<u32>,
     shared: Arc<Shared>,
+    identity: Identity,
 }
 
 impl Guest for SimGuest {
     fn connect(&self, port: u32, patience: Duration) -> Result<Box<dyn Stream>, Refusal> {
         allowed(&self.ports, port)?;
+        // None: past `Instant`'s range (`Duration::MAX`): until the guest listens or ends.
         let deadline = Instant::now().checked_add(patience);
         let mut state = lock(&self.shared);
         loop {
@@ -160,19 +218,20 @@ impl Guest for SimGuest {
                 self.shared.changed.notify_all();
                 return Ok(Box::new(ours));
             }
-            let left = deadline.map_or(Duration::ZERO, |d| d.saturating_duration_since(Instant::now()));
-            if left.is_zero() {
-                return Err(Refusal::Channel {
-                    port,
-                    why: format!("no OK within {patience:?}: the guest does not listen there"),
-                });
-            }
-            state = self
-                .shared
-                .changed
-                .wait_timeout(state, left)
-                .unwrap_or_else(PoisonError::into_inner)
-                .0;
+            state = match deadline.map(|d| d.saturating_duration_since(Instant::now())) {
+                Some(left) if left.is_zero() => {
+                    return Err(Refusal::Channel {
+                        port,
+                        why: format!("no OK within {patience:?}: the guest does not listen there"),
+                    });
+                }
+                Some(left) => self.wait(state, left),
+                None => self
+                    .shared
+                    .changed
+                    .wait(state)
+                    .unwrap_or_else(PoisonError::into_inner),
+            };
         }
     }
 
@@ -185,24 +244,39 @@ impl Guest for SimGuest {
         Ok(())
     }
 
+    fn identity(&self) -> Result<Identity, Refusal> {
+        Ok(self.identity.clone())
+    }
+
     fn wait_for(&self, timeout: Duration) -> Result<Option<End>, Refusal> {
+        // None: past `Instant`'s range (`Duration::MAX`): until it ends.
         let deadline = Instant::now().checked_add(timeout);
         let mut state = lock(&self.shared);
         loop {
             if let Some(end) = &state.end {
                 return Ok(Some(end.clone()));
             }
-            let left = deadline.map_or(Duration::ZERO, |d| d.saturating_duration_since(Instant::now()));
-            if left.is_zero() {
-                return Ok(None);
-            }
-            state = self
-                .shared
-                .changed
-                .wait_timeout(state, left)
-                .unwrap_or_else(PoisonError::into_inner)
-                .0;
+            state = match deadline.map(|d| d.saturating_duration_since(Instant::now())) {
+                Some(left) if left.is_zero() => return Ok(None),
+                Some(left) => self.wait(state, left),
+                None => self
+                    .shared
+                    .changed
+                    .wait(state)
+                    .unwrap_or_else(PoisonError::into_inner),
+            };
         }
+    }
+}
+
+impl SimGuest {
+    /// Waits at most `left` for a change.
+    fn wait<'a>(&'a self, state: MutexGuard<'a, State>, left: Duration) -> MutexGuard<'a, State> {
+        self.shared
+            .changed
+            .wait_timeout(state, left)
+            .unwrap_or_else(PoisonError::into_inner)
+            .0
     }
 }
 

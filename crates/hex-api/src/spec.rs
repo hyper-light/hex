@@ -448,18 +448,90 @@ pub struct User {
     pub groups: Vec<u32>,
 }
 
-/// A program's standard streams; `None` is the null device.
+/// A program's standard streams: each one the caller's own (a pipe's end, given here), one the runtime makes
+/// and gives the caller its end of ([`Stdio::ask`], [`crate::Proc::streams`]), or the null device.
 #[derive(Debug, Default)]
 pub struct Stdio {
     pub stdin: Option<PipeReader>,
     pub stdout: Option<PipeWriter>,
     pub stderr: Option<PipeWriter>,
+    /// The streams the runtime makes: their far ends are the program's, the near ends the caller's, so the
+    /// host copies no byte between them (native plan step 8). A stream both given above and asked for here
+    /// is refused, naming it.
+    pub ask: Ask,
 }
+
+/// Which of a program's standard streams the caller asks its runtime to make ([`Stdio::ask`]).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Ask {
+    pub stdin: bool,
+    pub stdout: bool,
+    pub stderr: bool,
+}
+
+/// The caller's ends of the streams it asked for ([`crate::Proc::streams`]): stdin's to write, stdout's and
+/// stderr's to read, each to its end as a pipe's end is.
+#[derive(Debug, Default)]
+pub struct Given {
+    pub stdin: Option<End>,
+    pub stdout: Option<End>,
+    pub stderr: Option<End>,
+}
+
+/// A stream's end the caller holds: a file descriptor on Unix (a pipe's or a socket's), a handle on Windows.
+#[cfg(unix)]
+pub type End = std::os::fd::OwnedFd;
+#[cfg(windows)]
+pub type End = std::os::windows::io::OwnedHandle;
 
 impl Stdio {
     /// Every stream the null device.
     pub fn null() -> Self {
         Self::default()
+    }
+
+    /// Makes each stream asked for as a pipe: the program's end put here, the caller's given back. A
+    /// runtime whose programs take pipes as their stdio makes its asked streams so; one whose streams are
+    /// elsewhere (a guest's) gives that stream's own end instead. Refused, naming the stream, when one is
+    /// both given and asked for.
+    pub fn make_asked(&mut self) -> Result<Given, crate::Refusal> {
+        self.check()?;
+        let pipe =
+            || std::io::pipe().map_err(|e| crate::Refusal::os("making a stream asked for", e));
+        let mut given = Given::default();
+        if self.ask.stdin {
+            let (r, w) = pipe()?;
+            self.stdin = Some(r);
+            given.stdin = Some(w.into());
+        }
+        if self.ask.stdout {
+            let (r, w) = pipe()?;
+            self.stdout = Some(w);
+            given.stdout = Some(r.into());
+        }
+        if self.ask.stderr {
+            let (r, w) = pipe()?;
+            self.stderr = Some(w);
+            given.stderr = Some(r.into());
+        }
+        self.ask = Ask::default();
+        Ok(given)
+    }
+
+    /// Refused, naming the stream, when one is both given and asked for.
+    pub fn check(&self) -> Result<(), crate::Refusal> {
+        let both = [
+            ("stdin", self.stdin.is_some() && self.ask.stdin),
+            ("stdout", self.stdout.is_some() && self.ask.stdout),
+            ("stderr", self.stderr.is_some() && self.ask.stderr),
+        ];
+        match both.into_iter().find(|(_, both)| *both) {
+            Some((name, _)) => Err(crate::Refusal::Invalid {
+                what: "stdio",
+                why: format!("{name} is both given and asked for"),
+            }),
+            None => Ok(()),
+        }
     }
 }
 

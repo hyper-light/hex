@@ -23,7 +23,7 @@ pub mod box_helper;
 pub mod box_run;
 #[cfg(target_os = "linux")]
 pub mod guest;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod node;
 #[cfg(target_os = "linux")]
 pub mod oci;

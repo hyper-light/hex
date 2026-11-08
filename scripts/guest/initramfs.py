@@ -21,9 +21,12 @@ def main(hex_path, out):
     with open(hex_path, "rb") as f:
         hex_bytes = f.read()
     parts = [
+        # Modes as the kernel's own devtmpfs gives them (drivers/base/devtmpfs.c): its root "mode=0755",
+        # and a device node no driver names a mode for 0600, root's alone, as the console's is.
         entry(1, 0o040755, "dev"),
         # A character device, 5:1, as devices.txt names /dev/console.
         entry(2, 0o020600, "dev/console", rdev=(5, 1)),
+        # Search and execute for every user (execve(2): EACCES without execute), written by root alone.
         entry(3, 0o100755, "init", hex_bytes),
         entry(0, 0, "TRAILER!!!"),
     ]

@@ -1,25 +1,38 @@
-"""Boots the guest image through Shards and proves it ready (docs/design/shards-guest.md §2): a
-CONNECT to the relay's control port answered OK, and the relay's first bytes on it, the
-connection's token (hex_core::stream::TOKEN_BYTES). Reads SHARDS_BIN, HEX_GUEST_KERNEL and
-HEX_GUEST_INITRD; retries the handshake with backoff until the deadline, as the guest client does,
-and fails when the VM process ends first.
+"""Boots the guest image through Shards and proves it ready (docs/design/shards-guest.md §2): init's
+`hex guest ready` on the console, then a CONNECT to the relay's control port answered OK, and the
+relay's first bytes on it, the connection's token (hex_core::stream::TOKEN_BYTES). Reads SHARDS_BIN,
+HEX_GUEST_KERNEL and HEX_GUEST_INITRD. Every wait is on a fact, never a clock (CLAUDE.md §4): the
+console's line or the VM's end, which a guest that can't start brings (init powers off, and a panic
+reboots at once, `panic=-1`).
 
-    python3 -I scripts/guest/boot_check.py WORKDIR [--console] [--deadline SECONDS]
-        [--share DIR[:ro]]... [--cmdline-extra WORDS]
+    python3 -I scripts/guest/boot_check.py WORKDIR [--console] [--share DIR[:ro]]...
+        [--cmdline-extra WORDS]
 
-Each --share is given to Shards and named on the command line (`hex.shares=`), so READY proves init
-mounted it: a share init can't mount ends the guest. --cmdline-extra adds kernel parameters, as a
-`hex.shares=` naming a share no device backs, which must end the guest.
+The VM is then killed: shards' VMM has no host-to-guest power-off, so a SIGTERM would change nothing, and the
+guest keeps nothing on a writable disk.
+
+The console is kept in WORKDIR/vm.log; --console echoes it too. Each --share is given to Shards and
+named on the command line (`hex.shares=`), so READY proves init mounted it: a share init can't mount
+ends the guest. --cmdline-extra adds kernel parameters, as a `hex.shares=` naming a share no device
+backs, which must end the guest.
 """
 
 import os
+import platform
 import socket
 import subprocess
 import sys
 import time
 
-CONTROL_PORT = 0x4845_5800  # hex_core::stream::CONTROL_PORT
+# The longest answer to a CONNECT: `OK <port>\n`, the port a u32 in decimal (firecracker
+# docs/vsock.md, "Host-Initiated Connections").
+OK_BYTES = len(b"OK 4294967295\n")
+READY = b"hex guest ready"
+
+# The control port and token width, as docs/design/shards-guest.md §3a assigns them (hex_core::stream).
+CONTROL_PORT = 0x4845_5800
 TOKEN_BYTES = 8
+# hex_runtime::guest's: `panic=-1` reboots at once on a panic (kernel-parameters.txt, `panic=`).
 CMDLINE = "console=ttyS0 panic=-1"
 
 
@@ -33,14 +46,13 @@ def read_exact(conn, n):
     return got
 
 
-def handshake(path, patience):
+def handshake(path):
     conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    conn.settimeout(patience)
     try:
         conn.connect(path)
         conn.sendall(b"CONNECT %d\n" % CONTROL_PORT)
         line = b""
-        while not line.endswith(b"\n") and len(line) < 64:
+        while not line.endswith(b"\n") and len(line) < OK_BYTES:
             chunk = conn.recv(1)
             if not chunk:
                 raise ConnectionError(f"closed after {line!r}")
@@ -52,6 +64,17 @@ def handshake(path, patience):
         conn.close()
 
 
+# HEX-GUEST-19's guest VM peak resident set, the most of three runs, in MiB (a boot is part of its workload;
+# bench/native/guest/peak-rss/RECORD.md), and Shards' least guest by architecture (shards_api::min_memory_mib).
+PEAK_MIB = 284
+
+
+def guest_memory_mib():
+    """Shards' least guest and twice the measured peak, as hex-cli's guest_real takes."""
+    least = 64 if platform.machine() in ("arm64", "aarch64") else 128
+    return least + 2 * PEAK_MIB
+
+
 def values(argv, flag):
     return [argv[i + 1] for i, word in enumerate(argv) if word == flag]
 
@@ -61,7 +84,6 @@ def main(argv):
         sys.exit(__doc__)
     work = argv[0]
     console = "--console" in argv
-    deadline_s = float((values(argv, "--deadline") or [60.0])[0])
     shares = values(argv, "--share")
     cmdline = " ".join([CMDLINE] + values(argv, "--cmdline-extra"))
     if shares:
@@ -73,39 +95,43 @@ def main(argv):
     if os.path.exists(vsock):
         os.unlink(vsock)
     args = [shards, "run", "vm", "--kernel", kernel, "--initrd", initrd, "--vsock", vsock,
-            "--cpus", "2", "--memory", "1024", "--cmdline", cmdline]
+            "--cpus", str(os.cpu_count()), "--memory", str(guest_memory_mib()), "--cmdline", cmdline]
     for share in shares:
         args += ["--share", share]
-    if not console:
-        args.append("--no-console")
     print("running:", " ".join(args), flush=True)
     log = open(os.path.join(work, "vm.log"), "wb")
     start = time.monotonic()
-    vm = subprocess.Popen(args, stdout=log, stderr=subprocess.STDOUT)
-    wait, last = 0.01, None
+    vm = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     try:
-        while time.monotonic() - start < deadline_s:
-            if vm.poll() is not None:
-                print(f"FAIL: the VM ended first, exit {vm.returncode}; last: {last}", flush=True)
-                return 1
-            try:
-                ok, token = handshake(vsock, 5.0)
-                print(f"READY after {time.monotonic() - start:.3f} s: {ok}, token {token.hex()}", flush=True)
-                return 0
-            except (OSError, ConnectionError) as e:
-                last = e
-            time.sleep(wait)
-            wait = min(wait * 2, 0.5)
-        print(f"FAIL: no answer within {deadline_s} s; last: {last}", flush=True)
-        return 1
-    finally:
-        vm.terminate()
+        ready = False
+        for line in vm.stdout:
+            log.write(line)
+            log.flush()
+            if console:
+                sys.stdout.buffer.write(line)
+                sys.stdout.flush()
+            if line.strip() == READY:
+                ready = True
+                break
+        if not ready:
+            print(f"FAIL: the VM ended first, exit {vm.wait()}", flush=True)
+            return 1
         try:
-            vm.wait(10)
-        except subprocess.TimeoutExpired:
-            vm.kill()
-            vm.wait()
-        print(f"the VM ended: exit {vm.returncode}", flush=True)
+            ok, token = handshake(vsock)
+        except (OSError, ConnectionError) as e:
+            print(f"FAIL: init said it is ready, but the relay answered: {e}", flush=True)
+            return 1
+        print(f"READY after {time.monotonic() - start:.3f} s: {ok}, token {token.hex()}", flush=True)
+        return 0
+    finally:
+        # Killed at once, as shards_api's stop does: the VMM has no host-to-guest power-off, and this guest
+        # keeps nothing on a writable disk. The console is drained to the VM's end.
+        stopping = time.monotonic()
+        vm.kill()
+        rest, _ = vm.communicate()
+        log.write(rest or b"")
+        log.close()
+        print(f"the VM ended: exit {vm.returncode}, {time.monotonic() - stopping:.3f} s after its kill", flush=True)
 
 
 if __name__ == "__main__":

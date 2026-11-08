@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use hex_api::{Exit, Proc, Refusal};
+use hex_api::{Exit, Proc, Refusal, Signal};
 
 use super::process::State;
 use super::sys::{self, Handle};
@@ -22,6 +22,9 @@ pub struct BoxProc {
     state: Arc<State>,
     pid: u32,
     exit: Option<Exit>,
+    /// Terminated by its own `kill`, with KILL's code: that code then reads as KILL whatever the box's job
+    /// was sent.
+    killed: bool,
 }
 
 impl BoxProc {
@@ -31,6 +34,7 @@ impl BoxProc {
             state,
             pid,
             exit: None,
+            killed: false,
         }
     }
 
@@ -48,7 +52,11 @@ impl BoxProc {
         }
         let code =
             sys::exit_code(process).map_err(|e| Refusal::os("reading a program's exit code", e))?;
-        let exit = hex_core::job::exit(code, self.state.sent()?);
+        let mut sent = self.state.sent()?;
+        if self.killed {
+            sent.add(Signal::KILL);
+        }
+        let exit = hex_core::job::exit(code, sent);
         self.exit = Some(exit);
         // Close the handle: the ended process is reaped and leaves the box's job.
         self.process = None;
@@ -90,5 +98,26 @@ impl Proc for BoxProc {
                 return Ok(self.exit);
             }
         }
+    }
+
+    /// Terminates this process alone, with the code Hex ends a job with for KILL, so its end reads as
+    /// KILL's.
+    fn kill(&mut self) -> Result<(), Refusal> {
+        if self.poll(0)?.is_some() {
+            return Ok(());
+        }
+        let Some(process) = self.process.as_ref() else {
+            return Ok(());
+        };
+        self.killed = true;
+        match sys::terminate_process(process, hex_core::job::terminated_code(Signal::KILL)) {
+            Ok(()) => Ok(()),
+            // Refused: it ended between the poll and the call, which its exit then says.
+            Err(_) if self.poll(0)?.is_some() => Ok(()),
+            Err(e) => Err(Refusal::os("TerminateProcess", e)),
+        }
+    }
+    fn streams(&mut self) -> Result<hex_api::Given, Refusal> {
+        Ok(hex_api::Given::default())
     }
 }

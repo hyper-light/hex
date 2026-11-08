@@ -40,10 +40,8 @@ fn listeners() -> (TcpListener, TcpListener, Arc<dyn Link>) {
     (control, stdio, link)
 }
 
-/// The next framed request on `conn`.
+/// The next framed request on `conn`, waiting on the fact: its bytes, or its end, which fails the test.
 fn next_request(conn: &mut TcpStream) -> (Header, Request) {
-    conn.set_read_timeout(Some(Duration::from_secs(30)))
-        .unwrap();
     let mut d = Deframer::new(wire::MAX_MESSAGE);
     let mut byte = [0u8; 1];
     loop {
@@ -74,6 +72,7 @@ fn hello(conn: &mut TcpStream) -> Header {
         &Answer::Hello(wire::Hello {
             version: wire::VERSION,
             classes: vec![Class::Oci],
+            // The stand-in's own limits, inputs rather than tuning: past what any test here makes.
             limits: Limits {
                 connections: 1,
                 message_bytes: wire::MAX_MESSAGE,
@@ -166,6 +165,7 @@ fn an_execs_stdio_rides_named_connections_and_its_end_comes_back() {
                 stdin: Some(in_r),
                 stdout: Some(out_w),
                 stderr: None,
+                ..Stdio::null()
             },
         )
         .unwrap();
@@ -175,10 +175,7 @@ fn an_execs_stdio_rides_named_connections_and_its_end_comes_back() {
     let mut out = String::new();
     out_r.read_to_string(&mut out).unwrap();
     assert_eq!(out, "hello through the guest\n");
-    assert_eq!(
-        proc.wait_for(Duration::from_secs(30)).unwrap(),
-        Some(Exit::Code(0))
-    );
+    assert_eq!(proc.wait_for(Duration::MAX).unwrap(), Some(Exit::Code(0)));
     drop(proc);
     let _ = client.inspect(&BoxId::new("b").unwrap());
     agent.join().unwrap();
@@ -226,4 +223,387 @@ fn an_agent_closing_mid_message_is_refused() {
         panic!("expected a broken connection, got {got:?}");
     };
     assert!(why.contains("middle of a message"), "{why}");
+}
+
+/// Each send bound set on a connection, by the port it was dialed on.
+type SendBounds = Arc<std::sync::Mutex<Vec<(u32, Option<Duration>)>>>;
+
+/// A connection that records each send bound set on it, by the port it was dialed on.
+struct Recorded {
+    conn: TcpStream,
+    port: u32,
+    bounds: SendBounds,
+}
+
+impl Read for Recorded {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.conn.read(buf)
+    }
+}
+
+impl Write for Recorded {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.conn.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.conn.flush()
+    }
+}
+
+impl Duplex for Recorded {
+    fn try_clone(&self) -> std::io::Result<Box<dyn Duplex>> {
+        Ok(Box::new(Recorded {
+            conn: self.conn.try_clone()?,
+            port: self.port,
+            bounds: Arc::clone(&self.bounds),
+        }))
+    }
+
+    fn shutdown(&self, how: Shutdown) -> std::io::Result<()> {
+        self.conn.shutdown(how)
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.bounds.lock().unwrap().push((self.port, timeout));
+        self.conn.set_write_timeout(timeout)
+    }
+
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.conn.set_read_timeout(timeout)
+    }
+
+    fn handle(&self) -> super::Handle<'_> {
+        Duplex::handle(&self.conn)
+    }
+
+    fn set_nonblocking(&self, on: bool) -> std::io::Result<()> {
+        self.conn.set_nonblocking(on)
+    }
+}
+
+struct Recording {
+    control: SocketAddr,
+    stdio: SocketAddr,
+    bounds: SendBounds,
+}
+
+impl Link for Recording {
+    fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+        let addr = if port == stream::CONTROL_PORT {
+            self.control
+        } else {
+            self.stdio
+        };
+        Ok(Box::new(Recorded {
+            conn: TcpStream::connect(addr).unwrap(),
+            port,
+            bounds: Arc::clone(&self.bounds),
+        }))
+    }
+}
+
+/// HEX-GUEST-32 (§3, CLAUDE.md §8): exec a program with stdin through the guest: expect its stdio
+/// connection given no send bound, as a local exec's stdin is the caller's own pipe, which waits on the
+/// program as long as it runs; only the control connection is bounded, as the local client's socket is.
+#[test]
+fn a_stdio_connection_waits_on_its_program_as_a_local_pipe_does() {
+    let (control, stdio) = (
+        TcpListener::bind("127.0.0.1:0").unwrap(),
+        TcpListener::bind("127.0.0.1:0").unwrap(),
+    );
+    let bounds = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let link = Arc::new(Recording {
+        control: control.local_addr().unwrap(),
+        stdio: stdio.local_addr().unwrap(),
+        bounds: Arc::clone(&bounds),
+    });
+    let agent = std::thread::spawn(move || {
+        let (mut conn, _) = control.accept().unwrap();
+        hello(&mut conn);
+        let (h, _) = next_request(&mut conn);
+        let (s, _) = stdio.accept().unwrap();
+        send_answer(&mut conn, h.version, h.id, &Answer::Started { pid: 7 });
+        send_answer(&mut conn, h.version, h.id, &Answer::Exited(Exit::Code(0)));
+        let _ = next_request(&mut conn);
+        drop(s);
+    });
+    let client = Client::connect(link).unwrap();
+    let (in_r, in_w) = std::io::pipe().unwrap();
+    let mut proc = client
+        .exec(
+            &BoxId::new("b").unwrap(),
+            Program::of(&["cat"]),
+            Stdio {
+                stdin: Some(in_r),
+                stdout: None,
+                stderr: None,
+                ..Stdio::null()
+            },
+        )
+        .unwrap();
+    assert_eq!(proc.wait_for(Duration::MAX).unwrap(), Some(Exit::Code(0)));
+    drop((proc, in_w));
+    let _ = client.inspect(&BoxId::new("b").unwrap());
+    agent.join().unwrap();
+    let bounds = bounds.lock().unwrap().clone();
+    assert!(
+        bounds.iter().all(|(port, _)| *port == stream::CONTROL_PORT),
+        "{bounds:?}"
+    );
+    assert!(
+        bounds.contains(&(stream::CONTROL_PORT, Some(ANSWER_PATIENCE))),
+        "{bounds:?}"
+    );
+}
+
+/// A stream over loopback, as Shards' is over its device.
+struct Looped(TcpStream);
+
+impl Read for Looped {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl Write for Looped {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+impl shards_api::Stream for Looped {
+    fn try_clone(&self) -> std::io::Result<Box<dyn shards_api::Stream>> {
+        Ok(Box::new(Looped(self.0.try_clone()?)))
+    }
+
+    fn handle(&self) -> shards_api::Handle<'_> {
+        #[cfg(unix)]
+        return std::os::fd::AsFd::as_fd(&self.0);
+        #[cfg(windows)]
+        std::os::windows::io::AsSocket::as_socket(&self.0)
+    }
+
+    fn set_nonblocking(&self, on: bool) -> std::io::Result<()> {
+        self.0.set_nonblocking(on)
+    }
+
+    fn shutdown(&self, how: Shutdown) -> std::io::Result<()> {
+        self.0.shutdown(how)
+    }
+
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.0.set_read_timeout(timeout)
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.0.set_write_timeout(timeout)
+    }
+}
+
+/// A guest that records the patience each dial is given and answers every one on loopback.
+struct Patient {
+    listener: TcpListener,
+    given: std::sync::Mutex<Vec<Duration>>,
+}
+
+impl shards_api::Guest for Patient {
+    fn connect(
+        &self,
+        _port: u32,
+        patience: Duration,
+    ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        self.given.lock().unwrap().push(patience);
+        let conn = TcpStream::connect(self.listener.local_addr().unwrap()).unwrap();
+        Ok(Box::new(Looped(conn)))
+    }
+
+    fn stop(&self) -> Result<(), shards_api::Refusal> {
+        Ok(())
+    }
+
+    fn wait_for(&self, _: Duration) -> Result<Option<shards_api::End>, shards_api::Refusal> {
+        Ok(None)
+    }
+
+    fn identity(&self) -> Result<shards_api::Identity, shards_api::Refusal> {
+        Err(shards_api::Refusal::Unsupported {
+            what: "identity",
+            why: "a loopback stand-in names no VM".into(),
+        })
+    }
+}
+
+/// HEX-GUEST-33 (§2, CLAUDE.md §4): dial a booted guest three times: expect the first dial given the
+/// caller's bound on the boot, and each later one a single try (`Duration::ZERO`), as the guest's relay
+/// already listens and a refusal then is its end, not its boot.
+#[test]
+fn the_first_dial_waits_for_the_guest_and_later_ones_try_once() {
+    let guest = Arc::new(Patient {
+        listener: TcpListener::bind("127.0.0.1:0").unwrap(),
+        given: std::sync::Mutex::new(Vec::new()),
+    });
+    let first = Duration::from_millis(354);
+    let link = shards::ShardsLink::new(guest.clone(), first);
+    for port in [stream::CONTROL_PORT, stream::STDIO_PORT, stream::STDIO_PORT] {
+        link.dial(port).unwrap();
+    }
+    assert_eq!(
+        *guest.given.lock().unwrap(),
+        [first, Duration::ZERO, Duration::ZERO]
+    );
+}
+
+/// Native plan step 8 (1), CLAUDE.md §2: the event form's writes queue behind a backlog bounded in bytes.
+/// To a peer that never reads, frames go while the socket and the backlog have room; the one that wouldn't
+/// fit is refused whole, `Exhausted` naming the backlog and its bound, nothing past the bound is ever
+/// held, and the loop is told once, when bytes first wait.
+#[test]
+fn the_event_forms_writes_are_bounded_and_refused_whole_past_the_bound() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut writer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    // Held, never read.
+    let (_peer, _) = listener.accept().unwrap();
+    writer.set_nonblocking(true).unwrap();
+    let told = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let telling = Arc::clone(&told);
+    let mut backlog = Backlog {
+        bytes: VecDeque::new(),
+        bound: 4096,
+        wants_room: Arc::new(move || {
+            telling.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }),
+    };
+    let frame = vec![7u8; 1000];
+    let mut refused = None;
+    // Bounded: 20 MB, past any loopback socket's buffers, so the backlog fills well before it ends.
+    for _ in 0..20_000 {
+        match backlog.send(&mut writer, &frame) {
+            Ok(()) => assert!(backlog.bytes.len() <= 4096, "{} held", backlog.bytes.len()),
+            Err(Sent::Refused(why)) => {
+                refused = Some(why);
+                break;
+            }
+            Err(Sent::Gone) => panic!("the peer went"),
+        }
+    }
+    assert_eq!(
+        refused,
+        Some(Refusal::Exhausted {
+            what: BACKLOG,
+            bound: 4096
+        })
+    );
+    assert!(backlog.bytes.len() <= 4096);
+    assert_eq!(told.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// Native plan step 8 (1): the event form's pump, its connection ended by the agent, says `Ended`, and
+/// every call waiting through it hears why, as a typed refusal; a call begun after is refused at once,
+/// never left waiting.
+#[cfg(unix)]
+#[test]
+fn a_pumps_end_reaches_every_call_waiting_through_it() {
+    let (control, _stdio, link) = listeners();
+    let agent = std::thread::spawn(move || {
+        let (mut conn, _) = control.accept().unwrap();
+        hello(&mut conn);
+        // Reads the inspect, and closes without answering it.
+        let _ = next_request(&mut conn);
+    });
+    let (client, mut pump) = Client::connect_evented(link, Arc::new(|| {})).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    client
+        .begin(
+            Call::Inspect(BoxId::new("b").unwrap()),
+            Stdio::null(),
+            Box::new(move |_, got| tx.send(got).unwrap()),
+            Box::new(|_| {}),
+        )
+        .unwrap();
+    agent.join().unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if pump.ready() == Pumped::Ended {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the pump never saw its end"
+        );
+        let handle = pump.handle();
+        let mut fds = [rustix::event::PollFd::new(
+            &handle,
+            rustix::event::PollFlags::IN,
+        )];
+        let wait = rustix::event::Timespec {
+            tv_sec: 1,
+            tv_nsec: 0,
+        };
+        let _ = rustix::event::poll(&mut fds, Some(&wait));
+    }
+    let got = rx.recv_timeout(Duration::from_secs(30)).unwrap();
+    assert!(
+        matches!(&got, Err(Refusal::Broken(why)) if why.contains("closed")),
+        "{got:?}"
+    );
+    assert!(
+        client
+            .begin(
+                Call::Inspect(BoxId::new("c").unwrap()),
+                Stdio::null(),
+                Box::new(|_, _| {}),
+                Box::new(|_| {}),
+            )
+            .is_err()
+    );
+}
+
+/// Native plan step 8, guest stdio (HEX-GUEST-41): the event form, a node's, copies no stream: an exec begun with
+/// a pipe of the caller's own is refused as invalid stdio and nothing goes to the guest, so the guest's next
+/// request is the inspect begun after it.
+#[test]
+fn the_event_form_takes_no_pipe_of_the_callers_own() {
+    let (control, _stdio, link) = listeners();
+    let agent = std::thread::spawn(move || {
+        let (mut conn, _) = control.accept().unwrap();
+        hello(&mut conn);
+        let (_, request) = next_request(&mut conn);
+        request
+    });
+    let (client, _pump) = Client::connect_evented(link, Arc::new(|| {})).unwrap();
+    let (r, _w) = std::io::pipe().unwrap();
+    let carried = client.begin(
+        Call::Exec {
+            id: BoxId::new("b").unwrap(),
+            program: Program::of(&["cat"]),
+            streams: wire::Streams::default(),
+        },
+        Stdio {
+            stdin: Some(r),
+            ..Stdio::null()
+        },
+        Box::new(|_, _| {}),
+        Box::new(|_| {}),
+    );
+    assert!(
+        matches!(&carried, Err(Refusal::Invalid { what: "stdio", .. })),
+        "{carried:?}"
+    );
+    client
+        .begin(
+            Call::Inspect(BoxId::new("b").unwrap()),
+            Stdio::null(),
+            Box::new(|_, _| {}),
+            Box::new(|_| {}),
+        )
+        .unwrap();
+    assert_eq!(
+        agent.join().unwrap(),
+        Request::Call(Call::Inspect(BoxId::new("b").unwrap()))
+    );
 }

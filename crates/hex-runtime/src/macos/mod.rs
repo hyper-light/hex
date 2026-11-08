@@ -114,6 +114,33 @@ impl MacRuntime {
         }
     }
 
+    /// Box `id`'s process group and its leader's start time, once its first member has started: what names
+    /// its members after the node is gone, for the node's record (native plan step 8, T-T7.1.2).
+    pub fn group(&self, id: &BoxId) -> Result<Option<(i32, u64)>, Refusal> {
+        self.get(id)?.group()
+    }
+
+    /// Takes back box `spec` after the node was gone, on `group` where it is still the box's
+    /// ([`ProcessBox::adopt`]).
+    pub fn adopt(&self, spec: &BoxSpec, group: Option<(i32, u64)>) -> Result<(), Refusal> {
+        let mut boxes = self.boxes()?;
+        if boxes.contains_key(&spec.id) {
+            return Err(Refusal::Exists(spec.id.clone()));
+        }
+        let b = ProcessBox::adopt(spec.id.clone(), &spec.bounds, self.shared.as_ref(), group)?;
+        boxes.insert(spec.id.clone(), Arc::new(b));
+        Ok(())
+    }
+
+    /// Ends what still runs of a box the node's recovery removes, named by `group`
+    /// ([`process::end_group`]).
+    pub fn end(group: Option<(i32, u64)>) -> Result<(), Refusal> {
+        match group {
+            Some((pgid, started)) => process::end_group(pgid, started),
+            None => Ok(()),
+        }
+    }
+
     fn boxes(
         &self,
     ) -> Result<std::sync::MutexGuard<'_, BTreeMap<BoxId, Arc<ProcessBox>>>, Refusal> {
@@ -294,7 +321,13 @@ impl Runtime for MacRuntime {
         })
     }
 
-    fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+    /// Streams asked for are made as pipes, the program's ends its stdio, the caller's held by its `Proc`.
+    fn exec(
+        &self,
+        id: &BoxId,
+        program: Program,
+        mut stdio: Stdio,
+    ) -> Result<Box<dyn Proc>, Refusal> {
         program.fits(&self.exec_limit)?;
         if let Some(bu) = &self.helper {
             program.check()?;
@@ -305,19 +338,19 @@ impl Runtime for MacRuntime {
                         .to_owned(),
                 });
             }
+            let given = stdio.make_asked()?;
             let pid = bu.exec(id, &program, stdio_fds(stdio)?)?;
-            return Ok(Box::new(proc::UserProc::watch(
-                pid,
-                id.clone(),
-                Arc::clone(&bu.helper),
-            )?));
+            let proc = proc::UserProc::watch(pid, id.clone(), Arc::clone(&bu.helper))?;
+            return Ok(Box::new(hex_api::Asked::new(proc, given)));
         }
+        let given = stdio.make_asked()?;
         let b = self.get(id)?;
         // The box's whole memory bound arms each member with a fatal per-process cap (native plan step 1's
         // `_ext` backstop); the box tracks which members carry it.
         let spawn = build_spawn(&program, stdio, b.bounds().memory_max)?;
         let pid = b.exec(spawn)?;
-        Ok(Box::new(proc::BoxProc::watch(pid, Some(b.members()))?))
+        let proc = proc::BoxProc::watch(pid, Some(b.members()))?;
+        Ok(Box::new(hex_api::Asked::new(proc, given)))
     }
 
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {

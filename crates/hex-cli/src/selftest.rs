@@ -7,6 +7,9 @@
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 
+#[cfg(target_os = "linux")]
+mod tree;
+
 /// Memory taken per chunk while growing, so a box's bound kills the act partway, not after a single
 /// huge allocation the allocator might refuse first.
 const CHUNK: usize = 1 << 20;
@@ -91,6 +94,16 @@ pub fn run(argv: &[String]) -> Option<u8> {
                 .unwrap_or(0),
         )),
         "echo" => Some(echo()),
+        // tree <dir> | tree --layers <lowest>:...: a manifest of everything under `dir`, or in the overlay
+        // of a box's layers, for HEX-GUEST-21's comparison of a staged root with containerd's unpack of
+        // the same image (selftest/tree.rs).
+        #[cfg(target_os = "linux")]
+        "tree" => Some(tree::tree(args)),
+        // room <dir>: the bytes free to an unprivileged writer on `dir`'s file system (statvfs(3),
+        // `f_bavail` × `f_frsize`), for HEX-GUEST-21 to size its guest by what the guest's staged folder
+        // really holds, not by half its memory.
+        #[cfg(target_os = "linux")]
+        "room" => Some(room(args.first().map(String::as_str).unwrap_or(""))),
         // fsync-probe <file> <iters>: the noisy-neighbour victim — times fsync over small writes
         // and prints "p50_us=<n> p99_us=<n>" (AC-T7.1.2).
         "fsync-probe" => Some(fsync_probe(
@@ -164,6 +177,26 @@ fn write_probe(path: &str) -> u8 {
             1
         }
     }
+}
+
+/// Prints `bytes=<n>`, what `dir`'s file system has free to an unprivileged writer; 1 when it can't be read.
+#[cfg(target_os = "linux")]
+fn room(dir: &str) -> u8 {
+    let Ok(st) = rustix::fs::statvfs(dir) else {
+        let _ = writeln!(std::io::stderr(), "room: can't read {dir}'s file system");
+        return 1;
+    };
+    let Some(bytes) = st.f_bavail.checked_mul(st.f_frsize) else {
+        let _ = writeln!(std::io::stderr(), "room: {dir}'s free bytes pass u64");
+        return 1;
+    };
+    u8::from(
+        write_all(
+            &mut std::io::stdout(),
+            format!("bytes={bytes}\n").as_bytes(),
+        )
+        .is_err(),
+    )
 }
 
 /// Windows: a child started with `CREATE_BREAKAWAY_FROM_JOB` from inside a job that forbids breakaway.

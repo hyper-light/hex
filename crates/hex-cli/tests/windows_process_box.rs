@@ -213,7 +213,8 @@ fn a_windows_image_stays_the_hosts_and_a_linux_image_goes_to_the_guest() {
         runtime(),
         GuestRuntime::new(Arc::new(guests), config),
         WinRuntime::oci_side,
-    );
+    )
+    .unwrap();
     let bundle = |name: &str, config: serde_json::Value| {
         let dir = root.path().join(name);
         std::fs::create_dir_all(dir.join("rootfs")).unwrap();

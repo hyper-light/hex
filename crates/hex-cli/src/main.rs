@@ -32,6 +32,15 @@ fn main() -> ExitCode {
     {
         return ExitCode::from(hex_runtime::windows::oci::launch::serve());
     }
+    // `hex node --socket …` serves the Runtime seam on the node agent's local socket.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let [Some(first), rest @ ..] = args.as_slice()
+        && first == "node"
+        && rest.iter().all(Option::is_some)
+    {
+        let rest: Vec<String> = rest.iter().flatten().cloned().collect();
+        return ExitCode::from(hex_cli::node::main(&rest));
+    }
     // The `oci` class's command line and its re-exec'd container init (Linux only).
     #[cfg(target_os = "linux")]
     if let [Some(first), rest @ ..] = args.as_slice()
@@ -49,11 +58,6 @@ fn main() -> ExitCode {
         if first == "oci" {
             let rest: Vec<String> = rest.iter().flatten().cloned().collect();
             return ExitCode::from(hex_cli::oci::main(&rest));
-        }
-        // `hex node --socket …` serves the Runtime seam on the node agent's local socket.
-        if first == "node" {
-            let rest: Vec<String> = rest.iter().flatten().cloned().collect();
-            return ExitCode::from(hex_cli::node::main(&rest));
         }
         // `hex guest relay …` relays a Shards guest's vsock to its node agent's socket.
         if first == "guest" {

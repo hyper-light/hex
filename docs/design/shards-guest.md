@@ -101,8 +101,14 @@ The node agent's socket is `SOCK_SEQPACKET` and carries an exec's stdio as `SCM_
   connection's own. The node takes only a
   pipe's end as a program's stream (`crates/hex-node/src/serve.rs:1208`: "the right end of a pipe, as the
   seam's `Stdio` holds; anything else is refused by name"), so the relay makes a pipe per stream, passes its end
-  to the node with the exec, and copies between the pipe and the vsock connection; on the host, the client
-  copies between the caller's pipes and its connections. One bounded buffer per stream on each side.
+  to the node with the exec, and copies between the pipe and the vsock connection. On the host (native plan step
+  8, the lead's ruling of 2026-11-08), a stream the caller asks for (`Stdio::ask`) is that connection itself: the
+  caller holds its socket and no byte is copied on the host. A pipe the caller gives of its own is copied between
+  it and the connection in the caller's process, one bounded buffer per stream: by the guest client in process,
+  or, through the host node's socket, by the caller's socket client, to which the node gives the connection's end
+  with the exec's answer (wire version 3's `Given`). The node copies no stream and keeps none of the caller's
+  pipes; a client of an earlier wire version carrying pipes to a guest's program is refused before the guest is
+  sent anything.
 - **In the guest**, a relay (`hex guest relay`) accepts the host's vsock connections and speaks the node's own
   socket, one node connection per host control connection, so the node, its wire and its disconnect rule stay
   as they are (CLAUDE.md §8). Its framing, stream names and gathering of an exec's streams are a sans-IO core
@@ -113,6 +119,43 @@ The node agent's socket is `SOCK_SEQPACKET` and carries an exec's stdio as `SCM_
   stdio connections that never name an exec within the answer patience are closed with a typed refusal logged on
   `hex.guest` (`event = "stdio_unnamed"`). Shards' muxer holds at most 1023 connections (`muxer.rs:42`), so a
   node's concurrent execs are bounded below that, and the next is refused by name.
+
+### 3a. The channel's formats and ports
+
+These define the channel; they are its specification, not tuning, and the code takes each from here (Ada's
+rule, 2026-11-06: each constant learned, measured or a cited limit; these are the last).
+
+**Ports.** vsock(7) gives a port as a `u32` (`svm_port`); ports below 1024 are privileged ("Only a process
+with the `CAP_NET_BIND_SERVICE` capability may bind to these port numbers"), and `VMADDR_PORT_ANY`
+(`-1U`) is reserved. Firecracker's hybrid vsock, which Shards' muxer speaks, names the port in decimal on its
+`CONNECT <port>` line (firecracker `docs/vsock.md`, "Host-Initiated Connections"), any `u32`. Hex assigns its
+ports above 1024, below `VMADDR_PORT_ANY`, each spelling `HEX` and its number so a capture reads them:
+
+| port | value | carries |
+|---|---|---|
+| `CONTROL_PORT` | `0x4845_5800` | a control connection: the relay's token, then framed wire messages |
+| `STDIO_PORT` | `0x4845_5801` | one stdio stream of one exec, named by its first `NAME_BYTES` |
+| `FILES_PORT` | `0x4845_5802` | a staging or removal connection (§4a) |
+| `STAMPS_PORT` | `0x4845_5803` | the boot's own stamps, one line, then closed (bench/native/guest/boot-split) |
+
+**Control.** A connection opens with the relay's token, then carries frames:
+
+| field | bytes | encoding |
+|---|---|---|
+| token (`TOKEN_BYTES`) | 8 | `u64`, little-endian as the wire's integers |
+| frame prefix (`PREFIX`) | 4 | the message's length, `u32` big-endian, at most the reader's bound |
+| frame body | the prefix's | one `hex_core::wire` message |
+
+**Stdio name** (`NAME_BYTES` = 24, the sum below):
+
+| field | bytes | value |
+|---|---|---|
+| magic | 4 | `HEXS` |
+| version | 2 | `u16` little-endian, 1; changes append-only |
+| stream | 1 | stdin 0, stdout 1, stderr 2 |
+| zero | 1 | 0 |
+| control connection's token | 8 | `u64` little-endian |
+| exec's request id | 8 | `u64` little-endian |
 
 ## 4. The guest image
 
@@ -141,6 +184,13 @@ The node agent's socket is `SOCK_SEQPACKET` and carries an exec's stdio as `SCM_
     the runtime chose glibc to avoid. Falsified, and replaced by the from-source glibc build, if the guest's
     `oci` create-to-start or exec measures slower with the musl `hex` than with a static-glibc `hex` on the same
     guest kernel.
+
+**Stopping the guest.** `GuestRuntime` ends its guest with shards_api's `stop()`, an immediate end of the VM
+process. Shards' VMM has no host-to-guest power-off: it follows only a guest that powers itself off, so a SIGTERM
+would change nothing. A kill loses what the guest held in its page cache for a writable disk. Hex's guest has
+none: its state, its boxes' records and their staged layers are all on its tmpfs and go with it by design, and
+its shares are the host's own directories over virtio-fs, which init mounts without its `writeback` option, so
+a write reaches the host's file before it returns. So an immediate kill loses nothing Hex keeps.
 
 ## 4a. Host paths: the bundle and rootfs copied in, bind mounts through Shards' shares
 
@@ -187,11 +237,11 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
   silent corruption (CLAUDE.md §3). So on Windows a directory root is refused by name (`Refusal::Platform`), pointing
   at the tarball form; on macOS and Linux, whose file systems keep both, a directory stays a root. OCI image layers
   are tarballs to begin with. The archive is read flat, one entry at a time, within the stage's bounds (entries,
-  bytes, path length); an absolute name or a `..` component, a device, FIFO or socket entry, an entry before its
-  directory, a corrupt or truncated archive (a gzip stream whose CRC or length doesn't match, an archive ending
-  mid-entry) are refused by name. A hard link is refused by name too: none of the lab's inputs or runtime-tools holds
-  one (`tar -tv` on each, 2026-11-06), so nothing needs it; falsified, and staged as a copy of an earlier entry, when
-  a root that must run does.
+  bytes, path length); an absolute name or a `..` component, a device, FIFO or socket entry, a corrupt or
+  truncated archive (a gzip stream whose CRC or length doesn't match, an archive ending mid-entry) are refused by
+  name. A hard link was refused by name too, since none of the lab's inputs holds one; that was falsified the same day
+  by real images (below) and is superseded by what a tarball root carries. So was an entry before its directory,
+  superseded by containerd's `mkparent` (below).
   - **The reader is the `tar` crate**, 0.4.46 from crates.io (alexcrichton's tar-rs), already a workspace
     dependency (`Cargo.toml:40`), used as it is rather than a reader of Hex's own; not vendored, since Hex changes
     nothing in it (CLAUDE.md "Vendoring"). Hex's checks wrap what it yields, and every hostile-input test runs
@@ -205,18 +255,191 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
     `EntryFields::read_all`, called at `src/archive.rs:418,429,440`), so a few MB of gzip can make it buffer
     gigabytes. tar-rs leaves bounding the stream to its callers, so this is no bug to patch, vendor or report;
     Hex bounds it. A global PAX record (`g`) is read within the same 64 KiB and may set only keys staging doesn't
-    carry, so can't get wrong: `mtime`, `atime`, `ctime`, `uid`, `gid`, `uname`, `gname`, `comment`, `charset`,
-    `hdrcharset` (staging carries a mode and a link text, never times, owners or names, and a root's texts are
-    UTF-8 either way); any other key (`path`, `linkpath`, `size`, sparse keys, one Hex doesn't know) would apply to
+    carry, so can't get wrong: `atime`, `ctime`, `uname`, `gname`, `comment`, `charset`, `hdrcharset` (a global
+    atime is left unapplied, as Go's archive/tar leaves it for containerd, never ctime (the kernel's), ignores owner names for numeric ids, and a root's texts are
+    UTF-8 either way; `uid`, `gid` and `mtime` left the list when staging began carrying them, below); any other key (`path`, `linkpath`, `size`, sparse keys, one Hex doesn't know) would apply to
     every later entry, and is refused by name, never ignored (CLAUDE.md §3); a key on neither list is refused naming
     it, so a real archive that meets one shows exactly what to weigh before it is added. `git archive`'s tarballs,
-    which begin with a global record holding only `comment=<commit>`, stage with every entry exact (a real one,
-    git 2.56.0, is the test's fixture: `crates/hex-client/src/guest/stage/fixtures/git-archive.tar`). Refused by name: an entry written through one of the archive's own symbolic
-    links (whatever its text, which stays legal: a root's absolute links resolve inside it when used), a PAX
+    which begin with a global record holding only `comment=<commit>`, stage with every entry exact (the test makes
+    one with the host's own `git`, `.tar` and `.tar.gz`; every host the gates run on has git). Refused by name: a PAX
     `size` (a file past a header's 8 GiB), sparse entries (GNU `S` and PAX `GNU.sparse.*`, which none of the
-    roots it serves holds: `tar -tv`), and an extension record with no entry after it. The tests that pin this
-    handling are `crates/hex-client/src/guest/stage/tar_tests.rs` and the relay's end-to-end
-    `a_tarball_writing_through_its_own_link_is_refused_end_to_end_and_leaves_nothing` (HEX-GUEST-14, -15).
+    roots it serves holds: `tar -tv`), and an extension record with no entry after it. An entry written through
+    one of the archive's own symbolic links was refused too, until the lead's ruling of 2026-11-06 (below): it
+    is now resolved within the root, as containerd does. The tests that pin this handling are
+    `crates/hex-client/src/guest/stage/tar_tests.rs` and the relay's end-to-end tests in
+    `crates/hex-node/src/relay/tests.rs` (HEX-GUEST-14, -15).
+- **A tarball root carries what Linux's own unpack holds** (amended 2026-11-06, the lead's call): owners, times,
+  extended attributes and hard links, not only a path, a mode and a link text. The evidence
+  (`docs/research/runtime/shards-guest.md` §9, six public images pinned by digest): every image but alpine has hard
+  links (debian's and ubuntu's perl-base ship `usr/bin/perl` and `perl5.x` as one inode; fedora:44 has 551 groups),
+  grafana has 16,280 entries owned by 1000:1000 or 472:0, the shadow group owns `etc/shadow` in debian, ubuntu and
+  alpine, and caddy's binary holds `security.capability`. Dropping them would make every non-root image's files
+  root's and copies of hard links, and strip capabilities; refusing them would refuse nearly every image. So:
+  - **The staging stream's entry carries** (version 2, the stream's only version: version 1 was never released,
+    the host's packer and the guest's relay ship from one tree in one image, so a version-1 opening is refused by
+    name, never read; the stream changes append-only from its first release): a numeric uid and gid (names
+    ignored, as containerd does: the layers carry none), an mtime and atime (seconds and nanoseconds), extended
+    attributes (name, value), a hard-link kind whose target is an earlier entry of the same root, a regular file or
+    a link (below), named as a staged path is and refused if it names its way out, a later or missing entry, or a
+    directory, and the layer, whiteout and opaque kinds (below). Bounds (CLAUDE.md §2), Linux's own
+    (include/uapi/linux/limits.h): a name at most `XATTR_NAME_MAX` (255 bytes), a value at most `XATTR_SIZE_MAX` (64
+    KiB), an entry's names together, each with its NUL, at most `XATTR_LIST_MAX` (64 KiB); the xattr bytes spend the
+    stage's byte budget, learned from the staged folder's free space when the stage opens; a link target within the
+    path bound.
+  - **Where they come from:** the tar header's uid, gid and mtime, or PAX `uid`, `gid`, `mtime` past what a header
+    holds; xattrs from PAX `SCHILY.xattr.*` and `LIBARCHIVE.xattr.*` (base64 there). Every xattr in a Linux namespace
+    (`security.`, `system.`, `trusted.`, `user.`) is carried; one in no Linux namespace (`com.apple.*`, from macOS
+    bsdtar) can't exist on Linux, so not carrying it loses nothing Linux's unpack would hold, and is stated, not
+    refused. A global PAX record setting `uid`, `gid` or `mtime` would now change what's staged, so those leave the
+    global record's allowed keys and are refused by name there.
+  - **The relay applies them in Linux's order** for each entry, since a chown and a write each clear setuid, setgid and
+    `security.capability`: contents written and closed, then the owner (`fchownat` with `AT_SYMLINK_NOFOLLOW`), the
+    mode, the xattrs, and last the times (`utimensat` with `AT_SYMLINK_NOFOLLOW`, atime as below). A directory's are
+    applied when its layer ends, deepest first, after everything in it, so writing its children doesn't move its
+    mtime. A hard link is `linkat` from the target's directory, resolved as an entry's parent is (below). An xattr the guest refuses to set is refused by name. All through rustix's safe
+    wrappers; no new `unsafe`.
+  - **User namespaces:** the ids are staged as the image holds them, as Linux's unpack stores them; mapping them for a
+    box in a user namespace is the runtime's, as on any Linux host.
+  - **atime** is the later of the archive's atime and mtime, as containerd's unpack sets it (`pkg/archive/tar.go:335,
+    445` at containerd v2.3.6, `ee273536`): the entry's metadata carries it beside mtime.
+  - **A multi-layer image's layers live once each in the guest's layer store, by digest** (the lead's call,
+    2026-11-06: it replaces staging a box's whole root at every create, in the same change, with no fallback;
+    after HEX-GUEST-22's first records, the lead's rule that it be no worse than whole-root staging in every
+    regime, with room or under pressure). The guest's staged folder holds `.layers/<sha256 of the layer's blob>`
+    (a box id never starts with '.'), one folder a layer, applied once as containerd's overlay snapshotter
+    applies a layer into its own upper directory (below). A box names its root's layers `<staged>/<box
+    id>/layers/<i>`, lowest first: each a link to the store's folder, or, where the store had no room or the
+    layer's digest isn't known, the layer itself, staged into the box as whole-root staging staged it. Its
+    overlay mounts those as its lower layers, as a Linux host does (`hex_core::bundle`'s overlay, lowest
+    first; overlayfs follows the links), so an `OciSpec`'s `Rootfs::Layers` of tarballs reaches the guest as
+    `Rootfs::Layers` of those paths whichever each is.
+    - **Why a store, not a fix elsewhere** (Ada's rule: fix the fault, don't hide it behind a cache): the
+      fault is that a macOS or Windows host can't keep a Linux layer faithfully where the guest could read it
+      in place (APFS folds case and normalization, NTFS keeps no Linux modes or owners), so the guest copies
+      every layer. The store makes that copy once per digest, content-addressed, verified as it's admitted,
+      and evicted by the room it learns. Its worth and what would falsify it (a no-copy path, per-layer EROFS
+      images over a read-only share, measured against it) are `bench/native/guest/create-life/RECORD.md`,
+      "Why a store, under Ada's rule".
+    - **What's sent:** a layer is named by its digest without being read: by its blob's name as its image
+      keeps it (`…/sha256/<hex>`, an OCI image layout's `blobs/<alg>/<encoded>`, image-spec
+      `image-layout.md`, "Blobs", and containerd's content store's alike), or by a digest the host learned
+      when it last crossed. Any other tarball whole-root staging took (`docker save`'s `<id>/layer.tar`) is
+      staged with no digest, into the box, hashed as it crosses, and its digest kept with its file's identity
+      (on Unix its device, inode, size, and modification and change times; stat(2)), for the next create to
+      name it by; one whose identity has changed is hashed again, never trusted. The host keeps at most one
+      such digest per layer the guest's store can hold (its inodes, from the stage's budget), the least
+      recently used going first. The opening names each layer's digest or none; the relay answers with the
+      stage's budget and which layers it holds; the packer sends only those it lacks, each after a layer
+      marker, reading each as gzip or uncompressed by its own magic (containerd's `DetectCompression`; zstd,
+      which whole-root staging never took either, is refused by name, an open gap), hashing its bytes as they
+      cross, and refusing a named one, before the next layer's marker or the stage's end that would let the
+      relay keep it, unless they are its digest. Only a stage that may admit checks: the relay says at its
+      opening whether the store may admit any of its layers (`admitting`, the room a stage needs is free),
+      and one that may not stages them all into the box, never cached, as whole-root staging did, unchecked
+      (the check cost alpine 1 ms and caddy 6 ms a create under pressure); a layer whose digest is being
+      learned is hashed either way. A layer the guest holds costs a create its digest alone, never
+      a read: HEX-GUEST-22's first record had the host hash every tarball at every create, about 0.9 s of a
+      grafana create (480 MB of blobs at 500-560 MB/s on a Mac Studio, sha2 0.10.9), the lead's rule after it.
+    - **Admission, eviction only as a last resort:** the store admits a layer only into room already free: it
+      leaves free the most entries and bytes one stage has taken of the file system (`.layers/.need`, the drop
+      in its free room across a stage, learned at each stage's end, rising only), and no more: leaving room
+      for a stage as large as the one under way too (0edcefd) held the cache to half the room, and with room
+      for every image grafana never cached whole. A guest's first stage, nothing learned, is admitted whole;
+      a next create it crowds is the last resort's, below, once. What's
+      free is the file system's own count (fstatvfs(2), read again only once what a stage has charged since
+      the last read reaches half the margin that read left over the room learned, or no margin is left: 515
+      entries read it at most 3 times, not 517, which had cost alpine's create 1.1 ms), and an entry is
+      charged its bytes in whole blocks: a tmpfs charges whole pages a file, so counting bytes undercounted grafana's 17834 entries
+      and its create hit `ENOSPC`. A layer that would cut into that room, even part way, goes into the box
+      instead (a partial folder is renamed into it), and so does every later layer of its stage, so a
+      create's worst case is whole-root staging's own. A stage larger than any yet can still find the cache
+      holding the room it needs, before the room learned has caught up: then, and only on `ENOSPC`, it takes
+      the least recently used unreferenced layer on its own path and tries again (the lead's rule: a create
+      never fails where whole-root staging would have staged it); that stage raises the room learned, so it
+      happens once per new largest stage.
+      HEX-GUEST-22's second record showed why: with eviction on the create's path (least recently used, on
+      `ENOSPC`), a guest whose store couldn't hold its three images evicted a peer's layers at every create,
+      and alpine's create took 52 ms against whole-root staging's 30 (LRU's loop on a working set past its
+      cache).
+    - **Applying a layer:** within its own folder, by containerd's rules (`applyNaive`, `pkg/archive/tar.go:161-340`
+      at v2.3.6) with its overlay conversion: a layer's entry replaces what this layer put at its path, except a
+      directory onto a directory, which merges and takes the later header's owner, mode, xattrs and times
+      (`:304-311`); `.wh.<name>` becomes overlayfs's whiteout, a character device 0/0, and `.wh..wh..opq` its
+      opaque directory, the xattr `trusted.overlay.opaque` = `y` (`user.overlay.opaque` where the relay runs
+      unprivileged, as such a node mounts with `userxattr`) (containerd's `OverlayConvertWhiteout`;
+      Documentation/filesystems/overlayfs.rst, "Whiteouts and opaque directories"); a directory's mode and times
+      are its latest header's, set when its layer ends, after everything in it (`:330-337`). One staging can't
+      apply is refused by name. At most 500 layers (`hex_core::bundle::MAX_LAYERS`, overlayfs's `OVL_MAX_STACK`).
+    - **Crash safety:** a layer is staged into `.layers/.partial-<relay pid>-<n>-<digest>` and renamed to its
+      digest only once whole, so a stage cut or crashed mid-layer leaves nothing that counts as held; a partial
+      another relay process left, and a layer it was evicting (`.gone-<pid>-<n>`), is removed when a stage
+      opens, and what this process left with its stage.
+    - **The budget:** the relay answers a stage's opening with what its staged folder's file system has free
+      (statvfs(3)), with what the layers no box names hold (their size files), which its last resort can
+      take, so the packer never refuses a stage whole-root staging would have staged (it did, alpine's, at
+      8232a8f, with 5 MiB free and the cache holding hundreds), and both sides spend against it: free inodes for entries, bytes free to an unprivileged
+      writer for file and xattr bytes; inodes in use bound what a removal visits, and its inodes how many
+      layers its store can hold. A file system that keeps no inode count (btrfs: statfs(2), "fields that are
+      undefined for a particular filesystem are set to 0") bounds entries by its bytes instead, free, in use
+      and in all, since every entry takes at least one byte of it: fedora's btrfs `/home` refused every stage as
+      "entries in one stage, bound 0" before this.
+    - **References, and eviction only on the path of a stage out of room:** a box's record, `<staged>/<box
+      id>/.layers`, names its layers, written when its stage opens under the store's lock (flock(2) on
+      `.layers/.lock`), so no eviction takes a layer it counted as held; removing the box removes its record.
+      A layer no record names becomes evictable and stays, a cache for the next create. Nothing takes it but
+      a stage that runs out of room (`ENOSPC`, above): the least recently used unreferenced layer (its
+      folder's mtime, set at each use) is taken out of the store under the lock (renamed to `.gone-…`, its
+      size file with it), then removed under a lock of its own, until the stage fits. A stage that goes into
+      the box takes nothing. A reclaimer that, after a stage bypassed the store, freed what the bypass held
+      was built and measured and dropped (the lead's call, 2026-11-07): under pressure it took cached layers
+      that would have been hits for layers never admitted, and grafana's create took 4,483 ms with it against
+      2,629 without (HEX-GUEST-22, 2x, launchd hex.ns5route.g22diag.20261107T003038Z). A layer being removed
+      still counts in a stage's budget, and a stage out of room with no layer left to take waits for that
+      removal (or finishes one whose remover ended), rather than refusing: at d51a4da grafana's create was
+      refused while one ran, its room neither free nor counted. A stage takes the store's lock at its
+      opening, and again only to raise the room learned.
+    - **One copy roots:** a bundle's `root.path` and a `Rootfs::Dir` are one directory its container writes into,
+      not an overlay, so a tarball given for one is applied in place, into the box's own folder, as one layer
+      with nothing below; a directory root (macOS, Linux) is copied as it is. Neither is a layered image's root.
+  - **A layer applies as containerd's overlay applier applies it** (the lead's ruling, 2026-11-06, after ctr's
+    snapshot): with the overlayfs snapshotter (ctr's and Docker's default) containerd unpacks each layer into the
+    snapshot's upper directory alone, the layers below given only as `WithParents`
+    (`core/diff/apply/apply_linux.go:36-55` at v2.3.6), not onto the full root as the native snapshotter does; Hex
+    follows overlay, the unpack every overlayfs Linux host makes. So, by `fs.RootPath` in that directory
+    (`pkg/archive/tar.go:268-270`):
+    - a link **this layer made** is followed, inside the root (an absolute link or a `..` stays in it): `a` →
+      `/etc` then `a/x` lands at the root's `etc/x`, never the guest's;
+    - an **earlier layer's** link or file in a path isn't in that directory, so mkparent makes a directory there
+      (`:448-503`), copying the owner, mode, atime and mtime and every xattr but `trusted.*` of what the name
+      resolves to below when that is a directory (`:482-500`; `copyDirInfo`, `copyUpXAttrs`,
+      `tar_unix.go:143-203`), else 0755; in the merged view it replaces the link or file. So `bin` → `usr/bin`
+      in one layer and `bin/tool` in the next makes `bin` a directory holding `tool`, with `usr/bin`'s
+      attributes, and `usr/bin` unchanged (the lead's first example, `usr/bin/tool`, was the native
+      snapshotter's result, not overlay's);
+    - a **parent no layer made** is made the same way: `mkdir` 0755 then an explicit chmod past the umask
+      (`tar_unix.go:90-97`), owned by the relay (root in the guest, as containerd's unpack runs), timed when made;
+    - a **hard link** names what this layer made (`hardlinkRootPath` in the upper directory, `:795-807`): a
+      regular file or a link itself, unfollowed, as containerd's `link` (os.Link, `:386-394`); one to an earlier
+      layer's file, a directory or nothing is refused by name, as overlay's unpack fails it (ENOENT, EPERM).
+    ctr's own snapshots hold each of these (`bench/native/guest-tree`: lab:tree, lab:file; lab:hardlink's unpack
+    fails, "link …/q …/h: no such file or directory"). The relay walks a layer's path a component at a time,
+    each opened `O_NOFOLLOW`, following only links this layer made, at most 40 (Linux's `MAXSYMLINKS`);
+    rustix's safe calls, no `unsafe`. One approximation, stated: the attributes copied are those of what the
+    name resolves to in the merged root below, where containerd resolves it in each lower layer alone; the two
+    differ only when a link and its target directory come from different layers. Outside a layer (a directory
+    root's walk, a bundle's `config.json`) a name resolves through no link, which a host walk never writes
+    through.
+  - **One difference from containerd, stated:** a literal absolute name or a `..` component, of an entry or a
+    hard link's target, is refused by name, where containerd clamps it to the root (`filepath.Clean`, then
+    `RootPath`): a layer a Docker or BuildKit build writes never holds one, and one that does is hostile or
+    broken. Falsified the day a real image holds one, which HEX-GUEST-21 would show.
+  - **HEX-GUEST-21** stages each image as a tarball root in a real guest and compares it, entry by entry, with
+    ctr's own snapshot of the same layers on Linux (`bench/native/guest-tree`). Its stated differences, and no
+    others: atime; the root directory itself; the mtime of directories mkparent made or made a child in (both
+    sides stamp them when the unpack runs); and security.selinux labels the host assigned, which the image's
+    layers don't carry.
+  - A directory root (a `Path` source) carries none of these: a host directory holds no Linux owners (and on Windows
+    is refused, above).
 - A non-bind mount (`proc`, `tmpfs`, …) names no host path and passes unchanged; hooks run in the guest's runtime
   namespace, so their paths are the guest's.
 
@@ -318,6 +541,48 @@ Hex's tests of the channel, each citing its ID:
 - HEX-GUEST-20: the OCI runtime-spec validation in the guest (§6a): the host's node boots the guest, makes the lab
   and runs `inside.sh` in it through the seam; each test's result matches the Linux record's
   (`crates/hex-cli/tests/guest_validation.rs`, run where its inputs are set, skipped elsewhere).
+- HEX-GUEST-30: §3a's tables are the code's: each port, the token and prefix widths, and the stdio name's
+  fields summing to `NAME_BYTES` (`hex_core::stream`'s tests, a doc-truth test).
+- HEX-GUEST-31: init reads mountinfo to its end, a line at a time, so a root listed past any fixed cut is still
+  the one read (`hex guest`).
+- HEX-GUEST-32: an exec's stdio connections carry no send bound, as a local exec's stdin is the caller's own
+  pipe; only the control connection is bounded, as the local client's socket is (`hex_client::guest`).
+- HEX-GUEST-33: the first dial to a booted guest is given the caller's bound on the boot; each later dial is one
+  try (`hex_client::guest::shards::ShardsLink`).
+- HEX-GUEST-34: a boot's first dial is bounded, never unbounded: twice the slowest boot to ready on record before
+  any boot is seen (bench/native/guest/boot-ready/RECORD.md), then twice the slowest of the record's and the
+  node's own, only rising; a guest alive and not ready within it is stopped, counted and booted once more, and
+  only a second hang refuses its caller, by type (`hex_runtime::guest::GuestRuntime`).
+- HEX-GUEST-35: the OCI validation reads its lab's end again after waiting as long as the last read took (step 7's
+  learned re-read), no picked interval (`crates/hex-cli/tests/guest_validation.rs`).
+- HEX-GUEST-36: the relay moves an exec's stdio by splice(2) through its pipe, both ways, so no byte passes through
+  user space (vsock's `splice_read` is the kernel's `copy_splice_read`): 1 MiB through `cat` leaves the relay
+  reading only each stream's name and writing nothing (`hex_node::relay`).
+- HEX-GUEST-37: the guest reports its boot's own stamps on `STAMPS_PORT`: `CLOCK_BOOTTIME` at init's first entry
+  (carried across its re-exec), its mounts, its node ready and its relay listening, which split a boot
+  (bench/native/guest/boot-split) (`hex guest`).
+- HEX-GUEST-38: init mounts cgroup2 alone with RCU's grace periods expedited (`/sys/kernel/rcu_expedited`, after
+  sysfs), as the kernel expedites them until it starts init: its first mount otherwise waits out grace periods, about
+  20 ms of an HVF boot (`hex guest`).
+- HEX-GUEST-39: the node boots its guest when it is made, before it accepts a box (`WithGuest::new`, which a guest
+  that can't boot refuses by type; where Shards has no backend the node is made and its `oci` class refused at
+  create, §5), so no create pays a boot. An upgrade's first boot costs 1.5-5.3 s of the host's first-run checks of
+  its new code before the guest's kernel runs, against a warm boot's 0.17 s; one boot absorbs it whole, for every
+  later process too (bench/native/guest/boot-ready/RECORD.md, the under-load record: every series' second boot
+  is warm). The lead's choice of 2026-11-07 over a throwaway boot at start: fewer boots, one path, latency first.
+- HEX-GUEST-40: on each create (a stat, no polling) the node compares the Shards binary's identity with the one its
+  running guest booted. If it changed, one throwaway guest boots on it in the background, at Shards' least memory
+  with no shares, and stops, so the node's next boot is warm; at most one is in flight, a binary is warmed once,
+  and the running guest is never booted again for it, which would end its boxes (`GuestRuntime`).
+- HEX-GUEST-41: a guest program's streams through the host node's socket are the guest's own stdio connections,
+  whose ends ride the exec's answer to the caller's client: asked for, they are the caller's; given as the
+  caller's own pipes, the client copies between them, and the node keeps none of the caller's pipes; a client of
+  wire version 2 carrying pipes is refused before the guest is sent anything (`crates/hex-node/tests/guest_loop.rs`,
+  over a stand-in guest whose programs' pids name no host process; `hex_client`'s Linux tests, the client's copy).
+- HEX-GUEST-42: the conformance suite on `oci` boxes through a host node's socket served over
+  `Recorded<WithGuest<…>>`, as the macOS and Windows nodes serve their guests, HEX-GUEST-18's simulated guest
+  behind it: the guest reached from the host's node through the seam (native plan step 5), both stdio forms
+  among its cases (`crates/hex-cli/tests/node_socket.rs`).
 
 ## 7. What would falsify it
 
@@ -326,6 +591,9 @@ Hex's tests of the channel, each citing its ID:
 - Shards' owner choosing another seam (§2): the routing (§1) and channel (§3) stand; the implementation changes.
 - A copy per stdio byte in the relay measurably slowing a program's output against a Linux host's: then the relay
   splices (`splice(2)`) between the socket and the pipe instead of copying.
+- The caller's client's copy, for a guest program's stream it gives as its own pipe, measurably slowing the
+  program's output against the same stream asked for (the connection's own end, no host copy): then the client
+  copies by splice(2) where the host has it, as the relay does.
 - The guest's interpreted BPF (`CONFIG_BPF_JIT` unset) making a device check measurably slower than the bar: then
   the guest kernel adds the JIT, with Shards.
 

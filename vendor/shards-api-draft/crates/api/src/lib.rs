@@ -107,6 +107,56 @@ pub enum End {
     Failed(String),
 }
 
+/// Bounds seeded from records of a host class's own runs: macOS-HVF, Linux-KVM and
+/// Windows-WHP are recorded apart, chosen as this crate is built, and a class with no record
+/// yet has no bound, but the [`Pending`](record::Pending) record it waits on.
+pub mod record {
+    /// This host's class.
+    pub const CLASS: &str = if cfg!(target_os = "macos") {
+        "macOS-HVF"
+    } else if cfg!(target_os = "linux") {
+        "Linux-KVM"
+    } else if cfg!(windows) {
+        "Windows-WHP"
+    } else {
+        "no backend"
+    };
+
+    /// A bound this host class has no record for yet: it is recorded on such a host first
+    /// (`docs/research/measurements/shards-api-waits/run.sh`), never borrowed from another
+    /// class's.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+    #[error("{what} has no record on {class} yet: record it there first ({how})")]
+    pub struct Pending {
+        pub what: &'static str,
+        pub class: &'static str,
+        pub how: &'static str,
+    }
+
+    impl Pending {
+        pub const fn of(what: &'static str) -> Pending {
+            Pending {
+                what,
+                class: CLASS,
+                how: "docs/research/measurements/shards-api-waits/run.sh, PM M463's table",
+            }
+        }
+    }
+}
+
+/// How long [`Guest::stop`] lets a guest's process end after SIGTERM before SIGKILL, by host
+/// class. macOS-HVF: twice (the margin) the slowest stop recorded, 13 ms, SIGTERM to a
+/// `shards run vm`'s end (Hex `bench/native/guest/stop/RECORD.md`, N 40; Shards' PM M463
+/// records shards-api's own `stop` at 6.59 ms at most, N 80). Linux-KVM and Windows-WHP:
+/// no record: no grace, killed at once (a guest's state is tmpfs, so a kill loses nothing),
+/// until their records are made; never a number borrowed from HVF's. Shards' daemon gives a
+/// container dockerd's 10 s (`crates/shards/src/daemon.rs:228-231`), a Docker CLI's contract
+/// this crate has not. `stop` returns within it and the kill.
+#[cfg(target_os = "macos")]
+pub const STOP_GRACE: Result<Duration, record::Pending> = Ok(Duration::from_millis(2 * 13));
+#[cfg(not(target_os = "macos"))]
+pub const STOP_GRACE: Result<Duration, record::Pending> = Err(record::Pending::of("STOP_GRACE"));
+
 /// What can't be done, and why.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Refusal {
@@ -128,6 +178,25 @@ pub enum Refusal {
     /// The guest is gone.
     #[error("the guest has ended: {0:?}")]
     Ended(End),
+    /// No guest runs as the [`Identity`] names: its VM's process has ended, or its pid now names
+    /// another process (its start time differs).
+    #[error("no guest runs as pid {pid}: {why}")]
+    Gone { pid: u32, why: String },
+}
+
+/// What names a booted guest beyond its client's process, so a client that restarts (crashed, say)
+/// takes it back with [`Guests::attach`]: its VM's process, by pid and the start time that tells it
+/// from a process given that pid since, and the socket its vsock is reached at. A client records it
+/// durably once the guest is booted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Identity {
+    pub pid: u32,
+    /// The VM process's start, as its OS counts it: Linux's `/proc/<pid>/stat` starttime (clock
+    /// ticks since boot, proc(5)); macOS's `proc_pid_rusage` `ri_proc_start_abstime` (Mach absolute
+    /// time); Windows' `GetProcessTimes` creation time (a FILETIME, 100 ns since 1601).
+    pub started: u64,
+    /// Where its vsock is reached (`--vsock`'s socket).
+    pub vsock: PathBuf,
 }
 
 /// A connection to a guest's vsock port: a Unix stream socket, on Windows shards' own
@@ -139,6 +208,16 @@ pub enum Refusal {
 pub trait Stream: Read + Write + Send + Sync {
     /// Another handle to the same connection.
     fn try_clone(&self) -> io::Result<Box<dyn Stream>>;
+    /// The OS handle under it, for a caller that waits in its own event loop (epoll, kqueue,
+    /// IOCP) rather than in a read: readable when a read won't wait, writable when a write
+    /// won't, both once the connection has ended. Borrowed: it stays the stream's, open for as
+    /// long as the borrow, so a caller waits on it without `unsafe` and never closes it; one that
+    /// adds it to an event set takes it out before the stream drops.
+    fn handle(&self) -> Handle<'_>;
+    /// With `on`, a read or a write that would wait fails `WouldBlock` at once, for a caller
+    /// that waits on [`handle`](Stream::handle); else each waits to its timeout, as by
+    /// default. Shared by its clones, as its timeouts are.
+    fn set_nonblocking(&self, on: bool) -> io::Result<()>;
     /// Ends one way or both; both, one way at a time (D175).
     fn shutdown(&self, how: Shutdown) -> io::Result<()>;
     /// A read waits at most this long (`None`: for ever), then fails as std's would.
@@ -147,6 +226,13 @@ pub trait Stream: Read + Write + Send + Sync {
     fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
 }
 
+/// The OS handle under a [`Stream`], borrowed from it: a file descriptor on Unix, a Winsock socket
+/// on Windows.
+#[cfg(unix)]
+pub type Handle<'a> = std::os::fd::BorrowedFd<'a>;
+#[cfg(windows)]
+pub type Handle<'a> = std::os::windows::io::BorrowedSocket<'a>;
+
 /// What boots guests.
 pub trait Guests: Send + Sync {
     /// What this host boots with, or the refusal naming the backend it lacks.
@@ -154,18 +240,32 @@ pub trait Guests: Send + Sync {
     /// Boots a guest; refused before boot past this host's bounds. It is the caller's
     /// until it drops, which ends it.
     fn boot(&self, spec: &GuestSpec) -> Result<Box<dyn Guest>, Refusal>;
+    /// Takes back the guest `identity` names, booted from `spec` by a client whose process has
+    /// gone since (a crash: nothing of it ran on, so nothing ended the guest), as [`boot`]'s
+    /// own: the caller's until it drops, which ends it. Refused [`Refusal::Gone`] when no guest
+    /// runs as `identity` names, [`Refusal::Ended`] when that guest has ended. On Windows a
+    /// guest's VM is in a job object that ends with the process that booted it (D141), so no
+    /// guest outlives its client there, and attach finds it gone.
+    ///
+    /// [`boot`]: Guests::boot
+    fn attach(&self, identity: &Identity, spec: &GuestSpec) -> Result<Box<dyn Guest>, Refusal>;
 }
 
 /// A booted guest. Dropping it ends it.
 pub trait Guest: Send + Sync {
     /// A stream to its vsock `port` (`CONNECT <port>`), within `patience`: until the guest
     /// listens there it is refused, and asked again, so the first that connects says the
-    /// guest is ready.
+    /// guest is ready. One dial is always made, so a patience of zero is that one alone;
+    /// `Duration::MAX` is no clock, until the guest listens or ends. A guest that has ended
+    /// is refused as soon as it has, whatever patience is left.
     fn connect(&self, port: u32, patience: Duration) -> Result<Box<dyn Stream>, Refusal>;
     /// Stops it: its [`wait_for`](Guest::wait_for) then returns [`End::Stopped`].
     fn stop(&self) -> Result<(), Refusal>;
-    /// Its end, once it has come, waiting at most `timeout`.
+    /// Its end, once it has come, waiting at most `timeout` (`Duration::MAX`: until it
+    /// comes).
     fn wait_for(&self, timeout: Duration) -> Result<Option<End>, Refusal>;
+    /// What names it for [`Guests::attach`].
+    fn identity(&self) -> Result<Identity, Refusal>;
 }
 
 /// The backend shards boots Linux guests with on `os` and `arch` (`std::env::consts`'):
@@ -185,14 +285,15 @@ pub fn backend() -> Result<Backend, Refusal> {
     backend_of(std::env::consts::OS, std::env::consts::ARCH)
 }
 
-/// The least memory a guest of `arch` boots in, in MiB (shards-vmm's `MIN_MEMORY_MIB`,
-/// `vm/aarch64.rs` and `vm/x86_64.rs`).
+/// The least memory a guest of `arch` boots in, in MiB: shards-vmm's `MIN_MEMORY_MIB`
+/// (`crates/vmm/src/vm/aarch64.rs:28`, `crates/vmm/src/vm/x86_64.rs:28`).
 pub fn min_memory_mib(arch: &str) -> u64 {
     if arch == "x86_64" { 128 } else { 64 }
 }
 
-/// The most vCPUs a guest has here: the host's CPUs, as std reads them (a cgroup's or
-/// affinity's bound included). shards-vmm then holds a guest to its hypervisor's own limit,
+/// The most vCPUs a guest has here: the host's CPUs, read from it now as std reads them (a
+/// cgroup's or affinity's bound included), as shards-vmm bounds them
+/// (`crates/vmm/src/vm/runtime.rs:1059` `check_vcpus`). shards-vmm then holds a guest to its hypervisor's own limit,
 /// which is no lower on any backend it has.
 pub fn max_vcpus() -> u32 {
     std::thread::available_parallelism()
@@ -201,11 +302,12 @@ pub fn max_vcpus() -> u32 {
 }
 
 /// The most vsock ports a spec may allow: the connections shards' muxer holds at once
-/// (`MAX_CONNECTIONS`, Firecracker's, `devices/virtio/vsock/muxer.rs`).
+/// (`MAX_CONNECTIONS`, Firecracker's, `crates/vmm/src/devices/virtio/vsock/muxer.rs:40-41`).
 pub const MAX_PORTS: usize = 1023;
 
 /// Checks `spec` against this host's bounds, as shards-vmm does as it starts a VM
-/// (`vm/runtime.rs` `check_vcpus`; `vm/{aarch64,x86_64}.rs`' memory), so that both the
+/// (`vm/runtime.rs:1059` `check_vcpus`; memory even and at least the least,
+/// `vm/aarch64.rs:414`, `vm/x86_64.rs:361`), so that both the
 /// client and the simulator refuse it before anything boots.
 pub fn check(spec: &GuestSpec) -> Result<(), Refusal> {
     let max = max_vcpus();
@@ -259,6 +361,8 @@ fn allowed(ports: &[u32], port: u32) -> Result<(), Refusal> {
 mod tests {
     use super::*;
 
+    /// Inputs: one vCPU and 256 MiB, within every host's bounds; the cases below step
+    /// past each bound by one (257, odd; `least - 2`; `MAX_PORTS + 1` ports).
     fn spec() -> GuestSpec {
         GuestSpec {
             kernel: "k".into(),
@@ -314,6 +418,32 @@ mod tests {
         );
         let ports = (0..=MAX_PORTS as u32).collect();
         assert_eq!(refused(GuestSpec { ports, ..spec() }), "ports");
+    }
+
+    /// A recorded bound is seeded only from its own host class's record: macOS-HVF's
+    /// here; on Linux-KVM and Windows-WHP, none yet, each naming its pending record, never a
+    /// number borrowed from another class (Hex HEX-GUEST-9).
+    #[test]
+    fn a_bound_is_seeded_only_from_its_own_host_classs_record() {
+        let ms = Duration::from_millis;
+        for (what, bound, macos) in [
+            ("STOP_GRACE", STOP_GRACE, ms(26)),
+            (
+                "OVERSHOOT",
+                conformance::OVERSHOOT,
+                Duration::from_nanos(301_708_500),
+            ),
+        ] {
+            match (record::CLASS, bound) {
+                ("macOS-HVF", Ok(d)) => assert_eq!(d, macos, "{what}"),
+                (class, Err(pending)) => {
+                    assert_ne!(class, "macOS-HVF", "{what}");
+                    assert_eq!((pending.what, pending.class), (what, class));
+                    assert!(pending.to_string().contains(class), "{pending}");
+                }
+                other => panic!("{what}: {other:?}"),
+            }
+        }
     }
 
     /// The backend each host boots with, and the two hosts without one refused naming

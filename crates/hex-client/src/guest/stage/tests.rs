@@ -8,6 +8,45 @@ use std::collections::BTreeMap;
 use super::*;
 use hex_core::stream::files::{LIMITS, Step, Unpack};
 
+/// A whole stage of `items` for `id` as the packer sends it to a relay: its opening, every entry, its end.
+pub(super) fn pack(
+    out: &mut dyn Write,
+    id: &BoxId,
+    items: &[Item],
+    limits: &Limits,
+) -> Result<(), Refusal> {
+    let digests: Vec<Option<files::Digest>> = items
+        .iter()
+        .filter_map(|item| match &item.source {
+            Source::Layers(layers) => Some(layers),
+            _ => None,
+        })
+        .flatten()
+        .map(|l| l.digest)
+        .collect();
+    let opening = files::open_stage(id.as_str(), &digests).map_err(refused)?;
+    out.write_all(&opening)
+        .map_err(|e| Refusal::os("sending staged files", e))?;
+    // A guest that holds none of the layers.
+    // A guest that admits what it lacks: every named layer is checked.
+    pack_items(out, items, limits, &vec![false; digests.len()], true)?;
+    out.write_all(&files::END)
+        .map_err(|e| Refusal::os("sending staged files", e))
+}
+
+/// `paths` as an image's layers, each named by its digest: its bytes' sha256.
+pub(super) fn layers_of(paths: &[PathBuf]) -> Vec<Layer> {
+    paths
+        .iter()
+        .map(|path| Layer {
+            path: path.clone(),
+            digest: Some(
+                <sha2::Sha256 as sha2::Digest>::digest(std::fs::read(path).unwrap()).into(),
+            ),
+        })
+        .collect()
+}
+
 pub(super) fn id() -> BoxId {
     BoxId::new("box-1").unwrap()
 }
@@ -139,8 +178,140 @@ fn a_stage_past_its_bounds_is_refused_before_it_is_sent() {
     assert_eq!(
         pack(&mut Vec::new(), &id(), &items, &small),
         Err(Refusal::Exhausted {
-            what: "file bytes in one stage",
+            what: "file and xattr bytes in one stage",
             bound: 9
         })
+    );
+}
+
+/// A relay stand-in: each dial a socket pair whose far end answers a stage's opening with `budget`, then
+/// reads to the end and answers `Done`.
+#[cfg(unix)]
+struct Budgeted {
+    budget: (u64, u64),
+}
+
+#[cfg(unix)]
+impl super::super::Link for Budgeted {
+    fn dial(&self, _port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+        use std::os::unix::net::UnixStream;
+        let (near, mut far) = UnixStream::pair().unwrap();
+        let (entries, bytes) = self.budget;
+        std::thread::spawn(move || {
+            // OPEN_BYTES, the id `box-1`, and a stage's count of layers (none).
+            let mut open = [0u8; 10 + 5 + 2];
+            far.read_exact(&mut open).unwrap();
+            let budget = hex_core::stream::frame(
+                &files::budget(&files::Budget {
+                    entries,
+                    bytes,
+                    present: vec![],
+                    capacity: 1,
+                    admitting: true,
+                }),
+                wire::MAX_MESSAGE,
+            )
+            .unwrap();
+            far.write_all(&budget).unwrap();
+            let mut rest = Vec::new();
+            let _ = far.read_to_end(&mut rest);
+            let done = wire::answer(wire::FIRST, 0, &Answer::Done, wire::MAX_MESSAGE).unwrap();
+            let _ = far.write_all(&hex_core::stream::frame(&done, wire::MAX_MESSAGE).unwrap());
+        });
+        Ok(Box::new(near))
+    }
+}
+
+/// HEX-GUEST-15 (Ada's rule on constants: a learned bound): stage through a relay whose budget is 4 bytes,
+/// what its file system has free, an item of 5: expect it refused by type, naming the budget, before its
+/// bytes are sent; and one of 4 staged. Through one with one inode free, two entries: expect the second
+/// refused.
+#[cfg(unix)]
+#[test]
+fn a_stage_spends_the_relays_learned_budget() {
+    let relay = Budgeted { budget: (8, 4) };
+    let item = |n: usize| Item {
+        name: "config.json".to_owned(),
+        source: Source::Bytes(vec![b'x'; n]),
+    };
+    assert_eq!(
+        stage(&relay, &id(), &[item(5)], &LIMITS),
+        Err(Refusal::Exhausted {
+            what: "file and xattr bytes in one stage",
+            bound: 4
+        })
+    );
+    assert_eq!(
+        stage(&relay, &id(), &[item(4)], &LIMITS).map(|_| ()),
+        Ok(())
+    );
+    // The entries too: a file system with one inode free takes one entry, not two.
+    let relay = Budgeted { budget: (1, 100) };
+    assert_eq!(
+        stage(&relay, &id(), &[item(1), item(1)], &LIMITS),
+        Err(Refusal::Exhausted {
+            what: "entries in one stage",
+            bound: 1
+        })
+    );
+}
+
+/// A relay stand-in for a box whose staged copy already exists: it reads a stage's opening, answers
+/// `Refused(Exists)` as the relay does, and reports every byte the packer sent after the opening.
+#[cfg(unix)]
+struct RefusesAtOpening {
+    sent_after: std::sync::mpsc::Sender<usize>,
+}
+
+#[cfg(unix)]
+impl super::super::Link for RefusesAtOpening {
+    fn dial(&self, _port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+        use std::os::unix::net::UnixStream;
+        let (near, mut far) = UnixStream::pair().unwrap();
+        let report = self.sent_after.clone();
+        std::thread::spawn(move || {
+            // OPEN_BYTES, the id `box-1`, and a stage's count of layers (none).
+            let mut open = [0u8; 10 + 5 + 2];
+            far.read_exact(&mut open).unwrap();
+            let refused = wire::answer(
+                wire::FIRST,
+                0,
+                &Answer::Refused(Refusal::Exists(id())),
+                wire::MAX_MESSAGE,
+            )
+            .unwrap();
+            far.write_all(&hex_core::stream::frame(&refused, wire::MAX_MESSAGE).unwrap())
+                .unwrap();
+            // Whatever the packer sends after the opening, until it closes its side.
+            let mut rest = Vec::new();
+            let _ = far.read_to_end(&mut rest);
+            report.send(rest.len()).unwrap();
+        });
+        Ok(Box::new(near))
+    }
+}
+
+/// HEX-GUEST-15 (CLAUDE.md §3; HEX-GUEST-19's HEX-RT-1 in a real guest): stage for a box whose staged copy
+/// the relay already holds, so it refuses the opening as `Exists` and closes: expect the packer to return
+/// that typed `Exists`, and to have sent nothing after the opening. A packer that writes on past a refused
+/// opening leaves bytes the relay never reads, and over vsock the close then resets the connection and
+/// the answer is lost: the host saw "Broken pipe", never `Exists`.
+#[cfg(unix)]
+#[test]
+fn a_stage_refused_at_its_opening_is_refused_typed_and_sends_nothing_more() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let relay = RefusesAtOpening { sent_after: tx };
+    let items = [Item {
+        name: "config.json".to_owned(),
+        source: Source::Bytes(vec![b'x'; 64 << 10]),
+    }];
+    assert_eq!(
+        stage(&relay, &id(), &items, &LIMITS),
+        Err(Refusal::Exists(id()))
+    );
+    assert_eq!(
+        rx.recv().unwrap(),
+        0,
+        "the packer wrote on past a refused opening"
     );
 }

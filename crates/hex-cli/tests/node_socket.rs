@@ -14,6 +14,11 @@
 //!   `hex_runtime::guest::WithGuest`, the node's runtime on macOS and Windows, over `shards_api`'s
 //!   simulator, whose guest bridges each port to `hex guest relay`: the real link, staging and spec
 //!   rewrite, each box's root staged and its copy removed with it;
+//! - HEX-GUEST-42 (native plan step 5's guest reached from the host's node through the seam, and step 8's
+//!   guest stdio): the conformance suite, every case, on `oci` boxes through a host node's socket served
+//!   over `Recorded<WithGuest<…>>`, as macOS's and Windows' nodes serve it, HEX-GUEST-18's simulated guest
+//!   behind it: both stdio forms through the socket, the caller's own pipes copied by its client and the
+//!   streams it asks for the guest's own connections;
 //! - HEX-SOCK-10: a box whose bundle makes a network namespace of its own is counted, as root as one
 //!   taken from the agent's pool, rootless as one made on its create's path, and the counts cross the
 //!   socket (decision 4; goal 4 plan steps 2 and 4);
@@ -46,7 +51,7 @@ use hex_api::{
     Bounds, BoxId, BoxSpec, BoxState, Class, ClassSpec, Exit, Program, Refusal, Runtime, Stdio,
 };
 use hex_client::Client;
-use hex_core::record::{BoxRecord, Phase};
+use hex_core::record::{BoxRecord, Phase, ProcId};
 use hex_core::stream;
 use hex_core::wire::{self, Answer, Call, Request, Streams};
 
@@ -513,6 +518,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     nofile_named(&lab, &client);
     through_the_guest_relay(&lab, &agent, exe);
     through_a_simulated_guest(&lab, &agent, exe);
+    through_a_host_nodes_socket(&lab, &agent, exe);
     disconnect(&lab, &agent, &client);
     crash_at_each_record_write(&lab, own, exe);
     assert!(client.list().unwrap().is_empty(), "a box is left");
@@ -553,9 +559,10 @@ fn through_the_guest_relay(lab: &Lab, agent: &Agent, exe: &str) {
         .arg(dir.path().join("staged"))
         .stdout(Std::piped())
         .spawn()
+        .map(Reaped)
         .expect("start hex guest relay");
     let mut line = String::new();
-    BufReader::new(relay.stdout.take().unwrap())
+    BufReader::new(relay.0.stdout.take().unwrap())
         .read_line(&mut line)
         .unwrap();
     assert_eq!(line.trim(), "ready", "hex guest relay said {line:?}");
@@ -574,8 +581,18 @@ fn through_the_guest_relay(lab: &Lab, agent: &Agent, exe: &str) {
         "process boxes through the guest relay: {failures:#?}"
     );
     drop(guest);
-    relay.kill().unwrap();
-    relay.wait().unwrap();
+    drop(relay);
+}
+
+/// A child ended and reaped when dropped, so a failing assertion leaves no relay running (one held a gate's
+/// output pipe open for 80 minutes after its test failed, 2026-11-07).
+struct Reaped(Child);
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 /// Copies `from` into `to` until `from` ends, then ends `to`'s sending half: one direction of a bridged
@@ -595,14 +612,22 @@ fn pump_back(mut from: std::os::unix::net::UnixStream, mut to: Box<dyn shards_ap
     });
 }
 
-/// HEX-GUEST-18: start `hex guest relay` (staging under a folder of the test's) to the agent's socket,
-/// boot a simulated Shards guest whose PID 1 bridges each of the channel's ports to it, and run the
-/// conformance suite on `oci` boxes through `WithGuest` over that guest, one share `/` seen at `/` (a
-/// simulated guest is the host): expect every case to pass, the guest booted once, and no staged
-/// copy left once the suite's boxes are deleted.
-fn through_a_simulated_guest(lab: &Lab, agent: &Agent, exe: &str) {
+/// HEX-GUEST-18's simulated Shards guest: `hex guest relay` started to the agent's socket, staging under a folder
+/// of the test's, and a guest whose PID 1 bridges each of the channel's ports to it, one share `/` seen at `/` (a
+/// simulated guest is the host). The test's folder and the relay's staging folder, the relay (reaped when dropped),
+/// the guest's runtime, and how many times it booted and how many stages it took.
+struct SimulatedGuest {
+    dir: tempfile::TempDir,
+    staged: PathBuf,
+    relay: Reaped,
+    runtime: hex_runtime::guest::GuestRuntime,
+    boots: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    stages: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+fn simulated_guest(agent: &Agent, exe: &str) -> SimulatedGuest {
     use hex_runtime::guest::shares::Share;
-    use hex_runtime::guest::{GuestConfig, GuestRuntime, WithGuest};
+    use hex_runtime::guest::{GuestConfig, GuestRuntime};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     let dir = tempfile::Builder::new()
@@ -619,15 +644,19 @@ fn through_a_simulated_guest(lab: &Lab, agent: &Agent, exe: &str) {
         .arg(&staged)
         .stdout(Std::piped())
         .spawn()
+        .map(Reaped)
         .expect("start hex guest relay");
     let mut line = String::new();
-    BufReader::new(relay.stdout.take().unwrap())
+    BufReader::new(relay.0.stdout.take().unwrap())
         .read_line(&mut line)
         .unwrap();
     assert_eq!(line.trim(), "ready", "hex guest relay said {line:?}");
     let ports = dir.path().to_owned();
     let boots = Arc::new(AtomicUsize::new(0));
     let booted = Arc::clone(&boots);
+    // Connections to the staging port: a stage each.
+    let stages = Arc::new(AtomicUsize::new(0));
+    let staging = Arc::clone(&stages);
     let guests = shards_api::sim::SimGuests::new(move |host| {
         booted.fetch_add(1, Ordering::SeqCst);
         for port in [
@@ -641,7 +670,10 @@ fn through_a_simulated_guest(lab: &Lab, agent: &Agent, exe: &str) {
             let name = match port {
                 stream::CONTROL_PORT => "control.sock",
                 stream::STDIO_PORT => "stdio.sock",
-                _ => "files.sock",
+                _ => {
+                    staging.fetch_add(1, Ordering::SeqCst);
+                    "files.sock"
+                }
             };
             let relay = std::os::unix::net::UnixStream::connect(ports.join(name)).unwrap();
             pump(conn.try_clone().unwrap(), relay.try_clone().unwrap());
@@ -654,8 +686,9 @@ fn through_a_simulated_guest(lab: &Lab, agent: &Agent, exe: &str) {
         binary: PathBuf::from("/nonexistent/shards"),
         kernel: PathBuf::from("/nonexistent/kernel"),
         initrd: PathBuf::from("/nonexistent/initrd"),
+        // Shards' least guest: one vCPU and its architecture's least memory (`shards_api::check`).
         vcpus: 1,
-        memory_mib: 256,
+        memory_mib: shards_api::min_memory_mib(std::env::consts::ARCH),
         shares: vec![Share {
             dir: PathBuf::from("/"),
             read_only: false,
@@ -663,10 +696,33 @@ fn through_a_simulated_guest(lab: &Lab, agent: &Agent, exe: &str) {
         }],
         staged: staged.to_str().unwrap().to_owned(),
     };
-    let node = WithGuest::new(
-        hex_api::sim::SimRuntime::new(),
-        GuestRuntime::new(Arc::new(guests), config),
-    );
+    SimulatedGuest {
+        dir,
+        staged,
+        relay,
+        runtime: GuestRuntime::new(Arc::new(guests), config),
+        boots,
+        stages,
+    }
+}
+
+/// HEX-GUEST-18: start `hex guest relay` (staging under a folder of the test's) to the agent's socket,
+/// boot a simulated Shards guest whose PID 1 bridges each of the channel's ports to it, and run the
+/// conformance suite on `oci` boxes through `WithGuest` over that guest, one share `/` seen at `/` (a
+/// simulated guest is the host): expect every case to pass, the guest booted once, and no staged
+/// copy left once the suite's boxes are deleted.
+fn through_a_simulated_guest(lab: &Lab, agent: &Agent, exe: &str) {
+    use hex_runtime::guest::WithGuest;
+    use std::sync::atomic::Ordering;
+    let SimulatedGuest {
+        dir: _dir,
+        staged,
+        relay,
+        runtime,
+        boots,
+        stages,
+    } = simulated_guest(agent, exe);
+    let node = WithGuest::new(hex_api::sim::SimRuntime::new(), runtime).unwrap();
     assert_eq!(node.classes(), [Class::Process, Class::Oci]);
     let failures = conformance::run(&node, &OciBoxes(lab, false));
     assert!(
@@ -679,11 +735,129 @@ fn through_a_simulated_guest(lab: &Lab, agent: &Agent, exe: &str) {
         "the guest booted more than once"
     );
     assert!(node.list().unwrap().is_empty(), "a box is left");
-    let left: Vec<_> = std::fs::read_dir(&staged).unwrap().collect();
+    // Every box's copy goes with its box; the layer store (§4a) stays, a cache for the next create.
+    let left: Vec<_> = std::fs::read_dir(&staged)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .filter(|n| n != stream::files::STORE)
+        .collect();
     assert!(left.is_empty(), "staged copies left: {left:?}");
+    // HEX-GUEST-18 (CLAUDE.md §3; HEX-GUEST-19's HEX-RT-1 in a real guest): a second create of an id the
+    // guest's node holds is refused as `Exists` before anything is staged: one stage for the two creates.
+    let fixture = OciBoxes(lab, false);
+    let id = BoxId::new("twice").unwrap();
+    let before = stages.load(Ordering::SeqCst);
+    node.create(fixture.spec(id.clone(), Bounds::default()))
+        .unwrap();
+    assert_eq!(
+        node.create(fixture.spec(id.clone(), Bounds::default())),
+        Err(Refusal::Exists(id.clone()))
+    );
+    assert_eq!(
+        stages.load(Ordering::SeqCst) - before,
+        1,
+        "the refused create staged its root"
+    );
+    node.delete(&id).unwrap();
     drop(node);
-    relay.kill().unwrap();
-    relay.wait().unwrap();
+    drop(relay);
+}
+
+/// The host's own boxes beside a node's guest: the simulator's, with no processes to take back after a crash,
+/// which HEX-GUEST-42 doesn't ask of a node.
+struct HostBoxes(hex_api::sim::SimRuntime);
+
+impl Runtime for HostBoxes {
+    fn classes(&self) -> Vec<Class> {
+        self.0.classes()
+    }
+    fn create(&self, spec: BoxSpec) -> Result<hex_api::BoxInfo, Refusal> {
+        self.0.create(spec)
+    }
+    fn start(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.0.start(id)
+    }
+    fn exec(
+        &self,
+        id: &BoxId,
+        program: Program,
+        stdio: Stdio,
+    ) -> Result<Box<dyn hex_api::Proc>, Refusal> {
+        self.0.exec(id, program, stdio)
+    }
+    fn signal(&self, id: &BoxId, signal: hex_api::Signal) -> Result<(), Refusal> {
+        self.0.signal(id, signal)
+    }
+    fn inspect(&self, id: &BoxId) -> Result<hex_api::BoxInfo, Refusal> {
+        self.0.inspect(id)
+    }
+    fn usage(&self, id: &BoxId) -> Result<hex_api::Usage, Refusal> {
+        self.0.usage(id)
+    }
+    fn list(&self) -> Result<Vec<hex_api::BoxInfo>, Refusal> {
+        self.0.list()
+    }
+    fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.0.delete(id)
+    }
+}
+
+impl hex_node::recorded::Recover for HostBoxes {
+    fn trace(&self, _id: &BoxId) -> Result<Option<ProcId>, Refusal> {
+        Ok(None)
+    }
+    fn adopt(&self, _spec: &BoxSpec, _trace: Option<ProcId>) -> Result<(), Refusal> {
+        Ok(())
+    }
+    fn end(&self, _trace: Option<ProcId>) -> Result<(), Refusal> {
+        Ok(())
+    }
+}
+
+/// HEX-GUEST-42 (native plan step 5: the guest reached from the host's node through the seam; step 8: guest
+/// stdio through the node's socket): serve `Recorded<WithGuest<…>>` over HEX-GUEST-18's simulated guest on a
+/// host node's socket, as macOS's and Windows' `hex node` serve their guests, and run the conformance suite on
+/// `oci` boxes through `hex-client` over that socket: expect every case to pass, both stdio forms among them
+/// (HEX-RT-2 and -9 the caller's own pipes, copied by its client; HEX-RT-17 the streams it asks for, the guest's
+/// own connections), the guest booted once, and no box left.
+fn through_a_host_nodes_socket(lab: &Lab, agent: &Agent, exe: &str) {
+    use hex_runtime::guest::WithGuest;
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+    let SimulatedGuest {
+        dir,
+        staged: _staged,
+        relay,
+        runtime,
+        boots,
+        stages: _stages,
+    } = simulated_guest(agent, exe);
+    let node = WithGuest::new(HostBoxes(hex_api::sim::SimRuntime::new()), runtime).unwrap();
+    let node = hex_node::recorded::Recorded::open(node, &dir.path().join("state")).unwrap();
+    let socket = dir.path().join("host.sock");
+    let server = hex_node::serve::Server::bind(
+        &socket,
+        Arc::new(node),
+        hex_node::serve::LIMITS,
+        hex_node::serve::WORKERS,
+    )
+    .unwrap();
+    let client = Client::connect(&socket).unwrap();
+    assert_eq!(client.classes(), [Class::Process, Class::Oci]);
+    let failures = conformance::run(&client, &OciBoxes(lab, false));
+    assert!(
+        failures.is_empty(),
+        "oci boxes through a host node's socket over a simulated Shards guest: {failures:#?}"
+    );
+    assert_eq!(
+        boots.load(Ordering::SeqCst),
+        1,
+        "the guest booted more than once"
+    );
+    assert!(client.list().unwrap().is_empty(), "a box is left");
+    drop(client);
+    drop(server);
+    drop(relay);
 }
 
 /// HEX-SOCK-9, the plan's example: a `Bundle` box made, started, and `/usr/bin/true` exec'd in it

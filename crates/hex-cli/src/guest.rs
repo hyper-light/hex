@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use hex_client::guest::Duplex;
 use hex_core::stream;
-use hex_node::relay::{LIMITS, Listen, Relay, STAGED};
+use hex_node::relay::{Conn, LIMITS, Listen, Relay, STAGED};
 use socket2::{Domain, SockAddr, Socket, Type};
 
 /// Runs `hex guest`'s arguments (everything after `guest`); returns the exit status.
@@ -110,6 +110,15 @@ fn relay(args: &[String]) -> Result<(), (u8, String)> {
             Box::new(unix(&dir.join("files.sock")).map_err(|e| (1, e))?),
         ),
     };
+    let stamps: Box<dyn Listen> = match &on {
+        On::Vsock => Box::new(vsock(stream::STAMPS_PORT).map_err(|e| (1, e))?),
+        On::Unix(dir) => Box::new(unix(&dir.join("stamps.sock")).map_err(|e| (1, e))?),
+    };
+    let line = stamps_line(std::env::var(BOOT_STAMPS).ok().as_deref(), boottime_ns());
+    std::thread::Builder::new()
+        .name("hex-relay-stamps".to_owned())
+        .spawn(move || serve_stamps(stamps, line))
+        .map_err(|e| (1, format!("starting the stamps thread: {e}")))?;
     let mut out = std::io::stdout().lock();
     out.write_all(b"ready\n")
         .and_then(|()| out.flush())
@@ -132,20 +141,28 @@ fn vsock(port: u32) -> Result<VsockListener, String> {
     socket
         .bind(&SockAddr::vsock(u32::MAX, port))
         .map_err(fail)?;
-    socket.listen(128).map_err(fail)?;
+    // The most the kernel queues: listen(2) truncates a larger backlog to `net.core.somaxconn`
+    // (net/socket.c, `__sys_listen_socket`), so asking for `i32::MAX` takes the guest's own.
+    socket.listen(i32::MAX).map_err(fail)?;
     Ok(VsockListener(socket))
 }
 
 struct VsockListener(Socket);
 
 impl Listen for VsockListener {
-    fn accept(&self) -> io::Result<Box<dyn Duplex>> {
+    fn accept(&self) -> io::Result<Box<dyn Conn>> {
         Ok(Box::new(Vsock(self.0.accept()?.0)))
     }
 }
 
 /// A vsock connection, as the relay's connections are.
 struct Vsock(Socket);
+
+impl std::os::fd::AsFd for Vsock {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.0.as_fd()
+    }
+}
 
 impl Read for Vsock {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
@@ -178,6 +195,53 @@ impl Duplex for Vsock {
 
     fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         self.0.set_read_timeout(timeout)
+    }
+
+    fn handle(&self) -> hex_client::guest::Handle<'_> {
+        std::os::fd::AsFd::as_fd(&self.0)
+    }
+
+    fn set_nonblocking(&self, on: bool) -> io::Result<()> {
+        self.0.set_nonblocking(on)
+    }
+}
+
+/// The variables that carry init's boot stamps: its first entry's, across its re-exec from the initramfs,
+/// and all three to the relay (its first entry, its mounts done, its node ready).
+const BOOT_T0: &str = "HEX_BOOT_T0";
+const BOOT_STAMPS: &str = "HEX_BOOT_STAMPS";
+
+/// Nanoseconds since the kernel began keeping time: `CLOCK_BOOTTIME` (clock_gettime(2)), the guest's own
+/// clock from its boot, which the boot split reads phases by.
+fn boottime_ns() -> u128 {
+    let t = rustix::time::clock_gettime(rustix::time::ClockId::Boottime);
+    let (secs, nanos) = (
+        u64::try_from(t.tv_sec).unwrap_or_default(),
+        u32::try_from(t.tv_nsec).unwrap_or_default(),
+    );
+    Duration::new(secs, nanos).as_nanos()
+}
+
+/// The relay's stamps line: init's three stamps as init handed them, then the relay's own; `-` for each of
+/// init's where it handed none (a relay outside a guest) or handed them unreadable.
+fn stamps_line(from_init: Option<&str>, relay_ns: u128) -> String {
+    let init = from_init.filter(|given| {
+        let words: Vec<&str> = given.split(' ').collect();
+        words.len() == 3 && words.iter().all(|w| w.parse::<u128>().is_ok())
+    });
+    format!("{} {relay_ns}\n", init.unwrap_or("- - -"))
+}
+
+/// Serves the boot's stamps on `listener`: each connection is sent `line` and closed, one at a time.
+fn serve_stamps(listener: Box<dyn Listen>, line: String) {
+    loop {
+        match listener.accept() {
+            Ok(mut conn) => {
+                let _ = conn.write_all(line.as_bytes());
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return,
+        }
     }
 }
 
@@ -216,7 +280,11 @@ pub fn init_main() -> u8 {
 
 fn init() -> Result<(), (u8, String)> {
     let fail = |why: String| (1, why);
-    leave_rootfs().map_err(fail)?;
+    let t0 = std::env::var(BOOT_T0)
+        .ok()
+        .and_then(|t| t.parse::<u128>().ok())
+        .unwrap_or_else(boottime_ns);
+    leave_rootfs(t0).map_err(fail)?;
     mount_all().map_err(fail)?;
     mount_shares().map_err(fail)?;
     std::fs::write("/sys/fs/cgroup/cgroup.subtree_control", CONTROLLERS).map_err(|e| {
@@ -224,6 +292,7 @@ fn init() -> Result<(), (u8, String)> {
             "enabling the cgroup controllers {CONTROLLERS}: {e}"
         ))
     })?;
+    let mounted = boottime_ns();
     let exe = std::env::current_exe().map_err(|e| fail(format!("finding /init: {e}")))?;
     let socket = Path::new(RUN).join("node.sock");
     let state = Path::new(STATE);
@@ -238,8 +307,11 @@ fn init() -> Result<(), (u8, String)> {
             "--box-root".as_ref(),
             BOX_ROOT.as_ref(),
         ],
+        &format!("ready {}\n", socket.display()),
+        None,
     )
     .map_err(fail)?;
+    let node_ready = boottime_ns();
     let relay = start(
         &exe,
         &[
@@ -249,6 +321,8 @@ fn init() -> Result<(), (u8, String)> {
             socket.as_os_str(),
             "--vsock".as_ref(),
         ],
+        "ready\n",
+        Some(format!("{t0} {mounted} {node_ready}")),
     )
     .map_err(fail)?;
     let mut out = std::io::stdout().lock();
@@ -270,6 +344,8 @@ struct Mount {
     target: &'static str,
     fs: &'static str,
     flags: rustix::mount::MountFlags,
+    /// Made with RCU's grace periods expedited ([`RCU_EXPEDITED`]).
+    expedite: bool,
 }
 
 /// What `init` mounts, in order.
@@ -281,11 +357,18 @@ fn mounts() -> [Mount; 6] {
         target,
         fs,
         flags,
+        expedite: false,
     };
     [
         mount("proc", "/proc", "proc", quiet),
         mount("sysfs", "/sys", "sysfs", quiet),
-        mount("cgroup2", "/sys/fs/cgroup", "cgroup2", quiet),
+        // cgroup2's first mount waits out RCU grace periods, which the kernel expedites only until it starts
+        // init (`rcu_end_inkernel_boot`): about 20 ms of an HVF boot, under 0.1 ms expedited
+        // (bench/native/guest/boot-split/RECORD.md).
+        Mount {
+            expedite: true,
+            ..mount("cgroup2", "/sys/fs/cgroup", "cgroup2", quiet)
+        },
         mount("devtmpfs", "/dev", "devtmpfs", MountFlags::NOSUID),
         mount(
             "tmpfs",
@@ -302,29 +385,29 @@ fn mounts() -> [Mount; 6] {
     ]
 }
 
-/// The most of `/proc/self/mountinfo` read: a fresh guest's lists a handful of mounts.
-const MOUNTINFO_BOUND: u64 = 64 * 1024;
-
 /// Where `init` mounts the tmpfs that becomes the root.
 const NEW_ROOT: &str = "/hex-root";
 
 /// Moves `init` off the kernel's initramfs, whose `rootfs` pivot_root(2) can't leave, onto a tmpfs
 /// mounted over `/` (switch_root's way: `MS_MOVE` and `chroot`), and runs it again from there. Returns
 /// only when the root is already not the initramfs.
-fn leave_rootfs() -> Result<(), String> {
+fn leave_rootfs(t0: u128) -> Result<(), String> {
     use rustix::mount::{MountFlags, UnmountFlags, mount, mount_move, unmount};
     let quiet = MountFlags::NOSUID | MountFlags::NOEXEC | MountFlags::NODEV;
     std::fs::create_dir_all("/proc").map_err(|e| format!("making /proc: {e}"))?;
     mount("proc", "/proc", "proc", quiet, None).map_err(|e| format!("mounting /proc: {e}"))?;
-    let mut info = String::new();
-    let read = std::fs::File::open("/proc/self/mountinfo")
-        .and_then(|f| f.take(MOUNTINFO_BOUND).read_to_string(&mut info));
+    let root =
+        std::fs::File::open("/proc/self/mountinfo").and_then(|f| root_fs(io::BufReader::new(f)));
     unmount("/proc", UnmountFlags::empty()).map_err(|e| format!("unmounting /proc: {e}"))?;
-    read.map_err(|e| format!("reading /proc/self/mountinfo: {e}"))?;
-    if root_fs(&info) != Some("rootfs") {
+    let root = root.map_err(|e| format!("reading /proc/self/mountinfo: {e}"))?;
+    if root.as_deref() != Some("rootfs") {
         return Ok(());
     }
     std::fs::create_dir_all(NEW_ROOT).map_err(|e| format!("making {NEW_ROOT}: {e}"))?;
+    // 0755: search on `/` for every user, as resolving any path needs (path_resolution(7)), and
+    // writes for root alone, the mode of ramfs's root, the kernel's rootfs without tmpfs
+    // (fs/ramfs/inode.c `RAMFS_DEFAULT_MODE`); a tmpfs left to itself is 01777 (tmpfs(5) `mode=`),
+    // which would let any user make names in `/`.
     mount(
         "tmpfs",
         NEW_ROOT,
@@ -342,20 +425,31 @@ fn leave_rootfs() -> Result<(), String> {
     mount_move(".", "/").map_err(|e| format!("moving {NEW_ROOT} to /: {e}"))?;
     rustix::process::chroot(".").map_err(|e| format!("entering the new root: {e}"))?;
     std::env::set_current_dir("/").map_err(|e| format!("entering /: {e}"))?;
-    let e = std::os::unix::process::CommandExt::exec(&mut std::process::Command::new("/init"));
+    let e = std::os::unix::process::CommandExt::exec(
+        std::process::Command::new("/init").env(BOOT_T0, t0.to_string()),
+    );
     Err(format!("running /init from the new root: {e}"))
 }
 
 /// The file system mounted at `/` in `mountinfo` (proc(5)): the last mount on `/`, as each covers the
-/// one before; `None` where no line names `/`.
-fn root_fs(mountinfo: &str) -> Option<&str> {
-    mountinfo
-        .lines()
-        .filter_map(|line| {
-            let (mount, fs) = line.split_once(" - ")?;
-            (mount.split(' ').nth(4)? == "/").then(|| fs.split(' ').next())?
-        })
-        .next_back()
+/// one before; `None` where no line names `/`. It is read to its end a line at a time, holding one line
+/// and the answer: its length is the kernel's, a line per mount in the namespace, which the kernel bounds
+/// (`fs.mount-max`, Documentation/admin-guide/sysctl/fs.rst), and here, before init mounts anything but
+/// this `/proc`, it lists the initramfs and that.
+fn root_fs(mut mountinfo: impl io::BufRead) -> io::Result<Option<String>> {
+    let (mut line, mut root) = (String::new(), None);
+    loop {
+        line.clear();
+        if mountinfo.read_line(&mut line)? == 0 {
+            return Ok(root);
+        }
+        let fs = line.split_once(" - ").and_then(|(mount, fs)| {
+            (mount.split(' ').nth(4)? == "/").then(|| fs.split([' ', '\n']).next())?
+        });
+        if let Some(fs) = fs {
+            root = Some(fs.to_owned());
+        }
+    }
 }
 
 /// One of Shards' shares (docs/design/shards-guest.md §4a): whether the guest mounts it read-only.
@@ -364,9 +458,9 @@ struct Share {
     read_only: bool,
 }
 
-/// The most shares a guest mounts: a bound of Hex's own, as the node shares a handful of roots (by
-/// default one, `/`); a longer list is refused by name.
-const MAX_SHARES: usize = 32;
+// The most shares a guest mounts: the host's bound, one virtio-fs device each among Shards' slots
+// (`hex_runtime::guest::shares::MAX_SHARES`); a longer list is refused by name.
+use hex_runtime::guest::shares::MAX_SHARES;
 
 /// The parameter on the kernel's command line that names the guest's shares: `hex.shares=` and a mode
 /// per share, `rw` or `ro`, joined by commas, in the order of their tags (`shards0`, `shards1`, …).
@@ -376,9 +470,14 @@ const SHARES_PARAMETER: &str = "hex.shares=";
 /// Where share `i` is mounted: `/run/hex/shares/<i>`.
 const SHARES: &str = "/run/hex/shares";
 
-/// The most read of `/proc/cmdline`: the kernel's own bound on a command line is smaller (`COMMAND_LINE_SIZE`,
-/// 2048 on x86_64 and arm64).
-const CMDLINE_BOUND: u64 = 4096;
+/// The most read of `/proc/cmdline`: the kernel's bound on its command line, `COMMAND_LINE_SIZE` with
+/// its terminating zero, which `/proc/cmdline` prints as a newline (fs/proc/cmdline.c): 2048 on x86_64
+/// (arch/x86/include/asm/setup.h:7) and arm64 (arch/arm64/include/uapi/asm/setup.h), the generic 512
+/// elsewhere (include/uapi/asm-generic/setup.h:5).
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+const CMDLINE_BOUND: u64 = 2048;
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+const CMDLINE_BOUND: u64 = 512;
 
 /// The shares the kernel's command line names, in tag order. Only the kernel's own parameters count:
 /// what follows `--` is init's arguments.
@@ -436,13 +535,31 @@ fn mount_shares() -> Result<(), String> {
     Ok(())
 }
 
+/// The kernel's switch for expediting RCU's grace periods (kernel/ksysfs.c, `rcu_expedited_store`):
+/// on, a grace period ends at once at the cost of an interrupt to every CPU; the kernel does so itself during
+/// its boot, until it starts init.
+const RCU_EXPEDITED: &str = "/sys/kernel/rcu_expedited";
+
+/// Turns RCU's expedited grace periods on or off.
+fn expedite_rcu(on: bool) -> Result<(), String> {
+    std::fs::write(RCU_EXPEDITED, if on { "1" } else { "0" })
+        .map_err(|e| format!("writing {on} to {RCU_EXPEDITED}: {e}"))
+}
+
 /// Mounts what the node needs, each on a directory made for it.
 fn mount_all() -> Result<(), String> {
     for m in mounts() {
         let (target, fs) = (m.target, m.fs);
         std::fs::create_dir_all(target).map_err(|e| format!("making {target}: {e}"))?;
-        rustix::mount::mount(m.source, target, fs, m.flags, None)
-            .map_err(|e| format!("mounting {fs} on {target}: {e}"))?;
+        if m.expedite {
+            expedite_rcu(true)?;
+        }
+        let mounted = rustix::mount::mount(m.source, target, fs, m.flags, None)
+            .map_err(|e| format!("mounting {fs} on {target}: {e}"));
+        if m.expedite {
+            expedite_rcu(false)?;
+        }
+        mounted?;
     }
     for dir in [RUN, STATE, BOX_ROOT] {
         std::fs::create_dir_all(dir).map_err(|e| format!("making {dir}: {e}"))?;
@@ -450,18 +567,26 @@ fn mount_all() -> Result<(), String> {
     Ok(())
 }
 
-/// The most read of a started process's first line: `ready` and its socket's path.
-const LINE_BOUND: u64 = 4096;
-
-/// Starts `/init` with `args` and waits for its `ready` line.
-fn start(exe: &Path, args: &[&std::ffi::OsStr]) -> Result<u32, String> {
+/// Starts `/init` with `args` and waits for its first line, `ready`: read as far as its length and no
+/// further, as nothing else is that line.
+/// `stamps`, where given, goes to the child as init's boot stamps ([`BOOT_STAMPS`]).
+fn start(
+    exe: &Path,
+    args: &[&std::ffi::OsStr],
+    ready: &str,
+    stamps: Option<String>,
+) -> Result<u32, String> {
     let what = args
         .iter()
         .take(2)
         .map(|a| a.to_string_lossy())
         .collect::<Vec<_>>()
         .join(" ");
-    let mut child = std::process::Command::new(exe)
+    let mut command = std::process::Command::new(exe);
+    if let Some(stamps) = stamps {
+        command.env(BOOT_STAMPS, stamps);
+    }
+    let mut child = command
         .args(args)
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -470,11 +595,17 @@ fn start(exe: &Path, args: &[&std::ffi::OsStr]) -> Result<u32, String> {
         .stdout
         .take()
         .ok_or_else(|| format!("hex {what}'s stdout wasn't kept"))?;
-    let mut line = String::new();
-    io::BufRead::read_line(&mut io::BufReader::new(stdout.take(LINE_BOUND)), &mut line)
+    let mut line = Vec::new();
+    let bound = u64::try_from(ready.len()).map_err(|_| format!("hex {what}'s ready line"))?;
+    stdout
+        .take(bound)
+        .read_to_end(&mut line)
         .map_err(|e| format!("reading hex {what}'s first line: {e}"))?;
-    if !line.starts_with("ready") {
-        return Err(format!("hex {what} said {line:?}, not ready"));
+    if line != ready.as_bytes() {
+        return Err(format!(
+            "hex {what} said {:?}, not {ready:?}",
+            String::from_utf8_lossy(&line)
+        ));
     }
     Ok(child.id())
 }
@@ -538,16 +669,29 @@ mod tests {
         assert!(Path::new(STATE).starts_with(RUN), "the state is at {STATE}");
     }
 
+    /// HEX-GUEST-38 (the boot split): read init's mounts: expect cgroup2's alone made with RCU's grace
+    /// periods expedited (its first mount waits out grace periods, 20 ms of an HVF boot), after sysfs, whose
+    /// /sys/kernel/rcu_expedited switches it, and every other mount made as the kernel leaves RCU.
+    #[test]
+    fn only_cgroup2_is_mounted_with_rcu_expedited_after_sysfs() {
+        let all = mounts();
+        let expedited: Vec<&str> = all.iter().filter(|m| m.expedite).map(|m| m.fs).collect();
+        assert_eq!(expedited, ["cgroup2"]);
+        let at = |fs| all.iter().position(|m| m.fs == fs).unwrap();
+        assert!(at("sysfs") < at("cgroup2"));
+    }
+
     /// HEX-GUEST-10 (§4): `init` reads the root's file system from mountinfo, so it leaves the
     /// initramfs (`rootfs`) once and never again; hostile or short lines name no root.
     #[test]
     fn the_root_file_system_is_read_from_mountinfo() {
+        let root_fs = |text: &str| root_fs(text.as_bytes()).unwrap();
         let initramfs = "1 1 0:2 / / rw - rootfs rootfs rw,size=1000k\n";
-        assert_eq!(root_fs(initramfs), Some("rootfs"));
+        assert_eq!(root_fs(initramfs).as_deref(), Some("rootfs"));
         let moved = "1 1 0:2 / / rw - rootfs rootfs rw\n\
                      20 1 0:20 / / rw,relatime - tmpfs tmpfs rw,mode=755\n\
                      21 20 0:21 / /proc rw - proc proc rw\n";
-        assert_eq!(root_fs(moved), Some("tmpfs"));
+        assert_eq!(root_fs(moved).as_deref(), Some("tmpfs"));
         for hostile in [
             "",
             "\n\n",
@@ -558,7 +702,20 @@ mod tests {
         ] {
             assert_eq!(root_fs(hostile), None, "{hostile:?}");
         }
-        assert_eq!(root_fs("1 1 0:2 / / rw - \n"), Some(""));
+        assert_eq!(root_fs("1 1 0:2 / / rw - \n").as_deref(), Some(""));
+    }
+
+    /// HEX-GUEST-31 (§4): mountinfo is read whole, a line at a time, as long as the kernel makes it: a
+    /// root mount listed past 64 KiB of other mounts is still the one read.
+    #[test]
+    fn mountinfo_is_read_to_its_end() {
+        let mut info = String::from("1 1 0:2 / / rw - tmpfs tmpfs rw\n");
+        for i in 0..2_000 {
+            info.push_str(&format!("{i} 1 0:3 / /mnt/{i:040} rw - tmpfs tmpfs rw\n"));
+        }
+        info.push_str("9 1 0:2 / / rw - rootfs rootfs rw\n");
+        assert!(info.len() > 64 * 1024);
+        assert_eq!(root_fs(info.as_bytes()).unwrap().as_deref(), Some("rootfs"));
     }
 
     /// HEX-GUEST-11 (§4a): `hex.shares=` on the kernel's command line names Shards' shares in tag order,
@@ -613,5 +770,15 @@ mod tests {
             );
         }
         assert!(!runs_as_init(1, None));
+    }
+
+    /// HEX-GUEST-37 (the boot split, bench/native/guest/boot-split): the relay's stamps line is init's three
+    /// stamps as init handed them, then the relay's own, in `CLOCK_BOOTTIME` nanoseconds; a relay started
+    /// without init's (outside a guest) says so in their place.
+    #[test]
+    fn the_stamps_line_carries_inits_stamps_then_the_relays() {
+        assert_eq!(stamps_line(Some("10 20 30"), 40), "10 20 30 40\n");
+        assert_eq!(stamps_line(None, 40), "- - - 40\n");
+        assert_eq!(stamps_line(Some("10 x 30"), 40), "- - - 40\n");
     }
 }

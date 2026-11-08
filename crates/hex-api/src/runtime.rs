@@ -50,6 +50,75 @@ pub trait Proc: Send {
 
     /// Waits at most `timeout` for its end; `Ok(None)` when it is still running.
     fn wait_for(&mut self, timeout: Duration) -> Result<Option<Exit>, Refusal>;
+
+    /// Ends this program, and only it (its box and the box's other programs run on), as KILL does: its end
+    /// then reads as `Exit::Signal(9)`, unless it had ended first. `Ok` once it is sent, or when the program
+    /// has ended already; it never reaches a process given the program's pid since.
+    fn kill(&mut self) -> Result<(), Refusal>;
+
+    /// The caller's ends of the streams its exec asked for ([`crate::Stdio::ask`]), once: a later call gives
+    /// none.
+    fn streams(&mut self) -> Result<crate::Given, Refusal>;
+}
+
+/// A program and the caller's ends of the streams its exec asked for ([`crate::Stdio::make_asked`]), held
+/// until [`Proc::streams`] takes them: a runtime whose programs take pipes wraps its own `Proc` in it.
+pub struct Asked<P> {
+    proc: P,
+    given: Option<crate::Given>,
+}
+
+impl<P: Proc> Asked<P> {
+    pub fn new(proc: P, given: crate::Given) -> Self {
+        Self {
+            proc,
+            given: Some(given),
+        }
+    }
+}
+
+impl<P: Proc> Proc for Asked<P> {
+    fn pid(&self) -> u32 {
+        self.proc.pid()
+    }
+
+    fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
+        self.proc.try_wait()
+    }
+
+    fn wait_for(&mut self, timeout: Duration) -> Result<Option<Exit>, Refusal> {
+        self.proc.wait_for(timeout)
+    }
+
+    fn kill(&mut self) -> Result<(), Refusal> {
+        self.proc.kill()
+    }
+
+    fn streams(&mut self) -> Result<crate::Given, Refusal> {
+        Ok(self.given.take().unwrap_or_default())
+    }
+}
+
+impl Proc for Box<dyn Proc> {
+    fn pid(&self) -> u32 {
+        (**self).pid()
+    }
+
+    fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
+        (**self).try_wait()
+    }
+
+    fn wait_for(&mut self, timeout: Duration) -> Result<Option<Exit>, Refusal> {
+        (**self).wait_for(timeout)
+    }
+
+    fn kill(&mut self) -> Result<(), Refusal> {
+        (**self).kill()
+    }
+
+    fn streams(&mut self) -> Result<crate::Given, Refusal> {
+        (**self).streams()
+    }
 }
 
 /// How a program ended.

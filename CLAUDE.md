@@ -120,9 +120,12 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   membership, step 2) and `proc_pid_rusage` reads each member's footprint, start time and exit; `thread_policy_set(THREAD_TIME_CONSTRAINT_POLICY)` makes the watcher a Mach
   time-constraint thread; `kqueue`/`kevent` carry its one-shot `NOTE_CRITICAL` timer, a user event to wake
   it, and `EVFILT_PROC` (`NOTE_FORK`/`NOTE_EXIT`/`NOTE_EXITSTATUS`, the dead member's wait status in the
-  event, so a cap kill is told from an ordinary SIGKILL without racing its reaper) on members;
-  `mach_timebase_info` converts Mach ticks; `sysctlbyname("kern.maxproc")` bounds a listing and
-  `sysctlbyname("kern.argmax")` a program's arguments and environment; `getrusage`
+  event, so a cap kill is told from an ordinary SIGKILL without racing its reaper) on members, and, for the
+  node's socket on macOS (native plan step 8, `hex-node`'s `serve::macos`, one kqueue on its I/O thread),
+  level-triggered `EVFILT_READ`/`EVFILT_WRITE` on the listener and connections; `getpeereid` names the
+  socket's peer, so only the node's user and root are served; `mach_timebase_info` converts Mach ticks;
+  `sysctlbyname("kern.maxproc")` bounds a listing and `sysctlbyname("kern.argmax")` a program's arguments
+  and environment; `getrusage`
   and `getloadavg` read the node's own cost for the bench and observability. rustix wraps the `kqueue`,
   `kill`/`killpg` and `waitid` beside these, which the class calls through it; libc binds the rest as
   `unsafe` foreign functions, and `posix_spawnattr_set_qos_class_np` and `posix_spawnattr_setjetsam_ext`
@@ -157,7 +160,8 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   resumes it (`ResumeThread`), waits on it and reads its end (`WaitForSingleObject`,
   `GetExitCodeProcess`), marks its standard handles inheritable (`SetHandleInformation`), reads the job's
   accounting and its guaranteed memory-limit violation (`QueryInformationJobObject`), ends the job
-  (`TerminateJobObject`) and closes its handles (`CloseHandle`), and reads the machine's processor count
+  (`TerminateJobObject`) or one member alone (`TerminateProcess`, a program's own kill) and closes its
+  handles (`CloseHandle`), and reads the machine's processor count
   (`GetActiveProcessorCount`). For the `oci` class's Shards guest it reads the default shared roots
   (docs/design/shards-guest.md §4a): the users folder from its known folder (`SHGetKnownFolderPath` with
   `FOLDERID_UserProfiles`, its string freed by `CoTaskMemFree`) and the temp folder (`GetTempPath2W`).

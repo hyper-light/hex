@@ -28,6 +28,14 @@
 //!
 //! Version 2 (goal 4 plan step 2) adds one request and its answer: the node agent's network namespace
 //! counts ([`Call::Netns`], [`Answer::Netns`]). Every version 1 kind reads the same in it.
+//!
+//! Version 3 (native plan step 8) adds a program's kill ([`Call::Kill`], `Proc::kill` through the socket),
+//! answered as every call is, and an exec that asks the node to make some of its streams
+//! ([`Call::ExecStreams`], `Stdio::ask`), answered [`Answer::Given`]: the program's pid, and the caller's
+//! ends of the streams it asked for as the answer's descriptors. An exec whose program can't take the pipes
+//! it carries (one in the node's guest, whose streams are the guest's own connections) is answered so too,
+//! with those streams' ends, between which and its pipes the caller's client copies. Every earlier kind reads
+//! the same in it.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -43,7 +51,7 @@ use crate::netns;
 /// Every message's first bytes.
 pub const MAGIC: [u8; 4] = *b"HEXW";
 /// The highest version this side speaks; it reads and writes every one from [`FIRST`].
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 /// The first version, which every side reads: a client's hello goes in it, and so does a refusal of a
 /// message whose version this side can't tell or doesn't speak.
 pub const FIRST: u16 = 1;
@@ -84,12 +92,17 @@ mod kind {
     // Version 2's.
     pub const NETNS: u16 = 0x000b;
     pub const NETNS_ANSWER: u16 = 0x8009;
+    // Version 3's.
+    pub const KILL: u16 = 0x000c;
+    pub const EXEC_STREAMS: u16 = 0x000d;
+    pub const GIVEN: u16 = 0x800a;
 
     /// The version that added `kind`: a message of an earlier version is never of it. A kind no
     /// version defines is refused by the reader's match, whatever this says.
     pub fn since(kind: u16) -> u16 {
         match kind {
             NETNS | NETNS_ANSWER => 2,
+            KILL | EXEC_STREAMS | GIVEN => 3,
             _ => 1,
         }
     }
@@ -137,6 +150,20 @@ pub enum Call {
     Delete(BoxId),
     /// The node agent's network namespace counts ([`netns::Counts`]), version 2's.
     Netns,
+    /// Version 3's: KILL to the program exec `exec` of this connection started (`Proc::kill`), and only it.
+    /// Answered `Done` once sent, or when that program has ended already.
+    Kill {
+        exec: u64,
+    },
+    /// Version 3's: an exec, as [`Call::Exec`], that also asks the node to make the streams `ask` names
+    /// (`Stdio::ask`); answered [`Answer::Given`] with the caller's ends of them. A stream both carried
+    /// and asked for is refused.
+    ExecStreams {
+        id: BoxId,
+        program: Program,
+        streams: Streams,
+        ask: Streams,
+    },
 }
 
 /// Which of a program's standard streams travel with its exec, in this order; the rest are the null
@@ -203,6 +230,13 @@ pub enum Answer {
     Exited(Exit),
     /// netns's, version 2's.
     Netns(netns::Counts),
+    /// Version 3's: an exec that asked for streams ([`Call::ExecStreams`]), or whose program can't take the
+    /// pipes it carried (a guest's), runs, with this process id; the caller's ends of the streams `given` names
+    /// ride as the message's descriptors, in order. Its end comes later as [`Answer::Exited`].
+    Given {
+        pid: u32,
+        given: Streams,
+    },
 }
 
 /// The answer to a hello.
@@ -344,6 +378,12 @@ pub fn answer(version: u16, id: u64, answer: &Answer, bound: usize) -> Result<Ve
         Answer::Started { pid } => {
             w.header(version, kind::STARTED, id);
             w.u32(*pid);
+        }
+        Answer::Given { pid, given } => {
+            defines(version, kind::GIVEN, "an answer")?;
+            w.header(version, kind::GIVEN, id);
+            w.u32(*pid);
+            w.u8(given.bits());
         }
         Answer::Usage(u) => {
             w.header(version, kind::USAGE_ANSWER, id);
@@ -509,6 +549,21 @@ fn parse_request(
         kind::LIST => Request::Call(Call::List),
         kind::DELETE => Request::Call(Call::Delete(box_id(&mut r).map_err(bad)?)),
         kind::NETNS => Request::Call(Call::Netns),
+        kind::KILL => Request::Call(Call::Kill {
+            exec: r.u64().map_err(bad)?,
+        }),
+        kind::EXEC_STREAMS => {
+            let id = box_id(&mut r).map_err(bad)?;
+            let program = program(&mut r).map_err(bad)?;
+            let streams = r.u8().and_then(Streams::of).map_err(bad)?;
+            let ask = r.u8().and_then(Streams::of).map_err(bad)?;
+            Request::Call(Call::ExecStreams {
+                id,
+                program,
+                streams,
+                ask,
+            })
+        }
         _ => {
             return Err(bad(Fault::Kind {
                 kind,
@@ -518,7 +573,11 @@ fn parse_request(
         }
     };
     let want = match &request {
-        Request::Call(Call::Exec { streams, .. }) if carried => streams.count(),
+        Request::Call(Call::Exec { streams, .. } | Call::ExecStreams { streams, .. })
+            if carried =>
+        {
+            streams.count()
+        }
         _ => 0,
     };
     if msg.descriptors != want {
@@ -532,14 +591,19 @@ fn parse_request(
     Ok((Header { version, kind, id }, request))
 }
 
-/// The answer a received message holds, at most `bound` bytes, or why it holds none. An answer
-/// carries no descriptors.
+/// Whether an answer in `version` can give a started program's streams' ends ([`Answer::Given`]).
+pub fn gives_ends(version: u16) -> bool {
+    version >= kind::since(kind::GIVEN)
+}
+
+/// The answer a received message holds, at most `bound` bytes, or why it holds none. An answer carries
+/// no descriptors but [`Answer::Given`]'s, one for each stream it names.
 pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer), Fault> {
     let mut r = Reader::new(msg.bytes);
     let (version, kind, id) = r.header()?;
     check(msg, bound, version)?;
     defines(version, kind, "an answer")?;
-    if msg.descriptors != 0 {
+    if kind != kind::GIVEN && msg.descriptors != 0 {
         return Err(Fault::Descriptors {
             what: "an answer",
             want: 0,
@@ -588,6 +652,18 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
             discarded: r.u64()?,
             failed: r.u64()?,
         }),
+        kind::GIVEN => {
+            let pid = r.u32()?;
+            let given = r.u8().and_then(Streams::of)?;
+            if msg.descriptors != given.count() {
+                return Err(Fault::Descriptors {
+                    what: "a given answer",
+                    want: given.count(),
+                    got: msg.descriptors,
+                });
+            }
+            Answer::Given { pid, given }
+        }
         _ => {
             return Err(Fault::Kind {
                 kind,
@@ -654,6 +730,8 @@ fn request_name(kind: u16) -> &'static str {
         kind::DELETE => "a delete",
         kind::RELEASE => "a release",
         kind::NETNS => "a netns",
+        kind::KILL => "a kill",
+        kind::EXEC_STREAMS => "an exec asking for streams",
         _ => "a request",
     }
 }
@@ -706,6 +784,26 @@ fn put_call(w: &mut Writer, version: u16, id: u64, call: &Call) -> Result<(), Fa
         Call::Netns => {
             defines(version, kind::NETNS, "a request")?;
             w.header(version, kind::NETNS, id);
+            Ok(())
+        }
+        Call::Kill { exec } => {
+            defines(version, kind::KILL, "a request")?;
+            w.header(version, kind::KILL, id);
+            w.u64(*exec);
+            Ok(())
+        }
+        Call::ExecStreams {
+            id: b,
+            program,
+            streams,
+            ask,
+        } => {
+            defines(version, kind::EXEC_STREAMS, "a request")?;
+            w.header(version, kind::EXEC_STREAMS, id);
+            w.string(b.as_str())?;
+            put_program(w, program)?;
+            w.u8(streams.bits());
+            w.u8(ask.bits());
             Ok(())
         }
     }
