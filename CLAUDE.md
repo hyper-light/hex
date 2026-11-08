@@ -142,7 +142,14 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   `GetExitCodeProcess`), marks its standard handles inheritable (`SetHandleInformation`), reads the job's
   accounting and its guaranteed memory-limit violation (`QueryInformationJobObject`), ends the job
   (`TerminateJobObject`) and closes its handles (`CloseHandle`), and reads the machine's processor count
-  (`GetActiveProcessorCount`). `windows-sys` binds these as `unsafe` foreign functions, and std's own
+  (`GetActiveProcessorCount`). Where its boxes outlive the node (the keeper, `super::keeper`; decision
+  "the Windows node, on one completion port"), it names each box's job (`CreateJobObjectW` with a name,
+  reopened by the next node with `OpenJobObjectW`), and a keeper holds a second handle to each: the node
+  duplicates the job into the keeper and closes it there on delete (`DuplicateHandle` into another process
+  and with `DUPLICATE_CLOSE_SOURCE`, the keeper opened by `OpenProcess` with `PROCESS_DUP_HANDLE`), names
+  a process by its creation time (`GetProcessTimes`) so a reused pid is told apart, waits on a process or
+  the keeper's stop (`WaitForMultipleObjects`), and makes and signals that stop (`CreateEventW` named,
+  `SetEvent`). `windows-sys` binds these as `unsafe` foreign functions, and std's own
   job-object support and its `PROC_THREAD_ATTRIBUTE_JOB_LIST`/`_HANDLE_LIST` process creation are
   unstable; Rust can express none of them safely.
 - `crates/hex-runtime/src/windows/oci/sys.rs`: the Windows `oci` class, a Windows image run process-isolated
