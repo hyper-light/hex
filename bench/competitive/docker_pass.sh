@@ -10,7 +10,8 @@
 # (2000), HEXBENCH_SUSTAINED (10000, the sustained phase's lifecycles), CAP (1000), BUDGET_MIB (8192), MEMORY (16g),
 # CPUSET (the VM's CPUs past an eighth of them, at least 2: fedora's 4-31 of 32), HOST_CPU (the machine's processor,
 # for env.txt), HEXBENCH_OWNER and HEXBENCH_REUSE (unset: boxes of no owner; as host.sh passes them), CRUN_TARBALL
-# (unset: crun's release downloaded; either way its bytes checked against the pinned sha256). The VM's load
+# (unset: crun's release downloaded; either way its bytes checked against the pinned sha256), CARGO_BUILD_JOBS (unset:
+# cargo's, one a CPU; a host short of memory bounds the build's jobs with it). The VM's load
 # is recorded at the pass's start and end, as host.sh records the host's, and so are
 # the pass's parameters as it ran them.
 set -euo pipefail
@@ -56,7 +57,7 @@ git -C "$REPO" -c core.autocrlf=false -c core.eol=lf archive "$SHA" | docker run
 say "build hex, seam_oci and the libcrun driver into volume $BIN"
 docker volume create "$BIN" > /dev/null
 docker run "${BENCH_LABELS[@]}" --rm -v "$SRC:/src:ro" -v "$BIN:/out" -v hexpass-cargo:/cargo -v hexpass-rustup:/rustup -v hexpass-target:/target \
-  -e CARGO_HOME=/cargo -e RUSTUP_HOME=/rustup -e CARGO_TARGET_DIR=/target -e RUSTUP_TOOLCHAIN=1.99.1 \
+  -e CARGO_HOME=/cargo -e RUSTUP_HOME=/rustup -e CARGO_TARGET_DIR=/target -e RUSTUP_TOOLCHAIN=1.99.1 -e CARGO_BUILD_JOBS \
   -e PATH=/cargo/bin:/usr/bin:/bin -e CRUN_VERSION="$CRUN_VERSION" -e CRUN_SHA256="$CRUN_SHA256" "${CRUN_GIVEN[@]}" \
   -w /src "$IMG" bash -euo pipefail -c '
     [ -x /cargo/bin/rustup ] || curl -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal --default-toolchain none
