@@ -6,6 +6,7 @@
 use super::*;
 use std::io::{Read, Write as _};
 use std::os::fd::{AsFd, BorrowedFd};
+use std::sync::PoisonError;
 use std::time::Duration;
 
 use hex_api::sim::SimRuntime;
@@ -28,7 +29,11 @@ const PATIENCE: Duration = match RECORDED {
     None => Duration::MAX,
 };
 
-/// Shuts a host's inspect until opened: holds calls in flight on purpose.
+/// Shuts a host's inspect until opened: holds calls in flight on purpose. A held call waits for the test to open the
+/// gate, the fact it needs, never for a time (CLAUDE.md §4): a test holds it shut across looks of its own, `quiet`'s
+/// among them, so a gate that opened itself after a patience would answer a call the test is checking is held. Its
+/// bound is the test's end: a test's [`Lab`] opens it as it drops, before the server stops, a failed assertion's
+/// unwinding too, so no stop waits on a held call (CLAUDE.md §2).
 #[derive(Default)]
 struct Gate {
     shut: Mutex<bool>,
@@ -37,15 +42,14 @@ struct Gate {
 
 impl Gate {
     fn set(&self, shut: bool) {
-        *self.shut.lock().unwrap() = shut;
+        *self.shut.lock().unwrap_or_else(PoisonError::into_inner) = shut;
         self.opened.notify_all();
     }
 
     fn pass(&self) {
-        let deadline = Instant::now().checked_add(PATIENCE);
         let mut shut = self.shut.lock().unwrap();
-        while *shut && deadline.is_none_or(|d| Instant::now() < d) {
-            shut = self.opened.wait_timeout(shut, PATIENCE).unwrap().0;
+        while *shut {
+            shut = self.opened.wait(shut).unwrap();
         }
     }
 }
@@ -195,6 +199,14 @@ impl Lab {
 
     fn watched(&self) -> usize {
         self.server.shared.table.lock().unwrap().watched.len()
+    }
+}
+
+impl Drop for Lab {
+    /// Opens the host's gate before the server stops (this runs before the fields drop), so a call the test left held
+    /// is let through and the server's stop never waits on it.
+    fn drop(&mut self) {
+        self.host.gate.set(false);
     }
 }
 
