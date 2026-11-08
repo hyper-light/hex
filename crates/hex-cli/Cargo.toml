@@ -70,6 +70,7 @@ hex-client.workspace = true
 # Windows runtime; windows-sys is for the test's own check that a deleted box's grandchild is gone.
 [target.'cfg(target_os = "windows")'.dev-dependencies]
 hex-core.workspace = true
+hex-afunix.workspace = true
 hex-client.workspace = true
 hex-runtime.workspace = true
 windows-sys.workspace = true
