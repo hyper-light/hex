@@ -17,6 +17,7 @@
 //! lifecycle (docs/research/runtime/goal5-netns-reuse.md).
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::os::fd::{AsFd, OwnedFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
@@ -24,7 +25,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 use hex_api::{BoxId, BoxOwner, Refusal};
-use hex_core::netns::{Counts, Pool, Take};
+use hex_core::netns::{Counts, Missing, Pool, Reason, Step, Take};
 use hex_core::netns_reuse::{self, Idle, Refused as Why, Take as Kept, Whose};
 use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::net;
@@ -564,6 +565,19 @@ impl Netns {
         Ok((bound, per_owner))
     }
 
+    /// A pool refused because the node lacks what a make takes (`missing`): no thread, and every take is
+    /// made on the path, counted under that reason ([`Pool::refused`]).
+    pub fn refused(missing: Missing) -> Self {
+        Self {
+            shared: Arc::new(Shared {
+                pool: Mutex::new(Pool::refused(missing)),
+                wake: Condvar::new(),
+            }),
+            refill: None,
+            kept: None,
+        }
+    }
+
     /// What the pool has done. Counted at the take, so a create that fails after it took a namespace,
     /// or found the pool dry, is counted all the same.
     pub fn counts(&self) -> Result<Counts, Refusal> {
@@ -803,11 +817,14 @@ fn check_returns(state: &KeptState, line: &Mutex<Receiver<(String, KeptNet)>>) {
 
 /// The refill thread: makes a namespace whenever the pool asks for one and hands it in, one at a time,
 /// as the pool's count of what it asks for needs, and ends once the pool is shut down. It opens its
-/// home namespace first; a thread that can't makes none, each make it is asked for failing, counted.
+/// home namespace first; a thread that can't makes none, each make it is asked for failing, counted
+/// under [`Step::Home`]. Each failed make is counted by the step that failed, its reason (the errno
+/// and the error's text) kept as that step's latest, and said on the agent's stderr ([`failed_line`]):
+/// at most one a take, since a failed make stops the asking until the next.
 /// A namespace the pool refuses (past its bound, which one maker never reaches, or after shutdown) is
 /// closed here. A poisoned lock ends it, and every create then refuses on the same lock.
 fn refill(shared: &Shared) {
-    let home = net::thread_network();
+    let home = net::home();
     loop {
         let Ok(mut pool) = shared.pool.lock() else {
             return;
@@ -838,9 +855,22 @@ fn refill(shared: &Shared) {
             Ok(ns) => {
                 let _ = pool.made(ns);
             }
-            Err(_) => pool.failed(),
+            Err(failed) => {
+                let reason = failed.reason();
+                // Said where the agent's operator reads it; the reason is kept in the counts all the
+                // same, so a stderr that can't be written loses nothing inspect can't show.
+                let _ = std::io::stderr()
+                    .lock()
+                    .write_all(failed_line(failed.step, &reason).as_bytes());
+                pool.failed(failed.step, reason);
+            }
         }
     }
+}
+
+/// What the agent says on stderr when a make ahead fails: the step and why.
+fn failed_line(step: Step, reason: &Reason) -> String {
+    format!("hex node: a network namespace made ahead failed at {step}: {reason}\n")
 }
 
 #[cfg(test)]

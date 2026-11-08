@@ -105,18 +105,33 @@ impl Host for TestHost {
     }
 
     fn netns(&self) -> Result<netns::Counts, Refusal> {
-        Ok(COUNTS)
+        Ok(counts())
     }
 }
 
 /// The test host's network namespace counts, each field a different value.
-const COUNTS: netns::Counts = netns::Counts {
-    made_ahead: 5,
-    taken: 4,
-    made_on_path: 3,
-    discarded: 2,
-    failed: 1,
-};
+fn counts() -> netns::Counts {
+    netns::Counts {
+        made_ahead: 5,
+        taken: 4,
+        made_on_path: 3,
+        discarded: 2,
+        failed: 15,
+        failed_by: netns::FailedBy {
+            home: 1,
+            unshare: 2,
+            open: 3,
+            loopback: 4,
+            back: 5,
+        },
+        refused: None,
+        refused_on_path: 6,
+        last_failed: netns::LastFailed {
+            unshare: Some(netns::Reason::new(Some(1), "unshare failed: EPERM")),
+            ..netns::LastFailed::default()
+        },
+    }
+}
 
 struct Lab {
     server: Server,
@@ -404,18 +419,18 @@ fn hostile_messages_are_refused_and_the_connection_is_served_after() {
 }
 
 /// HEX-SOCK-10: the node's network namespace counts cross the socket as its host holds them: asked
-/// through `hex-client`, and on a raw connection in version 2, answered in its request's version with
+/// through `hex-client`, and on a raw connection in version 4, answered in its request's version with
 /// its id.
 #[test]
 fn the_network_namespace_counts_cross_the_socket() {
     let lab = Lab::new(limits());
-    assert_eq!(lab.client().netns().unwrap(), COUNTS);
+    assert_eq!(lab.client().netns().unwrap(), counts());
     let fd = lab.raw();
     send_raw(&fd, &request(4, Call::Netns), &[]);
     let (h, answer) = answer_of(&fd);
     assert_eq!(
         (h.version, h.id, answer),
-        (wire::VERSION, 4, Answer::Netns(COUNTS))
+        (wire::VERSION, 4, Answer::Netns(counts()))
     );
 }
 

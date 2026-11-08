@@ -626,7 +626,8 @@ pub fn exec_direct(
     }
     // Whatever the clone did, this thread's children are born in the node's own pid namespace again.
     let reset = if set {
-        own_pid_namespace().and_then(|own| sys::setns(own.as_fd(), libc::CLONE_NEWPID))
+        own_pid_namespace()
+            .and_then(|own| sys::setns(own.as_fd(), libc::CLONE_NEWPID).map_err(OciError::from))
     } else {
         Ok(())
     };

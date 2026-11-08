@@ -28,10 +28,10 @@
 //!   or a delete, waits for the create under way (the follow-on fix, §4);
 //!
 //! Rootless where the caller isn't root, in a delegated cgroup v2 subtree, as oci_seccomp.rs; where
-//! neither is possible it prints SKIP and why rather than pass falsely. The crash runs first, before
-//! this process opens any node: an agent's orphans go to its nearest subreaper, and this process
-//! becomes one when it opens a node, so a restart in a process that never was the init's ancestor is
-//! the real one's.
+//! neither is possible it records the skip and why (hex_testkit, which the gate prints) rather
+//! than pass falsely. The crash runs first, before this process opens any node: an agent's orphans
+//! go to its nearest subreaper, and this process becomes one when it opens a node, so a restart in
+//! a process that never was the init's ancestor is the real one's.
 #![cfg(target_os = "linux")]
 #![allow(
     clippy::unwrap_used,
@@ -91,7 +91,12 @@ fn oci_boxes_report_their_inits_exit_through_the_seam() {
             rerun_delegated(TEST, &direct)
         }
         Err(direct) => {
-            eprintln!("SKIP: no usable cgroup v2 delegation ({direct}); run on a cgroup-v2 host")
+            hex_testkit::skip(
+                "oci_boxes_report_their_inits_exit_through_the_seam",
+                "cgroup v2 delegation",
+                &format!("none in the delegated scope either ({direct}); run on a cgroup-v2 host"),
+            )
+            .expect("recording the skip");
         }
     }
 }
@@ -118,9 +123,14 @@ fn rerun_delegated(name: &str, direct: &str) {
         .map(|d| Path::new(&d).join("systemd/private"))
         .is_some_and(|p| p.exists());
     if !manager {
-        eprintln!(
-            "SKIP: own cgroup isn't ours to subdivide ({direct}) and no systemd --user manager answers for a private scope"
-        );
+        hex_testkit::skip(
+            name,
+            "cgroup v2 delegation",
+            &format!(
+                "own cgroup isn't ours to subdivide ({direct}) and no systemd --user manager answers for a private scope"
+            ),
+        )
+        .expect("recording the skip");
         return;
     }
     let test_bin = std::env::current_exe().expect("test binary path");
@@ -447,7 +457,12 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     // First, while this process is no node's and so no subreaper; it also finds out whether a
     // container runs here at all (rootless needs unprivileged user namespaces).
     if let Err(e) = crash_and_restart(&lab, own) {
-        eprintln!("SKIP: rootless OCI unavailable here ({e})");
+        hex_testkit::skip(
+            "oci_boxes_report_their_inits_exit_through_the_seam",
+            "unprivileged user namespaces",
+            &format!("rootless OCI unavailable here ({e})"),
+        )
+        .expect("recording the skip");
         return;
     }
     parent_and_exit_code(&lab, own);

@@ -284,7 +284,7 @@ impl Node {
             Owner::Root => Pools::root(sizes),
             Owner::Rootless { .. } => Pools::rootless(sizes),
         };
-        let netns = Netns::learning(pools.netns, crate::netns::FilesBound::now(pools)?, sizes)?;
+        let netns = pool(owner, lacks()?, pools, sizes)?;
         let ipc_uts = IpcUtsPool::learning(sizes.starts.ipc_uts, pools.ipc_uts)?;
         let oci_boxes = BoxRoot::open(&root.dir().join(OCI_BOXES), root.disks().to_vec())?;
         let devices = device_programs(owner, &oci_boxes, sizes.programs)?;
@@ -493,6 +493,14 @@ impl Node {
                 what: "network-namespace bound",
                 why: format!(
                     "a rootless node makes no network namespaces ahead, so it can't hold {bound}"
+                ),
+            });
+        }
+        if let Some(missing) = lacks()?.filter(|_| bound > 0) {
+            return Err(Refusal::Invalid {
+                what: "network-namespace bound",
+                why: format!(
+                    "this node lacks {missing}, which a make ahead takes, so it can't hold {bound}"
                 ),
             });
         }
@@ -769,7 +777,8 @@ impl Node {
     /// What the node has counted of its containers' network namespaces since its pool opened
     /// (decision 4): made ahead, taken by a create, made on a create's path (the pool dry, or the
     /// container in a user namespace of its own, as every rootless node's is), discarded at shutdown,
-    /// and makes that failed. Counted at the take, so a create that fails after it is counted all the
+    /// and makes that failed, by the step that failed; and, where the pool was refused for what the
+    /// node lacks, what that is and the takes made on the path for it. Counted at the take, so a create that fails after it is counted all the
     /// same. The bench reads these around each phase, in process here and over the socket
     /// ([`crate::serve::Host::netns`]).
     pub fn netns(&self) -> Result<netns::Counts, Refusal> {
@@ -2113,6 +2122,39 @@ fn init_proc_id(pid: i32, start_time: Option<u64>) -> Option<ProcId> {
 /// pid with the start time recorded, as crun's `process-start-time` tells a container from a recycled
 /// pid. A recorded start time of 0 means it wasn't known at record time (state without the field), so
 /// the pid alone decides, as [`hex_runtime::linux::oci::state::State::init_alive`] does for that case.
+/// The pool a node opens with (decision 4). A namespace made ahead belongs to the agent's user
+/// namespace, so only a node whose containers are in it, a root node's, makes them; a rootless node's
+/// containers each have a user namespace of their own. A root node that lacks what a make takes
+/// (`lacks`, as a Kubernetes pod's root does) starts no pool whose every make would fail: its pool is
+/// refused, naming what it lacks, and its creates make their namespaces on the path, counted so.
+/// Every other node's pool is learned from its draws within `pools`' bound (a rootless node's is 0, so it makes
+/// none), its kept namespaces' files within the descriptor limit the node was given ([`crate::netns::FilesBound`]).
+fn pool(
+    owner: Owner,
+    lacks: Option<netns::Missing>,
+    pools: Pools,
+    sizes: Sizes,
+) -> Result<Netns, Refusal> {
+    match (owner, lacks) {
+        (Owner::Root, Some(missing)) => Ok(Netns::refused(missing)),
+        _ => Netns::learning(pools.netns, crate::netns::FilesBound::now(pools)?, sizes),
+    }
+}
+
+/// What this process lacks of the capabilities a make ahead takes, in its own user namespace
+/// (capget(2)): CAP_SYS_ADMIN for `unshare` and `setns`, CAP_NET_ADMIN for loopback's rtnetlink
+/// request.
+fn lacks() -> Result<Option<netns::Missing>, Refusal> {
+    use rustix::thread::CapabilitySet;
+    let held = rustix::thread::capabilities(None)
+        .map_err(|e| Refusal::os("reading the node's capabilities", e))?
+        .effective;
+    Ok(netns::Missing::of(
+        held.contains(CapabilitySet::SYS_ADMIN),
+        held.contains(CapabilitySet::NET_ADMIN),
+    ))
+}
+
 fn init_alive(init: ProcId) -> bool {
     match i32::try_from(init.pid).ok().and_then(start_time) {
         None => false,
@@ -2242,6 +2284,54 @@ mod tests {
             create_turn(&turns, &id("c")).is_ok(),
             "a turn let go is free again"
         );
+
+    }
+
+    /// This process's effective capabilities, as /proc/self/status says them (proc(5)): the oracle
+    /// [`lacks`] is held to, read another way than capget.
+    fn cap_eff() -> u64 {
+        let status = fs::read_to_string("/proc/self/status").unwrap();
+        let line = status
+            .lines()
+            .find_map(|l| l.strip_prefix("CapEff:"))
+            .unwrap();
+        u64::from_str_radix(line.trim(), 16).unwrap()
+    }
+
+    /// HEX-NETNS-13: what the node lacks is what /proc/self/status says it doesn't hold of
+    /// CAP_SYS_ADMIN (21) and CAP_NET_ADMIN (12), capability(7)'s numbers. Do: read both ways. Expect:
+    /// the same, wherever the test runs (a pod's root, a user, a privileged root).
+    #[test]
+    fn what_the_node_lacks_is_what_the_kernel_says_it_holds() {
+        let eff = cap_eff();
+        let held = |bit: u32| eff & (1u64 << bit) != 0;
+        assert_eq!(lacks().unwrap(), netns::Missing::of(held(21), held(12)));
+    }
+
+    /// HEX-NETNS-13: a root node that lacks what a make takes starts no pool whose every make would
+    /// fail. Do: open the pool of a root node lacking CAP_NET_ADMIN, then take as a create does.
+    /// Expect: the pool refused, naming it, nothing made or failed, and the take answered on the path
+    /// and counted under the refusal. A rootless node's pool is not refused: it holds none by design.
+    #[test]
+    fn a_root_node_lacking_a_capability_refuses_its_pool_by_name() {
+        use hex_runtime::linux::oci::run::Networks;
+        let missing = netns::Missing::of(true, false).unwrap();
+        let sizes = Sizes::now().unwrap();
+        let refused = pool(Owner::Root, Some(missing), Pools::root(sizes), sizes).unwrap();
+        assert!(refused.take().unwrap().is_none(), "a take made on the path");
+        let c = refused.counts().unwrap();
+        assert_eq!(c.refused, Some(missing));
+        assert_eq!((c.made_on_path, c.refused_on_path), (1, 1), "{c:?}");
+        assert_eq!((c.made_ahead, c.failed), (0, 0), "{c:?}");
+
+        let rootless = pool(
+            Owner::Rootless { uid: 1, gid: 1 },
+            Some(missing),
+            Pools::rootless(sizes),
+            sizes,
+        )
+        .unwrap();
+        assert_eq!(rootless.counts().unwrap().refused, None);
     }
 
     /// Decision 2: an oci box's init is told from a process given its pid since by its start time, as

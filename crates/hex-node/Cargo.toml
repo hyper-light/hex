@@ -23,6 +23,7 @@ test-controls = []
 
 [dev-dependencies]
 hex-client.workspace = true
+hex-testkit.workspace = true
 tempfile.workspace = true
 
 [lints]

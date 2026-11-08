@@ -32,6 +32,7 @@ tempfile.workspace = true
 serde_json.workspace = true
 hex-client.workspace = true
 hex-node = { workspace = true, features = ["test-controls"] }
+hex-testkit.workspace = true
 
 [lints]
 workspace = true

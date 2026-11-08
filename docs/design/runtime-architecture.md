@@ -421,7 +421,11 @@ defines, so an extension an older agent can't apply is refused, never dropped (C
 version added is refused in an earlier version's message, as one that version doesn't define. A list's answer comes
 in as many messages as its boxes need, so a dense node answers it whole. Version 2 (goal 4 plan step 2) adds one
 request and its answer, the node's network namespace counts (decision 4), and writes every version 1 kind as
-version 1 does but for its header's version. A client says hello in version 1, which an agent of any version reads,
+version 1 does but for its header's version. Version 3 appends to that answer why its failed makes failed, by step,
+and whether the pool was refused and for what (decision 4), and writes every version 2 kind as version 2 does;
+version 4 appends the latest reason a make failed for at each step, and writes every version 3 kind as version 3
+does. A
+client says hello in version 1, which an agent of any version reads,
 learns the highest version the agent speaks from its answer, and writes the rest in the highest both speak; an
 agent answers each request in its version, and refuses what it can't read in version 1, so a client of either
 version reads the refusal.
@@ -875,7 +879,17 @@ the seeds' bound. Until then it held at most 32. Its
 (`STATUS.md`, Open) hardly notices. One thread refills whenever the pool is below its bound, at 2,280/s or more;
 and it keeps up with sustained churn: no sustained phase of record found the pool dry (above). A make that fails
 stops the refill until the next take, so a kernel that refuses every make costs that thread one failed make a take,
-never a loop of them (CLAUDE.md §2). Takes go oldest first, so under churn each namespace is handed out within a
+never a loop of them (CLAUDE.md §2). A failed make is counted by the step that failed (opening the thread's own
+namespace, the unshare, opening the one made, its loopback, going back), and the latest reason at each step is
+kept, the errno where the kernel gave one and the error's text cut to 256 bytes, one a step, so what is kept stays
+bounded; the agent also says each failed make on its stderr, at most one a take. So what the kernel refused is
+never only a number (§3). A make takes CAP_SYS_ADMIN, for `unshare(CLONE_NEWNET)` and `setns` (unshare(2), setns(2)), and
+CAP_NET_ADMIN, for loopback's rtnetlink request: run as root with CAP_SYS_ADMIN added and not CAP_NET_ADMIN, the
+make fails at its loopback (fedora unit hex-ci-fix-20261104T083657Z), and uid 0 alone holds neither where a container
+runtime's default set applies, as in a Kubernetes pod (kiln CI's gates pod, CapEff `a80425fb`). A root node checks
+both as it opens (capget(2)); lacking either, it starts no pool whose every make would fail: its pool is refused,
+naming what it lacks, on `hex node`'s stderr and in its counts, and each create makes its container's namespace on
+its path, counted as made there for that reason. Takes go oldest first, so under churn each namespace is handed out within a
 bound's worth of takes of its making, none left in the pool while others come and go. The node counts what its
 containers' namespaces were (made ahead, taken from the pool, made on a create's path), and seam_oci reads the counts
 around each of its phases, in process (`Node::netns`) and over the socket (the wire's version 2), so the sustained
@@ -893,7 +907,12 @@ holds more than its bound, and a namespace made past it is refused and handed ba
 namespace out once, the oldest first, and never takes one back (HEX-NETNS-2); a take from it dry is answered with a
 namespace made on the path, and counted, as is a create it can't serve, which takes nothing (HEX-NETNS-3); after
 shutdown a take is refused, and what it held is handed back and counted as discarded (HEX-NETNS-4); it asks for the
-room below its bound until a make fails, then for nothing until the next take (HEX-NETNS-5). Its counts (made ahead,
+room below its bound until a make fails, then for nothing until the next take (HEX-NETNS-5); each failed make is
+counted by the step that failed (HEX-NETNS-12); and a pool refused for what the node lacks asks for nothing, and
+every take from it is made on the path, counted under the refusal, which the counts name (HEX-NETNS-13, with what a
+node lacks held to `/proc/self/status`'s `CapEff` and `hex node`'s line naming it); and the latest reason a make
+failed for is kept at each step, its text cut to its bound, the kernel's EPERM kept where a capability is missing,
+and said on the agent's stderr (HEX-NETNS-14). Its counts (made ahead,
 taken, made on the path, discarded, failed) are what the bench reads, and they equal the oracle's. A doc-truth test
 holds the core's bound to this decision's. The node's shell (goal 4 plan step 4): a stand-in shim holds no
 descriptor of the namespace made ahead it is handed, reaches it by its path, and finds the agent's descriptor
@@ -903,10 +922,11 @@ refuses the create when the pool refuses (HEX-NETNS-7, against a recording fake)
 their namespaces differ from each other's, an earlier box's and the host's, loopback up, and the agent holds neither
 (HEX-NETNS-8, `oci_box`); a pool of 0 makes a box's namespace on the path, loopback up, counted so (HEX-NETNS-9);
 rootless, the box's namespace is made in its own user namespace, which owns it, nothing taken (HEX-NETNS-10); and
-the refill thread fills its pool to the bound as root, each namespace its own with loopback up, or counts each
-failed make where it may not and serves takes on the path (HEX-NETNS-11). The hex-api conformance suite passes over
-the socket on `oci` boxes that each take a pooled namespace as root, or make their own on the path rootless
-(`node_socket`), as it does in process on boxes from OciSpecs with a private network (`oci_spec_box`).
+the refill thread fills its pool to the bound where it holds CAP_SYS_ADMIN and CAP_NET_ADMIN, each namespace its
+own with loopback up, or counts each failed make where it doesn't (a pod's root, as in kiln CI) and serves takes on
+the path (HEX-NETNS-11). The hex-api conformance suite passes over the socket on `oci` boxes that each take a
+pooled namespace as root, or make their own on the path rootless (`node_socket`), as it does in process on boxes
+from OciSpecs with a private network (`oci_spec_box`).
 
 **Sources.** `docs/research/runtime/netns-pool.md`: the kernel's `net/core/net_namespace.c` at v6.19; namespaces(7),
 setns(2) and user_namespaces(7); containerd v2.2.0's `pkg/netns`; Lambda's networking account (Vogels, 2026); AFaaS
