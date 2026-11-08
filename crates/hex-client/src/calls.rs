@@ -41,6 +41,17 @@ pub trait Transport: Send + Sync + 'static {
     fn send(&self, bytes: &[u8], with: Option<Self::Stdio>) -> Result<(), Sent>;
     /// Ends the connection both ways: the reading side sees the end.
     fn shutdown(&self);
+    /// Whether it makes the streams an exec asks for itself ([`Transport::asks`]), rather than asking the
+    /// agent, which gives their ends with its answer ([`Answer::Given`]).
+    const MAKES_ASKED: bool = false;
+    /// The streams `ask` names for exec `exec`, made here, its program's ends the agent's to find (a
+    /// guest's stdio connections, named for it): only where [`Transport::MAKES_ASKED`].
+    fn asks(&self, exec: u64, ask: hex_api::Ask) -> Result<hex_api::Given, Refusal> {
+        let _ = (exec, ask);
+        Err(Refusal::Broken(
+            "this transport asks the agent for an exec's streams".to_owned(),
+        ))
+    }
 }
 
 pub(crate) fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
@@ -64,6 +75,8 @@ struct State {
     closed: Option<Refusal>,
     /// Why the agent won't serve the connection, when it said (an answer to no request, id 0).
     refused: Option<Refusal>,
+    /// The streams a given answer's descriptors are, by its request's id, until its exec takes them.
+    given: BTreeMap<u64, hex_api::Given>,
 }
 
 struct Waiting {
@@ -122,6 +135,42 @@ impl<T> Shared<T> {
     /// `Proc` or completion. One nobody waits for (a call that gave up waiting, a program released) has no
     /// taker. Completions run after the lock is let go, so one may call the client again.
     pub(crate) fn deliver(&self, header: Header, answer: Answer) -> Result<(), Refusal> {
+        self.deliver_with(header, answer, Vec::new())
+    }
+
+    /// [`Shared::deliver`], with the descriptors that came with the message: a given answer's, one for each
+    /// stream it names, in order, kept for its exec.
+    #[cfg(unix)]
+    pub(crate) fn deliver_with(
+        &self,
+        header: Header,
+        answer: Answer,
+        fds: Vec<std::os::fd::OwnedFd>,
+    ) -> Result<(), Refusal> {
+        if let Answer::Given { given, .. } = &answer {
+            let mut fds = fds.into_iter();
+            let mut take = |on: bool| if on { fds.next() } else { None };
+            let ends = hex_api::Given {
+                stdin: take(given.stdin),
+                stdout: take(given.stdout),
+                stderr: take(given.stderr),
+            };
+            self.state()?.given.insert(header.id, ends);
+        }
+        self.deliver_inner(header, answer)
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn deliver_with(
+        &self,
+        header: Header,
+        answer: Answer,
+        _fds: Vec<()>,
+    ) -> Result<(), Refusal> {
+        self.deliver_inner(header, answer)
+    }
+
+    fn deliver_inner(&self, header: Header, answer: Answer) -> Result<(), Refusal> {
         let mut due: Vec<Due> = Vec::new();
         {
             let mut state = self.state()?;
@@ -158,7 +207,7 @@ impl<T> Shared<T> {
                 answer => {
                     // An exec that started no program has no end to come: a completion waiting
                     // for one is let go.
-                    if !matches!(answer, Answer::Started { .. })
+                    if !matches!(answer, Answer::Started { .. } | Answer::Given { .. })
                         && matches!(state.programs.get(&header.id), Some(Watching::Then(_)))
                     {
                         state.programs.remove(&header.id);
@@ -582,6 +631,7 @@ pub(crate) fn unexpected(call: &str, answer: &Answer) -> Refusal {
         Answer::Refused(_) => "a refusal",
         Answer::Exited(_) => "a program's end",
         Answer::Netns(_) => "network namespace counts",
+        Answer::Given { .. } => "a started program with streams",
     };
     Refusal::Broken(format!("the node agent answered a {call} with {kind}"))
 }
@@ -599,26 +649,76 @@ impl<T: Transport> Runtime for Core<T> {
         self.done(Call::Start(id.clone()), "start")
     }
 
+    /// Streams asked for are made by the transport where it can (a guest's, no copy) or asked of the
+    /// agent, which gives their ends with its answer (wire version 3's [`Call::ExecStreams`]).
     fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
-        let streams = Streams {
+        stdio.check()?;
+        let ask = stdio.ask;
+        let asking = ask != hex_api::Ask::default();
+        let mut streams = Streams {
             stdin: stdio.stdin.is_some(),
             stdout: stdio.stdout.is_some(),
             stderr: stdio.stderr.is_some(),
         };
         let ending = Arc::new(Ending::default());
-        let request = Request::Call(Call::Exec {
-            id: id.clone(),
-            program,
-            streams,
-        });
         let transport = &self.conn.shared.transport;
-        let (exec, answer) = self.call(
-            &request,
-            |exec| transport.stdio(exec, stdio).map(Some),
-            Some(Arc::clone(&ending)),
-        )?;
+        // Made here, the asked streams ride beside the exec as its own do; asked of the agent, they come
+        // back with its answer.
+        let made = std::cell::Cell::new(None);
+        let ask_streams = Streams {
+            stdin: ask.stdin,
+            stdout: ask.stdout,
+            stderr: ask.stderr,
+        };
+        let request = |exec_streams: Streams, agent_makes: bool| {
+            if agent_makes {
+                Request::Call(Call::ExecStreams {
+                    id: id.clone(),
+                    program: program.clone(),
+                    streams: exec_streams,
+                    ask: ask_streams,
+                })
+            } else {
+                Request::Call(Call::Exec {
+                    id: id.clone(),
+                    program: program.clone(),
+                    streams: exec_streams,
+                })
+            }
+        };
+        // Whether the transport makes them is known only once the exec's id is: asked with it.
+        let (exec, answer) = if asking {
+            let local = T::MAKES_ASKED;
+            if local {
+                streams.stdin |= ask.stdin;
+                streams.stdout |= ask.stdout;
+                streams.stderr |= ask.stderr;
+            }
+            let req = request(streams, !local);
+            self.call(
+                &req,
+                |exec| {
+                    if local {
+                        made.set(Some(transport.asks(exec, ask)?));
+                    }
+                    transport.stdio(exec, stdio).map(Some)
+                },
+                Some(Arc::clone(&ending)),
+            )?
+        } else {
+            let req = request(streams, false);
+            self.call(
+                &req,
+                |exec| transport.stdio(exec, stdio).map(Some),
+                Some(Arc::clone(&ending)),
+            )?
+        };
+        let given = match &answer {
+            Answer::Given { .. } => self.conn.shared.state()?.given.remove(&exec),
+            _ => made.take(),
+        };
         match answer {
-            Answer::Started { pid } => Ok(Box::new(RemoteProc {
+            Answer::Started { pid } | Answer::Given { pid, .. } => Ok(Box::new(RemoteProc {
                 conn: Arc::clone(&self.conn),
                 version: self.version,
                 bound: self.limits.message_bytes,
@@ -626,10 +726,12 @@ impl<T: Transport> Runtime for Core<T> {
                 pid,
                 ending,
                 exit: None,
+                given,
             })),
             other => {
                 if let Ok(mut state) = self.conn.shared.state() {
                     state.programs.remove(&exec);
+                    state.given.remove(&exec);
                 }
                 match other {
                     Answer::Refused(r) => Err(r),
@@ -684,6 +786,8 @@ struct RemoteProc<T: Transport> {
     pid: u32,
     ending: Arc<Ending>,
     exit: Option<Exit>,
+    /// The caller's ends of the streams its exec asked for, until taken.
+    given: Option<hex_api::Given>,
 }
 
 impl<T: Transport> RemoteProc<T> {
@@ -751,6 +855,10 @@ impl<T: Transport> Proc for RemoteProc<T> {
             Answer::Refused(r) => Err(r),
             other => Err(unexpected("kill", &other)),
         }
+    }
+
+    fn streams(&mut self) -> Result<hex_api::Given, Refusal> {
+        Ok(self.given.take().unwrap_or_default())
     }
 }
 

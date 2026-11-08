@@ -236,7 +236,30 @@ impl Os for Linux {
         }
     }
 
-    fn send(&self, conn: &OwnedFd, bytes: &[u8]) -> Sent {
+    /// One whole record, with `fds` as its `SCM_RIGHTS` (a given answer's streams).
+    fn send(&self, conn: &OwnedFd, bytes: &[u8], fds: &[hex_api::End]) -> Sent {
+        if !fds.is_empty() {
+            let borrowed: Vec<std::os::fd::BorrowedFd<'_>> =
+                fds.iter().map(std::os::fd::AsFd::as_fd).collect();
+            let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(wire::MAX_FDS))];
+            let mut control = rustix::net::SendAncillaryBuffer::new(&mut space);
+            if !control.push(rustix::net::SendAncillaryMessage::ScmRights(&borrowed)) {
+                return Sent::Gone;
+            }
+            loop {
+                return match rustix::net::sendmsg(
+                    conn,
+                    &[std::io::IoSlice::new(bytes)],
+                    &mut control,
+                    SendFlags::DONTWAIT | SendFlags::NOSIGNAL,
+                ) {
+                    Ok(_) => Sent::Sent,
+                    Err(Errno::INTR) => continue,
+                    Err(Errno::AGAIN) => Sent::WouldBlock,
+                    Err(_) => Sent::Gone,
+                };
+            }
+        }
         loop {
             return match rustix::net::send(conn, bytes, SendFlags::DONTWAIT | SendFlags::NOSIGNAL) {
                 Ok(_) => Sent::Sent,

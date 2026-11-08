@@ -374,7 +374,8 @@ impl Os for MacOs {
         }
     }
 
-    fn send(&self, conn: &Arc<Stream>, bytes: &[u8]) -> Sent {
+    /// One whole frame, `fds` riding at its first byte (a given answer's streams), as the client reads them.
+    fn send(&self, conn: &Arc<Stream>, bytes: &[u8], fds: &[hex_api::End]) -> Sent {
         let Ok(mut f) = conn.framing.lock() else {
             return Sent::Gone;
         };
@@ -384,8 +385,27 @@ impl Os for MacOs {
         let Ok(framed) = stream::frame(bytes, wire::MAX_MESSAGE) else {
             return Sent::Gone;
         };
+        let borrowed: Vec<std::os::fd::BorrowedFd<'_>> =
+            fds.iter().map(std::os::fd::AsFd::as_fd).collect();
+        let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(wire::MAX_FDS))];
+        let mut control = rustix::net::SendAncillaryBuffer::new(&mut space);
+        if !borrowed.is_empty()
+            && !control.push(rustix::net::SendAncillaryMessage::ScmRights(&borrowed))
+        {
+            return Sent::Gone;
+        }
         loop {
-            return match rustix::net::send(&conn.fd, &framed, SendFlags::DONTWAIT) {
+            let sent = if borrowed.is_empty() {
+                rustix::net::send(&conn.fd, &framed, SendFlags::DONTWAIT)
+            } else {
+                rustix::net::sendmsg(
+                    &conn.fd,
+                    &[std::io::IoSlice::new(&framed)],
+                    &mut control,
+                    SendFlags::DONTWAIT,
+                )
+            };
+            return match sent {
                 Ok(n) if n >= framed.len() => Sent::Sent,
                 Ok(n) => {
                     // Taken in part: the rest goes when the socket has room ([`finish_unsent`]), which

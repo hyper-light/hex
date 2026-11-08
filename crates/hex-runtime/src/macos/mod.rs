@@ -141,13 +141,21 @@ impl Runtime for MacRuntime {
         })
     }
 
-    fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+    /// Streams asked for are made as pipes, the program's ends its stdio, the caller's held by its `Proc`.
+    fn exec(
+        &self,
+        id: &BoxId,
+        program: Program,
+        mut stdio: Stdio,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        let given = stdio.make_asked()?;
         let b = self.get(id)?;
         // The box's whole memory bound arms each member with a fatal per-process cap (native plan step 1's
         // `_ext` backstop); the box tracks which members carry it.
         let spawn = build_spawn(&program, stdio, b.bounds().memory_max)?;
         let pid = b.exec(spawn)?;
-        Ok(Box::new(proc::BoxProc::watch(pid, b.members())?))
+        let proc = proc::BoxProc::watch(pid, b.members())?;
+        Ok(Box::new(hex_api::Asked::new(proc, given)))
     }
 
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {

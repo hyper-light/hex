@@ -173,6 +173,46 @@ impl Copier {
 impl Transport for Stream {
     type Stdio = ();
 
+    const MAKES_ASKED: bool = true;
+
+    /// Each stream asked for is a stdio connection of its own to the guest, named for the exec, and the
+    /// caller holds that connection's socket: the guest's relay splices it to the program, so no byte is
+    /// copied on the host (native plan step 8).
+    #[cfg(unix)]
+    fn asks(&self, exec: u64, ask: hex_api::Ask) -> Result<hex_api::Given, Refusal> {
+        let exec = Exec {
+            conn: self.token,
+            id: exec,
+        };
+        let dial = |on: bool, stream| -> Result<Option<std::os::fd::OwnedFd>, Refusal> {
+            if !on {
+                return Ok(None);
+            }
+            let mut conn = self.link.dial(stream::STDIO_PORT)?;
+            conn.write_all(&stream::name(Named { exec, stream }))
+                .map_err(os("naming a stdio connection"))?;
+            // The caller's own descriptor of the connection; this side's closes as `conn` drops.
+            conn.handle()
+                .try_clone_to_owned()
+                .map(Some)
+                .map_err(os("handing a stdio connection to its caller"))
+        };
+        Ok(hex_api::Given {
+            stdin: dial(ask.stdin, stream::Stdio::In)?,
+            stdout: dial(ask.stdout, stream::Stdio::Out)?,
+            stderr: dial(ask.stderr, stream::Stdio::Err)?,
+        })
+    }
+
+    #[cfg(not(unix))]
+    fn asks(&self, _exec: u64, _ask: hex_api::Ask) -> Result<hex_api::Given, Refusal> {
+        Err(Refusal::Platform {
+            what: "stdio streams made by the guest's transport",
+            platform: std::env::consts::OS,
+            why: "a guest stream's handle as the caller's is the Windows agent's to add".to_owned(),
+        })
+    }
+
     fn stdio(&self, exec: u64, stdio: Stdio) -> Result<(), Refusal> {
         let exec = Exec {
             conn: self.token,

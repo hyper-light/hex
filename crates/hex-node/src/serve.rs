@@ -324,7 +324,7 @@ pub trait Os: Send + Sync + 'static {
     /// Reads one whole message into `buf` without blocking; interrupted reads are retried.
     fn recv(&self, conn: &Self::Conn, buf: &mut [u8]) -> Recv<Self::Passed>;
     /// Sends one whole message without blocking, or none of it.
-    fn send(&self, conn: &Self::Conn, bytes: &[u8]) -> Sent;
+    fn send(&self, conn: &Self::Conn, bytes: &[u8], fds: &[hex_api::End]) -> Sent;
     /// Shuts `conn` both ways: its client sees the end, and the event set reports it hung up.
     fn shutdown(&self, conn: &Self::Conn);
     /// Whether `conn`'s peer has gone: a read of nothing then is its end, not an empty message.
@@ -380,8 +380,8 @@ impl<O: Os> Os for Arc<O> {
     fn recv(&self, conn: &Self::Conn, buf: &mut [u8]) -> Recv<Self::Passed> {
         (**self).recv(conn, buf)
     }
-    fn send(&self, conn: &Self::Conn, bytes: &[u8]) -> Sent {
-        (**self).send(conn, bytes)
+    fn send(&self, conn: &Self::Conn, bytes: &[u8], fds: &[hex_api::End]) -> Sent {
+        (**self).send(conn, bytes, fds)
     }
     fn shutdown(&self, conn: &Self::Conn) {
         (**self).shutdown(conn);
@@ -488,7 +488,7 @@ struct Out {
     /// Places taken by execs under way.
     reserved: usize,
     /// Answers waiting for room in the socket, oldest first.
-    backlog: VecDeque<Vec<u8>>,
+    backlog: VecDeque<(Vec<u8>, Vec<hex_api::End>)>,
     /// Whether its requests are read ([`Interest::Read`]) or only its backlog written.
     reading: bool,
 }
@@ -576,11 +576,13 @@ impl<O: Os> Loop for CoreLoop<O> {
     }
 }
 
-/// A program just started: the token its exec took, its box, and its pid.
+/// A program just started: the token its exec took, its box, its pid, and the caller's ends of the streams
+/// its exec asked for, which go with its answer.
 struct Start {
     token: u64,
     box_id: BoxId,
     pid: u32,
+    given: Option<hex_api::Given>,
 }
 
 struct Jobs<O: Os> {
@@ -915,7 +917,7 @@ impl<O: Os> Shared<O> {
         if let Ok(bytes) =
             wire::answer(wire::FIRST, 0, &Answer::Refused(refusal), wire::MAX_MESSAGE)
         {
-            let _ = self.os.send(sock, &bytes);
+            let _ = self.os.send(sock, &bytes, &[]);
         }
         self.os.shutdown(sock);
     }
@@ -1069,7 +1071,46 @@ impl<O: Os> Shared<O> {
                 wire::answer(version, id, &refused, self.limits.message_bytes)
             })
             .map_err(|e| Refusal::Broken(format!("a refusal couldn't be written: {e}")))?;
-        self.send(conn, bytes, None)
+        self.send(conn, bytes, Vec::new(), None)
+    }
+
+    /// Sends a given answer with the caller's ends of its streams riding as its descriptors.
+    fn answer_given(
+        &self,
+        conn: &Conn<O>,
+        header: Header,
+        pid: u32,
+        given: hex_api::Given,
+    ) -> Result<(), Refusal> {
+        let streams = Streams {
+            stdin: given.stdin.is_some(),
+            stdout: given.stdout.is_some(),
+            stderr: given.stderr.is_some(),
+        };
+        let fds: Vec<hex_api::End> = [given.stdin, given.stdout, given.stderr]
+            .into_iter()
+            .flatten()
+            .collect();
+        let answer = Answer::Given {
+            pid,
+            given: streams,
+        };
+        match wire::answer(
+            header.version,
+            header.id,
+            &answer,
+            self.limits.message_bytes,
+        ) {
+            Ok(bytes) => self.send(conn, bytes, fds, None),
+            Err(fault) => self.answer(
+                conn,
+                header.version,
+                header.id,
+                &Answer::Refused(Refusal::Broken(format!(
+                    "the node agent's answer couldn't be written: {fault}"
+                ))),
+            ),
+        }
     }
 
     /// Queues `bytes` after a connection's waiting answers, or sends them now when none wait. With a
@@ -1079,6 +1120,7 @@ impl<O: Os> Shared<O> {
         &self,
         conn: &Conn<O>,
         bytes: Vec<u8>,
+        fds: Vec<hex_api::End>,
         deadline: Option<Instant>,
     ) -> Result<(), Refusal> {
         let mut out = conn.out.lock().map_err(poisoned)?;
@@ -1098,13 +1140,13 @@ impl<O: Os> Shared<O> {
             return Ok(());
         }
         if out.backlog.is_empty() {
-            match self.os.send(&conn.sock, &bytes) {
+            match self.os.send(&conn.sock, &bytes, &fds) {
                 // Gone: its client is gone, and the I/O thread sees the hang-up and closes it.
                 Sent::Sent | Sent::Gone => return Ok(()),
                 Sent::WouldBlock => {}
             }
         }
-        out.backlog.push_back(bytes);
+        out.backlog.push_back((bytes, fds));
         if out.reading {
             out.reading = false;
             self.os
@@ -1118,8 +1160,8 @@ impl<O: Os> Shared<O> {
     /// read again.
     fn flush(&self, conn: &Conn<O>) -> Result<(), Refusal> {
         let mut out = conn.out.lock().map_err(poisoned)?;
-        while let Some(front) = out.backlog.front() {
-            match self.os.send(&conn.sock, front) {
+        while let Some((front, fds)) = out.backlog.front() {
+            match self.os.send(&conn.sock, front, fds) {
                 Sent::Sent => {
                     out.backlog.pop_front();
                 }
@@ -1445,20 +1487,27 @@ impl<O: Os> Shared<O> {
             self.answer(conn, header.version, header.id, &answer)
         };
         let (stdio, program) = match &call {
-            Call::Exec { id, streams, .. } => {
+            Call::Exec { id, streams, .. } | Call::ExecStreams { id, streams, .. } => {
                 if !self.reserve(conn)? {
                     return reply(Answer::Refused(Refusal::Exhausted {
                         what: PROGRAMS,
                         bound: self.limits.programs,
                     }));
                 }
-                let stdio = match self.os.stdio(*streams, passed) {
+                let mut stdio = match self.os.stdio(*streams, passed) {
                     Ok(stdio) => stdio,
                     Err(r) => {
                         self.unreserve(conn)?;
                         return reply(Answer::Refused(r));
                     }
                 };
+                if let Call::ExecStreams { ask, .. } = &call {
+                    stdio.ask = hex_api::Ask {
+                        stdin: ask.stdin,
+                        stdout: ask.stdout,
+                        stderr: ask.stderr,
+                    };
+                }
                 (stdio, Some((self.table()?.token()?, id.clone())))
             }
             _ => (Stdio::null(), None),
@@ -1490,12 +1539,15 @@ impl<O: Os> Shared<O> {
                 ((Call::Exec { id, program, .. }, stdio), Some((token, _))) => {
                     return self.exec(conn, header, token, id, program, stdio);
                 }
+                ((Call::ExecStreams { id, program, .. }, stdio), Some((token, _))) => {
+                    return self.exec(conn, header, token, id, program, stdio);
+                }
                 ((call, _), _) => call,
             },
         };
         let host = &self.host;
         let answer = match call {
-            Call::Exec { .. } => Err(Refusal::Broken(
+            Call::Exec { .. } | Call::ExecStreams { .. } => Err(Refusal::Broken(
                 "an exec came back from its host without its place".to_owned(),
             )),
             Call::Kill { exec } => return self.kill(conn, header, exec),
@@ -1531,7 +1583,12 @@ impl<O: Os> Shared<O> {
         let answer = match (got, program) {
             (Ok(Forwarded::Started { pid, program }), Some((token, box_id))) => {
                 let table = self.table()?;
-                let start = Start { token, box_id, pid };
+                let start = Start {
+                    token,
+                    box_id,
+                    pid,
+                    given: None,
+                };
                 return self.started(table, conn, header, start, Run::Remote(Arc::from(program)));
             }
             (Ok(Forwarded::Started { program, .. }), None) => {
@@ -1612,7 +1669,7 @@ impl<O: Os> Shared<O> {
         };
         let deadline = Instant::now().checked_add(READ_PATIENCE);
         for (n, part) in parts.into_iter().enumerate() {
-            self.send(conn, part, if n == 0 { None } else { deadline })?;
+            self.send(conn, part, Vec::new(), if n == 0 { None } else { deadline })?;
         }
         Ok(())
     }
@@ -1632,12 +1689,25 @@ impl<O: Os> Shared<O> {
             self.done(conn)?;
             self.answer(conn, header.version, header.id, &answer)
         };
-        let proc = match self.host.exec(&id, program, stdio) {
+        let asked = stdio.ask != hex_api::Ask::default();
+        let mut proc = match self.host.exec(&id, program, stdio) {
             Ok(proc) => proc,
             Err(r) => {
                 self.unreserve(conn)?;
                 return reply(Answer::Refused(r));
             }
+        };
+        let given = if asked {
+            match proc.streams() {
+                Ok(given) => Some(given),
+                Err(r) => {
+                    let _ = proc.kill();
+                    self.unreserve(conn)?;
+                    return reply(Answer::Refused(r));
+                }
+            }
+        } else {
+            None
         };
         let pid = proc.pid();
         // Announced and watched under the table, so the I/O thread can't send its end before its
@@ -1659,6 +1729,7 @@ impl<O: Os> Shared<O> {
             token,
             box_id: id,
             pid,
+            given,
         };
         let run = Run::Local {
             proc,
@@ -1702,12 +1773,15 @@ impl<O: Os> Shared<O> {
         let early = table.early.remove(&start.token);
         table.watched.insert(start.token, watched);
         if open {
-            self.answer(
-                conn,
-                header.version,
-                header.id,
-                &Answer::Started { pid: start.pid },
-            )?;
+            match start.given {
+                Some(given) => self.answer_given(conn, header, start.pid, given)?,
+                None => self.answer(
+                    conn,
+                    header.version,
+                    header.id,
+                    &Answer::Started { pid: start.pid },
+                )?,
+            }
         }
         drop(table);
         match early {

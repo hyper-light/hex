@@ -234,7 +234,7 @@ impl Os for SimOs {
         }
     }
 
-    fn send(&self, conn: &Accept, bytes: &[u8]) -> Sent {
+    fn send(&self, conn: &Accept, bytes: &[u8], _fds: &[hex_api::End]) -> Sent {
         let sock = &conn.0;
         if sock.client_gone.load(Ordering::SeqCst) || sock.shut.load(Ordering::SeqCst) {
             return Sent::Gone;
@@ -334,6 +334,9 @@ impl Proc for SimProc {
     fn kill(&mut self) -> Result<(), Refusal> {
         self.os.kill(&self.pid);
         Ok(())
+    }
+    fn streams(&mut self) -> Result<hex_api::Given, Refusal> {
+        Ok(hex_api::Given::default())
     }
 }
 

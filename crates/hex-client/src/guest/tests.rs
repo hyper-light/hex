@@ -165,6 +165,7 @@ fn an_execs_stdio_rides_named_connections_and_its_end_comes_back() {
                 stdin: Some(in_r),
                 stdout: Some(out_w),
                 stderr: None,
+                ..Stdio::null()
             },
         )
         .unwrap();
@@ -337,6 +338,7 @@ fn a_stdio_connection_waits_on_its_program_as_a_local_pipe_does() {
                 stdin: Some(in_r),
                 stdout: None,
                 stderr: None,
+                ..Stdio::null()
             },
         )
         .unwrap();

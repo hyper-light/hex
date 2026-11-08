@@ -113,4 +113,7 @@ impl Proc for PidfdProc {
             Err(e) => Err(Refusal::os("pidfd_send_signal", e)),
         }
     }
+    fn streams(&mut self) -> Result<hex_api::Given, Refusal> {
+        Ok(hex_api::Given::default())
+    }
 }

@@ -54,6 +54,9 @@ impl Proc for ChildProc {
             .kill()
             .map_err(|e| Refusal::os("kill", e))
     }
+    fn streams(&mut self) -> Result<hex_api::Given, Refusal> {
+        Ok(hex_api::Given::default())
+    }
 }
 
 /// Boxes in the simulator; programs real processes of this test, started on the request's stdio.

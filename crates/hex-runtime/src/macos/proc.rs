@@ -129,6 +129,9 @@ impl Proc for BoxProc {
             Err(e) => Err(Refusal::os("kill", e)),
         }
     }
+    fn streams(&mut self) -> Result<hex_api::Given, Refusal> {
+        Ok(hex_api::Given::default())
+    }
 }
 
 /// How a program ended, from its wait status, with any terminating signal carried as Linux's number so a

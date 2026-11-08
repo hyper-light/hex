@@ -68,6 +68,7 @@ pub fn stdio_of(streams: Streams, fds: Vec<OwnedFd>) -> Result<Stdio, Refusal> {
         stdin,
         stdout,
         stderr,
+        ..Stdio::null()
     })
 }
 

@@ -207,6 +207,7 @@ impl Runtime for SimRuntime {
         mut stdio: Stdio,
     ) -> Result<Box<dyn Proc>, Refusal> {
         program.check()?;
+        let given = stdio.make_asked()?;
         let mut boxes = self.boxes()?;
         let b = boxes
             .get_mut(id)
@@ -290,7 +291,7 @@ impl Runtime for SimRuntime {
             }
         }
         b.procs.push(Arc::clone(&proc));
-        Ok(Box::new(SimHandle(proc)))
+        Ok(Box::new(SimHandle(proc, Some(given))))
     }
 
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
@@ -353,7 +354,8 @@ impl Runtime for SimRuntime {
     }
 }
 
-struct SimHandle(Arc<SimProc>);
+/// A simulated program, and the caller's ends of the streams its exec asked for until they are taken.
+struct SimHandle(Arc<SimProc>, Option<crate::Given>);
 
 impl Proc for SimHandle {
     fn pid(&self) -> u32 {
@@ -383,6 +385,10 @@ impl Proc for SimHandle {
     }
     fn kill(&mut self) -> Result<(), Refusal> {
         self.0.end(Exit::Signal(Signal::KILL.number()))
+    }
+
+    fn streams(&mut self) -> Result<crate::Given, Refusal> {
+        Ok(self.1.take().unwrap_or_default())
     }
 }
 
