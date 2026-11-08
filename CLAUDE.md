@@ -147,6 +147,22 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   (`GetActiveProcessorCount`). `windows-sys` binds these as `unsafe` foreign functions, and std's own
   job-object support and its `PROC_THREAD_ATTRIBUTE_JOB_LIST`/`_HANDLE_LIST` process creation are
   unstable; Rust can express none of them safely.
+- `crates/hex-afunix/src/lib.rs`: the Windows node agent's socket and its client, an AF_UNIX stream on one
+  I/O completion port (decision "the Windows node, on one completion port"). It starts Winsock
+  (`WSAStartup`), makes, binds, listens on, connects, shuts down and closes AF_UNIX sockets (`WSASocketW`
+  overlapped and not inherited, `bind`, `listen`, `connect`, `shutdown`, `closesocket`), bounds a client's
+  sends (`setsockopt` `SO_SNDTIMEO`) and sends and receives on a client's blocking socket (`send`, `recv`),
+  makes the port and puts sockets on it (`CreateIoCompletionPort`), posts a wake and waits on it
+  (`PostQueuedCompletionStatus`, `GetQueuedCompletionStatusEx`), starts a connection's overlapped accept,
+  receive and send (`AcceptEx` with `SO_UPDATE_ACCEPT_CONTEXT`, `WSARecv`, `WSASend`), each operation's
+  `OVERLAPPED` and buffer held on the heap by the kernel from its start until its completion is dequeued,
+  reads a peer's pid (`WSAIoctl` `SIO_AF_UNIX_GETPEERPID`) and whether its process runs as this user or
+  LocalSystem (`OpenProcess`, `OpenProcessToken`, `GetTokenInformation` `TokenUser`, `EqualSid`,
+  `IsWellKnownSid`), and watches a program's end (`OpenProcess`, `RegisterWaitForSingleObject`, whose
+  thread-pool callback posts it to the port, `UnregisterWaitEx`) and ends it (`TerminateProcess`).
+  `windows-sys` binds these as `unsafe` foreign functions, std has no AF_UNIX socket or completion port on
+  Windows, and a buffer the kernel writes after the call returns is beyond Rust's borrow rules; Rust can
+  express none of them safely.
 
 ## 13. Lean code
 
