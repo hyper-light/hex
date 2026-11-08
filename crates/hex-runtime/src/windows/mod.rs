@@ -878,6 +878,20 @@ mod tests {
         }
     }
 
+    /// T-T7.1.2: do make a node's runtime on a state folder; expect its `oci` boxes' records and scratch
+    /// kept inside that folder, so its start-time reclaim sweeps only its own boxes, not the machine's shared
+    /// folder where a runtime driven in process (a bench's) keeps the records of boxes it is running.
+    #[test]
+    fn an_outliving_nodes_records_are_in_its_own_folder() {
+        let (name, state) = (node("own"), tempfile::tempdir().unwrap());
+        let rt = WinRuntime::outliving(&name, state.path(), &keeper("own")).unwrap();
+        let own = rt.scratch_root.starts_with(state.path());
+        if let Some(k) = rt.keeper_pid() {
+            crash(k);
+        }
+        assert!(own, "the node keeps its records in {:?}", rt.scratch_root);
+    }
+
     /// A runtime driven in process keeps kill-on-close: do make a box, run a program, drop the runtime;
     /// expect the program ended with it.
     #[test]
