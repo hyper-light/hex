@@ -251,6 +251,29 @@ fn hostile_frames_end_their_connection_and_the_node_serves_the_next() {
     client.delete(&id).unwrap();
 }
 
+/// HEX-RT-16 through the socket (native plan step 8): do exec two waiting programs in one box and kill one
+/// through its `Proc`; expect its end, read over the socket, to be KILL's (Signal(9)), the other still
+/// running, and a second kill accepted.
+#[test]
+fn a_program_killed_through_the_socket_ends_as_kill_and_its_box_runs_on() {
+    let dir = dir();
+    let node = Node::start(dir.path());
+    let client = node.client();
+    let id = BoxId::new("rt-16").unwrap();
+    client.create(spec(&id)).unwrap();
+    let mut killed = client.exec(&id, act(&["wait"]), Stdio::null()).unwrap();
+    let other = client.exec(&id, act(&["wait"]), Stdio::null()).unwrap();
+    killed.kill().unwrap();
+    let exit = killed.wait_for(PATIENCE).unwrap();
+    assert_eq!(exit, Some(Exit::Signal(9)), "a killed program's end");
+    assert!(
+        alive(other.pid()),
+        "the box's other program ended with the kill"
+    );
+    killed.kill().unwrap();
+    client.delete(&id).unwrap();
+}
+
 /// Native plan step 8: do exec a program with its stdout a pipe through the node; expect the exec refused
 /// by name (the platform, and why), the box untouched and the connection still served.
 #[test]
