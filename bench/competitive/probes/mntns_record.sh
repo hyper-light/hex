@@ -26,10 +26,12 @@
 # 1: each arm's first burst meets its node cold, and is summarized apart. CPUSET is, unless set, the CPUs of the L3
 # domain that doesn't hold CPU 0, where the host's interrupts and housekeeping land, read from sysfs; a host with one
 # L3 domain needs CPUSET set. The cell's busy loops run on it, as the bar's are on the same cores. Every other
-# variable that create_breakdown.sh reads may be set. Start it detached, its run bounded, e.g. on adacachy2:
-#   systemd-run --user --unit hex-g6-rec-$(date -u +%Y%m%dT%H%M%SZ) --collect -p RuntimeMaxSec=5400 \
-#     -E RT=$HOME/.cache/hex-g6/rt/runtime-tools -E CRUN=$HOME/.cache/hex-g6/rt/crun-1.27 \
-#     -- /usr/bin/bash "$PWD/bench/competitive/probes/mntns_record.sh" host
+# variable that create_breakdown.sh reads may be set. Start it detached, its run bounded, e.g. on adacachy2 (RT and
+# CRUN from bench/oci-validation/rt_setup.sh; 10,800 s holds the parts' own bounds, 4 cells x 708 s and 2 suites x 58
+# tests x 60 s, 9,792 s, and the release builds, which have none of their own):
+#   systemd-run --user --unit hex-g6-rec-$(date -u +%Y%m%dT%H%M%SZ) --collect -p MemoryHigh=3500M -p MemoryMax=7G \
+#     -p OOMScoreAdjust=1000 -p RuntimeMaxSec=10800 -E RT=$HOME/.cache/hex-g6/rt/runtime-tools \
+#     -E CRUN=$HOME/.cache/hex-g6/rt/crun-1.27 -- /usr/bin/bash "$PWD/bench/competitive/probes/mntns_record.sh" host
 set -uo pipefail
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
 REPO=$(git -C "$HERE" rev-parse --show-toplevel) || { echo "refusing: not in a git checkout" >&2; exit 2; }
@@ -48,6 +50,10 @@ mkdir -p "$O" || exit 2
 PASSES=${PASSES:-2}; LOOPS_SET=${LOOPS_SET:-6 12}; ROUNDS=${ROUNDS:-299}; WARMUP=${WARMUP:-1}
 ARMS=${ARMS:-hex:copy hex:tree hex:empty}
 st() { echo "$(date -u +%FT%TZ) $*" | tee -a "$O/status"; }
+# The run's containers go with it, however it ends (containers.sh): sourced once here, so the run's one reaper starts
+# here and every script the run calls (each cell's create_breakdown.sh, run_hex.sh, run.sh) labels its containers with
+# this run and starts none of its own, which would fail as the reaper already loaded and warn falsely.
+. "$HERE/../containers.sh"
 
 # The CPUs of each L3 domain, and the one this run takes: CPUSET, or the domain without CPU 0.
 read -r DOMAINS < <(cat /sys/devices/system/cpu/cpu*/cache/index3/shared_cpu_list 2>/dev/null | sort -u | paste -sd' ')
