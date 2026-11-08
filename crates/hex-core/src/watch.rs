@@ -38,20 +38,27 @@ pub const CLASSES: [(&str, Rates); 1] = [(
     },
 )];
 
-/// The highest rates on record, each the largest of every class's ([`CLASSES`]): what a machine whose model
-/// has no record is reckoned at, the safe side.
+/// The highest rates on record, each the largest of every class's ([`CLASSES`]): a machine whose model has no
+/// record is reckoned at twice these (the learned-wait rule, the lead 2026-11-07), the safe side.
 pub const RECORDED: Rates = Rates {
     bytes: NonZeroU64::MIN.saturating_add(51_052_630_610),
     processes: NonZeroU64::MIN.saturating_add(11_316),
 };
 
 /// The rates a node of model `model` (its `hw.model`) seeds its boxes' pacing with: its class's record, else
-/// the highest on record.
+/// twice the highest on record (saturating: a rate past 2^64 a second is past any box).
 pub fn seed(model: &str) -> Rates {
-    CLASSES
-        .iter()
-        .find(|(m, _)| *m == model)
-        .map_or(RECORDED, |(_, rates)| *rates)
+    CLASSES.iter().find(|(m, _)| *m == model).map_or(
+        Rates {
+            bytes: RECORDED
+                .bytes
+                .saturating_mul(NonZeroU64::MIN.saturating_add(1)),
+            processes: RECORDED
+                .processes
+                .saturating_mul(NonZeroU64::MIN.saturating_add(1)),
+        },
+        |(_, rates)| *rates,
+    )
 }
 
 /// A node's box growth rates as it learns them (the learned-waits rule, 2026-11-06): its class's record to
@@ -420,17 +427,21 @@ mod tests {
         assert_eq!(OVERSHOOT, 64 * MIB);
     }
 
-    /// HEX-MAC-4, the lead's call (2026-11-06): a node seeds its rates from its own machine class's record,
-    /// and a model with no record takes the highest on record in each rate, the safe side. Do seed an
-    /// unrecorded model; expect the highest bytes and the highest processes of every class.
+    /// HEX-MAC-4, the learned-wait rule (the lead, 2026-11-07): a node seeds its rates from its own machine
+    /// class's record, and a model with no record from twice the highest record of any class, the safe side.
+    /// Do seed an unrecorded model; expect twice the highest bytes and twice the highest processes on record.
     #[test]
-    fn an_unrecorded_model_seeds_the_highest_on_record() {
-        let highest_bytes = CLASSES.iter().map(|(_, r)| r.bytes).max().unwrap();
-        let highest_processes = CLASSES.iter().map(|(_, r)| r.processes).max().unwrap();
+    fn an_unrecorded_model_seeds_twice_the_highest_on_record() {
+        let highest_bytes = CLASSES.iter().map(|(_, r)| r.bytes.get()).max().unwrap();
+        let highest_processes = CLASSES
+            .iter()
+            .map(|(_, r)| r.processes.get())
+            .max()
+            .unwrap();
         let unknown = seed("Mac99,1");
-        assert_eq!(unknown.bytes, highest_bytes);
-        assert_eq!(unknown.processes, highest_processes);
-        assert_eq!(RECORDED, unknown);
+        assert_eq!(unknown.bytes.get(), 2 * highest_bytes);
+        assert_eq!(unknown.processes.get(), 2 * highest_processes);
+        assert_eq!(RECORDED.bytes.get(), highest_bytes);
         for (model, rates) in CLASSES {
             assert_eq!(seed(model), rates, "{model}");
         }
