@@ -11,7 +11,8 @@
 //! - `sustained`: the throughput lifecycle at concurrency 32 for `HEXBENCH_SUSTAINED` of them
 //!   (10,000), its rate in each window of 1,000 and the last window's against the first's;
 //! - `interleaved`, run only when `HEXBENCH_PHASES` names it: concurrency 1 and 32 in turn,
-//!   `HEXBENCH_INTERLEAVED` pairs of turns (10), 500 lifecycles at 1 then 4,000 at 32 in each, so the two
+//!   pairs of turns until the ratio is resolved against the 8x bar, 10 to 40 pairs (the runs of record before
+//!   Ada's 2026-11-06 rule ran a fixed 10), 500 lifecycles at 1 then 4,000 at 32 in each, so the two
 //!   meet the host as it is at that moment, its load included: each pair's rates and their ratio, and the
 //!   ratio of the pooled rates (the lead, 2026-11-03T06:01Z, for goal 5 extended step 6's second
 //!   criterion). `HEXBENCH_INTERLEAVED_CPUS1` and `HEXBENCH_INTERLEAVED_CPUS32` (CPU lists, `4-15`) pin
@@ -47,18 +48,12 @@
 //! runs in the OCI pass's privileged container, where the cgroup root is vacated to a leaf and its
 //! controllers handed down, as oci_inside.sh leaves it; off that it refuses, naming why.
 //! In process it reads the node's ipc and uts namespace counts the same way (`Node::ipc_uts`, goal 5 extended
-//! step 4), and HEXBENCH_IPCUTS=0 drains that pool (bound 0), so a run can time creates with it and without it. The
-//! `ipc_uts_pairs` phase, run only when named, in process: the lifecycle on a node with the pool and one with it
-//! drained, interleaved one by one, the first of each pair alternating, so a pair meets one host and a difference
-//! of a percent or two shows under other tenants' load; create, start, exec and delete each, so work that moved
-//! from one to another shows too.
+//! step 4).
 //! HEXBENCH_TRACE turns on the breakdown probes' markers, around the ops HEXBENCH_TRACE_OPS
 //! names (`Trace`, bench/competitive/probes/exec_breakdown.md and create_breakdown.md).
-//! HEXBENCH_AHEAD is how many cgroups the node makes ahead for boxes of no owner, each with an init parked in it
-//! (decision 8, "The p99.9 that stayed"), the node's default (`hex_node::INITS_AHEAD`) unless set; 0 makes none.
-//! HEXBENCH_PARKED_PROCS=1 has each parked init's proc made with it and 0 has none made (decision 8, parked procs;
-//! unset, the node's default, on for a root node), in process and in the socket driver's `hex node`
-//! (`--parked-procs`). In process the phase's `parked` counts say how many were made, taken by their create (hits),
+//! Each parked init's proc is made with it on a root node (decision 8, parked procs), in process and in the socket
+//! driver's `hex node`, with no knob to turn it off: Ada's 2026-11-06 rule removed HEXBENCH_PARKED_PROCS once
+//! bench/competitive/probes/parked_procs_ab.md decided them on. In process the phase's `parked` counts say how many were made, taken by their create (hits),
 //! left (misses), wanted with none made (dry) or failed; the socket driver ends its node with SIGTERM and records
 //! the line of counts it says then as the result's `parked_at_exit` (made, hits, misses, dry, capped, alive), the
 //! run's own node's.
@@ -100,7 +95,9 @@ mod linux {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
-    use hex_api::{Bounds, BoxId, BoxOwner, BoxSpec, ClassSpec, Exit, Program, Runtime, Stdio};
+    use hex_api::{
+        Bounds, BoxId, BoxOwner, BoxSpec, ClassSpec, Exit, Program, Runtime, Signal, Stdio,
+    };
     use hex_client::Client;
     use hex_core::{netns, seeds};
     use hex_node::Node;
@@ -114,23 +111,47 @@ mod linux {
     const SUSTAINED_WINDOW: usize = 1_000;
     /// The sustained phase's lifecycles unless `HEXBENCH_SUSTAINED` says, as oci_bench.py's.
     const SUSTAINED_DEFAULT: usize = 10_000;
-    /// The interleaved phase's pairs unless `HEXBENCH_INTERLEAVED` says, and each pair's lifecycles at
-    /// concurrency 1 and at 32: about a second of each at the rates of runs 1 to 5 of reuse_pass.md.
-    const INTERLEAVED_DEFAULT: usize = 10;
+    /// Each interleaved pair's lifecycles at concurrency 1 and at 32: about a second of each at the rates of runs 1
+    /// to 5 of reuse_pass.md.
     const INTERLEAVED_C1: usize = 500;
     const INTERLEAVED_C32: usize = 4_000;
+    /// The bar the interleaved phase's ratio is read against: concurrency 32 at 8x concurrency 1 a minimum (goal 5
+    /// extended step 6's second criterion, Ada via the lead, 2026-11-03; reuse_pass.md, run 6).
+    const INTERLEAVED_BAR: f64 = 8.0;
+    /// A round runs pairs until the mean of their ratios is resolved against [`INTERLEAVED_BAR`]: the bar outside the mean's two-sided 95% interval, `z` the normal
+    /// quantile 1.96, its standard error the pairs' over the square root of their count. A fixed count left
+    /// rounds unresolved: step 6 alone read 7.80x (SE 0.41) over 20 pairs (reuse_pass.md, 20261103T170834Z),
+    /// over the socket, the bar inside its interval. Ada's 2026-11-06 rule; it takes effect for runs after it. The fixed
+    /// count's knob is gone with it (Ada's 2026-11-06 rule on legacy paths): the runs of record that ran 10 pairs stay
+    /// records of the build that made them.
+    const RESOLVED_Z: f64 = 1.96;
+    /// The fewest pairs a resolved round holds: the fewest a record pooled (reuse_pass.md, run 6's socket row of
+    /// 20261103T064217Z, 10 pairs), so the standard error is never read from fewer than a record was.
+    const INTERLEAVED_FEWEST: usize = 10;
+    /// The most pairs a round runs before it stops unresolved, and says so: the most a record pooled for one binary
+    /// (reuse_pass.md, runs 9, 11 and 12, 40 pairs each). Past it no record shows what more pairs resolve.
+    const INTERLEAVED_MOST: usize = 40;
+
+    /// Whether the mean of `ratios` is resolved against [`INTERLEAVED_BAR`]: the bar outside its two-sided 95%
+    /// interval.
+    fn resolved(ratios: &[f64]) -> bool {
+        let n = ratios.len() as f64;
+        if ratios.len() < 2 {
+            return false;
+        }
+        let mean = ratios.iter().sum::<f64>() / n;
+        let var = ratios.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0);
+        (mean - INTERLEAVED_BAR).abs() > RESOLVED_Z * (var / n).sqrt()
+    }
 
     /// oci_bench.py's bundles bound every container to nothing of their own; the node bounds each box
     /// the way the competitive pass's do, so the comparison is like for like: the kernel's floor plus
-    /// the workload, not an unbounded cgroup. HEXBENCH_BOX_MEMORY=none leaves the memory bound off, for an
-    /// A/B of what only boxes without one take (goal16_ab.md's lever 4); a figure so made isn't the bar's.
+    /// the workload, not an unbounded cgroup: 256 MiB, the bar's bound. Goal 16's lever 4 (boxes with no memory
+    /// bound) was recorded negative (docs/research/runtime/goal16-teardown.md), so its knob is gone (Ada's 2026-11-06
+    /// rule on legacy paths).
     fn bounds() -> Bounds {
-        let memory_max = match std::env::var("HEXBENCH_BOX_MEMORY").as_deref() {
-            Ok("none") => None,
-            _ => Some(256 << 20),
-        };
         Bounds {
-            memory_max,
+            memory_max: Some(256 << 20),
             pids_max: Some(256),
             ..Bounds::default()
         }
@@ -300,59 +321,6 @@ mod linux {
         start: Vec<f64>,
         exec: Vec<f64>,
         delete: Vec<f64>,
-    }
-
-    /// The p50, the p99 and, against `other`'s lifecycles in the same pairs, the median difference of one operation.
-    fn paired(on: &[f64], drained: &[f64]) -> Value {
-        let at = |sorted: &[f64], pct: usize| sorted[(sorted.len() - 1) * pct / 100];
-        let sorted = |v: &[f64]| {
-            let mut v = v.to_vec();
-            v.sort_by(f64::total_cmp);
-            v
-        };
-        let (a, b) = (sorted(on), sorted(drained));
-        let diffs: Vec<f64> = on.iter().zip(drained).map(|(x, y)| x - y).collect();
-        let faster = diffs.iter().filter(|d| **d < 0.0).count();
-        json!({"on_p50": at(&a, 50), "drained_p50": at(&b, 50), "on_p99": at(&a, 99), "drained_p99": at(&b, 99),
-               "median_difference": at(&sorted(&diffs), 50), "on_faster": faster as f64 / diffs.len() as f64})
-    }
-
-    /// The `ipc_uts_pairs` phase (goal 5 extended, step 4): the module's header says what it times. `on` is the node
-    /// under test, with the pool; the drained node is made here beside it, with its own box root and state.
-    fn ipc_uts_pairs(
-        on: &dyn Runtime,
-        parent: &Path,
-        hex: &str,
-        bundle: &Path,
-        n: usize,
-        warmup: usize,
-    ) -> Result<Value, String> {
-        let state = tempfile::tempdir().map_err(|e| e.to_string())?;
-        let drained = Node::open(
-            &parent.join("hex-oci-seam-drained"),
-            state.path(),
-            state.path(),
-        )
-        .map_err(|e| e.to_string())?
-        .with_oci_helper(PathBuf::from(hex))
-        .with_ipc_uts_bound(0)
-        .map_err(|e| e.to_string())?;
-        let (mut a, mut b) = (Ops::default(), Ops::default());
-        for i in 0..n + warmup {
-            let timed = i >= warmup;
-            let first_on = i % 2 == 0;
-            for with_pool in [first_on, !first_on] {
-                if with_pool {
-                    lifecycle_once(on, bundle, &format!("pa{i}"), &mut a, timed, None)?;
-                } else {
-                    lifecycle_once(&drained, bundle, &format!("pd{i}"), &mut b, timed, None)?;
-                }
-            }
-        }
-        Ok(
-            json!({"pairs": n, "create": paired(&a.create, &b.create), "start": paired(&a.start, &b.start),
-                  "exec": paired(&a.exec, &b.exec), "delete": paired(&a.delete, &b.delete)}),
-        )
     }
 
     /// n timed lifecycles after `warmup` untimed ones, each operation timed alone, its boxes named
@@ -731,18 +699,15 @@ mod linux {
         json!({"load1": load1, "cpu_some_avg10": cpu_some_avg10})
     }
 
-    /// Concurrency 1 and [`SUSTAINED_CONCURRENCY`] in turn, `pairs` times: [`INTERLEAVED_C1`] lifecycles at
-    /// 1, then [`INTERLEAVED_C32`] at 32, as the sustained phase runs them, so both meet the host as it is
-    /// then. Each pair's rates and their ratio, with the host's load and CPU pressure at its start and end
+    /// Concurrency 1 and [`SUSTAINED_CONCURRENCY`] in turn, until the ratio is resolved against the bar
+    /// ([`INTERLEAVED_FEWEST`] to [`INTERLEAVED_MOST`] pairs): [`INTERLEAVED_C1`]
+    /// lifecycles at 1, then [`INTERLEAVED_C32`] at 32, as the sustained phase runs them, so both meet the host as it
+    /// is then. Each pair's rates and their ratio, with the host's load and CPU pressure at its start and end
     /// and each half's CPU, per lifecycle and as the CPUs it kept busy on average (the agent and its boxes,
     /// `own`'s cpu.stat): whether concurrency 32 is held by the CPUs it has or by waiting. And the ratio of
-    /// the pooled rates, each concurrency's lifecycles over its time.
-    fn interleaved(
-        node: &dyn Runtime,
-        bundle: &Path,
-        own: &Path,
-        pairs: usize,
-    ) -> Result<Value, String> {
+    /// the pooled rates, each concurrency's lifecycles over its time, and why the round stopped (`resolved`
+    /// against the bar, or `unresolved` at the most pairs).
+    fn interleaved(node: &dyn Runtime, bundle: &Path, own: &Path) -> Result<Value, String> {
         let (cpus1, cpus32) = (
             cpu_list("HEXBENCH_INTERLEAVED_CPUS1"),
             cpu_list("HEXBENCH_INTERLEAVED_CPUS32"),
@@ -754,7 +719,12 @@ mod linux {
         };
         let (mut rows, mut ratios) = (Vec::new(), Vec::new());
         let (mut one_s, mut many_s) = (0.0, 0.0);
-        for p in 0..pairs {
+        let mut stopped = "unresolved";
+        for p in 0..INTERLEAVED_MOST {
+            if p >= INTERLEAVED_FEWEST && resolved(&ratios) {
+                stopped = "resolved";
+                break;
+            }
             let at_start = host_load();
             let c1_pinned = pin_to(&cpus1)?;
             let (one, one_cpu, one_took) =
@@ -790,11 +760,16 @@ mod linux {
         if cpus1.is_some() || cpus32.is_some() {
             pin(&started_on)?;
         }
+        if resolved(&ratios) {
+            stopped = "resolved";
+        }
         ratios.sort_by(f64::total_cmp);
-        let c1 = (pairs * INTERLEAVED_C1) as f64 / one_s;
-        let c32 = (pairs * INTERLEAVED_C32) as f64 / many_s;
+        let ran = rows.len();
+        let c1 = (ran * INTERLEAVED_C1) as f64 / one_s;
+        let c32 = (ran * INTERLEAVED_C32) as f64 / many_s;
         Ok(
-            json!({"pairs": rows, "concurrency": SUSTAINED_CONCURRENCY, "c1_lifecycles": INTERLEAVED_C1,
+            json!({"pairs": rows, "stopped": stopped, "bar": INTERLEAVED_BAR,
+                  "concurrency": SUSTAINED_CONCURRENCY, "c1_lifecycles": INTERLEAVED_C1,
                   "c32_lifecycles": INTERLEAVED_C32, "c1_per_s": c1, "c32_per_s": c32, "ratio": c32 / c1,
                   "ratio_median": ratios.get(ratios.len() / 2), "ratio_min": ratios.first(),
                   "ratio_max": ratios.last(), "c1_cpus": cpus1.map(|(l, _)| l),
@@ -802,8 +777,16 @@ mod linux {
         )
     }
 
-    /// The most tasks a pin walks: this process's threads and its descendants', a few hundred here.
-    const PIN_TASKS: usize = 65_536;
+    /// The most tasks a pin walks: the kernel's own bound on the tasks that can exist at once,
+    /// `/proc/sys/kernel/threads-max` (Documentation/admin-guide/sysctl/kernel.rst, "threads-max"), read on the
+    /// host the bench runs on, so the walk ends however the tree it pins is shaped.
+    fn pin_tasks() -> Result<usize, String> {
+        let raw = std::fs::read_to_string("/proc/sys/kernel/threads-max")
+            .map_err(|e| format!("reading /proc/sys/kernel/threads-max: {e}"))?;
+        raw.trim()
+            .parse()
+            .map_err(|e| format!("/proc/sys/kernel/threads-max {raw:?}: {e}"))
+    }
 
     /// The CPU list in `var` (`4-15`, `4-15,20`) and its set; `None` when it's unset or empty.
     fn cpu_list(var: &str) -> Option<(String, rustix::thread::CpuSet)> {
@@ -835,6 +818,7 @@ mod linux {
     /// `Cpus_allowed_list` back: how many were pinned, and how many hold each list, which should be `cpus`'
     /// alone.
     fn pin(cpus: &rustix::thread::CpuSet) -> Result<Value, String> {
+        let most = pin_tasks()?;
         let mut procs = vec![std::process::id()];
         let mut tasks = Vec::new();
         let mut next = 0;
@@ -851,8 +835,10 @@ mod linux {
                 else {
                     continue;
                 };
-                if tasks.len() >= PIN_TASKS {
-                    return Err(format!("more than {PIN_TASKS} tasks to pin"));
+                if tasks.len() >= most {
+                    return Err(format!(
+                        "more tasks to pin than threads-max's {most}: the walk met tasks again"
+                    ));
                 }
                 match rustix::thread::sched_setaffinity(rustix::process::Pid::from_raw(tid), cpus) {
                     Ok(()) => tasks.push(tid),
@@ -939,7 +925,9 @@ mod linux {
 
     /// Inspect of one running `sleep` container, `n` times after `warmup`, each timed alone: a call
     /// whose work (the box's record and its container's state, read) is the same through either
-    /// driver, so the drivers' difference is the socket's cost per call.
+    /// driver, so the drivers' difference is the socket's cost per call. Then, untimed, `n` usage reads and `n`
+    /// SIGCONTs (which a running `sleep` ignores), so the waits census's `client.answer.usage` and `.signal` rows have
+    /// their answers (bench/competitive/probes/waits_census.md).
     fn rtt(node: &dyn Runtime, bundle: &Path, n: usize, warmup: usize) -> Result<Value, String> {
         let id = BoxId::new("rtt").map_err(|e| e.to_string())?;
         node.create(spec(&id, bundle))
@@ -954,30 +942,118 @@ mod linux {
                     ms.push(t.elapsed().as_secs_f64() * 1e3);
                 }
             }
+            let cont = Signal::new(18).map_err(|e| e.to_string())?;
+            for _ in 0..n {
+                node.usage(&id).map_err(|e| format!("usage rtt: {e}"))?;
+                node.signal(&id, cont)
+                    .map_err(|e| format!("signal rtt: {e}"))?;
+            }
             Ok(ms)
         })();
         node.delete(&id).map_err(|e| format!("delete rtt: {e}"))?;
         Ok(json!({ "ms": timed? }))
     }
 
-    /// HEXBENCH_PARKED_PROCS: `Some(true)` for 1, `Some(false)` for 0, `None` unset (the node's default).
-    fn parked_procs() -> Option<bool> {
-        match std::env::var("HEXBENCH_PARKED_PROCS").as_deref() {
-            Ok("1") => Some(true),
-            Ok("0") => Some(false),
-            Ok(v) => panic!("HEXBENCH_PARKED_PROCS={v:?}: 1 or 0"),
-            Err(_) => None,
+    /// The waits census's list arm (bench/competitive/probes/waits_census.md, `serve.reads`): `boxes` boxes made, then
+    /// `lists` lists of them, each timed, so a list's parts wait for their reader over the socket; the boxes deleted
+    /// after. `HEXBENCH_LIST_BOXES` and `HEXBENCH_LISTS` set them (the phase's N and 100 unset).
+    fn list(node: &dyn Runtime, bundle: &Path, n: usize) -> Result<Value, String> {
+        let count = |var: &str, unset: usize| {
+            std::env::var(var).map_or(unset, |v| {
+                v.trim()
+                    .parse()
+                    .unwrap_or_else(|e| panic!("{var}={v:?}: {e}"))
+            })
+        };
+        let (boxes, lists) = (
+            count("HEXBENCH_LIST_BOXES", n),
+            count("HEXBENCH_LISTS", 100),
+        );
+        let ids: Vec<BoxId> = (0..boxes)
+            .map(|i| BoxId::new(&format!("list{i}")).map_err(|e| e.to_string()))
+            .collect::<Result<_, _>>()?;
+        let mut made = 0;
+        let timed = (|| -> Result<Vec<f64>, String> {
+            for id in &ids {
+                node.create(spec(id, bundle))
+                    .map_err(|e| format!("create {id}: {e}"))?;
+                made += 1;
+            }
+            let mut ms = Vec::with_capacity(lists);
+            for _ in 0..lists {
+                let t = Instant::now();
+                let listed = node.list().map_err(|e| format!("list: {e}"))?;
+                ms.push(t.elapsed().as_secs_f64() * 1e3);
+                if listed.len() < boxes {
+                    return Err(format!("a list of {boxes} boxes gave {}", listed.len()));
+                }
+            }
+            Ok(ms)
+        })();
+        for id in ids.iter().take(made) {
+            node.delete(id).map_err(|e| format!("delete {id}: {e}"))?;
         }
+        Ok(json!({ "boxes": boxes, "ms": timed? }))
     }
 
-    /// How long a socket agent has to end on SIGTERM before it's SIGKILLed: its counts line and exit are a
-    /// write and an exit, so seconds are slack under any load the bench meets.
-    const AGENT_END: Duration = Duration::from_secs(30);
+    /// The waits census's restart arm (`node.listing`): over the socket driver, `boxes` boxes made, the agent ended
+    /// with SIGTERM and started again over the same state and box root, so its recovery lists their parts; then the
+    /// boxes, adopted, deleted. `HEXBENCH_RESTART_BOXES` sets `boxes` (the phase's N unset). Returns the driver
+    /// with the new agent, and how long the new agent took to say it was ready.
+    fn restart(
+        driver: Driver,
+        hex: &str,
+        state: &Path,
+        root: &Path,
+        bundle: &Path,
+        n: usize,
+    ) -> (Driver, Result<Value, String>) {
+        let Driver::Socket { client, agent } = driver else {
+            return (
+                driver,
+                Err("the restart arm needs HEXBENCH_DRIVER=socket".to_owned()),
+            );
+        };
+        let boxes = std::env::var("HEXBENCH_RESTART_BOXES").map_or(n, |v| {
+            v.trim()
+                .parse()
+                .unwrap_or_else(|e| panic!("HEXBENCH_RESTART_BOXES={v:?}: {e}"))
+        });
+        let ids: Vec<BoxId> = (0..boxes)
+            .map(|i| BoxId::new(&format!("restart{i}")).expect("a box id"))
+            .collect();
+        let mut made = 0;
+        let created = ids.iter().try_for_each(|id| {
+            client
+                .create(spec(id, bundle))
+                .map(|_| made += 1)
+                .map_err(|e| format!("create {id}: {e}"))
+        });
+        drop(client);
+        let ended = agent.end();
+        let t = Instant::now();
+        let (agent, path) = Agent::start(hex, state, root);
+        let ready_ms = t.elapsed().as_secs_f64() * 1e3;
+        let client = Client::connect(&path)
+            .unwrap_or_else(|e| panic!("connecting to hex node at {}: {e}", path.display()));
+        let deleted = ids
+            .iter()
+            .take(made)
+            .try_for_each(|id| client.delete(id).map_err(|e| format!("delete {id}: {e}")));
+        let result = created
+            .and(ended.map(|_| ()))
+            .and(deleted)
+            .map(|()| json!({ "boxes": boxes, "ready_ms": ready_ms }));
+        (Driver::Socket { client, agent }, result)
+    }
+
+    /// How long a socket agent has to end on SIGTERM before it's SIGKILLed: its end is one more exchange with the
+    /// agent (a counts line and an exit), so it has the bound each call has, [`CALL_TIMEOUT`], not one of its own.
+    const AGENT_END: Duration = CALL_TIMEOUT;
 
     /// A `hex node` serving its socket for the socket driver, its boxes under `box_root`; ended with SIGTERM
-    /// ([`Agent::end`]), else killed when dropped. It takes HEX_OCI_MNTNS and HEXBENCH_PARKED_PROCS
-    /// (`--parked-procs`): HEXBENCH_DEVFS, _PROCFS, _AHEAD and _IPCUTS set only the in-process node, and it raises its
-    /// soft descriptor limit to the hard one as it starts, undoing HEXBENCH_NOFILE's `ulimit -Sn`; so an A/B of any of
+    /// ([`Agent::end`]), else killed when dropped. It runs as a node ships, its pools and ways its own: what this
+    /// bench sets, it sets on the in-process node alone, and the agent raises its soft descriptor limit to the hard one as it starts, undoing HEXBENCH_NOFILE's `ulimit -Sn`; so an A/B of any of
     /// those reads the in-process figures, never the socket's. Its stderr is passed on as it comes and kept.
     struct Agent {
         child: Child,
@@ -998,9 +1074,6 @@ mod linux {
                 .arg(box_root)
                 .stdout(Std::piped())
                 .stderr(Std::piped());
-            if let Some(on) = parked_procs() {
-                cmd.arg("--parked-procs").arg(if on { "on" } else { "off" });
-            }
             let mut child = cmd.spawn().expect("start hex node");
             let said = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
             let drain = {
@@ -1030,20 +1103,36 @@ mod linux {
             )
         }
 
-        /// Ends the node with SIGTERM, waits at most [`AGENT_END`] for it (SIGKILLed past it), and returns the
-        /// parked procs' counts it said as it ended, each by name.
+        /// Ends the node with SIGTERM, waits at most [`AGENT_END`] for it (SIGKILLed past it) on its pidfd, which
+        /// reads ready the moment it exits, and returns the parked procs' counts it said as it ended, each by name.
         fn end(mut self) -> Result<Value, String> {
             let pid = rustix::process::Pid::from_child(&self.child);
+            let exited = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty())
+                .map_err(|e| format!("hex node's pidfd: {e}"))?;
             rustix::process::kill_process(pid, rustix::process::Signal::TERM)
                 .map_err(|e| format!("SIGTERM to hex node: {e}"))?;
             let deadline = Instant::now() + AGENT_END;
             let ended = loop {
-                match self.child.try_wait() {
-                    Ok(Some(status)) => break Some(status),
-                    Ok(None) if Instant::now() < deadline => {
-                        std::thread::park_timeout(Duration::from_millis(20));
+                let left = deadline.saturating_duration_since(Instant::now());
+                let left = rustix::event::Timespec {
+                    tv_sec: i64::try_from(left.as_secs()).unwrap_or(i64::MAX),
+                    tv_nsec: i64::from(left.subsec_nanos()),
+                };
+                let mut fds = [rustix::event::PollFd::new(
+                    &exited,
+                    rustix::event::PollFlags::IN,
+                )];
+                match rustix::event::poll(&mut fds, Some(&left)) {
+                    Ok(0) => break None,
+                    Ok(_) => {
+                        break Some(
+                            self.child
+                                .wait()
+                                .map_err(|e| format!("reaping hex node: {e}"))?,
+                        );
                     }
-                    _ => break None,
+                    Err(rustix::io::Errno::INTR) => continue,
+                    Err(e) => return Err(format!("waiting on hex node's pidfd: {e}")),
                 }
             };
             let Some(status) = ended else {
@@ -1307,6 +1396,9 @@ mod linux {
     }
 
     pub(super) fn main() -> ExitCode {
+        // The waits census probe's switch (bench/competitive/probes/waits_census.md): the in-process node's waits and
+        // this client's answers, recorded from their own timing points.
+        hex_node::census::install_from_env().expect("the waits census installs");
         let args: Vec<String> = std::env::args_os()
             .skip(1)
             .map(|a| {
@@ -1344,14 +1436,6 @@ mod linux {
                 v.trim()
                     .parse()
                     .unwrap_or_else(|e| panic!("HEXBENCH_SUSTAINED={v:?}: {e}"))
-            });
-        let interleaved_pairs = std::env::var("HEXBENCH_INTERLEAVED")
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .map_or(INTERLEAVED_DEFAULT, |v| {
-                v.trim()
-                    .parse()
-                    .unwrap_or_else(|e| panic!("HEXBENCH_INTERLEAVED={v:?}: {e}"))
             });
         let (sleep_bundle, true_bundle) = (PathBuf::from(sleep_bundle), PathBuf::from(true_bundle));
         // HEXBENCH_REUSE=0: the owner opts out of reuse, its boxes and bundles otherwise as with reuse on, so
@@ -1401,38 +1485,14 @@ mod linux {
                         root.display()
                     )
                 });
-            // HEX_OCI_MNTNS: the way a pruned create's mount namespace is made, for decision 6's A/B;
-            // unset, the node's default.
-            let node = match std::env::var(hex_runtime::linux::oci::mntns::ENV_WAY) {
+            // HEX_OCI_MNTNS: the way a pruned create's mount namespace is made, for decision 6's A/B, set on this
+            // in-process node's builder alone (the node agent reads no environment for it, Ada's 2026-11-06 rule);
+            // unset, the node's default. It stays until the 7.1/7.2 host record decides that A/B, then goes.
+            let node = match std::env::var("HEX_OCI_MNTNS") {
                 Ok(way) => node.with_mount_namespace(&way),
                 Err(_) => node,
             }
             .with_oci_helper(PathBuf::from(hex));
-            let node = node
-                .with_prepared_dev_mounts(std::env::var("HEXBENCH_DEVFS").as_deref() != Ok("0"))
-                .unwrap_or_else(|e| panic!("the prepared /dev pool: {e}"));
-            let node = match parked_procs() {
-                Some(on) => node
-                    .with_parked_procs(on)
-                    .unwrap_or_else(|e| panic!("parked procs: {e}")),
-                None => node,
-            };
-            // Cgroups made ahead for boxes of no owner, each with an init in it (decision 8): the node's default,
-            // as it ships, unless HEXBENCH_AHEAD says.
-            let node = match std::env::var("HEXBENCH_AHEAD") {
-                Ok(v) => node.with_inits_ahead(
-                    v.trim()
-                        .parse()
-                        .unwrap_or_else(|e| panic!("HEXBENCH_AHEAD={v:?}: {e}")),
-                ),
-                Err(_) => node,
-            };
-            let node = match std::env::var("HEXBENCH_IPCUTS").as_deref() {
-                Ok("0") => node
-                    .with_ipc_uts_bound(0)
-                    .unwrap_or_else(|e| panic!("draining the ipc and uts pool: {e}")),
-                _ => node,
-            };
             Driver::InProcess(Box::new(node))
         };
         let node = driver.runtime();
@@ -1452,7 +1512,8 @@ mod linux {
             "sustained",
             "interleaved",
             "rtt",
-            "ipc_uts_pairs",
+            "list",
+            "counts",
             "serve",
         ] {
             if !wanted.split_whitespace().any(|w| w == phase) {
@@ -1478,9 +1539,13 @@ mod linux {
                     "start_true" => start_true(node, &true_bundle, n, warmup),
                     "throughput" => throughput(node, &true_bundle, &parent, lifecycles),
                     "sustained" => sustained(node, &true_bundle, &parent, sustained_lifecycles),
-                    "interleaved" => interleaved(node, &true_bundle, &parent, interleaved_pairs),
-                    "ipc_uts_pairs" => ipc_uts_pairs(node, &parent, hex, &sleep_bundle, n, warmup),
-                    "serve" => serve(node, &true_bundle),
+                        "interleaved" => interleaved(node, &true_bundle, &parent),
+                        "list" => list(node, &sleep_bundle, n),
+                        // The waits census's `client.answer.netns` row: the node's counts, asked `n` times.
+                        "counts" => (0..n)
+                            .try_for_each(|_| driver.netns().map(drop))
+                            .map(|()| json!({ "calls": n })),
+                        "serve" => serve(node, &true_bundle),
                     _ => rtt(node, &sleep_bundle, n, warmup),
                 }?;
                 let rose = rise(before, driver.netns()?);
@@ -1578,6 +1643,49 @@ mod linux {
                 Ok(v) => phases.insert(phase.to_owned(), v),
                 Err(e) => errors.insert(phase.to_owned(), Value::String(e)),
             };
+        }
+        // The waits census's `client.answer.hello` row: `n` connections to the socket's agent, each its hello.
+        if wanted.split_whitespace().any(|w| w == "hellos") {
+            let socket = state.path().join("node.sock");
+            let r = match &driver {
+                Driver::Socket { .. } => (0..n).try_for_each(|_| {
+                    Client::connect(&socket)
+                        .map(drop)
+                        .map_err(|e| format!("connecting to {}: {e}", socket.display()))
+                }),
+                Driver::InProcess(_) => {
+                    Err("the hellos arm needs HEXBENCH_DRIVER=socket".to_owned())
+                }
+            };
+            match r {
+                Ok(()) => phases.insert("hellos".to_owned(), json!({ "connections": n })),
+                Err(e) => errors.insert("hellos".to_owned(), Value::String(e)),
+            };
+        }
+        // The restart arm comes after every phase, as it replaces the socket's agent; `HEXBENCH_RESTARTS` times (once
+        // unset), so the waits census's `node.listing` row has its recoveries' listings.
+        let mut driver = driver;
+        if wanted.split_whitespace().any(|w| w == "restart") {
+            let restarts = std::env::var("HEXBENCH_RESTARTS").map_or(1, |v| {
+                v.trim()
+                    .parse()
+                    .unwrap_or_else(|e| panic!("HEXBENCH_RESTARTS={v:?}: {e}"))
+            });
+            let mut runs = Vec::with_capacity(restarts);
+            let t0 = Instant::now();
+            for _ in 0..restarts {
+                let (restarted, r) = restart(driver, hex, state.path(), &root, &sleep_bundle, n);
+                driver = restarted;
+                match r {
+                    Ok(v) => runs.push(v),
+                    Err(e) => {
+                        errors.insert("restart".to_owned(), Value::String(e));
+                        break;
+                    }
+                }
+            }
+            println!("{runtime} restart: {:.0}s", t0.elapsed().as_secs_f64());
+            phases.insert("restart".to_owned(), Value::Array(runs));
         }
         // The idle cgroups an owner's boxes left go before the box root does; a socket agent's are its
         // next start's to remove (T-T7.1.2).

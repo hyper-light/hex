@@ -25,13 +25,19 @@ use std::collections::BTreeSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Refusal, Runtime, Stdio};
+use hex_core::patience::Patience;
 use hex_node::{Node, OCI_BOXES};
+use hex_testkit::waits::until;
 
 const TEST: &str = "a_root_nodes_boxes_join_ipc_and_uts_namespaces_made_ahead";
-const PATIENCE: Duration = Duration::from_secs(30);
+/// The conformance suite's patience for a program's end (Ada's 2026-11-06 rule).
+const PATIENCE: Duration = hex_api::conformance::PATIENCE;
+/// The ipc and uts pool's refill thread's makes, which no recorded operation makes and no census row times yet: measuring,
+/// for the fact alone, each answer recorded for the census to come (hex_testkit::waits; the lead's rule of 2026-11-08).
+static PAIRS: Patience = Patience::measuring("test.oci_ipcuts.pairs");
 const PATH: &str = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 #[test]
@@ -126,6 +132,7 @@ fn boxes_from_the_pool_and_one_drained(lab: &Lab, own: &Path) -> String {
     // Past the pool's bound, each box alive while the next is made, so a pair handed out twice would show here.
     for k in 0..8 {
         wait_for(
+            &PAIRS,
             || {
                 let c = node.ipc_uts().unwrap();
                 c.made_ahead - c.taken - c.discarded >= 1
@@ -173,6 +180,7 @@ fn a_second_box_sees_nothing_of_the_first(lab: &Lab, own: &Path) -> String {
         .with_ipc_uts_bound(2)
         .expect("a pool of two");
     wait_for(
+        &PAIRS,
         || node.ipc_uts().unwrap().made_ahead >= 2,
         "the pool to hold two pairs",
     );
@@ -270,6 +278,7 @@ fn a_user_namespace_of_its_own_keeps_the_clones_flags(lab: &Lab, own: &Path) -> 
         .with_ipc_uts_bound(2)
         .expect("a pool of two");
     wait_for(
+        &PAIRS,
         || node.ipc_uts().unwrap().made_ahead >= 2,
         "the pool to hold two pairs",
     );
@@ -317,15 +326,10 @@ fn sweep(box_root: &Path) {
     let _ = std::fs::remove_dir(box_root);
 }
 
-fn wait_for(mut fact: impl FnMut() -> bool, what: &str) {
-    let deadline = Instant::now() + PATIENCE;
-    while Instant::now() < deadline {
-        if fact() {
-            return;
-        }
-        std::thread::park_timeout(Duration::from_millis(1));
-    }
-    panic!("no {what} within {PATIENCE:?}");
+/// Waits for `fact` on `wait`. The node publishes no event as its pool fills; its counts are read again once other
+/// threads have run, as oci_box.rs waits out the inits' refill, rather than after a picked sleep (hex_testkit::waits).
+fn wait_for(wait: &Patience, fact: impl FnMut() -> bool, what: &str) {
+    until(wait, what, fact).unwrap();
 }
 
 /// Makes and starts box `id` from `bundle`; its init waits.

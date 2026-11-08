@@ -58,6 +58,11 @@ pub enum OciError {
     Os { op: &'static str, why: String },
     #[error("the runtime's state is unusable: {0}")]
     Broken(String),
+    /// No create seed came free for the create, its line at the seeds' `bound` (full, or its wait ended), and
+    /// nothing of it was made: refused, never sent another way (one implementation per job, the lead's ruling of
+    /// 2026-11-06). `why` is the line's own account.
+    #[error("every create seed is taken: the node holds its most ({bound}); {why}")]
+    SeedsExhausted { bound: usize, why: String },
 }
 
 impl OciError {
@@ -113,6 +118,10 @@ impl From<OciError> for Refusal {
             },
             OciError::Os { op, why } => Refusal::Os { op, why },
             OciError::Broken(why) => Refusal::Broken(why),
+            OciError::SeedsExhausted { bound, .. } => Refusal::Exhausted {
+                what: "create seeds",
+                bound,
+            },
         }
     }
 }

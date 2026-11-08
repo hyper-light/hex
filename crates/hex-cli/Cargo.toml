@@ -31,7 +31,8 @@ tempfile.workspace = true
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 serde_json.workspace = true
 hex-client.workspace = true
-hex-node.workspace = true
+hex-node = { workspace = true, features = ["test-controls"] }
+hex-testkit.workspace = true
 
 [lints]
 workspace = true

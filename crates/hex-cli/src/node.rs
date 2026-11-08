@@ -1,19 +1,20 @@
 //! `hex node`: the node agent as a process of its own, serving the `Runtime` seam on its local socket
 //! to callers that don't link Hex (decision 3 of docs/design/runtime-architecture.md):
 //!
-//!   hex node --socket <path> --state <dir> [--box-root <cgroup dir>] [--parked-procs on|off]
+//!   hex node --socket <path> --state <dir> [--box-root <cgroup dir>]
 //!
 //! It opens the node, its boxes in cgroups under `--box-root` (else in a subtree beside its own
 //! cgroup), their records under `--state` and their containers' state on tmpfs under the runtime
 //! directory (`/run/hex-node` as root, `$XDG_RUNTIME_DIR/hex-node` rootless; decision 1), takes back
 //! or cleans up what an agent before it left, saying on stderr each box it removed and why
 //! (T-T7.1.2), raises its soft descriptor limit to the hard one, says on stderr whether it parks procs with
-//! its inits (decision 8, parked procs: a root node's default, `--parked-procs off` turns it off), binds the
+//! its inits (decision 8, parked procs: a root node's, never a rootless one's), binds the
 //! socket, says `ready <path>` on stdout, and serves until it is signalled; if serving fails it says why on
 //! stderr and exits 1. On SIGTERM it writes one line of its parked procs' counts on stderr (made, hits, misses,
 //! dry, capped, alive) and exits 143 with nothing else done: its boxes, connections and socket's file are left as
 //! a SIGKILL leaves them, for the next agent's recovery. A socket an ended agent left at the path is replaced; one a live agent serves is
-//! refused. A debug build also takes `--crash-at <cgroup-made|bundle-rendered|record-first-write>`,
+//! refused. A root node whose network-namespace pool was refused for a capability it lacks says so on stderr as it
+//! opens (decision 4). A debug build also takes `--crash-at <cgroup-made|bundle-rendered|record-first-write>`,
 //! which arms the node's crash point there (`hex_node::CrashPoint`) for T-T7.1.2's crash test: from
 //! the agent's own arguments alone, so no container can arm it.
 
@@ -22,14 +23,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use hex_api::Refusal;
+use hex_core::netns::Counts;
 #[cfg(debug_assertions)]
 use hex_node::CrashPoint;
 use hex_node::Node;
-use hex_node::serve::{LIMITS, Server, WORKERS};
+use hex_node::serve::{Server, limits};
 use rustix::process::Resource;
 
 /// Runs `hex node`'s arguments (everything after `node`); returns the exit status.
 pub fn main(args: &[String]) -> u8 {
+    if args == ["--descriptors"] {
+        return descriptors();
+    }
     match serve(args) {
         Ok(()) => 0,
         Err((status, why)) => {
@@ -41,20 +46,50 @@ pub fn main(args: &[String]) -> u8 {
     }
 }
 
-const USAGE: &str = "usage: hex node --socket <path> --state <dir> [--box-root <cgroup dir>] [--parked-procs on|off]";
+const USAGE: &str = "usage: hex node --socket <path> --state <dir> [--box-root <cgroup dir>] | hex node --descriptors";
+
+/// `hex node --descriptors`: what a node of this process's owner needs of its soft descriptor limit on this host, at a
+/// first start's bounds, its own and every kept namespace's files (`FilesBound::needed`), said as `own N files M need
+/// T`: what an installer gives the node's service and the install lab checks, never a figure copied from one host's
+/// (goal 6 step 6's HEX-INST-5). What this process holds now stands for what the node holds beside its bounds.
+fn descriptors() -> u8 {
+    use hex_node::netns::{FilesBound, Pools, open_descriptors};
+    let needed = hex_node::sizes::Sizes::now().and_then(|sizes| {
+        let pools = if rustix::process::geteuid().is_root() {
+            Pools::root(sizes)
+        } else {
+            Pools::rootless(sizes)
+        };
+        let limit = rustix::process::getrlimit(Resource::Nofile);
+        Ok(FilesBound::needed(pools, open_descriptors(&limit)?))
+    });
+    match needed {
+        Ok(n) => {
+            let line = format!("own {} files {} need {}\n", n.own, n.files, n.total());
+            match std::io::stdout().lock().write_all(line.as_bytes()) {
+                Ok(()) => 0,
+                Err(_) => 1,
+            }
+        }
+        Err(e) => {
+            let _ = std::io::stderr()
+                .lock()
+                .write_all(format!("hex node: {e}\n").as_bytes());
+            1
+        }
+    }
+}
 
 struct Args {
     socket: PathBuf,
     state: PathBuf,
     box_root: Option<PathBuf>,
-    parked_procs: bool,
     #[cfg(debug_assertions)]
     crash_at: Option<CrashPoint>,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
     let (mut socket, mut state, mut box_root) = (None, None, None);
-    let mut parked_procs = None;
     #[cfg(debug_assertions)]
     let mut crash_at = None;
     let mut rest = args.iter();
@@ -67,17 +102,6 @@ fn parse(args: &[String]) -> Result<Args, String> {
             let point = CrashPoint::named(name)
                 .ok_or_else(|| format!("{flag} names no crash point: {name:?}"))?;
             if crash_at.replace(point).is_some() {
-                return Err(format!("{flag} is given twice\n{USAGE}"));
-            }
-            continue;
-        }
-        if flag == "--parked-procs" {
-            let on = match rest.next().map(String::as_str) {
-                Some("on") => true,
-                Some("off") => false,
-                other => return Err(format!("{flag} takes on or off, not {other:?}\n{USAGE}")),
-            };
-            if parked_procs.replace(on).is_some() {
                 return Err(format!("{flag} is given twice\n{USAGE}"));
             }
             continue;
@@ -99,7 +123,6 @@ fn parse(args: &[String]) -> Result<Args, String> {
         socket: socket.ok_or_else(|| format!("--socket is needed\n{USAGE}"))?,
         state: state.ok_or_else(|| format!("--state is needed\n{USAGE}"))?,
         box_root,
-        parked_procs: parked_procs.unwrap_or(true),
         #[cfg(debug_assertions)]
         crash_at,
     })
@@ -108,6 +131,8 @@ fn parse(args: &[String]) -> Result<Args, String> {
 fn serve(args: &[String]) -> Result<(), (u8, String)> {
     let args = parse(args).map_err(|why| (2, why))?;
     let failed = |e: Refusal| (1, e.to_string());
+    // The waits census, where the probe asks for it (bench/competitive/probes/waits_census.md); nothing otherwise.
+    hex_node::census::install_from_env().map_err(failed)?;
     // SIGTERM is read from a signalfd, blocked before the node starts a thread so every thread inherits the block;
     // each process the node starts has its mask emptied before it execs (the seeds' and execs' `default_signals`,
     // std's Command), so none inherits it.
@@ -127,12 +152,14 @@ fn serve(args: &[String]) -> Result<(), (u8, String)> {
     // warning.
     let node = node
         .with_lsm(hex_runtime::linux::oci::lsm::Policy::from_env().map_err(|e| failed(e.into()))?);
-    let node = node.with_parked_procs(args.parked_procs).map_err(failed)?;
     #[cfg(debug_assertions)]
     let node = match args.crash_at {
         Some(point) => node.with_crash_point(point),
         None => node,
     };
+    if let Some(line) = refused_pool(&node.netns().map_err(failed)?) {
+        let _ = std::io::stderr().lock().write_all(line.as_bytes());
+    }
     // Recovery removes a box it can't take back; say which and why, so nothing is dropped unseen
     // (CLAUDE.md §3), before the socket opens.
     let recovered = node.recover().map_err(failed)?;
@@ -173,18 +200,18 @@ fn serve(args: &[String]) -> Result<(), (u8, String)> {
     }
     {
         let said = if node.parked_procs() {
-            format!("on, at most {} alive", hex_node::cgroups::PROCS_ALIVE)
-        } else if args.parked_procs {
-            "off: a rootless node parks none".to_owned()
+            format!("on, at most {} alive", node.sizes().procs_alive())
         } else {
-            "off".to_owned()
+            "off: a rootless node parks none".to_owned()
         };
         let _ = writeln!(std::io::stderr().lock(), "hex node: parked procs: {said}");
     }
     let node = Arc::new(node);
     let (ended, end) = std::sync::mpsc::channel();
     end_on_sigterm(term, Arc::clone(&node), ended.clone()).map_err(failed)?;
-    let mut server = Server::bind(&args.socket, node, LIMITS, WORKERS).map_err(failed)?;
+    let sizes = node.sizes();
+    let mut server =
+        Server::bind(&args.socket, node, limits(&sizes), sizes.workers).map_err(failed)?;
     let mut out = std::io::stdout().lock();
     out.write_all(format!("ready {}\n", args.socket.display()).as_bytes())
         .and_then(|()| out.flush())
@@ -247,6 +274,17 @@ fn parked_counts(node: &Node) -> String {
     }
 }
 
+/// What `hex node` says on stderr when its network-namespace pool was refused: what the node lacks,
+/// and that its creates make their namespaces on the path, which its counts say as `refused_on_path`.
+fn refused_pool(counts: &Counts) -> Option<String> {
+    counts.refused.map(|missing| {
+        format!(
+            "hex node: network-namespace pool refused: this node lacks {missing}, which making one \
+             ahead takes; each create makes its container's on its path (counted as refused_on_path)\n"
+        )
+    })
+}
+
 /// Raises the soft limit on open descriptors to the hard one: each connection and watched program
 /// holds descriptors, and a service's soft limit stays 1,024 for `select(2)`'s sake while its hard
 /// limit is 524,288 (systemd-system.conf(5), `DefaultLimitNOFILE=`), which a program that needs
@@ -278,28 +316,36 @@ mod tests {
             .collect()
     }
 
-    /// `hex node --parked-procs on|off` (decision 8, parked procs; the lead, 2026-11-06, AC-T7.1.3). Do: parse
-    /// with the flag absent, `on`, `off`, a value of neither, and given twice. Expect: on, on, off, and each of
-    /// the last two refused naming the flag.
+    /// Parked procs have no off switch (decision 8, parked procs; Ada's 2026-11-06 rule, once
+    /// bench/competitive/probes/parked_procs_ab.md decided them on; AC-T7.1.3). Do: parse `--parked-procs` with `on`
+    /// and with `off`. Expect: each refused as an unknown argument, naming it.
     #[test]
-    fn parked_procs_are_on_unless_the_flag_says_off() {
-        assert!(parse(&args(&[])).unwrap().parked_procs);
-        assert!(
-            parse(&args(&["--parked-procs", "on"]))
-                .unwrap()
-                .parked_procs
-        );
-        assert!(
-            !parse(&args(&["--parked-procs", "off"]))
-                .unwrap()
-                .parked_procs
-        );
-        for bad in [
-            &["--parked-procs", "yes"][..],
-            &["--parked-procs", "off", "--parked-procs", "on"],
-        ] {
-            let why = parse(&args(bad)).err().unwrap();
-            assert!(why.contains("--parked-procs"), "{bad:?}: {why}");
+    fn parked_procs_have_no_flag() {
+        for value in ["on", "off"] {
+            let why = parse(&args(&["--parked-procs", value])).err().unwrap();
+            assert!(
+                why.starts_with("unknown argument \"--parked-procs\""),
+                "{value}: {why}"
+            );
         }
+    }
+
+    use hex_core::netns::Missing;
+
+    /// HEX-NETNS-13: a node whose pool was refused says so on stderr, naming what it lacks; one whose
+    /// pool wasn't says nothing. Do: render both. Expect: the line naming CAP_SYS_ADMIN, and none.
+    #[test]
+    fn a_refused_pool_is_said_by_name() {
+        let refused = Counts {
+            refused: Missing::of(false, true),
+            ..Counts::default()
+        };
+        assert_eq!(
+            refused_pool(&refused).unwrap(),
+            "hex node: network-namespace pool refused: this node lacks CAP_SYS_ADMIN, which making \
+             one ahead takes; each create makes its container's on its path (counted as \
+             refused_on_path)\n"
+        );
+        assert_eq!(refused_pool(&Counts::default()), None);
     }
 }

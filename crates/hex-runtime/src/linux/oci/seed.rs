@@ -97,7 +97,8 @@ fn serve() -> Result<(), OciError> {
     // spawn, so the agent never clears close-on-exec on it. Moved off fd 0 close-on-exec, so it doesn't
     // survive into a program an intermediate's clone execs (the intermediate is a fork, which keeps it;
     // only the workload's execve, which must not hold the agent's socket, closes it), and /dev/null put
-    // on fd 0 in its place.
+    // on fd 0 in its place. It goes to the lowest free descriptor from 3, the first past standard
+    // input, output and error's 0-2 (stdin(3)), so it never takes one of theirs.
     let mut stdin = sys::own_fd(0)?;
     let mut socket = rustix::io::fcntl_dupfd_cloexec(&stdin, 3)
         .map_err(|e| OciError::os("moving the seed's socket off its stdin", e))?;
@@ -117,6 +118,9 @@ fn serve() -> Result<(), OciError> {
     // A create seed on a root node joins the node's pruned mount namespace once, here, off every create's
     // path, so every init it clones copies a namespace holding nothing of the host (goal 5 plan step 2).
     if std::env::var_os(ENV_JOIN).is_some() {
+        // The namespace's mount cap, read while there is a `/proc` to read it from, for every init this seed
+        // clones to bound its walks of the namespace's mounts by (init::MOUNT_MAX).
+        init::mount_max()?;
         join_pruned(socket.as_fd())?;
     }
     let mut specs = Specs::default();
@@ -133,6 +137,11 @@ fn serve() -> Result<(), OciError> {
         }
     }
 }
+
+/// The data of the pruned root's tmpfs: one block, a page on any page size (`nr_blocks`,
+/// Documentation/filesystems/tmpfs.rst:82), the least bound tmpfs takes (0 is none, :94). It holds nothing and is
+/// remounted read-only; a container's root is attached on it, which takes no block.
+pub(crate) const ROOT_TMPFS: &std::ffi::CStr = c"nr_blocks=1,mode=755";
 
 /// Prunes a mount namespace for the node's create seeds, once per node (goal 5 plan step 2,
 /// `goal6-mntns.md` §12): unshare a mount namespace, make `/` private, mount a small tmpfs over
@@ -169,7 +178,7 @@ pub fn prune_namespace(mountpoint: &Path) -> Result<OwnedFd, OciError> {
         mountpoint,
         "tmpfs",
         MountFlags::NOSUID,
-        Some(c"size=64k,mode=755"),
+        Some(ROOT_TMPFS),
     )
     .map_err(|e| OciError::os("the pruned namespace's root tmpfs", e))?;
     rustix::process::chdir(mountpoint)
@@ -192,7 +201,9 @@ fn join_pruned(socket: BorrowedFd<'_>) -> Result<(), OciError> {
     let mut buf = [0u8; 1];
     match recv_request(socket, &mut buf)? {
         Received::Message { size: 1, stdio } => match <[OwnedFd; 1]>::try_from(stdio) {
-            Ok([namespace]) => sys::setns(namespace.as_fd(), libc::CLONE_NEWNS),
+            Ok([namespace]) => {
+                sys::setns(namespace.as_fd(), libc::CLONE_NEWNS).map_err(OciError::from)
+            }
             Err(fds) => Err(OciError::Broken(format!(
                 "the pruned namespace came with {} descriptors, not 1",
                 fds.len()
@@ -655,7 +666,8 @@ pub fn exec_direct(
     }
     // Whatever the clone did, this thread's children are born in the node's own pid namespace again.
     let reset = if set {
-        own_pid_namespace().and_then(|own| sys::setns(own.as_fd(), libc::CLONE_NEWPID))
+        own_pid_namespace()
+            .and_then(|own| sys::setns(own.as_fd(), libc::CLONE_NEWPID).map_err(OciError::from))
     } else {
         Ok(())
     };

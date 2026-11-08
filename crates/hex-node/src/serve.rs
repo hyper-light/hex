@@ -12,15 +12,24 @@
 //! Each resource has a bound (CLAUDE.md §2), refused past by type, naming it (§3):
 //! - connections ([`Limits::connections`]): one more is answered `Exhausted` and closed;
 //! - a message's size ([`Limits::message_bytes`]): a larger one is answered `Invalid`, naming it;
-//! - requests in flight on a connection ([`Limits::in_flight`]): one more is answered `Exhausted`;
-//! - programs a connection watches ([`Limits::programs`]): an exec past them is answered `Exhausted`;
+//! - requests in flight on the node's connections together ([`Limits::in_flight`]): one more is answered
+//!   `Exhausted`;
+//! - programs the node's connections watch together ([`Limits::programs`]): an exec past them is answered
+//!   `Exhausted`.
+//!
+//! Each is a budget for the node, never split among connections (the lead, 2026-11-06): the node's clients are
+//! its own control plane, so no fairness between them is owed. The node derives each from its platform
+//! ([`limits`]). Of each budget the node keeps [`KEPT`] for every connection it admits, which is what a hello
+//! tells a client in its limits, so a client within what it was told is never refused; a connection the node
+//! can't keep that for is refused as it comes, naming the budget. Version 4's hello tells the budgets beside;
 //! - answers waiting for room in a connection's socket: while any wait, its requests aren't read, so a
 //!   client that doesn't read its answers stops being read rather than growing the agent's memory.
 //!   By construction they number at most `in_flight + programs + 1`: an answer for each call in
 //!   flight (a list's parts go one at a time), an end for each program, and the one refusal read
 //!   before reading stopped;
-//! - workers ([`WORKERS`]): a call past them waits in the queue its connections' in-flight bounds
-//!   hold.
+//! - workers (the node's [`crate::sizes::Sizes::workers`]): one for every call the connections' in-flight
+//!   bounds admit, where the kernel's thread limit allows; a call past them waits in the queue those
+//!   bounds hold.
 //!
 //! The disconnect rule (decision 3): when a connection closes, every program its execs started that it
 //! still watches is sent KILL through its pidfd, reaped, and counted in its box ([`Host::abandoned`]),
@@ -35,13 +44,14 @@ use std::mem::MaybeUninit;
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use hex_api::{BoxId, Exit, Proc, Program, Refusal, Runtime, Stdio};
 use hex_core::netns;
+use hex_core::patience::Patience;
 use hex_core::wire::{self, Answer, Call, Header, Hello, Received, Request, Streams};
 use rustix::buffer::spare_capacity;
 use rustix::event::epoll::{self, CreateFlags, EventData, EventFlags};
@@ -56,29 +66,39 @@ use rustix::process::{Pid, PidfdFlags, Signal};
 
 pub use hex_core::wire::Limits;
 
-/// The node agent's bounds on its socket unless set ([`Server::bind`]'s `limits`):
-/// - 64 connections: a node's local callers are few (kiln's runner and executor, the command line),
-///   so this is far past them while holding each connection's cost to a known size;
+/// The node's bounds on its socket ([`Server::bind`]'s `limits`), each a budget for the node and each taken from
+/// its platform (Ada's rule and the lead's call, 2026-11-06); a hello tells its `in_flight` and `programs` as the
+/// node's budgets (version 7's) and [`KEPT`] as each connection's limits:
+/// - connections: the descriptors the node may hold (its hard `RLIMIT_NOFILE`, which the agent raises its soft
+///   limit to, getrlimit(2)), one each; the kernel refuses an accept past what remains of them (`EMFILE`), and the
+///   socket pauses accepting until one closes;
 /// - messages of [`wire::MAX_MESSAGE`] bytes, the largest the format sends;
-/// - 64 requests in flight on a connection: twice the bench's most threads sharing one client (32,
-///   seam_oci's throughput phase), so a client's threads don't meet it in use;
-/// - 1,024 programs watched by a connection, each holding a pidfd here: 64 connections' worth is
-///   65,536 descriptors, the supervisor's [`crate::supervise::INIT_BUDGET`].
-pub const LIMITS: Limits = Limits {
-    connections: 64,
-    message_bytes: wire::MAX_MESSAGE,
-    in_flight: 64,
-    programs: 1_024,
-};
+/// - calls in flight: the socket's workers ([`crate::sizes::Sizes::workers`], the thread limit), so a call admitted
+///   has a worker that can exist;
+/// - programs watched: the supervisor's pidfd budget ([`crate::sizes::Sizes::inits`]: a pidfd per live box, at most
+///   the node's boxes, within its hard `RLIMIT_NOFILE`, getrlimit(2)).
+pub fn limits(sizes: &crate::sizes::Sizes) -> Limits {
+    Limits {
+        connections: sizes.descriptors,
+        message_bytes: wire::MAX_MESSAGE,
+        in_flight: sizes.workers,
+        programs: sizes.inits,
+    }
+}
 
-/// Most workers running calls at once, started as calls need them and kept: past them, calls wait in
-/// the queue. Twice [`LIMITS`]' in-flight bound, so one connection's calls never wait on another's.
-pub const WORKERS: usize = 128;
+/// What the node keeps for every connection it admits, of its calls in flight and of its programs watched: one of
+/// each, the fewest by which a connection can do anything (the lead's ruling, 2026-11-06). A hello tells a client
+/// this in its limits, whose meaning is each connection's own (wire's append-only rule), so a client of any version
+/// within it is never refused, however much of the budgets other connections hold. It is less than the 64 calls
+/// and 1,024 programs a hello told before 2026-11-06: those were per-connection caps, which the node no longer
+/// keeps, and keeping 64 and 1,024 for every connection would cap the connections at the budgets over them (64 at
+/// the supervisor's 65,536 pidfds). Past it, a connection's calls and programs share what the budgets leave.
+pub const KEPT: usize = 1;
 
 /// What [`Refusal::Exhausted`] names for each bound.
 pub const CONNECTIONS: &str = "connections to the node agent's socket";
-pub const IN_FLIGHT: &str = "requests in flight on one connection";
-pub const PROGRAMS: &str = "programs watched by one connection";
+pub const IN_FLIGHT: &str = "requests in flight on the node agent's connections together";
+pub const PROGRAMS: &str = "programs watched by the node agent's connections together";
 
 /// Messages read from one connection before the others get a turn: a fairness bound, so one busy
 /// client can't hold the I/O thread.
@@ -87,14 +107,12 @@ const READS_PER_WAKE: usize = 64;
 const EVENTS: usize = 256;
 /// Connections waiting to be accepted: the I/O thread accepts them as they come.
 const BACKLOG: i32 = 64;
-/// Longest a list's worker waits for its client to read one part before it sends the next; past it
-/// the client has stopped reading, and its connection is closed. Five times the node's longest wait
-/// of its own (a delete's [`crate::node::EMPTY_PATIENCE`]), so a client busy with another call isn't
-/// taken for one that stopped.
-const READ_PATIENCE: Duration = Duration::from_secs(300);
-/// Longest a stopping server waits for the programs it ended to be reaped and recorded, as
-/// [`crate::node::EMPTY_PATIENCE`]: a killed process ends in milliseconds.
-const STOP_PATIENCE: Duration = Duration::from_secs(60);
+/// How long a list's worker waits for its client to read one part before it sends the next: twice the slowest
+/// such read this process has seen (decision 9; the lead's failure-bound rule); past it the client has stopped
+/// reading, and its connection is closed, the other calls on it refused by the close. MEASURING: the record to come is
+/// `bench/competitive/probes/waits_census.md`'s `serve.reads` row, which then seeds it. Until then the first part
+/// waited for is waited out.
+static READS: Patience = Patience::measuring("serve.reads");
 
 /// The epoll tokens of the listener and the stop eventfd; connections and programs take the rest.
 const LISTENER: u64 = 0;
@@ -128,6 +146,17 @@ struct Shared {
     listener: OwnedFd,
     wake: OwnedFd,
     stopping: AtomicBool,
+    /// Calls in flight on every connection together. With `idle_calls`, at most `limits.in_flight`: what is
+    /// in flight and what is kept for the open connections that have none in flight never pass the budget.
+    in_flight: AtomicUsize,
+    /// Open connections with no call in flight, each with its [`KEPT`] call kept for it.
+    idle_calls: AtomicUsize,
+    /// Open connections watching no program, each with its [`KEPT`] program kept for it; changed under the table's
+    /// lock, as the programs watched are.
+    idle_programs: AtomicUsize,
+    /// Execs under way holding a place among the programs watched, which with the table's watched programs are
+    /// at most `limits.programs`; changed under the table's lock.
+    reserving: AtomicUsize,
     table: Mutex<Table>,
     jobs: Mutex<Jobs>,
     work: Condvar,
@@ -262,6 +291,10 @@ impl Server {
             listener,
             wake,
             stopping: AtomicBool::new(false),
+            in_flight: AtomicUsize::new(0),
+            idle_calls: AtomicUsize::new(0),
+            idle_programs: AtomicUsize::new(0),
+            reserving: AtomicUsize::new(0),
             table: Mutex::new(Table::default()),
             jobs: Mutex::new(Jobs::default()),
             work: Condvar::new(),
@@ -511,6 +544,30 @@ impl Shared {
             );
             return Ok(());
         }
+        // A connection is admitted only if what it is kept fits in both budgets beside what is used and kept now.
+        let calls = self
+            .in_flight
+            .load(Ordering::Acquire)
+            .saturating_add(self.idle_calls.load(Ordering::Acquire))
+            .saturating_add(KEPT);
+        let programs = table
+            .watched
+            .len()
+            .saturating_add(self.reserving.load(Ordering::Acquire))
+            .saturating_add(self.idle_programs.load(Ordering::Acquire))
+            .saturating_add(KEPT);
+        let spent = if calls > self.limits.in_flight {
+            Some((IN_FLIGHT, self.limits.in_flight))
+        } else if programs > self.limits.programs {
+            Some((PROGRAMS, self.limits.programs))
+        } else {
+            None
+        };
+        if let Some((what, bound)) = spent {
+            drop(table);
+            refuse(&fd, Refusal::Exhausted { what, bound });
+            return Ok(());
+        }
         let token = table.token()?;
         if let Err(e) = epoll::add(
             &self.epoll,
@@ -540,6 +597,8 @@ impl Shared {
                 drained: Condvar::new(),
             }),
         );
+        self.idle_calls.fetch_add(1, Ordering::AcqRel);
+        self.idle_programs.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
 
@@ -653,20 +712,46 @@ impl Shared {
                 &Answer::Hello(Hello {
                     version: wire::VERSION,
                     classes: self.classes.clone(),
-                    limits: self.limits,
+                    limits: Limits {
+                        in_flight: KEPT,
+                        programs: KEPT,
+                        ..self.limits
+                    },
+                    // A version that has no room for them is told what each connection is kept alone.
+                    budgets: if h.version >= wire::BUDGETS {
+                        Some(wire::Budgets {
+                            in_flight: self.limits.in_flight,
+                            programs: self.limits.programs,
+                        })
+                    } else {
+                        None
+                    },
                 }),
             ),
             Ok((h, Request::Release)) => self.release(conn, h.id),
             Ok((header, Request::Call(call))) => {
                 let admitted = {
                     let mut out = conn.out.lock().map_err(poisoned)?;
-                    match out.in_flight.checked_add(1) {
-                        Some(n) if n <= self.limits.in_flight => {
-                            out.in_flight = n;
-                            true
+                    let admitted = if out.in_flight < KEPT {
+                        // Its kept call: always there, since what is kept and in flight never pass the budget.
+                        if out.open {
+                            self.idle_calls.fetch_sub(1, Ordering::AcqRel);
                         }
-                        _ => false,
+                        self.in_flight.fetch_add(1, Ordering::AcqRel);
+                        true
+                    } else {
+                        let kept = self.idle_calls.load(Ordering::Acquire);
+                        self.in_flight
+                            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                                n.checked_add(1)
+                                    .filter(|&m| m.saturating_add(kept) <= self.limits.in_flight)
+                            })
+                            .is_ok()
+                    };
+                    if admitted {
+                        out.in_flight = out.in_flight.saturating_add(1);
                     }
+                    admitted
                 };
                 if !admitted {
                     return self.answer(
@@ -700,24 +785,35 @@ impl Shared {
                 wire::answer(version, id, &refused, self.limits.message_bytes)
             })
             .map_err(|e| Refusal::Broken(format!("a refusal couldn't be written: {e}")))?;
-        self.send(conn, bytes, None)
+        self.send(conn, bytes, false)
     }
 
     /// Queues `bytes` after a connection's waiting answers, or sends them now when none wait. With a
-    /// `deadline`, first waits for the waiting ones to go (a list's next part), closing the connection
-    /// once it passes. Sending on a closed connection does nothing: its client is gone.
-    fn send(&self, conn: &Conn, bytes: Vec<u8>, deadline: Option<Instant>) -> Result<(), Refusal> {
+    /// `after_read` (a list's next part), first waits for the waiting ones to go, closing the connection
+    /// once the wait passes [`READS`]' bound. Sending on a closed connection does nothing: its client is gone.
+    fn send(&self, conn: &Conn, bytes: Vec<u8>, after_read: bool) -> Result<(), Refusal> {
         let mut out = conn.out.lock().map_err(poisoned)?;
-        if let Some(deadline) = deadline {
+        if after_read {
+            let began = Instant::now();
+            let deadline = READS.deadline().and_then(|wait| began.checked_add(wait));
+            let waited = out.open && !out.backlog.is_empty();
             while out.open && !out.backlog.is_empty() {
-                let left = deadline.saturating_duration_since(Instant::now());
-                if left.is_zero() {
-                    drop(out);
-                    // The I/O thread sees the hang-up and closes it, by the disconnect rule.
-                    let _ = rustix::net::shutdown(&conn.fd, Shutdown::Both);
-                    return Ok(());
-                }
-                out = conn.drained.wait_timeout(out, left).map_err(poisoned)?.0;
+                out = match deadline {
+                    None => conn.drained.wait(out).map_err(poisoned)?,
+                    Some(deadline) => {
+                        let left = deadline.saturating_duration_since(Instant::now());
+                        if left.is_zero() {
+                            drop(out);
+                            // The I/O thread sees the hang-up and closes it, by the disconnect rule. No sample.
+                            let _ = rustix::net::shutdown(&conn.fd, Shutdown::Both);
+                            return Ok(());
+                        }
+                        conn.drained.wait_timeout(out, left).map_err(poisoned)?.0
+                    }
+                };
+            }
+            if waited && out.open {
+                READS.answered(began.elapsed());
             }
         }
         if !out.open {
@@ -790,6 +886,13 @@ impl Shared {
                 return Ok(());
             }
             out.open = false;
+            // What was kept for it is let go with it.
+            if out.in_flight == 0 {
+                self.idle_calls.fetch_sub(1, Ordering::AcqRel);
+            }
+            if out.programs.len().saturating_add(out.reserved) == 0 {
+                self.idle_programs.fetch_sub(1, Ordering::AcqRel);
+            }
             out.backlog.clear();
             out.programs.values().copied().collect()
         };
@@ -809,7 +912,14 @@ impl Shared {
     /// and the node's sweep reaps it once it ends, as with a dropped in-process `Proc`.
     fn release(&self, conn: &Conn, exec: u64) -> Result<(), Refusal> {
         let mut table = self.table()?;
-        let token = conn.out.lock().map_err(poisoned)?.programs.remove(&exec);
+        let token = {
+            let mut out = conn.out.lock().map_err(poisoned)?;
+            let token = out.programs.remove(&exec);
+            if token.is_some() {
+                self.program_gone(&out);
+            }
+            token
+        };
         if let Some(token) = token {
             // Dropping the watch closes its pidfd, which leaves the epoll set, and lets the program go.
             table.watched.remove(&token);
@@ -820,13 +930,21 @@ impl Shared {
     /// A watched program's pidfd turned readable: it has ended. Reaped, and its end sent to its
     /// connection, or counted in its box when the connection closed (the disconnect rule).
     fn ended(self: &Arc<Self>, token: u64) -> Result<(), Refusal> {
-        let mut w = {
+        let (mut w, open) = {
             let mut table = self.table()?;
             let Some(w) = table.watched.remove(&token) else {
                 return Ok(());
             };
+            // Its connection's count goes with the node's, under the same lock, so the two never disagree.
+            let open = {
+                let mut out = w.conn.out.lock().map_err(poisoned)?;
+                if out.programs.remove(&w.exec).is_some() {
+                    self.program_gone(&out);
+                }
+                out.open
+            };
             self.resume_accepting(&mut table)?;
-            w
+            (w, open)
         };
         let exit = match w.proc.try_wait() {
             Ok(Some(exit)) => exit,
@@ -834,21 +952,33 @@ impl Shared {
             // lost.
             Ok(None) => {
                 let mut table = self.table()?;
+                {
+                    let mut out = w.conn.out.lock().map_err(poisoned)?;
+                    if out.open {
+                        if out.programs.len().saturating_add(out.reserved) == 0 {
+                            self.idle_programs.fetch_sub(1, Ordering::AcqRel);
+                        }
+                        out.programs.insert(w.exec, token);
+                    }
+                }
                 table.watched.insert(token, w);
                 return Ok(());
             }
             // Reaped elsewhere in this process: how it ended is no longer known.
             Err(_) => Exit::Unknown,
         };
-        let open = {
-            let mut out = w.conn.out.lock().map_err(poisoned)?;
-            out.programs.remove(&w.exec);
-            out.open
-        };
         if open && !w.killed {
             self.answer(&w.conn, w.version, w.exec, &Answer::Exited(exit))
         } else {
             self.enqueue(Job::Abandoned(w.box_id))
+        }
+    }
+
+    /// One of `out`'s programs is no longer watched (the table's lock held): a connection left with none has its
+    /// kept program kept again.
+    fn program_gone(&self, out: &Out) {
+        if out.open && out.programs.len().saturating_add(out.reserved) == 0 {
+            self.idle_programs.fetch_add(1, Ordering::AcqRel);
         }
     }
 
@@ -987,8 +1117,22 @@ impl Shared {
 
     fn done(&self, conn: &Conn) -> Result<(), Refusal> {
         let mut out = conn.out.lock().map_err(poisoned)?;
-        out.in_flight = out.in_flight.saturating_sub(1);
+        self.call_done(&mut out);
         Ok(())
+    }
+
+    /// One of `out`'s calls is done. A connection left with none has its kept call kept again, counted before the
+    /// call leaves the node's count, so the two together never read past the budget.
+    fn call_done(&self, out: &mut Out) {
+        out.in_flight = out.in_flight.saturating_sub(1);
+        if out.in_flight == 0 && out.open {
+            self.idle_calls.fetch_add(1, Ordering::AcqRel);
+        }
+        let _ = self
+            .in_flight
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                Some(n.saturating_sub(1))
+            });
     }
 
     /// A list's answer, in as many parts as its boxes need, each sent once the one before has gone.
@@ -1006,9 +1150,8 @@ impl Shared {
                 );
             }
         };
-        let deadline = Instant::now().checked_add(READ_PATIENCE);
         for (n, part) in parts.into_iter().enumerate() {
-            self.send(conn, part, if n == 0 { None } else { deadline })?;
+            self.send(conn, part, n > 0)?;
         }
         Ok(())
     }
@@ -1028,23 +1171,41 @@ impl Shared {
             self.done(conn)?;
             self.answer(conn, header.version, header.id, &answer)
         };
-        // A place among the programs the connection watches, taken before the program starts, so
-        // none starts that can't be watched.
+        // A place among the programs the node's connections watch, taken before the program starts, so
+        // none starts that can't be watched: under the table's lock, which every watch is added under.
         {
+            let table = self.table()?;
             let mut out = conn.out.lock().map_err(poisoned)?;
-            let held = out.programs.len().checked_add(out.reserved);
-            if held.is_none_or(|h| h >= self.limits.programs) {
-                drop(out);
-                return reply(Answer::Refused(Refusal::Exhausted {
-                    what: PROGRAMS,
-                    bound: self.limits.programs,
-                }));
+            let mine = out.programs.len().saturating_add(out.reserved);
+            if mine < KEPT {
+                // Its kept program: always there, since what is kept and watched never pass the budget.
+                if out.open {
+                    self.idle_programs.fetch_sub(1, Ordering::AcqRel);
+                }
+            } else {
+                let held = table
+                    .watched
+                    .len()
+                    .saturating_add(self.reserving.load(Ordering::Acquire))
+                    .saturating_add(self.idle_programs.load(Ordering::Acquire));
+                if held >= self.limits.programs {
+                    drop(out);
+                    drop(table);
+                    return reply(Answer::Refused(Refusal::Exhausted {
+                        what: PROGRAMS,
+                        bound: self.limits.programs,
+                    }));
+                }
             }
+            self.reserving.fetch_add(1, Ordering::AcqRel);
             out.reserved = out.reserved.saturating_add(1);
         }
         let unreserve = || -> Result<(), Refusal> {
+            let _table = self.table()?;
+            self.reserving.fetch_sub(1, Ordering::AcqRel);
             let mut out = conn.out.lock().map_err(poisoned)?;
             out.reserved = out.reserved.saturating_sub(1);
+            self.program_gone(&out);
             Ok(())
         };
         let started = stdio_of(streams, fds)
@@ -1084,9 +1245,11 @@ impl Shared {
         ) {
             drop(table);
             // It can't be watched: ended now, and the exec refused saying so.
+            let killed = Instant::now();
             let _ = rustix::process::pidfd_send_signal(&pidfd, Signal::KILL);
             let mut proc = proc;
-            let _ = proc.wait_for(STOP_PATIENCE);
+            // A killed process's end: the node's learned wait for a killed box to empty, its kind of wait.
+            let _ = proc.wait_for(crate::node::empty_patience(killed));
             unreserve()?;
             return reply(Answer::Refused(Refusal::Os {
                 op: "watching a started program",
@@ -1094,9 +1257,10 @@ impl Shared {
             }));
         }
         let open = {
+            self.reserving.fetch_sub(1, Ordering::AcqRel);
             let mut out = conn.out.lock().map_err(poisoned)?;
             out.reserved = out.reserved.saturating_sub(1);
-            out.in_flight = out.in_flight.saturating_sub(1);
+            self.call_done(&mut out);
             if out.open {
                 out.programs.insert(header.id, token);
             }
@@ -1132,10 +1296,12 @@ impl Shared {
             Ok(table) => table.conns.values().cloned().collect(),
             Err(_) => Vec::new(),
         };
+        // The programs the closes end are waited for as a killed box's processes are: the node's learned wait
+        // for an emptying, from their kill.
+        let killed = Instant::now();
         for conn in &conns {
             let _ = self.close(conn);
         }
-        let deadline = Instant::now().checked_add(STOP_PATIENCE);
         let mut events = Vec::with_capacity(EVENTS);
         loop {
             let tokens: Vec<u64> = match self.table() {
@@ -1145,9 +1311,7 @@ impl Shared {
             if tokens.is_empty() {
                 break;
             }
-            let left = deadline.map_or(Duration::ZERO, |d| {
-                d.saturating_duration_since(Instant::now())
-            });
+            let left = crate::node::empty_patience(killed);
             if left.is_zero() {
                 break;
             }

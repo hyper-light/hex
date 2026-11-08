@@ -1,14 +1,27 @@
 //! Fresh `/dev` mounts made ahead (goal 5 extended step 3, runtime architecture decision 5).
-//! Pure ownership and refill decisions: four LRU keys, eight fresh mounts per key. A take moves a
-//! mount out forever; a cold/dry take uses ordinary setup. One maker fills outside the take's lock.
-//! An evicted or shutdown job is discarded, and a failed key stops asking until another take.
+//! Pure ownership and refill decisions: LRU keys, fresh mounts per key, each count learned from demand
+//! ([`Shape`]; Ada's rule, 2026-11-06). A take moves a mount out forever; a cold/dry take uses ordinary
+//! setup. One maker fills outside the take's lock. An evicted or shutdown job is discarded, and a failed
+//! key stops asking until another take.
 
 use std::collections::VecDeque;
 
-/// Four distinct mount configurations retained, least recently requested evicted on overflow.
-pub const KEYS: usize = 4;
-/// Eight fresh mounts per configuration: the acceptance test's concurrent creates. At most 32 held.
-pub const PER_KEY: usize = 8;
+use crate::demand::{Depth, Learned};
+
+/// How many configurations the pool keeps and how many mounts each, where each starts and what bounds it.
+/// - `keys`: configurations kept at first, the least recently requested evicted past them. A cold take of a
+///   configuration evicted earlier (a ghost, as ARC's: Megiddo and Modha, FAST 2003, §4.3) keeps one more from
+///   then on.
+/// - `per_key`: fresh mounts a configuration keeps at first. A take that finds its configuration's mounts all
+///   taken raises its count to the draw plus one for each found short ([`Depth`]).
+/// - `cap`: the most of either, and the most mounts held in all: no more creates take a mount at once than hold
+///   a seed, so the node gives its seeds' bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shape {
+    pub keys: usize,
+    pub per_key: usize,
+    pub cap: usize,
+}
 
 /// Counts saturate rather than wrap. Every completed successful make is held, taken or discarded.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -111,9 +124,16 @@ struct Entry<K, T> {
     generation: u64,
     asking: bool,
     ready: VecDeque<T>,
+    /// How many it keeps ready, learned from its draws.
+    depth: Depth,
 }
 
 pub struct Pool<K, T> {
+    shape: Shape,
+    /// How many configurations it keeps, learned from its ghosts.
+    keys: Learned,
+    /// Configurations evicted, the oldest first, at most `shape.cap`.
+    ghosts: VecDeque<K>,
     entries: VecDeque<Entry<K, T>>,
     next_generation: u64,
     working: bool,
@@ -123,8 +143,11 @@ pub struct Pool<K, T> {
 }
 
 impl<K: Clone + Eq, T> Pool<K, T> {
-    pub fn new(enabled: bool) -> Self {
+    pub fn new(enabled: bool, shape: Shape) -> Self {
         Self {
+            shape,
+            keys: Learned::new(shape.keys, shape.cap),
+            ghosts: VecDeque::new(),
             entries: VecDeque::new(),
             next_generation: 0,
             working: false,
@@ -134,8 +157,9 @@ impl<K: Clone + Eq, T> Pool<K, T> {
         }
     }
 
-    /// Never waits for preparation. A new key evicts the least recently requested; all its unused
-    /// mounts are handed back to drop, bounded by PER_KEY. A failed key resumes after this request.
+    /// Never waits for preparation. A new key evicts the least recently requested past the keys kept; all
+    /// its unused mounts are handed back to drop, bounded by its count. A failed key resumes after this
+    /// request.
     pub fn take(&mut self, key: K) -> Result<(Option<T>, Vec<T>), Refused> {
         if self.closed {
             return Err(Refused::ShutDown);
@@ -151,12 +175,13 @@ impl<K: Clone + Eq, T> Pool<K, T> {
                 .position(|e| e.key == key)
                 .and_then(|i| self.entries.remove(i));
             let mut entry = match entry {
-                Some(entry) => {
+                Some(mut entry) => {
                     miss = if entry.asking {
                         Miss::Dry
                     } else {
                         Miss::AfterFailure
                     };
+                    entry.depth.took(entry.asking && entry.ready.is_empty());
                     entry
                 }
                 None => {
@@ -166,16 +191,28 @@ impl<K: Clone + Eq, T> Pool<K, T> {
                         .checked_add(1)
                         .ok_or(Refused::Generations)?;
                     self.next_generation = generation;
-                    if self.entries.len() >= KEYS
+                    if let Some(at) = self.ghosts.iter().position(|g| *g == key) {
+                        self.ghosts.remove(at);
+                        self.keys.observe(self.keys.size().saturating_add(1));
+                    }
+                    // One entry is added a take, so at most one evicted.
+                    if self.entries.len() >= self.keys.size().max(1)
                         && let Some(old) = self.entries.pop_front()
                     {
                         discarded.extend(old.ready);
+                        if self.ghosts.len() >= self.shape.cap {
+                            self.ghosts.pop_front();
+                        }
+                        if self.shape.cap > 0 {
+                            self.ghosts.push_back(old.key);
+                        }
                     }
                     Entry {
                         key,
                         generation,
                         asking: true,
                         ready: VecDeque::new(),
+                        depth: Depth::new(self.shape.per_key, self.shape.cap),
                     }
                 }
             };
@@ -231,10 +268,11 @@ impl<K: Clone + Eq, T> Pool<K, T> {
     pub fn wants_work(&self) -> bool {
         !self.closed
             && !self.working
+            && self.held() < self.shape.cap
             && self
                 .entries
                 .iter()
-                .any(|e| e.asking && e.ready.len() < PER_KEY)
+                .any(|e| e.asking && e.ready.len() < e.depth.size())
     }
 
     pub fn next_job(&mut self) -> Option<Job<K>> {
@@ -244,7 +282,7 @@ impl<K: Clone + Eq, T> Pool<K, T> {
         let e = self
             .entries
             .iter()
-            .find(|e| e.asking && e.ready.len() < PER_KEY)?;
+            .find(|e| e.asking && e.ready.len() < e.depth.size())?;
         let job = Job {
             key: e.key.clone(),
             generation: e.generation,
@@ -257,18 +295,23 @@ impl<K: Clone + Eq, T> Pool<K, T> {
     /// lock. The worker's error is counted and suppresses retries for that key until the next take.
     pub fn complete(&mut self, job: Job<K>, made: Result<T, MakeFailure>) -> Option<T> {
         self.working = false;
-        let e = self
-            .entries
-            .iter_mut()
-            .find(|e| e.generation == job.generation);
         match made {
             Ok(mount) => {
                 self.counts.made = self.counts.made.saturating_add(1);
+                let room = self.held() < self.shape.cap;
+                let e = self
+                    .entries
+                    .iter_mut()
+                    .find(|e| e.generation == job.generation);
                 if !self.closed
+                    && room
                     && let Some(e) = e
-                    && e.ready.len() < PER_KEY
+                    && e.ready.len() < e.depth.size()
                 {
                     e.ready.push_back(mount);
+                    if e.ready.len() >= e.depth.size() {
+                        e.depth.full();
+                    }
                     None
                 } else {
                     self.counts.discarded = self.counts.discarded.saturating_add(1);
@@ -284,7 +327,11 @@ impl<K: Clone + Eq, T> Pool<K, T> {
                     MakeFailure::Namespace => &mut self.counts.failed_namespace,
                 };
                 *counter = counter.saturating_add(1);
-                if let Some(e) = e {
+                if let Some(e) = self
+                    .entries
+                    .iter_mut()
+                    .find(|e| e.generation == job.generation)
+                {
                     e.asking = false;
                 }
                 None
@@ -315,6 +362,17 @@ impl<K: Clone + Eq, T> Pool<K, T> {
         held
     }
 
+    /// What it has learned: the keys it keeps, and the most mounts any key it keeps keeps.
+    pub fn learned(&self) -> (usize, usize) {
+        let per_key = self
+            .entries
+            .iter()
+            .map(|e| e.depth.size())
+            .max()
+            .unwrap_or(0);
+        (self.keys.size(), per_key)
+    }
+
     pub fn closed(&self) -> bool {
         self.closed
     }
@@ -330,11 +388,25 @@ impl<K: Clone + Eq, T> Pool<K, T> {
 mod tests {
     use super::*;
 
+    /// The shape the pool had before its counts were learned: four keys of eight, at most 32 held.
+    const KEYS: usize = 4;
+    const PER_KEY: usize = 8;
+    const FIXED: Shape = Shape {
+        keys: KEYS,
+        per_key: PER_KEY,
+        cap: KEYS * PER_KEY,
+    };
+
     /// AC-T7.1.4, goal 5 step 3: fill four configurations, then churn and evict while a make is
     /// outstanding. Expect bounded resources, unique ownership and exact successful-make accounting.
     #[test]
     fn fresh_mounts_are_bounded_and_never_reused_under_churn() {
-        let mut p = Pool::<usize, usize>::new(true);
+        // A cap past the run's 2,000 makes, so the learned keys and depths never meet it and a job is always wanted.
+        let shape = Shape {
+            cap: 4_096,
+            ..FIXED
+        };
+        let mut p = Pool::<usize, usize>::new(true, shape);
         let mut made = 0;
         let mut seen = std::collections::BTreeSet::new();
         for i in 0..2000 {
@@ -351,8 +423,8 @@ mod tests {
             }
             made += 1;
             let _ = p.complete(job, Ok(made));
-            assert!(p.entries.len() <= KEYS);
-            assert!(p.held() <= KEYS * PER_KEY);
+            assert!(p.entries.len() <= shape.cap);
+            assert!(p.held() <= shape.cap);
             let c = p.counts();
             assert_eq!(c.made, c.taken + c.discarded + p.held() as u64);
         }
@@ -366,7 +438,7 @@ mod tests {
     /// disabled miss that retains no key.
     #[test]
     fn a_disabled_pool_hands_back_what_it_held_and_asks_for_nothing() {
-        let mut p = Pool::<usize, usize>::new(true);
+        let mut p = Pool::<usize, usize>::new(true, FIXED);
         let _ = p.take(1).unwrap();
         let _ = p.take(2).unwrap();
         let j = p.next_job().unwrap();
@@ -385,7 +457,7 @@ mod tests {
     /// Expect no retry spin, no stale insertion and every unconsumed resource handed back.
     #[test]
     fn failure_eviction_and_shutdown_do_not_reuse_a_mount() {
-        let mut p = Pool::<usize, usize>::new(true);
+        let mut p = Pool::<usize, usize>::new(true, FIXED);
         assert!(p.take(1).unwrap().0.is_none());
         let j = p.next_job().unwrap();
         assert!(p.complete(j, Err(MakeFailure::Filesystem)).is_none());
@@ -408,7 +480,7 @@ mod tests {
     /// most, and a refill request only after the take. A disabled pool always uses ordinary setup.
     #[test]
     fn a_full_key_stops_refill_and_takes_are_fifo() {
-        let mut p = Pool::new(true);
+        let mut p = Pool::new(true, FIXED);
         let _ = p.take("a").unwrap();
         for i in 0..PER_KEY {
             let j = p.next_job().unwrap();
@@ -419,7 +491,7 @@ mod tests {
         assert_eq!(p.take("a").unwrap().0, Some(0));
         assert_eq!(p.take("a").unwrap().0, Some(1));
         assert!(p.wants_work());
-        let mut off = Pool::<&str, usize>::new(false);
+        let mut off = Pool::<&str, usize>::new(false, FIXED);
         assert!(off.take("a").unwrap().0.is_none());
         assert!(off.next_job().is_none());
     }
@@ -427,7 +499,7 @@ mod tests {
     /// the least recently requested key's eight resources evicted, and all counters conserved.
     #[test]
     fn full_pool_evicts_lru_and_counts_fixed_failure_and_miss_reasons() {
-        let mut p = Pool::<usize, usize>::new(true);
+        let mut p = Pool::<usize, usize>::new(true, FIXED);
         for k in 0..KEYS {
             assert!(p.take(k).unwrap().0.is_none());
             for i in 0..PER_KEY {
@@ -470,7 +542,7 @@ mod tests {
         );
         assert_eq!((c.after_failure, c.dry), (1, 1));
         assert_eq!(c.on_path, c.cold + c.dry + c.disabled + c.after_failure);
-        let mut off = Pool::<usize, usize>::new(false);
+        let mut off = Pool::<usize, usize>::new(false, FIXED);
         let _ = off.take(0).unwrap();
         assert_eq!(off.counts().disabled, 1);
     }
@@ -479,7 +551,7 @@ mod tests {
     /// Expect one reason per on-path create, no refill, and a typed refusal after shutdown.
     #[test]
     fn unpooled_specs_are_counted_by_reason_without_allocating_pool_entries() {
-        let mut p = Pool::<usize, usize>::new(true);
+        let mut p = Pool::<usize, usize>::new(true, FIXED);
         for reason in [
             Unpooled::Missing,
             Unpooled::Devices,
@@ -533,5 +605,44 @@ mod tests {
         let _ = p.shut_down();
         assert_eq!(p.unpooled(Unpooled::Missing), Err(Refused::ShutDown));
         assert_eq!(p.counts(), c);
+    }
+
+    /// Ada's rule, 2026-11-06 (AC-T7.1.3): KEYS' 4 and PER_KEY's 8 were picked; both are learned. Do: a pool of
+    /// one key and two mounts at first, at most 16: take key a three times with no make between, refill it, take
+    /// it three times again; then request b, a again (a evicted) and b. Expect: the first draw finds a short and
+    /// raises its count (no short take in the second); a's return after its eviction keeps two keys from then on,
+    /// so b stays; and nothing held passes the cap.
+    #[test]
+    fn keys_and_mounts_a_key_are_learned_from_their_misses() {
+        let mut p = Pool::<&str, usize>::new(
+            true,
+            Shape {
+                keys: 1,
+                per_key: 2,
+                cap: 16,
+            },
+        );
+        let mut n = 0;
+        let mut fill = |p: &mut Pool<&str, usize>| {
+            while let Some(j) = p.next_job() {
+                n += 1;
+                assert!(p.complete(j, Ok(n)).is_none());
+            }
+        };
+        let _ = p.take("a").unwrap();
+        fill(&mut p);
+        let short = (0..3).filter(|_| p.take("a").unwrap().0.is_none()).count();
+        assert_eq!(short, 1);
+        fill(&mut p);
+        let short = (0..3).filter(|_| p.take("a").unwrap().0.is_none()).count();
+        assert_eq!(short, 0, "the draw it ran short at is held");
+        let (_, evicted) = p.take("b").unwrap();
+        assert!(!evicted.is_empty(), "one key kept: a evicted for b");
+        let _ = p.take("a").unwrap();
+        let (_, evicted) = p.take("b").unwrap();
+        assert!(evicted.is_empty(), "a's return kept a second key");
+        assert_eq!(p.entries.len(), 2);
+        fill(&mut p);
+        assert!(p.held() <= 16);
     }
 }

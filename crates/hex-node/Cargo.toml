@@ -17,8 +17,13 @@ serde_json.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix.workspace = true
 
+[features]
+# The builders only hex-cli's tests call (scripts/check-production.sh keeps them out of production builds).
+test-controls = []
+
 [dev-dependencies]
 hex-client.workspace = true
+hex-testkit.workspace = true
 tempfile.workspace = true
 
 [lints]

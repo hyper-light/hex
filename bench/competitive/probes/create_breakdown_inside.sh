@@ -10,17 +10,15 @@
 #   seam_idle, libcrun_idle  with IDLE_AB set: the seam's and libcrun's lifecycle phases with that many idle threads
 #            up in this container (with_idle), so the same rounds time each with and without them (goal 5 plan
 #            step 2's AC-c within one run); libcrun's pivot_root walks them, the control that they are walked.
-#   seam_drained, traced_drained, pairs  with IPCUTS_AB=1: seam and traced with the node's ipc and uts pool drained
-#            (seam_oci's HEXBENCH_IPCUTS=0), so the same rounds read the pool on against drained (goal 5 extended
-#            step 4), the whole create and the init's clone with what follows it; and seam_oci's ipc_uts_pairs phase,
-#            the two interleaved lifecycle by lifecycle, which reads a whole create's difference under load.
 #   before, traced-before   with a binary from before a change staged (/opt/bin/before), its seam and traced
 #            rounds likewise, so the change's parts are set against the before binary's in the same run.
 # Then create_breakdown.py writes summary.md and summary.json. A round's item that fails is logged and skipped (the
 # summary names what's missing); a probe that fails ends the run before any round. The probes include a detailed
 # trace, which adds each open's entry with its path, so create_breakdown.py can hold the rounds' cuts to the files
 # they stand for.
-# Env: N (1000), WARMUP (100), ROUNDS (3), IDLE_AB (0: no idle kinds), IPCUTS_AB (0: no drained kinds).
+# Env: N (1000), WARMUP (100), ROUNDS (3), IDLE_AB (0: no idle kinds). The ipc and uts pool's drained kinds are gone
+# (Ada's 2026-11-06 rule on legacy paths): goal 5 extended step 4's A/B decided the pool on
+# (docs/research/runtime/goal5-ipcuts.md: part 16 at 0.727 of drained).
 set -uo pipefail
 N=${N:-1000}; WARMUP=${WARMUP:-100}; ROUNDS=${ROUNDS:-3}
 OUT=/opt/out; mkdir -p /run/err
@@ -33,6 +31,7 @@ case "${HEXBENCH_NOFILE:-given}" in
   *) ulimit -Sn "$HEXBENCH_NOFILE" ;;
 esac
 echo "descriptor limit: soft $(ulimit -Sn), hard $(ulimit -Hn) (HEXBENCH_NOFILE=${HEXBENCH_NOFILE:-given})" > "$OUT/nofile.txt"
+. "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/tracebuf.sh"
 
 # The OCI pass's bundles (oci_inside.sh): the `sleep` container seam_oci's lifecycle creates, and the `true` one
 # its command line names.
@@ -173,10 +172,10 @@ trap unprobe EXIT
 # traced <out name> <n> <warmup> [detail|-] [bin dir]: seam_oci's lifecycle phase with the tracer on around create,
 # its trace in <out name>.txt and the instance's per-CPU counts in <out name>.stats (create_breakdown.py refuses a
 # trace that lost events); `detail` adds the opens' entries; the binaries are the bin dir's (/opt/bin unless named).
-traced() {
+traced_once() {
   local name=$1 n=$2 warmup=$3 events=$EVENTS rc=0 bin=${5:-/opt/bin}
   [ "${4:-}" = detail ] && events="$EVENTS $DETAIL"
-  mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo 4096 > "$I/buffer_size_kb" \
+  mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo "${TRACE_KB:?}" > "$I/buffer_size_kb" \
     || { echo "the trace instance $I couldn't be made" >&2; untrace; return 1; }
   for ev in $events $PROBES; do
     { filter "$ev" > "$I/events/$ev/filter" && echo 1 > "$I/events/$ev/enable"; } \
@@ -194,6 +193,8 @@ traced() {
   untrace
   return $rc
 }
+# Its buffer starts at 4,096 KiB a CPU, the runs of record's, and grows while the trace lost events (tracebuf.sh).
+traced() { grown 4096 "$OUT/$1.stats" traced_once "$@"; }
 
 # switch <out name> <lifecycles>: goal 5 plan step 2's AC-e. A throughput phase pinned to 8 creates in flight
 # (seam_oci's HEXBENCH_THROUGHPUT_CONC) with the root's parts' events on — setns (the net-ns join that opens the
@@ -201,10 +202,10 @@ traced() {
 # whole phase. It passes no HEXBENCH_TRACE, so seam_oci never toggles tracing_on; this turns it on once and leaves
 # it, so every init's events are caught however they interleave. create_breakdown.py switch reads <out name>.txt
 # against <out name>.stats (its per-CPU counts).
-switch() {
+switch_once() {
   local name=$1 lc=$2 rc=0
   local SW="syscalls/sys_exit_clone3 syscalls/sys_enter_setns syscalls/sys_exit_setns syscalls/sys_enter_chroot syscalls/sys_exit_chroot syscalls/sys_enter_pivot_root syscalls/sys_exit_pivot_root syscalls/sys_enter_chdir"
-  mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo 8192 > "$I/buffer_size_kb" \
+  mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo "${TRACE_KB:?}" > "$I/buffer_size_kb" \
     || { echo "the trace instance $I couldn't be made" >&2; untrace; return 1; }
   for ev in $SW; do
     { filter "$ev" > "$I/events/$ev/filter" && echo 1 > "$I/events/$ev/enable"; } \
@@ -224,6 +225,8 @@ switch() {
   untrace
   return $rc
 }
+# Its buffer starts at 8,192 KiB a CPU, the runs of record's, and grows while the trace lost events (tracebuf.sh).
+switch() { grown 8192 "$OUT/$1.stats" switch_once "$@"; }
 
 # mounts_trace <out name> <lifecycles> <concurrency>: goal 5 plan step 3's per-call trace of the init's mounts. A
 # throughput phase at <concurrency> creates in flight with every system call the hex processes make traced by
@@ -236,7 +239,7 @@ switch() {
 # are traced too, so an init preempted while either ran on its CPU has its wait charged to the softirq or the work
 # function (the fedora traces of goal 5 step 3 found ksoftirqd and the kworkers first to the CPU in the tail), and so
 # are the softirqs run on a hex process as an interrupt returns, which take its CPU without a switch.
-mounts_trace() {
+mounts_trace_once() {
   local name=$1 lc=$2 conc=$3 rc=0 ev f nssem
   local MT="raw_syscalls/sys_enter raw_syscalls/sys_exit sched/sched_switch sched/sched_process_fork sched/sched_waking
     irq/softirq_entry irq/softirq_exit workqueue/workqueue_execute_start workqueue/workqueue_execute_end"
@@ -281,7 +284,7 @@ for l in open("/proc/kallsyms"):
          echo "the mount lock's slowpaths can't be probed here: its waits go uncounted" >&2
        fi ;;
   esac
-  mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo 16384 > "$I/buffer_size_kb" \
+  mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo "${TRACE_KB:?}" > "$I/buffer_size_kb" \
     || { echo "the trace instance $I couldn't be made" >&2; untrace; return 1; }
   for ev in $MT; do
     case $ev in
@@ -327,6 +330,8 @@ for l in open("/proc/kallsyms"):
   for ev in nsw nsr nsww nsrw nsu nswwr rww; do echo "-:hexcb/$ev" >> "$T/kprobe_events" 2>/dev/null; done
   return $rc
 }
+# Its buffer starts at 16,384 KiB a CPU, the runs of record's, and grows while the trace lost events (tracebuf.sh).
+mounts_trace() { grown 16384 "$OUT/$1.stats" mounts_trace_once "$@"; }
 
 # Where the node's records and the containers' state go (seam_oci keeps them under $HOME/.cache/hex-t7/ociseam, as
 # in the OCI pass): their filesystem decides what an fsync costs.
@@ -337,7 +342,7 @@ mkdir -p "$HOME/.cache/hex-t7/ociseam"
     "($(findmnt -n -o FSTYPE,OPTIONS -T "$HOME/.cache/hex-t7/ociseam" | cut -c1-160))"
   echo "inside: /run on $(stat -f -c %T /run); the cgroup root's subtree_control: $(cat /sys/fs/cgroup/cgroup.subtree_control)"
   echo "params: N=$N WARMUP=$WARMUP ROUNDS=$ROUNDS AC_E=${AC_E:-0} IDLE_AB=${IDLE_AB:-0} MOUNTS=${MOUNTS:-0}" \
-    "MOUNTS_CONC=${MOUNTS_CONC:-1 8} MOUNTS_PATH=${MOUNTS_PATH:-pruned} MOUNTS_SPAN=${MOUNTS_SPAN:-switch} CLASSIC=${CLASSIC:-0} HEXBENCH_DEVFS=${HEXBENCH_DEVFS:-1} AC_E_MOUNTS=${AC_E_MOUNTS:-0}"
+    "MOUNTS_CONC=${MOUNTS_CONC:-1 8} MOUNTS_PATH=${MOUNTS_PATH:-pruned} MOUNTS_SPAN=${MOUNTS_SPAN:-switch} CLASSIC=${CLASSIC:-0} AC_E_MOUNTS=${AC_E_MOUNTS:-0}"
 } >> "$OUT/env.txt"
 
 # with_idle <command...>: the command run while IDLE_AB idle threads are up in this container (idlethreads.c, built
@@ -465,11 +470,6 @@ if [ "${IDLE_AB:-0}" -gt 0 ]; then
   with_idle env HEXBENCH_PHASES=lifecycle /opt/bin/seam_oci "$OUT/probe.seam_idle.json" 2 0 0 /opt/bin/hex /run/bundle-sleep \
     /run/bundle-true >> "$OUT/probe.log" 2>&1 || { echo "refusing: the probe with idle threads failed ($OUT/probe.log)" >&2; exit 5; }
 fi
-if [ "${IPCUTS_AB:-0}" = 1 ]; then
-  KINDS="$KINDS seam_drained traced_drained pairs"
-  HEXBENCH_IPCUTS=0 HEXBENCH_PHASES=lifecycle /opt/bin/seam_oci "$OUT/probe.seam_drained.json" 2 0 0 /opt/bin/hex /run/bundle-sleep \
-    /run/bundle-true >> "$OUT/probe.log" 2>&1 || { echo "refusing: the drained pool's probe failed ($OUT/probe.log)" >&2; exit 5; }
-fi
 traced probe.traced 3 1 >> "$OUT/probe.log" 2>&1 || { echo "refusing: the traced probe failed ($OUT/probe.log)" >&2; exit 5; }
 traced probe.detail 20 1 detail >> "$OUT/probe.log" 2>&1 \
   || { echo "refusing: the detailed traced probe failed ($OUT/probe.log)" >&2; exit 5; }
@@ -493,11 +493,6 @@ for round in $(seq 1 "$ROUNDS"); do
       seam) HEXBENCH_PHASES=lifecycle /opt/bin/seam_oci "$OUT/seam.r$round.json" "$N" "$WARMUP" 0 /opt/bin/hex \
               /run/bundle-sleep /run/bundle-true >> "$OUT/seam.log" 2>&1 ;;
       traced) traced "traced.r$round" "$N" "$WARMUP" ;;
-      seam_drained) HEXBENCH_IPCUTS=0 HEXBENCH_PHASES=lifecycle /opt/bin/seam_oci "$OUT/seam_drained.r$round.json" "$N" "$WARMUP" 0 \
-                      /opt/bin/hex /run/bundle-sleep /run/bundle-true >> "$OUT/seam_drained.log" 2>&1 ;;
-      traced_drained) HEXBENCH_IPCUTS=0 traced "traced_drained.r$round" "$N" "$WARMUP" ;;
-      pairs) HEXBENCH_PHASES=ipc_uts_pairs /opt/bin/seam_oci "$OUT/pairs.r$round.json" "$N" "$WARMUP" 0 /opt/bin/hex \
-               /run/bundle-sleep /run/bundle-true >> "$OUT/pairs.log" 2>&1 ;;
       before) HEXBENCH_PHASES=lifecycle /opt/bin/before/seam_oci "$OUT/before.r$round.json" "$N" "$WARMUP" 0 \
                 /opt/bin/before/hex /run/bundle-sleep /run/bundle-true >> "$OUT/before.log" 2>&1 ;;
       traced-before) traced "traced-before.r$round" "$N" "$WARMUP" - /opt/bin/before ;;

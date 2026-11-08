@@ -5,7 +5,8 @@
 # over a run of creates, by strace -f; a seed's memory; and the node's seeds' counts over a sustained phase.
 # seed_path.py reads the trace. On fedora:
 #   seed_path.sh <hex release binary> <seam_oci release binary>
-# Env: N, WARMUP, EXECS, MEMORY_N, SUSTAINED (seed_path_inside.sh's), CPUSET (4-31), STRACE (the directory whose
+# Env: N, WARMUP, EXECS, MEMORY_N, SUSTAINED (seed_path_inside.sh's), CPUSET (4-31), BENCH_MEMORY and BENCH_OOM (the
+# container's --memory, 40g, and --oom-score-adj, none, as host.sh's), STRACE (the directory whose
 # usr/bin/strace runs in the container: ~/.cache/hex-t7/strace, Fedora's strace unpacked; the bench host has none).
 # Not a timed pass: the load is recorded, not gated. The clone's interval is the seed's own, so the CPU others use
 # shows in it only as their share of the cores it runs on.
@@ -30,7 +31,7 @@ containers() { docker ps --format '{{.Names}} ({{.Image}}, {{.Status}})' 2>&1 | 
 } > "$OUT/env.txt"
 NAME=hexbench-seedpath-$$
 bench_trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true'
-timeout 3600 docker run --rm --name "$NAME" "${BENCH_LABELS[@]}" --cpuset-cpus="${CPUSET:-4-31}" --memory=40g \
+timeout 3600 docker run --rm --name "$NAME" "${BENCH_LABELS[@]}" --cpuset-cpus="${CPUSET:-4-31}" --memory="${BENCH_MEMORY:-40g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
   --privileged --security-opt label=disable --cgroupns=private --network=none --tmpfs /run:rw,exec,nosuid,size=1g \
   -v /usr:/usr:ro -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$STRACE:/opt/strace:ro" -v "$OUT:/opt/out" \
   -e N -e WARMUP -e EXECS -e MEMORY_N -e SUSTAINED \

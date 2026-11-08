@@ -364,7 +364,7 @@ impl Drop for ChildStack {
 }
 
 /// The size of a page.
-fn page_size() -> Result<usize, OciError> {
+pub(crate) fn page_size() -> Result<usize, OciError> {
     // SAFETY: sysconf(3) takes a constant and reads nothing of ours.
     let n = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
     usize::try_from(n).map_err(|_| OciError::os("the page size", "sysconf gave none"))
@@ -795,14 +795,17 @@ pub fn set_keepcaps(keep: bool) -> Result<(), rustix::io::Errno> {
 }
 
 /// Joins the namespace the open `fd` refers to, checking it is of type `nstype` (a `CLONE_NEW*`
-/// flag); `setns` fails if the fd's namespace is of another type.
-pub fn setns(fd: std::os::fd::BorrowedFd<'_>, nstype: i32) -> Result<(), OciError> {
+/// flag); `setns` fails if the fd's namespace is of another type. Refused with its errno.
+pub fn setns(fd: std::os::fd::BorrowedFd<'_>, nstype: i32) -> Result<(), Failure> {
     use std::os::fd::AsRawFd;
     // SAFETY: setns(2) with a file descriptor and a type flag; it takes no pointers and writes
     // nothing. The return value is checked.
     let r = unsafe { libc::setns(fd.as_raw_fd(), nstype) };
     if r == -1 {
-        Err(OciError::os("setns", std::io::Error::last_os_error()))
+        Err(Failure {
+            what: "setns",
+            errno: last_errno(),
+        })
     } else {
         Ok(())
     }
@@ -812,7 +815,7 @@ pub fn setns(fd: std::os::fd::BorrowedFd<'_>, nstype: i32) -> Result<(), OciErro
 /// `unshare` unsound (it can detach file descriptors another thread is using); its callers, the init
 /// (single-threaded after its re-exec) and the node agent's thread that makes network namespaces ahead
 /// ([`super::net::make_ahead`]), use only the `NEW*` namespace flags.
-pub fn unshare(flags: rustix::thread::UnshareFlags) -> Result<(), OciError> {
+pub fn unshare(flags: rustix::thread::UnshareFlags) -> Result<(), Failure> {
     // CLONE_FILES is the one flag that makes `unshare` unsound; clear it defensively (callers only
     // ever pass namespace flags) so the invariant below holds whatever the caller passed.
     let flags = flags.difference(rustix::thread::UnshareFlags::FILES);
@@ -821,7 +824,7 @@ pub fn unshare(flags: rustix::thread::UnshareFlags) -> Result<(), OciError> {
     }
     // SAFETY: the flags are namespace flags only (CLONE_FILES cleared above), so no file-descriptor
     // table is detached; the invariant `unshare_unsafe` documents holds.
-    unsafe { rustix::thread::unshare_unsafe(flags) }.map_err(|e| OciError::os("unshare", e))
+    unsafe { rustix::thread::unshare_unsafe(flags) }.map_err(Failure::of("unshare"))
 }
 
 /// Drops capability number `cap` from the process's bounding set (`PR_CAPBSET_DROP`).
@@ -888,9 +891,9 @@ pub const BPF_F_ALLOW_OVERRIDE: u32 = 1;
 /// `BPF_F_ALLOW_MULTI` (1 << 1): the program joins whatever the cgroup's ancestors attached, all of
 /// which must allow an access, as runc and crun attach theirs.
 const BPF_F_ALLOW_MULTI: u32 = 2;
-/// Most program ids a query of one cgroup reads: the oci boxes' root carries one program, so more is
-/// already a root Hex didn't make; the count past it is still reported.
-const MAX_QUERIED: usize = 8;
+/// Most programs the kernel attaches to one cgroup for one attach type, `BPF_CGROUP_MAX_PROGS` (64,
+/// kernel/bpf/cgroup.c:794), past which it refuses an attach (`E2BIG`, :1009): every id a query reads.
+const BPF_CGROUP_MAX_PROGS: u32 = 64;
 /// Most bytes of the verifier's log kept when it refuses a program: enough for the refusing
 /// instruction and its context; the kernel truncates the log at the buffer's end.
 const VERIFIER_LOG_BYTES: usize = 65_536;
@@ -1087,29 +1090,54 @@ pub struct Attached {
     pub flags: u32,
     /// How many there are.
     pub count: u32,
-    /// The ids of the first [`MAX_QUERIED`] of them.
+    /// Their ids, every one of them up to the kernel's cap, [`BPF_CGROUP_MAX_PROGS`].
     pub ids: Vec<u32>,
+}
+
+/// How many ids a query of a cgroup holding `count` device programs reads: all of them, at most the kernel's cap.
+fn ids_to_read(count: u32) -> usize {
+    usize::try_from(count.min(BPF_CGROUP_MAX_PROGS)).unwrap_or(0)
 }
 
 /// The device programs attached to the cgroup whose directory is open as `cgroup` (`BPF_PROG_QUERY`,
 /// which needs CAP_NET_ADMIN or CAP_SYS_ADMIN and takes the kernel's `cgroup_mutex`: a node asks it at
-/// its start, never per create).
+/// its start, never per create). Asked twice: for the count first, then for that many ids, so every one is
+/// read; one attached between the two is counted and its id left out (`ENOSPC`).
 pub fn attached_device_programs(cgroup: std::os::fd::BorrowedFd<'_>) -> Result<Attached, OciError> {
+    let (_, count) = query_device_programs(cgroup, &mut [])?;
+    let mut ids = vec![0u32; ids_to_read(count)];
+    let (flags, count) = query_device_programs(cgroup, &mut ids)?;
+    ids.truncate(ids_to_read(count));
+    Ok(Attached { flags, count, ids })
+}
+
+/// One `BPF_PROG_QUERY` of the device programs attached to `cgroup`: their flags and count, and the first ids,
+/// as many as `ids` holds, written into it. With `ids` empty the kernel writes the count alone
+/// (kernel/bpf/cgroup.c:1494-1496).
+fn query_device_programs(
+    cgroup: std::os::fd::BorrowedFd<'_>,
+    ids: &mut [u32],
+) -> Result<(u32, u32), OciError> {
     use std::os::fd::AsRawFd;
-    let mut ids = [0u32; MAX_QUERIED];
     let mut attr = ProgQueryAttr {
         target_fd: u32::try_from(cgroup.as_raw_fd())
             .map_err(|_| OciError::os("bpf", "a negative descriptor"))?,
         attach_type: BPF_CGROUP_DEVICE,
-        prog_ids: user_ptr(ids.as_mut_ptr().cast_const())?,
-        prog_cnt: u32::try_from(ids.len()).unwrap_or(u32::MAX),
+        prog_ids: if ids.is_empty() {
+            0
+        } else {
+            user_ptr(ids.as_mut_ptr().cast_const())?
+        },
+        prog_cnt: u32::try_from(ids.len())
+            .map_err(|_| OciError::os("bpf", "more ids asked than a u32 counts"))?,
         ..ProgQueryAttr::default()
     };
     // SAFETY: bpf(BPF_PROG_QUERY) reads `attr`, a live, initialised repr(C) struct of the size passed,
     // and writes into it only its own fields (attach_flags, prog_cnt, revision), all within that size.
-    // Through `prog_ids` it writes at most `prog_cnt` u32s into `ids`, a live array of exactly that many
-    // that outlives the call; `prog_attach_flags` and the link fields are zero, so nothing is written
-    // through them. Checked.
+    // Through `prog_ids` it writes at most `prog_cnt` u32s into `ids`, a live slice of exactly that many
+    // that outlives the call; with `ids` empty, `prog_ids` is null and `prog_cnt` 0, and it writes nothing
+    // through it (kernel/bpf/cgroup.c:1494-1496). `prog_attach_flags` and the link fields are zero, so
+    // nothing is written through them. Checked.
     let r = unsafe {
         libc::syscall(
             libc::SYS_bpf,
@@ -1123,12 +1151,7 @@ pub fn attached_device_programs(cgroup: std::os::fd::BorrowedFd<'_>) -> Result<A
     if r != 0 && err.raw_os_error() != Some(libc::ENOSPC) {
         return Err(OciError::os("querying a cgroup's device programs", err));
     }
-    let read = usize::try_from(attr.prog_cnt).map_or(0, |n| n.min(ids.len()));
-    Ok(Attached {
-        flags: attr.attach_flags,
-        count: attr.prog_cnt,
-        ids: ids.iter().copied().take(read).collect(),
-    })
+    Ok((attr.attach_flags, attr.prog_cnt))
 }
 
 /// Loads seccomp filter `program` on the calling thread and leaves no_new_privs as it is: the kernel
@@ -1511,4 +1534,21 @@ pub fn listmount(_parent: u64, _last: u64, _ids: &mut [u64]) -> Result<usize, ru
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 pub fn statmount(_id: u64, _mask: u64, _buf: &mut [u8]) -> Result<(), rustix::io::Errno> {
     Err(rustix::io::Errno::NOSYS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ada's 2026-11-06 rule (AC-T7.1.4, decision 2's device programs): do size a query for cgroups the kernel says
+    /// hold 1, 9 (past the 8 once picked) and 65 programs; expect room for every one of them, up to the kernel's own
+    /// cap on one cgroup's programs, 64, and no more.
+    #[test]
+    fn a_query_reads_every_program_the_kernel_can_attach() {
+        assert_eq!(ids_to_read(0), 0);
+        assert_eq!(ids_to_read(1), 1);
+        assert_eq!(ids_to_read(9), 9);
+        assert_eq!(ids_to_read(64), 64);
+        assert_eq!(ids_to_read(65), 64);
+    }
 }

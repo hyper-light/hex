@@ -17,6 +17,7 @@
 //! lifecycle (docs/research/runtime/goal5-netns-reuse.md).
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::os::fd::{AsFd, OwnedFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
@@ -24,12 +25,14 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 use hex_api::{BoxId, BoxOwner, Refusal};
-use hex_core::netns::{BOUND, Counts, IPC_UTS_BOUND, Pool, Take};
+use hex_core::netns::{Counts, Missing, Pool, Reason, Step, Take};
 use hex_core::netns_reuse::{self, Idle, Refused as Why, Take as Kept, Whose};
 use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::net;
 use hex_runtime::linux::oci::netcheck::{self, Fresh, ProcNet, Scratch};
 use hex_runtime::linux::oci::run::Networks;
+
+use crate::sizes::Sizes;
 
 /// The pool and the thread that fills it, and the namespaces kept for their owners' next boxes (goal 5
 /// extended, step 6) with the thread that checks each as its box goes. Dropped, it shuts the pool down,
@@ -39,6 +42,10 @@ pub struct Netns {
     refill: Option<JoinHandle<()>>,
     kept: Option<Keeping>,
 }
+
+/// How long the refill thread's make of a network namespace takes: no wait in the node is bounded by it, but the
+/// waits census records it here (`waits_census.md`'s `netns.make` row), which seeds the netns tests' patience.
+static MAKES: hex_core::patience::Patience = hex_core::patience::Patience::measuring("netns.make");
 
 /// How many threads check the namespaces given back. With one, [`netcheck::check`] took 127 to 131 us a
 /// namespace at concurrency 32 on fedora, so it checked at most about 7,700 a second while that concurrency gave
@@ -76,22 +83,17 @@ const FILES_A_KEPT: u64 = 4;
 const FDS_A_BOX: u64 = 2;
 /// A seed's: its socket and its pidfd.
 const FDS_A_SEED: u64 = 2;
-/// The most exec seeds a node keeps (`seed::default_budget`'s ceiling).
-const EXEC_SEEDS: u64 = 128;
 /// A root node's create seeds' one pruned mount namespace, held for the node's life (`goal6-mntns.md` §12).
 const FDS_PRUNED: u64 = 1;
-/// What the agent holds open past those bounds, its listener, its polls and what its threads open for a moment:
-/// a margin, stated rather than measured, well past the few dozen it is.
-const FDS_BESIDE: u64 = 1_024;
 /// A pool's descriptors past what it holds: its refill thread's own namespace, which it goes back to, and the one
 /// it is making.
 const FDS_A_REFILL: u64 = 2;
 
 /// The mounts made ahead's (crate::devfs): the prepared `/dev` pool's at its bound, one descriptor each, and the
-/// proc pool's, two each (its pid namespace and its tree), four keys of eight each (`hex_core::devfs::KEYS`,
-/// `PER_KEY`).
-fn devfs_held() -> u64 {
-    let each_pool = hex_core::devfs::KEYS.saturating_mul(hex_core::devfs::PER_KEY);
+/// proc pool's, two each (its pid namespace and its tree), each pool holding at most the seeds' bound
+/// (`hex_core::devfs::Shape::cap`).
+fn devfs_held(sizes: Sizes) -> u64 {
+    let each_pool = sizes.seeds.get();
     of(each_pool, 1).saturating_add(of(each_pool, 2))
 }
 /// The one maker of both pools at its peak, a proc's (init::prepare_proc): the worker's own pid namespace, the one
@@ -113,19 +115,36 @@ pub struct Pools {
     pub ipc_uts: usize,
     /// Whether the node keeps step 3's prepared `/dev` pool, goal 6's prepared proc pool and their mask sources.
     pub devfs: bool,
+    /// The node's pools' bounds on its host, which the kept namespaces and the seeds are counted at.
+    pub sizes: Sizes,
 }
 
 impl Pools {
-    /// A root node's, each pool at its bound unless set.
-    pub const ROOT: Self = Self {
-        netns: BOUND,
-        ipc_uts: IPC_UTS_BOUND,
-        devfs: true,
-    };
+    /// A root node's on a host whose pools' bounds are `sizes`, each pool at its bound unless set: the network
+    /// namespaces and ipc and uts pairs at the most their learned sizes may reach.
+    pub fn root(sizes: Sizes) -> Self {
+        Self {
+            netns: sizes.netns,
+            ipc_uts: sizes.ipc_uts,
+            devfs: true,
+            sizes,
+        }
+    }
+
+    /// A rootless node's, which makes no namespaces or mounts ahead.
+    pub fn rootless(sizes: Sizes) -> Self {
+        Self {
+            netns: 0,
+            ipc_uts: 0,
+            devfs: false,
+            sizes,
+        }
+    }
 
     /// The descriptors the pools hold at their bounds, each pool's refill thread's beside, and the takes of every
-    /// call [`crate::serve::WORKERS`] runs at once, one of each pool's until its box's init joins them. A pool of
-    /// none has no thread. The mounts made ahead the same, where the node keeps them, their mask sources beside.
+    /// create a seed serves at once ([`Sizes::seeds`]), one of each pool's until its box's init joins them through
+    /// the seed's clone. A pool of none has no thread. The mounts made ahead the same, where the node keeps them,
+    /// their mask sources beside.
     fn descriptors(self) -> u64 {
         let pool = |bound: usize, each: u64| {
             if bound == 0 {
@@ -137,16 +156,16 @@ impl Pools {
         let takes =
             u64::from(self.netns > 0).saturating_add(u64::from(self.ipc_uts > 0).saturating_mul(2));
         let devfs = if self.devfs {
-            devfs_held()
+            devfs_held(self.sizes)
                 .saturating_add(FDS_A_DEVFS_MAKE)
                 .saturating_add(FDS_MASK_SOURCES)
-                .saturating_add(of(crate::serve::WORKERS, FDS_DEVFS_TAKES))
+                .saturating_add(of(self.sizes.seeds.get(), FDS_DEVFS_TAKES))
         } else {
             0
         };
         pool(self.netns, 1)
             .saturating_add(pool(self.ipc_uts, 2))
-            .saturating_add(of(crate::serve::WORKERS, takes))
+            .saturating_add(of(self.sizes.seeds.get(), takes))
             .saturating_add(devfs)
     }
 }
@@ -158,39 +177,50 @@ fn of(count: usize, each: u64) -> u64 {
 }
 
 /// The kept namespaces there may be at once: idle, on the checkers' line, and one for each live box.
-fn kept_at_most() -> u64 {
-    of(netns_reuse::PER_NODE, 2).saturating_add(of(hex_runtime::linux::cgroup::MAX_BOXES, 1))
+fn kept_at_most(sizes: Sizes) -> u64 {
+    of(sizes.idle_netns, 2).saturating_add(of(hex_runtime::linux::cgroup::MAX_BOXES, 1))
 }
 
-/// The descriptors this node may hold at once without the namespaces' `/proc/net` files, each by its bound and named:
-/// the kept namespaces; each live box's own; a connection and the programs it watches; the seeds of both pools; the
-/// namespaces and the mounts made ahead under `pools`; and the create seeds' one pruned mount namespace, which a root
-/// node holds for its life (`goal6-mntns.md` §12). That one is counted for every node: a rootless node holds none,
-/// and a bound may be one over, never under.
-fn descriptor_terms(pools: Pools) -> [(&'static str, u64); 9] {
-    let connections = crate::serve::LIMITS.connections;
+/// The descriptors this node may hold at once without the namespaces' `/proc/net` files, each by its bound and named: the
+/// kept namespaces; each live box's own; the programs its socket watches, a pidfd each, at the node's budget for
+/// them ([`crate::serve::limits`]); the seeds of both pools (the exec seeds at their most, [`crate::seed::most`]);
+/// the namespaces and the mounts made ahead under `pools`; the create seeds' one pruned mount namespace, which a root
+/// node holds for its life (`goal6-mntns.md` §12), counted for every node, as a rootless node holds none and a bound
+/// may be one over, never under; and `beside`, what the agent held open as the bound was taken (its listener, its
+/// polls, its standard streams). The socket's connections aren't among them: each is one of what remains, which the
+/// kernel refuses an accept past (`EMFILE`), the socket then pausing its accepts until one closes (the lead,
+/// 2026-11-06).
+fn descriptor_terms(pools: Pools, beside: u64) -> [(&'static str, u64); 9] {
     [
         ("the pools made ahead", pools.descriptors()),
-        ("kept namespaces", kept_at_most().saturating_mul(FDS_A_KEPT)),
+        (
+            "kept namespaces",
+            kept_at_most(pools.sizes).saturating_mul(FDS_A_KEPT),
+        ),
         (
             "live boxes",
             of(hex_runtime::linux::cgroup::MAX_BOXES, FDS_A_BOX),
         ),
-        ("connections", of(connections, 1)),
         (
             "programs watched",
-            of(connections.saturating_mul(crate::serve::LIMITS.programs), 1),
+            of(crate::serve::limits(&pools.sizes).programs, 1),
         ),
-        ("create seeds", of(hex_core::seeds::SEEDS.get(), FDS_A_SEED)),
-        ("exec seeds", EXEC_SEEDS.saturating_mul(FDS_A_SEED)),
+        // The device programs held, a descriptor each at their bound. A rootless node loads none, so its count is an
+        // over-bound there, and harmless: it keeps no namespaces whose files this bounds.
+        ("device programs", of(pools.sizes.programs, 1)),
+        ("create seeds", of(pools.sizes.seeds.get(), FDS_A_SEED)),
+        (
+            "exec seeds",
+            of(crate::seed::most(&pools.sizes), FDS_A_SEED),
+        ),
         ("the create seeds' pruned mount namespace", FDS_PRUNED),
-        ("beside those", FDS_BESIDE),
+        ("beside those", beside),
     ]
 }
 
 /// All the descriptors this node may hold at once without the namespaces' files ([`descriptor_terms`]).
-fn descriptors_of_the_node(pools: Pools) -> u64 {
-    descriptor_terms(pools)
+fn descriptors_of_the_node(pools: Pools, beside: u64) -> u64 {
+    descriptor_terms(pools, beside)
         .into_iter()
         .map(|(_, n)| n)
         .fold(0, u64::saturating_add)
@@ -206,20 +236,21 @@ fn descriptors_of_the_node(pools: Pools) -> u64 {
 pub struct FilesBound {
     /// The soft limit, `None` where it is unlimited.
     pub soft: Option<u64>,
-    /// The node's own descriptors at its bounds, without the files ([`descriptors_of_the_node`]).
+    /// The node's own descriptors at its bounds, without the files ([`descriptors_of_the_node`]), those it held
+    /// as the bound was taken among them.
     pub own: u64,
     /// The namespaces that may hold their files at once.
     pub namespaces: u64,
 }
 
 impl FilesBound {
-    /// The bound under `limit` for a node whose pools are `pools`, an unlimited one holding them for every
-    /// namespace there may be.
-    pub fn of(limit: &rustix::process::Rlimit, pools: Pools) -> Self {
-        let own = descriptors_of_the_node(pools);
+    /// The bound under `limit` for a node whose pools are `pools` and that holds `beside` descriptors past its
+    /// bounds, an unlimited one holding them for every namespace there may be.
+    pub fn of(limit: &rustix::process::Rlimit, pools: Pools, beside: u64) -> Self {
+        let own = descriptors_of_the_node(pools, beside);
         let namespaces = match limit.current {
-            None => kept_at_most(),
-            Some(soft) => (soft.saturating_sub(own) / FILES_A_KEPT).min(kept_at_most()),
+            None => kept_at_most(pools.sizes),
+            Some(soft) => (soft.saturating_sub(own) / FILES_A_KEPT).min(kept_at_most(pools.sizes)),
         };
         Self {
             soft: limit.current,
@@ -228,13 +259,68 @@ impl FilesBound {
         }
     }
 
-    /// The bound under this process's descriptor limit now, for a node whose pools are `pools`.
-    pub fn now(pools: Pools) -> Self {
-        Self::of(
-            &rustix::process::getrlimit(rustix::process::Resource::Nofile),
-            pools,
-        )
+    /// The bound under this process's descriptor limit now, for a node whose pools are `pools`, with the
+    /// descriptors it holds now counted ([`open_descriptors`]): learned, not stated (Ada's 2026-11-06 rule).
+    pub fn now(pools: Pools) -> Result<Self, Refusal> {
+        let limit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
+        Ok(Self::of(&limit, pools, open_descriptors(&limit)?))
     }
+
+    /// What a node whose pools are `pools`, holding `beside` past its bounds, needs of its soft descriptor limit to
+    /// hold every namespace it may keep with its files: its own descriptors at its bounds, as [`FilesBound::of`]
+    /// counts them, and four for each namespace a root node may keep; a rootless node keeps none, its own alone. The
+    /// node says it (`hex node --descriptors`), so an installer gives its service that and the install lab checks it,
+    /// never a figure copied from one host's (goal 6 step 6's HEX-INST-5; Ada's 2026-11-06 constants rule).
+    pub fn needed(pools: Pools, beside: u64) -> Needed {
+        // The namespaces kept for owners: none on a node without a pool (a rootless node's containers make theirs in
+        // user namespaces of their own), so none of their files either.
+        let kept = if pools.netns > 0 {
+            kept_at_most(pools.sizes)
+        } else {
+            0
+        };
+        Needed {
+            own: descriptors_of_the_node(pools, beside),
+            files: kept.saturating_mul(FILES_A_KEPT),
+        }
+    }
+}
+
+/// The descriptors a node needs, by what holds them ([`FilesBound::needed`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Needed {
+    /// Its own at its bounds, those it held beside them among them.
+    pub own: u64,
+    /// Every namespace it may keep, holding its `/proc/net` files.
+    pub files: u64,
+}
+
+impl Needed {
+    /// The soft limit that holds both.
+    pub fn total(self) -> u64 {
+        self.own.saturating_add(self.files)
+    }
+}
+
+/// How many descriptors this process holds now: the entries of `/proc/self/fd` (proc(5)), less the one the
+/// listing itself opens. The listing ends within the soft limit's entries, since no process holds more
+/// (getrlimit(2), `RLIMIT_NOFILE`), and refuses by type past it. Linux's alone, as this module is: macOS
+/// and Windows nodes keep no namespaces to bound files for.
+pub fn open_descriptors(limit: &rustix::process::Rlimit) -> Result<u64, Refusal> {
+    let listing = |e| Refusal::os("counting the agent's open descriptors in /proc/self/fd", e);
+    let most = limit.current.unwrap_or(u64::MAX);
+    let mut count = 0u64;
+    for entry in std::fs::read_dir("/proc/self/fd").map_err(listing)? {
+        entry.map_err(listing)?;
+        count = count.saturating_add(1);
+        if count > most.saturating_add(1) {
+            return Err(Refusal::Os {
+                op: "counting the agent's open descriptors in /proc/self/fd",
+                why: format!("more than the soft limit's {most} listed"),
+            });
+        }
+    }
+    Ok(count.saturating_sub(1))
 }
 
 /// A place under the [`FilesBound`], taken before a check opens a namespace's files and given back as it drops
@@ -266,7 +352,7 @@ struct KeptState {
     given_back: AtomicU64,
     /// Namespaces the checker ruled on, kept idle or closed.
     checked: AtomicU64,
-    /// Namespaces given back with the checkers' line full ([`netns_reuse::PER_NODE`]), or after every checker
+    /// Namespaces given back with the checkers' line full (the node's `idle_netns`), or after every checker
     /// ended,
     /// closed unchecked.
     unchecked: AtomicU64,
@@ -338,13 +424,30 @@ impl Netns {
     /// A pool that holds at most `bound` namespaces, and the thread that starts filling it at once, its kept
     /// namespaces holding their `/proc/net` files under `files`. With a bound of 0 there is no thread, and every
     /// container that makes a network namespace makes it on its create's path, counted, as a rootless node's
-    /// containers do (decision 4).
-    pub fn start(bound: usize, files: FilesBound) -> Result<Self, Refusal> {
+    /// containers do (decision 4). The namespaces kept idle for their owners are bounded by `sizes`: the node's
+    /// `idle_netns`, and each owner's learned from its fresh takes, starting at the host's parallelism.
+    pub fn start(bound: usize, files: FilesBound, sizes: Sizes) -> Result<Self, Refusal> {
+        Self::open(Pool::new(bound), bound, files, sizes)
+    }
+
+    /// As [`Netns::start`], the pool starting where the node's last start peaked (the host's parallelism on its first)
+    /// and learning its size from its draws, up to
+    /// `cap` ([`Pool::learning`]; Ada's rule, 2026-11-06): a root node's default, `cap` its [`Sizes::netns`].
+    pub fn learning(cap: usize, files: FilesBound, sizes: Sizes) -> Result<Self, Refusal> {
+        Self::open(Pool::learning(sizes.starts.netns, cap), cap, files, sizes)
+    }
+
+    fn open(
+        pool: Pool<OwnedFd>,
+        cap: usize,
+        files: FilesBound,
+        sizes: Sizes,
+    ) -> Result<Self, Refusal> {
         let shared = Arc::new(Shared {
-            pool: Mutex::new(Pool::new(bound)),
+            pool: Mutex::new(pool),
             wake: Condvar::new(),
         });
-        if bound == 0 {
+        if cap == 0 {
             return Ok(Self {
                 shared,
                 refill: None,
@@ -357,7 +460,7 @@ impl Netns {
             .spawn(move || refill(&filling))
             .map_err(|e| Refusal::os("starting the network-namespace thread", e))?;
         let state = Arc::new(KeptState {
-            idle: Mutex::new(Idle::new(netns_reuse::PER_OWNER, netns_reuse::PER_NODE)),
+            idle: Mutex::new(Idle::new(sizes.starts.owner_netns, sizes.idle_netns)),
             held: Mutex::new(BTreeMap::new()),
             given_back: AtomicU64::new(0),
             checked: AtomicU64::new(0),
@@ -372,7 +475,7 @@ impl Netns {
             files_held: Arc::new(AtomicU64::new(0)),
             check_ns: AtomicU64::new(0),
         });
-        let (returns, line) = std::sync::mpsc::sync_channel(netns_reuse::PER_NODE);
+        let (returns, line) = std::sync::mpsc::sync_channel(sizes.idle_netns);
         let line = Arc::new(Mutex::new(line));
         let mut checkers = Vec::with_capacity(CHECKERS);
         for n in 0..CHECKERS {
@@ -497,11 +600,40 @@ impl Netns {
     /// ([`ReuseCounts::made_on_path`]).
     fn make_on_path(&self) -> Result<OwnedFd, OciError> {
         let home = net::thread_network()?;
-        let ns = net::make_ahead(home.as_fd())?;
+        let ns = net::make_ahead(home.as_fd()).map_err(|f| f.error)?;
         if let Some(kept) = &self.kept {
             kept.state.made_on_path.fetch_add(1, Ordering::AcqRel);
         }
         Ok(ns)
+    }
+
+    /// What it has learned (Ada's rule, 2026-11-06): the pool's size, and the most idle namespaces an owner keeps
+    /// (0 on a node that keeps none).
+    pub fn learned(&self) -> Result<(usize, usize), Refusal> {
+        let bound = self.shared.pool().map_err(Refusal::from)?.bound();
+        let per_owner = match &self.kept {
+            None => 0,
+            Some(kept) => kept
+                .state
+                .idle
+                .lock()
+                .map_err(|_| Refusal::Broken("the kept namespaces' lock was poisoned".to_owned()))?
+                .per_owner(),
+        };
+        Ok((bound, per_owner))
+    }
+
+    /// A pool refused because the node lacks what a make takes (`missing`): no thread, and every take is
+    /// made on the path, counted under that reason ([`Pool::refused`]).
+    pub fn refused(missing: Missing) -> Self {
+        Self {
+            shared: Arc::new(Shared {
+                pool: Mutex::new(Pool::refused(missing)),
+                wake: Condvar::new(),
+            }),
+            refill: None,
+            kept: None,
+        }
     }
 
     /// What the pool has done. Counted at the take, so a create that fails after it took a namespace,
@@ -513,11 +645,15 @@ impl Netns {
 
 impl Networks for Netns {
     fn take(&self) -> Result<Option<OwnedFd>, OciError> {
-        let taken = self
-            .shared
-            .pool()?
-            .take()
-            .map_err(|e| OciError::Broken(e.to_string()))?;
+        let taken = {
+            let mut pool = self.shared.pool()?;
+            let before = pool.bound();
+            let taken = pool.take().map_err(|e| OciError::Broken(e.to_string()))?;
+            if pool.bound() > before {
+                crate::sizes::rose();
+            }
+            taken
+        };
         self.shared.wake.notify_one();
         Ok(match taken {
             Take::Pooled(ns) => Some(ns),
@@ -607,7 +743,11 @@ impl Networks for NetChoice<'_> {
         let taken = match self.idle()? {
             None => return self.netns.take(),
             Some(mut idle) => {
+                let before = idle.per_owner();
                 let taken = idle.take(self.whose(may_share));
+                if idle.per_owner() > before {
+                    crate::sizes::rose();
+                }
                 if matches!(taken, Kept::Idle(_)) {
                     // Checked as its box went (`check_returns`), and nothing ran in it since.
                     idle.hand_on();
@@ -735,11 +875,14 @@ fn check_returns(state: &KeptState, line: &Mutex<Receiver<(String, KeptNet)>>) {
 
 /// The refill thread: makes a namespace whenever the pool asks for one and hands it in, one at a time,
 /// as the pool's count of what it asks for needs, and ends once the pool is shut down. It opens its
-/// home namespace first; a thread that can't makes none, each make it is asked for failing, counted.
+/// home namespace first; a thread that can't makes none, each make it is asked for failing, counted
+/// under [`Step::Home`]. Each failed make is counted by the step that failed, its reason (the errno
+/// and the error's text) kept as that step's latest, and said on the agent's stderr ([`failed_line`]):
+/// at most one a take, since a failed make stops the asking until the next.
 /// A namespace the pool refuses (past its bound, which one maker never reaches, or after shutdown) is
 /// closed here. A poisoned lock ends it, and every create then refuses on the same lock.
 fn refill(shared: &Shared) {
-    let home = net::thread_network();
+    let home = net::home();
     loop {
         let Ok(mut pool) = shared.pool.lock() else {
             return;
@@ -755,10 +898,14 @@ fn refill(shared: &Shared) {
         }
         // Made with the lock let go, so a take never waits on a make.
         drop(pool);
+        let began = std::time::Instant::now();
         let made = match &home {
             Ok(home) => net::make_ahead(home.as_fd()),
             Err(e) => Err(e.clone()),
         };
+        if made.is_ok() {
+            MAKES.answered(began.elapsed());
+        }
         let Ok(mut pool) = shared.pool.lock() else {
             return;
         };
@@ -766,9 +913,22 @@ fn refill(shared: &Shared) {
             Ok(ns) => {
                 let _ = pool.made(ns);
             }
-            Err(_) => pool.failed(),
+            Err(failed) => {
+                let reason = failed.reason();
+                // Said where the agent's operator reads it; the reason is kept in the counts all the
+                // same, so a stderr that can't be written loses nothing inspect can't show.
+                let _ = std::io::stderr()
+                    .lock()
+                    .write_all(failed_line(failed.step, &reason).as_bytes());
+                pool.failed(failed.step, reason);
+            }
         }
     }
+}
+
+/// What the agent says on stderr when a make ahead fails: the step and why.
+fn failed_line(step: Step, reason: &Reason) -> String {
+    format!("hex node: a network namespace made ahead failed at {step}: {reason}\n")
 }
 
 #[cfg(test)]

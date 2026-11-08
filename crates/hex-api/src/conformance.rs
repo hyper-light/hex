@@ -53,9 +53,20 @@ pub struct Failure {
     pub why: String,
 }
 
-/// Longest a case waits for a program it expects to end: a bound on a wait for a fact, so a
-/// runtime that never reports an end fails the case instead of hanging the suite.
-pub const PATIENCE: Duration = Duration::from_secs(60);
+/// The slowest recorded end of a program the suites wait for, a container's exec of `true` from its exec to its
+/// end, in the suites' own runs (decision 9; the lead's rule of 2026-11-06 for test patiences).
+/// The tests run debug builds, so their record is the debug one: the `lifecycle.exec` row of
+/// `bench/competitive/probes/waits_census.md` run 3's debug arm, 39.131 ms of 10,000 (a release-build record ran these
+/// tests' waits out).
+pub const PROGRAM_END: Option<Duration> = Some(Duration::from_nanos(39_130_836));
+
+/// Longest a case waits for a program it expects to end: twice [`PROGRAM_END`], so a runtime that
+/// never reports an end fails the case instead of hanging the suite. While it is measuring, the longest
+/// a `Duration` holds: a deadline from it is none (`Instant::checked_add`), and the wait is the fact's.
+pub const PATIENCE: Duration = match PROGRAM_END {
+    Some(slowest) => slowest.saturating_mul(2),
+    None => Duration::MAX,
+};
 /// How long a case watches a program it expects to keep running.
 pub const STILL_RUNNING: Duration = Duration::from_millis(200);
 
@@ -411,17 +422,18 @@ fn started(rt: &dyn Runtime, id: &BoxId, class: Class) -> Result<(), String> {
     )
 }
 
-/// Polls `inspect` until the box reports an exit, for at most [`PATIENCE`]: the fact the exit cases
-/// wait on, never a guessed delay.
-fn exit_of(rt: &dyn Runtime, id: &BoxId) -> Result<crate::BoxInfo, String> {
-    let deadline = std::time::Instant::now().checked_add(PATIENCE);
+/// Polls `inspect` until the box reports an exit, for at most `patience` (the cases': [`PATIENCE`]): the fact
+/// the exit cases wait on, never a guessed delay.
+fn exit_of(rt: &dyn Runtime, id: &BoxId, patience: Duration) -> Result<crate::BoxInfo, String> {
+    let deadline = std::time::Instant::now().checked_add(patience);
     loop {
         let info = rt.inspect(id).map_err(|e| format!("inspect: {e}"))?;
         if info.exit.is_some() {
             return Ok(info);
         }
-        if deadline.is_none_or(|d| std::time::Instant::now() >= d) {
-            return Err(format!("no exit reported after {PATIENCE:?}: {info:?}"));
+        // No deadline is a measuring patience's: the wait is the fact's alone.
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Err(format!("no exit reported after {patience:?}: {info:?}"));
         }
         // park_timeout (thread::sleep is disallowed) yields between looks at the fact.
         std::thread::park_timeout(Duration::from_millis(10));
@@ -459,7 +471,7 @@ fn init_exit(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     let Some(id) = made_init(rt, fx, "init-exit", &Act::Fail(3))? else {
         return Ok(());
     };
-    let info = exit_of(rt, &id);
+    let info = exit_of(rt, &id, PATIENCE);
     rt.delete(&id).map_err(|e| e.to_string())?;
     let info = info?;
     ensure(info.exit == Some(Exit::Code(3)), || {
@@ -482,7 +494,7 @@ fn init_killed(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
         )?;
         rt.signal(&id, Signal::KILL)
             .map_err(|e| format!("signal: {e}"))?;
-        let info = exit_of(rt, &id)?;
+        let info = exit_of(rt, &id, PATIENCE)?;
         ensure(info.exit == Some(Exit::Signal(9)), || {
             format!("exit {:?}", info.exit)
         })
@@ -607,4 +619,119 @@ fn owned(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
         })?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::sim::SimRuntime;
+    use crate::{BoxInfo, Proc, Usage};
+
+    /// The simulator, whose `inspect` shows a box's exit only from its `shown`th look on, as a node that sees an
+    /// init's end some looks after a case asks; `looks` counts them.
+    struct Late {
+        sim: SimRuntime,
+        looks: AtomicUsize,
+        shown: usize,
+    }
+
+    impl Late {
+        /// Box `id`, an `oci` box whose init exits with 3 once started (the simulator's `fail 3`), made and started.
+        fn with_exiting_box(id: &BoxId, shown: usize) -> Self {
+            let late = Self {
+                sim: SimRuntime::new(),
+                looks: AtomicUsize::new(0),
+                shown,
+            };
+            late.sim
+                .create(BoxSpec {
+                    id: id.clone(),
+                    bounds: Bounds::default(),
+                    class: ClassSpec::Oci(Box::new(OciSpec {
+                        rootfs: Rootfs::Dir("/rootfs".into()),
+                        init: Program::of(&["fail", "3"]),
+                        mounts: Vec::new(),
+                        hostname: None,
+                        network: Network::Private,
+                        hosts: Vec::new(),
+                    })),
+                    owner: None,
+                })
+                .unwrap();
+            late.sim.start(id).unwrap();
+            late
+        }
+    }
+
+    impl Runtime for Late {
+        fn classes(&self) -> Vec<Class> {
+            self.sim.classes()
+        }
+        fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
+            self.sim.create(spec)
+        }
+        fn start(&self, id: &BoxId) -> Result<(), Refusal> {
+            self.sim.start(id)
+        }
+        fn exec(
+            &self,
+            id: &BoxId,
+            program: Program,
+            stdio: Stdio,
+        ) -> Result<Box<dyn Proc>, Refusal> {
+            self.sim.exec(id, program, stdio)
+        }
+        fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
+            self.sim.signal(id, signal)
+        }
+        fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
+            let mut info = self.sim.inspect(id)?;
+            if self.looks.fetch_add(1, Ordering::Relaxed) + 1 < self.shown {
+                info.exit = None;
+            }
+            Ok(info)
+        }
+        fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
+            self.sim.usage(id)
+        }
+        fn list(&self) -> Result<Vec<BoxInfo>, Refusal> {
+            self.sim.list()
+        }
+        fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
+            self.sim.delete(id)
+        }
+    }
+
+    /// Decision 9 (the lead's rule of 2026-11-06 for test patiences): an exit case waits on its fact, a box's
+    /// reported exit, for at most its patience, and with a measuring one (no record yet: the longest a `Duration`
+    /// holds, so no deadline) for the fact alone. Do: an `oci` box whose init exits with 3, its exit reported from
+    /// the third look; wait for it with a measuring patience. Expect: Code(3) at the third look, never "no exit
+    /// reported" at the first.
+    #[test]
+    fn a_measuring_patience_waits_for_the_exit_past_the_first_look() {
+        let id = BoxId::new("late").unwrap();
+        let late = Late::with_exiting_box(&id, 3);
+        assert_eq!(
+            exit_of(&late, &id, Duration::MAX).map(|info| info.exit),
+            Ok(Some(Exit::Code(3)))
+        );
+        assert_eq!(late.looks.load(Ordering::Relaxed), 3);
+    }
+
+    /// The wait still ends at its patience. Do: the same box, its exit never reported, waited for with a patience
+    /// of a nanosecond, less than a look takes. Expect: refused at its first look, naming that patience.
+    #[test]
+    fn a_patience_ends_the_wait_for_an_exit_never_reported() {
+        let id = BoxId::new("never").unwrap();
+        let late = Late::with_exiting_box(&id, usize::MAX);
+        let patience = Duration::from_nanos(1);
+        let refused = exit_of(&late, &id, patience).unwrap_err();
+        assert!(
+            refused.starts_with(&format!("no exit reported after {patience:?}")),
+            "{refused}"
+        );
+        assert_eq!(late.looks.load(Ordering::Relaxed), 1);
+    }
 }

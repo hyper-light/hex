@@ -29,10 +29,27 @@
 //! Version 2 (goal 4 plan step 2) adds one request and its answer: the node agent's network namespace
 //! counts ([`Call::Netns`], [`Answer::Netns`]). Every version 1 kind reads the same in it.
 //!
-//! Version 3 (goal 5 extended, step 6) appends a create's owner to its body ([`hex_api::BoxOwner`]): an
+//! Version 3 is native's (cp/t7-native-s8: `Call::Kill`, kind 0x000c), which lands first: versions go in landing
+//! order with no gaps (the lead, 2026-11-07), so a version implies the ones before it.
+//!
+//! Version 4 (goal 5 extended, step 6) appends a create's owner to its body ([`hex_api::BoxOwner`]): an
 //! option of the owner's name and a byte, 1 when its boxes' cgroups may be handed on and 0 when it opts
-//! out. A create of version 1 or 2 names no owner, and one that names an owner can't be written in
-//! either: it is refused before it is written, never sent without its owner (§3).
+//! out. A create of a version before it names no owner, and one that names an owner can't be written in
+//! one: it is refused before it is written, never sent without its owner (§3).
+//!
+//! Version 5 (ci-followups) appends to the network namespace counts' answer's body why the counts' failed makes failed and whether the pool was
+//! refused ([`netns::Counts`]'s `failed_by`, `refused` and `refused_on_path`): five `u64`s, one per
+//! [`netns::Step`], a byte naming what the node lacks (0 nothing, its bit 1 CAP_SYS_ADMIN, its bit 2
+//! CAP_NET_ADMIN), and a `u64`. Every version 4 message reads the same in it.
+//!
+//! Version 6 (ci-followups) appends the latest reason a make failed for at each step ([`netns::Counts`]'s `last_failed`): for
+//! each [`netns::Step`] in order an option of the reason, which is an option of its errno (an `i32`) and its
+//! text, a string of at most [`netns::MAX_REASON`] bytes. Every version 5 message reads the same in it.
+//!
+//! Version 7 (the lead's ruling, 2026-11-06) appends to a hello's answer the node's budgets ([`Budgets`]): calls in
+//! flight and programs watched on all its connections together, as an option after the limits, whose meaning stays
+//! each connection's own. A hello's answer of a version before it names none, and one that names budgets can't be written
+//! in them: refused before it is written (§3).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -48,7 +65,7 @@ use crate::netns;
 /// Every message's first bytes.
 pub const MAGIC: [u8; 4] = *b"HEXW";
 /// The highest version this side speaks; it reads and writes every one from [`FIRST`].
-pub const VERSION: u16 = 3;
+pub const VERSION: u16 = 7;
 /// The first version, which every side reads: a client's hello goes in it, and so does a refusal of a
 /// message whose version this side can't tell or doesn't speak.
 pub const FIRST: u16 = 1;
@@ -217,7 +234,22 @@ pub struct Hello {
     pub version: u16,
     pub classes: Vec<Class>,
     pub limits: Limits,
+    /// The node's budgets, from version 7 ([`BUDGETS`]); `None` in an earlier version's.
+    pub budgets: Option<Budgets>,
 }
+
+/// The node agent's budgets on all its connections together (version 7's): past either, a call or an exec is refused
+/// by type, whichever connection it comes on, but for what each connection's limits keep for it ([`Limits`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budgets {
+    /// Requests asked and not yet answered, on every connection together.
+    pub in_flight: usize,
+    /// Programs execs started that the connections still watch, together.
+    pub programs: usize,
+}
+
+/// The version whose hello's answer carries the node's budgets.
+pub const BUDGETS: u16 = 7;
 
 /// The node agent's bounds on its socket, each refused past by type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,9 +258,10 @@ pub struct Limits {
     pub connections: usize,
     /// Bytes in one message, at most [`MAX_MESSAGE`].
     pub message_bytes: usize,
-    /// Requests one connection has asked and not yet had answered.
+    /// Requests one connection may have asked and not yet had answered: the node keeps this many for each
+    /// connection it admits, so one within it is never refused.
     pub in_flight: usize,
-    /// Programs one connection's execs started that it still watches.
+    /// Programs one connection's execs started that it may still watch: kept for each connection likewise.
     pub programs: usize,
 }
 
@@ -340,6 +373,17 @@ pub fn answer(version: u16, id: u64, answer: &Answer, bound: usize) -> Result<Ve
             ] {
                 w.usize(n)?;
             }
+            if version >= BUDGETS {
+                w.option_with(h.budgets.as_ref(), |w, b| {
+                    w.usize(b.in_flight)?;
+                    w.usize(b.programs)
+                })?;
+            } else if h.budgets.is_some() {
+                return Err(Fault::value(
+                    "a hello's node budgets",
+                    format!("version {version} carries none; version {BUDGETS} does"),
+                ));
+            }
         }
         Answer::Info(info) => {
             w.header(version, kind::INFO, id);
@@ -389,6 +433,31 @@ pub fn answer(version: u16, id: u64, answer: &Answer, bound: usize) -> Result<Ve
                 counts.failed,
             ] {
                 w.u64(n);
+            }
+            if version >= FAILED_BY {
+                let by = counts.failed_by;
+                for n in [by.home, by.unshare, by.open, by.loopback, by.back] {
+                    w.u64(n);
+                }
+                w.u8(counts.refused.map_or(0, |m| {
+                    u8::from(m.sys_admin()) | (u8::from(m.net_admin()) << 1)
+                }));
+                w.u64(counts.refused_on_path);
+            }
+            if version >= LAST_FAILED {
+                let last = &counts.last_failed;
+                for reason in [
+                    &last.home,
+                    &last.unshare,
+                    &last.open,
+                    &last.loopback,
+                    &last.back,
+                ] {
+                    w.option_with(reason.as_ref(), |w, reason| {
+                        w.option(reason.errno(), |w, errno| w.i32(errno));
+                        w.string(reason.text())
+                    })?;
+                }
             }
         }
     }
@@ -533,18 +602,31 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
     }
     let answer = match kind {
         kind::HELLO_ANSWER => {
-            let version = r.u16()?;
+            // The version the agent speaks, not this message's, which says what the message holds.
+            let speaks = r.u16()?;
             let classes = r.list(class)?;
             let mut limit = || r.usize();
+            let limits = Limits {
+                connections: limit()?,
+                message_bytes: limit()?,
+                in_flight: limit()?,
+                programs: limit()?,
+            };
+            let budgets = if version >= BUDGETS {
+                r.option(|r| {
+                    Ok(Budgets {
+                        in_flight: r.usize()?,
+                        programs: r.usize()?,
+                    })
+                })?
+            } else {
+                None
+            };
             Answer::Hello(Hello {
-                version,
+                version: speaks,
                 classes,
-                limits: Limits {
-                    connections: limit()?,
-                    message_bytes: limit()?,
-                    in_flight: limit()?,
-                    programs: limit()?,
-                },
+                limits,
+                budgets,
             })
         }
         kind::INFO => Answer::Info(info(&mut r)?),
@@ -566,13 +648,37 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
         },
         kind::REFUSED => Answer::Refused(refusal(&mut r)?),
         kind::EXITED => Answer::Exited(exit(&mut r)?),
-        kind::NETNS_ANSWER => Answer::Netns(netns::Counts {
-            made_ahead: r.u64()?,
-            taken: r.u64()?,
-            made_on_path: r.u64()?,
-            discarded: r.u64()?,
-            failed: r.u64()?,
-        }),
+        kind::NETNS_ANSWER => {
+            let mut counts = netns::Counts {
+                made_ahead: r.u64()?,
+                taken: r.u64()?,
+                made_on_path: r.u64()?,
+                discarded: r.u64()?,
+                failed: r.u64()?,
+                ..netns::Counts::default()
+            };
+            if version >= FAILED_BY {
+                counts.failed_by = netns::FailedBy {
+                    home: r.u64()?,
+                    unshare: r.u64()?,
+                    open: r.u64()?,
+                    loopback: r.u64()?,
+                    back: r.u64()?,
+                };
+                counts.refused = missing(r.u8()?)?;
+                counts.refused_on_path = r.u64()?;
+            }
+            if version >= LAST_FAILED {
+                counts.last_failed = netns::LastFailed {
+                    home: reason(&mut r)?,
+                    unshare: reason(&mut r)?,
+                    open: reason(&mut r)?,
+                    loopback: reason(&mut r)?,
+                    back: reason(&mut r)?,
+                };
+            }
+            Answer::Netns(counts)
+        }
         _ => {
             return Err(Fault::Kind {
                 kind,
@@ -601,6 +707,39 @@ fn check(msg: &Received<'_>, bound: usize, version: u16) -> Result<(), Fault> {
 }
 
 /// That this side speaks `version`.
+/// A step's latest reason for a failed make (version 6): an option of its errno and its text, a text past
+/// [`netns::MAX_REASON`] bytes refused rather than cut, so what is read is what was written.
+fn reason(r: &mut Reader<'_>) -> Result<Option<netns::Reason>, Fault> {
+    r.option(|r| {
+        let errno = r.option(Reader::i32)?;
+        let text = r.string("a failed make's reason")?;
+        if text.len() > netns::MAX_REASON {
+            return Err(Fault::value(
+                "a failed make's reason",
+                format!(
+                    "{} bytes is over the {}-byte bound",
+                    text.len(),
+                    netns::MAX_REASON
+                ),
+            ));
+        }
+        Ok(netns::Reason::new(errno, &text))
+    })
+}
+
+/// What a node lacks, from its byte in the network namespace counts (version 5): nothing, or what its
+/// bits name; a bit no version defines is refused.
+fn missing(bits: u8) -> Result<Option<netns::Missing>, Fault> {
+    match bits {
+        0 => Ok(None),
+        1..=3 => Ok(netns::Missing::of(bits & 1 == 0, bits & 2 == 0)),
+        _ => Err(Fault::value(
+            "missing capabilities",
+            format!("{bits:#04x} names a capability no version defines"),
+        )),
+    }
+}
+
 fn speaks(version: u16) -> Result<(), Fault> {
     if (FIRST..=VERSION).contains(&version) {
         Ok(())
@@ -726,7 +865,13 @@ fn put_box_spec(w: &mut Writer, version: u16, spec: &BoxSpec) -> Result<(), Faul
 }
 
 /// The version whose create carries the box's owner.
-const OWNERS: u16 = 3;
+const OWNERS: u16 = 4;
+
+/// The version whose network namespace counts carry why each failed make failed and whether the pool was refused.
+const FAILED_BY: u16 = 5;
+
+/// The version whose network namespace counts carry the latest reason a make failed for at each step.
+const LAST_FAILED: u16 = 6;
 
 fn box_spec(r: &mut Reader<'_>, version: u16) -> Result<BoxSpec, Fault> {
     let id = box_id(r)?;

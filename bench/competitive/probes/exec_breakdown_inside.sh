@@ -17,6 +17,7 @@
 set -uo pipefail
 N=${N:-1000}; WARMUP=${WARMUP:-100}; ROUNDS=${ROUNDS:-2}; FLOOR_N=${FLOOR_N:-1000}; FLOOR_WARMUP=${FLOOR_WARMUP:-100}
 OUT=/opt/out; mkdir -p /run/err
+. "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/tracebuf.sh"
 
 # The OCI pass's bundles (oci_inside.sh): a `sleep` container to exec into, and the `true` one seam_oci names.
 ALL_NS='[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"}]'
@@ -81,10 +82,10 @@ trap untrace EXIT
 # traced <out name> <n> <warmup> [detail]: seam_oci's lifecycle phase with the tracer on, its trace in
 # <out name>.txt and the instance's per-CPU counts in <out name>.stats (exec_breakdown.py refuses a trace that
 # lost events); `detail` adds the opens' entries.
-traced() {
+traced_once() {
   local name=$1 n=$2 warmup=$3 events=$EVENTS rc=0
   [ "${4:-}" = detail ] && events="$EVENTS $DETAIL"
-  mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo 4096 > "$I/buffer_size_kb" \
+  mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo "${TRACE_KB:?}" > "$I/buffer_size_kb" \
     || { echo "the trace instance $I couldn't be made" >&2; untrace; return 1; }
   for ev in $events; do
     { filter "$ev" > "$I/events/$ev/filter" && echo 1 > "$I/events/$ev/enable"; } \
@@ -102,6 +103,8 @@ traced() {
   untrace
   return $rc
 }
+# Its buffer starts at 4,096 KiB a CPU, the runs of record's, and grows while the trace lost events (tracebuf.sh).
+traced() { grown 4096 "$OUT/$1.stats" traced_once "$@"; }
 
 # floor <out name> <n> <warmup>: exec_floor against a running `sleep` container crun makes from the same
 # bundle, its init's pid from crun's state and its cgroup from the init's.

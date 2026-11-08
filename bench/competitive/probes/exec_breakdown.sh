@@ -4,7 +4,8 @@
 # and exec_floor.c, built here. Every binary is copied into the run's directory, so what ran is kept beside what
 # it measured. On fedora:
 #   exec_breakdown.sh <hex release binary> <seam_oci release binary>
-# Env: N, WARMUP, ROUNDS, FLOOR_N, FLOOR_WARMUP, CHECK (exec_breakdown_inside.sh's), CPUSET (4-31); LOAD_GATE=0 skips the
+# Env: N, WARMUP, ROUNDS, FLOOR_N, FLOOR_WARMUP, CHECK (exec_breakdown_inside.sh's), CPUSET (4-31), BENCH_MEMORY and
+# BENCH_OOM (the container's --memory, 40g, and --oom-score-adj, none, as host.sh's); LOAD_GATE=0 skips the
 # wait for load under 2, as host.sh allows: this probe's comparisons are within one run (the floor against
 # libcrun's exec, the parts against their call), which cancel other people's CPU load. BENCH_HOST_OK names
 # another host, as host.sh takes it.
@@ -60,7 +61,7 @@ untag() {
     || echo "the run's trace instance (tag $TRACE_TAG) couldn't be checked gone" >&2
 }
 bench_trap untag
-timeout 7200 docker run --rm --name "$NAME" "${BENCH_LABELS[@]}" --cpuset-cpus="${CPUSET:-4-31}" --memory=40g \
+timeout 7200 docker run --rm --name "$NAME" "${BENCH_LABELS[@]}" --cpuset-cpus="${CPUSET:-4-31}" --memory="${BENCH_MEMORY:-40g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
   --privileged --security-opt label=disable --cgroupns=private --network=none \
   -v /usr:/usr:ro -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
   -e N -e WARMUP -e ROUNDS -e FLOOR_N -e FLOOR_WARMUP -e CHECK -e TRACE_TAG \

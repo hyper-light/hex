@@ -198,11 +198,12 @@ fn normal(dest: &str) -> String {
 
 /// How many times [`in_root`] tries a path Linux refuses with EAGAIN: a rename or a mount anywhere on the
 /// host crossing a `..` in the walk, where it can't then say the `..` stayed in the root, and leaves the
-/// retry to the caller (openat2(2); fs/namei.c v6.19 :2195-2206). libpathrs's budget (src/syscalls.rs:864-873),
-/// as runc v1.5.2 cites it (`internal/pathrs/retry.go`). Measured on fedora under 16 mount and 16 rename loops,
-/// no resolve needed more than 5 (unit hex-inroot-storm-20261105T130241Z;
-/// docs/research/runtime/inroot-eagain.md).
-const IN_ROOT_TRIES: u32 = 128;
+/// retry to the caller (openat2(2); fs/namei.c v6.19 :2195-2206). Twice the most a resolve was measured to need:
+/// on fedora under 16 mount and 16 rename loops, none needed more than 5 (unit hex-inroot-storm-20261105T130241Z,
+/// 10 runs of 2,007 resolves; docs/research/runtime/inroot-eagain.md §3), and a failure bound takes a margin of 2
+/// (Ada's 2026-11-06 rule). libpathrs's 128 (src/syscalls.rs:864-873) was copied, not measured here. A host that
+/// needs more is refused by name ([`failed`]), the record to re-derive it from.
+const IN_ROOT_TRIES: u32 = 2 * 5;
 
 thread_local! {
     /// The EAGAIN refusals [`in_root`] tried again past, on this thread: the init's count, as it is
@@ -227,6 +228,12 @@ fn in_root(root: BorrowedFd<'_>, path: &str) -> Result<OwnedFd, Errno> {
             ResolveFlags::IN_ROOT | ResolveFlags::NO_MAGICLINKS,
         )
     };
+    tried(open)
+}
+
+/// `open` tried until it answers other than EAGAIN, at most [`IN_ROOT_TRIES`] times, each EAGAIN tried again
+/// past counted ([`retried`]); past the budget, the last EAGAIN.
+fn tried(mut open: impl FnMut() -> Result<OwnedFd, Errno>) -> Result<OwnedFd, Errno> {
     for _ in 1..IN_ROOT_TRIES {
         match open() {
             Err(Errno::AGAIN) => RETRIED.with(|n| n.set(n.get().saturating_add(1))),
@@ -374,6 +381,28 @@ mod tests {
         );
     }
 
+    /// Ada's 2026-11-06 rule (AC-T7.1.4, CLAUDE.md §2): the budget is twice the most tries a resolve was measured to
+    /// need under a storm, 5 (unit hex-inroot-storm-20261105T130241Z, docs/research/runtime/inroot-eagain.md §3). Do:
+    /// a path Linux refuses with EAGAIN 9 times, then answers, and one it refuses 10 times. Expect the first opened,
+    /// its 9 retries counted, and the second refused with the EAGAIN, the budget spent.
+    #[test]
+    fn a_resolve_past_twice_the_measured_need_is_refused() {
+        let answer_after = |again: u32| {
+            let mut left = again;
+            move || match left.checked_sub(1) {
+                Some(n) => {
+                    left = n;
+                    Err(Errno::AGAIN)
+                }
+                None => rustix::fs::open("/", OFlags::PATH | OFlags::CLOEXEC, Mode::empty()),
+            }
+        };
+        let before = retried();
+        assert!(tried(answer_after(9)).is_ok());
+        assert_eq!(retried() - before, 9);
+        assert_eq!(tried(answer_after(10)).err(), Some(Errno::AGAIN));
+    }
+
     /// CLAUDE.md §3: past its budget the resolver's refusal names the path, the component and the budget, never a
     /// bare EAGAIN. Do: the refusal for an EAGAIN. Expect: all three named.
     #[test]
@@ -381,7 +410,7 @@ mod tests {
         let e = failed("/up/made/here", "up/made", Errno::AGAIN).to_string();
         assert!(
             e.contains("/up/made/here (up/made)")
-                && e.contains("in 128 tries")
+                && e.contains(&format!("in {IN_ROOT_TRIES} tries"))
                 && e.contains("EAGAIN"),
             "{e}"
         );

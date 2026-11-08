@@ -2,7 +2,8 @@
 //! the seed's pruned namespace copied by the init's clone (goal 5's way, every kernel), a namespace holding only
 //! its root made by that clone (`CLONE_EMPTY_MNTNS`, Linux 7.1), or one the agent makes from the rootfs's tree
 //! (`OPEN_TREE_NAMESPACE`, Linux 7.0) for the init to join. A node chooses one way at start: the one the record
-//! shows fastest, where the kernel has it, or the one it is asked for.
+//! shows fastest, where the kernel has it ([`default_way`]), or, for the bench's A/B and the lab, the one its builder
+//! is asked for (`Node::with_mount_namespace`). The node agent reads no environment for it (Ada's 2026-11-06 rule).
 
 use super::OciError;
 pub use hex_core::seed::MountNamespace;
@@ -17,10 +18,6 @@ pub const FSMOUNT_NAMESPACE: u32 = 0x2;
 /// `clone3`'s flag for a mount namespace holding only a clone of its parent's root mount
 /// (`include/uapi/linux/sched.h:42`, Linux 7.1).
 pub const CLONE_EMPTY_MNTNS: u64 = 1 << 37;
-
-/// The environment entry by which a node's owner asks for a way (`copy`, `empty` or `tree`): the bench's
-/// A/B. Unset, the node takes [`default_way`].
-pub const ENV_WAY: &str = "HEX_OCI_MNTNS";
 
 /// Whether this process may make a mount namespace from a tree, as [`probe`] finds it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,7 +164,7 @@ pub fn default_way(open_tree: OpenTreeNamespace) -> Result<MountNamespace, OciEr
     default_from(RECORD, open_tree)
 }
 
-/// The way a node takes: `asked` (by [`ENV_WAY`]'s words) where given, else [`default_way`]. A namespace
+/// The way a node takes: `asked` (`copy`, `empty` or `tree`) where given, else [`default_way`]. A namespace
 /// from its tree asked of a kernel or process that can't make one is refused by type. Empty asked of a
 /// kernel without `CLONE_EMPTY_MNTNS` isn't: the seed learns that from its first clone, makes the copy and
 /// says so in its answer, and the node counts the create as copied.
@@ -181,11 +178,11 @@ pub fn choose(
         Some("empty") => Ok(MountNamespace::Empty),
         Some("tree") if open_tree == OpenTreeNamespace::Available => Ok(MountNamespace::FromTree),
         Some("tree") => Err(OciError::Config(format!(
-            "{ENV_WAY}=tree asks for a mount namespace made from its tree, which this node can't make \
+            "the way asked, tree, is a mount namespace made from its tree, which this node can't make \
              ({open_tree:?})"
         ))),
         Some(other) => Err(OciError::Config(format!(
-            "{ENV_WAY}={other:?} names no way to make a mount namespace: copy, empty or tree"
+            "the way asked, {other:?}, names no way to make a mount namespace: copy, empty or tree"
         ))),
     }
 }

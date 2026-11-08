@@ -21,9 +21,10 @@ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Condvar, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hex_api::Refusal;
+use hex_core::patience::Patience;
 use hex_core::seed::{Answer, Failed, Request};
 use hex_runtime::linux::oci::seed as rt_seed;
 use rustix::process::{Pid, PidfdFlags, WaitId, WaitIdOptions};
@@ -33,10 +34,8 @@ use rustix::process::{Pid, PidfdFlags, WaitId, WaitIdOptions};
 /// of a full pool is a burst that drains in milliseconds, not a wedge.
 pub const WAITERS: usize = 4_096;
 
-/// How long the agent waits for a seed's answer before it takes the seed for wedged, kills it and
-/// refuses the exec. A seed's work is a fork, a few `setns` and a clone — milliseconds; this is a
-/// bound on a wait for a fact (CLAUDE.md §4), not a guess at how long the work takes.
-const ANSWER_PATIENCE: Duration = Duration::from_secs(30);
+/// The exec seeds' wait's name, as the waits census records it.
+const ANSWERS: &str = "exec_seeds.answers";
 
 /// A pool of reusable exec seeds, grown on demand to [`budget`](Self::budget).
 pub struct SeedPool {
@@ -45,6 +44,10 @@ pub struct SeedPool {
     budget: usize,
     inner: Mutex<Inner>,
     free: Condvar,
+    /// How long an exec waits for a busy seed to free: twice the slowest an exec has held a seed on this node,
+    /// seeded from the clone record ([`hex_core::seeds::CLONE_SLOWEST`], `seed_path.md` run 3), an exec seed's work
+    /// being the same kind of clone with a few `setns` (decision 9; the lead's rule of 2026-11-06).
+    answers: Patience,
 }
 
 #[derive(Default)]
@@ -60,22 +63,24 @@ struct Inner {
 struct Seed {
     socket: OwnedFd,
     pidfd: OwnedFd,
+    /// When its current exec took it: its hold is a sample of the pool's wait.
+    since: Instant,
 }
 
-/// The default seed budget: one per hardware thread, so a node that runs many execs at once rarely
-/// waits, clamped to a range that keeps a laptop's memory small and a big node's seed set bounded. An
-/// idle seed holds little (a `hex` process's pages, shared copy-on-write with the agent).
-fn default_budget() -> usize {
-    std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(4)
-        .clamp(4, 128)
+/// The most exec seeds a node keeps on its host (`sizes`; Ada's rule, 2026-11-06): as many as fit in the
+/// node's share for seeds, which are the same `hex __oci-seed` process a create seed is
+/// ([`crate::sizes::Sizes::seeds`], at [`crate::sizes::SEED_BYTES`] each), and no more than the calls its
+/// socket runs at once ([`crate::sizes::Sizes::workers`]), since an exec holds its seed only for its call.
+/// The pool starts none and starts one as an exec finds none idle, so it grows to the execs it has seen at
+/// once from the structural minimum, none, and this is only its ceiling.
+pub(crate) fn most(sizes: &crate::sizes::Sizes) -> usize {
+    sizes.seeds.get().min(sizes.workers)
 }
 
 impl SeedPool {
-    /// A pool that re-execs `exe` as `hex __oci-seed`, up to [`default_budget`] seeds.
-    pub fn new(exe: PathBuf) -> Self {
-        Self::with_budget(exe, default_budget())
+    /// A pool that re-execs `exe` as `hex __oci-seed`, up to [`most`] seeds on the node's host.
+    pub fn new(exe: PathBuf, sizes: &crate::sizes::Sizes) -> Self {
+        Self::with_budget(exe, most(sizes))
     }
 
     /// A pool bounded to `budget` seeds.
@@ -83,6 +88,11 @@ impl SeedPool {
         Self {
             exe,
             budget: budget.max(1),
+            answers: Patience::by_profile(
+                ANSWERS,
+                hex_core::seeds::CLONE_SLOWEST,
+                Some(hex_core::seeds::CLONE_SLOWEST_DEBUG),
+            ),
             inner: Mutex::new(Inner::default()),
             free: Condvar::new(),
         }
@@ -131,7 +141,8 @@ impl SeedPool {
     fn acquire(&self) -> Result<Seed, Refusal> {
         let mut inner = self.lock()?;
         loop {
-            if let Some(seed) = inner.idle.pop() {
+            if let Some(mut seed) = inner.idle.pop() {
+                seed.since = Instant::now();
                 return Ok(seed);
             }
             if inner.total < self.budget {
@@ -156,7 +167,7 @@ impl SeedPool {
             inner.waiting = inner.waiting.saturating_add(1);
             let (guard, timed_out) = self
                 .free
-                .wait_timeout(inner, ANSWER_PATIENCE)
+                .wait_timeout(inner, self.answers.deadline().unwrap_or(Duration::MAX))
                 .map_err(|_| Refusal::Broken("the seed pool's lock was poisoned".to_owned()))?;
             inner = guard;
             inner.waiting = inner.waiting.saturating_sub(1);
@@ -171,6 +182,7 @@ impl SeedPool {
 
     /// Returns a healthy seed to the pool and wakes one waiter.
     fn release(&self, seed: Seed) {
+        self.answers.answered(seed.since.elapsed());
         if let Ok(mut inner) = self.lock() {
             inner.idle.push(seed);
             self.free.notify_one();
@@ -210,6 +222,7 @@ impl SeedPool {
         let pidfd = rustix::process::pidfd_open(raw, PidfdFlags::empty())
             .map_err(|e| Refusal::os("opening a seed's pidfd", e))?;
         Ok(Seed {
+            since: Instant::now(),
             socket: ours,
             pidfd,
         })
@@ -282,5 +295,27 @@ fn round_trip(
                 Failed::Request | Failed::Start | Failed::Unable => Err(Trip::Refused(refusal)),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Decision 9 (the lead's failure-bound rule of 2026-11-06, by build profile; AC-T7.1.3): an exec's wait for a
+    /// busy seed to free is seeded from the seeds' record, an exec seed's work being a clone with a few `setns`: the
+    /// `seeds.hang` rows of `bench/competitive/probes/waits_census.md`, its build's. Do: open an exec seed pool and ask
+    /// its wait before any exec. Expect: twice its build's slowest recorded answer
+    /// ([`hex_core::seeds::CLONE_SLOWEST_DEBUG`] in a debug build, [`hex_core::seeds::CLONE_SLOWEST`] in a release
+    /// one), armed at once, no picked 30 s.
+    #[test]
+    fn an_execs_wait_for_a_seed_is_seeded_from_the_clone_record() {
+        let pool = SeedPool::with_budget(PathBuf::from("/nonexistent/hex-for-the-test"), 1);
+        let built = if cfg!(debug_assertions) {
+            hex_core::seeds::CLONE_SLOWEST_DEBUG
+        } else {
+            hex_core::seeds::CLONE_SLOWEST
+        };
+        assert_eq!(pool.answers.deadline(), Some(built * 2));
     }
 }

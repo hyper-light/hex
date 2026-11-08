@@ -2,14 +2,24 @@
 //! kernel this test runs on, privileged or not.
 
 use super::*;
+/// The slowest recorded make of a network namespace by the pool's refill thread, in these tests (the lead's rule
+/// of 2026-11-06 for test patiences).
+/// The tests run debug builds, so their record is the debug one: the `netns.make` row of
+/// `bench/competitive/probes/waits_census.md` run 3's debug arm, 120.814 ms of 47,210 (a release-build record ran these
+/// tests' waits out).
+const MAKE_RECORDED: Option<Duration> = Some(Duration::from_nanos(120_814_130));
+
+/// Longest a test waits for the refill thread's fact: twice [`MAKE_RECORDED`]; unbounded while measuring.
+const PATIENCE: Duration = match MAKE_RECORDED {
+    Some(slowest) => slowest.saturating_mul(2),
+    None => Duration::MAX,
+};
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
 use rustix::thread::{LinkNameSpaceType, move_into_link_name_space};
 
-/// Longest a test waits for a fact it needs: a bound, so a thread that never makes it true fails the
-/// test instead of hanging it.
-const PATIENCE: Duration = Duration::from_secs(30);
+use crate::sizes::{Host, Sizes};
 
 /// The most descriptors a process on this host may raise its limit to (`/proc/sys/fs/nr_open`; the kernel's
 /// Documentation/admin-guide/sysctl/fs.rst), so a limit the files' bound is read under is one this host allows.
@@ -21,13 +31,78 @@ fn nr_open() -> u64 {
         .unwrap()
 }
 
+/// The pools' bounds on fedora, the bench host, as its bench units run the node: 32 hardware threads, about 7.5 GiB
+/// of memory to hold, and a thread limit past the socket's need (`crate::sizes`).
+fn bench() -> Sizes {
+    Sizes::of(
+        Host {
+            memory: 7_500 << 20,
+            parallelism: std::num::NonZeroUsize::new(32).unwrap(),
+            threads: 500_000,
+            descriptors: 524_288,
+        },
+        &hex_core::demand::Peaks::default(),
+    )
+}
+
+/// Ada's rule and the lead's calls, 2026-11-06 (CLAUDE.md §2; goal 6 step 6's installer reads it): the descriptors a
+/// root node holds at its learned pools' bounds on fedora's figures, a first start's. Do: bound the files under no
+/// limit at the bench host's sizes, nothing held beside its bounds. Expect: the node's own 406,027 (342,634 with six
+/// memory pools and the device programs uncounted; 331,086 at the old constants, the socket's connections then among
+/// them): the pools' shares a seventh each with the device programs among them (440 seeds, 1,439 idle namespaces),
+/// and the programs held, 65,536 at their bound, now counted; and every kept namespace there may be holding its files
+/// four each past that, and the create seeds' one pruned mount namespace (`goal6-mntns.md` §12), 679,683 in all.
+#[test]
+fn the_nodes_own_descriptors_on_fedoras_figures() {
+    let unlimited = rustix::process::Rlimit {
+        current: None,
+        maximum: None,
+    };
+    let b = FilesBound::of(&unlimited, root_pools(), 0);
+    assert_eq!(b.own, 406_027, "{:?}", bench());
+    assert_eq!(b.own + b.namespaces * FILES_A_KEPT, 679_683);
+}
+
+/// Goal 6 step 6's HEX-INST-5 (Ada's 2026-11-06 constants rule): what a node needs of its soft descriptor limit is the
+/// node's to say, from its own bounds. Do: ask what a root node and a rootless one need on fedora's figures, nothing
+/// held beside. Expect: the root node the bound's own figures under no limit, its own and four files for each of its
+/// kept namespaces, 679,683 in all; the rootless node its own alone, keeping no namespaces.
+#[test]
+fn a_node_says_the_descriptors_it_needs() {
+    let unlimited = rustix::process::Rlimit {
+        current: None,
+        maximum: None,
+    };
+    let bound = FilesBound::of(&unlimited, root_pools(), 0);
+    let root = FilesBound::needed(root_pools(), 0);
+    assert_eq!(
+        root,
+        Needed {
+            own: bound.own,
+            files: bound.namespaces * FILES_A_KEPT
+        }
+    );
+    assert_eq!(root.total(), 679_683);
+    let rootless = FilesBound::needed(Pools::rootless(bench()), 0);
+    assert_eq!(rootless.files, 0, "a rootless node keeps no namespaces");
+    assert_eq!(rootless.total(), rootless.own);
+}
+
+/// A root node's pools on the bench host.
+fn root_pools() -> Pools {
+    Pools::root(bench())
+}
+
+/// Waits for `fact`, giving the CPU up between looks rather than sleeping a picked period, for at most
+/// [`PATIENCE`], the longest a case waits for a fact: a thread that never makes it true fails the test
+/// instead of hanging it.
 fn wait_for(what: &str, mut fact: impl FnMut() -> bool) {
-    let deadline = Instant::now() + PATIENCE;
-    while Instant::now() < deadline {
+    let deadline = Instant::now().checked_add(PATIENCE);
+    while deadline.is_none_or(|d| Instant::now() < d) {
         if fact() {
             return;
         }
-        std::thread::park_timeout(Duration::from_millis(1));
+        std::thread::yield_now();
     }
     panic!("no {what} within {PATIENCE:?}");
 }
@@ -47,28 +122,85 @@ fn loopback_up_in(ns: &OwnedFd) -> bool {
     .unwrap()
 }
 
+/// The step at which this process's make ahead (`net::make_ahead`) fails, if one does: unshare(2)
+/// takes `CLONE_NEWNET` only from a caller with CAP_SYS_ADMIN in its user namespace, and rtnetlink
+/// takes loopback's RTM_NEWLINK only with CAP_NET_ADMIN (rtnetlink(7)). uid 0 alone gives neither: a
+/// container runtime's default set, a Kubernetes pod's root's (kiln CI's), holds neither.
+fn failing_step() -> Option<(Step, hex_core::netns::Missing)> {
+    use rustix::thread::CapabilitySet;
+    let held = rustix::thread::capabilities(None).unwrap().effective;
+    let (sys_admin, net_admin) = (
+        held.contains(CapabilitySet::SYS_ADMIN),
+        held.contains(CapabilitySet::NET_ADMIN),
+    );
+    let step = if !sys_admin {
+        Step::Unshare
+    } else {
+        Step::Loopback
+    };
+    hex_core::netns::Missing::of(sys_admin, net_admin).map(|missing| (step, missing))
+}
+
+/// HEX-NETNS-14: the agent's stderr line for a failed make names the step and why, errno and text.
+#[test]
+fn a_failed_make_is_said_with_its_step_and_reason() {
+    let reason = Reason::new(
+        Some(1),
+        "unshare failed: Operation not permitted (os error 1)",
+    );
+    assert_eq!(
+        failed_line(Step::Unshare, &reason),
+        "hex node: a network namespace made ahead failed at unshare: errno 1: unshare failed: \
+         Operation not permitted (os error 1)\n"
+    );
+}
+
 /// HEX-NETNS-11: the refill thread hands the pool each namespace it makes, or counts each make that
 /// fails, and a create is served either way. Do: start a pool of 2 and wait for its thread's first
-/// outcome. Expect, where the agent may make network namespaces (as root): the pool fills to its
-/// bound; a take hands over a namespace that isn't this process's, its loopback up, and the thread
-/// makes another in its place. Expect, where it may not: one failed make, counted and nothing made;
-/// then a take answered on the path, counted, which asks the thread for one more, and that make fails
-/// and is counted too.
+/// outcome. Expect, where the agent may make network namespaces (CAP_SYS_ADMIN and CAP_NET_ADMIN):
+/// the pool fills to its bound; a take hands over a namespace that isn't this process's, its loopback
+/// up, and the thread makes another in its place. Expect, where it may not: one failed make, counted
+/// under the step the missing capability fails (HEX-NETNS-12) and nothing made; then a take answered
+/// on the path, counted, which asks the thread for one more, and that make fails and is counted too.
 #[test]
 fn the_refill_thread_fills_the_pool_or_counts_each_make_that_fails() {
-    let pool = Netns::start(2, FilesBound::now(Pools::ROOT)).unwrap();
+    let pool = Netns::start(2, FilesBound::now(root_pools()).unwrap(), bench()).unwrap();
     wait_for("first make", || {
         let c = pool.counts().unwrap();
         c.made_ahead + c.failed > 0
     });
-    if pool.counts().unwrap().failed > 0 {
-        assert_ne!(
-            rustix::process::geteuid().as_raw(),
-            0,
-            "root makes namespaces ahead"
-        );
+    let failing = failing_step();
+    assert_eq!(
+        pool.counts().unwrap().failed > 0,
+        failing.is_some(),
+        "a make fails exactly where CAP_SYS_ADMIN or CAP_NET_ADMIN is missing"
+    );
+    if let Some((step, missing)) = failing {
+        hex_testkit::skip(
+            "netns::tests::the_refill_thread_fills_the_pool_or_counts_each_make_that_fails",
+            &missing.to_string(),
+            "its full pool (made ahead, taken, loopback up) isn't tested here; its failed makes are",
+        )
+        .unwrap();
         let c = pool.counts().unwrap();
         assert_eq!((c.made_ahead, c.failed), (0, 1), "{c:?}");
+        let mut by = hex_core::netns::FailedBy::default();
+        let last = match step {
+            Step::Unshare => {
+                by.unshare = 1;
+                &c.last_failed.unshare
+            }
+            _ => {
+                by.loopback = 1;
+                &c.last_failed.loopback
+            }
+        };
+        assert_eq!(c.failed_by, by, "counted under the step that failed");
+        // HEX-NETNS-14: the kernel's refusal is kept, errno and text: EPERM, a capability missing.
+        let reason = last.as_ref().expect("the step's reason is kept");
+        let eperm = rustix::io::Errno::PERM.raw_os_error();
+        assert_eq!(reason.errno(), Some(eperm), "{reason}");
+        assert!(reason.text().contains("not permitted"), "{reason}");
         assert!(pool.take().unwrap().is_none(), "a dry take");
         assert_eq!(pool.counts().unwrap().made_on_path, 1);
         wait_for("second failed make", || pool.counts().unwrap().failed == 2);
@@ -96,13 +228,13 @@ fn the_refill_thread_fills_the_pool_or_counts_each_make_that_fails() {
 /// pruned namespace among them, one descriptor, and the total the terms' sum.
 #[test]
 fn the_seeds_pruned_namespace_is_counted_in_what_a_node_may_hold() {
-    let root = descriptor_terms(Pools::ROOT);
+    let root = descriptor_terms(root_pools(), 0);
     assert!(
         root.contains(&("the create seeds' pruned mount namespace", 1)),
         "{root:?}"
     );
     let sum = root.iter().map(|(_, n)| *n).fold(0, u64::saturating_add);
-    assert_eq!(descriptors_of_the_node(Pools::ROOT), sum);
+    assert_eq!(descriptors_of_the_node(root_pools(), 0), sum);
 }
 
 /// Goal 5 extended step 3 (AC-e's reader; T-T7.1.4): a create of an owner's box that finds the pool dry is
@@ -115,7 +247,7 @@ fn the_seeds_pruned_namespace_is_counted_in_what_a_node_may_hold() {
 #[test]
 fn a_dry_take_for_an_owners_box_is_made_by_the_node_and_counted() {
     let state = Arc::new(KeptState {
-        idle: Mutex::new(Idle::new(netns_reuse::PER_OWNER, netns_reuse::PER_NODE)),
+        idle: Mutex::new(Idle::new(bench().starts.owner_netns, bench().idle_netns)),
         held: Mutex::new(BTreeMap::new()),
         given_back: AtomicU64::new(0),
         checked: AtomicU64::new(0),
@@ -126,7 +258,7 @@ fn a_dry_take_for_an_owners_box_is_made_by_the_node_and_counted() {
         through_files: AtomicU64::new(0),
         files_failed: AtomicU64::new(0),
         files_bounded: AtomicU64::new(0),
-        files_bound: FilesBound::now(Pools::ROOT),
+        files_bound: FilesBound::now(root_pools()).unwrap(),
         files_held: Arc::new(AtomicU64::new(0)),
         check_ns: AtomicU64::new(0),
     });
@@ -178,6 +310,34 @@ fn a_dry_take_for_an_owners_box_is_made_by_the_node_and_counted() {
     }
 }
 
+/// systemd's default soft limit on a service's descriptors: `DefaultLimitNOFILE=` is `1024:524288`
+/// (systemd-system.conf(5), "DefaultLimitNOFILE=", since v240), the soft half the one a unit gets unless set.
+const SYSTEMD_SOFT_NOFILE: u64 = 1_024;
+
+/// Ada's 2026-11-06 rule (CLAUDE.md §2): the descriptors the agent holds past its bounds are counted, not
+/// stated. Do: hold eight files open and count; count under a soft limit of none. Expect: at least the eight;
+/// the count refused by type, naming the limit, since more are listed than it allows.
+#[test]
+fn the_descriptors_beside_the_bounds_are_counted() {
+    use rustix::process::Rlimit;
+
+    let held: Vec<std::fs::File> = (0..8)
+        .map(|_| std::fs::File::open("/proc/self/stat").unwrap())
+        .collect();
+    let limit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
+    let counted = open_descriptors(&limit).unwrap();
+    assert!(counted >= 8, "{counted} counted with eight held");
+    let none = Rlimit {
+        current: Some(0),
+        maximum: Some(0),
+    };
+    assert!(
+        matches!(open_descriptors(&none), Err(Refusal::Os { why, .. }) if why.contains("soft limit's 0")),
+        "past the soft limit the count is refused by type"
+    );
+    drop(held);
+}
+
 /// Goal 5 extended step 6, the lead's second condition for a kept namespace's files as he restated it
 /// (2026-11-03T23:07Z, 2026-11-04T09:15Z; CLAUDE.md §2, §3): the limit the node was given stays as it is, and what
 /// it leaves past the node's own descriptors at its bounds is how many namespaces may hold their four files. Do: ask
@@ -188,22 +348,29 @@ fn a_dry_take_for_an_owners_box_is_made_by_the_node_and_counted() {
 fn the_files_bound_is_what_the_soft_limit_leaves_past_the_node_four_a_namespace() {
     use rustix::process::Rlimit;
 
+    let beside = open_descriptors(&rustix::process::getrlimit(
+        rustix::process::Resource::Nofile,
+    ))
+    .unwrap();
+
     let at = |soft: Option<u64>| {
         FilesBound::of(
             &Rlimit {
                 current: soft,
                 maximum: soft,
             },
-            Pools::ROOT,
+            root_pools(),
+            beside,
         )
     };
-    let own = at(Some(1_024)).own;
+    let own = at(Some(SYSTEMD_SOFT_NOFILE)).own;
+    let boxes = u64::try_from(hex_runtime::MAX_BOXES).unwrap();
     assert!(
-        own >= 65_536 * 4,
+        own >= boxes * 4,
         "each live box's own descriptors and its kept namespace's are in it: {own}"
     );
     assert_eq!(
-        at(Some(1_024)).namespaces,
+        at(Some(SYSTEMD_SOFT_NOFILE)).namespaces,
         0,
         "systemd's default holds none"
     );
@@ -217,7 +384,7 @@ fn the_files_bound_is_what_the_soft_limit_leaves_past_the_node_four_a_namespace(
     let unlimited = at(None);
     assert_eq!(unlimited.soft, None);
     assert_eq!(unlimited.own, own);
-    assert!(unlimited.namespaces >= 65_536, "{unlimited:?}");
+    assert!(unlimited.namespaces >= boxes, "{unlimited:?}");
     assert_eq!(
         at(Some(u64::MAX)).namespaces,
         unlimited.namespaces,
@@ -235,6 +402,11 @@ fn the_files_bound_is_what_the_soft_limit_leaves_past_the_node_four_a_namespace(
 fn the_files_bound_counts_the_namespaces_both_pools_make_ahead() {
     use rustix::process::Rlimit;
 
+    let beside = open_descriptors(&rustix::process::getrlimit(
+        rustix::process::Resource::Nofile,
+    ))
+    .unwrap();
+
     let at = |netns: usize, ipc_uts: usize| {
         FilesBound::of(
             &Rlimit {
@@ -245,21 +417,26 @@ fn the_files_bound_counts_the_namespaces_both_pools_make_ahead() {
                 netns,
                 ipc_uts,
                 devfs: true,
+                sizes: bench(),
             },
+            beside,
         )
     };
     let none = at(0, 0);
     let n = |count: usize| u64::try_from(count).unwrap();
-    let workers = n(crate::serve::WORKERS);
-    assert_eq!(at(BOUND, 0).own - none.own, n(BOUND) + 2 + workers);
+    let takers = n(bench().seeds.get());
     assert_eq!(
-        at(0, IPC_UTS_BOUND).own - none.own,
-        2 * (n(IPC_UTS_BOUND) + 2) + 2 * workers
+        at(bench().netns, 0).own - none.own,
+        n(bench().netns) + 2 + takers
     );
-    let root = at(BOUND, IPC_UTS_BOUND);
+    assert_eq!(
+        at(0, bench().ipc_uts).own - none.own,
+        2 * (n(bench().ipc_uts) + 2) + 2 * takers
+    );
+    let root = at(bench().netns, bench().ipc_uts);
     assert_eq!(
         root.own - none.own,
-        n(BOUND) + 2 + 2 * (n(IPC_UTS_BOUND) + 2) + 3 * workers
+        n(bench().netns) + 2 + 2 * (n(bench().ipc_uts) + 2) + 3 * takers
     );
     assert_eq!(
         root,
@@ -268,12 +445,15 @@ fn the_files_bound_counts_the_namespaces_both_pools_make_ahead() {
                 current: Some(nr_open()),
                 maximum: Some(nr_open())
             },
-            Pools::ROOT
+            root_pools(),
+            beside
         )
     );
-    // Each pool's bound raised past a root node's: twice its own.
-    let raised = at(2 * BOUND, 2 * IPC_UTS_BOUND);
-    assert_eq!(raised.own - root.own, n(BOUND) + 2 * n(IPC_UTS_BOUND));
+    let raised = at(4_096, 4_096);
+    assert_eq!(
+        raised.own - root.own,
+        (4_096 - n(bench().netns)) + 2 * (4_096 - n(bench().ipc_uts))
+    );
     let soft = raised.own + 10 * FILES_A_KEPT + 3;
     let under = |pools| {
         FilesBound::of(
@@ -282,20 +462,22 @@ fn the_files_bound_counts_the_namespaces_both_pools_make_ahead() {
                 maximum: Some(soft),
             },
             pools,
+            beside,
         )
         .namespaces
     };
     assert_eq!(
         under(Pools {
-            netns: 2 * BOUND,
-            ipc_uts: 2 * IPC_UTS_BOUND,
+            netns: 4_096,
+            ipc_uts: 4_096,
             devfs: true,
+            sizes: bench(),
         }),
         10,
         "what the limit leaves past the pools, four a namespace"
     );
     assert_eq!(
-        under(Pools::ROOT),
+        under(root_pools()),
         10 + (raised.own - root.own + 3) / FILES_A_KEPT
     );
 }
@@ -304,12 +486,17 @@ fn the_files_bound_counts_the_namespaces_both_pools_make_ahead() {
 /// the mounts made ahead are the node's own too, step 3's prepared `/dev` pool and goal 6's prepared proc pool,
 /// with their mask sources. Do: bound the files under one soft limit with the namespace pools at a root node's
 /// bounds, with and without the mounts made ahead. Expect: the node's own grows by both pools held at their bounds
-/// (four keys of eight, one descriptor a `/dev`, two a proc: its pid namespace and its tree), the one maker's peak
+/// (the seeds' bound each, one descriptor a `/dev`, two a proc: its pid namespace and its tree), the one maker's peak
 /// while it makes a proc (six), the two mask sources, and each call's takes of a `/dev` and a proc beside; a
 /// rootless node keeps none.
 #[test]
 fn the_files_bound_counts_the_mounts_made_ahead() {
     use rustix::process::Rlimit;
+
+    let beside = open_descriptors(&rustix::process::getrlimit(
+        rustix::process::Resource::Nofile,
+    ))
+    .unwrap();
 
     let at = |devfs: bool| {
         FilesBound::of(
@@ -319,28 +506,37 @@ fn the_files_bound_counts_the_mounts_made_ahead() {
             },
             Pools {
                 devfs,
-                ..Pools::ROOT
+                ..root_pools()
             },
+            beside,
         )
     };
     let n = |count: usize| u64::try_from(count).unwrap();
-    let held = n(hex_core::devfs::KEYS * hex_core::devfs::PER_KEY);
+    let held = n(bench().seeds.get());
     assert_eq!(
         at(true).own - at(false).own,
-        held + 2 * held + 6 + 2 + 3 * n(crate::serve::WORKERS)
+        held + 2 * held + 6 + 2 + 3 * n(bench().seeds.get())
     );
-    const { assert!(Pools::ROOT.devfs, "a root node keeps the mounts made ahead") };
+    assert!(
+        root_pools().devfs,
+        "a root node keeps the mounts made ahead"
+    );
 }
 
 /// Goal 5 extended step 6, the files' bound past the node's own descriptors (CLAUDE.md §2; the lead, 2026-11-05T11:58Z):
 /// step 3's prepared `/dev` mounts are the node's own too. Do: bound the files under one soft limit with the namespace
 /// pools at a root node's bounds, with and without the mounts made ahead. Expect: the node's own grows by at least the
-/// `/dev` pool held at its bound (four keys of eight, one descriptor a `/dev`), its maker's peak (two: its context and
+/// `/dev` pool held at its bound (the seeds' bound, one descriptor a `/dev`), its maker's peak (two: its context and
 /// its tree) and each call's take of a `/dev`; here the proc pool and mask sources are counted beside them
 /// ([`the_files_bound_counts_the_mounts_made_ahead`]), and the one maker's peak is a proc's.
 #[test]
 fn the_files_bound_counts_the_prepared_dev_mounts() {
     use rustix::process::Rlimit;
+
+    let beside = open_descriptors(&rustix::process::getrlimit(
+        rustix::process::Resource::Nofile,
+    ))
+    .unwrap();
 
     let at = |devfs: bool| {
         FilesBound::of(
@@ -350,12 +546,13 @@ fn the_files_bound_counts_the_prepared_dev_mounts() {
             },
             Pools {
                 devfs,
-                ..Pools::ROOT
+                ..root_pools()
             },
+            beside,
         )
     };
     let n = |count: usize| u64::try_from(count).unwrap();
-    let dev = n(hex_core::devfs::KEYS * hex_core::devfs::PER_KEY) + 2 + n(crate::serve::WORKERS);
+    let dev = n(bench().seeds.get()) + 2 + n(bench().seeds.get());
     let grown = at(true).own - at(false).own;
     assert!(
         grown >= dev,
@@ -385,17 +582,17 @@ fn a_files_slot_is_taken_up_to_the_bound_and_given_back_as_it_drops() {
 
 /// Goal 5 extended step 6, the lead's conditions for the check's own socket (2026-11-03T17:36Z; CLAUDE.md §2): the
 /// netlink socket a check keeps in a namespace is held with it inside the idle namespaces' bound, and closed with
-/// it when the bound puts it out. Do: give one owner `PER_OWNER` + 1 kept namespaces, each with a stand-in for its
+/// it when the bound puts it out. Do: give one owner its bound + 1 kept namespaces, each with a stand-in for its
 /// socket, the write end of a pipe whose read end the test keeps, and drop what the bound puts out, as the checker
 /// does. Expect: one put out, the first given, its pipe at end-of-file; each kept one's still open. A process another
 /// test spawns holds a copy of every descriptor from its fork to its exec, so the end-of-file is waited for, the fact
 /// itself, as each such copy closes.
 #[test]
 fn a_kept_namespaces_socket_is_held_in_its_bound_and_closed_when_the_bound_puts_it_out() {
-    let mut idle = Idle::new(netns_reuse::PER_OWNER, netns_reuse::PER_NODE);
+    let mut idle = Idle::new(bench().starts.owner_netns, bench().idle_netns);
     let mut ends = Vec::new();
     let mut out = Vec::new();
-    for _ in 0..=netns_reuse::PER_OWNER {
+    for _ in 0..=bench().starts.owner_netns {
         let (read, write) = rustix::pipe::pipe_with(
             rustix::pipe::PipeFlags::CLOEXEC | rustix::pipe::PipeFlags::NONBLOCK,
         )

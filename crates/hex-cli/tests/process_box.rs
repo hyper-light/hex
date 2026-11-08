@@ -134,9 +134,14 @@ fn process_boxes_hold_the_contract_and_recover() {
                 .map(|o| o.status.success())
                 .unwrap_or(false);
             if !has_systemd {
-                eprintln!(
-                    "SKIP: own cgroup isn't ours to subdivide ({direct}) and no systemd --user for a private scope"
-                );
+                hex_testkit::skip(
+                    "process_boxes_hold_the_contract_and_recover",
+                    "cgroup v2 delegation",
+                    &format!(
+                        "own cgroup isn't ours to subdivide ({direct}) and no systemd --user for a private scope"
+                    ),
+                )
+                .expect("recording the skip");
                 return;
             }
             let test_bin = std::env::current_exe().expect("test binary path");
@@ -155,7 +160,12 @@ fn process_boxes_hold_the_contract_and_recover() {
             assert!(status.success(), "the delegated re-run failed");
         }
         Err(direct) => {
-            eprintln!("SKIP: no usable cgroup v2 delegation ({direct}); run on a cgroup-v2 host")
+            hex_testkit::skip(
+                "process_boxes_hold_the_contract_and_recover",
+                "cgroup v2 delegation",
+                &format!("none in the delegated scope either ({direct}); run on a cgroup-v2 host"),
+            )
+            .expect("recording the skip");
         }
     }
 }

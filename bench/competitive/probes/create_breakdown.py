@@ -588,7 +588,7 @@ def summarize(run):
     # Each round's create p50: libcrun's and the seam's untraced runs, and the traced run's creates with the
     # tracer recording (every other one) and between them.
     rows = {kind: {r: eb.lifecycle_ms(p, "create") for r, p in eb.rounds(run, kind).items()}
-            for kind in ("libcrun", "seam", "before", "seam_idle", "libcrun_idle", "seam_drained")
+            for kind in ("libcrun", "seam", "before", "seam_idle", "libcrun_idle")
             if kind in ("libcrun", "seam") or eb.rounds(run, kind)}
     rows["traced: recording"], rows["traced: between"] = {}, {}
     for rnd, path in eb.rounds(run, "traced").items():
@@ -665,71 +665,6 @@ def summarize(run):
             groups[g]["rounds"][r] += parts_r[r][k]["p50"] or 0
         groups[g]["p50"] += parts[k]["p50"] or 0
         groups[g]["mean"] += parts[k]["mean"] or 0
-    # The ipc and uts pool on against drained (IPCUTS_AB, goal 5 extended step 4), every figure from the same shuffled
-    # rounds: the whole create, untraced, for what a create gains; and, traced, the init's clone (part 16) with what
-    # follows it up to the network join (part 17, which holds the pair's joins), so what moved shows beside what fell.
-    # Each kind's counts say which it was: a pool on takes, a drained one makes on the path.
-    drained = {}
-    for rnd, path in eb.rounds(run, "traced_drained").items():
-        got, _ = eb.calls(path[:-len(".json")] + ".txt", ops_for(path[:-len(".json")] + ".txt"))
-        drained[rnd] = [c for c in got if "parts" in c]
-    if drained and "seam_drained" in lat:
-        clone = next(k for k, (name, _) in enumerate(spec) if name.startswith("the init's clone into"))
-        steps = next(k for k, (name, _) in enumerate(spec) if name.startswith("the init's first steps"))
-
-        def of(calls, *ks):
-            return eb.dist([sum(c["parts"][k] for k in ks) / 1000 for c in calls])
-
-        def counts(kind):
-            total = {"taken": 0, "made_on_path": 0}
-            for path in eb.rounds(run, kind).values():
-                with open(path) as f:
-                    got = json.load(f)["phases"]["lifecycle"]["ipc_uts"]
-                for key in total:
-                    total[key] += got[key]
-            return total
-
-        common = sorted(r for r in rnds if r in drained)
-        seam_r, dry_r = lat["seam"]["rounds"], lat["seam_drained"]["rounds"]
-        paired = [r for r in sorted(seam_r) if r in dry_r]
-        ab = {"counts": {k: counts(k) for k in ("seam", "seam_drained", "traced", "traced_drained")},
-              "create": {"rounds": {r: ratio(seam_r[r]["p50"], dry_r[r]["p50"]) for r in paired},
-                         "on": lat["seam"]["pooled"], "drained": lat["seam_drained"]["pooled"],
-                         "p50_ratio": ratio(lat["seam"]["pooled"]["p50"], lat["seam_drained"]["pooled"]["p50"]),
-                         "p99_ratio": ratio(lat["seam"]["pooled"]["p99"], lat["seam_drained"]["pooled"]["p99"])}}
-        for name, ks in (("part 16", (clone,)), ("part 17", (steps,)), ("parts 16+17", (clone, steps))):
-            on = of([c for r in common for c in by_round[r]], *ks)
-            off = of([c for r in common for c in drained[r]], *ks)
-            ab[name] = {"rounds": {r: ratio(of(by_round[r], *ks)["p50"], of(drained[r], *ks)["p50"]) for r in common},
-                        "on": on, "drained": off, "p50_ratio": ratio(on["p50"], off["p50"]),
-                        "p99_ratio": ratio(on["p99"], off["p99"])}
-        # The interleaved lifecycles (seam_oci's ipc_uts_pairs): each round's on and drained p50, the median of its
-        # pairs' differences and how many pairs the pool won, for each op, so work moved to another shows there.
-        pairs = {}
-        for rnd, path in eb.rounds(run, "pairs").items():
-            with open(path) as f:
-                pairs[rnd] = json.load(f)["phases"]["ipc_uts_pairs"]
-        ab["pairs"] = pairs
-        s["ipcuts_ab"] = ab
-        lines += ["## The ipc and uts pool on against drained, in the same rounds", "",
-                  f"Counts (taken, made on the path): {ab['counts']}", "",
-                  "| | on p50 (ms) | drained p50 | on over drained, p50 | on p99 | drained p99 | on over drained, p99 | "
-                  "p50 ratio by round |", "|---|---|---|---|---|---|---|---|"]
-        for name in ("create", "part 16", "part 17", "parts 16+17"):
-            v = ab[name]
-            lines.append(f"| {name} | {eb.ms3(v['on']['p50'])} | {eb.ms3(v['drained']['p50'])} | {v['p50_ratio']:.3f} | "
-                         f"{eb.ms3(v['on']['p99'])} | {eb.ms3(v['drained']['p99'])} | {v['p99_ratio']:.3f} | "
-                         + " ".join(f"{x:.3f}" for x in v["rounds"].values()) + " |")
-        lines.append("")
-        if pairs:
-            lines += ["Interleaved lifecycle by lifecycle, by round: median difference in ms, on minus drained (the share of "
-                      "pairs the pool won); then its op's on and drained p50 (ms):", "",
-                      "| round | create | start | exec | delete |", "|---|---|---|---|---|"]
-            def cell(p):
-                return (f"{p['median_difference']:+.4f} ({p['on_faster']:.2f}); {p['on_p50']:.3f} v {p['drained_p50']:.3f}")
-            for rnd, p in sorted(pairs.items()):
-                lines.append(f"| r{rnd} | " + " | ".join(cell(p[op]) for op in ("create", "start", "exec", "delete")) + " |")
-            lines.append("")
     sum_p50 = sum(p["p50"] for p in parts) if whole else None
     per_round = {}
     for r in rnds:
@@ -790,7 +725,8 @@ def summarize(run):
 
     # What decision 5's levers take, by the pooled parts: the record's fsyncs (plan step 2), the shim's spawn and
     # exec (the seed, plan steps 3 and 4), and the cgroup's making (a pool made ahead, plan step 5), each against
-    # the creates between the traced ones; what's left once the first two go; and goal 5's target, a quarter of
+    # the creates between the traced ones; what's left once the first two go; and goal 5's target (req: goal 5's bar,
+    # create p50 at most 0.25x libcrun's; STATUS.md, goal 5), a quarter of
     # libcrun's create p50 in the same run.
     if whole and between["p50"] and libcrun["p50"] and SEED in groups:
         # The seed path (goal 5 plan step 4): what's left for goal 5's added steps, each against the create.
@@ -1045,6 +981,8 @@ def switch(trace, stats, seam_json=None, scope="switch"):
     whole_covered = creates is not None and len(create_ms) == creates
     fallback_counts_match = expected_dry is not None and expected_dry == clone_starts
     mount_evidence = (levels == ["8"] and whole_covered and fallback_counts_match)
+    # The bar, p99 at most 0.5 ms (500 us) at 8 creates in flight, is AC-e's as written (req: goal 5 plan step 2, AC-e;
+    # create_breakdown.md, "The root switch at concurrency").
     switch_le_bar = sp99 is not None and sp99 <= 500
     mounts_le_bar = mp99 is not None and mp99 <= 500
     ok = (n_lost == 0 and dangling == 0 and failed_switches == 0 and seam_error is None

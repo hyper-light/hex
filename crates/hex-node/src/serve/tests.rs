@@ -6,16 +6,37 @@
 use super::*;
 use std::io::{Read, Write as _};
 use std::os::fd::{AsFd, BorrowedFd};
+use std::sync::PoisonError;
+use std::time::Duration;
 
+use hex_api::conformance::PATIENCE;
 use hex_api::sim::SimRuntime;
 use hex_api::{Bounds, BoxInfo, BoxSpec, ClassSpec, Signal as HexSignal, Usage};
 use hex_client::Client;
+use hex_core::patience::Patience;
+use hex_testkit::waits::{EMPTYING, EXEC, until};
 
-/// Longest a test waits for a fact it needs: a bound, so a server that never makes it true fails the
-/// test instead of hanging it.
-const PATIENCE: Duration = Duration::from_secs(30);
+/// Longest a test waits for the server's answer to a call over its socket: twice the slowest recorded answer of the
+/// kinds these tests ask (hello, inspect, netns counts, exec), an exec's (`client.answer.exec`, the census's debug
+/// arm, as the tests run debug builds: hex_testkit::waits::EXEC), so a server that never answers fails the test
+/// instead of hanging it. A program's end takes its own record, the suites' [`PATIENCE`]; each other fact, its own.
+const ANSWERED: Duration = EXEC.saturating_mul(2);
 
-/// Shuts a host's inspect until opened: holds calls in flight on purpose.
+/// The server's ending of a program whose client went away: its kill, its reaping and its count in its box, a box's
+/// emptying's work, which the server's own wait for the programs it ends takes the record of (decision 9's table:
+/// `node.emptying`).
+static ABANDONED: Patience = Patience::seeded("test.serve.abandoned", EMPTYING);
+/// The I/O thread's letting go of a connection that has closed, and its admitting of one that has connected: no
+/// recorded operation makes either, and no census row times them yet, so these wait measuring, for the fact alone, each
+/// answer recorded for the census to come, from the suites run under it.
+static LET_GO: Patience = Patience::measuring("test.serve.let_go");
+static ADMITTED: Patience = Patience::measuring("test.serve.admitted");
+
+/// Shuts a host's inspect until opened: holds calls in flight on purpose. A held call waits for the test to open the
+/// gate, the fact it needs, never for a time (CLAUDE.md §4): a test holds it shut across looks of its own, `quiet`'s
+/// among them, so a gate that opened itself after a patience would answer a call the test is checking is held. Its
+/// bound is the test's end: a test's [`Lab`] opens it as it drops, before the server stops, a failed assertion's
+/// unwinding too, so no stop waits on a held call (CLAUDE.md §2).
 #[derive(Default)]
 struct Gate {
     shut: Mutex<bool>,
@@ -24,15 +45,14 @@ struct Gate {
 
 impl Gate {
     fn set(&self, shut: bool) {
-        *self.shut.lock().unwrap() = shut;
+        *self.shut.lock().unwrap_or_else(PoisonError::into_inner) = shut;
         self.opened.notify_all();
     }
 
     fn pass(&self) {
-        let deadline = Instant::now() + PATIENCE;
         let mut shut = self.shut.lock().unwrap();
-        while *shut && Instant::now() < deadline {
-            shut = self.opened.wait_timeout(shut, PATIENCE).unwrap().0;
+        while *shut {
+            shut = self.opened.wait(shut).unwrap();
         }
     }
 }
@@ -94,18 +114,33 @@ impl Host for TestHost {
     }
 
     fn netns(&self) -> Result<netns::Counts, Refusal> {
-        Ok(COUNTS)
+        Ok(counts())
     }
 }
 
 /// The test host's network namespace counts, each field a different value.
-const COUNTS: netns::Counts = netns::Counts {
-    made_ahead: 5,
-    taken: 4,
-    made_on_path: 3,
-    discarded: 2,
-    failed: 1,
-};
+fn counts() -> netns::Counts {
+    netns::Counts {
+        made_ahead: 5,
+        taken: 4,
+        made_on_path: 3,
+        discarded: 2,
+        failed: 15,
+        failed_by: netns::FailedBy {
+            home: 1,
+            unshare: 2,
+            open: 3,
+            loopback: 4,
+            back: 5,
+        },
+        refused: None,
+        refused_on_path: 6,
+        last_failed: netns::LastFailed {
+            unshare: Some(netns::Reason::new(Some(1), "unshare failed: EPERM")),
+            ..netns::LastFailed::default()
+        },
+    }
+}
 
 struct Lab {
     server: Server,
@@ -170,6 +205,14 @@ impl Lab {
     }
 }
 
+impl Drop for Lab {
+    /// Opens the host's gate before the server stops (this runs before the fields drop), so a call the test left held
+    /// is let through and the server's stop never waits on it.
+    fn drop(&mut self) {
+        self.host.gate.set(false);
+    }
+}
+
 fn limits() -> Limits {
     Limits {
         connections: 4,
@@ -194,15 +237,20 @@ fn send_raw(fd: &OwnedFd, bytes: &[u8], fds: &[BorrowedFd<'_>]) {
     .unwrap();
 }
 
-/// The next message the server sends, waiting at most [`PATIENCE`] for it.
+/// [`ANSWERED`] as poll(2) takes it: its whole seconds and the nanoseconds past them. Its seconds alone would make a
+/// bound under a second zero, a poll that looks once and returns.
+fn answer_wait() -> Timespec {
+    Timespec {
+        tv_sec: i64::try_from(ANSWERED.as_secs()).unwrap_or(i64::MAX),
+        tv_nsec: i64::from(ANSWERED.subsec_nanos()),
+    }
+}
+
+/// The next message the server sends, waiting at most [`ANSWERED`] for it.
 fn answer_of(fd: &OwnedFd) -> (Header, Answer) {
     let mut fds = [PollFd::new(fd, PollFlags::IN)];
-    let ts = Timespec {
-        tv_sec: i64::try_from(PATIENCE.as_secs()).unwrap(),
-        tv_nsec: 0,
-    };
     assert_eq!(
-        rustix::event::poll(&mut fds, Some(&ts)).unwrap(),
+        rustix::event::poll(&mut fds, Some(&answer_wait())).unwrap(),
         1,
         "no answer came"
     );
@@ -240,12 +288,9 @@ fn b() -> BoxId {
     BoxId::new("b").unwrap()
 }
 
-fn wait_until(what: &str, mut fact: impl FnMut() -> bool) {
-    let deadline = Instant::now() + PATIENCE;
-    while !fact() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::park_timeout(Duration::from_millis(5));
-    }
+/// Waits for `fact`, the server's, on `wait`, its own record's patience or measuring (hex_testkit::waits).
+fn wait_until(wait: &Patience, what: &str, fact: impl FnMut() -> bool) {
+    until(wait, what, fact).unwrap();
 }
 
 fn alive(pid: u32) -> bool {
@@ -390,18 +435,18 @@ fn hostile_messages_are_refused_and_the_connection_is_served_after() {
 }
 
 /// HEX-SOCK-10: the node's network namespace counts cross the socket as its host holds them: asked
-/// through `hex-client`, and on a raw connection in version 2, answered in its request's version with
+/// through `hex-client`, and on a raw connection in this side's version, answered in its request's version with
 /// its id.
 #[test]
 fn the_network_namespace_counts_cross_the_socket() {
     let lab = Lab::new(limits());
-    assert_eq!(lab.client().netns().unwrap(), COUNTS);
+    assert_eq!(lab.client().netns().unwrap(), counts());
     let fd = lab.raw();
     send_raw(&fd, &request(4, Call::Netns), &[]);
     let (h, answer) = answer_of(&fd);
     assert_eq!(
         (h.version, h.id, answer),
-        (wire::VERSION, 4, Answer::Netns(COUNTS))
+        (wire::VERSION, 4, Answer::Netns(counts()))
     );
 }
 
@@ -424,7 +469,7 @@ fn connections_past_the_bound_are_refused_naming_it() {
     assert_eq!(a.inspect(&b()).unwrap().id, b());
     assert_eq!(c.list().unwrap().len(), 1);
     drop(a);
-    wait_until("the closed connection to be let go", || {
+    wait_until(&LET_GO, "the closed connection to be let go", || {
         lab.connections() == 1
     });
     let d = lab.client();
@@ -612,9 +657,13 @@ fn a_program_whose_client_goes_away_is_killed_reaped_and_counted() {
     };
     assert!(alive(pid));
     drop(fd);
-    wait_until("the abandoned program to be counted in its box", || {
-        lab.host.abandoned.lock().unwrap().as_slice() == [b()]
-    });
+    wait_until(
+        &ABANDONED,
+        "the abandoned program to be counted in its box",
+        || lab.host.abandoned.lock().unwrap().as_slice() == [b()],
+    );
+    // The count is the last of the server's ending of the program, after its kill and reaping, so counted, it is gone:
+    // the fact is made within that ending, whose record bounds the wait.
     assert!(
         !std::path::Path::new(&format!("/proc/{pid}")).exists(),
         "the program wasn't reaped"
@@ -634,7 +683,9 @@ fn a_released_program_runs_on_after_its_client_goes() {
     let pid = proc.pid();
     drop(proc);
     drop(client);
-    wait_until("the connection to close", || lab.connections() == 0);
+    wait_until(&LET_GO, "the connection to close", || {
+        lab.connections() == 0
+    });
     assert_eq!(lab.watched(), 0);
     assert!(alive(pid), "a released program was ended");
     assert!(lab.host.abandoned.lock().unwrap().is_empty());
@@ -722,11 +773,10 @@ fn a_release_sent_before_a_reset_is_honoured() {
     // An answer left unread at close is what makes the kernel report a reset to the server.
     send_raw(&fd, &request(2, Call::Inspect(b())), &[]);
     let mut readable = [PollFd::new(&fd, PollFlags::IN)];
-    let ts = Timespec {
-        tv_sec: i64::try_from(PATIENCE.as_secs()).unwrap(),
-        tv_nsec: 0,
-    };
-    assert_eq!(rustix::event::poll(&mut readable, Some(&ts)).unwrap(), 1);
+    assert_eq!(
+        rustix::event::poll(&mut readable, Some(&answer_wait())).unwrap(),
+        1
+    );
     {
         // The I/O thread takes the table on every event, so while it is held here the release and
         // the close both land before the server reads either: the reset comes first.
@@ -738,11 +788,176 @@ fn a_release_sent_before_a_reset_is_honoured() {
         );
         drop(fd);
     }
-    wait_until("the connection to close", || lab.connections() == 0);
+    wait_until(&LET_GO, "the connection to close", || {
+        lab.connections() == 0
+    });
     assert_eq!(lab.watched(), 0);
     assert!(alive(pid), "the released program was ended");
     assert!(lab.host.abandoned.lock().unwrap().is_empty());
     let pid = Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
     rustix::process::kill_process(pid, Signal::KILL).unwrap();
     rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::empty()).unwrap();
+}
+
+/// HEX-SOCK-5, the lead's call of 2026-11-06 (AC-T7.1.3): calls in flight are one budget for the node, not a share
+/// for each connection; the node's clients are its own control plane, so none is fair to another. Do: two
+/// connections under a node-wide bound of 2, the host's gate shut, one call on the first and two on the second.
+/// Expect: the third call, whichever connection it is on, refused naming the bound; the two within it answered once
+/// the gate opens.
+#[test]
+fn calls_in_flight_are_bounded_for_the_node_not_each_connection() {
+    let lab = Lab::new(Limits {
+        in_flight: 2,
+        ..limits()
+    });
+    let (one, two) = (lab.raw(), lab.raw());
+    lab.host.gate.set(true);
+    send_raw(&one, &request(1, Call::Inspect(b())), &[]);
+    send_raw(&two, &request(2, Call::Inspect(b())), &[]);
+    send_raw(&two, &request(3, Call::Inspect(b())), &[]);
+    assert_eq!(
+        answer_of(&two).1,
+        Answer::Refused(Refusal::Exhausted {
+            what: IN_FLIGHT,
+            bound: 2
+        })
+    );
+    lab.host.gate.set(false);
+    assert!(matches!(
+        answer_of(&one),
+        (Header { id: 1, .. }, Answer::Info(_))
+    ));
+    assert!(matches!(
+        answer_of(&two),
+        (Header { id: 2, .. }, Answer::Info(_))
+    ));
+}
+
+/// HEX-SOCK-7 and the lead's ruling of 2026-11-06 (AC-T7.1.3): the programs watched are one budget for the node, and
+/// each admitted connection keeps the one its hello promised. Do: two connections under a node-wide budget of 3, an
+/// exec on the first until refused, then one on the second. Expect: the first starts two, its third refused naming
+/// the node's budget, since the second connection's one is kept for it; the second's starts.
+#[test]
+fn programs_watched_are_bounded_for_the_node_and_each_connection_keeps_its_one() {
+    let lab = Lab::new(Limits {
+        programs: 3,
+        ..limits()
+    });
+    let (a, c) = (lab.client(), lab.client());
+    let mut held = Vec::new();
+    for _ in 0..2 {
+        held.push(
+            a.exec(&b(), Program::of(&["sleep", "1000"]), Stdio::null())
+                .unwrap(),
+        );
+    }
+    assert_eq!(
+        a.exec(&b(), Program::of(&["true"]), Stdio::null()).err(),
+        Some(Refusal::Exhausted {
+            what: PROGRAMS,
+            bound: 3
+        })
+    );
+    let mut theirs = c.exec(&b(), Program::of(&["true"]), Stdio::null()).unwrap();
+    assert_eq!(theirs.wait_for(PATIENCE).unwrap(), Some(Exit::Code(0)));
+    for mut p in held {
+        rustix::process::kill_process(
+            Pid::from_raw(i32::try_from(p.pid()).unwrap()).unwrap(),
+            Signal::KILL,
+        )
+        .unwrap();
+        assert_eq!(p.wait_for(PATIENCE).unwrap(), Some(Exit::Signal(9)));
+    }
+}
+
+/// HEX-SOCK-2 and HEX-SOCK-5, the lead's ruling of 2026-11-06: a client of an older version is told only what the
+/// node keeps for each connection, and is never refused within it, however much of the node's budgets other
+/// connections hold. Do: a hello in version 6 and one in version 7 (`wire::BUDGETS`); then, under a node-wide budget of 3 calls held at
+/// the gate, one connection taking all it can before an old client's call. Expect: version 6 told one call and one
+/// program a connection and no budgets; version 7 told the same and the node's budgets beside; the first connection
+/// refused past two calls, naming the node's budget; the old client's call admitted and answered.
+#[test]
+fn an_older_client_within_what_it_was_told_is_never_refused() {
+    let lab = Lab::new(Limits {
+        in_flight: 3,
+        ..limits()
+    });
+    let hello = |version: u16| {
+        let fd = lab.raw();
+        send_raw(
+            &fd,
+            &wire::request(version, 9, &Request::Hello, wire::MAX_MESSAGE).unwrap(),
+            &[],
+        );
+        match answer_of(&fd).1 {
+            Answer::Hello(h) => h,
+            other => panic!("{other:?}"),
+        }
+    };
+    let old = hello(6);
+    assert_eq!((old.limits.in_flight, old.limits.programs), (1, 1));
+    assert_eq!(old.budgets, None);
+    let new = hello(7);
+    assert_eq!((new.limits.in_flight, new.limits.programs), (1, 1));
+    assert_eq!(
+        new.budgets,
+        Some(wire::Budgets {
+            in_flight: 3,
+            programs: limits().programs
+        })
+    );
+    // Each connection holds its one call from its admission, so the hellos' are let go first, and both of these are
+    // admitted before either asks.
+    wait_until(&LET_GO, "the hellos' connections to close", || {
+        lab.connections() == 0
+    });
+    let (greedy, older) = (lab.raw(), lab.raw());
+    wait_until(&ADMITTED, "both connections to be admitted", || {
+        lab.connections() == 2
+    });
+    lab.host.gate.set(true);
+    for id in 1..=3 {
+        send_raw(&greedy, &request(id, Call::Inspect(b())), &[]);
+    }
+    assert_eq!(
+        answer_of(&greedy).1,
+        Answer::Refused(Refusal::Exhausted {
+            what: IN_FLIGHT,
+            bound: 3
+        })
+    );
+    send_raw(
+        &older,
+        &wire::request(3, 7, &Request::Call(Call::Inspect(b())), wire::MAX_MESSAGE).unwrap(),
+        &[],
+    );
+    lab.host.gate.set(false);
+    assert!(matches!(
+        answer_of(&older),
+        (Header { id: 7, .. }, Answer::Info(_))
+    ));
+    for _ in 0..2 {
+        assert!(matches!(answer_of(&greedy).1, Answer::Info(_)));
+    }
+}
+
+/// The init budget and the socket's programs-watched bound are a pidfd per box the node may hold, within its hard
+/// `RLIMIT_NOFILE` read at run time (getrlimit(2)), never a figure copied from systemd's default (Ada's 2026-11-06
+/// constants rule; CLAUDE.md §2). Do: read the node's sizes and its socket's limits on this host. Expect: the
+/// programs bound is the least of the boxes' bound and the hard limit (`/proc/sys/fs/nr_open` where unlimited).
+#[test]
+fn the_programs_bound_is_the_boxes_within_the_hard_descriptor_limit() {
+    let hard = rustix::process::getrlimit(rustix::process::Resource::Nofile)
+        .maximum
+        .or_else(|| {
+            std::fs::read_to_string("/proc/sys/fs/nr_open")
+                .ok()
+                .and_then(|t| t.trim().parse().ok())
+        })
+        .unwrap_or(u64::MAX);
+    let sizes = crate::sizes::Sizes::now().unwrap();
+    assert_eq!(
+        u64::try_from(super::limits(&sizes).programs).unwrap(),
+        hard.min(u64::try_from(hex_runtime::MAX_BOXES).unwrap())
+    );
 }

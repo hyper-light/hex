@@ -423,7 +423,8 @@ fn an_error_another_requests_answer_or_a_torn_message_is_unreadable() {
 }
 
 proptest! {
-    /// Any bytes give a verdict or a refusal, never a panic.
+    /// Any bytes give a verdict or a refusal, never a panic. 512 bytes is a fixture: room for headers, attributes
+    /// and lengths that run past the end, which is what the readers must refuse.
     #[test]
     fn any_answer_or_text_is_read_without_a_panic(
         bytes in proptest::collection::vec(any::<u8>(), 0..512),
@@ -440,4 +441,83 @@ proptest! {
         let _ = sockets(&text, &BTreeMap::new());
         let _ = links(&text);
     }
+}
+
+/// CLAUDE.md §2; Ada's 2026-11-06 rule (no picked constants): a dump's reads are bounded by its bytes, each read
+/// that isn't refused holding at least a message's header, not by a count picked beside them. Do: answer a dump in
+/// 65 reads of one header-only message each (one past the 64 once picked), then `NLMSG_DONE`, through a
+/// socket pair that keeps each read apart. Expect: the answer read whole, every message of it kept.
+#[test]
+fn a_dumps_reads_are_bounded_by_its_bytes() {
+    let (ours, theirs) = rustix::net::socketpair(
+        AddressFamily::UNIX,
+        SocketType::SEQPACKET,
+        SocketFlags::CLOEXEC,
+        None,
+    )
+    .unwrap();
+    let reads = 65;
+    for _ in 0..reads {
+        rustix::net::send(&theirs, &msg(20, 1, &[]), SendFlags::empty()).unwrap();
+    }
+    let done = msg(NLMSG_DONE, 1, &[0, 0, 0, 0]);
+    rustix::net::send(&theirs, &done, SendFlags::empty()).unwrap();
+    let mut scratch = Scratch::default();
+    assert_eq!(
+        ask(
+            &ours,
+            &[0; NLMSG_HDR],
+            &mut scratch,
+            &Patience::measuring("test")
+        ),
+        Ok(())
+    );
+    assert_eq!(scratch.answer.len(), reads * NLMSG_HDR + done.len());
+}
+
+/// The lead's failure bound (2026-11-06): measuring, with no record and no answer seen, a dump is waited for with no
+/// bound, and its answers' times arm it. Do: dump, with nothing recorded, through a socket pair whose other end has
+/// answered each of the five dumps with its end. Expect: the dumps read, and the bound armed.
+#[test]
+fn a_measuring_dump_is_waited_for_and_arms_the_bound() {
+    let (ours, theirs) = rustix::net::socketpair(
+        AddressFamily::UNIX,
+        SocketType::SEQPACKET,
+        SocketFlags::CLOEXEC,
+        None,
+    )
+    .unwrap();
+    for seq in 1..=5 {
+        let done = msg(NLMSG_DONE, seq, &[0, 0, 0, 0]);
+        rustix::net::send(&theirs, &done, SendFlags::empty()).unwrap();
+    }
+    let slowest = Patience::measuring("test");
+    let mut scratch = Scratch::default();
+    assert_eq!(
+        dumps(&ours, &mut scratch, &slowest),
+        Ok(vec![Vec::new(); DUMPS.len()])
+    );
+    assert!(slowest.deadline().is_some());
+}
+
+/// The lead's failure bound (2026-11-06): a read unanswered past twice the slowest answer recorded is refused, the
+/// namespace thrown away, and it is no sample (Karn's point), so the bound stays. Do: seed the wait at 1 ms, then dump
+/// through a socket pair whose other end never answers. Expect: refused as unreadable once 2 ms have passed, not held
+/// for good, and the bound still 2 ms.
+#[test]
+fn a_dump_unanswered_past_its_bound_is_refused_and_no_sample() {
+    let (ours, _theirs) = rustix::net::socketpair(
+        AddressFamily::UNIX,
+        SocketType::SEQPACKET,
+        SocketFlags::CLOEXEC,
+        None,
+    )
+    .unwrap();
+    let slowest = Patience::seeded("test", Duration::from_millis(1));
+    let mut scratch = Scratch::default();
+    assert_eq!(
+        dumps(&ours, &mut scratch, &slowest),
+        Err(Refused::Unreadable)
+    );
+    assert_eq!(slowest.deadline(), Some(Duration::from_millis(2)));
 }

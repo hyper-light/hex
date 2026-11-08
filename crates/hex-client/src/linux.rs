@@ -1,7 +1,7 @@
 //! The client on Linux: one `SOCK_SEQPACKET` connection, a thread that reads every message the agent
 //! sends and hands each answer to the call waiting for it and each program's end to its `Proc`, and
-//! calls that send their request (with an exec's stdio as `SCM_RIGHTS` descriptors) and wait, at most
-//! [`ANSWER_PATIENCE`], for the answer.
+//! calls that send their request (with an exec's stdio as `SCM_RIGHTS` descriptors) and wait for the
+//! answer, at most twice the slowest answer this process has had to a call of its kind ([`ANSWERS`]).
 
 use std::collections::BTreeMap;
 use std::io::{IoSlice, IoSliceMut};
@@ -26,7 +26,89 @@ use rustix::net::{
     SocketType,
 };
 
-use crate::{ANSWER_PATIENCE, MAX_LIST};
+use hex_core::patience::Patience;
+
+use crate::MAX_LIST;
+
+/// How long a call waits for the node agent's answer, and its send for room in the agent's socket, one wait a kind
+/// of call, since a delete waits on its box's emptying and a list on its parts, so a fast inspect's answer says
+/// nothing of theirs: twice the slowest answer this process has had to a call of that kind (decision 9; the lead's
+/// failure-bound rule of 2026-11-06), past which the call is refused by type, the only way left to it. Each kind is
+/// seeded by build profile from its `client.answer.<kind>` rows of `bench/competitive/probes/waits_census.md` runs 1
+/// and 3, in nanoseconds as the census keeps them: a release build from the largest max of the release arms with a
+/// row's 1,000 samples, a debug build from run 3's debug arm's (decision 9).
+static ANSWERS: [Patience; 10] = [
+    Patience::by_profile(
+        "client.answer.hello",
+        Duration::from_nanos(12_326_130),
+        Some(Duration::from_nanos(10_396_345)),
+    ),
+    Patience::by_profile(
+        "client.answer.create",
+        Duration::from_nanos(271_127_436),
+        Some(Duration::from_nanos(220_155_458)),
+    ),
+    Patience::by_profile(
+        "client.answer.start",
+        Duration::from_nanos(21_493_005),
+        Some(Duration::from_nanos(7_610_223)),
+    ),
+    Patience::by_profile(
+        "client.answer.exec",
+        Duration::from_nanos(38_938_041),
+        Some(Duration::from_nanos(38_753_534)),
+    ),
+    Patience::by_profile(
+        "client.answer.signal",
+        Duration::from_nanos(2_996_044),
+        Some(Duration::from_nanos(273_003)),
+    ),
+    Patience::by_profile(
+        "client.answer.inspect",
+        Duration::from_nanos(26_205_047),
+        Some(Duration::from_nanos(22_023_765)),
+    ),
+    Patience::by_profile(
+        "client.answer.usage",
+        Duration::from_nanos(2_089_462),
+        Some(Duration::from_nanos(162_395)),
+    ),
+    Patience::by_profile(
+        "client.answer.list",
+        Duration::from_nanos(446_346_155),
+        Some(Duration::from_nanos(1_439_696_712)),
+    ),
+    Patience::by_profile(
+        "client.answer.delete",
+        Duration::from_nanos(263_636_788),
+        Some(Duration::from_nanos(306_051_519)),
+    ),
+    Patience::by_profile(
+        "client.answer.netns",
+        Duration::from_nanos(4_511_178),
+        Some(Duration::from_nanos(8_048_226)),
+    ),
+];
+
+/// The wait for `request`'s answer, `None` for one that has none (a release).
+fn answers(request: &Request) -> Option<&'static Patience> {
+    let n = match request {
+        Request::Hello => 0,
+        Request::Call(call) => match call {
+            Call::Create(_) => 1,
+            Call::Start(_) => 2,
+            Call::Exec { .. } => 3,
+            Call::Signal { .. } => 4,
+            Call::Inspect(_) => 5,
+            Call::Usage(_) => 6,
+            Call::List => 7,
+            Call::Delete(_) => 8,
+            Call::Netns => 9,
+        },
+        Request::Release => return None,
+    };
+    ANSWERS.get(n)
+}
 
 /// A node agent, reached through its socket.
 pub struct Client {
@@ -238,9 +320,8 @@ impl Client {
             None,
         )
         .map_err(|e| Refusal::os("making a socket", e))?;
-        // Bounds a send, and the connect itself, by the agent's room to take them.
-        rustix::net::sockopt::set_socket_timeout(&fd, Timeout::Send, Some(ANSWER_PATIENCE))
-            .map_err(|e| Refusal::os("bounding a socket's sends", e))?;
+        // A connect to a socket the agent listens on doesn't wait for it to accept (unix(7)); each call's send
+        // is bounded by its kind's learned wait.
         rustix::net::connect(&fd, &addr).map_err(|e| Refusal::Os {
             op: "connecting to the node agent's socket",
             why: format!("{}: {e}", path.display()),
@@ -345,9 +426,16 @@ impl Client {
                 state.programs.remove(&id);
             }
         };
-        let sent = wire::request(self.version, id, request, self.limits.message_bytes)
-            .map_err(|fault| Sent::Refused(fault.into()))
-            .and_then(|bytes| send(&shared.fd, &bytes, &fds));
+        let waits = answers(request);
+        let patience = waits.and_then(Patience::deadline);
+        let asked = Instant::now();
+        let sent = rustix::net::sockopt::set_socket_timeout(&shared.fd, Timeout::Send, patience)
+            .map_err(|e| Sent::Refused(Refusal::os("bounding a socket's sends", e)))
+            .and_then(|()| {
+                wire::request(self.version, id, request, self.limits.message_bytes)
+                    .map_err(|fault| Sent::Refused(fault.into()))
+            })
+            .and_then(|bytes| send(&shared.fd, &bytes, &fds, patience));
         drop(fds);
         match sent {
             Ok(()) => {}
@@ -359,13 +447,25 @@ impl Client {
                 return Err(r);
             }
         }
-        let answer = match rx.recv_timeout(ANSWER_PATIENCE) {
-            Ok(answer) => answer,
+        let got = match patience {
+            Some(wait) => rx.recv_timeout(wait.saturating_sub(asked.elapsed())),
+            None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        };
+        let answer = match got {
+            Ok(answer) => {
+                if let Some(waits) = waits {
+                    waits.answered(asked.elapsed());
+                }
+                answer
+            }
             Err(RecvTimeoutError::Timeout) => {
                 forget(shared);
                 return Err(Refusal::Os {
                     op: "waiting for the node agent's answer",
-                    why: format!("none came in {ANSWER_PATIENCE:?}"),
+                    why: format!(
+                        "none came in {:?}, twice the slowest answer to a call of its kind",
+                        patience.unwrap_or_default()
+                    ),
                 });
             }
             Err(RecvTimeoutError::Disconnected) => {
@@ -409,7 +509,14 @@ enum Sent {
     Refused(Refusal),
 }
 
-fn send(fd: &OwnedFd, bytes: &[u8], fds: &[OwnedFd]) -> Result<(), Sent> {
+/// Sends `bytes` with `fds`, its wait for room bounded by `patience`, the call's learned wait, as the socket's send
+/// timeout says (named in a refusal).
+fn send(
+    fd: &OwnedFd,
+    bytes: &[u8],
+    fds: &[OwnedFd],
+    patience: Option<Duration>,
+) -> Result<(), Sent> {
     let borrowed: Vec<BorrowedFd<'_>> = fds.iter().map(AsFd::as_fd).collect();
     let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(wire::MAX_FDS))];
     let mut control = SendAncillaryBuffer::new(&mut space);
@@ -436,7 +543,11 @@ fn send(fd: &OwnedFd, bytes: &[u8], fds: &[OwnedFd]) -> Result<(), Sent> {
             Err(Errno::AGAIN) => {
                 return Err(Sent::Refused(Refusal::Os {
                     op: "sending to the node agent",
-                    why: format!("no room in its socket for {ANSWER_PATIENCE:?}: it isn't reading"),
+                    why: format!(
+                        "no room in its socket for {:?}, twice the slowest answer to a call of its kind: it \
+                         isn't reading",
+                        patience.unwrap_or_default()
+                    ),
                 }));
             }
             Err(e) => {
@@ -639,7 +750,7 @@ impl Drop for RemoteProc {
                 wire::MAX_MESSAGE,
             )
         {
-            let _ = send(&shared.fd, &bytes, &[]);
+            let _ = send(&shared.fd, &bytes, &[], None);
         }
     }
 }
@@ -744,6 +855,7 @@ mod tests {
                             in_flight: 1,
                             programs: 1,
                         },
+                        budgets: None,
                     }),
                     Request::Call(Call::Inspect(id)) => Answer::Refused(Refusal::NoSuchBox(id)),
                     other => panic!("a version 1 agent was sent {other:?}"),

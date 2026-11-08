@@ -101,8 +101,7 @@ the node's memory (`crates/hex-node/src/turns.rs`, the record store's per-box tu
 id, or a delete, waits for the create under way and then finds the box made or not. So a second create is refused
 as `Exists` only once a box was made, never while a create that will fail is under way, and a delete removes the box
 the create made rather than answer no such box while it's being made, which would leave a box its caller thinks gone.
-The wait ends at 120 s (`TURN_PATIENCE`, a delete's longest wait for a box to empty and its directories to go),
-refused past it by type, and at most `MAX_BOXES` turns are taken at once, the node's box budget: past it a create
+The wait ends at twice the longest a turn has been held (decision 9), refused past it by type, and at most `MAX_BOXES` turns are taken at once, the node's box budget: past it a create
 is refused as `Full`, as step 6's claim refused it, and a delete as `Exhausted`; other boxes'
 creates and deletes never wait. A box whose owner's create takes a slot-named cgroup (goal 5 extended,
 step 6, decision 5) has no cgroup named by its id either, so its turn is all that says it's being made. Step 6 had
@@ -216,7 +215,9 @@ containers' state costing more than 0.015 ms of filesystem work in the create br
   - **Watching each init.** `create` opens the init's pidfd and checks that the process is the agent's child
     with the start time `create` recorded (`/proc/<pid>/stat` fields 4 and 22), so a recycled pid is never
     taken for it.
-  - **The budget.** The pidfds are held within a budget (`INIT_BUDGET`, 65,536 by default; set per node).
+  - **The budget.** The pidfds are held within a budget: a pidfd per box the node may hold (`MAX_BOXES`), within
+    its hard `RLIMIT_NOFILE` read at run time (getrlimit(2); `/proc/sys/fs/nr_open` where it is unlimited). It was `INIT_BUDGET`, 65,536, systemd's figure
+    copied, until Ada's 2026-11-06 constants rule.
     Past it, `create` refuses with `Refusal::Exhausted` naming the budget before anything is made, so no
     init is left unwatched.
   - **Recording exits.** One thread waits on every pidfd through an epoll set. When one turns readable it
@@ -247,8 +248,9 @@ containers' state costing more than 0.015 ms of filesystem work in the create br
     Goal 5's extension (its step 1) took the load off the create, with the node agent as the holder that
     outlives its containers (`oci/programs.rs`; research `01a190c51f137042a9697949c8fe2c7a` f40-f61, notes
     `docs/research/runtime/goal5-cgroup-lock.md`):
-    - **The node holds each policy's program.** Once loaded, it stays open, at most 64 (`MAX_PROGRAMS`);
-      past that the one used longest ago is closed, and it lives on in the cgroups it's attached to (f53). A
+    - **The node holds each policy's program.** Once loaded, it stays open, at most `Sizes::programs`: the least of
+      the node's descriptors and its memory over a loaded program's 5.20 KiB (`PROGRAM_BYTES`, bench/competitive/
+      RESULT.md), never under the host's parallelism (a fixed 64 until Ada's 2026-11-06 constants rule); past that the one used longest ago is closed, and it lives on in the cgroups it's attached to (f53). A
       program is found by Hex's own digest of its instructions (64-bit FNV-1a) and proven by the instructions
       themselves, so nothing need be loaded to find it, as a kernel tag would need. A create attaches the
       program held for its policy and loads only a policy the node holds none for (f60).
@@ -261,7 +263,8 @@ containers' state costing more than 0.015 ms of filesystem work in the create br
       construction, as before. The start asks once which program the root carries (`BPF_PROG_QUERY` takes
       `cgroup_mutex`, f61): one attached with OVERRIDE whose translation is the default's stays, so an agent
       restarted over its boxes leaves it; anything else is replaced in one attach. A rootless node loads
-      nothing, as before. An `oci` box made before its node kept them apart is still found under the box root.
+      nothing, as before. An `oci` box is looked for only there: one under the box root was a node's from before the move, and none such
+      was ever deployed (the lead's ruling of 2026-11-06 under Ada's rule).
     - **The command line looks before it loads.** A process per container, it keeps the hints file in its
       state root (`.device-programs.json`: at most 64 programs, read up to 64 KiB), keyed by the same digest.
       A create opens the program a hint names and attaches it only when the kernel shows a cgroup device
@@ -418,7 +421,13 @@ defines, so an extension an older agent can't apply is refused, never dropped (C
 version added is refused in an earlier version's message, as one that version doesn't define. A list's answer comes
 in as many messages as its boxes need, so a dense node answers it whole. Version 2 (goal 4 plan step 2) adds one
 request and its answer, the node's network namespace counts (decision 4), and writes every version 1 kind as
-version 1 does but for its header's version. A client says hello in version 1, which an agent of any version reads,
+version 1 does but for its header's version. Versions go in landing order with no gaps, so a version implies the
+ones before it (the lead, 2026-11-07): version 3 is native's (`Call::Kill`); version 4 appends a create's owner;
+version 5 appends to the counts' answer why its failed makes failed, by step, and whether the pool was refused and
+for what (decision 4); version 6 appends the latest reason a make failed for at each step; version 7 appends the
+node's budgets to a hello's answer. Each writes every earlier kind as the version before it does but for its
+header's version. A
+client says hello in version 1, which an agent of any version reads,
 learns the highest version the agent speaks from its answer, and writes the rest in the highest both speak; an
 agent answers each request in its version, and refuses what it can't read in version 1, so a client of either
 version reads the refusal.
@@ -863,13 +872,26 @@ host moves as well, so an upper bound), and what a pool of them holds:
 | a pool of 32 | | 24384.0 KiB (23.8 MiB) |
 <!-- /record -->
 
-The pool holds at most **32**: the most creates the bench's busiest phase has in flight at once (concurrency 32), so
-a burst of its whole width finds a namespace each, at most 24 MiB of the kernel's memory on the heavier machine. Its
+The pool's size is **learned from its draws** (Ada's rule, 2026-11-06; decision 5, "Pool sizes learned from
+demand"): it starts at the host's parallelism, 32 on fedora, the most creates the bench's busiest phase has in flight
+at once (concurrency 32), so a burst of its whole width finds a namespace each, at most 24 MiB of the kernel's memory
+on the heavier machine; a take that finds it empty raises it, up to the node's memory share at 762 KiB a namespace and
+the seeds' bound. Until then it held at most 32. Its
 32 descriptors sit beside the agent's one pidfd per box, which an exec's copy of the agent's descriptor table
 (`STATUS.md`, Open) hardly notices. One thread refills whenever the pool is below its bound, at 2,280/s or more;
 and it keeps up with sustained churn: no sustained phase of record found the pool dry (above). A make that fails
 stops the refill until the next take, so a kernel that refuses every make costs that thread one failed make a take,
-never a loop of them (CLAUDE.md §2). Takes go oldest first, so under churn each namespace is handed out within a
+never a loop of them (CLAUDE.md §2). A failed make is counted by the step that failed (opening the thread's own
+namespace, the unshare, opening the one made, its loopback, going back), and the latest reason at each step is
+kept, the errno where the kernel gave one and the error's text cut to 256 bytes, one a step, so what is kept stays
+bounded; the agent also says each failed make on its stderr, at most one a take. So what the kernel refused is
+never only a number (§3). A make takes CAP_SYS_ADMIN, for `unshare(CLONE_NEWNET)` and `setns` (unshare(2), setns(2)), and
+CAP_NET_ADMIN, for loopback's rtnetlink request: run as root with CAP_SYS_ADMIN added and not CAP_NET_ADMIN, the
+make fails at its loopback (fedora unit hex-ci-fix-20261104T083657Z), and uid 0 alone holds neither where a container
+runtime's default set applies, as in a Kubernetes pod (kiln CI's gates pod, CapEff `a80425fb`). A root node checks
+both as it opens (capget(2)); lacking either, it starts no pool whose every make would fail: its pool is refused,
+naming what it lacks, on `hex node`'s stderr and in its counts, and each create makes its container's namespace on
+its path, counted as made there for that reason. Takes go oldest first, so under churn each namespace is handed out within a
 bound's worth of takes of its making, none left in the pool while others come and go. The node counts what its
 containers' namespaces were (made ahead, taken from the pool, made on a create's path), and seam_oci reads the counts
 around each of its phases, in process (`Node::netns`) and over the socket (the wire's version 2), so the sustained
@@ -887,7 +909,12 @@ holds more than its bound, and a namespace made past it is refused and handed ba
 namespace out once, the oldest first, and never takes one back (HEX-NETNS-2); a take from it dry is answered with a
 namespace made on the path, and counted, as is a create it can't serve, which takes nothing (HEX-NETNS-3); after
 shutdown a take is refused, and what it held is handed back and counted as discarded (HEX-NETNS-4); it asks for the
-room below its bound until a make fails, then for nothing until the next take (HEX-NETNS-5). Its counts (made ahead,
+room below its bound until a make fails, then for nothing until the next take (HEX-NETNS-5); each failed make is
+counted by the step that failed (HEX-NETNS-12); and a pool refused for what the node lacks asks for nothing, and
+every take from it is made on the path, counted under the refusal, which the counts name (HEX-NETNS-13, with what a
+node lacks held to `/proc/self/status`'s `CapEff` and `hex node`'s line naming it); and the latest reason a make
+failed for is kept at each step, its text cut to its bound, the kernel's EPERM kept where a capability is missing,
+and said on the agent's stderr (HEX-NETNS-14). Its counts (made ahead,
 taken, made on the path, discarded, failed) are what the bench reads, and they equal the oracle's. A doc-truth test
 holds the core's bound to this decision's. The node's shell (goal 4 plan step 4): a stand-in shim holds no
 descriptor of the namespace made ahead it is handed, reaches it by its path, and finds the agent's descriptor
@@ -897,10 +924,11 @@ refuses the create when the pool refuses (HEX-NETNS-7, against a recording fake)
 their namespaces differ from each other's, an earlier box's and the host's, loopback up, and the agent holds neither
 (HEX-NETNS-8, `oci_box`); a pool of 0 makes a box's namespace on the path, loopback up, counted so (HEX-NETNS-9);
 rootless, the box's namespace is made in its own user namespace, which owns it, nothing taken (HEX-NETNS-10); and
-the refill thread fills its pool to the bound as root, each namespace its own with loopback up, or counts each
-failed make where it may not and serves takes on the path (HEX-NETNS-11). The hex-api conformance suite passes over
-the socket on `oci` boxes that each take a pooled namespace as root, or make their own on the path rootless
-(`node_socket`), as it does in process on boxes from OciSpecs with a private network (`oci_spec_box`).
+the refill thread fills its pool to the bound where it holds CAP_SYS_ADMIN and CAP_NET_ADMIN, each namespace its
+own with loopback up, or counts each failed make where it doesn't (a pod's root, as in kiln CI) and serves takes on
+the path (HEX-NETNS-11). The hex-api conformance suite passes over the socket on `oci` boxes that each take a
+pooled namespace as root, or make their own on the path rootless (`node_socket`), as it does in process on boxes
+from OciSpecs with a private network (`oci_spec_box`).
 
 **Sources.** `docs/research/runtime/netns-pool.md`: the kernel's `net/core/net_namespace.c` at v6.19; namespaces(7),
 setns(2) and user_namespaces(7); containerd v2.2.0's `pkg/netns`; Lambda's networking account (Vogels, 2026); AFaaS
@@ -1198,7 +1226,7 @@ lifecycle without changing what a box may do.
     reaches a thread group whose leader has exited, which `cgroup.kill` misses
     (`bench/competitive/probes/delete_flake.md`).
 - **A cgroup handed from box to box of one owner** (f20, f23, f27-f39, f61-f65, f81, f82). A box whose spec names an
-  owner (`BoxSpec::owner`, append-only on the record and on the wire, whose version 3 carries it) is given the owner's
+  owner (`BoxSpec::owner`, append-only on the record and on the wire, whose version 4 carries it) is given the owner's
   idle cgroup when one reads clean. That takes off its `mkdir`, its `rmdir` and the kworkers' 12 holds (f62). The
   owner's boxes reuse by default; an owner opts out by `reuse: false` (Ada's call, 2026-10-31). The pool is a pure core,
   `hex_core::reuse`, with the node's shell in `crates/hex-node/src/cgroups.rs`.
@@ -1238,9 +1266,10 @@ lifecycle without changing what a box may do.
     any set, or its spec gives no capability sets (it keeps its creator's, all of root's), or it holds CAP_BPF with
     CAP_NET_ADMIN, which load a cgroup device program (`kernel/bpf/syscall.c:2930-2941`, v6.19) and attach it to the
     cgroup it can open. The plan named CAP_SYS_ADMIN; the other two reach the same files.
-  - *Bounds.* Idle cgroups are bounded at `PER_OWNER` 32 for an owner and `PER_NODE` 256 for the node; past either the
-    oldest is evicted. The bench's busiest phase runs 32 boxes at once, and RunD measured the load-tracking walk over
-    cgroups at 7.6% of a node's cycles past 10,000 (f65).
+  - *Bounds.* Idle cgroups are bounded for the node by what its memory holds, and for an owner by a bound learned
+    from its misses, from the host's parallelism up; past either the oldest is evicted ("Pool sizes learned from
+    demand", below; until 2026-11-06 they were `PER_OWNER` 32, the bench's width, and `PER_NODE` 256). RunD measured
+    the load-tracking walk over cgroups at 7.6% of a node's cycles past 10,000 (f65).
   - *Removal.* A thread of the node's removes what the bounds, a failed check or a failed create put out, off create's
     path. It ends anything left in the cgroup, then takes its sub-cgroups apart deepest first; with its queue full, the
     caller removes the cgroup itself.
@@ -1850,6 +1879,101 @@ measures). Each step's work, merged in one tree, each merge's resolutions in its
   files bounded past what both pools of namespaces made ahead hold, and a delete that reads its box's record again
   after forgetting the init, so an exit collected between the two ends the box through its init, not `cgroup.kill`.
 
+#### Pool sizes learned from demand (Ada's rule, 2026-11-06)
+
+Ada, 2026-11-06: "We do not support arbitrary constants. We support learned and data derived values." Latency and
+throughput come before memory: a learned size is never smaller than the demand the node has seen, and a memory cut
+that costs either isn't taken. The lead's conditions the same day: the pools grow ahead of demand with headroom, the
+first burst finds them no smaller than today's constants on the bench host, they shrink only by a rule that can't
+cause a miss under the demand seen, and each counts its cold takes. The pure core is `hex_core::demand`; the bounds are
+`hex_node::sizes`.
+
+- **The start: where the last start peaked, and on a first start the host's parallelism** (kind (a); the lead,
+  2026-11-06). Each learned size's peak is kept in the node's state (`sizes::Keeper`, the record `<state>/peaks`,
+  `demand::Peaks`), so a restart takes no cold miss its last start had learned past. A size starts at its peak, never
+  under `std::thread::available_parallelism` (the process's affinity and its cgroup's `cpu.max`): 32 on fedora, so no
+  pool starts under the constant it replaces (32 per owner, 32 seeds, 32 pairs and namespaces made ahead, 8 made
+  ahead, 4 keys of 8 mounts). The seeds' spare starts at its peak, and at one, the fewest by which a create finds a
+  seed idle rather than waits on a seed's exec, only on a node's first start.
+  - *Kept off the create's path.* A pool's shell counts a rise where its learned size grows; the create then hands a
+    snapshot to the keeper's thread, at most one waiting (one that finds it busy is offered again at the next
+    create), which writes it whole and renames it into place (rename(2)); unsynced, as the runtime directory's
+    records are (decision 1). The node's end writes the last, with its start's takes added to the record's.
+  - *A record that can't be read is a first start*: torn (no end line), foreign, past twice the most this node
+    writes, or unreadable, its reason kept (`Node::peaks_kept`), never a refusal of the start. The record changes
+    append-only: a key a later node wrote is passed over, one an earlier node didn't write reads as none seen.
+- **The growth.** Three rules, each in the core with model-based tests (`demand/tests.rs`):
+  - *A pool made ahead* (ipc/uts pairs, cgroups made ahead for boxes of no owner, mounts a `/dev` or proc key keeps):
+    each take since the pool last held its size is drawn; a take that finds it empty raises the size to the draw plus
+    one for each take found short (`Depth`), so the next draw as deep finds it full with that headroom.
+  - *An owner bound, and the keys a mount pool keeps*: an item the bound put out is remembered as a ghost; a take that
+    then finds its owner (or key) with none raises the bound by one (`Ghosts`), as ARC adapts its target on a ghost hit
+    (Megiddo and Modha, "ARC: A Self-Tuning, Low Overhead Replacement Cache", FAST 2003, §4.3).
+  - *Seeds*: a growing pool adds a slot for each create that finds no seed idle and no slot vacant
+    (`Seeds::growing`), and the spare kept idle beyond the creates waiting is the most seen waiting at once.
+- **No shrinking.** No rule that lowers a size can be shown not to cause a miss under the demand already seen, so none
+  lowers. An owner's ghosts are forgotten oldest first past the bound; that forgets a regret, never a size.
+- **The bounds: a demand-weighted share of the node's memory at each item's recorded cost** (kinds (a) and (b); the
+  lead, 2026-11-06). The node reads `MemAvailable` (Linux `Documentation/filesystems/proc.rst`) and what each cgroup
+  from its own up leaves under `memory.max` (`Documentation/admin-guide/cgroup-v2.rst`), once a process, and takes the
+  least. The six pools that hold memory share it in proportion to their takes times their item's cost, summed over
+  the node's starts and kept with its peaks (`demand::weighted`), evenly on a first start, so together they hold no
+  more than it but for each pool's floor: its peak and the host's parallelism, under which no bound falls (latency
+  first; `sizes` tests it on hosts of any memory):
+  | pool | an item's cost | record |
+  |---|---|---|
+  | idle cgroups (the node's bound) | 1,748,992 B residual + 24.7 KB parked init | `reuse_residual.md`, `create_tail.md` |
+  | cgroups made ahead | 262 KB | `create_tail.md` |
+  | idle network namespaces (the node's bound) | 762 KiB | `netns_pool.md` (Mac Studio, the heavier) |
+  | network namespaces made ahead (decision 4) | 762 KiB | `netns_pool.md` |
+  | create seeds | 2,488 KiB | `seed_path.md` |
+  | ipc/uts pairs | 14.1 KiB | `netns_pool.md` |
+
+  The pools a create takes an item from (network namespaces and ipc/uts pairs made ahead, cgroups made ahead, and the
+  `/dev` and proc mounts, in all and by key) are bounded besides by the seeds' bound: a create holds a seed while it
+  takes them. Fedora as its bench units run the node (about 7.5 GiB, 32 threads) gets, on a first start, 633 idle
+  cgroups, 1,439 idle namespaces and 440 seeds, against 256, 256 and 32, the memory split seven ways with the device
+  programs held (5.20 KiB each, at most one per box the node may hold) among the pools. The removal queue and the checkers' line hold the node's idle
+  bound; procs alive one a parked init.
+- **The socket: node-wide budgets from the platform, none split among connections** (kind (c); the lead,
+  2026-11-06: the node's clients are its own control plane, so no fairness between them is owed). Each is refused by
+  name when spent (`serve::limits`):
+  - calls in flight, on every connection together: at most the socket's workers, the threads the kernel lets the node
+    have (the least of `RLIMIT_NPROC`, getrlimit(2), and `/proc/sys/kernel/threads-max`, proc(5)). Workers start as
+    calls find none idle and are kept, so an admitted call has a worker that can exist. `Sizes::workers` is the one
+    accessor (the seeds' line of waiting creates is set by it).
+  - programs watched, by every connection together: the supervisor's pidfd budget, a pidfd per box the node may
+    hold, within its hard `RLIMIT_NOFILE` read at run time (getrlimit(2); `Sizes::inits`).
+  - connections: the node's hard `RLIMIT_NOFILE` (or `/proc/sys/fs/nr_open` where that is unlimited), one descriptor
+    each; the kernel refuses an accept past what remains (`EMFILE`), and the socket pauses accepting until one closes.
+  Of each budget the node keeps one for every connection it admits (`serve::KEPT`, the fewest by which a connection
+  can do anything): what is in flight and what is kept for the open connections that have none never pass the
+  budget, so a connection is admitted only if its one fits, and past it a connection's calls and programs share what
+  is left. A hello's `wire::Limits` keeps its meaning, each connection's own (the lead's ruling: no field's meaning
+  changes), and tells exactly what is kept, one call and one program, so a client of any version within it is never
+  refused however much other connections hold. That is less than the 64 and 1,024 it told before, which were caps the
+  node no longer keeps; keeping that much for every connection would cap connections at the budgets over it (64 at
+  65,536 pidfds). Wire version 7 appends the node's budgets to a hello (`Hello::budgets`), refused in earlier
+  versions, never sent without them.
+- **Derived from a fact the kernel gives.** The removal's walk of a slot's sub-cgroups is bounded by `cgroup.stat`'s
+  `nr_descendants`, read before it (kind (a)); one made during the walk refuses it, by type, for recovery.
+- **Derived, not learned: the wake mark and the record shards** (kind (b)). The ipc/uts refill is woken once a take
+  leaves at most `size x T / (T + M)` pairs, T the fastest take rate recorded (10,383 a second, `create_serial.md` run
+  20) and M the slowest make (0.035 ms p99, `netns_pool.md`), so what is left outlasts the refill of the rest; it was
+  half the size. `store::SHARDS` stays 64: run 20 measured no shard's wait at concurrency 32, and a record's place is
+  its id's hash over the count, so a count that changed with the host would lose the records a restart must find.
+- **What the bounds cost.** The descriptors counted at these bounds (`FilesBound`'s `own`): the learned pools at their
+  bounds, each create a seed serves holding a take of each, and the programs' pidfds at their budget; the socket's
+  connections are what remains, which the kernel bounds. On fedora's figures at a first start 406,026, the device programs held now
+  among them (342,634 without them, at six memory pools; the old constants gave 331,086, 64 connections then among
+  them); a soft limit past that lets kept namespaces hold their files, four each, 679,682 for every one there may be. A later start's own follows its peaks. A larger `/dev` and proc pool holds more
+  superblocks, each two memcg-aware `list_lru`s a memory offline walks (goal 16's finding); it holds them only for the
+  keys and depth demand reached.
+- **What would falsify it**: a cold take counted (reuse `missed`/`Owner`, netns_reuse `fresh`, `made_on_path`,
+  `AheadCounts::dry`, seeds `waited`, devfs `cold`/`dry`) at a draw the pool had already seen; goal 16's A/B against
+  a186d35 (the old constants) showing the learned tree slower at the bar; an idle cgroup holding more than its
+  recorded cost on a node near its bound; or the pools at their bounds holding more than the memory read.
+
 ### 6. Mount namespaces without copying, where the kernel has it
 
 **The choice.** On Linux 7.0 and later, `create` builds the container's mount namespace with
@@ -1900,8 +2024,9 @@ made in two parts.
   runtime reads at build (`mntns::RECORD`). Once all three ways have a create p50 from one interleaved run on a 7.1+
   bench host of record, the default is the fastest this node can take. Until then it is the record's stated
   prediction, `OpenTree` first by the hold count above. Changing the record changes the default, with nothing else
-  to edit. The record's A/B asks for each way in turn (`HEX_OCI_MNTNS`: `copy`, `empty` or `tree`, read by the bench's
-  node alone; a `hex node` takes its default, with no switch back to an older way). A namespace from its tree asked where the probe doesn't find it is
+  to edit. The record's A/B asks a node it builds for each way in turn (`Node::with_mount_namespace`: `copy`, `empty`
+  or `tree`; seam_oci's `HEX_OCI_MNTNS`, read by the bench's node alone); a `hex node` takes its default and reads no
+  environment for it (Ada's 2026-11-06 rule), with no switch back to an older way. A namespace from its tree asked where the probe doesn't find it is
   refused by type at the first create. Empty asked where the kernel lacks the flag is served by the seed's copy. Each
   create is counted under the way its seed answers it was made (`Node::mount_namespaces_made`), so that fallback
   shows, beside `ClassicReason`'s counts.
@@ -2090,8 +2215,9 @@ move to the delete, off create's path; the delete's cost is measured beside the 
   nothing of the next box until it is claimed: no spec, no rootfs, no network, ipc or uts namespace, and its fresh pid
   and mount namespaces are empty of the box's. A claim whose spec asks for other namespaces than it was made with is
   refused by type: the init is ended and the create clones a fresh one (CLAUDE.md §3).
-- **The default ships on (the lead, 2026-11-05: the bar measures what ships).** `hex_node::INITS_AHEAD` is 8: one per
-  box in flight at the seam bench's concurrency 8. At the bar's concurrency 1, eight never ran dry but for each round's
+- **The default ships on (the lead, 2026-11-05: the bar measures what ships).** `hex_node::INITS_AHEAD` was 8: one per
+  box in flight at the seam bench's concurrency 8; since 2026-11-06 the node learns it from its draws, from the host's
+  parallelism up ("Pool sizes learned from demand", decision 5). At the bar's concurrency 1, eight never ran dry but for each round's
   first create (1 in 10,100: the A/B below). That is about 2.1 MB a node at about 262 KB an init. It is a pool like
   decision 4's network namespaces made ahead, on by default; `Node::with_inits_ahead(0)` keeps none. The socket's node
   and the bench take the default.
@@ -2156,12 +2282,12 @@ proc's `fsconfig` and most of part 19's 22 `openat2`, 13 `open_tree` and 17 `mov
   creates clone fresh.
 - **On 7.x with the proc pool on**, a parked init's proc comes from this, not from the pool. The pool keeps serving
   the creates no parked init is ready for: each create goes one way or the other, never both.
-- **A node setting, on by default for a root node** (the lead's decision, 2026-11-06T01:52Z; it was off until then).
-  `Node::with_parked_procs(false)` turns it off, `hex node --parked-procs on|off` sets it for the socket's node, and the
-  bench's `HEXBENCH_PARKED_PROCS` (1 on, 0 off, unset the node's default) reaches both drivers' nodes. A rootless
-  node parks none (its devfs has no mask sources). Off, nothing changes on either kernel. A node keeps one empty
+- **Always on for a root node** (the lead's decision, 2026-11-06T01:52Z, on by default; it was off until then). Its
+  off path went with Ada's 2026-11-06 rule on legacy paths, the A/B (`parked_procs_ab.md`) having decided it:
+  `Node::with_parked_procs(bool)`, `hex node --parked-procs on|off` and the bench's `HEXBENCH_PARKED_PROCS` are gone.
+  A rootless node parks none (its devfs has no mask sources, so it has no proc maker). A node keeps one empty
   tmpfs for its life (`Devfs::restart`), so a parked proc's masks clone the same one every init's do, whichever pools
-  are on. `hex node` says its setting on stderr as it starts, and on SIGTERM one line of its parked procs' counts
+  are on. `hex node` says on stderr as it starts whether it parks them, and on SIGTERM one line of its parked procs' counts
   (made, hits, misses, dry, capped, alive), exiting 143 with its boxes left as a SIGKILL leaves them.
 - **Decided (the lead, 2026-11-05T17:00Z, on the measurements in `parked_procs_ab.md`).** The proc is made on the
   parking thread, and the setting stays off by default (superseded 2026-11-06: on by default, below).
@@ -2216,6 +2342,64 @@ to 59, not of record):
 **What would falsify it.** A reuse-on create with a parked init that still blocks on `cgroup_mutex` in `create_tail`
 (some other call on its path takes it). Or a claim that costs more at p50 than the clone it saves. Or a parked init's
 memory charge pushing an owner's box past bounds the fresh path keeps.
+
+### 9. Waits learn their deadlines from the answers they wait on (Ada's rule and the lead's, 2026-11-06)
+
+Ada's rule: "We do not support arbitrary constants. We support learned and data derived values." Every bound Hex
+states is of one of four kinds: learned at runtime; derived from a named record (a `bench/` file and its run);
+a platform or specification limit cited at its source; or picked. A picked one is converted where it can be. This
+decision covers the node's waits for an answer whose time it can observe (source notes:
+`docs/research/runtime/learned-waits.md`).
+
+**The rule** (the lead's failure-bound rule, final form of 2026-11-06), one core for every such wait,
+`hex_core::patience::Patience`:
+- **Seed**: before any sample on this node, a wait's bound is twice (`TIMES_SLOWEST`, stated at the code) the
+  slowest answer in that wait's recorded distribution for the host class, from a named record cited at the wait. No
+  calibration read, no unbounded first wait.
+- **Learn**: the bound is twice the larger of the record's slowest and this node's slowest answer, and only rises.
+  A wait that ran out is no sample, nor is a dead or hung seed (Karn's point).
+- **No caller failure where an alternative exists**: a seed past its bound is retired, counted, and the create goes
+  to another seed (when the hung seed is reaped with the box's cgroup still empty, so nothing of the create was
+  made); the network check past its bound throws the namespace away, counted; only where there is no alternative (a
+  record write, a client's call) is the caller refused, by type.
+- **Measuring**: where no record exists yet, the wait says so (`Patience::measuring`) and names the record to come;
+  no value is picked. It is never armed: its answers are only recorded, for the census that seeds it, so no first
+  answer becomes its bound.
+- **By build profile**: a wait's record is its build's (`Patience::by_profile`): a release build is seeded from the
+  waits census's release arms, a debug build, the suites', from its debug arm, and measures until that arm records it,
+  since a debug build's answers are slower and the release record isn't theirs.
+
+RFC 6298's timer was this decision's first draft and calibration reads its second; the lead ruled out both (the
+RFC's floor and constants are TCP's clocks'; a calibration read leaves the first wait unbounded).
+
+| Wait | Was | Now | Seed |
+| --- | --- | --- | --- |
+| a seed's hang bound and the shell's wait for its answer (createpool `ANSWER_PATIENCE`) | 30 s, copied | 2 × max(record, seen) | `seeds::CLONE_SLOWEST`, the `seeds.hang` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 187.044 ms, debug 100.815 ms<!-- /record --> |
+| a create's wait in line for a seed (`seeds`' line) | 1 s, picked | the same | the same record: a create in line waits for a busy seed's answer |
+| a record change's wait for the same box's (`WRITE_PATIENCE`) | 60 s, picked | learned, refused by type past it | the `store.turns` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 15.209 ms, debug 54.401 ms<!-- /record --> |
+| a create or delete's wait for the same box's (`TURN_PATIENCE`) | 120 s, picked | learned, from the holder's take | the `node.turns` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 270.803 ms, debug 305.809 ms<!-- /record --> |
+| a killed box's emptying, its programs' reaping and its init's end (`EMPTY_PATIENCE`, cgroups' `REMOVE_PATIENCE`), and a stopping server's wait for the programs it ended (serve `STOP_PATIENCE`) | 60 s each, picked or copied | learned from each kill to empty | the `node.emptying` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 42.798 ms, debug 127.753 ms<!-- /record --> |
+| a recovery's listing of a directory (`LIST_PATIENCE`) | 60 s, picked | learned per entry | the `node.listing` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 8,268 ns an entry, debug 68,562 ns<!-- /record --> |
+| a list's worker's wait for its client to read a part (serve `READ_PATIENCE`) | 300 s, picked | learned | MEASURING: the `serve.reads` rows are short of 1,000 samples (only the parts that waited) |
+| a client's call's wait for its answer and its send (hex-client `ANSWER_PATIENCE`) | 300 s, picked | learned per call kind | each kind's `client.answer.<kind>` rows, a create's being <!-- record: bench/competitive/probes/waits_census.md -->release 271.127 ms, debug 220.155 ms<!-- /record --> |
+| the network check's settle and dump reads (netcheck `SETTLES`, `ANSWERS`) | the check's local `Slowest` | the shared core; past the bound the namespace is thrown away, counted | the `netcheck.answers` row: <!-- record: bench/competitive/probes/waits_census.md -->release 2.093 ms<!-- /record -->; MEASURING its debug build (the debug arm keeps no namespaces) and the settles (4 samples) |
+
+Each row's record is `bench/competitive/probes/waits_census.md`'s rows of the same wait name, from the waits' own
+timing points (`hex_node::census`): a release build's seed the largest max of the release arms of its runs 1 and 3,
+a debug build's its debug arm's. The exec seeds' wait for a busy seed (`seed.rs`, a picked 30 s) is
+seeded from the clone record as the create seeds' are; and a create no seed came free for (line full, wait ended) is
+refused by type, `OciError::SeedsExhausted` as `Refusal::Exhausted { what: "create seeds", bound }`, counted by the
+seeds' core (`refused_busy`, `refused_waited`), never sent through the shim: one implementation per job (the lead's
+ruling of 2026-11-06 under Ada's rule; it replaced the shim fallback, `ClassicReason::NoSeed`). Seeds grow ahead under
+the pool rule from the persisted learned peak, so a node's next start begins where the last peaked. The shim stays
+for its named consumer alone: a spec a seed can't serve (the classic reasons).
+A parked init that doesn't answer a claim already falls back to a seed's clone: the claim borrows the request, whose
+descriptors stay the runtime's.
+
+**What would falsify it.** A healthy node retiring seeds as hung, or refusing a call or a record write, for an
+answer more than twice the record's slowest and the node's: then the record's distribution is narrower than the
+node's, and the evidence is the answer times around the refusal. The seed record is fedora's; another host class
+starts from it and learns its own, and a slower class's first answers would show the record doesn't carry.
 
 ## Axes that can't reach 4x, and why
 

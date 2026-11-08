@@ -43,7 +43,7 @@ impl Pair {
     /// node made and its clone makes its own.
     pub fn join(&self) -> Result<(), OciError> {
         sys::setns(self.ipc.as_fd(), libc::CLONE_NEWIPC)?;
-        sys::setns(self.uts.as_fd(), libc::CLONE_NEWUTS)
+        sys::setns(self.uts.as_fd(), libc::CLONE_NEWUTS).map_err(OciError::from)
     }
 }
 

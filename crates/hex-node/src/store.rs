@@ -38,6 +38,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use hex_api::{BoxId, Refusal};
+use hex_core::patience::Patience;
 use hex_core::record::BoxRecord;
 
 use crate::turns::{Turn, Turns};
@@ -48,21 +49,21 @@ use crate::turns::{Turn, Turns};
 /// fs/namei.c:4545-4546 for an open that may create, :2873 for an unlink, from :5429), so with every record in
 /// one directory the boxes made and deleted at once queued on it: 0.548 ms a lifecycle waiting to write it and
 /// 0.189 to read it at concurrency 32 on fedora's E-cores (bench/competitive/probes/create_serial.md, run 19).
-/// A stated bound, not a tuning: 64 directories, made as the store opens.
+/// Derived from a record, not learned (Ada's rule, 2026-11-06): over 64 shards those waits were 0.000 ms at the same
+/// concurrency (run 20), a shard's lock no longer measurable among the lifecycle's waits. It can't be learned as
+/// the node starts: where a record lives is its id's hash over this count, so a node restarted on a host of another
+/// parallelism, or recovery after a crash, must find each record where the last node put it, and a count that
+/// changed would need every record moved first (the store's layout, like a wire format, changes append-only).
+/// What would falsify it: a shard's directory measurable in `create_serial.md`'s locks table at the most writers a
+/// node runs at once; the remedy then is a layout change with its migration, not a learned count.
 pub const SHARDS: usize = 64;
 /// The bits of a box id's hash that name its shard, [`SHARDS`] of them.
 const SHARD_MASK: u64 = 0x3f;
 
-/// How long a change to a box's record waits for the change of the same box before it to finish:
-/// that one's write and its fsyncs, which take milliseconds. A minute is far past any real delay, so
-/// missing it is a fault to report (a disk that has stopped answering), not a limit to raise
-/// (CLAUDE.md §4).
-pub const WRITE_PATIENCE: Duration = Duration::from_secs(60);
-
 /// Most boxes whose records are being changed at once: one for each box the node can hold, its box
-/// budget (hex-runtime's `MAX_BOXES`), so the changes of the boxes a node holds never reach it. Past it
+/// budget ([`hex_runtime::MAX_BOXES`]), so the changes of the boxes a node holds never reach it. Past it
 /// a change is refused by type ([`Refusal::Exhausted`]), never kept waiting (CLAUDE.md §2).
-pub const TURNS: usize = 65_536;
+pub const TURNS: usize = hex_runtime::MAX_BOXES;
 
 /// Box records, one file each, named `<id>.json`, in the place each belongs ([`Store`]).
 #[derive(Debug, Clone)]
@@ -125,23 +126,34 @@ impl Store {
                 .and_then(|()| owner_only(&shard))
                 .map_err(|e| Refusal::os("making a shard of the runtime record directory", e))?;
         }
-        Ok(Self {
+        let store = Self {
             disk: disk.to_owned(),
             run: run.to_owned(),
             #[cfg(target_os = "linux")]
             disk_fd: Arc::new(open_directory(disk)?),
             #[cfg(target_os = "linux")]
             run_fd: Arc::new(open_directory(run)?),
+            // A change waits for the change of the same box before it: that one's write and its fsyncs.
+            // How long is learned from the changes made (decision 9), so a disk that has stopped answering is
+            // reported as a fault, refused by type, never waited on for ever (CLAUDE.md §4): a record write has
+            // no other path. Seeded by build profile from the `store.turns` rows of
+            // `bench/competitive/probes/waits_census.md` runs 1 and 3: release, the largest max of the release arms,
+            // 15.209 ms (run 3's owner arm, of 61,721); debug, run 3's debug arm's, 54.401 ms (of 139,118).
             turns: Arc::new(Turns::new(
                 "changing a box's record",
                 "record changes under way",
-                WRITE_PATIENCE,
                 TURNS,
+                Patience::by_profile(
+                    "store.turns",
+                    Duration::from_nanos(15_209_141),
+                    Some(Duration::from_nanos(54_401_152)),
+                ),
             )),
             synced: Arc::default(),
             #[cfg(all(debug_assertions, target_os = "linux"))]
             crash_before_write: Arc::default(),
-        })
+        };
+        Ok(store)
     }
 
     /// Arms this store's one crash point ([`Store::crash_before_write`]): a debug build's node ends its
@@ -153,7 +165,8 @@ impl Store {
     }
 
     /// Box `id`'s turn to change its record: waits for a change of the same box under way, never for
-    /// another box's, and refuses past [`WRITE_PATIENCE`], or past [`TURNS`] boxes changed at once.
+    /// another box's, and refuses past the wait the store's changes taught it, or past [`TURNS`] boxes
+    /// changed at once.
     fn claim(&self, id: &BoxId) -> Result<Turn<'_>, Refusal> {
         self.turns.take(id)
     }
@@ -174,8 +187,7 @@ impl Store {
     }
 
     /// Box `id`'s record files in the two places it may be kept: the runtime directory's, in its shard, then the
-    /// state directory's. A record a node before step 6 left in the runtime directory itself is in neither:
-    /// recovery moves it to its shard first ([`Store::settle`]), so no create or delete reads that directory.
+    /// state directory's.
     fn files(&self, id: &BoxId) -> [PathBuf; 2] {
         [
             record_file(&self.run.join(shard(id)), id),
@@ -183,10 +195,10 @@ impl Store {
         ]
     }
 
-    /// The directories records are found in, each listed whole by recovery: the state directory, the runtime
-    /// directory (a node's before step 6), then each of its shards.
+    /// The directories records are found in, each listed whole by recovery: the state directory, then each of the
+    /// runtime directory's shards.
     fn listed(&self) -> Vec<PathBuf> {
-        let mut dirs = vec![self.disk.clone(), self.run.clone()];
+        let mut dirs = vec![self.disk.clone()];
         dirs.extend((0..=SHARD_MASK).map(|n| self.run.join(format!("{n:02x}"))));
         dirs
     }
@@ -355,10 +367,7 @@ impl Store {
     }
 
     /// Every record the store holds, by box id; an id whose file can't be read is included with its
-    /// reason. A stray temp file (a crash mid-write) is ignored: its rename never completed. A record
-    /// in both places is the runtime directory's: a node before goal 5 extended step 5 kept every
-    /// record in the state directory, and a record whose place is the runtime directory has been
-    /// written there since.
+    /// reason. A stray temp file (a crash mid-write) is ignored: its rename never completed.
     pub fn all(&self) -> Result<BTreeMap<BoxId, Result<BoxRecord, String>>, Refusal> {
         let mut out = BTreeMap::new();
         for dir in self.listed() {
@@ -371,47 +380,6 @@ impl Store {
             }
         }
         Ok(out)
-    }
-
-    /// Moves each record kept outside its place to it, written there in full before the copy left
-    /// is removed, so a crash between leaves the record in both places and the next recovery moves it
-    /// again; how many it moved. Recovery's: a node before goal 5 extended step 5 kept every record in
-    /// the state directory, and an unreadable record is left where it is, for recovery to remove.
-    pub fn settle(&self) -> Result<usize, Refusal> {
-        let mut moved = 0usize;
-        // A node before step 6 kept the runtime directory's records in it, not in its shards: each is moved to
-        // its shard whole, readable or not (recovery removes an unreadable one's box from there), and one its
-        // shard holds already is the shard's, written since.
-        for (id, path) in records_in(&self.run)? {
-            let _turn = self.claim(&id)?;
-            let [to, _] = self.files(&id);
-            let gone = if to.exists() {
-                fs::remove_file(&path)
-            } else {
-                fs::rename(&path, &to)
-            };
-            match gone {
-                Ok(()) => moved = moved.saturating_add(1),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(Refusal::os("moving a record to its shard", e)),
-            }
-        }
-        for (id, path) in records_in(&self.disk)? {
-            let _turn = self.claim(&id)?;
-            let Ok(Ok(record)) = fs::read(&path).map(|bytes| BoxRecord::decode(&bytes)) else {
-                continue;
-            };
-            if record.spec.id != id || must_outlive_host(&record) {
-                continue;
-            }
-            self.write(&record)?;
-            match fs::remove_file(&path) {
-                Ok(()) => moved = moved.saturating_add(1),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(Refusal::os("removing a record moved to its place", e)),
-            }
-        }
-        Ok(moved)
     }
 
     /// Removes the temp files a crash mid-write left in either place, each never renamed into place,
@@ -594,11 +562,11 @@ fn on_tmpfs(_dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::time::Instant;
 
     use super::*;
     use hex_api::{Bounds, BoxSpec, ClassSpec};
     use hex_core::record::Phase;
+    use hex_testkit::waits::{STORE_TURN, until};
 
     fn record(id: &str) -> BoxRecord {
         let spec = BoxSpec {
@@ -737,85 +705,17 @@ mod tests {
         );
     }
 
-    /// Goal 5 extended step 5: a record found in both places, as a node before the step left one in
-    /// the state directory and wrote it again since in its place, is the runtime directory's, to
-    /// [`Store::get`] and [`Store::all`]; [`Store::remove`] takes both copies.
-    #[test]
-    fn a_record_in_both_places_is_the_runtime_directorys_and_goes_from_both() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store_in(dir.path());
-        let old = record("a");
-        fs::write(dir.path().join("state/a.json"), old.encode().unwrap()).unwrap();
-        let mut new = old.clone();
-        new.abandoned = 7;
-        store.put(&new).unwrap();
-        assert_eq!(store.get(&new.spec.id).unwrap(), Some(Ok(new.clone())));
-        assert_eq!(
-            store.all().unwrap().into_iter().collect::<Vec<_>>(),
-            [(new.spec.id.clone(), Ok(new.clone()))]
-        );
-        store.remove(&new.spec.id).unwrap();
-        assert_eq!(
-            store.get(&new.spec.id).unwrap(),
-            None,
-            "neither copy is left"
-        );
-        assert!(names(&dir.path().join("state")).is_empty());
-    }
-
-    /// Goal 5 extended step 5, T-T7.1.2 across the step's upgrade: a node before it kept every record
-    /// in its state directory. Recovery's settle moves each whose place is the runtime directory
-    /// there, and leaves a record that must outlive the host, a file that isn't a record and an
-    /// unreadable one where they are; a second settle moves nothing.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_record_an_older_node_left_in_the_state_directory_is_moved_to_its_place() {
-        let (_tmpfs, disk) = match tmpfs_and_disk() {
-            Ok(pair) => pair,
-            Err(why) => {
-                eprintln!("SKIP: {why}");
-                return;
-            }
-        };
-        let dir = tempfile::tempdir().unwrap();
-        let store = store_in(dir.path());
-        let state = dir.path().join("state");
-        let moving = record("moving");
-        let mut staying = record("staying");
-        staying.dirs = vec![disk.path().join("staying")];
-        for r in [&moving, &staying] {
-            fs::write(
-                state.join(format!("{}.json", r.spec.id)),
-                r.encode().unwrap(),
-            )
-            .unwrap();
-        }
-        fs::write(state.join("broken.json"), b"{ not json").unwrap();
-        fs::create_dir(state.join("bundles")).unwrap();
-
-        assert_eq!(store.settle().unwrap(), 1);
-        assert_eq!(
-            names(&state),
-            ["broken.json", "bundles", "staying.json"],
-            "the durable record, the unreadable one and the bundles stay"
-        );
-        assert_eq!(sharded(&dir.path().join("run")), ["moving.json"]);
-        assert_eq!(store.get(&moving.spec.id).unwrap(), Some(Ok(moving)));
-        assert_eq!(store.get(&staying.spec.id).unwrap(), Some(Ok(staying)));
-        assert_eq!(
-            store.syncs(),
-            Syncs::default(),
-            "the moved record isn't synced"
-        );
-        assert_eq!(store.settle().unwrap(), 0);
-    }
-
     /// Goal 5 plan step 2: writes of two boxes never wait on each other; two of one box do. While one
     /// box's turn is held, as its write holds it across the fsyncs, 31 other boxes' records are written
     /// from 31 threads at once, none of them waiting; a second write of the held box waits, its record
-    /// not written, until the turn is let go, and then is.
+    /// not written, until the turn is let go, and then is. Every wait here is a write's, bounded by twice the
+    /// `store.turns` record (hex_testkit::waits::STORE_TURN, the store's own bound in this build): each other box's
+    /// write is answered within it; and the held box's turn is taken again just before its second write, so the hold
+    /// that write waits on is that write's own wait starting, within the record, never the test's whole first half
+    /// (decision 9: a hold past twice the slowest recorded is a fault the store refuses).
     #[test]
     fn writes_of_two_boxes_never_wait_on_each_other_and_of_one_box_do() {
+        let write = STORE_TURN.saturating_mul(2);
         let dir = tempfile::tempdir().unwrap();
         let store = store_in(dir.path());
         let held = record("held");
@@ -828,21 +728,28 @@ mod tests {
             }
             for _ in 0..31 {
                 let put = written
-                    .recv_timeout(hex_api::conformance::PATIENCE)
+                    .recv_timeout(write)
                     .expect("a write waited on the held box's turn");
                 put.unwrap();
             }
         });
         assert_eq!(store.all().unwrap().len(), 31);
         assert_eq!(store.waited(), 0, "no write of another box waited");
+        drop(turn);
 
+        let turn = store.claim(&held.spec.id).unwrap();
         std::thread::scope(|s| {
             let second = s.spawn(|| store.put(&held));
-            let deadline = Instant::now() + hex_api::conformance::PATIENCE;
-            while store.waited() == 0 && Instant::now() < deadline {
-                std::thread::park_timeout(Duration::from_millis(1));
-            }
-            assert_eq!(store.waited(), 1, "the second write of the held box waits");
+            // The second write's wait starts within its own call: its record bounds it.
+            let waits = Patience::seeded("test.store.second_write_waits", STORE_TURN);
+            until(&waits, "the second write of the held box waiting", || {
+                store.waited() == 1
+            })
+            .unwrap();
+            assert!(
+                !second.is_finished(),
+                "a write waiting on its box's turn ends only once the turn is let go"
+            );
             assert_eq!(
                 store.get(&held.spec.id).unwrap(),
                 None,
@@ -877,7 +784,8 @@ mod tests {
         store.put(&past).unwrap();
     }
 
-    /// Doc-truth (CLAUDE.md §6): the bound on record changes under way is the node's box budget.
+    /// Doc-truth (CLAUDE.md §6): the bound on record changes under way is the node's box budget, the one
+    /// the cgroup root refuses past.
     #[cfg(target_os = "linux")]
     #[test]
     fn the_turns_bound_is_the_box_budget() {
@@ -970,13 +878,12 @@ mod tests {
         let store = store_in(dir.path());
         store.put(&record("a")).unwrap();
         let (state, run) = (dir.path().join("state"), dir.path().join("run"));
-        // One in a shard, one where a node before the shards wrote, one in the state directory.
+        // One in a shard, one in the state directory.
         fs::write(runtime_temp(&run, &BoxId::new("a").unwrap()), b"{ half").unwrap();
-        fs::write(run.join(".c.tmp"), b"{ half").unwrap();
         fs::write(state.join(".b.tmp"), b"").unwrap();
         fs::write(run.join(".notes"), b"hi").unwrap();
         fs::write(state.join(".notes"), b"hi").unwrap();
-        assert_eq!(store.remove_strays().unwrap(), 3);
+        assert_eq!(store.remove_strays().unwrap(), 2);
         assert_eq!(sharded(&run), ["a.json"]);
         assert!(
             names(&run).iter().all(|n| n == ".notes" || n.len() == 2),
@@ -1007,7 +914,8 @@ mod tests {
 
     /// Goal 5 extended step 6: the runtime directory's records are spread over its shards by their box's id, each
     /// where [`runtime_record`] says, none in the directory itself, so the boxes made and deleted at once rarely
-    /// take one directory's lock; got, listed and removed from there. Non-vacuity: 256 ids reach most shards.
+    /// take one directory's lock; got, listed and removed from there. Non-vacuity: 256 ids reach most shards,
+    /// at least [`shards_256_ids_reach`] of them.
     #[test]
     fn records_are_spread_over_the_shards_by_their_ids() {
         let dir = tempfile::tempdir().unwrap();
@@ -1030,9 +938,10 @@ mod tests {
             .iter()
             .filter_map(|id| runtime_record(&run, id).parent().map(Path::to_owned))
             .collect();
+        let least = shards_256_ids_reach();
         assert!(
-            used.len() >= 48,
-            "256 ids took {} of the shards",
+            used.len() >= least,
+            "256 ids took {} of the shards, fewer than {least}",
             used.len()
         );
         assert_eq!(store.all().unwrap().len(), 256);
@@ -1044,44 +953,33 @@ mod tests {
         assert!(sharded(&run).is_empty());
     }
 
-    /// Goal 5 extended step 6, T-T7.1.2 across the shards' upgrade: a node before them kept the runtime
-    /// directory's records in it. Recovery's settle moves each to its shard, readable or not (recovery then
-    /// removes an unreadable one's box from there), and of a record its shard holds already keeps the shard's,
-    /// written since; a second settle moves nothing, and no create or delete reads the directory itself.
+    /// The fewest of the [`SHARDS`] shards 256 ids reach but once in 2^32 sets of ids, were the id hash
+    /// uniform. Each shard is missed by all 256 with chance (63/64)^256, so the missed shards number μ =
+    /// 64·(63/64)^256 ≈ 1.14 on average and the ids reach 64·(1 − (63/64)^256) ≈ 62.9. The misses are
+    /// negatively associated (balls in bins: Dubhashi and Ranjan, "Balls and Bins: A Study in Negative
+    /// Dependence", Random Structures & Algorithms 13(2), 1998, §2), so Chernoff's bound holds for their count:
+    /// P(misses ≥ t) ≤ (e^δ / (1+δ)^(1+δ))^μ with t = (1+δ)μ. This is the least t that bound puts under 2^-32,
+    /// taken from [`SHARDS`]. Derived, not picked: a hash that spreads ids worse than chance fails it.
+    fn shards_256_ids_reach() -> usize {
+        let shards = SHARDS as f64;
+        let mu = shards * ((shards - 1.0) / shards).powi(256);
+        let tail = |t: f64| {
+            let delta = t / mu - 1.0;
+            mu * (delta - (1.0 + delta) * (1.0 + delta).ln())
+        };
+        let misses = (1..SHARDS)
+            .find(|&t| t as f64 > mu && tail(t as f64) <= -32.0 * std::f64::consts::LN_2)
+            .unwrap();
+        SHARDS - misses
+    }
+
+    /// Doc-truth for the bound above (CLAUDE.md §6): do derive it; expect the ids' average reach, about 62.9 of
+    /// 64, and a least reach of 50: 14 shards missed is the first count Chernoff's bound puts under 2^-32.
     #[test]
-    fn a_record_an_older_node_left_in_the_runtime_directory_is_moved_to_its_shard() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store_in(dir.path());
-        let run = dir.path().join("run");
-        let moving = record("moving");
-        fs::write(run.join("moving.json"), moving.encode().unwrap()).unwrap();
-        fs::write(run.join("broken.json"), b"{ not json").unwrap();
-        let mut newer = record("both");
-        newer.abandoned = 3;
-        store.put(&newer).unwrap();
-        fs::write(run.join("both.json"), record("both").encode().unwrap()).unwrap();
-        assert_eq!(store.settle().unwrap(), 3);
-        assert_eq!(
-            sharded(&run),
-            ["both.json", "broken.json", "moving.json"],
-            "each in its shard"
-        );
-        assert!(
-            names(&run).iter().all(|n| n.len() == 2),
-            "{:?}",
-            names(&run)
-        );
-        assert_eq!(store.get(&moving.spec.id).unwrap(), Some(Ok(moving)));
-        assert_eq!(
-            store.get(&newer.spec.id).unwrap(),
-            Some(Ok(newer)),
-            "the shard's copy, written since"
-        );
-        let all = store.all().unwrap();
-        assert!(
-            all[&BoxId::new("broken").unwrap()].is_err(),
-            "still found, as unreadable"
-        );
-        assert_eq!(store.settle().unwrap(), 0);
+    fn the_shards_256_ids_reach_follow_from_the_hash_being_uniform() {
+        let shards = SHARDS as f64;
+        let reach = shards * (1.0 - ((shards - 1.0) / shards).powi(256));
+        assert!((reach - 62.86).abs() < 0.01, "{reach}");
+        assert_eq!(shards_256_ids_reach(), 50);
     }
 }

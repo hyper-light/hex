@@ -11,6 +11,8 @@
 
 use std::os::fd::{BorrowedFd, OwnedFd};
 
+use hex_core::netns::{Reason, Step};
+
 use rustix::fs::{Mode, OFlags};
 use rustix::net::{AddressFamily, RecvFlags, SendFlags, SocketFlags, SocketType};
 use rustix::thread::UnshareFlags;
@@ -35,25 +37,38 @@ const ANSWER_BYTES: usize = 1024;
 
 /// Brings up the loopback interface of the network namespace this process is in.
 pub fn loopback_up() -> Result<(), OciError> {
+    loopback().map_err(|failed| failed.error)
+}
+
+/// [`loopback_up`], refused with the errno where the kernel gave one.
+fn loopback() -> Result<(), MakeFailed> {
+    let failed = MakeFailed::at(Step::Loopback);
     let fd = rustix::net::socket_with(
         AddressFamily::NETLINK,
         SocketType::RAW,
         SocketFlags::CLOEXEC,
         None,
     )
-    .map_err(|e| OciError::os("opening a route netlink socket", e))?;
+    .map_err(|e| failed(Some(e), OciError::os("opening a route netlink socket", e)))?;
     let request = request();
     let sent = rustix::net::send(&fd, &request, SendFlags::empty())
-        .map_err(|e| OciError::os("asking for loopback up", e))?;
+        .map_err(|e| failed(Some(e), OciError::os("asking for loopback up", e)))?;
     if sent != request.len() {
-        return Err(OciError::os(
-            "asking for loopback up",
-            format!("sent {sent} of {} bytes", request.len()),
+        return Err(failed(
+            None,
+            OciError::os(
+                "asking for loopback up",
+                format!("sent {sent} of {} bytes", request.len()),
+            ),
         ));
     }
     let mut answer = [0u8; ANSWER_BYTES];
-    let (got, _) = rustix::net::recv(&fd, &mut answer, RecvFlags::empty())
-        .map_err(|e| OciError::os("reading the answer to loopback up", e))?;
+    let (got, _) = rustix::net::recv(&fd, &mut answer, RecvFlags::empty()).map_err(|e| {
+        failed(
+            Some(e),
+            OciError::os("reading the answer to loopback up", e),
+        )
+    })?;
     acked(answer.get(..got).unwrap_or_default())
 }
 
@@ -61,12 +76,28 @@ pub fn loopback_up() -> Result<(), OciError> {
 /// thread's namespaces are its own, and this is where a thread that makes namespaces ahead goes back
 /// to after each.
 pub fn thread_network() -> Result<OwnedFd, OciError> {
+    open_network(Step::Home).map_err(|failed| failed.error)
+}
+
+/// The making thread's own network namespace, which [`make_ahead`] goes back to: [`thread_network`],
+/// refused as a make's [`Step::Home`].
+pub fn home() -> Result<OwnedFd, MakeFailed> {
+    open_network(Step::Home)
+}
+
+/// The calling thread's network namespace, refused as a make's `step`, with its errno.
+fn open_network(step: Step) -> Result<OwnedFd, MakeFailed> {
     rustix::fs::open(
         "/proc/thread-self/ns/net",
         OFlags::RDONLY | OFlags::CLOEXEC,
         Mode::empty(),
     )
-    .map_err(|e| OciError::os("opening this thread's network namespace", e))
+    .map_err(|e| {
+        MakeFailed::at(step)(
+            Some(e),
+            OciError::os("opening this thread's network namespace", e),
+        )
+    })
 }
 
 /// A fresh network namespace for a container to join (decision 4), made on the calling thread with
@@ -75,14 +106,42 @@ pub fn thread_network() -> Result<OwnedFd, OciError> {
 /// this file descriptor remains open, the namespace will remain alive", namespaces(7)). The thread
 /// goes back to `home`, its own namespace ([`thread_network`]), before this returns, whether or not
 /// the make worked, so it holds none of the namespaces it makes and each ends with the container it
-/// went to. A thread that can't go back is refused as the make is; its next make moves it on.
-pub fn make_ahead(home: BorrowedFd<'_>) -> Result<OwnedFd, OciError> {
-    sys::unshare(UnshareFlags::NEWNET)?;
-    let made = thread_network().and_then(|ns| loopback_up().map(|()| ns));
-    let back = sys::setns(home, libc::CLONE_NEWNET);
+/// went to. A thread that can't go back is refused as the make is; its next make moves it on. A make
+/// refused is refused with the step that failed, the first one where two did.
+pub fn make_ahead(home: BorrowedFd<'_>) -> Result<OwnedFd, MakeFailed> {
+    sys::unshare(UnshareFlags::NEWNET)
+        .map_err(|f| MakeFailed::at(Step::Unshare)(Some(f.errno), f.into()))?;
+    let made = open_network(Step::Open).and_then(|ns| loopback().map(|()| ns));
+    let back = sys::setns(home, libc::CLONE_NEWNET)
+        .map_err(|f| MakeFailed::at(Step::Back)(Some(f.errno), f.into()));
     match (made, back) {
         (Ok(ns), Ok(())) => Ok(ns),
         (Err(e), _) | (Ok(_), Err(e)) => Err(e),
+    }
+}
+
+/// A make ahead refused: the step that failed, the errno where the kernel gave one, and the error.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("making a network namespace ahead failed at {step}: {error}")]
+pub struct MakeFailed {
+    pub step: Step,
+    pub errno: Option<i32>,
+    pub error: OciError,
+}
+
+impl MakeFailed {
+    /// A closure that names `step` as the one that failed, with the errno and error it is given.
+    pub fn at(step: Step) -> impl Fn(Option<rustix::io::Errno>, OciError) -> Self {
+        move |errno, error| Self {
+            step,
+            errno: errno.map(rustix::io::Errno::raw_os_error),
+            error,
+        }
+    }
+
+    /// Why it failed, as the pool keeps it: the errno and the error's text, cut to its bound.
+    pub fn reason(&self) -> Reason {
+        Reason::new(self.errno, &self.error.to_string())
     }
 }
 
@@ -107,13 +166,17 @@ fn request() -> Vec<u8> {
 
 /// Whether the kernel's answer acknowledges the request: an NLMSG_ERROR whose error is 0. A negative
 /// error is the errno that refused it; anything else isn't an answer to it.
-fn acked(answer: &[u8]) -> Result<(), OciError> {
+fn acked(answer: &[u8]) -> Result<(), MakeFailed> {
+    let failed = MakeFailed::at(Step::Loopback);
     let unexpected = || {
-        OciError::os(
-            "bringing loopback up",
-            format!(
-                "the kernel's answer isn't an ack: {:?}",
-                answer.get(..32).unwrap_or(answer)
+        failed(
+            None,
+            OciError::os(
+                "bringing loopback up",
+                format!(
+                    "the kernel's answer isn't an ack: {:?}",
+                    answer.get(..32).unwrap_or(answer)
+                ),
             ),
         )
     };
@@ -129,10 +192,20 @@ fn acked(answer: &[u8]) -> Result<(), OciError> {
         .ok_or_else(unexpected)?;
     match (kind, error) {
         (NLMSG_ERROR, 0) => Ok(()),
-        (NLMSG_ERROR, refused) if refused < 0 => Err(OciError::os(
-            "bringing loopback up",
-            std::io::Error::from_raw_os_error(refused.checked_neg().unwrap_or(i32::MAX)),
-        )),
+        // The kernel's errno, negated; one outside 1..=MAX_ERRNO (4095, include/linux/err.h) is no
+        // errno, and isn't an answer to the request.
+        (NLMSG_ERROR, refused) if refused < 0 => match refused.checked_neg().filter(|n| *n <= 4095)
+        {
+            Some(errno) => Err(MakeFailed {
+                step: Step::Loopback,
+                errno: Some(errno),
+                error: OciError::os(
+                    "bringing loopback up",
+                    std::io::Error::from_raw_os_error(errno),
+                ),
+            }),
+            None => Err(unexpected()),
+        },
         _ => Err(unexpected()),
     }
 }
@@ -191,6 +264,13 @@ mod tests {
         assert!(acked(&answer(NLMSG_ERROR, 0)).is_ok());
         let refused = acked(&answer(NLMSG_ERROR, -libc::EPERM)).unwrap_err();
         assert!(refused.to_string().contains("not permitted"), "{refused}");
+        assert_eq!(
+            (refused.step, refused.errno),
+            (Step::Loopback, Some(libc::EPERM))
+        );
+        // An errno past MAX_ERRNO is no errno: the answer is refused as not an ack, never trusted.
+        let past = acked(&answer(NLMSG_ERROR, -4096)).unwrap_err();
+        assert_eq!(past.errno, None, "{past}");
         for hostile in [
             Vec::new(),
             vec![0; 5],

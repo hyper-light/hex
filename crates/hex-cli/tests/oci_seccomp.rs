@@ -52,7 +52,12 @@ fn oci_seccomp_refuses_a_denied_syscall_and_allows_the_rest() {
             &direct,
         ),
         Err(direct) => {
-            eprintln!("SKIP: no usable cgroup v2 delegation ({direct}); run on a cgroup-v2 host")
+            hex_testkit::skip(
+                "oci_seccomp_refuses_a_denied_syscall_and_allows_the_rest",
+                "cgroup v2 delegation",
+                &format!("none in the delegated scope either ({direct}); run on a cgroup-v2 host"),
+            )
+            .expect("recording the skip");
         }
     }
 }
@@ -75,7 +80,12 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
             "under the deny-mkdir profile the probe should report mkdir blocked + touch allowed (42)"
         ),
         Err(e) if is_userns_refusal(&e) => {
-            eprintln!("SKIP: rootless OCI unavailable here ({e})");
+            hex_testkit::skip(
+                "oci_seccomp_refuses_a_denied_syscall_and_allows_the_rest",
+                "unprivileged user namespaces",
+                &format!("rootless OCI unavailable here ({e})"),
+            )
+            .expect("recording the skip");
             return;
         }
         Err(e) => panic!("the profiled container failed: {e}"),

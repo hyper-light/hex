@@ -37,6 +37,11 @@ use hex_runtime::linux::cgroup::BoxRoot;
 
 const TEST: &str = "a_leaderless_thread_group_is_killed_on_delete";
 
+/// How long a box's cgroup has to empty after cgroup.kill: the oci class's own delete waits this long for it,
+/// `DELETE_PATIENCE` in crates/hex-runtime/src/linux/oci/run.rs (10 s; private there, so named here with its source),
+/// so the test holds the kill to the bound the delete it exercises holds it to (Ada's 2026-11-06 rule).
+const DELETE_PATIENCE: Duration = Duration::from_secs(10);
+
 #[test]
 fn a_leaderless_thread_group_is_killed_on_delete() {
     match prepare_cgroup() {
@@ -99,10 +104,10 @@ fn exercise(own: &Path) {
     );
 
     // The delete path: cgroup.kill, then empty. cgroup.kill alone leaves the leaderless worker alive
-    // (the bug); the fix SIGKILLs it by its thread id. Give it well under the agent's 60 s patience.
+    // (the bug); the fix SIGKILLs it by its thread id. Give it the oci delete's own patience.
     cg.kill().expect("kill the box");
     let emptied = cg
-        .wait_empty(Duration::from_secs(10))
+        .wait_empty(DELETE_PATIENCE)
         .expect("wait for the box to empty");
     let left = survivors(cg.dir());
     // Tear down before asserting, so a run that fails (cgroup.kill left the leaderless worker alive)
@@ -154,7 +159,7 @@ fn spares_outsiders(own: &Path) {
 
     cg.kill().expect("kill the box");
     let emptied = cg
-        .wait_empty(Duration::from_secs(10))
+        .wait_empty(DELETE_PATIENCE)
         .expect("wait for the box to empty");
     // Still running? try_wait is None while the child lives, so the box's kill did not reach it.
     let outsider_alive = matches!(outsider.try_wait(), Ok(None));

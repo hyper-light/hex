@@ -10,7 +10,8 @@
 #   rootfs.ext4 the guest's root: Fedora 44 with the kernel's modules, its PID 1 /sbin/vm7-boot, which mounts
 #               the lab's shares and hands over to vm7_inside.sh; booted with -snapshot, so it stays as built
 #   KERNEL      the kernel's name, version, source and the RPMs' sha256, which vm7_lab.sh prints
-# Rebuilds only what's missing; FORCE=1 rebuilds it all.
+# Rebuilds only what's missing; FORCE=1 rebuilds it all. Its containers are held to vm7_lab.sh's caps (VM_CPUS,
+# BENCH_MEMORY, BENCH_OOM; the OOM score 1000 is the kernel's OOM_SCORE_ADJ_MAX, include/uapi/linux/oom.h).
 # Usage: vm7_build.sh
 set -euo pipefail
 # Its containers carry the run's labels and go with the run, however it ends (containers.sh).

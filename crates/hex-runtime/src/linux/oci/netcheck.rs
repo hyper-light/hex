@@ -41,9 +41,10 @@
 
 use std::collections::BTreeMap;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hex_core::netns_reuse::Refused;
+use hex_core::patience::Patience;
 use rustix::fs::{Mode, OFlags};
 use rustix::net::{AddressFamily, RecvFlags, SendFlags, SocketFlags, SocketType};
 
@@ -54,8 +55,9 @@ use crate::linux::oci::{OciError, net, sys};
 const MAX_PROC_FILE: usize = 64 << 10;
 /// Most bytes one dump may answer with, all its messages together: a fresh namespace's are under 2 KiB.
 const MAX_DUMP_BYTES: usize = 256 << 10;
-/// Most reads one dump may take before it ends.
-const MAX_DUMP_READS: usize = 64;
+/// Most reads one dump may take before it ends: a read that isn't refused holds a message's header at least
+/// ([`ask`] refuses less), so past [`MAX_DUMP_BYTES`] over a header's bytes the answer is past its bound anyway.
+const MAX_DUMP_READS: usize = MAX_DUMP_BYTES / NLMSG_HDR;
 /// Room for one read of a dump's answer: what the kernel allocates each of the dump's answers at, so the less the
 /// better, but more than `NLMSG_GOODSIZE`, or an answer could be cut. A socket's dumps are answered in buffers of
 /// its largest read so far, capped at 32 KiB (Linux v6.19 net/netlink/af_netlink.c:1940-1943, :2279-2290), each
@@ -65,17 +67,30 @@ const MAX_DUMP_READS: usize = 64;
 /// clearing them (`bench/competitive/probes/create_serial.md`, run 15). 8 KiB is over `NLMSG_GOODSIZE` at any page
 /// size, and a fresh namespace's answers are under 2 KiB.
 const READ_BYTES: usize = 8 << 10;
-/// Most one read of a dump's answer waits. A bound, not a tuning: the kernel builds a dump's answer as it's
-/// read, so a read waits on nothing but the reading.
-const READ_WAIT: Duration = Duration::from_secs(1);
-/// How many times a fresh namespace's dumps are read, each after the kernel's next notice of an IPv6
-/// address or [`SETTLE_WAIT`], until its loopback's IPv6 address is no longer tentative. `::1` is added
-/// tentative (net/ipv6/addrconf.c:1148-1149) and its DAD work is queued (:4173), which clears that once it
-/// gets RTNL (:4194, :4107-4121), then puts in its host route (:6283) and tells `RTNLGRP_IPV6_IFADDR` (:4320,
-/// :5621). So how long it takes is how long the host's RTNL is held by others: a bound of 1 s in all, not a
-/// tuning.
-const SETTLE_TRIES: u32 = 8;
-const SETTLE_WAIT: Duration = Duration::from_millis(125);
+/// How long a fresh namespace's loopback IPv6 address takes to settle, learned in this process (decision 9;
+/// [`Patience`]). `::1` is added tentative (net/ipv6/addrconf.c:1148-1149) and its DAD work is queued (:4173), which
+/// clears that once it gets RTNL (:4194, :4107-4121), then puts in its host route (:6283) and tells
+/// `RTNLGRP_IPV6_IFADDR` (:4320, :5621). So how long it takes is how long the host's RTNL is held by others: the
+/// host's, so the process's to record, not one checker's. MEASURING: no record of the settle's distribution yet
+/// (`bench/competitive/probes/input_census.md` records the dumps' sizes, not their times); the record to come is
+/// `bench/competitive/probes/waits_census.md`'s `netcheck.settles` row. Until then it is unarmed until the first
+/// settle this process sees.
+static SETTLES: Patience = Patience::measuring("netcheck.settles");
+/// How long one read of a dump's answer takes, learned in this process ([`Patience`]). Seeded in a release build from
+/// the `netcheck.answers` row of `bench/competitive/probes/waits_census.md` run 3 (its owner arm, 2.093 ms of
+/// 160,192); a debug build has no record of its own yet (the census's debug arm keeps no namespaces): measuring.
+static ANSWERS: Patience =
+    Patience::by_profile("netcheck.answers", Duration::from_nanos(2_093_150), None);
+
+/// `bound` as `SO_RCVTIMEO` takes it: in whole microseconds, a `struct timeval`, rounded up, since one of zero
+/// waits for ever (socket(7)); `None`, no bound, waits for ever.
+fn receive_wait(bound: Option<Duration>) -> Option<Duration> {
+    let micros = bound?.as_nanos().div_ceil(1_000).max(1);
+    Some(Duration::from_micros(
+        u64::try_from(micros).unwrap_or(u64::MAX),
+    ))
+}
+
 /// `IFA_F_TENTATIVE` (include/uapi/linux/if_addr.h), in an `ifaddrmsg`'s `ifa_flags`, its third byte.
 const IFA_F_TENTATIVE: u8 = 0x40;
 /// `RTMGRP_IPV6_IFADDR` (include/uapi/linux/rtnetlink.h): the group of `RTNLGRP_IPV6_IFADDR`'s notices.
@@ -198,15 +213,15 @@ impl Fresh {
     /// `proc_net` its `/proc/thread-self/net` ([`ProcNet`]): the namespace is made, entered, read and closed, and
     /// the thread goes back home whether or not the reads worked.
     pub fn read(home: BorrowedFd<'_>, proc_net: &ProcNet) -> Result<Self, OciError> {
-        let ns = net::make_ahead(home)?;
-        sys::setns(ns.as_fd(), libc::CLONE_NEWNET)?;
+        let ns = net::make_ahead(home).map_err(|f| f.error)?;
+        sys::setns(ns.as_fd(), libc::CLONE_NEWNET).map_err(OciError::from)?;
         let mut scratch = Scratch::default();
         let read = proc_net
             .file("protocols", &mut scratch.text)
             .and_then(|text| in_use(text.ok_or(Refused::Unreadable)?))
             .map_err(|why| OciError::os("reading a fresh network namespace", why.name().to_owned()))
             .and_then(|protocols| settled(&mut scratch).map(|dumps| Self { protocols, dumps }));
-        let back = sys::setns(home, libc::CLONE_NEWNET);
+        let back = sys::setns(home, libc::CLONE_NEWNET).map_err(OciError::from);
         match (read, back) {
             (Ok(fresh), Ok(())) => Ok(fresh),
             (Err(e), _) | (Ok(_), Err(e)) => Err(e),
@@ -214,9 +229,10 @@ impl Fresh {
     }
 }
 
-/// The dumps of the namespace the calling thread is in, once no IPv6 address in it is tentative: read at
-/// most [`SETTLE_TRIES`] times, each after the namespace's next IPv6 address notice or [`SETTLE_WAIT`],
-/// whichever comes first. The socket the notices come to is bound before the first read, so none is missed.
+/// The dumps of the namespace the calling thread is in, once no IPv6 address in it is tentative: read again at
+/// each of the namespace's IPv6 address notices, until [`SETTLES`]'s bound, unbounded while it is measuring. The
+/// socket the notices come to is bound before the first read, so none is missed. Each settle seen is recorded; one
+/// not seen within the bound is refused, no sample (Karn's point).
 fn settled(scratch: &mut Scratch) -> Result<Vec<Vec<Vec<u8>>>, OciError> {
     const WAITING: &str = "waiting for a fresh network namespace's IPv6 address notices";
     let notices = rustix::net::socket_with(
@@ -224,12 +240,6 @@ fn settled(scratch: &mut Scratch) -> Result<Vec<Vec<Vec<u8>>>, OciError> {
         SocketType::RAW,
         SocketFlags::CLOEXEC,
         None,
-    )
-    .map_err(|e| OciError::os(WAITING, e))?;
-    rustix::net::sockopt::set_socket_timeout(
-        &notices,
-        rustix::net::sockopt::Timeout::Recv,
-        Some(SETTLE_WAIT),
     )
     .map_err(|e| OciError::os(WAITING, e))?;
     rustix::net::bind(
@@ -240,23 +250,39 @@ fn settled(scratch: &mut Scratch) -> Result<Vec<Vec<Vec<u8>>>, OciError> {
     let mut notice = vec![0u8; READ_BYTES];
     let socket = dump_socket()
         .map_err(|why| OciError::os("reading a fresh network namespace", why.name().to_owned()))?;
-    for _ in 0..SETTLE_TRIES {
-        let seen = dumps(&socket, scratch).map_err(|why| {
+    let began = Instant::now();
+    let bound = SETTLES.deadline();
+    // Ends at the bound: each pass waits on a notice for what is left of it, or ends. Measuring, with no bound, it
+    // waits on notices until the address settles.
+    loop {
+        let seen = dumps(&socket, scratch, &ANSWERS).map_err(|why| {
             OciError::os("reading a fresh network namespace", why.name().to_owned())
         })?;
         if !tentative(&seen) {
+            SETTLES.answered(began.elapsed());
             return Ok(seen);
         }
+        let left = bound.map(|b| b.saturating_sub(began.elapsed()));
+        if let Some(bound) = bound
+            && left.is_some_and(|l| l.is_zero())
+        {
+            // No sample (Karn's point): the namespace is refused, and the checker reads another.
+            return Err(OciError::Broken(format!(
+                "a fresh network namespace's loopback IPv6 address was still tentative after {bound:?}, \
+                 twice the slowest settle recorded"
+            )));
+        }
+        rustix::net::sockopt::set_socket_timeout(
+            &notices,
+            rustix::net::sockopt::Timeout::Recv,
+            receive_wait(left),
+        )
+        .map_err(|e| OciError::os(WAITING, e))?;
         match rustix::net::recv(&notices, &mut notice, RecvFlags::empty()) {
-            Ok(_) | Err(rustix::io::Errno::AGAIN) => {}
+            Ok(_) | Err(rustix::io::Errno::AGAIN | rustix::io::Errno::INTR) => {}
             Err(e) => return Err(OciError::os(WAITING, e)),
         }
     }
-    Err(OciError::Broken(format!(
-        "a fresh network namespace's loopback IPv6 address was still tentative after {SETTLE_TRIES} reads, \
-         each after a notice or {} ms",
-        SETTLE_WAIT.as_millis()
-    )))
 }
 
 /// Whether an address in `dumps` is tentative: each normalized address message is its type (2 bytes), then
@@ -462,7 +488,7 @@ fn look(
 
 /// Whether the namespace's dumps, through `socket`, are a fresh namespace's.
 fn same_dumps(socket: &OwnedFd, fresh: &Fresh, scratch: &mut Scratch) -> Result<(), Refused> {
-    let seen = dumps(socket, scratch)?;
+    let seen = dumps(socket, scratch, &ANSWERS)?;
     for ((d, have), want) in DUMPS.iter().zip(&seen).zip(&fresh.dumps) {
         if have != want {
             return Err(d.refused);
@@ -638,8 +664,8 @@ fn time_wait(sockstat: &str) -> Result<(), Refused> {
     Ok(())
 }
 
-/// `/proc/net/dev`'s word: loopback, and no other link. Its two first lines are headers; each other names a
-/// link before its colon.
+/// `/proc/net/dev`'s word: loopback, and no other link. Its two first lines are headers (`dev_seq_show`'s
+/// `SEQ_START_TOKEN` text, Linux v6.19 net/core/net-procfs.c:74-79); each other names a link before its colon.
 fn links(dev: &str) -> Result<(), Refused> {
     let mut lo = false;
     for line in dev.lines().skip(2) {
@@ -654,11 +680,26 @@ fn links(dev: &str) -> Result<(), Refused> {
 }
 
 /// The five dumps of `socket`'s namespace, the one it was made in, each normalized and sorted, read through
-/// `scratch`.
-fn dumps(socket: &OwnedFd, scratch: &mut Scratch) -> Result<Vec<Vec<Vec<u8>>>, Refused> {
+/// `scratch`, each read waiting at most `answers`' bound ([`Patience`]), unbounded while it is measuring.
+fn dumps(
+    socket: &OwnedFd,
+    scratch: &mut Scratch,
+    answers: &Patience,
+) -> Result<Vec<Vec<Vec<u8>>>, Refused> {
+    rustix::net::sockopt::set_socket_timeout(
+        socket,
+        rustix::net::sockopt::Timeout::Recv,
+        receive_wait(answers.deadline()),
+    )
+    .map_err(|_| Refused::Unreadable)?;
     let mut out = Vec::with_capacity(DUMPS.len());
     for (seq, d) in (1u32..).zip(DUMPS.iter()) {
-        ask(socket, &request(d.kind, d.family, d.header, seq), scratch)?;
+        ask(
+            socket,
+            &request(d.kind, d.family, d.header, seq),
+            scratch,
+            answers,
+        )?;
         let mut msgs = normalized(&scratch.answer, d, seq)?;
         msgs.sort_unstable();
         out.push(msgs);
@@ -666,22 +707,15 @@ fn dumps(socket: &OwnedFd, scratch: &mut Scratch) -> Result<Vec<Vec<Vec<u8>>>, R
     Ok(out)
 }
 
-/// A netlink socket for the dumps, in the namespace the calling thread is in, each read bounded by [`READ_WAIT`].
+/// A netlink socket for the dumps, in the namespace the calling thread is in; [`dumps`] bounds its reads.
 fn dump_socket() -> Result<OwnedFd, Refused> {
-    let fd = rustix::net::socket_with(
+    rustix::net::socket_with(
         AddressFamily::NETLINK,
         SocketType::RAW,
         SocketFlags::CLOEXEC,
         None,
     )
-    .map_err(|_| Refused::Unreadable)?;
-    rustix::net::sockopt::set_socket_timeout(
-        &fd,
-        rustix::net::sockopt::Timeout::Recv,
-        Some(READ_WAIT),
-    )
-    .map_err(|_| Refused::Unreadable)?;
-    Ok(fd)
+    .map_err(|_| Refused::Unreadable)
 }
 
 /// A dump request: a `struct nlmsghdr` and the family header, zero but for its family.
@@ -698,8 +732,15 @@ fn request(kind: u16, family: u8, header: usize, seq: u32) -> Vec<u8> {
     m
 }
 
-/// Sends `request` and reads the whole answer into `scratch`'s, until `NLMSG_DONE`, bounded.
-fn ask(fd: &OwnedFd, request: &[u8], scratch: &mut Scratch) -> Result<(), Refused> {
+/// Sends `request` and reads the whole answer into `scratch`'s, until `NLMSG_DONE`, bounded; each read's time is
+/// recorded in `answers`; a read that passed its bound is no sample ([`Patience`], Karn's point), and refuses the
+/// namespace, which is thrown away, counted.
+fn ask(
+    fd: &OwnedFd,
+    request: &[u8],
+    scratch: &mut Scratch,
+    answers: &Patience,
+) -> Result<(), Refused> {
     let sent =
         rustix::net::send(fd, request, SendFlags::empty()).map_err(|_| Refused::Unreadable)?;
     if sent != request.len() {
@@ -707,9 +748,18 @@ fn ask(fd: &OwnedFd, request: &[u8], scratch: &mut Scratch) -> Result<(), Refuse
     }
     scratch.answer.clear();
     for _ in 0..MAX_DUMP_READS {
-        let (got, _) = rustix::net::recv(fd, &mut scratch.read, RecvFlags::empty())
-            .map_err(|_| Refused::Unreadable)?;
+        let asked = Instant::now();
+        let got = match rustix::net::recv(fd, &mut scratch.read, RecvFlags::empty()) {
+            Ok((got, _)) => got,
+            Err(rustix::io::Errno::AGAIN) => return Err(Refused::Unreadable),
+            Err(_) => return Err(Refused::Unreadable),
+        };
+        answers.answered(asked.elapsed());
         let chunk = scratch.read.get(..got).ok_or(Refused::Unreadable)?;
+        // Every answer the kernel queues holds a message (an end of file, from a peer that isn't the kernel, none).
+        if chunk.len() < NLMSG_HDR {
+            return Err(Refused::Unreadable);
+        }
         if scratch.answer.len().saturating_add(chunk.len()) > MAX_DUMP_BYTES {
             return Err(Refused::Unreadable);
         }

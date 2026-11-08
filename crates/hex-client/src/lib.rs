@@ -22,8 +22,6 @@
     )
 )]
 
-use std::time::Duration;
-
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
@@ -33,11 +31,6 @@ pub use linux::Client;
 mod other;
 #[cfg(not(target_os = "linux"))]
 pub use other::Client;
-
-/// Longest a call waits for the node agent's answer, and a send for room in its socket: five times the
-/// agent's own longest wait (a delete's 60 s for its box to empty, `hex_node`'s `EMPTY_PATIENCE`), so
-/// only a wedged agent misses it, and a call to one is refused rather than waited on forever.
-pub const ANSWER_PATIENCE: Duration = Duration::from_secs(300);
 
 /// Most boxes one list takes, in however many messages they come: a node holding more is past any
 /// density Hex targets (10,560 idle containers per GiB held, docs/design/runtime-architecture.md),

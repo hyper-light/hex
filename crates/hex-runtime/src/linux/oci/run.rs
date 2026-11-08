@@ -39,7 +39,7 @@ const DEFAULT_CONTROLLERS: [&str; 4] = hex_core::cgroup::CONTROLLERS;
 
 /// The longest container id: a file name's limit (`NAME_MAX`, 255 bytes), since the id names the
 /// container's state directory.
-const MAX_ID_BYTES: usize = 255;
+pub(crate) const MAX_ID_BYTES: usize = 255;
 
 /// Refuses an id that isn't a plain name, before anything is touched. The id names the container's
 /// state directory and its default cgroup, so a `/` or `..` would reach outside the state root, and
@@ -185,9 +185,9 @@ struct Route<'a> {
     start: Start<'a>,
 }
 
-/// How a create starts the container's init: the command line and the legacy adoption path spawn
-/// `hex __oci-init` (the shim, [`Runtime::create`] and [`Runtime::create_in_cgroup`]); the node agent's
-/// seam hands a seed the container to clone ([`Runtime::create_in_cgroup_seeded`], decision 5).
+/// How a create starts the container's init: the command line spawns `hex __oci-init` (the shim,
+/// [`Runtime::create`]); the node agent's seam hands a seed the container to clone
+/// ([`Runtime::create_in_cgroup_seeded`], decision 5), and the shim only for a spec a seed can't serve.
 enum Start<'a> {
     /// Spawn `hex __oci-init`, which unshares the namespaces and forks the container.
     Shim,
@@ -730,17 +730,12 @@ impl Runtime {
         PathBuf::from("/run/hex-oci")
     }
 
-    /// Container `id`'s directory: in its shard of the root, unless a runtime before the shards left it in the
-    /// root itself and it isn't in its shard (goal 5 extended, step 6), so a create is refused over one made
-    /// before an upgrade as over one made after it.
+    /// Container `id`'s directory: in its shard of the root (goal 5 extended, step 6). A runtime from before the
+    /// shards kept it in the root itself; none such was ever deployed, so nothing looks there (the lead's ruling of
+    /// 2026-11-06 under Ada's rule).
     fn dir(&self, id: &str) -> Result<Dir, OciError> {
         check_id(id)?;
-        let dir = Dir::new(&self.root, id);
-        if dir.path().exists() {
-            return Ok(dir);
-        }
-        let before = Dir::unsharded(&self.root, id);
-        Ok(if before.exists() { before } else { dir })
+        Ok(Dir::new(&self.root, id))
     }
 
     /// Makes the container (OCI `create`): sets up its directory and the init blocked at the exec
@@ -769,48 +764,21 @@ impl Runtime {
         )
     }
 
-    /// Makes the container in a cgroup the caller already made and bounded, rather than from the
-    /// spec: the `Runtime` seam's path, where the node agent puts each container under its own
-    /// delegated box root with the box's bounds in force (as the `process` class does), so one code
-    /// path makes and bounds every box's cgroup. The spec's device list still governs the container's
-    /// device access; its `cgroupsPath` and `linux.resources` are ignored, the box's bounds standing
-    /// in their place. The caller owns the cgroup and removes it; a failed create leaves it be.
-    /// `held` is what the caller holds ready for it ([`Held`]): a container that makes a network
-    /// namespace of its own in this process's user namespace joins one made ahead in place of making
-    /// its own, and its device program is one the caller holds. Returns the state it wrote, so the
-    /// caller needn't read it back (goal 5 extended, step 5).
-    pub fn create_in_cgroup(
-        &self,
-        id: &str,
-        bundle: &Path,
-        pid_file: Option<&Path>,
-        cgroup: BoxCgroup,
-        held: Held<'_>,
-    ) -> Result<State, OciError> {
-        self.create_with(
-            id,
-            bundle,
-            pid_file,
-            Route {
-                cgroup: Cgroup::Provided(cgroup),
-                networks: held.networks,
-                devices: held.devices,
-                dev_mounts: held.dev_mounts,
-                ipc_uts: held.ipc_uts,
-                start: Start::Shim,
-            },
-        )
-    }
-
-    /// Makes the container as [`Runtime::create_in_cgroup`] does, but starts its init by handing it to a
-    /// seed to clone (decision 5, goal 5 plan step 4), in place of the shim's re-exec of the hex binary:
-    /// the `Runtime` seam's create, where `seeds` is the node agent's pool of `hex __oci-seed` processes.
-    /// The container's namespaces, cgroup, device policy, state and create-time hooks are the same as the
-    /// shim path's; only the init's start differs. A spec that joins a pid or user namespace by path can't
+    /// Makes the container in a cgroup the caller already made and bounded, rather than from the spec, and
+    /// starts its init by handing it to a seed to clone (decision 5, goal 5 plan step 4): the `Runtime` seam's
+    /// create, where the node agent puts each container under its own delegated box root with the box's bounds
+    /// in force (as the `process` class does) and `seeds` is its pool of `hex __oci-seed` processes. The spec's
+    /// device list still governs the container's device access; its `cgroupsPath` and `linux.resources` are
+    /// ignored, the box's bounds standing in their place. The caller owns the cgroup and removes it; a failed
+    /// create leaves it be. `held` is what the caller holds ready for it ([`Held`]): a container that makes a
+    /// network namespace of its own in this process's user namespace joins one made ahead in place of making its
+    /// own, and its device program is one the caller holds. The container's namespaces, cgroup, device policy,
+    /// state and create-time hooks are the shim path's; only the init's start differs. A spec that joins a pid or user namespace by path can't
     /// be made by a seed's one clone ([`init::needs_shim`]), so it is made through the shim, as the command
     /// line makes every container, and the seeds count it ([`CloneInit::through_shim`]): the one create
-    /// that still re-execs the hex binary. Returns the state it wrote, as [`Runtime::create_in_cgroup`]
-    /// does.
+    /// that still re-execs the hex binary. A create no seed came free for is refused by type, naming the
+    /// seeds' bound ([`OciError::SeedsExhausted`]), never sent through the shim. Returns the state it wrote, so
+    /// the caller needn't read it back (goal 5 extended, step 5).
     pub fn create_in_cgroup_seeded(
         &self,
         id: &str,
@@ -984,20 +952,21 @@ impl Runtime {
         };
         // Asked last, just before the init that joins it, so a create refused before it takes none.
         let result = network_for(&spec, networks).and_then(|network| match start {
-            Start::Shim => ipc_uts_on_path(&spec, ipc_uts).and_then(|()| {
-                self.start_shim(
-                    &making,
-                    &spec,
-                    &cgroup,
-                    Ahead {
-                        network,
-                        dev: None,
-                        masked_directory: shim_masked_directory(&spec, dev_mounts)?,
-                    },
-                    ShimStdio::Inherited,
-                    &Command::spawn,
-                )
-            }),
+            // The command line's create: nothing made ahead, the caller's streams passed on.
+            Start::Shim => self.start_shim(
+                &making,
+                &spec,
+                &cgroup,
+                Ahead {
+                    network,
+                    dev: None,
+                    masked_directory: None,
+                },
+                ShimStdio::Inherited,
+                &Command::spawn,
+            ),
+            // A create no seed came free for is refused by type (OciError::SeedsExhausted), never sent through the
+            // shim: one implementation per job (Ada's rule; the lead's ruling of 2026-11-06).
             Start::Seed(seeds) => self.start_seeded(
                 &making,
                 &spec,
@@ -1564,6 +1533,8 @@ impl Runtime {
             .map_or(super::mntns::MountNamespace::Copy, |p| p.mount_namespace);
         let made_with = super::mntns::clone_flags(flags, way);
         let claimed = match parked {
+            // A failed claim falls back to a seed's clone of the same request, which the claim only borrowed;
+            // the seeds count it by why, hung or refused, where they know it ([`CloneInit::claim`]).
             Some(p) if p.flags == made_with && takes_parked => seeds.claim(p, &req).ok(),
             _ => None,
         };
@@ -1644,10 +1615,10 @@ impl Runtime {
         state.poststart = Some(!spec.hooks.poststart.is_empty());
         state.pid_namespace = Some(spec.makes_namespace("pid"));
         if !spec.hooks.start_container.is_empty() {
-            state.start_container = Some(hooks::budget(
-                "startContainer",
-                &spec.hooks.start_container,
-            )?);
+            // A hook naming no timeout is waited for as long as it runs: recorded as the most seconds there are.
+            state.start_container = Some(
+                hooks::budget("startContainer", &spec.hooks.start_container)?.unwrap_or(u64::MAX),
+            );
         }
         making.dir.put(&state)?;
         if let Some(path) = making.pid_file {
@@ -2725,7 +2696,6 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
-    use crate::linux::oci::state::shard;
 
     // Hostile input (CLAUDE.md §6): a container id is a directory name under the state root, so one
     // that could name another place is refused before anything is touched; `delete ../../x` would
@@ -2868,8 +2838,9 @@ mod tests {
     /// `delete --force` waits for the killed container to exit (AC-T7.1.4); the competitive bench
     /// found it returning at once, which made its delete look 16x faster than crun's.
     fn sleeper() -> (std::process::Child, OwnedFd) {
+        // Until it is killed: each test that starts one ends it.
         let child = std::process::Command::new("sleep")
-            .arg("30")
+            .arg("infinity")
             .spawn()
             .unwrap();
         let pid = rustix::process::Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap();
@@ -2881,14 +2852,15 @@ mod tests {
     fn a_killed_process_is_seen_to_exit() {
         let (mut child, pidfd) = sleeper();
         child.kill().unwrap();
-        assert!(wait_exited(&pidfd, Duration::from_secs(10)).unwrap());
+        assert!(wait_exited(&pidfd, DELETE_PATIENCE).unwrap());
         child.wait().unwrap();
     }
 
+    /// A live process isn't seen to exit when the patience is spent, however short: none at all is the shortest.
     #[test]
     fn a_live_process_outlasts_a_short_patience() {
         let (mut child, pidfd) = sleeper();
-        assert!(!wait_exited(&pidfd, Duration::from_millis(50)).unwrap());
+        assert!(!wait_exited(&pidfd, Duration::ZERO).unwrap());
         child.kill().unwrap();
         child.wait().unwrap();
     }
@@ -2915,7 +2887,7 @@ mod tests {
         let (_dir, path, start) = exec_fifo();
         let end = open_to_write(&path);
         assert_eq!(rustix::io::write(&end, b"0").unwrap(), 1);
-        let took = wait_for_byte(&start, &pidfd, Duration::from_secs(10));
+        let took = wait_for_byte(&start, &pidfd, START_PATIENCE);
         assert!(matches!(took, Ok(Took::Byte)), "{took:?}");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("exec.fifo");
@@ -2926,7 +2898,7 @@ mod tests {
                 assert_eq!(rustix::io::write(&end, b"0").unwrap(), 1);
             });
             let start = open_start_end(&path).unwrap();
-            let took = wait_for_byte(&start, &pidfd, Duration::from_secs(10));
+            let took = wait_for_byte(&start, &pidfd, START_PATIENCE);
             assert!(matches!(took, Ok(Took::Byte)), "{took:?}");
             writer.join().unwrap();
         });
@@ -2951,11 +2923,11 @@ mod tests {
             tv_nsec: 0,
         };
         assert_eq!(rustix::event::poll(&mut fds, Some(&none)).unwrap(), 0);
-        let took = wait_for_byte(&start, &pidfd, Duration::from_millis(50));
+        let took = wait_for_byte(&start, &pidfd, Duration::ZERO);
         assert!(matches!(took, Ok(Took::Nothing)), "{took:?}");
         let end = open_to_write(&path);
         assert_eq!(rustix::io::write(&end, b"0").unwrap(), 1);
-        let took = wait_for_byte(&start, &pidfd, Duration::from_secs(10));
+        let took = wait_for_byte(&start, &pidfd, START_PATIENCE);
         assert!(matches!(took, Ok(Took::Byte)), "{took:?}");
         init.kill().unwrap();
         init.wait().unwrap();
@@ -2973,7 +2945,7 @@ mod tests {
             init.kill().unwrap();
             init.wait().unwrap();
             drop(end);
-            let took = wait_for_byte(&start, &pidfd, Duration::from_secs(10));
+            let took = wait_for_byte(&start, &pidfd, START_PATIENCE);
             assert!(matches!(took, Ok(Took::End)), "opened {opened}: {took:?}");
         }
     }
@@ -2989,7 +2961,7 @@ mod tests {
         drop(end);
         init.kill().unwrap();
         init.wait().unwrap();
-        let took = wait_for_byte(&start, &pidfd, Duration::from_secs(10));
+        let took = wait_for_byte(&start, &pidfd, START_PATIENCE);
         assert!(matches!(took, Ok(Took::Byte)), "{took:?}");
     }
 
@@ -3161,34 +3133,6 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
     /// (this process's own stands in for it). Expect: none of the stand-in's descriptors is a network
     /// namespace, the path it was handed names the namespace, and the agent's descriptor is
     /// close-on-exec while the stand-in runs.
-    /// Goal 5 extended step 6, lever 3 (T-T7.1.2): a root a runtime before the shards kept containers in, each
-    /// directly under it, is read as it is by today's, which makes its own in the root's shards. Do: leave a
-    /// container's state at `<root>/old` as the runtime before the shards wrote it; then read its state, and
-    /// place a new container `new`. Expect: `old`'s state read from where it is, its directory that one, and
-    /// `new`'s directory in its shard; once `old`'s is gone, `old` is placed in its shard too.
-    #[test]
-    fn a_container_kept_in_the_root_itself_is_read_there_and_new_ones_go_to_their_shards() {
-        let lab = tempfile::tempdir().unwrap();
-        let rt = Runtime::new(lab.path().to_path_buf());
-        let before = Dir::unsharded(lab.path(), "old");
-        before.create("old").unwrap();
-        let mut st = State::new("old", "/bundle");
-        st.status = Status::Created;
-        st.pid = 4321;
-        before.put(&st).unwrap();
-        assert_eq!(rt.state("old").unwrap().pid, 4321);
-        assert_eq!(rt.dir("old").unwrap().path(), lab.path().join("old"));
-        assert_eq!(
-            rt.dir("new").unwrap().path(),
-            lab.path().join(shard("new")).join("new")
-        );
-        before.remove().unwrap();
-        assert_eq!(
-            rt.dir("old").unwrap().path(),
-            lab.path().join(shard("old")).join("old")
-        );
-    }
-
     #[test]
     fn a_namespace_made_ahead_reaches_the_shim_by_path_and_no_process_inherits_it() {
         let lab = tempfile::tempdir().unwrap();
@@ -3256,7 +3200,7 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
         let path = lab.path().join("stand-in");
         stand_in_at(&path, "#!/bin/sh\nexit 0\n");
         let mut holder = Command::new("sh")
-            .args(["-c", "exec 3>>\"$0\" && echo ready && exec sleep 30"])
+            .args(["-c", "exec 3>>\"$0\" && echo ready && exec sleep infinity"])
             .arg(&path)
             .stdout(std::process::Stdio::piped())
             .spawn()
@@ -3347,7 +3291,7 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
         // otherwise keep the create's handshake from its end-of-file for as long as it lives.
         let held = std::cell::RefCell::new(Vec::new());
         let spawn = |cmd: &mut Command| {
-            let mut bystander = Command::new("sleep").arg("30").spawn()?;
+            let mut bystander = Command::new("sleep").arg("infinity").spawn()?;
             // Linux lets a vfork parent go before the exec closes what is close-on-exec (v6.19
             // `fs/exec.c:1156`, `:1194`, `kernel/fork.c:1488`), and sets the new program's arguments after
             // that (`fs/binfmt_elf.c:1296`): what it holds is read once it shows them.
@@ -3636,5 +3580,107 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
         assert!(network_for(&spec, Some(&pool)).is_err(), "a refused count");
 
         assert!(network_for(&own, None).unwrap().is_none(), "no pool");
+    }
+
+    /// A stand-in for a node's create seeds whose line is full: every clone is refused at the seeds' bound, and each
+    /// classic route is noted.
+    struct FullLine {
+        classic: std::cell::RefCell<Vec<ClassicReason>>,
+    }
+
+    impl CloneInit for FullLine {
+        fn clone_init(&self, _req: CloneReq<'_>) -> Result<(i32, OwnedFd), OciError> {
+            Err(OciError::SeedsExhausted {
+                bound: 2,
+                why: "no seed is free and 2 creates already wait for one".to_owned(),
+            })
+        }
+        fn claim(&self, _parked: Parked, _req: &CloneReq<'_>) -> Result<(i32, OwnedFd), OciError> {
+            Err(OciError::Broken("no init is parked here".to_owned()))
+        }
+        fn prunes_root(&self) -> bool {
+            false
+        }
+        fn mount_namespace(&self) -> super::super::mntns::MountNamespace {
+            super::super::mntns::MountNamespace::Copy
+        }
+        fn classic(&self, reason: ClassicReason) {
+            self.classic.borrow_mut().push(reason);
+        }
+    }
+
+    /// A chooser that gives every create the one cgroup it holds, carrying its program already.
+    struct OneCgroup(PathBuf);
+
+    impl Choose for OneCgroup {
+        fn choose(&self, _wants: &Wants<'_>) -> Result<Chosen, OciError> {
+            Ok(Chosen {
+                cgroup: BoxCgroup::at(self.0.clone()),
+                attached: true,
+                parked: None,
+            })
+        }
+        fn init_made(&self, _flags: u64, _claimed: bool) {}
+        fn parked_proc(&self, _outcome: ParkedProc) {}
+    }
+
+    /// One implementation per job, no fallback path (Ada's rule; the lead's NoSeed ruling of 2026-11-06; AC-T7.1.4,
+    /// CLAUDE.md §3). Do: a seam create whose seeds' line is full (every clone refused at the seeds' bound), with a
+    /// stand-in shim that leaves a mark if it runs. Expect: the create refused by type, naming the seeds' bound, as
+    /// the caller's `Refusal::Exhausted`; the shim never run; no create counted through it (the one route noted is
+    /// the rootless seed's, which isn't the shim); and nothing of the container left.
+    #[test]
+    fn a_create_past_the_seeds_bound_is_refused_and_never_takes_the_shim() {
+        let lab = tempfile::tempdir().unwrap();
+        let ran = lab.path().join("shim-ran");
+        let stand_in = lab.path().join("shim");
+        stand_in_at(
+            &stand_in,
+            &format!("#!/bin/sh\ntouch '{}'\n", ran.display()),
+        );
+        let rt = Runtime::with_helper(lab.path().join("state"), stand_in);
+        let bundle = lab.path().join("bundle");
+        std::fs::create_dir_all(bundle.join("rootfs")).unwrap();
+        std::fs::write(
+            bundle.join("config.json"),
+            br#"{"ociVersion":"1.2.0","root":{"path":"rootfs"},"process":{"args":["/bin/true"],"cwd":"/"},"linux":{"namespaces":[{"type":"pid"},{"type":"mount"}]}}"#,
+        )
+        .unwrap();
+        let cgroup = lab.path().join("cgroup");
+        std::fs::create_dir(&cgroup).unwrap();
+        let seeds = FullLine {
+            classic: std::cell::RefCell::new(Vec::new()),
+        };
+        let devices = Programs::rootless(1);
+        let made = rt.create_chosen_seeded(
+            "c1",
+            &bundle,
+            &OneCgroup(cgroup),
+            Held {
+                devices: Some(&devices),
+                ..Held::default()
+            },
+            &seeds,
+        );
+        match made {
+            Err(e @ OciError::SeedsExhausted { bound: 2, .. }) => assert_eq!(
+                Refusal::from(e),
+                Refusal::Exhausted {
+                    what: "create seeds",
+                    bound: 2
+                }
+            ),
+            other => panic!("refused by the seeds' bound, not {other:?}"),
+        }
+        assert!(!ran.exists(), "the shim ran");
+        assert_eq!(
+            *seeds.classic.borrow(),
+            vec![ClassicReason::Rootless],
+            "no create went through the shim"
+        );
+        assert!(
+            !rt.dir("c1").unwrap().path().exists(),
+            "the container's directory is left"
+        );
     }
 }

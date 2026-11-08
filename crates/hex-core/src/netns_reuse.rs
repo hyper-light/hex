@@ -16,14 +16,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-/// Most idle namespaces one owner keeps: the cgroup pool's bound, for the same reason (the seam's busiest
-/// phase runs 32 boxes of one owner at once, so each finds one); past it the owner's oldest is closed.
-pub const PER_OWNER: usize = crate::reuse::PER_OWNER;
-
-/// Most idle namespaces a node keeps, all owners' together; past it the node's oldest is closed. An idle
-/// namespace holds about 0.75 MiB of kernel memory (24 MiB for decision 4's 32,
-/// `bench/competitive/probes/netns_pool.md`), so this many hold about 192 MiB.
-pub const PER_NODE: usize = crate::reuse::PER_NODE;
+use crate::demand::Ghosts;
 
 /// Why a box was given a namespace of its own or a fresh one, or why an idle namespace wasn't handed on:
 /// each counted ([`Counts::refused`]).
@@ -115,14 +108,16 @@ pub struct Counts {
     pub fresh: u64,
     /// Each refusal, by reason.
     pub refused: BTreeMap<Refused, u64>,
-    /// Namespaces closed because their owner kept [`PER_OWNER`] already.
+    /// Namespaces closed because their owner kept its bound already.
     pub evicted_owner_bound: u64,
-    /// Namespaces closed because the node kept [`PER_NODE`] already.
+    /// Namespaces closed because the node kept its bound already.
     pub evicted_node_bound: u64,
     /// Namespaces closed because the node let every idle one go.
     pub drained: u64,
     /// Namespaces idle now.
     pub idle: usize,
+    /// The most idle namespaces an owner keeps now, learned ([`Idle::new`]).
+    pub per_owner: usize,
 }
 
 impl Counts {
@@ -158,7 +153,8 @@ pub enum Take<T> {
 /// The idle namespaces by owner, oldest first in each, and the node's order across owners, each bounded.
 #[derive(Debug)]
 pub struct Idle<T> {
-    per_owner: usize,
+    /// The most idle namespaces an owner keeps, learned from its misses.
+    per_owner: Ghosts,
     per_node: usize,
     by_owner: BTreeMap<String, VecDeque<(u64, T)>>,
     /// When each idle namespace went idle, and whose it is: the oldest first.
@@ -168,10 +164,12 @@ pub struct Idle<T> {
 }
 
 impl<T> Idle<T> {
-    /// No idle namespaces, bounded at `per_owner` for one owner and `per_node` for the node.
+    /// No idle namespaces, bounded at `per_node` for the node and at `per_owner` for one owner at first. The owner
+    /// bound is learned as the idle cgroups' is (`reuse::Pool::new`; Ada's rule, 2026-11-06): a fresh take by an
+    /// owner whose namespace the bound closed raises it by one, up to `per_node`, never lowered.
     pub fn new(per_owner: usize, per_node: usize) -> Self {
         Self {
-            per_owner,
+            per_owner: Ghosts::new(per_owner, per_node),
             per_node,
             by_owner: BTreeMap::new(),
             order: BTreeMap::new(),
@@ -204,6 +202,7 @@ impl<T> Idle<T> {
         if !self.order.is_empty() {
             self.refuse(Refused::Owner);
         }
+        self.per_owner.missed(owner);
         self.counts.fresh = self.counts.fresh.saturating_add(1);
         Take::Fresh
     }
@@ -221,8 +220,7 @@ impl<T> Idle<T> {
     }
 
     /// `owner`'s box is gone and left `ns`, kept idle for the owner's next box. Returns what the bounds put
-    /// out, for the shell to close: the owner's oldest past [`PER_OWNER`], then the node's oldest past
-    /// [`PER_NODE`].
+    /// out, for the shell to close: the owner's oldest past its bound, then the node's oldest past its.
     pub fn give(&mut self, owner: &str, ns: T) -> Vec<T> {
         self.seq = self.seq.saturating_add(1);
         let seq = self.seq;
@@ -230,10 +228,11 @@ impl<T> Idle<T> {
         let list = self.by_owner.entry(owner.to_owned()).or_default();
         list.push_back((seq, ns));
         let mut out = Vec::new();
-        if list.len() > self.per_owner
+        if list.len() > self.per_owner.bound()
             && let Some((old, ns)) = list.pop_front()
         {
             self.order.remove(&old);
+            self.per_owner.evicted(owner);
             self.counts.evicted_owner_bound = self.counts.evicted_owner_bound.saturating_add(1);
             out.push(ns);
         }
@@ -269,6 +268,11 @@ impl<T> Idle<T> {
         out
     }
 
+    /// The most idle namespaces an owner keeps now, learned.
+    pub fn per_owner(&self) -> usize {
+        self.per_owner.bound()
+    }
+
     /// How many of `owner`'s namespaces are idle.
     pub fn idle_of(&self, owner: &str) -> usize {
         self.by_owner.get(owner).map_or(0, VecDeque::len)
@@ -278,6 +282,7 @@ impl<T> Idle<T> {
     pub fn counts(&self) -> Counts {
         Counts {
             idle: self.order.len(),
+            per_owner: self.per_owner.bound(),
             ..self.counts.clone()
         }
     }

@@ -3,24 +3,35 @@
 //! the frames that carry a state between the runtime and the container's init, which runs the hooks the
 //! spec puts in the container's namespaces (createContainer, startContainer).
 
+use std::cell::Cell;
 use std::io::Write as _;
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::process::CommandExt as _;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use rustix::event::{PollFd, PollFlags};
 use rustix::fs::OFlags;
 
 use crate::linux::oci::OciError;
+use crate::linux::oci::run::MAX_ID_BYTES;
 use crate::linux::oci::spec::{Hook, Hooks, MAX_CONFIG_BYTES};
 use crate::linux::oci::state::State;
 
-/// Longest a hook may run when it names no timeout; a bound so a stuck hook can't wedge the runtime.
-pub const HOOK_TIMEOUT: Duration = Duration::from_secs(30);
+/// The most a state handed to the init may hold: its annotations, which take no more than the config's text of
+/// them (serde_json escapes nothing a config could write shorter, RFC 8259 §7), so at most [`MAX_CONFIG_BYTES`];
+/// and its other fields at their widest: the shape of a state with those strings taken out
+/// ([`STATE_SHAPE`]), a container id (at most [`MAX_ID_BYTES`], none of whose characters is escaped), and its
+/// bundle and cgroup paths, each at most `PATH_MAX` less its NUL, every byte at worst a six-byte `\u00XX`.
+pub const MAX_STATE_BYTES: usize =
+    MAX_CONFIG_BYTES + STATE_SHAPE.len() + (MAX_ID_BYTES + 2) + 2 * ((PATH_MAX - 1) * 6 + 2);
 
-/// The most a state handed to the init may hold: its annotations are the config's (at most
-/// [`MAX_CONFIG_BYTES`]), and its other fields are an id, a path and numbers, which the second half bounds.
-pub const MAX_STATE_BYTES: usize = 2 * MAX_CONFIG_BYTES;
+/// A state's JSON at its widest with its id, its paths and its annotations taken out: every key, the longest
+/// status, and each number its widest (`i32::MIN`, `u64::MAX`), in the order serde writes them ([`State`]).
+const STATE_SHAPE: &str = r#"{"ociVersion":"1.3.0","id":,"status":"creating","pid":-2147483648,"bundle":,"annotations":,"cgroup":,"startTime":18446744073709551615,"poststart":false,"pidNamespace":false,"startContainer":18446744073709551615}"#;
+
+/// `PATH_MAX`, a path's most bytes with its NUL (include/uapi/linux/limits.h).
+const PATH_MAX: usize = 4096;
 
 /// The most a startContainer failure written on the exec FIFO holds, its tag byte included: `PIPE_BUF`
 /// (pipe(7)), so the init's one write lands whole and `start` reads it whole without taking it.
@@ -43,6 +54,22 @@ pub const START_ABANDONED: u8 = 122;
 /// ([`crate::linux::oci::state::start_interrupted`]), so recovery removes the box by that reason.
 pub const START_BEGUN: &str = "start-begun";
 
+thread_local! {
+    /// This thread's wakes while it waits on a hook so far ([`wakes_on_this_thread`]).
+    static WAKES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// How many times this thread has woken while waiting on a hook: once each time it looks again at whether the hook
+/// has taken its state or ended. Tests read it.
+pub fn wakes_on_this_thread() -> u64 {
+    WAKES.with(Cell::get)
+}
+
+/// One more wake on this thread.
+fn woke() {
+    WAKES.with(|n| n.set(n.get().saturating_add(1)));
+}
+
 impl Hooks {
     /// Whether the init stops before its root switch for the runtime: it runs prestart and createRuntime
     /// there (config.md:607) and hands the init the state its createContainer and startContainer hooks
@@ -55,23 +82,35 @@ impl Hooks {
     }
 }
 
-/// The seconds `hooks` may take together, each its timeout or [`HOOK_TIMEOUT`]; refused, naming `kind`,
-/// where a timeout isn't above zero (config.md:559-560) or the sum overflows.
-pub fn budget(kind: &str, hooks: &[Hook]) -> Result<u64, OciError> {
-    hooks.iter().try_fold(0_u64, |sum, hook| {
-        let secs = timeout(kind, hook)?.as_secs();
-        sum.checked_add(secs)
-            .ok_or_else(|| OciError::Config(format!("the {kind} hooks' timeouts overflow")))
+/// The seconds `hooks` may take together, the sum of their timeouts; `None` where one names none, which is waited
+/// for as long as it runs. Refused, naming `kind`, where a timeout isn't above zero (config.md:559-560) or the sum
+/// overflows.
+pub fn budget(kind: &str, hooks: &[Hook]) -> Result<Option<u64>, OciError> {
+    hooks.iter().try_fold(Some(0_u64), |sum, hook| {
+        let Some(limit) = timeout(kind, hook)? else {
+            return Ok(None);
+        };
+        match sum {
+            None => Ok(None),
+            Some(sum) => sum
+                .checked_add(limit.as_secs())
+                .map(Some)
+                .ok_or_else(|| OciError::Config(format!("the {kind} hooks' timeouts overflow"))),
+        }
     })
 }
 
-fn timeout(kind: &str, hook: &Hook) -> Result<Duration, OciError> {
+/// How long `hook` may run: the timeout it names, or `None` where it names none. The spec gives no default
+/// (config.md:559-560), and runc waits for such a hook as long as it runs (`Command.Run`, runc 1.6.0-rc.1
+/// libcontainer/configs/config.go:620-635), as crun does (`run_process_with_stdin_timeout_envp`, crun 1.30.1
+/// src/libcrun/utils.c:1902, a timeout of 0 waits): so does Hex, and its caller's own patience bounds the whole.
+fn timeout(kind: &str, hook: &Hook) -> Result<Option<Duration>, OciError> {
     match hook.timeout {
-        None => Ok(HOOK_TIMEOUT),
+        None => Ok(None),
         Some(t) => u64::try_from(t)
             .ok()
             .filter(|t| *t > 0)
-            .map(Duration::from_secs)
+            .map(|t| Some(Duration::from_secs(t)))
             .ok_or_else(|| {
                 OciError::Config(format!(
                     "a {kind} hook's timeout is {t}: it must be above zero"
@@ -113,6 +152,20 @@ fn run_one(op: &'static str, hook: &Hook, state_json: &[u8]) -> Result<(), OciEr
         .spawn()
         .map_err(|e| failed(format!("{:?} didn't start: {e}", hook.path)))?;
     let limit = timeout(op, hook)?;
+    // Its pidfd turns readable once it has ended (pidfd_open(2)); its pid stays its own until it's reaped here.
+    let pidfd = match i32::try_from(child.id())
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .ok_or(rustix::io::Errno::SRCH)
+        .and_then(|pid| rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()))
+    {
+        Ok(pidfd) => pidfd,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(OciError::os("pidfd_open of a hook", e));
+        }
+    };
     // The state goes in as the hook takes it, never blocking: a hook that doesn't read its stdin can't hold
     // the runtime past its timeout.
     let mut stdin = child.stdin.take();
@@ -121,7 +174,8 @@ fn run_one(op: &'static str, hook: &Hook, state_json: &[u8]) -> Result<(), OciEr
             .map_err(|e| OciError::os("making a hook's stdin non-blocking", e))?;
     }
     let mut left = state_json;
-    let deadline = Instant::now().checked_add(limit);
+    // None where the hook names no timeout, or one past what an Instant holds.
+    let deadline = limit.and_then(|limit| Instant::now().checked_add(limit));
     loop {
         if let Some(pipe) = stdin.as_mut() {
             match pipe.write(left) {
@@ -142,18 +196,43 @@ fn run_one(op: &'static str, hook: &Hook, state_json: &[u8]) -> Result<(), OciEr
             Some(status) if status.success() => return Ok(()),
             Some(status) => return Err(failed(format!("{:?} exited {status}", hook.path))),
             None => {
-                // A timeout past what an Instant holds is no earlier deadline.
-                if deadline.is_some_and(|d| Instant::now() >= d) {
+                let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+                if left.is_some_and(|l| l.is_zero()) {
                     let _ = child.kill();
+                    let _ = child.wait();
                     return Err(failed(format!(
-                        "{:?} outlived its {limit:?} timeout",
-                        hook.path
+                        "{:?} outlived its {:?} timeout",
+                        hook.path,
+                        limit.unwrap_or_default()
                     )));
                 }
-                // park_timeout (not the disallowed thread::sleep) yields the CPU between polls.
-                std::thread::park_timeout(Duration::from_millis(5));
+                wait_on(&pidfd, stdin.as_ref(), left)?;
             }
         }
+    }
+}
+
+/// Waits until the hook behind `pidfd` has ended, its stdin `stdin` (while the state isn't all in) takes more, or
+/// `left` passes (`None`: no deadline).
+fn wait_on(
+    pidfd: &OwnedFd,
+    stdin: Option<&std::process::ChildStdin>,
+    left: Option<Duration>,
+) -> Result<(), OciError> {
+    let ts = left.map(|left| rustix::event::Timespec {
+        tv_sec: i64::try_from(left.as_secs()).unwrap_or(i64::MAX),
+        tv_nsec: i64::from(left.subsec_nanos()),
+    });
+    let mut fds = vec![PollFd::new(pidfd, PollFlags::IN)];
+    if let Some(pipe) = stdin {
+        fds.push(PollFd::new(pipe, PollFlags::OUT));
+    }
+    match rustix::event::poll(&mut fds, ts.as_ref()) {
+        Ok(_) | Err(rustix::io::Errno::INTR) => {
+            woke();
+            Ok(())
+        }
+        Err(e) => Err(OciError::os("waiting for a hook", e)),
     }
 }
 
@@ -289,6 +368,44 @@ mod tests {
         }
     }
 
+    /// AC-T7.1.4; Ada's 2026-11-06 rule (no picked constants): the state's bound is the config's, which holds its
+    /// annotations, and the widest every other field may be, not twice the config's. Do: write the widest state there
+    /// is with no annotations: its id the longest a container's may be, its bundle and cgroup paths `PATH_MAX`'s
+    /// bytes less its NUL, each byte one JSON escapes to six (`\u0001`), its numbers their widest. Expect: the bound is
+    /// the config's and that state's bytes, less the empty annotations' `{}`.
+    #[test]
+    fn the_states_bound_is_the_configs_and_its_widest_other_fields() {
+        let path = "\u{1}".repeat(usize::try_from(libc::PATH_MAX).unwrap() - 1);
+        let mut widest = State::new(&"a".repeat(crate::linux::oci::run::MAX_ID_BYTES), &path);
+        widest.status = crate::linux::oci::state::Status::Creating;
+        widest.pid = i32::MIN;
+        widest.cgroup = Some(path);
+        widest.start_time = Some(u64::MAX);
+        widest.poststart = Some(false);
+        widest.pid_namespace = Some(false);
+        widest.start_container = Some(u64::MAX);
+        let others = serde_json::to_vec(&widest).unwrap().len() - "{}".len();
+        assert_eq!(MAX_STATE_BYTES, MAX_CONFIG_BYTES + others);
+    }
+
+    /// A state's annotations take no more bytes than the config's text of them: serde_json escapes no character a
+    /// config could hold in fewer bytes (RFC 8259 §7). Do: parse a config whose annotations use every escape and
+    /// raw UTF-8, and write its state. Expect: the state's annotations no longer than the config's text of them.
+    #[test]
+    fn a_states_annotations_take_no_more_than_the_configs_text_of_them() {
+        let config = r#"{"ociVersion":"1.3.0","root":{"path":"rootfs"},"annotations":{"k\u0001":"\"\\\/\b\f\n\r\t\u001féé","k":"v","k":"w"}}"#;
+        let spec = crate::linux::oci::spec::Spec::parse(config.as_bytes()).unwrap();
+        let key = r#""annotations":"#;
+        let text = config.split_once(key).unwrap().1.strip_suffix('}').unwrap();
+        let annotations = serde_json::to_vec(&spec.annotations).unwrap();
+        assert!(
+            annotations.len() <= text.len(),
+            "{} > {}",
+            annotations.len(),
+            text.len()
+        );
+    }
+
     /// Do: a startContainer failure whose reason is longer than a pipe's atomic write, peeked from a FIFO,
     /// then peeked again. Expect: the reason, cut at a character's edge to fit, both times (nothing taken),
     /// and a taken start reads as none.
@@ -313,25 +430,62 @@ mod tests {
         assert_eq!(peek_start(r.as_fd()).unwrap(), None);
     }
 
-    /// CLAUDE.md §2. Do: run a hook that never reads its stdin, with a state bigger than a pipe holds,
-    /// and a one-second timeout. Expect: refused for outliving its timeout, not a write blocked for good.
+    /// CLAUDE.md §2. Do: run a hook that never reads its stdin and never ends by itself, with a state one byte more
+    /// than a new pipe holds (`F_GETPIPE_SZ`, pipe(7): the hook's stdin is a new pipe), and a one-second timeout.
+    /// Expect: refused for outliving its timeout, once that has passed: a write blocked for good would never return.
     #[test]
     fn a_hook_that_never_reads_its_stdin_ends_at_its_timeout() {
+        let (probe, _) = rustix::pipe::pipe().unwrap();
+        let holds = rustix::pipe::fcntl_getpipe_size(&probe).unwrap();
         let mut state = State::new("c1", "/bundle");
         state
             .annotations
-            .insert("big".to_owned(), "x".repeat(1 << 20));
+            .insert("big".to_owned(), "x".repeat(holds + 1));
         let started = Instant::now();
-        let got = run("a hook", &[sh("exec sleep 30", Some(1))], &state);
+        let got = run("a hook", &[sh("exec sleep infinity", Some(1))], &state);
         assert!(
             matches!(&got, Err(OciError::Os { why, .. }) if why.contains("timeout")),
             "{got:?}"
         );
         assert!(
-            started.elapsed() < Duration::from_secs(20),
+            started.elapsed() >= Duration::from_secs(1),
             "{:?}",
             started.elapsed()
         );
+    }
+
+    /// AC-T7.1.4; Ada's 2026-11-06 rule (no picked constants): the runner waits on the facts it needs, the hook
+    /// taking its state and the hook's end, never on a poll interval. Do: run a hook that takes its state and
+    /// then lives on a while. Expect: the runner woke at most once for each of those two facts, however long
+    /// the hook lived. (Its 0.2 s is a fixture: any life longer than a poll interval tells a poll from a
+    /// wait, since a poll wakes once an interval.)
+    #[test]
+    fn a_hook_is_waited_on_not_polled() {
+        let state = State::new("c1", "/bundle");
+        let before = wakes_on_this_thread();
+        run(
+            "a hook",
+            &[sh("cat > /dev/null; exec sleep 0.2", None)],
+            &state,
+        )
+        .unwrap();
+        let wakes = wakes_on_this_thread() - before;
+        assert!(wakes <= 2, "woke {wakes} times");
+    }
+
+    /// AC-T7.1.4, config.md:559-560; the lead's call of 2026-11-06 under Ada's rule (no picked constants): a hook
+    /// that names no timeout has no deadline of the runtime's choosing, as runc's (`Command.Run`,
+    /// libcontainer/configs/config.go:620-635: a nil `Timeout` waits for the command). Do: ask the deadline of a
+    /// hook naming none and of one naming 5 s, and the budget of lists holding each. Expect: no deadline and no
+    /// budget for the first, 5 s for the second.
+    #[test]
+    fn a_hook_naming_no_timeout_has_no_deadline() {
+        let none = sh("true", None);
+        let five = sh("true", Some(5));
+        assert_eq!(timeout("a", &none).unwrap(), None);
+        assert_eq!(timeout("a", &five).unwrap(), Some(Duration::from_secs(5)));
+        assert_eq!(budget("a", &[five.clone(), none]).unwrap(), None);
+        assert_eq!(budget("a", &[five.clone(), five]).unwrap(), Some(10));
     }
 
     /// config.md:592. Do: a hook that copies its stdin out, and one that fails. Expect: the state as
@@ -388,10 +542,11 @@ mod tests {
                 "{hooks}: {got:?}"
             );
         }
+        // 5 is a fixture: any timeout above zero is taken, and the budget is it.
         let ok = spec(r#"{"startContainer":[{"path":"/bin/sh","timeout":5}]}"#).unwrap();
         assert_eq!(
             budget("startContainer", &ok.hooks.start_container).unwrap(),
-            5
+            Some(5)
         );
         assert!(ok.hooks.sync_init());
     }

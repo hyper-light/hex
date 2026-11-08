@@ -26,7 +26,7 @@ CSSF="o_mem:mem_cgroup_css_offline o_cpu:cpu_cgroup_css_offline o_blk:blkcg_css_
 # /proc/sys read-only, so a box's cgroup and network namespace may be handed to the owner's next box).
 ALL_NS='[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"}]'
 CAPS='["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FSETID","CAP_FOWNER","CAP_MKNOD","CAP_NET_RAW","CAP_SETGID","CAP_SETUID","CAP_SETFCAP","CAP_SETPCAP","CAP_NET_BIND_SERVICE","CAP_SYS_CHROOT","CAP_KILL","CAP_AUDIT_WRITE"]'
-PROC_CAPS=""; [ -n "${HEXBENCH_OWNER:-}${HEXBENCH_DOCKER_CAPS:-}" ] && PROC_CAPS=",\"capabilities\":{\"bounding\":$CAPS,\"effective\":$CAPS,\"permitted\":$CAPS}"
+PROC_CAPS=""; [ -n "${HEXBENCH_OWNER:-}" ] && PROC_CAPS=",\"capabilities\":{\"bounding\":$CAPS,\"effective\":$CAPS,\"permitted\":$CAPS}"
 RO_PATHS=""; [ -n "${HEXBENCH_OWNER:-}" ] && RO_PATHS=',"readonlyPaths":["/proc/sys"]'
 bundle() { # bundle <dir> <args json>
   local B=$1; mkdir -p "$B/rootfs"/{usr,proc,dev,tmp}
@@ -71,6 +71,10 @@ trap untrace EXIT
 
 mkdir "$I" || { echo "refusing: no trace instance $I" >&2; exit 4; }
 echo 0 > "$I/tracing_on"
+# 8,192 KiB a CPU: the reader container streams the instance as it records, and at this size no event was lost in
+# create_tail.md's runs 1, 2 and 5 (create-tail-20261105T032219Z, 3,208,594 lines; 20261105T035431Z, 4,784,275;
+# 20261105T112335Z, N=10,000), each "none dropped". A run that loses any says how many in env.txt's dropped line; the
+# reader's handshake makes a rerun at a larger size a new run, not a retry here (tracebuf.sh's way).
 echo 8192 > "$I/buffer_size_kb"
 OURS='comm == "seam_oci" || comm == "sleep" || comm == "true" || comm ~ "hex*"'
 echo "prev_comm == \"seam_oci\" || prev_comm == \"sleep\" || prev_comm == \"true\" || prev_comm ~ \"hex*\" || next_comm == \"seam_oci\" || next_comm == \"sleep\" || next_comm == \"true\" || next_comm ~ \"hex*\"" \
@@ -110,7 +114,7 @@ mkdir -p /run/tailmark; : > /run/tailmark/tracing_on; ln -sfn "$I/trace_marker" 
 { echo "inside: date $(date -u +%FT%TZ), kernel $(uname -r), load $(cat /proc/loadavg)"
   echo "inside: cpus allowed $(sed -n 's/^Cpus_allowed_list:\t*//p' /proc/self/status)"
   echo "inside: the cgroup root's subtree_control: $(cat /sys/fs/cgroup/cgroup.subtree_control)"
-  echo "params: N=$N WARMUP=$WARMUP ROUNDS=$ROUNDS owner=${HEXBENCH_OWNER:-none} parked_procs=${HEXBENCH_PARKED_PROCS:-unset} docker_caps=${HEXBENCH_DOCKER_CAPS:-unset} box_memory=${HEXBENCH_BOX_MEMORY:-256m}"
+  echo "params: N=$N WARMUP=$WARMUP ROUNDS=$ROUNDS owner=${HEXBENCH_OWNER:-none}"
 } >> "$OUT/env.txt"
 
 # The reader container (create_tail.sh) waits for this file, then streams the instance; this waits for its word.

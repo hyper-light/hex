@@ -19,13 +19,47 @@ fn ms(n: u64) -> Duration {
     Duration::from_millis(n)
 }
 
-fn limits(seeds: usize, waiting: usize, wait: u64, hang: u64) -> Limits {
-    Limits {
-        seeds: NonZeroUsize::new(seeds).unwrap(),
-        waiting,
-        wait: ms(wait),
-        hang: ms(hang),
+/// A pool's bounds and its waits' seeds, in milliseconds: `None` for a wait left measuring, which is never armed.
+#[derive(Debug, Clone, Copy)]
+struct Setup {
+    limits: Limits,
+    wait: Option<u64>,
+    hang: Option<u64>,
+}
+
+impl Setup {
+    /// The pool, each wait seeded with half the wait it is to start with, so it starts at twice that
+    /// (`patience::TIMES_SLOWEST`).
+    fn pool(self) -> Seeds {
+        let mut pool = Seeds::new(self.limits);
+        calibrate(&mut pool.wait, &mut pool.hang, self);
+        pool
     }
+}
+
+fn calibrate(wait: &mut Patience, hang: &mut Patience, setup: Setup) {
+    let seed = |name, ms_: Option<u64>| match ms_ {
+        Some(n) => Patience::seeded(name, ms(n) / 2),
+        None => Patience::measuring(name),
+    };
+    *wait = seed(WAIT, setup.wait);
+    *hang = seed(HANG, setup.hang);
+}
+
+fn setup(seeds: usize, waiting: usize, wait: Option<u64>, hang: Option<u64>) -> Setup {
+    Setup {
+        limits: Limits {
+            seeds: NonZeroUsize::new(seeds).unwrap(),
+            waiting,
+        },
+        wait,
+        hang,
+    }
+}
+
+/// A pool whose waits start at `wait` and `hang` milliseconds.
+fn seeds(seeds: usize, waiting: usize, wait: u64, hang: u64) -> Seeds {
+    setup(seeds, waiting, Some(wait), Some(hang)).pool()
 }
 
 /// Starts a seed and reports it up at `now`, with no create waiting.
@@ -78,7 +112,8 @@ enum Phase {
         served: bool,
     },
     Busy {
-        until: Duration,
+        since: Duration,
+        until: Option<Duration>,
         unclaimed: Option<Ticket>,
     },
 }
@@ -88,21 +123,25 @@ enum Phase {
 /// nothing itself: it takes the pool's seeds and tickets once the test has checked each is new, and the pool's choice
 /// of slot or seed once the test has checked the design allows it.
 struct Oracle {
-    limits: Limits,
     seeds: Vec<Option<(SeedId, Phase)>>,
     up_before: Vec<bool>,
-    line: Vec<(Ticket, Duration)>,
+    line: Vec<(Ticket, Duration, Option<Duration>)>,
     answered: Vec<(Ticket, Result<SeedId, Refused>)>,
     asking: bool,
     counts: Counts,
     handed: Vec<u64>,
+    /// The line's wait and the hang bound, each twice the slowest answer recorded (`crate::patience`, tested on its
+    /// own): from each wait that ends in a seed and each create a seed is done with; no sample from a wait that ran
+    /// out or a seed that died or hung.
+    wait: Patience,
+    hang: Patience,
 }
 
 impl Oracle {
-    fn new(limits: Limits) -> Self {
+    fn new(setup: Setup) -> Self {
+        let limits = setup.limits;
         let slots = limits.seeds.get();
         Self {
-            limits,
             seeds: vec![None; slots],
             up_before: vec![false; slots],
             line: Vec::new(),
@@ -110,7 +149,15 @@ impl Oracle {
             asking: true,
             counts: Counts::default(),
             handed: vec![0; slots],
+            wait: Patience::measuring(WAIT),
+            hang: Patience::measuring(HANG),
         }
+        .calibrated(setup)
+    }
+
+    fn calibrated(mut self, setup: Setup) -> Self {
+        calibrate(&mut self.wait, &mut self.hang, setup);
+        self
     }
 
     fn phase(&self, seed: SeedId) -> Option<Phase> {
@@ -144,8 +191,15 @@ impl Oracle {
     }
 
     fn hand(&mut self, seed: SeedId, now: Duration, unclaimed: Option<Ticket>) {
-        let until = now + self.limits.hang;
-        self.set(seed, Some(Phase::Busy { until, unclaimed }));
+        let until = self.hang.deadline().map(|hang| now + hang);
+        self.set(
+            seed,
+            Some(Phase::Busy {
+                since: now,
+                until,
+                unclaimed,
+            }),
+        );
         self.counts.handed += 1;
         self.handed[seed.slot] += 1;
         let busy = self.with(|p| matches!(p, Phase::Busy { .. })).len() as u64;
@@ -161,15 +215,16 @@ impl Oracle {
         seen: &mut Paths,
     ) -> Option<Ticket> {
         while !self.line.is_empty() {
-            let (ticket, until) = self.line.remove(0);
-            if now < until {
+            let (ticket, since, until) = self.line.remove(0);
+            if until.is_none_or(|u| now < u) {
+                self.wait.answered(now - since);
                 self.hand(seed, now, Some(ticket));
                 self.answered.push((ticket, Ok(seed)));
                 return Some(ticket);
             }
             self.counts.refused_waited += 1;
             seen.refused_in_line += 1;
-            let wait = self.limits.wait;
+            let wait = until.unwrap() - since;
             self.answered.push((ticket, Err(Refused::Waited { wait })));
         }
         self.set(seed, Some(Phase::Idle { served }));
@@ -200,6 +255,7 @@ struct Paths {
     line_full: usize,
     refused_at_claim: usize,
     refused_in_line: usize,
+    refused_on_failed_start: usize,
     claim_waits: usize,
     claim_seed: usize,
     claim_died: usize,
@@ -239,9 +295,10 @@ fn handing(
 
 /// Plays `events` on a pool of `limits` and on the oracle, and checks the pool after each against the oracle and
 /// against the shell's own record of what it was given.
-fn play(limits: Limits, events: &[Event], paths: &Cell<Paths>) -> Result<(), TestCaseError> {
-    let mut pool = Seeds::new(limits);
-    let mut oracle = Oracle::new(limits);
+fn play(setup: Setup, events: &[Event], paths: &Cell<Paths>) -> Result<(), TestCaseError> {
+    let limits = setup.limits;
+    let mut pool = setup.pool();
+    let mut oracle = Oracle::new(setup);
     let mut seen = paths.get();
     let mut now = Duration::ZERO;
     let bound = limits.seeds.get();
@@ -319,7 +376,7 @@ fn play(limits: Limits, events: &[Event], paths: &Cell<Paths>) -> Result<(), Tes
                 let Some(seed) = pick(k, &oracle.with(|p| p == Phase::Starting), &issued) else {
                     continue;
                 };
-                let got = pool.start_failed(seed);
+                let got = pool.start_failed(seed, now);
                 match oracle.phase(seed) {
                     None => {
                         seen.gone += 1;
@@ -330,7 +387,20 @@ fn play(limits: Limits, events: &[Event], paths: &Cell<Paths>) -> Result<(), Tes
                         oracle.counts.start_failed += 1;
                         oracle.asking = false;
                         seen.start_failed += 1;
-                        prop_assert_eq!(got, Ok(()));
+                        // With no seed up or starting, none can come for the line: each create in it is refused.
+                        let none_left = oracle.seeds.iter().all(Option::is_none);
+                        let refuse = none_left && !oracle.line.is_empty();
+                        if refuse {
+                            for (ticket, since, _) in std::mem::take(&mut oracle.line) {
+                                oracle.counts.refused_waited += 1;
+                                seen.refused_on_failed_start += 1;
+                                let wait = now - since;
+                                oracle
+                                    .answered
+                                    .push((ticket, Err(Refused::Waited { wait })));
+                            }
+                        }
+                        prop_assert_eq!(got, Ok(refuse));
                         prop_assert!(starting.remove(&seed));
                     }
                     Some(_) => {
@@ -373,8 +443,8 @@ fn play(limits: Limits, events: &[Event], paths: &Cell<Paths>) -> Result<(), Tes
                         "ticket {} doesn't come after every earlier one",
                         ticket
                     );
-                    prop_assert_eq!(until, now + limits.wait);
-                    oracle.line.push((ticket, until));
+                    prop_assert_eq!(until, oracle.wait.deadline().map(|wait| now + wait));
+                    oracle.line.push((ticket, now, until));
                     oracle.counts.waited += 1;
                     tickets.push(ticket);
                     seen.waited += 1;
@@ -389,7 +459,7 @@ fn play(limits: Limits, events: &[Event], paths: &Cell<Paths>) -> Result<(), Tes
                 let held: Vec<Ticket> = oracle
                     .line
                     .iter()
-                    .map(|(t, _)| *t)
+                    .map(|(t, _, _)| *t)
                     .chain(oracle.answered.iter().map(|(t, _)| *t))
                     .collect();
                 let Some(ticket) = pick(k, &held, &tickets) else {
@@ -399,13 +469,20 @@ fn play(limits: Limits, events: &[Event], paths: &Cell<Paths>) -> Result<(), Tes
                 if let Some(i) = oracle.answered.iter().position(|(t, _)| *t == ticket) {
                     match oracle.answered.remove(i).1 {
                         Ok(seed) => {
-                            let Some(Phase::Busy { until, .. }) = oracle.phase(seed) else {
+                            let Some(Phase::Busy { since, until, .. }) = oracle.phase(seed) else {
                                 return Err(TestCaseError::fail(format!(
                                     "ticket {ticket} was handed {seed}, which serves nothing"
                                 )));
                             };
                             let unclaimed = None;
-                            oracle.set(seed, Some(Phase::Busy { until, unclaimed }));
+                            oracle.set(
+                                seed,
+                                Some(Phase::Busy {
+                                    since,
+                                    until,
+                                    unclaimed,
+                                }),
+                            );
                             seen.claim_seed += 1;
                             prop_assert_eq!(got, Ok(Claim::Seed(seed)));
                         }
@@ -418,16 +495,16 @@ fn play(limits: Limits, events: &[Event], paths: &Cell<Paths>) -> Result<(), Tes
                             prop_assert_eq!(got, Ok(Claim::Refused(refused)));
                         }
                     }
-                } else if let Some(i) = oracle.line.iter().position(|(t, _)| *t == ticket) {
-                    let until = oracle.line[i].1;
-                    if now < until {
+                } else if let Some(i) = oracle.line.iter().position(|(t, _, _)| *t == ticket) {
+                    let (_, since, until) = oracle.line[i];
+                    if until.is_none_or(|u| now < u) {
                         seen.claim_waits += 1;
                         prop_assert_eq!(got, Ok(Claim::Wait { until }));
                     } else {
                         oracle.line.remove(i);
                         oracle.counts.refused_waited += 1;
                         seen.refused_at_claim += 1;
-                        let wait = limits.wait;
+                        let wait = until.unwrap() - since;
                         prop_assert_eq!(got, Ok(Claim::Refused(Refused::Waited { wait })));
                     }
                 } else {
@@ -455,9 +532,12 @@ fn play(limits: Limits, events: &[Event], paths: &Cell<Paths>) -> Result<(), Tes
                         prop_assert_eq!(got, Err(Stale::Gone(seed)));
                     }
                     Some(Phase::Busy {
-                        unclaimed: None, ..
+                        since,
+                        unclaimed: None,
+                        ..
                     }) => {
                         oracle.counts.done += 1;
+                        oracle.hang.answered(now - since);
                         prop_assert!(serving.remove(&seed));
                         let want = oracle.free(seed, now, true, &mut seen);
                         prop_assert_eq!(got, Ok(want));
@@ -513,7 +593,7 @@ fn play(limits: Limits, events: &[Event], paths: &Cell<Paths>) -> Result<(), Tes
             }
             Event::Hung => {
                 let mut late: BTreeSet<SeedId> = oracle
-                    .with(|p| matches!(p, Phase::Busy { until, .. } if until <= now))
+                    .with(|p| matches!(p, Phase::Busy { until: Some(until), .. } if until <= now))
                     .into_iter()
                     .collect();
                 // Each answer takes a seed out of its slot, so the pool answers at most once a slot before `None`.
@@ -526,12 +606,17 @@ fn play(limits: Limits, events: &[Event], paths: &Cell<Paths>) -> Result<(), Tes
                         "took {} for hung, but it isn't past its bound",
                         seed
                     );
-                    let Some(Phase::Busy { unclaimed, .. }) = oracle.phase(seed) else {
+                    let Some(Phase::Busy {
+                        since,
+                        until,
+                        unclaimed,
+                    }) = oracle.phase(seed)
+                    else {
                         return Err(TestCaseError::fail(format!(
                             "{seed} was hung serving nothing"
                         )));
                     };
-                    let hang = limits.hang;
+                    let hang = until.unwrap() - since;
                     prop_assert_eq!(refused, Refused::Hung { seed, hang });
                     oracle.set(seed, None);
                     oracle.counts.hung += 1;
@@ -550,6 +635,10 @@ fn play(limits: Limits, events: &[Event], paths: &Cell<Paths>) -> Result<(), Tes
         let counts = pool.counts();
         prop_assert_eq!(counts, oracle.counts);
         prop_assert_eq!(pool.handed(), &oracle.handed[..]);
+        prop_assert_eq!(
+            pool.deadlines(),
+            (oracle.wait.deadline(), oracle.hang.deadline())
+        );
         prop_assert_eq!(pool.wanted(), oracle.wanted());
         prop_assert_eq!(pool.starting(), starting.len());
         prop_assert_eq!(pool.idle() + pool.busy(), up.len());
@@ -613,12 +702,18 @@ fn event() -> impl Strategy<Value = Event> {
     ]
 }
 
-/// Small pools, short lines and short bounds, which histories fill, cross and drain often; and the node's own.
-fn bounds() -> impl Strategy<Value = Limits> {
+/// Small pools, short lines and short waits, which histories fill, cross and drain often, calibrated and not; and
+/// a node's first-start pool of one seed, measuring.
+fn bounds() -> impl Strategy<Value = Setup> {
     prop_oneof![
-        8 => (1usize..=4, 0usize..=3, 0u64..=20, 0u64..=40)
-            .prop_map(|(seeds, waiting, wait, hang)| limits(seeds, waiting, wait, hang)),
-        1 => Just(LIMITS),
+        8 => (
+            1usize..=4,
+            0usize..=3,
+            proptest::option::of(0u64..=20),
+            proptest::option::of(0u64..=40),
+        )
+            .prop_map(|(seeds, waiting, wait, hang)| setup(seeds, waiting, wait, hang)),
+        1 => (0usize..=256).prop_map(|waiting| setup(1, waiting, None, None)),
     ]
 }
 
@@ -636,7 +731,7 @@ fn against_an_oracle_no_create_meets_a_busy_or_gone_seed_the_bound_holds_and_the
         ..Config::default()
     });
     let histories = (bounds(), proptest::collection::vec(event(), 0..200));
-    if let Err(e) = runner.run(&histories, |(limits, events)| play(limits, &events, &paths)) {
+    if let Err(e) = runner.run(&histories, |(setup, events)| play(setup, &events, &paths)) {
         panic!("{e}");
     }
     let p = paths.get();
@@ -659,6 +754,10 @@ fn against_an_oracle_no_create_meets_a_busy_or_gone_seed_the_bound_holds_and_the
         (
             "a create refused in line as a seed freed",
             p.refused_in_line,
+        ),
+        (
+            "a create refused in line as the last start failed",
+            p.refused_on_failed_start,
         ),
         ("a claim told to wait on", p.claim_waits),
         ("a claim handed its seed", p.claim_seed),
@@ -689,7 +788,7 @@ fn against_an_oracle_no_create_meets_a_busy_or_gone_seed_the_bound_holds_and_the
 /// line full, a create is refused by type at once.
 #[test]
 fn a_create_is_refused_by_type_when_every_seed_is_busy_past_the_wait_bound() {
-    let mut pool = Seeds::new(limits(2, 2, 10, 1_000));
+    let mut pool = seeds(2, 2, 10, 1_000);
     up(&mut pool, ms(0));
     up(&mut pool, ms(0));
     let Ok(Admit::Seed(first)) = pool.create(ms(0)) else {
@@ -703,12 +802,17 @@ fn a_create_is_refused_by_type_when_every_seed_is_busy_past_the_wait_bound() {
     else {
         panic!("a create with every seed busy didn't wait");
     };
-    assert_eq!(until, ms(11));
+    assert_eq!(until, Some(ms(11)));
     let Ok(Admit::Wait { ticket: next, .. }) = pool.create(ms(5)) else {
         panic!("a create with every seed busy didn't wait");
     };
     assert_eq!(pool.create(ms(5)), Err(Refused::Busy { waiting: 2 }));
-    assert_eq!(pool.claim(late, ms(10)), Ok(Claim::Wait { until: ms(11) }));
+    assert_eq!(
+        pool.claim(late, ms(10)),
+        Ok(Claim::Wait {
+            until: Some(ms(11))
+        })
+    );
     assert_eq!(
         pool.claim(late, ms(11)),
         Ok(Claim::Refused(Refused::Waited { wait: ms(10) }))
@@ -736,7 +840,7 @@ fn a_create_is_refused_by_type_when_every_seed_is_busy_past_the_wait_bound() {
 /// handed the new seed. A waiting create handed a seed that dies before it claims meets the refusal at its claim.
 #[test]
 fn a_seed_that_dies_mid_create_refuses_that_create_and_is_restarted_and_counted() {
-    let mut pool = Seeds::new(limits(1, 4, 1_000, 1_000));
+    let mut pool = seeds(1, 4, 1_000, 1_000);
     let first = up(&mut pool, ms(0));
     assert_eq!(pool.create(ms(1)), Ok(Admit::Seed(first)));
     assert_eq!(pool.died(first), Ok(Some(Refused::Died { seed: first })));
@@ -772,7 +876,7 @@ fn a_seed_that_dies_mid_create_refuses_that_create_and_is_restarted_and_counted(
 /// at its claim, and the late report of the create it served finds it gone.
 #[test]
 fn a_seed_busy_past_the_hang_bound_is_taken_for_hung_and_its_create_refused() {
-    let mut pool = Seeds::new(limits(1, 4, 1_000, 30));
+    let mut pool = seeds(1, 4, 1_000, 30);
     let first = up(&mut pool, ms(0));
     assert_eq!(pool.create(ms(0)), Ok(Admit::Seed(first)));
     let Ok(Admit::Wait { ticket, .. }) = pool.create(ms(5)) else {
@@ -807,7 +911,7 @@ fn a_seed_busy_past_the_hang_bound_is_taken_for_hung_and_its_create_refused() {
 /// takes it at once.
 #[test]
 fn seeds_go_to_the_waiting_creates_in_the_order_they_came() {
-    let mut pool = Seeds::new(limits(1, 8, 10, 1_000));
+    let mut pool = seeds(1, 8, 10, 1_000);
     let seed = up(&mut pool, ms(0));
     assert_eq!(pool.create(ms(0)), Ok(Admit::Seed(seed)));
     let mut wait = |at| match pool.create(ms(at)) {
@@ -832,9 +936,9 @@ fn seeds_go_to_the_waiting_creates_in_the_order_they_came() {
 /// create; a seed that dies after serving one has its slot asked for at once.
 #[test]
 fn a_failed_start_or_a_seed_dead_before_serving_stops_the_starting_until_the_next_create() {
-    let mut pool = Seeds::new(limits(2, 4, 1_000, 1_000));
+    let mut pool = seeds(2, 4, 1_000, 1_000);
     let failed = pool.start().unwrap();
-    assert_eq!(pool.start_failed(failed), Ok(()));
+    assert_eq!(pool.start_failed(failed, ms(0)), Ok(false));
     assert_eq!((pool.wanted(), pool.start()), (0, None));
     let Ok(Admit::Wait { ticket, .. }) = pool.create(ms(0)) else {
         panic!("a create with no seed up didn't wait");
@@ -863,7 +967,7 @@ fn a_failed_start_or_a_seed_dead_before_serving_stops_the_starting_until_the_nex
 /// fills a slot of its own.
 #[test]
 fn a_pool_asks_for_its_slots_and_no_more() {
-    let mut pool = Seeds::new(limits(3, 0, 0, 0));
+    let mut pool = seeds(3, 0, 0, 0);
     assert_eq!(pool.wanted(), 3);
     let seeds: Vec<SeedId> = (0..3).map(|_| pool.start().unwrap()).collect();
     assert_eq!((pool.wanted(), pool.start()), (0, None));
@@ -876,7 +980,7 @@ fn a_pool_asks_for_its_slots_and_no_more() {
 /// a report out of order is refused by type, as is a claim with a ticket no create holds.
 #[test]
 fn a_late_or_out_of_order_report_is_refused_by_type() {
-    let mut pool = Seeds::new(limits(1, 4, 1_000, 1_000));
+    let mut pool = seeds(1, 4, 1_000, 1_000);
     let old = up(&mut pool, ms(0));
     let serving = "serving a create that holds it";
     assert_eq!(
@@ -891,13 +995,13 @@ fn a_late_or_out_of_order_report_is_refused_by_type() {
         expected: "starting",
     };
     assert_eq!(pool.started(old, ms(0)), Err(starting));
-    assert_eq!(pool.start_failed(old), Err(starting));
+    assert_eq!(pool.start_failed(old, ms(0)), Err(starting));
     assert_eq!(pool.create(ms(0)), Ok(Admit::Seed(old)));
     assert_eq!(pool.died(old), Ok(Some(Refused::Died { seed: old })));
     let new = pool.start().unwrap();
     for late in [
         pool.started(old, ms(1)).map(|_| ()),
-        pool.start_failed(old),
+        pool.start_failed(old, ms(1)).map(|_| ()),
         pool.done(old, ms(1)).map(|_| ()),
         pool.died(old).map(|_| ()),
     ] {
@@ -907,4 +1011,133 @@ fn a_late_or_out_of_order_report_is_refused_by_type() {
     assert_eq!(pool.started(new, ms(2)), Ok(None));
     assert_eq!(pool.create(ms(2)), Ok(Admit::Seed(new)));
     assert_eq!(pool.claim(Ticket(7), ms(2)), Err(Stale::Ticket(Ticket(7))));
+}
+
+/// HEX-SEEDS-1 under Ada's rule of 2026-11-06 (AC-T7.1.3): `SEEDS`' 32 was the bench's width and fedora's cores; a
+/// node's seeds now start at its parallelism and grow with the creates that find none free, up to the bound derived
+/// from its memory. Do: a pool of 1 slot at first, at most 3, and four creates, each seed started as the pool asks.
+/// Expect: the second and third creates each add a slot to start, so each is handed a seed of its own; the fourth,
+/// past the bound, waits and adds none; the slots never pass the bound.
+#[test]
+fn a_growing_pool_adds_a_slot_for_each_create_that_finds_none_free_up_to_its_bound() {
+    let mut pool = Seeds::growing(setup(3, 8, None, None).limits, 1);
+    assert_eq!(pool.wanted(), 1);
+    up(&mut pool, ms(0));
+    assert!(matches!(pool.create(ms(1)), Ok(Admit::Seed(_))));
+    for n in 2..=3 {
+        let Ok(Admit::Wait { ticket, .. }) = pool.create(ms(n)) else {
+            panic!("create {n} found a seed idle");
+        };
+        assert_eq!(pool.wanted(), 1, "create {n} added a slot to start");
+        let seed = pool.start().unwrap();
+        assert_eq!(pool.started(seed, ms(n)), Ok(Some(ticket)));
+        assert!(matches!(pool.claim(ticket, ms(n)), Ok(Claim::Seed(s)) if s == seed));
+    }
+    assert!(matches!(pool.create(ms(4)), Ok(Admit::Wait { .. })));
+    assert_eq!(pool.wanted(), 0, "past the bound no slot is added");
+    assert_eq!(pool.handed().len(), 3);
+    assert_eq!(
+        pool.counts().waited,
+        3,
+        "each create that found none free is counted"
+    );
+}
+
+/// Decision 9 (Ada's 2026-11-06 rule, the lead's failure-bound rule; AC-T7.1.3): the line's wait and the hang bound
+/// are each twice the larger of the record's slowest answer and the slowest the pool has seen. Do: on a pool of one
+/// seed whose record's slowest is 2 ms, serve a create for 4 ms while another waits 3 ms in line; let the second's
+/// seed pass its bound; then let a create's wait in line end. Expect: the first waits within the record's 4 ms, then
+/// the hang bound 8 ms and the line's wait 6 ms; the seed taken for hung at 8 ms and not before; the create refused
+/// after 6 ms; neither wait moved by the hang or the refusal, which are no samples.
+#[test]
+fn the_wait_and_the_hang_bound_are_twice_the_slowest_answer() {
+    let mut pool = seeds(1, 4, 4, 4);
+    let seed = up(&mut pool, ms(0));
+    assert_eq!(pool.deadlines(), (Some(ms(4)), Some(ms(4))));
+    assert_eq!(pool.create(ms(0)), Ok(Admit::Seed(seed)));
+    assert_eq!(
+        pool.until(seed),
+        Ok(Some(ms(4))),
+        "the first clone's wait is the record's"
+    );
+    let Ok(Admit::Wait { ticket, until }) = pool.create(ms(1)) else {
+        panic!("a create with its only seed busy didn't wait");
+    };
+    assert_eq!(until, Some(ms(5)));
+    assert_eq!(pool.done(seed, ms(4)), Ok(Some(ticket)));
+    assert_eq!(pool.deadlines(), (Some(ms(6)), Some(ms(8))));
+    assert_eq!(pool.claim(ticket, ms(4)), Ok(Claim::Seed(seed)));
+    assert_eq!(pool.until(seed), Ok(Some(ms(12))));
+    assert_eq!(pool.hung(ms(11)), None);
+    let hung = Refused::Hung { seed, hang: ms(8) };
+    assert_eq!(pool.hung(ms(12)), Some((seed, hung)));
+    assert_eq!(pool.deadlines(), (Some(ms(6)), Some(ms(8))));
+
+    let next = pool.start().unwrap();
+    assert_eq!(pool.started(next, ms(12)), Ok(None));
+    assert_eq!(pool.create(ms(12)), Ok(Admit::Seed(next)));
+    let Ok(Admit::Wait { ticket, until }) = pool.create(ms(12)) else {
+        panic!("a create with its only seed busy didn't wait");
+    };
+    assert_eq!(until, Some(ms(18)));
+    assert_eq!(
+        pool.claim(ticket, ms(18)),
+        Ok(Claim::Refused(Refused::Waited { wait: ms(6) }))
+    );
+    assert_eq!(pool.deadlines(), (Some(ms(6)), Some(ms(8))));
+}
+
+/// A failed start with no seed up or starting refuses the line at once, since no seed can come for it. Do: on a new
+/// pool of one slot, fail its start with a create waiting unarmed in line. Expect: the create refused, its wait the
+/// time it waited; the line empty.
+#[test]
+fn a_failed_start_with_no_seed_left_refuses_the_line() {
+    let mut pool = setup(1, 4, None, None).pool();
+    let Ok(Admit::Wait {
+        ticket,
+        until: None,
+    }) = pool.create(ms(0))
+    else {
+        panic!("a create with no seed up didn't wait unarmed");
+    };
+    let failed = pool.start().unwrap();
+    assert_eq!(pool.start_failed(failed, ms(3)), Ok(true));
+    assert_eq!(
+        pool.claim(ticket, ms(3)),
+        Ok(Claim::Refused(Refused::Waited { wait: ms(3) }))
+    );
+    assert_eq!(pool.waiting(), 0);
+}
+
+/// Decision 9 (the lead's failure-bound rule, by build profile; AC-T7.1.3): before any answer of its own, a node's pool
+/// bounds its waits from its build's record. Do: open a pool with the node's seeds; then one seeded from the release
+/// record, serve a create for 1 ms, then one 5 ms slower than that record's slowest. Expect: the node's pool armed at
+/// once, both waits at twice its build's slowest recorded answer ([`CLONE_SLOWEST_DEBUG`] in a debug build,
+/// [`CLONE_SLOWEST`] in a release one: the waits census's runs 1 and 3), no calibration read; the seeded pool's at twice
+/// [`CLONE_SLOWEST`], the fast answer leaving the hang bound there, the slow one raising it to twice its own; the
+/// line's wait untouched.
+#[test]
+fn a_pools_waits_are_seeded_from_the_record_and_only_rise() {
+    let built = if cfg!(debug_assertions) {
+        CLONE_SLOWEST_DEBUG
+    } else {
+        CLONE_SLOWEST
+    };
+    let armed = Some(built * 2);
+    assert_eq!(
+        Seeds::new(setup(1, 4, None, None).limits).deadlines(),
+        (armed, armed)
+    );
+    let record = Some(CLONE_SLOWEST * 2);
+    let mut pool = Seeds::new(setup(1, 4, None, None).limits).seeded(CLONE_SLOWEST);
+    assert_eq!(pool.deadlines(), (record, record));
+    let seed = up(&mut pool, ms(0));
+    assert_eq!(pool.create(ms(0)), Ok(Admit::Seed(seed)));
+    assert_eq!(pool.until(seed), Ok(record));
+    assert_eq!(pool.done(seed, ms(1)), Ok(None));
+    assert_eq!(pool.deadlines(), (record, record));
+    let slow = CLONE_SLOWEST + ms(5);
+    assert_eq!(pool.create(ms(1)), Ok(Admit::Seed(seed)));
+    assert_eq!(pool.done(seed, ms(1) + slow), Ok(None));
+    assert_eq!(pool.deadlines(), (record, Some(slow * 2)));
 }
