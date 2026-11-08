@@ -1,0 +1,60 @@
+// bench/competitive/probes: by which kernel path the teardown of earlier boxes, or anything else, delays a create
+// (goal 16; create_tail.md). Run by create_tail_whose.sh beside create_tail.sh, in a privileged container, with the
+// create CPUs' first and last as $1 and $2. Lock contention on cgroup_mutex and cgroup_threadgroup_rwsem; where
+// css_killed_work_fn is queued and runs, and what each controller's offline costs; every kworker item and softirq on
+// the create CPUs; each preemption of the create's threads, by whether css_killed_work_fn ran on that CPU meanwhile;
+// off-CPU stacks over 500 us. g5rec's g16.bt (fedora, 2026-11-06), its CPUs made parameters.
+BEGIN { printf("whose attached\n"); }
+
+tracepoint:lock:contention_begin
+/ (uint64)args.lock_addr == kaddr("cgroup_mutex") || (uint64)args.lock_addr == kaddr("cgroup_threadgroup_rwsem") /
+{ @cb[tid] = nsecs; @cm[tid] = (uint64)args.lock_addr == kaddr("cgroup_mutex") ? 1 : 2; }
+tracepoint:lock:contention_end / @cb[tid] /
+{
+  $d = (nsecs - @cb[tid]) / 1000;
+  if (@cm[tid] == 1) { @mutex_wait_us[comm] = hist($d); @mutex_wait_total_us[comm] = sum($d); }
+  else { @tgrwsem_wait_us[comm] = hist($d); @tgrwsem_wait_total_us[comm] = sum($d); }
+  if ($d > 200) { @slow_lock_wait[comm, @cm[tid], kstack(10)] = sum($d); }
+  delete(@cb[tid]); delete(@cm[tid]);
+}
+
+tracepoint:workqueue:workqueue_queue_work / (uint64)args.function == kaddr("css_killed_work_fn") /
+{ @kill_queued_on_cpu[args.cpu] = count(); @kill_queued_by[comm] = count(); }
+
+kprobe:css_killed_work_fn { @kws[tid] = nsecs; @kwn[cpu] = @kwn[cpu] + 1; }
+kretprobe:css_killed_work_fn / @kws[tid] /
+{ $d = (nsecs - @kws[tid]) / 1000; @kill_work_us = hist($d); @kill_work_cpu_us[cpu] = sum($d); delete(@kws[tid]); }
+kprobe:mem_cgroup_css_offline { @t1[tid] = nsecs; }
+kretprobe:mem_cgroup_css_offline / @t1[tid] / { @memcg_offline_us = hist((nsecs - @t1[tid]) / 1000); delete(@t1[tid]); }
+kprobe:drain_all_stock { @t2[tid] = nsecs; }
+kretprobe:drain_all_stock / @t2[tid] / { @drain_all_stock_us = hist((nsecs - @t2[tid]) / 1000); delete(@t2[tid]); }
+kprobe:lru_gen_offline_memcg { @t3[tid] = nsecs; }
+kretprobe:lru_gen_offline_memcg / @t3[tid] / { @lru_gen_offline_us = hist((nsecs - @t3[tid]) / 1000); delete(@t3[tid]); }
+kprobe:cpu_cgroup_css_offline { @t4[tid] = nsecs; }
+kretprobe:cpu_cgroup_css_offline / @t4[tid] / { @cpu_offline_us = hist((nsecs - @t4[tid]) / 1000); delete(@t4[tid]); }
+kprobe:blkcg_css_offline { @t5[tid] = nsecs; }
+kretprobe:blkcg_css_offline / @t5[tid] / { @blkcg_offline_us = hist((nsecs - @t5[tid]) / 1000); delete(@t5[tid]); }
+
+tracepoint:workqueue:workqueue_execute_start / cpu >= $1 && cpu <= $2 / { @ws[tid] = nsecs; @wf[tid] = (uint64)args.function; }
+tracepoint:workqueue:workqueue_execute_end / @ws[tid] /
+{ @work_on_create_cpus_us[ksym(@wf[tid])] = sum((nsecs - @ws[tid]) / 1000); @work_on_create_cpus_n[ksym(@wf[tid])] = count(); delete(@ws[tid]); delete(@wf[tid]); }
+tracepoint:irq:softirq_entry / cpu >= $1 && cpu <= $2 / { @si[cpu] = nsecs; @sv[cpu] = args.vec; }
+tracepoint:irq:softirq_exit / cpu >= $1 && cpu <= $2 && @si[cpu] / { @softirq_on_create_cpus_us[@sv[cpu]] = sum((nsecs - @si[cpu]) / 1000); delete(@si[cpu]); }
+
+tracepoint:sched:sched_switch
+{
+  if (args.prev_comm == "seam_oci" || args.prev_comm == "hex" || args.prev_comm == "sleep" || args.prev_comm == "true") {
+    @out[args.prev_pid] = nsecs; @outcpu[args.prev_pid] = cpu; @outkw[args.prev_pid] = @kwn[cpu]; @outst[args.prev_pid] = args.prev_state;
+    if (args.prev_state == 0) { @preempted_by[args.prev_comm, args.next_comm] = count(); }
+    else { @outstack[args.prev_pid] = kstack(14); }
+  }
+  if (@out[args.next_pid]) {
+    $d = (nsecs - @out[args.next_pid]) / 1000;
+    if (@outst[args.next_pid] == 0) {
+      if (@kwn[@outcpu[args.next_pid]] > @outkw[args.next_pid]) { @preempt_css_kill_ran_us = hist($d); @preempt_css_kill_ran_total_us = sum($d); }
+      else { @preempt_other_us = hist($d); @preempt_other_total_us = sum($d); }
+    } else if ($d > 500) { @offcpu_slow_us[args.next_comm, @outstack[args.next_pid]] = sum($d); }
+    delete(@out[args.next_pid]); delete(@outcpu[args.next_pid]); delete(@outkw[args.next_pid]); delete(@outst[args.next_pid]); delete(@outstack[args.next_pid]);
+  }
+}
+END { clear(@cb); clear(@cm); clear(@kws); clear(@ws); clear(@wf); clear(@si); clear(@sv); clear(@out); clear(@outcpu); clear(@outkw); clear(@outst); clear(@outstack); clear(@t1); clear(@t2); clear(@t3); clear(@t4); clear(@t5); }
