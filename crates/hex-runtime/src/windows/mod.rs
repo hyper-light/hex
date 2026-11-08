@@ -996,6 +996,47 @@ mod tests {
         assert!(own, "the node keeps its records in {:?}", rt.scratch_root);
     }
 
+    /// T-T7.1.2 (native plan step 8): a box taken back after its node AND its keeper both went — its job
+    /// outliving them, as an `oci` box's container does (a `process` box's is modelled here by a handle the
+    /// test holds, since kill-on-close would end a real one) — is re-held by the taking-back node's keeper,
+    /// which isn't the one its record names. Do: make a box, hold its job apart (the "survives both-gone"
+    /// stand-in), drop the node and crash its keeper, take the box back on a new node, then drop that node
+    /// and the stand-in handle. Expect: the box's program still runs, held by the new keeper; before the
+    /// re-holding fix the new keeper never held it, so it ended here.
+    #[test]
+    fn a_box_taken_back_after_a_both_gone_crash_is_re_held_by_the_new_keeper() {
+        let (name, state) = (node("regone"), tempfile::tempdir().unwrap());
+        let spec = process_box("regone");
+        let rt = WinRuntime::outliving(&name, state.path(), &keeper("regone")).unwrap();
+        rt.create(spec.clone()).unwrap();
+        let pid = rt.exec(&spec.id, waiting(), Stdio::null()).unwrap().pid();
+        let first = rt.keeper_pid().expect("a keeper holds the node's boxes");
+        // A third handle to the box's job, so it outlives node and keeper both going, as an oci container
+        // outlives them through HCS.
+        let held = sys::Job::open(&format!("Local\\hex-{name}-regone"))
+            .unwrap()
+            .expect("the box's named job");
+        drop(rt);
+        crash(first);
+        wait_for("the first keeper to end", || !alive(first));
+        assert!(alive(pid), "the box's program ended though its job was still held");
+        let rt = WinRuntime::outliving(&name, state.path(), &keeper("regone")).unwrap();
+        let second = rt.keeper_pid().expect("a new keeper holds the node's boxes");
+        assert_ne!(second, first, "the new node adopted the gone keeper");
+        rt.adopt(&spec).unwrap();
+        assert_eq!(rt.inspect(&spec.id).unwrap().state, BoxState::Running);
+        // The stand-in handle and the new node both go: only the new keeper can keep the box now.
+        drop(held);
+        drop(rt);
+        assert!(
+            alive(pid),
+            "the taken-back box ended when its node went, so the new keeper never re-held its job"
+        );
+        // Ends the box: the new keeper's handle is its last, so crashing it ends the program.
+        crash(second);
+        wait_for("the new keeper's end to end the program", || !alive(pid));
+    }
+
     /// A runtime driven in process keeps kill-on-close: do make a box, run a program, drop the runtime;
     /// expect the program ended with it.
     #[test]
