@@ -2,6 +2,12 @@
 //! with one worker, its guest a loopback stand-in for a Shards guest's relay whose answer to an inspect is
 //! held until the test lets it go. Client A's inspect of a box in the guest waits on the guest; client B's
 //! inspect of a host box is answered meanwhile, as no call the guest holds holds a worker.
+//!
+//! Native plan step 8, guest stdio (HEX-GUEST-41, HEX-RT-17 for a guest's box): through the same socket, a guest
+//! program's streams are the guest's own stdio connections, whose ends the node gives the caller's client with its
+//! answer. Asked for, they are the caller's; given as the caller's own pipes, the client copies between them, and the
+//! node copies no byte and keeps none of the caller's pipes. The stand-in's programs echo their stdin to their stdout,
+//! under a pid no host process has, so their ends come as the guest's messages.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 #![allow(
     clippy::unwrap_used,
@@ -12,13 +18,15 @@
     clippy::disallowed_macros
 )]
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Refusal, Runtime};
+use hex_api::{Ask, Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Refusal, Runtime, Stdio};
 use hex_core::record::ProcId;
 use hex_core::{stream, wire};
 use hex_node::recorded::{Recorded, Recover};
@@ -29,11 +37,18 @@ use hex_runtime::guest::{GuestConfig, GuestRuntime, WithGuest};
 /// instead of hanging it.
 const PATIENCE: Duration = Duration::from_secs(30);
 
-/// Whether the stand-in guest holds its answers to inspects, and how many it holds.
+/// The stand-in guest's programs' pid: past the highest any host gives, Linux's `PID_MAX_LIMIT` (4 << 20,
+/// include/linux/threads.h) and macOS's `PID_MAX` (99999, bsd/sys/proc_internal.h), as a guest program's pid
+/// names no process of its host.
+const GUEST_PID: u32 = (4 << 20) + 1;
+
+/// Whether the stand-in guest holds its answers to inspects, and how many it holds; and how many execs it
+/// started.
 #[derive(Default)]
 struct Gate {
     state: Mutex<(bool, usize)>,
     changed: Condvar,
+    execs: AtomicUsize,
 }
 
 impl Gate {
@@ -68,24 +83,115 @@ impl Gate {
     }
 }
 
-/// A guest's relay and node agent, on loopback: the connection's token, a hello's answer, and every
-/// inspect answered `NoSuchBox` once the gate lets it pass. Each dial is served on a thread of its own.
-fn relay(gate: Arc<Gate>, conns: Arc<Mutex<Vec<TcpStream>>>) -> std::net::SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    std::thread::spawn(move || {
-        for conn in listener.incoming() {
-            let Ok(conn) = conn else { return };
-            conns.lock().unwrap().push(conn.try_clone().unwrap());
-            let gate = Arc::clone(&gate);
-            std::thread::spawn(move || serve(conn, &gate));
-        }
-    });
-    addr
+/// The stand-in's stdio connections, by their exec (its control connection's token and its request id) and
+/// stream, until that exec's program takes them.
+#[derive(Default)]
+struct Stdios {
+    named: Mutex<BTreeMap<(u64, u64, stream::Stdio), TcpStream>>,
+    came: Condvar,
 }
 
-fn serve(mut conn: TcpStream, gate: &Gate) {
-    conn.write_all(&7u64.to_le_bytes()).unwrap();
+impl Stdios {
+    fn arrive(&self, named: stream::Named, conn: TcpStream) {
+        self.named
+            .lock()
+            .unwrap()
+            .insert((named.exec.conn, named.exec.id, named.stream), conn);
+        self.came.notify_all();
+    }
+
+    /// Stream `s` of exec `id` on the control connection `token`, waiting at most [`PATIENCE`] for it.
+    fn take(&self, token: u64, id: u64, s: stream::Stdio) -> Option<TcpStream> {
+        let deadline = Instant::now() + PATIENCE;
+        let mut named = self.named.lock().unwrap();
+        loop {
+            if let Some(conn) = named.remove(&(token, id, s)) {
+                return Some(conn);
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            named = self.came.wait_timeout(named, left).unwrap().0;
+        }
+    }
+}
+
+/// A guest's relay and node agent, on loopback: each control connection's own token first, a hello's answer,
+/// every inspect answered `NoSuchBox` once the gate lets it pass, and every exec started as a program that
+/// echoes its stdin to its stdout, its pid [`GUEST_PID`], its end sent once its stdin has ended. Its stdio
+/// connections come on a port of their own, named by their first bytes. Each dial is served on a thread of its
+/// own. The control port's address, then the stdio port's.
+fn relay(gate: Arc<Gate>, conns: Arc<Mutex<Vec<TcpStream>>>) -> (SocketAddr, SocketAddr) {
+    let control = TcpListener::bind("127.0.0.1:0").unwrap();
+    let stdio = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addrs = (control.local_addr().unwrap(), stdio.local_addr().unwrap());
+    let stdios = Arc::new(Stdios::default());
+    {
+        let (stdios, conns) = (Arc::clone(&stdios), Arc::clone(&conns));
+        std::thread::spawn(move || {
+            for conn in stdio.incoming() {
+                let Ok(mut conn) = conn else { return };
+                conns.lock().unwrap().push(conn.try_clone().unwrap());
+                let mut name = [0u8; stream::NAME_BYTES];
+                if conn.read_exact(&mut name).is_ok()
+                    && let Ok(named) = stream::read_name(&name)
+                {
+                    stdios.arrive(named, conn);
+                }
+            }
+        });
+    }
+    std::thread::spawn(move || {
+        let tokens = AtomicU64::new(7);
+        for conn in control.incoming() {
+            let Ok(conn) = conn else { return };
+            conns.lock().unwrap().push(conn.try_clone().unwrap());
+            let (gate, stdios) = (Arc::clone(&gate), Arc::clone(&stdios));
+            let token = tokens.fetch_add(1, Ordering::SeqCst);
+            std::thread::spawn(move || serve(conn, &gate, &stdios, token));
+        }
+    });
+    addrs
+}
+
+/// Writes `answer` to request `h` on the stand-in's control connection, framed.
+fn answer(writer: &Mutex<TcpStream>, h: wire::Header, answer: &wire::Answer) {
+    let version = if h.kind == 0x0001 {
+        wire::FIRST
+    } else {
+        h.version
+    };
+    let bytes = wire::answer(version, h.id, answer, wire::MAX_MESSAGE).unwrap();
+    let _ = writer
+        .lock()
+        .unwrap()
+        .write_all(&stream::frame(&bytes, wire::MAX_MESSAGE).unwrap());
+}
+
+/// Exec `h`'s program on the control connection `token`: its stdin to its stdout, to its end, then its own
+/// end, sent as the guest's message.
+fn echo(stdios: &Stdios, writer: &Mutex<TcpStream>, token: u64, h: wire::Header) {
+    let (Some(mut input), Some(mut output)) = (
+        stdios.take(token, h.id, stream::Stdio::In),
+        stdios.take(token, h.id, stream::Stdio::Out),
+    ) else {
+        return;
+    };
+    let _ = std::io::copy(&mut input, &mut output);
+    // Its sending half ends: the relay's list of connections holds another handle on it.
+    let _ = output.shutdown(Shutdown::Write);
+    answer(writer, h, &wire::Answer::Exited(Exit::Code(0)));
+}
+
+fn serve(conn: TcpStream, gate: &Gate, stdios: &Arc<Stdios>, token: u64) {
+    let writer = Arc::new(Mutex::new(conn.try_clone().unwrap()));
+    let mut conn = conn;
+    writer
+        .lock()
+        .unwrap()
+        .write_all(&token.to_le_bytes())
+        .unwrap();
     let mut deframer = stream::Deframer::new(wire::MAX_MESSAGE);
     let mut buf = [0u8; 4096];
     loop {
@@ -104,7 +210,7 @@ fn serve(mut conn: TcpStream, gate: &Gate) {
             let Ok((h, request)) = wire::read_request_apart(&message, wire::MAX_MESSAGE) else {
                 return;
             };
-            let answer = match request {
+            let said = match request {
                 wire::Request::Hello => wire::Answer::Hello(wire::Hello {
                     version: wire::VERSION,
                     classes: vec![hex_api::Class::Oci],
@@ -123,18 +229,20 @@ fn serve(mut conn: TcpStream, gate: &Gate) {
                     infos: Vec::new(),
                     more: false,
                 },
+                wire::Request::Call(wire::Call::Exec { .. }) => {
+                    gate.execs.fetch_add(1, Ordering::SeqCst);
+                    answer(&writer, h, &wire::Answer::Started { pid: GUEST_PID });
+                    let (stdios, writer) = (Arc::clone(stdios), Arc::clone(&writer));
+                    std::thread::spawn(move || echo(&stdios, &writer, token, h));
+                    continue;
+                }
+                // Not answered, as a node answers no release.
+                wire::Request::Release => continue,
                 other => wire::Answer::Refused(Refusal::Broken(format!(
                     "the stand-in guest serves no {other:?}"
                 ))),
             };
-            let version = if h.kind == 0x0001 {
-                wire::FIRST
-            } else {
-                h.version
-            };
-            let bytes = wire::answer(version, h.id, &answer, wire::MAX_MESSAGE).unwrap();
-            conn.write_all(&stream::frame(&bytes, wire::MAX_MESSAGE).unwrap())
-                .unwrap();
+            answer(&writer, h, &said);
         }
     }
 }
@@ -184,16 +292,22 @@ impl shards_api::Stream for Looped {
     }
 }
 
-/// A guest whose every port is the stand-in relay; ended once the test says so.
-struct LoopGuest(std::net::SocketAddr, Arc<std::sync::atomic::AtomicBool>);
+/// A guest whose ports are the stand-in relay's: its stdio port, and its control port for every other; ended
+/// once the test says so.
+struct LoopGuest(SocketAddr, SocketAddr, Arc<std::sync::atomic::AtomicBool>);
 
 impl shards_api::Guest for LoopGuest {
     fn connect(
         &self,
-        _port: u32,
+        port: u32,
         _patience: Duration,
     ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
-        Ok(Box::new(Looped(TcpStream::connect(self.0).unwrap())))
+        let to = if port == stream::STDIO_PORT {
+            self.1
+        } else {
+            self.0
+        };
+        Ok(Box::new(Looped(TcpStream::connect(to).unwrap())))
     }
 
     fn stop(&self) -> Result<(), shards_api::Refusal> {
@@ -201,7 +315,7 @@ impl shards_api::Guest for LoopGuest {
     }
 
     fn wait_for(&self, _: Duration) -> Result<Option<shards_api::End>, shards_api::Refusal> {
-        Ok(if self.1.load(std::sync::atomic::Ordering::SeqCst) {
+        Ok(if self.2.load(std::sync::atomic::Ordering::SeqCst) {
             Some(shards_api::End::Stopped)
         } else {
             None
@@ -260,9 +374,9 @@ impl shards_api::Guests for Shared {
     ) -> Result<Box<dyn shards_api::Guest>, shards_api::Refusal> {
         let ended = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let conns = Arc::new(Mutex::new(Vec::new()));
-        let addr = relay(Arc::clone(&self.0.0), Arc::clone(&conns));
+        let (control, stdio) = relay(Arc::clone(&self.0.0), Arc::clone(&conns));
         self.0.1.lock().unwrap().push((Arc::clone(&ended), conns));
-        Ok(Box::new(LoopGuest(addr, ended)))
+        Ok(Box::new(LoopGuest(control, stdio, ended)))
     }
 
     fn attach(
@@ -460,4 +574,312 @@ fn a_guest_booted_again_answers_on_the_loop_too() {
     drop(client);
     assert_eq!(guests.boots(), 2, "the ended guest wasn't booted again");
     held_holds_no_other(&socket, &gate, &here);
+}
+
+/// A node's socket over `Recorded<WithGuest<…>>`, its guest the stand-in behind `gate`: the test's folder, the
+/// socket's path and its server.
+fn node(gate: &Arc<Gate>) -> (tempfile::TempDir, PathBuf, Server) {
+    let dir = tempfile::Builder::new().prefix("gl-").tempdir().unwrap();
+    let node = WithGuest::new(
+        Host(hex_api::sim::SimRuntime::new()),
+        GuestRuntime::new(
+            Arc::new(Shared(Arc::new(LoopGuests::new(Arc::clone(gate))))),
+            config(),
+        ),
+    )
+    .unwrap();
+    let node = Recorded::open(node, &dir.path().join("state")).unwrap();
+    let socket = dir.path().join("s");
+    let server = Server::bind(&socket, Arc::new(node), LIMITS, 4).unwrap();
+    (dir, socket, server)
+}
+
+/// A box the stand-in guest holds: none of the host's.
+fn there() -> BoxId {
+    BoxId::new("there").unwrap()
+}
+
+/// HEX-GUEST-41, HEX-RT-17 for a box in the node's guest: through the node's socket, exec a guest program that
+/// echoes, asking for its stdin and stdout: expect their ends to be the guest's own stdio connections, what is
+/// written to the stdin end read back from the stdout end to its end, and the program's end as the guest sent it,
+/// its pid naming no host process.
+#[test]
+fn a_guest_programs_asked_streams_are_the_guests_own_connections_through_the_socket() {
+    if shards_api::backend().is_err() {
+        eprintln!("SKIP: Shards has no backend on this host, so no guest boots");
+        return;
+    }
+    let gate = Arc::new(Gate::default());
+    let (_dir, socket, _server) = node(&gate);
+    let client = hex_client::Client::connect(&socket).unwrap();
+    let mut p = client
+        .exec(
+            &there(),
+            Program::of(&["cat"]),
+            Stdio {
+                ask: Ask {
+                    stdin: true,
+                    stdout: true,
+                    stderr: false,
+                },
+                ..Stdio::null()
+            },
+        )
+        .unwrap();
+    assert_eq!(p.pid(), GUEST_PID);
+    let given = p.streams().unwrap();
+    let (Some(stdin), Some(stdout)) = (given.stdin, given.stdout) else {
+        panic!("the streams asked for weren't given");
+    };
+    let mut stdin = std::fs::File::from(stdin);
+    stdin.write_all(b"round trip\n").unwrap();
+    drop(stdin);
+    let mut out = String::new();
+    std::fs::File::from(stdout)
+        .read_to_string(&mut out)
+        .unwrap();
+    assert_eq!(out, "round trip\n");
+    assert_eq!(p.wait_for(PATIENCE).unwrap(), Some(Exit::Code(0)));
+    assert_eq!(gate.execs.load(Ordering::SeqCst), 1);
+}
+
+/// HEX-GUEST-41, HEX-RT-9 for a box in the node's guest: through the node's socket, exec a guest program that
+/// echoes, its stdin and stdout the caller's own pipes: expect what the caller writes to its stdin pipe read back
+/// from its stdout pipe to its end (its client copies between them and the guest's connections), and the
+/// program's end as the guest sent it.
+#[test]
+fn a_guest_programs_streams_the_callers_own_pipes_carry_through_the_socket() {
+    if shards_api::backend().is_err() {
+        eprintln!("SKIP: Shards has no backend on this host, so no guest boots");
+        return;
+    }
+    let gate = Arc::new(Gate::default());
+    let (_dir, socket, _server) = node(&gate);
+    let client = hex_client::Client::connect(&socket).unwrap();
+    let (in_r, mut in_w) = std::io::pipe().unwrap();
+    let (mut out_r, out_w) = std::io::pipe().unwrap();
+    let mut p = client
+        .exec(
+            &there(),
+            Program::of(&["cat"]),
+            Stdio {
+                stdin: Some(in_r),
+                stdout: Some(out_w),
+                ..Stdio::null()
+            },
+        )
+        .unwrap();
+    in_w.write_all(b"round trip\n").unwrap();
+    drop(in_w);
+    let mut out = String::new();
+    out_r.read_to_string(&mut out).unwrap();
+    assert_eq!(out, "round trip\n");
+    assert_eq!(p.wait_for(PATIENCE).unwrap(), Some(Exit::Code(0)));
+}
+
+/// What the node's socket answers, as bytes on the wire: a client that writes and reads its messages itself.
+#[cfg(target_os = "linux")]
+mod raw {
+    use super::*;
+    use std::io::{IoSlice, IoSliceMut};
+    use std::mem::MaybeUninit;
+    use std::os::fd::{BorrowedFd, OwnedFd};
+
+    use rustix::event::{PollFd, PollFlags, Timespec};
+    use rustix::net::{
+        AddressFamily, RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, SendAncillaryBuffer,
+        SendAncillaryMessage, SendFlags, SocketAddrUnix, SocketFlags, SocketType,
+    };
+
+    pub struct Raw(OwnedFd);
+
+    impl Raw {
+        pub fn connect(path: &std::path::Path) -> Self {
+            let fd = rustix::net::socket_with(
+                AddressFamily::UNIX,
+                SocketType::SEQPACKET,
+                SocketFlags::CLOEXEC,
+                None,
+            )
+            .unwrap();
+            rustix::net::connect(&fd, &SocketAddrUnix::new(path).unwrap()).unwrap();
+            Self(fd)
+        }
+
+        /// Sends `request` as request `id` in `version`, `fds` riding with it.
+        pub fn send(&self, version: u16, id: u64, request: &wire::Request, fds: &[BorrowedFd<'_>]) {
+            let bytes = wire::request(version, id, request, wire::MAX_MESSAGE).unwrap();
+            let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(wire::MAX_FDS))];
+            let mut control = SendAncillaryBuffer::new(&mut space);
+            if !fds.is_empty() {
+                assert!(control.push(SendAncillaryMessage::ScmRights(fds)));
+            }
+            rustix::net::sendmsg(
+                &self.0,
+                &[IoSlice::new(&bytes)],
+                &mut control,
+                SendFlags::NOSIGNAL,
+            )
+            .unwrap();
+        }
+
+        /// The next answer and the descriptors that came with it, waiting at most [`PATIENCE`] for it.
+        pub fn answer(&self) -> (wire::Header, wire::Answer, Vec<OwnedFd>) {
+            let mut ready = [PollFd::new(&self.0, PollFlags::IN)];
+            let ts = Timespec {
+                tv_sec: i64::try_from(PATIENCE.as_secs()).unwrap(),
+                tv_nsec: 0,
+            };
+            assert_eq!(
+                rustix::event::poll(&mut ready, Some(&ts)).unwrap(),
+                1,
+                "no answer came"
+            );
+            let mut buf = vec![0u8; wire::MAX_MESSAGE];
+            let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(wire::MAX_FDS))];
+            let mut control = RecvAncillaryBuffer::new(&mut space);
+            let msg = rustix::net::recvmsg(
+                &self.0,
+                &mut [IoSliceMut::new(&mut buf)],
+                &mut control,
+                RecvFlags::CMSG_CLOEXEC,
+            )
+            .unwrap();
+            let mut fds = Vec::new();
+            for m in control.drain() {
+                if let RecvAncillaryMessage::ScmRights(came) = m {
+                    fds.extend(came);
+                }
+            }
+            let received = wire::Received {
+                bytes: &buf[..msg.bytes],
+                size: msg.bytes,
+                descriptors: fds.len(),
+                descriptors_cut: false,
+            };
+            let (h, answer) = wire::read_answer(&received, wire::MAX_MESSAGE).unwrap();
+            (h, answer, fds)
+        }
+
+        /// Says hello, as a client's first message.
+        pub fn hello(&self) {
+            self.send(wire::FIRST, 1, &wire::Request::Hello, &[]);
+            let (_, hello, _) = self.answer();
+            assert!(matches!(hello, wire::Answer::Hello(_)), "{hello:?}");
+        }
+    }
+}
+
+/// An exec of the stand-in's echo in box [`there`], its stdin and stdout carried as the caller's own pipes.
+#[cfg(target_os = "linux")]
+fn carried_exec() -> wire::Request {
+    wire::Request::Call(wire::Call::Exec {
+        id: there(),
+        program: Program::of(&["cat"]),
+        streams: wire::Streams {
+            stdin: true,
+            stdout: true,
+            stderr: false,
+        },
+    })
+}
+
+/// HEX-GUEST-41 on the wire: exec a guest program, its stdin and stdout the caller's own pipes carried as
+/// descriptors: expect the node to answer with the guest's own stdio connections' ends (`Given`), for the caller's
+/// client to copy between, and to keep none of the caller's pipes (with this test's own ends of them gone, its stdin
+/// pipe has no reader and its stdout pipe no writer); what goes in the stdin end comes back on the stdout end, to
+/// its end, and the program's end follows.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_node_gives_a_guest_programs_streams_to_the_callers_client_and_keeps_none_of_its_pipes() {
+    use std::os::fd::AsFd;
+    if shards_api::backend().is_err() {
+        eprintln!("SKIP: Shards has no backend on this host, so no guest boots");
+        return;
+    }
+    let gate = Arc::new(Gate::default());
+    let (_dir, socket, _server) = node(&gate);
+    let raw = raw::Raw::connect(&socket);
+    raw.hello();
+    let (in_r, mut in_w) = std::io::pipe().unwrap();
+    let (mut out_r, out_w) = std::io::pipe().unwrap();
+    raw.send(
+        wire::VERSION,
+        2,
+        &carried_exec(),
+        &[in_r.as_fd(), out_w.as_fd()],
+    );
+    drop((in_r, out_w));
+    let (h, answered, ends) = raw.answer();
+    assert_eq!(h.id, 2);
+    let wire::Answer::Given { pid, given } = answered else {
+        panic!("the node answered {answered:?}, not with the guest's streams' ends");
+    };
+    assert_eq!((pid, given), (GUEST_PID, carried_streams()));
+    assert_eq!(ends.len(), 2);
+    assert_eq!(
+        in_w.write(b"x").map_err(|e| e.kind()),
+        Err(std::io::ErrorKind::BrokenPipe),
+        "the node kept the caller's stdin pipe"
+    );
+    assert_eq!(
+        out_r.read(&mut [0u8; 1]).unwrap(),
+        0,
+        "the node kept the caller's stdout pipe"
+    );
+    let mut ends = ends.into_iter();
+    let (stdin, stdout) = (ends.next().unwrap(), ends.next().unwrap());
+    let mut stdin = std::fs::File::from(stdin);
+    stdin.write_all(b"round trip\n").unwrap();
+    drop(stdin);
+    let mut out = String::new();
+    std::fs::File::from(stdout)
+        .read_to_string(&mut out)
+        .unwrap();
+    assert_eq!(out, "round trip\n");
+    let (h, end, _) = raw.answer();
+    assert_eq!((h.id, end), (2, wire::Answer::Exited(Exit::Code(0))));
+}
+
+#[cfg(target_os = "linux")]
+fn carried_streams() -> wire::Streams {
+    wire::Streams {
+        stdin: true,
+        stdout: true,
+        stderr: false,
+    }
+}
+
+/// HEX-GUEST-41, the wire's append-only rule: a client of version 2, which takes no streams' ends with an answer,
+/// execs a guest program with its own pipes: expect the exec refused as invalid stdio, naming the version that
+/// gives them, before anything is sent to the guest.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_guest_program_given_pipes_by_a_version_2_client_is_refused_before_it_starts() {
+    use std::os::fd::AsFd;
+    if shards_api::backend().is_err() {
+        eprintln!("SKIP: Shards has no backend on this host, so no guest boots");
+        return;
+    }
+    let gate = Arc::new(Gate::default());
+    let (_dir, socket, _server) = node(&gate);
+    let raw = raw::Raw::connect(&socket);
+    raw.hello();
+    let (in_r, _in_w) = std::io::pipe().unwrap();
+    let (_out_r, out_w) = std::io::pipe().unwrap();
+    raw.send(2, 2, &carried_exec(), &[in_r.as_fd(), out_w.as_fd()]);
+    let (h, answered, ends) = raw.answer();
+    assert_eq!((h.version, h.id, ends.len()), (2, 2, 0));
+    assert!(
+        matches!(
+            &answered,
+            wire::Answer::Refused(Refusal::Invalid { what: "stdio", why }) if why.contains("version 3")
+        ),
+        "{answered:?}"
+    );
+    assert_eq!(
+        gate.execs.load(Ordering::SeqCst),
+        0,
+        "the guest was sent the exec"
+    );
 }
