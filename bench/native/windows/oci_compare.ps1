@@ -80,11 +80,15 @@ $runs["hex"] = @{
             copy = $j.blank_copy_ms.samples[0]; exec = $j.exec_ms.samples[0] } }
 }
 
+# A reading that fails is data, not the end of the segment (jupiter, 2026-11-07 15:39Z: WMI answered
+# Win32_Processor with "Server execution failed", 0x80080005, and the segment ended after one round).
+function Reading([scriptblock]$read) { try { & $read } catch { "failed: $_" } }
+
 function Load() {
     [ordered]@{
-        cpu_pct = (Get-CimInstance Win32_Processor | Measure-Object LoadPercentage -Average).Average
-        system_pct = [int]((Get-Counter '\Process(System)\% Processor Time' -SampleInterval 1 -MaxSamples 1).CounterSamples[0].CookedValue / [Environment]::ProcessorCount)
-        c_free_gb = [math]::Round((Get-PSDrive C).Free / 1GB, 1)
+        cpu_pct = Reading { (Get-CimInstance Win32_Processor | Measure-Object LoadPercentage -Average).Average }
+        system_pct = Reading { [int]((Get-Counter '\Process(System)\% Processor Time' -SampleInterval 1 -MaxSamples 1).CounterSamples[0].CookedValue / [Environment]::ProcessorCount) }
+        c_free_gb = Reading { [math]::Round((Get-PSDrive C).Free / 1GB, 1) }
     }
 }
 
@@ -120,9 +124,12 @@ if (Test-Path $roundsOut) {
 }
 $began = Get-Date
 $i = $first
+# Each round carries when it began and ended (UTC), so a window of the host's history can be taken out of
+# the record by time (the lead, 2026-11-08: rounds from 16:21Z to 00:06Z on 11-07/08 are retaken).
+try {
 for (; $i -lt $W + $N; $i++) {
     if ($Budget -gt 0 -and ((Get-Date) - $began).TotalSeconds -gt $Budget) { break }
-    $round = [ordered]@{ round = $i; load = (Load) }
+    $round = [ordered]@{ round = $i; began = (Get-Date).ToUniversalTime().ToString('o'); load = (Load) }
     for ($k = 0; $k -lt $names.Count; $k++) {
         $name = $names[($i + $k) % $names.Count]
         $r = $runs[$name]
@@ -150,9 +157,12 @@ for (; $i -lt $W + $N; $i++) {
             }
         }
     }
+    $round.ended = (Get-Date).ToUniversalTime().ToString('o')
     $round | ConvertTo-Json -Depth 5 -Compress | Add-Content $roundsOut
 }
-"segment rounds $first..$($i - 1) began $($began.ToString('o')) ended $((Get-Date).ToString('o'))" | Add-Content "$Out.segments"
+} finally {
+    "segment rounds $first..$($i - 1) began $($began.ToUniversalTime().ToString('o')) ended $((Get-Date).ToUniversalTime().ToString('o'))" | Add-Content "$Out.segments"
+}
 if ($i -lt $W + $N) { "segment ended at its budget: $i of $($W + $N) rounds"; exit 3 }
 
 # The record, from every round in the file (all segments), the W untimed rounds left out.
