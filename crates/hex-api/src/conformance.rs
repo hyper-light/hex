@@ -111,15 +111,15 @@ impl HostClass {
     /// - Linux: 957 ms, the slowest of 294 answers in each of three first runs of process_box, oci_box,
     ///   oci_spec_box and node_socket after a rebuild on fedora at load 20-108
     ///   (bench/native/records/firstrun-linux-e34d48d-20261107T173109Z.txt).
-    /// - macOS: 839 ms, a hog's end on adas-mac-studio.local-2 at load 15-20, the first of
-    ///   macos_process_box's 60 runs in a first run after a rebuild (bench/native/records/
-    ///   firstrun-macos-9908a6da-20261107T1823Z.txt, 2026-11-08), above the 770 ms seen on
-    ///   adalundhe-macbook-pro at load 21 (2026-11-06, [`still_running`]) and adas-mac-studio-2's 534 ms.
+    /// - macOS: 939 ms, a hog's end on adas-mac-studio.local-2 at load 15-20, the first program a rebuilt
+    ///   macos_process_box ran (bench/native/records/firstrun-macos-9908a6da-20261107T1823Z.txt,
+    ///   2026-11-08), above the 839 ms seen there before it, the 770 ms seen on adalundhe-macbook-pro at load
+    ///   21 (2026-11-06, [`still_running`]) and adas-mac-studio-2's 534 ms.
     pub const fn slowest_recorded_end(self) -> Option<Duration> {
         match self {
             HostClass::Windows => Some(Duration::from_millis(6_239)),
             HostClass::Linux => Some(Duration::from_millis(957)),
-            HostClass::Macos => Some(Duration::from_millis(839)),
+            HostClass::Macos => Some(Duration::from_millis(939)),
         }
     }
 }

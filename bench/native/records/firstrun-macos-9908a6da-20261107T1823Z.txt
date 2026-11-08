@@ -16,3 +16,7 @@ cycle 3 exit 0 suite 774735 ms answers 44 slowest 285 318 529  load { 5.45 6.84 
 # outside kiln's run tree): macos_process_box after a rebuild, three runs. Run 3 failed
 # a_programs_end_is_seen_when_it_ends_not_at_the_waits_budget: its first hog's end, Signal(9), came 839.38 ms
 # after its start, past the 770 ms record then. macOS's record is 839 ms from this run.
+# 2026-11-08 (gates at 30121e18, the same Mac, load 15-20): run 1 after a rebuild read its first hog's end at
+# 939.39 ms, past the 839 ms record then. So the first program a rebuilt binary runs carries a cost that sets a
+# new high now and again, and macOS's record is 939 ms. The test's late threshold is the wait's own budget
+# from 30121e18 on (an end missed until the budget is the fault it looks for), not the record.
