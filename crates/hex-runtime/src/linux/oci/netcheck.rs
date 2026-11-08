@@ -211,15 +211,15 @@ impl Fresh {
     /// `proc_net` its `/proc/thread-self/net` ([`ProcNet`]): the namespace is made, entered, read and closed, and
     /// the thread goes back home whether or not the reads worked.
     pub fn read(home: BorrowedFd<'_>, proc_net: &ProcNet) -> Result<Self, OciError> {
-        let ns = net::make_ahead(home)?;
-        sys::setns(ns.as_fd(), libc::CLONE_NEWNET)?;
+        let ns = net::make_ahead(home).map_err(|f| f.error)?;
+        sys::setns(ns.as_fd(), libc::CLONE_NEWNET).map_err(OciError::from)?;
         let mut scratch = Scratch::default();
         let read = proc_net
             .file("protocols", &mut scratch.text)
             .and_then(|text| in_use(text.ok_or(Refused::Unreadable)?))
             .map_err(|why| OciError::os("reading a fresh network namespace", why.name().to_owned()))
             .and_then(|protocols| settled(&mut scratch).map(|dumps| Self { protocols, dumps }));
-        let back = sys::setns(home, libc::CLONE_NEWNET);
+        let back = sys::setns(home, libc::CLONE_NEWNET).map_err(OciError::from);
         match (read, back) {
             (Ok(fresh), Ok(())) => Ok(fresh),
             (Err(e), _) | (Ok(_), Err(e)) => Err(e),

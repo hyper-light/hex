@@ -146,7 +146,7 @@ fn counts() -> netns::Counts {
 
 /// The counts version 3 adds to, each of its fields a different value: makes failed at every step, the pool
 /// refused for both capabilities.
-fn counts_v3() -> netns::Counts {
+fn counts_v5() -> netns::Counts {
     netns::Counts {
         failed: 15,
         failed_by: netns::FailedBy {
@@ -164,14 +164,14 @@ fn counts_v3() -> netns::Counts {
 
 /// The counts version 4 adds to: version 3's, with the latest reason kept at two steps, one with an errno and
 /// one without.
-fn counts_v4() -> netns::Counts {
+fn counts_v6() -> netns::Counts {
     netns::Counts {
         last_failed: netns::LastFailed {
             unshare: Some(netns::Reason::new(Some(1), "EPERM")),
             loopback: Some(netns::Reason::new(None, "not an ack")),
             ..netns::LastFailed::default()
         },
-        ..counts_v3()
+        ..counts_v5()
     }
 }
 
@@ -405,31 +405,31 @@ const GOLDEN_EXHAUSTED: &str = concat!(
 );
 // Version 2's network namespace counts, answered: made ahead 1, taken 2, made on the path 3, discarded
 // 4, failed u64::MAX.
-/// HEX-SOCK-2, append-only, and HEX-NETNS-12/13 over the socket: version 3 appends why makes failed and
-/// whether the pool was refused to the network namespace counts' answer, whose bytes are the ones recorded
-/// here; written in version 2 the answer is version 2's bytes, and every other kind is written in version 3 as
-/// in version 2 but for the version in its header. A version 2 answer with version 3's fields behind it is
+/// HEX-SOCK-2, append-only, and HEX-NETNS-12/13 over the socket: version 5 (ci-followups') appends why makes
+/// failed and whether the pool was refused to the network namespace counts' answer, whose bytes are the ones
+/// recorded here; written in version 2 the answer is version 2's bytes, and every other kind is written in version
+/// 5 as in version 4 but for the version in its header. A version 4 answer with version 5's fields behind it is
 /// refused, as is a byte naming a capability no version defines.
 #[test]
-fn version_3_messages_are_the_bytes_recorded() {
-    let v3 = answer(3, 12, &Answer::Netns(counts_v3()), MAX_MESSAGE).unwrap();
-    assert_eq!(hex(&v3), GOLDEN_NETNS_V3);
+fn version_5_messages_are_the_bytes_recorded() {
+    let v3 = answer(5, 12, &Answer::Netns(counts_v5()), MAX_MESSAGE).unwrap();
+    assert_eq!(hex(&v3), GOLDEN_NETNS_V5);
     assert_eq!(
         read_answer(&received(&v3, 0), MAX_MESSAGE).unwrap().1,
-        Answer::Netns(counts_v3())
+        Answer::Netns(counts_v5())
     );
     assert_eq!(
         hex(&answer(2, 12, &Answer::Netns(counts()), MAX_MESSAGE).unwrap()),
         GOLDEN_NETNS
     );
-    let as_v2 = |mut bytes: Vec<u8>| {
-        bytes[4..6].copy_from_slice(&2u16.to_le_bytes());
+    let as_v4 = |mut bytes: Vec<u8>| {
+        bytes[4..6].copy_from_slice(&4u16.to_le_bytes());
         bytes
     };
     for (n, req, _) in requests() {
         assert_eq!(
-            as_v2(request(3, n, &req, MAX_MESSAGE).unwrap()),
-            request(2, n, &req, MAX_MESSAGE).unwrap(),
+            as_v4(request(5, n, &req, MAX_MESSAGE).unwrap()),
+            request(4, n, &req, MAX_MESSAGE).unwrap(),
             "{req:?}"
         );
     }
@@ -438,13 +438,13 @@ fn version_3_messages_are_the_bytes_recorded() {
         .filter(|(_, a)| !matches!(a, Answer::Netns(_)))
     {
         assert_eq!(
-            as_v2(answer(3, n, &ans, MAX_MESSAGE).unwrap()),
-            answer(2, n, &ans, MAX_MESSAGE).unwrap(),
+            as_v4(answer(5, n, &ans, MAX_MESSAGE).unwrap()),
+            answer(4, n, &ans, MAX_MESSAGE).unwrap(),
             "{ans:?}"
         );
     }
     assert!(matches!(
-        read_answer(&received(&as_v2(v3.clone()), 0), MAX_MESSAGE),
+        read_answer(&received(&as_v4(v3.clone()), 0), MAX_MESSAGE),
         Err(Fault::Trailing { .. })
     ));
     let mut unknown = v3;
@@ -459,31 +459,31 @@ fn version_3_messages_are_the_bytes_recorded() {
     );
 }
 
-/// HEX-SOCK-2, append-only, and HEX-NETNS-14 over the socket: version 4 appends the latest reason a make
-/// failed for at each step to the network namespace counts' answer, whose bytes are the ones recorded here;
-/// written in version 3 the answer is version 3's bytes, and every other kind is written in version 4 as in
-/// version 3 but for the version in its header. A version 3 answer with version 4's fields behind it is
+/// HEX-SOCK-2, append-only, and HEX-NETNS-14 over the socket: version 6 (ci-followups') appends the latest reason a
+/// make failed for at each step to the network namespace counts' answer, whose bytes are the ones recorded here;
+/// written in version 5 the answer is version 5's bytes, and every other kind is written in version 6 as in
+/// version 5 but for the version in its header. A version 5 answer with version 6's fields behind it is
 /// refused, as is a reason whose text is past its bound.
 #[test]
-fn version_4_messages_are_the_bytes_recorded() {
-    let v4 = answer(4, 12, &Answer::Netns(counts_v4()), MAX_MESSAGE).unwrap();
-    assert_eq!(hex(&v4), GOLDEN_NETNS_V4);
+fn version_6_messages_are_the_bytes_recorded() {
+    let v4 = answer(6, 12, &Answer::Netns(counts_v6()), MAX_MESSAGE).unwrap();
+    assert_eq!(hex(&v4), GOLDEN_NETNS_V6);
     assert_eq!(
         read_answer(&received(&v4, 0), MAX_MESSAGE).unwrap().1,
-        Answer::Netns(counts_v4())
+        Answer::Netns(counts_v6())
     );
     assert_eq!(
-        hex(&answer(3, 12, &Answer::Netns(counts_v4()), MAX_MESSAGE).unwrap()),
-        GOLDEN_NETNS_V3
+        hex(&answer(5, 12, &Answer::Netns(counts_v6()), MAX_MESSAGE).unwrap()),
+        GOLDEN_NETNS_V5
     );
-    let as_v3 = |mut bytes: Vec<u8>| {
-        bytes[4..6].copy_from_slice(&3u16.to_le_bytes());
+    let as_v5 = |mut bytes: Vec<u8>| {
+        bytes[4..6].copy_from_slice(&5u16.to_le_bytes());
         bytes
     };
     for (n, req, _) in requests() {
         assert_eq!(
-            as_v3(request(4, n, &req, MAX_MESSAGE).unwrap()),
-            request(3, n, &req, MAX_MESSAGE).unwrap(),
+            as_v5(request(6, n, &req, MAX_MESSAGE).unwrap()),
+            request(5, n, &req, MAX_MESSAGE).unwrap(),
             "{req:?}"
         );
     }
@@ -492,17 +492,17 @@ fn version_4_messages_are_the_bytes_recorded() {
         .filter(|(_, a)| !matches!(a, Answer::Netns(_)))
     {
         assert_eq!(
-            as_v3(answer(4, n, &ans, MAX_MESSAGE).unwrap()),
-            answer(3, n, &ans, MAX_MESSAGE).unwrap(),
+            as_v5(answer(6, n, &ans, MAX_MESSAGE).unwrap()),
+            answer(5, n, &ans, MAX_MESSAGE).unwrap(),
             "{ans:?}"
         );
     }
     assert!(matches!(
-        read_answer(&received(&as_v3(v4), 0), MAX_MESSAGE),
+        read_answer(&received(&as_v5(v4), 0), MAX_MESSAGE),
         Err(Fault::Trailing { .. })
     ));
     // A text one byte past the bound, written as a writer that didn't cut it would.
-    let mut long = answer(4, 12, &Answer::Netns(counts_v3()), MAX_MESSAGE).unwrap();
+    let mut long = answer(6, 12, &Answer::Netns(counts_v5()), MAX_MESSAGE).unwrap();
     long.truncate(long.len() - 2);
     long.extend_from_slice(&[1, 0]);
     let text = "x".repeat(netns::MAX_REASON + 1);
@@ -518,9 +518,9 @@ fn version_4_messages_are_the_bytes_recorded() {
     );
 }
 
-/// [`counts_v4`]'s answer in version 4, id 12.
-const GOLDEN_NETNS_V4: &str = concat!(
-    "48455857040009800c00000000000000",
+/// [`counts_v6`]'s answer in version 6, id 12.
+const GOLDEN_NETNS_V6: &str = concat!(
+    "48455857060009800c00000000000000",
     "01000000000000000200000000000000030000000000000004000000000000000f00000000000000",
     "0100000000000000020000000000000003000000000000000400000000000000050000000000000003",
     "0600000000000000",
@@ -531,9 +531,9 @@ const GOLDEN_NETNS_V4: &str = concat!(
     "00",
 );
 
-/// [`counts_v3`]'s answer in version 3, id 12.
-const GOLDEN_NETNS_V3: &str = concat!(
-    "48455857030009800c00000000000000",
+/// [`counts_v5`]'s answer in version 5, id 12.
+const GOLDEN_NETNS_V5: &str = concat!(
+    "48455857050009800c00000000000000",
     "01000000000000000200000000000000030000000000000004000000000000000f00000000000000",
     "0100000000000000020000000000000003000000000000000400000000000000050000000000000003",
     "0600000000000000",
@@ -784,28 +784,29 @@ fn a_kind_a_later_version_added_is_refused_in_an_earlier_one() {
     );
 }
 
-/// HEX-SOCK-2, append-only (goal 5 extended, step 6): version 3 appends a create's owner to its body,
+/// HEX-SOCK-2, append-only (goal 5 extended, step 6): version 4 appends a create's owner to its body,
 /// as the bytes recorded here say: an option byte, then the name as a string and a byte for whether its
-/// boxes' cgroups may be handed on. Every other kind is written in version 3 as in version 2 but for the
-/// version in its header, and a create naming no owner as in version 2 with its option's none byte
-/// after. A create naming an owner can't be written in version 1 or 2: refused, never sent without it.
+/// boxes' cgroups may be handed on. Every other kind is written in version 4 as in version 2 but for the
+/// version in its header (version 3, native's Kill, adds a kind and changes none), and a create naming no owner as
+/// in version 2 with its option's none byte after. A create naming an owner can't be written in versions 1 to 3:
+/// refused, never sent without it.
 #[test]
-fn version_3_messages_are_the_bytes_recorded() {
-    let as_v3 = |mut bytes: Vec<u8>| {
-        bytes[4..6].copy_from_slice(&3u16.to_le_bytes());
+fn version_4_messages_are_the_bytes_recorded() {
+    let as_v4 = |mut bytes: Vec<u8>| {
+        bytes[4..6].copy_from_slice(&4u16.to_le_bytes());
         bytes
     };
     for (n, req, _) in requests() {
-        let mut want = as_v3(request(2, n, &req, MAX_MESSAGE).unwrap());
+        let mut want = as_v4(request(2, n, &req, MAX_MESSAGE).unwrap());
         if matches!(req, Request::Call(Call::Create(_))) {
             want.push(0);
         }
-        assert_eq!(request(3, n, &req, MAX_MESSAGE).unwrap(), want, "{req:?}");
+        assert_eq!(request(4, n, &req, MAX_MESSAGE).unwrap(), want, "{req:?}");
     }
     for (n, ans) in answers() {
         assert_eq!(
-            answer(3, n, &ans, MAX_MESSAGE).unwrap(),
-            as_v3(answer(2, n, &ans, MAX_MESSAGE).unwrap()),
+            answer(4, n, &ans, MAX_MESSAGE).unwrap(),
+            as_v4(answer(2, n, &ans, MAX_MESSAGE).unwrap()),
             "{ans:?}"
         );
     }
@@ -820,13 +821,13 @@ fn version_3_messages_are_the_bytes_recorded() {
     };
     let unowned = Request::Call(Call::Create(Box::new(oci_spec())));
     for (reuse, byte) in [(true, 1u8), (false, 0u8)] {
-        let mut want = as_v3(request(2, 4, &unowned, MAX_MESSAGE).unwrap());
+        let mut want = as_v4(request(2, 4, &unowned, MAX_MESSAGE).unwrap());
         want.extend_from_slice(&[1, 1, 0, 0, 0, b'o', byte]);
-        let bytes = request(3, 4, &owned(reuse), MAX_MESSAGE).unwrap();
+        let bytes = request(4, 4, &owned(reuse), MAX_MESSAGE).unwrap();
         assert_eq!(bytes, want);
         let (_, back) = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap();
         assert_eq!(back, owned(reuse));
-        for older in [1u16, 2] {
+        for older in [1u16, 2, 3] {
             assert!(
                 matches!(
                     request(older, 4, &owned(reuse), MAX_MESSAGE),
@@ -839,7 +840,7 @@ fn version_3_messages_are_the_bytes_recorded() {
             );
         }
     }
-    // A version 2 create read by a version 3 agent names no owner.
+    // A version 2 create read by a version 4 agent names no owner.
     let v2 = request(2, 4, &unowned, MAX_MESSAGE).unwrap();
     assert_eq!(
         read_request(&received(&v2, 0), MAX_MESSAGE).unwrap().1,
@@ -847,32 +848,32 @@ fn version_3_messages_are_the_bytes_recorded() {
     );
 }
 
-/// HEX-SOCK-2, append-only (the lead's ruling, 2026-11-06): version 4 appends to a hello's answer the node's budgets,
+/// HEX-SOCK-2, append-only (the lead's ruling, 2026-11-06): version 7 appends to a hello's answer the node's budgets,
 /// calls in flight and programs watched on all its connections together, as an option after the limits, which keep
-/// their meaning (each connection's own). Do: write every message in version 4, and a hello's answer naming budgets
-/// in each version. Expect: every message as in version 3 but for the version in its header, and a hello's answer
+/// their meaning (each connection's own). Do: write every message in version 7, and a hello's answer naming budgets
+/// in each version. Expect: every message as in version 6 but for the version in its header, and a hello's answer
 /// with its option's none byte after; with budgets, a one byte and the two counts as 64-bit numbers, read back the
-/// same; a hello's answer naming budgets refused in versions 1 to 3, never sent without them; and a version 3
-/// hello's answer read by a version 4 side naming none.
+/// same; a hello's answer naming budgets refused in versions 1 to 6, never sent without them; and a version 6
+/// hello's answer read by a version 7 side naming none.
 #[test]
-fn version_4_messages_are_the_bytes_recorded() {
-    let as_v4 = |mut bytes: Vec<u8>| {
-        bytes[4..6].copy_from_slice(&4u16.to_le_bytes());
+fn version_7_messages_are_the_bytes_recorded() {
+    let as_v7 = |mut bytes: Vec<u8>| {
+        bytes[4..6].copy_from_slice(&7u16.to_le_bytes());
         bytes
     };
     for (n, req, _) in requests() {
         assert_eq!(
-            request(4, n, &req, MAX_MESSAGE).unwrap(),
-            as_v4(request(3, n, &req, MAX_MESSAGE).unwrap()),
+            request(7, n, &req, MAX_MESSAGE).unwrap(),
+            as_v7(request(6, n, &req, MAX_MESSAGE).unwrap()),
             "{req:?}"
         );
     }
     for (n, ans) in answers() {
-        let mut want = as_v4(answer(3, n, &ans, MAX_MESSAGE).unwrap());
+        let mut want = as_v7(answer(6, n, &ans, MAX_MESSAGE).unwrap());
         if matches!(ans, Answer::Hello(_)) {
             want.push(0);
         }
-        assert_eq!(answer(4, n, &ans, MAX_MESSAGE).unwrap(), want, "{ans:?}");
+        assert_eq!(answer(7, n, &ans, MAX_MESSAGE).unwrap(), want, "{ans:?}");
     }
     let Answer::Hello(plain) = answers()[0].1.clone() else {
         panic!("the first answer is a hello's")
@@ -884,17 +885,17 @@ fn version_4_messages_are_the_bytes_recorded() {
         }),
         ..plain.clone()
     });
-    let mut want = as_v4(answer(3, 1, &Answer::Hello(plain.clone()), MAX_MESSAGE).unwrap());
+    let mut want = as_v7(answer(6, 1, &Answer::Hello(plain.clone()), MAX_MESSAGE).unwrap());
     want.push(1);
     want.extend_from_slice(&500_000u64.to_le_bytes());
     want.extend_from_slice(&65_536u64.to_le_bytes());
-    let bytes = answer(4, 1, &budgeted, MAX_MESSAGE).unwrap();
+    let bytes = answer(7, 1, &budgeted, MAX_MESSAGE).unwrap();
     assert_eq!(bytes, want);
     assert_eq!(
         read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
         budgeted
     );
-    for older in [1u16, 2, 3] {
+    for older in [1u16, 2, 3, 4, 5, 6] {
         assert!(
             matches!(
                 answer(older, 1, &budgeted, MAX_MESSAGE),
@@ -906,9 +907,9 @@ fn version_4_messages_are_the_bytes_recorded() {
             "version {older} wrote budgets"
         );
     }
-    let v3 = answer(3, 1, &Answer::Hello(plain.clone()), MAX_MESSAGE).unwrap();
+    let v6 = answer(6, 1, &Answer::Hello(plain.clone()), MAX_MESSAGE).unwrap();
     assert_eq!(
-        read_answer(&received(&v3, 0), MAX_MESSAGE).unwrap().1,
+        read_answer(&received(&v6, 0), MAX_MESSAGE).unwrap().1,
         Answer::Hello(plain)
     );
 }

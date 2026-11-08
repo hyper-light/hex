@@ -92,7 +92,9 @@ mod linux {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
-    use hex_api::{Bounds, BoxId, BoxOwner, BoxSpec, ClassSpec, Exit, Program, Runtime, Signal, Stdio};
+    use hex_api::{
+        Bounds, BoxId, BoxOwner, BoxSpec, ClassSpec, Exit, Program, Runtime, Signal, Stdio,
+    };
     use hex_client::Client;
     use hex_core::{netns, seeds};
     use hex_node::Node;
@@ -838,7 +840,8 @@ mod linux {
             let cont = Signal::new(18).map_err(|e| e.to_string())?;
             for _ in 0..n {
                 node.usage(&id).map_err(|e| format!("usage rtt: {e}"))?;
-                node.signal(&id, cont).map_err(|e| format!("signal rtt: {e}"))?;
+                node.signal(&id, cont)
+                    .map_err(|e| format!("signal rtt: {e}"))?;
             }
             Ok(ms)
         })();
@@ -1543,7 +1546,9 @@ mod linux {
                         .map(drop)
                         .map_err(|e| format!("connecting to {}: {e}", socket.display()))
                 }),
-                Driver::InProcess(_) => Err("the hellos arm needs HEXBENCH_DRIVER=socket".to_owned()),
+                Driver::InProcess(_) => {
+                    Err("the hellos arm needs HEXBENCH_DRIVER=socket".to_owned())
+                }
             };
             match r {
                 Ok(()) => phases.insert("hellos".to_owned(), json!({ "connections": n })),

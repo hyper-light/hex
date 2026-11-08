@@ -85,7 +85,8 @@ pub fn attempt(mode: &str, marker: &str) -> u8 {
             }
             Err(e) => {
                 say(&format!(
-                    "E0 make a user namespace: REFUSED ({e}) (insecure)"
+                    "E0 make a user namespace: REFUSED ({}) (insecure)",
+                    super::OciError::from(e)
                 ));
                 1
             }
@@ -127,7 +128,8 @@ pub fn attempt(mode: &str, marker: &str) -> u8 {
             }
             if let Err(e) = sys::setns(pidfd.as_fd(), libc::CLONE_NEWNS) {
                 say(&format!(
-                    "E2 umount / then setns: setns refused ({e}) (secure)"
+                    "E2 umount / then setns: setns refused ({}) (secure)",
+                    super::OciError::from(e)
                 ));
                 return 0;
             }
@@ -165,7 +167,10 @@ pub fn attempt(mode: &str, marker: &str) -> u8 {
             if let Err(e) =
                 sys::unshare(UnshareFlags::NEWUSER | UnshareFlags::NEWNS | UnshareFlags::NEWPID)
             {
-                say(&format!("E3 nested proc mount: unshare failed ({e})"));
+                say(&format!(
+                    "E3 nested proc mount: unshare failed ({})",
+                    super::OciError::from(e)
+                ));
                 return 2;
             }
             // Become root in the new user namespace, so the mount is tried with privilege.

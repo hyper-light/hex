@@ -421,10 +421,12 @@ defines, so an extension an older agent can't apply is refused, never dropped (C
 version added is refused in an earlier version's message, as one that version doesn't define. A list's answer comes
 in as many messages as its boxes need, so a dense node answers it whole. Version 2 (goal 4 plan step 2) adds one
 request and its answer, the node's network namespace counts (decision 4), and writes every version 1 kind as
-version 1 does but for its header's version. Version 3 appends to that answer why its failed makes failed, by step,
-and whether the pool was refused and for what (decision 4), and writes every version 2 kind as version 2 does;
-version 4 appends the latest reason a make failed for at each step, and writes every version 3 kind as version 3
-does. A
+version 1 does but for its header's version. Versions go in landing order with no gaps, so a version implies the
+ones before it (the lead, 2026-11-07): version 3 is native's (`Call::Kill`); version 4 appends a create's owner;
+version 5 appends to the counts' answer why its failed makes failed, by step, and whether the pool was refused and
+for what (decision 4); version 6 appends the latest reason a make failed for at each step; version 7 appends the
+node's budgets to a hello's answer. Each writes every earlier kind as the version before it does but for its
+header's version. A
 client says hello in version 1, which an agent of any version reads,
 learns the highest version the agent speaks from its answer, and writes the rest in the highest both speak; an
 agent answers each request in its version, and refuses what it can't read in version 1, so a client of either
@@ -1224,7 +1226,7 @@ lifecycle without changing what a box may do.
     reaches a thread group whose leader has exited, which `cgroup.kill` misses
     (`bench/competitive/probes/delete_flake.md`).
 - **A cgroup handed from box to box of one owner** (f20, f23, f27-f39, f61-f65, f81, f82). A box whose spec names an
-  owner (`BoxSpec::owner`, append-only on the record and on the wire, whose version 3 carries it) is given the owner's
+  owner (`BoxSpec::owner`, append-only on the record and on the wire, whose version 4 carries it) is given the owner's
   idle cgroup when one reads clean. That takes off its `mkdir`, its `rmdir` and the kworkers' 12 holds (f62). The
   owner's boxes reuse by default; an owner opts out by `reuse: false` (Ada's call, 2026-10-31). The pool is a pure core,
   `hex_core::reuse`, with the node's shell in `crates/hex-node/src/cgroups.rs`.
@@ -1951,7 +1953,7 @@ cause a miss under the demand seen, and each counts its cold takes. The pure cor
   changes), and tells exactly what is kept, one call and one program, so a client of any version within it is never
   refused however much other connections hold. That is less than the 64 and 1,024 it told before, which were caps the
   node no longer keeps; keeping that much for every connection would cap connections at the budgets over it (64 at
-  65,536 pidfds). Wire version 4 appends the node's budgets to a hello (`Hello::budgets`), refused in earlier
+  65,536 pidfds). Wire version 7 appends the node's budgets to a hello (`Hello::budgets`), refused in earlier
   versions, never sent without them.
 - **Derived from a fact the kernel gives.** The removal's walk of a slot's sub-cgroups is bounded by `cgroup.stat`'s
   `nr_descendants`, read before it (kind (a)); one made during the walk refuses it, by type, for recovery.

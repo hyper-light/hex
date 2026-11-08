@@ -2284,7 +2284,6 @@ mod tests {
             create_turn(&turns, &id("c")).is_ok(),
             "a turn let go is free again"
         );
-
     }
 
     /// This process's effective capabilities, as /proc/self/status says them (proc(5)): the oracle

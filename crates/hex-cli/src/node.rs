@@ -23,9 +23,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use hex_api::Refusal;
+use hex_core::netns::Counts;
 #[cfg(debug_assertions)]
 use hex_node::CrashPoint;
-use hex_core::netns::Counts;
 use hex_node::Node;
 use hex_node::serve::{Server, limits};
 use rustix::process::Resource;
@@ -289,7 +289,6 @@ mod tests {
                 "{value}: {why}"
             );
         }
-
     }
 
     use hex_core::netns::Missing;

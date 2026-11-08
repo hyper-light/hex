@@ -234,11 +234,11 @@ pub struct Hello {
     pub version: u16,
     pub classes: Vec<Class>,
     pub limits: Limits,
-    /// The node's budgets, from version 4; `None` in an earlier version's.
+    /// The node's budgets, from version 7 ([`BUDGETS`]); `None` in an earlier version's.
     pub budgets: Option<Budgets>,
 }
 
-/// The node agent's budgets on all its connections together (version 4's): past either, a call or an exec is refused
+/// The node agent's budgets on all its connections together (version 7's): past either, a call or an exec is refused
 /// by type, whichever connection it comes on, but for what each connection's limits keep for it ([`Limits`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Budgets {
@@ -707,7 +707,7 @@ fn check(msg: &Received<'_>, bound: usize, version: u16) -> Result<(), Fault> {
 }
 
 /// That this side speaks `version`.
-/// A step's latest reason for a failed make (version 4): an option of its errno and its text, a text past
+/// A step's latest reason for a failed make (version 6): an option of its errno and its text, a text past
 /// [`netns::MAX_REASON`] bytes refused rather than cut, so what is read is what was written.
 fn reason(r: &mut Reader<'_>) -> Result<Option<netns::Reason>, Fault> {
     r.option(|r| {
@@ -727,7 +727,7 @@ fn reason(r: &mut Reader<'_>) -> Result<Option<netns::Reason>, Fault> {
     })
 }
 
-/// What a node lacks, from its byte in the network namespace counts (version 3): nothing, or what its
+/// What a node lacks, from its byte in the network namespace counts (version 5): nothing, or what its
 /// bits name; a bit no version defines is refused.
 fn missing(bits: u8) -> Result<Option<netns::Missing>, Fault> {
     match bits {

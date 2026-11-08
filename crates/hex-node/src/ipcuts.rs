@@ -10,7 +10,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 use hex_api::Refusal;
-use hex_core::netns::{Counts, Pool, Take};
+use hex_core::netns::{Counts, Pool, Reason, Step, Take};
 use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::ipcuts::{self, Pair};
 use hex_runtime::linux::oci::run::IpcUtsAhead;
@@ -183,7 +183,9 @@ fn refill(shared: &Shared) {
             Ok(pair) => {
                 let _ = pool.made(pair);
             }
-            Err(_) => pool.failed(),
+            // The pair's make is one unshare and two opens, counted as the make's step (hex_core::netns::Step), its
+            // reason the error's own text, so what failed isn't dropped (CLAUDE.md §3).
+            Err(e) => pool.failed(Step::Unshare, Reason::new(None, &e.to_string())),
         }
     }
 }

@@ -542,7 +542,7 @@ impl Netns {
     /// ([`ReuseCounts::made_on_path`]).
     fn make_on_path(&self) -> Result<OwnedFd, OciError> {
         let home = net::thread_network()?;
-        let ns = net::make_ahead(home.as_fd())?;
+        let ns = net::make_ahead(home.as_fd()).map_err(|f| f.error)?;
         if let Some(kept) = &self.kept {
             kept.state.made_on_path.fetch_add(1, Ordering::AcqRel);
         }

@@ -419,7 +419,7 @@ fn hostile_messages_are_refused_and_the_connection_is_served_after() {
 }
 
 /// HEX-SOCK-10: the node's network namespace counts cross the socket as its host holds them: asked
-/// through `hex-client`, and on a raw connection in version 4, answered in its request's version with
+/// through `hex-client`, and on a raw connection in this side's version, answered in its request's version with
 /// its id.
 #[test]
 fn the_network_namespace_counts_cross_the_socket() {
@@ -849,9 +849,9 @@ fn programs_watched_are_bounded_for_the_node_and_each_connection_keeps_its_one()
 
 /// HEX-SOCK-2 and HEX-SOCK-5, the lead's ruling of 2026-11-06: a client of an older version is told only what the
 /// node keeps for each connection, and is never refused within it, however much of the node's budgets other
-/// connections hold. Do: a hello in version 3 and one in version 4; then, under a node-wide budget of 3 calls held at
-/// the gate, one connection taking all it can before an old client's call. Expect: version 3 told one call and one
-/// program a connection and no budgets; version 4 told the same and the node's budgets beside; the first connection
+/// connections hold. Do: a hello in version 6 and one in version 7 (`wire::BUDGETS`); then, under a node-wide budget of 3 calls held at
+/// the gate, one connection taking all it can before an old client's call. Expect: version 6 told one call and one
+/// program a connection and no budgets; version 7 told the same and the node's budgets beside; the first connection
 /// refused past two calls, naming the node's budget; the old client's call admitted and answered.
 #[test]
 fn an_older_client_within_what_it_was_told_is_never_refused() {
@@ -871,10 +871,10 @@ fn an_older_client_within_what_it_was_told_is_never_refused() {
             other => panic!("{other:?}"),
         }
     };
-    let old = hello(3);
+    let old = hello(6);
     assert_eq!((old.limits.in_flight, old.limits.programs), (1, 1));
     assert_eq!(old.budgets, None);
-    let new = hello(4);
+    let new = hello(7);
     assert_eq!((new.limits.in_flight, new.limits.programs), (1, 1));
     assert_eq!(
         new.budgets,

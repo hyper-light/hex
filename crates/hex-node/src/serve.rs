@@ -68,7 +68,7 @@ pub use hex_core::wire::Limits;
 
 /// The node's bounds on its socket ([`Server::bind`]'s `limits`), each a budget for the node and each taken from
 /// its platform (Ada's rule and the lead's call, 2026-11-06); a hello tells its `in_flight` and `programs` as the
-/// node's budgets (version 4's) and [`KEPT`] as each connection's limits:
+/// node's budgets (version 7's) and [`KEPT`] as each connection's limits:
 /// - connections: the descriptors the node may hold (its hard `RLIMIT_NOFILE`, which the agent raises its soft
 ///   limit to, getrlimit(2)), one each; the kernel refuses an accept past what remains of them (`EMFILE`), and the
 ///   socket pauses accepting until one closes;
