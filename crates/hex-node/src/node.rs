@@ -909,8 +909,6 @@ impl Node {
     pub fn recover(&self) -> Result<RecoverySummary, Refusal> {
         // What a crash at a record write left: a temp file never renamed into place.
         self.store.remove_strays()?;
-        // A node before goal 5 extended step 5 kept every record in its state directory.
-        self.store.settle()?;
         let mut seen: BTreeMap<BoxId, Seen> = BTreeMap::new();
         for (id, record) in self.store.all()? {
             seen.entry(id).or_default().record = Some(record);

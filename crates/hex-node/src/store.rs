@@ -182,8 +182,7 @@ impl Store {
     }
 
     /// Box `id`'s record files in the two places it may be kept: the runtime directory's, in its shard, then the
-    /// state directory's. A record a node before step 6 left in the runtime directory itself is in neither:
-    /// recovery moves it to its shard first ([`Store::settle`]), so no create or delete reads that directory.
+    /// state directory's.
     fn files(&self, id: &BoxId) -> [PathBuf; 2] {
         [
             record_file(&self.run.join(shard(id)), id),
@@ -191,10 +190,10 @@ impl Store {
         ]
     }
 
-    /// The directories records are found in, each listed whole by recovery: the state directory, the runtime
-    /// directory (a node's before step 6), then each of its shards.
+    /// The directories records are found in, each listed whole by recovery: the state directory, then each of the
+    /// runtime directory's shards.
     fn listed(&self) -> Vec<PathBuf> {
-        let mut dirs = vec![self.disk.clone(), self.run.clone()];
+        let mut dirs = vec![self.disk.clone()];
         dirs.extend((0..=SHARD_MASK).map(|n| self.run.join(format!("{n:02x}"))));
         dirs
     }
@@ -363,10 +362,7 @@ impl Store {
     }
 
     /// Every record the store holds, by box id; an id whose file can't be read is included with its
-    /// reason. A stray temp file (a crash mid-write) is ignored: its rename never completed. A record
-    /// in both places is the runtime directory's: a node before goal 5 extended step 5 kept every
-    /// record in the state directory, and a record whose place is the runtime directory has been
-    /// written there since.
+    /// reason. A stray temp file (a crash mid-write) is ignored: its rename never completed.
     pub fn all(&self) -> Result<BTreeMap<BoxId, Result<BoxRecord, String>>, Refusal> {
         let mut out = BTreeMap::new();
         for dir in self.listed() {
@@ -379,47 +375,6 @@ impl Store {
             }
         }
         Ok(out)
-    }
-
-    /// Moves each record kept outside its place to it, written there in full before the copy left
-    /// is removed, so a crash between leaves the record in both places and the next recovery moves it
-    /// again; how many it moved. Recovery's: a node before goal 5 extended step 5 kept every record in
-    /// the state directory, and an unreadable record is left where it is, for recovery to remove.
-    pub fn settle(&self) -> Result<usize, Refusal> {
-        let mut moved = 0usize;
-        // A node before step 6 kept the runtime directory's records in it, not in its shards: each is moved to
-        // its shard whole, readable or not (recovery removes an unreadable one's box from there), and one its
-        // shard holds already is the shard's, written since.
-        for (id, path) in records_in(&self.run)? {
-            let _turn = self.claim(&id)?;
-            let [to, _] = self.files(&id);
-            let gone = if to.exists() {
-                fs::remove_file(&path)
-            } else {
-                fs::rename(&path, &to)
-            };
-            match gone {
-                Ok(()) => moved = moved.saturating_add(1),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(Refusal::os("moving a record to its shard", e)),
-            }
-        }
-        for (id, path) in records_in(&self.disk)? {
-            let _turn = self.claim(&id)?;
-            let Ok(Ok(record)) = fs::read(&path).map(|bytes| BoxRecord::decode(&bytes)) else {
-                continue;
-            };
-            if record.spec.id != id || must_outlive_host(&record) {
-                continue;
-            }
-            self.write(&record)?;
-            match fs::remove_file(&path) {
-                Ok(()) => moved = moved.saturating_add(1),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(Refusal::os("removing a record moved to its place", e)),
-            }
-        }
-        Ok(moved)
     }
 
     /// Removes the temp files a crash mid-write left in either place, each never renamed into place,
@@ -745,79 +700,6 @@ mod tests {
         );
     }
 
-    /// Goal 5 extended step 5: a record found in both places, as a node before the step left one in
-    /// the state directory and wrote it again since in its place, is the runtime directory's, to
-    /// [`Store::get`] and [`Store::all`]; [`Store::remove`] takes both copies.
-    #[test]
-    fn a_record_in_both_places_is_the_runtime_directorys_and_goes_from_both() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store_in(dir.path());
-        let old = record("a");
-        fs::write(dir.path().join("state/a.json"), old.encode().unwrap()).unwrap();
-        let mut new = old.clone();
-        new.abandoned = 7;
-        store.put(&new).unwrap();
-        assert_eq!(store.get(&new.spec.id).unwrap(), Some(Ok(new.clone())));
-        assert_eq!(
-            store.all().unwrap().into_iter().collect::<Vec<_>>(),
-            [(new.spec.id.clone(), Ok(new.clone()))]
-        );
-        store.remove(&new.spec.id).unwrap();
-        assert_eq!(
-            store.get(&new.spec.id).unwrap(),
-            None,
-            "neither copy is left"
-        );
-        assert!(names(&dir.path().join("state")).is_empty());
-    }
-
-    /// Goal 5 extended step 5, T-T7.1.2 across the step's upgrade: a node before it kept every record
-    /// in its state directory. Recovery's settle moves each whose place is the runtime directory
-    /// there, and leaves a record that must outlive the host, a file that isn't a record and an
-    /// unreadable one where they are; a second settle moves nothing.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_record_an_older_node_left_in_the_state_directory_is_moved_to_its_place() {
-        let (_tmpfs, disk) = match tmpfs_and_disk() {
-            Ok(pair) => pair,
-            Err(why) => {
-                eprintln!("SKIP: {why}");
-                return;
-            }
-        };
-        let dir = tempfile::tempdir().unwrap();
-        let store = store_in(dir.path());
-        let state = dir.path().join("state");
-        let moving = record("moving");
-        let mut staying = record("staying");
-        staying.dirs = vec![disk.path().join("staying")];
-        for r in [&moving, &staying] {
-            fs::write(
-                state.join(format!("{}.json", r.spec.id)),
-                r.encode().unwrap(),
-            )
-            .unwrap();
-        }
-        fs::write(state.join("broken.json"), b"{ not json").unwrap();
-        fs::create_dir(state.join("bundles")).unwrap();
-
-        assert_eq!(store.settle().unwrap(), 1);
-        assert_eq!(
-            names(&state),
-            ["broken.json", "bundles", "staying.json"],
-            "the durable record, the unreadable one and the bundles stay"
-        );
-        assert_eq!(sharded(&dir.path().join("run")), ["moving.json"]);
-        assert_eq!(store.get(&moving.spec.id).unwrap(), Some(Ok(moving)));
-        assert_eq!(store.get(&staying.spec.id).unwrap(), Some(Ok(staying)));
-        assert_eq!(
-            store.syncs(),
-            Syncs::default(),
-            "the moved record isn't synced"
-        );
-        assert_eq!(store.settle().unwrap(), 0);
-    }
-
     /// Goal 5 plan step 2: writes of two boxes never wait on each other; two of one box do. While one
     /// box's turn is held, as its write holds it across the fsyncs, 31 other boxes' records are written
     /// from 31 threads at once, none of them waiting; a second write of the held box waits, its record
@@ -982,13 +864,12 @@ mod tests {
         let store = store_in(dir.path());
         store.put(&record("a")).unwrap();
         let (state, run) = (dir.path().join("state"), dir.path().join("run"));
-        // One in a shard, one where a node before the shards wrote, one in the state directory.
+        // One in a shard, one in the state directory.
         fs::write(runtime_temp(&run, &BoxId::new("a").unwrap()), b"{ half").unwrap();
-        fs::write(run.join(".c.tmp"), b"{ half").unwrap();
         fs::write(state.join(".b.tmp"), b"").unwrap();
         fs::write(run.join(".notes"), b"hi").unwrap();
         fs::write(state.join(".notes"), b"hi").unwrap();
-        assert_eq!(store.remove_strays().unwrap(), 3);
+        assert_eq!(store.remove_strays().unwrap(), 2);
         assert_eq!(sharded(&run), ["a.json"]);
         assert!(
             names(&run).iter().all(|n| n == ".notes" || n.len() == 2),
@@ -1086,46 +967,5 @@ mod tests {
         let reach = shards * (1.0 - ((shards - 1.0) / shards).powi(256));
         assert!((reach - 62.86).abs() < 0.01, "{reach}");
         assert_eq!(shards_256_ids_reach(), 50);
-    }
-
-    /// Goal 5 extended step 6, T-T7.1.2 across the shards' upgrade: a node before them kept the runtime
-    /// directory's records in it. Recovery's settle moves each to its shard, readable or not (recovery then
-    /// removes an unreadable one's box from there), and of a record its shard holds already keeps the shard's,
-    /// written since; a second settle moves nothing, and no create or delete reads the directory itself.
-    #[test]
-    fn a_record_an_older_node_left_in_the_runtime_directory_is_moved_to_its_shard() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store_in(dir.path());
-        let run = dir.path().join("run");
-        let moving = record("moving");
-        fs::write(run.join("moving.json"), moving.encode().unwrap()).unwrap();
-        fs::write(run.join("broken.json"), b"{ not json").unwrap();
-        let mut newer = record("both");
-        newer.abandoned = 3;
-        store.put(&newer).unwrap();
-        fs::write(run.join("both.json"), record("both").encode().unwrap()).unwrap();
-        assert_eq!(store.settle().unwrap(), 3);
-        assert_eq!(
-            sharded(&run),
-            ["both.json", "broken.json", "moving.json"],
-            "each in its shard"
-        );
-        assert!(
-            names(&run).iter().all(|n| n.len() == 2),
-            "{:?}",
-            names(&run)
-        );
-        assert_eq!(store.get(&moving.spec.id).unwrap(), Some(Ok(moving)));
-        assert_eq!(
-            store.get(&newer.spec.id).unwrap(),
-            Some(Ok(newer)),
-            "the shard's copy, written since"
-        );
-        let all = store.all().unwrap();
-        assert!(
-            all[&BoxId::new("broken").unwrap()].is_err(),
-            "still found, as unreadable"
-        );
-        assert_eq!(store.settle().unwrap(), 0);
     }
 }
