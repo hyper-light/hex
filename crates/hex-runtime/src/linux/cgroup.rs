@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use hex_api::{Bounds, BoxId, Refusal, Signal, Usage};
 use hex_core::cgroup::{self as core, CONTROLLERS, Dev, UsageFiles};
+use hex_core::setup::{self, Undelegated};
 use rustix::fs::{Mode, OFlags};
 
 use super::os_err;
@@ -49,15 +50,16 @@ pub fn own_cgroup() -> Result<PathBuf, Refusal> {
 #[derive(Debug, Clone)]
 pub struct BoxRoot {
     dir: PathBuf,
-    controllers: BTreeSet<String>,
     disks: Vec<Dev>,
 }
 
 impl BoxRoot {
-    /// Opens the box root at `dir`, making it when it's missing: its parent is asked to hand it each
-    /// of [`CONTROLLERS`] it has, and it hands them on to boxes. `disks` are the devices
-    /// `io.latency` and `io.max` apply to. Refused when the parent holds processes of its own (the
-    /// kernel then can't hand controllers down) or isn't writable (not delegated).
+    /// Opens the box root at `dir`, making it when it's missing: its parent is asked to hand it every
+    /// one of [`CONTROLLERS`], and it hands them on to boxes. `disks` are the devices `io.latency` and
+    /// `io.max` apply to. Where the delegation Hex's installer sets up is missing (the parent lacks a
+    /// controller, isn't this user's, or holds processes of its own, so the kernel can't hand
+    /// controllers down), both Linux classes are refused by name, saying what's missing
+    /// ([`setup::undelegated`]).
     pub fn open(dir: &Path, disks: Vec<Dev>) -> Result<Self, Refusal> {
         let parent = dir.parent().ok_or_else(|| Refusal::Invalid {
             what: "box root",
@@ -66,41 +68,35 @@ impl BoxRoot {
         match fs::create_dir(dir) {
             Ok(()) => {}
             Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => {
+                return Err(setup::undelegated(
+                    parent,
+                    Undelegated::NotOurs(e.to_string()),
+                ));
+            }
             Err(e) => return Err(os_err("making the box root", dir, e)),
         }
-        let available = read_set(&parent.join("cgroup.controllers"))?;
-        let wanted: Vec<&str> = CONTROLLERS
-            .iter()
-            .copied()
-            .filter(|c| available.contains(*c))
-            .collect();
-        let enable = wanted
+        setup::check_controllers(parent, &read_set(&parent.join("cgroup.controllers"))?)?;
+        let enable = CONTROLLERS
             .iter()
             .map(|c| format!("+{c}"))
             .collect::<Vec<_>>()
             .join(" ");
-        if !enable.is_empty() {
-            if let Err(e) = write_file(&parent.join("cgroup.subtree_control"), &enable) {
-                let procs = fs::read_to_string(parent.join("cgroup.procs")).unwrap_or_default();
-                let why = if procs.trim().is_empty() {
-                    format!("{e}")
+        if let Err(e) = write_file(&parent.join("cgroup.subtree_control"), &enable) {
+            let procs = fs::read_to_string(parent.join("cgroup.procs")).unwrap_or_default();
+            let why = e.to_string();
+            return Err(setup::undelegated(
+                parent,
+                if procs.trim().is_empty() {
+                    Undelegated::NotOurs(why)
                 } else {
-                    format!(
-                        "{e}: {} holds processes of its own, so cgroup v2 can't hand its controllers to the box root; run the node agent in a leaf cgroup beside it (systemd: Delegate=yes, DelegateSubgroup=)",
-                        parent.display()
-                    )
-                };
-                return Err(Refusal::Os {
-                    op: "enabling controllers for the box root",
-                    why,
-                });
-            }
-            write_file(&dir.join("cgroup.subtree_control"), &enable)?;
+                    Undelegated::Occupied(why)
+                },
+            ));
         }
-        let controllers = read_set(&dir.join("cgroup.subtree_control"))?;
+        write_file(&dir.join("cgroup.subtree_control"), &enable)?;
         Ok(Self {
             dir: dir.to_owned(),
-            controllers,
             disks,
         })
     }
@@ -123,48 +119,14 @@ impl BoxRoot {
         &self.dir
     }
 
-    /// The controllers boxes get.
-    pub fn controllers(&self) -> &BTreeSet<String> {
-        &self.controllers
-    }
-
     /// The disks `io.latency` and `io.max` apply to.
     pub fn disks(&self) -> &[Dev] {
         &self.disks
     }
 
-    /// Makes box `id`'s cgroup with `bounds` in force. A bound whose controller the root doesn't
-    /// have is refused by name, before anything is made.
+    /// Makes box `id`'s cgroup with `bounds` in force: every bound's controller is there, since the root
+    /// opened only with all of [`CONTROLLERS`] ([`BoxRoot::open`]).
     pub fn create(&self, id: &BoxId, bounds: &Bounds) -> Result<BoxCgroup, Refusal> {
-        for (needed, set) in [
-            (
-                "cpu",
-                bounds.cpu_weight.is_some() || bounds.cpu_max_milli.is_some(),
-            ),
-            (
-                "memory",
-                bounds.memory_max.is_some() || bounds.memory_high.is_some(),
-            ),
-            (
-                "io",
-                bounds.io_weight.is_some()
-                    || bounds.io_latency_us.is_some()
-                    || bounds.io_max.is_some(),
-            ),
-            ("pids", bounds.pids_max.is_some()),
-        ] {
-            if set && !self.controllers.contains(needed) {
-                return Err(Refusal::Platform {
-                    what: "a bound",
-                    platform: "linux",
-                    why: format!(
-                        "the {needed} controller isn't delegated to {} (it has {:?}): delegate it to the node agent's cgroup",
-                        self.dir.display(),
-                        self.controllers
-                    ),
-                });
-            }
-        }
         let writes = core::writes(bounds, &self.disks)?;
         if self.count()? >= MAX_BOXES {
             return Err(Refusal::Full(MAX_BOXES));

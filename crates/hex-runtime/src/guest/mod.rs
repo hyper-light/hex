@@ -612,12 +612,32 @@ impl Runtime for GuestRuntime {
     }
 }
 
-/// A node's runtime where the `oci` class is its guest's: `process` boxes are the host's own runtime's
-/// (`MacRuntime`, `WinRuntime`), `oci` boxes the guest's, one box id naming one box across both. This is
-/// the routing by class of §1, the same for macOS and Windows (CLAUDE.md §8).
+/// Which of a [`WithGuest`]'s runtimes takes a box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    /// The host's own runtime.
+    Host,
+    /// The guest's.
+    Guest,
+}
+
+/// The routing by class of §1: `process` boxes the host's, every `oci` box the guest's, for a host that
+/// runs no `oci` class of its own (macOS).
+pub fn by_class<P>(_host: &P, class: &ClassSpec) -> Result<Side, Refusal> {
+    Ok(match class {
+        ClassSpec::Process => Side::Host,
+        ClassSpec::Oci(_) | ClassSpec::Bundle(_) => Side::Guest,
+    })
+}
+
+/// A node's runtime where Linux images are its guest's: the host's own runtime (`MacRuntime`,
+/// `WinRuntime`) takes what its `route` says it runs, the guest the rest, one box id naming one box across
+/// both (CLAUDE.md §8). macOS routes by class ([`by_class`]); Windows runs its own images through HCS and
+/// sends only Linux images to the guest (`WinRuntime::oci_side`).
 pub struct WithGuest<P> {
     process: P,
     oci: GuestRuntime,
+    route: fn(&P, &ClassSpec) -> Result<Side, Refusal>,
 }
 
 impl<P: Runtime> WithGuest<P> {
@@ -627,11 +647,26 @@ impl<P: Runtime> WithGuest<P> {
         &self.process
     }
 
-    /// The node's runtime, its guest booted before it returns, so it accepts no box before that boot
-    /// ([`GuestRuntime::boot`]); a guest that can't boot refuses the node by type.
+    /// The node's runtime routed by class ([`by_class`]), its guest booted before it returns
+    /// ([`WithGuest::routing`]).
     pub fn new(process: P, oci: GuestRuntime) -> Result<Self, Refusal> {
+        Self::routing(process, oci, by_class)
+    }
+
+    /// The node's runtime routed by `route`, which a box it refuses is refused by. Its guest is booted
+    /// before it returns, so it accepts no box before that boot ([`GuestRuntime::boot`]); a guest that
+    /// can't boot refuses the node by type.
+    pub fn routing(
+        process: P,
+        oci: GuestRuntime,
+        route: fn(&P, &ClassSpec) -> Result<Side, Refusal>,
+    ) -> Result<Self, Refusal> {
         oci.boot()?;
-        Ok(Self { process, oci })
+        Ok(Self {
+            process,
+            oci,
+            route,
+        })
     }
 
     /// The runtime holding `id`, or [`Refusal::NoSuchBox`]: the host's, asked first as it answers
@@ -655,10 +690,11 @@ impl<P: Runtime> Runtime for WithGuest<P> {
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
         // An id is one box's across both classes: the other side holding it refuses the create.
-        let (this, other): (&dyn Runtime, &dyn Runtime) = match spec.class {
-            ClassSpec::Process => (&self.process, &self.oci),
-            ClassSpec::Oci(_) | ClassSpec::Bundle(_) => (&self.oci, &self.process),
-        };
+        let (this, other): (&dyn Runtime, &dyn Runtime) =
+            match (self.route)(&self.process, &spec.class)? {
+                Side::Host => (&self.process, &self.oci),
+                Side::Guest => (&self.oci, &self.process),
+            };
         match other.inspect(&spec.id) {
             Ok(_) => return Err(Refusal::Exists(spec.id)),
             Err(Refusal::NoSuchBox(_)) => {}

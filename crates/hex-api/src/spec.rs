@@ -109,10 +109,7 @@ impl OciSpec {
             host_path(&format!("mounts[{i}].source"), &m.source)?;
             let field = format!("mounts[{i}].destination");
             container_path(&field, &m.destination)?;
-            if m.destination
-                .split('/')
-                .all(|part| part.is_empty() || part == ".")
-            {
+            if path_parts(&m.destination).all(|part| part.is_empty() || part == ".") {
                 return Err(invalid_spec(format!(
                     "{field} is the root: a mount over it would hide the rootfs"
                 )));
@@ -140,7 +137,29 @@ fn invalid_spec(why: String) -> Refusal {
     }
 }
 
-/// A host path a spec names: absolute on the Linux host that runs the container, and UTF-8 without a
+/// Whether `path` is drive-absolute, Windows' absolute form (`C:\…` or `C:/…`); `C:data` is relative to
+/// the drive's current folder and `\\server\share` a UNC path, neither absolute here.
+pub fn drive_absolute(path: &str) -> bool {
+    let mut c = path.chars();
+    matches!(
+        (c.next(), c.next(), c.next()),
+        (Some(d), Some(':'), Some('\\' | '/')) if d.is_ascii_alphabetic()
+    )
+}
+
+/// The components of an absolute path in either form: after its drive for a drive-absolute one, split on
+/// both separators; split on `/` alone for a POSIX one, as Linux reads it.
+fn path_parts(path: &str) -> impl Iterator<Item = &str> {
+    let (rest, windows) = if drive_absolute(path) {
+        (path.get(2..).unwrap_or(""), true)
+    } else {
+        (path, false)
+    };
+    rest.split(move |c| c == '/' || (windows && c == '\\'))
+}
+
+/// A host path a spec names: absolute on the host that runs the container (POSIX-absolute on Linux and
+/// macOS, drive-absolute on Windows; the runtime refuses the form its host can't use), and UTF-8 without a
 /// NUL, since `config.json` carries it as a JSON string and the kernel takes it as a C string.
 fn host_path(field: &str, path: &Path) -> Result<(), Refusal> {
     let Some(text) = path.to_str() else {
@@ -151,7 +170,7 @@ fn host_path(field: &str, path: &Path) -> Result<(), Refusal> {
     if text.contains('\0') {
         return Err(invalid_spec(format!("{field} {text:?} holds a NUL")));
     }
-    if !text.starts_with('/') {
+    if !text.starts_with('/') && !drive_absolute(text) {
         return Err(invalid_spec(format!(
             "{field} {text:?} isn't an absolute path"
         )));
@@ -160,17 +179,18 @@ fn host_path(field: &str, path: &Path) -> Result<(), Refusal> {
 }
 
 /// A path in the container: absolute, without a NUL, and with no `..`, which could reach above the
-/// rootfs before the runtime has pivoted into it. Split on `/` alone, as the container's Linux does.
+/// rootfs before the runtime has pivoted into it. A POSIX path splits on `/` alone, as a Linux container
+/// does; a drive-absolute one (a Windows container's) on both separators.
 fn container_path(field: &str, path: &str) -> Result<(), Refusal> {
     if path.contains('\0') {
         return Err(invalid_spec(format!("{field} {path:?} holds a NUL")));
     }
-    if !path.starts_with('/') {
+    if !path.starts_with('/') && !drive_absolute(path) {
         return Err(invalid_spec(format!(
             "{field} {path:?} isn't an absolute path"
         )));
     }
-    if path.split('/').any(|part| part == "..") {
+    if path_parts(path).any(|part| part == "..") {
         return Err(invalid_spec(format!(
             "{field} {path:?} has a '..' component"
         )));
@@ -274,6 +294,150 @@ impl Program {
         }
         Ok(())
     }
+
+    /// The bytes an exec takes for this program, counted as Linux's `execve` counts them
+    /// (docs/research/runtime/exec-size-bounds.md), which is at least what XNU counts: each argument and
+    /// each `KEY=VALUE` string with its NUL, the first argument once more for the filename, and a pointer
+    /// for each string (one argument at least). Saturates at `usize::MAX`, which no bound admits.
+    pub fn exec_size(&self) -> usize {
+        let args = self
+            .args
+            .iter()
+            .fold(0usize, |n, a| n.saturating_add(a.len()).saturating_add(1));
+        let filename = self.args.first().map_or(1, |a| a.len().saturating_add(1));
+        let env = self.env.iter().fold(0usize, |n, (k, v)| {
+            // KEY=VALUE and its NUL.
+            n.saturating_add(k.len())
+                .saturating_add(v.len())
+                .saturating_add(2)
+        });
+        let pointers = self
+            .args
+            .len()
+            .max(1)
+            .saturating_add(self.env.len())
+            .saturating_mul(size_of::<usize>());
+        args.saturating_add(filename)
+            .saturating_add(env)
+            .saturating_add(pointers)
+    }
+
+    /// Whether this OS's exec takes it: refused as `Invalid` naming the sizes and the bound's source when it
+    /// doesn't, before any spawn (CLAUDE.md §2, §3).
+    pub fn fits(&self, limit: &ExecLimit) -> Result<(), Refusal> {
+        let size = limit.size(self);
+        if size > limit.block {
+            let (what, unit) = match limit.counts {
+                BlockCount::Execve => ("its arguments and environment take", "bytes"),
+                BlockCount::Environment => ("its environment takes", limit.unit.name()),
+            };
+            return Err(Refusal::Invalid {
+                what: "program",
+                why: format!(
+                    "{what} {size} {unit}; {} allows {}",
+                    limit.source, limit.block
+                ),
+            });
+        }
+        let Some(most) = limit.string else {
+            return Ok(());
+        };
+        let unit = limit.unit;
+        // Each string with its NUL, in the OS's own unit.
+        let arg_size = |a: &str| unit.of(a).saturating_add(1);
+        let var_size = |k: &str, v: &str| unit.of(k).saturating_add(unit.of(v)).saturating_add(2);
+        if let Some(a) = self.args.iter().find(|a| arg_size(a) > most) {
+            return Err(Refusal::Invalid {
+                what: "program",
+                why: format!(
+                    "an argument of {} {}; {} allows {most} for one string",
+                    arg_size(a),
+                    unit.name(),
+                    limit.source
+                ),
+            });
+        }
+        if let Some((k, v)) = self.env.iter().find(|(k, v)| var_size(k, v) > most) {
+            return Err(Refusal::Invalid {
+                what: "program",
+                why: format!(
+                    "environment variable {k:?} takes {} {}; {} allows {most} for one string",
+                    var_size(k, v),
+                    unit.name(),
+                    limit.source
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// What an OS's exec bound counts of a program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockCount {
+    /// Every argument and variable, the filename and their pointers, in bytes: [`Program::exec_size`]
+    /// (Linux's execve, which bounds at least what XNU's does).
+    Execve,
+    /// The environment alone, each NAME=VALUE and its NUL in [`ExecLimit::unit`] (Windows' environment block;
+    /// its command line is bounded apart).
+    Environment,
+}
+
+/// The unit an OS counts one string of a program in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StringUnit {
+    /// UTF-8 bytes (Linux's `MAX_ARG_STRLEN`).
+    Bytes,
+    /// UTF-16 code units (Windows' 32,767 characters a variable).
+    Utf16,
+}
+
+impl ExecLimit {
+    /// `program`'s size as this bound counts it.
+    pub fn size(&self, program: &Program) -> usize {
+        match self.counts {
+            BlockCount::Execve => program.exec_size(),
+            BlockCount::Environment => program.env.iter().fold(0usize, |n, (k, v)| {
+                // NAME=VALUE and its NUL.
+                n.saturating_add(self.unit.of(k))
+                    .saturating_add(self.unit.of(v))
+                    .saturating_add(2)
+            }),
+        }
+    }
+}
+
+impl StringUnit {
+    /// `s`'s length in this unit.
+    pub fn of(self, s: &str) -> usize {
+        match self {
+            Self::Bytes => s.len(),
+            Self::Utf16 => s.encode_utf16().count(),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Bytes => "bytes",
+            Self::Utf16 => "UTF-16 units",
+        }
+    }
+}
+
+/// The most an OS's exec takes of a program's arguments and environment
+/// (docs/research/runtime/exec-size-bounds.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecLimit {
+    /// The most a program may take, counted as [`ExecLimit::counts`] says.
+    pub block: usize,
+    /// What [`ExecLimit::block`] counts.
+    pub counts: BlockCount,
+    /// Any one string with its NUL, in [`ExecLimit::unit`], where the OS bounds that too.
+    pub string: Option<usize>,
+    /// What [`ExecLimit::string`] counts: Linux and macOS bound a string in bytes, Windows in UTF-16 units.
+    pub unit: StringUnit,
+    /// Where the bound was read, for the refusal.
+    pub source: &'static str,
 }
 
 /// A user and its groups in a container.
@@ -312,6 +476,102 @@ mod tests {
         p.env.push(("A=B".to_owned(), "c".to_owned()));
         assert!(p.check().is_err());
         assert_eq!(Program::of(&["sh", "-c", "true"]).check(), Ok(()));
+    }
+
+    /// docs/research/runtime/exec-size-bounds.md: do count `sh -c true` with one variable, expect Linux's
+    /// count (each string and its NUL, the filename again, a pointer per string); do fit it against a block one
+    /// byte short, expect a refusal naming the program and the bound's source; do a variable past the
+    /// per-string bound, expect it named.
+    #[test]
+    fn a_program_is_counted_as_execve_counts_it_and_refused_past_a_bound() {
+        let p = Program {
+            args: vec!["sh".into(), "-c".into(), "true".into()],
+            env: vec![("A".into(), "bcdef".into())],
+            ..Program::default()
+        };
+        // "sh\0" "-c\0" "true\0" = 3 + 3 + 5; the filename "sh\0" = 3; "A=bcdef\0" = 8; 4 pointers.
+        let size = 11 + 3 + 8 + 4 * size_of::<usize>();
+        assert_eq!(p.exec_size(), size);
+        let fits = ExecLimit {
+            block: size,
+            counts: BlockCount::Execve,
+            string: None,
+            unit: StringUnit::Bytes,
+            source: "a test",
+        };
+        assert_eq!(p.fits(&fits), Ok(()));
+        let short = ExecLimit {
+            block: size - 1,
+            ..fits
+        };
+        assert!(matches!(
+            p.fits(&short),
+            Err(Refusal::Invalid { what: "program", ref why }) if why.contains("a test")
+        ));
+        // Every argument fits in 6 bytes ("true\0" is the longest, 5); the variable's 8 don't.
+        let one_string = ExecLimit {
+            string: Some(6),
+            ..fits
+        };
+        assert!(matches!(
+            p.fits(&one_string),
+            Err(Refusal::Invalid { what: "program", ref why }) if why.contains("\"A\"")
+        ));
+    }
+
+    /// HEX-RT-14: a per-string bound counts in its OS's own unit. Do: a variable of three two-byte
+    /// characters, "A=ééé": 8 bytes with its NUL, 6 UTF-16 units. Expect a bound of 6 to take it in UTF-16
+    /// units (Windows' count) and refuse it in bytes (Linux's), naming the variable.
+    #[test]
+    fn a_per_string_bound_counts_in_the_os_unit() {
+        let p = Program {
+            args: vec!["sh".into()],
+            env: vec![("A".into(), "ééé".into())],
+            ..Program::default()
+        };
+        let utf16 = ExecLimit {
+            block: usize::MAX,
+            counts: BlockCount::Execve,
+            string: Some(6),
+            unit: StringUnit::Utf16,
+            source: "a test",
+        };
+        assert_eq!(p.fits(&utf16), Ok(()));
+        let bytes = ExecLimit {
+            unit: StringUnit::Bytes,
+            ..utf16
+        };
+        assert!(matches!(
+            p.fits(&bytes),
+            Err(Refusal::Invalid { what: "program", ref why }) if why.contains("\"A\"")
+        ));
+    }
+
+    /// HEX-RT-14: Windows' block is the environment alone, in UTF-16 units (each NAME=VALUE and its NUL;
+    /// the command line is bounded apart). Do: a long argument and the variable "A=ééé" (6 units with its
+    /// NUL). Expect a 6-unit environment block to take it whatever the argument's length, and a 5-unit one
+    /// to refuse it naming the environment.
+    #[test]
+    fn a_windows_block_counts_the_environment_alone_in_its_unit() {
+        let p = Program {
+            args: vec!["cmd".into(), "x".repeat(1000)],
+            env: vec![("A".into(), "ééé".into())],
+            ..Program::default()
+        };
+        let six = ExecLimit {
+            block: 6,
+            counts: BlockCount::Environment,
+            string: None,
+            unit: StringUnit::Utf16,
+            source: "a test",
+        };
+        assert_eq!(six.size(&p), 6);
+        assert_eq!(p.fits(&six), Ok(()));
+        let five = ExecLimit { block: 5, ..six };
+        assert!(matches!(
+            p.fits(&five),
+            Err(Refusal::Invalid { what: "program", ref why }) if why.contains("environment")
+        ));
     }
 
     fn spec() -> OciSpec {
@@ -410,6 +670,47 @@ mod tests {
             let mut s = spec();
             break_it(&mut s);
             refused_naming(&s, field);
+        }
+    }
+
+    /// AC-T7.1.1 (one code path, CLAUDE.md §8): a spec for a Windows node names Windows paths — a host
+    /// path and a container path drive-absolute — and they pass as POSIX ones do; a drive-relative path
+    /// (`C:data`), a UNC path, and a `..` behind a backslash are refused by the field's name.
+    #[test]
+    fn a_windows_path_passes_where_its_form_is_absolute() {
+        let mut s = spec();
+        s.rootfs = Rootfs::Layers(vec![r"D:\layers\base".into(), "C:/layers/app".into()]);
+        s.mounts[0].source = r"D:\srv\data".into();
+        s.mounts[0].destination = r"C:\data".to_owned();
+        s.init.cwd = Some(r"c:\work".to_owned());
+        assert_eq!(s.check(), Ok(()));
+        type Break = Box<dyn Fn(&mut OciSpec)>;
+        let cases: Vec<(&str, Break)> = vec![
+            (
+                "rootfs.layers[0]",
+                Box::new(|s| s.rootfs = Rootfs::Layers(vec![r"D:layers".into()])),
+            ),
+            (
+                "rootfs.layers[0]",
+                Box::new(|s| s.rootfs = Rootfs::Layers(vec![r"\\server\share".into()])),
+            ),
+            (
+                "mounts[0].destination",
+                Box::new(|s| s.mounts[0].destination = r"C:\data\..\Windows".to_owned()),
+            ),
+            (
+                "mounts[0].destination is the root",
+                Box::new(|s| s.mounts[0].destination = r"C:\".to_owned()),
+            ),
+            (
+                "init.cwd",
+                Box::new(|s| s.init.cwd = Some("C:work".to_owned())),
+            ),
+        ];
+        for (field, break_it) in cases {
+            let mut w = s.clone();
+            break_it(&mut w);
+            refused_naming(&w, field);
         }
     }
 

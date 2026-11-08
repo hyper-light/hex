@@ -33,6 +33,8 @@ pub mod guest;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
+pub use calls::WIRE_EXEC_LIMIT;
+#[cfg(target_os = "linux")]
 pub use linux::Client;
 
 #[cfg(target_os = "macos")]

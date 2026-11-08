@@ -123,7 +123,8 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   event, so a cap kill is told from an ordinary SIGKILL without racing its reaper) on members, and, for the
   node's socket on macOS (native plan step 8, `hex-node`'s `serve::macos`, one kqueue on its I/O thread),
   level-triggered `EVFILT_READ`/`EVFILT_WRITE` on the listener and connections; `getpeereid` names the
-  socket's peer, so only the node's user and root are served; `mach_timebase_info` converts Mach ticks; `sysctlbyname("kern.maxproc")` bounds a listing; `getrusage`
+  socket's peer, so only the node's user and root are served; `mach_timebase_info` converts Mach ticks; `sysctlbyname("kern.maxproc")` bounds a listing and
+  `sysctlbyname("kern.argmax")` a program's arguments and environment; `getrusage`
   and `getloadavg` read the node's own cost for the bench and observability. rustix wraps the `kqueue`,
   `kill`/`killpg` and `waitid` beside these, which the class calls through it; libc binds the rest as
   `unsafe` foreign functions, and `posix_spawnattr_set_qos_class_np` and `posix_spawnattr_setjetsam_ext`
@@ -144,9 +145,35 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   accounting and its guaranteed memory-limit violation (`QueryInformationJobObject`), ends the job
   (`TerminateJobObject`) or one member alone (`TerminateProcess`, a program's own kill) and closes its
   handles (`CloseHandle`), and reads the machine's processor count
-  (`GetActiveProcessorCount`). `windows-sys` binds these as `unsafe` foreign functions, and std's own
+  (`GetActiveProcessorCount`). Where its boxes outlive the node (the keeper, `super::keeper`; decision
+  "the Windows node, on one completion port"), it names each box's job (`CreateJobObjectW` with a name,
+  reopened by the next node with `OpenJobObjectW`), and a keeper holds a second handle to each: the node
+  duplicates the job into the keeper and closes it there on delete (`DuplicateHandle` into another process
+  and with `DUPLICATE_CLOSE_SOURCE`, the keeper opened by `OpenProcess` with `PROCESS_DUP_HANDLE`), names
+  a process by its creation time (`GetProcessTimes`) so a reused pid is told apart, waits on a process or
+  the keeper's stop (`WaitForMultipleObjects`), and makes and signals that stop (`CreateEventW` named,
+  `SetEvent`). `windows-sys` binds these as `unsafe` foreign functions, and std's own
   job-object support and its `PROC_THREAD_ATTRIBUTE_JOB_LIST`/`_HANDLE_LIST` process creation are
   unstable; Rust can express none of them safely.
+- `crates/hex-runtime/src/windows/oci/sys.rs`: the Windows `oci` class, a Windows image run process-isolated
+  through the Host Compute Service with a job of Hex's nested in its silo (decision "the Windows `oci` class is
+  an HCS silo holding a Hex job"). It resolves at run time (`LoadLibraryExW` from System32, `GetProcAddress`)
+  and calls HCS's operation, compute-system and process calls (`HcsCreateOperation`,
+  `HcsWaitForOperationResult[AndProcessInfo]`, `HcsCancelOperation`, `HcsCloseOperation`,
+  `HcsCreateComputeSystem`, `HcsStartComputeSystem`, `HcsTerminateComputeSystem`, `HcsCloseComputeSystem`,
+  `HcsCreateProcess`, `HcsCloseProcess`, `HcsGetServiceProperties`), freeing HCS's strings (`LocalFree`), and
+  vmcompute's layer calls that make and remove a box's scratch as hcsshim and runhcs do (`ActivateLayer`,
+  `PrepareLayer`, `GetLayerMountPath`, `UnprepareLayer`, `DeactivateLayer`: undocumented; the documented
+  storage calls made a scratch no container finished starting on, decision record) — resolved rather than
+  linked, because windows-sys links HCS's at load time (and binds none of vmcompute's), and a host without
+  the Containers feature would then not start the node at all. It opens a box's launcher and members by pid (`OpenProcess`), hands the launcher the box's
+  job and the caller's standard handles (`DuplicateHandle`), ends a launcher that never replied
+  (`TerminateProcess`), checks a member's job (`IsProcessInJob`), adopts in the launcher the handle values
+  the node gave it, and reads the host's build and kind (`RtlGetVersion`), an image's build from its base
+  layer's `ntdll.dll` (`GetFileVersionInfoW`, `VerQueryValueW`), and a device interface class's members
+  (`CM_Get_Device_Interface_List_SizeW`, `CM_Get_Device_Interface_ListW`) and whether each opens from where
+  it runs (`CreateFileW`, a query open). Rust can express none of these
+  foreign calls, the function pointers resolved at run time, nor a handle value crossing processes, safely.
 - `crates/hex-afunix/src/lib.rs`: the Windows node agent's socket and its client, an AF_UNIX stream on one
   I/O completion port (decision "the Windows node, on one completion port"). It starts Winsock
   (`WSAStartup`), makes, binds, listens on, connects, shuts down and closes AF_UNIX sockets (`WSASocketW`
@@ -195,8 +222,8 @@ the first failure; kiln CI runs it on every push and pull request (`.kiln/ci.yam
 
 ```
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo clippy --workspace --all-targets --locked --target aarch64-apple-darwin -- -D warnings
+cargo clippy --workspace --all-targets --locked --target x86_64-unknown-linux-gnu --target aarch64-unknown-linux-gnu --target aarch64-unknown-linux-musl -- -D warnings
+cargo clippy --workspace --all-targets --locked --target aarch64-apple-darwin --target x86_64-apple-darwin -- -D warnings
 cargo clippy --workspace --all-targets --locked --target x86_64-pc-windows-msvc -- -D warnings
 bash scripts/check-production.sh
 cargo test --workspace --locked

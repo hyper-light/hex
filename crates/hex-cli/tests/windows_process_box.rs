@@ -16,9 +16,10 @@
 
 use std::io::Read;
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use hex_api::conformance::{self, Act, Fixture};
+use hex_api::differential;
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Runtime, Signal, Stdio};
 use hex_runtime::windows::WinRuntime;
 
@@ -84,11 +85,205 @@ fn fixture() -> BinFixture {
     }
 }
 
+/// The refusal of an `oci` box made from the bundle `config` (a `config.json`), and the runtime, which
+/// must hold no box after it.
+fn refused_bundle(config: &serde_json::Value) -> hex_api::Refusal {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("config.json"), config.to_string()).unwrap();
+    let rt = runtime();
+    let refused = rt
+        .create(BoxSpec {
+            id: BoxId::new("oci-on-windows").unwrap(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(root.path().to_path_buf()),
+        })
+        .unwrap_err();
+    assert!(rt.list().unwrap().is_empty(), "the refused box is left");
+    refused
+}
+
+/// HEX-INST-2 (native plan step 6): a Windows image's `oci` box needs Windows' Containers feature
+/// alone. While it is off the box is refused by name, from the features' state the node read without
+/// elevation, naming Containers and saying the installer turns it on; once it is on, no feature is
+/// named and the box goes on to the HCS class (native plan step 4), which here refuses its missing
+/// layer for what it is. The installer's lab runs this before install and after, and prints which.
+#[test]
+fn a_windows_image_is_refused_naming_containers_while_it_is_off() {
+    let refused = refused_bundle(&serde_json::json!({
+        "ociVersion": "1.2.0",
+        "process": {"args": ["cmd.exe", "/c", "exit 0"], "cwd": "C:\\"},
+        "windows": {"layerFolders": ["C:\\hex-no-such-layer", "C:\\hex-no-such-scratch"]},
+    }));
+    eprintln!("the oci class, a Windows image: {refused:?}");
+    match &refused {
+        hex_api::Refusal::Platform {
+            what,
+            platform,
+            why,
+        } if why.contains("Hex's installer turns") => {
+            assert_eq!((*what, *platform), ("the oci class", "windows"));
+            assert!(why.contains("Containers"), "{why}");
+            assert!(!why.contains("HypervisorPlatform"), "{why}");
+            eprintln!("FEATURES: Containers off");
+        }
+        other => {
+            let text = format!("{other:?}");
+            assert!(!text.contains("Hex's installer turns"), "{text}");
+            eprintln!("FEATURES: Containers on");
+        }
+    }
+}
+
+/// HEX-INST-2 (native plan steps 5 and 6): a Linux image (a bundle with no `windows` section) runs in
+/// a Shards guest, which needs the Windows Hypervisor Platform. It is always refused by name here: while
+/// HypervisorPlatform is off, naming it and saying the installer turns it on; once it is on, naming the
+/// Shards guest it waits on, and never as a malformed Windows spec.
+#[test]
+fn a_linux_image_is_refused_naming_what_its_guest_waits_on() {
+    let refused = refused_bundle(&serde_json::json!({
+        "ociVersion": "1.2.0",
+        "process": {"args": ["/bin/true"], "cwd": "/"},
+        "root": {"path": "rootfs"},
+        "linux": {},
+    }));
+    eprintln!("the oci class, a Linux image: {refused:?}");
+    let hex_api::Refusal::Platform {
+        what,
+        platform,
+        why,
+    } = &refused
+    else {
+        panic!("not refused by name: {refused:?}");
+    };
+    assert_eq!((*what, *platform), ("the oci class", "windows"));
+    assert!(!why.contains("Containers"), "{why}");
+    if why.contains("Hex's installer turns") {
+        assert!(why.contains("HypervisorPlatform"), "{why}");
+        eprintln!("FEATURES: HypervisorPlatform off");
+    } else {
+        assert!(why.contains("Shards guest"), "{why}");
+        eprintln!("FEATURES: HypervisorPlatform on");
+    }
+}
+
+/// HEX-INST-2 (native plan steps 4, 5 and 6): on the Windows node, whose Linux images are its Shards guest's
+/// (`WithGuest::routing` by `WinRuntime::oci_side`), each image goes where it runs. Do: create a Windows
+/// image's box and then a Linux image's, on a node whose guest is simulated and counts its boots. Expect:
+/// the Windows image stays the host's (step 4's class refuses its missing layer) and boots no guest; the
+/// Linux image, while HypervisorPlatform is off, is refused naming it and boots nothing, and once it is on
+/// boots the guest for it; neither box is left.
+#[test]
+fn a_windows_image_stays_the_hosts_and_a_linux_image_goes_to_the_guest() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use hex_runtime::guest::shares::Share;
+    use hex_runtime::guest::{GuestConfig, GuestRuntime, WithGuest};
+
+    let root = tempfile::tempdir().unwrap();
+    let boots = Arc::new(AtomicUsize::new(0));
+    let booted = Arc::clone(&boots);
+    let guests = shards_api::sim::SimGuests::new(move |_host| {
+        booted.fetch_add(1, Ordering::SeqCst);
+        shards_api::End::Stopped
+    });
+    let config = GuestConfig {
+        // A simulated guest boots nothing real: no binary, kernel or initramfs is read.
+        binary: root.path().join("no-shards.exe"),
+        kernel: root.path().join("no-kernel"),
+        initrd: root.path().join("no-initrd"),
+        // The simulated guest reads neither: Shards' own minimums, the smallest guest it boots (Shards
+        // a0cced87 crates/vmm/src/vm/runtime.rs:1061 "at least one vCPU is required",
+        // crates/vmm/src/vm/x86_64.rs:28 MIN_MEMORY_MIB = 128, an even number of MiB).
+        vcpus: 1,
+        memory_mib: 128,
+        shares: vec![Share {
+            dir: root.path().to_path_buf(),
+            read_only: false,
+            at: "/run/hex/shares/0".to_owned(),
+        }],
+        staged: "/run/hex/staged".to_owned(),
+    };
+    let node = WithGuest::routing(
+        runtime(),
+        GuestRuntime::new(Arc::new(guests), config),
+        WinRuntime::oci_side,
+    )
+    .unwrap();
+    let bundle = |name: &str, config: serde_json::Value| {
+        let dir = root.path().join(name);
+        std::fs::create_dir_all(dir.join("rootfs")).unwrap();
+        std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
+        BoxSpec {
+            id: BoxId::new(name).unwrap(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(dir),
+        }
+    };
+
+    let windows = node
+        .create(bundle(
+            "windows-image",
+            serde_json::json!({
+                "ociVersion": "1.2.0",
+                "process": {"args": ["cmd.exe", "/c", "exit 0"], "cwd": "C:\\"},
+                "windows": {"layerFolders": ["C:\\hex-no-such-layer", "C:\\hex-no-such-scratch"]},
+            }),
+        ))
+        .unwrap_err();
+    eprintln!("a Windows image: {windows:?}");
+    assert_eq!(
+        boots.load(Ordering::SeqCst),
+        0,
+        "a Windows image booted the guest"
+    );
+
+    // A Linux image's root as a tarball: on Windows a directory root is refused by name, NTFS keeping
+    // neither its modes nor its links' texts (docs/design/shards-guest.md §4a).
+    let linux_root = root.path().join("linux-rootfs.tar");
+    tar::Builder::new(std::fs::File::create(&linux_root).unwrap())
+        .into_inner()
+        .unwrap();
+    let linux = node
+        .create(bundle(
+            "linux-image",
+            serde_json::json!({
+                "ociVersion": "1.2.0",
+                "process": {"args": ["/bin/true"], "cwd": "/"},
+                "root": {"path": linux_root.to_str().unwrap()},
+                "linux": {},
+            }),
+        ))
+        .unwrap_err();
+    eprintln!("a Linux image: {linux:?}");
+    match &linux {
+        hex_api::Refusal::Platform { why, .. } if why.contains("Hex's installer turns") => {
+            assert!(why.contains("HypervisorPlatform"), "{why}");
+            assert_eq!(
+                boots.load(Ordering::SeqCst),
+                0,
+                "booted with HypervisorPlatform off"
+            );
+            eprintln!("FEATURES: HypervisorPlatform off");
+        }
+        _ => {
+            assert_eq!(
+                boots.load(Ordering::SeqCst),
+                1,
+                "the Linux image didn't reach the guest"
+            );
+            eprintln!("FEATURES: HypervisorPlatform on");
+        }
+    }
+    assert!(node.list().unwrap().is_empty(), "a refused box is left");
+}
+
 /// AC-T7.1.1: the Windows `process` class holds the runtime contract (HEX-RT-1..9; 10..13 are the oci
-/// class's, which this one has nothing to check).
+/// class's, which this one has nothing to check), and the differential suite holds it to the simulator's
+/// trace (HEX-DIFF-1..6, CLAUDE.md §8).
 #[test]
 fn windows_process_boxes_hold_the_contract() {
-    let failures = conformance::run(&runtime(), &fixture());
+    let failures = differential::run(&runtime(), &fixture());
     assert!(failures.is_empty(), "conformance failures: {failures:#?}");
 }
 
@@ -114,10 +309,7 @@ fn a_box_past_its_bound_is_refused_at_the_bound() {
     let mut p = rt
         .exec(&id, fx.act(&Act::Hog(2 * GIB)), Stdio::null())
         .expect("exec hog");
-    let exit = p
-        .wait_for(Duration::from_secs(30))
-        .expect("wait")
-        .expect("the hog ends");
+    let exit = end_of(&mut *p, "the hog ends");
     let usage = rt.usage(&id).expect("usage");
     rt.delete(&id).expect("delete");
     assert_ne!(exit, Exit::Code(0), "a hog over the bound exited 0");
@@ -148,10 +340,7 @@ fn a_box_under_its_bound_runs_and_reports_its_exit() {
     let mut p = rt
         .exec(&id, fx.act(&Act::Fail(7)), Stdio::null())
         .expect("exec");
-    let exit = p
-        .wait_for(Duration::from_secs(30))
-        .expect("wait")
-        .expect("the program ends");
+    let exit = end_of(&mut *p, "the program ends");
     assert_eq!(exit, Exit::Code(7));
     // Once the member has ended and its exit is read, the box is empty (wait on the fact: the ended
     // process leaves the job once its handle is closed).
@@ -188,10 +377,7 @@ fn a_box_takes_a_named_signal() {
         "the box runs",
     );
     rt.signal(&id, Signal::TERM).expect("signal TERM");
-    let exit = p
-        .wait_for(Duration::from_secs(30))
-        .expect("wait")
-        .expect("the program ends");
+    let exit = end_of(&mut *p, "the program ends");
     rt.delete(&id).expect("delete");
     assert_eq!(exit, Exit::Signal(15), "TERM is 15 on the seam");
 }
@@ -218,10 +404,7 @@ fn a_member_asking_to_break_away_is_refused() {
             },
         )
         .expect("exec win-breakaway");
-    let exit = p
-        .wait_for(Duration::from_secs(30))
-        .expect("wait")
-        .expect("the act ends");
+    let exit = end_of(&mut *p, "the act ends");
     let mut out = String::new();
     r.read_to_string(&mut out).expect("read");
     rt.delete(&id).expect("delete");
@@ -309,10 +492,7 @@ fn delete_ends_a_boxs_grandchildren() {
         "the grandchild {grandchild} isn't running"
     );
     rt.delete(&id).expect("delete");
-    let exit = p
-        .wait_for(Duration::from_secs(30))
-        .expect("wait")
-        .expect("the member ends");
+    let exit = end_of(&mut *p, "the member ends");
     assert!(matches!(exit, Exit::Signal(_)), "member exit {exit:?}");
     // The grandchild is ended too: wait on the fact (its pid gone), not a guessed delay.
     wait_until(|| !alive(grandchild), "the grandchild ends with the box");
@@ -321,7 +501,7 @@ fn delete_ends_a_boxs_grandchildren() {
 /// The grandchild's pid from the member's `grandchild=<pid>` line, read from the pipe (blocking until
 /// the member writes and flushes it).
 fn read_grandchild_pid(r: &mut std::io::PipeReader) -> u32 {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + conformance::patience();
     let mut buf = Vec::new();
     let mut chunk = [0u8; 256];
     loop {
@@ -349,8 +529,22 @@ fn alive(pid: u32) -> bool {
     text.contains(&format!("\"{pid}\""))
 }
 
+/// `p`'s end, waited for within the suite's learned wait ([`conformance::patience`]), which the end's
+/// time teaches (Hex's rule for learned waits); the time is printed, so a run's ends can be recorded.
+fn end_of(p: &mut dyn hex_api::Proc, what: &str) -> Exit {
+    let asked = Instant::now();
+    let exit = p
+        .wait_for(conformance::patience())
+        .expect("wait")
+        .unwrap_or_else(|| panic!("{what}: no end within {:?}", conformance::patience()));
+    let took = asked.elapsed();
+    conformance::ENDS.saw(took);
+    eprintln!("END {what} {} ms", took.as_millis());
+    exit
+}
+
 fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + conformance::patience();
     while Instant::now() < deadline {
         if cond() {
             return;

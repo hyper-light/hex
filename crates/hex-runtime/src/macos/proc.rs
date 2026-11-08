@@ -19,6 +19,9 @@ pub struct BoxProc {
     /// (native plan step 1's `_ext` backstop) — before a caller that waited on this reads the box's usage.
     members: Members,
     exit: Option<Exit>,
+    /// Whether its end is under way: the kernel refused its watch as already exiting (`ESRCH`), or a wait
+    /// took its exit event. Its reap then waits for the zombie the same exit path makes.
+    exiting: bool,
     events: Vec<Event>,
 }
 
@@ -27,16 +30,18 @@ impl BoxProc {
     /// reaped, so its pid is this program's until [`BoxProc`] reaps it.
     pub fn watch(pid: i32, members: Members) -> Result<Self, Refusal> {
         let kq = Kqueue::new().map_err(|e| Refusal::os("making a program's kqueue", e))?;
-        // Already gone (reaped by a box delete that beat this): its end is then read by `reap` below, or is
-        // no longer knowable.
-        let _ = kq
+        // Already exiting (or reaped by a box delete that beat this): no exit event will come, so its end is
+        // read by a reap that waits for it, or is no longer knowable.
+        let exiting = kq
             .watch(&[pid], 0)
-            .map_err(|e| Refusal::os("watching a program", e))?;
+            .map_err(|e| Refusal::os("watching a program", e))?
+            .contains(&pid);
         Ok(Self {
             pid,
             kq,
             members,
             exit: None,
+            exiting,
             events: Vec::with_capacity(1),
         })
     }
@@ -45,9 +50,12 @@ impl BoxProc {
         self.pid
     }
 
-    /// Reaps the program if it has ended, caching its exit; `Ok(None)` while it still runs. An end its node
-    /// can't collect (reaped elsewhere, e.g. by a box delete) is [`Exit::Unknown`].
-    fn reap(&mut self) -> Result<Option<Exit>, Refusal> {
+    /// Reaps the program if it has ended, caching its exit; `Ok(None)` while it still runs. With `exiting`
+    /// (its exit event was delivered) it waits for the reap: XNU posts `NOTE_EXIT` before it makes the child
+    /// a zombie (`bsd/kern/kern_exit.c:2594-2595`, `p_stat = SZOMB` at :2664, the same exit path), and the
+    /// event fires once, so a reap that found nothing on it would wait out the caller's whole budget. An
+    /// end its node can't collect (reaped elsewhere, e.g. by a box delete) is [`Exit::Unknown`].
+    fn reap(&mut self, exiting: bool) -> Result<Option<Exit>, Refusal> {
         if self.exit.is_some() {
             return Ok(self.exit);
         }
@@ -57,10 +65,12 @@ impl BoxProc {
                 why: format!("{} isn't a process id", self.pid),
             });
         };
-        match rustix::process::waitid(
-            WaitId::Pid(pid),
-            WaitIdOptions::EXITED | WaitIdOptions::NOHANG,
-        ) {
+        let options = if exiting {
+            WaitIdOptions::EXITED
+        } else {
+            WaitIdOptions::EXITED | WaitIdOptions::NOHANG
+        };
+        match rustix::process::waitid(WaitId::Pid(pid), options) {
             Ok(Some(status)) => {
                 let exit = exit_of(&status);
                 // A SIGKILL of a box member is the kernel's fatal cap (or memory pressure on it): tell the
@@ -88,13 +98,13 @@ impl Proc for BoxProc {
     }
 
     fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
-        self.reap()
+        self.reap(self.exiting)
     }
 
     fn wait_for(&mut self, timeout: Duration) -> Result<Option<Exit>, Refusal> {
         let deadline = Instant::now().checked_add(timeout);
         loop {
-            if let Some(exit) = self.reap()? {
+            if let Some(exit) = self.reap(self.exiting)? {
                 return Ok(Some(exit));
             }
             let left = match deadline {
@@ -107,13 +117,22 @@ impl Proc for BoxProc {
             self.kq
                 .wait(None, Some(left), &mut self.events)
                 .map_err(|e| Refusal::os("waiting on a program", e))?;
+            let me = self.pid;
+            self.exiting = self.exiting
+                || self.events.iter().any(|e| match e {
+                    Event::Exit { pid, .. }
+                    | Event::Fork {
+                        pid, exited: true, ..
+                    } => *pid == me,
+                    _ => false,
+                });
         }
     }
 
     /// KILL by pid: the program is this node's child and not yet reaped (a reaped one has its exit cached),
     /// so its pid is still its own, a zombie's at worst.
     fn kill(&mut self) -> Result<(), Refusal> {
-        if self.reap()?.is_some() {
+        if self.reap(self.exiting)?.is_some() {
             return Ok(());
         }
         let Some(pid) = Pid::from_raw(self.pid) else {

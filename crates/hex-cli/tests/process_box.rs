@@ -24,7 +24,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use hex_api::conformance::{self, Act, Fixture};
+use hex_api::conformance::{Act, Fixture};
+use hex_api::differential;
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Program, Runtime, Signal, Stdio};
 use hex_node::Node;
 
@@ -39,6 +40,9 @@ impl BinFixture {
 }
 
 impl Fixture for BinFixture {
+    fn exec_limit(&self) -> Option<hex_api::ExecLimit> {
+        Some(hex_runtime::linux::process::exec_limit())
+    }
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
         BoxSpec {
             id,
@@ -85,27 +89,15 @@ fn prepare_cgroup(disk: &Path) -> Result<PathBuf, String> {
     std::fs::create_dir_all(&leaf).map_err(|e| format!("making a leaf for the agent: {e}"))?;
     std::fs::write(leaf.join("cgroup.procs"), format!("{}", std::process::id()))
         .map_err(|e| format!("moving self into a leaf: {e}"))?;
-    // A probe root proves the controllers are delegated before the real roots are opened. It opens
-    // with whichever of them the cgroup has, none included, so each is checked.
-    let probe = hex_runtime::linux::cgroup::BoxRoot::open(
+    // The probe root opening proves every controller a box uses is delegated here: `BoxRoot::open`
+    // refuses by name otherwise (HEX-INST-1).
+    hex_runtime::linux::cgroup::BoxRoot::open(
         &own.join("hex-probe"),
         hex_runtime::linux::disks::under(disk).unwrap_or_default(),
     )
     .map_err(|e| e.to_string())?;
-    let missing: Vec<&str> = hex_core::cgroup::CONTROLLERS
-        .into_iter()
-        .filter(|c| !probe.controllers().contains(*c))
-        .collect();
     let _ = std::fs::remove_dir(own.join("hex-probe"));
-    if missing.is_empty() {
-        Ok(own)
-    } else {
-        Err(format!(
-            "{} can't hand down the {} controllers",
-            own.display(),
-            missing.join(", ")
-        ))
-    }
+    Ok(own)
 }
 
 fn cache_dir() -> PathBuf {
@@ -187,6 +179,8 @@ fn exercise_clone_into_cgroup(own: &Path) {
         )
     };
     let c = |s: &str| CString::new(s).unwrap();
+    // These programs' descriptor limit is no part of this test: the one this process has.
+    let limit = || rustix::process::getrlimit(rustix::process::Resource::Nofile);
     let (mut out, w) = std::io::pipe().unwrap();
     let spawn = Spawn::new(
         vec![c("/usr/bin/cat")],
@@ -194,6 +188,7 @@ fn exercise_clone_into_cgroup(own: &Path) {
         vec![],
         None,
         [null_in(), OwnedFd::from(w), null_out()],
+        limit(),
     )
     .unwrap();
     let dir = cg.open_dir().unwrap();
@@ -218,6 +213,7 @@ fn exercise_clone_into_cgroup(own: &Path) {
                 vec![],
                 None,
                 [null_in(), null_out(), null_out()],
+                limit(),
             )
             .unwrap();
             let e = match clone_into_cgroup(dir.as_fd(), missing) {
@@ -238,7 +234,8 @@ fn exercise_clone_into_cgroup(own: &Path) {
     std::fs::remove_dir(root.dir()).unwrap();
 }
 
-/// AC-T7.1.1: the `process` class holds the runtime contract on real cgroups and processes.
+/// AC-T7.1.1: the `process` class holds the runtime contract on real cgroups and processes, and the
+/// differential suite holds it to the simulator's trace (HEX-DIFF-1..6, CLAUDE.md §8).
 fn exercise_conformance(own: &Path, cache: &Path, exe: &str) {
     let state = tempfile::Builder::new()
         .prefix("conf-")
@@ -246,7 +243,7 @@ fn exercise_conformance(own: &Path, cache: &Path, exe: &str) {
         .expect("state dir");
     let node =
         Node::open(&own.join("hex-boxes-conf"), state.path(), state.path()).expect("open a node");
-    let failures = conformance::run(
+    let failures = differential::run(
         &node,
         &BinFixture {
             exe: exe.to_owned(),

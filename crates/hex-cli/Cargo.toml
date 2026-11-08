@@ -36,9 +36,13 @@ hex-runtime.workspace = true
 rustix.workspace = true
 shards-api.workspace = true
 
-# `hex node` on Windows (native plan step 8): the node over the Windows runtime.
+# `hex node` on Windows (native plan step 8): the node over the Windows runtime. The Windows oci class's
+# launcher (`hex oci-launch`), which HCS runs inside each container (hex_runtime::windows::oci::launch), and
+# the selftest's device probe. `hex setup features` runs the Windows node's own bounded feature query for the
+# installer.
 [target.'cfg(windows)'.dependencies]
 hex-api.workspace = true
+hex-core.workspace = true
 hex-node.workspace = true
 hex-runtime.workspace = true
 
@@ -67,12 +71,14 @@ hex-core.workspace = true
 hex-client.workspace = true
 
 # The Windows process class's conformance test (tests/windows_process_box.rs) drives hex-runtime's
-# Windows runtime; windows-sys is for the test's own check that a deleted box's grandchild is gone.
+# Windows runtime; windows-sys is for the test's own check that a deleted box's grandchild is gone. The
+# oci class's test (tests/windows_oci_box.rs) writes its bundles' config.json with serde_json.
 [target.'cfg(target_os = "windows")'.dev-dependencies]
 hex-core.workspace = true
 hex-afunix.workspace = true
 hex-client.workspace = true
 hex-runtime.workspace = true
+serde_json.workspace = true
 windows-sys.workspace = true
 
 [lints]

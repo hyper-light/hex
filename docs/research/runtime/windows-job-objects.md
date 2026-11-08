@@ -65,19 +65,26 @@ A box forbids a member leaving its job: Hex sets neither `JOB_OBJECT_LIMIT_BREAK
 asking for `CREATE_BREAKAWAY_FROM_JOB` is refused. Measured: the child's `CreateProcess` fails with
 access denied (error 5) in every pass (`job_events` e8).
 
-## 4. Limit events: the guaranteed class and the accounting, never a lossy message
+## 4. Limit events: the job's accounting, never a message
 
 A job's I/O completion port carries limit events, but most are lossy (`job-objects.md:63`,
 `ns-winnt-jobobject_associate_completion_port.md:77`): "except for limits set with the
 JobObjectNotificationLimitInformation information class, messages ... delivery to the completion port is
 not guaranteed ... Notifications for limits set with JobObjectNotificationLimitInformation are
 guaranteed to arrive at the completion port." CLAUDE.md §3 forbids a silent drop, so a box's limit
-events come only from that guaranteed class or from the job's accounting (`QueryInformationJobObject`).
+events come from the job's accounting (`QueryInformationJobObject`), read when they are asked for.
 
-- **Memory, counted from the guaranteed class.** A notification limit set under the commit cap records a
-  violation, read with `JobObjectLimitViolationInformation`. Measured: querying it returns the memory
-  violation **with or without** an associated completion port (`job_events` e17), so Hex reads it from
-  the job and keeps no completion port — and so no message queue to bound (CLAUDE.md §2).
+- **Memory, from the peak.** The job refuses whole a commit that would cross its commit limit, and counts
+  the refused ask in its peak (`PeakJobMemoryUsed`; `job_events` e20, bench/install/records/windows-jupiter-20261105.txt entry 22), so the
+  job's commit never passes the limit and its peak does exactly when a member was refused at the bound.
+  Hex reads that
+  (`hex_core::job::reached_bound`) and keeps no completion port, so no message queue to bound
+  (CLAUDE.md §2). The "guaranteed" notification class doesn't do: a notification limit set under the cap
+  records its violation late or not at all. On jupiter (build 26200.9711, 2026-11-07), a member refused
+  at the cap and ended at once left it unset in 339 of 340 passes, a member held past the line saw it
+  set after 1 ms, 25,895 ms, or not within 30 s, and neither its completion-port message nor the
+  violation came with no hard cap at all; e17 and e5, which saw it in every pass on 2026-11-03, see it
+  in none now (`job_events` e5, e17, e18; bench/install/records/windows-jupiter-20261105.txt entry 21).
 - **The process count has no guaranteed event.** The violation class covers only memory, I/O bytes, job
   time and CPU-rate (`ns-winnt-jobobject_limit_violation_information.md`); there is no active-process
   notification limit, and `JOB_OBJECT_MSG_ACTIVE_PROCESS_LIMIT` is one of the lossy completion messages.
@@ -101,8 +108,8 @@ weakly and noisily (`job_events` e11): the hard cap is the real CPU bound.
 
 | A box needs | how, on Windows | §3-clean source |
 |---|---|---|
-| memory bound | job commit limit, refused past it | peak (accounting) and the guaranteed notification violation |
-| reached the bound | the notification violation | `JobObjectLimitViolationInformation` (accounting) |
+| memory bound | job commit limit, refused past it | peak (accounting) |
+| reached the bound | the peak at or past the commit limit | `PeakJobMemoryUsed` (accounting) |
 | CPU | weight, or a hard cap of the whole machine | set only |
 | processes | active-process limit (hard) | — refusals have no guaranteed count (below) |
 | membership, no escape | the job, breakaway refused | the job's process-id list (accounting) |
@@ -110,17 +117,16 @@ weakly and noisily (`job_events` e11): the hard cap is the real CPU bound.
 
 Two measured facts drive design calls the lead takes to the owner:
 
-- **The commit peak overshoots the limit by a bounded amount.** A job lets a commit that crosses its
-  limit overshoot before it refuses the next. A sweep of commit steps from 64 KiB to 256 MiB measured
-  the peak at most 1,163,264 bytes (≈1.11 MiB) over the limit, the overshoot **bounded** (it did not
-  grow with the step past ~1.1 MiB; `job_events` e16). So Hex sets the job's commit limit a margin
-  (2 MiB, headroom over the measured 1.11 MiB) under the box's bound, holding the job's peak at or below
-  the bound (`hex_core::job::OVERSHOOT_MARGIN`). A box smaller than that margin above the floor can't be
-  held under its bound; a Windows process needs about that much to exist, so such a box can't run a
-  member anyway. **Falsifier:** a commit step (in `job_events` e16's sweep, or a new step added to it)
-  whose peak overshoots the limit by more than 2 MiB — then the margin is too small and must grow to the
-  new measured bound (or the overshoot isn't a bounded constant after all, which would be a plan call).
-  Keep e16's step sweep in the record so the bound stays checkable on new hardware or Windows builds.
+- **A crossing commit is refused whole; the peak counts its ask.** A member committed to within half a
+  commit of a 256 MiB limit, asking for one commit of 64 MiB down to 64 KiB, was refused every time with
+  the job's commit unchanged, while `PeakJobMemoryUsed` rose by the ask (`job_events` e20). e16's
+  sweep, read on 2026-11-03 as a bounded ≈1.1 MiB overshoot admitted past the limit, is that ask landing
+  at the limit plus the member's base commit (each step divides 256 MiB). So Hex sets the job's commit
+  limit at the box's bound itself, with no margin (`hex_core::job::limits`), reports the committed peak
+  as the job's peak at most the bound, and counts the bound reached when the peak is past it.
+  **Falsifier:** a job whose commit (not its peak) passes its limit, or a peak past the limit with no
+  refused commit. Keep e16 and e20 in the record so this stays checkable on new hardware or Windows
+  builds.
 - **A refused fork is enforced but not counted.** The active-process limit refuses a fork synchronously
   in the forking process (`CreateProcess` → `ERROR_NOT_ENOUGH_QUOTA`, 1816), the limit hard and the
   kernel's. But the job's accounting never moved across 25 refusals, and failed assignments didn't

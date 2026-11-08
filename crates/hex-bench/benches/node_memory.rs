@@ -58,24 +58,12 @@ fn main() {
         std::fs::create_dir_all(&leaf).map_err(|e| format!("leaf: {e}"))?;
         std::fs::write(leaf.join("cgroup.procs"), format!("{}", std::process::id()))
             .map_err(|e| format!("move self: {e}"))?;
-        // The probe root opens with whichever controllers the cgroup has, none included, so each is
-        // checked: a cgroup without memory or pids would measure nothing it bounds.
-        let probe = hex_runtime::linux::cgroup::BoxRoot::open(&own.join("hex-probe"), Vec::new())
+        // The probe root opening proves every controller a box uses is delegated here: `BoxRoot::open`
+        // refuses by name otherwise (HEX-INST-1).
+        hex_runtime::linux::cgroup::BoxRoot::open(&own.join("hex-probe"), Vec::new())
             .map_err(|e| e.to_string())?;
-        let missing: Vec<&str> = hex_core::cgroup::CONTROLLERS
-            .into_iter()
-            .filter(|c| !probe.controllers().contains(*c))
-            .collect();
         let _ = std::fs::remove_dir(own.join("hex-probe"));
-        if missing.is_empty() {
-            Ok(own)
-        } else {
-            Err(format!(
-                "{} can't hand down the {} controllers",
-                own.display(),
-                missing.join(", ")
-            ))
-        }
+        Ok(own)
     }
 
     let own = match prepare() {

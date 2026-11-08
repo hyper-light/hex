@@ -450,6 +450,10 @@ fn round_trip(
                 ))),
             }
         }
+        Answer::Refused {
+            failed: Failed::Program,
+            why,
+        } => Err(Trip::Refused(OciError::Program(why))),
         Answer::Refused { failed, why } => {
             let e = OciError::Os {
                 op: "create in a container",
@@ -460,7 +464,9 @@ fn round_trip(
                 Failed::Seed => Err(Trip::Broken(e)),
                 // A bad request, a container the seed couldn't make, or one no clone3-into-cgroup kernel
                 // can make here: the seed is whole, the create refused by type.
-                Failed::Request | Failed::Start | Failed::Unable => Err(Trip::Refused(e)),
+                Failed::Request | Failed::Start | Failed::Unable | Failed::Program => {
+                    Err(Trip::Refused(e))
+                }
             }
         }
     }

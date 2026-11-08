@@ -33,6 +33,14 @@ fn main() -> ExitCode {
         let rest: Vec<String> = rest.iter().flatten().cloned().collect();
         return ExitCode::from(hex_cli::node::main(&rest));
     }
+    // The Windows `oci` class's launcher, which HCS runs inside a container to start a program in its
+    // box's job (hex_runtime::windows::oci::launch).
+    #[cfg(target_os = "windows")]
+    if let [Some(first)] = args.as_slice()
+        && first == "oci-launch"
+    {
+        return ExitCode::from(hex_runtime::windows::oci::launch::serve());
+    }
     // The `oci` class's command line and its re-exec'd container init (Linux only).
     #[cfg(target_os = "linux")]
     if let [Some(first), rest @ ..] = args.as_slice()
@@ -65,6 +73,14 @@ fn main() -> ExitCode {
             let box_args: Vec<String> = box_args.iter().flatten().cloned().collect();
             return ExitCode::from(hex_cli::box_run::main(&box_args));
         }
+    }
+    // `hex setup features`: the Windows features' state for the installer (hex_cli::setup).
+    if let [Some(first), rest @ ..] = args.as_slice()
+        && first == "setup"
+        && rest.iter().all(Option::is_some)
+    {
+        let rest: Vec<String> = rest.iter().flatten().cloned().collect();
+        return ExitCode::from(hex_cli::setup::main(&rest));
     }
     let reply = hex_cli::reply(&args);
     let wrote = if reply.to_stderr {

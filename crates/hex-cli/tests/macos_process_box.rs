@@ -17,6 +17,7 @@ use std::num::NonZeroU64;
 use std::time::{Duration, Instant};
 
 use hex_api::conformance::{self, Act, Fixture};
+use hex_api::differential;
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Runtime, Signal, Stdio};
 use hex_runtime::macos::MacRuntime;
 
@@ -43,6 +44,9 @@ impl BinFixture {
 }
 
 impl Fixture for BinFixture {
+    fn exec_limit(&self) -> Option<hex_api::ExecLimit> {
+        Some(hex_runtime::macos::exec_limit().expect("kern.argmax"))
+    }
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
         BoxSpec {
             id,
@@ -60,13 +64,13 @@ impl Fixture for BinFixture {
     }
 }
 
-/// The Mac Studio's measured allocation rate (bench/native/macos/RESULT.md): 256 GiB/s, the pacing the
-/// footprint bound is reckoned against. The process rate is set high so the process bound reads at the
-/// 250 µs floor near it; a box forks far slower than this.
+/// The runtime's pacing rates from the record of one member's growth, the fastest of its passes
+/// (bench/native/records/native-box-macos-growth-8503dc0-20261106T171108Z.txt): every box here holds one
+/// member at a time.
 fn runtime() -> MacRuntime {
     MacRuntime::new(
-        NonZeroU64::new(256 * GIB).unwrap(),
-        NonZeroU64::new(1_000_000).unwrap(),
+        NonZeroU64::new(2_596_898_598).unwrap(),
+        NonZeroU64::new(426).unwrap(),
     )
     .expect("a macOS runtime")
 }
@@ -78,10 +82,11 @@ fn fixture() -> BinFixture {
 }
 
 /// AC-T7.1.1: the macOS `process` class holds the runtime contract (HEX-RT-1..9; 10..13 are the oci
-/// class's, which this one has nothing to check).
+/// class's, which this one has nothing to check), and the differential suite holds it to the simulator's
+/// trace (HEX-DIFF-1..6, CLAUDE.md §8).
 #[test]
 fn macos_process_boxes_hold_the_contract() {
-    let failures = conformance::run(&runtime(), &fixture());
+    let failures = differential::run(&runtime(), &fixture());
     assert!(failures.is_empty(), "conformance failures: {failures:#?}");
 }
 
@@ -307,4 +312,50 @@ fn a_box_takes_a_named_signal() {
         .expect("the program ends");
     rt.delete(&id).expect("delete");
     assert_eq!(exit, Exit::Signal(15), "TERM is 15 on both kernels");
+}
+
+/// HEX-RT-3, HEX-DIFF-5 (AC-T7.1.1): do 60 programs killed at their box's bound, one after another,
+/// expect each wait to return when the program ends, never at the wait's budget. XNU posts a child's
+/// `NOTE_EXIT` before it is a zombie (`bsd/kern/kern_exit.c:2594-2595`, then `p_stat = SZOMB` at :2664),
+/// so a reap made on the event can find nothing yet; the native bench saw 3 of 60 such ends reported 60 s
+/// late (bench/native/RESULT.md). Sixty runs, from that measured rate: without the fix 3/60, 7/60 and 3/60
+/// missed, at least 5%, so sixty runs see none with probability at most 0.95^60 = 4.6%.
+#[test]
+fn a_programs_end_is_seen_when_it_ends_not_at_the_waits_budget() {
+    let rt = runtime();
+    let fx = fixture();
+    let id = BoxId::new("mac-end-seen").unwrap();
+    let _ = rt.delete(&id);
+    rt.create(BoxSpec {
+        id: id.clone(),
+        bounds: Bounds {
+            memory_max: Some(256 * MIB),
+            ..Bounds::default()
+        },
+        class: ClassSpec::Process,
+    })
+    .expect("create");
+    const RUNS: usize = 60;
+    // A missed exit event makes the wait sleep out its whole budget (XNU's exit event came before the zombie
+    // could be reaped, abdbfd0), so an end seen only at the budget is the fault. The budget is the suite's
+    // learned patience, at least twice the slowest end on macOS's record, so a legitimate end, even a rebuilt
+    // binary's first (939 ms on adas-mac-studio.local-2 at load 15-20), comes well before it.
+    let budget = hex_api::conformance::patience();
+    let late_after = budget;
+    let mut late = Vec::new();
+    for i in 0..RUNS {
+        let mut p = rt
+            .exec(&id, fx.act(&Act::Hog(GIB)), Stdio::null())
+            .expect("exec hog");
+        let t = Instant::now();
+        let exit = p.wait_for(budget).expect("wait");
+        if !matches!(exit, Some(Exit::Signal(_))) || t.elapsed() >= late_after {
+            late.push((i, exit, t.elapsed()));
+        }
+    }
+    rt.delete(&id).expect("delete");
+    assert!(
+        late.is_empty(),
+        "ends not seen as the bound's kill when they happened: {late:?}"
+    );
 }

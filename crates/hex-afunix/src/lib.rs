@@ -636,7 +636,8 @@ const PACKET_ACCESS: u32 = 0x1000_0000;
 /// given the pid since) and the wait completion packet that queues its end to the port. Chosen over a
 /// registered wait (`RegisterWaitForSingleObject`, a pool thread's hop on every end) by measurement:
 /// signal to notice p50 12.9 against 28.2 us, p99 0.82 against 2.43 ms, faster in 281 of 300 paired rounds
-/// under load (bench/native/records/endwait-jupiter-20261108T022608Z.txt).
+/// under load (bench/native/records/endwait-jupiter-20261108T022608Z.txt). That run fell in jupiter's NTFS
+/// stall and is void as timing, so the choice is provisional until it is retaken on a clean jupiter.
 pub struct ProgramWatch {
     process: OwnedHandle,
     packet: OwnedHandle,

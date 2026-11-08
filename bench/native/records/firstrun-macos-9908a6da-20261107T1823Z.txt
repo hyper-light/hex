@@ -1,0 +1,22 @@
+# How slow a program's end is on macOS in a first run after a rebuild, for the learned wait's macOS record
+# (hex_api::conformance::HostClass::Macos). adas-mac-studio-2 (Apple M4 Max, 14 CPUs, macOS 26.2),
+# 2026-11-07 10:11-11:10 local, a launchd job (launchctl submit, removed at the end) outside kiln's run tree,
+# submitted from a kiln run that waited for it. Tree: 9908a6da in a copy whose LearnedWait::saw printed every
+# answer; CARGO_TARGET_DIR ~/.cache/hex-t7-windows/target-measure. Each cycle: append a comment to
+# crates/hex-cli/src/selftest.rs (so hex and the test binary relink), build, then the first run of
+# macos_process_box (--nocapture). Logs on the Mac: ~/.cache/hex-t7-windows/logs/firstrun-mac[.1-3].
+cycle 1 exit 0 suite 769242 ms answers 44 slowest 269 280 462  load { 6.11 7.41 6.53 }
+cycle 2 exit 0 suite 770900 ms answers 44 slowest 295 304 534  load { 4.62 4.96 5.51 }
+cycle 3 exit 0 suite 774735 ms answers 44 slowest 285 318 529  load { 5.45 6.84 6.47 }
+# macos_process_box passed 7 of 7 in every cycle. The slowest answer across the three first runs: 534 ms. The
+# suite's time is mostly its negative watches, each waiting out the 69.7 s bound macOS had while it seeded from
+# Windows' record. AppleSystemPolicy refused two processes of the freshly built hex at cycle 3's start
+# (10:50:36, "Security policy would not allow process"); the cycle still passed 7 of 7.
+# 2026-11-08 (gates at 6b6db914, adas-mac-studio.local-2, Apple M-series, 32 CPUs, load 15-20, a launchd job
+# outside kiln's run tree): macos_process_box after a rebuild, three runs. Run 3 failed
+# a_programs_end_is_seen_when_it_ends_not_at_the_waits_budget: its first hog's end, Signal(9), came 839.38 ms
+# after its start, past the 770 ms record then. macOS's record is 839 ms from this run.
+# 2026-11-08 (gates at 30121e18, the same Mac, load 15-20): run 1 after a rebuild read its first hog's end at
+# 939.39 ms, past the 839 ms record then. So the first program a rebuilt binary runs carries a cost that sets a
+# new high now and again, and macOS's record is 939 ms. The test's late threshold is the wait's own budget
+# from 30121e18 on (an end missed until the budget is the fault it looks for), not the record.
