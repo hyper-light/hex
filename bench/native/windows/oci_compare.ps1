@@ -28,6 +28,10 @@ param(
     # and the machine's privileged time. The stall read 2,787-4,029 System threads in Wait/FreePage and
     # 66-96% kernel time (11-07/08), the clean boot of 02:51Z 28 threads and 2.8% (11-08 20:39Z). A round
     # read past either isn't of record: it goes to <Out>.stalled.jsonl and the segment stops (exit 4).
+    # The FreePage count is the stall's leading sign, not its cost: every started process-isolated
+    # container leaves about 4 such threads until a reboot, Docker's as Hex's (the lead's per-arm reading,
+    # 2026-11-08 23:50Z), and round 9-28 timings stayed flat while it rose from 172 to 475 at 0.7-2.5%
+    # privileged time (compare-7794bedd). 0 records it without stopping; privileged time is then the bar.
     [int]$StallFreePage = 500,
     [double]$StallPrivileged = 30,
     [string]$Root = "$env:USERPROFILE\.cache\hex-native-s4",
@@ -122,7 +126,7 @@ function Stalled($load) {
     $fp = $load.system_freepage
     $pr = $load.privileged_pct
     if ($fp -is [string] -or $pr -is [string]) { return "the host's state wasn't read (FreePage: $fp; privileged: $pr)" }
-    if ($fp -gt $StallFreePage) { return "$fp System threads wait on free pages, past $StallFreePage" }
+    if ($StallFreePage -gt 0 -and $fp -gt $StallFreePage) { return "$fp System threads wait on free pages, past $StallFreePage" }
     if ($pr -gt $StallPrivileged) { return "privileged time $pr%, past $StallPrivileged%" }
     $null
 }
