@@ -62,10 +62,14 @@ const OVERLAYFS_SUPER_MAGIC: i128 = 0x794c_7630;
 /// failure-bound rule): twice the slowest emptying recorded by this process's nodes, from every delete, scrub
 /// and removal, since all wait on one kernel. A wait that runs out is a fault to report (the kernel is
 /// wedged), not a limit to raise (CLAUDE.md §4). Its programs' reaping and its init's end, which a box's
-/// emptying waits on, share the wait. Seeded from the `node.emptying` row of `bench/competitive/probes/waits_census.md` run 1 (waits-census-20261108T023331Z, fedora, 91abf3a), its slowest
-/// arm's max, 42.798 ms of 10,276 (a box's kill to `populated 0`, state on tmpfs).
-static EMPTYING: Patience =
-    Patience::by_profile("node.emptying", Duration::from_micros(42_798), None);
+/// emptying waits on, share the wait. Seeded by build profile from the `node.emptying` rows of
+/// `bench/competitive/probes/waits_census.md` runs 1 and 3 (a box's kill to `populated 0`): release, the largest max
+/// of the release arms, 42.798 ms (run 1's tmpfs arm, of 10,276); debug, run 3's debug arm's, 127.753 ms (of 22,092).
+static EMPTYING: Patience = Patience::by_profile(
+    "node.emptying",
+    Duration::from_nanos(42_797_666),
+    Some(Duration::from_nanos(127_752_710)),
+);
 
 /// What is left at the time of asking of the wait for a box killed at `killed` to empty ([`EMPTYING`]):
 /// `Duration::MAX`, unbounded, while it is measuring with no emptying seen.
@@ -95,11 +99,15 @@ pub const REMOVE_PATIENCE: Duration = Duration::from_secs(60);
 /// refuses: the runtime directory is shared with every node of this user on the host, so its entries are
 /// theirs as well as this node's, and a listing's time grows with them. So the sample is a listing's time per
 /// entry, and the wait for a listing's first `k` entries is `k` times twice the slowest recorded (decision 9;
-/// Ada's 2026-11-06 rule, the lead's failure-bound rule), refused by type past it (CLAUDE.md §2, §4). MEASURING:
-/// no record times a listing per entry; the record to come is `bench/competitive/probes/waits_census.md`'s
-/// `node.listing` row. Until then recovery's first listing, the state
-/// directory's, is bounded by its entries, which are finite, not by time, and its time per entry arms the bound.
-static LISTING: Patience = Patience::measuring("node.listing");
+/// Ada's 2026-11-06 rule, the lead's failure-bound rule), refused by type past it (CLAUDE.md §2, §4). Seeded by
+/// build profile from the `node.listing` rows of `bench/competitive/probes/waits_census.md` runs 1 and 3: release,
+/// the largest max of the release arms with a row's 1,000 samples, 8.268 us an entry (run 3's disk arm, of 1,105; run
+/// 1's rows had 130 at most); debug, run 3's debug arm's, 68.562 us (of 1,105).
+static LISTING: Patience = Patience::by_profile(
+    "node.listing",
+    Duration::from_nanos(8_268),
+    Some(Duration::from_nanos(68_562)),
+);
 
 /// A point of an `oci` box's create where a debug build's node, once armed ([`Node::with_crash_point`]),
 /// ends its own process as a kill there would: T-T7.1.2's crash test kills the real agent at the points
@@ -345,9 +353,14 @@ impl Node {
                 "making or removing a box",
                 "creates and deletes under way",
                 MAX_BOXES,
-                // Seeded from the `node.turns` row of `bench/competitive/probes/waits_census.md` run 1 (waits-census-20261108T023331Z, fedora, 91abf3a),
-                // its slowest arm's max, 77.426 ms of 80,042.
-                Patience::by_profile("node.turns", Duration::from_micros(77_426), None),
+                // Seeded by build profile from the `node.turns` rows of `bench/competitive/probes/waits_census.md` runs
+                // 1 and 3: release, the largest max of the release arms, 270.803 ms (run 3's tmpfs arm, of 92,042);
+                // debug, run 3's debug arm's, 305.809 ms (of 92,042).
+                Patience::by_profile(
+                    "node.turns",
+                    Duration::from_nanos(270_803_181),
+                    Some(Duration::from_nanos(305_809_337)),
+                ),
             ),
             #[cfg(debug_assertions)]
             crash_at: None,

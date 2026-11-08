@@ -12,16 +12,18 @@ use hex_api::sim::SimRuntime;
 use hex_api::{Bounds, BoxInfo, BoxSpec, ClassSpec, Signal as HexSignal, Usage};
 use hex_client::Client;
 
-/// The slowest recorded answer of the server to a call over its socket, in these tests (the lead's rule of
-/// 2026-11-06 for test patiences).
-/// MEASURING: the record is the tests' own (debug builds, the whole suite at once, under the gates' load), not yet
-/// recorded. The bench's release-build census (`bench/competitive/probes/waits_census.md` run 1) isn't it: seeded
-/// from that run, the socket's tests' waits ran out (2026-11-08).
-const ANSWER_RECORDED: Option<Duration> = None;
+/// The slowest recorded of what these tests wait for (the lead's rule of 2026-11-06 for test patiences). The tests run
+/// debug builds, so their records are the debug ones, `bench/competitive/probes/waits_census.md` run 3's debug arm: the
+/// server's answer to a call over its socket, of the kinds these tests ask the slowest an exec's
+/// (`client.answer.exec`, 38.754 ms of 10,020), and a program's end, the suites' [`hex_api::conformance::PROGRAM_END`]
+/// (`lifecycle.exec`, 39.131 ms of 10,000). One patience bounds both, so its record is the larger, a program's end (a
+/// release-build record ran these tests' waits out).
+const RECORDED: Option<Duration> = hex_api::conformance::PROGRAM_END;
 
-/// Longest a test waits for the server's next message or a gate's change: twice [`ANSWER_RECORDED`], so a
-/// server that never makes it true fails the test instead of hanging it; unbounded while measuring.
-const PATIENCE: Duration = match ANSWER_RECORDED {
+/// Longest a test waits for the server's next message, a program's end or a fact the server makes true: twice
+/// [`RECORDED`], so a server that never makes it true fails the test instead of hanging it; unbounded while
+/// measuring.
+const PATIENCE: Duration = match RECORDED {
     Some(slowest) => slowest.saturating_mul(2),
     None => Duration::MAX,
 };

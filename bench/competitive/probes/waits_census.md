@@ -39,9 +39,13 @@ seed for a row under it, and names the row's n.
 | `client.answer.<kind>` | a client's call's wait for its answer, by kind | `tmpfs` | each kind's | `crates/hex-client/src/linux.rs`, `ANSWERS` |
 | `netcheck.settles`, `netcheck.answers` | a fresh namespace's IPv6 settle; a dump's read | `owner` | the network check's | `crates/hex-runtime/src/linux/oci/netcheck.rs` |
 | `netns.make` | the pool's refill thread's make of a network namespace (no node wait; the census's timing point) | `tmpfs` | the netns tests' patience | `crates/hex-node/src/netns/tests.rs`, `MAKE_RECORDED` |
-| `lifecycle.exec` (from `seam-tmpfs.json`) | a container's exec of `true`, to the program's end | `tmpfs` | the conformance suites' patience, and every test that takes it | `crates/hex-api/src/conformance.rs`, `PROGRAM_END` |
-| `client.answer.inspect` | the server's answer to a call over its socket | `tmpfs` (`rtt`) | the socket's tests' patience | `crates/hex-node/src/serve/tests.rs`, `ANSWER_RECORDED` |
-| `seeds.hang`, `seeds.wait`, `exec_seeds.answers` | the seeds' waits, seeded from `seed_path.md` run 3 already | `tmpfs` | a check of that record | `crates/hex-core/src/seeds.rs`, `crates/hex-node/src/seed.rs` |
+| `lifecycle.exec` (from `seam-<arm>.json`) | a container's exec of `true`, to the program's end | `debug` | the conformance suites' patience, and every test that takes it | `crates/hex-api/src/conformance.rs`, `PROGRAM_END` |
+| `client.answer.exec` and `lifecycle.exec` | the server's answer to a call over its socket (an exec's the slowest kind the socket's tests ask) and a program's end | `debug`: the larger, since one patience bounds both | the socket's tests' patience | `crates/hex-node/src/serve/tests.rs`, `RECORDED` |
+| `seeds.hang` | a seed's answer to a create, which `seeds.wait` and `exec_seeds.answers` share by design | every release arm; `debug` | `CLONE_SLOWEST`, `CLONE_SLOWEST_DEBUG` | `crates/hex-core/src/seeds.rs`, `crates/hex-node/src/seed.rs` |
+
+From run 3 the arm column is run 1's method: a release build's seed is the largest max of every release arm with a
+row's 1,000 samples, in runs 1 and 3; a debug build's is the debug arm's (`Patience::by_profile`). Each is the census's
+nanoseconds as recorded, never rounded below the max.
 
 Until a run is recorded here each of those waits stays MEASURING in the code, naming this file's row. Where a row's n
 is short of 1,000 (`client.answer.hello` is one a connection; `node.listing` a restart's entries; `serve.reads` only
@@ -77,3 +81,52 @@ an owner is covered as well as the bar's tmpfs one. ms:
   `client.answer.signal` and `.usage` (none: no phase calls them), `node.listing` (65-130: one restart a run),
   `serve.reads` (73-88: only parts that waited), `seeds.wait` (30-67). `netcheck.settles` and `.answers` have no row:
   the `owner` arm checked no kept namespace. The next run drives each.
+
+**Run 2** (2026-11-08T02:45Z, `waits-census-20261108T024522Z`, at 9c9a15b): armed at run 1's seeds, it mostly failed,
+and so taught the census's method. Three arms' nodes failed at start, an emptying of a slot holding a leftover `hex`
+past its 85.6 ms bound (117 to 145 ms), and the tmpfs arm's deletes after a 10,000-box list past 155.5 ms; and none of
+those answers was recorded, since a wait that runs out is no sample (Karn). So from run 3 the census measures every
+wait unarmed (`patience::measure_all`, 946e06f), and a wait's seed is its build profile's (`Patience::by_profile`).
+Its tmpfs arm's rows that were measuring then stand: `client.answer.hello` 1.023 ms (n 10,002), `.list` 329.722
+(1,000), `.netns` 0.997 (10,009), `.signal` 1.180 (10,000), `.usage` 0.803 (10,000).
+
+**Run 3** (2026-11-08T02:58Z, `waits-census-20261108T025856Z`, at 946e06f; every wait unarmed; four arms, the debug
+one on debug builds beside the suites (gate 6, `cargo test --workspace`, looping on CPUs 16-31); load 27.9 at start,
+the host shared). Its maxima, ms (n of the arm's max in brackets where it matters):
+
+| wait | tmpfs | disk | owner | release seed (runs 1 and 3) | debug arm (seed) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `client.answer.create` | 271.127 | 74.524 | 45.594 | 271.127 | 220.155 |
+| `client.answer.delete` | 263.637 | 87.993 | 59.883 | 263.637 | 306.052 |
+| `client.answer.exec` | 24.616 | 28.487 | 38.938 | 38.938 | 38.754 |
+| `client.answer.hello` | 0.645 | 12.326 | (n 1) | 12.326 | 10.396 |
+| `client.answer.inspect` | 18.316 | 26.047 | - | 26.205 (run 1) | 22.024 |
+| `client.answer.list` | 348.309 | 446.346 | - | 446.346 | 1,439.697 |
+| `client.answer.netns` | 4.511 | 1.401 | (n 4) | 4.511 | 8.048 |
+| `client.answer.signal` | 1.423 | 2.996 | - | 2.996 | 0.273 |
+| `client.answer.start` | 21.493 | 7.631 | 19.405 | 21.493 | 7.610 |
+| `client.answer.usage` | 0.374 | 2.089 | - | 2.089 | 0.162 |
+| `lifecycle.exec` | 24.636 | 28.750 | 39.172 | (tests: debug) | 39.131 |
+| `netns.make` | 23.925 | 40.782 | (n 104) | (tests: debug) | 120.814 |
+| `node.emptying` | 29.620 | 24.913 | (n 327) | 42.798 (run 1) | 127.753 |
+| `node.listing` (an entry) | 0.001 | 0.008 | (n 65) | 0.008 | 0.069 |
+| `node.turns` | 270.803 | 87.847 | 59.851 | 270.803 | 305.809 |
+| `seeds.hang` | 187.044 | 26.252 | 59.552 | 187.044 | 100.815 |
+| `store.turns` | 13.220 | 4.324 | 15.209 | 15.209 | 54.401 |
+| `netcheck.answers` | - | - | 2.093 (160,192) | 2.093 | none (the debug arm keeps no namespaces) |
+
+- Seeded at this run (by build profile; the tests' patiences from the debug arm), each at the census's nanoseconds:
+  the table's 3 decimals hide some, `node.listing`'s 0.008 being 8,268 ns an entry and its debug 0.069, 68,562 ns.
+  Run 2's measuring rows stand under run 3's, so they raise no max. Still MEASURING, short of 1,000: `seeds.wait` (45
+  to 63 an arm: a create rarely waits for a seed; it shares the clone's record by design), `serve.reads` (307 to 623:
+  only parts that waited), `netcheck.settles` (4: one a checker thread, a process's first).
+- **The suites beside the debug arm didn't load it as meant.** Every loop of `cargo test --workspace` (646 of them)
+  ended within about 2 s at `node_socket`'s HEX-RT-11 or 12, "no exit reported after" `Duration::MAX`: the
+  conformance suites' `exit_of` takes a measuring patience's absent deadline for one already passed, so with
+  `PROGRAM_END` measuring the case failed at its first look; and the launcher logged `date`'s exit status, not
+  cargo's, so its "suites exit 0" says nothing. The debug arm ran beside cargo starting a dozen test binaries every
+  2 s, not beside the whole suites, so its rows are what a lighter load gives; the next run beside the suites should
+  run them through (`--no-fail-fast`), each loop's own exit recorded.
+- **Convergence** (the lead, 2026-11-08): the census stops when a whole run sets no new max for any wait; each row
+  says the run it converged at. Run 3 set a new max for most rows (run 1's were armed), so none has converged yet:
+  the next run follows at these seeds' tree.

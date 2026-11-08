@@ -88,7 +88,11 @@ impl SeedPool {
         Self {
             exe,
             budget: budget.max(1),
-            answers: Patience::by_profile(ANSWERS, hex_core::seeds::CLONE_SLOWEST, None),
+            answers: Patience::by_profile(
+                ANSWERS,
+                hex_core::seeds::CLONE_SLOWEST,
+                Some(hex_core::seeds::CLONE_SLOWEST_DEBUG),
+            ),
             inner: Mutex::new(Inner::default()),
             free: Condvar::new(),
         }

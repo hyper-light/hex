@@ -34,20 +34,60 @@ use crate::MAX_LIST;
 /// of call, since a delete waits on its box's emptying and a list on its parts, so a fast inspect's answer says
 /// nothing of theirs: twice the slowest answer this process has had to a call of that kind (decision 9; the lead's
 /// failure-bound rule of 2026-11-06), past which the call is refused by type, the only way left to it. Each kind is
-/// seeded from its `client.answer.<kind>` row of `bench/competitive/probes/waits_census.md` run 1 (waits-census-20261108T023331Z, fedora, 91abf3a), its
-/// slowest arm's max; the kinds whose rows came short of 1,000 answers (hello, signal, usage, list, netns) stay
-/// MEASURING, never armed, until the census's next run drives them.
+/// seeded by build profile from its `client.answer.<kind>` rows of `bench/competitive/probes/waits_census.md` runs 1
+/// and 3, in nanoseconds as the census keeps them: a release build from the largest max of the release arms with a
+/// row's 1,000 samples, a debug build from run 3's debug arm's (decision 9).
 static ANSWERS: [Patience; 10] = [
-    Patience::measuring("client.answer.hello"),
-    Patience::by_profile("client.answer.create", Duration::from_micros(63_058), None),
-    Patience::by_profile("client.answer.start", Duration::from_micros(8_402), None),
-    Patience::by_profile("client.answer.exec", Duration::from_micros(24_421), None),
-    Patience::measuring("client.answer.signal"),
-    Patience::by_profile("client.answer.inspect", Duration::from_micros(26_205), None),
-    Patience::measuring("client.answer.usage"),
-    Patience::measuring("client.answer.list"),
-    Patience::by_profile("client.answer.delete", Duration::from_micros(77_759), None),
-    Patience::measuring("client.answer.netns"),
+    Patience::by_profile(
+        "client.answer.hello",
+        Duration::from_nanos(12_326_130),
+        Some(Duration::from_nanos(10_396_345)),
+    ),
+    Patience::by_profile(
+        "client.answer.create",
+        Duration::from_nanos(271_127_436),
+        Some(Duration::from_nanos(220_155_458)),
+    ),
+    Patience::by_profile(
+        "client.answer.start",
+        Duration::from_nanos(21_493_005),
+        Some(Duration::from_nanos(7_610_223)),
+    ),
+    Patience::by_profile(
+        "client.answer.exec",
+        Duration::from_nanos(38_938_041),
+        Some(Duration::from_nanos(38_753_534)),
+    ),
+    Patience::by_profile(
+        "client.answer.signal",
+        Duration::from_nanos(2_996_044),
+        Some(Duration::from_nanos(273_003)),
+    ),
+    Patience::by_profile(
+        "client.answer.inspect",
+        Duration::from_nanos(26_205_047),
+        Some(Duration::from_nanos(22_023_765)),
+    ),
+    Patience::by_profile(
+        "client.answer.usage",
+        Duration::from_nanos(2_089_462),
+        Some(Duration::from_nanos(162_395)),
+    ),
+    Patience::by_profile(
+        "client.answer.list",
+        Duration::from_nanos(446_346_155),
+        Some(Duration::from_nanos(1_439_696_712)),
+    ),
+    Patience::by_profile(
+        "client.answer.delete",
+        Duration::from_nanos(263_636_788),
+        Some(Duration::from_nanos(306_051_519)),
+    ),
+    Patience::by_profile(
+        "client.answer.netns",
+        Duration::from_nanos(4_511_178),
+        Some(Duration::from_nanos(8_048_226)),
+    ),
 ];
 
 /// The wait for `request`'s answer, `None` for one that has none (a release).

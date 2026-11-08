@@ -39,13 +39,17 @@ use std::time::Duration;
 use crate::patience::Patience;
 
 /// The slowest answer in a seed's recorded distribution on the bench's host class (x86_64 Linux, fedora's Core
-/// i9-14900HX): a seed's answer to a create, the `seeds.hang` row of `bench/competitive/probes/waits_census.md` run 1 (waits-census-20261108T023331Z, fedora, 91abf3a), its slowest arm's max, 36.925 ms of
-/// 40,025 (the bar's no-owner creates over the socket, state on btrfs). It replaces seed_path.md run 3's 1.918 ms,
-/// a clone timed alone, which under the bar's load would have taken about 1% of healthy seeds for hung. It seeds a pool's hang
-/// bound before the node has an answer of its own, and the line's wait, since a create in line waits for a busy
-/// seed's answer (decision 9: twice the slowest, recorded or seen). Another host class has no record yet; it starts
-/// from this one's and learns its own.
-pub const CLONE_SLOWEST: Duration = Duration::from_micros(36_925);
+/// i9-14900HX): a seed's answer to a create, the `seeds.hang` rows of `bench/competitive/probes/waits_census.md` runs
+/// 1 and 3, the largest max of their release arms, 187.044 ms (187,044,152 ns: run 3's tmpfs arm, measured unarmed, of
+/// 46,526). It replaces seed_path.md run 3's 1.918 ms, a clone timed alone, which under the bar's load would have taken
+/// healthy seeds for hung. It seeds a pool's hang bound before the node has an answer of its own, and the line's wait,
+/// since a create in line waits for a busy seed's answer (decision 9: twice the slowest, recorded or seen). Another
+/// host class has no record yet; it starts from this one's and learns its own.
+pub const CLONE_SLOWEST: Duration = Duration::from_nanos(187_044_152);
+
+/// The same answer's slowest in a debug build, the census's debug arm (run 3, 100.815 ms of 51,915: 100,815,120 ns),
+/// which a debug build's waits are seeded from (decision 9, by build profile).
+pub const CLONE_SLOWEST_DEBUG: Duration = Duration::from_nanos(100_815_120);
 
 /// The line's wait's name, as the waits census records it.
 pub const WAIT: &str = "seeds.wait";
@@ -291,9 +295,8 @@ impl Seeds {
             next_ticket: 0,
             counts: Counts::default(),
             handed: vec![0; slots],
-            // The debug build's record is to come (waits_census.md's debug arm): measuring there.
-            wait: Patience::by_profile(WAIT, CLONE_SLOWEST, None),
-            hang: Patience::by_profile(HANG, CLONE_SLOWEST, None),
+            wait: Patience::by_profile(WAIT, CLONE_SLOWEST, Some(CLONE_SLOWEST_DEBUG)),
+            hang: Patience::by_profile(HANG, CLONE_SLOWEST, Some(CLONE_SLOWEST_DEBUG)),
         }
     }
 

@@ -2358,25 +2358,30 @@ decision covers the node's waits for an answer whose time it can observe (source
   made); the network check past its bound throws the namespace away, counted; only where there is no alternative (a
   record write, a client's call) is the caller refused, by type.
 - **Measuring**: where no record exists yet, the wait says so (`Patience::measuring`) and names the record to come;
-  no value is picked. Until it lands the wait is unarmed until this process's first answer.
+  no value is picked. It is never armed: its answers are only recorded, for the census that seeds it, so no first
+  answer becomes its bound.
+- **By build profile**: a wait's record is its build's (`Patience::by_profile`): a release build is seeded from the
+  waits census's release arms, a debug build, the suites', from its debug arm, and measures until that arm records it,
+  since a debug build's answers are slower and the release record isn't theirs.
 
 RFC 6298's timer was this decision's first draft and calibration reads its second; the lead ruled out both (the
 RFC's floor and constants are TCP's clocks'; a calibration read leaves the first wait unbounded).
 
 | Wait | Was | Now | Seed |
 | --- | --- | --- | --- |
-| a seed's hang bound and the shell's wait for its answer (createpool `ANSWER_PATIENCE`) | 30 s, copied | 2 × max(record, seen) | `seeds::CLONE_SLOWEST` 1.918 ms: `seed_path.md` run 3, a clone of an init to its first run, max of 320 on fedora |
+| a seed's hang bound and the shell's wait for its answer (createpool `ANSWER_PATIENCE`) | 30 s, copied | 2 × max(record, seen) | `seeds::CLONE_SLOWEST`, the `seeds.hang` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 187.044 ms, debug 100.815 ms<!-- /record --> |
 | a create's wait in line for a seed (`seeds`' line) | 1 s, picked | the same | the same record: a create in line waits for a busy seed's answer |
-| a record change's wait for the same box's (`WRITE_PATIENCE`) | 60 s, picked | learned, refused by type past it | MEASURING: `levers.md` times a record write and rename without its fsyncs and gives no max; to come, that probe's write mode with the file's and directory's fsyncs, its max on fedora's btrfs |
-| a create or delete's wait for the same box's (`TURN_PATIENCE`) | 120 s, picked | learned, from the holder's take | MEASURING: to come, seam_oci's create and delete phases with each call's max |
-| a killed box's emptying, its programs' reaping and its init's end (`EMPTY_PATIENCE`, cgroups' `REMOVE_PATIENCE`), and a stopping server's wait for the programs it ended (serve `STOP_PATIENCE`) | 60 s each, picked or copied | learned from each kill to empty | MEASURING: the delete records time the whole delete; to come, the lead's delete pass timing each kill to `populated 0` |
-| a recovery's listing of a directory (`LIST_PATIENCE`) | 60 s, picked | learned per entry | MEASURING: to come, a recovery pass timing the state and runtime directories' listings per entry |
-| a list's worker's wait for its client to read a part (serve `READ_PATIENCE`) | 300 s, picked | learned | MEASURING: to come, seam_oci's list phase timing each part's drain |
-| a client's call's wait for its answer and its send (hex-client `ANSWER_PATIENCE`) | 300 s, picked | learned per call kind | MEASURING: to come, seam_oci's socket phases, each call kind's max |
-| the network check's settle and dump reads (netcheck `SETTLES`, `ANSWERS`) | the check's local `Slowest` | the shared core; past the bound the namespace is thrown away, counted | MEASURING: `input_census.md` records the dumps' sizes, not their times; to come, a pass timing them on fedora |
+| a record change's wait for the same box's (`WRITE_PATIENCE`) | 60 s, picked | learned, refused by type past it | the `store.turns` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 15.209 ms, debug 54.401 ms<!-- /record --> |
+| a create or delete's wait for the same box's (`TURN_PATIENCE`) | 120 s, picked | learned, from the holder's take | the `node.turns` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 270.803 ms, debug 305.809 ms<!-- /record --> |
+| a killed box's emptying, its programs' reaping and its init's end (`EMPTY_PATIENCE`, cgroups' `REMOVE_PATIENCE`), and a stopping server's wait for the programs it ended (serve `STOP_PATIENCE`) | 60 s each, picked or copied | learned from each kill to empty | the `node.emptying` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 42.798 ms, debug 127.753 ms<!-- /record --> |
+| a recovery's listing of a directory (`LIST_PATIENCE`) | 60 s, picked | learned per entry | the `node.listing` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 8,268 ns an entry, debug 68,562 ns<!-- /record --> |
+| a list's worker's wait for its client to read a part (serve `READ_PATIENCE`) | 300 s, picked | learned | MEASURING: the `serve.reads` rows are short of 1,000 samples (only the parts that waited) |
+| a client's call's wait for its answer and its send (hex-client `ANSWER_PATIENCE`) | 300 s, picked | learned per call kind | each kind's `client.answer.<kind>` rows, a create's being <!-- record: bench/competitive/probes/waits_census.md -->release 271.127 ms, debug 220.155 ms<!-- /record --> |
+| the network check's settle and dump reads (netcheck `SETTLES`, `ANSWERS`) | the check's local `Slowest` | the shared core; past the bound the namespace is thrown away, counted | the `netcheck.answers` row: <!-- record: bench/competitive/probes/waits_census.md -->release 2.093 ms<!-- /record -->; MEASURING its debug build (the debug arm keeps no namespaces) and the settles (4 samples) |
 
-Each MEASURING row's record is `bench/competitive/probes/waits_census.md`'s row of the same wait name, from the
-waits' own timing points (`hex_node::census`); the exec seeds' wait for a busy seed (`seed.rs`, a picked 30 s) is
+Each row's record is `bench/competitive/probes/waits_census.md`'s rows of the same wait name, from the waits' own
+timing points (`hex_node::census`): a release build's seed the largest max of the release arms of its runs 1 and 3,
+a debug build's its debug arm's. The exec seeds' wait for a busy seed (`seed.rs`, a picked 30 s) is
 seeded from the clone record as the create seeds' are; and a create no seed came free for (line full, wait ended) is
 refused by type, `OciError::SeedsExhausted` as `Refusal::Exhausted { what: "create seeds", bound }`, counted by the
 seeds' core (`refused_busy`, `refused_waited`), never sent through the shim: one implementation per job (the lead's

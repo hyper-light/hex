@@ -136,13 +136,18 @@ impl Store {
             // A change waits for the change of the same box before it: that one's write and its fsyncs.
             // How long is learned from the changes made (decision 9), so a disk that has stopped answering is
             // reported as a fault, refused by type, never waited on for ever (CLAUDE.md §4): a record write has
-            // no other path. Seeded from the `store.turns` row of `bench/competitive/probes/waits_census.md` run 1 (waits-census-20261108T023331Z, fedora, 91abf3a): its slower
-            // place's max, 7.825 ms of 120,644 (fedora's btrfs).
+            // no other path. Seeded by build profile from the `store.turns` rows of
+            // `bench/competitive/probes/waits_census.md` runs 1 and 3: release, the largest max of the release arms,
+            // 15.209 ms (run 3's owner arm, of 61,721); debug, run 3's debug arm's, 54.401 ms (of 139,118).
             turns: Arc::new(Turns::new(
                 "changing a box's record",
                 "record changes under way",
                 TURNS,
-                Patience::by_profile("store.turns", Duration::from_micros(7_825), None),
+                Patience::by_profile(
+                    "store.turns",
+                    Duration::from_nanos(15_209_141),
+                    Some(Duration::from_nanos(54_401_152)),
+                ),
             )),
             synced: Arc::default(),
             #[cfg(all(debug_assertions, target_os = "linux"))]

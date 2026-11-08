@@ -1109,17 +1109,24 @@ fn a_failed_start_with_no_seed_left_refuses_the_line() {
     assert_eq!(pool.waiting(), 0);
 }
 
-/// Decision 9 (the lead's failure-bound rule; AC-T7.1.3): before any answer of its own, a node's pool bounds its waits
-/// from the record. Do: open a pool with the node's seeds, serve a create for 1 ms, then one 5 ms slower than the
-/// record's slowest. Expect: both waits armed at once at twice the record's slowest answer ([`CLONE_SLOWEST`], the
-/// waits census's run 1), no calibration read; the fast answer leaving the hang bound there, the slow one raising it
-/// to twice its own; the line's wait untouched.
+/// Decision 9 (the lead's failure-bound rule, by build profile; AC-T7.1.3): before any answer of its own, a node's pool
+/// bounds its waits from its build's record. Do: open a pool with the node's seeds; then one seeded from the release
+/// record, serve a create for 1 ms, then one 5 ms slower than that record's slowest. Expect: the node's pool armed at
+/// once, both waits at twice its build's slowest recorded answer ([`CLONE_SLOWEST_DEBUG`] in a debug build,
+/// [`CLONE_SLOWEST`] in a release one: the waits census's runs 1 and 3), no calibration read; the seeded pool's at twice
+/// [`CLONE_SLOWEST`], the fast answer leaving the hang bound there, the slow one raising it to twice its own; the
+/// line's wait untouched.
 #[test]
 fn a_pools_waits_are_seeded_from_the_record_and_only_rise() {
-    // A node's pool in this build, a debug one, has no record yet (decision 9, by build profile): measuring.
+    let built = if cfg!(debug_assertions) {
+        CLONE_SLOWEST_DEBUG
+    } else {
+        CLONE_SLOWEST
+    };
+    let armed = Some(built * 2);
     assert_eq!(
         Seeds::new(setup(1, 4, None, None).limits).deadlines(),
-        (None, None)
+        (armed, armed)
     );
     let record = Some(CLONE_SLOWEST * 2);
     let mut pool = Seeds::new(setup(1, 4, None, None).limits).seeded(CLONE_SLOWEST);
