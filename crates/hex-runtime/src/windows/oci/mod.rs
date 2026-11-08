@@ -19,6 +19,7 @@ use hex_core::hcs::{self, Container, HcsError, Process, Scratch, Storage};
 
 use super::proc::BoxProc;
 use super::process::JobBox;
+use super::sys::Handle;
 use sys::{HcsFailure, System};
 
 /// The scratch file a box's folder holds, a copy of the base layer's `blank.vhdx` (note §3).
@@ -35,6 +36,8 @@ struct Mounted {
     /// The marker naming this scratch for a node that starts after this one was killed ([`reclaim`]),
     /// removed last, once everything else is.
     marker: Option<PathBuf>,
+    /// The box's record as the marker holds it, rewritten as an outliving box's start goes ([`OciBox::start`]).
+    record: Option<hcs::BoxRecord>,
     /// Set once the box's container exists and outlives its node: dropped without a delete (the node going
     /// down), its scratch stays the container's, for the next node to take back. Until then a failed create
     /// undoes it as any box's, so no create leaves a scratch attached without a container.
@@ -43,6 +46,48 @@ struct Mounted {
 
 /// The scratch markers under `root`, one per box, `<id>.scratch.json`.
 const MARKER_SUFFIX: &str = ".scratch.json";
+
+/// A marker's next record while it is written, `<id>.scratch.json.next`, moved over the marker once whole.
+const NEXT_SUFFIX: &str = ".next";
+
+/// Where `marker`'s next record is written before it is moved over it.
+fn next_of(marker: &Path) -> PathBuf {
+    let mut next = marker.as_os_str().to_owned();
+    next.push(NEXT_SUFFIX);
+    PathBuf::from(next)
+}
+
+/// Writes `record` as `marker` whole: to its next file, then moved over it, so a node killed while writing
+/// leaves the record before or the record after, never a torn one.
+fn write_marker(marker: &Path, record: &hcs::BoxRecord) -> Result<(), Refusal> {
+    let bytes = hcs::write_record(record)?;
+    let next = next_of(marker);
+    std::fs::write(&next, bytes).map_err(|e| Refusal::os("writing a box's record", e))?;
+    std::fs::rename(&next, marker).map_err(|e| Refusal::os("writing a box's record", e))
+}
+
+/// Reads the box's record at `marker`, at most [`hcs::MAX_RECORD`] bytes: what a node taking the box back
+/// reopens ([`OciBox::take_back`]).
+pub fn read_marker(marker: &Path) -> Result<hcs::BoxRecord, Refusal> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(marker)
+        .and_then(|f| {
+            f.take(
+                u64::try_from(hcs::MAX_RECORD)
+                    .unwrap_or(u64::MAX)
+                    .saturating_add(1),
+            )
+            .read_to_end(&mut bytes)
+        })
+        .map_err(|e| Refusal::os("reading a scratch marker", e))?;
+    hcs::read_record(&bytes).map_err(|r| match r {
+        Refusal::Invalid { what, why } => Refusal::Invalid {
+            what,
+            why: format!("{}: {why}", marker.display()),
+        },
+        other => other,
+    })
+}
 
 impl Mounted {
     /// Takes the filter off, detaches the volume and removes what Hex made; the first failure is returned,
@@ -112,11 +157,21 @@ pub fn reclaim(root: &Path) -> Vec<Refusal> {
                 continue;
             }
         };
-        if !path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.ends_with(MARKER_SUFFIX))
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        // A next record whose marker is gone is a first write a killed node didn't finish, made before
+        // anything else was; one beside its marker goes with the marker.
+        if let Some(marker) = name.strip_suffix(NEXT_SUFFIX)
+            && marker.ends_with(MARKER_SUFFIX)
+            && !root.join(marker).exists()
+            && let Err(e) = std::fs::remove_file(&path)
+            && e.kind() != std::io::ErrorKind::NotFound
         {
+            failures.push(Refusal::os(
+                "removing a scratch marker's unfinished record",
+                e,
+            ));
+        }
+        if !name.ends_with(MARKER_SUFFIX) {
             continue;
         }
         if let Err(r) = reclaim_one(&path) {
@@ -127,24 +182,7 @@ pub fn reclaim(root: &Path) -> Vec<Refusal> {
 }
 
 fn reclaim_one(marker: &Path) -> Result<(), Refusal> {
-    let mut bytes = Vec::new();
-    std::fs::File::open(marker)
-        .and_then(|f| {
-            f.take(
-                u64::try_from(hcs::MAX_RECORD)
-                    .unwrap_or(u64::MAX)
-                    .saturating_add(1),
-            )
-            .read_to_end(&mut bytes)
-        })
-        .map_err(|e| Refusal::os("reading a scratch marker", e))?;
-    let m = hcs::read_record(&bytes).map_err(|r| match r {
-        Refusal::Invalid { what, why } => Refusal::Invalid {
-            what,
-            why: format!("{}: {why}", marker.display()),
-        },
-        other => other,
-    })?;
+    let m = read_marker(marker)?;
     // An outliving box whose container HCS still runs is the next node's recovery's to take back or end.
     let system_runs = match &m.system {
         Some(id) => sys::open_system(id.as_str())
@@ -155,6 +193,39 @@ fn reclaim_one(marker: &Path) -> Result<(), Refusal> {
     if hcs::at_start(&m, system_runs) == hcs::AtStart::Leave {
         return Ok(());
     }
+    remove_scratch(&m, marker)
+}
+
+/// Ends what is left of the box the record at `marker` names, one a node before this one made that the
+/// node's recovery removes rather than takes back (native plan step 8, T-T7.1.2): its container where HCS
+/// still holds it, then its scratch and its record, as [`reclaim`] removes a killed node's. A record
+/// already gone has nothing left to end.
+pub fn end(marker: &Path) -> Result<(), Refusal> {
+    if !marker.exists() {
+        return Ok(());
+    }
+    let m = read_marker(marker)?;
+    if let Some(id) = &m.system
+        && let Some(system) = sys::open_system(id.as_str())
+            .map_err(|f| failure("reopening a box's container to end it", f))?
+    {
+        match system.terminate(launch::PATIENCE) {
+            Ok(()) => {}
+            Err(f)
+                if matches!(
+                    hcs::hcs_error(f.code),
+                    HcsError::AlreadyStopped | HcsError::NotFound
+                ) => {}
+            Err(f) => return Err(failure("ending a box's container", f)),
+        }
+    }
+    remove_scratch(&m, marker)
+}
+
+/// Removes the scratch record `m` names and then its marker: detaches the volume where it is still
+/// attached (UnprepareLayer, then DeactivateLayer, which detaches it whether or not the unprepare took:
+/// jupiter, 2026-11-06), removes what Hex made, the marker's unfinished next record, and the marker.
+fn remove_scratch(m: &hcs::BoxRecord, marker: &Path) -> Result<(), Refusal> {
     if sys::layer_mount_path(&m.folder).is_ok() {
         let unprepared = sys::unprepare_layer(&m.folder);
         sys::deactivate_layer(&m.folder).map_err(|f| {
@@ -182,6 +253,14 @@ fn reclaim_one(marker: &Path) -> Result<(), Refusal> {
             return Err(Refusal::os("removing a killed node's scratch", e));
         }
     }
+    if let Err(e) = std::fs::remove_file(next_of(marker))
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(Refusal::os(
+            "removing a scratch marker's unfinished record",
+            e,
+        ));
+    }
     std::fs::remove_file(marker).map_err(|e| Refusal::os("removing a scratch marker", e))
 }
 
@@ -197,6 +276,19 @@ impl Drop for Mounted {
 
 fn failure(op: &'static str, f: HcsFailure) -> Refusal {
     hcs::refusal(op, f.code, sys::host(), f.message.as_deref())
+}
+
+/// Why box `id` isn't taken back, by name, for the node's recovery to end what is left of it.
+fn lost_refusal(id: &BoxId, lost: hcs::Lost) -> Refusal {
+    let why = match lost {
+        hcs::Lost::EndsWithNode => "it ended with the node that made it",
+        hcs::Lost::NoSystem => "HCS holds no container of it",
+        hcs::Lost::InitEnded => "its init has ended, or its start wasn't finished",
+    };
+    Refusal::Invalid {
+        what: "adopt",
+        why: format!("box {id}: {why}"),
+    }
 }
 
 /// How the box's life stands.
@@ -329,7 +421,12 @@ impl OciBox {
             .map_err(|_| Refusal::Broken("an oci box's state lock is poisoned".to_owned()))
     }
 
-    fn launch(&self, process: &Process, stdio: [OwnedHandle; 3]) -> Result<BoxProc, Refusal> {
+    /// Starts `process` in the box through Hex's launcher: its process handle and pid.
+    fn launch_member(
+        &self,
+        process: &Process,
+        stdio: [OwnedHandle; 3],
+    ) -> Result<(Handle, u32), Refusal> {
         let system = self
             .system
             .lock()
@@ -337,8 +434,115 @@ impl OciBox {
         let system = system
             .as_ref()
             .ok_or_else(|| Refusal::NotRunning(self.id().clone(), "exec"))?;
-        let (member, pid) = launch::start(system, &self.job, self.user.as_deref(), process, stdio)?;
+        launch::start(system, &self.job, self.user.as_deref(), process, stdio)
+    }
+
+    fn launch(&self, process: &Process, stdio: [OwnedHandle; 3]) -> Result<BoxProc, Refusal> {
+        let (member, pid) = self.launch_member(process, stdio)?;
         Ok(BoxProc::new(member, pid, self.job.shared()))
+    }
+
+    /// Whether the box's container and scratch outlive its node (set once its container exists).
+    fn outlives(&self) -> Result<bool, Refusal> {
+        Ok(self
+            .mounted
+            .lock()
+            .map_err(|_| Refusal::Broken("an oci box's scratch lock is poisoned".to_owned()))?
+            .as_ref()
+            .is_some_and(|m| m.outlives))
+    }
+
+    /// Rewrites an outliving box's record with `change`; a box that ends with its node keeps its first.
+    fn record(&self, change: impl FnOnce(&mut hcs::BoxRecord)) -> Result<(), Refusal> {
+        let mut mounted = self
+            .mounted
+            .lock()
+            .map_err(|_| Refusal::Broken("an oci box's scratch lock is poisoned".to_owned()))?;
+        if let Some(m) = mounted.as_mut()
+            && m.outlives
+            && let (Some(marker), Some(record)) = (m.marker.as_ref(), m.record.as_mut())
+        {
+            change(record);
+            write_marker(marker, record)?;
+        }
+        Ok(())
+    }
+
+    /// The box's job handle value, for the node's keeper to hold a second handle to it (`super::keeper`).
+    pub fn job_token(&self) -> usize {
+        self.job.job_token()
+    }
+
+    /// Takes back the box a node before this one made and left running (native plan step 8, T-T7.1.2):
+    /// `job` its job, taken back by its name, `container` what its spec asks, `record` what its marker at
+    /// `marker` says. Reopens its compute system by id, its scratch (still attached: its container holds
+    /// it), and its init where it started, told from a process given that pid since by its creation time
+    /// ([`hcs::take_back`]). Refused by name where any of them is gone, for recovery to end what is left.
+    pub fn take_back(
+        job: JobBox,
+        container: &Container,
+        marker: PathBuf,
+        record: hcs::BoxRecord,
+    ) -> Result<Self, Refusal> {
+        let id = job.id().clone();
+        let system = match &record.system {
+            Some(s) => sys::open_system(s.as_str())
+                .map_err(|f| failure("reopening a box's container", f))?,
+            None => None,
+        };
+        let init = match record.init {
+            Some(r) => super::sys::open_process(r.pid)
+                .map_err(|e| Refusal::os("reopening a box's init", e))?,
+            None => None,
+        };
+        let seen = match &init {
+            Some(h) => Some(hcs::SeenProcess {
+                created: super::sys::created(h)
+                    .map_err(|e| Refusal::os("reading when a box's init was created", e))?,
+                running: !super::sys::wait(h, 0)
+                    .map_err(|e| Refusal::os("reading whether a box's init runs", e))?,
+            }),
+            None => None,
+        };
+        let found = hcs::Found {
+            system: system.is_some(),
+            init: seen,
+        };
+        let (system, started, init) = match (hcs::take_back(&record, found), system, init) {
+            (Ok(hcs::TakeBack::Created), Some(s), _) => (s, false, None),
+            (Ok(hcs::TakeBack::Running(r)), Some(s), Some(h)) => {
+                (s, true, Some(BoxProc::new(h, r.pid, job.shared())))
+            }
+            (Err(lost), _, _) => return Err(lost_refusal(&id, lost)),
+            (Ok(_), _, _) => {
+                return Err(Refusal::Broken(format!(
+                    "box {id} was taken back without the container or init its record names"
+                )));
+            }
+        };
+        let volume = sys::layer_mount_path(&record.folder)
+            .map_err(|f| failure("reading a taken-back box's scratch volume", f))?;
+        let mounted = Mounted {
+            volume,
+            activated: Some(record.folder.clone()),
+            prepared: true,
+            made: record.made.iter().map(PathBuf::from).collect(),
+            marker: Some(marker),
+            record: Some(record),
+            outlives: true,
+        };
+        Ok(Self {
+            job,
+            system: Mutex::new(Some(system)),
+            mounted: Mutex::new(Some(mounted)),
+            user: container.init.user.clone(),
+            init: container.init.clone(),
+            life: Mutex::new(Life {
+                started,
+                init,
+                exit: None,
+            }),
+        })
     }
 
     /// Starts the container and its init (the runtime-spec's `start`); a second start is refused.
@@ -350,6 +554,10 @@ impl OciBox {
                 why: format!("box {} has started already", self.id()),
             });
         }
+        // An outliving box's record says a start was asked before HCS is, and names its init once it runs,
+        // so a node killed in between leaves a start no node takes back unfinished (hcs::take_back).
+        let outlives = self.outlives()?;
+        self.record(|r| r.started = true)?;
         {
             let system = self
                 .system
@@ -361,9 +569,17 @@ impl OciBox {
                 .start(launch::PATIENCE)
                 .map_err(|f| failure("starting a container", f))?;
         }
-        let init = self.launch(&self.init, super::null_stdio()?)?;
+        let (member, pid) = self.launch_member(&self.init, super::null_stdio()?)?;
+        let created = outlives.then(|| super::sys::created(&member));
+        // The init runs from here, so the box is started whatever its record's write says: one that fails
+        // leaves a record naming no init, which no node takes back.
         life.started = true;
-        life.init = Some(init);
+        life.init = Some(BoxProc::new(member, pid, self.job.shared()));
+        if let Some(created) = created {
+            let created =
+                created.map_err(|e| Refusal::os("reading when a box's init was created", e))?;
+            self.record(|r| r.init = Some(hcs::InitRecord { pid, created }))?;
+        }
         Ok(())
     }
 
@@ -460,6 +676,7 @@ fn scratch(
                 prepared: false,
                 made: Vec::new(),
                 marker: None,
+                record: None,
                 outlives: false,
             });
         }
@@ -471,6 +688,7 @@ fn scratch(
         prepared: false,
         made: Vec::new(),
         marker: None,
+        record: None,
         outlives: false,
     };
     let sandbox = folder.join(SANDBOX);
@@ -500,12 +718,12 @@ fn scratch(
             started: false,
             init: None,
         };
-        let bytes = hcs::write_record(&record)?;
         if let Some(dir) = m.parent() {
             std::fs::create_dir_all(dir).map_err(|e| Refusal::os("writing a scratch marker", e))?;
         }
-        std::fs::write(&m, bytes).map_err(|e| Refusal::os("writing a scratch marker", e))?;
+        write_marker(&m, &record)?;
         mounted.marker = Some(m);
+        mounted.record = Some(record);
     }
     if !folder.exists() {
         std::fs::create_dir_all(&folder)
