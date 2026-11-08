@@ -464,14 +464,16 @@ fn kill(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     let mut other = rt
         .exec(&id, fx.program(&Act::Wait), Stdio::null())
         .map_err(|e| format!("exec: {e}"))?;
-    let early = killed.wait_for(STILL_RUNNING).map_err(|e| e.to_string())?;
+    let early = killed
+        .wait_for(still_running())
+        .map_err(|e| e.to_string())?;
     ensure(early.is_none(), || {
         format!("a waiting program ended: {early:?}")
     })?;
     killed.kill().map_err(|e| format!("kill: {e}"))?;
     let exit = ended(&mut killed)?;
     let again = killed.kill();
-    let on = other.wait_for(STILL_RUNNING).map_err(|e| e.to_string())?;
+    let on = other.wait_for(still_running()).map_err(|e| e.to_string())?;
     rt.delete(&id).map_err(|e| e.to_string())?;
     ensure(exit == Exit::Signal(9), || format!("exit {exit:?}"))?;
     ensure(again.is_ok(), || {

@@ -132,6 +132,33 @@ impl Proc for BoxProc {
             self.exiting = self.exiting || ended_in(&self.events, self.pid);
         }
     }
+
+    /// KILL by pid: the program is this node's child and not yet reaped (a reaped one has its exit cached),
+    /// so its pid is still its own, a zombie's at worst. Its box's watcher is told first, so the kill isn't
+    /// counted as its bound's (native plan step 8).
+    fn kill(&mut self) -> Result<(), Refusal> {
+        if self.reap(self.exiting)?.is_some() {
+            return Ok(());
+        }
+        let Some(pid) = Pid::from_raw(self.pid) else {
+            return Err(Refusal::Invalid {
+                what: "pid",
+                why: format!("{} isn't a process id", self.pid),
+            });
+        };
+        if let Some(members) = &self.members {
+            members.killing(self.pid)?;
+        }
+        match rustix::process::kill_process(pid, rustix::process::Signal::KILL) {
+            // ESRCH: reaped elsewhere since (a box delete); it has ended.
+            Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
+            Err(e) => Err(Refusal::os("kill", e)),
+        }
+    }
+
+    fn streams(&mut self) -> Result<hex_api::Given, Refusal> {
+        Ok(hex_api::Given::default())
+    }
 }
 
 /// Whether `events` carry `pid`'s end: its exit, or a fork coalesced with it.
@@ -245,24 +272,15 @@ impl Proc for UserProc {
         }
     }
 
-    /// KILL by pid: the program is this node's child and not yet reaped (a reaped one has its exit cached),
-    /// so its pid is still its own, a zombie's at worst.
+    /// A box-user program runs as its pool user, which this node can't signal; the helper signals only a
+    /// whole box (`Helper::signal`), so one program's own kill is refused by name until the helper's
+    /// protocol names a program (native plan step 8).
     fn kill(&mut self) -> Result<(), Refusal> {
-        if self.reap()?.is_some() {
-            return Ok(());
-        }
-        let Some(pid) = Pid::from_raw(self.pid) else {
-            return Err(Refusal::Invalid {
-                what: "pid",
-                why: format!("{} isn't a process id", self.pid),
-            });
-        };
-        self.members.killing(self.pid)?;
-        match rustix::process::kill_process(pid, rustix::process::Signal::KILL) {
-            // ESRCH: reaped elsewhere since (a box delete); it has ended.
-            Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
-            Err(e) => Err(Refusal::os("kill", e)),
-        }
+        Err(Refusal::Platform {
+            what: "a box-user program's own kill",
+            platform: "macos",
+            why: "the helper signals a whole box, not one of its programs".to_owned(),
+        })
     }
     fn streams(&mut self) -> Result<hex_api::Given, Refusal> {
         Ok(hex_api::Given::default())

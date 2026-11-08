@@ -122,6 +122,17 @@ impl Proc for SimProc {
     fn wait_for(&mut self, _timeout: Duration) -> Result<Option<Exit>, hex_api::Refusal> {
         self.try_wait()
     }
+
+    /// The stand-in's KILL: the program is no member from then on.
+    fn kill(&mut self) -> Result<(), hex_api::Refusal> {
+        let mut s = self.state.lock().expect("sim lock");
+        s.members.retain(|m| m.pid != self.pid);
+        Ok(())
+    }
+
+    fn streams(&mut self) -> Result<hex_api::Given, hex_api::Refusal> {
+        Ok(hex_api::Given::default())
+    }
 }
 
 impl Privileged for Sim {

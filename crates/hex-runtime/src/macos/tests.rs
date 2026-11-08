@@ -125,6 +125,17 @@ impl Proc for SimProc {
     fn wait_for(&mut self, _timeout: Duration) -> Result<Option<Exit>, Refusal> {
         self.try_wait()
     }
+
+    /// The stand-in's KILL: the program is no member from then on.
+    fn kill(&mut self) -> Result<(), Refusal> {
+        let mut s = self.state.lock().expect("sim lock");
+        s.members.retain(|m| m.pid != self.pid);
+        Ok(())
+    }
+
+    fn streams(&mut self) -> Result<hex_api::Given, Refusal> {
+        Ok(hex_api::Given::default())
+    }
 }
 
 /// HEX-MAC-16: a box-user MacRuntime drives a box through the helper over a real socket.
@@ -161,17 +172,7 @@ fn box_user_mode_routes_through_the_helper() {
         cwd: None,
         user: None,
     };
-    let proc = rt
-        .exec(
-            &id,
-            program,
-            Stdio {
-                stdin: None,
-                stdout: None,
-                stderr: None,
-            },
-        )
-        .expect("exec");
+    let proc = rt.exec(&id, program, Stdio::null()).expect("exec");
     assert!(proc.pid() > 2000, "the sim's pid came back");
 
     let info = rt.inspect(&id).expect("inspect");
@@ -232,6 +233,22 @@ impl Proc for ShellProc {
 
     fn wait_for(&mut self, _timeout: Duration) -> Result<Option<Exit>, Refusal> {
         self.try_wait()
+    }
+
+    /// KILL to the shell by its pid, as the real program's own kill sends it.
+    fn kill(&mut self) -> Result<(), Refusal> {
+        let pid = rustix::process::Pid::from_raw(self.pid).ok_or(Refusal::Invalid {
+            what: "pid",
+            why: format!("{} isn't a process id", self.pid),
+        })?;
+        match rustix::process::kill_process(pid, rustix::process::Signal::KILL) {
+            Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
+            Err(e) => Err(Refusal::os("kill", e)),
+        }
+    }
+
+    fn streams(&mut self) -> Result<hex_api::Given, Refusal> {
+        Ok(hex_api::Given::default())
     }
 }
 
@@ -372,8 +389,7 @@ fn a_box_user_programs_end_is_its_own_not_unknown() {
             sh("read _; exit 0"),
             Stdio {
                 stdin: Some(stdin),
-                stdout: None,
-                stderr: None,
+                ..Stdio::null()
             },
         )
         .expect("exec");
