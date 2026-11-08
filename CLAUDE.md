@@ -158,11 +158,13 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   `OVERLAPPED` and buffer held on the heap by the kernel from its start until its completion is dequeued,
   reads a peer's pid (`WSAIoctl` `SIO_AF_UNIX_GETPEERPID`) and whether its process runs as this user or
   LocalSystem (`OpenProcess`, `OpenProcessToken`, `GetTokenInformation` `TokenUser`, `EqualSid`,
-  `IsWellKnownSid`), and watches a program's end (`OpenProcess`, `RegisterWaitForSingleObject`, whose
-  thread-pool callback posts it to the port, `UnregisterWaitEx`) and ends it (`TerminateProcess`).
-  `windows-sys` binds these as `unsafe` foreign functions, std has no AF_UNIX socket or completion port on
-  Windows, and a buffer the kernel writes after the call returns is beyond Rust's borrow rules; Rust can
-  express none of them safely.
+  `IsWellKnownSid`), and watches a program's end (`OpenProcess`, then ntdll's wait completion packet,
+  which the kernel queues to the port when the process ends, no thread between: `NtCreateWaitCompletionPacket`,
+  `NtAssociateWaitCompletionPacket`, `NtCancelWaitCompletionPacket`; undocumented in the SDK, used by the
+  Windows thread pool and Go's runtime, and chosen over `RegisterWaitForSingleObject` by measurement) and ends
+  it (`TerminateProcess`). `windows-sys` binds these as `unsafe` foreign functions, but for the ntdll calls,
+  which Hex declares itself; std has no AF_UNIX socket or completion port on Windows, and a buffer the kernel
+  writes after the call returns is beyond Rust's borrow rules. Rust can express none of them safely.
 
 ## 13. Lean code
 
