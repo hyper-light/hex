@@ -1189,12 +1189,31 @@ impl Drop for CaseMade {
     fn drop(&mut self) {
         if self.boxes.exists() {
             let _ = std::fs::write(self.boxes.join("cgroup.kill"), "1");
+            // Waits on the fact, no interval of its own: a change in cgroup.events wakes a poll for POLLPRI
+            // on it (the kernel's cgroup-v2.rst, "cgroup.events"; fs/kernfs/file.c, kernfs_fop_poll), and
+            // each read re-arms it.
             let deadline = Instant::now() + conformance::PATIENCE;
-            while Instant::now() < deadline
-                && std::fs::read_to_string(self.boxes.join("cgroup.events"))
-                    .is_ok_and(|events| events.lines().any(|l| l == "populated 1"))
-            {
-                std::thread::park_timeout(Duration::from_millis(10));
+            if let Ok(mut events) = std::fs::File::open(self.boxes.join("cgroup.events")) {
+                let mut text = String::new();
+                loop {
+                    text.clear();
+                    let read = std::io::Seek::rewind(&mut events)
+                        .and_then(|()| events.read_to_string(&mut text));
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if read.is_err() || !text.lines().any(|l| l == "populated 1") || left.is_zero()
+                    {
+                        break;
+                    }
+                    let left = rustix::event::Timespec {
+                        tv_sec: i64::try_from(left.as_secs()).unwrap_or(i64::MAX),
+                        tv_nsec: i64::from(left.subsec_nanos()),
+                    };
+                    let mut fds = [rustix::event::PollFd::new(
+                        &events,
+                        rustix::event::PollFlags::PRI,
+                    )];
+                    let _ = rustix::event::poll(&mut fds, Some(&left));
+                }
             }
             let (mut walk, mut dirs) = (vec![self.boxes.clone()], Vec::new());
             while let Some(dir) = walk.pop() {
