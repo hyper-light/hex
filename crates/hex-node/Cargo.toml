@@ -24,6 +24,8 @@ tar.workspace = true
 tempfile.workspace = true
 # Its layer tests name each tarball by its sha256, as an image does (src/relay/tests.rs).
 sha2.workspace = true
+# The guest loop test's stand-in for a Shards guest (tests/guest_loop.rs).
+shards-api.workspace = true
 
 [lints]
 workspace = true
