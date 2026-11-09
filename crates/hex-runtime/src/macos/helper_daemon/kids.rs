@@ -125,6 +125,14 @@ impl Kids {
         Some(b.live.remove(&pid).map(Taken::Live))
     }
 
+    /// Kills program `pid` of box `id` where the box holds it running (`Proc::kill`), leaving it held for its
+    /// end to be read: `None` when the box has no entry; a program the box doesn't hold running is sent
+    /// nothing.
+    pub fn kill(&mut self, id: &BoxId, pid: i32) -> Option<Result<(), hex_api::Refusal>> {
+        let b = self.boxes.get_mut(id)?;
+        Some(b.live.get_mut(&pid).map_or(Ok(()), |p| p.kill()))
+    }
+
     /// Returns a program still running after a wait; `Err` hands it back when its box was dropped
     /// meanwhile, for the caller to reap.
     pub fn put_back(

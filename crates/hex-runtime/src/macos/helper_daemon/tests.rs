@@ -431,6 +431,38 @@ fn the_helper_reaps_a_program_and_answers_its_end_once() {
     assert_eq!(daemon.ops.inner.lock().unwrap().reaped, 1);
 }
 
+/// HEX-RT-16 (box-user mode; the lead, 2026-11-09): of two programs the helper started in a box, the one the
+/// node kills by its pid ends by the helper's hand, since the node may not signal the pool user, and the other
+/// runs on; a second kill of the ended one, and a kill of a pid the box doesn't hold, signal nothing and are
+/// done; a kill in a box the helper doesn't know is refused by name. Do start two programs, kill the first
+/// twice and a pid the box never started once, then kill in an unknown box; expect the first's end Signal(9),
+/// the second still running and a member, and the unknown box refused.
+#[test]
+fn a_box_user_program_is_killed_alone_through_the_helper() {
+    let (client, handle) = served(vec![7000], 64);
+    let b1 = BoxId::new("b1").expect("box id");
+    client.acquire(&b1, 256 * MIB, 16 * MIB, None).unwrap();
+    let pid1 = start(&client, &b1, true);
+    let pid2 = start(&client, &b1, false);
+    client.kill(&b1, pid1).unwrap();
+    client.kill(&b1, pid1).unwrap();
+    client.kill(&b1, pid2 + 1000).unwrap();
+    assert_eq!(client.wait(&b1, pid1).unwrap(), Some(Exit::Signal(9)));
+    assert_eq!(client.wait(&b1, pid2).unwrap(), None);
+    let unknown = BoxId::new("nobox").expect("box id");
+    assert!(
+        matches!(client.kill(&unknown, pid2), Err(hex_api::Refusal::NoSuchBox(b)) if b == unknown),
+        "a kill in an unknown box wasn't refused by name"
+    );
+    drop(client);
+    let daemon = handle.join().expect("daemon thread");
+    let s = daemon.ops.inner.lock().unwrap();
+    assert!(
+        s.members.iter().any(|m| m.pid == pid2),
+        "the box's other program ended with the first"
+    );
+}
+
 /// HEX-MAC-15, HEX-RT-3 (box-user mode): do delete a box with two programs running; expect both reaped
 /// by the delete (no zombie left under its user) and each one's end still answered after it, as a
 /// deleted box's program ends by the delete's kill on every class.

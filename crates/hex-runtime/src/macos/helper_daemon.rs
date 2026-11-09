@@ -554,6 +554,7 @@ impl<P: Privileged> Daemon<P> {
             Request::Inspect { box_id } => self.inspect(&box_id),
             Request::Signal { box_id, signal } => self.signal(&box_id, signal),
             Request::Wait { box_id, pid } => self.wait(&box_id, pid),
+            Request::Kill { box_id, pid } => self.kill(&box_id, pid),
         }
     }
 
@@ -812,6 +813,24 @@ impl<P: Privileged> Daemon<P> {
 }
 
 impl<P: Privileged> Daemon<P> {
+    /// A [`Request::Kill`]: ends program `pid`, which the daemon started in box `box_id` and holds running,
+    /// through its own watch of it (`Proc::kill`, `SIGKILL`; as root the daemon may signal the box's user),
+    /// leaving it held so its end is read by a [`Request::Wait`] as any end is; the box and its other
+    /// programs run on (HEX-RT-16). A pid the box doesn't hold running (ended, its end read, or never
+    /// started there) is sent nothing, so a node can only kill its own box's programs: killing an ended
+    /// program is done. An unknown box is refused by name.
+    fn kill(&self, box_id: &BoxId, pid: i32) -> Answer {
+        let killed = match self.kids() {
+            Ok(mut k) => k.kill(box_id, pid),
+            Err(_) => return poisoned("the daemon's programs"),
+        };
+        match killed {
+            None => Answer::Refused(Refused::UnknownBox(box_id.clone())),
+            Some(Ok(())) => Answer::Killed,
+            Some(Err(e)) => Answer::Refused(Refused::StartFailed(format!("killing {pid}: {e}"))),
+        }
+    }
+
     /// A [`Request::Wait`]: the program's end, reaped here (the daemon is its parent), read once.
     fn wait(&self, box_id: &BoxId, pid: i32) -> Answer {
         let taken = match self.kids() {

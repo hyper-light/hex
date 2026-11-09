@@ -53,6 +53,7 @@ fn responder(fd: OwnedFd) {
             Request::End { .. } => Answer::Ended,
             Request::Signal { .. } => Answer::Signalled,
             Request::Wait { .. } => Answer::Waited(Some(Exit::Code(3))),
+            Request::Kill { .. } => Answer::Killed,
             Request::Inspect { .. } => Answer::State(State {
                 members: u32::try_from(got_fds).unwrap_or(0),
                 footprint: 200 << 20,

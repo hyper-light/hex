@@ -407,6 +407,60 @@ fn a_box_user_programs_end_is_its_own_not_unknown() {
     assert_eq!(three.wait_for(HANG_GUARD).unwrap(), Some(Exit::Code(3)));
 }
 
+/// HEX-RT-16 (box-user mode, end to end; the lead, 2026-11-09): a node in box-user mode kills one of a box's
+/// programs through its own Proc, by the helper's hand (the program is the pool user's, which the node may
+/// not signal), and the box's other program runs on. Do run two programs that run until they are killed (each
+/// bounded by the hang guard), kill the first through its Proc twice, then the second; expect the first ended
+/// by Signal(9) and its second kill Ok, the second still running after the first's end, then ended by its own
+/// kill.
+#[test]
+fn a_box_user_program_is_killed_alone_through_its_proc() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let sock = dir.path().join("helper.sock");
+    let listener = helper_daemon::bind(&sock).expect("bind");
+    thread::spawn(move || {
+        let daemon = Daemon::new(Shells::default(), vec![7000], 64);
+        let _ = daemon.serve_listener(listener.as_fd());
+    });
+    let rt = MacRuntime::detect(
+        NonZeroU64::new(1 << 40).unwrap(),
+        NonZeroU64::new(1_000_000).unwrap(),
+        hex_core::watch::lateness_seed(&super::machine_model().expect("this Mac's model")),
+        &sock,
+    )
+    .expect("a box-user runtime");
+    let id = BoxId::new("bu-kill").unwrap();
+    rt.create(BoxSpec {
+        id: id.clone(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Process,
+    })
+    .expect("create");
+    let guard = HANG_GUARD.as_secs().to_string();
+    let until_killed = || Program {
+        args: vec!["/bin/sleep".to_owned(), guard.clone()],
+        env: vec![],
+        cwd: None,
+        user: None,
+    };
+    let mut first = rt
+        .exec(&id, until_killed(), Stdio::null())
+        .expect("exec the first");
+    let mut second = rt
+        .exec(&id, until_killed(), Stdio::null())
+        .expect("exec the second");
+    first.kill().expect("kill the first");
+    assert_eq!(first.wait_for(HANG_GUARD).unwrap(), Some(Exit::Signal(9)));
+    first.kill().expect("a second kill of the ended one");
+    assert_eq!(
+        second.try_wait().unwrap(),
+        None,
+        "the box's other program ended with the first"
+    );
+    second.kill().expect("kill the second");
+    assert_eq!(second.wait_for(HANG_GUARD).unwrap(), Some(Exit::Signal(9)));
+}
+
 /// CLAUDE.md §5 (the box helper's default process cap is the kernel's, not picked): do read the per-user
 /// process limit; expect what `sysctl kern.maxprocperuid` prints, the limit macOS itself holds each user to
 /// (`bsd/kern/kern_resource.c:169-170`), so a box's user gets what any user of this machine gets.

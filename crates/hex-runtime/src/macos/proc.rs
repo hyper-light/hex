@@ -290,15 +290,18 @@ impl Proc for UserProc {
         }
     }
 
-    /// A box-user program runs as its pool user, which this node can't signal; the helper signals only a
-    /// whole box (`Helper::signal`), so one program's own kill is refused by name until the helper's
-    /// protocol names a program (native plan step 8).
+    /// KILL by the helper's hand (HEX-RT-16): the program runs as its box's pool user, which this node may
+    /// not signal, and the helper, which started it, ends it alone, the box's other programs running on. An
+    /// end already read is done, and so is a box the helper no longer holds (deleted, its programs ended
+    /// with it), as a program's own kill after its box's delete is on every class.
     fn kill(&mut self) -> Result<(), Refusal> {
-        Err(Refusal::Platform {
-            what: "a box-user program's own kill",
-            platform: "macos",
-            why: "the helper signals a whole box, not one of its programs".to_owned(),
-        })
+        if self.exit.is_some() {
+            return Ok(());
+        }
+        match self.helper.kill(&self.box_id, self.pid) {
+            Ok(()) | Err(Refusal::NoSuchBox(_)) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
     fn streams(&mut self) -> Result<hex_api::Given, Refusal> {
         Ok(hex_api::Given::default())
