@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 
 use hex_api::Refusal;
 use hex_core::demand::Learned;
-use hex_core::seed::{Answer, Create, Failed, MountNamespace, Park};
+use hex_core::seed::{Answer, Create, Failed, Fixed, MountNamespace, Park};
 use hex_core::seeds::{Admit, Claim, Counts, Limits, Refused, SeedId, Seeds, Stale};
 use hex_runtime::linux::oci::run::{ClassicReason, CloneInit, CloneReq, Parked};
 use hex_runtime::linux::oci::seed as rt_seed;
@@ -370,8 +370,13 @@ impl CloneInit for CreatePool {
         }
     }
 
-    fn claim(&self, parked: Parked, req: &CloneReq<'_>) -> Result<(i32, OwnedFd), OciError> {
-        self.claim_parked(parked, req)
+    fn claim(
+        &self,
+        parked: Parked,
+        req: &CloneReq<'_>,
+        sync: BorrowedFd<'_>,
+    ) -> Result<(i32, OwnedFd), OciError> {
+        self.claim_parked(parked, req, sync)
     }
 }
 
@@ -417,7 +422,12 @@ impl CreatePool {
         }
     }
 
-    fn claim_parked(&self, parked: Parked, req: &CloneReq<'_>) -> Result<(i32, OwnedFd), OciError> {
+    fn claim_parked(
+        &self,
+        parked: Parked,
+        req: &CloneReq<'_>,
+        sync: BorrowedFd<'_>,
+    ) -> Result<(i32, OwnedFd), OciError> {
         let pruned = req.pruned.is_some();
         let Some((pid, pidfd, socket)) = parked.take() else {
             return Err(OciError::Broken(
@@ -425,11 +435,12 @@ impl CreatePool {
             ));
         };
         let (create, fds) = message(req);
-        let patience = self.shared.lock()?.seeds.deadlines().1;
-        // The parked init answers as a seed does, with a pidfd of its own, which the agent's stands for, within
-        // the hang bound the seeds' answers taught, or the record's before them.
-        match round_trip(socket.as_fd(), &create, &fds, patience) {
-            Ok((_, _, made)) => {
+        // The claim is taken at the init's first word on its sync pipe, with no answer before it (the lead's (A) of
+        // 2026-11-09), within the claim's own patience: its pid and pidfd are the park's.
+        let began = Instant::now();
+        match claim_round(socket.as_fd(), sync, &create, &fds, CLAIMS.deadline()) {
+            Ok(made) => {
+                CLAIMS.answered(began.elapsed());
                 // Counted by how its mount namespace was made, as a seed's clone is (clone_init).
                 if pruned && let Some(count) = self.shared.made.get(usize::from(made.code())) {
                     let _ = count.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
@@ -537,8 +548,10 @@ impl Parker {
 }
 
 /// A create as the seed's message and its descriptors, in the order the seed reads them (`serve_create`):
-/// the two pipes, a network namespace, then on the pruned path the four fixed descriptors and the bind trees,
-/// in `mount::plan`'s order (the order the init attaches them), and last the spec the runtime checked.
+/// the sync pipe, the map pipe on the classic path, a network namespace, then on the pruned path the fixed
+/// descriptors of a lean create (the cgroup directory where it rides, for a seed's clone; the state directory and the
+/// rootfs) and the bind trees, in `mount::plan`'s order (the order the init attaches them), and last the spec the
+/// runtime checked. A pruned create carries only what its init reads ([`Fixed::Lean`]; the lead's (B) of 2026-11-09).
 fn message<'r>(req: &'r CloneReq<'_>) -> (Create, Vec<BorrowedFd<'r>>) {
     let pruned = req.pruned.is_some();
     let create = Create {
@@ -573,14 +586,17 @@ fn message<'r>(req: &'r CloneReq<'_>) -> (Create, Vec<BorrowedFd<'r>>) {
             .pruned
             .as_ref()
             .is_some_and(|p| p.masked_directory.is_some()),
+        fixed: req.pruned.as_ref().map_or(Fixed::All, |p| Fixed::Lean {
+            cgroup: p.cgroup_dir.is_some(),
+        }),
     };
-    let mut fds: Vec<BorrowedFd<'_>> = vec![req.sync_w.as_fd(), req.map_r.as_fd()];
+    let mut fds: Vec<BorrowedFd<'_>> = vec![req.sync_w.as_fd()];
+    fds.extend(req.map_r.as_ref().map(AsFd::as_fd));
     if let Some(network) = &req.network {
         fds.push(network.as_fd());
     }
     if let Some(pruned) = &req.pruned {
-        fds.push(pruned.bundle_dir.as_fd());
-        fds.push(pruned.cgroup_dir.as_fd());
+        fds.extend(pruned.cgroup_dir.as_ref().map(AsFd::as_fd));
         fds.push(pruned.container_dir.as_fd());
         fds.push(pruned.rootfs.as_fd());
         fds.extend(pruned.binds.iter().map(AsFd::as_fd));
@@ -1005,19 +1021,7 @@ fn round_trip(
             pid,
             mount_namespace,
         } => (pid, mount_namespace),
-        Answer::Refused { failed, why } => {
-            let e = OciError::Os {
-                op: "create in a container",
-                why,
-            };
-            return match failed {
-                // The seed's own machinery broke: replace it.
-                Failed::Seed => Err(Trip::Broken(e)),
-                // A bad request, a container the seed couldn't make, or one no clone3-into-cgroup kernel
-                // can make here: the seed is whole, the create refused by type.
-                Failed::Request | Failed::Start | Failed::Unable => Err(Trip::Refused(e)),
-            };
-        }
+        Answer::Refused { failed, why } => return Err(refusal(failed, why)),
     };
     let pid = i32::try_from(pid).map_err(|_| {
         Trip::Broken(OciError::Broken(
@@ -1029,6 +1033,90 @@ fn round_trip(
         None => Err(Trip::Broken(OciError::Broken(
             "a create seed said an init started but sent no pidfd".to_owned(),
         ))),
+    }
+}
+
+/// A claim's wait for its parked init's first word on its sync pipe, from the claim's send (the lead's (A) of
+/// 2026-11-09: no early answer): the init's ready on a root node's pruned path, its ask for its user namespace's maps
+/// on a rootless node's classic one. MEASURING until a waits census with it in records it (`waits_census.md`'s
+/// `parked.ready` row); its seed then comes by build profile from that run (decision 9). Until then nothing in the
+/// agent bounds a claimed init that lives on and says nothing: the create waits for it, as a create waits for a
+/// seed-cloned init's word after the seed's answer (`Runtime::handshake_seed` reads with no bound). An init that ends or
+/// refuses is caught at once, its claim socket closed or carrying the refusal.
+static CLAIMS: hex_core::patience::Patience =
+    hex_core::patience::Patience::measuring("parked.ready");
+
+/// Sends a parked init its claim and waits, within `patience` (`None` while the claim's wait measures: unbounded), for
+/// the claim to be taken or not: how the init makes its mount namespace, or why not. A claimed init says nothing on its
+/// claim socket once it takes the claim (the lead's (A) of 2026-11-09), so the claim is taken at the init's first word
+/// on `sync`, the read end of its sync pipe, which stays there for the handshake to read, and the init makes its mount
+/// namespace the create's way, the one it was parked for (the seed's `begin` refuses another). A word there is taken
+/// before anything on the socket, since an init that reports a setup failure ends after it. Not taken: its refusal on
+/// the socket, its end (the socket closed with no word on the pipe), or its silence past `patience`.
+fn claim_round(
+    socket: BorrowedFd<'_>,
+    sync: BorrowedFd<'_>,
+    create: &Create,
+    fds: &[BorrowedFd<'_>],
+    patience: Option<Duration>,
+) -> Result<MountNamespace, Trip> {
+    rt_seed::send_create(socket, create, fds).map_err(Trip::Broken)?;
+    match first_readable([sync, socket], patience).map_err(Trip::Broken)? {
+        Some(0) => Ok(create.mount_namespace),
+        Some(_) => match rt_seed::recv_answer(socket) {
+            Ok((Answer::Refused { failed, why }, _)) => Err(refusal(failed, why)),
+            Ok(_) => Err(Trip::Broken(OciError::Broken(
+                "a claimed init answered other than to refuse its claim".to_owned(),
+            ))),
+            Err(e) => Err(Trip::Broken(e)),
+        },
+        None => Err(Trip::Hung(OciError::Broken(format!(
+            "a claimed init said nothing within {:?}",
+            patience.unwrap_or_default()
+        )))),
+    }
+}
+
+/// Which of `fds` turns readable first within `patience`, the earlier in the list where both have: `None` past it, and
+/// with none (a wait measuring) it waits until one does. A peer's end (`POLLHUP`) counts, for the read that says so.
+fn first_readable(
+    fds: [BorrowedFd<'_>; 2],
+    patience: Option<Duration>,
+) -> Result<Option<usize>, OciError> {
+    let [first, second] = fds;
+    let deadline = patience.and_then(|p| Instant::now().checked_add(p));
+    loop {
+        let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+        let ts = left.map(|left| Timespec {
+            tv_sec: i64::try_from(left.as_secs()).unwrap_or(i64::MAX),
+            tv_nsec: i64::from(left.subsec_nanos()),
+        });
+        let mut polled = [
+            PollFd::new(&first, PollFlags::IN),
+            PollFd::new(&second, PollFlags::IN),
+        ];
+        match rustix::event::poll(&mut polled, ts.as_ref()) {
+            Ok(n) if n > 0 => return Ok(polled.iter().position(|p| !p.revents().is_empty())),
+            Ok(_) if left.is_some_and(|l| l.is_zero()) => return Ok(None),
+            Ok(_) | Err(rustix::io::Errno::INTR) => {}
+            Err(e) => return Err(OciError::os("poll on a claimed init's pipe and socket", e)),
+        }
+    }
+}
+
+/// A refusal as a round trip's outcome: a seed's own machinery broken (replace it), or a refusal by type (the seed is
+/// whole, the create refused).
+fn refusal(failed: Failed, why: String) -> Trip {
+    let e = OciError::Os {
+        op: "create in a container",
+        why,
+    };
+    match failed {
+        // The seed's own machinery broke: replace it.
+        Failed::Seed => Trip::Broken(e),
+        // A bad request, a container the seed couldn't make, or one no clone3-into-cgroup kernel
+        // can make here: the seed is whole, the create refused by type.
+        Failed::Request | Failed::Start | Failed::Unable => Trip::Refused(e),
     }
 }
 
@@ -1264,6 +1352,203 @@ mod tests {
         pool.shared.claim_failed(&Trip::Refused(e()));
         pool.shared.claim_failed(&Trip::Broken(e()));
         assert_eq!(pool.claims_failed(), (1, 2));
+    }
+
+    /// The lead's (B) of 2026-11-09 (decision 8's claim), HEX-SEED-3: a request's descriptors are those its create
+    /// counts, in the order the seed reads them. Do: the message of a pruned request without its cgroup directory (a
+    /// parked init's claim), of one with it (a seed's clone), and of a classic request. Expect: the pruned ones lean,
+    /// the sync pipe, the cgroup directory where it rides, the state directory, the rootfs and the checked spec, with no
+    /// map pipe and no bundle directory; the classic one in the older layout, the sync and map pipes and the checked
+    /// spec; and each as many as its create counts.
+    #[test]
+    fn a_requests_descriptors_are_those_its_create_counts_in_the_seeds_order() {
+        use hex_runtime::linux::cgroup::BoxCgroup;
+        use hex_runtime::linux::oci::run::PrunedCreate;
+        use rustix::fs::{Mode, OFlags};
+        use std::os::fd::AsRawFd;
+        let lab = tempfile::tempdir().unwrap();
+        let open = || {
+            rustix::fs::open(
+                lab.path(),
+                OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .unwrap()
+        };
+        let cgroup = BoxCgroup::at(lab.path().to_owned());
+        let config = open();
+        let request = |map_r: Option<OwnedFd>, pruned: Option<PrunedCreate>| CloneReq {
+            bundle: lab.path(),
+            dir: lab.path(),
+            cgroup: &cgroup,
+            network: None,
+            sync_w: open(),
+            map_r,
+            config: config.as_fd(),
+            pruned,
+        };
+        let pruned = |cgroup_dir: Option<OwnedFd>| PrunedCreate {
+            cgroup_dir,
+            container_dir: open(),
+            rootfs: open(),
+            mount_namespace: MountNamespace::Copy,
+            dev_mount: None,
+            ipc_uts: None,
+            proc_mount: None,
+            proc_sink: None,
+            masked_directory: None,
+            binds: Vec::new(),
+            path_joins: Vec::new(),
+        };
+        let raw = |fds: &[BorrowedFd<'_>]| fds.iter().map(AsRawFd::as_raw_fd).collect::<Vec<_>>();
+        for cgroup_dir in [None, Some(open())] {
+            let rides = cgroup_dir.as_ref().map(AsRawFd::as_raw_fd);
+            let req = request(None, Some(pruned(cgroup_dir)));
+            let (create, fds) = message(&req);
+            assert_eq!(
+                create.fixed,
+                Fixed::Lean {
+                    cgroup: rides.is_some(),
+                }
+            );
+            let p = req.pruned.as_ref().unwrap();
+            let want: Vec<_> = [Some(req.sync_w.as_raw_fd()), rides]
+                .into_iter()
+                .flatten()
+                .chain([
+                    p.container_dir.as_raw_fd(),
+                    p.rootfs.as_raw_fd(),
+                    config.as_raw_fd(),
+                ])
+                .collect();
+            assert_eq!(raw(&fds), want);
+            assert_eq!(fds.len(), create.fds());
+        }
+        let req = request(Some(open()), None);
+        let (create, fds) = message(&req);
+        assert_eq!(create.fixed, Fixed::All);
+        assert_eq!(
+            raw(&fds),
+            vec![
+                req.sync_w.as_raw_fd(),
+                req.map_r.as_ref().unwrap().as_raw_fd(),
+                config.as_raw_fd()
+            ]
+        );
+        assert_eq!(fds.len(), create.fds());
+    }
+
+    /// The lead's (A) of 2026-11-09 (decision 8's claim): a claimed init says nothing on its claim socket once it takes
+    /// the claim, so the claim is taken at the init's first word on its sync pipe, which stays there for the handshake
+    /// to read, and fails on the init's refusal, its end, or its silence past the claim's patience. Do: claim a
+    /// stand-in init that, given its claim, writes its ready; writes a setup failure and ends; refuses; ends without a
+    /// word; or holds its claim and says nothing. Expect: taken at the ready, still on the pipe; taken at the failure,
+    /// still on the pipe for the handshake to report; refused; broken; and hung, given no time at all to wait. The
+    /// others wait at most the claim's bound before (A), the seeds' answers' record, so a claim that waits for an
+    /// answer fails here rather than waiting for ever.
+    #[test]
+    fn a_claim_is_taken_at_its_inits_first_word_and_otherwise_falls_back() {
+        use hex_runtime::linux::cgroup::BoxCgroup;
+        use hex_runtime::linux::oci::run::PrunedCreate;
+        use rustix::fs::{Mode, OFlags};
+        use rustix::pipe::{PipeFlags, pipe_with};
+        let lab = tempfile::tempdir().unwrap();
+        let open = || {
+            rustix::fs::open(
+                lab.path(),
+                OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .unwrap()
+        };
+        let cgroup = BoxCgroup::at(lab.path().to_owned());
+        let config = open();
+        let before = Patience::by_profile(
+            "test.createpool.claim_before",
+            hex_core::seeds::CLONE_SLOWEST,
+            Some(hex_core::seeds::CLONE_SLOWEST_DEBUG),
+        )
+        .deadline();
+        // A claim of a stand-in that does `then` with its claim's sync pipe end and its end of the claim socket, or,
+        // with none, holds its claim unread: what came of it, and what is left on the sync pipe.
+        let claim = |then: Option<fn(OwnedFd, OwnedFd)>, patience: Option<Duration>| {
+            let (sync_r, sync_w) = pipe_with(PipeFlags::CLOEXEC | PipeFlags::NONBLOCK).unwrap();
+            let (ours, theirs) = rt_seed::socketpair().unwrap();
+            let req = CloneReq {
+                bundle: lab.path(),
+                dir: lab.path(),
+                cgroup: &cgroup,
+                network: None,
+                sync_w,
+                map_r: None,
+                config: config.as_fd(),
+                pruned: Some(PrunedCreate {
+                    cgroup_dir: None,
+                    container_dir: open(),
+                    rootfs: open(),
+                    mount_namespace: MountNamespace::Copy,
+                    dev_mount: None,
+                    ipc_uts: None,
+                    proc_mount: None,
+                    proc_sink: None,
+                    masked_directory: None,
+                    binds: Vec::new(),
+                    path_joins: Vec::new(),
+                }),
+            };
+            let (create, fds) = message(&req);
+            let (stand_in, _held) = match then {
+                Some(then) => (
+                    Some(std::thread::spawn(move || {
+                        let mut buf = vec![0u8; hex_core::seed::MAX_REQUEST];
+                        let Ok(rt_seed::Received::Message { stdio, .. }) =
+                            rt_seed::recv_request(theirs.as_fd(), &mut buf)
+                        else {
+                            panic!("the stand-in was sent no claim");
+                        };
+                        then(stdio.into_iter().next().unwrap(), theirs);
+                    })),
+                    None,
+                ),
+                None => (None, Some(theirs)),
+            };
+            let came = match claim_round(ours.as_fd(), sync_r.as_fd(), &create, &fds, patience) {
+                Ok(MountNamespace::Copy) => "taken",
+                Ok(_) => "taken another way",
+                Err(Trip::Refused(_)) => "refused",
+                Err(Trip::Broken(_)) => "broken",
+                Err(Trip::Hung(_)) => "hung",
+            };
+            if let Some(stand_in) = stand_in {
+                stand_in.join().unwrap();
+            }
+            let mut left = [0u8; 64];
+            let n = rustix::io::read(&sync_r, &mut left).unwrap_or(0);
+            (came, String::from_utf8_lossy(&left[..n]).into_owned())
+        };
+        let ready: fn(OwnedFd, OwnedFd) = |sync, _socket| {
+            rustix::io::write(&sync, b"R\n").unwrap();
+        };
+        let failed: fn(OwnedFd, OwnedFd) = |sync, _socket| {
+            rustix::io::write(&sync, b"Ea step failed\n").unwrap();
+        };
+        let refuses: fn(OwnedFd, OwnedFd) = |_sync, socket| {
+            let why = "refused for the test".to_owned();
+            let refusal = Answer::Refused {
+                failed: Failed::Start,
+                why,
+            };
+            rt_seed::send_answer(socket.as_fd(), &refusal, None).unwrap();
+        };
+        let ends: fn(OwnedFd, OwnedFd) = |_sync, _socket| {};
+        assert_eq!(claim(Some(ready), before), ("taken", "R\n".to_owned()));
+        assert_eq!(
+            claim(Some(failed), before),
+            ("taken", "Ea step failed\n".to_owned())
+        );
+        assert_eq!(claim(Some(refuses), before), ("refused", String::new()));
+        assert_eq!(claim(Some(ends), before), ("broken", String::new()));
+        assert_eq!(claim(None, Some(Duration::ZERO)), ("hung", String::new()));
     }
 
     /// Goal 5 extended step 6: a seed given back goes at once to the create waiting in line, woken by the

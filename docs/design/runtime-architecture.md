@@ -1635,9 +1635,12 @@ This takes it off create's path on a root node, with no new kernel version (deci
   of the host beneath the container's root. A rootless seed can't own a mount namespace without a user namespace of its
   own, so it doesn't prune and its node takes the classic path (below).
 - **What the seed read by path, it is given as descriptors.** A pruned seed can reach no host path, so the create
-  carries, over `SCM_RIGHTS` with its existing pipes (`hex_core::seed::Create`, extended append-only): an `O_PATH`
-  descriptor for the bundle directory (to read `config.json`), the container's cgroup directory, the container's state
-  directory (the exec FIFO's), the rootfs as a detached tree, and one detached tree per bind source. The node agent,
+  carries, over `SCM_RIGHTS` with its sync pipe (`hex_core::seed::Create`, extended append-only), what its init reads:
+  an `O_PATH` descriptor for the container's state directory (the exec FIFO's), the rootfs as a detached tree, one
+  detached tree per bind source and, for a seed's clone, the container's cgroup directory it is born in. A parked
+  init's claim carries no cgroup directory, its init being in its cgroup already, and no pruned create carries the map
+  pipe (a user namespace's maps and the hooks' state, which the pruned path never has) or the bundle directory (the
+  spec rides checked, AC-T7.1.1): kind 9, the lead's (B) of 2026-11-09. The node agent,
   in its own (host) mount namespace, clones each source with `open_tree(OPEN_TREE_CLONE | AT_RECURSIVE)` while the host
   filesystem is still reachable, as crun opens every mount ahead for its `OPEN_TREE_NAMESPACE` path (f17, f73), sets a
   read-only source read-only on its tree (`mount_setattr`) before sending, and closes its copies once the seed answers;
@@ -2395,6 +2398,7 @@ RFC's floor and constants are TCP's clocks'; a calibration read leaves the first
 | --- | --- | --- | --- |
 | a seed's hang bound and the shell's wait for its answer (createpool `ANSWER_PATIENCE`) | 30 s, copied | 2 × max(record, seen) | `seeds::CLONE_SLOWEST`, the `seeds.hang` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 187.044 ms, debug 100.815 ms<!-- /record --> |
 | a create's wait in line for a seed (`seeds`' line) | 1 s, picked | the same | the same record: a create in line waits for a busy seed's answer |
+| a claim's wait for its parked init's first word on its sync pipe (createpool `CLAIMS`; the lead's (A) of 2026-11-09, no early answer) | the seeds' hang bound, for the init's answer | learned | MEASURING: the `parked.ready` rows, from a census run with it in |
 | a record change's wait for the same box's (`WRITE_PATIENCE`) | 60 s, picked | learned, refused by type past it | the `store.turns` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 15.209 ms, debug 54.401 ms<!-- /record --> |
 | a create or delete's wait for the same box's (`TURN_PATIENCE`) | 120 s, picked | learned, from the holder's take | the `node.turns` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 270.803 ms, debug 305.809 ms<!-- /record --> |
 | a killed box's emptying, its programs' reaping and its init's end (`EMPTY_PATIENCE`, cgroups' `REMOVE_PATIENCE`), and a stopping server's wait for the programs it ended (serve `STOP_PATIENCE`) | 60 s each, picked or copied | learned from each kill to empty | the `node.emptying` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 42.798 ms, debug 127.753 ms<!-- /record --> |
@@ -2412,8 +2416,8 @@ seeds' core (`refused_busy`, `refused_waited`), never sent through the shim: one
 ruling of 2026-11-06 under Ada's rule; it replaced the shim fallback, `ClassicReason::NoSeed`). Seeds grow ahead under
 the pool rule from the persisted learned peak, so a node's next start begins where the last peaked. The shim stays
 for its named consumer alone: a spec a seed can't serve (the classic reasons).
-A parked init that doesn't answer a claim already falls back to a seed's clone: the claim borrows the request, whose
-descriptors stay the runtime's.
+A parked init that refuses its claim, ends, or says nothing within the claim's patience falls back to a seed's clone:
+the claim borrows the request, whose descriptors stay the runtime's.
 
 **What would falsify it.** A healthy node retiring seeds as hung, or refusing a call or a record write, for an
 answer more than twice the record's slowest and the node's: then the record's distribution is narrower than the
