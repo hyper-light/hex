@@ -376,7 +376,7 @@ fn descriptors_in_the_middle_of_a_frame_are_refused() {
         hex_core::stream::frame(&request(5, Call::Inspect(b())), wire::MAX_MESSAGE).unwrap();
     let (head, tail) = framed.split_at(3);
     rustix::net::send(&fd, head, SendFlags::empty()).unwrap();
-    let (pr, _pw) = rustix::pipe::pipe().unwrap();
+    let (pr, _pw) = std::io::pipe().unwrap();
     let borrowed = [pr.as_fd()];
     let mut space = [std::mem::MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
     let mut control = rustix::net::SendAncillaryBuffer::new(&mut space);

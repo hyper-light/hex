@@ -133,11 +133,11 @@ fn held_in_a_record_write(pid: u32) -> (bool, String) {
 }
 
 fn record(dir: &Path, id: &BoxId) -> PathBuf {
-    dir.join("state").join(format!("{id}.json"))
+    hex_node::store::runtime_record(&dir.join("state/@records"), id)
 }
 
 fn temp(dir: &Path, id: &BoxId) -> PathBuf {
-    dir.join("state").join(format!(".{id}.tmp"))
+    hex_node::store::runtime_temp(&dir.join("state/@records"), id)
 }
 
 /// T-T7.1.2: a box made and running, and one made and empty, are taken back after the node is killed: the
