@@ -2057,3 +2057,5 @@ mod linux_tests;
 mod macos_tests;
 #[cfg(test)]
 mod sim_tests;
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod unix_tests;
