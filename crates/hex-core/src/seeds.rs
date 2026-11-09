@@ -38,14 +38,15 @@ use std::time::Duration;
 
 use crate::patience::Patience;
 
-/// The slowest answer in a seed's recorded distribution on the bench's host class (x86_64 Linux, fedora's Core
-/// i9-14900HX): a seed's answer to a create, the `seeds.hang` rows of `bench/competitive/probes/waits_census.md` runs
-/// 1 and 3, the largest max of their release arms, 187.044 ms (187,044,152 ns: run 3's tmpfs arm, measured unarmed, of
-/// 46,526). It replaces seed_path.md run 3's 1.918 ms, a clone timed alone, which under the bar's load would have taken
-/// healthy seeds for hung. It seeds a pool's hang bound before the node has an answer of its own, and the line's wait,
+/// The slowest answer in a seed's recorded distribution on the bench's host class (x86_64 Linux, adacachy2's AMD Ryzen
+/// 9 9950X3D2, the record host in fedora's place): a seed's answer to a create, the `seeds.hang` rows of
+/// `bench/competitive/probes/waits_census.md` run 4, the largest max of its release arms, 29.565 ms (29,564,846 ns: its
+/// tmpfs arm, measured unarmed, of 47,226). It replaces runs 1 and 3's 187.044 ms (fedora's), which replaced
+/// seed_path.md run 3's 1.918 ms, a clone timed alone that under the bar's load would have taken healthy seeds for hung.
+/// It seeds a pool's hang bound before the node has an answer of its own, and the line's wait,
 /// since a create in line waits for a busy seed's answer (decision 9: twice the slowest, recorded or seen). Another
 /// host class has no record yet; it starts from this one's and learns its own.
-pub const CLONE_SLOWEST: Duration = Duration::from_nanos(187_044_152);
+pub const CLONE_SLOWEST: Duration = Duration::from_nanos(29_564_846);
 
 /// The same answer's slowest in a debug build, the census's debug arm (run 3, 100.815 ms of 51,915: 100,815,120 ns),
 /// which a debug build's waits are seeded from (decision 9, by build profile).
@@ -638,12 +639,14 @@ impl Seeds {
         self.counts.most_busy = self.counts.most_busy.max(busy);
     }
 
-    /// A create in line since `since` whose wait ended at `until` with no seed: counted, and no sample (Karn's point).
+    /// A create in line since `since` whose wait ended at `until` with no seed: counted, and no sample (Karn's point),
+    /// but the census is told the line's wait ran out at its bound (busy seeds, not hung ones: a seed past its hang bound
+    /// is [`Seeds::hung`]'s, which tells the census nothing, a hung seed's run-out saying nothing of an answer's time).
     fn waited_out(&mut self, since: Duration, until: Duration) -> Refused {
         bump(&mut self.counts.refused_waited);
-        Refused::Waited {
-            wait: until.saturating_sub(since),
-        }
+        let wait = until.saturating_sub(since);
+        self.wait.ran_out(wait);
+        Refused::Waited { wait }
     }
 
     fn count(&self, holds: impl Fn(Holds) -> bool) -> usize {

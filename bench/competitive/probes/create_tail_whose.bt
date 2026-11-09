@@ -14,24 +14,36 @@
 // A wait's holder is named by its comm and its window: a mutex's or an rwsem's owner word (struct mutex, struct
 // rw_semaphore: a task, its low three bits flags, an rwsem's bit 0 its readers'), or the task that took a per-CPU rwsem
 // to write. The windows, outermost first: fork (kernel_clone), cgroup mkdir, cgroup rmdir, kernfs write (a cgroupfs or
-// sysfs file's), css kill (css_killed_work_fn), css release (css_release_work_fn), css free (css_free_rwork_fn).
+// sysfs file's), css kill (css_killed_work_fn), css release (css_release_work_fn), css free (css_free_rwork_fn),
+// kernfs notify (kernfs_notify_workfn: a cgroup file's change told to every superblock of its root), mount teardown
+// (cleanup_mnt, from a task's return or delayed_mntput's work) and netns teardown (cleanup_net).
 // Stacks need the addresses, so none are taken: windows, wakers and workqueues stand in for them.
 // Each delete() is of a key known made, or guarded: bpftrace warns at every delete of a missing key.
 // A per-CPU kernel thread's comm is keyed by its kind (kworker/3:2 as kworker): a teardown that blocks on
 // cgroup_mutex makes the workqueues start kworkers by the hundred, and their names would fill every map (4,096 keys).
+// The kind is an integer and its name is looked up as the key is made (@kname): a string variable given a shorter
+// string keeps its old one's tail past the end (bpftrace copies to the new end), so one name printed many times over
+// (whose-noowner-1f705e80-r2: @preempted_by's 3,781 keys). No string variable here is given a second string.
 //
 // A create's threads: Hex's (hex, hex-serve, hex-socket-worker, hex-ahead and the rest), seam_oci's and the bundles'
 // programs (sleep, true). Its maps, each bounded by what it keeps (bpftrace's 4,096 keys a map): lock waits by waiter,
 // lock and holder (a create's thread's, any on a cgroup lock learned, the teardown's own); css kills', releases' and
-// frees' cost, where kills run and where they are queued; each controller's offline cost; work items (by workqueue and
-// learned function) and softirqs on the create CPUs; each preemption of a create's thread by its preempter and what
-// ran on its CPU meanwhile; each sleep of one over 500 us by its window, its state and its waker.
+// frees' cost, where kills run and where they are queued; each controller's offline cost; the kernfs notify work's,
+// a mount's teardown's and a netns teardown's cost and where each ran; work items (by workqueue and learned function)
+// and softirqs on the create CPUs; each preemption of a create's thread by its preempter and what ran on its CPU
+// meanwhile; each sleep of one over 500 us by its window, its state and its waker; superblocks and memcg-aware
+// list_lrus alive, by their filesystem's type and their maker, each second (a memcg's offline walks every such list_lru,
+// two a superblock); and the work functions a box's end may queue on "events", named as they run.
+
+// A probe this kernel lacks (a candidate inlined or renamed) is warned of in bt.log, the rest of the record kept.
+config = { missing_probes = "warn" }
 
 BEGIN
 {
   @t0 = nsecs;
   @wname[1] = "fork"; @wname[2] = "cgroup mkdir"; @wname[3] = "cgroup rmdir"; @wname[4] = "kernfs write";
-  @wname[5] = "css kill"; @wname[6] = "css release"; @wname[7] = "css free";
+  @wname[5] = "css kill"; @wname[6] = "css release"; @wname[7] = "css free"; @wname[8] = "kernfs notify";
+  @wname[9] = "mount teardown"; @wname[10] = "netns teardown";
   @state[1] = "S"; @state[2] = "D"; @state[4] = "T"; @state[8] = "t"; @state[64] = "P"; @state[128] = "I";
   @vec[0] = "HI"; @vec[1] = "TIMER"; @vec[2] = "NET_TX"; @vec[3] = "NET_RX"; @vec[4] = "BLOCK"; @vec[5] = "IRQ_POLL";
   @vec[6] = "TASKLET"; @vec[7] = "SCHED"; @vec[8] = "HRTIMER"; @vec[9] = "RCU";
@@ -40,7 +52,14 @@ BEGIN
   // A kind's name replaces a whole comm, so each value is a comm's 16 bytes (the map's type is its widest value's, and
   // bpftrace zeroes a value's rest): a literal copied over a comm would leave the comm's tail after its end.
   @kname[0] = comm; @kname[1] = "kworker"; @kname[2] = "ksoftirqd"; @kname[3] = "migration"; @kname[4] = "swapper";
-  @kname[5] = "irq thread"; @kname[6] = "rcuc"; @kname[7] = "rcuop"; @kname[8] = "cpuhp"; delete(@kname[0]);
+  @kname[5] = "irq thread"; @kname[6] = "rcuc"; @kname[7] = "rcuop"; @kname[8] = "cpuhp"; @kname[9] = "readers";
+  @kname[10] = ""; delete(@kname[0]);
+  @pname[0] = "nothing traced"; @pname[1] = "a css kill"; @pname[2] = "a css release"; @pname[3] = "a kernfs notify";
+  @pname[4] = "a netns teardown"; @pname[5] = "a mount teardown"; @pname[6] = "other work";
+  // Who made a superblock or a list_lru: the refill (a box made ahead, what a parked box holds while it waits), Hex's
+  // inits and seeds and its node (hex), Hex's other threads, seam_oci, and everyone else.
+  @mname[1] = "refill (hex-ahead)"; @mname[2] = "hex"; @mname[3] = "Hex's other threads"; @mname[4] = "seam_oci";
+  @mname[5] = "others";
   printf("whose attached\n");
 }
 
@@ -61,7 +80,16 @@ fentry:vmlinux:cgroup_can_fork { @learn[tid] = 2; }
 fexit:vmlinux:cgroup_can_fork / @learn[tid] / { delete(@learn[tid]); }
 
 // Who takes a per-CPU rwsem to write: its waiters' holder.
-fentry:vmlinux:percpu_down_write { @pwc[(uint64)args.sem] = comm; @pww[(uint64)args.sem] = @win[tid]; }
+fentry:vmlinux:percpu_down_write
+{
+  $kw = 0;
+  if (strncmp(comm, "kworker/", 8) == 0) { $kw = 1; } else if (strncmp(comm, "ksoftirqd/", 10) == 0) { $kw = 2; }
+  else if (strncmp(comm, "migration/", 10) == 0) { $kw = 3; } else if (strncmp(comm, "swapper/", 8) == 0) { $kw = 4; }
+  else if (strncmp(comm, "irq/", 4) == 0) { $kw = 5; } else if (strncmp(comm, "rcuc/", 5) == 0) { $kw = 6; }
+  else if (strncmp(comm, "rcuop/", 6) == 0) { $kw = 7; } else if (strncmp(comm, "cpuhp/", 6) == 0) { $kw = 8; }
+  if ($kw) { @pwc[(uint64)args.sem] = @kname[$kw]; } else { @pwc[(uint64)args.sem] = comm; }
+  @pww[(uint64)args.sem] = @win[tid];
+}
 fentry:vmlinux:percpu_up_write / @pwc[(uint64)args.sem] != "" / { delete(@pwc[(uint64)args.sem]); delete(@pww[(uint64)args.sem]); }
 
 // The teardown's work items: their cost, where they run, and their functions learned.
@@ -98,6 +126,44 @@ fexit:vmlinux:css_free_rwork_fn / @free_t[tid] /
   delete(@free_t[tid]); delete(@win[tid]);
 }
 
+// The rest of what earlier boxes leave the host to do: each cgroup file's change told to every superblock its kernfs
+// root has, a mount's teardown, a network namespace's. Each its cost, where it runs, and its work function learned.
+fentry:vmlinux:kernfs_notify_workfn
+{
+  @win[tid] = 8; @notify_t[tid] = nsecs; @notifies_on[cpu]++;
+  if (@wf[tid]) { @fname[@wf[tid]] = "kernfs_notify_workfn"; }
+}
+fexit:vmlinux:kernfs_notify_workfn / @notify_t[tid] /
+{
+  $d = (nsecs - @notify_t[tid]) / 1000;
+  @kernfs_notify_us = hist($d); @kernfs_notify_ran_on_cpu_us[cpu] = sum($d);
+  delete(@notify_t[tid]); delete(@win[tid]);
+}
+fentry:vmlinux:delayed_mntput / @wf[tid] / { @fname[@wf[tid]] = "delayed_mntput"; }
+fentry:vmlinux:cleanup_mnt
+{
+  if (@win[tid] == 0) { @win[tid] = 9; }
+  @mnt_t[tid] = nsecs; @mounts_on[cpu]++;
+}
+fexit:vmlinux:cleanup_mnt / @mnt_t[tid] /
+{
+  $d = (nsecs - @mnt_t[tid]) / 1000;
+  @mount_teardown_us = hist($d); @mount_teardown_ran_on_cpu_us[cpu] = sum($d);
+  delete(@mnt_t[tid]);
+  if (@win[tid] == 9) { delete(@win[tid]); }
+}
+fentry:vmlinux:cleanup_net
+{
+  @win[tid] = 10; @net_t[tid] = nsecs; @netns_on[cpu]++;
+  if (@wf[tid]) { @fname[@wf[tid]] = "cleanup_net"; }
+}
+fexit:vmlinux:cleanup_net / @net_t[tid] /
+{
+  $d = (nsecs - @net_t[tid]) / 1000;
+  @netns_teardown_us = hist($d); @netns_teardown_ran_on_cpu_us[cpu] = sum($d);
+  delete(@net_t[tid]); delete(@win[tid]);
+}
+
 // Each controller's offline, within a css kill.
 fentry:vmlinux:mem_cgroup_css_offline { @memcg_t[tid] = nsecs; }
 fexit:vmlinux:mem_cgroup_css_offline / @memcg_t[tid] / { @offline_us["memory"] = hist((nsecs - @memcg_t[tid]) / 1000); delete(@memcg_t[tid]); }
@@ -111,6 +177,71 @@ fentry:vmlinux:blkcg_css_offline { @io_t[tid] = nsecs; }
 fexit:vmlinux:blkcg_css_offline / @io_t[tid] / { @offline_us["io"] = hist((nsecs - @io_t[tid]) / 1000); delete(@io_t[tid]); }
 fentry:vmlinux:cpuset_css_offline { @cpuset_t[tid] = nsecs; }
 fexit:vmlinux:cpuset_css_offline / @cpuset_t[tid] / { @offline_us["cpuset"] = hist((nsecs - @cpuset_t[tid]) / 1000); delete(@cpuset_t[tid]); }
+// Within the memory controller's offline: its walk of every memcg-aware list_lru on the host, under list_lrus_mutex.
+fentry:vmlinux:memcg_reparent_list_lrus { @reparent_t[tid] = nsecs; }
+fexit:vmlinux:memcg_reparent_list_lrus / @reparent_t[tid] / { @offline_us["memory: memcg_reparent_list_lrus"] = hist((nsecs - @reparent_t[tid]) / 1000); delete(@reparent_t[tid]); }
+
+// Superblocks and memcg-aware list_lrus alive (lever (b)): a memcg's offline walks every memcg-aware list_lru on the
+// host (mm/list_lru.c, memcg_reparent_list_lrus), two a superblock (fs/super.c, alloc_super: its dentries' and its
+// inodes'). Each is counted from its making to its end by its maker and, a superblock, its filesystem's type; those
+// made before the bt attached are the host's, its census at the wrapper's start. A superblock is new from sget_fc while
+// its root isn't made yet (an existing one, as every cgroup2 mount's, comes back made), and ends where
+// deactivate_locked_super drops its last active reference. Counted by sum(1) and sum(-1), per CPU and so exact (a
+// map's ++ is a read and a write, which CPUs making superblocks at once would undo), and printed each second, so the
+// most alive at once is read off the run.
+fexit:vmlinux:sget_fc
+{
+  $sb = (uint64)retval;
+  // An error comes back as a pointer into the last 4,095 bytes (ERR_PTR).
+  if ($sb != 0 && $sb < 0xfffffffffffff001 && retval->s_root == 0) {
+    $m = 5;
+    if (comm == "hex-ahead") { $m = 1; } else if (comm == "hex") { $m = 2; }
+    else if (strncmp(comm, "hex-", 4) == 0) { $m = 3; } else if (comm == "seam_oci") { $m = 4; }
+    @sbm[$sb] = $m;
+    @sbt[$sb] = str(args.fc->fs_type->name);
+    @sb_alive[@mname[$m], @sbt[$sb]] = sum(1);
+  }
+}
+fentry:vmlinux:deactivate_locked_super / @sbm[(uint64)args.s] && args.s->s_active.counter == 1 /
+{
+  $sb = (uint64)args.s;
+  @sb_alive[@mname[@sbm[$sb]], @sbt[$sb]] = sum(-1);
+  delete(@sbm[$sb]); delete(@sbt[$sb]);
+}
+fexit:vmlinux:__list_lru_init / retval == 0 && args.memcg_aware /
+{
+  $m = 5;
+  if (comm == "hex-ahead") { $m = 1; } else if (comm == "hex") { $m = 2; }
+  else if (strncmp(comm, "hex-", 4) == 0) { $m = 3; } else if (comm == "seam_oci") { $m = 4; }
+  @lrum[(uint64)args.lru] = $m;
+  @lru_alive[@mname[$m]] = sum(1);
+}
+fentry:vmlinux:list_lru_destroy / @lrum[(uint64)args.lru] /
+{
+  @lru_alive[@mname[@lrum[(uint64)args.lru]]] = sum(-1);
+  delete(@lrum[(uint64)args.lru]);
+}
+interval:s:1
+{
+  printf("alive at %d s\n", (nsecs - @t0) / 1000000000);
+  print(@sb_alive); print(@lru_alive);
+}
+
+// "events" ran 17.0 s on the create CPUs, its function unnamed (whose-noowner-1f705e80-r3). The work functions a box's
+// end may queue there that adacachy2's 7.3 kernel can trace, each named as it runs: a superblock's freeing
+// (destroy_super_work), an ipc namespace's (free_ipc), a memcg's per-CPU stock drained at its offline
+// (drain_local_memcg_stock, drain_local_obj_stock), the percpu allocator's balancing (pcpu_balance_workfn), a file's
+// deferred last close (delayed_fput), a memcg's reclaim past memory.high (high_work_func), and a network namespace's
+// fragment queues (fqdir_work_fn, fqdir_free_fn).
+fentry:vmlinux:destroy_super_work / @wf[tid] / { @fname[@wf[tid]] = "destroy_super_work"; }
+fentry:vmlinux:free_ipc / @wf[tid] / { @fname[@wf[tid]] = "free_ipc"; }
+fentry:vmlinux:drain_local_memcg_stock / @wf[tid] / { @fname[@wf[tid]] = "drain_local_memcg_stock"; }
+fentry:vmlinux:drain_local_obj_stock / @wf[tid] / { @fname[@wf[tid]] = "drain_local_obj_stock"; }
+fentry:vmlinux:pcpu_balance_workfn / @wf[tid] / { @fname[@wf[tid]] = "pcpu_balance_workfn"; }
+fentry:vmlinux:delayed_fput / @wf[tid] / { @fname[@wf[tid]] = "delayed_fput"; }
+fentry:vmlinux:high_work_func / @wf[tid] / { @fname[@wf[tid]] = "high_work_func"; }
+fentry:vmlinux:fqdir_work_fn / @wf[tid] / { @fname[@wf[tid]] = "fqdir_work_fn"; }
+fentry:vmlinux:fqdir_free_fn / @wf[tid] / { @fname[@wf[tid]] = "fqdir_free_fn"; }
 
 // Work items: each one's workqueue, held from its queueing to its start; on the create CPUs, its time.
 tracepoint:workqueue:workqueue_queue_work
@@ -118,14 +249,13 @@ tracepoint:workqueue:workqueue_queue_work
   $q = str(args.workqueue);
   @wqn[args.work] = $q;
   if (@fname[(uint64)args.function] == "css_killed_work_fn") {
-    $qb = comm;
-    $kqb = 0;
-    if (strncmp($qb, "kworker/", 8) == 0) { $kqb = 1; } else if (strncmp($qb, "ksoftirqd/", 10) == 0) { $kqb = 2; }
-    else if (strncmp($qb, "migration/", 10) == 0) { $kqb = 3; } else if (strncmp($qb, "swapper/", 8) == 0) { $kqb = 4; }
-    else if (strncmp($qb, "irq/", 4) == 0) { $kqb = 5; } else if (strncmp($qb, "rcuc/", 5) == 0) { $kqb = 6; }
-    else if (strncmp($qb, "rcuop/", 6) == 0) { $kqb = 7; } else if (strncmp($qb, "cpuhp/", 6) == 0) { $kqb = 8; }
-    if ($kqb) { $qb = @kname[$kqb]; }
-    @css_kill_queued_on_cpu[args.cpu] = count(); @css_kill_queued_by[$qb] = count();
+    $kq = 0;
+    if (strncmp(comm, "kworker/", 8) == 0) { $kq = 1; } else if (strncmp(comm, "ksoftirqd/", 10) == 0) { $kq = 2; }
+    else if (strncmp(comm, "migration/", 10) == 0) { $kq = 3; } else if (strncmp(comm, "swapper/", 8) == 0) { $kq = 4; }
+    else if (strncmp(comm, "irq/", 4) == 0) { $kq = 5; } else if (strncmp(comm, "rcuc/", 5) == 0) { $kq = 6; }
+    else if (strncmp(comm, "rcuop/", 6) == 0) { $kq = 7; } else if (strncmp(comm, "cpuhp/", 6) == 0) { $kq = 8; }
+    @css_kill_queued_on_cpu[args.cpu] = count();
+    if ($kq) { @css_kill_queued_by[@kname[$kq]] = count(); } else { @css_kill_queued_by[comm] = count(); }
   }
 }
 tracepoint:workqueue:workqueue_execute_start
@@ -169,19 +299,25 @@ tracepoint:lock:contention_begin
   // A mutex's wait begins twice when it spins and then sleeps, and ends once (kernel/locking/mutex.c): it starts at
   // the first. Kept: a create's thread's waits, every wait for a cgroup lock learned, and the teardown's own.
   if (@cb[tid] == 0 && (strncmp(comm, "hex", 3) == 0 || comm == "seam_oci" || comm == "sleep" || comm == "true" || $l == @cgm || $l == @tgr || @win[tid] >= 5)) {
-    @cb[tid] = nsecs; @cf[tid] = $f; @cl[tid] = $l; @hc[tid] = ""; @hw[tid] = 0;
+    @cb[tid] = nsecs; @cf[tid] = $f; @cl[tid] = $l; @hn[tid] = @kname[10]; @hw[tid] = 0;
     $o = (uint64)0;
     if ($f & 0x20) {
       $o = ((struct mutex *)args.lock_addr)->owner.counter & 0xfffffffffffffff8;
     } else if (($f & 0x19) == 0) {
       $w = (uint64)((struct rw_semaphore *)args.lock_addr)->owner.counter;
-      if ($w & 0x1) { @hc[tid] = "readers"; } else { $o = $w & 0xfffffffffffffff8; }
+      if ($w & 0x1) { @hn[tid] = @kname[9]; } else { $o = $w & 0xfffffffffffffff8; }
     } else if ($f & 0x10) {
-      @hc[tid] = @pwc[$l]; @hw[tid] = @pww[$l];
+      @hn[tid] = @pwc[$l]; @hw[tid] = @pww[$l];
     }
     if ($o) {
       $t = (struct task_struct *)$o;
-      @hc[tid] = $t->comm; @hw[tid] = @win[(uint64)$t->pid];
+      $kh = 0;
+      if (strncmp($t->comm, "kworker/", 8) == 0) { $kh = 1; } else if (strncmp($t->comm, "ksoftirqd/", 10) == 0) { $kh = 2; }
+      else if (strncmp($t->comm, "migration/", 10) == 0) { $kh = 3; } else if (strncmp($t->comm, "swapper/", 8) == 0) { $kh = 4; }
+      else if (strncmp($t->comm, "irq/", 4) == 0) { $kh = 5; } else if (strncmp($t->comm, "rcuc/", 5) == 0) { $kh = 6; }
+      else if (strncmp($t->comm, "rcuop/", 6) == 0) { $kh = 7; } else if (strncmp($t->comm, "cpuhp/", 6) == 0) { $kh = 8; }
+      if ($kh) { @hn[tid] = @kname[$kh]; } else { @hn[tid] = $t->comm; }
+      @hw[tid] = @win[(uint64)$t->pid];
     }
   }
 }
@@ -200,27 +336,23 @@ tracepoint:lock:contention_end / @cb[tid] /
   else if ($f & 0x6) { $k = 8; }
   $name = @lockname[$k];
   $in = @wname[@win[tid]];
-  $me = comm;
-  $kme = 0;
-  if (strncmp($me, "kworker/", 8) == 0) { $kme = 1; } else if (strncmp($me, "ksoftirqd/", 10) == 0) { $kme = 2; }
-  else if (strncmp($me, "migration/", 10) == 0) { $kme = 3; } else if (strncmp($me, "swapper/", 8) == 0) { $kme = 4; }
-  else if (strncmp($me, "irq/", 4) == 0) { $kme = 5; } else if (strncmp($me, "rcuc/", 5) == 0) { $kme = 6; }
-  else if (strncmp($me, "rcuop/", 6) == 0) { $kme = 7; } else if (strncmp($me, "cpuhp/", 6) == 0) { $kme = 8; }
-  if ($kme) { $me = @kname[$kme]; }
-  $by = @hc[tid];
-  $kby = 0;
-  if (strncmp($by, "kworker/", 8) == 0) { $kby = 1; } else if (strncmp($by, "ksoftirqd/", 10) == 0) { $kby = 2; }
-  else if (strncmp($by, "migration/", 10) == 0) { $kby = 3; } else if (strncmp($by, "swapper/", 8) == 0) { $kby = 4; }
-  else if (strncmp($by, "irq/", 4) == 0) { $kby = 5; } else if (strncmp($by, "rcuc/", 5) == 0) { $kby = 6; }
-  else if (strncmp($by, "rcuop/", 6) == 0) { $kby = 7; } else if (strncmp($by, "cpuhp/", 6) == 0) { $kby = 8; }
-  if ($kby) { $by = @kname[$kby]; }
   $byin = @wname[@hw[tid]];
-  @lock_wait_total_us[$me, $in, $name, $by, $byin] = sum($d);
-  @lock_wait_n[$me, $in, $name, $by, $byin] = count();
-  if (strncmp(comm, "hex", 3) == 0 || comm == "seam_oci" || comm == "sleep" || comm == "true") {
-    @create_lock_wait_us[$in, $name, $by, $byin] = hist($d);
+  $km = 0;
+  if (strncmp(comm, "kworker/", 8) == 0) { $km = 1; } else if (strncmp(comm, "ksoftirqd/", 10) == 0) { $km = 2; }
+  else if (strncmp(comm, "migration/", 10) == 0) { $km = 3; } else if (strncmp(comm, "swapper/", 8) == 0) { $km = 4; }
+  else if (strncmp(comm, "irq/", 4) == 0) { $km = 5; } else if (strncmp(comm, "rcuc/", 5) == 0) { $km = 6; }
+  else if (strncmp(comm, "rcuop/", 6) == 0) { $km = 7; } else if (strncmp(comm, "cpuhp/", 6) == 0) { $km = 8; }
+  if ($km) {
+    @lock_wait_total_us[@kname[$km], $in, $name, @hn[tid], $byin] = sum($d);
+    @lock_wait_n[@kname[$km], $in, $name, @hn[tid], $byin] = count();
+  } else {
+    @lock_wait_total_us[comm, $in, $name, @hn[tid], $byin] = sum($d);
+    @lock_wait_n[comm, $in, $name, @hn[tid], $byin] = count();
   }
-  delete(@cb[tid]); delete(@cf[tid]); delete(@cl[tid]); delete(@hc[tid]); delete(@hw[tid]);
+  if (strncmp(comm, "hex", 3) == 0 || comm == "seam_oci" || comm == "sleep" || comm == "true") {
+    @create_lock_wait_us[$in, $name, @hn[tid], $byin] = hist($d);
+  }
+  delete(@cb[tid]); delete(@cf[tid]); delete(@cl[tid]); delete(@hn[tid]); delete(@hw[tid]);
 }
 
 // A create's thread off its CPU: preempted (its state bits 0; TASK_REPORT_MAX, 0x100, marks it) or asleep.
@@ -232,16 +364,17 @@ tracepoint:sched:sched_switch
     if (($st & 0x30) == 0) {
       $p = args.prev_pid;
       @out[$p] = nsecs; @outcpu[$p] = cpu; @outst[$p] = $st + 1; @outwin[$p] = @win[(uint64)$p];
-      @outk[$p] = @kills_on[cpu]; @outr[$p] = @releases_on[cpu]; @outw[$p] = @works_on[cpu]; @wk[$p] = ""; @wkw[$p] = 0;
+      @outk[$p] = @kills_on[cpu]; @outr[$p] = @releases_on[cpu]; @outn[$p] = @notifies_on[cpu];
+      @outt[$p] = @netns_on[cpu]; @outm[$p] = @mounts_on[cpu]; @outw[$p] = @works_on[cpu];
+      @wk[$p] = @kname[10]; @wkw[$p] = 0;
       if ($st == 0) {
-        $pre = args.next_comm;
-        $kpre = 0;
-        if (strncmp($pre, "kworker/", 8) == 0) { $kpre = 1; } else if (strncmp($pre, "ksoftirqd/", 10) == 0) { $kpre = 2; }
-        else if (strncmp($pre, "migration/", 10) == 0) { $kpre = 3; } else if (strncmp($pre, "swapper/", 8) == 0) { $kpre = 4; }
-        else if (strncmp($pre, "irq/", 4) == 0) { $kpre = 5; } else if (strncmp($pre, "rcuc/", 5) == 0) { $kpre = 6; }
-        else if (strncmp($pre, "rcuop/", 6) == 0) { $kpre = 7; } else if (strncmp($pre, "cpuhp/", 6) == 0) { $kpre = 8; }
-        if ($kpre) { $pre = @kname[$kpre]; }
-        @preempted_by[args.prev_comm, $pre] = count();
+        $kp = 0;
+        if (strncmp(args.next_comm, "kworker/", 8) == 0) { $kp = 1; } else if (strncmp(args.next_comm, "ksoftirqd/", 10) == 0) { $kp = 2; }
+        else if (strncmp(args.next_comm, "migration/", 10) == 0) { $kp = 3; } else if (strncmp(args.next_comm, "swapper/", 8) == 0) { $kp = 4; }
+        else if (strncmp(args.next_comm, "irq/", 4) == 0) { $kp = 5; } else if (strncmp(args.next_comm, "rcuc/", 5) == 0) { $kp = 6; }
+        else if (strncmp(args.next_comm, "rcuop/", 6) == 0) { $kp = 7; } else if (strncmp(args.next_comm, "cpuhp/", 6) == 0) { $kp = 8; }
+        if ($kp) { @preempted_by[args.prev_comm, @kname[$kp]] = count(); }
+        else { @preempted_by[args.prev_comm, args.next_comm] = count(); }
       }
     }
   }
@@ -250,37 +383,45 @@ tracepoint:sched:sched_switch
     $d = (nsecs - @out[$n]) / 1000;
     $c = @outcpu[$n];
     if (@outst[$n] == 1) {
-      $what = "nothing traced";
-      if (@kills_on[$c] > @outk[$n]) { $what = "a css kill"; }
-      else if (@releases_on[$c] > @outr[$n]) { $what = "a css release"; }
-      else if (@works_on[$c] > @outw[$n]) { $what = "other work"; }
-      @preempt_us[$what] = hist($d); @preempt_total_us[$what] = sum($d);
+      $cls = 0;
+      if (@kills_on[$c] > @outk[$n]) { $cls = 1; }
+      else if (@releases_on[$c] > @outr[$n]) { $cls = 2; }
+      else if (@notifies_on[$c] > @outn[$n]) { $cls = 3; }
+      else if (@netns_on[$c] > @outt[$n]) { $cls = 4; }
+      else if (@mounts_on[$c] > @outm[$n]) { $cls = 5; }
+      else if (@works_on[$c] > @outw[$n]) { $cls = 6; }
+      @preempt_us[@pname[$cls]] = hist($d); @preempt_total_us[@pname[$cls]] = sum($d);
     } else if ($d > 500) {
       $s = @state[@outst[$n] - 1];
       $in = @wname[@outwin[$n]];
-      $by = @wk[$n];
-      $kby = 0;
-      if (strncmp($by, "kworker/", 8) == 0) { $kby = 1; } else if (strncmp($by, "ksoftirqd/", 10) == 0) { $kby = 2; }
-      else if (strncmp($by, "migration/", 10) == 0) { $kby = 3; } else if (strncmp($by, "swapper/", 8) == 0) { $kby = 4; }
-      else if (strncmp($by, "irq/", 4) == 0) { $kby = 5; } else if (strncmp($by, "rcuc/", 5) == 0) { $kby = 6; }
-      else if (strncmp($by, "rcuop/", 6) == 0) { $kby = 7; } else if (strncmp($by, "cpuhp/", 6) == 0) { $kby = 8; }
-      if ($kby) { $by = @kname[$kby]; }
       $byin = @wname[@wkw[$n]];
-      @sleep_slow_us[args.next_comm, $s, $in, $by, $byin] = sum($d);
+      @sleep_slow_us[args.next_comm, $s, $in, @wk[$n], $byin] = sum($d);
     }
-    delete(@out[$n]); delete(@outcpu[$n]); delete(@outst[$n]); delete(@outwin[$n]);
-    delete(@outk[$n]); delete(@outr[$n]); delete(@outw[$n]); delete(@wk[$n]); delete(@wkw[$n]);
+    delete(@out[$n]); delete(@outcpu[$n]); delete(@outst[$n]); delete(@outwin[$n]); delete(@outk[$n]);
+    delete(@outr[$n]); delete(@outn[$n]); delete(@outt[$n]); delete(@outm[$n]); delete(@outw[$n]); delete(@wk[$n]);
+    delete(@wkw[$n]);
   }
 }
 // Who woke a sleeping create's thread, and in which window.
-tracepoint:sched:sched_waking / @out[args.pid] / { @wk[args.pid] = comm; @wkw[args.pid] = @win[tid]; }
+tracepoint:sched:sched_waking / @out[args.pid] /
+{
+  $kw = 0;
+  if (strncmp(comm, "kworker/", 8) == 0) { $kw = 1; } else if (strncmp(comm, "ksoftirqd/", 10) == 0) { $kw = 2; }
+  else if (strncmp(comm, "migration/", 10) == 0) { $kw = 3; } else if (strncmp(comm, "swapper/", 8) == 0) { $kw = 4; }
+  else if (strncmp(comm, "irq/", 4) == 0) { $kw = 5; } else if (strncmp(comm, "rcuc/", 5) == 0) { $kw = 6; }
+  else if (strncmp(comm, "rcuop/", 6) == 0) { $kw = 7; } else if (strncmp(comm, "cpuhp/", 6) == 0) { $kw = 8; }
+  if ($kw) { @wk[args.pid] = @kname[$kw]; } else { @wk[args.pid] = comm; }
+  @wkw[args.pid] = @win[tid];
+}
 
 END
 {
-  clear(@t0); clear(@wname); clear(@state); clear(@vec); clear(@lockname); clear(@kname); clear(@win); clear(@learn); clear(@pwc); clear(@pww);
-  clear(@kill_t); clear(@kills_on); clear(@fname); clear(@release_t); clear(@releases_on); clear(@free_t);
-  clear(@memcg_t); clear(@drain_t); clear(@lru_t); clear(@cpu_t); clear(@io_t); clear(@cpuset_t);
-  clear(@wqn); clear(@wf); clear(@works_on); clear(@ws); clear(@wq); clear(@si); clear(@sv);
-  clear(@cgm); clear(@tgr); clear(@cb); clear(@cf); clear(@cl); clear(@hc); clear(@hw);
-  clear(@out); clear(@outcpu); clear(@outst); clear(@outwin); clear(@outk); clear(@outr); clear(@outw); clear(@wk); clear(@wkw);
+  clear(@t0); clear(@wname); clear(@state); clear(@vec); clear(@lockname); clear(@kname); clear(@pname); clear(@win);
+  clear(@learn); clear(@pwc); clear(@pww); clear(@kill_t); clear(@kills_on); clear(@fname); clear(@release_t);
+  clear(@releases_on); clear(@free_t); clear(@notify_t); clear(@notifies_on); clear(@mnt_t); clear(@mounts_on);
+  clear(@net_t); clear(@netns_on); clear(@memcg_t); clear(@drain_t); clear(@lru_t); clear(@cpu_t); clear(@io_t);
+  clear(@cpuset_t); clear(@wqn); clear(@wf); clear(@works_on); clear(@ws); clear(@wq); clear(@si); clear(@sv);
+  clear(@cgm); clear(@tgr); clear(@cb); clear(@cf); clear(@cl); clear(@hn); clear(@hw); clear(@out); clear(@outcpu);
+  clear(@outst); clear(@outwin); clear(@outk); clear(@outr); clear(@outn); clear(@outt); clear(@outm); clear(@outw);
+  clear(@wk); clear(@wkw); clear(@mname); clear(@reparent_t); clear(@sbm); clear(@sbt); clear(@lrum);
 }

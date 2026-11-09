@@ -73,7 +73,7 @@ impl std::fmt::Display for Waited {
 /// Waits for `fact`, giving the CPU up between looks rather than sleeping a picked period, for at most `wait`'s
 /// deadline (none while it measures: the fact alone); says how many looks it took, and tells `wait`, and the census
 /// where the probe runs the suites, how long. Refused, naming `what` and the patience, once the deadline has passed
-/// without the fact; a wait that ran out is no sample (Karn's point).
+/// without the fact; a wait that ran out is no sample (Karn's point), but the census is told it ran out at its bound.
 pub fn until(wait: &Patience, what: &str, mut fact: impl FnMut() -> bool) -> Result<u64, Waited> {
     census();
     let began = Instant::now();
@@ -86,10 +86,14 @@ pub fn until(wait: &Patience, what: &str, mut fact: impl FnMut() -> bool) -> Res
             wait.answered(began.elapsed());
             return Ok(looks);
         }
-        if deadline.is_some_and(|d| Instant::now() >= d) {
+        if let Some(after) = patience
+            && deadline.is_some_and(|d| Instant::now() >= d)
+        {
+            // No sample (Karn's point), but the census is told the fact took longer than its bound.
+            wait.ran_out(after);
             return Err(Waited {
                 what: what.to_owned(),
-                patience: patience.unwrap_or(Duration::MAX),
+                patience: after,
             });
         }
         std::thread::yield_now();
@@ -129,15 +133,16 @@ fn census() {
     }
 }
 
-/// One answer, appended as the census keeps it; past the bound, one line saying the census is full, then nothing.
-fn record(name: &'static str, took: Duration) {
+/// One answer or run-out, appended as the census keeps it; past the bound, one line saying the census is full, then
+/// nothing.
+fn record(name: &'static str, sample: hex_core::patience::Sample) {
     let Some(Some(out)) = OUT.get() else {
         return;
     };
     let n = LINES.fetch_add(1, Ordering::Relaxed);
     let max = MAX.load(Ordering::Relaxed);
     let line = if n < max {
-        hex_core::patience::census_line(name, took)
+        hex_core::patience::census_line(name, sample)
     } else if n == max {
         hex_core::patience::census_full_line(max)
     } else {

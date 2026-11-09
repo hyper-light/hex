@@ -10,7 +10,6 @@ use std::fs::File;
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
 
 use hex_api::Refusal;
 
@@ -55,15 +54,16 @@ pub fn install_from_env() -> Result<bool, Refusal> {
     Ok(hex_core::patience::census(record))
 }
 
-/// One answer, appended as `name nanos`; past the bound, one line saying the census is full, then nothing.
-fn record(name: &'static str, took: Duration) {
+/// One answer, appended as `name nanos`, or a run-out, `name >nanos`; past the bound, one line saying the census is
+/// full, then nothing.
+fn record(name: &'static str, sample: hex_core::patience::Sample) {
     let Some(out) = OUT.get() else {
         return;
     };
     let n = LINES.fetch_add(1, Ordering::Relaxed);
     let max = MAX.load(Ordering::Relaxed);
     let line = if n < max {
-        hex_core::patience::census_line(name, took)
+        hex_core::patience::census_line(name, sample)
     } else if n == max {
         hex_core::patience::census_full_line(max)
     } else {

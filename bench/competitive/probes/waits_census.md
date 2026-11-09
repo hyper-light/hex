@@ -140,3 +140,46 @@ the host shared). Its maxima, ms (n of the arm's max in brackets where it matter
 - **Convergence** (the lead, 2026-11-08): the census stops when a whole run sets no new max for any wait; each row
   says the run it converged at. Run 3 set a new max for most rows (run 1's were armed), so none has converged yet:
   the next run follows at these seeds' tree.
+
+**Run 4** (2026-11-09T16:18Z, adacachy2, the record host in fedora's place: AMD Ryzen 9 9950X3D2, 32 CPUs, Linux
+7.3.3-1-cachyos; `waits-census-20261109T161828Z`; hex 7f4ae81d68cc7fe8 and seam_oci 7ae5e851836f98d6 built at 50851ad9;
+four arms on CPUs 4-15, every wait in the node's arms unarmed, and the suites arm beside them on CPUs 16-31, 79 loops;
+load 18.4 at start, 9.8 at end; unit hex-lead-census-20261109T161736Z). The release arms, ms (n where under 1,000):
+
+| row | tmpfs | disk | owner | release seed |
+| --- | ---: | ---: | ---: | ---: |
+| `client.answer.create` | 43.655 | 41.745 | 17.094 | 43.655 |
+| `client.answer.delete` | 20.180 | 35.715 | 18.188 | 35.715 |
+| `client.answer.exec` | 16.286 | 17.331 | 17.237 | 17.331 |
+| `client.answer.hello` | 0.483 | 1.177 | (n 1) | 1.177 |
+| `client.answer.inspect` | 10.914 | 7.297 | - | 10.914 |
+| `client.answer.list` | 386.711 | 294.351 | - | 386.711 |
+| `client.answer.netns` | 0.715 | 0.306 | (n 4) | 0.715 |
+| `client.answer.signal` | 0.583 | 0.058 | - | 0.583 |
+| `client.answer.start` | 7.927 | 2.056 | 11.264 | 11.264 |
+| `client.answer.usage` | 0.757 | 0.119 | - | 0.757 |
+| `netcheck.answers` | - | - | 0.454 | 0.454 |
+| `netns.make` | 57.557 | 73.884 | (n 98) | (tests: debug) |
+| `node.emptying` | 19.771 | 15.725 | (n 875) | 19.771 |
+| `node.listing` (an entry) | 0.001 | 0.007 | (n 65) | 0.007 |
+| `node.turns` | 43.627 | 41.704 | 18.168 | 43.627 |
+| `seeds.hang` | 29.565 | 17.953 | 18.003 | 29.565 |
+| `store.turns` | 3.136 | 1.660 | 1.477 | 3.136 |
+
+- Seeded at this run: the release build's waits, each the largest max of the release arms with a row's 1,000 samples,
+  at the census's nanoseconds (the table's 3 decimals hide some: `node.listing`'s 0.007 is 7,043 ns an entry). They
+  replace runs 1 and 3's, fedora's. Still MEASURING, short of 1,000: `seeds.wait` (40 to 69 an arm; it shares the
+  clone's record by design), `serve.reads` (921 and 931), `netcheck.settles` (4).
+- **Its debug rows seed nothing.** The suites arm's waits were armed (the tests' census disarms none), so a wait that
+  ran out was no sample and each row's max is cut at its bound: `node_socket`'s create answers ran out at 440 ms,
+  twice run 3's debug `client.answer.create`, in 27 of 79 loops, while the suites arm's row has 41.525 ms at most (of
+  6,122). Seeded from it, that patience would fall to 83 ms. The debug seeds stay run 3's (fedora's) until run 5, in
+  which a wait that runs out for a slow answer tells the census (`Patience::ran_out`, a line `name >nanos`) and a
+  row's record is never under the bound it ran out at (`waits_census.py`'s `seed`), so a censored row's patience
+  doubles each run until nothing runs out. A seed past its hang bound tells it nothing: a hung seed says nothing of an
+  answer's time.
+- **The suites**: 79 loops, every one exit 101. In every loop: `oci_reuse`'s 3 GB burn, waited on with the program-end
+  record (a1be8761 gives each program its own fact's wait); `netcheck`'s measuring-dump test, holding the rule before
+  d6bfb3f0 (e316cbf6); and `oci_box`'s wait for "the ended orphan to be reaped", 78.26 ms, the program-end record for
+  a fact no program's end is. In 78: the shim's bystander, holding the tests' own pipes (7d8bdb1d). In 27:
+  `node_socket`'s contract test, "none came in 440 ms".

@@ -101,6 +101,10 @@ impl Turns {
                 Some(deadline) => {
                     let left = deadline.saturating_duration_since(Instant::now());
                     if left.is_zero() {
+                        // No sample (Karn's point), but the census is told the hold outlasted the bound.
+                        if let Some(after) = patience {
+                            held.patience.ran_out(after);
+                        }
                         return Err(Refusal::Os {
                             op: self.op,
                             why: format!(

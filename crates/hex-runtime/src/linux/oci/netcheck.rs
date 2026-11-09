@@ -77,10 +77,10 @@ const READ_BYTES: usize = 8 << 10;
 /// settle this process sees.
 static SETTLES: Patience = Patience::measuring("netcheck.settles");
 /// How long one read of a dump's answer takes, learned in this process ([`Patience`]). Seeded in a release build from
-/// the `netcheck.answers` row of `bench/competitive/probes/waits_census.md` run 3 (its owner arm, 2.093 ms of
-/// 160,192); a debug build has no record of its own yet (the census's debug arm keeps no namespaces): measuring.
+/// the `netcheck.answers` row of `bench/competitive/probes/waits_census.md` run 4 (adacachy2, its owner arm, 0.454 ms
+/// of 160,192); a debug build has no record of its own yet (the census's debug arm keeps no namespaces): measuring.
 static ANSWERS: Patience =
-    Patience::by_profile("netcheck.answers", Duration::from_nanos(2_093_150), None);
+    Patience::by_profile("netcheck.answers", Duration::from_nanos(454_408), None);
 
 /// `bound` as `SO_RCVTIMEO` takes it: in whole microseconds, a `struct timeval`, rounded up, since one of zero
 /// waits for ever (socket(7)); `None`, no bound, waits for ever.
@@ -266,7 +266,9 @@ fn settled(scratch: &mut Scratch) -> Result<Vec<Vec<Vec<u8>>>, OciError> {
         if let Some(bound) = bound
             && left.is_some_and(|l| l.is_zero())
         {
-            // No sample (Karn's point): the namespace is refused, and the checker reads another.
+            // No sample (Karn's point): the namespace is refused, and the checker reads another. The census is told the
+            // settle took longer than its bound.
+            SETTLES.ran_out(bound);
             return Err(OciError::Broken(format!(
                 "a fresh network namespace's loopback IPv6 address was still tentative after {bound:?}, \
                  twice the slowest settle recorded"
@@ -751,7 +753,13 @@ fn ask(
         let asked = Instant::now();
         let got = match rustix::net::recv(fd, &mut scratch.read, RecvFlags::empty()) {
             Ok((got, _)) => got,
-            Err(rustix::io::Errno::AGAIN) => return Err(Refused::Unreadable),
+            // The read's bound passed with no answer: no sample (Karn's point), but the census is told.
+            Err(rustix::io::Errno::AGAIN) => {
+                if let Some(after) = answers.deadline() {
+                    answers.ran_out(after);
+                }
+                return Err(Refused::Unreadable);
+            }
             Err(_) => return Err(Refused::Unreadable),
         };
         answers.answered(asked.elapsed());
