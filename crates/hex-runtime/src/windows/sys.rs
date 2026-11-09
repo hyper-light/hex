@@ -53,6 +53,45 @@ pub fn active_processors() -> u32 {
     n.max(1)
 }
 
+/// The machine's physical memory and how much of it is available, in bytes (`GlobalMemoryStatusEx`):
+/// the node's facts (`hex-node`'s `facts`).
+pub fn memory() -> io::Result<(u64, u64)> {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut m: MEMORYSTATUSEX = zeroed_struct();
+    m.dwLength = u32::try_from(size_of::<MEMORYSTATUSEX>())
+        .map_err(|_| io::Error::other("MEMORYSTATUSEX's size past u32"))?;
+    // SAFETY: `m` is a MEMORYSTATUSEX whose dwLength is its size, as the call requires; it outlives the
+    // call, which only writes into it.
+    let ok = unsafe { GlobalMemoryStatusEx(&raw mut m) };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((m.ullTotalPhys, m.ullAvailPhys))
+}
+
+/// The size of the volume `dir` is on and the bytes this user may still write there
+/// (`GetDiskFreeSpaceExW`): the node's facts.
+pub fn disk_space(dir: &std::path::Path) -> io::Result<(u64, u64)> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
+    let (mut caller, mut total, mut free) = (0u64, 0u64, 0u64);
+    // SAFETY: `wide` is a NUL-terminated UTF-16 path that outlives the call; the three outputs are u64s
+    // that outlive it, each written once.
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &raw mut caller,
+            &raw mut total,
+            &raw mut free,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((total, caller))
+}
+
 /// The users folder (`FOLDERID_UserProfiles`, `%SystemDrive%\\Users` unless moved), read from its known
 /// folder as Windows resolves it, never a literal: the node guest's default share
 /// (docs/design/shards-guest.md §4a).

@@ -27,7 +27,7 @@
     clippy::cast_sign_loss
 )]
 
-use hex_sim::index::Sample;
+use hex_sim::index::Pick;
 use hex_sim::proximity::{CLASSES, Homes, Policy, PolicyReport, Study, StudyConfig};
 use hex_sim::replay::{Limits, parse};
 use hex_sim::wan::{Access, Accuracy};
@@ -161,7 +161,7 @@ fn main() {
                 let config = StudyConfig {
                     access,
                     homes,
-                    sample: Sample::default(),
+                    pick: Pick::default(),
                     seed,
                 };
                 let study = Study::generate(&config, recorded).unwrap();

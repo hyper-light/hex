@@ -22,8 +22,10 @@ use hex_health::probe::DiskProbe;
 use hex_health::{HealthError, Level};
 
 use crate::danger::{self, Isolation, Refusal, STRONGER, Tripped};
-use crate::index::{FitIndex, Sample as Placement, Verdict};
-use crate::model::{Class, Classes, Demand, Kind, NodeId, NodeSpec, Overheads, Resources};
+use crate::index::{FitIndex, Pick as Placement, Verdict};
+use crate::model::{
+    Class, Classes, Demand, Kind, NodeId, NodeSpec, Overheads, Resources, WorkloadId,
+};
 use crate::rng::Rng;
 
 pub const MS: u64 = 1_000_000;
@@ -559,12 +561,14 @@ fn g2_node(rng: &mut Rng) -> (Classes, Resources) {
             cpu_milli: 48_000,
             mem_bytes: 384 * GIB,
             gpus: 0,
+            disk_bytes: 0,
         }
     } else {
         Resources {
             cpu_milli: rng.range(4, 48).saturating_mul(1000),
             mem_bytes: rng.range(8, 384).saturating_mul(GIB),
             gpus: u32::try_from(rng.range(0, 2)).unwrap_or(0),
+            disk_bytes: 0,
         }
     };
     (classes, capacity)
@@ -583,9 +587,11 @@ fn g2_workload(rng: &mut Rng, overheads: &Overheads) -> Result<Demand, FaultErro
             cpu_milli: rng.range(1_000, 24_000),
             mem_bytes: with_overhead(overheads, class, rng.range(1, 192).saturating_mul(GIB))?,
             gpus: 0,
+            disk_bytes: 0,
         },
         kind: Kind::Plain,
         class,
+        ask: Default::default(),
     })
 }
 
@@ -622,6 +628,7 @@ pub fn dangerous(seed: u64, kind: Class) -> Result<Dangerous, FaultError> {
         cpu_milli: rng.range(250, 8_000),
         mem_bytes: rng.range(128, 16_384).saturating_mul(MIB),
         gpus: u32::from(kind == Class::Oci && rng.chance(150)),
+        disk_bytes: 0,
     };
     let mut specs = Vec::new();
     for id in 0..n {
@@ -641,10 +648,14 @@ pub fn dangerous(seed: u64, kind: Class) -> Result<Dangerous, FaultError> {
             capacity,
             background_milli: 0,
             classes,
+            platform: Default::default(),
+            virt: Default::default(),
+            devices: crate::model::unnamed_gpus(capacity.gpus),
         });
     }
     let mut index = FitIndex::new(&specs).map_err(FaultError::Sim)?;
     let tripped = Tripped {
+        id: WorkloadId(0),
         node: NodeId(0),
         need,
         kind: Kind::Plain,
@@ -657,14 +668,19 @@ pub fn dangerous(seed: u64, kind: Class) -> Result<Dangerous, FaultError> {
         },
         kind: Kind::Plain,
         class: kind,
+        ask: Default::default(),
     };
-    index.take(NodeId(0), &running).map_err(FaultError::Sim)?;
+    index
+        .take(NodeId(0), tripped.id, &running)
+        .map_err(FaultError::Sim)?;
     // A seeded load: up to 4 workloads a node, each placed through the fast path where it fits.
-    let sample = Placement::default();
-    for _ in 0..n.saturating_mul(4) {
+    let pick = Placement::default();
+    for k in 0..n.saturating_mul(4) {
         let filler = g2_workload(&mut rng, &overheads)?;
-        if let Some(key) = index.sampled_fit(&filler, &sample).best {
-            index.take(key.node, &filler).map_err(FaultError::Sim)?;
+        if let Some(key) = index.fit(&filler, &pick).best {
+            index
+                .take(key.node, WorkloadId(k.saturating_add(1)), &filler)
+                .map_err(FaultError::Sim)?;
         }
     }
     let signal = match rng.range(0, 2) {
@@ -675,8 +691,10 @@ pub fn dangerous(seed: u64, kind: Class) -> Result<Dangerous, FaultError> {
     let onset = rng.range(S, 100 * S);
     // The oracle's cell: as it stands once the workload is stopped.
     let mut stopped = index.clone();
-    stopped.give(NodeId(0), &running).map_err(FaultError::Sim)?;
-    let isolation = danger::isolate(&tripped, signal, &mut index, &overheads, &sample)
+    stopped
+        .give(NodeId(0), tripped.id, &running)
+        .map_err(FaultError::Sim)?;
+    let isolation = danger::isolate(&tripped, signal, &mut index, &overheads, &pick)
         .map_err(FaultError::Sim)?;
     let first = if kind == Class::Oci {
         let mut first = None;
@@ -703,6 +721,7 @@ pub fn dangerous(seed: u64, kind: Class) -> Result<Dangerous, FaultError> {
                 },
                 kind: Kind::Plain,
                 class: to,
+                ask: Default::default(),
             };
             from == kind
                 && first == Some(to)
@@ -736,6 +755,7 @@ pub fn dangerous(seed: u64, kind: Class) -> Result<Dangerous, FaultError> {
             },
             kind: Kind::Plain,
             class: to,
+            ask: Default::default(),
         };
         on_node |= stopped.verdict(NodeId(0), &at).map_err(FaultError::Sim)? == Verdict::Admits;
     }
@@ -776,26 +796,26 @@ pub struct Correlated {
 fn without(
     index: &FitIndex,
     node: NodeId,
-    work: &[Demand],
-    sample: &Placement,
+    work: &[(WorkloadId, Demand)],
+    pick: &Placement,
 ) -> Result<(FitIndex, Vec<Option<NodeId>>, u64), FaultError> {
     let mut rest = index.clone();
-    for w in work {
-        rest.give(node, w).map_err(FaultError::Sim)?;
+    for (id, w) in work {
+        rest.give(node, *id, w).map_err(FaultError::Sim)?;
     }
     fence(&mut rest, node)?;
     let mut to = Vec::with_capacity(work.len());
     let mut stranded: u64 = 0;
-    for w in work {
+    for (id, w) in work {
         if !rest.admitted_anywhere(w) {
             stranded = stranded.saturating_add(1);
             to.push(None);
             continue;
         }
-        let at = rest.sampled_fit(w, sample).best.map(|k| k.node);
+        let at = rest.fit(w, pick).best.map(|k| k.node);
         match at {
             Some(at) => {
-                rest.take(at, w).map_err(FaultError::Sim)?;
+                rest.take(at, *id, w).map_err(FaultError::Sim)?;
             }
             None => stranded = stranded.saturating_add(1),
         }
@@ -812,11 +832,15 @@ fn fence(index: &mut FitIndex, node: NodeId) -> Result<(), FaultError> {
             cpu_milli: k.cpu_milli,
             mem_bytes: k.mem_bytes,
             gpus: k.gpus,
+            disk_bytes: 0,
         },
         kind: Kind::Plain,
         class: Class::Oci,
+        ask: Default::default(),
     };
-    index.take(node, &all).map_err(FaultError::Sim)?;
+    index
+        .take(node, WorkloadId(u64::MAX), &all)
+        .map_err(FaultError::Sim)?;
     Ok(())
 }
 
@@ -842,22 +866,25 @@ pub fn correlated(seed: u64, mutant: Mutant) -> Result<Correlated, FaultError> {
             capacity,
             background_milli: 0,
             classes,
+            platform: Default::default(),
+            virt: Default::default(),
+            devices: crate::model::unnamed_gpus(capacity.gpus),
         });
     }
     let mut index = FitIndex::new(&specs).map_err(FaultError::Sim)?;
-    let mut work: Vec<Vec<Demand>> = vec![Vec::new(); specs.len()];
-    let sample = Placement::default();
+    let mut work: Vec<Vec<(WorkloadId, Demand)>> = vec![Vec::new(); specs.len()];
+    let pick = Placement::default();
     let asked = nodes.saturating_mul(rng.range(1, 6));
     let mut out = Correlated {
         nodes,
         ..Correlated::default()
     };
-    for _ in 0..asked {
+    for id in (0..asked).map(WorkloadId) {
         let w = g2_workload(&mut rng, &overheads)?;
-        if let Some(k) = index.sampled_fit(&w, &sample).best {
-            index.take(k.node, &w).map_err(FaultError::Sim)?;
+        if let Some(k) = index.fit(&w, &pick).best {
+            index.take(k.node, id, &w).map_err(FaultError::Sim)?;
             if let Some(on) = usize::try_from(k.node.0).ok().and_then(|i| work.get_mut(i)) {
-                on.push(w);
+                on.push((id, w));
                 out.workloads = out.workloads.saturating_add(1);
             }
         }
@@ -886,7 +913,7 @@ pub fn correlated(seed: u64, mutant: Mutant) -> Result<Correlated, FaultError> {
                     FaultError::Sim(crate::SimError::Config("a node id past usize"))
                 })?;
                 let on = work.get(i).cloned().unwrap_or_default();
-                let (rest, to, stranded) = without(&index, node, &on, &sample)?;
+                let (rest, to, stranded) = without(&index, node, &on, &pick)?;
                 let re_placeable = stranded == 0 || mutant == Mutant::NoReplacementCheck;
                 if ejector.eject(c.node, at, re_placeable)?.is_err() {
                     out.refused = out.refused.saturating_add(1);

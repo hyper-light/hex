@@ -47,6 +47,7 @@ fn four_tenants() -> Day {
             cpu_milli: 16_000,
             mem_bytes: 64 * GIB,
             gpus: 0,
+            disk_bytes: 0,
         },
         tenants: vec![
             tenant((1, 1), (1, 2), 600_000),

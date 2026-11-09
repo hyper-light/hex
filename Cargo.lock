@@ -335,6 +335,7 @@ dependencies = [
  "hex-core",
  "hex-health",
  "hex-runtime",
+ "hex-sim",
  "hex-testkit",
  "rustix",
  "serde_json",

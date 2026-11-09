@@ -150,9 +150,13 @@ fn node(cpu: u64) -> NodeSpec {
             cpu_milli: cpu,
             mem_bytes: 100,
             gpus: 0,
+            disk_bytes: 0,
         },
         background_milli: 0,
         classes: Classes::ALL,
+        platform: Default::default(),
+        virt: Default::default(),
+        devices: Vec::new(),
     }
 }
 
@@ -163,6 +167,7 @@ fn work(id: u64, cpu: u64, band: u8, group: Option<u32>) -> WorkloadSpec {
             cpu_milli: cpu,
             mem_bytes: 1,
             gpus: 0,
+            disk_bytes: 0,
         },
         kind: Kind::Plain,
         class: Class::Oci,
@@ -173,6 +178,7 @@ fn work(id: u64, cpu: u64, band: u8, group: Option<u32>) -> WorkloadSpec {
             group: group.map(GroupId),
             ..Tenancy::default()
         },
+        ask: Default::default(),
     }
 }
 
@@ -184,7 +190,7 @@ fn run_of(store: Store, n: usize, groups: Vec<Group>) -> Run {
         acked: vec![true; n],
         refused: vec![false; n],
         ran: vec![None; n],
-        sample: Default::default(),
+        pick: Default::default(),
         policy: Default::default(),
         owners: vec![Owner::default()],
         gangs: Default::default(),

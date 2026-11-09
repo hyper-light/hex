@@ -261,7 +261,7 @@ pub fn choose_victims(
                 );
             }
             lost.insert(p.owner, lost_now);
-            view.give(node, &p.demand)?;
+            view.give(node, p.id, &p.demand)?;
             taken.push(p);
             if view.verdict(node, &demand)? == Verdict::Admits {
                 fits = true;
@@ -269,7 +269,7 @@ pub fn choose_victims(
             }
         }
         for p in taken.iter().rev() {
-            view.take(node, &p.demand)?;
+            view.take(node, p.id, &p.demand)?;
         }
         if fits && best.as_ref().is_none_or(|b| taken.len() < b.victims.len()) {
             best = Some(Preemption {
@@ -454,9 +454,13 @@ mod tests {
                 cpu_milli: cpu,
                 mem_bytes: mem,
                 gpus: 0,
+                disk_bytes: 0,
             },
             background_milli: 0,
             classes: crate::model::Classes::ALL,
+            platform: Default::default(),
+            virt: Default::default(),
+            devices: Vec::new(),
         }
     }
 
@@ -471,6 +475,7 @@ mod tests {
                 cpu_milli: 1,
                 mem_bytes: 1,
                 gpus: 0,
+                disk_bytes: 0,
             },
             kind: crate::model::Kind::Plain,
             class: crate::model::Class::Oci,
@@ -480,6 +485,7 @@ mod tests {
                 owner: OwnerId(owner),
                 ..crate::model::Tenancy::default()
             },
+            ask: Default::default(),
         };
         let cluster = Cluster {
             nodes: vec![node(10, 10)],
@@ -487,6 +493,7 @@ mod tests {
             owners: vec![crate::model::Owner::default(); 2],
             groups: Vec::new(),
             overheads: crate::model::Overheads::default(),
+            models: Vec::new(),
         };
         let ran = [
             Some(Ran {
@@ -520,6 +527,7 @@ mod tests {
                 cpu_milli: 3_000,
                 mem_bytes: 1,
                 gpus: 0,
+                disk_bytes: 0,
             },
         )
         .unwrap();
@@ -529,6 +537,7 @@ mod tests {
                 cpu_milli: 1_000,
                 mem_bytes: 40,
                 gpus: 0,
+                disk_bytes: 0,
             },
         )
         .unwrap();
@@ -538,6 +547,7 @@ mod tests {
                 cpu_milli: 6_000,
                 mem_bytes: 1,
                 gpus: 0,
+                disk_bytes: 0,
             },
         )
         .unwrap();
@@ -556,6 +566,7 @@ mod tests {
                 cpu_milli: 1_000,
                 mem_bytes: 40,
                 gpus: 0,
+                disk_bytes: 0,
             },
         )
         .unwrap();
@@ -566,7 +577,8 @@ mod tests {
                 &Resources {
                     cpu_milli: 1,
                     mem_bytes: 0,
-                    gpus: 0
+                    gpus: 0,
+                    disk_bytes: 0,
                 }
             )
             .is_err()

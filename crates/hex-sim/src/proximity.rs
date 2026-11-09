@@ -17,7 +17,7 @@
 //! are 30-85% of production requests' latency (its [34]); round trips are drawn log-normal through
 //! that p50 and p99. Homes sit in a region drawn uniformly over the regions some node is in.
 //!
-//! **Policies**, each over the fast path's own sample ([`FitIndex::sampled_fit`]'s window and its
+//! **Policies**, each over the fast path's own sample ([`FitIndex::fit`]'s window and its
 //! admitting nodes, so they see the same candidates):
 //! - [`Policy::Blind`]: the fast path's best fit, proximity ignored.
 //! - [`Policy::Proximity`]: the least RTT to the workload's home that hyper-swim's coordinates
@@ -40,8 +40,10 @@ use std::collections::{BinaryHeap, VecDeque};
 use std::time::Duration;
 
 use crate::error::SimError;
-use crate::index::{FitIndex, Key, Sample, Verdict};
-use crate::model::{Class, Cluster, Demand, Kind, NodeId, NodeSpec, OwnerId, Resources, Time};
+use crate::index::{FitIndex, Key, Pick, Verdict};
+use crate::model::{
+    Class, Cluster, Demand, Kind, NodeId, NodeSpec, OwnerId, Resources, Time, WorkloadId,
+};
 use crate::rng::Rng;
 use crate::trace::{Latencies, Quantiles, TraceHash};
 use crate::wan::{Access, Coordinates, INPUT_MARGIN, REGIONS, Wan, WanConfig, node_id};
@@ -80,7 +82,7 @@ pub enum Homes {
 pub struct StudyConfig {
     pub access: Access,
     pub homes: Homes,
-    pub sample: Sample,
+    pub pick: Pick,
     pub seed: u64,
 }
 
@@ -192,7 +194,7 @@ impl Study {
         for (at, row) in recorded.nodes.iter().enumerate() {
             nodes.push(NodeSpec {
                 id: node_id(at)?,
-                ..*row
+                ..row.clone()
             });
         }
         // Each region's nodes, to draw a home in a region.
@@ -313,7 +315,11 @@ impl Study {
                     break;
                 };
                 queue.pop_front();
-                index.take(node, &demand)?;
+                index.take(
+                    node,
+                    WorkloadId(u64::try_from(job).unwrap_or(u64::MAX)),
+                    &demand,
+                )?;
                 let rtt = self.wan.rtt_ns(node, spec.home)?;
                 let ends_at = now
                     .checked_add(run_ns(spec.round_trips, spec.compute, rtt)?)
@@ -373,11 +379,15 @@ impl Study {
     ) -> Result<Time, SimError> {
         let Reverse((at, job, node)) = ends.pop().ok_or(SimError::Config("no end to take"))?;
         let spec = self.jobs.get(job).ok_or(SimError::Config("jobs"))?;
-        index.give(node, &demand(spec))?;
+        index.give(
+            node,
+            WorkloadId(u64::try_from(job).unwrap_or(u64::MAX)),
+            &demand(spec),
+        )?;
         Ok(at)
     }
 
-    /// The node `policy` places `demand` on now, or none while no sampled node admits it.
+    /// The node `policy` places `demand` on now, or none while no node admits it.
     fn choose(
         &self,
         policy: Policy,
@@ -386,8 +396,8 @@ impl Study {
         home: NodeId,
         report: &mut PolicyReport,
     ) -> Result<Option<NodeId>, SimError> {
-        let sampled = index.sampled_fit(demand, &self.config.sample);
-        let Some(best) = sampled.best else {
+        let fit = index.fit(demand, &self.config.pick);
+        let Some(best) = fit.best else {
             return Ok(None);
         };
         if policy == Policy::Blind {
@@ -396,12 +406,7 @@ impl Study {
         let n = index.len();
         // (score, key): the least wins.
         let mut chosen: Option<(f64, Key)> = None;
-        for offset in 0..sampled.span {
-            let at = sampled
-                .start
-                .checked_add(offset)
-                .and_then(|x| x.checked_rem(n))
-                .ok_or(SimError::Config("window"))?;
+        for at in 0..n {
             let node = node_id(at)?;
             if index.verdict(node, demand)? != Verdict::Admits {
                 continue;
@@ -451,6 +456,7 @@ fn demand(job: &Job) -> Demand {
         need: job.need,
         kind: job.kind,
         class: job.class,
+        ask: Default::default(),
     }
 }
 
@@ -520,7 +526,7 @@ mod tests {
         StudyConfig {
             access: Access::Bound,
             homes: Homes::Uniform,
-            sample: Sample::default(),
+            pick: Pick::default(),
             seed,
         }
     }
