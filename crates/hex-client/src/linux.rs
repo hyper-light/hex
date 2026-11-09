@@ -816,6 +816,122 @@ mod tests {
         wire::read_request(&msg, wire::MAX_MESSAGE).unwrap()
     }
 
+    /// A stand-in agent's answer to a hello: version 4, a process class, room for `in_flight` calls at once.
+    fn hello(conn: &OwnedFd, in_flight: usize) {
+        let (h, request) = next_request(conn);
+        assert_eq!(request, Request::Hello);
+        let answer = Answer::Hello(wire::Hello {
+            version: wire::VERSION,
+            classes: vec![Class::Process],
+            limits: Limits {
+                connections: 1,
+                message_bytes: wire::MAX_MESSAGE,
+                in_flight,
+                programs: 1,
+            },
+            budgets: None,
+        });
+        let bytes = wire::answer(wire::FIRST, h.id, &answer, wire::MAX_MESSAGE).unwrap();
+        rustix::net::send(conn, &bytes, SendFlags::NOSIGNAL).unwrap();
+    }
+
+    /// Sends a stand-in agent's `answer` to request `id`.
+    fn answer(conn: &OwnedFd, id: u64, answer: &Answer) {
+        let bytes = wire::answer(wire::VERSION, id, answer, wire::MAX_MESSAGE).unwrap();
+        rustix::net::send(conn, &bytes, SendFlags::NOSIGNAL).unwrap();
+    }
+
+    /// The socket's per-call cost (goal 16; the lead, 2026-11-09): no thread reads the agent's socket but those waiting
+    /// on it, so an answer wakes the call it answers and no thread between hands it on. Do: connect to a stand-in agent
+    /// and delete a box. Expect: the call answered, and no thread of this process the client's reader.
+    #[test]
+    fn a_calls_answer_is_read_by_the_thread_waiting_for_it() {
+        let (_dir, path, listener) = agent_socket();
+        let agent = std::thread::spawn(move || {
+            let conn = rustix::net::accept_with(&listener, SocketFlags::CLOEXEC).unwrap();
+            hello(&conn, 1);
+            let (h, request) = next_request(&conn);
+            let Request::Call(Call::Delete(id)) = request else {
+                panic!("a delete, not {request:?}")
+            };
+            answer(&conn, h.id, &Answer::Refused(Refusal::NoSuchBox(id)));
+        });
+        let client = Client::connect(&path).unwrap();
+        let b = BoxId::new("b").unwrap();
+        assert_eq!(client.delete(&b), Err(Refusal::NoSuchBox(b.clone())));
+        let readers: Vec<String> = std::fs::read_dir("/proc/self/task")
+            .unwrap()
+            .filter_map(|t| std::fs::read_to_string(t.ok()?.path().join("comm")).ok())
+            .filter(|comm| comm.trim() == "hex-client")
+            .collect();
+        assert_eq!(readers, Vec::<String>::new(), "the client's reading thread");
+        agent.join().unwrap();
+    }
+
+    /// Many calls at once, answered last first: each gets its own answer, whichever thread read it, and the turn to read
+    /// passes from each call answered to one still waiting. Do: eight threads each delete a box of its own; the stand-in
+    /// agent reads all eight requests, then answers them in the reverse of their order. Expect: each refused naming its
+    /// own box.
+    #[test]
+    fn many_calls_answered_out_of_order_each_get_their_own() {
+        let (_dir, path, listener) = agent_socket();
+        let n = 8;
+        let agent = std::thread::spawn(move || {
+            let conn = rustix::net::accept_with(&listener, SocketFlags::CLOEXEC).unwrap();
+            hello(&conn, n);
+            let asked: Vec<(Header, Request)> = (0..n).map(|_| next_request(&conn)).collect();
+            for (h, request) in asked.into_iter().rev() {
+                let Request::Call(Call::Delete(id)) = request else {
+                    panic!("a delete, not {request:?}")
+                };
+                answer(&conn, h.id, &Answer::Refused(Refusal::NoSuchBox(id)));
+            }
+        });
+        let client = Client::connect(&path).unwrap();
+        std::thread::scope(|s| {
+            for i in 0..n {
+                let client = &client;
+                s.spawn(move || {
+                    let b = BoxId::new(&format!("b{i}")).unwrap();
+                    assert_eq!(client.delete(&b), Err(Refusal::NoSuchBox(b.clone())));
+                });
+            }
+        });
+        agent.join().unwrap();
+    }
+
+    /// A program's end comes to its `Proc` waiting for it with no call in flight: the wait reads it itself, there being
+    /// no other reader. Do: exec through a stand-in agent that answers it started and then sends its end. Expect: the
+    /// `Proc`'s wait returns that exit.
+    #[test]
+    fn a_programs_end_comes_to_its_wait_with_no_call_in_flight() {
+        let (_dir, path, listener) = agent_socket();
+        let agent = std::thread::spawn(move || {
+            let conn = rustix::net::accept_with(&listener, SocketFlags::CLOEXEC).unwrap();
+            hello(&conn, 1);
+            let (h, request) = next_request(&conn);
+            assert!(
+                matches!(request, Request::Call(Call::Exec { .. })),
+                "{request:?}"
+            );
+            answer(&conn, h.id, &Answer::Started { pid: 4321 });
+            answer(&conn, h.id, &Answer::Exited(Exit::Code(3)));
+            conn
+        });
+        let client = Client::connect(&path).unwrap();
+        let b = BoxId::new("b").unwrap();
+        let mut proc = client
+            .exec(&b, Program::of(&["/bin/true"]), Stdio::null())
+            .unwrap();
+        assert_eq!(proc.pid(), 4321);
+        assert_eq!(
+            proc.wait_for(Duration::from_secs(60)),
+            Ok(Some(Exit::Code(3)))
+        );
+        drop(proc);
+        drop(agent.join().unwrap());
+    }
+
     /// HEX-SOCK-4: an agent that refuses a connection and closes it with the client's hello unread
     /// leaves the client a reset, reported once and before the refusal it sent; the client still reads
     /// the refusal, so connect fails with it, typed, rather than with the reset.
