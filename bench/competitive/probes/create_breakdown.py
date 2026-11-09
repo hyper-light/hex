@@ -868,7 +868,20 @@ def summarize(run):
                   f"{eb.ms3(ratio(sum_p50, target))}x it. Take away the device program's load and attach, the root's "
                   f"mounts and pivot_root, and the cgroup's making, each whole, and {left:.3f} ms is left, "
                   f"{eb.ms3(ratio(left, target))}x the target.", ""]
-    elif whole and between["p50"] and libcrun["p50"]:
+    elif whole and between["p50"] and libcrun["p50"] and REQUEST in groups:
+        # The parked claim (decision 8): no seed and no shim on the path, nothing of either to take away. Each group's
+        # part p50s summed, against the create, and goal 5's target, a quarter of libcrun's create p50 in the same run.
+        create = between["p50"]
+        target = libcrun["p50"] / 4
+        s["levers"] = {"create_p50_ms": create, "libcrun_create_p50_ms": libcrun["p50"], "target_ms": target,
+                       "create_over_target": ratio(create, target),
+                       "groups_ms": {g: groups[g]["p50"] for g in groups_here}}
+        lines += [f"## Where a parked claim's create goes (pooled part p50s, against the creates between, p50 "
+                  f"{create:.3f} ms)", "", "| group | ms | share of create |", "|---|---|---|"]
+        lines += [f"| {g} | {groups[g]['p50']:.3f} | {100 * groups[g]['p50'] / create:.1f}% |" for g in groups_here]
+        lines += ["", f"Goal 5's target, a quarter of libcrun's create p50 ({libcrun['p50']:.3f} ms pooled), is "
+                  f"{target:.3f} ms: the create is {eb.ms3(ratio(create, target))}x it.", ""]
+    elif whole and between["p50"] and libcrun["p50"] and SHIM in groups:
         create = between["p50"]
         fsyncs = sum(parts[k]["p50"] for k in fsyncs_of(spec))
         shim = groups[SHIM]["p50"]
