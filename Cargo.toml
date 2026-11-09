@@ -22,6 +22,7 @@ hex-core = { path = "crates/hex-core", version = "0.1.0" }
 hex-runtime = { path = "crates/hex-runtime", version = "0.1.0" }
 hex-node = { path = "crates/hex-node", version = "0.1.0" }
 hex-client = { path = "crates/hex-client", version = "0.1.0" }
+hex-afunix = { path = "crates/hex-afunix", version = "0.1.0" }
 hex-testkit = { path = "crates/hex-testkit", version = "0.1.0" }
 hex-sim = { path = "crates/hex-sim", version = "0.1.0" }
 hex-health = { path = "crates/hex-health", version = "0.1.0" }
@@ -61,6 +62,7 @@ windows-sys = { version = "0.61.2", features = [
     "Wdk_System_SystemServices",
     "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Foundation",
+    "Win32_Networking_WinSock",
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",

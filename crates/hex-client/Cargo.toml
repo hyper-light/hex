@@ -20,6 +20,9 @@ rustix.workspace = true
 # A layer tarball's digest, its name in the guest's layer store (docs/design/shards-guest.md §4a).
 sha2.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+hex-afunix.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 
