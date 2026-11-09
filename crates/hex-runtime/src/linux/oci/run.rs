@@ -233,11 +233,12 @@ pub trait CloneInit {
     /// [`CloneInit::clone_init`] does, or the refusal, after which the parked init is gone and `req` unused.
     fn claim(&self, parked: Parked, req: &CloneReq<'_>) -> Result<(i32, OwnedFd), OciError>;
 
-    /// Whether this node's create seeds prune their mount namespace (goal 5 plan step 2): true on a root
-    /// node, so a pruned-eligible container takes the pruned root path (no `pivot_root`) and the rest go
-    /// through the shim, counted; false on a rootless node, whose seeds keep the agent's mount namespace
-    /// and build the root the classic way in the init, counted under [`ClassicReason::Rootless`].
-    fn prunes_root(&self) -> bool;
+    /// Why this node's create seeds keep the agent's mount namespace, or `None` where they prune it (goal 5 plan
+    /// step 2). A root node's prune, so a pruned-eligible container takes the pruned root path (no `pivot_root`)
+    /// and the rest go through the shim, counted. A rootless node's keep it ([`ClassicReason::Rootless`]), as do a
+    /// root node's built for the classic root ([`ClassicReason::Baseline`], goal 17's baseline arm): the init a seed
+    /// clones builds the root the classic way, counted under that reason.
+    fn unpruned(&self) -> Option<ClassicReason>;
 
     /// How this node makes a pruned create's mount namespace (decision 6's update): the seed's copy,
     /// empty, or from the rootfs's tree, chosen once ([`super::mntns::choose`]).
@@ -245,8 +246,8 @@ pub trait CloneInit {
 
     /// A container made on the classic root path rather than a pruned seed's, by its reason (a fixed set,
     /// so no high-cardinality label; CLAUDE.md §10): counted, so the node can tell how often a create
-    /// still pivots, and why. For every reason but [`ClassicReason::Rootless`] the create went through
-    /// the shim, a re-exec of the hex binary.
+    /// still pivots, and why. For every reason but [`ClassicReason::Rootless`] and [`ClassicReason::Baseline`],
+    /// whose creates a seed makes, the create went through the shim, a re-exec of the hex binary.
     fn classic(&self, reason: ClassicReason);
 }
 
@@ -276,14 +277,19 @@ pub enum ClassicReason {
     /// `SCM_RIGHTS` message ([`hex_core::seed::MAX_BINDS`]).
     Source,
     /// A rootless node: its seeds can't own a mount namespace without a user namespace of their own, so
-    /// they don't prune, and the init a seed clones builds the root the classic way. The one reason whose
-    /// creates don't go through the shim.
+    /// they don't prune, and the init a seed clones builds the root the classic way. Its creates don't go
+    /// through the shim.
     Rootless,
+    /// A root node built for the classic root by a test control (hex-node's `Node::with_classic_roots`, goal 17's
+    /// baseline arm, which the goal sets its create p50 and p99 against): its seeds keep the agent's mount
+    /// namespace, as a rootless node's do, and the init a seed clones builds the root the classic way. Its creates
+    /// don't go through the shim, and no production node's are counted here.
+    Baseline,
 }
 
 impl ClassicReason {
     /// The fixed count of reasons, for a per-reason counter.
-    pub const COUNT: usize = 7;
+    pub const COUNT: usize = 8;
 
     /// This reason's index, for a per-reason counter.
     pub fn index(self) -> usize {
@@ -295,6 +301,7 @@ impl ClassicReason {
             Self::NoMountNamespace => 4,
             Self::Source => 5,
             Self::Rootless => 6,
+            Self::Baseline => 7,
         }
     }
 }
@@ -1143,7 +1150,7 @@ impl Runtime {
                 &Command::spawn,
             );
         }
-        if seeds.prunes_root() {
+        if seeds.unpruned().is_none() {
             match self.pruned_create(making, spec, cgroup, seeds.mount_namespace()) {
                 Ok(mut pruned) => {
                     if let Some(pool) = dev_mounts {
@@ -3583,9 +3590,10 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
     }
 
     /// A stand-in for a node's create seeds whose line is full: every clone is refused at the seeds' bound, and each
-    /// classic route is noted.
+    /// classic route is noted. They keep the agent's mount namespace for `kept`.
     struct FullLine {
         classic: std::cell::RefCell<Vec<ClassicReason>>,
+        kept: ClassicReason,
     }
 
     impl CloneInit for FullLine {
@@ -3598,8 +3606,8 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
         fn claim(&self, _parked: Parked, _req: &CloneReq<'_>) -> Result<(i32, OwnedFd), OciError> {
             Err(OciError::Broken("no init is parked here".to_owned()))
         }
-        fn prunes_root(&self) -> bool {
-            false
+        fn unpruned(&self) -> Option<ClassicReason> {
+            Some(self.kept)
         }
         fn mount_namespace(&self) -> super::super::mntns::MountNamespace {
             super::super::mntns::MountNamespace::Copy
@@ -3631,6 +3639,44 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
     /// the rootless seed's, which isn't the shim); and nothing of the container left.
     #[test]
     fn a_create_past_the_seeds_bound_is_refused_and_never_takes_the_shim() {
+        let (made, routes, shim_ran, left) = on_a_full_line(ClassicReason::Rootless);
+        match made {
+            Err(e @ OciError::SeedsExhausted { bound: 2, .. }) => assert_eq!(
+                Refusal::from(e),
+                Refusal::Exhausted {
+                    what: "create seeds",
+                    bound: 2
+                }
+            ),
+            other => panic!("refused by the seeds' bound, not {other:?}"),
+        }
+        assert!(!shim_ran, "the shim ran");
+        assert_eq!(
+            routes,
+            vec![ClassicReason::Rootless],
+            "no create went through the shim"
+        );
+        assert!(!left, "the container's directory is left");
+    }
+
+    /// Goal 17's baseline arm (decision 6; the lead's ruling of 2026-11-09): a root node built for the classic root
+    /// keeps its seeds' mount namespace, and each create takes the classic root in a seed, counted under
+    /// [`ClassicReason::Baseline`], never under a rootless node's reason nor through the shim. Do: a seam create on
+    /// seeds that keep the agent's namespace for the baseline, their line full so nothing is made. Expect: the one
+    /// route noted is the baseline's, and the shim never ran.
+    #[test]
+    fn a_root_node_built_for_the_classic_root_counts_each_create_under_the_baseline() {
+        let (_, routes, shim_ran, _) = on_a_full_line(ClassicReason::Baseline);
+        assert_eq!(routes, vec![ClassicReason::Baseline]);
+        assert!(!shim_ran, "the shim ran");
+    }
+
+    /// A seam create of a `true` container on seeds whose line is full and which keep the agent's mount namespace for
+    /// `kept`, beside a stand-in shim that leaves a mark if it runs: what the create made, the classic routes the
+    /// seeds noted, whether the shim ran, and whether the container's directory is left.
+    fn on_a_full_line(
+        kept: ClassicReason,
+    ) -> (Result<State, OciError>, Vec<ClassicReason>, bool, bool) {
         let lab = tempfile::tempdir().unwrap();
         let ran = lab.path().join("shim-ran");
         let stand_in = lab.path().join("shim");
@@ -3650,6 +3696,7 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
         std::fs::create_dir(&cgroup).unwrap();
         let seeds = FullLine {
             classic: std::cell::RefCell::new(Vec::new()),
+            kept,
         };
         let devices = Programs::rootless(1);
         let made = rt.create_chosen_seeded(
@@ -3662,25 +3709,7 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
             },
             &seeds,
         );
-        match made {
-            Err(e @ OciError::SeedsExhausted { bound: 2, .. }) => assert_eq!(
-                Refusal::from(e),
-                Refusal::Exhausted {
-                    what: "create seeds",
-                    bound: 2
-                }
-            ),
-            other => panic!("refused by the seeds' bound, not {other:?}"),
-        }
-        assert!(!ran.exists(), "the shim ran");
-        assert_eq!(
-            *seeds.classic.borrow(),
-            vec![ClassicReason::Rootless],
-            "no create went through the shim"
-        );
-        assert!(
-            !rt.dir("c1").unwrap().path().exists(),
-            "the container's directory is left"
-        );
+        let left = rt.dir("c1").unwrap().path().exists();
+        (made, seeds.classic.into_inner(), ran.exists(), left)
     }
 }

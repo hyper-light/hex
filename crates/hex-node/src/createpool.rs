@@ -44,6 +44,15 @@ use hex_runtime::linux::oci::{OciError, mntns};
 use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::process::{Pid, PidfdFlags, Signal, WaitId, WaitIdOptions};
 
+/// Where a node's create seeds work (goal 5 plan step 2): in the one mount namespace the node prunes at `At`'s
+/// mountpoint, once, as the pool opens (a root node's); or in the agent's own, kept for the reason `Keep` names, under
+/// which their creates' classic roots are counted ([`CloneInit::unpruned`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Prune {
+    At(PathBuf),
+    Keep(ClassicReason),
+}
+
 /// The node agent's create seeds. Dropped, it stops its starting thread and ends and reaps every seed it
 /// started.
 pub struct CreatePool {
@@ -124,15 +133,15 @@ impl CreatePool {
     /// A pool that re-execs `exe` as `hex __oci-seed`, with the node's bounds on its host (`sizes`: at most its
     /// `seeds`, slots growing from its `start`, [`Seeds::growing`], and a line of at most its `workers`, the most
     /// calls its socket runs at once, so no create over the socket is refused for want of room in line), its
-    /// starting thread up and starting the first spare. `prune`, when given, is the mountpoint the node prunes its
-    /// seeds' one mount namespace at, once, as the pool opens (a root node, goal 5 plan step 2, `goal6-mntns.md`
-    /// §12); `None` on a rootless node, whose seeds keep the agent's mount namespace. `asked`, when given, is the
+    /// starting thread up and starting the first spare. `prune` is where its seeds work ([`Prune`]): the mountpoint
+    /// the node prunes their one mount namespace at, once, as the pool opens (a root node, goal 5 plan step 2,
+    /// `goal6-mntns.md` §12), or the agent's own namespace, kept, and why. `asked`, when given, is the
     /// way a pruned create's mount namespace is made (`copy`, `empty` or `tree`)
     /// (decision 6's update); a way this node can't take is refused by type.
     pub fn new(
         exe: PathBuf,
         sizes: crate::sizes::Sizes,
-        prune: Option<PathBuf>,
+        prune: Prune,
         asked: Option<&str>,
         #[cfg(debug_assertions)] inject: Option<String>,
     ) -> Result<Self, Refusal> {
@@ -159,7 +168,7 @@ impl CreatePool {
     pub fn with_limits(
         exe: PathBuf,
         limits: Limits,
-        prune: Option<PathBuf>,
+        prune: Prune,
         asked: Option<&str>,
         #[cfg(debug_assertions)] inject: Option<String>,
     ) -> Result<Self, Refusal> {
@@ -180,19 +189,19 @@ impl CreatePool {
         seeds: Seeds,
         limits: Limits,
         spare: usize,
-        prune: Option<PathBuf>,
+        prune: Prune,
         asked: Option<&str>,
         #[cfg(debug_assertions)] inject: Option<String>,
     ) -> Result<Self, Refusal> {
         // Only a pruning node's creates have a mount namespace to make another way; the probe makes
         // nothing and takes no lock (`goal6-mntns.md` §6).
-        let mount_namespace = match prune {
-            Some(_) => mntns::choose(mntns::probe()?, asked)?,
-            None => MountNamespace::Copy,
+        let mount_namespace = match &prune {
+            Prune::At(_) => mntns::choose(mntns::probe()?, asked)?,
+            Prune::Keep(_) => MountNamespace::Copy,
         };
         let pruned = match prune {
-            Some(mountpoint) => Some(prune_once(mountpoint)?),
-            None => None,
+            Prune::At(mountpoint) => Some(prune_once(mountpoint)?),
+            Prune::Keep(_) => None,
         };
         let slots = limits.seeds.get();
         let shared = Arc::new(Shared {
@@ -293,8 +302,11 @@ impl CreatePool {
 }
 
 impl CloneInit for CreatePool {
-    fn prunes_root(&self) -> bool {
-        self.shared.pruned.is_some()
+    fn unpruned(&self) -> Option<ClassicReason> {
+        self.shared
+            .pruned
+            .is_none()
+            .then_some(ClassicReason::Rootless)
     }
 
     fn mount_namespace(&self) -> MountNamespace {
@@ -1074,7 +1086,7 @@ mod tests {
         let pool = CreatePool::new(
             PathBuf::from("/nonexistent/hex-for-the-test"),
             crate::sizes::Sizes::now().unwrap(),
-            None,
+            Prune::Keep(ClassicReason::Rootless),
             None,
             #[cfg(debug_assertions)]
             None,
@@ -1091,6 +1103,27 @@ mod tests {
         assert_eq!(pool.creates_through_shim(), 3);
     }
 
+    /// Goal 17's baseline arm (the lead's ruling of 2026-11-09): a pool whose seeds keep the agent's mount namespace
+    /// says why, and counts none of those classic creates through the shim. Do: open a pool kept for the baseline, and
+    /// tell it a seed made one create with the classic root. Expect: it says its seeds keep the namespace for the
+    /// baseline, counts that create under the baseline, and none through the shim.
+    #[test]
+    fn a_pool_kept_for_the_baseline_says_so_and_counts_none_of_its_creates_through_the_shim() {
+        let pool = CreatePool::new(
+            PathBuf::from("/nonexistent/hex-for-the-test"),
+            crate::sizes::Sizes::now().unwrap(),
+            Prune::Keep(ClassicReason::Baseline),
+            None,
+            #[cfg(debug_assertions)]
+            None,
+        )
+        .unwrap();
+        assert_eq!(pool.unpruned(), Some(ClassicReason::Baseline));
+        pool.classic(ClassicReason::Baseline);
+        assert_eq!(pool.classic_creates_for(ClassicReason::Baseline), 1);
+        assert_eq!(pool.creates_through_shim(), 0);
+    }
+
     /// Goal 5 plan step 4 (T-T7.1.4; CLAUDE.md §3): a node whose seeds can't start says why. Do: open a
     /// pool on a `hex` binary that isn't there, wait until it has counted a failed start, then ask for a
     /// seed under the node's own bounds, its waits seeded from the record. Expect: the create is refused by
@@ -1102,7 +1135,7 @@ mod tests {
         let pool = CreatePool::new(
             PathBuf::from("/nonexistent/hex-for-the-test"),
             crate::sizes::Sizes::now().unwrap(),
-            None,
+            Prune::Keep(ClassicReason::Rootless),
             None,
             #[cfg(debug_assertions)]
             None,
@@ -1147,7 +1180,7 @@ mod tests {
         let pool = CreatePool::with_limits(
             PathBuf::from("/bin/sh"),
             limits,
-            None,
+            Prune::Keep(ClassicReason::Rootless),
             None,
             #[cfg(debug_assertions)]
             None,
@@ -1194,7 +1227,7 @@ mod tests {
         let pool = CreatePool::new(
             PathBuf::from("/nonexistent/hex-for-the-test"),
             crate::sizes::Sizes::now().unwrap(),
-            None,
+            Prune::Keep(ClassicReason::Rootless),
             None,
             #[cfg(debug_assertions)]
             None,
@@ -1222,7 +1255,7 @@ mod tests {
         let pool = CreatePool::with_limits(
             PathBuf::from("/bin/sh"),
             limits,
-            None,
+            Prune::Keep(ClassicReason::Rootless),
             None,
             #[cfg(debug_assertions)]
             None,
