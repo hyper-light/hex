@@ -75,7 +75,8 @@ on 44 to 256 GPUs or nodes (finding 4). Best-fit packing alone strands capacity 
 (Borg CM[1]); `AC-T7.4.3` holds Hex to ≥30% less stranded capacity than best-fit at 90% load.
 
 **What would falsify it.** A balance-only or best-fit-only scorer matching the goodput objective on the
-recorded kiln workload in hex-sim (`AC-T7.4.3`), or the goodput model costing more to evaluate than the
+recorded workload of OCI containers, Firecracker microVMs and Shards microVMs in hex-sim (`AC-T7.4.3`), or
+the goodput model costing more to evaluate than the
 10 ms p99 budget allows at 10,000/s (`AC-T7.4.2`) — in which case goodput moves to the optimiser tier
 (S2) and the fast path scores a cheap proxy.
 

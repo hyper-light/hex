@@ -24,6 +24,17 @@ harness = false
 name = "seccomp_compile"
 harness = false
 
+[[bench]]
+name = "sched_fast_path"
+harness = false
+
+[[bench]]
+name = "sched_packing"
+harness = false
+
+[dependencies]
+hex-sim.workspace = true
+
 [target.'cfg(target_os = "linux")'.dependencies]
 hex-api.workspace = true
 hex-client.workspace = true
