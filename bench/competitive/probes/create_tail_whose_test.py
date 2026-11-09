@@ -100,6 +100,18 @@ class TheBt(unittest.TestCase):
         self.assertIsNone(re.search(r"prev_state\s*==", self.code), "prev_state compared whole")
         self.assertIsNotNone(re.search(r"prev_state\s*&\s*0xff\b", self.code), "prev_state's state bits not taken")
 
+    def test_no_string_variable_is_given_a_second_string(self):
+        # bpftrace copies a string to its end, so a variable given a shorter one keeps the old one's tail: a comm folded
+        # to its kind printed as one key many times over (whose-noowner-1f705e80-r2, @preempted_by's 3,781 keys). Names
+        # go into keys straight from their maps and the comms themselves, never through a variable.
+        given = re.findall(r"(\$\w+)\s*=\s*(\"|comm\b|args\.\w*comm|@kname\[|@pname\[)", self.code)
+        self.assertEqual(given, [], "variables given a comm or a name")
+
+    def test_it_names_the_rest_of_what_earlier_boxes_leave_the_host(self):
+        # The workqueue "events" ran 14.0 s on the create CPUs, its function unnamed (whose-noowner-1f705e80-r2).
+        for probe in ("kernfs_notify_workfn", "delayed_mntput", "cleanup_mnt", "cleanup_net"):
+            self.assertIn(f"fentry:vmlinux:{probe}", self.code, probe)
+
     def test_a_dying_tasks_last_switch_leaves_nothing_behind(self):
         # A task's last switch reports X (0x10) or Z (0x20) and it never runs again: what it left would stay till the end.
         self.assertIsNotNone(re.search(r"&\s*0x30\)\s*==\s*0", self.code), "a switch out of X or Z is kept")
@@ -113,6 +125,12 @@ class TheWrapper(unittest.TestCase):
         self.assertTrue(lock and attach)
         self.assertLess(lock[0], attach[0], "bpftrace attaches before the timed lock is held")
         self.assertEqual(len(lock), 1, "the lock is taken once, around everything timed")
+
+    def test_it_records_the_hosts_superblocks_by_type_and_owner_at_its_start_and_end(self):
+        sh = read("create_tail_whose.sh")
+        for when in ("start", "end"):
+            self.assertRegex(sh, rf"(?m)^superblocks {when}$", f"the superblocks at its {when}")
+        self.assertIn('"$O/superblocks-$1.txt"', sh)
 
     def test_it_runs_its_siblings_from_any_directory(self):
         # The lead's run of a8e243f6 from the tree's root: "bench/competitive/probes/create_tail.sh: No such file or
