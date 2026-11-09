@@ -897,3 +897,290 @@ fn a_program_killed_outside_the_bound_is_no_bounds_end() {
         "a SIGKILL outside the bound passed for the bound's kill: {killed:?}"
     );
 }
+
+/// How many rounds the hold's stop comparison runs each way at each load: past the 299 a p99 needs.
+const STOP_ROUNDS: usize = 300;
+
+/// Children killed (a SIGKILL reaches a stopped one) and reaped when dropped, so no hog or spinner outlives
+/// a failed assertion.
+struct Kids(Vec<std::process::Child>);
+
+impl Drop for Kids {
+    fn drop(&mut self) {
+        for kid in &mut self.0 {
+            let _ = kid.kill();
+            let _ = kid.wait();
+        }
+    }
+}
+
+/// The ways a held box's members can run for a read and be stopped after it (the lead, 2026-11-09).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Way {
+    /// Every member continued, then stopped by one killpg: XNU holds a running member and waits for it to
+    /// leave its core before it signals the next (`place_task_hold` → `task_wait_locked` → `thread_wait`),
+    /// and the waiting thread may then wait for a core of its own while the members not yet held run on.
+    OneByOne,
+    /// Every member continued, then stopped by a thread each (the caller the first), so each wait for a core
+    /// is its own member's alone.
+    AtOnce,
+    /// One member continued, each in turn, then stopped by one killpg: no member runs behind its stop.
+    OneRunning,
+}
+
+/// A thread for each member but the first, each parked until told to stop its member.
+struct Stoppers {
+    order: std::sync::Arc<(std::sync::Mutex<Order>, std::sync::Condvar, std::sync::Condvar)>,
+    threads: Vec<std::thread::JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct Order {
+    round: u64,
+    pids: Vec<i32>,
+    done: usize,
+    quit: bool,
+}
+
+impl Stoppers {
+    fn new(members: usize) -> Self {
+        let order = std::sync::Arc::new((
+            std::sync::Mutex::new(Order::default()),
+            std::sync::Condvar::new(),
+            std::sync::Condvar::new(),
+        ));
+        let threads = (1..members)
+            .map(|i| {
+                let order = std::sync::Arc::clone(&order);
+                std::thread::spawn(move || {
+                    let (lock, go, done) = &*order;
+                    let mut seen = 0;
+                    loop {
+                        let pid = {
+                            let mut o = lock.lock().unwrap();
+                            while o.round == seen && !o.quit {
+                                o = go.wait(o).unwrap();
+                            }
+                            if o.quit {
+                                return;
+                            }
+                            seen = o.round;
+                            o.pids[i]
+                        };
+                        let _ = rustix::process::kill_process(
+                            rustix::process::Pid::from_raw(pid).unwrap(),
+                            rustix::process::Signal::STOP,
+                        );
+                        lock.lock().unwrap().done += 1;
+                        done.notify_one();
+                    }
+                })
+            })
+            .collect();
+        Self { order, threads }
+    }
+
+    /// Stops every member of `pids` at once, returning once each is held off its core: the caller stops the
+    /// first, a parked thread each the rest.
+    fn stop(&self, pids: &[i32]) {
+        let (lock, go, done) = &*self.order;
+        {
+            let mut o = lock.lock().unwrap();
+            o.pids.clear();
+            o.pids.extend_from_slice(pids);
+            o.done = 0;
+            o.round += 1;
+        }
+        go.notify_all();
+        let _ = rustix::process::kill_process(
+            rustix::process::Pid::from_raw(pids[0]).unwrap(),
+            rustix::process::Signal::STOP,
+        );
+        let mut o = lock.lock().unwrap();
+        while o.done + 1 < pids.len() {
+            o = done.wait(o).unwrap();
+        }
+    }
+}
+
+impl Drop for Stoppers {
+    fn drop(&mut self) {
+        if let Ok(mut o) = self.order.0.lock() {
+            o.quit = true;
+        }
+        self.order.1.notify_all();
+        for t in self.threads.drain(..) {
+            let _ = t.join();
+        }
+    }
+}
+
+/// `members` hogs in a process group of their own, each taking memory without end, stopped once each is
+/// filling (past its start, 16 of its 1 MiB chunks taken): them, the group's id and their pids.
+fn stopped_hogs(exe: &str, members: usize) -> (Kids, i32, Vec<i32>) {
+    use std::os::unix::process::CommandExt;
+    let hog = |group: i32| {
+        std::process::Command::new(exe)
+            .args(["selftest-box", "hog", &(64 * GIB).to_string()])
+            .process_group(group)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn a hog")
+    };
+    let first = hog(0);
+    let pgid = i32::try_from(first.id()).expect("a pid");
+    let mut kids = vec![first];
+    kids.extend((1..members).map(|_| hog(pgid)));
+    let kids = Kids(kids);
+    let pids: Vec<i32> = kids
+        .0
+        .iter()
+        .map(|k| i32::try_from(k.id()).expect("a pid"))
+        .collect();
+    let deadline = Instant::now() + HANG_GUARD;
+    while footprints(&pids).iter().any(|&f| f < 16 * MIB) {
+        assert!(Instant::now() < deadline, "the hogs never began filling");
+        std::thread::park_timeout(hex_core::watch::FLOOR);
+    }
+    rustix::process::kill_process_group(
+        rustix::process::Pid::from_raw(pgid).expect("a group id"),
+        rustix::process::Signal::STOP,
+    )
+    .expect("stop the hogs");
+    (kids, pgid, pids)
+}
+
+fn footprints(pids: &[i32]) -> Vec<u64> {
+    pids.iter()
+        .map(|&pid| {
+            hex_runtime::macos::sys::rusage(pid)
+                .expect("rusage")
+                .map_or(0, |r| r.footprint)
+        })
+        .collect()
+}
+
+/// One read of a held box run `way`: what its members grew in the read, what they grew past it until each
+/// was held again, and how long the stop took. Member `turn` (modulo) is the one a one-running read runs.
+fn stop_round(
+    way: Way,
+    pgid: i32,
+    pids: &[i32],
+    turn: usize,
+    stoppers: &Stoppers,
+) -> (u64, u64, Duration) {
+    let group = rustix::process::Pid::from_raw(pgid).expect("a group id");
+    let before = footprints(pids);
+    match way {
+        Way::OneRunning => rustix::process::kill_process(
+            rustix::process::Pid::from_raw(pids[turn % pids.len()]).expect("a pid"),
+            rustix::process::Signal::CONT,
+        )
+        .expect("continue one member"),
+        Way::OneByOne | Way::AtOnce => {
+            rustix::process::kill_process_group(group, rustix::process::Signal::CONT)
+                .expect("continue the group");
+        }
+    }
+    let read = footprints(pids);
+    let t = Instant::now();
+    match way {
+        Way::OneByOne | Way::OneRunning => {
+            rustix::process::kill_process_group(group, rustix::process::Signal::STOP)
+                .expect("stop the group");
+        }
+        Way::AtOnce => stoppers.stop(pids),
+    }
+    let stop = t.elapsed();
+    let after = footprints(pids);
+    let grown = |from: &[u64], to: &[u64]| -> u64 {
+        from.iter()
+            .zip(to)
+            .map(|(a, b)| b.saturating_sub(*a))
+            .sum()
+    };
+    (grown(&before, &read), grown(&read, &after), stop)
+}
+
+/// HEX-MAC-1, the hold's stop compared (the lead, 2026-11-09): a held box runs for its read and is stopped
+/// after it, and what its members grow past that read, until each is held again, is what it can pass its bar
+/// by. Do hold 8 hogs stopped in one group beside no spinners, half the cores' and all of them, and run 300
+/// reads each way (one-by-one killpg, a stop at once from a thread a member, one member running), the ways
+/// interleaved and the load read before each; expect each way's growth in the read (its throughput) and past
+/// it (its overshoot), printed. Ignored: a comparison the lead asked for, run on demand on the Studio.
+#[test]
+#[ignore = "the hold's stops compared on demand on the Studio (the lead, 2026-11-09)"]
+fn hex_mac_1_a_held_box_stop_compared_one_by_one_at_once_and_one_running() {
+    let exe = fixture().exe;
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let members = 8;
+    let stoppers = Stoppers::new(members);
+    let ways = [Way::OneByOne, Way::AtOnce, Way::OneRunning];
+    let mib = |b: u64| b as f64 / MIB as f64;
+    for spinners in [0, cores / 2, cores] {
+        let _load = Kids(
+            (0..spinners)
+                .map(|_| {
+                    std::process::Command::new("/usr/bin/yes")
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                        .expect("spawn a spinner")
+                })
+                .collect(),
+        );
+        let mut seen: Vec<(Way, f64, u64, u64, Duration)> = Vec::with_capacity(3 * STOP_ROUNDS);
+        let (mut kids, mut pgid, mut pids) = stopped_hogs(&exe, members);
+        for round in 0..STOP_ROUNDS {
+            for i in 0..ways.len() {
+                let way = ways[(round + i) % ways.len()];
+                let load = hex_runtime::macos::sys::loadavg().unwrap_or(-1.0);
+                let (grew_in, grew_past, stop) = stop_round(way, pgid, &pids, round, &stoppers);
+                println!(
+                    "ROUND spinners={spinners} way={way:?} load={load:.2} in_kib={} past_kib={} stop_us={}",
+                    grew_in >> 10,
+                    grew_past >> 10,
+                    stop.as_micros()
+                );
+                seen.push((way, load, grew_in, grew_past, stop));
+                std::thread::park_timeout(hex_core::watch::FLOOR);
+            }
+            // A fresh group before the hogs hold half a GiB each.
+            let held: u64 = footprints(&pids).iter().sum();
+            if held > u64::try_from(members).unwrap() * 512 * MIB {
+                drop(kids);
+                (kids, pgid, pids) = stopped_hogs(&exe, members);
+            }
+        }
+        drop(kids);
+        for way in ways {
+            let rounds: Vec<_> = seen.iter().filter(|s| s.0 == way).collect();
+            let mut past: Vec<u64> = rounds.iter().map(|s| s.3).collect();
+            let mut stops: Vec<Duration> = rounds.iter().map(|s| s.4).collect();
+            past.sort_unstable();
+            stops.sort_unstable();
+            let n = rounds.len();
+            let p99 = (n * 99).div_ceil(100) - 1;
+            let grew_in: u64 = rounds.iter().map(|s| s.2).sum();
+            let grew_all: u64 = rounds.iter().map(|s| s.2 + s.3).sum();
+            let (lo, hi) = rounds.iter().fold((f64::MAX, f64::MIN), |(lo, hi), s| {
+                (lo.min(s.1), hi.max(s.1))
+            });
+            println!(
+                "STOPS spinners={spinners} members={members} way={way:?} rounds={n} past_mib p50={:.2} p99={:.2} max={:.2} in_mib_per_read={:.3} all_mib_per_read={:.3} stop_us p50={} p99={} max={} load={lo:.2}..{hi:.2}",
+                mib(past[n / 2]),
+                mib(past[p99]),
+                mib(past[n - 1]),
+                mib(grew_in) / n as f64,
+                mib(grew_all) / n as f64,
+                stops[n / 2].as_micros(),
+                stops[p99].as_micros(),
+                stops[n - 1].as_micros(),
+            );
+        }
+        assert_eq!(seen.len(), 3 * STOP_ROUNDS, "every round ran");
+    }
+}
