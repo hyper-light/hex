@@ -728,10 +728,8 @@ mod tests {
         }
         assert_eq!(seed_from(None), SLOWEST_RECORDED_END);
         assert_eq!(seed(None), SLOWEST_RECORDED_END);
-        assert_eq!(
-            conformance::PATIENCE,
-            seed(HostClass::THIS).saturating_mul(2)
-        );
+        let twice_this_hosts_seed = seed(HostClass::THIS).saturating_mul(2);
+        assert_eq!(conformance::PATIENCE, twice_this_hosts_seed);
     }
 
     /// The rule for a learned wait: before any sample its bound is twice the slowest answer on record;

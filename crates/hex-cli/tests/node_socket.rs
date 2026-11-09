@@ -90,6 +90,9 @@ static HOOK: Patience = Patience::seeded("test.node_socket.hook", PROGRAM);
 /// A line the agent wrote before it answered or ended, delivered by this test's own stderr reader: no recorded
 /// operation makes the delivery, so measuring, for the fact alone, each answer recorded for the census to come.
 static SAID: Patience = Patience::measuring("test.node_socket.said");
+/// The agent's `READY=1` to its service manager once its socket listens: its start, its recovery and its bind, which
+/// no recorded operation makes, so measuring, for the fact alone, as [`SAID`] is.
+static READY: Patience = Patience::measuring("test.node_socket.ready");
 /// Longest the test waits for the agent's answer to an exec over a raw connection: twice the exec answer's record.
 const ANSWERED: std::time::Duration = EXEC.saturating_mul(2);
 
@@ -260,9 +263,7 @@ fn ready_is_told_to_the_service_manager(own: &Path, cache: &Path, exe: &str) {
         .unwrap();
     let notify = dir.path().join("notify.sock");
     let manager = std::os::unix::net::UnixDatagram::bind(&notify).unwrap();
-    manager
-        .set_read_timeout(Some(conformance::PATIENCE))
-        .unwrap();
+    manager.set_nonblocking(true).unwrap();
     let socket = dir.path().join("node.sock");
     let mut node = Command::new(exe)
         .arg("node")
@@ -277,7 +278,17 @@ fn ready_is_told_to_the_service_manager(own: &Path, cache: &Path, exe: &str) {
         .spawn()
         .expect("start hex node");
     let mut said = [0u8; 64];
-    let n = manager.recv(&mut said).expect("READY=1 on $NOTIFY_SOCKET");
+    let mut n = 0;
+    wait_for(&READY, "READY=1 on $NOTIFY_SOCKET", || {
+        match manager.recv(&mut said) {
+            Ok(got) => {
+                n = got;
+                true
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => false,
+            Err(e) => panic!("reading $NOTIFY_SOCKET: {e}"),
+        }
+    });
     let said = String::from_utf8_lossy(&said[..n]).into_owned();
     assert!(
         said.lines().any(|l| l == "READY=1"),

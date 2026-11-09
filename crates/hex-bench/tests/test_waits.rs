@@ -1,11 +1,13 @@
 //! Test waits take their own record (CLAUDE.md §4 and §6; decision 9; the lead's rule of 2026-11-06 for test
 //! patiences, and of 2026-11-08: every wait in the tests uses its own record's patience). A test's wait for a fact is
 //! bounded by twice the slowest answer recorded for that fact, so a slow but healthy fact passes and only a stuck one
-//! fails. The suites' program-end record, `hex_api::conformance::PROGRAM_END` and its patience `PATIENCE`, is the
-//! waits census's `lifecycle.exec` row: a program's run to its end. Bounding any other fact with it, a box's emptying,
-//! a pool's refill, a turn's hold, takes another fact's record, which under load fails a test whose fact was within
-//! its own. So the program-end record may bound only a program's end: a `Proc`'s `wait_for` and the cases' `exit_of`.
-//! This reads every test source in the workspace and names each other use, by file and line.
+//! fails. The suites' program-end record, `hex_api::conformance::PATIENCE`, is twice the slowest end of a program on
+//! its host class's record, from its start to its reported end (`HostClass::slowest_recorded_end`: on Linux the
+//! first-run record, above the waits census's `lifecycle.exec` row). Bounding any other fact with it, a box's
+//! emptying, a pool's refill, a turn's hold, a node's start, takes another fact's record, which under load fails a
+//! test whose fact was within its own. So the program-end record may bound only a program's end: a `Proc`'s
+//! `wait_for` and the cases' `exit_of`. This reads every test source in the workspace and names each other use, by
+//! file and line.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -79,7 +81,7 @@ fn names_it(line: &str, brought: bool) -> bool {
         || (brought && (words("PATIENCE") || words("PROGRAM_END")))
 }
 
-/// Whether the line uses the record as a program's end's bound, defines it, or only mentions it.
+/// Whether the line uses the record as a program's end's bound, defines it or checks what it is, or only mentions it.
 fn a_programs_end(line: &str) -> bool {
     let code = line.trim_start();
     code.starts_with("//")
@@ -89,10 +91,9 @@ fn a_programs_end(line: &str) -> bool {
         || code.contains(".wait_for(conformance::PATIENCE")
         || code.contains(".wait_for(hex_api::conformance::PATIENCE")
         || code.contains("exit_of(")
-        || code.starts_with("pub const PROGRAM_END")
         || code.starts_with("pub const PATIENCE")
         || code.starts_with("const PATIENCE: Duration = hex_api::conformance::PATIENCE;")
-        || code.starts_with("pub const PATIENCE: Duration = match PROGRAM_END")
+        || code.starts_with("assert_eq!(conformance::PATIENCE,")
 }
 
 /// The lines of `text`, the file `file`'s, that use the program-end record to bound another fact than a program's
