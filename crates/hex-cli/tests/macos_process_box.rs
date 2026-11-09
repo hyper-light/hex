@@ -14,11 +14,13 @@
 )]
 
 use std::num::NonZeroU64;
+use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 use hex_api::conformance::{self, Act, Fixture};
 use hex_api::differential;
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Runtime, Signal, Stdio};
+use hex_core::{stream, wire};
 use hex_runtime::macos::MacRuntime;
 
 const MIB: u64 = 1 << 20;
@@ -424,5 +426,84 @@ fn a_programs_end_is_seen_when_it_ends_not_at_the_waits_budget() {
     assert!(
         late.is_empty(),
         "ends not seen as the bound's kill when they happened: {late:?}"
+    );
+}
+
+/// One framed message to the node on a raw connection, as `hex-client`'s macOS transport frames it.
+fn say(conn: &mut UnixStream, id: u64, request: &wire::Request) {
+    use std::io::Write;
+    let bytes = wire::request(id, request, wire::MAX_MESSAGE).unwrap();
+    let framed = stream::frame(&bytes, wire::MAX_MESSAGE).unwrap();
+    conn.write_all(&framed).unwrap();
+}
+
+/// The node's next answer on a raw connection.
+fn hear(conn: &mut UnixStream, deframer: &mut stream::Deframer) -> (wire::Header, wire::Answer) {
+    use std::io::Read;
+    let mut byte = [0u8; 1];
+    loop {
+        conn.read_exact(&mut byte).unwrap();
+        if let (_, Some(message)) = deframer.take(&byte).unwrap() {
+            let received = wire::Received {
+                bytes: &message,
+                size: message.len(),
+                descriptors: 0,
+                descriptors_cut: false,
+            };
+            return wire::read_answer(&received, wire::MAX_MESSAGE).unwrap();
+        }
+    }
+}
+
+/// Native plan step 8, HEX-SOCK-6 through `hex node` on macOS: a program in a box bounded by memory (so the box
+/// arms it with its fatal cap) whose caller goes without releasing it, as a dead process's connection closes, is
+/// ended by the disconnect rule through its own runtime's kill, which tells the box's watcher first: the box
+/// counts it abandoned and counts no memory end of its own.
+#[test]
+fn a_program_whose_caller_goes_is_no_memory_end_of_its_box() {
+    use wire::{Answer, Call, Request, Streams};
+    let node = NodeProcess::start();
+    let client = hex_client::Client::connect(&node.socket).expect("connect to hex node");
+    let id = BoxId::new("mac-left").unwrap();
+    client
+        .create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds {
+                memory_max: Some(256 * MIB),
+                ..Bounds::default()
+            },
+            class: ClassSpec::Process,
+            owner: None,
+        })
+        .expect("create");
+    let mut caller = UnixStream::connect(&node.socket).unwrap();
+    let mut deframer = stream::Deframer::new(wire::MAX_MESSAGE);
+    let hello = Request::Hello {
+        build: wire::build(),
+    };
+    say(&mut caller, 1, &hello);
+    let (_, hello) = hear(&mut caller, &mut deframer);
+    assert!(matches!(hello, Answer::Hello(_)), "{hello:?}");
+    let exec = Request::Call(Call::Exec {
+        id: id.clone(),
+        program: fixture().act(&Act::Wait),
+        streams: Streams::default(),
+    });
+    say(&mut caller, 2, &exec);
+    let (h, started) = hear(&mut caller, &mut deframer);
+    assert!(
+        matches!((h.id, &started), (2, Answer::Started { .. })),
+        "{started:?}"
+    );
+    drop(caller);
+    wait_until(
+        || client.inspect(&id).is_ok_and(|i| i.abandoned == 1),
+        "the box counts its abandoned program",
+    );
+    let usage = client.usage(&id).expect("usage");
+    client.delete(&id).expect("delete");
+    assert_eq!(
+        usage.oom_kills, 0,
+        "the disconnect rule's kill was counted as the box's memory end: {usage:?}"
     );
 }

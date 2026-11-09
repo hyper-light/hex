@@ -131,6 +131,7 @@ fn requests() -> Vec<(u64, Request, usize)> {
         (6, Request::Release, 0),
         (12, Request::Call(Call::Netns), 0),
         (13, Request::Call(Call::Kill { exec: 6 }), 0),
+        (14, Request::Taken, 0),
         (
             14,
             Request::Call(Call::ExecStreams {
@@ -343,6 +344,33 @@ fn a_given_answer_carries_a_descriptor_for_each_stream_it_names() {
             })
         );
     }
+}
+
+/// Native plan step 8, guest stdio (HEX-GUEST-41): a client's word that it took a given answer's ends, by its exec's
+/// id, is a header alone, kind 0x000e beside the given answer's; read back as itself; and it carries no descriptor,
+/// one that comes with it refused, naming the count.
+#[test]
+fn a_word_that_a_given_answers_ends_were_taken_is_a_header_alone() {
+    let taken = request(14, &Request::Taken, MAX_MESSAGE).unwrap();
+    assert_eq!(taken, header(0x000e, 14));
+    assert_eq!(
+        read_request(&received(&taken, 0), MAX_MESSAGE),
+        Ok((
+            Header {
+                kind: 0x000e,
+                id: 14
+            },
+            Request::Taken
+        ))
+    );
+    assert_eq!(
+        read_request(&received(&taken, 1), MAX_MESSAGE).map_err(|bad| bad.fault),
+        Err(Fault::Descriptors {
+            what: "a taken",
+            want: 0,
+            got: 1
+        })
+    );
 }
 
 /// Every message's header: its magic, this side's wire identity, its kind and its id.
@@ -623,7 +651,7 @@ fn an_oversized_message_is_refused_naming_the_bound() {
 #[test]
 fn unknown_kinds_are_refused() {
     let hello = request(5, &Request::Hello { build: build() }, MAX_MESSAGE).unwrap();
-    for kind in [0u16, 0x000e, 0x7fff, 0x8001, 0x8009, 0xffff] {
+    for kind in [0u16, 0x000f, 0x7fff, 0x8001, 0x8009, 0xffff] {
         let mut bytes = hello.clone();
         bytes[12..14].copy_from_slice(&kind.to_le_bytes());
         let got = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
@@ -1021,7 +1049,7 @@ proptest! {
     /// HEX-SOCK-1: bodies of random bytes behind a valid header, so every kind's decoder meets them, are a
     /// message or a typed refusal, never a panic.
     #[test]
-    fn any_body_behind_a_header_is_read_or_refused(kind in prop_oneof![0u16..0x000f, 0x8000u16..0x800c], body in proptest::collection::vec(any::<u8>(), 0..256), fds in 0usize..4) {
+    fn any_body_behind_a_header_is_read_or_refused(kind in prop_oneof![0u16..0x0010, 0x8000u16..0x800c], body in proptest::collection::vec(any::<u8>(), 0..256), fds in 0usize..4) {
         let mut bytes = header(kind, 3);
         bytes.extend_from_slice(&body);
         let _ = read_request(&received(&bytes, fds), MAX_MESSAGE);

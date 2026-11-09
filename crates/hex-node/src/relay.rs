@@ -40,6 +40,7 @@ use hex_api::Refusal;
 use hex_client::guest::Duplex;
 use hex_core::stream::{self, Deframer, Exec, Gather, Stray};
 use hex_core::wire::{self, Answer, Call, Request};
+use rustix::event::{PollFd, PollFlags};
 use rustix::io::Errno;
 use rustix::net::{
     AddressFamily, RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, SendAncillaryBuffer,
@@ -547,35 +548,110 @@ impl Copier {
     /// user space. Pipe to connection: the socket's `splice_write` (`splice_to_socket`, net/socket.c).
     /// Connection to pipe: the socket's `splice_read`, which for vsock, whose `vsock_stream_ops` names none
     /// (net/vmw_vsock/af_vsock.c), is the kernel's own copy into the pipe (`sock_splice_read` falls back to
-    /// `copy_splice_read`, net/socket.c, Linux 6.18). Each call moves at most the pipe's capacity
-    /// (`F_GETPIPE_SZ`, fcntl(2)), learned from the pipe itself.
+    /// `copy_splice_read`, net/socket.c, Linux 6.18). Either way the copier waits only in poll ([`feed`],
+    /// [`drain`]), never in a splice. Each call moves at most the pipe's capacity (`F_GETPIPE_SZ`, fcntl(2)),
+    /// learned from the pipe itself. Its connection closes as the copy ends.
     fn run(self, conn: Box<dyn Conn>) {
         match self {
             Self::In(to) => {
-                let _ = splice_all(conn.as_fd(), &to, &to);
+                let _ = feed(&*conn, &to);
             }
             Self::Out(from) => {
-                let _ = splice_all(&from, conn.as_fd(), &from);
+                let _ = drain(&from, &*conn);
                 let _ = conn.shutdown(Shutdown::Write);
             }
         }
     }
 }
 
-/// Splices from `from` into `to` until `from` ends, at most `pipe`'s capacity a call.
-fn splice_all(from: impl AsFd, to: impl AsFd, pipe: impl AsFd) -> io::Result<()> {
-    let unit = rustix::pipe::fcntl_getpipe_size(pipe)?;
+/// Moves the host's stdin from its connection into its program's pipe until either ends. A splice from a socket
+/// into a pipe holds the pipe's lock while it waits for the socket (fs/splice.c, `splice_file_to_pipe` around
+/// `do_splice_read`), and the program's close of its stdin, as its exit makes, takes that lock (fs/pipe.c,
+/// `pipe_release`); so the copier waits in poll(2) for the host's bytes and for the program's end together, and
+/// splices only what has come, its connection non-blocking, so no splice waits on the host holding the pipe. A
+/// splice into a full pipe waits for room with the lock let go (`wait_for_space`). The pipe's write end reports
+/// `POLLERR` once the program has no read end (`pipe_poll`): the copy then ends, and the stream's connection
+/// closes with it, so the host sees its program let its stdin go.
+fn feed(conn: &dyn Conn, to: &PipeWriter) -> io::Result<()> {
+    conn.set_nonblocking(true)?;
+    let unit = rustix::pipe::fcntl_getpipe_size(to)?;
     loop {
+        let (came, gone) = {
+            let from = conn.as_fd();
+            let mut ready = [
+                PollFd::new(&from, PollFlags::IN),
+                PollFd::new(to, PollFlags::empty()),
+            ];
+            match rustix::event::poll(&mut ready, None) {
+                Ok(_) => {}
+                Err(Errno::INTR) => continue,
+                Err(e) => return Err(e.into()),
+            }
+            let [came, gone] = &ready;
+            (came.revents(), gone.revents())
+        };
+        if !gone.is_empty() {
+            return Ok(());
+        }
+        if came.is_empty() {
+            continue;
+        }
         match rustix::pipe::splice(
-            &from,
+            conn.as_fd(),
             None,
-            &to,
+            to,
             None,
             unit,
             rustix::pipe::SpliceFlags::MOVE,
         ) {
+            // The host ended its stdin.
             Ok(0) => return Ok(()),
-            Ok(_) | Err(Errno::INTR) => {}
+            Ok(_) | Err(Errno::INTR | Errno::AGAIN) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
+/// Moves a program's stdout or stderr from its pipe into the host's connection until the program's end of the
+/// pipe is gone and the pipe drained. A splice from a pipe into a socket holds the pipe's lock while it waits for
+/// the socket's room (fs/splice.c, `splice_to_socket` around `sock_sendmsg`), and the program's close of its
+/// stream, as its exit makes, takes that lock (fs/pipe.c, `pipe_release`); so the copier waits in poll(2), for the
+/// pipe's bytes or, once the connection took none, for the connection's room, and splices only what fits,
+/// non-blocking both ways (the connection non-blocking, `SPLICE_F_NONBLOCK` for the pipe), so no splice waits
+/// holding the pipe. A splice that would wait says which wait comes next: after the pipe's bytes came, the
+/// connection is full; after the connection's room came, the pipe is empty.
+fn drain(from: &PipeReader, conn: &dyn Conn) -> io::Result<()> {
+    conn.set_nonblocking(true)?;
+    let unit = rustix::pipe::fcntl_getpipe_size(from)?;
+    // Whether the connection took none at the last splice: then the copier waits for its room.
+    let mut full = false;
+    loop {
+        {
+            let to = conn.as_fd();
+            let mut ready = [if full {
+                PollFd::new(&to, PollFlags::OUT)
+            } else {
+                PollFd::new(from, PollFlags::IN)
+            }];
+            match rustix::event::poll(&mut ready, None) {
+                Ok(_) => {}
+                Err(Errno::INTR) => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        match rustix::pipe::splice(
+            from,
+            None,
+            conn.as_fd(),
+            None,
+            unit,
+            rustix::pipe::SpliceFlags::MOVE | rustix::pipe::SpliceFlags::NONBLOCK,
+        ) {
+            // The program's end of the pipe is gone, and the pipe drained.
+            Ok(0) => return Ok(()),
+            Ok(_) => full = false,
+            Err(Errno::AGAIN) => full = !full,
+            Err(Errno::INTR) => {}
             Err(e) => return Err(e.into()),
         }
     }

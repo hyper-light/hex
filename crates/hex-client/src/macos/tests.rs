@@ -193,8 +193,10 @@ fn two_callers_answers_sharing_reads_each_reach_their_own() {
 
 /// An answer's descriptors ride at its frame's first byte: a given answer's end reaches its exec, which hands it to the
 /// caller that asked for the stream. Do: exec asking for stdout; the stand-in agent answers it given, with one end of a
-/// socket pair at the frame's first byte and the frame cut across two writes, then writes into the other end and
-/// closes it. Expect: the exec's stdout end reads what the agent wrote, to its end, and the program's end as sent.
+/// socket pair at the frame's first byte and the frame cut across two writes, keeps its copy until the client says it
+/// took it (`Request::Taken`), as the node agent does (an end in flight alone may arrive dead on macOS, HEX-GUEST-41),
+/// then writes into the other end and closes it. Expect: the word, by the exec's id; the exec's stdout end reads what
+/// the agent wrote, to its end, and the program's end as sent.
 #[test]
 fn a_given_answers_descriptor_at_its_first_byte_reaches_its_exec() {
     let (_dir, path, listener) = agent_socket();
@@ -233,6 +235,8 @@ fn a_given_answers_descriptor_at_its_first_byte_reaches_its_exec() {
         )
         .unwrap();
         conn.write_all(&given[half..]).unwrap();
+        let (t, taken) = next_request(&mut conn, &mut requests);
+        assert_eq!((t.id, taken), (h.id, Request::Taken));
         drop(end);
         here.write_all(b"from the agent\n").unwrap();
         drop(here);

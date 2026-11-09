@@ -21,7 +21,7 @@ use hex_core::stream::{self, Deframer, Exec, Named};
 use hex_core::wire::{self, Received};
 
 use crate::calls::{Core, KINDS, Lent, Sent, Shared, Transport, poisoned};
-use crate::copy::copy;
+use crate::copy::{copy, copy_in};
 
 /// The OS handle under a guest connection, which an event loop waits on: a file descriptor on Unix, a
 /// Winsock socket on Windows.
@@ -241,10 +241,7 @@ impl Transport for Stream {
         };
         let named = |stream| Named { exec, stream };
         if let Some(r) = stdio.stdin {
-            let conn = self.dial_named(named(stream::Stdio::In))?;
-            copy(r, conn, |conn| {
-                let _ = conn.shutdown(Shutdown::Write);
-            })?;
+            copy_in(r, self.dial_named(named(stream::Stdio::In))?)?;
         }
         if let Some(w) = stdio.stdout {
             copy(self.dial_named(named(stream::Stdio::Out))?, w, drop)?;
@@ -471,6 +468,8 @@ impl Pump {
                 }
             }
         }
+        // What the reads owe the agent goes behind what waits, and with it.
+        self.shared.send_owed_now();
         match self.flush() {
             Ok(true) => Pumped::ReadWrite,
             Ok(false) => Pumped::Read,

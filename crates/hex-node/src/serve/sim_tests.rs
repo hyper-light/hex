@@ -49,8 +49,6 @@ struct SimState {
     conns: BTreeMap<u64, (Arc<Sock>, Interest)>,
     /// Programs watched, by pid: their token, and whether they have ended.
     programs: BTreeMap<u32, (u64, bool)>,
-    /// Programs the OS's watch sent KILL ([`Os::kill`]).
-    killed: BTreeSet<u32>,
     /// Programs killed by their own runtime ([`Proc::kill`]).
     proc_killed: BTreeSet<u32>,
     /// Every pid the core asked to watch as a host process.
@@ -292,16 +290,6 @@ impl Os for SimOs {
         Ok(pid)
     }
 
-    fn kill(&self, watch: &u32) {
-        let mut s = self.lock();
-        s.killed.insert(*watch);
-        if let Some(p) = s.programs.get_mut(watch) {
-            p.1 = true;
-        }
-        drop(s);
-        self.poke();
-    }
-
     fn unwatch_program(&self, watch: u32) {
         self.lock().programs.remove(&watch);
     }
@@ -323,10 +311,8 @@ impl Os for SimOs {
     fn unwatch_source(&self, _: super::Handle<'_>, _: u64) {}
 }
 
-/// A program that ends when the simulated OS says it has. Killed by its own runtime ([`Proc::kill`]), it ends
-/// `Signal(9)`; killed through the OS's watch, it ends as an OS's own kill can read, not as its runtime's
-/// (Windows' `TerminateProcess` with exit code 1 reads `Code(1)`), so a core that kills a program through its
-/// watch rather than its `Proc` is seen.
+/// A program that ends when the simulated OS says it has, or `Signal(9)` once its own runtime kills it
+/// ([`Proc::kill`]).
 struct SimProc {
     pid: u32,
     os: Arc<SimOs>,
@@ -340,8 +326,6 @@ impl Proc for SimProc {
         let s = self.os.lock();
         Ok(if s.proc_killed.contains(&self.pid) {
             Some(Exit::Signal(9))
-        } else if s.killed.contains(&self.pid) {
-            Some(Exit::Code(1))
         } else if s.programs.get(&self.pid).is_none_or(|p| p.1) {
             Some(Exit::Code(0))
         } else {
@@ -830,7 +814,8 @@ fn a_programs_end_follows_its_start_and_its_watch_is_let_go() {
     });
 }
 
-/// HEX-SOCK-6 (the core), the disconnect rule: a program whose client goes is killed through the OS's
+/// HEX-SOCK-6 (the core), the disconnect rule: a program whose client goes is killed by its own runtime's kill
+/// (its `Proc::kill`, which tells its box's bookkeeping first, as macOS's watcher needs), never the OS's
 /// watch, reaped and counted in its box; execs past the programs bound are refused naming it.
 #[test]
 fn a_program_whose_client_goes_is_killed_and_counted_and_the_bound_holds() {
@@ -852,7 +837,11 @@ fn a_program_whose_client_goes_is_killed_and_counted_and_the_bound_holds() {
     wait_until("both programs to be counted in their box", || {
         lab.host.abandoned.lock().unwrap().len() == 2
     });
-    assert_eq!(lab.os.lock().killed.len(), 2);
+    let killed = lab.os.lock().proc_killed.len();
+    assert_eq!(
+        killed, 2,
+        "the disconnect rule didn't kill its programs by their own runtime"
+    );
     wait_until("the connection and watches to go", || {
         lab.connections() == 0 && lab.watched() == 0
     });
@@ -890,10 +879,6 @@ fn a_kill_ends_its_program_alone_and_its_end_is_sent() {
             .copied()
             .collect::<Vec<_>>(),
         [pids[0]]
-    );
-    assert!(
-        lab.os.lock().killed.is_empty(),
-        "a program was killed through the OS's watch"
     );
     assert!(!lab.os.ended(pids[1]), "the other program was ended");
     lab.os.put(&sock, request(10, Call::Kill { exec: 7 }));
@@ -951,8 +936,8 @@ fn a_guest_programs_end_comes_from_its_guest_and_no_host_pid_is_watched() {
 }
 
 /// HEX-SOCK-7 (the core), native plan step 8 (1): a kill of a guest program goes to its guest, is answered
-/// once the guest says it was sent, and its end, `Signal(9)`, comes as its exec's message; the OS is asked to
-/// kill nothing.
+/// once the guest says it was sent, and its end, `Signal(9)`, comes as its exec's message; no host program is
+/// killed.
 #[test]
 fn a_guest_programs_kill_goes_to_its_guest() {
     let lab = Lab::new();
@@ -966,7 +951,7 @@ fn a_guest_programs_kill_goes_to_its_guest() {
         got,
         [(7, Answer::Exited(Exit::Signal(9))), (8, Answer::Done)]
     );
-    assert!(lab.os.lock().killed.is_empty());
+    assert!(lab.os.lock().proc_killed.is_empty());
 }
 
 /// HEX-SOCK-6 (the core), native plan step 8 (1), the disconnect rule for a guest program: its client goes,
@@ -984,7 +969,7 @@ fn a_guest_program_whose_client_goes_is_killed_by_its_guest_and_counted() {
     wait_until("the connection and its program to go", || {
         lab.connections() == 0 && lab.watched() == 0
     });
-    assert!(lab.os.lock().killed.is_empty());
+    assert!(lab.os.lock().proc_killed.is_empty());
 }
 
 /// HEX-SOCK-7 (the core): an exec whose program the OS can't watch is refused, saying the node ended it.

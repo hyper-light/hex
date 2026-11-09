@@ -2,7 +2,7 @@
 //! the reader's turn, its hand-off, room waited for and the given answer's descriptors meet a real socket.
 
 use super::*;
-use hex_api::{BoxId, Class, Exit, Program, Runtime, Stdio};
+use hex_api::{Ask, BoxId, Class, Exit, Program, Runtime, Stdio};
 use hex_core::wire::{Answer, Call, Header, Limits, Request, Streams};
 use rustix::event::{PollFd, PollFlags, Timespec};
 use std::io::{Read, Write};
@@ -693,6 +693,8 @@ fn an_end_of_a_stream_its_exec_neither_carried_nor_asked_for_is_refused() {
             },
         };
         answer_with(&conn, exec, &given, &[end.as_fd()]);
+        let (t, taken, _) = next_request_with(&conn);
+        assert_eq!((t.id, taken), (exec.id, Request::Taken));
         let (k, kill, _) = next_request_with(&conn);
         answer_with(&conn, k, &Answer::Done, &[]);
         (exec.id, kill)
@@ -710,6 +712,285 @@ fn an_end_of_a_stream_its_exec_neither_carried_nor_asked_for_is_refused() {
     );
     let (exec, kill) = agent.join().unwrap();
     assert_eq!(kill, Request::Call(Call::Kill { exec }));
+}
+
+/// A given answer to `exec` with one end of a fresh socket pair as its stdout's, sent on `conn`.
+fn give_stdout(conn: &OwnedFd, exec: Header) {
+    let (_here, end) = rustix::net::socketpair(
+        AddressFamily::UNIX,
+        SocketType::STREAM,
+        SocketFlags::CLOEXEC,
+        None,
+    )
+    .unwrap();
+    let given = Answer::Given {
+        pid: 42,
+        given: Streams {
+            stdout: true,
+            ..Streams::default()
+        },
+    };
+    answer_with(conn, exec, &given, &[end.as_fd()]);
+}
+
+/// A caller's stdio asking for its program's stdout.
+fn asking_stdout() -> Stdio {
+    Stdio {
+        ask: Ask {
+            stdout: true,
+            ..Ask::default()
+        },
+        ..Stdio::null()
+    }
+}
+
+/// Native plan step 8, guest stdio (HEX-GUEST-41): the agent keeps its copies of a given answer's ends until its
+/// client says it took them: expect the client to say so (`Request::Taken`, by the exec's id) as the answer comes,
+/// before its caller acts on it, so the caller's next request, the release its dropped program sends, comes after.
+#[test]
+fn the_client_says_it_took_a_given_answers_ends_before_its_caller_acts_on_it() {
+    let (_dir, path, listener) = agent_socket();
+    let agent = std::thread::spawn(move || {
+        let conn = rustix::net::accept_with(&listener, SocketFlags::CLOEXEC).unwrap();
+        hello(&conn, 1);
+        let (exec, request, _) = next_request_with(&conn);
+        assert!(
+            matches!(&request, Request::Call(Call::ExecStreams { ask, .. }) if ask.stdout),
+            "{request:?}"
+        );
+        give_stdout(&conn, exec);
+        // What the client says from here to its caller's last word, the release its dropped program sends.
+        let mut said = Vec::new();
+        loop {
+            let (h, request, _) = next_request_with(&conn);
+            let last = request == Request::Release;
+            said.push((h.id, request));
+            if last {
+                return (exec.id, said);
+            }
+        }
+    });
+    let client = Client::connect(&path).unwrap();
+    let mut proc = client
+        .exec(
+            &BoxId::new("p").unwrap(),
+            Program::of(&["true"]),
+            asking_stdout(),
+        )
+        .unwrap();
+    assert!(proc.streams().unwrap().stdout.is_some());
+    drop(proc);
+    let (exec, said) = agent.join().unwrap();
+    assert_eq!(
+        said,
+        [(exec, Request::Taken), (exec, Request::Release)],
+        "the client's first word after the given answer wasn't that it took the ends"
+    );
+}
+
+/// The lead's word of 2026-11-09 on the client's `Taken` (HEX-GUEST-41): one that finds no room is queued, never lost,
+/// and goes out before any later request. Do: an exec asking for stdout is read; an exec whose request is as large as
+/// the client's send buffer (`filling`) is left unread, so no send finds room; the given answer comes, and once the
+/// exec has returned its program, the caller kills it; then the agent reads on. Expect: after the large request, the
+/// word that the given ends were taken, by the exec's id, then the kill, nothing between.
+#[test]
+fn a_taken_queued_for_room_goes_out_before_any_later_request() {
+    let (_dir, path, listener) = agent_socket();
+    let (exec_read, read) = std::sync::mpsc::channel();
+    let (large_held, held) = std::sync::mpsc::channel();
+    let (returned, exec_returned) = std::sync::mpsc::channel::<()>();
+    let agent = std::thread::spawn(move || {
+        let conn = rustix::net::accept_with(&listener, SocketFlags::CLOEXEC).unwrap();
+        hello(&conn, 3);
+        let (exec, request, _) = next_request_with(&conn);
+        assert!(
+            matches!(&request, Request::Call(Call::ExecStreams { .. })),
+            "{request:?}"
+        );
+        exec_read.send(()).unwrap();
+        let (large, request) = peek_request(&conn);
+        assert!(
+            matches!(request, Request::Call(Call::Exec { .. })),
+            "{request:?}"
+        );
+        large_held.send(()).unwrap();
+        give_stdout(&conn, exec);
+        exec_returned.recv().unwrap();
+        let (_, request) = next_request(&conn);
+        assert!(
+            matches!(request, Request::Call(Call::Exec { .. })),
+            "{request:?}"
+        );
+        let (t, taken) = next_request(&conn);
+        let (k, kill) = next_request(&conn);
+        answer(&conn, k.id, &Answer::Done);
+        answer(
+            &conn,
+            large.id,
+            &Answer::Refused(Refusal::NoSuchBox(BoxId::new("l").unwrap())),
+        );
+        (exec.id, (t.id, taken), kill, conn)
+    });
+    let client = Client::connect(&path).unwrap();
+    std::thread::scope(|s| {
+        let exec = s.spawn(|| {
+            client.exec(
+                &BoxId::new("p").unwrap(),
+                Program::of(&["true"]),
+                asking_stdout(),
+            )
+        });
+        read.recv().unwrap();
+        let program = filling(&client);
+        let large = s.spawn(|| client.exec(&BoxId::new("l").unwrap(), program, Stdio::null()));
+        held.recv().unwrap();
+        let mut proc = exec.join().unwrap().unwrap();
+        returned.send(()).unwrap();
+        proc.kill().unwrap();
+        assert!(large.join().unwrap().is_err());
+        drop(proc);
+    });
+    let (exec, taken, kill, conn) = agent.join().unwrap();
+    assert_eq!(taken, (exec, Request::Taken), "the word didn't come first");
+    assert_eq!(kill, Request::Call(Call::Kill { exec }));
+    drop(conn);
+}
+
+/// The lead's word of 2026-11-09 on the client's `Taken` (HEX-GUEST-41): with both sockets full the client's reader
+/// waits on neither itself nor the agent. The node agent reads no request while its answers wait for room, so a reader
+/// that waited for room to send its word, reading nothing meanwhile, would wait for good. Do: an exec asking for stdout
+/// is read; an exec as large as the client's send buffer is left unread (no send finds room); the agent sends the
+/// given answer, then more answers than its own send buffer holds, which wait until the client reads, and only then
+/// reads on. Expect: the large request, then the word that the given ends were taken, by the exec's id.
+#[test]
+fn a_taken_owed_with_both_sockets_full_goes_out_without_hanging() {
+    let (_dir, path, listener) = agent_socket();
+    let (exec_read, read) = std::sync::mpsc::channel();
+    let (large_held, held) = std::sync::mpsc::channel();
+    let agent = std::thread::spawn(move || {
+        let conn = rustix::net::accept_with(&listener, SocketFlags::CLOEXEC).unwrap();
+        hello(&conn, 3);
+        let (exec, request, _) = next_request_with(&conn);
+        assert!(
+            matches!(&request, Request::Call(Call::ExecStreams { .. })),
+            "{request:?}"
+        );
+        exec_read.send(()).unwrap();
+        let (large, request) = peek_request(&conn);
+        assert!(
+            matches!(request, Request::Call(Call::Exec { .. })),
+            "{request:?}"
+        );
+        large_held.send(()).unwrap();
+        give_stdout(&conn, exec);
+        more_than_room(&conn);
+        let (_, request) = next_request(&conn);
+        assert!(
+            matches!(request, Request::Call(Call::Exec { .. })),
+            "{request:?}"
+        );
+        let (t, taken) = next_request(&conn);
+        answer(
+            &conn,
+            large.id,
+            &Answer::Refused(Refusal::NoSuchBox(BoxId::new("l").unwrap())),
+        );
+        (exec.id, (t.id, taken), conn)
+    });
+    let client = Client::connect(&path).unwrap();
+    std::thread::scope(|s| {
+        let exec = s.spawn(|| {
+            client.exec(
+                &BoxId::new("p").unwrap(),
+                Program::of(&["true"]),
+                asking_stdout(),
+            )
+        });
+        read.recv().unwrap();
+        let program = filling(&client);
+        let large = s.spawn(|| client.exec(&BoxId::new("l").unwrap(), program, Stdio::null()));
+        held.recv().unwrap();
+        let proc = exec.join().unwrap().unwrap();
+        assert!(large.join().unwrap().is_err());
+        drop(proc);
+    });
+    let (exec, taken, conn) = agent.join().unwrap();
+    assert_eq!(taken, (exec, Request::Taken));
+    drop(conn);
+}
+
+/// Whether the write end `w` of a pipe has lost every reader, waiting at most `within`: Linux's pipe poll reports
+/// `POLLERR` on a write end whose readers are gone (`pipe_poll`, fs/pipe.c), asked or not.
+fn readerless(w: &std::io::PipeWriter, within: Duration) -> bool {
+    let mut ready = [PollFd::new(w, PollFlags::empty())];
+    let ts = Timespec {
+        tv_sec: i64::try_from(within.as_secs()).unwrap(),
+        tv_nsec: 0,
+    };
+    rustix::event::poll(&mut ready, Some(&ts)).unwrap() == 1
+        && ready[0].revents().contains(PollFlags::ERR)
+}
+
+/// Native plan step 8, guest stdio (HEX-GUEST-41): a guest program that ends without reading its stdin, its stdin's
+/// connection ending with it, while the caller holds its own stdin pipe open: expect the client to let the caller's
+/// pipe go with that connection's end, so the pipe has no reader once the program has ended, as a local program's
+/// own stdin pipe has none; never a copier left waiting on the caller.
+#[test]
+fn the_stdin_copier_lets_the_callers_pipe_go_when_its_programs_connection_ends() {
+    let (_dir, path, listener) = agent_socket();
+    let agent = std::thread::spawn(move || {
+        let conn = rustix::net::accept_with(&listener, SocketFlags::CLOEXEC).unwrap();
+        let (h, _, _) = next_request_with(&conn);
+        answer_with(&conn, h, &oci_hello(), &[]);
+        let (h, _, carried) = next_request_with(&conn);
+        assert_eq!(carried.len(), 1);
+        drop(carried);
+        let (stdin, stdin_end) = rustix::net::socketpair(
+            AddressFamily::UNIX,
+            SocketType::STREAM,
+            SocketFlags::CLOEXEC,
+            None,
+        )
+        .unwrap();
+        let given = Answer::Given {
+            pid: 42,
+            given: Streams {
+                stdin: true,
+                ..Streams::default()
+            },
+        };
+        answer_with(&conn, h, &given, &[stdin_end.as_fd()]);
+        drop(stdin_end);
+        // The program ends without reading its stdin: its connection ends with it.
+        drop(stdin);
+        answer_with(&conn, h, &Answer::Exited(Exit::Code(0)), &[]);
+        // Held open until the client has gone, as an agent's connection is.
+        let mut rest = [0u8; 64];
+        let _ = rustix::net::recv(&conn, &mut rest, RecvFlags::empty());
+    });
+    let client = Client::connect(&path).unwrap();
+    let (in_r, in_w) = std::io::pipe().unwrap();
+    let mut proc = client
+        .exec(
+            &BoxId::new("g").unwrap(),
+            Program::of(&["true"]),
+            Stdio {
+                stdin: Some(in_r),
+                ..Stdio::null()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        proc.wait_for(Duration::from_secs(30)).unwrap(),
+        Some(Exit::Code(0))
+    );
+    assert!(
+        readerless(&in_w, Duration::from_secs(30)),
+        "the client still reads the caller's stdin pipe after its program's connection ended"
+    );
+    drop(proc);
+    drop(client);
+    agent.join().unwrap();
 }
 
 /// This thread's voluntary context switches so far: each a wait it blocked in (proc(5), `/proc/thread-self/status`).

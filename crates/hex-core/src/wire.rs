@@ -28,6 +28,14 @@
 //! answers a message of another identity, its hello first, with its own hello and ends the connection, and the client
 //! refuses an answer of another identity. A reader also refuses bytes past what a kind's body holds rather than
 //! skip them, so nothing is dropped silently.
+//!
+//! The client says it took a given answer's ends ([`Request::Taken`], not answered, its header's id the exec's)
+//! before anything it sends after the answer; the node agent keeps its own copies of them until then, or until the
+//! connection closes, so no end is ever in flight with no other reference to it: XNU's collector of descriptors in
+//! flight flushes a socket whose only reference is a message in flight, and it arrives reading nothing (on macOS
+//! 26.4, 719 of 20,000 sent so arrived dead with the sender's copy closed at once, none with it kept until
+//! received). Kept ends hold their program's place among the programs until taken ([`Limits::programs`],
+//! [`Budgets::programs`]).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -116,6 +124,7 @@ mod kind {
     pub const KILL: u16 = 0x000c;
     pub const EXEC_STREAMS: u16 = 0x000d;
     pub const GIVEN: u16 = 0x800a;
+    pub const TAKEN: u16 = 0x000e;
 }
 
 /// A message's header, once its wire identity is read as this side's.
@@ -137,6 +146,9 @@ pub enum Request {
     /// dropped): the node agent stops watching it and lets it run on, as dropping an in-process `Proc`
     /// does. Not answered.
     Release,
+    /// The client took the ends of the streams its header's id's exec was given ([`Answer::Given`]), so the node
+    /// agent lets its own copies go. Not answered.
+    Taken,
 }
 
 /// A call of the node agent: the `Runtime` seam's, its network namespace counts, and a program's kill.
@@ -266,7 +278,8 @@ pub struct Hello {
 pub struct Budgets {
     /// Requests asked and not yet answered, on every connection together.
     pub in_flight: usize,
-    /// Programs execs started that the connections still watch, together.
+    /// Programs execs started that the connections still watch, or whose given ends their clients haven't yet said
+    /// they took ([`Request::Taken`]), together.
     pub programs: usize,
 }
 
@@ -280,7 +293,8 @@ pub struct Limits {
     /// Requests one connection may have asked and not yet had answered: the node keeps this many for each
     /// connection it admits, so one within it is never refused.
     pub in_flight: usize,
-    /// Programs one connection's execs started that it may still watch: kept for each connection likewise.
+    /// Programs one connection's execs started that it may still watch, or whose given ends its client hasn't yet
+    /// said it took ([`Request::Taken`]): kept for each connection likewise.
     pub programs: usize,
 }
 
@@ -394,6 +408,7 @@ pub fn request(id: u64, request: &Request, bound: usize) -> Result<Vec<u8>, Faul
             w.string(build)?;
         }
         Request::Release => w.header(kind::RELEASE, id),
+        Request::Taken => w.header(kind::TAKEN, id),
         Request::Call(call) => put_call(&mut w, id, call)?,
     }
     w.done()
@@ -581,6 +596,7 @@ fn parse_request(
             build: r.string("build").map_err(bad)?,
         },
         kind::RELEASE => Request::Release,
+        kind::TAKEN => Request::Taken,
         kind::CREATE => Request::Call(Call::Create(Box::new(box_spec(&mut r).map_err(bad)?))),
         kind::START => Request::Call(Call::Start(box_id(&mut r).map_err(bad)?)),
         kind::EXEC => {
@@ -824,6 +840,7 @@ fn request_name(kind: u16) -> &'static str {
         kind::NETNS => "a netns",
         kind::KILL => "a kill",
         kind::EXEC_STREAMS => "an exec asking for streams",
+        kind::TAKEN => "a taken",
         _ => "a request",
     }
 }
