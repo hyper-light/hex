@@ -3,8 +3,11 @@
 # and the default follows, with nothing else to edit.
 #
 # One line per way: the way (copy, empty, tree), then its create p50 through the seam in ms on a Linux 7.1+ bench
-# host of record and the run that measured it, or `unmeasured`. All three measured in one interleaved run: the
-# default is the fastest the node can take. Otherwise it is the prediction, in order of preference, with its basis.
+# host of record and the run that measured it, or `unmeasured`. All three measured in one record, the lines stand in
+# the order its reader ranked them (mntns_record.py, the lead's rule of 2026-11-09: by create p50 where a sign test on
+# the rounds below shows a difference at the record's 95%, else by part 19 p99 at the heaviest load, then create p99
+# there), and the default is the first of them the node can take. Otherwise it is the prediction, in order of
+# preference, with its basis.
 copy unmeasured
 empty unmeasured
 tree unmeasured
