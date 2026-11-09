@@ -1888,3 +1888,5 @@ mod linux_tests;
 mod macos_tests;
 #[cfg(test)]
 mod sim_tests;
+#[cfg(all(test, windows))]
+mod windows_tests;

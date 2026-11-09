@@ -983,4 +983,43 @@ mod tests {
         assert!(unenvelope(&[2u8, 1, 2, 3]).is_err());
         assert!(unenvelope(&[]).is_err());
     }
+
+    /// Native plan step 8, a host's own connection on the port (`watch_source` on Windows): do arm a socket's
+    /// watch for room on a fresh connection, then for reading while it is quiet, after a byte comes, and again
+    /// while that byte waits. Expect each arm reported once at most: at once when what it watches for holds
+    /// as it is armed (room, a byte waiting), not while the socket is quiet, and once when the byte comes.
+    #[test]
+    fn a_sockets_watch_reports_each_arm_once() {
+        use std::io::Write as _;
+        use std::os::windows::io::AsSocket as _;
+        const PATIENCE: Duration = Duration::from_secs(30);
+        const TAG: u64 = 7;
+        let port = Port::new().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let source = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        // The reports of the watch: the first waited for at most `patience`, then each queued with it.
+        let reports = |patience: Duration| {
+            let mut done = Vec::new();
+            port.wait(&mut done, Some(patience), 16).unwrap();
+            port.wait(&mut done, Some(Duration::ZERO), 16).unwrap();
+            done.iter()
+                .filter(|d| matches!(d, Done::Source(TAG)))
+                .count()
+        };
+        let watch = SourceWatch::new(TAG).unwrap();
+        watch.arm(&port, source.as_socket(), true).unwrap();
+        assert_eq!(reports(PATIENCE), 1, "a connection with room, armed for it");
+        watch.arm(&port, source.as_socket(), false).unwrap();
+        assert_eq!(reports(Duration::ZERO), 0, "a quiet connection");
+        peer.write_all(b"x").unwrap();
+        assert_eq!(reports(PATIENCE), 1, "a connection a byte came to");
+        watch.arm(&port, source.as_socket(), false).unwrap();
+        assert_eq!(
+            reports(PATIENCE),
+            1,
+            "a connection armed again while its byte waits"
+        );
+        watch.stop(source.as_socket());
+    }
 }
