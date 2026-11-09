@@ -138,6 +138,10 @@ static DEVFS: Patience = Patience::measuring("test.oci_box.devfs");
 static AHEAD: Patience = Patience::measuring("test.oci_box.ahead");
 static DROPPED: Patience = Patience::measuring("test.oci_box.dropped");
 static SEED_RESTARTED: Patience = Patience::measuring("test.oci_box.seed_restarted");
+/// An orphan, let go, ending and reaped by the agent it was handed to: not a program's run, whose record the program-run
+/// one is (waits-census-20261109T161828Z's suites ran this wait out at that record's 78.26 ms in all 79 loops), and made
+/// by no recorded operation. Measuring, for the fact alone.
+static ORPHAN_REAPED: Patience = Patience::measuring("test.oci_box.orphan_reaped");
 static LOADER: Patience = Patience::measuring("test.oci_box.loader");
 
 /// Re-runs the test `name` in a transient systemd --user scope with `Delegate=yes`, so it gets a cgroup of its
@@ -4182,7 +4186,7 @@ fn orphans_are_reaped(lab: &Lab, own: &Path) {
     );
     std::fs::write(&fifo, b"go\n").unwrap();
     wait_for(
-        &PROGRAM_RUN,
+        &ORPHAN_REAPED,
         || !Path::new(&format!("/proc/{orphan}")).exists(),
         "the ended orphan to be reaped",
     );
