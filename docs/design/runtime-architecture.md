@@ -2021,10 +2021,12 @@ made in two parts.
   The node probes for `OPEN_TREE_NAMESPACE` once at start with an `open_tree` that makes nothing (an empty path at
   descriptor -1: `EBADF` where the call is there, `EINVAL` where it isn't, `EPERM` where the agent may not;
   `goal6-mntns.md` §6). The default follows its record, `bench/competitive/probes/mntns_default.txt`, which the
-  runtime reads at build (`mntns::RECORD`). Once all three ways have a create p50 from one interleaved run on a 7.1+
-  bench host of record, the default is the fastest this node can take. Until then it is the record's stated
-  prediction, `OpenTree` first by the hold count above. Changing the record changes the default, with nothing else
-  to edit. The record's A/B asks a node it builds for each way in turn (`Node::with_mount_namespace`: `copy`, `empty`
+  runtime reads at build (`mntns::RECORD`). Once all three ways are measured in one record on a 7.1+ bench host, the
+  default is the first this node can take in the record's order, as its reader ranked them: by create p50 where a
+  sign test on the rounds below shows a difference at the record's 95%, else by part 19 p99 at the heaviest load,
+  then create p99 there (the lead's rule of 2026-11-09). Until then it is the record's stated prediction, `OpenTree`
+  first by the hold count above. Changing the record changes the default, with nothing else to edit. The record's A/B
+  asks a node it builds for each way in turn (`Node::with_mount_namespace`: `copy`, `empty`
   or `tree`; seam_oci's `HEX_OCI_MNTNS`, read by the bench's node alone); a `hex node` takes its default and reads no
   environment for it (Ada's 2026-11-06 rule), with no switch back to an older way. A namespace from its tree asked where the probe doesn't find it is
   refused by type at the first create. Empty asked where the kernel lacks the flag is served by the seed's copy. Each
@@ -2091,14 +2093,16 @@ made in two parts.
   and the fallback is counted.
 - HEX-MNTNS-4, containment: `escapes_are_contained` and the shared-source leak test pass on each way.
 - HEX-MNTNS-5, the bench: goal 0's seam driver shows create p50 on the new path below the classic path's in the same
-  run, on a host with Linux 7.0 or later.
+  run, on a host with Linux 7.0 or later (the record's phase A: the classic root by `Node::with_classic_roots`, a test
+  control, interleaved with the ways).
 - HEX-MNTNS-6, the proc made ahead: a spec's masks and read-only paths beneath `/proc` come with it, as ordinary
   construction makes them; the init is its namespace's pid 1; each ineligible spec is counted by its reason (unit and
   `oci_box`).
 - HEX-MNTNS-8, masked directories: every masked directory of every box on a root node is one filesystem, the
   node's, on the pruned path and through the shim (`oci_box`, as root, on 6.19 and 7.2).
-- HEX-MNTNS-9, the default follows its record: a measured record orders the ways by create p50; an unmeasured one
-  takes its prediction; a hostile record is refused by type; the record built in names today's default (unit).
+- HEX-MNTNS-9, the default follows its record: a measured record's own order, as its reader ranked the ways; an
+  unmeasured one takes its prediction; a hostile record is refused by type; the record built in is measured and names
+  today's default, the copy (unit).
 - HEX-MNTNS-7, Ada's under-load bar: part 19's p99 at most 0.5 ms at 8 in flight with 8,000 idle threads, at 6 and 12
   busy loops at nice 0 on the same cores, with Docker's default paths, and the whole create's p99 lower with it; no
   priority, nice, RT or slice change.
@@ -2109,6 +2113,21 @@ made in two parts.
 - A shared source's mount reaching the agent from a container on either new way would falsify their containment.
 - For part 2: part 19's p99 under 6 and 12 loops not falling below the bar with the prepared trees, or the whole
   create's p99 not falling with it. Either would falsify the claim that the tail is the init's own work.
+
+**The record (goal 6, 2026-11-09).** <!-- record: bench/competitive/RESULT.md -->On adacachy2 (Linux 7.3.3),
+mntns-host-20261109T171050Z ("Goal 6 of record"), in two phases: A, the classic root interleaved with the three ways;
+B, the ways alone, since the classic arm's whole-namespace copies and detached old roots on the mount lock reach the
+ways' bursts (rec17's part 19 tails, 2-6x).
+- Against the classic path (phase A), the default's create p50 is 0.315 / 0.334 ms against 1.696 / 1.828 at 6 loops
+  and 0.445 / 0.725 against 2.368 / 3.822 at 12, below it in 292-299 of 299 rounds, and its create p99 is lower in
+  every cell: HEX-MNTNS-5 holds. That comparison counts goal 5's prune and its pools with this decision's ways.
+- The three ways tie at create p50 (phase B: no way's p50 below each other's by a sign test at 95% over 1,196 rounds).
+  So the tail ranks them, part 19 p99 at 12 loops: copy 183 µs, empty 243, tree 457. The default is the copy, as the
+  update's falsifier for part 1 foresaw (`OpenTree`'s create p50 not below the pruned path's). From its tree and empty
+  stay detected, counted, and a node's to ask for (`Node::with_mount_namespace`).
+- Part 2 holds: the default's part 19 p99 is 185 µs at 6 loops and 183 at 12, with the prepared trees and Docker's
+  paths, under the 0.5 ms bar (Ada's, HEX-MNTNS-7), and the whole create's p99 fell with it against the classic
+  path.<!-- /record -->
 
 ### 7. The process class: no wrapper per box
 

@@ -747,6 +747,87 @@ out/20261105T082351Z 0.219x, 0.043x, 0.236x, 0.126x (libcrun 65.19) and reuse on
 and reuse on out/20261105T125319Z 0.190x, 3.20x, 0.166x, 0.659x. Each in the column order above, in process. The
 p99.9 ratios move with libcrun's own tail (5 to 65 ms across them) while Hex's held at 2 to 4 ms until the tail cut.
 
+## Goal 6 of record: mount namespaces without copying (2026-11-09, adacachy2)
+
+The bar (runtime design goal 6, decision 6; the lead's goal 17): on Linux 7.0 and later create builds the container's
+mount namespace from its tree (`OPEN_TREE_NAMESPACE`), and on 7.1 empty (`CLONE_EMPTY_MNTNS`), detected at runtime,
+the classic path remaining for older kernels, create-time hooks and user namespaces. Done when (1) goal 0's seam driver
+on a 7.0+ bench host shows create p50 on the new path below the classic path's in the same run; (2) the faster path is
+the default; (3) runtime-tools passes the 28 tests crun passes; (4) Ada's under-load bar: part 19's p99 at most 0.5 ms
+at 8 in flight with 8,000 idle threads, 6 and 12 busy loops at nice 0 on the same cores, Docker's default masked and
+read-only paths, the whole create's p99 improving with it, and no priority, nice, RT or slice change.
+
+The record: `mntns_record.sh host` at cp/t7-g6 0c29b3ec on adacachy2 (Linux 7.3.3-1-cachyos, both calls native; AMD
+Ryzen 9 9950X3D2; the cells on CPUs 8-15,24-31, the L3 domain without CPU 0), run mntns-host-20261109T171050Z, load1
+13.7-28 over its cells. In process through seam_oci's serve phase: rounds.py interleaves the arms round by round, each
+round's order rotated and the host's load read, 299 rounds after one warmup a cell (Ada's rule for a p99 claim at 95%),
+8 lifecycles at 8 in flight a burst, 8,000 idle threads, owner bundles with reuse on and Docker's masked and read-only
+paths, untraced and then traced (part 19 to the init's chdir). Two phases, each best of 2 at 6 and 12 loops:
+
+- **A**, the classic root and the three ways interleaved, for the verdicts against the classic root. The classic arm
+  is a root node built by hex-node's test control `Node::with_classic_roots`, its creates counted under
+  `ClassicReason::Baseline`. Its seeds keep the agent's mount namespace, so each init copies it, binds the rootfs and
+  its mounts, `pivot_root`s, detaches the old root, and makes its own `/dev` and masked directories, as the classic
+  path does. The record refuses an arm whose creates weren't all that.
+- **B**, the three ways alone, for part 19's bar and the default. The first record with the classic arm, rec17
+  (mntns-host-20261109T165122Z at 3c19be23, every arm in one phase), had every way's part 19 p99 at 2-6x the c45b03f
+  record's (empty 104/135 µs at 12 loops became 805/717). A probe over its traces put the slowest 1% at 12 loops 80%
+  blocked in `move_mount` and `mount_setattr` (switched out not runnable, where those wait on the mount lock, whose
+  holders the trace can't name: `kptr_restrict` hides `namespace_sem`), preempted 15%, on a CPU 3%. The classic arm's
+  whole-namespace copies and detached old roots on that lock were the suspect, so the bar and the default are read
+  without it. In this record the ways' part 19 p99 at 12 loops is 178-459 µs in phase A too, at the same load: rec17's
+  tails were mostly the host at the time.
+
+| phase | loads | arm | create p50, ms (p1 / p2) | create p99, ms (p1 / p2) | part 19 p99, µs (p1 / p2) |
+|---|---|---|---|---|---|
+| B | 6 | copy | 0.325 / 0.320 | 0.817 / 0.692 | 185 / 121 |
+| B | 6 | empty | 0.324 / 0.318 | 0.749 / 0.746 | 130 / 144 |
+| B | 6 | tree | 0.327 / 0.326 | 0.763 / 0.767 | 159 / 140 |
+| B | 12 | copy | 0.471 / 0.440 | 2.390 / 1.973 | 183 / 211 |
+| B | 12 | empty | 0.472 / 0.436 | 2.668 / 1.782 | 243 / 294 |
+| B | 12 | tree | 0.492 / 0.445 | 2.780 / 1.611 | 457 / 246 |
+| A | 6 | copy | 0.315 / 0.334 | 0.775 / 0.850 | 343 / 155 |
+| A | 6 | classic | 1.696 / 1.828 | 2.766 / 3.113 | 22,595 / 3,056 |
+| A | 12 | copy | 0.445 / 0.725 | 2.305 / 5.440 | 323 / 178 |
+| A | 12 | classic | 2.368 / 3.822 | 10.813 / 17.168 | 8,941 / 16,147 |
+
+- **(1) met.** In phase A the default (copy) against the classic root: create p50 0.315 / 0.334 ms against 1.696 /
+  1.828 at 6 loops, and 0.445 / 0.725 against 2.368 / 3.822 at 12, below it in 298, 298, 299 and 292 of 299 rounds.
+- **(2) met, by the default rule** (the lead's, 2026-11-09): p50 decides only where a one-sided sign test on the rounds
+  below, over every timed round of phase B, shows a difference at 95%; otherwise part 19 p99 at the heaviest load does,
+  then create p99 there. No way's p50 is below each other's (copy below tree in 658 of 1,196 rounds, below empty in 604,
+  tree below empty in 533; 627 needed). The ways tie at p50, as every run before had them: tree and empty below the copy
+  in 124-161 of 299 rounds, cell by cell, a coin flip that had picked the default by noise. Part 19 p99 at 12 loops,
+  best of 2: copy 183 µs, empty 243, tree 457 (the other pass 211, 294, 246). So the default is the copy, then empty,
+  then tree (mntns_default.txt; HEX-MNTNS-9, HEX-MNTNS-1, with `mntns::order` taking a measured record in its own
+  order). The new calls stay detected and a node's to ask for (`Node::with_mount_namespace`).
+- **(3) met.** runtime-tools: hex passes 28 of the 28 tests crun 1.27 passes.
+- **(4) met.** Phase B, the default (copy): part 19 p99 185 µs (the other pass 121) at 6 loops and 183 (211) at 12,
+  under the 500 µs bar; every way at most 457 µs at 12 loops. Against the classic root the whole create's p99 improved
+  in all four cells of phase A. No priority, nice, RT or slice change.
+- **The caveat.** Classic against the default measures goal 5's prune, with the node's `/dev` and masked-directory
+  pools the classic init makes its own of, and goal 6's ways together: it is the comparison the goal's text names. Goal
+  6's own record of the ways is each new way against the copy in phase B: tree's create p50 below the copy's in 0 of 2
+  passes at each load, empty's in 2 of 2 at 6 loops and 1 of 2 at 12, inside the tie the sign test reads. Phase A's
+  second pass at 12 loops met load1 25-27, the ways' create p99 at 5.4-7.3 ms there and the classic root's at 17.2.
+
+On the way:
+- **L1, taken** (red caddac84, green 9bee9c97). A parked init leads its session (`setsid`) once it has said it is
+  parked, before its claim, so neither the create that claims it nor the delete that parked it takes the reschedule its
+  move to a new autogroup forces (kernel/sched/core.c `sched_move_task`). In the c45b03f record's traces at 12 busy
+  loops it was a mean of 128.8 µs of every claimed create (p99 1,618), mostly preempted.
+- **Pre-faulting at park, measured and not taken.** A claimed init takes 23-26 page faults between its run and its
+  ready: 15-17 on text, which fork leaves unmapped in the child, 4-6 copy-on-write and 2-3 first touches, about 0.87 µs
+  each. `MADV_POPULATE_READ` of the binary's 587 text pages costs 28.4 µs median in a fresh process on adacachy2,
+  against the 10-14 µs the claim's text faults cost. That is CPU at park traded for latency at create, which loses
+  throughput (the lead, 2026-11-09).
+- **The init's second parse, measured and held in reserve.** bench spec_parse (46c95d30, release, 299 fresh processes,
+  the record's 1,567-byte spec; unit hex-g6-specparse-20261109T165100Z): the first parse and check 15.8 µs median (21.4
+  p99) with 9 faults, warm 8.2; `Spec::check` alone 0.08 µs; the claim's decode 0.67 µs first. A handoff the init reads
+  without JSON would save an estimated 8-10 µs a create. It needs a format beside Hex's own wire format and must survive
+  an upgrade between a node and a seed of another build, which JSON does by construction, so it waits (the lead,
+  2026-11-09).
+
 ## What the run shows
 
 - **OCI class: Hex misses the bar, and crun is the competitor to beat.**

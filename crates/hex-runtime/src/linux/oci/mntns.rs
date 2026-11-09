@@ -269,13 +269,22 @@ mod tests {
         }
     }
 
-    /// HEX-MNTNS-9, doc truth: read the record built in. Expect it valid, and its default on a 7.x node the one
-    /// decision 6's update names today (from its tree, predicted), the copy on 6.19.
+    /// HEX-MNTNS-9, doc truth: read the record built in. Expect it valid and measured, no way unmeasured, and its
+    /// default the first of its lines a node can take: the copy, by its tail, on a 7.x node and on 6.19 alike (goal
+    /// 17's record, mntns-host-20261109T171050Z at 0c29b3ec: no way's create p50 below each other's at 95%, the copy's
+    /// part 19 p99 the lowest at 12 loops).
     #[test]
     fn the_record_built_in_reads_and_names_todays_default() {
+        assert!(
+            !RECORD
+                .lines()
+                .filter(|l| !l.trim_start().starts_with('#'))
+                .any(|l| l.contains("unmeasured")),
+            "the record built in is measured: no way's line says unmeasured"
+        );
         assert_eq!(
             default_way(OpenTreeNamespace::Available).unwrap(),
-            MountNamespace::FromTree
+            MountNamespace::Copy
         );
         assert_eq!(
             default_way(OpenTreeNamespace::Absent).unwrap(),
@@ -283,13 +292,13 @@ mod tests {
         );
     }
 
-    /// HEX-MNTNS-1: choose with and without a way asked, on each probe's answer; expect from its tree by
-    /// default where it can be made and the copy otherwise, each word taken where it can be served, the
-    /// tree refused by type where it can't, and an unknown word refused.
+    /// HEX-MNTNS-1: choose with and without a way asked, on each probe's answer; expect the record's default (the
+    /// copy, goal 17's record) where nothing is asked, whatever the probe finds, each word taken where it can be
+    /// served, the tree refused by type where it can't, and an unknown word refused.
     #[test]
     fn a_node_takes_the_way_asked_where_it_can_and_else_its_default() {
         use OpenTreeNamespace::*;
-        assert_eq!(choose(Available, None).unwrap(), MountNamespace::FromTree);
+        assert_eq!(choose(Available, None).unwrap(), MountNamespace::Copy);
         assert_eq!(choose(NotPermitted, None).unwrap(), MountNamespace::Copy);
         assert_eq!(choose(Absent, None).unwrap(), MountNamespace::Copy);
         for probe in [Available, NotPermitted, Absent] {
