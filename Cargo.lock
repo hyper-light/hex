@@ -307,6 +307,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hex-gpu"
+version = "0.1.0"
+dependencies = [
+ "cap",
+ "libc",
+ "tempfile",
+ "thiserror",
+ "windows-sys",
+]
+
+[[package]]
 name = "hex-health"
 version = "0.1.0"
 dependencies = [
