@@ -1082,7 +1082,7 @@ fn the_programs_bound_is_the_boxes_within_the_hard_descriptor_limit() {
         .unwrap_or(u64::MAX);
     let sizes = crate::sizes::Sizes::now().unwrap();
     assert_eq!(
-        u64::try_from(super::limits(&sizes).programs).unwrap(),
+        u64::try_from(super::limits(&sizes.platform()).programs).unwrap(),
         hard.min(u64::try_from(hex_runtime::MAX_BOXES).unwrap())
     );
 }
