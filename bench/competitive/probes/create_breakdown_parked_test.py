@@ -6,7 +6,11 @@ the path, and no root to switch, the init's root made when it parked.
 Run: python3 -B -I bench/competitive/probes/create_breakdown_parked_test.py
 Its fixtures are that run's first traced create, l000001, from its traced and its detailed trace (testdata/parked.*).
 """
+import contextlib
+import io
+import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -59,6 +63,34 @@ class ParkedClaim(unittest.TestCase):
             self.assertIsNot(cb.ops_for(path), cb.PARKED_OPS)
             (call,), _ = eb.calls(path, cb.PARKED_OPS)
             self.assertIn("forked", call.get("missing", ""))
+
+    def test_a_parked_runs_summary_says_where_its_create_goes(self):
+        # create-breakdown-20261109T164604Z (the lead's run at ee5f4d77) cut every create but its summary failed:
+        # KeyError "the shim's spawn and exec", the levers' table taking a run with no seed for the shim path. Do:
+        # summarize a run of one round, its traced create the fixture's, and one untraced between. Expect: its parts and
+        # a parked claim's levers, against a quarter of libcrun's create p50.
+        def lifecycle(warmup, ms):
+            return {"errors": {}, "warmup": warmup, "phases": {"lifecycle": {"ms": {"create": ms}}}}
+
+        with tempfile.TemporaryDirectory() as run:
+            with open(os.path.join(run, "env.txt"), "w") as f:
+                f.write("host: test\n")
+            for kind, body in (("libcrun", lifecycle(1, [0.66, 0.67])), ("seam", lifecycle(1, [0.17, 0.18])),
+                               ("traced", lifecycle(1, [0.228, 0.170]))):
+                with open(os.path.join(run, f"{kind}.r1.json"), "w") as f:
+                    json.dump(body, f)
+            shutil.copy(TRACED, os.path.join(run, "traced.r1.txt"))
+            open(os.path.join(run, "traced.r1.stats"), "w").close()
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                cb.summarize(run)
+            text = out.getvalue()
+            self.assertIn("## Create through the seam, in parts (1 traced creates)", text)
+            self.assertIn("## Where a parked claim's create goes", text)
+            self.assertIn(f"| {cb.REQUEST} |", text)
+            with open(os.path.join(run, "summary.json")) as f:
+                levers = json.load(f)["levers"]
+            self.assertAlmostEqual(levers["target_ms"], eb.dist([0.66, 0.67])["p50"] / 4)
 
 
 if __name__ == "__main__":
