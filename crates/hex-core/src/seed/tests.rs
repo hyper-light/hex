@@ -59,6 +59,7 @@ fn creates() -> Vec<Create> {
             mount_namespace: MountNamespace::Copy,
             proc_mount: None,
             masked_directory: false,
+            fixed: Fixed::All,
         },
         Create {
             bundle: "/b".to_owned(),
@@ -74,6 +75,7 @@ fn creates() -> Vec<Create> {
             mount_namespace: MountNamespace::Copy,
             proc_mount: None,
             masked_directory: false,
+            fixed: Fixed::All,
         },
         // A pruned create (goal 5 plan step 2): no network, four fixed descriptors, two bind trees and
         // one namespace joined by path.
@@ -91,6 +93,7 @@ fn creates() -> Vec<Create> {
             mount_namespace: MountNamespace::Copy,
             proc_mount: None,
             masked_directory: false,
+            fixed: Fixed::All,
         },
     ]
 }
@@ -942,4 +945,112 @@ fn a_park_reads_back_as_written_and_its_bytes_are_recorded() {
     let mut long = bytes.clone();
     long.push(0);
     assert!(read_message(&long, long.len(), PARK_FDS).is_err());
+}
+
+/// The lead's (B) of 2026-11-09 (decision 8's claim), HEX-SEED-2/3: a pruned create carrying only the descriptors its init
+/// reads does so in a new kind (9), whose bytes are the older kinds' create with its checked spec (kind 5), then the
+/// proc's option, the way and the masked directories' flag as kind 7 has them, whatever the way, then whether the cgroup
+/// directory rides; a create of the older layout keeps its kind and its bytes. Expect: no map pipe and no bundle directory
+/// counted, and the cgroup directory only where it rides (a seed's clone, never a parked init's claim); each reads back as
+/// written with those descriptors and with no other count; every truncation, a trailing byte and a cgroup byte neither 0
+/// nor 1 refused, and no bit flip panics; a lean create that isn't pruned refused; and one without its checked spec not
+/// written.
+#[test]
+fn a_lean_create_carries_only_what_its_init_reads_in_its_new_kind() {
+    let ordinary = Create {
+        config: true,
+        ..creates()[2].clone()
+    };
+    let old = create(&ordinary).unwrap();
+    for cgroup in [false, true] {
+        let lean = Create {
+            fixed: Fixed::Lean { cgroup },
+            ..ordinary.clone()
+        };
+        let bytes = create(&lean).unwrap();
+        assert_eq!(&bytes[..6], &old[..6]);
+        assert_eq!(u16::from_le_bytes(bytes[6..8].try_into().unwrap()), 9);
+        assert_eq!(&bytes[8..old.len()], &old[8..]);
+        assert_eq!(
+            &bytes[old.len()..],
+            &[0, 0, 0, u8::from(cgroup)],
+            "no prepared proc, the copy, no masked directory's source, then the cgroup directory's flag"
+        );
+        assert_eq!(
+            lean.fds(),
+            ordinary.fds() - 2 - usize::from(!cgroup),
+            "no map pipe and no bundle directory; the cgroup directory where it rides"
+        );
+        assert_eq!(
+            read_message(&bytes, bytes.len(), lean.fds()).unwrap(),
+            Message::Create(lean.clone())
+        );
+        for got in [lean.fds() - 1, lean.fds() + 1, ordinary.fds()] {
+            assert!(
+                matches!(
+                    read_message(&bytes, bytes.len(), got),
+                    Err(Fault::Descriptors { .. })
+                ),
+                "a lean create with {got} descriptors"
+            );
+        }
+        for len in 0..bytes.len() {
+            assert!(read_create(&bytes[..len], len).is_err(), "{len} bytes read");
+        }
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(read_create(&trailing, trailing.len()).is_err());
+        let mut two = bytes.clone();
+        *two.last_mut().unwrap() = 2;
+        assert!(read_create(&two, two.len()).is_err());
+        for bit in 0..bytes.len() * 8 {
+            let mut flipped = bytes.clone();
+            flipped[bit / 8] ^= 1 << (bit % 8);
+            let _ = read_message(&flipped, flipped.len(), lean.fds());
+        }
+    }
+    // A way named, a prepared `/dev` and proc and the masked directories' source ride as kind 7 has them, the flag after.
+    let named = Create {
+        mount_namespace: MountNamespace::FromTree,
+        dev_mount: Some(4),
+        proc_mount: Some(3),
+        masked_directory: true,
+        ..ordinary.clone()
+    };
+    let seven = create(&named).unwrap();
+    let lean = Create {
+        fixed: Fixed::Lean { cgroup: false },
+        ..named.clone()
+    };
+    let bytes = create(&lean).unwrap();
+    assert_eq!(u16::from_le_bytes(bytes[6..8].try_into().unwrap()), 9);
+    assert_eq!(&bytes[8..seven.len()], &seven[8..]);
+    assert_eq!(&bytes[seven.len()..], &[0]);
+    assert_eq!(lean.fds(), named.fds() - 3);
+    assert_eq!(
+        read_message(&bytes, bytes.len(), lean.fds()).unwrap(),
+        Message::Create(lean)
+    );
+    // Only a pruned create is lean: a classic create's init may ask for its maps, or stop for its hooks, on the map pipe.
+    let unpruned = create(&Create {
+        pruned: false,
+        binds: 0,
+        path_joins: 0,
+        fixed: Fixed::Lean { cgroup: false },
+        ..ordinary.clone()
+    })
+    .unwrap();
+    assert!(matches!(
+        read_create(&unpruned, unpruned.len()),
+        Err(Fault::Value { what: "fixed", .. })
+    ));
+    // It carries the spec its runtime checked, as every create of this build does.
+    assert!(matches!(
+        create(&Create {
+            config: false,
+            fixed: Fixed::Lean { cgroup: true },
+            ..ordinary
+        }),
+        Err(Fault::Value { what: "config", .. })
+    ));
 }

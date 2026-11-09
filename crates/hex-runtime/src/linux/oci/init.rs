@@ -246,6 +246,7 @@ fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
 /// namespaces, owned by the seed's user namespace — so the runtime makes such a container through the shim
 /// instead ([`needs_shim`]). A network namespace made ahead (`network`) is joined in place of the fresh
 /// one the clone left out. Then the shared [`container`] setup, born in the cgroup (`procs` is `None`).
+/// It leads a session of its own already ([`lead_session`]: a fresh clone's first act, a parked init's at park).
 /// Returns only on the no-process case or an error (the caller reports `E`).
 pub(crate) fn clone_child(
     spec: &Spec,
@@ -255,7 +256,6 @@ pub(crate) fn clone_child(
     map: Option<OwnedFd>,
     network: Option<OwnedFd>,
 ) -> Result<(), OciError> {
-    lead_session()?;
     if spec.makes_namespace("user") {
         let map = map
             .as_ref()
@@ -306,7 +306,6 @@ pub(crate) fn clone_child_pruned(
     network: Option<OwnedFd>,
     ipc_uts: Option<Pair>,
 ) -> Result<(), OciError> {
-    lead_session()?;
     // A namespace made from the rootfs's tree is joined first, before anything else the init does, so
     // nothing happens in the seed's namespace, which the init shares until then (cloned without
     // `CLONE_NEWNS`). `setns` takes no mount lock and sets the init's root and working directory to the
@@ -429,15 +428,19 @@ fn prepared_dev() -> Result<Option<super::run::PreparedDev>, OciError> {
 }
 
 /// Makes the init the leader of a session of its own (and of its process group), as runc's and crun's inits do, so
-/// nothing it or its program does reaches the agent's session or group. It is the init's first act: at Linux v6.19
-/// every `setsid` moves the caller to a new autogroup through `sched_move_task`, which reschedules a running task
-/// whether its group changed or not (kernel/sched/autogroup.c:177-188, kernel/sched/core.c:9123-9128). Taken
-/// first, that pass through the scheduler meets a task freshly placed by its clone; taken mid-build, it met one
-/// that had run its share, and under another tenant's load it waited about a millisecond for the CPU back
-/// (docs/research/runtime/goal5-mounts.md §8). Its allocations aren't charged to a memory cgroup (`GFP_KERNEL`
-/// without `__GFP_ACCOUNT`, autogroup.c:89, fair.c `alloc_fair_sched_group`), so it may come before the shim's
-/// child joins its cgroup.
-fn lead_session() -> Result<(), OciError> {
+/// nothing it or its program does reaches the agent's session or group. It is a fresh init's first act (the shim's
+/// child's, and a seed's clone's, `seed::How::lead_session`): at Linux v6.19 every `setsid` moves the caller to a new
+/// autogroup through `sched_move_task`, which reschedules a running task whether its group changed or not
+/// (kernel/sched/autogroup.c:177-188, kernel/sched/core.c:9123-9128). Taken first, that pass through the scheduler
+/// meets a task freshly placed by its clone; taken mid-build, it met one that had run its share, and under another
+/// tenant's load it waited about a millisecond for the CPU back (docs/research/runtime/goal5-mounts.md §8). An init
+/// parked ahead takes it at park, once it has said it is parked (`seed::parked`), so neither the create that claims
+/// it nor the delete that parked it waits on it (goal 17, lever L1): taken first on a claim, the record's traced
+/// rounds at 12 busy loops put it at a mean of 128.8 us of every create, p99 1,618 us, mostly preempted
+/// (mntns-host-20261108T220817Z). Its allocations aren't charged to a memory cgroup (`GFP_KERNEL` without
+/// `__GFP_ACCOUNT`, autogroup.c:89, fair.c `alloc_fair_sched_group`), so it may come before the shim's child joins its
+/// cgroup.
+pub(crate) fn lead_session() -> Result<(), OciError> {
     rustix::process::setsid()
         .map(|_| ())
         .map_err(|e| OciError::os("setsid", e))

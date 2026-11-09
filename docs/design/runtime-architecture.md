@@ -1635,9 +1635,12 @@ This takes it off create's path on a root node, with no new kernel version (deci
   of the host beneath the container's root. A rootless seed can't own a mount namespace without a user namespace of its
   own, so it doesn't prune and its node takes the classic path (below).
 - **What the seed read by path, it is given as descriptors.** A pruned seed can reach no host path, so the create
-  carries, over `SCM_RIGHTS` with its existing pipes (`hex_core::seed::Create`, extended append-only): an `O_PATH`
-  descriptor for the bundle directory (to read `config.json`), the container's cgroup directory, the container's state
-  directory (the exec FIFO's), the rootfs as a detached tree, and one detached tree per bind source. The node agent,
+  carries, over `SCM_RIGHTS` with its sync pipe (`hex_core::seed::Create`, extended append-only), what its init reads:
+  an `O_PATH` descriptor for the container's state directory (the exec FIFO's), the rootfs as a detached tree, one
+  detached tree per bind source and, for a seed's clone, the container's cgroup directory it is born in. A parked
+  init's claim carries no cgroup directory, its init being in its cgroup already, and no pruned create carries the map
+  pipe (a user namespace's maps and the hooks' state, which the pruned path never has) or the bundle directory (the
+  spec rides checked, AC-T7.1.1): kind 9, the lead's (B) of 2026-11-09. The node agent,
   in its own (host) mount namespace, clones each source with `open_tree(OPEN_TREE_CLONE | AT_RECURSIVE)` while the host
   filesystem is still reachable, as crun opens every mount ahead for its `OPEN_TREE_NAMESPACE` path (f17, f73), sets a
   read-only source read-only on its tree (`mount_setattr`) before sending, and closes its copies once the seed answers;
@@ -2021,10 +2024,12 @@ made in two parts.
   The node probes for `OPEN_TREE_NAMESPACE` once at start with an `open_tree` that makes nothing (an empty path at
   descriptor -1: `EBADF` where the call is there, `EINVAL` where it isn't, `EPERM` where the agent may not;
   `goal6-mntns.md` §6). The default follows its record, `bench/competitive/probes/mntns_default.txt`, which the
-  runtime reads at build (`mntns::RECORD`). Once all three ways have a create p50 from one interleaved run on a 7.1+
-  bench host of record, the default is the fastest this node can take. Until then it is the record's stated
-  prediction, `OpenTree` first by the hold count above. Changing the record changes the default, with nothing else
-  to edit. The record's A/B asks a node it builds for each way in turn (`Node::with_mount_namespace`: `copy`, `empty`
+  runtime reads at build (`mntns::RECORD`). Once all three ways are measured in one record on a 7.1+ bench host, the
+  default is the first this node can take in the record's order, as its reader ranked them: by create p50 where a
+  sign test on the rounds below shows a difference at the record's 95%, else by part 19 p99 at the heaviest load,
+  then create p99 there (the lead's rule of 2026-11-09). Until then it is the record's stated prediction, `OpenTree`
+  first by the hold count above. Changing the record changes the default, with nothing else to edit. The record's A/B
+  asks a node it builds for each way in turn (`Node::with_mount_namespace`: `copy`, `empty`
   or `tree`; seam_oci's `HEX_OCI_MNTNS`, read by the bench's node alone); a `hex node` takes its default and reads no
   environment for it (Ada's 2026-11-06 rule), with no switch back to an older way. A namespace from its tree asked where the probe doesn't find it is
   refused by type at the first create. Empty asked where the kernel lacks the flag is served by the seed's copy. Each
@@ -2091,14 +2096,16 @@ made in two parts.
   and the fallback is counted.
 - HEX-MNTNS-4, containment: `escapes_are_contained` and the shared-source leak test pass on each way.
 - HEX-MNTNS-5, the bench: goal 0's seam driver shows create p50 on the new path below the classic path's in the same
-  run, on a host with Linux 7.0 or later.
+  run, on a host with Linux 7.0 or later (the record's phase A: the classic root by `Node::with_classic_roots`, a test
+  control, interleaved with the ways).
 - HEX-MNTNS-6, the proc made ahead: a spec's masks and read-only paths beneath `/proc` come with it, as ordinary
   construction makes them; the init is its namespace's pid 1; each ineligible spec is counted by its reason (unit and
   `oci_box`).
 - HEX-MNTNS-8, masked directories: every masked directory of every box on a root node is one filesystem, the
   node's, on the pruned path and through the shim (`oci_box`, as root, on 6.19 and 7.2).
-- HEX-MNTNS-9, the default follows its record: a measured record orders the ways by create p50; an unmeasured one
-  takes its prediction; a hostile record is refused by type; the record built in names today's default (unit).
+- HEX-MNTNS-9, the default follows its record: a measured record's own order, as its reader ranked the ways; an
+  unmeasured one takes its prediction; a hostile record is refused by type; the record built in is measured and names
+  today's default, the copy (unit).
 - HEX-MNTNS-7, Ada's under-load bar: part 19's p99 at most 0.5 ms at 8 in flight with 8,000 idle threads, at 6 and 12
   busy loops at nice 0 on the same cores, with Docker's default paths, and the whole create's p99 lower with it; no
   priority, nice, RT or slice change.
@@ -2109,6 +2116,21 @@ made in two parts.
 - A shared source's mount reaching the agent from a container on either new way would falsify their containment.
 - For part 2: part 19's p99 under 6 and 12 loops not falling below the bar with the prepared trees, or the whole
   create's p99 not falling with it. Either would falsify the claim that the tail is the init's own work.
+
+**The record (goal 6, 2026-11-09).** <!-- record: bench/competitive/RESULT.md -->On adacachy2 (Linux 7.3.3),
+mntns-host-20261109T171050Z ("Goal 6 of record"), in two phases: A, the classic root interleaved with the three ways;
+B, the ways alone, since the classic arm's whole-namespace copies and detached old roots on the mount lock reach the
+ways' bursts (rec17's part 19 tails, 2-6x).
+- Against the classic path (phase A), the default's create p50 is 0.315 / 0.334 ms against 1.696 / 1.828 at 6 loops
+  and 0.445 / 0.725 against 2.368 / 3.822 at 12, below it in 292-299 of 299 rounds, and its create p99 is lower in
+  every cell: HEX-MNTNS-5 holds. That comparison counts goal 5's prune and its pools with this decision's ways.
+- The three ways tie at create p50 (phase B: no way's p50 below each other's by a sign test at 95% over 1,196 rounds).
+  So the tail ranks them, part 19 p99 at 12 loops: copy 183 µs, empty 243, tree 457. The default is the copy, as the
+  update's falsifier for part 1 foresaw (`OpenTree`'s create p50 not below the pruned path's). From its tree and empty
+  stay detected, counted, and a node's to ask for (`Node::with_mount_namespace`).
+- Part 2 holds: the default's part 19 p99 is 185 µs at 6 loops and 183 at 12, with the prepared trees and Docker's
+  paths, under the 0.5 ms bar (Ada's, HEX-MNTNS-7), and the whole create's p99 fell with it against the classic
+  path.<!-- /record -->
 
 ### 7. The process class: no wrapper per box
 
@@ -2376,6 +2398,7 @@ RFC's floor and constants are TCP's clocks'; a calibration read leaves the first
 | --- | --- | --- | --- |
 | a seed's hang bound and the shell's wait for its answer (createpool `ANSWER_PATIENCE`) | 30 s, copied | 2 × max(record, seen) | `seeds::CLONE_SLOWEST`, the `seeds.hang` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 29.565 ms, debug 100.815 ms<!-- /record --> |
 | a create's wait in line for a seed (`seeds`' line) | 1 s, picked | the same | the same record: a create in line waits for a busy seed's answer |
+| a claim's wait for its parked init's first word on its sync pipe (createpool `CLAIMS`; the lead's (A) of 2026-11-09, no early answer) | the seeds' hang bound, for the init's answer | learned | MEASURING: the `parked.ready` rows, from a census run with it in |
 | a record change's wait for the same box's (`WRITE_PATIENCE`) | 60 s, picked | learned, refused by type past it | the `store.turns` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 3.136 ms, debug 54.401 ms<!-- /record --> |
 | a create or delete's wait for the same box's (`TURN_PATIENCE`) | 120 s, picked | learned, from the holder's take | the `node.turns` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 43.627 ms, debug 305.809 ms<!-- /record --> |
 | a killed box's emptying, its programs' reaping and its init's end (`EMPTY_PATIENCE`, cgroups' `REMOVE_PATIENCE`), and a stopping server's wait for the programs it ended (serve `STOP_PATIENCE`) | 60 s each, picked or copied | learned from each kill to empty | the `node.emptying` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 19.771 ms, debug 127.753 ms<!-- /record --> |
@@ -2398,8 +2421,8 @@ seeds' core (`refused_busy`, `refused_waited`), never sent through the shim: one
 ruling of 2026-11-06 under Ada's rule; it replaced the shim fallback, `ClassicReason::NoSeed`). Seeds grow ahead under
 the pool rule from the persisted learned peak, so a node's next start begins where the last peaked. The shim stays
 for its named consumer alone: a spec a seed can't serve (the classic reasons).
-A parked init that doesn't answer a claim already falls back to a seed's clone: the claim borrows the request, whose
-descriptors stay the runtime's.
+A parked init that refuses its claim, ends, or says nothing within the claim's patience falls back to a seed's clone:
+the claim borrows the request, whose descriptors stay the runtime's.
 
 **What would falsify it.** A healthy node retiring seeds as hung, or refusing a call or a record write, for an
 answer more than twice the record's slowest and the node's: then the record's distribution is narrower than the

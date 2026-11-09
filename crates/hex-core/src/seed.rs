@@ -20,9 +20,9 @@
 //! the container init's pidfd, by which the program joins the init's namespaces (`setns(2)` with a pidfd
 //! joins several at once, and names that process, never a later one given its pid). The container's
 //! cgroup isn't a descriptor: the request names its path, which the seed opens. A [`Create`] carries
-//! [`CREATE_FDS`]: the write end of the pipe on which the container's init tells the agent it is
-//! ready, and the container's cgroup directory, which its init is born in; then, when it says so, the
-//! network namespace made ahead that the init joins. [`Answer::Started`] carries the pidfd of the
+//! first the write end of the pipe on which the container's init tells the agent it is ready and, in
+//! the older kinds, the read end of its map pipe ([`Fixed`]); then, when it says so, the network
+//! namespace made ahead that the init joins. [`Answer::Started`] carries the pidfd of the
 //! process the seed started, the program or the container's init, which the agent's supervisor
 //! watches; [`Answer::Refused`] carries none. A node spawns its seeds from the `hex` binary it is
 //! given (the bench names one), so the two sides can be of different builds: a reader refuses another
@@ -52,14 +52,20 @@ pub const MAX_ANSWER: usize = 4 << 10;
 pub const MAX_WHY: usize = 2 << 10;
 /// Descriptors an exec request carries: stdin, stdout, stderr, the container init's pidfd.
 pub const REQUEST_FDS: usize = 4;
-/// Descriptors a create carries first, always: the write end of the init's sync pipe and the read end
-/// of its map pipe.
+/// Descriptors a create of the older kinds carries first ([`Fixed::All`]): the write end of the init's sync pipe and
+/// the read end of its map pipe. A lean create carries [`LEAN_FDS`].
 pub const CREATE_FDS: usize = 2;
-/// Descriptors a pruned create carries after the network namespace, before the bind-source trees
+/// Descriptors a lean create carries first ([`Fixed::Lean`]): the write end of the init's sync pipe alone.
+pub const LEAN_FDS: usize = 1;
+/// Descriptors a pruned create of the older kinds carries after the network namespace, before the bind-source trees
 /// (goal 5 plan step 2): the bundle directory (to read `config.json`), the container's cgroup
 /// directory, the container's state directory (the exec FIFO's), and the rootfs as a detached tree.
-/// A pruned seed reaches no host path, so each comes as a descriptor.
+/// A pruned seed reaches no host path, so each comes as a descriptor. A lean create carries
+/// [`LEAN_PRUNED_FIXED_FDS`] there.
 pub const PRUNED_FIXED_FDS: usize = 4;
+/// Descriptors a lean create carries there ([`Fixed::Lean`]): the container's state directory and the rootfs, after the
+/// cgroup directory where it rides.
+pub const LEAN_PRUNED_FIXED_FDS: usize = 2;
 /// Most namespaces a pruned create joins by path, each a descriptor the agent opened (its host path
 /// out of the pruned seed's reach): the network, ipc, uts and cgroup kinds — a pid or user namespace by
 /// path is made through the shim instead, a mount namespace by path too (goal 5 plan step 2).
@@ -104,6 +110,10 @@ mod kind {
     /// A request that parks an init ahead in a slot's cgroup, its flags and its two descriptors (decision 8). Appended
     /// after goal 6's CREATE_MOUNT_NAMESPACE, which took 0x0007 first on this tree.
     pub const PARK: u16 = 0x0008;
+    /// A pruned create carrying only the descriptors its init reads ([`super::Fixed::Lean`]; the lead's (B) of
+    /// 2026-11-09): CREATE_MOUNT_NAMESPACE's body whatever the way, then whether the cgroup directory rides. A create of
+    /// the older layout keeps its kind and its bytes.
+    pub const CREATE_LEAN: u16 = 0x0009;
     pub const STARTED: u16 = 0x8001;
     pub const REFUSED: u16 = 0x8002;
     /// A started answer, then how the init's mount namespace was made.
@@ -150,7 +160,8 @@ pub struct Request {
 /// [`PRUNED_FIXED_FDS`] (the bundle directory, the cgroup directory, the state directory and the rootfs
 /// tree), then `binds` bind-source trees in the order the spec lists its bind mounts. The agent cloned
 /// each with `open_tree` in its own mount namespace and sends them here. Last ride an ipc and a uts namespace made
-/// ahead, when `ipc_uts` says so (goal 5 extended, step 4).
+/// ahead, when `ipc_uts` says so (goal 5 extended, step 4). A lean create ([`Fixed::Lean`]) carries only what its
+/// init reads: no map pipe and no bundle directory, and the cgroup directory only for a seed's clone.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Create {
     /// The container's bundle, whose `config.json` gives its namespaces and the init's set-up.
@@ -201,6 +212,23 @@ pub struct Create {
     /// Whether the node's one empty read-only tmpfs rides after the proc, which the init clones for each masked
     /// directory in place of a tmpfs of its own (decision 6's update): no superblock per mask.
     pub masked_directory: bool,
+    /// Which of the fixed descriptors ride ([`Fixed`]): all of them in every older kind; in the new CREATE_LEAN kind, a
+    /// pruned create's alone, only those its init reads.
+    pub fixed: Fixed,
+}
+
+/// Which of a create's fixed descriptors ride (the lead's (B) of 2026-11-09, decision 8's claim).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Fixed {
+    /// The older kinds' (1 to 7): the map pipe's read end after the sync pipe's write end, then on the pruned path the
+    /// bundle and cgroup directories before the state directory and the rootfs ([`CREATE_FDS`], [`PRUNED_FIXED_FDS`]).
+    #[default]
+    All,
+    /// A pruned create's in kind 9: only what its init reads. No map pipe, which carries a user namespace's maps and the
+    /// create-time hooks' state, neither of which a pruned create has; no bundle directory, since the spec rides
+    /// checked ([`Create::config`]); and the cgroup directory only where `cgroup`, for a seed's clone, which is born in
+    /// it, never for a parked init's claim, whose init is in its cgroup already.
+    Lean { cgroup: bool },
 }
 
 /// Descriptors a prepared proc adds to a create: its pid namespace and its tree.
@@ -242,14 +270,23 @@ impl MountNamespace {
 }
 
 impl Create {
-    /// How many descriptors this create carries: the two pipes always, then a network namespace made
-    /// ahead when there is one, then on the pruned path the four fixed descriptors, one tree per bind
-    /// mount, one descriptor per namespace joined by path, a prepared `/dev` and an ipc and uts pair.
+    /// How many descriptors this create carries: the pipes ([`Fixed`]: both in the older kinds, the sync pipe's
+    /// alone in a lean create), then a network namespace made ahead when there is one, then on the pruned path the
+    /// fixed descriptors (the four of the older kinds, or a lean create's two and the cgroup directory where it
+    /// rides), one tree per bind mount, one descriptor per namespace joined by path, a prepared `/dev` and an ipc and
+    /// uts pair.
     pub fn fds(&self) -> usize {
-        let mut n = CREATE_FDS.saturating_add(usize::from(self.network));
+        let (first, fixed) = match self.fixed {
+            Fixed::All => (CREATE_FDS, PRUNED_FIXED_FDS),
+            Fixed::Lean { cgroup } => (
+                LEAN_FDS,
+                LEAN_PRUNED_FIXED_FDS.saturating_add(usize::from(cgroup)),
+            ),
+        };
+        let mut n = first.saturating_add(usize::from(self.network));
         if self.pruned {
             n = n
-                .saturating_add(PRUNED_FIXED_FDS)
+                .saturating_add(fixed)
                 .saturating_add(self.binds as usize)
                 .saturating_add(self.path_joins as usize)
                 .saturating_add(usize::from(self.dev_mount.is_some()))
@@ -434,21 +471,27 @@ pub fn create(create: &Create) -> Result<Vec<u8>, Fault> {
     let named = create.mount_namespace != MountNamespace::Copy
         || create.proc_mount.is_some()
         || create.masked_directory;
-    // That kind is CREATE_CONFIG's with more, so it carries the checked spec, as every create of this build does.
-    if named && !create.config {
+    let lean = match create.fixed {
+        Fixed::All => None,
+        Fixed::Lean { cgroup } => Some(cgroup),
+    };
+    // Those kinds are CREATE_CONFIG's with more, so they carry the checked spec, as every create of this build does.
+    if (named || lean.is_some()) && !create.config {
         return Err(Fault::value(
             "config",
-            "a create that names its mount namespace carries the spec its runtime checked",
+            "a create that names its mount namespace, or carries only what its init reads, \
+             carries the spec its runtime checked",
         ));
     }
     header(
         &mut w,
-        match (named, create.config, create.ipc_uts, create.dev_mount) {
-            (true, _, _, _) => kind::CREATE_MOUNT_NAMESPACE,
-            (false, true, _, _) => kind::CREATE_CONFIG,
-            (false, false, true, _) => kind::CREATE_AHEAD,
-            (false, false, false, Some(_)) => kind::CREATE_PREPARED,
-            (false, false, false, None) => kind::CREATE,
+        match (lean, named, create.config, create.ipc_uts, create.dev_mount) {
+            (Some(_), _, _, _, _) => kind::CREATE_LEAN,
+            (None, true, _, _, _) => kind::CREATE_MOUNT_NAMESPACE,
+            (None, false, true, _, _) => kind::CREATE_CONFIG,
+            (None, false, false, true, _) => kind::CREATE_AHEAD,
+            (None, false, false, false, Some(_)) => kind::CREATE_PREPARED,
+            (None, false, false, false, None) => kind::CREATE,
         },
     );
     w.string(&create.bundle)?;
@@ -460,17 +503,21 @@ pub fn create(create: &Create) -> Result<Vec<u8>, Fault> {
     w.u32(create.path_joins);
     // CREATE_PREPARED's index is bare, as that kind's bytes have it; CREATE_AHEAD's is an option, since a pair rides
     // with or without a prepared `/dev`; CREATE_CONFIG's is an option, then the pair's flag; CREATE_MOUNT_NAMESPACE's
-    // is CREATE_CONFIG's, then the proc's index, the way and the masked directories' flag.
-    if create.config || named {
+    // is CREATE_CONFIG's, then the proc's index, the way and the masked directories' flag; CREATE_LEAN's is
+    // CREATE_MOUNT_NAMESPACE's whatever the way, then the cgroup directory's flag.
+    if create.config {
         w.option_with(create.dev_mount, |w, mount| {
             w.u32(mount);
             Ok(())
         })?;
         w.bool(create.ipc_uts);
-        if named {
+        if named || lean.is_some() {
             w.option(create.proc_mount, Writer::u32);
             w.u8(create.mount_namespace.code());
             w.bool(create.masked_directory);
+        }
+        if let Some(cgroup) = lean {
+            w.bool(cgroup);
         }
     } else if create.ipc_uts {
         w.option_with(create.dev_mount, |w, mount| {
@@ -500,6 +547,7 @@ pub fn read_create(bytes: &[u8], size: usize) -> Result<Create, Fault> {
             | kind::CREATE_AHEAD
             | kind::CREATE_CONFIG
             | kind::CREATE_MOUNT_NAMESPACE
+            | kind::CREATE_LEAN
     ) {
         return Err(Fault::Kind {
             kind,
@@ -517,38 +565,51 @@ pub fn read_create(bytes: &[u8], size: usize) -> Result<Create, Fault> {
         path_joins: r.u32()?,
         dev_mount: match kind {
             kind::CREATE_PREPARED => Some(r.u32()?),
-            kind::CREATE_AHEAD | kind::CREATE_CONFIG | kind::CREATE_MOUNT_NAMESPACE => {
-                r.option(|r| r.u32())?
-            }
+            kind::CREATE_AHEAD
+            | kind::CREATE_CONFIG
+            | kind::CREATE_MOUNT_NAMESPACE
+            | kind::CREATE_LEAN => r.option(|r| r.u32())?,
             _ => None,
         },
         ipc_uts: match kind {
             kind::CREATE_AHEAD => true,
-            kind::CREATE_CONFIG | kind::CREATE_MOUNT_NAMESPACE => r.bool("ipc_uts")?,
+            kind::CREATE_CONFIG | kind::CREATE_MOUNT_NAMESPACE | kind::CREATE_LEAN => {
+                r.bool("ipc_uts")?
+            }
             _ => false,
         },
-        config: matches!(kind, kind::CREATE_CONFIG | kind::CREATE_MOUNT_NAMESPACE),
+        config: matches!(
+            kind,
+            kind::CREATE_CONFIG | kind::CREATE_MOUNT_NAMESPACE | kind::CREATE_LEAN
+        ),
         mount_namespace: MountNamespace::Copy,
         proc_mount: None,
         masked_directory: false,
+        fixed: Fixed::All,
     };
-    if kind == kind::CREATE_MOUNT_NAMESPACE {
+    if matches!(kind, kind::CREATE_MOUNT_NAMESPACE | kind::CREATE_LEAN) {
         create.proc_mount = r.option(Reader::u32)?;
         create.mount_namespace = MountNamespace::of(r.u8()?).ok_or_else(|| {
             Fault::value("mount_namespace", "no mount namespace is made that way")
         })?;
         create.masked_directory = r.bool("masked_directory")?;
-        // A create with none of these has its old kinds: one encoding a value, so it is refused here.
-        if create.mount_namespace == MountNamespace::Copy
-            && create.proc_mount.is_none()
-            && !create.masked_directory
-        {
-            return Err(Fault::value(
-                "mount_namespace",
-                "a create in this kind is made empty or from its tree, or carries a proc or a \
-                 masked directory's source",
-            ));
-        }
+    }
+    // A create with none of these has its old kinds: one encoding a value, so it is refused here.
+    if kind == kind::CREATE_MOUNT_NAMESPACE
+        && create.mount_namespace == MountNamespace::Copy
+        && create.proc_mount.is_none()
+        && !create.masked_directory
+    {
+        return Err(Fault::value(
+            "mount_namespace",
+            "a create in this kind is made empty or from its tree, or carries a proc or a \
+             masked directory's source",
+        ));
+    }
+    if kind == kind::CREATE_LEAN {
+        create.fixed = Fixed::Lean {
+            cgroup: r.bool("cgroup_dir")?,
+        };
     }
     r.end(kind, version)?;
     if create.bundle.is_empty() || create.dir.is_empty() {
@@ -594,6 +655,13 @@ pub fn read_create(bytes: &[u8], size: usize) -> Result<Create, Fault> {
             "only a pruned create's mount namespace is made empty or from its tree, or carries a proc",
         ));
     }
+    if !create.pruned && create.fixed != Fixed::All {
+        return Err(Fault::value(
+            "fixed",
+            "only a pruned create carries only what its init reads: a classic create's init \
+             may ask for its maps, or stop for its hooks, on the map pipe",
+        ));
+    }
     if create.fds() > MAX_REQUEST_FDS {
         return Err(Fault::value(
             "dev_mount",
@@ -614,7 +682,8 @@ pub fn read_message(bytes: &[u8], size: usize, fds: usize) -> Result<Message, Fa
         | kind::CREATE_PREPARED
         | kind::CREATE_AHEAD
         | kind::CREATE_CONFIG
-        | kind::CREATE_MOUNT_NAMESPACE => {
+        | kind::CREATE_MOUNT_NAMESPACE
+        | kind::CREATE_LEAN => {
             let create = read_create(bytes, size)?;
             let want = create.fds();
             (Message::Create(create), want)
