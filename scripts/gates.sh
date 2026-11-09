@@ -11,15 +11,16 @@ targets() { rustup target add "$@" >&2; }
 gate cargo fmt --all --check
 # Linux on both arches, glibc and musl (the Shards guest's hex is musl aarch64): named, so the host's
 # own target is named too.
-targets x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-unknown-linux-musl
+targets x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-unknown-linux-musl
 gate cargo clippy --workspace --all-targets --locked --target x86_64-unknown-linux-gnu \
-  --target aarch64-unknown-linux-gnu --target aarch64-unknown-linux-musl -- -D warnings
+  --target aarch64-unknown-linux-gnu --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl -- -D warnings
 # The same lints for macOS and Windows (checking needs no linker or SDK while the code is pure Rust).
-targets aarch64-apple-darwin x86_64-apple-darwin
-gate cargo clippy --workspace --all-targets --locked --target aarch64-apple-darwin \
-  --target x86_64-apple-darwin -- -D warnings
-targets x86_64-pc-windows-msvc
-gate cargo clippy --workspace --all-targets --locked --target x86_64-pc-windows-msvc -- -D warnings
+# macOS on aarch64 alone; Windows on both arches (Ada, 2026-11-09: "AMD 64 and ARM64 excepting MacOS x86_64").
+targets aarch64-apple-darwin
+gate cargo clippy --workspace --all-targets --locked --target aarch64-apple-darwin -- -D warnings
+targets x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+gate cargo clippy --workspace --all-targets --locked --target x86_64-pc-windows-msvc \
+  --target aarch64-pc-windows-msvc -- -D warnings
 gate bash scripts/check-production.sh
 # A skipped test says so in the skip record (crates/hex-testkit), which libtest's capture can't hide:
 # emptied before the tests, printed after them, pass or fail (HEX-GATE-1).

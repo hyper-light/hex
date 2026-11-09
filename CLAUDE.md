@@ -80,7 +80,8 @@ depth-first on the call stack. Work is flat: loops with counted budgets and boun
 
 ## 12. Portable
 
-Linux, macOS and Windows, on x86_64 and aarch64. Platform code sits behind `cfg` with a portable path
+Linux (glibc and musl), macOS and Windows, on x86_64 and aarch64, but for macOS on x86_64 (Ada, 2026-11-09:
+"windows, macos, and linux (of most any major flavor) compatible. AMD 64 and ARM64 excepting MacOS x86_64"). Platform code sits behind `cfg` with a portable path
 beside it, or a typed refusal naming the platform. `unsafe` is denied; where an OS interface needs it,
 its file is named here with the reason, and every block carries a `// SAFETY:` comment stating its
 invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at its top):
@@ -243,9 +244,9 @@ the first failure; kiln CI runs it on every push and pull request (`.kiln/ci.yam
 
 ```
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --locked --target x86_64-unknown-linux-gnu --target aarch64-unknown-linux-gnu --target aarch64-unknown-linux-musl -- -D warnings
-cargo clippy --workspace --all-targets --locked --target aarch64-apple-darwin --target x86_64-apple-darwin -- -D warnings
-cargo clippy --workspace --all-targets --locked --target x86_64-pc-windows-msvc -- -D warnings
+cargo clippy --workspace --all-targets --locked --target x86_64-unknown-linux-gnu --target aarch64-unknown-linux-gnu --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl -- -D warnings
+cargo clippy --workspace --all-targets --locked --target aarch64-apple-darwin -- -D warnings
+cargo clippy --workspace --all-targets --locked --target x86_64-pc-windows-msvc --target aarch64-pc-windows-msvc -- -D warnings
 bash scripts/check-production.sh
 cargo test --workspace --locked
 python3 scripts/vendor.py check
