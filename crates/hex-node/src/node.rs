@@ -1594,7 +1594,7 @@ impl Runtime for Node {
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
         // A spec is checked before anything else, as the simulator checks it: what can't be rendered,
         // and an owner not well formed, is refused by name whether or not the id is taken (HEX-RT-13,
-        // HEX-RT-14).
+        // HEX-RT-18); then an oci box's init is held to its class's exec bound (HEX-RT-14).
         spec.check()?;
         if let ClassSpec::Oci(oci) = &spec.class {
             oci.init.fits(&process::exec_limit())?;
