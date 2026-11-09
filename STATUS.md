@@ -399,7 +399,15 @@ three different things (CLAUDE.md "Working here"):
     libcrun's 2.750; the container's root, its mounts and pivot_root, is 0.894 ms of it and the device program 0.276.
     Without the root, the device program and the cgroup's making, 0.825 ms is left, 1.2x goal 5's bar, so the bar
     needs a lever beyond the three added. Step 6 follows the added steps.
-  - goal 6 (mount namespaces without copying) — open.
+  - goal 6 (mount namespaces without copying) — met on its record (2026-11-09, adacachy2, Linux 7.3.3,
+    mntns-host-20261109T171050Z at cp/t7-g6 0c29b3ec; `RESULT.md`, "Goal 6 of record"), run in two phases, A the
+    classic root interleaved with the ways and B the ways alone, since the classic arm's mount work reaches the ways'
+    part 19: (1) the default's create p50 below the classic path's in every cell, 292-299 of 299 rounds; (2) the
+    default by the lead's rule, the copy: the ways tie at create p50 by a sign test at 95%, and the copy's part 19 p99
+    is the lowest; (3) runtime-tools 28 of 28; (4) part 19 p99 185 and 183 µs at 6 and 12 loops, and the whole create's
+    p99 lower than the classic path's in every cell. Classic against the default counts goal 5's prune and pools with
+    goal 6's ways. Held in reserve: the init's JSON parse of the checked spec (15.8 µs first, 8.2 warm). Closed once
+    merged and gated.
 - **The scheduler's architecture** (`docs/design/scheduler-architecture.md`, decided): goodput over
   balance, a sampled fast path with an optimiser tier, suitability filters on declared needs, Vivaldi
   proximity on hyper-swim, priority/fair-share/gangs/preemption, correctness against a serial
