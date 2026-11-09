@@ -32,7 +32,7 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   recovery.
 - **The node agent's local socket** (goal 3, plan step 4; decision 3 of `docs/design/runtime-architecture.md`):
   `hex node --socket <path> --state <dir>` serves the `Runtime` seam on a Unix `SOCK_SEQPACKET` socket, in a
-  versioned wire format that changes append-only (`hex-core::wire`, a pure core with version 1's bytes recorded),
+  wire whose identity is a digest of its definitions, a peer of another wire refused at the hello (`hex-core::wire`, a pure core),
   exec's stdio crossing as `SCM_RIGHTS` descriptors and a program's end coming back as a message. `hex-client` is a
   `Runtime` over it, and the conformance suite (HEX-RT-1 to 13) passes against it over a live `hex node`, on `oci`
   and `process` boxes. Its bounds (connections, message size, requests in flight, programs watched) are refused
@@ -589,7 +589,7 @@ this step's to build.
   seed the pool was starting (`probes/seed_path.md`), in the tail goal 5's p99.9 (plan step 6) reads. Closes with
   the pool keeping enough seeds started for the rate it serves, shown by a sustained phase with none waited.
 - **The create seeds' counts aren't on the socket.** `Node::create_seeds` reads them in process only. Closes with
-  an append-only wire call for them, as decision 4's counts got.
+  a wire call for them, as decision 4's counts got.
 - **A seed that dies after its clone but before it answers is untested.** Its cleanup is the shim path's. Closes
   with a crash test at that point.
 - **oci_spec_box fails in Docker Desktop's VM.** Its kernel (6.12.65-linuxkit) puts fallback tunnel devices in

@@ -251,7 +251,8 @@ The person's standing rules (kiln's master plan §8):
 - Build with `nice -n 10` and your own `CARGO_TARGET_DIR`. Heavy builds and benchmarks go to fedora or
   jupiter: adacachy runs production. A benchmark takes its slot on kiln's bench calendar.
 - No bare `git stash`; rebase and squash only onto a fixed SHA; gate every push on every check's exit
-  code; wire formats change append-only.
+  code. The node's wire has one identity, a digest of its definitions (`hex_core::wire::IDENTITY`): change it
+  as the work needs, and a peer of another wire is refused at the hello, typed, naming both (Ada, 2026-11-09).
 - Built, merged and live are three different things: say which.
 
 ## Where things are
