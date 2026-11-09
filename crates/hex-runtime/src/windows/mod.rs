@@ -293,7 +293,7 @@ impl WinRuntime {
                 ),
             });
         };
-        spec.bounds.check()?;
+        spec.check()?;
         let b = match &spec.class {
             ClassSpec::Process => Held::Process(Arc::new(JobBox::take_back(
                 spec.id.clone(),
@@ -554,7 +554,7 @@ impl Runtime for WinRuntime {
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
-        spec.bounds.check()?;
+        spec.check()?;
         if self.boxes()?.contains_key(&spec.id) {
             return Err(Refusal::Exists(spec.id));
         }

@@ -278,7 +278,7 @@ impl Runtime for MacRuntime {
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
-        spec.bounds.check()?;
+        spec.check()?;
         let ClassSpec::Process = spec.class else {
             return Err(Refusal::Platform {
                 what: "the oci class",

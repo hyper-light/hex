@@ -676,7 +676,7 @@ impl Runtime for GuestRuntime {
                 why: "the node's guest runs the oci class; process boxes are the host's".to_owned(),
             });
         }
-        spec.bounds.check()?;
+        spec.check()?;
         // Refused as on any node, naming the field, before anything is mapped, staged or booted.
         if let ClassSpec::Oci(oci) = &spec.class {
             rewrite::check(oci)?;
