@@ -198,6 +198,16 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   (`CM_Get_Device_Interface_List_SizeW`, `CM_Get_Device_Interface_ListW`) and whether each opens from where
   it runs (`CreateFileW`, a query open). Rust can express none of these
   foreign calls, the function pointers resolved at run time, nor a handle value crossing processes, safely.
+- `crates/hex-gpu/src/nvml/sys.rs`: hex-gpu's NVIDIA telemetry (`docs/design/gpu-telemetry.md` G1). It loads
+  NVML at run time, so a node without NVIDIA's driver starts and says why it reads no NVIDIA GPU: `dlopen`,
+  `dlsym` and `dlerror` on Linux, `LoadLibraryExW` from System32 alone and `GetProcAddress` on Windows, each
+  resolved address transmuted to its NVML function's type (nvml.h). Through those pointers it calls
+  `nvmlInit_v2`, `nvmlSystemGetDriverVersion`, `nvmlDeviceGetCount_v2`, `nvmlDeviceGetHandleByIndex_v2`,
+  `nvmlDeviceGetName`, `nvmlDeviceGetPciInfo_v3`, `nvmlDeviceGetMemoryInfo` and
+  `nvmlDeviceGetUtilizationRates`, each writing into the caller's frame. A device handle is `Send` and `Sync`
+  (`unsafe impl`): NVML is thread-safe, and a handle stays valid until `nvmlShutdown`, which Hex never calls.
+  Rust can express none of these foreign calls, the function pointers resolved at run time, nor an opaque
+  handle's thread-safety, safely.
 
 ## 13. Lean code
 
