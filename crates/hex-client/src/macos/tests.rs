@@ -195,8 +195,8 @@ fn two_callers_answers_sharing_reads_each_reach_their_own() {
 /// caller that asked for the stream. Do: exec asking for stdout; the stand-in agent answers it given, with one end of a
 /// socket pair at the frame's first byte and the frame cut across two writes, keeps its copy until the client says it
 /// took it (`Request::Taken`), as the node agent does (an end in flight alone may arrive dead on macOS, HEX-GUEST-41),
-/// then writes into the other end and closes it. Expect: the word, by the exec's id; the exec's stdout end reads what
-/// the agent wrote, to its end, and the program's end as sent.
+/// then writes into the other end and closes it. Expect: the word, by the exec's id; the exec's stdout end close-on-exec
+/// as it came, reading what the agent wrote, to its end, and the program's end as sent.
 #[test]
 fn a_given_answers_descriptor_at_its_first_byte_reaches_its_exec() {
     let (_dir, path, listener) = agent_socket();
@@ -259,8 +259,17 @@ fn a_given_answers_descriptor_at_its_first_byte_reaches_its_exec() {
         )
         .unwrap();
     let given = proc.streams().unwrap();
+    let stdout = given.stdout.expect("the stdout end");
+    // macOS's recvmsg has no MSG_CMSG_CLOEXEC: the end that came is close-on-exec all the same, so no spawn of the
+    // caller's inherits it (CVE-2024-21626's class).
+    assert!(
+        rustix::io::fcntl_getfd(&stdout)
+            .unwrap()
+            .contains(rustix::io::FdFlags::CLOEXEC),
+        "a given end crosses an exec"
+    );
     let mut out = String::new();
-    std::fs::File::from(given.stdout.expect("the stdout end"))
+    std::fs::File::from(stdout)
         .read_to_string(&mut out)
         .unwrap();
     assert_eq!(out, "from the agent\n");
