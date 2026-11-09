@@ -196,6 +196,64 @@ fn reclaim_one(marker: &Path) -> Result<(), Refusal> {
     remove_scratch(&m, marker)
 }
 
+/// What a node finds of the box a record names (native plan step 8, T-T7.1.2): its compute system, reopened
+/// by id where HCS still holds it, and the process now at its init's pid where one is there, with
+/// [`hcs::Found`], what [`hcs::take_back`] decides on.
+struct Reopened {
+    system: Option<System>,
+    init: Option<Handle>,
+    found: hcs::Found,
+}
+
+/// Reopens what `record` names of its box, for [`OciBox::take_back`] and [`alive`]: its compute system by
+/// id, and its init by pid with that process's creation time and whether it still runs.
+fn reopen(record: &hcs::BoxRecord) -> Result<Reopened, Refusal> {
+    let system = match &record.system {
+        Some(s) => {
+            sys::open_system(s.as_str()).map_err(|f| failure("reopening a box's container", f))?
+        }
+        None => None,
+    };
+    let init = match record.init {
+        Some(r) => {
+            super::sys::open_process(r.pid).map_err(|e| Refusal::os("reopening a box's init", e))?
+        }
+        None => None,
+    };
+    let seen = match &init {
+        Some(h) => Some(hcs::SeenProcess {
+            created: super::sys::created(h)
+                .map_err(|e| Refusal::os("reading when a box's init was created", e))?,
+            running: !super::sys::wait(h, 0)
+                .map_err(|e| Refusal::os("reading whether a box's init runs", e))?,
+        }),
+        None => None,
+    };
+    Ok(Reopened {
+        found: hcs::Found {
+            system: system.is_some(),
+            init: seen,
+        },
+        system,
+        init,
+    })
+}
+
+/// Whether the box whose record is at `marker` is one its next node takes back (native plan step 8,
+/// T-T7.1.2; the node's recovery asks it before it takes a box back or removes it): what
+/// [`OciBox::take_back`] finds of it, decided as [`hcs::take_back`] decides, so recovery takes back only a
+/// box its take-back takes and removes the rest: one made to end with its node, one whose container HCS no
+/// longer holds, and one whose init ended though its container runs on (an outliving container doesn't end
+/// with its init). A record already gone names nothing to take back.
+pub fn alive(marker: &Path) -> Result<bool, Refusal> {
+    if !marker.exists() {
+        return Ok(false);
+    }
+    let record = read_marker(marker)?;
+    let found = reopen(&record)?.found;
+    Ok(hcs::take_back(&record, found).is_ok())
+}
+
 /// Ends what is left of the box the record at `marker` names, one a node before this one made that the
 /// node's recovery removes rather than takes back (native plan step 8, T-T7.1.2): its container where HCS
 /// still holds it, then its scratch and its record, as [`reclaim`] removes a killed node's. A record
@@ -485,29 +543,11 @@ impl OciBox {
         record: hcs::BoxRecord,
     ) -> Result<Self, Refusal> {
         let id = job.id().clone();
-        let system = match &record.system {
-            Some(s) => sys::open_system(s.as_str())
-                .map_err(|f| failure("reopening a box's container", f))?,
-            None => None,
-        };
-        let init = match record.init {
-            Some(r) => super::sys::open_process(r.pid)
-                .map_err(|e| Refusal::os("reopening a box's init", e))?,
-            None => None,
-        };
-        let seen = match &init {
-            Some(h) => Some(hcs::SeenProcess {
-                created: super::sys::created(h)
-                    .map_err(|e| Refusal::os("reading when a box's init was created", e))?,
-                running: !super::sys::wait(h, 0)
-                    .map_err(|e| Refusal::os("reading whether a box's init runs", e))?,
-            }),
-            None => None,
-        };
-        let found = hcs::Found {
-            system: system.is_some(),
-            init: seen,
-        };
+        let Reopened {
+            system,
+            init,
+            found,
+        } = reopen(&record)?;
         let (system, started, init) = match (hcs::take_back(&record, found), system, init) {
             (Ok(hcs::TakeBack::Created), Some(s), _) => (s, false, None),
             (Ok(hcs::TakeBack::Running(r)), Some(s), Some(h)) => {

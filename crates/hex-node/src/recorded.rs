@@ -348,14 +348,22 @@ fn group(trace: Option<ProcId>) -> Option<(i32, u64)> {
     trace.and_then(|t| Some((i32::try_from(t.pid).ok()?, t.start_ticks)))
 }
 
-/// The Windows `process` class: a box is a job object that ends with the node's last handle to it
-/// (kill-on-close), so nothing of a box outlives its node. A box made is taken back empty, its job made
-/// again; one removed has nothing left to end. (Boxes that outlive their node are native plan step 8's
-/// change, the decision "the Windows node, on one completion port".)
+/// The Windows node's boxes outlive it (native plan step 8, the decision "the Windows node, on one completion
+/// port"): each box's job is named for the node and the box and held by the node's keeper as well as the
+/// node, and an `oci` box's container outlives the node with it. The next node takes back each box its
+/// records name that is still there, and removes the rest with what is left of them.
 #[cfg(windows)]
 impl Recover for hex_runtime::windows::WinRuntime {
     fn trace(&self, _id: &BoxId) -> Result<Option<ProcId>, Refusal> {
         Ok(None)
+    }
+
+    /// For an `oci` box, whether its take-back would take it: its container still held by HCS, and its
+    /// init the very process its record names, still running, or not yet started
+    /// ([`hex_runtime::windows::WinRuntime::alive`]); a box whose init ended while no node ran is removed,
+    /// its container with it.
+    fn alive(&self, spec: &BoxSpec) -> Result<Option<bool>, Refusal> {
+        hex_runtime::windows::WinRuntime::alive(self, spec)
     }
 
     /// Takes box `spec` back on this node: a `process` box by its named job, an `oci` box with its

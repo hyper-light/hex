@@ -285,6 +285,19 @@ impl WinRuntime {
             .map(|node| format!("Local\\hex-{node}-{id}"))
     }
 
+    /// Whether this node takes back box `spec` a node before it made (native plan step 8, T-T7.1.2; asked
+    /// by the node's recovery before it takes a box back or removes it): for an `oci` box, whether its
+    /// record names a box [`WinRuntime::adopt`] takes back ([`oci::alive`]); `None` for a `process` box,
+    /// which has no init.
+    pub fn alive(&self, spec: &BoxSpec) -> Result<Option<bool>, Refusal> {
+        match &spec.class {
+            ClassSpec::Process => Ok(None),
+            ClassSpec::Oci(_) | ClassSpec::Bundle(_) => {
+                oci::alive(&self.marker(&spec.id)).map(Some)
+            }
+        }
+    }
+
     /// Takes back box `spec` a node before this one made: a `process` box with whatever runs in it (made
     /// again, empty, where nothing does); an `oci` box with its container, scratch and init, refused by name
     /// where any of them is gone ([`OciBox::take_back`]), for recovery to end it. Refused for a runtime whose
