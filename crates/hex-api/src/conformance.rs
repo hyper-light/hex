@@ -4,6 +4,7 @@
 //! own programs. Each case reads "do X, expect Y"; [`run`] returns the cases that failed and why.
 
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::{
@@ -37,6 +38,30 @@ pub trait Fixture {
     fn init(&self, id: BoxId, act: &Act) -> BoxSpec;
     /// A program that does `act`.
     fn program(&self, act: &Act) -> Program;
+    /// Whether this class reports a fork its process bound refused in [`crate::Usage::pids_refused`]
+    /// reliably. True for every class whose kernel keeps that count (Linux's cgroup `pids.events`, the
+    /// simulator). The Windows job object does not: a member's own refused fork has no §3-clean job-side
+    /// count (`docs/research/runtime/windows-pids-refused.md`), so its class returns false and HEX-RT-6
+    /// checks the bound's deterministic effect there (a program that can't start all its children exits
+    /// non-zero) rather than the count. The bound's enforcement is checked on every platform regardless.
+    /// (Ada's decision, 2026-11-03.)
+    fn refused_forks_counted(&self) -> bool {
+        true
+    }
+    /// The bound this class's exec puts on a program's arguments and environment, read as the class reads
+    /// it (CLAUDE.md §2). `None` states none, and HEX-RT-14 fails on it: every class bounds a program.
+    fn exec_limit(&self) -> Option<crate::ExecLimit> {
+        None
+    }
+    /// Whether TERM ends an `oci` box's init that has no handler for it. False for Linux: the kernel
+    /// gives a PID namespace's init only KILL and STOP from outside it (pid_namespaces(7)). True for a
+    /// class with no POSIX signals, which ends the container instead: HCS's ProcessSignal carries only
+    /// console control events, and hcsshim maps TERM to a shutdown and KILL to terminate
+    /// (internal/signals/signal.go:185-197), so Windows' `oci` class ends its job. Both are right for their platform, so the differential suite's oracle follows this answer
+    /// (the lead's ruling, 2026-11-05). The `process` class has no init, so it doesn't apply there.
+    fn term_ends_init(&self) -> bool {
+        false
+    }
 }
 
 /// One part of the contract.
@@ -53,22 +78,143 @@ pub struct Failure {
     pub why: String,
 }
 
-/// The slowest recorded end of a program the suites wait for, a container's exec of `true` from its exec to its
-/// end, in the suites' own runs (decision 9; the lead's rule of 2026-11-06 for test patiences).
-/// The tests run debug builds, so their record is the debug one: the `lifecycle.exec` row of
-/// `bench/competitive/probes/waits_census.md` run 3's debug arm, 39.131 ms of 10,000 (a release-build record ran these
-/// tests' waits out).
-pub const PROGRAM_END: Option<Duration> = Some(Duration::from_nanos(39_130_836));
+/// The class of host a suite runs on, by its OS: each keeps its own record of how slow a program's end has
+/// been, from its start to its reported end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostClass {
+    Linux,
+    Macos,
+    Windows,
+}
 
-/// Longest a case waits for a program it expects to end: twice [`PROGRAM_END`], so a runtime that
-/// never reports an end fails the case instead of hanging the suite. While it is measuring, the longest
-/// a `Duration` holds: a deadline from it is none (`Instant::checked_add`), and the wait is the fact's.
-pub const PATIENCE: Duration = match PROGRAM_END {
-    Some(slowest) => slowest.saturating_mul(2),
-    None => Duration::MAX,
-};
-/// How long a case watches a program it expects to keep running.
-pub const STILL_RUNNING: Duration = Duration::from_millis(200);
+impl HostClass {
+    /// Every class.
+    pub const ALL: [HostClass; 3] = [HostClass::Linux, HostClass::Macos, HostClass::Windows];
+
+    /// The class of the host this is built for, if it is one of them.
+    pub const THIS: Option<HostClass> = if cfg!(target_os = "linux") {
+        Some(HostClass::Linux)
+    } else if cfg!(target_os = "macos") {
+        Some(HostClass::Macos)
+    } else if cfg!(target_os = "windows") {
+        Some(HostClass::Windows)
+    } else {
+        None
+    };
+
+    /// The slowest end on this class's record, across every driver of the native bench and the suites,
+    /// counting a first run after a rebuild (every upgrade's first run is one, and a fresh binary is
+    /// scanned before it runs), or `None` where no record holds one yet.
+    /// - Windows: Process Governor's 6,239 ms on jupiter (bench/native/RESULT.md, Windows, pass 1). It is
+    ///   above every end in four first runs of windows_process_box after a rebuild there, the slowest
+    ///   2,495 ms, though those runs overlap the NTFS stall's onset and aren't of record
+    ///   (bench/install/records/windows-jupiter-20261105.txt entry 23).
+    /// - Linux: 957 ms, the slowest of 294 answers in each of three first runs of process_box, oci_box,
+    ///   oci_spec_box and node_socket after a rebuild on fedora at load 20-108
+    ///   (bench/native/records/firstrun-linux-e34d48d-20261107T173109Z.txt). It is above the waits census's
+    ///   record of a program's end, its `lifecycle.exec` row (`bench/competitive/probes/waits_census.md` run 3's
+    ///   debug arm, 39.131 ms of 10,000, a lighter load's), so the slower of the two records seeds the wait
+    ///   (decision 9's seed: the slowest answer on the class's record).
+    /// - macOS: 939 ms, a hog's end on adas-mac-studio.local-2 at load 15-20, the first program a rebuilt
+    ///   macos_process_box ran (bench/native/records/firstrun-macos-9908a6da-20261107T1823Z.txt,
+    ///   2026-11-08), above the 839 ms seen there before it, the 770 ms seen on adalundhe-macbook-pro at load
+    ///   21 (2026-11-06, [`still_running`]) and adas-mac-studio-2's 534 ms.
+    pub const fn slowest_recorded_end(self) -> Option<Duration> {
+        match self {
+            HostClass::Windows => Some(Duration::from_millis(6_239)),
+            HostClass::Linux => Some(Duration::from_millis(957)),
+            HostClass::Macos => Some(Duration::from_millis(939)),
+        }
+    }
+}
+
+/// The slowest end on any class's record ([`HostClass::slowest_recorded_end`]).
+pub const SLOWEST_RECORDED_END: Duration = slower(
+    slower(
+        slower(Duration::ZERO, HostClass::Linux.slowest_recorded_end()),
+        HostClass::Macos.slowest_recorded_end(),
+    ),
+    HostClass::Windows.slowest_recorded_end(),
+);
+
+/// The slower of `a` and the record `b`, where there is one.
+const fn slower(a: Duration, b: Option<Duration>) -> Duration {
+    match b {
+        Some(record) if record.as_nanos() > a.as_nanos() => record,
+        _ => a,
+    }
+}
+
+/// What a learned wait on a host of `class` seeds from (Hex's rule for learned waits): its class's slowest
+/// end on record ([`seed_from`]).
+pub const fn seed(class: Option<HostClass>) -> Duration {
+    match class {
+        Some(c) => seed_from(c.slowest_recorded_end()),
+        None => seed_from(None),
+    }
+}
+
+/// What a learned wait seeds from given its class's `record`: that record, or for a class with none (or a
+/// host of no class), the slowest on any class's record, rather than refusing to wait.
+pub const fn seed_from(record: Option<Duration>) -> Duration {
+    match record {
+        Some(r) => r,
+        None => SLOWEST_RECORDED_END,
+    }
+}
+
+/// The learned wait's bound before any sample on this host, twice its [`seed`] (the x2 the false-alarm
+/// margin): a fixed wait for a program's end, for the tests that wait outside the suite's learned waits
+/// (hex-cli's oci_box, oci_spec_box and node_socket on every native line). The suite itself waits on
+/// [`patience`], which learns.
+pub const PATIENCE: Duration = seed(HostClass::THIS).saturating_mul(2);
+
+/// A wait whose bound is learned (Hex's rule for learned waits): before any sample, twice the slowest
+/// answer on its record; then twice the slowest of the record and what it has seen; and it only rises, so a
+/// node slower than the record is waited for, and no first wait is unbounded.
+pub struct LearnedWait {
+    record: Duration,
+    seen_nanos: AtomicU64,
+}
+
+impl LearnedWait {
+    /// A wait seeded from `record`, the slowest answer on its record.
+    pub const fn new(record: Duration) -> Self {
+        Self {
+            record,
+            seen_nanos: AtomicU64::new(0),
+        }
+    }
+
+    /// Learns from an answer that came after `answered`.
+    pub fn saw(&self, answered: Duration) {
+        let nanos = u64::try_from(answered.as_nanos()).unwrap_or(u64::MAX);
+        self.seen_nanos.fetch_max(nanos, Ordering::Relaxed);
+    }
+
+    /// Its bound now: twice the slowest of its record and what it has seen.
+    pub fn bound(&self) -> Duration {
+        let seen = Duration::from_nanos(self.seen_nanos.load(Ordering::Relaxed));
+        self.record.max(seen).saturating_mul(2)
+    }
+}
+
+/// The suite's waits for a program's end or a box's answer, seeded from this host's [`seed`]; each wait
+/// that gets its answer teaches it. [`PATIENCE`] is its bound before any sample.
+pub static ENDS: LearnedWait = LearnedWait::new(seed(HostClass::THIS));
+
+/// How long a case waits now for a program it expects to end: [`ENDS`]' bound.
+pub fn patience() -> Duration {
+    ENDS.bound()
+}
+
+/// How long a case watches now a program it expects to keep running (the negative watch, "this does not
+/// end"): [`ENDS`]' bound, since an end may come as late as the slowest seen, and one host's end maximum
+/// doesn't carry (59.6 ms on adas-mac-studio-2 was 550-770 ms on adalundhe-macbook-pro at load 21,
+/// 2026-11-06).
+pub fn still_running() -> Duration {
+    ENDS.bound()
+}
 
 /// Every case, in order.
 pub const CASES: &[Case] = &[
@@ -139,6 +285,21 @@ pub const CASES: &[Case] = &[
     },
     Case {
         id: "HEX-RT-14",
+        says: "exec of a program whose arguments and environment pass the class's exec bound is refused as Invalid naming the program, before any spawn",
+        run: oversized_program,
+    },
+    Case {
+        id: "HEX-RT-16",
+        says: "of two waiting programs in a box, the one killed through its Proc ends with Signal(9) and the other runs on; a second kill of the ended one is Ok",
+        run: kill,
+    },
+    Case {
+        id: "HEX-RT-17",
+        says: "stdio asked of the runtime: a program that echoes stdin gives back what is written to its stdin end on its stdout end, to its end; a stream both given and asked for is refused as Invalid",
+        run: streams,
+    },
+    Case {
+        id: "HEX-RT-18",
         says: "create of a box whose spec names a malformed owner is refused as Invalid naming the field, and makes nothing; boxes of one owner, made and deleted in turn, each run what any box runs",
         run: owned,
     },
@@ -175,9 +336,14 @@ fn made(rt: &dyn Runtime, fx: &dyn Fixture, name: &str, bounds: Bounds) -> Resul
 }
 
 fn ended(p: &mut Box<dyn crate::Proc>) -> Result<Exit, String> {
-    p.wait_for(PATIENCE)
+    let patience = patience();
+    let asked = std::time::Instant::now();
+    let exit = p
+        .wait_for(patience)
         .map_err(|e| format!("wait: {e}"))?
-        .ok_or_else(|| format!("still running after {PATIENCE:?}"))
+        .ok_or_else(|| format!("still running after {patience:?}"))?;
+    ENDS.saw(asked.elapsed());
+    Ok(exit)
 }
 
 fn piped() -> Result<(std::io::PipeReader, std::io::PipeWriter), String> {
@@ -230,6 +396,42 @@ fn say(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     ensure(out == "hello from a box\n", || format!("stdout {out:?}"))
 }
 
+fn oversized_program(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
+    let limit = fx.exec_limit().ok_or(
+        "the class states no bound on a program's arguments and environment (CLAUDE.md §2)",
+    )?;
+    let id = made(rt, fx, "oversized", Bounds::default())?;
+    let mut program = fx.program(&Act::Say("never"));
+    // Strings each under the OS's per-string bound (half of it, or of the block where there is none), as
+    // many as pass the block: only passing it matters, and any split under the string bound does. Each
+    // grows the program by at least a byte, so the loop ends.
+    let piece = limit
+        .string
+        .unwrap_or(limit.block)
+        .min(limit.block)
+        .div_ceil(2)
+        .max(1);
+    let mut n = 0usize;
+    while limit.size(&program) <= limit.block {
+        program
+            .env
+            .push((format!("HEX_RT_14_{n}"), "x".repeat(piece)));
+        n = n.saturating_add(1);
+    }
+    let refused = rt.exec(&id, program, Stdio::null());
+    rt.delete(&id).map_err(|e| e.to_string())?;
+    match refused {
+        Err(Refusal::Invalid {
+            what: "program", ..
+        }) => Ok(()),
+        Err(e) => Err(format!("refused, but not as an invalid program: {e}")),
+        Ok(_) => Err(format!(
+            "a program past the class's bound ({} bytes, {}) was taken",
+            limit.block, limit.source
+        )),
+    }
+}
+
 fn fail(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     let id = made(rt, fx, "fail", Bounds::default())?;
     let mut p = rt
@@ -245,7 +447,9 @@ fn signal(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     let mut p = rt
         .exec(&id, fx.program(&Act::Wait), Stdio::null())
         .map_err(|e| format!("exec: {e}"))?;
-    let early = p.wait_for(STILL_RUNNING).map_err(|e| e.to_string())?;
+    // Running now, at the signal: its Signal(15) end below then proves it hadn't ended on its own (that
+    // would be Code(0)), so no watch is waited out.
+    let early = p.wait_for(Duration::ZERO).map_err(|e| e.to_string())?;
     ensure(early.is_none(), || {
         format!("a waiting program ended: {early:?}")
     })?;
@@ -258,6 +462,101 @@ fn signal(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     let exit = ended(&mut p)?;
     rt.delete(&id).map_err(|e| e.to_string())?;
     ensure(exit == Exit::Signal(15), || format!("exit {exit:?}"))
+}
+
+fn kill(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
+    let id = made(rt, fx, "kill", Bounds::default())?;
+    let mut killed = rt
+        .exec(&id, fx.program(&Act::Wait), Stdio::null())
+        .map_err(|e| format!("exec: {e}"))?;
+    let mut other = rt
+        .exec(&id, fx.program(&Act::Wait), Stdio::null())
+        .map_err(|e| format!("exec: {e}"))?;
+    let early = killed
+        .wait_for(still_running())
+        .map_err(|e| e.to_string())?;
+    ensure(early.is_none(), || {
+        format!("a waiting program ended: {early:?}")
+    })?;
+    killed.kill().map_err(|e| format!("kill: {e}"))?;
+    let exit = ended(&mut killed)?;
+    let again = killed.kill();
+    let on = other.wait_for(still_running()).map_err(|e| e.to_string())?;
+    rt.delete(&id).map_err(|e| e.to_string())?;
+    ensure(exit == Exit::Signal(9), || format!("exit {exit:?}"))?;
+    ensure(again.is_ok(), || {
+        format!("a kill of the ended program: {again:?}")
+    })?;
+    ensure(on.is_none(), || {
+        format!("the other program ended with the kill: {on:?}")
+    })
+}
+
+fn streams(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
+    let id = made(rt, fx, "streams", Bounds::default())?;
+    let (_r, w) = piped()?;
+    let both = rt.exec(
+        &id,
+        fx.program(&Act::Echo),
+        Stdio {
+            stdout: Some(w),
+            ask: crate::Ask {
+                stdout: true,
+                ..crate::Ask::default()
+            },
+            ..Stdio::null()
+        },
+    );
+    let ask = crate::Ask {
+        stdin: true,
+        stdout: true,
+        stderr: false,
+    };
+    let mut p = rt
+        .exec(
+            &id,
+            fx.program(&Act::Echo),
+            Stdio {
+                ask,
+                ..Stdio::null()
+            },
+        )
+        .map_err(|e| format!("exec: {e}"))?;
+    let given = p.streams().map_err(|e| format!("streams: {e}"))?;
+    let again = p.streams().map_err(|e| format!("streams again: {e}"))?;
+    let (Some(stdin), Some(stdout)) = (given.stdin, given.stdout) else {
+        rt.delete(&id).map_err(|e| e.to_string())?;
+        return Err("the streams asked for weren't given".to_owned());
+    };
+    let mut stdin = std::fs::File::from(stdin);
+    stdin
+        .write_all(b"round trip\n")
+        .map_err(|e| format!("write: {e}"))?;
+    drop(stdin);
+    let mut out = String::new();
+    std::fs::File::from(stdout)
+        .read_to_string(&mut out)
+        .map_err(|e| format!("read: {e}"))?;
+    let exit = ended(&mut p)?;
+    rt.delete(&id).map_err(|e| e.to_string())?;
+    ensure(
+        matches!(
+            both.as_ref().err(),
+            Some(Refusal::Invalid { what: "stdio", .. })
+        ),
+        || {
+            format!(
+                "a stream both given and asked for: {:?}",
+                both.as_ref().err()
+            )
+        },
+    )?;
+    ensure(given.stderr.is_none(), || "stderr given unasked".to_owned())?;
+    ensure(again.stdin.is_none() && again.stdout.is_none(), || {
+        "the streams were given twice".to_owned()
+    })?;
+    ensure(exit == Exit::Code(0), || format!("exit {exit:?}"))?;
+    ensure(out == "round trip\n", || format!("stdout {out:?}"))
 }
 
 fn memory_bound(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
@@ -292,12 +591,19 @@ fn pids_bound(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     let exit = ended(&mut p)?;
     let usage = rt.usage(&id).map_err(|e| e.to_string())?;
     rt.delete(&id).map_err(|e| e.to_string())?;
+    // The bound blocked a fork the program needed, so it couldn't finish: it exits non-zero. This
+    // deterministic effect is checked on every platform (the process bound is kernel-enforced).
     ensure(exit != Exit::Code(0), || {
         "a program over the process bound exited 0".to_owned()
     })?;
-    ensure(usage.pids_refused >= 1, || {
-        format!("no refused fork counted: {usage:?}")
-    })
+    // Where the platform counts the refusal, the exact count is checked too; where it has no §3-clean
+    // count of a member's own refused fork (Windows), the effect above is the bar (Ada's call).
+    if fx.refused_forks_counted() {
+        ensure(usage.pids_refused >= 1, || {
+            format!("no refused fork counted: {usage:?}")
+        })?;
+    }
+    Ok(())
 }
 
 fn delete(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
@@ -369,6 +675,7 @@ fn stdin(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
                 stdin: Some(in_r),
                 stdout: Some(out_w),
                 stderr: None,
+                ..Stdio::null()
             },
         )
         .map_err(|e| format!("exec: {e}"))?;
@@ -422,21 +729,39 @@ fn started(rt: &dyn Runtime, id: &BoxId, class: Class) -> Result<(), String> {
     )
 }
 
-/// Polls `inspect` until the box reports an exit, for at most `patience` (the cases': [`PATIENCE`]): the fact
-/// the exit cases wait on, never a guessed delay.
-fn exit_of(rt: &dyn Runtime, id: &BoxId, patience: Duration) -> Result<crate::BoxInfo, String> {
-    let deadline = std::time::Instant::now().checked_add(patience);
+/// Waits `d` at least: `park_timeout` may wake early, and `thread::sleep` is disallowed.
+pub(crate) fn rest(d: Duration) {
+    let Some(end) = std::time::Instant::now().checked_add(d) else {
+        return;
+    };
     loop {
+        let left = end.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        std::thread::park_timeout(left);
+    }
+}
+
+/// Polls `inspect` until the box reports an exit, for at most `patience` (the cases': [`patience`]): the fact the
+/// exit cases wait on, never a guessed delay. A box's state has no event to wait on, so it is read again after
+/// waiting as long as the last read took: at most half the time reading, at this platform's cost.
+fn exit_of(rt: &dyn Runtime, id: &BoxId, patience: Duration) -> Result<crate::BoxInfo, String> {
+    let asked = std::time::Instant::now();
+    let deadline = asked.checked_add(patience);
+    loop {
+        let read = std::time::Instant::now();
         let info = rt.inspect(id).map_err(|e| format!("inspect: {e}"))?;
+        let took = read.elapsed();
         if info.exit.is_some() {
+            ENDS.saw(asked.elapsed());
             return Ok(info);
         }
         // No deadline is a measuring patience's: the wait is the fact's alone.
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             return Err(format!("no exit reported after {patience:?}: {info:?}"));
         }
-        // park_timeout (thread::sleep is disallowed) yields between looks at the fact.
-        std::thread::park_timeout(Duration::from_millis(10));
+        rest(took);
     }
 }
 
@@ -471,7 +796,7 @@ fn init_exit(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     let Some(id) = made_init(rt, fx, "init-exit", &Act::Fail(3))? else {
         return Ok(());
     };
-    let info = exit_of(rt, &id, PATIENCE);
+    let info = exit_of(rt, &id, patience());
     rt.delete(&id).map_err(|e| e.to_string())?;
     let info = info?;
     ensure(info.exit == Some(Exit::Code(3)), || {
@@ -494,7 +819,7 @@ fn init_killed(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
         )?;
         rt.signal(&id, Signal::KILL)
             .map_err(|e| format!("signal: {e}"))?;
-        let info = exit_of(rt, &id, PATIENCE)?;
+        let info = exit_of(rt, &id, patience())?;
         ensure(info.exit == Some(Exit::Signal(9)), || {
             format!("exit {:?}", info.exit)
         })
@@ -562,7 +887,7 @@ fn unrenderable(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     Ok(())
 }
 
-/// HEX-RT-14 (goal 5 extended, step 6): an owner whose name isn't well formed is refused before
+/// HEX-RT-18 (goal 5 extended, step 6): an owner whose name isn't well formed is refused before
 /// anything is made, by the field's name. Boxes of one well-formed owner, made and deleted in turn, are
 /// made as any box is and run what any box runs: a node hands the later box the cgroup the earlier one
 /// left, which the box sees only in its usage.
@@ -626,7 +951,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::sim::SimRuntime;
+    use crate::sim::{SimFixture, SimRuntime};
     use crate::{BoxInfo, Proc, Usage};
 
     /// The simulator, whose `inspect` shows a box's exit only from its `shown`th look on, as a node that sees an
@@ -733,5 +1058,18 @@ mod tests {
             "{refused}"
         );
         assert_eq!(late.looks.load(Ordering::Relaxed), 1);
+    }
+
+    /// HEX-RT-4 checks that a waiting program runs at the moment it signals the box: its Signal(15) end
+    /// then proves it hadn't ended on its own (that would be Code(0)), so the case waits out no watch (the
+    /// lead, 2026-11-07). Do: run HEX-RT-4 against the simulator, timed. Expect: it passes in less than one
+    /// [`still_running`] watch.
+    #[test]
+    fn the_signal_case_waits_out_no_watch() {
+        let case = CASES.iter().find(|c| c.id == "HEX-RT-4").unwrap();
+        let t = std::time::Instant::now();
+        (case.run)(&SimRuntime::new(), &SimFixture::Process).unwrap();
+        let took = t.elapsed();
+        assert!(took < still_running(), "HEX-RT-4 took {took:?}");
     }
 }

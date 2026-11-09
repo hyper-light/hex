@@ -10,11 +10,12 @@ publish.workspace = true
 
 [dependencies]
 hex-api.workspace = true
+hex-client.workspace = true
 hex-core.workspace = true
 hex-runtime.workspace = true
 serde_json.workspace = true
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 rustix.workspace = true
 
 [features]
@@ -22,9 +23,14 @@ rustix.workspace = true
 test-controls = []
 
 [dev-dependencies]
-hex-client.workspace = true
 hex-testkit.workspace = true
+# The relay's end-to-end staging test builds its tarball (src/relay/tests.rs).
+tar.workspace = true
 tempfile.workspace = true
+# Its layer tests name each tarball by its sha256, as an image does (src/relay/tests.rs).
+sha2.workspace = true
+# The guest loop test's stand-in for a Shards guest (tests/guest_loop.rs).
+shards-api.workspace = true
 
 [lints]
 workspace = true

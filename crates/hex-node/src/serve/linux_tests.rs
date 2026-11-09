@@ -5,9 +5,14 @@
 
 use super::*;
 use std::io::{Read, Write as _};
-use std::os::fd::{AsFd, BorrowedFd};
+use std::mem::MaybeUninit;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::PoisonError;
 use std::time::Duration;
+
+use rustix::event::{PollFd, PollFlags, Timespec};
+use rustix::net::{AddressFamily, SendFlags, SocketAddrUnix, SocketFlags, SocketType};
+use rustix::process::{Pid, Signal};
 
 use hex_api::conformance::PATIENCE;
 use hex_api::sim::SimRuntime;
@@ -362,7 +367,7 @@ fn hostile_messages_are_refused_and_the_connection_is_served_after() {
             9,
             &unspoken_says,
         ),
-        Hostile("unknown kind", with(6, [0x0c, 0]), vec![], 9, "kind 0x000c"),
+        Hostile("unknown kind", with(6, [0x0e, 0]), vec![], 9, "kind 0x000e"),
         Hostile(
             "a version 2 kind in version 1",
             with(6, [0x0b, 0]),
@@ -575,6 +580,7 @@ fn stdio_crosses_as_descriptors_and_only_pipes_are_taken() {
                 stdin: None,
                 stdout: Some(out_w),
                 stderr: Some(err_w),
+                ..Stdio::null()
             },
         )
         .unwrap();
@@ -593,6 +599,7 @@ fn stdio_crosses_as_descriptors_and_only_pipes_are_taken() {
                 stdin: Some(in_r),
                 stdout: Some(out_w),
                 stderr: None,
+                ..Stdio::null()
             },
         )
         .unwrap();

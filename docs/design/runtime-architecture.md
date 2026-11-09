@@ -493,6 +493,32 @@ spawn, decision 3's falsifier: 0.666 ms on fedora (`probes/oci_breakdown.md` §2
 lifecycles/s at concurrency 1, 8 and 32 over the socket, against 43, 55 and 52 in process, with 32 threads sharing
 one client.
 
+**The client** (`crates/hex-client`, one core for every transport, `calls.rs`). Linux's `SOCK_SEQPACKET` socket,
+macOS's framed `SOCK_STREAM` socket and a Shards guest's framed byte stream are each a transport under one core:
+each lends a handle to wait on and reads and writes without waiting; the core makes the calls, waits on the
+connection (poll(2), `WSAPoll` on Windows), hands each message to whoever it is for, and holds native plan step 8's
+wire version 3 once (a program's kill, an exec asking for streams and the given answer, the caller's copy). Two cores
+came to the landing: native plan step 8's, a reading thread per connection that hands each answer on, and goal 16's
+reader's turn (8ded733f), where whoever waits on the connection reads it, one at a time, and hands each message and
+then the turn on. Compared on the evidence, the core is the turn's, with native's transports and stdio rules:
+- Correctness: both give every answer to its call, drop one no call waits for, tell every waiter the connection's end
+  and deliver a program's end while its callers wait. The turn adds a hand-off, held by its tests: a call that runs
+  out or is dropped holding the turn hands it on (to the oldest call able to read, then a `Proc` in its wait), as does
+  a send that runs out waiting for room; a frame cut across reads stays in the read state the turn's holders share
+  (`a_frame_cut_across_reads_is_answered_whole`); two callers' answers sharing a read each reach their own.
+- Robustness: neither leaves a caller behind another's read: the turn's holder reads every message as it comes and
+  gives the turn up with its own answer. A send waiting for room has someone reading in both, as it must (the agent
+  reads no request while its answers wait for room): the sender itself while it holds the turn, else the holder,
+  which writes the sender's wake as it hands the turn to it. A message is sent whole under the connection's send lock,
+  so a stream's frames never interleave. One bad answer ends the connection in both. The reading thread is a thread
+  per connection besides.
+- Performance: an uncontended call blocks once, in its own wait, and no other thread of the client's wakes for it;
+  the reading thread's call wakes two threads. Measured in one test binary on adacachy2 (2026-11-09, load about 112,
+  a debug build, 2,000 inspects each, `the_readers_turn_wakes_fewer_threads_a_call_than_a_reading_thread`): the
+  turn's client waited 1.00 times a call, the reading thread's 2.00 (its caller 1.00, its reader 1.00); p50 9.8 us
+  against 11.0, p99 12.2 against 12.8 (not of record: a loaded host's debug build).
+In the event form a node's loop holds the turn for good (the guest's `Pump`), so nothing reads beside it.
+
 #### The floor under exec, and where exec and start spend their time (goal 3, plan step 1)
 
 The exec target, a quarter of libcrun's exec, is above the floor on fedora, so it stands. Any exec into a running

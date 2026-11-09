@@ -1107,16 +1107,19 @@ fn first_readable(
 /// A refusal as a round trip's outcome: a seed's own machinery broken (replace it), or a refusal by type (the seed is
 /// whole, the create refused).
 fn refusal(failed: Failed, why: String) -> Trip {
-    let e = OciError::Os {
+    let os = |why| OciError::Os {
         op: "create in a container",
         why,
     };
     match failed {
+        // An init past the exec bound the seed's own stack limit gives it (HEX-RT-14): the seed is whole, and the
+        // create is refused naming the program.
+        Failed::Program => Trip::Refused(OciError::Program(why)),
         // The seed's own machinery broke: replace it.
-        Failed::Seed => Trip::Broken(e),
+        Failed::Seed => Trip::Broken(os(why)),
         // A bad request, a container the seed couldn't make, or one no clone3-into-cgroup kernel
         // can make here: the seed is whole, the create refused by type.
-        Failed::Request | Failed::Start | Failed::Unable => Trip::Refused(e),
+        Failed::Request | Failed::Start | Failed::Unable => Trip::Refused(os(why)),
     }
 }
 

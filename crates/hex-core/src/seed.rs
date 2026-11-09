@@ -346,6 +346,9 @@ pub enum Failed {
     /// into a cgroup. Nothing was made, and the seed is whole; the agent makes it as the command line
     /// does.
     Unable,
+    /// The program is past the exec bound the seed's own stack limit gives it (HEX-RT-14): nothing was
+    /// started, the seed is whole, and the agent refuses the program by name. Appended to version 1.
+    Program,
 }
 
 impl Failed {
@@ -355,6 +358,7 @@ impl Failed {
             Self::Start => 2,
             Self::Seed => 3,
             Self::Unable => 4,
+            Self::Program => 5,
         }
     }
 
@@ -364,6 +368,7 @@ impl Failed {
             2 => Self::Start,
             3 => Self::Seed,
             4 => Self::Unable,
+            5 => Self::Program,
             n => {
                 return Err(Fault::value(
                     "refusal",

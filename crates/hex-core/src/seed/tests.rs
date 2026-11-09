@@ -1054,3 +1054,28 @@ fn a_lean_create_carries_only_what_its_init_reads_in_its_new_kind() {
         Err(Fault::Value { what: "config", .. })
     ));
 }
+
+/// HEX-RT-14 through a seed (CLAUDE.md §3): a seed refuses a program past its exec bound as that, so the
+/// agent refuses it as `Invalid` "program", not as a failed start. Do: write a program refusal. Expect: it
+/// reads back as written, its code is 5, appended after version 1's four (append-only), and the four keep
+/// theirs.
+#[test]
+fn a_program_refusal_reads_back_with_a_code_of_its_own() {
+    let want = Answer::Refused {
+        failed: Failed::Program,
+        why: "a program of 300000 bytes".to_owned(),
+    };
+    let bytes = answer(&want).unwrap();
+    assert_eq!(read_answer(&bytes, bytes.len(), 0).unwrap(), want);
+    assert_eq!(&bytes[HEADER_BYTES..HEADER_BYTES + 2], &5u16.to_le_bytes());
+    for (failed, code) in [
+        (Failed::Request, 1u16),
+        (Failed::Start, 2),
+        (Failed::Seed, 3),
+        (Failed::Unable, 4),
+        (Failed::Program, 5),
+    ] {
+        assert_eq!(failed.code(), code);
+        assert_eq!(Failed::of(code).unwrap(), failed);
+    }
+}

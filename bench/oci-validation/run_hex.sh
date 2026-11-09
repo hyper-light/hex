@@ -3,7 +3,9 @@
 # calls to `hex oci <verb>`. Same harness as the baseline (bench/oci-validation/run.sh).
 #   run_hex.sh <runtime-tools checkout> <hex binary> <out dir> [image]
 # HEX_OCI_LSM, where set, is hex's LSM policy in the container (lsm::ENV_POLICY).
-# BENCH_MEMORY and BENCH_OOM, when set, bound the container (--memory, --oom-score-adj), as seam_root.sh's do.
+# BENCH_MEMORY and BENCH_OOM, when set, bound the container (--memory, --oom-score-adj), as seam_root.sh's do: the
+# lead's shared fedora limits (8g, OOM score 1000; hex-slot and the T7 fedora-unit-limits rule), an operator's limit,
+# not tuning.
 set -euo pipefail
 RT=$(realpath "${1:?runtime-tools}")
 HEX=$(realpath "${2:?hex binary}")

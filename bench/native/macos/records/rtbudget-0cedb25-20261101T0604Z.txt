@@ -1,0 +1,7 @@
+# rtbudget on adas-mac-studio-3 (M4 Max, 14 cores), 2026-11-01, load 1.75, tree 0cedb25
+# Why the watcher's Mach time-constraint computation budget is 150 us, not the floor's 50 us: at 28 members
+# (2x cores) a budget below the read's cost gets the thread demoted and starved. Floor 250 us, rate 256 GiB/s.
+k=28 comp_us=50 floor_us=250 rate_gib=256: overshoot_max=41.8 MiB  max_read_gap_us=1007  mean_obs_rate_gib=180
+k=28 comp_us=150 floor_us=250 rate_gib=256: overshoot_max=18.3 MiB  max_read_gap_us=950  mean_obs_rate_gib=210
+k=28 comp_us=230 floor_us=250 rate_gib=256: overshoot_max=19.9 MiB  max_read_gap_us=946  mean_obs_rate_gib=210
+k=14 comp_us=150 floor_us=250 rate_gib=256: overshoot_max=60.2 MiB  max_read_gap_us=976  mean_obs_rate_gib=208

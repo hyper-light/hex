@@ -15,6 +15,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use hex_core::limits;
 use rustix::fs::{Mode, OFlags};
 use rustix::mount::{
     FsMountFlags, FsOpenFlags, MountAttrFlags, MountFlags, MountPropagationFlags, MoveMountFlags,
@@ -659,7 +660,7 @@ impl Becoming {
                 "the seccomp filter has more instructions than a filter holds".to_owned(),
             ));
         }
-        let rlimits = process
+        let mut rlimits = process
             .rlimits
             .iter()
             .map(|limit| {
@@ -671,7 +672,14 @@ impl Becoming {
                     },
                 ))
             })
-            .collect::<Result<_, OciError>>()?;
+            .collect::<Result<Vec<_>, OciError>>()?;
+        // A spec that names no RLIMIT_NOFILE gets Docker 29's, not the node's own (HEX-INST-6).
+        if !limits::names_nofile(process.rlimits.iter().map(|l| l.kind.as_str())) {
+            rlimits.push((
+                rustix::process::Resource::Nofile,
+                crate::linux::default_nofile(),
+            ));
+        }
         Ok(Self {
             oom: process
                 .oom_score_adj
