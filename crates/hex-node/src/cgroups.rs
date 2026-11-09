@@ -368,7 +368,7 @@ struct Ahead {
     /// The prepared-proc key of the last box of no owner to choose its cgroup, which each init parked ahead has its
     /// proc made for: set before that box takes one, so the refill its take wakes reads it.
     proc_key: Mutex<Option<procmount::Key>>,
-    ready: Mutex<VecDeque<(u64, BoxCgroup)>>,
+    ready: Mutex<VecDeque<MadeAhead>>,
     /// Signalled when a slot is taken, the flags are first known, or the node is going.
     want: Condvar,
     shut: AtomicBool,
@@ -416,7 +416,7 @@ impl Ahead {
         }
     }
 
-    fn ready(&self) -> Result<MutexGuard<'_, VecDeque<(u64, BoxCgroup)>>, Refusal> {
+    fn ready(&self) -> Result<MutexGuard<'_, VecDeque<MadeAhead>>, Refusal> {
         self.ready.lock().map_err(|_| {
             Refusal::Broken("the node's cgroups made ahead lock was poisoned".to_owned())
         })
@@ -434,10 +434,22 @@ impl Ahead {
     }
 }
 
+/// A cgroup made ahead, ready for a box of no owner: its slot, the cgroup with its init parked in it, and what the box's
+/// usage is reported from, which the refill read once that init parked ([`refill_ahead`]): the counters' baseline and
+/// the `memory.peak` descriptor written then ([`BoxCgroup::peak_from_now`]). A parked init does nothing until its box
+/// takes it, so they are what the take would read, read off the create's path (goal 16: the breakdown's part 4, the
+/// claim's 0.030 ms p50, create-breakdown-20261109T164604Z).
+struct MadeAhead {
+    n: u64,
+    cg: BoxCgroup,
+    baseline: Baseline,
+    peak: Option<OwnedFd>,
+}
+
 /// The refill's loop: while fewer than the bound are ready and the flags are known, one more cgroup made ahead,
-/// as a fresh slot with default bounds (a box's own are written when it takes it), and an init parked in it. A
-/// make that fails waits for the next take before it tries again, so a lasting failure never spins. Ends when
-/// the node does.
+/// as a fresh slot with default bounds (a box's own are written when it takes it), an init parked in it, and its usage's
+/// baseline and peak read once the init is parked ([`MadeAhead`]); a slot whose peak can't be reset is no make. A make
+/// that fails waits for the next take before it tries again, so a lasting failure never spins. Ends when the node does.
 fn refill_ahead(
     ahead: &Ahead,
     parking: &Parking,
@@ -446,8 +458,8 @@ fn refill_ahead(
     parker: &Parker,
 ) {
     let mut after_failure = false;
-    // Every file the create that takes a cgroup made ahead reads or writes, opened with it here, so that create looks
-    // none up (goal 16: its lookups queued behind this thread's next mkdir).
+    // Every file read or written in a cgroup made ahead, by this thread or by the create that takes it, opened with it
+    // here, so that create looks none up (goal 16: its lookups queued behind this thread's next mkdir).
     let files = root.ahead_files();
     loop {
         let flags = {
@@ -493,8 +505,17 @@ fn refill_ahead(
                     }
                 }
             });
+        // What its box's usage is reported from, read now its init is parked and does nothing until taken.
+        let made = made.and_then(|(n, cg, p)| match cg.peak_from_now() {
+            Ok(peak) => Ok((n, cg.baseline(), cg, p, peak)),
+            Err(e) => {
+                drop(p);
+                let _ = end_and_remove(&cg);
+                Err(OciError::Broken(e.to_string()))
+            }
+        });
         match made {
-            Ok((n, cg, p)) => {
+            Ok((n, baseline, cg, p, peak)) => {
                 parking.parked.fetch_add(1, Ordering::Relaxed);
                 ahead.made.fetch_add(1, Ordering::Relaxed);
                 let Ok(mut ready) = ahead.ready() else { return };
@@ -509,7 +530,12 @@ fn refill_ahead(
                 if let Ok(mut slots) = parking.slots() {
                     slots.insert(n, p);
                 }
-                ready.push_back((n, cg));
+                ready.push_back(MadeAhead {
+                    n,
+                    cg,
+                    baseline,
+                    peak,
+                });
                 ahead.filled(ready.len());
             }
             Err(_) => {
@@ -677,16 +703,16 @@ impl Cgroups {
 
     /// The oldest cgroup made ahead, with its init, taken for a box of no owner; `None` when none is ready
     /// (counted dry). The refill is told, to make another.
-    fn take_ahead(&self) -> Option<(u64, BoxCgroup, Parked)> {
+    fn take_ahead(&self) -> Option<(MadeAhead, Parked)> {
         let taken = loop {
             let next = self.ahead.ready().ok()?.pop_front();
-            let Some((n, cg)) = next else {
+            let Some(made) = next else {
                 break None;
             };
-            match self.parking.take(n) {
-                Ok(Some((p, _))) => break Some((n, cg, p)),
+            match self.parking.take(made.n) {
+                Ok(Some((p, _))) => break Some((made, p)),
                 // Its init is gone: the cgroup goes too, and the next is tried; the queue is bounded.
-                _ => self.remove_later(cg),
+                _ => self.remove_later(made.cg),
             }
         };
         // A take wakes the refill once its create has done its cgroup's file work ([`Cgroups::wake_refill`]): the refill's
@@ -847,10 +873,10 @@ impl Cgroups {
         let _made = self.ahead.busy.lock().map_err(|_| {
             Refusal::Broken("the cgroups-ahead refill's lock was poisoned".to_owned())
         })?;
-        let ahead: Vec<(u64, BoxCgroup)> = self.ahead.ready()?.drain(..).collect();
-        for (n, cg) in ahead {
-            self.parking.end(n);
-            if let Err(e) = self.removal.remove(&cg) {
+        let ahead: Vec<MadeAhead> = self.ahead.ready()?.drain(..).collect();
+        for made in ahead {
+            self.parking.end(made.n);
+            if let Err(e) = self.removal.remove(&made.cg) {
                 first.get_or_insert(e);
             }
         }
@@ -1177,18 +1203,21 @@ impl<'a> Choice<'a> {
         self.owner.map(|o| o.name.clone()).unwrap_or_default()
     }
 
-    /// Slot `n`'s cgroup, made ahead with `parked` in it, given the box's bounds: the slot as the box holds it, its
-    /// policy `None` so it is removed with the box and never handed on, or the cgroup back when it can't be bounded.
-    /// The slot is fresh, made with no bound ([`refill_ahead`]), so the box's own bounds are all it is given, as a
-    /// cgroup made on the create's path is ([`BoxRoot::bound`]); a cgroup an earlier box left is rebound instead.
-    fn ready_ahead(&self, n: u64, cg: BoxCgroup) -> Result<(BoxCgroup, Held), BoxCgroup> {
+    /// A cgroup made ahead with its init parked in it, given the box's bounds: the slot as the box holds it, its policy
+    /// `None` so it is removed with the box and never handed on, or the cgroup back when it can't be bounded. The slot is
+    /// fresh, made with no bound ([`refill_ahead`]), so the box's own bounds are all it is given, as a cgroup made on the
+    /// create's path is ([`BoxRoot::bound`]); a cgroup an earlier box left is rebound instead. Its usage's baseline and
+    /// peak are the refill's ([`MadeAhead`]): the take reads none of its counters.
+    fn ready_ahead(&self, made: MadeAhead) -> Result<(BoxCgroup, Held), BoxCgroup> {
+        let MadeAhead {
+            n,
+            cg,
+            baseline,
+            peak,
+        } = made;
         if self.root.bound(&cg, self.bounds).is_err() {
             return Err(cg);
         }
-        let baseline = cg.baseline();
-        let Ok(peak) = cg.peak_from_now() else {
-            return Err(cg);
-        };
         let held = Held {
             slot: n,
             baseline,
@@ -1232,9 +1261,9 @@ impl Choose for Choice<'_> {
                 Take::Own(reason) => {
                     // A box of no owner takes a cgroup made ahead, with its init in it, when one is ready.
                     if reason == Refused::NoOwner
-                        && let Some((n, cg, parked)) = self.cgroups.take_ahead()
+                        && let Some((made, parked)) = self.cgroups.take_ahead()
                     {
-                        let ready = self.ready_ahead(n, cg);
+                        let ready = self.ready_ahead(made);
                         self.cgroups.wake_refill();
                         match ready {
                             Ok((cgroup, held)) => {

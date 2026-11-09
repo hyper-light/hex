@@ -363,9 +363,10 @@ impl BoxRoot {
         }
     }
 
-    /// Every file a box's create reads or writes in a cgroup made ahead for it, by name: each bound's
-    /// ([`core::writes_all`] over the root's disks), its counters' ([`BoxCgroup::baseline`]) and `memory.peak`. The
-    /// refill opens them when it makes the cgroup ([`BoxCgroup::open_ahead`]), so the create looks none up.
+    /// Every file read or written in a cgroup made ahead, by name: each bound's ([`core::writes_all`] over the root's
+    /// disks), which the box's create writes, and its counters' ([`BoxCgroup::baseline`]) and `memory.peak`, which the
+    /// refill reads and writes once the cgroup's init is parked. The refill opens them when it makes the cgroup
+    /// ([`BoxCgroup::open_ahead`]), so neither looks one up.
     pub fn ahead_files(&self) -> Vec<&'static str> {
         let mut files: Vec<&'static str> = core::writes_all(&Bounds::default(), &self.disks)
             .map(|ws| ws.iter().map(|w| w.file).collect())
