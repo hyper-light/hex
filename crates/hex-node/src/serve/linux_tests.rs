@@ -68,6 +68,9 @@ struct TestHost {
     sim: SimRuntime,
     gate: Gate,
     abandoned: Mutex<Vec<BoxId>>,
+    /// Each descriptor an exec's streams came to the host as, or that it made for those asked for, by what it is, and
+    /// whether it was close-on-exec as the host started the program.
+    cloexec: Mutex<Vec<(&'static str, bool)>>,
 }
 
 impl Runtime for TestHost {
@@ -88,6 +91,30 @@ impl Runtime for TestHost {
     ) -> Result<Box<dyn Proc>, Refusal> {
         self.sim.inspect(id)?;
         let given = stdio.make_asked()?;
+        let ends = [
+            ("the program's stdin", stdio.stdin.as_ref().map(AsFd::as_fd)),
+            (
+                "the program's stdout",
+                stdio.stdout.as_ref().map(AsFd::as_fd),
+            ),
+            (
+                "the program's stderr",
+                stdio.stderr.as_ref().map(AsFd::as_fd),
+            ),
+            ("the caller's stdin", given.stdin.as_ref().map(AsFd::as_fd)),
+            (
+                "the caller's stdout",
+                given.stdout.as_ref().map(AsFd::as_fd),
+            ),
+            (
+                "the caller's stderr",
+                given.stderr.as_ref().map(AsFd::as_fd),
+            ),
+        ];
+        self.cloexec.lock().unwrap().extend(
+            ends.into_iter()
+                .filter_map(|(what, end)| end.map(|end| (what, cloexec(end)))),
+        );
         let (first, rest) = program.args.split_first().unwrap();
         let mut cmd = std::process::Command::new(first);
         cmd.args(rest).env_clear().envs(program.env.iter().cloned());
@@ -1275,4 +1302,110 @@ fn the_socket_path_probe_is_close_on_exec() {
         cloexec(&probe),
         "the probe crosses an exec: a spawn while it is open keeps it"
     );
+}
+
+/// The node's own copies of exec `exec`'s given ends on `lab`'s connections, kept until its client says it took them:
+/// each descriptor's number, and what it is open on (`/proc/self/fd`'s link: a pipe's or a socket's inode).
+fn kept_ends(lab: &Lab, exec: u64) -> Vec<(i32, std::path::PathBuf)> {
+    use std::os::fd::AsRawFd;
+    let table = lab.server.shared.table.lock().unwrap();
+    table
+        .conns
+        .values()
+        .flat_map(|conn| {
+            let out = conn.out.lock().unwrap();
+            out.given
+                .get(&exec)
+                .map(|ends| {
+                    ends.iter()
+                        .map(|end| {
+                            let fd = end.as_raw_fd();
+                            let open_on =
+                                std::fs::read_link(format!("/proc/self/fd/{fd}")).unwrap();
+                            (fd, open_on)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+/// The lead's word of 2026-11-09: every descriptor the node makes for an exec's streams and its given ends is
+/// close-on-exec from its creation (pipe2's `O_CLOEXEC`, recvmsg's `MSG_CMSG_CLOEXEC`), so no spawn of this process,
+/// the node's or another's, keeps one past its exec. Do: an exec carrying the caller's own stdout pipe and asking for
+/// stdin and stderr. Expect: close-on-exec on what the host was handed for the exec's streams (the carried pipe, as the
+/// node received it) and on what it made for those asked for (each pipe's two ends), on the node's own copies of the
+/// given ends, kept until its client took them, and on the given ends as its client received them.
+#[test]
+fn every_descriptor_the_node_makes_for_an_execs_streams_is_close_on_exec() {
+    let lab = Lab::new(limits());
+    let raw = lab.raw();
+    hello_raw(&raw);
+    let (_out, out_w) = std::io::pipe().unwrap();
+    let call = Call::ExecStreams {
+        id: b(),
+        program: Program::of(&["/bin/sh", "-c", "read l"]),
+        streams: wire::Streams {
+            stdout: true,
+            ..wire::Streams::default()
+        },
+        ask: wire::Streams {
+            stdin: true,
+            stdout: false,
+            stderr: true,
+        },
+    };
+    send_raw(&raw, &request(2, call), &[out_w.as_fd()]);
+    drop(out_w);
+    let (h, given, ends) = answer_with_ends(&raw);
+    assert!(
+        matches!((h.id, &given), (2, Answer::Given { .. })),
+        "{given:?}"
+    );
+    let host = lab.host.cloexec.lock().unwrap().clone();
+    assert_eq!(
+        host.iter().map(|(what, _)| *what).collect::<Vec<_>>(),
+        [
+            "the program's stdin",
+            "the program's stdout",
+            "the program's stderr",
+            "the caller's stdin",
+            "the caller's stderr"
+        ]
+    );
+    for (what, made) in &host {
+        assert!(made, "{what} crosses an exec");
+    }
+    let kept = kept_ends(&lab, 2);
+    assert_eq!(
+        kept.len(),
+        2,
+        "the node keeps both given ends until the word"
+    );
+    let table = lab.server.shared.table.lock().unwrap();
+    for conn in table.conns.values() {
+        for end in conn.out.lock().unwrap().given.values().flatten() {
+            assert!(
+                cloexec(end),
+                "the node's copy of a given end crosses an exec"
+            );
+        }
+    }
+    drop(table);
+    for end in &ends {
+        assert!(
+            cloexec(end),
+            "a given end as its client received it crosses an exec"
+        );
+    }
+    // The program ends with its stdin, once its client has taken it and let it go.
+    send_raw(
+        &raw,
+        &wire::request(2, &Request::Taken, wire::MAX_MESSAGE).unwrap(),
+        &[],
+    );
+    drop(ends);
+    let (h, end) = answer_of(&raw);
+    assert!(matches!((h.id, end), (2, Answer::Exited(_))));
 }
