@@ -14,7 +14,7 @@
 //!   on Windows necessarily (§4a), its tarball (lab.sh's fourth argument), to which this adds `/opt/hex`;
 //! - `HEX_GUEST_RUNTIME_TOOLS`: runtime-tools built for the guest's arch (runtime_tools.sh), unpacked;
 //! - `HEX_GUEST_VALIDATION_OUT`: an empty directory for the results;
-//! - optionally `HEX_GUEST_CPUS` and `HEX_GUEST_MEMORY_MIB` (else the host's CPUs, `shards_api::max_vcpus`, and Shards' least plus twice `PEAK_MIB`).
+//! - optionally `HEX_GUEST_CPUS` and `HEX_GUEST_MEMORY_MIB` (else the host's CPUs and Shards' least plus twice `PEAK_MIB`).
 //!
 //! Run: `cargo test -p hex-cli --test guest_validation -- --nocapture` with those set.
 #![allow(
@@ -249,10 +249,9 @@ fn the_oci_runtime_spec_validation_passes_in_the_guest_as_on_linux() {
         binary: given("SHARDS_BIN").unwrap(),
         kernel: given("HEX_GUEST_KERNEL").unwrap(),
         initrd: given("HEX_GUEST_INITRD").unwrap(),
-        // Unset, every CPU Shards gives a guest here (`shards_api::max_vcpus`, the host's): the
-        // fastest run, as a vCPU costs nothing while it idles.
-        vcpus: std::env::var("HEX_GUEST_CPUS")
-            .map_or_else(|_| shards_api::max_vcpus(), |v| v.parse().unwrap()),
+        // Unset, the host's CPUs (`host_cpus`): the fastest run, as a vCPU costs nothing while it
+        // idles.
+        vcpus: std::env::var("HEX_GUEST_CPUS").map_or_else(|_| host_cpus(), |v| v.parse().unwrap()),
         // Unset, Shards' least guest and twice this workload's measured peak (PEAK_MIB): the margin
         // C's guest_tree takes, stated as a factor, never below what was measured.
         memory_mib: number(
@@ -425,4 +424,10 @@ fn a_reread_waits_as_long_as_the_last_read_took() {
             e0 - s0
         );
     }
+}
+
+/// The host's CPUs, as std reads them: a guest here has every one, as a vCPU costs nothing while
+/// it idles.
+fn host_cpus() -> u32 {
+    std::thread::available_parallelism().map_or(1, |n| u32::try_from(n.get()).unwrap())
 }

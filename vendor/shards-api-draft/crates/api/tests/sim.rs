@@ -14,7 +14,7 @@ use std::net::Shutdown;
 use std::time::Duration;
 
 use shards_api::conformance::{self, Subject};
-use shards_api::record::Pending;
+use shards_api::record::Learned;
 use shards_api::sim::{SimGuests, SimHost};
 use shards_api::{End, GuestSpec, Guests, Init, Refusal, min_memory_mib};
 
@@ -23,18 +23,21 @@ use shards_api::{End, GuestSpec, Guests, Init, Refusal, min_memory_mib};
 const ECHO: u32 = 1234;
 const UNSERVED: u32 = 1236;
 /// A hang guard: each wait here returns at its fact (a condition variable's signal, a
-/// process's end), and the guard only bounds a failing one. By host class (`record`):
-/// macOS-HVF, twice (the margin) the slowest recorded of these tests' waits, a new stand-in
-/// script's boot to its end, 4.402617625 s (`docs/research/platform-measurements.md` M463);
-/// Linux-KVM and Windows-WHP, pending their records.
-#[cfg(target_os = "macos")]
-const PATIENCE: Result<Duration, Pending> = Ok(Duration::from_nanos(2 * 4_402_617_625));
-#[cfg(not(target_os = "macos"))]
-const PATIENCE: Result<Duration, Pending> = Err(Pending::of("tests/sim.rs PATIENCE"));
+/// process's end), and the guard only bounds a failing one (`record::Learned`). Recorded
+/// (`docs/research/platform-measurements.md` M463), the slowest of these tests' waits:
+/// macOS-HVF's, a new stand-in script's boot to its end, 4.402617625 s; Linux-KVM's, a
+/// simulated guest's connect as it listens 100 ms late, 100.83073 ms.
+static PATIENCE: Learned = Learned::new(
+    "tests/sim.rs PATIENCE",
+    &[
+        ("macOS-HVF", Duration::from_nanos(4_402_617_625)),
+        ("Linux-KVM", Duration::from_nanos(100_830_730)),
+    ],
+);
 
-/// This class's `PATIENCE`; a test fails naming the record it waits on where there is none.
+/// This node's `PATIENCE` now.
 fn patience() -> Duration {
-    PATIENCE.unwrap_or_else(|pending| panic!("{pending}"))
+    PATIENCE.get()
 }
 
 /// A spec of the least guest Shards boots: one vCPU, its least memory (`min_memory_mib`).
@@ -79,7 +82,7 @@ fn guest(host: &SimHost) -> End {
     End::Stopped
 }
 
-/// Every case of the conformance suite passes against the simulator (Hex HEX-GUEST-9).
+/// Every case of the conformance suite passes against the simulator (D215).
 #[test]
 fn the_simulator_conforms() {
     let guests = SimGuests::new(guest);
@@ -94,8 +97,7 @@ fn the_simulator_conforms() {
     .unwrap();
 }
 
-/// A connect waits for a guest that listens late, and is answered as it does (Hex
-/// HEX-GUEST-9).
+/// A connect waits for a guest that listens late, and is answered as it does (D215).
 #[test]
 fn a_connect_waits_for_a_guest_that_listens_late() {
     let guests = SimGuests::new(|host| {
@@ -110,7 +112,7 @@ fn a_connect_waits_for_a_guest_that_listens_late() {
 }
 
 /// A connect and a wait with no clock (`Duration::MAX`) wait for their facts: the guest's
-/// listening, its end (Hex HEX-GUEST-9).
+/// listening, its end (D215).
 #[test]
 fn no_clock_waits_for_the_fact() {
     // An input: late enough that the connect and the wait are waiting.
@@ -132,7 +134,7 @@ fn no_clock_waits_for_the_fact() {
 }
 
 /// A guest whose program ends in a reset ends as `Reset`, and is refused `Ended` after
-/// (Hex HEX-GUEST-9).
+/// (D215).
 #[test]
 fn a_guest_ends_as_its_program_says() {
     let guests = SimGuests::new(|_| End::Reset);
@@ -148,27 +150,40 @@ fn a_guest_ends_as_its_program_says() {
 mod client {
     use super::*;
     use shards_api::Shards;
-    use std::os::unix::fs::PermissionsExt as _;
     use std::path::PathBuf;
     use std::time::Instant;
 
-    /// How soon after shards' end its refusal comes: macOS-HVF, twice (the margin) the slowest
-    /// recorded, 4.277875 ms with a child holding shards' output (M463); other classes pending.
-    #[cfg(target_os = "macos")]
-    const REFUSED_AFTER_END: Result<Duration, Pending> = Ok(Duration::from_nanos(2 * 4_277_875));
-    #[cfg(not(target_os = "macos"))]
-    const REFUSED_AFTER_END: Result<Duration, Pending> = Err(Pending::of("REFUSED_AFTER_END"));
+    /// How soon after shards' end its refusal comes, with a child holding shards' output
+    /// (`record::Learned`). Recorded, the slowest (M463): macOS-HVF 4.277875 ms, Linux-KVM
+    /// 299.915 µs (beside the whole shards-api suite).
+    static REFUSED_AFTER_END: Learned = Learned::new(
+        "REFUSED_AFTER_END",
+        &[
+            ("macOS-HVF", Duration::from_nanos(4_277_875)),
+            ("Linux-KVM", Duration::from_nanos(299_915)),
+        ],
+    );
 
     /// A stand-in for `shards` that runs `body` whatever it is asked.
+    /// A stand-in for `shards` that runs `body` whatever it is asked. Written to a file of
+    /// its own and installed by install(1), so no descriptor of this process ever writes
+    /// the file it executes: one that a test running beside it forked while it was open
+    /// would make its exec fail ETXTBSY (execve(2)).
     fn stand_in(dir: &shards_testdir::TempDir, body: &str) -> PathBuf {
-        let path = dir.path().join("shards");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (source, path) = (dir.path().join("shards.sh"), dir.path().join("shards"));
+        std::fs::write(&source, format!("#!/bin/sh\n{body}\n")).unwrap();
+        let installed = std::process::Command::new("install")
+            .args(["-m", "755"])
+            .arg(&source)
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(installed.success());
         path
     }
 
     /// shards that ends before its guest is ready is refused as `Boot`, with its exit code
-    /// and what it said last (Hex HEX-GUEST-9).
+    /// and what it said last (D215).
     #[test]
     fn shards_ending_first_is_a_boot_refusal_with_its_exit_code() {
         let dir = shards_testdir::TempDir::new("api-boot").unwrap();
@@ -189,8 +204,51 @@ mod client {
         assert!(matches!(g.wait_for(patience()).unwrap(), Some(End::Failed(_))));
     }
 
+    /// A guest that powers off before anything connected to it is refused `Ended(PowerOff)`,
+    /// a normal end, not `Boot` (review 15).
+    #[test]
+    fn a_guest_powered_off_before_a_connect_is_ended_not_a_boot_refusal() {
+        let dir = shards_testdir::TempDir::new("api-off").unwrap();
+        let bin = stand_in(&dir, "exit 0");
+        let g = Shards
+            .boot(&GuestSpec {
+                binary: Some(bin),
+                ..spec("")
+            })
+            .unwrap();
+        assert_eq!(g.wait_for(Duration::MAX).unwrap(), Some(End::PowerOff));
+        assert_eq!(
+            g.connect(ECHO, Duration::ZERO).err(),
+            Some(Refusal::Ended(End::PowerOff))
+        );
+    }
+
+    /// shards' own refusal of a spec past its hypervisor's bounds, its VMM's words
+    /// (`crates/vmm/src/vm/runtime.rs:1065`), is a `Bounds` refusal naming the vCPUs, not
+    /// `Boot` (review 6).
+    #[test]
+    fn shards_refusing_the_vcpus_is_a_bounds_refusal() {
+        let dir = shards_testdir::TempDir::new("api-vcpus").unwrap();
+        let bin = stand_in(
+            &dir,
+            "echo 'shards: 4294967295 vCPUs requested; this host supports 14' >&2; exit 1",
+        );
+        let g = Shards
+            .boot(&GuestSpec {
+                binary: Some(bin),
+                ..spec("")
+            })
+            .unwrap();
+        match g.connect(ECHO, Duration::MAX) {
+            Err(Refusal::Bounds { what: "vcpus", why }) => {
+                assert!(why.contains("this host supports 14"), "{why}")
+            }
+            other => panic!("{:?}", other.err()),
+        }
+    }
+
     /// shards that exits 0 or 3 ends as `PowerOff` or `Reset`, as `shards run` exits for
-    /// them (Hex HEX-GUEST-9).
+    /// them (D215).
     #[test]
     fn exit_codes_are_ends() {
         for (code, end) in [(0, End::PowerOff), (3, End::Reset)] {
@@ -207,7 +265,7 @@ mod client {
     }
 
     /// `stop` ends a shards that runs on, as `Stopped`; a connect after is refused
-    /// `Ended(Stopped)` (Hex HEX-GUEST-9).
+    /// `Ended(Stopped)` (D215).
     #[test]
     fn stop_ends_a_running_shards() {
         let dir = shards_testdir::TempDir::new("api-stop").unwrap();
@@ -227,7 +285,7 @@ mod client {
         );
     }
 
-    /// A port off the allowlist is refused before anything is dialled (Hex HEX-GUEST-9).
+    /// A port off the allowlist is refused before anything is dialled (D215).
     #[test]
     fn a_port_off_the_allowlist_is_refused() {
         let dir = shards_testdir::TempDir::new("api-port").unwrap();
@@ -246,12 +304,22 @@ mod client {
 
     /// A connect with no clock (`Duration::MAX`) is refused as soon as shards ends, as
     /// `Boot` with its last words: the VM's end is the fact it waits on; and a wait with no
-    /// clock returns at that end (Hex HEX-GUEST-9).
+    /// clock returns at that end (D215).
     #[test]
     fn no_clock_ends_with_shards() {
         let dir = shards_testdir::TempDir::new("api-noclock").unwrap();
-        // An input: shards ends after the connect has begun.
-        let bin = stand_in(&dir, "sleep 0.2; echo 'no kernel at kernel' >&2; exit 7");
+        // An input: shards ends this long after it starts, so after the connect has begun. Each
+        // wait below is bounded by it plus the recorded wait for a stand-in's end (`patience()`),
+        // as the input is the test's own, not part of what the record timed.
+        let ends_after = Duration::from_millis(200);
+        let bound = ends_after + patience();
+        let bin = stand_in(
+            &dir,
+            &format!(
+                "sleep {}; echo 'no kernel at kernel' >&2; exit 7",
+                ends_after.as_secs_f64()
+            ),
+        );
         let g = Shards
             .boot(&GuestSpec {
                 binary: Some(bin.clone()),
@@ -260,7 +328,7 @@ mod client {
             .unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || tx.send(g.connect(ECHO, Duration::MAX).err()));
-        match rx.recv_timeout(patience()).unwrap() {
+        match rx.recv_timeout(bound).unwrap() {
             Some(Refusal::Boot(why)) => assert!(why.contains("no kernel at kernel"), "{why}"),
             other => panic!("{other:?}"),
         }
@@ -273,13 +341,13 @@ mod client {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || tx.send(g.wait_for(Duration::MAX)));
         assert!(matches!(
-            rx.recv_timeout(patience()).unwrap(),
+            rx.recv_timeout(bound).unwrap(),
             Ok(Some(End::Failed(_)))
         ));
     }
 
     /// The longest report shards writes as it ends, a reset's with its guest's last console
-    /// page escaped (six bytes for each of its 4096), is quoted whole (Hex HEX-GUEST-9).
+    /// page escaped (six bytes for each of its 4096), is quoted whole (D215).
     #[test]
     fn the_longest_report_shards_writes_is_quoted_whole() {
         let dir = shards_testdir::TempDir::new("api-tail").unwrap();
@@ -305,7 +373,7 @@ mod client {
     /// shards' refusal comes as shards ends, with its last words, though a child it left
     /// holds its output open (macOS's grants broker until it exits): the end of its words is
     /// a fact, not a clock. Timed from shards' last act, as a new script's first start can
-    /// take seconds on macOS, and held to `REFUSED_AFTER_END` (Hex HEX-GUEST-9).
+    /// take seconds on macOS, and held to `REFUSED_AFTER_END` (D215).
     #[test]
     fn a_child_holding_shards_output_holds_no_refusal_back() {
         let dir = shards_testdir::TempDir::new("api-held").unwrap();
@@ -347,9 +415,10 @@ mod client {
         }
         let took = at.saturating_duration_since(ended);
         assert!(
-            took < REFUSED_AFTER_END.unwrap_or_else(|pending| panic!("{pending}")),
+            took < REFUSED_AFTER_END.get(),
             "refused {took:?} after shards' end"
         );
+        REFUSED_AFTER_END.saw(took);
     }
 
     /// Measures how long past its patience an unserved connect's refusal comes, the
@@ -485,7 +554,7 @@ mod client {
                     let g = boot(bin);
                     let start = Instant::now();
                     g.stop().unwrap();
-                    assert_eq!(g.wait_for(Duration::ZERO).unwrap(), Some(End::Stopped));
+                    assert_eq!(g.wait_for(Duration::MAX).unwrap(), Some(End::Stopped));
                     start.elapsed()
                 }),
             ),
@@ -544,8 +613,8 @@ mod client {
         });
     }
 
-    /// A shards that ignores SIGTERM is killed once `stop`'s grace is out, and ends as
-    /// `Stopped` (Hex HEX-GUEST-9).
+    /// A shards that ignores SIGTERM is killed by `stop` at once, and ends as
+    /// `Stopped` (D215).
     #[test]
     fn stop_kills_a_shards_that_ignores_sigterm() {
         let dir = shards_testdir::TempDir::new("api-deaf").unwrap();
@@ -578,7 +647,7 @@ mod client {
         assert_eq!(end.unwrap(), Some(End::Stopped));
     }
 
-    /// A binary that isn't there is a `Boot` refusal naming it (Hex HEX-GUEST-9).
+    /// A binary that isn't there is a `Boot` refusal naming it (D215).
     #[test]
     fn a_missing_binary_is_refused() {
         let missing = PathBuf::from("/shards-api/no/such/shards");

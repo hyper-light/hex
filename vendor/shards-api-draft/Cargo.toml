@@ -1,6 +1,7 @@
 # A copy of Shards' draft `shards-api` (crates/api) and the crates it needs (afunix on Windows, testdir
-# for its tests), at hyper-light/shards hex/shards-api-constants 6f56f881 (local, task A of native plan step 5),
-# so Hex builds against it on every machine before Shards lands it. It moves to vendor/shards, recorded
+# for its tests), at hyper-light/shards hex/guests-attach 5b0e90c3 (local: hex/shards-api-constants rebased onto
+# Shards' p/integrate-1107 c0c18e6e6, with Hex's proposals and the real client's attach), so Hex builds against
+# it on every machine before Shards lands it. It moves to vendor/shards, recorded
 # in vendor/MANIFEST.toml, once Shards lands the crate (docs/design/shards-guest.md Appendix A). Its own
 # workspace, Shards' settings below (its root Cargo.toml at that commit), so its lints are Shards'.
 [workspace]
@@ -16,7 +17,6 @@ rust-version = "1.98.1"
 # Versions are pinned once here.
 [workspace.dependencies]
 libc = "0.2"
-thiserror = "2"
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Networking_WinSock",

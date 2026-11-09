@@ -1,9 +1,12 @@
-//! The conformance suite against real guests, booted by the `shards` binary: run where
-//! `SHARDS_API_REAL=1`, with `SHARDS_API_KERNEL` a kernel (shards' pinned one) and
+//! The waits real guests make, measured for the bounds that hold them (PM M463,
+//! `docs/research/measurements/shards-api-waits/run.sh`): an ignored test its harness runs
+//! where `SHARDS_API_REAL=1`, with `SHARDS_API_KERNEL` a kernel (shards' pinned one) and
 //! `SHARDS_API_INIT` Shards' test guest (`crates/testguest`, static musl, as the E2E tests
 //! build it or `SHARDS_TEST_GUESTS` holds it), booted as its PID 1: `shards_test=echo`
 //! serves port 1234, `shards_test=kmsg` powers off. `SHARDS_BIN` names the `shards` to
-//! boot them with (on macOS a signed build), else `shards` on `PATH`.
+//! boot them with (on macOS a signed build), else `shards` on `PATH`. The conformance suite
+//! runs against real guests in every E2E run, `crates/shards/tests/boot.rs`
+//! `shards_api_conforms_on_real_guests`.
 
 #![allow(
     clippy::unwrap_used,
@@ -17,8 +20,7 @@ use std::io::{Read as _, Write as _};
 use std::net::Shutdown;
 use std::time::{Duration, Instant};
 
-use shards_api::conformance::{self, Subject};
-use shards_api::record::Pending;
+use shards_api::conformance;
 use shards_api::{End, GuestSpec, Guests as _, Init, Shards, min_memory_mib};
 
 /// The real guests' specs, by `shards_test=` mode, where `SHARDS_API_REAL=1` asks for them.
@@ -46,30 +48,6 @@ fn specs() -> Option<impl Fn(&str) -> GuestSpec> {
     })
 }
 
-/// A hang guard: each wait returns at its fact. By host class (`record`): macOS-HVF, twice
-/// (the margin) the slowest recorded of these waits, a boot to its port answering, 248.467 ms
-/// (`docs/research/platform-measurements.md` M463); Linux-KVM and Windows-WHP, pending
-/// their records.
-#[cfg(target_os = "macos")]
-const PATIENCE: Result<Duration, Pending> = Ok(Duration::from_nanos(2 * 248_467_000));
-#[cfg(not(target_os = "macos"))]
-const PATIENCE: Result<Duration, Pending> = Err(Pending::of("tests/real.rs PATIENCE"));
-
-/// Every case passes against real guests (Hex HEX-GUEST-10).
-#[test]
-fn shards_conforms() {
-    let Some(spec) = specs() else { return };
-    conformance::run(&Subject {
-        guests: &Shards,
-        serving: spec("echo"),
-        port: 1234,
-        unserved: 1236,
-        powering_off: spec("kmsg"),
-        patience: PATIENCE.unwrap_or_else(|pending| panic!("{pending}")),
-    })
-    .unwrap();
-}
-
 /// Measures the waits real guests make, for the bounds that hold them: a boot to its echo
 /// port answering, an unserved port's refusal past `UNSERVED_PATIENCE`, `stop`, and a boot
 /// to a guest's power-off. `SHARDS_API_WAITS_N` (default 40) of each, printed as n, p50,
@@ -94,8 +72,8 @@ fn the_waits_of_real_guests() {
         over.push(start.elapsed().saturating_sub(conformance::UNSERVED_PATIENCE));
         let start = Instant::now();
         g.stop().unwrap();
+        assert_eq!(g.wait_for(Duration::MAX).unwrap(), Some(End::Stopped));
         stop.push(start.elapsed());
-        assert_eq!(g.wait_for(Duration::ZERO).unwrap(), Some(End::Stopped));
         let start = Instant::now();
         let g = Shards.boot(&spec("kmsg")).unwrap();
         assert_eq!(g.wait_for(Duration::MAX).unwrap(), Some(End::PowerOff));

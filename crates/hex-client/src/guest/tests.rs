@@ -403,6 +403,14 @@ impl shards_api::Stream for Looped {
     fn set_write_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
         self.0.set_write_timeout(timeout)
     }
+
+    /// Not asked of a guest's stream by Hex: refused, as loopback's are std's to keep.
+    fn buffer_sizes(&self) -> std::io::Result<(usize, usize)> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "a test's loopback stream reports no buffer sizes",
+        ))
+    }
 }
 
 /// A guest that records the patience each dial is given and answers every one on loopback.

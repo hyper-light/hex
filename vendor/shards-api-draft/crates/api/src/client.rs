@@ -22,7 +22,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::stream::{self, Socket};
-use crate::{End, Guest, GuestSpec, Guests, Identity, Init, Refusal, STOP_GRACE, Stream, allowed, backend, check};
+use crate::{End, Guest, GuestSpec, Guests, Identity, Init, Refusal, Stream, allowed, backend, check};
 
 /// The guests the `shards` binary boots: [`GuestSpec::binary`], else `SHARDS_BIN`, else
 /// `shards` on `PATH`.
@@ -65,15 +65,86 @@ impl Guests for Shards {
         Ok(Box::new(start(spec)?))
     }
 
-    /// Hex's proposal leaves the real client's attach to shards: finding the VM process by
-    /// pid and start time, re-dialing its vsock socket, and waiting on a process that is no
-    /// longer this one's child (a pidfd on Linux, `EVFILT_PROC` on macOS).
-    fn attach(&self, _identity: &Identity, _spec: &GuestSpec) -> Result<Box<dyn Guest>, Refusal> {
-        Err(Refusal::Unsupported {
-            what: "attach",
-            why: "the shards client does not take a guest back yet".into(),
-        })
+    fn attach(&self, identity: &Identity, spec: &GuestSpec) -> Result<Box<dyn Guest>, Refusal> {
+        check(spec)?;
+        backend()?;
+        Ok(Box::new(take_back(identity, spec)?))
     }
+}
+
+/// How a guest taken back by [`Guests::attach`] ends where this client did not stop it: its
+/// VM process is another's child, whose exit status is its parent's alone.
+#[cfg(unix)]
+const NOT_ITS_PARENT: &str = "it was taken back, its exit status its parent's, not this client's";
+
+/// The guest `identity` names, taken back: its VM process held by its pid and start
+/// (`taken::Held`, from before its start is read), watched to its end on a thread of its own,
+/// and dialed at its socket. Booted by the client that lost it, it is ready; it has no output
+/// here (its first client read it); and its socket directory is removed as it drops, where
+/// it is one this client makes (`PrivateDir::adopt`).
+#[cfg(unix)]
+fn take_back(identity: &Identity, spec: &GuestSpec) -> Result<ShardsGuest, Refusal> {
+    let process = crate::taken::Held::find(identity.pid, identity.started).map_err(|why| Refusal::Gone {
+        pid: identity.pid,
+        why,
+    })?;
+    let process = Arc::new(process);
+    let shared = Arc::new(Shared {
+        state: Mutex::new(State {
+            exited: false,
+            stopping: false,
+            ready: true,
+            end: None,
+            said: String::new(),
+            ended_as: String::new(),
+            status: None,
+        }),
+        changed: Condvar::new(),
+        tail: Mutex::new(Tail {
+            bytes: VecDeque::new(),
+            drained: true,
+            output: None,
+        }),
+        drained: Condvar::new(),
+        end_mark: end_mark(),
+    });
+    let (watched, watcher) = (process.clone(), shared.clone());
+    std::thread::Builder::new()
+        .name("shards-api-taken".into())
+        .spawn(move || {
+            let awaited = watched.exited();
+            let mut state = lock(&watcher.state);
+            state.status = Some(Err(match awaited {
+                Ok(()) => NOT_ITS_PARENT.into(),
+                Err(e) => format!("waiting for it: {e}"),
+            }));
+            state.exited = true;
+            watcher.changed.notify_all();
+        })
+        .map_err(|e| Refusal::Boot(format!("taking it back, a thread to watch it: {e}")))?;
+    Ok(ShardsGuest {
+        ports: spec.ports.clone(),
+        vsock: identity.vsock.clone(),
+        pid: identity.pid,
+        taken: Some(Taken {
+            identity: identity.clone(),
+            process,
+        }),
+        shared,
+        _dir: PrivateDir::adopt(&identity.vsock),
+    })
+}
+
+/// On Windows a guest's VM is in a job that ends with the process that booted it (D141), so
+/// no guest outlives its client to be taken back.
+#[cfg(windows)]
+fn take_back(identity: &Identity, _spec: &GuestSpec) -> Result<ShardsGuest, Refusal> {
+    Err(Refusal::Gone {
+        pid: identity.pid,
+        why: "on Windows a guest's VM ends with the process that booted it (D141): none outlives \
+              its client to be taken back"
+            .into(),
+    })
 }
 
 /// Boots `spec`'s guest through shards.
@@ -96,7 +167,7 @@ fn start(spec: &GuestSpec) -> Result<ShardsGuest, Refusal> {
         writer.try_clone().map_err(piped)?,
         writer.try_clone().map_err(piped)?,
     );
-    let mut child = Command::new(&binary)
+    let child = Command::new(&binary)
         .args(&args)
         .stdin(Stdio::null())
         .stdout(stdout)
@@ -111,6 +182,7 @@ fn start(spec: &GuestSpec) -> Result<ShardsGuest, Refusal> {
             end: None,
             said: String::new(),
             ended_as: String::new(),
+            status: None,
         }),
         changed: Condvar::new(),
         tail: Mutex::new(Tail {
@@ -121,8 +193,12 @@ fn start(spec: &GuestSpec) -> Result<ShardsGuest, Refusal> {
         drained: Condvar::new(),
         end_mark: end_mark(),
     });
+    #[cfg(unix)]
+    let pid = child.id();
+    let child = Arc::new(Mutex::new(child));
     let started = start_threads(&shared, &child, output, writer);
     if let Err(e) = started {
+        let mut child = lock(&child);
         let _ = child.kill();
         let _ = child.wait();
         return Err(Refusal::Boot(format!("a thread to watch shards: {e}")));
@@ -131,10 +207,13 @@ fn start(spec: &GuestSpec) -> Result<ShardsGuest, Refusal> {
         ports: spec.ports.clone(),
         vsock,
         #[cfg(unix)]
-        pid: child.id(),
-        child: Mutex::new(child),
+        pid,
+        #[cfg(windows)]
+        child,
+        #[cfg(unix)]
+        taken: None,
         shared,
-        _dir: dir,
+        _dir: Some(dir),
     })
 }
 
@@ -180,6 +259,23 @@ fn with_mode(what: &'static str, path: &Path, read_only: bool) -> Result<OsStrin
     Ok(arg)
 }
 
+/// Where a guest's socket directory goes: `tmp`, where `<tmp>/shards-api-<nonce>-<n>/v` is
+/// short enough to bind; else on Unix /tmp; on Windows, which has no such fallback, a
+/// refusal naming the bound (review 16).
+fn socket_dir(tmp: PathBuf) -> Result<PathBuf, Refusal> {
+    let longest = "/shards-api-ffffffffffffffff-18446744073709551615/v".len();
+    if tmp.as_os_str().len().saturating_add(longest) <= SOCKET_PATH {
+        return Ok(tmp);
+    }
+    #[cfg(unix)]
+    return Ok(PathBuf::from("/tmp"));
+    #[cfg(windows)]
+    Err(Refusal::Boot(format!(
+        "{}: too long for a guest's socket beneath it, {SOCKET_PATH} bytes at most",
+        tmp.display()
+    )))
+}
+
 /// A directory of this process's own for a guest's vsock socket, 0700, removed as it drops.
 #[derive(Debug)]
 struct PrivateDir(PathBuf);
@@ -196,17 +292,7 @@ impl PrivateDir {
             clippy::disallowed_methods,
             reason = "a guest's socket directory, made 0700 and removed with its guest, no test's"
         )]
-        let tmp = std::env::temp_dir();
-        // `<tmp>/shards-api-<nonce>-<n>/v`, short enough to bind, else under /tmp.
-        let longest = "/shards-api-ffffffffffffffff-18446744073709551615/v".len();
-        #[cfg(unix)]
-        let tmp = if tmp.as_os_str().len().saturating_add(longest) <= SOCKET_PATH {
-            tmp
-        } else {
-            PathBuf::from("/tmp")
-        };
-        #[cfg(not(unix))]
-        let _ = (longest, SOCKET_PATH);
+        let tmp = socket_dir(std::env::temp_dir())?;
         // Unique in this process by its counter, and apart from every other process's by
         // the process's nonce: 64 bits of std's `RandomState`, seeded from the OS's random
         // source, which no earlier process of the same pid shares and no other user can
@@ -231,6 +317,33 @@ impl PrivateDir {
     }
 }
 
+#[cfg(unix)]
+impl PrivateDir {
+    /// The directory a guest's socket `vsock` is in, where it is one this client makes (`new`'s
+    /// name, in `new`'s directory): a guest taken back removes it as it drops, as the guest it
+    /// was made for would have. Else none, and none is removed.
+    fn adopt(vsock: &Path) -> Option<PrivateDir> {
+        let dir = vsock.parent()?;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the directory `new` makes guests' socket directories in, no test's"
+        )]
+        let tmp = socket_dir(std::env::temp_dir()).ok()?;
+        let (nonce, n) = dir
+            .file_name()?
+            .to_str()?
+            .strip_prefix("shards-api-")?
+            .split_once('-')?;
+        let ours = vsock.file_name()? == "v"
+            && dir.parent()? == tmp.as_path()
+            && nonce.len() == 16
+            && nonce.bytes().all(|b| b.is_ascii_hexdigit())
+            && !n.is_empty()
+            && n.bytes().all(|b| b.is_ascii_digit());
+        ours.then(|| PrivateDir(dir.to_path_buf()))
+    }
+}
+
 impl Drop for PrivateDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
@@ -252,7 +365,7 @@ struct Shared {
 
 #[derive(Debug)]
 struct State {
-    /// The process has exited (and is reaped, or about to be under this lock).
+    /// The process has exited and is reaped (both under this lock).
     exited: bool,
     /// `stop` or a drop is ending it: its end is `Stopped`.
     stopping: bool,
@@ -263,6 +376,8 @@ struct State {
     said: String,
     /// How shards ended, with its last words, once reaped.
     ended_as: String,
+    /// Its exit status, as the watcher reaped it.
+    status: Option<Result<std::process::ExitStatus, String>>,
 }
 
 #[derive(Debug)]
@@ -292,7 +407,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// to exit.
 fn start_threads(
     shared: &Arc<Shared>,
-    child: &Child,
+    child: &Arc<Mutex<Child>>,
     output: io::PipeReader,
     writer: io::PipeWriter,
 ) -> io::Result<()> {
@@ -354,17 +469,24 @@ struct Exit {
     pid: libc::id_t,
     #[cfg(windows)]
     handle: std::os::windows::io::OwnedHandle,
+    /// The process, reaped once it has exited, under the state's lock.
+    child: Arc<Mutex<Child>>,
 }
 
 impl Exit {
-    fn of(child: &Child) -> io::Result<Exit> {
+    fn of(child: &Arc<Mutex<Child>>) -> io::Result<Exit> {
+        let process = lock(child);
         #[cfg(unix)]
-        return Ok(Exit { pid: child.id() });
+        return Ok(Exit {
+            pid: process.id(),
+            child: child.clone(),
+        });
         #[cfg(windows)]
         {
             use std::os::windows::io::AsHandle as _;
             Ok(Exit {
-                handle: child.as_handle().try_clone_to_owned()?,
+                handle: process.as_handle().try_clone_to_owned()?,
+                child: child.clone(),
             })
         }
     }
@@ -431,31 +553,51 @@ impl Exit {
             state.end = Some(End::Failed(format!("waiting for shards: {e}")));
             state.ended_as = format!("waiting for shards: {e}");
         }
+        // Reaped under the state's lock as `exited` is set, so no signal sent while it is
+        // false reaches another process, and none is left a zombie, dropped or not.
+        state.status = Some(lock(&self.child).wait().map_err(|e| e.to_string()));
         state.said = said;
         state.exited = true;
         shared.changed.notify_all();
     }
 }
 
-/// A guest shards booted.
+/// A guest shards booted, or one taken back by [`Guests::attach`].
 struct ShardsGuest {
     ports: Vec<u32>,
     vsock: PathBuf,
     #[cfg(unix)]
     pid: u32,
-    child: Mutex<Child>,
+    /// Ended through it on Windows, which sends a process no signal; the watcher reaps it.
+    #[cfg(windows)]
+    child: Arc<Mutex<Child>>,
+    /// What it was taken back by, where it was: its VM process is not this one's child.
+    #[cfg(unix)]
+    taken: Option<Taken>,
     shared: Arc<Shared>,
-    _dir: PrivateDir,
+    /// Its socket's directory, removed as it drops: none where a guest taken back was given
+    /// a socket in a directory this client does not make.
+    _dir: Option<PrivateDir>,
+}
+
+/// A guest taken back: the identity it was taken back by, and its VM process, held.
+#[cfg(unix)]
+struct Taken {
+    identity: Identity,
+    process: Arc<crate::taken::Held>,
 }
 
 impl ShardsGuest {
-    /// Its end, once the process has exited: reaped here, under its state's lock, once.
+    /// Its end, once the process has exited and its watcher reaped it.
     fn end(&self, state: &mut State) -> Option<End> {
         if !state.exited {
             return None;
         }
         if state.end.is_none() {
-            let status = lock(&self.child).wait();
+            let status = state
+                .status
+                .clone()
+                .unwrap_or_else(|| Err("no status reaped".into()));
             state.ended_as = match &status {
                 Ok(status) => said(&format!("shards {status}"), &state.said),
                 Err(e) => format!("shards: {e}"),
@@ -471,35 +613,78 @@ impl ShardsGuest {
     }
 
     /// The refusal for a guest that has ended: `Boot`, with shards' exit and last words,
-    /// where no `CONNECT` was ever answered, else `Ended`.
+    /// where it failed or reset before any `CONNECT` was answered, else `Ended`.
     fn gone(&self, state: &mut State) -> Option<Refusal> {
         let end = self.end(state)?;
-        if !state.ready && !state.stopping {
+        // A failure or a reset (a kernel's panic) before any answer is the boot's; a power-off
+        // or a stop is a normal end.
+        if !state.ready && matches!(end, End::Failed(_) | End::Reset) {
+            // shards-vmm's own refusal of the vCPUs its hypervisor won't run
+            // (`crates/vmm/src/vm/runtime.rs:1065`), as shards reports it.
+            if state.said.contains("vCPUs requested; this host supports") {
+                return Some(Refusal::Bounds {
+                    what: "vcpus",
+                    why: state.ended_as.clone(),
+                });
+            }
             return Some(Refusal::Boot(format!("before it was ready, {}", state.ended_as)));
         }
         Some(Refusal::Ended(end))
     }
 
-    /// Signals the process, while it is unreaped.
-    fn signal(&self, state: &State, kill: bool) {
+    /// Kills the process at once, while it is unreaped (or, taken back, while its exit has
+    /// not been seen).
+    fn signal(&self, state: &State) {
         if state.exited {
             return;
         }
         #[cfg(unix)]
+        if let Some(taken) = &self.taken {
+            taken.process.kill();
+            return;
+        }
+        #[cfg(unix)]
         if let Ok(pid) = libc::pid_t::try_from(self.pid) {
-            let signal = if kill { libc::SIGKILL } else { libc::SIGTERM };
             // SAFETY: kill(2) of our own child, unreaped while `exited` is false.
-            unsafe { libc::kill(pid, signal) };
+            unsafe { libc::kill(pid, libc::SIGKILL) };
         }
         // Windows sends a process no signal: shards' daemon ends a VM's process as its
         // Job's (shards_ipc `Child::kill`), and `run --kernel`'s VM, in a Job that ends with
         // it (cli/mod.rs `vm`), ends as it does.
         #[cfg(windows)]
         {
-            let _ = kill;
             let _ = lock(&self.child).kill();
         }
     }
+}
+
+/// When `child` was created: GetProcessTimes' creation time, a FILETIME (100 ns since
+/// 1601), as one number.
+#[cfg(windows)]
+fn created(child: &Child) -> io::Result<u64> {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetProcessTimes;
+    let zero = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+    // SAFETY: GetProcessTimes of the process handle `child` holds open, into FILETIMEs of
+    // ours.
+    let ok = unsafe {
+        GetProcessTimes(
+            child.as_raw_handle(),
+            &raw mut created,
+            &raw mut exited,
+            &raw mut kernel,
+            &raw mut user,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
 }
 
 /// `what`, with what shards said last where it said anything.
@@ -514,9 +699,10 @@ fn said(what: &str, said: &str) -> String {
 /// The wait before dialing again, `p = sqrt(2 c w)`: pacing that balances one dial's cost `c`
 /// against the waiting so far `w`, both measured as this connect runs.
 ///
-/// - `c` is the time the last refused dial took, measured each dial: on HVF 5.5 µs at p50 to
-///   a socket not bound yet and 44 µs to a guest that does not listen yet
-///   (`docs/research/platform-measurements.md` M464).
+/// - `c` is the last refused dial's own work, its connect and its ask, measured each dial;
+///   not its wait for the guest's answer, which costs this thread nothing (a muxer holding a
+///   request for a guest whose vsock is not up yet waits seconds). On HVF (M464) 5.5 µs at
+///   p50 to a socket not bound yet.
 /// - `w` is how long this connect has waited so far, and stands for the wait still to come.
 /// - Pausing `p` between dials, a wait of `w` takes `w / p` dials, `c w / p` of dialing; and a
 ///   guest that starts to listen at a uniform moment within a pause is reached `p / 2` late on
@@ -548,18 +734,33 @@ enum Attempt {
 /// bounds: it ends a request the guest leaves unanswered at Firecracker's
 /// `CONN_REQUEST_TIMEOUT_MS` (`crates/vmm/src/devices/virtio/vsock/conn.rs:26-27`), and the
 /// connection with the VM's process.
-fn handshake(vsock: &Path, port: u32, wait: Option<Duration>) -> Result<Socket, Attempt> {
-    let mut s = stream::connect(vsock).map_err(|e| match e.kind() {
-        // Not yet bound, or bound and not yet listening: the VM is starting.
-        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => Attempt::Again(format!("dialing: {e}")),
-        _ => Attempt::Refused(format!("{}: {e}", vsock.display())),
+/// `cost` is set to its own work, the connect and the ask, for `pause`.
+fn handshake(
+    vsock: &Path,
+    port: u32,
+    wait: Option<Duration>,
+    cost: &mut Duration,
+) -> Result<Socket, Attempt> {
+    let began = Instant::now();
+    // Its own work, the connect and the ask, as far as it got: not its wait for the answer.
+    let done = |cost: &mut Duration| *cost = began.elapsed();
+    let mut s = stream::connect(vsock).map_err(|e| {
+        done(cost);
+        match e.kind() {
+            // Not yet bound, or bound and not yet listening: the VM is starting.
+            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {
+                Attempt::Again(format!("dialing: {e}"))
+            }
+            _ => Attempt::Refused(format!("{}: {e}", vsock.display())),
+        }
     })?;
     if wait.is_some() {
         let timeouts = Stream::set_write_timeout(&s, wait).and_then(|()| Stream::set_read_timeout(&s, wait));
         timeouts.map_err(|e| Attempt::Refused(format!("its timeouts: {e}")))?;
     }
-    s.write_all(format!("CONNECT {port}\n").as_bytes())
-        .map_err(|e| Attempt::Again(format!("asking: {e}")))?;
+    let asked = s.write_all(format!("CONNECT {port}\n").as_bytes());
+    done(cost);
+    asked.map_err(|e| Attempt::Again(format!("asking: {e}")))?;
     let mut line = Vec::with_capacity(ANSWER);
     let mut byte = [0u8; 1];
     while line.last() != Some(&b'\n') {
@@ -605,11 +806,11 @@ impl Guest for ShardsGuest {
             if let Some(refusal) = self.gone(&mut lock(&self.shared.state)) {
                 return Err(refusal);
             }
-            let dialed = Instant::now();
+            let mut cost = Duration::ZERO;
             // One dial is always made, its answer awaited for what patience has left, or,
             // with none left (a patience of zero) or no clock, for the guest's own answer.
             let wait = left().filter(|l| !l.is_zero());
-            match handshake(&self.vsock, port, wait) {
+            match handshake(&self.vsock, port, wait, &mut cost) {
                 Ok(s) => {
                     lock(&self.shared.state).ready = true;
                     return Ok(Box::new(s));
@@ -621,7 +822,7 @@ impl Guest for ShardsGuest {
             // Waits out the pause, woken at once by the process's end.
             let state = lock(&self.shared.state);
             if !state.exited {
-                let pause = pause(dialed.elapsed(), began.elapsed(), left().unwrap_or(Duration::MAX));
+                let pause = pause(cost, began.elapsed(), left().unwrap_or(Duration::MAX));
                 let _ = self.shared.changed.wait_timeout(state, pause);
             }
         };
@@ -635,19 +836,42 @@ impl Guest for ShardsGuest {
     }
 
     fn stop(&self) -> Result<(), Refusal> {
-        // No record of a stop on this host class: no grace, killed at once. A guest's state
-        // is tmpfs and goes with it, so a kill loses nothing a graceful stop would keep;
-        // and a stop is never refused, which would leave the VM running.
-        self.stop_within(STOP_GRACE.ok());
+        let mut state = lock(&self.shared.state);
+        if !state.exited {
+            state.stopping = true;
+            self.signal(&state);
+        }
         Ok(())
     }
 
-    /// Hex's proposal leaves the real client's identity to shards: the VM process's pid, its
-    /// start time as its OS counts it, and the `--vsock` socket.
+    /// Its VM process's pid and start, as the OS counts it, read while the process is this
+    /// one's unreaped child (its watcher reaps it under the state's lock), and its socket; a
+    /// guest taken back, the identity it was taken back by. One that has ended is refused as
+    /// `gone` says: its pid may name another process since.
     fn identity(&self) -> Result<Identity, Refusal> {
-        Err(Refusal::Unsupported {
-            what: "identity",
-            why: "the shards client does not name its guests yet".into(),
+        #[cfg(unix)]
+        if let Some(taken) = &self.taken {
+            return Ok(taken.identity.clone());
+        }
+        let mut state = lock(&self.shared.state);
+        if let Some(refusal) = self.gone(&mut state) {
+            return Err(refusal);
+        }
+        #[cfg(unix)]
+        let (pid, started) = (self.pid, crate::taken::started(self.pid));
+        #[cfg(windows)]
+        let (pid, started) = {
+            let child = lock(&self.child);
+            (child.id(), created(&child))
+        };
+        drop(state);
+        Ok(Identity {
+            pid,
+            started: started.map_err(|e| Refusal::Gone {
+                pid,
+                why: format!("its start: {e}"),
+            })?,
+            vsock: self.vsock.clone(),
         })
     }
 
@@ -678,44 +902,13 @@ impl Guest for ShardsGuest {
     }
 }
 
-impl ShardsGuest {
-    /// Ends it: SIGTERM, then the kill once `grace` is out; with no grace, the kill at once
-    /// (on Windows, the process's end either way, as `signal` ends it).
-    fn stop_within(&self, grace: Option<Duration>) {
-        let mut state = lock(&self.shared.state);
-        if state.exited {
-            return;
-        }
-        state.stopping = true;
-        let Some(grace) = grace else {
-            self.signal(&state, true);
-            return;
-        };
-        self.signal(&state, false);
-        let deadline = Instant::now().checked_add(grace);
-        while !state.exited {
-            let left = deadline.map_or(Duration::ZERO, |d| d.saturating_duration_since(Instant::now()));
-            if left.is_zero() {
-                self.signal(&state, true);
-                break;
-            }
-            state = self
-                .shared
-                .changed
-                .wait_timeout(state, left)
-                .unwrap_or_else(PoisonError::into_inner)
-                .0;
-        }
-    }
-}
-
 impl Drop for ShardsGuest {
     /// Ends the guest, if it has not ended: no VM outlives its owner.
     fn drop(&mut self) {
         let mut state = lock(&self.shared.state);
         if !state.exited {
             state.stopping = true;
-            self.signal(&state, true);
+            self.signal(&state);
         }
     }
 }
@@ -753,7 +946,7 @@ mod tests {
     }
 
     /// A spec becomes `shards run --kernel` and its flags, as vm_run.rs reads them, the
-    /// kernel first (Hex HEX-GUEST-9).
+    /// kernel first (D215).
     #[test]
     fn a_spec_is_the_flags_shards_run_reads() {
         let args = arguments(&spec(), Path::new("/p/v")).unwrap();
@@ -791,8 +984,7 @@ mod tests {
         assert_eq!(args.get(3..5).unwrap(), ["--initrd", "/k/initrd"]);
     }
 
-    /// A path ending in `:ro`, which shards would read as a mode, is refused by name (Hex
-    /// HEX-GUEST-9).
+    /// A path ending in `:ro`, which shards would read as a mode, is refused by name (D215).
     #[test]
     fn a_path_ending_in_ro_is_refused() {
         let mut s = spec();
@@ -820,9 +1012,21 @@ mod tests {
         assert!(!path.exists());
     }
 
+    /// A temporary directory too long for a socket beneath it is passed over for /tmp on
+    /// Unix, and refused by name on Windows, whose AF_UNIX paths hold 108 bytes (review 16).
+    #[test]
+    fn a_socket_directory_too_long_is_passed_over_or_refused() {
+        let short = PathBuf::from("/t");
+        assert_eq!(socket_dir(short.clone()).unwrap(), short);
+        let long = PathBuf::from(format!("/{}", "d".repeat(SOCKET_PATH)));
+        #[cfg(unix)]
+        assert_eq!(socket_dir(long).unwrap(), PathBuf::from("/tmp"));
+        #[cfg(windows)]
+        assert!(matches!(socket_dir(long), Err(Refusal::Boot(why)) if why.contains("bytes at most")));
+    }
+
     /// The socket directory's name carries no pid, so a directory an earlier process of the
-    /// same pid left, or one another user made to take it first, is never its name (Hex
-    /// HEX-GUEST-9).
+    /// same pid left, or one another user made to take it first, is never its name (D215).
     #[test]
     fn the_socket_directory_is_named_apart_from_the_pid() {
         let dir = PrivateDir::new().unwrap();
@@ -831,6 +1035,22 @@ mod tests {
         assert!(!name.starts_with(&pid), "{name}");
         let again = PrivateDir::new().unwrap();
         assert_ne!(dir.0, again.0);
+    }
+
+    /// A stand-in script at `bin`, `body` its text: written beside it and installed by
+    /// install(1), so no descriptor of this process ever writes the file it executes (one a
+    /// test beside it forked while open would fail its exec ETXTBSY, execve(2)).
+    #[cfg(unix)]
+    fn installed(bin: &Path, body: &str) {
+        let source = bin.with_extension("sh");
+        std::fs::write(&source, body).unwrap();
+        let done = Command::new("install")
+            .args(["-m", "755"])
+            .arg(&source)
+            .arg(bin)
+            .status()
+            .unwrap();
+        assert!(done.success());
     }
 
     /// A guest's socket and its muxer's side of one connection, answering `answer` to the
@@ -852,13 +1072,14 @@ mod tests {
             s.write_all(answer).unwrap();
             s
         });
-        let got = handshake(&path, 5, None);
+        let mut cost = Duration::ZERO;
+        let got = handshake(&path, 5, None, &mut cost);
         drop(muxer.join().unwrap());
         got.err()
     }
 
     /// The longest answer Firecracker's protocol gives, `OK 4294967295\n`, is taken; one a
-    /// byte longer is refused as no answer (Hex HEX-GUEST-9).
+    /// byte longer is refused as no answer (D215).
     #[cfg(unix)]
     #[test]
     fn an_answer_past_the_longest_ok_is_refused() {
@@ -877,11 +1098,9 @@ mod tests {
         ShardsGuest,
         Arc<std::sync::atomic::AtomicUsize>,
     ) {
-        use std::os::unix::fs::PermissionsExt as _;
         let dir = shards_testdir::TempDir::new("api-dials").unwrap();
         let bin = dir.path().join("shards");
-        std::fs::write(&bin, "#!/bin/sh\nexec sleep 1000\n").unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        installed(&bin, "#!/bin/sh\nexec sleep 1000\n");
         let guest = start(&GuestSpec {
             binary: Some(bin),
             ..spec()
@@ -911,7 +1130,6 @@ mod tests {
     /// A stand-in for shards that ignores SIGTERM, booted, once it does.
     #[cfg(unix)]
     fn deaf() -> (shards_testdir::TempDir, ShardsGuest) {
-        use std::os::unix::fs::PermissionsExt as _;
         let dir = shards_testdir::TempDir::new("api-deaf-unit").unwrap();
         let (bin, deaf) = (dir.path().join("shards"), dir.path().join("deaf"));
         assert!(Command::new("mkfifo").arg(&deaf).status().unwrap().success());
@@ -919,8 +1137,7 @@ mod tests {
             "#!/bin/sh\ntrap '' TERM; echo > '{}'; while :; do sleep 1; done\n",
             deaf.display()
         );
-        std::fs::write(&bin, body).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        installed(&bin, &body);
         let guest = start(&GuestSpec {
             binary: Some(bin),
             ..spec()
@@ -930,28 +1147,64 @@ mod tests {
         (dir, guest)
     }
 
-    /// With no grace (a host class with no stop record), a stop kills at once, and the guest
-    /// ends `Stopped`, though it ignores SIGTERM: a stop is never refused (Hex HEX-GUEST-9).
+    /// A stop kills at once, though the guest ignores SIGTERM, returns `Ok`, and the guest
+    /// ends `Stopped`: never refused (review B7).
     #[cfg(unix)]
     #[test]
-    fn a_stop_with_no_grace_kills_at_once() {
-        let (_dir, guest) = deaf();
-        guest.stop_within(None);
-        assert_eq!(guest.wait_for(Duration::MAX).unwrap(), Some(End::Stopped));
-    }
-
-    /// Where this host class has no stop record, `stop` kills at once and returns `Ok`, and
-    /// the guest ends `Stopped`: no grace, no number borrowed from another class, and no
-    /// refusal, which would leave the VM running (Hex HEX-GUEST-9).
-    #[cfg(all(unix, not(target_os = "macos")))]
-    #[test]
-    fn a_stop_without_this_classs_record_kills_at_once() {
+    fn a_stop_kills_at_once() {
         let (_dir, guest) = deaf();
         guest.stop().unwrap();
         assert_eq!(guest.wait_for(Duration::MAX).unwrap(), Some(End::Stopped));
     }
 
-    /// A patience of zero is one dial, its answer awaited, and no other (Hex HEX-GUEST-9).
+    /// Whether `pid` names no process once `shared`'s watcher says it has exited: kill -0
+    /// names a zombie as a process, and a reaped pid as none.
+    #[cfg(unix)]
+    fn reaped_once_exited(pid: u32, shared: &Shared) -> bool {
+        let mut state = lock(&shared.state);
+        while !state.exited {
+            state = shared.changed.wait(state).unwrap();
+        }
+        drop(state);
+        let alive = Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        !alive.success()
+    }
+
+    /// A guest leaves no zombie, dropped while its shards runs or after shards has exited
+    /// with nobody asking its end: once its watcher says it has exited, its process is
+    /// reaped, so its pid names nothing (D215; review B2; both of integrate's
+    /// 80078b00 cases).
+    #[cfg(unix)]
+    #[test]
+    fn a_dropped_guest_leaves_no_zombie() {
+        let (_dir, guest, _) = listening_after(0);
+        let (pid, shared) = (guest.pid, guest.shared.clone());
+        drop(guest);
+        assert!(
+            reaped_once_exited(pid, &shared),
+            "pid {pid} is still a process (a zombie)"
+        );
+        let dir = shards_testdir::TempDir::new("api-exits").unwrap();
+        let bin = dir.path().join("shards");
+        installed(&bin, "#!/bin/sh\nexit 0\n");
+        let guest = start(&GuestSpec {
+            binary: Some(bin),
+            ..spec()
+        })
+        .unwrap();
+        let (pid, shared) = (guest.pid, guest.shared.clone());
+        assert!(
+            reaped_once_exited(pid, &shared),
+            "pid {pid}, exited unasked, is still a process (a zombie)"
+        );
+        drop(guest);
+    }
+
+    /// A patience of zero is one dial, its answer awaited, and no other (D215).
     #[cfg(unix)]
     #[test]
     fn a_patience_of_zero_dials_once() {
@@ -969,7 +1222,7 @@ mod tests {
     }
 
     /// A patience of `Duration::MAX` is no clock: dials go on until the guest listens
-    /// (Hex HEX-GUEST-9).
+    /// (D215).
     #[cfg(unix)]
     #[test]
     fn a_patience_of_max_dials_until_the_guest_listens() {
@@ -994,9 +1247,12 @@ mod tests {
         let timed = |path: &Path| -> Vec<Duration> {
             let mut d: Vec<Duration> = (0..n)
                 .map(|_| {
-                    let start = Instant::now();
-                    assert!(matches!(handshake(path, 1236, None), Err(Attempt::Again(_))));
-                    start.elapsed()
+                    let mut cost = Duration::ZERO;
+                    assert!(matches!(
+                        handshake(path, 1236, None, &mut cost),
+                        Err(Attempt::Again(_))
+                    ));
+                    cost
                 })
                 .collect();
             d.sort();
@@ -1036,8 +1292,37 @@ mod tests {
         }
     }
 
+    /// A refused dial's cost, `pause`'s `c`, is its own work, the connect and the ask, and
+    /// not its wait for the guest's answer: a muxer that holds a request unanswered (a guest
+    /// whose vsock is not up yet) costs this thread nothing while it waits, and a pause grown
+    /// from that wait held a boot back seconds (review: a 15 s boot on HVF).
+    #[cfg(unix)]
+    #[test]
+    fn a_dials_cost_is_its_work_not_its_wait_for_an_answer() {
+        let dir = PrivateDir::new().unwrap();
+        let path = dir.0.join("v");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        // An input: an answer held long past any connect's and write's own time.
+        let held = Duration::from_millis(200);
+        let muxer = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut line = [0u8; b"CONNECT 5\n".len()];
+            s.read_exact(&mut line).unwrap();
+            std::thread::sleep(held);
+        });
+        let mut cost = Duration::MAX;
+        let start = Instant::now();
+        assert!(matches!(
+            handshake(&path, 5, None, &mut cost),
+            Err(Attempt::Again(_))
+        ));
+        assert!(start.elapsed() >= held);
+        assert!(cost < held, "{cost:?}");
+        muxer.join().unwrap();
+    }
+
     /// The wait between dials is `sqrt(2 c w)` of the last dial's time and the wait so far,
-    /// none at first, never past what patience has left (Hex HEX-GUEST-9).
+    /// none at first, never past what patience has left (D215).
     #[test]
     fn a_pause_weighs_the_dials_cost_against_lateness() {
         let (us, ms) = (Duration::from_micros, Duration::from_millis);
@@ -1052,5 +1337,256 @@ mod tests {
         );
         assert_eq!(pause(us(5), ms(150), ms(1)), ms(1));
         assert_eq!(pause(Duration::MAX, Duration::MAX, ms(1)), ms(1));
+    }
+
+    /// A muxer for `listener`'s guest until the listener fails: each connection's
+    /// `CONNECT` answered `OK`, then what it is sent echoed back until it half-closes, as the
+    /// test guest's echo mode does.
+    #[cfg(unix)]
+    fn serve_echo(listener: &std::os::unix::net::UnixListener) {
+        for s in listener.incoming() {
+            let Ok(mut s) = s else { return };
+            std::thread::spawn(move || {
+                let mut line = Vec::new();
+                let mut byte = [0u8; 1];
+                while line.last() != Some(&b'\n') && s.read_exact(&mut byte).is_ok() {
+                    line.push(byte[0]);
+                }
+                if s.write_all(b"OK 1073741824\n").is_err() {
+                    return;
+                }
+                let mut buf = [0u8; 4096];
+                while let Ok(n @ 1..) = s.read(&mut buf) {
+                    if s.write_all(&buf[..n]).is_err() {
+                        return;
+                    }
+                }
+                let _ = s.shutdown(std::net::Shutdown::Write);
+            });
+        }
+    }
+
+    /// A guest booted by a stand-in for shards that runs on until it is ended, with an echoing
+    /// muxer (`serve_echo`) at its vsock socket, and its spec.
+    #[cfg(unix)]
+    fn echoing() -> (shards_testdir::TempDir, ShardsGuest, GuestSpec) {
+        let dir = shards_testdir::TempDir::new("api-attach").unwrap();
+        let bin = dir.path().join("shards");
+        installed(&bin, "#!/bin/sh\nexec sleep 1000\n");
+        let spec = GuestSpec {
+            binary: Some(bin),
+            ..spec()
+        };
+        let guest = start(&spec).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&guest.vsock).unwrap();
+        std::thread::spawn(move || serve_echo(&listener));
+        (dir, guest, spec)
+    }
+
+    /// What `guest`'s port 1024 echoes of `back`, written and half-closed.
+    #[cfg(unix)]
+    fn echoed(guest: &dyn Guest) -> Vec<u8> {
+        let mut conn = guest.connect(1024, Duration::MAX).unwrap();
+        conn.write_all(b"back").unwrap();
+        conn.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut got = Vec::new();
+        conn.read_to_end(&mut got).unwrap();
+        got
+    }
+
+    /// A booted guest names itself by its VM process's pid, that process's start as its OS
+    /// counts it, the same however often it is asked, and its vsock socket; once it has
+    /// ended, its pid no longer names it, and it is refused `Ended` (D215; Hex's proposal).
+    #[cfg(unix)]
+    #[test]
+    fn a_guest_names_itself_by_pid_start_and_socket() {
+        let (_dir, guest, _) = echoing();
+        let identity = guest.identity().unwrap();
+        assert_eq!((identity.pid, &identity.vsock), (guest.pid, &guest.vsock));
+        assert_eq!(echoed(&guest), b"back");
+        assert_eq!(guest.identity().unwrap(), identity);
+        guest.stop().unwrap();
+        assert_eq!(guest.wait_for(Duration::MAX).unwrap(), Some(End::Stopped));
+        assert_eq!(guest.identity(), Err(Refusal::Ended(End::Stopped)));
+    }
+
+    /// A guest whose handle its client lost without its drop (a crash, in one process) is
+    /// taken back by its identity: it serves its port, names itself as before, stops as
+    /// `Stopped`, and is then gone; an identity whose start differs (its pid since given
+    /// another process) is refused `Gone` (D215; Hex's proposal).
+    #[cfg(unix)]
+    #[test]
+    fn attach_takes_back_a_guest_whose_handle_was_lost() {
+        let (_dir, guest, spec) = echoing();
+        let identity = guest.identity().unwrap();
+        std::mem::forget(guest);
+        let other = Identity {
+            started: identity.started.wrapping_add(1),
+            ..identity.clone()
+        };
+        assert!(
+            matches!(Shards.attach(&other, &spec), Err(Refusal::Gone { .. })),
+            "another start"
+        );
+        let back = Shards.attach(&identity, &spec).unwrap();
+        assert_eq!(back.identity().unwrap(), identity);
+        assert_eq!(echoed(&*back), b"back");
+        back.stop().unwrap();
+        assert_eq!(back.wait_for(Duration::MAX).unwrap(), Some(End::Stopped));
+        let again = Shards.attach(&identity, &spec);
+        assert!(matches!(again, Err(Refusal::Gone { .. })), "{:?}", again.err());
+    }
+
+    /// A guest taken back is its taker's until it drops, which ends it, and with it the
+    /// socket directory its first client made; one that ends by itself ends `Failed`, as
+    /// its exit status is its parent's alone (D215; Hex's proposal).
+    #[cfg(unix)]
+    #[test]
+    fn a_guest_taken_back_ends_as_it_drops_or_by_itself() {
+        let (_dir, guest, spec) = echoing();
+        let (identity, shared) = (guest.identity().unwrap(), guest.shared.clone());
+        std::mem::forget(guest);
+        let back = Shards.attach(&identity, &spec).unwrap();
+        let socket_dir = identity.vsock.parent().unwrap().to_path_buf();
+        drop(back);
+        assert!(
+            reaped_once_exited(identity.pid, &shared),
+            "pid {} runs on",
+            identity.pid
+        );
+        assert!(!socket_dir.exists(), "{} is left", socket_dir.display());
+        let (_dir, guest, spec) = echoing();
+        let identity = guest.identity().unwrap();
+        std::mem::forget(guest);
+        let back = Shards.attach(&identity, &spec).unwrap();
+        let killed = Command::new("kill")
+            .args(["-KILL", &identity.pid.to_string()])
+            .status()
+            .unwrap();
+        assert!(killed.success());
+        let end = back.wait_for(Duration::MAX).unwrap();
+        assert!(
+            matches!(&end, Some(End::Failed(why)) if why.contains("parent")),
+            "{end:?}"
+        );
+    }
+
+    /// Set in the client `attach_takes_back_a_guest_whose_client_crashed` runs: the stand-in
+    /// for shards it boots with.
+    #[cfg(unix)]
+    const CRASHING_SHARDS: &str = "SHARDS_API_CRASHING_SHARDS";
+    /// Set by that stand-in for the VM process it becomes: its `--vsock` socket.
+    #[cfg(unix)]
+    const STANDIN_VSOCK: &str = "SHARDS_API_STANDIN_VSOCK";
+
+    /// The client `attach_takes_back_a_guest_whose_client_crashed` runs, in a process of its
+    /// own: it boots a guest, takes its identity before its stand-in has become the VM
+    /// process (so a start an exec changed would not be taken back), connects to it, says
+    /// the identity, and ends holding it, its drop never run, as a crash ends a client.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "a child of attach_takes_back_a_guest_whose_client_crashed"]
+    fn child_a_client_that_crashes() {
+        let Some(bin) = std::env::var_os(CRASHING_SHARDS) else {
+            return;
+        };
+        let guest = start(&GuestSpec {
+            binary: Some(bin.into()),
+            ..spec()
+        })
+        .unwrap();
+        let id = guest.identity().unwrap();
+        drop(guest.connect(1024, Duration::MAX).unwrap());
+        println!("identity {} {} {}", id.pid, id.started, id.vsock.display());
+        std::process::exit(0);
+    }
+
+    /// The VM process the crashing client's stand-in for shards becomes: an echoing muxer
+    /// (`serve_echo`) at the `--vsock` socket it was given, until it is killed.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "a child of attach_takes_back_a_guest_whose_client_crashed"]
+    fn child_a_vm_process_serving_its_vsock() {
+        let Some(vsock) = std::env::var_os(STANDIN_VSOCK) else {
+            return;
+        };
+        serve_echo(&std::os::unix::net::UnixListener::bind(vsock).unwrap());
+    }
+
+    /// A guest whose client crashed, ending with it held, is taken back by its identity from
+    /// another process, whose child its VM process is not: it serves its port, stops as
+    /// `Stopped`, and is then gone, and the crashed client's socket directory with it (D215;
+    /// Hex's proposal).
+    #[cfg(unix)]
+    #[test]
+    fn attach_takes_back_a_guest_whose_client_crashed() {
+        let dir = shards_testdir::TempDir::new("api-crash").unwrap();
+        let bin = dir.path().join("shards");
+        let me = std::env::current_exe().unwrap();
+        installed(
+            &bin,
+            &format!(
+                "#!/bin/sh\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = --vsock ]; then {STANDIN_VSOCK}=$2; \
+                 export {STANDIN_VSOCK}; fi\n  shift\ndone\nexec '{}' --exact \
+                 client::tests::child_a_vm_process_serving_its_vsock --ignored --test-threads=1 \
+                 >/dev/null 2>&1\n",
+                me.display()
+            ),
+        );
+        let client = Command::new(&me)
+            .args([
+                "--exact",
+                "client::tests::child_a_client_that_crashes",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CRASHING_SHARDS, &bin)
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&client.stdout);
+        assert!(client.status.success(), "{:?}: {said}", client.status);
+        // libtest says the test's name before what the test prints, on the same line.
+        let line = said
+            .lines()
+            .find_map(|l| l.split_once("identity ").map(|(_, id)| id))
+            .unwrap_or_else(|| panic!("no identity said: {said}"));
+        let mut words = line.splitn(3, ' ');
+        let identity = Identity {
+            pid: words.next().unwrap().parse().unwrap(),
+            started: words.next().unwrap().parse().unwrap(),
+            vsock: words.next().unwrap().into(),
+        };
+        let spec = GuestSpec {
+            binary: Some(bin),
+            ..spec()
+        };
+        let back = Shards.attach(&identity, &spec).unwrap();
+        assert_eq!(echoed(&*back), b"back");
+        back.stop().unwrap();
+        assert_eq!(back.wait_for(Duration::MAX).unwrap(), Some(End::Stopped));
+        let again = Shards.attach(&identity, &spec);
+        assert!(matches!(again, Err(Refusal::Gone { .. })), "{:?}", again.err());
+        let socket_dir = identity.vsock.parent().unwrap().to_path_buf();
+        drop(back);
+        assert!(!socket_dir.exists(), "{} is left", socket_dir.display());
+    }
+
+    /// On Windows a guest's VM ends with the process that booted it (D141), so none outlives
+    /// its client to be taken back: attach is refused `Gone` (D215; Hex's proposal).
+    #[cfg(windows)]
+    #[test]
+    fn attach_is_refused_gone_on_windows() {
+        let identity = Identity {
+            pid: std::process::id(),
+            started: 1,
+            vsock: "v".into(),
+        };
+        let refused = Shards.attach(&identity, &spec());
+        assert!(
+            matches!(refused, Err(Refusal::Gone { .. })),
+            "{:?}",
+            refused.err()
+        );
     }
 }
