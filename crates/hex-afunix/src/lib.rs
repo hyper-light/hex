@@ -33,11 +33,12 @@ use windows_sys::Win32::Foundation::{
     WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Networking::WinSock::{
-    AF_UNIX, AcceptEx, INVALID_SOCKET, SD_BOTH, SO_SNDTIMEO, SO_UPDATE_ACCEPT_CONTEXT, SOCK_STREAM,
-    SOCKADDR_UN, SOCKET, SOCKET_ERROR, SOL_SOCKET, WSA_FLAG_NO_HANDLE_INHERIT, WSA_FLAG_OVERLAPPED,
-    WSA_IO_PENDING, WSABUF, WSADATA, WSAECONNABORTED, WSAECONNRESET, WSAEMFILE, WSAENOBUFS,
-    WSAGetLastError, WSAIoctl, WSARecv, WSASend, WSASocketW, WSAStartup, bind, closesocket,
-    connect, listen, recv, send, setsockopt, shutdown,
+    AF_UNIX, AcceptEx, INVALID_SOCKET, LINGER, SD_BOTH, SO_LINGER, SO_SNDTIMEO,
+    SO_UPDATE_ACCEPT_CONTEXT, SOCK_STREAM, SOCKADDR_UN, SOCKET, SOCKET_ERROR, SOL_SOCKET,
+    WSA_FLAG_NO_HANDLE_INHERIT, WSA_FLAG_OVERLAPPED, WSA_IO_PENDING, WSABUF, WSADATA,
+    WSAECONNABORTED, WSAECONNRESET, WSAEMFILE, WSAENOBUFS, WSAGetLastError, WSAIoctl, WSARecv,
+    WSASend, WSASocketW, WSAStartup, bind, closesocket, connect, listen, recv, send, setsockopt,
+    shutdown,
 };
 use windows_sys::Win32::Security::{
     EqualSid, GetTokenInformation, IsWellKnownSid, TOKEN_QUERY, TOKEN_USER, TokenUser,
@@ -253,6 +254,30 @@ impl Socket {
     pub fn shutdown(&self) {
         // SAFETY: a socket this value owns.
         unsafe { shutdown(self.0, SD_BOTH) };
+    }
+
+    /// Makes this socket's close a reset (`SO_LINGER`, no linger): its peer's read then fails at once, if no
+    /// end-of-stream reached it before (afunix.sys doesn't wake a read that missed one). What the peer hasn't
+    /// read is discarded.
+    pub fn reset_on_close(&self) -> io::Result<()> {
+        let linger = LINGER {
+            l_onoff: 1,
+            l_linger: 0,
+        };
+        // SAFETY: a socket this value owns; the option's own value and its length.
+        let rc = unsafe {
+            setsockopt(
+                self.0,
+                SOL_SOCKET,
+                SO_LINGER,
+                (&raw const linger).cast(),
+                int_len(size_of::<LINGER>()),
+            )
+        };
+        if rc == SOCKET_ERROR {
+            return Err(wsa_error());
+        }
+        Ok(())
     }
 
     /// The pid of the process that connected (afunix.sys records it at the connect).

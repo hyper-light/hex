@@ -12,6 +12,12 @@
 //!   it waits, so a client the core has stopped reading holds one buffer and what it decoded here, no more;
 //! - a send hands the kernel the whole framed message and owns nothing after, so to the core every send is
 //!   whole or nothing; while one is under way, the next is `WouldBlock`;
+//! - a connection the core ends is closed in two phases: once its last send has completed it is held,
+//!   reading, until its peer closes (a graceful close), and reset if the peer hasn't closed within a learned
+//!   wait. It is never given an end-of-stream: afunix.sys now and then fails to wake a peer's read with one
+//!   (2026-11-09: ~2% under load), and a read that missed it isn't woken by a later reset either, only by
+//!   its own next call; a reset alone wakes every read, and the wait gives the peer the time to read the
+//!   last message first (what a reset would discard);
 //! - only this user or LocalSystem is served: each peer's pid (`SIO_AF_UNIX_GETPEERPID`) names a process
 //!   whose user is read and refused by name otherwise, as Linux's `SO_PEERCRED` is;
 //! - an exec's stdio isn't carried yet: Windows' AF_UNIX passes no handles, and how it reaches the caller is
@@ -23,7 +29,7 @@ use std::os::windows::fs::MetadataExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hex_afunix::{self as socket, Done, Port, ProgramWatch, Socket};
 use hex_api::{Refusal, Stdio};
@@ -34,8 +40,17 @@ use super::{Accepted, EVENTS, Event, Interest, Os, Peer, Recv, Sent, Unwatched};
 
 /// A frame's prefix, its body's length (`hex_core::stream`'s `u32`).
 const PREFIX: usize = size_of::<u32>();
-/// A [`Stream`]'s token before the core watches it.
-const UNWATCHED: u64 = u64::MAX;
+/// Where a [`Stream`]'s token starts before the core watches it: each its own, from a range the core's
+/// tokens (counted up from its first) never reach, so a connection the core never watched (one refused as
+/// it came) still has a tag of its own on the port while it is ended.
+const UNWATCHED_FIRST: u64 = 1 << 63;
+/// The next unwatched token.
+static NEXT_UNWATCHED: AtomicU64 = AtomicU64::new(UNWATCHED_FIRST);
+/// The slowest a peer that reads to its end closed after the node's last message, on its record
+/// (stdio_probe peerclose at dac212ce, bench/native/records/peerclose-jupiter-dac212ce-20261109T1834Z.txt:
+/// 2,883 us beside a workspace build, of 2,990 rounds): the seed of the node's wait before it resets an
+/// ended connection.
+const PEER_CLOSE_RECORD: Duration = Duration::from_micros(2_883);
 /// The listener's accepts' tag on the port.
 const LISTENER: u64 = 0;
 /// `FILE_ATTRIBUTE_REPARSE_POINT`: afunix.sys's socket file is one (`IO_REPARSE_TAG_AF_UNIX`).
@@ -70,6 +85,8 @@ struct State {
     reset: bool,
     /// The stream can't be read further (an oversized or bad frame): the next read is its end.
     broken: bool,
+    /// The core has ended it: its two-phase close is under way ([`Windows::hold`]).
+    ending: bool,
 }
 
 struct Message {
@@ -86,7 +103,7 @@ impl Stream {
     fn new(socket: Socket) -> Stream {
         Stream {
             socket,
-            token: AtomicU64::new(UNWATCHED),
+            token: AtomicU64::new(NEXT_UNWATCHED.fetch_add(1, Ordering::Relaxed)),
             state: Mutex::new(State {
                 deframer: Deframer::new(wire::MAX_MESSAGE),
                 ready: VecDeque::new(),
@@ -97,6 +114,7 @@ impl Stream {
                 ended: false,
                 reset: false,
                 broken: false,
+                ending: false,
             }),
         }
     }
@@ -123,12 +141,24 @@ impl Stream {
 /// The connections the core watches, by token, and what for.
 type Conns = BTreeMap<u64, (Arc<Stream>, Interest)>;
 
+/// The connection a completion is for, and what the core watches it for (`None`: the core has let it go,
+/// and this side holds it through its close).
+type Completed = Option<(Arc<Stream>, Option<Interest>)>;
+
 /// The listener's state: whether the core accepts, an accept under way, and what one took.
 #[derive(Default)]
 struct Listening {
     on: bool,
     accepting: bool,
     taken: VecDeque<io::Result<Socket>>,
+}
+
+/// A connection the core has ended: held until its peer closes, or reset once the wait for that passes.
+struct Ending {
+    conn: Arc<Stream>,
+    /// When its last send completed and the wait for its peer's close began; `None` while that send is
+    /// still under way.
+    since: Option<Instant>,
 }
 
 /// The listener and the completion port that watches it, the connections and the programs.
@@ -138,6 +168,10 @@ pub struct Windows {
     listening: Mutex<Listening>,
     /// The connections the core watches, by token, and what for.
     watching: Mutex<Conns>,
+    /// The connections the core has ended, by tag, held through their two-phase close.
+    ending: Mutex<BTreeMap<u64, Ending>>,
+    /// The slowest close a peer made after its end-of-stream went, in nanoseconds: it only rises.
+    slowest_close: AtomicU64,
 }
 
 impl Windows {
@@ -158,6 +192,8 @@ impl Windows {
             port,
             listening: Mutex::new(Listening::default()),
             watching: Mutex::new(BTreeMap::new()),
+            ending: Mutex::new(BTreeMap::new()),
+            slowest_close: AtomicU64::new(0),
         })
     }
 
@@ -167,6 +203,106 @@ impl Windows {
 
     fn listening(&self) -> Result<MutexGuard<'_, Listening>, Refusal> {
         self.listening.lock().map_err(poisoned)
+    }
+
+    fn ending(&self) -> Result<MutexGuard<'_, BTreeMap<u64, Ending>>, Refusal> {
+        self.ending.lock().map_err(poisoned)
+    }
+
+    /// How long an ended connection's peer has to close after its last message before the node resets it:
+    /// twice the slowest of its record and what this node has seen (Hex's rule for learned waits), so it only
+    /// rises.
+    fn close_wait(&self) -> Duration {
+        let seen = Duration::from_nanos(self.slowest_close.load(Ordering::Relaxed));
+        PEER_CLOSE_RECORD.max(seen).saturating_mul(2)
+    }
+
+    /// The second phase of an ended connection's close, once its last send has completed: the time noted,
+    /// and a receive kept under way for its peer's close. No end-of-stream is sent (see the module's note).
+    /// Done once: a second call finds the time noted.
+    fn hold(&self, tag: u64, conn: &Arc<Stream>) -> Result<(), Refusal> {
+        {
+            let mut ending = self.ending()?;
+            match ending.get_mut(&tag) {
+                Some(e) if e.since.is_none() => e.since = Some(Instant::now()),
+                _ => return Ok(()),
+            }
+        }
+        let mut st = conn.state.lock().map_err(poisoned)?;
+        if st.ended {
+            drop(st);
+            self.closed(tag);
+            return Ok(());
+        }
+        if !st.receiving
+            && let Some(buf) = st.buf.take()
+        {
+            match socket::receive(&conn.socket, tag, buf) {
+                Ok(()) => st.receiving = true,
+                Err((_, buf)) => {
+                    st.buf = Some(buf);
+                    st.ended = true;
+                    drop(st);
+                    self.closed(tag);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// An ended connection's peer has closed (or its read failed): it is let go, so its close is a graceful
+    /// one, and how long the peer took after the last message teaches the wait.
+    fn closed(&self, tag: u64) {
+        let held = self.ending.lock().ok().and_then(|mut e| e.remove(&tag));
+        if let Some(Ending {
+            since: Some(since), ..
+        }) = held
+        {
+            let took = u64::try_from(since.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            self.slowest_close.fetch_max(took, Ordering::Relaxed);
+        }
+    }
+
+    /// Resets each ended connection whose peer hasn't closed within the wait (a peer that reads to the end it
+    /// is given has its last message, and waits): its close becomes a reset, which ends the peer's read; a
+    /// core still watching it sees it hung up. How long until the next held one is due, if any.
+    fn reset_overdue(&self) -> Result<Option<Duration>, Refusal> {
+        let wait = self.close_wait();
+        let now = Instant::now();
+        let mut next: Option<Duration> = None;
+        let mut overdue = Vec::new();
+        self.ending()?.retain(|_, e| {
+            let Some(since) = e.since else {
+                return true;
+            };
+            let left = wait.saturating_sub(now.saturating_duration_since(since));
+            if left.is_zero() {
+                overdue.push(Arc::clone(&e.conn));
+                false
+            } else {
+                next = Some(next.map_or(left, |n| n.min(left)));
+                true
+            }
+        });
+        for conn in overdue {
+            let _ = conn.socket.reset_on_close();
+            if let Ok(mut st) = conn.state.lock() {
+                st.ended = true;
+            }
+        }
+        Ok(next)
+    }
+
+    /// The connection a completion under `tag` is for: one the core watches (and what for), or one it has
+    /// ended and this side holds through its close.
+    fn completed(&self, tag: u64) -> Result<Completed, Refusal> {
+        if let Some((conn, interest)) = self.watched(tag)? {
+            return Ok(Some((conn, Some(interest))));
+        }
+        Ok(self
+            .ending()?
+            .get(&tag)
+            .map(|e| (Arc::clone(&e.conn), None)))
     }
 
     /// Starts an accept if the core accepts and none is under way or waiting to be taken.
@@ -230,11 +366,36 @@ impl Windows {
                 }
             }
             Done::Received { tag, buf, n } => {
-                let Some((conn, interest)) = self.watched(tag)? else {
+                let Some((conn, interest)) = self.completed(tag)? else {
                     return Ok(());
                 };
                 let mut st = conn.state.lock().map_err(poisoned)?;
                 st.receiving = false;
+                if st.ending {
+                    // An ended connection reads only for its peer's close; what else comes is let go.
+                    st.buf = Some(buf);
+                    if matches!(n, Ok(k) if k > 0)
+                        && let Some(again) = st.buf.take()
+                    {
+                        match socket::receive(&conn.socket, tag, again) {
+                            Ok(()) => {
+                                st.receiving = true;
+                                return Ok(());
+                            }
+                            Err((_, again)) => st.buf = Some(again),
+                        }
+                    }
+                    st.ended = true;
+                    drop(st);
+                    self.closed(tag);
+                    if matches!(interest, Some(Interest::Read)) {
+                        push(events, tag, true, false, true);
+                    }
+                    return Ok(());
+                }
+                let Some(interest) = interest else {
+                    return Ok(());
+                };
                 match n {
                     Ok(0) => st.ended = true,
                     Ok(n) => frame(&mut st, buf.get(..n).unwrap_or_default()),
@@ -252,7 +413,7 @@ impl Windows {
                 }
             }
             Done::Sent { tag, buf, n } => {
-                let Some((conn, interest)) = self.watched(tag)? else {
+                let Some((conn, interest)) = self.completed(tag)? else {
                     return Ok(());
                 };
                 let mut st = conn.state.lock().map_err(poisoned)?;
@@ -269,8 +430,14 @@ impl Windows {
                     }
                     Err(_) => st.ended = true,
                 }
-                if matches!(interest, Interest::Write) && (!st.sending || st.ended) {
+                if matches!(interest, Some(Interest::Write)) && (!st.sending || st.ended) {
                     push(events, tag, false, true, st.ended);
+                }
+                // An ended connection's last send is out: the second phase of its close.
+                let end_now = st.ending && !st.sending;
+                drop(st);
+                if end_now {
+                    self.hold(tag, &conn)?;
                 }
             }
         }
@@ -389,6 +556,13 @@ impl Os for Windows {
     type Passed = NoHandle;
 
     fn wait(&self, events: &mut Vec<Event>, timeout: Option<Duration>) -> Result<(), Refusal> {
+        // Ended connections whose peer hasn't closed in time are reset, and the wait ends no later than the
+        // next is due.
+        let timeout = match (timeout, self.reset_overdue()?) {
+            (Some(t), Some(due)) => Some(t.min(due)),
+            (None, due) => due,
+            (t, None) => t,
+        };
         let conns: Conns = self
             .watching()?
             .iter()
@@ -526,7 +700,7 @@ impl Os for Windows {
         let Ok(mut st) = conn.state.lock() else {
             return Sent::Gone;
         };
-        if st.ended {
+        if st.ended || st.ending {
             return Sent::Gone;
         }
         if st.sending {
@@ -544,8 +718,33 @@ impl Os for Windows {
         }
     }
 
+    /// The core ends `conn`: the first phase of its two-phase close. It is held first (so a send completing
+    /// on the I/O thread finds it), then marked ending; once its last send has completed it waits for its
+    /// peer's close ([`Windows::hold`]), and is reset once the wait passes ([`Windows::reset_overdue`]).
     fn shutdown(&self, conn: &Arc<Stream>) {
-        conn.socket.shutdown();
+        let tag = conn.token.load(Ordering::SeqCst);
+        if let Ok(mut ending) = self.ending.lock() {
+            ending.entry(tag).or_insert_with(|| Ending {
+                conn: Arc::clone(conn),
+                since: None,
+            });
+        }
+        let sending = {
+            let Ok(mut st) = conn.state.lock() else {
+                return;
+            };
+            if st.ending {
+                return;
+            }
+            st.ending = true;
+            st.reading = false;
+            st.sending
+        };
+        if !sending {
+            let _ = self.hold(tag, conn);
+        }
+        // The I/O thread's wait takes the new deadline.
+        let _ = self.wake();
     }
 
     fn hung_up(&self, conn: &Arc<Stream>) -> bool {
