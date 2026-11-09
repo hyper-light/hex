@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Goal 17's record, rounds.py: arms interleaved round by round, each round's order rotated and its load and each
 burst's window recorded (Ada's rule: a p99 claim stands on at least 299 interleaved rounds, the load recorded each
-round), each arm a process speaking its protocol (seam_oci's serve phase, libcrun-driver's fds 3 and 4), and the
-summary each arm's creates over the timed rounds against the first arm's.
+round), each arm a process speaking its protocol (seam_oci's serve phase, libcrun-driver's fds 3 and 4), a classic
+arm's seam_oci asked for the classic root and no way (goal 17's baseline), and the summary each arm's creates over the
+timed rounds against every other arm's.
 Run: python3 -B -I bench/competitive/probes/rounds_test.py
 """
 import io
@@ -69,6 +70,14 @@ json.dump({"phases": {"serve": {"bursts": bursts, "mount_namespaces": {"tree": b
            "cgroup": os.environ.get("HEXBENCH_CGROUP")}, open(sys.argv[1], "w"))
 """
 
+SEAM_ENV = """import json, os, sys
+for line in sys.stdin:
+    word, n, conc = line.split()
+    print(json.dumps({"create_ms": [1.5] * int(n), "delete_ms": [0.5] * int(n)}), flush=True)
+json.dump({"phases": {"serve": {}}, "root": os.environ.get("HEXBENCH_ROOT"), "way": os.environ.get("HEX_OCI_MNTNS")},
+          open(sys.argv[1], "w"))
+"""
+
 DRIVER = """import os
 req, rep = os.fdopen(3), os.fdopen(4, "w")
 for line in req:
@@ -109,9 +118,9 @@ class Rounds(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual([b["arm"] for b in rows[0]["bursts"]], ["copy"])
 
-    def test_the_summary_pools_timed_rounds_and_sets_each_arm_against_the_first(self):
+    def test_the_summary_pools_timed_rounds_and_sets_each_arm_against_every_other(self):
         """Do one warmup round and two timed ones, expect each arm's creates over the timed rounds alone, its round
-        medians, and the second arm's rounds below the first's and its p50 ratio."""
+        medians, the second arm's rounds below the first's and its p50 ratio, and the first's below the second's."""
         out = io.StringIO()
         rd.run_rounds([Fake("copy", 2.0), Fake("tree", 1.0)], 2, 1, 4, 2, out, clock=ticking(), load=loads())
         rows = [json.loads(line) for line in out.getvalue().splitlines()]
@@ -121,6 +130,8 @@ class Rounds(unittest.TestCase):
         self.assertEqual(s["per_arm"]["tree"]["round_medians"], [1.0, 1.0])
         vs = s["per_arm"]["tree"]["against_copy"]
         self.assertEqual((vs["rounds_below"], vs["rounds"], vs["p50_ratio"], vs["p99_lower"]), (2, 2, 0.5, True))
+        back = s["per_arm"]["copy"]["against_tree"]
+        self.assertEqual((back["rounds_below"], back["p50_ratio"], back["p99_lower"]), (0, 2.0, False))
         self.assertEqual(s["load1"]["p50"], 2.0)
 
     def test_percentiles_are_nearest_rank(self):
@@ -154,6 +165,25 @@ class Processes(unittest.TestCase):
                 arms = json.load(f)
             self.assertEqual(arms["tree"]["result"]["phases"]["serve"]["bursts"], 2)
             self.assertEqual(arms["libcrun"]["exits"], [0, 0])
+
+    def test_a_classic_arm_asks_its_seam_oci_for_the_classic_root_and_no_way(self):
+        """Goal 17's baseline arm (the lead's ruling of 2026-11-09). Do a hex:classic arm beside a hex:tree arm, under an
+        environment asking for the copy and the classic root both, expect the classic arm named classic, its seam_oci
+        asked for the classic root (HEXBENCH_ROOT) and for no way, and the tree arm for its way and no classic root."""
+        with tempfile.TemporaryDirectory() as d:
+            saved = dict(os.environ)
+            os.environ.update(ROUNDS_SEAM=stand_in(d, "seam", SEAM_ENV), ROUNDS_HEX="/hex", ROUNDS_SLEEP="/s",
+                              ROUNDS_TRUE="/t", HEX_OCI_MNTNS="copy", HEXBENCH_ROOT="classic")
+            try:
+                rc = rd.main([os.path.join(d, "out"), "1", "0", "2", "2", "hex:classic", "hex:tree"])
+            finally:
+                os.environ.clear()
+                os.environ.update(saved)
+            self.assertEqual(rc, 0)
+            with open(os.path.join(d, "out", "arms.json")) as f:
+                arms = json.load(f)
+            self.assertEqual((arms["classic"]["result"]["root"], arms["classic"]["result"]["way"]), ("classic", None))
+            self.assertEqual((arms["tree"]["result"]["root"], arms["tree"]["result"]["way"]), (None, "tree"))
 
     def test_each_hex_arm_gets_a_cgroup_of_its_own_with_the_parents_controllers(self):
         """Do two hex arms under a ROUNDS_CGROUP whose subtree_control holds cpu and memory, expect each arm's node
