@@ -1116,6 +1116,7 @@ impl<O: Os> Shared<O> {
             }
             Ok((h, Request::Hello { .. })) => self.answer(conn, h.id, &Answer::Hello(self.hello())),
             Ok((h, Request::Release)) => self.release(conn, h.id),
+            Ok((_, Request::Taken)) => Ok(()),
             Ok((header, Request::Call(call))) => {
                 let admitted = {
                     let mut out = conn.out.lock().map_err(poisoned)?;

@@ -62,7 +62,7 @@ pub(crate) fn kind_of<'a>(waits: &'a [Patience; KINDS], request: &Request) -> Op
             Call::Kill { .. } => 10,
             Call::ExecStreams { .. } => 11,
         },
-        Request::Release => return None,
+        Request::Release | Request::Taken => return None,
     };
     waits.get(n)
 }

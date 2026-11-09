@@ -116,6 +116,7 @@ mod kind {
     pub const KILL: u16 = 0x000c;
     pub const EXEC_STREAMS: u16 = 0x000d;
     pub const GIVEN: u16 = 0x800a;
+    pub const TAKEN: u16 = 0x000e;
 }
 
 /// A message's header, once its wire identity is read as this side's.
@@ -137,6 +138,9 @@ pub enum Request {
     /// dropped): the node agent stops watching it and lets it run on, as dropping an in-process `Proc`
     /// does. Not answered.
     Release,
+    /// The client took the ends of the streams its header's id's exec was given ([`Answer::Given`]), so the node
+    /// agent lets its own copies go. Not answered.
+    Taken,
 }
 
 /// A call of the node agent: the `Runtime` seam's, its network namespace counts, and a program's kill.
@@ -394,6 +398,7 @@ pub fn request(id: u64, request: &Request, bound: usize) -> Result<Vec<u8>, Faul
             w.string(build)?;
         }
         Request::Release => w.header(kind::RELEASE, id),
+        Request::Taken => w.header(kind::TAKEN, id),
         Request::Call(call) => put_call(&mut w, id, call)?,
     }
     w.done()
@@ -581,6 +586,7 @@ fn parse_request(
             build: r.string("build").map_err(bad)?,
         },
         kind::RELEASE => Request::Release,
+        kind::TAKEN => Request::Taken,
         kind::CREATE => Request::Call(Call::Create(Box::new(box_spec(&mut r).map_err(bad)?))),
         kind::START => Request::Call(Call::Start(box_id(&mut r).map_err(bad)?)),
         kind::EXEC => {
@@ -824,6 +830,7 @@ fn request_name(kind: u16) -> &'static str {
         kind::NETNS => "a netns",
         kind::KILL => "a kill",
         kind::EXEC_STREAMS => "an exec asking for streams",
+        kind::TAKEN => "a taken",
         _ => "a request",
     }
 }

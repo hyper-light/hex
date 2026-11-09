@@ -413,10 +413,10 @@ fn hostile_messages_are_refused_and_the_connection_is_served_after() {
         ),
         Hostile(
             "unknown kind",
-            with(12, [0x0e, 0]),
+            with(12, [0x0f, 0]),
             vec![],
             9,
-            "kind 0x000e isn't a request this wire defines",
+            "kind 0x000f isn't a request this wire defines",
         ),
         Hostile(
             "an answer kind",
@@ -1099,4 +1099,98 @@ fn the_node_keeps_a_given_answers_ends_until_its_client_took_them() {
         (2, Answer::Exited(Exit::Code(0))),
         "the program's stdout had no reader: the node let its ends go before its client took them"
     );
+}
+
+/// Native plan step 8, guest stdio (HEX-GUEST-41): once its client says it took a given answer's ends, the node lets
+/// its own copies go, so the streams are the client's and its program's alone. A client that says so, then lets its
+/// stdout end go, leaves the program's stdout with no reader, and the program's write of its line ends it by SIGPIPE.
+/// A call answered after the word shows the node read the word first: it reads a connection's requests in order.
+#[test]
+fn the_node_lets_a_given_answers_ends_go_once_its_client_says_it_took_them() {
+    let lab = Lab::new(limits());
+    let raw = lab.raw();
+    hello_raw(&raw);
+    let (stdin, stdout) = line_after_line(&raw);
+    let taken = wire::request(2, &Request::Taken, wire::MAX_MESSAGE).unwrap();
+    send_raw(&raw, &taken, &[]);
+    send_raw(&raw, &request(3, Call::Inspect(b())), &[]);
+    let (h, info) = answer_of(&raw);
+    assert!(matches!((h.id, &info), (3, Answer::Info(_))), "{info:?}");
+    drop(stdout);
+    let mut stdin = std::fs::File::from(stdin);
+    stdin.write_all(b"go\n").unwrap();
+    drop(stdin);
+    let (h, end) = answer_of(&raw);
+    assert_eq!(
+        (h.id, end),
+        (2, Answer::Exited(Exit::Signal(13))),
+        "the program's stdout kept a reader after its client said it took its ends"
+    );
+}
+
+/// The answer to request `id` on a raw connection, with the descriptors that rode with it, past the programs' ends
+/// that come between.
+fn answer_to(raw: &OwnedFd, id: u64) -> (Answer, Vec<OwnedFd>) {
+    loop {
+        let (h, answer, ends) = answer_with_ends(raw);
+        if h.id == id && !matches!(answer, Answer::Exited(_)) {
+            return (answer, ends);
+        }
+    }
+}
+
+/// An exec of `true` asking for its stdout, as request `id`.
+fn true_asking_stdout(id: u64) -> Vec<u8> {
+    let call = Call::ExecStreams {
+        id: b(),
+        program: Program::of(&["/bin/true"]),
+        streams: wire::Streams::default(),
+        ask: wire::Streams {
+            stdout: true,
+            ..wire::Streams::default()
+        },
+    };
+    request(id, call)
+}
+
+/// The lead's word of 2026-11-09 on `Taken` (HEX-GUEST-41): `Limits::programs` counts given ends not yet taken, so a
+/// client that never says it took them holds the node to no more descriptors than its places. Do: under a budget of
+/// two programs, two execs asking for stdout, each answered with its end and ended, neither's ends said taken; a third
+/// exec; the word that the first's were taken; a fourth. Expect: the third refused, naming the programs' budget; the
+/// fourth given its end.
+#[test]
+fn a_given_answers_ends_not_yet_taken_hold_their_programs_place() {
+    let lab = Lab::new(Limits {
+        programs: 2,
+        ..limits()
+    });
+    let raw = lab.raw();
+    hello_raw(&raw);
+    for id in [2, 3] {
+        send_raw(&raw, &true_asking_stdout(id), &[]);
+        let (given, ends) = answer_to(&raw, id);
+        assert!(matches!(given, Answer::Given { .. }), "{given:?}");
+        drop(ends);
+        // Ended, so only its given ends can hold its place.
+        let (h, end) = answer_of(&raw);
+        assert_eq!((h.id, end), (id, Answer::Exited(Exit::Code(0))));
+    }
+    send_raw(&raw, &true_asking_stdout(4), &[]);
+    assert_eq!(
+        answer_to(&raw, 4).0,
+        Answer::Refused(Refusal::Exhausted {
+            what: PROGRAMS,
+            bound: 2
+        }),
+        "a program's place was let go with its given ends not yet taken"
+    );
+    send_raw(
+        &raw,
+        &wire::request(2, &Request::Taken, wire::MAX_MESSAGE).unwrap(),
+        &[],
+    );
+    send_raw(&raw, &true_asking_stdout(5), &[]);
+    let (given, ends) = answer_to(&raw, 5);
+    assert!(matches!(given, Answer::Given { .. }), "{given:?}");
+    drop(ends);
 }
