@@ -75,10 +75,10 @@ fn usable_cpu(nodes: &[NodeSpec], recorded: &Cluster) -> u64 {
 fn cluster(recorded: &Cluster, pick: &Pick, seed: u64, placements: usize) -> Cluster {
     let nodes: Vec<NodeSpec> = (0..NODES)
         .map(|i| {
-            let host = recorded.nodes[i as usize % recorded.nodes.len()];
+            let host = &recorded.nodes[i as usize % recorded.nodes.len()];
             NodeSpec {
                 id: NodeId(i),
-                ..host
+                ..host.clone()
             }
         })
         .collect();
@@ -94,6 +94,7 @@ fn cluster(recorded: &Cluster, pick: &Pick, seed: u64, placements: usize) -> Clu
             runs_for: None,
             tenancy: Tenancy::default(),
             class: w.class,
+            ask: Default::default(),
         }
     };
     let usable = usable_cpu(&nodes, recorded);
@@ -104,7 +105,7 @@ fn cluster(recorded: &Cluster, pick: &Pick, seed: u64, placements: usize) -> Clu
         fill += 1;
         match index.fit(&w.demand(), pick).best {
             Some(best) => {
-                index.take(best.node, &w.demand()).unwrap();
+                index.take(best.node, w.id, &w.demand()).unwrap();
                 placed += w.need.cpu_milli;
                 since_placed = 0;
             }
@@ -158,7 +159,7 @@ fn run(recorded: &Cluster, seed: u64, placements: usize) -> (Vec<Duration>, usiz
         else {
             panic!("the store refused the index's choice")
         };
-        index.take(node, &spec.demand()).unwrap();
+        index.take(node, spec.id, &spec.demand()).unwrap();
         Some(Live {
             spec: *spec,
             node,
@@ -176,7 +177,7 @@ fn run(recorded: &Cluster, seed: u64, placements: usize) -> (Vec<Duration>, usiz
                 },
             )
             .unwrap();
-        index.give(l.node, &l.spec.demand()).unwrap();
+        index.give(l.node, l.spec.id, &l.spec.demand()).unwrap();
     };
 
     // Fill, untimed.

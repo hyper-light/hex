@@ -44,6 +44,7 @@ fn usual() -> Cluster {
                 cpu_milli: 16_000,
                 mem_bytes: 64 * GIB,
                 gpus: 0,
+                disk_bytes: 0,
             },
             tenants: vec![
                 tenant((1, 2), (1, 4), 200_000, 80_000),

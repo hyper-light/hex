@@ -103,6 +103,7 @@ fn recorded_needs() -> Vec<Resources> {
             cpu_milli: ((u128::from(c) * 100 / cpu_mean) as u64).max(1),
             mem_bytes: ((u128::from(m) * u128::from(500 * MIB) / mem_mean) as u64).max(1),
             gpus: 0,
+            disk_bytes: 0,
         })
         .collect()
 }
@@ -122,6 +123,7 @@ fn workloads(row: Row, seed: u64) -> Vec<WorkloadSpec> {
                         cpu_milli: 100,
                         mem_bytes: 500 * MIB,
                         gpus: 0,
+                        disk_bytes: 0,
                     },
                     Kind::Plain,
                 ),
@@ -138,6 +140,7 @@ fn workloads(row: Row, seed: u64) -> Vec<WorkloadSpec> {
                 runs_for: None,
                 tenancy: Tenancy::default(),
                 class: Class::Oci,
+                ask: Default::default(),
             }
         })
         .collect::<Vec<_>>();
@@ -169,6 +172,7 @@ fn shapes(work: &[WorkloadSpec]) -> Shapes {
                     cpu_milli: cpu,
                     mem_bytes: mem,
                     gpus: 0,
+                    disk_bytes: 0,
                 },
                 class,
             ));
@@ -249,7 +253,7 @@ fn place(slice: &Slice, store: &Mutex<Store>, pick: &Pick) -> Placed {
                 spec.id
             ),
         }
-        index.take(best.node, &demand).unwrap();
+        index.take(best.node, spec.id, &demand).unwrap();
         placed += 1;
         by_class[spec.class as usize] += 1;
     }

@@ -62,12 +62,14 @@ fn h13() -> Cluster {
                 cpu_milli: 100,
                 mem_bytes: 500 * MIB,
                 gpus: 0,
+                disk_bytes: 0,
             },
             kind: Kind::Plain,
             arrives: 0,
             runs_for: None,
             tenancy: Tenancy::default(),
             class: Class::Oci,
+            ask: Default::default(),
         })
         .collect();
     let mut cluster = Cluster::single_owner(nodes, workloads);

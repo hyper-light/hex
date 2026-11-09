@@ -50,6 +50,7 @@ const POD: Resources = Resources {
     cpu_milli: 100,
     mem_bytes: 500 * MIB,
     gpus: 0,
+    disk_bytes: 0,
 };
 const BAR: Duration = Duration::from_micros(6_400);
 
@@ -70,6 +71,7 @@ fn workloads() -> Vec<WorkloadSpec> {
             runs_for: None,
             tenancy: Tenancy::default(),
             class: Class::Oci,
+            ask: Default::default(),
         })
         .collect();
     let mut c = Cluster::single_owner(Vec::new(), work);

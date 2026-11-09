@@ -21,7 +21,8 @@ use crate::error::SimError;
 use crate::fair::{self, Passed, Placed, Preemption, Queue, Shares};
 use crate::index::{FitIndex, Pick};
 use crate::model::{
-    Cluster, Demand, GroupId, Kind, NodeId, NodeSpec, Resources, WorkloadId, WorkloadSpec,
+    Cluster, Demand, DeviceKind, GroupId, Kind, NodeId, NodeSpec, Resources, WorkloadId,
+    WorkloadSpec, bind,
 };
 use crate::sim::{Layout, Run};
 use crate::store::{Entry, Op, State};
@@ -87,7 +88,7 @@ pub fn serial_place(
     for w in workloads {
         let choice = index.fit(&w.demand(), pick).best.map(|k| k.node);
         if let Some(node) = choice {
-            index.take(node, &w.demand())?;
+            index.take(node, w.id, &w.demand())?;
         }
         out.push(choice);
     }
@@ -260,10 +261,10 @@ fn check_entries(nodes: &[NodeSpec], run: &Run, log: &[Entry]) -> Result<LogRepo
                 }
                 let mut demands = Vec::with_capacity(write.len());
                 for (w, _) in &write {
-                    demands.push(spec_of(run, *w)?.demand());
+                    demands.push((*w, spec_of(run, *w)?.demand()));
                 }
                 let chosen = crate::sim::fit_whole(&mut index, &demands, &run.pick)?;
-                for (i, ((w, node), need)) in write.iter().zip(&demands).enumerate() {
+                for (i, ((w, node), (_, need))) in write.iter().zip(&demands).enumerate() {
                     let spec = chosen.as_ref().and_then(|c| c.get(i)).copied();
                     if spec != Some(*node) {
                         return Err(Violation::NotSerialChoice {
@@ -272,7 +273,7 @@ fn check_entries(nodes: &[NodeSpec], run: &Run, log: &[Entry]) -> Result<LogRepo
                             spec,
                         });
                     }
-                    index.take(*node, need)?;
+                    index.take(*node, *w, need)?;
                     shares.take(owner_of(run, *w)?, &need.need)?;
                     placed.insert(*w, (*node, entry.write));
                     placed_again(&mut preempted, &mut disrupted, *w);
@@ -333,7 +334,7 @@ fn check_entries(nodes: &[NodeSpec], run: &Run, log: &[Entry]) -> Result<LogRepo
                         return Err(Violation::NotSerialPreemption(id));
                     }
                     let victim = spec_of(run, w)?;
-                    index.give(n, &victim.demand())?;
+                    index.give(n, victim.id, &victim.demand())?;
                     shares.give(victim.tenancy.owner, &victim.need)?;
                     let s = *seq_of.get(&w).ok_or(Violation::NotSubmitted(w))?;
                     pending.insert(s, (w, victim.demand(), run.policy.queue(&victim)));
@@ -354,7 +355,7 @@ fn check_entries(nodes: &[NodeSpec], run: &Run, log: &[Entry]) -> Result<LogRepo
                 if !run.preemption || serial != Some(want) {
                     return Err(Violation::NotSerialPreemption(id));
                 }
-                let chosen = crate::sim::fit_whole(&mut index, &[need], &run.pick)?;
+                let chosen = crate::sim::fit_whole(&mut index, &[(id, need)], &run.pick)?;
                 let spec_node = chosen.as_ref().and_then(|c| c.first()).copied();
                 if spec_node != Some(node) {
                     return Err(Violation::NotSerialChoice {
@@ -363,7 +364,7 @@ fn check_entries(nodes: &[NodeSpec], run: &Run, log: &[Entry]) -> Result<LogRepo
                         spec: spec_node,
                     });
                 }
-                index.take(node, &need)?;
+                index.take(node, id, &need)?;
                 shares.take(spec.tenancy.owner, &spec.need)?;
                 placed.insert(id, (node, entry.write));
                 placed_again(&mut preempted, &mut disrupted, id);
@@ -375,7 +376,7 @@ fn check_entries(nodes: &[NodeSpec], run: &Run, log: &[Entry]) -> Result<LogRepo
                     return Err(Violation::CompletedElsewhere(workload));
                 }
                 let need = spec_of(run, workload)?.demand();
-                index.give(node, &need)?;
+                index.give(node, workload, &need)?;
                 shares.give(owner_of(run, workload)?, &need.need)?;
                 report.completions = report.completions.saturating_add(1);
             }
@@ -511,7 +512,7 @@ fn holds(
         if !pending.contains_key(&record.seq) {
             return Ok(false);
         }
-        demands.push(record.spec.demand());
+        demands.push((*m, record.spec.demand()));
     }
     Ok(crate::sim::fit_whole(index, &demands, &run.pick)?.is_some())
 }
@@ -680,6 +681,13 @@ pub struct FilterReport {
     pub hot_sessions: u64,
     /// A workload placed on a node that can't run its class.
     pub class_off_node: u64,
+    /// A workload placed on a node of another OS or architecture than its image's.
+    pub platform_off: u64,
+    /// A workload placed where the devices it asks weren't free and matching (one held twice, one of
+    /// another model or with too little memory), or of a class that can't be given them there.
+    pub device_off: u64,
+    /// Placements that held a device or were given KVM: the device filter's non-vacuity.
+    pub with_devices: u64,
 }
 
 impl FilterReport {
@@ -688,6 +696,8 @@ impl FilterReport {
             .saturating_add(self.benchmark_with_build)
             .saturating_add(self.hot_sessions)
             .saturating_add(self.class_off_node)
+            .saturating_add(self.platform_off)
+            .saturating_add(self.device_off)
     }
 }
 
@@ -706,6 +716,13 @@ fn over_ninety(capacity: &NodeSpec, used: &Resources) -> bool {
 
 pub fn check_filters(cluster: &Cluster, run: &Run) -> Result<FilterReport, Violation> {
     let mut seen = vec![Seen::default(); cluster.nodes.len()];
+    // Each node's devices' holders, replayed from the log: a device is held from its workload's
+    // placement until its completion or preemption.
+    let mut held: Vec<Vec<Option<WorkloadId>>> = cluster
+        .nodes
+        .iter()
+        .map(|n| vec![None; n.devices.len()])
+        .collect();
     let mut r = FilterReport::default();
     let at = |node: NodeId| {
         usize::try_from(node.0).map_err(|_| Violation::Replay(SimError::UnknownNode(node)))
@@ -731,11 +748,50 @@ pub fn check_filters(cluster: &Cluster, run: &Run) -> Result<FilterReport, Viola
         if placing {
             let now = seen.get(i).copied().unwrap_or_default();
             r.placements = r.placements.saturating_add(1);
-            if spec.need.gpus > 0 && (facts.capacity.gpus == 0 || !spec.class.takes_gpus()) {
+            if spec.need.gpus > 0
+                && (facts.capacity.gpus == 0
+                    || !spec.class.exposes(facts.platform.os, DeviceKind::Gpu))
+            {
                 r.gpu_off_gpu = r.gpu_off_gpu.saturating_add(1);
             }
             if !facts.classes.has(spec.class) {
                 r.class_off_node = r.class_off_node.saturating_add(1);
+            }
+            let (ask, os) = (&spec.ask, facts.platform.os);
+            if ask.os.is_some_and(|o| o != os) || ask.arch.is_some_and(|a| a != facts.platform.arch)
+            {
+                r.platform_off = r.platform_off.saturating_add(1);
+            }
+            if spec.need.gpus > 0 || ask.devices() {
+                let exposed = [
+                    (u64::from(spec.need.gpus), DeviceKind::Gpu),
+                    (u64::from(ask.vfio), DeviceKind::Vfio),
+                    (u64::from(ask.block), DeviceKind::Block),
+                    (u64::from(ask.net), DeviceKind::Net),
+                ]
+                .iter()
+                .all(|&(n, kind)| n == 0 || spec.class.exposes(os, kind))
+                    && (!ask.kvm || (facts.virt.kvm && spec.class.gives_kvm(os)));
+                let holders = held
+                    .get_mut(i)
+                    .ok_or(Violation::Replay(SimError::UnknownNode(node)))?;
+                let bound = bind(
+                    &facts.devices,
+                    |d| holders.get(d).is_some_and(Option::is_none),
+                    spec.need.gpus,
+                    ask,
+                );
+                match bound {
+                    Some(bound) if exposed => {
+                        for d in bound {
+                            if let Some(h) = holders.get_mut(usize::from(d)) {
+                                *h = Some(workload);
+                            }
+                        }
+                        r.with_devices = r.with_devices.saturating_add(1);
+                    }
+                    _ => r.device_off = r.device_off.saturating_add(1),
+                }
             }
             let shares = match spec.kind {
                 Kind::Benchmark => now.builds > 0,
@@ -756,6 +812,13 @@ pub fn check_filters(cluster: &Cluster, run: &Run) -> Result<FilterReport, Viola
                 });
                 if elsewhere {
                     r.hot_sessions = r.hot_sessions.saturating_add(1);
+                }
+            }
+        }
+        if !placing {
+            for h in held.get_mut(i).into_iter().flatten() {
+                if *h == Some(workload) {
+                    *h = None;
                 }
             }
         }

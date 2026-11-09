@@ -3,12 +3,13 @@
 //! microVMs alone (bench/sched/huawei_workload.md). Each workload's class and need are drawn against
 //! one node, a class it runs and a need inside its capacity, so every workload fits somewhere; GPU
 //! work is drawn only against a GPU node, and only as an OCI container, the one class a GPU can be
-//! given to ([`Class::takes_gpus`]).
+//! given to there ([`Class::exposes`]).
 
 use crate::error::SimError;
 use crate::model::{
-    Class, Classes, Cluster, GangId, Group, GroupId, Kind, NodeId, NodeSpec, Overheads, Owner,
-    OwnerId, Resources, Tenancy, Time, WorkloadId, WorkloadSpec,
+    Arch, Class, Classes, Cluster, Device, DeviceKind, GangId, Group, GroupId, Kind, ModelId,
+    NodeId, NodeSpec, Os, Overheads, Owner, OwnerId, Platform, Resources, Tenancy, Time, Virt,
+    WorkloadId, WorkloadSpec, unnamed_gpus,
 };
 use crate::rng::Rng;
 
@@ -50,22 +51,31 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
         let cpu_milli = cores.checked_mul(1000).ok_or(SimError::Config("cores"))?;
         // Six nodes in ten Linux, two Windows, two macOS: each class on many nodes, and some nodes
         // that run only some.
-        let classes = match rng.range(0, 9) {
-            0..6 => Classes::ALL,
-            6..8 => Classes::NONE.with(Class::Oci).with(Class::Shards),
-            _ => Classes::NONE.with(Class::Shards),
+        let os = match rng.range(0, 9) {
+            0..6 => Os::Linux,
+            6..8 => Os::Windows,
+            _ => Os::Macos,
         };
+        let kvm = os == Os::Linux;
+        let classes = os.classes(kvm);
         nodes.push(NodeSpec {
             id: NodeId(id),
             capacity: Resources {
                 cpu_milli,
                 mem_bytes: mem_gib.checked_mul(GIB).ok_or(SimError::Config("memory"))?,
                 gpus,
+                disk_bytes: 0,
             },
             // Uniform up to the node's CPU: about one node in ten starts above 90% from its
             // co-tenants alone, and placements push others past it.
             background_milli: rng.range(0, cpu_milli),
             classes,
+            platform: Platform {
+                os,
+                arch: Arch::X86_64,
+            },
+            virt: Virt { kvm, nested: false },
+            devices: unnamed_gpus(gpus),
         });
     }
     let mut workloads = Vec::new();
@@ -91,7 +101,9 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
             rng.range(1, most.min(of.max(1)))
         };
         let class = one_of(&mut rng, host.classes);
-        let wants_gpu = host.capacity.gpus > 0 && class.takes_gpus() && rng.chance(500);
+        let wants_gpu = host.capacity.gpus > 0
+            && class.exposes(host.platform.os, DeviceKind::Gpu)
+            && rng.chance(500);
         let need = Resources {
             cpu_milli: share(&mut rng, host.capacity.cpu_milli),
             mem_bytes: share(&mut rng, host.capacity.mem_bytes),
@@ -100,6 +112,7 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
             } else {
                 0
             },
+            disk_bytes: 0,
         };
         let gap = rng.range(
             0,
@@ -130,6 +143,7 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
             runs_for,
             tenancy: Tenancy::default(),
             class,
+            ask: Default::default(),
         });
     }
     Ok(Cluster::single_owner(nodes, workloads))
@@ -197,6 +211,7 @@ pub fn burst(
                     .and_then(|g| g.checked_mul(GIB))
                     .ok_or(SimError::Config("memory"))?,
                 gpus: 0,
+                disk_bytes: 0,
             },
             kind: Kind::Plain,
             class: by_index(i),
@@ -206,6 +221,7 @@ pub fn burst(
                 owner,
                 ..Tenancy::default()
             },
+            ask: Default::default(),
         });
     }
     // Stable: the burst stays after what arrived at `at` before it.
@@ -360,6 +376,12 @@ pub fn day(seed: u64, day: &Day) -> Result<Cluster, SimError> {
             capacity: day.node,
             background_milli: 0,
             classes: Classes::ALL,
+            platform: Platform::default(),
+            virt: Virt {
+                kvm: true,
+                nested: false,
+            },
+            devices: unnamed_gpus(day.node.gpus),
         })
         .collect();
     let total_cpu = day
@@ -391,6 +413,7 @@ pub fn day(seed: u64, day: &Day) -> Result<Cluster, SimError> {
                     .checked_mul(GIB)
                     .ok_or(SimError::Config("memory"))?,
                 gpus: 0,
+                disk_bytes: 0,
             };
             // The workload's dominant share of the cluster, in parts per million.
             let ppm = |n: u64, of: u64| {
@@ -445,11 +468,13 @@ pub fn day(seed: u64, day: &Day) -> Result<Cluster, SimError> {
                 owner: OwnerId(owner),
                 ..Tenancy::default()
             },
+            ask: Default::default(),
         });
     }
     Ok(Cluster {
         nodes,
         workloads,
+        models: Vec::new(),
         owners: day
             .tenants
             .iter()
@@ -465,68 +490,132 @@ pub fn day(seed: u64, day: &Day) -> Result<Cluster, SimError> {
 /// Windows OCI containers and Shards microVMs, macOS Shards microVMs alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeModel {
-    /// EC2 m5d.metal, the main model: 48,000 millicores, 384 GiB, no GPU, Linux with KVM, so every
-    /// class (Agache et al., NSDI 2020 §6: "two Intel Xeon Platinum 8175M processors (for a total of
-    /// 48 cores with hyper-threading disabled), 384GB of RAM").
+    /// EC2 m5d.metal, the main model: 48,000 millicores, 384 GiB, four 900 GB NVMe SSDs, no GPU,
+    /// Linux on x86_64 with KVM, so every class (Agache et al., NSDI 2020 §6: "two Intel Xeon
+    /// Platinum 8175M processors (for a total of 48 cores with hyper-threading disabled), 384GB of
+    /// RAM"; AWS's M5 instance page: m5d.metal, "4 x 900 NVMe SSD").
     M5dMetal,
     /// Hex's fleet beside it: its ten hosts from kiln's runner facts (2026-11-05), in G2's order,
     /// node `id` being host `id mod 10`, as `sched_fast_path` repeats them.
     Fleet,
 }
 
-/// Hex's fleet: threads, memory bytes, GPUs, and the OS's classes (`huawei_trace.py:83-94`).
-const FLEET: [(u64, u64, u32, Os); 10] = [
-    (32, 131_986_903_040, 1, Os::Linux),   // adacachy
-    (32, 67_128_643_584, 0, Os::Linux),    // fedora, kiln-a094a12d.attlocal.net
-    (32, 132_766_306_304, 0, Os::Windows), // jupiter
-    (18, 68_719_476_736, 0, Os::Macos),    // adalundhe-macbook-pro
-    (14, 38_654_705_664, 0, Os::Macos),    // adas-mac-studio-2.local
-    (14, 38_654_705_664, 0, Os::Macos),    // adas-mac-studio-3.local
-    (14, 38_654_705_664, 0, Os::Macos),    // adas-mac-studio.local
-    (32, 103_079_215_104, 0, Os::Macos),   // adas-mac-studio.local-2
-    (15, 51_539_607_552, 0, Os::Macos),    // adas-macbook-pro.local
-    (18, 137_438_953_472, 0, Os::Macos),   // e30189ea29182644fe5a4b2e06c7dac2
-];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Os {
-    Linux,
-    Windows,
-    Macos,
+/// One of Hex's fleet's hosts: threads, memory bytes and OS as G2 recorded them (2026-11-05,
+/// `huawei_trace.py:83-94`), and its architecture, disk bytes, GPU (model and memory bytes) and KVM
+/// as kiln's runner facts gave them on 2026-11-09 (`ci.runners.list`). Only a GPU some class on the
+/// host can be given is listed: an Apple GPU, which macOS's one class (Shards, through shards-api)
+/// can't be given, is not.
+struct Host {
+    threads: u64,
+    mem: u64,
+    os: Os,
+    arch: Arch,
+    disk: u64,
+    gpu: Option<(&'static str, u64)>,
+    kvm: bool,
 }
 
-impl Os {
-    fn classes(self) -> Classes {
-        match self {
-            Os::Linux => Classes::ALL,
-            Os::Windows => Classes::NONE.with(Class::Oci).with(Class::Shards),
-            Os::Macos => Classes::NONE.with(Class::Shards),
-        }
+const RTX_5060_TI: (&str, u64) = ("NVIDIA GeForce RTX 5060 Ti", 8_546_942_976);
+
+const fn host(threads: u64, mem: u64, os: Os, disk: u64) -> Host {
+    Host {
+        threads,
+        mem,
+        os,
+        arch: if matches!(os, Os::Macos) {
+            Arch::Aarch64
+        } else {
+            Arch::X86_64
+        },
+        disk,
+        gpu: None,
+        kvm: matches!(os, Os::Linux),
     }
 }
+
+/// Hex's fleet, in G2's order.
+const FLEET: [Host; 10] = [
+    // adacachy: the one GPU G2 counted.
+    Host {
+        gpu: Some(RTX_5060_TI),
+        ..host(32, 131_986_903_040, Os::Linux, 7_997_298_634_752)
+    },
+    host(32, 67_128_643_584, Os::Linux, 7_998_785_191_936), // fedora, kiln-a094a12d.attlocal.net
+    host(32, 132_766_306_304, Os::Windows, 992_549_867_520), // jupiter
+    host(18, 68_719_476_736, Os::Macos, 1_995_165_736_960), // adalundhe-macbook-pro
+    host(14, 38_654_705_664, Os::Macos, 494_384_795_648),   // adas-mac-studio-2.local
+    host(14, 38_654_705_664, Os::Macos, 494_384_795_648),   // adas-mac-studio-3.local
+    host(14, 38_654_705_664, Os::Macos, 494_384_795_648),   // adas-mac-studio.local
+    host(32, 103_079_215_104, Os::Macos, 3_996_329_328_640), // adas-mac-studio.local-2
+    host(15, 51_539_607_552, Os::Macos, 994_610_155_520),   // adas-macbook-pro.local
+    host(18, 137_438_953_472, Os::Macos, 7_998_499_225_600), // e30189ea29182644fe5a4b2e06c7dac2
+];
+
+/// The device model the fleet's GPU is: the first a cluster of the fleet interns
+/// ([`NodeModel::models`]).
+pub const FLEET_GPU: ModelId = ModelId(0);
 
 impl NodeModel {
     /// Node `id` of the model.
     pub fn node(self, id: u32) -> NodeSpec {
-        let (cpu_milli, mem_bytes, gpus, classes) = match self {
-            NodeModel::M5dMetal => (48_000, 384 << 30, 0, Classes::ALL),
+        match self {
+            NodeModel::M5dMetal => NodeSpec {
+                id: NodeId(id),
+                capacity: Resources {
+                    cpu_milli: 48_000,
+                    mem_bytes: 384 << 30,
+                    gpus: 0,
+                    disk_bytes: 3_600_000_000_000,
+                },
+                background_milli: 0,
+                classes: Classes::ALL,
+                platform: Platform::default(),
+                virt: Virt {
+                    kvm: true,
+                    nested: false,
+                },
+                devices: Vec::new(),
+            },
             NodeModel::Fleet => {
                 // `id mod 10` is always a host; the fallback is unreachable and empty.
                 let at = usize::try_from(id.checked_rem(10).unwrap_or(0)).unwrap_or(0);
-                let (threads, mem, gpus, os) =
-                    FLEET.get(at).copied().unwrap_or((0, 0, 0, Os::Macos));
-                (threads.saturating_mul(1000), mem, gpus, os.classes())
+                let none = host(0, 0, Os::Macos, 0);
+                let h = FLEET.get(at).unwrap_or(&none);
+                let devices: Vec<Device> = h
+                    .gpu
+                    .map(|(_, memory)| Device::gpu(FLEET_GPU, memory))
+                    .into_iter()
+                    .collect();
+                NodeSpec {
+                    id: NodeId(id),
+                    capacity: Resources {
+                        cpu_milli: h.threads.saturating_mul(1000),
+                        mem_bytes: h.mem,
+                        gpus: u32::try_from(devices.len()).unwrap_or(0),
+                        disk_bytes: h.disk,
+                    },
+                    background_milli: 0,
+                    classes: h.os.classes(h.kvm),
+                    platform: Platform {
+                        os: h.os,
+                        arch: h.arch,
+                    },
+                    virt: Virt {
+                        kvm: h.kvm,
+                        nested: h.kvm,
+                    },
+                    devices,
+                }
             }
-        };
-        NodeSpec {
-            id: NodeId(id),
-            capacity: Resources {
-                cpu_milli,
-                mem_bytes,
-                gpus,
-            },
-            background_milli: 0,
-            classes,
+        }
+    }
+
+    /// The device models the model's nodes name, in [`ModelId`] order: a cluster of its nodes
+    /// interns them first.
+    pub fn models(self) -> Vec<String> {
+        match self {
+            NodeModel::M5dMetal => Vec::new(),
+            NodeModel::Fleet => vec![crate::model::model_name(RTX_5060_TI.0)],
         }
     }
 

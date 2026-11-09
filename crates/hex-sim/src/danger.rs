@@ -20,7 +20,7 @@ use hex_health::danger::{self, Signal};
 
 use crate::SimError;
 use crate::index::{FitIndex, Pick, Verdict};
-use crate::model::{Class, Demand, Kind, NodeId, Overheads, Resources};
+use crate::model::{Class, Demand, Kind, NodeId, Overheads, Resources, WorkloadId};
 
 /// The kinds a tripped OCI container may be re-placed as, in the order it tries them.
 pub const STRONGER: [Class; 2] = [Class::Firecracker, Class::Shards];
@@ -29,6 +29,7 @@ pub const STRONGER: [Class; 2] = [Class::Firecracker, Class::Shards];
 /// kind of work and the kind it runs as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Tripped {
+    pub id: WorkloadId,
     pub node: NodeId,
     pub need: Resources,
     pub kind: Kind,
@@ -94,8 +95,9 @@ pub fn isolate(
         need: with_overhead(&tripped.need, from, overheads)?,
         kind: tripped.kind,
         class: from,
+        ask: Default::default(),
     };
-    index.give(tripped.node, &running)?;
+    index.give(tripped.node, tripped.id, &running)?;
     if from != Class::Oci {
         return Ok(Isolation::Refuse {
             from,
@@ -108,10 +110,11 @@ pub fn isolate(
             need: with_overhead(&tripped.need, to, overheads)?,
             kind: tripped.kind,
             class: to,
+            ask: Default::default(),
         };
         let fit = index.fit(&demand, pick);
         if let Some(key) = fit.best {
-            index.take(key.node, &demand)?;
+            index.take(key.node, tripped.id, &demand)?;
             return Ok(Isolation::Move {
                 from,
                 to,
@@ -145,6 +148,7 @@ pub fn admitted_as(
         need: with_overhead(&tripped.need, to, overheads)?,
         kind: tripped.kind,
         class: to,
+        ask: Default::default(),
     };
     Ok(index.admitted_anywhere(&demand))
 }
@@ -155,6 +159,7 @@ pub fn runs(index: &FitIndex, to: Class) -> Result<bool, SimError> {
         need: Resources::default(),
         kind: Kind::Plain,
         class: to,
+        ask: Default::default(),
     };
     for at in 0..index.len() {
         let id = u32::try_from(at).map_err(|_| SimError::Config("a node id past u32"))?;
@@ -185,6 +190,7 @@ mod tests {
             cpu_milli,
             mem_bytes: mem_mib * MIB,
             gpus,
+            disk_bytes: 0,
         }
     }
 
@@ -202,10 +208,14 @@ mod tests {
                 capacity: *capacity,
                 background_milli: 0,
                 classes: *classes,
+                platform: Default::default(),
+                virt: Default::default(),
+                devices: Vec::new(),
             })
             .collect();
         let mut index = FitIndex::new(&specs).unwrap();
         let t = Tripped {
+            id: WorkloadId(0),
             node: NodeId(0),
             need,
             kind: Kind::Plain,
@@ -215,8 +225,9 @@ mod tests {
             need: with_overhead(&need, Class::Oci, &overheads()).unwrap(),
             kind: Kind::Plain,
             class: Class::Oci,
+            ask: Default::default(),
         };
-        index.take(NodeId(0), &running).unwrap();
+        index.take(NodeId(0), WorkloadId(0), &running).unwrap();
         (index, t)
     }
 
@@ -285,6 +296,7 @@ mod tests {
                 cpu_milli: 500,
                 mem_bytes: mem,
                 gpus: 0,
+                disk_bytes: 0,
             };
             let (mut index, t) = cell(&[(Classes::ALL, capacity)], need);
             let iso = isolate(
@@ -329,10 +341,12 @@ mod tests {
             index
                 .give(
                     NodeId(0),
+                    WorkloadId(0),
                     &Demand {
                         need: with_overhead(&need, Class::Oci, &overheads()).unwrap(),
                         kind: Kind::Plain,
                         class: Class::Oci,
+                        ask: Default::default(),
                     },
                 )
                 .unwrap();
@@ -340,8 +354,9 @@ mod tests {
                 need: with_overhead(&need, from, &overheads()).unwrap(),
                 kind: Kind::Plain,
                 class: from,
+                ask: Default::default(),
             };
-            index.take(NodeId(0), &running).unwrap();
+            index.take(NodeId(0), WorkloadId(0), &running).unwrap();
             t.class = from;
             assert_eq!(
                 isolate(

@@ -329,6 +329,7 @@ fn cell_run(
     let cluster = Cluster {
         nodes: topo.nodes(at)?.to_vec(),
         workloads,
+        models: whole.models.clone(),
         owners: whole.owners.clone(),
         groups: whole.groups.clone(),
         overheads: whole.overheads.clone(),
@@ -371,17 +372,17 @@ fn snapshot(c: &CellRun, when: Time, config: &FedConfig) -> Result<FitIndex, Sim
         match e.op {
             Op::Submit { workload, .. } => queued.push(workload),
             Op::Place { workload, node } => {
-                index.take(node, &demand(c, workload)?)?;
+                index.take(node, workload, &demand(c, workload)?)?;
                 if let Some(p) = local(workload).and_then(|k| placed.get_mut(k)) {
                     *p = true;
                 }
             }
             Op::Complete { workload, node } => {
-                index.give(node, &demand(c, workload)?)?;
+                index.give(node, workload, &demand(c, workload)?)?;
             }
             // Taken off its node and pending again, at its old place in the queue (F4).
             Op::Preempt { workload, node } => {
-                index.give(node, &demand(c, workload)?)?;
+                index.give(node, workload, &demand(c, workload)?)?;
                 if let Some(p) = local(workload).and_then(|k| placed.get_mut(k)) {
                     *p = false;
                 }
@@ -394,7 +395,7 @@ fn snapshot(c: &CellRun, when: Time, config: &FedConfig) -> Result<FitIndex, Sim
         }
         let d = demand(c, workload)?;
         if let Some(k) = index.fit(&d, &config.cell.pick).best {
-            index.take(k.node, &d)?;
+            index.take(k.node, workload, &d)?;
         }
     }
     Ok(index)
@@ -471,7 +472,7 @@ impl Capacity {
                     continue;
                 };
                 if let Some(key) = index.fit(&d, &self.pick).best {
-                    index.take(key.node, &d)?;
+                    index.take(key.node, w.id, &d)?;
                     return Ok(Some(Admitted {
                         region: u32::try_from(r).map_err(|_| SimError::Config("region index"))?,
                         cell: u32::try_from(c).map_err(|_| SimError::Config("cell index"))?,

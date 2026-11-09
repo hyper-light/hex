@@ -67,6 +67,7 @@ fn pick(r: &mut Rng) -> Pick {
                     cpu_milli: r.range(1, 4000),
                     mem_bytes: r.range(1, 1 << 33),
                     gpus: 0,
+                    disk_bytes: 0,
                 },
                 Class::Oci,
             ),
@@ -75,6 +76,7 @@ fn pick(r: &mut Rng) -> Pick {
                     cpu_milli: r.range(1, 16000),
                     mem_bytes: r.range(1, 1 << 35),
                     gpus: 0,
+                    disk_bytes: 0,
                 },
                 Class::Oci,
             ),
@@ -455,6 +457,7 @@ fn res(cpu: u64) -> Resources {
         cpu_milli: cpu,
         mem_bytes: 1,
         gpus: 0,
+        disk_bytes: 0,
     }
 }
 
@@ -465,12 +468,18 @@ fn two_nodes() -> Vec<NodeSpec> {
             capacity: res(1000),
             background_milli: 0,
             classes: Classes::ALL,
+            platform: Default::default(),
+            virt: Default::default(),
+            devices: Vec::new(),
         },
         NodeSpec {
             id: NodeId(1),
             capacity: res(4000),
             background_milli: 0,
             classes: Classes::ALL,
+            platform: Default::default(),
+            virt: Default::default(),
+            devices: Vec::new(),
         },
     ]
 }
@@ -484,6 +493,7 @@ fn work(id: u64, cpu: u64) -> WorkloadSpec {
         runs_for: None,
         tenancy: Tenancy::default(),
         class: Class::Oci,
+        ask: Default::default(),
     }
 }
 

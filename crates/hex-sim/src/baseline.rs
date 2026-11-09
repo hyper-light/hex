@@ -100,7 +100,7 @@ pub fn kueue_cohort(cluster: &Cluster, max_cycles: u64) -> Result<Outcome, SimEr
                     .workloads
                     .get(at)
                     .ok_or(SimError::Config("workload index"))?;
-                index.give(node, &w.demand())?;
+                index.give(node, w.id, &w.demand())?;
                 give(&mut usage, w.tenancy.owner, &w.need)?;
             }
         }
@@ -171,7 +171,7 @@ pub fn kueue_cohort(cluster: &Cluster, max_cycles: u64) -> Result<Outcome, SimEr
                             .workloads
                             .get(v)
                             .ok_or(SimError::Config("workload index"))?;
-                        index.give(on, &victim.demand())?;
+                        index.give(on, victim.id, &victim.demand())?;
                         give(&mut usage, victim.tenancy.owner, &victim.need)?;
                         pending
                             .entry(victim.tenancy.owner.0)
@@ -191,7 +191,7 @@ pub fn kueue_cohort(cluster: &Cluster, max_cycles: u64) -> Result<Outcome, SimEr
                     pending.remove(&owner);
                 }
             }
-            index.take(node, &w.demand())?;
+            index.take(node, w.id, &w.demand())?;
             let o = usize::try_from(w.tenancy.owner.0).map_err(|_| SimError::Config("owner"))?;
             let u = usage.get_mut(o).ok_or(SimError::Config("owner"))?;
             *u = u.checked_add(&w.need).ok_or(SimError::Config("usage"))?;
@@ -265,7 +265,7 @@ fn reclaim(
                 .workloads
                 .get(v)
                 .ok_or(SimError::Config("workload index"))?;
-            index.give(node, &w.demand())?;
+            index.give(node, w.id, &w.demand())?;
             taken.push(v);
             if index.verdict(node, &demand)? == Verdict::Admits {
                 fits = true;
@@ -277,7 +277,7 @@ fn reclaim(
                 .workloads
                 .get(v)
                 .ok_or(SimError::Config("workload index"))?;
-            index.take(node, &w.demand())?;
+            index.take(node, w.id, &w.demand())?;
         }
         if fits && best.as_ref().is_none_or(|(_, b)| taken.len() < b.len()) {
             best = Some((node, taken));
@@ -307,5 +307,6 @@ fn scale(total: &Resources, part: u64, whole: u64) -> Result<Resources, SimError
         mem_bytes: f(total.mem_bytes)?,
         gpus: u32::try_from(f(u64::from(total.gpus))?)
             .map_err(|_| SimError::Config("a nominal quota"))?,
+        disk_bytes: 0,
     })
 }

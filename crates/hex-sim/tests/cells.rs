@@ -406,7 +406,7 @@ fn check_moved(cluster: &Cluster, out: &FedRun, lost_region: u32) -> ([u64; 3], 
                             .record(WorkloadId(u64::try_from(at).unwrap()))
                             .map(|r| r.state)
                         {
-                            index.take(node, &w.demand()).unwrap();
+                            index.take(node, w.id, &w.demand()).unwrap();
                         }
                     }
                     let room = index.fit(&spec.demand(), &Pick::default()).best;

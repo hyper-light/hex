@@ -41,7 +41,9 @@ use std::time::Duration;
 
 use crate::error::SimError;
 use crate::index::{FitIndex, Key, Pick, Verdict};
-use crate::model::{Class, Cluster, Demand, Kind, NodeId, NodeSpec, OwnerId, Resources, Time};
+use crate::model::{
+    Class, Cluster, Demand, Kind, NodeId, NodeSpec, OwnerId, Resources, Time, WorkloadId,
+};
 use crate::rng::Rng;
 use crate::trace::{Latencies, Quantiles, TraceHash};
 use crate::wan::{Access, Coordinates, INPUT_MARGIN, REGIONS, Wan, WanConfig, node_id};
@@ -192,7 +194,7 @@ impl Study {
         for (at, row) in recorded.nodes.iter().enumerate() {
             nodes.push(NodeSpec {
                 id: node_id(at)?,
-                ..*row
+                ..row.clone()
             });
         }
         // Each region's nodes, to draw a home in a region.
@@ -313,7 +315,11 @@ impl Study {
                     break;
                 };
                 queue.pop_front();
-                index.take(node, &demand)?;
+                index.take(
+                    node,
+                    WorkloadId(u64::try_from(job).unwrap_or(u64::MAX)),
+                    &demand,
+                )?;
                 let rtt = self.wan.rtt_ns(node, spec.home)?;
                 let ends_at = now
                     .checked_add(run_ns(spec.round_trips, spec.compute, rtt)?)
@@ -373,7 +379,11 @@ impl Study {
     ) -> Result<Time, SimError> {
         let Reverse((at, job, node)) = ends.pop().ok_or(SimError::Config("no end to take"))?;
         let spec = self.jobs.get(job).ok_or(SimError::Config("jobs"))?;
-        index.give(node, &demand(spec))?;
+        index.give(
+            node,
+            WorkloadId(u64::try_from(job).unwrap_or(u64::MAX)),
+            &demand(spec),
+        )?;
         Ok(at)
     }
 
@@ -446,6 +456,7 @@ fn demand(job: &Job) -> Demand {
         need: job.need,
         kind: job.kind,
         class: job.class,
+        ask: Default::default(),
     }
 }
 

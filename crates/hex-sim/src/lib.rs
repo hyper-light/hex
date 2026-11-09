@@ -4,7 +4,8 @@
 //! and a regression is a changed number, not noise.
 //!
 //! - [`census`]: the most the recorded inputs hold, and the input-bound rule that bounds inputs by it.
-//! - [`model`]: nodes, workloads and their resources.
+//! - [`model`]: nodes, workloads and their resources; nodes' platforms and devices, workloads' asks.
+//! - [`needs`]: what a box needs of a node, in kiln's needs grammar adapted to boxes.
 //! - [`index`]: the best-fit index both the scheduler and its serial specification place with.
 //! - [`store`]: the control plane's durable records, committed by compare-and-set (S6).
 //! - [`sim`]: the cluster: clients, a control plane of parallel deciders and an in-order validating
@@ -51,6 +52,7 @@ pub mod index;
 pub mod lb;
 pub mod membership;
 pub mod model;
+pub mod needs;
 pub mod packing;
 pub mod proximity;
 pub mod replay;

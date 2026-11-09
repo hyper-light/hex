@@ -63,6 +63,7 @@ const POD: Resources = Resources {
     cpu_milli: 100,
     mem_bytes: 500 * MIB,
     gpus: 0,
+    disk_bytes: 0,
 };
 /// A node's pod limit, from its own capacity: how many of the pause pod, with the largest class
 /// overhead, its CPU and its memory hold. Both sides keep to it: kube-scheduler as the kwok node's
@@ -96,6 +97,7 @@ fn pods() -> Vec<WorkloadSpec> {
             runs_for: None,
             tenancy: Tenancy::default(),
             class: Class::Oci,
+            ask: Default::default(),
         })
         .collect();
     let mut c = Cluster::single_owner(Vec::new(), work);
@@ -293,7 +295,7 @@ fn place(mut shard: Shard, pick: &Pick, start: &Barrier) -> Placed {
                 spec.id
             ),
         }
-        shard.index.take(best.node, &demand).unwrap();
+        shard.index.take(best.node, spec.id, &demand).unwrap();
         placed += 1;
     }
     Placed {

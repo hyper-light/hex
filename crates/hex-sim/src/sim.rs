@@ -650,7 +650,9 @@ impl Plane {
                     let Some(local) = layout.local(s, node) else {
                         continue;
                     };
-                    plane.view.take(local, &record.spec.demand())?;
+                    plane
+                        .view
+                        .take(local, record.spec.id, &record.spec.demand())?;
                     plane
                         .shares
                         .take(record.spec.tenancy.owner, &record.spec.need)?;
@@ -1072,34 +1074,34 @@ fn gangs_of(
             ));
         }
         let mut empty = FitIndex::new(&cluster.nodes)?;
-        let demands: Vec<Demand> = ws.iter().map(|w| w.demand()).collect();
+        let demands: Vec<(WorkloadId, Demand)> = ws.iter().map(|w| (w.id, w.demand())).collect();
         let fits = fit_whole(&mut empty, &demands, pick)?.is_some();
         out.insert(gang, (ws.iter().map(|w| w.id).collect(), fits));
     }
     Ok(out)
 }
 
-/// Where each of `demands`, in order, goes on `view` (each taking its room before the next is
-/// sought), or `None` if one fits nowhere; `view` is left as it was.
+/// Where each workload of `demands`, in order, goes on `view` (each taking its room and devices
+/// before the next is sought), or `None` if one fits nowhere; `view` is left as it was.
 pub fn fit_whole(
     view: &mut FitIndex,
-    demands: &[Demand],
+    demands: &[(WorkloadId, Demand)],
     pick: &Pick,
 ) -> Result<Option<Vec<NodeId>>, SimError> {
-    let mut taken: Vec<(NodeId, Demand)> = Vec::with_capacity(demands.len());
+    let mut taken: Vec<(NodeId, WorkloadId, Demand)> = Vec::with_capacity(demands.len());
     let mut whole = true;
-    for d in demands {
+    for (w, d) in demands {
         let Some(key) = view.fit(d, pick).best else {
             whole = false;
             break;
         };
-        view.take(key.node, d)?;
-        taken.push((key.node, *d));
+        view.take(key.node, *w, d)?;
+        taken.push((key.node, *w, *d));
     }
-    for (node, d) in &taken {
-        view.give(*node, d)?;
+    for (node, w, d) in &taken {
+        view.give(*node, *w, d)?;
     }
-    Ok(whole.then(|| taken.into_iter().map(|(n, _)| n).collect()))
+    Ok(whole.then(|| taken.into_iter().map(|(n, _, _)| n).collect()))
 }
 
 /// A gang member as its commit writes it: the workload, its node, the record version read and its
@@ -1197,7 +1199,7 @@ impl Sim<'_> {
         let members = self.members(gang)?;
         let mut demands = Vec::with_capacity(members.len());
         for (id, _) in &members {
-            demands.push(self.demand(*id)?);
+            demands.push((*id, self.demand(*id)?));
         }
         self.report.decisions = self
             .report
@@ -1728,6 +1730,8 @@ impl Sim<'_> {
             (&mut r.shares, fit.refused.shares),
             (&mut r.hot, fit.refused.hot),
             (&mut r.class, fit.refused.class),
+            (&mut r.platform, fit.refused.platform),
+            (&mut r.device, fit.refused.device),
         ] {
             tally(total, now, max)?;
         }
@@ -1928,7 +1932,7 @@ impl Sim<'_> {
         let changed = slot(&mut self.slices, s)?
             .plane
             .view
-            .take(key.node, &need)?;
+            .take(key.node, id, &need)?;
         self.note_change(s, changed)?;
         let (spec, write) = self
             .store
@@ -1992,10 +1996,11 @@ impl Sim<'_> {
         let mut reopened = false;
         for (&(member, node, _, member_seq), version) in members.iter().zip(versions) {
             let spec = self.spec(member)?;
-            let changed = slot(&mut self.slices, s)?
-                .plane
-                .view
-                .take(node, &spec.demand())?;
+            let changed =
+                slot(&mut self.slices, s)?
+                    .plane
+                    .view
+                    .take(node, member, &spec.demand())?;
             self.note_change(s, changed)?;
             let write = self.store.record(member).map_or(0, |r| r.placed_write);
             let preemption = self.config.preemptions > 0;
@@ -2141,7 +2146,7 @@ impl Sim<'_> {
             let changed = slot(&mut self.slices, s)?
                 .plane
                 .view
-                .give(node, &spec.demand())?;
+                .give(node, v, &spec.demand())?;
             self.note_change(s, changed)?;
             let victim_seq = self
                 .store
@@ -2157,10 +2162,11 @@ impl Sim<'_> {
             tally(&mut self.report.preempted, 1, max)?;
         }
         let spec = self.spec(id)?;
-        let changed = slot(&mut self.slices, s)?
-            .plane
-            .view
-            .take(chosen.node, &spec.demand())?;
+        let changed =
+            slot(&mut self.slices, s)?
+                .plane
+                .view
+                .take(chosen.node, id, &spec.demand())?;
         self.note_change(s, changed)?;
         let write = self.store.record(id).map_or(0, |r| r.placed_write);
         let plane = &mut slot(&mut self.slices, s)?.plane;
@@ -2439,10 +2445,11 @@ impl Sim<'_> {
                     .layout
                     .local(s, node)
                     .ok_or(SimError::UnknownNode(node))?;
-                let changed = slot(&mut self.slices, s)?
-                    .plane
-                    .view
-                    .give(local, &spec.demand())?;
+                let changed =
+                    slot(&mut self.slices, s)?
+                        .plane
+                        .view
+                        .give(local, spec.id, &spec.demand())?;
                 self.note_change(s, changed)?;
                 let max = self.config.max_steps;
                 let plane = &mut slot(&mut self.slices, s)?.plane;

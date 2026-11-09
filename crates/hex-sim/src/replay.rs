@@ -132,9 +132,13 @@ pub fn parse(text: &str, limits: &Limits) -> Result<Cluster, TraceError> {
                         cpu_milli,
                         mem_bytes,
                         gpus,
+                        disk_bytes: 0,
                     },
                     background_milli,
                     classes,
+                    platform: Default::default(),
+                    virt: Default::default(),
+                    devices: crate::model::unnamed_gpus(gpus),
                 });
             }
             Some("owner") => {
@@ -245,12 +249,14 @@ pub fn parse(text: &str, limits: &Limits) -> Result<Cluster, TraceError> {
                         cpu_milli,
                         mem_bytes,
                         gpus,
+                        disk_bytes: 0,
                     },
                     kind,
                     arrives,
                     runs_for: Some(runs_for),
                     tenancy,
                     class,
+                    ask: Default::default(),
                 });
             }
             Some(_) | None => {
@@ -270,6 +276,7 @@ pub fn parse(text: &str, limits: &Limits) -> Result<Cluster, TraceError> {
     Ok(Cluster {
         nodes,
         workloads,
+        models: Vec::new(),
         owners,
         groups,
         overheads,

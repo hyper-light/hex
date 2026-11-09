@@ -12,14 +12,16 @@ use std::collections::BTreeMap;
 
 use crate::error::SimError;
 use crate::lb;
-use crate::model::{Group, GroupId, NodeId, NodeSpec, Resources, Time, WorkloadId, WorkloadSpec};
+use crate::model::{
+    Device, Group, GroupId, Held, NodeId, NodeSpec, Resources, Time, WorkloadId, WorkloadSpec, bind,
+};
 
 /// The plane, as the owner its nodes' ledgers know it by.
 const PLANE: lb::OwnerId = lb::OwnerId(0);
 
 /// A need as the kernel's amounts: CPU, memory, disk (none here), GPUs.
 fn amounts(r: &Resources) -> lb::Amounts {
-    [r.cpu_milli, r.mem_bytes, 0, u64::from(r.gpus)]
+    [r.cpu_milli, r.mem_bytes, r.disk_bytes, u64::from(r.gpus)]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,6 +138,10 @@ pub enum GangOutcome {
 pub struct Store {
     /// Each node's ledger, by node id: what admits a placement and frees its room.
     nodes: Vec<lb::Runner>,
+    /// Each node's devices, by node id, and the workload holding each until it is deleted: a node's
+    /// ledger holds them beside its room.
+    devices: Vec<Vec<Device>>,
+    held: Vec<Vec<Option<WorkloadId>>>,
     /// Each placed workload's handle in its node's ledger.
     boxes: BTreeMap<WorkloadId, lb::Handle>,
     records: BTreeMap<WorkloadId, Record>,
@@ -157,12 +163,19 @@ impl Store {
             if usize::try_from(node.id.0).ok() != Some(at) {
                 return Err(SimError::Config("node ids must be dense from 0, in order"));
             }
+            if !node.devices_agree() {
+                return Err(SimError::Config(
+                    "a node's GPUs listed aren't its capacity's, or it lists more devices than a PCI segment has",
+                ));
+            }
         }
         Ok(Self {
             nodes: nodes
                 .iter()
                 .map(|n| lb::Runner::new(lb::RunnerId(n.id.0), amounts(&n.capacity), 1))
                 .collect(),
+            devices: nodes.iter().map(|n| n.devices.clone()).collect(),
+            held: nodes.iter().map(|n| vec![None; n.devices.len()]).collect(),
             boxes: BTreeMap::new(),
             records: BTreeMap::new(),
             next_seq: 0,
@@ -174,45 +187,77 @@ impl Store {
         })
     }
 
-    /// Admits `workload`, needing `need`, in `node`'s ledger: false when it hasn't the room.
-    fn admit(
-        &mut self,
-        node: NodeId,
-        workload: WorkloadId,
-        need: &Resources,
-    ) -> Result<bool, SimError> {
-        let runner = usize::try_from(node.0)
-            .ok()
-            .and_then(|at| self.nodes.get_mut(at))
-            .ok_or(SimError::UnknownNode(node))?;
+    /// Admits `workload` in `node`'s ledger: its room, and the devices it asks ([`bind`]), held by it
+    /// until it is deleted. False, changing nothing, when either isn't free.
+    fn admit(&mut self, node: NodeId, workload: WorkloadId) -> Result<bool, SimError> {
+        let spec = self
+            .records
+            .get(&workload)
+            .ok_or(SimError::UnknownWorkload(workload))?
+            .spec;
+        let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
+        let (devices, held) = (
+            self.devices.get(at).ok_or(SimError::UnknownNode(node))?,
+            self.held.get(at).ok_or(SimError::UnknownNode(node))?,
+        );
+        let Some(bound) = bind(
+            devices,
+            |i| held.get(i).is_some_and(Option::is_none),
+            spec.need.gpus,
+            &spec.ask,
+        ) else {
+            return Ok(false);
+        };
+        let runner = self.nodes.get_mut(at).ok_or(SimError::UnknownNode(node))?;
         let start = lb::Start {
             owner: PLANE,
             run: lb::Handle::NONE,
             epoch: runner.epoch(),
-            need: amounts(need),
+            need: amounts(&spec.need),
         };
-        match runner.start(start) {
-            lb::ToOwner::Started { at, .. } => {
-                self.boxes.insert(workload, at);
-                Ok(true)
+        let lb::ToOwner::Started { at: handle, .. } = runner.start(start) else {
+            return Ok(false);
+        };
+        self.boxes.insert(workload, handle);
+        if let Some(hs) = self.held.get_mut(at) {
+            for i in bound {
+                if let Some(h) = hs.get_mut(usize::from(i)) {
+                    *h = Some(workload);
+                }
             }
-            _ => Ok(false),
         }
+        Ok(true)
     }
 
-    /// Frees `workload`'s room in `node`'s ledger.
+    /// Frees `workload`'s room and devices in `node`'s ledger.
     fn release(&mut self, node: NodeId, workload: WorkloadId) -> Result<(), SimError> {
         let at = self
             .boxes
             .remove(&workload)
             .ok_or(SimError::Resources(node))?;
-        let runner = usize::try_from(node.0)
-            .ok()
-            .and_then(|i| self.nodes.get_mut(i))
-            .ok_or(SimError::UnknownNode(node))?;
+        let i = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
+        let runner = self.nodes.get_mut(i).ok_or(SimError::UnknownNode(node))?;
         let mut out = lb::RunnerOut::new();
         runner.end(at, &mut out).ok_or(SimError::Resources(node))?;
+        for h in self.held.get_mut(i).into_iter().flatten() {
+            if *h == Some(workload) {
+                *h = None;
+            }
+        }
         Ok(())
+    }
+
+    /// The devices `workload` holds on `node`, by their places in its devices.
+    pub fn holds(&self, node: NodeId, workload: WorkloadId) -> Held {
+        let at = usize::try_from(node.0).unwrap_or(usize::MAX);
+        self.held
+            .get(at)
+            .into_iter()
+            .flatten()
+            .zip(0u16..)
+            .filter(|(h, _)| **h == Some(workload))
+            .map(|(_, i)| i)
+            .collect()
     }
 
     pub fn apply(&mut self, at: Time, write: Write) -> Result<Outcome, SimError> {
@@ -286,13 +331,7 @@ impl Store {
         // Each member admitted by its node's ledger, in order; one that doesn't fit beside those
         // before it takes them out again and refuses the write.
         for (i, &(workload, node, _)) in members.iter().enumerate() {
-            let need = self
-                .records
-                .get(&workload)
-                .ok_or(SimError::UnknownWorkload(workload))?
-                .spec
-                .need;
-            if !self.admit(node, workload, &need)? {
+            if !self.admit(node, workload)? {
                 for &(before, on, _) in members.iter().take(i) {
                     self.release(on, before)?;
                 }
@@ -379,14 +418,14 @@ impl Store {
         if record.state != State::Pending {
             return Ok(Outcome::Conflict(Conflict::State(record.state)));
         }
-        let (version, need) = (bump(record.version)?, record.spec.need);
+        let version = bump(record.version)?;
         if self.log.len() >= self.max_log {
             return Err(SimError::Full {
                 what: "the store's log",
                 bound: self.max_log,
             });
         }
-        if !self.admit(node, workload, &need)? {
+        if !self.admit(node, workload)? {
             return Ok(Outcome::Conflict(Conflict::NodeFull));
         }
         let record = self
@@ -518,19 +557,12 @@ impl Store {
         }
         // The victims' room freed in their nodes' ledgers, then the head admitted on its node; a head
         // that doesn't fit even so admits the victims again and refuses the write.
-        let need = record.spec.need;
         for &(workload, on, _) in victims {
             self.release(on, workload)?;
         }
-        if !self.admit(node, id, &need)? {
+        if !self.admit(node, id)? {
             for &(workload, on, _) in victims {
-                let back = self
-                    .records
-                    .get(&workload)
-                    .ok_or(SimError::UnknownWorkload(workload))?
-                    .spec
-                    .need;
-                if !self.admit(on, workload, &back)? {
+                if !self.admit(on, workload)? {
                     return Err(SimError::Resources(on));
                 }
             }
@@ -648,9 +680,13 @@ mod tests {
                 cpu_milli: 1000,
                 mem_bytes: 10,
                 gpus: 0,
+                disk_bytes: 0,
             },
             background_milli: 0,
             classes: crate::model::Classes::ALL,
+            platform: Default::default(),
+            virt: Default::default(),
+            devices: Vec::new(),
         }];
         Store::new(&nodes, 4, 16).unwrap()
     }
@@ -662,12 +698,14 @@ mod tests {
                 cpu_milli: cpu,
                 mem_bytes: 1,
                 gpus: 0,
+                disk_bytes: 0,
             },
             kind: crate::model::Kind::Plain,
             arrives: 0,
             runs_for: None,
             tenancy: crate::model::Tenancy::default(),
             class: crate::model::Class::Oci,
+            ask: Default::default(),
         }
     }
 

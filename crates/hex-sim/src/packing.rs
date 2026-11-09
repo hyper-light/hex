@@ -201,7 +201,7 @@ pub fn pack(
             let Some(done) = usize::try_from(ended.0).ok().and_then(|at| all.get(at)) else {
                 continue;
             };
-            index.give(node, &done.demand())?;
+            index.give(node, done.id, &done.demand())?;
             r.placed_cpu_milli = r.placed_cpu_milli.saturating_sub(done.need.cpu_milli);
             r.placed_mem_bytes = r.placed_mem_bytes.saturating_sub(done.need.mem_bytes);
             r.completions = r.completions.saturating_add(1);
@@ -220,7 +220,7 @@ pub fn pack(
             }
             continue;
         };
-        index.take(key.node, &demand)?;
+        index.take(key.node, w.id, &demand)?;
         r.placed_cpu_milli = r.placed_cpu_milli.saturating_add(w.need.cpu_milli);
         r.placed_mem_bytes = r.placed_mem_bytes.saturating_add(w.need.mem_bytes);
         r.placements = r.placements.saturating_add(1);
@@ -236,6 +236,7 @@ pub fn pack(
             cpu_milli: free.cpu_milli,
             mem_bytes: free.mem_bytes,
             gpus: free.gpus,
+            disk_bytes: 0,
         };
         r.free_cpu_milli = r.free_cpu_milli.saturating_add(free.cpu_milli);
         r.free_mem_bytes = r.free_mem_bytes.saturating_add(free.mem_bytes);
@@ -260,6 +261,7 @@ mod tests {
             cpu_milli: cpu,
             mem_bytes: mem,
             gpus: 0,
+            disk_bytes: 0,
         }
     }
 
@@ -271,6 +273,9 @@ mod tests {
                     capacity: node,
                     background_milli: 0,
                     classes: Classes::ALL,
+                    platform: Default::default(),
+                    virt: Default::default(),
+                    devices: Vec::new(),
                 })
                 .collect(),
             needs
@@ -284,6 +289,7 @@ mod tests {
                     runs_for: None,
                     tenancy: Tenancy::default(),
                     class: Class::Oci,
+                    ask: Default::default(),
                 })
                 .collect(),
         )
