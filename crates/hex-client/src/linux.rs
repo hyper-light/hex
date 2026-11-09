@@ -20,7 +20,7 @@ use rustix::net::{
     SocketType,
 };
 
-use crate::calls::{Core, Handle, KINDS, Lent, Sent, Shared, Transport};
+use crate::calls::{Core, Handle, KINDS, Lent, Sent, Shared, Take, Transport};
 
 /// How long a call waits for the node agent's answer, and its send for room in the agent's socket, one wait a kind
 /// of call (`crate::calls::kind_of`'s order), since a delete waits on its box's emptying and a list on its parts,
@@ -123,11 +123,7 @@ impl Transport for Socket {
     }
 
     /// One message, whole: `SOCK_SEQPACKET` keeps each as it was sent, and says its true size past the buffer.
-    fn recv(
-        &self,
-        reading: &mut Reading,
-        take: &mut dyn FnMut(&Received<'_>, Vec<hex_api::End>) -> Result<(), Refusal>,
-    ) -> Result<bool, Refusal> {
+    fn recv(&self, reading: &mut Reading, take: &mut Take<'_>) -> Result<bool, Refusal> {
         let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(wire::MAX_FDS))];
         let mut control = RecvAncillaryBuffer::new(&mut space);
         let msg = match rustix::net::recvmsg(

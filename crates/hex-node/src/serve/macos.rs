@@ -604,8 +604,9 @@ fn read_some(fd: &OwnedFd, f: &mut Framing) -> Result<bool, Errno> {
         return Ok(false);
     }
     for fd in &fds {
-        // A descriptor that came is this process's now: close-on-exec, as every other.
-        let _ = rustix::io::fcntl_setfd(fd, FdFlags::CLOEXEC);
+        // A descriptor that came is this process's now: close-on-exec, as every other (macOS's recvmsg has no
+        // MSG_CMSG_CLOEXEC). A failure is the connection's, never dropped (CLAUDE.md §3).
+        rustix::io::fcntl_setfd(fd, FdFlags::CLOEXEC)?;
     }
     if !fds.is_empty() {
         // Descriptors begin a message; ones that come while a frame is under way are misplaced.

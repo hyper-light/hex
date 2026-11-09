@@ -197,6 +197,9 @@ impl Wake {
     }
 }
 
+/// What a transport's read hands each whole message to: the message, with the descriptors that came with it.
+pub(crate) type Take<'a> = dyn FnMut(&Received<'_>, Vec<hex_api::End>) -> Result<(), Refusal> + 'a;
+
 /// What carries a client's messages to its node agent. Its connection is read and written without waiting, and
 /// waited on through its handle ([`Transport::handle`]), by whoever holds the reader's turn.
 pub trait Transport: Send + Sync + 'static {
@@ -213,11 +216,7 @@ pub trait Transport: Send + Sync + 'static {
     /// Reads what has come, without waiting: each whole message, with the descriptors that came with it, handed to
     /// `take`, a message cut across reads kept in `reading` for the next. Whether anything came; the connection's end,
     /// or a message `take` refuses, is the error, saying why.
-    fn recv(
-        &self,
-        reading: &mut Self::Reading,
-        take: &mut dyn FnMut(&Received<'_>, Vec<hex_api::End>) -> Result<(), Refusal>,
-    ) -> Result<bool, Refusal>;
+    fn recv(&self, reading: &mut Self::Reading, take: &mut Take<'_>) -> Result<bool, Refusal>;
     /// The bytes a message goes as: itself where the transport keeps messages whole, framed where it is a stream.
     fn frame(message: Vec<u8>) -> Result<Vec<u8>, Refusal> {
         Ok(message)

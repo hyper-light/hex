@@ -162,8 +162,8 @@ pub enum Forward {
 
 /// A forwarded call's answer.
 pub enum Forwarded {
-    /// Any call's answer but a started exec's.
-    Answer(Answer),
+    /// Any call's answer but a started exec's: boxed, as an answer is many times a started exec's size.
+    Answer(Box<Answer>),
     /// An exec's program started where the host isn't: its pid there, which names no process here, what
     /// kills it or lets it go, and the caller's ends of its streams (its guest's own connections, for those
     /// the exec carried or asked for), which go with its answer. Its end comes to the exec's [`Ended`].
@@ -1862,8 +1862,11 @@ impl<O: Os> Shared<O> {
                     self.unreserve(conn)?;
                     self.table()?.early.remove(&token);
                 }
-                match got {
-                    Ok(Forwarded::Answer(Answer::Boxes { infos, .. })) => {
+                match got.map(|f| match f {
+                    Forwarded::Answer(answer) => Ok(*answer),
+                    started @ Forwarded::Started { .. } => Err(started),
+                }) {
+                    Ok(Ok(Answer::Boxes { infos, .. })) => {
                         self.done(conn)?;
                         return self.enqueue(Job::List {
                             conn: Arc::clone(conn),
@@ -1871,8 +1874,8 @@ impl<O: Os> Shared<O> {
                             infos,
                         });
                     }
-                    Ok(Forwarded::Answer(answer)) => answer,
-                    Ok(Forwarded::Started { .. }) => Answer::Refused(Refusal::Broken(
+                    Ok(Ok(answer)) => answer,
+                    Ok(Err(_started)) => Answer::Refused(Refusal::Broken(
                         "the node's host started a program twice for one exec".to_owned(),
                     )),
                     Err(why) => Answer::Refused(why),

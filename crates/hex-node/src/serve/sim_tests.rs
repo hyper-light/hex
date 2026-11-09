@@ -507,7 +507,7 @@ impl Host for SimHost {
             Call::Inspect(id) if id == g() => {
                 let info = self.sim.inspect(&id);
                 self.guest.answer(Box::new(move || {
-                    reply(info.map(|i| Forwarded::Answer(Answer::Info(i))));
+                    reply(info.map(|i| Forwarded::Answer(Box::new(Answer::Info(i)))));
                 }));
                 Forward::Taken
             }

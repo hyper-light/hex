@@ -20,7 +20,7 @@ use rustix::net::{
     SendAncillaryMessage, SendFlags, Shutdown, SocketAddrUnix, SocketType,
 };
 
-use crate::calls::{Core, Handle, KINDS, Lent, Sent, Shared, Transport};
+use crate::calls::{Core, Handle, KINDS, Lent, Sent, Shared, Take, Transport};
 
 /// How long a call waits for the macOS node agent's answer, and its send for room in the agent's socket, one wait a
 /// kind of call (`crate::calls::kind_of`'s order), as Linux's client waits (decision 9): twice the slowest answer this
@@ -85,11 +85,7 @@ impl Transport for Socket {
 
     /// What one read takes, each whole message in it handed on with the descriptors that came before it; a frame cut
     /// across reads stays in the deframer for the next.
-    fn recv(
-        &self,
-        reading: &mut Reading,
-        take: &mut dyn FnMut(&Received<'_>, Vec<hex_api::End>) -> Result<(), Refusal>,
-    ) -> Result<bool, Refusal> {
+    fn recv(&self, reading: &mut Reading, take: &mut Take<'_>) -> Result<bool, Refusal> {
         let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(wire::MAX_FDS))];
         let mut control = RecvAncillaryBuffer::new(&mut space);
         let msg = match rustix::net::recvmsg(
@@ -117,6 +113,12 @@ impl Transport for Socket {
             if let RecvAncillaryMessage::ScmRights(came) = m {
                 reading.fds.extend(came);
             }
+        }
+        // macOS's recvmsg has no MSG_CMSG_CLOEXEC: each end that came is made close-on-exec at once, before anything
+        // else is done with it, so no spawn of the caller's inherits it (CVE-2024-21626's class).
+        for fd in reading.fds.get(before..).unwrap_or_default() {
+            rustix::io::fcntl_setfd(fd, FdFlags::CLOEXEC)
+                .map_err(|e| Refusal::os("making a given end close-on-exec", e))?;
         }
         if msg.bytes == 0 && reading.fds.len() == before {
             return Err(reading.reset.take().unwrap_or_else(|| {

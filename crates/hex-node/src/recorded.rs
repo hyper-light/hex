@@ -306,9 +306,12 @@ impl<R: Recover> Host for Recorded<R> {
                 let books = Arc::clone(&self.books);
                 let counted: Reply = Box::new(move |got| {
                     reply(match got {
-                        Ok(Forwarded::Answer(Answer::Info(info))) => books
-                            .counted(info)
-                            .map(|info| Forwarded::Answer(Answer::Info(info))),
+                        Ok(Forwarded::Answer(answer)) => match *answer {
+                            Answer::Info(info) => books
+                                .counted(info)
+                                .map(|info| Forwarded::Answer(Box::new(Answer::Info(info)))),
+                            answer => Ok(Forwarded::Answer(Box::new(answer))),
+                        },
                         other => other,
                     })
                 });
@@ -480,7 +483,7 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
                     }),
                 }),
                 Ok(Answer::Refused(why)) | Err(why) => Err(why),
-                Ok(answer) => Ok(Forwarded::Answer(answer)),
+                Ok(answer) => Ok(Forwarded::Answer(Box::new(answer))),
             })
         });
         // Refused before it was sent: `then` is dropped unrun, and the caller hears why.

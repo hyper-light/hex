@@ -20,7 +20,7 @@ use hex_core::patience::Patience;
 use hex_core::stream::{self, Deframer, Exec, Named};
 use hex_core::wire::{self, Received};
 
-use crate::calls::{Core, KINDS, Lent, Sent, Shared, Transport, poisoned};
+use crate::calls::{Core, KINDS, Lent, Sent, Shared, Take, Transport, poisoned};
 use crate::copy::{copy, copy_in};
 
 /// The OS handle under a guest connection, which an event loop waits on: a file descriptor on Unix, a
@@ -253,11 +253,7 @@ impl Transport for Stream {
     }
 
     /// What one read takes, each whole message in it handed on; a frame cut across reads stays in the deframer.
-    fn recv(
-        &self,
-        reading: &mut Reading,
-        take: &mut dyn FnMut(&Received<'_>, Vec<hex_api::End>) -> Result<(), Refusal>,
-    ) -> Result<bool, Refusal> {
+    fn recv(&self, reading: &mut Reading, take: &mut Take<'_>) -> Result<bool, Refusal> {
         let Reading {
             conn,
             buf,
