@@ -1156,4 +1156,31 @@ mod tests {
         );
         watch.stop(source.as_socket());
     }
+
+    /// Native plan step 8: do watch a program that has ended already (its process still held, so its pid
+    /// names it). Expect its end reported once: a packet associated with an object signalled already is
+    /// queued at once (as `a_sockets_watch_reports_each_arm_once` finds), so nothing posts it again.
+    #[test]
+    fn a_program_ended_before_its_watch_is_reported_once() {
+        const PATIENCE: Duration = Duration::from_secs(30);
+        const TAG: u64 = 9;
+        let port = Port::new().unwrap();
+        let mut child = std::process::Command::new("cmd")
+            .args(["/c", "exit", "0"])
+            .spawn()
+            .unwrap();
+        child.wait().unwrap();
+        let watch = watch_program(&port, child.id(), TAG).unwrap();
+        let mut done = Vec::new();
+        port.wait(&mut done, Some(PATIENCE), 16).unwrap();
+        port.wait(&mut done, Some(Duration::ZERO), 16).unwrap();
+        assert_eq!(
+            done.iter()
+                .filter(|d| matches!(d, Done::Program(TAG)))
+                .count(),
+            1,
+            "a program ended before its watch wasn't reported once"
+        );
+        drop(watch);
+    }
 }
