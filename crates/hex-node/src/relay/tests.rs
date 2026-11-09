@@ -1843,3 +1843,117 @@ fn a_tarball_roots_owners_times_xattrs_and_hard_links_land_on_disk() {
         "the directory's mtime is set after its children"
     );
 }
+
+/// Whether the write end `w` of a pipe has lost every reader, waiting at most `within`: Linux's pipe poll reports
+/// `POLLERR` on a write end whose readers are gone (`pipe_poll`, fs/pipe.c), asked or not.
+fn readerless(w: &std::io::PipeWriter, within: Duration) -> bool {
+    let mut ready = [PollFd::new(w, PollFlags::empty())];
+    let ts = Timespec {
+        tv_sec: i64::try_from(within.as_secs()).unwrap(),
+        tv_nsec: 0,
+    };
+    rustix::event::poll(&mut ready, Some(&ts)).unwrap() == 1
+        && ready[0].revents().contains(PollFlags::ERR)
+}
+
+/// Native plan step 8, guest stdio (HEX-GUEST-41): exec a program with the caller's own stdin pipe through the
+/// relay; the program ends without reading its stdin, its stdin pipe's read end going with it: expect the relay
+/// to end that stream's connection, and the host's client to let the caller's pipe go with it, so the caller's
+/// stdin pipe has no reader once the program has ended, as a local program's has none.
+#[test]
+fn a_programs_stdin_lets_the_callers_pipe_go_when_the_program_ends() {
+    let lab = Lab::new(LIMITS);
+    let node = lab.node.try_clone().unwrap();
+    let agent = std::thread::spawn(move || {
+        let conn = hello(&node);
+        let (h, r, fds) = next_request(&conn);
+        assert!(matches!(r, Request::Call(Call::Exec { .. })), "{r:?}");
+        assert_eq!(fds.len(), 1);
+        answer(&conn, h, &Answer::Started { pid: 7 });
+        // The program ends without reading its stdin: its pipe's read end goes with it.
+        drop(fds);
+        answer(&conn, h, &Answer::Exited(Exit::Code(0)));
+        conn
+    });
+    let client = Client::connect(lab.link()).unwrap();
+    let (in_r, in_w) = std::io::pipe().unwrap();
+    let mut proc = client
+        .exec(
+            &BoxId::new("b").unwrap(),
+            Program::of(&["true"]),
+            Stdio {
+                stdin: Some(in_r),
+                ..Stdio::null()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        proc.wait_for(Duration::from_secs(30)).unwrap(),
+        Some(Exit::Code(0))
+    );
+    assert!(
+        readerless(&in_w, Duration::from_secs(30)),
+        "the caller's stdin pipe is still read after its program ended"
+    );
+    drop(proc);
+    drop(agent.join().unwrap());
+}
+
+/// The system calls a stdin copier waits in, by this architecture's numbers: splice(2), and poll(2) or ppoll(2)
+/// (arch/x86/entry/syscalls/syscall_64.tbl; include/uapi/asm-generic/unistd.h, which has no poll).
+#[cfg(target_arch = "x86_64")]
+const WAITS: [i64; 3] = [275, 7, 271];
+#[cfg(target_arch = "aarch64")]
+const WAITS: [i64; 2] = [76, 73];
+
+/// Whether thread `tid` sleeps inside one of the copier's waits: the call `/proc/self/task/<tid>/syscall` names
+/// is one of [`WAITS`], and its state in `/proc/self/task/<tid>/stat` is 'S' (proc(5)), past the call's entry.
+fn waiting(tid: rustix::thread::Pid) -> bool {
+    let task = format!("/proc/self/task/{}", tid.as_raw_nonzero());
+    let call = std::fs::read_to_string(format!("{task}/syscall")).unwrap_or_default();
+    let inside = call
+        .split_whitespace()
+        .next()
+        .and_then(|nr| nr.parse::<i64>().ok())
+        .is_some_and(|nr| WAITS.contains(&nr));
+    let stat = std::fs::read_to_string(format!("{task}/stat")).unwrap_or_default();
+    let asleep = stat
+        .rsplit_once(')')
+        .is_some_and(|(_, after)| after.trim_start().starts_with('S'));
+    inside && asleep
+}
+
+/// Native plan step 8, guest stdio (HEX-GUEST-41): a program ends without reading its stdin while the host's stdin
+/// connection carries nothing and the relay's stdin copier waits on it: expect the program's close of its stdin
+/// pipe, as its exit makes, to complete, never held until the host writes, and the copier then to end the stream's
+/// connection, so the host sees it end.
+#[test]
+fn a_programs_stdin_close_is_held_by_no_copier() {
+    let (host, relay) = UnixStream::pair().unwrap();
+    let (r, w) = std::io::pipe().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        tx.send(rustix::thread::gettid()).unwrap();
+        Copier::In(w).run(Box::new(relay));
+    });
+    let tid = rx.recv().unwrap();
+    // The fact the test needs: the copier asleep inside its wait for the stream, not on its way to it.
+    until(|| waiting(tid));
+    let (closed, done) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        drop(r);
+        let _ = closed.send(());
+    });
+    assert!(
+        done.recv_timeout(Duration::from_secs(30)).is_ok(),
+        "the program's close of its stdin pipe waited on the relay's copier"
+    );
+    host.set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    let mut byte = [0u8; 1];
+    assert_eq!(
+        (&host).read(&mut byte).unwrap(),
+        0,
+        "the relay held the stream's connection after its program let its stdin go"
+    );
+}
