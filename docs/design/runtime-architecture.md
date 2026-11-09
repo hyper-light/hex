@@ -1635,9 +1635,12 @@ This takes it off create's path on a root node, with no new kernel version (deci
   of the host beneath the container's root. A rootless seed can't own a mount namespace without a user namespace of its
   own, so it doesn't prune and its node takes the classic path (below).
 - **What the seed read by path, it is given as descriptors.** A pruned seed can reach no host path, so the create
-  carries, over `SCM_RIGHTS` with its existing pipes (`hex_core::seed::Create`, extended append-only): an `O_PATH`
-  descriptor for the bundle directory (to read `config.json`), the container's cgroup directory, the container's state
-  directory (the exec FIFO's), the rootfs as a detached tree, and one detached tree per bind source. The node agent,
+  carries, over `SCM_RIGHTS` with its sync pipe (`hex_core::seed::Create`, extended append-only), what its init reads:
+  an `O_PATH` descriptor for the container's state directory (the exec FIFO's), the rootfs as a detached tree, one
+  detached tree per bind source and, for a seed's clone, the container's cgroup directory it is born in. A parked
+  init's claim carries no cgroup directory, its init being in its cgroup already, and no pruned create carries the map
+  pipe (a user namespace's maps and the hooks' state, which the pruned path never has) or the bundle directory (the
+  spec rides checked, AC-T7.1.1): kind 9, the lead's (B) of 2026-11-09. The node agent,
   in its own (host) mount namespace, clones each source with `open_tree(OPEN_TREE_CLONE | AT_RECURSIVE)` while the host
   filesystem is still reachable, as crun opens every mount ahead for its `OPEN_TREE_NAMESPACE` path (f17, f73), sets a
   read-only source read-only on its tree (`mount_setattr`) before sending, and closes its copies once the seed answers;

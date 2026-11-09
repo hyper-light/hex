@@ -964,8 +964,8 @@ fn parked(claim: OwnedFd, flags: u64, pid_for: &mut PidFor) -> ! {
 /// program, so nothing of the seed's address space is carried past the exec (f17) and any state unique to
 /// the container is made anew in the child (f15). No process but the init, no `hex` exec per create.
 ///
-/// `fds` are the create's: the init's sync pipe (write end), the map pipe (read end), then a network
-/// namespace made ahead when the create says one rides with it. The init joins the namespaces its spec
+/// `fds` are the create's: the init's sync pipe (write end), the map pipe (read end) in the older kinds, then a
+/// network namespace made ahead when the create says one rides with it. The init joins the namespaces its spec
 /// names by path itself; one that joins a pid or user namespace by path can't be made by one clone, so the
 /// runtime makes it through the shim and never hands it here (`init::needs_shim`).
 fn serve_create(
@@ -991,17 +991,26 @@ fn serve_create(
     };
     drop(checked);
     let mut fds = fds.into_iter();
-    let (Some(sync_w), Some(map_r)) = (fds.next(), fds.next()) else {
+    // `read_message` held the descriptor count to the create's, so each rides exactly when the create says: the sync
+    // pipe, the map pipe in the older kinds (never in a lean create, which is pruned), the network namespace, then
+    // (on the pruned path) the root descriptors.
+    let sync_w = fds.next();
+    let map_r = match create.fixed {
+        seed::Fixed::All => fds.next(),
+        seed::Fixed::Lean { .. } => None,
+    };
+    let Some(sync_w) = sync_w else {
         return refused(
             Failed::Request,
-            format!("a create carries at least {} descriptors", seed::CREATE_FDS),
+            "a create carries its init's sync pipe".to_owned(),
         );
     };
-    // `read_message` held the descriptor count to the create's, so the network namespace rides next
-    // exactly when the create says one does, then (on the pruned path) the root descriptors.
     let network = if create.network { fds.next() } else { None };
     if create.pruned {
-        return serve_create_pruned(create, &spec, fds, sync_w, map_r, network, begun);
+        // The map pipe carries only a user namespace's maps and the hooks' state, which the pruned path never asks
+        // for: an older kind's copy is dropped before the clone, so the init doesn't inherit it.
+        drop(map_r);
+        return serve_create_pruned(create, &spec, fds, sync_w, network, begun);
     }
     // The runtime hands a seed no container that joins a pid or user namespace by path (it makes those
     // through the shim, `init::needs_shim`); one that came anyway is refused by type, never made in the
@@ -1039,7 +1048,7 @@ fn serve_create(
                     &create.bundle,
                     Path::new(&create.dir),
                     sync_w.as_fd(),
-                    Some(map_r),
+                    map_r,
                     network,
                 )
             });
@@ -1069,10 +1078,11 @@ fn serve_create(
 }
 
 /// Makes a container on the pruned-seed root path (goal 5 plan step 2). The seed's own mount namespace
-/// is pruned to two mounts, so it reaches no host path; the create carried, after the two pipes and a
-/// network namespace, four fixed descriptors (the bundle directory, the cgroup, the state directory and
-/// the rootfs tree) and one tree per bind mount, and last the spec the runtime checked. The seed makes the
-/// container from that spec (the bundle descriptor rides, unread), clones the init into the cgroup with the fresh namespaces the spec asks for (`CLONE_NEWNS` copies the
+/// is pruned to two mounts, so it reaches no host path; the create carried, after the sync pipe and a
+/// network namespace, its fixed descriptors (a lean create's: the cgroup directory for a seed's clone, the state
+/// directory and the rootfs tree; the older kinds' the bundle directory, read by nothing, and the cgroup directory
+/// before those two) and one tree per bind mount, and last the spec the runtime checked. The seed makes the
+/// container from that spec, clones the init into the cgroup with the fresh namespaces the spec asks for (`CLONE_NEWNS` copies the
 /// pruned namespace), and the init builds the root from the trees ([`init::clone_child_pruned`]), with no
 /// `pivot_root`. The runtime routes a user-namespaced, hook-bearing or path-joined container to the shim,
 /// never here; one that reaches here anyway is refused by type (CLAUDE.md §3).
@@ -1081,20 +1091,22 @@ fn serve_create_pruned(
     spec: &Spec,
     mut fds: impl Iterator<Item = OwnedFd>,
     sync_w: OwnedFd,
-    map_r: OwnedFd,
     network: Option<OwnedFd>,
     begun: Begin<'_, '_>,
 ) -> (Answer, Option<OwnedFd>) {
     let Begin { how, pid_for } = begun;
-    let (Some(bundle_dir), Some(cgroup_dir), Some(container_dir), Some(rootfs)) =
-        (fds.next(), fds.next(), fds.next(), fds.next())
-    else {
+    // The older kinds carry the bundle directory, which nothing reads (the spec rides checked), and the cgroup
+    // directory always; a lean create carries the cgroup directory only for a seed's clone, which is born in it.
+    let (bundle_dir, cgroup_dir) = match create.fixed {
+        seed::Fixed::All => (fds.next(), fds.next()),
+        seed::Fixed::Lean { cgroup: true } => (None, fds.next()),
+        seed::Fixed::Lean { cgroup: false } => (None, None),
+    };
+    drop(bundle_dir);
+    let (Some(container_dir), Some(rootfs)) = (fds.next(), fds.next()) else {
         return refused(
             Failed::Request,
-            format!(
-                "a pruned create carries {} fixed descriptors after its pipes and network namespace",
-                seed::PRUNED_FIXED_FDS
-            ),
+            "a pruned create carries its state directory and its rootfs".to_owned(),
         );
     };
     let binds: Vec<OwnedFd> = fds.by_ref().take(create.binds as usize).collect();
@@ -1174,9 +1186,6 @@ fn serve_create_pruned(
             );
         }
     };
-    // The bundle directory still rides (the pruned kinds' descriptors are fixed), but nothing reads it: the
-    // spec is the one the runtime checked.
-    drop(bundle_dir);
     // The runtime routes a container with a user namespace of its own, or one that joins a pid, user or
     // mount namespace by path, through the shim (the classic root path), never to a pruned seed; one
     // that came anyway is refused by type, never built in the wrong namespace (CLAUDE.md §3). A network,
@@ -1205,11 +1214,15 @@ fn serve_create_pruned(
     }
     let made_ahead = network.is_some();
     let mut flags = init::fresh_clone_flags(spec, made_ahead, ipc_uts.is_some());
-    // The map pipe carries only a user namespace's map ack, which the pruned path never asks for: the
-    // seed's copy is dropped before the clone, so the init doesn't inherit it.
-    drop(map_r);
     let (made, cloned) = match how {
         How::Clone => {
+            // Born in the box's cgroup, so a seed's clone needs its directory, which the agent opens for it.
+            let Some(cgroup_dir) = &cgroup_dir else {
+                return refused(
+                    Failed::Request,
+                    "a seed's clone carries the cgroup directory the init is born in".to_owned(),
+                );
+            };
             // A proc made ahead shows a pid namespace made ahead (decision 6's update, part 2): the init is cloned
             // into it, its pid 1, in place of a fresh one, and the seed's next children are its own again after.
             if let Some((_, proc)) = &proc_mount {
@@ -1258,9 +1271,10 @@ fn serve_create_pruned(
             }
             (
                 create.mount_namespace,
+                // In its cgroup already: a claim carries no cgroup directory, and an older kind's goes unused.
                 begin(
                     how,
-                    Some(cgroup_dir.as_fd()),
+                    None,
                     super::mntns::clone_flags(flags, create.mount_namespace),
                     create.mount_namespace,
                 ),

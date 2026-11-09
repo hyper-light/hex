@@ -323,8 +323,8 @@ pub struct CloneReq<'a> {
     /// The spec the runtime checked, sealed ([`checked::seal`]), which the seed makes the container from in place
     /// of reading the bundle (AC-T7.1.1).
     pub config: BorrowedFd<'a>,
-    /// On the pruned root path (goal 5 plan step 2): the bundle, cgroup and state directories as
-    /// descriptors and the rootfs and bind-source trees the runtime cloned in its own mount namespace,
+    /// On the pruned root path (goal 5 plan step 2): the state directory (and, for a seed's clone, the cgroup
+    /// directory) as descriptors and the rootfs and bind-source trees the runtime cloned in its own mount namespace,
     /// which the seed hands the init to build the root from. `None` on the classic seed path (a rootless
     /// node), where the seed reads them by path.
     pub pruned: Option<PrunedCreate>,
@@ -333,9 +333,9 @@ pub struct CloneReq<'a> {
 /// The root descriptors the runtime cloned for a pruned create (goal 5 plan step 2), handed to the seed
 /// over `SCM_RIGHTS` with the create. The runtime opens them in its own (host) mount namespace, where
 /// the host filesystem is reachable, and closes them once the seed has answered; a tree never attached
-/// dissolves with its last descriptor.
+/// dissolves with its last descriptor. No bundle directory: the init makes the container from the spec the runtime
+/// checked ([`CloneReq::config`]), so nothing would read one.
 pub struct PrunedCreate {
-    pub bundle_dir: OwnedFd,
     /// The box's cgroup directory, opened only for a seed's clone, which is born in it (the create's first try with no
     /// init parked, or a failed claim's fallback): a parked init is in its cgroup already, so its claim carries none
     /// ([`hex_core::seed::Fixed::Lean`]; the lead's (B) of 2026-11-09).
@@ -1162,7 +1162,7 @@ impl Runtime {
             ipc_uts_on_path(spec, ipc_uts)?;
             self.start_via_seed(making, spec, cgroup, network, None, Via { seeds, parking })
         } else {
-            match self.pruned_create(making, spec, cgroup, seeds.mount_namespace()) {
+            match self.pruned_create(making, spec, seeds.mount_namespace()) {
                 Ok(mut pruned) => {
                     if let Some(pool) = dev_mounts {
                         let plan = super::mount::plan(&spec.mounts)?;
@@ -1330,8 +1330,9 @@ impl Runtime {
     /// `OPEN_TREE_CLONE | AT_RECURSIVE`) in the agent's own mount namespace, where the host filesystem is
     /// reachable, as crun opens every mount ahead for its `OPEN_TREE_NAMESPACE` path (f17, f73); the
     /// binds are cloned in [`crate::linux::oci::mount::plan`]'s order, which the seed's init follows when
-    /// it attaches them. The bundle, cgroup and state directories are opened as descriptors too, so a
-    /// pruned seed, which reaches no host path, builds the whole root from descriptors.
+    /// it attaches them. The state directory is opened as a descriptor too, so a pruned seed, which reaches no
+    /// host path, builds the whole root from descriptors; the cgroup directory only where a seed clones the init
+    /// ([`Runtime::start_via_seed`]), never for a parked init's claim.
     ///
     /// Where `way` is from its tree (decision 6's update), the agent makes the container's mount namespace
     /// itself from the rootfs, here where the rootfs's host path is reachable, in one hold of the mount
@@ -1342,7 +1343,6 @@ impl Runtime {
         &self,
         making: &Making<'_>,
         spec: &Spec,
-        cgroup: &BoxCgroup,
         way: super::mntns::MountNamespace,
     ) -> Result<PrunedCreate, ClassicReason> {
         let from_tree = way == super::mntns::MountNamespace::FromTree;
@@ -1469,13 +1469,11 @@ impl Runtime {
             .map_err(|_| ClassicReason::JoinsByPath)?;
             path_joins.push(fd);
         }
-        let bundle_dir = open_dir(making.bundle).map_err(|_| ClassicReason::Source)?;
-        let cgroup_dir = open_cgroup_dir(cgroup.dir()).map_err(|_| ClassicReason::Source)?;
         let container_dir = open_dir(making.dir.path()).map_err(|_| ClassicReason::Source)?;
         Ok(PrunedCreate {
             proc_sink: None,
-            bundle_dir,
-            cgroup_dir: Some(cgroup_dir),
+            // Opened only where a seed clones the init ([`Runtime::start_via_seed`]).
+            cgroup_dir: None,
             container_dir,
             rootfs,
             mount_namespace: way,
@@ -1506,13 +1504,20 @@ impl Runtime {
         via: Via<'_>,
     ) -> Result<State, OciError> {
         let Via { seeds, parking } = via;
-        // Two pipes, close-on-exec: the init writes the sync pipe, the runtime writes the map pipe. The
+        // Pipes, close-on-exec: the init writes the sync pipe, the runtime writes the map pipe. The
         // seed hands the init's ends over `SCM_RIGHTS`, so they never need their close-on-exec cleared;
-        // they close in the init only when it execs the container's program.
+        // they close in the init only when it execs the container's program. The map pipe carries a user
+        // namespace's maps and the create-time hooks' state, which a pruned create has neither of
+        // (`pruned_create` routes both to the classic path), so only a classic create makes one.
         let pipe =
             || rustix::pipe::pipe_with(PipeFlags::CLOEXEC).map_err(|e| OciError::os("pipe", e));
         let (sync_r, sync_w) = pipe()?;
-        let (map_r, map_w) = pipe()?;
+        let (map_r, map_w) = if pruned.is_none() {
+            let (r, w) = pipe()?;
+            (Some(r), Some(w))
+        } else {
+            (None, None)
+        };
         // The namespaces the init is made in, as the seed works them out (`seed::serve_create`): a parked init
         // made with these takes the create, in place of a clone into the cgroup and its wait for the host-wide
         // `cgroup_mutex` (decision 8, "The p99.9 that stayed"); one made with others is ended, never used.
@@ -1527,7 +1532,7 @@ impl Runtime {
             cgroup,
             network,
             sync_w,
-            map_r: Some(map_r),
+            map_r,
             config: making.config,
             pruned,
         };
@@ -1584,12 +1589,19 @@ impl Runtime {
                 drop(req);
                 started
             }
-            None => seeds.clone_init(req)?,
+            None => {
+                // A seed's clone is born in the box's cgroup, so it is handed the cgroup's directory, opened only
+                // now: a parked init's claim, whose init is in its cgroup already, carried none.
+                if let Some(p) = req.pruned.as_mut() {
+                    p.cgroup_dir = Some(open_cgroup_dir(cgroup.dir())?);
+                }
+                seeds.clone_init(req)?
+            }
         };
         // The runtime holds the read end of sync and the write end of map; the seed closed its copies of
         // the init's ends once it had cloned, so the init alone holds them now.
         let outcome = self
-            .handshake_seed(making, &sync_r, &map_w, pid, spec)
+            .handshake_seed(making, &sync_r, map_w.as_ref(), pid, spec)
             .and_then(|()| {
                 // The init is blocked at the exec FIFO, so its start time is its own.
                 state::start_time(pid).ok_or_else(|| {
@@ -1647,12 +1659,13 @@ impl Runtime {
     /// does, but its pid came back from the seed, so the protocol carries no pid line. A `U` asks for the
     /// user namespace's maps, which the runtime writes against `pid` (the init's) and acks on the map
     /// pipe; `H` stops the init before its root switch for the create-time hooks ([`answer_hooks`]); `R`
-    /// is the ready signal; `E` a setup failure. Returns once the init is ready, or the error.
+    /// is the ready signal; `E` a setup failure. Returns once the init is ready, or the error. A pruned create's init
+    /// has no map pipe (`map_w` is `None`): it asks for no maps and stops for no hooks, so one that did is refused.
     fn handshake_seed(
         &self,
         making: &Making<'_>,
         sync_r: &OwnedFd,
-        map_w: &OwnedFd,
+        map_w: Option<&OwnedFd>,
         pid: i32,
         spec: &Spec,
     ) -> Result<(), OciError> {
@@ -1661,11 +1674,19 @@ impl Runtime {
                 .try_clone()
                 .map_err(|e| OciError::os("duplicating the sync pipe", e))?,
         ));
-        let mut map_w = std::fs::File::from(
-            map_w
-                .try_clone()
-                .map_err(|e| OciError::os("duplicating the map pipe", e))?,
-        );
+        let mut map_w = map_w
+            .map(|w| {
+                w.try_clone()
+                    .map(std::fs::File::from)
+                    .map_err(|e| OciError::os("duplicating the map pipe", e))
+            })
+            .transpose()?;
+        let unanswerable = || {
+            OciError::Broken(
+                "a pruned create's init asked for maps or hooks, and has no map pipe for them"
+                    .to_owned(),
+            )
+        };
         let mut hooked = false;
         let mut line = String::new();
         loop {
@@ -1681,13 +1702,14 @@ impl Runtime {
             let msg = line.trim_end();
             match msg.chars().next() {
                 Some('U') => {
+                    let map_w = map_w.as_mut().ok_or_else(unanswerable)?;
                     write_id_maps(pid, &spec.linux.uid_mappings, &spec.linux.gid_mappings)?;
                     map_w
                         .write_all(&[1])
                         .map_err(|e| OciError::os("acking the maps", e))?;
                 }
                 Some('H') => {
-                    answer_hooks(making, spec, pid, &mut map_w)?;
+                    answer_hooks(making, spec, pid, map_w.as_mut().ok_or_else(unanswerable)?)?;
                     hooked = true;
                 }
                 Some('R') if spec.hooks.sync_init() && !hooked => return Err(unhooked(making.id)),
@@ -3783,7 +3805,6 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
         let cgroup = BoxCgroup::at(box_dir.clone());
         let open = || open_dir(lab.path()).unwrap();
         let pruned = || PrunedCreate {
-            bundle_dir: open(),
             cgroup_dir: None,
             container_dir: open(),
             rootfs: open(),

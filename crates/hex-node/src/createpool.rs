@@ -537,8 +537,10 @@ impl Parker {
 }
 
 /// A create as the seed's message and its descriptors, in the order the seed reads them (`serve_create`):
-/// the two pipes, a network namespace, then on the pruned path the four fixed descriptors and the bind trees,
-/// in `mount::plan`'s order (the order the init attaches them), and last the spec the runtime checked.
+/// the sync pipe, the map pipe on the classic path, a network namespace, then on the pruned path the fixed
+/// descriptors of a lean create (the cgroup directory where it rides, for a seed's clone; the state directory and the
+/// rootfs) and the bind trees, in `mount::plan`'s order (the order the init attaches them), and last the spec the
+/// runtime checked. A pruned create carries only what its init reads ([`Fixed::Lean`]; the lead's (B) of 2026-11-09).
 fn message<'r>(req: &'r CloneReq<'_>) -> (Create, Vec<BorrowedFd<'r>>) {
     let pruned = req.pruned.is_some();
     let create = Create {
@@ -573,7 +575,9 @@ fn message<'r>(req: &'r CloneReq<'_>) -> (Create, Vec<BorrowedFd<'r>>) {
             .pruned
             .as_ref()
             .is_some_and(|p| p.masked_directory.is_some()),
-        fixed: Fixed::All,
+        fixed: req.pruned.as_ref().map_or(Fixed::All, |p| Fixed::Lean {
+            cgroup: p.cgroup_dir.is_some(),
+        }),
     };
     let mut fds: Vec<BorrowedFd<'_>> = vec![req.sync_w.as_fd()];
     fds.extend(req.map_r.as_ref().map(AsFd::as_fd));
@@ -581,7 +585,6 @@ fn message<'r>(req: &'r CloneReq<'_>) -> (Create, Vec<BorrowedFd<'r>>) {
         fds.push(network.as_fd());
     }
     if let Some(pruned) = &req.pruned {
-        fds.push(pruned.bundle_dir.as_fd());
         fds.extend(pruned.cgroup_dir.as_ref().map(AsFd::as_fd));
         fds.push(pruned.container_dir.as_fd());
         fds.push(pruned.rootfs.as_fd());
@@ -1302,7 +1305,6 @@ mod tests {
             pruned,
         };
         let pruned = |cgroup_dir: Option<OwnedFd>| PrunedCreate {
-            bundle_dir: open(),
             cgroup_dir,
             container_dir: open(),
             rootfs: open(),
