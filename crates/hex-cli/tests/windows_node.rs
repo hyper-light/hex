@@ -31,10 +31,14 @@ use hex_core::wire::{self, Answer, Call, Received, Request, Streams};
 /// instead of hanging it.
 const PATIENCE: Duration = Duration::from_secs(60);
 
-/// A `hex node` of this build on a folder of its own, ended when dropped.
+/// A `hex node` of this build on a folder of its own, ended when dropped, and its keeper with it: the keeper
+/// outlives a killed node by design (it holds the node's boxes for the next one), so a node this test started
+/// leaves no keeper, and no box the keeper held, behind it.
 struct Node {
     child: std::process::Child,
     socket: PathBuf,
+    /// The keeper's state folder (`state\keeper`), whose `keeper.owner` names it.
+    keeping: PathBuf,
 }
 
 impl Node {
@@ -54,7 +58,11 @@ impl Node {
             .read_line(&mut line)
             .unwrap();
         assert_eq!(line.trim(), format!("ready {}", socket.display()));
-        Self { child, socket }
+        Self {
+            child,
+            socket,
+            keeping: dir.join("state").join("keeper"),
+        }
     }
 
     fn client(&self) -> hex_client::Client {
@@ -63,9 +71,23 @@ impl Node {
 }
 
 impl Drop for Node {
+    /// Kills the node, then asks the keeper its `keeper.owner` names to stop, as a node going down cleanly
+    /// does; the keeper's going ends what it held (kill-on-close).
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        let Ok(text) = std::fs::read_to_string(self.keeping.join("keeper.owner")) else {
+            return;
+        };
+        let mut words = text.split_whitespace();
+        if let (Some(Ok(pid)), Some(Ok(created))) = (
+            words.next().map(str::parse::<u32>),
+            words.next().map(str::parse::<u64>),
+        ) && let Ok(keeper) =
+            hex_runtime::windows::keeper::NodeKeeper::open(pid, created, &self.keeping)
+        {
+            keeper.stop();
+        }
     }
 }
 
