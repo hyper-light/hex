@@ -317,6 +317,9 @@ fn reaches(cluster: &Cluster, sample: Sample, clock: Clock) -> bool {
         .all(|runs| runs.iter().all(|p| p.reached))
 }
 
+/// A set's days, each with its slowest speed found with every node scanned, or `None` for no completions.
+type Days = Vec<(Cluster, Option<Time>)>;
+
 /// The sample's floor from data (Ada's rule, 2026-11-06; the lead, 17:14Z): on `copies` copies of a
 /// node model's hosts (one of each: m5d.metal's one, the fleet's ten), the fewest admitting nodes a
 /// decision can sample with Hex still meeting `AC-T7.4.3`'s bar on every seed, set and clock, at that
@@ -354,7 +357,7 @@ fn floors(model: &str, copies: usize) {
         ..sample(day)
     };
     // Each set's days, with no completions and with each lifetime's slowest speed, every node scanned.
-    let mut sets: Vec<(String, Vec<(Cluster, Option<Time>)>)> = Vec::new();
+    let mut sets: Vec<(String, Days)> = Vec::new();
     for (set, class) in [
         ("mix", None),
         ("oci", Some(Class::Oci)),
@@ -372,8 +375,8 @@ fn floors(model: &str, copies: usize) {
             ("lifetimes as recorded", recorded),
             ("with the keep-alive", kept_alive),
         ] {
-            let speed = slowest(&set, lives, &day, sampled(&day, nodes))
-                .expect("a speed reaching 90%");
+            let speed =
+                slowest(&set, lives, &day, sampled(&day, nodes)).expect("a speed reaching 90%");
             days.push((day, Some(speed)));
         }
         sets.push((set, days));
