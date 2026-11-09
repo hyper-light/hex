@@ -85,57 +85,96 @@ impl Keeping {
     }
 
     fn spawn_at(state: &Path, command: &[String]) -> Result<keeper::NodeKeeper, Refusal> {
-        let (program, args) = command.split_first().ok_or_else(|| Refusal::Invalid {
-            what: "keeper",
-            why: "an empty keeper command".to_owned(),
-        })?;
         let ready = state.join(format!("keeper-ready-{}", std::process::id()));
         let _ = std::fs::remove_file(&ready);
-        // The keeper takes its state folder and ready path from the environment, so the command names only
-        // how to launch it (`hex keep`, or the test's own keeper body); `keeper::Args` reads flags or these.
-        // The keeper outlives its node, so it holds none of the node's pipes: what reads the node's output (a
-        // supervisor, a test) sees its end when the node ends. It says it is ready through its ready file.
-        let mut child = std::process::Command::new(program)
-            .args(args)
-            .env("HEX_KEEP_STATE", state)
-            .env("HEX_KEEP_READY", &ready)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| Refusal::os("starting the keeper", e))?;
-        // Wait for the keeper to write its identity, waiting on the child itself between polls (no blocking
-        // sleep): a bound of the node's EMPTY_PATIENCE, 60 s, at ticks of 10 ms.
-        let watch = sys::open_process(child.id()).ok().flatten();
+        // The keeper outlives its node, so it inherits none of the node's handles. std's spawn hands a child
+        // every inheritable handle its parent holds, the node's own stdout and stderr among them (which it
+        // inherited), so the keeper is started as a box's member is ([`sys::create`]): only its three
+        // standard handles inherited, each the NUL device, and assigned to no job of Hex's. What reads the
+        // node's output (a supervisor, a test) then sees its end when the node ends. It says it is ready
+        // through its ready file.
+        let mut spawn = keeper_spawn(command, state, &ready)?;
+        let Started {
+            process, thread, ..
+        } = sys::create(&mut spawn, &[]).map_err(|e| Refusal::os("starting the keeper", e))?;
+        if let Err(e) = sys::resume(&thread) {
+            let _ = sys::terminate_process(&process, 1);
+            return Err(Refusal::os("starting the keeper", e));
+        }
+        drop(thread);
+        // Wait for the keeper to write its identity, waiting on it between polls (no blocking sleep): a bound
+        // of the node's EMPTY_PATIENCE, 60 s, at ticks of 10 ms.
         let mut ticks: u32 = 6_000;
         let (pid, created) = loop {
             if let Some((pid, created)) = read_ready(&ready) {
                 break (pid, created);
             }
-            if let Ok(Some(status)) = child.try_wait() {
+            if matches!(sys::wait(&process, 0), Ok(true)) {
+                let code = sys::exit_code(&process)
+                    .map_or_else(|e| format!("unread ({e})"), |c| c.to_string());
                 return Err(Refusal::Broken(format!(
-                    "the keeper exited before it was ready: {status}"
+                    "the keeper exited before it was ready: exit code {code}"
                 )));
             }
             ticks = match ticks.checked_sub(1) {
                 Some(n) => n,
                 None => {
-                    let _ = child.kill();
+                    let _ = sys::terminate_process(&process, 1);
                     return Err(Refusal::Os {
                         op: "starting the keeper",
                         why: "it didn't say it was ready in 60 s".to_owned(),
                     });
                 }
             };
-            // Wait up to 10 ms on the child; its ending wakes us, else the next poll reads the ready file.
-            if let Some(w) = watch.as_ref() {
-                let _ = sys::wait(w, 10);
-            }
+            // Wait up to 10 ms on the keeper; its ending wakes us, else the next poll reads the ready file.
+            let _ = sys::wait(&process, 10);
         };
         let k = keeper::NodeKeeper::open(pid, created, state)?;
         write_keeper(state, pid, created).map_err(|e| Refusal::os("recording the keeper", e))?;
         Ok(k)
     }
+}
+
+/// The keeper's spawn: `command` (`hex keep`, or a test's own keeper body) with the node's environment and
+/// the keeper's state folder and ready path added (`keeper::Args` reads them there, so the command names only
+/// how to launch it), the node's working folder, and the NUL device as its three standard handles. A variable
+/// whose name or value isn't Unicode, or whose name holds an `=` (Windows' per-drive folders, `=C:`), isn't
+/// passed on. Refused for an empty command, or a state folder or ready path that isn't Unicode.
+fn keeper_spawn(command: &[String], state: &Path, ready: &Path) -> Result<Spawn, Refusal> {
+    if command.is_empty() {
+        return Err(Refusal::Invalid {
+            what: "keeper",
+            why: "an empty keeper command".to_owned(),
+        });
+    }
+    let unicode = |what: &str, p: &Path| {
+        p.to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| Refusal::Invalid {
+                what: "keeper",
+                why: format!("its {what} {} isn't Unicode", p.display()),
+            })
+    };
+    let mut env: Vec<(String, String)> = std::env::vars_os()
+        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+        .filter(|(k, _)| {
+            !k.is_empty()
+                && !k.contains('=')
+                && !k.eq_ignore_ascii_case("HEX_KEEP_STATE")
+                && !k.eq_ignore_ascii_case("HEX_KEEP_READY")
+        })
+        .collect();
+    env.push(("HEX_KEEP_STATE".to_owned(), unicode("state folder", state)?));
+    env.push(("HEX_KEEP_READY".to_owned(), unicode("ready path", ready)?));
+    Ok(Spawn {
+        command_line: hex_core::job::command_line(command)
+            .encode_utf16()
+            .chain([0])
+            .collect(),
+        environment: hex_core::job::environment(&env),
+        cwd: None,
+        stdio: std_handles(Stdio::null())?,
+    })
 }
 
 fn read_ready(path: &Path) -> Option<(u32, u64)> {
