@@ -94,6 +94,12 @@ impl Runtime for TestHost {
             child.id(),
         )?))
     }
+    /// The run's box in the simulator, its program a real process of this test as an exec's is.
+    fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        let id = spec.id.clone();
+        self.sim.create(spec)?;
+        self.exec(&id, program, stdio)
+    }
     fn signal(&self, id: &BoxId, signal: HexSignal) -> Result<(), Refusal> {
         self.sim.signal(id, signal)
     }
@@ -379,10 +385,10 @@ fn hostile_messages_are_refused_and_the_connection_is_served_after() {
         ),
         Hostile(
             "unknown kind",
-            with(12, [0x0e, 0]),
+            with(12, [0x0f, 0]),
             vec![],
             9,
-            "kind 0x000e isn't a request this wire defines",
+            "kind 0x000f isn't a request this wire defines",
         ),
         Hostile(
             "an answer kind",

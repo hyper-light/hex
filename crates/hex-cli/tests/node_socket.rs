@@ -927,6 +927,14 @@ impl Runtime for HostBoxes {
     ) -> Result<Box<dyn hex_api::Proc>, Refusal> {
         self.0.exec(id, program, stdio)
     }
+    fn run(
+        &self,
+        spec: BoxSpec,
+        program: Program,
+        stdio: Stdio,
+    ) -> Result<Box<dyn hex_api::Proc>, Refusal> {
+        self.0.run(spec, program, stdio)
+    }
     fn signal(&self, id: &BoxId, signal: hex_api::Signal) -> Result<(), Refusal> {
         self.0.signal(id, signal)
     }

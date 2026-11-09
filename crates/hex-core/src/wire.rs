@@ -116,6 +116,7 @@ mod kind {
     pub const KILL: u16 = 0x000c;
     pub const EXEC_STREAMS: u16 = 0x000d;
     pub const GIVEN: u16 = 0x800a;
+    pub const RUN: u16 = 0x000e;
 }
 
 /// A message's header, once its wire identity is read as this side's.
@@ -170,6 +171,17 @@ pub enum Call {
     /// and asked for is refused.
     ExecStreams {
         id: BoxId,
+        program: Program,
+        streams: Streams,
+        ask: Streams,
+    },
+    /// `program` in a `process` box made from `spec` for its life (`Runtime::run`, decision 7 of
+    /// docs/design/runtime-architecture.md): a create's body, then an exec's program, the streams it carries as the
+    /// message's descriptors, in order, and the streams it asks the node to make, as [`Call::ExecStreams`]'s. Answered
+    /// as an exec is, [`Answer::Started`] or [`Answer::Given`], and later [`Answer::Exited`], which comes once the
+    /// box is gone.
+    Run {
+        spec: Box<BoxSpec>,
         program: Program,
         streams: Streams,
         ask: Streams,
@@ -620,6 +632,18 @@ fn parse_request(
                 ask,
             })
         }
+        kind::RUN => {
+            let spec = box_spec(&mut r).map_err(bad)?;
+            let program = program(&mut r).map_err(bad)?;
+            let streams = r.u8().and_then(Streams::of).map_err(bad)?;
+            let ask = r.u8().and_then(Streams::of).map_err(bad)?;
+            Request::Call(Call::Run {
+                spec: Box::new(spec),
+                program,
+                streams,
+                ask,
+            })
+        }
         _ => {
             return Err(bad(Fault::Undefined {
                 kind,
@@ -628,11 +652,11 @@ fn parse_request(
         }
     };
     let want = match &request {
-        Request::Call(Call::Exec { streams, .. } | Call::ExecStreams { streams, .. })
-            if carried =>
-        {
-            streams.count()
-        }
+        Request::Call(
+            Call::Exec { streams, .. }
+            | Call::ExecStreams { streams, .. }
+            | Call::Run { streams, .. },
+        ) if carried => streams.count(),
         _ => 0,
     };
     if msg.descriptors != want {
@@ -824,6 +848,7 @@ fn request_name(kind: u16) -> &'static str {
         kind::NETNS => "a netns",
         kind::KILL => "a kill",
         kind::EXEC_STREAMS => "an exec asking for streams",
+        kind::RUN => "a run",
         _ => "a request",
     }
 }
@@ -890,6 +915,19 @@ fn put_call(w: &mut Writer, id: u64, call: &Call) -> Result<(), Fault> {
         } => {
             w.header(kind::EXEC_STREAMS, id);
             w.string(b.as_str())?;
+            put_program(w, program)?;
+            w.u8(streams.bits());
+            w.u8(ask.bits());
+            Ok(())
+        }
+        Call::Run {
+            spec,
+            program,
+            streams,
+            ask,
+        } => {
+            w.header(kind::RUN, id);
+            put_box_spec(w, spec)?;
             put_program(w, program)?;
             w.u8(streams.bits());
             w.u8(ask.bits());

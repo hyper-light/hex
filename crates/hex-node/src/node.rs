@@ -1006,6 +1006,12 @@ impl Node {
                 s.start_interrupted =
                     hex_runtime::linux::oci::state::start_interrupted(&self.container_dir(id));
             }
+            // A run's box lives as long as its program, told apart from a later process the same way.
+            if let Some(Ok(record)) = &s.record
+                && let Some(program) = record.run
+            {
+                s.init_alive = Some(init_alive(program));
+            }
         }
         let mut summary = RecoverySummary::default();
         // The slots no readable record names, idle or a create's caught before its record: ended and
@@ -1039,6 +1045,19 @@ impl Node {
                         && let Some(cg) = self.oci_boxes.slot(slot.n)
                     {
                         self.cgroups.adopt(&id, slot.n, slot.baseline, &cg)?;
+                    }
+                    // A run taken back is watched again, so its box still goes when its program ends.
+                    let run = seen
+                        .get(&id)
+                        .and_then(|s| s.record.as_ref())
+                        .and_then(|r| r.as_ref().ok())
+                        .and_then(|r| r.run);
+                    if let Some(program) = run
+                        && let Some(cg) = self.root.get(&id)
+                    {
+                        let slot = self.supervisor.reserve()?;
+                        self.supervisor
+                            .adopt_run(slot, &id, program, cg, self.root.names())?;
                     }
                     summary.adopted.push(id);
                 }
@@ -1668,6 +1687,67 @@ impl Runtime for Node {
         Ok(Box::new(hex_api::Asked::new(proc, given)))
     }
 
+    /// The run's steps ([`hex_core::record::RUN_STEPS`]): the box's cgroup, its program cloned into it, then its
+    /// record, naming the program; the box then watched by the supervisor, which removes it once the program ends
+    /// (decision 7). Streams asked for are made as an exec's are.
+    fn run(
+        &self,
+        spec: BoxSpec,
+        program: Program,
+        mut stdio: Stdio,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        spec.check_run()?;
+        let id = spec.id.clone();
+        // Held until the run's box is whole and watched, as a create's turn is.
+        let _turn: Turn<'_> = create_turn(&self.turns, &id)?;
+        if self.record(&id)?.is_some() || self.cgroup(&id).is_some() {
+            return Err(Refusal::Exists(id));
+        }
+        // A place for the program's pidfd first: past the budget nothing is made.
+        let slot = self.supervisor.reserve()?;
+        let given = stdio.make_asked()?;
+        let cg = self.root.create(&id, &spec.bounds)?;
+        // From the spawn until the supervisor owns the program, so no sweep reaps it first.
+        let spawning = self.supervisor.spawning()?;
+        let (pid, pidfd) = match process::exec(&cg, &program, stdio) {
+            Ok(proc) => proc.into_parts(),
+            Err(e) => {
+                drop(spawning);
+                self.scrub(&id)?;
+                return Err(e);
+            }
+        };
+        // The record names the program by its start time too, so recovery never takes a later
+        // process given its pid for it. A program that ended already is a zombie until reaped, its
+        // start time still there.
+        let mut record = BoxRecord::new(spec, Phase::Ready, Vec::new());
+        record.run = Some(ProcId {
+            pid,
+            start_ticks: i32::try_from(pid).ok().and_then(start_time).unwrap_or(0),
+        });
+        let watched = match self.store.put(&record) {
+            Ok(()) => self
+                .supervisor
+                .watch_run(slot, &id, pid, pidfd, cg, self.root.names()),
+            Err(e) => Err((e, pidfd)),
+        };
+        drop(spawning);
+        match watched {
+            Ok(proc) => Ok(Box::new(hex_api::Asked::new(proc, given))),
+            Err((e, pidfd)) => {
+                // Unwatched, the program is ended and reaped here, and the box removed: nothing of a
+                // refused run is left (CLAUDE.md §2). The sweep may have reaped it first.
+                let _ = rustix::process::pidfd_send_signal(&pidfd, rustix::process::Signal::KILL);
+                self.scrub(&id)?;
+                let _ = rustix::process::waitid(
+                    rustix::process::WaitId::PidFd(pidfd.as_fd()),
+                    rustix::process::WaitIdOptions::EXITED,
+                );
+                Err(e)
+            }
+        }
+    }
+
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
         let cg = self
             .cgroup(id)
@@ -1726,6 +1806,24 @@ impl Runtime for Node {
         // After a create or delete of the box under way, so it removes what that one made, or finds it
         // gone, and scrubs nothing it's doing.
         let _turn: Turn<'_> = self.turns.take(id)?;
+        // A run's box is this delete's to remove once its run is taken, so the run's own removal doesn't race
+        // it; its caller is told how the delete went.
+        let run = self.supervisor.take_run(id)?;
+        let deleted = self.delete_box(id);
+        match &run {
+            Some(run) => {
+                self.supervisor.ended_run(run, deleted.clone())?;
+                deleted
+            }
+            None => deleted,
+        }
+    }
+}
+
+impl Node {
+    /// Ends what runs in box `id` and removes it: [`Runtime::delete`] once its turn is held and any run of the box
+    /// is taken.
+    fn delete_box(&self, id: &BoxId) -> Result<(), Refusal> {
         let record = self.record(id)?;
         if record.is_none() && self.cgroup(id).is_none() {
             return Err(Refusal::NoSuchBox(id.clone()));
@@ -1777,7 +1875,7 @@ impl crate::serve::Host for Node {
 /// the refusal's tag byte and its two strings' `u32` lengths (`hex_core::wire`'s encoding of
 /// [`Refusal::Os`]), `op` and `said`. Past it the socket would answer the call's refusal with another,
 /// losing what it named (CLAUDE.md §3).
-fn why_room(op: &str, said: &str) -> usize {
+pub(crate) fn why_room(op: &str, said: &str) -> usize {
     // A tag byte and two u32 lengths.
     const TAG_AND_LENGTHS: usize = 9;
     wire::MAX_MESSAGE
@@ -1793,7 +1891,7 @@ fn why_room(op: &str, said: &str) -> usize {
 /// named under its path. `cgroup.procs` leaves out a process whose leader has ended while another of its
 /// threads hasn't (Linux v6.19, `kernel/cgroup/cgroup.c:5112-5121`), so with no process listed the box's
 /// threads are named instead, each with its process, state and where it waits.
-fn survivors(cg: &hex_runtime::linux::cgroup::BoxCgroup, room: usize) -> String {
+pub(crate) fn survivors(cg: &hex_runtime::linux::cgroup::BoxCgroup, room: usize) -> String {
     const NO_PROCESS: &str = " (no process listed, only threads:)";
     let root = cg.dir().to_path_buf();
     let (mut out, mut threads) = (String::new(), String::new());

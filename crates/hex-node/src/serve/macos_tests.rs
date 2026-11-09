@@ -89,6 +89,12 @@ impl Runtime for TestHost {
         let pid = child.id();
         Ok(Box::new(ChildProc(Mutex::new(child), pid)))
     }
+    /// The run's box in the simulator, its program a real process of this test as an exec's is.
+    fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        let id = spec.id.clone();
+        self.sim.create(spec)?;
+        self.exec(&id, program, stdio)
+    }
     fn signal(&self, id: &BoxId, signal: HexSignal) -> Result<(), Refusal> {
         self.sim.signal(id, signal)
     }

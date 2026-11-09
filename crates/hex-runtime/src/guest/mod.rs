@@ -716,6 +716,21 @@ impl Runtime for GuestRuntime {
         self.with(id, |c| c.exec(id, program, stdio))
     }
 
+    /// The guest runs the `oci` class, whose spec's run is refused ([`BoxSpec::check_run`]); a run's `process` box
+    /// is the host's, refused here as its create is.
+    fn run(
+        &self,
+        spec: BoxSpec,
+        _program: Program,
+        _stdio: Stdio,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        spec.check_run()?;
+        Err(Refusal::Invalid {
+            what: "class",
+            why: "the node's guest runs the oci class; process boxes are the host's".to_owned(),
+        })
+    }
+
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
         self.with(id, |c| c.signal(id, signal))
     }
@@ -810,6 +825,21 @@ impl<P: Runtime> WithGuest<P> {
         })
     }
 
+    /// The runtime that makes a box of `spec`, as its `route` says. An id is one box's across both classes: the other
+    /// side holding it refuses the box as [`Refusal::Exists`].
+    fn maker(&self, spec: &BoxSpec) -> Result<&dyn Runtime, Refusal> {
+        let (this, other): (&dyn Runtime, &dyn Runtime) =
+            match (self.route)(&self.process, &spec.class)? {
+                Side::Host => (&self.process, &self.oci),
+                Side::Guest => (&self.oci, &self.process),
+            };
+        match other.inspect(&spec.id) {
+            Ok(_) => Err(Refusal::Exists(spec.id.clone())),
+            Err(Refusal::NoSuchBox(_)) => Ok(this),
+            Err(why) => Err(why),
+        }
+    }
+
     /// The runtime holding `id`, or [`Refusal::NoSuchBox`]: the host's, asked first as it answers
     /// without a guest, then the guest's.
     fn holder(&self, id: &BoxId) -> Result<&dyn Runtime, Refusal> {
@@ -830,18 +860,7 @@ impl<P: Runtime> Runtime for WithGuest<P> {
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
-        // An id is one box's across both classes: the other side holding it refuses the create.
-        let (this, other): (&dyn Runtime, &dyn Runtime) =
-            match (self.route)(&self.process, &spec.class)? {
-                Side::Host => (&self.process, &self.oci),
-                Side::Guest => (&self.oci, &self.process),
-            };
-        match other.inspect(&spec.id) {
-            Ok(_) => return Err(Refusal::Exists(spec.id)),
-            Err(Refusal::NoSuchBox(_)) => {}
-            Err(why) => return Err(why),
-        }
-        this.create(spec)
+        self.maker(&spec)?.create(spec)
     }
 
     fn start(&self, id: &BoxId) -> Result<(), Refusal> {
@@ -850,6 +869,12 @@ impl<P: Runtime> Runtime for WithGuest<P> {
 
     fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
         self.holder(id)?.exec(id, program, stdio)
+    }
+
+    /// A run's box is a `process` box ([`BoxSpec::check_run`]), made where a create of its spec would be.
+    fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        spec.check_run()?;
+        self.maker(&spec)?.run(spec, program, stdio)
     }
 
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {

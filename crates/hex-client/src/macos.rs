@@ -40,6 +40,7 @@ static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.answer.netns"),
     Patience::measuring("client.answer.kill"),
     Patience::measuring("client.answer.exec_streams"),
+    Patience::measuring("client.answer.run"),
 ];
 
 /// A node agent, reached through its socket.

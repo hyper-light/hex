@@ -51,6 +51,23 @@ impl BoxSpec {
         }
         Ok(())
     }
+
+    /// Checks the spec of a run ([`crate::Runtime::run`]) as [`BoxSpec::check`] does, and refuses an `oci`
+    /// box's as `Invalid` naming the run: its init is created and started, and a run's box is the
+    /// `process` class's (decision 7 of docs/design/runtime-architecture.md).
+    pub fn check_run(&self) -> Result<(), Refusal> {
+        self.check()?;
+        if self.class.class() != Class::Process {
+            return Err(Refusal::Invalid {
+                what: "run",
+                why: format!(
+                    "box {} is an oci box, whose init is created and started",
+                    self.id
+                ),
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Whose box it is (goal 5 extended, step 6). A node may give a box whose spec names an owner a cgroup

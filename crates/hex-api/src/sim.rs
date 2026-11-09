@@ -6,7 +6,8 @@
 //! at start and `say` with 0; any other init, and a bundle's, runs until it is killed or the box is
 //! deleted: as the init of its PID namespace with no handler, it takes no other signal (unless made
 //! [`SimRuntime::with_term_ending_init`], for a class that ends its init on TERM). Once the init has ended the box is empty and inspect reports how it ended, as the node
-//! agent does for a container whose init it reaped.
+//! agent does for a container whose init it reaped. A box a run made ([`Runtime::run`]) goes once its
+//! program has ended, ending what else ran in it, as the node agent removes it (decision 7).
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -55,16 +56,32 @@ struct SimBox {
     started: bool,
     /// How its init ends once started, from its program; `None` runs until signalled.
     init_ends: Option<Exit>,
+    /// The program a [`Runtime::run`] made the box for: once it has ended the box is gone.
+    run: Option<Arc<SimProc>>,
 }
 
 #[derive(Default)]
 struct SimProc {
     exit: Mutex<Option<Exit>>,
     ended: Condvar,
+    /// A run's program: the other programs of its box, which its end ends, as the node agent's removal
+    /// of the run's box does.
+    left: Mutex<Vec<Arc<SimProc>>>,
 }
 
 impl SimProc {
+    /// Ends it with `exit`, and, a run's program, what else runs in its box.
     fn end(&self, exit: Exit) -> Result<(), Refusal> {
+        self.set(exit)?;
+        let left = std::mem::take(&mut *self.left.lock().map_err(poisoned)?);
+        for p in left {
+            p.set(Exit::Signal(Signal::KILL.number()))?;
+        }
+        Ok(())
+    }
+
+    /// Ends it alone with `exit`, unless it has ended.
+    fn set(&self, exit: Exit) -> Result<(), Refusal> {
         let mut e = self.exit.lock().map_err(poisoned)?;
         if e.is_none() {
             *e = Some(exit);
@@ -95,8 +112,26 @@ impl SimRuntime {
         }
     }
 
+    /// The boxes, less each run's whose program has ended: removed before any call can see it, as the
+    /// node agent removes it before the run's end is reported, what else ran in it ended.
     fn boxes(&self) -> Result<MutexGuard<'_, BTreeMap<BoxId, SimBox>>, Refusal> {
-        self.boxes.lock().map_err(poisoned)
+        let mut boxes = self.boxes.lock().map_err(poisoned)?;
+        let mut ended = Vec::new();
+        for (id, b) in boxes.iter() {
+            if let Some(run) = &b.run
+                && run.exit()?.is_some()
+            {
+                ended.push(id.clone());
+            }
+        }
+        for id in ended {
+            if let Some(b) = boxes.remove(&id) {
+                for p in &b.procs {
+                    p.set(Exit::Signal(Signal::KILL.number()))?;
+                }
+            }
+        }
+        Ok(boxes)
     }
 
     fn info(b: &SimBox) -> Result<BoxInfo, Refusal> {
@@ -191,6 +226,7 @@ impl Runtime for SimRuntime {
             init,
             started: false,
             init_ends,
+            run: None,
         };
         let info = Self::info(&b)?;
         boxes.insert(b.spec.id.clone(), b);
@@ -315,8 +351,29 @@ impl Runtime for SimRuntime {
                 });
             }
         }
+        if let Some(run) = &b.run {
+            run.left.lock().map_err(poisoned)?.push(Arc::clone(&proc));
+        }
         b.procs.push(Arc::clone(&proc));
         Ok(Box::new(SimHandle(proc, Some(given))))
+    }
+
+    fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        spec.check_run()?;
+        let id = spec.id.clone();
+        self.create(spec)?;
+        let proc = match self.exec(&id, program, stdio) {
+            Ok(proc) => proc,
+            Err(e) => {
+                self.delete(&id)?;
+                return Err(e);
+            }
+        };
+        let mut boxes = self.boxes()?;
+        if let Some(b) = boxes.get_mut(&id) {
+            b.run = b.procs.last().cloned();
+        }
+        Ok(proc)
     }
 
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
@@ -325,9 +382,10 @@ impl Runtime for SimRuntime {
             .get(id)
             .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
         let mut any = false;
+        // Each program takes the signal itself, a run's among them, whose box then goes.
         for p in &b.procs {
             if p.exit()?.is_none() {
-                p.end(Exit::Signal(signal.number()))?;
+                p.set(Exit::Signal(signal.number()))?;
                 any = true;
             }
         }

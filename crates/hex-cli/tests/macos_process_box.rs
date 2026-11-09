@@ -63,6 +63,12 @@ impl Fixture for BinFixture {
     fn program(&self, act: &Act) -> Program {
         self.act(act)
     }
+
+    /// HEX-RT-15: the macOS node has nothing that removes a box once its program ends (decision 7's run is
+    /// Linux's node agent's), so a run is refused, naming the platform.
+    fn runs(&self) -> bool {
+        false
+    }
 }
 
 /// The runtime's pacing rates from the record of one member's growth, the fastest of its passes

@@ -634,6 +634,25 @@ impl Runtime for WinRuntime {
         }
     }
 
+    /// A run's box goes once its program ends (decision 7), which takes something watching the program to remove
+    /// it: Linux's node agent's supervisor. This runtime's boxes are made, exec'd into and deleted by its callers,
+    /// nothing of its own removing one, so a run is refused naming the platform, before anything is made.
+    fn run(
+        &self,
+        spec: BoxSpec,
+        _program: Program,
+        _stdio: Stdio,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        spec.check_run()?;
+        Err(Refusal::Platform {
+            what: "run",
+            platform: "windows",
+            why: "a box made for one program's life is removed by Linux's node agent once the program ends \
+                  (decision 7); a Windows box is made, exec'd into and deleted by its caller"
+                .to_owned(),
+        })
+    }
+
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
         match self.get(id)? {
             Held::Process(b) => b.signal(signal),

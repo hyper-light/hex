@@ -30,8 +30,8 @@ use crate::calls::{Core, Handle, KINDS, Lent, Sent, Shared, Transport};
 /// `bench/competitive/probes/waits_census.md`, in nanoseconds as the census keeps them: a release build from run 4's
 /// largest max of the release arms with a row's 1,000 samples (adacachy2), a debug build from run 5's largest answer
 /// of the debug-build arms, the debug arm and the suites' (adacachy2), for the kind and the tests' waits seeded from
-/// it, never under a bound one ran out at (decision 9). A kill and an exec asking for streams have no rows yet:
-/// MEASURING until a census with them in records them.
+/// it, never under a bound one ran out at (decision 9). A kill, an exec asking for streams and a run have no rows
+/// yet: MEASURING until a census with them in records them.
 static ANSWERS: [Patience; KINDS] = [
     Patience::by_profile(
         "client.answer.hello",
@@ -85,6 +85,7 @@ static ANSWERS: [Patience; KINDS] = [
     ),
     Patience::measuring("client.answer.kill"),
     Patience::measuring("client.answer.exec_streams"),
+    Patience::measuring("client.answer.run"),
 ];
 
 /// A node agent, reached through its socket.

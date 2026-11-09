@@ -39,13 +39,13 @@ pub type Then = Box<dyn FnOnce(u64, Result<Answer, Refusal>) + Send>;
 pub type Ended = Box<dyn FnOnce(Result<Exit, Refusal>) + Send>;
 
 /// How many kinds of call a client waits for an answer to, one wait each ([`kind_of`]): a hello and each [`Call`].
-pub const KINDS: usize = 12;
+pub const KINDS: usize = 13;
 
 /// The wait of `request`'s kind in `waits`, a client's table of its call kinds' learned waits (decision 9: a client's
 /// call's wait for its answer and its send is learned per call kind, since a delete waits on its box's emptying and a
 /// list on its parts, so a fast inspect's answer says nothing of theirs); `None` for one that has no answer (a
 /// release). A table's order: hello, create, start, exec, signal, inspect, usage, list, delete, netns, then wire
-/// a program's kill and an exec asking for streams.
+/// a program's kill, an exec asking for streams and a run.
 pub(crate) fn kind_of<'a>(waits: &'a [Patience; KINDS], request: &Request) -> Option<&'a Patience> {
     let n = match request {
         Request::Hello { .. } => 0,
@@ -61,6 +61,7 @@ pub(crate) fn kind_of<'a>(waits: &'a [Patience; KINDS], request: &Request) -> Op
             Call::Netns => 9,
             Call::Kill { .. } => 10,
             Call::ExecStreams { .. } => 11,
+            Call::Run { .. } => 12,
         },
         Request::Release => return None,
     };
@@ -1023,8 +1024,11 @@ impl<T: Transport> Core<T> {
         then: Then,
         ended: Ended,
     ) -> Result<u64, Refusal> {
-        let (id, program) = match call {
-            Call::Exec { id, program, .. } | Call::ExecStreams { id, program, .. } => (id, program),
+        let (launch, program) = match call {
+            Call::Exec { id, program, .. } | Call::ExecStreams { id, program, .. } => {
+                (Launch::Exec(id), program)
+            }
+            Call::Run { spec, program, .. } => (Launch::Run(spec), program),
             call => {
                 return self.begun(&Request::Call(call), |_| Ok(NONE), then, None);
             }
@@ -1038,27 +1042,9 @@ impl<T: Transport> Core<T> {
                     why: "the event form copies no stream: ask for each of a guest program's streams, whose ends are the caller's".to_owned(),
                 });
             }
-            let exec = Call::Exec {
-                id,
-                program,
-                streams: asked,
-            };
-            (exec, asked)
-        } else if asked == Streams::default() {
-            let exec = Call::Exec {
-                id,
-                program,
-                streams: carried,
-            };
-            (exec, Streams::default())
+            (launch.call(program, asked, Streams::default()), asked)
         } else {
-            let exec = Call::ExecStreams {
-                id,
-                program,
-                streams: carried,
-                ask: asked,
-            };
-            (exec, Streams::default())
+            (launch.call(program, carried, asked), Streams::default())
         };
         let lent = lend(&stdio);
         let shared = &*self.conn.shared;
@@ -1220,6 +1206,133 @@ impl<T: Transport> Core<T> {
             Answer::Info(info) => Ok(info),
             Answer::Refused(r) => Err(r),
             other => Err(unexpected(name, &other)),
+        }
+    }
+
+    /// Starts `program` where `launch` says, an exec or a run, with `stdio` as [`Runtime::exec`] takes it: the
+    /// program's `Proc`, whose end comes later as a message.
+    fn spawn(
+        &self,
+        launch: Launch,
+        program: Program,
+        stdio: Stdio,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        program.fits(&WIRE_EXEC_LIMIT)?;
+        stdio.check()?;
+        let name = launch.name();
+        let (carried, asked) = (carried(&stdio), streams(stdio.ask));
+        let ending = Arc::new(Ending::default());
+        let shared = &*self.conn.shared;
+        let (exec, answer, kept) = if T::MAKES_ASKED {
+            let request =
+                Request::Call(launch.call(program, union(carried, asked), Streams::default()));
+            let Stdio {
+                stdin,
+                stdout,
+                stderr,
+                ask,
+            } = stdio;
+            let pipes = Stdio {
+                stdin,
+                stdout,
+                stderr,
+                ..Stdio::null()
+            };
+            let (exec, answer) = self.call(
+                &request,
+                |exec| {
+                    make(shared, exec, asked)?;
+                    shared.transport.carries(exec, pipes)?;
+                    Ok(NONE)
+                },
+                Some(Arc::clone(&ending)),
+            )?;
+            let kept = Stdio {
+                ask,
+                ..Stdio::null()
+            };
+            (exec, answer, kept)
+        } else {
+            let request = Request::Call(launch.call(program, carried, asked));
+            let (exec, answer) = {
+                let lent = lend(&stdio);
+                self.call(&request, |_| Ok(&lent[..]), Some(Arc::clone(&ending)))?
+            };
+            (exec, answer, stdio)
+        };
+        match answer {
+            Answer::Started { pid } | Answer::Given { pid, .. } => {
+                let ends = shared.state()?.given.remove(&exec).unwrap_or_default();
+                let mut proc = RemoteProc {
+                    conn: Arc::clone(&self.conn),
+                    bound: self.limits.message_bytes,
+                    exec,
+                    pid,
+                    ending,
+                    exit: None,
+                    given: None,
+                };
+                match settle(kept, ends) {
+                    Ok(given) => {
+                        proc.given = Some(given);
+                        Ok(Box::new(proc))
+                    }
+                    Err(why) => {
+                        let _ = proc.kill();
+                        Err(why)
+                    }
+                }
+            }
+            other => {
+                if let Ok(mut state) = shared.state() {
+                    state.programs.remove(&exec);
+                    state.given.remove(&exec);
+                }
+                match other {
+                    Answer::Refused(r) => Err(r),
+                    other => Err(unexpected(name, &other)),
+                }
+            }
+        }
+    }
+}
+
+/// Where a call that starts a program starts it: in a box there is (an exec), or in a `process` box made for its
+/// life (a run, decision 7).
+enum Launch {
+    Exec(BoxId),
+    Run(Box<BoxSpec>),
+}
+
+impl Launch {
+    /// The call that starts `program` here, the streams `streams` names carried and those `ask` names asked for.
+    fn call(self, program: Program, streams: Streams, ask: Streams) -> Call {
+        match self {
+            Self::Exec(id) if ask == Streams::default() => Call::Exec {
+                id,
+                program,
+                streams,
+            },
+            Self::Exec(id) => Call::ExecStreams {
+                id,
+                program,
+                streams,
+                ask,
+            },
+            Self::Run(spec) => Call::Run {
+                spec,
+                program,
+                streams,
+                ask,
+            },
+        }
+    }
+
+    /// What its refusals name it.
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Exec(_) => "exec",
+            Self::Run(_) => "run",
         }
     }
 }
@@ -1391,98 +1504,12 @@ impl<T: Transport> Runtime for Core<T> {
     /// agent's answer gives its end. The one copy left is this client's, the caller's, never the node's (native
     /// plan step 8).
     fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
-        program.fits(&WIRE_EXEC_LIMIT)?;
-        stdio.check()?;
-        let (carried, asked) = (carried(&stdio), streams(stdio.ask));
-        let ending = Arc::new(Ending::default());
-        let shared = &*self.conn.shared;
-        let (exec, answer, kept) = if T::MAKES_ASKED {
-            let request = Request::Call(Call::Exec {
-                id: id.clone(),
-                program,
-                streams: union(carried, asked),
-            });
-            let Stdio {
-                stdin,
-                stdout,
-                stderr,
-                ask,
-            } = stdio;
-            let pipes = Stdio {
-                stdin,
-                stdout,
-                stderr,
-                ..Stdio::null()
-            };
-            let (exec, answer) = self.call(
-                &request,
-                |exec| {
-                    make(shared, exec, asked)?;
-                    shared.transport.carries(exec, pipes)?;
-                    Ok(NONE)
-                },
-                Some(Arc::clone(&ending)),
-            )?;
-            let kept = Stdio {
-                ask,
-                ..Stdio::null()
-            };
-            (exec, answer, kept)
-        } else {
-            let request = if asked == Streams::default() {
-                Request::Call(Call::Exec {
-                    id: id.clone(),
-                    program,
-                    streams: carried,
-                })
-            } else {
-                Request::Call(Call::ExecStreams {
-                    id: id.clone(),
-                    program,
-                    streams: carried,
-                    ask: asked,
-                })
-            };
-            let (exec, answer) = {
-                let lent = lend(&stdio);
-                self.call(&request, |_| Ok(&lent[..]), Some(Arc::clone(&ending)))?
-            };
-            (exec, answer, stdio)
-        };
-        match answer {
-            Answer::Started { pid } | Answer::Given { pid, .. } => {
-                let ends = shared.state()?.given.remove(&exec).unwrap_or_default();
-                let mut proc = RemoteProc {
-                    conn: Arc::clone(&self.conn),
-                    bound: self.limits.message_bytes,
-                    exec,
-                    pid,
-                    ending,
-                    exit: None,
-                    given: None,
-                };
-                match settle(kept, ends) {
-                    Ok(given) => {
-                        proc.given = Some(given);
-                        Ok(Box::new(proc))
-                    }
-                    Err(why) => {
-                        let _ = proc.kill();
-                        Err(why)
-                    }
-                }
-            }
-            other => {
-                if let Ok(mut state) = shared.state() {
-                    state.programs.remove(&exec);
-                    state.given.remove(&exec);
-                }
-                match other {
-                    Answer::Refused(r) => Err(r),
-                    other => Err(unexpected("exec", &other)),
-                }
-            }
-        }
+        self.spawn(Launch::Exec(id.clone()), program, stdio)
+    }
+
+    /// One request, [`Call::Run`], its stdio as an exec's; its program's end comes once the agent has removed the box.
+    fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        self.spawn(Launch::Run(Box::new(spec)), program, stdio)
     }
 
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {

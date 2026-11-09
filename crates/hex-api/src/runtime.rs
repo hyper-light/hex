@@ -24,6 +24,16 @@ pub trait Runtime: Send + Sync {
     /// container's namespaces in an `oci` box.
     fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal>;
 
+    /// Makes a `process` box from `spec` and runs `program` in it with `stdio`, as one call: the box a
+    /// program runs in for its life, with no process beside it (decision 7 of
+    /// docs/design/runtime-architecture.md). The runtime removes the box once the program has ended,
+    /// ending anything it left running there, whether or not the caller still holds the [`Proc`]; the
+    /// `Proc` reports the end only once the box is gone. Until then the box is any box: listed,
+    /// signalled, inspected, deleted. An `oci` spec is refused ([`BoxSpec::check_run`]): its box has an
+    /// init to create and start. A class whose node has nothing that removes a box when its program ends
+    /// refuses the run as [`Refusal::Platform`], naming its platform.
+    fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal>;
+
     /// Sends `signal` to every process in the box.
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal>;
 

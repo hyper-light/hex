@@ -382,9 +382,9 @@ impl Relay {
         }
     }
 
-    /// One request to the node: an exec with its streams' pipes, once they have all come, anything
-    /// else as it came (the node refuses what isn't a request itself). An exec whose streams haven't
-    /// all come is parked, and the host's connection read on.
+    /// One request to the node: an exec or a run (decision 7) with its streams' pipes, once they have all
+    /// come, anything else as it came (the node refuses what isn't a request itself). One whose streams
+    /// haven't all come is parked, and the host's connection read on.
     fn request(
         &self,
         token: u64,
@@ -393,7 +393,9 @@ impl Relay {
         writer: &Arc<Mutex<Box<dyn Duplex>>>,
     ) -> Result<(), Gone> {
         let exec = match wire::read_request_apart(message, wire::MAX_MESSAGE) {
-            Ok((header, Request::Call(Call::Exec { streams, .. }))) => Some((header, streams)),
+            Ok((header, Request::Call(Call::Exec { streams, .. } | Call::Run { streams, .. }))) => {
+                Some((header, streams))
+            }
             _ => None,
         };
         let Some((header, streams)) = exec else {

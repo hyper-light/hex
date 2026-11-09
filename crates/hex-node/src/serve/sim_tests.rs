@@ -56,6 +56,13 @@ struct SimState {
     /// Every pid the core asked to watch as a host process.
     ever_watched: BTreeSet<u32>,
     unwatchable: bool,
+    /// Programs reaped by their runtime before the core watched them (a run's, whose node reaps it to remove its box):
+    /// a watch of one finds it gone.
+    reaped: BTreeSet<u32>,
+    /// Programs ended whose runtime hasn't told their end yet (a run's, its box being removed).
+    untold: BTreeSet<u32>,
+    /// How many times each program's watch was reported ready.
+    reported: BTreeMap<u32, usize>,
 }
 
 #[derive(Default)]
@@ -118,6 +125,12 @@ impl SimOs {
     fn ended(&self, pid: u32) -> bool {
         self.lock().programs.get(&pid).is_none_or(|p| p.1)
     }
+
+    /// The runtime of program `pid` tells its end now.
+    fn tell(&self, pid: u32) {
+        self.lock().untold.remove(&pid);
+        self.poke();
+    }
 }
 
 struct Accept(Arc<Sock>, bool);
@@ -152,15 +165,20 @@ impl Os for SimOs {
                     });
                 }
             }
-            for (token, ended) in s.programs.values() {
-                if *ended {
-                    events.push(Event::Ready {
-                        token: *token,
-                        readable: true,
-                        writable: false,
-                        hung_up: false,
-                    });
-                }
+            let ready: Vec<(u32, u64)> = s
+                .programs
+                .iter()
+                .filter(|(_, (_, ended))| *ended)
+                .map(|(pid, (token, _))| (*pid, *token))
+                .collect();
+            for (pid, token) in ready {
+                *s.reported.entry(pid).or_default() += 1;
+                events.push(Event::Ready {
+                    token,
+                    readable: true,
+                    writable: false,
+                    hung_up: false,
+                });
             }
             if !events.is_empty() {
                 return Ok(());
@@ -278,14 +296,14 @@ impl Os for SimOs {
 
     fn watch_program(&self, pid: u32, token: u64) -> Result<u32, Unwatched> {
         let mut s = self.lock();
+        if s.reaped.contains(&pid) {
+            return Err(Unwatched::Gone);
+        }
         if s.unwatchable {
-            return Err(Unwatched {
-                why: Refusal::Os {
-                    op: "watching a started program",
-                    why: "a simulated failure: the node agent ended it".to_owned(),
-                },
-                killed: true,
-            });
+            return Err(Unwatched::Killed(Refusal::Os {
+                op: "watching a started program",
+                why: "a simulated failure: the node agent ended it".to_owned(),
+            }));
         }
         s.programs.insert(pid, (token, false));
         s.ever_watched.insert(pid);
@@ -338,7 +356,9 @@ impl Proc for SimProc {
     }
     fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
         let s = self.os.lock();
-        Ok(if s.proc_killed.contains(&self.pid) {
+        Ok(if s.untold.contains(&self.pid) {
+            None
+        } else if s.proc_killed.contains(&self.pid) {
             Some(Exit::Signal(9))
         } else if s.killed.contains(&self.pid) {
             Some(Exit::Code(1))
@@ -348,8 +368,20 @@ impl Proc for SimProc {
             None
         })
     }
-    fn wait_for(&mut self, _timeout: Duration) -> Result<Option<Exit>, Refusal> {
-        self.try_wait()
+    /// Waits until its end can be told, at most `timeout`.
+    fn wait_for(&mut self, timeout: Duration) -> Result<Option<Exit>, Refusal> {
+        let deadline = Instant::now().checked_add(timeout);
+        loop {
+            if let Some(exit) = self.try_wait()? {
+                return Ok(Some(exit));
+            }
+            let left = deadline.map_or(timeout, |d| d.saturating_duration_since(Instant::now()));
+            if left.is_zero() {
+                return Ok(None);
+            }
+            let s = self.os.lock();
+            drop(self.os.changed.wait_timeout(s, left).unwrap());
+        }
     }
     fn kill(&mut self) -> Result<(), Refusal> {
         self.os.proc_kill(self.pid);
@@ -493,6 +525,12 @@ impl Runtime for SimHost {
             os: Arc::clone(&self.os),
         }))
     }
+    /// The run's box in the simulator, its program a [`SimProc`] as an exec's is.
+    fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        let id = spec.id.clone();
+        self.sim.create(spec)?;
+        self.exec(&id, program, stdio)
+    }
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
         self.sim.signal(id, signal)
     }
@@ -633,6 +671,24 @@ fn of_wire(mut bytes: Vec<u8>, theirs: u64) -> Vec<u8> {
 
 fn exec(id: u64) -> Vec<u8> {
     exec_in(id, b())
+}
+
+/// A run (decision 7) of a program in a `process` box named `name`.
+fn run(id: u64, name: &str) -> Vec<u8> {
+    request(
+        id,
+        Call::Run {
+            spec: Box::new(BoxSpec {
+                id: BoxId::new(name).unwrap(),
+                bounds: Bounds::default(),
+                class: ClassSpec::Process,
+                owner: None,
+            }),
+            program: Program::of(&["p"]),
+            streams: Streams::default(),
+            ask: Streams::default(),
+        },
+    )
 }
 
 fn exec_in(id: u64, b: BoxId) -> Vec<u8> {
@@ -985,6 +1041,66 @@ fn a_guest_program_whose_client_goes_is_killed_by_its_guest_and_counted() {
         lab.connections() == 0 && lab.watched() == 0
     });
     assert!(lab.os.lock().killed.is_empty());
+}
+
+/// HEX-SOCK-7 (the core), runtime goal 7 (decision 7): a run's program whose watch reports its end before its runtime
+/// can tell it (its node removing its box, which tells the end once the box is gone) has its end waited for on a
+/// worker, off the event set: the I/O thread is woken by that watch once and serves the connection meanwhile, and the
+/// end is sent once told. Do: run a program, end it with its end untold, inspect a box, then tell the end. Expect: the
+/// program's watch let go and reported ready once, the inspect answered while the end is untold, then the run's end,
+/// Code(0), and nothing left watched.
+#[test]
+fn a_runs_end_told_late_is_waited_for_on_a_worker() {
+    let lab = Lab::new();
+    let sock = lab.os.connect(true, 64);
+    lab.os.put(&sock, run(7, "r"));
+    let pid = match answer_of(&sock) {
+        (Header { id: 7, .. }, Answer::Started { pid }) => pid,
+        other => panic!("{other:?}"),
+    };
+    lab.os.lock().untold.insert(pid);
+    lab.os.end(pid);
+    wait_until("the untold end's watch to be let go", || {
+        !lab.os.lock().programs.contains_key(&pid)
+    });
+    lab.os.put(&sock, request(8, Call::Inspect(b())));
+    assert!(matches!(
+        answer_of(&sock),
+        (Header { id: 8, .. }, Answer::Info(_))
+    ));
+    assert_eq!(lab.os.lock().reported.get(&pid), Some(&1));
+    lab.os.tell(pid);
+    let (h, end) = answer_of(&sock);
+    assert_eq!((h.id, end), (7, Answer::Exited(Exit::Code(0))));
+    assert_eq!(lab.watched(), 0);
+}
+
+/// HEX-SOCK-7 (the core), runtime goal 7 (decision 7): a run's program its node reaped before the core could watch it
+/// (to remove its box) is answered as any run is, its start and then its end, which its `Proc` tells, and its place
+/// among the programs is given back. Do: run a program the OS finds reaped when the core watches it, then exec two
+/// programs, the connection's places. Expect: Started with its pid, then Exited(Code(0)); nothing watched; both
+/// execs started.
+#[test]
+fn a_run_reaped_before_its_watch_is_answered_started_then_ended() {
+    let lab = Lab::new();
+    let sock = lab.os.connect(true, 64);
+    let pid = u32::try_from(lab.host.next_pid.load(Ordering::SeqCst)).unwrap();
+    lab.os.lock().reaped.insert(pid);
+    lab.os.put(&sock, run(7, "r"));
+    match answer_of(&sock) {
+        (Header { id: 7, .. }, Answer::Started { pid: started }) => assert_eq!(started, pid),
+        other => panic!("{other:?}"),
+    }
+    let (h, end) = answer_of(&sock);
+    assert_eq!((h.id, end), (7, Answer::Exited(Exit::Code(0))));
+    assert_eq!(lab.watched(), 0);
+    for id in [8, 9] {
+        lab.os.put(&sock, exec(id));
+        assert!(
+            matches!(answer_of(&sock).1, Answer::Started { .. }),
+            "exec {id}"
+        );
+    }
 }
 
 /// HEX-SOCK-7 (the core): an exec whose program the OS can't watch is refused, saying the node ended it.

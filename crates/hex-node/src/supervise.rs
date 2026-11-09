@@ -6,7 +6,9 @@
 //! the box's record. A box's other processes that are orphaned (a daemon a `process` box's program
 //! forks, a container's process without a pid namespace) become the agent's children too; a sweep
 //! each [`SWEEP_PERIOD`] reaps those that have ended, and only those: a zombie in one of the node's
-//! box cgroups that no [`Proc`] handle and no watched init owns.
+//! box cgroups that no [`Proc`] handle and no watched init owns. A box a run made for one program's life
+//! (decision 7) is watched through its program's pidfd in the same set, and removed once the program ends
+//! ([`run`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
@@ -23,6 +25,13 @@ use rustix::io::Errno;
 use rustix::process::{Pid, PidfdFlags, WaitId, WaitIdOptions, WaitIdStatus};
 
 use crate::store::Store;
+
+mod run;
+pub use run::{Run, RunProc};
+
+/// What [`Refusal::Exhausted`] names the supervisor's budget: its pidfds, one for each live `oci` box's init and
+/// one for each run's program (decision 7), each box holding one at most.
+pub const PIDFDS: &str = "pidfds of containers' inits and runs' programs";
 
 /// Most exec'd programs the agent watches for one box at once (to reap on its delete), past which exec
 /// is refused ([`Refusal::Exhausted`]), so the per-box tracking is bounded (CLAUDE.md §2). A program
@@ -102,10 +111,25 @@ struct Inits {
     by_box: BTreeMap<BoxId, Init>,
     /// The epoll token each watched init's pidfd carries, back to its box.
     by_token: BTreeMap<u64, BoxId>,
+    /// The next epoll token, an init's or a run's.
     next_token: u64,
-    /// Creates under way that hold a place in the budget.
+    /// Creates and runs under way that hold a place in the budget.
     reserved: usize,
+    /// The most pidfds held at once, the inits' and the runs' together.
     budget: usize,
+    /// The boxes runs made, each watched through its program's pidfd ([`run`]).
+    runs: run::Runs,
+}
+
+impl Inits {
+    /// The next epoll token, refused once they have run out.
+    fn token(&mut self) -> Result<u64, Refusal> {
+        let token = self.next_token;
+        self.next_token = token
+            .checked_add(1)
+            .ok_or_else(|| Refusal::Broken("the supervisor's tokens ran out".to_owned()))?;
+        Ok(token)
+    }
 }
 
 /// The node's supervision of its boxes' processes.
@@ -141,10 +165,10 @@ fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
 impl Supervisor {
     /// Makes this process a child subreaper and starts the supervising thread. `box_root` is the
     /// node's box root under the cgroup root; records of reaped inits go to `store`. `budget` is the most
-    /// inits whose pidfds it holds, one fd per live `oci` box, past which `create` refuses with
-    /// [`Refusal::Exhausted`] before making anything ([`crate::sizes::Sizes::inits`]: at most the node's boxes, within
-    /// its hard `RLIMIT_NOFILE` read at run time, getrlimit(2)). It was 65,536, systemd's figure copied (Ada's
-    /// 2026-11-06 constants rule).
+    /// pidfds it holds, one per live `oci` box's init or run's program, past which `create` and `run` refuse with
+    /// [`Refusal::Exhausted`] before making anything ([`crate::sizes::Sizes::inits`]: at most the node's boxes, each
+    /// holding one at most, within its hard `RLIMIT_NOFILE` read at run time, getrlimit(2)). It was 65,536, systemd's
+    /// figure copied (Ada's 2026-11-06 constants rule).
     pub fn start(box_root: &Path, store: Store, budget: usize) -> Result<Arc<Self>, Refusal> {
         rustix::process::set_child_subreaper(Some(rustix::process::getpid()))
             .map_err(|e| Refusal::os("making the node agent a child subreaper", e))?;
@@ -181,24 +205,28 @@ impl Supervisor {
         self.inits.lock().map_err(poisoned)
     }
 
-    /// Sets the init budget.
+    /// Sets the budget, the inits' and the runs' pidfds together.
     pub fn set_budget(&self, budget: usize) -> Result<(), Refusal> {
         self.inits()?.budget = budget;
         Ok(())
     }
 
-    /// Takes a place in the init budget for a create, or refuses with [`Refusal::Exhausted`] naming
+    /// Takes a place in the budget for a create or a run, or refuses with [`Refusal::Exhausted`] naming
     /// the budget when none is left. The place is given back when the [`Slot`] is dropped, or turned
-    /// into the init's by [`Supervisor::watch`].
+    /// into the init's by [`Supervisor::watch`], or the run's by [`Supervisor::watch_run`].
     pub fn reserve(self: &Arc<Self>) -> Result<Slot, Refusal> {
         let mut inits = self.inits()?;
         if let Some(fault) = self.fault.lock().map_err(poisoned)?.as_ref() {
             return Err(Refusal::Broken(format!("the node's supervisor: {fault}")));
         }
-        let held = inits.by_box.len().checked_add(inits.reserved);
+        let held = inits
+            .by_box
+            .len()
+            .checked_add(inits.reserved)
+            .and_then(|h| h.checked_add(inits.runs.len()));
         if held.is_none_or(|h| h >= inits.budget) {
             return Err(Refusal::Exhausted {
-                what: "container init pidfds",
+                what: PIDFDS,
                 bound: inits.budget,
             });
         }
@@ -248,10 +276,7 @@ impl Supervisor {
             )));
         }
         let mut inits = self.inits()?;
-        let token = inits.next_token;
-        inits.next_token = token
-            .checked_add(1)
-            .ok_or_else(|| Refusal::Broken("the supervisor's tokens ran out".to_owned()))?;
+        let token = inits.token()?;
         epoll::add(
             self.epoll.as_fd(),
             pidfd.as_fd(),
@@ -496,16 +521,22 @@ impl Supervisor {
         Ok(exit)
     }
 
-    /// The supervising thread's pass over the inits whose pidfds turned readable.
+    /// The supervising thread's pass over the inits and runs whose pidfds turned readable.
     fn ready(&self, tokens: &[u64]) -> Result<(), Refusal> {
-        let ids: Vec<BoxId> = {
+        let (ids, runs): (Vec<BoxId>, Vec<Arc<Run>>) = {
             let inits = self.inits()?;
-            tokens
-                .iter()
-                .filter_map(|token| inits.by_token.get(token).cloned())
-                .collect()
+            (
+                tokens
+                    .iter()
+                    .filter_map(|token| inits.by_token.get(token).cloned())
+                    .collect(),
+                tokens
+                    .iter()
+                    .filter_map(|token| inits.runs.by_token(*token))
+                    .collect(),
+            )
         };
-        let mut first_error = None;
+        let mut first_error = self.runs_ready(&runs).err();
         for id in &ids {
             if let Err(e) = self.collect(id) {
                 first_error.get_or_insert(e);
@@ -635,7 +666,7 @@ fn supervise(epoll: &OwnedFd, supervisor: &Weak<Supervisor>) {
     }
 }
 
-/// A place in the init budget, given back on drop unless [`Supervisor::watch`] took it.
+/// A place in the budget, given back on drop unless [`Supervisor::watch`] or [`Supervisor::watch_run`] took it.
 pub struct Slot {
     supervisor: Arc<Supervisor>,
     held: bool,
