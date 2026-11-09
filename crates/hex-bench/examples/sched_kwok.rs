@@ -24,8 +24,8 @@
 //! `hex` places the same 50,000 on the same 10,000 with hex-sim's own fast path, as
 //! `benches/sched_million.rs` does: every pod submitted to the store before the clock starts, the
 //! nodes split into `shards` disjoint partitions (node `n` to shard `n % shards`, pod `id % shards`),
-//! one thread per shard running the sampled choice by Hex's packing score (`FitIndex::sampled_fit`
-//! with `Scorer::HEX`, H11; kube-scheduler's floors
+//! one thread per shard running the pick by Hex's packing score (`FitIndex::fit`
+//! with `Scorer::HEX`, H11; the kernel's walk, no sample floors
 //! of 100 nodes or 5%), the compare-and-set commit (`Store::apply`) and the index update, in submit
 //! order. The time runs from the first shard starting to the last one ending. After each run
 //! (untimed) every record must be placed, and no node above its capacity or its pod limit.
@@ -49,7 +49,7 @@ use std::sync::Barrier;
 use std::time::{Duration, Instant};
 
 use hex_sim::generate::{self, NodeModel};
-use hex_sim::index::{FitIndex, Sample, Scorer, Shapes};
+use hex_sim::index::{FitIndex, Pick, Scorer, Shapes};
 use hex_sim::model::{
     Class, Cluster, Kind, NodeId, NodeSpec, Resources, Tenancy, WorkloadId, WorkloadSpec,
 };
@@ -272,13 +272,13 @@ struct Placed {
     ended: Instant,
 }
 
-fn place(mut shard: Shard, sample: &Sample, start: &Barrier) -> Placed {
+fn place(mut shard: Shard, pick: &Pick, start: &Barrier) -> Placed {
     start.wait();
     let began = Instant::now();
     let mut placed = 0;
     for (spec, version) in &shard.pending {
         let demand = spec.demand();
-        let Some(best) = shard.index.sampled_fit(&demand, sample).best else {
+        let Some(best) = shard.index.fit(&demand, pick).best else {
             continue;
         };
         let write = Write::Place {
@@ -329,7 +329,7 @@ fn check(p: &Placed) -> Result<(), String> {
 
 fn hex(runs: u32, shard_counts: &[usize], model: NodeModel) {
     // Hex's packing score (H11, `Scorer::HEX`), against each class's one need.
-    let sample = Sample {
+    let pick = Pick {
         scorer: Scorer::HEX,
         shapes: Shapes::of(
             pods()
@@ -340,7 +340,6 @@ fn hex(runs: u32, shard_counts: &[usize], model: NodeModel) {
                 .collect(),
         )
         .unwrap(),
-        ..Sample::default()
     };
     let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     println!(
@@ -356,8 +355,8 @@ fn hex(runs: u32, shard_counts: &[usize], model: NodeModel) {
                 let handles: Vec<_> = parts
                     .into_iter()
                     .map(|part| {
-                        let (start, sample) = (&start, &sample);
-                        s.spawn(move || place(part, sample, start))
+                        let (start, pick) = (&start, &pick);
+                        s.spawn(move || place(part, pick, start))
                     })
                     .collect();
                 handles.into_iter().map(|h| h.join().unwrap()).collect()

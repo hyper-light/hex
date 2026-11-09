@@ -21,7 +21,7 @@
 use hex_sim::fair::Policy;
 use hex_sim::federation::{self, CellRun, FedConfig, FedRun, Loss, Moved, Topology};
 use hex_sim::generate::{self, NodeModel, Shape};
-use hex_sim::index::{FitIndex, Sample};
+use hex_sim::index::{FitIndex, Pick};
 use hex_sim::model::{Class, Cluster, Kind, WorkloadId};
 use hex_sim::rng::Rng;
 use hex_sim::sim::{self, Config, Nemesis};
@@ -409,7 +409,7 @@ fn check_moved(cluster: &Cluster, out: &FedRun, lost_region: u32) -> ([u64; 3], 
                             index.take(node, &w.demand()).unwrap();
                         }
                     }
-                    let room = index.sampled_fit(&spec.demand(), &Sample::whole()).best;
+                    let room = index.fit(&spec.demand(), &Pick::default()).best;
                     assert!(
                         room.is_none(),
                         "{id:?} refused while region {} cell {} had room on {:?}",

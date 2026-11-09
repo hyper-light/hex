@@ -1,4 +1,4 @@
-//! What each node can take, and the fast path's sampled best fit over it.
+//! What each node can take, and the fast path's pick over it: the kernel's walk, ported from kiln.
 //!
 //! A node admits a workload when its hard filters pass (`scheduler-architecture.md` S3) and it has
 //! the room: GPU work only on a node with GPUs, a benchmark never beside a build nor a build beside a
@@ -9,8 +9,8 @@
 
 use crate::census;
 use crate::error::SimError;
+use crate::lb::{self, BUCKETS, Index};
 use crate::model::{Class, Classes, Demand, Kind, NodeId, NodeSpec, Resources};
-use crate::trace::TraceHash;
 
 /// A session is refused a node whose CPU in use, background and placed, is above this share of
 /// its CPU, per mille: `AC-T7.6.3`'s 90%.
@@ -36,25 +36,19 @@ impl Key {
     }
 }
 
-/// How the fast path samples (`scheduler-architecture.md` S2): a class scans the nodes in id order
-/// from a start its demand and `seed` fix, and stops at the `want`-th node that admits it, choosing
-/// the best fit among those. `want` is at least `min_feasible` and at least `per_mille` of the nodes,
-/// never more than all of them: kube-scheduler's floors, `minFeasibleNodesToFind = 100` and
-/// `minFeasibleNodesPercentageToFind = 5` (pkg/scheduler/schedule_one.go:57,62 at v1.37.1), and Borg's
-/// relaxed randomization (EuroSys 2015 §3.4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Sample {
-    pub seed: u64,
-    pub min_feasible: u32,
-    pub per_mille: u32,
-    /// How the sampled nodes are ranked.
+/// How a pick ranks the nodes that admit a demand: its scorer, and the workload shapes
+/// [`Scorer::Fragment`] keeps usable. A pick reads every node with the room, from the least room that
+/// could hold the need up (the kernel's walk, [`crate::lb::Index`]): no sample, so no sample size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Pick {
+    /// How the nodes that admit the demand are ranked.
     pub scorer: Scorer,
     /// The workload shapes [`Scorer::Fragment`] keeps usable.
     pub shapes: Shapes,
 }
 
 /// At most [`Shapes::MAX`] workload shapes, each with the class that asks it, kept in a fixed array
-/// so a [`Sample`] stays a plain value. More is refused, typed: the shapes a sample keeps are
+/// so a [`Pick`] stays a plain value. More is refused, typed: the shapes a pick keeps are
 /// Pareto-minimal, none fitting wherever another does, so dropping one could leave a leftover only it
 /// fits read as stranded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -98,7 +92,7 @@ impl Shapes {
     }
 }
 
-/// How a decision ranks the nodes its sample admits.
+/// How a pick ranks the nodes that admit a demand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Scorer {
     /// The least free capacity first ([`Key`]'s order): best fit, the baseline (Borg's, S1).
@@ -114,7 +108,7 @@ pub enum Scorer {
     /// [`Key`]'s order.
     Align,
     /// Least stranded: the node whose leftover after placing the need is either nothing or still
-    /// fits one of the sample's [`Shapes`], so no CPU or memory is left that no workload can use;
+    /// fits one of the pick's [`Shapes`], so no CPU or memory is left that no workload can use;
     /// then the [`Tie`]; then [`Key`]'s order. [`Scorer::HEX`] is Hex's packing score.
     Fragment(Tie),
 }
@@ -142,78 +136,6 @@ pub enum Tie {
     Narrowest,
 }
 
-impl Default for Sample {
-    fn default() -> Self {
-        Self {
-            seed: 0,
-            min_feasible: 100,
-            per_mille: 50,
-            scorer: Scorer::BestFit,
-            shapes: Shapes::default(),
-        }
-    }
-}
-
-impl Sample {
-    /// A sample that scans every node: whole-cluster best fit.
-    pub fn whole() -> Self {
-        Self {
-            seed: 0,
-            min_feasible: u32::MAX,
-            per_mille: 0,
-            scorer: Scorer::BestFit,
-            shapes: Shapes::default(),
-        }
-    }
-
-    /// How many admitting nodes a scan over `nodes` stops at.
-    pub fn want(&self, nodes: usize) -> usize {
-        let share = nodes
-            .checked_mul(usize::try_from(self.per_mille).unwrap_or(usize::MAX))
-            .map_or(nodes, |x| x.div_ceil(1000));
-        let floor = usize::try_from(self.min_feasible).unwrap_or(usize::MAX);
-        share.max(floor).max(1).min(nodes)
-    }
-
-    /// Where `demand`'s class starts its scan over `nodes` (0 for none).
-    pub fn start(&self, demand: &Demand, nodes: usize) -> usize {
-        let mut h = TraceHash::default();
-        let need = &demand.need;
-        for word in [
-            self.seed,
-            need.cpu_milli,
-            need.mem_bytes,
-            u64::from(need.gpus),
-            kind_word(demand.kind),
-            class_word(demand.class),
-        ] {
-            h.word(word);
-        }
-        u64::try_from(nodes)
-            .ok()
-            .and_then(|n| h.finish().checked_rem(n))
-            .and_then(|at| usize::try_from(at).ok())
-            .unwrap_or(0)
-    }
-}
-
-fn class_word(class: Class) -> u64 {
-    match class {
-        Class::Oci => 0,
-        Class::Firecracker => 1,
-        Class::Shards => 2,
-    }
-}
-
-fn kind_word(kind: Kind) -> u64 {
-    match kind {
-        Kind::Plain => 0,
-        Kind::Build => 1,
-        Kind::Benchmark => 2,
-        Kind::Session => 3,
-    }
-}
-
 /// `part` as a share of `whole` in millionths; 0 of a whole of 0, and past u64 saturates.
 fn millionths(part: u64, whole: u64) -> u64 {
     u128::from(part)
@@ -235,26 +157,14 @@ pub struct Refusals {
     pub class: u64,
 }
 
-/// A sampled decision: the best fit among the scanned nodes that admit the demand, the window
-/// scanned (`span` nodes from `start` in id order, wrapping), and what the filters refused in it.
+/// A pick: the best node that admits the demand, the nodes its walk read, and what the filters
+/// refused among them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Sampled {
+pub struct Fit {
     pub best: Option<Key>,
-    pub start: usize,
-    pub span: usize,
+    /// Nodes the walk read: every one with the CPU for the need.
+    pub walked: u64,
     pub refused: Refusals,
-}
-
-impl Sampled {
-    /// Whether `node` lies in the scanned window, of a cluster of `nodes`.
-    pub fn covers(&self, node: NodeId, nodes: usize) -> bool {
-        usize::try_from(node.0)
-            .ok()
-            .and_then(|at| at.checked_add(nodes))
-            .and_then(|x| x.checked_sub(self.start))
-            .and_then(|x| x.checked_rem(nodes))
-            .is_none_or(|offset| offset < self.span)
-    }
 }
 
 /// Why a node doesn't admit a demand, or that it does.
@@ -341,6 +251,36 @@ impl Slot {
         )
     }
 
+    /// What `pick`'s scorer gives placing `need` here: higher is better.
+    fn score(&self, need: &Resources, pick: &Pick) -> u128 {
+        match pick.scorer {
+            Scorer::BestFit => 0,
+            Scorer::MostAllocated => u128::from(self.allocated_after(need)),
+            Scorer::Align => u128::from(self.alignment(need)),
+            Scorer::Fragment(tie) => {
+                // Lexicographic in one number: least stranded capacity in the high word, then the tie
+                // in the low word.
+                let stranded = self.stranded_after(need, &pick.shapes);
+                let then = match tie {
+                    Tie::Align => self.alignment(need),
+                    Tie::LeastAllocated => u64::MAX.saturating_sub(self.allocated_after(need)),
+                    Tie::MostAllocated => self.allocated_after(need),
+                    // Fewer classes in the high bits; the allocation (at most 2,000,000) below.
+                    Tie::Narrowest => {
+                        u64::from(Classes::ALL.count().saturating_sub(self.classes.count()))
+                            .checked_shl(32)
+                            .unwrap_or(0)
+                            | self.allocated_after(need)
+                    }
+                };
+                u128::from(u64::MAX.saturating_sub(stranded))
+                    .checked_mul(1 << 64)
+                    .unwrap_or(0)
+                    | u128::from(then)
+            }
+        }
+    }
+
     /// CPU in use, background and placed, above 90% of the node's CPU. Compared as
     /// busy * 1000 > capacity * 900 in u128, where neither side can overflow; a busy count past u64
     /// is hot.
@@ -359,10 +299,27 @@ impl Slot {
     }
 }
 
+/// The nodes' room and filter state, and the kernel's index of them by free whole CPUs
+/// ([`crate::lb::Index`], kiln's `lb/index.rs`): a pick walks it from the need's bucket up, so it
+/// reads only nodes with the CPU for the need, every one of them.
 #[derive(Debug, Clone)]
 pub struct FitIndex {
     /// By node id; ids are dense from 0.
     slots: Vec<Slot>,
+    ix: Index,
+    /// The highest bucket: the most whole CPUs any node has.
+    last: u32,
+}
+
+/// A node's bucket in the kernel's index: its free whole CPUs, at most `last`.
+fn bucket(free: &Resources, last: u32) -> u32 {
+    let whole = free.cpu_milli.checked_div(lb::CPU).unwrap_or(0);
+    u32::try_from(whole).unwrap_or(u32::MAX).min(last)
+}
+
+/// A node's capacity as the kernel's amounts: CPU, memory, disk (none here), GPUs.
+fn amounts(r: &Resources) -> lb::Amounts {
+    [r.cpu_milli, r.mem_bytes, 0, u64::from(r.gpus)]
 }
 
 impl FitIndex {
@@ -382,7 +339,29 @@ impl FitIndex {
                 benchmarks: 0,
             });
         }
-        Ok(Self { slots })
+        let whole = nodes
+            .iter()
+            .map(|n| n.capacity.cpu_milli.checked_div(lb::CPU).unwrap_or(0))
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let buckets = u32::try_from(whole).unwrap_or(BUCKETS).min(BUCKETS);
+        let last = buckets.saturating_sub(1);
+        let count = u32::try_from(nodes.len()).map_err(|_| SimError::Full {
+            what: "the index's nodes",
+            bound: usize::try_from(u32::MAX).unwrap_or(usize::MAX),
+        })?;
+        let mut ix = Index::new(0);
+        if !ix.grow(buckets, count) {
+            return Err(SimError::Config("the index can't grow to the cluster"));
+        }
+        for (slot, id) in slots.iter().zip(0u32..) {
+            if !ix.join(id, &amounts(&slot.capacity)) {
+                return Err(SimError::Config("the index can't hold the cluster"));
+            }
+            ix.push(id, bucket(&slot.free, last));
+        }
+        Ok(Self { slots, ix, last })
     }
 
     pub fn len(&self) -> usize {
@@ -413,6 +392,11 @@ impl FitIndex {
         Ok(self.slot(node)?.hot())
     }
 
+    /// Whether `node` runs `class`: a change to it can change a pick for that class.
+    pub fn runs(&self, node: NodeId, class: Class) -> bool {
+        self.slot(node).is_ok_and(|s| s.classes.has(class))
+    }
+
     /// Whether any node admits `demand` now.
     pub fn admitted_anywhere(&self, demand: &Demand) -> bool {
         self.slots
@@ -420,91 +404,59 @@ impl FitIndex {
             .any(|slot| slot.verdict(demand) == Verdict::Admits)
     }
 
-    /// The sampled best fit for `demand` ([`Sample`]). It visits each node at most once, so the node
-    /// count bounds it; a demand no node admits scans them all and finds none.
-    pub fn sampled_fit(&self, demand: &Demand, sample: &Sample) -> Sampled {
-        let n = self.slots.len();
-        let start = sample.start(demand, n);
-        let want = sample.want(n);
-        let (mut best, mut best_score, mut found) = (None::<Key>, 0u128, 0usize);
+    /// The best node for `demand` by `pick`'s scorer, ties broken by [`Key`]'s order: the kernel's
+    /// walk ([`crate::lb::Index`], kiln's `owner.rs` walk) from the bucket of the need's whole CPUs up,
+    /// every node in it read and checked exactly. Kiln's walk stops at the first runner that fits,
+    /// the least loaded; Hex's reads them all, since the packing score (H11) ranks by what each node
+    /// would have left. Each node is read once, so the node count bounds it.
+    pub fn fit(&self, demand: &Demand, pick: &Pick) -> Fit {
+        let floor = u32::try_from(demand.need.cpu_milli.checked_div(lb::CPU).unwrap_or(0))
+            .unwrap_or(u32::MAX);
+        let (mut best, mut best_score) = (None::<Key>, 0u128);
         let mut refused = Refusals::default();
-        // found, offset and the refusals count nodes, so they stay below the node count.
-        for offset in 0..n {
-            let Some(at) = start.checked_add(offset).and_then(|x| x.checked_rem(n)) else {
-                break;
-            };
-            let (Some(slot), Ok(id)) = (self.slots.get(at), u32::try_from(at)) else {
-                break;
-            };
-            match slot.verdict(demand) {
-                Verdict::Admits => {}
-                Verdict::NoRoom => continue,
-                Verdict::NoClass => {
-                    refused.class = refused.class.saturating_add(1);
+        let mut walked = 0u64;
+        let mut b = self.ix.at_or_above(floor.min(self.last));
+        while let Some(bb) = b {
+            for r in self.ix.bucket(bb) {
+                walked = walked.saturating_add(1);
+                let Some(slot) = self.slots.get(lb::ix(r)) else {
                     continue;
-                }
-                Verdict::NoGpu => {
-                    refused.gpu = refused.gpu.saturating_add(1);
-                    continue;
-                }
-                Verdict::Shares => {
-                    refused.shares = refused.shares.saturating_add(1);
-                    continue;
-                }
-                Verdict::Hot => {
-                    refused.hot = refused.hot.saturating_add(1);
-                    continue;
-                }
-            }
-            let key = Key::of(NodeId(id), &slot.free);
-            let score = match sample.scorer {
-                Scorer::BestFit => 0,
-                Scorer::MostAllocated => u128::from(slot.allocated_after(&demand.need)),
-                Scorer::Align => u128::from(slot.alignment(&demand.need)),
-                Scorer::Fragment(tie) => {
-                    // Lexicographic in one number: least stranded capacity in the high word, then
-                    // the tie in the low word.
-                    let stranded = slot.stranded_after(&demand.need, &sample.shapes);
-                    let then = match tie {
-                        Tie::Align => slot.alignment(&demand.need),
-                        Tie::LeastAllocated => {
-                            u64::MAX.saturating_sub(slot.allocated_after(&demand.need))
-                        }
-                        Tie::MostAllocated => slot.allocated_after(&demand.need),
-                        // Fewer classes in the high bits; the allocation (at most 2,000,000) below.
-                        Tie::Narrowest => {
-                            u64::from(Classes::ALL.count().saturating_sub(slot.classes.count()))
-                                .checked_shl(32)
-                                .unwrap_or(0)
-                                | slot.allocated_after(&demand.need)
-                        }
-                    };
-                    u128::from(u64::MAX.saturating_sub(stranded))
-                        .checked_mul(1 << 64)
-                        .unwrap_or(0)
-                        | u128::from(then)
-                }
-            };
-            // A higher score wins; between equal scores, the least key.
-            let wins = best.is_none_or(|b| score > best_score || (score == best_score && key < b));
-            if wins {
-                best = Some(key);
-                best_score = score;
-            }
-            found = found.saturating_add(1);
-            if found >= want {
-                return Sampled {
-                    best,
-                    start,
-                    span: offset.saturating_add(1),
-                    refused,
                 };
+                match slot.verdict(demand) {
+                    Verdict::Admits => {}
+                    Verdict::NoRoom => continue,
+                    Verdict::NoClass => {
+                        refused.class = refused.class.saturating_add(1);
+                        continue;
+                    }
+                    Verdict::NoGpu => {
+                        refused.gpu = refused.gpu.saturating_add(1);
+                        continue;
+                    }
+                    Verdict::Shares => {
+                        refused.shares = refused.shares.saturating_add(1);
+                        continue;
+                    }
+                    Verdict::Hot => {
+                        refused.hot = refused.hot.saturating_add(1);
+                        continue;
+                    }
+                }
+                let key = Key::of(NodeId(r), &slot.free);
+                let score = slot.score(&demand.need, pick);
+                // A higher score wins; between equal scores, the least key.
+                let wins =
+                    best.is_none_or(|k| score > best_score || (score == best_score && key < k));
+                if wins {
+                    best = Some(key);
+                    best_score = score;
+                }
             }
+            b = self.ix.above(bb);
         }
-        Sampled {
+        Fit {
             best,
-            start,
-            span: n,
+            walked,
             refused,
         }
     }
@@ -548,7 +500,9 @@ impl FitIndex {
             }
             Kind::Plain | Kind::Session => {}
         }
+        let (from, to) = (bucket(&slot.free, self.last), bucket(&next.free, self.last));
         *slot = next;
+        self.ix.relink(node.0, from, to);
         Ok(Key::of(node, &next.free))
     }
 }
@@ -606,7 +560,7 @@ mod tests {
         .unwrap();
         let fit = |need| {
             index
-                .sampled_fit(&plain(need), &Sample::whole())
+                .fit(&plain(need), &Pick::default())
                 .best
                 .map(|k| k.node)
         };
@@ -634,7 +588,7 @@ mod tests {
             Verdict::NoClass
         );
         assert_eq!(index.verdict(NodeId(1), &microvm).unwrap(), Verdict::Admits);
-        let s = index.sampled_fit(&microvm, &Sample::whole());
+        let s = index.fit(&microvm, &Pick::default());
         assert_eq!(
             (s.best.map(|k| k.node), s.refused.class),
             (Some(NodeId(1)), 1)
@@ -703,7 +657,7 @@ mod tests {
         index.give(NodeId(1), &build).unwrap();
         index.take(NodeId(1), &bench).unwrap();
         assert_eq!(index.verdict(NodeId(1), &build).unwrap(), Verdict::Shares);
-        let s = index.sampled_fit(&build, &Sample::whole());
+        let s = index.fit(&build, &Pick::default());
         assert_eq!(
             (s.best.map(|k| k.node), s.refused.shares),
             (Some(NodeId(0)), 1)
@@ -731,35 +685,6 @@ mod tests {
         );
     }
 
-    /// T-T7.4.1: a sample that wants one node takes the first from its class's start that admits it.
-    #[test]
-    fn the_sample_stops_at_its_wanted_admitting_node() {
-        let index = FitIndex::new(&nodes(&[
-            res(8000, 16, 0),
-            res(2000, 16, 0),
-            res(4000, 4, 1),
-            res(3000, 16, 0),
-        ]))
-        .unwrap();
-        let demand = plain(res(1000, 8, 0));
-        let one = Sample {
-            seed: 3,
-            min_feasible: 1,
-            per_mille: 0,
-            ..Sample::default()
-        };
-        let s = index.sampled_fit(&demand, &one);
-        let first = (0..4)
-            .map(|o| (s.start + o) % 4)
-            .map(|at| NodeId(u32::try_from(at).unwrap()))
-            .find(|&n| index.verdict(n, &demand).unwrap() == Verdict::Admits)
-            .unwrap();
-        assert_eq!(s.best.map(|k| k.node), Some(first));
-        assert!(s.covers(first, 4));
-        let none = index.sampled_fit(&plain(res(1, 100, 0)), &one);
-        assert_eq!((none.best, none.span), (None, 4));
-    }
-
     /// CLAUDE.md §3: do give `Shapes::of` as many incomparable shapes as its bound, then one more;
     /// expect the first taken whole and the second refused, typed, never cut to its smallest: none of
     /// them fits wherever another does, so a dropped one could leave a usable leftover read as
@@ -785,15 +710,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn want_follows_kube_schedulers_floors() {
-        let s = Sample::default();
-        assert_eq!(
-            (s.want(10), s.want(1_000), s.want(10_000), s.want(0)),
-            (10, 100, 500, 0)
-        );
-    }
-
     proptest::proptest! {
         /// T-T7.4.1 (oracle test): after any sequence of takes and gives of any kinds, the whole-cluster
         /// sampled fit equals the brute-force least admitting key.
@@ -815,7 +731,7 @@ mod tests {
             }
             for (c, m, g, k) in needs {
                 let demand = Demand { need: res(c, m, g), kind: kind(k), class: Class::Oci };
-                proptest::prop_assert_eq!(index.sampled_fit(&demand, &Sample::whole()).best, oracle(&index, &demand));
+                proptest::prop_assert_eq!(index.fit(&demand, &Pick::default()).best, oracle(&index, &demand));
             }
         }
     }

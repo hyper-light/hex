@@ -4,7 +4,7 @@
 //! cell runs as [`sim::run`] runs it alone.
 
 use crate::error::SimError;
-use crate::index::{FitIndex, Sample};
+use crate::index::{FitIndex, Pick};
 use crate::model::{Classes, Cluster, Demand, NodeId, NodeSpec, Time, WorkloadId, WorkloadSpec};
 use crate::sim::{self, Config, Layout, Nemesis, Run};
 use crate::store::Op;
@@ -278,7 +278,7 @@ pub fn run(cluster: &Cluster, config: &FedConfig) -> Result<FedRun, SimError> {
     let mut capacity = Capacity {
         topo: topo.clone(),
         free,
-        sample: config.cell.sample,
+        pick: config.cell.pick,
     };
     let mut moved = Vec::with_capacity(moving.len());
     for w in &moving {
@@ -393,7 +393,7 @@ fn snapshot(c: &CellRun, when: Time, config: &FedConfig) -> Result<FitIndex, Sim
             continue;
         }
         let d = demand(c, workload)?;
-        if let Some(k) = index.sampled_fit(&d, &config.cell.sample).best {
+        if let Some(k) = index.fit(&d, &config.cell.pick).best {
             index.take(k.node, &d)?;
         }
     }
@@ -436,19 +436,19 @@ pub struct Admitted {
 pub struct Capacity {
     topo: Topo,
     free: Vec<Option<FitIndex>>,
-    sample: Sample,
+    pick: Pick,
 }
 
 impl Capacity {
     /// Every cell of the topology over `nodes`, empty.
-    pub fn empty(nodes: &[NodeSpec], topology: Topology, sample: Sample) -> Result<Self, SimError> {
+    pub fn empty(nodes: &[NodeSpec], topology: Topology, pick: Pick) -> Result<Self, SimError> {
         let topo = Topo::new(nodes, topology)?;
         let n = topo.len()?;
         let mut free = Vec::with_capacity(n);
         for i in 0..n {
             free.push(Some(FitIndex::new(topo.nodes(i)?)?));
         }
-        Ok(Self { topo, free, sample })
+        Ok(Self { topo, free, pick })
     }
 
     /// The first region from the workload's home (`id mod regions`) on, and in it the first cell
@@ -470,7 +470,7 @@ impl Capacity {
                 let Some(Some(index)) = self.free.get_mut(i) else {
                     continue;
                 };
-                if let Some(key) = index.sampled_fit(&d, &self.sample).best {
+                if let Some(key) = index.fit(&d, &self.pick).best {
                     index.take(key.node, &d)?;
                     return Ok(Some(Admitted {
                         region: u32::try_from(r).map_err(|_| SimError::Config("region index"))?,

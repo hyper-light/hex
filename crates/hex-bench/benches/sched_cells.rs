@@ -34,7 +34,7 @@ use hex_sim::federation::{Capacity, Topology};
 use hex_sim::generate::{self, NodeModel};
 use std::collections::BTreeSet;
 
-use hex_sim::index::{Sample, Scorer, Shapes};
+use hex_sim::index::{Pick, Scorer, Shapes};
 use hex_sim::model::{
     Class, Cluster, Kind, NodeSpec, Resources, Tenancy, WorkloadId, WorkloadSpec,
 };
@@ -122,7 +122,7 @@ fn main() {
     let mut best: Option<Duration> = None;
     for run in 0..runs {
         // Hex's packing score (H11), against each class's one need.
-        let sample = Sample {
+        let pick = Pick {
             scorer: Scorer::HEX,
             shapes: Shapes::of(
                 work.iter()
@@ -132,9 +132,8 @@ fn main() {
                     .collect(),
             )
             .unwrap(),
-            ..Sample::default()
         };
-        let mut capacity = Capacity::empty(&nodes, TOPOLOGY, sample).unwrap();
+        let mut capacity = Capacity::empty(&nodes, TOPOLOGY, pick).unwrap();
         let mut took = Vec::with_capacity(WORKLOADS as usize);
         let mut by_class: [Vec<Duration>; 3] = Default::default();
         let mut per_cell = vec![0u64; cells as usize];

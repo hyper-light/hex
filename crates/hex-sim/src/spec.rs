@@ -1,8 +1,8 @@
 //! The scheduler's serial specification (`scheduler-architecture.md` S6): one scheduler, one cycle.
 //! Workloads queue in the order the store accepted them, one queue per band and owner; whenever state
 //! changes, the scheduler takes the first queue in policy order ([`crate::fair`]: band, then weighted
-//! dominant share, then owner) in order, and puts each workload on the best fit its class's sample finds
-//! ([`FitIndex::sampled_fit`], the fast path's own choice), passing over one no node holds now and placing nothing past that queue when none of its work holds. A placement is correct when this specification could have made it.
+//! dominant share, then owner) in order, and puts each workload on the best fit its class's pick finds
+//! ([`FitIndex::fit`], the fast path's own choice), passing over one no node holds now and placing nothing past that queue when none of its work holds. A placement is correct when this specification could have made it.
 //!
 //! [`serial_place`] runs the specification directly on a cluster whose capacity only shrinks.
 //! [`check_log`] replays a run's store log and refuses the first write the specification couldn't
@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 
 use crate::error::SimError;
 use crate::fair::{self, Passed, Placed, Preemption, Queue, Shares};
-use crate::index::{FitIndex, Sample};
+use crate::index::{FitIndex, Pick};
 use crate::model::{
     Cluster, Demand, GroupId, Kind, NodeId, NodeSpec, Resources, WorkloadId, WorkloadSpec,
 };
@@ -76,16 +76,16 @@ impl From<SimError> for Violation {
     }
 }
 
-/// The specification run directly: each workload, in order, on its sampled best fit or none.
+/// The specification run directly: each workload, in order, on its pick's best or none.
 pub fn serial_place(
     nodes: &[NodeSpec],
     workloads: &[WorkloadSpec],
-    sample: &Sample,
+    pick: &Pick,
 ) -> Result<Vec<Option<NodeId>>, SimError> {
     let mut index = FitIndex::new(nodes)?;
     let mut out = Vec::with_capacity(workloads.len());
     for w in workloads {
-        let choice = index.sampled_fit(&w.demand(), sample).best.map(|k| k.node);
+        let choice = index.fit(&w.demand(), pick).best.map(|k| k.node);
         if let Some(node) = choice {
             index.take(node, &w.demand())?;
         }
@@ -262,7 +262,7 @@ fn check_entries(nodes: &[NodeSpec], run: &Run, log: &[Entry]) -> Result<LogRepo
                 for (w, _) in &write {
                     demands.push(spec_of(run, *w)?.demand());
                 }
-                let chosen = crate::sim::fit_whole(&mut index, &demands, &run.sample)?;
+                let chosen = crate::sim::fit_whole(&mut index, &demands, &run.pick)?;
                 for (i, ((w, node), need)) in write.iter().zip(&demands).enumerate() {
                     let spec = chosen.as_ref().and_then(|c| c.get(i)).copied();
                     if spec != Some(*node) {
@@ -354,7 +354,7 @@ fn check_entries(nodes: &[NodeSpec], run: &Run, log: &[Entry]) -> Result<LogRepo
                 if !run.preemption || serial != Some(want) {
                     return Err(Violation::NotSerialPreemption(id));
                 }
-                let chosen = crate::sim::fit_whole(&mut index, &[need], &run.sample)?;
+                let chosen = crate::sim::fit_whole(&mut index, &[need], &run.pick)?;
                 let spec_node = chosen.as_ref().and_then(|c| c.first()).copied();
                 if spec_node != Some(node) {
                     return Err(Violation::NotSerialChoice {
@@ -513,7 +513,7 @@ fn holds(
         }
         demands.push(record.spec.demand());
     }
-    Ok(crate::sim::fit_whole(index, &demands, &run.sample)?.is_some())
+    Ok(crate::sim::fit_whole(index, &demands, &run.pick)?.is_some())
 }
 
 fn spec_of(run: &Run, workload: WorkloadId) -> Result<crate::model::WorkloadSpec, Violation> {

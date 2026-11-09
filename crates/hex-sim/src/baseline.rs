@@ -17,7 +17,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use crate::error::SimError;
-use crate::index::{FitIndex, Sample, Verdict};
+use crate::index::{FitIndex, Pick, Verdict};
 use crate::model::{Cluster, Demand, NodeId, OwnerId, Resources, Time};
 
 /// What a run of the model did: each workload's first start, and its preemptions.
@@ -45,7 +45,7 @@ enum Event {
 pub fn kueue_cohort(cluster: &Cluster, max_cycles: u64) -> Result<Outcome, SimError> {
     let n = cluster.workloads.len();
     let mut index = FitIndex::new(&cluster.nodes)?;
-    let whole = Sample::whole();
+    let whole = Pick::default();
     let mut total = Resources::default();
     for node in &cluster.nodes {
         total = total
@@ -132,7 +132,7 @@ pub fn kueue_cohort(cluster: &Cluster, max_cycles: u64) -> Result<Outcome, SimEr
                         .checked_add(&w.need)
                         .ok_or(SimError::Config("usage"))?;
                     let within = nominal.get(o).is_some_and(|q| q.holds(&with));
-                    let go = if let Some(key) = index.sampled_fit(&w.demand(), &whole).best {
+                    let go = if let Some(key) = index.fit(&w.demand(), &whole).best {
                         Go::Fits(key.node)
                     } else if within {
                         match reclaim(&mut index, cluster, &running, &usage, &nominal, at)? {

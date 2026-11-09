@@ -1064,9 +1064,14 @@ saturation is the stated meaning, or wrapping where kiln's counters wrap (CLAUDE
 | `mod.rs:1-150` | `mod.rs:1-167` | Amounts unchanged, `[cpu, memory, disk, GPUs]`. The planted `MostLoaded` (the pick that spreads) is Hex's `MostFree`. `RecoverForgets` is added: a recovered node that drops its kept boxes. |
 | `tests.rs:1-815` | `tests.rs:1-892` | `least_loaded` (:85) is `packs` (:100), caught by `MostFree`. `fenced` (:214) is split into `fenced` (:314, caught by `NoFence`) and `outlives_the_agent` (:349, caught by `RecoverForgets`). Not taken: `ask_many` (:345), `peek` (:479), and the several-owner herding measurement, which comes with kiln's spread. |
 | `model.rs:1-591` | `model.rs:1-818` | kiln's `restart` (:346) restarted a runner with its links up and its jobs dead. Hex's (:482) drops the agent's links, both ends told, and recovers its boxes, so the model holds boxes that outlive agents. No word crosses an agent restart, so `NoFence` is caught by its unit test, not the model (:789). The model is kiln's otherwise: 48 seeds of 2,000 steps, three owners, five nodes. |
+| `index.rs` (the `Index`) and `owner.rs` walk (:623) | `../index.rs` `FitIndex::fit` (:412), `bucket` (:315) | The plane's pick, and its serial specification's, and every other caller of the old `FitIndex::sampled_fit` (packing, danger, faults, federation, baseline, proximity): the kernel's index of the nodes by free whole CPUs, walked from the need's bucket up. kiln's walk stops at the first runner that fits. Hex's reads every node in those buckets and ranks them by H11's packing score, so `AC-T7.4.3`'s least-stranded choice is kept. Ties go to the node key, not the kernel's turns: the specification replays the pick, so it must be a function of the view alone. |
+| `runner.rs` `start` (:448) and `end` (:552) | `../store.rs` `admit` (:178), `release` (:204) | The plane's commit: each node's ledger in the store is the kernel's `Runner`, so a placement is admitted by it, never past its budget, and a completion or preemption frees its room there. Gangs and preemptions take their room back out of the ledger when the write is refused. kiln's admission is a CI runner's; here it is the node's, owned by the plane. |
 
-**Replaced.** Nothing yet: the plane's pick and commit (`sim.rs` over `FitIndex::sampled_fit` and the
-store's compare-and-set) move onto this kernel in the next commit.
+**Replaced.** Hex's own sampled pick: `FitIndex::sampled_fit`, `Sample` (kube-scheduler's floors of 100
+nodes or 5%, the seeded start and the scan window), `Sampled::covers` and its late-binding window, and
+the packing bench's floors sweep that measured them, are gone. The kernel's walk reads every node
+with the room, and a decision is voided by a change to any node that runs its class. Also gone is the
+store's own capacity arithmetic: the store admits and frees through the kernel's node ledgers.
 
 **What could be vendored instead of ported (Ada's call).** kiln's `lb/slab.rs` and `lb/msg.rs` could be
 shared as they are once kiln's code meets Hex's arithmetic and cast lints (`arithmetic_side_effects`,

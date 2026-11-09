@@ -22,7 +22,7 @@ use hex_health::probe::DiskProbe;
 use hex_health::{HealthError, Level};
 
 use crate::danger::{self, Isolation, Refusal, STRONGER, Tripped};
-use crate::index::{FitIndex, Sample as Placement, Verdict};
+use crate::index::{FitIndex, Pick as Placement, Verdict};
 use crate::model::{Class, Classes, Demand, Kind, NodeId, NodeSpec, Overheads, Resources};
 use crate::rng::Rng;
 
@@ -660,10 +660,10 @@ pub fn dangerous(seed: u64, kind: Class) -> Result<Dangerous, FaultError> {
     };
     index.take(NodeId(0), &running).map_err(FaultError::Sim)?;
     // A seeded load: up to 4 workloads a node, each placed through the fast path where it fits.
-    let sample = Placement::default();
+    let pick = Placement::default();
     for _ in 0..n.saturating_mul(4) {
         let filler = g2_workload(&mut rng, &overheads)?;
-        if let Some(key) = index.sampled_fit(&filler, &sample).best {
+        if let Some(key) = index.fit(&filler, &pick).best {
             index.take(key.node, &filler).map_err(FaultError::Sim)?;
         }
     }
@@ -676,7 +676,7 @@ pub fn dangerous(seed: u64, kind: Class) -> Result<Dangerous, FaultError> {
     // The oracle's cell: as it stands once the workload is stopped.
     let mut stopped = index.clone();
     stopped.give(NodeId(0), &running).map_err(FaultError::Sim)?;
-    let isolation = danger::isolate(&tripped, signal, &mut index, &overheads, &sample)
+    let isolation = danger::isolate(&tripped, signal, &mut index, &overheads, &pick)
         .map_err(FaultError::Sim)?;
     let first = if kind == Class::Oci {
         let mut first = None;
@@ -777,7 +777,7 @@ fn without(
     index: &FitIndex,
     node: NodeId,
     work: &[Demand],
-    sample: &Placement,
+    pick: &Placement,
 ) -> Result<(FitIndex, Vec<Option<NodeId>>, u64), FaultError> {
     let mut rest = index.clone();
     for w in work {
@@ -792,7 +792,7 @@ fn without(
             to.push(None);
             continue;
         }
-        let at = rest.sampled_fit(w, sample).best.map(|k| k.node);
+        let at = rest.fit(w, pick).best.map(|k| k.node);
         match at {
             Some(at) => {
                 rest.take(at, w).map_err(FaultError::Sim)?;
@@ -846,7 +846,7 @@ pub fn correlated(seed: u64, mutant: Mutant) -> Result<Correlated, FaultError> {
     }
     let mut index = FitIndex::new(&specs).map_err(FaultError::Sim)?;
     let mut work: Vec<Vec<Demand>> = vec![Vec::new(); specs.len()];
-    let sample = Placement::default();
+    let pick = Placement::default();
     let asked = nodes.saturating_mul(rng.range(1, 6));
     let mut out = Correlated {
         nodes,
@@ -854,7 +854,7 @@ pub fn correlated(seed: u64, mutant: Mutant) -> Result<Correlated, FaultError> {
     };
     for _ in 0..asked {
         let w = g2_workload(&mut rng, &overheads)?;
-        if let Some(k) = index.sampled_fit(&w, &sample).best {
+        if let Some(k) = index.fit(&w, &pick).best {
             index.take(k.node, &w).map_err(FaultError::Sim)?;
             if let Some(on) = usize::try_from(k.node.0).ok().and_then(|i| work.get_mut(i)) {
                 on.push(w);
@@ -886,7 +886,7 @@ pub fn correlated(seed: u64, mutant: Mutant) -> Result<Correlated, FaultError> {
                     FaultError::Sim(crate::SimError::Config("a node id past usize"))
                 })?;
                 let on = work.get(i).cloned().unwrap_or_default();
-                let (rest, to, stranded) = without(&index, node, &on, &sample)?;
+                let (rest, to, stranded) = without(&index, node, &on, &pick)?;
                 let re_placeable = stranded == 0 || mutant == Mutant::NoReplacementCheck;
                 if ejector.eject(c.node, at, re_placeable)?.is_err() {
                     out.refused = out.refused.saturating_add(1);

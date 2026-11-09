@@ -3,8 +3,8 @@
 //!
 //!   cargo bench -p hex-bench --bench sched_fast_path -- [runs] [placements]
 //!
-//! What it times is hex-sim's own fast path, for real: for each launch, Hex's sampled choice over
-//! the node index (`FitIndex::sampled_fit` with `Scorer::HEX`, kube-scheduler's floors of 100 nodes
+//! What it times is hex-sim's own fast path, for real: for each launch, Hex's pick over
+//! the node index (`FitIndex::fit` with `Scorer::HEX`, the kernel's walk over every node with the room
 //! or 5%), the commit by compare-and-set to the store (`Store::apply`), and the index update. The
 //! launches are the recorded workload's (bench/sched/huawei_workload.md), each an OCI container, a
 //! Firecracker microVM or a Shards microVM, their shapes and classes in arrival order, from a start
@@ -35,7 +35,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use hex_sim::index::{FitIndex, Sample, Scorer, Shapes};
+use hex_sim::index::{FitIndex, Pick, Scorer, Shapes};
 use hex_sim::model::{
     Class, Classes, Cluster, Kind, NodeId, NodeSpec, Tenancy, WorkloadId, WorkloadSpec,
 };
@@ -72,7 +72,7 @@ fn usable_cpu(nodes: &[NodeSpec], recorded: &Cluster) -> u64 {
 /// the index alone, which places as the timed run's fill does, so the run has exactly the launches
 /// it takes and its store exactly their records. A whole day's launches that find no node before the
 /// fill ends would find none after: the index doesn't change while they're refused.
-fn cluster(recorded: &Cluster, sample: &Sample, seed: u64, placements: usize) -> Cluster {
+fn cluster(recorded: &Cluster, pick: &Pick, seed: u64, placements: usize) -> Cluster {
     let nodes: Vec<NodeSpec> = (0..NODES)
         .map(|i| {
             let host = recorded.nodes[i as usize % recorded.nodes.len()];
@@ -102,7 +102,7 @@ fn cluster(recorded: &Cluster, sample: &Sample, seed: u64, placements: usize) ->
     while placed * 1000 < usable * LOAD_PER_MILLE {
         let w = launch(fill);
         fill += 1;
-        match index.sampled_fit(&w.demand(), sample).best {
+        match index.fit(&w.demand(), pick).best {
             Some(best) => {
                 index.take(best.node, &w.demand()).unwrap();
                 placed += w.need.cpu_milli;
@@ -121,12 +121,11 @@ fn cluster(recorded: &Cluster, sample: &Sample, seed: u64, placements: usize) ->
 }
 
 fn run(recorded: &Cluster, seed: u64, placements: usize) -> (Vec<Duration>, usize) {
-    let sample = Sample {
+    let pick = Pick {
         scorer: Scorer::HEX,
         shapes: Shapes::of(minimal_shapes(recorded)).unwrap(),
-        ..Sample::default()
     };
-    let cluster = cluster(recorded, &sample, seed, placements);
+    let cluster = cluster(recorded, &pick, seed, placements);
     let mut index = FitIndex::new(&cluster.nodes).unwrap();
     // A submit, a placement and a completion a launch: the log's most.
     let mut store = Store::new(
@@ -145,7 +144,7 @@ fn run(recorded: &Cluster, seed: u64, placements: usize) -> (Vec<Duration>, usiz
         let Outcome::Applied { version, .. } = store.apply(0, Write::Submit(*spec)).unwrap() else {
             panic!("submit")
         };
-        let node = index.sampled_fit(&spec.demand(), &sample).best?.node;
+        let node = index.fit(&spec.demand(), &pick).best?.node;
         let Outcome::Applied { version, .. } = store
             .apply(
                 0,

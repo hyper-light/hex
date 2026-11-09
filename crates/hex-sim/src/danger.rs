@@ -7,7 +7,7 @@
 //! - An OCI container shares its host's kernel; a Firecracker or Shards microVM runs its own under a
 //!   hypervisor (Agache et al., NSDI '20, FI[19]). So a tripped OCI container is re-placed as a
 //!   microVM: the first of [`STRONGER`] that some node of the cell admits, by G2's own fast path
-//!   ([`FitIndex::sampled_fit`]) and its filters, the class filter among them, with its need plus that
+//!   ([`FitIndex::fit`]) and its filters, the class filter among them, with its need plus that
 //!   kind's overhead. Nothing ties it to the node it tripped on: it starts again either way. A GPU
 //!   workload fits no microVM: neither takes one ([`Class::takes_gpus`]).
 //! - Firecracker before Shards: Firecracker's isolation is published and measured (a minimal device
@@ -19,7 +19,7 @@
 use hex_health::danger::{self, Signal};
 
 use crate::SimError;
-use crate::index::{FitIndex, Sample, Verdict};
+use crate::index::{FitIndex, Pick, Verdict};
 use crate::model::{Class, Demand, Kind, NodeId, Overheads, Resources};
 
 /// The kinds a tripped OCI container may be re-placed as, in the order it tries them.
@@ -39,7 +39,7 @@ pub struct Tripped {
 pub enum Isolation {
     /// Not a trip: nothing to do.
     None,
-    /// Stopped, and re-placed as `to` on `node`; `scanned` the nodes the fast path looked at.
+    /// Stopped, and re-placed as `to` on `node`; `scanned` the nodes the pick read.
     Move {
         from: Class,
         to: Class,
@@ -84,7 +84,7 @@ pub fn isolate(
     signal: Signal,
     index: &mut FitIndex,
     overheads: &Overheads,
-    sample: &Sample,
+    pick: &Pick,
 ) -> Result<Isolation, SimError> {
     if !danger::trips(signal) {
         return Ok(Isolation::None);
@@ -109,19 +109,20 @@ pub fn isolate(
             kind: tripped.kind,
             class: to,
         };
-        let fit = index.sampled_fit(&demand, sample);
+        let fit = index.fit(&demand, pick);
         if let Some(key) = fit.best {
             index.take(key.node, &demand)?;
             return Ok(Isolation::Move {
                 from,
                 to,
                 node: key.node,
-                scanned: fit.span,
+                scanned: usize::try_from(fit.walked).unwrap_or(usize::MAX),
             });
         }
-        // The scan found none, so it passed over every node; it ran this kind unless every one
-        // refused it for its class.
-        runs_one |= usize::try_from(fit.refused.class).map_or(true, |c| c < index.len());
+        // None holds it: some node runs this kind, or none does.
+        runs_one |= (0..index.len())
+            .filter_map(|at| u32::try_from(at).ok())
+            .any(|at| index.runs(NodeId(at), to));
     }
     Ok(Isolation::Refuse {
         from,
@@ -237,7 +238,7 @@ mod tests {
                 ],
                 need,
             );
-            let iso = isolate(&t, s, &mut index, &overheads(), &Sample::whole()).unwrap();
+            let iso = isolate(&t, s, &mut index, &overheads(), &Pick::default()).unwrap();
             assert!(
                 matches!(
                     iso,
@@ -257,7 +258,7 @@ mod tests {
                 ],
                 need,
             );
-            let iso = isolate(&t, s, &mut index, &overheads(), &Sample::whole()).unwrap();
+            let iso = isolate(&t, s, &mut index, &overheads(), &Pick::default()).unwrap();
             assert!(
                 matches!(
                     iso,
@@ -291,7 +292,7 @@ mod tests {
                 Signal::SeccompKill,
                 &mut index,
                 &overheads(),
-                &Sample::whole(),
+                &Pick::default(),
             )
             .unwrap();
             if fits {
@@ -348,7 +349,7 @@ mod tests {
                     Signal::SeccompKill,
                     &mut index,
                     &overheads(),
-                    &Sample::whole()
+                    &Pick::default()
                 )
                 .unwrap(),
                 Isolation::Refuse {
@@ -371,7 +372,7 @@ mod tests {
                 Signal::EgressRefused,
                 &mut index,
                 &overheads(),
-                &Sample::whole()
+                &Pick::default()
             )
             .unwrap(),
             Isolation::Refuse {
@@ -387,7 +388,7 @@ mod tests {
                 Signal::PrivilegeEscalation,
                 &mut index,
                 &overheads(),
-                &Sample::whole()
+                &Pick::default()
             )
             .unwrap(),
             Isolation::Refuse {
@@ -409,7 +410,7 @@ mod tests {
                 Signal::SeccompErrno,
                 &mut index,
                 &overheads(),
-                &Sample::whole()
+                &Pick::default()
             )
             .unwrap(),
             Isolation::None

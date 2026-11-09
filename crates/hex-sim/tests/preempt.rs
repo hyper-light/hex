@@ -184,7 +184,7 @@ fn run_of(store: Store, n: usize, groups: Vec<Group>) -> Run {
         acked: vec![true; n],
         refused: vec![false; n],
         ran: vec![None; n],
-        sample: Default::default(),
+        pick: Default::default(),
         policy: Default::default(),
         owners: vec![Owner::default()],
         gangs: Default::default(),

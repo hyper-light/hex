@@ -1,5 +1,6 @@
-//! The control plane's durable state: one record per workload and each node's used capacity,
-//! changed only by compare-and-set writes (`scheduler-architecture.md` S6, Omega's optimistic commit
+//! The control plane's durable state: one record per workload and each node's ledger, the kernel's
+//! (`crate::lb::Runner`, kiln's `lb/runner.rs`: a placement is admitted by its node's ledger, never
+//! past its budget), changed only by compare-and-set writes (`scheduler-architecture.md` S6, Omega's optimistic commit
 //! CM[2]). A placement names the record version it read, so a commit made twice, or made from a
 //! stale read, is a conflict and never a second start. A write is atomic: the nemesis crashes the
 //! control plane before one is applied or after it is applied and before anyone hears of it.
@@ -10,7 +11,16 @@
 use std::collections::BTreeMap;
 
 use crate::error::SimError;
+use crate::lb;
 use crate::model::{Group, GroupId, NodeId, NodeSpec, Resources, Time, WorkloadId, WorkloadSpec};
+
+/// The plane, as the owner its nodes' ledgers know it by.
+const PLANE: lb::OwnerId = lb::OwnerId(0);
+
+/// A need as the kernel's amounts: CPU, memory, disk (none here), GPUs.
+fn amounts(r: &Resources) -> lb::Amounts {
+    [r.cpu_milli, r.mem_bytes, 0, u64::from(r.gpus)]
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
@@ -124,8 +134,10 @@ pub enum GangOutcome {
 
 #[derive(Debug, Clone)]
 pub struct Store {
-    capacity: Vec<Resources>,
-    used: Vec<Resources>,
+    /// Each node's ledger, by node id: what admits a placement and frees its room.
+    nodes: Vec<lb::Runner>,
+    /// Each placed workload's handle in its node's ledger.
+    boxes: BTreeMap<WorkloadId, lb::Handle>,
     records: BTreeMap<WorkloadId, Record>,
     next_seq: u64,
     log: Vec<Entry>,
@@ -147,8 +159,11 @@ impl Store {
             }
         }
         Ok(Self {
-            capacity: nodes.iter().map(|n| n.capacity).collect(),
-            used: vec![Resources::default(); nodes.len()],
+            nodes: nodes
+                .iter()
+                .map(|n| lb::Runner::new(lb::RunnerId(n.id.0), amounts(&n.capacity), 1))
+                .collect(),
+            boxes: BTreeMap::new(),
             records: BTreeMap::new(),
             next_seq: 0,
             log: Vec::new(),
@@ -157,6 +172,47 @@ impl Store {
             max_records,
             max_log,
         })
+    }
+
+    /// Admits `workload`, needing `need`, in `node`'s ledger: false when it hasn't the room.
+    fn admit(
+        &mut self,
+        node: NodeId,
+        workload: WorkloadId,
+        need: &Resources,
+    ) -> Result<bool, SimError> {
+        let runner = usize::try_from(node.0)
+            .ok()
+            .and_then(|at| self.nodes.get_mut(at))
+            .ok_or(SimError::UnknownNode(node))?;
+        let start = lb::Start {
+            owner: PLANE,
+            run: lb::Handle::NONE,
+            epoch: runner.epoch(),
+            need: amounts(need),
+        };
+        match runner.start(start) {
+            lb::ToOwner::Started { at, .. } => {
+                self.boxes.insert(workload, at);
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Frees `workload`'s room in `node`'s ledger.
+    fn release(&mut self, node: NodeId, workload: WorkloadId) -> Result<(), SimError> {
+        let at = self
+            .boxes
+            .remove(&workload)
+            .ok_or(SimError::Resources(node))?;
+        let runner = usize::try_from(node.0)
+            .ok()
+            .and_then(|i| self.nodes.get_mut(i))
+            .ok_or(SimError::UnknownNode(node))?;
+        let mut out = lb::RunnerOut::new();
+        runner.end(at, &mut out).ok_or(SimError::Resources(node))?;
+        Ok(())
     }
 
     pub fn apply(&mut self, at: Time, write: Write) -> Result<Outcome, SimError> {
@@ -207,9 +263,7 @@ impl Store {
                 bound: self.max_log,
             });
         }
-        let mut adds: BTreeMap<usize, Resources> = BTreeMap::new();
-        for (i, &(workload, node, read)) in members.iter().enumerate() {
-            let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
+        for (i, &(workload, _, read)) in members.iter().enumerate() {
             let Some(record) = self.records.get(&workload) else {
                 return Ok(GangOutcome::Conflict(workload, Conflict::Missing));
             };
@@ -228,35 +282,29 @@ impl Store {
                     Conflict::State(record.state),
                 ));
             }
-            let add = adds.entry(at).or_default();
-            *add = add
-                .checked_add(&record.spec.need)
-                .ok_or(SimError::Resources(node))?;
-            let capacity = self.capacity.get(at).ok_or(SimError::UnknownNode(node))?;
-            let after = self
-                .used
-                .get(at)
-                .ok_or(SimError::UnknownNode(node))?
-                .checked_add(add)
-                .ok_or(SimError::Resources(node))?;
-            if !capacity.holds(&after) {
+        }
+        // Each member admitted by its node's ledger, in order; one that doesn't fit beside those
+        // before it takes them out again and refuses the write.
+        for (i, &(workload, node, _)) in members.iter().enumerate() {
+            let need = self
+                .records
+                .get(&workload)
+                .ok_or(SimError::UnknownWorkload(workload))?
+                .spec
+                .need;
+            if !self.admit(node, workload, &need)? {
+                for &(before, on, _) in members.iter().take(i) {
+                    self.release(on, before)?;
+                }
                 return Ok(GangOutcome::Conflict(workload, Conflict::NodeFull));
             }
         }
         let mut versions = Vec::with_capacity(members.len());
         for &(workload, node, _) in members {
-            let at_node = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
             let record = self
                 .records
                 .get_mut(&workload)
                 .ok_or(SimError::UnknownWorkload(workload))?;
-            let used = self
-                .used
-                .get_mut(at_node)
-                .ok_or(SimError::UnknownNode(node))?;
-            *used = used
-                .checked_add(&record.spec.need)
-                .ok_or(SimError::Resources(node))?;
             record.version = bump(record.version)?;
             record.state = State::Placed(node);
             versions.push(record.version);
@@ -319,8 +367,7 @@ impl Store {
         node: NodeId,
         read: u64,
     ) -> Result<Outcome, SimError> {
-        let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
-        let Some(record) = self.records.get_mut(&workload) else {
+        let Some(record) = self.records.get(&workload) else {
             return Ok(Outcome::Conflict(Conflict::Missing));
         };
         if record.version != read {
@@ -332,22 +379,20 @@ impl Store {
         if record.state != State::Pending {
             return Ok(Outcome::Conflict(Conflict::State(record.state)));
         }
-        let capacity = self.capacity.get(at).ok_or(SimError::UnknownNode(node))?;
-        let used = self.used.get_mut(at).ok_or(SimError::UnknownNode(node))?;
-        let after = used
-            .checked_add(&record.spec.need)
-            .ok_or(SimError::Resources(node))?;
-        if !capacity.holds(&after) {
-            return Ok(Outcome::Conflict(Conflict::NodeFull));
-        }
-        let version = bump(record.version)?;
+        let (version, need) = (bump(record.version)?, record.spec.need);
         if self.log.len() >= self.max_log {
             return Err(SimError::Full {
                 what: "the store's log",
                 bound: self.max_log,
             });
         }
-        *used = after;
+        if !self.admit(node, workload, &need)? {
+            return Ok(Outcome::Conflict(Conflict::NodeFull));
+        }
+        let record = self
+            .records
+            .get_mut(&workload)
+            .ok_or(SimError::UnknownWorkload(workload))?;
         record.version = version;
         record.state = State::Placed(node);
         let (group, was) = placed_again(record, self.writes)?;
@@ -364,8 +409,7 @@ impl Store {
         node: NodeId,
         read: u64,
     ) -> Result<Outcome, SimError> {
-        let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
-        let Some(record) = self.records.get_mut(&workload) else {
+        let Some(record) = self.records.get(&workload) else {
             return Ok(Outcome::Conflict(Conflict::Missing));
         };
         if record.state == State::Complete(node) {
@@ -382,10 +426,6 @@ impl Store {
                 found: record.version,
             }));
         }
-        let used = self.used.get_mut(at).ok_or(SimError::UnknownNode(node))?;
-        let after = used
-            .checked_sub(&record.spec.need)
-            .ok_or(SimError::Resources(node))?;
         let version = bump(record.version)?;
         if self.log.len() >= self.max_log {
             return Err(SimError::Full {
@@ -393,7 +433,11 @@ impl Store {
                 bound: self.max_log,
             });
         }
-        *used = after;
+        self.release(node, workload)?;
+        let record = self
+            .records
+            .get_mut(&workload)
+            .ok_or(SimError::UnknownWorkload(workload))?;
         record.version = version;
         record.state = State::Complete(node);
         Ok(Outcome::Applied {
@@ -421,7 +465,6 @@ impl Store {
                 bound: self.max_log,
             });
         }
-        let mut freed = Resources::default();
         let mut more: BTreeMap<GroupId, u32> = BTreeMap::new();
         for (i, &(workload, node, read)) in victims.iter().enumerate() {
             let Some(record) = self.records.get(&workload) else {
@@ -443,11 +486,6 @@ impl Store {
                     workload,
                     Conflict::State(record.state),
                 ));
-            }
-            if node == head.1 {
-                freed = freed
-                    .checked_add(&record.spec.need)
-                    .ok_or(SimError::Resources(node))?;
             }
             if let Some(g) = record.spec.tenancy.group {
                 let n = more.entry(g).or_default();
@@ -478,35 +516,32 @@ impl Store {
         if record.state != State::Pending {
             return Ok(PreemptOutcome::Conflict(id, Conflict::State(record.state)));
         }
-        let at_node = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
-        let capacity = self
-            .capacity
-            .get(at_node)
-            .ok_or(SimError::UnknownNode(node))?;
-        let after = self
-            .used
-            .get(at_node)
-            .ok_or(SimError::UnknownNode(node))?
-            .checked_sub(&freed)
-            .and_then(|u| u.checked_add(&record.spec.need))
-            .ok_or(SimError::Resources(node))?;
-        if !capacity.holds(&after) {
+        // The victims' room freed in their nodes' ledgers, then the head admitted on its node; a head
+        // that doesn't fit even so admits the victims again and refuses the write.
+        let need = record.spec.need;
+        for &(workload, on, _) in victims {
+            self.release(on, workload)?;
+        }
+        if !self.admit(node, id, &need)? {
+            for &(workload, on, _) in victims {
+                let back = self
+                    .records
+                    .get(&workload)
+                    .ok_or(SimError::UnknownWorkload(workload))?
+                    .spec
+                    .need;
+                if !self.admit(on, workload, &back)? {
+                    return Err(SimError::Resources(on));
+                }
+            }
             return Ok(PreemptOutcome::Conflict(id, Conflict::NodeFull));
         }
         let mut versions = Vec::with_capacity(victims.len());
         for &(workload, node, _) in victims {
-            let at_node = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
             let record = self
                 .records
                 .get_mut(&workload)
                 .ok_or(SimError::UnknownWorkload(workload))?;
-            let used = self
-                .used
-                .get_mut(at_node)
-                .ok_or(SimError::UnknownNode(node))?;
-            *used = used
-                .checked_sub(&record.spec.need)
-                .ok_or(SimError::Resources(node))?;
             record.version = bump(record.version)?;
             record.state = State::Pending;
             record.preempted = true;
@@ -525,13 +560,6 @@ impl Store {
             .records
             .get_mut(&id)
             .ok_or(SimError::UnknownWorkload(id))?;
-        let used = self
-            .used
-            .get_mut(at_node)
-            .ok_or(SimError::UnknownNode(node))?;
-        *used = used
-            .checked_add(&record.spec.need)
-            .ok_or(SimError::Resources(node))?;
         record.version = bump(record.version)?;
         record.state = State::Placed(node);
         let placed = record.version;

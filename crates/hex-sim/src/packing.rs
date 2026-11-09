@@ -1,7 +1,7 @@
 //! Stranded capacity (`AC-T7.4.3`): what a placement policy leaves free that no workload can use.
 //!
 //! [`pack`] places a workload's arrivals in order from a given one, with no completions or, by its
-//! [`Clock`], with them, through the fast path's sampled choice ([`FitIndex::sampled_fit`]), passing
+//! [`Clock`], with them, through the fast path's pick ([`FitIndex::fit`]), passing
 //! over one no node admits, until the load reaches what is asked (90% for `AC-T7.4.3`). The load is the dominant share of what is
 //! placed: the larger of placed CPU over all CPU and placed memory over all memory, as Dominant
 //! Resource Fairness measures a share, so a workload that runs out of CPU first is loaded by its CPU.
@@ -20,7 +20,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap};
 
 use crate::error::SimError;
-use crate::index::{FitIndex, Refusals, Sample};
+use crate::index::{FitIndex, Pick, Refusals};
 use crate::model::{Class, Classes, Cluster, NodeId, Resources, Time, WorkloadId, WorkloadSpec};
 use crate::rng::Rng;
 
@@ -136,7 +136,7 @@ pub enum Clock {
 /// `load_per_mille`, then measures what is stranded.
 pub fn pack(
     cluster: &Cluster,
-    sample: &Sample,
+    pick: &Pick,
     load_per_mille: u64,
     from: usize,
     clock: Clock,
@@ -207,15 +207,15 @@ pub fn pack(
             r.completions = r.completions.saturating_add(1);
         }
         let demand = w.demand();
-        let sampled = index.sampled_fit(&demand, sample);
-        let Some(key) = sampled.best else {
+        let fit = index.fit(&demand, pick);
+        let Some(key) = fit.best else {
             let load = r.load_per_mille();
             r.passed_over = r.passed_over.saturating_add(1);
             if let Some(n) = r.passed_over_by_class.get_mut(w.class.index()) {
                 *n = n.saturating_add(1);
             }
             r.first_refusal_per_mille.get_or_insert(load);
-            if r.first_full_per_mille.is_none() && sampled.refused == Refusals::default() {
+            if r.first_full_per_mille.is_none() && fit.refused == Refusals::default() {
                 r.first_full_per_mille = Some(load);
             }
             continue;
@@ -296,7 +296,7 @@ mod tests {
     fn stranded_is_free_capacity_no_shape_fits() {
         let c = cluster(2, res(4000, 4), &[res(3000, 1), res(3000, 1), res(1000, 3)]);
         assert_eq!(minimal_shapes(&c).len(), 2);
-        let r = pack(&c, &Sample::whole(), 1000, 0, Clock::Held).unwrap();
+        let r = pack(&c, &Pick::default(), 1000, 0, Clock::Held).unwrap();
         assert_eq!((r.placements, r.passed_over), (3, 0));
         // After all three: one node holds (3,1)+(1,3) = full; the other (3,1), free (1,3), which (1,3) fits.
         assert_eq!((r.stranded_cpu_milli, r.stranded_mem_bytes), (0, 0));
@@ -307,7 +307,7 @@ mod tests {
     #[test]
     fn a_memory_bound_load_strands_the_cpu_beside_spent_memory() {
         let c = cluster(1, res(8000, 4), &[res(1000, 3), res(1000, 2)]);
-        let r = pack(&c, &Sample::whole(), 1000, 0, Clock::Held).unwrap();
+        let r = pack(&c, &Pick::default(), 1000, 0, Clock::Held).unwrap();
         assert_eq!((r.placements, r.passed_over), (1, 1));
         assert_eq!(r.load_per_mille(), 750);
         assert_eq!(r.first_full_per_mille, Some(750));
@@ -325,7 +325,7 @@ mod tests {
         needs.extend([res(9000, 1); 3]);
         let mut c = cluster(1, res(8000, 8), &needs);
         c.workloads[3].class = Class::Shards;
-        let r = pack(&c, &Sample::whole(), 1000, 0, Clock::Held).unwrap();
+        let r = pack(&c, &Pick::default(), 1000, 0, Clock::Held).unwrap();
         assert_eq!(r.passed_over, 3);
         assert_eq!(r.passed_over_by_class, [2, 0, 1]);
         assert_eq!(r.first_refusal_per_mille, Some(125));
@@ -341,7 +341,7 @@ mod tests {
         let mut c = cluster(1, res(8000, 8), &[res(8000, 8), res(8000, 8)]);
         c.workloads[0].runs_for = Some(10);
         c.workloads[1].arrives = 100;
-        let at = |clock| pack(&c, &Sample::whole(), 2000, 0, clock).unwrap();
+        let at = |clock| pack(&c, &Pick::default(), 2000, 0, clock).unwrap();
         assert_eq!(at(Clock::Held).passed_over, 1);
         assert_eq!(at(Clock::Compressed(1)).passed_over, 0);
         assert_eq!(at(Clock::Compressed(1)).placed_cpu_milli, 8000);
@@ -350,7 +350,7 @@ mod tests {
             [Clock::Held, Clock::Compressed(1), Clock::Compressed(100)].map(|c| at(c).completions);
         assert_eq!(completions, [0, 1, 0]);
         assert_eq!(
-            pack(&c, &Sample::whole(), 2000, 0, Clock::Compressed(0)),
+            pack(&c, &Pick::default(), 2000, 0, Clock::Compressed(0)),
             Err(SimError::Config("a compressed clock runs at least 1x"))
         );
     }
@@ -394,7 +394,7 @@ mod tests {
     fn a_node_no_workload_here_can_run_isnt_counted() {
         let mut c = cluster(2, res(4000, 4), &[res(4000, 4)]);
         c.nodes[1].classes = Classes::NONE.with(Class::Shards);
-        let r = pack(&c, &Sample::whole(), 1000, 0, Clock::Held).unwrap();
+        let r = pack(&c, &Pick::default(), 1000, 0, Clock::Held).unwrap();
         assert_eq!(
             (r.total_cpu_milli, r.placements, r.reached),
             (4000, 1, true)
@@ -433,9 +433,9 @@ mod tests {
     #[test]
     fn a_pack_starts_at_its_arrival() {
         let c = cluster(1, res(8000, 8), &[res(8000, 8), res(1000, 1)]);
-        let r = pack(&c, &Sample::whole(), 1000, 1, Clock::Held).unwrap();
+        let r = pack(&c, &Pick::default(), 1000, 1, Clock::Held).unwrap();
         assert_eq!((r.placements, r.placed_cpu_milli), (1, 1000));
-        let past = pack(&c, &Sample::whole(), 1000, 9, Clock::Held).unwrap();
+        let past = pack(&c, &Pick::default(), 1000, 9, Clock::Held).unwrap();
         assert_eq!(past.placements, 0);
     }
 }

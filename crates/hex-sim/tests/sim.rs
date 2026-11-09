@@ -16,7 +16,7 @@
 use hex_sim::SimError;
 use hex_sim::fair::Policy;
 use hex_sim::generate::{self, Shape};
-use hex_sim::index::{Sample, Scorer, Shapes};
+use hex_sim::index::{Pick, Scorer, Shapes};
 use hex_sim::model::{
     Class, Classes, Cluster, GangId, Kind, NodeId, NodeSpec, Owner, OwnerId, Resources, Tenancy,
     Time, WorkloadId, WorkloadSpec,
@@ -50,18 +50,15 @@ fn config(seed: u64) -> Config {
         decide_ns: r.range(0, 200_000),
         commit_ns: r.range(0, 100_000),
         change_window: usize::try_from(r.range(1, 64)).unwrap(),
-        sample: sample(&mut r),
+        pick: pick(&mut r),
         ..Config::default()
     }
 }
 
-/// A sample that wants 1 to 8 nodes, or up to 30% of them, from a seeded start: small enough that
-/// test-sized clusters are sampled, not scanned whole.
-fn sample(r: &mut Rng) -> Sample {
-    Sample {
-        seed: r.next_u64(),
-        min_feasible: u32::try_from(r.range(1, 8)).unwrap(),
-        per_mille: u32::try_from(r.range(0, 300)).unwrap(),
+/// A pick's scorer and shapes, drawn: the kernel's walk reads every node with the room, so there
+/// is no sample size to draw.
+fn pick(r: &mut Rng) -> Pick {
+    Pick {
         scorer: [Scorer::BestFit, Scorer::Align, Scorer::HEX]
             [usize::try_from(r.range(0, 2)).unwrap()],
         shapes: Shapes::of(vec![
@@ -284,7 +281,6 @@ fn the_oracle_refuses_a_placement_that_jumps_a_lower_share() {
 /// node the specification run serially puts it on.
 #[test]
 fn with_capacity_only_shrinking_placements_equal_a_serial_run() {
-    let mut sampled_differs = 0u64;
     for seed in 0..200 {
         let shape = Shape {
             mean_run: None,
@@ -293,14 +289,7 @@ fn with_capacity_only_shrinking_placements_equal_a_serial_run() {
         let cluster = generate::cluster(seed, &shape).unwrap();
         let config = config(seed);
         let run = sim::run(&cluster, &config).unwrap();
-        let serial =
-            spec::serial_place(&cluster.nodes, &cluster.workloads, &config.sample).unwrap();
-        let whole = Sample {
-            min_feasible: u32::MAX,
-            ..config.sample
-        };
-        let best_fit = spec::serial_place(&cluster.nodes, &cluster.workloads, &whole).unwrap();
-        sampled_differs += u64::from(serial != best_fit);
+        let serial = spec::serial_place(&cluster.nodes, &cluster.workloads, &config.pick).unwrap();
         for (w, want) in cluster.workloads.iter().zip(serial) {
             let got = match run.store.record(w.id).unwrap().state {
                 State::Placed(n) => Some(n),
@@ -310,8 +299,6 @@ fn with_capacity_only_shrinking_placements_equal_a_serial_run() {
             assert_eq!(got, want, "seed {seed}, {:?}", w.id);
         }
     }
-    // Non-vacuity: sampling chose otherwise than a whole-cluster best fit in some runs.
-    assert!(sampled_differs > 0, "sampling changed none of 200 runs");
 }
 
 fn crash_cluster() -> Cluster {
@@ -508,7 +495,7 @@ fn run_of(store: Store, n: usize) -> Run {
         acked: vec![true; n],
         refused: vec![false; n],
         ran: vec![None; n],
-        sample: Sample::default(),
+        pick: Pick::default(),
         policy: Policy::default(),
         owners: vec![Owner::default()],
         gangs: Default::default(),
@@ -676,7 +663,7 @@ fn crash_seed(seed: u64) -> (Cluster, Config) {
         decide_ns: r.range(0, 200_000),
         commit_ns: r.range(0, 100_000),
         change_window: usize::try_from(r.range(1, 64)).unwrap(),
-        sample: sample(&mut r),
+        pick: pick(&mut r),
         restart_ns: r.range(0, 5_000_000),
         nemesis: Nemesis::Random {
             seed: r.next_u64(),
@@ -1036,14 +1023,14 @@ fn the_recorded_workload_strands_at_least_30_percent_less_than_best_fit() {
 }
 
 fn strands_less(set: &str, cluster: &Cluster, clock: Clock) {
-    let sample = Sample {
+    let pick = Pick {
         shapes: Shapes::of(packing::minimal_shapes(cluster)).unwrap(),
-        ..Sample::default()
+        ..Pick::default()
     };
     let pack = |scorer, from| {
         packing::pack(
             cluster,
-            &Sample { scorer, ..sample },
+            &Pick { scorer, ..pick },
             packing::LOAD_PER_MILLE,
             from,
             clock,
