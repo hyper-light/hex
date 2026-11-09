@@ -1192,30 +1192,49 @@ fn the_node_keeps_a_given_answers_ends_until_its_client_took_them() {
 }
 
 /// Native plan step 8, guest stdio (HEX-GUEST-41): once its client says it took a given answer's ends, the node lets
-/// its own copies go, so the streams are the client's and its program's alone. A client that says so, then lets its
-/// stdout end go, leaves the program's stdout with no reader, and the program's write of its line ends it by SIGPIPE.
-/// A call answered after the word shows the node read the word first: it reads a connection's requests in order.
+/// its own copies go. Asserted from the node's own state, which no other test's spawn can touch: a spawn of this
+/// process copies every descriptor of it, close-on-exec ones too, and keeps them until its exec, so whether the
+/// program's write finds a reader is no fact of the node's (the lead's word of 2026-11-09, after this test, then
+/// reading the program's SIGPIPE, failed once in a parallel run). Do: an exec asking for stdin and stdout; the word
+/// that its ends were taken; a call. Expect: before the word, the node keeps both ends; once the call is answered after
+/// it (the node reads a connection's requests in order), it keeps none for the exec, and each descriptor it held is
+/// closed, or open on something else.
 #[test]
 fn the_node_lets_a_given_answers_ends_go_once_its_client_says_it_took_them() {
     let lab = Lab::new(limits());
     let raw = lab.raw();
     hello_raw(&raw);
     let (stdin, stdout) = line_after_line(&raw);
+    let held = kept_ends(&lab, 2);
+    assert_eq!(
+        held.len(),
+        2,
+        "the node keeps both given ends until the word"
+    );
     let taken = wire::request(2, &Request::Taken, wire::MAX_MESSAGE).unwrap();
     send_raw(&raw, &taken, &[]);
     send_raw(&raw, &request(3, Call::Inspect(b())), &[]);
     let (h, info) = answer_of(&raw);
     assert!(matches!((h.id, &info), (3, Answer::Info(_))), "{info:?}");
+    assert!(
+        kept_ends(&lab, 2).is_empty(),
+        "the node still keeps exec 2's ends after the word"
+    );
+    for (fd, open_on) in &held {
+        let now = std::fs::read_link(format!("/proc/self/fd/{fd}")).ok();
+        assert_ne!(
+            now.as_ref(),
+            Some(open_on),
+            "the node's descriptor {fd} is still open on its end after the word"
+        );
+    }
+    // The program ends with its stdin.
     drop(stdout);
     let mut stdin = std::fs::File::from(stdin);
     stdin.write_all(b"go\n").unwrap();
     drop(stdin);
     let (h, end) = answer_of(&raw);
-    assert_eq!(
-        (h.id, end),
-        (2, Answer::Exited(Exit::Signal(13))),
-        "the program's stdout kept a reader after its client said it took its ends"
-    );
+    assert!(matches!((h.id, end), (2, Answer::Exited(_))));
 }
 
 /// The answer to request `id` on a raw connection, with the descriptors that rode with it, past the programs' ends
