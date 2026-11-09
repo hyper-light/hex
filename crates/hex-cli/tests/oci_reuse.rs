@@ -956,8 +956,8 @@ fn an_owners_next_box_is_made_by_the_init_parked_in_its_idle_cgroup(lab: &Lab, o
 /// its ready. Do: O's first box created, started and deleted, so its slot holds an init parked for O's next; then three
 /// times, once that init sleeps for its claim, create O's next box, counting the creating thread's voluntary context
 /// switches across the create (proc(5), /proc/thread-self/status), then start and delete it, which parks the next.
-/// Expect: each create claimed the parked init, and the median of the three counts is the init's words, one as root
-/// and two rootless. The median, since a create's other steps sleep now and then (a lock one of the node's threads
+/// Expect: each create claimed the parked init, and the median of the three counts is at most the init's words,
+/// one as root and two rootless: a word buffered before its read needs no sleep. The median, since a create's other steps sleep now and then (a lock one of the node's threads
 /// holds, the page cache), and a create can find a word written by the time it reads it: of 59 claims each way on
 /// adacachy2 before this (unit hex-g6-wakes-20261109T181009Z), 54 as root slept twice, for the answer and the ready, 1
 /// once more and 4 once less; 57 rootless slept twice too, the ask for its maps written by the time the answer was
@@ -1016,9 +1016,9 @@ fn a_parked_create_wakes_its_agent_once_a_word(lab: &Lab, own: &Path) {
     // rootless bundles do, `Lab::bundle_with`; its root ones don't), and its ready.
     let words = if lab.rootless { 2 } else { 1 };
     wakes.sort_unstable();
-    assert_eq!(
-        wakes[1], words,
-        "a parked create wakes its agent once for each word its init says, and for no answer (each create's wakes, \
+    assert!(
+        wakes[1] <= words,
+        "a parked create wakes its agent at most once for each word its init says, and for no answer (each create's wakes, \
          sorted: {wakes:?})"
     );
     node.release_idle().unwrap();
