@@ -56,9 +56,10 @@ pub struct Failure {
 /// The slowest recorded end of a program the suites wait for, a container's exec of `true` from its exec to its
 /// end, in the suites' own runs (decision 9; the lead's rule of 2026-11-06 for test patiences).
 /// The tests run debug builds, so their record is the debug one: the `lifecycle.exec` row of
-/// `bench/competitive/probes/waits_census.md` run 3's debug arm, 39.131 ms of 10,000 (a release-build record ran these
-/// tests' waits out).
-pub const PROGRAM_END: Option<Duration> = Some(Duration::from_nanos(39_130_836));
+/// `bench/competitive/probes/waits_census.md` run 5, the largest answer of its debug-build arms (the debug arm's 18.003
+/// ms of 10,000) and of the tests' program waits seeded from it, `oci_box`'s program run in the suites' 18.262 ms of 272
+/// (a release-build record ran these tests' waits out).
+pub const PROGRAM_END: Option<Duration> = Some(Duration::from_nanos(18_262_060));
 
 /// Longest a case waits for a program it expects to end: twice [`PROGRAM_END`], so a runtime that
 /// never reports an end fails the case instead of hanging the suite. While it is measuring, the longest

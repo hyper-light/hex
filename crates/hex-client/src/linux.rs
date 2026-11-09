@@ -38,58 +38,58 @@ use crate::MAX_LIST;
 /// failure-bound rule of 2026-11-06), past which the call is refused by type, the only way left to it. Each kind is
 /// seeded by build profile from its `client.answer.<kind>` rows of `bench/competitive/probes/waits_census.md`, in
 /// nanoseconds as the census keeps them: a release build from run 4's largest max of the release arms with a row's 1,000
-/// samples (adacachy2), a debug build from run 3's debug arm's (fedora) until run 5 records the suites' run-outs
-/// (decision 9).
+/// samples (adacachy2), a debug build from run 5's largest answer of the debug-build arms, the debug arm and the suites'
+/// (adacachy2), for the kind and the tests' waits seeded from it, never under a bound one ran out at (decision 9).
 static ANSWERS: [Patience; 10] = [
     Patience::by_profile(
         "client.answer.hello",
         Duration::from_nanos(1_177_037),
-        Some(Duration::from_nanos(10_396_345)),
+        Some(Duration::from_nanos(17_232_102)),
     ),
     Patience::by_profile(
         "client.answer.create",
         Duration::from_nanos(43_655_221),
-        Some(Duration::from_nanos(220_155_458)),
+        Some(Duration::from_nanos(49_798_121)),
     ),
     Patience::by_profile(
         "client.answer.start",
         Duration::from_nanos(11_263_989),
-        Some(Duration::from_nanos(7_610_223)),
+        Some(Duration::from_nanos(16_120_605)),
     ),
     Patience::by_profile(
         "client.answer.exec",
         Duration::from_nanos(17_330_544),
-        Some(Duration::from_nanos(38_753_534)),
+        Some(Duration::from_nanos(100_780_659)),
     ),
     Patience::by_profile(
         "client.answer.signal",
         Duration::from_nanos(583_198),
-        Some(Duration::from_nanos(273_003)),
+        Some(Duration::from_nanos(3_952_426)),
     ),
     Patience::by_profile(
         "client.answer.inspect",
         Duration::from_nanos(10_914_126),
-        Some(Duration::from_nanos(22_023_765)),
+        Some(Duration::from_nanos(12_007_514)),
     ),
     Patience::by_profile(
         "client.answer.usage",
         Duration::from_nanos(757_183),
-        Some(Duration::from_nanos(162_395)),
+        Some(Duration::from_nanos(386_833)),
     ),
     Patience::by_profile(
         "client.answer.list",
         Duration::from_nanos(386_711_080),
-        Some(Duration::from_nanos(1_439_696_712)),
+        Some(Duration::from_nanos(868_709_473)),
     ),
     Patience::by_profile(
         "client.answer.delete",
         Duration::from_nanos(35_715_197),
-        Some(Duration::from_nanos(306_051_519)),
+        Some(Duration::from_nanos(706_090_511)),
     ),
     Patience::by_profile(
         "client.answer.netns",
         Duration::from_nanos(715_105),
-        Some(Duration::from_nanos(8_048_226)),
+        Some(Duration::from_nanos(2_733_541)),
     ),
 ];
 
