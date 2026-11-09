@@ -201,7 +201,9 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   I/O completion port (decision "the Windows node, on one completion port"). It starts Winsock
   (`WSAStartup`), makes, binds, listens on, connects, shuts down and closes AF_UNIX sockets (`WSASocketW`
   overlapped and not inherited, `bind`, `listen`, `connect`, `shutdown`, `closesocket`), bounds a client's
-  sends (`setsockopt` `SO_SNDTIMEO`) and sends and receives on a client's blocking socket (`send`, `recv`),
+  sends (`setsockopt` `SO_SNDTIMEO`), makes the close of a connection the node has ended a reset
+  (`setsockopt` `SO_LINGER`, no linger: afunix.sys doesn't wake every peer's read with a graceful
+  end-of-stream) and sends and receives on a client's blocking socket (`send`, `recv`),
   makes the port and puts sockets on it (`CreateIoCompletionPort`), posts a wake and waits on it
   (`PostQueuedCompletionStatus`, `GetQueuedCompletionStatusEx`), starts a connection's overlapped accept,
   receive and send (`AcceptEx` with `SO_UPDATE_ACCEPT_CONTEXT`, `WSARecv`, `WSASend`), each operation's
