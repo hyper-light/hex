@@ -63,7 +63,7 @@ mod linux {
     ];
 
     pub fn main() {
-        if std::env::args().nth(1).as_deref() == Some("child") {
+        if std::env::args_os().nth(1).is_some_and(|a| a == "child") {
             child();
             return;
         }
