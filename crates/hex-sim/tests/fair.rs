@@ -214,6 +214,41 @@ fn as_trace(cluster: &Cluster) -> String {
     out
 }
 
+/// Compare every field, reporting the first mismatched row instead of printing the whole day.
+fn assert_same_cluster(read: &Cluster, expected: &Cluster) {
+    fn rows<T: std::fmt::Debug + PartialEq>(kind: &str, read: &[T], expected: &[T]) {
+        assert_eq!(read.len(), expected.len(), "{kind} count");
+        for (i, (read, expected)) in read.iter().zip(expected).enumerate() {
+            assert_eq!(read, expected, "{kind} {i}");
+        }
+    }
+    rows("node", &read.nodes, &expected.nodes);
+    rows("workload", &read.workloads, &expected.workloads);
+    rows("owner", &read.owners, &expected.owners);
+    rows("group", &read.groups, &expected.groups);
+    rows("model", &read.models, &expected.models);
+    assert_eq!(read.overheads, expected.overheads, "overheads");
+}
+
+/// AC-T7.5.2: do the generated day's node-to-trace-to-node path with one node and no workloads;
+/// expect its advertised microVM classes and the virtualization they require to survive replay.
+#[test]
+fn ac_t7_5_2_a_days_node_capabilities_survive_trace_replay() {
+    let day = Cluster::single_owner(
+        vec![hex_sim::model::NodeSpec::new(
+            hex_sim::model::NodeId(0),
+            Resources {
+                cpu_milli: 1,
+                mem_bytes: 1,
+                ..Resources::default()
+            },
+        )],
+        Vec::new(),
+    );
+    let read = replay::parse(&as_trace(&day), &replay::Limits::default()).unwrap();
+    assert_same_cluster(&read, &day);
+}
+
 /// AC-T7.5.2 over a recorded day: do hex-sim over the day in `HEX_SIM_RECORDED_DAY` (a recorded
 /// workload day in `replay.rs`'s format, an owner per tenant or app) when it is set; expect each owner's part
 /// of the held share under contention within 2% of an equal part. Without a recording, do the
@@ -259,7 +294,7 @@ fn four_equal_weight_owners_over_a_recorded_day() {
         max_overheads: 0,
     };
     let read = replay::parse(&text, &own).unwrap();
-    assert_eq!(read, day);
+    assert_same_cluster(&read, &day);
     let run = sim::run(&read, &config).unwrap();
     let shares = fair::measure(&read, &run.ran, &run.refused, run.report.end).unwrap();
     assert!(shares.worst_from_equal_ppm() <= 5_000, "{shares:?}");
