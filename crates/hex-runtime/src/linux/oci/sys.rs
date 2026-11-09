@@ -87,8 +87,8 @@ pub fn fork_into_cgroup(cgroup: std::os::fd::BorrowedFd<'_>) -> Result<Option<Fo
 }
 
 /// `CLONE_PIDFD` (Linux 5.2, `include/uapi/linux/sched.h`): the kernel writes a pidfd for the child
-/// where `clone_args.pidfd` points. libc's constant is the same value, written here to match
-/// [`crate::linux::sys`]'s own.
+/// where `clone_args.pidfd` points. libc's constant is the same value, written here as
+/// [`crate::linux::sys`] writes `CLONE_INTO_CGROUP`.
 const CLONE_PIDFD: u64 = 0x1000;
 
 /// Forks into a cgroup with a pidfd for the child: `clone3(CLONE_INTO_CGROUP | CLONE_PIDFD)`, so the
@@ -409,24 +409,23 @@ impl Drop for Blocked {
 /// CLONE_PIDFD)`, as posix_spawn clones. No page of this process is copied for the child, and its execve
 /// tears none down; the calling thread waits until the child has exec'd or exited. The caller blocks
 /// signals first ([`block_signals`]). `child` makes system calls alone on memory made before the clone,
-/// and returns only when one failed (the status to exit with, and what): it shares this process's memory
-/// with the process's other threads, so it may take no lock and allocate nothing. `None` on an
-/// architecture without the trampoline below, or a kernel or sandbox without clone3 into a cgroup
-/// (`ENOSYS`, `E2BIG`).
-pub fn clone_vfork<F: Fn() -> (u8, Failure)>(
+/// and returns only when one failed, the status to exit with, having reported why as its caller wants
+/// (the seed's exec writes it to the program's stderr, [`report`]; a process box's spawn leaves its errno
+/// in the memory it shares): it shares this process's memory with the process's other threads, so it may
+/// take no lock and allocate nothing. `None` on an architecture without the trampoline below, or a kernel
+/// or sandbox without clone3 into a cgroup (`ENOSYS`, `E2BIG`).
+pub fn clone_vfork<F: Fn() -> u8>(
     cgroup: std::os::fd::BorrowedFd<'_>,
     stack: &ChildStack,
     child: &F,
 ) -> Result<Option<(i32, std::os::fd::OwnedFd)>, OciError> {
     use std::os::fd::{AsRawFd, FromRawFd};
-    /// The child's start, on its own stack: `child`, then its failure reported and its exit.
-    extern "C" fn entry<F: Fn() -> (u8, Failure)>(arg: *mut libc::c_void) -> ! {
+    /// The child's start, on its own stack: `child`, then its exit.
+    extern "C" fn entry<F: Fn() -> u8>(arg: *mut libc::c_void) -> ! {
         // SAFETY: `arg` is `child`, borrowed by the clone below, alive until this child has exec'd or
         // exited, which the vfork makes its parent thread wait for.
         let child = unsafe { &*arg.cast::<F>().cast_const() };
-        let (code, failed) = child();
-        report(failed);
-        exit_child(code)
+        exit_child(child())
     }
     let page = page_size()?;
     let fd = u64::try_from(cgroup.as_raw_fd())
