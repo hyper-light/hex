@@ -345,7 +345,7 @@ mod tests {
         let mut state = State::new("c1", "/bundle");
         state.pid = 42;
         state.annotations.insert("k".to_owned(), "v".to_owned());
-        let (r, w) = rustix::pipe::pipe().unwrap();
+        let (r, w) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).unwrap();
         let mut w = std::fs::File::from(w);
         send_state(&mut w, &state).unwrap();
         drop(w);
@@ -358,7 +358,7 @@ mod tests {
     fn a_frame_over_its_bound_or_cut_short_is_refused() {
         let over = u32::try_from(MAX_STATE_BYTES + 1).unwrap().to_le_bytes();
         for wire in [over.to_vec(), [4, 0, 0, 0, b'{'].to_vec(), vec![1, 0]] {
-            let (r, w) = rustix::pipe::pipe().unwrap();
+            let (r, w) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).unwrap();
             rustix::io::write(&w, &wire).unwrap();
             drop(w);
             assert!(
@@ -417,7 +417,7 @@ mod tests {
         };
         let frame = start_failure(&long);
         assert!(frame.len() <= MAX_START_FAILURE, "{}", frame.len());
-        let (r, w) = rustix::pipe::pipe().unwrap();
+        let (r, w) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).unwrap();
         rustix::io::write(&w, &frame).unwrap();
         let first = peek_start(r.as_fd()).unwrap().unwrap();
         assert!(
@@ -425,7 +425,7 @@ mod tests {
             "{first}"
         );
         assert_eq!(peek_start(r.as_fd()).unwrap(), Some(first));
-        let (r, w) = rustix::pipe::pipe().unwrap();
+        let (r, w) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).unwrap();
         rustix::io::write(&w, &[START_TAKEN]).unwrap();
         assert_eq!(peek_start(r.as_fd()).unwrap(), None);
     }
@@ -435,7 +435,7 @@ mod tests {
     /// Expect: refused for outliving its timeout, once that has passed: a write blocked for good would never return.
     #[test]
     fn a_hook_that_never_reads_its_stdin_ends_at_its_timeout() {
-        let (probe, _) = rustix::pipe::pipe().unwrap();
+        let (probe, _) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).unwrap();
         let holds = rustix::pipe::fcntl_getpipe_size(&probe).unwrap();
         let mut state = State::new("c1", "/bundle");
         state

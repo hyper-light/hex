@@ -18,7 +18,8 @@ parts, a cut that the detailed trace shows opening another file than the one it 
 summarize writes the run's markdown (stdout) and summary.json beside its results: libcrun's create p50, the seam's,
 and each traced create cut into its parts, grouped as decision 5 of docs/design/runtime-architecture.md weighs them:
 the box's record, the cgroup, the shim's spawn and exec (or, where a seed clones the init, the request to the seed:
-goal 5 plan step 4), the init's set-up, the handshake, and the runtime's own work. A part runs from one event of the call's critical path to the next (create_cuts), so a create's parts cover
+goal 5 plan step 4; where the init was parked in the cgroup the create is given, the request to it: decision 8), the
+init's set-up, the handshake, and the runtime's own work. A part runs from one event of the call's critical path to the next (create_cuts), so a create's parts cover
 it whole, from seam_oci's marker before it to the one after.
 
 The trace, its markers and its reading are exec_breakdown.py's (its module is imported from beside this one):
@@ -40,10 +41,11 @@ RECORD = "the box's record"
 CGROUP = "the cgroup, made and bounded"
 SHIM = "the shim's spawn and exec"
 SEED = "the seed: the request and its clone's preparing"
+REQUEST = "the parked init: the request and its wake"
 INIT = "the init's set-up, to the exec FIFO"
 HANDSHAKE = "the handshake"
 OWN = "the node's and the runtime's own work"
-GROUPS = [RECORD, CGROUP, SHIM, SEED, INIT, HANDSHAKE, OWN]
+GROUPS = [RECORD, CGROUP, SHIM, SEED, REQUEST, INIT, HANDSHAKE, OWN]
 
 # The parts of a create through the seam (node.rs create_oci, oci/run.rs create_in_cgroup, oci/init.rs's shim and
 # container), each (name, group), in critical-path order: part k runs from cut k to cut k+1 (create_cuts).
@@ -152,8 +154,31 @@ CHOSEN_PARTS = [
     ("a fresh cgroup's bounds written; the device program's instructions made", CGROUP),
 ] + ONCE_PARTS[6:]
 PRUNED_CHOSEN_PARTS = CHOSEN_PARTS[:8] + PRUNED_SEED_PARTS[13:23] + CHOSEN_PARTS[18:]
+# The parts of a create given a cgroup with its init parked there (decision 8: a slot made ahead for a box of no owner,
+# its init cloned into it ahead by the refill and parked; node.rs create_oci takes the slot, oci/run.rs hands the init
+# its request, and the init joins its root's mount namespace, made when it parked, and the namespaces made ahead). No
+# seed and no clone on the path, and no root to switch. The record is written once, last, as on the chosen path, but cut
+# at its open's exit, its temp file no part of its own: the open's entry kprobe (create_breakdown_inside.sh's openat_in)
+# never fires where the kernel inlines __x64_sys_openat into x64_sys_call (adacachy2's 7.3 CachyOS kernel, built with
+# clang's LTO: create-breakdown-20261108T223355Z traced open_in's entries and no openat_in at all).
+PARKED_PARTS = [
+    ONCE_PARTS[0],
+    CHOSEN_PARTS[1],
+    CHOSEN_PARTS[2],
+    ("the exec FIFO made; the cgroup taken with its parked init: its files read, its bounds written", CGROUP),
+    ("the root's trees taken (open_tree: the rootfs and /usr)", INIT),
+    ("the bundle, the cgroup and the state directory opened for the init", OWN),
+    ("the pipes made; the request sent to the parked init, which wakes and reads it", REQUEST),
+    ("the init's first steps, to its join of its root's mount namespace", INIT),
+    ("its root's mount namespace joined (setns, kernel)", INIT),
+    ("the init's joins of an ipc and uts pair made ahead, to its join of the network namespace made ahead", INIT),
+    SEED_PARTS[17],
+    ("the init's last steps; ready sent", INIT),
+    SEED_PARTS[21],
+    SEED_PARTS[22],
+] + CREATE_PARTS[29:]
 # The part lists whose record is written once (goal 5 extended step 5), which summarize's bookkeeping reads.
-ONCE_LISTS = (ONCE_PARTS, PRUNED_ONCE_PARTS, CHOSEN_PARTS, PRUNED_CHOSEN_PARTS)
+ONCE_LISTS = (ONCE_PARTS, PRUNED_ONCE_PARTS, CHOSEN_PARTS, PRUNED_CHOSEN_PARTS, PARKED_PARTS)
 # The node's bookkeeping, goal 5 extended step 5's first measure: the record's writes and the container's state
 # written, and read back where it is, as run 4 cut them (its parts 2-6 and 23-29: the record written twice, the state
 # written and read back), bookkeeping_of.
@@ -320,6 +345,64 @@ def chosen_cuts(c, ev, bench, cid):
         c.at.append(pipe)
 
 
+def parked_init(ev, start, bench):
+    """A create's parked init: the process other than the agent whose ready signal (its first write of two bytes, `R`
+    and a newline) comes first from event `start` on, made by no fork in the create's window, so it was there before the
+    create began (decision 8). A fork's child that signals is a shim's or a seed's init, cloned on the path."""
+    ready = first(ev, start, lambda e: e.kind == "enter" and e.name == "write" and e.pid != bench
+                  and "(52:0a)" in e.text, "a ready signal from an init")
+    init = ev[ready].pid
+    held(not any(e.kind == "sched" and e.name == "fork" and e.kv.get("child_pid") == str(init) for e in ev),
+         f"no parked claim: its init {init} was forked on the create's path")
+    return init
+
+
+def parked_cuts(ev, bench, cid):
+    """A create's cuts where it is given a cgroup with its init parked there (PARKED_PARTS): the record looked for in
+    both places, the state directory's mkdir and the exec FIFO's mknod as on the chosen path; then no mkdir and no device
+    program, the cgroup's claim to the root's first tree (open_tree) and its last, the opens for the init to the
+    create's first pipe; the parked init's read of its request (its first pread after the pipe), its join of its root's
+    mount namespace, of the pair made ahead or none, and of the network namespace made ahead, and its ready signal; the
+    agent's open of the init's stat, the state renamed into place, and the record written once."""
+    c = eb.Cuts(ev)
+    c.record_kinds, c.cgroups = [], []
+    looked = lambda p: named(p, f"{cid}.json")  # noqa: E731
+    c.opened(bench, "openat", 2, 0, looked, "the node's look for the box's record in its second place")
+    state = c.to(enter(bench, "mkdir", "mkdirat"), "the state directory's mkdir")
+    held(state_dir(ev[state].path(), cid),
+         f"a parked claim makes the container's state directory first (it made {ev[state].path()!r})")
+    fifo = c.to(enter(bench, "mknodat", "mknod"), "the exec FIFO's mknod")
+    pipe = first(ev, fifo, enter(bench, "pipe2"), "the create's first pipe")
+    held(not any(enter(bench, "mkdir", "mkdirat")(e) for e in ev[fifo:pipe]), "a parked claim makes no cgroup on its path")
+    held(not any(enter(bench, "bpf")(e) for e in ev[fifo:pipe]),
+         "a parked claim loads and attaches no device program on its path (the oci boxes' root carries it)")
+    trees = [i for i in range(fifo, pipe) if enter(bench, "open_tree")(ev[i])]
+    held(len(trees) > 0, "the root's trees taken (open_tree) before the create's first pipe")
+    c.at.append(trees[0])
+    c.at.append(last_before(ev, trees[0], pipe, exited(bench, "open_tree"), "the root's last tree taken"))
+    c.at.append(pipe)
+    c.cgroups.append("parked")
+    init = parked_init(ev, pipe, bench)
+    c.to(exited(init, "pread64"), "the parked init's read of its request")
+    is_join = enter(init, "setns")
+    c.to(lambda e: is_join(e) and arg(e, "flags") == CLONE_NEWNS, "the init's join of its root's mount namespace")
+    c.to(exited(init, "setns"), "that join returning")
+    since = c.at[-1]
+    joins = c.to(lambda e: is_join(e) and arg(e, "flags") == CLONE_NEWNET,
+                 "the init's join of the network namespace made ahead")
+    between = [arg(e, "flags") for e in ev[since:joins] if is_join(e)]
+    held(between in ([], [CLONE_NEWIPC, CLONE_NEWUTS]),
+         "the init joins the pair, or none, between its root's mount namespace and the network namespace")
+    c.to(exited(init, "setns"), "the join returning")
+    ready = c.to(enter(init, "write"), "the init's ready signal")
+    held(arg(ev[ready], "count") == 2, "the init's first write is its ready signal (`R` and a newline)")
+    c.opened(bench, "openat", 1, ready, lambda p: p.startswith("/proc/") and named(p, "stat"),
+             "the agent's open of the init's stat")
+    c.to(exited(bench, *RENAMES), "the container's state renamed into place")
+    record_write_cuts(c, ev, bench, cid, 2)
+    return c
+
+
 def create_cuts(ev, bench, cid, seeded=False, pruned=False, once=False, chosen=False):
     """A create's cuts on the shim path, with `seeded` on the seed path (goal 5 plan step 4), or with
     `pruned` on the pruned-seed path (goal 5 plan step 2): the init builds its root from descriptors and
@@ -482,6 +565,7 @@ PRUNED_CHOSEN_OPS = {
     "create": (PRUNED_CHOSEN_PARTS,
                lambda ev, bench, cid: create_cuts(ev, bench, cid, seeded=True, pruned=True, once=True, chosen=True))
 }
+PARKED_OPS = {"create": (PARKED_PARTS, parked_cuts)}
 
 
 def ops_for(trace):
@@ -489,7 +573,8 @@ def ops_for(trace):
     init, goal 5 plan step 4), else the shim path's, read from the trace's first traced create; on the seed path,
     the record-once path's when the agent renamed nothing into place before its first mkdir, the box's cgroup (goal
     5 extended step 5), and the chosen cgroup's when that first mkdir is the container's state directory (goal 5
-    extended step 6: an owner's box, its cgroup chosen once the runtime has read its spec)."""
+    extended step 6: an owner's box, its cgroup chosen once the runtime has read its spec), and the parked claim's
+    when that create's init was there before it began, parked in the cgroup it was given (decision 8, parked_init)."""
     ev, _ = eb.parse(trace)
     begin = next((i for i, e in enumerate(ev) if e.kind == "mark" and e.text.split()[:3] == ["hexbd", "B", "create"]),
                  None)
@@ -498,13 +583,16 @@ def ops_for(trace):
     bench = ev[begin].pid
     cid = ev[begin].text.split()[3]
     renamed, made, chosen = False, False, False
-    for e in ev[begin + 1:]:
+    for i in range(begin + 1, len(ev)):
+        e = ev[i]
         if e.kind == "mark" and e.pid == bench and e.text.split()[:2] == ["hexbd", "E"]:
             # Seeded. The pruned-seed path's init chroots and never pivot_roots (goal 5 plan step 2); the
             # classic seed path pivot_roots. Tell them apart by whether any init chroots in the trace. A record
             # renamed into place before the cgroup's mkdir is the record written twice; none, written once
             # (goal 5 extended step 5).
             pruned = any(x.kind == "enter" and x.name == "chroot" for x in ev)
+            if chosen and parked(ev[begin:i + 1], bench):
+                return PARKED_OPS
             if chosen:
                 return PRUNED_CHOSEN_OPS if pruned else CHOSEN_OPS
             if pruned:
@@ -517,6 +605,15 @@ def ops_for(trace):
             made = e.kind == "enter" and e.name in ("mkdir", "mkdirat")
             chosen = made and not renamed and state_dir(e.path(), cid)
     return OPS
+
+
+def parked(window, bench):
+    """Whether a create's window is a parked claim's: an init signals ready that no fork in it made (parked_init)."""
+    try:
+        parked_init(window, 0, bench)
+    except Missing:
+        return False
+    return True
 
 
 def check(run, prefix):
@@ -771,7 +868,20 @@ def summarize(run):
                   f"{eb.ms3(ratio(sum_p50, target))}x it. Take away the device program's load and attach, the root's "
                   f"mounts and pivot_root, and the cgroup's making, each whole, and {left:.3f} ms is left, "
                   f"{eb.ms3(ratio(left, target))}x the target.", ""]
-    elif whole and between["p50"] and libcrun["p50"]:
+    elif whole and between["p50"] and libcrun["p50"] and REQUEST in groups:
+        # The parked claim (decision 8): no seed and no shim on the path, nothing of either to take away. Each group's
+        # part p50s summed, against the create, and goal 5's target, a quarter of libcrun's create p50 in the same run.
+        create = between["p50"]
+        target = libcrun["p50"] / 4
+        s["levers"] = {"create_p50_ms": create, "libcrun_create_p50_ms": libcrun["p50"], "target_ms": target,
+                       "create_over_target": ratio(create, target),
+                       "groups_ms": {g: groups[g]["p50"] for g in groups_here}}
+        lines += [f"## Where a parked claim's create goes (pooled part p50s, against the creates between, p50 "
+                  f"{create:.3f} ms)", "", "| group | ms | share of create |", "|---|---|---|"]
+        lines += [f"| {g} | {groups[g]['p50']:.3f} | {100 * groups[g]['p50'] / create:.1f}% |" for g in groups_here]
+        lines += ["", f"Goal 5's target, a quarter of libcrun's create p50 ({libcrun['p50']:.3f} ms pooled), is "
+                  f"{target:.3f} ms: the create is {eb.ms3(ratio(create, target))}x it.", ""]
+    elif whole and between["p50"] and libcrun["p50"] and SHIM in groups:
         create = between["p50"]
         fsyncs = sum(parts[k]["p50"] for k in fsyncs_of(spec))
         shim = groups[SHIM]["p50"]

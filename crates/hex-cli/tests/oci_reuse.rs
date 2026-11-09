@@ -298,12 +298,17 @@ fn has_ended(fd: &OwnedFd) -> bool {
     rustix::event::poll(&mut fds, Some(&now)).unwrap() > 0
 }
 
-/// Runs `program` in box `id` to its end.
-fn run(node: &Node, id: &BoxId, program: Program) -> Exit {
+/// Runs `program` in box `id` to its end, waiting as `wait`, its end's own record, says: for at most its deadline, or,
+/// while it measures, for the end alone. Its answer is told to `wait` and to the census as [`until`]'s are.
+fn run(node: &Node, id: &BoxId, program: Program, wait: &Patience) -> Exit {
     let mut p = node.exec(id, program, Stdio::null()).expect("exec");
-    p.wait_for(PATIENCE)
+    let began = Instant::now();
+    let exit = p
+        .wait_for(wait.deadline().unwrap_or(Duration::MAX))
         .expect("wait")
-        .expect("the program ended in time")
+        .expect("the program ended in time");
+    hex_testkit::waits::answered(wait, began.elapsed());
+    exit
 }
 
 fn exercise(own: &Path, cache: &Path, exe: &str) {
@@ -327,6 +332,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     a_box_of_no_owner_is_made_by_an_init_parked_in_a_cgroup_made_ahead(&lab, own);
     a_box_of_no_owner_made_ahead_looks_up_nothing_in_cgroupfs(&lab, own);
     a_box_of_no_owner_made_ahead_is_given_its_own_bounds_alone(&lab, own);
+    a_box_of_no_owner_made_ahead_reads_none_of_its_counters(&lab, own);
     a_reused_cgroups_cpu_max_is_written_only_when_its_values_differ(&lab, own);
     each_guard_gives_a_fresh_cgroup_and_counts_why(&lab, own);
     a_boxs_network_namespace_is_reused_within_its_owner_when_clean(&lab, own);
@@ -672,15 +678,18 @@ fn a_box_of_one_owner_is_given_the_cgroup_its_earlier_box_left(lab: &Lab, own: &
         "-c",
         "head -c 3000000000 /dev/zero | sha256sum >/dev/null",
     ]);
-    assert_eq!(run(&node, &a, burn), Exit::Code(0));
-    assert_eq!(run(&node, &a, selftest(&Act::Hog(A_HOG))), Exit::Code(0));
+    assert_eq!(run(&node, &a, burn, &BURN_ENDS), Exit::Code(0));
     assert_eq!(
-        run(&node, &a, selftest(&Act::Hog(512 << 20))),
+        run(&node, &a, selftest(&Act::Hog(A_HOG)), &HOG_ENDS),
+        Exit::Code(0)
+    );
+    assert_eq!(
+        run(&node, &a, selftest(&Act::Hog(512 << 20)), &OOM_ENDS),
         Exit::Signal(9),
         "a program past A's memory bound is OOM-killed"
     );
     assert_ne!(
-        run(&node, &a, selftest(&Act::Spawn(64))),
+        run(&node, &a, selftest(&Act::Spawn(64)), &REFUSED_ENDS),
         Exit::Code(0),
         "a program past A's process bound fails"
     );
@@ -923,7 +932,10 @@ fn an_owners_next_box_is_made_by_the_init_parked_in_its_idle_cgroup(lab: &Lab, o
         );
     }
     node.start(&b).unwrap();
-    assert_eq!(run(&node, &b, Program::of(&["/bin/true"])), Exit::Code(0));
+    assert_eq!(
+        run(&node, &b, Program::of(&["/bin/true"]), &TRUE_ENDS),
+        Exit::Code(0)
+    );
     node.delete(&b).unwrap();
     node.release_idle().unwrap();
     assert!(
@@ -989,7 +1001,10 @@ fn a_parked_init_made_with_other_namespaces_is_ended_and_counted(lab: &Lab, own:
     );
     assert!(has_ended(&init), "the parked init has ended");
     node.start(&b).unwrap();
-    assert_eq!(run(&node, &b, Program::of(&["/bin/true"])), Exit::Code(0));
+    assert_eq!(
+        run(&node, &b, Program::of(&["/bin/true"]), &TRUE_ENDS),
+        Exit::Code(0)
+    );
     node.delete(&b).unwrap();
     node.release_idle().unwrap();
     eprintln!("parked init made with other namespaces: ended, counted");
@@ -1163,7 +1178,10 @@ fn a_box_of_no_owner_is_made_by_an_init_parked_in_a_cgroup_made_ahead(lab: &Lab,
         after.parked
     );
     node.start(&n2).unwrap();
-    assert_eq!(run(&node, &n2, Program::of(&["/bin/true"])), Exit::Code(0));
+    assert_eq!(
+        run(&node, &n2, Program::of(&["/bin/true"]), &TRUE_ENDS),
+        Exit::Code(0)
+    );
     node.delete(&n2).unwrap();
     assert!(
         !slot.exists(),
@@ -1214,7 +1232,10 @@ fn a_box_of_no_owner_made_ahead_looks_up_nothing_in_cgroupfs(lab: &Lab, own: &Pa
     assert_eq!(lookups, 0, "N2's create looked up {lookups} cgroupfs names");
     let n2 = BoxId::new("q2").unwrap();
     node.start(&n2).unwrap();
-    assert_eq!(run(&node, &n2, Program::of(&["/bin/true"])), Exit::Code(0));
+    assert_eq!(
+        run(&node, &n2, Program::of(&["/bin/true"]), &TRUE_ENDS),
+        Exit::Code(0)
+    );
     node.delete(&n2).unwrap();
     node.release_idle().unwrap();
     eprintln!("test 2f: a create in a cgroup made ahead, no cgroupfs lookup on its thread");
@@ -1268,7 +1289,8 @@ fn a_box_of_no_owner_made_ahead_is_given_its_own_bounds_alone(lab: &Lab, own: &P
         "N2 took the cgroup made ahead"
     );
     if let Some(written) = watch.files_written() {
-        let own: BTreeSet<String> = ["memory.max", "memory.swap.max", "pids.max", "memory.peak"]
+        // Its peak was reset by the refill once its init parked (test 2h), so the take writes the box's bounds alone.
+        let own: BTreeSet<String> = ["memory.max", "memory.swap.max", "pids.max"]
             .into_iter()
             .filter(|f| slot.join(f).exists())
             .map(str::to_owned)
@@ -1281,6 +1303,118 @@ fn a_box_of_no_owner_made_ahead_is_given_its_own_bounds_alone(lab: &Lab, own: &P
     node.delete(&n2).unwrap();
     node.release_idle().unwrap();
     eprintln!("test 2g: a box of no owner made ahead given its own bounds alone");
+}
+
+/// Test 2h (goal 16; the breakdown's part 4, create-breakdown-20261109T164604Z: the claim's 0.030 ms p50, its reads of
+/// the slot's counters among it). Do: wait for a cgroup made ahead, watch its files for reads and writes, and create a
+/// box of no owner, which takes it. Expect: the take reads none of the counters a box's usage is reported from and
+/// resets no peak, the refill having done both once the slot's init parked, as the init does nothing until taken; and
+/// the box's usage still starts there: its CPU under a lifecycle's most, its OOM kills and refused forks 0.
+fn a_box_of_no_owner_made_ahead_reads_none_of_its_counters(lab: &Lab, own: &Path) {
+    let (node, _state) = lab.node(&own.join("hex-reuse-counters"));
+    let node = node.with_inits_ahead(1);
+    let n1 = BoxId::new("c1").unwrap();
+    node.create(lab.oci("c1", None, Caps::Docker, Bounds::default()))
+        .unwrap();
+    let root = node
+        .cgroup_dir(&n1)
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    node.delete(&n1).unwrap();
+    wait_for(
+        &MADE_AHEAD,
+        || node.cgroup_reuse().unwrap().ahead.ready != 0,
+        "a cgroup made ahead",
+    );
+    let ready = populated_slots(&root);
+    assert_eq!(ready.len(), 1, "the one made ahead: {ready:?}");
+    let slot = ready[0].0.clone();
+    let Some(watch) = Touched::on(&slot) else {
+        eprintln!("test 2h: SKIP, no inotify instance left for this user here (EMFILE)");
+        node.release_idle().unwrap();
+        return;
+    };
+    node.create(lab.oci("c2", None, Caps::Docker, Bounds::default()))
+        .unwrap();
+    let n2 = BoxId::new("c2").unwrap();
+    assert_eq!(
+        node.cgroup_dir(&n2).as_deref(),
+        Some(slot.as_path()),
+        "C2 took the cgroup made ahead"
+    );
+    let (read, written) = watch.files();
+    let counters: BTreeSet<String> = ["memory.events", "pids.events", "cpu.stat", "io.stat"]
+        .into_iter()
+        .filter(|f| slot.join(f).exists())
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        read.is_disjoint(&counters),
+        "C2's take read the counters {:?}",
+        read.intersection(&counters).collect::<Vec<_>>()
+    );
+    assert!(
+        !written.contains("memory.peak"),
+        "C2's take reset its peak: {written:?}"
+    );
+    let usage = node.usage(&n2).unwrap();
+    assert!(
+        usage.cpu_usec < LIFECYCLE_CPU_MOST_US && usage.oom_kills == 0 && usage.pids_refused == 0,
+        "C2's usage starts where the refill read it: {usage:?}"
+    );
+    node.delete(&n2).unwrap();
+    node.release_idle().unwrap();
+    eprintln!(
+        "test 2h: a box of no owner made ahead reads none of its counters on its create's path"
+    );
+}
+
+/// The files of a cgroup read and written while it is watched (inotify's IN_ACCESS and IN_MODIFY on its directory:
+/// the VFS notifies each read and write of a cgroupfs file as of any other), or `None` where no inotify instance is left.
+struct Touched(OwnedFd);
+
+impl Touched {
+    fn on(cgroup: &Path) -> Option<Self> {
+        let fd = match inotify::init(inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK)
+        {
+            Ok(fd) => fd,
+            Err(rustix::io::Errno::MFILE) => return None,
+            Err(e) => panic!("inotify: {e}"),
+        };
+        inotify::add_watch(
+            &fd,
+            cgroup,
+            inotify::WatchFlags::ACCESS | inotify::WatchFlags::MODIFY,
+        )
+        .expect("watch the cgroup's directory");
+        Some(Self(fd))
+    }
+
+    /// The files read and the files written since the watch began.
+    fn files(&self) -> (BTreeSet<String>, BTreeSet<String>) {
+        let (mut read, mut written) = (BTreeSet::new(), BTreeSet::new());
+        let mut buf = [MaybeUninit::<u8>::uninit(); 4096];
+        let mut events = inotify::Reader::new(&self.0, &mut buf);
+        loop {
+            match events.next() {
+                Ok(e) => {
+                    let Some(name) = e.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                        continue;
+                    };
+                    if e.events().contains(inotify::ReadFlags::ACCESS) {
+                        read.insert(name.clone());
+                    }
+                    if e.events().contains(inotify::ReadFlags::MODIFY) {
+                        written.insert(name);
+                    }
+                }
+                Err(rustix::io::Errno::AGAIN) => return (read, written),
+                Err(e) => panic!("reading the cgroup's watch: {e}"),
+            }
+        }
+    }
 }
 
 /// Decision 8, "The p99.9 that stayed" (AC-T7.1.3): recovery removes the inits a node parked. Do: A of O created and
@@ -2151,7 +2285,8 @@ fn a_box_can_not_send_to_the_socket_the_check_keeps_in_its_namespace(lab: &Lab, 
         run(
             &node,
             &b,
-            Program::of(&["/hex", "selftest-box", "netlink-to", &portid])
+            Program::of(&["/hex", "selftest-box", "netlink-to", &portid]),
+            &SEND_ENDS,
         ),
         Exit::Code(1),
         "B's send to the node's socket is refused, EPERM"
@@ -2160,7 +2295,8 @@ fn a_box_can_not_send_to_the_socket_the_check_keeps_in_its_namespace(lab: &Lab, 
         run(
             &node,
             &b,
-            Program::of(&["/hex", "selftest-box", "netlink-to", "0"])
+            Program::of(&["/hex", "selftest-box", "netlink-to", "0"]),
+            &SEND_ENDS,
         ),
         Exit::Code(0),
         "B's send to the kernel goes"
@@ -2357,6 +2493,20 @@ fn wait_for(wait: &Patience, cond: impl FnMut() -> bool, what: &str) -> u64 {
 static KILLED: Patience = Patience::seeded("test.oci_reuse.killed", EMPTYING);
 /// An init's run to its end: the program-run record.
 static INIT_ENDS: Patience = Patience::seeded("test.oci_reuse.init_ends", PROGRAM);
+/// An exec of `true` run to its end: the program-run record's own fact (`lifecycle.exec`, an exec of `true`).
+static TRUE_ENDS: Patience = Patience::seeded("test.oci_reuse.true_ends", PROGRAM);
+/// A 3 GB sha256 burn's end, a 64 MiB hog's, a 1 MiB hog's, a hog's OOM kill past its bound, a spawn's refusal past
+/// its bound, and 64 MiB written to a box's root: none is an exec of `true`, whose end the program-run record is (each
+/// runs its own work first), and no recorded operation makes any.
+static BURN_ENDS: Patience = Patience::measuring("test.oci_reuse.burn_ends");
+static HOG_ENDS: Patience = Patience::measuring("test.oci_reuse.hog_ends");
+static SMALL_HOG_ENDS: Patience = Patience::measuring("test.oci_reuse.small_hog_ends");
+static OOM_ENDS: Patience = Patience::measuring("test.oci_reuse.oom_ends");
+static REFUSED_ENDS: Patience = Patience::measuring("test.oci_reuse.refused_ends");
+static WRITE_ENDS: Patience = Patience::measuring("test.oci_reuse.write_ends");
+/// A box's netlink send's end, refused or taken: the hex binary run in the box to its own socket's send, not an exec of
+/// `true`'s, and made by no recorded operation.
+static SEND_ENDS: Patience = Patience::measuring("test.oci_reuse.send_ends");
 /// An owner's idle slot given its parked init: made within the delete (`Cgroups::give_back`), whose record bounds it.
 static PARKED: Patience = Patience::seeded("test.oci_reuse.parked", DELETE);
 /// A parked init asleep for its claim once its delete has answered: its own steps after it said it is parked, which
@@ -2382,7 +2532,7 @@ fn a_state_guard(
     lab: &Lab,
     node: &Node,
     case: &str,
-    work: Option<Program>,
+    work: Option<(Program, &Patience)>,
     leave: impl FnOnce(&Path),
     reason: Refused,
 ) {
@@ -2396,8 +2546,8 @@ fn a_state_guard(
     ))
     .unwrap();
     node.start(&a).unwrap();
-    if let Some(work) = work {
-        assert_eq!(run(node, &a, work), Exit::Code(0), "{case}: A's work");
+    if let Some((work, wait)) = work {
+        assert_eq!(run(node, &a, work, wait), Exit::Code(0), "{case}: A's work");
     }
     let slot = node.cgroup_dir(&a).unwrap();
     node.delete(&a).unwrap();
@@ -2479,11 +2629,10 @@ fn each_guard_gives_a_fresh_cgroup_and_counts_why(lab: &Lab, own: &Path) {
         lab,
         &node,
         "charged",
-        Some(Program::of(&[
-            "/bin/sh",
-            "-c",
-            "head -c 67108864 /dev/zero > /big",
-        ])),
+        Some((
+            Program::of(&["/bin/sh", "-c", "head -c 67108864 /dev/zero > /big"]),
+            &WRITE_ENDS,
+        )),
         |slot| {
             let charged: u64 = read(slot, "memory.current").parse().unwrap();
             assert!(charged >= 60 << 20, "A left {charged} bytes charged");
@@ -2530,7 +2679,7 @@ fn each_guard_gives_a_fresh_cgroup_and_counts_why(lab: &Lab, own: &Path) {
     );
     node.start(&b).unwrap();
     assert_eq!(
-        run(&node, &b, selftest(&Act::Hog(1 << 20))),
+        run(&node, &b, selftest(&Act::Hog(1 << 20)), &SMALL_HOG_ENDS),
         Exit::Code(0),
         "B's init and its programs run"
     );

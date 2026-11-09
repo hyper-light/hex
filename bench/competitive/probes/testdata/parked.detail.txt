@@ -1,0 +1,208 @@
+        seam_oci-503567  [006] ...1. 79178.810788: tracing_mark_write: hexbd B create l000001
+        seam_oci-503567  [006] ..... 79178.810789: sys_openat(dfd: 18446744073709551516, filename: 140723013913552 "/run/hex-node/8b7e1b057b9f88c8.records/00/l000001.json", flags: O_RDONLY|O_CLOEXEC)
+        seam_oci-503567  [006] ..... 79178.810790: sys_openat -> 0xfffffffffffffffe
+        seam_oci-503567  [006] ..... 79178.810791: sys_openat(dfd: 18446744073709551516, filename: 140723013913552 "/root/.cache/hex-t7/ociseam/ociseam-a0GZAG/l000001.json", flags: O_RDONLY|O_CLOEXEC)
+        seam_oci-503567  [006] ..... 79178.810795: sys_openat -> 0xfffffffffffffffe
+        seam_oci-503567  [006] ..... 79178.810797: sys_mkdir(pathname: 0x7ffca1417120 "/run/hex-node/30/8b7e1b057b9f88c8-l000001", mode: 0x1ff)
+        seam_oci-503567  [006] ..... 79178.810799: sys_mkdir -> 0xfffffffffffffffe
+        seam_oci-503567  [006] ..... 79178.810799: sys_mkdir(pathname: 0x7ffca1417120 "/run/hex-node/30", mode: 0x1ff)
+        seam_oci-503567  [006] ..... 79178.810801: sys_mkdir -> 0x0
+        seam_oci-503567  [006] ..... 79178.810801: sys_mkdir(pathname: 0x7ffca1417120 "/run/hex-node/30/8b7e1b057b9f88c8-l000001", mode: 0x1ff)
+        seam_oci-503567  [006] ..... 79178.810806: sys_mkdir -> 0x0
+        seam_oci-503567  [006] ..... 79178.810808: sys_openat(dfd: 18446744073709551516, filename: 140723013907088 "/run/bundle-sleep/config.json", flags: O_RDONLY|O_CLOEXEC)
+        seam_oci-503567  [006] ..... 79178.810809: sys_openat -> 0x15
+        seam_oci-503567  [006] ..... 79178.810809: sys_close(fd: 0x15)
+        seam_oci-503567  [006] ..... 79178.810809: sys_close -> 0x0
+        seam_oci-503567  [006] ..... 79178.810815: sys_openat(dfd: 18446744073709551516, filename: 140723013906888 "/run/hex-node/30/8b7e1b057b9f88c8-l000001/checked.json", flags: O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC, mode: 0600)
+        seam_oci-503567  [006] ..... 79178.810816: sys_openat -> 0x15
+        seam_oci-503567  [006] ..... 79178.810818: sys_close(fd: 0x15)
+        seam_oci-503567  [006] ..... 79178.810818: sys_close -> 0x0
+        seam_oci-503567  [006] ..... 79178.810823: sys_mknodat(dfd: 0xffffff9c, filename: 0x7ffca14178a0 "/run/hex-node/30/8b7e1b057b9f88c8-l000001/exec.fifo", mode: 0x1192, dev: 0)
+        seam_oci-503567  [006] ..... 79178.810835: sys_close(fd: 0x3e)
+        seam_oci-503567  [006] ..... 79178.810835: sys_close -> 0x0
+        seam_oci-503567  [006] ..... 79178.810837: sys_pread64 -> 0xb
+        seam_oci-503567  [006] ..... 79178.810837: sys_pread64 -> 0x0
+        seam_oci-503567  [006] ..... 79178.810837: sys_close(fd: 0x3e)
+        seam_oci-503567  [006] ..... 79178.810837: sys_close -> 0x0
+        seam_oci-503567  [006] ..... 79178.810839: sys_close(fd: 0x3e)
+        seam_oci-503567  [006] ..... 79178.810839: sys_close -> 0x0
+        seam_oci-503567  [006] ..... 79178.810841: sys_close(fd: 0x3e)
+        seam_oci-503567  [006] ..... 79178.810841: sys_close -> 0x0
+        seam_oci-503567  [006] ..... 79178.810842: sys_close(fd: 0x3e)
+        seam_oci-503567  [006] ..... 79178.810842: sys_close -> 0x0
+        seam_oci-503567  [006] ..... 79178.810845: sys_close(fd: 0x3e)
+        seam_oci-503567  [006] ..... 79178.810845: sys_close -> 0x0
+        seam_oci-503567  [006] ..... 79178.810846: sys_close(fd: 0x3e)
+        seam_oci-503567  [006] ..... 79178.810846: sys_close -> 0x0
+        seam_oci-503567  [006] ..... 79178.810849: sys_pread64 -> 0x46
+        seam_oci-503567  [006] ..... 79178.810849: sys_pread64 -> 0x0
+        seam_oci-503567  [006] ..... 79178.810849: sys_close(fd: 0x3e)
+        seam_oci-503567  [006] ..... 79178.810849: sys_close -> 0x0
+        seam_oci-503567  [006] ..... 79178.810850: sys_pread64 -> 0x6
+        seam_oci-503567  [006] ..... 79178.810851: sys_pread64 -> 0x0
+        seam_oci-503567  [006] ..... 79178.810851: sys_close(fd: 0x3e)
+        seam_oci-503567  [006] ..... 79178.810851: sys_close -> 0x0
+        seam_oci-503567  [006] ..... 79178.810860: sys_pread64 -> 0x98
+        seam_oci-503567  [006] ..... 79178.810860: sys_pread64 -> 0x0
+        seam_oci-503567  [006] ..... 79178.810861: sys_close(fd: 0x3e)
+        seam_oci-503567  [006] ..... 79178.810861: sys_close -> 0x0
+        seam_oci-503567  [006] ..... 79178.810863: sys_pread64 -> 0x0
+        seam_oci-503567  [006] ..... 79178.810863: sys_close(fd: 0x3e)
+        seam_oci-503567  [006] ..... 79178.810864: sys_close -> 0x0
+        seam_oci-503567  [006] ..... 79178.810869: sys_open_tree(dfd: 0xffffff9c, filename: 0x7ffca1416cf8 "/run/bundle-sleep/rootfs", flags: 0x88002)
+        seam_oci-503567  [006] ..... 79178.810878: sys_open_tree -> 0xb2
+        seam_oci-503567  [006] ..... 79178.810878: sys_open_tree(dfd: 0xffffff9c, filename: 0x7ffca1416d00 "/usr", flags: 0x88001)
+        seam_oci-503567  [006] ..... 79178.810880: sys_open_tree -> 0xb7
+        seam_oci-503567  [006] ..... 79178.810881: sys_open(filename: 0x7ffca1416d00 "/run/bundle-sleep", flags: 0x298000, mode: 0)
+        seam_oci-503567  [006] ..... 79178.810881: open_in: (__x64_sys_open+0x4/0x30)
+        seam_oci-503567  [006] ..... 79178.810882: sys_open -> 0xb9
+        seam_oci-503567  [006] ..... 79178.810882: sys_open(filename: 0x7ffca1416d00 "/sys/fs/cgroup/hex-oci-seam/.oci/.0", flags: 0x98000, mode: 0)
+        seam_oci-503567  [006] ..... 79178.810882: open_in: (__x64_sys_open+0x4/0x30)
+        seam_oci-503567  [006] ..... 79178.810885: sys_open -> 0xba
+        seam_oci-503567  [006] ..... 79178.810885: sys_open(filename: 0x7ffca1416d00 "/run/hex-node/30/8b7e1b057b9f88c8-l000001", flags: 0x298000, mode: 0)
+        seam_oci-503567  [006] ..... 79178.810885: open_in: (__x64_sys_open+0x4/0x30)
+        seam_oci-503567  [006] ..... 79178.810886: sys_open -> 0xbc
+        seam_oci-503567  [006] ..... 79178.810890: sys_pipe2(fildes: 0x7ffca1416ac0, flags: 0x80000)
+        seam_oci-503567  [006] ..... 79178.810892: sys_pipe2(fildes: 0x7ffca1416ac0, flags: 0x80000)
+             hex-503582  [014] ..... 79178.810895: sys_clone3(uargs: 0x7ffc131025d8, size: 0x58)
+             hex-503586  [004] ..... 79178.810930: sys_pread64 -> 0x249
+             hex-503582  [014] ..... 79178.810930: sched_process_fork: comm=hex pid=503582 child_comm=hex child_pid=503591
+             hex-503582  [014] ..... 79178.810933: sys_clone3 -> 0xb1
+             hex-503582  [014] ..... 79178.810934: sys_close(fd: 6)
+             hex-503582  [014] ..... 79178.810934: sys_close -> 0x0
+             hex-503582  [014] ..... 79178.810934: sys_close(fd: 7)
+             hex-503582  [014] ..... 79178.810935: sys_close -> 0x0
+             hex-503591  [015] ..... 79178.810935: sys_clone3 -> 0x0
+             hex-503582  [014] ..... 79178.810938: sys_close(fd: 8)
+             hex-503582  [014] ..... 79178.810938: sys_close -> 0x0
+             hex-503591  [015] ..... 79178.810942: sys_close(fd: 6)
+             hex-503591  [013] ..... 79178.810945: sys_close -> 0x0
+             hex-503591  [013] ..... 79178.810946: sys_pipe2(fildes: 0x7ffc13102760, flags: 0x80000)
+             hex-503591  [013] ..... 79178.810951: sys_close(fd: 8)
+             hex-503591  [013] ..... 79178.810951: sys_close -> 0x0
+             hex-503591  [013] ..... 79178.810951: sys_close(fd: 6)
+             hex-503591  [013] ..... 79178.810951: sys_close -> 0x0
+             hex-503586  [004] ..... 79178.810955: sys_close(fd: 0x15)
+             hex-503586  [004] ..... 79178.810955: sys_close -> 0x0
+             hex-503586  [004] ..... 79178.810956: sys_close(fd: 0xa)
+             hex-503586  [004] ..... 79178.810956: sys_close -> 0x0
+             hex-503586  [004] ..... 79178.810958: sys_close(fd: 8)
+             hex-503586  [004] ..... 79178.810958: sys_close -> 0x0
+             hex-503591  [013] ..... 79178.810960: sys_close(fd: 6)
+             hex-503591  [013] ..... 79178.810960: sys_close -> 0x0
+             hex-503586  [004] ..... 79178.810966: sys_close(fd: 8)
+             hex-503586  [004] ..... 79178.810966: sys_close -> 0x0
+        seam_oci-503567  [006] ..... 79178.810968: sys_ppoll -> 0x1
+        seam_oci-503567  [006] ..... 79178.810971: sys_close(fd: 0xb6)
+        seam_oci-503567  [006] ..... 79178.810972: sys_close -> 0x0
+        seam_oci-503567  [006] ..... 79178.810972: sys_close(fd: 0x54)
+        seam_oci-503567  [006] ..... 79178.810973: sys_close -> 0x0
+        seam_oci-503567  [006] ..... 79178.810974: sys_close(fd: 0x29)
+        seam_oci-503567  [006] ..... 79178.810974: sys_close -> 0x0
+        seam_oci-503567  [006] ..... 79178.810975: sys_close(fd: 0xbe)
+        seam_oci-503567  [006] ..... 79178.810975: sys_close -> 0x0
+        seam_oci-503567  [006] ..... 79178.810975: sys_close(fd: 0xbf)
+        seam_oci-503567  [006] ..... 79178.810975: sys_close -> 0x0
+        seam_oci-503567  [006] ..... 79178.810976: sys_close(fd: 0x3c)
+        seam_oci-503567  [006] ..... 79178.810976: sys_close -> 0x0
+        seam_oci-503567  [006] ..... 79178.810976: sys_close(fd: 0x6e)
+        seam_oci-503567  [006] ..... 79178.810976: sys_close -> 0x0
+        seam_oci-503567  [006] ..... 79178.810976: sys_close(fd: 0xb9)
+             hex-503586  [004] ..... 79178.810976: sys_setns(fd: 0xd, flags: 0x20000)
+        seam_oci-503567  [006] ..... 79178.810976: sys_close -> 0x0
+        seam_oci-503567  [006] ..... 79178.810976: sys_close(fd: 0xba)
+        seam_oci-503567  [006] ..... 79178.810977: sys_close -> 0x0
+        seam_oci-503567  [006] ..... 79178.810977: sys_close(fd: 0xbc)
+        seam_oci-503567  [006] ..... 79178.810977: sys_close -> 0x0
+        seam_oci-503567  [006] ..... 79178.810977: sys_close(fd: 0xb2)
+        seam_oci-503567  [006] ..... 79178.810977: sys_close -> 0x0
+        seam_oci-503567  [006] ..... 79178.810977: sys_close(fd: 0x44)
+        seam_oci-503567  [006] ..... 79178.810977: sys_close -> 0x0
+        seam_oci-503567  [006] ..... 79178.810977: sys_close(fd: 0x16)
+        seam_oci-503567  [006] ..... 79178.810977: sys_close -> 0x0
+        seam_oci-503567  [006] ..... 79178.810977: sys_close(fd: 0x17)
+        seam_oci-503567  [006] ..... 79178.810978: sys_close -> 0x0
+        seam_oci-503567  [006] ..... 79178.810978: sys_close(fd: 0xbb)
+        seam_oci-503567  [006] ..... 79178.810978: sys_close -> 0x0
+        seam_oci-503567  [006] ..... 79178.810978: sys_close(fd: 0xb7)
+        seam_oci-503567  [006] ..... 79178.810978: sys_close -> 0x0
+             hex-503586  [004] ..... 79178.810978: sys_setns -> 0x0
+             hex-503586  [004] ..... 79178.810978: sys_open(filename: 0x7ffc78263788 "/", flags: 0x298000, mode: 0)
+             hex-503586  [004] ..... 79178.810978: open_in: (__x64_sys_open+0x4/0x30)
+             hex-503586  [004] ..... 79178.810979: sys_open -> 0x8
+             hex-503586  [004] ..... 79178.810979: sys_close(fd: 0xd)
+             hex-503586  [004] ..... 79178.810980: sys_close -> 0x0
+             hex-503586  [004] ..... 79178.810980: sys_setns(fd: 0x10, flags: 0x8000000)
+             hex-503586  [004] ..... 79178.810981: sys_setns -> 0x0
+             hex-503586  [004] ..... 79178.810981: sys_setns(fd: 0x11, flags: 0x4000000)
+             hex-503586  [004] ..... 79178.810981: sys_setns -> 0x0
+             hex-503586  [004] ..... 79178.810981: sys_setns(fd: 9, flags: 0x40000000)
+             hex-503586  [004] ..... 79178.810982: sys_setns -> 0x0
+             hex-503586  [004] ..... 79178.810982: sys_close(fd: 9)
+             hex-503586  [004] ..... 79178.810983: sys_close -> 0x0
+             hex-503586  [004] ..... 79178.810991: sys_close(fd: 9)
+             hex-503586  [004] ..... 79178.810991: sys_close -> 0x0
+             hex-503586  [004] ..... 79178.810993: sys_close(fd: 9)
+             hex-503586  [004] ..... 79178.810993: sys_close -> 0x0
+             hex-503586  [004] ..... 79178.810993: sys_close(fd: 9)
+             hex-503586  [004] ..... 79178.810994: sys_close -> 0x0
+             hex-503586  [004] ..... 79178.810995: sys_close(fd: 9)
+             hex-503586  [004] ..... 79178.810995: sys_close -> 0x0
+             hex-503586  [004] ..... 79178.810999: sys_write(fd: 6, buf: 0x55556f564c20 (52:0a) "R.", count: 2)
+             hex-503586  [004] ..... 79178.811004: sys_openat(dfd: 12, filename: 140722324254552 "exec.fifo", flags: O_WRONLY|O_LARGEFILE)
+        seam_oci-503567  [005] ..... 79178.811008: sys_close(fd: 0x17)
+        seam_oci-503567  [005] ..... 79178.811009: sys_close -> 0x0
+        seam_oci-503567  [005] ..... 79178.811009: sys_close(fd: 0x16)
+        seam_oci-503567  [005] ..... 79178.811009: sys_close -> 0x0
+        seam_oci-503567  [005] ..... 79178.811012: sys_openat(dfd: 18446744073709551516, filename: 140723013904208 "/proc/172/stat", flags: O_RDONLY|O_CLOEXEC)
+        seam_oci-503567  [005] ..... 79178.811017: sys_openat -> 0x16
+        seam_oci-503567  [005] ..... 79178.811025: sys_close(fd: 0x16)
+        seam_oci-503567  [005] ..... 79178.811025: sys_close -> 0x0
+        seam_oci-503567  [005] ..... 79178.811028: sys_openat(dfd: 18446744073709551516, filename: 140723013903784 "/run/hex-node/30/8b7e1b057b9f88c8-l000001/.state.json.tmp", flags: O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, mode: 0666)
+        seam_oci-503567  [005] ..... 79178.811032: sys_openat -> 0x16
+        seam_oci-503567  [005] ..... 79178.811034: sys_close(fd: 0x16)
+        seam_oci-503567  [005] ..... 79178.811035: sys_close -> 0x0
+        seam_oci-503567  [005] ..... 79178.811043: sys_rename -> 0x0
+        seam_oci-503567  [005] ..... 79178.811044: sys_close(fd: 0x39)
+        seam_oci-503567  [005] ..... 79178.811045: sys_close -> 0x0
+        seam_oci-503567  [005] ..... 79178.811045: sys_close(fd: 0xc0)
+        seam_oci-503567  [005] ..... 79178.811046: sys_close -> 0x0
+        seam_oci-503567  [005] ..... 79178.811046: sys_close(fd: 0xbd)
+        seam_oci-503567  [005] ..... 79178.811046: sys_close -> 0x0
+        seam_oci-503567  [005] ..... 79178.811047: sys_close(fd: 0x43)
+        seam_oci-503567  [005] ..... 79178.811047: sys_close -> 0x0
+        seam_oci-503567  [005] ..... 79178.811048: sys_close(fd: 0x47)
+        seam_oci-503567  [005] ..... 79178.811049: sys_close -> 0x0
+        seam_oci-503567  [005] ..... 79178.811049: sys_close(fd: 0x4a)
+        seam_oci-503567  [005] ..... 79178.811050: sys_close -> 0x0
+        seam_oci-503567  [005] ..... 79178.811050: sys_close(fd: 0x4b)
+        seam_oci-503567  [005] ..... 79178.811051: sys_close -> 0x0
+        seam_oci-503567  [005] ..... 79178.811051: sys_close(fd: 0x4c)
+        seam_oci-503567  [005] ..... 79178.811052: sys_close -> 0x0
+        seam_oci-503567  [005] ..... 79178.811052: sys_close(fd: 0x46)
+        seam_oci-503567  [005] ..... 79178.811053: sys_close -> 0x0
+        seam_oci-503567  [005] ..... 79178.811053: sys_close(fd: 0x4e)
+        seam_oci-503567  [005] ..... 79178.811054: sys_close -> 0x0
+        seam_oci-503567  [005] ..... 79178.811054: sys_close(fd: 0x4f)
+        seam_oci-503567  [005] ..... 79178.811055: sys_close -> 0x0
+        seam_oci-503567  [005] ..... 79178.811055: sys_close(fd: 0x50)
+        seam_oci-503567  [005] ..... 79178.811056: sys_close -> 0x0
+        seam_oci-503567  [005] ..... 79178.811056: sys_close(fd: 0x51)
+        seam_oci-503567  [005] ..... 79178.811056: sys_close -> 0x0
+        seam_oci-503567  [005] ..... 79178.811056: sys_close(fd: 0x52)
+        seam_oci-503567  [005] ..... 79178.811057: sys_close -> 0x0
+        seam_oci-503567  [005] ..... 79178.811057: sys_close(fd: 0x53)
+        seam_oci-503567  [005] ..... 79178.811057: sys_close -> 0x0
+        seam_oci-503567  [005] ..... 79178.811057: sys_close(fd: 0x55)
+        seam_oci-503567  [005] ..... 79178.811058: sys_close -> 0x0
+        seam_oci-503567  [005] ..... 79178.811058: sys_close(fd: 0x15)
+        seam_oci-503567  [005] ..... 79178.811061: sys_close -> 0x0
+        seam_oci-503567  [005] ..... 79178.811068: sys_openat(dfd: 5, filename: 140723013910680 "00/l000001.json", flags: O_WRONLY|O_CREAT|O_EXCL|O_LARGEFILE|O_CLOEXEC, mode: 0666)
+        seam_oci-503567  [005] ..... 79178.811070: sys_openat -> 0x17
+        seam_oci-503567  [005] ..... 79178.811071: sys_close(fd: 0x17)
+        seam_oci-503567  [005] ..... 79178.811072: sys_close -> 0x0
+        seam_oci-503567  [005] ..... 79178.811075: sys_openat(dfd: 18446744073709551516, filename: 140723013910864 "/proc/172/stat", flags: O_RDONLY|O_CLOEXEC)
+        seam_oci-503567  [005] ..... 79178.811076: sys_openat -> 0x43
+        seam_oci-503567  [005] ..... 79178.811078: sys_close(fd: 0x43)
+        seam_oci-503567  [005] ..... 79178.811078: sys_close -> 0x0
+        seam_oci-503567  [005] ...1. 79178.811084: tracing_mark_write: hexbd E create l000001 295031

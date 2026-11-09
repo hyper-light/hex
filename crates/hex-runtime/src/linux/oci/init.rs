@@ -3015,7 +3015,7 @@ mod tests {
     /// `Abandoned`, the EPIPE taken, never the signal; and on a pipe with its reader, `Taken`.
     #[test]
     fn a_start_whose_reader_is_gone_is_abandoned_not_a_sigpipe() {
-        let (r, w) = rustix::pipe::pipe().unwrap();
+        let (r, w) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).unwrap();
         assert_eq!(take_start(&w).unwrap(), Taken::Taken);
         drop(r);
         assert_eq!(take_start(&w).unwrap(), Taken::Abandoned);
