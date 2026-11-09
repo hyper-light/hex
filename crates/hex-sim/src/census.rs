@@ -7,8 +7,9 @@
 pub const INPUT_MARGIN: usize = 2;
 /// The longest trace, in bytes: `huawei-r5-day30.fleet.keepalive.trace`.
 pub const BYTES: usize = 1_772_228;
-/// The most node rows: `huawei-r5-day30.fleet.trace`'s 50, Hex's fleet's hosts five times over.
-pub const NODES: usize = 50;
+/// The most node rows: `azure-packing2020-day1.trace`'s 431, the most m5d.metal hosts at which each of
+/// its four owners asks for more than a quarter (G4).
+pub const NODES: usize = 431;
 /// The most legs: the Huawei day's 25,295 launches.
 pub const LEGS: usize = 25_295;
 /// The most owners: the Huawei day's 339.

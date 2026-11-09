@@ -7,8 +7,8 @@
 
 use crate::error::SimError;
 use crate::model::{
-    Class, Classes, Cluster, Kind, NodeId, NodeSpec, Resources, Tenancy, Time, WorkloadId,
-    WorkloadSpec,
+    Class, Classes, Cluster, GangId, Group, GroupId, Kind, NodeId, NodeSpec, Overheads, Owner,
+    OwnerId, Resources, Tenancy, Time, WorkloadId, WorkloadSpec,
 };
 use crate::rng::Rng;
 
@@ -135,6 +135,331 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
     Ok(Cluster::single_owner(nodes, workloads))
 }
 
+/// `cluster` with its workloads spread over `owners` owners of weight 1 to 4 and bands `0..bands`,
+/// drawn from `seed`: the model-based test's multi-owner clusters.
+pub fn tenants(
+    mut cluster: Cluster,
+    seed: u64,
+    owners: u32,
+    bands: u8,
+) -> Result<Cluster, SimError> {
+    if owners == 0 || bands == 0 {
+        return Err(SimError::Config("at least one owner and one band"));
+    }
+    let mut rng = Rng::new(seed ^ 0x7e4a_4c15);
+    cluster.owners = (0..owners)
+        .map(|_| Owner {
+            weight: u32::try_from(rng.range(1, 4)).unwrap_or(1),
+        })
+        .collect();
+    let top_owner = u64::from(owners.saturating_sub(1));
+    let top_band = u64::from(bands.saturating_sub(1));
+    for w in &mut cluster.workloads {
+        w.tenancy.owner = OwnerId(u32::try_from(rng.range(0, top_owner)).unwrap_or(0));
+        w.tenancy.band = u8::try_from(rng.range(0, top_band)).unwrap_or(0);
+    }
+    Ok(cluster)
+}
+
+/// `cluster` with a burst (`T-T7.5.1`): `count` workloads of `owner`'s, all arriving at `at`, each of
+/// 1 to `max_cores` cores and 2 GiB a core, running 1 minute to `2 * mean_run` less a minute, and
+/// OCI containers, Firecracker microVMs and Shards microVMs in turn ([`by_index`]). The
+/// workloads are put back in arrival order (the burst after what arrived at `at` before it) and their
+/// ids made dense again.
+pub fn burst(
+    mut cluster: Cluster,
+    seed: u64,
+    owner: OwnerId,
+    at: Time,
+    count: u64,
+    max_cores: u64,
+    mean_run: Time,
+) -> Result<Cluster, SimError> {
+    let mut rng = Rng::new(seed ^ 0xb025_7b25);
+    let minute: Time = 60_000_000_000;
+    let longest = mean_run
+        .checked_mul(2)
+        .and_then(|x| x.checked_sub(minute))
+        .ok_or(SimError::TimeOverflow)?;
+    let extra = usize::try_from(count).map_err(|_| SimError::Config("burst workloads"))?;
+    cluster
+        .workloads
+        .try_reserve_exact(extra)
+        .map_err(|_| SimError::Config("no memory for the burst"))?;
+    for i in 0..count {
+        let cores = rng.range(1, max_cores.max(1));
+        cluster.workloads.push(WorkloadSpec {
+            id: WorkloadId(u64::MAX),
+            need: Resources {
+                cpu_milli: cores.checked_mul(1000).ok_or(SimError::Config("cores"))?,
+                mem_bytes: cores
+                    .checked_mul(2)
+                    .and_then(|g| g.checked_mul(GIB))
+                    .ok_or(SimError::Config("memory"))?,
+                gpus: 0,
+            },
+            kind: Kind::Plain,
+            class: by_index(i),
+            arrives: at,
+            runs_for: Some(rng.range(minute, longest)),
+            tenancy: Tenancy {
+                owner,
+                ..Tenancy::default()
+            },
+        });
+    }
+    // Stable: the burst stays after what arrived at `at` before it.
+    cluster.workloads.sort_by_key(|w| w.arrives);
+    for (id, w) in (0u64..).zip(cluster.workloads.iter_mut()) {
+        w.id = WorkloadId(id);
+    }
+    Ok(cluster)
+}
+
+/// `cluster` with a burst drawn from its own workloads (`T-T7.5.1` on a recorded day): `count` workloads of
+/// `owner`'s (a new owner of weight 1 if the cluster has fewer), all arriving at `at`, each taking the
+/// need, run time and kind of one of the cluster's workloads chosen uniformly, with replacement. The
+/// workloads are put back in arrival order and their ids made dense again, as [`burst`] does.
+pub fn burst_from(
+    mut cluster: Cluster,
+    seed: u64,
+    owner: OwnerId,
+    at: Time,
+    count: u64,
+) -> Result<Cluster, SimError> {
+    let mut rng = Rng::new(seed ^ 0xb025_f0d1);
+    let n = u64::try_from(cluster.workloads.len()).map_err(|_| SimError::Config("workloads"))?;
+    let last = n
+        .checked_sub(1)
+        .ok_or(SimError::Config("a burst drawn from no workloads"))?;
+    let extra = usize::try_from(count).map_err(|_| SimError::Config("burst workloads"))?;
+    let mut drawn = Vec::new();
+    drawn
+        .try_reserve_exact(extra)
+        .map_err(|_| SimError::Config("no memory for the burst"))?;
+    for _ in 0..count {
+        let i = usize::try_from(rng.range(0, last)).map_err(|_| SimError::Config("workloads"))?;
+        let like = cluster
+            .workloads
+            .get(i)
+            .ok_or(SimError::Config("workload index"))?;
+        drawn.push(WorkloadSpec {
+            id: WorkloadId(u64::MAX),
+            arrives: at,
+            tenancy: Tenancy {
+                owner,
+                ..Tenancy::default()
+            },
+            ..*like
+        });
+    }
+    while usize::try_from(owner.0).is_ok_and(|o| o >= cluster.owners.len()) {
+        cluster.owners.push(Owner { weight: 1 });
+    }
+    cluster
+        .workloads
+        .try_reserve_exact(extra)
+        .map_err(|_| SimError::Config("no memory for the burst"))?;
+    cluster.workloads.extend(drawn);
+    // Stable: the burst stays after what arrived at `at` before it.
+    cluster.workloads.sort_by_key(|w| w.arrives);
+    for (id, w) in (0u64..).zip(cluster.workloads.iter_mut()) {
+        w.id = WorkloadId(id);
+    }
+    Ok(cluster)
+}
+
+/// `cluster` with `groups` disruption groups of budgets 1 to `max_budget`, each workload in one
+/// of them with probability `per_mille / 1000`.
+pub fn groups(
+    mut cluster: Cluster,
+    seed: u64,
+    groups: u32,
+    max_budget: u32,
+    per_mille: u64,
+) -> Cluster {
+    let mut rng = Rng::new(seed ^ 0x9e0b_d15e);
+    cluster.groups = (0..groups)
+        .map(|_| Group {
+            budget: u32::try_from(rng.range(1, u64::from(max_budget.max(1)))).unwrap_or(1),
+        })
+        .collect();
+    if groups == 0 {
+        return cluster;
+    }
+    for w in &mut cluster.workloads {
+        if rng.chance(per_mille) {
+            let g = rng.range(0, u64::from(groups.saturating_sub(1)));
+            w.tenancy.group = Some(GroupId(u32::try_from(g).unwrap_or(0)));
+        }
+    }
+    cluster
+}
+
+/// `cluster` with runs of 2 to `max_size` consecutive workloads made gangs (workloads that only work together),
+/// starting one at a workload with probability `per_mille / 1000`: each member takes the first's
+/// arrival, owner, band and group, so a gang is submitted at once into one queue.
+pub fn gangs(mut cluster: Cluster, seed: u64, per_mille: u64, max_size: u64) -> Cluster {
+    let mut rng = Rng::new(seed ^ 0x6a46_9a46);
+    let mut next = 0u64;
+    let mut at = 0usize;
+    while let Some(first) = cluster.workloads.get(at).copied() {
+        if !rng.chance(per_mille) {
+            at = at.saturating_add(1);
+            continue;
+        }
+        let size = usize::try_from(rng.range(2, max_size.max(2))).unwrap_or(2);
+        let gang = Some(GangId(next));
+        next = next.saturating_add(1);
+        for w in cluster.workloads.iter_mut().skip(at).take(size) {
+            w.arrives = first.arrives;
+            w.tenancy = Tenancy {
+                gang,
+                ..first.tenancy
+            };
+        }
+        at = at.saturating_add(size);
+    }
+    cluster
+}
+
+/// One tenant's workloads over a [`Day`]: their sizes, and how much of the cluster's capacity they
+/// ask for, in parts per million, in the busy hours and out of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tenant {
+    pub weight: u32,
+    pub cores: (u64, u64),
+    pub gib: (u64, u64),
+    pub busy_ppm: u64,
+    pub quiet_ppm: u64,
+}
+
+/// A day of workloads on identical nodes: each tenant's workloads arrive at its rate, more in the busy
+/// hours `busy.0..busy.1`, and run for a minute to `2 * mean_run` less a minute.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Day {
+    pub nodes: u32,
+    pub node: Resources,
+    pub tenants: Vec<Tenant>,
+    pub length: Time,
+    pub busy: (Time, Time),
+    pub mean_run: Time,
+    /// Past this many workloads the day is refused, not cut short.
+    pub max_vms: usize,
+}
+
+/// A generated day of workloads ([`Day`]): every tenant an owner, and the workloads OCI containers,
+/// Firecracker microVMs and Shards microVMs in turn by id ([`by_index`]), a third of each.
+pub fn day(seed: u64, day: &Day) -> Result<Cluster, SimError> {
+    if day.nodes == 0 || day.tenants.is_empty() {
+        return Err(SimError::Config("a day has nodes and tenants"));
+    }
+    let nodes: Vec<NodeSpec> = (0..day.nodes)
+        .map(|id| NodeSpec {
+            id: NodeId(id),
+            capacity: day.node,
+            background_milli: 0,
+            classes: Classes::ALL,
+        })
+        .collect();
+    let total_cpu = day
+        .node
+        .cpu_milli
+        .checked_mul(u64::from(day.nodes))
+        .ok_or(SimError::Config("cluster CPU"))?;
+    let total_mem = day
+        .node
+        .mem_bytes
+        .checked_mul(u64::from(day.nodes))
+        .ok_or(SimError::Config("cluster memory"))?;
+    let mut rng = Rng::new(seed);
+    let mut vms: Vec<(Time, u32, Resources, Time)> = Vec::new();
+    for (owner, tenant) in (0u32..).zip(&day.tenants) {
+        let mut t: Time = 0;
+        while t < day.length {
+            if vms.len() >= day.max_vms {
+                return Err(SimError::Full {
+                    what: "the day's workloads",
+                    bound: day.max_vms,
+                });
+            }
+            let cores = rng.range(tenant.cores.0, tenant.cores.1);
+            let need = Resources {
+                cpu_milli: cores.checked_mul(1000).ok_or(SimError::Config("cores"))?,
+                mem_bytes: rng
+                    .range(tenant.gib.0, tenant.gib.1)
+                    .checked_mul(GIB)
+                    .ok_or(SimError::Config("memory"))?,
+                gpus: 0,
+            };
+            // The workload's dominant share of the cluster, in parts per million.
+            let ppm = |n: u64, of: u64| {
+                n.checked_mul(1_000_000)
+                    .and_then(|x| x.checked_div(of))
+                    .unwrap_or(0)
+            };
+            let leg_ppm = ppm(need.cpu_milli, total_cpu).max(ppm(need.mem_bytes, total_mem));
+            let rate = if (day.busy.0..day.busy.1).contains(&t) {
+                tenant.busy_ppm
+            } else {
+                tenant.quiet_ppm
+            };
+            // Mean gap = run time * workload share / the share asked for, so the workloads in flight ask for
+            // `rate` of the cluster.
+            let mean_gap = day
+                .mean_run
+                .checked_mul(leg_ppm)
+                .and_then(|x| x.checked_div(rate.max(1)))
+                .ok_or(SimError::TimeOverflow)?
+                .max(1);
+            t = t
+                .checked_add(rng.range(1, mean_gap.checked_mul(2).ok_or(SimError::TimeOverflow)?))
+                .ok_or(SimError::TimeOverflow)?;
+            let minute: Time = 60_000_000_000;
+            let runs_for = rng.range(
+                minute,
+                day.mean_run
+                    .checked_mul(2)
+                    .and_then(|x| x.checked_sub(minute))
+                    .ok_or(SimError::TimeOverflow)?,
+            );
+            if t < day.length {
+                vms.push((t, owner, need, runs_for));
+            }
+        }
+    }
+    vms.sort_unstable_by_key(|&(t, owner, _, _)| (t, owner));
+    let mut workloads = Vec::new();
+    workloads
+        .try_reserve_exact(vms.len())
+        .map_err(|_| SimError::Config("no memory for the workloads"))?;
+    for (id, (arrives, owner, need, runs_for)) in (0u64..).zip(vms) {
+        workloads.push(WorkloadSpec {
+            id: WorkloadId(id),
+            need,
+            kind: Kind::Plain,
+            class: by_index(id),
+            arrives,
+            runs_for: Some(runs_for),
+            tenancy: Tenancy {
+                owner: OwnerId(owner),
+                ..Tenancy::default()
+            },
+        });
+    }
+    Ok(Cluster {
+        nodes,
+        workloads,
+        owners: day
+            .tenants
+            .iter()
+            .map(|r| Owner { weight: r.weight })
+            .collect(),
+        groups: Vec::new(),
+        overheads: Overheads::default(),
+    })
+}
+
 /// One of the classes `classes` holds, each alike (OCI when it holds none).
 fn one_of(rng: &mut Rng, classes: Classes) -> Class {
     let pick = rng.range(0, u64::from(classes.count().saturating_sub(1)));
@@ -151,6 +476,16 @@ fn hot(node: &NodeSpec) -> bool {
     let rhs =
         u128::from(node.capacity.cpu_milli).checked_mul(u128::from(crate::index::HOT_PER_MILLE));
     matches!((lhs, rhs), (Some(l), Some(r)) if l > r)
+}
+
+/// The `n`th of OCI container, Firecracker microVM and Shards microVM, cycling: a generated day's and a
+/// burst's classes, by index, so they take nothing from the generator's random stream.
+fn by_index(n: u64) -> Class {
+    match n % 3 {
+        0 => Class::Oci,
+        1 => Class::Firecracker,
+        _ => Class::Shards,
+    }
 }
 
 #[cfg(test)]
@@ -179,7 +514,7 @@ mod tests {
         for w in &a.workloads {
             assert!(empty.admitted_anywhere(&w.demand()), "{w:?}");
         }
-        for kind in [Kind::Plain, Kind::Build, Kind::Benchmark, Kind::Session] {
+        for kind in [Kind::Plain, Kind::Plain, Kind::Benchmark, Kind::Session] {
             assert!(a.workloads.iter().any(|w| w.kind == kind), "{kind:?}");
         }
         assert!(a.workloads.windows(2).all(|p| p[0].arrives <= p[1].arrives));

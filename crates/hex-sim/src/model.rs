@@ -227,11 +227,12 @@ pub struct Demand {
     pub class: Class,
 }
 
-/// Who a workload's capacity is charged to: a repository or a person (`AC-T7.5.2`).
+/// Who a workload's capacity is charged to: the tenant or app an OCI container, a Firecracker microVM
+/// or a Shards microVM runs for (`AC-T7.5.2`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct OwnerId(pub u32);
 
-/// Workloads admitted whole or not at all: a matrix job's legs (`AC-T7.5.1`).
+/// Workloads admitted whole or not at all: workloads that only work together (`AC-T7.5.1`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GangId(pub u64);
 
