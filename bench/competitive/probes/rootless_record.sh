@@ -84,7 +84,7 @@ CELL_BOUND=708
 cell() { # cell <pass> <loops>
   local name=p$1-L$2 rc t0=$SECONDS
   { echo "== $name $(date -u +%FT%TZ) uptime: $(uptime)"; } >> "$O/context.txt"
-  CPUSET=$CPUSET ROUNDS=$ROUNDS WARMUP=$WARMUP IDLE_THREADS=${IDLE_THREADS:-8000} HEXBENCH_DEVFS=1 \
+  CPUSET=$CPUSET ROUNDS=$ROUNDS WARMUP=$WARMUP IDLE_THREADS=${IDLE_THREADS:-8000} \
     HEXBENCH_OWNER=bench-owner HEXBENCH_REUSE=1 timeout "$CELL_BOUND" systemd-run --user --scope --quiet \
     -p Delegate=yes --unit "hex-g6-rlcell-${RUN#rootless-}-$name" -- bash "$SRC/bench/competitive/probes/rootless_cell.sh" \
     "$O/$name" "$O/hex" "$O/seam_oci" "$O/libcrun-driver" "$O/idlethreads" "$2" > "$O/$name.log" 2>&1

@@ -13,13 +13,14 @@
 # best of 2, as summarize.py takes it), each with the host's clock state (host_clock.sh) at its start and end, and one
 # cell at each of LOOPS_SET busy loops ("6 12"), at nice 0 on CPUSET, the CPUs the cell's container runs on. A cell is
 # create_breakdown.sh's MOUNTS_ARMS run: 8,000 idle threads on the host, owner bundles with reuse on, Docker's masked
-# and read-only paths, the /dev pool on, and rounds.py's ARMS ("hex:copy hex:tree hex:empty"; add libcrun to run it
-# beside them) for ROUNDS rounds after WARMUP, each round a burst of 8 lifecycles at 8 in flight on each arm, its order
-# rotated and the host's load read, once untraced and once traced (part 19, to the init's chdir: MOUNTS_SPAN=root, so
-# a namespace joined from its tree, which no chroot ends, is cut alike). Each cell's arms must show every create made
-# the way it asked, or the record refuses it. Then runtime-tools' validation suite against this hex and against CRUN,
-# each in its privileged container (run_hex.sh, run.sh; RT the built checkout). mntns_record.py reads it all into
-# record.txt: the tables, goal 17's verdicts and the record lines for mntns_default.txt.
+# and read-only paths, the /dev pool on (a root node's has no off switch: b0fd0b7d), and rounds.py's ARMS ("hex:copy
+# hex:tree hex:empty"; add libcrun to run it beside them) for ROUNDS rounds after WARMUP, each round a burst of 8
+# lifecycles at 8 in flight on each arm, its order rotated and the host's load read, once untraced and once traced
+# (part 19, to the init's chdir: MOUNTS_SPAN=root, so a namespace joined from its tree, which no chroot ends, is cut
+# alike). Each cell's arms must show every create made the way it asked, or the record refuses it. Then runtime-tools'
+# validation suite against this hex and against CRUN, each in its privileged container (run_hex.sh, run.sh; RT the
+# built checkout). mntns_record.py reads it all into record.txt: the tables, goal 17's verdicts and the record lines
+# for mntns_default.txt.
 #
 # ROUNDS is 299: the fewest rounds whose largest sample bounds the p99 with 95% confidence, N >= ln(0.05)/ln(0.99) =
 # 298.07 (Ada's rule: a p99 claim stands on at least 299 interleaved rounds, the load recorded each round). WARMUP is
@@ -113,7 +114,7 @@ cell() { # cell <pass> <loops>
   { echo "== $name $(date -u +%FT%TZ) uptime: $(uptime)"; echo "  docker ps: $(docker ps -q | wc -l) containers"; } >> "$O/context.txt"
   ( cd "$SRC" && MOUNTS=8 MOUNTS_CONC=8 MOUNTS_ARMS="$ARMS" MOUNTS_ROUNDS=$ROUNDS MOUNTS_WARMUP=$WARMUP \
       MOUNTS_PATH=pruned MOUNTS_SPAN=root IDLE_THREADS=8000 CPUSET=$CPUSET LOAD_GATE=0 BENCH_HOST_OK="$(hostname)" \
-      BENCH_MEMORY=${BENCH_MEMORY:-8g} BENCH_OOM=${BENCH_OOM:-1000} HEXBENCH_DEVFS=1 HEXBENCH_OWNER=bench-owner \
+      BENCH_MEMORY=${BENCH_MEMORY:-8g} BENCH_OOM=${BENCH_OOM:-1000} HEXBENCH_OWNER=bench-owner \
       HEXBENCH_REUSE=1 HEXBENCH_DOCKER_PATHS=1 \
       timeout "$CELL_BOUND" bash bench/competitive/probes/create_breakdown.sh "$O/hex" "$O/seam_oci" ) > "$O/$name.log" 2>&1
   rc=$?

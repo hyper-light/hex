@@ -780,6 +780,17 @@ fn procs(cg: &Path) -> Vec<u32> {
     pids
 }
 
+/// A process's state and session, as /proc/<pid>/stat has them (proc(5), fields 3 and 6), read after its name's
+/// closing parenthesis, the line's last, since the name may hold spaces and parentheses itself.
+fn state_and_session(pid: u32) -> (String, u32) {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let (_, fields) = stat.rsplit_once(')').unwrap();
+    let mut fields = fields.split_whitespace();
+    let state = fields.next().unwrap().to_owned();
+    // After the state: the parent's pid, the process group's, then the session's.
+    (state, fields.nth(2).unwrap().parse().unwrap())
+}
+
 /// The processes in cgroup `cg` once it holds any, waiting on the fact through `cgroup.events`, which the kernel
 /// marks changed (`POLLPRI`) when the cgroup is populated (cgroup-v2.rst, "cgroup.events"); whatever it holds
 /// at `patience`'s end, perhaps none.
@@ -802,13 +813,14 @@ fn populated_within(cg: &Path, patience: Duration) -> Vec<u32> {
     }
 }
 
-/// Goal 5's p99.9 tail (decision 8, "The p99.9 that stayed"; AC-T7.1.3): an owner's idle cgroup holds an init
-/// made ahead, so the owner's next create clones nothing into a cgroup and takes no `cgroup_mutex`. Do: A of O
-/// created, started and deleted; wait for the fact that A's idle slot holds one process; create B of O. Expect:
-/// the slot holds that one process, with no effective capability, before B's create and the same one after it,
-/// so B's init is the parked one; B starts and runs a program; the node counts one init claimed. Then delete B and release the idle
-/// cgroups: none is left, so a parked init is ended with its cgroup. With parked procs (root only), B's create
-/// takes the proc made for that init at A's delete, counted a hit (decision 8, parked procs).
+/// Goal 5's p99.9 tail (decision 8, "The p99.9 that stayed"; AC-T7.1.3): an owner's idle cgroup holds an init made
+/// ahead, so the owner's next create clones nothing into a cgroup and takes no `cgroup_mutex`. Do: A of O created,
+/// started and deleted; wait for the fact that A's idle slot holds one process; create B of O. Expect: the slot holds
+/// that one process, with no effective capability and, once it sleeps for its claim, leading a session of its own,
+/// before B's create and the same one after it, so B's init is the parked one; B starts and runs a program; the node
+/// counts one init claimed. Then delete B and release the idle cgroups: none is left, so a parked init is ended with
+/// its cgroup. With parked procs (root only), B's create takes the proc made for that init at A's delete, counted a hit
+/// (decision 8, parked procs).
 fn an_owners_next_box_is_made_by_the_init_parked_in_its_idle_cgroup(lab: &Lab, own: &Path) {
     let (node, _state) = lab.node(&own.join("hex-reuse-parked"));
     let o = BoxOwner::named("owner-p").unwrap();
@@ -856,6 +868,24 @@ fn an_owners_next_box_is_made_by_the_init_parked_in_its_idle_cgroup(lab: &Lab, o
         u64::from_str_radix(eff, 16).unwrap(),
         0,
         "a parked init holds no effective capability"
+    );
+    // And it leads a session of its own before a create claims it (goal 17, runtime design goal 6, lever L1): its
+    // `setsid`, and the reschedule its move to a new autogroup forces (kernel/sched/core.c `sched_move_task`,
+    // `resched_curr`), are its park's, never the claiming create's. It leads it once it has said it is parked, so the
+    // delete doesn't wait on that either: looked at once it sleeps for its claim, its only sleep after that word
+    // (proc(5), /proc/<pid>/stat: the state `S` and the session, fields 3 and 6).
+    let mut asleep = (String::new(), 0);
+    wait_for(
+        &PARKED_ASLEEP,
+        || {
+            asleep = state_and_session(parked[0]);
+            asleep.0 == "S"
+        },
+        "the parked init asleep for its claim",
+    );
+    assert_eq!(
+        asleep.1, parked[0],
+        "a parked init leads a session of its own before its claim (its state and session: {asleep:?})"
     );
     // Nor can another process take its claim socket or any descriptor of its: it is non-dumpable, so a caller
     // without CAP_SYS_PTRACE is refused pidfd_getfd (ptrace(2), "Ptrace access mode checking"). This process is
@@ -2329,6 +2359,9 @@ static KILLED: Patience = Patience::seeded("test.oci_reuse.killed", EMPTYING);
 static INIT_ENDS: Patience = Patience::seeded("test.oci_reuse.init_ends", PROGRAM);
 /// An owner's idle slot given its parked init: made within the delete (`Cgroups::give_back`), whose record bounds it.
 static PARKED: Patience = Patience::seeded("test.oci_reuse.parked", DELETE);
+/// A parked init asleep for its claim once its delete has answered: its own steps after it said it is parked, which
+/// no recorded operation makes.
+static PARKED_ASLEEP: Patience = Patience::measuring("test.oci_reuse.parked_asleep");
 /// Trees queued to the parked procs' dropper, dropped by its thread: no recorded operation makes it.
 static DROPPED: Patience = Patience::measuring("test.oci_reuse.dropped");
 /// A cgroup made ahead by the cgroups' refill thread: no recorded operation makes it.
