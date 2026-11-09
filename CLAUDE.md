@@ -121,7 +121,9 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   member that crosses it, rootless, with no overshoot), and `adddup2`/`addchdir` file actions);
   `proc_listpids(PROC_PGRP_ONLY)` lists the group (and `PROC_UID_ONLY` a user, for the box helper's
   membership, step 2) and `proc_pid_rusage` reads each member's footprint, start time and exit, and
-  `proc_pidinfo(PROC_PIDTBSDINFO)` its run state, so a box's hold continues only the members it stopped;
+  `proc_pidinfo(PROC_PIDTBSDINFO)` its run state, so a box's hold continues only the members it stopped,
+  and `proc_pidinfo(PROC_PIDTASKINFO)` whether a member has a thread running or waiting for a core, so a run
+  that gave it none shows nothing of its rate;
   `kqueue`/`kevent` carry its one-shot `NOTE_CRITICAL` timer, a user event to wake
   it, and `EVFILT_PROC` (`NOTE_FORK`/`NOTE_EXIT`/`NOTE_EXITSTATUS`, the dead member's wait status in the
   event, so a cap kill is told from an ordinary SIGKILL without racing its reaper) on members, and, for the
