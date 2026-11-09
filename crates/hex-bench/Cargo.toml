@@ -24,6 +24,10 @@ harness = false
 name = "seccomp_compile"
 harness = false
 
+[[bench]]
+name = "spec_parse"
+harness = false
+
 [target.'cfg(target_os = "linux")'.dependencies]
 hex-api.workspace = true
 hex-client.workspace = true
@@ -33,6 +37,11 @@ hex-runtime.workspace = true
 rustix.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+
+# Goal 17's classic arm (seam_oci's HEXBENCH_ROOT=classic) builds its node with Node::with_classic_roots, a test
+# control: a dev-dependency edge, which builds the benches and no production binary (scripts/check-production.sh).
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+hex-node = { workspace = true, features = ["test-controls"] }
 
 [lints]
 workspace = true

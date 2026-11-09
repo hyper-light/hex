@@ -43,7 +43,7 @@ use hex_runtime::linux::proc::PidfdProc;
 use hex_runtime::linux::{disks, process};
 
 use crate::cgroups::{self, Cgroups, Choice, Made};
-use crate::createpool::CreatePool;
+use crate::createpool::{CreatePool, Prune};
 use crate::devfs::Devfs;
 use crate::ipcuts::IpcUtsPool;
 use crate::netns::{Netns, Pools};
@@ -197,6 +197,11 @@ pub struct Node {
     /// The way a pruned create's mount namespace is made, as its owner asked (`copy`, `empty` or `tree`,
     /// [`Node::with_mount_namespace`]); `None` takes the node's default (decision 6's update).
     mount_namespace: Option<String>,
+    /// Whether this root node's create seeds keep the agent's mount namespace, so every create builds its root the
+    /// classic way ([`Node::with_classic_roots`], goal 17's baseline arm): a test control's, absent from production
+    /// builds.
+    #[cfg(feature = "test-controls")]
+    classic_roots: bool,
     /// What a create does with a label whose module the host's kernel doesn't run ([`Node::with_lsm`]).
     lsm: hex_runtime::linux::oci::lsm::Policy,
     /// The network namespaces the node makes ahead for its containers, and what it counts of every
@@ -330,6 +335,8 @@ impl Node {
             #[cfg(debug_assertions)]
             inject: None,
             mount_namespace: None,
+            #[cfg(feature = "test-controls")]
+            classic_roots: false,
             lsm: hex_runtime::linux::oci::lsm::Policy::default(),
             specs: Mutex::new(Specs::default()),
             netns,
@@ -492,16 +499,37 @@ impl Node {
         self
     }
 
-    /// The mountpoint a root node's create seeds prune their mount namespace at (goal 5 plan step 2), or
-    /// `None` on a rootless node, whose seeds keep the agent's mount namespace and build the root the
-    /// classic way. A dedicated directory under the oci root, which the seed mounts a fresh tmpfs over
-    /// and pivots away from in its own namespace: the agent's view of it stays an empty directory, and
-    /// nothing scans the oci root (recovery reaches containers by the paths their records name).
-    fn seed_prune(&self) -> Option<PathBuf> {
-        match self.owner {
-            Owner::Root => Some(self.oci_root.join(".seed-root")),
-            Owner::Rootless { .. } => None,
+    /// Where this node's create seeds work ([`seed_prune_for`]).
+    fn seed_prune(&self) -> Prune {
+        #[cfg(feature = "test-controls")]
+        let classic_roots = self.classic_roots;
+        #[cfg(not(feature = "test-controls"))]
+        let classic_roots = false;
+        seed_prune_for(&self.owner, &self.oci_root, classic_roots)
+    }
+
+    /// A test control, for goal 17's baseline arm (the bench's classic arm its one caller; the lead's ruling of
+    /// 2026-11-09 under Ada's of 2026-11-06: a test control, never a production knob): this root node's create seeds
+    /// keep the agent's mount namespace, so every create builds its root the classic way (a copy of that namespace,
+    /// bind, `pivot_root`, the old root detached), counted under [`ClassicReason::Baseline`]. Refused on a rootless
+    /// node, whose seeds keep the agent's namespace already, counted as rootless; and once the seed pool is built
+    /// ([`Node::with_oci_helper`]), whose seeds would prune all the same.
+    #[cfg(feature = "test-controls")]
+    pub fn with_classic_roots(mut self) -> Result<Self, Refusal> {
+        if self.owner != Owner::Root {
+            return Err(Refusal::Invalid {
+                what: "classic roots",
+                why: "a rootless node's seeds keep the agent's mount namespace already".to_owned(),
+            });
         }
+        if self.create_seeds.get().is_some() {
+            return Err(Refusal::Invalid {
+                what: "classic roots",
+                why: "asked after the seed pool was built (Node::with_oci_helper)".to_owned(),
+            });
+        }
+        self.classic_roots = true;
+        Ok(self)
     }
 
     /// A test control, with no production or bench caller: the network namespaces a root node makes ahead fixed at
@@ -2254,9 +2282,50 @@ fn node_key(state_dir: &Path) -> Result<String, Refusal> {
     ))
 }
 
+/// Where a node's create seeds work (goal 5 plan step 2). A root node's prune their mount namespace at a dedicated
+/// directory under the oci root, which the seed mounts a fresh tmpfs over and pivots away from in its own namespace:
+/// the agent's view of it stays an empty directory, and nothing scans the oci root (recovery reaches containers by
+/// the paths their records name). One built for the classic root (`classic_roots`, `Node::with_classic_roots`,
+/// goal 17's baseline arm) keeps the agent's mount namespace, as a rootless node's seeds do, and their inits build the
+/// root the classic way, counted under that reason.
+fn seed_prune_for(owner: &Owner, oci_root: &Path, classic_roots: bool) -> Prune {
+    match owner {
+        Owner::Root if classic_roots => Prune::Keep(ClassicReason::Baseline),
+        Owner::Root => Prune::At(oci_root.join(".seed-root")),
+        Owner::Rootless { .. } => Prune::Keep(ClassicReason::Rootless),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal 17's baseline arm (the lead's ruling of 2026-11-09): where a node's create seeds work. Do: ask for a root
+    /// node's, a root node's built for the classic root, and a rootless node's, asked for the classic root or not.
+    /// Expect: the root node's prune at `.seed-root` under the oci root; the classic root's keep the agent's namespace
+    /// for the baseline; a rootless node's keep it for being rootless.
+    #[test]
+    fn a_root_node_built_for_the_classic_root_keeps_its_seeds_namespace_for_the_baseline() {
+        let root = Path::new("/oci");
+        assert_eq!(
+            seed_prune_for(&Owner::Root, root, false),
+            Prune::At(root.join(".seed-root"))
+        );
+        assert_eq!(
+            seed_prune_for(&Owner::Root, root, true),
+            Prune::Keep(ClassicReason::Baseline)
+        );
+        let rootless = Owner::Rootless {
+            uid: 1000,
+            gid: 1000,
+        };
+        for asked in [false, true] {
+            assert_eq!(
+                seed_prune_for(&rootless, root, asked),
+                Prune::Keep(ClassicReason::Rootless)
+            );
+        }
+    }
 
     /// CLAUDE.md §3 (Ada's 2026-11-06 rule): what a refusal names of a box's survivors is bounded by the wire,
     /// derived, not picked. Do: fill a delete's refusal to its room past what it says first, then one byte past
