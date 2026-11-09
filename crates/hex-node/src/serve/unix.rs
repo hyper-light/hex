@@ -26,8 +26,7 @@ pub fn clear(path: &Path, kind: SocketType) -> Result<(), Refusal> {
             why: format!("{} exists and isn't a socket", path.display()),
         });
     }
-    let probe = rustix::net::socket(AddressFamily::UNIX, kind, None)
-        .map_err(|e| Refusal::os("probing the node agent's socket", e))?;
+    let probe = probe(kind)?;
     let addr = SocketAddrUnix::new(path).map_err(|e| Refusal::Invalid {
         what: "socket path",
         why: format!("{}: {e}", path.display()),
@@ -44,6 +43,12 @@ pub fn clear(path: &Path, kind: SocketType) -> Result<(), Refusal> {
             why: format!("{}: {e}", path.display()),
         }),
     }
+}
+
+/// The socket [`clear`] connects with to learn whether an agent serves a path.
+pub fn probe(kind: SocketType) -> Result<OwnedFd, Refusal> {
+    rustix::net::socket(AddressFamily::UNIX, kind, None)
+        .map_err(|e| Refusal::os("probing the node agent's socket", e))
 }
 
 /// A program's stdio from the descriptors its exec carried, in the order `streams` names them: each

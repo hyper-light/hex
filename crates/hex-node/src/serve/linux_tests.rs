@@ -1257,3 +1257,22 @@ fn a_given_answers_ends_not_yet_taken_hold_their_programs_place() {
     assert!(matches!(given, Answer::Given { .. }), "{given:?}");
     drop(ends);
 }
+
+/// Whether `fd` is close-on-exec: whether a spawn of this process, the node's or another's, lets it go at its exec.
+fn cloexec(fd: impl AsFd) -> bool {
+    rustix::io::fcntl_getfd(fd)
+        .unwrap()
+        .contains(rustix::io::FdFlags::CLOEXEC)
+}
+
+/// The lead's word of 2026-11-09: what the node makes is close-on-exec at its creation, never by a later `fcntl`, so
+/// a spawn made while it is open never keeps it past its exec. Do: make the socket a node binding a path probes it
+/// with ([`super::unix::clear`]). Expect: close-on-exec on it.
+#[test]
+fn the_socket_path_probe_is_close_on_exec() {
+    let probe = super::unix::probe(SocketType::SEQPACKET).unwrap();
+    assert!(
+        cloexec(&probe),
+        "the probe crosses an exec: a spawn while it is open keeps it"
+    );
+}
