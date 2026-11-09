@@ -88,7 +88,9 @@ fn take_back(identity: &Identity, spec: &GuestSpec) -> Result<ShardsGuest, Refus
         pid: identity.pid,
         why,
     })?;
+    // Shared: its watcher thread waits on it for the guest's life, past this call, as the guest kills it.
     let process = Arc::new(process);
+    // Shared: the guest and its watcher thread, which outlives this call, each hold it while either lives.
     let shared = Arc::new(Shared {
         state: Mutex::new(State {
             exited: false,
@@ -174,6 +176,7 @@ fn start(spec: &GuestSpec) -> Result<ShardsGuest, Refusal> {
         .stderr(stderr)
         .spawn()
         .map_err(|e| Refusal::Boot(format!("{}: {e}", binary.display())))?;
+    // Shared: the guest, its drain and its watcher, threads that outlive this call, each hold it.
     let shared = Arc::new(Shared {
         state: Mutex::new(State {
             exited: false,
@@ -195,6 +198,7 @@ fn start(spec: &GuestSpec) -> Result<ShardsGuest, Refusal> {
     });
     #[cfg(unix)]
     let pid = child.id();
+    // Shared: the watcher, which outlives this call, reaps it; on Windows the guest kills it too.
     let child = Arc::new(Mutex::new(child));
     let started = start_threads(&shared, &child, output, writer);
     if let Err(e) = started {
@@ -744,11 +748,19 @@ fn handshake(
     let began = Instant::now();
     // Its own work, the connect and the ask, as far as it got: not its wait for the answer.
     let done = |cost: &mut Duration| *cost = began.elapsed();
-    let mut s = stream::connect(vsock).map_err(|e| {
+    let mut s = stream::connect(vsock, wait).map_err(|e| {
         done(cost);
         match e.kind() {
-            // Not yet bound, or bound and not yet listening: the VM is starting.
-            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {
+            // Not yet bound, or bound and not yet listening: the VM is starting. Or its
+            // muxer's queue is full (Linux's EAGAIN) or the connect still under way at its
+            // wait's end: the VM takes no connection now.
+            io::ErrorKind::NotFound
+            | io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::WouldBlock
+            | io::ErrorKind::TimedOut => Attempt::Again(format!("dialing: {e}")),
+            // Windows' full queue, its EAGAIN (PM M205).
+            #[cfg(windows)]
+            _ if e.raw_os_error() == Some(windows_sys::Win32::Networking::WinSock::WSAENOBUFS) => {
                 Attempt::Again(format!("dialing: {e}"))
             }
             _ => Attempt::Refused(format!("{}: {e}", vsock.display())),
@@ -1337,6 +1349,56 @@ mod tests {
         );
         assert_eq!(pause(us(5), ms(150), ms(1)), ms(1));
         assert_eq!(pause(Duration::MAX, Duration::MAX, ms(1)), ms(1));
+    }
+
+    /// A listener at `path` whose queue is full and which accepts none, with what holds it so:
+    /// on Unix its backlog cut to none (listen(2) again) and one connection queued, which
+    /// Linux and macOS each take past a backlog of none; on Windows a backlog of one and
+    /// connections until afunix.sys refuses one (WSAENOBUFS, after five: PM M205).
+    #[cfg(unix)]
+    fn a_full_listener(path: &Path) -> Vec<Box<dyn std::any::Any + Send>> {
+        use std::os::fd::AsRawFd as _;
+        let listener = std::os::unix::net::UnixListener::bind(path).unwrap();
+        // SAFETY: listen(2) again on the socket `listener` holds, its backlog cut to none.
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
+        let queued = std::os::unix::net::UnixStream::connect(path);
+        vec![Box::new(listener), Box::new(queued)]
+    }
+
+    #[cfg(windows)]
+    fn a_full_listener(path: &Path) -> Vec<Box<dyn std::any::Any + Send>> {
+        let listener = shards_afunix::UnixListener::bound(path).unwrap();
+        // SAFETY: listen of the bound socket `listener` holds, its backlog one.
+        let listening = unsafe { windows_sys::Win32::Networking::WinSock::listen(listener.raw(), 1) };
+        assert_eq!(listening, 0);
+        let mut held: Vec<Box<dyn std::any::Any + Send>> = vec![Box::new(listener)];
+        while let Ok(queued) = shards_afunix::UnixStream::connect(path) {
+            held.push(Box::new(queued));
+        }
+        held
+    }
+
+    /// A dial to a socket whose listener's queue is full waits no longer than its patience
+    /// and is asked again within it, refused `Again`, as a guest whose vsock takes no
+    /// connection yet is: Linux's blocking connect(2) waited for room for ever, and Windows'
+    /// WSAENOBUFS (PM M205) was taken for a refusal (D215).
+    #[test]
+    fn a_dial_to_a_full_listener_is_asked_again_within_its_patience() {
+        let dir = PrivateDir::new().unwrap();
+        let path = dir.0.join("v");
+        let _full = a_full_listener(&path);
+        // An input: any patience shows it kept.
+        let patience = crate::conformance::UNSERVED_PATIENCE;
+        let (worker, rx) = crate::while_runs::on_a_thread(move || {
+            let mut cost = Duration::ZERO;
+            match handshake(&path, 5, Some(patience), &mut cost) {
+                Ok(_) => "connected".to_string(),
+                Err(Attempt::Again(why)) => format!("again: {why}"),
+                Err(Attempt::Refused(why)) => format!("refused: {why}"),
+            }
+        });
+        let said = crate::while_runs::answer(&rx, worker, patience);
+        assert!(said.starts_with("again: "), "{said}");
     }
 
     /// A muxer for `listener`'s guest until the listener fails: each connection's

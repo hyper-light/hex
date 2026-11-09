@@ -581,6 +581,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "shards-abi"
+version = "0.1.0"
+
+[[package]]
 name = "shards-afunix"
 version = "0.1.0"
 dependencies = [
@@ -592,6 +596,7 @@ name = "shards-api"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "shards-abi",
  "shards-afunix",
  "windows-sys",
 ]

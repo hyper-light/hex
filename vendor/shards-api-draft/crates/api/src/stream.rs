@@ -24,12 +24,22 @@ pub(crate) struct Socket {
     nonblocking: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// Connects to the Unix socket at `path`.
-pub(crate) fn connect(path: &Path) -> io::Result<Socket> {
+/// Connects to the Unix socket at `path`, waiting on its listener no longer than `wait`
+/// (`None`: as long as the OS's connect takes). On Unix a connect that does not wait
+/// connects or fails at once, never under way ("UNIX domain sockets failed with EAGAIN
+/// instead", connect(2)): EAGAIN where the listener's queue is full (Linux) and
+/// ECONNREFUSED where none listens or (macOS) its queue is full, so `wait` has nothing to
+/// bound there, as a blocking one waits for room for as long as its send timeout, for ever
+/// as std leaves it (unix(7)). On Windows its connect is under way until afunix.sys ends it,
+/// waited out within `wait` (`shards_afunix::UnixStream::connect_within`).
+pub(crate) fn connect(path: &Path, wait: Option<Duration>) -> io::Result<Socket> {
     #[cfg(unix)]
-    let inner = std::os::unix::net::UnixStream::connect(path)?;
+    let inner = {
+        let _ = wait;
+        unix::connect(path)?
+    };
     #[cfg(windows)]
-    let inner = shards_afunix::UnixStream::connect(path)?;
+    let inner = shards_afunix::UnixStream::connect_within(path, wait)?;
     Socket::new(inner)
 }
 
@@ -128,10 +138,72 @@ mod waits {
 #[cfg(unix)]
 mod unix {
     use std::io;
-    use std::os::fd::AsRawFd;
+    use std::os::fd::{AsRawFd, FromRawFd as _, OwnedFd};
+    use std::path::Path;
 
     use super::Socket;
     use super::waits::READ;
+
+    /// `path` as a Unix socket's address, and its length: its bytes and a NUL in
+    /// `sun_path` (unix(7)), refused where they don't fit or hold a NUL of their own.
+    fn address(path: &Path) -> io::Result<(libc::sockaddr_un, libc::socklen_t)> {
+        use std::os::unix::ffi::OsStrExt as _;
+        // SAFETY: a sockaddr_un, plain data, zeroed.
+        let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        let bytes = path.as_os_str().as_bytes();
+        if bytes.len() >= addr.sun_path.len() || bytes.contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{}: no Unix socket's path", path.display()),
+            ));
+        }
+        addr.sun_family = libc::sa_family_t::try_from(libc::AF_UNIX).map_err(io::Error::other)?;
+        for (to, from) in addr.sun_path.iter_mut().zip(bytes) {
+            *to = libc::c_char::from_ne_bytes([*from]);
+        }
+        let len = std::mem::offset_of!(libc::sockaddr_un, sun_path)
+            .saturating_add(bytes.len())
+            .saturating_add(1);
+        #[cfg(target_os = "macos")]
+        {
+            addr.sun_len = u8::try_from(len).map_err(io::Error::other)?;
+        }
+        Ok((addr, libc::socklen_t::try_from(len).map_err(io::Error::other)?))
+    }
+
+    /// A connect to the Unix socket at `path` that never waits on its listener: its socket
+    /// made non-blocking and close-on-exec before its connect(2).
+    pub(super) fn connect(path: &Path) -> io::Result<std::os::unix::net::UnixStream> {
+        let (addr, len) = address(path)?;
+        #[cfg(target_os = "linux")]
+        let ty = libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC;
+        #[cfg(not(target_os = "linux"))]
+        let ty = libc::SOCK_STREAM;
+        // SAFETY: socket(2), plain arguments.
+        let fd = unsafe { libc::socket(libc::AF_UNIX, ty, 0) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the descriptor socket(2) just made, owned from here alone.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        // macOS's socket(2) takes neither flag: set as std sets them on a socket it makes.
+        #[cfg(not(target_os = "linux"))]
+        {
+            // SAFETY: fcntl(2) of the descriptor `fd` owns, setting its close-on-exec flag.
+            if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: fcntl(2) of the descriptor `fd` owns, making it non-blocking.
+            if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        // SAFETY: connect(2) of the socket `fd` owns to an address of ours, `len` its length.
+        if unsafe { libc::connect(fd.as_raw_fd(), (&raw const addr).cast(), len) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(std::os::unix::net::UnixStream::from(fd))
+    }
 
     impl Socket {
         /// Its socket made non-blocking, its waits this value's (`waits`); and on macOS a
@@ -334,6 +406,7 @@ impl Stream for Socket {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::while_runs;
     use std::time::Instant;
 
     /// Bytes go both ways, a half-close reaches the peer as its end, and the other way
@@ -388,31 +461,21 @@ mod tests {
         assert_eq!(waits::nanos(Some(Duration::MAX)).unwrap(), u64::MAX);
     }
 
-    /// How long a timed operation here may take: its timeout, `UNSERVED_PATIENCE`, and
-    /// this host class's recorded lateness of a timed wait (`OVERSHOOT`), a hang guard.
-    fn timed() -> (Duration, Duration) {
-        let late = crate::conformance::OVERSHOOT.get();
-        let timeout = crate::conformance::UNSERVED_PATIENCE;
-        (timeout, timeout.saturating_add(late))
-    }
-
     /// A write to a peer that stops reading fails at its timeout, having moved what the
-    /// socket took, rather than blocking for ever (D215; review B3).
+    /// socket took, rather than blocking for ever: waited on while it runs, however late its
+    /// host runs it (D215; review B3).
     #[test]
     fn a_write_to_a_peer_that_stops_reading_ends_at_its_timeout() {
-        let (timeout, guard) = timed();
+        // An input: any timeout shows it kept.
+        let timeout = crate::conformance::UNSERVED_PATIENCE;
         let (mut a, _b) = pair().unwrap();
         Stream::set_write_timeout(&a, Some(timeout)).unwrap();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            // An input: more than any socket's buffer holds (macOS's 8 KiB, Linux's
-            // wmem_max), so the peer's not reading is what stops it.
-            let big = vec![7u8; 64 << 20];
-            tx.send(a.write_all(&big).map_err(|e| e.kind()))
-        });
-        let wrote = rx
-            .recv_timeout(guard)
-            .expect("the write blocked past its timeout");
+        // An input: more than any socket's buffer holds (macOS's 8 KiB, Linux's wmem_max), so
+        // the peer's not reading is what stops it. Made before the write's thread begins, so
+        // its beginning is the write's.
+        let big = vec![7u8; 64 << 20];
+        let (worker, rx) = while_runs::on_a_thread(move || a.write_all(&big).map_err(|e| e.kind()));
+        let wrote = while_runs::answer(&rx, worker, timeout);
         // Winsock may take the whole buffer from a non-blocking send (jupiter took 64 MiB);
         // what the write may not do is block past its timeout.
         assert!(
@@ -448,7 +511,7 @@ mod tests {
             let dir = shards_testdir::TempDir::new("sp").unwrap();
             let at = dir.path().join("s");
             let listener = std::os::unix::net::UnixListener::bind(&at).unwrap();
-            let mut connected = connect(&at).unwrap();
+            let mut connected = connect(&at, None).unwrap();
             drop(listener.accept().unwrap());
             for (what, s) in [("a pair", &mut paired), ("a connection", &mut connected)] {
                 let e = s.write(b"x").unwrap_err();
@@ -472,21 +535,24 @@ mod tests {
     }
 
     /// Two clones reading one byte: one reads it, the other fails at its timeout rather
-    /// than blocking after a poll said the byte was there (D215; review B3).
+    /// than blocking after a poll said the byte was there; each waited on while it runs
+    /// (D215; review B3).
     #[test]
     fn a_read_a_clone_raced_ends_at_its_timeout() {
-        let (timeout, guard) = timed();
+        // An input: any timeout shows it kept.
+        let timeout = crate::conformance::UNSERVED_PATIENCE;
         let (a, mut b) = pair().unwrap();
         Stream::set_read_timeout(&a, Some(timeout)).unwrap();
-        let (tx, rx) = std::sync::mpsc::channel();
-        for _ in 0..2 {
-            let mut reader = Stream::try_clone(&a).unwrap();
-            let tx = tx.clone();
-            std::thread::spawn(move || tx.send(reader.read(&mut [0u8; 1]).map_err(|e| e.kind())));
-        }
+        let readers: Vec<_> = (0..2)
+            .map(|_| {
+                let mut reader = Stream::try_clone(&a).unwrap();
+                while_runs::on_a_thread(move || reader.read(&mut [0u8; 1]).map_err(|e| e.kind()))
+            })
+            .collect();
         b.write_all(b"x").unwrap();
-        let mut got: Vec<_> = (0..2)
-            .map(|_| rx.recv_timeout(guard).expect("a read blocked past its timeout"))
+        let mut got: Vec<_> = readers
+            .iter()
+            .map(|(worker, rx)| while_runs::answer(rx, *worker, timeout))
             .collect();
         got.sort_by_key(|r| r.is_err());
         assert_eq!(got[0], Ok(1));
@@ -522,33 +588,33 @@ mod tests {
     /// native plan step 8).
     #[test]
     fn a_nonblocking_read_fails_at_once_and_its_handle_says_when_to_read() {
-        // A hang guard alone: each wait here returns at its fact.
-        let (_, guard) = timed();
+        // Neither the read nor the poll below waits for anything but its fact: each is looked
+        // at while it runs, each millisecond (poll(2)'s unit), and fails the test if blocked.
+        let at_once = Duration::from_millis(1);
         let (a, mut b) = pair().unwrap();
         Stream::set_nonblocking(&a, true).unwrap();
         let mut clone = Stream::try_clone(&a).unwrap();
-        let (tx, rx) = std::sync::mpsc::channel();
-        let reader = std::thread::spawn(move || {
+        let (worker, rx) = while_runs::on_a_thread(move || {
             let mut buf = [0u8; 8];
-            let empty = clone.read(&mut buf).map_err(|e| e.kind());
-            tx.send(empty).unwrap();
-            clone
+            (clone.read(&mut buf).map_err(|e| e.kind()), clone)
         });
-        let empty = rx.recv_timeout(guard).unwrap();
+        let (empty, mut clone) = while_runs::answer(&rx, worker, at_once);
         assert_eq!(empty, Err(io::ErrorKind::WouldBlock));
-        let mut clone = reader.join().unwrap();
         b.write_all(b"now").unwrap();
         #[cfg(unix)]
         {
-            let mut fd = libc::pollfd {
-                fd: std::os::fd::AsRawFd::as_raw_fd(&Stream::handle(&a)),
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            let ms = i32::try_from(guard.as_millis()).unwrap();
-            // SAFETY: poll(2) of one pollfd, of a socket `a` holds open.
-            let n = unsafe { libc::poll(&raw mut fd, 1, ms) };
-            assert_eq!((n, fd.revents & libc::POLLIN), (1, libc::POLLIN));
+            let fd = std::os::fd::AsRawFd::as_raw_fd(&Stream::handle(&a));
+            let (worker, rx) = while_runs::on_a_thread(move || {
+                let mut fd = libc::pollfd {
+                    fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY: poll(2) of one pollfd, of a socket `a` holds open until it answers.
+                let n = unsafe { libc::poll(&raw mut fd, 1, -1) };
+                (n, fd.revents & libc::POLLIN)
+            });
+            assert_eq!(while_runs::answer(&rx, worker, at_once), (1, libc::POLLIN));
         }
         let mut buf = [0u8; 8];
         let n = clone.read(&mut buf).unwrap();

@@ -1,11 +1,11 @@
-# A copy of Shards' draft `shards-api` (crates/api) and the crates it needs (afunix on Windows, testdir
-# for its tests), at hyper-light/shards hex/guests-attach 5b0e90c3 (local: hex/shards-api-constants rebased onto
-# Shards' p/integrate-1107 c0c18e6e6, with Hex's proposals and the real client's attach), so Hex builds against
-# it on every machine before Shards lands it. It moves to vendor/shards, recorded
-# in vendor/MANIFEST.toml, once Shards lands the crate (docs/design/shards-guest.md Appendix A). Its own
-# workspace, Shards' settings below (its root Cargo.toml at that commit), so its lints are Shards'.
+# A copy of Shards' `shards-api` (crates/api) and the crates it needs (abi, the constants it shares with Shards' VMM;
+# afunix on Windows; testdir for its tests), at hyper-light/shards p/integrate-1107 f2e5a8ca1 (pushed 2026-11-09: the
+# real client's attach and identity, and the bounds derived at run time, hex/derived-bounds ea32c690), so Hex builds
+# against it on every machine before Shards lands it on main. It moves to vendor/shards, recorded in
+# vendor/MANIFEST.toml, once Shards lands the crate (docs/design/shards-guest.md Appendix A). Its own workspace,
+# Shards' settings below (its root Cargo.toml at that commit), so its lints are Shards'.
 [workspace]
-members = ["crates/api", "crates/afunix", "crates/testdir"]
+members = ["crates/abi", "crates/api", "crates/afunix", "crates/testdir"]
 resolver = "3"
 
 [workspace.package]
