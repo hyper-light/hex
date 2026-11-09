@@ -932,6 +932,21 @@ turns each source into a completion on the one port (`GetQueuedCompletionStatusE
   afunix.sys completes it on the port when a client connects, and the socket it took reads its peer's pid
   once `SO_UPDATE_ACCEPT_CONTEXT` is set. The accepted socket joins the port before the accept starts, and
   once only (a second join is refused, `ERROR_INVALID_PARAMETER`: `tests/windows_node.rs` found it).
+- *A host's own connection* (its guest's control connection, the core's `Source`, which reads and writes it
+  itself and never waits): its socket's network events, which Winsock records on an event of the watch's own
+  (`WSAEventSelect`: bytes or its end to read, and room to send while its writes wait), and a wait completion
+  packet on that event queues them to the port, as a program's end is queued. Not a zero-byte `WSARecv`: that
+  tells when bytes or the end came, never when room came back, and room reported at every ask would have the
+  core write, find none and ask again without end. Winsock records what holds as a watch is set (its
+  "persistence of network events"), so each watch reads afresh what holds, and one reported is reported at
+  each wait until the core watches it again: the level-triggered readiness the core takes. The socket never
+  joins the port, so it stays its owner's. `ProcessSocketNotifications` does this in one call, but from build
+  20348 on; afunix.sys's floor is 1803. *Measured* (jupiter, 2026-11-09, `hex_afunix`'s
+  `a_sockets_watch_reports_each_arm_once` and `serve/windows_tests.rs`, red at d3a300de, green at 2e490369):
+  each arm is reported once at most, at once when what it watches for holds as it is armed (a packet
+  associated with an event already set is queued at once, so nothing need post it again); a full connection
+  is reported for room only once it has room; and `tests/guest_loop.rs`' HEX-SOCK-5 holds through it, a guest
+  booted again included.
 - *Who the peer is*: `SIO_AF_UNIX_GETPEERPID`, then the process's user from its token, as Linux's
   `SO_PEERCRED`.
 Messages are framed over the stream (`hex_core::stream`), as on macOS: Windows' AF_UNIX is `SOCK_STREAM`
