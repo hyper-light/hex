@@ -212,10 +212,17 @@ impl Transport for Stream {
             }
             let conn = self.dial_named(Named { exec, stream })?;
             // The caller's own descriptor of the connection; this side's closes as `conn` drops.
-            conn.handle()
+            let end = conn
+                .handle()
                 .try_clone_to_owned()
-                .map(Some)
-                .map_err(os("handing a stdio connection to its caller"))
+                .map_err(os("handing a stdio connection to its caller"))?;
+            // HEX-RT-17: Shards waits around a non-blocking socket in its Stream wrapper. Only the raw descriptor
+            // outlives this handoff, so its caller's File must block itself; the control connection stays evented.
+            let flags = rustix::fs::fcntl_getfl(&end)
+                .map_err(|e| Refusal::os("reading a stdio connection's mode", e))?;
+            rustix::fs::fcntl_setfl(&end, flags & !rustix::fs::OFlags::NONBLOCK)
+                .map_err(|e| Refusal::os("making a caller's stdio connection wait", e))?;
+            Ok(Some(end))
         };
         Ok(hex_api::Given {
             stdin: dial(ask.stdin, stream::Stdio::In)?,
