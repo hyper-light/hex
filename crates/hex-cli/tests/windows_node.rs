@@ -257,15 +257,23 @@ fn hostile_frames_end_their_connection_and_the_node_serves_the_next() {
     ] {
         let raw = hex_afunix::Socket::connect(&node.socket).unwrap();
         assert_eq!(raw.send(&hostile).unwrap(), hostile.len());
-        let mut buf = vec![0u8; 1 << 16];
-        let deadline = Instant::now() + PATIENCE;
-        // The node answers what it can (a refusal) and closes: the read reaches the end.
-        loop {
-            match raw.recv(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => assert!(Instant::now() < deadline, "the node kept the connection"),
+        // The node answers what it can (a refusal) and closes: the read reaches the end, within PATIENCE.
+        // Read on a thread of its own, so a node that keeps the connection fails the test by name instead
+        // of holding it (gates at 8907b97a, 2026-11-09, held here).
+        let (ended, end) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buf = vec![0u8; 1 << 16];
+            while let Ok(n) = raw.recv(&mut buf) {
+                if n == 0 {
+                    break;
+                }
             }
-        }
+            let _ = ended.send(());
+        });
+        assert!(
+            end.recv_timeout(PATIENCE).is_ok(),
+            "the node kept the connection {PATIENCE:?} after a hostile frame"
+        );
     }
     let client = node.client();
     let id = BoxId::new("sock-3").unwrap();
