@@ -8,6 +8,8 @@
 //! [`check_log`] replays a run's store log and refuses the first write the specification couldn't
 //! have made: the model-based oracle of `T-T7.4.1`, in the shape of QuickCheck's state-machine model
 //! checked at every step (DS[10], DS[11] in `docs/research/scheduler/deterministic-simulation.md`).
+//! [`check_slices`] does the same for each slice of a sharded control plane (H60), on the slice's own
+//! nodes and the workloads routed to it.
 //! [`check_end`] counts what `AC-T7.3.3` holds to zero: workloads lost or started twice.
 //!
 //! Counters here saturate: each counts a run's workloads or writes, bounded by the store far below
@@ -21,8 +23,8 @@ use crate::index::{FitIndex, Sample};
 use crate::model::{
     Cluster, Demand, GroupId, Kind, NodeId, NodeSpec, Resources, WorkloadId, WorkloadSpec,
 };
-use crate::sim::Run;
-use crate::store::{Op, State};
+use crate::sim::{Layout, Run};
+use crate::store::{Entry, Op, State};
 
 /// A write the serial specification couldn't have made.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -58,6 +60,12 @@ pub enum Violation {
     NotSerialPreemption(WorkloadId),
     #[error("{0:?} was left pending while it could preempt within the rules")]
     Inversion(WorkloadId),
+    #[error("{workload:?} was routed to slice {slice} and written on {node:?}, outside it")]
+    OutsideSlice {
+        workload: WorkloadId,
+        node: NodeId,
+        slice: usize,
+    },
     #[error("the replay itself failed: {0}")]
     Replay(SimError),
 }
@@ -104,6 +112,74 @@ pub struct LogReport {
 /// queue, each member on the best fit left by those before it. Its cost is each placement times the
 /// pending workloads ahead of it times the node count: an oracle for test-sized runs.
 pub fn check_log(nodes: &[NodeSpec], run: &Run) -> Result<LogReport, Violation> {
+    check_entries(nodes, run, run.store.log())
+}
+
+/// [`check_log`] for each of the run's slices: the log's writes of the workloads routed to it, its
+/// nodes by their ids within it. A write on a node outside its workload's slice is refused.
+pub fn check_slices(cluster: &Cluster, run: &Run) -> Result<Vec<LogReport>, Violation> {
+    let shards = u32::try_from(run.planes.len()).map_err(|_| SimError::Config("shards"))?;
+    check_layout(&Layout::new(&cluster.nodes, shards)?, run)
+}
+
+/// [`check_slices`] over a given layout, for a run that kept no planes (a bench's own store).
+pub fn check_layout(layout: &Layout, run: &Run) -> Result<Vec<LogReport>, Violation> {
+    let mut reports = Vec::with_capacity(layout.len());
+    for s in 0..layout.len() {
+        let nodes = layout.nodes(s).ok_or(SimError::Config("slice index"))?;
+        let mut entries = Vec::new();
+        for e in run.store.log() {
+            if let Some(op) = in_slice(layout, run, s, e.op)? {
+                entries.push(Entry { op, ..*e });
+            }
+        }
+        reports.push(check_entries(nodes, run, &entries)?);
+    }
+    Ok(reports)
+}
+
+/// `op` in slice `s`'s node ids, if its workload was routed there.
+fn in_slice(layout: &Layout, run: &Run, s: usize, op: Op) -> Result<Option<Op>, Violation> {
+    let workload = match op {
+        Op::Submit { workload, .. }
+        | Op::Place { workload, .. }
+        | Op::Complete { workload, .. }
+        | Op::Preempt { workload, .. } => workload,
+    };
+    let spec = run
+        .store
+        .record(workload)
+        .ok_or(Violation::NotSubmitted(workload))?
+        .spec;
+    if layout.route(&spec) != Some(s) {
+        return Ok(None);
+    }
+    let local = |node: NodeId| {
+        layout.local(s, node).ok_or(Violation::OutsideSlice {
+            workload,
+            node,
+            slice: s,
+        })
+    };
+    Ok(Some(match op {
+        Op::Submit { .. } => op,
+        Op::Place { workload, node } => Op::Place {
+            workload,
+            node: local(node)?,
+        },
+        Op::Complete { workload, node } => Op::Complete {
+            workload,
+            node: local(node)?,
+        },
+        Op::Preempt { workload, node } => Op::Preempt {
+            workload,
+            node: local(node)?,
+        },
+    }))
+}
+
+/// [`check_log`] over `log`, a run's whole log or one slice's part of it, its nodes `nodes`.
+fn check_entries(nodes: &[NodeSpec], run: &Run, log: &[Entry]) -> Result<LogReport, Violation> {
     let mut index = FitIndex::new(nodes)?;
     let mut shares = Shares::new(nodes, run.owners.iter().map(|o| o.weight).collect())?;
     let mut pending: Pending = BTreeMap::new();
@@ -113,7 +189,6 @@ pub fn check_log(nodes: &[NodeSpec], run: &Run) -> Result<LogReport, Violation> 
     let mut disrupted: BTreeMap<GroupId, u32> = BTreeMap::new();
     let mut preempted: BTreeMap<WorkloadId, Option<GroupId>> = BTreeMap::new();
     let mut report = LogReport::default();
-    let log = run.store.log();
     let mut at = 0usize;
     while let Some(entry) = log.get(at) {
         at = at.saturating_add(1);

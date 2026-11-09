@@ -514,6 +514,7 @@ fn run_of(store: Store, n: usize) -> Run {
         gangs: Default::default(),
         preemption: false,
         groups: Vec::new(),
+        planes: Vec::new(),
     }
 }
 

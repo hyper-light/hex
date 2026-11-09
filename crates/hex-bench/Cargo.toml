@@ -36,6 +36,14 @@ harness = false
 name = "sched_proximity"
 harness = false
 
+[[bench]]
+name = "sched_million"
+harness = false
+
+[[bench]]
+name = "sched_cells"
+harness = false
+
 [dependencies]
 hex-sim.workspace = true
 

@@ -23,6 +23,7 @@
 //!   slow-member false positives (S8).
 //! - [`swim`]: hyper-swim's own failure detector, the membership the design gives the node agent, vendored and
 //!   driven over a simulated LAN: the crash class's bound (S8, F1).
+//! - [`federation`]: cells and regions, a federation over independent cells (H64-H66).
 
 #![cfg_attr(
     test,
@@ -42,6 +43,7 @@ pub mod danger;
 pub mod error;
 pub mod fair;
 pub mod faults;
+pub mod federation;
 pub mod generate;
 pub mod index;
 pub mod membership;

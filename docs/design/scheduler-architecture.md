@@ -250,6 +250,27 @@ nodes for GKE experimental (CM[4][38]); `AC-T7.11.2` (1,000,000 workloads on 10,
 sharded cell's reach by these, and `T-T7.11.1` (losing a shard at 1,000,000 workloads, its share taken
 over within 5 s) is the shard-failure bound.
 
+The cell's sharding, its shard-loss takeover, its memory accounting and its scale benches are decided in
+`hex-sim.md`:
+- H60: shards as one Plane per contiguous node slice, with workloads routed by a pure function of
+  spec and cluster; `slices = 1` is today's plane.
+- H61: lease takeover. Renewed once per recorded store write round trip (Amphora's K0 p99.9, 22.27 ms),
+  the lease ten of them, etcd's rule; the rebuild from the store is measured within `T-T7.11.1`'s 5 s.
+- H62: a counting allocator over the store and the planes (`AC-T7.11.4`).
+- H63: the 1,000,000-placement bench and the kwok comparison method, with kube-scheduler at its default
+  and raised QPS, on the same node and pod shapes (`AC-T7.11.2`, `AC-T7.11.3`).
+
+Cells and regions are decided there too:
+- H64: a federation over independent cells, each today's hex-sim run with its own store and shards;
+  workloads routed to a home region, then a cell, by pure functions; one cell is `sim::run` bit for bit.
+- H65: the cell-loss drill (`AC-T7.12.2`), measured as every other cell's run unchanged.
+- H66: a lost region's work moved only where a surviving region's live free capacity holds it, after
+  deducting what is pending there; the rest refused, typed (`T-T7.12.1`).
+- H67: the differential suite on one node, one cell and three regions (`AC-T7.12.3`).
+- H68: cell selection on 100 simulated cells against Karmada's P99 32 ms.
+- H69: all of G6 and G7 over Hex's three classes: each workload an OCI container, a Firecracker or a
+  Shards microVM by owner (G2's rule), and each node, cell and region declaring the classes it runs.
+
 **What would falsify it.** The differential suite diverging across one node, one cell and three regions
 (`AC-T7.12.3`), or a cell's control-plane loss disturbing another cell's workloads (`AC-T7.12.2`, the
 cell-loss drill) — either breaks the failure-domain guarantee.

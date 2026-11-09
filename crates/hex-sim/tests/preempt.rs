@@ -190,6 +190,7 @@ fn run_of(store: Store, n: usize, groups: Vec<Group>) -> Run {
         gangs: Default::default(),
         preemption: true,
         groups,
+        planes: Vec::new(),
     }
 }
 
