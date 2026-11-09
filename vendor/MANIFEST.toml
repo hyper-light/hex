@@ -17,3 +17,29 @@ path = "vendor/seccompiler"
 exclude = ["rust-vmm-ci"]
 # Hex's own files in the vendored tree (not upstream's): the record of what Hex changed and why.
 own = ["UPSTREAM.md"]
+
+# hyper-raft (hyper-light): hex-sim scores placement with hyper-swim's own Vivaldi engine
+# (docs/design/hex-sim.md H20), and measures the crash class on hyper-swim's own failure detector, the
+# membership the node agent runs (docs/design/failure-isolation.md F1). hyper-raft has no -api crate
+# for Hex to depend on (CLAUDE.md §9), so only what hex-sim compiles is taken: coordinates.rs, included
+# unchanged by path, and the hyper-swim and hyper-timing crates with the workspace manifest their
+# packages inherit from, depended on by name and patched to this copy (Cargo.toml [patch.crates-io]),
+# as kiln patches the same names. When hyper-raft publishes these behind an -api crate, Hex depends on
+# that by name and this entry goes.
+[projects.hyper-raft]
+kind = "git"
+repository = "https://github.com/hyper-light/hyper-raft"
+commit = "6a236ae4c73e10013b149699ca8ec6802d919476"
+path = "vendor/hyper-raft"
+take = [
+    "Cargo.toml",
+    "crates/hyper-swim/Cargo.toml",
+    "crates/hyper-swim/ORIGIN.md",
+    "crates/hyper-swim/benches",
+    "crates/hyper-swim/src",
+    "crates/hyper-timing/Cargo.toml",
+    "crates/hyper-timing/ORIGIN.md",
+    "crates/hyper-timing/benches",
+    "crates/hyper-timing/src",
+]
+own = ["UPSTREAM.md"]

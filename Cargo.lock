@@ -79,6 +79,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
+name = "cap"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f125eb85b84a24c36b02ed1d22c9dd8632f53b3cde6e4d23512f94021030003"
+
+[[package]]
 name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -249,6 +255,7 @@ dependencies = [
  "hex-core",
  "hex-node",
  "hex-runtime",
+ "hex-sim",
  "serde_json",
  "tempfile",
 ]
@@ -300,12 +307,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "hex-health"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "hex-node"
 version = "0.1.0"
 dependencies = [
  "hex-api",
  "hex-client",
  "hex-core",
+ "hex-health",
  "hex-runtime",
  "rustix",
  "serde_json",
@@ -313,6 +328,7 @@ dependencies = [
  "shards-api",
  "tar",
  "tempfile",
+ "thiserror",
 ]
 
 [[package]]
@@ -333,6 +349,29 @@ dependencies = [
  "thiserror",
  "windows-sys",
 ]
+
+[[package]]
+name = "hex-sim"
+version = "0.1.0"
+dependencies = [
+ "cap",
+ "hex-health",
+ "hyper-swim",
+ "hyper-timing",
+ "proptest",
+ "thiserror",
+]
+
+[[package]]
+name = "hyper-swim"
+version = "0.1.0"
+dependencies = [
+ "hyper-timing",
+]
+
+[[package]]
+name = "hyper-timing"
+version = "0.1.0"
 
 [[package]]
 name = "indexmap"

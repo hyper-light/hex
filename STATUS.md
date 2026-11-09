@@ -354,6 +354,30 @@ three different things (CLAUDE.md "Working here"):
   proximity on hyper-swim, priority/fair-share/gangs/preemption, correctness against a serial
   specification, one code path from a laptop to a region, and fast isolation of bad workloads and
   nodes, all measured in **hex-sim** (built first). Implementation open.
+  - **Priority, fair share, gangs and preemption** between the owners of Hex's workloads, OCI containers,
+    Firecracker microVMs and Shards microVMs (implementation goal 4, CP-T7.5; `docs/design/scheduler-fairness.md`),
+    in hex-sim's control plane and its serial specification, 2026-11-06: queues by band then weighted DRF
+    (AC-T7.5.2: four equal-weight owners within 479 ppm of a quarter on a generated day, bar 5,000; FIFO
+    133,982), gangs in one store write (partial gangs 0 over crashes at every write), preemption within
+    disruption budgets (AC-T7.5.3: breaches 0 by a 256-case proptest with the crash nemesis), and a burst of
+    1,000 workloads leaving the other owners' start p95 as it was (T-T7.5.1; plain DRF and FIFO fail it, a
+    Kueue cohort model keeps it). On G2's recorded day (Huawei Cloud's serverless sandboxes) neither bar can
+    be shown (`bench/sched/g4_huawei.md`): open for Ada's call. Days of kiln's CI are a side measurement
+    (`bench/sched/kiln_workload.md`): Hex schedules OCI containers, Firecracker microVMs and Shards microVMs,
+    not CI jobs (Ada, 2026-11-06).
+- **Scheduler goal 5, failure detection and isolation (S8)** (`docs/design/failure-isolation.md`; built
+  on `cp/t7-sched-g5`, not merged): `hex-health`, the pure core of the detectors and penalties; hex-sim's
+  fault nemesis, each fault class within its stated bound over 1,000 seeds (gray drained ≤ 3.9 s; a
+  tripped OCI container stopped, then re-placed through the fast path anywhere in the cell as a
+  Firecracker or Shards microVM, else refused, and a microVM's trip refused, over 1,000 seeds of each
+  kind);
+  the crash class on hyper-swim's own detector, vendored (every crash condemned within the bound its
+  condemner stated; at one probe a second, p99 12.1 s, though the stated bound runs to 1,090 s, a
+  finding for hyper-swim's owner), memberlist's SWIM+Lifeguard beside it as the competitor, its
+  slow-member false positives ended by health-gated confirmations; the node's disk probe, and `AC-T7.10.3`'s dm-delay drill
+  (`bench/health/records/2026-11-05-dm-delay-drill.md`: drained 3.5 s after the stall, no work failed;
+  8 of 8 failed with the probe off). Open: the node agent running hyper-swim (it runs no membership
+  yet), and the control plane acting on the verdicts (CP-T7.3).
 
 ## What works where (native plan step 7; `docs/design/runtime.md`, decision "one differential suite")
 

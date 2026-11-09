@@ -1651,12 +1651,9 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
     /// Expect: the bystander holds no pipe past its stdio.
     #[test]
     fn a_process_started_while_a_shim_starts_inherits_none_of_its_descriptors() {
-        use std::os::unix::fs::PermissionsExt;
-
         let lab = tempfile::tempdir().unwrap();
         let stand_in = lab.path().join("shim");
-        std::fs::write(&stand_in, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&stand_in, std::fs::Permissions::from_mode(0o755)).unwrap();
+        stand_in_at(&stand_in, "#!/bin/sh\nexit 0\n");
         let rt = Runtime::with_helper(lab.path().join("state"), stand_in);
         let dir = rt.dir("c1").unwrap();
         dir.create("c1").unwrap();

@@ -17,6 +17,7 @@
 )]
 
 mod abandoned;
+pub mod disk_probe;
 pub mod recorded;
 pub mod store;
 

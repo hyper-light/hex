@@ -934,7 +934,7 @@ fn program_alone(lab: &Lab, own: &Path) {
 /// A program holds its stdio alone, whatever the agent above it holds (CVE-2024-21626's class; decision 3,
 /// "Descriptors reach a program only on purpose"; AC-T7.1.4). Do: leave a descriptor open in this process, the
 /// agent, without close-on-exec, as a window above a program would; start a box's program and exec a second into
-/// it. Expect: once each has exec'd, neither holds anything past 0, 1 and 2.
+/// it. Expect: each comes to hold nothing past 0, 1 and 2.
 fn programs_hold_their_stdio_alone(lab: &Lab, own: &Path) {
     let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
     let node = lab.node(&own.join("hex-oci-stdio"), state.path());
@@ -959,17 +959,24 @@ fn programs_hold_their_stdio_alone(lab: &Lab, own: &Path) {
         u32::try_from(init_pid(&node.container_dir(&id))).unwrap(),
         exec.pid(),
     ] {
+        // Its loader holds a descriptor for a moment after the exec, so what's waited for is their end; a
+        // stray stays.
         let deadline = Instant::now() + conformance::PATIENCE;
-        while !cmdline_has(pid, "/usr/bin/sleep") {
-            assert!(Instant::now() < deadline, "{pid} never became its program");
+        loop {
+            let held: Vec<String> = std::fs::read_dir(format!("/proc/{pid}/fd"))
+                .unwrap()
+                .map(|fd| fd.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|fd| !["0", "1", "2"].contains(&fd.as_str()))
+                .collect();
+            if cmdline_has(pid, "/usr/bin/sleep") && held.is_empty() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "program {pid} also holds {held:?}, or never became its program"
+            );
             std::thread::yield_now();
         }
-        let held: Vec<String> = std::fs::read_dir(format!("/proc/{pid}/fd"))
-            .unwrap()
-            .map(|fd| fd.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|fd| !["0", "1", "2"].contains(&fd.as_str()))
-            .collect();
-        assert!(held.is_empty(), "program {pid} also holds {held:?}");
     }
     drop(stray);
     node.delete(&id).expect("delete ends the programs");
