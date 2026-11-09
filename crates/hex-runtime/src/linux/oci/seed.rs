@@ -723,8 +723,20 @@ fn serve_one(
 enum How<'a> {
     /// The seed clones the init into its cgroup and namespaces ([`sys::clone_sibling`]).
     Clone,
-    /// This process is an init parked in its cgroup with the namespaces `flags` made, claimed on `claim`.
+    /// This process is an init parked in its cgroup with the namespaces `flags` made, leading a session of its own
+    /// since it parked ([`parked`]), claimed on `claim`.
     Parked { flags: u64, claim: BorrowedFd<'a> },
+}
+
+impl How<'_> {
+    /// Makes the init a session's leader ([`init::lead_session`]) as a fresh clone's first act. A parked init led its
+    /// own at park, so its create's path takes no `setsid` (goal 17, lever L1).
+    fn lead_session(self) -> Result<(), OciError> {
+        match self {
+            How::Clone => init::lead_session(),
+            How::Parked { .. } => Ok(()),
+        }
+    }
 }
 
 /// How a create's init comes to be ([`How`]), and the pid namespace the seed's next children are born in, which a
@@ -845,7 +857,7 @@ fn parkable() -> u64 {
 }
 
 /// A parked init's life (decision 8): it empties its effective capabilities, says on `claim` that it is parked,
-/// and waits there for one create, then makes that container as a
+/// leads a session of its own, and waits there for one create, then makes that container as a
 /// freshly cloned init does, through the create's own path with [`How::Parked`]. A refusal goes back on the
 /// claim socket and the init ends; so does the agent closing the socket (an idle cgroup evicted, the node
 /// shutting down). It never returns.
@@ -886,6 +898,11 @@ fn parked(claim: OwnedFd, flags: u64, pid_for: &mut PidFor) -> ! {
     if said.is_err() {
         sys::exit_child(127);
     }
+    // A session of its own, led now that it has said it is parked ([`init::lead_session`]): the reschedule its move to
+    // a new autogroup forces is neither the delete's that parked it, which waits for that word
+    // (`run::Parked::wait_parked`), nor the claiming create's (goal 17, lever L1). One that couldn't lead one refuses
+    // its claim, never making a container in the seed's session.
+    let led = init::lead_session();
     let mut buf = vec![0u8; seed::MAX_REQUEST];
     let (size, fds) = match recv_request(claim.as_fd(), &mut buf) {
         Ok(Received::Message { size, stdio }) => (size, stdio),
@@ -893,6 +910,13 @@ fn parked(claim: OwnedFd, flags: u64, pid_for: &mut PidFor) -> ! {
     };
     let bytes = buf.get(..size.min(buf.len())).unwrap_or_default();
     let answer = match seed::read_message(bytes, size, fds.len()) {
+        Ok(seed::Message::Create(_)) if led.is_err() => {
+            refused(
+                Failed::Start,
+                "a parked init couldn't lead a session of its own".to_owned(),
+            )
+            .0
+        }
         Ok(seed::Message::Create(_))
             if rustix::thread::set_capabilities(None, held).is_err()
                 || rustix::process::set_dumpable_behavior(dumpable).is_err() =>
@@ -1009,14 +1033,16 @@ fn serve_create(
             // The init. It returns here only if a step before the exec FIFO failed; its error goes to
             // the agent on the sync pipe, as the shim's does, then it exits (it must not run the seed's
             // serve loop). Born in the cgroup and the fresh namespaces, the agent's own child.
-            let r = init::clone_child(
-                &spec,
-                &create.bundle,
-                Path::new(&create.dir),
-                sync_w.as_fd(),
-                Some(map_r),
-                network,
-            );
+            let r = begun.how.lead_session().and_then(|()| {
+                init::clone_child(
+                    &spec,
+                    &create.bundle,
+                    Path::new(&create.dir),
+                    sync_w.as_fd(),
+                    Some(map_r),
+                    network,
+                )
+            });
             if let Err(e) = r {
                 init::msg(sync_w.as_fd(), &format!("E{e}"));
                 sys::exit_child(127);
@@ -1259,15 +1285,17 @@ fn serve_create_pruned(
                 binds,
                 path_joins,
             };
-            let r = init::clone_child_pruned(
-                spec,
-                &create.bundle,
-                container_dir,
-                sources,
-                sync_w.as_fd(),
-                network,
-                ipc_uts,
-            );
+            let r = how.lead_session().and_then(|()| {
+                init::clone_child_pruned(
+                    spec,
+                    &create.bundle,
+                    container_dir,
+                    sources,
+                    sync_w.as_fd(),
+                    network,
+                    ipc_uts,
+                )
+            });
             if let Err(e) = r {
                 init::msg(sync_w.as_fd(), &format!("E{e}"));
                 sys::exit_child(127);
