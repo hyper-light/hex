@@ -169,9 +169,11 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   "the Windows node, on one completion port"), it names each box's job (`CreateJobObjectW` with a name,
   reopened by the next node with `OpenJobObjectW`), and a keeper holds a second handle to each: the node
   duplicates the job into the keeper and closes it there on delete (`DuplicateHandle` into another process
-  and with `DUPLICATE_CLOSE_SOURCE`, the keeper opened by `OpenProcess` with `PROCESS_DUP_HANDLE`), names
-  a process by its creation time (`GetProcessTimes`) so a reused pid is told apart, and makes and signals
-  the keeper's stop (`CreateEventW` named, `SetEvent`). `windows-sys` binds these as `unsafe` foreign
+  and with `DUPLICATE_CLOSE_SOURCE`, the keeper opened by `OpenProcess` with `PROCESS_DUP_HANDLE`), starts
+  the keeper as it starts a member but in no job (`CreateProcessW` with the `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`
+  alone, its three standard handles the NUL device), so the keeper, which outlives the node, holds none of
+  the node's handles, names a process by its creation time (`GetProcessTimes`) so a reused pid is told
+  apart, and makes and signals the keeper's stop (`CreateEventW` named, `SetEvent`). `windows-sys` binds these as `unsafe` foreign
   functions, and std's own
   job-object support and its `PROC_THREAD_ATTRIBUTE_JOB_LIST`/`_HANDLE_LIST` process creation are
   unstable; Rust can express none of them safely.
