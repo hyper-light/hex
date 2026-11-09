@@ -7,7 +7,8 @@
 //!   reaped and counted in its box (`abandoned`), and one it released runs on;
 //! - HEX-SOCK-3: hostile bytes to the live node (a frame past the bound, a frame of garbage) end that
 //!   connection alone, and the node serves the next;
-//! - an exec that asks for a stream is refused by name until the stdio transport's decision is recorded.
+//! - an exec that asks for a stream is refused by name until the stdio transport's decision is recorded;
+//! - HEX-SOCK-3 every time: each of many hostile connections brings its refusal and then its end.
 #![cfg(windows)]
 #![allow(
     clippy::unwrap_used,
@@ -327,5 +328,77 @@ fn an_exec_with_a_stream_is_refused_by_name_until_the_stdio_transport_is_decided
         Err(other) => panic!("an exec with a stream was refused, but not by name: {other:?}"),
         Ok(_) => panic!("an exec with a stream wasn't refused"),
     }
+    client.delete(&id).unwrap();
+}
+
+/// The rounds [`hostile_connections_each_get_their_refusal_then_their_end`] makes: at the ~2% of graceful
+/// closes afunix.sys lost to a peer in another process (jupiter, 2026-11-09: 35 of 1,500 rounds, and 2-30
+/// of 300 per run across the variants measured), 300 rounds keep at least one with probability above 99.7%
+/// (1 - 0.98^300), so the node that loses one fails this test, not one run in twenty.
+const HOSTILE_ROUNDS: usize = 300;
+
+/// HEX-SOCK-3, every time (native plan step 8; Ada's ask, 2026-11-09): do send one live node a hostile
+/// frame on each of [`HOSTILE_ROUNDS`] connections in turn, half a prefix past the format's largest message
+/// and half a frame of garbage, reading each to its end. Expect each connection to bring its refusal (one
+/// whole `Answer::Refused`) and then its end, within PATIENCE: the node ends every connection it refuses,
+/// its refusal read first, though the platform loses an end-of-stream now and then.
+#[test]
+fn hostile_connections_each_get_their_refusal_then_their_end() {
+    let dir = dir();
+    let node = Node::start(dir.path());
+    for round in 0..HOSTILE_ROUNDS {
+        let hostile = if round % 2 == 0 {
+            u32::MAX.to_le_bytes().to_vec()
+        } else {
+            [16u32.to_le_bytes().to_vec(), vec![0xee; 16]].concat()
+        };
+        let raw = hex_afunix::Socket::connect(&node.socket).unwrap();
+        assert_eq!(raw.send(&hostile).unwrap(), hostile.len());
+        let (ended, end) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buf = vec![0u8; 1 << 16];
+            let mut got = Vec::new();
+            while let Ok(n) = raw.recv(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                got.extend_from_slice(buf.get(..n).unwrap_or_default());
+            }
+            let _ = ended.send(got);
+        });
+        let got = end.recv_timeout(PATIENCE).unwrap_or_else(|_| {
+            panic!("round {round}: the node's connection didn't end within {PATIENCE:?}")
+        });
+        // The answer's frame, taken as a client takes it (its prefix, then its body).
+        let mut deframer = Deframer::new(wire::MAX_MESSAGE);
+        let mut input = got.as_slice();
+        let mut message = None;
+        while message.is_none() && !input.is_empty() {
+            let (took, done) = deframer.take(input).unwrap();
+            input = input.get(took..).unwrap_or_default();
+            message = done;
+        }
+        let message = message.unwrap_or_else(|| {
+            panic!(
+                "round {round}: the connection ended before a whole answer ({} bytes)",
+                got.len()
+            )
+        });
+        assert!(input.is_empty(), "round {round}: bytes past the refusal");
+        let received = Received {
+            bytes: &message,
+            size: message.len(),
+            descriptors: 0,
+            descriptors_cut: false,
+        };
+        let (_, answer) = wire::read_answer(&received, wire::MAX_MESSAGE).unwrap();
+        assert!(
+            matches!(answer, Answer::Refused(_)),
+            "round {round}: the node answered {answer:?}"
+        );
+    }
+    let client = node.client();
+    let id = BoxId::new("sock-3-every").unwrap();
+    client.create(spec(&id)).unwrap();
     client.delete(&id).unwrap();
 }
