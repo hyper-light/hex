@@ -59,7 +59,8 @@ struct UserBox {
 struct BoxUser {
     /// Shared with each program it starts, which asks the helper for its end ([`proc::UserProc`]).
     helper: Arc<helper_client::Helper>,
-    boxes: Mutex<BTreeMap<BoxId, UserBox>>,
+    /// Shared with a run's thread, which removes its box through [`remove_user_box`] as `delete` does.
+    boxes: Arc<Mutex<BTreeMap<BoxId, UserBox>>>,
 }
 
 /// The macOS node's runtime over the `process` class. Rootless (`helper` `None`), a box is a process group
@@ -68,7 +69,8 @@ struct BoxUser {
 /// when the helper's socket answers. Holds its boxes in memory, keyed by id.
 pub struct MacRuntime {
     shared: Arc<Shared>,
-    boxes: Mutex<BTreeMap<BoxId, Arc<ProcessBox>>>,
+    /// Shared with a run's thread, which removes its box through [`remove_process_box`] as `delete` does.
+    boxes: Arc<Mutex<BTreeMap<BoxId, Arc<ProcessBox>>>>,
     helper: Option<BoxUser>,
     /// The kernel's bound on a program's arguments and environment, read at start (`kern.argmax`).
     exec_limit: ExecLimit,
@@ -83,7 +85,7 @@ impl MacRuntime {
             .map_err(|e| Refusal::os("reading the machine's timebase", e))?;
         Ok(Self {
             shared: Arc::new(shared),
-            boxes: Mutex::new(BTreeMap::new()),
+            boxes: Arc::new(Mutex::new(BTreeMap::new())),
             helper: None,
             exec_limit: exec_limit()?,
         })
@@ -102,10 +104,10 @@ impl MacRuntime {
                     .map_err(|e| Refusal::os("reading the machine's timebase", e))?;
                 Ok(Self {
                     shared: Arc::new(shared),
-                    boxes: Mutex::new(BTreeMap::new()),
+                    boxes: Arc::new(Mutex::new(BTreeMap::new())),
                     helper: Some(BoxUser {
                         helper: Arc::new(helper),
-                        boxes: Mutex::new(BTreeMap::new()),
+                        boxes: Arc::new(Mutex::new(BTreeMap::new())),
                     }),
                     exec_limit: exec_limit()?,
                 })
@@ -139,6 +141,29 @@ impl MacRuntime {
             Some((pgid, started)) => process::end_group(pgid, started),
             None => Ok(()),
         }
+    }
+
+    /// Hands run box `id`'s program to its own thread ([`crate::run::Run`]), with the box's KILL and its removal,
+    /// each the mode's own.
+    fn watch_run(&self, proc: Box<dyn Proc>, id: &BoxId) -> Result<crate::run::Run, Refusal> {
+        if let Some(bu) = &self.helper {
+            let (killer, kill_id) = (Arc::clone(&bu.helper), id.clone());
+            let (helper, boxes, gone) = (Arc::clone(&bu.helper), Arc::clone(&bu.boxes), id.clone());
+            return crate::run::Run::start(
+                proc,
+                id,
+                Box::new(move || killer.signal(&kill_id, Signal::KILL.number())),
+                Box::new(move || remove_user_box(&helper, &boxes, &gone)),
+            );
+        }
+        let b = self.get(id)?;
+        let (boxes, gone) = (Arc::clone(&self.boxes), id.clone());
+        crate::run::Run::start(
+            proc,
+            id,
+            Box::new(move || b.signal(Signal::KILL)),
+            Box::new(move || remove_process_box(&boxes, &gone)),
+        )
     }
 
     fn boxes(
@@ -251,10 +276,38 @@ impl BoxUser {
     }
 
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
-        self.helper.end(id)?;
-        self.boxes()?.remove(id);
-        Ok(())
+        remove_user_box(&self.helper, &self.boxes, id)
     }
+}
+
+/// Ends box-user box `id` through the helper and forgets it: the runtime's delete and a run's thread take this one
+/// path.
+fn remove_user_box(
+    helper: &helper_client::Helper,
+    boxes: &Mutex<BTreeMap<BoxId, UserBox>>,
+    id: &BoxId,
+) -> Result<(), Refusal> {
+    helper.end(id)?;
+    boxes
+        .lock()
+        .map_err(|_| Refusal::Broken("the node's box-user map lock is poisoned".to_owned()))?
+        .remove(id);
+    Ok(())
+}
+
+/// Removes rootless box `id` and ends it (kill, drain, stop its watcher): the runtime's delete and a run's thread
+/// take this one path. Dropping the last Arc does the same, so removing a box a caller still holds through
+/// `list` is safe.
+fn remove_process_box(
+    boxes: &Mutex<BTreeMap<BoxId, Arc<ProcessBox>>>,
+    id: &BoxId,
+) -> Result<(), Refusal> {
+    let b = boxes
+        .lock()
+        .map_err(|_| Refusal::Broken("the node's box map lock is poisoned".to_owned()))?
+        .remove(id)
+        .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
+    b.delete()
 }
 
 /// A box-user box's [`BoxInfo`]: a `process` box, with box-user membership (the helper holds it), no init
@@ -353,23 +406,21 @@ impl Runtime for MacRuntime {
         Ok(Box::new(hex_api::Asked::new(proc, given)))
     }
 
-    /// A run's box goes once its program ends (decision 7), which takes something watching the program to remove
-    /// it: Linux's node agent's supervisor. This runtime's boxes are made, exec'd into and deleted by its callers,
-    /// nothing of its own removing one, so a run is refused naming the platform, before anything is made.
-    fn run(
-        &self,
-        spec: BoxSpec,
-        _program: Program,
-        _stdio: Stdio,
-    ) -> Result<Box<dyn Proc>, Refusal> {
+    /// A run's box goes once its program ends (decision 7): a thread of the run's own waits for the end and
+    /// removes the box through the delete's own path ([`crate::run::Run`]), whether or not its caller still holds
+    /// the run, and only then gives the caller the end. Its kill is the box's KILL, the box holding that program
+    /// alone. In both modes: a process group's and a box user's.
+    fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
         spec.check_run()?;
-        Err(Refusal::Platform {
-            what: "run",
-            platform: "macos",
-            why: "a box made for one program's life is removed by Linux's node agent once the program ends \
-                  (decision 7); a macOS box is made, exec'd into and deleted by its caller"
-                .to_owned(),
-        })
+        let id = spec.id.clone();
+        self.create(spec)?;
+        let begun = self
+            .exec(&id, program, stdio)
+            .and_then(|proc| self.watch_run(proc, &id));
+        match begun {
+            Ok(run) => Ok(Box::new(run)),
+            Err(why) => Err(crate::run::undone(why, self.delete(&id), &id)),
+        }
     }
 
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
@@ -407,13 +458,7 @@ impl Runtime for MacRuntime {
         if let Some(bu) = &self.helper {
             return bu.delete(id);
         }
-        let b = self
-            .boxes()?
-            .remove(id)
-            .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
-        // Ends the box (kill, drain, stop its watcher); dropping the last Arc does the same, so deleting a
-        // box a caller still holds through `list` is safe.
-        b.delete()
+        remove_process_box(&self.boxes, id)
     }
 }
 

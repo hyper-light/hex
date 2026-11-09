@@ -62,15 +62,6 @@ pub trait Fixture {
     fn term_ends_init(&self) -> bool {
         false
     }
-    /// Whether this class's node makes a box for one program's life ([`Runtime::run`], decision 7 of
-    /// docs/design/runtime-architecture.md): true where something there removes the box once its program
-    /// ends (Linux's node agent, its supervisor watching the program's pidfd, and the simulator). A class whose
-    /// node has nothing that would (macOS's and Windows' `process` classes, which keep their boxes in their
-    /// runtimes) says false, and HEX-RT-15 then checks that a run is refused naming the platform, making nothing.
-    /// An `oci` class's run is refused whatever this says.
-    fn runs(&self) -> bool {
-        true
-    }
 }
 
 /// One part of the contract.
@@ -990,29 +981,20 @@ fn owned(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
 /// HEX-RT-15 (runtime design goal 7, decision 7): a run is a box for one program's life. Once the caller is told
 /// it ended, the box is gone. While it runs it is a box like any other, its id taken. A run the caller let go of is
 /// still removed when its program ends, with what it left there, and the suite waits for that fact, bounded by its
-/// learned patience ([`gone_within`]). An `oci` box has an init to create and start, so its spec's run is refused;
-/// so is any run on a class whose node has nothing that removes a box when its program ends ([`Fixture::runs`]),
-/// naming its platform. A refused run makes nothing.
+/// learned patience ([`gone_within`]). Every OS's `process` class runs one: Linux's, macOS's and Windows' (Ada,
+/// 2026-11-09). An `oci` box has an init to create and start, so its spec's run is refused, and a refused run
+/// makes nothing.
 fn run_removes(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     let id = id("run")?;
     let _ = rt.delete(&id);
     let spec = fx.spec(id.clone(), Bounds::default());
     let gone = Err(Refusal::NoSuchBox(id.clone()));
     let oci = spec.class.class() == Class::Oci;
-    if oci || !fx.runs() {
+    if oci {
         let got = rt.run(spec, fx.program(&Act::Say("no")), Stdio::null());
-        let refused = match &got {
-            Err(Refusal::Invalid { what: "run", .. }) => oci,
-            Err(Refusal::Platform { what: "run", .. }) => !oci,
-            _ => false,
-        };
+        let refused = matches!(&got, Err(Refusal::Invalid { what: "run", .. }));
         ensure(refused, || {
-            let of = if oci {
-                "an oci spec"
-            } else {
-                "a class that runs none"
-            };
-            format!("run of {of}: {:?}", got.as_ref().err())
+            format!("run of an oci spec: {:?}", got.as_ref().err())
         })?;
         let left = rt.inspect(&id);
         return ensure(left == gone, || format!("a refused run made {left:?}"));

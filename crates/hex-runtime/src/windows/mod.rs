@@ -79,7 +79,7 @@ impl Keeping {
         Self::spawn_at(state, command)
     }
 
-    /// Starts a fresh keeper and records it, for [`WinRuntime::ensure_keeper`] when the old one is gone.
+    /// Starts a fresh keeper and records it, for [`Holding::ensure_keeper`] when the old one is gone.
     fn spawn(&self) -> Result<keeper::NodeKeeper, Refusal> {
         Self::spawn_at(&self.state, &self.command)
     }
@@ -161,14 +161,13 @@ pub struct WinRuntime {
     /// The folder holding the `hex` binary every `oci` box maps read-only as its launcher: the node's
     /// own folder unless told otherwise.
     launcher: Option<PathBuf>,
-    boxes: Mutex<BTreeMap<BoxId, Held>>,
+    /// Its boxes and their keeper, shared with a run's thread, which removes its box as `delete` does
+    /// ([`Holding::remove`]).
+    holding: Arc<Holding>,
     /// The node's name for its boxes' jobs, where its `process` boxes outlive it ([`WinRuntime::outliving`]):
     /// a box is the job `Local\hex-<node>-<box>`, which a node on the same name takes back. `None`: a
     /// runtime driven in process, whose boxes end with it (kill-on-close).
     node: Option<String>,
-    /// Where its boxes outlive it: the keeper holding a second handle to each box's job, and the state
-    /// folder their handle values are kept in. `None` for a runtime driven in process.
-    keeper: Option<Keeping>,
     /// The installer's features that are off, read when the runtime is made (node start), so no box's
     /// create waits on the query: a feature turns on or off only across a reboot, which starts the
     /// node again.
@@ -181,64 +180,20 @@ pub struct WinRuntime {
     reclaim_failures: Vec<Refusal>,
 }
 
-impl WinRuntime {
-    /// A runtime for this machine, its processor count read from Windows, its `oci` scratch under
-    /// `%ProgramData%\hex\boxes`.
-    pub fn new() -> Self {
-        Self::with(sys::active_processors(), default_scratch_root())
-    }
+/// A runtime's boxes and the keeper holding their jobs: shared with a run's thread, which removes its box
+/// through [`Holding::remove`] as the runtime's delete does.
+struct Holding {
+    boxes: Mutex<BTreeMap<BoxId, Held>>,
+    /// Where its boxes outlive it: the keeper holding a second handle to each box's job, and the state
+    /// folder their handle values are kept in. `None` for a runtime driven in process.
+    keeper: Option<Keeping>,
+}
 
-    /// A runtime told the machine has `processors` logical processors (at least one), keeping `oci`
-    /// scratch under `scratch_root`, first reclaiming what a killed node left there ([`oci::reclaim`]).
-    /// The installer's features are read here, before any box, so the first `oci` create doesn't wait
-    /// on PowerShell's query (p50 1,183 ms on jupiter, bench/install/records/windows-jupiter-20261105.txt
-    /// entry 19). A read that fails here isn't lost: the first box that needs the features reads them
-    /// again, and is refused by name if that fails too.
-    pub fn with(processors: u32, scratch_root: PathBuf) -> Self {
-        let reclaim_failures = oci::reclaim(&scratch_root);
-        let runtime = Self {
-            processors: NonZeroU32::new(processors).unwrap_or(NonZeroU32::MIN),
-            scratch_root,
-            launcher: None,
-            boxes: Mutex::new(BTreeMap::new()),
-            node: None,
-            keeper: None,
-            features_off: OnceLock::new(),
-            #[cfg(test)]
-            feature_reads: std::sync::atomic::AtomicU32::new(0),
-            reclaim_failures,
-        };
-        // Read now so no create waits on it; a failure is read again, and refused, at the first ask.
-        let _ = runtime.features_off();
-        runtime
-    }
-
-    /// A node's runtime on this machine whose boxes outlive it: each box's job is the one named for `node`
-    /// and the box, kill-on-close, held by the node and by a keeper (`keeper`, a command line started apart
-    /// from the node, its state in `dir`), and an `oci` box's container outlives the node with it (HCS
-    /// doesn't end it with its last handle), so a node killed with boxes running leaves them to the keeper,
-    /// and the next node on the same name takes them back ([`WinRuntime::adopt`]) or ends them
-    /// ([`WinRuntime::end`]). With node and keeper both gone, kill-on-close ends them. `node` names one
-    /// node's boxes apart from another's in the session. Its `oci` boxes' records and spec-made scratch are
-    /// its own, under `dir\boxes`, so its start-time reclaim sweeps no other runtime's boxes (the machine's
-    /// shared `%ProgramData%\hex\boxes` holds those of runtimes driven in process, a bench's among them).
-    pub fn outliving(node: &str, dir: &Path, keeper: &[String]) -> Result<Self, Refusal> {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| Refusal::os("making the node's state folder", e))?;
-        let keeping = Keeping::start(dir, keeper)?;
-        let mut runtime = Self::with(sys::active_processors(), dir.join("boxes"));
-        runtime.node = Some(node.to_owned());
-        runtime.keeper = Some(keeping);
-        Ok(runtime)
-    }
-
-    /// The pid of the keeper holding this node's boxes' jobs, where its boxes outlive it; a keeper found
-    /// dead is replaced first (the node's own watch does this on its port; here, for a runtime driven in
-    /// process, it is done when asked).
-    pub fn keeper_pid(&self) -> Option<u32> {
-        let keeping = self.keeper.as_ref()?;
-        self.ensure_keeper(keeping).ok()?;
-        Some(keeping.keeper.lock().ok()?.pid())
+impl Holding {
+    fn boxes(&self) -> Result<std::sync::MutexGuard<'_, BTreeMap<BoxId, Held>>, Refusal> {
+        self.boxes
+            .lock()
+            .map_err(|_| Refusal::Broken("the node's box map lock is poisoned".to_owned()))
     }
 
     /// Ensures the keeper is alive: one found dead is started again and every live box's job duplicated
@@ -270,6 +225,106 @@ impl WinRuntime {
         };
         self.ensure_keeper(keeping)?;
         Ok(Some(keeping))
+    }
+
+    /// Closes box `id`'s job in the keeper and forgets its value (its delete or its removal by recovery):
+    /// after this the box's last handle is the node's, so kill-on-close ends it with the node.
+    fn drop_from_keeper(&self, id: &BoxId) -> Result<(), Refusal> {
+        if let Some(keeping) = self.keeping()?
+            && let Some(value) = keeper::read_held(&keeping.state, id.as_str())
+        {
+            keeping
+                .keeper
+                .lock()
+                .map_err(|_| Refusal::Broken("the node's keeper lock is poisoned".to_owned()))?
+                .drop_held(value)?;
+            keeper::forget_held(&keeping.state, id.as_str());
+        }
+        Ok(())
+    }
+
+    /// Removes box `id` and ends it: the runtime's delete and a run's thread take this one path.
+    fn remove(&self, id: &BoxId) -> Result<(), Refusal> {
+        let b = self
+            .boxes()?
+            .remove(id)
+            .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
+        // Close the keeper's handle to this box's job first, so the node's TerminateJobObject and the
+        // dropped Arc leave nothing holding it.
+        self.drop_from_keeper(id)?;
+        // Ends the box; dropping the last Arc closes its job (kill-on-close) and, for an oci box, its
+        // container's last handle (terminate-on-close) as a backstop, so deleting a box a caller still
+        // holds through `list` is safe.
+        match b {
+            Held::Process(b) => b.delete(),
+            Held::Oci(b) => b.delete(),
+        }
+    }
+}
+
+impl WinRuntime {
+    /// A runtime for this machine, its processor count read from Windows, its `oci` scratch under
+    /// `%ProgramData%\hex\boxes`.
+    pub fn new() -> Self {
+        Self::with(sys::active_processors(), default_scratch_root())
+    }
+
+    /// A runtime told the machine has `processors` logical processors (at least one), keeping `oci`
+    /// scratch under `scratch_root`, first reclaiming what a killed node left there ([`oci::reclaim`]).
+    /// The installer's features are read here, before any box, so the first `oci` create doesn't wait
+    /// on PowerShell's query (p50 1,183 ms on jupiter, bench/install/records/windows-jupiter-20261105.txt
+    /// entry 19). A read that fails here isn't lost: the first box that needs the features reads them
+    /// again, and is refused by name if that fails too.
+    pub fn with(processors: u32, scratch_root: PathBuf) -> Self {
+        let reclaim_failures = oci::reclaim(&scratch_root);
+        let runtime = Self {
+            processors: NonZeroU32::new(processors).unwrap_or(NonZeroU32::MIN),
+            scratch_root,
+            launcher: None,
+            holding: Arc::new(Holding {
+                boxes: Mutex::new(BTreeMap::new()),
+                keeper: None,
+            }),
+            node: None,
+            features_off: OnceLock::new(),
+            #[cfg(test)]
+            feature_reads: std::sync::atomic::AtomicU32::new(0),
+            reclaim_failures,
+        };
+        // Read now so no create waits on it; a failure is read again, and refused, at the first ask.
+        let _ = runtime.features_off();
+        runtime
+    }
+
+    /// A node's runtime on this machine whose boxes outlive it: each box's job is the one named for `node`
+    /// and the box, kill-on-close, held by the node and by a keeper (`keeper`, a command line started apart
+    /// from the node, its state in `dir`), and an `oci` box's container outlives the node with it (HCS
+    /// doesn't end it with its last handle), so a node killed with boxes running leaves them to the keeper,
+    /// and the next node on the same name takes them back ([`WinRuntime::adopt`]) or ends them
+    /// ([`WinRuntime::end`]). With node and keeper both gone, kill-on-close ends them. `node` names one
+    /// node's boxes apart from another's in the session. Its `oci` boxes' records and spec-made scratch are
+    /// its own, under `dir\boxes`, so its start-time reclaim sweeps no other runtime's boxes (the machine's
+    /// shared `%ProgramData%\hex\boxes` holds those of runtimes driven in process, a bench's among them).
+    pub fn outliving(node: &str, dir: &Path, keeper: &[String]) -> Result<Self, Refusal> {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| Refusal::os("making the node's state folder", e))?;
+        let keeping = Keeping::start(dir, keeper)?;
+        let mut runtime = Self::with(sys::active_processors(), dir.join("boxes"));
+        runtime.node = Some(node.to_owned());
+        // Nothing shares the runtime's holding yet, so its keeper is set in place.
+        Arc::get_mut(&mut runtime.holding)
+            .ok_or_else(|| Refusal::Broken("a new runtime's holding was shared".to_owned()))?
+            .keeper = Some(keeping);
+        Ok(runtime)
+    }
+
+    /// The pid of the keeper holding this node's boxes' jobs, where its boxes outlive it; a keeper found
+    /// dead is replaced first (the node's own watch does this on its port; here, for a runtime driven in
+    /// process, it is done when asked).
+    pub fn keeper_pid(&self) -> Option<u32> {
+        let keeping = self.holding.keeper.as_ref()?;
+        self.holding.ensure_keeper(keeping).ok()?;
+        Some(keeping.keeper.lock().ok()?.pid())
     }
 
     /// The job name a node's box `id` has (`Local\hex-<node>-<box>`), where its boxes outlive it.
@@ -324,22 +379,6 @@ impl WinRuntime {
             return Err(Refusal::Exists(spec.id.clone()));
         }
         boxes.insert(spec.id.clone(), b);
-        Ok(())
-    }
-
-    /// Closes box `id`'s job in the keeper and forgets its value (its delete or its removal by recovery):
-    /// after this the box's last handle is the node's, so kill-on-close ends it with the node.
-    fn drop_from_keeper(&self, id: &BoxId) -> Result<(), Refusal> {
-        if let Some(keeping) = self.keeping()?
-            && let Some(value) = keeper::read_held(&keeping.state, id.as_str())
-        {
-            keeping
-                .keeper
-                .lock()
-                .map_err(|_| Refusal::Broken("the node's keeper lock is poisoned".to_owned()))?
-                .drop_held(value)?;
-            keeper::forget_held(&keeping.state, id.as_str());
-        }
         Ok(())
     }
 
@@ -430,9 +469,15 @@ impl WinRuntime {
     }
 
     fn boxes(&self) -> Result<std::sync::MutexGuard<'_, BTreeMap<BoxId, Held>>, Refusal> {
-        self.boxes
-            .lock()
-            .map_err(|_| Refusal::Broken("the node's box map lock is poisoned".to_owned()))
+        self.holding.boxes()
+    }
+
+    fn keeping(&self) -> Result<Option<&Keeping>, Refusal> {
+        self.holding.keeping()
+    }
+
+    fn drop_from_keeper(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.holding.drop_from_keeper(id)
     }
 
     fn get(&self, id: &BoxId) -> Result<Held, Refusal> {
@@ -634,23 +679,36 @@ impl Runtime for WinRuntime {
         }
     }
 
-    /// A run's box goes once its program ends (decision 7), which takes something watching the program to remove
-    /// it: Linux's node agent's supervisor. This runtime's boxes are made, exec'd into and deleted by its callers,
-    /// nothing of its own removing one, so a run is refused naming the platform, before anything is made.
-    fn run(
-        &self,
-        spec: BoxSpec,
-        _program: Program,
-        _stdio: Stdio,
-    ) -> Result<Box<dyn Proc>, Refusal> {
+    /// A run's box goes once its program ends (decision 7): a thread of the run's own waits on the program's
+    /// process handle and removes the box through the delete's own path ([`Holding::remove`], its job and the
+    /// keeper's handle with it), whether or not its caller still holds the run, and only then gives the caller
+    /// the end. Its kill is the box's KILL, the box's job holding that program alone.
+    fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
         spec.check_run()?;
-        Err(Refusal::Platform {
-            what: "run",
-            platform: "windows",
-            why: "a box made for one program's life is removed by Linux's node agent once the program ends \
-                  (decision 7); a Windows box is made, exec'd into and deleted by its caller"
-                .to_owned(),
-        })
+        let id = spec.id.clone();
+        self.create(spec)?;
+        let begun = self.exec(&id, program, stdio).and_then(|proc| {
+            let b = match self.get(&id)? {
+                Held::Process(b) => b,
+                Held::Oci(_) => {
+                    return Err(Refusal::Invalid {
+                        what: "run",
+                        why: format!("box {id} is an oci box; a run's box is the process class's"),
+                    });
+                }
+            };
+            let (holding, gone) = (Arc::clone(&self.holding), id.clone());
+            crate::run::Run::start(
+                proc,
+                &id,
+                Box::new(move || b.signal(Signal::KILL)),
+                Box::new(move || holding.remove(&gone)),
+            )
+        });
+        match begun {
+            Ok(run) => Ok(Box::new(run)),
+            Err(why) => Err(crate::run::undone(why, self.delete(&id), &id)),
+        }
     }
 
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
@@ -678,20 +736,7 @@ impl Runtime for WinRuntime {
     }
 
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
-        let b = self
-            .boxes()?
-            .remove(id)
-            .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
-        // Close the keeper's handle to this box's job first, so the node's TerminateJobObject and the
-        // dropped Arc leave nothing holding it.
-        self.drop_from_keeper(id)?;
-        // Ends the box; dropping the last Arc closes its job (kill-on-close) and, for an oci box, its
-        // container's last handle (terminate-on-close) as a backstop, so deleting a box a caller still
-        // holds through `list` is safe.
-        match b {
-            Held::Process(b) => b.delete(),
-            Held::Oci(b) => b.delete(),
-        }
+        self.holding.remove(id)
     }
 }
 
