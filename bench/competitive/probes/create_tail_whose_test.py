@@ -114,6 +114,15 @@ class TheWrapper(unittest.TestCase):
         self.assertLess(lock[0], attach[0], "bpftrace attaches before the timed lock is held")
         self.assertEqual(len(lock), 1, "the lock is taken once, around everything timed")
 
+    def test_it_runs_its_siblings_from_any_directory(self):
+        # The lead's run of a8e243f6 from the tree's root: "bench/competitive/probes/create_tail.sh: No such file or
+        # directory", the wrapper having changed to bench/ first. Its siblings are named by its own directory.
+        code = [l for l in read("create_tail_whose.sh").splitlines() if not l.lstrip().startswith("#")]
+        relative = [l.strip() for l in code if "bench/competitive/probes/" in l or "cd " in l]
+        self.assertEqual(relative, [], "lines that name a sibling from a working directory")
+        for sibling in ("create_tail.sh", "create_tail_attr.py"):
+            self.assertTrue(any(f'"$HERE/{sibling}"' in l for l in code), f"{sibling} named by $HERE")
+
 
 if __name__ == "__main__":
     unittest.main()
