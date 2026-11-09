@@ -7,7 +7,10 @@
 //!   reaped and counted in its box (`abandoned`), and one it released runs on;
 //! - HEX-SOCK-3: hostile bytes to the live node (a frame past the bound, a frame of garbage) end that
 //!   connection alone, and the node serves the next;
-//! - an exec that asks for a stream is refused by name until the stdio transport's decision is recorded;
+//! - an exec that gives a stream (the caller's own pipe) is refused by name: the Windows client lends no
+//!   handle through the socket;
+//! - HEX-RT-17 through the socket: an exec's asked streams come to the caller as pipe ends of its own,
+//!   duplicated into its process by the node (the stdio decision's pick, dup), no byte copied between;
 //! - HEX-SOCK-3 every time: each of many hostile connections brings its refusal and then its end.
 #![cfg(windows)]
 #![allow(
@@ -19,12 +22,12 @@
     clippy::disallowed_macros
 )]
 
-use std::io::BufRead;
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Refusal, Runtime, Stdio};
+use hex_api::{Ask, Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Refusal, Runtime, Stdio};
 use hex_core::stream::{self, Deframer};
 use hex_core::wire::{self, Answer, Call, Received, Request, Streams};
 
@@ -400,5 +403,51 @@ fn hostile_connections_each_get_their_refusal_then_their_end() {
     let client = node.client();
     let id = BoxId::new("sock-3-every").unwrap();
     client.create(spec(&id)).unwrap();
+    client.delete(&id).unwrap();
+}
+
+/// HEX-RT-17 through the socket (native plan step 8; the stdio decision's pick, dup): do exec a program that
+/// echoes its stdin to its stdout, both asked of the node through its socket; write a line to the stdin end
+/// the exec gave, close it, and read the stdout end to its end. Expect the line back whole and the program's
+/// exit 0: the ends are pipe ends of this process's own, which the node duplicated into it.
+#[test]
+fn an_execs_asked_streams_come_through_the_socket_as_the_callers_own_pipe_ends() {
+    let dir = dir();
+    let node = Node::start(dir.path());
+    let client = node.client();
+    let id = BoxId::new("sock-17").unwrap();
+    client.create(spec(&id)).unwrap();
+    let mut p = client
+        .exec(
+            &id,
+            act(&["echo"]),
+            Stdio {
+                ask: Ask {
+                    stdin: true,
+                    stdout: true,
+                    stderr: false,
+                },
+                ..Stdio::null()
+            },
+        )
+        .expect("an exec whose stdin and stdout are asked of the node");
+    let hex_api::Given {
+        stdin,
+        stdout,
+        stderr,
+    } = p.streams().expect("the asked streams");
+    let (Some(stdin), Some(stdout)) = (stdin, stdout) else {
+        panic!("the asked streams weren't given");
+    };
+    assert!(stderr.is_none(), "stderr was given unasked");
+    let mut stdin = std::fs::File::from(stdin);
+    stdin.write_all(b"round trip\n").unwrap();
+    drop(stdin);
+    let mut out = String::new();
+    std::fs::File::from(stdout)
+        .read_to_string(&mut out)
+        .unwrap();
+    assert_eq!(out, "round trip\n");
+    assert_eq!(p.wait_for(PATIENCE).unwrap(), Some(Exit::Code(0)));
     client.delete(&id).unwrap();
 }
