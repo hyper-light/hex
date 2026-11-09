@@ -1127,3 +1127,111 @@ fn a_recorded_nodes_oci_box_whose_init_ended_with_no_node_is_removed_by_the_next
         "the box's scratch folder outlived its removal"
     );
 }
+
+/// A `hex node` of this build on `dir` (its state `dir\state`, its socket `dir\node.sock`), as
+/// tests/windows_node_recovery.rs starts one; dropped, it is ended by `TerminateProcess` (std's kill on
+/// Windows), as a crash ends it.
+struct HexNode {
+    child: std::process::Child,
+    socket: PathBuf,
+}
+
+impl HexNode {
+    fn start(dir: &Path) -> Self {
+        let socket = dir.join("node.sock");
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_hex"))
+            .arg("node")
+            .arg("--socket")
+            .arg(&socket)
+            .arg("--state")
+            .arg(dir.join("state"))
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("start hex node");
+        let mut line = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(child.stdout.take().unwrap()),
+            &mut line,
+        )
+        .unwrap();
+        assert_eq!(line.trim(), format!("ready {}", socket.display()));
+        Self { child, socket }
+    }
+
+    fn client(&self) -> hex_client::Client {
+        hex_client::Client::connect(&self.socket).expect("connect to hex node")
+    }
+}
+
+impl Drop for HexNode {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// T-T7.1.2, native plan step 8 ("a box still alive is taken back, as on Linux"), through `hex node`
+/// itself: do: start `hex node` on a state folder, make and start an `oci` box through its socket, and kill
+/// the node (`TerminateProcess`), as a crash ends it; then start `hex node` again on the same state folder.
+/// Expect: the container outlives the node; the next node takes the box back, adopted and running; a program
+/// runs in it through the socket (its exit code its own); and its delete leaves no container, record or
+/// attached scratch. The program's stdio is the null device: a Windows client lends no handles through the
+/// socket until the stdio record's winner carries them.
+#[test]
+fn an_oci_box_outlives_a_killed_hex_node_and_the_next_takes_it_back() {
+    let Some(lab) = Lab::new() else {
+        eprintln!("SKIP: HEX_WINDOWS_LAYERS names no image layers");
+        return;
+    };
+    let _one = one_at_a_time();
+    let dir = tempfile::tempdir().unwrap();
+    let id = BoxId::new("hex-oci-node").unwrap();
+    let spec = lab.spec(id.clone(), Bounds::default());
+    let keeping = dir.path().join("state").join("keeper");
+    let markers = keeping.join("boxes");
+    let marker = markers.join(format!("{id}.scratch.json"));
+    let scratch = lab
+        .root
+        .path()
+        .join(format!("scratch-{id}"))
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let _left = Leftover {
+        id: &id,
+        markers: &markers,
+    };
+    let _keepers = Keepers(keeping.clone());
+    let node = HexNode::start(dir.path());
+    let client = node.client();
+    client.create(spec).expect("create");
+    client.start(&id).expect("start");
+    drop(client);
+    drop(node);
+    outlived(&id);
+    let node = HexNode::start(dir.path());
+    let client = node.client();
+    let info = client
+        .inspect(&id)
+        .expect("the next node takes the box back");
+    assert_eq!(
+        (info.state, info.adopted),
+        (BoxState::Running, true),
+        "{info:?}"
+    );
+    let mut program = client
+        .exec(&id, lab.program(&Act::Fail(3)), Stdio::null())
+        .expect("exec");
+    let exit = program
+        .wait_for(conformance::PATIENCE)
+        .expect("wait")
+        .expect("the program ends");
+    assert_eq!(exit, Exit::Code(3));
+    client.delete(&id).expect("delete");
+    assert!(!hcs_holds(&id), "HCS still holds {id} after its delete");
+    assert!(!marker.exists(), "the box's record outlived its delete");
+    assert!(
+        oci::sys::layer_mount_path(&scratch).is_err(),
+        "the box's scratch is still attached after its delete"
+    );
+}
