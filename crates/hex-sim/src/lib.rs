@@ -24,6 +24,8 @@
 //! - [`swim`]: hyper-swim's own failure detector, the membership the design gives the node agent, vendored and
 //!   driven over a simulated LAN: the crash class's bound (S8, F1).
 //! - [`federation`]: cells and regions, a federation over independent cells (H64-H66).
+//! - [`lb`]: the placement kernel, ported from kiln's load balancer and adapted to boxes: an owner's
+//!   pick that packs, a node's ledger that admits, and the words between them.
 
 #![cfg_attr(
     test,
@@ -46,6 +48,7 @@ pub mod faults;
 pub mod federation;
 pub mod generate;
 pub mod index;
+pub mod lb;
 pub mod membership;
 pub mod model;
 pub mod packing;

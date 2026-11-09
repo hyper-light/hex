@@ -1044,3 +1044,33 @@ Under saturation each completion sends the committer back to the front of the qu
 workload ahead of a placement is decided again, as the specification itself does; the equivalence
 classes of S2 (goal 2) are what make that cheap, so hex-sim's own runs are sized below saturation
 until then.
+
+## Ported from kiln's load balancer
+
+kiln's placement kernel, taken from kiln `crates/kiln-ci/src/lb/` at `f20858c9c` (on kiln's main,
+inside `a63dd98ef`) and adapted to what Hex runs: OCI containers, Firecracker microVMs and Shards
+microVMs, each created and started on its node, running, and holding its reserved room until it is
+deleted. kiln's run is Hex's box; kiln's runner is Hex's node; kiln's owner is whatever decides for a
+box, a node for its own or a plane for a cell. Every arithmetic step is checked, saturating where
+saturation is the stated meaning, or wrapping where kiln's counters wrap (CLAUDE.md §1).
+
+| kiln (`crates/kiln-ci/src/lb/`, `f20858c9c`) | Hex (`crates/hex-sim/src/lb/`) | What was CI- or agent-specific, and the adaptation |
+|---|---|---|
+| `slab.rs:1-165` | `slab.rs:1-198` | Nothing. `take_if` and `clear`, which only kiln's fast paths used, aren't taken. |
+| `msg.rs:1-146` | `msg.rs:1-182` | A job's start and end are a box's create-and-start and its delete (or exit); the words are kiln's. |
+| `index.rs:1-374` | `index.rs:1-478` | kiln reads buckets from the top down (`top` :259, `below` :272). The pick that packs reads from the need's bucket up: `at_or_above` :355 and `above` :375 are Hex's. `grow` (:74) refuses, typed, when its tables can't be that large on the target. |
+| `runner.rs:1-778` | `runner.rs:1-899` | kiln's `restart` (:727) assumes the jobs died with the runner and resets its counts. A box outlives its node agent, because the runtime's records bring it back, so `recover` (:836) admits again the boxes the node's records kept, with their room, and keeps each owner's count of ends. `start` (:448) and `end` (:552) lose kiln's fast paths: the general paths decide the same. `outside` is what runs beside Hex (the host's own use, page cache), where kiln's was an agent's own shell build. |
+| `owner.rs:1-1641` | `owner.rs:1-1764` | kiln's pick (:574) and walk (:623) take the least loaded runner, the top bucket down, which spreads jobs that end soon. A box holds its room until it is deleted, so Hex's pick (:607) and walk (:674) take the least room that holds the need, from the need's own bucket up. kiln's `restarted` (:809) took every job on a restarted runner for lost. Hex's (:837) holds them unsure until the node's Synced, and `started_run` (:922) takes a box said again under the new handle the recovered node gave it. Not taken: `ask_fast`, `started_fast` and `ended_fast` (:452, :866, :895: speed paths for kiln's top bucket), `ask_many` (:525: a CI push's legs as one batch), and `peek` (:1573: `kiln run --reuse`). `cancel` is a box deleted before it is known to run. |
+| `mod.rs:1-150` | `mod.rs:1-167` | Amounts unchanged, `[cpu, memory, disk, GPUs]`. The planted `MostLoaded` (the pick that spreads) is Hex's `MostFree`. `RecoverForgets` is added: a recovered node that drops its kept boxes. |
+| `tests.rs:1-815` | `tests.rs:1-892` | `least_loaded` (:85) is `packs` (:100), caught by `MostFree`. `fenced` (:214) is split into `fenced` (:314, caught by `NoFence`) and `outlives_the_agent` (:349, caught by `RecoverForgets`). Not taken: `ask_many` (:345), `peek` (:479), and the several-owner herding measurement, which comes with kiln's spread. |
+| `model.rs:1-591` | `model.rs:1-818` | kiln's `restart` (:346) restarted a runner with its links up and its jobs dead. Hex's (:482) drops the agent's links, both ends told, and recovers its boxes, so the model holds boxes that outlive agents. No word crosses an agent restart, so `NoFence` is caught by its unit test, not the model (:789). The model is kiln's otherwise: 48 seeds of 2,000 steps, three owners, five nodes. |
+
+**Replaced.** Nothing yet: the plane's pick and commit (`sim.rs` over `FitIndex::sampled_fit` and the
+store's compare-and-set) move onto this kernel in the next commit.
+
+**What could be vendored instead of ported (Ada's call).** kiln's `lb/slab.rs` and `lb/msg.rs` could be
+shared as they are once kiln's code meets Hex's arithmetic and cast lints (`arithmetic_side_effects`,
+`cast_possible_truncation`, which kiln doesn't deny). `lb/index.rs`, `lb/runner.rs` and `lb/owner.rs`
+carry Hex's adaptations for boxes: the pick that packs, and recovery. Sharing them would mean those
+adaptations living upstream as one of kiln's own choices. A shared crate (kiln's `lb` behind its own
+`-api`, MANIFEST provenance) would need both.
