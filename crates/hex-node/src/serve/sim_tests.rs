@@ -830,7 +830,8 @@ fn a_programs_end_follows_its_start_and_its_watch_is_let_go() {
     });
 }
 
-/// HEX-SOCK-6 (the core), the disconnect rule: a program whose client goes is killed through the OS's
+/// HEX-SOCK-6 (the core), the disconnect rule: a program whose client goes is killed by its own runtime's kill
+/// (its `Proc::kill`, which tells its box's bookkeeping first, as macOS's watcher needs), never the OS's
 /// watch, reaped and counted in its box; execs past the programs bound are refused naming it.
 #[test]
 fn a_program_whose_client_goes_is_killed_and_counted_and_the_bound_holds() {
@@ -852,7 +853,11 @@ fn a_program_whose_client_goes_is_killed_and_counted_and_the_bound_holds() {
     wait_until("both programs to be counted in their box", || {
         lab.host.abandoned.lock().unwrap().len() == 2
     });
-    assert_eq!(lab.os.lock().killed.len(), 2);
+    let killed = lab.os.lock().proc_killed.len();
+    assert_eq!(
+        killed, 2,
+        "the disconnect rule didn't kill its programs by their own runtime"
+    );
     wait_until("the connection and watches to go", || {
         lab.connections() == 0 && lab.watched() == 0
     });
