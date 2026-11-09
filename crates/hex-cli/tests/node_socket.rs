@@ -1043,11 +1043,12 @@ fn crash_case(
         }
         At::StartContainer => {
             wait_for(&CREATING, "the create", || create.is_finished());
-            let socket = agent.socket.clone();
+            // Connected and greeted first: the wait below is for what the start makes within itself, its record's,
+            // and a client's connect and hello are no part of a start (the waits census's run 5: this wait ran out at
+            // 15.220 ms in 3 of 53 loops, the hello's answers under the suites' load reaching 17.232 ms).
+            let client = Client::connect(&agent.socket).expect("connect for the start");
             let id = id.clone();
-            start = Some(std::thread::spawn(move || {
-                Client::connect(&socket).and_then(|c| c.start(&id))
-            }));
+            start = Some(std::thread::spawn(move || client.start(&id)));
             wait_for(
                 &STARTING,
                 "the start's startContainer hook to hold it",

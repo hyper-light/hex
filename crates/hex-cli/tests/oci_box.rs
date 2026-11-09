@@ -2907,10 +2907,11 @@ fn create_and_start_container_hooks_run_in_the_containers_namespaces(lab: &Lab, 
     );
 
     node.start(&id).expect("start the hooked box");
+    // The program's shell makes its file as it opens it for the line, before it writes the line: the fact is the line.
     wait_for(
         &PROGRAM_RUN,
-        || obs.join("program").exists(),
-        "the program to run",
+        || std::fs::read_to_string(obs.join("program")).is_ok_and(|l| l.ends_with('\n')),
+        "the program to write its line",
     );
     assert_eq!(
         read(obs.join("program")).trim(),
@@ -2952,10 +2953,11 @@ fn create_and_start_container_hooks_run_in_the_containers_namespaces(lab: &Lab, 
         "a startContainer hook takes the classic path"
     );
     node.start(&id).expect("start it");
+    // The program's shell makes its file as it opens it for the line, before it writes the line: the fact is the line.
     wait_for(
         &PROGRAM_RUN,
-        || obs.join("program").exists(),
-        "the program to run",
+        || std::fs::read_to_string(obs.join("program")).is_ok_and(|l| l.ends_with('\n')),
+        "the program to write its line",
     );
     assert_eq!(
         read(obs.join("program")).trim(),
