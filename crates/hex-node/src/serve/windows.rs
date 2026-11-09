@@ -25,8 +25,14 @@
 //!   (`DuplicateHandle` into the process it opened at the connection's admission, `PROCESS_DUP_HANDLE`,
 //!   held so its pid can't name another meanwhile) and names their values in the message's envelope
 //!   (`hex_afunix::envelope`); an exec that gives a stream (the caller's own pipe) is refused by name, as
-//!   the Windows client lends no handle.
+//!   the Windows client lends no handle;
+//! - a host's own connection (its guest's, [`super::Source`]) is watched by its socket's network events
+//!   (`hex_afunix::SourceWatch`: bytes or its end to read, and room to send while its writes wait), queued
+//!   to the port by a wait completion packet as a program's end is. Each watch reads afresh what holds, and
+//!   one reported is reported at each wait until the core watches it again, as the core's event set is
+//!   level-triggered. Its socket never joins the port: it stays its owner's.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::os::windows::fs::MetadataExt;
@@ -172,6 +178,15 @@ struct Listening {
     taken: VecDeque<io::Result<Socket>>,
 }
 
+/// A host's own connection the core watches ([`Os::watch_source`]): its watch on the port, whether it is
+/// watched for room too, and whether its watch has reported since the core last watched it, so it is
+/// reported at each wait until then.
+struct Sourced {
+    watch: socket::SourceWatch,
+    write: bool,
+    fired: bool,
+}
+
 /// A connection the core has ended: held until its peer closes, or reset once the wait for that passes.
 struct Ending {
     conn: Arc<Stream>,
@@ -191,6 +206,8 @@ pub struct Windows {
     ending: Mutex<BTreeMap<u64, Ending>>,
     /// The slowest close a peer made after its end-of-stream went, in nanoseconds: it only rises.
     slowest_close: AtomicU64,
+    /// The host's own connections the core watches, by token ([`super::Source`]).
+    sources: Mutex<BTreeMap<u64, Sourced>>,
 }
 
 impl Windows {
@@ -213,6 +230,7 @@ impl Windows {
             watching: Mutex::new(BTreeMap::new()),
             ending: Mutex::new(BTreeMap::new()),
             slowest_close: AtomicU64::new(0),
+            sources: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -226,6 +244,10 @@ impl Windows {
 
     fn ending(&self) -> Result<MutexGuard<'_, BTreeMap<u64, Ending>>, Refusal> {
         self.ending.lock().map_err(poisoned)
+    }
+
+    fn sources(&self) -> Result<MutexGuard<'_, BTreeMap<u64, Sourced>>, Refusal> {
+        self.sources.lock().map_err(poisoned)
     }
 
     /// How long an ended connection's peer has to close after its last message before the node resets it:
@@ -358,6 +380,14 @@ impl Windows {
                 push(events, *token, readable, writable, st.ended);
             }
         }
+        for (token, s) in self.sources()?.iter() {
+            if events.len() >= EVENTS {
+                break;
+            }
+            if s.fired {
+                push(events, *token, true, s.write, false);
+            }
+        }
         Ok(events.len() > before)
     }
 
@@ -376,6 +406,14 @@ impl Windows {
                 }
             }
             Done::Program(token) => push(events, token, true, false, false),
+            Done::Source(token) => {
+                // Kept until the core watches it again, so a report the events had no room for comes at the
+                // next wait.
+                if let Some(s) = self.sources()?.get_mut(&token) {
+                    s.fired = true;
+                    push(events, token, true, s.write, false);
+                }
+            }
             Done::Accepted { conn, .. } => {
                 let mut l = self.listening()?;
                 l.accepting = false;
@@ -834,18 +872,43 @@ impl Os for Windows {
         Ok(Stdio::null())
     }
 
-    /// A host's own connection in the port isn't built on Windows yet: the IOCP source (a zero-byte
-    /// overlapped receive as readiness) is native plan step 8's next change, and no Windows host has a
-    /// source to add until then (its guest's connection isn't evented). Refused by name.
-    fn watch_source(&self, _: super::Handle<'_>, _: u64, _: bool) -> Result<(), Refusal> {
-        Err(Refusal::Platform {
-            what: "a host's own connection in the node's event set",
-            platform: std::env::consts::OS,
-            why: "the completion port's source for it is native plan step 8's next change"
-                .to_owned(),
-        })
+    /// Watches a host's own connection by its socket's network events ([`socket::SourceWatch`]), or watches
+    /// it again: reported while it has bytes to read or has ended, and room with `write`, until the core
+    /// watches it again; each watch reads afresh what holds.
+    fn watch_source(
+        &self,
+        handle: super::Handle<'_>,
+        token: u64,
+        write: bool,
+    ) -> Result<(), Refusal> {
+        let watching = |e: io::Error| Refusal::os("watching the node's guest connection", e);
+        let mut sources = self.sources()?;
+        let (s, fresh) = match sources.entry(token) {
+            Entry::Occupied(o) => (o.into_mut(), false),
+            Entry::Vacant(v) => {
+                let watch = socket::SourceWatch::new(token).map_err(watching)?;
+                let s = v.insert(Sourced {
+                    watch,
+                    write,
+                    fired: false,
+                });
+                (s, true)
+            }
+        };
+        s.write = write;
+        s.fired = false;
+        let armed = s.watch.arm(&self.port, handle, write).map_err(watching);
+        if armed.is_err() && fresh {
+            sources.remove(&token);
+        }
+        armed
     }
 
-    /// Nothing is watched as a source on Windows yet ([`Os::watch_source`]).
-    fn unwatch_source(&self, _: super::Handle<'_>, _: u64) {}
+    /// Stops watching a host's own connection: its socket is its owner's again, and no report of it comes.
+    fn unwatch_source(&self, handle: super::Handle<'_>, token: u64) {
+        let taken = self.sources.lock().ok().and_then(|mut s| s.remove(&token));
+        if let Some(s) = taken {
+            s.watch.stop(handle);
+        }
+    }
 }

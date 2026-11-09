@@ -3,7 +3,8 @@
 //! decision "the Windows node, on one completion port" in docs/design/runtime.md): one I/O completion
 //! port that every source reports on, Windows' AF_UNIX stream sockets (afunix.sys, Windows 10 1803 on),
 //! each connection's overlapped receive and send and the listener's overlapped `AcceptEx`, a program's
-//! end by a wait completion packet on its process handle, queued to the port by the kernel, and who a
+//! end by a wait completion packet on its process handle, queued to the port by the kernel, a host's own
+//! connection's readiness by its socket's network events through such a packet ([`SourceWatch`]), and who a
 //! connection's peer is (its pid by `SIO_AF_UNIX_GETPEERPID`, then its process's user). `windows-sys` binds
 //! these as `unsafe` foreign functions, but for ntdll's wait completion packet calls, which Hex declares
 //! itself; std has no AF_UNIX socket on Windows and no completion port. Each `unsafe` block states the
@@ -33,7 +34,9 @@
 use std::ffi::c_void;
 use std::io;
 use std::mem::{size_of, zeroed};
-use std::os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle, RawHandle};
+use std::os::windows::io::{
+    AsRawHandle, AsRawSocket, BorrowedHandle, BorrowedSocket, FromRawHandle, OwnedHandle, RawHandle,
+};
 use std::path::Path;
 use std::ptr::{null, null_mut};
 use std::sync::{Arc, OnceLock};
@@ -41,15 +44,16 @@ use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, DuplicateHandle,
-    ERROR_OPERATION_ABORTED, FALSE, GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_TIMEOUT,
+    ERROR_OPERATION_ABORTED, FALSE, GetLastError, HANDLE, INVALID_HANDLE_VALUE, STATUS_PENDING,
+    TRUE, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Networking::WinSock::{
-    AF_UNIX, AcceptEx, INVALID_SOCKET, LINGER, SD_BOTH, SO_LINGER, SO_SNDTIMEO,
-    SO_UPDATE_ACCEPT_CONTEXT, SOCK_STREAM, SOCKADDR_UN, SOCKET, SOCKET_ERROR, SOL_SOCKET,
-    WSA_FLAG_NO_HANDLE_INHERIT, WSA_FLAG_OVERLAPPED, WSA_IO_PENDING, WSABUF, WSADATA,
-    WSAECONNABORTED, WSAECONNRESET, WSAEMFILE, WSAENOBUFS, WSAGetLastError, WSAIoctl, WSARecv,
-    WSASend, WSASocketW, WSAStartup, bind, closesocket, connect, listen, recv, send, setsockopt,
-    shutdown,
+    AF_UNIX, AcceptEx, FD_CLOSE, FD_READ, FD_WRITE, INVALID_SOCKET, LINGER, SD_BOTH, SO_LINGER,
+    SO_SNDTIMEO, SO_UPDATE_ACCEPT_CONTEXT, SOCK_STREAM, SOCKADDR_UN, SOCKET, SOCKET_ERROR,
+    SOL_SOCKET, WSA_FLAG_NO_HANDLE_INHERIT, WSA_FLAG_OVERLAPPED, WSA_IO_PENDING, WSABUF, WSADATA,
+    WSAECONNABORTED, WSAECONNRESET, WSAEMFILE, WSAENOBUFS, WSAEventSelect, WSAGetLastError,
+    WSAIoctl, WSARecv, WSASend, WSASocketW, WSAStartup, bind, closesocket, connect, listen, recv,
+    send, setsockopt, shutdown,
 };
 use windows_sys::Win32::Security::{
     EqualSid, GetTokenInformation, IsWellKnownSid, TOKEN_QUERY, TOKEN_USER, TokenUser,
@@ -60,8 +64,9 @@ use windows_sys::Win32::System::IO::{
     PostQueuedCompletionStatus,
 };
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, INFINITE, OpenProcess, OpenProcessToken, PROCESS_DUP_HANDLE,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess,
+    CreateEventW, GetCurrentProcess, INFINITE, OpenProcess, OpenProcessToken, PROCESS_DUP_HANDLE,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, ResetEvent,
+    TerminateProcess,
 };
 
 /// `SIO_AF_UNIX_GETPEERPID`: `_WSAIOR(IOC_VENDOR, 256)` (afunix.h), which windows-sys doesn't define.
@@ -72,6 +77,9 @@ const KEY_IO: usize = 0;
 const KEY_WAKE: usize = 1;
 /// The completion key a program's end posts; its token is the entry's pointer-sized field.
 const KEY_PROGRAM: usize = 2;
+/// The completion key a watched socket's readiness posts ([`SourceWatch`]); its token is the entry's
+/// pointer-sized field.
+const KEY_SOURCE: usize = 3;
 /// Room `AcceptEx` takes for each end's address: the address and 16 bytes (AcceptEx's documentation).
 const ADDRESS_ROOM: usize = size_of::<SOCKADDR_UN>() + 16;
 /// A size as Winsock's `int` lengths take it (every one here is a structure's, far below `i32::MAX`).
@@ -355,6 +363,8 @@ pub enum Done {
     Wake,
     /// The watched program `tag` ended.
     Program(u64),
+    /// The socket watched under `tag` ([`SourceWatch`]) has what its arm watched for.
+    Source(u64),
     /// An accept under `tag` finished: the connection, or why not.
     Accepted { tag: u64, conn: io::Result<Socket> },
     /// A receive under `tag` finished: its buffer, the first `n` bytes read (0: the peer's end).
@@ -462,6 +472,7 @@ impl Port {
             done.push(match e.lpCompletionKey {
                 KEY_WAKE => Done::Wake,
                 KEY_PROGRAM => Done::Program(e.lpOverlapped as usize as u64),
+                KEY_SOURCE => Done::Source(e.lpOverlapped as usize as u64),
                 _ => {
                     // SAFETY: on KEY_IO every entry's pointer is an `Op` a start handed the kernel by
                     // `Box::into_raw`, its OVERLAPPED its first field; its completion comes once, so it
@@ -668,6 +679,20 @@ unsafe extern "system" {
 /// The access a packet is made with (`GENERIC_ALL`, as Go's runtime makes its packets).
 const PACKET_ACCESS: u32 = 0x1000_0000;
 
+/// A new wait completion packet, associated with nothing yet.
+fn wait_packet() -> io::Result<OwnedHandle> {
+    let mut raw: HANDLE = null_mut();
+    // SAFETY: the packet's handle is written on success; no attributes.
+    let status = unsafe { NtCreateWaitCompletionPacket(&raw mut raw, PACKET_ACCESS, null()) };
+    if status < 0 {
+        return Err(io::Error::other(format!(
+            "NtCreateWaitCompletionPacket ended NTSTATUS {status:#x}"
+        )));
+    }
+    // SAFETY: a handle just made, owned from here.
+    Ok(unsafe { OwnedHandle::from_raw_handle(raw) })
+}
+
 /// A watched program: its process handle (which names it, not its pid, so a kill can't reach a process
 /// given the pid since) and the wait completion packet that queues its end to the port. Chosen over a
 /// registered wait (`RegisterWaitForSingleObject`, a pool thread's hop on every end) by measurement:
@@ -699,16 +724,7 @@ pub fn watch_program(port: &Port, pid: u32, tag: u64) -> io::Result<ProgramWatch
     }
     // SAFETY: a handle just opened, owned from here.
     let process = unsafe { OwnedHandle::from_raw_handle(h) };
-    let mut raw: HANDLE = null_mut();
-    // SAFETY: the packet's handle is written on success; no attributes.
-    let status = unsafe { NtCreateWaitCompletionPacket(&raw mut raw, PACKET_ACCESS, null()) };
-    if status < 0 {
-        return Err(io::Error::other(format!(
-            "NtCreateWaitCompletionPacket ended NTSTATUS {status:#x}"
-        )));
-    }
-    // SAFETY: a handle just made, owned from here.
-    let packet = unsafe { OwnedHandle::from_raw_handle(raw) };
+    let packet = wait_packet()?;
     let mut already = 0u8;
     // SAFETY: the packet, the port and the process are live handles (the port's for as long as the watch
     // is, the Os owning both); the key and the token are posted back as values, which the port's
@@ -754,6 +770,124 @@ impl Drop for ProgramWatch {
         // The packet's wait is cancelled, and a completion it queued already removed from the port, so an
         // unwatched program's end comes to no one; then both handles close.
         // SAFETY: the packet this watch made, cancelled once before it closes.
+        unsafe { NtCancelWaitCompletionPacket(self.packet.as_raw_handle(), 1) };
+    }
+}
+
+/// A host's own connection watched on the port (native plan step 8, the node core's `Source`: its guest's
+/// control connection), by its socket's network events: Winsock records on an event of the watch's own
+/// whether the socket has bytes to read, has ended, or has room to send (`WSAEventSelect`), and a wait
+/// completion packet queues that event's signal to the port as [`Done::Source`], as a program's end is
+/// queued, no thread between. Not a zero-byte receive, which tells when bytes or the end came but never when
+/// room came back. The socket stays its owner's: it never joins the port, none of its I/O comes there, and
+/// none of it waits (Winsock makes a watched socket non-blocking, as a source's reads and writes are).
+pub struct SourceWatch {
+    event: OwnedHandle,
+    packet: OwnedHandle,
+    tag: usize,
+}
+
+/// A borrowed socket as Winsock names it.
+fn raw_socket(socket: BorrowedSocket<'_>) -> io::Result<SOCKET> {
+    SOCKET::try_from(socket.as_raw_socket()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a socket past a pointer's size",
+        )
+    })
+}
+
+impl SourceWatch {
+    /// A watch reported under `tag`, armed by [`SourceWatch::arm`].
+    pub fn new(tag: u64) -> io::Result<SourceWatch> {
+        let tag = usize::try_from(tag).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "a token past a pointer's size")
+        })?;
+        // SAFETY: no attributes and no name: a manual-reset event, unsignalled, as `WSACreateEvent` makes
+        // one; owned below.
+        let h = unsafe { CreateEventW(null(), TRUE, FALSE, null()) };
+        if h.is_null() {
+            return Err(last_error());
+        }
+        // SAFETY: a handle just made, owned from here.
+        let event = unsafe { OwnedHandle::from_raw_handle(h) };
+        Ok(SourceWatch {
+            event,
+            packet: wait_packet()?,
+            tag,
+        })
+    }
+
+    /// Arms the watch on `socket`, borrowed for the call: reported once on `port` when the socket has bytes
+    /// to read or its peer has ended it, or, with `write`, room to send; at once if it has as it is armed
+    /// (Winsock records what holds as a watch is set, its "persistence of network events"). The arm before is
+    /// taken back first, with its report if queued and not yet taken; a report already on its way can't be
+    /// (the packet's cancel answers `STATUS_PENDING`), and stands for this arm: once it is taken, the next arm
+    /// reads afresh what holds.
+    pub fn arm(&self, port: &Port, socket: BorrowedSocket<'_>, write: bool) -> io::Result<()> {
+        // SAFETY: the packet this watch made: its wait, and its report queued and not taken, are cancelled.
+        let cancelled = unsafe { NtCancelWaitCompletionPacket(self.packet.as_raw_handle(), 1) };
+        if cancelled == STATUS_PENDING {
+            return Ok(());
+        }
+        // SAFETY: the event this watch made.
+        if unsafe { ResetEvent(self.event.as_raw_handle()) } == 0 {
+            return Err(last_error());
+        }
+        let events = if write {
+            FD_READ | FD_CLOSE | FD_WRITE
+        } else {
+            FD_READ | FD_CLOSE
+        };
+        // SAFETY: a socket borrowed for the call, and the event this watch owns (Winsock takes a reference
+        // of its own to the event it records on).
+        let rc = unsafe {
+            WSAEventSelect(
+                raw_socket(socket)?,
+                self.event.as_raw_handle().addr().cast_signed(),
+                events.cast_signed(),
+            )
+        };
+        if rc == SOCKET_ERROR {
+            return Err(wsa_error());
+        }
+        let mut already = 0u8;
+        // SAFETY: as in `watch_program`: the packet, the port and the event are live handles; the key and the
+        // tag are posted back as values, which the port's KEY_SOURCE tells its wait never to take as an `Op`.
+        let status = unsafe {
+            NtAssociateWaitCompletionPacket(
+                self.packet.as_raw_handle(),
+                port.0.0,
+                self.event.as_raw_handle(),
+                KEY_SOURCE as *const c_void,
+                self.tag as *const c_void,
+                0,
+                0,
+                &raw mut already,
+            )
+        };
+        if status < 0 {
+            return Err(io::Error::other(format!(
+                "NtAssociateWaitCompletionPacket ended NTSTATUS {status:#x}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Stops watching `socket`, borrowed for the call: Winsock records nothing more on the watch's event (the
+    /// socket stays non-blocking), and a report queued and not taken is taken back as the watch drops.
+    pub fn stop(self, socket: BorrowedSocket<'_>) {
+        if let Ok(raw) = raw_socket(socket) {
+            // SAFETY: a socket borrowed for the call; no events and no event end its watch.
+            unsafe { WSAEventSelect(raw, 0, 0) };
+        }
+    }
+}
+
+impl Drop for SourceWatch {
+    fn drop(&mut self) {
+        // SAFETY: the packet this watch made, cancelled once before it closes, a report it queued removed
+        // from the port.
         unsafe { NtCancelWaitCompletionPacket(self.packet.as_raw_handle(), 1) };
     }
 }
