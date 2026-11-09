@@ -8,8 +8,9 @@
 # The bpftrace image (Fedora 44's bpftrace) is made once by a container and a commit, as docker_pass.sh makes its own.
 # The timed lock is held from before that until bpftrace has gone: bpftrace's attaching patches kernel text on every
 # CPU and its programs run on all of them, so neither may meet another holder's record. Its children don't hold it.
-# Its record: <out dir>/status.txt, bt.txt (the maps at bpftrace's end), bt.log, create_tail.log and attr.md. It runs
-# from any working directory: its siblings are named by its own.
+# Its record: <out dir>/status.txt, bt.txt (the maps at bpftrace's end), bt.log, create_tail.log, attr.md, and the
+# host's superblocks at its start and its end (superblocks-start.txt, -end.txt). It runs from any working directory: its
+# siblings are named by its own.
 set -uo pipefail
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
 HEX=$(realpath "${1:?hex release binary}"); SEAM=$(realpath "${2:?seam_oci release binary}")
@@ -22,6 +23,25 @@ LOCK=${TIMED_LOCK:-$HOME/.cache/hex-t7/timed.lock}; mkdir -p "$(dirname "$LOCK")
 exec 9>>"$LOCK"
 flock -w 3600 9 || { log "the timed lock $LOCK wasn't free in an hour"; exit 3; }
 cp "$HERE/create_tail_whose.bt" "$O/whose.bt"
+# The host's superblocks by filesystem type and by whose mount namespaces mount them, which a memcg's offline walks
+# (one list_lru each) and a kernfs root's notify tells (goal 16; the lead, 2026-11-09): every mount namespace read once,
+# through one of its processes, and a superblock counted once, by its device, under the first owner it is seen with:
+# hex where that process is Hex's (hex*, seam_oci) or in a cgroup under a hex-* one, docker where in docker's, else
+# the host. Its first line is the total.
+read -r -d '' SB <<'EOS'
+for p in /proc/[0-9]*; do ns=$(readlink "$p/ns/mnt" 2>/dev/null) || continue; echo "$ns ${p#/proc/}"; done | sort -u -k1,1 > /tmp/ns
+while read -r ns p; do
+  comm=$(cat "/proc/$p/comm" 2>/dev/null); cg=$(head -1 "/proc/$p/cgroup" 2>/dev/null | cut -d: -f3)
+  case "$comm $cg" in hex*|seam_oci*|*/hex*) own=hex ;; *docker*) own=docker ;; *) own=host ;; esac
+  awk -v own="$own" '{ for (i = 7; i <= NF; i++) if ($i == "-") { print $3, $(i + 1), own; break } }' "/proc/$p/mountinfo" 2>/dev/null
+done < /tmp/ns | awk '!seen[$1]++ { n[$2 " " $3]++; t++ } END { print t, "superblocks"; for (k in n) print n[k], k }' | sort -rn
+EOS
+superblocks() {
+  # The host's cgroup namespace, so each process's cgroup reads whole: in its own, docker's shows its peers' as "/".
+  docker run --rm --privileged --pid=host --cgroupns=host --cpuset-cpus="$READER_CPUS" --memory=256m \
+    registry.fedoraproject.org/fedora:44 sh -c "$SB" > "$O/superblocks-$1.txt" 2>&1 9>&-
+}
+superblocks start
 IMG=hexbench/bpftrace:44
 if ! docker image inspect "$IMG" >/dev/null 2>&1; then
   docker rm -f hexbench-bt-build >/dev/null 2>&1
@@ -54,6 +74,7 @@ env N="${N:-10000}" ROUNDS="${ROUNDS:-2}" CPUSET="$CPUSET" READER_CPUS="$READER_
   BENCH_MEMORY="${BENCH_MEMORY:-8g}" BENCH_OOM="${BENCH_OOM:-1000}" BENCH_HOST_OK="${BENCH_HOST_OK:-$(hostname)}" \
   bash "$HERE/create_tail.sh" "$HEX" "$SEAM" > "$O/create_tail.log" 2>&1 9>&-
 rc=$?; R=$(grep -o -E '/[^ ]*create-tail-[0-9TZ]+' "$O/create_tail.log" | tail -1)
+superblocks end
 log "create_tail exit $rc; $R; load $(cut -d' ' -f1-3 /proc/loadavg)"
 stop_bt; trap - EXIT
 exec 9>&-
