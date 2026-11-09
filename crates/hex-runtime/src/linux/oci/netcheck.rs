@@ -77,10 +77,10 @@ const READ_BYTES: usize = 8 << 10;
 /// settle this process sees.
 static SETTLES: Patience = Patience::measuring("netcheck.settles");
 /// How long one read of a dump's answer takes, learned in this process ([`Patience`]). Seeded in a release build from
-/// the `netcheck.answers` row of `bench/competitive/probes/waits_census.md` run 3 (its owner arm, 2.093 ms of
-/// 160,192); a debug build has no record of its own yet (the census's debug arm keeps no namespaces): measuring.
+/// the `netcheck.answers` row of `bench/competitive/probes/waits_census.md` run 4 (adacachy2, its owner arm, 0.454 ms
+/// of 160,192); a debug build has no record of its own yet (the census's debug arm keeps no namespaces): measuring.
 static ANSWERS: Patience =
-    Patience::by_profile("netcheck.answers", Duration::from_nanos(2_093_150), None);
+    Patience::by_profile("netcheck.answers", Duration::from_nanos(454_408), None);
 
 /// `bound` as `SO_RCVTIMEO` takes it: in whole microseconds, a `struct timeval`, rounded up, since one of zero
 /// waits for ever (socket(7)); `None`, no bound, waits for ever.

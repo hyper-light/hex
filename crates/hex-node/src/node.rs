@@ -63,11 +63,12 @@ const OVERLAYFS_SUPER_MAGIC: i128 = 0x794c_7630;
 /// and removal, since all wait on one kernel. A wait that runs out is a fault to report (the kernel is
 /// wedged), not a limit to raise (CLAUDE.md §4). Its programs' reaping and its init's end, which a box's
 /// emptying waits on, share the wait. Seeded by build profile from the `node.emptying` rows of
-/// `bench/competitive/probes/waits_census.md` runs 1 and 3 (a box's kill to `populated 0`): release, the largest max
-/// of the release arms, 42.798 ms (run 1's tmpfs arm, of 10,276); debug, run 3's debug arm's, 127.753 ms (of 22,092).
+/// `bench/competitive/probes/waits_census.md` (a box's kill to `populated 0`): release, run 4's largest max of the
+/// release arms, 19.771 ms (adacachy2, its tmpfs arm, of 17,569); debug, run 3's debug arm's, 127.753 ms (fedora, of
+/// 22,092), until run 5 records the suites' run-outs.
 static EMPTYING: Patience = Patience::by_profile(
     "node.emptying",
-    Duration::from_nanos(42_797_666),
+    Duration::from_nanos(19_770_961),
     Some(Duration::from_nanos(127_752_710)),
 );
 
@@ -103,12 +104,12 @@ pub const REMOVE_PATIENCE: Duration = Duration::from_secs(60);
 /// theirs as well as this node's, and a listing's time grows with them. So the sample is a listing's time per
 /// entry, and the wait for a listing's first `k` entries is `k` times twice the slowest recorded (decision 9;
 /// Ada's 2026-11-06 rule, the lead's failure-bound rule), refused by type past it (CLAUDE.md §2, §4). Seeded by
-/// build profile from the `node.listing` rows of `bench/competitive/probes/waits_census.md` runs 1 and 3: release,
-/// the largest max of the release arms with a row's 1,000 samples, 8.268 us an entry (run 3's disk arm, of 1,105; run
-/// 1's rows had 130 at most); debug, run 3's debug arm's, 68.562 us (of 1,105).
+/// build profile from the `node.listing` rows of `bench/competitive/probes/waits_census.md`: release, run 4's largest
+/// max of the release arms with a row's 1,000 samples, 7.043 us an entry (adacachy2, its disk arm, of 1,105); debug,
+/// run 3's debug arm's, 68.562 us (fedora, of 1,105), until run 5 records the suites' run-outs.
 static LISTING: Patience = Patience::by_profile(
     "node.listing",
-    Duration::from_nanos(8_268),
+    Duration::from_nanos(7_043),
     Some(Duration::from_nanos(68_562)),
 );
 
@@ -359,12 +360,12 @@ impl Node {
                 "making or removing a box",
                 "creates and deletes under way",
                 MAX_BOXES,
-                // Seeded by build profile from the `node.turns` rows of `bench/competitive/probes/waits_census.md` runs
-                // 1 and 3: release, the largest max of the release arms, 270.803 ms (run 3's tmpfs arm, of 92,042);
-                // debug, run 3's debug arm's, 305.809 ms (of 92,042).
+                // Seeded by build profile from the `node.turns` rows of `bench/competitive/probes/waits_census.md`:
+                // release, run 4's largest max of the release arms, 43.627 ms (adacachy2, its tmpfs arm, of 92,042);
+                // debug, run 3's debug arm's, 305.809 ms (fedora, of 92,042), until run 5 records the suites' run-outs.
                 Patience::by_profile(
                     "node.turns",
-                    Duration::from_nanos(270_803_181),
+                    Duration::from_nanos(43_627_499),
                     Some(Duration::from_nanos(305_809_337)),
                 ),
             ),
