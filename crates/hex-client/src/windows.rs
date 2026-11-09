@@ -33,18 +33,19 @@ pub struct Socket {
 }
 
 impl Transport for Socket {
-    /// Sends `bytes` framed. Windows' AF_UNIX carries no descriptors, so a message that lends any is
-    /// refused by name: an exec's stdio through the node agent's socket waits on its transport, step 8's
-    /// measured decision. (A guest makes its own stdio connections, [`Transport::MAKES_ASKED`], not this.)
+    /// Sends `bytes` framed. Windows' AF_UNIX carries no descriptors, so a message that lends any (a stream
+    /// the caller gives, its own pipe) is refused by name: a Windows caller asks the node for an exec's
+    /// streams instead, and is given handles of its own to them. (A guest makes its own stdio connections,
+    /// [`Transport::MAKES_ASKED`], not this.)
     fn send(&self, bytes: &[u8], lent: &[Lent<'_>]) -> Result<(), Sent> {
         if !lent.is_empty() {
             return Err(Sent::Refused(Refusal::Platform {
                 what: "an exec's stdio through the node agent's socket",
                 platform: std::env::consts::OS,
-                why:
-                    "Windows' AF_UNIX passes no handles, and the transport that carries an exec's \
-                      streams to its caller waits on its measured decision (native plan step 8)"
-                        .to_owned(),
+                why: "Windows' AF_UNIX passes no handles, so a stream the caller gives (its own pipe) \
+                      can't reach the node: a Windows caller asks the node for an exec's streams, and \
+                      is given handles of its own to them (native plan step 8)"
+                    .to_owned(),
             }));
         }
         let _whole = self.sending.lock().map_err(|_| {

@@ -311,10 +311,11 @@ fn a_program_killed_through_the_socket_ends_as_kill_and_its_box_runs_on() {
     client.delete(&id).unwrap();
 }
 
-/// Native plan step 8: do exec a program with its stdout a pipe through the node; expect the exec refused
-/// by name (the platform, and why), the box untouched and the connection still served.
+/// Native plan step 8: do exec a program with its stdout a pipe of the caller's own through the node; expect
+/// the exec refused by name (the platform, and why: Windows' AF_UNIX passes no handles, so a Windows caller
+/// asks for its streams instead), the box untouched and the connection still served.
 #[test]
-fn an_exec_with_a_stream_is_refused_by_name_until_the_stdio_transport_is_decided() {
+fn an_exec_that_gives_a_stream_is_refused_by_name() {
     let dir = dir();
     let node = Node::start(dir.path());
     let client = node.client();

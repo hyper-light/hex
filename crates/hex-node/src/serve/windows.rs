@@ -886,10 +886,10 @@ impl Os for Windows {
             return Err(Refusal::Platform {
                 what: "an exec's stdio through the node agent's socket",
                 platform: std::env::consts::OS,
-                why:
-                    "Windows' AF_UNIX passes no handles, and the transport that carries an exec's \
-                      streams to its caller waits on its measured decision (native plan step 8)"
-                        .to_owned(),
+                why: "Windows' AF_UNIX passes no handles, so a stream the caller gives (its own pipe) \
+                      can't reach the node: a Windows caller asks the node for an exec's streams, and \
+                      is given handles of its own to them (native plan step 8)"
+                    .to_owned(),
             });
         }
         Ok(Stdio::null())
