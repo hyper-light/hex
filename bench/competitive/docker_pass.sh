@@ -52,7 +52,11 @@ fi
 
 say "source $SHA into volume $SRC"
 docker volume create "$SRC" > /dev/null
-git -C "$REPO" -c core.autocrlf=false -c core.eol=lf archive "$SHA" | docker run "${BENCH_LABELS[@]}" -i --rm -v "$SRC:/src" "$IMG" sh -c 'find /src -mindepth 1 -delete && tar -x -C /src'
+# git archive stamps every file with its commit's time, and the build's target volume is shared by every commit a
+# pass builds: a commit older than the last build would read as unchanged to cargo, which would link the last
+# commit's crates into this one's (an A/B's arms alternate so). Each file is touched as it lands, so every commit
+# builds from its own tree.
+git -C "$REPO" -c core.autocrlf=false -c core.eol=lf archive "$SHA" | docker run "${BENCH_LABELS[@]}" -i --rm -v "$SRC:/src" "$IMG" sh -c 'find /src -mindepth 1 -delete && tar -x -C /src && find /src -type f -exec touch {} +'
 
 say "build hex, seam_oci and the libcrun driver into volume $BIN"
 docker volume create "$BIN" > /dev/null
