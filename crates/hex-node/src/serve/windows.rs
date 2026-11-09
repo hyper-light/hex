@@ -7,7 +7,8 @@
 //!   connection's one overlapped receive and one overlapped send, a program's end (a wait completion packet
 //!   on its process handle, which the kernel queues to the port itself), and [`Os::wake`]. The core's event set is level-triggered readiness, so
 //!   a connection watched for reads is reported while a message read whole waits or its client has gone,
-//!   and one watched for writes while no send of it is under way;
+//!   and one watched for writes while no send of it is under way. A program's end, whose completion is its
+//!   only report, is kept here until a wait has room for it, and reported before the connections;
 //! - a connection is read one buffer at a time, and only while the core reads it and no message read from
 //!   it waits, so a client the core has stopped reading holds one buffer and what it decoded here, no more;
 //! - a send hands the kernel the whole framed message and owns nothing after, so to the core every send is
@@ -33,7 +34,7 @@
 //!   level-triggered. Its socket never joins the port: it stays its owner's.
 
 use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
 use std::os::windows::fs::MetadataExt;
 use std::os::windows::io::AsHandle;
@@ -208,6 +209,9 @@ pub struct Windows {
     slowest_close: AtomicU64,
     /// The host's own connections the core watches, by token ([`super::Source`]).
     sources: Mutex<BTreeMap<u64, Sourced>>,
+    /// Watched programs whose end was taken from the port and not yet reported: an end's completion is its
+    /// only report, so one a wait had no room for is kept for the next (CLAUDE.md §3).
+    ends: Mutex<BTreeSet<u64>>,
 }
 
 impl Windows {
@@ -231,6 +235,7 @@ impl Windows {
             ending: Mutex::new(BTreeMap::new()),
             slowest_close: AtomicU64::new(0),
             sources: Mutex::new(BTreeMap::new()),
+            ends: Mutex::new(BTreeSet::new()),
         })
     }
 
@@ -248,6 +253,18 @@ impl Windows {
 
     fn sources(&self) -> Result<MutexGuard<'_, BTreeMap<u64, Sourced>>, Refusal> {
         self.sources.lock().map_err(poisoned)
+    }
+
+    /// Reports the kept program ends `events` has room for; the rest wait for the next wait.
+    fn report_ends(&self, events: &mut Vec<Event>) -> Result<(), Refusal> {
+        let mut ends = self.ends.lock().map_err(poisoned)?;
+        while events.len() < EVENTS {
+            let Some(token) = ends.pop_first() else {
+                break;
+            };
+            push(events, token, true, false, false);
+        }
+        Ok(())
     }
 
     /// How long an ended connection's peer has to close after its last message before the node resets it:
@@ -358,13 +375,24 @@ impl Windows {
         }
     }
 
-    /// Puts in `events` what is ready without a wait. Whether there was any.
+    /// Puts in `events` what is ready without a wait: first what only this side holds (connections taken,
+    /// kept program ends, sources reported), so the connections, which stay ready on their own until read,
+    /// can't crowd it out. Whether there was any.
     fn ready_now(&self, conns: &Conns, events: &mut Vec<Event>) -> Result<bool, Refusal> {
         let before = events.len();
         {
             let l = self.listening()?;
             if l.on && !l.taken.is_empty() {
                 events.push(Event::Listener);
+            }
+        }
+        self.report_ends(events)?;
+        for (token, s) in self.sources()?.iter() {
+            if events.len() >= EVENTS {
+                break;
+            }
+            if s.fired {
+                push(events, *token, true, s.write, false);
             }
         }
         for (token, (s, interest)) in conns {
@@ -378,14 +406,6 @@ impl Windows {
             };
             if readable || writable {
                 push(events, *token, readable, writable, st.ended);
-            }
-        }
-        for (token, s) in self.sources()?.iter() {
-            if events.len() >= EVENTS {
-                break;
-            }
-            if s.fired {
-                push(events, *token, true, s.write, false);
             }
         }
         Ok(events.len() > before)
@@ -405,7 +425,10 @@ impl Windows {
                     events.push(Event::Wake);
                 }
             }
-            Done::Program(token) => push(events, token, true, false, false),
+            // Kept until a wait has room for it ([`Windows::report_ends`]): this completion is its only report.
+            Done::Program(token) => {
+                self.ends.lock().map_err(poisoned)?.insert(token);
+            }
             Done::Source(token) => {
                 // Kept until the core watches it again, so a report the events had no room for comes at the
                 // next wait.
@@ -638,7 +661,7 @@ impl Os for Windows {
         for d in done {
             self.take(d, events)?;
         }
-        Ok(())
+        self.report_ends(events)
     }
 
     fn wake(&self) -> Result<(), Refusal> {
