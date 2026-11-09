@@ -120,21 +120,21 @@ impl Keepers {
     fn of(dir: &Path) -> Self {
         Self(dir.join("state").join("keeper"))
     }
+
+    /// The keeper `keeper.owner` names: its pid and creation time.
+    fn owner(&self) -> Option<(u32, u64)> {
+        let text = std::fs::read_to_string(self.0.join("keeper.owner")).ok()?;
+        let mut words = text.split_whitespace();
+        Some((words.next()?.parse().ok()?, words.next()?.parse().ok()?))
+    }
 }
 
 impl Drop for Keepers {
     fn drop(&mut self) {
-        let Ok(text) = std::fs::read_to_string(self.0.join("keeper.owner")) else {
-            return;
-        };
-        let mut words = text.split_whitespace();
-        let (Some(Ok(pid)), Some(Ok(created))) = (
-            words.next().map(str::parse::<u32>),
-            words.next().map(str::parse::<u64>),
-        ) else {
-            return;
-        };
-        if let Ok(keeper) = hex_runtime::windows::keeper::NodeKeeper::open(pid, created, &self.0) {
+        if let Some((pid, created)) = self.owner()
+            && let Ok(keeper) =
+                hex_runtime::windows::keeper::NodeKeeper::open(pid, created, &self.0)
+        {
             keeper.stop();
         }
     }
@@ -218,4 +218,55 @@ fn a_box_killed_mid_delete_is_cleaned_up() {
     assert_eq!(client.inspect(&id), Err(Refusal::NoSuchBox(id.clone())));
     wait_for("the half-deleted box's member to be ended", || !alive(pid));
     assert!(!path.exists(), "the record was left");
+}
+
+/// T-T7.1.2 (native plan step 8): do start `hex node` with its stdout and stderr piped to the test, as a
+/// supervisor reading its output starts it, and kill it (`TerminateProcess`); expect both to reach their end
+/// with the node, though its keeper runs on to hold its boxes: the keeper holds none of its node's pipes, so
+/// what reads the node's output isn't kept waiting by it (bench/install/jupiter.sh's tee waited on the five
+/// keepers windows_node.rs's tests left, 2026-11-09).
+#[test]
+fn a_killed_nodes_output_ends_with_it_though_its_keeper_runs_on() {
+    let dir = tempfile::Builder::new().prefix("out-").tempdir().unwrap();
+    let keepers = Keepers::of(dir.path());
+    let socket = dir.path().join("node.sock");
+    let mut node = Command::new(env!("CARGO_BIN_EXE_hex"))
+        .arg("node")
+        .arg("--socket")
+        .arg(&socket)
+        .arg("--state")
+        .arg(dir.path().join("state"))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("start hex node");
+    let mut out = std::io::BufReader::new(node.stdout.take().unwrap());
+    let mut line = String::new();
+    out.read_line(&mut line).unwrap();
+    assert_eq!(line.trim(), format!("ready {}", socket.display()));
+    let err = node.stderr.take().unwrap();
+    let (keeper, _) = keepers.owner().expect("the node records its keeper");
+    node.kill().unwrap();
+    node.wait().unwrap();
+    assert!(alive(keeper), "the node's keeper ended with it");
+    let (ended, ends) = std::sync::mpsc::channel();
+    let streams: [(&'static str, Box<dyn std::io::Read + Send>); 2] =
+        [("stdout", Box::new(out)), ("stderr", Box::new(err))];
+    for (name, mut stream) in streams {
+        let ended = ended.clone();
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut stream, &mut std::io::sink());
+            let _ = ended.send(name);
+        });
+    }
+    let deadline = Instant::now() + PATIENCE;
+    let mut open = vec!["stdout", "stderr"];
+    while !open.is_empty() {
+        match ends.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(name) => open.retain(|n| *n != name),
+            Err(_) => panic!(
+                "the node's {open:?} didn't end with it in {PATIENCE:?}: its keeper holds the pipe"
+            ),
+        }
+    }
 }
