@@ -276,8 +276,11 @@ mod tests {
     #[test]
     fn the_record_built_in_reads_and_names_todays_default() {
         assert!(
-            !RECORD.lines().any(|l| l.contains("unmeasured")),
-            "the record built in is measured"
+            !RECORD
+                .lines()
+                .filter(|l| !l.trim_start().starts_with('#'))
+                .any(|l| l.contains("unmeasured")),
+            "the record built in is measured: no way's line says unmeasured"
         );
         assert_eq!(
             default_way(OpenTreeNamespace::Available).unwrap(),
