@@ -185,7 +185,7 @@ pub fn refuse_as(user: &str, node: Option<&str>) {
         let served = std::thread::scope(|sc| {
             let h = sc.spawn(|| {
                 let mut buf = vec![0u8; CHUNK];
-                receive(&mut mine, &path, c as usize, &mut buf, Instant::now()).1
+                receive(&mut mine, &path, c as usize, 1 << 20, &mut buf, Instant::now()).2
             });
             let refused = serve(
                 &listener,

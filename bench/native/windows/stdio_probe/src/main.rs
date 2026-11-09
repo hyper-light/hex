@@ -9,7 +9,8 @@
 //!   naming the handle to it over the connection.
 //! `bench` runs the node and one caller, which asks for a stream of `bytes` from each candidate in turn, the
 //! order rotated each round, and prints a CSV row per stream: the time to its first byte and to its last,
-//! and the machine's CPU load over the round. `refuse` runs a second process of the caller's user against
+//! and the machine's CPU load over the round. Each stream is read to the bytes asked for, never to its end,
+//! which afunix.sys doesn't always deliver (`receive`). `refuse` runs a second process of the caller's user against
 //! the two candidates that have a node-facing door (`conn`, `pipe`), and says whether the node refused it.
 //! A probe, outside Hex's workspace: its `unsafe` is the Win32 calls only.
 
@@ -334,8 +335,7 @@ fn caller(path: &Path, rounds: usize, bytes: usize) {
             let t0 = Instant::now();
             ctl.write_all(&[c as u8]).unwrap();
             ctl.write_all(&(bytes as u64).to_le_bytes()).unwrap();
-            let (first, got) = receive(&mut ctl, path, c, &mut buf, t0);
-            let last = t0.elapsed();
+            let (first, last, got) = receive(&mut ctl, path, c, bytes, &mut buf, t0);
             assert_eq!(got, bytes, "{} gave {got} of {bytes}", CANDIDATES[c]);
             rows.push((c, first, last));
         }
@@ -353,46 +353,65 @@ fn caller(path: &Path, rounds: usize, bytes: usize) {
     }
 }
 
-/// Reads one stream: when its first byte came, and how many bytes in all.
+/// Reads one stream of the `want` bytes the caller asked for: when its first byte came, when its last did,
+/// and how many came. No stream's end is waited for: a `conn` stream's end is its connection's graceful
+/// close, which afunix.sys now and then never delivers to a read in another process (the hostile-frame
+/// finding of docs/design/runtime.md; ~1 in 100 `conn` streams on a quiet jupiter, 2026-11-09, each with
+/// its bytes all in), so a round that waited for it hung.
 fn receive(
     ctl: &mut UnixStream,
     path: &Path,
     c: usize,
+    want: usize,
     buf: &mut [u8],
     t0: Instant,
-) -> (std::time::Duration, usize) {
+) -> (std::time::Duration, std::time::Duration, usize) {
     let mut first = None;
     let mut got = 0usize;
-    let mut drain = |r: &mut dyn Read, first: &mut Option<std::time::Duration>, got: &mut usize| loop {
-        let k = r.read(buf).unwrap();
-        if k == 0 {
-            break;
-        }
-        first.get_or_insert_with(|| t0.elapsed());
-        *got += k;
-    };
-    match CANDIDATES[c] {
-        "framed" => loop {
-            let mut l = [0u8; 4];
-            ctl.read_exact(&mut l).unwrap();
-            let k = u32::from_le_bytes(l) as usize;
+    let mut drain = |r: &mut dyn Read, first: &mut Option<std::time::Duration>, got: &mut usize| {
+        while *got < want {
+            let room = buf.len().min(want - *got);
+            let k = r.read(&mut buf[..room]).unwrap();
             if k == 0 {
                 break;
             }
-            ctl.read_exact(&mut buf[..k]).unwrap();
             first.get_or_insert_with(|| t0.elapsed());
-            got += k;
-        },
+            *got += k;
+        }
+    };
+    let last = match CANDIDATES[c] {
+        "framed" => {
+            let mut last = None;
+            loop {
+                let mut l = [0u8; 4];
+                ctl.read_exact(&mut l).unwrap();
+                let k = u32::from_le_bytes(l) as usize;
+                if k == 0 {
+                    // The end, a frame on the control connection: read, as the protocol has it, after the
+                    // last byte's time is taken.
+                    break;
+                }
+                ctl.read_exact(&mut buf[..k]).unwrap();
+                first.get_or_insert_with(|| t0.elapsed());
+                got += k;
+                if got >= want {
+                    last.get_or_insert_with(|| t0.elapsed());
+                }
+            }
+            last.unwrap_or_else(|| t0.elapsed())
+        }
         "conn" => {
             let token = recv_str(ctl);
             let mut s = UnixStream::connect(path).unwrap();
             s.write_all(token.as_bytes()).unwrap();
             drain(&mut s, &mut first, &mut got);
+            t0.elapsed()
         }
         "pipe" => {
             let name = recv_str(ctl);
             let mut f = open_pipe(&name).unwrap();
             drain(&mut f, &mut first, &mut got);
+            t0.elapsed()
         }
         "dup" => {
             let mut h = [0u8; 8];
@@ -400,10 +419,11 @@ fn receive(
             // SAFETY: the node duplicated this handle into this process for this read; File owns it now.
             let mut f = unsafe { File::from_raw_handle(u64::from_le_bytes(h) as usize as _) };
             drain(&mut f, &mut first, &mut got);
+            t0.elapsed()
         }
         _ => unreachable!(),
-    }
-    (first.unwrap_or_default(), got)
+    };
+    (first.unwrap_or_default(), last, got)
 }
 
 fn open_pipe(name: &str) -> std::io::Result<File> {
@@ -438,7 +458,7 @@ fn refuse() {
         let served = std::thread::scope(|sc| {
             let h = sc.spawn(|| {
                 let mut buf = vec![0u8; CHUNK];
-                receive(&mut mine, &path, c as usize, &mut buf, Instant::now()).1
+                receive(&mut mine, &path, c as usize, 1 << 20, &mut buf, Instant::now()).2
             });
             let refused = serve(&listener, &mut ctl, me, c, 1 << 20, &payload, &mut n, Some(&intruder));
             (refused, h.join().unwrap())

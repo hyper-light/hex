@@ -979,7 +979,11 @@ caller gets a real OS pipe handle, what a program's stdio is, with no copy in th
 faster first byte doesn't outweigh that, since framed makes the client copy every byte, at the lowest
 throughput. That run isn't of record: its batches of ten each ran in a fresh probe process younger than a
 second, so its load column holds no whole second's reading, and s4's criterion 2 ran beside it. The record is
-retaken on a jupiter free of other work once the probe's handshake no longer hangs (~8% of its rounds).
+retaken on a jupiter free of other work by a probe that no longer hangs. Its rounds didn't hang in a handshake,
+as that run's note had it: each waited for its streams' ends, and a `conn` stream's end, its connection's
+graceful close, never reached the caller about once in 100 streams (afunix.sys's lost wakeup, the next
+paragraph's finding; traced on jupiter, 2026-11-09, every hang with the stream's bytes all in). The probe now
+reads the bytes it asked for and waits for no end (`tests/bench_ends.rs`, red at 831c09f1).
 
 **A connection's end: held, then reset, never an end-of-stream (the hostile-frame hang; Ada's ask and the
 lead's rulings, 2026-11-09).** A connection the node ends (a hostile frame, a refusal at the door, the
