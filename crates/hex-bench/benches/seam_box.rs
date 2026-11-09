@@ -6,7 +6,8 @@
 //! decision 7) is measured on it. Kiln research 01a16eb2308472b89f1af9806ef9f32e, findings f7 and f8.
 //!   seam_box <out.json> <n> <warmup> <lifecycles> <density cap> <density budget MiB>
 //! (`cargo bench -p hex-bench --bench seam_box -- ...`, or its binary as host.sh's boxseam pass runs it).
-//! HEXBENCH_PHASES names the phases to run, as box_bench.py's does. It needs a cgroup v2 subtree with
+//! HEXBENCH_PHASES names the phases to run, as box_bench.py's does, and HEXBENCH_CONCURRENCY the
+//! throughput phase's concurrencies (1 8 32). It needs a cgroup v2 subtree with
 //! every one of cpu, io, memory and pids delegated; where this process's cgroup lacks one, it re-runs
 //! itself once in a `systemd-run --user --scope -p Delegate=yes`, as process_box.rs does since 460597a.
 #![allow(
@@ -125,21 +126,17 @@ mod linux {
             + read_i64(&cg.join("memory.swap.current"))
     }
 
-    /// One run of `true` in a fresh box: create, exec, wait, delete.
+    /// One run of `true` in a box made for it (decision 7): run, then wait for its end, which comes once
+    /// the node agent has removed the box.
     fn run_true(node: &Node, id: &str) -> Result<(), String> {
         let id = BoxId::new(id).map_err(|e| e.to_string())?;
-        node.create(spec(&id))
-            .map_err(|e| format!("create {id}: {e}"))?;
         let ended = node
-            .exec(&id, Program::of(&["/usr/bin/true"]), Stdio::null())
-            .map_err(|e| format!("exec in {id}: {e}"))
-            .and_then(|mut p| {
-                p.wait_for(CALL_TIMEOUT)
-                    .map_err(|e| format!("wait in {id}: {e}"))?
-                    .ok_or_else(|| format!("`true` in {id} still running after {CALL_TIMEOUT:?}"))
-            });
-        node.delete(&id).map_err(|e| format!("delete {id}: {e}"))?;
-        match ended? {
+            .run(spec(&id), Program::of(&["/usr/bin/true"]), Stdio::null())
+            .map_err(|e| format!("run {id}: {e}"))?
+            .wait_for(CALL_TIMEOUT)
+            .map_err(|e| format!("wait in {id}: {e}"))?
+            .ok_or_else(|| format!("`true` in {id} still running after {CALL_TIMEOUT:?}"))?;
+        match ended {
             Exit::Code(0) => Ok(()),
             other => Err(format!("`true` in {id} ended {other:?}")),
         }
@@ -168,7 +165,17 @@ mod linux {
     /// lifecycles; the clock starts once every thread is waiting at the barrier.
     fn throughput(node: &Node, lifecycles: usize) -> Result<Value, String> {
         let mut out = Map::new();
-        for conc in [1usize, 8, 32] {
+        // HEXBENCH_CONCURRENCY names the concurrencies to run (1, 8 and 32 by default): a probe of one.
+        let concurrencies: Vec<usize> = std::env::var("HEXBENCH_CONCURRENCY")
+            .ok()
+            .filter(|c| !c.trim().is_empty())
+            .map(|c| {
+                c.split_whitespace()
+                    .map(|n| n.parse().expect("HEXBENCH_CONCURRENCY: numbers"))
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![1, 8, 32]);
+        for conc in concurrencies {
             let per = (lifecycles / conc).max(1);
             let start = Barrier::new(conc + 1);
             let (wall, errs) = std::thread::scope(|s| {
@@ -206,10 +213,18 @@ mod linux {
         Ok(Value::Object(out))
     }
 
-    /// Whether `pid` runs `sleep`. std's spawn returns once the child's exec has succeeded or failed,
-    /// so a box's program is running when `exec` returns: a fact to check, not one to wait for.
+    /// Whether process `pid` runs `sleep`, waited for at most CALL_TIMEOUT: a run returns once the
+    /// program's execve has released the agent's memory (the vfork's release, Linux v6.19
+    /// fs/exec.c:854, kernel/fork.c:1488), and the kernel names it a moment later (fs/exec.c:1242-1246).
     fn runs_sleep(pid: u32) -> bool {
-        std::fs::read_to_string(format!("/proc/{pid}/comm")).is_ok_and(|c| c.trim() == "sleep")
+        let deadline = Instant::now() + CALL_TIMEOUT;
+        loop {
+            match std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+                Ok(c) if c.trim() == "sleep" => return true,
+                Ok(_) if Instant::now() < deadline => std::thread::yield_now(),
+                _ => return false,
+            }
+        }
     }
 
     /// How many cgroups under `cg` are removed but not yet released (`cgroup.stat` nr_dying_descendants).
@@ -252,26 +267,22 @@ mod linux {
         let t0 = Instant::now();
         for i in 0..cap {
             let id = BoxId::new(&format!("d{i}")).map_err(|e| e.to_string())?;
-            if let Err(e) = node.create(spec(&id)) {
-                stop = format!("create d{i}: {e}");
-                break;
-            }
-            ids.push(id.clone());
-            match node.exec(
-                &id,
+            match node.run(
+                spec(&id),
                 Program::of(&["/usr/bin/sleep", "infinity"]),
                 Stdio::null(),
             ) {
                 Ok(p) => {
+                    ids.push(id);
                     let up = runs_sleep(p.pid());
                     procs.push(p);
                     if !up {
-                        stop = format!("box d{i}: its program isn't `sleep` once exec returned");
+                        stop = format!("box d{i}: its program isn't `sleep` once run returned");
                         break;
                     }
                 }
                 Err(e) => {
-                    stop = format!("exec in d{i}: {e}");
+                    stop = format!("run d{i}: {e}");
                     break;
                 }
             }
@@ -287,16 +298,20 @@ mod linux {
         for id in &ids {
             node.delete(id).map_err(|e| format!("delete {id}: {e}"))?;
         }
-        // Each `sleep` is this process's child: reap it, so none is left a zombie.
+        // Each `sleep`'s end, which its box's delete reaped.
         for p in &mut procs {
             p.wait_for(CALL_TIMEOUT)
                 .map_err(|e| format!("reaping box {}'s sleep: {e}", p.pid()))?
                 .ok_or_else(|| format!("box {}'s sleep outlived its box's delete", p.pid()))?;
         }
         let boxes_left = node.list().map_err(|e| e.to_string())?.len();
+        // The node's own root for oci boxes (`.oci`, since 32db274) is no box.
         let cgroups_left = std::fs::read_dir(root)
             .map_err(|e| format!("listing {}: {e}", root.display()))?
-            .filter(|e| e.as_ref().is_ok_and(|e| e.path().is_dir()))
+            .filter(|e| {
+                e.as_ref()
+                    .is_ok_and(|e| e.path().is_dir() && e.file_name() != hex_node::OCI_BOXES)
+            })
             .count();
         if boxes_left > 0 || cgroups_left > 0 {
             return Err(format!(

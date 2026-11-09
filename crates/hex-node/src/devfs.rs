@@ -153,49 +153,56 @@ impl DevMounts for Devfs {
             .map_err(|e| OciError::Broken(e.to_string()))
     }
 
+    /// The worker is woken only when the take leaves it work, a key at its low mark (the core's `Pool::take`), not
+    /// once a take.
     fn take(&self, key: Key) -> Result<Option<OwnedFd>, OciError> {
-        let (taken, discarded) = {
+        let took = {
             let mut pool = self.shared.pool.lock().map_err(|_| {
                 OciError::Broken("the prepared /dev pool lock was poisoned".to_owned())
             })?;
             let before = pool.learned();
-            let taken = pool
+            let took = pool
                 .take(key)
                 .map_err(|e| OciError::Broken(e.to_string()))?;
             if pool.learned() > before {
                 crate::sizes::rose();
             }
-            taken
+            took
         };
-        drop(discarded);
-        self.shared.wake.notify_one();
-        Ok(taken)
+        drop(took.discarded);
+        if took.wake {
+            self.shared.wake.notify_one();
+        }
+        Ok(took.mount)
     }
 
     fn masked_directory(&self) -> Option<BorrowedFd<'_>> {
         self.shared.sources.as_deref().and_then(ProcSources::empty)
     }
 
+    /// The worker is woken only when the take leaves it work, as a `/dev` take wakes it.
     fn take_proc(&self, key: procmount::Key) -> Result<Option<PreparedProc>, OciError> {
-        let (taken, discarded) = {
+        let took = {
             let mut procs = self.shared.procs.lock().map_err(|_| {
                 OciError::Broken("the prepared proc pool lock was poisoned".to_owned())
             })?;
             let before = procs.learned();
-            let taken = procs
+            let took = procs
                 .take(key)
                 .map_err(|e| OciError::Broken(e.to_string()))?;
             if procs.learned() > before {
                 crate::sizes::rose();
             }
-            taken
+            took
         };
-        drop(discarded);
-        // The worker checks this pool holding `/dev`'s lock, the condition's, so taking that lock before
-        // the wake means the wake can't fall between its check and its wait.
-        drop(self.shared.pool.lock());
-        self.shared.wake.notify_one();
-        Ok(taken)
+        drop(took.discarded);
+        if took.wake {
+            // The worker checks this pool holding `/dev`'s lock, the condition's, so taking that lock before
+            // the wake means the wake can't fall between its check and its wait.
+            drop(self.shared.pool.lock());
+            self.shared.wake.notify_one();
+        }
+        Ok(took.mount)
     }
 
     fn unpooled_proc(&self, reason: hex_core::devfs::Unpooled) -> Result<(), OciError> {

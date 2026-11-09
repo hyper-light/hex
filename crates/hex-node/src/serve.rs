@@ -13,7 +13,9 @@
 //!
 //! One thread does every connection's I/O and watches every exec'd program's end through the OS's event
 //! set; it never blocks but in [`Os::wait`]. The runtime's calls, which may block (a delete waits for its
-//! box to empty), run on a pool of workers, which answer their calls themselves.
+//! box to empty), run on a pool of workers, which answer their calls themselves. A run (decision 7) is
+//! answered as an exec is: its program's end comes once its node has removed its box, so an end its watch
+//! reports before the runtime can tell it is waited for on a worker, never on the I/O thread.
 //!
 //! Each resource has a bound (CLAUDE.md §2), refused past by type, naming it (§3):
 //! - connections ([`Limits::connections`]): one more is answered `Exhausted` and closed;
@@ -51,7 +53,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use hex_api::{BoxId, Exit, Proc, Program, Refusal, Runtime, Stdio};
+use hex_api::{BoxId, BoxSpec, Exit, Proc, Program, Refusal, Runtime, Stdio};
 use hex_core::netns;
 use hex_core::patience::Patience;
 use hex_core::wire::{self, Answer, Call, Header, Hello, Received, Request, Streams};
@@ -325,11 +327,15 @@ pub enum Sent {
     Gone,
 }
 
-/// Why a started program couldn't be watched, and whether the OS ended it (it could open a handle to the
-/// program but not watch it); one it couldn't open runs on, unwatched, for the node's sweep.
-pub struct Unwatched {
-    pub why: Refusal,
-    pub killed: bool,
+/// Why a started program couldn't be watched.
+pub enum Unwatched {
+    /// No handle to it could be opened: it runs on, unwatched, for the node's sweep.
+    Runs(Refusal),
+    /// A handle to it was opened but couldn't be watched, and the OS ended it through that handle.
+    Killed(Refusal),
+    /// It had ended and been reaped before it could be watched: a run's program, which its node reaps to remove
+    /// its box (decision 7). Its end is its runtime's to tell, through its `Proc`.
+    Gone,
 }
 
 /// One OS's event sources and local socket: everything the core does that isn't the same on every OS.
@@ -695,6 +701,26 @@ enum Job<O: Os> {
         header: Header,
         infos: Vec<hex_api::BoxInfo>,
     },
+    /// A program here whose watch reported its end before its runtime could tell it: a run's, whose box its node
+    /// is removing (decision 7). Its end is waited for on a worker, so the I/O thread waits on no removal.
+    Collect(Box<Watched<O>>),
+}
+
+/// What a call that starts a program starts: a program in a box there is (an exec), or a `process` box made for
+/// the program's life, with it (a run, decision 7).
+enum Launch {
+    Exec(BoxId, Program),
+    Run(Box<BoxSpec>, Program),
+}
+
+impl Launch {
+    /// The box the program runs in.
+    fn box_id(&self) -> BoxId {
+        match self {
+            Self::Exec(id, _) => id.clone(),
+            Self::Run(spec, _) => spec.id.clone(),
+        }
+    }
 }
 
 fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
@@ -1478,8 +1504,7 @@ impl<O: Os> Shared<O> {
         let exit = match &mut w.run {
             Run::Local { proc, .. } => match proc.try_wait() {
                 Ok(Some(exit)) => Some(exit),
-                // Ready but not yet waitable can't happen on an OS whose watch reports the end
-                // (pidfd_open(2)); watched again rather than lost.
+                // Ready but not yet told: a run's program, its box being removed (decision 7).
                 Ok(None) => None,
                 // Reaped elsewhere in this process: how it ended is no longer known.
                 Err(_) => Some(Exit::Unknown),
@@ -1488,6 +1513,14 @@ impl<O: Os> Shared<O> {
             Run::Remote(_) => None,
         };
         let Some(exit) = exit else {
+            if let Run::Local { watch, .. } = &mut w.run {
+                // Ended, but its end not yet told: a run's, whose box its node is removing, which tells the end once
+                // the box is gone. Off the event set, its end is waited for on a worker.
+                if let Some(watch) = watch.take() {
+                    self.os.unwatch_program(watch);
+                }
+                return self.enqueue(Job::Collect(Box::new(w)));
+            }
             let mut table = self.table()?;
             {
                 let mut out = w.conn.out.lock().map_err(poisoned)?;
@@ -1665,6 +1698,17 @@ impl<O: Os> Shared<O> {
                             header,
                             infos,
                         }) => self.list(&conn, header, &infos),
+                        // No worker to wait in: its end isn't known, and is sent so, or counted in its box as
+                        // `finish` counts one.
+                        Some(Job::Collect(w)) => {
+                            let open = w.conn.out.lock().is_ok_and(|out| out.open);
+                            if open && !w.killed {
+                                self.answer(&w.conn, w.exec, &Answer::Exited(Exit::Unknown))
+                            } else {
+                                let _ = self.host.abandoned(&w.box_id);
+                                Ok(())
+                            }
+                        }
                         None => Ok(()),
                     };
                 }
@@ -1720,6 +1764,21 @@ impl<O: Os> Shared<O> {
                 } => {
                     let _ = self.list(&conn, header, &infos);
                 }
+                Job::Collect(mut w) => {
+                    let exit = match &mut w.run {
+                        Run::Local { proc, .. } => {
+                            // Told once its box is gone: the node's learned wait for a box to empty bounds it, the
+                            // removal waiting on that emptying.
+                            match proc.wait_for(crate::emptying::empty_patience(Instant::now())) {
+                                Ok(Some(exit)) => exit,
+                                Ok(None) | Err(_) => Exit::Unknown,
+                            }
+                        }
+                        Run::Remote(_) => Exit::Unknown,
+                    };
+                    let open = w.conn.out.lock().is_ok_and(|out| out.open);
+                    let _ = self.finish(*w, open, exit);
+                }
             }
         }
     }
@@ -1739,22 +1798,29 @@ impl<O: Os> Shared<O> {
             self.done(conn)?;
             self.answer(conn, header.id, &answer)
         };
-        let (stdio, program) = match &call {
+        let starts = match &call {
             Call::Exec { id, streams, .. } | Call::ExecStreams { id, streams, .. } => {
+                Some((id, *streams))
+            }
+            Call::Run { spec, streams, .. } => Some((&spec.id, *streams)),
+            _ => None,
+        };
+        let (stdio, program) = match starts {
+            Some((id, streams)) => {
                 if !self.reserve(conn)? {
                     return reply(Answer::Refused(Refusal::Exhausted {
                         what: PROGRAMS,
                         bound: self.limits.programs,
                     }));
                 }
-                let mut stdio = match self.os.stdio(*streams, passed) {
+                let mut stdio = match self.os.stdio(streams, passed) {
                     Ok(stdio) => stdio,
                     Err(r) => {
                         self.unreserve(conn)?;
                         return reply(Answer::Refused(r));
                     }
                 };
-                if let Call::ExecStreams { ask, .. } = &call {
+                if let Call::ExecStreams { ask, .. } | Call::Run { ask, .. } = &call {
                     stdio.ask = hex_api::Ask {
                         stdin: ask.stdin,
                         stdout: ask.stdout,
@@ -1763,7 +1829,7 @@ impl<O: Os> Shared<O> {
                 }
                 (stdio, Some((self.table()?.token()?, id.clone())))
             }
-            _ => (Stdio::null(), None),
+            None => (Stdio::null(), None),
         };
         let ended: Ended = match &program {
             Some((token, _)) => {
@@ -1790,19 +1856,22 @@ impl<O: Os> Shared<O> {
             }
             Forward::Back(back) => match (*back, program) {
                 ((Call::Exec { id, program, .. }, stdio), Some((token, _))) => {
-                    return self.exec(conn, header, token, id, program, stdio);
+                    return self.exec(conn, header, token, Launch::Exec(id, program), stdio);
                 }
                 ((Call::ExecStreams { id, program, .. }, stdio), Some((token, _))) => {
-                    return self.exec(conn, header, token, id, program, stdio);
+                    return self.exec(conn, header, token, Launch::Exec(id, program), stdio);
+                }
+                ((Call::Run { spec, program, .. }, stdio), Some((token, _))) => {
+                    return self.exec(conn, header, token, Launch::Run(spec, program), stdio);
                 }
                 ((call, _), _) => call,
             },
         };
         let host = &self.host;
         let answer = match call {
-            Call::Exec { .. } | Call::ExecStreams { .. } => Err(Refusal::Broken(
-                "an exec came back from its host without its place".to_owned(),
-            )),
+            Call::Exec { .. } | Call::ExecStreams { .. } | Call::Run { .. } => Err(
+                Refusal::Broken("an exec came back from its host without its place".to_owned()),
+            ),
             Call::Kill { exec } => return self.kill(conn, header, exec),
             Call::List => {
                 let listed = host.list();
@@ -1967,15 +2036,14 @@ impl<O: Os> Shared<O> {
         Ok(())
     }
 
-    /// An exec the host runs here: the program started on its stdio, then watched by the OS, announced,
+    /// An exec, or a run, the host runs here: the program started on its stdio, then watched by the OS, announced,
     /// and its end sent after.
     fn exec(
         self: &Arc<Self>,
         conn: &Arc<Conn<O>>,
         header: Header,
         token: u64,
-        id: BoxId,
-        program: Program,
+        launch: Launch,
         stdio: Stdio,
     ) -> Result<(), Refusal> {
         let reply = |answer: Answer| -> Result<(), Refusal> {
@@ -1983,7 +2051,12 @@ impl<O: Os> Shared<O> {
             self.answer(conn, header.id, &answer)
         };
         let asked = stdio.ask != hex_api::Ask::default();
-        let mut proc = match self.host.exec(&id, program, stdio) {
+        let id = launch.box_id();
+        let started = match launch {
+            Launch::Exec(b, program) => self.host.exec(&b, program, stdio),
+            Launch::Run(spec, program) => self.host.run(*spec, program, stdio),
+        };
+        let mut proc = match started {
             Ok(proc) => proc,
             Err(r) => {
                 self.unreserve(conn)?;
@@ -2008,14 +2081,20 @@ impl<O: Os> Shared<O> {
         let table = self.table()?;
         let watch = match self.os.watch_program(pid, token) {
             Ok(watch) => watch,
-            Err(Unwatched { why, killed }) => {
+            Err(Unwatched::Gone) => {
                 drop(table);
-                if killed {
-                    // A killed process's end: the node's learned wait for a killed box to empty, its kind of wait.
-                    let killed = Instant::now();
-                    let mut proc = proc;
-                    let _ = proc.wait_for(crate::emptying::empty_patience(killed));
-                }
+                return self.gone(conn, header, pid, given, proc);
+            }
+            Err(Unwatched::Killed(why)) => {
+                drop(table);
+                // A killed process's end: the node's learned wait for a killed box to empty, its kind of wait.
+                let killed = Instant::now();
+                let _ = proc.wait_for(crate::emptying::empty_patience(killed));
+                self.unreserve(conn)?;
+                return reply(Answer::Refused(why));
+            }
+            Err(Unwatched::Runs(why)) => {
+                drop(table);
                 self.unreserve(conn)?;
                 return reply(Answer::Refused(why));
             }
@@ -2031,6 +2110,31 @@ impl<O: Os> Shared<O> {
             watch: Some(watch),
         };
         self.started(table, conn, header, start, run)
+    }
+
+    /// A program that had ended and been reaped before it could be watched: a run's, whose node reaps it to remove
+    /// its box (decision 7). With nothing left to watch, its end, its `Proc`'s to tell once its box is gone, is waited
+    /// for here on the worker, bounded by the node's learned wait for a box to empty, which the removal waits on; then
+    /// its start and its end are sent, one after the other.
+    fn gone(
+        &self,
+        conn: &Conn<O>,
+        header: Header,
+        pid: u32,
+        given: Option<hex_api::Given>,
+        mut proc: Box<dyn Proc>,
+    ) -> Result<(), Refusal> {
+        let exit = match proc.wait_for(crate::emptying::empty_patience(Instant::now())) {
+            Ok(Some(exit)) => exit,
+            Ok(None) | Err(_) => Exit::Unknown,
+        };
+        self.unreserve(conn)?;
+        self.done(conn)?;
+        match given {
+            Some(given) => self.answer_given(conn, header, pid, given)?,
+            None => self.answer(conn, header.id, &Answer::Started { pid })?,
+        }
+        self.answer(conn, header.id, &Answer::Exited(exit))
     }
 
     /// A program started: watched from now under `table`, held since its watch began, its place among

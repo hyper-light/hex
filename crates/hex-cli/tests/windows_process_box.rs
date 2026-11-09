@@ -79,6 +79,12 @@ impl Fixture for BinFixture {
     fn exec_limit(&self) -> Option<hex_api::ExecLimit> {
         Some(hex_core::hcs::exec_limit())
     }
+
+    /// HEX-RT-15: the Windows node has nothing that removes a box once its program ends (decision 7's run is
+    /// Linux's node agent's), so a run is refused, naming the platform.
+    fn runs(&self) -> bool {
+        false
+    }
 }
 
 fn runtime() -> WinRuntime {

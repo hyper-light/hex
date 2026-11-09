@@ -659,7 +659,8 @@ pub fn exec_direct(
             (p.init.as_fd(), rest),
         );
         failed.set(Some(why));
-        (code, why)
+        sys::report(why);
+        code
     };
     let cloned = STACK.with(|stack| -> Result<_, OciError> {
         let mut stack = stack

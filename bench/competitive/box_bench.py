@@ -23,6 +23,7 @@ HEXBENCH_PHASES names the phases to run (all three by default).
 import json
 import multiprocessing as mp
 import os
+import select
 import signal
 import subprocess
 import sys
@@ -126,10 +127,43 @@ def worker(method, hex_bin, cgroup, count, warmup, start, conn):
         conn.send({"error": f"{type(e).__name__}: {e}"})
 
 
+# How often wait_empty re-reads cgroup.events between the kernel's notifications. That notification can lag
+# the depopulation by milliseconds, so the read is never more than this apart. The same cap as Hex's
+# BoxCgroup::wait_empty (crates/hex-runtime/src/linux/cgroup.rs; probes/oci_breakdown.md, run 3).
+EMPTY_POLL_S = 0.0005
+
+
+def wait_empty(cg, timeout=CALL_TIMEOUT_S):
+    """Waits, at most `timeout` s, until `cg`'s cgroup.events reads `populated 0`: no task in it or under it.
+    A call reaped by wait4 can still be in its cgroup. exit_notify makes a task reapable (Linux v6.19
+    kernel/exit.c:983), but it leaves its css_set only at its final switch, in cgroup_task_dead from
+    finish_task_switch (kernel/sched/core.c:5156, kernel/cgroup/cgroup.c:6989-7008). Until then rmdir refuses the
+    cgroup with EBUSY (cgroup.c:6160-6161). The kernel notifies cgroup.events' pollers when `populated` changes
+    (cgroup-v2.rst, "cgroup.events"). Past the timeout it raises, naming what the cgroup still lists."""
+    deadline = time.monotonic() + timeout
+    fd = os.open(cg + "/cgroup.events", os.O_RDONLY)
+    try:
+        poller = select.poll()
+        poller.register(fd, select.POLLPRI)
+        while True:
+            if b"populated 0" in os.pread(fd, 256, 0):
+                return
+            left = deadline - time.monotonic()
+            if left <= 0:
+                listed = {f: open(f"{cg}/{f}").read().split() for f in ("cgroup.procs", "cgroup.threads")}
+                raise RuntimeError(f"{cg} still populated {timeout}s after its call was reaped: {listed}")
+            poller.poll(min(left, EMPTY_POLL_S) * 1000)
+    finally:
+        os.close(fd)
+
+
 def remove_tree(cg):
-    """Removes an emptied cgroup and its emptied children, deepest first (bounded by the tree's size)."""
+    """Removes a cgroup and its children, deepest first (bounded by the tree's size), once the kernel has
+    taken every task out of it (wait_empty)."""
     dirs = [d for d, _, _ in os.walk(cg)]
     stand_in = bool(os.environ.get("HEXBENCH_SELF_CGROUP"))  # plain dirs: cgroup.procs is a real file there
+    if not stand_in:
+        wait_empty(cg)
     for d in reversed(dirs):
         if stand_in and os.path.isfile(os.path.join(d, "cgroup.procs")):
             os.unlink(os.path.join(d, "cgroup.procs"))

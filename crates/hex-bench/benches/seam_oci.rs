@@ -1603,6 +1603,7 @@ mod linux {
                     if let (Some(before), Some(after)) = (dev_before, driver.dev_mounts()?) {
                         fields.insert("dev_mounts".to_owned(), json!({
                             "made":after.made-before.made, "taken":after.taken-before.taken,
+                            "wakes":after.wakes-before.wakes,
                             "on_path":after.on_path-before.on_path, "discarded":after.discarded-before.discarded,
                             "failed":after.failed-before.failed, "cold":after.cold-before.cold,
                             "dry":after.dry-before.dry, "disabled":after.disabled-before.disabled,

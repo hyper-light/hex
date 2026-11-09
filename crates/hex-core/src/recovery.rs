@@ -29,7 +29,7 @@ pub struct Seen {
     pub record: Option<Result<BoxRecord, String>>,
     /// Its parts at the paths its id fixes.
     pub parts: Parts,
-    /// For a record with an init: whether that very process still runs.
+    /// For a record with an init, or a run's program: whether that very process still runs.
     pub init_alive: Option<bool>,
     /// For an `oci` box: a start of it had begun and never took the byte when the agent stopped (its
     /// state directory's start mark beside its exec FIFO, hex_runtime's `state::start_interrupted`).
@@ -55,6 +55,8 @@ pub enum Why {
     MidDelete,
     /// Its container's init has ended: the container is gone.
     InitGone,
+    /// The program it was run for has ended, while no agent was there to remove it (decision 7).
+    RunEnded,
     /// Its record exists but its cgroup doesn't: something removed it (its unit was stopped).
     NoCgroup,
     /// No record names it, and these parts of it are left: the agent stopped while making it, before
@@ -81,6 +83,9 @@ pub fn decide(seen: &Seen) -> Decision {
             }
             Phase::Ready if r.spec.class.class() == Class::Oci && seen.init_alive != Some(true) => {
                 Decision::Remove(Why::InitGone)
+            }
+            Phase::Ready if r.run.is_some() && seen.init_alive != Some(true) => {
+                Decision::Remove(Why::RunEnded)
             }
             Phase::Ready => Decision::Adopt,
         },
@@ -176,7 +181,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::record::{DELETE_STEPS, ProcId, REMOVE_STEPS, Step, create_steps};
+    use crate::record::{DELETE_STEPS, ProcId, REMOVE_STEPS, RUN_STEPS, Step, create_steps};
 
     #[derive(Debug, Clone, Default)]
     struct Machine {
@@ -196,13 +201,16 @@ mod tests {
         Bundle,
         /// An `oci` box run from a bundle the node renders from its `OciSpec`.
         Rendered,
+        /// A `process` box made by a run, for its program's life (decision 7).
+        Run,
     }
 
     #[derive(Debug, Clone, Copy)]
     enum Op {
         Create(u8, Kind),
         Delete(u8),
-        /// A container's init exits on its own (the box stays until deleted).
+        /// A container's init exits on its own (the box stays until deleted), or a run's program
+        /// ends while the agent is down (it removes the box itself while up).
         InitExits(u8),
     }
 
@@ -212,7 +220,7 @@ mod tests {
 
     fn spec(id: &BoxId, kind: Kind) -> BoxSpec {
         let class = match kind {
-            Kind::Process => ClassSpec::Process,
+            Kind::Process | Kind::Run => ClassSpec::Process,
             Kind::Bundle => ClassSpec::Bundle(PathBuf::from("/srv/bundle")),
             Kind::Rendered => ClassSpec::Oci(Box::new(OciSpec {
                 rootfs: Rootfs::Layers(vec![]),
@@ -254,10 +262,15 @@ mod tests {
             Step::MarkReady => {
                 let mut r = BoxRecord::new(spec.clone(), Phase::Ready, vec![]);
                 if m.inits.contains(id) {
-                    r.init = Some(ProcId {
+                    let program = Some(ProcId {
                         pid: 1,
                         start_ticks: 1,
                     });
+                    // A `process` box with a program started before its record is a run's.
+                    match spec.class {
+                        ClassSpec::Process => r.run = program,
+                        _ => r.init = program,
+                    }
                 }
                 m.records.insert(id.clone(), r);
             }
@@ -293,7 +306,11 @@ mod tests {
                         continue;
                     }
                     let spec = spec(&id, kind);
-                    for s in create_steps(&spec.class) {
+                    let steps = match kind {
+                        Kind::Run => RUN_STEPS,
+                        _ => create_steps(&spec.class),
+                    };
+                    for s in steps {
                         if !apply(m, &mut budget, &id, &spec, *s) {
                             return;
                         }
@@ -327,7 +344,7 @@ mod tests {
                 r.phase == Phase::Ready
                     && made(&m.cgroups)
                     && match r.spec.class {
-                        ClassSpec::Process => true,
+                        ClassSpec::Process => r.run.is_none() || made(&m.inits),
                         ClassSpec::Bundle(_) => made(&m.inits) && made(&m.state_dirs),
                         ClassSpec::Oci(_) => {
                             made(&m.inits) && made(&m.state_dirs) && made(&m.bundles)
@@ -352,7 +369,7 @@ mod tests {
     fn look(m: &Machine) -> BTreeMap<BoxId, Seen> {
         let mut seen: BTreeMap<BoxId, Seen> = BTreeMap::new();
         for (id, r) in &m.records {
-            let init_alive = r.init.map(|_| m.inits.contains(id));
+            let init_alive = r.init.or(r.run).map(|_| m.inits.contains(id));
             seen.insert(
                 id.clone(),
                 Seen {
@@ -390,7 +407,8 @@ mod tests {
         let kind = prop_oneof![
             Just(Kind::Process),
             Just(Kind::Bundle),
-            Just(Kind::Rendered)
+            Just(Kind::Rendered),
+            Just(Kind::Run)
         ];
         prop_oneof![
             (0u8..4, kind).prop_map(|(n, k)| Op::Create(n, k)),
@@ -430,9 +448,12 @@ mod tests {
     #[test]
     fn a_create_killed_after_each_step_is_removed_by_what_it_made_or_taken_back() {
         let b = id(0);
-        for kind in [Kind::Process, Kind::Bundle, Kind::Rendered] {
+        for kind in [Kind::Process, Kind::Bundle, Kind::Rendered, Kind::Run] {
             let spec = spec(&b, kind);
-            let steps = create_steps(&spec.class);
+            let steps = match kind {
+                Kind::Run => RUN_STEPS,
+                _ => create_steps(&spec.class),
+            };
             assert_eq!(
                 steps.last(),
                 Some(&Step::MarkReady),
@@ -470,7 +491,7 @@ mod tests {
                 assert_eq!(
                     m.state_dirs.len() + m.bundles.len(),
                     match kind {
-                        Kind::Process => 0,
+                        Kind::Process | Kind::Run => 0,
                         Kind::Bundle => kept,
                         Kind::Rendered => 2 * kept,
                     },
@@ -509,13 +530,15 @@ mod tests {
     fn each_finding_gets_its_decision() {
         let r = |phase, kind| {
             let mut r = BoxRecord::new(spec(&id(0), kind), phase, vec![]);
-            r.init = match kind {
-                Kind::Bundle | Kind::Rendered => Some(ProcId {
-                    pid: 7,
-                    start_ticks: 9,
-                }),
-                Kind::Process => None,
-            };
+            let program = Some(ProcId {
+                pid: 7,
+                start_ticks: 9,
+            });
+            match kind {
+                Kind::Bundle | Kind::Rendered => r.init = program,
+                Kind::Run => r.run = program,
+                Kind::Process => {}
+            }
             Some(Ok(r))
         };
         let cgroup = Parts {
@@ -612,6 +635,26 @@ mod tests {
                     record: r(Phase::Ready, Kind::Process),
                     parts: cgroup,
                     init_alive: None,
+                    start_interrupted: false,
+                },
+                Decision::Adopt,
+            ),
+            // Decision 7: a run whose program ended while no agent was there is removed; one whose program
+            // still runs is taken back, to be removed when it ends.
+            (
+                Seen {
+                    record: r(Phase::Ready, Kind::Run),
+                    parts: cgroup,
+                    init_alive: Some(false),
+                    start_interrupted: false,
+                },
+                Decision::Remove(Why::RunEnded),
+            ),
+            (
+                Seen {
+                    record: r(Phase::Ready, Kind::Run),
+                    parts: cgroup,
+                    init_alive: Some(true),
                     start_interrupted: false,
                 },
                 Decision::Adopt,

@@ -65,6 +65,12 @@ impl Runtime for SocketHost {
         }
         Ok(Box::new(hex_api::Asked::new(Unending, given)))
     }
+    /// The run's box in the simulator, its program the exec's, as the other hosts' run is.
+    fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        let id = spec.id.clone();
+        self.sim.create(spec)?;
+        self.exec(&id, program, stdio)
+    }
     fn signal(&self, id: &BoxId, signal: HexSignal) -> Result<(), Refusal> {
         self.sim.signal(id, signal)
     }

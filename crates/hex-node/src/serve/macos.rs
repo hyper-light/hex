@@ -441,14 +441,13 @@ impl Os for MacOs {
     }
 
     fn watch_program(&self, pid: u32, token: u64) -> Result<Watch, Unwatched> {
-        let unwatched = |why: String| Unwatched {
-            why: Refusal::Os {
+        let unwatched = |why: String| {
+            Unwatched::Runs(Refusal::Os {
                 op: "watching a started program",
                 why: format!(
                     "{why}: it runs on unwatched by the socket, and the node's sweep reaps it"
                 ),
-            },
-            killed: false,
+            })
         };
         let pid = i32::try_from(pid).map_err(|_| unwatched(format!("pid {pid} isn't one")))?;
         let started = match sys::rusage(pid) {

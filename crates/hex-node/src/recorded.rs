@@ -40,6 +40,7 @@ pub(crate) fn why_text(why: &Why) -> String {
         Why::MidCreate => "the node agent stopped while it was being made".to_owned(),
         Why::MidDelete => "the node agent stopped while it was being removed".to_owned(),
         Why::InitGone => "its container's init had ended".to_owned(),
+        Why::RunEnded => "the program it was run for had ended".to_owned(),
         Why::NoCgroup => "its record had no cgroup".to_owned(),
         Why::NoRecord(parts) => {
             let left: Vec<&str> = [
@@ -238,6 +239,13 @@ impl<R: Recover> Runtime for Recorded<R> {
 
     fn start(&self, id: &BoxId) -> Result<(), Refusal> {
         self.runtime.start(id)
+    }
+
+    /// Its runtime's to refuse: none this wraps makes a box for one program's life (macOS's and Windows' refuse a
+    /// run, naming their platform, and an `oci` spec's is refused everywhere; decision 7), so there is no run's box
+    /// to record.
+    fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        self.runtime.run(spec, program, stdio)
     }
 
     /// Runs `program`, and once the box has processes, records what names them after a crash.

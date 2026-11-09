@@ -304,9 +304,85 @@ fn exercise_recovery(own: &Path, cache: &Path, exe: &str) {
         .expect("midcreate record");
     std::fs::create_dir_all(box_root.join("midcreate")).expect("midcreate cgroup");
 
+    // Two runs' boxes as an agent that stopped left them (decision 7): one whose program still runs,
+    // and one whose program ended while no agent was there to remove its box.
+    let runs = hex_runtime::linux::cgroup::BoxRoot::open(&box_root, Vec::new()).expect("box root");
+    let ran_live = BoxId::new("ran-live").unwrap();
+    let live_cg = runs
+        .create(&ran_live, &Bounds::default())
+        .expect("a run's cgroup");
+    let mut cmd = Command::new(exe);
+    cmd.args(["selftest-box", "wait"]);
+    hex_runtime::linux::process::join_on_exec(&live_cg, &mut cmd).expect("join on exec");
+    let mut running = cmd.spawn().expect("a run's program");
+    let pid = i32::try_from(running.id()).unwrap();
+    let ran_ended = BoxId::new("ran-ended").unwrap();
+    runs.create(&ran_ended, &Bounds::default())
+        .expect("an ended run's cgroup");
+    let mut gone = Command::new("true").spawn().unwrap();
+    let gone_pid = gone.id();
+    gone.wait().unwrap();
+    for (id, program) in [
+        (
+            &ran_live,
+            hex_core::record::ProcId {
+                pid: running.id(),
+                start_ticks: hex_runtime::linux::oci::state::start_time(pid).expect("start time"),
+            },
+        ),
+        (
+            &ran_ended,
+            hex_core::record::ProcId {
+                pid: gone_pid,
+                start_ticks: 1,
+            },
+        ),
+    ] {
+        let mut rec = hex_core::record::BoxRecord::new(
+            fx.spec(id.clone(), Bounds::default()),
+            hex_core::record::Phase::Ready,
+            vec![],
+        );
+        rec.run = Some(program);
+        std::fs::write(
+            state.path().join(format!("{id}.json")),
+            rec.encode().unwrap(),
+        )
+        .expect("a run's record");
+    }
+
     // The restart: a fresh node on the same directories recovers.
     let restarted = Node::open(&box_root, state.path(), state.path()).expect("restart");
     let summary = restarted.recover().expect("recover");
+
+    // Decision 7, T-T7.1.2: the run whose program ended is removed, saying so; the one still running is
+    // taken back and watched again, so its box goes once its program ends.
+    assert!(
+        summary
+            .removed
+            .iter()
+            .any(|(id, why)| *id == ran_ended && why.contains("run for had ended")),
+        "the ended run's box wasn't removed: {summary:?}"
+    );
+    assert!(
+        !box_root.join("ran-ended").exists(),
+        "the ended run's cgroup leaked"
+    );
+    assert!(
+        summary.adopted.contains(&ran_live),
+        "the running run's box wasn't taken back: {summary:?}"
+    );
+    running.kill().expect("end the run's program");
+    wait_until(
+        || restarted.inspect(&ran_live) == Err(hex_api::Refusal::NoSuchBox(ran_live.clone())),
+        "the taken-back run's box removed once its program ended",
+    );
+    assert!(
+        !box_root.join("ran-live").exists(),
+        "the taken-back run's cgroup leaked"
+    );
+    // The node reaped it (it is this process's child) to remove its box; nothing is left to wait for.
+    assert!(running.wait().is_err(), "the run's program wasn't reaped");
 
     assert!(
         summary.adopted.contains(&live),

@@ -529,6 +529,83 @@ records are `~/.cache/hex-bench/out/create-breakdown-<run>`.
   - Under another tenant's load, not met: at 6 busy loops 2 runs of 3 under (0.454-0.580), at 12 none (0.702-1.068).
     What's left is the mount lock's convoys and the proc superblock.
 
+## 9. A box's `/dev` handed on within one owner (goal 5 extended, step 6; 2026-11-03)
+
+The lead's lever (2026-11-03T17:47Z), for the CPU step 3's `hex-devfs` worker spends beside concurrency 1's path, 97
+to 101 us a lifecycle on fedora's E-cores (`bench/competitive/probes/create_serial.md`, run 17): the agent keeps a
+detached original of an owner's `/dev`; each box of that owner gets a clone of it (`open_tree(OPEN_TREE_CLONE)`);
+after the box the original is checked and reset to the defaults, and the next clone goes to the owner's next box
+whose `/dev` has the same key. Never another owner's. Read at Linux v6.19.
+
+**A detached tree can be cloned, and only a mounted one.** `open_tree`'s clone goes through `get_detached_copy`
+(`fs/namespace.c:3007`) to `__do_loopback`, whose `may_copy_tree` (`:2928-2947`) takes a tree in an anonymous mount
+namespace when `check_anonymous_mnt` holds (`:957-966`): an anonymous namespace whose origin is 0 or the caller's own
+namespace. `fsmount` puts its mount in an anonymous namespace of its own (`alloc_mnt_ns`, `:4351`; `mnt_add_to_ns`,
+`:4357`) and gives it no origin, so step 3's prepared `/dev` can be cloned from the agent, and each clone's namespace
+takes its source's origin (`:3024-3029`), 0 again. A tree that isn't mounted can't be copied (`:2943-2944`): the box's
+clone, unmounted with the box's mount namespace, is never the next box's source, and the original must stay detached,
+never attached itself. The clone needs CAP_SYS_ADMIN over the caller's mount namespace (`may_mount`, `:1998-2001`,
+`:3088`), which the agent holds.
+
+**What the clone costs that a fresh `/dev` doesn't: the host's one mount lock.** `get_detached_copy` takes
+`namespace_sem` to write (`guard(namespace_excl)`, `:3017`; `:96`, `:1723-1725`), and `fsmount` doesn't take it at all
+(`:4269-4380`). The init's `move_mount` of either takes it (`do_lock_mount`). So a `/dev` handed on adds one exclusive
+hold of `namespace_sem` a box, made on the create's path or by the worker ahead of it, where concurrency 32 already
+waits 0.206 ms a lifecycle on that lock (`create_serial.md`, run 21). Whether the CPU it saves beside concurrency 1's
+path is worth that hold at concurrency 32 is a measurement, below.
+
+**What a check must cover.** The boxes that may be handed a `/dev` are the boxes that may share their cgroup and
+network namespace: no CAP_SYS_ADMIN (decision 5), with Docker's default capabilities at most. Such a box can still:
+- make any entry in its `/dev`: a file of any size up to the tmpfs's `size=` (charged to the writer's memory cgroup), a
+  directory and what's in it, a symlink, a FIFO, a socket, and a character or block node, since Docker's set holds
+  CAP_MKNOD (`fs/namei.c:4977-4979`) and the device program governs a node's open, not its making; or a hard link to a
+  default, which raises the default's link count;
+- change a default's mode, owner and group (CAP_FOWNER, CAP_CHOWN), and the root directory's;
+- set xattrs: tmpfs keeps `security.*`, `trusted.*` and `user.*` (`mm/shmem.c:4380-4400`). `user.*` lands only on
+  regular files and directories (`fs/xattr.c:146-148`), so on the root and on what the box made; `trusted.*` needs
+  CAP_SYS_ADMIN; `security.capability` on a file needs CAP_SETFCAP, which Docker's set holds;
+- set inode flags: tmpfs lets an owner set IMMUTABLE, APPEND, NODUMP, NOATIME and CASEFOLD
+  (`include/linux/shmem_fs.h:62-63`; `mm/shmem.c:4229-4246`), IMMUTABLE and APPEND only with CAP_LINUX_IMMUTABLE
+  (`fs/file_attr.c:192-194`), which Docker's set doesn't hold. `statx` reports APPEND, IMMUTABLE and NODUMP without the
+  node being opened (`mm/shmem.c:1293-1301`); NOATIME isn't reported, and reading it would open the device.
+
+So the check, through the original's descriptor, removes every entry not of the defaults, and requires of each
+default its type, mode, device number, owner, group, link count, flags and xattrs as made, of each link its target,
+and of the root its mode, owner and group; anything else, or anything it can't read or remove, closes the `/dev`, and
+the next box gets a fresh one. It can't change: a remount of the superblock needs CAP_SYS_ADMIN over the superblock's
+user namespace (`fs/namespace.c:3263`), and the original's mount is never in the box's namespace.
+
+**What can't be reset stays within the owner.** Timestamps (but those the check sets back), inode numbers, the
+superblock's device number and a default's NOATIME flag carry to the owner's next box, which can tell it was handed a
+used `/dev`, as it can tell its network namespace's counters (decision 5). A descriptor a box passed out, or a process
+outside holding one into the clone (an open file, a working directory), keeps reaching the shared tmpfs after the box
+and can change the next box's `/dev` after the check: the box's own processes are gone at the check, so only a process
+outside it can, as with a socket never hashed (decision 5), and the kernel exposes no count of a superblock's users to
+check against. That stays within one owner because no `/dev` is handed to another owner's box.
+
+**Measured: the hand-on saves about a quarter of what the worker spends** (`bench/competitive/probes/devfs_clone.md`:
+fedora, CPU 20, 20,000 iterations each way, load 4.7, `devfs_clone.c` at source 0b80bf19bec19477). A `/dev` made fresh
+and torn down took 75.3 us p50 (87.8 mean): `fsopen` to `fsmount` 13.4, the six nodes with their modes 21.4, the five
+links 11.8, a box's three mountpoints 6.7, the teardown at its last close 18.5. Handed on, 53.0 us p50 (62.8 mean): the
+clone 2.7, the mountpoints 8.6, the clone's close 10.8, the check 23.0, the mountpoints' removal 6.0. So the check costs
+what the six nodes do, and the hand-on saves 22 us p50 a box, about a quarter of the 97 to 101 us a lifecycle the
+worker's thread was sampled at (run 17), for one more exclusive hold of `namespace_sem` a box. The clone's 2.7 us is
+the lock uncontended; at concurrency 32 the hold waits behind the inits' attaches.
+
+**The decision: not built** (the lead, 2026-11-03T18:52Z). The hand-on saves 22 us a box and adds an exclusive
+hold of `namespace_sem` a box, the lock step 3's tail convoys on under load (§8: at 12 busy loops `move_mount` blocked
+on it for 386 us of the slowest 1%'s 1,623 us span; the lead's later trace, 790 us) and that concurrency 32 already
+waits 0.206 ms a lifecycle on. So it stays a rejected design, recorded here with its probe. In its place, in this order:
+the pool's own overhead, its wakes and its lock beside the 75 to 88 us a fresh `/dev` costs (run 17 sampled the worker
+at 97 to 101 us a lifecycle); then a cheaper fresh path, the worker with a umask of its own (`unshare(CLONE_FS)`) so
+the six `fchmodat`s go, about a third of the nodes' 21 us, which needs `unsafe` and so its own commit, for Ada.
+
+**What would have falsified it:**
+- the next box seeing anything but the defaults after a hostile box (a node, a file, an xattr, a changed mode);
+- a `/dev` reaching another owner's box;
+- the clone and the check costing as much as the making;
+- concurrency 32 falling as the clones' holds of `namespace_sem` join the inits';
+- the pool's bound exceeded.
 
 ## 10. Masks and read-only paths bound through the init's own proc: tried, and falsified (2026-11-03)
 

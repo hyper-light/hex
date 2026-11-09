@@ -612,6 +612,14 @@ mod tests {
             ran.push(id.clone());
             self.sim.exec(id, p, s)
         }
+        fn run(
+            &self,
+            spec: crate::BoxSpec,
+            p: Program,
+            s: Stdio,
+        ) -> Result<Box<dyn Proc>, Refusal> {
+            self.sim.run(spec, p, s)
+        }
         fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
             match (self.lie, self.sim.signal(id, signal)) {
                 (Lie::SignalsNothing, Err(Refusal::NotRunning(..))) => Ok(()),
@@ -842,6 +850,14 @@ mod tests {
                 after: Duration::from_millis(770),
             }))
         }
+        fn run(
+            &self,
+            spec: crate::BoxSpec,
+            p: Program,
+            s: Stdio,
+        ) -> Result<Box<dyn Proc>, Refusal> {
+            self.0.run(spec, p, s)
+        }
         fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
             self.0.signal(id, signal)
         }
@@ -919,6 +935,14 @@ mod tests {
             }
             fn exec(&self, id: &BoxId, p: Program, s: Stdio) -> Result<Box<dyn Proc>, Refusal> {
                 self.sim.exec(id, p, s)
+            }
+            fn run(
+                &self,
+                spec: crate::BoxSpec,
+                p: Program,
+                s: Stdio,
+            ) -> Result<Box<dyn Proc>, Refusal> {
+                self.sim.run(spec, p, s)
             }
             fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
                 self.sim.signal(id, signal)

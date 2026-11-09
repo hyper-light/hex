@@ -92,6 +92,22 @@ pub struct BoxRoot {
     named: Arc<Mutex<Option<BTreeSet<String>>>>,
 }
 
+/// The cgroups a [`BoxRoot`] keeps names of ([`BoxRoot::names`]): shared with the root, so a name forgotten here is
+/// forgotten there.
+#[derive(Debug, Clone)]
+pub struct Names(Arc<Mutex<Option<BTreeSet<String>>>>);
+
+impl Names {
+    /// The cgroup `name` under the root is gone ([`BoxRoot::forget`]).
+    pub fn forget(&self, name: &str) {
+        if let Ok(mut set) = self.0.lock()
+            && let Some(set) = set.as_mut()
+        {
+            set.remove(name);
+        }
+    }
+}
+
 impl BoxRoot {
     /// Opens the box root at `dir`, making it when it's missing: its parent is asked to hand it every
     /// one of [`CONTROLLERS`], and it hands them on to boxes. `disks` are the devices `io.latency` and
@@ -298,11 +314,13 @@ impl BoxRoot {
 
     /// The cgroup `name` under the root is gone, removed by its box's delete or found so.
     pub fn forget(&self, name: &str) {
-        if let Ok(mut set) = self.named.lock()
-            && let Some(set) = set.as_mut()
-        {
-            set.remove(name);
-        }
+        self.names().forget(name);
+    }
+
+    /// The names the root keeps, for one that removes a box's cgroup apart from the root (a run's, by its node's
+    /// supervisor, decision 7) to forget it by.
+    pub fn names(&self) -> Names {
+        Names(Arc::clone(&self.named))
     }
 
     /// The cgroup `name` was made under the root: one a box's id may name, a slot's apart. Past [`MAX_BOXES`] names the

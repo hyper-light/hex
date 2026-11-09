@@ -150,7 +150,31 @@ fn requests() -> Vec<(u64, Request, usize)> {
             }),
             1,
         ),
+        (15, run(), 2),
     ]
+}
+
+/// A run (runtime design goal 7) of a `process` box carrying stdout and stderr and asking for stdin.
+fn run() -> Request {
+    Request::Call(Call::Run {
+        spec: Box::new(BoxSpec {
+            id: id("r"),
+            bounds: bounds(),
+            class: ClassSpec::Process,
+            owner: None,
+        }),
+        program: program(),
+        streams: Streams {
+            stdin: false,
+            stdout: true,
+            stderr: true,
+        },
+        ask: Streams {
+            stdin: true,
+            stdout: false,
+            stderr: false,
+        },
+    })
 }
 
 /// The node agent's network namespace counts, each field a different value: makes failed at every step, the pool
@@ -646,12 +670,48 @@ fn an_oversized_message_is_refused_naming_the_bound() {
     ));
 }
 
+/// HEX-SOCK-2 (runtime design goal 7, decision 7): a run is one request, the wire's kind after every other
+/// request's (0x000f): a create's spec, then an exec's program, the streams it carries and those it asks for, as an
+/// exec asking for streams has them. Do: write one carrying stdout and stderr and asking for stdin; read it with two
+/// descriptors, with none, one and three, and apart from its stdio. Expect: read back as written with two, and whole
+/// apart from its stdio (a stream transport's, whose streams travel on connections of their own); refused naming
+/// the count otherwise.
+#[test]
+fn a_run_is_a_create_and_an_exec_in_one_request() {
+    let run = run();
+    let bytes = request(15, &run, MAX_MESSAGE).unwrap();
+    assert_eq!(&bytes[12..14], &0x000fu16.to_le_bytes());
+    assert_eq!(
+        read_request(&received(&bytes, 2), MAX_MESSAGE).unwrap(),
+        (
+            Header {
+                kind: 0x000f,
+                id: 15
+            },
+            run.clone()
+        )
+    );
+    for fds in [0, 1, 3] {
+        assert_eq!(
+            read_request(&received(&bytes, fds), MAX_MESSAGE)
+                .unwrap_err()
+                .fault,
+            Fault::Descriptors {
+                what: "a run",
+                want: 2,
+                got: fds
+            }
+        );
+    }
+    assert_eq!(read_request_apart(&bytes, MAX_MESSAGE).unwrap().1, run);
+}
+
 /// HEX-SOCK-1: a kind the wire doesn't define is refused by type, a request's kinds as an answer and an
 /// answer's as a request too.
 #[test]
 fn unknown_kinds_are_refused() {
     let hello = request(5, &Request::Hello { build: build() }, MAX_MESSAGE).unwrap();
-    for kind in [0u16, 0x000f, 0x7fff, 0x8001, 0x8009, 0xffff] {
+    for kind in [0u16, 0x0010, 0x7fff, 0x8001, 0x8009, 0xffff] {
         let mut bytes = hello.clone();
         bytes[12..14].copy_from_slice(&kind.to_le_bytes());
         let got = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
@@ -1007,14 +1067,18 @@ fn any_refusal() -> impl Strategy<Value = Refusal> {
 }
 
 proptest! {
-    /// HEX-SOCK-2: any create, and any exec, reads back as written.
+    /// HEX-SOCK-2: any create, any exec and any run (runtime design goal 7) read back as written.
     #[test]
     fn any_create_or_exec_reads_back(spec in any_spec(), program in any_program(), id in any_id(), n in any::<u64>(), bits in 0u8..8) {
-        let req = Request::Call(Call::Create(Box::new(spec)));
+        let req = Request::Call(Call::Create(Box::new(spec.clone())));
         let bytes = request(n, &req, MAX_MESSAGE).unwrap();
         prop_assert_eq!(read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap(), (Header { kind: 0x0002, id: n }, req));
         let streams = Streams::of(bits).unwrap();
-        let req = Request::Call(Call::Exec { id, program, streams });
+        let req = Request::Call(Call::Exec { id, program: program.clone(), streams });
+        let bytes = request(n, &req, MAX_MESSAGE).unwrap();
+        prop_assert_eq!(read_request(&received(&bytes, streams.count()), MAX_MESSAGE).unwrap().1, req);
+        let ask = Streams::of(!bits & 0b111).unwrap();
+        let req = Request::Call(Call::Run { spec: Box::new(spec), program, streams, ask });
         let bytes = request(n, &req, MAX_MESSAGE).unwrap();
         prop_assert_eq!(read_request(&received(&bytes, streams.count()), MAX_MESSAGE).unwrap().1, req);
     }

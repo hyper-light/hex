@@ -2170,6 +2170,44 @@ wrapper each box keeps (f13).
 
 **What would falsify it.** The wrapper's share of held memory being small.
 
+#### How it is built (implementation goal 7, 2026-11-04)
+
+- **A run is one seam call.** `Runtime::run(spec, program, stdio)` makes a `process` box, clones the program into
+  it and returns its `Proc`. The node agent removes the box once the program ends, ending whatever it left
+  there, as `hex box run` ends its strays. The `Proc` reports the end only once the box is gone (HEX-RT-15).
+  `create` then `exec` still make a box that outlives its programs. An `oci` spec's run is refused: its box has
+  an init to create and start. macOS's and Windows' nodes have nothing that removes a box when its program ends,
+  so they refuse a run naming their platform (`Fixture::runs`).
+- **The spawn is the vfork class.** `clone3(CLONE_VM | CLONE_VFORK | CLONE_INTO_CGROUP | CLONE_PIDFD)` runs from
+  the calling agent thread on goal 5's trampoline (`oci/sys.rs`, `clone_vfork`, decision 3's exec), on a
+  per-thread child stack. glibc's `posix_spawn` and Go's `os/exec` start programs the same way
+  (`oci-runtimes-and-fast-start.md` §4.7). Nothing of the agent is copied: no page table, no `mm`. The child
+  shares the agent's memory until its `execve`. If no path executes, it leaves its errno in that shared memory,
+  so no pipe is made per spawn. Where the kernel or a seccomp profile refuses `clone3` into a cgroup, the fork
+  path stays.
+- **Supervision by pidfd, removed once.** The run's pidfd sits in the supervisor's epoll set beside the
+  containers' inits, one of the supervisor's budget with theirs (`Sizes::inits`: a pidfd per live box). Three
+  parties can meet the end: the caller's own wait (no hop through another thread), the supervising thread (a
+  caller that let go), or a delete. Each claims the run under the supervisor's lock, and only the claimer removes
+  the box. It reaps the program, ends what is left (`cgroup.kill`, bounded by the node's learned wait for a box
+  to empty, decision 9), removes the cgroup, then the record, and publishes the end. The others wait for that.
+  So a box is removed once, and never after another box has taken its id.
+- **One record write.** The run writes its record once, after the clone, naming the program by pid and start
+  time (`BoxRecord::run`, appended). The steps are `RUN_STEPS`: the cgroup, the program, the record. A crash
+  before the record leaves a cgroup no record names, which recovery removes. After a restart, a run whose
+  program has ended is removed (`Why::RunEnded`). One still running is watched again by a pidfd opened then,
+  its end `Exit::Unknown`. The crash-at-every-step model covers runs (`recovery.rs`).
+- **Over the socket, one request.** `Call::Run` is a create's body, then an exec's program, the streams it carries
+  and those it asks for, as an exec asking for streams has them. It is answered as an exec is. An end the
+  program's watch reports before the agent can tell it, its box still being removed, is waited for on a
+  worker, so the socket's thread waits on no removal; a program reaped before the socket could watch it is
+  answered started and ended at once.
+- **Measured** (`bench/competitive/RESULT.md`, "Goal 7"; fedora, CPUs 4-15, noisy, best of 3):
+  <!-- record: bench/competitive/RESULT.md -->a run of `true` through the seam has a p50 of 0.41 ms, against a
+  systemd scope's 5.82 in the same run (14.10x). It costs 0.55 ms of CPU against the scope's 6.39 (11.59x), and
+  holds 0.27 MiB per idle box against the scope's 0.30. Each of goal 7's three bars is met. In the same rounds
+  the vfork-class clone took the p50 from 0.471 to 0.413 ms and runs/s at 32 from 1,993 to 2,583.<!-- /record -->
+
 ### 8. The tail: what bounds p99.9 and max
 
 **The choice.** Nothing on the create, start or exec path waits on storage, or on kernel work a background task

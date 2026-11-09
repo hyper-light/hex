@@ -87,7 +87,9 @@ its file is named here with the reason, and every block carries a `// SAFETY:` c
 invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at its top):
 
 - `crates/hex-runtime/src/linux/sys.rs`: the `process` class clones a program straight into its box's
-  cgroup (`clone3` with `CLONE_INTO_CGROUP` and `CLONE_PIDFD`) and executes it in the child, or, where
+  cgroup (`clone3` with `CLONE_INTO_CGROUP` and `CLONE_PIDFD`, vfork-class on the trampoline below,
+  decision 7) and executes it in the child, which shares the agent's memory until its execve and leaves its
+  errno there when it can't, or, where
   the kernel refuses that clone, joins it to the cgroup in the forked child before `execve` (`pre_exec`);
   Rust can express neither safely. And the `close_range` call, with the walk of `/proc/self/fd` by borrowed raw
   descriptors where the kernel refuses it, by which every descriptor from 3 up is marked close-on-exec before
@@ -112,7 +114,7 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   `hex oci exec` ends the way its program did when the node agent drives it (seam mode), the
   `_exit` by which a seed's forked intermediate and program end without running the seed's `atexit`
   handlers, and the vfork-style `clone3` (`CLONE_VM | CLONE_VFORK`) by which a node agent's thread starts
-  an exec'd program as posix_spawn does: an inline-assembly trampoline for x86_64 and aarch64 that runs
+  an exec'd program, or a `process` box's program, as posix_spawn does: an inline-assembly trampoline for x86_64 and aarch64 that runs
   the child on a stack of its own (mapped with a guard page), every signal blocked around the clone, and
   the child's `execve` and signal reset, none of which rustix wraps safely. The process is
   single-threaded (it re-exec'd) where that matters, but for the vfork-style clone's child, which runs in

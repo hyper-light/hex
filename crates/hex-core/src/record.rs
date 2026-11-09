@@ -43,6 +43,11 @@ pub struct BoxRecord {
     /// version 1, so a record without it names a cgroup by its box's id (append-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slot: Option<Slot>,
+    /// The program a run made this `process` box for ([`hex_api::Runtime::run`]): the box goes once
+    /// it has ended, by its node agent or, after a restart, by recovery (decision 7). Added within
+    /// version 1, so a record without it is a box made by create (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<ProcId>,
 }
 
 /// A cgroup that may be handed from box to box of one owner ([`crate::reuse`]).
@@ -91,6 +96,7 @@ impl BoxRecord {
             exit: None,
             abandoned: 0,
             slot: None,
+            run: None,
         }
     }
 
@@ -137,7 +143,7 @@ pub enum Step {
     MakeCgroup,
     /// Make the container's state directory (`oci`).
     MakeStateDir,
-    /// Start the container's init in the box (`oci`).
+    /// Start the container's init in the box (`oci`), or a run's program (`process`).
     StartInit,
     /// Write the record, phase `Ready`, with the init it started: the box's first record.
     MarkReady,
@@ -173,6 +179,10 @@ pub fn create_steps(class: &ClassSpec) -> &'static [Step] {
         ],
     }
 }
+
+/// The steps of a run ([`hex_api::Runtime::run`]): a `process` box's cgroup, its program cloned into it,
+/// then the record naming the program, so a box no record names yet is found by its cgroup and removed.
+pub const RUN_STEPS: &[Step] = &[Step::MakeCgroup, Step::StartInit, Step::MarkReady];
 
 /// The steps that remove a box its caller asked to delete.
 pub const DELETE_STEPS: &[Step] = &[
@@ -220,6 +230,22 @@ mod tests {
             start_ticks: 1234,
         });
         assert_eq!(BoxRecord::decode(&r.encode().unwrap()).unwrap(), r);
+    }
+
+    /// Decision 7, append-only: a record written before `run` existed reads as a box made by create,
+    /// one with no run is written without the field, and a run's program round-trips.
+    #[test]
+    fn a_record_without_a_run_reads_and_writes_as_before() {
+        let r = record();
+        let text = String::from_utf8(r.encode().unwrap()).unwrap();
+        assert!(!text.contains("\"run\""), "{text}");
+        assert_eq!(BoxRecord::decode(text.as_bytes()).unwrap().run, None);
+        let mut ran = r;
+        ran.run = Some(ProcId {
+            pid: 7,
+            start_ticks: 99,
+        });
+        assert_eq!(BoxRecord::decode(&ran.encode().unwrap()).unwrap(), ran);
     }
 
     /// HEX-SOCK-6, append-only: a record written before `abandoned` existed reads as 0, and a record

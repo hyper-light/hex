@@ -62,6 +62,15 @@ pub trait Fixture {
     fn term_ends_init(&self) -> bool {
         false
     }
+    /// Whether this class's node makes a box for one program's life ([`Runtime::run`], decision 7 of
+    /// docs/design/runtime-architecture.md): true where something there removes the box once its program
+    /// ends (Linux's node agent, its supervisor watching the program's pidfd, and the simulator). A class whose
+    /// node has nothing that would (macOS's and Windows' `process` classes, which keep their boxes in their
+    /// runtimes) says false, and HEX-RT-15 then checks that a run is refused naming the platform, making nothing.
+    /// An `oci` class's run is refused whatever this says.
+    fn runs(&self) -> bool {
+        true
+    }
 }
 
 /// One part of the contract.
@@ -287,6 +296,11 @@ pub const CASES: &[Case] = &[
         id: "HEX-RT-14",
         says: "exec of a program whose arguments and environment pass the class's exec bound is refused as Invalid naming the program, before any spawn",
         run: oversized_program,
+    },
+    Case {
+        id: "HEX-RT-15",
+        says: "run of a program in a process box: its words reach stdout, it ends Code(0) and the box is gone; a running run's box is Running and its id taken; let go of, its box is removed once its program ends, with what it left there; an oci spec's run is refused as Invalid, and a class that runs none refuses it naming its platform, each making nothing",
+        run: run_removes,
     },
     Case {
         id: "HEX-RT-16",
@@ -765,6 +779,33 @@ fn exit_of(rt: &dyn Runtime, id: &BoxId, patience: Duration) -> Result<crate::Bo
     }
 }
 
+/// Polls `inspect` until box `id` is gone, for at most `patience` (the cases': [`patience`]): the fact a run's
+/// removal is waited on, read again after waiting as long as the last read took, as [`exit_of`] reads an exit.
+fn gone_within(rt: &dyn Runtime, id: &BoxId, patience: Duration) -> Result<(), String> {
+    let asked = std::time::Instant::now();
+    let deadline = asked.checked_add(patience);
+    loop {
+        let read = std::time::Instant::now();
+        let left = rt.inspect(id);
+        let took = read.elapsed();
+        match left {
+            Err(Refusal::NoSuchBox(_)) => {
+                ENDS.saw(asked.elapsed());
+                return Ok(());
+            }
+            Ok(_) => {}
+            Err(e) => return Err(format!("inspect of a run's box being removed: {e}")),
+        }
+        // No deadline is a measuring patience's: the wait is the fact's alone.
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Err(format!(
+                "a let-go run's box still there {patience:?} after its program ended: {left:?}"
+            ));
+        }
+        rest(took);
+    }
+}
+
 /// A box whose init does `act`, made and started; `None` for a `process` box, after checking it
 /// reports no exit.
 fn made_init(
@@ -946,6 +987,95 @@ fn owned(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     Ok(())
 }
 
+/// HEX-RT-15 (runtime design goal 7, decision 7): a run is a box for one program's life. Once the caller is told
+/// it ended, the box is gone. While it runs it is a box like any other, its id taken. A run the caller let go of is
+/// still removed when its program ends, with what it left there, and the suite waits for that fact, bounded by its
+/// learned patience ([`gone_within`]). An `oci` box has an init to create and start, so its spec's run is refused;
+/// so is any run on a class whose node has nothing that removes a box when its program ends ([`Fixture::runs`]),
+/// naming its platform. A refused run makes nothing.
+fn run_removes(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
+    let id = id("run")?;
+    let _ = rt.delete(&id);
+    let spec = fx.spec(id.clone(), Bounds::default());
+    let gone = Err(Refusal::NoSuchBox(id.clone()));
+    let oci = spec.class.class() == Class::Oci;
+    if oci || !fx.runs() {
+        let got = rt.run(spec, fx.program(&Act::Say("no")), Stdio::null());
+        let refused = match &got {
+            Err(Refusal::Invalid { what: "run", .. }) => oci,
+            Err(Refusal::Platform { what: "run", .. }) => !oci,
+            _ => false,
+        };
+        ensure(refused, || {
+            let of = if oci {
+                "an oci spec"
+            } else {
+                "a class that runs none"
+            };
+            format!("run of {of}: {:?}", got.as_ref().err())
+        })?;
+        let left = rt.inspect(&id);
+        return ensure(left == gone, || format!("a refused run made {left:?}"));
+    }
+    let (mut r, w) = piped()?;
+    let mut p = rt
+        .run(
+            spec,
+            fx.program(&Act::Say("hello from a run")),
+            Stdio {
+                stdout: Some(w),
+                ..Stdio::null()
+            },
+        )
+        .map_err(|e| format!("run: {e}"))?;
+    let exit = ended(&mut p)?;
+    let mut out = String::new();
+    r.read_to_string(&mut out)
+        .map_err(|e| format!("read: {e}"))?;
+    ensure(exit == Exit::Code(0), || format!("exit {exit:?}"))?;
+    ensure(out == "hello from a run\n", || format!("stdout {out:?}"))?;
+    let left = rt.inspect(&id);
+    ensure(left == gone, || {
+        format!("a run whose end was reported left {left:?}")
+    })?;
+    let listed = rt.list().map_err(|e| e.to_string())?;
+    ensure(!listed.iter().any(|b| b.id == id), || {
+        format!("{id} still listed after its run ended")
+    })?;
+
+    // A run its caller lets go of: a program that ends when its stdin closes, and a second program in its box that
+    // waits, which the run's removal ends with whatever else is left there.
+    let (in_r, in_w) = piped()?;
+    let p = rt
+        .run(
+            fx.spec(id.clone(), Bounds::default()),
+            fx.program(&Act::Echo),
+            Stdio {
+                stdin: Some(in_r),
+                ..Stdio::null()
+            },
+        )
+        .map_err(|e| format!("run of a program reading stdin: {e}"))?;
+    let state = rt.inspect(&id).map_err(|e| e.to_string())?.state;
+    ensure(state == BoxState::Running, || {
+        format!("a running run's box is {state:?}")
+    })?;
+    let again = rt.create(fx.spec(id.clone(), Bounds::default()));
+    ensure(again == Err(Refusal::Exists(id.clone())), || {
+        format!("create beside a run: {again:?}")
+    })?;
+    let mut left_behind = rt
+        .exec(&id, fx.program(&Act::Wait), Stdio::null())
+        .map_err(|e| format!("exec in a run's box: {e}"))?;
+    drop(p);
+    drop(in_w);
+    let ended_by = ended(&mut left_behind)?;
+    ensure(matches!(ended_by, Exit::Signal(_)), || {
+        format!("what a let-go run left in its box ended {ended_by:?}")
+    })?;
+    gone_within(rt, &id, patience())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1007,6 +1137,14 @@ mod tests {
             stdio: Stdio,
         ) -> Result<Box<dyn Proc>, Refusal> {
             self.sim.exec(id, program, stdio)
+        }
+        fn run(
+            &self,
+            spec: BoxSpec,
+            program: Program,
+            stdio: Stdio,
+        ) -> Result<Box<dyn Proc>, Refusal> {
+            self.sim.run(spec, program, stdio)
         }
         fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
             self.sim.signal(id, signal)

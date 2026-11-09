@@ -3880,7 +3880,7 @@ fn budget(lab: &Lab, own: &Path) {
     assert_eq!(
         refused,
         Err(Refusal::Exhausted {
-            what: "container init pidfds",
+            what: hex_node::supervise::PIDFDS,
             bound: 1
         })
     );
