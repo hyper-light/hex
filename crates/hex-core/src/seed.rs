@@ -201,6 +201,23 @@ pub struct Create {
     /// Whether the node's one empty read-only tmpfs rides after the proc, which the init clones for each masked
     /// directory in place of a tmpfs of its own (decision 6's update): no superblock per mask.
     pub masked_directory: bool,
+    /// Which of the fixed descriptors ride ([`Fixed`]): all of them in every older kind; in the new CREATE_LEAN kind, a
+    /// pruned create's alone, only those its init reads.
+    pub fixed: Fixed,
+}
+
+/// Which of a create's fixed descriptors ride (the lead's (B) of 2026-11-09, decision 8's claim).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Fixed {
+    /// The older kinds' (1 to 7): the map pipe's read end after the sync pipe's write end, then on the pruned path the
+    /// bundle and cgroup directories before the state directory and the rootfs ([`CREATE_FDS`], [`PRUNED_FIXED_FDS`]).
+    #[default]
+    All,
+    /// A pruned create's in kind 9: only what its init reads. No map pipe, which carries a user namespace's maps and the
+    /// create-time hooks' state, neither of which a pruned create has; no bundle directory, since the spec rides
+    /// checked ([`Create::config`]); and the cgroup directory only where `cgroup`, for a seed's clone, which is born in
+    /// it, never for a parked init's claim, whose init is in its cgroup already.
+    Lean { cgroup: bool },
 }
 
 /// Descriptors a prepared proc adds to a create: its pid namespace and its tree.
@@ -531,6 +548,7 @@ pub fn read_create(bytes: &[u8], size: usize) -> Result<Create, Fault> {
         mount_namespace: MountNamespace::Copy,
         proc_mount: None,
         masked_directory: false,
+        fixed: Fixed::All,
     };
     if kind == kind::CREATE_MOUNT_NAMESPACE {
         create.proc_mount = r.option(Reader::u32)?;

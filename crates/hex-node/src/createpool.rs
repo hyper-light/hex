@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 
 use hex_api::Refusal;
 use hex_core::demand::Learned;
-use hex_core::seed::{Answer, Create, Failed, MountNamespace, Park};
+use hex_core::seed::{Answer, Create, Failed, Fixed, MountNamespace, Park};
 use hex_core::seeds::{Admit, Claim, Counts, Limits, Refused, SeedId, Seeds, Stale};
 use hex_runtime::linux::oci::run::{ClassicReason, CloneInit, CloneReq, Parked};
 use hex_runtime::linux::oci::seed as rt_seed;
@@ -573,14 +573,16 @@ fn message<'r>(req: &'r CloneReq<'_>) -> (Create, Vec<BorrowedFd<'r>>) {
             .pruned
             .as_ref()
             .is_some_and(|p| p.masked_directory.is_some()),
+        fixed: Fixed::All,
     };
-    let mut fds: Vec<BorrowedFd<'_>> = vec![req.sync_w.as_fd(), req.map_r.as_fd()];
+    let mut fds: Vec<BorrowedFd<'_>> = vec![req.sync_w.as_fd()];
+    fds.extend(req.map_r.as_ref().map(AsFd::as_fd));
     if let Some(network) = &req.network {
         fds.push(network.as_fd());
     }
     if let Some(pruned) = &req.pruned {
         fds.push(pruned.bundle_dir.as_fd());
-        fds.push(pruned.cgroup_dir.as_fd());
+        fds.extend(pruned.cgroup_dir.as_ref().map(AsFd::as_fd));
         fds.push(pruned.container_dir.as_fd());
         fds.push(pruned.rootfs.as_fd());
         fds.extend(pruned.binds.iter().map(AsFd::as_fd));
@@ -1264,6 +1266,91 @@ mod tests {
         pool.shared.claim_failed(&Trip::Refused(e()));
         pool.shared.claim_failed(&Trip::Broken(e()));
         assert_eq!(pool.claims_failed(), (1, 2));
+    }
+
+    /// The lead's (B) of 2026-11-09 (decision 8's claim), HEX-SEED-3: a request's descriptors are those its create
+    /// counts, in the order the seed reads them. Do: the message of a pruned request without its cgroup directory (a
+    /// parked init's claim), of one with it (a seed's clone), and of a classic request. Expect: the pruned ones lean,
+    /// the sync pipe, the cgroup directory where it rides, the state directory, the rootfs and the checked spec, with no
+    /// map pipe and no bundle directory; the classic one in the older layout, the sync and map pipes and the checked
+    /// spec; and each as many as its create counts.
+    #[test]
+    fn a_requests_descriptors_are_those_its_create_counts_in_the_seeds_order() {
+        use hex_runtime::linux::cgroup::BoxCgroup;
+        use hex_runtime::linux::oci::run::PrunedCreate;
+        use rustix::fs::{Mode, OFlags};
+        use std::os::fd::AsRawFd;
+        let lab = tempfile::tempdir().unwrap();
+        let open = || {
+            rustix::fs::open(
+                lab.path(),
+                OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .unwrap()
+        };
+        let cgroup = BoxCgroup::at(lab.path().to_owned());
+        let config = open();
+        let request = |map_r: Option<OwnedFd>, pruned: Option<PrunedCreate>| CloneReq {
+            bundle: lab.path(),
+            dir: lab.path(),
+            cgroup: &cgroup,
+            network: None,
+            sync_w: open(),
+            map_r,
+            config: config.as_fd(),
+            pruned,
+        };
+        let pruned = |cgroup_dir: Option<OwnedFd>| PrunedCreate {
+            bundle_dir: open(),
+            cgroup_dir,
+            container_dir: open(),
+            rootfs: open(),
+            mount_namespace: MountNamespace::Copy,
+            dev_mount: None,
+            ipc_uts: None,
+            proc_mount: None,
+            proc_sink: None,
+            masked_directory: None,
+            binds: Vec::new(),
+            path_joins: Vec::new(),
+        };
+        let raw = |fds: &[BorrowedFd<'_>]| fds.iter().map(AsRawFd::as_raw_fd).collect::<Vec<_>>();
+        for cgroup_dir in [None, Some(open())] {
+            let rides = cgroup_dir.as_ref().map(AsRawFd::as_raw_fd);
+            let req = request(None, Some(pruned(cgroup_dir)));
+            let (create, fds) = message(&req);
+            assert_eq!(
+                create.fixed,
+                Fixed::Lean {
+                    cgroup: rides.is_some(),
+                }
+            );
+            let p = req.pruned.as_ref().unwrap();
+            let want: Vec<_> = [Some(req.sync_w.as_raw_fd()), rides]
+                .into_iter()
+                .flatten()
+                .chain([
+                    p.container_dir.as_raw_fd(),
+                    p.rootfs.as_raw_fd(),
+                    config.as_raw_fd(),
+                ])
+                .collect();
+            assert_eq!(raw(&fds), want);
+            assert_eq!(fds.len(), create.fds());
+        }
+        let req = request(Some(open()), None);
+        let (create, fds) = message(&req);
+        assert_eq!(create.fixed, Fixed::All);
+        assert_eq!(
+            raw(&fds),
+            vec![
+                req.sync_w.as_raw_fd(),
+                req.map_r.as_ref().unwrap().as_raw_fd(),
+                config.as_raw_fd()
+            ]
+        );
+        assert_eq!(fds.len(), create.fds());
     }
 
     /// Goal 5 extended step 6: a seed given back goes at once to the create waiting in line, woken by the

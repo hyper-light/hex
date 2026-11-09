@@ -36,7 +36,7 @@ mod linux {
     use std::process::Command;
     use std::time::Instant;
 
-    use hex_core::seed::{self, Create, MountNamespace};
+    use hex_core::seed::{self, Create, Fixed, MountNamespace};
     use hex_runtime::linux::oci::spec::Spec;
 
     /// The record's `true` bundle's config.json (create_breakdown_inside.sh with HEXBENCH_OWNER and
@@ -113,6 +113,8 @@ mod linux {
             mount_namespace: MountNamespace::Copy,
             proc_mount: Some(1),
             masked_directory: true,
+            // A claim carries only what its init reads, and no cgroup directory: the init is in its cgroup already.
+            fixed: Fixed::Lean { cgroup: false },
         };
         let bytes = seed::create(&create).expect("the claim's bytes");
         let fds = create.fds();
