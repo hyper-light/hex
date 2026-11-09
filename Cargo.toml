@@ -113,6 +113,13 @@ debug = "line-tables-only"
 [profile.bench]
 inherits = "release"
 
+# hex-sim's tests replay recorded days and generated clusters of thousands of nodes; the gates' `cargo test` is a
+# debug build, where an unoptimized simulator took G4's fair-share tests past the gates' two hours. Optimized
+# in test builds as a release build runs them; overflow checks and debug assertions stay on (they are the dev
+# profile's own settings, not opt-level's).
+[profile.dev.package.hex-sim]
+opt-level = 3
+
 # Hex vendors seccompiler (vendor/MANIFEST.toml) and builds against that copy, as the no-package-takes-
 # a-kiln-name rule has kiln patch its own vendored products (CLAUDE.md, Vendoring). vendor/ is its own
 # workspace (excluded above); the patch points at the crate directory inside it.
