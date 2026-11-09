@@ -80,8 +80,14 @@ impl Runtime for TestHost {
     fn start(&self, id: &BoxId) -> Result<(), Refusal> {
         self.sim.start(id)
     }
-    fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+    fn exec(
+        &self,
+        id: &BoxId,
+        program: Program,
+        mut stdio: Stdio,
+    ) -> Result<Box<dyn Proc>, Refusal> {
         self.sim.inspect(id)?;
+        let given = stdio.make_asked()?;
         let (first, rest) = program.args.split_first().unwrap();
         let mut cmd = std::process::Command::new(first);
         cmd.args(rest).env_clear().envs(program.env.iter().cloned());
@@ -90,9 +96,8 @@ impl Runtime for TestHost {
         cmd.stdout(stdio.stdout.map_or_else(null, std::process::Stdio::from));
         cmd.stderr(stdio.stderr.map_or_else(null, std::process::Stdio::from));
         let child = cmd.spawn().map_err(|e| Refusal::os("spawning", e))?;
-        Ok(Box::new(hex_runtime::linux::proc::PidfdProc::of_child(
-            child.id(),
-        )?))
+        let proc = hex_runtime::linux::proc::PidfdProc::of_child(child.id())?;
+        Ok(Box::new(hex_api::Asked::new(proc, given)))
     }
     fn signal(&self, id: &BoxId, signal: HexSignal) -> Result<(), Refusal> {
         self.sim.signal(id, signal)
@@ -264,6 +269,40 @@ fn answer_of(fd: &OwnedFd) -> (Header, Answer) {
         .unwrap()
         .0;
     wire::read_answer(&received(&buf[..n]), wire::MAX_MESSAGE).unwrap()
+}
+
+/// The next message the server sends and the descriptors that ride with it, waiting at most [`ANSWERED`].
+fn answer_with_ends(fd: &OwnedFd) -> (Header, Answer, Vec<OwnedFd>) {
+    let mut ready = [PollFd::new(fd, PollFlags::IN)];
+    assert_eq!(
+        rustix::event::poll(&mut ready, Some(&answer_wait())).unwrap(),
+        1,
+        "no answer came"
+    );
+    let mut buf = vec![0u8; wire::MAX_MESSAGE];
+    let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(wire::MAX_FDS))];
+    let mut control = rustix::net::RecvAncillaryBuffer::new(&mut space);
+    let msg = rustix::net::recvmsg(
+        fd,
+        &mut [std::io::IoSliceMut::new(&mut buf)],
+        &mut control,
+        rustix::net::RecvFlags::CMSG_CLOEXEC,
+    )
+    .unwrap();
+    let mut ends = Vec::new();
+    for m in control.drain() {
+        if let rustix::net::RecvAncillaryMessage::ScmRights(fds) = m {
+            ends.extend(fds);
+        }
+    }
+    let message = Received {
+        bytes: &buf[..msg.bytes],
+        size: msg.bytes,
+        descriptors: ends.len(),
+        descriptors_cut: false,
+    };
+    let (h, answer) = wire::read_answer(&message, wire::MAX_MESSAGE).unwrap();
+    (h, answer, ends)
 }
 
 /// Whether the server sends anything more within a short look: for "nothing more came".
@@ -1007,5 +1046,57 @@ fn the_programs_bound_is_the_boxes_within_the_hard_descriptor_limit() {
     assert_eq!(
         u64::try_from(super::limits(&sizes).programs).unwrap(),
         hard.min(u64::try_from(hex_runtime::MAX_BOXES).unwrap())
+    );
+}
+
+/// Says hello on a raw connection, as a client's first message.
+fn hello_raw(raw: &OwnedFd) {
+    send_raw(raw, &hello_of_this_wire(1), &[]);
+    assert!(matches!(answer_of(raw).1, Answer::Hello(_)));
+}
+
+/// Asks the node to run a shell that reads a line from its stdin, then writes one to its stdout, both streams
+/// asked for (exec id 2); its given answer's two ends, stdin's then stdout's.
+fn line_after_line(raw: &OwnedFd) -> (OwnedFd, OwnedFd) {
+    let call = Call::ExecStreams {
+        id: b(),
+        program: Program::of(&["/bin/sh", "-c", "read l; echo x"]),
+        streams: wire::Streams::default(),
+        ask: wire::Streams {
+            stdin: true,
+            stdout: true,
+            stderr: false,
+        },
+    };
+    send_raw(raw, &request(2, call), &[]);
+    let (h, given, ends) = answer_with_ends(raw);
+    assert!(
+        matches!((h.id, &given), (2, Answer::Given { .. })),
+        "{given:?}"
+    );
+    let mut ends = ends.into_iter();
+    (ends.next().unwrap(), ends.next().unwrap())
+}
+
+/// Native plan step 8, guest stdio (HEX-GUEST-41): the node keeps a given answer's ends until its client says it
+/// took them, so none is ever in flight alone: XNU's collector of descriptors in flight flushes a socket whose only
+/// reference is a message in flight (719 of 20,000 arrived dead on macOS 26.4). A client takes them and lets its
+/// stdout end go at once, saying nothing: the program's stdout pipe still has a reader, the node's, so the program
+/// writes its line and ends 0, never by SIGPIPE.
+#[test]
+fn the_node_keeps_a_given_answers_ends_until_its_client_took_them() {
+    let lab = Lab::new(limits());
+    let raw = lab.raw();
+    hello_raw(&raw);
+    let (stdin, stdout) = line_after_line(&raw);
+    drop(stdout);
+    let mut stdin = std::fs::File::from(stdin);
+    stdin.write_all(b"go\n").unwrap();
+    drop(stdin);
+    let (h, end) = answer_of(&raw);
+    assert_eq!(
+        (h.id, end),
+        (2, Answer::Exited(Exit::Code(0))),
+        "the program's stdout had no reader: the node let its ends go before its client took them"
     );
 }
