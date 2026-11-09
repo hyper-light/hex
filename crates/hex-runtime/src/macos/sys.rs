@@ -771,10 +771,15 @@ impl Kqueue {
         events: &mut [libc::kevent],
         timeout: Option<Duration>,
     ) -> io::Result<usize> {
-        let ts = timeout.map(|t| libc::timespec {
-            tv_sec: libc::time_t::try_from(t.as_secs()).unwrap_or(libc::time_t::MAX),
-            tv_nsec: libc::c_long::from(t.subsec_nanos()),
-        });
+        // A timeout no deadline can hold (the clock can't add it to now: a run's wait for its program's end)
+        // bounds nothing, so it waits for the event alone, rather than hand the kernel a time it refuses
+        // (EINVAL for a timespec past its range).
+        let ts = timeout
+            .filter(|t| std::time::Instant::now().checked_add(*t).is_some())
+            .map(|t| libc::timespec {
+                tv_sec: libc::time_t::try_from(t.as_secs()).unwrap_or(libc::time_t::MAX),
+                tv_nsec: libc::c_long::from(t.subsec_nanos()),
+            });
         let nchanges = c_int::try_from(changes.len())
             .map_err(|_| io::Error::other("too many kevent changes"))?;
         let nevents = c_int::try_from(events.len())

@@ -210,7 +210,8 @@ mod tests {
                 classes: *classes,
                 platform: Default::default(),
                 virt: Default::default(),
-                devices: Vec::new(),
+                // A node's GPUs are listed as its capacity counts them (NodeSpec::devices_agree).
+                devices: crate::model::unnamed_gpus(capacity.gpus),
             })
             .collect();
         let mut index = FitIndex::new(&specs).unwrap();
