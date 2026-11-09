@@ -266,7 +266,9 @@ fn settled(scratch: &mut Scratch) -> Result<Vec<Vec<Vec<u8>>>, OciError> {
         if let Some(bound) = bound
             && left.is_some_and(|l| l.is_zero())
         {
-            // No sample (Karn's point): the namespace is refused, and the checker reads another.
+            // No sample (Karn's point): the namespace is refused, and the checker reads another. The census is told the
+            // settle took longer than its bound.
+            SETTLES.ran_out(bound);
             return Err(OciError::Broken(format!(
                 "a fresh network namespace's loopback IPv6 address was still tentative after {bound:?}, \
                  twice the slowest settle recorded"
@@ -751,7 +753,13 @@ fn ask(
         let asked = Instant::now();
         let got = match rustix::net::recv(fd, &mut scratch.read, RecvFlags::empty()) {
             Ok((got, _)) => got,
-            Err(rustix::io::Errno::AGAIN) => return Err(Refused::Unreadable),
+            // The read's bound passed with no answer: no sample (Karn's point), but the census is told.
+            Err(rustix::io::Errno::AGAIN) => {
+                if let Some(after) = answers.deadline() {
+                    answers.ran_out(after);
+                }
+                return Err(Refused::Unreadable);
+            }
             Err(_) => return Err(Refused::Unreadable),
         };
         answers.answered(asked.elapsed());

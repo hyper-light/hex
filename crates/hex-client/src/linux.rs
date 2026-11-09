@@ -442,6 +442,14 @@ impl Client {
             // The agent has gone, or closed the connection: why reaches the waiting call through
             // the reading thread, which sees the end.
             Err(Sent::Gone) => {}
+            // No room for the request in all the call's patience: its wait ran out, as an answer's would.
+            Err(Sent::Full(r)) => {
+                if let (Some(waits), Some(wait)) = (waits, patience) {
+                    waits.ran_out(wait);
+                }
+                forget(shared);
+                return Err(r);
+            }
             Err(Sent::Refused(r)) => {
                 forget(shared);
                 return Err(r);
@@ -459,6 +467,10 @@ impl Client {
                 answer
             }
             Err(RecvTimeoutError::Timeout) => {
+                // No sample (Karn's point), but the census is told the answer took longer than its bound.
+                if let (Some(waits), Some(wait)) = (waits, patience) {
+                    waits.ran_out(wait);
+                }
                 forget(shared);
                 return Err(Refusal::Os {
                     op: "waiting for the node agent's answer",
@@ -506,6 +518,8 @@ impl Client {
 enum Sent {
     /// The connection is gone: the reading thread says why.
     Gone,
+    /// No room in the agent's socket in all the call's patience: the agent isn't reading.
+    Full(Refusal),
     Refused(Refusal),
 }
 
@@ -541,7 +555,7 @@ fn send(
             Err(Errno::INTR) => continue,
             Err(Errno::PIPE | Errno::CONNRESET | Errno::NOTCONN) => return Err(Sent::Gone),
             Err(Errno::AGAIN) => {
-                return Err(Sent::Refused(Refusal::Os {
+                return Err(Sent::Full(Refusal::Os {
                     op: "sending to the node agent",
                     why: format!(
                         "no room in its socket for {:?}, twice the slowest answer to a call of its kind: it \

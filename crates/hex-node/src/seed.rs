@@ -165,13 +165,18 @@ impl SeedPool {
                 });
             }
             inner.waiting = inner.waiting.saturating_add(1);
+            let patience = self.answers.deadline();
             let (guard, timed_out) = self
                 .free
-                .wait_timeout(inner, self.answers.deadline().unwrap_or(Duration::MAX))
+                .wait_timeout(inner, patience.unwrap_or(Duration::MAX))
                 .map_err(|_| Refusal::Broken("the seed pool's lock was poisoned".to_owned()))?;
             inner = guard;
             inner.waiting = inner.waiting.saturating_sub(1);
             if timed_out.timed_out() && inner.idle.is_empty() && inner.total >= self.budget {
+                // No sample (Karn's point), but the census is told a busy seed was held longer than its bound.
+                if let Some(after) = patience {
+                    self.answers.ran_out(after);
+                }
                 return Err(Refusal::Exhausted {
                     what: "exec seeds",
                     bound: self.budget,

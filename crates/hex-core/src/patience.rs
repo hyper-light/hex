@@ -20,7 +20,10 @@
 //!   shell reports only answers it waited for and got.
 //! - **The census**: each wait is named, and every answer it records goes to the census sink as well, where a shell
 //!   installs one ([`census`]): the waits census probe's record of each wait's distribution
-//!   (`bench/competitive/probes/waits_census.md`), from the code's own timing points.
+//!   (`bench/competitive/probes/waits_census.md`), from the code's own timing points. A wait that ran out for a slow
+//!   answer tells the census too ([`Patience::ran_out`]): no sample, but its slowest is at least the bound it ran out
+//!   at, which the census's seed rule takes, so a wait the census saw run out has its patience raised past that bound
+//!   (Karn's point, made learned; the lead, 2026-11-09).
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -30,8 +33,17 @@ use std::time::Duration;
 /// slower than any recorded or seen. The lead's failure-bound rule (2026-11-06), stated here.
 pub const TIMES_SLOWEST: u32 = 2;
 
-/// Where every named wait's answers go besides its own maximum, once a shell installs it: none unless one does.
-static CENSUS: OnceLock<fn(&'static str, Duration)> = OnceLock::new();
+/// What a wait tells the census: an answer it got, the time after its wait began, or that it ran out, the bound that
+/// passed with no answer, the least its slowest is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sample {
+    Answered(Duration),
+    RanOut(Duration),
+}
+
+/// Where every named wait's answers and run-outs go besides its own maximum, once a shell installs it: none unless one
+/// does.
+static CENSUS: OnceLock<fn(&'static str, Sample)> = OnceLock::new();
 
 /// Whether every wait in this process measures, unarmed: the waits census's, so it records the answers past a bound,
 /// which a wait that runs out never gives (Karn's point).
@@ -44,16 +56,20 @@ pub fn measure_all() {
     MEASURE_ALL.store(true, Ordering::Relaxed);
 }
 
-/// Installs `sink` to be told every answer every wait records, by the wait's name: the waits census probe's. Only
-/// the first install takes; says whether this one did.
-pub fn census(sink: fn(&'static str, Duration)) -> bool {
+/// Installs `sink` to be told every answer every wait records, and every run-out, by the wait's name: the waits census
+/// probe's. Only the first install takes; says whether this one did.
+pub fn census(sink: fn(&'static str, Sample)) -> bool {
     CENSUS.set(sink).is_ok()
 }
 
-/// One answer as the census's file keeps it, `name nanos` and a newline, the line every census sink writes (the
-/// node's, `hex_node::census`, and the tests', `hex_testkit::waits`), so `waits_census.py` reads one form.
-pub fn census_line(name: &str, took: Duration) -> String {
-    format!("{name} {}\n", took.as_nanos())
+/// One sample as the census's file keeps it, an answer `name nanos` and a run-out `name >nanos`, and a newline: the
+/// line every census sink writes (the node's, `hex_node::census`, and the tests', `hex_testkit::waits`), so
+/// `waits_census.py` reads one form.
+pub fn census_line(name: &str, sample: Sample) -> String {
+    match sample {
+        Sample::Answered(took) => format!("{name} {}\n", took.as_nanos()),
+        Sample::RanOut(after) => format!("{name} >{}\n", after.as_nanos()),
+    }
 }
 
 /// The line a census sink writes once it has written its `max` lines, then nothing more: the record says it was
@@ -117,7 +133,17 @@ impl Patience {
     pub fn answered(&self, took: Duration) {
         self.seen.fetch_max(stored(took), Ordering::Relaxed);
         if let Some(sink) = CENSUS.get() {
-            sink(self.name, took);
+            sink(self.name, Sample::Answered(took));
+        }
+    }
+
+    /// The wait ran out, `after` passing with no answer: no sample (Karn's point), so its slowest is as it was, but told
+    /// to the census where one is installed, whose seed rule takes `after` as the least the wait's slowest is. Said where
+    /// the answer is slow, never where its server is taken for dead or hung (a seed's hang bound): that says nothing of
+    /// how long an answer takes.
+    pub fn ran_out(&self, after: Duration) {
+        if let Some(sink) = CENSUS.get() {
+            sink(self.name, Sample::RanOut(after));
         }
     }
 

@@ -86,6 +86,9 @@ pub(crate) fn wait_empty(cg: &BoxCgroup, killed: Instant) -> Result<(bool, Durat
     let emptied = cg.wait_empty(empty_patience(killed))?;
     if emptied {
         EMPTYING.answered(killed.elapsed());
+    } else if let Some(after) = wait {
+        // A fault to report here, but the census is told it took longer than its bound.
+        EMPTYING.ran_out(after);
     }
     Ok((emptied, wait.unwrap_or(Duration::MAX)))
 }
@@ -2034,6 +2037,8 @@ fn ids_in(dir: &Path, prefix: &str) -> Result<BTreeSet<BoxId>, Refusal> {
         if let Some(per_entry) = per_entry
             && began.elapsed() > per_entry.saturating_mul(listed)
         {
+            // No sample (Karn's point), but the census is told an entry took longer than its bound.
+            LISTING.ran_out(per_entry);
             return Err(Refusal::Os {
                 op: "listing a directory for boxes' parts",
                 why: format!(
