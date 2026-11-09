@@ -53,6 +53,32 @@ pub enum Prune {
     Keep(ClassicReason),
 }
 
+/// Where a pool's create seeds work, as it opened ([`Prune`]).
+enum SeedRoot {
+    /// The one mount namespace the node pruned, which each seed joins.
+    Pruned(OwnedFd),
+    /// The agent's own, kept for this reason.
+    Kept(ClassicReason),
+}
+
+impl SeedRoot {
+    /// The pruned namespace a new seed joins, if the seeds prune.
+    fn pruned(&self) -> Option<BorrowedFd<'_>> {
+        match self {
+            Self::Pruned(namespace) => Some(namespace.as_fd()),
+            Self::Kept(_) => None,
+        }
+    }
+
+    /// Why the seeds keep the agent's mount namespace, if they do.
+    fn kept(&self) -> Option<ClassicReason> {
+        match self {
+            Self::Pruned(_) => None,
+            Self::Kept(reason) => Some(*reason),
+        }
+    }
+}
+
 /// The node agent's create seeds. Dropped, it stops its starting thread and ends and reaps every seed it
 /// started.
 pub struct CreatePool {
@@ -66,11 +92,11 @@ struct Shared {
     retries: usize,
     /// The `hex` binary re-exec'd as `hex __oci-seed`.
     exe: PathBuf,
-    /// The node's one pruned mount namespace (goal 5 plan step 2), made as the pool opens and joined by
-    /// each create seed ([`rt_seed::ENV_JOIN`]), so the node pivots once, not once per seed
-    /// (`goal6-mntns.md` §12); `None` on a rootless node, whose seeds don't prune and whose
-    /// creates take the classic root path in the init.
-    pruned: Option<OwnedFd>,
+    /// Where the create seeds work (goal 5 plan step 2): the node's one pruned mount namespace, made as the pool
+    /// opens and joined by each seed ([`rt_seed::ENV_JOIN`]), so the node pivots once, not once per seed
+    /// (`goal6-mntns.md` §12); or the agent's own, kept, and why, whose creates take the classic root path in the
+    /// init.
+    root: SeedRoot,
     /// A debug-only crash point the node arms on each seed it spawns (its [`rt_seed::ENV_INJECT`]), for
     /// the crash-safety test of the pruned init's root build; `None` unless a test arms it, and absent
     /// from release builds (CLAUDE.md §6).
@@ -90,7 +116,7 @@ struct Shared {
     /// at `u64::MAX`, as the core's counts do.
     classic: [AtomicU64; ClassicReason::COUNT],
     /// How this node makes a pruned create's mount namespace (decision 6's update), chosen as the pool
-    /// opens: the copy on a rootless node, whose seeds don't prune.
+    /// opens: the copy where the seeds keep the agent's mount namespace.
     mount_namespace: MountNamespace,
     /// Creates a pruned seed made on the pruned root path (goal 5 plan step 2), with no `pivot_root`, by
     /// the way their mount namespace was made as the seed answered ([`MountNamespace::code`]'s index).
@@ -199,15 +225,15 @@ impl CreatePool {
             Prune::At(_) => mntns::choose(mntns::probe()?, asked)?,
             Prune::Keep(_) => MountNamespace::Copy,
         };
-        let pruned = match prune {
-            Prune::At(mountpoint) => Some(prune_once(mountpoint)?),
-            Prune::Keep(_) => None,
+        let root = match prune {
+            Prune::At(mountpoint) => SeedRoot::Pruned(prune_once(mountpoint)?),
+            Prune::Keep(reason) => SeedRoot::Kept(reason),
         };
         let slots = limits.seeds.get();
         let shared = Arc::new(Shared {
             retries: slots,
             exe,
-            pruned,
+            root,
             #[cfg(debug_assertions)]
             inject,
             base: Instant::now(),
@@ -239,14 +265,16 @@ impl CreatePool {
     }
 
     /// How many creates were made through the shim since the pool opened: those a pruned seed couldn't
-    /// serve, and those that join a pid or user namespace by path. Every reason but
-    /// [`ClassicReason::Rootless`], whose creates a seed makes with the classic root.
+    /// serve, and those that join a pid or user namespace by path. Every reason but [`ClassicReason::Rootless`] and
+    /// [`ClassicReason::Baseline`], whose creates a seed makes with the classic root.
     pub fn creates_through_shim(&self) -> u64 {
         self.shared
             .classic
             .iter()
             .enumerate()
-            .filter(|&(i, _)| i != ClassicReason::Rootless.index())
+            .filter(|&(i, _)| {
+                i != ClassicReason::Rootless.index() && i != ClassicReason::Baseline.index()
+            })
             .map(|(_, c)| c.load(Ordering::Relaxed))
             .fold(0u64, u64::saturating_add)
     }
@@ -303,10 +331,7 @@ impl CreatePool {
 
 impl CloneInit for CreatePool {
     fn unpruned(&self) -> Option<ClassicReason> {
-        self.shared
-            .pruned
-            .is_none()
-            .then_some(ClassicReason::Rootless)
+        self.shared.root.kept()
     }
 
     fn mount_namespace(&self) -> MountNamespace {
@@ -814,7 +839,7 @@ fn start_seeds(shared: &Shared) {
         drop(inner);
         let spawned = spawn(
             &shared.exe,
-            shared.pruned.as_ref().map(AsFd::as_fd),
+            shared.root.pruned(),
             #[cfg(debug_assertions)]
             shared.inject.as_deref(),
         );

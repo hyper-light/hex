@@ -252,9 +252,9 @@ pub trait CloneInit {
 }
 
 /// Why a create takes the classic root path (the init's `pivot_root`) rather than a pruned seed's (goal 5
-/// plan step 2): through the shim, or on a rootless node by a seed with the classic root
-/// ([`ClassicReason::Rootless`]). A fixed set: each is a label on a counter, none derived from the
-/// container.
+/// plan step 2): through the shim, or by a seed with the classic root where the node's seeds keep the agent's mount
+/// namespace (a rootless node's, [`ClassicReason::Rootless`]; a root node's built for the classic root,
+/// [`ClassicReason::Baseline`]). A fixed set: each is a label on a counter, none derived from the container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClassicReason {
     /// A pid or user namespace joined by path: a seed's one clone can't make it ([`init::needs_shim`]).
@@ -1108,13 +1108,13 @@ impl Runtime {
         }
     }
 
-    /// Routes a seam create to a seed: through the shim (counted) for a container a seed can't make in
-    /// one clone or a pruned seed can't serve, else to the seed, on the pruned root path on a root node
-    /// (goal 5 plan step 2) and the classic path on a rootless one, counted under
-    /// [`ClassicReason::Rootless`]. The pruned path clones the rootfs and each bind source here, in the
-    /// agent's own mount namespace, and hands them to the seed; a container not eligible for it (a user
-    /// namespace of its own, create-time hooks, a mount namespace joined by path, none of its own, or a
-    /// source that can't be cloned) is made through the shim, by reason.
+    /// Routes a seam create to a seed: through the shim (counted) for a container a seed can't make in one clone or a
+    /// pruned seed can't serve, else to the seed, on the pruned root path on a root node (goal 5 plan step 2), and the
+    /// classic path where the node's seeds keep the agent's mount namespace, counted under the reason they keep it
+    /// ([`CloneInit::unpruned`]). The pruned path clones the rootfs and each bind source here, in the agent's own mount
+    /// namespace, and hands them to the seed; a container not eligible for it (a user namespace of its own, create-time
+    /// hooks, a mount namespace joined by path, none of its own, or a source that can't be cloned) is made through the
+    /// shim, by reason.
     fn start_seeded(
         &self,
         making: &Making<'_>,
@@ -1150,7 +1150,11 @@ impl Runtime {
                 &Command::spawn,
             );
         }
-        if seeds.unpruned().is_none() {
+        if let Some(kept) = seeds.unpruned() {
+            seeds.classic(kept);
+            ipc_uts_on_path(spec, ipc_uts)?;
+            self.start_via_seed(making, spec, cgroup, network, None, Via { seeds, parking })
+        } else {
             match self.pruned_create(making, spec, cgroup, seeds.mount_namespace()) {
                 Ok(mut pruned) => {
                     if let Some(pool) = dev_mounts {
@@ -1311,10 +1315,6 @@ impl Runtime {
                     )
                 }
             }
-        } else {
-            seeds.classic(ClassicReason::Rootless);
-            ipc_uts_on_path(spec, ipc_uts)?;
-            self.start_via_seed(making, spec, cgroup, network, None, Via { seeds, parking })
         }
     }
 
