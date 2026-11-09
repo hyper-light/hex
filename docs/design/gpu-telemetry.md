@@ -8,6 +8,9 @@ node's room, and B4, its pace): each GPU's identity once (`Gpus::inventory`) and
 (`Gpus::sample`). The node-facts probe being ported into hex-sim will call both.
 
 Sources, each read on 2026-11-09:
+- **ADL:** AMD's ADL SDK (GPUOpen-LibrariesAndSDKs/display-library at `84c881cb`, MIT): its headers,
+  its documented prototypes, its samples; and what jupiter's ADL (driver 25.20.32.06, a Radeon 8060S)
+  answered to each call.
 - **NVML:** NVIDIA's `nvml.h`, NVML 13.4.92, as NVIDIA/go-nvml carries it (`gen/nvml/nvml.h` at
   `f83235b8`); what adacachy2's NVML (driver 620.70.06, a GeForce RTX 5060 Ti) answered to each call.
 - **NVIDIA's driver:** open-gpu-kernel-modules at 620.70.06,
@@ -20,6 +23,9 @@ Sources, each read on 2026-11-09:
 - **libdrm** 2.4.134's `amdgpu.ids`, as adacachy2 has it.
 - **The vendored sources:** NVIDIA/cuda-rust at `a0a4dc78`, lablup/all-smi at `fe479ae6`
   (`vendor/cuda-rust/UPSTREAM.md`, `vendor/all-smi/UPSTREAM.md` say what was taken and changed).
+- **Portability:** Ada's rule (2026-11-09): "windows, macos, and linux (of most any major flavor)
+  compatible. AMD 64 and ARM64 excepting MacOS x86_64": hex-gpu builds and lints for x86_64 and aarch64
+  Linux (gnu and musl), aarch64 macOS, and x86_64 and aarch64 Windows.
 
 ## G1. NVIDIA through NVML, loaded at run time, two calls a GPU a sample
 
@@ -88,22 +94,57 @@ an asleep one still reading its memory, and hostile counters and tables refused 
 one instant, or whose `pread` at offset 0 of a kept-open attribute returns a stale value, or that
 answers a removed device's counter otherwise than `ENODEV`.
 
-## G3. Platforms: Linux both, Windows NVIDIA's, macOS none, each refusal typed
+## G3. Windows' AMD through ADL, two calls a GPU a sample; platforms
 
-**Decision.** Linux reads both vendors. Windows reads NVIDIA's through NVML; AMD's is refused as
-`Absent::Unsupported` for now. macOS reads neither, refused the same way for both: NVIDIA's driver and
-amdgpu don't run there.
+**Decision.** On Windows, AMD's GPUs are read through ADL, AMD's Display Library (`atiadlxx.dll`,
+which AMD's driver installs in System32), loaded at run time as NVML is and kept for the process, with
+one ADL context per `Gpus`, made at open and ended with it. Open lists ADL's adapters: rows of AMD's
+vendor id (`1002`, which ADL writes in decimal) are one GPU per PCI address, the first row's adapter
+index reading it, as AMD's own Display sample groups them (`Sample/Display/Display/Adl.cpp`); another
+vendor's rows are passed over and a row whose strings don't read is skipped as malformed. Each GPU's
+model is ADL's adapter name, its memory `ADL2_Adapter_MemoryInfo2_Get`'s size, and the driver's
+version its release (`ADL2_Graphics_VersionsX2_Get`'s Crimson version, else its packaging version). A
+sample makes two calls a GPU: `ADL2_New_QueryPMLogData_Get`, whose sensor 19
+(`ADL_PMLOG_INFO_ACTIVITY_GFX`) is the busy percent, read into a table on the stack, and
+`ADL2_Adapter_VRAMUsage_Get`, the VRAM in use in megabytes of 2^20 bytes. ADL's codes map onto
+`Unread`: an index ADL no longer numbers (-5) or a disabled adapter (-10) is gone, a power state that
+answers nothing (-25) asleep, a function the driver doesn't offer (-8) unsupported. ADL names no PCI
+segment, so Windows' AMD GPUs are read on segment 0. Linux reads both vendors (G1, G2); macOS reads
+neither, `Absent::Unsupported` for both, NVIDIA's driver, amdgpu and ADL not running there; where a
+vendor's library isn't installed (ARM64 Windows, which AMD's driver doesn't support) it is
+`Absent::NoLibrary`.
 
-**What Windows AMD would take.** jupiter (a Radeon 8060S, driver 32.0.22032.6002) has ADL
-(`atiadlxx.dll`, `amdadlx64.dll` in System32), which all-smi reads through
-(`src/device/readers/amd_adl/`): `ADL2_Main_Control_Create`, `ADL2_Adapter_NumberOfAdapters_Get` and
-`ADL2_Adapter_AdapterInfo_Get` (bus, device and function, name) once, then `ADL2_New_QueryPMLogData_Get`
-per sample for activity, loaded as NVML is. VRAM in use comes cheaper from DXGI,
-`IDXGIAdapter3::QueryVideoMemoryInfo` on the local segment, one call an adapter (all-smi's
-`src/device/readers/windows_gpu_perf/dxgi.rs`), keeping the adapter. WDDM's own counters, PDH's
-`\GPU Engine(*)\Utilization Percentage` (Task Manager's source, all-smi's `pdh.rs`), serve any vendor
-but are a rate over two collections and a sum over engines and processes, so they cost more per sample
-than ADL's one call. Each is a new `unsafe` file for CLAUDE.md §12.
+**Why.** DXGI, the other source asked about, can't give a GPU's memory in use:
+`IDXGIAdapter3::QueryVideoMemoryInfo` reports the calling process's own budget and use, not the GPU's
+(all-smi's `windows_gpu_perf/dxgi.rs` says so and takes the system-wide figure from PDH), and DXGI has
+no utilisation at all. WDDM's PDH counters (`\GPU Engine(*)\Utilization Percentage`, Task Manager's
+source) serve any vendor but are a rate over two collections and a sum over engines and processes,
+more work a sample than one call. ADLX, ADL's successor, is a C++ interface whose GPU metrics come
+as a reference-counted object per read (`GetCurrentGPUMetrics`, `IPerformanceMonitoring.h`), then a
+call per value and its release, under a licence agreement of its own; ADL's SDK headers are MIT. Through ADL,
+activity and memory are one call each, the floor its interface allows: no call reads both, and PMLog
+publishes no VRAM use. On jupiter (Radeon 8060S, an APU) ADL refuses Overdrive (`ADL2_Overdrive_Caps`:
+-8) yet fills PMLog, so PMLog is read without asking Overdrive. Every row of jupiter's GPU has
+`iPresent` 0 and reads inactive, so neither filters. ADL's megabyte is 2^20 bytes: PDH's
+`\GPU Adapter Memory(*)\Dedicated Usage` read 61386752 bytes as `ADL2_Adapter_DedicatedVRAMUsage_Get`,
+which reads that counter, said 58 MB (58.5 of 2^20, floored). `VRAMUsage` (73 MB there) is the
+driver's own count and costs no counter query; ADL never called the allocator it is handed for
+memory it returns, so Hex's refuses (all four of Hex's buffers are its own). The types and entry
+points are all-smi's transcription of AMD's headers (`vendor/all-smi`, `src/device/readers/amd_adl/`),
+checked against them (GPUOpen-LibrariesAndSDKs/display-library at `84c881cb`: `adl_sdk.h`,
+`adl_structures.h`, `adl_defines.h`, and the documented prototypes of `adapter.h`, `overdrive8.h`,
+`graphics.h`), their sizes pinned at compile time.
+
+**Evidence.** On jupiter, `tests/hardware.rs` listed the 8060S by the name Windows' own video
+controller list gives it and sampled it twice for no allocation. The fixture tests (`src/adl/tests.rs`,
+jupiter's recorded rows, table, memory, versions and refusals) show five rows grouped into one GPU, two
+calls a GPU a sample, a GPU gone or disabled costing one call, an asleep one still reading its memory,
+an unpublished or out-of-range activity and a foreign table size refused by type, other vendors'
+rows passed over and garbled ones skipped; they run on every platform.
+
+**What would falsify it.** An AMD driver whose PMLog GFX activity disagrees with Task Manager's 3D
+engine at one instant, or whose `VRAMUsage` drifts from PDH's dedicated usage beyond the megabyte;
+an AMD GPU on Windows that ADL lists on a segment other than 0.
 
 ## G4. The interface
 
@@ -111,7 +152,8 @@ than ADL's one call. Each is a new `unsafe` file for CLAUDE.md §12.
 in bytes, PCI address, driver version), NVIDIA's first and each vendor's in PCI order. `sample()` gives
 `&[Load]` in that order, a `Result` per counter (`busy_percent: Result<u8, Unread>`,
 `memory_used_bytes: Result<u64, Unread>`) so one can fail while the other reads, written into room
-reserved at open: no allocation, spawn or path walk. Both return `Err(&NoGpus)`, each vendor's
+reserved at open: no allocation, spawn or path walk; ADL's PMLog table is read into the sampling
+frame (8 KiB with its headroom), not the heap. Both return `Err(&NoGpus)`, each vendor's
 `Absent` reason, when there is no GPU to read; `skipped()` lists the devices a driver counts that open
 couldn't read, with why. A GPU unplugged reads `Unread::Gone`; a new `Gpus::open()` lists what is there
 now. `sample()` takes `&mut self` and `Gpus` is `Send` and `Sync`, so the probe owns it on its thread.

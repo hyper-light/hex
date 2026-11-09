@@ -1,29 +1,30 @@
 //! hex-gpu: a node's NVIDIA and AMD GPUs and their load, for Hex's scheduler to balance on beside CPU
 //! load (`AC-T7.3.1`, placement by CPU, memory, disk and devices; Ada, 2026-11-09: "make sure to
-//! incorporate GPU load in the balancing"). NVIDIA's are read through NVML and AMD's through amdgpu's
-//! sysfs counters, each vendored and adapted from upstream (`vendor/cuda-rust`, `vendor/all-smi`;
-//! `docs/design/gpu-telemetry.md`).
+//! incorporate GPU load in the balancing"). NVIDIA's are read through NVML, AMD's through amdgpu's
+//! sysfs counters on Linux and through ADL, AMD's Display Library, on Windows, each vendored and
+//! adapted from upstream (`vendor/cuda-rust`, `vendor/all-smi`; `docs/design/gpu-telemetry.md`).
 //!
 //! [`Gpus::open`] does every costly thing once: it loads and initialises NVML (once for the process),
-//! lists the cards amdgpu drives, reads what doesn't change and opens every counter a sample reads.
-//! Then:
+//! lists the cards amdgpu drives or ADL's adapters, reads what doesn't change and opens every counter
+//! or context a sample reads through. Then:
 //!
 //! - [`Gpus::inventory`] gives each GPU's [`Gpu`]: its [`Vendor`], model, total memory in bytes,
 //!   [`PciAddress`] and driver version. NVIDIA's come first, then AMD's, each vendor's in PCI order.
 //! - [`Gpus::sample`] gives each GPU's [`Load`] now, in the inventory's order: the percent of the time
-//!   it is busy and the bytes of its memory in use. A counter costs one NVML call or one read of a file
-//!   kept open; a sample allocates nothing, spawns nothing and walks no path.
+//!   it is busy and the bytes of its memory in use. A counter costs one NVML or ADL call, or one read of
+//!   a file kept open; a sample allocates nothing, spawns nothing and walks no path.
 //!
 //! Both refuse with [`NoGpus`] when the node has no GPU this process can read, saying for each vendor
-//! why ([`Absent`]): on macOS that is [`Absent::Unsupported`] for both, on Windows for AMD (decision
-//! G3 says what reading it there would take). A device a driver counts that can't be read is in
+//! why ([`Absent`]): on macOS that is [`Absent::Unsupported`] for both; where a vendor's library isn't
+//! installed (Windows on ARM64 has AMD's nowhere) it is [`Absent::NoLibrary`]. A device a driver
+//! counts that can't be read is in
 //! [`Gpus::skipped`] with why ([`Skipped`]), never dropped silently (CLAUDE.md §3). A counter that
 //! can't be read is an [`Unread`] in its place: [`Unread::Gone`] once a GPU is unplugged or falls off
 //! the bus, after which a new [`Gpus::open`] lists what is there now.
 //!
 //! Bounds (CLAUDE.md §2): one entry per device the drivers report, read at open, and nothing per sample;
-//! NVML's count is refused past the NVIDIA driver's own 248 devices, and each AMD card holds two file
-//! descriptors (`amd`).
+//! NVML's count is refused past the NVIDIA driver's own 248 devices, ADL's past its own 250 adapters,
+//! and each AMD card on Linux holds two file descriptors (`amd`).
 
 #![cfg_attr(
     test,
@@ -37,6 +38,8 @@
     )
 )]
 
+#[cfg(any(target_os = "windows", test))]
+mod adl;
 #[cfg(target_os = "linux")]
 mod amd;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -51,7 +54,7 @@ use std::fmt;
 pub enum Vendor {
     /// Read through NVML.
     Nvidia,
-    /// Read through amdgpu's sysfs counters.
+    /// Read through amdgpu's sysfs counters on Linux, ADL on Windows.
     Amd,
 }
 
@@ -110,9 +113,10 @@ pub struct Gpu {
     /// Its memory: NVIDIA's framebuffer; AMD's VRAM, which on an APU is the carve-out the firmware
     /// gives it (the system memory it maps besides is not counted).
     pub memory_total_bytes: u64,
+    /// Where it is. On Windows an AMD GPU's is on segment 0: ADL names no segment.
     pub pci: PciAddress,
     /// NVIDIA's driver's version (`620.70.06`); amdgpu's: a DKMS module's own, else the kernel's
-    /// release, the in-tree driver's.
+    /// release, the in-tree driver's; on Windows, AMD's driver release (`25.20.32.06`).
     pub driver_version: String,
 }
 
@@ -123,10 +127,10 @@ pub struct Gpu {
 pub struct Load {
     /// The percent of the time the GPU is busy, 0 to 100: for NVIDIA, of NVML's last sample period
     /// (1/6 s to 1 s by product) that a kernel ran; for AMD, the SMU firmware's load over the GPU's IP
-    /// cores (`gpu_busy_percent`).
+    /// cores (`gpu_busy_percent` on Linux) or its graphics engine's activity (ADL's PMLog on Windows).
     pub busy_percent: Result<u8, Unread>,
     /// The bytes of its memory in use: NVML's `used` (allocated and reserved), amdgpu's
-    /// `mem_info_vram_used`.
+    /// `mem_info_vram_used`, ADL's VRAM usage (whole megabytes of 2^20 bytes).
     pub memory_used_bytes: Result<u64, Unread>,
 }
 
@@ -152,6 +156,9 @@ pub enum Unread {
     /// The OS refused the read, with its error number (0: the error carried none).
     #[error("the OS refused the read: error {errno}")]
     Os { errno: i32 },
+    /// ADL refused, with its code.
+    #[error("ADL refused: {}", adl_says(.code))]
+    Adl { code: i32 },
 }
 
 /// A device a driver counts that [`Gpus::open`] couldn't read, and why.
@@ -161,6 +168,8 @@ pub enum Skipped {
     Nvml { index: u32, why: Unread },
     /// The DRM class's `card<N>` (`/sys/class/drm`).
     Drm { card: u32, why: Unread },
+    /// ADL's adapter row at this position (`ADL2_Adapter_AdapterInfo_Get`'s order).
+    Adl { adapter: u32, why: Unread },
 }
 
 /// Why one vendor's GPUs aren't read on this node.
@@ -190,6 +199,9 @@ pub enum Absent {
     /// The interface works and lists none this process can read ([`Gpus::skipped`] has any it saw).
     #[error("none is present that this process can read")]
     NoGpu,
+    /// ADL refused to start or to list, with its code.
+    #[error("ADL refused: {}", adl_says(.code))]
+    Adl { code: i32 },
 }
 
 /// The node has no GPU this process can read: why, for each vendor.
@@ -223,6 +235,28 @@ fn nvml_says(code: &i32) -> String {
     }
 }
 
+/// What adl_defines.h says each ADL code means, for a person reading a refusal.
+fn adl_says(code: &i32) -> String {
+    let says = match *code {
+        -1 => "a call to the driver failed",
+        -2 => "ADL isn't initialised",
+        -3 => "an argument is invalid",
+        -5 => "no such adapter index",
+        -8 => "the driver doesn't support it",
+        -10 => "the adapter is disabled",
+        -22 => "an incompatible driver is installed",
+        -23 => "it needs an administrator",
+        -25 => "the adapter is in a power state that answers nothing",
+        -26 => "ADL's server is busy",
+        _ => "",
+    };
+    if says.is_empty() {
+        format!("ADL code {code}")
+    } else {
+        format!("ADL code {code} ({says})")
+    }
+}
+
 /// A node's GPUs, found once, with every counter [`Gpus::sample`] reads kept open.
 #[derive(Debug)]
 pub struct Gpus {
@@ -235,11 +269,14 @@ pub struct Gpus {
     nvidia: Vec<nvml::Device<&'static nvml::sys::Api>>,
     #[cfg(target_os = "linux")]
     amd: Vec<amd::Card<std::fs::File>>,
+    #[cfg(target_os = "windows")]
+    adl: Option<adl::Amd<adl::sys::Session>>,
 }
 
 impl Gpus {
     /// Finds the node's GPUs: NVML loaded and initialised (once for the process; a failure is tried
-    /// again at the next open), amdgpu's cards listed, each GPU's identity read and its counters opened.
+    /// again at the next open), amdgpu's cards listed (Linux) or ADL loaded and a context of its own
+    /// made (Windows), each GPU's identity read and its counters opened.
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub fn open() -> Gpus {
         let mut gpus = Vec::new();
@@ -270,8 +307,21 @@ impl Gpus {
             }
             Err(why) => (Vec::new(), why),
         };
-        #[cfg(not(target_os = "linux"))]
-        let amd_absent = Absent::Unsupported;
+        #[cfg(target_os = "windows")]
+        let (adl, amd_absent) = {
+            let found = adl::sys::adl()
+                .map_err(adl::sys::absent)
+                .and_then(|api| adl::sys::Session::open(api).map_err(|code| Absent::Adl { code }))
+                .and_then(adl::open);
+            match found {
+                Ok(found) => {
+                    skipped.extend(found.skipped);
+                    gpus.extend(found.gpus);
+                    (Some(found.amd), Absent::NoGpu)
+                }
+                Err(why) => (None, why),
+            }
+        };
 
         let none = if gpus.is_empty() {
             Some(NoGpus {
@@ -289,11 +339,13 @@ impl Gpus {
             nvidia,
             #[cfg(target_os = "linux")]
             amd,
+            #[cfg(target_os = "windows")]
+            adl,
         }
     }
 
-    /// Finds the node's GPUs: none here, where neither vendor's interface exists (NVIDIA's driver and
-    /// amdgpu are Linux's and Windows').
+    /// Finds the node's GPUs: none here, where neither vendor's interface exists (NVIDIA's driver,
+    /// amdgpu and ADL are Linux's and Windows').
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     pub fn open() -> Gpus {
         Gpus {
@@ -315,8 +367,8 @@ impl Gpus {
         }
     }
 
-    /// Each GPU's load now, in [`Gpus::inventory`]'s order: one NVML call or one read of a kept-open
-    /// counter per counter, into room reserved at open. Or why there are none.
+    /// Each GPU's load now, in [`Gpus::inventory`]'s order: one NVML or ADL call, or one read of a
+    /// kept-open counter, per counter, into room reserved at open. Or why there are none.
     pub fn sample(&mut self) -> Result<&[Load], &NoGpus> {
         if let Some(none) = &self.none {
             return Err(none);
@@ -330,6 +382,10 @@ impl Gpus {
         #[cfg(target_os = "linux")]
         for card in &self.amd {
             self.loads.push(card.sample());
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(adl) = &mut self.adl {
+            adl.sample(&mut self.loads);
         }
         Ok(&self.loads)
     }
