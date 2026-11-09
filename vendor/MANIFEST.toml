@@ -17,3 +17,15 @@ path = "vendor/seccompiler"
 exclude = ["rust-vmm-ci"]
 # Hex's own files in the vendored tree (not upstream's): the record of what Hex changed and why.
 own = ["UPSTREAM.md"]
+
+# hyper-raft (hyper-light): hex-sim scores placement with hyper-swim's own Vivaldi engine
+# (docs/design/hex-sim.md H20). hyper-raft has no -api crate for Hex to depend on (CLAUDE.md §9), so
+# only the files hex-sim compiles are taken, each included unchanged by path; when hyper-raft
+# publishes the engine behind an -api crate, hex-sim depends on that by name and this entry goes.
+[projects.hyper-raft]
+kind = "git"
+repository = "https://github.com/hyper-light/hyper-raft"
+commit = "6a236ae4c73e10013b149699ca8ec6802d919476"
+path = "vendor/hyper-raft"
+take = ["crates/hyper-swim/src/coordinates.rs"]
+own = ["UPSTREAM.md"]

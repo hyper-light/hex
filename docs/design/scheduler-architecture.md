@@ -168,6 +168,19 @@ gap PF[6][7][34]). So this decision's benefit is **unproven until hex-sim measur
 models inter-node latency and the scheduler's proximity term, and reports the goodput and tail it buys,
 against placement that ignores proximity.
 
+**Measured (G3, `bench/sched/proximity.md`, `hex-sim.md` H20-H21).** G2's recorded day was run as it
+is, 25,295 launches of Hex's three kinds (OCI containers, Firecracker microVMs and Shards microVMs), on
+both of H10's node models. The WAN was Azure's inter-region table with every zone pair at Azure's 2 ms
+bound, and hyper-swim's coordinates were learned on its own probe schedule. On 118 studies (59 seeds
+for each node model, the number the claim "at least 95% of seeds, at 95% confidence" needs),
+proximity-scored placement beat proximity-blind best fit on the latency tail for every launch and for
+each kind. The p99 completion time was at least 5.1% lower over all launches, and the p50 at least 91%
+lower. Goodput did not move: at the day's own load nothing queues, so every launch finishes within the
+day under either policy. The falsifier below was not met, so proximity stays a soft score: the plain
+predicted RTT, with no widening and no tie-break policy (H21 gives the measured reasons). The claim
+covers inter-region and inter-zone structure and the recorded load. Shards' overhead in that run is a
+5 MiB stand-in.
+
 **What would falsify it.** Proximity-aware placement not improving goodput or the latency tail over
 proximity-blind placement in hex-sim on a modelled WAN — in which case proximity drops to a tie-breaker.
 Or hyper-swim's coordinates proving too inaccurate on a real WAN (the open gap), in which case the score
@@ -294,8 +307,9 @@ measures its own rather than citing one:
   the p99; the p99.9 and max are recorded beside it).
 - **A2. Network proximity's benefit is unmeasured, and bandwidth has no model** (finding 9, S4):
   neither Consul nor Hyperscale reports how much latency-aware placement improves outcomes, and
-  hyper-swim's WAN accuracy is unknown; hex-sim measures the latency term's benefit, and until then
-  proximity can only help the ranking (S4). Bandwidth-aware placement is a further gap — Vivaldi models
+  hyper-swim's WAN accuracy is unknown; hex-sim measured the latency term's benefit on a modelled WAN
+  (G3, `bench/sched/proximity.md`: goodput +0.9-18.6%, p99 5.7-93.7% lower than blind on every
+  study), so it stays a soft score (S4); its accuracy on a real WAN remains open. Bandwidth-aware placement is a further gap — Vivaldi models
   latency only (`proximity-and-failure-containment.md` §1.6, PF[1][2]), so the objective's bandwidth
   term must come from topology and measured transfers, which no source read here evaluates; hex-sim
   models it and the design leaves it a soft score until measured.

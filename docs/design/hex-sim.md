@@ -375,6 +375,195 @@ completions (`packing.md`, the record at `ad3053c`); least stranded then least a
 **Open.** Hex's own launch records replace the given kinds once Hex runs microVMs for its users, and a
 shards-api that carries a device would let Shards microVMs ask for GPUs (H9).
 
+### H20. A modelled WAN, and hyper-swim's own coordinates learned over it
+
+**The choice.** `wan` models a WAN of eight regions whose round trips are Azure's published P50s
+between them (the larger of each pair's two directions), with three zones a region. In the WAN of
+record (`Access::Bound`) every pair of zones is at Azure's stated bound, about 2 ms, which is the
+worst case Azure allows. Nodes have no access height and probes no jitter, because nothing measured
+states either. So the record's claim covers inter-region and inter-zone structure only, and two nodes
+of one zone are 0 apart. `Access::Modelled` is used only by a labelled sensitivity run, never the
+record: zone terms drawn below the bound, heights of 25-250 µs and probes stretched up to 10%, each
+modelled.
+
+Every node runs hyper-swim's Vivaldi engine (`vivaldi`) on hyper-swim's own schedule: one probe a
+protocol period, and each round a fresh shuffled permutation of the other members, so every member is
+probed once a round (its detector's `RandomizedOrder`, SWIM §4.3). Rounds run with scale-free patience
+(the lead, 2026-11-06), so no round count is chosen. The lowest median relative error over every pair
+so far is tracked, and convergence stops once as many rounds have passed without a new low as it took
+to reach that low. The coordinates the study places with are the last round's, as a running cluster's
+are. Choosing the lowest round would read the true RTTs, which no node knows, and would make proximity
+look better than production can be. The stop rule itself measures error against the truth; that is
+the simulation's convergence clock only, since a running cluster never stops converging.
+
+Bounds follow the input-bound rule, the largest value in the census times a stated margin of 2:
+- `MAX_NODES` = 100: the fleet trace's 50 node rows.
+- `MAX_ROUNDS` = 12,700: the longest convergence of the record and its sensitivity runs, 6,350 rounds.
+Doc-truth tests tie the census to the traces.
+
+The engine is hyper-swim's `coordinates.rs`, its tests with it, vendored through `scripts/vendor.py` at
+hyper-raft `6a236ae4c73e` (`vendor/MANIFEST.toml` `[projects.hyper-raft]`, `take` naming only the files
+hex-sim compiles). It is included unchanged by path (`crates/hex-sim/src/lib.rs`, `#[path]`), so
+`vendor.py check`, one of the gates, proves the bytes are upstream's; `vendor/hyper-raft/UPSTREAM.md`
+records no changes.
+
+Why not the alternatives:
+- Hex reaches another product only through its `-api` crate (CLAUDE.md §9), and hyper-raft has none.
+- A model of the engine would measure the model, not what Hex's nodes will carry.
+- A pasted copy has nothing holding it to upstream.
+hex-sim's SWIM timing (implementation goal 5) takes its hyper-swim files through the same entry, so
+hyper-raft is vendored once.
+
+**What replaces it:** when hyper-raft publishes the engine behind an `-api` crate, hex-sim depends on
+that by name and version (patched to kiln's copy in `[patch.crates-io]`, CLAUDE.md Vendoring), and the
+`hyper-raft` entry and its `#[path]` include go.
+
+**Sources.**
+- Dabek, Cox, Kaashoek and Morris, *Vivaldi*, SIGCOMM 2004 (`PF[1]`: 11% median relative error over
+  1,740 Internet hosts).
+- Ledlie, Gardner and Seltzer, *Network Coordinates in the Wild*, NSDI 2007 (`PF[2]`: real latencies
+  violate the triangle inequality, which Azure's table also does in a few triples).
+- hyper-swim (`PF[3][6]`; its detector's probe order at hyper-raft `6a236ae`,
+  `crates/hyper-swim/src/detector.rs`, `RandomizedOrder`).
+- Das, Gupta and Motivala, *SWIM*, DSN 2002 (§4.3, round-robin probe target selection).
+- "Azure network round-trip latency statistics" (learn.microsoft.com/azure/networking/azure-network-latency,
+  2026-07-30: monthly P50s of backbone probes taken each minute).
+- "What are Azure availability zones?", Inter-zone networking.
+- Kiln research `01a1a9977b2273d0860ac510b8aa0a69`.
+
+**Evidence.**
+- `wan::a_seed_names_one_set_of_coordinates`: one seed gives the same coordinates bit for bit, and
+  another seed others; each round offers `n·(n−1)` probes, and every probe of a pair apart is a sample.
+- `wan::coordinates_learn_the_wan`: on both node models' WANs the patience rule stops at twice the
+  best round, and the median relative error ends at most Vivaldi's 11%. A node's own region is
+  predicted nearer than another's in more trials than chance; `unconverged_coordinates_fail_the_same_measure`
+  shows the measure fails coordinates that learned nothing.
+- `patience_runs_past_a_noise_uptick`: AllKinds seed 15, whose error rose once by noise (25.4% at
+  round 3, then 26.4%), ran past the uptick; the first-uptick rule had stopped it at round 4, and the
+  test failed on that rule.
+- `the_coordinates_held_are_the_last_rounds`: the study places with the last round's coordinates. It
+  failed on a best-round snapshot, which held 25.4% where the last round was 29.2%.
+- `true_round_trips_follow_the_model` and `the_census_is_the_traces`.
+- hyper-swim's own six tests pass on the vendored file.
+- Over the record's 118 studies (fedora, commit `272b220`, unit
+  `hex-sched-g3-record-20261106T204635Z`, virtual time), the final median error is at least 3.1%, 6.0% at the median and at
+  most 29.2% (seed 15, 6 rounds). `bench/sched/proximity.md` lists each seed's rounds and final error.
+
+**What would falsify it.** hyper-swim's coordinates measured on a real WAN (the open gap `PF[6]`)
+predicting worse than they do here. Then the model is too kind, and hex-sim's proximity numbers (H21)
+are an upper bound until they are refit to the measurement. Inside a zone, where the record claims
+nothing, access heights and jitter are what a measurement would add.
+
+### H21. Proximity is measured against blind placement, on the recorded day as it is
+
+**The choice.** `proximity` runs G2's recorded day (H10: Huawei Cloud's Region 5, day 30) as it is, in
+virtual time, on each of its node models:
+- `huawei-r5-day30.trace`'s ten m5d.metal hosts, each running all three kinds.
+- `huawei-r5-day30.fleet.trace`'s Hex fleet hosts, some running only some kinds.
+Every one of its 25,295 launches runs at its recorded arrival, with:
+- its owner;
+- its kind (an OCI container, a Firecracker microVM or a Shards microVM, by G2's rule in the trace: a
+  kind per owner, in thirds of the launches);
+- its need, with its kind's overhead as the trace states it;
+- its recorded lifetime as its compute.
+A launch is placed only on a node that runs its kind. Each launch talks to a home node, drawn
+uniformly (the record claims nothing about where homes sit; skewed homes are a labelled sensitivity
+run). Its round trips are log-normal through TraceLab's p50 25 and p99 1,438 tool calls a session, and
+their waits, each the WAN's true RTT from its node to its home, are added to its compute. So the
+RTT-to-compute ratio is the data's.
+
+Three policies choose from the same sampled window (`FitIndex::sampled_fit`):
+- Blind best fit.
+- Proximity: the least RTT hyper-swim's coordinates predict, best fit breaking ties. It is a soft
+  score that never removes a candidate, and a node is predicted 0 from itself.
+- An oracle on the true RTT.
+Goodput is the launches finished by the day's last arrival, per second. The tail is the p99 of arrival
+to end. Both are reported over every launch and for each kind.
+
+The seeds carry a stated claim: at least 95% of seeds show the gain, at 95% confidence. If a fraction
+`f` of seeds would not, `n` seeds all showing it happens with chance `(1−f)^n`, so
+`n = ⌈ln 0.05 / ln 0.95⌉ = 59` seeds a node model, 118 studies. `MAX_WORKLOADS` follows the census
+rule: 25,295 launches × 2.
+
+**Sources.**
+- Scheduler design S1 (goodput, not balance) and S4 (proximity a soft score, its falsifier).
+- H10, for the kinds, their overheads, the recorded workload and the two node models.
+- `agentic-workloads.md` §1 (TraceLab's tool calls a session, AW[5]; tool calls 30-85% of request
+  latency, AW[34]).
+- `proximity-and-failure-containment.md` §1.5 (Hyperscale's `rtt_ucb`, PF[33]).
+- Kiln research `01a1a9977b2273d0860ac510b8aa0a69`.
+
+**Evidence.** `bench/sched/proximity.md` (the run of record: fedora, commit `272b220`, unit
+`hex-sched-g3-record-20261106T204635Z`, virtual time; adas-mac-studio-2.local gives the same tables
+digit for digit). Proximity cuts the completion time's p99 and p50, and mean RTT,
+against blind on all 118 studies, over all launches and for each kind:
+
+| | AllKinds | Mixed |
+|---|---|---|
+| p99, all launches | at least 5.1% | at least 5.8% |
+| p99, OCI | at least 61.2% | at least 27.6% |
+| p99, Firecracker | at least 2.5% | at least 2.1% |
+| p99, Shards | at least 0.004% | at least 2.3% |
+| p50, all launches | at least 93.8% | at least 91.5% |
+
+Goodput does not move. At the day's own load nothing queues (blind's queue never holds more than one
+launch), so every launch finishes within the day under either policy, and goodput is equal on every
+study. This replaces the earlier reading of a goodput gain on every study, which came from loads that
+were picked, not recorded. Proximity is within 0.01% of the oracle's goodput.
+
+Tests:
+- `proximity_beats_blind` asserts what holds on every seed (p99 and p50 lower, goodput no lower). The
+  mutant `no-proximity-term` fails it, and that mutant is its non-vacuity, with no share asserted.
+- `proximity_and_the_oracle_place_nearer_than_blind`.
+- `jobs_and_nodes_are_the_recorded_ones` and `kinds_are_g2s_by_owner_in_thirds` (the trace's 8,432,
+  8,432 and 8,431).
+- `a_kind_no_node_runs_is_refused_not_misplaced`.
+- `a_node_is_predicted_zero_from_itself`.
+- `hostile_recorded_workloads_are_refused`, `every_policy_runs_every_job_deterministically` and
+  `blind_never_moves_from_itself`.
+
+**Why it is this way: four measured reasons.**
+- **The prediction is not widened (`K_SIGMA = 0`).** Hyperscale's bound, `rtt × (1 + K_SIGMA·mean
+  error)` with its `K_SIGMA = 2`, was measured against the plain prediction on 120 studies of recorded
+  nodes and launches (commit `5920b50`, adas-mac-studio.local-2, virtual time).
+  - The least gains over blind were identical: all launches goodput +3.1% and p99 −9.3%; OCI +3.0% and
+    −6.8%; Firecracker +3.1% and −6.5%; Shards +2.7% with −4.0% (`K = 2`) against −3.9% (`K = 0`).
+  - The bound's only edges were the tie-break nearer than blind on 116 against 112 studies, and the
+    oracle gap at 0.88% against 0.91%.
+  - A copied multiplier that buys no least gain is not taken (Ada, 2026-11-06: "We do not support
+    arbitrary constants"; the lead's ruling).
+- **No tie-break policy.** Proximity only among best fit's exact ties was measured against blind on the
+  same 59 seeds a fleet (commit `4cadcb3`, adas-mac-studio-2.local, virtual time). It worsened the
+  all-launch p99 on both fleets:
+  - AllKinds: worse on 49, better on 4 (mean −3.2%).
+  - Mixed: worse on 42, better on 16 (mean −1.2%).
+  - Only Shards on Mixed improved (better on 39, +0.8%), and that fleet's tail was still worse.
+  - It is not the coordinates' error: scored by the true RTT it was worse still (AllKinds worse on 49,
+    Mixed on 41).
+  - It is path dependence. It changes about 13 decisions a day on the identical m5d hosts (185 on the
+    fleet), yet it shifts mean RTT across every placement, because best fit packs later launches onto
+    whichever node those few choices filled. It was dropped (the lead's rule).
+- **A node is predicted 0 from itself.** Vivaldi's estimate of a node to itself is `2·height`.
+  - On AllKinds seed 15 that put node 6 (Brazil South, alone in its region) 246 ms from itself and
+    195 ms from node 4 (Southeast Asia; true RTT 331 ms).
+  - So proximity never placed a launch on its own home there. All 3,166 launches homed on node 6 went
+    to Southeast Asia, and Shards' p99 came out 1.6% worse than blind's: the one per-kind miss of
+    117/118.
+  - A launch on its own home has a true RTT of 0, so the study predicts 0. With that, the miss is gone
+    (118/118).
+- **Patience, with the last round's coordinates.** The first-uptick stop halted seed 15 at round 4 on
+  noise. Patience runs on, and the study places with the last round's coordinates (29.2% on seed 15),
+  not the lowest round's (25.4%), which only the truth could pick (H20). 118/118 holds with them.
+
+**What would falsify it.**
+- Recorded microVM sessions whose round trips don't go to one place.
+- A day whose load queues while proximity's tail cut vanishes. At the recorded load nothing queues, so
+  the record says nothing about goodput under contention.
+- A real WAN on which hyper-swim's error is far above this WAN's (H20).
+- Shards' measured overhead, once it replaces the stand-in in the recorded workload, changing which
+  nodes fit a Shards microVM enough to cut its gain. The run is repeated then.
+Bandwidth, unmodelled here, is A2's open gap.
+
 ### H5. Bounded everywhere, no recursion
 
 **The choice.** The store holds at most the run's workloads and three log entries each; the event queue
@@ -389,7 +578,8 @@ most once; handlers schedule events, never call each other's handlers in a cycle
 ## What it doesn't do yet
 
 Each goes with the implementation goal that needs it: the nemesis's faults other than crashes (gray, fail-slow, mass
-loss, the agent-specific faults; goal 5), inter-node latency and Vivaldi coordinates (goal 3), provider
+loss, the agent-specific faults; goal 5), inter-node latency inside the control-plane loop `sim` (H20-H21
+measure proximity in a study of their own), provider
 quotas (A3), priorities and fair share (goal 4), sharded control planes, cells and regions (goals 6-7),
 heap accounting per workload (`AC-T7.11.4`; `Store::record_bytes` is the record's layout only), and
 wall-clock throughput and tail of the real fast path (goal 2). The virtual costs in `Config::default`
