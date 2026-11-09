@@ -656,17 +656,16 @@ impl Runtime for WinRuntime {
         }
     }
 
-    fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
-        stdio.check()?;
-        if stdio.ask != hex_api::Ask::default() {
-            return Err(Refusal::Platform {
-                what: "stdio streams made by the runtime",
-                platform: "windows",
-                why: "the Windows classes take the caller's own handles; the stream form is the Windows \
-                      agent's to add, by its stdio record's winner"
-                    .to_owned(),
-            });
-        }
+    /// HEX-RT-17: the streams the caller asks for are made as pipes ([`Stdio::make_asked`]), the program's
+    /// ends handed to it as a caller's own handles are and the caller's given back once by the program's
+    /// [`Proc::streams`], so the host copies no byte between them, in either class.
+    fn exec(
+        &self,
+        id: &BoxId,
+        program: Program,
+        mut stdio: Stdio,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        let given = stdio.make_asked()?;
         match self.get(id)? {
             Held::Process(b) => {
                 let spawn = build_spawn(&program, stdio)?;
@@ -677,11 +676,13 @@ impl Runtime for WinRuntime {
                 } = b.exec(spawn)?;
                 // The initial thread is resumed; the node holds only the process handle to wait on.
                 drop(thread);
-                Ok(Box::new(proc::BoxProc::new(process, pid, b.shared())))
+                let proc = proc::BoxProc::new(process, pid, b.shared());
+                Ok(Box::new(hex_api::Asked::new(proc, given)))
             }
             Held::Oci(b) => {
                 let process = hex_core::hcs::process("program", &program)?;
-                b.exec(&process, std_handles(stdio)?)
+                let proc = b.exec(&process, std_handles(stdio)?)?;
+                Ok(Box::new(hex_api::Asked::new(proc, given)))
             }
         }
     }
