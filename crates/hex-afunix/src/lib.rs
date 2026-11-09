@@ -704,8 +704,9 @@ pub struct ProgramWatch {
     packet: OwnedHandle,
 }
 
-/// Watches the program `pid` until it ends, reported on `port` as [`Done::Program`] under `tag`. One that
-/// ended already is reported at once.
+/// Watches the program `pid` until it ends, reported once on `port` as [`Done::Program`] under `tag`. One that
+/// ended already is reported at once: a packet associated with a process signalled already is queued as it is
+/// associated (`a_program_ended_before_its_watch_is_reported_once`), so nothing posts its end again.
 pub fn watch_program(port: &Port, pid: u32, tag: u64) -> io::Result<ProgramWatch> {
     let tag = usize::try_from(tag).map_err(|_| {
         io::Error::new(io::ErrorKind::InvalidInput, "a token past a pointer's size")
@@ -725,6 +726,7 @@ pub fn watch_program(port: &Port, pid: u32, tag: u64) -> io::Result<ProgramWatch
     // SAFETY: a handle just opened, owned from here.
     let process = unsafe { OwnedHandle::from_raw_handle(h) };
     let packet = wait_packet()?;
+    // Told whether the process had ended already, which changes nothing: its packet is queued either way.
     let mut already = 0u8;
     // SAFETY: the packet, the port and the process are live handles (the port's for as long as the watch
     // is, the Os owning both); the key and the token are posted back as values, which the port's
@@ -745,12 +747,6 @@ pub fn watch_program(port: &Port, pid: u32, tag: u64) -> io::Result<ProgramWatch
         return Err(io::Error::other(format!(
             "NtAssociateWaitCompletionPacket ended NTSTATUS {status:#x}"
         )));
-    }
-    if already != 0 {
-        // Ended before the watch: said to the port here as well, so its end can't go unreported; an end
-        // reported twice is taken once (the core's watch is gone after the first).
-        // SAFETY: this port; the "pointer" is the token, as above.
-        unsafe { PostQueuedCompletionStatus(port.0.0, 0, KEY_PROGRAM, tag as *const OVERLAPPED) };
     }
     Ok(ProgramWatch { process, packet })
 }
@@ -851,6 +847,7 @@ impl SourceWatch {
         if rc == SOCKET_ERROR {
             return Err(wsa_error());
         }
+        // Told whether the event was set already, which changes nothing: its packet is queued either way.
         let mut already = 0u8;
         // SAFETY: as in `watch_program`: the packet, the port and the event are live handles; the key and the
         // tag are posted back as values, which the port's KEY_SOURCE tells its wait never to take as an `Op`.
