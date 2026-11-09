@@ -10,6 +10,8 @@ use hex_api::{Refusal, Stdio};
 use hex_core::wire::Streams;
 use rustix::fs::{FileType, OFlags};
 use rustix::io::Errno;
+#[cfg(target_os = "linux")]
+use rustix::net::SocketFlags;
 use rustix::net::{AddressFamily, SocketAddrUnix, SocketType};
 
 /// Makes room for a socket of `kind` at `path`: a socket no agent serves (one that ended) is removed; one an
@@ -26,8 +28,7 @@ pub fn clear(path: &Path, kind: SocketType) -> Result<(), Refusal> {
             why: format!("{} exists and isn't a socket", path.display()),
         });
     }
-    let probe = rustix::net::socket(AddressFamily::UNIX, kind, None)
-        .map_err(|e| Refusal::os("probing the node agent's socket", e))?;
+    let probe = probe(kind)?;
     let addr = SocketAddrUnix::new(path).map_err(|e| Refusal::Invalid {
         what: "socket path",
         why: format!("{}: {e}", path.display()),
@@ -44,6 +45,20 @@ pub fn clear(path: &Path, kind: SocketType) -> Result<(), Refusal> {
             why: format!("{}: {e}", path.display()),
         }),
     }
+}
+
+/// The socket [`clear`] connects with to learn whether an agent serves a path: close-on-exec from its creation where
+/// the OS can make it so, so a spawn made while it is open, by another thread of this process, doesn't keep it past its
+/// exec.
+pub fn probe(kind: SocketType) -> Result<OwnedFd, Refusal> {
+    #[cfg(target_os = "linux")]
+    let probe = rustix::net::socket_with(AddressFamily::UNIX, kind, SocketFlags::CLOEXEC, None);
+    // macOS's socket(2) takes no flags, so there is no SOCK_CLOEXEC to make it close-on-exec as it is made: from here
+    // to its drop at the end of `clear`'s connect, a spawn made by another thread of this process keeps a copy past
+    // its exec, for as long as the spawned program runs.
+    #[cfg(not(target_os = "linux"))]
+    let probe = rustix::net::socket(AddressFamily::UNIX, kind, None);
+    probe.map_err(|e| Refusal::os("probing the node agent's socket", e))
 }
 
 /// A program's stdio from the descriptors its exec carried, in the order `streams` names them: each
