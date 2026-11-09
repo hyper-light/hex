@@ -112,7 +112,7 @@ def oci_section(run):
     data = {n: rounds(run, n) for n in names}
     # The oci class through the Runtime seam (seam_oci writes ociseam.r<N>.json): a second Hex column,
     # beside `hex`, its ratio against the in-process rival (libcrun). It measures lifecycle, lifecycle_nonet,
-    # throughput and sustained (and rtt, below), so the start_true and density rows read n/a for it.
+    # start_true, throughput and sustained (and rtt, below), so the density rows read n/a for it.
     seam = rounds(run, "ociseam")
     if seam:
         data["hex-seam"] = seam

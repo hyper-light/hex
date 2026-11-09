@@ -3,12 +3,18 @@
 //! agent's in another process, reached through its Unix `SOCK_SEQPACKET` socket in
 //! [`hex_core::wire`]'s format, so a caller that doesn't link Hex holds the same contract as one that
 //! does (the conformance suite, HEX-RT-1 on). An exec's stdio goes to the agent as descriptors, and
-//! its `Proc` waits for the program's end, which the agent sends. Every thread sharing a client shares
+//! its `Proc` waits for the program's end, which the agent sends. A stream the caller asks for comes back as
+//! its end with the answer; one whose program can't take the caller's own pipe (a guest's) comes back as its
+//! end too, and the client copies between it and the pipe: the one copy left is the caller's (native plan
+//! step 8). Every thread sharing a client shares
 //! its one connection, which closes once the client and the last `Proc` it returned are dropped; the
 //! agent then ends the programs it still watches for it (the disconnect rule).
 //!
-//! Linux only: the socket passes descriptors over `SOCK_SEQPACKET` (unix(7)), which macOS's and
-//! Windows' local sockets lack; elsewhere [`Client::connect`] refuses, naming the platform.
+//! On Linux the socket is `SOCK_SEQPACKET` (unix(7)); macOS has none, so there each message is framed over
+//! a `SOCK_STREAM` socket, its descriptors at its first byte (native plan step 8). Elsewhere
+//! [`Client::connect`] refuses, naming the platform, until its transport lands. On every
+//! platform, [`guest::Client`] reaches a node agent in a Shards guest over a byte stream
+//! (docs/design/shards-guest.md §3), the same calls on another transport.
 
 #![cfg_attr(
     test,
@@ -24,14 +30,27 @@
 
 use std::time::Duration;
 
+mod calls;
+mod copy;
+pub mod guest;
+
+pub use calls::{Ended, Then};
+
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
+pub use calls::WIRE_EXEC_LIMIT;
+#[cfg(target_os = "linux")]
 pub use linux::Client;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::Client;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod other;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub use other::Client;
 
 /// Longest a call waits for the node agent's answer, and a send for room in its socket: five times the

@@ -1,0 +1,18 @@
+# kiln run r42 on jupiter (background), job_probe.ps1 at 69c2df6, three passes asked; pass 3's output was lost when
+# kiln restarted on adacachy mid-run (the run was collected before its output was read). Load is Win32_Processor's
+# LoadPercentage averaged, at each pass's start; Amphora's chain4 pass tenx-product-job-1 ran beside it.
+commit 69c2df6
+=== pass 1 2026-11-01T00:11:02Z load: 25% cpu
+host JUPITER | Microsoft Windows 11 Pro 10.0.26200 | AMD RYZEN AI MAX+ 395 w/ Radeon 8060S           | 2026-10-31T17:11:21.2209935-07:00
+create n=200 box_ms p50=42.883 p99=23,243.350 max=27,427.840 | bare_ms p50=42.821 p99=27,395.605 max=27,547.426
+memory job_limit_bytes=268435456 peak_job_bytes=268468224 over_bytes=32768 peak_process_bytes=260501504 member: refused_after_mib=235 error=1455
+tree grandchild=111896 alive_before_close=True alive_after_close=False member_alive_after_close=False
+escape breakaway=refused error=5
+=== pass 2 2026-11-01T00:19:06Z load: 65% cpu
+host JUPITER | Microsoft Windows 11 Pro 10.0.26200 | AMD RYZEN AI MAX+ 395 w/ Radeon 8060S           | 2026-10-31T17:19:13.3038652-07:00
+create n=200 box_ms p50=71.519 p99=11,258.275 max=17,499.811 | bare_ms p50=72.467 p99=11,249.523 max=27,719.869
+memory job_limit_bytes=268435456 peak_job_bytes=268476416 over_bytes=40960 peak_process_bytes=260501504 member: refused_after_mib=235 error=1455
+tree grandchild=103452 alive_before_close=True alive_after_close=False member_alive_after_close=False
+escape breakaway=refused error=5
+=== pass 3 2026-11-01T00:24:22Z load: 65% cpu
+(output lost: kiln restarted before it was read)

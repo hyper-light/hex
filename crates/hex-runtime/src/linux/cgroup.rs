@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use hex_api::{Bounds, BoxId, Refusal, Signal, Usage};
 use hex_core::cgroup::{self as core, CONTROLLERS, Dev, UsageFiles};
+use hex_core::setup::{self, Undelegated};
 use rustix::fs::{Mode, OFlags};
 
 use super::os_err;
@@ -24,6 +25,10 @@ pub const MAX_BOXES: usize = 65_536;
 /// Most processes a signal is sent to one by one in a box (signals other than KILL, which the
 /// kernel delivers to the whole box at once through `cgroup.kill`).
 pub const MAX_SIGNALLED: usize = 1 << 20;
+/// The most cgroups a box's removal lists beneath it: Hex's own bound on what a container with a
+/// writable cgroup2 mount may leave there (the kernel's `cgroup.max.descendants` is unlimited unless set),
+/// as many as the boxes a node holds ([`MAX_BOXES`]); past it the removal is refused by type.
+pub const MAX_DESCENDANTS: usize = MAX_BOXES;
 
 /// The cgroup this process is in, as a path under [`CGROUP_ROOT`].
 pub fn own_cgroup() -> Result<PathBuf, Refusal> {
@@ -45,15 +50,16 @@ pub fn own_cgroup() -> Result<PathBuf, Refusal> {
 #[derive(Debug, Clone)]
 pub struct BoxRoot {
     dir: PathBuf,
-    controllers: BTreeSet<String>,
     disks: Vec<Dev>,
 }
 
 impl BoxRoot {
-    /// Opens the box root at `dir`, making it when it's missing: its parent is asked to hand it each
-    /// of [`CONTROLLERS`] it has, and it hands them on to boxes. `disks` are the devices
-    /// `io.latency` and `io.max` apply to. Refused when the parent holds processes of its own (the
-    /// kernel then can't hand controllers down) or isn't writable (not delegated).
+    /// Opens the box root at `dir`, making it when it's missing: its parent is asked to hand it every
+    /// one of [`CONTROLLERS`], and it hands them on to boxes. `disks` are the devices `io.latency` and
+    /// `io.max` apply to. Where the delegation Hex's installer sets up is missing (the parent lacks a
+    /// controller, isn't this user's, or holds processes of its own, so the kernel can't hand
+    /// controllers down), both Linux classes are refused by name, saying what's missing
+    /// ([`setup::undelegated`]).
     pub fn open(dir: &Path, disks: Vec<Dev>) -> Result<Self, Refusal> {
         let parent = dir.parent().ok_or_else(|| Refusal::Invalid {
             what: "box root",
@@ -62,41 +68,35 @@ impl BoxRoot {
         match fs::create_dir(dir) {
             Ok(()) => {}
             Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => {
+                return Err(setup::undelegated(
+                    parent,
+                    Undelegated::NotOurs(e.to_string()),
+                ));
+            }
             Err(e) => return Err(os_err("making the box root", dir, e)),
         }
-        let available = read_set(&parent.join("cgroup.controllers"))?;
-        let wanted: Vec<&str> = CONTROLLERS
-            .iter()
-            .copied()
-            .filter(|c| available.contains(*c))
-            .collect();
-        let enable = wanted
+        setup::check_controllers(parent, &read_set(&parent.join("cgroup.controllers"))?)?;
+        let enable = CONTROLLERS
             .iter()
             .map(|c| format!("+{c}"))
             .collect::<Vec<_>>()
             .join(" ");
-        if !enable.is_empty() {
-            if let Err(e) = write_file(&parent.join("cgroup.subtree_control"), &enable) {
-                let procs = fs::read_to_string(parent.join("cgroup.procs")).unwrap_or_default();
-                let why = if procs.trim().is_empty() {
-                    format!("{e}")
+        if let Err(e) = write_file(&parent.join("cgroup.subtree_control"), &enable) {
+            let procs = fs::read_to_string(parent.join("cgroup.procs")).unwrap_or_default();
+            let why = e.to_string();
+            return Err(setup::undelegated(
+                parent,
+                if procs.trim().is_empty() {
+                    Undelegated::NotOurs(why)
                 } else {
-                    format!(
-                        "{e}: {} holds processes of its own, so cgroup v2 can't hand its controllers to the box root; run the node agent in a leaf cgroup beside it (systemd: Delegate=yes, DelegateSubgroup=)",
-                        parent.display()
-                    )
-                };
-                return Err(Refusal::Os {
-                    op: "enabling controllers for the box root",
-                    why,
-                });
-            }
-            write_file(&dir.join("cgroup.subtree_control"), &enable)?;
+                    Undelegated::Occupied(why)
+                },
+            ));
         }
-        let controllers = read_set(&dir.join("cgroup.subtree_control"))?;
+        write_file(&dir.join("cgroup.subtree_control"), &enable)?;
         Ok(Self {
             dir: dir.to_owned(),
-            controllers,
             disks,
         })
     }
@@ -119,50 +119,16 @@ impl BoxRoot {
         &self.dir
     }
 
-    /// The controllers boxes get.
-    pub fn controllers(&self) -> &BTreeSet<String> {
-        &self.controllers
-    }
-
     /// The disks `io.latency` and `io.max` apply to.
     pub fn disks(&self) -> &[Dev] {
         &self.disks
     }
 
-    /// Makes box `id`'s cgroup with `bounds` in force. A bound whose controller the root doesn't
-    /// have is refused by name, before anything is made.
+    /// Makes box `id`'s cgroup with `bounds` in force: every bound's controller is there, since the root
+    /// opened only with all of [`CONTROLLERS`] ([`BoxRoot::open`]).
     pub fn create(&self, id: &BoxId, bounds: &Bounds) -> Result<BoxCgroup, Refusal> {
-        for (needed, set) in [
-            (
-                "cpu",
-                bounds.cpu_weight.is_some() || bounds.cpu_max_milli.is_some(),
-            ),
-            (
-                "memory",
-                bounds.memory_max.is_some() || bounds.memory_high.is_some(),
-            ),
-            (
-                "io",
-                bounds.io_weight.is_some()
-                    || bounds.io_latency_us.is_some()
-                    || bounds.io_max.is_some(),
-            ),
-            ("pids", bounds.pids_max.is_some()),
-        ] {
-            if set && !self.controllers.contains(needed) {
-                return Err(Refusal::Platform {
-                    what: "a bound",
-                    platform: "linux",
-                    why: format!(
-                        "the {needed} controller isn't delegated to {} (it has {:?}): delegate it to the node agent's cgroup",
-                        self.dir.display(),
-                        self.controllers
-                    ),
-                });
-            }
-        }
         let writes = core::writes(bounds, &self.disks)?;
-        if self.boxes()?.len() >= MAX_BOXES {
+        if self.count()? >= MAX_BOXES {
             return Err(Refusal::Full(MAX_BOXES));
         }
         let dir = self.dir.join(id.as_str());
@@ -211,6 +177,28 @@ impl BoxRoot {
         } else {
             None
         }
+    }
+
+    /// How many cgroups are under the root, box or not: the count [`BoxRoot::boxes`] would list, read from
+    /// the root's link count instead. A cgroup v2 directory's link count is its child directories plus two
+    /// (kernfs sets it so, `set_nlink(inode, kn->dir.subdirs + 2)` in `kernfs_refresh_inode`, Linux v6.19
+    /// fs/kernfs/inode.c; measured on fedora: 0, 1, 7 and 32 children, links 2, 3, 9 and 34), and a `stat`
+    /// of it takes only kernfs's attribute lock, shared (`kernfs_iop_getattr`). A listing takes the root
+    /// directory's own lock shared, and every box's `mkdir` and `rmdir` beside it take that lock
+    /// exclusive, so at concurrency 32 a create waited behind them all: 5.7 ms of each lifecycle off the
+    /// CPU, the largest wait a create had (goal 5 plan step 4, bench/competitive/probes/create_serial.md).
+    ///
+    /// A directory whose links don't count its children (fewer than two: btrfs, for one, gives every
+    /// directory one) is listed instead, so the bound holds on any filesystem a root is opened on.
+    pub fn count(&self) -> Result<usize, Refusal> {
+        use std::os::unix::fs::MetadataExt;
+        let links = fs::metadata(&self.dir)
+            .map_err(|e| os_err("counting boxes", &self.dir, e))?
+            .nlink();
+        if links < 2 {
+            return Ok(self.boxes()?.len());
+        }
+        Ok(usize::try_from(links.saturating_sub(2)).unwrap_or(usize::MAX))
     }
 
     /// The name of every cgroup under the root, box or not, bounded by [`MAX_BOXES`].
@@ -359,13 +347,48 @@ impl BoxCgroup {
         }
     }
 
-    /// Removes the box's cgroup: it must be empty. Absent already is removed.
+    /// Removes the box's cgroup, which must hold no process (`cgroup.kill` and `populated` cover its
+    /// whole subtree), with every cgroup beneath it: a container with a cgroup namespace and a writable
+    /// cgroup2 mount makes its own (runc's and crun's delete remove them the same way). Flat: the
+    /// descendants are listed breadth first, at most [`MAX_DESCENDANTS`] of them, then removed deepest
+    /// first (CLAUDE.md §11). Absent already is removed.
     pub fn remove(&self) -> Result<(), Refusal> {
-        match fs::remove_dir(&self.dir) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(os_err("removing a box's cgroup", &self.dir, e)),
+        let mut found: Vec<PathBuf> = Vec::new();
+        let mut next = 0;
+        let mut dir = Some(self.dir.clone());
+        while let Some(at) = dir {
+            let listing = match fs::read_dir(&at) {
+                Ok(listing) => listing,
+                Err(e) if e.kind() == ErrorKind::NotFound => {
+                    dir = found.get(next).cloned();
+                    next = next.saturating_add(1);
+                    continue;
+                }
+                Err(e) => return Err(os_err("listing a box's cgroups", &at, e)),
+            };
+            for entry in listing {
+                let entry = entry.map_err(|e| os_err("listing a box's cgroups", &at, e))?;
+                if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                    if found.len() >= MAX_DESCENDANTS {
+                        return Err(Refusal::Exhausted {
+                            what: "cgroups beneath a box that its removal lists",
+                            bound: MAX_DESCENDANTS,
+                        });
+                    }
+                    found.push(entry.path());
+                }
+            }
+            dir = found.get(next).cloned();
+            next = next.saturating_add(1);
         }
+        for sub in found.iter().rev().chain(std::iter::once(&self.dir)) {
+            match fs::remove_dir(sub) {
+                Ok(()) => {}
+                Err(e) if e.kind() == ErrorKind::NotFound => {}
+                Err(e) => return Err(os_err("removing a box's cgroup", sub, e)),
+            }
+        }
+        Ok(())
     }
 
     /// What the box has used, from its cgroup files; a file the kernel doesn't have reads as 0.
@@ -414,4 +437,45 @@ pub(crate) fn read_set(path: &Path) -> Result<BTreeSet<String>, Refusal> {
     let text =
         fs::read_to_string(path).map_err(|e| os_err("reading cgroup controllers", path, e))?;
     Ok(text.split_ascii_whitespace().map(str::to_owned).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The test's own cgroup, from `/proc/self/cgroup` (cgroup v2's `0::<path>`).
+    fn own_cgroup() -> PathBuf {
+        let text = fs::read_to_string("/proc/self/cgroup").unwrap();
+        let path = text
+            .lines()
+            .find_map(|l| l.strip_prefix("0::"))
+            .unwrap()
+            .trim_start_matches('/');
+        Path::new(CGROUP_ROOT).join(path)
+    }
+
+    /// Found by the OCI validation lab (docs/design/shards-guest.md §6a, HEX-GUEST-20): a container with
+    /// a cgroup namespace and a writable cgroup2 mount makes cgroups of its own under its box's. Make
+    /// a box's cgroup with cgroups nested two deep beneath it, as the suite's inside.sh does, and remove
+    /// the box: expect every one gone, deepest first, and the box's own.
+    #[test]
+    fn a_box_is_removed_with_the_cgroups_its_container_made_beneath_it() {
+        let parent = own_cgroup().join(format!("hex-remove-test-{}", std::process::id()));
+        if let Err(e) = fs::create_dir(&parent) {
+            eprintln!(
+                "SKIP: this test's cgroup {} takes no child ({e})",
+                parent.display()
+            );
+            return;
+        }
+        let dir = parent.join("box");
+        for sub in ["", "lab", "lab/t1", "lab/t2", "other"] {
+            fs::create_dir(dir.join(sub)).unwrap();
+        }
+        let got = BoxCgroup::at(dir.clone()).remove();
+        let left = dir.exists();
+        let _ = fs::remove_dir(&parent);
+        assert_eq!(got, Ok(()));
+        assert!(!left, "the box's cgroup is left");
+    }
 }

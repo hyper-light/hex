@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, Weak};
 use std::time::{Duration, Instant};
 
 use hex_api::{BoxId, Exit, Proc, Refusal};
+use hex_core::record::ProcId;
 use rustix::buffer::spare_capacity;
 use rustix::event::epoll::{self, CreateFlags, EventData, EventFlags};
 use rustix::event::{PollFd, PollFlags, Timespec};
@@ -69,6 +70,8 @@ fn owned() -> Result<MutexGuard<'static, BTreeSet<u32>>, Refusal> {
 /// One `oci` box's init, watched through its pidfd.
 struct Init {
     pid: i32,
+    /// Which process it is, as its box's record names it: its exit goes into that record alone.
+    who: ProcId,
     /// `None` once reaped.
     pidfd: Option<OwnedFd>,
     /// How it ended, kept until the box's record holds it.
@@ -221,10 +224,15 @@ impl Supervisor {
         start_ticks: u64,
         container: Container,
     ) -> Result<(), Refusal> {
-        let raw = Pid::from_raw(pid).ok_or_else(|| Refusal::Invalid {
+        let not_a_pid = || Refusal::Invalid {
             what: "pid",
             why: format!("{pid} isn't a process id"),
-        })?;
+        };
+        let raw = Pid::from_raw(pid).ok_or_else(not_a_pid)?;
+        let who = ProcId {
+            pid: u32::try_from(pid).map_err(|_| not_a_pid())?,
+            start_ticks,
+        };
         let pidfd = rustix::process::pidfd_open(raw, PidfdFlags::empty())
             .map_err(|e| Refusal::os("pidfd_open of a container's init", e))?;
         let stat = Stat::of(pid)
@@ -249,14 +257,13 @@ impl Supervisor {
             EventFlags::IN,
         )
         .map_err(|e| Refusal::os("watching a container's init", e))?;
-        if let Ok(pid) = u32::try_from(pid) {
-            owned()?.insert(pid);
-        }
+        owned()?.insert(who.pid);
         inits.by_token.insert(token, id.clone());
         inits.by_box.insert(
             id.clone(),
             Init {
                 pid,
+                who,
                 pidfd: Some(pidfd),
                 exit: None,
                 container: Arc::new(container),
@@ -305,13 +312,12 @@ impl Supervisor {
     /// supervising thread hasn't come to it yet, so inspect never reads a stopped box without its
     /// exit. `None` when it runs or isn't watched.
     pub fn exit(&self, id: &BoxId) -> Result<Option<Exit>, Refusal> {
-        let mut inits = self.inits()?;
-        self.collect(&mut inits, id)
+        self.collect(id)
     }
 
     /// Stops watching box `id`'s init, which the box's delete is about to end; returns its pidfd, if
-    /// it hasn't been reaped, for the delete to reap it once the box is empty. After this nothing
-    /// writes the box's record on the init's behalf.
+    /// it hasn't been reaped, for the delete to reap it once the box is empty. An exit being recorded
+    /// as it's forgotten goes into this box's record alone, which the delete removes.
     pub fn forget(&self, id: &BoxId) -> Result<Option<Forgotten>, Refusal> {
         let mut inits = self.inits()?;
         inits.by_token.retain(|_, b| b != id);
@@ -431,70 +437,86 @@ impl Supervisor {
         }
     }
 
-    /// Reaps box `id`'s init if it has ended, and records how in its record. Holding `inits`, so a
-    /// delete's [`Supervisor::forget`] waits for the record write and nothing writes it after.
-    fn collect(&self, inits: &mut Inits, id: &BoxId) -> Result<Option<Exit>, Refusal> {
-        let Some(init) = inits.by_box.get_mut(id) else {
-            return Ok(None);
+    /// Reaps box `id`'s init if it has ended, and records how in its record. The record is written
+    /// with no lock of the supervisor's held, so one box's durable record write never holds up
+    /// another box's create, exec or delete, which take `inits` (goal 5 plan step 2); and only into
+    /// the record naming this init, so an exit recorded as its box is deleted, and another made under
+    /// its id, goes into no other box's record.
+    fn collect(&self, id: &BoxId) -> Result<Option<Exit>, Refusal> {
+        let (who, exit) = {
+            let mut inits = self.inits()?;
+            let Some(init) = inits.by_box.get_mut(id) else {
+                return Ok(None);
+            };
+            if let Some(pidfd) = &init.pidfd {
+                match rustix::process::waitid(
+                    WaitId::PidFd(pidfd.as_fd()),
+                    WaitIdOptions::EXITED | WaitIdOptions::NOHANG,
+                ) {
+                    Ok(None) => return Ok(None),
+                    Ok(Some(status)) => init.exit = Some(exit_of(&status)),
+                    // Not the agent's child any more: something else in this process reaped it.
+                    Err(Errno::CHILD) => init.exit = Some(Exit::Unknown),
+                    Err(e) => return Err(Refusal::os("reaping a container's init", e)),
+                }
+                // Closing the pidfd takes it out of the epoll set.
+                init.pidfd = None;
+                owned()?.remove(&init.who.pid);
+            }
+            (init.who, init.exit)
         };
-        if let Some(pidfd) = &init.pidfd {
-            match rustix::process::waitid(
-                WaitId::PidFd(pidfd.as_fd()),
-                WaitIdOptions::EXITED | WaitIdOptions::NOHANG,
-            ) {
-                Ok(None) => return Ok(None),
-                Ok(Some(status)) => init.exit = Some(exit_of(&status)),
-                // Not the agent's child any more: something else in this process reaped it.
-                Err(Errno::CHILD) => init.exit = Some(Exit::Unknown),
-                Err(e) => return Err(Refusal::os("reaping a container's init", e)),
-            }
-            // Closing the pidfd takes it out of the epoll set.
-            init.pidfd = None;
-            if let Ok(pid) = u32::try_from(init.pid) {
-                owned()?.remove(&pid);
-            }
-        }
-        let exit = init.exit;
         // Kept in memory until the record holds it; a failed write is tried again on the next
         // inspect or sweep, never dropped (§3). A box with no readable record has none to hold it:
         // inspect refuses such a box as broken, and recovery removes it. One change of the record, so
         // a count the socket writes at the same moment isn't lost.
-        self.store.update(id, |record| record.exit = exit)?;
-        inits.by_box.remove(id);
-        inits.by_token.retain(|_, b| b != id);
+        self.store.update(id, |record| {
+            if record.init != Some(who) {
+                return false;
+            }
+            record.exit = exit;
+            true
+        })?;
+        let mut inits = self.inits()?;
+        if inits.by_box.get(id).is_some_and(|init| init.who == who) {
+            inits.by_box.remove(id);
+            inits.by_token.retain(|_, b| b != id);
+        }
         Ok(exit)
     }
 
     /// The supervising thread's pass over the inits whose pidfds turned readable.
     fn ready(&self, tokens: &[u64]) -> Result<(), Refusal> {
-        let mut inits = self.inits()?;
+        let ids: Vec<BoxId> = {
+            let inits = self.inits()?;
+            tokens
+                .iter()
+                .filter_map(|token| inits.by_token.get(token).cloned())
+                .collect()
+        };
         let mut first_error = None;
-        for token in tokens {
-            let Some(id) = inits.by_token.get(token).cloned() else {
-                continue;
-            };
-            if let Err(e) = self.collect(&mut inits, &id) {
+        for id in &ids {
+            if let Err(e) = self.collect(id) {
                 first_error.get_or_insert(e);
             }
         }
         first_error.map_or(Ok(()), Err)
     }
 
-    /// Reaps the box processes orphaned to the agent that have ended, and records exits a failed
-    /// write left in memory. Under the spawning lock, so no child is taken before it is registered.
+    /// Records exits a failed write left in memory, then reaps the box processes orphaned to the agent
+    /// that have ended. The exits are recorded first, with no lock held across their writes; the
+    /// reaping is under the spawning lock, so no child is taken before it is registered.
     fn sweep(&self) -> Result<usize, Refusal> {
-        let _no_spawns = SPAWNING.write().map_err(poisoned)?;
-        let mut inits = self.inits()?;
-        let unrecorded: Vec<BoxId> = inits
+        let unrecorded: Vec<BoxId> = self
+            .inits()?
             .by_box
             .iter()
             .filter(|(_, init)| init.exit.is_some())
             .map(|(id, _)| id.clone())
             .collect();
         for id in &unrecorded {
-            self.collect(&mut inits, id)?;
+            self.collect(id)?;
         }
-        drop(inits);
+        let _no_spawns = SPAWNING.write().map_err(poisoned)?;
         let owned = owned()?;
         let mut reaped = 0usize;
         for pid in children()? {
@@ -656,6 +678,14 @@ impl Proc for Owned {
         let exit = self.proc.wait_for(timeout)?;
         Ok(self.seen(exit))
     }
+
+    fn kill(&mut self) -> Result<(), Refusal> {
+        self.proc.kill()
+    }
+
+    fn streams(&mut self) -> Result<hex_api::Given, Refusal> {
+        self.proc.streams()
+    }
 }
 
 impl Drop for Owned {
@@ -731,6 +761,17 @@ impl Proc for ProgramProc {
                 None => Err(e),
             },
         }
+    }
+
+    /// Ended already when a delete reaped it; else killed through its own `Proc`.
+    fn kill(&mut self) -> Result<(), Refusal> {
+        if self.done || self.recorded().is_some() {
+            return Ok(());
+        }
+        self.proc.kill()
+    }
+    fn streams(&mut self) -> Result<hex_api::Given, Refusal> {
+        self.proc.streams()
     }
 }
 

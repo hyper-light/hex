@@ -1,0 +1,23 @@
+# macos_box (the class's own path, hex_runtime::macos::MacRuntime), 20261101T015043Z, commit 459ded2
+os=26.2 build=25C56 cpu=Apple M4 Max ncpu=14 mem_bytes=38654705664
+load_at_start={ 1.61 2.45 2.67 }
+macos_box bound_mib=256 passes=3
+pass=1 members=1 overshoot_mib=0.8 load1=1.61
+pass=1 members=4 overshoot_mib=15.1 load1=1.61
+pass=1 members=8 overshoot_mib=30.5 load1=1.61
+pass=1 members=14 overshoot_mib=21.5 load1=1.61
+pass=1 members=28 overshoot_mib=56.0 load1=1.61
+pass=2 members=1 overshoot_mib=7.3 load1=1.61
+pass=2 members=4 overshoot_mib=24.5 load1=1.61
+pass=2 members=8 overshoot_mib=32.9 load1=1.61
+pass=2 members=14 overshoot_mib=54.4 load1=1.61
+pass=2 members=28 overshoot_mib=94.8 load1=1.61
+pass=3 members=1 overshoot_mib=1.6 load1=1.61
+pass=3 members=4 overshoot_mib=25.4 load1=1.61
+pass=3 members=8 overshoot_mib=6.7 load1=1.61
+pass=3 members=14 overshoot_mib=39.8 load1=1.61
+pass=3 members=28 overshoot_mib=587.5 load1=1.61
+pass=1 hold_seconds=2 watcher_cpu_pct_of_core=12.16 load1=1.61
+pass=2 hold_seconds=2 watcher_cpu_pct_of_core=14.55 load1=1.61
+pass=3 hold_seconds=2 watcher_cpu_pct_of_core=13.49 load1=1.96
+load_at_end={ 1.96 2.51 2.69 }

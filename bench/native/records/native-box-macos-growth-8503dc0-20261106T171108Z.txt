@@ -1,0 +1,29 @@
+native_box (crates/hex-bench/benches/native_box.rs), macOS driver hex: the growth rates it measures at bench start
+(os::growth_rates), three passes. These are the rates the MacRuntime's watcher paces by in the bench.
+Host adalundhe-macbook-pro (kiln runner; Ada's Mac for macOS builds): Apple M5 Max, 18 CPUs, 64 GiB, macOS 26.5.2.
+Commit 8503dc0, release build. 2026-11-06T17:11:08Z-17:11:36Z, as a one-shot launchd job
+hex-native-s7-growth-20261106T171107Z (outside kiln's runs); not niced.
+kiln's headroom guard: learned.json cpu_knee safe 0.332 cores; its paced dir was empty in every pass; the bench's
+processes, sampled with ps -o stat every 0.5 s, were never stopped (no T sample).
+Args: native_box <out> hex 20 2 20 (n 20, warmup 2, 20 bound runs).
+
+What each figure measures (os::growth_rates):
+- bytes_per_second: one box's bound (256 MiB) taken in this process and every byte filled with an incompressible
+  xorshift stream, a u64 at a time, as the bench's climbing program fills its memory; bytes over elapsed seconds.
+  A single member's fill rate, not the machine's memory bandwidth.
+- processes_per_second: `true` spawned and reaped n (20) times one after another; n over elapsed seconds. One
+  member's serial spawn rate, not a concurrent fork storm's.
+
+pass 1  2026-11-06T17:11:29Z  load 7.08 7.72 9.28  ps stat: 6 S
+  growth_rates bytes_per_second 1556758623 processes_per_second 246
+pass 2  2026-11-06T17:11:32Z  load 7.08 7.72 9.28  ps stat: 1 R, 3 S
+  growth_rates bytes_per_second 2468933904 processes_per_second 310
+pass 3  2026-11-06T17:11:34Z  load 7.87 7.87 9.32  ps stat: 4 R, 3 S
+  growth_rates bytes_per_second 2596898598 processes_per_second 426
+
+Fastest of the three (the worst a ceiling must cover): 2,596,898,598 bytes/s and 426 processes/s.
+The first pass ran cold (its fill page-faulted fresh memory); the rates rise across passes.
+Raw JSON and ps samples on the Mac: ~/.cache/hex-t7/native-s7/growth-20261106T171107Z/.
+
+Earlier figures (2.39 GB/s, 381 processes/s) came from a single unrecorded check at 549f547 (2026-11-06T15:45Z,
+load 6.6-10.6), whose JSON was not kept; they are superseded by this record and are not to be cited.

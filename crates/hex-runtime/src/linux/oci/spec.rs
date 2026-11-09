@@ -150,6 +150,17 @@ pub struct Capabilities {
     pub ambient: Vec<String>,
 }
 
+impl Process {
+    /// The stack limit this process runs under: its own RLIMIT_STACK soft limit where the spec sets one,
+    /// else the node's, which it inherits.
+    pub fn stack(&self) -> u64 {
+        self.rlimits
+            .iter()
+            .find(|r| r.kind == "RLIMIT_STACK")
+            .map_or_else(crate::linux::process::node_stack, |r| r.soft)
+    }
+}
+
 /// A resource limit (`setrlimit`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -466,6 +477,13 @@ impl Spec {
         if self.oci_version.is_empty() {
             return Err(OciError::Config("ociVersion is empty".to_owned()));
         }
+        // The init's arguments and environment, counted as execve counts them and held to the bound of the
+        // box's own stack (its RLIMIT_STACK, else the node's) before anything is made, so no box is left whose
+        // init can't start (HEX-RT-14).
+        if let Some(p) = &self.process {
+            crate::linux::process::fits_process(&p.args, &p.env, p.stack())
+                .map_err(|e| OciError::Config(format!("process: {e}")))?;
+        }
         if self.root.path.is_empty() {
             return Err(OciError::Config("root.path is empty".to_owned()));
         }
@@ -532,7 +550,42 @@ impl Spec {
                     .to_owned(),
             ));
         }
+        // A container in a user namespace that doesn't make a network namespace of its own can't mount a
+        // sysfs (the network namespace's owner must), so its /sys is a bind of one, the host's where it
+        // shares the host's network. Holding CAP_SYS_ADMIN, it could unmount the mounts over that bind
+        // and read every box's cgroup tree beneath it, which the bind's read-only remount leaves
+        // readable (docs/research/runtime/goal5-cgroupfs.md). Refused, the combination, on Ada's call
+        // (2026-10-31).
+        if self.in_user_namespace()
+            && !self.makes_namespace("network")
+            && self.holds_capability("CAP_SYS_ADMIN")
+        {
+            return Err(OciError::Config(
+                "a container in a user namespace that holds CAP_SYS_ADMIN without a network namespace \
+                 of its own could reach the host's cgroup tree through the /sys it must bind: give it \
+                 a network namespace of its own or drop CAP_SYS_ADMIN"
+                    .to_owned(),
+            ));
+        }
         Ok(())
+    }
+
+    /// Whether any of the process's capability sets names `cap`.
+    fn holds_capability(&self, cap: &str) -> bool {
+        self.process
+            .as_ref()
+            .and_then(|p| p.capabilities.as_ref())
+            .is_some_and(|c| {
+                [
+                    &c.bounding,
+                    &c.effective,
+                    &c.inheritable,
+                    &c.permitted,
+                    &c.ambient,
+                ]
+                .iter()
+                .any(|set| set.iter().any(|name| name == cap))
+            })
     }
 
     /// Whether the spec asks for a namespace of `kind` (made fresh, no `path`).
@@ -541,6 +594,13 @@ impl Spec {
             .namespaces
             .iter()
             .any(|n| n.kind == kind && n.path.is_none())
+    }
+
+    /// Whether the container runs in a user namespace of its own or one it joins by `path`: either way
+    /// it is outside the initial user namespace, where `mknod` of a device is refused and a device policy
+    /// is enforced by construction rather than by a cgroup device program the runtime loads.
+    pub fn in_user_namespace(&self) -> bool {
+        self.linux.namespaces.iter().any(|n| n.kind == "user")
     }
 }
 
@@ -555,6 +615,41 @@ mod tests {
         "mounts": [{"destination": "/proc", "type": "proc", "source": "proc"}],
         "linux": {"namespaces": [{"type": "pid"}, {"type": "mount"}], "maskedPaths": ["/proc/kcore"]}
     }"#;
+
+    /// HEX-RT-14 at create, from the box's own stack: do parse a config whose process sets RLIMIT_STACK to
+    /// 1 MiB (a 256 KiB exec bound) and has a 300 KiB variable, which the node's own default stack would take.
+    /// Expect it refused against the box's stack, by name.
+    #[test]
+    fn an_init_is_held_to_its_own_stack_limit() {
+        let value = "x".repeat(300 << 10);
+        let json = format!(
+            r#"{{"ociVersion":"1.3.0","root":{{"path":"rootfs"}},"process":{{"args":["/bin/sh"],"cwd":"/","env":["BIG={value}"],"rlimits":[{{"type":"RLIMIT_STACK","hard":1048576,"soft":1048576}}]}}}}"#
+        );
+        let r = Spec::parse(json.as_bytes());
+        assert!(
+            matches!(r, Err(OciError::Config(ref why)) if why.contains("allows 262144")),
+            "{r:?}"
+        );
+    }
+
+    /// HEX-RT-14 at create: do parse a config whose init has a variable one byte past this kernel's
+    /// per-string execve bound (read now); expect it refused as the config, naming the bound, before
+    /// anything is made, so no box is left that can't start.
+    #[test]
+    fn an_init_past_the_kernels_exec_bound_is_refused_at_parse() {
+        let most = crate::linux::process::exec_limit().string.unwrap();
+        // "BIG=" and the value with its NUL pass `most` by a byte.
+        let value = "x".repeat(most - "BIG=".len());
+        let json = format!(
+            r#"{{"ociVersion":"1.3.0","root":{{"path":"rootfs"}},"process":{{"args":["/bin/sh"],"cwd":"/","env":["BIG={value}"]}}}}"#
+        );
+        assert!(json.len() <= MAX_CONFIG_BYTES, "the config itself fits");
+        let r = Spec::parse(json.as_bytes());
+        assert!(
+            matches!(r, Err(OciError::Config(ref why)) if why.contains("execve")),
+            "{r:?}"
+        );
+    }
 
     #[test]
     fn a_minimal_config_parses_with_its_fields() {
@@ -597,6 +692,51 @@ mod tests {
                 matches!(&r, Err(OciError::Config(why)) if why.contains(field)),
                 "{field} should be refused with a Config error naming it, got {r:?}"
             );
+        }
+    }
+
+    // T-T7.1.4: a container in a user namespace that doesn't make a network namespace of its own can't
+    // mount a sysfs, so its /sys is a bind of the host's, and holding CAP_SYS_ADMIN it could unmount
+    // the mounts over that bind and read every box's cgroup tree beneath it
+    // (docs/research/runtime/goal5-cgroupfs.md). Such a spec is refused by name, from any capability
+    // set; with a network namespace of its own, without CAP_SYS_ADMIN, or outside a user namespace, it
+    // parses.
+    #[test]
+    fn a_user_namespaced_container_on_a_borrowed_network_with_cap_sys_admin_is_refused() {
+        let spec = |namespaces: &str, set: &str, cap: &str| {
+            format!(
+                r#"{{"ociVersion":"1.0.0","root":{{"path":"rootfs"}},
+                    "process":{{"args":["/bin/sh"],"capabilities":{{"{set}":["{cap}"]}}}},
+                    "linux":{{"namespaces":[{namespaces}]}}}}"#
+            )
+        };
+        let host_network = r#"{"type":"user"},{"type":"pid"},{"type":"mount"}"#;
+        let joined_network =
+            r#"{"type":"user"},{"type":"mount"},{"type":"network","path":"/proc/1/ns/net"}"#;
+        for set in [
+            "bounding",
+            "effective",
+            "inheritable",
+            "permitted",
+            "ambient",
+        ] {
+            for namespaces in [host_network, joined_network] {
+                let r = Spec::parse(spec(namespaces, set, "CAP_SYS_ADMIN").as_bytes());
+                assert!(
+                    matches!(&r, Err(OciError::Config(why))
+                        if why.contains("CAP_SYS_ADMIN") && why.contains("network namespace")),
+                    "CAP_SYS_ADMIN in {set} with {namespaces} should be refused by name, got {r:?}"
+                );
+            }
+        }
+        let own_network = r#"{"type":"user"},{"type":"network"},{"type":"mount"}"#;
+        let no_user_namespace = r#"{"type":"pid"},{"type":"mount"}"#;
+        for ok in [
+            spec(own_network, "bounding", "CAP_SYS_ADMIN"),
+            spec(host_network, "bounding", "CAP_CHOWN"),
+            spec(no_user_namespace, "bounding", "CAP_SYS_ADMIN"),
+        ] {
+            assert!(Spec::parse(ok.as_bytes()).is_ok(), "{ok} should parse");
         }
     }
 

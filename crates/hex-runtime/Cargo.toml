@@ -10,15 +10,28 @@ publish.workspace = true
 
 [dependencies]
 hex-api.workspace = true
+hex-client.workspace = true
 hex-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+shards-api.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true
 rustix.workspace = true
 seccompiler.workspace = true
+
+# The macOS `process` class: posix_spawn, proc_pid_rusage, kqueue, the Mach time-constraint watcher
+# (crates/hex-runtime/src/macos). rustix wraps kqueue, kill and waitid; libc binds the rest.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc.workspace = true
+rustix.workspace = true
+
+# The Windows `process` class: job objects and suspended, job-listed process creation
+# (crates/hex-runtime/src/windows). windows-sys binds these as unsafe foreign functions.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys.workspace = true
 
 [dev-dependencies]
 proptest = "1.12.0"

@@ -1,0 +1,12 @@
+# mem_bound_probe on adas-mac-studio-3 (rootless, uid 501), 20261101T060308Z, tree 18fd653
+os=26.2 build=25C56 cpu=Apple M4 Max
+uid=501
+ledger: task_set_phys_footprint_limit(128MB) kr=8 (0=SUCCESS, 8=KERN_NO_ACCESS) old=-1
+ledger: not armable rootless -> step 2 (privileged helper)
+jetsam: memorystatus_control SET_MEMLIMIT(self,128MB) ret=-1 errno=1 (Operation not permitted)
+jetsam: SET_MEMLIMIT(child,128MB) ret=-1 errno=1 (Operation not permitted)
+jetsam: child exited uncapped
+rlimit: setrlimit(RLIMIT_AS,192 MB) ret=-1 errno=22
+rlimit: RLIMIT_AS reached 512 MB, footprint=515 MB (NOT enforced)
+rlimit: setrlimit(RLIMIT_RSS,128 MB) ret=-1 errno=22
+rlimit: RLIMIT_RSS reached 512 MB, footprint=515 MB (NOT enforced)

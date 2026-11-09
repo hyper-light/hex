@@ -1,0 +1,24 @@
+# kiln run r3 on jupiter (background), job_probe.ps1 at 80fb38b, three whole passes; output kept on jupiter at
+# C:\Users\corph\.cache\hexnative\job-probe-80fb38b-20261101T075113Z\{out,exit}.txt (exit 0). Amphora's chain4 ran
+# beside it. Load is Win32_Processor's LoadPercentage at each pass's start. jupiter booted 2026-11-01T07:20:52Z after
+# enabling Containers and HypervisorPlatform.
+commit 80fb38b
+=== pass 1 2026-11-01T07:51:13Z load: 3% cpu
+host JUPITER | Microsoft Windows 11 Pro 10.0.26200 | AMD RYZEN AI MAX+ 395 w/ Radeon 8060S
+create n=200 box_ms p50=20.556 p99=22,876.068 max=23,189.930 | bare_ms p50=20.409 p99=22,797.185 max=23,046.143
+memory job_limit_bytes=268435456 peak_job_bytes=268480512 over_bytes=45056 peak_process_bytes=260513792 member: refused_after_mib=235 error=1455
+tree grandchild=21012 alive_before_close=True alive_after_close=False member_alive_after_close=False
+escape breakaway=refused error=5
+=== pass 2 2026-11-01T08:18:03Z load: 4% cpu
+host JUPITER | Microsoft Windows 11 Pro 10.0.26200 | AMD RYZEN AI MAX+ 395 w/ Radeon 8060S
+create n=200 box_ms p50=20.324 p99=21,546.046 max=21,862.416 | bare_ms p50=20.334 p99=21,662.261 max=21,738.289
+memory job_limit_bytes=268435456 peak_job_bytes=268484608 over_bytes=49152 peak_process_bytes=260505600 member: refused_after_mib=235 error=1455
+tree grandchild=21416 alive_before_close=True alive_after_close=False member_alive_after_close=False
+escape breakaway=refused error=5
+=== pass 3 2026-11-01T08:31:32Z load: 11% cpu
+host JUPITER | Microsoft Windows 11 Pro 10.0.26200 | AMD RYZEN AI MAX+ 395 w/ Radeon 8060S
+create n=200 box_ms p50=20.791 p99=21,852.351 max=22,029.910 | bare_ms p50=20.342 p99=21,502.473 max=21,612.431
+memory job_limit_bytes=268435456 peak_job_bytes=268472320 over_bytes=36864 peak_process_bytes=260517888 member: refused_after_mib=235 error=1455
+tree grandchild=18564 alive_before_close=True alive_after_close=False member_alive_after_close=False
+escape breakaway=refused error=5
+=== end 2026-11-01T08:39:31Z

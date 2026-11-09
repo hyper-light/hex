@@ -104,6 +104,66 @@ pub trait Networks {
     fn on_path(&self) -> Result<(), OciError>;
 }
 
+/// How a create makes its container: where its cgroup comes from, the network namespaces made ahead it
+/// may join one of, and how its init is started.
+struct Route<'a> {
+    cgroup: Cgroup,
+    networks: Option<&'a dyn Networks>,
+    start: Start<'a>,
+}
+
+/// How a create starts the container's init: the command line and the legacy adoption path spawn
+/// `hex __oci-init` (the shim, [`Runtime::create`] and [`Runtime::create_in_cgroup`]); the node agent's
+/// seam hands a seed the container to clone ([`Runtime::create_in_cgroup_seeded`], decision 5).
+enum Start<'a> {
+    /// Spawn `hex __oci-init`, which unshares the namespaces and forks the container.
+    Shim,
+    /// Hand a seed the container to clone, in place of that re-exec.
+    Seed(&'a dyn CloneInit),
+}
+
+/// Where a shim's standard streams come from, and through its fork its container's: the init and the
+/// program it execs keep them.
+#[derive(Clone, Copy)]
+enum ShimStdio {
+    /// The caller's, as the command line's `create` passes its own on (runc's pass-through).
+    Inherited,
+    /// The null device: what a seed-made container's streams are (the seed's own), so a seam container's
+    /// streams don't depend on whether a seed or the shim made it, nor carry the node agent's.
+    Null,
+}
+
+/// A seed that clones a container's init for the `Runtime` seam (decision 5, goal 5 plan step 4). The
+/// node agent implements it over its pool of `hex __oci-seed` processes: in place of the shim's re-exec
+/// of the hex binary, a seed clones the init with `clone3` into its cgroup and the fresh namespaces its
+/// spec asks for, as the agent's own child, and hands back its pid and a pidfd. No `hex` binary is
+/// exec'd per create.
+pub trait CloneInit {
+    /// Have a seed clone container `dir`'s init ([`CloneReq`]): born in `cgroup`, in the fresh namespaces
+    /// its spec asks for and the network namespace made ahead if one is given, writing the sync pipe as
+    /// the shim's child does (`R`, or `E` with a reason; `U` for a user namespace, whose maps the runtime
+    /// writes). Returns the init's pid in this process's pid namespace and a pidfd for it, the caller's to
+    /// own.
+    fn clone_init(&self, req: CloneReq<'_>) -> Result<(i32, OwnedFd), OciError>;
+
+    /// A container a seed can't make in one clone ([`init::needs_shim`]: it joins a pid or user namespace
+    /// by path) is made through the shim instead: counted here, so a run shows how often a create still
+    /// re-execs the hex binary.
+    fn through_shim(&self);
+}
+
+/// What [`CloneInit::clone_init`] is given: the container to make, its cgroup and a network namespace
+/// made ahead (if any), and the two pipe ends the init talks to the runtime over — the sync pipe it
+/// writes and the map pipe it reads the runtime's answer on.
+pub struct CloneReq<'a> {
+    pub bundle: &'a Path,
+    pub dir: &'a Path,
+    pub cgroup: &'a BoxCgroup,
+    pub network: Option<OwnedFd>,
+    pub sync_w: OwnedFd,
+    pub map_r: OwnedFd,
+}
+
 /// Where a container's cgroup comes from.
 enum Cgroup {
     /// Made from the spec's `cgroupsPath` under the cgroup root (the command line).
@@ -157,7 +217,16 @@ impl Runtime {
     /// the container init's pid. The container's cgroup is made from the spec's `cgroupsPath` under
     /// the cgroup root, as the runtime-spec's command line does.
     pub fn create(&self, id: &str, bundle: &Path, pid_file: Option<&Path>) -> Result<(), OciError> {
-        self.create_with(id, bundle, pid_file, Cgroup::FromSpec, None)
+        self.create_with(
+            id,
+            bundle,
+            pid_file,
+            Route {
+                cgroup: Cgroup::FromSpec,
+                networks: None,
+                start: Start::Shim,
+            },
+        )
     }
 
     /// Makes the container in a cgroup the caller already made and bounded, rather than from the
@@ -177,7 +246,45 @@ impl Runtime {
         cgroup: BoxCgroup,
         networks: Option<&dyn Networks>,
     ) -> Result<(), OciError> {
-        self.create_with(id, bundle, pid_file, Cgroup::Provided(cgroup), networks)
+        self.create_with(
+            id,
+            bundle,
+            pid_file,
+            Route {
+                cgroup: Cgroup::Provided(cgroup),
+                networks,
+                start: Start::Shim,
+            },
+        )
+    }
+
+    /// Makes the container as [`Runtime::create_in_cgroup`] does, but starts its init by handing it to a
+    /// seed to clone (decision 5, goal 5 plan step 4), in place of the shim's re-exec of the hex binary:
+    /// the `Runtime` seam's create, where `seeds` is the node agent's pool of `hex __oci-seed` processes.
+    /// The container's namespaces, cgroup, device policy, state and create-time hooks are the same as the
+    /// shim path's; only the init's start differs. A spec that joins a pid or user namespace by path can't
+    /// be made by a seed's one clone ([`init::needs_shim`]), so it is made through the shim, as the command
+    /// line makes every container, and the seeds count it ([`CloneInit::through_shim`]): the one create
+    /// that still re-execs the hex binary.
+    pub fn create_in_cgroup_seeded(
+        &self,
+        id: &str,
+        bundle: &Path,
+        pid_file: Option<&Path>,
+        cgroup: BoxCgroup,
+        networks: Option<&dyn Networks>,
+        seeds: &dyn CloneInit,
+    ) -> Result<(), OciError> {
+        self.create_with(
+            id,
+            bundle,
+            pid_file,
+            Route {
+                cgroup: Cgroup::Provided(cgroup),
+                networks,
+                start: Start::Seed(seeds),
+            },
+        )
     }
 
     fn create_with(
@@ -185,12 +292,11 @@ impl Runtime {
         id: &str,
         bundle: &Path,
         pid_file: Option<&Path>,
-        cgroup: Cgroup,
-        networks: Option<&dyn Networks>,
+        route: Route<'_>,
     ) -> Result<(), OciError> {
         let dir = self.dir(id)?;
         dir.create(id)?;
-        let result = self.create_inner(id, bundle, &dir, pid_file, cgroup, networks);
+        let result = self.create_inner(id, bundle, &dir, pid_file, route);
         if result.is_err() {
             let _ = dir.remove();
         }
@@ -203,9 +309,13 @@ impl Runtime {
         bundle: &Path,
         dir: &Dir,
         pid_file: Option<&Path>,
-        cgroup: Cgroup,
-        networks: Option<&dyn Networks>,
+        route: Route<'_>,
     ) -> Result<(), OciError> {
+        let Route {
+            cgroup,
+            networks,
+            start,
+        } = route;
         let config = std::fs::read(bundle.join("config.json"))
             .map_err(|e| OciError::os("reading config.json", e))?;
         let spec = Spec::parse(&config)?;
@@ -225,7 +335,7 @@ impl Runtime {
         let (cgroup, caller_owns) = match cgroup {
             Cgroup::FromSpec => (make_cgroup(&spec, id, &plan, &self.root)?, false),
             Cgroup::Provided(cg) => {
-                attach_device_program(&cg, &plan, spec.makes_namespace("user"), &self.root)?;
+                attach_device_program(&cg, &plan, spec.in_user_namespace(), &self.root)?;
                 (cg, true)
             }
         };
@@ -235,9 +345,29 @@ impl Runtime {
             dir,
             pid_file,
         };
-        // Asked last, just before the shim that joins it, so a create refused before it takes none.
-        let result = network_for(&spec, networks)
-            .and_then(|network| self.start_shim(&making, &spec, &cgroup, network, &Command::spawn));
+        // Asked last, just before the init that joins it, so a create refused before it takes none.
+        let result = network_for(&spec, networks).and_then(|network| match start {
+            Start::Shim => self.start_shim(
+                &making,
+                &spec,
+                &cgroup,
+                network,
+                ShimStdio::Inherited,
+                &Command::spawn,
+            ),
+            Start::Seed(seeds) if init::needs_shim(&spec) => {
+                seeds.through_shim();
+                self.start_shim(
+                    &making,
+                    &spec,
+                    &cgroup,
+                    network,
+                    ShimStdio::Null,
+                    &Command::spawn,
+                )
+            }
+            Start::Seed(seeds) => self.start_via_seed(&making, &spec, &cgroup, network, seeds),
+        });
         if result.is_err() && !caller_owns {
             // A create that fails leaves no cgroup behind either: whatever ran in it is killed first.
             let _ = end_cgroup(&cgroup, id);
@@ -251,13 +381,15 @@ impl Runtime {
         spec: &Spec,
         cgroup: &BoxCgroup,
         network: Option<OwnedFd>,
+        stdio: ShimStdio,
         spawn: &dyn Fn(&mut Command) -> std::io::Result<std::process::Child>,
     ) -> Result<(), OciError> {
+        // `pid_file` and the state write are the shared tail's ([`record_created`]).
         let Making {
             id,
             bundle,
             dir,
-            pid_file,
+            pid_file: _,
         } = *making;
         // Two pipes: the init writes the sync pipe, the runtime writes the map pipe. The shim opens its
         // ends, and a network namespace made ahead, by the path of this process's descriptors for them,
@@ -280,6 +412,11 @@ impl Runtime {
             .env(init::ENV_CGROUP, cgroup.dir());
         if let Some(network) = &network {
             cmd.env(init::ENV_NETWORK, by_path(network));
+        }
+        if let ShimStdio::Null = stdio {
+            cmd.stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
         }
         let mut shim =
             spawn(&mut cmd).map_err(|e| OciError::os("starting the container init", e))?;
@@ -321,25 +458,145 @@ impl Runtime {
         }
         match outcome {
             Ok((container_pid, start_time)) => {
-                let mut state = State::new(id, &bundle.to_string_lossy());
-                state.status = Status::Created;
-                state.pid = container_pid;
-                state.start_time = Some(start_time);
-                state.annotations = spec.annotations.clone();
-                state.cgroup = Some(cgroup.dir().to_string_lossy().into_owned());
-                state.poststart = Some(!spec.hooks.poststart.is_empty());
-                dir.put(&state)?;
-                if let Some(path) = pid_file {
-                    std::fs::write(path, format!("{container_pid}\n"))
-                        .map_err(|e| OciError::os("writing the pid file", e))?;
-                }
-                // The create-time hooks run in the runtime's namespace while the container waits at
-                // the exec FIFO (OCI §Lifecycle): prestart (deprecated) then createRuntime.
-                run_hooks(&spec.hooks.prestart, &state)?;
-                run_hooks(&spec.hooks.create_runtime, &state)?;
-                Ok(())
+                self.record_created(making, spec, cgroup, container_pid, start_time)
             }
             Err(e) => Err(e),
+        }
+    }
+
+    /// Starts the container's init by handing it to a seed to clone (decision 5, goal 5 plan step 4), in
+    /// place of the shim's re-exec. The seed clones the init into the cgroup and the fresh namespaces its
+    /// spec asks for, as the agent's own child, and hands back its pid and a pidfd. The runtime then runs
+    /// the same sync handshake as the shim path ([`handshake_seed`]: a user namespace's maps, the ready
+    /// signal), reads the init's start time and writes the `created` state. The pidfd is held only to end
+    /// the init cleanly if the handshake fails; the node agent opens its own for the init it watches, as
+    /// it does for a shim-forked init.
+    fn start_via_seed(
+        &self,
+        making: &Making<'_>,
+        spec: &Spec,
+        cgroup: &BoxCgroup,
+        network: Option<OwnedFd>,
+        seeds: &dyn CloneInit,
+    ) -> Result<(), OciError> {
+        // Two pipes, close-on-exec: the init writes the sync pipe, the runtime writes the map pipe. The
+        // seed hands the init's ends over `SCM_RIGHTS`, so they never need their close-on-exec cleared;
+        // they close in the init only when it execs the container's program.
+        let pipe =
+            || rustix::pipe::pipe_with(PipeFlags::CLOEXEC).map_err(|e| OciError::os("pipe", e));
+        let (sync_r, sync_w) = pipe()?;
+        let (map_r, map_w) = pipe()?;
+        let (pid, pidfd) = seeds.clone_init(CloneReq {
+            bundle: making.bundle,
+            dir: making.dir.path(),
+            cgroup,
+            network,
+            sync_w,
+            map_r,
+        })?;
+        // The runtime holds the read end of sync and the write end of map; the seed closed its copies of
+        // the init's ends once it had cloned, so the init alone holds them now.
+        let outcome = self
+            .handshake_seed(&sync_r, &map_w, pid, spec)
+            .and_then(|()| {
+                // The init is blocked at the exec FIFO, so its start time is its own.
+                state::start_time(pid).ok_or_else(|| {
+                    OciError::Broken(format!(
+                        "container {}'s init ended during create",
+                        making.id
+                    ))
+                })
+            });
+        match outcome {
+            Ok(start_time) => self.record_created(making, spec, cgroup, pid, start_time),
+            Err(e) => {
+                // A create that fails leaves nothing running: the init, if it still runs, ended through
+                // the pidfd the seed handed back (no pid-reuse race, unlike a kill by pid).
+                let _ = rustix::process::pidfd_send_signal(&pidfd, rustix::process::Signal::KILL);
+                Err(e)
+            }
+        }
+    }
+
+    /// Writes the `created` state for a container whose init is at the exec FIFO, its pid file (if asked)
+    /// and its create-time hooks: the tail both the shim and the seed paths share.
+    fn record_created(
+        &self,
+        making: &Making<'_>,
+        spec: &Spec,
+        cgroup: &BoxCgroup,
+        pid: i32,
+        start_time: u64,
+    ) -> Result<(), OciError> {
+        let mut state = State::new(making.id, &making.bundle.to_string_lossy());
+        state.status = Status::Created;
+        state.pid = pid;
+        state.start_time = Some(start_time);
+        state.annotations = spec.annotations.clone();
+        state.cgroup = Some(cgroup.dir().to_string_lossy().into_owned());
+        state.poststart = Some(!spec.hooks.poststart.is_empty());
+        making.dir.put(&state)?;
+        if let Some(path) = making.pid_file {
+            std::fs::write(path, format!("{pid}\n"))
+                .map_err(|e| OciError::os("writing the pid file", e))?;
+        }
+        // The create-time hooks run in the runtime's namespace while the container waits at the exec
+        // FIFO (OCI §Lifecycle): prestart (deprecated) then createRuntime.
+        run_hooks(&spec.hooks.prestart, &state)?;
+        run_hooks(&spec.hooks.create_runtime, &state)?;
+        Ok(())
+    }
+
+    /// The sync handshake for a create through a seed: the init writes the sync pipe, as the shim's child
+    /// does, but its pid came back from the seed, so the protocol carries no pid line. A `U` asks for the
+    /// user namespace's maps, which the runtime writes against `pid` (the init's) and acks on the map
+    /// pipe; `R` is the ready signal; `E` a setup failure. Returns once the init is ready, or the error.
+    fn handshake_seed(
+        &self,
+        sync_r: &OwnedFd,
+        map_w: &OwnedFd,
+        pid: i32,
+        spec: &Spec,
+    ) -> Result<(), OciError> {
+        let mut reader = BufReader::new(std::fs::File::from(
+            sync_r
+                .try_clone()
+                .map_err(|e| OciError::os("duplicating the sync pipe", e))?,
+        ));
+        let mut map_w = std::fs::File::from(
+            map_w
+                .try_clone()
+                .map_err(|e| OciError::os("duplicating the map pipe", e))?,
+        );
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let n = reader
+                .read_line(&mut line)
+                .map_err(|e| OciError::os("reading the sync pipe", e))?;
+            if n == 0 {
+                return Err(OciError::Broken(
+                    "the container init closed before its ready signal".to_owned(),
+                ));
+            }
+            let msg = line.trim_end();
+            match msg.chars().next() {
+                Some('U') => {
+                    write_id_maps(pid, &spec.linux.uid_mappings, &spec.linux.gid_mappings)?;
+                    map_w
+                        .write_all(&[1])
+                        .map_err(|e| OciError::os("acking the maps", e))?;
+                }
+                Some('R') => return Ok(()),
+                Some('E') => {
+                    return Err(OciError::Os {
+                        op: "container init",
+                        why: msg.get(1..).unwrap_or_default().to_owned(),
+                    });
+                }
+                None => {}
+                _ => return Err(OciError::Broken(format!("unknown sync message {msg:?}"))),
+            }
         }
     }
 
@@ -705,7 +962,7 @@ fn make_cgroup(
         }
     };
     let cg = BoxCgroup::at(path);
-    if let Err(e) = apply(&cg, plan, spec.makes_namespace("user"), state_root) {
+    if let Err(e) = apply(&cg, plan, spec.in_user_namespace(), state_root) {
         if made {
             let _ = cg.remove();
         }
@@ -1314,6 +1571,25 @@ echo "named $(readlink "$HEX_OCI_NETWORK")" >> "$HEX_OCI_DIR/report"
 sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/#/fdinfo/#')" >> "$HEX_OCI_DIR/report"
 "#;
 
+    /// A stand-in shim at `path`, written by a child process. Written from here, a descriptor open to write
+    /// it could reach a process another test forks in that moment, and until that process's exec closed it
+    /// Linux would refuse to run the file (ETXTBSY, execve(2)), as unit hex-g5x-s6-fdh9-20261103T215230Z saw.
+    fn stand_in_at(path: &Path, text: &str) {
+        let mut writer = Command::new("sh")
+            .args(["-c", "cat > \"$0\" && chmod 755 \"$0\""])
+            .arg(path)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        writer
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(text.as_bytes())
+            .unwrap();
+        assert!(writer.wait().unwrap().success());
+    }
+
     /// HEX-NETNS-6 (decision 4, goal 4 plan step 4): a create hands its shim a network namespace made
     /// ahead by the path of the agent's descriptor for it, which stays close-on-exec, so neither the
     /// shim nor any process the multi-threaded agent starts meanwhile (another create's shim, an exec'd
@@ -1323,12 +1599,9 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
     /// close-on-exec while the stand-in runs.
     #[test]
     fn a_namespace_made_ahead_reaches_the_shim_by_path_and_no_process_inherits_it() {
-        use std::os::unix::fs::PermissionsExt;
-
         let lab = tempfile::tempdir().unwrap();
         let stand_in = lab.path().join("shim");
-        std::fs::write(&stand_in, STAND_IN).unwrap();
-        std::fs::set_permissions(&stand_in, std::fs::Permissions::from_mode(0o755)).unwrap();
+        stand_in_at(&stand_in, STAND_IN);
         let rt = Runtime::with_helper(lab.path().join("state"), stand_in);
         let dir = rt.dir("c1").unwrap();
         dir.create("c1").unwrap();
@@ -1351,8 +1624,15 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
         };
         let cgroup = BoxCgroup::at(lab.path().to_owned());
         assert!(
-            rt.start_shim(&making, &spec, &cgroup, Some(network), &Command::spawn)
-                .is_err(),
+            rt.start_shim(
+                &making,
+                &spec,
+                &cgroup,
+                Some(network),
+                ShimStdio::Inherited,
+                &Command::spawn
+            )
+            .is_err(),
             "the stand-in ends without a word"
         );
 
@@ -1418,7 +1698,7 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
             cmd.spawn()
         };
         assert!(
-            rt.start_shim(&making, &spec, &cgroup, None, &spawn)
+            rt.start_shim(&making, &spec, &cgroup, None, ShimStdio::Inherited, &spawn)
                 .is_err(),
             "the stand-in ends without a word"
         );

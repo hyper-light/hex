@@ -24,11 +24,41 @@ harness = false
 name = "seccomp_compile"
 harness = false
 
+# The macOS `process` class's own path: overshoot past the memory bound and the watcher's CPU
+# (bench/native/macos/RESULT.md), through hex-runtime's macOS runtime and real `hex selftest-box` members.
+[[bench]]
+name = "macos_box"
+harness = false
+
+# The Windows `oci` class's create, start and delete through the seam (native plan step 4), beside Docker's
+# and containerd's runhcs on the same image (bench/native/windows/oci_compare.ps1).
+[[bench]]
+name = "windows_oci"
+harness = false
+
+# Each OS's `process` class against its named competitors on the same machine (native plan step 7,
+# bench/native/RESULT.md).
+[[bench]]
+name = "native_box"
+harness = false
+
 [target.'cfg(target_os = "linux")'.dependencies]
 hex-api.workspace = true
 hex-client.workspace = true
 hex-core.workspace = true
 hex-node.workspace = true
+hex-runtime.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+hex-api.workspace = true
+hex-runtime.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+hex-api.workspace = true
 hex-runtime.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

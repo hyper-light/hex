@@ -7,7 +7,8 @@
 # the namespace's root, so it can hand controllers down to its boxes. The test binaries and the `hex`
 # binary they name are mounted at the paths they were built at; the tests' HOME is a host directory
 # (LAB_HOME, ~/.cache/hex-t7/seam-root-home by default), since the container's own root is overlayfs, on
-# which the node refuses a layered box's writable layer by name. Exits non-zero on any failure.
+# which the node refuses a layered box's writable layer by name. /run is a tmpfs, as on a host, where a
+# root node keeps its containers' state (decision 1). Exits non-zero on any failure.
 # Usage: seam_root.sh <target dir the tests were built in> <test binary>...
 set -euo pipefail
 TGT=$(realpath "${1:?target dir}"); shift
@@ -17,5 +18,6 @@ HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
 LAB_HOME=${LAB_HOME:-$HOME/.cache/hex-t7/seam-root-home}
 mkdir -p "$LAB_HOME"
 docker run --rm --privileged --security-opt label=disable --cgroupns=private --network=none \
+  --tmpfs /run:rw,exec,nosuid,size=1g \
   -v /usr:/usr:ro -v "$TGT:$TGT" -v "$HERE:/opt/lab:ro" -v "$LAB_HOME:/root" -e HOME=/root \
   "$IMAGE" bash /opt/lab/seam_root_inside.sh "$@"

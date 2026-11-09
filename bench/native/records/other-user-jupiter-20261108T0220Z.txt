@@ -1,0 +1,39 @@
+stdio_probe refuse-as (native plan step 8): the refusal check with a process of ANOTHER user, on a temporary
+standard local account Ada approved for it (via the lead, 2026-11-08). Functional checks, not a bench.
+
+machine:  jupiter (AMD Ryzen AI MAX+ 395, 32 logical CPUs, Windows NT 10.0.26200), kiln run as corph (elevated)
+probe:    bench/native/windows/stdio_probe at the commit that adds this record (on 3fa61fd3), --release
+node:     hex node from cp/t7-native-s8-windows 7f49a51c (debug build, the windows_node tests' binary)
+driver:   bench/native/windows/stdio_probe/other_user.ps1
+when:     2026-11-08 02:20:00-02:20:03Z (run 4; runs 1-3 at 02:17-02:19Z stopped at CreateProcessWithLogonW,
+          error 1326: PowerShell's pipe added a byte-order mark to the password on stdin, 37 characters for
+          36. The probe now strips it, and the lengths match.)
+load:     jupiter at 95% privileged time, not this run's (see iocp record); a functional check
+
+The account: hexprobe<5 random digits>, a member of Users only, password 24 random bytes (RNG) in base64 +
+"Aa1!". It was held in the script's memory and on the probe's stdin only; neither printed nor written. Its
+processes were started by CreateProcessWithLogonW with no profile loaded.
+
+made standard user hexprobe40273 (S-1-5-21-1713965091-3066690348-99272262-1010)
+hex node (pid 46064): ready C:\ProgramData\hex-probe-hexprobe40273\node.sock
+refuse-as: a password of 36 characters came on stdin
+refuse-as acl: another user's connect to this user's socket file, nothing granted: refused at connect: An attempt was made to access a socket in a way forbidden by its access permissions. (os error 10013)
+refuse-as conn: another user's process was REFUSED ; it says "intruder conn: read 0 bytes" ; the caller got 1048576 of 1048576 bytes
+refuse-as pipe: another user's process was REFUSED ; it says "intruder pipe: read 0 bytes" ; the caller got 1048576 of 1048576 bytes
+refuse-as node: another user's connect to hex node's socket, granted the file: connected; then 87 bytes, then the end: SHEXW ... caller4 pid 68776 runs as another user than the node agent's
+probe exit 0
+cleanup: account hexprobe40273 gone; its profile gone; C:\Users\hexprobe40273 gone; C:\ProgramData\hex-probe-hexprobe40273 gone
+
+Every run's cleanup said the same for its own account (hexprobe65856, hexprobe37930, hexprobe41526,
+hexprobe40273). Checked afterwards (02:21Z): Get-LocalUser lists none of them; Win32_UserProfile has no
+profile but corph's and the service profiles; C:\Users holds corph and Public; no
+C:\ProgramData\hex-probe-* folder; no hex or stdio_probe process.
+
+Read:
+- afunix.sys checks the socket file's write access at connect, so with the file this user's and SYSTEM's
+  alone, another user is refused before any node code runs (WSAEACCES).
+- Granted the file, the connection-per-stream door is still refused by the node's peer-pid check, and the
+  named-pipe door by GetNamedPipeClientProcessId (the pipe's default DACL lets another user open it for
+  reading, so this check is what stops it). The caller got every byte each time.
+- hex node refuses another user's connection by name, sending the refusal and closing:
+  hex_afunix::same_user_or_system, the token user compared.

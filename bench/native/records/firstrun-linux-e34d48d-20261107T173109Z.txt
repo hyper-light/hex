@@ -1,0 +1,13 @@
+# How slow a program's end is on Linux in a first run after a rebuild, for the learned wait's Linux record
+# (hex_api::conformance::HostClass::Linux). fedora (i9-14900HX, Linux 6.19), 2026-11-07 17:31-18:16Z, systemd
+# user unit hex-windows-firstrun-20261107T173109Z through hex-slot (MemoryHigh 6G, MemoryMax 8G, CPUs 16-31,
+# -j 4), CARGO_TARGET_DIR ~/.cache/hex-t7/windows/target-measure. Tree: e34d48d plus the learned-wait change
+# (f8074122 + 8777fbab's code but Windows' record), in a copy whose LearnedWait::saw printed every answer.
+# Each cycle: append a comment to crates/hex-cli/src/selftest.rs (so hex and the test binaries relink), build,
+# then the first run of process_box, oci_box, oci_spec_box and node_socket (--nocapture). Script:
+# ~/.cache/hex-t7/windows/bin/firstrun.sh on fedora; logs ~/.cache/hex-t7/windows/logs/<unit>.1-3.
+cycle 1 exit 0 suites 873977 ms answers 294 slowest 604 723 904  load 19.74 28.68 37.33
+cycle 2 exit 0 suites 886624 ms answers 294 slowest 754 832 957  load 108.47 52.50 41.25
+cycle 3 exit 0 suites 884413 ms answers 294 slowest 693 695 767  load 59.91 37.54 37.97
+# Every test passed in every cycle. The slowest answer across the three first runs: 957 ms (cycle 2, load
+# 108). The suites' time is mostly their negative watches, each waiting out the 12.5 s bound the copy had.
