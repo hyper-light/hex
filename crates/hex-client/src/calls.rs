@@ -14,8 +14,12 @@
 //! as the agent reads no request while its answers wait for room in the client's socket, else waits on the connection
 //! for room and on a wake of its own, which the turn's holder writes as it hands the turn to it. The core waits on
 //! every connection the same way (poll(2), Winsock's `WSAPoll`), through the handle its transport lends it.
+//!
+//! The word that a given answer's ends were taken ([`Request::Taken`]), which the agent waits for before it lets its
+//! own copies go, is owed from the read that hands the answer on, before its taker wakes: queued ahead of every later
+//! request, never sent from inside a read, so the reader never waits on itself, and never lost ([`Owed`]).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -278,6 +282,21 @@ pub struct Shared<T: Transport> {
     reading: Mutex<T::Reading>,
     /// Held across one whole message's writes.
     sending: Mutex<()>,
+    /// What the client owes the agent ahead of any request it sends from now.
+    owed: Mutex<Owed>,
+}
+
+/// The words a client owes its agent ahead of any later request: each given answer's [`Request::Taken`], framed,
+/// queued by the read that hands the answer on before its taker wakes, so a read never waits to send. They go out
+/// whole, in order, under the send lock: first by whoever sends next, before its own message, and by the reader's
+/// turn's holder, which waits for room for them beside what comes, so one goes as soon as the agent reads. None is
+/// dropped: an unsent one leaves the agent holding the given ends, and with them its program's stdin open, until the
+/// connection closes. At most `bound` wait: the agent's budget of programs (`Hello::budgets`), which counts the given
+/// ends not yet taken, so the queue can't grow past what the agent can give (CLAUDE.md §2).
+#[derive(Default)]
+struct Owed {
+    words: VecDeque<Vec<u8>>,
+    bound: usize,
 }
 
 #[derive(Default)]
@@ -396,6 +415,7 @@ impl<T: Transport> Shared<T> {
             state: Mutex::new(State::default()),
             reading: Mutex::new(reading),
             sending: Mutex::new(()),
+            owed: Mutex::new(Owed::default()),
         }
     }
 
@@ -413,6 +433,10 @@ impl<T: Transport> Shared<T> {
         answer: Answer,
         fds: Vec<hex_api::End>,
     ) -> Result<(), Refusal> {
+        if let Answer::Given { .. } = &answer {
+            // Owed before its taker wakes below, so the word goes ahead of anything its caller sends after.
+            self.owe(header.id)?;
+        }
         let mut due: Vec<Due> = Vec::new();
         {
             let mut state = self.state()?;
@@ -487,6 +511,74 @@ impl<T: Transport> Shared<T> {
         Ok(())
     }
 
+    /// Owes the agent the word that exec `exec`'s given ends were taken, ahead of every later request ([`Owed`]). Past
+    /// the agent's budget of programs, which each given answer's ends hold until taken, the agent has given more than
+    /// it can, and the read that brought it ends the connection.
+    fn owe(&self, exec: u64) -> Result<(), Refusal> {
+        let word = wire::request(exec, &Request::Taken, wire::MAX_MESSAGE)
+            .map_err(Refusal::from)
+            .and_then(T::frame)?;
+        let mut owed = self.owed.lock().map_err(poisoned)?;
+        if owed.words.len() >= owed.bound {
+            return Err(Refusal::Exhausted {
+                what: "given answers whose ends the client owes the word it took, the node agent's programs",
+                bound: owed.bound,
+            });
+        }
+        owed.words.push_back(word);
+        Ok(())
+    }
+
+    /// Whether anything is owed ([`Owed`]).
+    fn owing(&self) -> bool {
+        self.owed.lock().is_ok_and(|owed| !owed.words.is_empty())
+    }
+
+    /// Writes what is owed, each word whole and in order, without waiting, the send lock held (`_whole`): whether all
+    /// of it is out. A word cut short on a stream keeps its rest first, so nothing comes between its bytes; one a
+    /// failed write cut short leaves the stream unable to carry another, and the connection goes.
+    fn send_owed(&self, _whole: &MutexGuard<'_, ()>) -> Result<bool, Sent> {
+        loop {
+            let word = self
+                .owed
+                .lock()
+                .map_err(|e| Sent::Refused(poisoned(e)))?
+                .words
+                .pop_front();
+            let Some(word) = word else {
+                return Ok(true);
+            };
+            let mut at = 0;
+            let sent = self.transport.try_send(&word, &mut at, NONE);
+            if !matches!(sent, Ok(true)) {
+                let rest = word.get(at..).unwrap_or_default().to_vec();
+                self.owed
+                    .lock()
+                    .map_err(|e| Sent::Refused(poisoned(e)))?
+                    .words
+                    .push_front(rest);
+            }
+            match sent {
+                Ok(true) => {}
+                Ok(false) => return Ok(false),
+                Err(e) => {
+                    if at > 0 {
+                        self.transport.shutdown();
+                    }
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    /// Writes what is owed now, if the send lock is free and there is room; whoever holds the lock writes it before its
+    /// own message and after it. The connection's end, should a word find it, is the next read's to see.
+    pub(crate) fn send_owed_now(&self) {
+        if let Ok(whole) = self.sending.try_lock() {
+            let _ = self.send_owed(&whole);
+        }
+    }
+
     /// The connection has ended: every call waiting and every program's `Proc` or completion hear why, and no one
     /// reads any more.
     pub(crate) fn close(&self, why: Refusal) {
@@ -541,14 +633,20 @@ impl<T: Transport> Shared<T> {
     }
 
     /// One wait and read by the turn's holder: the connection waited on at most `wait` (none: as long as it takes),
-    /// then what has come read and handed to whoever it is for. Whether anything came; the connection's end is the
+    /// for what comes and, while words are owed ([`Owed`]), for room to send them, then what has come read and handed
+    /// to whoever it is for, and what is owed sent if it can go. Whether anything came; the connection's end is the
     /// error, everyone waiting told why.
     fn turn(&self, wait: Option<Duration>) -> Result<bool, Refusal> {
-        let ready = match ready(self.transport.handle(), false, None, wait) {
+        let owing = self.owing();
+        let ready = match ready(self.transport.handle(), owing, None, wait) {
             Ok(ready) => ready,
             Err(why) => return Err(self.end(why)),
         };
-        if ready.read { self.recv() } else { Ok(false) }
+        let came = if ready.read { self.recv()? } else { false };
+        if owing || came {
+            self.send_owed_now();
+        }
+        Ok(came)
     }
 
     /// What has come, read by the turn's holder (or the event form's loop) without waiting and handed to whoever it
@@ -678,7 +776,7 @@ impl<'a, T: Transport> Caller<'a, T> {
         patience: Option<Duration>,
     ) -> Result<(), Sent> {
         let shared = self.shared;
-        let _whole = shared
+        let whole = shared
             .sending
             .lock()
             .map_err(|e| Sent::Refused(poisoned(e)))?;
@@ -687,8 +785,18 @@ impl<'a, T: Transport> Caller<'a, T> {
         // Made the first time the send waits with the turn another's, so a send that finds room pays nothing for it.
         let mut woken: Option<Arc<Wake>> = None;
         let sent = loop {
-            match shared.transport.try_send(bytes, &mut at, lent) {
-                Ok(true) => break Ok(()),
+            // What is owed goes first, whole, before this message's first byte.
+            let owed = if at == 0 {
+                shared.send_owed(&whole)
+            } else {
+                Ok(true)
+            };
+            match owed {
+                Ok(true) => match shared.transport.try_send(bytes, &mut at, lent) {
+                    Ok(true) => break Ok(()),
+                    Ok(false) => {}
+                    Err(e) => break Err(e),
+                },
                 Ok(false) => {}
                 Err(e) => break Err(e),
             }
@@ -716,6 +824,10 @@ impl<'a, T: Transport> Caller<'a, T> {
         // A message cut short on a stream leaves the connection unable to carry another: it goes.
         if sent.is_err() && at > 0 {
             shared.transport.shutdown();
+        }
+        // What came owed while it sent goes now if it can; the rest is the next sender's, or the reader's.
+        if sent.is_ok() {
+            let _ = shared.send_owed(&whole);
         }
         sent
     }
@@ -939,9 +1051,13 @@ impl<T: Transport> Conn<T> {
         };
         let mut at = 0;
         {
-            let Ok(_whole) = shared.sending.lock() else {
+            let Ok(whole) = shared.sending.lock() else {
                 return;
             };
+            // What is owed goes first: if it can't go now, neither can this, which comes after it.
+            if !matches!(shared.send_owed(&whole), Ok(true)) {
+                return;
+            }
             match shared.transport.try_send(&framed, &mut at, NONE) {
                 Ok(true) | Err(_) => return,
                 Ok(false) if at == 0 => return,
@@ -1003,6 +1119,7 @@ impl<T: Transport> Core<T> {
                     message_bytes: hello.limits.message_bytes.min(wire::MAX_MESSAGE),
                     ..hello.limits
                 };
+                self.conn.shared.owed.lock().map_err(poisoned)?.bound = hello.budgets.programs;
                 Ok(self)
             }
             Answer::Refused(r) => Err(r),
@@ -1119,9 +1236,16 @@ impl<T: Transport> Core<T> {
             .and_then(T::frame)
             .and_then(|bytes| {
                 let lent = with(id)?;
-                let _whole = shared.sending.lock().map_err(poisoned)?;
+                let whole = shared.sending.lock().map_err(poisoned)?;
                 let mut at = 0;
-                match shared.transport.try_send(&bytes, &mut at, lent) {
+                // What is owed goes first, as it does before any message.
+                let owed = shared.send_owed(&whole);
+                let sent = match owed {
+                    Ok(true) => shared.transport.try_send(&bytes, &mut at, lent),
+                    Ok(false) => Ok(false),
+                    Err(e) => Err(e),
+                };
+                match sent {
                     // The agent has gone: why reaches the completion through the loop, which sees the end.
                     Ok(true) | Err(Sent::Gone) => Ok(()),
                     Ok(false) => {

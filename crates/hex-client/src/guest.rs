@@ -468,6 +468,8 @@ impl Pump {
                 }
             }
         }
+        // What the reads owe the agent goes behind what waits, and with it.
+        self.shared.send_owed_now();
         match self.flush() {
             Ok(true) => Pumped::ReadWrite,
             Ok(false) => Pumped::Read,

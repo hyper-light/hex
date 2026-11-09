@@ -28,6 +28,14 @@
 //! answers a message of another identity, its hello first, with its own hello and ends the connection, and the client
 //! refuses an answer of another identity. A reader also refuses bytes past what a kind's body holds rather than
 //! skip them, so nothing is dropped silently.
+//!
+//! The client says it took a given answer's ends ([`Request::Taken`], not answered, its header's id the exec's)
+//! before anything it sends after the answer; the node agent keeps its own copies of them until then, or until the
+//! connection closes, so no end is ever in flight with no other reference to it: XNU's collector of descriptors in
+//! flight flushes a socket whose only reference is a message in flight, and it arrives reading nothing (on macOS
+//! 26.4, 719 of 20,000 sent so arrived dead with the sender's copy closed at once, none with it kept until
+//! received). Kept ends hold their program's place among the programs until taken ([`Limits::programs`],
+//! [`Budgets::programs`]).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -270,7 +278,8 @@ pub struct Hello {
 pub struct Budgets {
     /// Requests asked and not yet answered, on every connection together.
     pub in_flight: usize,
-    /// Programs execs started that the connections still watch, together.
+    /// Programs execs started that the connections still watch, or whose given ends their clients haven't yet said
+    /// they took ([`Request::Taken`]), together.
     pub programs: usize,
 }
 
@@ -284,7 +293,8 @@ pub struct Limits {
     /// Requests one connection may have asked and not yet had answered: the node keeps this many for each
     /// connection it admits, so one within it is never refused.
     pub in_flight: usize,
-    /// Programs one connection's execs started that it may still watch: kept for each connection likewise.
+    /// Programs one connection's execs started that it may still watch, or whose given ends its client hasn't yet
+    /// said it took ([`Request::Taken`]): kept for each connection likewise.
     pub programs: usize,
 }
 

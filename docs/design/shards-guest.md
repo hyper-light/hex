@@ -107,6 +107,12 @@ The node agent's socket is `SOCK_SEQPACKET` and carries an exec's stdio as `SCM_
   it and the connection in the caller's process, one bounded buffer per stream: by the guest client in process,
   or, through the host node's socket, by the caller's socket client, to which the node gives the connection's end
   with the exec's answer (the wire's `Given`). The node copies no stream and keeps none of the caller's pipes.
+  The node keeps its own copy of each end it gives until the client says it took them (`Taken`, owed from the
+  read that brings the answer, ahead of anything the client sends after it) or the connection closes: XNU's
+  collector of descriptors in flight flushes a socket whose only reference is a message in flight, so an end sent
+  with no other reference can arrive reading nothing (a probe on macOS 26.4 lost 719 of 20,000 so, and none with
+  the sender's copy kept until received). Kept ends hold their program's place among the node's programs until
+  taken.
 - **In the guest**, a relay (`hex guest relay`) accepts the host's vsock connections and speaks the node's own
   socket, one node connection per host control connection, so the node, its wire and its disconnect rule stay
   as they are (CLAUDE.md §8). Its framing, stream names and gathering of an exec's streams are a sans-IO core
@@ -576,7 +582,11 @@ Hex's tests of the channel, each citing its ID:
   whose ends ride the exec's answer to the caller's client: asked for, they are the caller's; given as the
   caller's own pipes, the client copies between them, and the node keeps none of the caller's pipes
   (`crates/hex-node/tests/guest_loop.rs`, over a stand-in guest whose programs' pids name no host process;
-  `hex_client`'s Linux tests, the client's copy).
+  `hex_client`'s Linux tests, the client's copy). The node keeps its copies of the ends it gives until the client
+  says it took them, so none arrives dead while other Unix sockets close (`crates/hex-node/src/serve/unix_tests.rs`:
+  as many given sockets as the probe sent, 20,000, under the same churn, none dead; 10,861 dead on macOS before
+  the node kept them), and they hold their program's place until then; the client's word goes ahead of any later
+  request, and with both sockets full its reader doesn't wait on itself (`hex_client`'s Linux tests).
 - HEX-GUEST-42: the conformance suite on `oci` boxes through a host node's socket served over
   `Recorded<WithGuest<…>>`, as the macOS and Windows nodes serve their guests, HEX-GUEST-18's simulated guest
   behind it: the guest reached from the host's node through the seam (native plan step 5), both stdio forms

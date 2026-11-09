@@ -792,8 +792,8 @@ fn carried_exec() -> wire::Request {
 /// HEX-GUEST-41 on the wire: exec a guest program, its stdin and stdout the caller's own pipes carried as
 /// descriptors: expect the node to answer with the guest's own stdio connections' ends (`Given`), for the caller's
 /// client to copy between, and to keep none of the caller's pipes (with this test's own ends of them gone, its stdin
-/// pipe has no reader and its stdout pipe no writer); what goes in the stdin end comes back on the stdout end, to
-/// its end, and the program's end follows.
+/// pipe has no reader and its stdout pipe no writer); once the caller says it took the ends, what goes in the stdin
+/// end comes back on the stdout end, to its end, and the program's end follows.
 #[cfg(target_os = "linux")]
 #[test]
 fn the_node_gives_a_guest_programs_streams_to_the_callers_client_and_keeps_none_of_its_pipes() {
@@ -817,6 +817,8 @@ fn the_node_gives_a_guest_programs_streams_to_the_callers_client_and_keeps_none_
     };
     assert_eq!((pid, given), (GUEST_PID, carried_streams()));
     assert_eq!(ends.len(), 2);
+    // The node keeps its copies of the ends until it hears they came, as a client says first.
+    raw.send(2, &wire::Request::Taken, &[]);
     assert_eq!(
         in_w.write(b"x").map_err(|e| e.kind()),
         Err(std::io::ErrorKind::BrokenPipe),
