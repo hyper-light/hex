@@ -24,6 +24,7 @@ use std::time::Instant;
 mod endwait;
 mod iocp;
 mod other;
+mod peerclose;
 
 use shards_afunix::{UnixListener, UnixStream};
 use windows_sys::Win32::Foundation::{
@@ -57,10 +58,19 @@ fn main() {
         Some("refuse-as") => other::refuse_as(&args[1], args.get(2).map(String::as_str)),
         Some("knock") => other::knock(&args[1], &args[2]),
         Some("endwait") => endwait::endwait(arg(&args, 1, 300)),
+        Some("peerclose") => peerclose::peerclose(
+            arg(&args, 1, 299),
+            std::time::Duration::from_millis(arg(&args, 2, 1000) as u64),
+        ),
+        Some("peerclose-caller") => peerclose::caller(
+            Path::new(&args[1]),
+            arg(&args, 2, 299),
+            std::time::Duration::from_millis(arg(&args, 3, 2000) as u64),
+        ),
         Some("linger") => loop {
             std::thread::sleep(std::time::Duration::from_secs(3600));
         },
-        _ => eprintln!("usage: stdio_probe bench <rounds> <bytes> | refuse | iocp | refuse-as <user> [node socket] (password on stdin) | endwait <rounds>"),
+        _ => eprintln!("usage: stdio_probe bench <rounds> <bytes> | refuse | iocp | refuse-as <user> [node socket] (password on stdin) | endwait <rounds> | peerclose <rounds> [watch_ms]"),
     }
 }
 
