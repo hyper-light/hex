@@ -712,6 +712,80 @@ fn an_end_of_a_stream_its_exec_neither_carried_nor_asked_for_is_refused() {
     assert_eq!(kill, Request::Call(Call::Kill { exec }));
 }
 
+/// Whether the write end `w` of a pipe has lost every reader, waiting at most `within`: Linux's pipe poll reports
+/// `POLLERR` on a write end whose readers are gone (`pipe_poll`, fs/pipe.c), asked or not.
+fn readerless(w: &std::io::PipeWriter, within: Duration) -> bool {
+    let mut ready = [PollFd::new(w, PollFlags::empty())];
+    let ts = Timespec {
+        tv_sec: i64::try_from(within.as_secs()).unwrap(),
+        tv_nsec: 0,
+    };
+    rustix::event::poll(&mut ready, Some(&ts)).unwrap() == 1
+        && ready[0].revents().contains(PollFlags::ERR)
+}
+
+/// Native plan step 8, guest stdio (HEX-GUEST-41): a guest program that ends without reading its stdin, its stdin's
+/// connection ending with it, while the caller holds its own stdin pipe open: expect the client to let the caller's
+/// pipe go with that connection's end, so the pipe has no reader once the program has ended, as a local program's
+/// own stdin pipe has none; never a copier left waiting on the caller.
+#[test]
+fn the_stdin_copier_lets_the_callers_pipe_go_when_its_programs_connection_ends() {
+    let (_dir, path, listener) = agent_socket();
+    let agent = std::thread::spawn(move || {
+        let conn = rustix::net::accept_with(&listener, SocketFlags::CLOEXEC).unwrap();
+        let (h, _, _) = next_request_with(&conn);
+        answer_with(&conn, h, &oci_hello(), &[]);
+        let (h, _, carried) = next_request_with(&conn);
+        assert_eq!(carried.len(), 1);
+        drop(carried);
+        let (stdin, stdin_end) = rustix::net::socketpair(
+            AddressFamily::UNIX,
+            SocketType::STREAM,
+            SocketFlags::CLOEXEC,
+            None,
+        )
+        .unwrap();
+        let given = Answer::Given {
+            pid: 42,
+            given: Streams {
+                stdin: true,
+                ..Streams::default()
+            },
+        };
+        answer_with(&conn, h, &given, &[stdin_end.as_fd()]);
+        drop(stdin_end);
+        // The program ends without reading its stdin: its connection ends with it.
+        drop(stdin);
+        answer_with(&conn, h, &Answer::Exited(Exit::Code(0)), &[]);
+        // Held open until the client has gone, as an agent's connection is.
+        let mut rest = [0u8; 64];
+        let _ = rustix::net::recv(&conn, &mut rest, RecvFlags::empty());
+    });
+    let client = Client::connect(&path).unwrap();
+    let (in_r, in_w) = std::io::pipe().unwrap();
+    let mut proc = client
+        .exec(
+            &BoxId::new("g").unwrap(),
+            Program::of(&["true"]),
+            Stdio {
+                stdin: Some(in_r),
+                ..Stdio::null()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        proc.wait_for(Duration::from_secs(30)).unwrap(),
+        Some(Exit::Code(0))
+    );
+    assert!(
+        readerless(&in_w, Duration::from_secs(30)),
+        "the client still reads the caller's stdin pipe after its program's connection ended"
+    );
+    drop(proc);
+    drop(client);
+    agent.join().unwrap();
+}
+
 /// This thread's voluntary context switches so far: each a wait it blocked in (proc(5), `/proc/thread-self/status`).
 fn voluntary_switches() -> u64 {
     std::fs::read_to_string("/proc/thread-self/status")
