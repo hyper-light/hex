@@ -2410,32 +2410,34 @@ decision covers the node's waits for an answer whose time it can observe (source
   no value is picked. It is never armed: its answers are only recorded, for the census that seeds it, so no first
   answer becomes its bound.
 - **By build profile**: a wait's record is its build's (`Patience::by_profile`): a release build is seeded from the
-  waits census's release arms, a debug build, the suites', from its debug arm, and measures until that arm records it,
-  since a debug build's answers are slower and the release record isn't theirs.
+  waits census's release arms, a debug build, the suites', from its debug-build arms (the debug arm and the suites,
+  whose waits run armed under the gates' load), and measures until one records it, since a debug build's answers are
+  slower and the release record isn't theirs.
 
 RFC 6298's timer was this decision's first draft and calibration reads its second; the lead ruled out both (the
 RFC's floor and constants are TCP's clocks'; a calibration read leaves the first wait unbounded).
 
 | Wait | Was | Now | Seed |
 | --- | --- | --- | --- |
-| a seed's hang bound and the shell's wait for its answer (createpool `ANSWER_PATIENCE`) | 30 s, copied | 2 × max(record, seen) | `seeds::CLONE_SLOWEST`, the `seeds.hang` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 29.565 ms, debug 100.815 ms<!-- /record --> |
+| a seed's hang bound and the shell's wait for its answer (createpool `ANSWER_PATIENCE`) | 30 s, copied | 2 × max(record, seen) | `seeds::CLONE_SLOWEST`, the `seeds.hang` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 29.565 ms, debug 652.938 ms<!-- /record --> |
 | a create's wait in line for a seed (`seeds`' line) | 1 s, picked | the same | the same record: a create in line waits for a busy seed's answer |
-| a claim's wait for its parked init's first word on its sync pipe (createpool `CLAIMS`; the lead's (A) of 2026-11-09, no early answer) | the seeds' hang bound, for the init's answer | learned | MEASURING: the `parked.ready` rows, from a census run with it in |
-| a record change's wait for the same box's (`WRITE_PATIENCE`) | 60 s, picked | learned, refused by type past it | the `store.turns` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 3.136 ms, debug 54.401 ms<!-- /record --> |
-| a create or delete's wait for the same box's (`TURN_PATIENCE`) | 120 s, picked | learned, from the holder's take | the `node.turns` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 43.627 ms, debug 305.809 ms<!-- /record --> |
-| a killed box's emptying, its programs' reaping and its init's end (`EMPTY_PATIENCE`, cgroups' `REMOVE_PATIENCE`), and a stopping server's wait for the programs it ended (serve `STOP_PATIENCE`) | 60 s each, picked or copied | learned from each kill to empty | the `node.emptying` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 19.771 ms, debug 127.753 ms<!-- /record --> |
-| a recovery's listing of a directory (`LIST_PATIENCE`) | 60 s, picked | learned per entry | the `node.listing` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 7,043 ns an entry, debug 68,562 ns<!-- /record --> |
+| a claim's wait for its parked init's first word on its sync pipe (createpool `CLAIMS`; the lead's (A) of 2026-11-09, no early answer) | the seeds' hang bound, for the init's answer | learned | the `parked.ready` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 12.896 ms, debug 652.431 ms<!-- /record --> |
+| a record change's wait for the same box's (`WRITE_PATIENCE`) | 60 s, picked | learned, refused by type past it | the `store.turns` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 3.136 ms, debug 367.733 ms<!-- /record --> |
+| a create or delete's wait for the same box's (`TURN_PATIENCE`) | 120 s, picked | learned, from the holder's take | the `node.turns` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 43.627 ms, debug 1,719.743 ms<!-- /record --> |
+| a killed box's emptying, its programs' reaping and its init's end (`EMPTY_PATIENCE`, cgroups' `REMOVE_PATIENCE`), and a stopping server's wait for the programs it ended (serve `STOP_PATIENCE`) | 60 s each, picked or copied | learned from each kill to empty | the `node.emptying` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 19.771 ms, debug 904.705 ms<!-- /record --> |
+| a recovery's listing of a directory (`LIST_PATIENCE`) | 60 s, picked | learned per entry | the `node.listing` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 7,043 ns an entry, debug 137,124 ns<!-- /record --> |
 | a list's worker's wait for its client to read a part (serve `READ_PATIENCE`) | 300 s, picked | learned | MEASURING: the `serve.reads` rows are short of 1,000 samples (only the parts that waited) |
-| a client's call's wait for its answer and its send (hex-client `ANSWER_PATIENCE`) | 300 s, picked | learned per call kind | each kind's `client.answer.<kind>` rows, a create's being <!-- record: bench/competitive/probes/waits_census.md -->release 43.655 ms, debug 220.155 ms<!-- /record --> |
+| a client's call's wait for its answer and its send (hex-client `ANSWER_PATIENCE`) | 300 s, picked | learned per call kind | each kind's `client.answer.<kind>` rows, a create's being <!-- record: bench/competitive/probes/waits_census.md -->release 43.655 ms, debug 49.798 ms<!-- /record --> |
 | the network check's settle and dump reads (netcheck `SETTLES`, `ANSWERS`) | the check's local `Slowest` | the shared core; past the bound the namespace is thrown away, counted | the `netcheck.answers` row: <!-- record: bench/competitive/probes/waits_census.md -->release 0.454 ms<!-- /record -->; MEASURING its debug build (the debug arm keeps no namespaces) and the settles (4 samples) |
 
 Each row's record is `bench/competitive/probes/waits_census.md`'s rows of the same wait name, from the waits' own
 timing points (`hex_node::census`): a release build's seed the largest max of the release arms of its run 4 (adacachy2,
-the record host in fedora's place), a debug build's run 3's debug arm's (fedora) until run 5. A wait that ran out for a
-slow answer is no sample but tells the census its bound (`Patience::ran_out`, `name >nanos`), which a row's record is
-never under (`waits_census.py`'s `seed`): run 4's suites arm, its waits armed, had node_socket's create answers run out
-at 440 ms in 27 of 79 loops while its row's max was 41.5 ms, so its debug rows seed nothing until run 5 records the
-run-outs. A seed past its hang bound tells the census nothing: a hung seed says nothing of an answer's time. The exec
+the record host in fedora's place), a debug build's run 5's largest answer of the debug-build arms, the debug arm and
+the suites (adacachy2), for every wait seeded from the same record, the tests' among them. A wait that ran out for a
+slow answer is no sample but tells the census its bound (`Patience::ran_out`, `name >nanos`), which a record is never
+under (`waits_census.py`'s `seed`), so a censored row's patience doubles each run until nothing runs out: run 5's
+suites ran `node.emptying` out at 255.505 ms under run 3's seed, and `node.listing` at its bound, which its seed now
+is. A seed past its hang bound tells the census nothing: a hung seed says nothing of an answer's time. The exec
 seeds' wait for a busy seed (`seed.rs`, a picked 30 s) is
 seeded from the clone record as the create seeds' are; and a create no seed came free for (line full, wait ended) is
 refused by type, `OciError::SeedsExhausted` as `Refusal::Exhausted { what: "create seeds", bound }`, counted by the
@@ -2448,9 +2450,9 @@ the claim borrows the request, whose descriptors stay the runtime's.
 
 **What would falsify it.** A healthy node retiring seeds as hung, or refusing a call or a record write, for an
 answer more than twice the record's slowest and the node's: then the record's distribution is narrower than the
-node's, and the evidence is the answer times around the refusal, and the census's run-outs. The release seeds are
-adacachy2's and the debug seeds fedora's; another host class starts from them and learns its own, and a slower class's
-first answers would show the record doesn't carry.
+node's, and the evidence is the answer times around the refusal, and the census's run-outs. The release and debug
+seeds are adacachy2's; another host class starts from them and learns its own, and a slower class's first answers
+would show the record doesn't carry.
 
 ## Axes that can't reach 4x, and why
 

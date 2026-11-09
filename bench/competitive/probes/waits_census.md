@@ -49,13 +49,16 @@ seed for a row under it, and names the row's n.
 | `lifecycle.exec` (from `seam-<arm>.json`) | a container's exec of `true`, to the program's end | `debug` | the conformance suites' patience, and every test that takes it | `crates/hex-api/src/conformance.rs`, `PROGRAM_END` |
 | `client.answer.exec` and `lifecycle.exec` | the server's answer to a call over its socket (an exec's the slowest kind the socket's tests ask) and a program's end | `debug`: the larger, since one patience bounds both | the socket's tests' patience | `crates/hex-node/src/serve/tests.rs`, `RECORDED` |
 | `seeds.hang` | a seed's answer to a create, which `seeds.wait` and `exec_seeds.answers` share by design | every release arm; `debug` | `CLONE_SLOWEST`, `CLONE_SLOWEST_DEBUG` | `crates/hex-core/src/seeds.rs`, `crates/hex-node/src/seed.rs` |
-| `parked.ready` | a claim's wait for its parked init's first word on its sync pipe, from the claim's send: the init's ready on a root node, with no answer before it (the lead's (A) of 2026-11-09) | every release arm; `debug` | the claim's patience by build profile, MEASURING until a run with it in records it | `crates/hex-node/src/createpool.rs`, `CLAIMS` |
+| `parked.ready` | a claim's wait for its parked init's first word on its sync pipe, from the claim's send: the init's ready on a root node, with no answer before it (the lead's (A) of 2026-11-09) | every release arm; `debug` and `suites` | the claim's patience by build profile, from run 5 | `crates/hex-node/src/createpool.rs`, `CLAIMS` |
 | `node.emptying`, `netns.make`, `store.turns`, `node.turns`, `client.answer.create`, `.start`, `.delete`, `.exec`, `node.listing`, `lifecycle.exec` | the facts the tests wait for that these rows record, or that one operation with a row makes within itself | `debug` | the tests' patiences for those facts | `crates/hex-testkit/src/waits.rs`, `crates/hex-api/src/conformance.rs` |
 | `test.<crate>.<fact>` | a test's wait for a fact no recorded operation makes (a refill thread's, a checker's, a line delivered by the test's reader) | `suites` | that wait, measuring until its row has 1,000 samples | the test's own `Patience::measuring` (`hex_testkit::waits::until`) |
 
 From run 3 the arm column is run 1's method: a release build's seed is the largest max of every release arm with a
-row's 1,000 samples, in runs 1 and 3; a debug build's is the debug arm's (`Patience::by_profile`). Each is the census's
-nanoseconds as recorded, never rounded below the max.
+row's 1,000 samples, in runs 1 and 3; a debug build's is the debug arm's (`Patience::by_profile`). From run 5 a debug
+build's is the largest answer of its debug-build arms, the `debug` arm and the `suites` (whose waits run armed, under
+the gates' load), for every wait seeded from the same record, the tests' among them, and never under a bound one ran
+out at: a row seeds once it has 1,000 answers or ran out, and its answers short of 1,000 count as seen. Each is the
+census's nanoseconds as recorded, never rounded below the max.
 
 Until a run is recorded here each of those waits stays MEASURING in the code, naming this file's row. Where a row's n
 is short of 1,000 (`client.answer.hello` is one a connection; `node.listing` a restart's entries; `serve.reads` only
@@ -183,3 +186,47 @@ load 18.4 at start, 9.8 at end; unit hex-lead-census-20261109T161736Z). The rele
   d6bfb3f0 (e316cbf6); and `oci_box`'s wait for "the ended orphan to be reaped", 78.26 ms, the program-end record for
   a fact no program's end is. In 78: the shim's bystander, holding the tests' own pipes (7d8bdb1d). In 27:
   `node_socket`'s contract test, "none came in 440 ms".
+
+**Run 5** (2026-11-09T18:40Z, adacachy2 as run 4, Linux 7.3.3-1-cachyos; `waits-census-20261109T184054Z`; hex
+d8a0d4967935f6c1 and seam_oci c975f1df17e86d85 built at goal 5's tree ef259dbe, with g6's claim (A) and the censored
+run-outs; four arms on CPUs 4-15, every wait in the node's arms unarmed, and the suites arm beside them on CPUs 16-31, 53
+loops, its waits armed and each run-out told, `name >nanos`; load 10.1 at start, 13.8 at end). The debug-build arms, ms
+(n where under 1,000; "ran out" the count and the largest bound):
+
+| row | debug | suites | debug seed |
+| --- | ---: | ---: | ---: |
+| `client.answer.create` | 49.798 | 32.842 | 49.798 |
+| `client.answer.delete` | 36.988 | 706.091 | 706.091 |
+| `client.answer.exec` | 17.891 | 100.781 | 100.781 |
+| `client.answer.hello` | 1.540 | 17.232 | 17.232 |
+| `client.answer.inspect` | 12.008 | 4.210 | 12.008 |
+| `client.answer.list` | 868.709 | 4.884 | 868.709 |
+| `client.answer.netns` | 0.294 | 2.734 (n 137) | 2.734 |
+| `client.answer.signal` | 0.173 | 3.952 (n 357; ran out 10, at 0.944) | 3.952 |
+| `client.answer.start` | 16.121 | 13.277 (ran out 13, at 15.220) | 16.121 |
+| `client.answer.usage` | 0.115 | 0.387 (n 447; ran out 2, at 0.325) | 0.387 |
+| `lifecycle.exec` | 18.003 | - | 18.262 (`test.oci_box.program`'s, of 272) |
+| `netns.make` | 50.825 | - | 50.825 |
+| `node.emptying` | 14.875 | 904.705 (ran out 7, at 255.505) | 904.705 |
+| `node.listing` (an entry) | 0.001 | 0.036 (ran out 4, at 0.137) | 0.137 |
+| `node.turns` | 49.681 | 1719.743 | 1719.743 |
+| `parked.ready` | 4.094 | 652.431 | 652.431 |
+| `seeds.hang` | 19.132 | 652.938 | 652.938 |
+| `store.turns` | 2.180 | 367.733 | 367.733 |
+
+- Seeded at this run, at the census's nanoseconds: every debug build's wait, by run 5's rule above, the suites' answers
+  deciding most of them (the debug arm runs one bench at a time; the suites run the gates' load). A seed shared by
+  several waits takes theirs too: `seeds.hang` with the line's (`seeds.wait`, ran out 53 at 22.222 in the suites) and the
+  exec seeds' (120.691); `lifecycle.exec` with the tests' program waits, `oci_box`'s program run at 18.262 above the
+  debug arm's 18.003. `node.listing`'s seed is the bound run 3's ran out at, 137,124 ns an entry, so its patience
+  doubles.
+- **`parked.ready`** (the claim's wait, g6's (A)) is seeded by build profile: release 12.896 ms, the largest max of the
+  release arms (tmpfs 12.896, disk 7.433, owner 3.022), debug 652.431 ms, the suites'.
+- The release seeds stay run 4's. Still MEASURING: `serve.reads` (970 to 991 an arm), `netcheck.settles` (4), and
+  `netcheck.answers`' debug build (no debug-build row).
+- **The suites**: 53 loops, every one exit 101. In all 53: `oci_box`'s `oci_boxes_report_their_inits_exit_through_the_seam`,
+  its delete refused "emptying a box: box swap-exec's init still runs 326.645366ms after SIGKILL", `node.emptying`'s
+  debug patience under run 3's seed (127.753 ms; 904.705 ms now). In 15, `node_socket`'s contract test; in 12,
+  `oci_spec_box`'s conformance, its HEX-RT-2 emptying the same, "256.71229ms after SIGKILL"; in 5, `oci_reuse`'s
+  cgroup reuse within its owner; once each, `process_box`'s contract, `node`'s `a_listing_teaches_the_next_its_wait` and
+  the init's `a_start_whose_reader_is_gone_is_abandoned_not_a_sigpipe`.

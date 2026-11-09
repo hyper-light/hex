@@ -54,3 +54,27 @@ against 0.336 and 0.411; exec 1.562 and 1.674 against 1.795 and 1.766.
   flight on one connection), 42, 54 and 55 lifecycles/s against 43, 55 and 52 in process (best of 2). What limits
   both here is the node's create (about 17 ms at p50 on this loaded host), not the socket. libcrun did 63, 308 and
   359.
+
+## Run 2 (2026-11-09, adacachy2): the client's reading thread removed
+
+- **What it compares:** `hex-client` at 601513bb (A), whose reading thread handed each answer to the caller waiting
+  for it, against 8ded733f (B), where whoever waits on the connection reads it, one at a time, so an answer wakes the
+  caller it answers and no thread between (goal 16, the socket's per-call cost). Only seam_oci differs, as it links the
+  client: A's sha256 3537edbef1c60edd, B's ed6094a51de98385. The node, `hex` 2a45892e0b333eae, is the same binary in
+  every pass.
+- **Host and load:** adacachy2, its bench containers in a Linux VM (kernel 7.3.3-1-cachyos, x86_64, 32 CPUs). Four
+  passes in ABBA order, 2026-11-09T18:31:40Z to about 18:41Z; the 1-minute load 10.7 to 17.2 at their starts and ends,
+  from other work on the host: noisy, so not of record by CLAUDE.md §7.
+- **Harness:** the OCI pass (`docker_pass.sh`, with cab0c3b7's fix so each pass builds its own commit), boxes of no
+  owner, 10,000 creates a round, two rounds a pass. Out dirs on adacachy2: `~/.cache/hexpass/sock-{1,4}-noowner-A-601513bb`
+  and `sock-{2,3}-noowner-B-8ded733f`; every pass recorded errors `{}`.
+
+| Over the socket, p50 in µs, best of 2 a pass | A, passes 1 and 4 | B, passes 2 and 3 |
+|---|---|---|
+| create | 195.5, 172.6 | 179.6, 182.0 |
+| inspect of a running box (`rtt`) | 20.1, 14.7 | 17.6, 17.9 |
+
+- **No change is measurable here.** Each arm's two passes differ by more than the arms do (A's creates 195.5 against
+  172.6, its round trips 20.1 against 14.7), so the one wakeup a call the change removes is under this host's noise at
+  this load. It is kept: no pass shows harm, and the node's own handoff, the I/O thread's to a worker, is the other
+  half (decision 3, "Threads").

@@ -138,8 +138,8 @@ impl Store {
             // reported as a fault, refused by type, never waited on for ever (CLAUDE.md §4): a record write has
             // no other path. Seeded by build profile from the `store.turns` rows of
             // `bench/competitive/probes/waits_census.md`: release, run 4's largest max of the release arms, 3.136 ms
-            // (adacachy2, its tmpfs arm, of 138,598); debug, run 3's debug arm's, 54.401 ms (fedora, of 139,118), until
-            // run 5 records the suites' run-outs.
+            // (adacachy2, its tmpfs arm, of 138,598); debug, run 5's largest answer of the debug-build arms, the debug
+            // arm and the suites' (adacachy2), 367.733 ms (the suites', of 4,109,178).
             turns: Arc::new(Turns::new(
                 "changing a box's record",
                 "record changes under way",
@@ -147,7 +147,7 @@ impl Store {
                 Patience::by_profile(
                     "store.turns",
                     Duration::from_nanos(3_135_674),
-                    Some(Duration::from_nanos(54_401_152)),
+                    Some(Duration::from_nanos(367_732_601)),
                 ),
             )),
             synced: Arc::default(),

@@ -48,9 +48,11 @@ use crate::patience::Patience;
 /// host class has no record yet; it starts from this one's and learns its own.
 pub const CLONE_SLOWEST: Duration = Duration::from_nanos(29_564_846);
 
-/// The same answer's slowest in a debug build, the census's debug arm (run 3, 100.815 ms of 51,915: 100,815,120 ns),
-/// which a debug build's waits are seeded from (decision 9, by build profile).
-pub const CLONE_SLOWEST_DEBUG: Duration = Duration::from_nanos(100_815_120);
+/// The same answer's slowest in a debug build, which a debug build's waits are seeded from (decision 9, by build
+/// profile): run 5's largest answer of the debug-build arms, the debug arm and the suites' (adacachy2), for it and the
+/// waits seeded from it (the line's, the exec seeds'), never under a bound one ran out at: 652.938 ms (652,937,547 ns,
+/// the suites' `seeds.hang`, of 493,529).
+pub const CLONE_SLOWEST_DEBUG: Duration = Duration::from_nanos(652_937_547);
 
 /// The line's wait's name, as the waits census records it.
 pub const WAIT: &str = "seeds.wait";

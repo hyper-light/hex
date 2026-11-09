@@ -87,11 +87,12 @@ pub const REMOVE_PATIENCE: Duration = Duration::from_secs(60);
 /// Ada's 2026-11-06 rule, the lead's failure-bound rule), refused by type past it (CLAUDE.md §2, §4). Seeded by
 /// build profile from the `node.listing` rows of `bench/competitive/probes/waits_census.md`: release, run 4's largest
 /// max of the release arms with a row's 1,000 samples, 7.043 us an entry (adacachy2, its disk arm, of 1,105); debug,
-/// run 3's debug arm's, 68.562 us (fedora, of 1,105), until run 5 records the suites' run-outs.
+/// run 5's suites', where run 3's seed ran out at 137.124 us an entry: the bound it ran out at, above every answer of
+/// the debug-build arms, so its patience doubles (decision 9).
 static LISTING: Patience = Patience::by_profile(
     "node.listing",
     Duration::from_nanos(7_043),
-    Some(Duration::from_nanos(68_562)),
+    Some(Duration::from_nanos(137_124)),
 );
 
 /// A point of an `oci` box's create where a debug build's node, once armed ([`Node::with_crash_point`]),
@@ -362,11 +363,12 @@ impl Node {
                 MAX_BOXES,
                 // Seeded by build profile from the `node.turns` rows of `bench/competitive/probes/waits_census.md`:
                 // release, run 4's largest max of the release arms, 43.627 ms (adacachy2, its tmpfs arm, of 92,042);
-                // debug, run 3's debug arm's, 305.809 ms (fedora, of 92,042), until run 5 records the suites' run-outs.
+                // debug, run 5's largest answer of the debug-build arms, the debug arm and the suites' (adacachy2),
+                // 1,719.743 ms (the suites', of 398,973).
                 Patience::by_profile(
                     "node.turns",
                     Duration::from_nanos(43_627_499),
-                    Some(Duration::from_nanos(305_809_337)),
+                    Some(Duration::from_nanos(1_719_743_234)),
                 ),
             ),
             #[cfg(debug_assertions)]

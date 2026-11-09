@@ -1038,13 +1038,16 @@ fn round_trip(
 
 /// A claim's wait for its parked init's first word on its sync pipe, from the claim's send (the lead's (A) of
 /// 2026-11-09: no early answer): the init's ready on a root node's pruned path, its ask for its user namespace's maps
-/// on a rootless node's classic one. MEASURING until a waits census with it in records it (`waits_census.md`'s
-/// `parked.ready` row); its seed then comes by build profile from that run (decision 9). Until then nothing in the
-/// agent bounds a claimed init that lives on and says nothing: the create waits for it, as a create waits for a
-/// seed-cloned init's word after the seed's answer (`Runtime::handshake_seed` reads with no bound). An init that ends or
-/// refuses is caught at once, its claim socket closed or carrying the refusal.
-static CLAIMS: hex_core::patience::Patience =
-    hex_core::patience::Patience::measuring("parked.ready");
+/// on a rootless node's classic one. Seeded by build profile from the `parked.ready` rows of
+/// `bench/competitive/probes/waits_census.md` run 5 (decision 9): release, the largest max of the release arms,
+/// 12.896 ms (adacachy2, its tmpfs arm, of 29,007); debug, the largest answer of the debug-build arms, the debug arm and
+/// the suites', 652.431 ms (the suites', of 190,580). An init that ends or refuses is caught at once, its claim socket
+/// closed or carrying the refusal; one that says nothing within the claim's patience falls back to a seed's clone.
+static CLAIMS: hex_core::patience::Patience = hex_core::patience::Patience::by_profile(
+    "parked.ready",
+    std::time::Duration::from_nanos(12_896_493),
+    Some(std::time::Duration::from_nanos(652_430_750)),
+);
 
 /// Sends a parked init its claim and waits, within `patience` (`None` while the claim's wait measures: unbounded), for
 /// the claim to be taken or not: how the init makes its mount namespace, or why not. A claimed init says nothing on its
