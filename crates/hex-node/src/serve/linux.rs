@@ -321,11 +321,6 @@ impl Os for Linux {
         Ok(pidfd)
     }
 
-    fn kill(&self, watch: &OwnedFd) {
-        // Fails only for one that has ended already, which is reaped and counted just the same.
-        let _ = rustix::process::pidfd_send_signal(watch, Signal::KILL);
-    }
-
     fn unwatch_program(&self, watch: OwnedFd) {
         // Closing the pidfd takes it out of the epoll set.
         drop(watch);

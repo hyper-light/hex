@@ -38,7 +38,7 @@
 //!   bounds hold.
 //!
 //! The disconnect rule (decision 3): when a connection closes, every program its execs started that it
-//! still watches is sent KILL through the OS's watch of it, reaped, and counted in its box ([`Host::abandoned`]),
+//! still watches is killed by its own runtime (`Proc::kill`), reaped, and counted in its box ([`Host::abandoned`]),
 //! which inspect reports; none is left running unwatched. A program the client released (it dropped
 //! the `Proc`) runs on, as a dropped in-process `Proc` does. A request the agent has read is carried
 //! out whether or not its client stays to take the answer; one it hadn't read is let go with the
@@ -373,9 +373,6 @@ pub trait Os: Send + Sync + 'static {
     fn hung_up(&self, conn: &Self::Conn) -> bool;
     /// Watches the program `pid` under `token` until it ends.
     fn watch_program(&self, pid: u32, token: u64) -> Result<Self::Watch, Unwatched>;
-    /// Sends the watched program KILL, for the disconnect rule; one that has ended already is reaped and
-    /// counted just the same. A caller's own kill goes through the program's runtime instead (`Proc::kill`).
-    fn kill(&self, watch: &Self::Watch);
     /// Stops watching a program.
     fn unwatch_program(&self, watch: Self::Watch);
     /// A program's stdio from what its exec carried, in the order `streams` names them; anything that
@@ -434,9 +431,6 @@ impl<O: Os> Os for Arc<O> {
     }
     fn watch_program(&self, pid: u32, token: u64) -> Result<Self::Watch, Unwatched> {
         (**self).watch_program(pid, token)
-    }
-    fn kill(&self, watch: &Self::Watch) {
-        (**self).kill(watch);
     }
     fn unwatch_program(&self, watch: Self::Watch) {
         (**self).unwatch_program(watch);
@@ -1531,15 +1525,16 @@ impl<O: Os> Shared<O> {
         Ok(())
     }
 
-    /// Ends a program whose connection closed: KILL through the OS's watch, so it can't reach a process
-    /// given its pid since, or by its host for a remote one; its end, when it comes, is counted in its box.
-    /// A remote kill its host can't send leaves the program to end of itself, counted then all the same.
+    /// Ends a program whose connection closed: by its own runtime's kill (its held `Proc::kill`, which can't
+    /// reach a process given its pid since and tells its box's bookkeeping first, as macOS's watcher needs to
+    /// tell it from its cap's), or by its host for a remote one; its end, when it comes, is counted in its
+    /// box. A kill its runtime refuses, or its host can't send, leaves the program to end of itself, counted
+    /// then all the same.
     fn end(&self, w: &mut Watched<O>) {
-        match &w.run {
-            Run::Local {
-                watch: Some(watch), ..
-            } => self.os.kill(watch),
-            Run::Local { watch: None, .. } => {}
+        match &mut w.run {
+            Run::Local { proc, .. } => {
+                let _ = proc.kill();
+            }
             Run::Remote(program) => program.kill(Box::new(|_| {})),
         }
         w.killed = true;

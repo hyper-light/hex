@@ -40,7 +40,6 @@ use rustix::net::{
     AddressFamily, RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags, SendFlags,
     Shutdown, SocketAddrUnix, SocketType,
 };
-use rustix::process::{Pid, Signal};
 
 use super::{Accepted, EVENTS, Event, Interest, Os, Peer, Recv, Sent, Unwatched};
 
@@ -157,10 +156,9 @@ impl MacOs {
     }
 }
 
-/// A watched program: its pid, and when it started, which with the pid names it.
+/// A watched program, by its pid.
 pub struct Watch {
     pid: i32,
-    started: u64,
 }
 
 impl Os for MacOs {
@@ -479,18 +477,7 @@ impl Os for MacOs {
             }
             let _ = self.kq.trigger();
         }
-        Ok(Watch { pid, started })
-    }
-
-    fn kill(&self, watch: &Watch) {
-        // Only the process that pid named when it was watched: one given the pid since started later.
-        // An ended program not yet reaped keeps its pid and start time, and a kill of it does nothing.
-        if let Ok(Some(r)) = sys::rusage(watch.pid)
-            && r.started == watch.started
-            && let Some(pid) = Pid::from_raw(watch.pid)
-        {
-            let _ = rustix::process::kill_process(pid, Signal::KILL);
-        }
+        Ok(Watch { pid })
     }
 
     fn unwatch_program(&self, watch: Watch) {

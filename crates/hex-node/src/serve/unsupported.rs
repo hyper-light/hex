@@ -79,9 +79,6 @@ impl Os for Unsupported {
     fn watch_program(&self, _: u32, _: u64) -> Result<Never, Unwatched> {
         match self.never {}
     }
-    fn kill(&self, watch: &Never) {
-        match *watch {}
-    }
     fn unwatch_program(&self, watch: Never) {
         match watch {}
     }
