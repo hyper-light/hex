@@ -503,11 +503,13 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
   - Linux: cgroup v2, as today.
   - Windows: a job object per box, nested under the node's. Memory is the job's memory limit; CPU a weight
     or a hard cap; processes the active-process limit; delete is kill-on-close (§2). Limit events come from
-    the notification class Windows guarantees, or from the job's accounting, since other completion-port
-    messages may be lost (CLAUDE.md §3).
+    the job's accounting, read synchronously: completion-port messages may be lost, and the memory
+    notification Windows calls guaranteed is set seconds late under load, or never once the member's
+    commit has fallen back (CLAUDE.md §3; bench/install/records/windows-jupiter-20261105.txt entry 21).
   - macOS: a box runs as a user of its own, from a pool made at install, as Nix's build users are. A user
     is the only marker macOS lists that a member inherits and can't drop, since macOS can't follow forks
-    (§3). So a privileged helper starts each box, and `RLIMIT_NPROC` caps its processes in the kernel.
+    (§3). So a privileged helper starts each box, and `RLIMIT_NPROC` of the box's user caps its processes in
+    the kernel.
     macOS's memory bound has **three layers** (Ada, 2026-11-01). Layer one is **rootless and
     kernel-enforced** (step 1's `_ext` backstop): every member Hex spawns is armed at `posix_spawn` with a
     *fatal* per-process physical-footprint cap at the box's **whole** bound (`posix_spawnattr_setjetsam_ext`,
@@ -564,14 +566,15 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
     2026-11-06, under Ada's 2026-11-03 rule). A box that asks for confinement gets App Sandbox's, which every
     child inherits (§3). The class's own purpose is trusted code that must not starve
     the machine, and that purpose doesn't need it. Under the helper the ledger limits sum to the bound less a
-    reserve (`hex_core::boxuser`), the fork window's room; the daemon's own sweep is layer three there, and
-    it is event-driven, with no period (the lead's call, 2026-11-06, under Ada's rule that no constant is
-    picked): the daemon watches every member for its forks and its end (`EVFILT_PROC`, which root may place on
-    any process), and each fork or end, like each crossing, wakes a sweep that re-reads every box, arms a forked
-    member at once, and ends a box past its bound (`Daemon::pump_members`, `Daemon::pump_crossings`). A member
-    that forks before its watch is placed is caught by the sweep listing the box again after each watch, until
-    a listing finds no member it hadn't watched (`docs/research/runtime/macos-box-user-and-ledger.md`). The
-    helper's privileged calls are `crates/hex-runtime/src/macos/helper_sys.rs`, CLAUDE.md §12: its lines
+    reserve (`hex_core::boxuser`), the fork window's room; layer three there is event-driven, with no
+    period (the lead's call, 2026-11-06, under Ada's rule that no constant is picked): the daemon watches every
+    member for its forks and its end (`EVFILT_PROC`, which root may place on any process), and each fork or end
+    wakes a sweep of its own box (its watch's tag names the box), while a crossing, whose corpse doesn't name
+    one, re-reads every box; each sweep arms a forked member at once and ends a box past its bound
+    (`Daemon::pump_members`, `Daemon::pump_crossings`). A member that forks before its watch is placed is
+    caught by the sweep listing the box again after each watch, until a listing finds no member it hadn't
+    watched; from then on every fork posts an event (`docs/research/runtime/macos-box-user-and-ledger.md`).
+    The helper's privileged calls are `crates/hex-runtime/src/macos/helper_sys.rs`, CLAUDE.md §12: its lines
     `d4252f3` (the file and its fork, user drop, ledger and exception arming) and `a960732` (the `mach_msg`
     crossing receive) were approved by Ada on 2026-11-06, as written, and so was `caa6e9f` (the child's
     `RLIMIT_NOFILE`). A node with no helper runs the
@@ -620,30 +623,36 @@ lacking any of it "refuses that class by name, saying what's missing", and "Unin
   still present, which is none. `check <plan>` is that listing on its own: on a machine fresh of Hex, and
   after uninstall, it lists nothing (CLAUDE.md §3: nothing is left silently).
 - **Linux** (§1): the classes need a cgroup v2 subtree the node owns with `cpu`, `io`, `memory` and `pids`
-  (`hex_core::cgroup::CONTROLLERS`). systemd's own `user@.service` delegates only `pids memory cpu`, never `io`,
-  in every release from v244 to v259 (§1.3; fedora's systemd 259 ships the same line), so install adds a
-  drop-in for every user's manager, `/etc/systemd/system/user@.service.d/50-hex-delegate.conf`
-  (`Delegate=cpu io memory pids`, which adds to the unit's own list rather than replacing it, §1.2), and a
-  `hex-node` user service (`Delegate=yes`, `DelegateSubgroup=agent`: the node runs in the
-  leaf `agent` and its boxes in `hex` beside it, so cgroup v2's no-internal-processes rule holds, §1.1-1.2;
-  systemd ≥254, refused by name below it), enabled for every user (`systemctl --global enable`). A running user manager reads which
-  controllers it may hand on only when it starts (§1.4), so `daemon-reload` alone leaves it without `io`:
-  measured, the lab's installed node was refused `io` until install re-executed each running user manager
-  (`systemctl reload user@UID.service`, which keeps its processes), as install now does. The node's descriptor limit is
-  the unit's `LimitNOFILE=1048576`, soft and hard: its own descriptors at its bounds (330,112) and every kept
-  namespace's held `/proc/net` files (4 × 66,048) need 594,304; 1,048,576 is the kernel's default
-  `fs.nr_open` and dockerd's old value (`docs/research/runtime/nofile-limit.md`). A user unit can't exceed its
-  manager's hard limit, so the drop-in also gives `user@.service` `LimitNOFILE=1024:1048576` (everything else
-  a user runs keeps systemd's soft 1024). A box whose spec names no `RLIMIT_NOFILE` inherits the node's
-  limit, as crun's containers inherit theirs; Docker 29 gives 1024:524288, which every box naming none gets
-  (Ada, 2026-11-06), capped at the node's hard limit (`hex_core::limits`). On macOS only box-user boxes get it
+  (`hex_core::cgroup::CONTROLLERS`), and the node a descriptor limit of 594,304: its own descriptors at its
+  bounds (330,112) and every kept namespace's held `/proc/net` files (4 × 66,048). Install puts each named
+  user's node in a **system** unit, the template `hex-node@.service`, run as that user (`User=%i`), its cgroup
+  delegated to it (`Delegate=yes`: every controller the system has, §1.2; `DelegateSubgroup=agent`, so the node
+  runs in the leaf `agent` and its boxes in `hex` beside it and cgroup v2's no-internal-processes rule holds,
+  §1.1; systemd ≥254, refused by name below it) and `LimitNOFILE=1048576`, soft and hard (the kernel's default
+  `fs.nr_open` and dockerd's old value, `docs/research/runtime/nofile-limit.md` §2-§3). Its socket is
+  `/run/hex/<user>/node.sock`, its containers' state on the tmpfs under `/run/hex/<user>`, its records under
+  `/var/lib/hex/<user>`. Not a user unit: systemd's own `user@.service` delegates only `pids memory cpu`, never
+  `io` (v244-v259, §1.3); a user manager reads the controllers it may hand on only when it starts (§1.4); and a
+  user unit can't take a hard limit above its manager's (nofile-limit.md §1.3). Measured in the lab: with a user
+  unit, a drop-in raising `user@.service`'s delegation and limit, and the running manager re-executed, the node
+  got `io` but stayed clamped at 524,288 descriptors; only a restart would give it more, and a restart ends
+  everything under the manager, a CI runner's work included (the lead: never). A system unit takes both from
+  root and touches no user's manager (HEX-INST-7: the lab's manager keeps its pid across install). A box whose
+  spec names no `RLIMIT_NOFILE` gets Docker 29's 1024:524288, not the node's own (Ada, 2026-11-06;
+  `hex_core::limits`, capped at the node's hard limit, which an unprivileged process can't raise): the `oci`
+  init and every program exec'd into a container add it where the spec names none, and the Linux `process`
+  class sets it in the child before `execve` (HEX-INST-6). `hex box run` isn't the node but wraps a program
+  for its caller, so its program keeps the caller's limit (the lead, 2026-11-06). A `process` box always gets
+  1024:524288, or the node's hard limit where that is lower: its spec (`BoxSpec`'s `Process` class and
+  `Program`) has no rlimits to name one, and none is added, since the native boxes don't need it and a new
+  field in the process spec is an API and wire change beyond this step (the lead, 2026-11-06). An `oci` box
+  keeps a limit its spec names (end to end in `node_socket.rs`). On macOS only box-user boxes get the default
   (the helper's child sets it before `execve`); plain boxes keep the embedding process's, since posix_spawn
   sets no rlimit and a fork in the threaded node isn't safe (`docs/research/runtime/nofile-limit.md` §6).
-  For each `--user` it turns on lingering (their manager, and so their node, runs with no session, as a CI runner's must, §1.5) and
-  starts the service, its socket at `$XDG_RUNTIME_DIR/hex/node.sock`. Rootless `oci` boxes need nothing more: each maps
-  only the node's own uid (`hex_core::bundle`), so no subordinate id ranges (§1.6). Ubuntu
-  24.04's `apparmor_restrict_unprivileged_userns` (§1.6) would need an AppArmor profile for `hex`; no Ubuntu
-  machine is in this step's bar, so that is a gap the installer doesn't fill yet (STATUS.md).
+  Rootless `oci` boxes need
+  nothing more: each maps only the node's own uid (`hex_core::bundle`), so no subordinate id ranges (§1.6).
+  Ubuntu 24.04's `apparmor_restrict_unprivileged_userns` (§1.6) would need an AppArmor profile for `hex`; no
+  Ubuntu machine is in this step's bar, so that is a gap the installer doesn't fill yet (STATUS.md).
 - **Windows** (§2): the `process` class's job objects need no admin. Install turns on the `Containers`
   (Windows images through HCS, plan step 4) and `HypervisorPlatform` (the Shards guest for Linux images,
   plan step 5) optional features with `Enable-WindowsOptionalFeature -Online -All -NoRestart`, records each
@@ -678,8 +687,10 @@ lacking any of it "refuses that class by name, saying what's missing", and "Unin
   the installer turns it on (HEX-INST-2), the state read without elevation from `Win32_OptionalFeature`
   (§2.4: Microsoft lists no restriction on reading it, to be measured as a standard user on jupiter) by
   PowerShell run as the member of a job-object box of its own, so its wait is the class's bounded one and the
-  box's end takes whatever it left; `hex_core::setup::features_off` parses its listing and refuses anything
-  else by name.
+  box's end takes whatever it left, within `hex_core::setup::FEATURE_QUERY_PATIENCE` (twice the slowest
+  recorded run); `hex_core::setup::features_off` parses its listing and refuses anything else by name. The
+  installer asks the same query through `hex setup features` (one `<name> on|off` line each) rather than
+  querying Windows itself, so there is one query and one bound (HEX-INST-9).
 - **Done when** (the plan's criterion): on a machine fresh of Hex the one admin step leaves every class working
   with no further step, and uninstall leaves nothing of Hex's behind, checked by listing what install made.
   The bar is not narrowed per OS: on Windows the `oci` class is native plan steps 4 and 5, so Windows' part is
@@ -693,10 +704,367 @@ lacking any of it "refuses that class by name, saying what's missing", and "Unin
   the box-user HEX-RT contract over the installed helper's socket as that ordinary user, shows a user outside
   `hexnode` refused the socket (HEX-INST-6), uninstalls, and lists nothing left by the plan and by `dscl` and
   `launchctl` on their own (HEX-INST-7).
-- **What would falsify it:** a drop-in's `Delegate=` list that replaced rather than merged with the unit's (the
-  lab's installed node got all four); a running user manager that a re-exec didn't give the new delegation,
-  so a logged-in user needed a further step (the lab's user's manager runs before install to show it); a
+- **What would falsify it:** a system unit's `Delegate=yes` with `User=` that didn't hand the user every
+  controller, or its `LimitNOFILE=` that the node didn't get (the lab reads both); an install that disturbed a
+  user's running manager (the lab's runs before install and keeps its pid); a
   Windows feature whose state an unprivileged node can't read; a box user macOS lets a member drop.
+
+## Decision: the Windows `oci` class is an HCS silo holding a Hex job (native plan step 4, 2026-11-04)
+
+The native plan's step 4 builds the `oci` class for Windows images on Windows: process isolation through the Host
+Compute Service, as the OCI runtime spec's Windows section defines it. Sources:
+`docs/research/runtime/windows-hcs.md` (cited below as §n of that note).
+
+- **A box is an HCS compute system, process-isolated, with a job of Hex's nested inside it.** Hex creates the
+  container through HCS v2 (`computecore.dll`, schema 2.1, no hosting system, `ShouldTerminateOnLastHandleClosed` so
+  a node agent that dies takes its containers with it; note §2). Every program Hex runs in the box — its init and
+  each exec — is created *suspended inside a job object Hex owns* and then resumed, as a `process` box's member is
+  (`hex_core::job`, step 3). That job nests under the container's silo (`nested-jobs.md:27,43`, note §5), so the box's
+  `memory_max`, `pids_max` and CPU bound hold on its members by the `process` class's own measured rule, while the
+  container's ~20 system processes (note §5) stay outside the box's count.
+  - **Why not the silo's own job:** HEX-RT-6 bounds a box to 8 processes, and the silo holds more than 20 of its own;
+    the silo's job is reachable only by an implementation-detail name, as SYSTEM, through an unbound NT call (note §5).
+  - **Why a launcher:** HCS can't create a process suspended (note §4), and a member it starts runs at once, so a job
+    assigned afterward races the member's forks. Hex's own `hex` binary is mapped read-only into each box at a fixed
+    path, and HCS starts it as a launcher. The node opens the launcher by pid and duplicates into it the box's job
+    (with only `JOB_OBJECT_ASSIGN_PROCESS`) and the caller's three standard handles (`DuplicateHandle`, note §4).
+    The launcher reads one bounded request on its stdin and creates the member suspended in the job with only those
+    three handles inheritable. It resumes the member, replies with the member's pid, and holds the member's handle
+    until the node has opened it, so the pid can't be reused in between. Then the launcher exits. The node waits on
+    the member's own handle, reads its exit as a `process` box's (`hex_core::job::exit`), and the member reads and
+    writes the caller's pipes directly, with no copier thread. The request and reply are a sans-IO wire in
+    `hex_core::hcs`, bounded, and every malformed one is refused by name.
+  - **The container as a whole** is bounded too, by HCS, as the spec's Windows section says: `Memory.SizeInMB` and
+    `Processor.Maximum`/`Weight` from the bundle's `windows.resources`. A `ClassSpec::Oci` box's container is bounded
+    at its box bound plus the silo's own measured baseline (note §9, probe 3). Neither bound is dropped: a bound the
+    job can't hold is refused by name, as the `process` class refuses it.
+- **Signals and ends are the `process` class's:** KILL and TERM end the box's job (HCS has only console controls,
+  hcsshim maps TERM to a shutdown and KILL to terminate, and Docker ends the container on either; note §4), so TERM
+  ends this class's init, and its fixture says so to the differential suite (`term_ends_init`, true); a member's exit reads as the
+  signal; any other signal is refused by name. An init that has ended leaves the box `Empty` with its exit, and an
+  exec into it is refused `NotRunning`. Delete ends the job, terminates the compute system, detaches the scratch and
+  removes what the box made. Every HCS wait has a deadline, and a timed-out operation is cancelled, never abandoned
+  (note §2).
+- **Layers by `vmcompute.dll`'s layer calls, as hcsshim, runhcs and Docker make them** (changed 2026-11-06 on
+  jupiter's evidence, the lead's approval; note §11). The box's scratch is a folder holding a copy of the base layer's
+  `blank.vhdx`; `ActivateLayer` attaches it as a volume, `PrepareLayer` puts the storage filter over it with the
+  read-only layers as its parents (each named by `hex_core::hcs::layer_guid`, the id the document gives it),
+  `GetLayerMountPath` gives the volume, and the volume's root is the container's `Storage.Path`. Teardown is
+  `UnprepareLayer` then `DeactivateLayer`; after a container has run, `UnprepareLayer` answers
+  `ERROR_FLT_DO_NOT_DETACH` (the container's end took the filter), matched alone. The calls are undocumented, so
+  they're resolved at run time like HCS's, and a missing one refuses the class by name. hcsshim's timed retry and
+  global lock are not copied (CLAUDE.md §4); 32 boxes started at once on jupiter each got their own volume.
+  - **Why not the documented calls:** on Windows 11 25H2 (26200), a scratch made by them (a `blank.vhdx` copy or a
+    fresh `HcsFormatWritableLayerVhd` disk, attached, `HcsInitializeWritableLayer`, `HcsAttachLayerStorageFilter`)
+    never finished starting: the silo stopped after one service host, and `HcsStartComputeSystem` ended only when
+    cancelled. The same document over a vmcompute scratch started in 0.6 s (note §11). What would falsify this: a
+    host where the documented sequence boots a silo, which returns the class to documented calls.
+- **"A device not granted isn't visible" is checked as reachable** (the lead's ruling, 2026-11-06, for Ada's
+  report). The step's words: "A device not granted isn't visible". Under process isolation a silo's PnP listing is
+  the host's: `CM_Get_Device_Interface_ListW` for the display adapter class gives 2 on jupiter's host, 2 in a Hex box
+  and 2 in a Docker `--isolation process` container, none granted. Microsoft's guide says a grant means "all devices
+  which identify as implementing the requested class will be plumbed into the container"
+  (`hardware-devices-in-containers.md:39`): a grant makes devices reachable, not listed. So the probe opens each
+  listed interface (a query open, no access asked): ungranted, USB, keyboard, mouse and disk classes open 0 of n in a
+  box; granted, n of n (note §11). The test uses the USB device class with both cases, since jupiter has none of
+  Microsoft's four supported classes and HCS refuses a display-class grant at create for Docker and Hex alike. Only
+  Hyper-V isolation, which is not this class, would hide the listing itself.
+- **Hex's Windows binaries carry their own C runtime** (`.cargo/config.toml`, `+crt-static` for both Windows
+  targets): the launcher runs inside the image, and nanoserver has `ucrtbase.dll` but no Visual C++ runtime, so an
+  `hex.exe` importing `VCRUNTIME140.dll` couldn't load there (note §11). It's the Windows twin of the static-glibc
+  decision, and `crates/hex-cli/tests/windows_static_crt.rs` refuses a build importing `VCRUNTIME*`/`MSVCP*`.
+- **The spec, as the OCI Windows section defines it:** a `ClassSpec::Bundle` reads `config.json`'s `windows` section
+  (`layerFolders` topmost first with the scratch last, `devices`, `resources`) and its mounts. A `ClassSpec::Oci` box
+  renders the same, its `Rootfs::Layers` lowest first. Devices are granted only by interface class, with `class` and
+  `vpci-class-guid` both meaning one. A mount is read-only where its options say `ro`, and nested destinations are
+  refused. A field Hex doesn't render is refused by its name (`hyperv`, which is a Hyper-V container, not this class;
+  `credentialSpec`; `servicing`; `network.endpointList` until Hex holds HNS endpoints; a uid/gid `user`; a
+  `root.readonly` of true; a `Rootfs::Dir`, which a Windows container can't run from). A spec isn't half-applied.
+- **Versions, refused by name before HCS is asked:** the host's build and kind come from `RtlGetVersion`, and the
+  image's build from its base layer's `Files\Windows\System32\ntdll.dll`. Microsoft's table decides (note §7): a
+  Windows Server host runs its own build, and a Server 2025 host runs Server 2022 images too. A Windows 11 host runs
+  Server 2022 images, and Server 2025 images from 24H2 (26100) on. A Windows 10 host runs none process-isolated. Any
+  other pair is refused, naming both builds. HCS's own mismatch code (0x80370101, or 0xC0370101) maps to the same
+  refusal. Production is Windows Server's; Windows 10 and 11 hosts are for development (`hyperv-container.md:76`).
+- **The Containers feature, refused by name:** Hex resolves the HCS, storage and virtual-disk calls at run time
+  (`LoadLibraryExW` from System32, `GetProcAddress`), because windows-sys links them at load time and a missing
+  `computecore.dll` would stop the whole node from starting (note §7). A missing module or export means the class is
+  refused, saying the Containers feature is off and Hex's installer turns it on. `classes()` lists `oci` only where
+  HCS loads.
+- **Unsafe:** the HCS, vmcompute layer, process-handle, version and device calls sit in one file,
+  `crates/hex-runtime/src/windows/oci/sys.rs`, named in CLAUDE.md §12 by a commit of its own (c4961c1, which replaced aadbd4e's list), approved by Ada as written on 2026-11-06.
+- **What would falsify it:** a job handed into the silo that doesn't nest, or that the member escapes; the
+  launcher being unopenable for `PROCESS_DUP_HANDLE` from the elevated node; the documented storage calls unable to
+  make a scratch HCS starts; HCS refusing an image the table allows on jupiter, or starting one it forbids (each a
+  probe in note §9, run on jupiter before the class claims it).
+- **Done when (the step's criteria):** HEX-RT-1..9 pass for this class on jupiter with a matching nanoserver or
+  servercore image. A device not granted isn't visible, a read-only mount refuses writes, and every gate passes.
+  Create, start and delete through the seam are measured against Docker's and containerd's (runhcs) on jupiter, with
+  the same image in the same run, and recorded in `bench/`.
+
+## Decision: one differential suite on every OS, the simulator its oracle (native plan step 7)
+
+CLAUDE.md §8 asks that one suite pass on every platform. The conformance suite (`hex_api::conformance`,
+HEX-RT-1..13) checks each call alone; the differential suite (`hex_api::differential`, HEX-DIFF-1..6) adds
+scripts of calls on several boxes and programs at once, played on the class under test and on the
+simulator, and compares what each step shows (`docs/research/runtime/differential-suite.md`).
+
+- **One suite, run as each OS's tests:** `differential::run` is the conformance suite and then every
+  scenario. Each class's own test calls it with its own fixture: Linux `process` (`process_box.rs`), `oci`
+  from bundles and from specs (`oci_box.rs`, `oci_spec_box.rs`) and both over the node's socket
+  (`node_socket.rs`); macOS `process` (`macos_process_box.rs`); Windows `process`
+  (`windows_process_box.rs`). A class that lands later (Windows `oci`, the Shards guest) joins by calling it.
+- **The oracle is the simulator for the same class**, made the same way (process, bundle or spec). A step
+  shows a normalized fact: a refusal's kind, a box's state and its init's exit, a program's exit (or only
+  whether it exited 0, or whether a signal ended it, where OSes differ by design), its output, whether
+  list shows a box, whether a memory kill is counted.
+- **A reading waits for the fact:** a step that reads a box reads again until it shows the oracle's
+  answer or `PATIENCE` passes, so a late report passes and a missing one fails (CLAUDE.md §4).
+- **A divergence is fixed where the contract says.** The first two it found:
+  - A Windows box with nothing running took a signal, where the simulator, Linux and macOS refuse it as
+    `NotRunning`; Windows now refuses it (HEX-DIFF-2).
+  - An `oci` box signalled TERM kept its init running on fedora, where the simulator ended it. The kernel
+    is right: a PID namespace's init takes from an ancestor namespace only the signals it has a handler
+    for, and KILL and STOP, which are forced (pid_namespaces(7), man-pages 6.19); Docker's stop waits out
+    the same rule before it kills. The simulator was wrong, and now models it: a signal other than KILL
+    ends a box's exec'd programs and leaves its init running (HEX-DIFF-1, HEX-DIFF-2).
+  - On the Mac Studio, a macOS box whose members had all ended refused the next program (it was spawned
+    into the dead leader's process group, which no process can join), and took a signal with no member
+    alive (killpg's ESRCH read as success). The next program now leads a new group, and such a signal is
+    refused as `NotRunning`, as on every other class (HEX-DIFF-1, HEX-DIFF-2).
+- **What TERM does to an `oci` box's init is the class's** (the lead's ruling, 2026-11-05). Linux's is the
+  rule above. Windows has no POSIX signals: HCS's ProcessSignal carries console control events only, and
+  hcsshim maps TERM to a shutdown and KILL to terminate (`internal/signals/signal.go:185-197`), so Windows'
+  `oci` class ends the container's job. Both are right for their platform, so the fixture says which
+  (`Fixture::term_ends_init`, false by default), and the oracle is a simulator made with that answer
+  (`SimRuntime::with_term_ending_init`), as HEX-RT-6 checks the effect of a refused fork where the count is
+  not kept. Neither class's behavior changes for the suite.
+- **Non-vacuity:** runtimes that are the simulator but for one lie (a signal of nothing taken, a deleted
+  box kept, a box stuck running, an exec refused after the last program ended) each fail the scenario that
+  shows it, at the step named; one that reports a box late passes; a runtime whose init ends on TERM passes
+  with a fixture that says so and fails HEX-DIFF-2 without (`crates/hex-api/src/differential.rs` tests).
+- **What would falsify it:** a behavior two classes show differently that no scenario reaches (the
+  scenarios grow with it), or the simulator diverging from the design text (then the simulator is fixed
+  and every class re-run).
+
+## Decision: a program is held to its OS's exec bound, before any spawn (HEX-RT-14)
+
+`Program` carried an environment of any size, and only Linux's execve stopped it (`E2BIG`, after the spawn
+began); Windows bounds no environment block at all. CLAUDE.md §2 and §3 ask a bound and a typed refusal, so every
+class refuses a program past its OS's exec bound as `Invalid` naming the program, the sizes and the bound's source,
+before anything is spawned (`docs/research/runtime/exec-size-bounds.md`).
+
+- **One count:** `Program::exec_size` counts as Linux's execve does (each string and its NUL, the filename again, a
+  pointer per string), which is at least what XNU counts.
+- **Each OS's bound, from its source:** Linux reads the kernel's own formula at run time (a quarter of
+  `RLIMIT_STACK`, capped at three quarters of `_STK_LIM`, never under `ARG_MAX`; 32 pages a string; `fs/exec.c:410-416`,
+  `binfmts.h:15`), not glibc's `sysconf(_SC_ARG_MAX)`, which skips the cap. macOS reads `kern.argmax` (XNU's
+  `NCARGS`). Windows, whose block Microsoft documents as unbounded, takes a census of real container environments with
+  a stated margin, and 32,767 characters a variable (native step 4). The simulator holds Linux's floor, `ARG_MAX`.
+- **Whose stack limit, and when it is read:** a box's own (its spec's `process.rlimits` `RLIMIT_STACK`), else the
+  node's, read once and kept, so an exec makes no system call for it. A limit lowered after that reading is learned
+  where the program meets it, on the failure path alone: as root, the agent's vfork-style child reports the kernel's
+  `E2BIG` through memory the two share, and the agent reaps it and refuses the program; rootless, the seed (started
+  under the lower limit, which its programs inherit) refuses the program by its own reading with a refusal of its own
+  on the seed wire (code 5, appended). Either way the node reads its limit again, once, and refuses the next exec
+  itself. Rootless, the seed wire's one request (160 KiB, `hex_core::seed::MAX_REQUEST`) bounds a program too: one
+  past it is refused by name before it is sent, and the seed kept. **Open gap:** a rootless program between that
+  request and the kernel's own bound (a quarter of `RLIMIT_STACK`, 2 MiB at an 8 MiB stack) is refused, where runc and
+  crun, bounded only by the kernel, run it; as root it meets only the kernel's. Closing it needs a request carried over
+  several `SOCK_SEQPACKET` records, a kind appended to the seed wire (STATUS.md, native step 7).
+- **Over the node's socket** the wire's one-message bound is tighter than Linux's, so the client refuses past it, as a
+  program, before encoding.
+- **Tested by** HEX-RT-14 on every class's conformance run (a fixture that states no bound fails it), and a unit test of
+  the count against the kernel's arithmetic.
+- **What would falsify it:** a program the count admits that the OS's exec refuses with `E2BIG` (the count is short),
+  or a kernel whose formula changes; either is fixed in the count or the read, and HEX-RT-14 re-run.
+
+## Decision (proposed, native plan step 8): the Windows node, on one completion port, its boxes outliving it
+
+Step 8 puts Hex's node agent on Windows over the one socket core every OS shares (`hex_node::serve`, its `Os`
+trait; step 8a, `cp/t7-native-s8` 6c900ccc). This proposes Windows' `Os`, how an exec's stdio reaches its caller,
+and how a box outlives its node so a restarted node takes it back (T-T7.1.2). It's proposed: the parts marked
+*to measure* are checked on jupiter before the code lands, and the stdio part waits on its record.
+
+**Events: one I/O completion port, every source on it by a documented call.** The core's `Os::wait` is
+level-triggered readiness (epoll, kqueue); a completion port reports finished operations. The Windows `Os`
+turns each source into a completion on the one port (`GetQueuedCompletionStatusEx`):
+- *Wake*: `PostQueuedCompletionStatus` with the wake's key.
+- *A program's end*: `RegisterWaitForSingleObject` on the member's process handle, its callback posting the
+  program's token to the port. Not the job's `JOBOBJECT_ASSOCIATE_COMPLETION_PORT` messages, which the plan
+  names: Microsoft documents that, but for notification limits, their delivery "is not guaranteed", a lossy
+  source CLAUDE.md §3 forbids (`docs/research/runtime/windows-job-objects.md` §4). The process handle's
+  signal is the kernel's own end of the process, so no end is missed, and a pid given out again can't be
+  mistaken for it (the handle names the process, not the pid).
+- *A connection readable*: one overlapped `WSARecv` into the connection's buffer, posted only while the
+  core reads the connection and no message read from it waits, so a client the core has stopped reading
+  holds one buffer and what was decoded from it. Its completion is the bytes (or the peer's end, a read of
+  0). *Measured* (jupiter, 2026-11-08, `stdio_probe iocp`, record
+  `bench/native/records/iocp-jupiter-07da2bc9-*`): a zero-byte `WSARecv` is a readiness signal on AF_UNIX
+  as on TCP, pending while quiet and completing without taking bytes, on data and on the peer's end. The
+  node posts real reads, which need none of that, so it reads in one step what readiness would take two
+  for.
+- *A connection writable*: `Os::send` (a whole message or none) issues one overlapped `WSASend` that owns
+  the message; while one is outstanding the next send is `WouldBlock`, and its completion is "writable".
+  The bound on a connection's waiting answers stays the core's. *Measured* (the same record): one 8 MiB
+  overlapped send is taken whole at once, before its peer reads anything, so a send's completion says the
+  kernel holds the bytes, not that the peer read them, and the socket doesn't push back at that size: the
+  core's bound on waiting answers is what bounds them.
+- *A connection waiting*: overlapped `AcceptEx` on the listener, one at a time. *Measured* (the same record):
+  afunix.sys completes it on the port when a client connects, and the socket it took reads its peer's pid
+  once `SO_UPDATE_ACCEPT_CONTEXT` is set. The accepted socket joins the port before the accept starts, and
+  once only (a second join is refused, `ERROR_INVALID_PARAMETER`: `tests/windows_node.rs` found it).
+- *Who the peer is*: `SIO_AF_UNIX_GETPEERPID`, then the process's user from its token, as Linux's
+  `SO_PEERCRED`.
+Messages are framed over the stream (`hex_core::stream`), as on macOS: Windows' AF_UNIX is `SOCK_STREAM`
+alone. **Falsifier:** a completion that never comes for a source that fired (a lost end or read), shown by a
+test that counts every program's end and every message against the port's completions.
+
+**An exec's stdio: a transport of its own, chosen by measurement (step 8's record, to be committed).**
+Windows' AF_UNIX passes no handles, so the four candidates are measured on jupiter by
+`bench/native/windows/stdio_probe` (first byte and throughput, N >= 299 interleaved, the machine's load over
+the last second recorded each round): the streams framed over the caller's own connection; a connection per
+stream; a named pipe per stream; and an anonymous pipe whose read end the node duplicates into the caller's
+process (`DuplicateHandle`, the caller named by `SIO_AF_UNIX_GETPEERPID`). Only the caller may read or write
+its streams. Framed and duplicated streams have no door a second process can knock on: they're the caller's
+own connection or handle. A connection per stream and a named pipe per stream are doors, so the node takes
+them only from the caller's pid (`SIO_AF_UNIX_GETPEERPID`; `GetNamedPipeClientProcessId`, the pipe first
+instance only and remote clients refused). The probe's refusal check gives a second process of the caller's
+user the door first: the node refused it for both and still served the caller every byte (jupiter,
+2026-11-07, `stdio_probe refuse`). A process of *another* user, on a temporary account Ada approved, is
+refused before any node code by the socket file's own permissions (`WSAEACCES`), and, granted the file, by
+each door's check, while the caller gets every byte; `hex node` refuses such a connection by name (jupiter,
+2026-11-08, `stdio_probe refuse-as`, `bench/native/records/other-user-jupiter-20261108T0220Z.txt`).
+What no transport can stop: a process of the caller's own user may open the caller's process and take any
+handle in it (`PROCESS_DUP_HANDLE`), its own connection included, so "only the caller" means only through
+the node, as Linux's `SCM_RIGHTS` means it. The fastest candidate that passes is chosen when the timed run of
+record is in.
+
+**Recovery: a box outlives its node through a keeper, and the restarted node takes it back (T-T7.1.2;
+the lead's decision, 2026-11-08).** Today a Windows box ends with the node's last handle: its job is
+kill-on-close (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`), and an `oci` box's compute system is made with
+`ShouldTerminateOnLastHandleClosed` (the HCS decision above). That is clean up by construction. Recovery as
+on Linux takes a live box back, which needs the box's job to outlive the node *without* losing the
+guarantee that no box outlives Hex. Both facts force the shape:
+- *A named job's name lapses with its last handle.* *Measured* (jupiter, 2026-11-08,
+  `sys::tests::a_named_jobs_name_lapses_with_its_last_handle_though_its_member_runs`,
+  `cp/t7-native-windows-outlive`): a named job opens by name while a handle to it is held, but once its last
+  handle closes its member runs on and its name is gone. The object manager drops a temporary object's name
+  with its last handle, though processes still hold the object. So a name alone can't carry a box past the
+  node: something that outlives the node must hold a handle to each box's job, or the next node finds nothing
+  and the box's processes are left in a job no one can open (a §3 leak).
+- *The holder is a keeper, and kill-on-close stays.* Each box's job is a *named* job object (`CreateJobObjectW`
+  with a name under the node's own namespace, `Local\hex-<node>-<box>`), kept kill-on-close, and the node
+  **and** a keeper process each hold a handle to it (the node duplicates the job into the keeper,
+  `DuplicateHandle` with `PROCESS_DUP_HANDLE`, and closes it there on delete, `DUPLICATE_CLOSE_SOURCE`).
+  Then: the node crashes → the keeper's handle keeps the job and its name, and the next node reopens it by
+  name (`OpenJobObjectW`) and takes the box back, or ends it (`TerminateJobObject`); the keeper dies while
+  the node lives → the node sees its end on its port and starts another, duplicating the handles again; both
+  are gone → the last handle closes and kill-on-close ends the boxes, so nothing is left in a job no one can
+  open. The keeper is wholly passive — it only holds handles — so it needs no trust and no logic of its own;
+  it is `hex keep`, started by the node. This replaces "refuse by name with boxes recorded": kill-on-close is
+  the backstop, not a refusal. *Built and measured* (jupiter, 2026-11-08, `cp/t7-native-windows-outlive`,
+  `windows::tests` 6/6): a box outlives its runtime and the next takes it back as running; a box no node
+  takes back is ended by name; a box whose node and keeper are both gone is ended by kill-on-close; a keeper
+  that dies while its node lives is replaced.
+- *The keeper's own lifetime.* The keeper holds its handles and waits, with no timer, until its stop is
+  asked — a node going down cleanly, or a node replacing it. It never exits on its own: a node that never
+  returns leaves its boxes running, as a box on Linux waits for its node with no timer (the installer's
+  service restarts the node, and recovery is its first act). No picked hold constant. The node signals the
+  stop event only on a clean shutdown, never on a respawn: the stop is shared by the state folder, so
+  signalling it would also stop the new keeper.
+- *Breakaway.* The keeper holds handles only; it need not be a member of the node's own job. A child
+  inherits the node's job membership unless it is made to break away, so the keeper's lifetime is that job's.
+  Under a kiln run the node (and so the keeper) sits in kiln's job, which kiln holds: the node can die inside
+  the run and the keeper lives on, and the run ending ends them both (a dev/test node's boxes don't outlive
+  the run, as a crashed Linux node's wait on the service). *To measure* (under a kiln run on a clean
+  jupiter): that the keeper survives the node's death within the run. The installer's service is the real
+  case, and the SCM runs a service in *no* job unless the service makes one, so a keeper the service starts
+  is in no job and outlives any node; that is measured for real when the service exists (step 6). No
+  temporary service is made on jupiter (an admin change not approved).
+- *The `oci` side* (step 4's agent, `cp/t7-native-s8-oci`). An outliving node's `oci` box is its named job,
+  held by the keeper as a `process` box's is, and its compute system is made without
+  `ShouldTerminateOnLastHandleClosed` (`hcs::Lifetime::Outlives`), so the container runs on past the node's
+  last handle; the next node reopens it by its id (`HcsOpenComputeSystem`; HCS naming no such system is
+  nothing to take back). The box's scratch marker is its record (`hcs::BoxRecord`): its scratch folder and
+  what Hex made, that it outlives, its system's id, that a start was asked (written before HCS starts the
+  container), and its init's pid and creation time (`GetProcessTimes`, written once it runs), each write
+  whole (a `.next` file moved over the marker), its size bound derived as `MAX_WIRE` counts a folder. The
+  scratch becomes the container's only once HCS has made the container, so a create that fails before that
+  undoes it and leaves nothing attached. At a node's start, reclaim leaves an outliving box's record and
+  scratch while HCS still holds its system (`hcs::at_start`) and reclaims every other. `adopt` takes the box
+  back (`hcs::take_back`) only while HCS holds its system: as made when no start was asked, and with its
+  init only when the process at the init's pid has the recorded creation time and still runs. A start its
+  node didn't finish recording, an ended init, or a pid given to another process since is lost, and `end`
+  ends its container, scratch and record (`oci::end`). An outliving node keeps these records under its own
+  state folder (`<state>\boxes`): every runtime made in process keeps its records in the machine's shared
+  `%ProgramData%\hex\boxes` and reclaims that whole folder when made, so a node or a suite starting beside a
+  running bench would detach a live bench box's scratch. *From step 4*: a box's scratch survives a node kill
+  (the crash test asserts `sandbox.vhdx` is still there after the kill, in the created and the started
+  phase; green, jupiter 2026-11-08 00:12Z), and with the flag on HCS ends a killed node's compute system
+  up to 2 s on record (one idle sample at 1 s resolution), to be retaken on a clean jupiter
+  (`cp/t7-native-s4`); with the flag off it holds the
+  container all through that bound (`windows_oci_box`'s `outlived`). *Built and measured* (jupiter,
+  2026-11-08, `windows_oci_box`): an outliving box's container and scratch wait for its next node, and a
+  container reopened by id is ended through the reopened handle (kiln run r105); a node's `oci` box outlives
+  its runtime, the next runtime on the node's name takes it back running and runs a program in it through
+  the reopened container, and its delete leaves nothing; a box no node takes back is ended with its
+  container, scratch and record (kiln run r160, 3/3; the tree before fails each at `outlived`, HCS ending the
+  container 315-753 µs after its last handle).
+- A box's record names each member by its pid and its creation time (`GetProcessTimes`), so the restarted
+  node, opening the pid, tells the member from a process given its pid since, as macOS uses a process's
+  start time. The record names the keeper the same way (its pid and creation time), so the next node adopts
+  the live keeper or starts a new one.
+- The record's phases stay Linux's (`creating`/`ready`/`deleting`, written before the machine changes), so
+  a node killed mid-create or mid-delete leaves a box recovery finishes or removes.
+- Linux images in the WHP guest: the guest outlives its node, as on macOS, and is taken back the same way:
+  the restarted node re-attaches to the running guest, then the guest's own node recovers its boxes from
+  its own records (T-T7.1.2 inside the guest). The macOS decision on `cp/t7-native-s8` (step 8's core) sets
+  how; the Windows guest follows it, so a guest box is no longer removed because its guest went with the node.
+What it costs: one idle keeper process per node, and a handle duplicated into it per box; a node that dies
+and never restarts leaves its boxes running (the keeper holds them), as a crashed Linux node's boxes wait
+for the service to bring it back.
+**Falsifier:** the crash-restart tests (step 8's): the node killed with boxes running, mid-create and
+mid-delete, then restarted on the same state directory; each must fail on the tree before this change and
+pass after.
+
+## Decision (native plan step 8, 2026-11-08): a macOS rootless box outlives its node and is taken back with a new watcher
+
+T-T7.1.2 asks that a node restarted after a crash take each live box back, as Linux's does; the step names "macOS
+rootless boxes left with no watcher" as what must change to meet it. Linux's boxes are cgroups, which outlive the
+node by construction. A macOS rootless box is its process group (the leader's pid), held by a watcher thread in
+the node, so the node's death leaves the members running without a bound.
+
+- **What survives.** The members do: when a process's parent exits, XNU reparents its children to launchd
+  (`bsd/kern/kern_exit.c`, `proc_reparentlocked` to `initproc`), which reaps them, so they run on, unbounded,
+  until the node is back. Their process group is unchanged.
+- **What names them.** The group id with its leader's start time (`proc_pid_rusage`, `ri_proc_start_abstime`),
+  read at the leader's spawn while it is the node's unreaped child, and recorded with the box in the node's
+  state (the record's `init`, a `ProcId`, its `start_ticks` holding the Mach start time). The group is still the
+  box's when its leader runs with that start time, or when no process has the leader's pid. A live process with
+  that pid and another start time was given it since and leads a group of its own: the box is then taken back
+  empty, and the rootless gap the class already states (a recycled leader pid) is why box users close it.
+- **Taken back.** The restarted node runs Linux's decisions (`hex_core::recovery`) over its records
+  (`hex_node::recorded::Recorded::recover`). A record made is taken back: the class makes a box on the recorded
+  group (`ProcessBox::adopt`), and its watcher lists, measures and ends the members as it does its own, since none
+  of that needs parenthood. The members' own ends are launchd's to reap, and their exit statuses aren't the
+  node's. A record being made or removed is removed, and what its group still runs is killed
+  (`process::end_group`).
+- **The fact it waits on.** XNU's `EVFILT_PROC` catches only events after its attach (`bsd/kern/kern_event.c`,
+  `filt_procattach`). So the node's socket re-reads a watched program's `proc_pid_rusage` after attaching and
+  reports an end that came before. Measured on adas-mac-studio.local-2 through `hex node`: without it, 2 of 12
+  suite runs stalled 60 s on a lost end; with it, 0 of 12.
+- **Evidence.** crates/hex-cli/tests/macos_node_recovery.rs: `hex node` killed (SIGKILL) with a box running, one
+  empty, one mid-create (held in its record write by a FIFO at the write's temp path, and seen held there by
+  `sample(1)`) and one mid-delete (its record deleting, its member running). Restarted on the same state, it takes
+  back the running box with its member still running, which a delete then ends, and the empty one. It leaves
+  nothing of the others: no record, no temp file, no member. The tests failed on the tree before the change
+  (NoSuchBox; the temp file left; the member not ended) and pass after.
+- **What would falsify it.** A rootless member that changes its process group without `setsid` (`setpgid` into
+  another group) leaves the box as a daemonizing one does, and is lost to recovery as it is to the watcher. A
+  macOS that stopped reparenting orphans to launchd, or reaped a group's members with its leader, would end
+  boxes with their node. Box users name a box by its uid, which recovery reads the same way, so neither gap is
+  theirs.
 
 ## Open (STATUS.md)
 
@@ -727,11 +1095,16 @@ lacking any of it "refuses that class by name, saying what's missing", and "Unin
   object, its limits the kernel's and hard (`hex_core::job`, `docs/research/runtime/windows-job-objects.md`,
   `bench/native/windows/RESULT.md`). A member is created suspended inside the job
   (`PROC_THREAD_ATTRIBUTE_JOB_LIST`, so nothing runs outside it) and resumed; breakaway is refused; delete
-  (kill-on-close / `TerminateJobObject`) ends the tree. The job lets a commit that crosses its limit
-  overshoot by a bounded ≈1.1 MiB, so Hex sets the commit limit a 2 MiB margin under the box's bound and
-  the job's peak stays at or below the bound; reaching the bound is the guaranteed
-  `JobObjectNotificationLimitInformation` violation, read from the job with no completion port (no message
-  queue to bound). CPU is a weight or a hard cap of the whole machine (`milli × 10 / processors`).
+  (kill-on-close / `TerminateJobObject`) ends the tree. The job refuses whole a commit that would cross
+  its commit limit, so the limit is the box's bound itself; its peak (`PeakJobMemoryUsed`) counts the
+  refused ask, so the box reports its committed peak as that peak at most the bound, and reaching the
+  bound is the peak past the limit (`hex_core::job::reached_bound`, `committed_peak`; `job_events` e20,
+  bench/install/records/windows-jupiter-20261105.txt entry 22), from the job's accounting with no completion port (no message queue to
+  bound). It was the `JobObjectNotificationLimitInformation` violation until that was
+  shown late or lost under load: on jupiter, a member refused at the cap and ended at once left it unset in
+  nearly every pass, and one held past the line saw it after up to 26 s or not within 30 s
+  (`job_events` e18; bench/install/records/windows-jupiter-20261105.txt entry 21). The peak can't fall, so a box reads as having reached its bound
+  once, not once per refused commit, which the job doesn't count. CPU is a weight or a hard cap of the whole machine (`milli × 10 / processors`).
   HEX-RT-1..9 pass on jupiter. **`pids_refused` on Windows** counts only what Hex observes synchronously —
   the node's own `exec` into a full box returns `ERROR_NOT_ENOUGH_QUOTA` (surfaced as `Exhausted`) — since
   Windows gives no guaranteed count of a member's own refused forks: its accounting doesn't move, and the

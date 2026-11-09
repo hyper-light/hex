@@ -23,7 +23,7 @@
 //! after [`Limits::hang`] over one create. A seed that dies, or a round trip that breaks, refuses its
 //! create by type and leaves its slot, which the thread starts again, counted.
 
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -371,18 +371,18 @@ fn start_seeds(shared: &Shared) {
 /// keeps the other and the child's pidfd, by which it ends and reaps it.
 fn spawn(exe: &std::path::Path) -> Result<Proc, OciError> {
     let (ours, theirs) = rt_seed::socketpair()?;
-    rt_seed::clear_cloexec(&theirs)?;
+    // The seed's end rides in as its stdin, which the spawn duplicates into the child alone: it stays
+    // close-on-exec here, so no process another thread of the agent starts meanwhile inherits it, as one
+    // would in the window a cleared flag leaves (CVE-2024-21626's class). The seed keeps only its socket;
+    // every other inherited descriptor closes on its re-exec.
     let mut cmd = Command::new(exe);
     cmd.arg("__oci-seed")
-        .env(rt_seed::ENV_SOCKET, theirs.as_fd().as_raw_fd().to_string())
-        .stdin(std::process::Stdio::null())
+        .stdin(std::process::Stdio::from(theirs))
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     let child = cmd
         .spawn()
         .map_err(|e| OciError::os("starting a create seed", e))?;
-    // The seed keeps only its socket; every other inherited descriptor closes on its re-exec.
-    drop(theirs);
     let pid = i32::try_from(child.id())
         .ok()
         .and_then(Pid::from_raw)
@@ -450,6 +450,10 @@ fn round_trip(
                 ))),
             }
         }
+        Answer::Refused {
+            failed: Failed::Program,
+            why,
+        } => Err(Trip::Refused(OciError::Program(why))),
         Answer::Refused { failed, why } => {
             let e = OciError::Os {
                 op: "create in a container",
@@ -460,7 +464,9 @@ fn round_trip(
                 Failed::Seed => Err(Trip::Broken(e)),
                 // A bad request, a container the seed couldn't make, or one no clone3-into-cgroup kernel
                 // can make here: the seed is whole, the create refused by type.
-                Failed::Request | Failed::Start | Failed::Unable => Err(Trip::Refused(e)),
+                Failed::Request | Failed::Start | Failed::Unable | Failed::Program => {
+                    Err(Trip::Refused(e))
+                }
             }
         }
     }

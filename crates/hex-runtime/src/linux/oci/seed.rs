@@ -33,7 +33,7 @@ use std::collections::VecDeque;
 use std::ffi::{CString, c_char};
 use std::io::{IoSlice, IoSliceMut, Write};
 use std::mem::MaybeUninit;
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
 
 use hex_core::seed::{self, Answer, Failed, Request};
@@ -46,9 +46,6 @@ use rustix::thread::ThreadNameSpaceType as Ns;
 
 use crate::linux::oci::spec::{Namespace, Process, Spec};
 use crate::linux::oci::{Failure, OciError, exec, init, sys};
-
-/// The environment entry naming the socket, inherited from the node agent, the seed serves on.
-pub const ENV_SOCKET: &str = "HEX_OCI_SEED_SOCKET";
 
 /// A program that fails before it can start exits as a shell does for a program it can't run (126),
 /// and for one that doesn't exist (127), as [`super::exec`] reports the same.
@@ -68,14 +65,24 @@ pub fn run() -> u8 {
 }
 
 fn serve() -> Result<(), OciError> {
-    let raw: RawFd = env_fd(ENV_SOCKET)?;
-    // The agent opened this socket and passed its number here with close-on-exec cleared, so the seed
-    // inherited it across the re-exec; the seed is its sole owner. Made close-on-exec again now, so it
-    // doesn't survive into a program an intermediate's clone execs (the intermediate is a fork, which
-    // keeps it; only the workload's execve, which must not hold the agent's socket, closes it).
-    let socket = sys::own_fd(raw)?;
-    rustix::io::fcntl_setfd(&socket, rustix::io::FdFlags::CLOEXEC)
-        .map_err(|e| OciError::os("setting close-on-exec on the seed's socket", e))?;
+    // The agent hands its socket in as the seed's stdin, duplicated into this process alone by the
+    // spawn, so the agent never clears close-on-exec on it. Moved off fd 0 close-on-exec, so it doesn't
+    // survive into a program an intermediate's clone execs (the intermediate is a fork, which keeps it;
+    // only the workload's execve, which must not hold the agent's socket, closes it), and /dev/null put
+    // on fd 0 in its place.
+    let mut stdin = sys::own_fd(0)?;
+    let socket = rustix::io::fcntl_dupfd_cloexec(&stdin, 3)
+        .map_err(|e| OciError::os("moving the seed's socket off its stdin", e))?;
+    let null = rustix::fs::open(
+        "/dev/null",
+        rustix::fs::OFlags::RDWR | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|e| OciError::os("opening /dev/null", e))?;
+    crate::linux::sys::mark_cloexec_from_3()
+        .map_err(|e| OciError::os("marking descriptors close-on-exec", e))?;
+    rustix::io::dup2(&null, &mut stdin)
+        .map_err(|e| OciError::os("putting /dev/null on fd 0", e))?;
     let mut pid_for = PidFor::open()?;
     let mut specs = Specs::default();
     let mut buf = vec![0u8; seed::MAX_REQUEST];
@@ -218,6 +225,10 @@ fn prepare(req: &Request, init: OwnedFd, specs: &mut Specs) -> Result<Prepared, 
         seam: true,
     };
     let process = exec::process_for(spec.process.clone().unwrap_or_default(), &request);
+    // The program as it will run, the container's environment with the request's over it, held to the
+    // bound of the box's own stack before anything is cloned (HEX-RT-14).
+    crate::linux::process::fits_process(&process.args, &process.env, process.stack())
+        .map_err(|e| OciError::Program(e.to_string()))?;
     Ok(Prepared {
         becoming: init::Becoming::of(&process, spec.linux.seccomp.as_ref())?,
         launch: Launch::of(&process)?,
@@ -451,13 +462,15 @@ pub fn exec_direct(
     cgroup: Option<BorrowedFd<'_>>,
     specs: &mut Specs,
 ) -> Result<Direct, OciError> {
+    // Prepared first, whichever way the program then starts: a program past its box's exec bound is refused
+    // here, by name, before a seed is asked (HEX-RT-14).
+    let p = prepare(req, init, specs)?;
     if UNSURE.with(std::cell::Cell::get) {
-        return Ok(Direct::Unable(init));
+        return Ok(Direct::Unable(p.init));
     }
     let Some(cgroup) = cgroup else {
-        return Ok(Direct::Unable(init));
+        return Ok(Direct::Unable(p.init));
     };
-    let p = prepare(req, init, specs)?;
     let blocked = sys::block_signals()?;
     let set = p.joins.contains(Ns::PROCESS_ID);
     if set {
@@ -480,18 +493,24 @@ pub fn exec_direct(
     // exec's p50 falls from 1.186–1.227 ms to 1.123–1.141. The child gives the pin back before anything
     // else, so the program never runs pinned, and the thread does after the clone.
     let pin = Pin::here();
+    // What the child failed at, if it did: written by the child into this thread's memory, which it
+    // shares, before it exits, and read once the vfork has let this thread go, so the kernel's E2BIG
+    // reaches the caller as a refusal, not as a program that ends 126 (HEX-RT-14).
+    let failed = std::cell::Cell::new(None);
     let child = || {
         if let Some(pin) = &pin {
             pin.release();
         }
-        program(
+        let (code, why) = program(
             &p.becoming,
             &p.launch,
             stdio,
             None,
             None,
             (p.init.as_fd(), rest),
-        )
+        );
+        failed.set(Some(why));
+        (code, why)
     };
     let cloned = STACK.with(|stack| -> Result<_, OciError> {
         let mut stack = stack
@@ -523,13 +542,36 @@ pub fn exec_direct(
         }
         return Err(e);
     }
-    match cloned? {
-        Some((pid, pidfd)) => {
+    match (cloned?, failed.get()) {
+        // The kernel refused the program's arguments and environment: this thread's stack limit is below
+        // what the node last read. The child has exited (the vfork waited for it); it is reaped here,
+        // and the limit read again, so the next exec is held to it before any clone.
+        (
+            Some((_, pidfd)),
+            Some(Failure {
+                errno: rustix::io::Errno::TOOBIG,
+                ..
+            }),
+        ) => {
+            let _reaped = rustix::process::waitid(
+                rustix::process::WaitId::PidFd(pidfd.as_fd()),
+                rustix::process::WaitIdOptions::EXITED,
+            )
+            .map_err(|e| OciError::os("reaping a program the kernel refused", e))?;
+            crate::linux::process::relearn_stack();
+            Err(OciError::Program(format!(
+                "execve refused its arguments and environment (E2BIG): this node's stack limit, read \
+                 again, allows {} bytes ({})",
+                crate::linux::process::exec_limit().block,
+                crate::linux::process::exec_limit().source
+            )))
+        }
+        (Some((pid, pidfd)), _) => {
             let pid = u32::try_from(pid)
                 .map_err(|_| OciError::os("clone3 the program", "a pid out of range"))?;
             Ok(Direct::Started(pid, pidfd))
         }
-        None => Ok(Direct::Unable(p.init)),
+        (None, _) => Ok(Direct::Unable(p.init)),
     }
 }
 
@@ -666,6 +708,9 @@ fn serve_exec(
         Ok(p)
     }) {
         Ok(prepared) => prepared,
+        // Past the exec bound this seed's own stack limit gives (HEX-RT-14): said as that, so the agent
+        // refuses the program by name and reads its own limit again.
+        Err(OciError::Program(why)) => return refused(Failed::Program, why),
         Err(e) => return refused(Failed::Start, e.to_string()),
     };
     match single_clone(prepared, stdio, pid_for) {
@@ -1011,8 +1056,13 @@ pub fn send_request(
     req: &Request,
     fds: [BorrowedFd<'_>; seed::REQUEST_FDS],
 ) -> Result<(), OciError> {
-    let bytes = seed::request(req)
-        .map_err(|f| OciError::Broken(format!("encoding an exec request: {f}")))?;
+    // A request past the wire's one message is a program no seed can be handed: refused as that.
+    let bytes = seed::request(req).map_err(|f| match f {
+        hex_core::wire::Fault::Oversized { .. } => OciError::Program(format!(
+            "the exec request past the seed wire's one message: {f}"
+        )),
+        f => OciError::Broken(format!("encoding an exec request: {f}")),
+    })?;
     let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(seed::REQUEST_FDS))];
     let mut control = SendAncillaryBuffer::new(&mut space);
     if !control.push(SendAncillaryMessage::ScmRights(&fds)) {
@@ -1178,18 +1228,4 @@ pub fn socketpair() -> Result<(OwnedFd, OwnedFd), OciError> {
         None,
     )
     .map_err(|e| OciError::os("making the seed's socket", e))
-}
-
-fn env_fd(name: &str) -> Result<RawFd, OciError> {
-    std::env::var(name)
-        .map_err(|_| OciError::Broken(format!("{name} not set for the seed")))?
-        .parse()
-        .map_err(|_| OciError::Broken(format!("{name} isn't a file descriptor")))
-}
-
-/// Clears close-on-exec on a socket the agent passes to a seed, so the seed inherits it across the
-/// re-exec, as the init's inherited pipes are ([`super::init`]).
-pub fn clear_cloexec(fd: &OwnedFd) -> Result<(), OciError> {
-    rustix::io::fcntl_setfd(fd, rustix::io::FdFlags::empty())
-        .map_err(|e| OciError::os("clearing close-on-exec on the seed's socket", e))
 }

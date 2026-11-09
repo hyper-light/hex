@@ -17,7 +17,7 @@
 //! A seed that dies, or a round trip that breaks, refuses its exec and is replaced; the agent reaps
 //! every seed it started (by pidfd), so none is leaked.
 
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Condvar, Mutex, MutexGuard};
@@ -25,6 +25,7 @@ use std::time::Duration;
 
 use hex_api::Refusal;
 use hex_core::seed::{Answer, Failed, Request};
+use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::seed as rt_seed;
 use rustix::process::{Pid, PidfdFlags, WaitId, WaitIdOptions};
 
@@ -191,20 +192,18 @@ impl SeedPool {
     /// agent keeps the other and the child's pidfd.
     fn start(&self) -> Result<Seed, Refusal> {
         let (ours, theirs) = rt_seed::socketpair()?;
-        rt_seed::clear_cloexec(&theirs)?;
+        // The seed's end rides in as its stdin, which the spawn duplicates into the child alone: it stays
+        // close-on-exec here, so no process another thread of the agent starts meanwhile inherits it, as
+        // one would in the window a cleared flag leaves (CVE-2024-21626's class). The seed keeps only its
+        // socket; every other inherited descriptor closes on its re-exec, as the init's do.
         let mut cmd = Command::new(&self.exe);
         cmd.arg("__oci-seed")
-            .env(rt_seed::ENV_SOCKET, theirs.as_fd().as_raw_fd().to_string())
-            .stdin(std::process::Stdio::null())
+            .stdin(std::process::Stdio::from(theirs))
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
-        // The seed keeps only its socket; every other inherited descriptor closes on its re-exec, as
-        // the init's do. `theirs` is passed by number with close-on-exec cleared, so keep it open past
-        // the spawn until the child has it.
         let child = cmd
             .spawn()
             .map_err(|e| Refusal::os("starting an exec seed", e))?;
-        drop(theirs);
         let pid = i32::try_from(child.id())
             .map_err(|_| Refusal::os("starting an exec seed", "a pid out of range"))?;
         let raw = Pid::from_raw(pid)
@@ -254,9 +253,12 @@ fn round_trip(
     let [stdin, stdout, stderr] = stdio;
     let fds = [stdin, stdout, stderr, init.as_fd()];
     // The agent↔seed wire lives once in `hex-runtime`'s seed module, used by the seed, its
-    // intermediate and here (CLAUDE.md §13). A broken socket is the seed's death: take it for broken.
-    rt_seed::send_request(seed.socket.as_fd(), req, fds)
-        .map_err(|e| Trip::Broken(Refusal::from(e)))?;
+    // intermediate and here (CLAUDE.md §13). A broken socket is the seed's death: take it for broken. A
+    // program too big for the wire was never sent, and the seed is whole.
+    rt_seed::send_request(seed.socket.as_fd(), req, fds).map_err(|e| match e {
+        e @ OciError::Program(_) => Trip::Refused(Refusal::from(e)),
+        e => Trip::Broken(Refusal::from(e)),
+    })?;
     // The seed holds its own copy of the init's pidfd now.
     drop(init);
     let (answer, pidfd) =
@@ -268,6 +270,19 @@ fn round_trip(
                 "a seed said a program started but sent no pidfd".to_owned(),
             ))),
         },
+        // A seed started under a lower stack limit than the node's reading refuses the program by its own
+        // (HEX-RT-14): the node reads its limit again, once, on this refusal alone, and holds the next exec
+        // to it before any seed is asked.
+        Answer::Refused {
+            failed: Failed::Program,
+            why,
+        } => {
+            hex_runtime::linux::process::relearn_stack();
+            Err(Trip::Refused(Refusal::Invalid {
+                what: "program",
+                why,
+            }))
+        }
         Answer::Refused { failed, why } => {
             let refusal = Refusal::Os {
                 op: "exec in a container",
@@ -277,7 +292,9 @@ fn round_trip(
                 Failed::Seed => Err(Trip::Broken(refusal)),
                 // `Unable` is a create's outcome (no clone3 into a cgroup), which an exec never meets;
                 // were it to, the seed is whole, so the exec is refused by type, not the seed replaced.
-                Failed::Request | Failed::Start | Failed::Unable => Err(Trip::Refused(refusal)),
+                Failed::Request | Failed::Start | Failed::Unable | Failed::Program => {
+                    Err(Trip::Refused(refusal))
+                }
             }
         }
     }

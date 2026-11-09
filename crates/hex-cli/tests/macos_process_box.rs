@@ -16,6 +16,7 @@
 use std::time::{Duration, Instant};
 
 use hex_api::conformance::{self, Act, Fixture};
+use hex_api::differential;
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Runtime, Signal, Stdio};
 use hex_core::watch::{lateness_seed, seed};
 use hex_runtime::macos::{MacRuntime, machine_model};
@@ -28,10 +29,6 @@ const GIB: u64 = 1 << 30;
 /// bench/native/macos/records/test-waits-macos.txt), as hex-runtime's macOS tests use. A guard only ends a
 /// hang; a passing test waits on its fact (Ada's rule, 2026-11-06).
 const HANG_GUARD: Duration = Duration::from_millis(39_507);
-/// When a bound kill's end counts as late, for the test that claims ends are seen when they happen: twice the
-/// max of 30 measured exec-to-exits of a hog ended at its 256 MiB bound, 465.469 ms
-/// (bench/native/macos/records/execexit-a82ce7b-20261106T161405Z.txt).
-const ENDED_AT_BOUND: Duration = Duration::from_micros(930_938);
 /// How long the exec-to-exit measurement waits on one sample: twice (x 2) the slowest sample recorded, the
 /// hog's 465.469 ms (bench/native/macos/records/execexit-a82ce7b-20261106T161405Z.txt). A sample past it
 /// prints `None`, recorded as slower than every earlier run, never waited out (the lead's call #4, 2026-11-06).
@@ -57,6 +54,9 @@ impl BinFixture {
 }
 
 impl Fixture for BinFixture {
+    fn exec_limit(&self) -> Option<hex_api::ExecLimit> {
+        Some(hex_runtime::macos::exec_limit().expect("kern.argmax"))
+    }
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
         BoxSpec {
             id,
@@ -90,10 +90,11 @@ fn fixture() -> BinFixture {
 }
 
 /// AC-T7.1.1: the macOS `process` class holds the runtime contract (HEX-RT-1..9; 10..13 are the oci
-/// class's, which this one has nothing to check).
+/// class's, which this one has nothing to check), and the differential suite holds it to the simulator's
+/// trace (HEX-DIFF-1..6, CLAUDE.md §8).
 #[test]
 fn macos_process_boxes_hold_the_contract() {
-    let failures = conformance::run(&runtime(), &fixture());
+    let failures = differential::run(&runtime(), &fixture());
     assert!(failures.is_empty(), "conformance failures: {failures:#?}");
 }
 
@@ -157,6 +158,63 @@ fn box_user_boxes_hold_the_contract() {
         failures.is_empty(),
         "box-user conformance failures: {failures:#?}"
     );
+}
+
+/// A `hex node` of this build serving a fresh state folder, ended when dropped.
+struct NodeProcess {
+    child: std::process::Child,
+    socket: std::path::PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+impl NodeProcess {
+    fn start() -> Self {
+        use std::io::BufRead;
+        let dir = tempfile::Builder::new().prefix("node-").tempdir().unwrap();
+        let socket = dir.path().join("node.sock");
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_hex"))
+            .arg("node")
+            .arg("--socket")
+            .arg(&socket)
+            .arg("--state")
+            .arg(dir.path().join("state"))
+            .env_remove("SHARDS_BIN")
+            .env_remove("HEX_GUEST_KERNEL")
+            .env_remove("HEX_GUEST_INITRD")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("start hex node");
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert_eq!(line.trim(), format!("ready {}", socket.display()));
+        Self {
+            child,
+            socket,
+            _dir: dir,
+        }
+    }
+}
+
+impl Drop for NodeProcess {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Native plan step 8, the suite through the node's socket (HEX-RT-1..9): a `hex node` on macOS serving the
+/// `process` class over its socket, driven by `hex-client`, holds the contract with the same results as
+/// the class in process.
+#[test]
+fn macos_process_boxes_hold_the_contract_through_the_nodes_socket() {
+    let node = NodeProcess::start();
+    let client = hex_client::Client::connect(&node.socket).expect("connect to hex node");
+    let through = conformance::run(&client, &fixture());
+    let in_process = conformance::run(&runtime(), &fixture());
+    assert!(through.is_empty(), "through the socket: {through:#?}");
+    assert_eq!(through, in_process);
 }
 
 /// The step's scenario: a box allocating past its 256 MiB bound is ended, its end reported as memory with
@@ -327,7 +385,8 @@ fn a_box_takes_a_named_signal() {
 /// expect each wait to return when the program ends, never at the wait's budget. XNU posts a child's
 /// `NOTE_EXIT` before it is a zombie (`bsd/kern/kern_exit.c:2594-2595`, then `p_stat = SZOMB` at :2664),
 /// so a reap made on the event can find nothing yet; the native bench saw 3 of 60 such ends reported 60 s
-/// late (bench/native/macos/RESULT.md).
+/// late (bench/native/RESULT.md). Sixty runs, from that measured rate: without the fix 3/60, 7/60 and 3/60
+/// missed, at least 5%, so sixty runs see none with probability at most 0.95^60 = 4.6%.
 #[test]
 fn a_programs_end_is_seen_when_it_ends_not_at_the_waits_budget() {
     let rt = runtime();
@@ -343,12 +402,16 @@ fn a_programs_end_is_seen_when_it_ends_not_at_the_waits_budget() {
         class: ClassSpec::Process,
     })
     .expect("create");
-    // Late is past the measured bound kill's own wait; the budget is the hang guard, so a wait that runs
-    // out its budget reads as late, never as on time.
-    let late_after = ENDED_AT_BOUND;
-    let budget = HANG_GUARD;
+    const RUNS: usize = 60;
+    // A missed exit event makes the wait sleep out its whole budget (XNU's exit event came before the zombie
+    // could be reaped, abdbfd0), so an end seen only at the budget is the fault. The budget is the suite's
+    // learned patience, at least twice the slowest end on macOS's record, so a legitimate end, even a rebuilt
+    // binary's first (939 ms on adas-mac-studio.local-2 at load 15-20), comes well before it. On time is the
+    // bound's kill before then: a refused exec's SIGKILL is no bound's end (bound_end).
+    let budget = hex_api::conformance::patience();
+    let late_after = budget;
     let mut late = Vec::new();
-    for i in 0..60 {
+    for i in 0..RUNS {
         match bound_end(&rt, &id, fx.act(&Act::Hog(GIB)), budget) {
             Ok(took) if took < late_after => {}
             other => late.push((i, other)),

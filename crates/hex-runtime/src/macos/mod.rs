@@ -1,7 +1,8 @@
 //! The macOS runtime: [`hex_api::Runtime`] over the `process` class (docs/design/runtime.md). A box is a
 //! process group at the QoS its declared weight asks, its bounds held by a watcher thread reading each
-//! member's footprint (`process`, `sys`, `watch`); the `oci` class is a Linux kernel's, refused by name here until a Shards
-//! guest carries it (the native plan's step 5). This is the node's runtime seam on macOS; the records,
+//! member's footprint (`process`, `sys`, `watch`); the `oci` class is a Linux kernel's, refused by name
+//! here: a node runs it in its Shards guest by wrapping this in [`crate::guest::WithGuest`] (the native
+//! plan's step 5). This is the node's runtime seam on macOS; the records,
 //! recovery and socket that wrap it on Linux (`hex-node`) are not yet cross-OS, so this holds its boxes
 //! in memory and is driven in process.
 
@@ -23,12 +24,24 @@ use std::os::fd::{AsFd, OwnedFd};
 use std::sync::{Arc, Mutex};
 
 use hex_api::{
-    Bounds, BoxId, BoxInfo, BoxSpec, BoxState, Class, ClassSpec, Membership, Proc, Program,
-    Refusal, Runtime, Signal, Stdio, Usage,
+    Bounds, BoxId, BoxInfo, BoxSpec, BoxState, Class, ClassSpec, ExecLimit, Membership, Proc,
+    Program, Refusal, Runtime, Signal, Stdio, Usage,
 };
 use rustix::fs::{Mode, OFlags};
 
 use process::{ProcessBox, Shared};
+
+/// The bound macOS's execve puts on a program's arguments and environment, read from the kernel now
+/// (`kern.argmax`, kind (a); docs/research/runtime/exec-size-bounds.md). XNU has no bound on one string apart.
+pub fn exec_limit() -> Result<ExecLimit, Refusal> {
+    Ok(ExecLimit {
+        block: sys::arg_max().map_err(|e| Refusal::os("reading kern.argmax", e))?,
+        counts: hex_api::BlockCount::Execve,
+        string: None,
+        unit: hex_api::StringUnit::Bytes,
+        source: "macOS's execve (kern.argmax)",
+    })
+}
 
 /// The headroom held back from a box's bound for the fork arming window, in bytes ([`hex_core::boxuser`]'s
 /// reserve): a just-forked member is unarmed until the helper arms it, and this is what it may grow into
@@ -78,6 +91,8 @@ pub struct MacRuntime {
     shared: Arc<Shared>,
     boxes: Mutex<BTreeMap<BoxId, Arc<ProcessBox>>>,
     helper: Option<BoxUser>,
+    /// The kernel's bound on a program's arguments and environment, read at start (`kern.argmax`).
+    exec_limit: ExecLimit,
 }
 
 impl MacRuntime {
@@ -108,6 +123,7 @@ impl MacRuntime {
             shared: Arc::new(shared),
             boxes: Mutex::new(BTreeMap::new()),
             helper: None,
+            exec_limit: exec_limit()?,
         })
     }
 
@@ -130,9 +146,37 @@ impl MacRuntime {
                         helper: Arc::new(helper),
                         boxes: Mutex::new(BTreeMap::new()),
                     }),
+                    exec_limit: exec_limit()?,
                 })
             }
             None => Self::new(rate_bytes, rate_processes, lateness),
+        }
+    }
+
+    /// Box `id`'s process group and its leader's start time, once its first member has started: what names
+    /// its members after the node is gone, for the node's record (native plan step 8, T-T7.1.2).
+    pub fn group(&self, id: &BoxId) -> Result<Option<(i32, u64)>, Refusal> {
+        self.get(id)?.group()
+    }
+
+    /// Takes back box `spec` after the node was gone, on `group` where it is still the box's
+    /// ([`ProcessBox::adopt`]).
+    pub fn adopt(&self, spec: &BoxSpec, group: Option<(i32, u64)>) -> Result<(), Refusal> {
+        let mut boxes = self.boxes()?;
+        if boxes.contains_key(&spec.id) {
+            return Err(Refusal::Exists(spec.id.clone()));
+        }
+        let b = ProcessBox::adopt(spec.id.clone(), &spec.bounds, self.shared.as_ref(), group)?;
+        boxes.insert(spec.id.clone(), Arc::new(b));
+        Ok(())
+    }
+
+    /// Ends what still runs of a box the node's recovery removes, named by `group`
+    /// ([`process::end_group`]).
+    pub fn end(group: Option<(i32, u64)>) -> Result<(), Refusal> {
+        match group {
+            Some((pgid, started)) => process::end_group(pgid, started),
+            None => Ok(()),
         }
     }
 
@@ -285,7 +329,8 @@ impl Runtime for MacRuntime {
             return Err(Refusal::Platform {
                 what: "the oci class",
                 platform: "macos",
-                why: "a Linux image needs a Linux kernel; a Shards guest carries it (native plan step 5)"
+                why: "a Linux image needs a Linux kernel: the node's Shards guest carries it \
+                      (hex_runtime::guest::WithGuest routes the class there)"
                     .to_owned(),
             });
         };
@@ -322,7 +367,14 @@ impl Runtime for MacRuntime {
         })
     }
 
-    fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+    /// Streams asked for are made as pipes, the program's ends its stdio, the caller's held by its `Proc`.
+    fn exec(
+        &self,
+        id: &BoxId,
+        program: Program,
+        mut stdio: Stdio,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        program.fits(&self.exec_limit)?;
         if let Some(bu) = &self.helper {
             program.check()?;
             if program.user.is_some() {
@@ -332,19 +384,19 @@ impl Runtime for MacRuntime {
                         .to_owned(),
                 });
             }
+            let given = stdio.make_asked()?;
             let pid = bu.exec(id, &program, stdio_fds(stdio)?)?;
-            return Ok(Box::new(proc::UserProc::watch(
-                pid,
-                id.clone(),
-                Arc::clone(&bu.helper),
-            )?));
+            let proc = proc::UserProc::watch(pid, id.clone(), Arc::clone(&bu.helper))?;
+            return Ok(Box::new(hex_api::Asked::new(proc, given)));
         }
+        let given = stdio.make_asked()?;
         let b = self.get(id)?;
         // The box's whole memory bound arms each member with a fatal per-process cap (native plan step 1's
         // `_ext` backstop); the box tracks which members carry it.
         let spawn = build_spawn(&program, stdio, b.bounds().memory_max)?;
         let pid = b.exec(spawn)?;
-        Ok(Box::new(proc::BoxProc::watch(pid, Some(b.members()))?))
+        let proc = proc::BoxProc::watch(pid, Some(b.members()))?;
+        Ok(Box::new(hex_api::Asked::new(proc, given)))
     }
 
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {

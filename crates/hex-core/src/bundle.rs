@@ -371,9 +371,9 @@ fn overlay(
     for (i, layer) in layers.iter().enumerate().rev() {
         lower.push(option_path(layer, &format!("rootfs.layers[{i}]"))?);
     }
-    let rootfs = bundle.join(ROOTFS);
-    let upper = bundle.join(UPPER);
-    let work = bundle.join(WORK);
+    let rootfs = linux_join(bundle, ROOTFS);
+    let upper = linux_join(bundle, UPPER);
+    let work = linux_join(bundle, WORK);
     let mut options = vec![
         format!("lowerdir={}", lower.join(":")),
         format!(
@@ -402,6 +402,18 @@ fn overlay(
         options,
     };
     Ok((mount, vec![rootfs, upper, work]))
+}
+
+/// `dir/name` as the Linux that mounts it reads a path: joined by `/` on every host, since
+/// `Path::join` uses the host's (`\` on Windows), which overlayfs's options read as a separator.
+/// `dir` keeps its bytes as given.
+fn linux_join(dir: &Path, name: &str) -> PathBuf {
+    let mut path = dir.as_os_str().to_owned();
+    if dir.as_os_str().as_encoded_bytes().last() != Some(&b'/') {
+        path.push("/");
+    }
+    path.push(name);
+    PathBuf::from(path)
 }
 
 /// The mounts every container gets, Docker's (daemon/pkg/oci/defaults.go) with containerd's sized
@@ -658,14 +670,16 @@ mod tests {
 
     /// AC-T7.1.1: the plan step's example, rootless: the overlay is the first mount, its lower
     /// directories top first, with `userxattr`; the user namespace maps the node to root; the
-    /// network namespace is the box's own; the bind is read-only and not recursive.
+    /// network namespace is the box's own; the bind is read-only and not recursive. The bundle's
+    /// directories are Linux paths, `/`-joined on every host (CLAUDE.md §12: the core renders a Linux
+    /// container's bundle the same on Windows, where `Path::join` would put `\` in them).
     #[test]
     fn layers_with_a_private_network_render_rootless_to_their_golden_config() {
         let b = render(&layered(), &at(ROOTLESS, &[])).unwrap();
         golden("layers-private-rootless.json", &b);
         assert_eq!(
             b.dirs,
-            ["rootfs", "upper", "work"].map(|d| Path::new(BUNDLE).join(d))
+            ["rootfs", "upper", "work"].map(|d| PathBuf::from(format!("{BUNDLE}/{d}")))
         );
     }
 

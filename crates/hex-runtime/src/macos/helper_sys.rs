@@ -310,25 +310,32 @@ impl Privileged for RealPriv {
 
     /// Root may watch any process: `EVFILT_PROC` with `NOTE_FORK | NOTE_EXIT` (`EV_ADD` on a watched pid
     /// changes nothing).
-    fn watch_members(&self, pids: &[i32]) -> io::Result<Vec<i32>> {
-        self.members.watch(pids, 0)
+    fn watch_members(&self, pids: &[i32], uid: u32) -> io::Result<Vec<i32>> {
+        self.members.watch(pids, u64::from(uid))
     }
 
-    /// Waits, with no timeout, until a watched member forks or ends.
-    fn next_member_event(&self) -> io::Result<()> {
+    /// Waits, with no timeout, until a watched member forks or ends; returns the users whose members did,
+    /// each read from its watch's tag.
+    fn next_member_event(&self) -> io::Result<Vec<u32>> {
         let mut events = self
             .events
             .lock()
             .map_err(|_| io::Error::other("the member events lock is poisoned"))?;
         loop {
             self.members.wait(None, None, &mut events)?;
-            if events.iter().any(|e| {
-                matches!(
-                    e,
-                    super::sys::Event::Fork { .. } | super::sys::Event::Exit { .. }
-                )
-            }) {
-                return Ok(());
+            let mut users: Vec<u32> = events
+                .iter()
+                .filter_map(|e| match e {
+                    super::sys::Event::Fork { tag, .. } | super::sys::Event::Exit { tag, .. } => {
+                        u32::try_from(*tag).ok()
+                    }
+                    _ => None,
+                })
+                .collect();
+            if !users.is_empty() {
+                users.sort_unstable();
+                users.dedup();
+                return Ok(users);
             }
         }
     }

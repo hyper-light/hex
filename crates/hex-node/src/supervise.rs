@@ -678,6 +678,14 @@ impl Proc for Owned {
         let exit = self.proc.wait_for(timeout)?;
         Ok(self.seen(exit))
     }
+
+    fn kill(&mut self) -> Result<(), Refusal> {
+        self.proc.kill()
+    }
+
+    fn streams(&mut self) -> Result<hex_api::Given, Refusal> {
+        self.proc.streams()
+    }
 }
 
 impl Drop for Owned {
@@ -753,6 +761,17 @@ impl Proc for ProgramProc {
                 None => Err(e),
             },
         }
+    }
+
+    /// Ended already when a delete reaped it; else killed through its own `Proc`.
+    fn kill(&mut self) -> Result<(), Refusal> {
+        if self.done || self.recorded().is_some() {
+            return Ok(());
+        }
+        self.proc.kill()
+    }
+    fn streams(&mut self) -> Result<hex_api::Given, Refusal> {
+        self.proc.streams()
     }
 }
 

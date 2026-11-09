@@ -10,11 +10,12 @@
 //! pipe the runtime writes its acknowledgement on.
 
 use std::fs;
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use hex_core::limits;
 use rustix::fs::{Mode, OFlags};
 use rustix::mount::{MountFlags, MountPropagationFlags, UnmountFlags};
 use rustix::thread::UnshareFlags;
@@ -50,7 +51,7 @@ const DEFAULT_DEVICES: [(&str, u32, u32, u32); 6] = [
 /// The `hex __oci-init` entry. Returns the process exit code; a setup failure is reported to the
 /// runtime over the sync pipe before returning non-zero.
 pub fn run() -> u8 {
-    let sync = match inherited_fd(ENV_SYNC_W) {
+    let sync = match handed_fd(ENV_SYNC_W, OFlags::WRONLY) {
         Ok(fd) => fd,
         Err(_) => return 125,
     };
@@ -120,7 +121,7 @@ fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
 
     // The map pipe's end is read only for a user namespace's maps, and is the shim's to close either
     // way, before the container is forked.
-    let map = inherited_fd(ENV_MAP_R)?;
+    let map = handed_fd(ENV_MAP_R, OFlags::RDONLY)?;
     if spec.makes_namespace("user") {
         sys::unshare(UnshareFlags::NEWUSER)?;
         msg(sync, &format!("U{}", std::process::id()));
@@ -338,7 +339,7 @@ impl Becoming {
                 "the seccomp filter has more instructions than a filter holds".to_owned(),
             ));
         }
-        let rlimits = process
+        let mut rlimits = process
             .rlimits
             .iter()
             .map(|limit| {
@@ -350,7 +351,14 @@ impl Becoming {
                     },
                 ))
             })
-            .collect::<Result<_, OciError>>()?;
+            .collect::<Result<Vec<_>, OciError>>()?;
+        // A spec that names no RLIMIT_NOFILE gets Docker 29's, not the node's own (HEX-INST-6).
+        if !limits::names_nofile(process.rlimits.iter().map(|l| l.kind.as_str())) {
+            rlimits.push((
+                rustix::process::Resource::Nofile,
+                crate::linux::default_nofile(),
+            ));
+        }
         Ok(Self {
             oom: process
                 .oom_score_adj
@@ -373,6 +381,10 @@ impl Becoming {
 
     /// Becomes the process: system calls alone, in the order the type's docs give.
     pub(crate) fn apply(&self) -> Result<(), Failure> {
+        // Before anything else, so before the seccomp filter a strict profile would refuse it under, as
+        // crun marks them before its own (src/libcrun/container.c:1096).
+        crate::linux::sys::mark_cloexec_from_3()
+            .map_err(Failure::of("marking descriptors close-on-exec"))?;
         // oom_score_adj is set while still privileged (lowering it needs CAP_SYS_RESOURCE).
         if let Some(text) = &self.oom {
             let fd = rustix::fs::open(
@@ -983,17 +995,14 @@ fn env_var(name: &str) -> Result<String, OciError> {
         .map_err(|_| OciError::Broken(format!("{name} not set for the container init")))
 }
 
-/// A pipe end the runtime passed across its exec of the shim, named by `name`. It goes no further: it's
-/// made close-on-exec again, so the program the container execs never holds it (crun's holds only its
-/// stdio, and so does Hex's).
-fn inherited_fd(name: &str) -> Result<OwnedFd, OciError> {
-    let n: RawFd = env_var(name)?
-        .parse()
-        .map_err(|_| OciError::Broken(format!("{name} isn't an fd")))?;
-    let fd = sys::own_fd(n)?;
-    rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::CLOEXEC)
-        .map_err(|e| OciError::os("setting close-on-exec", e))?;
-    Ok(fd)
+/// A pipe end the runtime holds, named by `name` as the path of the runtime's descriptor for it
+/// (`/proc/<pid>/fd/<n>`), which stays close-on-exec there: the runtime never clears the flag for the
+/// spawn, so no process another of its threads starts meanwhile inherits it. Opened close-on-exec here, so
+/// the program the container execs never holds it (crun's holds only its stdio, and so does Hex's).
+fn handed_fd(name: &str, flags: OFlags) -> Result<OwnedFd, OciError> {
+    let path = env_var(name)?;
+    rustix::fs::open(path.as_str(), flags | OFlags::CLOEXEC, Mode::empty())
+        .map_err(|e| OciError::os("opening a pipe the runtime holds", e))
 }
 
 /// Writes one newline-terminated sync message; a broken pipe is ignored (the runtime has gone).

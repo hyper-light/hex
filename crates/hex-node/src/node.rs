@@ -11,12 +11,11 @@
 //! crash takes it with the container, so a box's record that names nothing else isn't fsynced
 //! (decision 1; [`crate::store`]).
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::os::fd::AsFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use hex_api::{
@@ -27,7 +26,7 @@ use hex_core::bundle::{self, Bundle, Owner, Place};
 use hex_core::cgroup::Dev;
 use hex_core::netns;
 use hex_core::record::{BoxRecord, Phase, ProcId};
-use hex_core::recovery::{self, Decision, Seen, Why};
+use hex_core::recovery::{self, Decision, Seen};
 use hex_runtime::linux::cgroup::BoxRoot;
 use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::run::Runtime as OciRuntime;
@@ -36,8 +35,10 @@ use hex_runtime::linux::oci::state::{State, Status, start_time};
 use hex_runtime::linux::proc::PidfdProc;
 use hex_runtime::linux::{disks, process};
 
+use crate::abandoned::Abandoned;
 use crate::createpool::CreatePool;
 use crate::netns::Netns;
+use crate::recorded::{RecoverySummary, why_text};
 use crate::remove::remove_tree;
 use crate::seed::SeedPool;
 use crate::store::Store;
@@ -72,11 +73,8 @@ pub struct Node {
     oci_helper: Option<PathBuf>,
     /// The `oci` boxes' inits, watched and reaped; orphaned box processes, reaped.
     supervisor: Arc<Supervisor>,
-    /// Abandoned programs ([`Node::abandoned`]) counted but not yet in their box's record, by box:
-    /// kept and reported until a record write takes them, never dropped (§3). Each box's count has a
-    /// lock of its own, held across the write that takes it, so one box's durable write holds up no
-    /// other box's inspect or create (goal 5 plan step 2). An entry goes with its box's delete.
-    abandoned: Mutex<Pending>,
+    /// Abandoned programs ([`Node::abandoned`]) counted but not yet in their box's record.
+    abandoned: Abandoned,
     /// Where each box made from an [`OciSpec`] has its bundle: `<bundles>/<id>`, its writable layer
     /// in it.
     bundles: PathBuf,
@@ -99,9 +97,6 @@ pub struct Node {
     netns: Netns,
 }
 
-/// Each box's abandoned programs not yet in its record ([`Node::abandoned`]).
-type Pending = BTreeMap<BoxId, Arc<Mutex<u64>>>;
-
 /// Where an `oci` box's bundle comes from.
 enum Source {
     /// The caller's ([`ClassSpec::Bundle`]), run as it is.
@@ -110,16 +105,37 @@ enum Source {
     Rendered(PathBuf, Bundle),
 }
 
-/// What a recovery did.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RecoverySummary {
-    /// Boxes taken back as they were.
-    pub adopted: Vec<BoxId>,
-    /// Boxes removed, each with why.
-    pub removed: Vec<(BoxId, String)>,
-}
-
 impl Node {
+    /// The program started, its stdio as given: an oci box whose init runs is known to the supervisor,
+    /// with what its exec needs, so the hot path reads nothing from disk; any other box's record says what
+    /// it is.
+    fn exec_given(
+        &self,
+        id: &BoxId,
+        program: Program,
+        stdio: Stdio,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        match self.supervisor.live(id)? {
+            Some(live) => self.exec_oci(id, live, program, stdio),
+            None => match self.record(id)?.map(|r| r.spec.class) {
+                None => Err(Refusal::NoSuchBox(id.clone())),
+                Some(ClassSpec::Process) => {
+                    let cg = self
+                        .root
+                        .get(id)
+                        .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
+                    let _spawning = self.supervisor.spawning()?;
+                    self.supervisor
+                        .own(Box::new(process::exec(&cg, &program, stdio)?))
+                }
+                // An oci box with no running init: mid-create, stopped, or its create failed.
+                Some(ClassSpec::Oci(_) | ClassSpec::Bundle(_)) => {
+                    Err(Refusal::NotRunning(id.clone(), "exec"))
+                }
+            },
+        }
+    }
+
     /// Opens a node agent whose boxes live under cgroup `box_root` with their records in `state_dir`,
     /// the `io` bounds applying to the disks under `disk_path`. Does not recover; call [`Node::recover`].
     pub fn open(box_root: &Path, state_dir: &Path, disk_path: &Path) -> Result<Self, Refusal> {
@@ -167,7 +183,7 @@ impl Node {
             key,
             oci_helper: None,
             supervisor,
-            abandoned: Mutex::new(BTreeMap::new()),
+            abandoned: Abandoned::default(),
             bundles,
             owner,
             masked: thermal_throttle()?,
@@ -327,7 +343,9 @@ impl Node {
             bounds: record.spec.bounds.clone(),
             adopted,
             exit,
-            abandoned: record.abandoned.saturating_add(self.unrecorded(id)?),
+            abandoned: record
+                .abandoned
+                .saturating_add(self.abandoned.unrecorded(id)?),
         })
     }
 
@@ -337,30 +355,7 @@ impl Node {
     /// can't take now is kept, reported all the same, and written with the next; a box with no
     /// readable record (deleted since) has none to take it.
     pub fn abandoned(&self, id: &BoxId) -> Result<(), Refusal> {
-        let count = Arc::clone(self.pending()?.entry(id.clone()).or_default());
-        let mut count = count.lock().map_err(|_| counts_poisoned())?;
-        // Saturating: 2^64 programs is past any box's life, so the cap is never met.
-        *count = count.saturating_add(1);
-        let add = *count;
-        self.store.update(id, |r| {
-            r.abandoned = r.abandoned.saturating_add(add);
-            true
-        })?;
-        *count = 0;
-        Ok(())
-    }
-
-    fn pending(&self) -> Result<MutexGuard<'_, Pending>, Refusal> {
-        self.abandoned.lock().map_err(|_| counts_poisoned())
-    }
-
-    /// Box `id`'s abandoned programs not yet in its record; waits only for a write of its own count.
-    fn unrecorded(&self, id: &BoxId) -> Result<u64, Refusal> {
-        let Some(count) = self.pending()?.get(id).map(Arc::clone) else {
-            return Ok(0);
-        };
-        let count = count.lock().map_err(|_| counts_poisoned())?;
-        Ok(*count)
+        self.abandoned.count(&self.store, id)
     }
 
     /// How an `oci` box's init ended: as the supervisor reaped it, or as the box's record holds it
@@ -756,6 +751,7 @@ impl Runtime for Node {
         // be rendered is refused by name whether or not the id is taken (HEX-RT-13).
         if let ClassSpec::Oci(oci) = &spec.class {
             oci.check()?;
+            oci.init.fits(&process::exec_limit())?;
         }
         if self.record(&spec.id)?.is_some() || self.root.get(&spec.id).is_some() {
             return Err(Refusal::Exists(spec.id));
@@ -815,28 +811,16 @@ impl Runtime for Node {
         }
     }
 
-    fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
-        // An oci box whose init runs is known to the supervisor, with what its exec needs, so the hot
-        // path reads nothing from disk; any other box's record says what it is.
-        match self.supervisor.live(id)? {
-            Some(live) => self.exec_oci(id, live, program, stdio),
-            None => match self.record(id)?.map(|r| r.spec.class) {
-                None => Err(Refusal::NoSuchBox(id.clone())),
-                Some(ClassSpec::Process) => {
-                    let cg = self
-                        .root
-                        .get(id)
-                        .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
-                    let _spawning = self.supervisor.spawning()?;
-                    self.supervisor
-                        .own(Box::new(process::exec(&cg, &program, stdio)?))
-                }
-                // An oci box with no running init: mid-create, stopped, or its create failed.
-                Some(ClassSpec::Oci(_) | ClassSpec::Bundle(_)) => {
-                    Err(Refusal::NotRunning(id.clone(), "exec"))
-                }
-            },
-        }
+    /// Streams asked for are made as pipes, the program's ends its stdio, the caller's held by its `Proc`.
+    fn exec(
+        &self,
+        id: &BoxId,
+        program: Program,
+        mut stdio: Stdio,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        let given = stdio.make_asked()?;
+        let proc = self.exec_given(id, program, stdio)?;
+        Ok(Box::new(hex_api::Asked::new(proc, given)))
     }
 
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
@@ -899,9 +883,7 @@ impl Runtime for Node {
             self.store.put(&record)?;
         }
         self.scrub(id)?;
-        if let Ok(mut pending) = self.abandoned.lock() {
-            pending.remove(id);
-        }
+        self.abandoned.forget(id);
         // The box is empty, so its init has ended: reaped here, leaving no zombie of it.
         init.as_ref().map_or(Ok(()), supervise::reap)
     }
@@ -1007,17 +989,6 @@ fn survivors(cg: &hex_runtime::linux::cgroup::BoxCgroup) -> String {
     }
 }
 
-fn why_text(why: &Why) -> String {
-    match why {
-        Why::MidCreate => "the node agent stopped while it was being made".to_owned(),
-        Why::MidDelete => "the node agent stopped while it was being removed".to_owned(),
-        Why::InitGone => "its container's init had ended".to_owned(),
-        Why::NoCgroup => "its record had no cgroup".to_owned(),
-        Why::NoRecord => "its cgroup had no record".to_owned(),
-        Why::Unreadable(w) => format!("its record couldn't be read: {w}"),
-    }
-}
-
 /// Refuses, by the spec's field, a path that isn't a directory on this host.
 fn a_dir(field: &str, path: &Path) -> Result<(), Refusal> {
     let why = match fs::metadata(path) {
@@ -1106,10 +1077,6 @@ fn init_alive(init: ProcId) -> bool {
         None => false,
         Some(now) => init.start_ticks == 0 || now == init.start_ticks,
     }
-}
-
-fn counts_poisoned() -> Refusal {
-    Refusal::Broken("the node's abandoned-program counts' lock was poisoned".to_owned())
 }
 
 /// Where a node keeps its containers' state: on tmpfs, where a host crash takes it with the

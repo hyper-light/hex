@@ -6,6 +6,19 @@
 //! - the hex-api conformance suite, every case, over the socket, on `oci` and on `process` boxes, and on
 //!   `oci` boxes each with a network namespace of its own: as root they take the agent's pooled ones,
 //!   rootless they make theirs on the create's path (decision 4; goal 4 plan step 4);
+//! - HEX-GUEST-8 (native plan step 5, docs/design/shards-guest.md §3): the conformance suite, every
+//!   case, on `oci` and `process` boxes, again through `hex guest relay` and `hex_client::guest`'s
+//!   client, the path a macOS or Windows host takes to the node in its Shards guest, Unix sockets
+//!   standing in for vsock;
+//! - HEX-GUEST-18 (§4a): the conformance suite, every case, on `oci` boxes through
+//!   `hex_runtime::guest::WithGuest`, the node's runtime on macOS and Windows, over `shards_api`'s
+//!   simulator, whose guest bridges each port to `hex guest relay`: the real link, staging and spec
+//!   rewrite, each box's root staged and its copy removed with it;
+//! - HEX-GUEST-42 (native plan step 5's guest reached from the host's node through the seam, and step 8's
+//!   guest stdio): the conformance suite, every case, on `oci` boxes through a host node's socket served
+//!   over `Recorded<WithGuest<…>>`, as macOS's and Windows' nodes serve it, HEX-GUEST-18's simulated guest
+//!   behind it: both stdio forms through the socket, the caller's own pipes copied by its client and the
+//!   streams it asks for the guest's own connections;
 //! - HEX-SOCK-10: a box whose bundle makes a network namespace of its own is counted, as root as one
 //!   taken from the agent's pool, rootless as one made on its create's path, and the counts cross the
 //!   socket (decision 4; goal 4 plan steps 2 and 4);
@@ -38,7 +51,8 @@ use hex_api::{
     Bounds, BoxId, BoxSpec, BoxState, Class, ClassSpec, Exit, Program, Refusal, Runtime, Stdio,
 };
 use hex_client::Client;
-use hex_core::record::{BoxRecord, Phase};
+use hex_core::record::{BoxRecord, Phase, ProcId};
+use hex_core::stream;
 use hex_core::wire::{self, Answer, Call, Request, Streams};
 
 const TEST: &str = "the_seam_holds_its_contract_over_the_node_agents_socket";
@@ -77,7 +91,7 @@ fn the_seam_holds_its_contract_over_the_node_agents_socket() {
 }
 
 /// HEX-INST-3 (native plan step 6): on a machine where Hex's installer ran its one admin step, the
-/// node it installed (the `hex-node` user service) serves every Linux class with no further step: the
+/// node it installed (the user's `hex-node@<user>` service) serves every Linux class with no further step: the
 /// conformance suite passes over its socket, `HEX_INSTALLED_SOCKET`, on `oci` and `process` boxes.
 /// Run by the installer's lab (bench/install/linux_lab.sh); elsewhere it prints SKIP.
 #[test]
@@ -107,6 +121,49 @@ fn an_installed_node_serves_every_class() {
         );
     }
     assert!(client.list().unwrap().is_empty(), "a box is left");
+}
+
+/// HEX-INST-6 (native plan step 6, Ada 2026-11-06): a box whose spec names no RLIMIT_NOFILE, an oci
+/// box from a bundle that names none and a process box, gets Docker 29's 1024:524288, capped at the
+/// node's hard limit, not the node's own (which the installed node raises for the files it holds).
+fn nofile_by_default(lab: &Lab, client: &Client) {
+    let hard = rustix::process::getrlimit(rustix::process::Resource::Nofile).maximum;
+    let want = hex_core::limits::default_nofile(hard);
+    let want = format!("{}:{}", want.soft, want.hard);
+    for (class, spec) in [
+        ("oci", ClassSpec::Bundle(lab.bundle(&Lab::act(&Act::Wait)))),
+        ("process", ClassSpec::Process),
+    ] {
+        assert_eq!(nofile_seen(client, spec), want, "{class} box");
+    }
+}
+
+/// HEX-INST-6 (native plan step 6): an oci box whose spec names RLIMIT_NOFILE keeps the spec's, not the
+/// default: here one less than the default's soft limit, soft, and the default's soft limit, hard
+/// (1023:1024), below the default in both and a lowering a rootless init may make under any node.
+fn nofile_named(lab: &Lab, client: &Client) {
+    let hard = hex_core::limits::NOFILE_SOFT;
+    let soft = hard - 1;
+    let bundle = lab.bundle(&Lab::act(&Act::Wait));
+    let config = bundle.join("config.json");
+    let text = std::fs::read_to_string(&config).unwrap();
+    let named = text.replacen(
+        r#""noNewPrivileges": true"#,
+        &format!(
+            r#""noNewPrivileges": true, "rlimits": [{{"type": "RLIMIT_NOFILE", "soft": {soft}, "hard": {hard}}}]"#
+        ),
+        1,
+    );
+    assert_ne!(
+        named, text,
+        "the bundle's process has no noNewPrivileges to name the limit beside"
+    );
+    std::fs::write(&config, named).unwrap();
+    assert_eq!(
+        nofile_seen(client, ClassSpec::Bundle(bundle)),
+        format!("{soft}:{hard}"),
+        "oci box"
+    );
 }
 
 /// The soft and hard descriptor limits a program sees in a box made from `class`, as `soft:hard`.
@@ -141,6 +198,45 @@ fn nofile_seen(client: &Client, class: ClassSpec) -> String {
     );
     client.delete(&id).unwrap();
     said.trim().to_owned()
+}
+
+/// HEX-INST-8 (native plan step 6): `hex node` started with `$NOTIFY_SOCKET` (systemd's `Type=notify`) says
+/// `READY=1` there once its socket listens, so the installed unit is up exactly when it serves, within the
+/// start bound systemd gives it (sd_notify(3); systemd.service(5) `TimeoutStartSec=`), and the installer
+/// needs no wait of its own. A client connects right after the datagram arrives.
+fn ready_is_told_to_the_service_manager(own: &Path, cache: &Path, exe: &str) {
+    let dir = tempfile::Builder::new()
+        .prefix("notify-")
+        .tempdir_in(cache)
+        .unwrap();
+    let notify = dir.path().join("notify.sock");
+    let manager = std::os::unix::net::UnixDatagram::bind(&notify).unwrap();
+    manager
+        .set_read_timeout(Some(conformance::PATIENCE))
+        .unwrap();
+    let socket = dir.path().join("node.sock");
+    let mut node = Command::new(exe)
+        .arg("node")
+        .arg("--socket")
+        .arg(&socket)
+        .arg("--state")
+        .arg(dir.path().join("state"))
+        .arg("--box-root")
+        .arg(own.join("hex-notify"))
+        .env("NOTIFY_SOCKET", &notify)
+        .stdout(Std::null())
+        .spawn()
+        .expect("start hex node");
+    let mut said = [0u8; 64];
+    let n = manager.recv(&mut said).expect("READY=1 on $NOTIFY_SOCKET");
+    let said = String::from_utf8_lossy(&said[..n]).into_owned();
+    assert!(
+        said.lines().any(|l| l == "READY=1"),
+        "the node told {said:?}"
+    );
+    Client::connect(&socket).expect("connect once the node has said it's ready");
+    node.kill().unwrap();
+    node.wait().unwrap();
 }
 
 /// A `hex node` process serving its socket, killed when dropped.
@@ -334,7 +430,21 @@ fn program(args: &[String]) -> Program {
 /// the create's path rootless (decision 4).
 struct OciBoxes<'a>(&'a Lab, bool);
 
+/// The bound a program crosses the node's socket under: the tighter of the wire's (the client refuses past it)
+/// and Linux's (the node refuses past it).
+fn over_the_socket() -> hex_api::ExecLimit {
+    let linux = hex_runtime::linux::process::exec_limit();
+    if hex_client::WIRE_EXEC_LIMIT.block < linux.block {
+        hex_client::WIRE_EXEC_LIMIT
+    } else {
+        linux
+    }
+}
+
 impl Fixture for OciBoxes<'_> {
+    fn exec_limit(&self) -> Option<hex_api::ExecLimit> {
+        Some(over_the_socket())
+    }
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
         BoxSpec {
             id,
@@ -360,6 +470,9 @@ impl Fixture for OciBoxes<'_> {
 struct ProcessBoxes<'a>(&'a str);
 
 impl Fixture for ProcessBoxes<'_> {
+    fn exec_limit(&self) -> Option<hex_api::ExecLimit> {
+        Some(over_the_socket())
+    }
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
         BoxSpec {
             id,
@@ -380,6 +493,7 @@ impl Fixture for ProcessBoxes<'_> {
 }
 
 fn exercise(own: &Path, cache: &Path, exe: &str) {
+    ready_is_told_to_the_service_manager(own, cache, exe);
     let lab = Lab::new(cache, exe);
     let agent = Agent::start(exe, cache, own.join("hex-sock"));
     let client = agent.client();
@@ -389,20 +503,361 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
         return;
     }
     namespaces_counted(&lab, &client);
-    let failures = conformance::run(&client, &OciBoxes(&lab, false));
+    let failures = hex_api::differential::run(&client, &OciBoxes(&lab, false));
     assert!(
         failures.is_empty(),
         "oci boxes over the socket: {failures:#?}"
     );
     conformance_with_namespaces(&lab, &client);
-    let failures = conformance::run(&client, &ProcessBoxes(exe));
+    let failures = hex_api::differential::run(&client, &ProcessBoxes(exe));
     assert!(
         failures.is_empty(),
         "process boxes over the socket: {failures:#?}"
     );
+    nofile_by_default(&lab, &client);
+    nofile_named(&lab, &client);
+    through_the_guest_relay(&lab, &agent, exe);
+    through_a_simulated_guest(&lab, &agent, exe);
+    through_a_host_nodes_socket(&lab, &agent, exe);
     disconnect(&lab, &agent, &client);
     crash_at_each_record_write(&lab, own, exe);
     assert!(client.list().unwrap().is_empty(), "a box is left");
+}
+
+/// The guest's ports as Unix sockets in the relay's directory.
+struct GuestPorts(PathBuf);
+
+impl hex_client::guest::Link for GuestPorts {
+    fn dial(&self, port: u32) -> Result<Box<dyn hex_client::guest::Duplex>, Refusal> {
+        let name = match port {
+            stream::CONTROL_PORT => "control.sock",
+            stream::STDIO_PORT => "stdio.sock",
+            stream::files::FILES_PORT => "files.sock",
+            other => panic!("dialed port {other:#x}"),
+        };
+        Ok(Box::new(
+            std::os::unix::net::UnixStream::connect(self.0.join(name)).unwrap(),
+        ))
+    }
+}
+
+/// HEX-GUEST-8: start `hex guest relay` to the agent's socket, connect through it as a host reaches
+/// the node in its guest, and run the conformance suite on `oci` and `process` boxes: expect every case
+/// to pass, as over the socket itself. The relay stages under the test's own folder: its default,
+/// `/run/hex/staged`, is the guest's, which a rootless test can't make.
+fn through_the_guest_relay(lab: &Lab, agent: &Agent, exe: &str) {
+    let dir = tempfile::Builder::new()
+        .prefix("relay-")
+        .tempdir_in(agent.socket.parent().unwrap())
+        .unwrap();
+    let mut relay = Command::new(exe)
+        .args(["guest", "relay", "--node"])
+        .arg(&agent.socket)
+        .arg("--unix")
+        .arg(dir.path())
+        .arg("--staged")
+        .arg(dir.path().join("staged"))
+        .stdout(Std::piped())
+        .spawn()
+        .map(Reaped)
+        .expect("start hex guest relay");
+    let mut line = String::new();
+    BufReader::new(relay.0.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert_eq!(line.trim(), "ready", "hex guest relay said {line:?}");
+    let guest =
+        hex_client::guest::Client::connect(std::sync::Arc::new(GuestPorts(dir.path().to_owned())))
+            .expect("connect through the guest relay");
+    assert_eq!(guest.classes(), [Class::Process, Class::Oci]);
+    let failures = conformance::run(&guest, &OciBoxes(lab, false));
+    assert!(
+        failures.is_empty(),
+        "oci boxes through the guest relay: {failures:#?}"
+    );
+    let failures = conformance::run(&guest, &ProcessBoxes(exe));
+    assert!(
+        failures.is_empty(),
+        "process boxes through the guest relay: {failures:#?}"
+    );
+    drop(guest);
+    drop(relay);
+}
+
+/// A child ended and reaped when dropped, so a failing assertion leaves no relay running (one held a gate's
+/// output pipe open for 80 minutes after its test failed, 2026-11-07).
+struct Reaped(Child);
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Copies `from` into `to` until `from` ends, then ends `to`'s sending half: one direction of a bridged
+/// connection, the guest's vsock port to the relay's socket or back.
+fn pump(mut from: Box<dyn shards_api::Stream>, to: std::os::unix::net::UnixStream) {
+    let mut to_w = to.try_clone().unwrap();
+    std::thread::spawn(move || {
+        let _ = std::io::copy(&mut from, &mut to_w);
+        let _ = to_w.shutdown(std::net::Shutdown::Write);
+    });
+}
+
+fn pump_back(mut from: std::os::unix::net::UnixStream, mut to: Box<dyn shards_api::Stream>) {
+    std::thread::spawn(move || {
+        let _ = std::io::copy(&mut from, &mut to);
+        let _ = to.shutdown(std::net::Shutdown::Write);
+    });
+}
+
+/// HEX-GUEST-18's simulated Shards guest: `hex guest relay` started to the agent's socket, staging under a folder
+/// of the test's, and a guest whose PID 1 bridges each of the channel's ports to it, one share `/` seen at `/` (a
+/// simulated guest is the host). The test's folder and the relay's staging folder, the relay (reaped when dropped),
+/// the guest's runtime, and how many times it booted and how many stages it took.
+struct SimulatedGuest {
+    dir: tempfile::TempDir,
+    staged: PathBuf,
+    relay: Reaped,
+    runtime: hex_runtime::guest::GuestRuntime,
+    boots: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    stages: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+fn simulated_guest(agent: &Agent, exe: &str) -> SimulatedGuest {
+    use hex_runtime::guest::shares::Share;
+    use hex_runtime::guest::{GuestConfig, GuestRuntime};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let dir = tempfile::Builder::new()
+        .prefix("guest-")
+        .tempdir_in(agent.socket.parent().unwrap())
+        .unwrap();
+    let staged = dir.path().join("staged");
+    let mut relay = Command::new(exe)
+        .args(["guest", "relay", "--node"])
+        .arg(&agent.socket)
+        .arg("--unix")
+        .arg(dir.path())
+        .arg("--staged")
+        .arg(&staged)
+        .stdout(Std::piped())
+        .spawn()
+        .map(Reaped)
+        .expect("start hex guest relay");
+    let mut line = String::new();
+    BufReader::new(relay.0.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert_eq!(line.trim(), "ready", "hex guest relay said {line:?}");
+    let ports = dir.path().to_owned();
+    let boots = Arc::new(AtomicUsize::new(0));
+    let booted = Arc::clone(&boots);
+    // Connections to the staging port: a stage each.
+    let stages = Arc::new(AtomicUsize::new(0));
+    let staging = Arc::clone(&stages);
+    let guests = shards_api::sim::SimGuests::new(move |host| {
+        booted.fetch_add(1, Ordering::SeqCst);
+        for port in [
+            stream::CONTROL_PORT,
+            stream::STDIO_PORT,
+            stream::files::FILES_PORT,
+        ] {
+            host.listen(port);
+        }
+        while let Some((port, conn)) = host.accept() {
+            let name = match port {
+                stream::CONTROL_PORT => "control.sock",
+                stream::STDIO_PORT => "stdio.sock",
+                _ => {
+                    staging.fetch_add(1, Ordering::SeqCst);
+                    "files.sock"
+                }
+            };
+            let relay = std::os::unix::net::UnixStream::connect(ports.join(name)).unwrap();
+            pump(conn.try_clone().unwrap(), relay.try_clone().unwrap());
+            pump_back(relay, conn);
+        }
+        shards_api::End::Stopped
+    });
+    let config = GuestConfig {
+        // A simulated guest boots nothing: no binary, kernel or initramfs is read.
+        binary: PathBuf::from("/nonexistent/shards"),
+        kernel: PathBuf::from("/nonexistent/kernel"),
+        initrd: PathBuf::from("/nonexistent/initrd"),
+        // Shards' least guest: one vCPU and its architecture's least memory (`shards_api::check`).
+        vcpus: 1,
+        memory_mib: shards_api::min_memory_mib(std::env::consts::ARCH),
+        shares: vec![Share {
+            dir: PathBuf::from("/"),
+            read_only: false,
+            at: "/".to_owned(),
+        }],
+        staged: staged.to_str().unwrap().to_owned(),
+    };
+    SimulatedGuest {
+        dir,
+        staged,
+        relay,
+        runtime: GuestRuntime::new(Arc::new(guests), config),
+        boots,
+        stages,
+    }
+}
+
+/// HEX-GUEST-18: start `hex guest relay` (staging under a folder of the test's) to the agent's socket,
+/// boot a simulated Shards guest whose PID 1 bridges each of the channel's ports to it, and run the
+/// conformance suite on `oci` boxes through `WithGuest` over that guest, one share `/` seen at `/` (a
+/// simulated guest is the host): expect every case to pass, the guest booted once, and no staged
+/// copy left once the suite's boxes are deleted.
+fn through_a_simulated_guest(lab: &Lab, agent: &Agent, exe: &str) {
+    use hex_runtime::guest::WithGuest;
+    use std::sync::atomic::Ordering;
+    let SimulatedGuest {
+        dir: _dir,
+        staged,
+        relay,
+        runtime,
+        boots,
+        stages,
+    } = simulated_guest(agent, exe);
+    let node = WithGuest::new(hex_api::sim::SimRuntime::new(), runtime).unwrap();
+    assert_eq!(node.classes(), [Class::Process, Class::Oci]);
+    let failures = conformance::run(&node, &OciBoxes(lab, false));
+    assert!(
+        failures.is_empty(),
+        "oci boxes through a simulated Shards guest: {failures:#?}"
+    );
+    assert_eq!(
+        boots.load(Ordering::SeqCst),
+        1,
+        "the guest booted more than once"
+    );
+    assert!(node.list().unwrap().is_empty(), "a box is left");
+    // Every box's copy goes with its box; the layer store (§4a) stays, a cache for the next create.
+    let left: Vec<_> = std::fs::read_dir(&staged)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .filter(|n| n != stream::files::STORE)
+        .collect();
+    assert!(left.is_empty(), "staged copies left: {left:?}");
+    // HEX-GUEST-18 (CLAUDE.md §3; HEX-GUEST-19's HEX-RT-1 in a real guest): a second create of an id the
+    // guest's node holds is refused as `Exists` before anything is staged: one stage for the two creates.
+    let fixture = OciBoxes(lab, false);
+    let id = BoxId::new("twice").unwrap();
+    let before = stages.load(Ordering::SeqCst);
+    node.create(fixture.spec(id.clone(), Bounds::default()))
+        .unwrap();
+    assert_eq!(
+        node.create(fixture.spec(id.clone(), Bounds::default())),
+        Err(Refusal::Exists(id.clone()))
+    );
+    assert_eq!(
+        stages.load(Ordering::SeqCst) - before,
+        1,
+        "the refused create staged its root"
+    );
+    node.delete(&id).unwrap();
+    drop(node);
+    drop(relay);
+}
+
+/// The host's own boxes beside a node's guest: the simulator's, with no processes to take back after a crash,
+/// which HEX-GUEST-42 doesn't ask of a node.
+struct HostBoxes(hex_api::sim::SimRuntime);
+
+impl Runtime for HostBoxes {
+    fn classes(&self) -> Vec<Class> {
+        self.0.classes()
+    }
+    fn create(&self, spec: BoxSpec) -> Result<hex_api::BoxInfo, Refusal> {
+        self.0.create(spec)
+    }
+    fn start(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.0.start(id)
+    }
+    fn exec(
+        &self,
+        id: &BoxId,
+        program: Program,
+        stdio: Stdio,
+    ) -> Result<Box<dyn hex_api::Proc>, Refusal> {
+        self.0.exec(id, program, stdio)
+    }
+    fn signal(&self, id: &BoxId, signal: hex_api::Signal) -> Result<(), Refusal> {
+        self.0.signal(id, signal)
+    }
+    fn inspect(&self, id: &BoxId) -> Result<hex_api::BoxInfo, Refusal> {
+        self.0.inspect(id)
+    }
+    fn usage(&self, id: &BoxId) -> Result<hex_api::Usage, Refusal> {
+        self.0.usage(id)
+    }
+    fn list(&self) -> Result<Vec<hex_api::BoxInfo>, Refusal> {
+        self.0.list()
+    }
+    fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.0.delete(id)
+    }
+}
+
+impl hex_node::recorded::Recover for HostBoxes {
+    fn trace(&self, _id: &BoxId) -> Result<Option<ProcId>, Refusal> {
+        Ok(None)
+    }
+    fn adopt(&self, _spec: &BoxSpec, _trace: Option<ProcId>) -> Result<(), Refusal> {
+        Ok(())
+    }
+    fn end(&self, _trace: Option<ProcId>) -> Result<(), Refusal> {
+        Ok(())
+    }
+}
+
+/// HEX-GUEST-42 (native plan step 5: the guest reached from the host's node through the seam; step 8: guest
+/// stdio through the node's socket): serve `Recorded<WithGuest<…>>` over HEX-GUEST-18's simulated guest on a
+/// host node's socket, as macOS's and Windows' `hex node` serve their guests, and run the conformance suite on
+/// `oci` boxes through `hex-client` over that socket: expect every case to pass, both stdio forms among them
+/// (HEX-RT-2 and -9 the caller's own pipes, copied by its client; HEX-RT-17 the streams it asks for, the guest's
+/// own connections), the guest booted once, and no box left.
+fn through_a_host_nodes_socket(lab: &Lab, agent: &Agent, exe: &str) {
+    use hex_runtime::guest::WithGuest;
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+    let SimulatedGuest {
+        dir,
+        staged: _staged,
+        relay,
+        runtime,
+        boots,
+        stages: _stages,
+    } = simulated_guest(agent, exe);
+    let node = WithGuest::new(HostBoxes(hex_api::sim::SimRuntime::new()), runtime).unwrap();
+    let node = hex_node::recorded::Recorded::open(node, &dir.path().join("state")).unwrap();
+    let socket = dir.path().join("host.sock");
+    let server = hex_node::serve::Server::bind(
+        &socket,
+        Arc::new(node),
+        hex_node::serve::LIMITS,
+        hex_node::serve::WORKERS,
+    )
+    .unwrap();
+    let client = Client::connect(&socket).unwrap();
+    assert_eq!(client.classes(), [Class::Process, Class::Oci]);
+    let failures = conformance::run(&client, &OciBoxes(lab, false));
+    assert!(
+        failures.is_empty(),
+        "oci boxes through a host node's socket over a simulated Shards guest: {failures:#?}"
+    );
+    assert_eq!(
+        boots.load(Ordering::SeqCst),
+        1,
+        "the guest booted more than once"
+    );
+    assert!(client.list().unwrap().is_empty(), "a box is left");
+    drop(client);
+    drop(server);
+    drop(relay);
 }
 
 /// HEX-SOCK-9, the plan's example: a `Bundle` box made, started, and `/usr/bin/true` exec'd in it
@@ -504,7 +959,7 @@ fn conformance_with_namespaces(lab: &Lab, client: &Client) {
         });
     }
     let before = client.netns().unwrap();
-    let failures = conformance::run(client, &OciBoxes(lab, true));
+    let failures = hex_api::differential::run(client, &OciBoxes(lab, true));
     assert!(
         failures.is_empty(),
         "oci boxes with network namespaces of their own over the socket: {failures:#?}"
@@ -944,25 +1399,15 @@ fn prepare_cgroup(disk: &Path) -> Result<PathBuf, String> {
     std::fs::create_dir_all(&leaf).map_err(|e| format!("making a leaf for the agent: {e}"))?;
     std::fs::write(leaf.join("cgroup.procs"), format!("{}", std::process::id()))
         .map_err(|e| format!("moving self into a leaf: {e}"))?;
-    let probe = hex_runtime::linux::cgroup::BoxRoot::open(
+    // The probe root opening proves every controller a box uses is delegated here: `BoxRoot::open`
+    // refuses by name otherwise (HEX-INST-1).
+    hex_runtime::linux::cgroup::BoxRoot::open(
         &own.join("hex-probe"),
         hex_runtime::linux::disks::under(disk).unwrap_or_default(),
     )
     .map_err(|e| e.to_string())?;
-    let missing: Vec<&str> = hex_core::cgroup::CONTROLLERS
-        .into_iter()
-        .filter(|c| !probe.controllers().contains(*c))
-        .collect();
     let _ = std::fs::remove_dir(own.join("hex-probe"));
-    if missing.is_empty() {
-        Ok(own)
-    } else {
-        Err(format!(
-            "{} can't hand down the {} controllers",
-            own.display(),
-            missing.join(", ")
-        ))
-    }
+    Ok(own)
 }
 
 fn cache_dir() -> PathBuf {

@@ -15,6 +15,8 @@
     )
 )]
 
+pub mod guest;
+
 #[cfg(target_os = "linux")]
 pub mod linux;
 

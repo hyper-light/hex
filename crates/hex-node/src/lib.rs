@@ -16,6 +16,8 @@
     )
 )]
 
+mod abandoned;
+pub mod recorded;
 pub mod store;
 
 #[cfg(target_os = "linux")]
@@ -25,13 +27,15 @@ mod netns;
 #[cfg(target_os = "linux")]
 mod node;
 #[cfg(target_os = "linux")]
+pub mod relay;
+#[cfg(target_os = "linux")]
 mod remove;
 #[cfg(target_os = "linux")]
 mod seed;
-#[cfg(target_os = "linux")]
 pub mod serve;
 #[cfg(target_os = "linux")]
 pub mod supervise;
 
 #[cfg(target_os = "linux")]
-pub use node::{Node, RecoverySummary};
+pub use node::Node;
+pub use recorded::RecoverySummary;

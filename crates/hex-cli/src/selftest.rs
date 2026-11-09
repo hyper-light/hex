@@ -7,6 +7,9 @@
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 
+#[cfg(target_os = "linux")]
+mod tree;
+
 /// Memory taken per chunk while growing, so a box's bound kills the act partway, not after a single
 /// huge allocation the allocator might refuse first.
 const CHUNK: usize = 1 << 20;
@@ -51,6 +54,28 @@ pub fn run(argv: &[String]) -> Option<u8> {
         "wait" => loop {
             std::thread::park();
         },
+        // serve: says "up" once it runs, then waits like `wait` — a start the native bench times to
+        // that line, the same for Hex and its competitors (bench/native).
+        "serve" => {
+            if write_all(&mut std::io::stdout(), b"up\n").is_err() {
+                return Some(1);
+            }
+            loop {
+                std::thread::park();
+            }
+        }
+        // climb <bytes> [step]: as `hog`, a step at a time (1 MiB unless given), reporting the KiB it has
+        // touched after each, so a bound's overshoot is read from the program itself whatever ends it
+        // (bench/native).
+        "climb" => Some(climb(
+            args.first()
+                .and_then(|b| b.parse::<u64>().ok())
+                .unwrap_or(0),
+            args.get(1)
+                .and_then(|b| b.parse::<usize>().ok())
+                .filter(|s| *s > 0)
+                .unwrap_or(CHUNK),
+        )),
         "hog" => Some(hog(args
             .first()
             .and_then(|b| b.parse::<u64>().ok())
@@ -69,6 +94,16 @@ pub fn run(argv: &[String]) -> Option<u8> {
                 .unwrap_or(0),
         )),
         "echo" => Some(echo()),
+        // tree <dir> | tree --layers <lowest>:...: a manifest of everything under `dir`, or in the overlay
+        // of a box's layers, for HEX-GUEST-21's comparison of a staged root with containerd's unpack of
+        // the same image (selftest/tree.rs).
+        #[cfg(target_os = "linux")]
+        "tree" => Some(tree::tree(args)),
+        // room <dir>: the bytes free to an unprivileged writer on `dir`'s file system (statvfs(3),
+        // `f_bavail` × `f_frsize`), for HEX-GUEST-21 to size its guest by what the guest's staged folder
+        // really holds, not by half its memory.
+        #[cfg(target_os = "linux")]
+        "room" => Some(room(args.first().map(String::as_str).unwrap_or(""))),
         // fsync-probe <file> <iters>: the noisy-neighbour victim — times fsync over small writes
         // and prints "p50_us=<n> p99_us=<n>" (AC-T7.1.2).
         "fsync-probe" => Some(fsync_probe(
@@ -90,8 +125,78 @@ pub fn run(argv: &[String]) -> Option<u8> {
         // prints its process id, then waits — so a box delete can be shown to end the grandchild too.
         #[cfg(windows)]
         "win-grandchild" => Some(win_grandchild()),
+        // win-devices <class GUID>: prints how many present devices implement that interface class where
+        // this runs and how many of them open ("<listed> <reachable>"), exits 0 — inside an oci box, a class
+        // not granted is listed (the host's PnP view) but none opens.
+        #[cfg(windows)]
+        "win-devices" => Some(
+            match hex_runtime::windows::oci::devices(args.first().map(String::as_str).unwrap_or(""))
+            {
+                Ok(v) => u8::from(
+                    write_all(
+                        &mut std::io::stdout(),
+                        format!("{} {}\n", v.listed, v.reachable).as_bytes(),
+                    )
+                    .is_err(),
+                ),
+                Err(e) => {
+                    let _ = write_all(&mut std::io::stderr(), format!("{e}\n").as_bytes());
+                    2
+                }
+            },
+        ),
+        // write <path>: creates `path` and writes to it; prints "wrote", or "refused <os error>" and exits
+        // 1 — a read-only mount refuses it.
+        "write" => Some(write_probe(args.first().map(String::as_str).unwrap_or(""))),
+        // exists <path>: prints "yes" or "no", exits 0 — a box sees another box's file only if they share a
+        // volume.
+        "exists" => {
+            let seen =
+                std::path::Path::new(args.first().map(String::as_str).unwrap_or("")).exists();
+            Some(u8::from(
+                write_all(
+                    &mut std::io::stdout(),
+                    if seen { b"yes\n" } else { b"no\n" },
+                )
+                .is_err(),
+            ))
+        }
         _ => None,
     }
+}
+
+/// Creates `path` and writes a line to it: 0 and "wrote" when it could, 1 and "refused <os error code>"
+/// when it couldn't (a read-only mount's refusal).
+fn write_probe(path: &str) -> u8 {
+    let wrote = std::fs::File::create(path).and_then(|mut f| f.write_all(b"written in a box\n"));
+    match wrote {
+        Ok(()) => u8::from(write_all(&mut std::io::stdout(), b"wrote\n").is_err()),
+        Err(e) => {
+            let line = format!("refused {}\n", e.raw_os_error().unwrap_or(-1));
+            let _ = write_all(&mut std::io::stdout(), line.as_bytes());
+            1
+        }
+    }
+}
+
+/// Prints `bytes=<n>`, what `dir`'s file system has free to an unprivileged writer; 1 when it can't be read.
+#[cfg(target_os = "linux")]
+fn room(dir: &str) -> u8 {
+    let Ok(st) = rustix::fs::statvfs(dir) else {
+        let _ = writeln!(std::io::stderr(), "room: can't read {dir}'s file system");
+        return 1;
+    };
+    let Some(bytes) = st.f_bavail.checked_mul(st.f_frsize) else {
+        let _ = writeln!(std::io::stderr(), "room: {dir}'s free bytes pass u64");
+        return 1;
+    };
+    u8::from(
+        write_all(
+            &mut std::io::stdout(),
+            format!("bytes={bytes}\n").as_bytes(),
+        )
+        .is_err(),
+    )
 }
 
 /// Windows: a child started with `CREATE_BREAKAWAY_FROM_JOB` from inside a job that forbids breakaway.
@@ -246,6 +351,30 @@ fn hog(bytes: u64) -> u8 {
     let keep = held.len();
     std::thread::park_timeout(std::time::Duration::from_millis(200));
     u8::from(keep == usize::MAX)
+}
+
+/// Takes and touches `bytes` a `step` at a time, writing the KiB touched so far as a line after each;
+/// exits 0 once all are touched, 1 when stdout is gone. The step is the instrument's resolution: an
+/// overshoot reads to within one step.
+fn climb(bytes: u64, step: usize) -> u8 {
+    let target = usize::try_from(bytes).unwrap_or(usize::MAX);
+    let mut held: Vec<Vec<u8>> = Vec::new();
+    let mut taken = 0usize;
+    let mut rng = 0x9e37_79b9_7f4a_7c15u64;
+    let mut out = std::io::stdout();
+    while taken < target {
+        let want = step.min(target.saturating_sub(taken));
+        let mut chunk = vec![0u8; want];
+        fill_incompressible(&mut chunk, &mut rng);
+        held.push(chunk);
+        taken = taken.saturating_add(want);
+        let line = format!("{}\n", taken.div_ceil(1024));
+        if write_all(&mut out, line.as_bytes()).is_err() {
+            return 1;
+        }
+    }
+    drop(held);
+    0
 }
 
 /// Takes and touches `bytes`, then sits for `millis`, holding the memory: a box kept near its bound for
