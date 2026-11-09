@@ -214,8 +214,10 @@ mod tests {
         assert!(classify(Ok(())).is_err());
     }
 
-    /// HEX-MNTNS-9 ("the faster path is the default"): read a record with all three ways measured, then one with
-    /// any unmeasured. Expect the fastest the node can take as the default in the first, wherever its line sits,
+    /// HEX-MNTNS-9 ("the faster path is the default"; the lead's rule of 2026-11-09): read a record with all three
+    /// ways measured, then one with any unmeasured. Expect the first the node can take in the record's own order as
+    /// the default in the first, whatever the p50s on its lines (its reader ranked the ways: by create p50 where a
+    /// sign test on the rounds below shows a difference at the record's 95%, else by part 19 p99, then create p99),
     /// and the prediction's first takeable in the second; a 6.19 node (no call) the copy either way.
     #[test]
     fn the_default_follows_its_record() {
@@ -224,22 +226,22 @@ mod tests {
         assert_eq!(
             order(measured).unwrap(),
             [
+                MountNamespace::FromTree,
                 MountNamespace::Copy,
-                MountNamespace::Empty,
-                MountNamespace::FromTree
+                MountNamespace::Empty
             ]
         );
         assert_eq!(
             default_from(measured, Available).unwrap(),
-            MountNamespace::Copy
+            MountNamespace::FromTree
         );
-        let empty_fastest = "tree 1.2 r\ncopy 1.3 r\nempty 0.9 r\nprediction: tree copy empty\n";
+        let empty_first = "empty 1.3 r\ncopy 0.9 r\ntree 1.2 r\nprediction: tree copy empty\n";
         assert_eq!(
-            default_from(empty_fastest, Available).unwrap(),
+            default_from(empty_first, Available).unwrap(),
             MountNamespace::Empty
         );
         assert_eq!(
-            default_from(empty_fastest, Absent).unwrap(),
+            default_from(empty_first, Absent).unwrap(),
             MountNamespace::Copy
         );
         let predicted = "tree 1.2 r\ncopy unmeasured\nempty 0.9 r\nprediction: tree copy empty\n";
