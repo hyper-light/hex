@@ -475,11 +475,12 @@ fn a_dumps_reads_are_bounded_by_its_bytes() {
     assert_eq!(scratch.answer.len(), reads * NLMSG_HDR + done.len());
 }
 
-/// The lead's failure bound (2026-11-06): measuring, with no record and no answer seen, a dump is waited for with no
-/// bound, and its answers' times arm it. Do: dump, with nothing recorded, through a socket pair whose other end has
-/// answered each of the five dumps with its end. Expect: the dumps read, and the bound armed.
+/// The lead's failure bound (2026-11-06), with decision 9's rule (d6bfb3f0): measuring, with no record, a dump is
+/// waited for with no bound, and its answers are recorded for the census that seeds it, never arming one, so no first
+/// answer becomes the bound. Do: dump, with nothing recorded, through a socket pair whose other end has answered each of
+/// the five dumps with its end. Expect: the dumps read, their answers seen, and still no bound.
 #[test]
-fn a_measuring_dump_is_waited_for_and_arms_the_bound() {
+fn a_measuring_dump_is_waited_for_and_its_answers_recorded_unarmed() {
     let (ours, theirs) = rustix::net::socketpair(
         AddressFamily::UNIX,
         SocketType::SEQPACKET,
@@ -497,7 +498,11 @@ fn a_measuring_dump_is_waited_for_and_arms_the_bound() {
         dumps(&ours, &mut scratch, &slowest),
         Ok(vec![Vec::new(); DUMPS.len()])
     );
-    assert!(slowest.deadline().is_some());
+    assert!(
+        slowest.slowest().is_some(),
+        "the dumps' answers are recorded"
+    );
+    assert_eq!(slowest.deadline(), None, "a measuring wait is never armed");
 }
 
 /// The lead's failure bound (2026-11-06): a read unanswered past twice the slowest answer recorded is refused, the
