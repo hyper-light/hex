@@ -1,7 +1,8 @@
 //! The NVML calls hex-gpu makes, which Rust can't make safely (CLAUDE.md §12): NVML loaded at run time
 //! (`dlopen` and `dlsym` on Linux; `LoadLibraryExW` from System32 and `GetProcAddress` on Windows), so a
 //! node without NVIDIA's driver starts and says why it reads no NVIDIA GPU, and the eight entry points
-//! called through the pointers resolved there. Their signatures and structures are NVIDIA's NVML
+//! called through the pointers resolved there. Its `loader` and `export!` load AMD's ADL on Windows
+//! too (`crate::adl::sys`). Their signatures and structures are NVIDIA's NVML
 //! reference (`nvml.h`, NVML 13.4.92: NVIDIA/go-nvml's `gen/nvml/nvml.h` at f83235b8). Each `unsafe`
 //! block states the invariant that makes it sound.
 
@@ -90,20 +91,21 @@ fn check(code: Return) -> Result<(), i32> {
     if code == SUCCESS { Ok(()) } else { Err(code) }
 }
 
+/// A vendor's library loaded at run time and never unloaded, and its exports.
 #[cfg(target_os = "linux")]
-mod loader {
+pub(crate) mod loader {
     use std::ffi::{CStr, CString, c_void};
 
     use super::DynLoadError;
 
-    pub(super) type Library = *mut c_void;
+    pub(crate) type Library = *mut c_void;
 
-    pub(super) fn load(name: &'static str) -> Result<Library, DynLoadError> {
+    pub(crate) fn load(name: &'static str) -> Result<Library, DynLoadError> {
         let failed = |source| DynLoadError::LoadFailed { names: &[], source };
         let path = CString::new(name).map_err(|_| failed(format!("{name}: holds a NUL")))?;
-        // SAFETY: path is NUL-terminated and outlives the call. RTLD_NOW binds NVML's own symbols before
-        // dlopen returns; RTLD_LOCAL keeps them out of the process's global scope. A null return is an
-        // error, read from dlerror.
+        // SAFETY: path is NUL-terminated and outlives the call. RTLD_NOW binds the library's own symbols
+        // before dlopen returns; RTLD_LOCAL keeps them out of the process's global scope. A null return
+        // is an error, read from dlerror.
         let library = unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
         if library.is_null() {
             return Err(failed(error()));
@@ -111,7 +113,7 @@ mod loader {
         Ok(library)
     }
 
-    pub(super) fn symbol(library: Library, name: &'static CStr) -> Option<*mut c_void> {
+    pub(crate) fn symbol(library: Library, name: &'static CStr) -> Option<*mut c_void> {
         // SAFETY: library is what dlopen returned, never closed; name is NUL-terminated. dlsym returns
         // null for a symbol the library lacks, checked.
         let f = unsafe { libc::dlsym(library, name.as_ptr()) };
@@ -132,8 +134,9 @@ mod loader {
     }
 }
 
+/// A vendor's library loaded at run time and never unloaded, and its exports.
 #[cfg(target_os = "windows")]
-mod loader {
+pub(crate) mod loader {
     use std::ffi::{CStr, c_void};
     use std::ptr::null_mut;
 
@@ -144,9 +147,9 @@ mod loader {
 
     use super::DynLoadError;
 
-    pub(super) type Library = HMODULE;
+    pub(crate) type Library = HMODULE;
 
-    pub(super) fn load(name: &'static str) -> Result<Library, DynLoadError> {
+    pub(crate) fn load(name: &'static str) -> Result<Library, DynLoadError> {
         let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
         // SAFETY: wide is NUL-terminated and outlives the call; no file handle is passed, and
         // LOAD_LIBRARY_SEARCH_SYSTEM32 searches System32 alone. A null return is an error, checked.
@@ -163,7 +166,7 @@ mod loader {
         Ok(library)
     }
 
-    pub(super) fn symbol(library: Library, name: &'static CStr) -> Option<*mut c_void> {
+    pub(crate) fn symbol(library: Library, name: &'static CStr) -> Option<*mut c_void> {
         // SAFETY: library is a module LoadLibraryExW returned, never freed; name is NUL-terminated ASCII.
         // GetProcAddress returns None for an export the module lacks, checked.
         let f = unsafe { GetProcAddress(library, name.as_ptr().cast()) }?;
@@ -171,23 +174,28 @@ mod loader {
     }
 }
 
-/// Resolves NVML's export `$name` as a function of type `$t`, or returns the missing symbol's error.
+/// Resolves a loaded library's export `$name` as a function of type `$t`, or returns the missing
+/// symbol's error.
 macro_rules! export {
     ($library:expr, $name:literal, $t:ty) => {{
-        let Some(f) = loader::symbol($library, $name) else {
-            return Err(DynLoadError::MissingSymbol {
+        let Some(f) = $crate::nvml::sys::loader::symbol($library, $name) else {
+            return Err($crate::nvml::load::DynLoadError::MissingSymbol {
                 name: match $name.to_str() {
                     Ok(name) => name,
                     Err(_) => "a name that isn't UTF-8",
                 },
             });
         };
-        // SAFETY: the export is NVML's function of signature $t (nvml.h, the module comment); a
-        // function's address read as a data pointer and transmuted back to that function's own type is
-        // that function, and the two pointers have one size on every target Hex builds for.
-        unsafe { std::mem::transmute::<*mut c_void, $t>(f) }
+        // SAFETY: the export is the library's function of signature $t, as its vendor's header declares
+        // it (the calling module's comment names the header); a function's address read as a data
+        // pointer and transmuted back to that function's own type is that function, and the two
+        // pointers have one size on every target Hex builds for.
+        unsafe { ::std::mem::transmute::<*mut ::std::ffi::c_void, $t>(f) }
     }};
 }
+// ADL's loading on Windows resolves its exports through it too (`crate::adl::sys`).
+#[cfg(target_os = "windows")]
+pub(crate) use export;
 
 impl Api {
     /// Loads the library `name` names and resolves every entry point Hex calls.

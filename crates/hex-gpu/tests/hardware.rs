@@ -1,7 +1,7 @@
 //! A light check on real GPUs (`AC-T7.3.1`): where the machine has NVIDIA or AMD GPUs, hex-gpu lists
 //! each as the vendor's own sources name it (nvidia-smi where it is installed; amdgpu's sysfs read
-//! apart) and samples each without allocating. Where none is present it says why and stops: on macOS
-//! that must be `Unsupported` for both vendors, on Windows for AMD.
+//! apart on Linux; Windows' own video controllers on Windows) and samples each without allocating.
+//! Where none is present it says why and stops: on macOS that must be `Unsupported` for both vendors.
 //!
 //! This binary holds one test, so nothing else allocates while it counts a sample's allocations.
 
@@ -28,8 +28,7 @@ static ALLOC: Cap<System> = Cap::new(System, usize::MAX);
 /// AC-T7.3.1: do open the machine's GPUs, list them and sample them twice; expect each listed with a
 /// model, its memory, its PCI address and its driver's version, NVIDIA's first and each vendor's in
 /// PCI order, matching the vendor's own sources; each sample a load per GPU, in range, for no
-/// allocation at all. Where the machine has none: expect the reason, and on macOS and Windows the
-/// platform's.
+/// allocation at all. Where the machine has none: expect the reason, and on macOS the platform's.
 #[test]
 fn the_machines_gpus_are_listed_and_sampled_without_allocating() {
     let mut gpus = Gpus::open();
@@ -41,8 +40,6 @@ fn the_machines_gpus_are_listed_and_sampled_without_allocating() {
                 (&none.nvidia, &none.amd),
                 (&hex_gpu::Absent::Unsupported, &hex_gpu::Absent::Unsupported)
             );
-            #[cfg(target_os = "windows")]
-            assert_eq!(none.amd, hex_gpu::Absent::Unsupported);
             eprintln!("skipped: {none}; devices skipped: {:?}", gpus.skipped());
             return;
         }
@@ -110,6 +107,25 @@ fn matches_the_vendors_sources(inventory: &[hex_gpu::Gpu]) {
                 }
             }
             other => eprintln!("nvidia-smi not compared: {other:?}"),
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let names = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name }",
+            ])
+            .output()
+            .unwrap();
+        let names = String::from_utf8(names.stdout).unwrap();
+        for gpu in inventory.iter().filter(|g| g.vendor == Vendor::Amd) {
+            assert!(
+                names.lines().any(|name| name.trim() == gpu.model),
+                "Windows names no {}: {names}",
+                gpu.model
+            );
         }
     }
     #[cfg(target_os = "linux")]
