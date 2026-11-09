@@ -301,6 +301,22 @@ pub fn max_processes_per_uid() -> io::Result<usize> {
     sysctl_count(c"kern.maxprocperuid")
 }
 
+/// The most processes the kernel runs at once (`kern.maxproc`): what `fork1` holds every user to, root too
+/// (`bsd/kern/kern_fork.c`).
+pub fn max_processes() -> io::Result<usize> {
+    sysctl_count(c"kern.maxproc")
+}
+
+/// The most descriptors one process may open (`kern.maxfilesperproc`): what caps its `RLIMIT_NOFILE`.
+pub fn max_files_per_process() -> io::Result<usize> {
+    sysctl_count(c"kern.maxfilesperproc")
+}
+
+/// The most threads one process may run (`kern.num_taskthreads`).
+pub fn max_threads_per_task() -> io::Result<usize> {
+    sysctl_count(c"kern.num_taskthreads")
+}
+
 /// A kernel count read by name (an `int` sysctl), as read now: an administrator may change it.
 fn sysctl_count(name: &std::ffi::CStr) -> io::Result<usize> {
     let mut v: c_int = 0;

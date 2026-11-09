@@ -118,6 +118,26 @@ fn answer(conn: &OwnedFd, h: Header, answer: &Answer) {
     rustix::net::send(conn, &bytes, SendFlags::NOSIGNAL).unwrap();
 }
 
+/// A node's bounds as this host's platform gives them ([`crate::serve::limits`]): what the stand-in node's hello
+/// tells.
+fn node_limits() -> wire::Limits {
+    crate::serve::limits(&crate::sizes::Sizes::now().unwrap().platform())
+}
+
+/// The stand-in node's budgets over all its connections: its bounds' own.
+fn budgets() -> wire::Budgets {
+    let node = node_limits();
+    wire::Budgets {
+        in_flight: node.in_flight,
+        programs: node.programs,
+    }
+}
+
+/// The relay's bounds over the stand-in node, as its hello tells them ([`Limits::of`]).
+fn limits() -> Limits {
+    Limits::of(&node_limits(), &budgets())
+}
+
 /// Accepts a connection and answers its hello.
 fn hello(node: &OwnedFd) -> OwnedFd {
     let conn = rustix::net::accept_with(node, SocketFlags::CLOEXEC).unwrap();
@@ -129,11 +149,8 @@ fn hello(node: &OwnedFd) -> OwnedFd {
         &Answer::Hello(Hello {
             build: wire::build(),
             classes: vec![Class::Oci],
-            limits: crate::serve::LIMITS,
-            budgets: wire::Budgets {
-                in_flight: crate::serve::LIMITS.in_flight,
-                programs: crate::serve::LIMITS.programs,
-            },
+            limits: node_limits(),
+            budgets: budgets(),
         }),
     );
     conn
@@ -153,7 +170,7 @@ fn readable(conn: impl AsFd) -> bool {
 /// classes and its refusal, typed, as the node's own socket gives them.
 #[test]
 fn a_hosts_calls_reach_the_node_and_its_answers_come_back() {
-    let lab = Lab::new(LIMITS);
+    let lab = Lab::new(limits());
     let node = lab.node.try_clone().unwrap();
     let agent = std::thread::spawn(move || {
         let conn = hello(&node);
@@ -177,7 +194,7 @@ fn a_hosts_calls_reach_the_node_and_its_answers_come_back() {
 /// node sent it.
 #[test]
 fn an_execs_streams_reach_the_node_as_pipe_ends() {
-    let lab = Lab::new(LIMITS);
+    let lab = Lab::new(limits());
     let node = lab.node.try_clone().unwrap();
     let agent = std::thread::spawn(move || {
         let conn = hello(&node);
@@ -327,7 +344,10 @@ fn exec_stdin(client: &Client) -> Result<Box<dyn hex_api::Proc>, Refusal> {
 /// the node, its set gone with its host (no clock), so a second host's exec takes the one set and runs.
 #[test]
 fn an_exec_whose_stream_never_comes_waits_for_its_host_and_goes_with_it() {
-    let lab = Lab::new(Limits { sets: 1, ..LIMITS });
+    let lab = Lab::new(Limits {
+        sets: 1,
+        ..limits()
+    });
     // Stdio goes to a socket nobody serves from: it connects, and nothing reads it.
     let nowhere = lab.dir.path().join("nowhere.sock");
     let nowhere_listener = UnixListener::bind(&nowhere).unwrap();
@@ -375,7 +395,7 @@ fn an_exec_whose_stream_never_comes_waits_for_its_host_and_goes_with_it() {
 /// one still open after (it waits on its host, not a clock).
 #[test]
 fn a_silent_stdio_connection_holds_no_other_exec_up() {
-    let lab = Lab::new(LIMITS);
+    let lab = Lab::new(limits());
     let silent = UnixStream::connect(lab.dir.path().join("stdio.sock")).unwrap();
     let node = lab.node.try_clone().unwrap();
     let agent = std::thread::spawn(move || {
@@ -544,7 +564,7 @@ impl Link for LatePorts {
 /// expect the parked exec to reach the node with its pipe as soon as its set is whole, and to run.
 #[test]
 fn a_parked_exec_goes_to_the_node_when_its_set_is_whole() {
-    let (lab, relay) = kept_lab(LIMITS);
+    let (lab, relay) = kept_lab(limits());
     let node = lab.node.try_clone().unwrap();
     let agent = std::thread::spawn(move || {
         let conn = hello(&node);
@@ -656,7 +676,7 @@ fn stdio_crosses_the_relay_without_a_copy_through_user_space() {
     const MIB: usize = 1 << 20;
     let moved = Arc::new(Moved::default());
     let counted = Arc::clone(&moved);
-    let (lab, _relay) = kept_lab_with(LIMITS, move |listener| {
+    let (lab, _relay) = kept_lab_with(limits(), move |listener| {
         Box::new(Counting {
             listener,
             moved: counted,
@@ -710,7 +730,7 @@ fn stdio_crosses_the_relay_without_a_copy_through_user_space() {
 fn an_unnamed_connection_past_the_bound_is_refused() {
     let (lab, relay) = kept_lab(Limits {
         unnamed: 2,
-        ..LIMITS
+        ..limits()
     });
     let path = lab.dir.path().join("stdio.sock");
     let held = [
@@ -733,7 +753,7 @@ fn an_unnamed_connection_past_the_bound_is_refused() {
 fn a_connection_past_the_bound_is_refused() {
     let lab = Lab::new(Limits {
         connections: 1,
-        ..LIMITS
+        ..limits()
     });
     let node = lab.node.try_clone().unwrap();
     let agent = std::thread::spawn(move || hello(&node));
@@ -749,8 +769,24 @@ fn a_connection_past_the_bound_is_refused() {
     drop(held);
 }
 
+/// HEX-GUEST-7 (Ada's rule, 2026-11-06: no picked bound): a relay's bounds are its node's, asked in a hello of their
+/// own. Do ask the stand-in node, whose hello tells this host's platform's bounds and budgets; expect its
+/// connections, as many sets as its calls in flight together, and [`STREAMS`] unnamed connections a set.
+#[test]
+fn a_relays_bounds_are_its_nodes_as_its_hello_tells_them() {
+    let lab = Lab::new(limits());
+    let node = lab.node.try_clone().unwrap();
+    let agent = std::thread::spawn(move || hello(&node));
+    let asked = Limits::asked(&lab.dir.path().join("node.sock")).unwrap();
+    drop(agent.join().unwrap());
+    let (node, budgets) = (node_limits(), budgets());
+    assert_eq!(asked.connections, node.connections);
+    assert_eq!(asked.sets, budgets.in_flight);
+    assert_eq!(asked.unnamed, budgets.in_flight.saturating_mul(STREAMS));
+}
+
 fn staged_lab() -> (Lab, PathBuf) {
-    let lab = Lab::new(LIMITS);
+    let lab = Lab::new(limits());
     let staged = lab.dir.path().join("staged");
     (lab, staged)
 }
@@ -1862,7 +1898,7 @@ fn readerless(w: &std::io::PipeWriter, within: Duration) -> bool {
 /// stdin pipe has no reader once the program has ended, as a local program's has none.
 #[test]
 fn a_programs_stdin_lets_the_callers_pipe_go_when_the_program_ends() {
-    let lab = Lab::new(LIMITS);
+    let lab = Lab::new(limits());
     let node = lab.node.try_clone().unwrap();
     let agent = std::thread::spawn(move || {
         let conn = hello(&node);

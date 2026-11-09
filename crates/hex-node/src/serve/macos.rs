@@ -41,10 +41,41 @@ use rustix::net::{
     Shutdown, SocketAddrUnix, SocketType,
 };
 
-use super::{Accepted, EVENTS, Event, Interest, Os, Peer, Recv, Sent, Unwatched};
+use super::{Accepted, EVENTS, Event, Interest, Os, Peer, Platform, Recv, Sent, Unwatched};
 
-/// Connections waiting to be accepted: the I/O thread accepts them as they come.
-const BACKLOG: i32 = 64;
+/// What macOS lets the node hold ([`Platform`]), as it starts:
+/// - descriptors: its soft `RLIMIT_NOFILE` (raised to its hard limit where that is finite), within
+///   `kern.maxfilesperproc`, as XNU's open holds a process to the less of the two (`proc_limitgetcur_nofile`);
+/// - threads: `kern.num_taskthreads`, the most one process runs;
+/// - programs: each a process, so what `fork1` holds the node's user to (`bsd/kern/kern_fork.c`): `kern.maxproc`,
+///   and for any user but root its soft `RLIMIT_NPROC`.
+pub fn platform() -> Result<Platform, Refusal> {
+    let read =
+        |what: &'static str, got: std::io::Result<usize>| got.map_err(|e| Refusal::os(what, e));
+    let soft = |resource| {
+        rustix::process::getrlimit(resource)
+            .current
+            .map_or(usize::MAX, |n| usize::try_from(n).unwrap_or(usize::MAX))
+    };
+    let processes = read("reading kern.maxproc", sys::max_processes())?;
+    Ok(Platform {
+        descriptors: soft(rustix::process::Resource::Nofile).min(read(
+            "reading kern.maxfilesperproc",
+            sys::max_files_per_process(),
+        )?),
+        threads: read("reading kern.num_taskthreads", sys::max_threads_per_task())?,
+        programs: if rustix::process::getuid().is_root() {
+            processes
+        } else {
+            soft(rustix::process::Resource::Nproc).min(processes)
+        },
+    })
+}
+
+/// Connections waiting to be accepted, which the I/O thread accepts as they come: as many as the kernel queues for a
+/// socket, none picked (Ada's rule, 2026-11-06). listen(2) caps a larger backlog at the kernel's own, Linux's
+/// `net.core.somaxconn` and XNU's `kern.ipc.somaxconn` (`solisten`), so this asks for the most and gets the kernel's.
+const BACKLOG: i32 = i32::MAX;
 /// A frame's prefix, its body's length (`hex_core::stream`'s `u32`).
 const PREFIX: usize = size_of::<u32>();
 

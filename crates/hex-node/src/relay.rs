@@ -13,8 +13,8 @@
 //!   connection read on, so its set waits on facts alone: its last stream, or its host's end.
 //!
 //! Each resource has a bound, refused past by type (CLAUDE.md §2, §3):
-//! - control connections ([`Limits::connections`], the node's own): one more is sent its token and a
-//!   refusal (`Exhausted`, as the node's socket refuses one) and closed;
+//! - control connections ([`Limits::connections`], the node's own, as its hello told them: [`Limits::of`]): one
+//!   more is sent its token and a refusal (`Exhausted`, as the node's socket refuses one) and closed;
 //! - execs and early streams waiting for each other ([`Limits::sets`]): one more is refused, the exec
 //!   answered `Invalid` naming the bound, the stream closed; a set goes when its host's connection ends,
 //!   which no exec of its can outlive, its streams closed;
@@ -60,17 +60,29 @@ pub struct Limits {
     pub files: hex_core::stream::files::Limits,
 }
 
-/// The relay's bounds unless set:
-/// - the node socket's own connections (`crate::serve::LIMITS`), as each holds one of the node's;
-/// - a connection's in-flight bound for every connection (`crate::serve::LIMITS`, the node's own), so no
-///   host that holds the node's bounds meets the sets' bound;
-/// - every stream of every set naming itself at once: [`STREAMS`] a set.
-pub const LIMITS: Limits = Limits {
-    connections: crate::serve::LIMITS.connections,
-    sets: crate::serve::LIMITS.connections * crate::serve::LIMITS.in_flight,
-    unnamed: crate::serve::LIMITS.connections * crate::serve::LIMITS.in_flight * STREAMS,
-    files: hex_core::stream::files::LIMITS,
-};
+impl Limits {
+    /// The relay's bounds over its node, as the node's hello told them (`node`, each connection's, and `budgets`,
+    /// over them all), so none is picked (Ada's rule, 2026-11-06) and none is the relay's own guess at the node's:
+    /// - the node's connections, as each control connection holds one of the node's;
+    /// - as many sets as the node's calls in flight together, so no host within the node's budgets meets the
+    ///   sets' bound;
+    /// - every stream of every set naming itself at once: [`STREAMS`] a set.
+    pub fn of(node: &wire::Limits, budgets: &wire::Budgets) -> Self {
+        Self {
+            connections: node.connections,
+            sets: budgets.in_flight,
+            unnamed: budgets.in_flight.saturating_mul(STREAMS),
+            files: hex_core::stream::files::LIMITS,
+        }
+    }
+
+    /// The relay's bounds over the node agent at `node`, asked of it in a hello of their own.
+    pub fn asked(node: &Path) -> Result<Self, Refusal> {
+        let told = hex_client::Client::connect(node)?;
+        Ok(Self::of(&told.limits(), &told.budgets()))
+    }
+}
+
 /// Where the guest's relay writes staged bundles and roots: the guest's tmpfs `/run`, charged to its
 /// memory (docs/design/shards-guest.md §4).
 pub const STAGED: &str = "/run/hex/staged";

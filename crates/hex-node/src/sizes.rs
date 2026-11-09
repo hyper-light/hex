@@ -251,6 +251,16 @@ impl Sizes {
         host().map(|h| Self::of(h, peaks))
     }
 
+    /// What the node's socket is bounded by ([`crate::serve::limits`]): the descriptors it may hold, its workers'
+    /// threads, and its inits' pidfd budget as the programs it watches.
+    pub fn platform(&self) -> crate::serve::Platform {
+        crate::serve::Platform {
+            descriptors: self.descriptors,
+            threads: self.workers,
+            programs: self.inits,
+        }
+    }
+
     /// The most procs alive at once with parked inits (decision 8, parked procs): one an init parked, in an idle
     /// cgroup or one made ahead.
     pub fn procs_alive(&self) -> usize {

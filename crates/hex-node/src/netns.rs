@@ -203,7 +203,7 @@ fn descriptor_terms(pools: Pools, beside: u64) -> [(&'static str, u64); 9] {
         ),
         (
             "programs watched",
-            of(crate::serve::limits(&pools.sizes).programs, 1),
+            of(crate::serve::limits(&pools.sizes.platform()).programs, 1),
         ),
         // The device programs held, a descriptor each at their bound. A rootless node loads none, so its count is an
         // over-bound there, and harmless: it keeps no namespaces whose files this bounds.

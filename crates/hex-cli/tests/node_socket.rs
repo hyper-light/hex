@@ -997,12 +997,12 @@ fn through_a_host_nodes_socket(lab: &Lab, agent: &Agent, exe: &str) {
     let node = hex_node::recorded::Recorded::open(node, &dir.path().join("state")).unwrap();
     let socket = dir.path().join("host.sock");
     // The host node's socket bounds, as a Linux node takes them from its host (goal 5's sizes).
-    let sizes = hex_node::sizes::Sizes::now().unwrap();
+    let platform = hex_node::sizes::Sizes::now().unwrap().platform();
     let server = hex_node::serve::Server::bind(
         &socket,
         Arc::new(node),
-        hex_node::serve::limits(&sizes),
-        sizes.workers,
+        hex_node::serve::limits(&platform),
+        platform.threads,
     )
     .unwrap();
     let client = Client::connect(&socket).unwrap();

@@ -30,8 +30,20 @@ use hex_api::{Ask, Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Refusal, Ru
 use hex_core::record::ProcId;
 use hex_core::{stream, wire};
 use hex_node::recorded::{Recorded, Recover};
-use hex_node::serve::{LIMITS, Server};
+use hex_node::serve::Server;
 use hex_runtime::guest::{GuestConfig, GuestRuntime, WithGuest};
+
+/// The node's socket bounds as this host's platform gives them, as `hex node` takes them: Linux's from its sizes.
+#[cfg(target_os = "linux")]
+fn limits() -> wire::Limits {
+    hex_node::serve::limits(&hex_node::sizes::Sizes::now().unwrap().platform())
+}
+
+/// The node's socket bounds as this Mac's kernel gives them, as `hex node` takes them.
+#[cfg(target_os = "macos")]
+fn limits() -> wire::Limits {
+    hex_node::serve::limits(&hex_node::serve::macos::platform().unwrap())
+}
 
 /// Longest a test waits for a fact it needs: a bound, so a node that never makes it true fails the test
 /// instead of hanging it.
@@ -521,7 +533,7 @@ fn a_call_its_guest_holds_holds_no_other_clients_call_through_the_guest_client()
     .unwrap();
     let node = Recorded::open(node, &dir.path().join("state")).unwrap();
     let socket = dir.path().join("s");
-    let _server = Server::bind(&socket, Arc::new(node), LIMITS, 1).unwrap();
+    let _server = Server::bind(&socket, Arc::new(node), limits(), 1).unwrap();
     gate.hold(true);
     let a = hex_client::Client::connect(&socket).unwrap();
     let held = std::thread::spawn(move || a.inspect(&BoxId::new("there").unwrap()).err());
@@ -568,7 +580,7 @@ fn a_guest_booted_again_answers_on_the_loop_too() {
     .unwrap();
     let node = Recorded::open(node, &dir.path().join("state")).unwrap();
     let socket = dir.path().join("s");
-    let _server = Server::bind(&socket, Arc::new(node), LIMITS, 1).unwrap();
+    let _server = Server::bind(&socket, Arc::new(node), limits(), 1).unwrap();
     held_holds_no_other(&socket, &gate, &here);
     // The guest ends; the next create boots another (and is then refused by the stand-in, which stages
     // nothing: the boot is what the test needs).
@@ -608,7 +620,7 @@ fn node(gate: &Arc<Gate>) -> (tempfile::TempDir, PathBuf, Server) {
     .unwrap();
     let node = Recorded::open(node, &dir.path().join("state")).unwrap();
     let socket = dir.path().join("s");
-    let server = Server::bind(&socket, Arc::new(node), LIMITS, 4).unwrap();
+    let server = Server::bind(&socket, Arc::new(node), limits(), 4).unwrap();
     (dir, socket, server)
 }
 

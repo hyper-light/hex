@@ -1081,6 +1081,7 @@ pub struct Core<T: Transport> {
     conn: Arc<Conn<T>>,
     classes: Vec<Class>,
     limits: Limits,
+    budgets: wire::Budgets,
 }
 
 impl<T: Transport> Core<T> {
@@ -1094,6 +1095,10 @@ impl<T: Transport> Core<T> {
             limits: Limits {
                 connections: 1,
                 message_bytes: wire::MAX_MESSAGE,
+                in_flight: 1,
+                programs: 0,
+            },
+            budgets: wire::Budgets {
                 in_flight: 1,
                 programs: 0,
             },
@@ -1120,6 +1125,7 @@ impl<T: Transport> Core<T> {
                     ..hello.limits
                 };
                 self.conn.shared.owed.lock().map_err(poisoned)?.bound = hello.budgets.programs;
+                self.budgets = hello.budgets;
                 Ok(self)
             }
             Answer::Refused(r) => Err(r),
@@ -1282,6 +1288,11 @@ impl<T: Transport> Core<T> {
     /// The agent's bounds on this connection and its socket, as its hello told them.
     pub fn limits(&self) -> Limits {
         self.limits
+    }
+
+    /// The agent's budgets over all its connections together, as its hello told them.
+    pub fn budgets(&self) -> wire::Budgets {
+        self.budgets
     }
 
     /// The agent's network namespace counts (decision 4), as `hex_node::Node::netns` reads them in

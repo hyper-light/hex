@@ -26,16 +26,16 @@
 //!   client hasn't yet said it took them (`Request::Taken`): an exec past them is answered `Exhausted`.
 //!
 //! Each is a budget for the node, never split among connections (the lead, 2026-11-06): the node's clients are
-//! its own control plane, so no fairness between them is owed. Linux's node derives each from its platform
-//! ([`limits`]). Of each budget the node keeps [`KEPT`] for every connection it admits, which is what a hello
-//! tells a client in its limits, so a client within what it was told is never refused; a connection the node
-//! can't keep that for is refused as it comes, naming the budget. A hello tells the budgets beside;
+//! its own control plane, so no fairness between them is owed. Each is its platform's own ([`limits`]). Of each
+//! budget the node keeps [`KEPT`] for every connection it admits, which is what a hello tells a client in its
+//! limits, so a client within what it was told is never refused; a connection the node can't keep that for is
+//! refused as it comes, naming the budget. A hello tells the budgets beside;
 //! - answers waiting for room in a connection's socket: while any wait, its requests aren't read, so a
 //!   client that doesn't read its answers stops being read rather than growing the agent's memory.
 //!   By construction they number at most `in_flight + programs + 1`: an answer for each call in
 //!   flight (a list's parts go one at a time), an end for each program, and the one refusal read
 //!   before reading stopped;
-//! - workers (Linux's node's [`crate::sizes::Sizes::workers`]): one for every call the connections' in-flight
+//! - workers (the platform's threads, [`Platform::threads`]): one for every call the connections' in-flight
 //!   bounds admit, where the kernel's thread limit allows; a call past them waits in the queue those
 //!   bounds hold.
 //!
@@ -77,43 +77,41 @@ pub type Native = macos::MacOs;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub type Native = unsupported::Unsupported;
 
-/// The node's bounds on its socket ([`Server::bind`]'s `limits`), each a budget for the node and each taken from
-/// its platform (Ada's rule and the lead's call, 2026-11-06); a hello tells its `in_flight` and `programs` as the
-/// node's budgets and [`KEPT`] as each connection's limits:
-/// - connections: the descriptors the node may hold (its hard `RLIMIT_NOFILE`, which the agent raises its soft
-///   limit to, getrlimit(2)), one each; the kernel refuses an accept past what remains of them (`EMFILE`), and the
-///   socket pauses accepting until one closes;
-/// - messages of [`wire::MAX_MESSAGE`] bytes, the largest the format sends;
-/// - calls in flight: the socket's workers ([`crate::sizes::Sizes::workers`], the thread limit), so a call admitted
-///   has a worker that can exist;
-/// - programs watched: the supervisor's pidfd budget ([`crate::sizes::Sizes::inits`]: a pidfd per live box, at most
-///   the node's boxes, within its hard `RLIMIT_NOFILE`, getrlimit(2)).
-#[cfg(target_os = "linux")]
-pub fn limits(sizes: &crate::sizes::Sizes) -> Limits {
-    Limits {
-        connections: sizes.descriptors,
-        message_bytes: wire::MAX_MESSAGE,
-        in_flight: sizes.workers,
-        programs: sizes.inits,
-    }
+/// What the node's platform lets it hold, read as the node starts: what its socket's bounds are ([`limits`]), and its
+/// workers. Linux's node reads it with its sizes ([`crate::sizes::Sizes::platform`]), macOS's from its kernel
+/// ([`macos::platform`]); none is picked (Ada's rule, 2026-11-06).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Platform {
+    /// The most descriptors the node may hold.
+    pub descriptors: usize,
+    /// The most threads the node may run.
+    pub threads: usize,
+    /// The most programs the node can watch at once.
+    pub programs: usize,
 }
 
-/// The bounds native plan step 8b picked for a socket whose node has no sizes of its own yet (`crate::sizes` reads
-/// Linux's): the macOS node's ([`Server::bind`]'s `limits`), each now a budget for the node as Linux's are, and the
-/// guest relay's own over its guest's node (`crate::relay::LIMITS`): 64 connections, messages of
-/// [`wire::MAX_MESSAGE`] bytes, 64 calls in flight and 1,024 programs watched. Picked, not yet derived from the
-/// platform as Linux's node's are ([`limits`]).
-pub const LIMITS: Limits = Limits {
-    connections: 64,
-    message_bytes: wire::MAX_MESSAGE,
-    in_flight: 64,
-    programs: 1_024,
-};
-
-/// The macOS node's workers, as native plan step 8b picked them: twice [`LIMITS`]' calls in flight, so every call
-/// admitted has one. Picked, as [`LIMITS`] is.
-#[cfg(not(target_os = "linux"))]
-pub const WORKERS: usize = 128;
+/// The node's bounds on its socket ([`Server::bind`]'s `limits`), each a budget for the node and each its platform's
+/// own (Ada's rule and the lead's call, 2026-11-06; one rule on every OS, the lead's call of 2026-11-09 that unified
+/// the macOS line's admission with it); a hello tells its `in_flight` and `programs` as the node's budgets and
+/// [`KEPT`] as each connection's limits:
+/// - connections: the descriptors the node may hold, one each; the kernel refuses an accept past what remains of them
+///   (`EMFILE`), and the socket pauses accepting until one closes;
+/// - messages of [`wire::MAX_MESSAGE`] bytes, the largest the format sends;
+/// - calls in flight: the threads the node may run, its workers' bound (`Server::bind`'s `workers`), so a call
+///   admitted has a worker that can exist;
+/// - programs watched: the programs the node can watch at once.
+///
+/// Each is a ceiling the platform sets, not the room left under it now: what else holds the platform's room, the
+/// kernel refuses past as the node takes it (`EMFILE`, `EAGAIN`), typed, at no cost to an admission (the lead,
+/// 2026-11-09, over reading the room at each admission, which cost every exec a listing of the node's descriptors).
+pub fn limits(platform: &Platform) -> Limits {
+    Limits {
+        connections: platform.descriptors,
+        message_bytes: wire::MAX_MESSAGE,
+        in_flight: platform.threads,
+        programs: platform.programs,
+    }
+}
 
 /// What the node keeps for every connection it admits, of its calls in flight and of its programs watched: one of
 /// each, the fewest by which a connection can do anything (the lead's ruling, 2026-11-06). A hello tells a client

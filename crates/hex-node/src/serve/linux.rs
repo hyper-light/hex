@@ -23,8 +23,10 @@ use rustix::process::{Pid, PidfdFlags, Signal};
 
 use super::{Accepted, EVENTS, Event, Interest, Os, Peer, Recv, Sent, Unwatched};
 
-/// Connections waiting to be accepted: the I/O thread accepts them as they come.
-const BACKLOG: i32 = 64;
+/// Connections waiting to be accepted, which the I/O thread accepts as they come: as many as the kernel queues for a
+/// socket, none picked (Ada's rule, 2026-11-06). listen(2) caps a larger backlog at the kernel's own, Linux's
+/// `net.core.somaxconn` and XNU's `kern.ipc.somaxconn` (`solisten`), so this asks for the most and gets the kernel's.
+const BACKLOG: i32 = i32::MAX;
 
 /// The epoll tokens of the listener and the wake eventfd; the core's tokens start above them.
 const LISTENER: u64 = 0;

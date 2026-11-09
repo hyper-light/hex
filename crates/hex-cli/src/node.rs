@@ -302,16 +302,17 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
         let _ = writeln!(std::io::stderr().lock(), "hex node: parked procs: {said}");
     }
     let node = Arc::new(node);
-    let sizes = node.sizes();
+    let platform = node.sizes().platform();
     Ok(Hosted {
         host: Arc::clone(&node) as Arc<dyn Host>,
-        limits: hex_node::serve::limits(&sizes),
-        workers: sizes.workers,
+        limits: hex_node::serve::limits(&platform),
+        workers: platform.threads,
         node,
     })
 }
 
-/// The macOS node: the `process` class, and Linux images in a Shards guest where one is configured.
+/// The macOS node: the `process` class, and Linux images in a Shards guest where one is configured, its socket's
+/// bounds from its kernel ([`hex_node::serve::macos::platform`]).
 #[cfg(target_os = "macos")]
 fn host(args: &Args) -> Result<Hosted, (u8, String)> {
     use hex_node::recorded::Recorded;
@@ -358,10 +359,11 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
         say_recovered(&node.recover().map_err(failed)?);
         Arc::new(node)
     };
+    let platform = hex_node::serve::macos::platform().map_err(failed)?;
     Ok(Hosted {
         host,
-        limits: hex_node::serve::LIMITS,
-        workers: hex_node::serve::WORKERS,
+        limits: hex_node::serve::limits(&platform),
+        workers: platform.threads,
     })
 }
 
