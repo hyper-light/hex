@@ -93,10 +93,15 @@ impl Keeping {
         let _ = std::fs::remove_file(&ready);
         // The keeper takes its state folder and ready path from the environment, so the command names only
         // how to launch it (`hex keep`, or the test's own keeper body); `keeper::Args` reads flags or these.
+        // The keeper outlives its node, so it holds none of the node's pipes: what reads the node's output (a
+        // supervisor, a test) sees its end when the node ends. It says it is ready through its ready file.
         let mut child = std::process::Command::new(program)
             .args(args)
             .env("HEX_KEEP_STATE", state)
             .env("HEX_KEEP_READY", &ready)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .map_err(|e| Refusal::os("starting the keeper", e))?;
         // Wait for the keeper to write its identity, waiting on the child itself between polls (no blocking
