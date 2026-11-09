@@ -27,6 +27,8 @@ pub struct Facts {
     pub virt: Virt,
     /// Its GPUs, from hex-gpu.
     pub gpus: Vec<Gpu>,
+    /// Why it reports no GPUs, where hex-gpu refused to read any (no driver, an OS it can't read).
+    pub no_gpus: Option<String>,
     /// Devices a box may be given whole: PCI functions bound to `vfio-pci`, and the block and network
     /// devices its administrator gave Hex.
     pub devices: Vec<Found>,
@@ -345,6 +347,7 @@ mod tests {
                 hvf: os == Os::Macos,
             },
             gpus: vec![gpu.clone()],
+            no_gpus: None,
             devices: vec![vfio.clone()],
         };
         let mut c = Cluster::single_owner(Vec::new(), Vec::new());

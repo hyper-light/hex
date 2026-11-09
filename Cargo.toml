@@ -25,6 +25,7 @@ hex-client = { path = "crates/hex-client", version = "0.1.0" }
 hex-testkit = { path = "crates/hex-testkit", version = "0.1.0" }
 hex-sim = { path = "crates/hex-sim", version = "0.1.0" }
 hex-health = { path = "crates/hex-health", version = "0.1.0" }
+hex-gpu = { path = "crates/hex-gpu", version = "0.1.0" }
 # Shards' guests (docs/design/shards-guest.md §2, Appendix A): the oci class's Linux guest on macOS and
 # Windows. By name and version, patched below to a copy of Shards' draft until Shards lands it, then to
 # vendor/shards as every other vendored project (vendor/shards-api-draft/Cargo.toml says which).

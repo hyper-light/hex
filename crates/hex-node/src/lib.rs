@@ -22,6 +22,7 @@ pub mod disk_probe;
 mod emptying;
 pub mod facts;
 pub mod recorded;
+pub mod records;
 pub mod store;
 mod turns;
 
