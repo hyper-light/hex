@@ -332,6 +332,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     a_box_of_no_owner_is_made_by_an_init_parked_in_a_cgroup_made_ahead(&lab, own);
     a_box_of_no_owner_made_ahead_looks_up_nothing_in_cgroupfs(&lab, own);
     a_box_of_no_owner_made_ahead_is_given_its_own_bounds_alone(&lab, own);
+    a_box_of_no_owner_made_ahead_reads_none_of_its_counters(&lab, own);
     a_reused_cgroups_cpu_max_is_written_only_when_its_values_differ(&lab, own);
     each_guard_gives_a_fresh_cgroup_and_counts_why(&lab, own);
     a_boxs_network_namespace_is_reused_within_its_owner_when_clean(&lab, own);
@@ -1258,7 +1259,8 @@ fn a_box_of_no_owner_made_ahead_is_given_its_own_bounds_alone(lab: &Lab, own: &P
         "N2 took the cgroup made ahead"
     );
     if let Some(written) = watch.files_written() {
-        let own: BTreeSet<String> = ["memory.max", "memory.swap.max", "pids.max", "memory.peak"]
+        // Its peak was reset by the refill once its init parked (test 2h), so the take writes the box's bounds alone.
+        let own: BTreeSet<String> = ["memory.max", "memory.swap.max", "pids.max"]
             .into_iter()
             .filter(|f| slot.join(f).exists())
             .map(str::to_owned)
@@ -1271,6 +1273,118 @@ fn a_box_of_no_owner_made_ahead_is_given_its_own_bounds_alone(lab: &Lab, own: &P
     node.delete(&n2).unwrap();
     node.release_idle().unwrap();
     eprintln!("test 2g: a box of no owner made ahead given its own bounds alone");
+}
+
+/// Test 2h (goal 16; the breakdown's part 4, create-breakdown-20261109T164604Z: the claim's 0.030 ms p50, its reads of
+/// the slot's counters among it). Do: wait for a cgroup made ahead, watch its files for reads and writes, and create a
+/// box of no owner, which takes it. Expect: the take reads none of the counters a box's usage is reported from and
+/// resets no peak, the refill having done both once the slot's init parked, as the init does nothing until taken; and
+/// the box's usage still starts there: its CPU under a lifecycle's most, its OOM kills and refused forks 0.
+fn a_box_of_no_owner_made_ahead_reads_none_of_its_counters(lab: &Lab, own: &Path) {
+    let (node, _state) = lab.node(&own.join("hex-reuse-counters"));
+    let node = node.with_inits_ahead(1);
+    let n1 = BoxId::new("c1").unwrap();
+    node.create(lab.oci("c1", None, Caps::Docker, Bounds::default()))
+        .unwrap();
+    let root = node
+        .cgroup_dir(&n1)
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    node.delete(&n1).unwrap();
+    wait_for(
+        &MADE_AHEAD,
+        || node.cgroup_reuse().unwrap().ahead.ready != 0,
+        "a cgroup made ahead",
+    );
+    let ready = populated_slots(&root);
+    assert_eq!(ready.len(), 1, "the one made ahead: {ready:?}");
+    let slot = ready[0].0.clone();
+    let Some(watch) = Touched::on(&slot) else {
+        eprintln!("test 2h: SKIP, no inotify instance left for this user here (EMFILE)");
+        node.release_idle().unwrap();
+        return;
+    };
+    node.create(lab.oci("c2", None, Caps::Docker, Bounds::default()))
+        .unwrap();
+    let n2 = BoxId::new("c2").unwrap();
+    assert_eq!(
+        node.cgroup_dir(&n2).as_deref(),
+        Some(slot.as_path()),
+        "C2 took the cgroup made ahead"
+    );
+    let (read, written) = watch.files();
+    let counters: BTreeSet<String> = ["memory.events", "pids.events", "cpu.stat", "io.stat"]
+        .into_iter()
+        .filter(|f| slot.join(f).exists())
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        read.is_disjoint(&counters),
+        "C2's take read the counters {:?}",
+        read.intersection(&counters).collect::<Vec<_>>()
+    );
+    assert!(
+        !written.contains("memory.peak"),
+        "C2's take reset its peak: {written:?}"
+    );
+    let usage = node.usage(&n2).unwrap();
+    assert!(
+        usage.cpu_usec < LIFECYCLE_CPU_MOST_US && usage.oom_kills == 0 && usage.pids_refused == 0,
+        "C2's usage starts where the refill read it: {usage:?}"
+    );
+    node.delete(&n2).unwrap();
+    node.release_idle().unwrap();
+    eprintln!(
+        "test 2h: a box of no owner made ahead reads none of its counters on its create's path"
+    );
+}
+
+/// The files of a cgroup read and written while it is watched (inotify's IN_ACCESS and IN_MODIFY on its directory:
+/// the VFS notifies each read and write of a cgroupfs file as of any other), or `None` where no inotify instance is left.
+struct Touched(OwnedFd);
+
+impl Touched {
+    fn on(cgroup: &Path) -> Option<Self> {
+        let fd = match inotify::init(inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK)
+        {
+            Ok(fd) => fd,
+            Err(rustix::io::Errno::MFILE) => return None,
+            Err(e) => panic!("inotify: {e}"),
+        };
+        inotify::add_watch(
+            &fd,
+            cgroup,
+            inotify::WatchFlags::ACCESS | inotify::WatchFlags::MODIFY,
+        )
+        .expect("watch the cgroup's directory");
+        Some(Self(fd))
+    }
+
+    /// The files read and the files written since the watch began.
+    fn files(&self) -> (BTreeSet<String>, BTreeSet<String>) {
+        let (mut read, mut written) = (BTreeSet::new(), BTreeSet::new());
+        let mut buf = [MaybeUninit::<u8>::uninit(); 4096];
+        let mut events = inotify::Reader::new(&self.0, &mut buf);
+        loop {
+            match events.next() {
+                Ok(e) => {
+                    let Some(name) = e.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                        continue;
+                    };
+                    if e.events().contains(inotify::ReadFlags::ACCESS) {
+                        read.insert(name.clone());
+                    }
+                    if e.events().contains(inotify::ReadFlags::MODIFY) {
+                        written.insert(name);
+                    }
+                }
+                Err(rustix::io::Errno::AGAIN) => return (read, written),
+                Err(e) => panic!("reading the cgroup's watch: {e}"),
+            }
+        }
+    }
 }
 
 /// Decision 8, "The p99.9 that stayed" (AC-T7.1.3): recovery removes the inits a node parked. Do: A of O created and
