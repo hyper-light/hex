@@ -981,6 +981,56 @@ mod tests {
         );
     }
 
+    /// The waits census's suites, every loop of run 5 (waits-census-20261109T184054Z): `oci_box`'s delete of a box whose
+    /// exec'd program its caller had let go ran out of the emptying wait, the box's init "still runs 326.645366ms after
+    /// SIGKILL". The init is its pid namespace's first process, which doesn't finish exiting until every process in the
+    /// namespace is reaped (kernel/pid_namespace.c, `zap_pid_ns_processes`); the program it killed is the agent's child,
+    /// and a program let go was forgotten by the box, left to the sweep, which reaps once in [`SWEEP_PERIOD`]. Do: own a
+    /// child as box `b`'s exec'd program, let its `Proc` go, kill the child, and reap box `b`'s programs as its delete
+    /// does. Expect: the child reaped by that, none of it left for the sweep.
+    #[test]
+    fn a_program_let_go_is_reaped_by_its_boxs_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("disk"), &dir.path().join("run")).unwrap();
+        // A box root no process of this test is in, so the sweep reaps none of them.
+        let supervisor = Supervisor::start(
+            Path::new(hex_runtime::linux::cgroup::CGROUP_ROOT)
+                .join("hex-supervise-test-none")
+                .as_path(),
+            store,
+            1,
+        )
+        .unwrap();
+        #[expect(
+            clippy::zombie_processes,
+            reason = "reaped by the box's delete, through the agent's pidfd: the reap this test looks for"
+        )]
+        let child = std::process::Command::new("sleep")
+            .arg("600")
+            .spawn()
+            .unwrap();
+        let pid = Pid::from_child(&child);
+        let id = BoxId::new("b").unwrap();
+        let proc = hex_runtime::linux::proc::PidfdProc::of_child(child.id()).unwrap();
+        let pidfd = rustix::process::pidfd_open(pid, PidfdFlags::empty()).unwrap();
+        let program = supervisor.own_program(&id, Box::new(proc), pidfd).unwrap();
+        drop(program);
+        let look = rustix::process::pidfd_open(pid, PidfdFlags::empty()).unwrap();
+        rustix::process::kill_process(pid, rustix::process::Signal::KILL).unwrap();
+        supervisor
+            .reap_programs(&id, hex_testkit::waits::EMPTYING)
+            .unwrap();
+        assert_eq!(
+            rustix::process::waitid(
+                WaitId::PidFd(look.as_fd()),
+                WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+            )
+            .map(|status| status.is_some()),
+            Err(Errno::CHILD),
+            "the program let go is still the agent's child after its box's delete reaped the box's programs"
+        );
+    }
+
     /// Decision 2: the supervisor reads a process's state, parent and start time from its stat line,
     /// a command name with spaces and parentheses included; a truncated or malformed line is no stat.
     #[test]

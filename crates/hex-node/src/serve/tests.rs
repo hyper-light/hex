@@ -150,6 +150,11 @@ struct Lab {
 
 impl Lab {
     fn new(limits: Limits) -> Self {
+        Self::with(limits, 8)
+    }
+
+    /// A lab whose server runs calls on at most `workers` threads.
+    fn with(limits: Limits, workers: usize) -> Self {
         let cache = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/hex-t7/serve");
         std::fs::create_dir_all(&cache).unwrap();
         let dir = tempfile::Builder::new()
@@ -169,7 +174,7 @@ impl Lab {
             &dir.path().join("node.sock"),
             Arc::clone(&host) as Arc<dyn Host>,
             limits,
-            8,
+            workers,
         )
         .unwrap();
         Self {
@@ -960,4 +965,62 @@ fn the_programs_bound_is_the_boxes_within_the_hard_descriptor_limit() {
         u64::try_from(super::limits(&sizes).programs).unwrap(),
         hard.min(u64::try_from(hex_runtime::MAX_BOXES).unwrap())
     );
+}
+
+/// The waits census's suites (run 5, waits-census-20261109T184054Z): `node_socket`'s contract test failed in 15 of 53
+/// loops on calls answered past their patience, a start's among them while a hook held another. Two calls the I/O
+/// thread reads in one wake were one worker's: it started a worker only when none was idle, and the one it notified
+/// for the first is idle still until it wakes, so the second waited for the first to be done. Do: under calls in flight
+/// bounded at 2 on 2 workers, an exec answered, its worker then idle; then, the host's gate shut, an inspect and a
+/// netns call sent one after the other on the same connection. Expect: the netns call answered while the inspect is
+/// held at the gate; the inspect once it opens.
+#[test]
+fn two_calls_read_in_one_wake_each_get_a_worker() {
+    let lab = Lab::with(
+        Limits {
+            in_flight: 2,
+            ..limits()
+        },
+        2,
+    );
+    let fd = lab.raw();
+    let (stdin_r, stdin_w) = std::io::pipe().unwrap();
+    send_raw(
+        &fd,
+        &request(
+            1,
+            Call::Exec {
+                id: b(),
+                program: Program::of(&["cat"]),
+                streams: wire::Streams {
+                    stdin: true,
+                    ..wire::Streams::default()
+                },
+            },
+        ),
+        &[stdin_r.as_fd()],
+    );
+    drop(stdin_r);
+    assert!(matches!(
+        answer_of(&fd),
+        (Header { id: 1, .. }, Answer::Started { .. })
+    ));
+    lab.host.gate.set(true);
+    send_raw(&fd, &request(2, Call::Inspect(b())), &[]);
+    send_raw(&fd, &request(3, Call::Netns), &[]);
+    match answer_of(&fd) {
+        (Header { id: 3, .. }, Answer::Netns(c)) => assert_eq!(c, counts()),
+        other => panic!("{other:?}"),
+    }
+    lab.host.gate.set(false);
+    assert!(matches!(
+        answer_of(&fd),
+        (Header { id: 2, .. }, Answer::Info(_))
+    ));
+    // The `cat` ends with its stdin, and its end comes.
+    drop(stdin_w);
+    assert!(matches!(
+        answer_of(&fd),
+        (Header { id: 1, .. }, Answer::Exited(Exit::Code(0)))
+    ));
 }
