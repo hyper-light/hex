@@ -868,7 +868,11 @@ mod tests {
             os,
             arch: crate::model::Arch::X86_64,
         };
-        n.classes = os.classes(true);
+        n.classes = os.classes(crate::model::Virt {
+            kvm: true,
+            nested: false,
+            hvf: true,
+        });
         n.devices = gpus
             .iter()
             .map(|&(model, memory, busy)| Device {

@@ -71,16 +71,17 @@ impl Os {
         })
     }
 
-    /// The classes a node of this OS runs (H10, `huawei_trace.py`): Linux every class, Firecracker
-    /// only where KVM is usable (it is a KVM VMM); Windows OCI containers and Shards microVMs; macOS
-    /// Shards microVMs; FreeBSD none Hex places.
-    pub fn classes(self, kvm: bool) -> Classes {
+    /// The classes a node of this OS runs with `virt` (H10, `huawei_trace.py`): Linux OCI containers,
+    /// and Firecracker and Shards microVMs where KVM is usable (both VMMs run on it); Windows OCI
+    /// containers and Shards microVMs (on the Windows Hypervisor Platform, which kiln's facts don't
+    /// probe); macOS Shards microVMs where Hypervisor.framework is supported; FreeBSD none Hex places.
+    pub fn classes(self, virt: Virt) -> Classes {
         match self {
-            Os::Linux if kvm => Classes::ALL,
-            Os::Linux => Classes::NONE.with(Class::Oci).with(Class::Shards),
+            Os::Linux if virt.kvm => Classes::ALL,
+            Os::Linux => Classes::NONE.with(Class::Oci),
             Os::Windows => Classes::NONE.with(Class::Oci).with(Class::Shards),
-            Os::Macos => Classes::NONE.with(Class::Shards),
-            Os::Freebsd => Classes::NONE,
+            Os::Macos if virt.hvf => Classes::NONE.with(Class::Shards),
+            Os::Macos | Os::Freebsd => Classes::NONE,
         }
     }
 }
@@ -118,12 +119,13 @@ pub struct Platform {
     pub arch: Arch,
 }
 
-/// The virtualization a node offers (kiln's facts' `virt`): `/dev/kvm` usable, and nested
-/// virtualization on (its guests may use KVM themselves).
+/// The virtualization a node offers (kiln's facts' `virt`): `/dev/kvm` usable, nested virtualization
+/// on (its guests may use KVM themselves), and macOS's Hypervisor.framework supported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Virt {
     pub kvm: bool,
     pub nested: bool,
+    pub hvf: bool,
 }
 
 /// A device a box holds alone, from its start until it is deleted.
@@ -298,7 +300,7 @@ impl NodeSpec {
             platform: Platform::default(),
             virt: Virt {
                 kvm: true,
-                nested: false,
+                ..Virt::default()
             },
             devices: unnamed_gpus(capacity.gpus),
         }

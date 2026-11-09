@@ -322,6 +322,7 @@ dependencies = [
  "hex-core",
  "hex-health",
  "hex-runtime",
+ "hex-sim",
  "rustix",
  "serde_json",
  "sha2",

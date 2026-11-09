@@ -128,7 +128,8 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   level-triggered `EVFILT_READ`/`EVFILT_WRITE` on the listener and connections; `getpeereid` names the
   socket's peer, so only the node's user and root are served; `mach_timebase_info` converts Mach ticks;
   `sysctlbyname("kern.maxproc")` bounds a listing and `sysctlbyname("kern.argmax")` a program's arguments
-  and environment; `getrusage`
+  and environment, and the node's facts read `hw.memsize`, `hw.physicalcpu`, `hw.pagesize`,
+  `vm.page_free_count`, `vm.page_speculative_count` and `kern.hv_support` by it (`hex-node`'s `facts`); `getrusage`
   and `getloadavg` read the node's own cost for the bench and observability. rustix wraps the `kqueue`,
   `kill`/`killpg` and `waitid` beside these, which the class calls through it; libc binds the rest as
   `unsafe` foreign functions, and `posix_spawnattr_set_qos_class_np` and `posix_spawnattr_setjetsam_ext`
@@ -165,7 +166,8 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   accounting and its guaranteed memory-limit violation (`QueryInformationJobObject`), ends the job
   (`TerminateJobObject`) or one member alone (`TerminateProcess`, a program's own kill) and closes its
   handles (`CloseHandle`), and reads the machine's processor count
-  (`GetActiveProcessorCount`). For the `oci` class's Shards guest it reads the default shared roots
+  (`GetActiveProcessorCount`) and, for the node's facts (`hex-node`'s `facts`), its memory
+  (`GlobalMemoryStatusEx`) and a volume's size and free space (`GetDiskFreeSpaceExW`). For the `oci` class's Shards guest it reads the default shared roots
   (docs/design/shards-guest.md §4a): the users folder from its known folder (`SHGetKnownFolderPath` with
   `FOLDERID_UserProfiles`, its string freed by `CoTaskMemFree`) and the temp folder (`GetTempPath2W`).
   Where its boxes outlive the node (the keeper, `super::keeper`; decision

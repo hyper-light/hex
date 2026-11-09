@@ -6,6 +6,7 @@
 //! - [`census`]: the most the recorded inputs hold, and the input-bound rule that bounds inputs by it.
 //! - [`model`]: nodes, workloads and their resources; nodes' platforms and devices, workloads' asks.
 //! - [`needs`]: what a box needs of a node, in kiln's needs grammar adapted to boxes.
+//! - [`facts`]: what a node reports about itself, read from its OS's text, and the node it makes.
 //! - [`index`]: the best-fit index both the scheduler and its serial specification place with.
 //! - [`store`]: the control plane's durable records, committed by compare-and-set (S6).
 //! - [`sim`]: the cluster: clients, a control plane of parallel deciders and an in-order validating
@@ -44,6 +45,7 @@ pub mod baseline;
 pub mod census;
 pub mod danger;
 pub mod error;
+pub mod facts;
 pub mod fair;
 pub mod faults;
 pub mod federation;

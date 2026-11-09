@@ -18,6 +18,7 @@
 
 mod abandoned;
 pub mod disk_probe;
+pub mod facts;
 pub mod recorded;
 pub mod store;
 

@@ -219,6 +219,35 @@ fn sysctl_count(name: &std::ffi::CStr) -> io::Result<usize> {
         .map_err(|_| io::Error::other(format!("{} reads {v}", name.to_string_lossy())))
 }
 
+/// A numeric sysctl (`hw.memsize`, `hw.physicalcpu`, `kern.hv_support`, `vm.page_free_count`), whether
+/// the kernel keeps it in 4 bytes or 8: the node's facts (`hex-node`'s `facts`).
+pub fn sysctl_number(name: &std::ffi::CStr) -> io::Result<u64> {
+    let mut v = [0u8; 8];
+    let mut len = v.len();
+    // SAFETY: sysctlbyname reads the NUL-terminated name and writes at most `len` bytes (8) into `v`,
+    // and the length it wrote into `len`; all three outlive the call, and nothing is set (newp null).
+    let r = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            v.as_mut_ptr().cast::<c_void>(),
+            &raw mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if r != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    match (len, v) {
+        (4, [a, b, c, d, ..]) => Ok(u64::from(u32::from_ne_bytes([a, b, c, d]))),
+        (8, v) => Ok(u64::from_ne_bytes(v)),
+        _ => Err(io::Error::other(format!(
+            "{} is {len} bytes, not a number",
+            name.to_string_lossy()
+        ))),
+    }
+}
+
 /// Makes the calling thread a Mach time-constraint thread (`THREAD_TIME_CONSTRAINT_POLICY`,
 /// `mach/thread_policy.h`), so a box's members filling every core don't hold its watcher off: it needs
 /// `computation` of every `period`, done within `constraint`, and can be preempted.

@@ -14,6 +14,8 @@ hex-client.workspace = true
 hex-core.workspace = true
 hex-health.workspace = true
 hex-runtime.workspace = true
+# The node's facts are the scheduler's (`src/facts.rs`, `hex_sim::facts`).
+hex-sim.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 

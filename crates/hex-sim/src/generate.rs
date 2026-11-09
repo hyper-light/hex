@@ -56,8 +56,12 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
             6..8 => Os::Windows,
             _ => Os::Macos,
         };
-        let kvm = os == Os::Linux;
-        let classes = os.classes(kvm);
+        let virt = Virt {
+            kvm: os == Os::Linux,
+            hvf: os == Os::Macos,
+            ..Virt::default()
+        };
+        let classes = os.classes(virt);
         nodes.push(NodeSpec {
             id: NodeId(id),
             capacity: Resources {
@@ -74,7 +78,7 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
                 os,
                 arch: Arch::X86_64,
             },
-            virt: Virt { kvm, nested: false },
+            virt,
             devices: unnamed_gpus(gpus),
         });
     }
@@ -379,7 +383,7 @@ pub fn day(seed: u64, day: &Day) -> Result<Cluster, SimError> {
             platform: Platform::default(),
             virt: Virt {
                 kvm: true,
-                nested: false,
+                ..Virt::default()
             },
             devices: unnamed_gpus(day.node.gpus),
         })
@@ -572,7 +576,7 @@ impl NodeModel {
                 platform: Platform::default(),
                 virt: Virt {
                     kvm: true,
-                    nested: false,
+                    ..Virt::default()
                 },
                 devices: Vec::new(),
             },
@@ -581,6 +585,11 @@ impl NodeModel {
                 let at = usize::try_from(id.checked_rem(10).unwrap_or(0)).unwrap_or(0);
                 let none = host(0, 0, Os::Macos, 0);
                 let h = FLEET.get(at).unwrap_or(&none);
+                let virt = Virt {
+                    kvm: h.kvm,
+                    nested: h.kvm,
+                    hvf: matches!(h.os, Os::Macos),
+                };
                 let devices: Vec<Device> = h
                     .gpu
                     .map(|(_, memory)| Device::gpu(FLEET_GPU, memory))
@@ -595,15 +604,12 @@ impl NodeModel {
                         disk_bytes: h.disk,
                     },
                     background_milli: 0,
-                    classes: h.os.classes(h.kvm),
+                    classes: h.os.classes(virt),
                     platform: Platform {
                         os: h.os,
                         arch: h.arch,
                     },
-                    virt: Virt {
-                        kvm: h.kvm,
-                        nested: h.kvm,
-                    },
+                    virt,
                     devices,
                 }
             }
