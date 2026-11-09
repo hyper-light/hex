@@ -8,9 +8,10 @@
 # The bpftrace image (Fedora 44's bpftrace) is made once by a container and a commit, as docker_pass.sh makes its own.
 # The timed lock is held from before that until bpftrace has gone: bpftrace's attaching patches kernel text on every
 # CPU and its programs run on all of them, so neither may meet another holder's record. Its children don't hold it.
-# Its record: <out dir>/status.txt, bt.txt (the maps at bpftrace's end), bt.log, create_tail.log and attr.md.
+# Its record: <out dir>/status.txt, bt.txt (the maps at bpftrace's end), bt.log, create_tail.log and attr.md. It runs
+# from any working directory: its siblings are named by its own.
 set -uo pipefail
-HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")"); LAB=$(dirname "$HERE")
+HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
 HEX=$(realpath "${1:?hex release binary}"); SEAM=$(realpath "${2:?seam_oci release binary}")
 O=$(realpath -m "${3:?out dir}"); mkdir -p "$O"
 CPUSET=${CPUSET:-4-15}; READER_CPUS=${READER_CPUS:-16-31}
@@ -49,13 +50,12 @@ for i in $(seq 1 60); do
   sleep 2
 done
 log "bpftrace up on $READER_CPUS, create CPUs $FIRST-$LAST; load $(cut -d' ' -f1-3 /proc/loadavg)"
-cd "$LAB/.." || exit 2
 env N="${N:-10000}" ROUNDS="${ROUNDS:-2}" CPUSET="$CPUSET" READER_CPUS="$READER_CPUS" \
   BENCH_MEMORY="${BENCH_MEMORY:-8g}" BENCH_OOM="${BENCH_OOM:-1000}" BENCH_HOST_OK="${BENCH_HOST_OK:-$(hostname)}" \
-  bash bench/competitive/probes/create_tail.sh "$HEX" "$SEAM" > "$O/create_tail.log" 2>&1 9>&-
+  bash "$HERE/create_tail.sh" "$HEX" "$SEAM" > "$O/create_tail.log" 2>&1 9>&-
 rc=$?; R=$(grep -o -E '/[^ ]*create-tail-[0-9TZ]+' "$O/create_tail.log" | tail -1)
 log "create_tail exit $rc; $R; load $(cut -d' ' -f1-3 /proc/loadavg)"
 stop_bt; trap - EXIT
 exec 9>&-
-[ -n "$R" ] && python3 -I bench/competitive/probes/create_tail_attr.py bench/competitive/probes "$R" > "$O/attr.md" 2>&1
+[ -n "$R" ] && python3 -I "$HERE/create_tail_attr.py" "$HERE" "$R" > "$O/attr.md" 2>&1
 log "done; bt.txt $(wc -c < "$O/bt.txt" 2>/dev/null) bytes"
