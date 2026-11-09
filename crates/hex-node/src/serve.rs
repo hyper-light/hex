@@ -1000,7 +1000,9 @@ impl Shared {
     fn enqueue(self: &Arc<Self>, job: Job) -> Result<(), Refusal> {
         let mut jobs = self.jobs.lock().map_err(poisoned)?;
         jobs.queue.push_back(job);
-        if jobs.idle == 0 && jobs.workers < self.workers {
+        // Each job queued has a worker of its own: an idle worker counts once, for the job it is woken for, so two
+        // jobs queued before it wakes start a second (the waits census's run 5: a call left behind another's).
+        if jobs.queue.len() > jobs.idle && jobs.workers < self.workers {
             let shared = Arc::clone(self);
             match std::thread::Builder::new()
                 .name("hex-socket-worker".to_owned())

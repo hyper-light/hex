@@ -26,7 +26,8 @@ use crate::store::Store;
 
 /// Most exec'd programs the agent watches for one box at once (to reap on its delete), past which exec
 /// is refused ([`Refusal::Exhausted`]), so the per-box tracking is bounded (CLAUDE.md §2). A program
-/// the caller reaps is forgotten at once, so this bounds concurrent unreaped execs, not a box's total;
+/// the caller reaps is forgotten at once, and one let go once it has ended and been reaped (by the sweep, or
+/// by the box's next exec, which looks), so this bounds concurrent unreaped execs, not a box's total;
 /// it sits well above a box's steps, which run one at a time.
 pub const PROGRAM_BUDGET: usize = 1_024;
 
@@ -129,6 +130,8 @@ struct Program {
     pid: u32,
     pidfd: OwnedFd,
     exit: Arc<Mutex<Option<Exit>>>,
+    /// Let go by its caller: no one waits for its exit, but the box's delete still reaps it.
+    released: bool,
 }
 
 fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
@@ -358,6 +361,8 @@ impl Supervisor {
         {
             let mut programs = self.programs.lock().map_err(poisoned)?;
             let watched = programs.entry(id.clone()).or_default();
+            // A program let go that has ended is reaped here, or was by the sweep, and no longer counts.
+            watched.retain(|p| !p.released || !ended_and_reaped(p.pidfd.as_fd()));
             if watched.len() >= PROGRAM_BUDGET {
                 return Err(Refusal::Exhausted {
                     what: "exec'd programs watched for one box",
@@ -368,6 +373,7 @@ impl Supervisor {
                 pid,
                 pidfd,
                 exit: Arc::clone(&exit),
+                released: false,
             });
         }
         owned()?.insert(pid);
@@ -381,9 +387,12 @@ impl Supervisor {
         }))
     }
 
-    /// Reaps every exec'd program still watched for box `id`, recording each exit for its caller's
-    /// [`Proc`] to read. The box's delete calls this after `cgroup.kill`, so the programs — killed, in
-    /// the container's pid namespace — are reaped, letting the init finish exiting and the box empty.
+    /// Reaps every exec'd program of box `id` the agent still holds, those let go among them, recording each exit
+    /// for its caller's [`Proc`] to read. The box's delete calls this after its kill, so the programs — killed, in
+    /// the container's pid namespace — are reaped, letting the init finish exiting and the box empty: an init that is
+    /// its namespace's first process doesn't finish until every process in the namespace is reaped
+    /// (kernel/pid_namespace.c, `zap_pid_ns_processes`), so a program left to the sweep held the box for as long as
+    /// [`SWEEP_PERIOD`] (the waits census's run 5: `oci_box`'s delete "326.645366ms after SIGKILL" in every loop).
     pub fn reap_programs(&self, id: &BoxId, patience: Duration) -> Result<(), Refusal> {
         let watched = self
             .programs
@@ -415,8 +424,20 @@ impl Supervisor {
         Ok(())
     }
 
-    /// Stops watching a program the caller has reaped or let go, freeing the agent's pidfd for it, so
-    /// the box's delete no longer looks for it.
+    /// Keeps a program its caller let go unreaped for the box's delete to reap, its exit read by no one; the sweep
+    /// reaps it instead if it ends first.
+    fn let_go(&self, id: &BoxId, pid: u32) {
+        if let Ok(mut programs) = self.programs.lock()
+            && let Some(program) = programs
+                .get_mut(id)
+                .and_then(|watched| watched.iter_mut().find(|p| p.pid == pid))
+        {
+            program.released = true;
+        }
+    }
+
+    /// Stops watching a program the caller has reaped, freeing the agent's pidfd for it, so the box's delete no
+    /// longer looks for it.
     fn forget_program(&self, id: &BoxId, pid: u32) {
         if let Ok(mut programs) = self.programs.lock()
             && let Some(watched) = programs.get_mut(id)
@@ -680,7 +701,7 @@ impl Drop for Owned {
 
 /// A [`Proc`] for an exec'd program the agent watches for its box's delete. It reaps the program itself
 /// when the caller waits, unless a delete reaped it first — then it reads the exit the agent recorded.
-/// Dropped unreaped, it leaves the program to the sweep (it is the box's) and stops being watched.
+/// Dropped unreaped, it lets the program go: the sweep reaps it if it ends first, else the box's delete does.
 struct ProgramProc {
     supervisor: Arc<Supervisor>,
     id: BoxId,
@@ -750,13 +771,25 @@ impl Proc for ProgramProc {
 impl Drop for ProgramProc {
     fn drop(&mut self) {
         if !self.done {
-            // Let go unreaped: leave it to the sweep (it is the box's) and stop watching it.
-            self.supervisor.forget_program(&self.id, self.pid);
+            // Let go unreaped: the box's delete reaps it, its init's end waiting for that; the sweep may first, the
+            // program out of the owned set.
+            self.supervisor.let_go(&self.id, self.pid);
             if let Ok(mut owned) = OWNED.lock() {
                 owned.remove(&self.pid);
             }
         }
     }
+}
+
+/// Whether a program let go has ended and been reaped, by this look or by the sweep before it.
+fn ended_and_reaped(pidfd: BorrowedFd<'_>) -> bool {
+    matches!(
+        rustix::process::waitid(
+            WaitId::PidFd(pidfd),
+            WaitIdOptions::EXITED | WaitIdOptions::NOHANG,
+        ),
+        Ok(Some(_)) | Err(_)
+    )
 }
 
 /// Reaps `pidfd`'s process if it has ended and records how in `slot`, for the caller's [`Proc`]. The
