@@ -143,7 +143,10 @@ struct Entry<K, T> {
     /// a take: learned, the most takes that came during one of its fill passes, from the take that woke the maker
     /// to its being full, so a pass as busy as any seen finds a mount for each of its takes in what the key held at
     /// its wake. It starts at 0, a wake when a take leaves the key empty, none seen yet, and never falls; at its
-    /// depth less one every take wakes the maker, as before the low mark.
+    /// depth less one every take wakes the maker, as before the low mark. What a wake at a low mark saves against a
+    /// wake a take, measured with the fixed mark this replaces (half of eight): at concurrency 1 a quarter of the
+    /// futex calls a mount, and 70 us on-CPU against 77 (bench/competitive/probes/devfs_clone.md, the low mark's
+    /// A B B A).
     low: Learned,
     /// Being filled to its depth: from the take that left it at its low mark until it holds its depth.
     filling: bool,

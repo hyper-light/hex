@@ -154,7 +154,7 @@ impl DevMounts for Devfs {
     }
 
     /// The worker is woken only when the take leaves it work, a key at its low mark (the core's `Pool::take`), not
-    /// once a take: each wake costs it a cold make.
+    /// once a take.
     fn take(&self, key: Key) -> Result<Option<OwnedFd>, OciError> {
         let took = {
             let mut pool = self.shared.pool.lock().map_err(|_| {

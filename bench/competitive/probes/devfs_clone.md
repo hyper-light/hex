@@ -58,8 +58,25 @@ boxes, on the E-cores 16-31, load 2.6 to 6.7; run `create-serial-devfs-20261103T
 | `fchmodat` x6 | 9.5 us | 6.4 us |
 | `fsmount`, `fsopen` | 5.4, 4.9 us | 3.2, 1.8 us |
 
-At concurrency 1 the pool's thread is woken by every take and makes one `/dev` cold, then waits again; at 32 it is
-never idle and makes them back to back. The 48 us between the two is the cost of a wake and a cold make a take.
+At concurrency 1 the pool's thread is woken by every take and makes one `/dev`, then waits again; at 32 it is never
+idle and makes them back to back.
+
+**The low mark's A B B A** (2026-11-03, 20:12Z to 20:15Z, the unit `hex-g5x-s6-verify21-20261103T201127Z`; the same mode
+and CPUs, one-minute load 7.5 to 13.9): mr12h against mr13, which is mr12h with the pool's thread woken only at a key's
+low mark and filling the key in one pass (`hex` 252eea5c30632778).
+
+| run | binary | concurrency 1: on-CPU, futex calls a `/dev` | concurrency 32: on-CPU, futex calls a `/dev` |
+|---|---|---|---|
+| `create-serial-devfs-20261103T201214Z` | mr12h | 79.8 us, 1.00 | 78.2 us, 0.04 |
+| `create-serial-devfs-20261103T201258Z` | mr13 | 73.0 us, 0.25 | 81.0 us, 0.03 |
+| `create-serial-devfs-20261103T201334Z` | mr13 | 67.4 us, 0.25 | 79.7 us, 0.03 |
+| `create-serial-devfs-20261103T201424Z` | mr12h | 74.9 us, 1.00 | 78.3 us, 0.04 |
+
+The low mark takes concurrency 1's futex calls to a quarter, as it is built to, and its on-CPU from 77 us to 70 a
+`/dev`; concurrency 32's doesn't move. **The 124.6 us above didn't repeat:** mr12h here is 75 to 80 us at concurrency 1,
+so that figure was that run's alone, and what this record said of it (that the 48 us between the two columns is the
+cost of a wake and a cold make a take) is withdrawn. mr13's mark was fixed, half a key's eight; the tree's is learned,
+each key's own, from the takes that came during its fill passes (`cp/t7-port-g7`, 2026-11-09), and not measured here.
 
 **What would falsify it.** The steps' order of size changing on another kernel or at another load: a check that costs
 more than the nodes and links it replaces, or a clone whose hold of `namespace_sem` costs concurrency 32 more than the
