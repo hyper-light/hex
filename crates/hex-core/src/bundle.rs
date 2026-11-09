@@ -371,9 +371,9 @@ fn overlay(
     for (i, layer) in layers.iter().enumerate().rev() {
         lower.push(option_path(layer, &format!("rootfs.layers[{i}]"))?);
     }
-    let rootfs = bundle.join(ROOTFS);
-    let upper = bundle.join(UPPER);
-    let work = bundle.join(WORK);
+    let rootfs = linux_join(bundle, ROOTFS);
+    let upper = linux_join(bundle, UPPER);
+    let work = linux_join(bundle, WORK);
     let mut options = vec![
         format!("lowerdir={}", lower.join(":")),
         format!(
@@ -404,17 +404,33 @@ fn overlay(
     Ok((mount, vec![rootfs, upper, work]))
 }
 
+/// `dir/name` as the Linux that mounts it reads a path: joined by `/` on every host, since
+/// `Path::join` uses the host's (`\` on Windows), which overlayfs's options read as a separator.
+/// `dir` keeps its bytes as given.
+fn linux_join(dir: &Path, name: &str) -> PathBuf {
+    let mut path = dir.as_os_str().to_owned();
+    if dir.as_os_str().as_encoded_bytes().last() != Some(&b'/') {
+        path.push("/");
+    }
+    path.push(name);
+    PathBuf::from(path)
+}
+
 /// The mounts every container gets, Docker's (daemon/pkg/oci/defaults.go) with containerd's sized
 /// `/dev/shm` (pkg/oci/mounts.go), the 64 MiB Docker's `--shm-size` defaults to, and the cgroup
 /// filesystem named as the version Hex runs (`cgroup2`). A container in a user namespace of its own
 /// has no gid 5 to give its terminals, and can't mount a sysfs while it shares the host's network
 /// namespace, so it binds the host's instead, both as runc's rootless containers do
 /// (libcontainer/specconv, `ToRootless`). That bind must be recursive (a user namespace refuses a
-/// plain bind of a mount with locked mounts beneath it), so it carries the host's cgroup filesystem,
-/// writable under the read-only `/sys`, where a box's processes run as the node's uid, which owns
-/// every box's cgroup files. The container's own cgroup filesystem goes over it, so it sees its own
-/// box's cgroups and no other's, with a read-only tmpfs between: mount(2) refuses a filesystem over
-/// the same filesystem's root (fs/namespace.c, "Refuse the same filesystem on the same mount point").
+/// plain bind of a mount with locked mounts beneath it), so it carries the host's cgroup filesystem
+/// beneath the read-only `/sys`. A box's processes run as the node's uid, which owns every box's
+/// cgroup files, so the runtime remounts that carried cgroup filesystem read-only too (a recursive
+/// bind's read-only covers only its top; `hex_runtime`'s init `remount_cgroupfs_readonly`): else a box
+/// holding `CAP_SYS_ADMIN` in its user namespace could reach every box's cgroup files by unmounting
+/// its own cgroup mounts off it (T-T7.1.4). The container's own cgroup filesystem goes over it, so it
+/// sees its own box's cgroups and no other's, with a read-only tmpfs between: mount(2) refuses a
+/// filesystem over the same filesystem's root (fs/namespace.c, "Refuse the same filesystem on the
+/// same mount point").
 fn default_mounts(owner: Owner, network: Network) -> Vec<Mount> {
     let rootless = matches!(owner, Owner::Rootless { .. });
     let fs = |destination: &str, kind: &'static str, source: &str, options: &[&str]| Mount {
@@ -654,14 +670,16 @@ mod tests {
 
     /// AC-T7.1.1: the plan step's example, rootless: the overlay is the first mount, its lower
     /// directories top first, with `userxattr`; the user namespace maps the node to root; the
-    /// network namespace is the box's own; the bind is read-only and not recursive.
+    /// network namespace is the box's own; the bind is read-only and not recursive. The bundle's
+    /// directories are Linux paths, `/`-joined on every host (CLAUDE.md §12: the core renders a Linux
+    /// container's bundle the same on Windows, where `Path::join` would put `\` in them).
     #[test]
     fn layers_with_a_private_network_render_rootless_to_their_golden_config() {
         let b = render(&layered(), &at(ROOTLESS, &[])).unwrap();
         golden("layers-private-rootless.json", &b);
         assert_eq!(
             b.dirs,
-            ["rootfs", "upper", "work"].map(|d| Path::new(BUNDLE).join(d))
+            ["rootfs", "upper", "work"].map(|d| PathBuf::from(format!("{BUNDLE}/{d}")))
         );
     }
 

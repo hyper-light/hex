@@ -1,0 +1,58 @@
+config_updates_without_affect	pass		0
+create	pass		0
+default	pass		39
+delete	pass		0
+delete_only_create_resources	fail	exit 1: open /sys/fs/cgroup/pids/cgrouptest/tasks: no such file or directory	0
+delete_resources	fail	not ok 1 - find pids cgroup	0
+hooks	fail	exit 0: 1..0	0
+hooks_stdin	pass		0
+hostname	pass		0
+kill	pass		0
+kill_no_effect	pass		0
+killsig	pass		0
+linux_cgroups_blkio	fail	exit 1: exit status 1	0
+linux_cgroups_cpus	fail	exit 1: cannot validate CPU cgroups: exit status 1	0
+linux_cgroups_devices	fail	not ok 1 - find devices	0
+linux_cgroups_hugetlb	fail	exit 1: exit status 1	0
+linux_cgroups_memory	fail	not ok 1 - exit status 1	0
+linux_cgroups_network	fail	exit 2:  /home/adalundhe/.cache/rt-amd64.Kxfx2C/validation/linux_cgroups_network/linux_cgroups_network.go:105 +0x13	0
+linux_cgroups_pids	fail	not ok 1 - find pids cgroup	0
+linux_cgroups_relative_blkio	fail	not ok 1 - exit status 1	0
+linux_cgroups_relative_cpus	fail	not ok 1 - exit status 1	0
+linux_cgroups_relative_devices	fail	not ok 1 - find devices	0
+linux_cgroups_relative_hugetlb	fail	not ok 1 - exit status 1	0
+linux_cgroups_relative_memory	fail	not ok 1 - exit status 1	0
+linux_cgroups_relative_network	fail	not ok 1 - exit status 1	0
+linux_cgroups_relative_pids	fail	not ok 1 - find pids cgroup	0
+linux_devices	pass		40
+linux_masked_paths	pass		0
+linux_mount_label	fail	exit 1: exit status 1	0
+linux_ns_itype	pass		0
+linux_ns_nopath	pass		0
+linux_ns_path	pass		0
+linux_ns_path_type	pass		0
+linux_process_apparmor_profile	fail	exit 1: exit status 1	0
+linux_readonly_paths	pass		0
+linux_rootfs_propagation	pass		0
+linux_seccomp	pass		0
+linux_sysctl	pass		38
+linux_uid_mappings	pass		38
+misc_props	fail	not ok 3 - runtimes that are reading or processing this configuration file MUST generate an error when invalid or unsupported values are encountered	0
+mounts	pass		39
+pidfile	fail	not ok 1 - create with '--pid-file' option works	0
+poststart	fail	exit 0: 1..0	0
+poststart_fail	fail	exit 0: 1..0	0
+poststop	fail	exit 0: 1..0	0
+poststop_fail	fail	exit 0: 1..0	0
+prestart	fail	exit 0: 1..0	0
+prestart_fail	fail	exit 0: 1..0	0
+process	pass		39
+process_capabilities	pass		32
+process_capabilities_fail	fail	exit 1: Refer to: https://github.com/opencontainers/runtime-spec/blob/v1.3.0/config.md#linux-process	39
+process_oom_score_adj	pass		38
+process_rlimits	fail	not ok 13 - has expected soft RLIMIT_NOFILE	39
+process_rlimits_fail	fail	exit 0: Clean: Delete:  exit status 1	0
+process_user	pass		39
+root_readonly_true	pass		39
+start	pass		0
+state	pass		0

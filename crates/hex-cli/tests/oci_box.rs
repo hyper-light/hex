@@ -14,7 +14,12 @@
 //!   boxes take one each from the node's pool, and the node keeps no descriptor of either.
 //!   HEX-NETNS-10, rootless: made on the path in the box's own user namespace, which owns it, nothing
 //!   taken;
-//! - a box's process orphaned to the agent, once ended, is reaped by the sweep: no zombie is kept.
+//! - a box's process orphaned to the agent, once ended, is reaped by the sweep: no zombie is kept;
+//! - goal 5 plan step 2: 31 boxes are made at once while another box's durable record write is held
+//!   open, none waiting on it, and none of their records synced with their container state on tmpfs;
+//!   two nodes with state directories of their own each make and start a box of the same id, two
+//!   containers, and deleting one leaves the other running; a box made before the container state
+//!   moved, its record naming `<state>/oci/<id>`, is taken back, inspected and deleted by today's node.
 //!
 //! Rootless where the caller isn't root, in a delegated cgroup v2 subtree, as oci_seccomp.rs; where
 //! neither is possible it prints SKIP and why rather than pass falsely. The crash runs first, before
@@ -31,14 +36,22 @@
     clippy::disallowed_macros
 )]
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio as Std};
 use std::time::{Duration, Instant};
 
 use hex_api::conformance::{self, Act, Fixture};
-use hex_api::{Bounds, BoxId, BoxInfo, BoxSpec, BoxState, ClassSpec, Exit, Refusal, Runtime};
+use hex_api::{
+    Bounds, BoxId, BoxInfo, BoxSpec, BoxState, ClassSpec, Exit, Network, OciSpec, Refusal, Rootfs,
+    Runtime,
+};
+use hex_core::record::{BoxRecord, Phase, ProcId};
 use hex_node::Node;
+use hex_node::store::Store;
+use hex_runtime::linux::cgroup::BoxRoot;
+use hex_runtime::linux::disks;
+use hex_runtime::linux::oci::run::Runtime as OciRuntime;
 
 const TEST: &str = "oci_boxes_report_their_inits_exit_through_the_seam";
 /// Set in the re-exec'd copy of this test that plays the agent the crash kills.
@@ -150,6 +163,11 @@ impl Lab {
     {"destination": "/sys", "type": "sysfs", "source": "sysfs", "options": ["nosuid","noexec","nodev","ro"]}"#,
             );
         }
+        self.config_with(args, &namespaces, &mappings, &sys)
+    }
+
+    /// A bundle's config.json with its `linux.namespaces` entries, id mappings and extra mounts as given.
+    fn config_with(&self, args: &[String], namespaces: &str, mappings: &str, sys: &str) -> String {
         let args = json_args(args);
         format!(
             r#"{{
@@ -216,6 +234,9 @@ impl Lab {
 }
 
 impl Fixture for Lab {
+    fn exec_limit(&self) -> Option<hex_api::ExecLimit> {
+        Some(hex_runtime::linux::process::exec_limit())
+    }
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
         BoxSpec {
             id,
@@ -255,10 +276,244 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     programs_hold_their_stdio_alone(&lab, own);
     exec_reads_no_state(&lab, own);
     orphans_are_reaped(&lab, own);
+    held_record_write(&lab, own);
+    two_nodes_one_box_id(&lab, own);
+    a_box_made_before_the_move_is_adopted(&lab, own);
+    created_through_a_seed_in_its_cgroup_and_namespaces(&lab, own);
+    each_seed_cloned_container_is_randomized_afresh(&lab, own);
+    a_seed_that_dies_mid_create_is_refused_and_restarted(&lab, own);
+    a_bundle_joining_a_namespace_by_path_runs_through_the_seam(&lab, own);
+    a_box_root_counts_its_boxes_without_listing(&lab, own);
+    a_program_past_the_kernels_bound_is_refused_by_name_and_learned(&lab, own);
+}
+
+/// HEX-RT-14, the bound learned (CLAUDE.md §3): the node keeps its RLIMIT_STACK from its first reading, so
+/// a limit lowered after it is first met where a program starts: as root, the agent's vfork-style child's
+/// `execve` fails `E2BIG`; rootless, the seed (started under the lower limit) refuses the program by its
+/// own reading. Do: lower this node's RLIMIT_STACK after its first reading to 512 KiB (whose bound is
+/// Linux's floor, `ARG_MAX`), then exec a program between the two limits' bounds and within the seed
+/// wire's one message, twice. Expect: the first is refused as `Invalid` "program" and the node reads its
+/// limit again, once; the second is refused the same way by the node itself, with no further reading; a
+/// small program still runs. Rootless, a program within the node's bound but past the seed wire's one
+/// message is refused as `Invalid` "program" too, with no reading: no seed can be handed it.
+fn a_program_past_the_kernels_bound_is_refused_by_name_and_learned(lab: &Lab, own: &Path) {
+    use hex_runtime::linux::process::{exec_limit, exec_limit_for, relearn_stack, stack_reads};
+    use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-e2big"), state.path());
+    let id = BoxId::new("e2big").unwrap();
+    node.create(lab.spec(id.clone(), Bounds::default()))
+        .expect("create");
+    node.start(&id).expect("start");
+    let high = exec_limit().block;
+    let was = getrlimit(Resource::Stack);
+    let lower = 512 << 10;
+    let low = exec_limit_for(lower).block;
+    let wire = hex_core::seed::MAX_REQUEST;
+    assert!(
+        low < wire && wire < high,
+        "this host's stack bound ({high}) is above the seed wire's message ({wire}), above a 512 KiB stack's ({low})"
+    );
+    // Padded a page at a time past the lower bound, by an eighth of the room the seed's message leaves.
+    let padded = |past: usize| {
+        let mut program = lab.program(&Act::Say("past"));
+        let mut n = 0;
+        while program.exec_size() <= past {
+            program.env.push((format!("PAD{n}"), "x".repeat(4 << 10)));
+            n += 1;
+        }
+        program
+    };
+    let program = padded(low + (wire - low) / 8);
+    setrlimit(
+        Resource::Stack,
+        Rlimit {
+            current: Some(lower),
+            maximum: was.maximum,
+        },
+    )
+    .expect("lower this node's stack limit");
+    let reads = stack_reads();
+    let first = node.exec(&id, program.clone(), hex_api::Stdio::null());
+    let after = stack_reads();
+    let second = node.exec(&id, program, hex_api::Stdio::null());
+    let small = node
+        .exec(&id, lab.program(&Act::Say("small")), hex_api::Stdio::null())
+        .map(|mut p| p.wait_for(conformance::patience()));
+    let last = stack_reads();
+    setrlimit(Resource::Stack, was).expect("restore this node's stack limit");
+    relearn_stack();
+    // After the stack case, whose seed must start under the lower limit: asking for one starts it.
+    if lab.rootless {
+        // Two pages past, since the wire counts each string's length where execve counts a pointer and a NUL.
+        let reads = stack_reads();
+        let oversized = node.exec(&id, padded(wire + (8 << 10)), hex_api::Stdio::null());
+        assert!(
+            matches!(
+                oversized,
+                Err(Refusal::Invalid {
+                    what: "program",
+                    ..
+                })
+            ),
+            "a program past the seed wire's one message is refused by name, got {:?}",
+            oversized.map(|p| p.pid())
+        );
+        assert_eq!(
+            stack_reads(),
+            reads,
+            "the wire's bound reads no stack limit"
+        );
+    }
+    assert!(
+        matches!(
+            first,
+            Err(Refusal::Invalid {
+                what: "program",
+                ..
+            })
+        ),
+        "the first exec past the kernel's bound is refused by name, got {:?}",
+        first.map(|p| p.pid())
+    );
+    assert_eq!(
+        after - reads,
+        1,
+        "the refusal read the node's limit again, once"
+    );
+    assert!(
+        matches!(
+            second,
+            Err(Refusal::Invalid {
+                what: "program",
+                ..
+            })
+        ),
+        "the second is refused by the node's learned bound, got {:?}",
+        second.map(|p| p.pid())
+    );
+    assert_eq!(
+        last, after,
+        "the learned bound refused it with no further reading"
+    );
+    assert!(
+        matches!(small, Ok(Ok(Some(Exit::Code(0))))),
+        "a program within the bound still runs, got {small:?}"
+    );
+    node.delete(&id).expect("delete");
+}
+
+/// Goal 5 plan step 4: the box bound's count is the root's link count, not a listing (a listing waits
+/// behind every box's `mkdir` and `rmdir` beside it). Do: make three boxes under a box root, then remove
+/// one. Expect: the count equals the listing's at each step — 0, 3, then 2.
+fn a_box_root_counts_its_boxes_without_listing(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let root = BoxRoot::open(
+        &own.join("hex-oci-count"),
+        disks::under(state.path()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!((root.count().unwrap(), root.boxes().unwrap().len()), (0, 0));
+    let ids: Vec<BoxId> = ["c1", "c2", "c3"]
+        .iter()
+        .map(|n| BoxId::new(n).unwrap())
+        .collect();
+    let made: Vec<_> = ids
+        .iter()
+        .map(|id| root.create(id, &Bounds::default()).unwrap())
+        .collect();
+    assert_eq!((root.count().unwrap(), root.boxes().unwrap().len()), (3, 3));
+    made[0].remove().unwrap();
+    assert_eq!((root.count().unwrap(), root.boxes().unwrap().len()), (2, 2));
+    for cg in &made[1..] {
+        cg.remove().unwrap();
+    }
+}
+
+/// Goal 5 plan step 4 (decision 5, T-T7.1.4): a given bundle that joins a namespace by path is made
+/// through the seam, as the shim made it before. Do: run box A with a network namespace of its own;
+/// create and start box B whose bundle names A's network namespace by path — and, rootless, A's user
+/// namespace too, which a rootless container needs to join a namespace A's user namespace owns. Expect: B
+/// runs in A's network namespace (and A's user namespace, rootless). As root, B's init joined A's network
+/// namespace itself after the seed's clone, so no create went through the shim; rootless, a user namespace
+/// by path can't be joined in one clone, so B was made through the shim and counted once — the one kind of
+/// create that still re-execs the hex binary. Either way both inits' streams are the null device, a seed's
+/// and a seam shim's alike, never the node agent's.
+fn a_bundle_joining_a_namespace_by_path_runs_through_the_seam(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-joinpath"), state.path());
+    let host = BoxId::new("join-host").unwrap();
+    node.create(lab.networked(host.clone()))
+        .expect("create the box whose namespaces are joined");
+    node.start(&host).expect("start it");
+    let host_init = init_pid(&node.container_dir(&host));
+    let path = |ns: &str| format!("/proc/{host_init}/ns/{ns}");
+    let rest = r#"{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#;
+    let namespaces = if lab.rootless {
+        format!(
+            r#"{{"type":"user","path":"{}"}},{{"type":"network","path":"{}"}},{rest}"#,
+            path("user"),
+            path("net")
+        )
+    } else {
+        format!(r#"{{"type":"network","path":"{}"}},{rest}"#, path("net"))
+    };
+    let dir = tempfile::Builder::new()
+        .prefix("bundle-")
+        .tempdir_in(lab.bundles.path())
+        .unwrap()
+        .keep();
+    std::fs::write(
+        dir.join("config.json"),
+        lab.config_with(&Lab::act(&Act::Wait), &namespaces, "", ""),
+    )
+    .unwrap();
+    let joiner = BoxId::new("join-path").unwrap();
+    node.create(BoxSpec {
+        id: joiner.clone(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Bundle(dir),
+    })
+    .expect("a bundle joining a namespace by path is made through the seam");
+    node.start(&joiner).expect("start the joiner");
+    let joined = init_pid(&node.container_dir(&joiner));
+    assert_eq!(
+        netns_of(joined),
+        netns_of(host_init),
+        "it runs in the network namespace it joined by path"
+    );
+    for (who, pid) in [("the seed-made box", host_init), ("the joiner", joined)] {
+        assert_eq!(
+            streams(pid),
+            ["/dev/null"; 3].map(PathBuf::from),
+            "{who}'s init has the null device for its streams"
+        );
+    }
+    if lab.rootless {
+        let userns = |pid: i32| std::fs::read_link(format!("/proc/{pid}/ns/user")).unwrap();
+        assert_eq!(
+            userns(joined),
+            userns(host_init),
+            "and the user namespace it joined"
+        );
+        assert_eq!(
+            node.creates_through_shim(),
+            1,
+            "a user namespace by path is made through the shim, counted"
+        );
+    } else {
+        assert_eq!(
+            node.creates_through_shim(),
+            0,
+            "a network namespace by path is joined by the seed's clone, not the shim"
+        );
+    }
+    node.delete(&joiner).expect("delete the joiner");
+    node.delete(&host).expect("delete the box it joined");
 }
 
 /// The agent the crash kills: a node in this re-exec'd process makes and starts a box whose init
-/// waits, says `ready <agent pid>` on stdout, and waits to be killed.
+/// waits, says `ready <agent pid> <its container's state dir>` on stdout, and waits to be killed.
 fn play_the_agent(dirs: &Path, exe: &str) -> ! {
     let lab_rootfs = dirs.join("rootfs");
     let box_root = PathBuf::from(std::fs::read_to_string(dirs.join("box_root")).unwrap());
@@ -279,7 +534,11 @@ fn play_the_agent(dirs: &Path, exe: &str) -> ! {
         Err(e) => println!("unavailable {e}"),
         Ok(_) => {
             node.start(&id).expect("agent: start");
-            println!("ready {}", std::process::id());
+            println!(
+                "ready {} {}",
+                std::process::id(),
+                node.container_dir(&id).display()
+            );
         }
     }
     loop {
@@ -321,14 +580,15 @@ fn crash_and_restart(lab: &Lab, own: &Path) -> Result<(), String> {
         .expect("start the agent");
     // libtest writes `test <name> ... ` before the test's own output, on the same line.
     let mut out = BufReader::new(agent.stdout.take().unwrap());
-    let agent_pid: i32 = loop {
+    let (agent_pid, container): (i32, PathBuf) = loop {
         let mut line = String::new();
         assert!(
             out.read_line(&mut line).unwrap() > 0,
             "the agent ended before it was ready"
         );
-        if let Some((_, pid)) = line.split_once("ready ") {
-            break pid.trim().parse().unwrap();
+        if let Some((_, ready)) = line.split_once("ready ") {
+            let (pid, dir) = ready.trim().split_once(' ').unwrap();
+            break (pid.parse().unwrap(), PathBuf::from(dir));
         }
         if let Some((_, why)) = line.split_once("unavailable ") {
             agent.kill().unwrap();
@@ -336,7 +596,7 @@ fn crash_and_restart(lab: &Lab, own: &Path) -> Result<(), String> {
             return Err(why.trim().to_owned());
         }
     };
-    let init = init_pid(&state, "crash");
+    let init = init_pid(&container);
     assert_eq!(parent_of(init), agent_pid, "the init is the agent's child");
 
     agent.kill().unwrap();
@@ -382,7 +642,7 @@ fn parent_and_exit_code(lab: &Lab, own: &Path) {
         .create(lab.running(id.clone(), &strings(&["/bin/sh", "-c", "exit 7"])))
         .expect("create");
     assert_eq!((info.state, info.exit), (BoxState::Created, None));
-    let init = init_pid(state.path(), "exit7");
+    let init = init_pid(&node.container_dir(&id));
     assert_eq!(
         parent_of(init),
         i32::try_from(std::process::id()).unwrap(),
@@ -409,7 +669,7 @@ fn killed_init(lab: &Lab, own: &Path) {
     node.create(lab.running(id.clone(), &Lab::act(&Act::Wait)))
         .expect("create");
     node.start(&id).expect("start");
-    let init = init_pid(state.path(), "killed");
+    let init = init_pid(&node.container_dir(&id));
     kill(init, 9);
     let ended = wait_exit(&node, &id);
     assert_eq!(
@@ -454,7 +714,7 @@ fn budget(lab: &Lab, own: &Path) {
         "a refused create made a cgroup"
     );
     assert!(
-        !state.path().join("oci/second").exists(),
+        !node.container_dir(&second).exists(),
         "a refused create made state"
     );
     node.delete(&first).expect("delete");
@@ -464,11 +724,12 @@ fn budget(lab: &Lab, own: &Path) {
 }
 
 /// AC-T7.1.1: the `oci` class through the node holds the runtime contract, HEX-RT-11 and 12 (the
-/// init's exit) included.
+/// init's exit) included, and the differential suite holds it to the simulator's trace (HEX-DIFF-1..6,
+/// CLAUDE.md §8).
 fn conformance_on_oci(lab: &Lab, own: &Path) {
     let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
     let node = lab.node(&own.join("hex-oci-conf"), state.path());
-    let failures = conformance::run(&node, lab);
+    let failures = hex_api::differential::run(&node, lab);
     assert!(failures.is_empty(), "conformance failures: {failures:#?}");
 }
 
@@ -495,7 +756,7 @@ fn network_namespaces(lab: &Lab, own: &Path) {
     let first = BoxId::new("netns-dry").unwrap();
     dry.create(lab.networked(first.clone())).expect("create");
     dry.start(&first).expect("start");
-    let made = netns_of(init_pid(dry_state.path(), "netns-dry"));
+    let made = netns_of(init_pid(&dry.container_dir(&first)));
     assert_ne!(made, host, "the box's network namespace is its own");
     assert_eq!(loopback_flags(&dry, &first), "0x9", "its loopback is up");
     let counts = dry.netns().unwrap();
@@ -524,7 +785,7 @@ fn network_namespaces(lab: &Lab, own: &Path) {
         let id = BoxId::new(name).unwrap();
         node.create(lab.networked(id.clone())).expect("create");
         node.start(&id).expect("start");
-        let ns = netns_of(init_pid(state.path(), name));
+        let ns = netns_of(init_pid(&node.container_dir(&id)));
         assert!(!seen.contains(&ns), "{name}'s {ns} is no other's: {seen:?}");
         assert!(
             !held_by_this_process(&ns),
@@ -626,22 +887,15 @@ fn program_alone(lab: &Lab, own: &Path) {
         "no hex __oci-exec helper runs beside the program"
     );
     // Goal 3 plan step 2's acceptance: no process is made per exec but the program, and no hex binary is
-    // exec'd per call. A node that runs as root clones the program from its own thread and keeps no
-    // seed; a rootless one hands the exec to a reusable seed. Either way a second exec adds to the agent's
-    // children its program alone.
-    let seeds = |cs: &[u32]| cs.iter().filter(|&&c| cmdline_has(c, "__oci-seed")).count();
-    if lab.rootless {
-        assert!(
-            seeds(&children) >= 1,
-            "a rootless node's exec is served by a reusable seed"
-        );
-    } else {
-        assert_eq!(
-            seeds(&children),
-            0,
-            "a node that runs as root needs no seed"
-        );
-    }
+    // exec'd per call. A node that runs as root clones the program straight from its own thread; a
+    // rootless one hands the exec to a reusable seed. Either way a second exec adds to the agent's
+    // children its program alone (the diff below). A `hex __oci-seed` is up whichever way the node runs:
+    // the box's create is made by a create seed as of goal 5, so the seed count no longer tells a root
+    // node from a rootless one — the diff does.
+    assert!(
+        children.iter().any(|&c| cmdline_has(c, "__oci-seed")),
+        "a create seed is up, having made the box"
+    );
     let before: std::collections::BTreeSet<u32> = children.into_iter().collect();
     let second = node
         .exec(
@@ -702,7 +956,7 @@ fn programs_hold_their_stdio_alone(lab: &Lab, own: &Path) {
         )
         .expect("exec a program");
     for pid in [
-        u32::try_from(init_pid(state.path(), "stdio")).unwrap(),
+        u32::try_from(init_pid(&node.container_dir(&id))).unwrap(),
         exec.pid(),
     ] {
         // Its loader holds a descriptor for a moment after the exec, so what's waited for is their end; a
@@ -741,8 +995,8 @@ fn exec_reads_no_state(lab: &Lab, own: &Path) {
     node.create(lab.running(id.clone(), &Lab::act(&Act::Wait)))
         .expect("create");
     node.start(&id).expect("start");
-    let file = state.path().join("oci/nostate/state.json");
-    let aside = state.path().join("state.json.aside");
+    let file = node.container_dir(&id).join("state.json");
+    let aside = node.container_dir(&id).join("state.json.aside");
     std::fs::rename(&file, &aside).expect("move the container's state away");
     let ran = node
         .exec(
@@ -848,6 +1102,504 @@ fn orphans_are_reaped(lab: &Lab, own: &Path) {
     node.delete(&id).unwrap();
 }
 
+/// Goal 5 plan step 2: no create waits on another box's record write, its fsyncs included. 32 boxes
+/// are created at once from 32 threads; then 31 more while a box with a durable record (an `OciSpec`
+/// box, its rendered bundle on disk) is held inside its first record write: its temp file is a FIFO no
+/// one has opened, so the write can't go on until this test reads it. All 31 are made while it's held,
+/// and with the node's container state on tmpfs none of their records is synced. Let go, the held
+/// write fails at its fsync (a FIFO can't be synced), which shows it was a durable one. Both runs'
+/// latencies are printed: the 31 beside the held write against the 32 with none.
+fn held_record_write(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-held"), state.path());
+    let wait = Lab::act(&Act::Wait);
+    let specs = |prefix: &str, n: usize| -> Vec<BoxSpec> {
+        (0..n)
+            .map(|i| lab.running(BoxId::new(&format!("{prefix}{i}")).unwrap(), &wait))
+            .collect()
+    };
+    // Each create timed on a thread of its own, all started at once; their latencies in the order they
+    // came, a create that didn't come within the patience missing.
+    let create_all = |specs: Vec<BoxSpec>| -> Vec<Duration> {
+        let n = specs.len();
+        let (done, made) = std::sync::mpsc::channel();
+        std::thread::scope(|s| {
+            for spec in specs {
+                let (node, done) = (&node, done.clone());
+                s.spawn(move || {
+                    let t = Instant::now();
+                    let made = node.create(spec).map(|_| t.elapsed());
+                    let _ = done.send(made);
+                });
+            }
+            (0..n)
+                .map_while(|_| made.recv_timeout(conformance::PATIENCE).ok())
+                .map(|m| m.expect("create"))
+                .collect()
+        })
+    };
+
+    let free = specs("free", 32);
+    let ids: Vec<BoxId> = free.iter().map(|s| s.id.clone()).collect();
+    let alone = create_all(free);
+    assert_eq!(alone.len(), 32, "32 creates at once, none held");
+    for id in &ids {
+        node.delete(id).unwrap();
+    }
+
+    let fifo = state.path().join(".held.tmp");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let held = BoxId::new("held").unwrap();
+    let held_spec = BoxSpec {
+        id: held.clone(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Oci(Box::new(OciSpec {
+            rootfs: Rootfs::Dir(lab.rootfs.clone()),
+            init: hex_api::Program::of(&["/hex", "selftest-box", "wait"]),
+            mounts: Vec::new(),
+            hostname: None,
+            network: Network::Host,
+            hosts: Vec::new(),
+        })),
+    };
+    let busy = specs("busy", 31);
+    let ids: Vec<BoxId> = busy.iter().map(|s| s.id.clone()).collect();
+    let synced = node.record_syncs();
+    // Nothing here panics before the held write is let go, so a create that waited on it ends too and
+    // the scope's joins return.
+    let (beside, synced_beside, held_made) = std::thread::scope(|s| {
+        let holder = s.spawn(|| node.create(held_spec));
+        wait_for(
+            blocked_opening_a_fifo,
+            "the held create to block in its record write",
+        );
+        let (done, made) = std::sync::mpsc::channel();
+        for spec in busy {
+            let (node, done) = (&node, done.clone());
+            s.spawn(move || {
+                let t = Instant::now();
+                let made = node.create(spec).map(|_| t.elapsed());
+                let _ = done.send(made);
+            });
+        }
+        let beside: Vec<Result<Duration, Refusal>> = (0..31)
+            .map_while(|_| made.recv_timeout(conformance::PATIENCE).ok())
+            .collect();
+        let synced_beside = node.record_syncs();
+        // Let the held write go on: its open completes, and it writes the record into the FIFO.
+        let mut held_bytes = Vec::new();
+        let read = std::fs::File::open(&fifo).and_then(|mut f| f.read_to_end(&mut held_bytes));
+        (beside, synced_beside, (read, holder.join().unwrap()))
+    });
+    let (read, held_made) = held_made;
+    read.unwrap();
+    std::fs::remove_file(&fifo).unwrap();
+    assert_eq!(
+        beside.len(),
+        31,
+        "every create beside the held write was made while it was held"
+    );
+    let beside: Vec<Duration> = beside.into_iter().map(|m| m.expect("create")).collect();
+    assert!(
+        matches!(
+            &held_made,
+            Err(Refusal::Os {
+                op: "flushing a record",
+                ..
+            })
+        ),
+        "the held write, let go, failed at its fsync: {held_made:?}"
+    );
+    if on_tmpfs(node.container_dir(&held).parent().unwrap()) {
+        assert_eq!(
+            synced_beside, synced,
+            "the 31 boxes' records, their container state on tmpfs alone, were not synced"
+        );
+    } else {
+        eprintln!(
+            "held_record_write: the node's container state isn't on tmpfs here, so its boxes' records are synced too"
+        );
+    }
+    let ms = |d: &Duration| d.as_secs_f64() * 1e3;
+    let (alone, beside) = (sorted_ms(&alone), sorted_ms(&beside));
+    eprintln!(
+        "held_record_write: create p50 {:.3} ms, max {:.3} ms with 32 at once; p50 {:.3} ms, max {:.3} ms with 31 beside a held durable write",
+        ms(&alone[alone.len() / 2]),
+        ms(&alone[alone.len() - 1]),
+        ms(&beside[beside.len() / 2]),
+        ms(&beside[beside.len() - 1]),
+    );
+    for id in &ids {
+        node.delete(id).unwrap();
+    }
+    assert_eq!(node.inspect(&held), Err(Refusal::NoSuchBox(held.clone())));
+    assert!(node.list().unwrap().is_empty(), "a box is left");
+}
+
+/// Goal 5 plan step 2: two nodes on one host, each with a state directory of its own, keep their
+/// containers' state in the one root under the runtime directory; a box of the same id in each gets a
+/// container of its own, named for its node. Both are made and start, each its own init; deleting one
+/// leaves the other running, its state where it was.
+fn two_nodes_one_box_id(lab: &Lab, own: &Path) {
+    let (state_a, state_b) = (
+        tempfile::tempdir_in(lab.bundles.path()).unwrap(),
+        tempfile::tempdir_in(lab.bundles.path()).unwrap(),
+    );
+    let a = lab.node(&own.join("hex-oci-two-a"), state_a.path());
+    let b = lab.node(&own.join("hex-oci-two-b"), state_b.path());
+    let id = BoxId::new("same").unwrap();
+    let wait = Lab::act(&Act::Wait);
+    a.create(lab.running(id.clone(), &wait))
+        .expect("create in a");
+    b.create(lab.running(id.clone(), &wait))
+        .expect("create in b");
+    let (in_a, in_b) = (a.container_dir(&id), b.container_dir(&id));
+    assert_ne!(in_a.file_name(), in_b.file_name(), "two containers' names");
+    if in_a.parent() != in_b.parent() {
+        eprintln!(
+            "two_nodes_one_box_id: no runtime directory here, so each node keeps its containers in its state directory"
+        );
+    }
+    for node in [&a, &b] {
+        node.start(&id).expect("start");
+        assert_eq!(node.inspect(&id).unwrap().state, BoxState::Running);
+    }
+    assert_ne!(init_pid(&in_a), init_pid(&in_b), "two inits");
+    a.delete(&id).expect("delete in a");
+    assert!(!in_a.exists(), "a's container state is left");
+    assert_eq!(
+        b.inspect(&id).unwrap().state,
+        BoxState::Running,
+        "b's box runs on"
+    );
+    assert!(
+        in_b.join("state.json").exists(),
+        "b's container state is kept"
+    );
+    b.delete(&id).expect("delete in b");
+    assert!(!in_b.exists(), "b's container state is left");
+}
+
+/// T-T7.1.2 across goal 5 plan step 2's upgrade: a node before defda14 kept a box's container state in
+/// its state directory, `<state>/oci/<id>`, and the box's record names that directory. A box made so,
+/// its init waiting, is taken back by a node of today restarted on the same state directory, which reads
+/// its state where the record names it (created, not empty with an exit no one saw) and deletes it,
+/// leaving nothing of it.
+fn a_box_made_before_the_move_is_adopted(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let box_root = own.join("hex-oci-legacy");
+    let id = BoxId::new("legacy").unwrap();
+    let bundle = lab.bundle(&Lab::act(&Act::Wait));
+    // The box as the node before defda14 made it: its cgroup under the box root with its bounds, its
+    // container under `<state>/oci` named by its id, and its record naming that directory.
+    let root = BoxRoot::open(&box_root, disks::under(state.path()).unwrap()).unwrap();
+    let cgroup = root.create(&id, &Bounds::default()).unwrap();
+    let _cleanup = Killing(&root, id.clone());
+    let before = state.path().join("oci");
+    let oci = OciRuntime::with_helper(before.clone(), PathBuf::from(&lab.exe));
+    oci.create_in_cgroup(id.as_str(), &bundle, None, cgroup, None)
+        .unwrap();
+    let made = oci.state(id.as_str()).unwrap();
+    let mut record = BoxRecord::new(
+        BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(bundle),
+        },
+        Phase::Ready,
+        vec![before.join(id.as_str())],
+    );
+    record.init = Some(ProcId {
+        pid: u32::try_from(made.pid).unwrap(),
+        start_ticks: made.start_time.unwrap(),
+    });
+    Store::open(state.path()).unwrap().put(&record).unwrap();
+
+    let node = lab.node(&box_root, state.path());
+    assert_ne!(
+        node.container_dir(&id),
+        before.join(id.as_str()),
+        "today's node keeps its containers elsewhere"
+    );
+    let summary = node.recover().expect("recover");
+    assert!(summary.adopted.contains(&id), "not adopted: {summary:?}");
+    let info = node.inspect(&id).unwrap();
+    assert_eq!(
+        (info.state, info.exit),
+        (BoxState::Created, None),
+        "its state, read where its record names it"
+    );
+    node.delete(&id).expect("delete");
+    assert!(
+        !before.join(id.as_str()).exists(),
+        "its container state is left"
+    );
+    assert!(!box_root.join(id.as_str()).exists(), "its cgroup is left");
+    assert_eq!(node.inspect(&id), Err(Refusal::NoSuchBox(id.clone())));
+}
+
+/// Goal 5 plan step 4 (T-T7.1.4), the lab test as root and rootless: a container made through a seed has
+/// its init in its own cgroup and the namespaces its spec asks for, and no `hex` binary was exec'd for
+/// the create. Do: create and start a box whose init is a non-hex program (`/usr/bin/sleep`) with a
+/// network namespace of its own; read the init's `/proc/<pid>/cgroup`, `ns/*` and `exe`. Expect: the
+/// init is in the box's cgroup, in fresh pid, mount, ipc, uts and network namespaces (and a user
+/// namespace rootless), its `exe` is the program (not the `hex` binary), the create was handed a seed and
+/// done with it and none went through the shim (the pool's counts: the `hex __oci-init` re-exec the seed
+/// replaces didn't run), and its streams are the null device, the seed's own.
+fn created_through_a_seed_in_its_cgroup_and_namespaces(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let box_root = own.join("hex-oci-seedns");
+    let node = lab.node(&box_root, state.path());
+    let id = BoxId::new("nsbox").unwrap();
+    // A non-hex init, with a network namespace of its own, so the exe is plainly the program and every
+    // namespace the spec asks for can be read.
+    let bundle = lab.bundle_with(&strings(&["/usr/bin/sleep", "600"]), true);
+    let before = node.create_seeds().unwrap();
+    node.create(BoxSpec {
+        id: id.clone(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Bundle(bundle),
+    })
+    .expect("create through a seed");
+    let after = node.create_seeds().unwrap();
+    assert_eq!(
+        (
+            after.handed - before.handed,
+            after.done - before.done,
+            node.creates_through_shim()
+        ),
+        (1, 1, 0),
+        "the create was handed a seed and done with it, and none went through the shim: {after:?}"
+    );
+    node.start(&id).expect("start");
+    let init = u32::try_from(init_pid(&node.container_dir(&id))).unwrap();
+    // Wait until the init has exec'd its program, so `exe`, the namespaces and the cgroup are the
+    // container's and not the seed's clone mid-setup.
+    wait_for(
+        || std::fs::read_link(format!("/proc/{init}/exe")).is_ok_and(|p| p.ends_with("sleep")),
+        "the init to exec its program",
+    );
+
+    let exe = std::fs::read_link(format!("/proc/{init}/exe")).unwrap();
+    assert!(
+        exe.ends_with("sleep") && !exe.to_string_lossy().contains("hex"),
+        "the init is the program, not a hex shim: {}",
+        exe.display()
+    );
+    // Its cgroup is the box's own (read in this process's cgroup namespace: the full path).
+    let cgroup = std::fs::read_to_string(format!("/proc/{init}/cgroup")).unwrap();
+    assert!(
+        cgroup
+            .lines()
+            .any(|l| l.starts_with("0::") && l.ends_with("/nsbox")),
+        "the init is in the box's cgroup: {cgroup:?}"
+    );
+    // Each namespace its spec makes is its own (differs from the agent's); a rootless box also has a
+    // user namespace of its own.
+    let agent = std::process::id();
+    let mut kinds = vec!["pid", "mnt", "ipc", "uts", "net"];
+    if lab.rootless {
+        kinds.push("user");
+    }
+    for ns in kinds {
+        let theirs = std::fs::read_link(format!("/proc/{init}/ns/{ns}")).unwrap();
+        let ours = std::fs::read_link(format!("/proc/{agent}/ns/{ns}")).unwrap();
+        assert_ne!(theirs, ours, "the init has its own {ns} namespace");
+    }
+    // The seed cloned the init as the agent's own child (`CLONE_PARENT`), and the init's streams are the
+    // seed's: the null device, never the agent's.
+    assert_eq!(ppid(init), Some(agent), "the init is the agent's own child");
+    assert_eq!(
+        streams(init),
+        ["/dev/null"; 3].map(PathBuf::from),
+        "the init has the null device for its streams"
+    );
+    node.delete(&id).expect("delete");
+}
+
+/// Goal 5 plan step 4 (T-T7.1.4), the re-initialization test: two containers cloned from one seed are
+/// each randomized afresh, so neither carries the seed's layout (f15, f17: the child execs the
+/// container's program, so its address space is randomized anew, not the seed's copied one). Do: create
+/// two boxes in turn from the same idle seed and read each init's stack base, and the seed's, from
+/// `/proc/<pid>/maps`. Expect: the two inits' stack bases differ, and each differs from the seed's — the
+/// value each child "makes" (its ASLR'd layout) is its own.
+fn each_seed_cloned_container_is_randomized_afresh(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-reinit"), state.path());
+    let agent = std::process::id();
+    let base = |pid: u32| {
+        wait_for(
+            || stack_base(pid).is_some(),
+            "a process to have a readable stack mapping",
+        );
+        stack_base(pid).unwrap()
+    };
+    let make = |id: &str| -> u32 {
+        let bid = BoxId::new(id).unwrap();
+        node.create(lab.running(bid.clone(), &strings(&["/usr/bin/sleep", "600"])))
+            .expect("create");
+        node.start(&bid).expect("start");
+        let init = u32::try_from(init_pid(&node.container_dir(&bid))).unwrap();
+        wait_for(
+            || std::fs::read_link(format!("/proc/{init}/exe")).is_ok_and(|p| p.ends_with("sleep")),
+            "the init to exec its program",
+        );
+        init
+    };
+
+    let one = make("reinit1");
+    // The seed that cloned it, now idle: the agent's child running `hex __oci-seed`. The next create
+    // reuses it, so both inits are cloned from this one seed.
+    let seed = children_of(agent)
+        .into_iter()
+        .find(|&c| cmdline_has(c, "__oci-seed"))
+        .expect("a create seed is up");
+    let (v1, vs) = (base(one), base(seed));
+    let two = make("reinit2");
+    let v2 = base(two);
+    assert_ne!(v1, v2, "two containers from one seed differ: {v1} vs {v2}");
+    assert_ne!(v1, vs, "the first differs from the seed's: {v1} vs {vs}");
+    assert_ne!(v2, vs, "the second differs from the seed's: {v2} vs {vs}");
+    node.delete(&BoxId::new("reinit1").unwrap())
+        .expect("delete");
+    node.delete(&BoxId::new("reinit2").unwrap())
+        .expect("delete");
+}
+
+/// Goal 5 plan step 4 (T-T7.1.4), crash injection: a seed that dies mid-create refuses that create by
+/// type, its box is cleaned up, and the seed is restarted, counted, so the next create succeeds. Do:
+/// create and delete a box, so the pool holds two idle seeds, its first (the one the next create is
+/// handed: the core hands the lowest idle slot) and the spare it started beside it; stop the first; create
+/// a second box on another thread and, once the pool has handed it the stopped seed, kill that seed; then
+/// create a third. Expect: the second create is refused by type and left no box; the pool counts the
+/// death and the create its death refused; the third create succeeds and the pool counts a restart.
+fn a_seed_that_dies_mid_create_is_refused_and_restarted(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-seedcrash"), state.path());
+    let agent = std::process::id();
+    let first = BoxId::new("crash-a").unwrap();
+    node.create(lab.running(first.clone(), &Lab::act(&Act::Wait)))
+        .expect("the first create, through the pool's first seed");
+    node.delete(&first)
+        .expect("delete the first box, leaving its seed idle");
+    // The pool's first seed, the one started earliest: it served the first create, and is in the lowest
+    // slot, so the next create is handed it.
+    let seed = children_of(agent)
+        .into_iter()
+        .filter(|&c| cmdline_has(c, "__oci-seed"))
+        .min_by_key(|&c| start_ticks(c))
+        .expect("a create seed is up");
+    let seed = i32::try_from(seed).unwrap();
+    kill(seed, 19); // SIGSTOP: it holds whatever create it is handed, unanswered
+    let before = node.create_seeds().unwrap();
+
+    let dead = BoxId::new("crash-b").unwrap();
+    let refused = std::thread::scope(|scope| {
+        let creating =
+            scope.spawn(|| node.create(lab.running(dead.clone(), &Lab::act(&Act::Wait))));
+        wait_for(
+            || node.create_seeds().unwrap().handed > before.handed,
+            "the second create to be handed the stopped seed",
+        );
+        // Mid-create: the seed holds the create, which waits on its answer. It dies.
+        kill(seed, 9);
+        creating.join().unwrap()
+    });
+    assert!(
+        matches!(refused, Err(Refusal::Os { .. }) | Err(Refusal::Broken(_))),
+        "a create whose seed dies is refused by type: {refused:?}"
+    );
+    assert_eq!(
+        node.inspect(&dead),
+        Err(Refusal::NoSuchBox(dead.clone())),
+        "its box is cleaned up"
+    );
+    assert!(!own.join("hex-oci-seedcrash").join("crash-b").exists());
+    let counts = node.create_seeds().unwrap();
+    assert_eq!(
+        (
+            counts.died - before.died,
+            counts.refused_died - before.refused_died
+        ),
+        (1, 1),
+        "the seed's death and the create it refused are counted: {counts:?}"
+    );
+
+    // The next create is handed a live seed, and the dead one's slot is started again, counted.
+    let next = BoxId::new("crash-c").unwrap();
+    node.create(lab.running(next.clone(), &Lab::act(&Act::Wait)))
+        .expect("the next create succeeds");
+    node.start(&next).expect("start the next box");
+    assert_eq!(node.inspect(&next).unwrap().state, BoxState::Running);
+    wait_for(
+        || node.create_seeds().unwrap().restarted > before.restarted,
+        "the dead seed's slot to be started again",
+    );
+    node.delete(&next).expect("delete");
+}
+
+/// The start address of `pid`'s main-thread stack, from `/proc/<pid>/maps` (`[stack]`), as a string;
+/// `None` while it can't be read. Randomized afresh at each `execve`, so it tells one container's
+/// address space from another's and from the seed's.
+fn stack_base(pid: u32) -> Option<String> {
+    let maps = std::fs::read_to_string(format!("/proc/{pid}/maps")).ok()?;
+    maps.lines()
+        .find(|l| l.ends_with("[stack]"))
+        .and_then(|l| l.split('-').next())
+        .map(str::to_owned)
+}
+
+/// What `pid`'s standard streams are open on: the targets of `/proc/<pid>/fd/0`, `1` and `2`.
+fn streams<P: std::fmt::Display>(pid: P) -> [PathBuf; 3] {
+    [0, 1, 2].map(|fd| std::fs::read_link(format!("/proc/{pid}/fd/{fd}")).unwrap())
+}
+
+/// When `pid` started, in clock ticks after boot (`/proc/<pid>/stat` field 22).
+fn start_ticks(pid: u32) -> u64 {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let (_, rest) = stat.rsplit_once(')').unwrap();
+    rest.split_whitespace().nth(19).unwrap().parse().unwrap()
+}
+
+/// Kills whatever is left in a box's cgroup when dropped, so a check that fails leaves no container
+/// running, holding this test's output open.
+struct Killing<'a>(&'a BoxRoot, BoxId);
+
+impl Drop for Killing<'_> {
+    fn drop(&mut self) {
+        if let Some(cg) = self.0.get(&self.1) {
+            let _ = cg.kill();
+        }
+    }
+}
+
+fn sorted_ms(latencies: &[Duration]) -> Vec<Duration> {
+    let mut sorted = latencies.to_vec();
+    sorted.sort_unstable();
+    sorted
+}
+
+/// Whether a thread of this process is blocked opening a FIFO no one has opened the other end of: the
+/// kernel shows it waiting in `wait_for_partner` (fs/pipe.c), or in `fifo_open` where that's inlined.
+fn blocked_opening_a_fifo() -> bool {
+    std::fs::read_dir("/proc/self/task")
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter_map(|task| std::fs::read_to_string(task.path().join("wchan")).ok())
+        .any(|wchan| matches!(wchan.trim(), "wait_for_partner" | "fifo_open"))
+}
+
+/// Whether `dir` lies on tmpfs (include/uapi/linux/magic.h, `TMPFS_MAGIC`).
+fn on_tmpfs(dir: &Path) -> bool {
+    rustix::fs::statfs(dir).is_ok_and(|fs| i128::from(fs.f_type) == 0x0102_1994)
+}
+
 /// Polls inspect until the box reports an exit: the fact the test needs, bounded so a runtime that
 /// never reports one fails rather than hangs.
 fn wait_exit(rt: &dyn Runtime, id: &BoxId) -> BoxInfo {
@@ -875,9 +1627,9 @@ fn wait_for(mut cond: impl FnMut() -> bool, what: &str) {
     panic!("timed out waiting for {what}");
 }
 
-/// The init's pid, from the container's state (`"pid":<n>`).
-fn init_pid(state: &Path, id: &str) -> i32 {
-    let text = std::fs::read_to_string(state.join("oci").join(id).join("state.json")).unwrap();
+/// The init's pid, from the state (`"pid":<n>`) in its container's state dir.
+fn init_pid(container: &Path) -> i32 {
+    let text = std::fs::read_to_string(container.join("state.json")).unwrap();
     let (_, after) = text.split_once("\"pid\":").unwrap();
     after
         .split(|c: char| !c.is_ascii_digit())
@@ -959,25 +1711,15 @@ fn prepare_cgroup(disk: &Path) -> Result<PathBuf, String> {
     std::fs::create_dir_all(&leaf).map_err(|e| format!("making a leaf for the agent: {e}"))?;
     std::fs::write(leaf.join("cgroup.procs"), format!("{}", std::process::id()))
         .map_err(|e| format!("moving self into a leaf: {e}"))?;
-    let probe = hex_runtime::linux::cgroup::BoxRoot::open(
+    // The probe root opening proves every controller a box uses is delegated here: `BoxRoot::open`
+    // refuses by name otherwise (HEX-INST-1).
+    hex_runtime::linux::cgroup::BoxRoot::open(
         &own.join("hex-probe"),
         hex_runtime::linux::disks::under(disk).unwrap_or_default(),
     )
     .map_err(|e| e.to_string())?;
-    let missing: Vec<&str> = hex_core::cgroup::CONTROLLERS
-        .into_iter()
-        .filter(|c| !probe.controllers().contains(*c))
-        .collect();
     let _ = std::fs::remove_dir(own.join("hex-probe"));
-    if missing.is_empty() {
-        Ok(own)
-    } else {
-        Err(format!(
-            "{} can't hand down the {} controllers",
-            own.display(),
-            missing.join(", ")
-        ))
-    }
+    Ok(own)
 }
 
 fn cache_dir() -> PathBuf {

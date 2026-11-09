@@ -103,10 +103,15 @@ if [[ " $PHASES " == *" oci "* ]]; then
       >> "$OUT/lab-image.ids"
   fi
   # One privileged container, private cgroup namespace, no network; host /usr read-only provides the
-  # workloads and python3. --memory bounds the density phase on top of its own budget.
+  # workloads and python3. --memory bounds the density phase on top of its own budget. The container's /run
+  # is a tmpfs, as a host's is, where the runtimes keep their state (runc's and crun's, libcrun's, a root
+  # Hex node's /run/hex-node): the image's own /run is the container's overlayfs. A change of method from
+  # goal 5 plan step 2 on: passes before it kept every runtime's state on overlayfs, so a ratio taken across
+  # it compares unlike setups; a ratio within one pass compares like ones.
   SEAM_OCI_ENV=(); [ -x "$BASE/bin/seam_oci" ] && SEAM_OCI_ENV=(-e "SEAM_OCI=/opt/bin/seam_oci")
+  echo "oci pass: /run a tmpfs (size 1g), where the runtimes keep their state" >> "$OUT/env.txt"
   timeout 36000 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="$CPUSET" --memory=40g \
-    --privileged --security-opt label=disable --cgroupns=private --network=none \
+    --privileged --security-opt label=disable --cgroupns=private --network=none --tmpfs /run:rw,exec,nosuid,size=1g \
     -v /usr:/usr:ro -v "$BASE/bin:/opt/bin:ro" "${KRUN[@]}" -v "$HERE:/opt/lab:ro" -v "$OUT:/opt/out" \
     -e RUNTIMES -e ROUNDS -e ROUND_FIRST -e N -e WARMUP -e N_OVERRIDE -e LIFECYCLES -e CAP -e BUDGET_MIB -e HEXBENCH_PHASES \
     -e HEXBENCH_SUSTAINED -e STANDIN "${SEAM_OCI_ENV[@]}" registry.fedoraproject.org/fedora:44 bash /opt/lab/oci_inside.sh 2>&1 | tee "$OUT/oci.log"

@@ -36,6 +36,9 @@ use hex_api::Refusal;
 pub enum OciError {
     #[error("config: {0}")]
     Config(String),
+    /// A program its box's exec bound refuses (HEX-RT-14).
+    #[error("program: {0}")]
+    Program(String),
     #[error("no container {0}")]
     NoSuchContainer(String),
     #[error("container {0} exists already")]
@@ -85,6 +88,10 @@ impl From<OciError> for Refusal {
         match e {
             OciError::Config(why) => Refusal::Invalid {
                 what: "oci config",
+                why,
+            },
+            OciError::Program(why) => Refusal::Invalid {
+                what: "program",
                 why,
             },
             OciError::NoSuchContainer(id) => Refusal::Os {

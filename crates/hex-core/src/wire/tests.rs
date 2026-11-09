@@ -63,6 +63,7 @@ fn oci_spec() -> BoxSpec {
 
 fn info() -> BoxInfo {
     BoxInfo {
+        membership: None,
         id: id("b-1"),
         class: Class::Oci,
         state: BoxState::Running,
@@ -125,6 +126,25 @@ fn requests() -> Vec<(u64, Request, usize)> {
         (11, Request::Call(Call::Delete(b)), 0),
         (6, Request::Release, 0),
         (12, Request::Call(Call::Netns), 0),
+        (13, Request::Call(Call::Kill { exec: 6 }), 0),
+        (
+            14,
+            Request::Call(Call::ExecStreams {
+                id: id("b-1"),
+                program: program(),
+                streams: Streams {
+                    stdin: true,
+                    stdout: false,
+                    stderr: false,
+                },
+                ask: Streams {
+                    stdin: false,
+                    stdout: true,
+                    stderr: true,
+                },
+            }),
+            1,
+        ),
     ]
 }
 
@@ -203,6 +223,7 @@ fn answers() -> Vec<(u64, Answer)> {
                 infos: vec![
                     info(),
                     BoxInfo {
+                        membership: None,
                         id: id("p"),
                         class: Class::Process,
                         state: BoxState::Empty,
@@ -223,6 +244,13 @@ fn answers() -> Vec<(u64, Answer)> {
             },
         ),
         (12, Answer::Netns(counts())),
+        (
+            14,
+            Answer::Given {
+                pid: 4243,
+                given: Streams::default(),
+            },
+        ),
     ];
     out.extend(refusals().into_iter().map(|r| (11, Answer::Refused(r))));
     for exit in [
@@ -322,10 +350,13 @@ fn version_2_messages_are_the_bytes_recorded() {
         bytes[4..6].copy_from_slice(&1u16.to_le_bytes());
         bytes
     };
-    for (n, req, _) in requests()
-        .into_iter()
-        .filter(|(_, r, _)| *r != Request::Call(Call::Netns))
-    {
+    for (n, req, _) in requests().into_iter().filter(|(_, r, _)| {
+        *r != Request::Call(Call::Netns)
+            && !matches!(
+                r,
+                Request::Call(Call::Kill { .. } | Call::ExecStreams { .. })
+            )
+    }) {
         assert_eq!(
             as_v1(request(2, n, &req, MAX_MESSAGE).unwrap()),
             request(1, n, &req, MAX_MESSAGE).unwrap(),
@@ -334,7 +365,7 @@ fn version_2_messages_are_the_bytes_recorded() {
     }
     for (n, ans) in answers()
         .into_iter()
-        .filter(|(_, a)| !matches!(a, Answer::Netns(_)))
+        .filter(|(_, a)| !matches!(a, Answer::Netns(_) | Answer::Given { .. }))
     {
         assert_eq!(
             as_v1(answer(2, n, &ans, MAX_MESSAGE).unwrap()),
@@ -342,6 +373,128 @@ fn version_2_messages_are_the_bytes_recorded() {
             "{ans:?}"
         );
     }
+}
+
+/// HEX-SOCK-2, append-only: version 3 adds one request, a program's kill by its exec's id (answered as any
+/// call is), whose bytes are the ones recorded here; it is no kind of version 2, refused in it before it is
+/// written and when read; and every earlier kind is written in version 3 as in version 2 but for the
+/// version in its header.
+#[test]
+fn version_3_messages_are_the_bytes_recorded() {
+    let kill = Request::Call(Call::Kill { exec: 6 });
+    assert_eq!(
+        hex(&request(3, 13, &kill, MAX_MESSAGE).unwrap()),
+        "4845585703000c000d000000000000000600000000000000"
+    );
+    assert_eq!(
+        request(2, 13, &kill, MAX_MESSAGE),
+        Err(Fault::Kind {
+            kind: 0x000c,
+            version: 2,
+            expected: "a request"
+        })
+    );
+    let as_v = |v: u16, mut bytes: Vec<u8>| {
+        bytes[4..6].copy_from_slice(&v.to_le_bytes());
+        bytes
+    };
+    assert_eq!(
+        read_request(
+            &received(&as_v(2, request(3, 13, &kill, MAX_MESSAGE).unwrap()), 0),
+            MAX_MESSAGE
+        ),
+        Err(Bad {
+            version: 2,
+            id: 13,
+            fault: Fault::Kind {
+                kind: 0x000c,
+                version: 2,
+                expected: "a request"
+            }
+        })
+    );
+    let v3 = |r: &Request| {
+        matches!(
+            r,
+            Request::Call(Call::Kill { .. } | Call::ExecStreams { .. })
+        )
+    };
+    for (n, req, _) in requests().into_iter().filter(|(_, r, _)| !v3(r)) {
+        assert_eq!(
+            as_v(2, request(3, n, &req, MAX_MESSAGE).unwrap()),
+            request(2, n, &req, MAX_MESSAGE).unwrap(),
+            "{req:?}"
+        );
+    }
+    for (n, ans) in answers()
+        .into_iter()
+        .filter(|(_, a)| !matches!(a, Answer::Given { .. }))
+    {
+        assert_eq!(
+            as_v(2, answer(3, n, &ans, MAX_MESSAGE).unwrap()),
+            answer(2, n, &ans, MAX_MESSAGE).unwrap(),
+            "{ans:?}"
+        );
+    }
+}
+
+/// Native plan step 8, guest stdio (HEX-GUEST-41): an answer gives a started program's streams' ends from version
+/// 3 on, and in no earlier version, which defines no given answer.
+#[test]
+fn a_programs_ends_ride_its_answer_from_version_3_on() {
+    assert!(!gives_ends(1) && !gives_ends(2));
+    assert!((3..=VERSION).all(gives_ends));
+    let given = Answer::Given {
+        pid: 1,
+        given: Streams::default(),
+    };
+    assert!(answer(2, 1, &given, MAX_MESSAGE).is_err());
+}
+
+/// HEX-SOCK-2, version 3's exec asking for streams and its answer: their bytes are the ones recorded here
+/// (the exec's body is version 1's recorded exec's, under its own header, with its streams and ask bytes);
+/// a given answer carries a descriptor for each stream it names and is refused, naming the count, with any
+/// other; neither is a kind of version 2.
+#[test]
+fn version_3_streams_are_the_bytes_recorded_and_their_descriptors_counted() {
+    let asking = requests()[14].1.clone();
+    let body = GOLDEN_EXEC.get(32..GOLDEN_EXEC.len() - 2).unwrap();
+    assert_eq!(
+        hex(&request(3, 14, &asking, MAX_MESSAGE).unwrap()),
+        format!("4845585703000d000e00000000000000{body}0106")
+    );
+    let given = Answer::Given {
+        pid: 4243,
+        given: Streams {
+            stdin: false,
+            stdout: true,
+            stderr: true,
+        },
+    };
+    let bytes = answer(3, 14, &given, MAX_MESSAGE).unwrap();
+    assert_eq!(hex(&bytes), "4845585703000a800e000000000000009310000006");
+    assert_eq!(
+        read_answer(&received(&bytes, 2), MAX_MESSAGE).map(|(_, a)| a),
+        Ok(given.clone())
+    );
+    for fds in [0, 1, 3] {
+        assert_eq!(
+            read_answer(&received(&bytes, fds), MAX_MESSAGE),
+            Err(Fault::Descriptors {
+                what: "a given answer",
+                want: 2,
+                got: fds
+            })
+        );
+    }
+    assert!(matches!(
+        request(2, 14, &asking, MAX_MESSAGE),
+        Err(Fault::Kind { kind: 0x000d, .. })
+    ));
+    assert!(matches!(
+        answer(2, 14, &given, MAX_MESSAGE),
+        Err(Fault::Kind { kind: 0x800a, .. })
+    ));
 }
 
 // Exec of /usr/bin/true with stdin and stdout, an env, a cwd and a user; a create from an OciSpec;
@@ -379,6 +532,7 @@ const GOLDEN_NETNS: &str = concat!(
 fn a_long_list_is_split_into_messages_within_the_bound() {
     let infos: Vec<BoxInfo> = (0..5_000)
         .map(|n| BoxInfo {
+            membership: None,
             id: id(&format!("box-{n:06}")),
             ..info()
         })
@@ -528,7 +682,7 @@ fn unknown_versions_and_kinds_are_refused() {
     // version this side speaks.
     for version in FIRST..=VERSION {
         let hello = request(version, 5, &Request::Hello, MAX_MESSAGE).unwrap();
-        for kind in [0u16, 0x000c, 0x7fff, 0x8001, 0x8009, 0xffff] {
+        for kind in [0u16, 0x000e, 0x7fff, 0x8001, 0x8009, 0xffff] {
             let mut bytes = hello.clone();
             bytes[6..8].copy_from_slice(&kind.to_le_bytes());
             let got = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
@@ -537,7 +691,7 @@ fn unknown_versions_and_kinds_are_refused() {
                 "{got:?}"
             );
         }
-        for kind in [0u16, 0x0001, 0x000b, 0x8000, 0x800a, 0xffff] {
+        for kind in [0u16, 0x0001, 0x000b, 0x8000, 0x800b, 0xffff] {
             let mut bytes = answer(version, 5, &Answer::Done, MAX_MESSAGE).unwrap();
             bytes[6..8].copy_from_slice(&kind.to_le_bytes());
             assert!(matches!(
@@ -908,6 +1062,7 @@ fn any_info() -> impl Strategy<Value = BoxInfo> {
     )
         .prop_map(
             |(id, oci, state, bounds, adopted, exit, abandoned)| BoxInfo {
+                membership: None,
                 id,
                 class: if oci { Class::Oci } else { Class::Process },
                 state: match state {
@@ -985,7 +1140,7 @@ proptest! {
     /// HEX-SOCK-1: bodies of random bytes behind a valid header of each version, so every kind's
     /// decoder meets them, are a message or a typed refusal, never a panic.
     #[test]
-    fn any_body_behind_a_header_is_read_or_refused(version in FIRST..=VERSION, kind in prop_oneof![0u16..0x000d, 0x8000u16..0x800b], body in proptest::collection::vec(any::<u8>(), 0..256), fds in 0usize..4) {
+    fn any_body_behind_a_header_is_read_or_refused(version in FIRST..=VERSION, kind in prop_oneof![0u16..0x000f, 0x8000u16..0x800c], body in proptest::collection::vec(any::<u8>(), 0..256), fds in 0usize..4) {
         let mut bytes = MAGIC.to_vec();
         bytes.extend_from_slice(&version.to_le_bytes());
         bytes.extend_from_slice(&kind.to_le_bytes());
@@ -1019,4 +1174,34 @@ fn every_bit_flip_is_read_or_refused() {
             }
         }
     }
+}
+
+/// HEX-GUEST-1 (docs/design/shards-guest.md §3): an exec naming stdin and stdout, sent with no
+/// descriptors: expect it read whole where its stdio travels apart (a stream transport), and refused by
+/// type where descriptors ride with the message.
+#[test]
+fn an_exec_whose_stdio_travels_apart_carries_no_descriptors() {
+    let exec = Request::Call(Call::Exec {
+        id: id("b"),
+        program: Program::of(&["cat"]),
+        streams: Streams {
+            stdin: true,
+            stdout: true,
+            stderr: false,
+        },
+    });
+    let bytes = request(VERSION, 7, &exec, MAX_MESSAGE).unwrap();
+    let (h, read) = read_request_apart(&bytes, MAX_MESSAGE).unwrap();
+    assert_eq!((h.id, read), (7, exec));
+    assert!(matches!(
+        read_request(&received(&bytes, 0), MAX_MESSAGE),
+        Err(Bad {
+            fault: Fault::Descriptors {
+                want: 2,
+                got: 0,
+                ..
+            },
+            ..
+        })
+    ));
 }

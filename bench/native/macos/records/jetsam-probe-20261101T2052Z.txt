@@ -1,0 +1,66 @@
+jetsam_probe — the rootless spawn-time per-process fatal memory cap, and how its kill is detected
+(native plan step 1, the `_ext` backstop). Source: bench/native/macos/jetsam_probe.c.
+
+host:      adas-mac-studio-3.local (Adas-Mac-Studio-3.local), Apple silicon, arm64
+os:        macOS 26.2, build 25C56
+uid:       501 (rootless; euid 501)
+date:      2026-11-01T20:52Z (UTC)
+base:      cp/t7-native ab20d0e (the macOS process class as merged)
+compiler:  cc -O2 -Wall (Apple clang, CommandLineTools SDK)
+
+Constants, cited (the CommandLineTools SDK ships neither spawn_private.h nor sys/reason.h):
+  posix_spawnattr_setjetsam_ext(posix_spawnattr_t*, short flags, int priority,
+                                int memlimit_active, int memlimit_inactive)   // "All memory limits are in MiB."
+      — libSystem (nm: _posix_spawnattr_setjetsam_ext in libsystem_kernel.dylib);
+        prototype from xnu libsyscall/wrappers/spawn/spawn_private.h.
+  POSIX_SPAWN_JETSAM_SET                     = 0x8000   // xnu bsd/sys/spawn_internal.h
+  POSIX_SPAWN_JETSAM_MEMLIMIT_ACTIVE_FATAL   = 0x04     //   "fatal when the process is active"
+  POSIX_SPAWN_JETSAM_MEMLIMIT_INACTIVE_FATAL = 0x08     //   "fatal when the process is inactive"
+  NOTE_EXIT_MEMORY = 0x00020000  (sys/event.h, present)
+  OS_REASON_JETSAM = 1           (xnu bsd/sys/reason.h)
+
+Findings:
+(i)   Signature and flags above confirmed: the call returns 0 and the cap takes effect. The task's flags
+      SET|ACTIVE_FATAL|INACTIVE_FATAL (0x800c, both limits = bound in MiB) and step 2's SET|ACTIVE_FATAL
+      (0x8004) BOTH SIGKILL at the cap. priority 40 (a middling jetsam band; the fatal per-process limit
+      kills regardless of band).
+(ii)  A child capped at N MiB and allocating past it (incompressible fill, so the VM compressor can't
+      shrink the pages below the cap) is SIGKILLed (signal 9) at exactly N MiB — 0 overshoot, rootless:
+        cap 256 MiB: zombie rusage peak 268435960 B (256.0 MiB), overshoot 0.0 MiB, signal 9
+        cap 64 MiB:  zombie rusage peak  67109200 B  (64.0 MiB), overshoot 0.0 MiB, signal 9
+(iii) Telling the jetsam fatal-memlimit kill from an ordinary SIGKILL, rootless, before reap:
+        a) kqueue EVFILT_PROC with NOTE_EXIT|NOTE_EXITSTATUS|NOTE_EXIT_DETAIL: fflags 0x86000000 —
+           NOTE_EXIT and NOTE_EXIT_DETAIL set, but NOTE_EXIT_MEMORY (0x00020000) NOT set. So the kqueue
+           memory-exit bit does NOT fire for a per-process fatal-memlimit kill (it is for system memory
+           pressure). NOT usable.
+        b) proc_pidinfo(PROC_PIDEXITREASONINFO) returns 0 / errno ENOMEM rootless. NOT usable.
+        c) proc_pid_rusage(RUSAGE_INFO_V4) on the zombie reports ri_lifetime_max_phys_footprint = the cap
+           exactly (preserved after death, readable rootless before reap). USABLE and chosen: an armed
+           member seen as a zombie with peak >= its cap was jetsam-killed (sound — reaching the fatal cap
+           is death, so a clean exit can never show peak >= cap).
+
+Gotcha recorded: a hog that fills pages with a constant (e.g. memset) is shrunk by the VM compressor so
+phys_footprint never reaches the cap and the kill never fires; an xorshift (incompressible) fill is
+required. Dead-store elimination at -O2 also hid the writes until a volatile pointer + an escaping sink
+were used.
+
+Raw output (the run of record):
+
+=== RUN ===
+jetsam_probe uid=501 euid=501
+[SET|ACTIVE=0x8004 cap=256] spawned pid=693 priority=40
+[SET|ACTIVE cap=256] kevent fflags=0x86000000 data=0x10020009 NOTE_EXIT=1 NOTE_EXIT_DETAIL=1 NOTE_EXIT_MEMORY=0
+[SET|ACTIVE cap=256] zombie rusage peak=268435960 bytes (256.0 MiB) overshoot=0.0 MiB
+[SET|ACTIVE cap=256] proc_pidinfo(PROC_PIDEXITREASONINFO)=0 (errno Cannot allocate memory)
+[SET|ACTIVE cap=256] waitpid: signaled signal=9 SIGKILL=1
+[SET|ACTIVE|INACTIVE=0x800c cap=256] spawned pid=694 priority=40
+[SET|ACTIVE|INACTIVE cap=256] kevent fflags=0x86000000 data=0x10020009 NOTE_EXIT=1 NOTE_EXIT_DETAIL=1 NOTE_EXIT_MEMORY=0
+[SET|ACTIVE|INACTIVE cap=256] zombie rusage peak=268435960 bytes (256.0 MiB) overshoot=0.0 MiB
+[SET|ACTIVE|INACTIVE cap=256] proc_pidinfo(PROC_PIDEXITREASONINFO)=0 (errno Cannot allocate memory)
+[SET|ACTIVE|INACTIVE cap=256] waitpid: signaled signal=9 SIGKILL=1
+[SET|ACTIVE|INACTIVE=0x800c cap=64] spawned pid=698 priority=40
+[SET|ACTIVE|INACTIVE cap=64] kevent fflags=0x86000000 data=0x10020009 NOTE_EXIT=1 NOTE_EXIT_DETAIL=1 NOTE_EXIT_MEMORY=0
+[SET|ACTIVE|INACTIVE cap=64] zombie rusage peak=67109200 bytes (64.0 MiB) overshoot=0.0 MiB
+[SET|ACTIVE|INACTIVE cap=64] proc_pidinfo(PROC_PIDEXITREASONINFO)=0 (errno Cannot allocate memory)
+[SET|ACTIVE|INACTIVE cap=64] waitpid: signaled signal=9 SIGKILL=1
+=== exit 0 ===

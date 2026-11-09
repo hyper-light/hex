@@ -5,6 +5,8 @@
 //! - `lifecycle`: create, start, exec of `true` and delete of a `sleep` container, each timed alone;
 //! - `lifecycle_nonet`: the same on a bundle without a network namespace of its own, so create and
 //!   delete are timed with and without one (decision 4);
+//! - `start_true`: create+start of a `true` container, timed together and deleted untimed (AC-T7.1.3's
+//!   measure, goal 5's create+start of `true`);
 //! - `throughput`: create+start+delete of a `true` container at concurrency 1, 8 and 32;
 //! - `sustained`: the throughput lifecycle at concurrency 32 for `HEXBENCH_SUSTAINED` of them
 //!   (10,000), its rate in each window of 1,000 and the last window's against the first's;
@@ -15,8 +17,10 @@
 //! made on a create's path because the pool was dry or the node keeps none, discarded, failed), in
 //! process through `Node::netns` and over the socket through `Client::netns` (the socket's version 2),
 //! and records what the phase added: the sustained phase's made-on-the-path count is how often its
-//! creates found the pool dry (decision 4's falsifier). No call spawns a process but the container's
-//! own init and exec helper. It writes oci_bench.py's JSON under the runtime `hex-seam` (or
+//! creates found the pool dry (decision 4's falsifier). In process it reads the node's create seeds'
+//! counts the same way (`Node::create_seeds`; decision 5): the creates that waited for a seed, the
+//! seeds started, the most busy at once, which the seeds' bound is judged by. No call spawns a process
+//! but the container's own init and exec helper. It writes oci_bench.py's JSON under the runtime `hex-seam` (or
 //! `hex-seam-socket`), which summarize.py sets beside libcrun (the in-process rival), so runtime design
 //! goal 3's targets (exec p50 at most a quarter of libcrun's, start p50 within 10% of libcrun's,
 //! argument A3) and goal 4's (create p50 with a network namespace at most 5% over without one) are read
@@ -24,14 +28,14 @@
 //!
 //!   seam_oci <out.json> <n> <warmup> <lifecycles> <hex-binary> <sleep-bundle> <true-bundle> [<sleep-nonet-bundle>]
 //! (`cargo bench -p hex-bench --bench seam_oci -- ...`, or its binary as host.sh's ociseam pass runs
-//! it). HEXBENCH_PHASES names the phases to run (all five unless set); `lifecycle_nonet` needs the
+//! it). HEXBENCH_PHASES names the phases to run (all six unless set); `lifecycle_nonet` needs the
 //! eighth argument, a bundle like the sleep bundle without a network namespace, and records an error
 //! naming it when it isn't given. The `oci` class needs root (a container's cgroup
 //! device program is an eBPF program, and its namespaces are made without a user namespace), so this
 //! runs in the OCI pass's privileged container, where the cgroup root is vacated to a leaf and its
 //! controllers handed down, as oci_inside.sh leaves it; off that it refuses, naming why.
-//! HEXBENCH_TRACE turns on the breakdown probe's markers (`Trace`,
-//! bench/competitive/probes/exec_breakdown.md).
+//! HEXBENCH_TRACE turns on the breakdown probes' markers, around the ops HEXBENCH_TRACE_OPS
+//! names (`Trace`, bench/competitive/probes/exec_breakdown.md and create_breakdown.md).
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -65,7 +69,7 @@ mod linux {
 
     use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Runtime, Stdio};
     use hex_client::Client;
-    use hex_core::netns;
+    use hex_core::{netns, seeds};
     use hex_node::Node;
     use serde_json::{Map, Value, json};
 
@@ -117,17 +121,19 @@ mod linux {
             .unwrap_or(0)
     }
 
-    /// The breakdown probe's markers (bench/competitive/probes/exec_breakdown.md). With
-    /// `HEXBENCH_TRACE` naming an ftrace instance's directory, the lifecycle phase brackets the start
-    /// and exec of every other timed lifecycle in the instance's buffer, `hexbd B <op> <id>` before
-    /// the call and `hexbd E <op> <id> <ns>` after it, `<ns>` the call's time as this driver measured
-    /// it, and the instance records only from one to the other: its trace is those calls and what
-    /// they ran, and nothing of create or delete. The lifecycles between run untraced in the same
+    /// The breakdown probes' markers (bench/competitive/probes/exec_breakdown.md, create_breakdown.md).
+    /// With `HEXBENCH_TRACE` naming an ftrace instance's directory, the lifecycle phase brackets the
+    /// ops `HEXBENCH_TRACE_OPS` names (`create`, `start`, `exec`; start and exec unless it says) of
+    /// every other timed lifecycle in the instance's buffer, `hexbd B <op> <id>` before the call and
+    /// `hexbd E <op> <id> <ns>` after it, `<ns>` the call's time as this driver measured it, and the
+    /// instance records only from one to the other: its trace is those calls and what they ran, and
+    /// nothing of the ops it doesn't name or of delete. The lifecycles between run untraced in the same
     /// process, so the traced calls are set against calls that met the host as they did. Each marker
     /// is written outside the time it brackets.
     struct Trace {
         on: File,
         marker: File,
+        ops: Vec<String>,
     }
 
     impl Trace {
@@ -140,10 +146,29 @@ mod linux {
                     .open(&path)
                     .unwrap_or_else(|e| panic!("HEXBENCH_TRACE: {}: {e}", path.display()))
             };
+            let ops: Vec<String> = std::env::var("HEXBENCH_TRACE_OPS")
+                .ok()
+                .filter(|o| !o.trim().is_empty())
+                .unwrap_or_else(|| "start exec".to_owned())
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect();
+            if let Some(other) = ops
+                .iter()
+                .find(|o| !["create", "start", "exec"].contains(&o.as_str()))
+            {
+                panic!("HEXBENCH_TRACE_OPS: {other:?} isn't create, start or exec");
+            }
             Some(Self {
                 on: open("tracing_on"),
                 marker: open("trace_marker"),
+                ops,
             })
+        }
+
+        /// Whether calls of `op` are bracketed.
+        fn brackets(&self, op: &str) -> bool {
+            self.ops.iter().any(|o| o == op)
         }
 
         /// Starts the instance recording, then marks the call's beginning.
@@ -169,7 +194,7 @@ mod linux {
 
     /// One container's create, start, exec of `true` and delete, each timed alone; a slot for the op
     /// that failed records the error. The init is the bundle's `sleep infinity`, so exec runs beside it.
-    /// A timed start and exec are bracketed by `trace`'s markers when it's on.
+    /// A timed op `trace` brackets is bracketed by its markers when it's on.
     fn lifecycle_once(
         node: &dyn Runtime,
         bundle: &Path,
@@ -178,20 +203,22 @@ mod linux {
         timed: bool,
         trace: Option<&Trace>,
     ) -> Result<(), String> {
-        let trace = trace.filter(|_| timed);
+        let traced = |op: &str| trace.filter(|t| timed && t.brackets(op));
         let bid = BoxId::new(id).map_err(|e| e.to_string())?;
+        traced("create").map_or(Ok(()), |t| t.begin("create", id))?;
         let create = Instant::now();
         node.create(spec(&bid, bundle))
             .map_err(|e| format!("create {id}: {e}"))?;
         let create = create.elapsed();
+        traced("create").map_or(Ok(()), |t| t.end("create", id, create))?;
         // start and exec, timed; delete runs whether or not they did, so a box is never left behind.
         let inner = (|| -> Result<(Duration, Duration), String> {
-            trace.map_or(Ok(()), |t| t.begin("start", id))?;
+            traced("start").map_or(Ok(()), |t| t.begin("start", id))?;
             let start = Instant::now();
             node.start(&bid).map_err(|e| format!("start {id}: {e}"))?;
             let start = start.elapsed();
-            trace.map_or(Ok(()), |t| t.end("start", id, start))?;
-            trace.map_or(Ok(()), |t| t.begin("exec", id))?;
+            traced("start").map_or(Ok(()), |t| t.end("start", id, start))?;
+            traced("exec").map_or(Ok(()), |t| t.begin("exec", id))?;
             let exec = Instant::now();
             let mut p = node
                 .exec(&bid, Program::of(&["/usr/bin/true"]), Stdio::null())
@@ -201,7 +228,7 @@ mod linux {
                 .map_err(|e| format!("wait in {id}: {e}"))?
                 .ok_or_else(|| format!("`true` in {id} still running after {CALL_TIMEOUT:?}"))?;
             let exec = exec.elapsed();
-            trace.map_or(Ok(()), |t| t.end("exec", id, exec))?;
+            traced("exec").map_or(Ok(()), |t| t.end("exec", id, exec))?;
             if ended != Exit::Code(0) {
                 return Err(format!("`true` in {id} ended {ended:?}"));
             }
@@ -382,6 +409,35 @@ mod linux {
         )
     }
 
+    /// n sequential create+start of a `true` container after `warmup` untimed ones, the two calls'
+    /// times summed and the box deleted untimed, as oci_bench.py's `start_true` times libcrun's
+    /// (AC-T7.1.3's measure): delete runs whether or not start did, so no box is left behind.
+    fn start_true(
+        node: &dyn Runtime,
+        bundle: &Path,
+        n: usize,
+        warmup: usize,
+    ) -> Result<Value, String> {
+        let mut ms = Vec::with_capacity(n);
+        for i in 0..warmup + n {
+            let id = format!("t{i:06}");
+            let bid = BoxId::new(id.as_str()).map_err(|e| e.to_string())?;
+            let create = Instant::now();
+            node.create(spec(&bid, bundle))
+                .map_err(|e| format!("create {id}: {e}"))?;
+            let create = create.elapsed();
+            let start = Instant::now();
+            let started = node.start(&bid).map_err(|e| format!("start {id}: {e}"));
+            let start = start.elapsed();
+            node.delete(&bid).map_err(|e| format!("delete {id}: {e}"))?;
+            started?;
+            if i >= warmup {
+                ms.push((create + start).as_secs_f64() * 1e3);
+            }
+        }
+        Ok(json!({"ms": ms}))
+    }
+
     /// create+start+delete of a `true` container, with no exec: the throughput lifecycle.
     fn run_true_container(node: &dyn Runtime, bundle: &Path, id: &str) -> Result<(), String> {
         let bid = BoxId::new(id).map_err(|e| e.to_string())?;
@@ -466,6 +522,17 @@ mod linux {
             }
         }
 
+        /// The node's create seeds' counts, in process; the socket carries none.
+        fn seeds(&self) -> Result<Option<seeds::Counts>, String> {
+            match self {
+                Self::InProcess(node) => node
+                    .create_seeds()
+                    .map(Some)
+                    .map_err(|e| format!("the node's create seeds' counts: {e}")),
+                Self::Socket { .. } => Ok(None),
+            }
+        }
+
         /// The node's network namespace counts: a node method in process, a call over the socket.
         fn netns(&self) -> Result<netns::Counts, String> {
             match self {
@@ -483,6 +550,21 @@ mod linux {
                "made_on_path": after.made_on_path - before.made_on_path,
                "discarded": after.discarded - before.discarded,
                "failed": after.failed - before.failed})
+    }
+
+    /// What the node's create seeds' counts rose by from `before` to `after`, and the most busy at once
+    /// so far (a high-water mark, not a rise).
+    fn seeds_rise(before: seeds::Counts, after: seeds::Counts) -> Value {
+        json!({"asked": after.asked - before.asked,
+               "waited": after.waited - before.waited,
+               "refused": (after.refused_busy + after.refused_waited + after.refused_died + after.refused_hung)
+                   - (before.refused_busy + before.refused_waited + before.refused_died + before.refused_hung),
+               "started": after.started - before.started,
+               "restarted": after.restarted - before.restarted,
+               "start_failed": after.start_failed - before.start_failed,
+               "died": after.died - before.died,
+               "hung": after.hung - before.hung,
+               "most_busy": after.most_busy})
     }
 
     pub(super) fn main() -> ExitCode {
@@ -571,12 +653,15 @@ mod linux {
         let wanted = std::env::var("HEXBENCH_PHASES")
             .ok()
             .filter(|p| !p.trim().is_empty())
-            .unwrap_or_else(|| "lifecycle lifecycle_nonet throughput sustained rtt".to_owned());
+            .unwrap_or_else(|| {
+                "lifecycle lifecycle_nonet start_true throughput sustained rtt".to_owned()
+            });
         let trace = Trace::from_env();
         let (mut phases, mut errors) = (Map::new(), Map::new());
         for phase in [
             "lifecycle",
             "lifecycle_nonet",
+            "start_true",
             "throughput",
             "sustained",
             "rtt",
@@ -587,6 +672,7 @@ mod linux {
             let t0 = Instant::now();
             // The node's counts before and after the phase, outside its timing: what it added.
             let r = driver.netns().and_then(|before| {
+                let seeds_before = driver.seeds()?;
                 let mut v = match phase {
                     "lifecycle" => lifecycle(node, &sleep_bundle, n, warmup, "l", trace.as_ref()),
                     "lifecycle_nonet" => match &nonet_bundle {
@@ -595,13 +681,21 @@ mod linux {
                                      seam_oci's eighth argument"
                             .to_owned()),
                     },
+                    "start_true" => start_true(node, &true_bundle, n, warmup),
                     "throughput" => throughput(node, &true_bundle, &parent, lifecycles),
                     "sustained" => sustained(node, &true_bundle, &parent, sustained_lifecycles),
                     _ => rtt(node, &sleep_bundle, n, warmup),
                 }?;
                 let rose = rise(before, driver.netns()?);
+                let seeds_rose = match (seeds_before, driver.seeds()?) {
+                    (Some(before), Some(after)) => Some(seeds_rise(before, after)),
+                    _ => None,
+                };
                 if let Value::Object(fields) = &mut v {
                     fields.insert("netns".to_owned(), rose);
+                    if let Some(seeds_rose) = seeds_rose {
+                        fields.insert("seeds".to_owned(), seeds_rose);
+                    }
                 }
                 Ok(v)
             });

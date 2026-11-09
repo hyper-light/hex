@@ -147,6 +147,9 @@ impl Lab {
 }
 
 impl Fixture for Lab {
+    fn exec_limit(&self) -> Option<hex_api::ExecLimit> {
+        Some(hex_runtime::linux::process::exec_limit())
+    }
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
         BoxSpec {
             id,
@@ -441,10 +444,11 @@ fn links_in_a_layer_stay_in_the_box(lab: &Lab, own: &Path) {
 }
 
 /// AC-T7.1.1: the hex-api conformance suite holds for boxes made from OciSpecs, HEX-RT-13 (an
-/// unrenderable spec refused by name) included.
+/// unrenderable spec refused by name) included, and the differential suite holds them to the
+/// simulator's trace (HEX-DIFF-1..6, CLAUDE.md §8).
 fn conformance_on_specs(lab: &Lab, own: &Path) {
     let (node, _, _) = lab.node(own, "conformance");
-    let failures = conformance::run(&node, lab);
+    let failures = hex_api::differential::run(&node, lab);
     assert!(failures.is_empty(), "conformance failures: {failures:#?}");
 }
 
@@ -490,11 +494,14 @@ fn refusals(lab: &Lab, own: &Path) {
 
 /// T-T7.1.2: the node stopped mid-create, after the record and the rendered bundle and before the
 /// cgroup; its layer already holds a directory of mode 0 and a deep tree, as a container can leave
-/// one. Recovery removes the box, its bundle with it.
+/// one, and its container's state directory is made. Recovery removes the box, its bundle and its
+/// container's state with it.
 fn recovery_removes_a_half_made_bundle(lab: &Lab, own: &Path) {
     let (node, box_root, state) = lab.node(own, "recovery");
-    drop(node);
     let id = BoxId::new("half-made").unwrap();
+    let container = node.container_dir(&id);
+    drop(node);
+    std::fs::create_dir_all(&container).unwrap();
     let bundle = state.join("bundles/half-made");
     let mut deep = bundle.join("upper");
     for _ in 0..200 {
@@ -515,7 +522,7 @@ fn recovery_removes_a_half_made_bundle(lab: &Lab, own: &Path) {
     let record = BoxRecord::new(
         spec,
         Phase::Creating,
-        vec![state.join("oci/half-made"), bundle.clone()],
+        vec![container.clone(), bundle.clone()],
     );
     Store::open(&state).unwrap().put(&record).unwrap();
     let (restarted, _, _) = lab.node(own, "recovery");
@@ -525,6 +532,7 @@ fn recovery_removes_a_half_made_bundle(lab: &Lab, own: &Path) {
         "not removed: {summary:?}"
     );
     assert!(!bundle.exists(), "the half-made bundle is left");
+    assert!(!container.exists(), "the half-made container state is left");
     nothing_left(&restarted, &id, &box_root, &state);
 }
 
@@ -543,7 +551,7 @@ fn nothing_left(node: &Node, id: &BoxId, box_root: &Path, state: &Path) {
     let bundle = state.join("bundles").join(id.as_str());
     assert!(!bundle.exists(), "{id}'s bundle is left");
     assert!(
-        !state.join("oci").join(id.as_str()).exists(),
+        !node.container_dir(id).exists(),
         "{id}'s container state is left"
     );
     assert!(
@@ -747,25 +755,15 @@ fn prepare_cgroup(disk: &Path) -> Result<PathBuf, String> {
     std::fs::create_dir_all(&leaf).map_err(|e| format!("making a leaf for the agent: {e}"))?;
     std::fs::write(leaf.join("cgroup.procs"), format!("{}", std::process::id()))
         .map_err(|e| format!("moving self into a leaf: {e}"))?;
-    let probe = hex_runtime::linux::cgroup::BoxRoot::open(
+    // The probe root opening proves every controller a box uses is delegated here: `BoxRoot::open`
+    // refuses by name otherwise (HEX-INST-1).
+    hex_runtime::linux::cgroup::BoxRoot::open(
         &own.join("hex-probe"),
         hex_runtime::linux::disks::under(disk).unwrap_or_default(),
     )
     .map_err(|e| e.to_string())?;
-    let missing: Vec<&str> = hex_core::cgroup::CONTROLLERS
-        .into_iter()
-        .filter(|c| !probe.controllers().contains(*c))
-        .collect();
     let _ = std::fs::remove_dir(own.join("hex-probe"));
-    if missing.is_empty() {
-        Ok(own)
-    } else {
-        Err(format!(
-            "{} can't hand down the {} controllers",
-            own.display(),
-            missing.join(", ")
-        ))
-    }
+    Ok(own)
 }
 
 fn cache_dir() -> PathBuf {

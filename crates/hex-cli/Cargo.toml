@@ -19,18 +19,64 @@ harness = false
 
 [target.'cfg(target_os = "linux")'.dependencies]
 hex-api.workspace = true
+hex-client.workspace = true
 hex-core.workspace = true
 hex-node.workspace = true
 hex-runtime.workspace = true
 rustix.workspace = true
+# `hex selftest-box tree`'s file hashes (HEX-GUEST-21, selftest/tree.rs).
+sha2.workspace = true
+socket2.workspace = true
+
+# macOS: the box helper daemon subcommand (`hex __box-helper`) drives hex-runtime's macOS daemon, and
+# `hex node` on macOS (native plan step 8b) runs the node over the macOS runtime and its Shards guest.
+[target.'cfg(target_os = "macos")'.dependencies]
+hex-api.workspace = true
+hex-node.workspace = true
+hex-runtime.workspace = true
+rustix.workspace = true
+shards-api.workspace = true
+
+# The Windows oci class's launcher (`hex oci-launch`), which HCS runs inside each container
+# (hex_runtime::windows::oci::launch), the selftest's device probe, and `hex setup features`, the Windows
+# node's own bounded feature query for the installer.
+[target.'cfg(target_os = "windows")'.dependencies]
+hex-core.workspace = true
+hex-runtime.workspace = true
 
 [dev-dependencies]
 hex-api.workspace = true
+# The oci class through a Shards guest (docs/design/shards-guest.md): its simulator on Linux
+# (tests/node_socket.rs, HEX-GUEST-14) and the real client where a guest is given (tests/guest_real.rs).
+# HEX-GUEST-20 writes its lab's config.json (tests/guest_validation.rs).
+serde_json.workspace = true
+shards-api.workspace = true
+# HEX-GUEST-19 and -20 give roots as tarballs, as §4a's roots may be (tests/guest_real.rs,
+# tests/guest_validation.rs).
+flate2.workspace = true
+# HEX-GUEST-21 names each layer by its sha256, as its image does (tests/guest_tree.rs).
+sha2.workspace = true
+tar.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-hex-client.workspace = true
 hex-node.workspace = true
+
+# The macOS process class's conformance test (tests/macos_process_box.rs) drives hex-runtime's macOS
+# runtime with the `hex selftest-box` programs this crate's binary provides.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+hex-core.workspace = true
+hex-client.workspace = true
+
+# The Windows process class's conformance test (tests/windows_process_box.rs) drives hex-runtime's
+# Windows runtime; windows-sys is for the test's own check that a deleted box's grandchild is gone. The
+# oci class's test (tests/windows_oci_box.rs) writes its bundles' config.json with serde_json.
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+hex-core.workspace = true
+hex-client.workspace = true
+hex-runtime.workspace = true
+serde_json.workspace = true
+windows-sys.workspace = true
 
 [lints]
 workspace = true

@@ -279,15 +279,15 @@ def held_to_their_files(window, cuts):
             raise Missing(f"{what}: it opened {window[j].path()!r}")
 
 
-def calls(trace):
-    """Each traced call: its op and id, its parts in microseconds (or what was missing), its span from marker
-    to marker, and the time seam_oci measured for it."""
+def calls(trace, ops=OPS):
+    """Each traced call of an op `ops` names (op: (parts, cuts)): its op and id, its parts in microseconds (or
+    what was missing), its span from marker to marker, and the time seam_oci measured for it."""
     ev, unread = parse(trace)
     out, i = [], 0
     while i < len(ev):
         e = ev[i]
         f = e.text.split() if e.kind == "mark" else []
-        if len(f) == 4 and f[:2] == ["hexbd", "B"] and f[2] in OPS:
+        if len(f) == 4 and f[:2] == ["hexbd", "B"] and f[2] in ops:
             op, cid, bench = f[2], f[3], e.pid
             end = next((j for j in range(i + 1, len(ev)) if ev[j].kind == "mark" and ev[j].pid == bench
                         and ev[j].text.split()[:2] == ["hexbd", "E"]), None)
@@ -297,7 +297,7 @@ def calls(trace):
             g = ev[end].text.split()
             measured = int(g[4]) / 1000 if len(g) == 5 and g[2:4] == [op, cid] else None
             window = ev[i:end + 1]
-            spec, cut = OPS[op]
+            spec, cut = ops[op]
             call = {"op": op, "id": cid, "span": window[-1].ts - window[0].ts, "measured": measured}
             try:
                 if measured is None:

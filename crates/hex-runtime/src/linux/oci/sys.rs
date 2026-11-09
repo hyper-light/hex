@@ -159,25 +159,34 @@ pub fn fork_into_cgroup_pidfd(
 /// `CLONE_PARENT` (`include/uapi/linux/sched.h`): the child's parent is the caller's parent.
 const CLONE_PARENT: u64 = 0x8000;
 
-/// Clones a sibling: `clone3(CLONE_PARENT | CLONE_PIDFD)`, with `CLONE_INTO_CGROUP` when `cgroup` is
-/// given, so the child's parent is the caller's parent (the exec seed's: the node agent), it is born in
-/// the cgroup the open directory `cgroup` is, and the caller is handed its pidfd. `exit_signal` is 0
-/// because `clone3` refuses `CLONE_PARENT` with any other (`clone3_args_valid` in kernel/fork.c): the
-/// child takes the caller's own exit signal instead (`copy_process`), which for a seed the agent
-/// spawned is `SIGCHLD`. `None` when this kernel or sandbox has no `clone3` or no clone into a cgroup
-/// (`ENOSYS` or `E2BIG`, as [`fork_into_cgroup`]); the seed then takes its intermediate path. The caller
-/// must be single-threaded, as for [`fork`].
+/// Clones a sibling: `clone3(CLONE_PARENT | CLONE_PIDFD | ns)`, with `CLONE_INTO_CGROUP` when `cgroup`
+/// is given, so the child's parent is the caller's parent (the seed's: the node agent), it is born in
+/// the cgroup the open directory `cgroup` is and in the fresh namespaces `ns` names (`CLONE_NEW*`;
+/// `0` for an exec, which joins the container's by `setns`; the spec's for a create, which makes them),
+/// and the caller is handed its pidfd. `exit_signal` is 0 because `clone3` refuses `CLONE_PARENT` with
+/// any nonzero `exit_signal` (`clone3_args_valid`, v6.19 `kernel/fork.c:2911-2913`): the child takes the
+/// caller's own exit signal instead (`copy_process`), which for a seed the agent spawned is `SIGCHLD`. A
+/// create's child is PID 1 of its new pid namespace and the agent's own child at once: `clone(2)`'s
+/// ERRORS (man-pages 6.19) once barred `CLONE_PARENT` with `CLONE_NEWPID`, but the kernel dropped that
+/// bar (Biederman, "fork: Allow CLONE_PARENT after setns(CLONE_NEWPID)", in the tree since before
+/// v3.12), and that ERRORS entry is out of date: v6.19's `copy_process` refuses `CLONE_PARENT` only from
+/// an init (`SIGNAL_UNKILLABLE`, `kernel/fork.c:2010-2012`) and `CLONE_NEWUSER` or `CLONE_NEWPID` only
+/// together with `CLONE_THREAD` (`2018-2022`) (raw.githubusercontent.com/torvalds/linux/v6.19/
+/// kernel/fork.c; the lab's `oci_box` tests, rootless and as root). `None` when this kernel or
+/// sandbox has no `clone3` or no clone into a cgroup (`ENOSYS` or `E2BIG`, as [`fork_into_cgroup`]).
+/// The caller must be single-threaded, as for [`fork`].
 pub fn clone_sibling(
     cgroup: Option<std::os::fd::BorrowedFd<'_>>,
+    ns: u64,
 ) -> Result<Option<Sibling>, OciError> {
     use std::os::fd::{AsRawFd, FromRawFd};
     let (flags, cgroup) = match cgroup {
         Some(dir) => (
-            CLONE_PARENT | CLONE_PIDFD | CLONE_INTO_CGROUP,
+            CLONE_PARENT | CLONE_PIDFD | CLONE_INTO_CGROUP | ns,
             u64::try_from(dir.as_raw_fd())
                 .map_err(|_| OciError::os("clone3 a sibling", "a negative file descriptor"))?,
         ),
-        None => (CLONE_PARENT | CLONE_PIDFD, 0),
+        None => (CLONE_PARENT | CLONE_PIDFD | ns, 0),
     };
     let mut pidfd: libc::c_int = -1;
     let pidfd_ptr = u64::try_from((&raw mut pidfd).addr())

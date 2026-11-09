@@ -15,6 +15,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use hex_core::limits;
 use rustix::fs::{Mode, OFlags};
 use rustix::mount::{MountFlags, MountPropagationFlags, UnmountFlags};
 use rustix::thread::UnshareFlags;
@@ -172,10 +173,50 @@ fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
     }
 }
 
+/// A create's clone child, born by [`super::sys::clone_sibling`] with the fresh namespaces its spec asks
+/// for, in its cgroup, the agent's own child (decision 5, goal 5 plan step 4): what the shim's child does,
+/// after the seed's one clone makes the namespaces the shim made by `unshare`. For a user namespace the
+/// child is born unmapped, so it asks the runtime for its maps (`U`; the runtime knows this init's pid
+/// from the seed's answer, so the message carries none), waits the ack on `map`, and becomes root in the
+/// namespace, as the shim does before it forks. Then it joins the namespaces its spec names by `path`, in
+/// the shim's order ([`join_namespace_paths`]): the network, ipc, uts, mount and cgroup kinds, which a
+/// `setns` moves the caller itself into. A pid or user namespace by path can't be joined here — a pid
+/// namespace's `setns` moves only the caller's later children, and the clone has already made the fresh
+/// namespaces, owned by the seed's user namespace — so the runtime makes such a container through the shim
+/// instead ([`needs_shim`]). A network namespace made ahead (`network`) is joined in place of the fresh
+/// one the clone left out. Then the shared [`container`] setup, born in the cgroup (`procs` is `None`).
+/// Returns only on the no-process case or an error (the caller reports `E`).
+pub(crate) fn clone_child(
+    spec: &Spec,
+    bundle: &str,
+    container_dir: &Path,
+    sync: BorrowedFd<'_>,
+    map: Option<OwnedFd>,
+    network: Option<OwnedFd>,
+) -> Result<(), OciError> {
+    if spec.makes_namespace("user") {
+        let map =
+            map.ok_or_else(|| OciError::Broken("a user namespace needs the map pipe".to_owned()))?;
+        msg(sync, "U");
+        let mut ack = [0u8; 1];
+        rustix::io::read(&map, &mut ack).map_err(|e| OciError::os("reading the map ack", e))?;
+        become_userns_root()?;
+    }
+    join_namespace_paths(spec)?;
+    let made_ahead = match network {
+        Some(network) => {
+            sys::setns(network.as_fd(), libc::CLONE_NEWNET)?;
+            true
+        }
+        None => false,
+    };
+    container(spec, bundle, container_dir, sync, None, made_ahead)
+}
+
 /// The container (PID 1 of its namespaces): join its cgroup through `procs` (when it wasn't born there),
 /// set up the world, signal ready, wait for `start`, exec. `network_made_ahead`: its network namespace
 /// came from the node's pool, its loopback already up.
-fn container(
+pub(crate) fn container(
     spec: &Spec,
     bundle: &str,
     container_dir: &Path,
@@ -298,7 +339,7 @@ impl Becoming {
                 "the seccomp filter has more instructions than a filter holds".to_owned(),
             ));
         }
-        let rlimits = process
+        let mut rlimits = process
             .rlimits
             .iter()
             .map(|limit| {
@@ -310,7 +351,14 @@ impl Becoming {
                     },
                 ))
             })
-            .collect::<Result<_, OciError>>()?;
+            .collect::<Result<Vec<_>, OciError>>()?;
+        // A spec that names no RLIMIT_NOFILE gets Docker 29's, not the node's own (HEX-INST-6).
+        if !limits::names_nofile(process.rlimits.iter().map(|l| l.kind.as_str())) {
+            rlimits.push((
+                rustix::process::Resource::Nofile,
+                crate::linux::default_nofile(),
+            ));
+        }
         Ok(Self {
             oom: process
                 .oom_score_adj
@@ -490,6 +538,39 @@ fn join_namespace_paths(spec: &Spec) -> Result<(), OciError> {
     Ok(())
 }
 
+/// Whether a container can't be made by a seed's one clone and is made through the shim instead: one
+/// that joins a pid or a user namespace by `path` ([`clone_child`] says why). The node counts each.
+pub fn needs_shim(spec: &Spec) -> bool {
+    spec.linux
+        .namespaces
+        .iter()
+        .any(|n| n.path.is_some() && matches!(n.kind.as_str(), "pid" | "user"))
+}
+
+/// The `CLONE_NEW*` flags a create's one clone makes fresh for the container (decision 5): each
+/// namespace the spec makes (not one joined by `path`, which [`clone_child`] joins), as `clone3` flags,
+/// but the cgroup namespace, which [`container`] unshares once the child is in its cgroup, and the
+/// network namespace when one is made ahead (`made_ahead`), which [`clone_child`] joins by `setns` in
+/// its place.
+pub(crate) fn fresh_clone_flags(spec: &Spec, made_ahead: bool) -> u64 {
+    let mut flags: u64 = 0;
+    for (kind, flag) in [
+        ("mount", libc::CLONE_NEWNS),
+        ("uts", libc::CLONE_NEWUTS),
+        ("ipc", libc::CLONE_NEWIPC),
+        ("pid", libc::CLONE_NEWPID),
+        ("user", libc::CLONE_NEWUSER),
+    ] {
+        if spec.makes_namespace(kind) {
+            flags |= u64::try_from(flag).unwrap_or(0);
+        }
+    }
+    if spec.makes_namespace("network") && !made_ahead {
+        flags |= u64::try_from(libc::CLONE_NEWNET).unwrap_or(0);
+    }
+    flags
+}
+
 /// The namespace flags the shim makes fresh for the container (those without a `path`). A fresh
 /// cgroup namespace isn't among them: the container makes it once it has joined its own cgroup.
 fn namespace_flags(spec: &Spec) -> UnshareFlags {
@@ -530,7 +611,7 @@ fn setup_rootfs(spec: &Spec, bundle: &str) -> Result<(), OciError> {
 
     // In a user namespace mknod is refused (CAP_MKNOD has no effect across the userns boundary), so
     // devices are bind-mounted from the host instead of created.
-    let in_userns = spec.makes_namespace("user");
+    let in_userns = spec.in_user_namespace();
     for op in crate::linux::oci::mount::plan(&spec.mounts)? {
         do_mount(&rootfs, &op)?;
     }
@@ -614,6 +695,16 @@ fn do_mount(rootfs: &Path, op: &crate::linux::oci::mount::Op) -> Result<(), OciE
             let top = inroot::fd_path(&top_fd);
             rustix::mount::mount_remount(&top, op.flags | MountFlags::BIND, op.data.as_str())
                 .map_err(|e| OciError::os("remounting bind", failed(e)))?;
+            // A recursive bind carries the source's submounts with the source's own flags, so the
+            // remount above, which changes only the bind's top, leaves them writable. For a rootless
+            // box on the host's network that means the host's cgroup filesystem stays writable
+            // beneath the box's own cgroup mounts over it (crates/hex-core/src/bundle.rs,
+            // `default_mounts`), where a box holding CAP_SYS_ADMIN in its user namespace could reach
+            // every box's cgroup files by unmounting its own cgroup mounts off (T-T7.1.4). So each
+            // cgroup filesystem the bind carries is remounted read-only too.
+            if op.recursive_bind {
+                remount_cgroupfs_readonly(rootfs, &op.destination, &top_fd, op.flags)?;
+            }
         }
     } else {
         let data = data_cstr(&op.data)?;
@@ -649,6 +740,81 @@ fn data_cstr(data: &str) -> Result<Option<std::ffi::CString>, OciError> {
             |_| OciError::Config("mount data has a NUL".to_owned()),
         )?))
     }
+}
+
+/// Most cgroup filesystems a recursive read-only bind is expected to carry: cgroup v2 has one
+/// (`/sys/fs/cgroup`), and a box is refused rather than left part-done past this (CLAUDE.md §2, §3).
+const MAX_CGROUP_SUBMOUNTS: usize = 256;
+
+/// Each cgroup filesystem a recursive read-only bind carries, remounted read-only. A `mount(2)`
+/// remount changes one mount, not the submounts a recursive bind brought with it, so remounting the
+/// bind's top leaves them with the source's flags. For a rootless box's `/sys` that is the host's
+/// cgroup filesystem, which stays writable beneath the box's own cgroup mounts over it; this makes it
+/// read-only, so a box holding `CAP_SYS_ADMIN` that unmounts its own cgroup mounts off reaches a
+/// read-only host tree, not a writable one. Flat: one bounded pass over the mount table (§11), at most
+/// [`MAX_CGROUP_SUBMOUNTS`] (§2).
+fn remount_cgroupfs_readonly(
+    rootfs: &Path,
+    destination: &str,
+    top_fd: &OwnedFd,
+    flags: MountFlags,
+) -> Result<(), OciError> {
+    let top_real = std::fs::read_link(inroot::fd_path(top_fd))
+        .map_err(|e| OciError::os("reading the bind's path", e))?;
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")
+        .map_err(|e| OciError::os("reading the mount table", e))?;
+    let base = destination.trim_end_matches('/');
+    let mut seen = 0usize;
+    for line in mountinfo.lines() {
+        // proc_pid_mountinfo(5): the mount point is field 5, then the optional fields, then " - ",
+        // then the filesystem type.
+        let Some((left, right)) = line.split_once(" - ") else {
+            continue;
+        };
+        if !matches!(right.split(' ').next(), Some("cgroup2") | Some("cgroup")) {
+            continue;
+        }
+        let Some(point) = left.split(' ').nth(4) else {
+            continue;
+        };
+        let point = unescape_mountpoint(point);
+        let Ok(under) = Path::new(&point).strip_prefix(&top_real) else {
+            continue;
+        };
+        let under = under.to_string_lossy();
+        if under.is_empty() {
+            continue; // the bind's own top, already remounted by the caller
+        }
+        seen = seen.saturating_add(1);
+        if seen > MAX_CGROUP_SUBMOUNTS {
+            return Err(OciError::Config(format!(
+                "the recursive bind at {destination} carries over {MAX_CGROUP_SUBMOUNTS} cgroup \
+                 filesystems to make read-only"
+            )));
+        }
+        let dest = format!("{base}/{under}");
+        let sub = target(rootfs, &dest, Make::Nothing)?;
+        rustix::mount::mount_remount(inroot::fd_path(&sub), flags | MountFlags::BIND, "").map_err(
+            |e| {
+                OciError::os(
+                    "remounting a cgroup filesystem read-only",
+                    format!("{dest}: {e}"),
+                )
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// A `/proc/self/mountinfo` mount point with its escapes (space `\040`, tab `\011`, newline `\012`,
+/// backslash `\134`; proc_pid_mountinfo(5)) turned back into their characters, the backslash last so a
+/// decoded one isn't read as the start of another escape.
+fn unescape_mountpoint(field: &str) -> String {
+    field
+        .replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
 }
 
 fn make_default_devices(rootfs: &Path, in_userns: bool) -> Result<(), OciError> {
@@ -840,7 +1006,7 @@ fn handed_fd(name: &str, flags: OFlags) -> Result<OwnedFd, OciError> {
 }
 
 /// Writes one newline-terminated sync message; a broken pipe is ignored (the runtime has gone).
-fn msg(sync: BorrowedFd<'_>, text: &str) {
+pub(crate) fn msg(sync: BorrowedFd<'_>, text: &str) {
     let line = format!("{text}\n");
     let _ = rustix::io::write(sync, line.as_bytes());
 }

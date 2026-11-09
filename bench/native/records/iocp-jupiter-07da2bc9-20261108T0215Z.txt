@@ -1,0 +1,23 @@
+stdio_probe iocp (native plan step 8; the "to measure" items of the decision "the Windows node, on one
+completion port", docs/design/runtime.md). Functional checks, not a bench: each time is what one run saw.
+
+machine:  jupiter (AMD Ryzen AI MAX+ 395, 32 logical CPUs, Windows NT 10.0.26200), booted 2026-11-08 00:06Z
+commit:   07da2bc9 (cp/t7-native-windows), stdio_probe built --release on jupiter
+when:     2026-11-08 ~02:15Z, a kiln run (foreground)
+load:     89% CPU (Win32_Processor), 73% privileged and 1% user time (\Processor(_Total)); System the top
+          process; no hex, cargo, rustc, vmmem or compute system running (hcsdiag list empty). Not this
+          probe's: a load from outside it, recorded so the run reads in its context.
+
+iocp accept: PASS pending until a client connected, completed 575.4µs after; update context rc 0; peer pid Ok(19300) (the client is 19300)
+iocp zero-read data: PASS pending while quiet, completed with 0 bytes 1.1168ms after the peer wrote, all 10 bytes then read
+iocp zero-read end: PASS pending while quiet, completed 9.6756ms after the peer ended, the read then 0 (its end)
+iocp send: PASS 8 MiB in one overlapped send (completed at once), completed whole 736.2µs after it was made (the peer began reading at 500 ms); the peer read 8388608
+EXIT 0
+
+Read: afunix.sys completes an overlapped AcceptEx on a completion port, and the socket it took reads its
+peer's pid once SO_UPDATE_ACCEPT_CONTEXT is set; a zero-byte overlapped WSARecv is a readiness signal on
+AF_UNIX as on TCP (pending while quiet, completing without taking bytes, and at the peer's end); and one
+overlapped send of 8 MiB is taken whole at once, before its peer reads anything, so a send's completion
+says the kernel has the bytes, not that the peer read them. The node (hex_node::serve::windows) posts real
+overlapped reads, which need none of the zero-byte behaviour, and bounds what waits to be sent itself
+(the core's backlog bound), since the socket's own buffer doesn't push back at 8 MiB.

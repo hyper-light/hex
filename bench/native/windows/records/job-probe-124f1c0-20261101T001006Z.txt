@@ -1,0 +1,10 @@
+# kiln run on jupiter (foreground), bench/native/windows/job_probe.ps1 at 124f1c0, one pass
+commit 124f1c0
+2026-11-01T00:10:06Z
+host JUPITER | Microsoft Windows 11 Pro 10.0.26200 | AMD RYZEN AI MAX+ 395 w/ Radeon 8060S           | 2026-10-31T17:10:08.5804741-07:00
+create n=200 box_ms p50=43.121 p99=66.700 max=66.804 | bare_ms p50=42.611 p99=88.100 max=2,679.228
+memory job_limit_mib=256 peak_job_mib=256.1 peak_process_mib=248.5 member: refused_after_mib=235 error=1455
+tree grandchild=125956 alive_before_close=True alive_after_close=False member_alive_after_close=False
+escape breakaway=refused error=5
+probe exit 0
+2026-11-01T00:10:29Z

@@ -50,6 +50,7 @@ and `Placement`.
 | The OCI runtime: Hex's own or youki's libcontainer, by conformance, start latency and the no-panic rule | CP-T7.1 | decided: Hex's own (`runtime.md`) |
 | The runtime's architecture against the 4-5x bar: volatile state, one supervisor per node, the `Runtime` seam as the fast path, network-namespace work off the path, a seed per node, mount namespaces without copying, no wrapper per box (`runtime-architecture.md`) | goal 4 (kiln plan `01a16e75781c776390a6efeb797a9ad6`) | decided 2026-10-24; implementation open |
 | The `process` box per platform | CP-T7.1 | open |
+| Linux images on macOS and Windows: one Shards guest per node running Hex's Linux node unchanged, its wire over vsock, reached through a `shards-api` seam (`shards-guest.md`) | native plan step 5 | proposed 2026-11-04; seam agreed with Shards' owner 2026-11-04 |
 | Snapshot templates, pool sizing and working-set prefetch | CP-T7.2 | open |
 | The scheduler's architecture: goodput over balance, a sampled fast path with an optimiser tier, suitability filters on declared needs, Vivaldi proximity on hyper-swim, priority/fair-share/gangs/preemption, correctness against a serial spec, laptop-to-cell-to-region on one code path, fast isolation of bad workloads and nodes, and hex-sim first (`scheduler-architecture.md`) | CP-T7.3-T7.12 | decided 2026-10-24; implementation open |
 | The control plane's state and watches in Amphora | CP-T7.3 | open (within `scheduler-architecture.md`, S6) |

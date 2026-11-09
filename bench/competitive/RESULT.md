@@ -488,6 +488,54 @@ rate, the socket's held (47-64 and 64-67 a second). And Hex's seam sustains 26 a
 against libcrun's 1,294, 553 and 352 against 1,429 on the Mac Studio, and 108 and 66 against 959 on jupiter, as step 2's
 passes found: about one create's time per lifecycle at concurrency 32. Both are open (`STATUS.md`).
 
+## Goal 5, plan step 2: a box's record off create's path (2026-10-30, fedora)
+
+seam_oci's lifecycle and sustained phases by both drivers, beside libcrun's, at eb6cae7 (built on cp/t7-g5-s2; 6f7ba39
+here): each container's state on tmpfs under the node's runtime directory, a record whose directories all lie on tmpfs
+written without its fsyncs, and no lock another box's create takes held across a record write (goal 5 plan step 2:
+defda14, 1f4babe). host.sh (`PHASES=oci RUNTIMES=libcrun SEAM_OCI_BIN=...`), `HEXBENCH_PHASES="lifecycle sustained"`, 2
+rounds of 1,000 lifecycles after 100, the sustained phase 10,000 lifecycles at concurrency 32, no load gate (the load
+recorded).
+
+**A change of method from this pass on.** The OCI pass's container mounts a tmpfs at `/run` (6f7ba39, host.sh and
+docker_pass.sh), as a host has one, where the runtimes keep their state: libcrun's and crun's and runc's, and a root Hex
+node's `/run/hex-node`. Every pass before it, goal 4's of record among them, kept every runtime's state on the
+container's overlayfs. A ratio within one pass compares like setups; one taken across the change compares unlike ones,
+and the sustained comparison with goal 4's pass below is one: libcrun's own rate went from 1,294 to 1,765 a second.
+
+Best of 2 (each round's in brackets), ms:
+
+| Machine | | create p50 | create p99.9 | delete p50 | sustained /s (last window over first) | made on the path, of the sustained phase's creates |
+|---|---|---|---|---|---|---|
+| fedora (Intel Core i9-14900HX, Linux 6.19.10, load 4.18 to 15.09, no other bench) | Hex's seam, in process | 1.928 (2.490 / 1.928) | 3.03 | 0.81 | 2,108 (0.94) | 248 of 10,000 |
+| | Hex's seam, over the socket | 2.002 (2.002 / 2.080) | 3.01 | 0.88 | 2,095 (0.97) | 265 of 10,000 |
+| | libcrun in process | 2.515 (2.786 / 2.515) | 4.10 | 10.30 | 1,765 (0.96) | |
+
+- **Create, against libcrun's in the same run: 0.77x in process, 0.80x over the socket** (1.928 and 2.002 against 2.515
+  ms; each round's own, 0.89x and 0.77x in process, 0.72x and 0.83x over the socket). Step 2's bar was at most 2x. In
+  goal 4's pass of record it was 3.7x and 4.6x, nearly all of it the record's four fsyncs (12.187 of 18.297 ms in goal 5
+  plan step 1's breakdown, `create-breakdown-20261030T000822Z`).
+- **Sustained at concurrency 32: 2,108 and 2,095 lifecycles a second**, against goal 4's pass of record's 26 and 51:
+  +8,008% and +4,008%, 81x and 41x (step 2's bar, +400%). That comparison crosses the change of method; within each
+  pass, Hex's seam over libcrun went from 0.02x and 0.04x (26 and 51 against 1,294) to 1.19x and 1.19x (2,108 and 2,095
+  against 1,765). The seam no longer runs about one create at a time: its rate held across the ten windows of 1,000
+  (2,017-2,191 in process, 1,976-2,164 over the socket).
+- **Decision 4's second falsifier is met: one thread refilling the network-namespace pool to 32 doesn't keep up at
+  about 2,100 creates a second.** In each sustained phase 181-279 of the 10,000 creates (1.8-2.8%) found the pool dry,
+  past the falsifier's 1%. Each made its namespace on its create's path, counted, and none failed; every create of the
+  lifecycle phase, one at a time, took one from the pool (1,100 of 1,100). The pool held at goal 4's rates, 26 to 553
+  a second, and fails at about 40x that. This run doesn't time a dry create (the sustained phase times its windows, not
+  its creates); a namespace made on fedora costs 0.152-0.161 ms p50 and 0.333-0.401 ms p99 (`probes/netns_pool.md`,
+  one thread, unloaded). At 2.5% of creates the dry ones sit in the tail above a create's p97.5, so a p99 or p99.9
+  taken under concurrency reads them, as goal 5's p99.9 criterion (plan step 6) will.
+
+Run: fedora `~/.cache/hex-bench/out/20261030T004533Z` (hex sha256 226b9315661e7a3b…, x86_64, static-glibc, built at
+eb6cae7 in the pass image's Fedora 44; seam_oci 5de18d17af2cfcd4…; libcrun 1.30.1, commit 079ff6a7…, in process, driver
+5c356f2139adc232…; CPUs 4-31), the host's clock before and after it (`probes/host_clock.sh`): a short burst's p50 0.320
+and 0.114 ms on the P-cores and 0.501 and 0.163 ms on the E-cores at rest (the idle host clocks short bursts down before
+the pass, not after), 0.114 and 0.102, 0.165 and 0.181 held awake. No phase recorded an error. A pass begun at 00:42:58Z
+(`20261030T004258Z`) was stopped before any phase, since step 1's breakdown was measuring then; it is marked `ABORTED`.
+
 ## What the run shows
 
 - **OCI class: Hex misses the bar, and crun is the competitor to beat.**

@@ -1,0 +1,45 @@
+native_box (crates/hex-bench/benches/native_box.rs), Linux, drivers hex and scope (systemd transient scope).
+Host fedora (kiln runner kiln-a094a12d.attlocal.net): Intel Core i9-14900HX, 32 CPUs, 62 GiB, Linux 6.19.10-300.fc44.x86_64.
+Commit 1aa735c, release build. Started 2026-11-05T09:01:07Z, timed part 09:01:42Z-09:02:11Z.
+systemd --user unit hex-native-s7-bench-20261105T085507Z (via hex-slot, Delegate=yes), timed part under
+flock fedora-timed.lock, pinned to CPUs 4-15 (taskset, inherited by every program either driver starts);
+not niced. Noisy host: 7 containers running, load 18-35 (as below). Passes interleave the drivers.
+Every box/scope bounded to 256 MiB (MemoryMax, no swap); n 200 lifecycles after 20 warmup; 20 climbs to 1 GiB.
+Raw JSON on fedora: ~/.cache/hex-t7/native-s7/bench-linux-20261105T085507Z/.
+
+hex-p1.json: driver hex n 200 warmup 20 started_unix 1793869302
+  load before:  average: 25.33, 35.04, 33.82  after:  average: 25.33, 35.04, 33.82
+  create ms p50 0.167 p99 0.862 p99.9 1.235 max 1.235
+  start ms p50 0.397 p99 0.691 p99.9 1.336 max 1.336
+  delete ms p50 0.699 p99 1.366 p99.9 1.824 max 1.824
+  bound 256 MiB, climb 1024 MiB: 20/20 ended by it, most past it -2 MiB, end ms p50 99.487 p99 112.937 p99.9 112.937 max 112.937, exits ['Signal(9)']
+scope-p1.json: driver scope n 200 warmup 20 started_unix 1793869304
+  load before:  average: 25.33, 35.04, 33.82  after:  average: 22.89, 34.20, 33.56
+  create ms -
+  start ms p50 18.315 p99 29.621 p99.9 30.155 max 30.155
+  delete ms p50 10.264 p99 12.218 p99.9 13.678 max 13.678
+  bound 256 MiB, climb 1024 MiB: 20/20 ended by it, most past it -2 MiB, end ms p50 123.200 p99 132.916 p99.9 132.916 max 132.916, exits ['ExitStatus(unix_wait_status(9))']
+hex-p2.json: driver hex n 200 warmup 20 started_unix 1793869313
+  load before:  average: 22.89, 34.20, 33.56  after:  average: 21.46, 33.71, 33.40
+  create ms p50 0.169 p99 1.401 p99.9 1.799 max 1.799
+  start ms p50 0.412 p99 1.059 p99.9 1.449 max 1.449
+  delete ms p50 0.701 p99 1.464 p99.9 14.878 max 14.878
+  bound 256 MiB, climb 1024 MiB: 20/20 ended by it, most past it -2 MiB, end ms p50 106.192 p99 114.155 p99.9 114.155 max 114.155, exits ['Signal(9)']
+scope-p2.json: driver scope n 200 warmup 20 started_unix 1793869315
+  load before:  average: 21.46, 33.71, 33.40  after:  average: 20.46, 33.30, 33.27
+  create ms -
+  start ms p50 4.395 p99 26.622 p99.9 28.530 max 28.530
+  delete ms p50 10.632 p99 12.757 p99.9 12.921 max 12.921
+  bound 256 MiB, climb 1024 MiB: 20/20 ended by it, most past it -2 MiB, end ms p50 121.438 p99 130.551 p99.9 130.551 max 130.551, exits ['ExitStatus(unix_wait_status(9))']
+hex-p3.json: driver hex n 200 warmup 20 started_unix 1793869322
+  load before:  average: 20.46, 33.30, 33.27  after:  average: 20.46, 33.30, 33.27
+  create ms p50 0.160 p99 0.713 p99.9 1.463 max 1.463
+  start ms p50 0.406 p99 1.409 p99.9 1.632 max 1.632
+  delete ms p50 0.696 p99 1.615 p99.9 1.902 max 1.902
+  bound 256 MiB, climb 1024 MiB: 20/20 ended by it, most past it -2 MiB, end ms p50 103.513 p99 112.100 p99.9 112.100 max 112.100, exits ['Signal(9)']
+scope-p3.json: driver scope n 200 warmup 20 started_unix 1793869324
+  load before:  average: 20.46, 33.30, 33.27  after:  average: 18.47, 32.45, 33.00
+  create ms -
+  start ms p50 4.468 p99 30.014 p99.9 32.900 max 32.900
+  delete ms p50 10.528 p99 12.867 p99.9 14.001 max 14.001
+  bound 256 MiB, climb 1024 MiB: 20/20 ended by it, most past it -2 MiB, end ms p50 117.507 p99 158.023 p99.9 158.023 max 158.023, exits ['ExitStatus(unix_wait_status(9))']

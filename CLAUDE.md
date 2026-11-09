@@ -93,7 +93,9 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   foreign code runs (those two children, a container's init, an exec'd program's child, a seed: CVE-2024-21626's
   class), which rustix doesn't wrap.
 - `crates/hex-runtime/src/linux/oci/sys.rs`: the `oci` class's `fork`, the `clone3` calls that start a
-  container in its cgroup and that clone an exec'd program into it with a pidfd the node agent watches —
+  container in its cgroup (from the shim, or from a create seed as the node agent's own child, `CLONE_PARENT`
+  with `exit_signal` 0, rootless and as root: decision 5) and that clone an exec'd program into it with a
+  pidfd the node agent watches —
   as the agent's own child (`CLONE_PARENT`, `exit_signal` 0) where a privileged seed may, else through an
   intermediate (the exec seed, decision 3), `waitpid`, `unshare`, `setns`, `kill`, `prctl` capability calls,
   inherited-fd adoption, the `bpf` calls that load and attach a container's cgroup device program
@@ -110,6 +112,92 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   single-threaded (it re-exec'd) where that matters, but for the vfork-style clone's child, which runs in
   the multi-threaded agent's memory and so makes system calls alone on what was made before the clone,
   as posix_spawn's child does.
+- `crates/hex-runtime/src/macos/sys.rs`: the macOS `process` class, which has no cgroup, so a box is a
+  process group under a watcher that reads its members' footprints and ends it past a bound (decision
+  "each OS runs its own boxes natively"). `posix_spawn` starts each member in the box's process group
+  (`POSIX_SPAWN_SETPGROUP`, `SETSIGDEF`, `SETSIGMASK`, `POSIX_SPAWN_CLOEXEC_DEFAULT` so only its stdio is
+  inherited, `posix_spawnattr_set_qos_class_np` to clamp its QoS, `posix_spawnattr_setjetsam_ext` to arm a
+  fatal per-process memory cap at the box's whole bound (step 1's `_ext` backstop: the kernel SIGKILLs a
+  member that crosses it, rootless, with no overshoot), and `adddup2`/`addchdir` file actions);
+  `proc_listpids(PROC_PGRP_ONLY)` lists the group (and `PROC_UID_ONLY` a user, for the box helper's
+  membership, step 2) and `proc_pid_rusage` reads each member's footprint, start time and exit; `thread_policy_set(THREAD_TIME_CONSTRAINT_POLICY)` makes the watcher a Mach
+  time-constraint thread; `kqueue`/`kevent` carry its one-shot `NOTE_CRITICAL` timer, a user event to wake
+  it, and `EVFILT_PROC` (`NOTE_FORK`/`NOTE_EXIT`/`NOTE_EXITSTATUS`, the dead member's wait status in the
+  event, so a cap kill is told from an ordinary SIGKILL without racing its reaper) on members, and, for the
+  node's socket on macOS (native plan step 8, `hex-node`'s `serve::macos`, one kqueue on its I/O thread),
+  level-triggered `EVFILT_READ`/`EVFILT_WRITE` on the listener and connections; `getpeereid` names the
+  socket's peer, so only the node's user and root are served; `mach_timebase_info` converts Mach ticks;
+  `sysctlbyname("kern.maxproc")` bounds a listing and `sysctlbyname("kern.argmax")` a program's arguments
+  and environment; `getrusage`
+  and `getloadavg` read the node's own cost for the bench and observability. rustix wraps the `kqueue`,
+  `kill`/`killpg` and `waitid` beside these, which the class calls through it; libc binds the rest as
+  `unsafe` foreign functions, and `posix_spawnattr_set_qos_class_np` and `posix_spawnattr_setjetsam_ext`
+  Hex declares itself (the macOS 26 SDK ships neither prototype, nor the jetsam flag values, which are
+  xnu's `bsd/sys/spawn_internal.h`, though libSystem exports the symbols). Rust can express none of these
+  foreign calls, nor the raw `posix_spawnattr_t` the spawn-attribute setters write, safely, and macOS
+  offers no safe wrapper.
+- `crates/hex-runtime/src/macos/helper_sys.rs`: the macOS box helper daemon's privileged syscalls (the
+  `process` class's box-user mode, decision "each OS runs its own boxes natively"; step 2). The daemon,
+  as root, starts a box's programs as the box's pool user: a `fork` whose child drops to the user
+  (`setgid`/`setuid`), opens a session for a leader (`setsid`), caps the user's processes
+  (`setrlimit(RLIMIT_NPROC)`) and the program's descriptors (`RLIMIT_NOFILE`), puts the three stdio descriptors on 0/1/2 (`dup2`), closes the rest
+  (`getdtablesize` then `close`, there being no `closefrom` in libc) and `execve`s the program — every
+  call async-signal-safe, as the Linux runtime's `pre_exec` is, since between fork and exec a
+  multi-threaded process may touch no lock. It then arms each member: `task_for_pid` for the member's
+  task, `task_set_phys_footprint_limit` for its ledger limit, and
+  `task_set_exception_ports`(`EXC_MASK_RESOURCE`) to route a crossing to the daemon's port
+  (`mach_port_allocate`/`mach_port_insert_right`), so a crossing notifies rather than kills. The daemon
+  receives those crossings with `mach_msg` on that port and replies, freeing the thread and task send
+  rights the message carried with `mach_port_deallocate`, and re-apportions the box (the event-driven
+  rebalance, no polling). `posix_spawn` can't change uid, so the start is a fork, not a spawn; libc binds
+  the POSIX calls and the Mach routines are declared as `unsafe` foreign functions, macOS offering no safe
+  wrapper.
+- `crates/hex-runtime/src/windows/sys.rs`: the Windows `process` class, whose box is a job object nested
+  under the node's. It creates the job (`CreateJobObjectW`), sets its hard limits
+  (`SetInformationJobObject`: the commit cap, active-process cap, kill-on-close and no breakaway, the CPU
+  weight or hard cap, and the memory notification the one class Windows guarantees), starts each member
+  suspended inside the job and nowhere else (`CreateProcessW` with `CREATE_SUSPENDED` and a
+  `PROC_THREAD_ATTRIBUTE_JOB_LIST`, so it is a job member from creation, and a
+  `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` so only its three standard handles are inherited —
+  `InitializeProcThreadAttributeList`/`UpdateProcThreadAttribute`/`DeleteProcThreadAttributeList`),
+  resumes it (`ResumeThread`), waits on it and reads its end (`WaitForSingleObject`,
+  `GetExitCodeProcess`), marks its standard handles inheritable (`SetHandleInformation`), reads the job's
+  accounting and its guaranteed memory-limit violation (`QueryInformationJobObject`), ends the job
+  (`TerminateJobObject`) or one member alone (`TerminateProcess`, a program's own kill) and closes its
+  handles (`CloseHandle`), and reads the machine's processor count
+  (`GetActiveProcessorCount`). For the `oci` class's Shards guest it reads the default shared roots
+  (docs/design/shards-guest.md §4a): the users folder from its known folder (`SHGetKnownFolderPath` with
+  `FOLDERID_UserProfiles`, its string freed by `CoTaskMemFree`) and the temp folder (`GetTempPath2W`).
+  Where its boxes outlive the node (the keeper, `super::keeper`; decision
+  "the Windows node, on one completion port"), it names each box's job (`CreateJobObjectW` with a name,
+  reopened by the next node with `OpenJobObjectW`), and a keeper holds a second handle to each: the node
+  duplicates the job into the keeper and closes it there on delete (`DuplicateHandle` into another process
+  and with `DUPLICATE_CLOSE_SOURCE`, the keeper opened by `OpenProcess` with `PROCESS_DUP_HANDLE`), names
+  a process by its creation time (`GetProcessTimes`) so a reused pid is told apart, waits on a process or
+  the keeper's stop (`WaitForMultipleObjects`), and makes and signals that stop (`CreateEventW` named,
+  `SetEvent`). `windows-sys` binds these as `unsafe` foreign functions, and std's own
+  job-object support and its `PROC_THREAD_ATTRIBUTE_JOB_LIST`/`_HANDLE_LIST` process creation are
+  unstable; Rust can express none of them safely.
+- `crates/hex-runtime/src/windows/oci/sys.rs`: the Windows `oci` class, a Windows image run process-isolated
+  through the Host Compute Service with a job of Hex's nested in its silo (decision "the Windows `oci` class is
+  an HCS silo holding a Hex job"). It resolves at run time (`LoadLibraryExW` from System32, `GetProcAddress`)
+  and calls HCS's operation, compute-system and process calls (`HcsCreateOperation`,
+  `HcsWaitForOperationResult[AndProcessInfo]`, `HcsCancelOperation`, `HcsCloseOperation`,
+  `HcsCreateComputeSystem`, `HcsOpenComputeSystem` (by which the next node reopens a box a killed node left
+  running, to take it back), `HcsStartComputeSystem`, `HcsTerminateComputeSystem`, `HcsCloseComputeSystem`,
+  `HcsCreateProcess`, `HcsCloseProcess`, `HcsGetServiceProperties`), freeing HCS's strings (`LocalFree`), and
+  vmcompute's layer calls that make and remove a box's scratch as hcsshim and runhcs do (`ActivateLayer`,
+  `PrepareLayer`, `GetLayerMountPath`, `UnprepareLayer`, `DeactivateLayer`: undocumented; the documented
+  storage calls made a scratch no container finished starting on, decision record) — resolved rather than
+  linked, because windows-sys links HCS's at load time (and binds none of vmcompute's), and a host without
+  the Containers feature would then not start the node at all. It opens a box's launcher and members by pid (`OpenProcess`), hands the launcher the box's
+  job and the caller's standard handles (`DuplicateHandle`), ends a launcher that never replied
+  (`TerminateProcess`), checks a member's job (`IsProcessInJob`), adopts in the launcher the handle values
+  the node gave it, and reads the host's build and kind (`RtlGetVersion`), an image's build from its base
+  layer's `ntdll.dll` (`GetFileVersionInfoW`, `VerQueryValueW`), and a device interface class's members
+  (`CM_Get_Device_Interface_List_SizeW`, `CM_Get_Device_Interface_ListW`) and whether each opens from where
+  it runs (`CreateFileW`, a query open). Rust can express none of these
+  foreign calls, the function pointers resolved at run time, nor a handle value crossing processes, safely.
 
 ## 13. Lean code
 
@@ -140,8 +228,8 @@ the first failure; kiln CI runs it on every push and pull request (`.kiln/ci.yam
 
 ```
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo clippy --workspace --all-targets --locked --target aarch64-apple-darwin -- -D warnings
+cargo clippy --workspace --all-targets --locked --target x86_64-unknown-linux-gnu --target aarch64-unknown-linux-gnu --target aarch64-unknown-linux-musl -- -D warnings
+cargo clippy --workspace --all-targets --locked --target aarch64-apple-darwin --target x86_64-apple-darwin -- -D warnings
 cargo clippy --workspace --all-targets --locked --target x86_64-pc-windows-msvc -- -D warnings
 bash scripts/check-production.sh
 cargo test --workspace --locked

@@ -73,8 +73,14 @@ itself (implementation goal 0), this axis can't be judged.
 ### 1. A container's state is written atomically, never fsynced
 
 **The choice.** The `oci` class writes `state.json` as runc and crun do: a temporary file, then `rename(2)`, with no
-`fsync` of the file or its directory. So do the node agent's box records, for every record that describes only
-processes and cgroups.
+`fsync` of the file or its directory. So do the node agent's box records, for every record whose directories all lie
+on tmpfs or that names none: the node keeps its containers' state where runc and crun keep theirs, under its runtime
+directory (`/run/hex-node` as root, `$XDG_RUNTIME_DIR/hex-node` rootless), each container named `<node key>-<box
+id>`. A record naming a directory on disk, such as a rendered bundle's writable layer, is still fsynced, file and
+directory, and no lock another box's create takes is held across a record write (goal 5 plan step 2). So create
+holds the supervisor's spawning lock twice, across the shim's spawn and across the init's watch, and not across the
+Ready record between them: an init that dies in that gap, and is reaped there by a sweep, refuses its create by
+type and the box is scrubbed, where before the box was made showing the init's exit.
 
 **Sources.**
 - rename(2), DESCRIPTION: the target is "atomically replaced, so that there is no point at which another
@@ -83,6 +89,8 @@ processes and cgroups.
   crashes or is rebooted".
 - crun, `src/libcrun/status.c:270-337` at 3fc26242: open, write, close, rename.
 - runc, `libcontainer/container_linux.go:872-896` at 976d95ab: CreateTemp, WriteJSON, Close, Rename.
+- runc, `main.go`, `--root`: "root directory for storage of container state (this should be located in tmpfs)".
+- crun(1), STATE: state under `/run/crun` as root, `$XDG_RUNTIME_DIR/crun` rootless.
 
 Neither competitor fsyncs (f3, f4).
 
@@ -95,12 +103,19 @@ Neither competitor fsyncs (f3, f4).
 - **What the fsyncs buy: nothing** (f5). A process crash leaves the page cache, so a rename-atomic write already
   survives it. A system crash ends every container the state describes, and the default state root is under
   `/run` (`run.rs:78-87`), which is emptied at boot.
-- **The node agent's records** are fsynced today as kiln's lesson from its lost session file (`runtime.md`,
-  "Durability and recovery"). That file described sessions that outlive a restart of the host. A box doesn't:
-  after a host crash, recovery finds no cgroup for any record and scrubs it, torn or whole.
+- **The node agent's records.** An oci box's record always named a directory (its container's state), so a seam
+  create wrote two durable records, four fsyncs: 12.187 ms of create's 18.297 ms p50 in the bench container
+  (create-breakdown-20261030T000822Z). The rule now judges each directory's filesystem: statfs of the directory, or
+  of its nearest existing parent; unreadable counts as disk. A record whose directories all lie on tmpfs isn't
+  synced: 0 fsync and 0 fdatasync over 5 seam lifecycles per driver with /run on tmpfs, against 30 with it on
+  overlayfs (`probes/record_syncs.md`, record-syncs-20261030T002934Z). With the store's lock off the fsyncs too, a
+  seam create's p50 is 0.77x libcrun's and the seam sustains 2,108 lifecycles a second at concurrency 32 against
+  libcrun's 1,765 (`RESULT.md`, 20261030T004533Z).
 
 **What would falsify it.** A record that must outlive the host, such as one for a persistent volume; that record
-keeps its fsync. The probe's measured cost already rules out the other falsifier, a cost under a tenth of start.
+keeps its fsync. The probe's measured cost already rules out the other falsifier, a cost under a tenth of start. A
+host whose runtime directory isn't tmpfs gets durable records: correct, but at the fsyncs' cost. That includes a
+container's /run unless it mounts a tmpfs there, as the bench and lab containers now do.
 
 ### 2. No shim per container: one supervisor per node
 
@@ -718,22 +733,331 @@ setns(2) and user_namespaces(7); containerd v2.2.0's `pkg/netns`; Lambda's netwo
 **What would falsify it.** A create from the pool costing more than 5% over a create without a namespace, at p50
 through the seam, on any machine measured (fedora, jupiter, the Mac Studio): the pool then isn't taking the
 namespace's work off the path. Or a sustained phase in which more than 1% of creates found the pool dry: one thread
-refilling to 32 isn't keeping up.
+refilling to 32 isn't keeping up. That one has been met (goal 5 plan step 2's pass of record on fedora,
+`bench/competitive/RESULT.md`, 20261030T004533Z): once the record left create's path and the seam ran at about 2,100
+creates a second, the pool ran dry for 181-279 of each sustained phase's 10,000 creates (1.8-2.8%), each made on the
+path and counted, none failed. At goal 4's 553 a second at most it kept up; at 2,100 one refill thread doesn't. Open
+(`STATUS.md`).
 
-### 5. A seed per node clones containers
+### 5. A seed per node clones containers (restated on goal 5's measurements, 2026-10-30)
 
-**The choice.** The node agent keeps a prepared, single-threaded helper that has already exec'd and set up
-everything common to its containers. `create` asks it for a `clone3` into the container's cgroup and namespaces,
-with `CLONE_PIDFD`. This replaces today's second exec of the hex binary per create.
+**What the plan expected.** This decision first rested on one figure: create's second exec of the hex binary, about
+1 ms on fedora (`hex --version`, 1.038 ms; kiln research `01a1877e05cc73b495447bf5113ebda3`, f3), a sixth of a create
+with its state on tmpfs. Measured whole through the seam today, that exec is a twentieth of create.
 
-**Sources.** SOCK's zygotes, Catalyzer's `sfork` and AFaaS's seeds (`oci-runtimes-and-fast-start.md` §5.1-5.4, §6
-rank 2). AFaaS names the risks: a seed is serial, so a node keeps several, and unique state such as random
-seeds must be re-initialized after the fork.
+**What a seam create is made of** (goal 5 plan step 1; `bench/competitive/probes/create_breakdown.md`, run 1). The
+create breakdown traced 1,500 seam creates in process, in the OCI pass's bench container on fedora (`kiln-a094a12d`,
+Intel Core i9-14900HX, Linux 6.19.10, the container on CPUs 4-31), 2026-10-30T00:08:22Z to 00:12:35Z. The 1-minute
+load was 7.17 at the start and 6.85 at the end, from other work on the host, which ran in its at-rest clock state
+(`probes/host_clock.sh`). Binaries: `hex 0.1.0 (ef64dbc)`, sha256 596969cb3a612644; `seam_oci` sha256
+0656cae0a8464d57; libcrun 1.30.1 in process beside it, in the same three rounds. The node's state was where the OCI pass
+keeps it, on the container's overlay over fedora's btrfs.
 
-**Evidence.** Each create execs the hex binary a second time (f6). An exec of that binary costs about 1 ms on the
-bench host (`hex --version`, 1.038 ms), about a sixth of create's 5.74 ms with the state on tmpfs.
+**The bench's `/run` was overlayfs.** In the OCI pass's container `/run` is the overlay too (the run's environment;
+only `/dev/shm` is a tmpfs there, as step 2 found), and `oci_bench.py` keeps every runtime's state under it, libcrun's
+in `/run/libcrun` (`oci_bench.py:70`). So in this run both runtimes' state sat on overlayfs, where a host's `/run` is a
+tmpfs. This is the baseline: today's code in today's container. Step 2 mounts a tmpfs at `/run` in the pass's
+containers, so a pass matches a real host.
 
-**What would falsify it.** A seed's clone costing as much as the exec it replaces.
+Each traced create is cut into 35 parts at system calls on its critical path, from the call's marker to its return,
+across the node agent, the shim and the container's init. The parts' p50s summed are 99.5% of the p50 of the untraced
+creates between them (99.1-100.1% by round), so they account for the whole create (the step's criterion: within 10%).
+By group (ms; each group its parts' p50s summed):
+
+<!-- record: bench/competitive/probes/create_breakdown.md -->
+| Group | r1 | r2 | r3 | pooled | share |
+|---|---|---|---|---|---|
+| the box's record | 12.785 | 12.698 | 13.049 | 12.841 | 70.5% |
+| the init's set-up, to the exec FIFO | 2.534 | 2.485 | 2.507 | 2.508 | 13.8% |
+| the node's and the runtime's own work | 1.386 | 1.354 | 1.360 | 1.365 | 7.5% |
+| the shim's spawn and exec | 0.888 | 0.868 | 0.878 | 0.878 | 4.8% |
+| the cgroup, made and bounded | 0.477 | 0.463 | 0.474 | 0.473 | 2.6% |
+| the handshake | 0.141 | 0.143 | 0.143 | 0.142 | 0.8% |
+| the parts, summed | 18.211 | 18.011 | 18.411 | 18.207 | |
+| the creates between the traced ones, p50 | 18.185 | 17.997 | 18.573 | 18.297 | |
+| libcrun's create, p50 | 5.055 | 4.814 | 5.183 | 5.015 | |
+<!-- /record -->
+
+**The levers, in order.** Each takes the parts named off create's path. Its share is those parts' share of create's
+p50 (18.297 ms):
+
+<!-- record: bench/competitive/probes/create_breakdown.md -->
+| Lever | Plan step | Its parts | ms | Share of create |
+|---|---|---|---|---|
+| the record off create's path | 2 | the record's four fsyncs | 12.187 | 66.6% |
+| the seed, several per node | 3 and 4 | the shim's spawn and exec | 0.878 | 4.8% |
+| a pool of cgroups made ahead | 5 | the cgroup's making: the box root listed and the mkdir | 0.372 | 2.0% |
+<!-- /record -->
+
+1. **The record off create's path** (plan step 2) comes first.
+   - **Why first.** Its fsyncs are two thirds of create. The store also holds its one write lock across them
+     (`store.rs:51`; f5), so under concurrency creates wait on each other's fsyncs and run one at a time (f8). No other
+     lever shows at concurrency 32 while they stand.
+   - **What it costs.** Each durable write's pair of fsyncs, the file's and its directory's, took 6.028 and 6.159 ms at
+     p50 on the overlay. The fsync probe found 7.138 and 7.481 ms for the same pair on fedora's `/home` (f6).
+   - **Why it can go.** Runtimes keep a container's state where a host crash takes it with the containers it describes:
+     runc's `--root` asks for tmpfs, and crun keeps its state under `/run/crun` (f11). Step 2 holds the box's record to
+     that rule, so its writes leave the fsyncs and the lock behind.
+   - **What stays.** The record's temp files, writes and renames take 0.654 ms on the overlay. On a tmpfs runtime
+     directory they take less. In the bench container `/run` is the overlay as well (the run's environment), so step 2's
+     pass needs a tmpfs there for the record to land where the node would put it.
+   - **What would falsify it:** Hex's create through the seam on fedora not falling by about the fsyncs' 12.187 ms once
+     step 2 is in. Or the sustained phase's rate at concurrency 32 not rising once the lock is no longer held across
+     them.
+2. **The seed, several per node** (plan steps 3 and 4) is next.
+   - **What it removes.** The shim's spawn and exec, 0.878 ms (4.8%), which a seed does once and never again: the
+     clone of the agent (0.084 ms), the hex binary's execve (0.256), its start as a static-pie binary (0.354), and
+     Rust's start-up up to its config (0.184).
+   - **What stays.** Today's shim already does a seed's per-create work after its exec, single-threaded: it reads and
+     parses the spec, makes the namespaces and clones the init into its cgroup. That takes 0.527 ms at p50 (parts 19, 21
+     and 22), and this serial part sets a seed's rate (f14). The init's own set-up after its clone (1.974 ms: its root
+     mounted and pivoted, the process become) runs in the init, beside the seed's next clone.
+   - **The plan's other conditions stand.** A seed's child execs the container's program, so the program's address
+     space is randomized afresh (f17). Any state unique to the container is made anew in the child before that exec
+     (f15).
+   - **What would falsify it:** a seed's clone of a container's init, from the request's arrival to the init's first run,
+     costing as much as the spawn and exec it replaces: 0.878 ms in this run. Step 4's bar, `hex --version`'s 1.038 ms,
+     is a spawn, exec and exit of the same binary, timed by the earlier probe's spawning process (f1, f3).
+     **Met (goal 5 plan step 4, `bench/competitive/probes/seed_path.md`):**
+     <!-- record: bench/competitive/probes/seed_path.md -->a seed's clone of a container's init, from the request's
+     arrival at the seed to the init's first run, is 0.234 ms p50 (p99 1.050; run 3), and to the init's birth 0.209 to
+     0.256 ms p50 in the probe's three runs: under a quarter of the 1.038 ms exec it replaces, and under a third of the
+     0.878 ms of the shim's spawn and exec.<!-- /record -->
+3. **A pool of cgroups made ahead** (plan step 5) comes last, if at all.
+   - **What it would remove.** Making and bounding the box's cgroup takes 0.473 ms (2.6%): listing the box root to count
+     its boxes (0.094 ms), the `mkdir` (0.278) and writing the bounds (0.101). A cgroup made ahead still has its bounds
+     written when it is taken.
+   - **Its share.** Of what's left once the first two levers are in, 5.142 ms, the cgroup is 9.2% and its making 7.2%.
+     That is under step 5's tenth, so on this run the pool isn't built. Step 5 measures the share again with this probe
+     once steps 2 and 4 are in, and builds the pool only if it has reached a tenth.
+   - **What others found.** SOCK measured reusing a cgroup at twice the speed of making one, on Linux 4.13, and pooled
+     them; AFaaS pools them too (f16). AFaaS's own lesson is that "not all kernel resources require pooling; it is
+     crucial to identify the minimal necessary set" (Chai et al., OSDI 2025, §8, p.512).
+   - **What would falsify it:** the cgroup, made and bounded, at a tenth or more of what's left of a create once steps 2
+     and 4 are in.
+   - **Step 5's measure** (2026-10-31): <!-- record: bench/competitive/probes/create_breakdown.md -->with steps 2 and 4
+     in, the cgroup, made and bounded, is 0.184 ms of a create whose parts sum to 2.134 ms, 8.6%, and its making 0.139
+     (6.6%; run 4, create-breakdown-20261031T061841Z).<!-- /record --> That is under the tenth, so no pool is built and
+     goal 5 plan step 5 closes on this record. The cgroup's work goes instead to goal 5's added step for fewer
+     `cgroup_mutex` holds per lifecycle, which reuses a box's cgroup for the next box of the same owner once it's
+     clean (Ada's call, 2026-10-31).
+   - **What step 4 adds.** At concurrency 32 the rate is what `cgroup_mutex` admits, and a cgroup made and removed per
+     lifecycle is most of what holds it (below, "Concurrency 32"). A pool that makes cgroups ahead and removes them
+     after use still takes the lock as often, so under a sustained rate it doesn't lift that ceiling (under a burst it
+     can move the holds out of the burst); only one that reuses a cgroup from box to box would.
+
+**What's left, and the bar.** Goal 5's bar is Hex's create p50 at most a quarter of libcrun's in the same run: 1.254 ms
+here. The three levers can't reach it. Once the record's fsyncs and the shim's spawn and exec are gone, 5.142 ms is left:
+1.025 of libcrun's create in the same run, and 4.101 of the bar. Nearly all of it is what any runtime does to make a
+fresh container, and libcrun does it too, in its whole create of 5.015 ms. By part:
+
+<!-- record: bench/competitive/probes/create_breakdown.md -->
+| What's left | ms | Share |
+|---|---|---|
+| the init's root: mounted, then pivot_root | 1.839 | 35.8% |
+| the init's other set-up: the shim's config read, the namespaces joined and made, the init's clone, the process become | 0.669 | 13.0% |
+| the record's temp files, writes and renames, without their fsyncs | 0.654 | 12.7% |
+| the device program, loaded and attached | 0.583 | 11.3% |
+| the node's and the runtime's other work | 0.523 | 10.2% |
+| the cgroup, made and bounded | 0.473 | 9.2% |
+| the container's state written (state.json) and read back | 0.259 | 5.0% |
+| the handshake | 0.142 | 2.8% |
+<!-- /record -->
+
+Even with the init's root, the device program, the record's and the state's writes and the cgroup's making each taken
+away whole, 1.435 ms is left: still 1.145 of the bar. Three of those parts are measured here as levers beyond this
+plan:
+- **The init's root** (35.8% of what's left). The mounts take 0.966 ms and `pivot_root` 0.873.
+  - `pivot_root` walks every thread on the host, to move each one whose root or working directory was the old root
+    (`chroot_fs_refs`, Linux v6.19 `fs/fs_struct.c:60-61`). So it grows with a node's density: the host had 3,310 to
+    3,752 threads during this run.
+  - Decision 6 makes the container's mount namespace from its tree, `open_tree(OPEN_TREE_NAMESPACE)` and `setns`, in
+    place of `unshare(CLONE_NEWNS)`, the root's bind and `pivot_root`, as crun does where it can
+    (`oci-runtimes-and-fast-start.md` §4.2). That needs Linux 7.0, and fedora runs 6.19.
+- **The device program** (11.3%). It is loaded and verified with each create (0.491 ms), because the program a policy
+  shares ends with the last cgroup it is attached to, and in the lifecycle phase no other container holds it. A node
+  that kept its policies' programs loaded would only attach them: decision 2's sharing, with the agent as the holder
+  that outlives every container.
+- **The record's and the state's writes** (17.7%). They are files made, written and renamed on the overlay, and on the
+  tmpfs step 2 moves them to they cost less.
+
+Beyond those, a quarter of libcrun's create needs most of a fresh container's own set-up done before the create asks for
+it: its namespaces, root and process. None of these levers does that. That is the measured case for containers made
+ahead, which needs research of its own and isn't decided here.
+
+The tails follow the fsyncs. Hex's create p99.9 was 36.007 to 55.114 ms by round, against libcrun's 7.376 to 14.212, and
+each fsync's p99 was 5.719 to 6.333 ms.
+
+**What would falsify this account.**
+- The breakdown's parts summed falling outside 10% of create's p50 in a later run of the probe: the parts then miss
+  part of create.
+- Once steps 2 and 4 are in, Hex's create through the seam on fedora more than 10% above the 5.142 ms they leave here
+  plus the seed's clone: a lever then took less off than its parts measure.
+
+**The choice** (built, goal 5 plan step 4). The node agent starts its seeds once.
+- **The seed.** Each is `hex __oci-seed`, exec'd once and single-threaded, with what's common to its containers already
+  set up (`crates/hex-runtime/src/linux/oci/seed.rs`, `serve_create`).
+- **A create.** It hands an idle seed the container's spec and state directory over its socket, with the init's sync and
+  map pipes and a network namespace made ahead as `SCM_RIGHTS` descriptors (`hex_core::seed::Create`). The seed clones
+  the container's init with `clone3(CLONE_PARENT | CLONE_INTO_CGROUP | CLONE_PIDFD | the namespace flags the spec asks
+  for)` (f12), as Hex's exec seed clones already (f13), and passes the init's pidfd back over `SCM_RIGHTS`. The
+  `CLONE_PARENT` makes the init the node agent's own child, so the agent reaps it by its pidfd (`waitid(P_PIDFD)`) as it
+  reaps a shim-forked init; `exit_signal` is 0, the one value `clone3` takes with `CLONE_PARENT`.
+  - **One clone serves root and rootless.** `clone(2)`'s ERRORS (man-pages 6.19) still bars `CLONE_PARENT` with
+    `CLONE_NEWPID`, but the kernel dropped that bar before v3.12 (Biederman, "fork: Allow CLONE_PARENT after
+    setns(CLONE_NEWPID)", commit `1f7f4dde5c94`), and v6.19's `copy_process` refuses `CLONE_PARENT` only from an init
+    (`SIGNAL_UNKILLABLE`, `kernel/fork.c:2010-2012`) and `CLONE_NEWUSER`/`CLONE_NEWPID` only with `CLONE_THREAD`
+    (`2018-2022`); `clone3_args_valid` refuses `CLONE_PARENT` with a nonzero `exit_signal` (`2911-2913`). A rootless
+    container's init is born unmapped in its new user namespace by the same clone and asks the runtime for its maps over
+    the sync pipe, which the agent writes against the pid the seed hands back, as the shim did before it forked; so no
+    intermediate fork is needed (shown by the lab's `oci_box` tests, which make every seam container through one such
+    clone: rootless on adacachy's Linux 7.2 and as root on fedora's 6.19).
+  - **Namespaces by path.** The init joins the network, ipc, uts, mount and cgroup namespaces its spec names by path
+    itself, after its user namespace's maps, in the shim's order (`init::join_namespace_paths`). A pid or user namespace
+    by path can't be joined that way: a pid namespace's `setns` moves only the caller's later children, and the clone
+    has already made the fresh namespaces, owned by the seed's user namespace. So a given bundle that joins either is
+    made through the shim, as the command line makes every container, and counted (`Node::creates_through_shim`): the
+    one kind of seam create that still re-execs the hex binary. The rendered bundles never join by path; a pod's
+    containers sharing a network namespace (`ClassSpec::Bundle`) go through the seed as root, and rootless, where joining
+    a namespace another container's user namespace owns needs that user namespace joined too, through the shim.
+- **The child.** It does what the shim's child does today (`init::clone_child`), up to the exec FIFO, then execs the
+  container's program, so the program's address space is randomized afresh (f17) and any state unique to the container
+  is made anew in the child after the clone (f15). Its standard streams are the seed's, the null device, as a `process`
+  box's program's and an exec's unset streams are; a seam create made through the shim gives the shim the same, so no
+  seam container holds the node agent's streams, as one did when the shim inherited them. The command line's `create`
+  still passes its caller's streams on, as runc's does.
+- **The shim.** Its re-exec (`hex __oci-init`) leaves the seam's create (`create_in_cgroup_seeded`); the command line
+  keeps it (`create`).
+- **No `hex` exec per create.** <!-- record: bench/competitive/probes/seed_path.md -->strace of `execve` over 55 seam
+  creates on fedora, in each of the probe's three runs: the hex binary is exec'd twice, both `__oci-seed` (the node's
+  first seed and its spare, started ahead of the creates), and `__oci-init` (the shim) and `__oci-exec` not at all;
+  each create's init execs only its own program (`/usr/bin/sleep`, `/usr/bin/true`), never hex: 0 per
+  create.<!-- /record --> The exception is the pid or user namespace by path above, made through the shim and counted.
+- **The box count.** A create counts the node's boxes by the box root's link count, its subdirectories plus two on
+  cgroup2 (`kernfs_refresh_inode`, Linux v6.19 `fs/kernfs/inode.c`), where it listed the root before:
+  <!-- record: bench/competitive/probes/create_serial.md -->at concurrency 32 that listing, under the root's
+  `i_rwsem`, was 5.710 ms of each lifecycle's waits (run 0).<!-- /record -->
+- **Seeds start ahead of the creates.** A thread of the node's create pool starts each seed with its lock let go and
+  keeps one spare up idle beyond the creates waiting (`createpool::SPARE`), the first as soon as the node's hex binary
+  is named, so no create's path holds a seed's exec, nor the pool's lock while one starts. A burst past the spare waits
+  in line for a seed to free or to start, while the thread adds more, up to the bound.
+
+**Concurrency 32 (plan step 4's fourth criterion: measured, not met).** The criterion asks the sustained rate at
+concurrency 32 to be at least 8x the throughput at concurrency 1 in the same run. What holds the rate at concurrency
+32 is the kernel's `cgroup_mutex`, one lock for the whole host (`bench/competitive/probes/create_serial.md`):
+
+<!-- record: bench/competitive/probes/create_serial.md -->
+- **The measurement.** The OCI pass at ca45e1a on fedora (`20261030T041910Z`, a load of 21.81, not of record) read
+  1,942 against 394 lifecycles a second in process, 4.93x, and 1,994 against 316 over the socket, 6.31x; libcrun
+  beside it ran 1,593 against 73.
+- **The lock is the ceiling.** In run 2 the box root's exclusive holds filled 90% of the run's time, and `cgroup_mkdir`
+  and `cgroup_rmdir` inside them, each waiting for and holding the lock, 87%. In run 4 the lock was held 83.4% of the
+  time and handed off 6.8% more, so it was free under a tenth of it; the runtime's own takers waited for it 1.789 ms a
+  lifecycle, and the kworkers 4.104 ms more.
+- **Not the network namespaces.** Without a network namespace of its own the sustained phase ran 1,340/s against
+  1,359/s with one, the lock held 83.0% of the time against 83.4% (run 4).
+- **Each lifecycle takes the lock 17 times.** The runtime's `mkdir` and `rmdir` of the container's cgroup, its
+  `cgroup.kill`, its device program's attach and its clone into the cgroup; and the kernel's work for the removed
+  cgroup in kworkers: five csses offlined, six released, and its BPF state released.
+- **libcrun contends on the same lock.** Its lifecycle takes it more often, and at its lower rate the lock was held
+  74.6% of the time (run 4), while libcrun spends 4.069 ms of each lifecycle in its own polling sleeps (run 1).
+- **Hex's own waits are small beside it.** Its futexes took 0.601 ms of a lifecycle at concurrency 32 and its record
+  directory 0.671, against 7.756 on the box root.
+<!-- /record -->
+
+- **Where the kernel takes the lock** (Linux v6.19). `mkdir`, `rmdir` and `cgroup.kill` take it through
+  `cgroup_kn_lock_live` (`kernel/cgroup/cgroup.c:1732`). A clone with `CLONE_INTO_CGROUP` takes it in
+  `cgroup_css_set_fork` (`cgroup.c:6694-6695`) and holds it to `cgroup_css_set_put_fork`'s unlock (`6803`), at the end
+  of `cgroup_post_fork` (`6968`). The kworkers take it in `css_killed_work_fn` (`6049`), `css_release_work_fn`
+  (`5629`) and `cgroup_bpf_release` (`kernel/bpf/cgroup.c:314`), which runs for every removed cgroup, a program
+  attached or not. Inside it `cgroup_mkdir` and `cgroup_rmdir` take the hierarchy's `kernfs_rwsem` to write, for each
+  interface file they make and once to remove them (`fs/kernfs/dir.c:796`, `1554`), and every lookup in the cgroup
+  filesystem takes that to read as it revalidates (`1167`, `1185`). `mkdir` and `rmdir` hold their parent's `i_rwsem`
+  across all of it, from `__start_dirop` (`fs/namei.c:2873`). kernfs leaves the dentry its `mkdir` made negative
+  (`kernfs_iop_mkdir`, `fs/kernfs/dir.c:1259-1277`) and drops a negative dentry once its directory has changed
+  (`1170`), so each lifecycle's two first lookups of its new cgroup go the slow way, under that `i_rwsem`.
+- **The ceiling moves with the host's load.** A lock handed off is unusable until its woken waiter runs, and that
+  wait grows with the host's other work, so the rate at concurrency 32, and the ratio with it, depend on the load in a
+  way the rate at concurrency 1 doesn't.
+- **What would raise it: fewer holds of the lock per lifecycle.** A cgroup reused from one box to the next rather than
+  made and removed for each would take the `mkdir`, the `rmdir` and the kworkers' 12 holds off it. Fewer controllers
+  enabled for a box would each take an offline, a release and their interface files off; one device program attached
+  at the box root for boxes that share a policy would take the attaches; a kill that doesn't go through `cgroup.kill`
+  would take that one.
+- **What wouldn't.** A pool that makes cgroups ahead and removes them after use takes the lock as often: under a
+  sustained rate it moves no hold. Under a burst it can move up to 14 of the 17 out of the burst, if the making comes
+  before it and the removal after. Spreading the boxes' cgroups over several parents would part their directories'
+  `i_rwsem`s but not the lock: with the lock free under a tenth of the time, about a tenth more at most.
+- **So no lever of this step reaches 8x.** The faster a lifecycle runs alone, the further 8x of it sits above what the
+  lock admits. The criterion is put to Ada with this measurement; no cgroup change is made for it here.
+
+**The seeds a node keeps (plan step 3).** The node's policy for its seeds is a pure core, `hex_core::seeds`
+(`crates/hex-core/src/seeds.rs`, 5f0b474), which step 4's shell drives (`crates/hex-node/src/createpool.rs`).
+- **The bound.** At most **32** seeds, up or starting, one to a slot. A seed serves one create at a time: "only one
+  instance can be cloned from it at a time (serially)" (AFaaS, OSDI 2025, §8; f14). The bench's busiest phase has 32
+  creates in flight (concurrency 32, the figure decision 4's pool holds), so with 32 seeds no create of that phase
+  waits for a seed that is busy. The shell starts seeds as creates wait for them rather than all 32 at once (one spare
+  beyond the creates waiting, above), so a create can wait while one starts. At concurrency 1 one seed serves every
+  create, its clone a seventh of a create (0.209 ms p50 against the pass's 1.50 ms create p50 in process,
+  `20261030T041910Z`). At concurrency 32 clones into a cgroup queue on `cgroup_mutex` (above), so the creates in
+  flight hold their seeds longer and how many are busy follows that queue:
+  <!-- record: bench/competitive/probes/seed_path.md -->a sustained phase on a loaded fedora started all 32 seeds and
+  had all 32 busy at once, 45 of its 10,000 creates waiting and none refused (run 2); under a lighter load 21 started
+  and 20 at most were busy (run 3).<!-- /record --> Those busy seeds are the clones' queue on the lock, not a need for
+  32: fewer would move the queue into the pool's line without changing the rate. The core counts the most seeds busy
+  at once, so a run shows how many it used.
+  - **Their memory.** <!-- record: bench/competitive/probes/seed_path.md -->A seed holds 1.5 to 2.4 MiB `VmRSS`, the
+    busier seed the larger (run 2: 58 samples of a node's two seeds while it served 400 creates after 20 on fedora;
+    `Pss` 0.7 to 1.7 MiB, the two sharing the binary's pages), so the bound caps the seeds at about 78 MiB, counted as
+    if they shared nothing.<!-- /record --> They run in the node agent's cgroup, so their memory is charged to the
+    node's own budget there, and a density reading that counts the agent's cgroup with its boxes' counts them, as
+    decision 4's pooled namespaces are counted.
+- **Handing out seeds.** A create is handed an idle seed that is up, never one starting, busy or gone. With none idle it
+  waits in line, and each seed that frees goes to the create that has waited longest.
+- **Waiting.** At most 128 creates wait: the socket's 128 workers, so no create over the socket is refused for room.
+  Past that, a create is refused by type at once, and one handed no seed within 1 s is refused by type.
+  - A seed frees once it has cloned: 0.209 ms at p50 at concurrency 1 (step 4's measurement), a pace at which a full
+    line of 128 behind a single seed clears in about 27 ms. At concurrency 32 on a loaded host a clone's fork into the
+    cgroup alone averaged 1.014 ms (`create_serial.md`, run 3), a pace at which the same line takes about 130 ms.
+  - So a create still waiting after a second has found the seeds stuck, and its refusal lets the scheduler place it
+    elsewhere.
+- **A dead or hung seed.** One reported dead, or busy on one create for 30 s (decision 3's bound on a seed's answer,
+  far past a clone), leaves its slot, and its create is refused by type. The slot is started again and the restart
+  counted.
+  - Each seed carries a number no other has, so a late report about one that left is refused, never taken for the
+    slot's next seed.
+  - A start that fails, or a seed that dies before it serves a create, stops the starting until the next create. A node
+    whose seeds can't start tries each slot once a create, never in a loop.
+- **What the bench reads.** Creates asked, handed, waited for, done, and refused for a full line, a wait past its bound,
+  a seed's death or a seed's hang. Seeds started, restarted, failed to start, dead and hung. The most busy at once, and
+  the creates each slot's seeds were handed.
+- **Tests** (HEX-SEEDS-1 to 6). A proptest runs against an oracle under random starts, failed starts, creates, claims,
+  completions, deaths, hangs and the clock moving on. After every event it checks the core against the oracle and the
+  shell's own record of its seeds, with a non-vacuity counter on each of 23 paths. It checks that:
+  - the bound is never passed (HEX-SEEDS-1);
+  - no create is handed a seed starting, busy or gone, and no seed serves two (HEX-SEEDS-2);
+  - creates wait in the order they came, and are refused past the line or the wait bound (HEX-SEEDS-3);
+  - a death or a hang refuses its create, the slot is started again, and late reports are refused (HEX-SEEDS-4);
+  - a failed start, or a seed dead before serving, stops the starting until the next create (HEX-SEEDS-5);
+  - the counts equal the oracle's and keep their identities (HEX-SEEDS-6).
+
+  Unit tests take the plan's two cases (every seed busy past the wait bound; a seed dying mid-create), and a hang, the
+  line's order, a failed start and a late report.
+- **What would falsify the bound.** As first written: a sustained phase at concurrency 32 in which creates waited
+  for a seed. That tripped (45 of 10,000 waited, above). With the seeds started as creates ask for them, a create waits
+  while a seed starts, which that falsifier didn't foresee, and the count can't tell those waits from waits for a busy
+  seed. So it is restated as one a run can trip: with more creates in flight than seeds (concurrency 64 over the
+  socket's 128 workers, against bounds of 16, 32 and 64), creates refused for a wait past its bound with no seed hung,
+  or the sustained rate rising with the bound. Not yet run.
+
+**Sources.** `docs/research/runtime/seed-per-node.md`: the code a create runs today, where runc and crun keep state,
+clone(2), AFaaS, Firecracker and SOCK on seeds, unique state and cgroup pools, and pivot_root's walk. Kiln research
+`01a1877e05cc73b495447bf5113ebda3`, f1-f17. `bench/competitive/probes/create_breakdown.md`, run 1;
+`bench/competitive/probes/seed_path.md` (a seed's clone, the execs, a seed's memory, the seeds' counts) and
+`create_serial.md` (where creates wait under concurrency). Linux v6.19 `kernel/fork.c` (`copy_process`,
+`clone3_args_valid`) and commit `1f7f4dde5c94`; Linux v6.19 `kernel/cgroup/cgroup.c` (`cgroup_kn_lock_live`,
+`cgroup_css_set_fork`, `css_killed_work_fn`, `css_release_work_fn`), `fs/namei.c` (`__start_dirop`), `fs/kernfs/dir.c`
+(`kernfs_iop_mkdir`, `kernfs_dop_revalidate`) and `fs/kernfs/inode.c` (`kernfs_refresh_inode`).
 
 ### 6. Mount namespaces without copying, where the kernel has it
 

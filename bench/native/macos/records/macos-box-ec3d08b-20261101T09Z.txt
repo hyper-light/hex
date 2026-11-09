@@ -1,0 +1,41 @@
+# macos_box (class path hex_runtime::macos), 2026-11-01, commit ec3d08b, adas-mac-studio-3 (M4 Max, 14 cores,
+# 36 GiB, macOS 26.2 25C56), load 2.14. The polling watcher with every rootless improvement: 150 us RT
+# computation budget, lean per-read, and floor pacing while a box takes on members. 5 passes, 256 MiB bound.
+macos_box bound_mib=256 passes=5
+pass=1 members=1 overshoot_mib=0.2
+pass=1 members=4 overshoot_mib=20.1
+pass=1 members=8 overshoot_mib=47.9
+pass=1 members=14 overshoot_mib=29.4
+pass=1 members=28 overshoot_mib=697.2
+pass=2 members=1 overshoot_mib=3.5
+pass=2 members=4 overshoot_mib=20.8
+pass=2 members=8 overshoot_mib=20.5
+pass=2 members=14 overshoot_mib=2.3
+pass=2 members=28 overshoot_mib=42.8
+pass=3 members=1 overshoot_mib=2.2
+pass=3 members=4 overshoot_mib=5.5
+pass=3 members=8 overshoot_mib=7.3
+pass=3 members=14 overshoot_mib=31.1
+pass=3 members=28 overshoot_mib=1034.5
+pass=4 members=1 overshoot_mib=2.1
+pass=4 members=4 overshoot_mib=6.8
+pass=4 members=8 overshoot_mib=16.0
+pass=4 members=14 overshoot_mib=14.3
+pass=4 members=28 overshoot_mib=0.3
+pass=5 members=1 overshoot_mib=4.1
+pass=5 members=4 overshoot_mib=6.2
+pass=5 members=8 overshoot_mib=14.7
+pass=5 members=14 overshoot_mib=21.0
+pass=5 members=28 overshoot_mib=230.7
+pass=1 hold_seconds=2 watcher_cpu_pct_of_core=14.11
+pass=2 hold_seconds=2 watcher_cpu_pct_of_core=15.06
+pass=3 hold_seconds=2 watcher_cpu_pct_of_core=15.46
+pass=4 hold_seconds=2 watcher_cpu_pct_of_core=15.21
+pass=5 hold_seconds=2 watcher_cpu_pct_of_core=14.84
+# Up to one member per core (1,4,8,14): ≤48 MiB, within the 64 MiB bar. At 28 (2x cores) the watcher is
+# intermittently descheduled under memory-bandwidth saturation and overshoots (0.3-1034 MiB across passes) —
+# the documented limit of rootless footprint-polling at CPU overcommit; the standalone probe (bench/native/
+# macos/rtbudget.c) holds 28 simultaneous allocators to ≤55 MiB, but the class under realistic load spikes.
+# The tight bound at any member count is step 2's event-driven kernel ledger (hex_core::ledger + the
+# privileged helper), with this polling the defense-in-depth layer. Watcher CPU held at 95% is ~14-15% of a
+# core (criterion 3's ≤1% is step 2's ledger: event-driven, ~0 CPU).
