@@ -117,6 +117,39 @@ fn a_watched_source_is_reported_while_its_bytes_wait_or_it_has_ended_and_never_o
     os.unwatch_source(source.as_socket(), token);
 }
 
+/// Native plan step 8, CLAUDE.md §3: do watch a long-running program and end it, then wait with the wait's
+/// events already at their bound, so the one completion that wait takes from the port is the program's end;
+/// then wait again. Expect the end reported: its completion is its only report, so a wait with no room for it
+/// keeps it for the next, never drops it.
+#[test]
+fn a_programs_end_taken_by_a_full_wait_is_reported_by_the_next() {
+    let (_dir, os) = os();
+    let mut child = std::process::Command::new("ping")
+        .args(["-n", "60", "127.0.0.1"])
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let token = 7;
+    let Ok(watch) = os.watch_program(child.id(), token) else {
+        panic!("the program wasn't watched");
+    };
+    os.kill(&watch);
+    child.wait().unwrap();
+    let full = Event::Ready {
+        token: 1000,
+        readable: true,
+        writable: false,
+        hung_up: false,
+    };
+    let mut events = vec![full; EVENTS];
+    os.wait(&mut events, Some(PATIENCE)).unwrap();
+    assert!(
+        reported(&os, token, PATIENCE),
+        "a program's end taken by a wait with no room for it was never reported"
+    );
+    os.unwatch_program(watch);
+}
+
 /// Native plan step 8: do watch a source for room, then write to it until it takes no more and watch it for
 /// room again, each time, until a wait finds it full and unreported; then let its peer read all of it. Expect
 /// a source with room reported at once; every report while it fills finding room for a write (a full
