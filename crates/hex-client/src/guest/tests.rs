@@ -546,6 +546,87 @@ fn the_first_dial_waits_for_the_guest_and_later_ones_try_once() {
     );
 }
 
+/// HEX-RT-17, HEX-GUEST-41: ask an actual Shards simulator for stdin and stdout, then use their raw descriptors as
+/// the caller's files. Expect blocking ends that echo to EOF, while the control connection remains non-blocking.
+/// Shards waits around its non-blocking kernel sockets in its Stream wrapper; that wrapper is gone at handoff.
+#[cfg(unix)]
+#[test]
+fn asked_shards_streams_wait_as_the_callers_files_do() {
+    use shards_api::Guests;
+
+    let guests = shards_api::sim::SimGuests::new(|host| {
+        host.listen(stream::CONTROL_PORT);
+        host.listen(stream::STDIO_PORT);
+        let (port, mut control) = host.accept().unwrap();
+        assert_eq!(port, stream::CONTROL_PORT);
+        control.write_all(&TOKEN.to_le_bytes()).unwrap();
+        let mut named = std::collections::BTreeMap::new();
+        for _ in 0..2 {
+            let (port, mut conn) = host.accept().unwrap();
+            assert_eq!(port, stream::STDIO_PORT);
+            let mut name = [0u8; stream::NAME_BYTES];
+            conn.read_exact(&mut name).unwrap();
+            let named_stream = stream::read_name(&name).unwrap();
+            assert_eq!(named_stream.exec, Exec { conn: TOKEN, id: 1 });
+            named.insert(named_stream.stream, conn);
+        }
+        let mut stdin = named.remove(&stream::Stdio::In).unwrap();
+        let mut stdout = named.remove(&stream::Stdio::Out).unwrap();
+        std::io::copy(&mut stdin, &mut stdout).unwrap();
+        shards_api::End::PowerOff
+    });
+    let guest = guests
+        .boot(&shards_api::GuestSpec {
+            kernel: "kernel".into(),
+            init: shards_api::Init::Executable("init".into()),
+            cmdline: String::new(),
+            vcpus: 1,
+            memory_mib: shards_api::min_memory_mib(std::env::consts::ARCH),
+            disks: vec![],
+            shares: vec![],
+            ports: vec![stream::CONTROL_PORT, stream::STDIO_PORT],
+            binary: None,
+        })
+        .unwrap();
+    let transport = Stream::dial(Arc::new(shards::ShardsLink::new(
+        Arc::from(guest),
+        Duration::MAX,
+    )))
+    .unwrap();
+    let given = transport
+        .asks(
+            1,
+            hex_api::Ask {
+                stdin: true,
+                stdout: true,
+                stderr: false,
+            },
+        )
+        .unwrap();
+    let (stdin, stdout) = (given.stdin.unwrap(), given.stdout.unwrap());
+    for fd in [&stdin, &stdout] {
+        assert!(
+            !rustix::fs::fcntl_getfl(fd)
+                .unwrap()
+                .contains(rustix::fs::OFlags::NONBLOCK),
+            "a raw given end must wait without Shards' Stream wrapper"
+        );
+    }
+    assert!(
+        rustix::fs::fcntl_getfl(transport.handle())
+            .unwrap()
+            .contains(rustix::fs::OFlags::NONBLOCK)
+    );
+    let mut stdin = std::fs::File::from(stdin);
+    stdin.write_all(b"round trip\n").unwrap();
+    drop(stdin);
+    let mut output = String::new();
+    std::fs::File::from(stdout)
+        .read_to_string(&mut output)
+        .unwrap();
+    assert_eq!(output, "round trip\n");
+}
+
 /// Native plan step 8 (1), CLAUDE.md §2: the event form's writes queue behind a backlog bounded in bytes.
 /// To a peer that never reads, frames go while the socket and the backlog have room; the one that wouldn't
 /// fit is refused whole, `Exhausted` naming the backlog and its bound, nothing past the bound is ever
