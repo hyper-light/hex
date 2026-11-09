@@ -547,19 +547,29 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
     (`records/watcher-headroom-cpu-f18e6ee-20261106T1737Z.txt`). Under load the watcher's wake comes late
     (up to 79 ms past its wait on Mac16,9, its timeshare thread waiting for a core beside the box's own
     members and other programs; `records/watcher-wakes-load-0cb6e11-20261108T2114Z.txt`), and a box filling
-    at the recorded rate passes its bar by what it grows meanwhile. So layer three holds such a box stopped
-    (SIGSTOP of its group) across a wait it could pass its bar in, at the rate it was seen growing (the
-    recorded rate while it takes on members) over the wait plus the latest lateness the node's watchers have
-    seen (`hex_core::watch::Watch::holds`; the lead, 2026-11-08: the box's own bound enforced, as Linux's
-    `memory.high` throttles a cgroup near its limit, slowing no other program). A held box runs only for its
-    watcher's reads, at most one fewer of its members than the machine has cores, and is let go by a run in
-    which it didn't grow; a member started beside another waits stopped for the watcher's next read; the
-    watcher continues only what it stopped, so a member the box's own programs stopped stays stopped. It
-    does not yet hold the bar: light checks on adas-mac-studio-3 (2026-11-08, launchd
-    `hex-macos-resume-hold4-20261108T215447Z`, `-hold6-20261108T223549Z`, `-tip5-20261108T224311Z`, ambient
-    load about 3) passed 3 of 8 runs, with 5 of 72 passes at 4, 8 and 14 members past 64 MiB (worst 175 MiB),
-    and beside 7 or 14 CPU-bound programs a box passes it by up to 565 MiB. What stretches a held box's run
-    is not yet taken apart. CPU follows the box's declared weight, as
+    at the recorded rate passes its bar by what it grows meanwhile. So layer three holds what of such a box it
+    must (the graded hold: the lead, 2026-11-08, the box's own bound enforced, as Linux's `memory.high`
+    throttles a cgroup near its limit, slowing no other program; 2026-11-09, as many members running as the
+    bound allows): at each read, the members whose own rates over the wait and the lateness fit the box's
+    headroom run across the wait, each in turn, and the rest are held stopped (SIGSTOP), the box then read at
+    the floor (`hex_core::watch::Watch::runs`). Every input is measured: the headroom is the bound and the bar
+    less the read's footprint; the lateness is the latest the node's watchers have acted past their waits
+    (a wake, its read and its stops), learned from the reads' own delays from the class's record up; each
+    member's rate is what its own runs showed (what it grew across the last wait, or the fastest its runs for a
+    read have shown while they show it growing, 0 once one doesn't), one no run has shown yet at the recorded
+    rate, and a run that gave a member no core (a thread runnable, none of its own code run) shows nothing of
+    it. Each read runs one held member, stopped again first, so its rate shows. XNU stops a running process by
+    holding its threads, then waiting for each to leave its core (`place_task_hold`, `task_wait_locked`,
+    `thread_wait`), and the stopping thread then waits for a core of its own, so a stop of several running
+    members, one by one or from a thread each, lets those not yet held run on: on adas-mac-studio-3
+    (2026-11-09, launchd `hex-macos-stops-cmp-20261109T194931Z`, 8 hogs, 300 interleaved reads a way beside
+    0, 7 and 14 CPU-bound programs) a box's members grew 85-226 MiB past its read at p99 stopped one by one,
+    88-226 MiB stopped from a thread each, and at most 0.06 MiB with one member running. A member started
+    beside another waits stopped for the watcher's next read, and the watcher continues only what it stopped,
+    so a member the box's own programs stopped stays stopped. Light checks on the same machine (2026-11-09,
+    launchd `hex-macos-graded-20261109T200810Z`, host load about 15) held the bar beside 0, 7 and 14
+    CPU-bound programs, with 1, 4, 8 and 14 members three passes each and 28 and 56 once, the worst 3.4 MiB
+    past the bound; the bench and its record follow the merge. CPU follows the box's declared weight, as
     `cpu.weight` sets a box's share on Linux: a box at the default weight runs unclamped, at the QoS the
     node's own programs run at, and one whose weight is under the default runs at background QoS (darwin
     background: lowest CPU priority, I/O throttled). No clamp keeps the watcher ahead of a box (the lead,

@@ -5,13 +5,13 @@
 //! refuses the allocation or the fork itself. A box can pass its bound by what it grows between two
 //! reads, so each wait is the time its headroom, plus the [`OVERSHOOT`] it may pass its bound by, lasts at
 //! the fastest the box can grow ([`Rates`], seeded from its machine class's record, [`seed`], and learned), at least the [`FLOOR`]. A box with no
-//! bound to pace by waits for its next change (a fork, an end, a start, a delete). A box whose growth could
-//! pass its bar before the next read, given how late the node's watchers wake ([`Lateness`]), is held
-//! stopped across the wait ([`Watch::holds`]). Pure (CLAUDE.md §9): the shell (`hex_runtime::macos`) lists the
-//! members, reads their footprints, waits and kills; this says when to read next, whether to end the
-//! box, and what it holds.
+//! bound to pace by waits for its next change (a fork, an end, a start, a delete). Of a box whose growth could
+//! pass its bar before the next read, given how late the node's watchers act ([`Lateness`]), only the members
+//! whose own rates fit its headroom run across the wait, the rest held stopped ([`Watch::runs`]). Pure
+//! (CLAUDE.md §9): the shell (`hex_runtime::macos`) lists the members, reads their footprints, waits, stops and
+//! kills; this says when to read next, whether to end the box, and which members run.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
 use std::time::Duration;
 
@@ -66,7 +66,7 @@ pub fn seed(model: &str) -> Rates {
 /// Each machine class's latest recorded watcher wake, by its `hw.model`: the widest gap past its armed wait
 /// a box's watcher showed, its timeshare thread waiting for a core beside the box's own members and other
 /// programs at equal priority (Ada's rule, 2026-11-03: no priority over other programs). What a node's holds
-/// reckon a wake can be late by to start ([`lateness_seed`], [`Watch::holds`]).
+/// reckon its watchers can act late by to start ([`lateness_seed`], [`Watch::runs`]).
 /// - `Mac16,9` (M4 Max, 14 cores, adas-mac-studio-3): 79,308 µs, a 28-member box's read armed for the 250 µs
 ///   floor and made 79,558 µs after the read before, one bound of the gap past the wait
 ///   (bench/native/macos/records/watcher-wakes-load-0cb6e11-20261108T2114Z.txt).
@@ -88,8 +88,11 @@ pub fn lateness_seed(model: &str) -> Duration {
     )
 }
 
-/// How late a node's watchers wake, as it learns it (the learned-waits rule, 2026-11-06): its class's
-/// record to start ([`lateness_seed`]), raised to any later wake a watcher sees, never lowered.
+/// How late a node's watchers act past their armed waits, as it learns it (the learned-waits rule,
+/// 2026-11-06; the lead, 2026-11-09: from the reads' own observed delays): a wake past its wait, the read
+/// it makes and the stops it then sends, the whole of which a member running across a wait can run on
+/// through. Its class's record to start ([`lateness_seed`]), raised to any later act a watcher sees, never
+/// lowered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Lateness {
     worst: Duration,
@@ -105,21 +108,10 @@ impl Lateness {
         self.worst
     }
 
-    /// Notes a wake `late` past its armed wait: the worst rises to it, when later.
+    /// Notes a watcher acting `late` past its armed wait: the worst rises to it, when later.
     pub fn observe(&mut self, late: Duration) {
         self.worst = self.worst.max(late);
     }
-}
-
-/// Whether a box growing at `rate` bytes a second, for `wait` and then `lateness` more, could use up
-/// `headroom` bytes: the hold's rule ([`Watch::holds`]). Whole bytes, rounded down; saturating, as a growth
-/// past 2^128 bytes uses up any headroom.
-pub fn hold(headroom: u64, rate: u64, wait: Duration, lateness: Duration) -> bool {
-    let grown = u128::from(rate)
-        .saturating_mul(wait.saturating_add(lateness).as_nanos())
-        .checked_div(NANOS_PER_SECOND)
-        .unwrap_or(u128::MAX);
-    grown >= u128::from(headroom)
 }
 
 /// The rate of `grown` over `over`, a second, rounded down: 0 for no growth, and the most a `u64` holds for
@@ -260,6 +252,34 @@ pub struct Read {
     pub running: u64,
 }
 
+/// A member's run since its box's last read, for the rate the hold reckons it at ([`Watch::ran`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Run {
+    pub pid: u32,
+    /// How long it could run: since the last read, for a member that ran across the wait; its run for this
+    /// read, for one held across it.
+    pub over: Duration,
+    /// It ran across the wait, so its rate is what it grew over that time. A held member runs for a read
+    /// alone, which it may not run whole, so its rate is the fastest such runs show.
+    pub across: bool,
+    /// It had a core in its run, or it was waiting on its own (asleep), so what it grew in the run is what it
+    /// does. A member left runnable with no core in its run shows nothing: its rate stays as it was.
+    pub shown: bool,
+}
+
+/// One running member as the hold reckons it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Grows {
+    /// Its footprint at the latest read.
+    footprint: u64,
+    /// Its footprint at the read before, `None` at its first.
+    before: Option<u64>,
+    /// The rate it grows at, in bytes a second, as its runs show it; `None` until one has.
+    rate: Option<u64>,
+    /// The read that last found it running; one the latest didn't is dropped.
+    read: u64,
+}
+
 /// One box under the rule: its bounds, the rates it is read at, and what its reads have found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Watch {
@@ -275,11 +295,9 @@ pub struct Watch {
     /// (a node starts a box's processes one after another), each beginning to allocate before the next is
     /// there, so the read paces at the floor rather than by a headroom the next new member would blow past.
     last_running: u64,
-    /// Whether the last read found the box taking on members (its running count rose), so the hold
-    /// reckons it at the recorded rate ([`Watch::holds`]).
-    taking_on: bool,
-    /// The rate the box is held at while it is held, 0 while it isn't ([`Watch::holds`]).
-    held_rate: u64,
+    /// Each running member's footprints and rate, by pid and start: the hold reckons each member by its own
+    /// ([`Watch::runs`]). Bounded by the box's running members, the last read's.
+    grows: BTreeMap<(u32, u64), Grows>,
 }
 
 impl Watch {
@@ -291,8 +309,7 @@ impl Watch {
             peak: 0,
             reads: 0,
             last_running: 0,
-            taking_on: false,
-            held_rate: 0,
+            grows: BTreeMap::new(),
         }
     }
 
@@ -319,7 +336,23 @@ impl Watch {
             .all(|m| m.armed);
         let taking_on = running > self.last_running;
         self.last_running = running;
-        self.taking_on = taking_on;
+        let reads = self.reads;
+        for m in members.iter().filter(|m| m.life == Life::Running) {
+            self.grows
+                .entry((m.pid, m.started))
+                .and_modify(|g| {
+                    g.before = Some(g.footprint);
+                    g.footprint = m.footprint;
+                    g.read = reads;
+                })
+                .or_insert(Grows {
+                    footprint: m.footprint,
+                    before: None,
+                    rate: None,
+                    read: reads,
+                });
+        }
+        self.grows.retain(|_, g| g.read == reads);
         self.peak = self.peak.max(footprint);
         let verdict = if running == 0 {
             self.ending = None;
@@ -386,38 +419,96 @@ impl Watch {
         self.reads
     }
 
-    /// Whether the box must be held stopped across the wait `read` decided (the lead, 2026-11-08: the box's
-    /// own bound enforced, as Linux's `memory.high` throttles a cgroup near its limit, slowing no other
-    /// program): its watcher's next read can come `lateness` past that wait, and a box growing meanwhile
-    /// could pass its bar before it. So it is held when growing at `rate_seen` (bytes a second, what it was
-    /// seen growing at while it ran), or at the recorded rate while it takes on members (a new member
-    /// begins allocating at once), for the wait and the lateness could use up its headroom plus the bar.
-    /// A box held stays held at the rate that held it while its runs show it growing at all: a member just
-    /// continued may not run its whole run, so a slower run alone isn't the box slowing; one run with no
-    /// growth lets it go. Only a memory bound's wait is held across: an end, an idle box, one left to
-    /// events, or a box with no memory bound is not.
-    pub fn holds(&mut self, read: &Read, rate_seen: u64, lateness: Duration) -> bool {
-        let seen = if self.held_rate > 0 && rate_seen > 0 {
-            rate_seen.max(self.held_rate)
-        } else {
-            rate_seen
-        };
-        let held = match (read.verdict, self.limit.memory) {
-            (Verdict::Wait(wait), Some(bound)) => {
-                let headroom = bound
-                    .saturating_add(OVERSHOOT)
-                    .saturating_sub(read.footprint);
-                let rate = if self.taking_on {
-                    seen.max(self.rates.bytes.get())
-                } else {
-                    seen
+    /// The box's rate as the hold reckons it: its running members' rates summed, one no run has shown yet at
+    /// the recorded rate, in bytes a second.
+    pub fn rate(&self) -> u64 {
+        let recorded = self.rates.bytes.get();
+        self.grows.values().fold(0u64, |sum, g| {
+            sum.saturating_add(g.rate.unwrap_or(recorded))
+        })
+    }
+
+    /// Notes what each member's run since the last read showed of its rate (the lead, 2026-11-09: each
+    /// member's rate from its own runs). A run across the wait: what it grew over that time. A held member's
+    /// run for a read: the fastest such runs have shown while they show it growing at all (a member just
+    /// continued may not run its whole run), and 0 once one shows it not growing. A run that shows nothing (a
+    /// member left runnable with no core) leaves its rate as it was; so does a member's first read, which has
+    /// no read before it to grow from.
+    pub fn ran(&mut self, runs: &[Run]) {
+        for run in runs.iter().filter(|run| run.shown) {
+            for g in self
+                .grows
+                .range_mut((run.pid, 0)..=(run.pid, u64::MAX))
+                .map(|(_, g)| g)
+            {
+                let Some(before) = g.before else {
+                    continue;
                 };
-                hold(headroom, rate, wait, lateness)
+                let grown = g.footprint.saturating_sub(before);
+                let rate = per_second(grown, run.over);
+                g.rate = Some(if run.across || grown == 0 {
+                    rate
+                } else {
+                    rate.max(g.rate.unwrap_or(0))
+                });
             }
-            _ => false,
+        }
+    }
+
+    /// Which of the box's running members run across the wait `read` decided, the rest held stopped (the
+    /// graded hold: the lead, 2026-11-08, the box's own bound enforced as Linux's `memory.high` throttles a
+    /// cgroup near its limit, slowing no other program; 2026-11-09, as many members running as the bound
+    /// allows). The watcher's next read, and its stop of a member that must not run on, can come `lateness`
+    /// past the wait (learned from its own reads' delays), so a member running across the wait can grow over
+    /// the wait and that before it is stopped. So `order`'s members are taken in turn, each whose rate
+    /// ([`Watch::ran`]; one no run has shown yet at the recorded rate, as a member just started allocates at
+    /// once) over the wait and the lateness still fits what is left of the box's headroom to its bar (its
+    /// bound plus the [`OVERSHOOT`], less the read's footprint), written to `run`. Every member runs when the
+    /// read's wait isn't a memory bound's (an end, an idle box, one left to events, no memory bound).
+    ///
+    /// Returns the wait to hold the box across when any of its members is held: the [`FLOOR`], as a held member
+    /// runs only at the reads (each runs one, the shell's), so a longer wait only slows it, while those let run
+    /// were reckoned over the read's own wait, no shorter. `None` leaves the read's own wait.
+    pub fn runs(
+        &self,
+        read: &Read,
+        order: &[u32],
+        lateness: Duration,
+        run: &mut Vec<u32>,
+    ) -> Option<Duration> {
+        run.clear();
+        let recorded = self.rates.bytes.get();
+        let (Verdict::Wait(wait), Some(bound)) = (read.verdict, self.limit.memory) else {
+            run.extend_from_slice(order);
+            return None;
         };
-        self.held_rate = if held { seen.max(1) } else { 0 };
-        held
+        let span = wait.saturating_add(lateness).as_nanos();
+        let mut left = u128::from(
+            bound
+                .saturating_add(OVERSHOOT)
+                .saturating_sub(read.footprint),
+        );
+        for &pid in order {
+            let rate = self
+                .grows
+                .range((pid, 0)..=(pid, u64::MAX))
+                .fold(0u64, |sum, (_, g)| {
+                    sum.saturating_add(g.rate.unwrap_or(recorded))
+                });
+            let grows = u128::from(rate)
+                .saturating_mul(span)
+                .checked_div(NANOS_PER_SECOND)
+                .unwrap_or(u128::MAX);
+            if grows < left {
+                left = left.saturating_sub(grows);
+                run.push(pid);
+            }
+        }
+        if run.len() < order.len() {
+            Some(FLOOR)
+        } else {
+            None
+        }
     }
 }
 
@@ -555,112 +646,303 @@ mod tests {
         }
     }
 
-    /// A box of `bound` settled at `footprint` (read twice, so it isn't taking on members) at the recorded
-    /// rates, and its second read.
-    fn settled(bound: u64, footprint: u64) -> (Watch, Read) {
-        let limit = Limit {
+    fn limit(bound: u64) -> Limit {
+        Limit {
             memory: Some(bound),
             processes: None,
+        }
+    }
+
+    /// A box of `bound` whose members (pids 1 on) were read at `before`, then at `after`, each having run
+    /// across the wait between them for `over`: the box and its second read.
+    fn across(bound: u64, before: &[u64], after: &[u64], over: Duration) -> (Watch, Read) {
+        let mut w = Watch::new(limit(bound), RECORDED);
+        let at = |footprints: &[u64]| -> Vec<Member> {
+            footprints
+                .iter()
+                .zip(1u32..)
+                .map(|(f, pid)| member(pid, *f, Life::Running))
+                .collect()
         };
-        let mut w = Watch::new(limit, RECORDED);
-        let two = [
-            member(1, footprint, Life::Running),
-            member(2, 0, Life::Running),
-        ];
-        let _ = w.read(&two);
-        let read = w.read(&two);
+        let _ = w.read(&at(before));
+        let read = w.read(&at(after));
+        let runs: Vec<Run> = (1u32..)
+            .take(after.len())
+            .map(|pid| Run {
+                pid,
+                over,
+                across: true,
+                shown: true,
+            })
+            .collect();
+        w.ran(&runs);
         (w, read)
     }
 
-    /// HEX-MAC-4, the hold (the lead, 2026-11-08: the box's own bound enforced, as Linux's memory.high
-    /// throttles a cgroup near its limit): a box seen growing at the recorded rate reaches its bar by the
-    /// read its wait asks for, so any lateness of that read would carry it past. Do ask whether a settled
-    /// box growing at the recorded rate is held for a wake 1 µs late, and one growing at none for a wake a
-    /// day late; expect the first held and the second not.
+    /// Member `pid`'s run for one read of a held box, showing what it does.
+    fn read_run(pid: u32, over: Duration) -> [Run; 1] {
+        [Run {
+            pid,
+            over,
+            across: false,
+            shown: true,
+        }]
+    }
+
+    /// HEX-MAC-4, the graded hold (the lead, 2026-11-08 and 2026-11-09): a member growing at the recorded rate
+    /// reaches the box's bar by the read its wait asks for, so any lateness of that read would carry it past,
+    /// while a member growing at none can run across any wait. Do read a box whose member 1 grew at the
+    /// recorded rate (51,052,631 bytes in 1 ms, rounded up to a byte) and member 2 nothing, and ask with a wake
+    /// 1 µs late; expect member 2 run and member 1 held, at the floor. Do ask of a box that grew nothing with a
+    /// wake a day late; expect both run, at the read's own wait.
     #[test]
-    fn a_box_growing_at_the_recorded_rate_is_held_for_any_lateness() {
-        let (mut w, read) = settled(256 * MIB, 39 * MIB);
-        assert_eq!(
-            read.verdict,
-            Verdict::Wait(next(&w.limit(), &RECORDED, 39 * MIB, 2).unwrap())
+    fn a_member_growing_at_the_recorded_rate_is_held_and_one_growing_at_none_runs() {
+        let ms = Duration::from_millis(1);
+        let (w, read) = across(
+            256 * MIB,
+            &[39 * MIB, 0],
+            &[39 * MIB + 51_052_631, 0],
+            ms,
         );
-        assert!(w.holds(&read, RECORDED.bytes.get(), Duration::from_micros(1)));
-        let (mut still, read) = settled(256 * MIB, 39 * MIB);
-        assert!(!still.holds(&read, 0, Duration::from_secs(86_400)));
+        assert!(matches!(read.verdict, Verdict::Wait(_)));
+        let mut run = Vec::new();
+        assert_eq!(
+            w.runs(&read, &[1, 2], Duration::from_micros(1), &mut run),
+            Some(FLOOR)
+        );
+        assert_eq!(run, [2]);
+        assert_eq!(w.rate(), 51_052_631_000);
+        let (still, read) = across(256 * MIB, &[39 * MIB, 0], &[39 * MIB, 0], ms);
+        assert_eq!(
+            still.runs(&read, &[1, 2], Duration::from_secs(86_400), &mut run),
+            None
+        );
+        assert_eq!(run, [1, 2]);
+        assert_eq!(still.rate(), 0);
     }
 
-    /// HEX-MAC-4, the hold: a held box keeps the rate that held it while its runs show it growing, since a
-    /// member just continued may not run its whole run, and one run with no growth lets it go. Do hold a box
-    /// growing at the recorded rate, then show it a run 100 times slower, then one with none, then the
-    /// slower one again; expect it held, held, let go, and not held again at the slower rate.
+    /// HEX-MAC-4, the graded hold (the lead, 2026-11-09: each member's rate from its own runs): the box's rate
+    /// is its members' summed, each from what its own runs showed. Do read a box of three whose member 1 grew
+    /// 10 MiB in 1 ms across the wait, then run member 2 alone for a read of 100 µs while it grows 1 MiB, then
+    /// member 1 alone growing nothing; expect the box at 10 MiB/ms, then twice that, then member 2's alone.
     #[test]
-    fn a_held_box_stays_held_while_it_grows_and_is_let_go_by_a_run_with_none() {
-        let (mut w, read) = settled(256 * MIB, 39 * MIB);
-        let late = Duration::from_millis(1);
-        let slow = RECORDED.bytes.get() / 100;
-        assert!(w.holds(&read, RECORDED.bytes.get(), late));
-        assert!(w.holds(&read, slow, late));
-        assert!(!w.holds(&read, 0, late));
-        assert!(!w.holds(&read, slow, late));
-    }
-
-    /// HEX-MAC-4, the hold: a box taking on members is reckoned at the recorded rate whatever it was seen
-    /// doing, since a new member begins allocating at once. Do read one member, then two (taking on, so
-    /// the floor), and ask whether it is held with no growth seen; expect it held when the lateness and the
-    /// floor at the recorded rate would carry it past its bar, and not when they wouldn't.
-    #[test]
-    fn a_box_taking_on_members_is_held_when_the_lateness_could_carry_it_past_its_bar() {
-        let limit = Limit {
-            memory: Some(256 * MIB),
-            processes: None,
+    fn a_box_is_reckoned_at_its_members_rates_summed_each_from_its_own_runs() {
+        let ms = Duration::from_millis(1);
+        let fast = per_second(10 * MIB, ms);
+        let (mut w, _) = across(GIB, &[0, 0, 0], &[10 * MIB, 0, 0], ms);
+        assert_eq!(w.rate(), fast);
+        let three = |a, b| {
+            [
+                member(1, a, Life::Running),
+                member(2, b, Life::Running),
+                member(3, 0, Life::Running),
+            ]
         };
-        let mut w = Watch::new(limit, RECORDED);
+        let _ = w.read(&three(10 * MIB, MIB));
+        w.ran(&read_run(2, Duration::from_micros(100)));
+        assert_eq!(w.rate(), 2 * fast);
+        let _ = w.read(&three(10 * MIB, MIB));
+        w.ran(&read_run(1, Duration::from_micros(100)));
+        assert_eq!(w.rate(), fast);
+    }
+
+    /// HEX-MAC-4, the graded hold (the lead, 2026-11-09): a member run for a read but left runnable with no core
+    /// grew nothing because it didn't run, which says nothing of its rate. Do read a box whose member 1 grew
+    /// 10 MiB in 1 ms, so that with the class's lateness it is held; run it for a read with no core, then with
+    /// one, growing nothing both times; expect it held at its rate, still held, then run at 0.
+    #[test]
+    fn a_held_members_run_with_no_core_shows_nothing() {
+        let ms = Duration::from_millis(1);
+        let late = lateness_seed("Mac16,9");
+        let (mut w, read) = across(256 * MIB, &[100 * MIB, 0], &[110 * MIB, 0], ms);
+        let mut run = Vec::new();
+        let _ = w.runs(&read, &[1, 2], late, &mut run);
+        assert_eq!(run, [2]);
+        let two = [
+            member(1, 110 * MIB, Life::Running),
+            member(2, 0, Life::Running),
+        ];
+        let read = w.read(&two);
+        w.ran(&[Run {
+            pid: 1,
+            over: ms,
+            across: false,
+            shown: false,
+        }]);
+        assert_eq!(w.rate(), per_second(10 * MIB, ms));
+        let _ = w.runs(&read, &[1, 2], late, &mut run);
+        assert_eq!(run, [2]);
+        let read = w.read(&two);
+        w.ran(&read_run(1, ms));
+        assert_eq!(w.rate(), 0);
+        let _ = w.runs(&read, &[1, 2], late, &mut run);
+        assert_eq!(run, [1, 2]);
+    }
+
+    /// HEX-MAC-4, the graded hold: a held member runs for a read, which it may not run whole, so a slower run
+    /// alone isn't it slowing: its rate is the fastest such runs show while they show it growing at all, and 0
+    /// once one shows it not growing. Do run member 1 for four reads of 1 ms, growing 10 MiB, 1 MiB, nothing,
+    /// then 1 MiB; expect 10 MiB/ms, 10 MiB/ms, 0, then 1 MiB/ms.
+    #[test]
+    fn a_held_members_rate_is_the_fastest_its_runs_show_until_one_shows_none() {
+        let ms = Duration::from_millis(1);
+        let (mut w, _) = across(GIB, &[0, 0], &[0, 0], ms);
+        for (footprint, rate) in [
+            (10 * MIB, per_second(10 * MIB, ms)),
+            (11 * MIB, per_second(10 * MIB, ms)),
+            (11 * MIB, 0),
+            (12 * MIB, per_second(MIB, ms)),
+        ] {
+            let _ = w.read(&[
+                member(1, footprint, Life::Running),
+                member(2, 0, Life::Running),
+            ]);
+            w.ran(&read_run(1, ms));
+            assert_eq!(w.rate(), rate, "at {footprint}");
+        }
+    }
+
+    /// HEX-MAC-4, the graded hold: a member no run has shown yet (one just started, which begins allocating at
+    /// once) is reckoned at the recorded rate until a run of it shows its own. Do read one member, then two
+    /// (taking on, so the floor); expect the new one held when the floor and the lateness at the recorded rate
+    /// would carry it past the bar, and run when they wouldn't; then run it for a read, growing nothing; expect
+    /// the box at 0.
+    #[test]
+    fn a_member_no_run_has_shown_is_reckoned_at_the_recorded_rate() {
+        let ms = Duration::from_millis(1);
+        let mut w = Watch::new(limit(256 * MIB), RECORDED);
         let _ = w.read(&[member(1, MIB, Life::Running)]);
-        let read = w.read(&[member(1, MIB, Life::Running), member(2, 0, Life::Running)]);
+        let both = [member(1, MIB, Life::Running), member(2, 0, Life::Running)];
+        let read = w.read(&both);
         assert_eq!(read.verdict, Verdict::Wait(FLOOR));
+        w.ran(&[Run {
+            pid: 1,
+            over: ms,
+            across: true,
+            shown: true,
+        }]);
+        assert_eq!(w.rate(), RECORDED.bytes.get());
+        let mut run = Vec::new();
         // 319 MiB of headroom to the bar lasts 6.55 ms at the recorded rate; the floor is 250 µs of it.
-        assert!(w.holds(&read, 0, Duration::from_millis(7)));
-        assert!(!w.holds(&read, 0, Duration::from_millis(6)));
+        let _ = w.runs(&read, &[1, 2], Duration::from_millis(7), &mut run);
+        assert_eq!(run, [1]);
+        let _ = w.runs(&read, &[1, 2], Duration::from_millis(6), &mut run);
+        assert_eq!(run, [1, 2]);
+        let _ = w.read(&both);
+        w.ran(&read_run(2, ms));
+        assert_eq!(w.rate(), 0);
     }
 
-    /// HEX-MAC-4, the hold: only a wait is held across. Do ask of a box past its bound (end), an idle one and
-    /// one left to events; expect none held.
+    /// HEX-MAC-4, the graded hold (the lead, 2026-11-09: as many members running as the bound allows): members
+    /// are taken in turn, each whose growth over the wait and the lateness fits what the ones before it left of
+    /// the headroom, so a slow member after a fast one that doesn't fit still runs. Do read a 960 MiB box whose
+    /// members 1 and 3 grow 600 KiB a millisecond and 2 and 4 100 KiB, with a second's lateness (about 598 MiB
+    /// and 100 MiB each, against 1,023 MiB of headroom), in turn from member 1 and from member 3; expect 1, 2
+    /// and 4 run, then 3, 4 and 2, the one held at the floor.
     #[test]
-    fn only_a_wait_is_held_across() {
-        let limit = Limit {
-            memory: Some(256 * MIB),
-            processes: None,
-        };
-        let mut w = Watch::new(limit, RECORDED);
+    fn the_graded_hold_runs_each_member_whose_growth_fits_what_is_left_in_turn() {
+        let ms = Duration::from_millis(1);
+        let (fast, slow) = (600 << 10, 100 << 10);
+        let (w, read) = across(960 * MIB, &[0, 0, 0, 0], &[fast, slow, fast, slow], ms);
+        let mut run = Vec::new();
+        let late = Duration::from_secs(1);
+        assert_eq!(w.runs(&read, &[1, 2, 3, 4], late, &mut run), Some(FLOOR));
+        assert_eq!(run, [1, 2, 4]);
+        assert_eq!(w.runs(&read, &[3, 4, 1, 2], late, &mut run), Some(FLOOR));
+        assert_eq!(run, [3, 4, 2]);
+    }
+
+    /// HEX-MAC-4, the graded hold: a box none of whose members fits grows only at its reads, each running one
+    /// held member, so it is held across the floor, the shortest wait. Do read a 256 MiB box of two members
+    /// each growing at the recorded rate, with the class's lateness; expect none run, at the floor.
+    #[test]
+    fn a_box_none_of_whose_members_fits_is_held_across_the_floor() {
+        let (w, read) = across(
+            256 * MIB,
+            &[0, 0],
+            &[51_052_631, 51_052_631],
+            Duration::from_millis(1),
+        );
+        let mut run = Vec::new();
+        assert_eq!(
+            w.runs(&read, &[1, 2], lateness_seed("Mac16,9"), &mut run),
+            Some(FLOOR)
+        );
+        assert!(run.is_empty());
+    }
+
+    /// HEX-MAC-4, the graded hold: only a memory bound's wait holds members. Do ask of a box past its bound
+    /// (end), an idle one and one left to events, each with any lateness; expect every member run, at the
+    /// read's own wait.
+    #[test]
+    fn only_a_memory_wait_holds_members() {
+        let mut run = Vec::new();
+        let mut w = Watch::new(limit(256 * MIB), RECORDED);
         let over = w.read(&[member(1, 300 * MIB, Life::Running)]);
         assert!(matches!(over.verdict, Verdict::End(_)));
-        assert!(!w.holds(&over, u64::MAX, Duration::MAX));
-        let mut idle = Watch::new(limit, RECORDED);
+        assert_eq!(w.runs(&over, &[1], Duration::MAX, &mut run), None);
+        assert_eq!(run, [1]);
+        let mut idle = Watch::new(limit(256 * MIB), RECORDED);
         let none = idle.read(&[]);
         assert_eq!(none.verdict, Verdict::Idle);
-        assert!(!idle.holds(&none, u64::MAX, Duration::MAX));
-        let mut one = Watch::new(limit, RECORDED);
+        assert_eq!(idle.runs(&none, &[], Duration::MAX, &mut run), None);
+        assert!(run.is_empty());
+        let mut one = Watch::new(limit(256 * MIB), RECORDED);
         let events = one.read(&[armed(1, MIB, Life::Running)]);
         assert_eq!(events.verdict, Verdict::Events);
-        assert!(!one.holds(&events, u64::MAX, Duration::MAX));
+        assert_eq!(one.runs(&events, &[1], Duration::MAX, &mut run), None);
+        assert_eq!(run, [1]);
     }
 
     proptest! {
-        /// HEX-MAC-4, the hold (model-based): a box is held exactly when its rate over the wait plus the
-        /// lateness could use up its headroom: rate x (wait + lateness) >= headroom, in whole bytes. Do ask
-        /// any headroom, rate, wait and lateness; expect the oracle's answer.
+        /// HEX-MAC-4, the graded hold (model-based, the lead 2026-11-09): of a box whose members all ran across
+        /// the wait, each grown by any amount over any time, the members run across the next wait are, in turn,
+        /// each whose growth at its own rate over the wait and any lateness fits what the ones before it left
+        /// of the headroom; so together they grow less than the headroom before the watcher can stop them, and
+        /// a box holding any waits at the floor. Do read up to six members twice and ask, from any turn; expect
+        /// the oracle's members, their growth within the headroom, and the oracle's wait.
         #[test]
-        fn the_hold_is_the_oracles(
-            headroom in 0u64..(1u64 << 44),
-            rate in 0u64..(1u64 << 40),
-            wait_ns in 0u64..(1u64 << 36),
-            late_ns in 0u64..(1u64 << 36),
+        fn the_members_run_across_a_wait_fit_its_headroom(
+            grown in proptest::collection::vec(0u64..(1u64 << 30), 1..6),
+            over_us in 1u64..100_000,
+            late_us in 0u64..200_000,
+            turn in 0usize..6,
         ) {
-            let grown = u128::from(rate) * u128::from(wait_ns + late_ns) / 1_000_000_000;
-            prop_assert_eq!(
-                hold(headroom, rate, Duration::from_nanos(wait_ns), Duration::from_nanos(late_ns)),
-                grown >= u128::from(headroom)
+            let bound = 4 * GIB;
+            let n = grown.len();
+            let over = Duration::from_micros(over_us);
+            let (w, read) = across(bound, &vec![0; n], &grown, over);
+            let order: Vec<u32> = (0..n)
+                .map(|i| u32::try_from((turn + i) % n + 1).unwrap())
+                .collect();
+            let late = Duration::from_micros(late_us);
+            let mut run = Vec::new();
+            let wait = w.runs(&read, &order, late, &mut run);
+            let Verdict::Wait(read_wait) = read.verdict else {
+                prop_assert_eq!(&run, &order);
+                prop_assert_eq!(wait, None);
+                return Ok(());
+            };
+            let span = read_wait.saturating_add(late).as_nanos();
+            let headroom = u128::from((bound + OVERSHOOT).saturating_sub(read.footprint));
+            let growth = |pid: u32| {
+                let g = grown[usize::try_from(pid).unwrap() - 1];
+                u128::from(per_second(g, over)) * span / 1_000_000_000
+            };
+            let mut left = headroom;
+            let mut oracle = Vec::new();
+            for &pid in &order {
+                if growth(pid) < left {
+                    left -= growth(pid);
+                    oracle.push(pid);
+                }
+            }
+            prop_assert_eq!(&run, &oracle);
+            prop_assert!(
+                run.is_empty() || run.iter().map(|&pid| growth(pid)).sum::<u128>() < headroom
             );
+            let held_wait = if run.len() < order.len() { Some(FLOOR) } else { None };
+            prop_assert_eq!(wait, held_wait);
         }
     }
 

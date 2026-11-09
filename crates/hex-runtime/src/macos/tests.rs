@@ -650,6 +650,37 @@ impl Drop for Reaped {
     }
 }
 
+/// The graded hold's sign of a run (the lead, 2026-11-09): a program asleep has no thread running or waiting
+/// for a core, so a run of it shows it isn't growing; a spinning one has, so a run of it that grew nothing and
+/// ran no code of its own shows nothing. Do read the threads of a sleeping child, then of a spinning one; expect
+/// none runnable, then one.
+#[test]
+fn a_sleeping_program_has_no_runnable_thread_and_a_spinning_one_has() {
+    let sleeper = Reaped(
+        Command::new("/bin/sleep")
+            .arg(HANG_GUARD.as_secs().to_string())
+            .spawn()
+            .expect("spawn sleep"),
+    );
+    let spinner = Reaped(
+        Command::new("/usr/bin/yes")
+            .stdout(Piped::null())
+            .spawn()
+            .expect("spawn yes"),
+    );
+    for (child, want) in [(&sleeper, false), (&spinner, true)] {
+        let pid = i32::try_from(child.0.id()).expect("a pid");
+        let deadline = std::time::Instant::now() + HANG_GUARD;
+        while super::sys::task(pid).expect("task").map(|t| t.runnable) != Some(want) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{pid} never read runnable {want}"
+            );
+            thread::yield_now();
+        }
+    }
+}
+
 /// The lead's call (2026-11-08): a box's watcher continues only the members it held, so a member the box's
 /// own programs stopped stays stopped. Do stop a box's member from outside the watcher, as one of the box's
 /// programs would, then start a second, which the box holds until its watcher's next read continues it;

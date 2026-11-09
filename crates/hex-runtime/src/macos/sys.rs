@@ -65,6 +65,9 @@ pub struct Rusage {
     pub peak: u64,
     /// CPU it used itself, user and system.
     pub cpu: u64,
+    /// CPU it ran its own code with (user time): one whose user time rose over a run had a core in it.
+    /// Stopped, its time is whole: XNU totals a thread's time as it leaves its core.
+    pub user: u64,
     /// CPU its reaped children used.
     pub child_cpu: u64,
     pub read_bytes: u64,
@@ -99,6 +102,7 @@ pub fn rusage(pid: i32) -> io::Result<Option<Rusage>> {
         footprint: ri.ri_phys_footprint,
         peak: ri.ri_lifetime_max_phys_footprint,
         cpu: ri.ri_user_time.saturating_add(ri.ri_system_time),
+        user: ri.ri_user_time,
         child_cpu: ri
             .ri_child_user_time
             .saturating_add(ri.ri_child_system_time),
@@ -155,6 +159,50 @@ pub fn run_state(pid: i32) -> io::Result<Option<Run>> {
         libc::SSTOP => Run::Stopped,
         libc::SZOMB => Run::Ended,
         _ => Run::Live,
+    }))
+}
+
+/// What a process's threads are doing, as `proc_pidinfo(PROC_PIDTASKINFO)` reads them: XNU counts each
+/// thread whose state has `TH_RUN`, on a core or waiting for one (`fill_taskprocinfo`,
+/// `osfmk/kern/bsd_kern.c`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Task {
+    /// A thread of it runs or waits for a core; with none, each is asleep or stopped.
+    pub runnable: bool,
+}
+
+/// Process `pid`'s threads, or `None` when no process has that pid (`ESRCH`).
+pub fn task(pid: i32) -> io::Result<Option<Task>> {
+    let mut info = MaybeUninit::<libc::proc_taskinfo>::zeroed();
+    let size = c_int::try_from(std::mem::size_of::<libc::proc_taskinfo>())
+        .map_err(|_| io::Error::other("a proc_taskinfo past an int's bytes"))?;
+    // SAFETY: for PROC_PIDTASKINFO proc_pidinfo writes at most `size` bytes, one proc_taskinfo, into the
+    // buffer it is given, which is one proc_taskinfo, alive for the call.
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTASKINFO,
+            0,
+            info.as_mut_ptr().cast::<c_void>(),
+            size,
+        )
+    };
+    if n <= 0 {
+        let e = io::Error::last_os_error();
+        return match e.raw_os_error() {
+            Some(libc::ESRCH) => Ok(None),
+            _ => Err(e),
+        };
+    }
+    if n != size {
+        return Err(io::Error::other(format!(
+            "proc_pidinfo(PROC_PIDTASKINFO) of {pid} wrote {n} of {size} bytes"
+        )));
+    }
+    // SAFETY: zeroed above and written whole by the kernel; every field is an integer, so any bytes are valid.
+    let info = unsafe { info.assume_init() };
+    Ok(Some(Task {
+        runnable: info.pti_numrunning > 0,
     }))
 }
 

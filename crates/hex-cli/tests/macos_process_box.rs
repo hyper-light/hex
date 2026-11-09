@@ -585,6 +585,81 @@ fn a_rootless_box_holds_the_bar_up_to_one_member_per_core() {
     );
 }
 
+/// HEX-MAC-4, the graded hold (the lead, 2026-11-09): of a box near its bound, the members whose own rates fit
+/// its headroom run across the watcher's waits and the rest are held stopped, so a fast grower is held while the
+/// members that don't grow run on, and the box still ends within the bar. Do start three sleepers, then a hog, in
+/// a 256 MiB box, and watch the hog past half the bound; expect a moment it is held while every sleeper runs, then
+/// the box ended for memory within 64 MiB of its bound.
+#[test]
+fn hex_mac_4_a_fast_grower_near_its_bound_is_held_while_its_idle_members_run() {
+    use hex_runtime::macos::sys;
+    let fx = fixture();
+    let rt = runtime();
+    let id = BoxId::new("mac-graded-hold").expect("an id");
+    let _ = rt.delete(&id);
+    rt.create(BoxSpec {
+        id: id.clone(),
+        bounds: Bounds {
+            memory_max: Some(256 * MIB),
+            ..Bounds::default()
+        },
+        class: ClassSpec::Process,
+    })
+    .expect("create");
+    let guard = HANG_GUARD.as_secs().to_string();
+    let sleepers: Vec<_> = (0..3)
+        .map(|_| {
+            rt.exec(&id, Program::of(&["/bin/sleep", &guard]), Stdio::null())
+                .expect("exec a sleeper")
+        })
+        .collect();
+    let mut hog = rt
+        .exec(&id, fx.act(&Act::Hog(4 * GIB)), Stdio::null())
+        .expect("exec the hog");
+    let hog_pid = i32::try_from(hog.pid()).expect("a pid");
+    let sleeping: Vec<i32> = sleepers
+        .iter()
+        .map(|p| i32::try_from(p.pid()).expect("a pid"))
+        .collect();
+    let deadline = Instant::now() + HANG_GUARD;
+    let held_beside_runners = loop {
+        assert!(
+            Instant::now() < deadline,
+            "the hog was never held while the sleepers ran"
+        );
+        let Some(r) = sys::rusage(hog_pid).expect("rusage") else {
+            break false;
+        };
+        if r.ended {
+            break false;
+        }
+        if r.footprint >= 128 * MIB
+            && sys::run_state(hog_pid).expect("run state") == Some(sys::Run::Stopped)
+            && sleeping
+                .iter()
+                .all(|&pid| sys::run_state(pid).expect("run state") == Some(sys::Run::Live))
+        {
+            break true;
+        }
+        std::thread::yield_now();
+    };
+    let exit = hog.wait_for(HANG_GUARD).expect("wait");
+    let usage = rt.usage(&id).expect("usage");
+    rt.delete(&id).expect("delete");
+    drop(sleepers);
+    assert!(
+        held_beside_runners,
+        "the hog ended before it was seen held while the sleepers ran"
+    );
+    assert!(exit.is_some(), "the hog never ended: the box didn't end");
+    assert!(usage.oom_kills >= 1, "the box didn't end for memory");
+    assert!(
+        usage.memory_peak_bytes <= 256 * MIB + 64 * MIB,
+        "the box passed its bound by {} MiB",
+        usage.memory_peak_bytes.saturating_sub(256 * MIB) / MIB
+    );
+}
+
 /// HEX-MAC-1/HEX-MAC-7, Ada's two-layer bound: on a node with the helper, its ledger layer holds the bar
 /// whatever the box's size, every member (forks included) armed with an apportioned share and rebalanced.
 /// Do fill a box-user box with twice and four times the cores' hogs, three passes each, on the installed
