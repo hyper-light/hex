@@ -333,6 +333,7 @@ dependencies = [
  "hex-api",
  "hex-client",
  "hex-core",
+ "hex-gpu",
  "hex-health",
  "hex-runtime",
  "hex-sim",

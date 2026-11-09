@@ -6,9 +6,10 @@
 //! through `sysinfo`; Hex reads each OS's own interface: Linux's `/proc` and `/sys`, macOS's sysctls,
 //! Windows' `GlobalMemoryStatusEx` and `GetDiskFreeSpaceExW` (`hex_runtime`'s OS files).
 //!
-//! GPUs come from hex-gpu's `inventory()` and `sample()`; until it is wired here a node reports none,
-//! as kiln leaves out a fact its probe can't establish. A platform Hex doesn't place on is refused,
-//! typed, naming it.
+//! GPUs come from hex-gpu: a [`Prober`] opens `hex_gpu::Gpus` once (NVML's initialisation) and keeps
+//! it, and each probe reads its `inventory()` and `sample()`. Where hex-gpu reads none, the node reports
+//! no GPUs and why, as kiln leaves out a fact its probe can't establish. A platform Hex doesn't place on
+//! is refused, typed, naming it.
 
 use std::path::Path;
 
@@ -26,8 +27,75 @@ pub struct Declared {
     pub net: Vec<String>,
 }
 
-/// Every fact of this node, read now. `dir` is the folder boxes' disks go on.
-pub fn probe(dir: &Path, declared: &Declared) -> Result<Facts, Refusal> {
+/// What reads a node's facts: its GPUs opened once and kept, the folder boxes' disks go on, and what
+/// its administrator declares.
+#[derive(Debug)]
+pub struct Prober {
+    gpus: hex_gpu::Gpus,
+    dir: std::path::PathBuf,
+    declared: Declared,
+}
+
+impl Prober {
+    /// Opens the node's GPUs (hex-gpu's `Gpus::open`: NVML loaded and initialised, amdgpu's counters
+    /// opened), once for the node's life.
+    pub fn open(dir: &Path, declared: Declared) -> Self {
+        Self {
+            gpus: hex_gpu::Gpus::open(),
+            dir: dir.to_path_buf(),
+            declared,
+        }
+    }
+
+    /// Every fact of this node, read now: its GPUs' load sampled.
+    pub fn probe(&mut self) -> Result<Facts, Refusal> {
+        let mut f = machine(&self.dir, &self.declared)?;
+        (f.gpus, f.no_gpus) = gpus(&mut self.gpus);
+        Ok(f)
+    }
+}
+
+/// The GPUs hex-gpu reads, each with its load now; or none, and why.
+pub fn gpus(found: &mut hex_gpu::Gpus) -> (Vec<facts::Gpu>, Option<String>) {
+    let inventory = match found.inventory() {
+        Ok(inventory) => inventory.to_vec(),
+        Err(none) => return (Vec::new(), Some(none.to_string())),
+    };
+    match found.sample() {
+        Ok(loads) => (gpu_facts(&inventory, loads), None),
+        Err(none) => (Vec::new(), Some(none.to_string())),
+    }
+}
+
+/// hex-gpu's inventory and loads as the node's facts. A counter that can't be read leaves its part of
+/// the load out (a MIG-enabled NVIDIA GPU has no utilisation; its memory in use still counts), rather
+/// than guessing it busy or idle.
+pub fn gpu_facts(inventory: &[hex_gpu::Gpu], loads: &[hex_gpu::Load]) -> Vec<facts::Gpu> {
+    inventory
+        .iter()
+        .zip(loads.iter().map(Some).chain(std::iter::repeat(None)))
+        .map(|(g, load)| facts::Gpu {
+            vendor: match g.vendor {
+                hex_gpu::Vendor::Nvidia => "nvidia",
+                hex_gpu::Vendor::Amd => "amd",
+            }
+            .to_owned(),
+            model: g.model.clone(),
+            memory: g.memory_total_bytes,
+            pci: Some(g.pci.to_string()),
+            driver: Some(g.driver_version.clone()),
+            load: hex_sim::model::GpuLoad {
+                busy_per_mille: load
+                    .and_then(|l| l.busy_percent.ok())
+                    .map_or(0, |p| u16::from(p.min(100)).saturating_mul(10)),
+                memory_used: load.and_then(|l| l.memory_used_bytes.ok()).unwrap_or(0),
+            },
+        })
+        .collect()
+}
+
+/// Every fact of this node but its GPUs, read now. `dir` is the folder boxes' disks go on.
+fn machine(dir: &Path, declared: &Declared) -> Result<Facts, Refusal> {
     let (os, arch) =
         facts::platform(std::env::consts::OS, std::env::consts::ARCH).ok_or(Refusal::Platform {
             what: "a node's facts",
@@ -51,6 +119,7 @@ pub fn probe(dir: &Path, declared: &Declared) -> Result<Facts, Refusal> {
         disk: here::volume(dir),
         virt: here::virt(),
         gpus: Vec::new(),
+        no_gpus: None,
         devices: here::devices(declared),
     })
 }
@@ -294,7 +363,9 @@ mod tests {
     #[test]
     fn this_machine_reports_its_facts() {
         let dir = tempfile::tempdir().unwrap();
-        let f = probe(dir.path(), &Declared::default()).unwrap();
+        let f = Prober::open(dir.path(), Declared::default())
+            .probe()
+            .unwrap();
         assert_eq!(
             Some((f.os, f.arch)),
             facts::platform(std::env::consts::OS, std::env::consts::ARCH)
@@ -315,6 +386,105 @@ mod tests {
         assert!(node.classes.count() > 0, "{node:?}");
     }
 
+    /// CP-T7.4, GPU load from hex-gpu: do probe this machine's GPUs through the kept `Gpus`; expect
+    /// either each GPU hex-gpu lists, with its load, or none and hex-gpu's reason (macOS, a host
+    /// without a driver), never both and never neither.
+    #[test]
+    fn gpus_come_from_hex_gpu_or_say_why_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut prober = Prober::open(dir.path(), Declared::default());
+        let f = prober.probe().unwrap();
+        match prober.gpus.inventory() {
+            Ok(listed) => {
+                assert_eq!((f.gpus.len(), &f.no_gpus), (listed.len(), &None), "{f:?}");
+            }
+            Err(none) => {
+                assert!(f.gpus.is_empty(), "{f:?}");
+                assert_eq!(f.no_gpus, Some(none.to_string()));
+            }
+        }
+        if cfg!(target_os = "macos") {
+            assert!(f.no_gpus.is_some(), "{f:?}");
+        }
+    }
+
+    /// CP-T7.4: do turn hex-gpu's inventory and loads into the node's facts; expect its vendor,
+    /// model, memory, PCI address and driver kept, its busy percent in per mille, its memory in use,
+    /// and a counter that can't be read left out of the load rather than guessed.
+    #[test]
+    fn hex_gpus_inventory_and_loads_become_the_nodes_gpus() {
+        let gpu = |model: &str, bus: u8| hex_gpu::Gpu {
+            vendor: hex_gpu::Vendor::Nvidia,
+            model: model.to_owned(),
+            memory_total_bytes: 8_546_942_976,
+            pci: hex_gpu::PciAddress {
+                domain: 0,
+                bus,
+                device: 0,
+                function: 0,
+            },
+            driver_version: "620.70.06".to_owned(),
+        };
+        let inventory = [gpu("NVIDIA GeForce RTX 5060 Ti", 1), gpu("NVIDIA L4", 2)];
+        let loads = [
+            hex_gpu::Load {
+                busy_percent: Ok(37),
+                memory_used_bytes: Ok(1 << 30),
+            },
+            hex_gpu::Load {
+                busy_percent: Err(hex_gpu::Unread::Unsupported),
+                memory_used_bytes: Ok(2 << 30),
+            },
+        ];
+        let got = gpu_facts(&inventory, &loads);
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            (got[0].vendor.as_str(), got[0].model.as_str()),
+            ("nvidia", "NVIDIA GeForce RTX 5060 Ti")
+        );
+        assert_eq!(
+            (
+                got[0].memory,
+                got[0].pci.as_deref(),
+                got[0].driver.as_deref()
+            ),
+            (8_546_942_976, Some("0000:01:00.0"), Some("620.70.06"))
+        );
+        assert_eq!(
+            got[0].load,
+            hex_sim::model::GpuLoad {
+                busy_per_mille: 370,
+                memory_used: 1 << 30
+            }
+        );
+        assert_eq!(
+            got[1].load,
+            hex_sim::model::GpuLoad {
+                busy_per_mille: 0,
+                memory_used: 2 << 30
+            }
+        );
+        // A node made from them holds both, their load the pick reads.
+        let f = Facts {
+            gpus: got,
+            cpu: facts::Cpu {
+                cores: None,
+                threads: 8,
+            },
+            virt: Virt {
+                kvm: true,
+                ..Virt::default()
+            },
+            ..Facts::default()
+        };
+        let mut cluster = hex_sim::model::Cluster::single_owner(Vec::new(), Vec::new());
+        let node = f.node(hex_sim::model::NodeId(0), &mut cluster).unwrap();
+        assert_eq!(
+            (node.capacity.gpus, node.devices[1].load.memory_used),
+            (2, 2 << 30)
+        );
+    }
+
     /// A declared block device or interface that the kernel hasn't is left out, never guessed.
     #[test]
     fn a_declared_device_the_kernel_hasnt_is_left_out() {
@@ -323,7 +493,7 @@ mod tests {
             net: vec!["hex-no-such-if".into()],
         };
         let dir = tempfile::tempdir().unwrap();
-        let f = probe(dir.path(), &declared).unwrap();
+        let f = Prober::open(dir.path(), declared).probe().unwrap();
         assert!(
             f.devices
                 .iter()

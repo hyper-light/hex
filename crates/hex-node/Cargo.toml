@@ -16,6 +16,8 @@ hex-health.workspace = true
 hex-runtime.workspace = true
 # The node's facts are the scheduler's (`src/facts.rs`, `hex_sim::facts`).
 hex-sim.workspace = true
+# The node's GPUs and their load, for its facts (`src/facts.rs`).
+hex-gpu.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 

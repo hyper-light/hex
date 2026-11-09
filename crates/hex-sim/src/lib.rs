@@ -26,6 +26,8 @@
 //! - [`swim`]: hyper-swim's own failure detector, the membership the design gives the node agent, vendored and
 //!   driven over a simulated LAN: the crash class's bound (S8, F1).
 //! - [`federation`]: cells and regions, a federation over independent cells (H64-H66).
+//! - [`peer`]: placement with no plane, each node owning the boxes asked of it and admitting the boxes
+//!   it runs, under kiln's restart rules: p2p, and a laptop alone.
 //! - [`lb`]: the placement kernel, ported from kiln's load balancer and adapted to boxes: an owner's
 //!   pick that packs, a node's ledger that admits, and the words between them.
 
@@ -56,6 +58,7 @@ pub mod membership;
 pub mod model;
 pub mod needs;
 pub mod packing;
+pub mod peer;
 pub mod proximity;
 pub mod replay;
 pub mod rng;
