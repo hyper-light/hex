@@ -2,8 +2,8 @@
 //! of 2026-11-06 and 2026-11-08: every wait in the tests uses its own record's patience). A test waits for a fact for
 //! at most twice the slowest answer recorded for that fact, so a slow but healthy fact passes and only a stuck one
 //! fails:
-//! - a fact a census row records takes that row's record, here or `hex_api::conformance::PROGRAM_END` (a program's
-//!   end);
+//! - a fact a census row records takes that row's record, here; a program's end through a `Proc` takes the suites'
+//!   program-end record (`hex_api::conformance::PATIENCE`, its host class's slowest recorded end, twice);
 //! - a fact one node operation makes within itself takes that operation's record, the relation stated where it is
 //!   waited for and tested there (a hook holding a create is bounded by the create's answer);
 //! - a fact no recorded operation makes is waited for measuring, for the fact alone, its answers recorded for the
@@ -23,9 +23,9 @@ use std::time::{Duration, Instant};
 
 use hex_core::patience::Patience;
 
-/// `lifecycle.exec`: a program's run to its end (39.131 ms of 10,000), the record of `hex_api::conformance::PROGRAM_END`
-/// too, here for a program a test runs as a child of its own (`std::process::Child`) rather than through a `Proc`:
-/// its end, and what it does on its way there.
+/// `lifecycle.exec`: a program's run to its end (39.131 ms of 10,000), here for a program a test runs as a child of its
+/// own (`std::process::Child`) rather than through a `Proc`: its end, and what it does on its way there. (A `Proc`'s
+/// end takes the suites' record, `hex_api::conformance::PATIENCE`, which on Linux is the first-run record above it.)
 pub const PROGRAM: Duration = Duration::from_nanos(39_130_836);
 /// `node.emptying`: a box's kill to its cgroup's `populated 0` (127.753 ms of 22,092), what a test waits on for a
 /// killed box's processes to end, its emptying or the end of a process killed with it.
