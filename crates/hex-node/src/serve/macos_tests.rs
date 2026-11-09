@@ -184,7 +184,7 @@ fn b() -> BoxId {
 }
 
 fn request(id: u64, call: Call) -> Vec<u8> {
-    wire::request(wire::VERSION, id, &Request::Call(call), wire::MAX_MESSAGE).unwrap()
+    wire::request(id, &Request::Call(call), wire::MAX_MESSAGE).unwrap()
 }
 
 fn send_framed(fd: &OwnedFd, message: &[u8]) {
@@ -245,6 +245,46 @@ fn calls_cross_the_framed_stream() {
         client.inspect(&BoxId::new("none").unwrap()),
         Err(Refusal::NoSuchBox(BoxId::new("none").unwrap()))
     );
+}
+
+/// One wire (the lead's word of 2026-11-09, which drops the append-only rule), over macOS's framed stream: a client of
+/// another wire is refused at its hello, and nothing it sends is read as this wire's. Do: on a raw stream, a framed
+/// hello as a client of another wire sends it (its identity and its build, in the hello's head every build lays out
+/// alike) and a framed delete of box b of that wire; then inspect b through `hex-client`, of this wire. Expect: the
+/// first answered with the node's own hello, of this wire and this build, which a client of another wire refuses
+/// naming both (hex-client's own tests), then the stream's end, nothing more sent, and b kept; the inspect answered.
+#[test]
+fn a_client_of_another_wire_is_refused_at_its_hello() {
+    let lab = Lab::new();
+    let theirs = !wire::IDENTITY;
+    let of_wire = |mut bytes: Vec<u8>| {
+        bytes[4..12].copy_from_slice(&theirs.to_le_bytes());
+        bytes
+    };
+    let fd = lab.raw();
+    let their_hello = Request::Hello {
+        build: "hex 9.9.9 (another wire)".to_owned(),
+    };
+    send_framed(
+        &fd,
+        &of_wire(wire::request(1, &their_hello, wire::MAX_MESSAGE).unwrap()),
+    );
+    send_framed(&fd, &of_wire(request(2, Call::Delete(b()))));
+    match answer_of(&fd) {
+        (Header { id: 1, .. }, Answer::Hello(h)) => assert_eq!(h.build, wire::build()),
+        other => panic!("the node's own hello, not {other:?}"),
+    }
+    let mut rest = [0u8; 64];
+    assert_eq!(
+        rustix::net::recv(&fd, &mut rest, rustix::net::RecvFlags::empty())
+            .unwrap()
+            .0,
+        0,
+        "the node sent more than its hello"
+    );
+    wait_until("the refused connection to close", || lab.connections() == 0);
+    assert_eq!(lab.host.sim.inspect(&b()).unwrap().id, b());
+    assert_eq!(lab.client().inspect(&b()).unwrap().id, b());
 }
 
 /// HEX-SOCK-7 on macOS: an exec's stdio crosses as descriptors at its message's first byte, and the

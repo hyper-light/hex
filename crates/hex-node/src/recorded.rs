@@ -93,15 +93,8 @@ pub trait Recover: Runtime {
         Ok(())
     }
     /// A call it answers later ([`Host::forward`]). By default every call runs on the worker.
-    fn forward(
-        &self,
-        call: Call,
-        stdio: Stdio,
-        ends: bool,
-        reply: Reply,
-        ended: serve::Ended,
-    ) -> Forward {
-        let _ = (ends, reply, ended);
+    fn forward(&self, call: Call, stdio: Stdio, reply: Reply, ended: serve::Ended) -> Forward {
+        let _ = (reply, ended);
         Forward::Back(Box::new((call, stdio)))
     }
 }
@@ -307,14 +300,7 @@ impl<R: Recover> Host for Recorded<R> {
     /// The calls its runtime answers later go there: an inspect's answer counted as any inspect's is
     /// ([`Books::counted`]). A create or a delete, which write the box's record and stage or remove its
     /// root, runs on the worker.
-    fn forward(
-        &self,
-        call: Call,
-        stdio: Stdio,
-        ends: bool,
-        reply: Reply,
-        ended: serve::Ended,
-    ) -> Forward {
+    fn forward(&self, call: Call, stdio: Stdio, reply: Reply, ended: serve::Ended) -> Forward {
         match call {
             Call::Inspect(_) => {
                 let books = Arc::clone(&self.books);
@@ -326,13 +312,13 @@ impl<R: Recover> Host for Recorded<R> {
                         other => other,
                     })
                 });
-                self.runtime.forward(call, stdio, ends, counted, ended)
+                self.runtime.forward(call, stdio, counted, ended)
             }
             Call::Start(_)
             | Call::Signal { .. }
             | Call::Usage(_)
             | Call::Exec { .. }
-            | Call::ExecStreams { .. } => self.runtime.forward(call, stdio, ends, reply, ended),
+            | Call::ExecStreams { .. } => self.runtime.forward(call, stdio, reply, ended),
             call => Forward::Back(Box::new((call, stdio))),
         }
     }
@@ -440,16 +426,8 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
     /// A guest program can't take the caller's own pipes, and the node copies no byte between them (native
     /// plan step 8): each stream an exec carries or asks for is the guest's own stdio connection, whose end
     /// goes to the caller's client with the answer, and the caller's pipes are let go here. Its client
-    /// copies between those it carried and their ends; one of a wire version that takes no ends with an
-    /// answer is refused before anything is sent.
-    fn forward(
-        &self,
-        call: Call,
-        stdio: Stdio,
-        ends: bool,
-        reply: Reply,
-        ended: serve::Ended,
-    ) -> Forward {
+    /// copies between those it carried and their ends.
+    fn forward(&self, call: Call, stdio: Stdio, reply: Reply, ended: serve::Ended) -> Forward {
         let id = match &call {
             Call::Inspect(id) | Call::Start(id) | Call::Usage(id) => id,
             Call::Signal { id, .. } | Call::Exec { id, .. } | Call::ExecStreams { id, .. } => id,
@@ -474,12 +452,6 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
                     stdout: stdio.stdout.is_some() || stdio.ask.stdout,
                     stderr: stdio.stderr.is_some() || stdio.ask.stderr,
                 };
-                if ask != Ask::default() && !ends {
-                    return Forward::Refused(Refusal::Invalid {
-                        what: "stdio",
-                        why: "a program in the node's guest takes its streams as the guest's own connections, whose ends ride its answer from wire version 3 on; this client's exec is of an earlier version".to_owned(),
-                    });
-                }
                 // The caller's own pipes, let go here: its client keeps its own.
                 drop(stdio);
                 let streams = hex_core::wire::Streams::default();

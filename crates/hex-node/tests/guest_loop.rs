@@ -157,12 +157,7 @@ fn relay(gate: Arc<Gate>, conns: Arc<Mutex<Vec<TcpStream>>>) -> (SocketAddr, Soc
 
 /// Writes `answer` to request `h` on the stand-in's control connection, framed.
 fn answer(writer: &Mutex<TcpStream>, h: wire::Header, answer: &wire::Answer) {
-    let version = if h.kind == 0x0001 {
-        wire::FIRST
-    } else {
-        h.version
-    };
-    let bytes = wire::answer(version, h.id, answer, wire::MAX_MESSAGE).unwrap();
+    let bytes = wire::answer(h.id, answer, wire::MAX_MESSAGE).unwrap();
     let _ = writer
         .lock()
         .unwrap()
@@ -211,8 +206,8 @@ fn serve(conn: TcpStream, gate: &Gate, stdios: &Arc<Stdios>, token: u64) {
                 return;
             };
             let said = match request {
-                wire::Request::Hello => wire::Answer::Hello(wire::Hello {
-                    version: wire::VERSION,
+                wire::Request::Hello { .. } => wire::Answer::Hello(wire::Hello {
+                    build: wire::build(),
                     classes: vec![hex_api::Class::Oci],
                     limits: wire::Limits {
                         connections: 4,
@@ -220,7 +215,10 @@ fn serve(conn: TcpStream, gate: &Gate, stdios: &Arc<Stdios>, token: u64) {
                         in_flight: 4,
                         programs: 4,
                     },
-                    budgets: None,
+                    budgets: wire::Budgets {
+                        in_flight: 4,
+                        programs: 4,
+                    },
                 }),
                 wire::Request::Call(wire::Call::Inspect(id)) => {
                     gate.pass();
@@ -710,9 +708,9 @@ mod raw {
             Self(fd)
         }
 
-        /// Sends `request` as request `id` in `version`, `fds` riding with it.
-        pub fn send(&self, version: u16, id: u64, request: &wire::Request, fds: &[BorrowedFd<'_>]) {
-            let bytes = wire::request(version, id, request, wire::MAX_MESSAGE).unwrap();
+        /// Sends `request` as request `id`, `fds` riding with it.
+        pub fn send(&self, id: u64, request: &wire::Request, fds: &[BorrowedFd<'_>]) {
+            let bytes = wire::request(id, request, wire::MAX_MESSAGE).unwrap();
             let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(wire::MAX_FDS))];
             let mut control = SendAncillaryBuffer::new(&mut space);
             if !fds.is_empty() {
@@ -767,7 +765,10 @@ mod raw {
 
         /// Says hello, as a client's first message.
         pub fn hello(&self) {
-            self.send(wire::FIRST, 1, &wire::Request::Hello, &[]);
+            let hello = wire::Request::Hello {
+                build: wire::build(),
+            };
+            self.send(1, &hello, &[]);
             let (_, hello, _) = self.answer();
             assert!(matches!(hello, wire::Answer::Hello(_)), "{hello:?}");
         }
@@ -807,12 +808,7 @@ fn the_node_gives_a_guest_programs_streams_to_the_callers_client_and_keeps_none_
     raw.hello();
     let (in_r, mut in_w) = std::io::pipe().unwrap();
     let (mut out_r, out_w) = std::io::pipe().unwrap();
-    raw.send(
-        wire::VERSION,
-        2,
-        &carried_exec(),
-        &[in_r.as_fd(), out_w.as_fd()],
-    );
+    raw.send(2, &carried_exec(), &[in_r.as_fd(), out_w.as_fd()]);
     drop((in_r, out_w));
     let (h, answered, ends) = raw.answer();
     assert_eq!(h.id, 2);
@@ -852,38 +848,4 @@ fn carried_streams() -> wire::Streams {
         stdout: true,
         stderr: false,
     }
-}
-
-/// HEX-GUEST-41, the wire's append-only rule: a client of version 2, which takes no streams' ends with an answer,
-/// execs a guest program with its own pipes: expect the exec refused as invalid stdio, naming the version that
-/// gives them, before anything is sent to the guest.
-#[cfg(target_os = "linux")]
-#[test]
-fn a_guest_program_given_pipes_by_a_version_2_client_is_refused_before_it_starts() {
-    use std::os::fd::AsFd;
-    if shards_api::backend().is_err() {
-        eprintln!("SKIP: Shards has no backend on this host, so no guest boots");
-        return;
-    }
-    let gate = Arc::new(Gate::default());
-    let (_dir, socket, _server) = node(&gate);
-    let raw = raw::Raw::connect(&socket);
-    raw.hello();
-    let (in_r, _in_w) = std::io::pipe().unwrap();
-    let (_out_r, out_w) = std::io::pipe().unwrap();
-    raw.send(2, 2, &carried_exec(), &[in_r.as_fd(), out_w.as_fd()]);
-    let (h, answered, ends) = raw.answer();
-    assert_eq!((h.version, h.id, ends.len()), (2, 2, 0));
-    assert!(
-        matches!(
-            &answered,
-            wire::Answer::Refused(Refusal::Invalid { what: "stdio", why }) if why.contains("version 3")
-        ),
-        "{answered:?}"
-    );
-    assert_eq!(
-        gate.execs.load(Ordering::SeqCst),
-        0,
-        "the guest was sent the exec"
-    );
 }

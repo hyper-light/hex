@@ -88,7 +88,7 @@ fn next_request(conn: &OwnedFd) -> Option<(Header, Request, Vec<OwnedFd>)> {
 }
 
 fn answer(conn: &OwnedFd, h: Header, answer: &Answer) {
-    let bytes = wire::answer(h.version, h.id, answer, wire::MAX_MESSAGE).unwrap();
+    let bytes = wire::answer(h.id, answer, wire::MAX_MESSAGE).unwrap();
     rustix::net::send(conn, &bytes, SendFlags::NOSIGNAL).unwrap();
 }
 
@@ -97,14 +97,17 @@ fn node(listener: OwnedFd) {
     let conn = rustix::net::accept_with(&listener, SocketFlags::CLOEXEC).unwrap();
     while let Some((h, r, fds)) = next_request(&conn) {
         match r {
-            Request::Hello => answer(
+            Request::Hello { .. } => answer(
                 &conn,
                 h,
                 &Answer::Hello(Hello {
-                    version: wire::VERSION,
+                    build: wire::build(),
                     classes: vec![Class::Oci],
                     limits: hex_node::serve::LIMITS,
-                    budgets: None,
+                    budgets: wire::Budgets {
+                        in_flight: hex_node::serve::LIMITS.in_flight,
+                        programs: hex_node::serve::LIMITS.programs,
+                    },
                 }),
             ),
             Request::Call(Call::Exec { .. }) => {

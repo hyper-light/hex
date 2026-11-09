@@ -518,14 +518,7 @@ impl Runtime for SimHost {
 
 impl Host for SimHost {
     /// Box [`g`]'s inspects and execs are its guest's; every other call runs here.
-    fn forward(
-        &self,
-        call: Call,
-        stdio: Stdio,
-        _ends: bool,
-        reply: Reply,
-        ended: Ended,
-    ) -> Forward {
+    fn forward(&self, call: Call, stdio: Stdio, reply: Reply, ended: Ended) -> Forward {
         match call {
             Call::Inspect(id) if id == g() => {
                 let info = self.sim.inspect(&id);
@@ -621,11 +614,21 @@ fn g() -> BoxId {
 const GUEST_PIDS: u32 = 1 << 20;
 
 fn request(id: u64, call: Call) -> Vec<u8> {
-    wire::request(wire::VERSION, id, &Request::Call(call), wire::MAX_MESSAGE).unwrap()
+    wire::request(id, &Request::Call(call), wire::MAX_MESSAGE).unwrap()
 }
 
 fn hello() -> Vec<u8> {
-    wire::request(wire::VERSION, 1, &Request::Hello, wire::MAX_MESSAGE).unwrap()
+    let hello = Request::Hello {
+        build: wire::build(),
+    };
+    wire::request(1, &hello, wire::MAX_MESSAGE).unwrap()
+}
+
+/// `bytes`, a message of this wire, as the wire whose identity is `theirs` would send it: the identity is the
+/// header's bytes 4 to 12 in every build.
+fn of_wire(mut bytes: Vec<u8>, theirs: u64) -> Vec<u8> {
+    bytes[4..12].copy_from_slice(&theirs.to_le_bytes());
+    bytes
 }
 
 fn exec(id: u64) -> Vec<u8> {
@@ -671,8 +674,8 @@ fn wait_until(what: &str, mut fact: impl FnMut() -> bool) {
     }
 }
 
-/// HEX-SOCK-3 (the core): a hello is answered with the host's classes, the server's limits with what it keeps for
-/// each connection ([`KEPT`]) as the connection's, and its budgets, over an OS that isn't Linux's.
+/// HEX-SOCK-3 (the core): a hello is answered with the node's build, the host's classes, the server's limits with
+/// what it keeps for each connection ([`KEPT`]) as the connection's, and its budgets, over an OS that isn't Linux's.
 #[test]
 fn a_hello_is_answered_over_any_os() {
     let lab = Lab::new();
@@ -680,6 +683,7 @@ fn a_hello_is_answered_over_any_os() {
     lab.os.put(&sock, hello());
     match answer_of(&sock) {
         (_, Answer::Hello(h)) => {
+            assert_eq!(h.build, wire::build());
             assert_eq!(h.classes, lab.host.sim.classes());
             assert_eq!(
                 h.limits,
@@ -691,14 +695,60 @@ fn a_hello_is_answered_over_any_os() {
             );
             assert_eq!(
                 h.budgets,
-                Some(wire::Budgets {
+                wire::Budgets {
                     in_flight: limits().in_flight,
                     programs: limits().programs,
-                })
+                }
             );
         }
         other => panic!("{other:?}"),
     }
+}
+
+/// One wire (the lead's word of 2026-11-09, which drops the append-only rule), over any OS: a client of another wire
+/// is refused at its hello, and nothing more it sends is read. Do: as a client of another wire, a hello (its identity
+/// and its build, in the hello's head every build lays out alike) and a delete of box b, both waiting before the server
+/// reads; then a client of this wire's hello and inspect of b. Expect: the hello answered with the node's own, and
+/// nothing more, its connection shut and let go with the delete unread, b kept; the second greeted and its inspect
+/// answered.
+#[test]
+fn a_client_of_another_wire_is_refused_at_its_hello_over_any_os() {
+    let lab = Lab::new();
+    let theirs = !wire::IDENTITY;
+    let other = Sock::new(64);
+    let their_hello = Request::Hello {
+        build: "hex 9.9.9 (another wire)".to_owned(),
+    };
+    other.to_server.lock().unwrap().extend([
+        of_wire(
+            wire::request(1, &their_hello, wire::MAX_MESSAGE).unwrap(),
+            theirs,
+        ),
+        of_wire(request(2, Call::Delete(b())), theirs),
+    ]);
+    lab.os.lock().pending.push_back((Arc::clone(&other), true));
+    lab.os.poke();
+    match answer_of(&other) {
+        (Header { id: 1, .. }, Answer::Hello(h)) => assert_eq!(h.build, wire::build()),
+        other => panic!("the node's own hello, not {other:?}"),
+    }
+    wait_until("the refused connection to be let go", || {
+        lab.connections() == 0
+    });
+    assert!(other.shut.load(Ordering::SeqCst), "its connection shut");
+    assert!(
+        other.to_client.lock().unwrap().is_empty(),
+        "nothing more answered"
+    );
+    assert_eq!(lab.host.sim.inspect(&b()).unwrap().id, b());
+    let sock = lab.os.connect(true, 64);
+    lab.os.put(&sock, hello());
+    assert!(matches!(answer_of(&sock).1, Answer::Hello(_)));
+    lab.os.put(&sock, request(2, Call::Inspect(b())));
+    assert!(matches!(
+        answer_of(&sock),
+        (Header { id: 2, .. }, Answer::Info(_))
+    ));
 }
 
 /// HEX-SOCK-4 (the core): connections past the bound, and a caller the OS says isn't this user, are each

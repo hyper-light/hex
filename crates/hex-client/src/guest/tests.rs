@@ -1,6 +1,6 @@
 //! The guest client's tests (docs/design/shards-guest.md §3, HEX-GUEST-4 and HEX-GUEST-5; native plan
 //! step 5, serving HEX-RT-1..13 through the seam): against a stand-in agent on loopback, the client says
-//! hello in the first version and calls in the highest both speak, framed; an exec's stdin and stdout
+//! hello with its build, then calls, framed, in its one wire; an exec's stdin and stdout
 //! ride connections of their own, named for it, and its end comes back; and an agent that sends bytes
 //! that aren't a message, or closes mid-message, refuses every waiting call by type.
 
@@ -52,8 +52,8 @@ fn next_request(conn: &mut TcpStream) -> (Header, Request) {
     }
 }
 
-fn send_answer(conn: &mut TcpStream, version: u16, id: u64, answer: &Answer) {
-    let bytes = wire::answer(version, id, answer, wire::MAX_MESSAGE).unwrap();
+fn send_answer(conn: &mut TcpStream, id: u64, answer: &Answer) {
+    let bytes = wire::answer(id, answer, wire::MAX_MESSAGE).unwrap();
     conn.write_all(&stream::frame(&bytes, wire::MAX_MESSAGE).unwrap())
         .unwrap();
 }
@@ -61,33 +61,40 @@ fn send_answer(conn: &mut TcpStream, version: u16, id: u64, answer: &Answer) {
 /// The relay's token for every stand-in connection.
 const TOKEN: u64 = 0x7465_7374;
 
+/// The stand-in agent's hello, of this wire and this build.
+fn agents_hello() -> wire::Hello {
+    wire::Hello {
+        build: wire::build(),
+        classes: vec![Class::Oci],
+        // The stand-in's own limits, inputs rather than tuning: past what any test here makes.
+        limits: Limits {
+            connections: 1,
+            message_bytes: wire::MAX_MESSAGE,
+            in_flight: 4,
+            programs: 4,
+        },
+        budgets: wire::Budgets {
+            in_flight: 4,
+            programs: 4,
+        },
+    }
+}
+
 fn hello(conn: &mut TcpStream) -> Header {
     conn.write_all(&TOKEN.to_le_bytes()).unwrap();
     let (h, request) = next_request(conn);
-    assert_eq!(request, Request::Hello);
-    send_answer(
-        conn,
-        wire::FIRST,
-        h.id,
-        &Answer::Hello(wire::Hello {
-            version: wire::VERSION,
-            classes: vec![Class::Oci],
-            // The stand-in's own limits, inputs rather than tuning: past what any test here makes.
-            limits: Limits {
-                connections: 1,
-                message_bytes: wire::MAX_MESSAGE,
-                in_flight: 4,
-                programs: 4,
-            },
-            budgets: None,
-        }),
+    assert_eq!(
+        request,
+        Request::Hello {
+            build: wire::build()
+        }
     );
+    send_answer(conn, h.id, &Answer::Hello(agents_hello()));
     h
 }
 
-/// HEX-GUEST-4: connect, then inspect a box the agent doesn't hold: expect the hello in version 1 and
-/// the inspect in the highest version both speak, each framed, the classes the agent named, and its
-/// refusal returned typed.
+/// HEX-GUEST-4: connect, then inspect a box the agent doesn't hold: expect the hello and the inspect, each
+/// framed, the classes the agent named, and its refusal returned typed.
 #[test]
 fn a_call_goes_framed_and_its_refusal_comes_back_typed() {
     let (control, _stdio, link) = listeners();
@@ -98,22 +105,79 @@ fn a_call_goes_framed_and_its_refusal_comes_back_typed() {
         let Request::Call(Call::Inspect(id)) = request else {
             panic!("expected an inspect, got {request:?}");
         };
-        send_answer(
-            &mut conn,
-            h.version,
-            h.id,
-            &Answer::Refused(Refusal::NoSuchBox(id)),
-        );
-        [(first.version, first.kind), (h.version, h.kind)]
+        send_answer(&mut conn, h.id, &Answer::Refused(Refusal::NoSuchBox(id)));
+        [first.kind, h.kind]
     });
     let client = Client::connect(link).unwrap();
     assert_eq!(client.classes(), vec![Class::Oci]);
     let b = BoxId::new("b").unwrap();
     assert_eq!(client.inspect(&b), Err(Refusal::NoSuchBox(b)));
-    assert_eq!(
-        agent.join().unwrap(),
-        [(wire::FIRST, 0x0001), (wire::VERSION, 0x0006)]
+    assert_eq!(agent.join().unwrap(), [0x0001, 0x0006]);
+}
+
+/// One wire (the lead's word of 2026-11-09, which drops the append-only rule), over the guest's stream: a client
+/// refuses an agent of another wire at the hello, typed, naming both wires' identities and both builds, and sends it
+/// nothing more; an agent of its own wire it serves. Do: connect to a stand-in agent that answers the hello, framed,
+/// as an agent of another wire would (its own identity and build, in the hello's head every build lays out alike);
+/// then connect again, answered in this wire, and inspect a box. Expect: the first connect refused as
+/// `Invalid { what: "wire" }` naming both, its connection ended with nothing more sent; the second greeted and its
+/// inspect answered.
+#[test]
+fn an_agent_of_another_wire_is_refused_at_the_hello() {
+    let (control, _stdio, link) = listeners();
+    let theirs = !wire::IDENTITY;
+    let their_build = "hex 9.9.9 (another wire)";
+    let agent = std::thread::spawn(move || {
+        let (mut conn, _) = control.accept().unwrap();
+        conn.write_all(&TOKEN.to_le_bytes()).unwrap();
+        let (h, request) = next_request(&mut conn);
+        assert!(matches!(request, Request::Hello { .. }), "{request:?}");
+        let mut bytes = wire::answer(
+            h.id,
+            &Answer::Hello(wire::Hello {
+                build: their_build.to_owned(),
+                ..agents_hello()
+            }),
+            wire::MAX_MESSAGE,
+        )
+        .unwrap();
+        bytes[4..12].copy_from_slice(&theirs.to_le_bytes());
+        conn.write_all(&stream::frame(&bytes, wire::MAX_MESSAGE).unwrap())
+            .unwrap();
+        // Nothing more comes: the client's end of the connection, read as its close.
+        let mut rest = Vec::new();
+        conn.read_to_end(&mut rest).unwrap();
+        let (mut conn, _) = control.accept().unwrap();
+        hello(&mut conn);
+        let (h, request) = next_request(&mut conn);
+        let Request::Call(Call::Inspect(id)) = request else {
+            panic!("an inspect, not {request:?}")
+        };
+        send_answer(&mut conn, h.id, &Answer::Refused(Refusal::NoSuchBox(id)));
+        (rest, conn)
+    });
+    let refused = Client::connect(Arc::clone(&link)).err();
+    let Some(Refusal::Invalid { what: "wire", why }) = &refused else {
+        panic!("refused for its wire, not {refused:?}")
+    };
+    for named in [
+        format!("{theirs:016x}"),
+        format!("{:016x}", wire::IDENTITY),
+        their_build.to_owned(),
+        wire::build(),
+    ] {
+        assert!(why.contains(&named), "{why:?} names {named:?}");
+    }
+    let client = Client::connect(link).unwrap();
+    let b = BoxId::new("b").unwrap();
+    assert_eq!(client.inspect(&b), Err(Refusal::NoSuchBox(b.clone())));
+    let (rest, conn) = agent.join().unwrap();
+    assert!(
+        rest.is_empty(),
+        "the refused client sent {} bytes after its hello",
+        rest.len()
     );
+    drop(conn);
 }
 
 /// HEX-GUEST-4: exec a program with stdin and stdout whose agent echoes one into the other: expect two
@@ -146,12 +210,12 @@ fn an_execs_stdio_rides_named_connections_and_its_end_comes_back() {
             );
             named.insert(n.stream, s);
         }
-        send_answer(&mut conn, h.version, h.id, &Answer::Started { pid: 42 });
+        send_answer(&mut conn, h.id, &Answer::Started { pid: 42 });
         let mut stdin = named.remove(&stream::Stdio::In).unwrap();
         let mut stdout = named.remove(&stream::Stdio::Out).unwrap();
         std::io::copy(&mut stdin, &mut stdout).unwrap();
         drop(stdout);
-        send_answer(&mut conn, h.version, h.id, &Answer::Exited(Exit::Code(0)));
+        send_answer(&mut conn, h.id, &Answer::Exited(Exit::Code(0)));
         // Held open until the client has its end, as an agent's connection is.
         let _ = next_request(&mut conn);
     });
@@ -213,7 +277,7 @@ fn an_agent_closing_mid_message_is_refused() {
         let (mut conn, _) = control.accept().unwrap();
         hello(&mut conn);
         let (h, _) = next_request(&mut conn);
-        let bytes = wire::answer(h.version, h.id, &Answer::Done, wire::MAX_MESSAGE).unwrap();
+        let bytes = wire::answer(h.id, &Answer::Done, wire::MAX_MESSAGE).unwrap();
         let framed = stream::frame(&bytes, wire::MAX_MESSAGE).unwrap();
         conn.write_all(&framed[..framed.len() - 1]).unwrap();
     });
@@ -339,8 +403,8 @@ fn a_stdio_connection_waits_on_its_program_as_a_local_pipe_does() {
         hello(&mut conn);
         let (h, _) = next_request(&mut conn);
         let (s, _) = stdio.accept().unwrap();
-        send_answer(&mut conn, h.version, h.id, &Answer::Started { pid: 7 });
-        send_answer(&mut conn, h.version, h.id, &Answer::Exited(Exit::Code(0)));
+        send_answer(&mut conn, h.id, &Answer::Started { pid: 7 });
+        send_answer(&mut conn, h.id, &Answer::Exited(Exit::Code(0)));
         let _ = next_request(&mut conn);
         drop(s);
     });

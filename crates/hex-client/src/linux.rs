@@ -29,8 +29,8 @@ use crate::calls::{Core, Handle, KINDS, Lent, Sent, Shared, Transport};
 /// way left to it. Each kind is seeded by build profile from its `client.answer.<kind>` rows of
 /// `bench/competitive/probes/waits_census.md`, in nanoseconds as the census keeps them: a release build from run 4's
 /// largest max of the release arms with a row's 1,000 samples (adacachy2), a debug build from run 3's debug arm's
-/// (fedora) until run 5 records the suites' run-outs (decision 9). Wire version 3's kill and exec asking for streams
-/// have no rows yet: MEASURING until a census with them in records them.
+/// (fedora) until run 5 records the suites' run-outs (decision 9). A kill and an exec asking for streams have no rows
+/// yet: MEASURING until a census with them in records them.
 static ANSWERS: [Patience; KINDS] = [
     Patience::by_profile(
         "client.answer.hello",

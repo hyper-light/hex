@@ -66,16 +66,14 @@ fn next_request(conn: &mut UnixStream, requests: &mut Requests) -> (Header, Requ
 
 /// `answer` to request `h`, framed.
 fn framed(h: Header, answer: &Answer) -> Vec<u8> {
-    let bytes = wire::answer(h.version, h.id, answer, wire::MAX_MESSAGE).unwrap();
+    let bytes = wire::answer(h.id, answer, wire::MAX_MESSAGE).unwrap();
     stream::frame(&bytes, wire::MAX_MESSAGE).unwrap()
 }
 
-/// Answers a hello: this version, a process class, room for `in_flight` calls at once.
-fn hello(conn: &mut UnixStream, requests: &mut Requests, in_flight: usize) {
-    let (h, request) = next_request(conn, requests);
-    assert_eq!(request, Request::Hello);
-    let answer = Answer::Hello(wire::Hello {
-        version: wire::VERSION,
+/// A stand-in agent's hello, of this wire and this build: a process class, room for `in_flight` calls at once.
+fn agents_hello(in_flight: usize) -> wire::Hello {
+    wire::Hello {
+        build: wire::build(),
         classes: vec![Class::Process],
         limits: Limits {
             connections: 1,
@@ -83,9 +81,24 @@ fn hello(conn: &mut UnixStream, requests: &mut Requests, in_flight: usize) {
             in_flight,
             programs: 1,
         },
-        budgets: None,
-    });
-    conn.write_all(&framed(h, &answer)).unwrap();
+        budgets: wire::Budgets {
+            in_flight,
+            programs: 1,
+        },
+    }
+}
+
+/// Answers a client's hello, which carries its build, with [`agents_hello`].
+fn hello(conn: &mut UnixStream, requests: &mut Requests, in_flight: usize) {
+    let (h, request) = next_request(conn, requests);
+    assert_eq!(
+        request,
+        Request::Hello {
+            build: wire::build()
+        }
+    );
+    conn.write_all(&framed(h, &Answer::Hello(agents_hello(in_flight))))
+        .unwrap();
 }
 
 /// Whether the client's reader holds part of a frame: its read state, between the turn's reads.
@@ -254,4 +267,71 @@ fn a_given_answers_descriptor_at_its_first_byte_reaches_its_exec() {
     drop(proc);
     drop(client);
     drop(agent.join().unwrap());
+}
+
+/// One wire (the lead's word of 2026-11-09, which drops the append-only rule), over the framed stream: a client
+/// refuses an agent of another wire at the hello, typed, naming both wires' identities and both builds, and sends it
+/// nothing more; an agent of its own wire it serves. Do: connect to a stand-in agent that answers the hello, framed,
+/// as an agent of another wire would (its own identity and build, in the hello's head every build lays out alike);
+/// then connect again, answered in this wire, and inspect a box. Expect: the first connect refused as
+/// `Invalid { what: "wire" }` naming both, its connection ended with nothing more sent; the second greeted and its
+/// inspect answered.
+#[test]
+fn an_agent_of_another_wire_is_refused_at_the_hello() {
+    let (_dir, path, listener) = agent_socket();
+    let theirs = !wire::IDENTITY;
+    let their_build = "hex 9.9.9 (another wire)";
+    let agent = std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        let mut requests = Requests::new();
+        let (h, request) = next_request(&mut conn, &mut requests);
+        assert!(matches!(request, Request::Hello { .. }), "{request:?}");
+        let mut bytes = wire::answer(
+            h.id,
+            &Answer::Hello(wire::Hello {
+                build: their_build.to_owned(),
+                ..agents_hello(1)
+            }),
+            wire::MAX_MESSAGE,
+        )
+        .unwrap();
+        bytes[4..12].copy_from_slice(&theirs.to_le_bytes());
+        conn.write_all(&stream::frame(&bytes, wire::MAX_MESSAGE).unwrap())
+            .unwrap();
+        // Nothing more comes: the client's end of the connection, read as its close.
+        let mut rest = Vec::new();
+        conn.read_to_end(&mut rest).unwrap();
+        let (mut conn, _) = listener.accept().unwrap();
+        let mut requests = Requests::new();
+        hello(&mut conn, &mut requests, 1);
+        let (h, request) = next_request(&mut conn, &mut requests);
+        let Request::Call(Call::Inspect(id)) = request else {
+            panic!("an inspect, not {request:?}")
+        };
+        conn.write_all(&framed(h, &Answer::Refused(Refusal::NoSuchBox(id))))
+            .unwrap();
+        (rest, conn)
+    });
+    let refused = Client::connect(&path).err();
+    let Some(Refusal::Invalid { what: "wire", why }) = &refused else {
+        panic!("refused for its wire, not {refused:?}")
+    };
+    for named in [
+        format!("{theirs:016x}"),
+        format!("{:016x}", wire::IDENTITY),
+        their_build.to_owned(),
+        wire::build(),
+    ] {
+        assert!(why.contains(&named), "{why:?} names {named:?}");
+    }
+    let client = Client::connect(&path).unwrap();
+    let b = BoxId::new("b").unwrap();
+    assert_eq!(client.inspect(&b), Err(Refusal::NoSuchBox(b.clone())));
+    let (rest, conn) = agent.join().unwrap();
+    assert!(
+        rest.is_empty(),
+        "the refused client sent {} bytes after its hello",
+        rest.len()
+    );
+    drop(conn);
 }

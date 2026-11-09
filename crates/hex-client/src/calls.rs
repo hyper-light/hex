@@ -45,10 +45,10 @@ pub const KINDS: usize = 12;
 /// call's wait for its answer and its send is learned per call kind, since a delete waits on its box's emptying and a
 /// list on its parts, so a fast inspect's answer says nothing of theirs); `None` for one that has no answer (a
 /// release). A table's order: hello, create, start, exec, signal, inspect, usage, list, delete, netns, then wire
-/// version 3's kill and exec asking for streams.
+/// a program's kill and an exec asking for streams.
 pub(crate) fn kind_of<'a>(waits: &'a [Patience; KINDS], request: &Request) -> Option<&'a Patience> {
     let n = match request {
-        Request::Hello => 0,
+        Request::Hello { .. } => 0,
         Request::Call(call) => match call {
             Call::Create(_) => 1,
             Call::Start(_) => 2,
@@ -562,9 +562,13 @@ impl<T: Transport> Shared<T> {
         };
         let mut take = |msg: &Received<'_>, fds: Vec<hex_api::End>| -> Result<(), Refusal> {
             let (header, answer) = wire::read_answer(msg, wire::MAX_MESSAGE).map_err(|fault| {
-                Refusal::Broken(format!(
-                    "the node agent sent a message that isn't an answer: {fault}"
-                ))
+                match fault {
+                    // An agent of another wire: refused by type, naming both wires and both builds.
+                    wire::Fault::Wire { .. } => Refusal::from(fault),
+                    fault => Refusal::Broken(format!(
+                        "the node agent sent a message that isn't an answer: {fault}"
+                    )),
+                }
             })?;
             self.deliver(header, answer, fds)
         };
@@ -873,7 +877,6 @@ impl<T: Transport> Conn<T> {
     /// program an exec starts is made before the exec goes, so the end can't come first.
     fn call<'l>(
         &self,
-        version: u16,
         bound: usize,
         request: &Request,
         with: impl FnOnce(u64) -> Result<&'l [Lent<'l>], Refusal>,
@@ -885,7 +888,7 @@ impl<T: Transport> Conn<T> {
         let patience = waits.and_then(Patience::deadline);
         let asked = Instant::now();
         let deadline = patience.and_then(|p| asked.checked_add(p));
-        let bytes = wire::request(version, caller.id, request, bound)
+        let bytes = wire::request(caller.id, request, bound)
             .map_err(Refusal::from)
             .and_then(T::frame)?;
         let lent = with(caller.id)?;
@@ -962,14 +965,12 @@ pub struct Core<T: Transport> {
     conn: Arc<Conn<T>>,
     classes: Vec<Class>,
     limits: Limits,
-    /// The wire version this client writes: [`wire::FIRST`] for its hello, then the highest both it
-    /// and its agent speak.
-    version: u16,
 }
 
 impl<T: Transport> Core<T> {
-    /// Says hello over `shared` and learns what the agent runs and its bounds. Its hello goes in the first version,
-    /// which an agent of any version reads.
+    /// Says hello over `shared`, naming this build, and learns what the agent runs and its bounds. An agent of
+    /// another wire is refused here, by type, naming both wires and both builds (`hex_core::wire::Fault::Wire`):
+    /// two sides talk only when built from the same wire.
     pub(crate) fn hello(shared: Arc<Shared<T>>) -> Result<Self, Refusal> {
         let client = Self {
             conn: Arc::new(Conn { shared }),
@@ -980,9 +981,11 @@ impl<T: Transport> Core<T> {
                 in_flight: 1,
                 programs: 0,
             },
-            version: wire::FIRST,
         };
-        let answer = client.call(&Request::Hello, |_| Ok(NONE), None)?.1;
+        let hello = Request::Hello {
+            build: wire::build(),
+        };
+        let answer = client.call(&hello, |_| Ok(NONE), None)?.1;
         client.greeted(answer)
     }
 
@@ -991,20 +994,15 @@ impl<T: Transport> Core<T> {
         self.conn.shared.closed()
     }
 
-    /// This client, told by the hello's `answer` what its agent runs, its bounds and its version.
+    /// This client, told by the hello's `answer` what its agent runs and its bounds.
     fn greeted(mut self, answer: Answer) -> Result<Self, Refusal> {
         match answer {
-            Answer::Hello(hello) if hello.version < wire::FIRST => Err(Refusal::Broken(format!(
-                "the node agent says it speaks wire version {}, below the first",
-                hello.version
-            ))),
             Answer::Hello(hello) => {
                 self.classes = hello.classes;
                 self.limits = Limits {
                     message_bytes: hello.limits.message_bytes.min(wire::MAX_MESSAGE),
                     ..hello.limits
                 };
-                self.version = hello.version.min(wire::VERSION);
                 Ok(self)
             }
             Answer::Refused(r) => Err(r),
@@ -1116,7 +1114,7 @@ impl<T: Transport> Core<T> {
                 state.given.remove(&id);
             }
         };
-        let sent = wire::request(self.version, id, request, self.limits.message_bytes)
+        let sent = wire::request(id, request, self.limits.message_bytes)
             .map_err(Refusal::from)
             .and_then(T::frame)
             .and_then(|bytes| {
@@ -1162,12 +1160,7 @@ impl<T: Transport> Core<T> {
         if let Ok(mut state) = self.conn.shared.state() {
             state.programs.remove(&exec);
         }
-        if let Ok(bytes) = wire::request(
-            self.version,
-            exec,
-            &Request::Release,
-            self.limits.message_bytes,
-        ) {
+        if let Ok(bytes) = wire::request(exec, &Request::Release, self.limits.message_bytes) {
             self.conn.send_now(&bytes);
         }
     }
@@ -1183,8 +1176,7 @@ impl<T: Transport> Core<T> {
     }
 
     /// The agent's network namespace counts (decision 4), as `hex_node::Node::netns` reads them in
-    /// process. An agent of wire version 1 has none to give: the call is refused by type before it is
-    /// sent, as a kind version 1 doesn't define.
+    /// process.
     pub fn netns(&self) -> Result<netns::Counts, Refusal> {
         match self
             .call(&Request::Call(Call::Netns), |_| Ok(NONE), None)?
@@ -1204,13 +1196,8 @@ impl<T: Transport> Core<T> {
         with: impl FnOnce(u64) -> Result<&'l [Lent<'l>], Refusal>,
         program: Option<Arc<Ending>>,
     ) -> Result<(u64, Answer), Refusal> {
-        self.conn.call(
-            self.version,
-            self.limits.message_bytes,
-            request,
-            with,
-            program,
-        )
+        self.conn
+            .call(self.limits.message_bytes, request, with, program)
     }
 
     /// A call that carries nothing beside its message.
@@ -1398,7 +1385,7 @@ impl<T: Transport> Runtime for Core<T> {
 
     /// The caller's own pipes ride with the exec as descriptors, which a local program takes as its streams. A
     /// stream asked for is made where the program's streams are: by the transport, where they are connections of
-    /// its own (a guest's), or by the agent, which gives its end with its answer (wire version 3's
+    /// its own (a guest's), or by the agent, which gives its end with its answer (the wire's
     /// [`Call::ExecStreams`]). A program that can't take the caller's own pipe (a guest's) has its stream's
     /// connection copied to and from that pipe here: by the transport where it makes the connection, or once the
     /// agent's answer gives its end. The one copy left is this client's, the caller's, never the node's (native
@@ -1467,7 +1454,6 @@ impl<T: Transport> Runtime for Core<T> {
                 let ends = shared.state()?.given.remove(&exec).unwrap_or_default();
                 let mut proc = RemoteProc {
                     conn: Arc::clone(&self.conn),
-                    version: self.version,
                     bound: self.limits.message_bytes,
                     exec,
                     pid,
@@ -1537,8 +1523,7 @@ impl<T: Transport> Runtime for Core<T> {
 /// A program a node agent started for this client: its end comes as a message.
 struct RemoteProc<T: Transport> {
     conn: Arc<Conn<T>>,
-    /// The wire version its client writes, which its release and kill go in, and the agent's message bound.
-    version: u16,
+    /// The agent's message bound, which its kill goes in.
     bound: usize,
     exec: u64,
     pid: u32,
@@ -1661,17 +1646,13 @@ impl<T: Transport> Proc for RemoteProc<T> {
     }
 
     /// A kill request naming its exec, answered once the agent has sent KILL; its end then comes as any
-    /// end does. An agent of wire version 2 or earlier has no kill: refused by type before it is sent.
+    /// end does.
     fn kill(&mut self) -> Result<(), Refusal> {
         if self.wait(None)?.is_some() {
             return Ok(());
         }
         let kill = Request::Call(Call::Kill { exec: self.exec });
-        match self
-            .conn
-            .call(self.version, self.bound, &kill, |_| Ok(NONE), None)?
-            .1
-        {
+        match self.conn.call(self.bound, &kill, |_| Ok(NONE), None)?.1 {
             Answer::Done => Ok(()),
             Answer::Refused(r) => Err(r),
             other => Err(unexpected("kill", &other)),
@@ -1699,13 +1680,7 @@ impl<T: Transport> Drop for RemoteProc<T> {
         if let Ok(mut state) = shared.state() {
             state.programs.remove(&self.exec);
         }
-        if !ended
-            && let Ok(bytes) = wire::request(
-                self.version,
-                self.exec,
-                &Request::Release,
-                wire::MAX_MESSAGE,
-            )
+        if !ended && let Ok(bytes) = wire::request(self.exec, &Request::Release, wire::MAX_MESSAGE)
         {
             self.conn.send_now(&bytes);
         }
@@ -1717,12 +1692,6 @@ impl<T: Transport> Core<T> {
     /// The connection's shared state, for a test of a transport to reach its socket.
     pub(crate) fn shared(&self) -> &Shared<T> {
         &self.conn.shared
-    }
-
-    /// The wire version this client writes.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn version(&self) -> u16 {
-        self.version
     }
 }
 

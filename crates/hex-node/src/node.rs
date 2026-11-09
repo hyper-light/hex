@@ -2275,7 +2275,7 @@ mod tests {
         let fits = |n: usize| {
             let why = format!("{said}{}", "x".repeat(n));
             let refused = wire::Answer::Refused(Refusal::Os { op, why });
-            wire::answer(wire::FIRST, u64::MAX, &refused, wire::MAX_MESSAGE).is_ok()
+            wire::answer(u64::MAX, &refused, wire::MAX_MESSAGE).is_ok()
         };
         assert!(fits(room), "a refusal filled to its room of {room} fits");
         assert!(!fits(room + 1), "one byte past its room doesn't");

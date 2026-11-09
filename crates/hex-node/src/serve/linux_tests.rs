@@ -286,7 +286,22 @@ fn received(bytes: &[u8]) -> Received<'_> {
 }
 
 fn request(id: u64, call: Call) -> Vec<u8> {
-    wire::request(wire::VERSION, id, &Request::Call(call), wire::MAX_MESSAGE).unwrap()
+    wire::request(id, &Request::Call(call), wire::MAX_MESSAGE).unwrap()
+}
+
+/// A hello of this wire and this build, as request `id`.
+fn hello_of_this_wire(id: u64) -> Vec<u8> {
+    let hello = Request::Hello {
+        build: wire::build(),
+    };
+    wire::request(id, &hello, wire::MAX_MESSAGE).unwrap()
+}
+
+/// `bytes`, a message of this wire, as the wire whose identity is `theirs` would send it: the identity is the
+/// header's bytes 4 to 12 in every build.
+fn of_wire(mut bytes: Vec<u8>, theirs: u64) -> Vec<u8> {
+    bytes[4..12].copy_from_slice(&theirs.to_le_bytes());
+    bytes
 }
 
 fn b() -> BoxId {
@@ -307,15 +322,16 @@ fn alive(pid: u32) -> bool {
 
 struct Hostile<'a>(&'a str, Vec<u8>, Vec<BorrowedFd<'a>>, u64, &'a str);
 
-/// HEX-SOCK-3: hostile messages to a live server (truncated, empty, not Hex's, an unknown version or
-/// kind, an answer sent as a request, trailing bytes, oversized, descriptors where none belong and
-/// more than a message takes) are each refused by type, to the request their header names, and the
-/// connection is served after each; another connection is served too.
+/// HEX-SOCK-3: hostile messages to a live server (truncated, empty, not Hex's, an unknown kind, an answer sent
+/// as a request, trailing bytes, oversized, descriptors where none belong and more than a message takes) are each
+/// refused by type, to the request their header names, and the connection is served after each; another
+/// connection is served too. A message of another wire is refused by its own test
+/// (`a_client_of_another_wire_is_refused_at_its_hello`).
 #[test]
 fn hostile_messages_are_refused_and_the_connection_is_served_after() {
     let lab = Lab::new(limits());
     let fd = lab.raw();
-    let hello = wire::request(wire::FIRST, 9, &Request::Hello, wire::MAX_MESSAGE).unwrap();
+    let hello = hello_of_this_wire(9);
     let with = |at: usize, two: [u8; 2]| {
         let mut m = hello.clone();
         m[at..at + 2].copy_from_slice(&two);
@@ -338,10 +354,6 @@ fn hostile_messages_are_refused_and_the_connection_is_served_after() {
         },
     );
     let p = pipe_r.as_fd();
-    // The first version this side doesn't speak, and what a trailing byte past this version's body says.
-    let unspoken = wire::VERSION + 1;
-    let unspoken_says = format!("version {unspoken}");
-    let trailing_says = format!("follow what version {} defines", wire::VERSION);
     // Each: what it is, its bytes, the descriptors sent with it, the id its refusal goes to, and
     // what the refusal says.
     let cases: Vec<Hostile<'_>> = vec![
@@ -361,28 +373,26 @@ fn hostile_messages_are_refused_and_the_connection_is_served_after() {
             "HEXW",
         ),
         Hostile(
-            "a version this side doesn't speak",
-            with(4, unspoken.to_le_bytes()),
+            "unknown kind",
+            with(12, [0x0e, 0]),
             vec![],
             9,
-            &unspoken_says,
-        ),
-        Hostile("unknown kind", with(6, [0x0e, 0]), vec![], 9, "kind 0x000e"),
-        Hostile(
-            "a version 2 kind in version 1",
-            with(6, [0x0b, 0]),
-            vec![],
-            9,
-            "kind 0x000b isn't a request version 1 defines",
+            "kind 0x000e isn't a request this wire defines",
         ),
         Hostile(
             "an answer kind",
-            with(6, [0x03, 0x80]),
+            with(12, [0x03, 0x80]),
             vec![],
             9,
             "kind 0x8003",
         ),
-        Hostile("trailing bytes", trailing, vec![], 5, &trailing_says),
+        Hostile(
+            "trailing bytes",
+            trailing,
+            vec![],
+            5,
+            "follow what this wire defines",
+        ),
         Hostile(
             "oversized",
             oversized,
@@ -440,8 +450,7 @@ fn hostile_messages_are_refused_and_the_connection_is_served_after() {
 }
 
 /// HEX-SOCK-10: the node's network namespace counts cross the socket as its host holds them: asked
-/// through `hex-client`, and on a raw connection in this side's version, answered in its request's version with
-/// its id.
+/// through `hex-client`, and on a raw connection, answered with its request's id.
 #[test]
 fn the_network_namespace_counts_cross_the_socket() {
     let lab = Lab::new(limits());
@@ -449,10 +458,56 @@ fn the_network_namespace_counts_cross_the_socket() {
     let fd = lab.raw();
     send_raw(&fd, &request(4, Call::Netns), &[]);
     let (h, answer) = answer_of(&fd);
-    assert_eq!(
-        (h.version, h.id, answer),
-        (wire::VERSION, 4, Answer::Netns(counts()))
-    );
+    assert_eq!((h.id, answer), (4, Answer::Netns(counts())));
+}
+
+/// One wire (the lead's word of 2026-11-09, which drops the append-only rule): a client of another wire is refused at
+/// its hello, and nothing it sends is read as this wire's. Do: on a raw connection, a hello as a client of another wire
+/// sends it (its identity and its build, in the hello's head every build lays out alike); on another, greeted in this
+/// wire, a delete of box b as the other wire would send it; then inspect b through `hex-client`, of this wire. Expect:
+/// each answered with the node's own hello, of this wire and this build, to its id, which a client of another wire
+/// refuses naming both (hex-client's own tests), then its connection's end, nothing more sent; b kept; the inspect
+/// answered.
+#[test]
+fn a_client_of_another_wire_is_refused_at_its_hello() {
+    let lab = Lab::new(limits());
+    let theirs = !wire::IDENTITY;
+    let hello = Request::Hello {
+        build: "hex 9.9.9 (another wire)".to_owned(),
+    };
+    let their_hello = of_wire(wire::request(9, &hello, wire::MAX_MESSAGE).unwrap(), theirs);
+    let their_delete = of_wire(request(2, Call::Delete(b())), theirs);
+    let refused = lab.raw();
+    send_raw(&refused, &their_hello, &[]);
+    let greeted = lab.raw();
+    send_raw(&greeted, &hello_of_this_wire(1), &[]);
+    assert!(matches!(answer_of(&greeted).1, Answer::Hello(_)));
+    send_raw(&greeted, &their_delete, &[]);
+    for (fd, id) in [(&refused, 9), (&greeted, 2)] {
+        match answer_of(fd) {
+            (h, Answer::Hello(told)) if h.id == id => assert_eq!(told.build, wire::build()),
+            other => panic!("the node's own hello to {id}, not {other:?}"),
+        }
+        let mut after = [0u8; 64];
+        let mut readable = [PollFd::new(fd, PollFlags::IN)];
+        assert_eq!(
+            rustix::event::poll(&mut readable, Some(&answer_wait())).unwrap(),
+            1,
+            "the node kept the connection open"
+        );
+        assert_eq!(
+            rustix::net::recv(fd, &mut after, rustix::net::RecvFlags::empty())
+                .unwrap()
+                .0,
+            0,
+            "the node sent more than its hello"
+        );
+    }
+    wait_until(&LET_GO, "the refused connections to close", || {
+        lab.connections() == 0
+    });
+    assert_eq!(lab.host.sim.inspect(&b()).unwrap().id, b());
+    assert_eq!(lab.client().inspect(&b()).unwrap().id, b());
 }
 
 /// HEX-SOCK-4: connections past the bound are refused by type, naming it, without disturbing the
@@ -499,7 +554,6 @@ fn requests_past_the_in_flight_bound_are_refused_and_none_is_lost() {
         answer_of(&fd),
         (
             Header {
-                version: wire::VERSION,
                 kind: 0x8007,
                 id: 3
             },
@@ -790,7 +844,7 @@ fn a_release_sent_before_a_reset_is_honoured() {
         let _held = lab.server.shared.table.lock().unwrap();
         send_raw(
             &fd,
-            &wire::request(wire::VERSION, 1, &Request::Release, wire::MAX_MESSAGE).unwrap(),
+            &wire::request(1, &Request::Release, wire::MAX_MESSAGE).unwrap(),
             &[],
         );
         drop(fd);
@@ -877,48 +931,39 @@ fn programs_watched_are_bounded_for_the_node_and_each_connection_keeps_its_one()
     }
 }
 
-/// HEX-SOCK-2 and HEX-SOCK-5, the lead's ruling of 2026-11-06: a client of an older version is told only what the
-/// node keeps for each connection, and is never refused within it, however much of the node's budgets other
-/// connections hold. Do: a hello in version 6 and one in version 7 (`wire::BUDGETS`); then, under a node-wide budget of 3 calls held at
-/// the gate, one connection taking all it can before an old client's call. Expect: version 6 told one call and one
-/// program a connection and no budgets; version 7 told the same and the node's budgets beside; the first connection
-/// refused past two calls, naming the node's budget; the old client's call admitted and answered.
+/// HEX-SOCK-5, the lead's ruling of 2026-11-06: a client is told what the node keeps for each connection, beside the
+/// node's budgets, and is never refused within what it keeps, however much of the budgets other connections hold. Do:
+/// a hello; then, under a node-wide budget of 3 calls held at the gate, one connection taking all it can before
+/// another's call. Expect: the hello told one call and one program a connection and the node's budgets beside; the
+/// first connection refused past two calls, naming the node's budget; the other's call admitted and answered.
 #[test]
-fn an_older_client_within_what_it_was_told_is_never_refused() {
+fn a_client_within_what_it_was_told_is_never_refused() {
     let lab = Lab::new(Limits {
         in_flight: 3,
         ..limits()
     });
-    let hello = |version: u16| {
+    let told = {
         let fd = lab.raw();
-        send_raw(
-            &fd,
-            &wire::request(version, 9, &Request::Hello, wire::MAX_MESSAGE).unwrap(),
-            &[],
-        );
+        send_raw(&fd, &hello_of_this_wire(9), &[]);
         match answer_of(&fd).1 {
             Answer::Hello(h) => h,
             other => panic!("{other:?}"),
         }
     };
-    let old = hello(6);
-    assert_eq!((old.limits.in_flight, old.limits.programs), (1, 1));
-    assert_eq!(old.budgets, None);
-    let new = hello(7);
-    assert_eq!((new.limits.in_flight, new.limits.programs), (1, 1));
+    assert_eq!((told.limits.in_flight, told.limits.programs), (1, 1));
     assert_eq!(
-        new.budgets,
-        Some(wire::Budgets {
+        told.budgets,
+        wire::Budgets {
             in_flight: 3,
             programs: limits().programs
-        })
+        }
     );
-    // Each connection holds its one call from its admission, so the hellos' are let go first, and both of these are
+    // Each connection holds its one call from its admission, so the hello's is let go first, and both of these are
     // admitted before either asks.
-    wait_until(&LET_GO, "the hellos' connections to close", || {
+    wait_until(&LET_GO, "the hello's connection to close", || {
         lab.connections() == 0
     });
-    let (greedy, older) = (lab.raw(), lab.raw());
+    let (greedy, other) = (lab.raw(), lab.raw());
     wait_until(&ADMITTED, "both connections to be admitted", || {
         lab.connections() == 2
     });
@@ -933,14 +978,10 @@ fn an_older_client_within_what_it_was_told_is_never_refused() {
             bound: 3
         })
     );
-    send_raw(
-        &older,
-        &wire::request(3, 7, &Request::Call(Call::Inspect(b())), wire::MAX_MESSAGE).unwrap(),
-        &[],
-    );
+    send_raw(&other, &request(7, Call::Inspect(b())), &[]);
     lab.host.gate.set(false);
     assert!(matches!(
-        answer_of(&older),
+        answer_of(&other),
         (Header { id: 7, .. }, Answer::Info(_))
     ));
     for _ in 0..2 {

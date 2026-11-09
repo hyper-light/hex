@@ -1169,7 +1169,7 @@ fn disconnect(lab: &Lab, agent: &Agent, client: &Client) {
         };
         send(
             &caller,
-            &wire::request(wire::VERSION, n, &Request::Call(call), wire::MAX_MESSAGE).unwrap(),
+            &wire::request(n, &Request::Call(call), wire::MAX_MESSAGE).unwrap(),
         );
         match answer(&caller) {
             (h, Answer::Started { pid }) if h.id == n => pids.push(pid),

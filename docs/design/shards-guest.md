@@ -106,9 +106,7 @@ The node agent's socket is `SOCK_SEQPACKET` and carries an exec's stdio as `SCM_
   caller holds its socket and no byte is copied on the host. A pipe the caller gives of its own is copied between
   it and the connection in the caller's process, one bounded buffer per stream: by the guest client in process,
   or, through the host node's socket, by the caller's socket client, to which the node gives the connection's end
-  with the exec's answer (wire version 3's `Given`). The node copies no stream and keeps none of the caller's
-  pipes; a client of an earlier wire version carrying pipes to a guest's program is refused before the guest is
-  sent anything.
+  with the exec's answer (the wire's `Given`). The node copies no stream and keeps none of the caller's pipes.
 - **In the guest**, a relay (`hex guest relay`) accepts the host's vsock connections and speaks the node's own
   socket, one node connection per host control connection, so the node, its wire and its disconnect rule stay
   as they are (CLAUDE.md §8). Its framing, stream names and gathering of an exec's streams are a sans-IO core
@@ -576,9 +574,9 @@ Hex's tests of the channel, each citing its ID:
   and the running guest is never booted again for it, which would end its boxes (`GuestRuntime`).
 - HEX-GUEST-41: a guest program's streams through the host node's socket are the guest's own stdio connections,
   whose ends ride the exec's answer to the caller's client: asked for, they are the caller's; given as the
-  caller's own pipes, the client copies between them, and the node keeps none of the caller's pipes; a client of
-  wire version 2 carrying pipes is refused before the guest is sent anything (`crates/hex-node/tests/guest_loop.rs`,
-  over a stand-in guest whose programs' pids name no host process; `hex_client`'s Linux tests, the client's copy).
+  caller's own pipes, the client copies between them, and the node keeps none of the caller's pipes
+  (`crates/hex-node/tests/guest_loop.rs`, over a stand-in guest whose programs' pids name no host process;
+  `hex_client`'s Linux tests, the client's copy).
 - HEX-GUEST-42: the conformance suite on `oci` boxes through a host node's socket served over
   `Recorded<WithGuest<…>>`, as the macOS and Windows nodes serve their guests, HEX-GUEST-18's simulated guest
   behind it: the guest reached from the host's node through the seam (native plan step 5), both stdio forms

@@ -1,6 +1,6 @@
 //! The node agent's local socket (decision 3 of docs/design/runtime-architecture.md): the `Runtime`
 //! seam served over a local socket to callers that don't link Hex, in [`hex_core::wire`]'s format, and
-//! from its version 2 the node's network namespace counts ([`Host::netns`]). An exec's stdio comes in
+//! the node's network namespace counts ([`Host::netns`]). An exec's stdio comes in
 //! with its request, and a program's end goes out as a message after its exec's answer.
 //!
 //! This is the one core for every OS (native plan step 8): the protocol, the bounds, the disconnect rule
@@ -27,7 +27,7 @@
 //! its own control plane, so no fairness between them is owed. Linux's node derives each from its platform
 //! ([`limits`]). Of each budget the node keeps [`KEPT`] for every connection it admits, which is what a hello
 //! tells a client in its limits, so a client within what it was told is never refused; a connection the node
-//! can't keep that for is refused as it comes, naming the budget. Version 7's hello tells the budgets beside;
+//! can't keep that for is refused as it comes, naming the budget. A hello tells the budgets beside;
 //! - answers waiting for room in a connection's socket: while any wait, its requests aren't read, so a
 //!   client that doesn't read its answers stops being read rather than growing the agent's memory.
 //!   By construction they number at most `in_flight + programs + 1`: an answer for each call in
@@ -77,7 +77,7 @@ pub type Native = unsupported::Unsupported;
 
 /// The node's bounds on its socket ([`Server::bind`]'s `limits`), each a budget for the node and each taken from
 /// its platform (Ada's rule and the lead's call, 2026-11-06); a hello tells its `in_flight` and `programs` as the
-/// node's budgets (version 7's) and [`KEPT`] as each connection's limits:
+/// node's budgets and [`KEPT`] as each connection's limits:
 /// - connections: the descriptors the node may hold (its hard `RLIMIT_NOFILE`, which the agent raises its soft
 ///   limit to, getrlimit(2)), one each; the kernel refuses an accept past what remains of them (`EMFILE`), and the
 ///   socket pauses accepting until one closes;
@@ -115,8 +115,8 @@ pub const WORKERS: usize = 128;
 
 /// What the node keeps for every connection it admits, of its calls in flight and of its programs watched: one of
 /// each, the fewest by which a connection can do anything (the lead's ruling, 2026-11-06). A hello tells a client
-/// this in its limits, whose meaning is each connection's own (wire's append-only rule), so a client of any version
-/// within it is never refused, however much of the budgets other connections hold. It is less than the 64 calls
+/// this in its limits, each connection's own, so a client within it is never refused, however much of the budgets
+/// other connections hold. It is less than the 64 calls
 /// and 1,024 programs a hello told before 2026-11-06: those were per-connection caps, which the node no longer
 /// keeps, and keeping 64 and 1,024 for every connection would cap the connections at the budgets over them (64 at
 /// the supervisor's 65,536 pidfds). Past it, a connection's calls and programs share what the budgets leave.
@@ -237,11 +237,10 @@ pub trait Host: Runtime {
     /// worker. A host takes the calls about boxes a node behind a connection holds (the node's guest):
     /// what must be done here first (staging a box's root) is done on the worker, then the request goes
     /// without waiting for its answer, so the worker is free and no other client's call waits on that
-    /// node. An exec's program's end goes to `ended`. `ends` says whether the caller's client takes a
-    /// started program's streams' ends with its answer (wire version 3's [`Answer::Given`]). By default
-    /// every call runs here.
-    fn forward(&self, call: Call, stdio: Stdio, ends: bool, reply: Reply, ended: Ended) -> Forward {
-        let _ = (ends, reply, ended);
+    /// node. An exec's program's end goes to `ended`; the caller's client takes a started program's streams' ends
+    /// with its answer ([`Answer::Given`]). By default every call runs here.
+    fn forward(&self, call: Call, stdio: Stdio, reply: Reply, ended: Ended) -> Forward {
+        let _ = (reply, ended);
         Forward::Back(Box::new((call, stdio)))
     }
 
@@ -249,7 +248,7 @@ pub trait Host: Runtime {
     /// it closed (the disconnect rule): reported as [`hex_api::BoxInfo::abandoned`].
     fn abandoned(&self, id: &BoxId) -> Result<(), Refusal>;
 
-    /// The node's network namespace counts (decision 4), which a client of wire version 2 asks for.
+    /// The node's network namespace counts (decision 4).
     fn netns(&self) -> Result<netns::Counts, Refusal>;
 }
 
@@ -551,9 +550,8 @@ struct Out {
 /// A program a connection's exec started.
 struct Watched<O: Os> {
     conn: Arc<Conn<O>>,
-    /// Its exec's id and version, which its end is sent with.
+    /// Its exec's id, which its end is sent with.
     exec: u64,
-    version: u16,
     box_id: BoxId,
     run: Run<O>,
     /// Sent KILL because its connection closed: its end is counted in its box, not sent.
@@ -997,11 +995,9 @@ impl<O: Os> Shared<O> {
     }
 
     /// Answers a connection that won't be served with why, as id 0 (its client hasn't asked anything
-    /// yet), in the first version, which a client of any version reads, then lets it go.
+    /// yet), then lets it go.
     fn refuse(&self, sock: &O::Conn, refusal: Refusal) {
-        if let Ok(bytes) =
-            wire::answer(wire::FIRST, 0, &Answer::Refused(refusal), wire::MAX_MESSAGE)
-        {
+        if let Ok(bytes) = wire::answer(0, &Answer::Refused(refusal), wire::MAX_MESSAGE) {
             let _ = self.os.send(sock, &bytes, &[]);
         }
         self.os.shutdown(sock);
@@ -1029,7 +1025,8 @@ impl<O: Os> Shared<O> {
     }
 
     /// Reads a connection's requests until none wait, its answers back up, or it has had its turn;
-    /// or, once its client has gone (`gone`), every request it left. Whether its client has gone.
+    /// or, once its client has gone (`gone`), every request it left. Whether the connection ends: its client
+    /// has gone, or it sent a message of another wire.
     fn read(
         self: &Arc<Self>,
         conn: &Arc<Conn<O>>,
@@ -1076,49 +1073,54 @@ impl<O: Os> Shared<O> {
                 descriptors: passed.len(),
                 descriptors_cut: cut,
             };
-            self.request(conn, &received, passed)?;
+            if self.request(conn, &received, passed)? {
+                return Ok(true);
+            }
         }
     }
 
+    /// This node's hello: its build, the classes it runs, what it keeps for each connection ([`KEPT`]) and its
+    /// budgets over them all.
+    fn hello(&self) -> Hello {
+        Hello {
+            build: wire::build(),
+            classes: self.classes.clone(),
+            limits: Limits {
+                in_flight: KEPT,
+                programs: KEPT,
+                ..self.limits
+            },
+            budgets: wire::Budgets {
+                in_flight: self.limits.in_flight,
+                programs: self.limits.programs,
+            },
+        }
+    }
+
+    /// Carries out a request a connection sent. Whether the connection ends with it: one of another wire ends it.
     fn request(
         self: &Arc<Self>,
         conn: &Arc<Conn<O>>,
         msg: &Received<'_>,
         passed: Vec<O::Passed>,
-    ) -> Result<(), Refusal> {
-        match wire::read_request(msg, self.limits.message_bytes) {
+    ) -> Result<bool, Refusal> {
+        let carried = match wire::read_request(msg, self.limits.message_bytes) {
+            // A client of another wire is refused at its hello: a message of another wire, its hello first, is
+            // answered with this node's hello, whose head (the header, then the build) every build reads, so the
+            // client refuses it naming both wires and both builds; then the connection ends, nothing more of it read.
+            Err(wire::Bad {
+                id,
+                fault: wire::Fault::Wire { .. },
+            }) => {
+                drop(passed);
+                self.answer(conn, id, &Answer::Hello(self.hello()))?;
+                return Ok(true);
+            }
             Err(bad) => {
                 drop(passed);
-                self.answer(
-                    conn,
-                    bad.version,
-                    bad.id,
-                    &Answer::Refused(bad.fault.into()),
-                )
+                self.answer(conn, bad.id, &Answer::Refused(bad.fault.into()))
             }
-            Ok((h, Request::Hello)) => self.answer(
-                conn,
-                h.version,
-                h.id,
-                &Answer::Hello(Hello {
-                    version: wire::VERSION,
-                    classes: self.classes.clone(),
-                    limits: Limits {
-                        in_flight: KEPT,
-                        programs: KEPT,
-                        ..self.limits
-                    },
-                    // A version that has no room for them is told what each connection is kept alone.
-                    budgets: if h.version >= wire::BUDGETS {
-                        Some(wire::Budgets {
-                            in_flight: self.limits.in_flight,
-                            programs: self.limits.programs,
-                        })
-                    } else {
-                        None
-                    },
-                }),
-            ),
+            Ok((h, Request::Hello { .. })) => self.answer(conn, h.id, &Answer::Hello(self.hello())),
             Ok((h, Request::Release)) => self.release(conn, h.id),
             Ok((header, Request::Call(call))) => {
                 let admitted = {
@@ -1144,42 +1146,37 @@ impl<O: Os> Shared<O> {
                     }
                     admitted
                 };
-                if !admitted {
-                    return self.answer(
+                if admitted {
+                    self.enqueue(Job::Call {
+                        conn: Arc::clone(conn),
+                        header,
+                        call: Box::new(call),
+                        passed,
+                    })
+                } else {
+                    self.answer(
                         conn,
-                        header.version,
                         header.id,
                         &Answer::Refused(Refusal::Exhausted {
                             what: IN_FLIGHT,
                             bound: self.limits.in_flight,
                         }),
-                    );
+                    )
                 }
-                self.enqueue(Job::Call {
-                    conn: Arc::clone(conn),
-                    header,
-                    call: Box::new(call),
-                    passed,
-                })
             }
-        }
+        };
+        carried.map(|()| false)
     }
 
     /// Sends one answer on a connection, or keeps it until there is room; an answer that can't be
     /// written is refused to its request in its place.
-    fn answer(
-        &self,
-        conn: &Conn<O>,
-        version: u16,
-        id: u64,
-        answer: &Answer,
-    ) -> Result<(), Refusal> {
-        let bytes = wire::answer(version, id, answer, self.limits.message_bytes)
+    fn answer(&self, conn: &Conn<O>, id: u64, answer: &Answer) -> Result<(), Refusal> {
+        let bytes = wire::answer(id, answer, self.limits.message_bytes)
             .or_else(|fault| {
                 let refused = Answer::Refused(Refusal::Broken(format!(
                     "the node agent's answer couldn't be written: {fault}"
                 )));
-                wire::answer(version, id, &refused, self.limits.message_bytes)
+                wire::answer(id, &refused, self.limits.message_bytes)
             })
             .map_err(|e| Refusal::Broken(format!("a refusal couldn't be written: {e}")))?;
         self.send(conn, bytes, Vec::new(), false)
@@ -1206,16 +1203,10 @@ impl<O: Os> Shared<O> {
             pid,
             given: streams,
         };
-        match wire::answer(
-            header.version,
-            header.id,
-            &answer,
-            self.limits.message_bytes,
-        ) {
+        match wire::answer(header.id, &answer, self.limits.message_bytes) {
             Ok(bytes) => self.send(conn, bytes, fds, false),
             Err(fault) => self.answer(
                 conn,
-                header.version,
                 header.id,
                 &Answer::Refused(Refusal::Broken(format!(
                     "the node agent's answer couldn't be written: {fault}"
@@ -1407,7 +1398,7 @@ impl<O: Os> Shared<O> {
                     Ok(_) => Answer::Done,
                     Err(why) => Answer::Refused(why),
                 };
-                return self.answer(conn, header.version, header.id, &answer);
+                return self.answer(conn, header.id, &answer);
             }
         };
         let shared = Arc::clone(self);
@@ -1419,7 +1410,7 @@ impl<O: Os> Shared<O> {
             };
             let _ = shared
                 .done(&conn)
-                .and_then(|()| shared.answer(&conn, header.version, header.id, &answer));
+                .and_then(|()| shared.answer(&conn, header.id, &answer));
         }));
         Ok(())
     }
@@ -1524,7 +1515,7 @@ impl<O: Os> Shared<O> {
     /// killed it.
     fn finish(self: &Arc<Self>, w: Watched<O>, open: bool, exit: Exit) -> Result<(), Refusal> {
         if open && !w.killed {
-            self.answer(&w.conn, w.version, w.exec, &Answer::Exited(exit))
+            self.answer(&w.conn, w.exec, &Answer::Exited(exit))
         } else {
             self.enqueue(Job::Abandoned(w.box_id))
         }
@@ -1575,7 +1566,6 @@ impl<O: Os> Shared<O> {
                             self.done(&conn)?;
                             self.answer(
                                 &conn,
-                                header.version,
                                 header.id,
                                 &Answer::Refused(Refusal::os("starting a worker for a call", e)),
                             )
@@ -1661,7 +1651,7 @@ impl<O: Os> Shared<O> {
     ) -> Result<(), Refusal> {
         let reply = |answer: Answer| -> Result<(), Refusal> {
             self.done(conn)?;
-            self.answer(conn, header.version, header.id, &answer)
+            self.answer(conn, header.id, &answer)
         };
         let (stdio, program) = match &call {
             Call::Exec { id, streams, .. } | Call::ExecStreams { id, streams, .. } => {
@@ -1704,8 +1694,7 @@ impl<O: Os> Shared<O> {
                 let _ = shared.forwarded(&conn, header, program, got);
             })
         };
-        let ends = wire::gives_ends(header.version);
-        let call = match self.host.forward(call, stdio, ends, forwarded, ended) {
+        let call = match self.host.forward(call, stdio, forwarded, ended) {
             Forward::Taken => return Ok(()),
             Forward::Refused(why) => {
                 if program.is_some() {
@@ -1734,7 +1723,7 @@ impl<O: Os> Shared<O> {
                 self.done(conn)?;
                 return match listed {
                     Ok(infos) => self.list(conn, header, &infos),
-                    Err(r) => self.answer(conn, header.version, header.id, &Answer::Refused(r)),
+                    Err(r) => self.answer(conn, header.id, &Answer::Refused(r)),
                 };
             }
             Call::Create(spec) => host.create(*spec).map(Answer::Info),
@@ -1805,7 +1794,7 @@ impl<O: Os> Shared<O> {
             }
         };
         self.done(conn)?;
-        self.answer(conn, header.version, header.id, &answer)
+        self.answer(conn, header.id, &answer)
     }
 
     fn done(&self, conn: &Conn<O>) -> Result<(), Refusal> {
@@ -1870,12 +1859,11 @@ impl<O: Os> Shared<O> {
         header: Header,
         infos: &[hex_api::BoxInfo],
     ) -> Result<(), Refusal> {
-        let parts = match wire::boxes(header.version, header.id, infos, self.limits.message_bytes) {
+        let parts = match wire::boxes(header.id, infos, self.limits.message_bytes) {
             Ok(parts) => parts,
             Err(fault) => {
                 return self.answer(
                     conn,
-                    header.version,
                     header.id,
                     &Answer::Refused(Refusal::Broken(format!(
                         "the node agent's list couldn't be written: {fault}"
@@ -1902,7 +1890,7 @@ impl<O: Os> Shared<O> {
     ) -> Result<(), Refusal> {
         let reply = |answer: Answer| -> Result<(), Refusal> {
             self.done(conn)?;
-            self.answer(conn, header.version, header.id, &answer)
+            self.answer(conn, header.id, &answer)
         };
         let asked = stdio.ask != hex_api::Ask::default();
         let mut proc = match self.host.exec(&id, program, stdio) {
@@ -1979,7 +1967,6 @@ impl<O: Os> Shared<O> {
         let mut watched = Watched {
             conn: Arc::clone(conn),
             exec: header.id,
-            version: header.version,
             box_id: start.box_id,
             run,
             killed: false,
@@ -1993,12 +1980,7 @@ impl<O: Os> Shared<O> {
         if open {
             match start.given {
                 Some(given) => self.answer_given(conn, header, start.pid, given)?,
-                None => self.answer(
-                    conn,
-                    header.version,
-                    header.id,
-                    &Answer::Started { pid: start.pid },
-                )?,
+                None => self.answer(conn, header.id, &Answer::Started { pid: start.pid })?,
             }
         }
         drop(table);

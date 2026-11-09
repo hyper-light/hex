@@ -120,7 +120,6 @@ struct Sets {
 /// An exec whose streams haven't all come: what to send the node, and where, once they have.
 struct Parked {
     message: Vec<u8>,
-    version: u16,
     id: u64,
     streams: wire::Streams,
     node: Arc<OwnedFd>,
@@ -406,7 +405,6 @@ impl Relay {
         };
         let parked = Parked {
             message: message.to_vec(),
-            version: header.version,
             id: header.id,
             streams,
             node: Arc::clone(node),
@@ -448,7 +446,7 @@ struct Gone;
 /// Refuses a host connection whose token went: a refusal of no request (id 0), as the node's socket
 /// refuses one, which the host's hello returns.
 fn refuse(host: &mut dyn Duplex, why: Refusal) {
-    if let Some(bytes) = wire::answer(wire::FIRST, 0, &Answer::Refused(why), wire::MAX_MESSAGE)
+    if let Some(bytes) = wire::answer(0, &Answer::Refused(why), wire::MAX_MESSAGE)
         .ok()
         .and_then(|bytes| stream::frame(&bytes, wire::MAX_MESSAGE).ok())
     {
@@ -488,14 +486,9 @@ fn deliver(parked: &Parked, waiting: Vec<Waiting>) -> Result<(), Gone> {
 
 /// Answers the parked exec `parked` with `why` on its host's connection.
 fn refuse_exec(parked: &Parked, why: Refusal) -> Result<(), Gone> {
-    let answer = wire::answer(
-        parked.version,
-        parked.id,
-        &Answer::Refused(why),
-        wire::MAX_MESSAGE,
-    )
-    .ok()
-    .and_then(|bytes| stream::frame(&bytes, wire::MAX_MESSAGE).ok());
+    let answer = wire::answer(parked.id, &Answer::Refused(why), wire::MAX_MESSAGE)
+        .ok()
+        .and_then(|bytes| stream::frame(&bytes, wire::MAX_MESSAGE).ok());
     let mut w = parked.writer.lock().map_err(|_| Gone)?;
     w.write_all(&answer.unwrap_or_default()).map_err(|_| Gone)
 }

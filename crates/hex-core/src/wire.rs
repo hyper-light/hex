@@ -4,59 +4,30 @@
 //! ride with them (exec's stdio, by `SCM_RIGHTS`); this decides what each message says, and refuses by
 //! type every one that says nothing valid.
 //!
-//! A message is one `SOCK_SEQPACKET` record, so the kernel keeps its bounds (unix(7)): a 16-byte
+//! A message is one `SOCK_SEQPACKET` record, so the kernel keeps its bounds (unix(7)): a 22-byte
 //! header, then the body its kind defines.
 //!
 //! | bytes | field |
 //! |---|---|
 //! | 0..4 | `HEXW` |
-//! | 4..6 | version |
-//! | 6..8 | kind: a request below `0x8000`, an answer from it |
-//! | 8..16 | id: a request's, chosen by its client; its answer, and an exec'd program's end, carry it |
+//! | 4..12 | the sender's wire identity ([`IDENTITY`]) |
+//! | 12..14 | kind: a request below `0x8000`, an answer from it |
+//! | 14..22 | id: a request's, chosen by its client; its answer, and an exec'd program's end, carry it |
 //!
 //! Integers are little-endian. A string or a path is a `u32` length and its bytes, an option a byte
 //! (0 none, 1 some) before the value, a list a `u32` count before its items, and an enum a byte naming
 //! its variant before its fields.
 //!
-//! The format changes append-only (CLAUDE.md): version 1's kinds and their layouts never change. A
-//! later version adds kinds and appends fields to a kind's body, and reads every earlier version's
-//! messages as they were; an answer is written in its request's version. A reader refuses a message
-//! with bytes past what its version defines rather than skip them, so a field an older reader can't
-//! act on is never dropped silently (§3), and a kind newer than a message's version is refused as one
-//! that version doesn't define. A client says hello in [`FIRST`], which every node agent reads, learns
-//! from the answer the highest version the agent speaks, and writes the rest in the highest both speak.
-//!
-//! Version 2 (goal 4 plan step 2) adds one request and its answer: the node agent's network namespace
-//! counts ([`Call::Netns`], [`Answer::Netns`]). Every version 1 kind reads the same in it.
-//!
-//! Version 3 (native plan step 8) adds a program's kill ([`Call::Kill`], `Proc::kill` through the socket),
-//! answered as every call is, and an exec that asks the node to make some of its streams
-//! ([`Call::ExecStreams`], `Stdio::ask`), answered [`Answer::Given`]: the program's pid, and the caller's
-//! ends of the streams it asked for as the answer's descriptors. An exec whose program can't take the pipes
-//! it carries (one in the node's guest, whose streams are the guest's own connections) is answered so too,
-//! with those streams' ends, between which and its pipes the caller's client copies. Every earlier kind reads
-//! the same in it.
-//!
-//! Versions go in landing order with no gaps (the lead, 2026-11-07), so a version implies the ones before it.
-//!
-//! Version 4 (goal 5 extended, step 6) appends a create's owner to its body ([`hex_api::BoxOwner`]): an
-//! option of the owner's name and a byte, 1 when its boxes' cgroups may be handed on and 0 when it opts
-//! out. A create of a version before it names no owner, and one that names an owner can't be written in
-//! one: it is refused before it is written, never sent without its owner (§3).
-//!
-//! Version 5 (ci-followups) appends to the network namespace counts' answer's body why the counts' failed makes failed and whether the pool was
-//! refused ([`netns::Counts`]'s `failed_by`, `refused` and `refused_on_path`): five `u64`s, one per
-//! [`netns::Step`], a byte naming what the node lacks (0 nothing, its bit 1 CAP_SYS_ADMIN, its bit 2
-//! CAP_NET_ADMIN), and a `u64`. Every version 4 message reads the same in it.
-//!
-//! Version 6 (ci-followups) appends the latest reason a make failed for at each step ([`netns::Counts`]'s `last_failed`): for
-//! each [`netns::Step`] in order an option of the reason, which is an option of its errno (an `i32`) and its
-//! text, a string of at most [`netns::MAX_REASON`] bytes. Every version 5 message reads the same in it.
-//!
-//! Version 7 (the lead's ruling, 2026-11-06) appends to a hello's answer the node's budgets ([`Budgets`]): calls in
-//! flight and programs watched on all its connections together, as an option after the limits, whose meaning stays
-//! each connection's own. A hello's answer of a version before it names none, and one that names budgets can't be written
-//! in them: refused before it is written (§3).
+//! One wire: no versions. Both sides are built from the same wire definitions or they don't talk. Every message
+//! carries its sender's wire identity, a digest of this module's source and [`crate::stream`]'s (the kinds and
+//! their bodies, and the frames a stream carries them in) made at compile time, so a change to either is a new
+//! identity with no number to bump. A reader refuses a message of another identity before it reads its body, so
+//! nothing of another wire is misread (§3). The one layout every build keeps is a hello's head: the header, then
+//! its sender's build as a string ([`build`]), first in a hello and first in its answer. So a peer built from
+//! another wire is refused at the hello, typed, naming both identities and both builds ([`Fault::Wire`]): the agent
+//! answers a message of another identity, its hello first, with its own hello and ends the connection, and the client
+//! refuses an answer of another identity. A reader also refuses bytes past what a kind's body holds rather than
+//! skip them, so nothing is dropped silently.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -71,13 +42,12 @@ use crate::netns;
 
 /// Every message's first bytes.
 pub const MAGIC: [u8; 4] = *b"HEXW";
-/// The highest version this side speaks; it reads and writes every one from [`FIRST`].
-pub const VERSION: u16 = 7;
-/// The first version, which every side reads: a client's hello goes in it, and so does a refusal of a
-/// message whose version this side can't tell or doesn't speak.
-pub const FIRST: u16 = 1;
-/// The header's length: magic, version, kind and id.
-pub const HEADER_BYTES: usize = 16;
+/// This build's wire identity: FNV-1a (64-bit) of the wire definitions' source, this module's and
+/// [`crate::stream`]'s, made at compile time, carriage returns skipped so a checkout's line endings can't split it.
+/// Two builds talk only when theirs are the same.
+pub const IDENTITY: u64 = identity(&[include_bytes!("wire.rs"), include_bytes!("stream.rs")]);
+/// The header's length: magic, wire identity, kind and id.
+pub const HEADER_BYTES: usize = 22;
 /// Largest message either side sends or reads. It sits under the kernel's own bound on a
 /// `SOCK_SEQPACKET` record, the sender's send buffer less 32 bytes (net/unix/af_unix.c,
 /// `unix_dgram_sendmsg`), which is 212,960 bytes under the default 212,992-byte buffer
@@ -89,9 +59,40 @@ pub const MAX_MESSAGE: usize = 128 << 10;
 /// Most descriptors one message carries: exec's stdin, stdout and stderr.
 pub const MAX_FDS: usize = 3;
 
-/// The kinds, each from the version that added it. Requests sit below `0x8000`, answers from it.
+/// FNV-1a (64-bit) of `sources` in turn, every carriage return skipped: the offset basis and prime are FNV-1a's own
+/// (IETF draft-eastlake-fnv, "FNV Basics" and "FNV Constants"). A digest, not a seal: it tells two wires apart, and
+/// FNV-1a because it is a few lines of `const fn`, where a cryptographic hash isn't.
+const fn identity(sources: &[&[u8]]) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = OFFSET;
+    let mut sources = sources;
+    while let Some((source, more)) = sources.split_first() {
+        let mut bytes = *source;
+        while let Some((&byte, rest)) = bytes.split_first() {
+            if byte != b'\r' {
+                hash ^= byte as u64;
+                hash = hash.wrapping_mul(PRIME);
+            }
+            bytes = rest;
+        }
+        sources = more;
+    }
+    hash
+}
+
+/// This build as a hello names it: its crate's version and the commit it was built from (`HEX_COMMIT` at build
+/// time, which kiln CI sets), else "unknown commit".
+pub fn build() -> String {
+    format!(
+        "hex {} ({})",
+        env!("CARGO_PKG_VERSION"),
+        option_env!("HEX_COMMIT").unwrap_or("unknown commit")
+    )
+}
+
+/// The kinds. Requests sit below `0x8000`, answers from it.
 mod kind {
-    // Version 1's.
     pub const HELLO: u16 = 0x0001;
     pub const CREATE: u16 = 0x0002;
     pub const START: u16 = 0x0003;
@@ -110,29 +111,16 @@ mod kind {
     pub const BOXES: u16 = 0x8006;
     pub const REFUSED: u16 = 0x8007;
     pub const EXITED: u16 = 0x8008;
-    // Version 2's.
     pub const NETNS: u16 = 0x000b;
     pub const NETNS_ANSWER: u16 = 0x8009;
-    // Version 3's.
     pub const KILL: u16 = 0x000c;
     pub const EXEC_STREAMS: u16 = 0x000d;
     pub const GIVEN: u16 = 0x800a;
-
-    /// The version that added `kind`: a message of an earlier version is never of it. A kind no
-    /// version defines is refused by the reader's match, whatever this says.
-    pub fn since(kind: u16) -> u16 {
-        match kind {
-            NETNS | NETNS_ANSWER => 2,
-            KILL | EXEC_STREAMS | GIVEN => 3,
-            _ => 1,
-        }
-    }
 }
 
-/// A message's header.
+/// A message's header, once its wire identity is read as this side's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header {
-    pub version: u16,
     pub kind: u16,
     pub id: u64,
 }
@@ -140,8 +128,9 @@ pub struct Header {
 /// What a client sends.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
-    /// A connection's first message: answered with what the node agent runs and its bounds.
-    Hello,
+    /// A connection's first message, naming the client's build ([`build`]): answered with the node agent's build,
+    /// what it runs and its bounds.
+    Hello { build: String },
     /// A call of the seam, answered once.
     Call(Call),
     /// The client no longer waits for the end of the program its header's id started (its `Proc` was
@@ -150,7 +139,7 @@ pub enum Request {
     Release,
 }
 
-/// A call of the node agent: the `Runtime` seam's, and from version 2 its network namespace counts.
+/// A call of the node agent: the `Runtime` seam's, its network namespace counts, and a program's kill.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Call {
     Create(Box<BoxSpec>),
@@ -169,14 +158,14 @@ pub enum Call {
     Usage(BoxId),
     List,
     Delete(BoxId),
-    /// The node agent's network namespace counts ([`netns::Counts`]), version 2's.
+    /// The node agent's network namespace counts ([`netns::Counts`]).
     Netns,
-    /// Version 3's: KILL to the program exec `exec` of this connection started (`Proc::kill`), and only it.
+    /// KILL to the program exec `exec` of this connection started (`Proc::kill`), and only it.
     /// Answered `Done` once sent, or when that program has ended already.
     Kill {
         exec: u64,
     },
-    /// Version 3's: an exec, as [`Call::Exec`], that also asks the node to make the streams `ask` names
+    /// An exec, as [`Call::Exec`], that also asks the node to make the streams `ask` names
     /// (`Stdio::ask`); answered [`Answer::Given`] with the caller's ends of them. A stream both carried
     /// and asked for is refused.
     ExecStreams {
@@ -249,9 +238,9 @@ pub enum Answer {
     Refused(Refusal),
     /// The program the header's id started has ended. Sent unasked, after that exec's answer.
     Exited(Exit),
-    /// netns's, version 2's.
+    /// netns's.
     Netns(netns::Counts),
-    /// Version 3's: an exec that asked for streams ([`Call::ExecStreams`]), or whose program can't take the
+    /// An exec that asked for streams ([`Call::ExecStreams`]), or whose program can't take the
     /// pipes it carried (a guest's), runs, with this process id; the caller's ends of the streams `given` names
     /// ride as the message's descriptors, in order. Its end comes later as [`Answer::Exited`].
     Given {
@@ -263,15 +252,15 @@ pub enum Answer {
 /// The answer to a hello.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hello {
-    /// The highest version the node agent speaks; it speaks every one from 1.
-    pub version: u16,
+    /// The node agent's build ([`build`]): first in the answer, as the client's is in its hello.
+    pub build: String,
     pub classes: Vec<Class>,
     pub limits: Limits,
-    /// The node's budgets, from version 7 ([`BUDGETS`]); `None` in an earlier version's.
-    pub budgets: Option<Budgets>,
+    /// The node's budgets on all its connections together.
+    pub budgets: Budgets,
 }
 
-/// The node agent's budgets on all its connections together (version 7's): past either, a call or an exec is refused
+/// The node agent's budgets on all its connections together: past either, a call or an exec is refused
 /// by type, whichever connection it comes on, but for what each connection's limits keep for it ([`Limits`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Budgets {
@@ -280,9 +269,6 @@ pub struct Budgets {
     /// Programs execs started that the connections still watch, together.
     pub programs: usize,
 }
-
-/// The version whose hello's answer carries the node's budgets.
-pub const BUDGETS: u16 = 7;
 
 /// The node agent's bounds on its socket, each refused past by type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -307,14 +293,29 @@ pub enum Fault {
     Oversized { bytes: usize, bound: usize },
     #[error("it doesn't start with HEXW")]
     Magic,
+    /// A version the other protocols this codec carries don't speak: the seeds', the macOS box helper's, a stdio
+    /// connection's name (the node socket's wire has none: [`Fault::Wire`]).
     #[error("version {got}: this side speaks 1 to {speaks}")]
     Version { got: u16, speaks: u16 },
+    /// A message of another wire: its sender's identity, and its build where the message is a hello or a hello's
+    /// answer, whose head every build lays out alike.
+    #[error("{}", other_wire(*theirs, build.as_deref()))]
+    Wire { theirs: u64, build: Option<String> },
+    /// A kind the node socket's wire doesn't define.
+    #[error("kind {kind:#06x} isn't {expected} this wire defines")]
+    Undefined { kind: u16, expected: &'static str },
+    /// Bytes past what the node socket's wire defines for a message's kind.
+    #[error("{bytes} bytes follow what this wire defines for kind {kind:#06x}")]
+    Leftover { bytes: usize, kind: u16 },
+    /// A kind a message's version doesn't define, in the other protocols this codec carries: the seeds', the macOS
+    /// box helper's.
     #[error("kind {kind:#06x} isn't {expected} version {version} defines")]
     Kind {
         kind: u16,
         version: u16,
         expected: &'static str,
     },
+    /// Bytes past what a message's version defines for its kind, in the other protocols this codec carries.
     #[error("{bytes} bytes follow what version {version} defines for kind {kind:#06x}")]
     Trailing {
         bytes: usize,
@@ -342,10 +343,24 @@ impl Fault {
     }
 }
 
+/// What a message of another wire is refused saying: both identities and both builds.
+fn other_wire(theirs: u64, build: Option<&str>) -> String {
+    format!(
+        "the peer's wire is {theirs:016x} ({}), this side's {IDENTITY:016x} ({}): two sides talk only when built from \
+         the same wire",
+        build.unwrap_or("its build unsaid"),
+        self::build()
+    )
+}
+
 impl From<Fault> for Refusal {
     fn from(fault: Fault) -> Self {
+        let what = match fault {
+            Fault::Wire { .. } => "wire",
+            _ => "message",
+        };
         Refusal::Invalid {
-            what: "message",
+            what,
             why: fault.to_string(),
         }
     }
@@ -362,38 +377,35 @@ pub struct Received<'a> {
     pub descriptors_cut: bool,
 }
 
-/// A request refused: the fault, and where to send the refusal (the request's version and id; version
-/// [`FIRST`] when the request's isn't one this side speaks, and id 0 when its header couldn't be read).
+/// A request refused: the fault, and where to send the refusal (the request's id; 0 when its header couldn't be
+/// read).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bad {
-    pub version: u16,
     pub id: u64,
     pub fault: Fault,
 }
 
-/// A request as a message of at most `bound` bytes, in `version`: the highest its node agent speaks,
-/// as far as this side does, or [`FIRST`] for a hello. A request of a kind `version` doesn't define is
-/// refused before it is written.
-pub fn request(version: u16, id: u64, request: &Request, bound: usize) -> Result<Vec<u8>, Fault> {
-    speaks(version)?;
+/// A request as a message of at most `bound` bytes.
+pub fn request(id: u64, request: &Request, bound: usize) -> Result<Vec<u8>, Fault> {
     let mut w = Writer::new(bound);
     match request {
-        Request::Hello => w.header(version, kind::HELLO, id),
-        Request::Release => w.header(version, kind::RELEASE, id),
-        Request::Call(call) => put_call(&mut w, version, id, call)?,
+        Request::Hello { build } => {
+            w.header(kind::HELLO, id);
+            w.string(build)?;
+        }
+        Request::Release => w.header(kind::RELEASE, id),
+        Request::Call(call) => put_call(&mut w, id, call)?,
     }
     w.done()
 }
 
-/// An answer as a message of at most `bound` bytes, in `version` (its request's). An answer of a kind
-/// `version` doesn't define is refused before it is written.
-pub fn answer(version: u16, id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> {
-    speaks(version)?;
+/// An answer as a message of at most `bound` bytes.
+pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> {
     let mut w = Writer::new(bound);
     match answer {
         Answer::Hello(h) => {
-            w.header(version, kind::HELLO_ANSWER, id);
-            w.u16(h.version);
+            w.header(kind::HELLO_ANSWER, id);
+            w.string(&h.build)?;
             w.list(&h.classes, |w, c| {
                 w.u8(class_tag(*c));
                 Ok(())
@@ -406,35 +418,25 @@ pub fn answer(version: u16, id: u64, answer: &Answer, bound: usize) -> Result<Ve
             ] {
                 w.usize(n)?;
             }
-            if version >= BUDGETS {
-                w.option_with(h.budgets.as_ref(), |w, b| {
-                    w.usize(b.in_flight)?;
-                    w.usize(b.programs)
-                })?;
-            } else if h.budgets.is_some() {
-                return Err(Fault::value(
-                    "a hello's node budgets",
-                    format!("version {version} carries none; version {BUDGETS} does"),
-                ));
-            }
+            w.usize(h.budgets.in_flight)?;
+            w.usize(h.budgets.programs)?;
         }
         Answer::Info(info) => {
-            w.header(version, kind::INFO, id);
+            w.header(kind::INFO, id);
             put_info(&mut w, info)?;
         }
-        Answer::Done => w.header(version, kind::DONE, id),
+        Answer::Done => w.header(kind::DONE, id),
         Answer::Started { pid } => {
-            w.header(version, kind::STARTED, id);
+            w.header(kind::STARTED, id);
             w.u32(*pid);
         }
         Answer::Given { pid, given } => {
-            defines(version, kind::GIVEN, "an answer")?;
-            w.header(version, kind::GIVEN, id);
+            w.header(kind::GIVEN, id);
             w.u32(*pid);
             w.u8(given.bits());
         }
         Answer::Usage(u) => {
-            w.header(version, kind::USAGE_ANSWER, id);
+            w.header(kind::USAGE_ANSWER, id);
             for n in [
                 u.memory_bytes,
                 u.memory_peak_bytes,
@@ -449,21 +451,20 @@ pub fn answer(version: u16, id: u64, answer: &Answer, bound: usize) -> Result<Ve
             }
         }
         Answer::Boxes { infos, more } => {
-            w.header(version, kind::BOXES, id);
+            w.header(kind::BOXES, id);
             w.bool(*more);
             w.list(infos, put_info)?;
         }
         Answer::Refused(r) => {
-            w.header(version, kind::REFUSED, id);
+            w.header(kind::REFUSED, id);
             put_refusal(&mut w, r)?;
         }
         Answer::Exited(exit) => {
-            w.header(version, kind::EXITED, id);
+            w.header(kind::EXITED, id);
             put_exit(&mut w, *exit);
         }
         Answer::Netns(counts) => {
-            defines(version, kind::NETNS_ANSWER, "an answer")?;
-            w.header(version, kind::NETNS_ANSWER, id);
+            w.header(kind::NETNS_ANSWER, id);
             for n in [
                 counts.made_ahead,
                 counts.taken,
@@ -473,30 +474,26 @@ pub fn answer(version: u16, id: u64, answer: &Answer, bound: usize) -> Result<Ve
             ] {
                 w.u64(n);
             }
-            if version >= FAILED_BY {
-                let by = counts.failed_by;
-                for n in [by.home, by.unshare, by.open, by.loopback, by.back] {
-                    w.u64(n);
-                }
-                w.u8(counts.refused.map_or(0, |m| {
-                    u8::from(m.sys_admin()) | (u8::from(m.net_admin()) << 1)
-                }));
-                w.u64(counts.refused_on_path);
+            let by = counts.failed_by;
+            for n in [by.home, by.unshare, by.open, by.loopback, by.back] {
+                w.u64(n);
             }
-            if version >= LAST_FAILED {
-                let last = &counts.last_failed;
-                for reason in [
-                    &last.home,
-                    &last.unshare,
-                    &last.open,
-                    &last.loopback,
-                    &last.back,
-                ] {
-                    w.option_with(reason.as_ref(), |w, reason| {
-                        w.option(reason.errno(), |w, errno| w.i32(errno));
-                        w.string(reason.text())
-                    })?;
-                }
+            w.u8(counts.refused.map_or(0, |m| {
+                u8::from(m.sys_admin()) | (u8::from(m.net_admin()) << 1)
+            }));
+            w.u64(counts.refused_on_path);
+            let last = &counts.last_failed;
+            for reason in [
+                &last.home,
+                &last.unshare,
+                &last.open,
+                &last.loopback,
+                &last.back,
+            ] {
+                w.option_with(reason.as_ref(), |w, reason| {
+                    w.option(reason.errno(), |w, errno| w.i32(errno));
+                    w.string(reason.text())
+                })?;
             }
         }
     }
@@ -506,12 +503,7 @@ pub fn answer(version: u16, id: u64, answer: &Answer, bound: usize) -> Result<Ve
 /// A list's answer as messages of at most `bound` bytes each: as many boxes in each as fit, every
 /// message but the last marked `more`, so a node holding more boxes than one message carries still
 /// answers a list whole. An empty list is one message.
-pub fn boxes(
-    version: u16,
-    id: u64,
-    infos: &[BoxInfo],
-    bound: usize,
-) -> Result<Vec<Vec<u8>>, Fault> {
+pub fn boxes(id: u64, infos: &[BoxInfo], bound: usize) -> Result<Vec<Vec<u8>>, Fault> {
     // A message's bytes before its boxes: the header, `more` and the list's count.
     const OVERHEAD: usize = HEADER_BYTES + 1 + 4;
     let room = bound.checked_sub(OVERHEAD).ok_or(Fault::Oversized {
@@ -542,7 +534,6 @@ pub fn boxes(
         .enumerate()
         .map(|(n, infos)| {
             answer(
-                version,
                 id,
                 &Answer::Boxes {
                     infos,
@@ -579,28 +570,18 @@ fn parse_request(
     carried: bool,
 ) -> Result<(Header, Request), Bad> {
     let mut r = Reader::new(msg.bytes);
-    let (version, kind, id) = r.header().map_err(|fault| Bad {
-        version: FIRST,
-        id: 0,
-        fault,
-    })?;
-    let bad = |fault| Bad {
-        version: if speaks(version).is_ok() {
-            version
-        } else {
-            FIRST
-        },
-        id,
-        fault,
-    };
-    check(msg, bound, version).map_err(bad)?;
-    defines(version, kind, "a request").map_err(bad)?;
+    let (identity, kind, id) = r.header().map_err(|fault| Bad { id: 0, fault })?;
+    let bad = |fault| Bad { id, fault };
+    if identity != IDENTITY {
+        return Err(bad(other(&mut r, identity, kind == kind::HELLO)));
+    }
+    check(msg, bound).map_err(bad)?;
     let request = match kind {
-        kind::HELLO => Request::Hello,
+        kind::HELLO => Request::Hello {
+            build: r.string("build").map_err(bad)?,
+        },
         kind::RELEASE => Request::Release,
-        kind::CREATE => Request::Call(Call::Create(Box::new(
-            box_spec(&mut r, version).map_err(bad)?,
-        ))),
+        kind::CREATE => Request::Call(Call::Create(Box::new(box_spec(&mut r).map_err(bad)?))),
         kind::START => Request::Call(Call::Start(box_id(&mut r).map_err(bad)?)),
         kind::EXEC => {
             let id = box_id(&mut r).map_err(bad)?;
@@ -640,9 +621,8 @@ fn parse_request(
             })
         }
         _ => {
-            return Err(bad(Fault::Kind {
+            return Err(bad(Fault::Undefined {
                 kind,
-                version,
                 expected: "a request",
             }));
         }
@@ -662,22 +642,28 @@ fn parse_request(
             got: msg.descriptors,
         }));
     }
-    r.end(kind, version).map_err(bad)?;
-    Ok((Header { version, kind, id }, request))
+    r.all_read(kind).map_err(bad)?;
+    Ok((Header { kind, id }, request))
 }
 
-/// Whether an answer in `version` can give a started program's streams' ends ([`Answer::Given`]).
-pub fn gives_ends(version: u16) -> bool {
-    version >= kind::since(kind::GIVEN)
+/// What a message of another wire, whose sender's identity is `theirs`, is refused as: its sender's build read
+/// where the message is a hello or a hello's answer (`hello`), whose head every build lays out alike.
+fn other(r: &mut Reader<'_>, theirs: u64, hello: bool) -> Fault {
+    Fault::Wire {
+        theirs,
+        build: hello.then(|| r.string("build").ok()).flatten(),
+    }
 }
 
 /// The answer a received message holds, at most `bound` bytes, or why it holds none. An answer carries
 /// no descriptors but [`Answer::Given`]'s, one for each stream it names.
 pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer), Fault> {
     let mut r = Reader::new(msg.bytes);
-    let (version, kind, id) = r.header()?;
-    check(msg, bound, version)?;
-    defines(version, kind, "an answer")?;
+    let (identity, kind, id) = r.header()?;
+    if identity != IDENTITY {
+        return Err(other(&mut r, identity, kind == kind::HELLO_ANSWER));
+    }
+    check(msg, bound)?;
     if kind != kind::GIVEN && msg.descriptors != 0 {
         return Err(Fault::Descriptors {
             what: "an answer",
@@ -687,28 +673,21 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
     }
     let answer = match kind {
         kind::HELLO_ANSWER => {
-            // The version the agent speaks, not this message's, which says what the message holds.
-            let speaks = r.u16()?;
+            let build = r.string("build")?;
             let classes = r.list(class)?;
-            let mut limit = || r.usize();
+            let mut usize = || r.usize();
             let limits = Limits {
-                connections: limit()?,
-                message_bytes: limit()?,
-                in_flight: limit()?,
-                programs: limit()?,
+                connections: usize()?,
+                message_bytes: usize()?,
+                in_flight: usize()?,
+                programs: usize()?,
             };
-            let budgets = if version >= BUDGETS {
-                r.option(|r| {
-                    Ok(Budgets {
-                        in_flight: r.usize()?,
-                        programs: r.usize()?,
-                    })
-                })?
-            } else {
-                None
+            let budgets = Budgets {
+                in_flight: usize()?,
+                programs: usize()?,
             };
             Answer::Hello(Hello {
-                version: speaks,
+                build,
                 classes,
                 limits,
                 budgets,
@@ -742,26 +721,22 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
                 failed: r.u64()?,
                 ..netns::Counts::default()
             };
-            if version >= FAILED_BY {
-                counts.failed_by = netns::FailedBy {
-                    home: r.u64()?,
-                    unshare: r.u64()?,
-                    open: r.u64()?,
-                    loopback: r.u64()?,
-                    back: r.u64()?,
-                };
-                counts.refused = missing(r.u8()?)?;
-                counts.refused_on_path = r.u64()?;
-            }
-            if version >= LAST_FAILED {
-                counts.last_failed = netns::LastFailed {
-                    home: reason(&mut r)?,
-                    unshare: reason(&mut r)?,
-                    open: reason(&mut r)?,
-                    loopback: reason(&mut r)?,
-                    back: reason(&mut r)?,
-                };
-            }
+            counts.failed_by = netns::FailedBy {
+                home: r.u64()?,
+                unshare: r.u64()?,
+                open: r.u64()?,
+                loopback: r.u64()?,
+                back: r.u64()?,
+            };
+            counts.refused = missing(r.u8()?)?;
+            counts.refused_on_path = r.u64()?;
+            counts.last_failed = netns::LastFailed {
+                home: reason(&mut r)?,
+                unshare: reason(&mut r)?,
+                open: reason(&mut r)?,
+                loopback: reason(&mut r)?,
+                back: reason(&mut r)?,
+            };
             Answer::Netns(counts)
         }
         kind::GIVEN => {
@@ -777,20 +752,18 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
             Answer::Given { pid, given }
         }
         _ => {
-            return Err(Fault::Kind {
+            return Err(Fault::Undefined {
                 kind,
-                version,
                 expected: "an answer",
             });
         }
     };
-    r.end(kind, version)?;
-    Ok((Header { version, kind, id }, answer))
+    r.all_read(kind)?;
+    Ok((Header { kind, id }, answer))
 }
 
-/// What every message is checked for once its header is read: its size, its descriptors' room and
-/// its version.
-fn check(msg: &Received<'_>, bound: usize, version: u16) -> Result<(), Fault> {
+/// What every message of this wire is checked for once its header is read: its size and its descriptors' room.
+fn check(msg: &Received<'_>, bound: usize) -> Result<(), Fault> {
     if msg.size > bound {
         return Err(Fault::Oversized {
             bytes: msg.size,
@@ -800,11 +773,10 @@ fn check(msg: &Received<'_>, bound: usize, version: u16) -> Result<(), Fault> {
     if msg.descriptors_cut || msg.descriptors > MAX_FDS {
         return Err(Fault::DescriptorsCut);
     }
-    speaks(version)
+    Ok(())
 }
 
-/// That this side speaks `version`.
-/// A step's latest reason for a failed make (version 6): an option of its errno and its text, a text past
+/// A step's latest reason for a failed make: an option of its errno and its text, a text past
 /// [`netns::MAX_REASON`] bytes refused rather than cut, so what is read is what was written.
 fn reason(r: &mut Reader<'_>) -> Result<Option<netns::Reason>, Fault> {
     r.option(|r| {
@@ -824,41 +796,16 @@ fn reason(r: &mut Reader<'_>) -> Result<Option<netns::Reason>, Fault> {
     })
 }
 
-/// What a node lacks, from its byte in the network namespace counts (version 5): nothing, or what its
-/// bits name; a bit no version defines is refused.
+/// What a node lacks, from its byte in the network namespace counts: nothing, or what its bits name; a bit the wire
+/// doesn't define is refused.
 fn missing(bits: u8) -> Result<Option<netns::Missing>, Fault> {
     match bits {
         0 => Ok(None),
         1..=3 => Ok(netns::Missing::of(bits & 1 == 0, bits & 2 == 0)),
         _ => Err(Fault::value(
             "missing capabilities",
-            format!("{bits:#04x} names a capability no version defines"),
+            format!("{bits:#04x} names a capability the wire doesn't define"),
         )),
-    }
-}
-
-fn speaks(version: u16) -> Result<(), Fault> {
-    if (FIRST..=VERSION).contains(&version) {
-        Ok(())
-    } else {
-        Err(Fault::Version {
-            got: version,
-            speaks: VERSION,
-        })
-    }
-}
-
-/// That `version` defines `kind` (`expected`, a request or an answer): a kind a later version added
-/// is refused in an earlier one's message, as one that version doesn't define.
-fn defines(version: u16, kind: u16, expected: &'static str) -> Result<(), Fault> {
-    if version >= kind::since(kind) {
-        Ok(())
-    } else {
-        Err(Fault::Kind {
-            kind,
-            version,
-            expected,
-        })
     }
 }
 
@@ -881,14 +828,14 @@ fn request_name(kind: u16) -> &'static str {
     }
 }
 
-fn put_call(w: &mut Writer, version: u16, id: u64, call: &Call) -> Result<(), Fault> {
+fn put_call(w: &mut Writer, id: u64, call: &Call) -> Result<(), Fault> {
     match call {
         Call::Create(spec) => {
-            w.header(version, kind::CREATE, id);
-            put_box_spec(w, version, spec)
+            w.header(kind::CREATE, id);
+            put_box_spec(w, spec)
         }
         Call::Start(b) => {
-            w.header(version, kind::START, id);
+            w.header(kind::START, id);
             w.string(b.as_str())
         }
         Call::Exec {
@@ -896,14 +843,14 @@ fn put_call(w: &mut Writer, version: u16, id: u64, call: &Call) -> Result<(), Fa
             program,
             streams,
         } => {
-            w.header(version, kind::EXEC, id);
+            w.header(kind::EXEC, id);
             w.string(b.as_str())?;
             put_program(w, program)?;
             w.u8(streams.bits());
             Ok(())
         }
         Call::Signal { id: b, signal } => {
-            w.header(version, kind::SIGNAL, id);
+            w.header(kind::SIGNAL, id);
             w.string(b.as_str())?;
             let n = u8::try_from(signal.number())
                 .map_err(|_| Fault::value("signal", format!("{} isn't a byte", signal.number())))?;
@@ -911,29 +858,27 @@ fn put_call(w: &mut Writer, version: u16, id: u64, call: &Call) -> Result<(), Fa
             Ok(())
         }
         Call::Inspect(b) => {
-            w.header(version, kind::INSPECT, id);
+            w.header(kind::INSPECT, id);
             w.string(b.as_str())
         }
         Call::Usage(b) => {
-            w.header(version, kind::USAGE, id);
+            w.header(kind::USAGE, id);
             w.string(b.as_str())
         }
         Call::List => {
-            w.header(version, kind::LIST, id);
+            w.header(kind::LIST, id);
             Ok(())
         }
         Call::Delete(b) => {
-            w.header(version, kind::DELETE, id);
+            w.header(kind::DELETE, id);
             w.string(b.as_str())
         }
         Call::Netns => {
-            defines(version, kind::NETNS, "a request")?;
-            w.header(version, kind::NETNS, id);
+            w.header(kind::NETNS, id);
             Ok(())
         }
         Call::Kill { exec } => {
-            defines(version, kind::KILL, "a request")?;
-            w.header(version, kind::KILL, id);
+            w.header(kind::KILL, id);
             w.u64(*exec);
             Ok(())
         }
@@ -943,8 +888,7 @@ fn put_call(w: &mut Writer, version: u16, id: u64, call: &Call) -> Result<(), Fa
             streams,
             ask,
         } => {
-            defines(version, kind::EXEC_STREAMS, "a request")?;
-            w.header(version, kind::EXEC_STREAMS, id);
+            w.header(kind::EXEC_STREAMS, id);
             w.string(b.as_str())?;
             put_program(w, program)?;
             w.u8(streams.bits());
@@ -954,7 +898,7 @@ fn put_call(w: &mut Writer, version: u16, id: u64, call: &Call) -> Result<(), Fa
     }
 }
 
-fn put_box_spec(w: &mut Writer, version: u16, spec: &BoxSpec) -> Result<(), Fault> {
+fn put_box_spec(w: &mut Writer, spec: &BoxSpec) -> Result<(), Fault> {
     w.string(spec.id.as_str())?;
     put_bounds(w, &spec.bounds);
     match &spec.class {
@@ -968,31 +912,14 @@ fn put_box_spec(w: &mut Writer, version: u16, spec: &BoxSpec) -> Result<(), Faul
             w.path(path)?;
         }
     }
-    if version >= OWNERS {
-        w.option_with(spec.owner.as_ref(), |w, owner| {
-            w.string(&owner.name)?;
-            w.bool(owner.reuse);
-            Ok(())
-        })?;
-    } else if spec.owner.is_some() {
-        return Err(Fault::value(
-            "a create's owner",
-            format!("version {version} carries none; version {OWNERS} does"),
-        ));
-    }
-    Ok(())
+    w.option_with(spec.owner.as_ref(), |w, owner| {
+        w.string(&owner.name)?;
+        w.bool(owner.reuse);
+        Ok(())
+    })
 }
 
-/// The version whose create carries the box's owner.
-const OWNERS: u16 = 4;
-
-/// The version whose network namespace counts carry why each failed make failed and whether the pool was refused.
-const FAILED_BY: u16 = 5;
-
-/// The version whose network namespace counts carry the latest reason a make failed for at each step.
-const LAST_FAILED: u16 = 6;
-
-fn box_spec(r: &mut Reader<'_>, version: u16) -> Result<BoxSpec, Fault> {
+fn box_spec(r: &mut Reader<'_>) -> Result<BoxSpec, Fault> {
     let id = box_id(r)?;
     let bounds = bounds(r)?;
     let class = match r.u8()? {
@@ -1001,15 +928,11 @@ fn box_spec(r: &mut Reader<'_>, version: u16) -> Result<BoxSpec, Fault> {
         2 => ClassSpec::Bundle(r.path()?),
         t => return Err(Fault::value("class spec", format!("variant {t}"))),
     };
-    let owner = if version >= OWNERS {
-        r.option(|r| {
-            let name = r.string("owner.name")?;
-            let reuse = r.bool("owner.reuse")?;
-            Ok(BoxOwner { name, reuse })
-        })?
-    } else {
-        None
-    };
+    let owner = r.option(|r| {
+        let name = r.string("owner.name")?;
+        let reuse = r.bool("owner.reuse")?;
+        Ok(BoxOwner { name, reuse })
+    })?;
     Ok(BoxSpec {
         id,
         bounds,
@@ -1353,9 +1276,9 @@ impl Writer {
         }
     }
 
-    pub(crate) fn header(&mut self, version: u16, kind: u16, id: u64) {
+    pub(crate) fn header(&mut self, kind: u16, id: u64) {
         self.out.extend_from_slice(&MAGIC);
-        self.u16(version);
+        self.u64(IDENTITY);
         self.u16(kind);
         self.u64(id);
     }
@@ -1519,15 +1442,28 @@ impl<'a> Reader<'a> {
         })
     }
 
-    /// The header: magic first, so a message of something else is refused as that.
-    pub(crate) fn header(&mut self) -> Result<(u16, u16, u64), Fault> {
+    /// The header: magic first, so a message of something else is refused as that; then its sender's wire identity,
+    /// its kind and its id.
+    pub(crate) fn header(&mut self) -> Result<(u64, u16, u64), Fault> {
         if self.array::<4>()? != MAGIC {
             return Err(Fault::Magic);
         }
-        Ok((self.u16()?, self.u16()?, self.u64()?))
+        Ok((self.u64()?, self.u16()?, self.u64()?))
     }
 
-    /// That nothing follows what the message's version defines.
+    /// That nothing follows what the node socket's wire defines for the message's kind.
+    pub(crate) fn all_read(&self, kind: u16) -> Result<(), Fault> {
+        if self.rest.is_empty() {
+            Ok(())
+        } else {
+            Err(Fault::Leftover {
+                bytes: self.rest.len(),
+                kind,
+            })
+        }
+    }
+
+    /// That nothing follows what the message's version defines, in the other protocols this codec carries.
     pub(crate) fn end(&self, kind: u16, version: u16) -> Result<(), Fault> {
         if self.rest.is_empty() {
             Ok(())

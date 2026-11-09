@@ -1,8 +1,8 @@
 //! The wire format's tests (decision 3, HEX-SOCK-1 and HEX-SOCK-2): every request and answer reads
-//! back as written; version 1's, version 2's and version 3's bytes are the ones recorded here, so a
-//! change to them fails (append-only), a kind version 2 added is refused in a version 1 message, and a
-//! create's owner, which version 3 added, is refused in an earlier one; and hostile bytes, at every
-//! truncation, every bit flip and at random, are refused by type and never panic.
+//! back as written; a message of another wire is refused before its body is read, naming both wires, and a
+//! hello's head names its sender's build whatever the wire; the wire's identity is its definitions' digest,
+//! line endings aside; and hostile bytes, at every truncation, every bit flip and at random, are refused by
+//! type and never panic.
 
 use super::*;
 use hex_api::{Bounds, BoxOwner, BoxSpec, IoRates, Mount, Network, OciSpec, Program, Rootfs, User};
@@ -80,7 +80,7 @@ fn info() -> BoxInfo {
 fn requests() -> Vec<(u64, Request, usize)> {
     let b = id("b-1");
     vec![
-        (1, Request::Hello, 0),
+        (1, Request::Hello { build: build() }, 0),
         (
             2,
             Request::Call(Call::Create(Box::new(BoxSpec {
@@ -152,7 +152,8 @@ fn requests() -> Vec<(u64, Request, usize)> {
     ]
 }
 
-/// The node agent's network namespace counts, each field a different value.
+/// The node agent's network namespace counts, each field a different value: makes failed at every step, the pool
+/// refused for both capabilities, the latest reason kept at two steps, one with an errno and one without.
 fn counts() -> netns::Counts {
     netns::Counts {
         made_ahead: 1,
@@ -160,15 +161,6 @@ fn counts() -> netns::Counts {
         made_on_path: 3,
         discarded: 4,
         failed: u64::MAX,
-        ..netns::Counts::default()
-    }
-}
-
-/// The counts version 3 adds to, each of its fields a different value: makes failed at every step, the pool
-/// refused for both capabilities.
-fn counts_v5() -> netns::Counts {
-    netns::Counts {
-        failed: 15,
         failed_by: netns::FailedBy {
             home: 1,
             unshare: 2,
@@ -178,20 +170,11 @@ fn counts_v5() -> netns::Counts {
         },
         refused: netns::Missing::of(false, false),
         refused_on_path: 6,
-        ..counts()
-    }
-}
-
-/// The counts version 4 adds to: version 3's, with the latest reason kept at two steps, one with an errno and
-/// one without.
-fn counts_v6() -> netns::Counts {
-    netns::Counts {
         last_failed: netns::LastFailed {
             unshare: Some(netns::Reason::new(Some(1), "EPERM")),
             loopback: Some(netns::Reason::new(None, "not an ack")),
             ..netns::LastFailed::default()
         },
-        ..counts_v5()
     }
 }
 
@@ -227,15 +210,18 @@ fn answers() -> Vec<(u64, Answer)> {
         (
             1,
             Answer::Hello(Hello {
-                version: VERSION,
+                build: build(),
                 classes: vec![Class::Process, Class::Oci],
                 limits: Limits {
                     connections: 64,
                     message_bytes: MAX_MESSAGE,
+                    in_flight: 1,
+                    programs: 1,
+                },
+                budgets: Budgets {
                     in_flight: 64,
                     programs: 1024,
                 },
-                budgets: None,
             }),
         ),
         (2, Answer::Info(info())),
@@ -310,17 +296,13 @@ fn received(bytes: &[u8], descriptors: usize) -> Received<'_> {
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 /// HEX-SOCK-2: each request reads back as the one written, with its header.
 #[test]
 fn every_request_reads_back_as_written() {
     for (n, req, fds) in requests() {
-        let bytes = request(VERSION, n, &req, MAX_MESSAGE).unwrap();
+        let bytes = request(n, &req, MAX_MESSAGE).unwrap();
         let (h, back) = read_request(&received(&bytes, fds), MAX_MESSAGE).unwrap();
-        assert_eq!((h.version, h.id, &back), (VERSION, n, &req));
+        assert_eq!((h.id, &back), (n, &req));
     }
 }
 
@@ -328,178 +310,16 @@ fn every_request_reads_back_as_written() {
 #[test]
 fn every_answer_reads_back_as_written() {
     for (n, ans) in answers() {
-        let bytes = answer(VERSION, n, &ans, MAX_MESSAGE).unwrap();
+        let bytes = answer(n, &ans, MAX_MESSAGE).unwrap();
         let (h, back) = read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap();
-        assert_eq!((h.version, h.id, &back), (VERSION, n, &ans));
+        assert_eq!((h.id, &back), (n, &ans));
     }
 }
 
-/// HEX-SOCK-2, append-only: version 1's bytes for these messages are the ones recorded here. A
-/// change that alters any of them breaks every client and server of version 1 already deployed;
-/// extend the format with new kinds or appended fields under a new version instead.
+/// HEX-SOCK-2: a given answer carries a descriptor for each stream it names, and is refused, naming the count,
+/// with any other.
 #[test]
-fn version_1_messages_are_the_bytes_recorded() {
-    let golden: [(&str, Vec<u8>); 6] = [
-        (
-            "48455857010001000100000000000000",
-            request(1, 1, &Request::Hello, MAX_MESSAGE).unwrap(),
-        ),
-        (
-            GOLDEN_EXEC,
-            request(1, 6, &requests()[5].1, MAX_MESSAGE).unwrap(),
-        ),
-        (
-            GOLDEN_CREATE_OCI,
-            request(1, 3, &requests()[2].1, MAX_MESSAGE).unwrap(),
-        ),
-        (
-            GOLDEN_INFO,
-            answer(1, 2, &Answer::Info(info()), MAX_MESSAGE).unwrap(),
-        ),
-        (
-            GOLDEN_EXHAUSTED,
-            answer(1, 11, &Answer::Refused(refusals()[6].clone()), MAX_MESSAGE).unwrap(),
-        ),
-        (
-            "484558570100088006000000000000000109000000",
-            answer(1, 6, &Answer::Exited(Exit::Signal(9)), MAX_MESSAGE).unwrap(),
-        ),
-    ];
-    for (want, got) in golden {
-        assert_eq!(hex(&got), want);
-    }
-}
-
-/// HEX-SOCK-2, append-only: version 2 adds the network namespace counts' request and answer, whose
-/// bytes are the ones recorded here, and every version 1 kind is written in version 2 as in version 1
-/// but for the version in its header, so an agent of either version reads it.
-#[test]
-fn version_2_messages_are_the_bytes_recorded() {
-    assert_eq!(
-        hex(&request(2, 12, &Request::Call(Call::Netns), MAX_MESSAGE).unwrap()),
-        "4845585702000b000c00000000000000"
-    );
-    assert_eq!(
-        hex(&answer(2, 12, &Answer::Netns(counts()), MAX_MESSAGE).unwrap()),
-        GOLDEN_NETNS
-    );
-    let as_v1 = |mut bytes: Vec<u8>| {
-        bytes[4..6].copy_from_slice(&1u16.to_le_bytes());
-        bytes
-    };
-    for (n, req, _) in requests().into_iter().filter(|(_, r, _)| {
-        *r != Request::Call(Call::Netns)
-            && !matches!(
-                r,
-                Request::Call(Call::Kill { .. } | Call::ExecStreams { .. })
-            )
-    }) {
-        assert_eq!(
-            as_v1(request(2, n, &req, MAX_MESSAGE).unwrap()),
-            request(1, n, &req, MAX_MESSAGE).unwrap(),
-            "{req:?}"
-        );
-    }
-    for (n, ans) in answers()
-        .into_iter()
-        .filter(|(_, a)| !matches!(a, Answer::Netns(_) | Answer::Given { .. }))
-    {
-        assert_eq!(
-            as_v1(answer(2, n, &ans, MAX_MESSAGE).unwrap()),
-            answer(1, n, &ans, MAX_MESSAGE).unwrap(),
-            "{ans:?}"
-        );
-    }
-}
-
-/// HEX-SOCK-2, append-only: version 3 adds one request, a program's kill by its exec's id (answered as any
-/// call is), whose bytes are the ones recorded here; it is no kind of version 2, refused in it before it is
-/// written and when read; and every earlier kind is written in version 3 as in version 2 but for the
-/// version in its header.
-#[test]
-fn version_3_messages_are_the_bytes_recorded() {
-    let kill = Request::Call(Call::Kill { exec: 6 });
-    assert_eq!(
-        hex(&request(3, 13, &kill, MAX_MESSAGE).unwrap()),
-        "4845585703000c000d000000000000000600000000000000"
-    );
-    assert_eq!(
-        request(2, 13, &kill, MAX_MESSAGE),
-        Err(Fault::Kind {
-            kind: 0x000c,
-            version: 2,
-            expected: "a request"
-        })
-    );
-    let as_v = |v: u16, mut bytes: Vec<u8>| {
-        bytes[4..6].copy_from_slice(&v.to_le_bytes());
-        bytes
-    };
-    assert_eq!(
-        read_request(
-            &received(&as_v(2, request(3, 13, &kill, MAX_MESSAGE).unwrap()), 0),
-            MAX_MESSAGE
-        ),
-        Err(Bad {
-            version: 2,
-            id: 13,
-            fault: Fault::Kind {
-                kind: 0x000c,
-                version: 2,
-                expected: "a request"
-            }
-        })
-    );
-    let v3 = |r: &Request| {
-        matches!(
-            r,
-            Request::Call(Call::Kill { .. } | Call::ExecStreams { .. })
-        )
-    };
-    for (n, req, _) in requests().into_iter().filter(|(_, r, _)| !v3(r)) {
-        assert_eq!(
-            as_v(2, request(3, n, &req, MAX_MESSAGE).unwrap()),
-            request(2, n, &req, MAX_MESSAGE).unwrap(),
-            "{req:?}"
-        );
-    }
-    for (n, ans) in answers()
-        .into_iter()
-        .filter(|(_, a)| !matches!(a, Answer::Given { .. }))
-    {
-        assert_eq!(
-            as_v(2, answer(3, n, &ans, MAX_MESSAGE).unwrap()),
-            answer(2, n, &ans, MAX_MESSAGE).unwrap(),
-            "{ans:?}"
-        );
-    }
-}
-
-/// Native plan step 8, guest stdio (HEX-GUEST-41): an answer gives a started program's streams' ends from version
-/// 3 on, and in no earlier version, which defines no given answer.
-#[test]
-fn a_programs_ends_ride_its_answer_from_version_3_on() {
-    assert!(!gives_ends(1) && !gives_ends(2));
-    assert!((3..=VERSION).all(gives_ends));
-    let given = Answer::Given {
-        pid: 1,
-        given: Streams::default(),
-    };
-    assert!(answer(2, 1, &given, MAX_MESSAGE).is_err());
-}
-
-/// HEX-SOCK-2, version 3's exec asking for streams and its answer: their bytes are the ones recorded here
-/// (the exec's body is version 1's recorded exec's, under its own header, with its streams and ask bytes);
-/// a given answer carries a descriptor for each stream it names and is refused, naming the count, with any
-/// other; neither is a kind of version 2.
-#[test]
-fn version_3_streams_are_the_bytes_recorded_and_their_descriptors_counted() {
-    let asking = requests()[14].1.clone();
-    let body = GOLDEN_EXEC.get(32..GOLDEN_EXEC.len() - 2).unwrap();
-    assert_eq!(
-        hex(&request(3, 14, &asking, MAX_MESSAGE).unwrap()),
-        format!("4845585703000d000e00000000000000{body}0106")
-    );
+fn a_given_answer_carries_a_descriptor_for_each_stream_it_names() {
     let given = Answer::Given {
         pid: 4243,
         given: Streams {
@@ -508,8 +328,7 @@ fn version_3_streams_are_the_bytes_recorded_and_their_descriptors_counted() {
             stderr: true,
         },
     };
-    let bytes = answer(3, 14, &given, MAX_MESSAGE).unwrap();
-    assert_eq!(hex(&bytes), "4845585703000a800e000000000000009310000006");
+    let bytes = answer(14, &given, MAX_MESSAGE).unwrap();
     assert_eq!(
         read_answer(&received(&bytes, 2), MAX_MESSAGE).map(|(_, a)| a),
         Ok(given.clone())
@@ -524,178 +343,154 @@ fn version_3_streams_are_the_bytes_recorded_and_their_descriptors_counted() {
             })
         );
     }
-    assert!(matches!(
-        request(2, 14, &asking, MAX_MESSAGE),
-        Err(Fault::Kind { kind: 0x000d, .. })
-    ));
-    assert!(matches!(
-        answer(2, 14, &given, MAX_MESSAGE),
-        Err(Fault::Kind { kind: 0x800a, .. })
-    ));
 }
 
-// Exec of /usr/bin/true with stdin and stdout, an env, a cwd and a user; a create from an OciSpec;
-// an info with every field set; an Exhausted refusal.
-const GOLDEN_EXEC: &str = concat!(
-    "4845585701000400060000000000000003000000622d31020000000d0000002f7573722f62696e2f747275650300",
-    "00007820790100000004000000504154480d0000002f7573722f62696e3a2f62696e01010000002f01e803000064",
-    "000000020000000a0000001400000003",
-);
-const GOLDEN_CREATE_OCI: &str = concat!(
-    "48455857010002000300000000000000050000006f63692d310000000000000000010102000000070000002f6c2f",
-    "62617365060000002f6c2f6170700200000005000000736c65657008000000696e66696e69747901000000040000",
-    "00504154483c0000002f7573722f6c6f63616c2f7362696e3a2f7573722f6c6f63616c2f62696e3a2f7573722f73",
-    "62696e3a2f7573722f62696e3a2f7362696e3a2f62696e000001000000050000002f64617461040000002f6d6e74",
-    "010103000000626f7801010000000200000064620800000031302e302e302e32",
-);
-const GOLDEN_INFO: &str = concat!(
-    "4845585701000280020000000000000003000000622d31010101640000010000000400000000000001f401000001",
-    "01000010000000000000000164000000000000000108000000010101090000000200000000000000",
-);
-const GOLDEN_EXHAUSTED: &str = concat!(
-    "48455857010007800b000000000000000624000000726571756573747320696e20666c69676874206f6e206f6e65",
-    "20636f6e6e656374696f6e4000000000000000",
-);
-// Version 2's network namespace counts, answered: made ahead 1, taken 2, made on the path 3, discarded
-// 4, failed u64::MAX.
-/// HEX-SOCK-2, append-only, and HEX-NETNS-12/13 over the socket: version 5 (ci-followups') appends why makes
-/// failed and whether the pool was refused to the network namespace counts' answer, whose bytes are the ones
-/// recorded here; written in version 2 the answer is version 2's bytes, and every other kind is written in version
-/// 5 as in version 4 but for the version in its header. A version 4 answer with version 5's fields behind it is
-/// refused, as is a byte naming a capability no version defines.
+/// Every message's header: its magic, this side's wire identity, its kind and its id.
+fn header(kind: u16, id: u64) -> Vec<u8> {
+    let mut b = MAGIC.to_vec();
+    b.extend_from_slice(&IDENTITY.to_le_bytes());
+    b.extend_from_slice(&kind.to_le_bytes());
+    b.extend_from_slice(&id.to_le_bytes());
+    b
+}
+
+/// `bytes` as a message of the wire whose identity is `other`.
+fn of_wire(mut bytes: Vec<u8>, other: u64) -> Vec<u8> {
+    bytes[4..12].copy_from_slice(&other.to_le_bytes());
+    bytes
+}
+
+/// One wire (the lead's word of 2026-11-09): a message's header is its magic, its sender's wire identity, its kind
+/// and its id, in that order and at those bytes, and a hello's body begins with its sender's build. Do: write a hello
+/// and its answer. Expect: each starts with the header, then the build as a string, the layout every build keeps.
 #[test]
-fn version_5_messages_are_the_bytes_recorded() {
-    let v3 = answer(5, 12, &Answer::Netns(counts_v5()), MAX_MESSAGE).unwrap();
-    assert_eq!(hex(&v3), GOLDEN_NETNS_V5);
+fn a_hellos_head_is_the_header_then_its_senders_build() {
+    let b = build();
+    let mut built = u32::try_from(b.len()).unwrap().to_le_bytes().to_vec();
+    built.extend_from_slice(b.as_bytes());
+    let hello = request(5, &Request::Hello { build: b.clone() }, MAX_MESSAGE).unwrap();
+    assert_eq!(hello.len(), HEADER_BYTES + built.len());
+    assert_eq!(&hello[..HEADER_BYTES], &header(0x0001, 5)[..]);
+    assert_eq!(&hello[HEADER_BYTES..], &built[..]);
+    let answered = answer(5, &answers()[0].1, MAX_MESSAGE).unwrap();
+    assert_eq!(&answered[..HEADER_BYTES], &header(0x8001, 5)[..]);
     assert_eq!(
-        read_answer(&received(&v3, 0), MAX_MESSAGE).unwrap().1,
-        Answer::Netns(counts_v5())
-    );
-    assert_eq!(
-        hex(&answer(2, 12, &Answer::Netns(counts()), MAX_MESSAGE).unwrap()),
-        GOLDEN_NETNS
-    );
-    let as_v4 = |mut bytes: Vec<u8>| {
-        bytes[4..6].copy_from_slice(&4u16.to_le_bytes());
-        bytes
-    };
-    for (n, req, _) in requests() {
-        assert_eq!(
-            as_v4(request(5, n, &req, MAX_MESSAGE).unwrap()),
-            request(4, n, &req, MAX_MESSAGE).unwrap(),
-            "{req:?}"
-        );
-    }
-    for (n, ans) in answers()
-        .into_iter()
-        .filter(|(_, a)| !matches!(a, Answer::Netns(_)))
-    {
-        assert_eq!(
-            as_v4(answer(5, n, &ans, MAX_MESSAGE).unwrap()),
-            answer(4, n, &ans, MAX_MESSAGE).unwrap(),
-            "{ans:?}"
-        );
-    }
-    assert!(matches!(
-        read_answer(&received(&as_v4(v3.clone()), 0), MAX_MESSAGE),
-        Err(Fault::Trailing { .. })
-    ));
-    let mut unknown = v3;
-    let byte = HEADER_BYTES + 10 * 8;
-    unknown[byte] = 4;
-    assert_eq!(
-        read_answer(&received(&unknown, 0), MAX_MESSAGE),
-        Err(Fault::value(
-            "missing capabilities",
-            "0x04 names a capability no version defines"
-        ))
+        &answered[HEADER_BYTES..HEADER_BYTES + built.len()],
+        &built[..]
     );
 }
 
-/// HEX-SOCK-2, append-only, and HEX-NETNS-14 over the socket: version 6 (ci-followups') appends the latest reason a
-/// make failed for at each step to the network namespace counts' answer, whose bytes are the ones recorded here;
-/// written in version 5 the answer is version 5's bytes, and every other kind is written in version 6 as in
-/// version 5 but for the version in its header. A version 5 answer with version 6's fields behind it is
-/// refused, as is a reason whose text is past its bound.
+/// One wire (the lead's word of 2026-11-09): a message of another wire is refused before its body is read, naming
+/// both wires, and a hello's or a hello's answer's sender's build with them. Do: read a hello, a hello's answer, an
+/// inspect and a done, each stamped with another identity. Expect: each refused as of another wire, naming that
+/// identity; the hello's and the answer's naming their sender's build too; and as a refusal, `Invalid` of "wire"
+/// naming both identities and both builds.
 #[test]
-fn version_6_messages_are_the_bytes_recorded() {
-    let v4 = answer(6, 12, &Answer::Netns(counts_v6()), MAX_MESSAGE).unwrap();
-    assert_eq!(hex(&v4), GOLDEN_NETNS_V6);
-    assert_eq!(
-        read_answer(&received(&v4, 0), MAX_MESSAGE).unwrap().1,
-        Answer::Netns(counts_v6())
+fn a_message_of_another_wire_is_refused_naming_both_wires() {
+    let other = IDENTITY ^ 1;
+    let theirs = "hex 0.0.0 (another commit)".to_owned();
+    let hello = of_wire(
+        request(
+            5,
+            &Request::Hello {
+                build: theirs.clone(),
+            },
+            MAX_MESSAGE,
+        )
+        .unwrap(),
+        other,
     );
+    let got = read_request(&received(&hello, 0), MAX_MESSAGE).unwrap_err();
     assert_eq!(
-        hex(&answer(5, 12, &Answer::Netns(counts_v6()), MAX_MESSAGE).unwrap()),
-        GOLDEN_NETNS_V5
+        (got.id, &got.fault),
+        (
+            5,
+            &Fault::Wire {
+                theirs: other,
+                build: Some(theirs.clone())
+            }
+        )
     );
-    let as_v5 = |mut bytes: Vec<u8>| {
-        bytes[4..6].copy_from_slice(&5u16.to_le_bytes());
-        bytes
+    let answered = of_wire(
+        answer(
+            5,
+            &Answer::Hello(Hello {
+                build: theirs.clone(),
+                ..match &answers()[0].1 {
+                    Answer::Hello(h) => h.clone(),
+                    other => panic!("{other:?}"),
+                }
+            }),
+            MAX_MESSAGE,
+        )
+        .unwrap(),
+        other,
+    );
+    let fault = read_answer(&received(&answered, 0), MAX_MESSAGE).unwrap_err();
+    assert_eq!(
+        fault,
+        Fault::Wire {
+            theirs: other,
+            build: Some(theirs.clone())
+        }
+    );
+    let refusal = Refusal::from(fault);
+    let Refusal::Invalid { what: "wire", why } = &refusal else {
+        panic!("{refusal:?}")
     };
-    for (n, req, _) in requests() {
-        assert_eq!(
-            as_v5(request(6, n, &req, MAX_MESSAGE).unwrap()),
-            request(5, n, &req, MAX_MESSAGE).unwrap(),
-            "{req:?}"
-        );
+    for named in [
+        format!("{other:016x}"),
+        format!("{IDENTITY:016x}"),
+        theirs.clone(),
+        build(),
+    ] {
+        assert!(why.contains(&named), "{why} names no {named}");
     }
-    for (n, ans) in answers()
-        .into_iter()
-        .filter(|(_, a)| !matches!(a, Answer::Netns(_)))
-    {
-        assert_eq!(
-            as_v5(answer(6, n, &ans, MAX_MESSAGE).unwrap()),
-            answer(5, n, &ans, MAX_MESSAGE).unwrap(),
-            "{ans:?}"
-        );
-    }
-    assert!(matches!(
-        read_answer(&received(&as_v5(v4), 0), MAX_MESSAGE),
-        Err(Fault::Trailing { .. })
-    ));
-    // A text one byte past the bound, written as a writer that didn't cut it would.
-    let mut long = answer(6, 12, &Answer::Netns(counts_v5()), MAX_MESSAGE).unwrap();
-    long.truncate(long.len() - 2);
-    long.extend_from_slice(&[1, 0]);
-    let text = "x".repeat(netns::MAX_REASON + 1);
-    long.extend_from_slice(&u32::try_from(text.len()).unwrap().to_le_bytes());
-    long.extend_from_slice(text.as_bytes());
-    long.push(0);
+    let inspect = of_wire(request(8, &requests()[7].1, MAX_MESSAGE).unwrap(), other);
     assert_eq!(
-        read_answer(&received(&long, 0), MAX_MESSAGE),
-        Err(Fault::value(
-            "a failed make's reason",
-            format!("257 bytes is over the {}-byte bound", netns::MAX_REASON)
-        ))
+        read_request(&received(&inspect, 0), MAX_MESSAGE)
+            .unwrap_err()
+            .fault,
+        Fault::Wire {
+            theirs: other,
+            build: None
+        }
+    );
+    let done = of_wire(answer(3, &Answer::Done, MAX_MESSAGE).unwrap(), other);
+    assert_eq!(
+        read_answer(&received(&done, 0), MAX_MESSAGE),
+        Err(Fault::Wire {
+            theirs: other,
+            build: None
+        })
     );
 }
 
-/// [`counts_v6`]'s answer in version 6, id 12.
-const GOLDEN_NETNS_V6: &str = concat!(
-    "48455857060009800c00000000000000",
-    "01000000000000000200000000000000030000000000000004000000000000000f00000000000000",
-    "0100000000000000020000000000000003000000000000000400000000000000050000000000000003",
-    "0600000000000000",
-    "00",
-    "01010100000005000000455045524d",
-    "00",
-    "01000a0000006e6f7420616e2061636b",
-    "00",
-);
-
-/// [`counts_v5`]'s answer in version 5, id 12.
-const GOLDEN_NETNS_V5: &str = concat!(
-    "48455857050009800c00000000000000",
-    "01000000000000000200000000000000030000000000000004000000000000000f00000000000000",
-    "0100000000000000020000000000000003000000000000000400000000000000050000000000000003",
-    "0600000000000000",
-);
-
-const GOLDEN_NETNS: &str = concat!(
-    "48455857020009800c00000000000000",
-    "0100000000000000020000000000000003000000000000000400000000000000ffffffffffffffff",
-);
+/// One wire (the lead's word of 2026-11-09): the identity is FNV-1a of the wire definitions' source, this module's
+/// and the stream module's, with no number to bump, and a checkout's line endings don't split it. Do: digest the two
+/// files as read now, then with every line ended `\r\n`. Expect: both [`IDENTITY`]; and a source with one byte more
+/// another identity.
+#[test]
+fn the_wire_identity_is_its_definitions_digest_line_endings_aside() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let wire = std::fs::read(dir.join("wire.rs")).unwrap();
+    let stream = std::fs::read(dir.join("stream.rs")).unwrap();
+    assert_eq!(identity(&[&wire, &stream]), IDENTITY);
+    let crlf = |bytes: &[u8]| -> Vec<u8> {
+        let mut out = Vec::new();
+        for &b in bytes.iter().filter(|&&b| b != b'\r') {
+            if b == b'\n' {
+                out.push(b'\r');
+            }
+            out.push(b);
+        }
+        out
+    };
+    assert_eq!(identity(&[&crlf(&wire), &crlf(&stream)]), IDENTITY);
+    let mut more = wire.clone();
+    more.push(b' ');
+    assert_ne!(identity(&[&more, &stream]), IDENTITY);
+}
 
 /// HEX-SOCK-2: a list longer than one message carries is split into messages within the bound, each
 /// but the last marked `more`, and the parts read back as the whole list, in order.
@@ -708,7 +503,7 @@ fn a_long_list_is_split_into_messages_within_the_bound() {
             ..info()
         })
         .collect();
-    let parts = boxes(VERSION, 10, &infos, MAX_MESSAGE).unwrap();
+    let parts = boxes(10, &infos, MAX_MESSAGE).unwrap();
     assert!(parts.len() > 1, "5,000 boxes fit one message");
     let mut back = Vec::new();
     for (n, bytes) in parts.iter().enumerate() {
@@ -726,7 +521,7 @@ fn a_long_list_is_split_into_messages_within_the_bound() {
         }
     }
     assert_eq!(back, infos);
-    let one = boxes(VERSION, 10, &[], MAX_MESSAGE).unwrap();
+    let one = boxes(10, &[], MAX_MESSAGE).unwrap();
     assert_eq!(one.len(), 1);
     assert_eq!(
         read_answer(&received(&one[0], 0), MAX_MESSAGE).unwrap().1,
@@ -741,14 +536,14 @@ fn a_long_list_is_split_into_messages_within_the_bound() {
 #[test]
 fn every_truncation_is_refused() {
     for (n, req, fds) in requests() {
-        let bytes = request(VERSION, n, &req, MAX_MESSAGE).unwrap();
+        let bytes = request(n, &req, MAX_MESSAGE).unwrap();
         for cut in 0..bytes.len() {
             let got = read_request(&received(&bytes[..cut], fds), MAX_MESSAGE);
             assert!(got.is_err(), "{req:?} cut at {cut} read as {got:?}");
         }
     }
     for (n, ans) in answers() {
-        let bytes = answer(VERSION, n, &ans, MAX_MESSAGE).unwrap();
+        let bytes = answer(n, &ans, MAX_MESSAGE).unwrap();
         for cut in 0..bytes.len() {
             let got = read_answer(&received(&bytes[..cut], 0), MAX_MESSAGE);
             assert!(got.is_err(), "{ans:?} cut at {cut} read as {got:?}");
@@ -757,36 +552,32 @@ fn every_truncation_is_refused() {
 }
 
 /// HEX-SOCK-1: a message whose header is cut, or isn't Hex's, is refused with id 0 (there is no
-/// request to answer by its own) in the first version, which every client reads; past the header, the
-/// refusal carries the request's id and version.
+/// request to answer by its own); past the header, the refusal carries the request's id.
 #[test]
 fn a_refusal_goes_to_the_request_its_header_names() {
     let got = read_request(&received(b"HEXW\x01\x00", 0), MAX_MESSAGE).unwrap_err();
-    assert_eq!((got.id, got.version), (0, FIRST));
+    assert_eq!(got.id, 0);
     assert!(matches!(got.fault, Fault::Truncated { .. }), "{got:?}");
     let got = read_request(&received(b"GET / HTTP/1.1\r\n\r\n", 0), MAX_MESSAGE).unwrap_err();
-    assert_eq!((got.id, got.version, got.fault), (0, FIRST, Fault::Magic));
-    for version in FIRST..=VERSION {
-        let mut bytes = request(version, 77, &requests()[4].1, MAX_MESSAGE).unwrap();
-        bytes.push(0);
-        let got = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
-        assert_eq!((got.id, got.version), (77, version));
-        assert_eq!(
-            got.fault,
-            Fault::Trailing {
-                bytes: 1,
-                kind: 0x0003,
-                version
-            }
-        );
-    }
+    assert_eq!((got.id, got.fault), (0, Fault::Magic));
+    let mut bytes = request(77, &requests()[4].1, MAX_MESSAGE).unwrap();
+    bytes.push(0);
+    let got = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
+    assert_eq!(got.id, 77);
+    assert_eq!(
+        got.fault,
+        Fault::Leftover {
+            bytes: 1,
+            kind: 0x0003,
+        }
+    );
 }
 
 /// HEX-SOCK-1: a message over the bound is refused naming it, by the size the kernel reports even
 /// when the receiver's buffer cut it, and with the request's id.
 #[test]
 fn an_oversized_message_is_refused_naming_the_bound() {
-    let bytes = request(VERSION, 9, &requests()[8].1, MAX_MESSAGE).unwrap();
+    let bytes = request(9, &requests()[8].1, MAX_MESSAGE).unwrap();
     let cut = Received {
         bytes: &bytes,
         size: MAX_MESSAGE + 1,
@@ -819,7 +610,7 @@ fn an_oversized_message_is_refused_naming_the_bound() {
         streams: Streams::default(),
     };
     assert!(matches!(
-        request(VERSION, 1, &Request::Call(huge), MAX_MESSAGE),
+        request(1, &Request::Call(huge), MAX_MESSAGE),
         Err(Fault::Oversized {
             bound: MAX_MESSAGE,
             ..
@@ -827,252 +618,38 @@ fn an_oversized_message_is_refused_naming_the_bound() {
     ));
 }
 
-/// HEX-SOCK-1: a version this side doesn't speak, or a kind its version doesn't define, is refused
-/// by type; the refusal goes out in a version the sender reads.
+/// HEX-SOCK-1: a kind the wire doesn't define is refused by type, a request's kinds as an answer and an
+/// answer's as a request too.
 #[test]
-fn unknown_versions_and_kinds_are_refused() {
-    let hello = request(FIRST, 5, &Request::Hello, MAX_MESSAGE).unwrap();
-    for version in [0u16, VERSION + 1, 0xffff] {
+fn unknown_kinds_are_refused() {
+    let hello = request(5, &Request::Hello { build: build() }, MAX_MESSAGE).unwrap();
+    for kind in [0u16, 0x000e, 0x7fff, 0x8001, 0x8009, 0xffff] {
         let mut bytes = hello.clone();
-        bytes[4..6].copy_from_slice(&version.to_le_bytes());
+        bytes[12..14].copy_from_slice(&kind.to_le_bytes());
         let got = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
-        assert_eq!(
-            (got.version, got.id, got.fault),
-            (
-                FIRST,
-                5,
-                Fault::Version {
-                    got: version,
-                    speaks: VERSION
-                }
-            )
-        );
-        assert!(read_answer(&received(&bytes, 0), MAX_MESSAGE).is_err());
-    }
-    // Requests and answers each refuse the other's kinds, and kinds no version defines, in every
-    // version this side speaks.
-    for version in FIRST..=VERSION {
-        let hello = request(version, 5, &Request::Hello, MAX_MESSAGE).unwrap();
-        for kind in [0u16, 0x000e, 0x7fff, 0x8001, 0x8009, 0xffff] {
-            let mut bytes = hello.clone();
-            bytes[6..8].copy_from_slice(&kind.to_le_bytes());
-            let got = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
-            assert!(
-                matches!(got.fault, Fault::Kind { kind: k, version: v, expected: "a request" } if k == kind && v == version),
-                "{got:?}"
-            );
-        }
-        for kind in [0u16, 0x0001, 0x000b, 0x8000, 0x800b, 0xffff] {
-            let mut bytes = answer(version, 5, &Answer::Done, MAX_MESSAGE).unwrap();
-            bytes[6..8].copy_from_slice(&kind.to_le_bytes());
-            assert!(matches!(
-                read_answer(&received(&bytes, 0), MAX_MESSAGE),
-                Err(Fault::Kind {
-                    expected: "an answer",
-                    ..
-                })
-            ));
-        }
-    }
-    // A message in a version this side doesn't write is refused before it is written.
-    for version in [0u16, VERSION + 1] {
-        assert!(matches!(
-            answer(version, 1, &Answer::Done, MAX_MESSAGE),
-            Err(Fault::Version { got, .. }) if got == version
-        ));
-        assert!(matches!(
-            request(version, 1, &Request::Hello, MAX_MESSAGE),
-            Err(Fault::Version { got, .. }) if got == version
-        ));
-    }
-}
-
-/// HEX-SOCK-1 and HEX-SOCK-2: a kind version 2 added is no kind of version 1. Asked for in version 1,
-/// the network namespace counts' request and answer are refused before they are written; read in a
-/// version 1 message, each is refused as a kind version 1 doesn't define, with the request's id and
-/// version, so a version 1 agent's refusal of it is the one a version 1 reader gives.
-#[test]
-fn a_kind_a_later_version_added_is_refused_in_an_earlier_one() {
-    let netns = Request::Call(Call::Netns);
-    assert_eq!(
-        request(1, 4, &netns, MAX_MESSAGE),
-        Err(Fault::Kind {
-            kind: 0x000b,
-            version: 1,
-            expected: "a request"
-        })
-    );
-    assert_eq!(
-        answer(1, 4, &Answer::Netns(counts()), MAX_MESSAGE),
-        Err(Fault::Kind {
-            kind: 0x8009,
-            version: 1,
-            expected: "an answer"
-        })
-    );
-    let as_v1 = |mut bytes: Vec<u8>| {
-        bytes[4..6].copy_from_slice(&1u16.to_le_bytes());
-        bytes
-    };
-    let asked = as_v1(request(2, 4, &netns, MAX_MESSAGE).unwrap());
-    assert_eq!(
-        read_request(&received(&asked, 0), MAX_MESSAGE),
-        Err(Bad {
-            version: 1,
-            id: 4,
-            fault: Fault::Kind {
-                kind: 0x000b,
-                version: 1,
-                expected: "a request"
-            }
-        })
-    );
-    let answered = as_v1(answer(2, 4, &Answer::Netns(counts()), MAX_MESSAGE).unwrap());
-    assert_eq!(
-        read_answer(&received(&answered, 0), MAX_MESSAGE),
-        Err(Fault::Kind {
-            kind: 0x8009,
-            version: 1,
-            expected: "an answer"
-        })
-    );
-}
-
-/// HEX-SOCK-2, append-only (goal 5 extended, step 6): version 4 appends a create's owner to its body,
-/// as the bytes recorded here say: an option byte, then the name as a string and a byte for whether its
-/// boxes' cgroups may be handed on. Every other kind is written in version 4 as in version 2 but for the
-/// version in its header (version 3, native's Kill, adds a kind and changes none), and a create naming no owner as
-/// in version 2 with its option's none byte after. A create naming an owner can't be written in versions 1 to 3:
-/// refused, never sent without it.
-#[test]
-fn version_4_messages_are_the_bytes_recorded() {
-    let as_v4 = |mut bytes: Vec<u8>| {
-        bytes[4..6].copy_from_slice(&4u16.to_le_bytes());
-        bytes
-    };
-    for (n, req, _) in requests() {
-        let mut want = as_v4(request(2, n, &req, MAX_MESSAGE).unwrap());
-        if matches!(req, Request::Call(Call::Create(_))) {
-            want.push(0);
-        }
-        assert_eq!(request(4, n, &req, MAX_MESSAGE).unwrap(), want, "{req:?}");
-    }
-    for (n, ans) in answers() {
-        assert_eq!(
-            answer(4, n, &ans, MAX_MESSAGE).unwrap(),
-            as_v4(answer(2, n, &ans, MAX_MESSAGE).unwrap()),
-            "{ans:?}"
-        );
-    }
-    let owned = |reuse| {
-        Request::Call(Call::Create(Box::new(BoxSpec {
-            owner: Some(BoxOwner {
-                name: "o".to_owned(),
-                reuse,
-            }),
-            ..oci_spec()
-        })))
-    };
-    let unowned = Request::Call(Call::Create(Box::new(oci_spec())));
-    for (reuse, byte) in [(true, 1u8), (false, 0u8)] {
-        let mut want = as_v4(request(2, 4, &unowned, MAX_MESSAGE).unwrap());
-        want.extend_from_slice(&[1, 1, 0, 0, 0, b'o', byte]);
-        let bytes = request(4, 4, &owned(reuse), MAX_MESSAGE).unwrap();
-        assert_eq!(bytes, want);
-        let (_, back) = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap();
-        assert_eq!(back, owned(reuse));
-        for older in [1u16, 2, 3] {
-            assert!(
-                matches!(
-                    request(older, 4, &owned(reuse), MAX_MESSAGE),
-                    Err(Fault::Value {
-                        what: "a create's owner",
-                        ..
-                    })
-                ),
-                "version {older} wrote an owner"
-            );
-        }
-    }
-    // A version 2 create read by a version 4 agent names no owner.
-    let v2 = request(2, 4, &unowned, MAX_MESSAGE).unwrap();
-    assert_eq!(
-        read_request(&received(&v2, 0), MAX_MESSAGE).unwrap().1,
-        unowned
-    );
-}
-
-/// HEX-SOCK-2, append-only (the lead's ruling, 2026-11-06): version 7 appends to a hello's answer the node's budgets,
-/// calls in flight and programs watched on all its connections together, as an option after the limits, which keep
-/// their meaning (each connection's own). Do: write every message in version 7, and a hello's answer naming budgets
-/// in each version. Expect: every message as in version 6 but for the version in its header, and a hello's answer
-/// with its option's none byte after; with budgets, a one byte and the two counts as 64-bit numbers, read back the
-/// same; a hello's answer naming budgets refused in versions 1 to 6, never sent without them; and a version 6
-/// hello's answer read by a version 7 side naming none.
-#[test]
-fn version_7_messages_are_the_bytes_recorded() {
-    let as_v7 = |mut bytes: Vec<u8>| {
-        bytes[4..6].copy_from_slice(&7u16.to_le_bytes());
-        bytes
-    };
-    for (n, req, _) in requests() {
-        assert_eq!(
-            request(7, n, &req, MAX_MESSAGE).unwrap(),
-            as_v7(request(6, n, &req, MAX_MESSAGE).unwrap()),
-            "{req:?}"
-        );
-    }
-    for (n, ans) in answers() {
-        let mut want = as_v7(answer(6, n, &ans, MAX_MESSAGE).unwrap());
-        if matches!(ans, Answer::Hello(_)) {
-            want.push(0);
-        }
-        assert_eq!(answer(7, n, &ans, MAX_MESSAGE).unwrap(), want, "{ans:?}");
-    }
-    let Answer::Hello(plain) = answers()[0].1.clone() else {
-        panic!("the first answer is a hello's")
-    };
-    let budgeted = Answer::Hello(Hello {
-        budgets: Some(Budgets {
-            in_flight: 500_000,
-            programs: 65_536,
-        }),
-        ..plain.clone()
-    });
-    let mut want = as_v7(answer(6, 1, &Answer::Hello(plain.clone()), MAX_MESSAGE).unwrap());
-    want.push(1);
-    want.extend_from_slice(&500_000u64.to_le_bytes());
-    want.extend_from_slice(&65_536u64.to_le_bytes());
-    let bytes = answer(7, 1, &budgeted, MAX_MESSAGE).unwrap();
-    assert_eq!(bytes, want);
-    assert_eq!(
-        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
-        budgeted
-    );
-    for older in [1u16, 2, 3, 4, 5, 6] {
         assert!(
-            matches!(
-                answer(older, 1, &budgeted, MAX_MESSAGE),
-                Err(Fault::Value {
-                    what: "a hello's node budgets",
-                    ..
-                })
-            ),
-            "version {older} wrote budgets"
+            matches!(got.fault, Fault::Undefined { kind: k, expected: "a request" } if k == kind),
+            "{got:?}"
         );
     }
-    let v6 = answer(6, 1, &Answer::Hello(plain.clone()), MAX_MESSAGE).unwrap();
-    assert_eq!(
-        read_answer(&received(&v6, 0), MAX_MESSAGE).unwrap().1,
-        Answer::Hello(plain)
-    );
+    for kind in [0u16, 0x0001, 0x000b, 0x8000, 0x800b, 0xffff] {
+        let mut bytes = answer(5, &Answer::Done, MAX_MESSAGE).unwrap();
+        bytes[12..14].copy_from_slice(&kind.to_le_bytes());
+        assert!(matches!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE),
+            Err(Fault::Undefined {
+                expected: "an answer",
+                ..
+            })
+        ));
+    }
 }
 
 /// HEX-SOCK-1: descriptors travel only with an exec, one for each stream it names; any other count,
 /// or more than the three a message takes, is refused by type.
 #[test]
 fn descriptors_where_none_belong_are_refused() {
-    let create = request(VERSION, 2, &requests()[1].1, MAX_MESSAGE).unwrap();
+    let create = request(2, &requests()[1].1, MAX_MESSAGE).unwrap();
     let got = read_request(&received(&create, 1), MAX_MESSAGE).unwrap_err();
     assert_eq!(
         (got.id, got.fault),
@@ -1085,7 +662,7 @@ fn descriptors_where_none_belong_are_refused() {
             }
         )
     );
-    let exec = request(VERSION, 6, &requests()[5].1, MAX_MESSAGE).unwrap();
+    let exec = request(6, &requests()[5].1, MAX_MESSAGE).unwrap();
     for fds in [0, 1, 3] {
         let got = read_request(&received(&exec, fds), MAX_MESSAGE).unwrap_err();
         assert_eq!(
@@ -1107,7 +684,7 @@ fn descriptors_where_none_belong_are_refused() {
         read_request(&cut, MAX_MESSAGE).unwrap_err().fault,
         Fault::DescriptorsCut
     );
-    let done = answer(VERSION, 3, &Answer::Done, MAX_MESSAGE).unwrap();
+    let done = answer(3, &Answer::Done, MAX_MESSAGE).unwrap();
     assert!(matches!(
         read_answer(&received(&done, 1), MAX_MESSAGE),
         Err(Fault::Descriptors {
@@ -1123,13 +700,7 @@ fn descriptors_where_none_belong_are_refused() {
 /// that isn't UTF-8, and a list claiming more items than bytes are left.
 #[test]
 fn hostile_values_are_refused_by_name() {
-    let header = |kind: u16| {
-        let mut b = MAGIC.to_vec();
-        b.extend_from_slice(&VERSION.to_le_bytes());
-        b.extend_from_slice(&kind.to_le_bytes());
-        b.extend_from_slice(&42u64.to_le_bytes());
-        b
-    };
+    let head = |kind: u16| header(kind, 42);
     let string = |s: &[u8]| {
         let mut b = u32::try_from(s.len()).unwrap().to_le_bytes().to_vec();
         b.extend_from_slice(s);
@@ -1143,33 +714,33 @@ fn hostile_values_are_refused_by_name() {
         }) => what,
         other => panic!("{other:?}"),
     };
-    let mut start = header(0x0003);
+    let mut start = head(0x0003);
     start.extend(string(b"../etc"));
     assert_eq!(value(&start, 0), "box id");
-    let mut start = header(0x0003);
+    let mut start = head(0x0003);
     start.extend(string(b"\xff\xfe"));
     assert_eq!(value(&start, 0), "box id");
     for n in [0u8, 65, 255] {
-        let mut signal = header(0x0005);
+        let mut signal = head(0x0005);
         signal.extend(string(b"b"));
         signal.push(n);
         assert_eq!(value(&signal, 0), "signal");
     }
-    let mut exec = header(0x0004);
+    let mut exec = head(0x0004);
     exec.extend(string(b"b"));
     exec.extend([0, 0, 0, 0, 0, 0, 0, 0, 7]); // no args, no env, then an option byte of 7
     assert_eq!(value(&exec, 0), "option");
-    let mut exec = header(0x0004);
+    let mut exec = head(0x0004);
     exec.extend(string(b"b"));
     exec.extend([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0b1000]);
     assert_eq!(value(&exec, 0), "streams");
-    let mut create = header(0x0002);
+    let mut create = head(0x0002);
     create.extend(string(b"b"));
     create.extend([0; 8]);
     create.push(9); // no such class spec
     assert_eq!(value(&create, 0), "class spec");
     // A list claiming four billion items in a short message is refused before room is made for them.
-    let mut exec = header(0x0004);
+    let mut exec = head(0x0004);
     exec.extend(string(b"b"));
     exec.extend(u32::MAX.to_le_bytes());
     assert!(matches!(
@@ -1178,7 +749,7 @@ fn hostile_values_are_refused_by_name() {
             .fault,
         Fault::Truncated { .. }
     ));
-    let mut info = answer(VERSION, 2, &Answer::Info(info()), MAX_MESSAGE).unwrap();
+    let mut info = answer(2, &Answer::Info(info()), MAX_MESSAGE).unwrap();
     let adopted = info.len() - 1 - 8 - 6; // abandoned's 8, the exit's 5 and option byte, then adopted
     info[adopted] = 2;
     assert!(matches!(
@@ -1194,13 +765,7 @@ fn hostile_values_are_refused_by_name() {
 /// however often it comes, and a name past the bound is refused, never kept.
 #[test]
 fn refusal_names_are_kept_once_and_bounded() {
-    let bytes = answer(
-        VERSION,
-        1,
-        &Answer::Refused(refusals()[0].clone()),
-        MAX_MESSAGE,
-    )
-    .unwrap();
+    let bytes = answer(1, &Answer::Refused(refusals()[0].clone()), MAX_MESSAGE).unwrap();
     let what = |bytes: &[u8]| match read_answer(&received(bytes, 0), MAX_MESSAGE).unwrap().1 {
         Answer::Refused(Refusal::Invalid { what, .. }) => what,
         other => panic!("{other:?}"),
@@ -1212,7 +777,7 @@ fn refusal_names_are_kept_once_and_bounded() {
         what: "x",
         why: String::new(),
     };
-    let mut bytes = answer(VERSION, 1, &Answer::Refused(long), MAX_MESSAGE).unwrap();
+    let mut bytes = answer(1, &Answer::Refused(long), MAX_MESSAGE).unwrap();
     // Swap the one-byte name for one longer than the bound.
     let at = HEADER_BYTES + 1;
     let name = "n".repeat(NAME_BYTES + 1);
@@ -1418,11 +983,11 @@ proptest! {
     #[test]
     fn any_create_or_exec_reads_back(spec in any_spec(), program in any_program(), id in any_id(), n in any::<u64>(), bits in 0u8..8) {
         let req = Request::Call(Call::Create(Box::new(spec)));
-        let bytes = request(VERSION, n, &req, MAX_MESSAGE).unwrap();
-        prop_assert_eq!(read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap(), (Header { version: VERSION, kind: 0x0002, id: n }, req));
+        let bytes = request(n, &req, MAX_MESSAGE).unwrap();
+        prop_assert_eq!(read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap(), (Header { kind: 0x0002, id: n }, req));
         let streams = Streams::of(bits).unwrap();
         let req = Request::Call(Call::Exec { id, program, streams });
-        let bytes = request(VERSION, n, &req, MAX_MESSAGE).unwrap();
+        let bytes = request(n, &req, MAX_MESSAGE).unwrap();
         prop_assert_eq!(read_request(&received(&bytes, streams.count()), MAX_MESSAGE).unwrap().1, req);
     }
 
@@ -1440,7 +1005,7 @@ proptest! {
             },
         };
         for ans in [Answer::Boxes { infos, more: false }, Answer::Refused(refusal), Answer::Exited(exit), Answer::Netns(counts)] {
-            let bytes = answer(VERSION, 7, &ans, MAX_MESSAGE).unwrap();
+            let bytes = answer(7, &ans, MAX_MESSAGE).unwrap();
             prop_assert_eq!(read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1, ans);
         }
     }
@@ -1453,14 +1018,11 @@ proptest! {
         let _ = read_answer(&received(&bytes, fds), MAX_MESSAGE);
     }
 
-    /// HEX-SOCK-1: bodies of random bytes behind a valid header of each version, so every kind's
-    /// decoder meets them, are a message or a typed refusal, never a panic.
+    /// HEX-SOCK-1: bodies of random bytes behind a valid header, so every kind's decoder meets them, are a
+    /// message or a typed refusal, never a panic.
     #[test]
-    fn any_body_behind_a_header_is_read_or_refused(version in FIRST..=VERSION, kind in prop_oneof![0u16..0x000f, 0x8000u16..0x800c], body in proptest::collection::vec(any::<u8>(), 0..256), fds in 0usize..4) {
-        let mut bytes = MAGIC.to_vec();
-        bytes.extend_from_slice(&version.to_le_bytes());
-        bytes.extend_from_slice(&kind.to_le_bytes());
-        bytes.extend_from_slice(&3u64.to_le_bytes());
+    fn any_body_behind_a_header_is_read_or_refused(kind in prop_oneof![0u16..0x000f, 0x8000u16..0x800c], body in proptest::collection::vec(any::<u8>(), 0..256), fds in 0usize..4) {
+        let mut bytes = header(kind, 3);
         bytes.extend_from_slice(&body);
         let _ = read_request(&received(&bytes, fds), MAX_MESSAGE);
         let _ = read_answer(&received(&bytes, fds), MAX_MESSAGE);
@@ -1473,11 +1035,11 @@ proptest! {
 fn every_bit_flip_is_read_or_refused() {
     let messages: Vec<(Vec<u8>, usize)> = requests()
         .into_iter()
-        .map(|(n, r, fds)| (request(VERSION, n, &r, MAX_MESSAGE).unwrap(), fds))
+        .map(|(n, r, fds)| (request(n, &r, MAX_MESSAGE).unwrap(), fds))
         .chain(
             answers()
                 .into_iter()
-                .map(|(n, a)| (answer(VERSION, n, &a, MAX_MESSAGE).unwrap(), 0)),
+                .map(|(n, a)| (answer(n, &a, MAX_MESSAGE).unwrap(), 0)),
         )
         .collect();
     for (bytes, fds) in messages {
@@ -1506,7 +1068,7 @@ fn an_exec_whose_stdio_travels_apart_carries_no_descriptors() {
             stderr: false,
         },
     });
-    let bytes = request(VERSION, 7, &exec, MAX_MESSAGE).unwrap();
+    let bytes = request(7, &exec, MAX_MESSAGE).unwrap();
     let (h, read) = read_request_apart(&bytes, MAX_MESSAGE).unwrap();
     assert_eq!((h.id, read), (7, exec));
     assert!(matches!(

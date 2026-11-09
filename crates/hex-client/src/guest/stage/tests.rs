@@ -215,7 +215,7 @@ impl super::super::Link for Budgeted {
             far.write_all(&budget).unwrap();
             let mut rest = Vec::new();
             let _ = far.read_to_end(&mut rest);
-            let done = wire::answer(wire::FIRST, 0, &Answer::Done, wire::MAX_MESSAGE).unwrap();
+            let done = wire::answer(0, &Answer::Done, wire::MAX_MESSAGE).unwrap();
             let _ = far.write_all(&hex_core::stream::frame(&done, wire::MAX_MESSAGE).unwrap());
         });
         Ok(Box::new(near))
@@ -274,7 +274,6 @@ impl super::super::Link for RefusesAtOpening {
             let mut open = [0u8; 10 + 5 + 2];
             far.read_exact(&mut open).unwrap();
             let refused = wire::answer(
-                wire::FIRST,
                 0,
                 &Answer::Refused(Refusal::Exists(id())),
                 wire::MAX_MESSAGE,

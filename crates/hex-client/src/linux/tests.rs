@@ -49,12 +49,10 @@ fn next_request(conn: &OwnedFd) -> (Header, Request) {
     wire::read_request(&msg, wire::MAX_MESSAGE).unwrap()
 }
 
-/// A stand-in agent's answer to a hello: version 4, a process class, room for `in_flight` calls at once.
-fn hello(conn: &OwnedFd, in_flight: usize) {
-    let (h, request) = next_request(conn);
-    assert_eq!(request, Request::Hello);
-    let answer = Answer::Hello(wire::Hello {
-        version: wire::VERSION,
+/// A stand-in agent's hello, of this wire and this build: a process class, room for `in_flight` calls at once.
+fn agents_hello(in_flight: usize) -> wire::Hello {
+    wire::Hello {
+        build: wire::build(),
         classes: vec![Class::Process],
         limits: Limits {
             connections: 1,
@@ -62,15 +60,28 @@ fn hello(conn: &OwnedFd, in_flight: usize) {
             in_flight,
             programs: 1,
         },
-        budgets: None,
-    });
-    let bytes = wire::answer(wire::FIRST, h.id, &answer, wire::MAX_MESSAGE).unwrap();
-    rustix::net::send(conn, &bytes, SendFlags::NOSIGNAL).unwrap();
+        budgets: wire::Budgets {
+            in_flight,
+            programs: 1,
+        },
+    }
+}
+
+/// Answers a client's hello, which carries its build, with [`agents_hello`].
+fn hello(conn: &OwnedFd, in_flight: usize) {
+    let (h, request) = next_request(conn);
+    assert_eq!(
+        request,
+        Request::Hello {
+            build: wire::build()
+        }
+    );
+    answer(conn, h.id, &Answer::Hello(agents_hello(in_flight)));
 }
 
 /// Sends a stand-in agent's `answer` to request `id`.
 fn answer(conn: &OwnedFd, id: u64, answer: &Answer) {
-    let bytes = wire::answer(wire::VERSION, id, answer, wire::MAX_MESSAGE).unwrap();
+    let bytes = wire::answer(id, answer, wire::MAX_MESSAGE).unwrap();
     rustix::net::send(conn, &bytes, SendFlags::NOSIGNAL).unwrap();
 }
 
@@ -106,7 +117,7 @@ fn filling(client: &Client) -> Program {
         program: program.clone(),
         streams: Streams::default(),
     });
-    let len = wire::request(client.version(), u64::MAX, &call, wire::MAX_MESSAGE)
+    let len = wire::request(u64::MAX, &call, wire::MAX_MESSAGE)
         .unwrap()
         .len();
     rustix::net::sockopt::set_socket_send_buffer_size(fd, (len + 32).div_ceil(2)).unwrap();
@@ -124,7 +135,7 @@ fn filling(client: &Client) -> Program {
 fn more_than_room(conn: &OwnedFd) {
     let room = rustix::net::sockopt::socket_send_buffer_size(conn).unwrap();
     let filler = Answer::Refused(Refusal::Broken("x".repeat(room / 8)));
-    let bytes = wire::answer(wire::VERSION, u64::MAX, &filler, wire::MAX_MESSAGE).unwrap();
+    let bytes = wire::answer(u64::MAX, &filler, wire::MAX_MESSAGE).unwrap();
     let mut sent = 0;
     loop {
         rustix::net::send(conn, &bytes, SendFlags::NOSIGNAL).unwrap();
@@ -441,9 +452,8 @@ fn a_refusal_before_a_reset_is_the_one_connect_returns() {
                 tv_nsec: 0,
             };
             assert_eq!(rustix::event::poll(&mut hello, Some(&ts)).unwrap(), 1);
-            // In the first version, as the node agent refuses a connection.
-            let bytes =
-                wire::answer(wire::FIRST, 0, &Answer::Refused(refusal), wire::MAX_MESSAGE).unwrap();
+            // As the node agent refuses a connection: to no request (id 0).
+            let bytes = wire::answer(0, &Answer::Refused(refusal), wire::MAX_MESSAGE).unwrap();
             rustix::net::send(&conn, &bytes, SendFlags::NOSIGNAL).unwrap();
         })
     };
@@ -451,55 +461,64 @@ fn a_refusal_before_a_reset_is_the_one_connect_returns() {
     agent.join().unwrap();
 }
 
-/// HEX-SOCK-2, append-only: a client of version 2 serves the seam to an agent of version 1. Its
-/// hello goes in version 1; told the agent speaks version 1 alone, it writes every call in
-/// version 1, and the network namespace counts, which version 1 doesn't define, are refused by
-/// type without a message sent: the agent's next request is the call after them.
+/// One wire (the lead's word of 2026-11-09, which drops the append-only rule): a client refuses an agent of another
+/// wire at the hello, typed, naming both wires' identities and both builds, and sends it nothing more; an agent of its
+/// own wire it serves. Do: connect to a stand-in agent that answers the hello as an agent of another wire would (its
+/// own identity and build, in the hello's head every build lays out alike); then connect again, answered in this wire,
+/// and delete a box. Expect: the first connect refused as `Invalid { what: "wire" }` naming both, and its connection
+/// ended with nothing more sent; the second greeted and its delete answered.
 #[test]
-fn a_version_1_agent_is_served_in_version_1() {
+fn an_agent_of_another_wire_is_refused_at_the_hello() {
     let (_dir, path, listener) = agent_socket();
+    let theirs = !wire::IDENTITY;
+    let their_build = "hex 9.9.9 (another wire)";
     let agent = std::thread::spawn(move || {
         let conn = rustix::net::accept_with(&listener, SocketFlags::CLOEXEC).unwrap();
-        let mut seen = Vec::new();
-        for _ in 0..3 {
-            let (h, request) = next_request(&conn);
-            let answer = match request {
-                Request::Hello => Answer::Hello(wire::Hello {
-                    version: 1,
-                    classes: vec![Class::Process],
-                    limits: Limits {
-                        connections: 1,
-                        message_bytes: wire::MAX_MESSAGE,
-                        in_flight: 1,
-                        programs: 1,
-                    },
-                    budgets: None,
-                }),
-                Request::Call(Call::Inspect(id)) => Answer::Refused(Refusal::NoSuchBox(id)),
-                other => panic!("a version 1 agent was sent {other:?}"),
-            };
-            let bytes = wire::answer(1, h.id, &answer, wire::MAX_MESSAGE).unwrap();
-            rustix::net::send(&conn, &bytes, SendFlags::NOSIGNAL).unwrap();
-            seen.push((h.version, h.kind));
-        }
-        seen
+        let (h, request) = next_request(&conn);
+        assert!(matches!(request, Request::Hello { .. }), "{request:?}");
+        let mut bytes = wire::answer(
+            h.id,
+            &Answer::Hello(wire::Hello {
+                build: their_build.to_owned(),
+                ..agents_hello(1)
+            }),
+            wire::MAX_MESSAGE,
+        )
+        .unwrap();
+        bytes[4..12].copy_from_slice(&theirs.to_le_bytes());
+        rustix::net::send(&conn, &bytes, SendFlags::NOSIGNAL).unwrap();
+        // Nothing more comes: the client's end of the connection, read as its close.
+        let mut rest = [0u8; 64];
+        let after = rustix::net::recv(&conn, &mut rest, RecvFlags::empty())
+            .unwrap()
+            .0;
+        let conn = rustix::net::accept_with(&listener, SocketFlags::CLOEXEC).unwrap();
+        hello(&conn, 1);
+        let (h, request) = next_request(&conn);
+        let Request::Call(Call::Delete(id)) = request else {
+            panic!("a delete, not {request:?}")
+        };
+        answer(&conn, h.id, &Answer::Refused(Refusal::NoSuchBox(id)));
+        (after, conn)
     });
+    let refused = Client::connect(&path).err();
+    let Some(Refusal::Invalid { what: "wire", why }) = &refused else {
+        panic!("refused for its wire, not {refused:?}")
+    };
+    for named in [
+        format!("{theirs:016x}"),
+        format!("{:016x}", wire::IDENTITY),
+        their_build.to_owned(),
+        wire::build(),
+    ] {
+        assert!(why.contains(&named), "{why:?} names {named:?}");
+    }
     let client = Client::connect(&path).unwrap();
     let b = BoxId::new("b").unwrap();
-    assert_eq!(client.inspect(&b), Err(Refusal::NoSuchBox(b.clone())));
-    assert_eq!(
-        client.netns(),
-        Err(Refusal::Invalid {
-            what: "message",
-            why: "kind 0x000b isn't a request version 1 defines".to_owned(),
-        })
-    );
-    assert_eq!(client.inspect(&b), Err(Refusal::NoSuchBox(b.clone())));
-    assert_eq!(
-        agent.join().unwrap(),
-        [(1, 0x0001), (1, 0x0006), (1, 0x0006)],
-        "the hello and both inspects, each in version 1, and nothing between them"
-    );
+    assert_eq!(client.delete(&b), Err(Refusal::NoSuchBox(b.clone())));
+    let (after, conn) = agent.join().unwrap();
+    assert_eq!(after, 0, "the refused client sent nothing after its hello");
+    drop(conn);
 }
 
 /// The next request on `conn` and the descriptors that came with it, waiting at most 30 s for it.
@@ -536,9 +555,9 @@ fn next_request_with(conn: &OwnedFd) -> (Header, Request, Vec<OwnedFd>) {
     (h, request, fds)
 }
 
-/// Sends `answer` to request `h`, in its version, with `fds` riding as its descriptors.
+/// Sends `answer` to request `h`, with `fds` riding as its descriptors.
 fn answer_with(conn: &OwnedFd, h: Header, answer: &Answer, fds: &[BorrowedFd<'_>]) {
-    let bytes = wire::answer(h.version, h.id, answer, wire::MAX_MESSAGE).unwrap();
+    let bytes = wire::answer(h.id, answer, wire::MAX_MESSAGE).unwrap();
     let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(wire::MAX_FDS))];
     let mut control = SendAncillaryBuffer::new(&mut space);
     if !fds.is_empty() {
@@ -553,6 +572,14 @@ fn answer_with(conn: &OwnedFd, h: Header, answer: &Answer, fds: &[BorrowedFd<'_>
     .unwrap();
 }
 
+/// A stand-in agent's hello that runs OCI boxes, as a guest's node does: room for one call and one program.
+fn oci_hello() -> Answer {
+    Answer::Hello(wire::Hello {
+        classes: vec![Class::Oci],
+        ..agents_hello(1)
+    })
+}
+
 /// Native plan step 8, guest stdio (HEX-GUEST-41): an agent whose program can't take the caller's own pipes
 /// (a guest's, whose streams are connections of their own) lets them go and answers the exec with its streams'
 /// ends; expect the client to copy between those ends and the caller's pipes, so what the caller writes to its
@@ -564,19 +591,8 @@ fn the_client_copies_between_its_callers_pipes_and_the_ends_its_agent_gives() {
     let agent = std::thread::spawn(move || {
         let conn = rustix::net::accept_with(&listener, SocketFlags::CLOEXEC).unwrap();
         let (h, request, _) = next_request_with(&conn);
-        assert_eq!(request, Request::Hello);
-        let hello = Answer::Hello(wire::Hello {
-            version: wire::VERSION,
-            classes: vec![Class::Oci],
-            limits: Limits {
-                connections: 1,
-                message_bytes: wire::MAX_MESSAGE,
-                in_flight: 1,
-                programs: 1,
-            },
-            budgets: None,
-        });
-        answer_with(&conn, h, &hello, &[]);
+        assert!(matches!(request, Request::Hello { .. }), "{request:?}");
+        answer_with(&conn, h, &oci_hello(), &[]);
         let (h, request, carried) = next_request_with(&conn);
         let Request::Call(Call::Exec { streams, .. }) = request else {
             panic!("expected an exec, got {request:?}");
@@ -656,18 +672,7 @@ fn an_end_of_a_stream_its_exec_neither_carried_nor_asked_for_is_refused() {
     let agent = std::thread::spawn(move || {
         let conn = rustix::net::accept_with(&listener, SocketFlags::CLOEXEC).unwrap();
         let (h, _, _) = next_request_with(&conn);
-        let hello = Answer::Hello(wire::Hello {
-            version: wire::VERSION,
-            classes: vec![Class::Oci],
-            limits: Limits {
-                connections: 1,
-                message_bytes: wire::MAX_MESSAGE,
-                in_flight: 1,
-                programs: 1,
-            },
-            budgets: None,
-        });
-        answer_with(&conn, h, &hello, &[]);
+        answer_with(&conn, h, &oci_hello(), &[]);
         let (exec, request, _) = next_request_with(&conn);
         assert!(
             matches!(&request, Request::Call(Call::Exec { streams, .. }) if *streams == Streams::default()),
@@ -755,12 +760,14 @@ fn an_uncontended_call_blocks_at_most_once_and_wakes_no_other_thread() {
         switches <= calls,
         "{switches} voluntary switches in {calls} calls"
     );
+    // The reading thread the turn replaced was named `hex-client`; the stdio copies of tests beside this one,
+    // `hex-client-stdio`, read no connection.
     let readers = std::fs::read_dir("/proc/self/task")
         .unwrap()
         .filter_map(|t| std::fs::read_to_string(t.ok()?.path().join("comm")).ok())
-        .filter(|comm| comm.trim().starts_with("hex-client"))
+        .filter(|comm| comm.trim() == "hex-client")
         .count();
-    assert_eq!(readers, 0, "a thread of the client's");
+    assert_eq!(readers, 0, "the client's reading thread");
     drop(agent.join().unwrap());
 }
 

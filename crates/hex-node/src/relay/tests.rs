@@ -114,7 +114,7 @@ fn next_request(conn: &OwnedFd) -> (Header, Request, Vec<OwnedFd>) {
 }
 
 fn answer(conn: &OwnedFd, h: Header, answer: &Answer) {
-    let bytes = wire::answer(h.version, h.id, answer, wire::MAX_MESSAGE).unwrap();
+    let bytes = wire::answer(h.id, answer, wire::MAX_MESSAGE).unwrap();
     rustix::net::send(conn, &bytes, SendFlags::NOSIGNAL).unwrap();
 }
 
@@ -122,15 +122,18 @@ fn answer(conn: &OwnedFd, h: Header, answer: &Answer) {
 fn hello(node: &OwnedFd) -> OwnedFd {
     let conn = rustix::net::accept_with(node, SocketFlags::CLOEXEC).unwrap();
     let (h, r, _) = next_request(&conn);
-    assert_eq!(r, Request::Hello);
+    assert!(matches!(r, Request::Hello { .. }), "{r:?}");
     answer(
         &conn,
         h,
         &Answer::Hello(Hello {
-            version: wire::VERSION,
+            build: wire::build(),
             classes: vec![Class::Oci],
             limits: crate::serve::LIMITS,
-            budgets: None,
+            budgets: wire::Budgets {
+                in_flight: crate::serve::LIMITS.in_flight,
+                programs: crate::serve::LIMITS.programs,
+            },
         }),
     );
     conn

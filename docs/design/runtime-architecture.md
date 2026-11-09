@@ -413,24 +413,20 @@ the receiver's buffer still reports its size, `MSG_TRUNC`: "return the real size
 it was longer than the passed buffer" (recv(2), for sequenced-packet sockets since Linux 3.4), so an oversized one is
 refused naming its size and the bound.
 
-**The wire** (`crates/hex-core/src/wire.rs`, a pure core): a 16-byte header (magic, version, kind, id) and a body
-each kind defines; integers little-endian, strings and paths length-prefixed, options and enums tagged. Version 1's
-bytes are recorded in its tests, and the format changes append-only: a later version adds kinds and appends fields,
-and reads every earlier version's messages as they were. A reader refuses bytes past what a message's version
-defines, so an extension an older agent can't apply is refused, never dropped (CLAUDE.md §3); a kind a later
-version added is refused in an earlier version's message, as one that version doesn't define. A list's answer comes
-in as many messages as its boxes need, so a dense node answers it whole. Version 2 (goal 4 plan step 2) adds one
-request and its answer, the node's network namespace counts (decision 4), and writes every version 1 kind as
-version 1 does but for its header's version. Versions go in landing order with no gaps, so a version implies the
-ones before it (the lead, 2026-11-07): version 3 is native's (`Call::Kill`); version 4 appends a create's owner;
-version 5 appends to the counts' answer why its failed makes failed, by step, and whether the pool was refused and
-for what (decision 4); version 6 appends the latest reason a make failed for at each step; version 7 appends the
-node's budgets to a hello's answer. Each writes every earlier kind as the version before it does but for its
-header's version. A
-client says hello in version 1, which an agent of any version reads,
-learns the highest version the agent speaks from its answer, and writes the rest in the highest both speak; an
-agent answers each request in its version, and refuses what it can't read in version 1, so a client of either
-version reads the refusal.
+**The wire** (`crates/hex-core/src/wire.rs`, a pure core): a 22-byte header (magic, wire identity, kind, id) and a
+body each kind defines; integers little-endian, strings and paths length-prefixed, options and enums tagged. One
+wire, no versions (the lead's word of 2026-11-09, which drops the append-only rule): a client and an agent talk only
+when built from the same wire definitions. The identity (`wire::IDENTITY`) is a digest of those definitions' source,
+`wire.rs` and `stream.rs` (FNV-1a over `include_bytes!` in a `const fn`, carriage returns skipped so a checkout's line
+endings can't split it), so a change to either is a new identity with no number to bump. Every message carries its
+sender's, and a reader refuses one of another identity before it reads its body, so nothing of another wire is
+misread (CLAUDE.md §3). The one layout every build keeps is a hello's head: the header, then its sender's build
+(`wire::build`), first in a hello and first in its answer. So a peer of another wire is refused at the hello, typed
+(`Invalid`, "wire"), naming both identities and both builds: the agent answers a message of another identity, its
+hello first, with its own hello and ends the connection, nothing more of it read, and the client refuses an answer of
+another identity. A reader also refuses
+bytes past what a kind's body holds rather than skip them. A list's answer comes in as many messages as its boxes
+need, so a dense node answers it whole.
 
 **Bounds** (`serve::LIMITS`, told to each client in its hello), each refused past by type, naming it:
 
@@ -474,16 +470,16 @@ restarts, reattaches to a step still running rather than running it again. Then 
 (appended to the wire's exec), whose program the agent releases at the close, and the rule holds for the rest.
 
 **Tests** (HEX-SOCK-n, cited beside each): 1, hostile bytes to the codec are refused by type, never a panic: every
-truncation and bit flip, random bytes, unknown versions and kinds, trailing bytes, descriptors where none belong.
-2, the format is append-only: version 1's bytes as recorded, every message round-trips, a long list splits. 3,
+truncation and bit flip, random bytes, unknown kinds, trailing bytes, descriptors where none belong, a message of
+another wire. 2, one wire: a hello's head is the header then its sender's build, every message round-trips, a long
+list splits, a peer of another wire is refused at the hello naming both, on every transport. 3,
 hostile messages to a live server are refused, and the connection is served after each. 4, connections past the
 bound are refused naming it, and the next is served once one closes. 5, requests past the in-flight bound are refused
 naming it, and every request is answered once. 6, the disconnect rule: a gone client's programs killed, reaped and
 counted, a released one left running, a release sent just before a reset honoured. 7, programs past the bound are
 refused naming it. 8, stdio crosses as descriptors, and only a pipe's right end is taken. 9, the plan's example over
 a live `hex node`. 10, the node's network namespace counts cross the socket as the node holds them, a box with a
-network namespace of its own counted over a live `hex node`, and a client of version 2 serves the seam to an
-agent of version 1, writing in version 1 and refusing the counts by type, unsent.
+network namespace of its own counted over a live `hex node`.
 
 **What it costs** (`bench/competitive/probes/socket_cost.md`, run 1: fedora, 2026-10-27, 0f41abb, both drivers in one
 run, load 12 to 15, so not of record). A call over the socket costs 0.031 ms more than in process at p50: `inspect`
@@ -497,7 +493,8 @@ one client.
 macOS's framed `SOCK_STREAM` socket and a Shards guest's framed byte stream are each a transport under one core:
 each lends a handle to wait on and reads and writes without waiting; the core makes the calls, waits on the
 connection (poll(2), `WSAPoll` on Windows), hands each message to whoever it is for, and holds native plan step 8's
-wire version 3 once (a program's kill, an exec asking for streams and the given answer, the caller's copy). Two cores
+wire's hello once, refusing an agent of another wire (a program's kill, an exec asking for streams and the given
+answer, and the caller's copy are its too). Two cores
 came to the landing: native plan step 8's, a reading thread per connection that hands each answer on, and goal 16's
 reader's turn (8ded733f), where whoever waits on the connection reads it, one at a time, and hands each message and
 then the turn on. Compared on the evidence, the core is the turn's, with native's transports and stdio rules:
@@ -1252,7 +1249,7 @@ lifecycle without changing what a box may do.
     reaches a thread group whose leader has exited, which `cgroup.kill` misses
     (`bench/competitive/probes/delete_flake.md`).
 - **A cgroup handed from box to box of one owner** (f20, f23, f27-f39, f61-f65, f81, f82). A box whose spec names an
-  owner (`BoxSpec::owner`, append-only on the record and on the wire, whose version 4 carries it) is given the owner's
+  owner (`BoxSpec::owner`, on the record and on the wire) is given the owner's
   idle cgroup when one reads clean. That takes off its `mkdir`, its `rmdir` and the kworkers' 12 holds (f62). The
   owner's boxes reuse by default; an owner opts out by `reuse: false` (Ada's call, 2026-10-31). The pool is a pure core,
   `hex_core::reuse`, with the node's shell in `crates/hex-node/src/cgroups.rs`.
@@ -1979,11 +1976,10 @@ cause a miss under the demand seen, and each counts its cold takes. The pure cor
   can do anything): what is in flight and what is kept for the open connections that have none never pass the
   budget, so a connection is admitted only if its one fits, and past it a connection's calls and programs share what
   is left. A hello's `wire::Limits` keeps its meaning, each connection's own (the lead's ruling: no field's meaning
-  changes), and tells exactly what is kept, one call and one program, so a client of any version within it is never
-  refused however much other connections hold. That is less than the 64 and 1,024 it told before, which were caps the
-  node no longer keeps; keeping that much for every connection would cap connections at the budgets over it (64 at
-  65,536 pidfds). Wire version 7 appends the node's budgets to a hello (`Hello::budgets`), refused in earlier
-  versions, never sent without them.
+  changes), and tells exactly what is kept, one call and one program, so a client within it is never refused however
+  much other connections hold. That is less than the 64 and 1,024 it told before, which were caps the node no longer
+  keeps; keeping that much for every connection would cap connections at the budgets over it (64 at 65,536 pidfds). A
+  hello's answer tells the node's budgets beside (`Hello::budgets`).
 - **Derived from a fact the kernel gives.** The removal's walk of a slot's sub-cgroups is bounded by `cgroup.stat`'s
   `nr_descendants`, read before it (kind (a)); one made during the walk refuses it, by type, for recovery.
 - **Derived, not learned: the wake mark and the record shards** (kind (b)). The ipc/uts refill is woken once a take

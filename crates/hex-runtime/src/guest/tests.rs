@@ -699,7 +699,7 @@ fn ready_relay() -> std::net::TcpStream {
         let (h, _) =
             hex_core::wire::read_request_apart(&message, hex_core::wire::MAX_MESSAGE).unwrap();
         let hello = hex_core::wire::Answer::Hello(hex_core::wire::Hello {
-            version: hex_core::wire::VERSION,
+            build: hex_core::wire::build(),
             classes: vec![hex_api::Class::Oci],
             limits: hex_core::wire::Limits {
                 connections: 1,
@@ -707,15 +707,12 @@ fn ready_relay() -> std::net::TcpStream {
                 in_flight: 1,
                 programs: 1,
             },
-            budgets: None,
+            budgets: hex_core::wire::Budgets {
+                in_flight: 1,
+                programs: 1,
+            },
         });
-        let bytes = hex_core::wire::answer(
-            hex_core::wire::FIRST,
-            h.id,
-            &hello,
-            hex_core::wire::MAX_MESSAGE,
-        )
-        .unwrap();
+        let bytes = hex_core::wire::answer(h.id, &hello, hex_core::wire::MAX_MESSAGE).unwrap();
         conn.write_all(&stream::frame(&bytes, hex_core::wire::MAX_MESSAGE).unwrap())
             .unwrap();
         // Held until the client goes, as a relay's connection is.
