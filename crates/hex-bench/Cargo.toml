@@ -24,6 +24,10 @@ harness = false
 name = "seccomp_compile"
 harness = false
 
+[[bench]]
+name = "spec_parse"
+harness = false
+
 [target.'cfg(target_os = "linux")'.dependencies]
 hex-api.workspace = true
 hex-client.workspace = true
