@@ -156,14 +156,14 @@ impl<T> Shared<T> {
         self.deliver_with(header, answer, Vec::new())
     }
 
-    /// [`Shared::deliver`], with the descriptors that came with the message: a given answer's, one for each
-    /// stream it names, in order, kept for its exec.
-    #[cfg(unix)]
+    /// [`Shared::deliver`], with the ends that came with the message: a given answer's, one for each stream
+    /// it names, in order, kept for its exec (descriptors on Unix, handles on Windows).
+    #[cfg(any(unix, windows))]
     pub(crate) fn deliver_with(
         &self,
         header: Header,
         answer: Answer,
-        fds: Vec<std::os::fd::OwnedFd>,
+        fds: Vec<hex_api::End>,
     ) -> Result<(), Refusal> {
         if let Answer::Given { given, .. } = &answer {
             let mut fds = fds.into_iter();
@@ -178,7 +178,7 @@ impl<T> Shared<T> {
         self.deliver_inner(header, answer)
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     pub(crate) fn deliver_with(
         &self,
         header: Header,

@@ -18,19 +18,30 @@
 // This file's `unsafe` is named in CLAUDE.md §12; every block below carries its SAFETY comment.
 #![allow(unsafe_code)]
 #![cfg(windows)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::disallowed_macros
+    )
+)]
 
 use std::ffi::c_void;
 use std::io;
 use std::mem::{size_of, zeroed};
-use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::path::Path;
 use std::ptr::{null, null_mut};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_OPERATION_ABORTED, FALSE, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
-    WAIT_TIMEOUT,
+    CloseHandle, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, DuplicateHandle,
+    ERROR_OPERATION_ABORTED, FALSE, GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Networking::WinSock::{
     AF_UNIX, AcceptEx, INVALID_SOCKET, LINGER, SD_BOTH, SO_LINGER, SO_SNDTIMEO,
@@ -49,8 +60,8 @@ use windows_sys::Win32::System::IO::{
     PostQueuedCompletionStatus,
 };
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, INFINITE, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
-    PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess,
+    GetCurrentProcess, INFINITE, OpenProcess, OpenProcessToken, PROCESS_DUP_HANDLE,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess,
 };
 
 /// `SIO_AF_UNIX_GETPEERPID`: `_WSAIOR(IOC_VENDOR, 256)` (afunix.h), which windows-sys doesn't define.
@@ -791,6 +802,134 @@ fn token_user(process: HANDLE) -> io::Result<Vec<u64>> {
     Ok(buf)
 }
 
+/// The most ends one message carries: an exec's stdin, stdout and stderr (`hex_core::wire::MAX_FDS`).
+pub const MAX_ENDS: usize = 3;
+/// The most bytes an envelope ([`envelope`]) adds to a message: its count and that many handle values.
+pub const ENVELOPE_MAX: usize = 1 + MAX_ENDS * size_of::<u64>();
+
+fn envelope_fault(why: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("a message's ends: {why}"),
+    )
+}
+
+/// A message as the Windows node sends it to its caller: how many ends ride with it, each end's handle
+/// value in the caller's process (the node gave the caller its own handle, [`Peer::give`]), then the
+/// message. Windows' AF_UNIX passes no handles, so they ride in the stream (the stdio decision's pick, dup:
+/// docs/design/runtime.md). Refused past [`MAX_ENDS`].
+pub fn envelope(values: &[u64], message: &[u8]) -> io::Result<Vec<u8>> {
+    let count = u8::try_from(values.len())
+        .ok()
+        .filter(|n| usize::from(*n) <= MAX_ENDS)
+        .ok_or_else(|| envelope_fault("more ends than a message carries"))?;
+    let mut out = Vec::with_capacity(ENVELOPE_MAX.saturating_add(message.len()));
+    out.push(count);
+    for v in values {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out.extend_from_slice(message);
+    Ok(out)
+}
+
+/// A message from the Windows node, taken apart ([`envelope`]): the handle values of the ends that rode
+/// with it, each this process's own now, and the message. Refused when malformed: a count past
+/// [`MAX_ENDS`], or fewer bytes than its values.
+pub fn unenvelope(payload: &[u8]) -> io::Result<(Vec<u64>, &[u8])> {
+    let (&count, rest) = payload
+        .split_first()
+        .ok_or_else(|| envelope_fault("an empty message"))?;
+    let count = usize::from(count);
+    if count > MAX_ENDS {
+        return Err(envelope_fault("more ends than a message carries"));
+    }
+    let (raw, message) = rest
+        .split_at_checked(count.saturating_mul(size_of::<u64>()))
+        .ok_or_else(|| envelope_fault("fewer bytes than its ends"))?;
+    let (values, _) = raw.as_chunks::<{ size_of::<u64>() }>();
+    let values = values
+        .iter()
+        .map(|value| u64::from_le_bytes(*value))
+        .collect();
+    Ok((values, message))
+}
+
+/// A message from the Windows node, taken apart ([`unenvelope`]) with the ends that rode with it as handles
+/// this process owns: the node gave this process each handle the envelope names ([`Peer::give`]), for this
+/// message alone. They close with the answer that doesn't take them.
+pub fn take_given(payload: &[u8]) -> io::Result<(Vec<OwnedHandle>, &[u8])> {
+    let (values, message) = unenvelope(payload)?;
+    let ends = values
+        .into_iter()
+        .filter_map(|value| usize::try_from(value).ok())
+        // SAFETY: the node gave this process each handle named here (DuplicateHandle into it) for this
+        // message alone, so each is this process's, owned by this value from now on and closed once.
+        .map(|value| unsafe { OwnedHandle::from_raw_handle(value as RawHandle) })
+        .collect();
+    Ok((ends, message))
+}
+
+/// A connected peer's process, opened to give it handles (`PROCESS_DUP_HANDLE`) and held for its
+/// connection's life, so its pid can't come to name another process meanwhile.
+pub struct Peer(OwnedHandle);
+
+impl Peer {
+    /// Opens process `pid` to give it handles: refused where this process may not open it so.
+    pub fn open(pid: u32) -> io::Result<Peer> {
+        // SAFETY: opens a process by pid with the one right named; the handle returned is owned below.
+        let h = unsafe { OpenProcess(PROCESS_DUP_HANDLE, FALSE, pid) };
+        if h.is_null() {
+            return Err(last_error());
+        }
+        // SAFETY: OpenProcess succeeded, so `h` is a process handle this process now owns.
+        Ok(Peer(unsafe { OwnedHandle::from_raw_handle(h) }))
+    }
+
+    /// Gives the peer a handle of its own to what `end` names (`DuplicateHandle`, the same access): its
+    /// value in the peer's process, which only that process can use. `end` stays this process's.
+    pub fn give(&self, end: BorrowedHandle<'_>) -> io::Result<u64> {
+        let mut theirs: HANDLE = null_mut();
+        // SAFETY: `end` is a live handle of this process and `self.0` the peer's, opened with
+        // PROCESS_DUP_HANDLE; `theirs` is written. The source is not closed.
+        let ok = unsafe {
+            DuplicateHandle(
+                GetCurrentProcess(),
+                end.as_raw_handle(),
+                self.0.as_raw_handle(),
+                &raw mut theirs,
+                0,
+                FALSE,
+                DUPLICATE_SAME_ACCESS,
+            )
+        };
+        if ok == 0 {
+            return Err(last_error());
+        }
+        u64::try_from(theirs as usize).map_err(|_| envelope_fault("a handle value past 64 bits"))
+    }
+
+    /// Closes a handle given to the peer that it never learned of, its message not sent
+    /// (`DuplicateHandle` with `DUPLICATE_CLOSE_SOURCE` and no target).
+    pub fn take_back(&self, value: u64) {
+        let Ok(value) = usize::try_from(value) else {
+            return;
+        };
+        // SAFETY: closes the handle `value` in the peer's process, one this side gave it and the peer was
+        // never told of; no handle is made here (no target).
+        unsafe {
+            DuplicateHandle(
+                self.0.as_raw_handle(),
+                value as HANDLE,
+                null_mut(),
+                null_mut(),
+                0,
+                FALSE,
+                DUPLICATE_CLOSE_SOURCE,
+            )
+        };
+    }
+}
+
 /// Whether the process `pid` runs as this process's user or as LocalSystem (the node's peers: this user,
 /// or the machine's own account, as Linux's are this user or root).
 pub fn same_user_or_system(pid: u32) -> io::Result<bool> {
@@ -814,4 +953,34 @@ pub fn same_user_or_system(pid: u32) -> io::Result<bool> {
     };
     // SAFETY: two valid SIDs, as above.
     Ok(unsafe { EqualSid(a, b) } != 0 || unsafe { IsWellKnownSid(a, WinLocalSystemSid) } != 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The stdio decision's dup (native plan step 8): do put a message in an envelope with no ends' values,
+    /// one, and three, and take each apart. Expect the same values and message back, each envelope one byte
+    /// and eight per end longer than its message.
+    #[test]
+    fn a_message_and_its_ends_come_back_from_their_envelope() {
+        let message = b"an answer";
+        for values in [vec![], vec![7u64], vec![1, u64::MAX, 0x8000]] {
+            let enveloped = envelope(&values, message).unwrap();
+            assert_eq!(enveloped.len(), 1 + 8 * values.len() + message.len());
+            let (back, rest) = unenvelope(&enveloped).unwrap();
+            assert_eq!(back, values);
+            assert_eq!(rest, message);
+        }
+    }
+
+    /// do put four ends' values in an envelope, and take apart one that counts four, one short of its
+    /// values, and an empty one. Expect each refused: no message carries more than three ends.
+    #[test]
+    fn an_envelope_past_its_bound_or_short_of_its_values_is_refused() {
+        assert!(envelope(&[1, 2, 3, 4], b"m").is_err());
+        assert!(unenvelope(&[4u8; 40]).is_err());
+        assert!(unenvelope(&[2u8, 1, 2, 3]).is_err());
+        assert!(unenvelope(&[]).is_err());
+    }
 }

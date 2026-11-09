@@ -164,7 +164,7 @@ impl Raw {
     fn connect(node: &Node) -> Self {
         Self {
             socket: hex_afunix::Socket::connect(&node.socket).unwrap(),
-            deframer: Deframer::new(wire::MAX_MESSAGE),
+            deframer: Deframer::new(wire::MAX_MESSAGE + hex_afunix::ENVELOPE_MAX),
             next: 0,
         }
     }
@@ -192,9 +192,12 @@ impl Raw {
                 let (took, message) = self.deframer.take(input).unwrap();
                 input = &input[took..];
                 let Some(message) = message else { continue };
+                // The node's frames carry the envelope of the ends that ride with a message (none here).
+                let (ends, body) = hex_afunix::unenvelope(&message).unwrap();
+                assert!(ends.is_empty(), "ends rode with an answer to {id}");
                 let received = Received {
-                    bytes: &message,
-                    size: message.len(),
+                    bytes: body,
+                    size: body.len(),
                     descriptors: 0,
                     descriptors_cut: false,
                 };
@@ -373,7 +376,7 @@ fn hostile_connections_each_get_their_refusal_then_their_end() {
             panic!("round {round}: the node's connection didn't end within {PATIENCE:?}")
         });
         // The answer's frame, taken as a client takes it (its prefix, then its body).
-        let mut deframer = Deframer::new(wire::MAX_MESSAGE);
+        let mut deframer = Deframer::new(wire::MAX_MESSAGE + hex_afunix::ENVELOPE_MAX);
         let mut input = got.as_slice();
         let mut message = None;
         while message.is_none() && !input.is_empty() {
@@ -388,9 +391,12 @@ fn hostile_connections_each_get_their_refusal_then_their_end() {
             )
         });
         assert!(input.is_empty(), "round {round}: bytes past the refusal");
+        // The node's frames carry the envelope of the ends that ride with a message (none with a refusal).
+        let (ends, body) = hex_afunix::unenvelope(&message).unwrap();
+        assert!(ends.is_empty(), "round {round}: ends rode with the refusal");
         let received = Received {
-            bytes: &message,
-            size: message.len(),
+            bytes: body,
+            size: body.len(),
             descriptors: 0,
             descriptors_cut: false,
         };

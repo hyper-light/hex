@@ -3,8 +3,10 @@
 //! that reads every message the agent sends and hands it to [`crate::calls`]; and calls that send their
 //! request whole (one at a time, as a stream's writes could interleave) and wait, at most
 //! [`crate::ANSWER_PATIENCE`], for the answer. The Win32 calls are `hex_afunix`'s.
-//! Windows' AF_UNIX passes no handles, and how an exec's stdio reaches the agent is step 8's measured
-//! decision, so an exec that gives a stream is refused by name until then.
+//! Windows' AF_UNIX passes no handles, so an exec that gives a stream (the caller's own pipe) is refused by
+//! name; one that asks for its streams gets their ends from the agent, which gave this process a handle of
+//! its own to each and names their values in its answer's envelope (`hex_afunix::unenvelope`; the stdio
+//! decision's pick, dup).
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -16,6 +18,9 @@ use hex_core::wire::{self, Received};
 
 use crate::ANSWER_PATIENCE;
 use crate::calls::{Core, Lent, Sent, Shared, Transport};
+
+/// The longest frame the agent sends: its longest message and the longest envelope of ends with it.
+const FRAME_BOUND: usize = wire::MAX_MESSAGE + socket::ENVELOPE_MAX;
 
 /// A node agent, reached through its socket.
 pub type Client = Core<Socket>;
@@ -59,7 +64,7 @@ impl Transport for Socket {
 fn read(shared: &Shared<Socket>) {
     let raw = &shared.transport.raw;
     let mut buf = vec![0u8; stream::MAX_FRAME];
-    let mut deframer = Deframer::new(wire::MAX_MESSAGE);
+    let mut deframer = Deframer::new(FRAME_BOUND);
     let mut reset = None;
     let why = 'reading: loop {
         let n = match raw.recv(&mut buf) {
@@ -90,11 +95,21 @@ fn read(shared: &Shared<Socket>) {
                     ));
                 }
             };
-            let Some(message) = message else { continue };
+            let Some(payload) = message else { continue };
+            // The ends that rode with the message: handles the agent gave this process, owned here from now
+            // on (closed with the answer that doesn't take them).
+            let (ends, message) = match socket::take_given(&payload) {
+                Ok(parts) => parts,
+                Err(e) => {
+                    break 'reading Refusal::Broken(format!(
+                        "the node agent's stream can't be read: {e}"
+                    ));
+                }
+            };
             let received = Received {
-                bytes: &message,
+                bytes: message,
                 size: message.len(),
-                descriptors: 0,
+                descriptors: ends.len(),
                 descriptors_cut: false,
             };
             let delivered = wire::read_answer(&received, wire::MAX_MESSAGE)
@@ -103,7 +118,7 @@ fn read(shared: &Shared<Socket>) {
                         "the node agent sent a message that isn't an answer: {fault}"
                     ))
                 })
-                .and_then(|(header, answer)| shared.deliver(header, answer));
+                .and_then(|(header, answer)| shared.deliver_with(header, answer, ends));
             if let Err(why) = delivered {
                 break 'reading why;
             }

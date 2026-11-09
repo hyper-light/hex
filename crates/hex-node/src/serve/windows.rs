@@ -20,15 +20,20 @@
 //!   last message first (what a reset would discard);
 //! - only this user or LocalSystem is served: each peer's pid (`SIO_AF_UNIX_GETPEERPID`) names a process
 //!   whose user is read and refused by name otherwise, as Linux's `SO_PEERCRED` is;
-//! - an exec's stdio isn't carried yet: Windows' AF_UNIX passes no handles, and how it reaches the caller is
-//!   step 8's measured decision, so an exec that asks for a stream is refused by name until then.
+//! - an exec's asked streams reach the caller as handles of its own (the stdio decision's pick, dup):
+//!   Windows' AF_UNIX passes no handles, so the node gives the caller's process a handle to each end
+//!   (`DuplicateHandle` into the process it opened at the connection's admission, `PROCESS_DUP_HANDLE`,
+//!   held so its pid can't name another meanwhile) and names their values in the message's envelope
+//!   (`hex_afunix::envelope`); an exec that gives a stream (the caller's own pipe) is refused by name, as
+//!   the Windows client lends no handle.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::os::windows::fs::MetadataExt;
+use std::os::windows::io::AsHandle;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use hex_afunix::{self as socket, Done, Port, ProgramWatch, Socket};
@@ -40,6 +45,8 @@ use super::{Accepted, EVENTS, Event, Interest, Os, Peer, Recv, Sent, Unwatched};
 
 /// A frame's prefix, its body's length (`hex_core::stream`'s `u32`).
 const PREFIX: usize = size_of::<u32>();
+/// The longest frame the node sends its caller: the longest message and the longest envelope of its ends.
+const FRAME_BOUND: usize = wire::MAX_MESSAGE + socket::ENVELOPE_MAX;
 /// Where a [`Stream`]'s token starts before the core watches it: each its own, from a range the core's
 /// tokens (counted up from its first) never reach, so a connection the core never watched (one refused as
 /// it came) still has a tag of its own on the port while it is ended.
@@ -65,6 +72,8 @@ pub struct Stream {
     socket: Socket,
     token: AtomicU64,
     state: Mutex<State>,
+    /// Its caller's process, opened at its admission to give it the ends of the streams its execs ask for.
+    peer: OnceLock<socket::Peer>,
 }
 
 struct State {
@@ -99,11 +108,21 @@ fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
     Refusal::Broken("a socket lock was poisoned".to_owned())
 }
 
+/// Closes in the caller's process the handles given it for a message that didn't go.
+fn take_back(peer: Option<&socket::Peer>, given: &[u64]) {
+    if let Some(peer) = peer {
+        for value in given {
+            peer.take_back(*value);
+        }
+    }
+}
+
 impl Stream {
     fn new(socket: Socket) -> Stream {
         Stream {
             socket,
             token: AtomicU64::new(NEXT_UNWATCHED.fetch_add(1, Ordering::Relaxed)),
+            peer: OnceLock::new(),
             state: Mutex::new(State {
                 deframer: Deframer::new(wire::MAX_MESSAGE),
                 ready: VecDeque::new(),
@@ -625,7 +644,14 @@ impl Os for Windows {
             return Peer::Gone;
         };
         match socket::same_user_or_system(pid) {
-            Ok(true) => Peer::Allowed,
+            Ok(true) => {
+                // Held for the connection, to give its execs' asked streams; a caller this process may not
+                // open so is still served, and an exec's ends to it end the connection instead.
+                if let Ok(peer) = socket::Peer::open(pid) {
+                    let _ = conn.peer.set(peer);
+                }
+                Peer::Allowed
+            }
             Ok(false) => Peer::Refused(format!(
                 "pid {pid} runs as another user than the node agent's"
             )),
@@ -689,14 +715,12 @@ impl Os for Windows {
         Recv::WouldBlock
     }
 
-    /// Ends to pass can't go: Windows' AF_UNIX carries no handles, and no Windows host gives any (its
-    /// runtimes refuse streams they'd make by name, before an exec). A message that carries some is never
-    /// sent without them: its connection ends, which its client sees.
+    /// Sends `bytes` whole, the ends in `fds` with it (an exec's asked streams, `Answer::Given`): each is
+    /// given to the caller's process as a handle of its own, and its value named in the message's envelope
+    /// ([`socket::envelope`]), so the caller reads it with the message. A message whose ends can't be given
+    /// (a caller not opened at its admission, or a give refused) is never sent without them: what was given
+    /// is taken back and the connection ended, which its client sees.
     fn send(&self, conn: &Arc<Stream>, bytes: &[u8], fds: &[hex_api::End]) -> Sent {
-        if !fds.is_empty() {
-            conn.socket.shutdown();
-            return Sent::Gone;
-        }
         let Ok(mut st) = conn.state.lock() else {
             return Sent::Gone;
         };
@@ -706,7 +730,24 @@ impl Os for Windows {
         if st.sending {
             return Sent::WouldBlock;
         }
-        let Ok(framed) = stream::frame(bytes, wire::MAX_MESSAGE) else {
+        let mut given = Vec::with_capacity(fds.len());
+        let peer = conn.peer.get();
+        for end in fds {
+            match peer.map(|p| p.give(end.as_handle())) {
+                Some(Ok(value)) => given.push(value),
+                _ => {
+                    take_back(peer, &given);
+                    drop(st);
+                    self.shutdown(conn);
+                    return Sent::Gone;
+                }
+            }
+        }
+        let framed = socket::envelope(&given, bytes)
+            .ok()
+            .and_then(|enveloped| stream::frame(&enveloped, FRAME_BOUND).ok());
+        let Some(framed) = framed else {
+            take_back(peer, &given);
             return Sent::Gone;
         };
         match socket::send_all(&conn.socket, conn.token.load(Ordering::SeqCst), framed) {
@@ -714,7 +755,10 @@ impl Os for Windows {
                 st.sending = true;
                 Sent::Sent
             }
-            Err(_) => Sent::Gone,
+            Err(_) => {
+                take_back(peer, &given);
+                Sent::Gone
+            }
         }
     }
 
