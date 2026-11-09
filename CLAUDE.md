@@ -213,7 +213,11 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   `OVERLAPPED` and buffer held on the heap by the kernel from its start until its completion is dequeued,
   reads a peer's pid (`WSAIoctl` `SIO_AF_UNIX_GETPEERPID`) and whether its process runs as this user or
   LocalSystem (`OpenProcess`, `OpenProcessToken`, `GetTokenInformation` `TokenUser`, `EqualSid`,
-  `IsWellKnownSid`), and watches a program's end (`OpenProcess`, then ntdll's wait completion packet,
+  `IsWellKnownSid`), gives the peer's process handles of its own to an exec's asked streams and closes ones
+  it was never told of (`OpenProcess` with `PROCESS_DUP_HANDLE`, held for the connection; `DuplicateHandle`
+  into it, and with `DUPLICATE_CLOSE_SOURCE` and no target), and owns the handles the node gave this
+  process for a message (the values its envelope names), and watches a program's end (`OpenProcess`,
+  then ntdll's wait completion packet,
   which the kernel queues to the port when the process ends, no thread between: `NtCreateWaitCompletionPacket`,
   `NtAssociateWaitCompletionPacket`, `NtCancelWaitCompletionPacket`; undocumented in the SDK, used by the
   Windows thread pool and Go's runtime, and chosen over `RegisterWaitForSingleObject` by measurement) and ends
