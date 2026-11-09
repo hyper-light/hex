@@ -70,6 +70,10 @@
 #    cc3f8fb4d8bf0229. Under the timed lock, units started through hex-slot. fedora had rebooted at about
 #    10:00Z; load average 22-61 throughout (CPU pressure some avg10 about 25%), with the kind cluster, buildkit
 #    builders and other agents' units up. Nearest-rank, ms:
+#    UNCAPPED: both runs' containers had exec_ab.sh's hard-coded --memory=40g and no --oom-score-adj, not fedora's
+#    8g / 1000 (rule 5); the units themselves were capped (MemoryMax 8G, OOMScoreAdjust 1000), the containers dockerd
+#    started weren't. exec_ab.sh honors BENCH_MEMORY and BENCH_OOM from cp/t7-hooks f5c1a9d. Their state was on the
+#    container's overlay (no tmpfs /run), so their creates paid the record's fsyncs: create_load-20261104.md.
 #    Run 1, unit hex-hooks-abc-20261104T142625Z (exec-ab-20261104T142957Z, load 22-51):
 #      create p50/p99  before 18.825/40.275  after 19.868/41.497  libcrun 2.378/10.601 (pooled, n=5000 each)
 #      after/before    pooled p50 1.055 p99 1.030; by round p50 1.053 1.318 1.014 1.014 1.097
