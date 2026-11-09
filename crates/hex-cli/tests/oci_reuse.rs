@@ -298,12 +298,17 @@ fn has_ended(fd: &OwnedFd) -> bool {
     rustix::event::poll(&mut fds, Some(&now)).unwrap() > 0
 }
 
-/// Runs `program` in box `id` to its end.
-fn run(node: &Node, id: &BoxId, program: Program) -> Exit {
+/// Runs `program` in box `id` to its end, waiting as `wait`, its end's own record, says: for at most its deadline, or,
+/// while it measures, for the end alone. Its answer is told to `wait` and to the census as [`until`]'s are.
+fn run(node: &Node, id: &BoxId, program: Program, wait: &Patience) -> Exit {
     let mut p = node.exec(id, program, Stdio::null()).expect("exec");
-    p.wait_for(PATIENCE)
+    let began = Instant::now();
+    let exit = p
+        .wait_for(wait.deadline().unwrap_or(Duration::MAX))
         .expect("wait")
-        .expect("the program ended in time")
+        .expect("the program ended in time");
+    hex_testkit::waits::answered(wait, began.elapsed());
+    exit
 }
 
 fn exercise(own: &Path, cache: &Path, exe: &str) {
@@ -672,15 +677,18 @@ fn a_box_of_one_owner_is_given_the_cgroup_its_earlier_box_left(lab: &Lab, own: &
         "-c",
         "head -c 3000000000 /dev/zero | sha256sum >/dev/null",
     ]);
-    assert_eq!(run(&node, &a, burn), Exit::Code(0));
-    assert_eq!(run(&node, &a, selftest(&Act::Hog(A_HOG))), Exit::Code(0));
+    assert_eq!(run(&node, &a, burn, &BURN_ENDS), Exit::Code(0));
     assert_eq!(
-        run(&node, &a, selftest(&Act::Hog(512 << 20))),
+        run(&node, &a, selftest(&Act::Hog(A_HOG)), &HOG_ENDS),
+        Exit::Code(0)
+    );
+    assert_eq!(
+        run(&node, &a, selftest(&Act::Hog(512 << 20)), &OOM_ENDS),
         Exit::Signal(9),
         "a program past A's memory bound is OOM-killed"
     );
     assert_ne!(
-        run(&node, &a, selftest(&Act::Spawn(64))),
+        run(&node, &a, selftest(&Act::Spawn(64)), &REFUSED_ENDS),
         Exit::Code(0),
         "a program past A's process bound fails"
     );
@@ -893,7 +901,10 @@ fn an_owners_next_box_is_made_by_the_init_parked_in_its_idle_cgroup(lab: &Lab, o
         );
     }
     node.start(&b).unwrap();
-    assert_eq!(run(&node, &b, Program::of(&["/bin/true"])), Exit::Code(0));
+    assert_eq!(
+        run(&node, &b, Program::of(&["/bin/true"]), &TRUE_ENDS),
+        Exit::Code(0)
+    );
     node.delete(&b).unwrap();
     node.release_idle().unwrap();
     assert!(
@@ -959,7 +970,10 @@ fn a_parked_init_made_with_other_namespaces_is_ended_and_counted(lab: &Lab, own:
     );
     assert!(has_ended(&init), "the parked init has ended");
     node.start(&b).unwrap();
-    assert_eq!(run(&node, &b, Program::of(&["/bin/true"])), Exit::Code(0));
+    assert_eq!(
+        run(&node, &b, Program::of(&["/bin/true"]), &TRUE_ENDS),
+        Exit::Code(0)
+    );
     node.delete(&b).unwrap();
     node.release_idle().unwrap();
     eprintln!("parked init made with other namespaces: ended, counted");
@@ -1133,7 +1147,10 @@ fn a_box_of_no_owner_is_made_by_an_init_parked_in_a_cgroup_made_ahead(lab: &Lab,
         after.parked
     );
     node.start(&n2).unwrap();
-    assert_eq!(run(&node, &n2, Program::of(&["/bin/true"])), Exit::Code(0));
+    assert_eq!(
+        run(&node, &n2, Program::of(&["/bin/true"]), &TRUE_ENDS),
+        Exit::Code(0)
+    );
     node.delete(&n2).unwrap();
     assert!(
         !slot.exists(),
@@ -1184,7 +1201,10 @@ fn a_box_of_no_owner_made_ahead_looks_up_nothing_in_cgroupfs(lab: &Lab, own: &Pa
     assert_eq!(lookups, 0, "N2's create looked up {lookups} cgroupfs names");
     let n2 = BoxId::new("q2").unwrap();
     node.start(&n2).unwrap();
-    assert_eq!(run(&node, &n2, Program::of(&["/bin/true"])), Exit::Code(0));
+    assert_eq!(
+        run(&node, &n2, Program::of(&["/bin/true"]), &TRUE_ENDS),
+        Exit::Code(0)
+    );
     node.delete(&n2).unwrap();
     node.release_idle().unwrap();
     eprintln!("test 2f: a create in a cgroup made ahead, no cgroupfs lookup on its thread");
@@ -2121,7 +2141,8 @@ fn a_box_can_not_send_to_the_socket_the_check_keeps_in_its_namespace(lab: &Lab, 
         run(
             &node,
             &b,
-            Program::of(&["/hex", "selftest-box", "netlink-to", &portid])
+            Program::of(&["/hex", "selftest-box", "netlink-to", &portid]),
+            &SEND_ENDS,
         ),
         Exit::Code(1),
         "B's send to the node's socket is refused, EPERM"
@@ -2130,7 +2151,8 @@ fn a_box_can_not_send_to_the_socket_the_check_keeps_in_its_namespace(lab: &Lab, 
         run(
             &node,
             &b,
-            Program::of(&["/hex", "selftest-box", "netlink-to", "0"])
+            Program::of(&["/hex", "selftest-box", "netlink-to", "0"]),
+            &SEND_ENDS,
         ),
         Exit::Code(0),
         "B's send to the kernel goes"
@@ -2327,6 +2349,20 @@ fn wait_for(wait: &Patience, cond: impl FnMut() -> bool, what: &str) -> u64 {
 static KILLED: Patience = Patience::seeded("test.oci_reuse.killed", EMPTYING);
 /// An init's run to its end: the program-run record.
 static INIT_ENDS: Patience = Patience::seeded("test.oci_reuse.init_ends", PROGRAM);
+/// An exec of `true` run to its end: the program-run record's own fact (`lifecycle.exec`, an exec of `true`).
+static TRUE_ENDS: Patience = Patience::seeded("test.oci_reuse.true_ends", PROGRAM);
+/// A 3 GB sha256 burn's end, a 64 MiB hog's, a 1 MiB hog's, a hog's OOM kill past its bound, a spawn's refusal past
+/// its bound, and 64 MiB written to a box's root: none is an exec of `true`, whose end the program-run record is (each
+/// runs its own work first), and no recorded operation makes any.
+static BURN_ENDS: Patience = Patience::measuring("test.oci_reuse.burn_ends");
+static HOG_ENDS: Patience = Patience::measuring("test.oci_reuse.hog_ends");
+static SMALL_HOG_ENDS: Patience = Patience::measuring("test.oci_reuse.small_hog_ends");
+static OOM_ENDS: Patience = Patience::measuring("test.oci_reuse.oom_ends");
+static REFUSED_ENDS: Patience = Patience::measuring("test.oci_reuse.refused_ends");
+static WRITE_ENDS: Patience = Patience::measuring("test.oci_reuse.write_ends");
+/// A box's netlink send's end, refused or taken: the hex binary run in the box to its own socket's send, not an exec of
+/// `true`'s, and made by no recorded operation.
+static SEND_ENDS: Patience = Patience::measuring("test.oci_reuse.send_ends");
 /// An owner's idle slot given its parked init: made within the delete (`Cgroups::give_back`), whose record bounds it.
 static PARKED: Patience = Patience::seeded("test.oci_reuse.parked", DELETE);
 /// Trees queued to the parked procs' dropper, dropped by its thread: no recorded operation makes it.
@@ -2349,7 +2385,7 @@ fn a_state_guard(
     lab: &Lab,
     node: &Node,
     case: &str,
-    work: Option<Program>,
+    work: Option<(Program, &Patience)>,
     leave: impl FnOnce(&Path),
     reason: Refused,
 ) {
@@ -2363,8 +2399,8 @@ fn a_state_guard(
     ))
     .unwrap();
     node.start(&a).unwrap();
-    if let Some(work) = work {
-        assert_eq!(run(node, &a, work), Exit::Code(0), "{case}: A's work");
+    if let Some((work, wait)) = work {
+        assert_eq!(run(node, &a, work, wait), Exit::Code(0), "{case}: A's work");
     }
     let slot = node.cgroup_dir(&a).unwrap();
     node.delete(&a).unwrap();
@@ -2446,11 +2482,10 @@ fn each_guard_gives_a_fresh_cgroup_and_counts_why(lab: &Lab, own: &Path) {
         lab,
         &node,
         "charged",
-        Some(Program::of(&[
-            "/bin/sh",
-            "-c",
-            "head -c 67108864 /dev/zero > /big",
-        ])),
+        Some((
+            Program::of(&["/bin/sh", "-c", "head -c 67108864 /dev/zero > /big"]),
+            &WRITE_ENDS,
+        )),
         |slot| {
             let charged: u64 = read(slot, "memory.current").parse().unwrap();
             assert!(charged >= 60 << 20, "A left {charged} bytes charged");
@@ -2497,7 +2532,7 @@ fn each_guard_gives_a_fresh_cgroup_and_counts_why(lab: &Lab, own: &Path) {
     );
     node.start(&b).unwrap();
     assert_eq!(
-        run(&node, &b, selftest(&Act::Hog(1 << 20))),
+        run(&node, &b, selftest(&Act::Hog(1 << 20)), &SMALL_HOG_ENDS),
         Exit::Code(0),
         "B's init and its programs run"
     );
