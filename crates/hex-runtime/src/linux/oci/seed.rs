@@ -720,15 +720,15 @@ fn serve_one(
 /// How a create's init comes to be: cloned by the seed now, or the init parked ahead that this process is
 /// (decision 8, "The p99.9 that stayed").
 #[derive(Clone, Copy)]
-enum How<'a> {
+enum How {
     /// The seed clones the init into its cgroup and namespaces ([`sys::clone_sibling`]).
     Clone,
     /// This process is an init parked in its cgroup with the namespaces `flags` made, leading a session of its own
-    /// since it parked ([`parked`]), claimed on `claim`.
-    Parked { flags: u64, claim: BorrowedFd<'a> },
+    /// since it parked, and claimed on its claim socket, which it answers only to refuse ([`parked`]).
+    Parked { flags: u64 },
 }
 
-impl How<'_> {
+impl How {
     /// Makes the init a session's leader ([`init::lead_session`]) as a fresh clone's first act. A parked init led its
     /// own at park, so its create's path takes no `setsid` (goal 17, lever L1).
     fn lead_session(self) -> Result<(), OciError> {
@@ -741,43 +741,30 @@ impl How<'_> {
 
 /// How a create's init comes to be ([`How`]), and the pid namespace the seed's next children are born in, which a
 /// clone carrying a proc made ahead changes and sets back ([`PidFor`]).
-struct Begin<'a, 'p> {
-    how: How<'a>,
+struct Begin<'p> {
+    how: How,
     pid_for: &'p mut PidFor,
 }
 
 /// Where a create's init is cloned, or, for a parked init, the claim taken: the clone's outcome as
 /// [`sys::clone_sibling`] gives it. A parked init made with other namespaces than the create's `flags` is
-/// refused by type, never made into a container its spec didn't ask for (CLAUDE.md §3); one that takes the
-/// claim answers on its claim socket that it started, its mount namespace made `way` (as a fresh clone's answer
-/// says how it made its, so the agent counts both alike), with a pidfd of its own, and goes on as the child.
+/// refused by type, never made into a container its spec didn't ask for (CLAUDE.md §3). One that takes the claim
+/// says nothing on its claim socket (the lead's (A) of 2026-11-09: no early answer) and goes on as the child: its
+/// first word is the one on its sync pipe, which the agent's claim waits for, and the agent holds its pid and pidfd
+/// from its park, and knows its mount namespace is made the create's way, the one it was parked for.
 fn begin(
-    how: How<'_>,
+    how: How,
     cgroup: Option<BorrowedFd<'_>>,
     flags: u64,
-    way: MountNamespace,
 ) -> Result<Option<sys::Sibling>, OciError> {
     match how {
         How::Clone => sys::clone_sibling(cgroup, flags),
-        How::Parked { flags: made, claim } => {
+        How::Parked { flags: made } => {
             if made != flags {
                 return Err(OciError::Broken(format!(
                     "an init parked with namespaces {made:#x} was claimed by a create that makes {flags:#x}"
                 )));
             }
-            let pidfd = rustix::process::pidfd_open(
-                rustix::process::getpid(),
-                rustix::process::PidfdFlags::empty(),
-            )
-            .map_err(|e| OciError::os("opening a parked init's own pidfd", e))?;
-            send_answer(
-                claim,
-                &Answer::StartedIn {
-                    pid: 0,
-                    mount_namespace: way,
-                },
-                Some(pidfd.as_fd()),
-            )?;
             Ok(Some(sys::Sibling::Child))
         }
     }
@@ -935,10 +922,7 @@ fn parked(claim: OwnedFd, flags: u64, pid_for: &mut PidFor) -> ! {
                 &create,
                 fds,
                 Begin {
-                    how: How::Parked {
-                        flags,
-                        claim: claim.as_fd(),
-                    },
+                    how: How::Parked { flags },
                     pid_for,
                 },
             )
@@ -971,7 +955,7 @@ fn parked(claim: OwnedFd, flags: u64, pid_for: &mut PidFor) -> ! {
 fn serve_create(
     create: &seed::Create,
     fds: Vec<OwnedFd>,
-    begun: Begin<'_, '_>,
+    begun: Begin<'_>,
 ) -> (Answer, Option<OwnedFd>) {
     // The spec the runtime checked rides last (`read_message` held the count to the create's), and the
     // container is made from its bytes alone, never from a read of the bundle, which may since hold a spec
@@ -1028,12 +1012,7 @@ fn serve_create(
     };
     let made_ahead = network.is_some();
     let flags = init::fresh_clone_flags(&spec, made_ahead, false);
-    match begin(
-        begun.how,
-        cgroup.as_ref().map(AsFd::as_fd),
-        flags,
-        MountNamespace::Copy,
-    ) {
+    match begin(begun.how, cgroup.as_ref().map(AsFd::as_fd), flags) {
         Ok(None) => refused(
             Failed::Unable,
             "this kernel or sandbox has no clone3 into a cgroup".to_owned(),
@@ -1092,7 +1071,7 @@ fn serve_create_pruned(
     mut fds: impl Iterator<Item = OwnedFd>,
     sync_w: OwnedFd,
     network: Option<OwnedFd>,
-    begun: Begin<'_, '_>,
+    begun: Begin<'_>,
 ) -> (Answer, Option<OwnedFd>) {
     let Begin { how, pid_for } = begun;
     // The older kinds carry the bundle directory, which nothing reads (the spec rides checked), and the cgroup
@@ -1276,7 +1255,6 @@ fn serve_create_pruned(
                     how,
                     None,
                     super::mntns::clone_flags(flags, create.mount_namespace),
-                    create.mount_namespace,
                 ),
             )
         }

@@ -2398,6 +2398,7 @@ RFC's floor and constants are TCP's clocks'; a calibration read leaves the first
 | --- | --- | --- | --- |
 | a seed's hang bound and the shell's wait for its answer (createpool `ANSWER_PATIENCE`) | 30 s, copied | 2 × max(record, seen) | `seeds::CLONE_SLOWEST`, the `seeds.hang` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 187.044 ms, debug 100.815 ms<!-- /record --> |
 | a create's wait in line for a seed (`seeds`' line) | 1 s, picked | the same | the same record: a create in line waits for a busy seed's answer |
+| a claim's wait for its parked init's first word on its sync pipe (createpool `CLAIMS`; the lead's (A) of 2026-11-09, no early answer) | the seeds' hang bound, for the init's answer | learned | MEASURING: the `parked.ready` rows, from a census run with it in |
 | a record change's wait for the same box's (`WRITE_PATIENCE`) | 60 s, picked | learned, refused by type past it | the `store.turns` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 15.209 ms, debug 54.401 ms<!-- /record --> |
 | a create or delete's wait for the same box's (`TURN_PATIENCE`) | 120 s, picked | learned, from the holder's take | the `node.turns` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 270.803 ms, debug 305.809 ms<!-- /record --> |
 | a killed box's emptying, its programs' reaping and its init's end (`EMPTY_PATIENCE`, cgroups' `REMOVE_PATIENCE`), and a stopping server's wait for the programs it ended (serve `STOP_PATIENCE`) | 60 s each, picked or copied | learned from each kill to empty | the `node.emptying` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 42.798 ms, debug 127.753 ms<!-- /record --> |
@@ -2415,8 +2416,8 @@ seeds' core (`refused_busy`, `refused_waited`), never sent through the shim: one
 ruling of 2026-11-06 under Ada's rule; it replaced the shim fallback, `ClassicReason::NoSeed`). Seeds grow ahead under
 the pool rule from the persisted learned peak, so a node's next start begins where the last peaked. The shim stays
 for its named consumer alone: a spec a seed can't serve (the classic reasons).
-A parked init that doesn't answer a claim already falls back to a seed's clone: the claim borrows the request, whose
-descriptors stay the runtime's.
+A parked init that refuses its claim, ends, or says nothing within the claim's patience falls back to a seed's clone:
+the claim borrows the request, whose descriptors stay the runtime's.
 
 **What would falsify it.** A healthy node retiring seeds as hung, or refusing a call or a record write, for an
 answer more than twice the record's slowest and the node's: then the record's distribution is narrower than the

@@ -435,11 +435,12 @@ impl CreatePool {
             ));
         };
         let (create, fds) = message(req);
-        let patience = self.shared.lock()?.seeds.deadlines().1;
-        // The parked init answers as a seed does, with a pidfd of its own, which the agent's stands for, within
-        // the hang bound the seeds' answers taught, or the record's before them.
-        match claim_round(socket.as_fd(), sync, &create, &fds, patience) {
+        // The claim is taken at the init's first word on its sync pipe, with no answer before it (the lead's (A) of
+        // 2026-11-09), within the claim's own patience: its pid and pidfd are the park's.
+        let began = Instant::now();
+        match claim_round(socket.as_fd(), sync, &create, &fds, CLAIMS.deadline()) {
             Ok(made) => {
+                CLAIMS.answered(began.elapsed());
                 // Counted by how its mount namespace was made, as a seed's clone is (clone_init).
                 if pruned && let Some(count) = self.shared.made.get(usize::from(made.code())) {
                     let _ = count.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
@@ -1020,19 +1021,7 @@ fn round_trip(
             pid,
             mount_namespace,
         } => (pid, mount_namespace),
-        Answer::Refused { failed, why } => {
-            let e = OciError::Os {
-                op: "create in a container",
-                why,
-            };
-            return match failed {
-                // The seed's own machinery broke: replace it.
-                Failed::Seed => Err(Trip::Broken(e)),
-                // A bad request, a container the seed couldn't make, or one no clone3-into-cgroup kernel
-                // can make here: the seed is whole, the create refused by type.
-                Failed::Request | Failed::Start | Failed::Unable => Err(Trip::Refused(e)),
-            };
-        }
+        Answer::Refused { failed, why } => return Err(refusal(failed, why)),
     };
     let pid = i32::try_from(pid).map_err(|_| {
         Trip::Broken(OciError::Broken(
@@ -1047,16 +1036,88 @@ fn round_trip(
     }
 }
 
-/// Sends a parked init its claim and waits, within `patience`, for the claim to be taken or not: how the init makes
-/// its mount namespace, or why not (the lead's (A) of 2026-11-09).
+/// A claim's wait for its parked init's first word on its sync pipe, from the claim's send (the lead's (A) of
+/// 2026-11-09: no early answer): the init's ready on a root node's pruned path, its ask for its user namespace's maps
+/// on a rootless node's classic one. MEASURING until a waits census with it in records it (`waits_census.md`'s
+/// `parked.ready` row); its seed then comes by build profile from that run (decision 9). Until then nothing in the
+/// agent bounds a claimed init that lives on and says nothing: the create waits for it, as a create waits for a
+/// seed-cloned init's word after the seed's answer (`Runtime::handshake_seed` reads with no bound). An init that ends or
+/// refuses is caught at once, its claim socket closed or carrying the refusal.
+static CLAIMS: hex_core::patience::Patience =
+    hex_core::patience::Patience::measuring("parked.ready");
+
+/// Sends a parked init its claim and waits, within `patience` (`None` while the claim's wait measures: unbounded), for
+/// the claim to be taken or not: how the init makes its mount namespace, or why not. A claimed init says nothing on its
+/// claim socket once it takes the claim (the lead's (A) of 2026-11-09), so the claim is taken at the init's first word
+/// on `sync`, the read end of its sync pipe, which stays there for the handshake to read, and the init makes its mount
+/// namespace the create's way, the one it was parked for (the seed's `begin` refuses another). A word there is taken
+/// before anything on the socket, since an init that reports a setup failure ends after it. Not taken: its refusal on
+/// the socket, its end (the socket closed with no word on the pipe), or its silence past `patience`.
 fn claim_round(
     socket: BorrowedFd<'_>,
-    _sync: BorrowedFd<'_>,
+    sync: BorrowedFd<'_>,
     create: &Create,
     fds: &[BorrowedFd<'_>],
     patience: Option<Duration>,
 ) -> Result<MountNamespace, Trip> {
-    round_trip(socket, create, fds, patience).map(|(_, _, made)| made)
+    rt_seed::send_create(socket, create, fds).map_err(Trip::Broken)?;
+    match first_readable([sync, socket], patience).map_err(Trip::Broken)? {
+        Some(0) => Ok(create.mount_namespace),
+        Some(_) => match rt_seed::recv_answer(socket) {
+            Ok((Answer::Refused { failed, why }, _)) => Err(refusal(failed, why)),
+            Ok(_) => Err(Trip::Broken(OciError::Broken(
+                "a claimed init answered other than to refuse its claim".to_owned(),
+            ))),
+            Err(e) => Err(Trip::Broken(e)),
+        },
+        None => Err(Trip::Hung(OciError::Broken(format!(
+            "a claimed init said nothing within {:?}",
+            patience.unwrap_or_default()
+        )))),
+    }
+}
+
+/// Which of `fds` turns readable first within `patience`, the earlier in the list where both have: `None` past it, and
+/// with none (a wait measuring) it waits until one does. A peer's end (`POLLHUP`) counts, for the read that says so.
+fn first_readable(
+    fds: [BorrowedFd<'_>; 2],
+    patience: Option<Duration>,
+) -> Result<Option<usize>, OciError> {
+    let [first, second] = fds;
+    let deadline = patience.and_then(|p| Instant::now().checked_add(p));
+    loop {
+        let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+        let ts = left.map(|left| Timespec {
+            tv_sec: i64::try_from(left.as_secs()).unwrap_or(i64::MAX),
+            tv_nsec: i64::from(left.subsec_nanos()),
+        });
+        let mut polled = [
+            PollFd::new(&first, PollFlags::IN),
+            PollFd::new(&second, PollFlags::IN),
+        ];
+        match rustix::event::poll(&mut polled, ts.as_ref()) {
+            Ok(n) if n > 0 => return Ok(polled.iter().position(|p| !p.revents().is_empty())),
+            Ok(_) if left.is_some_and(|l| l.is_zero()) => return Ok(None),
+            Ok(_) | Err(rustix::io::Errno::INTR) => {}
+            Err(e) => return Err(OciError::os("poll on a claimed init's pipe and socket", e)),
+        }
+    }
+}
+
+/// A refusal as a round trip's outcome: a seed's own machinery broken (replace it), or a refusal by type (the seed is
+/// whole, the create refused).
+fn refusal(failed: Failed, why: String) -> Trip {
+    let e = OciError::Os {
+        op: "create in a container",
+        why,
+    };
+    match failed {
+        // The seed's own machinery broke: replace it.
+        Failed::Seed => Trip::Broken(e),
+        // A bad request, a container the seed couldn't make, or one no clone3-into-cgroup kernel
+        // can make here: the seed is whole, the create refused by type.
+        Failed::Request | Failed::Start | Failed::Unable => Trip::Refused(e),
+    }
 }
 
 /// Whether `fd` turns readable within `patience`; with none (a wait measuring) it waits until it does.
