@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Goal 17's run of record (decision 6's update; docs/research/runtime/goal6-mntns.md): on a host whose kernel has
 # both calls (Linux 7.1 or later), the three ways a root node makes a pruned create's mount namespace, through goal 0's
-# driver in process (seam_oci): the copy (the classic way), the namespace made from its tree (open_tree's
-# OPEN_TREE_NAMESPACE, 7.0) and the empty namespace (clone3's CLONE_EMPTY_MNTNS, 7.1). They run interleaved round by
-# round under the under-load bar's arms, best of 2, with runtime-tools' suite beside them, so the fastest becomes the
-# default by bench/competitive/probes/mntns_default.txt.
+# driver in process (seam_oci): the copy of the pruned seed's namespace (goal 5's way), the namespace made from its tree
+# (open_tree's OPEN_TREE_NAMESPACE, 7.0) and the empty namespace (clone3's CLONE_EMPTY_MNTNS, 7.1); and beside them the
+# classic root the goal's text sets them against (a copy of the agent's whole mount namespace, bind, pivot_root: a node
+# built by hex-node's test control Node::with_classic_roots, the lead's ruling of 2026-11-09), never a default. They
+# run interleaved round by round under the under-load bar's arms, best of 2, with runtime-tools' suite beside them, so
+# the fastest way becomes the default by bench/competitive/probes/mntns_default.txt.
 #
 #   mntns_record.sh probe   whether this kernel takes the two calls (bench/oci-validation/vm7_probe.py, rootless)
 #   mntns_record.sh host    the run of record, in the harness's privileged container (create_breakdown.sh)
@@ -13,14 +15,14 @@
 # best of 2, as summarize.py takes it), each with the host's clock state (host_clock.sh) at its start and end, and one
 # cell at each of LOOPS_SET busy loops ("6 12"), at nice 0 on CPUSET, the CPUs the cell's container runs on. A cell is
 # create_breakdown.sh's MOUNTS_ARMS run: 8,000 idle threads on the host, owner bundles with reuse on, Docker's masked
-# and read-only paths, the /dev pool on (a root node's has no off switch: b0fd0b7d), and rounds.py's ARMS ("hex:copy
-# hex:tree hex:empty"; add libcrun to run it beside them) for ROUNDS rounds after WARMUP, each round a burst of 8
-# lifecycles at 8 in flight on each arm, its order rotated and the host's load read, once untraced and once traced
-# (part 19, to the init's chdir: MOUNTS_SPAN=root, so a namespace joined from its tree, which no chroot ends, is cut
-# alike). Each cell's arms must show every create made the way it asked, or the record refuses it. Then runtime-tools'
-# validation suite against this hex and against CRUN, each in its privileged container (run_hex.sh, run.sh; RT the
-# built checkout). mntns_record.py reads it all into record.txt: the tables, goal 17's verdicts and the record lines
-# for mntns_default.txt.
+# and read-only paths, the /dev pool on (a root node's has no off switch: b0fd0b7d), and rounds.py's ARMS ("hex:classic
+# hex:copy hex:tree hex:empty", the classic first so summary.md sets each against it; add libcrun to run it beside
+# them) for ROUNDS rounds after WARMUP, each round a burst of 8 lifecycles at 8 in flight on each arm, its order
+# rotated and the host's load read, once untraced and once traced (part 19, to the init's chdir: MOUNTS_SPAN=root, so a
+# namespace joined from its tree, which no chroot ends, is cut alike). Each cell's arms must show every create made the
+# way it asked, or the record refuses it. Then runtime-tools' validation suite against this hex and against CRUN, each
+# in its privileged container (run_hex.sh, run.sh; RT the built checkout). mntns_record.py reads it all into
+# record.txt: the tables, goal 17's verdicts and the record lines for mntns_default.txt.
 #
 # ROUNDS is 299: the fewest rounds whose largest sample bounds the p99 with 95% confidence, N >= ln(0.05)/ln(0.99) =
 # 298.07 (Ada's rule: a p99 claim stands on at least 299 interleaved rounds, the load recorded each round). WARMUP is
@@ -49,7 +51,7 @@ RUN=mntns-$MODE-$(date -u +%Y%m%dT%H%M%SZ)
 O=${OUT_ROOT:-$HOME/.cache/hex-t7/g6/rec}/$RUN
 mkdir -p "$O" || exit 2
 PASSES=${PASSES:-2}; LOOPS_SET=${LOOPS_SET:-6 12}; ROUNDS=${ROUNDS:-299}; WARMUP=${WARMUP:-1}
-ARMS=${ARMS:-hex:copy hex:tree hex:empty}
+ARMS=${ARMS:-hex:classic hex:copy hex:tree hex:empty}
 st() { echo "$(date -u +%FT%TZ) $*" | tee -a "$O/status"; }
 # The run's containers go with it, however it ends (containers.sh): sourced once here, so the run's one reaper starts
 # here and every script the run calls (each cell's create_breakdown.sh, run_hex.sh, run.sh) labels its containers with

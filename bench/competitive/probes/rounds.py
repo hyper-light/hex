@@ -5,7 +5,9 @@ rule: a p99 claim stands on at least 299 interleaved rounds, the load recorded e
   rounds.py <out dir> <rounds> <warmup> <lifecycles> <concurrency> <arm>...
 
 An arm is `hex:<way>`, a node in a seam_oci of its own (its `serve` phase) asked for that way of making a pruned
-create's mount namespace (HEX_OCI_MNTNS: copy, empty or tree); `hex`, a node taking its own default; or `libcrun`,
+create's mount namespace (HEX_OCI_MNTNS: copy, empty or tree); `hex:classic`, one whose node builds every root the
+classic way (HEXBENCH_ROOT=classic: hex-node's test control, goal 17's baseline); `hex`, a node taking its own default;
+or `libcrun`,
 libcrun in process, one libcrun-driver per concurrency slot (libcrun/driver.c, as oci_bench.py runs it). Each arm is a
 process of its own, as a node is one process on a host.
 
@@ -25,7 +27,8 @@ node's HEXBENCH_* settings among them).
 
 Writes into <out dir>: rounds.jsonl, a line a round; arms.json, what each arm said of itself at its end (a hex arm's
 seam_oci result, the node's counts over the phase among it); summary.json and summary.md, each arm's creates and
-deletes over the timed rounds and each arm against the first named. Exits 3 when an arm fails, with what it said.
+deletes over the timed rounds and each arm against every other (summary.md shows each against the first named).
+Exits 3 when an arm fails, with what it said.
 """
 import fcntl
 import json
@@ -97,16 +100,21 @@ def burst_bound(lifecycles, conc):
 
 class HexArm:
     """A node in a seam_oci of its own, serving bursts (seam_oci's `serve` phase): a request a line on its stdin, a
-    JSON reply a line on its stdout. `way` asks for that way of making a pruned create's mount namespace; None leaves
-    the node its default. Its result, written as the phase ends, is what it says of itself."""
+    JSON reply a line on its stdout. `way` asks for that way of making a pruned create's mount namespace, `root` for
+    the classic root on every create (goal 17's baseline); None leaves the node its default. Neither comes from the
+    environment the run was given, so no arm takes another's. Its result, written as the phase ends, is what it says
+    of itself."""
 
-    def __init__(self, name, way, out_dir, env):
+    def __init__(self, name, way, out_dir, env, root=None):
         self.name, self.out = name, os.path.join(out_dir, f"arm-{name}")
         os.makedirs(self.out)
         arm_env = dict(env, HEXBENCH_PHASES="serve")
         arm_env.pop("HEX_OCI_MNTNS", None)
+        arm_env.pop("HEXBENCH_ROOT", None)
         if way is not None:
             arm_env["HEX_OCI_MNTNS"] = way
+        if root is not None:
+            arm_env["HEXBENCH_ROOT"] = root
         # Each node its own box root, as each node on a host has: under ROUNDS_CGROUP, a cgroup of the arm's with the
         # parent's controllers handed down (seam_oci makes its box root beneath HEXBENCH_CGROUP).
         self.cgroup = None
@@ -293,7 +301,9 @@ def make_arm(spec, conc, out_dir, env):
         return HexArm("hex", None, out_dir, env)
     if spec.startswith("hex:") and spec[4:] in ("copy", "empty", "tree"):
         return HexArm(spec[4:], spec[4:], out_dir, env)
-    raise SystemExit(f"refusing: an arm {spec!r} isn't hex, hex:copy, hex:empty, hex:tree or libcrun")
+    if spec == "hex:classic":
+        return HexArm("classic", None, out_dir, env, root="classic")
+    raise SystemExit(f"refusing: an arm {spec!r} isn't hex, hex:copy, hex:empty, hex:tree, hex:classic or libcrun")
 
 
 def run_rounds(arms, rounds, warmup, lifecycles, conc, out, clock=time.monotonic_ns, load=host_load):
@@ -320,8 +330,9 @@ def run_rounds(arms, rounds, warmup, lifecycles, conc, out, clock=time.monotonic
 
 
 def summarize(rows, names):
-    """Each arm over the timed rounds: its creates and deletes, pooled, and each round's median create; each arm but
-    the first against the first: the rounds whose median create is below the first's, and the pooled p50s' ratio."""
+    """Each arm over the timed rounds: its creates and deletes, pooled, and each round's median create; each arm against
+    every other: the rounds whose median create is below the other's, the pooled p50s' ratio and whether its p99 is
+    lower."""
     timed = [r for r in rows if not r["warmup"] and len(r["bursts"]) == len(names)]
     per = {}
     for name in names:
@@ -330,15 +341,17 @@ def summarize(rows, names):
         per[name] = {"rounds": len(bursts), "create_ms": dist(creates),
                      "delete_ms": dist([ms for b in bursts for ms in b["delete_ms"]]),
                      "round_medians": [pct(b["create_ms"], 0.5) for b in bursts]}
-    first = names[0]
-    for name in names[1:]:
-        pairs = list(zip(per[name]["round_medians"], per[first]["round_medians"]))
-        a, b = per[name]["create_ms"]["p50"], per[first]["create_ms"]["p50"]
-        per[name]["against_" + first] = {
-            "rounds_below": sum(1 for x, y in pairs if x < y), "rounds": len(pairs),
-            "p50_ratio": a / b if a is not None and b else None,
-            "p99_lower": (per[name]["create_ms"]["p99"] < per[first]["create_ms"]["p99"])
-            if pairs else None}
+    for name in names:
+        for other in names:
+            if other == name:
+                continue
+            pairs = list(zip(per[name]["round_medians"], per[other]["round_medians"]))
+            a, b = per[name]["create_ms"]["p50"], per[other]["create_ms"]["p50"]
+            per[name]["against_" + other] = {
+                "rounds_below": sum(1 for x, y in pairs if x < y), "rounds": len(pairs),
+                "p50_ratio": a / b if a is not None and b else None,
+                "p99_lower": (per[name]["create_ms"]["p99"] < per[other]["create_ms"]["p99"])
+                if pairs else None}
     loads = [r["load"] for r in timed]
     return {"rounds": len(timed), "arms": names, "per_arm": per,
             "load1": dist([lo["load1"] for lo in loads]) if loads else None,

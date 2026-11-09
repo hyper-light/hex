@@ -25,6 +25,9 @@
 //! - `serve`, run only when `HEXBENCH_PHASES` names it: bursts of the throughput lifecycle on request, a line on
 //!   stdin each, every lifecycle's create and delete timed and replied as a line on stdout, so a coordinator
 //!   (bench/competitive/probes/rounds.py) interleaves this node with others round by round (goal 17's record).
+//!   With `HEXBENCH_ROOT=classic` (rounds.py's hex:classic, goal 17's baseline), the in-process node builds every
+//!   root the classic way (hex-node's test control `Node::with_classic_roots`); each phase's `roots` then counts
+//!   its creates made so and those made pruned.
 //!
 //! Around every phase it reads the node's network namespace counts (made ahead, taken from its pool,
 //! made on a create's path because the pool was dry or the node keeps none, discarded, failed), in
@@ -1217,6 +1220,19 @@ mod linux {
             }
         }
 
+        /// The creates its node made with the classic root as goal 17's baseline arm's
+        /// (`Node::with_classic_roots`, counted under `ClassicReason::Baseline`), and those a pruned seed made, in
+        /// process only, as `/dev`'s counts are.
+        fn roots(&self) -> Option<[u64; 2]> {
+            match self {
+                Self::InProcess(node) => Some([
+                    node.classic_creates_for(hex_runtime::linux::oci::run::ClassicReason::Baseline),
+                    node.pruned_creates(),
+                ]),
+                Self::Socket { .. } => None,
+            }
+        }
+
         /// Direct preparation counters; the socket wire remains unchanged.
         fn dev_mounts(&self) -> Result<Option<hex_core::devfs::Counts>, String> {
             match self {
@@ -1465,6 +1481,17 @@ mod linux {
             Ok("inprocess") | Err(_) => false,
             Ok(other) => panic!("HEXBENCH_DRIVER={other:?}: inprocess or socket"),
         };
+        // HEXBENCH_ROOT=classic: goal 17's baseline arm (rounds.py's hex:classic; the lead's ruling of 2026-11-09):
+        // a node that builds every root the classic way, by hex-node's test control, never a production knob. Only
+        // the node in this process takes it: a socket's hex node takes no test control.
+        let classic = match std::env::var("HEXBENCH_ROOT").as_deref() {
+            Ok("classic") if socket => {
+                panic!("HEXBENCH_ROOT=classic: the classic arm's node is the in-process one")
+            }
+            Ok("classic") => true,
+            Ok(other) => panic!("HEXBENCH_ROOT={other:?}: the one root an arm asks for is classic"),
+            Err(_) => false,
+        };
         let (runtime, root) = if socket {
             ("hex-seam-socket", parent.join("hex-oci-seam-sock"))
         } else {
@@ -1488,6 +1515,12 @@ mod linux {
             // HEX_OCI_MNTNS: the way a pruned create's mount namespace is made, for decision 6's A/B, set on this
             // in-process node's builder alone (the node agent reads no environment for it, Ada's 2026-11-06 rule);
             // unset, the node's default. It stays until the 7.1/7.2 host record decides that A/B, then goes.
+            let node = if classic {
+                node.with_classic_roots()
+                    .unwrap_or_else(|e| panic!("the classic arm's node: {e}"))
+            } else {
+                node
+            };
             let node = match std::env::var("HEX_OCI_MNTNS") {
                 Ok(way) => node.with_mount_namespace(&way),
                 Err(_) => node,
@@ -1528,6 +1561,7 @@ mod linux {
                 let dev_before = driver.dev_mounts()?;
                 let ipc_uts_before = driver.ipc_uts()?;
                 let proc_before = driver.proc_mounts()?;
+                let roots_before = driver.roots();
                 let mut v = match phase {
                     "lifecycle" => lifecycle(node, &sleep_bundle, n, warmup, "l", trace.as_ref()),
                     "lifecycle_nonet" => match &nonet_bundle {
@@ -1610,6 +1644,11 @@ mod linux {
                         fields.insert("mount_namespaces".to_owned(), json!({
                             "copy":ways[0]-ways_before[0], "empty":ways[1]-ways_before[1],
                             "tree":ways[2]-ways_before[2],
+                        }));
+                    }
+                    if let (Some(before), Some(after)) = (roots_before, driver.roots()) {
+                        fields.insert("roots".to_owned(), json!({
+                            "classic":after[0]-before[0], "pruned":after[1]-before[1],
                         }));
                     }
                     if let Some(seeds_rose) = seeds_rose {
