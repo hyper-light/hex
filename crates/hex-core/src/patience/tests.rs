@@ -101,28 +101,51 @@ fn answers_from_many_threads_keep_the_slowest() {
     assert_eq!(p.slowest(), Some(ms(800)));
 }
 
-/// The census (the waits census probe, `bench/competitive/probes/waits_census.md`): every answer a wait records
-/// reaches the installed sink by the wait's name, from the wait's own timing point. Do: install a sink, answer a wait
-/// named `census.test` in 7 ms and 9 ms. Expect: the sink told both, by that name.
+/// The census (the waits census probe, `bench/competitive/probes/waits_census.md`): every answer a wait records, and
+/// every time it runs out, reaches the installed sink by the wait's name, from the wait's own timing point; a run-out
+/// is no sample (Karn's point), so the wait's slowest stays its answers' (decision 9; the lead, 2026-11-09). Do:
+/// install a sink, answer a wait named `census.test` in 7 ms and 9 ms, and say it ran out at 20 ms. Expect: the sink
+/// told the two answers and the run-out, by that name, and the wait's slowest 9 ms.
 #[test]
-fn every_answer_reaches_the_census_by_its_waits_name() {
-    static TOLD: std::sync::Mutex<Vec<(&'static str, Duration)>> =
-        std::sync::Mutex::new(Vec::new());
-    fn sink(name: &'static str, took: Duration) {
-        TOLD.lock().unwrap().push((name, took));
+fn every_answer_and_run_out_reaches_the_census_by_its_waits_name() {
+    static TOLD: std::sync::Mutex<Vec<(&'static str, Sample)>> = std::sync::Mutex::new(Vec::new());
+    fn sink(name: &'static str, sample: Sample) {
+        TOLD.lock().unwrap().push((name, sample));
     }
     assert!(census(sink), "the first install takes");
     let p = Patience::seeded("census.test", ms(1));
     p.answered(ms(7));
     p.answered(ms(9));
-    let told: Vec<Duration> = TOLD
+    p.ran_out(ms(20));
+    let told: Vec<Sample> = TOLD
         .lock()
         .unwrap()
         .iter()
         .filter(|(name, _)| *name == "census.test")
-        .map(|(_, took)| *took)
+        .map(|(_, sample)| *sample)
         .collect();
-    assert_eq!(told, [ms(7), ms(9)]);
+    assert_eq!(
+        told,
+        [
+            Sample::Answered(ms(7)),
+            Sample::Answered(ms(9)),
+            Sample::RanOut(ms(20))
+        ]
+    );
+    assert_eq!(p.slowest(), Some(ms(9)), "a run-out is no sample");
+}
+
+/// The census's file form, which `waits_census.py` reads: an answer `name nanos`, a run-out `name >nanos`.
+#[test]
+fn an_answer_and_a_run_out_are_census_lines_of_their_own() {
+    assert_eq!(
+        census_line("a.wait", Sample::Answered(Duration::from_nanos(41))),
+        "a.wait 41\n"
+    );
+    assert_eq!(
+        census_line("a.wait", Sample::RanOut(ms(440))),
+        "a.wait >440000000\n"
+    );
 }
 
 /// Seeds by build profile (the lead, 2026-11-08: a debug build reads the debug record; production builds carry only

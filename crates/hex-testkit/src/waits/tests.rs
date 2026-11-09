@@ -66,8 +66,9 @@ fn census_child() {
 }
 
 /// Do: run [`census_child`] with `HEX_WAITS_CENSUS` naming a file and `HEX_WAITS_CENSUS_MAX` set. Expect: the file
-/// holds the measured wait's answer as the census keeps it, `name nanos`, and the seeded wait still refused past its
-/// bound, so the tests' census disarms none of their waits, as the node's census does its own.
+/// holds the measured wait's answer as the census keeps it, `name nanos`, and the seeded wait's run-out at its bound,
+/// `name >nanos`: the seeded wait still refused past its bound, so the tests' census disarms none of their waits, and
+/// what ran out is told, a censored sample the census's seed rule takes (decision 9; the lead, 2026-11-09).
 #[test]
 fn the_census_records_a_tests_waits_and_disarms_none() {
     let dir = tempfile::tempdir().unwrap();
@@ -90,8 +91,10 @@ fn the_census_records_a_tests_waits_and_disarms_none() {
     );
     let text = std::fs::read_to_string(&file).unwrap();
     let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(lines.len(), 1, "{text:?}");
+    assert_eq!(lines.len(), 2, "{text:?}");
     let (name, nanos) = lines[0].split_once(' ').unwrap();
     assert_eq!(name, "test.testkit.census");
     assert!(nanos.parse::<u64>().is_ok(), "{text:?}");
+    // Its bound, twice a record of a nanosecond.
+    assert_eq!(lines[1], "test.testkit.bounded >2", "{text:?}");
 }
