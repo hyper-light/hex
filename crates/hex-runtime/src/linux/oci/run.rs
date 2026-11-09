@@ -18,7 +18,6 @@ use std::time::{Duration, Instant};
 use hex_api::Refusal;
 use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::fs::{Mode, OFlags};
-use rustix::io::FdFlags;
 use rustix::pipe::PipeFlags;
 use rustix::process::PidfdFlags;
 
@@ -348,10 +347,24 @@ impl Runtime {
         };
         // Asked last, just before the init that joins it, so a create refused before it takes none.
         let result = network_for(&spec, networks).and_then(|network| match start {
-            Start::Shim => self.start_shim(&making, &spec, &cgroup, network, ShimStdio::Inherited),
+            Start::Shim => self.start_shim(
+                &making,
+                &spec,
+                &cgroup,
+                network,
+                ShimStdio::Inherited,
+                &Command::spawn,
+            ),
             Start::Seed(seeds) if init::needs_shim(&spec) => {
                 seeds.through_shim();
-                self.start_shim(&making, &spec, &cgroup, network, ShimStdio::Null)
+                self.start_shim(
+                    &making,
+                    &spec,
+                    &cgroup,
+                    network,
+                    ShimStdio::Null,
+                    &Command::spawn,
+                )
             }
             Start::Seed(seeds) => self.start_via_seed(&making, &spec, &cgroup, network, seeds),
         });
@@ -369,6 +382,7 @@ impl Runtime {
         cgroup: &BoxCgroup,
         network: Option<OwnedFd>,
         stdio: ShimStdio,
+        spawn: &dyn Fn(&mut Command) -> std::io::Result<std::process::Child>,
     ) -> Result<(), OciError> {
         // `pid_file` and the state write are the shared tail's ([`record_created`]).
         let Making {
@@ -377,45 +391,46 @@ impl Runtime {
             dir,
             pid_file: _,
         } = *making;
-        // Two pipes: the init writes the sync pipe, the runtime writes the map pipe. Made close-on-exec,
-        // so the runtime's own ends never reach the shim, and through it the container's program.
+        // Two pipes: the init writes the sync pipe, the runtime writes the map pipe. The shim opens its
+        // ends, and a network namespace made ahead, by the path of this process's descriptors for them,
+        // which stay close-on-exec: a flag cleared for the spawn would leave a window in which a process
+        // another thread of this multi-threaded agent starts (another create's shim, an exec'd program, a
+        // hook) inherits them (CVE-2024-21626's class; runc v1.5.2 `libcontainer/container_linux.go:341-349`).
         let pipe =
             || rustix::pipe::pipe_with(PipeFlags::CLOEXEC).map_err(|e| OciError::os("pipe", e));
         let (sync_r, sync_w) = pipe()?;
         let (map_r, map_w) = pipe()?;
-        // The init inherits sync_w and map_r across exec; clear their close-on-exec.
-        keep_across_exec(&sync_w)?;
-        keep_across_exec(&map_r)?;
+        let by_path = |fd: &OwnedFd| format!("/proc/{}/fd/{}", std::process::id(), fd.as_raw_fd());
 
         let exe = self.helper_exe()?;
         let mut cmd = Command::new(exe);
         cmd.arg("__oci-init")
-            .env(init::ENV_SYNC_W, sync_w.as_raw_fd().to_string())
-            .env(init::ENV_MAP_R, map_r.as_raw_fd().to_string())
+            .env(init::ENV_SYNC_W, by_path(&sync_w))
+            .env(init::ENV_MAP_R, by_path(&map_r))
             .env(init::ENV_DIR, dir.path())
             .env(init::ENV_BUNDLE, bundle)
             .env(init::ENV_CGROUP, cgroup.dir());
-        // A network namespace made ahead goes by the path of this process's descriptor for it, which
-        // the shim opens. The descriptor stays close-on-exec, so no process this multi-threaded agent
-        // starts meanwhile (another create's shim, an exec'd program) inherits it, as one would in the
-        // window a cleared flag leaves before the spawn.
         if let Some(network) = &network {
-            cmd.env(
-                init::ENV_NETWORK,
-                format!("/proc/{}/fd/{}", std::process::id(), network.as_raw_fd()),
-            );
+            cmd.env(init::ENV_NETWORK, by_path(network));
         }
         if let ShimStdio::Null = stdio {
             cmd.stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
         }
-        let mut shim = cmd
-            .spawn()
-            .map_err(|e| OciError::os("starting the container init", e))?;
-        // The runtime holds the read end of sync and the write end of map; the init holds the others.
+        let mut shim =
+            spawn(&mut cmd).map_err(|e| OciError::os("starting the container init", e))?;
+        // The shim opens both ends before its first word on the sync pipe, so this process keeps them,
+        // and the paths name them, until the shim has spoken or ended. Until then this end of the sync
+        // pipe keeps it from reading end-of-file, so the shim's pidfd says it ended.
+        let heard = first_word(&sync_r, &shim);
         drop(sync_w);
         drop(map_r);
+        if let Err(e) = heard {
+            let _ = shim.kill();
+            let _ = shim.wait();
+            return Err(e);
+        }
 
         let mut container_pid = None;
         let outcome = self
@@ -1349,11 +1364,26 @@ fn network_for(spec: &Spec, networks: Option<&dyn Networks>) -> Result<Option<Ow
     networks.take()
 }
 
-/// Clears an fd's close-on-exec, so the re-exec'd init inherits it.
-fn keep_across_exec(fd: &OwnedFd) -> Result<(), OciError> {
-    rustix::io::fcntl_setfd(fd, FdFlags::empty())
-        .map_err(|e| OciError::os("clearing close-on-exec", e))?;
-    Ok(())
+/// Waits until the shim has written on the sync pipe or has ended, whichever comes first.
+fn first_word(sync_r: &OwnedFd, shim: &std::process::Child) -> Result<(), OciError> {
+    let pid = i32::try_from(shim.id())
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .ok_or_else(|| OciError::Broken("the shim's pid isn't a pid".to_owned()))?;
+    // The shim is this process's child, not yet reaped, so its pid names it.
+    let pidfd = rustix::process::pidfd_open(pid, PidfdFlags::empty())
+        .map_err(|e| OciError::os("pidfd_open of the shim", e))?;
+    loop {
+        let mut fds = [
+            PollFd::new(sync_r, PollFlags::IN),
+            PollFd::new(&pidfd, PollFlags::IN),
+        ];
+        match rustix::event::poll(&mut fds, None) {
+            Ok(_) => return Ok(()),
+            Err(rustix::io::Errno::INTR) => {}
+            Err(e) => return Err(OciError::os("poll on the sync pipe and the shim", e)),
+        }
+    }
 }
 
 /// Writes a user namespace's uid and gid maps for process `pid` (OCI `uidMappings`/`gidMappings`).
@@ -1594,8 +1624,15 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
         };
         let cgroup = BoxCgroup::at(lab.path().to_owned());
         assert!(
-            rt.start_shim(&making, &spec, &cgroup, Some(network), ShimStdio::Inherited)
-                .is_err(),
+            rt.start_shim(
+                &making,
+                &spec,
+                &cgroup,
+                Some(network),
+                ShimStdio::Inherited,
+                &Command::spawn
+            )
+            .is_err(),
             "the stand-in ends without a word"
         );
 
@@ -1605,6 +1642,68 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
         assert_eq!(lines[0], format!("named {}", named.display()), "{report}");
         let flags = u32::from_str_radix(lines[1].strip_prefix("flags ").unwrap(), 8).unwrap();
         assert_ne!(flags & 0o2_000_000, 0, "O_CLOEXEC in {report}");
+    }
+
+    /// A process another of the agent's threads starts while a create starts its shim (another create's
+    /// shim, an exec'd program, a hook) inherits none of the create's descriptors: the shim's pipes stay
+    /// close-on-exec in the agent (CVE-2024-21626's class: runc v1.5.2 `libcontainer/container_linux.go:341-349`).
+    /// Do: start a stand-in shim with a bystander started inside the spawn, as another thread's would be.
+    /// Expect: the bystander holds no pipe past its stdio.
+    #[test]
+    fn a_process_started_while_a_shim_starts_inherits_none_of_its_descriptors() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let lab = tempfile::tempdir().unwrap();
+        let stand_in = lab.path().join("shim");
+        std::fs::write(&stand_in, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&stand_in, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let rt = Runtime::with_helper(lab.path().join("state"), stand_in);
+        let dir = rt.dir("c1").unwrap();
+        dir.create("c1").unwrap();
+        let spec = Spec::parse(br#"{"ociVersion":"1.2.0","root":{"path":"rootfs"}}"#).unwrap();
+        let making = Making {
+            id: "c1",
+            bundle: lab.path(),
+            dir: &dir,
+            pid_file: None,
+        };
+        let cgroup = BoxCgroup::at(lab.path().to_owned());
+        // What the bystander holds is read, and it is ended, inside the spawn: a pipe it inherited would
+        // otherwise keep the create's handshake from its end-of-file for as long as it lives.
+        let held = std::cell::RefCell::new(Vec::new());
+        let spawn = |cmd: &mut Command| {
+            let mut bystander = Command::new("sleep").arg("30").spawn()?;
+            // Linux lets a vfork parent go before the exec closes what is close-on-exec (v6.19
+            // `fs/exec.c:1156`, `:1194`, `kernel/fork.c:1488`), and sets the new program's arguments after
+            // that (`fs/binfmt_elf.c:1296`): what it holds is read once it shows them.
+            let cmdline = format!("/proc/{}/cmdline", bystander.id());
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !std::fs::read(&cmdline)?.starts_with(b"sleep\0") {
+                assert!(
+                    Instant::now() < deadline,
+                    "the bystander never became sleep"
+                );
+                std::thread::yield_now();
+            }
+            for fd in std::fs::read_dir(format!("/proc/{}/fd", bystander.id()))? {
+                let fd = fd?;
+                let stdio = ["0", "1", "2"].contains(&fd.file_name().to_string_lossy().as_ref());
+                let target = std::fs::read_link(fd.path())?;
+                if !stdio && target.to_string_lossy().starts_with("pipe:") {
+                    held.borrow_mut().push(target);
+                }
+            }
+            bystander.kill()?;
+            bystander.wait()?;
+            cmd.spawn()
+        };
+        assert!(
+            rt.start_shim(&making, &spec, &cgroup, None, ShimStdio::Inherited, &spawn)
+                .is_err(),
+            "the stand-in ends without a word"
+        );
+        let held = held.into_inner();
+        assert!(held.is_empty(), "the bystander inherited {held:?}");
     }
 
     /// A pool that records what it is asked, its take answered by `answer`.

@@ -17,7 +17,7 @@
 //! A seed that dies, or a round trip that breaks, refuses its exec and is replaced; the agent reaps
 //! every seed it started (by pidfd), so none is leaked.
 
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Condvar, Mutex, MutexGuard};
@@ -192,20 +192,18 @@ impl SeedPool {
     /// agent keeps the other and the child's pidfd.
     fn start(&self) -> Result<Seed, Refusal> {
         let (ours, theirs) = rt_seed::socketpair()?;
-        rt_seed::clear_cloexec(&theirs)?;
+        // The seed's end rides in as its stdin, which the spawn duplicates into the child alone: it stays
+        // close-on-exec here, so no process another thread of the agent starts meanwhile inherits it, as
+        // one would in the window a cleared flag leaves (CVE-2024-21626's class). The seed keeps only its
+        // socket; every other inherited descriptor closes on its re-exec, as the init's do.
         let mut cmd = Command::new(&self.exe);
         cmd.arg("__oci-seed")
-            .env(rt_seed::ENV_SOCKET, theirs.as_fd().as_raw_fd().to_string())
-            .stdin(std::process::Stdio::null())
+            .stdin(std::process::Stdio::from(theirs))
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
-        // The seed keeps only its socket; every other inherited descriptor closes on its re-exec, as
-        // the init's do. `theirs` is passed by number with close-on-exec cleared, so keep it open past
-        // the spawn until the child has it.
         let child = cmd
             .spawn()
             .map_err(|e| Refusal::os("starting an exec seed", e))?;
-        drop(theirs);
         let pid = i32::try_from(child.id())
             .map_err(|_| Refusal::os("starting an exec seed", "a pid out of range"))?;
         let raw = Pid::from_raw(pid)

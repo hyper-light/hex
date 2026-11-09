@@ -33,7 +33,7 @@ use std::collections::VecDeque;
 use std::ffi::{CString, c_char};
 use std::io::{IoSlice, IoSliceMut, Write};
 use std::mem::MaybeUninit;
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
 
 use hex_core::seed::{self, Answer, Failed, Request};
@@ -46,9 +46,6 @@ use rustix::thread::ThreadNameSpaceType as Ns;
 
 use crate::linux::oci::spec::{Namespace, Process, Spec};
 use crate::linux::oci::{Failure, OciError, exec, init, sys};
-
-/// The environment entry naming the socket, inherited from the node agent, the seed serves on.
-pub const ENV_SOCKET: &str = "HEX_OCI_SEED_SOCKET";
 
 /// A program that fails before it can start exits as a shell does for a program it can't run (126),
 /// and for one that doesn't exist (127), as [`super::exec`] reports the same.
@@ -68,14 +65,24 @@ pub fn run() -> u8 {
 }
 
 fn serve() -> Result<(), OciError> {
-    let raw: RawFd = env_fd(ENV_SOCKET)?;
-    // The agent opened this socket and passed its number here with close-on-exec cleared, so the seed
-    // inherited it across the re-exec; the seed is its sole owner. Made close-on-exec again now, so it
-    // doesn't survive into a program an intermediate's clone execs (the intermediate is a fork, which
-    // keeps it; only the workload's execve, which must not hold the agent's socket, closes it).
-    let socket = sys::own_fd(raw)?;
-    rustix::io::fcntl_setfd(&socket, rustix::io::FdFlags::CLOEXEC)
-        .map_err(|e| OciError::os("setting close-on-exec on the seed's socket", e))?;
+    // The agent hands its socket in as the seed's stdin, duplicated into this process alone by the
+    // spawn, so the agent never clears close-on-exec on it. Moved off fd 0 close-on-exec, so it doesn't
+    // survive into a program an intermediate's clone execs (the intermediate is a fork, which keeps it;
+    // only the workload's execve, which must not hold the agent's socket, closes it), and /dev/null put
+    // on fd 0 in its place.
+    let mut stdin = sys::own_fd(0)?;
+    let socket = rustix::io::fcntl_dupfd_cloexec(&stdin, 3)
+        .map_err(|e| OciError::os("moving the seed's socket off its stdin", e))?;
+    let null = rustix::fs::open(
+        "/dev/null",
+        rustix::fs::OFlags::RDWR | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|e| OciError::os("opening /dev/null", e))?;
+    crate::linux::sys::mark_cloexec_from_3()
+        .map_err(|e| OciError::os("marking descriptors close-on-exec", e))?;
+    rustix::io::dup2(&null, &mut stdin)
+        .map_err(|e| OciError::os("putting /dev/null on fd 0", e))?;
     let mut pid_for = PidFor::open()?;
     let mut specs = Specs::default();
     let mut buf = vec![0u8; seed::MAX_REQUEST];
@@ -1221,18 +1228,4 @@ pub fn socketpair() -> Result<(OwnedFd, OwnedFd), OciError> {
         None,
     )
     .map_err(|e| OciError::os("making the seed's socket", e))
-}
-
-fn env_fd(name: &str) -> Result<RawFd, OciError> {
-    std::env::var(name)
-        .map_err(|_| OciError::Broken(format!("{name} not set for the seed")))?
-        .parse()
-        .map_err(|_| OciError::Broken(format!("{name} isn't a file descriptor")))
-}
-
-/// Clears close-on-exec on a socket the agent passes to a seed, so the seed inherits it across the
-/// re-exec, as the init's inherited pipes are ([`super::init`]).
-pub fn clear_cloexec(fd: &OwnedFd) -> Result<(), OciError> {
-    rustix::io::fcntl_setfd(fd, rustix::io::FdFlags::empty())
-        .map_err(|e| OciError::os("clearing close-on-exec on the seed's socket", e))
 }
