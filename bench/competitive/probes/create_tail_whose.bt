@@ -31,7 +31,12 @@
 // frees' cost, where kills run and where they are queued; each controller's offline cost; the kernfs notify work's,
 // a mount's teardown's and a netns teardown's cost and where each ran; work items (by workqueue and learned function)
 // and softirqs on the create CPUs; each preemption of a create's thread by its preempter and what ran on its CPU
-// meanwhile; each sleep of one over 500 us by its window, its state and its waker.
+// meanwhile; each sleep of one over 500 us by its window, its state and its waker; superblocks and memcg-aware
+// list_lrus alive, by their filesystem's type and their maker, each second (a memcg's offline walks every such list_lru,
+// two a superblock); and the work functions a box's end may queue on "events", named as they run.
+
+// A probe this kernel lacks (a candidate inlined or renamed) is warned of in bt.log, the rest of the record kept.
+config = { missing_probes = "warn" }
 
 BEGIN
 {
@@ -51,6 +56,10 @@ BEGIN
   @kname[10] = ""; delete(@kname[0]);
   @pname[0] = "nothing traced"; @pname[1] = "a css kill"; @pname[2] = "a css release"; @pname[3] = "a kernfs notify";
   @pname[4] = "a netns teardown"; @pname[5] = "a mount teardown"; @pname[6] = "other work";
+  // Who made a superblock or a list_lru: the refill (a box made ahead, what a parked box holds while it waits), Hex's
+  // inits and seeds and its node (hex), Hex's other threads, seam_oci, and everyone else.
+  @mname[1] = "refill (hex-ahead)"; @mname[2] = "hex"; @mname[3] = "Hex's other threads"; @mname[4] = "seam_oci";
+  @mname[5] = "others";
   printf("whose attached\n");
 }
 
@@ -168,6 +177,71 @@ fentry:vmlinux:blkcg_css_offline { @io_t[tid] = nsecs; }
 fexit:vmlinux:blkcg_css_offline / @io_t[tid] / { @offline_us["io"] = hist((nsecs - @io_t[tid]) / 1000); delete(@io_t[tid]); }
 fentry:vmlinux:cpuset_css_offline { @cpuset_t[tid] = nsecs; }
 fexit:vmlinux:cpuset_css_offline / @cpuset_t[tid] / { @offline_us["cpuset"] = hist((nsecs - @cpuset_t[tid]) / 1000); delete(@cpuset_t[tid]); }
+// Within the memory controller's offline: its walk of every memcg-aware list_lru on the host, under list_lrus_mutex.
+fentry:vmlinux:memcg_reparent_list_lrus { @reparent_t[tid] = nsecs; }
+fexit:vmlinux:memcg_reparent_list_lrus / @reparent_t[tid] / { @offline_us["memory: memcg_reparent_list_lrus"] = hist((nsecs - @reparent_t[tid]) / 1000); delete(@reparent_t[tid]); }
+
+// Superblocks and memcg-aware list_lrus alive (lever (b)): a memcg's offline walks every memcg-aware list_lru on the
+// host (mm/list_lru.c, memcg_reparent_list_lrus), two a superblock (fs/super.c, alloc_super: its dentries' and its
+// inodes'). Each is counted from its making to its end by its maker and, a superblock, its filesystem's type; those
+// made before the bt attached are the host's, its census at the wrapper's start. A superblock is new from sget_fc while
+// its root isn't made yet (an existing one, as every cgroup2 mount's, comes back made), and ends where
+// deactivate_locked_super drops its last active reference. Counted by sum(1) and sum(-1), per CPU and so exact (a
+// map's ++ is a read and a write, which CPUs making superblocks at once would undo), and printed each second, so the
+// most alive at once is read off the run.
+fexit:vmlinux:sget_fc
+{
+  $sb = (uint64)retval;
+  // An error comes back as a pointer into the last 4,095 bytes (ERR_PTR).
+  if ($sb != 0 && $sb < 0xfffffffffffff001 && retval->s_root == 0) {
+    $m = 5;
+    if (comm == "hex-ahead") { $m = 1; } else if (comm == "hex") { $m = 2; }
+    else if (strncmp(comm, "hex-", 4) == 0) { $m = 3; } else if (comm == "seam_oci") { $m = 4; }
+    @sbm[$sb] = $m;
+    @sbt[$sb] = str(args.fc->fs_type->name);
+    @sb_alive[@mname[$m], @sbt[$sb]] = sum(1);
+  }
+}
+fentry:vmlinux:deactivate_locked_super / @sbm[(uint64)args.s] && args.s->s_active.counter == 1 /
+{
+  $sb = (uint64)args.s;
+  @sb_alive[@mname[@sbm[$sb]], @sbt[$sb]] = sum(-1);
+  delete(@sbm[$sb]); delete(@sbt[$sb]);
+}
+fexit:vmlinux:__list_lru_init / retval == 0 && args.memcg_aware /
+{
+  $m = 5;
+  if (comm == "hex-ahead") { $m = 1; } else if (comm == "hex") { $m = 2; }
+  else if (strncmp(comm, "hex-", 4) == 0) { $m = 3; } else if (comm == "seam_oci") { $m = 4; }
+  @lrum[(uint64)args.lru] = $m;
+  @lru_alive[@mname[$m]] = sum(1);
+}
+fentry:vmlinux:list_lru_destroy / @lrum[(uint64)args.lru] /
+{
+  @lru_alive[@mname[@lrum[(uint64)args.lru]]] = sum(-1);
+  delete(@lrum[(uint64)args.lru]);
+}
+interval:s:1
+{
+  printf("alive at %d s\n", (nsecs - @t0) / 1000000000);
+  print(@sb_alive); print(@lru_alive);
+}
+
+// "events" ran 17.0 s on the create CPUs, its function unnamed (whose-noowner-1f705e80-r3). The work functions a box's
+// end may queue there that adacachy2's 7.3 kernel can trace, each named as it runs: a superblock's freeing
+// (destroy_super_work), an ipc namespace's (free_ipc), a memcg's per-CPU stock drained at its offline
+// (drain_local_memcg_stock, drain_local_obj_stock), the percpu allocator's balancing (pcpu_balance_workfn), a file's
+// deferred last close (delayed_fput), a memcg's reclaim past memory.high (high_work_func), and a network namespace's
+// fragment queues (fqdir_work_fn, fqdir_free_fn).
+fentry:vmlinux:destroy_super_work / @wf[tid] / { @fname[@wf[tid]] = "destroy_super_work"; }
+fentry:vmlinux:free_ipc / @wf[tid] / { @fname[@wf[tid]] = "free_ipc"; }
+fentry:vmlinux:drain_local_memcg_stock / @wf[tid] / { @fname[@wf[tid]] = "drain_local_memcg_stock"; }
+fentry:vmlinux:drain_local_obj_stock / @wf[tid] / { @fname[@wf[tid]] = "drain_local_obj_stock"; }
+fentry:vmlinux:pcpu_balance_workfn / @wf[tid] / { @fname[@wf[tid]] = "pcpu_balance_workfn"; }
+fentry:vmlinux:delayed_fput / @wf[tid] / { @fname[@wf[tid]] = "delayed_fput"; }
+fentry:vmlinux:high_work_func / @wf[tid] / { @fname[@wf[tid]] = "high_work_func"; }
+fentry:vmlinux:fqdir_work_fn / @wf[tid] / { @fname[@wf[tid]] = "fqdir_work_fn"; }
+fentry:vmlinux:fqdir_free_fn / @wf[tid] / { @fname[@wf[tid]] = "fqdir_free_fn"; }
 
 // Work items: each one's workqueue, held from its queueing to its start; on the create CPUs, its time.
 tracepoint:workqueue:workqueue_queue_work
@@ -349,5 +423,5 @@ END
   clear(@cpuset_t); clear(@wqn); clear(@wf); clear(@works_on); clear(@ws); clear(@wq); clear(@si); clear(@sv);
   clear(@cgm); clear(@tgr); clear(@cb); clear(@cf); clear(@cl); clear(@hn); clear(@hw); clear(@out); clear(@outcpu);
   clear(@outst); clear(@outwin); clear(@outk); clear(@outr); clear(@outn); clear(@outt); clear(@outm); clear(@outw);
-  clear(@wk); clear(@wkw);
+  clear(@wk); clear(@wkw); clear(@mname); clear(@reparent_t); clear(@sbm); clear(@sbt); clear(@lrum);
 }
