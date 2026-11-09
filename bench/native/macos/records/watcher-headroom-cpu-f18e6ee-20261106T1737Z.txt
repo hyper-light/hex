@@ -1,0 +1,29 @@
+# The macOS watcher paced by headroom at the recorded worst aggregate rate, no ceiling (the lead's call,
+# 2026-11-06): each box's next read is (bound + 64 MiB - footprint) / 47,464,532,324 B/s (hex_core::watch::RECORDED,
+# record box-aggregate-growth-f83189c-20261106T1718Z.txt), at least the 250 us floor; a box with no bound, or one
+# armed member, waits for its next change. crates/hex-bench/benches/macos_box.rs (the bar's 256 MiB box), release
+# build of tree f18e6ee + the change, adas-mac-studio-2 (Mac16,9, Apple M4 Max, 14 cores, macOS 26.2 25C56),
+# launchd one-shots outside kiln's runs, 3 passes each.
+
+## Overshoot past the 256 MiB bound (MiB), members allocating at full speed (4 GiB each), 3 runs x 3 passes
+# hex-macos-headroom-20261106T173043Z (load 4.99):
+#   1: 0.0 0.0 0.0 | 4: 7.4 12.6 8.6 | 8: 32.2 38.1 36.6 | 14: 17.2 22.9 41.4 | 28: 64.7 59.2 71.4
+# hex-macos-headroom-cpu-20261106T173416Z (load 4.13):
+#   1: - 0.0 0.0 | 4: 8.7 9.0 7.2 | 8: 34.8 34.0 34.9 | 14: 59.8 38.9 61.4 | 28: 11.1 46.5 20.0
+# hex-macos-headroom-cpu-20261106T173714Z (load 3.36):
+#   1: 0.0 0.0 0.0 | 4: 6.1 11.6 9.2 | 8: 35.7 36.4 33.0 | 14: 35.8 32.0 34.4 | 28: 3.1 2.9 3.3
+# Up to one member per core (the rate's own scope, 14 here) every pass is within the 64 MiB bar (max 61.4). At
+# twice the cores (28), past what the recorded aggregate measured, 2 of 9 passes passed it (64.7, 71.4).
+
+## The watcher's CPU (% of one core) for a box held at a share of its bound, 2 s, main thread parked
+# hex-macos-headroom-cpu-20261106T173714Z (load 3.02-3.36); min-max of 3 passes; the members hold the share
+# between them. A box whose members' own baseline footprint took it past the bound was ended by the watcher
+# (held=false) and is left out: 2 members at 99 %, 14 at 95 and 99 %.
+# members  1%           25%          50%          75%          90%          95%          99%
+# 1        0.001        0.001        0.001        0.001        0.001        0.001        0.001   (armed: events only)
+# 2        1.47-1.83    1.78-2.15    2.14-2.53    2.83-3.52    3.74-4.34    4.12-5.10    (ended)
+# 14       2.14-2.50    2.51-3.00    3.15-3.59    4.25-5.44    6.09-7.46    (ended)      (ended)
+# The cost rises as a box nears its bound. For this 256 MiB bound even an empty box is read every
+# (256 + 64) MiB / 47.46 GB/s = 7.07 ms (141 reads/s), so a many-member box costs about 1.5-2.5 % of a core far
+# from its bound and 4-7.5 % near it; a one-member box, armed by the kernel's cap, costs nothing. A larger bound
+# reads less often in proportion (a 4 GiB box far from its bound: every 92 ms).

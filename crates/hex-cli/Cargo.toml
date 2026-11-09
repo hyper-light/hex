@@ -29,9 +29,11 @@ sha2.workspace = true
 socket2.workspace = true
 
 # macOS: the box helper daemon subcommand (`hex __box-helper`) drives hex-runtime's macOS daemon, and
-# `hex node` on macOS (native plan step 8b) runs the node over the macOS runtime and its Shards guest.
+# `hex node` on macOS (native plan step 8b) runs the node over the macOS runtime and its Shards guest,
+# seeding its boxes' pacing from its machine class's records (hex-core's watch).
 [target.'cfg(target_os = "macos")'.dependencies]
 hex-api.workspace = true
+hex-core.workspace = true
 hex-node.workspace = true
 hex-runtime.workspace = true
 rustix.workspace = true

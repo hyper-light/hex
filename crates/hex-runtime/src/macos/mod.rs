@@ -1,10 +1,12 @@
 //! The macOS runtime: [`hex_api::Runtime`] over the `process` class (docs/design/runtime.md). A box is a
-//! process group under a QoS clamp, its bounds held by a watcher thread reading each member's footprint
-//! (`process`, `sys`, `watch`); the `oci` class is a Linux kernel's, refused by name here: a node
-//! runs it in its Shards guest by wrapping this in [`crate::guest::WithGuest`] (the native plan's step 5). This is the node's runtime seam on macOS; the records,
+//! process group at the QoS its declared weight asks, its bounds held by a watcher thread reading each
+//! member's footprint (`process`, `sys`, `watch`); the `oci` class is a Linux kernel's, refused by name
+//! here: a node runs it in its Shards guest by wrapping this in [`crate::guest::WithGuest`] (the native
+//! plan's step 5). This is the node's runtime seam on macOS; the records,
 //! recovery and socket that wrap it on Linux (`hex-node`) are not yet cross-OS, so this holds its boxes
 //! in memory and is driven in process.
 
+pub mod directory;
 pub mod helper_client;
 pub mod helper_daemon;
 pub mod helper_sys;
@@ -67,6 +69,25 @@ struct BoxUser {
 /// under a watcher (step 1); with the privileged helper installed (`helper` `Some`), a box is a user of
 /// its own the helper starts and bounds in the kernel (step 2). `new` is rootless; `detect` picks box-user
 /// when the helper's socket answers. Holds its boxes in memory, keyed by id.
+/// This machine's model, `hw.model` (`Mac16,9`): its class, whose recorded growth rates seed its boxes'
+/// pacing (`hex_core::watch::seed`). Read once at node start by `/usr/sbin/sysctl`, by absolute path with
+/// a fixed argv and no shell, as the helper runs its directory tools.
+pub fn machine_model() -> Result<String, Refusal> {
+    let out = std::process::Command::new("/usr/sbin/sysctl")
+        .args(["-n", "hw.model"])
+        .output()
+        .map_err(|e| Refusal::os("reading the machine's model", e))?;
+    if !out.status.success() {
+        return Err(Refusal::os(
+            "reading the machine's model",
+            std::io::Error::other(format!("sysctl -n hw.model: {}", out.status)),
+        ));
+    }
+    String::from_utf8(out.stdout)
+        .map(|m| m.trim().to_owned())
+        .map_err(|e| Refusal::os("reading the machine's model", std::io::Error::other(e)))
+}
+
 pub struct MacRuntime {
     shared: Arc<Shared>,
     /// Shared with a run's thread, which removes its box through [`remove_process_box`] as `delete` does.
@@ -77,11 +98,28 @@ pub struct MacRuntime {
 }
 
 impl MacRuntime {
+    /// The growth rates the node's boxes are paced at, as its watchers have learned them (observability:
+    /// what the watchers pace by).
+    pub fn pacing(&self) -> Result<hex_core::watch::Rates, Refusal> {
+        self.shared.rates()
+    }
+
+    /// How late the node's watchers have woken past their waits, at the latest (its class's record to
+    /// start; observability: what the boxes' holds reckon with).
+    pub fn lateness(&self) -> Result<std::time::Duration, Refusal> {
+        self.shared.lateness()
+    }
+
     /// A rootless runtime (no helper): boxes are process groups whose bounds a watcher holds, reckoned to
-    /// grow at `rate_bytes` bytes and `rate_processes` processes a second (the bound's pacing, CLAUDE.md §5:
-    /// measured at node start or cited, the caller says which).
-    pub fn new(rate_bytes: NonZeroU64, rate_processes: NonZeroU64) -> Result<Self, Refusal> {
-        let shared = Shared::new(rate_bytes, rate_processes)
+    /// grow at `rate_bytes` bytes and `rate_processes` processes a second, and its watchers to wake up to
+    /// `lateness` past their waits (the bound's pacing and its hold, CLAUDE.md §5: measured at node start or
+    /// cited, the caller says which).
+    pub fn new(
+        rate_bytes: NonZeroU64,
+        rate_processes: NonZeroU64,
+        lateness: std::time::Duration,
+    ) -> Result<Self, Refusal> {
+        let shared = Shared::new(rate_bytes, rate_processes, lateness)
             .map_err(|e| Refusal::os("reading the machine's timebase", e))?;
         Ok(Self {
             shared: Arc::new(shared),
@@ -96,11 +134,12 @@ impl MacRuntime {
     pub fn detect(
         rate_bytes: NonZeroU64,
         rate_processes: NonZeroU64,
+        lateness: std::time::Duration,
         helper_socket: &std::path::Path,
     ) -> Result<Self, Refusal> {
         match helper_client::Helper::connect(helper_socket)? {
             Some(helper) => {
-                let shared = Shared::new(rate_bytes, rate_processes)
+                let shared = Shared::new(rate_bytes, rate_processes, lateness)
                     .map_err(|e| Refusal::os("reading the machine's timebase", e))?;
                 Ok(Self {
                     shared: Arc::new(shared),
@@ -112,7 +151,7 @@ impl MacRuntime {
                     exec_limit: exec_limit()?,
                 })
             }
-            None => Self::new(rate_bytes, rate_processes),
+            None => Self::new(rate_bytes, rate_processes, lateness),
         }
     }
 
@@ -174,6 +213,12 @@ impl MacRuntime {
             .map_err(|_| Refusal::Broken("the node's box map lock is poisoned".to_owned()))
     }
 
+    /// Box `id` as its watcher last recorded it, why it ended included (observability: the footprint the
+    /// watcher read when it ended a box, beside the peak).
+    pub fn status(&self, id: &BoxId) -> Result<process::Status, Refusal> {
+        self.get(id)?.status()
+    }
+
     fn get(&self, id: &BoxId) -> Result<Arc<ProcessBox>, Refusal> {
         self.boxes()?
             .get(id)
@@ -216,7 +261,8 @@ impl BoxUser {
         }
         let bound = spec.bounds.memory_max.unwrap_or(u64::MAX);
         let reserve = RESERVE_BYTES.min(bound / 4);
-        self.helper.acquire(&spec.id, bound, reserve)?;
+        self.helper
+            .acquire(&spec.id, bound, reserve, spec.bounds.pids_max)?;
         boxes.insert(
             spec.id.clone(),
             UserBox {

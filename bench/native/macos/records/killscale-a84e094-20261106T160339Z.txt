@@ -1,0 +1,14 @@
+# SIGKILL to empty: a process group of n members (each /bin/sleep, its own pid, the group's leader the first)
+# killed with kill(-pgid, SIGKILL), timed until every member is reaped (waitpid). The basis of the drain bound
+# (the process class's group drain, the helper's end, the installer's uninstall wait): Ada's rule, 2026-11-06.
+# launchd one-shot hex-macos-killscale-20261106T160339Z, adas-mac-studio-2, macOS 26.2 25C56, Mac16,9,
+# kern.maxprocperuid 6000, load average 4.95 at start, 5.07 at end. 10 trials a size.
+# n=1 (s):   0.000386 0.000516 0.000548 0.000745 0.000324 0.000621 0.000460 0.000617 0.000456 0.000883
+# n=32 (s):  0.005330 0.008937 0.002934 0.006807 0.005245 0.006836 0.003377 0.005374 0.010125 0.008670
+# n=128 (s): 0.030660 0.033976 0.027171 0.028976 0.024644 0.021015 0.020242 0.015587 0.024621 0.022179
+# n=512 (s): 0.040813 0.061340 0.044624 0.045145 0.034048 0.044639 0.043930 0.044602 0.037358 0.038485
+# Also on adas-mac-studio.local-2 (macOS 26.4, load ~37): n=32, 20 trials, 0.004244-0.006590 s.
+# Upper envelope a + b*(n-1): a = the worst n=1, 0.000883 s; b = the largest (max(n) - a) / (n - 1) over the
+# sizes measured: n=32 (0.010125 - 0.000883) / 31 = 0.000298 s (n=128 gives 0.000261, n=512 0.000118).
+# Bound(n) = 2 x (a + b*(n-1)), the x2 the lead's margin: 1.77 ms at 1 member, 20.2 ms at 32, 306 ms at 512,
+# 3.58 s at 6,000 (studio-2's per-uid ceiling).

@@ -283,6 +283,16 @@ Apple's role users now occupy UIDs 300–308 (`_aonsensed` 300 … `_mds_stores`
 groups 395–399 (`com.apple.access_*`). Nix's 351+ is clear on this release, but the range Apple takes
 grows; Hex lists before creating and refuses (by name) a collision, never reuses a taken ID.
 
+**Apple's own range, read at its source** (2026-11-06, adas-mac-studio.local-2, macOS 26.4 25E246): `sysadminctl`
+with no arguments prints its usage, which ends "*Role accounts require name starting with _ and UID in 450-499
+range." So the role range is 450-499 on this release, not the 200-400 that Nix's comment (`:9-11`) recalls from an
+older usage note. **MEASURED-OWN** there: `dscl` lists no user and no group in 450-499 (the nearest are `_oahd`
+441 and the first person, 501), and no process runs at a uid there. Hex's installer therefore learns its ids at
+install time, the first run of `COUNT+2` ids in 450-499 that no user, group or process holds (`free_run` in
+`scripts/install/macos.sh`), rather than a fixed start (Ada's rule, 2026-11-06: no arbitrary constants). On this
+Mac that is 450-481. Falsified if a release prints another range, or puts its own users in 450-499 (then the
+learned run moves past them, or the install refuses by name when no run fits).
+
 ### 3.2 How Nix installs and removes its daemon
 
 - Plist `/Library/LaunchDaemons/org.nixos.nix-daemon.plist` (`install-darwin-multi-user.sh:20`), installed

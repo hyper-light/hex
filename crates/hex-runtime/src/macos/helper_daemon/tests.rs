@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use hex_api::{BoxId, Exit, Proc, Program};
 use hex_core::helper::{START_FDS, VERSION};
+use hex_core::pool::{Account, ROLE_UIDS, pool_index};
 use rustix::net::{AddressFamily, SocketFlags, SocketType};
 
 use super::super::helper_client::Helper;
@@ -28,7 +29,7 @@ fn m(pid: i32, footprint: u64) -> Member {
 #[test]
 fn reapportion_arms_the_changed_and_ends_when_over() {
     // 256 MiB bound, 16 MiB reserve → 240 MiB apportioned.
-    let mut t = Tracked::new(7000, 256 * MIB, 16 * MIB);
+    let mut t = Tracked::new(7000, 256 * MIB, 16 * MIB, 64);
 
     // Two idle members: both armed at 120 MiB (240 / 2).
     let plan = t.reapportion(&[m(10, 0), m(11, 0)]);
@@ -73,6 +74,16 @@ struct SimState {
     arm_calls: u32,
     /// Programs whose end a watch read (the stand-in's reap).
     reaped: u32,
+    /// The process cap each spawn was asked to set (`RLIMIT_NPROC` of the box's user), in order.
+    nprocs: Vec<u32>,
+    /// The directory's pool users (name, uid), which the daemon reads at start.
+    pool_users: Vec<(String, u32)>,
+    /// The ids held outside the pool (other users, groups, processes).
+    taken: BTreeSet<u32>,
+    /// The accounts the daemon asked to make, in order.
+    made: Vec<Account>,
+    /// The kept peak of concurrent boxes.
+    peak: u32,
     /// Each pid armed, in order.
     armed: Vec<i32>,
     /// The members watched for their forks and ends.
@@ -143,10 +154,11 @@ impl Privileged for Sim {
         fds: [OwnedFd; START_FDS],
         _leader: bool,
         _cap_mib: u32,
-        _nproc: u32,
+        nproc: u32,
     ) -> std::io::Result<i32> {
         drop(fds); // the stdio descriptors rode across; a real spawn would dup2 them.
         let mut s = self.inner.lock().expect("sim lock");
+        s.nprocs.push(nproc);
         s.next_pid += 1;
         let pid = 1000 + s.next_pid;
         s.members.push(Member { pid, footprint: 0 });
@@ -177,6 +189,33 @@ impl Privileged for Sim {
             .filter(|m| owner.get(&m.pid) == Some(&uid))
             .copied()
             .collect())
+    }
+
+    fn pool_users(&self) -> std::io::Result<Vec<(String, u32)>> {
+        Ok(self.inner.lock().expect("sim lock").pool_users.clone())
+    }
+
+    fn taken_ids(&self) -> std::io::Result<BTreeSet<u32>> {
+        let s = self.inner.lock().expect("sim lock");
+        let mut taken = s.taken.clone();
+        taken.extend(s.pool_users.iter().map(|(_, uid)| *uid));
+        Ok(taken)
+    }
+
+    fn make_user(&self, account: &Account) -> std::io::Result<()> {
+        let mut s = self.inner.lock().expect("sim lock");
+        s.pool_users.push((account.name.clone(), account.uid));
+        s.made.push(account.clone());
+        Ok(())
+    }
+
+    fn peak(&self) -> std::io::Result<u32> {
+        Ok(self.inner.lock().expect("sim lock").peak)
+    }
+
+    fn keep_peak(&self, peak: u32) -> std::io::Result<()> {
+        self.inner.lock().expect("sim lock").peak = peak;
+        Ok(())
     }
 
     fn watch_members(&self, pids: &[i32], uid: u32) -> std::io::Result<Vec<i32>> {
@@ -263,10 +302,13 @@ fn the_daemon_serves_a_box_end_to_end() {
     let b1 = BoxId::new("b1").expect("box id");
 
     // Acquire takes a pool user (the last pushed, 7001).
-    assert_eq!(client.acquire(&b1, 256 * MIB, 16 * MIB).unwrap(), 7001);
+    assert_eq!(
+        client.acquire(&b1, 256 * MIB, 16 * MIB, None).unwrap(),
+        7001
+    );
     // A box already acquired is refused by name.
     assert!(matches!(
-        client.acquire(&b1, 256 * MIB, 16 * MIB),
+        client.acquire(&b1, 256 * MIB, 16 * MIB, None),
         Err(hex_api::Refusal::Exists(_))
     ));
 
@@ -290,7 +332,10 @@ fn the_daemon_serves_a_box_end_to_end() {
         client.inspect(&b1),
         Err(hex_api::Refusal::NoSuchBox(_))
     ));
-    assert_eq!(client.acquire(&b1, 256 * MIB, 16 * MIB).unwrap(), 7001);
+    assert_eq!(
+        client.acquire(&b1, 256 * MIB, 16 * MIB, None).unwrap(),
+        7001
+    );
 
     drop(client);
     let daemon = handle.join().expect("daemon thread");
@@ -318,7 +363,7 @@ fn a_box_with_no_live_member_refuses_a_signal_and_takes_a_program() {
 
     let client = Helper::over(client, VERSION);
     let b1 = BoxId::new("b1").expect("box id");
-    client.acquire(&b1, 256 * MIB, 16 * MIB).unwrap();
+    client.acquire(&b1, 256 * MIB, 16 * MIB, None).unwrap();
     client
         .start(&b1, &prog(), nulls().each_ref().map(|f| f.as_fd()), true)
         .unwrap();
@@ -342,9 +387,9 @@ fn a_box_with_no_live_member_refuses_a_signal_and_takes_a_program() {
     handle.join().expect("daemon thread");
 }
 
-/// A connected client to a daemon over the stand-in, with `pool` users and `nproc` programs a box, the
-/// daemon serving on its own thread until the client closes.
-fn served(pool: Vec<u32>, nproc: u32) -> (Helper, thread::JoinHandle<Daemon<Sim>>) {
+/// A connected client to a daemon over the stand-in, with `pool` users under a per-uid process ceiling
+/// `per_uid`, the daemon serving on its own thread until the client closes.
+fn served(pool: Vec<u32>, per_uid: u32) -> (Helper, thread::JoinHandle<Daemon<Sim>>) {
     let (client, server) = rustix::net::socketpair(
         AddressFamily::UNIX,
         SocketType::STREAM,
@@ -355,7 +400,7 @@ fn served(pool: Vec<u32>, nproc: u32) -> (Helper, thread::JoinHandle<Daemon<Sim>
     let _ = rustix::net::sockopt::set_socket_nosigpipe(&client, true);
     let _ = rustix::net::sockopt::set_socket_nosigpipe(&server, true);
     let handle = thread::spawn(move || {
-        let daemon = Daemon::new(Sim::default(), pool, nproc);
+        let daemon = Daemon::new(Sim::default(), pool, per_uid);
         let _ = daemon.serve(server.as_fd());
         daemon
     });
@@ -375,7 +420,7 @@ fn start(client: &Helper, b: &BoxId, leader: bool) -> i32 {
 fn the_helper_reaps_a_program_and_answers_its_end_once() {
     let (client, handle) = served(vec![7000], 64);
     let b1 = BoxId::new("b1").expect("box id");
-    client.acquire(&b1, 256 * MIB, 16 * MIB).unwrap();
+    client.acquire(&b1, 256 * MIB, 16 * MIB, None).unwrap();
     let pid1 = start(&client, &b1, true);
     assert_eq!(client.wait(&b1, pid1).unwrap(), None);
     client.signal(&b1, 9).unwrap();
@@ -386,6 +431,38 @@ fn the_helper_reaps_a_program_and_answers_its_end_once() {
     assert_eq!(daemon.ops.inner.lock().unwrap().reaped, 1);
 }
 
+/// HEX-RT-16 (box-user mode; the lead, 2026-11-09): of two programs the helper started in a box, the one the
+/// node kills by its pid ends by the helper's hand, since the node may not signal the pool user, and the other
+/// runs on; a second kill of the ended one, and a kill of a pid the box doesn't hold, signal nothing and are
+/// done; a kill in a box the helper doesn't know is refused by name. Do start two programs, kill the first
+/// twice and a pid the box never started once, then kill in an unknown box; expect the first's end Signal(9),
+/// the second still running and a member, and the unknown box refused.
+#[test]
+fn a_box_user_program_is_killed_alone_through_the_helper() {
+    let (client, handle) = served(vec![7000], 64);
+    let b1 = BoxId::new("b1").expect("box id");
+    client.acquire(&b1, 256 * MIB, 16 * MIB, None).unwrap();
+    let pid1 = start(&client, &b1, true);
+    let pid2 = start(&client, &b1, false);
+    client.kill(&b1, pid1).unwrap();
+    client.kill(&b1, pid1).unwrap();
+    client.kill(&b1, pid2 + 1000).unwrap();
+    assert_eq!(client.wait(&b1, pid1).unwrap(), Some(Exit::Signal(9)));
+    assert_eq!(client.wait(&b1, pid2).unwrap(), None);
+    let unknown = BoxId::new("nobox").expect("box id");
+    assert!(
+        matches!(client.kill(&unknown, pid2), Err(hex_api::Refusal::NoSuchBox(b)) if b == unknown),
+        "a kill in an unknown box wasn't refused by name"
+    );
+    drop(client);
+    let daemon = handle.join().expect("daemon thread");
+    let s = daemon.ops.inner.lock().unwrap();
+    assert!(
+        s.members.iter().any(|m| m.pid == pid2),
+        "the box's other program ended with the first"
+    );
+}
+
 /// HEX-MAC-15, HEX-RT-3 (box-user mode): do delete a box with two programs running; expect both reaped
 /// by the delete (no zombie left under its user) and each one's end still answered after it, as a
 /// deleted box's program ends by the delete's kill on every class.
@@ -393,7 +470,7 @@ fn the_helper_reaps_a_program_and_answers_its_end_once() {
 fn a_deleted_boxs_programs_are_reaped_and_their_ends_kept() {
     let (client, handle) = served(vec![7000], 64);
     let b1 = BoxId::new("b1").expect("box id");
-    client.acquire(&b1, 256 * MIB, 16 * MIB).unwrap();
+    client.acquire(&b1, 256 * MIB, 16 * MIB, None).unwrap();
     let pid1 = start(&client, &b1, true);
     let pid2 = start(&client, &b1, false);
     client.end(&b1).unwrap();
@@ -404,14 +481,15 @@ fn a_deleted_boxs_programs_are_reaped_and_their_ends_kept() {
     assert_eq!(daemon.ops.inner.lock().unwrap().reaped, 2);
 }
 
-/// CLAUDE.md §2 (the helper's programs are bounded): do start `nproc` programs in a box at `nproc` 2;
+/// CLAUDE.md §2 (the helper's programs are bounded): do start `nproc` programs in a box whose spec names
+/// `pids_max` 2;
 /// expect a third refused by name while both run, and taken once they have ended (the oldest unread end
 /// is dropped for it, and reads Unknown).
 #[test]
 fn a_box_holds_at_most_its_process_cap_of_programs() {
-    let (client, handle) = served(vec![7000], 2);
+    let (client, handle) = served(vec![7000], 64);
     let b1 = BoxId::new("b1").expect("box id");
-    client.acquire(&b1, 256 * MIB, 16 * MIB).unwrap();
+    client.acquire(&b1, 256 * MIB, 16 * MIB, Some(2)).unwrap();
     let pid1 = start(&client, &b1, true);
     let _pid2 = start(&client, &b1, false);
     assert!(matches!(
@@ -457,7 +535,7 @@ fn shared(nproc: u32) -> Shared {
 fn a_forked_member_is_armed_on_its_fork_event() {
     let (client, daemon, state, posted) = shared(64);
     let b1 = BoxId::new("b1").expect("box id");
-    let uid = client.acquire(&b1, 256 * MIB, 16 * MIB).unwrap();
+    let uid = client.acquire(&b1, 256 * MIB, 16 * MIB, None).unwrap();
     let leader = start(&client, &b1, true);
     assert!(state.lock().unwrap().watched.contains(&leader));
     let pumping = Arc::clone(&daemon);
@@ -483,8 +561,8 @@ fn a_forked_member_is_armed_on_its_fork_event() {
 fn a_fork_sweeps_only_its_own_box() {
     let (client, daemon, state, posted) = shared(64);
     let (b1, b2) = (BoxId::new("b1").expect("id"), BoxId::new("b2").expect("id"));
-    let u1 = client.acquire(&b1, 256 * MIB, 16 * MIB).unwrap();
-    let u2 = client.acquire(&b2, 256 * MIB, 16 * MIB).unwrap();
+    let u1 = client.acquire(&b1, 256 * MIB, 16 * MIB, None).unwrap();
+    let u2 = client.acquire(&b2, 256 * MIB, 16 * MIB, None).unwrap();
     start(&client, &b1, true);
     start(&client, &b2, true);
     let before = state.lock().unwrap().listed.clone();
@@ -507,7 +585,7 @@ fn a_fork_sweeps_only_its_own_box() {
 fn a_member_forked_before_its_watch_is_caught_by_the_relist() {
     let (client, _daemon, state, _posted) = shared(64);
     let b1 = BoxId::new("b1").expect("box id");
-    client.acquire(&b1, 256 * MIB, 16 * MIB).unwrap();
+    client.acquire(&b1, 256 * MIB, 16 * MIB, None).unwrap();
     state.lock().unwrap().fork_in_watch = Some(5151);
     start(&client, &b1, true);
     let s = state.lock().unwrap();
@@ -547,10 +625,13 @@ fn members_lists_the_users_live_processes() {
         .map(|c| i32::try_from(c.id()).expect("a pid"))
         .collect();
 
-    // Wait on the fact, not the clock (CLAUDE.md §4): poll the listing on a counted budget until every
-    // child is in it. The kernel knows a child at fork, so the first read usually already has them.
+    // Wait on the fact, not the clock (CLAUDE.md §4): read the listing until every child is in it, guarded by
+    // twice the slowest recorded run of the macOS tests that wait (39.507 s,
+    // bench/native/macos/records/test-waits-macos.txt). The kernel knows a child at fork, so the first read
+    // usually already has them.
     let mut pids = std::collections::BTreeSet::new();
-    for _ in 0..100_000u32 {
+    let deadline = std::time::Instant::now() + Duration::from_millis(39_507);
+    while std::time::Instant::now() < deadline {
         pids = members(uid)
             .expect("list the user's members")
             .iter()
@@ -570,4 +651,136 @@ fn members_lists_the_users_live_processes() {
     // This process itself is one of its user's processes.
     let me = rustix::process::getpid().as_raw_nonzero().get();
     assert!(pids.contains(&me), "the listing holds this process {me}");
+}
+
+/// Ada's rule (2026-11-06): no picked defaults. A box's process cap is its spec's `pids_max` when it names
+/// one, else the platform's per-uid ceiling (`kern.maxprocperuid`, which the helper reads at start): each
+/// box has a uid of its own, and XNU's fork counts a uid's processes against its `RLIMIT_NPROC`
+/// (`bsd/kern/kern_fork.c:269-283`). Linux's class sets no default either (`pids.max` only from
+/// `pids_max`). Do start a program in a box naming none and in one naming 5, under a ceiling of 64;
+/// expect the spawns asked for 64 and 5.
+#[test]
+fn a_box_naming_no_process_limit_gets_the_per_uid_ceiling() {
+    let (client, handle) = served(vec![7000, 7001], 64);
+    let plain = BoxId::new("plain").expect("box id");
+    let limited = BoxId::new("limited").expect("box id");
+    client.acquire(&plain, 256 * MIB, 16 * MIB, None).unwrap();
+    client
+        .acquire(&limited, 256 * MIB, 16 * MIB, Some(5))
+        .unwrap();
+    start(&client, &plain, true);
+    start(&client, &limited, true);
+    drop(client);
+    let daemon = handle.join().expect("daemon thread");
+    assert_eq!(daemon.ops.inner.lock().unwrap().nprocs, vec![64, 5]);
+}
+
+/// A connected client to a daemon that grows its pool, over a stand-in whose directory holds `pool_users`,
+/// with `taken` ids held outside it and a kept `peak`.
+fn served_growing(
+    pool_users: Vec<(String, u32)>,
+    taken: BTreeSet<u32>,
+    peak: u32,
+) -> (
+    Helper,
+    Arc<Mutex<SimState>>,
+    thread::JoinHandle<Daemon<Sim>>,
+) {
+    let (client, server) = rustix::net::socketpair(
+        AddressFamily::UNIX,
+        SocketType::STREAM,
+        SocketFlags::empty(),
+        None,
+    )
+    .expect("socketpair");
+    let _ = rustix::net::sockopt::set_socket_nosigpipe(&client, true);
+    let _ = rustix::net::sockopt::set_socket_nosigpipe(&server, true);
+    let sim = Sim::default();
+    {
+        let mut s = sim.inner.lock().unwrap();
+        s.pool_users = pool_users;
+        s.taken = taken;
+        s.peak = peak;
+    }
+    let state = Arc::clone(&sim.inner);
+    let daemon = Daemon::growing(sim, 64).expect("a growing daemon");
+    let handle = thread::spawn(move || {
+        let _ = daemon.serve(server.as_fd());
+        daemon
+    });
+    (Helper::over(client, VERSION), state, handle)
+}
+
+/// The lead's #2 (2026-11-06): a hexnode member can't make the helper create anything outside Apple's role
+/// range or the pool's name pattern, nor at an id someone holds. Do acquire 60 boxes (more than the range
+/// holds) through the socket, with ids 455 and 9000 held outside the pool and one pool user at 450; expect
+/// every account made to be `_hexbox<n>` in 450-499 and never 455, one made per box past the first, and
+/// the acquires past the range refused by name.
+#[test]
+fn a_member_cannot_make_an_account_outside_the_range_or_the_pattern() {
+    let (client, state, handle) = served_growing(
+        vec![("_hexbox1".to_owned(), 450)],
+        BTreeSet::from([455, 9000]),
+        0,
+    );
+    let mut refused = 0;
+    for i in 0..60 {
+        let b = BoxId::new(&format!("hostile-{i}")).expect("box id");
+        match client.acquire(&b, 256 * MIB, 16 * MIB, None) {
+            Ok(uid) => assert!(ROLE_UIDS.contains(&uid) && uid != 455, "uid {uid}"),
+            Err(hex_api::Refusal::Os { .. }) => refused += 1,
+            Err(e) => panic!("{e}"),
+        }
+    }
+    drop(client);
+    handle.join().expect("daemon thread");
+    let made = state.lock().unwrap().made.clone();
+    // 50 role uids, less 450 (the pool's) and 455 (held): 48 accounts, then refusals.
+    assert_eq!(made.len(), 48);
+    assert_eq!(refused, 60 - 49);
+    for a in &made {
+        assert!(pool_index(&a.name).is_some(), "{}", a.name);
+        assert!(ROLE_UIDS.contains(&a.uid) && a.uid != 455, "{}", a.uid);
+    }
+}
+
+/// The lead's #2: an id is checked free just before its account is made, since another installer may have
+/// taken it since install. Do take 451 after the daemon starts; expect the account made at 452.
+#[test]
+fn an_id_taken_after_start_is_skipped() {
+    let (client, state, handle) =
+        served_growing(vec![("_hexbox1".to_owned(), 450)], BTreeSet::new(), 0);
+    state.lock().unwrap().taken.insert(451);
+    let a = BoxId::new("a").expect("box id");
+    let b = BoxId::new("b").expect("box id");
+    client.acquire(&a, 256 * MIB, 16 * MIB, None).unwrap();
+    assert_eq!(client.acquire(&b, 256 * MIB, 16 * MIB, None).unwrap(), 452);
+    drop(client);
+    handle.join().expect("daemon thread");
+    assert_eq!(
+        state.lock().unwrap().made,
+        vec![Account {
+            name: "_hexbox2".to_owned(),
+            uid: 452
+        }]
+    );
+}
+
+/// The lead's #2: the pool stays ahead by the node's observed peak of concurrent box-user boxes, kept
+/// across restarts. Do start a daemon with one pool user and a kept peak of 3, then hold 4 boxes at once;
+/// expect 2 accounts made at start, a 4th when the 4th box comes, and the kept peak 4.
+#[test]
+fn the_pool_is_grown_to_the_kept_peak_and_the_peak_is_kept() {
+    let (client, state, handle) =
+        served_growing(vec![("_hexbox1".to_owned(), 450)], BTreeSet::new(), 3);
+    assert_eq!(state.lock().unwrap().made.len(), 2);
+    for i in 0..4 {
+        let b = BoxId::new(&format!("b{i}")).expect("box id");
+        client.acquire(&b, 256 * MIB, 16 * MIB, None).unwrap();
+    }
+    drop(client);
+    handle.join().expect("daemon thread");
+    let s = state.lock().unwrap();
+    assert_eq!(s.made.len(), 3);
+    assert_eq!(s.peak, 4);
 }

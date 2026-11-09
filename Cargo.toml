@@ -122,6 +122,12 @@ inherits = "release"
 [profile.dev.package.hex-sim]
 opt-level = 3
 
+# hex-cli's own code optimized in test builds too: its `selftest-box` acts are the members the macOS tests
+# box, and a hog has to fill memory at the speed a release program does for a test's overshoot to say what
+# a box can do (the lead, 2026-11-06). Its dependencies keep the dev profile.
+[profile.dev.package.hex-cli]
+opt-level = 3
+
 # Hex vendors seccompiler (vendor/MANIFEST.toml) and builds against that copy, as the no-package-takes-
 # a-kiln-name rule has kiln patch its own vendored products (CLAUDE.md, Vendoring). vendor/ is its own
 # workspace (excluded above); the patch points at the crate directory inside it.

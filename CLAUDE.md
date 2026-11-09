@@ -128,16 +128,20 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   fatal per-process memory cap at the box's whole bound (step 1's `_ext` backstop: the kernel SIGKILLs a
   member that crosses it, rootless, with no overshoot), and `adddup2`/`addchdir` file actions);
   `proc_listpids(PROC_PGRP_ONLY)` lists the group (and `PROC_UID_ONLY` a user, for the box helper's
-  membership, step 2) and `proc_pid_rusage` reads each member's footprint, start time and exit; `thread_policy_set(THREAD_TIME_CONSTRAINT_POLICY)` makes the watcher a Mach
-  time-constraint thread; `kqueue`/`kevent` carry its one-shot `NOTE_CRITICAL` timer, a user event to wake
+  membership, step 2) and `proc_pid_rusage` reads each member's footprint, start time and exit, and
+  `proc_pidinfo(PROC_PIDTBSDINFO)` its run state, so a box's hold continues only the members it stopped,
+  and `proc_pidinfo(PROC_PIDTASKINFO)` whether a member has a thread running or waiting for a core, so a run
+  that gave it none shows nothing of its rate;
+  `kqueue`/`kevent` carry its one-shot `NOTE_CRITICAL` timer, a user event to wake
   it, and `EVFILT_PROC` (`NOTE_FORK`/`NOTE_EXIT`/`NOTE_EXITSTATUS`, the dead member's wait status in the
   event, so a cap kill is told from an ordinary SIGKILL without racing its reaper) on members, and, for the
   node's socket on macOS (native plan step 8, `hex-node`'s `serve::macos`, one kqueue on its I/O thread),
   level-triggered `EVFILT_READ`/`EVFILT_WRITE` on the listener and connections; `getpeereid` names the
   socket's peer, so only the node's user and root are served; `mach_timebase_info` converts Mach ticks;
-  `sysctlbyname("kern.maxproc")` bounds a listing and `sysctlbyname("kern.argmax")` a program's arguments
-  and environment, and the node's facts read `hw.memsize`, `hw.physicalcpu`, `hw.pagesize`,
-  `vm.page_free_count`, `vm.page_speculative_count` and `kern.hv_support` by it (`hex-node`'s `facts`); `getrusage`
+  `sysctlbyname("kern.maxproc")` bounds a listing, `sysctlbyname("kern.argmax")` a program's arguments
+  and environment, and `sysctlbyname("kern.maxprocperuid")` is a box-user box's default process cap, and the
+  node's facts read `hw.memsize`, `hw.physicalcpu`, `hw.pagesize`, `vm.page_free_count`,
+  `vm.page_speculative_count` and `kern.hv_support` by it (`hex-node`'s `facts`); `getrusage`
   and `getloadavg` read the node's own cost for the bench and observability. rustix wraps the `kqueue`,
   `kill`/`killpg` and `waitid` beside these, which the class calls through it; libc binds the rest as
   `unsafe` foreign functions, and `posix_spawnattr_set_qos_class_np` and `posix_spawnattr_setjetsam_ext`

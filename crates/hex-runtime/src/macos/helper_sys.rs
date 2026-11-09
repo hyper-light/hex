@@ -34,6 +34,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use hex_api::{Proc, Program};
 
+use super::directory::Directory;
 use super::helper_daemon::Privileged;
 use super::sys::Spawn;
 
@@ -134,6 +135,8 @@ struct ExcMessage {
     exception: c_int,
     code_count: c_uint,
     code: [i64; 2],
+    /// Room for the largest trailer the kernel appends: `MAX_TRAILER_SIZE`, `sizeof(mach_msg_max_trailer_t)`,
+    /// 68 bytes (macOS SDK `mach/message.h:563-564`; measured on studio-2, macOS 26.2).
     trailer: [u8; 68],
 }
 
@@ -150,6 +153,8 @@ struct ExcReply {
 pub struct RealPriv {
     /// The daemon's exception receive port.
     recv: MachPort,
+    /// Where the pool grows, when it does (the installed helper); `None` for a fixed pool (the lab's).
+    directory: Option<Directory>,
     /// Every box member, watched for its forks and its end ([`Privileged::watch_members`]).
     members: super::sys::Kqueue,
     /// The member events taken by the last wait, kept so a wait allocates nothing.
@@ -177,11 +182,57 @@ impl RealPriv {
             recv,
             members: super::sys::Kqueue::new()?,
             events: std::sync::Mutex::new(Vec::with_capacity(super::sys::EVENTS)),
+            directory: None,
+        })
+    }
+
+    /// The same backend, growing its pool through `directory`.
+    #[must_use]
+    pub fn with_directory(mut self, directory: Directory) -> Self {
+        self.directory = Some(directory);
+        self
+    }
+
+    fn directory(&self) -> io::Result<&Directory> {
+        self.directory.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "this helper serves a fixed pool (--users) and makes no box users",
+            )
         })
     }
 }
 
 impl Privileged for RealPriv {
+    fn pool_users(&self) -> io::Result<Vec<(String, u32)>> {
+        match &self.directory {
+            Some(d) => d.pool_users(),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn taken_ids(&self) -> io::Result<std::collections::BTreeSet<u32>> {
+        self.directory()?.taken_ids()
+    }
+
+    fn make_user(&self, account: &hex_core::pool::Account) -> io::Result<()> {
+        self.directory()?.make_user(account)
+    }
+
+    fn peak(&self) -> io::Result<u32> {
+        match &self.directory {
+            Some(d) => d.peak(),
+            None => Ok(0),
+        }
+    }
+
+    fn keep_peak(&self, peak: u32) -> io::Result<()> {
+        match &self.directory {
+            Some(d) => d.keep_peak(peak),
+            None => Ok(()),
+        }
+    }
+
     fn spawn(
         &self,
         uid: u32,

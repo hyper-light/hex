@@ -643,7 +643,7 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
     the spawn SPI the macOS SDK ships no prototype for; flags from `bsd/sys/spawn_internal.h`), so the kernel
     `SIGKILL`s a member the instant its footprint crosses the bound — 0 overshoot, no privilege. It bounds a
     single-member box, and any one runaway member, exactly, and lets the watcher read a fully-armed box
-    holding at most one member only at the ceiling (~0.1% of a core). The cap is per process, doesn't survive
+    holding at most one member only when it changes (a fork, an end). The cap is per process, doesn't survive
     a fork, and caps each member at the whole bound, so it does not bound a multi-member tree's footprint
     *sum* — layers two and three do. Layer two, the **primary** for a many-member box, is kernel-enforced and
     event-driven, armed by the privileged helper (step 2; root alone suffices, `kern_memorystatus.c:9192-9193`):
@@ -651,12 +651,16 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
     members so the limits sum to the bound, so the kernel fires a Mach `EXC_RESOURCE` the instant the tree
     crosses it (by pigeonhole some member crosses its share) — near-zero overshoot, ~zero watcher CPU,
     bounding the whole tree, and re-arming a forked child, which layer one can't. Layer three is
-    **defense-in-depth**, the whole bound on a node with no helper: Hex's own polling rule, a Mach
-    time-constraint thread that reads each member's footprint (`proc_pid_rusage`) on `NOTE_CRITICAL` kqueue
-    timers, every (bound - footprint) / the machine's measured allocation rate (floor 250 µs, ceiling 100 ms),
-    and ends the box past its bound (an eviction by a stated rule, CLAUDE.md §2). A rootless, kernel-enforced
-    per-process cap thus **does** exist — at spawn, layer one — but re-arming a *running* task and apportioning
-    a bound across members need root (`memorystatus_control` → `EPERM`, `task_set_phys_footprint_limit` →
+    **defense-in-depth**, the whole bound on a node with no helper: Hex's own polling rule, a timeshare
+    thread (no priority over other programs, Ada's rule 2026-11-03) that reads each member's footprint
+    (`proc_pid_rusage`) on `NOTE_CRITICAL` kqueue timers, every (bound + 64 MiB - footprint) / the node's
+    machine class's recorded worst aggregate rate, learned up as it sees faster growth (51.05 GB/s for the
+    M4 Max; floor 250 µs, no ceiling), and ends the box past its bound (an eviction by a stated rule,
+    CLAUDE.md §2). It holds step 1's 64 MiB bar up to one member per core, its recorded limit; past that its
+    thread doesn't run often enough, and the ledger layer holds the box (Ada's two-layer bound, 2026-11-01;
+    the lead, 2026-11-06). A rootless, kernel-enforced per-process cap thus **does** exist — at spawn, layer
+    one — but re-arming a *running* task and apportioning a bound across members need root
+    (`memorystatus_control` → `EPERM`, `task_set_phys_footprint_limit` →
     `KERN_NO_ACCESS` unprivileged; `RLIMIT_AS`/`RLIMIT_RSS` → `EINVAL` and unenforced, `EVFILT_MEMORYSTATUS`
     absent, `proc_rlimit_control` has no memory cap; `bench/native/macos/mem_bound_probe.c`,
     `docs/research/runtime/macos-spawn-jetsam-cap.md`). Built and measured on the Mac Studio through the
@@ -664,9 +668,40 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
     held at its bound (`bench/native/macos/RESULT.md`, record `macos-box-ext-b285d07-20261101T223556Z.txt`);
     layer three alone holds the bound to ≤48 MiB with up to one member per core (~12-15% of a core held) but,
     being an eviction by a rule, can't tightly bound a box filling more than every core (28 members spike) —
-    which is exactly what the step-2 ledger layer catches. CPU is bounded by priority alone: a
-    QoS class, and background priority where the box's weight is low. A box that asks for confinement gets App
-    Sandbox's, which every child inherits (§3). The class's own purpose is trusted code that must not starve
+    which is exactly what the step-2 ledger layer catches. Paced by headroom plus the bar at the recorded
+    worst aggregate rate (no ceiling, 2026-11-06), layer three costs a many-member 256 MiB box 1.5-2.5% of a
+    core far from its bound and 4-7.5% near it, and a one-member armed box nothing
+    (`records/watcher-headroom-cpu-f18e6ee-20261106T1737Z.txt`). Under load the watcher's wake comes late
+    (up to 79 ms past its wait on Mac16,9, its timeshare thread waiting for a core beside the box's own
+    members and other programs; `records/watcher-wakes-load-0cb6e11-20261108T2114Z.txt`), and a box filling
+    at the recorded rate passes its bar by what it grows meanwhile. So layer three holds what of such a box it
+    must (the graded hold: the lead, 2026-11-08, the box's own bound enforced, as Linux's `memory.high`
+    throttles a cgroup near its limit, slowing no other program; 2026-11-09, as many members running as the
+    bound allows): at each read, the members whose own rates over the wait and the lateness fit the box's
+    headroom run across the wait, each in turn, and the rest are held stopped (SIGSTOP), the box then read at
+    the floor (`hex_core::watch::Watch::runs`). Every input is measured: the headroom is the bound and the bar
+    less the read's footprint; the lateness is the latest the node's watchers have acted past their waits
+    (a wake, its read and its stops), learned from the reads' own delays from the class's record up; each
+    member's rate is what its own runs showed (what it grew across the last wait, or the fastest its runs for a
+    read have shown while they show it growing, 0 once one doesn't), one no run has shown yet at the recorded
+    rate, and a run that gave a member no core (a thread runnable, none of its own code run) shows nothing of
+    it. Each read runs one held member, stopped again first, so its rate shows. XNU stops a running process by
+    holding its threads, then waiting for each to leave its core (`place_task_hold`, `task_wait_locked`,
+    `thread_wait`), and the stopping thread then waits for a core of its own, so a stop of several running
+    members, one by one or from a thread each, lets those not yet held run on: on adas-mac-studio-3
+    (2026-11-09, launchd `hex-macos-stops-cmp-20261109T194931Z`, 8 hogs, 300 interleaved reads a way beside
+    0, 7 and 14 CPU-bound programs) a box's members grew 85-226 MiB past its read at p99 stopped one by one,
+    88-226 MiB stopped from a thread each, and at most 0.06 MiB with one member running. A member started
+    beside another waits stopped for the watcher's next read, and the watcher continues only what it stopped,
+    so a member the box's own programs stopped stays stopped. Light checks on the same machine (2026-11-09,
+    launchd `hex-macos-graded-20261109T200810Z`, host load about 15) held the bar beside 0, 7 and 14
+    CPU-bound programs, with 1, 4, 8 and 14 members three passes each and 28 and 56 once, the worst 3.4 MiB
+    past the bound; the bench and its record follow the merge. CPU follows the box's declared weight, as
+    `cpu.weight` sets a box's share on Linux: a box at the default weight runs unclamped, at the QoS the
+    node's own programs run at, and one whose weight is under the default runs at background QoS (darwin
+    background: lowest CPU priority, I/O throttled). No clamp keeps the watcher ahead of a box (the lead,
+    2026-11-06, under Ada's 2026-11-03 rule). A box that asks for confinement gets App Sandbox's, which every
+    child inherits (§3). The class's own purpose is trusted code that must not starve
     the machine, and that purpose doesn't need it. Under the helper the ledger limits sum to the bound less a
     reserve (`hex_core::boxuser`), the fork window's room; layer three there is event-driven, with no
     period (the lead's call, 2026-11-06, under Ada's rule that no constant is picked): the daemon watches every
@@ -678,7 +713,8 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
     watched; from then on every fork posts an event (`docs/research/runtime/macos-box-user-and-ledger.md`).
     The helper's privileged calls are `crates/hex-runtime/src/macos/helper_sys.rs`, CLAUDE.md §12: its lines
     `d4252f3` (the file and its fork, user drop, ledger and exception arming) and `a960732` (the `mach_msg`
-    crossing receive) were approved by Ada on 2026-11-06, as written. A node with no helper runs the
+    crossing receive) were approved by Ada on 2026-11-06, as written, and so was `caa6e9f` (the child's
+    `RLIMIT_NOFILE`). A node with no helper runs the
     class as step 1's, and says so in its inspect (`BoxInfo.membership`).
 
     **A program's end** is the helper's to collect, since it is the program's parent and `waitid` answers no
@@ -768,12 +804,13 @@ lacking any of it "refuses that class by name, saying what's missing", and "Unin
   113) and by its socket answering (§3.5). Without the helper the `process` class still runs, as a process
   group under step 1's watcher, and its inspect says so: Ada's call in the plan's step 2 (2026-11-01), "Both
   run on a node with the helper; polling alone runs on one without". The refusal by name covers only what
-  can't run without the helper. Concretely (`scripts/install/macos.sh`): the pool is `_hexbox1`..`_hexbox30` in
-  group `hexbox`, and the users whose nodes may reach the helper are put in a group `hexnode`; their ids start at
-  320 (`hexnode`'s gid, then `hexbox`'s, then the pool's uids 322-351), inside sysadminctl's 200-400 role-user
-  range and between Apple's own (300-308 on macOS 26.2) and Nix's (350-382), measured in §3.1, and any taken id,
-  name or a live process at a pool uid is refused by name before anything is made (`--first-id` moves the
-  range). The helper runs from a root-owned copy of `hex` in `/Library/PrivilegedHelperTools` (Docker's place
+  can't run without the helper. Concretely (`scripts/install/macos.sh`): the pool's group is `hexbox`, and the users
+  whose nodes may reach the helper are put in a group `hexnode`; the two gids are learned at install time:
+  the first run of 2 ids in Apple's role-account range, 450-499 (`sysadminctl`'s usage on macOS 26.4, §3.1),
+  that no user, group or process holds. The helper makes the pool's users (`_hexbox1`, `_hexbox2`, …) on
+  demand, each at the first role uid then free, recorded in the manifest before it is made (the lead's
+  call, 2026-11-06: no picked pool size; one account path, the helper's). Any taken name is refused by name before anything is made,
+  and so is a range with no free run (`--first-id` names a start instead). The helper runs from a root-owned copy of `hex` in `/Library/PrivilegedHelperTools` (Docker's place
   for its helper, §3.2), never from `/usr/local/bin`, which Homebrew gives the user on Intel Macs, so no user can
   replace what runs as root. Its socket is `/var/db/hex/box-helper.sock` (persistent, so launchd's start at boot
   finds its folder), in a folder `root:hexnode 0750`: a new file takes its folder's group (open(2)'s BSD

@@ -72,27 +72,45 @@ impl BoxProc {
         } else {
             WaitIdOptions::EXITED | WaitIdOptions::NOHANG
         };
-        match rustix::process::waitid(WaitId::Pid(pid), options) {
-            Ok(Some(status)) => {
-                let exit = exit_of(&status);
-                // A SIGKILL of a box member is the kernel's fatal cap (or memory pressure on it): tell the
-                // box before this reap returns, so the count is there when a caller that waited reads
-                // usage. The box ignores it unless the member was armed and it wasn't the box's own kill.
-                let sigkill = matches!(exit, Exit::Signal(s) if s == Signal::KILL.number());
-                self.exit = Some(exit);
-                if let Some(members) = &self.members {
-                    members.ended(self.pid, sigkill)?;
+        // macOS answers WEXITED with a stopped or continued child's report too (measured, tests.rs
+        // a_stopped_program_is_running_to_its_waiter_not_ended): not its end, so the report is taken and the
+        // child read again. Beside its exit a child holds at most one stop and one continue report (XNU
+        // keeps one of each a process, `bsd/kern/kern_exit.c`), so a reap reads past at most two.
+        for _ in 0..REPORTS {
+            // Peek first (NOWAIT): the zombie's lifetime peak is readable only until the reap, and it tells a
+            // cap kill from another hand's SIGKILL (State::killed_by_cap).
+            let peak =
+                match rustix::process::waitid(WaitId::Pid(pid), options | WaitIdOptions::NOWAIT) {
+                    Ok(Some(report)) if ended(&report) => {
+                        super::sys::rusage(self.pid).ok().flatten().map(|r| r.peak)
+                    }
+                    _ => None,
+                };
+            match rustix::process::waitid(WaitId::Pid(pid), options) {
+                Ok(Some(status)) if !ended(&status) => {}
+                Ok(Some(status)) => {
+                    let exit = exit_of(&status);
+                    // A SIGKILL of a box member is the kernel's fatal cap (or memory pressure on it): tell the
+                    // box before this reap returns, so the count is there when a caller that waited reads
+                    // usage. The box ignores it unless the member was armed and it wasn't the box's own kill.
+                    let sigkill = matches!(exit, Exit::Signal(s) if s == Signal::KILL.number());
+                    self.exit = Some(exit);
+                    if let Some(members) = &self.members {
+                        members.ended(self.pid, sigkill, peak)?;
+                    }
+                    return Ok(self.exit);
                 }
-                Ok(self.exit)
+                Ok(None) => return Ok(None),
+                // No such child: it was reaped elsewhere (a box delete). Its end is no longer knowable here.
+                Err(rustix::io::Errno::CHILD) => {
+                    self.exit = Some(Exit::Unknown);
+                    return Ok(self.exit);
+                }
+                Err(e) => return Err(Refusal::os("waitid", e)),
             }
-            Ok(None) => Ok(None),
-            // No such child: it was reaped elsewhere (a box delete). Its end is no longer knowable here.
-            Err(rustix::io::Errno::CHILD) => {
-                self.exit = Some(Exit::Unknown);
-                Ok(self.exit)
-            }
-            Err(e) => Err(Refusal::os("waitid", e)),
         }
+        // Stopped or continued again past the reports a child holds at once: it still runs.
+        Ok(None)
     }
 }
 
@@ -272,19 +290,32 @@ impl Proc for UserProc {
         }
     }
 
-    /// A box-user program runs as its pool user, which this node can't signal; the helper signals only a
-    /// whole box (`Helper::signal`), so one program's own kill is refused by name until the helper's
-    /// protocol names a program (native plan step 8).
+    /// KILL by the helper's hand (HEX-RT-16): the program runs as its box's pool user, which this node may
+    /// not signal, and the helper, which started it, ends it alone, the box's other programs running on. An
+    /// end already read is done, and so is a box the helper no longer holds (deleted, its programs ended
+    /// with it), as a program's own kill after its box's delete is on every class.
     fn kill(&mut self) -> Result<(), Refusal> {
-        Err(Refusal::Platform {
-            what: "a box-user program's own kill",
-            platform: "macos",
-            why: "the helper signals a whole box, not one of its programs".to_owned(),
-        })
+        if self.exit.is_some() {
+            return Ok(());
+        }
+        match self.helper.kill(&self.box_id, self.pid) {
+            Ok(()) | Err(Refusal::NoSuchBox(_)) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
     fn streams(&mut self) -> Result<hex_api::Given, Refusal> {
         Ok(hex_api::Given::default())
     }
+}
+
+/// A reap reads past at most this many reports before the child's own: its exit, and the one stop and one
+/// continue report a process holds at once (`bsd/kern/kern_exit.c`).
+const REPORTS: usize = 3;
+
+/// Whether wait report `status` is the child's end (it exited, or a signal ended it), not a stop or a
+/// continue.
+fn ended(status: &rustix::process::WaitIdStatus) -> bool {
+    status.exited() || status.killed() || status.dumped()
 }
 
 /// How a program ended, from its wait status, with any terminating signal carried as Linux's number so a

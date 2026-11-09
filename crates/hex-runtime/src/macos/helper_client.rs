@@ -96,13 +96,21 @@ impl Helper {
         }
     }
 
-    /// Takes a pool user for `box_id` with memory bound and reserve in bytes; returns the user's id.
-    pub fn acquire(&self, box_id: &BoxId, bound: u64, reserve: u64) -> Result<u32, Refusal> {
+    /// Takes a pool user for `box_id` with memory bound and reserve in bytes, its processes capped at
+    /// `pids_max` (else the platform's per-uid ceiling); returns the user's id.
+    pub fn acquire(
+        &self,
+        box_id: &BoxId,
+        bound: u64,
+        reserve: u64,
+        pids_max: Option<u32>,
+    ) -> Result<u32, Refusal> {
         match self.rpc(
             &Request::Acquire {
                 box_id: box_id.clone(),
                 bound,
                 reserve,
+                pids_max,
             },
             &[],
         )? {
@@ -181,6 +189,23 @@ impl Helper {
         }
     }
 
+    /// Ends program `pid` of the box with `SIGKILL`, by the helper's hand (the program is its pool user's,
+    /// which this node may not signal); the box and its other programs run on. A program the box no longer
+    /// holds running is sent nothing: killing an ended program is done (HEX-RT-16).
+    pub fn kill(&self, box_id: &BoxId, pid: i32) -> Result<(), Refusal> {
+        match self.rpc(
+            &Request::Kill {
+                box_id: box_id.clone(),
+                pid,
+            },
+            &[],
+        )? {
+            Answer::Killed => Ok(()),
+            Answer::Refused(r) => Err(refusal(r)),
+            other => Err(unexpected("kill", &other)),
+        }
+    }
+
     /// What the box holds now.
     pub fn inspect(&self, box_id: &BoxId) -> Result<State, Refusal> {
         match self.rpc(
@@ -252,6 +277,10 @@ fn refusal(r: Refused) -> Refusal {
             what: "helper request",
             why,
         },
+        Refused::GrowFailed(why) => Refusal::Os {
+            op: "grow the box users' pool through the helper",
+            why,
+        },
         Refused::Malformed(why) => {
             Refusal::Broken(format!("the helper rejected a message as malformed: {why}"))
         }
@@ -268,6 +297,7 @@ fn unexpected(call: &str, answer: &Answer) -> Refusal {
         Answer::Signalled => "a signalled box",
         Answer::Waited(_) => "a program's end",
         Answer::Refused(_) => "a refusal",
+        Answer::Killed => "a killed program",
     };
     Refusal::Broken(format!("the helper answered a {call} with {kind}"))
 }

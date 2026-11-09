@@ -81,6 +81,7 @@ tempfile.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 hex-api.workspace = true
+hex-core.workspace = true
 hex-runtime.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

@@ -1,0 +1,20 @@
+# hex-core pool model test: the share of each kind of case its generator makes
+# recorder: crates/hex-core/src/pool.rs records_the_rarest_case_shares (cargo test --release -p hex-core --lib
+#   pool::tests::records_the_rarest_case_shares -- --ignored --nocapture --exact), 100000 cases, so the rarest
+#   share (about 0.08) is known to about 1.1% relative (its standard error, sqrt((1 - p) / (n p))).
+# launchd one-shot hex-macos-measure-20261106T165609Z, adas-mac-studio-2 (Mac16,9, M4 Max, macOS 26.2 25C56),
+#   tree a7d13c6 + the recorder, 2026-11-06T16:56Z, load 3.90.
+# The shares are the generator's (proptest strategies), not the machine's. A full role range, which the
+# generator all but never makes, is pinned by its own deterministic test (a_full_role_range_makes_no_account).
+an_account_is_always_in_range_untaken_and_new: a pool holding a pool name: 91597 of 100000 (0.91597)
+an_account_is_always_in_range_untaken_and_new: a pool holding none: 8403 of 100000 (0.08403)
+an_account_is_always_in_range_untaken_and_new: the first role uid taken: 26687 of 100000 (0.26687)
+an_account_is_always_in_range_untaken_and_new: the first role uid free: 73313 of 100000 (0.73313)
+an_account_is_always_in_range_untaken_and_new: rarest share 0.08403 -> 35 cases
+# The case by which proptest's deterministic sequence (TestRng::deterministic_rng, which the test draws from) has
+# met every kind: a fixed sequence meets each kind every run or never, so the test runs max(the share's count,
+# this) (native step 2's finding, 7785ad3). Recorder rerun, launchd hex-macos-poolmeet-20261106T174452Z,
+# adas-mac-studio-2, 2026-11-06T17:44Z, load 2.61 (its random-draw shares: 0.91543 / 0.08457 / 0.26841 /
+# 0.73159, rarest 0.08457 -> 34, within the first run's standard error):
+an_account_is_always_in_range_untaken_and_new: the deterministic sequence meets every kind by case 19
+# So the test runs max(35, 19) = 35 cases.

@@ -48,14 +48,6 @@ impl Timebase {
             .and_then(|n| n.checked_div(u128::from(self.denom)))
             .map_or(u64::MAX, |n| u64::try_from(n).unwrap_or(u64::MAX))
     }
-
-    /// `d` in ticks of Mach absolute time, saturating at `u32::MAX`, the width a thread policy takes.
-    pub fn ticks32(&self, d: Duration) -> u32 {
-        d.as_nanos()
-            .checked_mul(u128::from(self.denom))
-            .and_then(|n| n.checked_div(u128::from(self.numer)))
-            .map_or(u32::MAX, |n| u32::try_from(n).unwrap_or(u32::MAX))
-    }
 }
 
 /// A process's use as `proc_pid_rusage(RUSAGE_INFO_V4)` reads it (`libproc.h`). Times are Mach absolute
@@ -73,6 +65,9 @@ pub struct Rusage {
     pub peak: u64,
     /// CPU it used itself, user and system.
     pub cpu: u64,
+    /// CPU it ran its own code with (user time): one whose user time rose over a run had a core in it.
+    /// Stopped, its time is whole: XNU totals a thread's time as it leaves its core.
+    pub user: u64,
     /// CPU its reaped children used.
     pub child_cpu: u64,
     pub read_bytes: u64,
@@ -107,11 +102,107 @@ pub fn rusage(pid: i32) -> io::Result<Option<Rusage>> {
         footprint: ri.ri_phys_footprint,
         peak: ri.ri_lifetime_max_phys_footprint,
         cpu: ri.ri_user_time.saturating_add(ri.ri_system_time),
+        user: ri.ri_user_time,
         child_cpu: ri
             .ri_child_user_time
             .saturating_add(ri.ri_child_system_time),
         read_bytes: ri.ri_diskio_bytesread,
         written_bytes: ri.ri_diskio_byteswritten,
+    }))
+}
+
+/// Where a process is in its life, as `proc_pidinfo(PROC_PIDTBSDINFO)` reads it: XNU copies the process's
+/// `p_stat` into `pbi_status` (`bsd/kern/proc_info.c`), whose values are `sys/proc.h`'s (`SSTOP` 4, `SZOMB`
+/// 5), and a stop signal sets `SSTOP` (`bsd/kern/kern_sig.c`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Run {
+    /// Stopped by a signal: it runs again only once continued.
+    Stopped,
+    /// Ended, waiting to be reaped.
+    Ended,
+    /// Being made, runnable or asleep: each can run.
+    Live,
+}
+
+/// Process `pid`'s run state, or `None` when no process has that pid (`ESRCH`).
+pub fn run_state(pid: i32) -> io::Result<Option<Run>> {
+    let mut info = MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let size = c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>())
+        .map_err(|_| io::Error::other("a proc_bsdinfo past an int's bytes"))?;
+    // SAFETY: for PROC_PIDTBSDINFO proc_pidinfo writes at most `size` bytes, one proc_bsdinfo, into the
+    // buffer it is given, which is one proc_bsdinfo, alive for the call.
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast::<c_void>(),
+            size,
+        )
+    };
+    if n <= 0 {
+        let e = io::Error::last_os_error();
+        return match e.raw_os_error() {
+            Some(libc::ESRCH) => Ok(None),
+            _ => Err(e),
+        };
+    }
+    if n != size {
+        return Err(io::Error::other(format!(
+            "proc_pidinfo(PROC_PIDTBSDINFO) of {pid} wrote {n} of {size} bytes"
+        )));
+    }
+    // SAFETY: zeroed above and written whole by the kernel; every field is an integer or an array of them,
+    // so any bytes are valid.
+    let info = unsafe { info.assume_init() };
+    Ok(Some(match info.pbi_status {
+        libc::SSTOP => Run::Stopped,
+        libc::SZOMB => Run::Ended,
+        _ => Run::Live,
+    }))
+}
+
+/// What a process's threads are doing, as `proc_pidinfo(PROC_PIDTASKINFO)` reads them: XNU counts each
+/// thread whose state has `TH_RUN`, on a core or waiting for one (`fill_taskprocinfo`,
+/// `osfmk/kern/bsd_kern.c`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Task {
+    /// A thread of it runs or waits for a core; with none, each is asleep or stopped.
+    pub runnable: bool,
+}
+
+/// Process `pid`'s threads, or `None` when no process has that pid (`ESRCH`).
+pub fn task(pid: i32) -> io::Result<Option<Task>> {
+    let mut info = MaybeUninit::<libc::proc_taskinfo>::zeroed();
+    let size = c_int::try_from(std::mem::size_of::<libc::proc_taskinfo>())
+        .map_err(|_| io::Error::other("a proc_taskinfo past an int's bytes"))?;
+    // SAFETY: for PROC_PIDTASKINFO proc_pidinfo writes at most `size` bytes, one proc_taskinfo, into the
+    // buffer it is given, which is one proc_taskinfo, alive for the call.
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTASKINFO,
+            0,
+            info.as_mut_ptr().cast::<c_void>(),
+            size,
+        )
+    };
+    if n <= 0 {
+        let e = io::Error::last_os_error();
+        return match e.raw_os_error() {
+            Some(libc::ESRCH) => Ok(None),
+            _ => Err(e),
+        };
+    }
+    if n != size {
+        return Err(io::Error::other(format!(
+            "proc_pidinfo(PROC_PIDTASKINFO) of {pid} wrote {n} of {size} bytes"
+        )));
+    }
+    // SAFETY: zeroed above and written whole by the kernel; every field is an integer, so any bytes are valid.
+    let info = unsafe { info.assume_init() };
+    Ok(Some(Task {
+        runnable: info.pti_numrunning > 0,
     }))
 }
 
@@ -191,6 +282,19 @@ pub fn max_processes() -> io::Result<usize> {
     sysctl_count(c"kern.maxproc")
 }
 
+/// An empty process listing with room for every process the kernel holds (`kern.maxproc`), so one
+/// listing call fills it; refused naming `kern.maxproc` when it can't be read, never sized by a guess.
+pub fn listing() -> io::Result<Vec<i32>> {
+    listing_from(max_processes())
+}
+
+/// A listing sized from a read of `kern.maxproc` ([`listing`] with the read given, so its refusal is
+/// testable).
+pub fn listing_from(max: io::Result<usize>) -> io::Result<Vec<i32>> {
+    let max = max.map_err(|e| io::Error::new(e.kind(), format!("reading kern.maxproc: {e}")))?;
+    Ok(Vec::with_capacity(max))
+}
+
 /// The most processes one uid may hold (`kern.maxprocperuid`, `bsd/kern/kern_resource.c:169-170`): a
 /// box-user box's process cap when its spec names none, each box having a uid of its own.
 pub fn max_processes_per_uid() -> io::Result<usize> {
@@ -248,64 +352,25 @@ pub fn sysctl_number(name: &std::ffi::CStr) -> io::Result<u64> {
     }
 }
 
-/// Makes the calling thread a Mach time-constraint thread (`THREAD_TIME_CONSTRAINT_POLICY`,
-/// `mach/thread_policy.h`), so a box's members filling every core don't hold its watcher off: it needs
-/// `computation` of every `period`, done within `constraint`, and can be preempted.
-pub fn time_constraint(
-    tb: &Timebase,
-    period: Duration,
-    computation: Duration,
-    constraint: Duration,
-) -> io::Result<()> {
-    let mut policy = libc::thread_time_constraint_policy_data_t {
-        period: tb.ticks32(period),
-        computation: tb.ticks32(computation),
-        constraint: tb.ticks32(constraint),
-        preemptible: 1,
-    };
-    // The flavor constant is an `i32` in libc but the parameter a `u32` (`thread_policy_flavor_t`); it is a
-    // small positive tag, so the conversion never fails.
-    let flavor = u32::try_from(libc::THREAD_TIME_CONSTRAINT_POLICY)
-        .map_err(|_| io::Error::other("THREAD_TIME_CONSTRAINT_POLICY is negative"))?;
-    // SAFETY: pthread_mach_thread_np names the calling thread's own port without taking a reference to
-    // release. thread_policy_set reads THREAD_TIME_CONSTRAINT_POLICY_COUNT integers, the struct's size,
-    // from the policy given, which outlives the call.
-    let kr = unsafe {
-        libc::thread_policy_set(
-            libc::pthread_mach_thread_np(libc::pthread_self()),
-            flavor,
-            (&raw mut policy).cast::<libc::integer_t>(),
-            libc::THREAD_TIME_CONSTRAINT_POLICY_COUNT,
-        )
-    };
-    if kr == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
-            "thread_policy_set: kern_return {kr}"
-        )))
-    }
-}
-
 /// The most bytes execve takes of a program's arguments and environment, their pointers included
 /// (`kern.argmax`, XNU's `NCARGS`: bsd/kern/kern_exec.c:578, :6546-6549; docs/research/runtime/exec-size-bounds.md).
 pub fn arg_max() -> io::Result<usize> {
     sysctl_count(c"kern.argmax")
 }
 
-/// The QoS a box's processes are clamped to from their first instruction, passed to every process
-/// they start (XNU's task policy copies the clamp to a forked child, `osfmk/kern/task_policy.c:746`).
+/// The QoS a box's processes run at from their first instruction, as its declared CPU weight asks (a box's
+/// CPU share follows its `cpu.weight` on Linux): passed to every process they start (XNU's task policy
+/// copies the clamp to a forked child, `osfmk/kern/task_policy.c:746`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Clamp {
-    /// `QOS_CLASS_UTILITY` (`sys/qos.h`): below the user's own work and the watcher.
-    Utility,
-    /// `QOS_CLASS_BACKGROUND`, which also puts the box in darwin background (lowest CPU priority, I/O
-    /// throttled; `task_policy.c:946-950`).
+    /// No clamp: the default weight, the QoS the node's own programs run at.
+    Unclamped,
+    /// `QOS_CLASS_BACKGROUND` for a weight under the default, which also puts the box in darwin
+    /// background (lowest CPU priority, I/O throttled; `task_policy.c:946-950`).
     Background,
 }
 
-/// `QOS_CLASS_UTILITY` and `QOS_CLASS_BACKGROUND` (`sys/qos.h`, macOS 26 SDK).
-const QOS_CLASS_UTILITY: u32 = 0x11;
+/// `QOS_CLASS_BACKGROUND` (`sys/qos.h`, macOS 26 SDK).
 const QOS_CLASS_BACKGROUND: u32 = 0x09;
 
 // SAFETY: declared as `pthread/spawn.h` (macOS 26 SDK, line 64) declares it: it sets the spawn attribute's
@@ -446,10 +511,6 @@ pub fn spawn(s: &Spawn, pgroup: i32, clamp: Clamp) -> io::Result<i32> {
         i16::try_from(flags).map_err(|_| io::Error::other("posix_spawn flags past a short"))?;
     let mut none: libc::sigset_t = 0;
     let mut all: libc::sigset_t = 0;
-    let qos = match clamp {
-        Clamp::Utility => QOS_CLASS_UTILITY,
-        Clamp::Background => QOS_CLASS_BACKGROUND,
-    };
     // SAFETY: each call takes the attribute object initialized above and reads or writes only the signal
     // sets given, which outlive the calls.
     unsafe {
@@ -465,7 +526,12 @@ pub fn spawn(s: &Spawn, pgroup: i32, clamp: Clamp) -> io::Result<i32> {
             &raw mut attr.0,
             &raw const all,
         ))?;
-        errno(posix_spawnattr_set_qos_class_np(&raw mut attr.0, qos))?;
+        if clamp == Clamp::Background {
+            errno(posix_spawnattr_set_qos_class_np(
+                &raw mut attr.0,
+                QOS_CLASS_BACKGROUND,
+            ))?;
+        }
     }
     // Arm the box's whole memory bound as a fatal per-process cap, so the kernel bounds this member with
     // no overshoot (native plan step 1's `_ext` backstop). The watcher tracks it as armed.
@@ -559,9 +625,13 @@ const NOTE_EXITSTATUS: u32 = 0x0400_0000;
 const TIMER: usize = 1;
 const USER: usize = 2;
 
-/// Most events one [`Kqueue::wait`] takes; a watched process's forks and end coalesce into one event until
-/// it is taken (XNU sets `EV_CLEAR` on them, `bsd/kern/kern_event.c:1139`), so more just wait a call.
-pub const EVENTS: usize = 64;
+/// Most events one [`Kqueue::wait`] takes: the most one wait met in the bench, 28 (one a member of its
+/// largest box, all killed at once; bench/native/macos/records/watcher-readcost-events-a7d13c6-20261106T165609Z.txt),
+/// and the [`TIMER`] and [`USER`] events, which can be pending beside them, so one call takes such a box's
+/// events (the lead's call 2, 2026-11-06). A watched process's forks and end coalesce into one event until
+/// it is taken (XNU sets `EV_CLEAR` on them, `bsd/kern/kern_event.c:1139`), so a larger box's further events
+/// wait for the next call, none lost.
+pub const EVENTS: usize = 28 + 2;
 
 /// A kqueue (kqueue(2)): timers, a user event other threads trigger, and processes' forks and ends.
 #[derive(Debug)]
@@ -609,7 +679,8 @@ impl Kqueue {
 
     fn watch_with(&self, pids: &[i32], tag: u64, fflags: u32) -> io::Result<Vec<i32>> {
         let mut gone = Vec::new();
-        for chunk in pids.chunks(64) {
+        // One registration call per EVENTS processes: the same batch the waits take.
+        for chunk in pids.chunks(EVENTS) {
             let changes: Vec<libc::kevent> = chunk
                 .iter()
                 .filter_map(|pid| usize::try_from(*pid).ok())

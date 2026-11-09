@@ -323,15 +323,17 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
             format!("--box-root names a cgroup directory, which is Linux's\n{USAGE}"),
         ));
     }
-    // The Mac Studio's measured allocation rate (bench/native/macos/RESULT.md), 256 GiB/s, the pace the
-    // footprint bound is reckoned against; the process rate set high, so the process bound reads at its
-    // 250 us floor, as the class's conformance test does (tests/macos_process_box.rs).
-    let rate_bytes =
-        std::num::NonZeroU64::new(256 << 30).ok_or((1, "a zero allocation rate".to_owned()))?;
-    let rate_processes =
-        std::num::NonZeroU64::new(1_000_000).ok_or((1, "a zero process rate".to_owned()))?;
-    let process =
-        hex_runtime::macos::MacRuntime::new(rate_bytes, rate_processes).map_err(failed)?;
+    // The node's machine class's records seed its boxes' pacing and their hold, which its watchers then
+    // learn up from (hex_core::watch::seed and lateness_seed of its hw.model; a model with no record takes
+    // twice the highest on record).
+    let model = hex_runtime::macos::machine_model().map_err(failed)?;
+    let rates = hex_core::watch::seed(&model);
+    let process = hex_runtime::macos::MacRuntime::new(
+        rates.bytes,
+        rates.processes,
+        hex_core::watch::lateness_seed(&model),
+    )
+    .map_err(failed)?;
     let guest = [
         hex_runtime::guest::ENV_SHARDS_BIN,
         hex_runtime::guest::ENV_KERNEL,

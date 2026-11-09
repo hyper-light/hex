@@ -1,0 +1,13 @@
+# The default QoS clamp, before and after it follows the declared weight (the lead, 2026-11-06). Same launchd
+# one-shot as the rootless record (hex-macos-ab-20261106T233003Z, ProcessType Interactive, adas-mac-studio-2,
+# load 3.5-12.3). OLD = tree with today's Utility clamp at the default weight; NEW = unclamped at the default.
+# Priorities (ps -o pri): an unclamped program the test starts; a default-weight box's member; a weight-50 box's.
+OLD  unclamped=31 default_weight=20 low_weight=4   (a_box_runs_at_the_qos_its_declared_weight_asks: FAILED)
+NEW  unclamped=31 default_weight=31 low_weight=4   (passed)
+# A CPU-bound member (/usr/bin/yes) in a default-weight box beside 14 unclamped `yes` programs (every core busy):
+# the CPU it was given over 2 s, in cores, 3 runs.
+OLD  0.024 0.046 0.038
+NEW  0.885 0.869 0.880
+# The Utility clamp nearly starved a default-weight box under contention; unclamped it gets its share.
+# Context: under a launchd job without ProcessType Interactive, unclamped programs already run at 20, so the
+# Utility clamp changes nothing there (r13: unclamped=20 default_weight=20).

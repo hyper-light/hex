@@ -660,7 +660,14 @@ mod os {
                 let n: usize = args[2].parse().expect("n");
                 let (bytes, procs) = growth_rates(n);
                 let mut v = go(&mut Hex {
-                    rt: MacRuntime::new(bytes, procs).expect("a macOS runtime"),
+                    rt: MacRuntime::new(
+                        bytes,
+                        procs,
+                        hex_core::watch::lateness_seed(
+                            &hex_runtime::macos::machine_model().expect("this Mac's model"),
+                        ),
+                    )
+                    .expect("a macOS runtime"),
                     prefix: "native".to_owned(),
                 });
                 if let Value::Object(m) = &mut v {

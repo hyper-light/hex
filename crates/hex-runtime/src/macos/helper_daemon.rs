@@ -15,7 +15,7 @@ use std::io;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use rustix::net::{AddressFamily, SocketAddrUnix, SocketType};
 
@@ -23,17 +23,13 @@ use hex_api::{BoxId, Exit, Proc, Program, Refusal, Signal};
 use hex_core::boxuser::{self, Bound, Use};
 use hex_core::darwin;
 use hex_core::helper::{self, Answer, Refused, Request, START_FDS, State};
+use hex_core::pool::{Account, ROLE_UIDS, next_account};
 
 use super::helper_client::{recv_framed, send_framed};
 use super::sys;
 
 mod kids;
 use kids::{Full, Kids, Taken};
-
-/// How long [`Daemon::end`] waits for a killed box's user to empty before it reports the kill didn't take
-/// (a `SIGKILL` ends a user's processes in milliseconds; missing a generous bound is a fault, not a limit
-/// to raise, CLAUDE.md §4). Freeing the uid before it is empty would hand a live process to the next box.
-const DRAIN_PATIENCE: Duration = Duration::from_secs(10);
 
 /// One live member of a box's user: its pid and its physical footprint in bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,7 +44,7 @@ pub struct Member {
 /// (docs/research/runtime/native-platforms.md §3). A process gone since it was listed (`ESRCH`) or ended
 /// and awaiting reap is left out; its footprint would be 0.
 pub fn members(uid: u32) -> io::Result<Vec<Member>> {
-    let mut pids = Vec::with_capacity(sys::max_processes()?);
+    let mut pids = sys::listing()?;
     sys::user_pids(uid, &mut pids)?;
     let mut out = Vec::with_capacity(pids.len());
     for &pid in &pids {
@@ -73,7 +69,7 @@ pub fn kill_user(uid: u32, linux_signal: i32) -> io::Result<usize> {
         .ok_or_else(|| io::Error::other(format!("signal {linux_signal} has no macOS number")))?;
     let sig = rustix::process::Signal::from_named_raw(macos)
         .ok_or_else(|| io::Error::other(format!("{macos} isn't a signal this kernel names")))?;
-    let mut pids = Vec::with_capacity(sys::max_processes()?);
+    let mut pids = sys::listing()?;
     sys::user_pids(uid, &mut pids)?;
     let mut signalled = 0usize;
     for &pid in &pids {
@@ -113,12 +109,14 @@ pub struct Tracked {
     peak: u64,
     crossings: u64,
     ended_over: bool,
+    /// Its processes' cap (`RLIMIT_NPROC` of its user), set when each program starts.
+    nproc: u32,
 }
 
 impl Tracked {
     /// A box on pool user `uid`, bounded at `bound` bytes with `reserve` bytes held back for the fork
-    /// arming window (`hex_core::boxuser::Bound`).
-    pub fn new(uid: u32, bound: u64, reserve: u64) -> Self {
+    /// arming window (`hex_core::boxuser::Bound`), its processes capped at `nproc`.
+    pub fn new(uid: u32, bound: u64, reserve: u64, nproc: u32) -> Self {
         Self {
             uid,
             bound: Bound {
@@ -129,6 +127,7 @@ impl Tracked {
             peak: 0,
             crossings: 0,
             ended_over: false,
+            nproc,
         }
     }
 
@@ -243,6 +242,36 @@ pub trait Privileged {
 
     /// Blocks until a member's `EXC_RESOURCE` crossing arrives on the daemon's port.
     fn next_crossing(&self) -> io::Result<()>;
+
+    /// The pool's users now, each name and uid, as the directory lists them: the users named by
+    /// [`hex_core::pool::pool_index`] in the pool's group (default: none, a fixed pool).
+    fn pool_users(&self) -> io::Result<Vec<(String, u32)>> {
+        Ok(Vec::new())
+    }
+
+    /// Every id held now: users' uids, groups' gids and running processes' uids (default: none).
+    fn taken_ids(&self) -> io::Result<BTreeSet<u32>> {
+        Ok(BTreeSet::new())
+    }
+
+    /// Makes `account` from the helper's fixed template (hidden, no shell, no home, no password, in the pool's
+    /// group) and records it for uninstall (default: refused, a backend that makes no accounts).
+    fn make_user(&self, account: &Account) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("this backend makes no box users ({})", account.name),
+        ))
+    }
+
+    /// The peak of concurrent box-user boxes kept across restarts (default: 0).
+    fn peak(&self) -> io::Result<u32> {
+        Ok(0)
+    }
+
+    /// Keeps a new peak of concurrent box-user boxes across restarts (default: kept nowhere).
+    fn keep_peak(&self, _peak: u32) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// The macOS box helper daemon over a [`Privileged`] backend: a pool of box users, the boxes it manages,
@@ -256,22 +285,121 @@ pub struct Daemon<P: Privileged> {
     boxes: Mutex<BTreeMap<BoxId, Tracked>>,
     /// The programs the daemon started, until the node reads each one's end ([`kids`]).
     kids: Mutex<Kids>,
-    nproc: u32,
+    /// The pool users' names, every one it holds, busy or free: the next account follows the highest
+    /// (`hex_core::pool`). `None` for a fixed pool, which never grows.
+    names: Option<Mutex<Vec<String>>>,
+    /// The most box-user boxes held at once, kept across restarts through [`Privileged::keep_peak`].
+    peak: Mutex<u32>,
+    /// The platform's per-uid process ceiling (`kern.maxprocperuid`, read at start): a box's process cap
+    /// when its spec names no `pids_max`. Each box has a uid of its own, and XNU's fork counts a uid's
+    /// processes against its `RLIMIT_NPROC` (`bsd/kern/kern_fork.c:269-283`).
+    per_uid: u32,
+    /// How long a killed user gets to empty, as this node learns it: the record's to start, raised by every
+    /// slower drain (hex_core::drain::Learned; the learned-waits rule, 2026-11-06).
+    drain: Mutex<hex_core::drain::Learned>,
+}
+
+/// How many users a daemon's pool holds now, busy or free.
+fn listed_len<P: Privileged>(daemon: &Daemon<P>) -> usize {
+    daemon
+        .names
+        .as_ref()
+        .and_then(|n| n.lock().ok().map(|n| n.len()))
+        .unwrap_or(0)
 }
 
 impl<P: Privileged> Daemon<P> {
-    /// A daemon over `ops`, with the free `pool` users and a per-user process cap `nproc`.
-    /// A box holds at most `nproc` programs the daemon started (its user can run no more), and the unread
-    /// ends of as many ended boxes as the pool has users.
-    pub fn new(ops: P, pool: Vec<u32>, nproc: u32) -> Self {
-        let cap = usize::try_from(nproc).unwrap_or(usize::MAX).max(1);
+    /// A daemon over `ops`, with the free `pool` users under the platform's per-uid process ceiling
+    /// `per_uid`. A box holds at most its process cap of programs the daemon started (its user can run no
+    /// more), and the unread ends of as many ended boxes as the pool has users.
+    pub fn new(ops: P, pool: Vec<u32>, per_uid: u32) -> Self {
         let graves = pool.len().max(1);
         Self {
             ops,
             pool: Mutex::new(pool),
             boxes: Mutex::new(BTreeMap::new()),
-            kids: Mutex::new(Kids::new(cap, graves)),
-            nproc,
+            kids: Mutex::new(Kids::new(graves)),
+            names: None,
+            peak: Mutex::new(0),
+            per_uid,
+            drain: Mutex::new(hex_core::drain::Learned::default()),
+        }
+    }
+
+    /// A daemon whose pool grows on demand (the lead's call, 2026-11-06): its users are read from the
+    /// directory, and accounts are made up to the kept peak of concurrent boxes, so a restart doesn't make
+    /// boxes wait on account creation. Ended boxes' unread ends are kept for as many boxes as the role range
+    /// holds users.
+    pub fn growing(ops: P, per_uid: u32) -> Result<Self, Refusal> {
+        let listed = ops
+            .pool_users()
+            .map_err(|e| Refusal::os("listing the box users' pool", e))?;
+        let peak = ops
+            .peak()
+            .map_err(|e| Refusal::os("reading the box users' kept peak", e))?;
+        let graves = ROLE_UIDS.clone().count();
+        let daemon = Self {
+            ops,
+            pool: Mutex::new(listed.iter().map(|(_, uid)| *uid).collect()),
+            boxes: Mutex::new(BTreeMap::new()),
+            kids: Mutex::new(Kids::new(graves)),
+            names: Some(Mutex::new(listed.into_iter().map(|(n, _)| n).collect())),
+            peak: Mutex::new(peak),
+            per_uid,
+            drain: Mutex::new(hex_core::drain::Learned::default()),
+        };
+        // Counted to the kept peak; a full role range stops it short (the next box is refused by name).
+        for _ in listed_len(&daemon)..usize::try_from(peak).unwrap_or(0) {
+            let uid = match daemon.grow() {
+                Ok(uid) => uid,
+                Err(Refused::NoFreeUser) => break,
+                Err(r) => {
+                    return Err(Refusal::Broken(format!(
+                        "growing the pool to its kept peak: {r}"
+                    )));
+                }
+            };
+            daemon
+                .pool
+                .lock()
+                .map_err(|_| Refusal::Broken("the daemon's pool lock is poisoned".to_owned()))?
+                .push(uid);
+        }
+        Ok(daemon)
+    }
+
+    /// Makes one more pool user, from `hex_core::pool` alone (no name or attribute from any caller), at an id
+    /// read free just before: another installer may have taken it since install. Refused by name when the
+    /// role range is full or the directory refuses.
+    fn grow(&self) -> Result<u32, Refused> {
+        let Some(names) = &self.names else {
+            return Err(Refused::NoFreeUser);
+        };
+        let mut names = names.lock().map_err(|_| {
+            Refused::GrowFailed("the daemon's pool names lock is poisoned".to_owned())
+        })?;
+        let taken = self
+            .ops
+            .taken_ids()
+            .map_err(|e| Refused::GrowFailed(format!("reading the ids held: {e}")))?;
+        let account = next_account(&names, &taken).ok_or(Refused::NoFreeUser)?;
+        self.ops
+            .make_user(&account)
+            .map_err(|e| Refused::GrowFailed(format!("making {}: {e}", account.name)))?;
+        names.push(account.name);
+        Ok(account.uid)
+    }
+
+    /// Keeps a new peak when `held` box-user boxes are held at once.
+    fn note_held(&self, held: usize) {
+        let Ok(held) = u32::try_from(held) else {
+            return;
+        };
+        if let Ok(mut peak) = self.peak.lock()
+            && held > *peak
+            && self.ops.keep_peak(held).is_ok()
+        {
+            *peak = held;
         }
     }
 
@@ -355,8 +483,8 @@ impl<P: Privileged> Daemon<P> {
     /// The box user's live members, each watched for its forks and its end. A member may fork after the
     /// listing and before its watch is placed, leaving a child whose forks post nothing; so it lists again
     /// after each watch until a listing finds no member it hadn't watched. Each further round watches a
-    /// member new since the last, so it ends within the user's process cap of rounds (`nproc`, its
-    /// `RLIMIT_NPROC`); past that, the newest children's forks wake the next turn through their parents'
+    /// member new since the last, so it ends within the platform's per-uid process ceiling of rounds
+    /// (`per_uid`, which no box's `RLIMIT_NPROC` passes); past that, the newest children's forks wake the next turn through their parents'
     /// watches.
     fn watched_members(&self, uid: u32) -> Result<Vec<Member>, Answer> {
         let list = |uid| {
@@ -365,7 +493,7 @@ impl<P: Privileged> Daemon<P> {
                 .map_err(|e| os("reading a box's members", &e))
         };
         let mut live = list(uid)?;
-        for _ in 0..=self.nproc {
+        for _ in 0..=self.per_uid {
             let pids: Vec<i32> = live.iter().map(|m| m.pid).collect();
             self.ops
                 .watch_members(&pids, uid)
@@ -415,7 +543,8 @@ impl<P: Privileged> Daemon<P> {
                 box_id,
                 bound,
                 reserve,
-            } => self.acquire(box_id, bound, reserve),
+                pids_max,
+            } => self.acquire(box_id, bound, reserve, pids_max),
             Request::Start {
                 box_id,
                 program,
@@ -425,6 +554,7 @@ impl<P: Privileged> Daemon<P> {
             Request::Inspect { box_id } => self.inspect(&box_id),
             Request::Signal { box_id, signal } => self.signal(&box_id, signal),
             Request::Wait { box_id, pid } => self.wait(&box_id, pid),
+            Request::Kill { box_id, pid } => self.kill(&box_id, pid),
         }
     }
 
@@ -440,7 +570,7 @@ impl<P: Privileged> Daemon<P> {
             .map_err(|_| Refusal::Broken("the daemon's programs lock is poisoned".to_owned()))
     }
 
-    fn acquire(&self, box_id: BoxId, bound: u64, reserve: u64) -> Answer {
+    fn acquire(&self, box_id: BoxId, bound: u64, reserve: u64, pids_max: Option<u32>) -> Answer {
         let mut boxes = match self.boxes() {
             Ok(b) => b,
             Err(a) => return a,
@@ -451,15 +581,24 @@ impl<P: Privileged> Daemon<P> {
         let Ok(mut pool) = self.pool.lock() else {
             return poisoned("the daemon's pool");
         };
-        let Some(uid) = pool.pop() else {
-            return Answer::Refused(Refused::NoFreeUser);
-        };
+        let popped = pool.pop();
         drop(pool);
+        // No free user: the pool grows by one account, made for this box.
+        let uid = match popped {
+            Some(uid) => uid,
+            None => match self.grow() {
+                Ok(uid) => uid,
+                Err(r) => return Answer::Refused(r),
+            },
+        };
+        // The box's own limit, never past the platform's per-uid ceiling, which the kernel would hold it to.
+        let nproc = pids_max.map_or(self.per_uid, |p| p.min(self.per_uid));
         match self.kids() {
-            Ok(mut k) => k.open(&box_id),
+            Ok(mut k) => k.open(&box_id, usize::try_from(nproc).unwrap_or(usize::MAX)),
             Err(_) => return poisoned("the daemon's programs"),
         }
-        boxes.insert(box_id, Tracked::new(uid, bound, reserve));
+        boxes.insert(box_id, Tracked::new(uid, bound, reserve, nproc));
+        self.note_held(boxes.len());
         Answer::Acquired { uid }
     }
 
@@ -469,13 +608,13 @@ impl<P: Privileged> Daemon<P> {
                 "a start without its three stdio descriptors".to_owned(),
             ));
         };
-        let (uid, cap_mib) = {
+        let (uid, cap_mib, nproc) = {
             let boxes = match self.boxes() {
                 Ok(b) => b,
                 Err(a) => return a,
             };
             match boxes.get(box_id) {
-                Some(t) => (t.uid(), t.provisional_cap_mib()),
+                Some(t) => (t.uid(), t.provisional_cap_mib(), t.nproc),
                 None => return Answer::Refused(Refused::UnknownBox(box_id.clone())),
             }
         };
@@ -497,7 +636,7 @@ impl<P: Privileged> Daemon<P> {
             [stdin, stdout, stderr],
             leader,
             cap_mib,
-            self.nproc,
+            nproc,
         ) {
             Ok(pid) => pid,
             Err(e) => return Answer::Refused(Refused::StartFailed(e.to_string())),
@@ -567,14 +706,36 @@ impl<P: Privileged> Daemon<P> {
             }
         };
         // Kill every process of the user, then wait for the user to empty before freeing it, so the next
-        // box never inherits a live process. KILL is 9; mapped through the table like the rest of Hex.
+        // box never inherits a live process. KILL is 9; mapped through the table like the rest of Hex. The
+        // user's size sets how long it gets: the measured kill-to-empty envelope, doubled, as this node has
+        // learned it (hex_core::drain); past it the kill didn't take, a fault named (CLAUDE.md §4). The user
+        // can't be freed while it holds a process, so the node gets the refusal.
+        let members = match self.ops.list(uid) {
+            Ok(m) => m.len(),
+            Err(e) => return os("listing a box's user", &e),
+        };
+        let patience = match self.drain.lock() {
+            Ok(d) => d.bound(members),
+            Err(_) => {
+                return os(
+                    "reading the node's drain bound",
+                    &io::Error::other("poisoned"),
+                );
+            }
+        };
+        let killed = Instant::now();
         if let Err(e) = self.ops.kill(uid, Signal::KILL.number()) {
             return os("ending a box", &e);
         }
-        let deadline = Instant::now().checked_add(DRAIN_PATIENCE);
+        let deadline = killed.checked_add(patience);
         loop {
             match self.ops.list(uid).map(|m| m.is_empty()) {
-                Ok(true) => break,
+                Ok(true) => {
+                    if let Ok(mut d) = self.drain.lock() {
+                        d.observe(members, killed.elapsed());
+                    }
+                    break;
+                }
                 Ok(false) => {
                     if deadline.is_none_or(|d| Instant::now() >= d) {
                         return os(
@@ -590,7 +751,7 @@ impl<P: Privileged> Daemon<P> {
         }
         // Reap the box's programs (each a zombie now, or about to be) and keep their ends for the node.
         if let Ok(mut k) = self.kids() {
-            k.close(box_id, Instant::now().checked_add(DRAIN_PATIENCE));
+            k.close(box_id, Instant::now().checked_add(patience));
         }
         if let Ok(mut pool) = self.pool.lock() {
             pool.push(uid);
@@ -652,6 +813,24 @@ impl<P: Privileged> Daemon<P> {
 }
 
 impl<P: Privileged> Daemon<P> {
+    /// A [`Request::Kill`]: ends program `pid`, which the daemon started in box `box_id` and holds running,
+    /// through its own watch of it (`Proc::kill`, `SIGKILL`; as root the daemon may signal the box's user),
+    /// leaving it held so its end is read by a [`Request::Wait`] as any end is; the box and its other
+    /// programs run on (HEX-RT-16). A pid the box doesn't hold running (ended, its end read, or never
+    /// started there) is sent nothing, so a node can only kill its own box's programs: killing an ended
+    /// program is done. An unknown box is refused by name.
+    fn kill(&self, box_id: &BoxId, pid: i32) -> Answer {
+        let killed = match self.kids() {
+            Ok(mut k) => k.kill(box_id, pid),
+            Err(_) => return poisoned("the daemon's programs"),
+        };
+        match killed {
+            None => Answer::Refused(Refused::UnknownBox(box_id.clone())),
+            Some(Ok(())) => Answer::Killed,
+            Some(Err(e)) => Answer::Refused(Refused::StartFailed(format!("killing {pid}: {e}"))),
+        }
+    }
+
     /// A [`Request::Wait`]: the program's end, reaped here (the daemon is its parent), read once.
     fn wait(&self, box_id: &BoxId, pid: i32) -> Answer {
         let taken = match self.kids() {
@@ -674,7 +853,11 @@ impl<P: Privileged> Daemon<P> {
             };
             // Its box was dropped meanwhile: reap it here rather than leave a zombie.
             if let Err(mut p) = back {
-                let _ = p.wait_for(DRAIN_PATIENCE);
+                let patience = self
+                    .drain
+                    .lock()
+                    .map_or_else(|_| hex_core::drain::bound(1), |d| d.bound(1));
+                let _ = p.wait_for(patience);
             }
         }
         match got {
