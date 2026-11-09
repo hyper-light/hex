@@ -385,3 +385,399 @@ bench) shows its number of record:
    (≥10x kube-scheduler against kwok), `AC-T7.11.4` (≤4 KiB/workload) and `T-T7.11.1` (shard loss) pass.
 7. **Cells and regions (CP-T7.12, S7):** done when the differential suite passes on one node, one cell
    and three simulated regions (`AC-T7.12.3`) and the cell-loss and region-loss drills pass.
+
+## Borrowed from kiln's load balancer
+
+kiln's load balancer (the Load Balancing agent's program, LB00 to LB15; kiln agent
+`01a198e7a285772298e00399c5c7d5de`) places kiln's own work, CI legs, commands and agent sessions, on
+kiln's runners. It is not Hex's scheduler (Ada, 2026-11-06: "Your scheduler is for *microvms*"), but it
+met and measured problems G0-G7 (the implementation goals above) meet too, and Ada asked that Hex take
+what it can (2026-11-09: "examine our Load Balancing agent's work. We can learn and borrow much"). This
+records which of its ideas Hex takes, for which goal, and what each changes for the three kinds Hex
+places: OCI containers, Firecracker microVMs and Shards microVMs. Each is a proposal for the goal it
+lands in, held to that goal's number of record; listing it here decides nothing. Hex already shares
+kiln's method (pure cores, integers on decision paths, planted mutants, an oracle), so what follows is
+mechanism.
+
+**Where it is.** kiln at `a63dd98ef` (origin/main, 2026-11-08); paths are under `crates/kiln-ci/src/`
+unless they start with `docs/`. The placement kernel is `lb/` (docs/lb.md); the place core `place/`
+(docs/reach.md §2.3-2.5, docs/needs.md); node pace `pace/` and learned run times `runtime.rs`
+(docs/needs.md §17); the topology `topo/`; the use-based detector `detect.rs`; protection `protect/`
+and `headroom/` (docs/protect.md). The agent's measurements and decisions are in its notes on
+adas-macbook-pro-2, `~/.cache/kiln-lb/` (`SWARM-STATUS.md`, `notes/hillclimb.md`,
+`notes/federation-research.md`). Room tokens, learned wait weights and the auction reach its place
+core only on its integration branch, `lb/adopt` at `a193e0229`, unpushed.
+
+**The rules each is held to** (Ada's): no arbitrary constants, only learned or data-derived values (a
+cited published number is still (d), as `failure-isolation-constants.md` counts it); latency and
+throughput before memory; no legacy kept, so what a borrowing replaces goes; no switches but test
+controls. kiln turns several mechanisms on by a person's setting (`[reach] tokens`, `learned_weights`,
+`auction`, Headroom's `false_alarms_per_day`); Hex takes a mechanism unconditionally once its goal
+measures it better, or not at all, the comparison a test control. kiln's own comparisons at scale
+(tokens against hints, the auction against one at a time, learned weights against two choices,
+fleet-wide fair share against its oracle on random workloads) were still owed at its checkpoint of
+2026-11-08 (`SWARM-STATUS.md`), so nothing below rests on them.
+
+| | Idea | Lands in |
+|---|---|---|
+| B1 | The whole class's best in O(1), by bitmaps over buckets, in place of H8's sample | G2, G6 |
+| B2 | Parallel deciders deduct at once and widen their pick by the herd they should expect | G2 |
+| B3 | The node admits too, against its measured room, and says its room when it changes | G1, G2 |
+| B4 | Rank by expected finish on each node's learned pace, folded into the key | G0, G2 |
+| B5 | Explain slowness before accusing: grade a node's residual, not its raw slowdown | G0, G5 |
+| B6 | Detection per observation, its reference from the node's own calm | G5 |
+| B7 | The disk probe's period and share derived from what it protects | G5 |
+| B8 | Penalties from measured times, not Envoy's and Kubernetes' | G5 |
+| B9 | Detection on use, beside hyper-swim | G1, G5 |
+| B10 | Measured-first latency, bandwidth from Hex's own transfers, links' stability | G3, G7 |
+| B11 | One store write per batch, published once it lands | G1, G6 |
+| B12 | An integer auction for gangs and batches, its ε derived | G2 (S2's optimiser tier), G4 |
+| B13 | Fair share under constraints: an exact oracle, and usage carried between planes | G4, G6 |
+| B14 | The first queue's head keeps room; later work backfills around it | G4 |
+| B15 | A lost shard's slices adopted by rendezvous rank | G6, G7 |
+| B16 | Quotas as escrowed rights across cells and regions | G7, A3 |
+
+### B1. The whole class's best in O(1), in place of H8's sample (G2, G6)
+
+**kiln's.** Each signature (an equivalence class of needs) keeps its nodes in buckets by a rank key,
+free whole cores (the unit the hardware schedules): a bitset per bucket over node ids, interleaved by
+word so a node's move is two bit writes; a summary word per 4,096 nodes; a bitmap of non-empty
+buckets, the top two leading-zeros counts away. The key is a multiply and a shift,
+`(view × scale) >> 40`; other dimensions are checked exactly at the pick, nodes passed counted; equals
+take turns from a cursor; whether a need could ever fit is O(distinct node shapes). A node's record is
+32 bytes (four to a 128-byte line), an admitted run's 24, runs are generational slab handles, and a
+decision hashes and allocates nothing (`lb/index.rs:1-20, 188, 267-302`; `lb/owner.rs:37-42, 360`;
+docs/lb.md:34-69). A bench step, a release and then a pick the node admits, took 10.08 ns at 100 nodes
+and 23.02 ns at 10,000 on adacachy2, 10.84 and 18.35 ns on the Mac Studio (`b31682982`, 24
+interleaved rounds, `notes/hillclimb.md`).
+
+**Hex's.** H8 scans from a seeded start to the `want`-th admitting node and takes the best fit among
+those; `want`'s floors, 100 nodes or 5% (`crates/hex-sim/src/index.rs:138-139`), are kube-scheduler's,
+the last (d) on G2's fast path (`hex-sim-constants.md`, on `cp/t7-sched`). With one index per class
+(H8's `Demand`) and per set of kinds a node runs, read fewest kinds first (H11's tie), best fit's pick
+is the least non-empty bucket at or above the need, one trailing-zeros count over the masked bitmap
+(kiln takes the highest); H11's stranding test and allocation tie are checked at each node passed,
+the passes counted. The pick is then the whole class's, not a sample's: `Sample`, its floors and the
+specification's sample go, and S2's sample becomes this index. A Firecracker microVM's class holds
+only the KVM Linux nodes, a Shards microVM's every node that runs Shards (H10), so a kind no node can
+hold is known from its classes' node shapes, without a scan. Hex's sampled decide, commit and index
+update take p50 9.5-19.0 µs at 10,000 nodes (`bench/sched/fast_path.md`): G2's bench splits that into
+its parts before claiming any share of it for the scan, and tunes the index as kiln's hill-climb did,
+each idea kept only on an interleaved A/B with its counters (`notes/hillclimb.md`). Falsified by
+AC-T7.4.2's p99 rising, or AC-T7.4.3's cut against best fit shrinking, with the walk counted.
+
+### B2. Parallel deciders deduct at once and widen by the expected herd (G2)
+
+**kiln's.** An owner deducts what it sends from its view at once, so its own starts in flight never
+herd onto one node (planted `NoDeduct`, caught). Owners that share nodes see the same best and herd on
+it, which cursors spread over the fleet (Fibonacci hashing) don't stop. A shared owner widens its pick
+to the herd it should expect, the others' measured decision rate times a word's measured delay, plus
+one, drawn uniformly from the top buckets down by SplitMix64 (Mitzenmacher, "How Useful Is Old
+Information?", TPDS 2000); a sole owner keeps the exact best at no cost (`lb/owner.rs:709-723, 1060`;
+docs/lb.md:250-305). Declines per decision at ρ 0.9 fell 7 to 27 times (3.102 to 0.115 at 32 owners),
+and to none at ρ 0.5 (`lb/tests.rs:896`).
+
+**Hex's.** H3's deciders decide against one view, and the committer voids a decision whose window
+changed (a conflict, counted). With B1 every decider sees the same best node, so conflicts would grow
+with deciders. Each decider deducts its decision from its view at once and draws among its class's
+best `rate × delay + 1` nodes, the rate the other deciders' measured decisions a second and the delay
+its own measured decide-to-commit time, from the run's seeded generator (H1); one decider picks the
+exact best. T-T7.4.1's specification states the allowance H4 provides for: any of those best.
+Falsified by conflicts per decision not falling at 2-8 deciders, or AC-T7.4.3's stranding rising.
+
+### B3. The node admits too, and says its room when it changes (G1, G2)
+
+**kiln's.** The node that owns the room admits against its own ledger, never past its budget; a
+refusal carries its room, so the next pick never repeats the miss and the loop is bounded by the
+class's nodes; use the node measures beyond what was placed (`Runner::outside`) is kept off the room
+(`lb/runner.rs:1-18, 442`; docs/needs.md:291-296). Every word carries the room, and words to a watcher
+coalesce while unsent, the newest replacing the older (backpressure, no timer); a decision reads the
+last measure and waits on no read (docs/needs.md:690-721).
+
+**Hex's.** S6's compare-and-set checks a node's capacity against Hex's books, and the node holds what
+the books don't: page cache, the host's own processes, Shards' share process, a VMM past its measured
+idle overhead (H10). The hexlet admits each start the store's feed shows it against its measured
+room, so a guest's memory, which can't be overcommitted, never is; a refusal is a store write carrying
+the node's room, which the plane's index takes at once (B1), and the workload is decided again within
+its class. The node's state (room outside Hex's books, its pace, B4) reaches the plane when it
+changes, read on the OS's events (PSI triggers, power and thermal notifications) and coalesced while
+unsent: no state heartbeat, and liveness stays hyper-swim's (`failure-isolation.md` F1). hex-sim's
+nemesis moves host memory outside Hex's books to hold it. Falsified by a microVM started past a node's
+memory, or a refusal loop longer than its class.
+
+### B4. Rank by expected finish on each node's learned pace (G0, G2)
+
+**kiln's.** A run of work W and parallelism p on a node with f cores free at per-core rate s finishes
+in W / (min(p, f) s), plus its I/O at the disk's rate, its fetches at the node's network rate and what
+must move to it over the link, less what is warm there, and, for a run a person watches, the link's
+latency and expected stall (`lb/owner/terms.rs:387-420`; docs/lb.md:111-241). Speed is learned from
+kiln's own history: ln CPU-seconds = kind − machine, least squares over the kinds run on two or more
+machines, solved exactly on the machines' Laplacian and shrunk toward the fleet by empirical Bayes, so
+a new machine runs no benchmark (`pace/speed.rs:1-46`). Slowness is processor sharing's dilation over
+the shares of time lost to CPU, memory, I/O and swap (PSI, or the run queue where there is none), its
+weights learned by non-negative least squares from the node's own runs; throttling is speed now
+(`pace/slow.rs:1-40`). Run times are Ernest's model per key, each row weighted by its placement's
+inverse probability, with a Thompson draw from its posterior in place of an exploration rate
+(`runtime.rs:1-36`). Speed and slowness fold into the key's multiplier as a node's word arrives, so a
+plain pick stays one lookup; several terms are read from per-rate orders (64 classes an octave) by
+Fagin, Lotem and Naor's threshold algorithm, which stops within 1/64 of the soonest, the classes' own
+resolution (`lb/owner/terms.rs:125-150, 354`; `lb/order.rs:12-37`); a node not yet measured takes the
+measured nodes' mean (empirical Bayes; for a rate, its harmonic mean: `lb/owner/terms.rs:517-540`).
+The fits run off the decision path and hand it integers; the kernel's own arithmetic is integer (Q32;
+e^-x by `exp_neg_q32`, `lb/owner/terms.rs:611`). Against a brute force on two sets of 20,000 random
+fleets the choice was the soonest in 26,984 of 27,340 asks with several terms, never past 1.0155
+times it, where the orders' tops alone were 9.7 times it at worst (`lb/finish_tests.rs:305`;
+docs/lb.md:469-531).
+
+**Hex's.** S1 scores the goodput a placement adds; H11 packs, and hex-sim's run time doesn't depend on
+the node. Expected finish is the cheap proxy S1's falsifier names: a workload's learned work over the
+node's learned speed and its slowness now, plus the bytes of its image or snapshot template the node
+lacks over the link (B10), less what is warm there: a Firecracker snapshot template or warm pool
+(CP-T7.2), a Shards image, an OCI container's layers. A session (H9's role) adds the link's latency and
+expected stall; a build or benchmark doesn't, since it runs on while the link is down. Packing breaks
+ties within the 1/64, as kiln's design has it (docs/needs.md:246-252: best fit for batch work, most
+room for interactive), so H11 still decides among nodes alike in pace, which on m5d.metal is every
+node. hex-sim gives its node models speeds and contention (G0), and G2's tests keep kiln's brute-force
+oracle and its bound. Falsified on the recorded day, on the fleet's mixed hosts, by goodput or the p99
+no better than H11's, or by AC-T7.4.2's p99 passing 10 ms.
+
+### B5. Explain slowness before accusing (G0, G5)
+
+**kiln's.** Pace explains a node's slowness by its hardware, its measured contention, throttling and
+swap (B4), and a slowdown is laid on a cause only with evidence it was that cause: the work used that
+resource over the span, and a disk idle for part of the span wasn't the bottleneck
+(`protect/cause.rs:1-12, 126`; docs/protect.md:71-112).
+
+**Hex's.** `failure-isolation.md` F2 grades a node by its median slowdown, "time over what its class
+expects", against its peers' medians, with a picked 2× bar. On a fleet of mixed hosts (H10's) a node
+slower by hardware, by measured contention or by throttling has a known slowdown, which B4's key
+multiplier already answers, in proportion and at once. F2 grades the residual instead: each workload's
+time over what B4 predicts for its kind on that node at the contention measured as it started, so only
+unexplained slowness counts toward `Suspect` and `Drain`. A Firecracker guest's vCPUs are host threads,
+so the host's PSI explains them; a Shards guest on macOS has the run queue. The same cause rule takes
+F4 past CPI: a co-tenant is an antagonist suspect for a resource only if it used that resource over the
+span (each microVM's cgroup's PSI). hex-sim's gray nemesis draws node heterogeneity. Falsified by more
+healthy nodes suspected, or a 2.5× node caught later, than F2's medians give on the same seeds.
+
+### B6. Detection per observation, its reference from the node's calm (G5)
+
+**kiln's.** A CUSUM on the logarithm of a target's latency steps on each sample; its reference is
+halfway from the target's calm, learned only from excursions that ended without harm, to harm (Page,
+Biometrika 1954); a sample at harm alarms at once and needs no record; a shift down starts a new regime
+(`headroom/detect.rs:1-27`; `protect/stall.rs:1-23`). Its threshold is calibrated against a person's
+false-alarm budget.
+
+**Hex's.** F2's window (1 s), minimum count (5) and drain run (3 windows) are (d), and a CUSUM needs
+none of them: it steps on each requester's observation of a node's residual (B5), its reference halfway,
+in log, from the node's calm to the fault class's 2.5× (the bounds table's definition), and a workload
+of that node missing its declared deadline because of it is harm, acted on at once. The threshold is
+not kiln's false-alarm budget, which Ada's rule excludes, but Hex's cost rule as F3 prices it: act
+once the posterior that the node changed makes waiting cost more than acting (the Bayesian form of the
+same test: Shiryaev, "On optimum methods in quickest detection problems", Theory Probab. Appl. 8(1),
+1963), a false action priced at the measured re-placement of each kind, waiting at the work blocked.
+The same form can replace F4's 2σ, 3-in-5-minutes and 0.35, which stay (d) today. Falsified by F2's or
+F4's bounds missed over the nemesis's 1,000 seeds, or more false drains than today's rule.
+
+### B7. The disk probe's period and share derived (G5)
+
+**kiln's.** A probe's interval is the time left to act (the tolerance less the longest a cut took to
+show) shared over the samples a shift takes to alarm, plus one; and probes take no more of the target
+than would move its latency by the detector's own reference: under M/M/1, δ ≤ (1 − ρ)(1 − e^−k), the
+idle share 1 − ρ being the fastest answer over the calm one, so probing can't make the trouble it looks
+for (`headroom/detect.rs:270-285, 647-662`; docs/protect.md:118-123). kiln learned why on 2026-10-30:
+a 221 s lag had every runner's disk probed back to back, and production's server about 270 times a
+second (`headroom/detect.rs:653-654`).
+
+**Hex's.** F3's probe period is its caller's (the drill's 100 ms, (d)), and the drill drained its
+healthy disk in warm-up (`0d5fbed2`; this branch's `c4f157dc` ends one of its false drains, not the
+other). The period becomes the work's own deadline less the measured re-placement time, over two (one
+write outliving the drain age decides, one more to see it start), never taking more of the disk than
+kiln's δ; and a write slow while the device sat idle for part of the span (its busy time, from the
+OS's counters) is no disk stall but F2's (B5). Falsified by the dm-delay drill missing its deadline at
+the derived period, or the probe's own load moving the disk's healthy latency past its reference.
+
+### B8. Penalties from measured times (G5)
+
+**kiln's.** A reaction's budget is the deadline less calm, spent in four measured parts: sensing,
+deciding, acting and draining what was already issued (Little: L/λ) (`protect/budget.rs:1-6`;
+docs/protect.md:57-69). A budget cut by trouble rises again only after it held calm for the slowest
+target's detection delay plus the longest a cut took to show, and budgets move by bisection and
+doubling (Bentley and Yao 1976) (docs/protect.md:127-130, 296).
+
+**Hex's.** F6's ejection (30 s to 300 s: Envoy's), eviction rates (0.1 and 0.01 nodes a second; 55%,
+3 and 50: Kubernetes') and crash-loop backoff (10 s, 300 s, 600 s) are (d), each with an "(a)" way out
+(`failure-isolation-constants.md`); kiln's rules give those ways out their form. An ejection lasts its
+detector's own detection delay plus the measured time from a drain to its effect, times the node's
+consecutive ejections (Envoy's form, its base now measured), and the node returns only once it has
+held healthy that long. Work moves off failed nodes at the cell's measured re-placement throughput, so
+what it queues drains within the reaction budget. A crash-looping workload's first delay is its own
+measured start (an OCI start, a Firecracker restore, a Shards boot), doubling from there as
+CrashLoopBackOff's does. Falsified by F6's correlated-fault runs stranding work, or by nodes ejected
+and returned more often than under Envoy's numbers on the same seeds.
+
+### B9. Detection on use, beside hyper-swim (G1, G5)
+
+**kiln's.** A peer is suspected only when something is owed on its link: the link dropped (the
+transport's verdict), the transport's timeout on unacknowledged data, an answer overdue, or a peer's
+report of its own failed traffic (Panorama); a link owing nothing is never probed, and a wrong
+suspicion costs a redundant claim, never a second start (Chandra and Toueg) (`detect.rs:1-29, 84-145`).
+
+**Hex's.** A hexlet owes the plane an acknowledgement of each start the feed shows it. One outstanding
+longer than any healthy acknowledgement that node has given (F3's rule for `Suspect`, not kiln's RFC
+6298 timer) makes the node `Suspect` at once, so no more work goes to it, before hyper-swim condemns it
+(F1: 1.62 s at p99 at need, 12.1 s at a probe a second); its work moves only on condemnation, so
+nothing starts twice. hyper-swim stays: a long-running microVM owes nothing for hours, and only
+membership sees its node die. Falsified by nodes suspected on use whose acknowledgements were only
+queued, counted in hex-sim's crash class with work arriving.
+
+### B10. Measured-first latency, bandwidth from Hex's own transfers, links' stability (G3, G7)
+
+**kiln's.** A pair's latency is, in order of what it rests on, its own filtered round trip, then its
+relayed legs plus the relay's measured time, then coordinates with their announced error
+(`topo/estimate.rs:1-16, 72-97`). A pair's rate is Hockney's `a + n/r`, least squares on its own
+transfers; a pair never seen is bounded by its ends' access rates (the smaller of the sender's most
+seen up and the receiver's most seen down), an upper bound, since about half of Internet paths are
+bottlenecked inside the network (Akella et al., IMC 2003), tightened by a measured pair between the
+same two sites; sites are single-linkage clusters in coordinate space cut where a gap passes the
+estimates' own error (Zahn 1971) (`topo/rate.rs:1-32, 265`; `topo/sites.rs:1-10`). A link's drops are
+Poisson over its time up (none seen: the rule of three), and a run of length T expects to lose (1 −
+e^(−λT)) times the mean outage (`topo/stability.rs:1-18`). All from traffic that already flows, in
+integers that agree on x86-64 and arm64; a round-trip estimate costs 6.5 ns and a never-seen pair's rate
+5.5 ns (docs/reach.md:212-273).
+
+**Hex's.** G3 places by hyper-swim's predicted RTT, a node 0 from itself (H21, on `cp/t7-sched-g3`);
+measured-first generalises that fix: every pair Hex has its own round trips for takes them, and
+coordinates serve only pairs never measured. A2's bandwidth term gets a model: an image's layers from
+Reliquary, a Firecracker snapshot template or a volume from Slates moved to a node cost B4 their bytes
+over the pair's learned rate, edge-bounded where never seen; a session pays the link's expected stall,
+a build doesn't. Not taken: He, Dovrolis and Ammar's window and thresholds (10, 0.4, 0.3) and Ledlie's
+25th percentile of four, which kiln uses: published numbers, (d) by Hex's audit; a level shift is
+B6's change test on the fit's residuals. hyper-swim's engine stays vendored unchanged (H20), so kiln's
+coordinate refinements are findings for its owner. kiln's failure domains, learned from links that drop
+together (`topo/domains.rs:1-18`), serve G7 beside the declared cells once their test's level (a
+person's 5% in kiln) is priced by the cost rule. Falsified by measured-first and the transfer term not
+improving goodput or the tail over H21's RTT-only proximity on its study.
+
+### B11. One store write per batch, published once it lands (G1, G6)
+
+**kiln's.** A node commits once for each batch of inputs it handles, the rows as they are now, and
+publishes nothing a batch gates until it lands; a refused commit holds what it gates and is tried again
+with the next; a row written twice is written once (docs/reach.md:169-211; `b9c027b19`, `3d098ad7b`).
+One at a time, placement cost two forced commits a decision, 4.5 ms median each (p99 8.6 ms, fedora-2);
+a burst of 1,000 asks committed in 204 ms in all (the LB lead's record, kiln conversation
+`agent:01a198e7a285772298e00399c5c7d5de`, 2026-11-08).
+
+**Hex's.** H3's committer writes each placement to the store alone. At Amphora's recorded durable write
+(`hex-sim.md` H61, on `cp/t7-sched-g6`: p99.9 22.27 ms) that holds a plane to about 45 placements a
+second; AC-T7.11.2's 8,333 a second needs about 186 placements a write on one plane, 23 on each of
+H60's eight. The committer writes each batch it holds as one store write, every placement in it still
+checked by its record's version and its node's capacity (as `Store::apply_gang` writes a gang,
+`scheduler-fairness.md` F3, on `cp/t7-sched-g4`); the feed being the store's, hexlets see none of it
+until it lands. A refused write is made again with its conflicting decisions decided again (H3), and
+H2's nemesis crashes at each batch write, both sides. Falsified by H63's million placements missing
+120 s at Amphora's recorded write time, or a crash seed losing or doubling a workload inside a batch.
+
+### B12. An integer auction for gangs and batches (G2's optimiser tier, G4)
+
+**kiln's.** Runs placed together go to the least total cost by Bertsekas's forward auction, costs
+scaled by min(n, m) + 1 and ε = 1, so ε < 1/n and < 1/m and the assignment is optimal with ε derived,
+not chosen; a node's slots are one similarity class, so bidders don't raise identical slots one ε at a
+time; feasibility is found first by augmenting paths, so the auction ends; a gang's places are all of
+them or none (`lb/auction.rs:1-24, 92-107`; `lb/owner.rs:2424-2437`). Checked against every assignment
+on 400 cases, a price war planted and caught (docs/lb.md:502-503).
+
+**Hex's.** `scheduler-fairness.md` F3 places a gang member by member in order, each taking its room
+before the next is sought (greedy), then writes all or none; S2's optimiser tier is unbuilt. The
+auction gives a gang's microVMs their nodes at the least total cost (B4's expected finish, or H11's
+stranding as a cost) in one pass, then F3's single write; and it is the optimiser tier's first solver,
+for a batch of arrivals of one class, as H63's million pending of one shape are. Falsified on F3's
+contended day by gangs starting no sooner, or stranding no less, than in order, or by the auction's
+time at the recorded gang sizes (2 to 12) passing the decision budget.
+
+### B13. Fair share under constraints: an exact oracle, and usage carried between planes (G4, G6)
+
+**kiln's.** Its fair-share tests measure against Choosy's constrained max-min fair shares, exact in
+integers by Fujishige's lexicographically optimal base of the polymatroid whose rank of a set of
+tenants is the capacity of the nodes any of them may use (`place/fair_tests.rs:1-20, 457-469`). With
+no center, each word an owner sends anyway carries a tenant's usage elsewhere since its last word there
+(DSFQ's delay, Wang and Merchant, FAST 2007; PS-DSF's per-server count), and the node gives freed room
+to the waiting tenant that got least across the fleet, Choosy's rule (`place/msg.rs:494-520`;
+`place/runner.rs:1224-1235`); held within one run of the oracle, its planted mistakes caught.
+
+**Hex's.** AC-T7.5.2's 25% each is the fair share only where every owner may use every node. Under
+H9's kind filters on the fleet's hosts (Firecracker only on Linux, macOS only Shards, a kind per owner
+by H10's rule) an owner's share is its constrained max-min share, which the decomposition gives
+exactly: G4's fairness test takes it as its oracle on the recorded day. With H60's slices each plane
+ranks owners by weighted DRF (`scheduler-fairness.md` F1) over shares no plane sees whole; each
+plane's per-owner usage, carried as a delta on writes it makes anyway, gives the others the cell's
+shares without a shared counter on the decision path, to within DSFQ's bound on what isn't yet
+carried. Falsified by held shares missing the constrained shares by more than AC-T7.5.2's 2%, on one
+plane or on eight.
+
+### B14. The first queue's head keeps room; later work backfills around it (G4)
+
+**kiln's.** A start passes the first in line only in room the first can't use (EASY backfilling's
+guarantee, Mu'alem and Feitelson, TPDS 2001); with expected ends, the first keeps room on the node
+where room frees soonest, each run there ending by its p90, else its median, else its timeout, and once
+past that by its start plus twice what it has run; a gang keeps room on all its nodes from the latest
+(`lb/runner.rs:1-11`; docs/needs.md:253-263; planted `NoKeep`, the first starving, caught).
+
+**Hex's.** `scheduler-fairness.md` F2 stops all placement at the first queue whose head fits nowhere;
+its falsifier names "a reservation for the first queue's head (Borg-style) with backfill elsewhere"
+should strict order cost more goodput than fairness is worth, GPU work the case to watch. kiln's rule is
+that reservation, built and tested, its time from B4's learned run lengths: a large Shards guest or a
+GPU OCI container at the lowest share keeps its room while small starts fill around it. Falsified by
+idle capacity while a head waits not falling, or a head waiting past its reservation plus what ran over
+before it.
+
+### B15. A lost shard's slices adopted by rendezvous rank (G6, G7)
+
+**kiln's.** The holder of a gone owner's news ranks the live nodes by rendezvous hashing on the run's
+handle (Thaler and Ravishankar, ToN 1998): every node works the order out alone, and only the gone
+owner's runs move; safety is per-run Paxos under integer ballots, never agreement on who is alive
+(`place/handoff/mod.rs:1-35, 106-141`; `b39559d83`). A bounded-load variant (Mirrokni, Thorup and
+Zadimoghaddam, SODA 2018) keeps one adopter from taking too much (`notes/federation-research.md` Q3).
+
+**Hex's.** H61's live shards take a lapsed slice by compare-and-set on its lease, all of them racing.
+By rendezvous rank over the live shards on the slice's id, each knows alone whether it is the slice's
+adopter, so one compare-and-set is tried, not one per shard, and a lost shard's slices spread over the
+survivors, each slice to its own top, keeping each survivor's rebuild near one slice's, inside
+T-T7.11.1's 5 s. The lease and its epoch stay the fence. H66 can order the surviving regions for a lost
+one's work by the same rank, its capacity check unchanged. Falsified by takeover at 1,000,000 not
+falling, or two shards writing one slice.
+
+### B16. Quotas as escrowed rights across cells and regions (G7, A3)
+
+**kiln's.** A tenant's budget is integer rights a period (resource × time), split among the owners
+once a period and kept before anyone sees the split; a run reserves its worst case, its ask times its
+timeout, before it's placed, and settles to what it used; an owner short asks one peer at a time,
+which lowers its own holding and keeps that before it sends (demarcation), each transfer a grow-only
+total merged by maximum (bounded counter, Balegas et al., SRDS 2015); spend under a cap can't avoid
+coordination (Bailis et al., PVLDB 2014), so it comes once a period, ahead of every spend. Zero
+overspend under any partition, crash or word said twice; its model plants `GiveBeforeLower`,
+`SettleTwice`, `HoardWhenShort` and `PublishBeforeKeep`, each caught (`place/budget.rs:1-38, 220-243`;
+docs/needs.md:411-484).
+
+**Hex's.** S5's quotas, and A3's provider quotas (the rate limits and token budgets of the providers
+agent sessions call), cross cells and regions that share no store (H64, on `cp/t7-sched-g6`). Each cell
+holds escrowed rights of a tenant's or a provider account's period; a workload reserves its worst case
+before it's placed (its request times its declared duration, S3; for a session, its declared token
+budget); a cell short of rights asks a peer. A lost region's unspent rights are under-use until the
+period ends: kiln left reclaiming them without the holder's records open
+(`notes/federation-research.md`, its unproven item 4), and H66's epoch fence, which refuses the lost
+region's word, may be what makes reclaiming safe; hex-sim's model must show it before H66 moves work
+that draws on them. Falsified by any period overspent under partitions and region loss, or a held
+workload given no rights while its peers hold them free.
+
+### Not taken
+
+- **Room tokens** (`lb/tokens.rs`): with one owner a node's token is its whole room (docs/lb.md:361),
+  and each Hex node has one deciding plane (H60's slices, H64's cells).
+- **Waiting at two nodes, and learned wait weights** (Ready, Go and Withdraw; Lattanzi et al.'s
+  Algorithm 1, `lb/weights.rs`): kiln's runs with no room wait at nodes; Hex's wait in their plane's
+  queue, under H8's class skips.
+- **Settings that switch mechanisms on, and a person's defaults**: `on_battery` (BOINC's default), the
+  guard's false-alarm budget, the failure domains' 5%, predicted order's γ. Ada's rules allow none.
+- **kiln's bar of ten times every proxy's pick**: not Hex's (AC-T7.11.3 is against kube-scheduler), and
+  kiln showed it can't be met against a stateless hash (docs/lb.md:588-591).
+- **Detection on use in place of hyper-swim**: B9 adds it beside.
