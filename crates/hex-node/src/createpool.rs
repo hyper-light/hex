@@ -370,8 +370,13 @@ impl CloneInit for CreatePool {
         }
     }
 
-    fn claim(&self, parked: Parked, req: &CloneReq<'_>) -> Result<(i32, OwnedFd), OciError> {
-        self.claim_parked(parked, req)
+    fn claim(
+        &self,
+        parked: Parked,
+        req: &CloneReq<'_>,
+        sync: BorrowedFd<'_>,
+    ) -> Result<(i32, OwnedFd), OciError> {
+        self.claim_parked(parked, req, sync)
     }
 }
 
@@ -417,7 +422,12 @@ impl CreatePool {
         }
     }
 
-    fn claim_parked(&self, parked: Parked, req: &CloneReq<'_>) -> Result<(i32, OwnedFd), OciError> {
+    fn claim_parked(
+        &self,
+        parked: Parked,
+        req: &CloneReq<'_>,
+        sync: BorrowedFd<'_>,
+    ) -> Result<(i32, OwnedFd), OciError> {
         let pruned = req.pruned.is_some();
         let Some((pid, pidfd, socket)) = parked.take() else {
             return Err(OciError::Broken(
@@ -428,8 +438,8 @@ impl CreatePool {
         let patience = self.shared.lock()?.seeds.deadlines().1;
         // The parked init answers as a seed does, with a pidfd of its own, which the agent's stands for, within
         // the hang bound the seeds' answers taught, or the record's before them.
-        match round_trip(socket.as_fd(), &create, &fds, patience) {
-            Ok((_, _, made)) => {
+        match claim_round(socket.as_fd(), sync, &create, &fds, patience) {
+            Ok(made) => {
                 // Counted by how its mount namespace was made, as a seed's clone is (clone_init).
                 if pruned && let Some(count) = self.shared.made.get(usize::from(made.code())) {
                     let _ = count.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
@@ -1037,6 +1047,18 @@ fn round_trip(
     }
 }
 
+/// Sends a parked init its claim and waits, within `patience`, for the claim to be taken or not: how the init makes
+/// its mount namespace, or why not (the lead's (A) of 2026-11-09).
+fn claim_round(
+    socket: BorrowedFd<'_>,
+    _sync: BorrowedFd<'_>,
+    create: &Create,
+    fds: &[BorrowedFd<'_>],
+    patience: Option<Duration>,
+) -> Result<MountNamespace, Trip> {
+    round_trip(socket, create, fds, patience).map(|(_, _, made)| made)
+}
+
 /// Whether `fd` turns readable within `patience`; with none (a wait measuring) it waits until it does.
 fn readable(fd: BorrowedFd<'_>, patience: Option<Duration>) -> Result<bool, OciError> {
     let deadline = patience.and_then(|p| Instant::now().checked_add(p));
@@ -1353,6 +1375,119 @@ mod tests {
             ]
         );
         assert_eq!(fds.len(), create.fds());
+    }
+
+    /// The lead's (A) of 2026-11-09 (decision 8's claim): a claimed init says nothing on its claim socket once it takes
+    /// the claim, so the claim is taken at the init's first word on its sync pipe, which stays there for the handshake
+    /// to read, and fails on the init's refusal, its end, or its silence past the claim's patience. Do: claim a
+    /// stand-in init that, given its claim, writes its ready; writes a setup failure and ends; refuses; ends without a
+    /// word; or holds its claim and says nothing. Expect: taken at the ready, still on the pipe; taken at the failure,
+    /// still on the pipe for the handshake to report; refused; broken; and hung, given no time at all to wait. The
+    /// others wait at most the claim's bound before (A), the seeds' answers' record, so a claim that waits for an
+    /// answer fails here rather than waiting for ever.
+    #[test]
+    fn a_claim_is_taken_at_its_inits_first_word_and_otherwise_falls_back() {
+        use hex_runtime::linux::cgroup::BoxCgroup;
+        use hex_runtime::linux::oci::run::PrunedCreate;
+        use rustix::fs::{Mode, OFlags};
+        use rustix::pipe::{PipeFlags, pipe_with};
+        let lab = tempfile::tempdir().unwrap();
+        let open = || {
+            rustix::fs::open(
+                lab.path(),
+                OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .unwrap()
+        };
+        let cgroup = BoxCgroup::at(lab.path().to_owned());
+        let config = open();
+        let before = Patience::by_profile(
+            "test.createpool.claim_before",
+            hex_core::seeds::CLONE_SLOWEST,
+            Some(hex_core::seeds::CLONE_SLOWEST_DEBUG),
+        )
+        .deadline();
+        // A claim of a stand-in that does `then` with its claim's sync pipe end and its end of the claim socket, or,
+        // with none, holds its claim unread: what came of it, and what is left on the sync pipe.
+        let claim = |then: Option<fn(OwnedFd, OwnedFd)>, patience: Option<Duration>| {
+            let (sync_r, sync_w) = pipe_with(PipeFlags::CLOEXEC | PipeFlags::NONBLOCK).unwrap();
+            let (ours, theirs) = rt_seed::socketpair().unwrap();
+            let req = CloneReq {
+                bundle: lab.path(),
+                dir: lab.path(),
+                cgroup: &cgroup,
+                network: None,
+                sync_w,
+                map_r: None,
+                config: config.as_fd(),
+                pruned: Some(PrunedCreate {
+                    cgroup_dir: None,
+                    container_dir: open(),
+                    rootfs: open(),
+                    mount_namespace: MountNamespace::Copy,
+                    dev_mount: None,
+                    ipc_uts: None,
+                    proc_mount: None,
+                    proc_sink: None,
+                    masked_directory: None,
+                    binds: Vec::new(),
+                    path_joins: Vec::new(),
+                }),
+            };
+            let (create, fds) = message(&req);
+            let (stand_in, _held) = match then {
+                Some(then) => (
+                    Some(std::thread::spawn(move || {
+                        let mut buf = vec![0u8; hex_core::seed::MAX_REQUEST];
+                        let Ok(rt_seed::Received::Message { stdio, .. }) =
+                            rt_seed::recv_request(theirs.as_fd(), &mut buf)
+                        else {
+                            panic!("the stand-in was sent no claim");
+                        };
+                        then(stdio.into_iter().next().unwrap(), theirs);
+                    })),
+                    None,
+                ),
+                None => (None, Some(theirs)),
+            };
+            let came = match claim_round(ours.as_fd(), sync_r.as_fd(), &create, &fds, patience) {
+                Ok(MountNamespace::Copy) => "taken",
+                Ok(_) => "taken another way",
+                Err(Trip::Refused(_)) => "refused",
+                Err(Trip::Broken(_)) => "broken",
+                Err(Trip::Hung(_)) => "hung",
+            };
+            if let Some(stand_in) = stand_in {
+                stand_in.join().unwrap();
+            }
+            let mut left = [0u8; 64];
+            let n = rustix::io::read(&sync_r, &mut left).unwrap_or(0);
+            (came, String::from_utf8_lossy(&left[..n]).into_owned())
+        };
+        let ready: fn(OwnedFd, OwnedFd) = |sync, _socket| {
+            rustix::io::write(&sync, b"R\n").unwrap();
+        };
+        let failed: fn(OwnedFd, OwnedFd) = |sync, _socket| {
+            rustix::io::write(&sync, b"Ea step failed\n").unwrap();
+        };
+        let refuses: fn(OwnedFd, OwnedFd) = |_sync, socket| {
+            let why = "refused for the test".to_owned();
+            let refusal = Answer::Refused {
+                failed: Failed::Start,
+                why,
+            };
+            rt_seed::send_answer(socket.as_fd(), &refusal, None).unwrap();
+        };
+        let ends: fn(OwnedFd, OwnedFd) = |_sync, _socket| {};
+        assert_eq!(claim(Some(ready), before), ("taken", "R\n".to_owned()));
+        assert_eq!(
+            claim(Some(failed), before),
+            ("taken", "Ea step failed\n".to_owned())
+        );
+        assert_eq!(claim(Some(refuses), before), ("refused", String::new()));
+        assert_eq!(claim(Some(ends), before), ("broken", String::new()));
+        assert_eq!(claim(None, Some(Duration::ZERO)), ("hung", String::new()));
     }
 
     /// Goal 5 extended step 6: a seed given back goes at once to the create waiting in line, woken by the

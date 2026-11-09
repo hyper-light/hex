@@ -38,7 +38,11 @@
 //!   beside O's idle namespace: each fresh, counted, never O's; then O's next box gets O's and P's next box
 //!   P's oldest. B of O given a namespace the node checked: expect B to see the node's netlink socket in it and
 //!   its send to that socket refused, its send to the kernel gone, the socket's queue and drops unchanged, and
-//!   the namespace kept again at its next check.
+//!   the namespace kept again at its next check;
+//! - a parked create's wakes (the lead's (A) of 2026-11-09, decision 8's claim): three creates of one owner, each
+//!   claiming the init its last box's delete parked: expect the creating thread to sleep, in the middle one, once for
+//!   each word the init says on its sync pipe (its ready, and rootless its ask for its maps before it), and for no
+//!   answer to the claim.
 //!
 //! Rootless where the caller isn't root, in a delegated cgroup v2 subtree, as oci_box.rs; where neither
 //! is possible it prints SKIP and why rather than pass falsely.
@@ -317,6 +321,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
         }
         node.delete(&BoxId::new("probe").unwrap()).unwrap();
     }
+    a_parked_create_wakes_its_agent_once_a_word(&lab, own);
     a_delete_ends_a_box_through_its_inits_pidfd(&lab, own);
     a_box_of_one_owner_is_given_the_cgroup_its_earlier_box_left(&lab, own);
     an_owners_next_box_is_made_by_the_init_parked_in_its_idle_cgroup(&lab, own);
@@ -909,6 +914,81 @@ fn an_owners_next_box_is_made_by_the_init_parked_in_its_idle_cgroup(lab: &Lab, o
         "released, no idle cgroup nor parked init is left"
     );
     eprintln!("test 2b: B made by the init parked in A's slot (pid {parked:?})");
+}
+
+/// The lead's (A) of 2026-11-09 (decision 8's claim, goal 16): a create that claims a parked init wakes its agent once
+/// for each word the init says on its sync pipe, and not for an answer to the claim, which the init sent as it took
+/// it. The init's words: its ask for its user namespace's maps where its box makes one (a rootless node's does), then
+/// its ready. Do: O's first box created, started and deleted, so its slot holds an init parked for O's next; then three
+/// times, once that init sleeps for its claim, create O's next box, counting the creating thread's voluntary context
+/// switches across the create (proc(5), /proc/thread-self/status), then start and delete it, which parks the next.
+/// Expect: each create claimed the parked init, and the median of the three counts is the init's words, one as root
+/// and two rootless. The median, since a create's other steps sleep now and then (a lock one of the node's threads
+/// holds, the page cache), and a create can find a word written by the time it reads it: of 59 claims each way on
+/// adacachy2 before this (unit hex-g6-wakes-20261109T181009Z), 54 as root slept twice, for the answer and the ready, 1
+/// once more and 4 once less; 57 rootless slept twice too, the ask for its maps written by the time the answer was
+/// read, and 2 once more. Three is the fewest creates whose median one such create can't move.
+fn a_parked_create_wakes_its_agent_once_a_word(lab: &Lab, own: &Path) {
+    let (node, _state) = lab.node(&own.join("hex-reuse-wakes"));
+    let o = BoxOwner::named("owner-w").unwrap();
+    // The creating thread's voluntary context switches so far: each a sleep it woke from (proc(5)).
+    let slept = || -> u64 {
+        std::fs::read_to_string("/proc/thread-self/status")
+            .unwrap()
+            .lines()
+            .find_map(|l| l.strip_prefix("voluntary_ctxt_switches:"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    };
+    // Starts and deletes box `name`, whose delete parks an init in its slot for O's next box, and waits for that init
+    // to sleep for its claim.
+    let park = |name: &str| {
+        let id = BoxId::new(name).unwrap();
+        node.start(&id).unwrap();
+        let slot = node.cgroup_dir(&id).expect("the box's cgroup");
+        node.delete(&id).unwrap();
+        let parked = populated_within(&slot, PARKED.deadline().unwrap_or(Duration::MAX));
+        assert_eq!(
+            parked.len(),
+            1,
+            "{name}'s delete parked one init: {parked:?}"
+        );
+        wait_for(
+            &PARKED_ASLEEP,
+            || state_and_session(parked[0]) == ("S".to_owned(), parked[0]),
+            "the parked init asleep for its claim",
+        );
+    };
+    node.create(lab.oci("wake-0", Some(&o), Caps::Docker, Bounds::default()))
+        .unwrap();
+    park("wake-0");
+    let mut wakes = Vec::new();
+    for name in ["wake-1", "wake-2", "wake-3"] {
+        let claimed = node.cgroup_reuse().unwrap().parked.claimed;
+        let before = slept();
+        node.create(lab.oci(name, Some(&o), Caps::Docker, Bounds::default()))
+            .unwrap();
+        wakes.push(slept() - before);
+        assert_eq!(
+            node.cgroup_reuse().unwrap().parked.claimed,
+            claimed + 1,
+            "{name}'s create claimed the parked init"
+        );
+        park(name);
+    }
+    // The init's words on its sync pipe: its ask for its user namespace's maps, where its box makes one (the lab's
+    // rootless bundles do, `Lab::bundle_with`; its root ones don't), and its ready.
+    let words = if lab.rootless { 2 } else { 1 };
+    wakes.sort_unstable();
+    assert_eq!(
+        wakes[1], words,
+        "a parked create wakes its agent once for each word its init says, and for no answer (each create's wakes, \
+         sorted: {wakes:?})"
+    );
+    node.release_idle().unwrap();
+    eprintln!("wakes: three parked creates woke their agent {wakes:?} times");
 }
 
 /// Decision 8, "The p99.9 that stayed" (AC-T7.1.3): an init parked for an owner's next box with namespaces its spec

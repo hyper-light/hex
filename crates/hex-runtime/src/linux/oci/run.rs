@@ -229,9 +229,18 @@ pub trait CloneInit {
     fn clone_init(&self, req: CloneReq<'_>) -> Result<(i32, OwnedFd), OciError>;
 
     /// Hands the create `req` to the init `parked` in its cgroup (decision 8, "The p99.9 that stayed"), in place
-    /// of a clone: the same message a seed takes, on the init's own socket. Returns its pid and pidfd as
-    /// [`CloneInit::clone_init`] does, or the refusal, after which the parked init is gone and `req` unused.
-    fn claim(&self, parked: Parked, req: &CloneReq<'_>) -> Result<(i32, OwnedFd), OciError>;
+    /// of a clone: the same message a seed takes, on the init's own socket. A claimed init says nothing on that socket
+    /// once it takes the claim (the lead's (A) of 2026-11-09: no early answer), so the claim is taken at its first word
+    /// on `sync`, the read end of its sync pipe, which stays there for the handshake to read, and fails on its refusal or
+    /// its end on the socket, or on its silence past the claim's patience. Returns the parked init's pid and pidfd, the
+    /// park's, as [`CloneInit::clone_init`] returns a clone's, or why not, after which the parked init is gone and
+    /// `req` unused.
+    fn claim(
+        &self,
+        parked: Parked,
+        req: &CloneReq<'_>,
+        sync: BorrowedFd<'_>,
+    ) -> Result<(i32, OwnedFd), OciError>;
 
     /// Why this node's create seeds keep the agent's mount namespace, or `None` where they prune it (goal 5 plan
     /// step 2). A root node's prune, so a pruned-eligible container takes the pruned root path (no `pivot_root`)
@@ -1554,7 +1563,9 @@ impl Runtime {
         let claimed = match parked {
             // A failed claim falls back to a seed's clone of the same request, which the claim only borrowed;
             // the seeds count it by why, hung or refused, where they know it ([`CloneInit::claim`]).
-            Some(p) if p.flags == made_with && takes_parked => seeds.claim(p, &req).ok(),
+            Some(p) if p.flags == made_with && takes_parked => {
+                seeds.claim(p, &req, sync_r.as_fd()).ok()
+            }
             _ => None,
         };
         // A parked init's proc shows that init's pid namespace, so a create its init didn't take mounts its own:
@@ -3632,7 +3643,12 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
                 why: "no seed is free and 2 creates already wait for one".to_owned(),
             })
         }
-        fn claim(&self, _parked: Parked, _req: &CloneReq<'_>) -> Result<(i32, OwnedFd), OciError> {
+        fn claim(
+            &self,
+            _parked: Parked,
+            _req: &CloneReq<'_>,
+            _sync: BorrowedFd<'_>,
+        ) -> Result<(i32, OwnedFd), OciError> {
             Err(OciError::Broken("no init is parked here".to_owned()))
         }
         fn unpruned(&self) -> Option<ClassicReason> {
@@ -3766,7 +3782,12 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
             self.note("clone", &req);
             Err(OciError::Broken("refused for the test".to_owned()))
         }
-        fn claim(&self, _parked: Parked, req: &CloneReq<'_>) -> Result<(i32, OwnedFd), OciError> {
+        fn claim(
+            &self,
+            _parked: Parked,
+            req: &CloneReq<'_>,
+            _sync: BorrowedFd<'_>,
+        ) -> Result<(i32, OwnedFd), OciError> {
             self.note("claim", req);
             Err(OciError::Broken("refused for the test".to_owned()))
         }
