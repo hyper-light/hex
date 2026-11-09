@@ -201,13 +201,25 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
 - `crates/hex-gpu/src/nvml/sys.rs`: hex-gpu's NVIDIA telemetry (`docs/design/gpu-telemetry.md` G1). It loads
   NVML at run time, so a node without NVIDIA's driver starts and says why it reads no NVIDIA GPU: `dlopen`,
   `dlsym` and `dlerror` on Linux, `LoadLibraryExW` from System32 alone and `GetProcAddress` on Windows, each
-  resolved address transmuted to its NVML function's type (nvml.h). Through those pointers it calls
+  resolved address transmuted to its NVML function's type (nvml.h); the same loader and transmute load ADL
+  for `adl/sys.rs`. Through those pointers it calls
   `nvmlInit_v2`, `nvmlSystemGetDriverVersion`, `nvmlDeviceGetCount_v2`, `nvmlDeviceGetHandleByIndex_v2`,
   `nvmlDeviceGetName`, `nvmlDeviceGetPciInfo_v3`, `nvmlDeviceGetMemoryInfo` and
   `nvmlDeviceGetUtilizationRates`, each writing into the caller's frame. A device handle is `Send` and `Sync`
   (`unsafe impl`): NVML is thread-safe, and a handle stays valid until `nvmlShutdown`, which Hex never calls.
   Rust can express none of these foreign calls, the function pointers resolved at run time, nor an opaque
   handle's thread-safety, safely.
+- `crates/hex-gpu/src/adl/sys.rs`: hex-gpu's AMD telemetry on Windows (`docs/design/gpu-telemetry.md` G3).
+  It loads AMD's ADL (`atiadlxx.dll`, from System32 alone) at run time through `nvml/sys.rs`'s loader, so a
+  node without AMD's driver (ARM64 Windows among them) starts and says why it reads no AMD GPU; makes one ADL
+  context per `Gpus` with `ADL2_Main_Control_Create`, handed an allocator that refuses (every buffer is
+  Hex's own), and ends it with `ADL2_Main_Control_Destroy`; and through the resolved pointers calls
+  `ADL2_Adapter_NumberOfAdapters_Get`, `ADL2_Adapter_AdapterInfo_Get`, `ADL2_Adapter_MemoryInfo2_Get`,
+  `ADL2_Graphics_VersionsX2_Get`, `ADL2_New_QueryPMLogData_Get` and `ADL2_Adapter_VRAMUsage_Get`, each
+  writing into the caller's buffer (PMLog's with room behind it for a larger table than AMD's header
+  declares, the pointer the whole buffer's). A context is `Send` and `Sync` (`unsafe impl`): every call
+  through it takes `&mut`, so a shared reference reaches none. Rust can express none of these foreign
+  calls, the function pointers resolved at run time, nor a context's thread-safety, safely.
 
 ## 13. Lean code
 
