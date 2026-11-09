@@ -30,7 +30,7 @@ use hex_core::patience::Patience;
 use hex_core::wire::{self, Answer, Call, Header, Limits, Received, Request, Streams};
 
 use crate::MAX_LIST;
-use crate::copy::copy;
+use crate::copy::{copy, copy_in};
 
 /// What takes a call's answer in the event form ([`Core::begin`]), with its request's id (an exec's names
 /// its program): run once, on the thread that reads the connection, after the client's lock is let go.
@@ -1340,7 +1340,7 @@ fn settle(stdio: Stdio, ends: hex_api::Given) -> Result<hex_api::Given, Refusal>
     };
     let mut given = hex_api::Given::default();
     match (stdin, ends.stdin) {
-        (Some(pipe), Some(end)) => copy(pipe, std::fs::File::from(end), end_sending)?,
+        (Some(pipe), Some(end)) => copy_in(pipe, std::fs::File::from(end))?,
         (None, Some(end)) if ask.stdin => given.stdin = Some(end),
         (None, Some(_)) => return Err(unasked("stdin")),
         (_, None) => {}
@@ -1357,14 +1357,6 @@ fn settle(stdio: Stdio, ends: hex_api::Given) -> Result<hex_api::Given, Refusal>
         }
     }
     Ok(given)
-}
-
-/// A stream's end its stdin was copied into: its sending half ends, so the program sees its stdin end even while
-/// another holds the connection.
-fn end_sending(to: std::fs::File) {
-    #[cfg(unix)]
-    let _ = rustix::net::shutdown(&to, rustix::net::Shutdown::Write);
-    drop(to);
 }
 
 impl<T: Transport> Runtime for Core<T> {
