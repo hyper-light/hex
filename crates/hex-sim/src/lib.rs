@@ -16,6 +16,13 @@
 //! - [`generate`]: generated clusters and workloads from a seed.
 //! - [`replay`]: a recorded workload read from text, for replaying a real day.
 //! - [`packing`]: stranded capacity at a load, the measure of `AC-T7.4.3`.
+//! - [`danger`]: where a workload that trips a security signal may run again, by the kinds Hex places
+//!   (S8).
+//! - [`faults`]: the fault nemesis, each fault class against its detection and isolation bound (S8).
+//! - [`membership`]: SWIM with Lifeguard on memberlist's protocol, the competitor: crash detection and
+//!   slow-member false positives (S8).
+//! - [`swim`]: hyper-swim's own failure detector, the membership the design gives the node agent, vendored and
+//!   driven over a simulated LAN: the crash class's bound (S8, F1).
 
 #![cfg_attr(
     test,
@@ -31,10 +38,13 @@
 
 pub mod baseline;
 pub mod census;
+pub mod danger;
 pub mod error;
 pub mod fair;
+pub mod faults;
 pub mod generate;
 pub mod index;
+pub mod membership;
 pub mod model;
 pub mod packing;
 pub mod proximity;
@@ -43,6 +53,7 @@ pub mod rng;
 pub mod sim;
 pub mod spec;
 pub mod store;
+pub mod swim;
 pub mod trace;
 /// hyper-swim's Vivaldi engine, vendored unchanged from hyper-raft (`vendor/MANIFEST.toml`,
 /// `docs/design/hex-sim.md` H20): `scripts/vendor.py check` proves it is upstream's, byte for byte.

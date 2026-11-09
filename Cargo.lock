@@ -205,16 +205,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "hex-health"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "hex-node"
 version = "0.1.0"
 dependencies = [
  "hex-api",
  "hex-client",
  "hex-core",
+ "hex-health",
  "hex-runtime",
  "rustix",
  "serde_json",
  "tempfile",
+ "thiserror",
 ]
 
 [[package]]
@@ -237,9 +246,23 @@ dependencies = [
 name = "hex-sim"
 version = "0.1.0"
 dependencies = [
+ "hex-health",
+ "hyper-swim",
+ "hyper-timing",
  "proptest",
  "thiserror",
 ]
+
+[[package]]
+name = "hyper-swim"
+version = "0.1.0"
+dependencies = [
+ "hyper-timing",
+]
+
+[[package]]
+name = "hyper-timing"
+version = "0.1.0"
 
 [[package]]
 name = "indexmap"

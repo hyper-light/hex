@@ -266,7 +266,7 @@ graded into a continuous suspicion, and acted on with escalating, bounded, forgi
 - **Antagonists** by correlation, throttled with a cap (CPI²-style): a workload whose neighbours' CPI
   rises is throttled, not killed, for a bounded window.
 - **Repeat offenders** escalated with a forgiveness window (CrashLoopBackOff, Envoy ejection), the
-  ejection capped so a correlated fault can't drain a cell.
+  a node ejected only where the cell re-places its work, so a correlated fault can't drain a cell.
 - **Mass loss** rate-limited, because a mass failure looks like a partition (Borg); retries budgeted,
   because sustained retries drove more than half of 22 metastable outages (PF[20], `MI`).
 - **Agent-specific** faults — a stuck tool loop, quota exhaustion that looks like slowness, a partial
@@ -294,8 +294,8 @@ before its work fails) is the fail-slow drill.
 **What would falsify it.** A bad workload or node not deprioritised and isolated within the bound hex-sim
 sets for its fault class (implementation goal 5 states each: crash, gray/fail-slow, antagonist,
 agent-specific, dangerous; `AC-T7.10.3`'s disk-stall "before its work fails" is the one already fixed),
-a slow member's self-doubt still accusing healthy peers, or a correlated fault draining a cell past the
-ejection cap — each fixed at its cause.
+a slow member's self-doubt still accusing healthy peers, or a correlated fault ejecting a node whose
+work the cell can't re-place — each fixed at its cause.
 
 ## Where a bar must be measured, not cited
 
@@ -356,7 +356,10 @@ bench) shows its number of record:
    antagonist throttling, retry budgets, the agent-specific faults, and the dangerous-workload move to a
    stronger runtime class. Done when hex-sim's nemesis states and meets a detection-and-isolation bound
    for each fault class (crash, gray/fail-slow, antagonist, agent-specific, dangerous) and `AC-T7.10.3`
-   (disk-stall drain) passes.
+   (disk-stall drain) passes. Built on `cp/t7-sched-g5` (`docs/design/failure-isolation.md`, F1-F8):
+   every bound met over 1,000 seeds and the drill drained before work failed. The crash class is
+   measured on hyper-swim's own detector, vendored and driven by hex-sim, with memberlist's protocol
+   modelled beside it as the competitor; the node agent runs no membership yet.
 6. **Scale and shards (CP-T7.11):** done when `AC-T7.11.2` (1,000,000 on 10,000 in ≤120 s), `AC-T7.11.3`
    (≥10x kube-scheduler against kwok), `AC-T7.11.4` (≤4 KiB/workload) and `T-T7.11.1` (shard loss) pass.
 7. **Cells and regions (CP-T7.12, S7):** done when the differential suite passes on one node, one cell
