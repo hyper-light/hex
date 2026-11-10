@@ -8,7 +8,6 @@ fn catalog() -> Catalog {
 
 fn spec(name: &str, key: u64) -> BoxSpec {
     BoxSpec {
-        allocation: None,
         id: BoxId::new(name).unwrap(),
         bounds: Bounds::default(),
         class: ClassSpec::Oci(Box::new(hex_api::OciSpec {
@@ -20,6 +19,7 @@ fn spec(name: &str, key: u64) -> BoxSpec {
             hosts: Vec::new(),
         })),
         owner: None,
+        allocation: None,
         devices: vec![DeviceId {
             kind: DeviceKind::Gpu,
             key,
@@ -35,11 +35,11 @@ fn selected_identity_returns_only_its_native_binding() {
     assert_eq!(selected.len(), 1);
     assert_eq!(selected[0].info.id.key, 512);
     assert!(
-        matches!(&selected[0].binding, Binding::Hcs { location } if location == "PCIROOT(0)#PCI(0200)")
+        matches!(selected[0].binding(Route::Hcs), Some(Binding::Hcs { location }) if location == "PCIROOT(0)#PCI(0200)")
     );
     let selected = catalog.prepare(&spec("two", 256), &Records::new()).unwrap();
     assert!(
-        matches!(&selected[0].binding, Binding::Cdi { file, qualified } if file == "/private/fixture.json" && qualified == "fixture.test/gpu=a")
+        matches!(selected[0].binding(Route::Cdi), Some(Binding::Cdi { file, qualified }) if file == "/private/fixture.json" && qualified == "fixture.test/gpu=a")
     );
     assert!(
         catalog
@@ -154,4 +154,118 @@ fn absent_and_oversized_catalogs_are_distinguished() {
     assert!(Catalog::open(&path).is_err());
     std::fs::write(&path, b"hex-devices-1\n").unwrap();
     assert!(Catalog::open(&path).unwrap().entries().is_empty());
+}
+
+/// AC-T7.4.1: OCI and microVM routes for one physical GPU share one slot and retained holder.
+#[test]
+fn explicit_consistent_backend_aliases_keep_one_physical_entry_and_holder() {
+    let catalog = Catalog::parse(b"hex-devices-1\ngpu\t512\tother\t8192\thcs\tPCIROOT(0)#PCI(0200)\t\ngpu\t256\tsame\t4096\tshards-gpu\tpci:0000:01:00.0\t\ngpu\t256\tsame\t4096\tcdi\t/private/gpu.cdi\tfixture.test/gpu=a\ngpu\t256\tsame\t4096\tvfio\t0000:01:00.0\t7\n").unwrap();
+    assert_eq!(catalog.entries().len(), 2);
+    assert_eq!(catalog.entries()[0].info.id.key, 512);
+    assert_eq!(catalog.entries()[1].info.id.key, 256);
+    for route in [Route::Cdi, Route::ShardsGpu, Route::Vfio] {
+        let entries = catalog.entries_for(route).collect::<Vec<_>>();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].info.id.key, 256);
+        assert_eq!(entries[0].bindings().len(), 3);
+    }
+    assert_eq!(catalog.entries_for(Route::Hcs).count(), 1);
+    let held = spec("retained-alias", 256);
+    let records = BTreeMap::from([(
+        held.id.clone(),
+        Ok(BoxRecord::new(held.clone(), Phase::Creating, Vec::new())),
+    )]);
+    assert_eq!(
+        catalog.holder(held.devices[0], &records).unwrap(),
+        Some(&held.id)
+    );
+    assert!(
+        catalog
+            .prepare(&spec("another-backend", 256), &records)
+            .is_err()
+    );
+    assert!(catalog.prepare(&spec("independent", 512), &records).is_ok());
+    assert_eq!(catalog.conflict_ids(&held.devices).unwrap(), held.devices);
+}
+
+/// AC-T7.4.1: aliases cannot change physical metadata or make one backend choose between recipes.
+#[test]
+fn conflicting_alias_metadata_and_duplicate_routes_refuse() {
+    let first = "hex-devices-1\ngpu\t256\tsame\t4096\tcdi\t/private/a\tfixture.test/gpu=a\n";
+    for alias in [
+        "gpu\t256\tchanged\t4096\tshards-gpu\tpci:0000:01:00.0\t\n",
+        "gpu\t256\tsame\t8192\tshards-gpu\tpci:0000:01:00.0\t\n",
+        "gpu\t256\tsame\t4096\tcdi\t/private/a\tfixture.test/gpu=a\n",
+        "gpu\t256\tsame\t4096\tcdi\t/private/other\tfixture.test/gpu=b\n",
+    ] {
+        assert!(Catalog::parse(format!("{first}{alias}").as_bytes()).is_err());
+    }
+}
+
+/// AC-T7.4.1: a current-boot LUID declaration does not rename the stable identity or prove a join.
+#[test]
+fn luid_route_retains_stable_device_identity_without_claiming_native_correspondence() {
+    let catalog = Catalog::parse(
+        b"hex-devices-1\ngpu\t256\tsame\t4096\tshards-gpu\tluid:123456789abcdef0\t\n",
+    )
+    .unwrap();
+    let entry = catalog.entries().first().unwrap();
+    assert_eq!(entry.info.id.key, 256);
+    assert!(matches!(
+        entry.binding(Route::ShardsGpu),
+        Some(Binding::ShardsGpu {
+            physical: shards_api::PhysicalGpu::Luid(0x123456789abcdef0)
+        })
+    ));
+}
+
+/// AC-T7.4.1: a catalog label cannot grant trusted guest render authority or bypass host CDI.
+#[test]
+fn guest_recipe_is_separate_and_requires_exact_boot_owner_and_full_set() {
+    let catalog = Catalog::parse(b"hex-devices-1\ngpu\t256\tshards-renderer\t0\tguest-gpu\t/private/guest.cdi\thex.shards/gpu=256\n").unwrap();
+    assert_eq!(catalog.entries_for(Route::GuestGpu).count(), 1);
+    assert_eq!(catalog.entries_for(Route::Cdi).count(), 0);
+    let selected = spec("dedicated", 256);
+    assert!(catalog.cdi(&selected.devices).is_err());
+    let foreign = crate::guest::gpu::Authority {
+        owner: BoxId::new("foreign").unwrap(),
+        devices: selected.devices.clone(),
+    };
+    assert!(catalog.guest_cdi(&selected, &foreign).is_err());
+    let subset = crate::guest::gpu::Authority {
+        owner: selected.id.clone(),
+        devices: vec![
+            selected.devices[0],
+            DeviceId {
+                kind: DeviceKind::Gpu,
+                key: 512,
+            },
+        ],
+    };
+    assert!(catalog.guest_cdi(&selected, &subset).is_err());
+    for row in [
+        "gpu\t256\tshards-renderer\t0\tguest-gpu\t/private/g\thex.shards/gpu=512",
+        "gpu\t256\tshards-renderer\t4096\tguest-gpu\t/private/g\thex.shards/gpu=256",
+        "gpu\t256\tinvented-measured-model\t0\tguest-gpu\t/private/g\thex.shards/gpu=256",
+    ] {
+        assert!(Catalog::parse(format!("hex-devices-1\n{row}\n").as_bytes()).is_err());
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("guest.cdi");
+    std::fs::write(&path, br#"{"cdiVersion":"1.1.0","kind":"hex.shards/gpu","devices":[{"name":"256","containerEdits":{"deviceNodes":[{"path":"/dev/dri/renderD128","type":"c","major":226,"minor":128,"permissions":"rw"}]}}]}"#).unwrap();
+    let catalog = Catalog::parse(
+        format!(
+            "hex-devices-1\ngpu\t256\tshards-renderer\t0\tguest-gpu\t{}\thex.shards/gpu=256\n",
+            path.display()
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    let authority = crate::guest::gpu::Authority {
+        owner: selected.id.clone(),
+        devices: selected.devices.clone(),
+    };
+    let plan = catalog.guest_cdi(&selected, &authority).unwrap();
+    assert_eq!(plan.edits().unwrap().device_nodes.len(), 1);
+    assert!(catalog.cdi(&selected.devices).is_err());
 }

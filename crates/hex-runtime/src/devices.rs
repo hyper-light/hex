@@ -11,8 +11,15 @@ use hex_core::record::BoxRecord;
 
 /// A trusted administrator binds one physical resource to an existing native adapter.
 /// CDI hooks/paths and HCS location paths are backend configuration, never peer payloads.
+#[derive(Debug)]
 pub enum Binding {
     Cdi {
+        file: String,
+        qualified: String,
+    },
+    /// A dedicated VM's attachment receipt, accepted only with that initialized guest's immutable
+    /// boot authority. This recipe is not ordinary host CDI or measured GPU capacity.
+    GuestGpu {
         file: String,
         qualified: String,
     },
@@ -32,12 +39,52 @@ pub enum Binding {
     },
 }
 
+/// A native route is configuration only. Its initialized adapter must verify current hardware
+/// correspondence before publishing a capability; choosing a route never switches a host driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    Cdi,
+    GuestGpu,
+    Hcs,
+    ShardsGpu,
+    Vfio,
+}
+
+impl Binding {
+    pub fn route(&self) -> Route {
+        match self {
+            Self::Cdi { .. } => Route::Cdi,
+            Self::GuestGpu { .. } => Route::GuestGpu,
+            Self::Hcs { .. } => Route::Hcs,
+            Self::ShardsGpu { .. } => Route::ShardsGpu,
+            Self::Vfio { .. } => Route::Vfio,
+        }
+    }
+}
+
 pub struct Entry {
     pub info: DeviceInfo,
-    pub binding: Binding,
+    bindings: Vec<Binding>,
 }
 
 impl Entry {
+    pub fn binding(&self, route: Route) -> Option<&Binding> {
+        self.bindings
+            .iter()
+            .find(|binding| binding.route() == route)
+    }
+
+    pub fn bindings(&self) -> &[Binding] {
+        &self.bindings
+    }
+
+    fn group(&self) -> Option<u32> {
+        match self.binding(Route::Vfio) {
+            Some(Binding::Vfio { group, .. }) => Some(*group),
+            _ => None,
+        }
+    }
+
     pub fn report(&self, holder: Option<&BoxId>) -> Result<DeviceInfo, Refusal> {
         Ok(DeviceInfo {
             id: self.info.id,
@@ -178,10 +225,10 @@ impl Catalog {
         if lines.next() != Some("hex-devices-1") {
             return Err(invalid("unsupported or absent configuration version"));
         }
-        let mut catalog = Self::default();
+        let mut rows = Vec::new();
         for line in lines {
             // The existing scheduler uses u16 device indices; it cannot represent another entry.
-            if catalog.entries.len() > usize::from(u16::MAX) {
+            if rows.len() >= hex_api::MAX_DEVICES {
                 return Err(invalid(
                     "configuration exceeds the scheduler device index space",
                 ));
@@ -224,6 +271,21 @@ impl Catalog {
                     file: copy(source)?,
                     qualified: copy(selector)?,
                 },
+                "guest-gpu"
+                    if source.starts_with('/')
+                        && kind == DeviceKind::Gpu
+                        && model == "shards-renderer"
+                        && size == 0
+                        && selector
+                            .strip_prefix("hex.shards/gpu=")
+                            .and_then(|value| value.parse::<u64>().ok())
+                            == Some(key) =>
+                {
+                    Binding::GuestGpu {
+                        file: copy(source)?,
+                        qualified: copy(selector)?,
+                    }
+                }
                 "hcs" if !source.is_empty() && selector.is_empty() && kind == DeviceKind::Gpu => {
                     Binding::Hcs {
                         location: copy(source)?,
@@ -239,16 +301,18 @@ impl Catalog {
                             bus,
                             device,
                             function,
-                        } => {
+                        } => Some(
                             (u64::from(domain) << 16)
                                 | (u64::from(bus) << 8)
                                 | (u64::from(device) << 3)
-                                | u64::from(function)
-                        }
-                        shards_api::PhysicalGpu::MetalRegistry(id)
-                        | shards_api::PhysicalGpu::Luid(id) => id,
+                                | u64::from(function),
+                        ),
+                        shards_api::PhysicalGpu::MetalRegistry(id) => Some(id),
+                        // A LUID is current-boot identity, not the stable PCI DeviceId. L2 must
+                        // prove the native PNP/interface/KMT/UUID join before offering this route.
+                        shards_api::PhysicalGpu::Luid(_) => None,
                     };
-                    if native_key != key {
+                    if native_key.is_some_and(|native_key| native_key != key) {
                         return Err(invalid(
                             "Shards selector differs from its physical catalog identity",
                         ));
@@ -291,25 +355,62 @@ impl Catalog {
                 holder: None,
             };
             info.check()?;
-            catalog
-                .entries
-                .try_reserve(1)
-                .map_err(|_| allocation(bytes.len()))?;
-            catalog.entries.push(Entry { info, binding });
+            let mut bindings = Vec::new();
+            bindings.try_reserve_exact(1).map_err(|_| allocation(1))?;
+            bindings.push(binding);
+            rows.try_reserve(1).map_err(|_| allocation(bytes.len()))?;
+            rows.push((rows.len(), Entry { info, bindings }));
         }
-        let mut ids = Vec::new();
-        ids.try_reserve_exact(catalog.entries.len())
-            .map_err(|_| allocation(catalog.entries.len()))?;
-        ids.extend(catalog.entries.iter().map(|entry| entry.info.id));
-        ids.sort_unstable();
-        if ids.windows(2).any(|pair| pair.first() == pair.last()) {
-            return Err(invalid("duplicate physical device identity"));
+        // Sort once and coalesce explicit aliases; no per-row insertion shifts or second registry.
+        // First-report catalog order is restored after normalization. Routes per ID are bounded by
+        // distinct enum variants, and duplicate routes are refused even if text happens to agree.
+        rows.sort_unstable_by_key(|(order, entry)| (entry.info.id, *order));
+        let mut normalized: Vec<(usize, Entry)> = Vec::new();
+        normalized
+            .try_reserve_exact(rows.len())
+            .map_err(|_| allocation(rows.len()))?;
+        for (order, mut entry) in rows {
+            if let Some((_, previous)) = normalized
+                .last_mut()
+                .filter(|(_, previous)| previous.info.id == entry.info.id)
+            {
+                if previous.info.model != entry.info.model || previous.info.size != entry.info.size
+                {
+                    return Err(invalid("physical aliases disagree on model or size"));
+                }
+                for binding in &entry.bindings {
+                    if previous.binding(binding.route()).is_some() {
+                        return Err(invalid("duplicate native route for one physical identity"));
+                    }
+                }
+                previous
+                    .bindings
+                    .try_reserve_exact(entry.bindings.len())
+                    .map_err(|_| allocation(entry.bindings.len()))?;
+                previous.bindings.append(&mut entry.bindings);
+            } else {
+                normalized.push((order, entry));
+            }
         }
-        Ok(catalog)
+        normalized.sort_unstable_by_key(|(order, _)| *order);
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(normalized.len())
+            .map_err(|_| allocation(normalized.len()))?;
+        entries.extend(normalized.into_iter().map(|(_, entry)| entry));
+        Ok(Self { entries })
     }
 
     pub fn entries(&self) -> &[Entry] {
         &self.entries
+    }
+
+    /// Inspect only this adapter's configured routes. Absence grants no capability; another
+    /// backend's valid configuration must not make this adapter reject the whole catalog.
+    pub fn entries_for(&self, route: Route) -> impl Iterator<Item = &Entry> {
+        self.entries
+            .iter()
+            .filter(move |entry| entry.binding(route).is_some())
     }
 
     /// Canonical existing turn keys for a selection, including every catalogued alias of an
@@ -348,8 +449,8 @@ impl Catalog {
             let entry = indexed
                 .get(at)
                 .ok_or_else(|| invalid("device identity index disagrees"))?;
-            if let Binding::Vfio { group, .. } = &entry.binding {
-                groups.push(*group);
+            if let Some(group) = entry.group() {
+                groups.push(group);
             }
         }
         groups.sort_unstable();
@@ -358,7 +459,9 @@ impl Catalog {
         keys.try_reserve_exact(indexed.len())
             .map_err(|_| allocation(indexed.len()))?;
         for entry in indexed {
-            let group_alias = matches!(&entry.binding, Binding::Vfio { group, .. } if groups.binary_search(group).is_ok());
+            let group_alias = entry
+                .group()
+                .is_some_and(|group| groups.binary_search(&group).is_ok());
             if group_alias || selected.binary_search(&entry.info.id).is_ok() {
                 keys.push(entry.info.id);
             }
@@ -369,6 +472,21 @@ impl Catalog {
     /// Each file is read once per create; all selected files share the native config byte budget.
     /// A spec's globals are selected once, with its requested devices in request order.
     pub fn cdi<'a>(&'a self, devices: &[DeviceId]) -> Result<CdiPlan<'a>, Refusal> {
+        self.cdi_for(devices, Route::Cdi)
+    }
+
+    /// Dedicated guest receipts never enter ordinary CDI selection. The boot owner/full set check
+    /// lives here as well as in Node's native render-node validation, before any device effects.
+    pub fn guest_cdi<'a>(
+        &'a self,
+        spec: &BoxSpec,
+        authority: &crate::guest::gpu::Authority,
+    ) -> Result<CdiPlan<'a>, Refusal> {
+        authority.check(spec)?;
+        self.cdi_for(&spec.devices, Route::GuestGpu)
+    }
+
+    fn cdi_for<'a>(&'a self, devices: &[DeviceId], route: Route) -> Result<CdiPlan<'a>, Refusal> {
         if devices.len() > hex_api::MAX_DEVICES {
             return Err(invalid(
                 "selection exceeds the scheduler device index space",
@@ -384,12 +502,18 @@ impl Catalog {
                 .iter()
                 .find(|entry| entry.info.id == *id)
                 .ok_or_else(|| invalid("requested physical device has no native binding"))?;
-            let Binding::Cdi { file, qualified } = &entry.binding else {
-                return Err(Refusal::Platform {
-                    what: "device attachment",
-                    platform: "Linux OCI",
-                    why: "selected binding is not CDI".into(),
-                });
+            let (file, qualified) = match entry.binding(route) {
+                Some(Binding::Cdi { file, qualified }) if route == Route::Cdi => (file, qualified),
+                Some(Binding::GuestGpu { file, qualified }) if route == Route::GuestGpu => {
+                    (file, qualified)
+                }
+                _ => {
+                    return Err(Refusal::Platform {
+                        what: "device attachment",
+                        platform: "Linux OCI",
+                        why: "selected binding is not CDI".into(),
+                    });
+                }
             };
             if let Some((_, names)) = groups.iter_mut().find(|(path, _)| *path == file.as_str()) {
                 names
@@ -470,10 +594,7 @@ impl Catalog {
             self.entries
                 .iter()
                 .find(|entry| entry.info.id == id)
-                .and_then(|entry| match entry.binding {
-                    Binding::Vfio { group, .. } => Some(group),
-                    _ => None,
-                })
+                .and_then(Entry::group)
         };
         group(first).zip(group(second)).is_some_and(|(a, b)| a == b)
     }
@@ -696,8 +817,8 @@ mod authority_tests {
                 format!("hex-devices-1\ngpu\t{key}\tfixture\t4096\tshards-gpu\t{source}\t\n");
             let catalog = Catalog::parse(text.as_bytes()).unwrap();
             assert!(matches!(
-                catalog.entries().first().unwrap().binding,
-                Binding::ShardsGpu { .. }
+                catalog.entries().first().unwrap().binding(Route::ShardsGpu),
+                Some(Binding::ShardsGpu { .. })
             ));
         }
         for source in ["0", "NVIDIA", "metal:0", "pci:0000:01:20.0", "metal:2"] {

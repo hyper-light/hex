@@ -1399,21 +1399,16 @@ impl Node {
     /// checked against this host before anything is made: its root and each mount's source are there,
     /// and a layered root's writable layer can go where the node keeps bundles. What can't be is
     /// refused by name (CLAUDE.md §3).
-    fn render(
-        &self,
-        id: &BoxId,
-        spec: &OciSpec,
-        devices: &[hex_api::DeviceId],
-    ) -> Result<Source, Refusal> {
-        let dir = self.bundles.join(id.as_str());
+    fn render(&self, full: &BoxSpec, spec: &OciSpec) -> Result<Source, Refusal> {
+        let dir = self.bundles.join(full.id.as_str());
         let rendered = self.render_attachments(
+            full,
             spec,
             &Place {
                 dir: &dir,
                 owner: self.owner,
                 masked: &self.masked,
             },
-            devices,
         )?;
         match &spec.rootfs {
             Rootfs::Dir(root) => a_dir("rootfs.dir", root)?,
@@ -1670,7 +1665,7 @@ impl Runtime for Node {
         let source = match &spec.class {
             ClassSpec::Process => return self.create_process(spec),
             ClassSpec::Bundle(bundle) => Source::Given(bundle.clone()),
-            ClassSpec::Oci(oci) => self.render(&spec.id, oci, &spec.devices)?,
+            ClassSpec::Oci(oci) => self.render(&spec, oci)?,
         };
         let id = spec.id.clone();
         let assigned = !spec.devices.is_empty();

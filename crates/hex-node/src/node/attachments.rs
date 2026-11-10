@@ -3,18 +3,14 @@
 use super::*;
 use hex_api::{DeviceId, DeviceKind};
 use hex_core::cdi::{DeviceType, Edits};
-use hex_runtime::devices::{Binding, Catalog};
+use hex_runtime::devices::{Catalog, Route};
 
+mod guest;
 mod identity;
 
 impl Node {
     pub(super) fn hold_attachments(&self, devices: &[DeviceId]) -> Result<Vec<Turn<'_>>, Refusal> {
-        let mut ordered = Vec::new();
-        ordered
-            .try_reserve_exact(devices.len())
-            .map_err(|_| full(devices.len()))?;
-        ordered.extend_from_slice(devices);
-        ordered.sort_unstable();
+        let ordered = self.attachments.conflict_ids(devices)?;
         let mut held = Vec::new();
         held.try_reserve_exact(ordered.len())
             .map_err(|_| full(ordered.len()))?;
@@ -34,11 +30,8 @@ impl Node {
         reports
             .try_reserve_exact(self.attachments.entries().len())
             .map_err(|_| full(self.attachments.entries().len()))?;
-        for entry in self.attachments.entries() {
-            // The native Linux runtime implements CDI nodes/mounts/hooks, not an HCS mapping.
-            if !matches!(entry.binding, Binding::Cdi { .. })
-                || entry.info.id.kind == DeviceKind::Net
-            {
+        for entry in self.attachments.entries_for(Route::Cdi) {
+            if entry.info.id.kind == DeviceKind::Net {
                 return Err(Refusal::Platform {
                     what: "device attachment",
                     platform: "Linux OCI",
@@ -65,13 +58,32 @@ impl Node {
 
     pub(super) fn render_attachments(
         &self,
+        full: &BoxSpec,
         spec: &OciSpec,
         place: &Place<'_>,
-        devices: &[DeviceId],
     ) -> Result<Bundle, Refusal> {
-        let plan = self.attachments.cdi(devices)?;
+        let guest = self
+            .attachments
+            .entries_for(Route::GuestGpu)
+            .any(|entry| full.devices.contains(&entry.info.id));
+        let authority = if guest {
+            Some(guest::authority(full)?)
+        } else {
+            None
+        };
+        let plan = match &authority {
+            Some(authority) => self.attachments.guest_cdi(full, authority)?,
+            None => self.attachments.cdi(&full.devices)?,
+        };
         let edits = plan.edits()?;
-        let resolved = resolve(&edits, devices)?;
+        let resolved = match &authority {
+            Some(authority) => {
+                let nodes = resolve_nodes(&edits)?;
+                guest::check(full, authority, &nodes)?;
+                nodes
+            }
+            None => resolve(&edits, &full.devices)?,
+        };
         bundle::render_with_devices(spec, place, &edits, &resolved)
     }
 }
@@ -87,6 +99,34 @@ fn resolve<'a>(
     edits: &Edits<'a>,
     devices: &[DeviceId],
 ) -> Result<Vec<bundle::ResolvedNode<'a>>, Refusal> {
+    let nodes = resolve_nodes(edits)?;
+    let block_key = |node: &bundle::ResolvedNode<'_>| {
+        if node.kind == DeviceType::Block {
+            Some((u64::from(node.major) << u32::BITS) | u64::from(node.minor))
+        } else {
+            None
+        }
+    };
+    if devices
+        .iter()
+        .filter(|device| device.kind == DeviceKind::Block)
+        .any(|device| !nodes.iter().any(|node| block_key(node) == Some(device.key)))
+        || nodes.iter().filter_map(block_key).any(|key| {
+            !devices
+                .iter()
+                .any(|device| device.kind == DeviceKind::Block && device.key == key)
+        })
+    {
+        return Err(Refusal::Invalid {
+            what: "CDI block device assignment",
+            why: "selected device nodes disagree with reserved block identities".into(),
+        });
+    }
+    identity::check(&nodes, devices)?;
+    Ok(nodes)
+}
+
+fn resolve_nodes<'a>(edits: &Edits<'a>) -> Result<Vec<bundle::ResolvedNode<'a>>, Refusal> {
     let mut nodes = Vec::new();
     nodes
         .try_reserve_exact(edits.device_nodes.len())
@@ -119,29 +159,6 @@ fn resolve<'a>(
             file_mode: stat.st_mode & 0o7777,
         });
     }
-    let block_key = |node: &bundle::ResolvedNode<'_>| {
-        if node.kind == DeviceType::Block {
-            Some((u64::from(node.major) << u32::BITS) | u64::from(node.minor))
-        } else {
-            None
-        }
-    };
-    if devices
-        .iter()
-        .filter(|device| device.kind == DeviceKind::Block)
-        .any(|device| !nodes.iter().any(|node| block_key(node) == Some(device.key)))
-        || nodes.iter().filter_map(block_key).any(|key| {
-            !devices
-                .iter()
-                .any(|device| device.kind == DeviceKind::Block && device.key == key)
-        })
-    {
-        return Err(Refusal::Invalid {
-            what: "CDI block device assignment",
-            why: "selected device nodes disagree with reserved block identities".into(),
-        });
-    }
-    identity::check(&nodes, devices)?;
     Ok(nodes)
 }
 
