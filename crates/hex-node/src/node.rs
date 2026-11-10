@@ -864,8 +864,14 @@ impl Node {
         let state = match record.spec.class {
             // A process box runs when its cgroup holds a process; it has no `created` state.
             ClassSpec::Process => match self.root.get(id) {
-                Some(cg) if cg.populated()? => BoxState::Running,
-                _ => BoxState::Empty,
+                Some(cg) => match cg.populated_if_present()? {
+                    Some(true) => BoxState::Running,
+                    Some(false) => BoxState::Empty,
+                    // HEX-RT-15: a run can remove its cgroup after this inspect opened it.
+                    // Its pinned directory names the removed box, even if the id is used again.
+                    None => return Err(Refusal::NoSuchBox(id.clone())),
+                },
+                None => BoxState::Empty,
             },
             // An oci box follows the container's lifecycle: `created` until `start`, then `running`,
             // then `empty` once its init no longer runs (the oci state's `stopped`).
@@ -1785,7 +1791,12 @@ impl Runtime for Node {
         let mut out = Vec::new();
         for (id, record) in self.store.all()? {
             if let Ok(record) = record {
-                out.push(self.info(&record, false)?);
+                match self.info(&record, false) {
+                    Ok(info) => out.push(info),
+                    // HEX-RT-15: the list's record snapshot can outlive a run's cgroup.
+                    Err(Refusal::NoSuchBox(gone)) if gone == id => {}
+                    Err(why) => return Err(why),
+                }
             } else {
                 // A box whose record can't be read is reported as its id with an empty state rather
                 // than hidden; recovery is what cleans it up.

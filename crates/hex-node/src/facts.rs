@@ -373,10 +373,9 @@ mod tests {
         assert!(f.cpu.threads > 0, "{f:?}");
         assert!(f.mem.total > 0 && f.mem.free <= f.mem.total, "{f:?}");
         assert!(f.disk.total > 0 && f.disk.free <= f.disk.total, "{f:?}");
-        assert!(
-            f.cpu.cores.is_none_or(|c| c > 0 && c <= f.cpu.threads),
-            "{f:?}"
-        );
+        // CP-T7.4: physical cores describe the host; offered threads respect this process's
+        // affinity and CPU quota. A four-CPU node on a sixteen-core host keeps both facts.
+        assert!(f.cpu.cores.is_none_or(|c| c > 0), "{f:?}");
         if cfg!(target_os = "macos") {
             assert!(f.cpu.cores.is_some() && f.virt.hvf, "{f:?}");
         }
@@ -384,6 +383,23 @@ mod tests {
         let node = f.node(hex_sim::model::NodeId(0), &mut cluster).unwrap();
         assert_eq!(node.capacity.cpu_milli, u64::from(f.cpu.threads) * 1000);
         assert!(node.classes.count() > 0, "{node:?}");
+    }
+
+    /// CP-T7.4: CPU quota can offer fewer threads than the host has physical cores. Keep the
+    /// topology fact while charging placement only against the node's available parallelism.
+    #[test]
+    fn a_cpu_quota_bounds_capacity_without_rewriting_physical_cores() {
+        let f = Facts {
+            cpu: Cpu {
+                cores: Some(16),
+                threads: 4,
+            },
+            ..Facts::default()
+        };
+        let mut cluster = hex_sim::model::Cluster::single_owner(Vec::new(), Vec::new());
+        let node = f.node(hex_sim::model::NodeId(0), &mut cluster).unwrap();
+        assert_eq!(f.cpu.cores, Some(16));
+        assert_eq!(node.capacity.cpu_milli, 4_000);
     }
 
     /// CP-T7.4, GPU load from hex-gpu: do probe this machine's GPUs through the kept `Gpus`; expect

@@ -566,14 +566,41 @@ impl BoxCgroup {
 
     /// Whether any process runs in the box.
     pub fn populated(&self) -> Result<bool, Refusal> {
-        let text = self.read("cgroup.events")?;
-        core::populated(&text).ok_or_else(|| Refusal::Os {
+        self.parse_populated(&self.read("cgroup.events")?)
+    }
+
+    fn parse_populated(&self, text: &str) -> Result<bool, Refusal> {
+        core::populated(text).ok_or_else(|| Refusal::Os {
             op: "reading cgroup.events",
             why: format!(
                 "{}: no populated line",
                 self.dir.join("cgroup.events").display()
             ),
         })
+    }
+
+    /// Whether any process runs, or its mandatory events file disappeared during removal (HEX-RT-15). Reads
+    /// stay relative to this cgroup's pinned directory, so a new box at the same path cannot stand in for it.
+    /// Other open/read failures, invalid text and oversized files remain refusals.
+    pub fn populated_if_present(&self) -> Result<Option<bool>, Refusal> {
+        let fd = match self.open_file("cgroup.events", OFlags::RDONLY) {
+            Ok(fd) => fd,
+            Err(rustix::io::Errno::NOENT) => return Ok(None),
+            Err(e) => {
+                return Err(os_err(
+                    "reading a cgroup file",
+                    &self.dir.join("cgroup.events"),
+                    e,
+                ));
+            }
+        };
+        read_if_present(
+            MAX_CGROUP_FILE,
+            || self.dir.join("cgroup.events"),
+            |buf, at| rustix::io::pread(fd.as_fd(), buf, at),
+        )?
+        .map(|text| self.parse_populated(&text))
+        .transpose()
     }
 
     /// Sends `signal` to every process in the box; refused as not running when there is none.
@@ -868,28 +895,69 @@ fn cpu_max_holds(cg: &BoxCgroup, want: &str) -> bool {
 /// (`fs::read_to_string` takes one per file to size its buffer): an idle cgroup's check and baseline read a
 /// dozen on create's path. Refused past `max` bytes; `path` names the file in a refusal.
 fn read_fd(fd: BorrowedFd<'_>, max: usize, path: impl Fn() -> PathBuf) -> Result<String, Refusal> {
+    read_text(max, &path, |buf, at| rustix::io::pread(fd, buf, at)).map_err(|e| e.refusal(&path()))
+}
+
+/// Preserve a read errno until the caller decides whether removal is absence. Format and size failures are
+/// already typed refusals, and never count as removal.
+enum ReadFailure {
+    Io(rustix::io::Errno),
+    Refused(Refusal),
+}
+
+impl ReadFailure {
+    fn refusal(self, path: &Path) -> Refusal {
+        match self {
+            Self::Io(e) => os_err("reading a cgroup file", path, e),
+            Self::Refused(r) => r,
+        }
+    }
+}
+
+/// A removed kernfs file can fail after it was opened. A partial read does not prove presence once the next
+/// read reports removal; every other errno and every malformed or oversized text remains an error.
+fn read_if_present(
+    max: usize,
+    path: impl Fn() -> PathBuf,
+    read: impl FnMut(&mut [u8], u64) -> rustix::io::Result<usize>,
+) -> Result<Option<String>, Refusal> {
+    match read_text(max, &path, read) {
+        Ok(text) => Ok(Some(text)),
+        Err(ReadFailure::Io(rustix::io::Errno::NODEV | rustix::io::Errno::NOENT)) => Ok(None),
+        Err(e) => Err(e.refusal(&path())),
+    }
+}
+
+/// The same bounded descriptor read for strict and removal-aware callers; `read` is pread in production and
+/// can stand in for a removed kernfs file in a deterministic unit test.
+fn read_text(
+    max: usize,
+    path: &impl Fn() -> PathBuf,
+    mut read: impl FnMut(&mut [u8], u64) -> rustix::io::Result<usize>,
+) -> Result<String, ReadFailure> {
     let mut out = Vec::new();
     let mut buf = [0u8; READ_CHUNK];
     // From the file's start whatever its offset: a descriptor opened ahead is read more than once, through copies that
     // share it ([`BoxCgroup::open_ahead`]).
     loop {
         let at = u64::try_from(out.len()).unwrap_or(u64::MAX);
-        let n = rustix::io::pread(fd, &mut buf, at)
-            .map_err(|e| os_err("reading a cgroup file", &path(), e))?;
+        let n = read(&mut buf, at).map_err(ReadFailure::Io)?;
         if n == 0 {
             break;
         }
         out.extend_from_slice(buf.get(..n).unwrap_or_default());
         if out.len() > max {
-            return Err(Refusal::Os {
+            return Err(ReadFailure::Refused(Refusal::Os {
                 op: "reading a cgroup file",
                 why: format!("{} is over {max} bytes", path().display()),
-            });
+            }));
         }
     }
-    String::from_utf8(out).map_err(|e| Refusal::Os {
-        op: "reading a cgroup file",
-        why: format!("{} isn't UTF-8: {e}", path().display()),
+    String::from_utf8(out).map_err(|e| {
+        ReadFailure::Refused(Refusal::Os {
+            op: "reading a cgroup file",
+            why: format!("{} isn't UTF-8: {e}", path().display()),
+        })
     })
 }
 
@@ -1111,6 +1179,85 @@ mod tests {
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
+    }
+
+    /// HEX-RT-15: once the run supervisor removes a cgroup, its pinned directory must report absence even if
+    /// a new cgroup reuses its path. A present cgroup reports population; malformed text and real I/O failures
+    /// remain refusals, not absence.
+    #[test]
+    fn population_distinguishes_a_removed_pinned_cgroup_from_a_reused_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("box");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("cgroup.events"), "populated 0\n").unwrap();
+        let fd = rustix::fs::open(
+            &dir,
+            OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        let old = BoxCgroup {
+            dir: dir.clone(),
+            fd: Some(Arc::new(fd)),
+            opened: None,
+        };
+        assert_eq!(old.populated_if_present(), Ok(Some(false)));
+        fs::write(dir.join("cgroup.events"), "populated 1\n").unwrap();
+        assert_eq!(old.populated_if_present(), Ok(Some(true)));
+        fs::remove_file(dir.join("cgroup.events")).unwrap();
+        fs::remove_dir(&dir).unwrap();
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("cgroup.events"), "populated 1\n").unwrap();
+        assert_eq!(old.populated_if_present(), Ok(None));
+        let new = BoxCgroup::at(dir.clone());
+        assert_eq!(new.populated_if_present(), Ok(Some(true)));
+        assert!(
+            old.populated().is_err(),
+            "the strict API still refuses a removed file"
+        );
+        fs::write(dir.join("cgroup.events"), "populated malformed\n").unwrap();
+        assert!(new.populated_if_present().is_err());
+        fs::write(dir.join("cgroup.events"), [0xff]).unwrap();
+        assert!(new.populated_if_present().is_err());
+        fs::remove_file(dir.join("cgroup.events")).unwrap();
+        fs::create_dir(dir.join("cgroup.events")).unwrap();
+        assert!(
+            new.populated_if_present().is_err(),
+            "EISDIR is a read failure, not disappearance"
+        );
+    }
+
+    /// HEX-RT-15: kernel removal during the bounded read discards even an already-read population line.
+    /// Permission, device I/O and directory read errors are refusals, never absent cgroups.
+    #[test]
+    fn population_reads_treat_only_removed_kernfs_errors_as_absence() {
+        use rustix::io::Errno;
+        for removed in [Errno::NODEV, Errno::NOENT] {
+            let text = b"populated 1\n";
+            let got = read_if_present(
+                MAX_CGROUP_FILE,
+                || p("events"),
+                |buf, at| {
+                    if at == 0 {
+                        buf[..text.len()].copy_from_slice(text);
+                        Ok(text.len())
+                    } else {
+                        Err(removed)
+                    }
+                },
+            );
+            assert_eq!(got, Ok(None));
+        }
+        for failed in [Errno::ACCESS, Errno::IO, Errno::ISDIR] {
+            let got = read_if_present(MAX_CGROUP_FILE, || p("events"), |_, _| Err(failed));
+            assert!(matches!(
+                got,
+                Err(Refusal::Os {
+                    op: "reading a cgroup file",
+                    ..
+                })
+            ));
+        }
     }
 
     /// Goal 5 extended, step 6 (bench/competitive/probes/create_serial.md, run 12): a box's cgroup opened
