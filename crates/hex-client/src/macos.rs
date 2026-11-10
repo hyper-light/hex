@@ -9,6 +9,7 @@ use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use hex_api::Refusal;
 use hex_core::patience::Patience;
@@ -24,11 +25,16 @@ use crate::calls::{Core, Handle, KINDS, Lent, Sent, Shared, Take, Transport};
 
 /// How long a call waits for the macOS node agent's answer, and its send for room in the agent's socket, one wait a
 /// kind of call (`crate::calls::kind_of`'s order), as Linux's client waits (decision 9): twice the slowest answer this
-/// process has had to a call of that kind. MEASURING: no record of a macOS node's answers yet; each kind's
-/// `client.answer.<kind>` rows of `bench/competitive/probes/waits_census.md` from a macOS host will seed it, and until
-/// then a call waits for its answer alone.
+/// process has had to a call of that kind. Hello, scheduler operations and capacity use the exact per-profile
+/// maxima of the root-verified actual macOS/SSH guest census (AC-T7.4.1):
+/// `bench/sched/runtime-pools/calibration-macos-bba3d814.json`. These time wire replies, not workload success.
+/// Other operations remain measuring until their own actual macOS rows are recorded.
 static ANSWERS: [Patience; KINDS] = [
-    Patience::measuring("client.answer.hello"),
+    Patience::by_profile(
+        "client.answer.hello",
+        Duration::from_nanos(829_500),
+        Some(Duration::from_nanos(2_607_584)),
+    ),
     Patience::measuring("client.answer.create"),
     Patience::measuring("client.answer.start"),
     Patience::measuring("client.answer.exec"),
@@ -41,17 +47,61 @@ static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.answer.kill"),
     Patience::measuring("client.answer.exec_streams"),
     Patience::measuring("client.answer.run"),
-    Patience::measuring("client.answer.schedule.describe"),
-    Patience::measuring("client.answer.schedule.advertise"),
-    Patience::measuring("client.answer.schedule.submit"),
-    Patience::measuring("client.answer.schedule.hear_create"),
-    Patience::measuring("client.answer.schedule.hear_delete"),
-    Patience::measuring("client.answer.schedule.hear_control"),
-    Patience::measuring("client.answer.schedule.link_up"),
-    Patience::measuring("client.answer.schedule.retry"),
-    Patience::measuring("client.answer.schedule.delete"),
-    Patience::measuring("client.answer.schedule.status"),
-    Patience::measuring("client.answer.capacity"),
+    Patience::by_profile(
+        "client.answer.schedule.describe",
+        Duration::from_nanos(22_866_875),
+        Some(Duration::from_nanos(22_181_708)),
+    ),
+    Patience::by_profile(
+        "client.answer.schedule.advertise",
+        Duration::from_nanos(78_447_792),
+        Some(Duration::from_nanos(108_619_750)),
+    ),
+    Patience::by_profile(
+        "client.answer.schedule.submit",
+        Duration::from_nanos(162_546_792),
+        Some(Duration::from_nanos(401_317_333)),
+    ),
+    Patience::by_profile(
+        "client.answer.schedule.hear_create",
+        Duration::from_nanos(213_308_750),
+        Some(Duration::from_nanos(392_913_792)),
+    ),
+    Patience::by_profile(
+        "client.answer.schedule.hear_delete",
+        Duration::from_nanos(132_392_000),
+        Some(Duration::from_nanos(130_079_458)),
+    ),
+    Patience::by_profile(
+        "client.answer.schedule.hear_control",
+        Duration::from_nanos(116_103_292),
+        Some(Duration::from_nanos(119_427_250)),
+    ),
+    Patience::by_profile(
+        "client.answer.schedule.link_up",
+        Duration::from_nanos(139_333),
+        Some(Duration::from_nanos(250_209)),
+    ),
+    Patience::by_profile(
+        "client.answer.schedule.retry",
+        Duration::from_nanos(9_766_084),
+        Some(Duration::from_nanos(16_694_750)),
+    ),
+    Patience::by_profile(
+        "client.answer.schedule.delete",
+        Duration::from_nanos(83_190_542),
+        Some(Duration::from_nanos(125_323_459)),
+    ),
+    Patience::by_profile(
+        "client.answer.schedule.status",
+        Duration::from_nanos(4_420_667),
+        Some(Duration::from_nanos(7_264_708)),
+    ),
+    Patience::by_profile(
+        "client.answer.capacity",
+        Duration::from_nanos(13_172_125),
+        Some(Duration::from_nanos(14_254_417)),
+    ),
 ];
 
 /// A node agent, reached through its socket.

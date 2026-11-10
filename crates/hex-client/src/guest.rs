@@ -111,10 +111,18 @@ pub trait Link: Send + Sync + 'static {
 
 /// How long a call waits for the guest's node agent's answer, one wait a kind of call (`crate::calls::kind_of`'s
 /// order), as the socket's client waits (decision 9): twice the slowest answer this process has had to a call of
-/// that kind, through the guest. MEASURING: no record of a guest's answers yet, whose creates stage a root through
-/// the guest's relay; each kind's `client.guest.answer.<kind>` rows of `bench/competitive/probes/waits_census.md` will
-/// seed it, and until then a call waits for its answer alone.
+/// that kind, through the guest. On macOS, Hello and capacity use exact per-profile maxima from
+/// `bench/sched/runtime-pools/calibration-macos-bba3d814.json` (AC-T7.4.1). Hello begins after dial/token setup;
+/// neither row measures VM boot or workload completion. Other host platforms and operations remain measuring
+/// until their own actual rows are recorded; macOS evidence is not extrapolated across OS transports.
 static ANSWERS: [Patience; KINDS] = [
+    #[cfg(target_os = "macos")]
+    Patience::by_profile(
+        "client.guest.answer.hello",
+        Duration::from_nanos(202_583),
+        Some(Duration::from_nanos(197_042)),
+    ),
+    #[cfg(not(target_os = "macos"))]
     Patience::measuring("client.guest.answer.hello"),
     Patience::measuring("client.guest.answer.create"),
     Patience::measuring("client.guest.answer.start"),
@@ -138,6 +146,13 @@ static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.guest.answer.schedule.retry"),
     Patience::measuring("client.guest.answer.schedule.delete"),
     Patience::measuring("client.guest.answer.schedule.status"),
+    #[cfg(target_os = "macos")]
+    Patience::by_profile(
+        "client.guest.answer.capacity",
+        Duration::from_nanos(5_094_833),
+        Some(Duration::from_nanos(6_826_667)),
+    ),
+    #[cfg(not(target_os = "macos"))]
     Patience::measuring("client.guest.answer.capacity"),
 ];
 
