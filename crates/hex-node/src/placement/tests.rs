@@ -111,6 +111,14 @@ fn boot(dir: &Path, runtime: Arc<Counting>) -> Driver {
 }
 
 fn try_boot(dir: &Path, runtime: Arc<Counting>) -> Result<Driver, Error> {
+    try_boot_with_budget(dir, runtime, Budget { owned: 4, ran: 4 })
+}
+
+fn try_boot_with_budget(
+    dir: &Path,
+    runtime: Arc<Counting>,
+    budget: Budget,
+) -> Result<Driver, Error> {
     let (demand, _) = request();
     let nodes = [NodeSpec::new(
         NodeId(0),
@@ -124,11 +132,249 @@ fn try_boot(dir: &Path, runtime: Arc<Counting>) -> Result<Driver, Error> {
         NodeId(0),
         &nodes,
         &[],
-        Budget { owned: 4, ran: 4 },
+        budget,
         Pick::default(),
         dir,
         Runtimes::new([(Class::Oci, runtime as Arc<dyn Runtime>)]).unwrap(),
     )
+}
+
+fn durable_placement_files(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rec"))
+        .map(|path| {
+            (
+                path.file_name().unwrap().to_str().unwrap().to_owned(),
+                std::fs::read(path).unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// AC-T7.4.1: lowering admission below two held boxes neither deletes physical state nor blocks
+/// control. Equality with the smaller ceiling still refuses; only dropping below it admits again.
+#[test]
+fn lowered_record_budget_keeps_live_boxes_and_delete_control_until_below_ceiling() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = Arc::new(Counting::default());
+    let driver = try_boot_with_budget(dir.path(), rt.clone(), Budget { owned: 2, ran: 2 }).unwrap();
+    let (d, p) = request();
+    let (first, step) = driver.submit(d, p.clone()).unwrap();
+    local(&driver, step);
+    let (second, step) = driver.submit(d, p.clone()).unwrap();
+    local(&driver, step);
+    let physical = [
+        driver.physical_id(first).unwrap(),
+        driver.physical_id(second).unwrap(),
+    ];
+    // Two retained rows of each kind plus an authorized third row of the other kind need
+    // six control slots including epoch, even though max(current sum, retained sum) is five.
+    for mixed in [Budget { owned: 1, ran: 3 }, Budget { owned: 3, ran: 1 }] {
+        assert_eq!(driver.set_budget(mixed).unwrap(), 6);
+        assert_eq!(driver.control_bound().unwrap(), 6);
+    }
+    driver.set_budget(Budget { owned: 1, ran: 1 }).unwrap();
+    assert_eq!(rt.list().unwrap().len(), physical.len());
+    for (key, id) in [first, second].into_iter().zip(&physical) {
+        assert_eq!(driver.status(key).unwrap().unwrap().physical, *id);
+        assert_eq!(rt.sim.inspect(id).unwrap().id, *id);
+    }
+    assert!(matches!(
+        driver.submit(d, p.clone()),
+        Err(Error::Core(Stop::Full { bound: 1, .. }))
+    ));
+    local(&driver, driver.delete(first).unwrap());
+    assert!(matches!(
+        rt.sim.inspect(&physical[0]),
+        Err(Refusal::NoSuchBox(_))
+    ));
+    assert_eq!(rt.sim.inspect(&physical[1]).unwrap().id, physical[1]);
+    assert!(matches!(
+        driver.submit(d, p.clone()),
+        Err(Error::Core(Stop::Full { bound: 1, .. }))
+    ));
+    local(&driver, driver.delete(second).unwrap());
+    assert!(rt.list().unwrap().is_empty());
+    let (third, step) = driver.submit(d, p).unwrap();
+    local(&driver, step);
+    assert_eq!(rt.creates.load(Ordering::SeqCst), 3);
+    assert_eq!(rt.list().unwrap().len(), 1);
+    local(&driver, driver.delete(third).unwrap());
+    assert!(rt.list().unwrap().is_empty());
+}
+
+/// AC-T7.4.1/LB03: a smaller reboot ceiling recovers every original physical ID/namespace without
+/// another Runtime.create, while new admission observes the small ceiling rather than the read floor.
+#[test]
+fn smaller_record_budget_reboot_preserves_identity_without_granting_recovery_room() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = Arc::new(Counting::default());
+    let driver = try_boot_with_budget(dir.path(), rt.clone(), Budget { owned: 2, ran: 2 }).unwrap();
+    let (d, p) = request();
+    let mut kept = Vec::new();
+    for _ in 0..2 {
+        let (key, step) = driver.submit(d, p.clone()).unwrap();
+        local(&driver, step);
+        kept.push((key, driver.physical_id(key).unwrap()));
+    }
+    let namespace = driver.namespace().to_owned();
+    drop(driver);
+    let recovered =
+        try_boot_with_budget(dir.path(), rt.clone(), Budget { owned: 1, ran: 1 }).unwrap();
+    local(&recovered, recovered.take_recovered().unwrap());
+    assert_eq!(recovered.namespace(), namespace);
+    assert_eq!(rt.creates.load(Ordering::SeqCst), kept.len());
+    assert_eq!(rt.list().unwrap().len(), kept.len());
+    for (key, physical) in &kept {
+        let status = recovered.status(*key).unwrap().unwrap();
+        assert!(status.created);
+        assert_eq!(status.physical, *physical);
+        assert_eq!(rt.sim.inspect(physical).unwrap().id, *physical);
+    }
+    assert!(matches!(
+        recovered.submit(d, p.clone()),
+        Err(Error::Core(Stop::Full { bound: 1, .. }))
+    ));
+    for (key, _) in kept {
+        local(&recovered, recovered.delete(key).unwrap());
+    }
+    let (key, step) = recovered.submit(d, p.clone()).unwrap();
+    local(&recovered, step);
+    assert!(matches!(
+        recovered.submit(d, p),
+        Err(Error::Core(Stop::Full { bound: 1, .. }))
+    ));
+    assert_eq!(rt.creates.load(Ordering::SeqCst), 3);
+    local(&recovered, recovered.delete(key).unwrap());
+    assert!(rt.list().unwrap().is_empty());
+}
+
+/// AC-T7.4.1: migrating a legacy epoch lacking read_budget retains its full own/ran rows and
+/// physical identities, writes read metadata, and never turns the compatibility ceiling into admission.
+#[test]
+fn legacy_read_budget_migration_retains_rows_and_small_active_admission() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = Arc::new(Counting::default());
+    let driver = try_boot_with_budget(dir.path(), rt.clone(), Budget { owned: 2, ran: 2 }).unwrap();
+    let (d, p) = request();
+    let mut kept = Vec::new();
+    for _ in 0..2 {
+        let (key, step) = driver.submit(d, p.clone()).unwrap();
+        local(&driver, step);
+        kept.push((key, driver.physical_id(key).unwrap()));
+    }
+    let namespace = driver.namespace().to_owned();
+    drop(driver);
+    let epoch = dir.path().join("epoch.rec");
+    let mut legacy: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&epoch).unwrap()).unwrap();
+    assert!(
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("read_budget")
+            .is_some()
+    );
+    std::fs::write(&epoch, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    let mut before = durable_placement_files(dir.path());
+    before.remove("epoch.rec");
+    let recovered =
+        try_boot_with_budget(dir.path(), rt.clone(), Budget { owned: 1, ran: 1 }).unwrap();
+    let mut after = durable_placement_files(dir.path());
+    after.remove("epoch.rec");
+    assert_eq!(after, before);
+    let rewritten: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&epoch).unwrap()).unwrap();
+    assert_eq!(rewritten["namespace"], legacy["namespace"]);
+    assert_eq!(rewritten["read_budget"]["owned"].as_u64(), Some(2));
+    assert_eq!(rewritten["read_budget"]["ran"].as_u64(), Some(2));
+    assert_eq!(recovered.namespace(), namespace);
+    local(&recovered, recovered.take_recovered().unwrap());
+    assert_eq!(rt.creates.load(Ordering::SeqCst), kept.len());
+    assert_eq!(rt.list().unwrap().len(), kept.len());
+    assert!(matches!(
+        recovered.submit(d, p),
+        Err(Error::Core(Stop::Full { bound: 1, .. }))
+    ));
+    for (key, physical) in kept {
+        assert_eq!(recovered.physical_id(key).unwrap(), physical);
+        local(&recovered, recovered.delete(key).unwrap());
+    }
+    assert!(rt.list().unwrap().is_empty());
+}
+
+/// AC-T7.4.1: malformed counts and checked count/entry overflow are refused before runtime effects;
+/// neither a damaged epoch nor the associated durable own/ran rows may be silently rewritten/deleted.
+#[test]
+fn corrupt_or_overflow_read_budget_refuses_before_runtime_inspect_or_create() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = Arc::new(Counting::default());
+    let driver = try_boot_with_budget(dir.path(), rt.clone(), Budget { owned: 2, ran: 2 }).unwrap();
+    let (d, p) = request();
+    let (_, step) = driver.submit(d, p).unwrap();
+    local(&driver, step);
+    drop(driver);
+    let path = dir.path().join("epoch.rec");
+    let original: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let creates = rt.creates.load(Ordering::SeqCst);
+    let inspects = rt.inspects.load(Ordering::SeqCst);
+    let deletes = rt.deletes.load(Ordering::SeqCst);
+    for metadata in [
+        serde_json::Value::Null,
+        serde_json::json!({"owned":"2","ran":2}),
+        serde_json::json!({"owned":-1,"ran":2}),
+        serde_json::json!({"owned":2}),
+        serde_json::json!({"owned":u64::MAX,"ran":u64::MAX}),
+        serde_json::json!({"owned":u64::MAX / 2,"ran":0}),
+    ] {
+        let mut corrupt = original.clone();
+        corrupt["read_budget"] = metadata;
+        std::fs::write(&path, serde_json::to_vec(&corrupt).unwrap()).unwrap();
+        let before = durable_placement_files(dir.path());
+        assert!(matches!(
+            try_boot_with_budget(dir.path(), rt.clone(), Budget { owned: 1, ran: 1 }),
+            Err(Error::Core(Stop::Damaged(_)))
+        ));
+        assert_eq!(rt.inspects.load(Ordering::SeqCst), inspects);
+        assert_eq!(rt.creates.load(Ordering::SeqCst), creates);
+        assert_eq!(rt.deletes.load(Ordering::SeqCst), deletes);
+        assert_eq!(durable_placement_files(dir.path()), before);
+        assert_eq!(rt.list().unwrap().len(), 1);
+    }
+}
+
+/// AC-T7.4.1: a larger admission ceiling cannot precede its durable epoch envelope. A failed
+/// atomic write leaves the old ceiling effective and preserves existing physical cleanup authority.
+#[test]
+fn failed_durable_budget_growth_does_not_admit_another_runtime_create() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = Arc::new(Counting::default());
+    let driver = try_boot_with_budget(dir.path(), rt.clone(), Budget { owned: 1, ran: 1 }).unwrap();
+    let (d, p) = request();
+    let (key, step) = driver.submit(d, p.clone()).unwrap();
+    local(&driver, step);
+    let physical = driver.physical_id(key).unwrap();
+    let before = durable_placement_files(dir.path());
+    let blocked = dir.path().join("epoch.tmp");
+    std::fs::create_dir(&blocked).unwrap();
+    assert!(matches!(
+        driver.set_budget(Budget { owned: 2, ran: 2 }),
+        Err(Error::Core(Stop::Io(_)))
+    ));
+    assert_eq!(durable_placement_files(dir.path()), before);
+    assert!(matches!(
+        driver.submit(d, p),
+        Err(Error::Core(Stop::Full { bound: 1, .. }))
+    ));
+    assert_eq!(rt.creates.load(Ordering::SeqCst), 1);
+    assert_eq!(rt.list().unwrap().len(), 1);
+    assert_eq!(rt.sim.inspect(&physical).unwrap().id, physical);
+    std::fs::remove_dir(blocked).unwrap();
+    local(&driver, driver.delete(key).unwrap());
+    assert!(rt.list().unwrap().is_empty());
 }
 
 fn local(driver: &Driver, step: Step) -> Step {
