@@ -220,3 +220,15 @@ at this input pin. This selective import includes no Firecracker adapter, Node
 registration or native capability proof. The owner is extending normalized
 per-backend routes in a successor; mixed-route and boot authority semantics must
 be coherent before the real CLI is ready.
+
+## PID1 selected-renderer initialization source
+
+After mounting proc/sys/dev/shares and before starting the guest node, PID1 calls
+L2's exact signed57 `guest::gpu::initialize(state)`. Only paired immutable boot
+authority can generate its selected render-node CDI/catalog; CPU-only guests
+return None. This hook is not a native grant by itself. L1's dedicated GuestGpu
+route must independently validate boot authority, the exact box/full set and
+actual render-node identity before create, and host metadata must not be inferred
+from a virtio ordinal or zero telemetry. That complete route and native effects
+are still in progress; no current Linux compile or VM result is claimed for this
+hook.

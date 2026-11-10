@@ -300,6 +300,10 @@ fn init() -> Result<(), (u8, String)> {
     let exe = std::env::current_exe().map_err(|e| fail(format!("finding /init: {e}")))?;
     let socket = Path::new(RUN).join("node.sock");
     let state = Path::new(STATE);
+    // AC-T7.4.1: only immutable host boot authority can materialize the selected renderer's
+    // guest catalog; do this before the node reads its configured attachment routes.
+    let _ = hex_runtime::guest::gpu::initialize(state)
+        .map_err(|why| fail(format!("initializing guest GPU authority: {why}")))?;
     let node = start(
         &exe,
         &[
