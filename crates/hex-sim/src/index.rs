@@ -211,8 +211,6 @@ struct Slot {
     kvm: bool,
     builds: u32,
     benchmarks: u32,
-    used_by_class: [Resources; Class::COUNT],
-    runtime_pools: [Option<RuntimePool>; Class::COUNT],
 }
 
 /// A GPU's load as one share, in millionths: the larger of its utilisation and its memory in use, as
@@ -231,7 +229,24 @@ fn gpu_idle(devices: &[Device], held: &[u16]) -> u64 {
         .fold(0, u64::saturating_add)
 }
 
-impl Slot {
+// CP-T7.4: declarations and per-class accounting stay out of the copied hot Slot. Like
+// devices/held, this side storage is authoritative by dense node id. Each declaration vector
+// contains only that node's actual pools (at most Class::COUNT); empty nodes allocate no payload.
+#[derive(Debug, Clone)]
+struct RuntimeState {
+    used_by_class: [Resources; Class::COUNT],
+    pools: Vec<RuntimePool>,
+}
+
+impl RuntimeState {
+    fn new(node: &NodeSpec) -> Result<Self, SimError> {
+        node.check_runtime_pools()?;
+        Ok(Self {
+            used_by_class: [Resources::default(); Class::COUNT],
+            pools: node.runtime_pools.clone(),
+        })
+    }
+
     fn pool_used(&self, classes: Classes) -> Option<Resources> {
         let mut used = Resources::default();
         for class in Class::ALL {
@@ -242,14 +257,13 @@ impl Slot {
         Some(used)
     }
 
-    fn runtime_holds(&self, class: Class, need: &Resources) -> bool {
+    fn holds(&self, class: Class, need: &Resources) -> bool {
         #[cfg(test)]
         if IGNORE_RUNTIME_POOLS.get() {
             return true;
         }
-        self.runtime_pools
+        self.pools
             .iter()
-            .flatten()
             .find(|pool| pool.classes.has(class))
             .is_none_or(|pool| {
                 self.pool_used(pool.classes)
@@ -257,10 +271,14 @@ impl Slot {
                     .is_some_and(|free| free.holds(need))
             })
     }
+}
+
+impl Slot {
     /// The verdict on `demand` here, `devices` the node's and `free(i)` whether device `i` is free.
     fn verdict(
         &self,
         demand: &Demand,
+        runtime: &RuntimeState,
         devices: &[Device],
         free: impl Fn(usize) -> bool,
     ) -> Verdict {
@@ -304,7 +322,7 @@ impl Slot {
                 return Verdict::NoDevice;
             }
         }
-        if !self.free.holds(need) || !self.runtime_holds(class, need) {
+        if !self.free.holds(need) || !runtime.holds(class, need) {
             return Verdict::NoRoom;
         }
         if (need.gpus > 0 || ask.devices()) && !fits_devices(devices, free, need.gpus, ask) {
@@ -416,6 +434,8 @@ pub struct FitIndex {
     costs: Costs,
     /// By node id; ids are dense from 0.
     slots: Vec<Slot>,
+    /// Per-class reservations and actual pool declarations, by node id; never copied with Slot.
+    runtime: Vec<RuntimeState>,
     /// Each node's devices, by node id.
     devices: Vec<Vec<Device>>,
     /// The workload holding each of a node's devices, until it is deleted.
@@ -436,19 +456,11 @@ fn amounts(r: &Resources) -> lb::Amounts {
     [r.cpu_milli, r.mem_bytes, r.disk_bytes, u64::from(r.gpus)]
 }
 
-fn runtime_pools(node: &NodeSpec) -> Result<[Option<RuntimePool>; Class::COUNT], SimError> {
-    node.check_runtime_pools()?;
-    let mut pools = [None; Class::COUNT];
-    for (slot, pool) in pools.iter_mut().zip(&node.runtime_pools) {
-        *slot = Some(*pool);
-    }
-    Ok(pools)
-}
-
 impl FitIndex {
     /// Nodes' ids must be dense from 0, in order.
     pub fn new(nodes: &[NodeSpec]) -> Result<Self, SimError> {
         let mut slots = Vec::with_capacity(nodes.len());
+        let mut runtime = Vec::with_capacity(nodes.len());
         let (mut devices, mut held) = (
             Vec::with_capacity(nodes.len()),
             Vec::with_capacity(nodes.len()),
@@ -471,9 +483,8 @@ impl FitIndex {
                 kvm: node.virt.kvm,
                 builds: 0,
                 benchmarks: 0,
-                used_by_class: [Resources::default(); Class::COUNT],
-                runtime_pools: runtime_pools(node)?,
             });
+            runtime.push(RuntimeState::new(node)?);
             devices.push(node.devices.clone());
             held.push(vec![None; node.devices.len()]);
         }
@@ -502,6 +513,7 @@ impl FitIndex {
         Ok(Self {
             costs: Costs::new(nodes.len()),
             slots,
+            runtime,
             devices,
             held,
             ix,
@@ -539,7 +551,10 @@ impl FitIndex {
             self.devices.get(at).map_or(&[][..], Vec::as_slice),
             self.held.get(at).map_or(&[][..], Vec::as_slice),
         );
-        slot.verdict(demand, devices, |i| {
+        let Some(runtime) = self.runtime.get(at) else {
+            return Verdict::NoRoom;
+        };
+        slot.verdict(demand, runtime, devices, |i| {
             held.get(i).is_some_and(Option::is_none)
         })
     }
@@ -574,20 +589,18 @@ impl FitIndex {
     pub(crate) fn check_refresh_node(&self, node: &NodeSpec) -> Result<(), SimError> {
         let at = usize::try_from(node.id.0).map_err(|_| SimError::UnknownNode(node.id))?;
         let old = self.slot(node.id)?;
-        let pools = runtime_pools(node)?;
+        node.check_runtime_pools()?;
+        let runtime = self.runtime.get(at).ok_or(SimError::UnknownNode(node.id))?;
+        let pools = &node.runtime_pools;
         for class in Class::ALL {
-            let used = old
+            let used = runtime
                 .used_by_class
                 .get(class.index())
                 .ok_or(SimError::Resources(node.id))?;
             if *used != Resources::default() {
                 // Availability gates new admission; existing boxes keep their cleanup authority.
-                let was_pooled = old
-                    .runtime_pools
-                    .iter()
-                    .flatten()
-                    .any(|pool| pool.classes.has(class));
-                let remains_pooled = pools.iter().flatten().any(|pool| pool.classes.has(class));
+                let was_pooled = runtime.pools.iter().any(|pool| pool.classes.has(class));
+                let remains_pooled = pools.iter().any(|pool| pool.classes.has(class));
                 if was_pooled && !remains_pooled {
                     return Err(SimError::Config(
                         "refreshed facts remove a held runtime pool",
@@ -595,8 +608,8 @@ impl FitIndex {
                 }
             }
         }
-        for pool in pools.iter().flatten() {
-            let used = old
+        for pool in pools {
+            let used = runtime
                 .pool_used(pool.classes)
                 .ok_or(SimError::Resources(node.id))?;
             if !pool.capacity.holds(&used) {
@@ -652,8 +665,16 @@ impl FitIndex {
         let (old_capacity, old_bucket) = (old.capacity, bucket(&old.free, self.last));
         let builds = old.builds;
         let benchmarks = old.benchmarks;
-        let used_by_class = old.used_by_class;
-        let runtime_pools = runtime_pools(node)?;
+        let runtime = self
+            .runtime
+            .get_mut(at)
+            .ok_or(SimError::UnknownNode(node.id))?;
+        // Reserve before changing any logical state; a node reuses its own bounded declaration
+        // allocation across refreshes, without shifting other nodes or appending history.
+        runtime
+            .pools
+            .try_reserve_exact(node.runtime_pools.len().saturating_sub(runtime.pools.len()))
+            .map_err(|_| SimError::Config("the index cannot reserve refreshed runtime pools"))?;
         let slot = self
             .slots
             .get_mut(at)
@@ -667,9 +688,9 @@ impl FitIndex {
             kvm: node.virt.kvm,
             builds,
             benchmarks,
-            used_by_class,
-            runtime_pools,
         };
+        runtime.pools.clear();
+        runtime.pools.extend_from_slice(&node.runtime_pools);
         if let Some(devices) = self.devices.get_mut(at) {
             *devices = node.devices.clone();
         }
@@ -947,7 +968,8 @@ impl FitIndex {
         let slot = self.slot(node)?;
         // Recovery also takes already-running work, whose policy filters may now differ.
         // Resource constraints are unconditional; policy selection remains verdict's job.
-        if !slot.free.holds(&demand.need) || !slot.runtime_holds(demand.class, &demand.need) {
+        let runtime = self.runtime.get(at).ok_or(SimError::UnknownNode(node))?;
+        if !slot.free.holds(&demand.need) || !runtime.holds(demand.class, &demand.need) {
             return Err(SimError::Resources(node));
         }
         let held = self.bound(at, demand).ok_or(SimError::Resources(node))?;
@@ -1006,11 +1028,15 @@ impl FitIndex {
         if !slot.capacity.holds(&next.free) {
             return Err(SimError::Resources(node));
         }
-        let used = next
+        let runtime = self
+            .runtime
+            .get_mut(at)
+            .ok_or(SimError::UnknownNode(node))?;
+        let used = runtime
             .used_by_class
             .get_mut(demand.class.index())
             .ok_or(SimError::Resources(node))?;
-        *used = class_used(used).ok_or(SimError::Resources(node))?;
+        let next_used = class_used(used).ok_or(SimError::Resources(node))?;
         match demand.kind {
             Kind::Build => next.builds = count(slot.builds).ok_or(SimError::Resources(node))?,
             Kind::Benchmark => {
@@ -1019,6 +1045,7 @@ impl FitIndex {
             Kind::Plain | Kind::Session => {}
         }
         let (from, to) = (bucket(&slot.free, self.last), bucket(&next.free, self.last));
+        *used = next_used;
         *slot = next;
         self.ix.relink(node.0, from, to);
         Ok(Key::of(node, &next.free))
@@ -1072,6 +1099,69 @@ mod tests {
             class,
             ..plain(res(100, mem, 0))
         }
+    }
+
+    /// CP-T7.4: refresh reuses bounded declarations without allocating payload for empty nodes.
+    #[test]
+    fn runtime_pool_side_storage_reuses_each_nodes_declarations() {
+        let mut nodes = nodes(&[res(4_000, 1_024 << 20, 0); 2]);
+        let mut index = FitIndex::new(&nodes).unwrap();
+        assert!(
+            index
+                .runtime
+                .iter()
+                .all(|state| state.pools.capacity() == 0)
+        );
+        nodes[0].runtime_pools = Class::ALL
+            .into_iter()
+            .map(|class| RuntimePool {
+                classes: Classes::NONE.with(class),
+                capacity: res(4_000, 128 << 20, 0),
+            })
+            .collect();
+        index.refresh_node(&nodes[0]).unwrap();
+        let declarations = index.runtime[0].pools.as_ptr();
+        let capacity = index.runtime[0].pools.capacity();
+        let all_pools = nodes[0].runtime_pools.clone();
+        for count in [1, 0, Class::COUNT] {
+            nodes[0].runtime_pools = all_pools.iter().take(count).copied().collect();
+            index.refresh_node(&nodes[0]).unwrap();
+            assert_eq!(index.runtime[0].pools, nodes[0].runtime_pools);
+            assert_eq!(index.runtime[0].pools.as_ptr(), declarations);
+            assert_eq!(index.runtime[0].pools.capacity(), capacity);
+            assert_eq!(index.runtime[1].pools.capacity(), 0);
+        }
+        let demand = pool_demand(Class::Shards, 64 << 20);
+        index.take(NodeId(0), W, &demand).unwrap();
+        assert_eq!(index.verdict(NodeId(0), &demand).unwrap(), Verdict::Admits);
+        index.give(NodeId(0), W, &demand).unwrap();
+        assert_eq!(index.runtime[0].pools.as_ptr(), declarations);
+        assert_eq!(index.runtime[0].pools.capacity(), capacity);
+    }
+
+    /// CP-T7.4: failure after calculating resources must not publish either half of a ledger update.
+    #[test]
+    fn runtime_pool_side_ledger_stays_atomic_when_kind_charge_fails() {
+        let node = pool_node(Classes::NONE.with(Class::Shards), 64 << 20);
+        let mut index = FitIndex::new(std::slice::from_ref(&node)).unwrap();
+        let demand = pool_demand(Class::Shards, 64 << 20);
+        let held = index.take(NodeId(0), W, &demand).unwrap();
+        let wrong_kind = Demand {
+            kind: Kind::Build,
+            ..demand
+        };
+        assert_eq!(
+            index.give(NodeId(0), W, &wrong_kind),
+            Err(SimError::Resources(NodeId(0)))
+        );
+        assert_eq!(index.key(NodeId(0)).unwrap(), held);
+        assert_eq!(index.verdict(NodeId(0), &demand).unwrap(), Verdict::NoRoom);
+        let mut missing_pool = node.clone();
+        missing_pool.runtime_pools.clear();
+        assert!(index.refresh_node(&missing_pool).is_err());
+        index.give(NodeId(0), W, &demand).unwrap();
+        index.refresh_node(&missing_pool).unwrap();
+        assert_eq!(index.verdict(NodeId(0), &demand).unwrap(), Verdict::Admits);
     }
 
     /// AC-T7.4.1: the real 633MiB-in-632MiB counterexample must fail before a guest create.
