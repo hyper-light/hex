@@ -526,18 +526,25 @@ pub enum SimFixture {
     Process,
     Bundle,
     Spec,
+    Firecracker,
+    Shards,
 }
 
 impl SimFixture {
     fn oci(&self, act: &Act) -> ClassSpec {
-        ClassSpec::Oci(Box::new(OciSpec {
+        let workload = Box::new(OciSpec {
             rootfs: Rootfs::Dir("/rootfs".into()),
             init: self.program(act),
             mounts: Vec::new(),
             hostname: None,
             network: Network::Private,
             hosts: Vec::new(),
-        }))
+        });
+        match self {
+            Self::Firecracker => ClassSpec::Firecracker(workload),
+            Self::Shards => ClassSpec::Shards(workload),
+            Self::Process | Self::Bundle | Self::Spec => ClassSpec::Oci(workload),
+        }
     }
 }
 
@@ -553,7 +560,7 @@ impl Fixture for SimFixture {
             class: match self {
                 Self::Process => ClassSpec::Process,
                 Self::Bundle => ClassSpec::Bundle("/bundle".into()),
-                Self::Spec => self.oci(&Act::Wait),
+                Self::Spec | Self::Firecracker | Self::Shards => self.oci(&Act::Wait),
             },
             owner: None,
         }
@@ -565,7 +572,7 @@ impl Fixture for SimFixture {
             bounds: Bounds::default(),
             class: match self {
                 Self::Process => ClassSpec::Process,
-                Self::Bundle | Self::Spec => self.oci(act),
+                Self::Bundle | Self::Spec | Self::Firecracker | Self::Shards => self.oci(act),
             },
             owner: None,
         }

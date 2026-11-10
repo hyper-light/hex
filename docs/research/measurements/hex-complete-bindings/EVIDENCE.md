@@ -26,8 +26,6 @@ invalid guest workload and cleanup. Local scoped rustfmt completed; **no builds
 or tests have run**. ROOT owns wire tags 2/3 and spec tags 3/4, shared exports,
 CLI registration and combined checks. L2/L3 own their downstream matches.
 
-## Firecracker source research
-
 ## Source checkpoint 2: one physical slot across initialized backends
 
 `model::Device.classes: Classes` records the actual adapter mask. Old JSON and
@@ -53,6 +51,29 @@ and unverified. The new masks permit only real adapter ceilings; they do not
 establish that those native adapters are implemented or validated yet.
 
 ## Firecracker source research (continued)
+
+The first focused API attempt used exact ROOT `9d9dccfb` plus owned changes
+through `9b54f18b`, source archive SHA256
+`c083b83df04783ebe9a6914b6661667b755f1c42d46afc434f60db9d2927187a`, owned patch
+SHA256 `324ec54aef7160093ed511251bee4ff6ad9721c322b71ede7b8a3e5ed2afb69c`.
+Admitted d132, needs cpus=1,mem=4g,disk=12g, nice10/jobs1/testthreads1, private
+`~/.cache/hex-complete-bindings/check9b54-v1/{source,target,cargo,temp}` and
+precise no-sync stdin archives. Command: `cargo test --locked -p hex-api --lib
+explicit_microvm_backends_roundtrip_and_validate_the_guest_workload -- --exact
+spec::tests::explicit_microvm_backends_roundtrip_and_validate_the_guest_workload
+--test-threads=1`. Exit101 at compile: ROOT-owned differential.rs needed exhaustive
+new backend fixture mappings. No tests executed. Retained `api.log` SHA256
+`e964b240e146a44b88be85e5160736e630bf014ac0660dec962681c7b7f3c118` on d132.
+Owned SimFixture variants now preserve those backend classes; ROOT maps them.
+
+ROOT source review identified insertion shifts in the initial sorted alias
+index. The successor collects fallibly, sorts once by native identity, coalesces
+linearly, then sorts by first-report position. This keeps original order with
+O(n log n) sorting rather than quadratic insertion shifts, without a cache or
+infallible map. This is source analysis of a new feature, not a performance
+measurement or a claimed live regression fix. Telemetry never publishes a native
+offer on its own. The new macOS physical ceiling permits only validated GPU
+adapters; legacy/synthetic masks remain OCI-only and native effect proof is owed.
 
 Official main on 2026-11-10 was
 `778a26c0594c80025ed798088a66c2511ba618de` (API 1.19.0-dev), with PCI support

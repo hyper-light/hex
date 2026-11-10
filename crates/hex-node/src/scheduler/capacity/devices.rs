@@ -28,10 +28,13 @@ fn collect_offers(
     if reports.len() > Class::COUNT {
         return Err(invalid("more attachment reports than placement classes"));
     }
-    let mut devices: Vec<Device> = Vec::new();
-    // Sorted native identities index the same physical slots. The input class count and each
-    // report's u16 address space bound this temporary; no persistent discovery cache is kept.
-    let mut identities: Vec<(hex_api::DeviceId, usize, Option<&hex_api::BoxId>)> = Vec::new();
+    struct Candidate<'a> {
+        id: hex_api::DeviceId,
+        device: Device,
+        holder: Option<&'a hex_api::BoxId>,
+        order: usize,
+    }
+    let mut candidates: Vec<Candidate<'_>> = Vec::new();
     let mut classes = Classes::NONE;
     let own_prefix = format!("hex-place-{namespace}-");
     for (class, report) in reports {
@@ -48,16 +51,10 @@ fn collect_offers(
                 "device offers require an initialized native attachment adapter",
             ));
         }
-        devices
+        candidates
             .try_reserve_exact(report.devices.len())
             .map_err(|_| Refusal::Exhausted {
                 what: "runtime device facts",
-                bound: report.devices.len(),
-            })?;
-        identities
-            .try_reserve_exact(report.devices.len())
-            .map_err(|_| Refusal::Exhausted {
-                what: "runtime device identities",
                 bound: report.devices.len(),
             })?;
         for offer in &report.devices {
@@ -105,48 +102,73 @@ fn collect_offers(
                 };
                 (model, offer.size, GpuLoad::default())
             };
-            match identities.binary_search_by_key(&offer.id, |entry| entry.0) {
-                Ok(at) => {
-                    let (_, index, holder) = identities
-                        .get(at)
-                        .ok_or_else(|| invalid("attachment identity index disagrees"))?;
-                    let previous = devices
-                        .get_mut(*index)
-                        .ok_or_else(|| invalid("attachment device index disagrees"))?;
-                    if previous.model != model
-                        || previous.size != size
-                        || *holder != offer.holder.as_ref()
-                    {
-                        return Err(invalid(
-                            "backend aliases disagree on physical metadata or holder",
-                        ));
-                    }
-                    previous.classes = previous.classes.with(*class);
-                    continue;
-                }
-                Err(at) => {
-                    if devices.len() >= hex_api::MAX_DEVICES {
-                        return Err(invalid(
-                            "combined physical devices exceed the scheduler index space",
-                        ));
-                    }
-                    identities.insert(at, (offer.id, devices.len(), offer.holder.as_ref()));
-                }
-            }
-            devices.push(Device {
-                kind,
-                key: Some(offer.id.key),
-                available: offer
-                    .holder
-                    .as_ref()
-                    .is_none_or(|holder| holder.as_str().starts_with(&own_prefix)),
-                classes: Classes::NONE.with(*class),
-                model,
-                size,
-                load,
+            candidates.push(Candidate {
+                id: offer.id,
+                holder: offer.holder.as_ref(),
+                order: candidates.len(),
+                device: Device {
+                    kind,
+                    key: Some(offer.id.key),
+                    available: offer
+                        .holder
+                        .as_ref()
+                        .is_none_or(|holder| holder.as_str().starts_with(&own_prefix)),
+                    classes: Classes::NONE.with(*class),
+                    model,
+                    size,
+                    load,
+                },
             });
         }
     }
+    // Sort once and coalesce linearly: insertion into a sorted Vec would shift every following
+    // identity for an adversarial catalog order. Total candidates are bounded by three reports
+    // of at most MAX_DEVICES entries. These temporary sorts allocate no additional storage.
+    candidates.sort_unstable_by_key(|candidate| candidate.id);
+    let mut aliases: Vec<Candidate<'_>> = Vec::new();
+    aliases
+        .try_reserve_exact(candidates.len().min(hex_api::MAX_DEVICES))
+        .map_err(|_| Refusal::Exhausted {
+            what: "runtime device aliases",
+            bound: candidates.len().min(hex_api::MAX_DEVICES),
+        })?;
+    for candidate in candidates {
+        if let Some(previous) = aliases
+            .last_mut()
+            .filter(|previous| previous.id == candidate.id)
+        {
+            if previous.device.model != candidate.device.model
+                || previous.device.size != candidate.device.size
+                || previous.holder != candidate.holder
+            {
+                return Err(invalid(
+                    "backend aliases disagree on physical metadata or holder",
+                ));
+            }
+            for class in Class::ALL {
+                if candidate.device.classes.has(class) {
+                    previous.device.classes = previous.device.classes.with(class);
+                }
+            }
+            previous.order = previous.order.min(candidate.order);
+        } else {
+            if aliases.len() >= hex_api::MAX_DEVICES {
+                return Err(invalid(
+                    "combined physical devices exceed the scheduler index space",
+                ));
+            }
+            aliases.push(candidate);
+        }
+    }
+    aliases.sort_unstable_by_key(|candidate| candidate.order);
+    let mut devices = Vec::new();
+    devices
+        .try_reserve_exact(aliases.len())
+        .map_err(|_| Refusal::Exhausted {
+            what: "runtime device facts",
+            bound: aliases.len(),
+        })?;
+    devices.extend(aliases.into_iter().map(|candidate| candidate.device));
     Ok(devices)
 }
 
