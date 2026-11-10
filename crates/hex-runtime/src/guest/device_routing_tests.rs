@@ -24,11 +24,11 @@ fn physical_claims_reach_the_configured_backend_route_for_create_and_run() {
         route: backend,
     };
     let spec = BoxSpec {
-        allocation: None,
         id: BoxId::new("router-selected-device").unwrap(),
         bounds: hex_api::Bounds::default(),
         class: ClassSpec::Process,
         owner: None,
+        allocation: None,
         devices: vec![hex_api::DeviceId {
             kind: hex_api::DeviceKind::Gpu,
             key: 256,
@@ -171,5 +171,35 @@ fn conformance_accepts_every_supported_host_backend() {
     assert_eq!(
         shards_api::conformance::hosts_without_a_backend_are_named(&subject),
         Ok(())
+    );
+}
+
+/// AC-T7.4.1: backend-explicit Shards cannot be hidden as Windows native OCI;
+/// ordinary configured routing still owns native OCI and process work.
+#[test]
+fn exact_shards_bypasses_native_ordinary_route_without_relabeling_oci() {
+    let runtime = WithGuest {
+        process: hex_api::sim::SimRuntime::new(),
+        oci: GuestRuntime::new(
+            Arc::new(shards_api::sim::SimGuests::new(|_| {
+                shards_api::End::PowerOff
+            })),
+            config(),
+        ),
+        route: |_host, _class| Ok(Side::Host),
+    };
+    let payload = match oci(Rootfs::Dir("/rootfs".into()), Vec::new()).class {
+        ClassSpec::Oci(payload) => payload,
+        _ => unreachable!(),
+    };
+    assert_eq!(
+        runtime.route(&ClassSpec::Oci(payload.clone())),
+        Ok(Side::Host)
+    );
+    assert_eq!(runtime.route(&ClassSpec::Shards(payload)), Ok(Side::Guest));
+    assert_eq!(runtime.route(&ClassSpec::Process), Ok(Side::Host));
+    assert!(
+        !runtime.oci.classes().contains(&Class::Shards),
+        "uninitialized Books/cost is no capability"
     );
 }

@@ -168,3 +168,72 @@ process; macOS/Windows render in process, with Windows launcher/job semantics
 also relevant. Exact kernel/process/job/driver resource witnesses and the error
 case remain ROOT-owned and unverified. No complete cleanup/absence claim follows
 from model End values or source inspection.
+
+
+## Same-owner Books and initialized cost successor (source only)
+
+Consumes exact shared Catalog/Books API14e2c1979dea3ea1a925e8c86561b360d4987175,
+RuntimeCost/Allocation APIcc4dae242599991de6c86419b7c166ffe425137e and ROOT
+Lifecycle cause export6d7f24fe. No test/build result is claimed for this successor.
+ROOT actual d83 guest compile retained E0624 for private Booted::host_info;
+this source carries pub(super) and ROOT is authorized to apply that one line to
+its old integrated source independently.
+
+GuestRuntime::bind_books(Weak<dyn devices::Books>)->Result<(),Refusal> initializes
+one inline OnceLock. Rebinding is refused; same pointer registration is idempotent;
+owner death remains a refusal. No Arc::new/Box::new slot/transaction allocation.
+Linux registration coerces existing Arc<Node> to Arc<dyn Books> then downgrades.
+macOS/Windows use existing Arc<Recorded<WithGuest<P>>> the same way; ROOT wires
+post-Arc registration, L3 implements Books on the sole Store/method/device Turns.
+No second Recorded, Store, holder ledger or strong Arc cycle is added.
+
+GuestRuntime::owns_record(spec) is uses_books && (explicit Shards || selected
+devices). L3 Recover::owns_records is route(spec.class)==Guest && that predicate.
+Ordinary CPU OCI keeps its existing outer Recorded lifecycle. Dedicated create
+enters shared stack transaction once, validates all sole-Store holders, puts original
+BoxSpec Creating before launch effects, then Ready only after host class/id checks.
+Failed create retains Creating. Dedicated methods reread original class/spec under
+that same method/device ownership. Delete puts Deleting and removes only after
+native deletion returns proof; uncertainty preserves original grants. VM receipts
+remain process/boot receipts only. Public recorded_box is a routing snapshot, never
+a turn or grant. WithGuest consults persisted class before native inspect and forces
+exact Shards to Guest; ordinary configured Windows OCI remains Host. L3 direct async
+forwarding must hold canonical Turns until reply and normalize Inspect to the retained
+original class. ROOT CLI registration/recovery integration is still owed.
+
+with_runtime_cost requires the single L1 RuntimeCost profile and exact evidence id;
+fixed CPU/memory floor and ceiling equal configured vcpus*1000 and MiB*(1<<20).
+The shared cost.allocate checks guest allowance, explicit quanta and host allowance.
+Dedicated capacity starts with the SAME owner's native physical pool, measured device
+facts and catalog.holder over sole records; it no longer appends report(None).
+Capacity.cost is that initialized profile. Missing measured cost cannot advertise
+Shards via classes or create a dedicated VM. Before launch allocation.cost must equal
+that profile, allocation.guest CPU/memory must equal configured actual VM and unchanged
+workload caps must remain covered. No separate formula/charge or guessed overhead.
+The host allocation is retained by original host record; rewritten inner native OCI
+clears that host allocation so the VMM/relay overhead is not charged twice.
+Scheduler candidate/admission propagation and native measurements remain L1/ROOT inputs.
+
+Kernel boot authority is fallibly reserved within Linux COMMAND_LINE_SIZE2048 before
+formatting. Oversized or noncanonical selections fail before Intent/VM effects.
+Selected route lookup does not fall through to an unrelated shared CPU guest after
+terminal or missing dedicated receipt. Recovery requires exact retained receipt;
+stop reconstruction uses immutable selector/vCPU/memory even if configured selector
+changed, though missing current conflict catalog may still prevent canonical turn
+acquisition and must not be treated as absence. Inner metadata normalizes only exact
+owned BoxId; foreign boxes refuse.
+
+Primary resource precedent: Kubernetes Pod Overhead accounts runtime overhead during
+scheduling and cgroup sizing, https://kubernetes.io/docs/concepts/scheduling-eviction/pod-overhead/.
+We consume its scheduling-before-effects principle, not its cluster constants. Its
+runtime overhead is analogous to this one profile; the exact formula/types are L1's.
+
+New focused controls (UNRUN): same-owner/rebind/dead weak registration; missing/forged/
+stale/smaller cost receipt; exact canonical transaction entry and nonready refusal;
+backend-explicit route with Windows ordinary Host; forged boot owner/set/class and
+kernel byte overflow. Earlier dedicated reentry/sibling/CPU lock and stop models
+remain source only unless ROOT reports exact results. Native renderer selection ACK,
+physical/helper termination and Windows PCI/PNP/KMT-LUID live correlation remain
+UNVERIFIED. In particular Some End can reflect failed upstream observation; neither
+that value nor VMM PID exit alone proves selected renderer workers/helpers ended.
+All R01–R16 gaps in this document remain binding; no source checkpoint is completion.

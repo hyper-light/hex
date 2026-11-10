@@ -94,12 +94,12 @@ pub fn rewrite(
     };
     Ok(Rewritten {
         spec: BoxSpec {
-            allocation,
             id,
             bounds,
             class,
             owner,
             devices,
+            allocation,
         },
         items,
     })

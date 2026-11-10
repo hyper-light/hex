@@ -5,6 +5,7 @@
 //! call over [`hex_client::guest::Client`]. Shards' existing KVM/HVF/WHP adapters cover the supported
 //! hosts; the public seam recognizes them, and the actual backend checks host capabilities at boot.
 
+mod books;
 mod dedicated;
 pub mod gpu;
 pub mod held;
@@ -15,7 +16,7 @@ pub mod shares;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use hex_api::{
@@ -289,6 +290,8 @@ pub struct GuestRuntime {
     /// through it holds no thread while the guest answers.
     dedicated: Mutex<Vec<dedicated::Slot>>,
     gpu_catalog: Option<Arc<crate::devices::Catalog>>,
+    books: OnceLock<Weak<dyn crate::devices::Books>>,
+    runtime_cost: Option<hex_api::RuntimeCost>,
     /// What joins each guest's evented connection to the node's loop ([`GuestRuntime::join_loop`]).
     joins: Mutex<Option<Arc<dyn Joins>>>,
 }
@@ -392,6 +395,8 @@ impl GuestRuntime {
             record: None,
             dedicated: Mutex::new(Vec::new()),
             gpu_catalog: None,
+            books: OnceLock::new(),
+            runtime_cost: None,
             joins: Mutex::new(None),
         }
     }
@@ -689,10 +694,7 @@ impl GuestRuntime {
         id: &BoxId,
         call: impl FnOnce(&Booted) -> Result<T, Refusal>,
     ) -> Result<T, Refusal> {
-        let running = match self.selected_running(id)? {
-            Some(booted) => Some(booted),
-            None => self.running()?,
-        };
+        let running = self.booted_for(id)?;
         match running {
             Some(b) => call(&b),
             None => Err(Refusal::NoSuchBox(id.clone())),
@@ -761,6 +763,9 @@ impl Runtime for GuestRuntime {
                 why: "the guest runs only oci".to_owned(),
             });
         }
+        if self.uses_books() && class == Class::Shards {
+            return self.native_capacity().map(Some);
+        }
         let booted = self.guest()?;
         let capacity = booted.client.capacity(Class::Oci)?.ok_or_else(|| {
             Refusal::Broken("the guest node reported no resource pool".to_owned())
@@ -769,29 +774,16 @@ impl Runtime for GuestRuntime {
             .guest
             .identity()
             .map_err(|why| refusal("reading the guest pool identity", &why))?;
-        let mut capacity = guest_capacity(capacity, &self.config, &identity)?;
-        if let Some(catalog) = &self.gpu_catalog {
-            for entry in catalog
-                .entries()
-                .iter()
-                .filter(|entry| matches!(entry.binding, crate::devices::Binding::ShardsGpu { .. }))
-            {
-                capacity
-                    .devices
-                    .try_reserve(1)
-                    .map_err(|_| Refusal::Exhausted {
-                        what: "guest GPU capacity",
-                        bound: hex_api::MAX_DEVICES,
-                    })?;
-                capacity.devices.push(entry.report(None)?);
-            }
-        }
-        capacity.check()?;
+        let capacity = guest_capacity(capacity, &self.config, &identity)?;
         Ok(Some(capacity))
     }
 
     fn classes(&self) -> Vec<Class> {
-        vec![Class::Oci, Class::Shards]
+        if self.uses_books() && self.runtime_cost.is_some() {
+            vec![Class::Oci, Class::Shards]
+        } else {
+            vec![Class::Oci]
+        }
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
@@ -805,21 +797,25 @@ impl Runtime for GuestRuntime {
         if let ClassSpec::Oci(oci) | ClassSpec::Shards(oci) = &spec.class {
             rewrite::check(oci)?;
         }
-        if !spec.devices.is_empty() || matches!(spec.class, ClassSpec::Shards(_)) {
-            return self.create_selected(spec);
+        if self.owns_record(&spec) {
+            return self.create_recorded(spec);
         }
-        let rewritten = self.rewrite_spec(spec)?;
-        let b = self.guest()?;
-        self.warm_if_changed()?;
-        self.create_in(&b, rewritten)
+        if !spec.devices.is_empty() || matches!(spec.class, ClassSpec::Shards(_)) {
+            return Err(Refusal::Broken(
+                "a dedicated guest needs the initialized native record authority".into(),
+            ));
+        }
+        self.create_payload(spec)
     }
 
     fn start(&self, id: &BoxId) -> Result<(), Refusal> {
-        self.with(id, |b| b.client.start(id))
+        self.call_recorded(id, true, || self.with(id, |b| b.client.start(id)))
     }
 
     fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
-        self.with(id, |b| b.client.exec(id, program, stdio))
+        self.call_recorded(id, true, || {
+            self.with(id, |b| b.client.exec(id, program, stdio))
+        })
     }
 
     fn run(
@@ -837,15 +833,17 @@ impl Runtime for GuestRuntime {
     }
 
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
-        self.with(id, |b| b.client.signal(id, signal))
+        self.call_recorded(id, true, || self.with(id, |b| b.client.signal(id, signal)))
     }
 
     fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
-        self.with(id, |b| b.host_info(b.client.inspect(id)?))
+        self.call_recorded(id, false, || {
+            self.with(id, |b| b.host_info(b.client.inspect(id)?))
+        })
     }
 
     fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
-        self.with(id, |b| b.client.usage(id))
+        self.call_recorded(id, false, || self.with(id, |b| b.client.usage(id)))
     }
 
     fn list(&self) -> Result<Vec<BoxInfo>, Refusal> {
@@ -878,6 +876,28 @@ impl Runtime for GuestRuntime {
     }
 
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
+        if self.uses_books()
+            && let Some(record) = self.recorded_box(id)?
+            && self.owns_record(&record.spec)
+        {
+            return self.delete_recorded(id);
+        }
+        self.delete_payload(id)
+    }
+}
+
+impl GuestRuntime {
+    fn create_payload(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
+        if !spec.devices.is_empty() || matches!(spec.class, ClassSpec::Shards(_)) {
+            return self.create_selected(spec);
+        }
+        let rewritten = self.rewrite_spec(spec)?;
+        let b = self.guest()?;
+        self.warm_if_changed()?;
+        self.create_in(&b, rewritten)
+    }
+
+    fn delete_payload(&self, id: &BoxId) -> Result<(), Refusal> {
         if self.delete_selected(id)? {
             return Ok(());
         }
@@ -890,12 +910,13 @@ impl Runtime for GuestRuntime {
             Err(why) => Err(why),
         }
     }
-}
 
-impl GuestRuntime {
     fn rewrite_spec(&self, mut spec: BoxSpec) -> Result<rewrite::Rewritten, Refusal> {
         // The guest's native runtime executes the same OCI payload. The backend-explicit
         // class belongs to the host endpoint and is retained by its durable BoxRecord.
+        // Host allocation/overhead is retained only by the canonical host record;
+        // the inner native OCI runtime enforces the unchanged workload bounds.
+        spec.allocation = None;
         spec.class = match spec.class {
             ClassSpec::Shards(oci) => ClassSpec::Oci(oci),
             other => other,
@@ -967,8 +988,15 @@ pub struct WithGuest<P> {
 impl<P: Runtime> WithGuest<P> {
     /// The configured backend route, shared with recovery; it never selects a device.
     pub fn route(&self, class: &ClassSpec) -> Result<Side, Refusal> {
+        if matches!(class, ClassSpec::Shards(_)) {
+            return Ok(Side::Guest);
+        }
         (self.route)(&self.process, class)
     }
+    pub fn bind_books(&self, books: Weak<dyn crate::devices::Books>) -> Result<(), Refusal> {
+        self.oci.bind_books(books)
+    }
+
     /// The host's own runtime, which runs the `process` class: a node's recovery takes its boxes back
     /// through it (native plan step 8).
     pub fn host(&self) -> &P {
@@ -1008,6 +1036,9 @@ impl<P: Runtime> WithGuest<P> {
             Side::Host => (&self.process, &self.oci),
             Side::Guest => (&self.oci, &self.process),
         };
+        if self.oci.uses_books() {
+            return Ok(this);
+        }
         match other.inspect(&spec.id) {
             Ok(_) => Err(Refusal::Exists(spec.id.clone())),
             Err(Refusal::NoSuchBox(_)) => Ok(this),
@@ -1018,6 +1049,16 @@ impl<P: Runtime> WithGuest<P> {
     /// The runtime holding `id`, or [`Refusal::NoSuchBox`]: the host's, asked first as it answers
     /// without a guest, then the guest's.
     fn holder(&self, id: &BoxId) -> Result<&dyn Runtime, Refusal> {
+        if self.oci.uses_books() {
+            let record = self
+                .oci
+                .recorded_box(id)?
+                .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
+            return Ok(match self.route(&record.spec.class)? {
+                Side::Host => &self.process,
+                Side::Guest => &self.oci,
+            });
+        }
         match self.process.inspect(id) {
             Ok(_) => Ok(&self.process),
             Err(Refusal::NoSuchBox(_)) => match self.oci.inspect(id) {
@@ -1049,7 +1090,11 @@ impl<P: Runtime> Runtime for WithGuest<P> {
     }
 
     fn classes(&self) -> Vec<Class> {
-        vec![Class::Process, Class::Oci, Class::Shards]
+        if self.oci.classes().contains(&Class::Shards) {
+            vec![Class::Process, Class::Oci, Class::Shards]
+        } else {
+            vec![Class::Process, Class::Oci]
+        }
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {

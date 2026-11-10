@@ -368,6 +368,23 @@ impl Booted {
 }
 
 impl GuestRuntime {
+    pub(super) fn booted_for(&self, id: &BoxId) -> Result<Option<Arc<Booted>>, Refusal> {
+        let dedicated = if self.uses_books() {
+            self.recorded_box(id)?.is_some_and(|record| {
+                !record.spec.devices.is_empty() || matches!(record.spec.class, ClassSpec::Shards(_))
+            })
+        } else if self.record.is_some() {
+            selected::read(&self.selected_path(id)?)?.is_some()
+        } else {
+            false
+        };
+        if dedicated {
+            self.selected_running(id)
+        } else {
+            self.running()
+        }
+    }
+
     pub fn with_gpu_catalog(mut self, catalog: Arc<crate::devices::Catalog>) -> Self {
         self.gpu_catalog = Some(catalog);
         self
@@ -474,54 +491,45 @@ impl GuestRuntime {
     }
 
     fn selected_spec(&self, receipt: &Record) -> Result<shards_api::GuestSpec, Refusal> {
+        self.check_native_binding(receipt)?;
+        self.receipt_spec(receipt)
+    }
+
+    fn check_native_binding(&self, receipt: &Record) -> Result<(), Refusal> {
+        if receipt.devices.is_empty() {
+            return Ok(());
+        }
+        if self.physical_for(&receipt.devices)? != receipt.physical {
+            return Err(invalid(
+                "configured physical binding changed since guest launch",
+            ));
+        }
+        Ok(())
+    }
+
+    fn receipt_spec(&self, receipt: &Record) -> Result<shards_api::GuestSpec, Refusal> {
         let mut spec = self.config.spec();
         spec.gpu = !receipt.devices.is_empty();
+        spec.vcpus = receipt.vcpus;
+        spec.memory_mib = receipt.memory_mib;
         if receipt.devices.is_empty() {
             return Ok(spec);
         }
-        let catalog = self
-            .gpu_catalog
-            .as_ref()
-            .ok_or_else(|| invalid("no initialized exact Shards GPU catalog"))?;
         spec.gpu_devices
-            .try_reserve_exact(receipt.devices.len())
+            .try_reserve_exact(receipt.physical.len())
             .map_err(|_| Refusal::Exhausted {
                 what: "selected Shards GPU identities",
-                bound: receipt.devices.len(),
+                bound: receipt.physical.len(),
             })?;
-        for (id, recorded) in receipt.devices.iter().zip(&receipt.physical) {
-            let entry = catalog
-                .entries()
-                .iter()
-                .find(|entry| entry.info.id == *id)
-                .ok_or_else(|| invalid("recorded GPU has no configured native binding"))?;
-            let crate::devices::Binding::ShardsGpu { physical } = &entry.binding else {
-                return Err(invalid("recorded GPU is not bound to the Shards renderer"));
-            };
-            if physical != recorded {
-                return Err(invalid(
-                    "configured physical binding changed since guest launch",
-                ));
-            }
-            spec.gpu_devices.push(*recorded);
-        }
+        spec.gpu_devices.extend_from_slice(&receipt.physical);
         if receipt.physical.len() != receipt.devices.len() {
             return Err(invalid("receipt lost a physical selector"));
         }
-        use std::fmt::Write as _;
-        write!(spec.cmdline, " hex.gpu.box={} hex.gpu=", receipt.id)
-            .map_err(|_| invalid("cannot encode GPU boot authority"))?;
-        for (index, id) in receipt.devices.iter().enumerate() {
-            if index != 0 {
-                spec.cmdline.push(',');
-            }
-            write!(spec.cmdline, "{}", id.key)
-                .map_err(|_| invalid("cannot encode GPU boot authority"))?;
-        }
+        gpu::append_authority(&mut spec.cmdline, &receipt.id, &receipt.devices)?;
         Ok(spec)
     }
 
-    fn physical_for(
+    pub(super) fn physical_for(
         &self,
         devices: &[hex_api::DeviceId],
     ) -> Result<Vec<shards_api::PhysicalGpu>, Refusal> {
@@ -545,7 +553,9 @@ impl GuestRuntime {
                 .iter()
                 .find(|entry| entry.info.id == *id)
                 .ok_or_else(|| invalid("selected GPU is not in the initialized catalog"))?;
-            let crate::devices::Binding::ShardsGpu { physical: native } = &entry.binding else {
+            let Some(crate::devices::Binding::ShardsGpu { physical: native }) =
+                entry.binding(crate::devices::Route::ShardsGpu)
+            else {
                 return Err(invalid("selected GPU has another backend binding"));
             };
             physical.push(*native);
@@ -559,10 +569,13 @@ impl GuestRuntime {
         if spec.devices.is_empty() && !matches!(spec.class, ClassSpec::Shards(_)) {
             return Ok(());
         }
-        if let Some(receipt) = selected::read(&self.selected_path(&spec.id)?)? {
-            receipt.matches(spec, &self.config)?;
-            self.selected_spec(&receipt)?;
-        }
+        let receipt =
+            selected::read(&self.selected_path(&spec.id)?)?.ok_or(Refusal::Lifecycle {
+                id: spec.id.try_clone()?,
+                cause: hex_api::LifecycleCause::Uncertain,
+            })?;
+        receipt.matches(spec, &self.config)?;
+        self.selected_spec(&receipt)?;
         Ok(())
     }
 
@@ -705,7 +718,7 @@ impl GuestRuntime {
             Some(known) => Arc::clone(&known.booted.guest),
             None => match self
                 .guests
-                .attach(receipt.identity()?, &self.selected_spec(&receipt)?)
+                .attach(receipt.identity()?, &self.receipt_spec(&receipt)?)
             {
                 Ok(guest) => Arc::<dyn shards_api::Guest>::from(guest),
                 Err(why) if absent(&why) => {
@@ -737,10 +750,7 @@ impl GuestRuntime {
     }
 
     pub fn evented_for(&self, id: &BoxId) -> Result<Option<Arc<Client>>, Refusal> {
-        let booted = match self.selected_running(id)? {
-            Some(guest) => Some(guest),
-            None => self.running()?,
-        };
+        let booted = self.booted_for(id)?;
         let Some(booted) = booted else {
             return Ok(None);
         };
@@ -753,10 +763,7 @@ impl GuestRuntime {
     }
 
     pub fn program_client_for(&self, id: &BoxId) -> Result<Option<Arc<Client>>, Refusal> {
-        let booted = match self.selected_running(id)? {
-            Some(guest) => Some(guest),
-            None => self.running()?,
-        };
+        let booted = self.booted_for(id)?;
         let Some(booted) = booted else {
             return Ok(None);
         };

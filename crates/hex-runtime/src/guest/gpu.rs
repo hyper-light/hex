@@ -12,6 +12,63 @@ use hex_api::{BoxId, BoxSpec, DeviceId, DeviceKind, Refusal};
 pub const CMDLINE_BYTES: usize = 2048;
 pub const CDI_KIND: &str = "hex.shards/gpu";
 
+/// Reserve the kernel's complete remaining command-line budget before formatting.
+/// A failed write cannot grow storage or launch a partially authorized guest.
+pub(super) fn append_authority(
+    cmdline: &mut String,
+    owner: &BoxId,
+    devices: &[DeviceId],
+) -> Result<(), Refusal> {
+    use std::fmt::Write as _;
+    struct Bounded<'a>(&'a mut String);
+    impl std::fmt::Write for Bounded<'_> {
+        fn write_str(&mut self, value: &str) -> std::fmt::Result {
+            if self
+                .0
+                .len()
+                .checked_add(value.len())
+                .is_none_or(|len| len >= CMDLINE_BYTES)
+            {
+                return Err(std::fmt::Error);
+            }
+            self.0.push_str(value);
+            Ok(())
+        }
+    }
+    if Authority::parse(cmdline)?.is_some() || cmdline.split_whitespace().any(|word| word == "--") {
+        return Err(invalid(
+            "base command line already contains boot authority or init arguments",
+        ));
+    }
+    let room = CMDLINE_BYTES
+        .checked_sub(cmdline.len())
+        .ok_or_else(|| invalid("base command line is oversized"))?;
+    cmdline
+        .try_reserve_exact(room)
+        .map_err(|_| Refusal::Exhausted {
+            what: "guest kernel command line",
+            bound: CMDLINE_BYTES,
+        })?;
+    let mut text = Bounded(cmdline);
+    write!(text, " hex.gpu.box={owner} hex.gpu=")
+        .map_err(|_| invalid("GPU boot authority exceeds kernel command line"))?;
+    for (index, device) in devices.iter().enumerate() {
+        if index != 0 {
+            text.write_char(',')
+                .map_err(|_| invalid("GPU boot authority exceeds kernel command line"))?;
+        }
+        write!(text, "{}", device.key)
+            .map_err(|_| invalid("GPU boot authority exceeds kernel command line"))?;
+    }
+    let parsed = Authority::parse(text.0)?.ok_or_else(|| invalid("GPU boot authority is empty"))?;
+    if parsed.owner != *owner || parsed.devices != devices {
+        return Err(invalid(
+            "GPU boot authority is not the exact canonical selection",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct Authority {
     pub owner: BoxId,
@@ -55,6 +112,12 @@ impl Authority {
         for key in list.split(',') {
             if devices.len() >= hex_api::MAX_DEVICES {
                 return Err(invalid("too many GPU identities"));
+            }
+            if key.is_empty()
+                || !key.bytes().all(|byte| byte.is_ascii_digit())
+                || (key.len() > 1 && key.starts_with('0'))
+            {
+                return Err(invalid("GPU key is not canonical unsigned decimal"));
             }
             let key = key
                 .parse::<u64>()
@@ -329,8 +392,54 @@ mod tests {
             "hex.gpu.box=a hex.gpu=1 hex.gpu=2",
             "hex.gpu.box=a hex.gpu.box=b hex.gpu=1",
             "hex.gpu.box=../a hex.gpu=1",
+            "hex.gpu.box=a hex.gpu=+1",
+            "hex.gpu.box=a hex.gpu=01",
         ] {
             assert!(Authority::parse(text).is_err(), "{text}");
         }
+    }
+
+    /// AC-T7.4.1: a payload cannot forge another box/set; kernel overflow refuses
+    /// before any VM effect, rather than truncating the selected authority.
+    #[test]
+    fn exact_owner_set_and_kernel_budget_are_enforced() {
+        use hex_api::{Bounds, ClassSpec, Network, OciSpec, Program, Rootfs};
+        let owner = BoxId::new("selected").unwrap();
+        let devices = vec![DeviceId {
+            kind: DeviceKind::Gpu,
+            key: 256,
+        }];
+        let mut cmdline = "console=ttyS0".to_owned();
+        append_authority(&mut cmdline, &owner, &devices).unwrap();
+        let authority = Authority::parse(&cmdline).unwrap().unwrap();
+        let spec = BoxSpec {
+            id: owner,
+            bounds: Bounds::default(),
+            class: ClassSpec::Oci(Box::new(OciSpec {
+                rootfs: Rootfs::Dir("/rootfs".into()),
+                init: Program::of(&["/bin/true"]),
+                mounts: Vec::new(),
+                hostname: None,
+                network: Network::Private,
+                hosts: Vec::new(),
+            })),
+            owner: None,
+            devices: devices.clone(),
+            allocation: None,
+        };
+        authority.check(&spec).unwrap();
+        let mut wrong_class = spec.clone();
+        wrong_class.class = ClassSpec::Process;
+        assert!(authority.check(&wrong_class).is_err());
+        let mut foreign = spec.clone();
+        foreign.id = BoxId::new("foreign").unwrap();
+        assert!(authority.check(&foreign).is_err());
+        foreign.id = spec.id.clone();
+        foreign.devices[0].key = 512;
+        assert!(authority.check(&foreign).is_err());
+        let mut too_long = "x".repeat(CMDLINE_BYTES - 1);
+        assert!(append_authority(&mut too_long, &spec.id, &devices).is_err());
+        assert!(too_long.len() < CMDLINE_BYTES);
+        assert!(append_authority(&mut cmdline, &spec.id, &devices).is_err());
     }
 }
