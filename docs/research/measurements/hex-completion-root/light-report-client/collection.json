@@ -1,0 +1,47 @@
+{
+  "bytes": 185375,
+  "sha256": "2a14c855eff5a54b2f477caaa5952deaf8f3d0c15fb2162a060e1a5aa787ec2d",
+  "members": {
+    "cohort-696b94ef-light-v1/wire.log": {
+      "bytes": 6370,
+      "sha256": "aa6e26c0451259bbbe53731d4fe9bbc68d6b30d2ec6c2015415a86e32dfe7a95"
+    },
+    "cohort-696b94ef-light-v1/running.json": {
+      "bytes": 3369,
+      "sha256": "99666b3e6a05195b0c56198b3ce3b219814e9829f60eb507d7b71a74b41a24be"
+    },
+    "cohort-696b94ef-light-v1/result.json": {
+      "bytes": 3571,
+      "sha256": "3d43f5e9ace6ead6d5f5a41ab9baee0583c4bd523ec61ef508ad5f29757b77f9"
+    },
+    "cohort-696b94ef-light-v1/source-before.json": {
+      "bytes": 270516,
+      "sha256": "a256a105e5cab4bdb4b6d1ecd777834c86c1b014148abf185aa85e2dd6d81d85"
+    },
+    "cohort-696b94ef-light-v1/source-after.json": {
+      "bytes": 270516,
+      "sha256": "a256a105e5cab4bdb4b6d1ecd777834c86c1b014148abf185aa85e2dd6d81d85"
+    },
+    "cohort-696b94ef-light-v1/clippy.log": {
+      "bytes": 2274,
+      "sha256": "3146be4c7663befb737357a5bc74cb63b6dbc890e8d2181e1780f6e81c880898"
+    },
+    "cohort-696b94ef-light-v1/client-indexes.log": {
+      "bytes": 414,
+      "sha256": "56806becc5c2699a11717989f664a9cd86b383f9cfff1d8a80a4f13cdc0d05e8"
+    },
+    "cohort-696b94ef-light-v1/client-report.log": {
+      "bytes": 6893,
+      "sha256": "36154bb0b80eddd00dce9a87e586c86583e4d936d91d5e6a6d4b03200038b379"
+    },
+    "cohort-696b94ef-light-v1/collected-binaries.json": {
+      "bytes": 3417,
+      "sha256": "36269c1917be61ddb55386ddb8e6e6aae40136931fd1ec87a7d857ce00c67363"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}
