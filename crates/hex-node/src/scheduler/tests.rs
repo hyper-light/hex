@@ -1074,3 +1074,6 @@ fn dispatch_control_refuses_at_global_limit_and_returns_failed_send_permits() {
 
 #[path = "adversarial_relay_tests.rs"]
 mod adversarial_relay_tests;
+
+#[path = "device_offer_tests.rs"]
+mod device_offer_tests;

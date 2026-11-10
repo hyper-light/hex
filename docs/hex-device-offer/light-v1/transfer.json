@@ -1,0 +1,24 @@
+{
+  "command": [
+    "/Users/adalundhe/.local/bin/kiln",
+    "run",
+    "--on",
+    "d1323898b255a3ed435eb83fa0f7b0cf",
+    "--needs",
+    "cpus=1,mem=4g,disk=12g",
+    "--no-sync",
+    "--stdin",
+    "--timeout",
+    "120",
+    "--",
+    "nice -n 10 python3 -c 'import pathlib,sys,io,tarfile,hashlib,json\nroot=pathlib.Path.home()/'\"'\"'.cache/hex-device-offer-01a1c640-c5e806ed-v1'\"'\"'\nassert not root.exists()\nraw=sys.stdin.buffer.read();assert hashlib.sha256(raw).hexdigest()=='\"'\"'15ebda5970b262b11055505c867db0626c08e7a6181884e373b6892f9c081b55'\"'\"'\nroot.mkdir(parents=True);(root/'\"'\"'source-input.tar.gz'\"'\"').write_bytes(raw)\nnames=set()\nwith tarfile.open(fileobj=io.BytesIO(raw),mode='\"'\"'r:gz'\"'\"') as archive:\n for m in archive.getmembers():\n  p=pathlib.PurePosixPath(m.name)\n  assert m.isfile() and not p.is_absolute() and '\"'\"'..'\"'\"' not in p.parts and m.name not in names\n  names.add(m.name);target=root/m.name;target.parent.mkdir(parents=True,exist_ok=True)\n  with target.open('\"'\"'xb'\"'\"') as f:f.write(archive.extractfile(m).read())\n  target.chmod(m.mode)\nprint(json.dumps({'\"'\"'root'\"'\"':str(root),'\"'\"'archive_bytes'\"'\"':len(raw),'\"'\"'archive_sha256'\"'\"':hashlib.sha256(raw).hexdigest(),'\"'\"'members'\"'\"':len(names)}))\n'"
+  ],
+  "source": "c5e806edb0b91395af14a0575b6f74a69979a5dc",
+  "production_pin": "07c68e378b741e3ce6008e1cd612b5e9d9bc3ed2",
+  "archive_bytes": 7686034,
+  "archive_sha256": "15ebda5970b262b11055505c867db0626c08e7a6181884e373b6892f9c081b55",
+  "local_free_kib": 218557188,
+  "exit_code": 0,
+  "stdout": "{\"root\": \"/Users/adalundhe/.cache/hex-device-offer-01a1c640-c5e806ed-v1\", \"archive_bytes\": 7686034, \"archive_sha256\": \"15ebda5970b262b11055505c867db0626c08e7a6181884e373b6892f9c081b55\", \"members\": 1708}\n",
+  "stderr": "\u001b[2m[kiln] on d1323898b255a3ed435eb83fa0f7b0cf \u00b7 macos/aarch64 \u00b7 30 of 32 cores idle \u00b7 48 GB free \u00b7 room for 1 CPU, 4 GiB of memory, 12 GiB of disk\u001b[0m\n"
+}

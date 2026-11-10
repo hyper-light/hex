@@ -9,6 +9,22 @@ pub(crate) fn offers(
     cluster: &mut Cluster,
     namespace: &str,
 ) -> Result<Vec<Device>, Refusal> {
+    // Cluster::model only appends. This exclusive call publishes either the entire offer's
+    // interned names or none, without copying the cluster or maintaining another model table.
+    let before = cluster.models.len();
+    let result = collect_offers(reports, facts, cluster, namespace);
+    if result.is_err() {
+        cluster.models.truncate(before);
+    }
+    result
+}
+
+fn collect_offers(
+    reports: &[(Class, Option<Capacity>)],
+    facts: &hex_sim::facts::Facts,
+    cluster: &mut Cluster,
+    namespace: &str,
+) -> Result<Vec<Device>, Refusal> {
     let mut devices = Vec::new();
     let own_prefix = format!("hex-place-{namespace}-");
     for (class, report) in reports {
