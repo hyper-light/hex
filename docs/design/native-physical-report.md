@@ -2,7 +2,7 @@
 
 ROOT coordinator01a1aa77778471339bea3beff90d6bbd. Policyca3ab10c151aa5539e757f1cc76029746ccbb561, rulesdf2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3. Source checkpoint5e5a0f5047bb1ef452e9a0dd6c3b70c0198df8ca; integration/native results remain separate.
 
-The CLI currently runs scheduler Service and its runtime node as separate processes. Runtime backends inside the node share its one existing native provider and Store/turn authority. Service reads a factual snapshot through that same Runtime/socket protocol. It opens no additional GPU provider, and observations grant no holder. Original source anchors are scheduler::Service::open, hex-cli/src/schedule.rs, facts::Prober, Runtime and wire's existing capacity call.
+The CLI currently runs scheduler Service and its runtime node as separate processes. The integration decision is to share one native provider and the existing Store/turn authority among backends inside the node. Service reads a factual snapshot through that same Runtime/socket protocol and opens no additional GPU provider. Observations grant no holder. Original source anchors are scheduler::Service::open, hex-cli/src/schedule.rs, facts::Prober, Runtime and wire's existing capacity call. Native consumer wiring is still in progress at this checkpoint.
 
 Rust1.99.1 [Arc documentation](https://doc.rust-lang.org/std/sync/struct.Arc.html) describes shared ownership of one heap allocation and Weak references for avoiding cycles. Accordingly Arc/Weak connects adapters within the native node; a separate scheduler uses a serialized report rather than a process-local pointer.
 
@@ -10,7 +10,7 @@ Rust1.99.1 [Arc documentation](https://doc.rust-lang.org/std/sync/struct.Arc.htm
 
 | Alternative | Result |
 |---|---|
-| Embed a second Node in Service | Changes the existing split CLI and duplicates native ownership. |
+| Embed the existing Node and Service together | Can share Arc, but changes the current independent CLI/process deployment. |
 | Independently open Gpus in each consumer | Duplicate native inventory/driver ownership and incompatible delta sampling. |
 | Share Arc inside a node and report over its existing wire | Preserves the CLI and one native authority; chosen. |
 

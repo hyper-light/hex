@@ -546,7 +546,6 @@ fn info() -> BoxInfo {
 fn requests() -> Vec<(u64, Request, usize)> {
     let b = id("b-1");
     vec![
-        (87, Request::Call(Call::PhysicalReport), 0),
         (1, Request::Hello { build: build() }, 0),
         (
             2,
@@ -623,6 +622,7 @@ fn requests() -> Vec<(u64, Request, usize)> {
             1,
         ),
         (15, run(), 2),
+        (87, Request::Call(Call::PhysicalReport), 0),
     ]
 }
 
@@ -718,7 +718,6 @@ fn refusals() -> Vec<Refusal> {
 
 fn answers() -> Vec<(u64, Answer)> {
     let mut out = vec![
-        (87, Answer::PhysicalReport(example_physical_report())),
         (
             1,
             Answer::Hello(Hello {
@@ -811,6 +810,7 @@ fn answers() -> Vec<(u64, Answer)> {
     ] {
         out.push((6, Answer::Exited(exit)));
     }
+    out.push((87, Answer::PhysicalReport(example_physical_report())));
     out
 }
 
@@ -915,17 +915,15 @@ fn example_physical_report() -> PhysicalReport {
 fn physical_report_preserves_authority_unknowns_and_pressure_without_grants() {
     let req = Request::Call(Call::PhysicalReport);
     let bytes = request(87, &req, MAX_MESSAGE).unwrap();
-    assert_eq!(
-        read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
-        req
-    );
+    let (header, decoded) = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap();
+    assert_eq!(header.kind, 0x0013);
+    assert_eq!(decoded, req);
     let report = example_physical_report();
     let expected = Answer::PhysicalReport(report.clone());
     let bytes = answer(87, &expected, MAX_MESSAGE).unwrap();
-    assert_eq!(
-        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
-        expected
-    );
+    let (header, decoded) = read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap();
+    assert_eq!(header.kind, 0x800e);
+    assert_eq!(decoded, expected);
     assert!(matches!(
         read_answer(&received(&bytes, 1), MAX_MESSAGE),
         Err(Fault::Descriptors { .. })
@@ -1481,7 +1479,7 @@ fn a_run_is_a_create_and_an_exec_in_one_request() {
 #[test]
 fn unknown_kinds_are_refused() {
     let hello = request(5, &Request::Hello { build: build() }, MAX_MESSAGE).unwrap();
-    for kind in [0u16, 0x0013, 0x7fff, 0x8001, 0x8009, 0xffff] {
+    for kind in [0u16, 0x0014, 0x7fff, 0x8001, 0x8009, 0xffff] {
         let mut bytes = hello.clone();
         bytes[12..14].copy_from_slice(&kind.to_le_bytes());
         let got = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
