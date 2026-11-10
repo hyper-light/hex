@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use hex_api::{BoxId, BoxInfo, BoxSpec, BoxState, Refusal, Runtime};
 use hex_sim::index::Pick;
-use hex_sim::model::{Class, Demand, NodeId, NodeSpec};
+use hex_sim::model::{Class, Demand, NodeId, NodeSpec, Resources};
 use hex_sim::peer::{self, Boxed, Budget, Key, Msg, Stop, Told};
 
 mod rows;
@@ -241,6 +241,7 @@ impl Driver {
         let namespace = rows.namespace().to_owned();
         let mut actual = BTreeMap::new();
         let mut start = Vec::new();
+        let mut retained = Resources::default();
         for (key, payload) in rows.running()? {
             // Core demand is durable beside this payload; decode it through core boot below.
             // Select its runtime using the shared model codec, without a second decision format.
@@ -251,6 +252,11 @@ impl Driver {
             let physical = physical_id(&namespace, key)?;
             let boxed = match runtime.inspect(&physical) {
                 Ok(info) => {
+                    if !ended {
+                        retained = retained
+                            .checked_add(&demand.need)
+                            .ok_or_else(|| bad("recovered physical reservations overflow"))?;
+                    }
                     if !ended && payload.start && info.state == BoxState::Created {
                         start.push((runtime, physical));
                     }
@@ -261,9 +267,40 @@ impl Driver {
             };
             actual.insert(key, boxed);
         }
-        let node = peer::Node::boot(id, nodes, models, budget, pick, &mut rows, |key| {
-            actual.get(&key).copied().unwrap_or(Boxed::Absent)
-        })?;
+        let live = nodes
+            .iter()
+            .find(|node| node.id == id)
+            .ok_or_else(|| bad("recovery node is not configured"))?
+            .capacity;
+        let raised = !live.holds(&retained);
+        // Live FREE room is an admission offer, not a reason to forget an existing physical box.
+        // Only the boot ledger gets a floor equal to checked, actually surviving reservations.
+        // Service's original facts stay untouched and new local admission is blocked below.
+        let recovery_nodes = if raised {
+            let mut recovered = nodes.to_vec();
+            let local = recovered
+                .iter_mut()
+                .find(|node| node.id == id)
+                .ok_or_else(|| bad("recovery node missing"))?;
+            local.capacity = Resources {
+                cpu_milli: live.cpu_milli.max(retained.cpu_milli),
+                mem_bytes: live.mem_bytes.max(retained.mem_bytes),
+                disk_bytes: live.disk_bytes.max(retained.disk_bytes),
+                gpus: live.gpus.max(retained.gpus),
+            };
+            Some(recovered)
+        } else {
+            None
+        };
+        let node = peer::Node::boot(
+            id,
+            recovery_nodes.as_deref().unwrap_or(nodes),
+            models,
+            budget,
+            pick,
+            &mut rows,
+            |key| actual.get(&key).copied().unwrap_or(Boxed::Absent),
+        )?;
         // Only validated, recovered records may resume an init; no acknowledgement has escaped.
         for (runtime, id) in start {
             runtime.start(&id)?;
@@ -273,7 +310,10 @@ impl Driver {
                 node,
                 rows,
                 stopped: None,
-                admission: None,
+                admission: raised.then(||Refusal::Invalid {
+                    what:"local admission",
+                    why:format!("current live room {live:?} is below recovered physical reservations {retained:?}; a successful live-room refresh is required before new local admission"),
+                }),
             }),
             operation: Mutex::new(()),
             runtimes,
