@@ -670,6 +670,18 @@ fn refusals() -> Vec<Refusal> {
             why: "ENOENT".to_owned(),
         },
         Refusal::Broken("a lock was poisoned".to_owned()),
+        Refusal::Lifecycle {
+            id: id("retained-box"),
+            cause: LifecycleCause::Pending,
+        },
+        Refusal::Lifecycle {
+            id: id("retained-box"),
+            cause: LifecycleCause::Uncertain,
+        },
+        Refusal::Lifecycle {
+            id: id("retained-box"),
+            cause: LifecycleCause::Busy,
+        },
     ]
 }
 
@@ -796,6 +808,39 @@ fn every_answer_reads_back_as_written() {
         let bytes = answer(n, &ans, MAX_MESSAGE).unwrap();
         let (h, back) = read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap();
         assert_eq!((h.id, &back), (n, &ans));
+    }
+}
+
+/// AC-T7.4.1: retained-resource lifecycle causes survive the wire as distinct typed outcomes;
+/// an unknown cause cannot become absence, success or a default retry decision.
+#[test]
+fn lifecycle_causes_preserve_box_identity_and_reject_unknown_tags() {
+    for cause in [
+        LifecycleCause::Pending,
+        LifecycleCause::Uncertain,
+        LifecycleCause::Busy,
+    ] {
+        let refused = Answer::Refused(Refusal::Lifecycle {
+            id: id("retained-box"),
+            cause,
+        });
+        let bytes = answer(41, &refused, MAX_MESSAGE).unwrap();
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            refused
+        );
+        for tag in [3, u8::MAX] {
+            let mut invalid = bytes.clone();
+            *invalid.last_mut().unwrap() = tag;
+            let error = read_answer(&received(&invalid, 0), MAX_MESSAGE).unwrap_err();
+            assert!(matches!(
+                error,
+                Fault::Value {
+                    what: "lifecycle cause",
+                    ..
+                }
+            ));
+        }
     }
 }
 
@@ -1553,6 +1598,15 @@ fn any_refusal() -> impl Strategy<Value = Refusal> {
         }),
         (name, any_text()).prop_map(|(op, why)| Refusal::Os { op, why }),
         any_text().prop_map(Refusal::Broken),
+        (
+            any_id(),
+            proptest::sample::select(vec![
+                LifecycleCause::Pending,
+                LifecycleCause::Uncertain,
+                LifecycleCause::Busy
+            ])
+        )
+            .prop_map(|(id, cause)| Refusal::Lifecycle { id, cause }),
     ]
 }
 

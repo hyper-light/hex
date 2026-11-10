@@ -43,8 +43,8 @@ use std::sync::Mutex;
 
 use hex_api::{
     Bounds, BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, Capacity, CapacityResources, Class,
-    ClassSpec, DeviceId, DeviceInfo, DeviceKind, Exit, IoRates, MAX_DEVICES, Mount, Network,
-    OciSpec, Program, Refusal, Rootfs, Signal, Usage, User,
+    ClassSpec, DeviceId, DeviceInfo, DeviceKind, Exit, IoRates, LifecycleCause, MAX_DEVICES, Mount,
+    Network, OciSpec, Program, Refusal, Rootfs, Signal, Usage, User,
 };
 
 use crate::netns;
@@ -1461,6 +1461,16 @@ fn put_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
             w.u8(8);
             w.string(why)
         }
+        Refusal::Lifecycle { id, cause } => {
+            w.u8(9);
+            w.string(id.as_str())?;
+            w.u8(match cause {
+                LifecycleCause::Pending => 0,
+                LifecycleCause::Uncertain => 1,
+                LifecycleCause::Busy => 2,
+            });
+            Ok(())
+        }
     }
 }
 
@@ -1488,6 +1498,15 @@ fn refusal(r: &mut Reader<'_>) -> Result<Refusal, Fault> {
             why: r.string("refusal reason")?,
         },
         8 => Refusal::Broken(r.string("refusal reason")?),
+        9 => Refusal::Lifecycle {
+            id: box_id(r)?,
+            cause: match r.u8()? {
+                0 => LifecycleCause::Pending,
+                1 => LifecycleCause::Uncertain,
+                2 => LifecycleCause::Busy,
+                t => return Err(Fault::value("lifecycle cause", format!("variant {t}"))),
+            },
+        },
         t => return Err(Fault::value("refusal", format!("variant {t}"))),
     })
 }

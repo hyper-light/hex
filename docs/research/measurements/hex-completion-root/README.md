@@ -119,3 +119,13 @@ Unix connection. These are dependency edges, not new dependency versions. The
 stream readiness test's constant comparison was expressed as a range check after
 L3's exact core Clippy reproduced assertions_on_constants; no production port,
 protocol or wait changed in that correction.
+
+## Typed retained-resource lifecycle boundary
+
+L1 signed source `ccd77b4b8a34d27de67c4d0aa643952ae8ac0dc1` introduces
+`Lifecycle { id, cause }` with distinct Pending, Uncertain and Busy meanings.
+ROOT exports the cause and adds refusal tag9 after all existing tags; the cause
+has checked tags0..2, and hostile unknown tags refuse. The differential classifier
+retains this outcome as Lifecycle. Deterministic and generated wire coverage now
+includes all causes and the exact BoxId. These source tests are not yet executed;
+physical absence/terminality remains a native backend obligation.

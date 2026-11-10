@@ -557,6 +557,7 @@ fn kind(r: &Refusal) -> &'static str {
         Refusal::Exhausted { .. } => "Exhausted",
         Refusal::Os { .. } => "Os",
         Refusal::Broken(_) => "Broken",
+        Refusal::Lifecycle { .. } => "Lifecycle",
     }
 }
 
