@@ -1546,7 +1546,20 @@ fn put_info(w: &mut Writer, info: &BoxInfo) -> Result<(), Fault> {
     w.bool(info.adopted);
     w.option(info.exit, put_exit);
     w.u64(info.abandoned);
-    Ok(())
+    // AC-T7.4.1: the retained native receipt follows every old info field. The wire identity
+    // changes with this schema; list entries carry their own option tag, including None.
+    w.reserve_fixed(if info.allocation.is_some() {
+        OPTIONAL_ALLOCATION_BYTES
+    } else {
+        1
+    })?;
+    w.option_with(info.allocation, |w, allocation| {
+        allocation
+            .guest()
+            .map_err(|e| Fault::value("allocation", e.to_string()))?;
+        put_resources(w, allocation.resources);
+        put_cost(w, allocation.cost)
+    })
 }
 
 fn info(r: &mut Reader<'_>) -> Result<BoxInfo, Fault> {
@@ -1564,6 +1577,16 @@ fn info(r: &mut Reader<'_>) -> Result<BoxInfo, Fault> {
         adopted: r.bool("adopted")?,
         exit: r.option(exit)?,
         abandoned: r.u64()?,
+        allocation: r.option(|r| {
+            let allocation = Allocation {
+                resources: resources(r)?,
+                cost: runtime_cost(r)?,
+            };
+            allocation
+                .guest()
+                .map_err(|e| Fault::value("allocation", e.to_string()))?;
+            Ok(allocation)
+        })?,
     })
 }
 

@@ -531,6 +531,7 @@ fn oci_spec() -> BoxSpec {
 
 fn info() -> BoxInfo {
     BoxInfo {
+        allocation: None,
         membership: None,
         id: id("b-1"),
         class: Class::Oci,
@@ -757,6 +758,7 @@ fn answers() -> Vec<(u64, Answer)> {
                 infos: vec![
                     info(),
                     BoxInfo {
+                        allocation: None,
                         membership: None,
                         id: id("p"),
                         class: Class::Process,
@@ -1055,6 +1057,50 @@ fn runtime_cost_and_admitted_allocation_survive_the_wire() {
     );
 }
 
+/// AC-T7.4.1: inspect/list carry the original receipt, including after exit. A native
+/// process observation is not permission to replace that receipt with today's cost.
+#[test]
+fn retained_box_allocations_survive_inspect_and_mixed_list_messages() {
+    let allocation = example_runtime_cost()
+        .allocate(CapacityResources {
+            cpu_milli: 250,
+            mem_bytes: 16 << 20,
+            disk_bytes: 3,
+        })
+        .unwrap();
+    let mut retained = info();
+    retained.state = BoxState::Empty;
+    retained.exit = Some(Exit::Code(0));
+    retained.allocation = Some(allocation);
+    for expected in [
+        Answer::Info(retained.clone()),
+        Answer::Boxes {
+            infos: vec![info(), retained.clone(), info()],
+            more: false,
+        },
+    ] {
+        let bytes = answer(56, &expected, MAX_MESSAGE).unwrap();
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            expected
+        );
+        for end in 0..bytes.len() {
+            assert!(read_answer(&received(&bytes[..end], 0), MAX_MESSAGE).is_err());
+        }
+    }
+    retained.allocation = Some(Allocation {
+        resources: CapacityResources::default(),
+        ..allocation
+    });
+    assert!(matches!(
+        answer(56, &Answer::Info(retained), MAX_MESSAGE),
+        Err(Fault::Value {
+            what: "allocation",
+            ..
+        })
+    ));
+}
+
 /// AC-T7.4.1: retained-resource lifecycle causes survive the wire as distinct typed outcomes;
 /// an unknown cause cannot become absence, success or a default retry decision.
 #[test]
@@ -1318,6 +1364,7 @@ fn the_wire_identity_is_its_definitions_digest_line_endings_aside() {
 fn a_long_list_is_split_into_messages_within_the_bound() {
     let infos: Vec<BoxInfo> = (0..5_000)
         .map(|n| BoxInfo {
+            allocation: None,
             membership: None,
             id: id(&format!("box-{n:06}")),
             ..info()
@@ -1797,6 +1844,7 @@ fn any_info() -> impl Strategy<Value = BoxInfo> {
     )
         .prop_map(
             |(id, backend, state, bounds, adopted, exit, abandoned)| BoxInfo {
+                allocation: None,
                 membership: None,
                 id,
                 class: match backend {

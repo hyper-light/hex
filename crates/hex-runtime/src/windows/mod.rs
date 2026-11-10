@@ -1150,6 +1150,7 @@ impl WinRuntime {
     fn info(&self, b: &Held) -> Result<BoxInfo, Refusal> {
         match b {
             Held::Process(b) => Ok(BoxInfo {
+                allocation: None,
                 id: b.id().clone(),
                 class: Class::Process,
                 state: if b.running()? {

@@ -912,6 +912,7 @@ impl Node {
                 state
             },
             bounds: record.spec.bounds.clone(),
+            allocation: record.spec.allocation,
             adopted,
             exit,
             abandoned: record
@@ -1377,6 +1378,7 @@ impl Node {
             class: Class::Oci,
             state: BoxState::Created,
             bounds: record.spec.bounds,
+            allocation: record.spec.allocation,
             adopted: false,
             exit: None,
             abandoned: 0,
@@ -1852,6 +1854,7 @@ impl Runtime for Node {
                     class: Class::Process,
                     state: BoxState::Empty,
                     bounds: hex_api::Bounds::default(),
+                    allocation: None,
                     adopted: false,
                     exit: None,
                     abandoned: 0,

@@ -92,6 +92,7 @@ mod tests {
 
     fn info(id: &BoxId) -> BoxInfo {
         BoxInfo {
+            allocation: None,
             id: id.clone(),
             class: Class::Oci,
             state: BoxState::Empty,

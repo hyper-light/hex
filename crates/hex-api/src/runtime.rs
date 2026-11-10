@@ -441,6 +441,9 @@ pub struct BoxInfo {
     pub class: Class,
     pub state: BoxState,
     pub bounds: Bounds,
+    /// The existing native record's immutable admitted charge, independent of today's profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allocation: Option<Allocation>,
     /// Taken back after its node agent restarted, rather than made by this one.
     pub adopted: bool,
     /// How a macOS `process` box holds its members (the helper's box user, or the rootless process
@@ -646,6 +649,7 @@ mod tests {
         assert_eq!(info.exit, None);
         assert!(!serde_json::to_string(&info).unwrap().contains("exit"));
         let ended = BoxInfo {
+            allocation: None,
             membership: None,
             exit: Some(Exit::Signal(9)),
             ..info
