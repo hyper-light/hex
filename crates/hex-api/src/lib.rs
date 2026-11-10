@@ -31,7 +31,7 @@ pub mod sim;
 mod spec;
 
 pub use bounds::{Bounds, IoRates, MIN_CPU_MILLI, MIN_MEMORY};
-pub use devices::{DeviceId, DeviceInfo, DeviceKind, MAX_DEVICES};
+pub use devices::{DeviceId, DeviceInfo, DeviceKind, MAX_DEVICES, PhysicalDevice, PhysicalReport};
 pub use id::BoxId;
 pub use runtime::{
     Allocation, Asked, BoxInfo, BoxState, Capacity, CapacityResources, Exit, LifecycleCause,

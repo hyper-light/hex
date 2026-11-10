@@ -11,6 +11,16 @@ pub trait Runtime: Send + Sync {
     /// The classes it runs.
     fn classes(&self) -> Vec<Class>;
 
+    /// One factual snapshot from the native Store/turn owner over the existing client/wire seam.
+    /// An uninitialized observation API refuses explicitly and grants no physical capability.
+    fn physical_report(&self) -> Result<crate::devices::PhysicalReport, Refusal> {
+        Err(Refusal::Platform {
+            what: "native physical report",
+            platform: std::env::consts::OS,
+            why: "this runtime has no initialized native facts provider".into(),
+        })
+    }
+
     /// AC-T7.4.1: the resource pool backing this class. `None` explicitly selects the caller's
     /// same-host physical budget; a guest must report its own pool rather than host capacity.
     fn capacity(&self, _class: Class) -> Result<Option<Capacity>, Refusal> {

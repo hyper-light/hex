@@ -44,7 +44,8 @@ use std::sync::Mutex;
 use hex_api::{
     Allocation, Bounds, BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, Capacity, CapacityResources,
     Class, ClassSpec, DeviceId, DeviceInfo, DeviceKind, Exit, IoRates, LifecycleCause, MAX_DEVICES,
-    Mount, Network, OciSpec, Program, Refusal, Rootfs, RuntimeCost, Signal, Usage, User,
+    Mount, Network, OciSpec, PhysicalDevice, PhysicalReport, Program, Refusal, Rootfs, RuntimeCost,
+    Signal, Usage, User,
 };
 
 use crate::netns;
@@ -144,6 +145,8 @@ mod kind {
     pub const OFFERED: u16 = 0x800b;
     pub const CAPACITY: u16 = 0x0012;
     pub const CAPACITY_ANSWER: u16 = 0x800d;
+    pub const PHYSICAL_REPORT: u16 = 0x0013;
+    pub const PHYSICAL_REPORT_ANSWER: u16 = 0x800e;
 }
 
 /// A message's header, once its wire identity is read as this side's.
@@ -222,6 +225,8 @@ pub enum Call {
         ask: Streams,
     },
     Capacity(Class),
+    /// AC-T7.4.1: factual native observations from the existing Store/turn owner, never grants.
+    PhysicalReport,
 }
 
 /// Which of a program's standard streams travel with its exec, in this order; the rest are the null
@@ -300,6 +305,7 @@ pub enum Answer {
     /// A preparation, not a started program; no descriptor or cross-process socket reservation rides with it.
     Offered(StreamOffer),
     Capacity(Option<Capacity>),
+    PhysicalReport(PhysicalReport),
 }
 
 /// A Shards guest's identity and the names of an exec's caller-owned streams (HEX-RT-17).
@@ -527,6 +533,10 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
                 put_cost_option(w, capacity.cost)
             })?;
         }
+        Answer::PhysicalReport(report) => {
+            w.header(kind::PHYSICAL_REPORT_ANSWER, id);
+            put_physical_report(&mut w, report)?;
+        }
         Answer::Info(info) => {
             w.header(kind::INFO, id);
             put_info(&mut w, info)?;
@@ -706,6 +716,7 @@ fn parse_request(
             )))
         }
         kind::CAPACITY => Request::Call(Call::Capacity(class(&mut r).map_err(bad)?)),
+        kind::PHYSICAL_REPORT => Request::Call(Call::PhysicalReport),
         kind::CREATE => Request::Call(Call::Create(Box::new(box_spec(&mut r).map_err(bad)?))),
         kind::START => Request::Call(Call::Start(box_id(&mut r).map_err(bad)?)),
         kind::EXEC => {
@@ -837,6 +848,7 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
                     .map_err(|e| Fault::value("scheduler reply", e.to_string()))?,
             ))
         }
+        kind::PHYSICAL_REPORT_ANSWER => Answer::PhysicalReport(physical_report(&mut r)?),
         kind::CAPACITY_ANSWER => Answer::Capacity(r.option(|r| {
             let id = r.string("capacity pool")?;
             let capacity = Capacity {
@@ -1015,6 +1027,10 @@ fn request_name(kind: u16) -> &'static str {
 
 fn put_call(w: &mut Writer, id: u64, call: &Call) -> Result<(), Fault> {
     match call {
+        Call::PhysicalReport => {
+            w.header(kind::PHYSICAL_REPORT, id);
+            Ok(())
+        }
         Call::Capacity(class) => {
             w.header(kind::CAPACITY, id);
             w.u8(class_tag(*class));
@@ -1201,6 +1217,74 @@ const RESOURCE_BYTES: usize = 3 * size_of::<u64>();
 const COST_BYTES: usize = 32 + 5 * RESOURCE_BYTES;
 const OPTIONAL_COST_BYTES: usize = 1 + COST_BYTES;
 const OPTIONAL_ALLOCATION_BYTES: usize = 1 + RESOURCE_BYTES + COST_BYTES;
+
+// Device kind/key, model length, byte size and two optional-counter tags. Holder is absent by
+// definition: this factual RPC cannot authorize a reservation through telemetry (AC-T7.4.1).
+const PHYSICAL_MIN_BYTES: usize =
+    size_of::<u8>() + size_of::<u64>() + size_of::<u32>() + size_of::<u64>() + 2 * size_of::<u8>();
+const PHYSICAL_PREFIX_BYTES: usize = 2 * size_of::<u32>();
+
+fn put_physical_report(w: &mut Writer, report: &PhysicalReport) -> Result<(), Fault> {
+    report
+        .check()
+        .map_err(|e| Fault::value("physical report", e.to_string()))?;
+    let overflow = || Fault::value("physical report", "encoded snapshot size overflows");
+    let mut bytes = PHYSICAL_PREFIX_BYTES
+        .checked_add(report.authority.len())
+        .ok_or_else(overflow)?;
+    for device in &report.devices {
+        bytes = bytes
+            .checked_add(PHYSICAL_MIN_BYTES)
+            .and_then(|n| n.checked_add(device.info.model.len()))
+            .and_then(|n| {
+                n.checked_add(if device.busy_per_mille.is_some() {
+                    size_of::<u16>()
+                } else {
+                    0
+                })
+            })
+            .and_then(|n| {
+                n.checked_add(if device.memory_used_bytes.is_some() {
+                    size_of::<u64>()
+                } else {
+                    0
+                })
+            })
+            .ok_or_else(overflow)?;
+    }
+    w.reserve_fixed(bytes)?;
+    w.string(&report.authority)?;
+    w.device_count(report.devices.len(), PHYSICAL_MIN_BYTES)?;
+    for device in &report.devices {
+        put_device_id(w, &device.info.id);
+        w.string(&device.info.model)?;
+        w.u64(device.info.size);
+        w.option(device.busy_per_mille, |w, value| w.u16(value));
+        w.option(device.memory_used_bytes, |w, value| w.u64(value));
+    }
+    Ok(())
+}
+
+fn physical_report(r: &mut Reader<'_>) -> Result<PhysicalReport, Fault> {
+    let authority = r.device_string("physical authority")?;
+    let devices = r.device_list(PHYSICAL_MIN_BYTES, |r| {
+        Ok(PhysicalDevice {
+            info: DeviceInfo {
+                id: device_id(r)?,
+                model: r.device_string("physical device model")?,
+                size: r.u64()?,
+                holder: None,
+            },
+            busy_per_mille: r.option(|r| r.u16())?,
+            memory_used_bytes: r.option(|r| r.u64())?,
+        })
+    })?;
+    let report = PhysicalReport { authority, devices };
+    report
+        .check()
+        .map_err(|e| Fault::value("physical report", e.to_string()))?;
+    Ok(report)
+}
 
 fn workload_caps(spec: &BoxSpec) -> CapacityResources {
     CapacityResources {

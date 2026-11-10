@@ -98,6 +98,52 @@ pub struct DeviceInfo {
     pub holder: Option<BoxId>,
 }
 
+/// A factual native snapshot around the existing catalog metadata. Each None counter remains
+/// unknown; Some(0) is an actual known zero. This grants no holder or attachment authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PhysicalDevice {
+    pub info: DeviceInfo,
+    pub busy_per_mille: Option<u16>,
+    pub memory_used_bytes: Option<u64>,
+}
+
+/// A flat snapshot from the native Store/turn owner's one provider. Overlapping backend routes
+/// must name this same stable authority; telemetry does not report or grant a holder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PhysicalReport {
+    pub authority: String,
+    pub devices: Vec<PhysicalDevice>,
+}
+
+impl PhysicalReport {
+    pub fn check(&self) -> Result<(), Refusal> {
+        let invalid = |why: &'static str| Refusal::Invalid {
+            what: "native physical report",
+            why: why.into(),
+        };
+        if self.authority.is_empty() || self.authority.contains('\0') {
+            return Err(invalid("native Store/turn authority is empty or invalid"));
+        }
+        check_ids(self.devices.iter().map(|device| device.info.id))?;
+        for device in &self.devices {
+            device.info.check()?;
+            if device.info.holder.is_some() {
+                return Err(invalid("telemetry cannot report or grant holders"));
+            }
+            if (device.busy_per_mille.is_some() || device.memory_used_bytes.is_some())
+                && (device.info.id.kind != DeviceKind::Gpu
+                    || device.busy_per_mille.is_some_and(|busy| busy > 1000))
+            {
+                return Err(invalid("load is not a GPU reading within its native units"));
+            }
+            // Apple mapped allocation may exceed its working-set budget. Preserve known pressure.
+        }
+        Ok(())
+    }
+}
+
 impl DeviceInfo {
     pub fn check(&self) -> Result<(), Refusal> {
         self.id.check()
@@ -143,6 +189,45 @@ pub(crate) fn check_ids(ids: impl ExactSizeIterator<Item = DeviceId>) -> Result<
 mod tests {
     use super::*;
     use crate::{Bounds, BoxSpec, Capacity, CapacityResources, ClassSpec, Program, Runtime, Stdio};
+
+    /// AC-T7.4.1: unknown independent counters survive the public snapshot and confer no holder.
+    #[test]
+    fn physical_report_keeps_independent_unknown_counters_and_refuses_grants() {
+        let info = DeviceInfo {
+            id: id(DeviceKind::Gpu, u64::MAX),
+            model: "actual-native".into(),
+            size: 4096,
+            holder: None,
+        };
+        let report = PhysicalReport {
+            authority: "one-store-owner".into(),
+            devices: vec![PhysicalDevice {
+                info,
+                busy_per_mille: None,
+                memory_used_bytes: Some(0),
+            }],
+        };
+        report.check().unwrap();
+        let bytes = serde_json::to_vec(&report).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<PhysicalReport>(&bytes).unwrap(),
+            report
+        );
+        assert_eq!(report.devices[0].busy_per_mille, None);
+        assert_eq!(report.devices[0].memory_used_bytes, Some(0));
+        let mut malformed = report.clone();
+        malformed.devices[0].info.holder = Some(BoxId::new("not-a-grant").unwrap());
+        assert!(malformed.check().is_err());
+        malformed = report.clone();
+        malformed.devices[0].busy_per_mille = Some(1001);
+        assert!(malformed.check().is_err());
+        malformed = report.clone();
+        malformed.devices.push(report.devices[0].clone());
+        assert!(malformed.check().is_err());
+        malformed = report;
+        malformed.authority.clear();
+        assert!(malformed.check().is_err());
+    }
 
     fn id(kind: DeviceKind, key: u64) -> DeviceId {
         DeviceId { kind, key }

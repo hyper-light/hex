@@ -546,6 +546,7 @@ fn info() -> BoxInfo {
 fn requests() -> Vec<(u64, Request, usize)> {
     let b = id("b-1");
     vec![
+        (87, Request::Call(Call::PhysicalReport), 0),
         (1, Request::Hello { build: build() }, 0),
         (
             2,
@@ -717,6 +718,7 @@ fn refusals() -> Vec<Refusal> {
 
 fn answers() -> Vec<(u64, Answer)> {
     let mut out = vec![
+        (87, Answer::PhysicalReport(example_physical_report())),
         (
             1,
             Answer::Hello(Hello {
@@ -871,6 +873,108 @@ fn example_runtime_cost() -> RuntimeCost {
             disk_bytes: 0,
         },
     }
+}
+
+fn example_physical_report() -> PhysicalReport {
+    PhysicalReport {
+        authority: "native-store-owner".into(),
+        devices: vec![
+            PhysicalDevice {
+                info: DeviceInfo {
+                    id: DeviceId {
+                        kind: DeviceKind::Gpu,
+                        key: u64::MAX,
+                    },
+                    model: "private-native-model".into(),
+                    size: 4096,
+                    holder: None,
+                },
+                busy_per_mille: None,
+                memory_used_bytes: Some(8192),
+            },
+            PhysicalDevice {
+                info: DeviceInfo {
+                    id: DeviceId {
+                        kind: DeviceKind::Gpu,
+                        key: 256,
+                    },
+                    model: "another-native-model".into(),
+                    size: 8192,
+                    holder: None,
+                },
+                busy_per_mille: Some(0),
+                memory_used_bytes: None,
+            },
+        ],
+    }
+}
+
+/// AC-T7.4.1: the split scheduler reads the same native authority without inventing idle counters,
+/// losing observed pressure or treating a factual reply as a descriptor/holder grant.
+#[test]
+fn physical_report_preserves_authority_unknowns_and_pressure_without_grants() {
+    let req = Request::Call(Call::PhysicalReport);
+    let bytes = request(87, &req, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        req
+    );
+    let report = example_physical_report();
+    let expected = Answer::PhysicalReport(report.clone());
+    let bytes = answer(87, &expected, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        expected
+    );
+    assert!(matches!(
+        read_answer(&received(&bytes, 1), MAX_MESSAGE),
+        Err(Fault::Descriptors { .. })
+    ));
+    assert!(matches!(
+        answer(87, &expected, HEADER_BYTES),
+        Err(Fault::Oversized { .. })
+    ));
+    for end in 0..bytes.len() {
+        assert!(read_answer(&received(&bytes[..end], 0), MAX_MESSAGE).is_err());
+    }
+    let mut invalid = report.clone();
+    invalid.devices[0].info.holder = Some(id("not-a-telemetry-grant"));
+    assert!(answer(87, &Answer::PhysicalReport(invalid), MAX_MESSAGE).is_err());
+    let mut invalid = report.clone();
+    invalid.devices.push(report.devices[0].clone());
+    assert!(answer(87, &Answer::PhysicalReport(invalid), MAX_MESSAGE).is_err());
+}
+
+/// AC-T7.4.1: hostile counts and impossible loads refuse before another list element is allocated,
+/// without echoing native model metadata in the diagnostic.
+#[test]
+fn physical_report_refuses_truncated_counts_and_invalid_counter_units() {
+    for count in [1, u32::try_from(MAX_DEVICES + 1).unwrap()] {
+        let mut w = Writer::new(MAX_MESSAGE);
+        w.header(kind::PHYSICAL_REPORT_ANSWER, 88);
+        w.string("native-owner").unwrap();
+        w.u32(count);
+        assert!(read_answer(&received(&w.done().unwrap(), 0), MAX_MESSAGE).is_err());
+    }
+    let mut w = Writer::new(MAX_MESSAGE);
+    w.header(kind::PHYSICAL_REPORT_ANSWER, 88);
+    w.string("native-owner").unwrap();
+    w.u32(1);
+    put_device_id(&mut w, &example_physical_report().devices[0].info.id);
+    w.string("private-native-model").unwrap();
+    w.u64(4096);
+    w.u8(1);
+    w.u16(1001);
+    w.u8(0);
+    let fault = read_answer(&received(&w.done().unwrap(), 0), MAX_MESSAGE).unwrap_err();
+    assert!(matches!(
+        fault,
+        Fault::Value {
+            what: "physical report",
+            ..
+        }
+    ));
+    assert!(!fault.to_string().contains("private-native-model"));
 }
 
 /// AC-T7.4.1: peer capacity and admitted work retain the same exact cost profile/host charge;
