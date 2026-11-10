@@ -541,9 +541,23 @@ fn a_message_of_another_wire_is_refused_naming_both_wires() {
 #[test]
 fn the_wire_identity_is_its_definitions_digest_line_endings_aside() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let wire = std::fs::read(dir.join("wire.rs")).unwrap();
-    let stream = std::fs::read(dir.join("stream.rs")).unwrap();
-    assert_eq!(identity(&[&wire, &stream]), IDENTITY);
+    let paths = [
+        "wire.rs",
+        "stream.rs",
+        "schedule.rs",
+        "../../hex-sim/src/peer.rs",
+        "../../hex-sim/src/model.rs",
+        "../../hex-api/src/spec.rs",
+        "../../hex-api/src/id.rs",
+        "../../hex-api/src/bounds.rs",
+    ];
+    let mut sources: Vec<Vec<u8>> = paths
+        .iter()
+        .map(|p| std::fs::read(dir.join(p)).unwrap())
+        .collect();
+    let digest =
+        |sources: &[Vec<u8>]| identity(&sources.iter().map(Vec::as_slice).collect::<Vec<_>>());
+    assert_eq!(digest(&sources), IDENTITY);
     let crlf = |bytes: &[u8]| -> Vec<u8> {
         let mut out = Vec::new();
         for &b in bytes.iter().filter(|&&b| b != b'\r') {
@@ -554,10 +568,15 @@ fn the_wire_identity_is_its_definitions_digest_line_endings_aside() {
         }
         out
     };
-    assert_eq!(identity(&[&crlf(&wire), &crlf(&stream)]), IDENTITY);
-    let mut more = wire.clone();
-    more.push(b' ');
-    assert_ne!(identity(&[&more, &stream]), IDENTITY);
+    assert_eq!(
+        digest(&sources.iter().map(|s| crlf(s)).collect::<Vec<_>>()),
+        IDENTITY
+    );
+    for changed in 0..sources.len() {
+        sources[changed].push(b' ');
+        assert_ne!(digest(&sources), IDENTITY);
+        sources[changed].pop();
+    }
 }
 
 /// HEX-SOCK-2: a list longer than one message carries is split into messages within the bound, each
@@ -727,7 +746,7 @@ fn a_run_is_a_create_and_an_exec_in_one_request() {
 #[test]
 fn unknown_kinds_are_refused() {
     let hello = request(5, &Request::Hello { build: build() }, MAX_MESSAGE).unwrap();
-    for kind in [0u16, 0x0011, 0x7fff, 0x8001, 0x8009, 0xffff] {
+    for kind in [0u16, 0x0012, 0x7fff, 0x8001, 0x8009, 0xffff] {
         let mut bytes = hello.clone();
         bytes[12..14].copy_from_slice(&kind.to_le_bytes());
         let got = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
@@ -736,7 +755,7 @@ fn unknown_kinds_are_refused() {
             "{got:?}"
         );
     }
-    for kind in [0u16, 0x0001, 0x000b, 0x8000, 0x800c, 0xffff] {
+    for kind in [0u16, 0x0001, 0x000b, 0x8000, 0x800d, 0xffff] {
         let mut bytes = answer(5, &Answer::Done, MAX_MESSAGE).unwrap();
         bytes[12..14].copy_from_slice(&kind.to_le_bytes());
         assert!(matches!(
@@ -1129,7 +1148,7 @@ proptest! {
     /// HEX-SOCK-1: bodies of random bytes behind a valid header, so every kind's decoder meets them, are a
     /// message or a typed refusal, never a panic.
     #[test]
-    fn any_body_behind_a_header_is_read_or_refused(kind in prop_oneof![0u16..0x0011, 0x8000u16..0x800c], body in proptest::collection::vec(any::<u8>(), 0..256), fds in 0usize..4) {
+    fn any_body_behind_a_header_is_read_or_refused(kind in prop_oneof![0u16..0x0012, 0x8000u16..0x800d], body in proptest::collection::vec(any::<u8>(), 0..256), fds in 0usize..4) {
         let mut bytes = header(kind, 3);
         bytes.extend_from_slice(&body);
         let _ = read_request(&received(&bytes, fds), MAX_MESSAGE);
@@ -1190,4 +1209,26 @@ fn an_exec_whose_stdio_travels_apart_carries_no_descriptors() {
             ..
         })
     ));
+}
+
+/// CP-T7.4: scheduling shares descriptor validation and message admission with Runtime calls.
+#[test]
+fn scheduler_control_cannot_carry_a_descriptor_or_exceed_the_wire_bound() {
+    let request_value = Request::Call(Call::Schedule(Box::new(crate::schedule::Command::Retry)));
+    let bytes = request(47, &request_value, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_request_apart(&bytes, MAX_MESSAGE).unwrap().1,
+        request_value
+    );
+    let received = Received {
+        bytes: &bytes,
+        size: bytes.len(),
+        descriptors: 1,
+        descriptors_cut: false,
+    };
+    assert!(matches!(
+        read_request(&received, MAX_MESSAGE).unwrap_err().fault,
+        Fault::Descriptors { .. }
+    ));
+    assert!(request(47, &request_value, HEADER_BYTES).is_err());
 }

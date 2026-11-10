@@ -2,7 +2,7 @@
 //! Peer messages use `hex_sim::peer`'s bounded codec, including GPU model names rather than
 //! process-local model IDs. Refusals use a complete `wire::Answer::Refused` message, retaining type.
 
-use hex_api::BoxSpec;
+use hex_api::{BoxId, BoxSpec};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,6 +23,8 @@ pub struct Payload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Packet {
+    pub epoch: u64,
+    pub seq: u64,
     pub message: String,
     pub payload: Option<Payload>,
     pub refusal: Option<Vec<u8>>,
@@ -44,6 +46,7 @@ pub enum Command {
 pub struct Reply {
     pub key: Option<Key>,
     pub at: Option<u32>,
+    pub physical: Option<BoxId>,
     pub created: bool,
     pub ended: bool,
     /// Typed failures from actual runtime operations, encoded by the existing refusal codec.

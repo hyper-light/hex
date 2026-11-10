@@ -27,7 +27,16 @@ fn run(args: &[String]) -> Result<(), Refusal> {
     match args {
         [verb, flag, file] if verb == "serve" && flag == "--config" => {
             let config = hex_node::scheduler::read_config(Path::new(file))?;
-            let service = hex_node::scheduler::Service::open(&config)?;
+            let service = hex_node::scheduler::Service::open(
+                &config,
+                Arc::new(|node, why| {
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "hex scheduler peer {}: {why}",
+                        node.0
+                    );
+                }),
+            )?;
             #[cfg(target_os = "linux")]
             let platform = hex_node::sizes::Sizes::now()?.platform();
             #[cfg(target_os = "macos")]

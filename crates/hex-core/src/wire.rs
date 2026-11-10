@@ -59,6 +59,9 @@ pub const IDENTITY: u64 = identity(&[
     include_bytes!("schedule.rs"),
     include_bytes!("../../hex-sim/src/peer.rs"),
     include_bytes!("../../hex-sim/src/model.rs"),
+    include_bytes!("../../hex-api/src/spec.rs"),
+    include_bytes!("../../hex-api/src/id.rs"),
+    include_bytes!("../../hex-api/src/bounds.rs"),
 ]);
 /// The header's length: magic, wire identity, kind and id.
 pub const HEADER_BYTES: usize = 22;

@@ -2,10 +2,11 @@
 //! The ordinary node socket carries control. Declared peers use authenticated SSH stdio tunnels;
 //! no cluster service or listening TCP socket is required, including on a single laptop.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{SyncSender, sync_channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use hex_api::{
     BoxId, BoxInfo, BoxSpec, Class, Proc, Program, Refusal, Runtime, Signal, Stdio, Usage,
@@ -19,7 +20,17 @@ use serde::{Deserialize, Serialize};
 use crate::placement::{Driver, Envelope, Error, Notice, Payload, Runtimes, Step};
 use crate::serve::Host;
 
+mod order;
 pub mod tunnel;
+
+/// CLI-owned reporting: library delivery never chooses an output stream.
+pub type Report = Arc<dyn Fn(NodeId, &str) + Send + Sync>;
+
+#[derive(Default)]
+struct Stopping {
+    stopped: Mutex<bool>,
+    wake: Condvar,
+}
 
 /// Explicitly initialized runtime endpoints; class names describe the configured backend,
 /// while its hello independently establishes which BoxSpec forms it implements.
@@ -84,8 +95,15 @@ fn encoded_refusal(why: &Refusal) -> Result<Vec<u8>, Refusal> {
     wire::answer(0, &wire::Answer::Refused(why.clone()), wire::MAX_MESSAGE).map_err(Into::into)
 }
 
-fn packet(envelope: Envelope, models: &[String]) -> Result<dto::Packet, Refusal> {
+fn packet(
+    envelope: Envelope,
+    models: &[String],
+    epoch: u64,
+    seq: u64,
+) -> Result<dto::Packet, Refusal> {
     Ok(dto::Packet {
+        epoch,
+        seq,
         message: peer::encode_message(&envelope.msg, models, wire::MAX_MESSAGE)
             .map_err(|e| Refusal::Broken(format!("encoding placement message: {e:?}")))?,
         payload: envelope.payload.map(|p| dto::Payload {
@@ -133,18 +151,55 @@ fn envelope(packet: dto::Packet, models: &[String]) -> Result<Envelope, Refusal>
     })
 }
 
+struct Permit(Arc<AtomicUsize>);
+impl Drop for Permit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+struct Queued {
+    envelope: Envelope,
+    _permit: Permit,
+}
+
+#[derive(Default)]
+struct Dispatch {
+    refusals: Vec<Vec<u8>>,
+    notices: Vec<Notice>,
+}
+
 /// A scheduler socket serves control only. Box execution continues through its configured Runtime
 /// endpoints, so a caller cannot bypass placement admission by calling Create on this socket.
 pub struct Service {
     id: NodeId,
+    _lease: std::fs::File,
+    order: Mutex<order::Order>,
     driver: Driver,
     cluster: Mutex<Cluster>,
     prober: Mutex<crate::facts::Prober>,
-    senders: BTreeMap<NodeId, SyncSender<Envelope>>,
+    stopping: Arc<Stopping>,
+    queued: Arc<AtomicUsize>,
+    senders: BTreeMap<NodeId, SyncSender<Queued>>,
 }
 
 impl Service {
-    pub fn open(config: &Config) -> Result<Arc<Self>, Refusal> {
+    pub fn open(config: &Config, report: Report) -> Result<Arc<Self>, Refusal> {
+        std::fs::create_dir_all(&config.state)
+            .map_err(|e| Refusal::os("creating scheduler state", e))?;
+        let lease = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(config.state.join("scheduler.lock"))
+            .map_err(|e| Refusal::os("opening scheduler state lease", e))?;
+        lease.try_lock().map_err(|e| {
+            Refusal::Broken(format!(
+                "scheduler state is already held or cannot be locked: {e}"
+            ))
+        })?;
+        let order = order::Order::open(&config.state.join("transport"))?;
+        let epoch = order.epoch;
         let mut cluster = Cluster::single_owner(config.nodes.clone(), Vec::new());
         cluster.models = config.models.clone();
         let id = NodeId(config.node);
@@ -204,11 +259,13 @@ impl Service {
                 ran: hex_runtime::MAX_BOXES,
             },
             Pick::default(),
-            &config.state,
+            &config.state.join("placements"),
             Runtimes::new(backends).map_err(failed)?,
         )
         .map_err(failed)?;
         let mut senders = BTreeMap::new();
+        let queued = Arc::new(AtomicUsize::new(0));
+        let stopping = Arc::new(Stopping::default());
         for peer in &config.peers {
             let node = NodeId(peer.node);
             if node == id
@@ -220,29 +277,71 @@ impl Service {
                     why: format!("invalid or duplicate node {}", peer.node),
                 });
             }
-            let (send, receive) = sync_channel(crate::records::MOST);
+            let (send, receive) = sync_channel::<Queued>(crate::records::MOST);
             let peer = peer.clone();
             let models = cluster.models.clone();
+            let stopping = Arc::clone(&stopping);
+            let report = Arc::clone(&report);
             std::thread::Builder::new()
                 .name(format!("hex-peer-{}", peer.node))
                 .spawn(move || {
                     let mut tunnel = None;
+                    let mut seq = 0u64;
                     for message in receive {
-                        let delivery = packet(message, &models).and_then(|packet| {
-                            if tunnel.is_none() {
-                                tunnel = Some(tunnel::Connection::open(&peer)?);
+                        let Some(next) = seq.checked_add(1) else {
+                            break;
+                        };
+                        seq = next;
+                        let packet = match packet(message.envelope, &models, epoch, seq) {
+                            Ok(packet) => packet,
+                            Err(why) => {
+                                report(node, &why.to_string());
+                                continue;
                             }
-                            let conn = tunnel
-                                .as_mut()
-                                .ok_or_else(|| Refusal::Broken("peer tunnel absent".into()))?;
-                            conn.call(dto::Command::Hear { from: id.0, packet })
+                        };
+                        let mut pace = std::time::Duration::ZERO;
+                        let mut previous = None;
+                        loop {
+                            let began = std::time::Instant::now();
+                            let delivery = (|| {
+                                if tunnel.is_none() {
+                                    tunnel = Some(tunnel::Connection::open(&peer)?);
+                                }
+                                let conn = tunnel
+                                    .as_mut()
+                                    .ok_or_else(|| Refusal::Broken("peer tunnel absent".into()))?;
+                                conn.call(dto::Command::Hear {
+                                    from: id.0,
+                                    packet: packet.clone(),
+                                })
                                 .map(|_| ())
-                        });
-                        if let Err(why) = delivery {
+                            })();
+                            if delivery.is_ok() {
+                                break;
+                            }
                             tunnel = None;
-                            // The durable peer core retains ownership. Silence never releases it; LinkUp/Retry
-                            // resends from its records, rather than making an unsafe second placement.
-                            eprintln!("hex scheduler peer {}: {why}", peer.node);
+                            pace = pace.max(began.elapsed());
+                            if let Err(why) = delivery {
+                                let why = why.to_string();
+                                if previous.as_ref() != Some(&why) {
+                                    report(node, &why.to_string());
+                                    previous = Some(why);
+                                }
+                            }
+                            // Pacing is measured SSH service time. Ownership is never released on silence.
+                            let Ok(stopped) = stopping.stopped.lock() else {
+                                return;
+                            };
+                            let Ok((stopped, _)) =
+                                stopping
+                                    .wake
+                                    .wait_timeout_while(stopped, pace, |stopped| !*stopped)
+                            else {
+                                return;
+                            };
+                            if *stopped {
+                                return;
+                            }
                         }
                     }
                 })
@@ -251,9 +350,13 @@ impl Service {
         }
         let service = Arc::new(Self {
             id,
+            _lease: lease,
+            order: Mutex::new(order),
             driver,
             cluster: Mutex::new(cluster),
             prober: Mutex::new(prober),
+            stopping,
+            queued,
             senders,
         });
         let recovered = service.driver.take_recovered().map_err(failed)?;
@@ -261,44 +364,69 @@ impl Service {
         Ok(service)
     }
 
-    fn dispatch(&self, step: Step) -> Result<Vec<Vec<u8>>, Refusal> {
-        let mut refusals = Vec::new();
-        for notice in step.notices {
-            match notice {
-                Notice::Refused { refusal, .. } => refusals.push(encoded_refusal(&refusal)?),
-                Notice::Unknown {
-                    refusal, cleanup, ..
-                } => {
-                    refusals.push(encoded_refusal(&refusal)?);
-                    if let Some(cleanup) = cleanup {
-                        refusals.push(encoded_refusal(&cleanup)?);
+    fn dispatch(&self, step: Step) -> Result<Dispatch, Refusal> {
+        let mut result = Dispatch::default();
+        let mut work = VecDeque::from([step]);
+        while let Some(step) = work.pop_front() {
+            for notice in step.notices {
+                match &notice {
+                    Notice::Refused { refusal, .. } => {
+                        result.refusals.push(encoded_refusal(refusal)?)
                     }
+                    Notice::Unknown {
+                        refusal, cleanup, ..
+                    } => {
+                        result.refusals.push(encoded_refusal(refusal)?);
+                        if let Some(cleanup) = cleanup {
+                            result.refusals.push(encoded_refusal(cleanup)?);
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
+                result.notices.push(notice);
             }
-        }
-        for (node, envelope) in step.send {
-            if let Some(why) = &envelope.refusal {
-                refusals.push(encoded_refusal(why)?);
-            }
-            let result = self
-                .senders
-                .get(&node)
-                .ok_or_else(|| Refusal::Invalid {
-                    what: "scheduler peer",
-                    why: format!("no authenticated route to node {}", node.0),
-                })
-                .and_then(|sender| {
-                    sender.try_send(envelope).map_err(|_| Refusal::Exhausted {
-                        what: "queued peer messages",
-                        bound: crate::records::MOST,
+            for (node, envelope) in step.send {
+                if node == self.id {
+                    if work.len() >= crate::records::MOST {
+                        return Err(Refusal::Exhausted {
+                            what: "local placement transitions",
+                            bound: crate::records::MOST,
+                        });
+                    }
+                    work.push_back(self.driver.hear(self.id, envelope).map_err(failed)?);
+                    continue;
+                }
+                let delivery = self
+                    .senders
+                    .get(&node)
+                    .ok_or_else(|| Refusal::Invalid {
+                        what: "scheduler peer",
+                        why: format!("no authenticated route to node {}", node.0),
                     })
-                });
-            if let Err(why) = result {
-                refusals.push(encoded_refusal(&why)?);
+                    .and_then(|sender| {
+                        self.queued
+                            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                                n.checked_add(1).filter(|n| *n <= crate::records::MOST)
+                            })
+                            .map_err(|_| Refusal::Exhausted {
+                                what: "queued peer messages",
+                                bound: crate::records::MOST,
+                            })?;
+                        let queued = Queued {
+                            envelope,
+                            _permit: Permit(Arc::clone(&self.queued)),
+                        };
+                        sender.try_send(queued).map_err(|_| Refusal::Exhausted {
+                            what: "queued peer messages",
+                            bound: crate::records::MOST,
+                        })
+                    });
+                if let Err(why) = delivery {
+                    result.refusals.push(encoded_refusal(&why)?);
+                }
             }
         }
-        Ok(refusals)
+        Ok(result)
     }
 
     fn refresh(&self) -> Result<(), Refusal> {
@@ -327,10 +455,7 @@ impl Service {
     pub fn command(&self, command: dto::Command) -> Result<dto::Reply, Refusal> {
         // Current facts gate new admission. Refresh errors stop admission; an old, larger offer is
         // never used merely because the host can no longer establish its current capacity.
-        if matches!(
-            &command,
-            dto::Command::Submit { .. } | dto::Command::Hear { .. } | dto::Command::Retry
-        ) {
+        if matches!(&command, dto::Command::Submit { .. } | dto::Command::Retry) {
             self.refresh()?;
         }
 
@@ -390,13 +515,32 @@ impl Service {
                         why: format!("unconfigured peer {from}"),
                     });
                 }
+                let mut order = self
+                    .order
+                    .lock()
+                    .map_err(|_| Refusal::Broken("peer order lock poisoned".into()))?;
+                if !order.accept(from, packet.epoch, packet.seq)? {
+                    return Ok(dto::Reply {
+                        key: None,
+                        at: None,
+                        physical: None,
+                        created: false,
+                        ended: false,
+                        refusals: Vec::new(),
+                    });
+                }
                 let cluster = self
                     .cluster
                     .lock()
                     .map_err(|_| Refusal::Broken("scheduler model lock poisoned".into()))?;
                 let message = envelope(packet, &cluster.models)?;
                 drop(cluster);
-                self.driver.hear(NodeId(from), message).map_err(failed)?
+                if matches!(message.msg, peer::Msg::Start { .. }) {
+                    self.refresh()?;
+                }
+                let step = self.driver.hear(NodeId(from), message).map_err(failed)?;
+                drop(order);
+                step
             }
             dto::Command::LinkUp { peer } => self.driver.link_up(NodeId(peer)).map_err(failed)?,
             dto::Command::Retry => self.driver.retry().map_err(failed)?,
@@ -409,7 +553,7 @@ impl Service {
                 self.driver.poll_status().map_err(failed)?
             }
         };
-        let refusals = self.dispatch(step)?;
+        let dispatch = self.dispatch(step)?;
         let status = requested
             .map(|key| self.driver.status(key).map_err(failed))
             .transpose()?
@@ -417,10 +561,28 @@ impl Service {
         Ok(dto::Reply {
             key: requested.map(external),
             at: status.as_ref().and_then(|s| s.node).map(|n| n.0),
-            created: status.as_ref().is_some_and(|s| s.created),
-            ended: status.as_ref().is_some_and(|s| s.ended),
-            refusals,
+            physical: status.as_ref().map(|s| s.physical.clone()),
+            created: status.as_ref().is_some_and(|s| s.created)
+                || dispatch
+                    .notices
+                    .iter()
+                    .any(|n| matches!(n, Notice::Started { key, .. } if Some(*key) == requested)),
+            ended: status.as_ref().is_some_and(|s| s.ended)
+                || dispatch
+                    .notices
+                    .iter()
+                    .any(|n| matches!(n, Notice::Ended { key } if Some(*key) == requested)),
+            refusals: dispatch.refusals,
         })
+    }
+}
+
+impl Drop for Service {
+    fn drop(&mut self) {
+        if let Ok(mut stopped) = self.stopping.stopped.lock() {
+            *stopped = true;
+            self.stopping.wake.notify_all();
+        }
     }
 }
 
@@ -501,3 +663,6 @@ pub fn read_config(path: &Path) -> Result<Config, Refusal> {
         why: e.to_string(),
     })
 }
+
+#[cfg(test)]
+mod tests;

@@ -138,7 +138,7 @@ impl Connection {
     }
 
     pub fn call(&mut self, command: schedule::Command) -> Result<schedule::Reply, Refusal> {
-        self.next = self.next.checked_add(1).ok_or_else(|| Refusal::Exhausted {
+        self.next = self.next.checked_add(1).ok_or(Refusal::Exhausted {
             what: "peer request IDs",
             bound: usize::MAX,
         })?;

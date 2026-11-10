@@ -282,10 +282,8 @@ impl Driver {
             }
             // Runtime::classes is a backend call too: validate after dropping the core lock.
             let prior = state.node.ran_keys().any(|(k, _, _)| k == key);
-            if !prior {
-                if let Some(why) = &state.admission {
-                    return Err(why.clone().into());
-                }
+            if !prior && let Some(why) = &state.admission {
+                return Err(why.clone().into());
             }
             if prior && state.rows.payload("ran", key)? != payload {
                 return Err(invalid("repeated start changed its payload").into());
