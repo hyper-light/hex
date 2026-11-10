@@ -82,10 +82,10 @@ pub fn run(s: &Subject<'_>) -> Result<(), Failure> {
     a_guest_its_client_lost_is_taken_back_by_attach(s)
 }
 
-/// `backend()` is this host's, and macOS x86_64 and Windows arm64 have none, by name.
+/// `backend()` is this host's; Intel Mac is excluded from the supported target set.
 pub fn hosts_without_a_backend_are_named(s: &Subject<'_>) -> Result<(), Failure> {
     const CASE: &str = "hosts without a backend are named";
-    for (os, arch) in [("macos", "x86_64"), ("windows", "aarch64")] {
+    for (os, arch) in [("macos", "x86_64")] {
         match backend_of(os, arch) {
             Err(Refusal::NoBackend { os: o, arch: a }) if (o, a) == (os, arch) => {}
             other => return Err(fail(CASE, format!("{os} {arch}: {other:?}"))),

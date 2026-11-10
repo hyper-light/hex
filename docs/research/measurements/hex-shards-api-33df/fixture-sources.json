@@ -1,0 +1,11 @@
+{
+  "upstream": "33df95b08ad8f95bddeaa1c48acf0c64386e0eac",
+  "files": {
+    "docs/research/measurements/managed-borrowed-nowait/focused.rs": "84ae94fefbd4ca3b9bb3e813a24ce1e81750efa748f70662cf0d42caffe2f010",
+    "docs/research/measurements/managed-borrowed-nowait/contract.rs": "306245f3f9b444d1333ef36ee80e326202198ba9c1bb6791efc16817330ddce1",
+    "docs/research/measurements/managed-proc-main/allocation.rs": "638e6f6599e683d8ffec09f6abf76992b0023e7ae42dad71576ac0f881eaab37",
+    "docs/research/measurements/managed-proc-main/repro.rs": "680f0e9807b88ad626aff5054af3b797d4c63b8d60023ecc56a006e0cf0fa01a",
+    "docs/research/measurements/managed-proc-main/reader-tests.rs": "7bf0273668a4e946801a38713ee1def8884673a9183106d3db1608e51ba187e2"
+  },
+  "reason": "API compile includes these canonical upstream sources; no test module disabled or stubbed"
+}
