@@ -11,6 +11,7 @@
   "host": "macOS arm64 d1323898b255a3ed435eb83fa0f7b0cf",
   "kind": "root-reviewed-macos-cold-and-tail-extension",
   "method": "existing per-operation/per-build-profile recorded maximum and online maximum, deadline TIMES_SLOWEST times max(recorded,seen); extend eligible cohorts and retain existing D9 censored lower bounds, no new floor, multiplier or algorithm",
+  "new_negative_evidence": "armed-submit-negative-df534d2f.json; candidate source record values unchanged pending root diagnosis",
   "prior_candidate": "bbb3ef2114641d82742e153c98665ea6639b9a60 failed broader validation, retained unchanged as historical evidence",
   "requirement": "AC-T7.4.1 / decision9",
   "root_cold_capture_revision": "8f51140ef653d0b348597b02b241cc185a4aa54e",
@@ -707,6 +708,6 @@
     }
   },
   "scope": "macOS native and macOS-host guest transports only. Guest SDK timer starts after dial/token; normal counts are not per-row VM identity and unobserved pre-Hello retries remain possible. No CONNECT/fullboot/workload/performance/resource-return or whole-goal claim. Linux/Windows and other waits unchanged.",
-  "status": "candidate installed; actual armed and final combined validation owed; not ready to land",
+  "status": "FAILED actual armed physical Submit at456592000ns after106complete localcycles; not ready to land",
   "units": "nanoseconds"
 }

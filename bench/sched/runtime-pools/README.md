@@ -310,3 +310,23 @@ This is a new candidate requiring actual armed fresh-node/local/SSH validation
 and final combined gates. It does not claim a cause or fix for the unreproduced
 guest_loop reboot-count failure. Other platforms and measuring waits retain
 their recorded scope and remain unverified where no actual record exists.
+
+The new candidate subsequently passed 1,000 fresh armed nodes per profile. Root
+reconstructed all 10,002 authority inputs and 32,000 ledger rows, checked every
+empty census directory and external artifact/receipt hashes, and matched all
+2,000 unique guest identities and exact recorded Stopped closures. These results
+are armed-cold-{debug,release}-265c1501.json. They establish the stated fresh-node
+readiness/closure controls, with no timing or workload claim.
+
+The release physical boundary also passed two oversized refusals and two valid
+local/SSH cycles. Its larger physical run then FAILED on Submit at456.592ms after
+106 complete local cycles. The final durable owner/runner rows for key0/1/106
+were created/running while the caller had timed out without confirmation. Record
+data mtimes alone cannot locate a delay or establish fsync completion. The guest
+ended Stopped; final full-run baseline/count fields are absent and not invented.
+armed-submit-negative-df534d2f.json retains exact input hashes and the failure.
+The calibration manifest is explicitly failed again. No further record value or
+deadline changed. Root is profiling the same binaries to distinguish durable
+record flushes, runtime staging/start and reply publication; all profiled rows
+are diagnostic and excluded from calibration. A passing fresh-node campaign
+does not certify the physical scheduler lifecycle or the whole goal.

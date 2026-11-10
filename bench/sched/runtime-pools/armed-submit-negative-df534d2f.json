@@ -1,0 +1,126 @@
+{
+  "binary_and_artifact_hashes": {
+    "hex": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-cold-extension-host-265c1501/aarch64-apple-darwin/release/hex",
+      "sha256": "cd9c1650550532f6f518b560a9ce1169e4c7637902f3b3397ff169d7ef7007d1"
+    },
+    "initrd": {
+      "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/initramfs-cc7c2190-release-aarch64.cpio",
+      "sha256": "5521b2304a5a6c2d9357fe4e1ac43f68ec817b685f8600115fa94f139eda778e"
+    },
+    "kernel": {
+      "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/Image-6.18.48-aarch64",
+      "sha256": "1b178851998d27b4c6c346ae391c26d675f81461fbaa19cbe514500291fe472d"
+    },
+    "linux_hex": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-scheduler-vm-cc7c2190/aarch64-unknown-linux-musl/release/hex",
+      "sha256": "e2670cf5cf0b4ac32fa30f55b7027b3f95a942205c51aafe26169f5a7b9a276d"
+    },
+    "runtime_probe": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-cold-extension-probe-265c1501/aarch64-apple-darwin/release/hex-scheduler-runtime-probe",
+      "sha256": "9ad51a2fe7edb3dd3e9a25a42997378f25ee90249c1cde2c0b26b17b4be7835e"
+    },
+    "shards": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-shards-vm-tool/release/shards",
+      "sha256": "b9d74f0910a54593b66f604ffe36e39d588c89afea60d4643e37813200daa61e"
+    }
+  },
+  "call_log": {
+    "bytes": 129,
+    "mtime_ns": 1794314087429168205,
+    "path": "/Users/adalundhe/.cache/hx/e-jyods8t4/call.log",
+    "sha256": "b405349c8141278ba540a853704a3f6a63f4cff3db94e395dd643e895a8ea61c"
+  },
+  "call_log_text": "hex schedule: waiting for the node agent's answer failed: none came in 456.592ms, twice the slowest answer to a call of its kind\n",
+  "cleanup_errors": "neither cleanup_error nor backend_cleanup_error present",
+  "compiled_binary_source": "265c15016d1a47c07f28e55a2f352c166b94a4b2",
+  "complete_physical_cycles_reconstructed": 106,
+  "complete_run_baseline_and_counts": "absent; not invented",
+  "failed_call": {
+    "census": null,
+    "kind": "census-call-exit",
+    "operation": "submit",
+    "parent": 49860,
+    "pid": 51505,
+    "recorded_by": 49860,
+    "returncode": 1,
+    "run": "/Users/adalundhe/.cache/hx/e-jyods8t4",
+    "success": false
+  },
+  "failed_key": {
+    "epoch": 1,
+    "owner": 0,
+    "seq": 106
+  },
+  "kind": "root-negative-armed-submit-df534d2f",
+  "ledger": {
+    "bytes": 463490,
+    "mtime_ns": 1794314087600457690,
+    "path": "/Users/adalundhe/.cache/hx/e-jyods8t4/pids.jsonl",
+    "sha256": "cb0c16881b0dba6d522546a1b2f4899f6e98398d4f2671a5c204fcdbd14db94c"
+  },
+  "mtime_limit": "record data mtimes precede call error write; they do not establish fsync/durability completion or locate reply latency",
+  "next_step": "profile unchanged production binaries to distinguish durable record flush, runtime staging/start and reply publication; profiling data excluded from calibration; no further seed change",
+  "phase": "local",
+  "profile": "release",
+  "raw_result": {
+    "bytes": 5876,
+    "mtime_ns": 1794314087641459808,
+    "path": "/Users/adalundhe/.cache/hx/e-jyods8t4/result.json",
+    "sha256": "e0362be2f81191d95a6de68f0d7954f92eeaa1d1b1e2035a7bed2763e69b5a03"
+  },
+  "receipts": {
+    "build": {
+      "path": "/Users/adalundhe/.cache/hex-lead/cold-extension-265c1501/receipts/build-physical-release-df534d2f.json",
+      "sha256": "4d17c87dd632bf4b19e32090f2c634276242385c9c820e5a6fcc0a4e78c21dc4"
+    },
+    "deadline": {
+      "path": "/Users/adalundhe/.cache/hex-lead/cold-extension-265c1501/receipts/method-physical-release-mass-df534d2f.json",
+      "sha256": "cdaf900e5ec7e49d0f9e1ef83451b51892f6391363057862bb8eff6843ef9eb9"
+    },
+    "policy": {
+      "path": "/Users/adalundhe/.cache/hex-lead/cold-extension-265c1501/receipts/policy-root-f5.json",
+      "sha256": "2561f5c98ec6340a0007606f4c20d7fac8c802716bab4514a03d7bf7da94dcb0"
+    }
+  },
+  "requirement": "AC-T7.4.1; actual installed response-record validation",
+  "retained_owner_row": {
+    "input": {
+      "bytes": 515,
+      "mtime_ns": 1794314087347325053,
+      "path": "/Users/adalundhe/.cache/hx/e-jyods8t4/l.state/placements/own-0-1-106.rec",
+      "sha256": "c9c6b0448f7629501dbe6bbb8756cd343872582ad6f852d5fb954ef9678ea9b0"
+    },
+    "original_box_id": "local-106",
+    "row": "created 0 d1 plain shards 1000 67108864 0 0 linux aarch64 - 0 0 0 0 0 0"
+  },
+  "retained_runner_row": {
+    "input": {
+      "bytes": 515,
+      "mtime_ns": 1794314087307577118,
+      "path": "/Users/adalundhe/.cache/hx/e-jyods8t4/l.state/placements/ran-0-1-106.rec",
+      "sha256": "ff6205f6c39408ba662c4b18f3bef86e3214125d8d2170e7e98e6d87279d9c9a"
+    },
+    "row": "0 running d1 plain shards 1000 67108864 0 0 linux aarch64 - 0 0 0 0 0 0"
+  },
+  "retirement": {
+    "end": "Stopped",
+    "guest_stopped": true,
+    "pid": 49872,
+    "started": 12438822933453
+  },
+  "root_identity_reconstruction": {
+    "live_API_check": "not performed by verifier",
+    "pid": 49872,
+    "receipt_sha256": "9b63ca988b70160bd4234fe5941314f9326396edabee3cdd35634c2ad779b4d6",
+    "record_sha256": "92781c86a134ac6318aa3e74092f93e139b066f116a7b5325f7df7a743fe3981",
+    "recorded_terminal": "Stopped",
+    "started": 12438822933453,
+    "vsock": "/Users/adalundhe/.cache/hx/e-jyods8t4/guest-tmp/shards-api-0b98a7f2cbbc53ae-0/v"
+  },
+  "source_revision": "df534d2f20a32c404e62e8dd31aa70d9838f0267",
+  "status": "FAILED; candidate not ready to land",
+  "timeout_derivation": "unchanged TIMES_SLOWEST2 x selectedSubmit228296000ns",
+  "timeout_ns": 456592000,
+  "whole_goal": "incomplete; passing cold readiness does not certify physical scheduler lifecycle"
+}
