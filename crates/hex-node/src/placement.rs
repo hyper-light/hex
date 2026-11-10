@@ -120,7 +120,7 @@ pub fn runtime_budget() -> Budget {
 }
 
 pub fn physical_id(key: Key) -> Result<BoxId, Refusal> {
-    BoxId::new(format!("hex-place-{}-{}-{}", key.owner, key.epoch, key.seq))
+    BoxId::new(&format!("hex-place-{}-{}-{}", key.owner, key.epoch, key.seq))
 }
 
 fn invalid(why: impl Into<String>) -> Refusal {
