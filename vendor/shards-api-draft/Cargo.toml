@@ -1,9 +1,11 @@
-# A copy of Shards' `shards-api` (crates/api) and the crates it needs (abi, the constants it shares with Shards' VMM;
-# afunix on Windows; testdir for its tests), at hyper-light/shards p/integrate-1107 f2e5a8ca1 (pushed 2026-11-09: the
-# real client's attach and identity, and the bounds derived at run time, hex/derived-bounds ea32c690), so Hex builds
-# against it on every machine before Shards lands it on main. It moves to vendor/shards, recorded in
-# vendor/MANIFEST.toml, once Shards lands the crate (docs/design/shards-guest.md Appendix A). Its own workspace,
-# Shards' settings below (its root Cargo.toml at that commit), so its lints are Shards'.
+# A byte-for-byte copy of Shards' `shards-api` (crates/api) and the crates it needs (abi, afunix on Windows,
+# testdir for its tests), at hyper-light/shards p/integrate-1107 c55d85db9b8c88656b4fe4bd582f5ebe6500e959
+# (2026-11-09; SAID da8bcd272, vmm-round2 7ddceb974). D12: the kept console size is learned per kernel pin,
+# `--console-said N` is passed to Shards, and the client's refusal tail is derived from that size. Real guests
+# require a Shards binary that supports `--console-said` (this revision or a descendant); the guest kernel pin
+# is unchanged. The source crates have no Hex patches; the root keeps Shards' settings below (its Cargo.toml
+# is unchanged since f2e5a8ca1), with only these four workspace members. It moves to vendor/shards, recorded in
+# vendor/MANIFEST.toml, once Shards lands the crate on main (docs/design/shards-guest.md Appendix A).
 [workspace]
 members = ["crates/abi", "crates/api", "crates/afunix", "crates/testdir"]
 resolver = "3"
