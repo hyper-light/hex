@@ -85,11 +85,10 @@ pub fn run(s: &Subject<'_>) -> Result<(), Failure> {
 /// `backend()` is this host's; Intel Mac is excluded from the supported target set.
 pub fn hosts_without_a_backend_are_named(s: &Subject<'_>) -> Result<(), Failure> {
     const CASE: &str = "hosts without a backend are named";
-    for (os, arch) in [("macos", "x86_64")] {
-        match backend_of(os, arch) {
-            Err(Refusal::NoBackend { os: o, arch: a }) if (o, a) == (os, arch) => {}
-            other => return Err(fail(CASE, format!("{os} {arch}: {other:?}"))),
-        }
+    let (os, arch) = ("macos", "x86_64");
+    match backend_of(os, arch) {
+        Err(Refusal::NoBackend { os: o, arch: a }) if (o, a) == (os, arch) => {}
+        other => return Err(fail(CASE, format!("{os} {arch}: {other:?}"))),
     }
     let here: Result<Backend, Refusal> = backend_of(std::env::consts::OS, std::env::consts::ARCH);
     let said = s.guests.backend();

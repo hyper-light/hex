@@ -23,3 +23,4 @@ Five exact upstream Rust fixture sources referenced by API include!/path attribu
 | crates/api/tests/hex_borrowed_contract.rs | Add ignored coordinator-owned public lifetime and repeated Windows handle checks | Validate the current borrowed contract without reviving the obsolete c55 implementation. | 0004-exercise-public-borrowed-process-lifetime-and-windows-handle.patch |
 
 | crates/api/tests/hex_borrowed_contract.rs | Exercise finite overflow, target death during handshake and exact readiness observations. | AC-T7.4.1 adversarial regression coverage; production API unchanged. | 0005-exercise-finite-overflow-and-post-handshake-target-death.patch |
+| crates/api/src/conformance.rs | Check the sole excluded Intel Mac directly. | Native direct API Clippy at17c reproduces single_element_loop after0003; semantics unchanged. | 0006-check-the-sole-excluded-host-directly.patch |

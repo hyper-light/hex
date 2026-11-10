@@ -82,3 +82,10 @@ Linux native and seven-target combined checks remain unrun: approvedadacachy2 is
 offline andadacachy currently has no admitted idle CPU. No Fedora/laptop checks,
 runner restart or unowned process/VM changes. ROOT retains integration, native
 mutation/effects/fullgates, profiling, benchmarking and merge responsibilities.
+
+The follow-up17c99c58 built both native targets successfully but direct API Clippy
+failed on conformance.rs:88 single_element_loop, before new native tests ran.
+That loop came from Hex0003 narrowing the excluded set to Intel Mac. The small
+0006 correction checks the same pair directly, without a lint allowance; no
+backend or borrowed semantics change. Raw red runs remain in their private
+source/target roots. New native tests/mutation and corrected Clippy are pending.
