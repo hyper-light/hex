@@ -13,6 +13,7 @@ pub mod oci;
 pub mod proc;
 pub mod process;
 pub mod sys;
+mod wmi;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
@@ -484,7 +485,7 @@ impl WinRuntime {
         #[cfg(test)]
         self.feature_reads
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let off = features::off(self.processors)?;
+        let off = features::off()?;
         Ok(self.features_off.get_or_init(|| off))
     }
 

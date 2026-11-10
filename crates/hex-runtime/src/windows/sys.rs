@@ -514,6 +514,17 @@ pub struct Accounting {
     pub write_bytes: u64,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// HEX-INST-9: count this thread's process starts to detect a feature read spawning PowerShell.
+    static STARTED_HERE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn started_here() -> u64 {
+    STARTED_HERE.with(std::cell::Cell::get)
+}
+
 /// Starts `spawn` suspended in `jobs` (its box's job, and the node's where there is one), so it is a
 /// member of them from its creation and nothing runs outside them (`PROC_THREAD_ATTRIBUTE_JOB_LIST`).
 /// Only its three standard handles are inherited (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`). The caller
@@ -632,6 +643,8 @@ fn create_in(
     if ok == 0 {
         return Err(last_error());
     }
+    #[cfg(test)]
+    STARTED_HERE.with(|n| n.set(n.get().saturating_add(1)));
     // SAFETY: CreateProcessW succeeded, so pi holds a process handle this process now owns.
     let process = unsafe { Handle::own(pi.hProcess) };
     // SAFETY: and a thread handle this process now owns.

@@ -250,6 +250,58 @@ lists the features as a prerequisite; it does not say the installer enables them
 `-NoRestart`, one reboot. **Falsified if** a standard user cannot read `Win32_OptionalFeature`'s
 `InstallState` (then detection falls back to the DLL/capability probes alone).
 
+### 2.6 Reading WMI in process (2026-11-06)
+
+Why: the node first read `Win32_OptionalFeature` through PowerShell (`Get-CimInstance`) in a job-object box.
+On jupiter, 2026-11-06 ~19:45Z, every such read ran past its 4,842 ms bound for about 50 s, right after a
+`cargo test --no-run` relinked test binaries on a 98%-full disk (the Windows agent's record entry 20,
+`bench/install/records/windows-jupiter-20261105.txt` on cp/t7-native-windows); the same query, run
+uncensored at 19:57Z, took 1,173-1,352 ms over 180 reads. A PowerShell start is about a second of each read
+(entry 19's minimum, 1,048 ms), and a process past the bound is one more thing to end. The Hex lead's call
+(2026-11-06): read WMI in process, through its COM interface.
+
+Sources (Microsoft's pages, read through search on 2026-11-06; client sequence and enumerator/connect
+contracts checked again on 2026-11-09 during the port; wording quoted where marked, else paraphrased):
+
+- **The client sequence.** "Example: Getting WMI Data from the Local Computer"
+  (https://learn.microsoft.com/en-us/windows/win32/wmisdk/example--getting-wmi-data-from-the-local-computer):
+  initialize COM, create the locator with `CoCreateInstance` of `CLSID_WbemLocator`, connect to `root\cimv2`
+  with `IWbemLocator::ConnectServer`, set the proxy's security with `CoSetProxyBlanket` (Windows
+  authentication, call level, impersonate) "so WMI can impersonate the client", query with
+  `IWbemServices::ExecQuery` (WQL), read with `IEnumWbemClassObject::Next` and `IWbemClassObject::Get`
+  (paraphrase).
+- **The bound is WMI's own.** `IEnumWbemClassObject::Next`
+  (https://learn.microsoft.com/en-us/windows/win32/api/wbemcli/nf-wbemcli-ienumwbemclassobject-next):
+  `lTimeout` is the most milliseconds the call blocks; `WBEM_INFINITE` blocks until objects are available,
+  0 returns at once; `WBEM_S_TIMEDOUT` (0x40004) when fewer objects than asked came before the timeout and the
+  enumeration isn't at its end; `WBEM_S_FALSE` at its end (paraphrase). [MS-WMI] §3.1.4.4.2
+  (https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wmi/141623d4-a170-4b09-8fea-3cb8f78fbbfe):
+  clients should continue after `WBEM_S_NO_ERROR`/`WBEM_S_TIMEDOUT` and must stop after an error or
+  `WBEM_S_FALSE` (paraphrase).
+- **A read can hang.** A Microsoft Q&A thread reports a `Win32_OptionalFeature` query stuck about 20 minutes
+  on some devices, unresolved (https://learn.microsoft.com/en-us/answers/questions/1810566/wmi-query-stuck-20-min-and-cancel-for-timeout):
+  a reason the bound stays, not evidence of a rate.
+- **The bindings.** The `windows` crate 0.62.2 (Microsoft's windows-rs, the project `windows-sys` comes from)
+  binds `IWbemLocator`, `IWbemServices`, `IEnumWbemClassObject` and `IWbemClassObject` as typed interfaces
+  whose methods are `unsafe` (`src/Windows/Win32/System/Wmi/mod.rs`: `Next(&self, ltimeout: i32, apobjects:
+  &mut [Option<IWbemClassObject>], pureturned: *mut u32)`, line 34; `ExecQuery`, line 8593), with
+  `VARIANT` conversions (`src/extensions/Win32/System/Variant.rs:183`, `u32` by `VariantToUInt32`; `:128`,
+  `BSTR` by way of `PROPVARIANT`, behind `Win32_System_Com_StructuredStorage`). `windows-sys` declares the
+  same interfaces as untyped pointers, so calling them through it means writing each vtable by hand.
+
+**What Hex does:** `crates/hex-runtime/src/windows/wmi.rs` runs the sequence above on a thread of its own:
+COM multithreaded, the in-process locator, `ROOT\CIMV2`, the blanket, one semisynchronous forward-only WQL
+query, each `Next` bounded by the time left to the deadline (a `WBEM_S_TIMEDOUT` is the deadline passing),
+at most one instance per feature asked for and one call for the end. The caller waits for that thread no
+longer than the bound, so a connect that never answers is refused too, and one read is in flight at a time.
+Concurrent identical requests share that read's own completion, so a later query cannot replace an
+older caller's answer. All query inputs must match; a different request while one is in flight is
+refused. There is no timed result cache here; `WinRuntime` retains its existing reboot-lifetime feature
+cache. A caller timeout does not start another thread while the first remains blocked in COM.
+No process is started (`features::tests::the_feature_read_starts_no_process`). **Falsified if** a standard
+user's in-process read is refused where PowerShell's wasn't, or the read's own record shows it no faster than
+PowerShell's.
+
 ## 3. macOS: box users and a privileged helper
 
 ### 3.1 How Nix's multi-user installer makes build users

@@ -78,6 +78,9 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_UI_Shell",
 ] }
 
+# WMI COM interfaces used only by hex-runtime on Windows (native plan step 6, HEX-INST-9).
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Ole", "Win32_System_Rpc", "Win32_System_Variant", "Win32_System_Wmi"] }
+
 # The no-panic rule and the rest of CLAUDE.md as lints. Production code is checked again by
 # scripts/check-production.sh, without the test allowances.
 [workspace.lints.rust]

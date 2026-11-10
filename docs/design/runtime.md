@@ -822,10 +822,12 @@ lacking any of it "refuses that class by name, saying what's missing", and "Unin
   controller, isn't the node's user's, or holds processes refuses the box root of both classes, naming what's
   missing and the installer (HEX-INST-1); on Windows, the `oci` class names each feature that's off and says
   the installer turns it on (HEX-INST-2), the state read without elevation from `Win32_OptionalFeature`
-  (§2.4: Microsoft lists no restriction on reading it, to be measured as a standard user on jupiter) by
-  PowerShell run as the member of a job-object box of its own, so its wait is the class's bounded one and the
-  box's end takes whatever it left, within `hex_core::setup::FEATURE_QUERY_PATIENCE` (twice the slowest
-  recorded run); `hex_core::setup::features_off` parses its listing and refuses anything else by name. The
+  (§2.4: Microsoft lists no restriction on reading it, to be measured as a standard user on jupiter) in
+  process, through WMI's COM interface (`windows/wmi.rs`, §2.6; the Hex lead's call, 2026-11-06, after the
+  PowerShell read it replaces ran past its bound for ~50 s on jupiter), each wait bounded by WMI's own
+  timeout and the caller's wait by `hex_core::setup::FEATURE_QUERY_PATIENCE` (twice the slowest recorded
+  feature read), at most one read in flight even if COM remains blocked, no process started;
+  `hex_core::setup::features_off` parses its rows and refuses anything else by name. The
   installer asks the same query through `hex setup features` (one `<name> on|off` line each) rather than
   querying Windows itself, so there is one query and one bound (HEX-INST-9).
 - **Done when** (the plan's criterion): on a machine fresh of Hex the one admin step leaves every class working

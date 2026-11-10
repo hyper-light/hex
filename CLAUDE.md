@@ -195,6 +195,15 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   functions, and std's own
   job-object support and its `PROC_THREAD_ATTRIBUTE_JOB_LIST`/`_HANDLE_LIST` process creation are
   unstable; Rust can express none of them safely.
+- `crates/hex-runtime/src/windows/wmi.rs`: the Windows node reads the optional features Hex's installer
+  turns on (Containers, HypervisorPlatform) from WMI in process rather than starting PowerShell for them.
+  On a thread of its own it initializes COM (`CoInitializeEx`, multithreaded, paired with
+  `CoUninitialize`), makes WMI's in-process locator (`CoCreateInstance` of `WbemLocator`), connects to
+  `ROOT\CIMV2` (`IWbemLocator::ConnectServer`), sets the proxy's security (`CoSetProxyBlanket`: Windows
+  authentication, call level, impersonate), runs one WQL query semisynchronously and forward-only
+  (`IWbemServices::ExecQuery`), reads its instances with `IEnumWbemClassObject::Next` bounded by the time
+  left, and each instance's properties with `IWbemClassObject::Get`. The `windows` crate binds these COM
+  methods and functions as `unsafe`, and Rust can express none of them safely.
 - `crates/hex-runtime/src/windows/oci/sys.rs`: the Windows `oci` class, a Windows image run process-isolated
   through the Host Compute Service with a job of Hex's nested in its silo (decision "the Windows `oci` class is
   an HCS silo holding a Hex job"). It resolves at run time (`LoadLibraryExW` from System32, `GetProcAddress`)
