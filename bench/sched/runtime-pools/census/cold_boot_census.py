@@ -113,7 +113,7 @@ def recover_pre_ready(harness):
     An existing receipt is never replaced. A create-new remember receipt must match its complete
     record/configuration before any stop request. Failure leaves closure unproved and halts campaign.
     """
-    process = harness.backend_process
+    process = harness.backend_process if harness.backend_process is not None else getattr(harness, "cold_process", None)
     # Harness.spawn prunes exited children. The saved original Popen remains exact ownership proof
     # after that pruning; a PID/name lookup must never substitute for it.
     recorded = process is not None and (process is getattr(harness, "cold_process", None)
@@ -149,8 +149,9 @@ def recover_pre_ready(harness):
                    (stopped.get("pid"), stopped.get("started")) == (current["pid"], current["started"]),
                    "owned guest retirement did not preserve exact identity")
     harness.report["owned_guest_retired"] = stopped
-    harness.report["cold_boot"]["pre_ready_recovery_receipt"] = str(selected)
-    harness.report["cold_boot"]["pre_ready_recovery"] = True
+    harness.report["cold_boot"]["recovery_receipt"] = str(selected)
+    harness.report["cold_boot"]["exact_record_recovery"] = True
+    harness.report["cold_boot"]["pre_ready_recovery"] = not harness.report["cold_boot"].get("backend_ready", False)
     harness.report["cold_boot"]["recovery_identity"] = {key: current[key] for key in ("pid", "started", "vsock")}
 
 
@@ -194,13 +195,23 @@ class ColdHarness(census.Harness):
                                         receipt=str(self.guest_receipt), ready_class_verified=True)
 
     def finish_backend(self):
+        original_failure = None
         if self.report["cold_boot"]["backend_ready"]:
-            return super().finish_backend()
+            try:
+                return super().finish_backend()
+            except Exception as why:
+                original_failure = why
+                self.report["status"] = "failed"
+                self.report["cold_boot"]["original_finish_failure"] = str(why)
         try:
             recover_pre_ready(self)
         except Exception as why:
             self.report["cold_boot"]["cleanup_unproven"] = str(why)
+            if original_failure is not None:
+                raise original_failure from why
             raise
+        if original_failure is not None:
+            raise original_failure
 
     def census_report(self):
         process = self.cold_process
@@ -213,17 +224,13 @@ class ColdHarness(census.Harness):
             path = Path(process.hex_census_path)
             census.require(path.parent == self.root / "census", "backend census is outside its exact private census directory")
             # Use only the captured backend-node filename, never other observers/borrowers or PID fallback.
-            rows = []
             with path.open("rb") as source:
-                for _ in range(self.args.max_census_lines + 2):
-                    line = source.readline(self.runtime["max_frame"] + 1)
-                    if not line:
-                        break
-                    rows.append(line)
-            cold["sdk_hello"] = classify_hellos(rows, self.args.max_census_lines, self.runtime["max_frame"])
+                lines = iter(lambda: source.readline(self.runtime["max_frame"] + 1), b"")
+                cold["sdk_hello"] = classify_hellos(lines, self.args.max_census_lines, self.runtime["max_frame"])
         stopped = self.report.get("owned_guest_retired", {})
-        identity = cold.get("identity", {})
-        cold["stopped_receipt_verified"] = (stopped.get("guest_stopped") is True and stopped.get("end") == "Stopped"
+        identity = cold.get("identity") or cold.get("recovery_identity") or {}
+        cold["stopped_identity_basis"] = "ready" if cold.get("identity") else "recovery" if cold.get("recovery_identity") else None
+        cold["stopped_receipt_verified"] = (bool(identity) and stopped.get("guest_stopped") is True and stopped.get("end") == "Stopped"
             and (stopped.get("pid"), stopped.get("started")) == (identity.get("pid"), identity.get("started")))
         cold["backend_reaped"] = process is not None and process.returncode is not None
         census.require(cold["backend_ready"] and cold.get("ready_class_verified") and cold["backend_reaped"]

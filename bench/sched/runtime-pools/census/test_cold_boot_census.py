@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 spec = importlib.util.spec_from_file_location("cold_boot_under_test", Path(__file__).with_name("cold_boot_census.py"))
@@ -167,6 +168,57 @@ class SyntheticRecovery(unittest.TestCase):
         cold.recover_pre_ready(self.harness)
         self.assertEqual(self.events, ["stop-backend", "--remember-guest", "--stop-owned-guest"])
         self.assertEqual(self.harness.report["owned_guest_retired"]["pid"], self.identity["pid"])
+
+    def post_ready_failure(self, original_reaped):
+        self.record()
+        harness = object.__new__(cold.ColdHarness)
+        harness.__dict__.update(self.harness.__dict__)
+        harness.cold_process = self.process
+        harness.report["cold_boot"]["backend_ready"] = True
+        failure = cold.census.Failed("original synthetic finish failure")
+
+        def original(instance):
+            if original_reaped:
+                self.process.returncode = -9
+                instance.backend_process = None
+                instance.children = []
+            raise failure
+
+        with patch.object(cold.census.Harness, "finish_backend", original):
+            with self.assertRaises(cold.census.Failed) as observed:
+                harness.finish_backend()
+        self.assertIs(observed.exception, failure)
+        self.assertEqual(self.events, ["stop-backend", "--remember-guest", "--stop-owned-guest"])
+        self.assertEqual(harness.report["owned_guest_retired"]["end"], "Stopped")
+        self.assertEqual(harness.report["status"], "failed")
+        self.assertEqual(harness.report["cold_boot"]["original_finish_failure"], str(failure))
+
+    def test_cp_t7_4_post_ready_snapshot_failure_recovers_then_reraises_original(self):
+        self.post_ready_failure(original_reaped=False)
+
+    def test_cp_t7_4_post_ready_retire_failure_recovers_after_original_cleared_backend(self):
+        self.post_ready_failure(original_reaped=True)
+
+    def test_cp_t7_4_pre_ready_recovery_proves_closure_but_never_sample_success(self):
+        self.record()
+        self.harness.cold_process = self.process
+        self.harness.report["cold_boot"]["backend_ready"] = False
+        cold.recover_pre_ready(self.harness)
+        directory = self.root / "census"
+        directory.mkdir()
+        path = directory / "backend-node.tsv"
+        path.write_bytes(b"client.guest.answer.hello 9\nclient.guest.answer.hello 1\n")
+        self.process.hex_census_path = str(path)
+        self.harness.args = SimpleNamespace(max_census_lines=len(cold.NORMAL_HELLO_PHASES))
+        self.harness.runtime.update(ledger=str(self.root / "pids.jsonl"), profile="synthetic")
+        with self.assertRaises(cold.census.Failed):
+            cold.ColdHarness.census_report(self.harness)
+        report = self.harness.report["cold_boot"]
+        self.assertTrue(report["stopped_receipt_verified"])
+        self.assertEqual(report["stopped_identity_basis"], "recovery")
+        self.assertTrue(report["backend_reaped"])
+        self.assertFalse(report["backend_ready"])
+        self.assertFalse(report.get("ready_class_verified", False))
 
 
 if __name__ == "__main__":

@@ -155,6 +155,12 @@ entire identity/configuration before stop is requested; an existing receipt is n
 Missing/invalid/mismatched records or receipts, or unproved retirement, retain cleanup-unproven and
 halt the campaign without another guest. No PID discovery, scan or guessed stop is added. Root must
 review this path before any live campaign and still owns all actual failure/cancel/retirement proof.
+The same exact-record fallback runs if the original post-readiness snapshot/finish path raises,
+including after it already cleared/reaped its backend. Successful fallback retains and re-raises
+the original failure, so the iteration stays failed and no next guest starts. Closure reporting uses
+the established ready identity or the separately verified recovery identity; proving Stopped through
+recovery never supplies readiness, class verification or measurement success. Census lines stream
+directly into the bounded classifier; exact rows/full markers remain preserved.
 
 Synthetic only, on approved d132 with 1CPU/1GiB/2GiB, nice10/private Python:
 `COLD_BOOT_SYNTHETIC_ROOT="$OWNED_SYNTHETIC_CACHE" nice -n 10 "$PRIVATE_PYTHON" -I -B test_cold_boot_census.py`.
@@ -164,7 +170,7 @@ rules SHA256 `d634fcb944959ce1e40a9277d12b0905fcfcebf82d9da9832e826f790a349242`,
 CLAUDE/handoff and Hex CLAUDE read before edits. Root owns all actual data, guest/E2E/resource/timeout/
 provenance/gate review. No FD/task/allocator, competitive-performance or original-failure-cause claim.
 
-Implementer evidence: approved d132/private Python3.13.18, 1CPU/1GiB/2GiB, nice10; the command above
+Initial eccfc5e9 implementer evidence: approved d132/private Python3.13.18, 1CPU/1GiB/2GiB, nice10; the command above
 passed all10 synthetic tests (exit0). The new saved-Popen/pruned-live-list regression first failed
 against the initial driver, then passed after preserving that exact Popen authority; no process
 lookup was added. Own logs are `~/.cache/hex-lead/cold-boot-census-synthetic/{pruned-red,tests-final}.log`.
@@ -175,3 +181,12 @@ were executed by the implementer. Root still owes review before any live run, ac
 cohort/normal-count/identity attribution, malformed/no-ready/cancellation/receipt/retirement cases,
 all child/VM closure and resource-return observations, immutable provenance reconstruction and any
 later eligibility decision. The existing base Harness and production sources are unchanged.
+
+Cleanup/report follow-up: three new synthetic regressions failed against eccfc5e9 (post-ready
+snapshot failure, failure after the original cleared the backend, and recovered closure with no
+ready identity). All13 synthetic tests then passed on the same approved runner/envelope/private
+Python, exit0. Own logs: `~/.cache/hex-lead/cold-boot-census-synthetic/followup-{red,green}.log`.
+Final driver SHA256 `38cfb6a2148e3a05b37773e6523eaa3b9a25a4ec48f9666a09d6c1cb77e1ee2c`, tests
+`8fdad8b9b3710f983e065c977caf5256f193b6b1c4e643b7e202dcd2d7f7e0bd`; local/remote match.
+These are synthetic-only results; every actual lifecycle/failure/mutation/provenance check remains
+root-owned and unrun by this implementer. No additional source scope or seed change is included.
