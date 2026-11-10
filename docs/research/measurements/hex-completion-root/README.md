@@ -182,3 +182,23 @@ must invoke it exactly once, reject missing/dead authority, and release every
 acquired turn on every return. No allocation-free, lifetime or native-cleanup
 performance claim follows from this source design; ROOT owes fault/mutation and
 profile proof.
+
+## Successor light closure and resource accounting requirement
+
+Exact source b1de3c7edf385b5a1b752746aae0eefd001dcee7 passed31 wire,1 exact
+readiness,4 recovery-model and4 vendored physical/argument/compatibility units;
+API/core all-target native Clippy exited0. Prior unchanged API36 passed at c478.
+[The complete source/command/log/binary and raw-failure record](light-api-core/README.md)
+keeps these cohorts separate. No native backend or full-gate result is inferred.
+
+Runtime resource admission must also include the actual VM envelope before the
+scheduler chooses a candidate, not merely reject a small request after placement.
+The lane owners are deriving a shared initialized cost/immutable allocation
+receipt. Unknown host overhead is explicit and requires ROOT measurement; it is
+never guessed0. Workload bounds remain distinct from effective host reservation,
+with one record and no additional resource ledger. As a primary precedent,
+[Kubernetes Pod Overhead](https://kubernetes.io/docs/concepts/scheduling-eviction/pod-overhead/)
+sets runtime cost at admission and includes it in scheduling and cgroup limits.
+Its example numbers are not Hex constants. Exact fixed-VM versus within-reservation
+semantics, actual measurements and native enforcement remain open implementation
+and validation work here.
