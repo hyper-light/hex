@@ -1,0 +1,48 @@
+{
+  "source": "85ee0ce83fad8d7becdcfc2d97b7625a94ee68c9",
+  "scope": "pure unit and Python syntax only; NO GPU/native/VM/mutation/profile",
+  "runner": "d1323898b255a3ed435eb83fa0f7b0cf",
+  "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+  "archive_sha256": "593bcc782777763575ad916b4bee65598839f055304980a056a2c9add4dcf868",
+  "unit": {
+    "argv": [
+      "/Users/adalundhe/.cache/hex-lead/python-3.13.18-20261026/python/bin/python3",
+      "-m",
+      "unittest",
+      "-v",
+      "test_evidence"
+    ],
+    "pid": 93295,
+    "exit": 0,
+    "reaped": true,
+    "selected": 27,
+    "count_exact": true,
+    "log_sha256": "1f2fc35f42da1d893d4cefc8d6560625e509d6dde11e217bda731158a0ed526b"
+  },
+  "syntax": {
+    "exit": 0,
+    "files": 14,
+    "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "c_syntax": {
+    "exit": 0,
+    "command": [
+      "nice",
+      "-n",
+      "10",
+      "/usr/bin/cc",
+      "-std=c11",
+      "-fsyntax-only",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-I",
+      "/Users/adalundhe/.cache/hex-completion-validation/compile-70945fe8-8c399c0b-a6863c4c/headers/Vulkan-Headers-vulkan-sdk-1.4.321.0/include",
+      "/Users/adalundhe/.cache/hex-completion-validation/light-85ee0ce8-f370b2ff97/source/scripts/scheduler-completion/vulkan-witness.c"
+    ],
+    "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "source_unchanged": true,
+  "temp_entries": 0,
+  "exit": 0
+}

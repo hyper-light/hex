@@ -27,7 +27,23 @@ The native Windows compute source was copied byte-identically from the dirty
 draft recorded in windows-draft.json. ROOT integrated the requested dev features
 at 9d9dccfbd82c8e7448d67166525114d2a41a8db5. The port itself is unrun until its
 focused compile result is recorded; no old draft/native result is attributed to
-the new integrated revision.
+the new integrated revision. Its first Windows cross-Clippy exposed the old
+draft's implicit ManuallyDrop union dereference. The red is preserved and the
+owned copy now uses the explicit dereference required by Rust; the original
+dirty draft is unchanged. Rechecking that fix awaits ROOT's exact combined
+cohort along with the integrated socket fixture compile.
+
+Pure/light result: source 85ee0ce83fad8d7becdcfc2d97b7625a94ee68c9, admitted d132,
+one CPU/4 GiB/12 GiB, nice10/jobs1/threads1, private no-sync source/target/cache/temp.
+Selected 27/27 pure cases passed, all 14 Python files passed syntax checks, and
+the current C helper passed syntax against official Vulkan-Headers SDK
+1.4.321.0 archive SHA256
+17f8ff30fd79fb7531efcb7c78c02c17a595208d482a150f06836b0ca97ef8f2.
+Unit log SHA256 1f2fc35f42da1d893d4cefc8d6560625e509d6dde11e217bda731158a0ed526b;
+source archive SHA256 593bcc782777763575ad916b4bee65598839f055304980a056a2c9add4dcf868.
+Source unchanged, child processes reaped, temp entries zero. No GPU, VM, HCS,
+fault/mutation campaign or profile was executed. These checks do not verify
+the native ABI at runtime or the final platform matrix.
 
 The combined fixture requires source-pinned actual native observer, host
 inventory, cleanup observer and telemetry helpers. They must read the actual

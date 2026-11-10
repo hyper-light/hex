@@ -48,8 +48,17 @@ would duplicate production authority; `RUSAGE_CHILDREN.ru_maxrss` is the largest
 child's peak on Linux and cannot establish parent/kernel/tree cost. Raw workload
 and external resource observers are separate evidence, joined by source/run IDs.
 
-This checkpoint is source-first and has no native pass or performance claim.
-Initial source has not yet been checked. All actual backend/VM/foreign-device,
+This lane has no native pass or performance claim. Exact source 85ee0ce8 passed
+27/27 pure receipt/oracle/profile checks, syntax checks for all 14 Python files,
+and static Vulkan C syntax on admitted d132. Raw results are in light-85ee0ce8.
+Earlier source 70945fe8 passed native telemetry fixture Clippy, while the Windows
+draft exposed a real ManuallyDrop union compile error; the error is preserved
+under light-70945fe8 and the owned port contains the explicit-dereference fix.
+The original dirty draft remains byte-identical to its recorded original hash.
+The combined Rust fixture's first compile attempt stopped in ROOT's older
+record.rs at missing new class arms; that failure is preserved. ROOT holds the
+dependent rerun until its exact combined cohort is published. Those compile
+checks are not native execution results. All actual backend/VM/foreign-device,
 crash/recovery, mutation/restoration, allocation/copy/fault, competing-baseline
 and supported-target results remain owed by ROOT. Light harness self-checks will
 run only on admitted d132 with one CPU, 4 GiB memory, 12 GiB disk, nice 10,
