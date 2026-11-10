@@ -549,7 +549,6 @@ fn the_first_dial_waits_for_the_guest_and_later_ones_try_once() {
 /// HEX-RT-17, HEX-GUEST-41: ask an actual Shards simulator for stdin and stdout, then use their raw descriptors as
 /// the caller's files. Expect blocking ends that echo to EOF, while the control connection remains non-blocking.
 /// Shards waits around its non-blocking kernel sockets in its Stream wrapper; that wrapper is gone at handoff.
-#[cfg(unix)]
 #[test]
 fn asked_shards_streams_wait_as_the_callers_files_do() {
     use shards_api::Guests;
@@ -604,6 +603,7 @@ fn asked_shards_streams_wait_as_the_callers_files_do() {
         )
         .unwrap();
     let (stdin, stdout) = (given.stdin.unwrap(), given.stdout.unwrap());
+    #[cfg(unix)]
     for fd in [&stdin, &stdout] {
         assert!(
             !rustix::fs::fcntl_getfl(fd)
@@ -612,16 +612,27 @@ fn asked_shards_streams_wait_as_the_callers_files_do() {
             "a raw given end must wait without Shards' Stream wrapper"
         );
     }
+    #[cfg(unix)]
     assert!(
         rustix::fs::fcntl_getfl(transport.handle())
             .unwrap()
             .contains(rustix::fs::OFlags::NONBLOCK)
     );
-    let mut stdin = std::fs::File::from(stdin);
+    #[cfg(windows)]
+    {
+        assert!(stdin.socket().is_some());
+        assert!(stdout.socket().is_some());
+        // A retained transfer copy closing must not shut down the caller's socket stream.
+        let retained: hex_api::End = stdin.socket().unwrap().try_clone_to_owned().unwrap().into();
+        drop(retained);
+        let empty = hex_afunix::receive_socket(transport.handle(), &mut [0]).unwrap_err();
+        assert_eq!(empty.kind(), std::io::ErrorKind::WouldBlock);
+    }
+    let mut stdin = hex_api::OwnedStream::from(stdin);
     stdin.write_all(b"round trip\n").unwrap();
     drop(stdin);
     let mut output = String::new();
-    std::fs::File::from(stdout)
+    hex_api::OwnedStream::from(stdout)
         .read_to_string(&mut output)
         .unwrap();
     assert_eq!(output, "round trip\n");

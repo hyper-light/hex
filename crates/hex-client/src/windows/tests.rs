@@ -150,7 +150,7 @@ fn the_common_core_takes_windows_stream_handles_and_acknowledges_them() {
     let streams = proc.streams().unwrap();
     // Driving the turn flushes Taken. The server then writes and ends the program.
     assert_eq!(proc.wait_for(TEST_WAIT).unwrap(), Some(Exit::Code(0)));
-    let mut stdout = std::fs::File::from(streams.stdout.unwrap());
+    let mut stdout = hex_api::OwnedStream::from(streams.stdout.unwrap());
     let mut bytes = Vec::new();
     stdout.read_to_end(&mut bytes).unwrap();
     assert_eq!(bytes, b"native stream");

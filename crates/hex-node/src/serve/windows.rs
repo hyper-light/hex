@@ -37,7 +37,6 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
 use std::os::windows::fs::MetadataExt;
-use std::os::windows::io::AsHandle;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -833,7 +832,10 @@ impl Os for Windows {
         let mut given = Vec::with_capacity(fds.len());
         let peer = conn.peer.get();
         for end in fds {
-            match peer.map(|p| p.give(end.as_handle())) {
+            match end
+                .file_handle()
+                .and_then(|handle| peer.map(|p| p.give(handle)))
+            {
                 Some(Ok(value)) => given.push(value),
                 _ => {
                     take_back(peer, &given);

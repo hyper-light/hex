@@ -447,11 +447,11 @@ fn an_execs_asked_streams_come_through_the_socket_as_the_callers_own_pipe_ends()
         panic!("the asked streams weren't given");
     };
     assert!(stderr.is_none(), "stderr was given unasked");
-    let mut stdin = std::fs::File::from(stdin);
+    let mut stdin = hex_api::OwnedStream::from(stdin);
     stdin.write_all(b"round trip\n").unwrap();
     drop(stdin);
     let mut out = String::new();
-    std::fs::File::from(stdout)
+    hex_api::OwnedStream::from(stdout)
         .read_to_string(&mut out)
         .unwrap();
     assert_eq!(out, "round trip\n");

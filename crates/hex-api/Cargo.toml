@@ -12,6 +12,9 @@ publish.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+hex-afunix.workspace = true
+
 [dev-dependencies]
 serde_json.workspace = true
 
