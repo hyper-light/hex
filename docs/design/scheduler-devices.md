@@ -107,3 +107,22 @@ no physical GPU/VFIO/block/network or WindowsARM pass; the paused VM remains
 untouched. R15/R16 require signed scope checkpoints, private admitted remote
 checks, preserved evidence and the30GiB local floor. Earlier943-test f3 gates do
 not validate this later device implementation or complete the full scheduler goal.
+
+
+## Supported operating systems — Ada, 2026-11-10
+
+Ada explicitly requires the complete device path on Linux (major distributions,
+glibc and musl) and Windows on amd64/arm64, and macOS on arm64. Intel Mac remains
+excluded. Platform-based `unsupported` responses for valid requests are missing
+implementation, never an accepted completion condition. This applies to discovery,
+selection, durable exact identity, native/guest attachment, recovery, cancellation,
+cleanup, peer operation and actual validation. Invalid identity/configuration and
+real resource exhaustion remain typed failures; platform fallback is not proof of
+support. Existing safe refusals remain visible until the corresponding real path
+is implemented and validated. Do not delete a guard and silently grant no device.
+
+The current PCI-only GPU identity and Linux-CDI/Windows-HCS implementation do not
+establish macOS GPU support. macOS/guest support and appropriate non-PCI physical
+identity must be implemented at the existing seams, with native evidence. The
+Shards coordinator has been asked for the existing tested GPU/guest API, to avoid
+introducing an independent VMM or duplicating its Venus/VFIO mechanisms.
