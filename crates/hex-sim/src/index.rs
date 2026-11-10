@@ -674,6 +674,11 @@ impl FitIndex {
         excluded: &std::collections::BTreeSet<NodeId>,
     ) -> Result<Fit, SimError> {
         let prepared = self.costs.prepare(terms)?;
+        // No measured class service and no modeled component means no time signal. Keep exactly
+        // the original single walk; a measured zero still counts as a real observation.
+        if !terms.costs() && !self.costs.observed_class(demand.class) {
+            return Ok(self.fit_excluding(demand, pick, excluded));
+        }
         Ok(self.fit_scored(demand, pick, Some(&prepared), excluded))
     }
 
@@ -682,8 +687,8 @@ impl FitIndex {
         self.costs.set_rates(node, rates)
     }
 
-    /// Observe actual post-image-staging create/start service for this node and initialized class.
-    /// The same service must not also be supplied as Terms.cpu_ns or transfer time.
+    /// Observe actual complete create/start service, including opaque image staging, for this
+    /// node/class. Explicit modeled Terms omit this combined elapsed time, preventing double charge.
     pub fn observe_start(
         &mut self,
         node: NodeId,
@@ -1018,6 +1023,37 @@ mod tests {
                 Some(NodeId(0))
             );
         }
+    }
+
+    /// CP-T7.4: calling the production terms path before learning anything costs the same single
+    /// candidate walk; another class's observations do not activate a model for this request.
+    #[test]
+    fn start_cost_empty_context_keeps_the_original_single_walk() {
+        let mut index =
+            FitIndex::new(&nodes(&[res(2000, 8, 0), res(4000, 8, 0), res(8000, 8, 0)])).unwrap();
+        let demand = plain(res(1000, 1, 0));
+        let pick = Pick::default();
+        let original = index.fit(&demand, &pick);
+        let cold = index
+            .fit_with_terms(&demand, &pick, &Terms::default())
+            .unwrap();
+        assert_eq!(
+            (cold.best, cold.walked, cold.refused),
+            (original.best, original.walked, original.refused)
+        );
+        index.observe_start(NodeId(0), Class::Shards, 100).unwrap();
+        assert_eq!(
+            index
+                .fit_with_terms(&demand, &pick, &Terms::default())
+                .unwrap()
+                .walked,
+            original.walked
+        );
+        index.observe_start(NodeId(0), Class::Oci, 100).unwrap();
+        let learned = index
+            .fit_with_terms(&demand, &pick, &Terms::default())
+            .unwrap();
+        assert_eq!(learned.walked, original.walked * 2);
     }
 
     /// CP-T7.4: requested image warmth is borrowed per ask, never retained under a hash or

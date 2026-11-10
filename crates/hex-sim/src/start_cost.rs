@@ -3,8 +3,9 @@
 //! crates/kiln-ci/src/lb/owner/terms.rs (Terms, Warm, finish, Rates, Mean and arithmetic),
 //! owner/orders.rs (Link), order.rs (class_of). CPU units retain Hex's ported lb constants.
 //! The caller supplies learned work and measured rates; absent rates omit that term everywhere.
-//! A box's post-image-staging create/start service is measured separately, by node and class.
-//! Its population prior follows the source's empirical-Bayes mean; transfer is never measured twice.
+//! A box's complete create/start service, including staging, is measured by node and class.
+//! Its population prior follows the source's empirical-Bayes mean. This combined service and
+//! explicit modeled components are mutually exclusive: a component-bearing Terms omits the combined sample.
 
 use crate::error::SimError;
 use crate::lb::{CPU, SCALE, SPEED_ONE};
@@ -55,9 +56,10 @@ impl Default for Warm {
     }
 }
 
-/// The request's learned terms, selected by its class/image by the caller. cpu_ns is useful work,
-/// excluding the separately observed create/start service. bytes/warm describe this image directly;
-/// there is no lossy image key. No term introduces a weighting parameter.
+/// The request's learned launch components, selected by its class/image by the caller. cpu_ns is
+/// reference-core CPU work; bytes/warm describe this image directly, with no lossy image key.
+/// Any modeled component selects the component model instead of measured combined launch service.
+/// No term introduces a weighting parameter.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Terms<'a> {
     pub parallel: u64,
@@ -67,6 +69,16 @@ pub struct Terms<'a> {
     pub bytes: u64,
     pub interactive: bool,
     pub warm: &'a [Warm],
+}
+
+impl Terms<'_> {
+    /// Exact source predicate: parallelism alone carries no time. A caller supplying any component
+    /// chooses that model uniformly, even where its byte rates have not yet been measured.
+    pub fn costs(&self) -> bool {
+        (self.cpu_ns | self.io_bytes | self.net_bytes | self.bytes) != 0
+            || self.interactive
+            || !self.warm.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -200,6 +212,12 @@ impl Costs {
         }
     }
 
+    pub(crate) fn observed_class(&self, class: Class) -> bool {
+        self.start_priors
+            .get(class.index())
+            .is_some_and(|p| p.observed())
+    }
+
     pub(crate) fn set_rates(&mut self, node: NodeId, rates: Rates) -> Result<(), SimError> {
         let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
         let old = self.nodes.get_mut(at).ok_or(SimError::UnknownNode(node))?;
@@ -317,8 +335,9 @@ impl Costs {
         Ok(Prepared { terms, warm })
     }
 
-    /// Source finish(): every component is nanoseconds. The sole new component is measured startup
-    /// service after staging, with the same empirical population-mean rule as byte-rate priors.
+    /// Source finish(): every component is nanoseconds. With no modeled components, use measured
+    /// complete launch service and its empirical population prior. A modeled transfer, warm state,
+    /// CPU, I/O, network or interactive component excludes that combined elapsed time entirely.
     pub(crate) fn finish(
         &self,
         node: NodeId,
@@ -370,7 +389,9 @@ impl Costs {
             .and_then(|n| n.get(class.index()))
             .copied()
             .unwrap_or_default();
-        let start = if observation.n != 0 {
+        let start = if terms.costs() {
+            0
+        } else if observation.n != 0 {
             observation.value()
         } else {
             self.start_priors
@@ -538,7 +559,7 @@ mod tests {
         );
     }
 
-    /// CP-T7.4: only observed post-staging service counts; means are by node/class and unknown
+    /// CP-T7.4: observed combined launch service counts; means are by node/class and unknown
     /// nodes take that class's measured population prior rather than a chosen cold-start value.
     #[test]
     fn start_cost_observations_are_by_class_with_empirical_prior() {
@@ -554,6 +575,85 @@ mod tests {
         assert_eq!(costs.finish(NodeId(1), Class::Shards, CPU, CPU, &p), 0);
         assert!(costs.observe(NodeId(2), Class::Oci, 100).is_err());
         assert_eq!(costs.finish(NodeId(0), Class::Oci, CPU, CPU, &p), 200);
+    }
+
+    /// CP-T7.4: opaque Runtime.create includes staging. Its complete elapsed time is charged once
+    /// by default; a real per-image component model uniformly replaces it rather than counting both.
+    #[test]
+    fn start_cost_combined_launch_and_modeled_components_are_exclusive() {
+        let mut costs = Costs::new(1);
+        costs.observe(NodeId(0), Class::Oci, 1000).unwrap();
+        costs
+            .set_rates(
+                NodeId(0),
+                Rates {
+                    disk: 1_000_000_000,
+                    link: Link {
+                        rate: 1_000_000_000,
+                        latency_ns: 10,
+                        ..Link::default()
+                    },
+                    ..Rates::default()
+                },
+            )
+            .unwrap();
+        let predict = |terms: &Terms<'_>| {
+            costs.finish(
+                NodeId(0),
+                Class::Oci,
+                CPU,
+                CPU,
+                &costs.prepare(terms).unwrap(),
+            )
+        };
+        assert_eq!(predict(&Terms::default()), 1000);
+        assert_eq!(
+            predict(&Terms {
+                bytes: 100,
+                ..Terms::default()
+            }),
+            100
+        );
+        assert_eq!(
+            predict(&Terms {
+                io_bytes: 200,
+                ..Terms::default()
+            }),
+            200
+        );
+        assert_eq!(
+            predict(&Terms {
+                cpu_ns: 300,
+                ..Terms::default()
+            }),
+            300
+        );
+        assert_eq!(
+            predict(&Terms {
+                interactive: true,
+                ..Terms::default()
+            }),
+            10
+        );
+        let warm = [Warm {
+            node: NodeId(0),
+            wait_ns: 20,
+            ..Warm::default()
+        }];
+        assert_eq!(
+            predict(&Terms {
+                warm: &warm,
+                ..Terms::default()
+            }),
+            20
+        );
+        assert_eq!(
+            predict(&Terms {
+                parallel: 2 * CPU,
+                ..Terms::default()
+            }),
+            1000
+        );
     }
 
     /// CP-T7.4: bounded aggregates survive restart without replaying means as observations;
