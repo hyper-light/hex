@@ -869,7 +869,13 @@ pub fn check_filters(cluster: &Cluster, run: &Run) -> Result<FilterReport, Viola
                     .ok_or(Violation::Replay(SimError::UnknownNode(node)))?;
                 let bound = bind(
                     &facts.devices,
-                    |d| holders.get(d).is_some_and(Option::is_none),
+                    |d| {
+                        holders.get(d).is_some_and(Option::is_none)
+                            && facts
+                                .devices
+                                .get(d)
+                                .is_some_and(|device| device.classes.has(spec.class))
+                    },
                     spec.need.gpus,
                     ask,
                 );
