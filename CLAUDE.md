@@ -81,8 +81,10 @@ depth-first on the call stack. Work is flat: loops with counted budgets and boun
 ## 12. Portable
 
 Linux (glibc and musl), macOS and Windows, on x86_64 and aarch64, but for macOS on x86_64 (Ada, 2026-11-09:
-"windows, macos, and linux (of most any major flavor) compatible. AMD 64 and ARM64 excepting MacOS x86_64"). Platform code sits behind `cfg` with a portable path
-beside it, or a typed refusal naming the platform. `unsafe` is denied; where an OS interface needs it,
+"windows, macos, and linux (of most any major flavor) compatible. AMD 64 and ARM64 excepting MacOS x86_64"). Platform code sits behind `cfg` with equivalent working adapters on every supported target.
+Ada, 2026-11-10: valid device requests must work across these targets; a platform-based
+`unsupported` refusal is an implementation gap, never completion. Intel Mac remains excluded.
+`unsafe` is denied; where an OS interface needs it,
 its file is named here with the reason, and every block carries a `// SAFETY:` comment stating its
 invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at its top):
 
@@ -224,6 +226,12 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   (`CM_Get_Device_Interface_List_SizeW`, `CM_Get_Device_Interface_ListW`) and whether each opens from where
   it runs (`CreateFileW`, a query open). Rust can express none of these
   foreign calls, the function pointers resolved at run time, nor a handle value crossing processes, safely.
+- `crates/hex-gpu/src/apple/sys.rs`: Apple Silicon GPU identity and telemetry for the same
+  `hex-gpu` inventory/sample seam. Metal's device registry identifiers and the native Objective-C,
+  CoreFoundation, IOKit/IOReport interfaces require foreign calls and explicit retain/release ownership;
+  Rust cannot express those calls safely through this workspace's existing dependencies. Keep them
+  isolated here with checked type/count/lifetime boundaries and a SAFETY explanation per block.
+  This adapter is required by Ada's 2026-11-10 full macOS device-support instruction.
 - `crates/hex-gpu/src/nvml/sys.rs`: hex-gpu's NVIDIA telemetry (`docs/design/gpu-telemetry.md` G1). It loads
   NVML at run time, so a node without NVIDIA's driver starts and says why it reads no NVIDIA GPU: `dlopen`,
   `dlsym` and `dlerror` on Linux, `LoadLibraryExW` from System32 alone and `GetProcAddress` on Windows, each
