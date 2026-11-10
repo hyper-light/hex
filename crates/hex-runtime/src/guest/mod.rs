@@ -931,7 +931,7 @@ impl<P: Runtime> Runtime for WithGuest<P> {
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
-        spec.check_no_devices(std::env::consts::OS)?;
+        spec.check()?;
         self.maker(&spec)?.create(spec)
     }
 
@@ -945,7 +945,7 @@ impl<P: Runtime> Runtime for WithGuest<P> {
 
     /// A run's box is a `process` box ([`BoxSpec::check_run`]), made where a create of its spec would be.
     fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
-        spec.check_no_devices(std::env::consts::OS)?;
+        spec.check()?;
         spec.check_run()?;
         self.maker(&spec)?.run(spec, program, stdio)
     }
