@@ -480,9 +480,30 @@ fn cold_remote_creation_feedback_survives_owner_publication_busy() {
 fn advertise_timing_service(
     id: NodeId,
     dir: &Path,
+    cluster: Cluster,
+    runtimes: Runtimes,
+    sender: Sender<Queued>,
+) -> Arc<Service> {
+    advertise_service_with_budget(
+        id,
+        dir,
+        cluster,
+        runtimes,
+        sender,
+        Budget {
+            owned: hex_runtime::MAX_BOXES,
+            ran: hex_runtime::MAX_BOXES,
+        },
+    )
+}
+
+fn advertise_service_with_budget(
+    id: NodeId,
+    dir: &Path,
     mut cluster: Cluster,
     runtimes: Runtimes,
     sender: Sender<Queued>,
+    budget: Budget,
 ) -> Arc<Service> {
     std::fs::create_dir_all(dir).unwrap();
     let other = cluster.nodes.iter().find(|node| node.id != id).unwrap().id;
@@ -490,10 +511,7 @@ fn advertise_timing_service(
         id,
         &cluster.nodes,
         &cluster.models,
-        Budget {
-            owned: hex_runtime::MAX_BOXES,
-            ran: hex_runtime::MAX_BOXES,
-        },
+        budget,
         Pick::default(),
         &dir.join("placements"),
         runtimes.clone(),
@@ -533,6 +551,241 @@ fn advertise_timing_service(
         senders: BTreeMap::from([(other, sender)]),
         refreshing: BTreeMap::from([(other, Arc::new(AtomicBool::new(false)))]),
     })
+}
+
+fn capacity_budget_request(boxes: u32) -> (Demand, Payload) {
+    let cpu = hex_api::MIN_CPU_MILLI * boxes;
+    let memory = hex_api::MIN_MEMORY * u64::from(boxes);
+    (
+        Demand {
+            need: Resources {
+                cpu_milli: u64::from(cpu),
+                mem_bytes: memory,
+                ..Resources::default()
+            },
+            kind: Kind::Plain,
+            class: hex_sim::model::Class::Oci,
+            ask: Ask::default(),
+        },
+        Payload {
+            spec: BoxSpec {
+                id: BoxId::new("capacity-budget").unwrap(),
+                bounds: Bounds {
+                    cpu_max_milli: Some(cpu),
+                    memory_max: Some(memory),
+                    ..Bounds::default()
+                },
+                class: ClassSpec::Process,
+                owner: None,
+            },
+            start: false,
+        },
+    )
+}
+
+fn advertise_capacity(service: &Service, peer: &NodeSpec) -> Result<dto::Reply, Refusal> {
+    service.command(dto::Command::Advertise {
+        from: peer.id.0,
+        cluster: service.realm.clone(),
+        offer: offer::from_local(peer, &[]).unwrap(),
+        observations: Vec::new(),
+    })
+}
+
+fn capacity_budget_service(
+    dir: &Path,
+) -> (
+    Arc<Service>,
+    Arc<hex_api::sim::SimRuntime>,
+    Receiver<Queued>,
+    NodeSpec,
+) {
+    let (request, _) = capacity_budget_request(1);
+    let peer = NodeSpec::new(NodeId(1), request.need);
+    let cluster = Cluster::single_owner(
+        vec![NodeSpec::new(NodeId(0), request.need), peer.clone()],
+        Vec::new(),
+    );
+    let budget = crate::placement::budget::runtime_budget(NodeId(0), &cluster.nodes).unwrap();
+    let runtime = Arc::new(hex_api::sim::SimRuntime::default());
+    let (sender, receiver) = channel();
+    let service = advertise_service_with_budget(
+        NodeId(0),
+        dir,
+        cluster,
+        Runtimes::new([(
+            hex_sim::model::Class::Oci,
+            runtime.clone() as Arc<dyn Runtime>,
+        )])
+        .unwrap(),
+        sender,
+        budget,
+    );
+    // Initialize admission and control through the same incoming-facts command as the updates.
+    assert!(
+        advertise_capacity(&service, &peer)
+            .unwrap()
+            .refusals
+            .is_empty()
+    );
+    (service, runtime, receiver, peer)
+}
+
+fn capacity_budget_rows(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    std::fs::read_dir(dir.join("placements"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rec"))
+        .map(|path| {
+            (
+                path.file_name().unwrap().to_str().unwrap().to_owned(),
+                std::fs::read(path).unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// AC-T7.4.1: incoming facts change admission immediately, preserving live/pending durable rows
+/// and already-held control permits even when the current ceiling falls below retained intents.
+#[test]
+fn service_advertise_growth_and_shrink_preserve_intents_and_control() {
+    let dir = tempfile::tempdir().unwrap();
+    let (service, runtime, receiver, mut peer) = capacity_budget_service(dir.path());
+    let (demand, payload) = capacity_budget_request(1);
+    let (live, step) = service.driver.submit(demand, payload).unwrap();
+    assert!(service.dispatch(step).unwrap().refusals.is_empty());
+    let status = service.driver.status(live).unwrap().unwrap();
+    assert!(status.local && status.created);
+    assert_eq!(runtime.list().unwrap().len(), 1);
+    let (pending, payload) = capacity_budget_request(4);
+    let (first, step) = service.driver.submit(pending, payload.clone()).unwrap();
+    assert!(service.dispatch(step).unwrap().refusals.is_empty());
+    assert!(matches!(
+        service
+            .driver
+            .submit(pending, payload.clone())
+            .map_err(failed),
+        Err(Refusal::Exhausted {
+            what: "owned records",
+            bound: 2
+        })
+    ));
+
+    peer.capacity = capacity_budget_request(2).0.need;
+    assert!(
+        advertise_capacity(&service, &peer)
+            .unwrap()
+            .refusals
+            .is_empty()
+    );
+    let (second, step) = service.driver.submit(pending, payload.clone()).unwrap();
+    assert!(service.dispatch(step).unwrap().refusals.is_empty());
+    assert!(matches!(
+        service
+            .driver
+            .submit(pending, payload.clone())
+            .map_err(failed),
+        Err(Refusal::Exhausted {
+            what: "owned records",
+            bound: 3
+        })
+    ));
+    service.refresh_peers().unwrap();
+    let held_control = receiver.try_recv().unwrap();
+    assert!(held_control.envelope.is_none());
+    assert_eq!(service.queued.load(Ordering::Acquire), 1);
+    let before = capacity_budget_rows(dir.path());
+    peer.capacity = demand.need;
+    assert!(
+        advertise_capacity(&service, &peer)
+            .unwrap()
+            .refusals
+            .is_empty()
+    );
+    assert_eq!(capacity_budget_rows(dir.path()), before);
+    assert_eq!(service.queued.load(Ordering::Acquire), 1);
+    assert!(matches!(
+        service.driver.submit(pending, payload).map_err(failed),
+        Err(Refusal::Exhausted {
+            what: "owned records",
+            bound: 2
+        })
+    ));
+    assert_eq!(service.driver.status(live).unwrap().unwrap(), status);
+    assert_eq!(
+        runtime.inspect(&status.physical).unwrap().id,
+        status.physical
+    );
+    for key in [first, second] {
+        let status = service.driver.status(key).unwrap().unwrap();
+        assert!(status.node.is_none() && !status.created && !status.ended);
+    }
+    drop(held_control);
+    assert_eq!(service.queued.load(Ordering::Acquire), 0);
+    assert!(!service.refreshing[&NodeId(1)].load(Ordering::Acquire));
+    // A smaller admission ceiling must still permit the real lifecycle cleanup path.
+    for key in [live, first, second] {
+        assert!(
+            service
+                .command(dto::Command::Delete { key: external(key) })
+                .unwrap()
+                .refusals
+                .is_empty()
+        );
+    }
+    assert!(runtime.list().unwrap().is_empty());
+    assert_eq!(capacity_budget_rows(dir.path()).len(), 1); // epoch only, no abandoned authority.
+}
+
+/// AC-T7.4.1: a peer's larger facts do not authorize extra records before their recovery ceiling
+/// is durable. Remove the write fault before admission checks so it cannot mask an enlarged cap.
+#[test]
+fn service_advertise_failed_budget_growth_keeps_old_admission_and_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let (service, runtime, receiver, mut peer) = capacity_budget_service(dir.path());
+    let (demand, payload) = capacity_budget_request(1);
+    let (live, step) = service.driver.submit(demand, payload).unwrap();
+    service.dispatch(step).unwrap();
+    let physical = service.driver.status(live).unwrap().unwrap().physical;
+    let (pending, payload) = capacity_budget_request(4);
+    let (intent, step) = service.driver.submit(pending, payload.clone()).unwrap();
+    service.dispatch(step).unwrap();
+    service.refresh_peers().unwrap();
+    let held_control = receiver.try_recv().unwrap();
+    let before = capacity_budget_rows(dir.path());
+    let control_limit = service.control_limit.load(Ordering::Acquire);
+    let blocked = dir.path().join("placements/epoch.tmp");
+    std::fs::create_dir(&blocked).unwrap();
+    peer.capacity = capacity_budget_request(2).0.need;
+    let growth = advertise_capacity(&service, &peer);
+    std::fs::remove_dir(blocked).unwrap();
+    assert!(matches!(growth, Err(Refusal::Broken(_))));
+    assert_eq!(service.cluster.lock().unwrap().nodes[1], peer);
+    assert_eq!(service.control_limit.load(Ordering::Acquire), control_limit);
+    assert!(matches!(
+        service.driver.submit(pending, payload).map_err(failed),
+        Err(Refusal::Exhausted {
+            what: "owned records",
+            bound: 2
+        })
+    ));
+    assert_eq!(capacity_budget_rows(dir.path()), before);
+    assert_eq!(runtime.list().unwrap().len(), 1);
+    assert_eq!(runtime.inspect(&physical).unwrap().id, physical);
+    assert_eq!(service.queued.load(Ordering::Acquire), 1);
+    drop(held_control);
+    assert_eq!(service.queued.load(Ordering::Acquire), 0);
+    for key in [live, intent] {
+        assert!(
+            service
+                .command(dto::Command::Delete { key: external(key) })
+                .unwrap()
+                .refusals
+                .is_empty()
+        );
+    }
+    assert!(runtime.list().unwrap().is_empty());
+    assert_eq!(capacity_budget_rows(dir.path()).len(), 1);
 }
 
 /// AC-T7.4.1/r423: successful SSH Describe is followed by local source Advertise Busy. Its own
