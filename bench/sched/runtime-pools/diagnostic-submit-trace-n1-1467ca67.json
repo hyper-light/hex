@@ -1,0 +1,344 @@
+{
+  "binary": {
+    "path": "/Users/adalundhe/.cache/hex-lead/target-submit-trace-root-1467ca67/aarch64-apple-darwin/release/hex",
+    "sha256": "fe70b4daeb4443403ed30be2d3575974ac4722fc4670d62c89b83a89f6100f35"
+  },
+  "build": {
+    "bytes": 784,
+    "path": "/Users/adalundhe/.cache/hex-lead/logs/submit-trace-cli-build-1467ca67.json",
+    "sha256": "e26ede7aca49b0f137cd38bb197ca97983bb58204df9dac51b950f667dfb3271"
+  },
+  "calibration_eligibility": false,
+  "candidate_ready": false,
+  "cases": [
+    {
+      "backend_reaped": true,
+      "identity": {
+        "pid": 84266,
+        "started": 12538741755622,
+        "vsock": "/Users/adalundhe/.cache/hx/e-m4_z578q/guest-tmp/shards-api-c714b8fc32bb88b5-0/v"
+      },
+      "ledger": {
+        "bytes": 159771,
+        "path": "/Users/adalundhe/.cache/hx/e-m4_z578q/pids.jsonl",
+        "sha256": "23c7e0cc32ce3772fac43b3243f876c2692a6c1f154a4dac9fe42649565385cb"
+      },
+      "logs": [
+        {
+          "bytes": 7632,
+          "path": "/Users/adalundhe/.cache/hx/e-m4_z578q/call.log",
+          "sha256": "0121e1c3c17315ca2eb665faa8c7503ae335443aa01802b179d4c3b8f44069b8"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-m4_z578q/cold-node.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-m4_z578q/hex-version.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-m4_z578q/keygen-client-0.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-m4_z578q/keygen-client-1.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-m4_z578q/keygen-host-key.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-m4_z578q/l.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 77,
+          "path": "/Users/adalundhe/.cache/hx/e-m4_z578q/o.log",
+          "sha256": "33341bef88e8f9dbcb68a4104f20a331e2f3233d72eb5073b9c8d7dfacd93b2a"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-m4_z578q/pid-check.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 95,
+          "path": "/Users/adalundhe/.cache/hx/e-m4_z578q/r.log",
+          "sha256": "c9fdd1398f5c8f2adae44d5b0b3db8270cc58d04febbeb1f372c3bcdf9bf279c"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-m4_z578q/runtime-probe.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 166,
+          "path": "/Users/adalundhe/.cache/hx/e-m4_z578q/sshd-4.log",
+          "sha256": "5996283b716c21b31ae4a02898e4c61243e24ac4d050ccd69764022bed49c646"
+        },
+        {
+          "bytes": 83,
+          "path": "/Users/adalundhe/.cache/hx/e-m4_z578q/sshd-6.log",
+          "sha256": "51d2670636d644c2df52a5795243e0c2028210f3ebcee80eaac2300deb65cce9"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-m4_z578q/sshd-effective.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "marker_count": 0,
+      "marker_phases": {},
+      "mode": "off",
+      "physical_controls": [
+        {
+          "key": {
+            "epoch": 1,
+            "owner": 0,
+            "seq": 0
+          },
+          "kind": "verified-physical-lifecycle",
+          "parent": 84260,
+          "phase": "local",
+          "physical": "hex-place-444f825766b754b0f857cf6de350961c845802a496e13cbaec2590466af856b4-0-1-0",
+          "pid": 84261,
+          "recorded_by": 84261,
+          "run": "/Users/adalundhe/.cache/hx/e-m4_z578q"
+        },
+        {
+          "key": {
+            "epoch": 1,
+            "owner": 0,
+            "seq": 0
+          },
+          "kind": "verified-physical-lifecycle",
+          "parent": 84260,
+          "phase": "remote",
+          "physical": "hex-place-48a48471fa3d3cc8bef90e07fae562732101cb705ebf0fb985a234fd177e2d49-0-1-0",
+          "pid": 84261,
+          "recorded_by": 84261,
+          "run": "/Users/adalundhe/.cache/hx/e-m4_z578q"
+        }
+      ],
+      "receipt": {
+        "bytes": 617,
+        "path": "/Users/adalundhe/.cache/hx/e-m4_z578q/owned-guest.json",
+        "sha256": "c8e51ab8beb38bef2745fd0960d7439b42ab5efdaed3505270e078846e0f332a"
+      },
+      "record": {
+        "bytes": 131,
+        "path": "/Users/adalundhe/.cache/hx/e-m4_z578q/cold-node.node-state/@guest",
+        "sha256": "c713fae943984ebab2b398caed38c661007615bb7e94ebe3e976ae5c9b24a5ca"
+      },
+      "result": {
+        "bytes": 7248,
+        "path": "/Users/adalundhe/.cache/hx/e-m4_z578q/result.json",
+        "sha256": "95485e83990c343b7d1e48226d7105d7103580a238d3404ae1dcf7a93cc53228"
+      },
+      "retirement": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 84266,
+        "started": 12538741755622
+      },
+      "runtime": {
+        "bytes": 961,
+        "path": "/Users/adalundhe/.cache/hx/e-m4_z578q/runtime.json",
+        "sha256": "d239a1985e668df3cee81b6279894048c01d094235d6a228c975add5a8f2fad8"
+      }
+    },
+    {
+      "backend_reaped": true,
+      "identity": {
+        "pid": 84608,
+        "started": 12538793721579,
+        "vsock": "/Users/adalundhe/.cache/hx/e-orsbjt83/guest-tmp/shards-api-58cf45757a22f88f-0/v"
+      },
+      "ledger": {
+        "bytes": 97209,
+        "path": "/Users/adalundhe/.cache/hx/e-orsbjt83/pids.jsonl",
+        "sha256": "1f72190b2fc5617fea5885a6b253ad2f0b5367b1451a6eef8f2463e1b96d401a"
+      },
+      "logs": [
+        {
+          "bytes": 4191,
+          "path": "/Users/adalundhe/.cache/hx/e-orsbjt83/call.log",
+          "sha256": "3b23febe3c41797a415890cd57037ba974d7c13b816e642de5d7d394d6df690d"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-orsbjt83/cold-node.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-orsbjt83/hex-version.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-orsbjt83/keygen-client-0.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-orsbjt83/keygen-client-1.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-orsbjt83/keygen-host-key.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 10039,
+          "path": "/Users/adalundhe/.cache/hx/e-orsbjt83/l.log",
+          "sha256": "f8d6297f9c3fc91368e004d9db750b81eaa101d8c6827710196ae69b2392a4fe"
+        },
+        {
+          "bytes": 4107,
+          "path": "/Users/adalundhe/.cache/hx/e-orsbjt83/o.log",
+          "sha256": "1f6cdc943c0bb3f1dbd1dd1ca73d2bee548b05cb402e1940380a95f6a6eecb0e"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-orsbjt83/pid-check.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 190,
+          "path": "/Users/adalundhe/.cache/hx/e-orsbjt83/r.log",
+          "sha256": "1dafbef4ef89c5154a778d918e0ead0c581a6aa8d709528666838af38653ed75"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-orsbjt83/runtime-probe.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 83,
+          "path": "/Users/adalundhe/.cache/hx/e-orsbjt83/sshd-14.log",
+          "sha256": "51d2670636d644c2df52a5795243e0c2028210f3ebcee80eaac2300deb65cce9"
+        },
+        {
+          "bytes": 166,
+          "path": "/Users/adalundhe/.cache/hx/e-orsbjt83/sshd-4.log",
+          "sha256": "5996283b716c21b31ae4a02898e4c61243e24ac4d050ccd69764022bed49c646"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-orsbjt83/sshd-effective.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "marker_count": 94,
+      "marker_phases": {
+        "call_asked": 2,
+        "call_returned": 2,
+        "call_sent": 2,
+        "command_dispatch_begin": 2,
+        "command_dispatch_complete": 2,
+        "command_driver_submit_begin": 2,
+        "command_driver_submit_done": 2,
+        "command_enter": 2,
+        "command_refresh_begin": 2,
+        "command_refresh_done": 2,
+        "command_reply_ready": 2,
+        "driver_completed_begin": 1,
+        "driver_completed_end": 1,
+        "driver_completed_record_begin": 1,
+        "driver_completed_record_end": 1,
+        "driver_create_begin": 1,
+        "driver_create_end": 1,
+        "driver_inspect_begin": 1,
+        "driver_inspect_end": 1,
+        "driver_key_allocated": 2,
+        "driver_start_begin": 1,
+        "driver_start_end": 1,
+        "driver_submit_begin": 2,
+        "driver_submit_drive_complete": 2,
+        "record_directory_sync_begin": 8,
+        "record_directory_sync_end": 8,
+        "record_file_sync_begin": 8,
+        "record_file_sync_end": 8,
+        "record_put_begin": 8,
+        "record_rename_begin": 8,
+        "record_rename_end": 8
+      },
+      "mode": "on",
+      "physical_controls": [
+        {
+          "key": {
+            "epoch": 1,
+            "owner": 0,
+            "seq": 0
+          },
+          "kind": "verified-physical-lifecycle",
+          "parent": 84260,
+          "phase": "local",
+          "physical": "hex-place-3418fd90ba8003c495a2921cda43e51157631d50b27c2234e1021299cec81a01-0-1-0",
+          "pid": 84603,
+          "recorded_by": 84603,
+          "run": "/Users/adalundhe/.cache/hx/e-orsbjt83"
+        },
+        {
+          "key": {
+            "epoch": 1,
+            "owner": 0,
+            "seq": 0
+          },
+          "kind": "verified-physical-lifecycle",
+          "parent": 84260,
+          "phase": "remote",
+          "physical": "hex-place-8ae6238e4095f617049216eaa0ca93d21ad8e88b5542c8ebe57b1e594f6004db-0-1-0",
+          "pid": 84603,
+          "recorded_by": 84603,
+          "run": "/Users/adalundhe/.cache/hx/e-orsbjt83"
+        }
+      ],
+      "receipt": {
+        "bytes": 617,
+        "path": "/Users/adalundhe/.cache/hx/e-orsbjt83/owned-guest.json",
+        "sha256": "da5c2b2be2d3bf079703a0e05e863d8b2f33368cfae48b50545c9e4a2fe0346f"
+      },
+      "record": {
+        "bytes": 131,
+        "path": "/Users/adalundhe/.cache/hx/e-orsbjt83/cold-node.node-state/@guest",
+        "sha256": "46c2818b7c5624ed4b1392cf8bacc26c7d155fbb1dd7c9458a2a684e6eda1259"
+      },
+      "result": {
+        "bytes": 7246,
+        "path": "/Users/adalundhe/.cache/hx/e-orsbjt83/result.json",
+        "sha256": "80a9f0a423147dd01ee7e6804b6fb63f398846b8793333f95ab8e638b8082fab"
+      },
+      "retirement": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 84608,
+        "started": 12538793721579
+      },
+      "runtime": {
+        "bytes": 961,
+        "path": "/Users/adalundhe/.cache/hx/e-orsbjt83/runtime.json",
+        "sha256": "c8f8d9a6a1debcb20281625718a58eabae694c85ab8010078b7c634f0aede8da"
+      }
+    }
+  ],
+  "kind": "root-scoped-Submit-trace-N1-controls",
+  "limits": [
+    "Four actual physical cycles total, not a large campaign or original timeout reproduction.",
+    "Synchronous Submit context only; asynchronous/background work is intentionally not traced.",
+    "read_ready includes IN/ERR/HUP, not decoded-answer proof; reply_ready precedes actual wire send.",
+    "No resource leak or performance claim; production remains265 and failed."
+  ],
+  "production_fix": false,
+  "source_revision": "1467ca67cdf66ded550c2fcd7e10bb2b6d3a8bd3"
+}

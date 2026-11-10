@@ -363,5 +363,8 @@ hashes and identity joins are in diagnostic-physical-fault-controls-aa2f0bdd.jso
 That record also retains Submit-only client trace8cc99eb3's unrelated LinkUp
 289.25µs timeout; its Submit completed in110.665333ms. Both trace controls again
 retired their exact guests. Daemon traces are now being restricted to Submit's
-synchronous scope in a separate diagnostic checkout; no production change or
-new timing seed follows from these controls.
+synchronous scope in separate diagnostic1467ca67. Its N1 controls both passed:
+trace-off had no markers; trace-on had94, limited to Submit. Root independently
+joined both local/remote physical events and each record/receipt/Stopped identity.
+See diagnostic-submit-trace-n1-1467ca67.json. Larger reproduction remains separate;
+no production change or new timing seed follows from these controls.
