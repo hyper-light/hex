@@ -101,6 +101,9 @@ impl SimOs {
     }
 
     fn poke(&self) {
+        // Socket predicates live behind their own locks/atomics. Join the waiter's state mutex
+        // before notifying, so a producer cannot signal after its scan but before it sleeps.
+        let _state = self.lock();
         self.changed.notify_all();
     }
 
@@ -363,13 +366,9 @@ struct SimProc {
     os: Arc<SimOs>,
 }
 
-impl Proc for SimProc {
-    fn pid(&self) -> u32 {
-        self.pid
-    }
-    fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
-        let s = self.os.lock();
-        Ok(if s.untold.contains(&self.pid) {
+impl SimProc {
+    fn exit_in(&self, s: &SimState) -> Option<Exit> {
+        if s.untold.contains(&self.pid) {
             None
         } else if s.proc_killed.contains(&self.pid) {
             Some(Exit::Signal(9))
@@ -377,13 +376,24 @@ impl Proc for SimProc {
             Some(Exit::Code(0))
         } else {
             None
-        })
+        }
+    }
+}
+
+impl Proc for SimProc {
+    fn pid(&self) -> u32 {
+        self.pid
+    }
+    fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
+        let s = self.os.lock();
+        Ok(self.exit_in(&s))
     }
     /// Waits until its end can be told, at most `timeout`.
     fn wait_for(&mut self, timeout: Duration) -> Result<Option<Exit>, Refusal> {
         let deadline = Instant::now().checked_add(timeout);
+        let mut s = self.os.lock();
         loop {
-            if let Some(exit) = self.try_wait()? {
+            if let Some(exit) = self.exit_in(&s) {
                 return Ok(Some(exit));
             }
             self.os.after_proc_check();
@@ -391,9 +401,10 @@ impl Proc for SimProc {
             if left.is_zero() {
                 return Ok(None);
             }
-            let s = self.os.lock();
             self.os.before_sleep();
-            drop(self.os.changed.wait_timeout(s, left).unwrap());
+            // The checked predicate and condvar registration share one guard; an end cannot
+            // arrive between a discarded predicate guard and a fresh sleep guard.
+            s = self.os.changed.wait_timeout(s, left).unwrap().0;
         }
     }
     fn kill(&mut self) -> Result<(), Refusal> {
