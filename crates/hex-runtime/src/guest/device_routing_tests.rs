@@ -16,8 +16,10 @@ fn physical_claims_reach_the_configured_backend_route_for_create_and_run() {
     let node = WithGuest {
         process: hex_api::sim::SimRuntime::new(),
         oci: GuestRuntime::new(
-            Arc::new(shards_api::sim::SimGuests::new()),
-            super::tests::config(),
+            Arc::new(shards_api::sim::SimGuests::new(|_| {
+                shards_api::End::PowerOff
+            })),
+            config(),
         ),
         route: backend,
     };

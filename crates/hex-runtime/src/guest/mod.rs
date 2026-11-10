@@ -975,6 +975,3 @@ impl<P: Runtime> Runtime for WithGuest<P> {
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-mod device_routing_tests;

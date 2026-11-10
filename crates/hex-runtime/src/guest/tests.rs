@@ -1382,3 +1382,6 @@ fn runtime_capacity_keeps_smaller_actual_guest_room() {
     .unwrap();
     assert_eq!((actual.total, actual.free), (room, free));
 }
+
+#[path = "device_routing_tests.rs"]
+mod device_routing_tests;
