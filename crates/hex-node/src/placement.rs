@@ -12,6 +12,7 @@ use hex_sim::index::Pick;
 use hex_sim::model::{Class, Demand, NodeId, NodeSpec, Resources};
 use hex_sim::peer::{self, Boxed, Budget, Key, Msg, Stop, Told};
 
+pub mod budget;
 mod rows;
 use rows::{Context, Rows};
 
@@ -128,7 +129,7 @@ impl Runtimes {
     }
 }
 
-/// Bounds derive from the runtime's own maximum box ledger, never a separate picked queue size.
+/// Legacy shim until the shell wires [`budget::runtime_budget`] with retained recovery ceilings.
 pub fn runtime_budget() -> Budget {
     Budget {
         owned: hex_runtime::MAX_BOXES,
