@@ -25,6 +25,7 @@ mod order;
 mod stopping;
 use stopping::Stopping;
 mod cache;
+mod capacity;
 pub mod tunnel;
 
 /// CLI-owned reporting: library delivery never chooses an output stream.
@@ -401,6 +402,7 @@ pub struct Service {
     _lease: std::fs::File,
     order: Mutex<order::Order>,
     driver: Driver,
+    runtimes: Runtimes,
     cluster: Mutex<Cluster>,
     prober: Mutex<crate::facts::Prober>,
     stopping: Arc<Stopping>,
@@ -507,6 +509,8 @@ impl Service {
             classes = classes.with(class);
             backends.push((class, runtime));
         }
+        let runtimes = Runtimes::new(backends).map_err(failed)?;
+        let runtime_capacity = runtimes.capacities().map_err(failed)?;
         std::fs::create_dir_all(&config.state)
             .map_err(|e| Refusal::os("creating scheduler state", e))?;
         let mut prober =
@@ -521,6 +525,7 @@ impl Service {
         let mut local = local;
         local.capacity.gpus = 0;
         local.devices.clear();
+        local.runtime_pools = capacity::pools(runtime_capacity, &BTreeMap::new(), local.classes)?;
         if let Some(slot) = cluster.nodes.iter_mut().find(|node| node.id == id) {
             *slot = local;
         }
@@ -537,7 +542,7 @@ impl Service {
             },
             Pick::default(),
             &config.state.join("placements"),
-            Runtimes::new(backends).map_err(failed)?,
+            runtimes.clone(),
         )
         .map_err(failed)?;
         let mut senders = BTreeMap::new();
@@ -593,6 +598,7 @@ impl Service {
             _lease: lease,
             order: Mutex::new(order),
             driver,
+            runtimes,
             cluster: Mutex::new(cluster),
             prober: Mutex::new(prober),
             stopping,
@@ -819,7 +825,15 @@ impl Service {
     }
 
     fn refresh(&self) -> Result<(), Refusal> {
-        let owned = self.driver.measured_owned_use().map_err(failed)?;
+        let owned_by_class = self.driver.measured_owned_use_by_class().map_err(failed)?;
+        let runtime_capacity = self.runtimes.capacities().map_err(failed)?;
+        let owned = owned_by_class.values().try_fold(
+            hex_sim::model::Resources::default(),
+            |used, more| {
+                used.checked_add(more)
+                    .ok_or_else(|| Refusal::Broken("measured owned resource sum overflows".into()))
+            },
+        )?;
         let facts = self
             .prober
             .lock()
@@ -834,6 +848,7 @@ impl Service {
             .map_err(|e| Refusal::Broken(e.to_string()))?;
         local.capacity.gpus = 0;
         local.devices.clear();
+        local.runtime_pools = capacity::pools(runtime_capacity, &owned_by_class, local.classes)?;
         self.driver.refresh_node(local.clone()).map_err(failed)?;
         if let Some(node) = cluster.nodes.iter_mut().find(|n| n.id == self.id) {
             *node = local;
@@ -1102,6 +1117,9 @@ fn control_only() -> Refusal {
 impl Runtime for Service {
     fn classes(&self) -> Vec<Class> {
         Vec::new()
+    }
+    fn capacity(&self, _: Class) -> Result<Option<hex_api::Capacity>, Refusal> {
+        Err(control_only())
     }
     fn create(&self, _: BoxSpec) -> Result<BoxInfo, Refusal> {
         Err(control_only())

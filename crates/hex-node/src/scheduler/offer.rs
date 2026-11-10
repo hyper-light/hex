@@ -61,6 +61,8 @@ fn checked_name(name: &str) -> Result<(), Refusal> {
 }
 
 fn checked_shape(spec: &NodeSpec) -> Result<(), Refusal> {
+    spec.check_runtime_pools()
+        .map_err(|e| invalid(e.to_string()))?;
     if !spec.devices_agree() {
         return Err(invalid("device list and GPU capacity disagree"));
     }
@@ -186,6 +188,35 @@ mod tests {
             Device::gpu(ModelId(1), 16 << 30),
         ];
         node
+    }
+
+    /// AC-T7.4.1: existing host-backed records with no runtime-pool field retain their meaning.
+    #[test]
+    fn a_record_without_runtime_pools_remains_host_backed() {
+        let original = node();
+        let encoded = serde_json::to_value(&original).unwrap();
+        assert!(encoded.get("runtime_pools").is_none());
+        let restored: NodeSpec = serde_json::from_value(encoded).unwrap();
+        assert!(restored.runtime_pools.is_empty());
+        assert_eq!(restored, original);
+    }
+
+    /// AC-T7.4.1: malformed runtime pools are refused before a peer can change shared models.
+    #[test]
+    fn invalid_runtime_pool_does_not_mutate_shared_models() {
+        let mut source = node();
+        source.runtime_pools.push(hex_sim::model::RuntimePool {
+            classes: Classes::NONE,
+            capacity: source.capacity,
+        });
+        let incoming = Offer {
+            spec: serde_json::to_string(&source).unwrap(),
+            models: vec!["new-model".into()],
+        };
+        let mut cluster = Cluster::single_owner(vec![source], Vec::new());
+        cluster.models.push("kept-model".into());
+        assert!(decode(&incoming, NodeId(1), &mut cluster).is_err());
+        assert_eq!(cluster.models, ["kept-model"]);
     }
 
     /// AC-T7.4.1: reordered intern tables preserve the exact physical model and device order.

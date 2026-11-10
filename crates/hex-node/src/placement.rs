@@ -111,6 +111,21 @@ impl Runtimes {
             .cloned()
             .ok_or_else(|| invalid("no registered runtime for placement class").into())
     }
+
+    /// Query each configured backend without holding any placement or record lock.
+    pub fn capacities(&self) -> Result<Vec<(Class, Option<hex_api::Capacity>)>, Error> {
+        self.by_class
+            .iter()
+            .map(|(&class, runtime)| {
+                let form = if runtime.classes().contains(&hex_api::Class::Oci) {
+                    hex_api::Class::Oci
+                } else {
+                    hex_api::Class::Process
+                };
+                Ok((class, runtime.capacity(form)?))
+            })
+            .collect()
+    }
 }
 
 /// Bounds derive from the runtime's own maximum box ledger, never a separate picked queue size.
@@ -242,6 +257,7 @@ impl Driver {
         let mut actual = BTreeMap::new();
         let mut start = Vec::new();
         let mut retained = Resources::default();
+        let mut retained_by_class = BTreeMap::<Class, Resources>::new();
         for (key, payload) in rows.running()? {
             // Core demand is durable beside this payload; decode it through core boot below.
             // Select its runtime using the shared model codec, without a second decision format.
@@ -256,6 +272,10 @@ impl Driver {
                         retained = retained
                             .checked_add(&demand.need)
                             .ok_or_else(|| bad("recovered physical reservations overflow"))?;
+                        let class = retained_by_class.entry(demand.class).or_default();
+                        *class = class
+                            .checked_add(&demand.need)
+                            .ok_or_else(|| bad("recovered runtime reservations overflow"))?;
                     }
                     if !ended && payload.start && info.state == BoxState::Created {
                         start.push((runtime, physical));
@@ -267,12 +287,24 @@ impl Driver {
             };
             actual.insert(key, boxed);
         }
-        let live = nodes
+        let live_node = nodes
             .iter()
             .find(|node| node.id == id)
-            .ok_or_else(|| bad("recovery node is not configured"))?
-            .capacity;
-        let raised = !live.holds(&retained);
+            .ok_or_else(|| bad("recovery node is not configured"))?;
+        let live = live_node.capacity;
+        let pool_use = |classes: hex_sim::model::Classes| {
+            retained_by_class
+                .iter()
+                .filter(|(class, _)| classes.has(**class))
+                .try_fold(Resources::default(), |used, (_, more)| {
+                    used.checked_add(more)
+                        .ok_or_else(|| bad("recovered runtime pool reservations overflow"))
+                })
+        };
+        let mut raised = !live.holds(&retained);
+        for pool in &live_node.runtime_pools {
+            raised |= !pool.capacity.holds(&pool_use(pool.classes)?);
+        }
         // Live FREE room is an admission offer, not a reason to forget an existing physical box.
         // Only the boot ledger gets a floor equal to checked, actually surviving reservations.
         // Service's original facts stay untouched and new local admission is blocked below.
@@ -288,6 +320,15 @@ impl Driver {
                 disk_bytes: live.disk_bytes.max(retained.disk_bytes),
                 gpus: live.gpus.max(retained.gpus),
             };
+            for pool in &mut local.runtime_pools {
+                let held = pool_use(pool.classes)?;
+                pool.capacity = Resources {
+                    cpu_milli: pool.capacity.cpu_milli.max(held.cpu_milli),
+                    mem_bytes: pool.capacity.mem_bytes.max(held.mem_bytes),
+                    disk_bytes: pool.capacity.disk_bytes.max(held.disk_bytes),
+                    gpus: pool.capacity.gpus.max(held.gpus),
+                };
+            }
             Some(recovered)
         } else {
             None
@@ -312,7 +353,7 @@ impl Driver {
                 stopped: None,
                 admission: raised.then(||Refusal::Invalid {
                     what:"local admission",
-                    why:format!("current live room {live:?} is below recovered physical reservations {retained:?}; a successful live-room refresh is required before new local admission"),
+                    why:format!("current host or runtime pool room cannot cover recovered physical reservations {retained:?}; a successful live-room refresh is required before new local admission"),
                 }),
             }),
             operation: Mutex::new(()),
@@ -784,8 +825,9 @@ impl Driver {
         Ok(step)
     }
 
-    /// Actual memory held by this driver's physical boxes. CPU/disk are not invented from caps.
-    pub fn measured_owned_use(&self) -> Result<hex_sim::model::Resources, Error> {
+    /// Actual memory held by this driver's physical boxes, by runtime class. CPU/disk are not
+    /// invented from caps. The caller can credit a shared pool once for all its classes.
+    pub fn measured_owned_use_by_class(&self) -> Result<BTreeMap<Class, Resources>, Error> {
         let _operation = self.operation()?;
         let state = self.lock()?;
         let keys: Vec<_> = state
@@ -803,7 +845,7 @@ impl Driver {
             })
             .collect::<Result<_, Stop>>()?;
         drop(state);
-        let mut resources = hex_sim::model::Resources::default();
+        let mut resources = BTreeMap::<Class, Resources>::new();
         for (key, demand) in keys {
             match self
                 .runtimes
@@ -811,7 +853,8 @@ impl Driver {
                 .usage(&self.physical_id(key)?)
             {
                 Ok(usage) => {
-                    resources.mem_bytes = resources
+                    let owned = resources.entry(demand.class).or_default();
+                    owned.mem_bytes = owned
                         .mem_bytes
                         .checked_add(usage.memory_bytes)
                         .ok_or_else(|| invalid("physical memory usage overflow"))?

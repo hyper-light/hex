@@ -839,6 +839,16 @@ fn explicit_shared_namespace_matches_remote_ids_and_cannot_rebind_existing_state
 /// Recovery retains cleanup authority, refuses fresh local admission, and later uses real facts.
 #[test]
 fn restart_with_less_live_room_than_held_reservations_restores_cleanup_authority() {
+    restart_with_less_room(false);
+}
+
+/// AC-T7.4.1: a narrowed guest pool retains cleanup authority without enlarging its live offer.
+#[test]
+fn restart_with_less_runtime_pool_room_restores_cleanup_authority() {
+    restart_with_less_room(true);
+}
+
+fn restart_with_less_room(pool_limited: bool) {
     let dir = tempfile::tempdir().unwrap();
     let rt = Arc::new(Counting::default());
     let driver = boot(dir.path(), rt.clone());
@@ -853,7 +863,14 @@ fn restart_with_less_live_room_than_held_reservations_restores_cleanup_authority
         mem_bytes: d.need.mem_bytes / 2,
         ..Resources::default()
     };
-    let nodes = [NodeSpec::new(NodeId(0), live)];
+    let mut node = NodeSpec::new(NodeId(0), if pool_limited { d.need } else { live });
+    if pool_limited {
+        node.runtime_pools.push(hex_sim::model::RuntimePool {
+            classes: hex_sim::model::Classes::NONE.with(Class::Oci),
+            capacity: live,
+        });
+    }
+    let nodes = [node];
     let recovered = Driver::boot(
         NodeId(0),
         &nodes,
@@ -921,5 +938,19 @@ fn restart_with_less_live_room_than_held_reservations_restores_cleanup_authority
     let (_, step) = recovered.submit(d, p).unwrap();
     local(&recovered, step);
     assert_eq!(rt.creates.load(Ordering::SeqCst), 2);
-    assert_eq!(nodes.first().unwrap().capacity, live);
+    if pool_limited {
+        assert_eq!(nodes.first().unwrap().capacity, d.need);
+        assert_eq!(
+            nodes
+                .first()
+                .unwrap()
+                .runtime_pools
+                .first()
+                .unwrap()
+                .capacity,
+            live
+        );
+    } else {
+        assert_eq!(nodes.first().unwrap().capacity, live);
+    }
 }

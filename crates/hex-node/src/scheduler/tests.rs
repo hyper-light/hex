@@ -71,6 +71,7 @@ fn replayed_deletion_does_not_interrupt_the_reconnected_peer() {
         _lease: std::fs::File::create(dir.path().join("lease")).unwrap(),
         order: Mutex::new(order::Order::open(&dir.path().join("transport")).unwrap()),
         driver,
+        runtimes: Runtimes::default(),
         cluster: Mutex::new(cluster),
         prober: Mutex::new(crate::facts::Prober::open(
             dir.path(),
@@ -140,6 +141,7 @@ fn laptop_dispatch_and_common_wire_keep_the_box_until_explicit_delete() {
         _lease: std::fs::File::create(dir.path().join("lease")).unwrap(),
         order: Mutex::new(order::Order::open(&dir.path().join("transport")).unwrap()),
         driver,
+        runtimes: Runtimes::default(),
         cluster: Mutex::new(cluster),
         prober: Mutex::new(crate::facts::Prober::open(
             dir.path(),
