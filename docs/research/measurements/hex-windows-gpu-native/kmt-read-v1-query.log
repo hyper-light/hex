@@ -1,0 +1,10 @@
+{
+    "source":  "ROOT read-only native identity witness, no D3D/compute/HCS",
+    "path":  "\\\\?\\PCI#VEN_1002\u0026DEV_1586\u0026SUBSYS_1FB31043\u0026REV_C1#4\u002635fe04f8\u00260\u00260041#{1ca05180-a699-450a-9a0c-de4fbe3ddd89}",
+    "open_ntstatus":  0,
+    "adapter_handle":  1073741824,
+    "low":  85591,
+    "high":  0,
+    "open_struct_bytes":  24,
+    "close_ntstatus":  0
+}
