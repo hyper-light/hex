@@ -283,3 +283,30 @@ errors and identities. census/cold_fault_e2e.py is the exact actual wrapper;
 use --cold-driver PATH/TO/cold_boot_census.py, --fault pre-ready or post-ready,
 then the existing cold-census arguments with --n 2 and a new output path. These
 injected-failure rows are excluded from calibration and workload success.
+
+## Cold-start and tail extension candidate
+
+Root r571 independently reconstructed all 14,000 census files and 44,000 rows
+from the two fresh-node N1000 campaigns. Each profile had 1,000 normal first
+completed SDK Hellos and 1,000 subsequent Hellos, with no marked Hello refusal,
+run-out, malformed/full row or ambiguous cohort. Root separately enumerated every
+census directory entry and hashed all external artifacts and build/policy inputs.
+The compact records are cold-sdk-hello-{debug,release}-8f51140e.json; they retain
+the full reconstruction and authority-manifest hashes. All exact guest identities
+and recorded Stopped results agree. Normal source-order counts still cannot prove
+each row's VM identity or exclude an unobserved pre-Hello boot retry.
+
+Fresh first-Hello maxima were 295,291ns debug and 3,022,291ns release, compared
+with the earlier warm-borrower maxima of 197,042ns and 202,583ns. The SDK timer
+begins after dialing/token setup. These are response records, not boot timings.
+
+calibration-macos-cold-extension-1bb73f74.json applies the existing decision9
+method across the eligible warm/fresh/subsequent cohorts and uncensored release
+extension, retaining larger prior records. It also preserves the earlier Delete
+166,381,084ns run-out as a distinct censored lower bound, rather than treating it
+as a completed answer or dropping it below the new 150,082,083ns completed max.
+The learner and TIMES_SLOWEST rule are unchanged; only these macOS records change.
+This is a new candidate requiring actual armed fresh-node/local/SSH validation
+and final combined gates. It does not claim a cause or fix for the unreproduced
+guest_loop reboot-count failure. Other platforms and measuring waits retain
+their recorded scope and remain unverified where no actual record exists.

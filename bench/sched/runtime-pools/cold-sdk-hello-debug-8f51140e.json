@@ -1,0 +1,146 @@
+{
+  "aggregate_byte_identical_copy": "/Users/adalundhe/.cache/hx/root-cold-debug-n1000-8f51140e.json",
+  "aggregate_original": {
+    "bytes": 2522942,
+    "path": "/Users/adalundhe/.cache/hex-lead/cold-census-8f51140e/receipts/cold-debug-n1000.json",
+    "sha256": "03b34288593cc18ee81c7cfaee4189ee9a185d7ed3d6ceebf854234dac1d9d4c"
+  },
+  "authority_inputs_hashed": 12001,
+  "binary_and_artifact_hashes": {
+    "hex": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-mac-seeds-host-8dffdca8/aarch64-apple-darwin/debug/hex",
+      "sha256": "7263e6173079320b8e2ab01dbdbd03b01f011893323d590d4819f35fe91def9f"
+    },
+    "initrd": {
+      "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/initramfs-cc7c2190-debug-aarch64.cpio",
+      "sha256": "fcab9b12bb999fb0e7cf7f91ecd96011df0ede2f24cd46be5f30ddda0afbe68d"
+    },
+    "kernel": {
+      "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/Image-6.18.48-aarch64",
+      "sha256": "1b178851998d27b4c6c346ae391c26d675f81461fbaa19cbe514500291fe472d"
+    },
+    "linux_hex": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-scheduler-vm-cc7c2190/aarch64-unknown-linux-musl/debug/hex",
+      "sha256": "4706ad1c166de3d95342d8751145c2a975da3d79b7e24015f7f0504df2c560ab"
+    },
+    "runtime_probe": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-mac-seeds-probe-8dffdca8/aarch64-apple-darwin/debug/hex-scheduler-runtime-probe",
+      "sha256": "ee58d0714cd49f301789c92ce457f89475cab2d440b019ceec077c56a05999b0"
+    },
+    "shards": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-shards-vm-tool/release/shards",
+      "sha256": "b9d74f0910a54593b66f604ffe36e39d588c89afea60d4643e37813200daa61e"
+    }
+  },
+  "cohorts": {
+    "ambiguous_iterations": 0,
+    "first_completed_rows": 1000,
+    "malformed_rows": 0,
+    "normal_iterations": 1000,
+    "run_out_rows": 0,
+    "subsequent_completed_rows": 1000,
+    "truncated_markers": 0,
+    "wire_refused_rows": 0
+  },
+  "distributions_ns": {
+    "all_first_completed_sdk_hello": {
+      "max": 295291,
+      "n": 1000,
+      "p50": 187708,
+      "p90": 201250,
+      "p99": 235250,
+      "p999": 287458
+    },
+    "normal_first_completed_sdk_hello": {
+      "max": 295291,
+      "n": 1000,
+      "p50": 187708,
+      "p90": 201250,
+      "p99": 235250,
+      "p999": 287458
+    },
+    "run_out_sdk_hello": {
+      "max": null,
+      "n": 0,
+      "p50": null,
+      "p90": null,
+      "p99": null,
+      "p999": null
+    },
+    "subsequent_completed_sdk_hello": {
+      "max": 252167,
+      "n": 1000,
+      "p50": 146208,
+      "p90": 171875,
+      "p99": 207833,
+      "p999": 229459
+    },
+    "wire_refused_sdk_hello": {
+      "max": null,
+      "n": 0,
+      "p50": null,
+      "p90": null,
+      "p99": null,
+      "p999": null
+    }
+  },
+  "fresh_roots": 1000,
+  "full_boot_latency": "not measured; SDK timer starts after dial/token",
+  "guest_retirement": "all1000exact report/record/receipt identities agree with each actual harness Stopped result; verifier performs no live API query",
+  "kind": "cold-census-raw-reconstruction",
+  "limits": [
+    "file evidence is not a live API/VM identity or cleanup check",
+    "only ledger-attributed census files reconstructed; directory extras not enumerated",
+    "artifact/config paths are compared as recorded; external artifact bytes are root-owned checks",
+    "zero boxes is the recorded no-workload/empty-baseline assertion, not an independent create-effect counter",
+    "recorded Popen closure joins filename first, then parent/recorder/PID/order; no PID selects census data"
+  ],
+  "n": 1000,
+  "per_row_VM_identity_proven": false,
+  "performance_claim": false,
+  "profile": "debug",
+  "profiles_reported": [
+    "debug"
+  ],
+  "raw_verification": {
+    "bytes": 4871530,
+    "path": "/Users/adalundhe/.cache/hex-lead/cold-census-8f51140e/receipts/root-verified-cold-debug-n1000-1bb73f74.json",
+    "sha256": "5df11567ab8f9efad4afbfd042b65c42454d167279b0e3b6c82ea04a71989bd2"
+  },
+  "receipts": {
+    "build": {
+      "path": "/Users/adalundhe/.cache/hex-lead/cold-census-8f51140e/receipts/build-debug.json",
+      "sha256": "7a569fc89dce7726af68842506034fa5a16024cd985d6cb553d7f2481a9e8e37"
+    },
+    "deadline": {
+      "path": "/Users/adalundhe/.cache/hex-lead/cold-census-8f51140e/receipts/method-debug-n1000.json",
+      "sha256": "38c8d831901b9e5a63f268ee35659ee2b2eb04eb866f4404bee5a3c34f24b998"
+    },
+    "policy": {
+      "path": "/Users/adalundhe/.cache/hex-lead/refusal-census-bba3d814/receipts/policy-f5.json",
+      "sha256": "00fca9fa1a05d72fe197d633a7426d6e3ec9b4ea4bc44899e0556cd9b761f960"
+    }
+  },
+  "requirement": "AC-T7.4.1 / decision9 cold SDK Hello calibration evidence",
+  "role": "root coordinator performed all actual captures/reconstruction/external hashes; implementer only synthetic verifier fixtures",
+  "root_directory_coverage": "every census directory entry is regular and ledger-attributed; none absent/extra",
+  "root_external_authority": {
+    "bytes": 772692,
+    "path": "/Users/adalundhe/.cache/hex-lead/cold-census-8f51140e/receipts/root-external-authority-debug-8f51140e.json",
+    "sha256": "a372361484b7832acb9a0b5578f5da2dfd29c5cda6cd6d2b96c304715fc936c9"
+  },
+  "root_verifier_revision": "1bb73f74",
+  "root_verifier_sha256": "8794db963b533759c69fd47457e4d077ff4a598c8f33cdf05f7e99a8f24b210d",
+  "seed_installation": "none by capture or reconstruction",
+  "shared_reader_sha256": "a1b650dafee625f17d619fffe47afd3bc97fb920d5e17717c48b98a93fb8987a",
+  "source_revisions_reported": [
+    "8f51140ef653d0b348597b02b241cc185a4aa54e"
+  ],
+  "source_scope": "capture source8f has productionbbb, prior bba+macOS seeds; measuring mode disarms waits; no diagnostic source rows",
+  "status": "consistent",
+  "unique_pid_start_pairs": 1000,
+  "unobserved_pre_hello_boot_retries_possible": true,
+  "verified_raw_files": 7000,
+  "verified_raw_rows": 22000,
+  "workload_success": "not exercised; ready empty baseline and no box lifecycle ledger entries are not an independent effect counter"
+}

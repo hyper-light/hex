@@ -172,3 +172,17 @@ repeats; no speculative remedy or raised limit is accepted. Source identities,
 terminal guest proofs and the explicit failed status are retained in
 bench/sched/runtime-pools/mac-seeds-validation-e2fb4f17.json. Neither the earlier
 unarmed captures nor the passing short controls certify this candidate for main.
+
+Root subsequently reconstructed both fresh-node N1000 campaigns (14,000 files,
+44,000 rows), including ready class/empty baseline, exact producer filenames,
+receipt/record/Stopped identities and ordered recorded-Popen reaping. Separate
+root checks covered every census directory entry and external artifact/receipt
+hash. The fresh release first SDK Hello reached 3,022,291ns, while the earlier
+warm-only record was 202,583ns. Timing starts after dialing/token setup and does
+not establish per-row VM identity or boot latency. The new candidate retains
+eligible warm/fresh/subsequent maxima and the uncensored release extension, plus
+the existing decision9 censored Delete lower bound. Its derivation and remaining
+armed/combined validation are explicit in
+bench/sched/runtime-pools/calibration-macos-cold-extension-1bb73f74.json.
+This calibration change is not a causal explanation or claimed fix for the
+unreproduced guest_loop reboot-count failure.

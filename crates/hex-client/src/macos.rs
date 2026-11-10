@@ -26,8 +26,8 @@ use crate::calls::{Core, Handle, KINDS, Lent, Sent, Shared, Take, Transport};
 /// How long a call waits for the macOS node agent's answer, and its send for room in the agent's socket, one wait a
 /// kind of call (`crate::calls::kind_of`'s order), as Linux's client waits (decision 9): twice the slowest answer this
 /// process has had to a call of that kind. Hello, scheduler operations and capacity use the exact per-profile
-/// maxima of the root-verified actual macOS/SSH guest census (AC-T7.4.1):
-/// `bench/sched/runtime-pools/calibration-macos-bba3d814.json`. These time wire replies, not workload success.
+/// response maxima and censored run-out lower bounds of the root-verified macOS/SSH guest census (AC-T7.4.1):
+/// `bench/sched/runtime-pools/calibration-macos-cold-extension-1bb73f74.json`. These time wire replies, not workload success.
 /// Other operations remain measuring until their own actual macOS rows are recorded.
 static ANSWERS: [Patience; KINDS] = [
     Patience::by_profile(
@@ -49,52 +49,52 @@ static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.answer.run"),
     Patience::by_profile(
         "client.answer.schedule.describe",
-        Duration::from_nanos(22_866_875),
+        Duration::from_nanos(23_338_333),
         Some(Duration::from_nanos(22_181_708)),
     ),
     Patience::by_profile(
         "client.answer.schedule.advertise",
-        Duration::from_nanos(78_447_792),
+        Duration::from_nanos(88_998_417),
         Some(Duration::from_nanos(108_619_750)),
     ),
     Patience::by_profile(
         "client.answer.schedule.submit",
-        Duration::from_nanos(162_546_792),
+        Duration::from_nanos(228_296_000),
         Some(Duration::from_nanos(401_317_333)),
     ),
     Patience::by_profile(
         "client.answer.schedule.hear_create",
-        Duration::from_nanos(213_308_750),
+        Duration::from_nanos(244_933_375),
         Some(Duration::from_nanos(392_913_792)),
     ),
     Patience::by_profile(
         "client.answer.schedule.hear_delete",
-        Duration::from_nanos(132_392_000),
+        Duration::from_nanos(152_498_583),
         Some(Duration::from_nanos(130_079_458)),
     ),
     Patience::by_profile(
         "client.answer.schedule.hear_control",
-        Duration::from_nanos(116_103_292),
+        Duration::from_nanos(122_932_458),
         Some(Duration::from_nanos(119_427_250)),
     ),
     Patience::by_profile(
         "client.answer.schedule.link_up",
-        Duration::from_nanos(139_333),
+        Duration::from_nanos(144_625),
         Some(Duration::from_nanos(250_209)),
     ),
     Patience::by_profile(
         "client.answer.schedule.retry",
-        Duration::from_nanos(9_766_084),
+        Duration::from_nanos(18_684_542),
         Some(Duration::from_nanos(16_694_750)),
     ),
     Patience::by_profile(
         "client.answer.schedule.delete",
-        Duration::from_nanos(83_190_542),
+        Duration::from_nanos(166_381_084),
         Some(Duration::from_nanos(125_323_459)),
     ),
     Patience::by_profile(
         "client.answer.schedule.status",
-        Duration::from_nanos(4_420_667),
+        Duration::from_nanos(7_577_917),
         Some(Duration::from_nanos(7_264_708)),
     ),
     Patience::by_profile(
