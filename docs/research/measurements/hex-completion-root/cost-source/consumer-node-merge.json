@@ -1,0 +1,74 @@
+[
+  {
+    "path": "crates/hex-node/src/placement.rs",
+    "exit": 0,
+    "root": "a6532aa5d61c08f8f7920ff8bac63f8956287bac93b9c0415e41aa6c210696fc",
+    "base": "8a5eed5c8bf78b2a58fe8c44e502a7f89f223104e6f3b07eef11880ee3087fe5",
+    "new": "6963f8f70fe8e5f1fc7921d8d9e63222a0117c1e8a7707e892c61f2cef4a491b",
+    "merged": "2fddc77d084c85586d97bf74a32152fb24ddc6eb60fcbc0d437a52ca934b4e06"
+  },
+  {
+    "path": "crates/hex-node/src/placement/device_binding_tests.rs",
+    "exit": 0,
+    "root": "3d02c0cb92d395ddb276bfb1f15499914fe7991c613400c9826ba9c87a366c03",
+    "base": "50ee56ad39a976f5f70ed56eb88bd9d107fabdec3aae9e4b1ef06dd13ab9ad9b",
+    "new": "9edb1e326620b9bf4e98263c6d78f6dce50065768f1565f1c7ba2a70cd3c0d68",
+    "merged": "3d02c0cb92d395ddb276bfb1f15499914fe7991c613400c9826ba9c87a366c03"
+  },
+  {
+    "path": "crates/hex-node/src/placement/tests.rs",
+    "exit": 0,
+    "root": "be948807fa247e26c3c3f0155c0ece28faeedbe8328abe3a0dc8249932e8d151",
+    "base": "427a9314118e611e329b039eeb510a9f120fe6b7cb62e390b0d57399a0eb1c6c",
+    "new": "a079de1ecd9e9572e2f7407519ef234090dab4e5e43bbe46b9f7931467d1ce36",
+    "merged": "a079de1ecd9e9572e2f7407519ef234090dab4e5e43bbe46b9f7931467d1ce36"
+  },
+  {
+    "path": "crates/hex-node/src/scheduler.rs",
+    "exit": 0,
+    "root": "aa7153cabf90516163dd9abf955453364081da2599d1161eb9fbd2f47603f963",
+    "base": "5ac47267a6e11cfaafe90577b48581ffd8a7b359502942b819ecf3a4d2f07ef0",
+    "new": "7470cf63538dfb9fe0faf52329fec5e727052e81002ed2a87f470121803ec86e",
+    "merged": "896c7eb92cafb630032736f07643f165d6d9aa3292fb7282c9f29978b2ae6251"
+  },
+  {
+    "path": "crates/hex-node/src/scheduler/adversarial_relay_tests.rs",
+    "exit": 0,
+    "root": "fa267b8c48540ffab2e566a8fa231934206c32b4302e80b0bebb3c220c583b76",
+    "base": "b3b07941c7b469af327798339664b844148d8b1f1ed9c1deee20b07fc1b86079",
+    "new": "037660b2e4cf8892e7c46d1d1302033edff9deb6356ccfa7461a3e133e27e6b8",
+    "merged": "037660b2e4cf8892e7c46d1d1302033edff9deb6356ccfa7461a3e133e27e6b8"
+  },
+  {
+    "path": "crates/hex-node/src/scheduler/capacity.rs",
+    "exit": 0,
+    "root": "8c8792eda2b01f09b2abc71faa41f8c55e01792faffbb681017279ef8a0fed37",
+    "base": "1c92096118ad8750c5064193ea01ad55815f35eef1b7c0040d7ed839fc1fa8ee",
+    "new": "9e2eeeecc2ee16b2048b8253e0b027f374af6aad92c66b101d9da19adc98d6ed",
+    "merged": "9e2eeeecc2ee16b2048b8253e0b027f374af6aad92c66b101d9da19adc98d6ed"
+  },
+  {
+    "path": "crates/hex-node/src/scheduler/offer.rs",
+    "exit": 0,
+    "root": "c2b489b52d3d869c90055a65f295129f51324a9bad2b70b35401c48d21161c3f",
+    "base": "c2b489b52d3d869c90055a65f295129f51324a9bad2b70b35401c48d21161c3f",
+    "new": "a0fdc90b20ce476717aca3759283b2b6db2a38ace5c73e6fd4c374940b4cb749",
+    "merged": "a0fdc90b20ce476717aca3759283b2b6db2a38ace5c73e6fd4c374940b4cb749"
+  },
+  {
+    "path": "crates/hex-node/src/scheduler/tests.rs",
+    "exit": 0,
+    "root": "c03c675ad907f2e0b489ef856f9aaf3bb0ff80a735e39c766ff9fa5a2c7bdcda",
+    "base": "15138583a472477840ccc3c97bdd44225e58f921451e249d386129996b72db2b",
+    "new": "c03c675ad907f2e0b489ef856f9aaf3bb0ff80a735e39c766ff9fa5a2c7bdcda",
+    "merged": "c03c675ad907f2e0b489ef856f9aaf3bb0ff80a735e39c766ff9fa5a2c7bdcda"
+  },
+  {
+    "path": "crates/hex-node/src/scheduler/tunnel.rs",
+    "exit": 0,
+    "root": "c86547d45d3b473043bd81313ae12807e66b914c65c1a5c734821847adef7d2b",
+    "base": "a2f20c71a8eba936f766119138f76685f399fac32d61ef09eea3ef145a7c076d",
+    "new": "c86547d45d3b473043bd81313ae12807e66b914c65c1a5c734821847adef7d2b",
+    "merged": "c86547d45d3b473043bd81313ae12807e66b914c65c1a5c734821847adef7d2b"
+  }
+]

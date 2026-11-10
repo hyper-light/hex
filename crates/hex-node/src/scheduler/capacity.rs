@@ -8,6 +8,38 @@ use hex_sim::model::{Class, Classes, Resources, RuntimePool};
 
 pub(super) mod devices;
 
+/// VM capability includes a known per-box cost before any candidate can be admitted. Native
+/// identity-cost reports remain optional; runtime resource profiles never come from telemetry.
+pub(super) fn profiles(
+    reports: &[(Class, Option<Capacity>)],
+) -> Result<[Option<hex_api::RuntimeCost>; Class::COUNT], Refusal> {
+    if reports.len() > Class::COUNT {
+        return Err(invalid(
+            "more cost reports than initialized backend classes",
+        ));
+    }
+    let mut costs = [None; Class::COUNT];
+    let mut seen = Classes::NONE;
+    for (class, report) in reports {
+        if seen.has(*class) {
+            return Err(invalid("duplicate runtime cost class"));
+        }
+        seen = seen.with(*class);
+        let cost = report.as_ref().and_then(|report| report.cost);
+        if let Some(cost) = cost {
+            cost.check()?;
+        }
+        if matches!(class, Class::Firecracker | Class::Shards) && cost.is_none() {
+            return Err(invalid("initialized VM class has no verified per-box cost"));
+        }
+        let slot = costs
+            .get_mut(class.index())
+            .ok_or_else(|| invalid("runtime cost class index"))?;
+        *slot = cost;
+    }
+    Ok(costs)
+}
+
 fn invalid(why: impl Into<String>) -> Refusal {
     Refusal::Invalid {
         what: "runtime capacity",

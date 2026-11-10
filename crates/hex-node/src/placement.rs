@@ -280,7 +280,9 @@ impl Driver {
         for (key, payload) in rows.running()? {
             // Core demand is durable beside this payload; decode it through core boot below.
             // Select its runtime using the shared model codec, without a second decision format.
-            let (demand, ended) = durable_demand(&rows, key, models)?;
+            let (demand, allocation, ended) = durable_demand(&rows, key, models)?;
+            let charged = hex_sim::model::allocated_resources(demand.need, allocation)
+                .map_err(|_| bad("retained allocation differs from original workload"))?;
             let runtime = runtimes.get(demand.class)?;
             validate(&demand, &payload)?;
             validate_backend(&payload, &runtime)?;
@@ -291,6 +293,13 @@ impl Driver {
                         return Err(bad(
                             "surviving physical box belongs to another runtime backend",
                         )
+                        .into());
+                    }
+                    if info.allocation != allocation {
+                        return Err(Refusal::Lifecycle {
+                            id: physical.try_clone()?,
+                            cause: hex_api::LifecycleCause::Uncertain,
+                        }
                         .into());
                     }
                     if !ended && device_request(&demand) {
@@ -308,11 +317,11 @@ impl Driver {
                     }
                     if !ended {
                         retained = retained
-                            .checked_add(&demand.need)
+                            .checked_add(&charged)
                             .ok_or_else(|| bad("recovered physical reservations overflow"))?;
                         let class = retained_by_class.entry(demand.class).or_default();
                         *class = class
-                            .checked_add(&demand.need)
+                            .checked_add(&charged)
                             .ok_or_else(|| bad("recovered runtime reservations overflow"))?;
                     }
                     if !ended && payload.start && info.state == BoxState::Created {
@@ -450,7 +459,7 @@ impl Driver {
     pub fn hear(&self, from: NodeId, envelope: Envelope) -> Result<Step, Error> {
         let _operation = self.operation()?;
         let mut state = self.lock()?;
-        if let Msg::Start { key, demand } = envelope.msg {
+        if let Msg::Start { key, demand, .. } = envelope.msg {
             if key.owner != from.0 || !self.peers.contains(&from) {
                 return Err(invalid("start owner is not its known sender").into());
             }
@@ -678,6 +687,8 @@ impl Driver {
             let id = self.physical_id(key)?;
             let mut spec = payload.spec.clone();
             spec.id = id.clone();
+            let allocation = self.lock()?.node.assigned_allocation(key)?;
+            spec.allocation = allocation;
             let selected = self
                 .lock()?
                 .node
@@ -694,6 +705,17 @@ impl Driver {
             assigned.extend_from_slice(&spec.devices);
             let mut launched = None;
             let made = match runtime.inspect(&id) {
+                Ok(info) if info.allocation != allocation => {
+                    step.notices.push(Notice::Unknown {
+                        key,
+                        refusal: Refusal::Lifecycle {
+                            id: id.try_clone()?,
+                            cause: hex_api::LifecycleCause::Uncertain,
+                        },
+                        cleanup: None,
+                    });
+                    continue;
+                }
                 Ok(info) => Ok(info),
                 Err(Refusal::NoSuchBox(_)) => {
                     // Combined launch service includes any staging performed inside create.
@@ -712,6 +734,12 @@ impl Driver {
                 }
             };
             let made = made.and_then(|info| {
+                if info.allocation != allocation {
+                    return Err(Refusal::Lifecycle {
+                        id: id.try_clone()?,
+                        cause: hex_api::LifecycleCause::Uncertain,
+                    });
+                }
                 if info.class != payload.spec.class.class() {
                     return Err(Refusal::Broken(
                         "physical box belongs to another runtime backend".into(),
@@ -744,11 +772,13 @@ impl Driver {
                         }),
                     }
                 }
-                Err(why @ Refusal::Exists(_)) => step.notices.push(Notice::Unknown {
-                    key,
-                    refusal: why,
-                    cleanup: None,
-                }),
+                Err(why @ (Refusal::Exists(_) | Refusal::Lifecycle { .. })) => {
+                    step.notices.push(Notice::Unknown {
+                        key,
+                        refusal: why,
+                        cleanup: None,
+                    })
+                }
                 Err(why) => match runtime.delete(&id) {
                     Ok(()) | Err(Refusal::NoSuchBox(_)) => {
                         self.completed(key, Some(why), None, &mut step)?
@@ -951,6 +981,11 @@ impl Driver {
 
 fn validate(demand: &Demand, payload: &Payload) -> Result<(), Error> {
     payload.spec.check()?;
+    if payload.spec.allocation.is_some() {
+        return Err(
+            invalid("the scheduler derives the allocation from the original demand").into(),
+        );
+    }
     let cpu = payload
         .spec
         .bounds
@@ -1063,12 +1098,17 @@ fn collect(state: &mut State, out: Vec<(NodeId, Msg)>) -> Result<Collected, Erro
     Ok((step, create))
 }
 
-fn durable_demand(rows: &Rows, key: Key, models: &[String]) -> Result<(Demand, bool), Stop> {
+fn durable_demand(
+    rows: &Rows,
+    key: Key,
+    models: &[String],
+) -> Result<(Demand, Option<hex_api::Allocation>, bool), Stop> {
     let row = rows.row(key)?;
     // The existing core durable grammar prefixes a ran demand with owner and lifecycle state.
     let (_, rest) = row.split_once(' ').ok_or_else(|| bad("ran owner"))?;
-    let (state, demand) = rest.split_once(' ').ok_or_else(|| bad("ran state"))?;
-    Ok((peer::decode_demand(demand, models)?, state == "ended"))
+    let (state, _) = rest.split_once(' ').ok_or_else(|| bad("ran state"))?;
+    let (demand, allocation) = peer::recorded_demand(row, models)?;
+    Ok((demand, allocation, state == "ended"))
 }
 
 #[cfg(test)]

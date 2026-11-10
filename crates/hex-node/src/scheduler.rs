@@ -565,6 +565,7 @@ impl Service {
             .node(id, &mut cluster)
             .map_err(|e| Refusal::Broken(e.to_string()))?;
         let mut local = local;
+        local.costs = capacity::profiles(&runtime_capacity)?;
         local.devices =
             capacity::devices::offers(&runtime_capacity, &facts, &mut cluster, &namespace)?;
         local.capacity.gpus = u32::try_from(
@@ -898,6 +899,7 @@ impl Service {
         let mut local = facts
             .node_with_owned(self.id, &mut cluster, owned)
             .map_err(|e| Refusal::Broken(e.to_string()))?;
+        local.costs = capacity::profiles(&runtime_capacity)?;
         local.devices = capacity::devices::offers(
             &runtime_capacity,
             &facts,

@@ -1,0 +1,32 @@
+{
+  "source": "30e89d7298fc929620cd70908ba8cc480c407c65",
+  "source_only": true,
+  "copied_pure_owner_paths": [
+    {
+      "path": "crates/hex-sim/src/facts.rs",
+      "old_sha256": "6f663ad5a8f19b2eac6db613a08f54b107b8c544cbcac2d9f8efb1a55870c04c",
+      "new_sha256": "fb99bf24a4d2d2f8b7eb19dbbc1b6d0d77f210d8ae748eb12f9ad1b7f47349d1"
+    },
+    {
+      "path": "crates/hex-sim/src/index.rs",
+      "old_sha256": "d2a8db4f4964a0fd6285351ea0d27c764f343fcd1a1be62890cc20a041e56ada",
+      "new_sha256": "def8c364052a25b8060016ca05fb0d03d856abb411d0a7c2c8289d8c01b50100"
+    },
+    {
+      "path": "crates/hex-sim/src/model.rs",
+      "old_sha256": "a0e59da81a64cda23ea8f05ee97b3b2f5a979cba3fe8f4bf3134d84c2bc24569",
+      "new_sha256": "1589ab7aaca4a1590c63f6b33583d0a45ef6aac5e7cc55833739f8f6db4bdf78"
+    },
+    {
+      "path": "crates/hex-sim/src/peer.rs",
+      "old_sha256": "00beb4bfbba7d7cd6ad84d34f99a402c1772408e2eb894415f3d484680710187",
+      "new_sha256": "89867cfcbf0c4ad5dcd192e7a964f452e3485036c45cfa861afc97c0ce3d8124"
+    },
+    {
+      "path": "crates/hex-sim/src/peer/adversarial_device_recovery_tests.rs",
+      "old_sha256": "b937671b0ba2e6cc555ec7b7cee0cfeb8d4368e0027667596cafe32d35faec6a",
+      "new_sha256": "7013e6ad96fbf646c7bad224cd6f15fe17059e226879391b1000ae771065e312"
+    }
+  ],
+  "node_intake": "fixed 10ef parent to 30e89 delta; three-way merge with preserved ROOT changes, all nine paths exit0"
+}

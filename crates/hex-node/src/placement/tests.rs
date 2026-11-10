@@ -137,6 +137,118 @@ fn request() -> (Demand, Payload) {
 
 const TEST_NAMESPACE: &str = "00112233445566778899aabbccddeeff";
 
+/// AC-T7.4.1: the real Driver passes its saved charge to Runtime without rewriting workload caps.
+#[test]
+fn dedicated_vm_driver_preserves_original_payload_and_effective_charge_on_reboot() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = Arc::new(hex_api::sim::SimRuntime::for_backend(
+        hex_api::Class::Shards,
+    ));
+    let guest = hex_api::CapacityResources {
+        cpu_milli: 1_000,
+        mem_bytes: hex_api::MIN_MEMORY * 2,
+        disk_bytes: 0,
+    };
+    let cost = hex_api::RuntimeCost {
+        id: [11; 32], // Synthetic interface fixture, never a measured runtime default.
+        floor: guest,
+        ceiling: guest,
+        quantum: hex_api::CapacityResources {
+            cpu_milli: 1_000,
+            mem_bytes: 1,
+            disk_bytes: 1,
+        },
+        guest_overhead: hex_api::CapacityResources::default(),
+        overhead: hex_api::CapacityResources {
+            cpu_milli: 100,
+            mem_bytes: hex_api::MIN_MEMORY,
+            disk_bytes: 0,
+        },
+    };
+    let mut node = NodeSpec::new(
+        NodeId(0),
+        Resources {
+            cpu_milli: 2_100,
+            mem_bytes: hex_api::MIN_MEMORY * 6,
+            ..Resources::default()
+        },
+    );
+    node.costs[Class::Shards.index()] = Some(cost);
+    let (mut demand, mut payload) = request();
+    demand.class = Class::Shards;
+    payload.spec.class = ClassSpec::Shards(Box::new(OciSpec {
+        rootfs: Rootfs::Dir("/pure-fixture".into()),
+        init: Program::of(&["wait"]),
+        mounts: Vec::new(),
+        hostname: None,
+        network: Network::Private,
+        hosts: Vec::new(),
+    }));
+    let original = payload.clone();
+    let registry =
+        || Runtimes::new([(Class::Shards, Arc::clone(&runtime) as Arc<dyn Runtime>)]).unwrap();
+    let open = |node: &NodeSpec| {
+        Driver::boot_in(
+            Identity {
+                node: NodeId(0),
+                namespace: TEST_NAMESPACE,
+            },
+            &[node.clone()],
+            &[],
+            Budget { owned: 4, ran: 4 },
+            Pick::default(),
+            dir.path(),
+            registry(),
+        )
+    };
+    let driver = open(&node).unwrap();
+    let (key, step) = driver.submit(demand, payload).unwrap();
+    let done = local(&driver, step);
+    assert!(done.notices.contains(&Notice::Started {
+        key,
+        node: NodeId(0)
+    }));
+    let id = driver.physical_id(key).unwrap();
+    let info = runtime.inspect(&id).unwrap();
+    let receipt = cost
+        .allocate(hex_sim::model::capacity_resources(demand.need))
+        .unwrap();
+    assert_eq!(info.allocation, Some(receipt));
+    assert_eq!(info.bounds, original.spec.bounds);
+    assert_eq!(
+        driver.lock().unwrap().rows.payload("ran", key).unwrap(),
+        original
+    );
+    assert_eq!(
+        driver.lock().unwrap().node.admitted(),
+        [1_100, hex_api::MIN_MEMORY * 3, 0, 0]
+    );
+    drop(driver);
+    let mut changed = cost;
+    changed.id = [12; 32];
+    changed.floor.cpu_milli = 2_000;
+    changed.ceiling.cpu_milli = 2_000;
+    node.costs[Class::Shards.index()] = Some(changed);
+    let recovered = open(&node).unwrap();
+    assert_eq!(runtime.list().unwrap().len(), 1);
+    assert_eq!(runtime.inspect(&id).unwrap().allocation, Some(receipt));
+    assert_eq!(
+        recovered
+            .lock()
+            .unwrap()
+            .node
+            .assigned_allocation(key)
+            .unwrap(),
+        Some(receipt)
+    );
+    local(&recovered, recovered.delete(key).unwrap());
+    assert!(runtime.list().unwrap().is_empty());
+    assert_eq!(
+        recovered.lock().unwrap().node.admitted(),
+        [0; hex_sim::lb::DIMS]
+    );
+}
+
 fn boot(dir: &Path, runtime: Arc<Counting>) -> Driver {
     try_boot(dir, runtime).unwrap()
 }
@@ -1179,7 +1291,11 @@ fn restart_with_less_room(pool_limited: bool) {
     assert_eq!(recovered.status(key).unwrap().unwrap().physical, physical);
     assert_eq!(rt.creates.load(Ordering::SeqCst), 1);
     let duplicate = Envelope {
-        msg: Msg::Start { key, demand: d },
+        msg: Msg::Start {
+            allocation: None,
+            key,
+            demand: d,
+        },
         payload: Some(p.clone()),
         refusal: None,
     };
@@ -1205,6 +1321,7 @@ fn restart_with_less_room(pool_limited: bool) {
             NodeId(0),
             Envelope {
                 msg: Msg::Start {
+                    allocation: None,
                     key: foreign,
                     demand: d,
                 },

@@ -354,11 +354,52 @@ pub struct NodeSpec {
     /// Missing pools retain the host-backed model used by earlier records/configuration.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runtime_pools: Vec<RuntimePool>,
+    /// Initialized, evidence-pinned per-box charges. Real peer/Service offers require a known
+    /// profile for each VM class; absent entries retain native identity-cost semantics only.
+    #[serde(default, skip_serializing_if = "no_runtime_costs")]
+    pub costs: [Option<hex_api::RuntimeCost>; Class::COUNT],
+}
+
+fn no_runtime_costs(costs: &[Option<hex_api::RuntimeCost>; Class::COUNT]) -> bool {
+    costs.iter().all(Option::is_none)
+}
+
+/// Physical resource units shared with the native allocation API; GPU counts stay in the sole
+/// existing device/holder authority and are never inferred from a runtime's resource profile.
+pub fn capacity_resources(need: Resources) -> hex_api::CapacityResources {
+    hex_api::CapacityResources {
+        cpu_milli: need.cpu_milli,
+        mem_bytes: need.mem_bytes,
+        disk_bytes: need.disk_bytes,
+    }
+}
+
+/// Validate the immutable receipt against the original demand, including on recovery. This calls
+/// the API's single cost formula; it does not re-derive the charge using today's runtime profile.
+pub fn allocated_resources(
+    need: Resources,
+    allocation: Option<hex_api::Allocation>,
+) -> Result<Resources, hex_api::Refusal> {
+    let Some(allocation) = allocation else {
+        return Ok(need);
+    };
+    allocation.check(capacity_resources(need))?;
+    Ok(Resources {
+        cpu_milli: allocation.resources.cpu_milli,
+        mem_bytes: allocation.resources.mem_bytes,
+        disk_bytes: allocation.resources.disk_bytes,
+        gpus: need.gpus,
+    })
 }
 
 impl NodeSpec {
     /// Runtime pools are bounded by the runtime class set: each class belongs to at most one pool.
     pub fn check_runtime_pools(&self) -> Result<(), crate::SimError> {
+        for cost in self.costs.iter().flatten() {
+            cost.check().map_err(|_| {
+                crate::SimError::Config("node runtime cost has an invalid identity, bound or unit")
+            })?;
+        }
         if self.runtime_pools.len() > Class::COUNT {
             return Err(crate::SimError::Full {
                 what: "a node's runtime pools",
@@ -396,6 +437,7 @@ impl NodeSpec {
             },
             devices: unnamed_gpus(capacity.gpus),
             runtime_pools: Vec::new(),
+            costs: [None; Class::COUNT],
         }
     }
 

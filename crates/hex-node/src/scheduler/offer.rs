@@ -63,6 +63,13 @@ fn checked_name(name: &str) -> Result<(), Refusal> {
 fn checked_shape(spec: &NodeSpec) -> Result<(), Refusal> {
     spec.check_runtime_pools()
         .map_err(|e| invalid(e.to_string()))?;
+    for class in [Class::Firecracker, Class::Shards] {
+        if spec.classes.has(class) && spec.costs.get(class.index()).is_none_or(Option::is_none) {
+            return Err(invalid(
+                "initialized VM peer offer has no immutable runtime cost",
+            ));
+        }
+    }
     if !spec.devices_agree() {
         return Err(invalid("device list and GPU capacity disagree"));
     }
@@ -183,6 +190,7 @@ mod tests {
                 ..Resources::default()
             },
         );
+        node.classes = Classes::NONE.with(Class::Oci);
         node.devices = vec![
             Device::gpu(ModelId(0), 8 << 30),
             Device::gpu(ModelId(1), 16 << 30),

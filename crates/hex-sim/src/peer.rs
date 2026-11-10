@@ -79,6 +79,7 @@ pub enum Msg {
     Start {
         key: Key,
         demand: Demand,
+        allocation: Option<hex_api::Allocation>,
     },
     /// Durable owner cancellation; the receiver proves actual deletion before acknowledging it.
     Delete {
@@ -144,6 +145,7 @@ enum State {
 #[derive(Debug, Clone)]
 struct Owned {
     demand: Demand,
+    allocation: Option<hex_api::Allocation>,
     workload: WorkloadId,
     /// A persisted Created is reconfirmed against its peer after every owner boot.
     ready: bool,
@@ -156,6 +158,7 @@ struct Owned {
 struct Ran {
     owner: NodeId,
     demand: Demand,
+    allocation: Option<hex_api::Allocation>,
     workload: WorkloadId,
     created: bool,
     at: Option<lb::Handle>,
@@ -386,11 +389,134 @@ fn flag<'a>(words: &mut impl Iterator<Item = &'a str>) -> Result<bool, Stop> {
     }
 }
 
+// a1 + SHA256-width evidence identity + 18 u64 physical-unit fields. Each decimal u64 uses at
+// most 20 digits plus its colon; this is a fixed receipt, independent of workload/catalog size.
+const ALLOCATION_BYTES: usize = 445;
+
+fn write_allocation(
+    out: &mut impl std::fmt::Write,
+    allocation: Option<hex_api::Allocation>,
+) -> std::fmt::Result {
+    let Some(allocation) = allocation else {
+        return Ok(());
+    };
+    out.write_str("a1:")?;
+    for byte in allocation.cost.id {
+        write!(out, "{byte:02x}")?;
+    }
+    for resource in [
+        allocation.resources,
+        allocation.cost.floor,
+        allocation.cost.ceiling,
+        allocation.cost.quantum,
+        allocation.cost.guest_overhead,
+        allocation.cost.overhead,
+    ] {
+        write!(
+            out,
+            ":{}:{}:{}",
+            resource.cpu_milli, resource.mem_bytes, resource.disk_bytes
+        )?;
+    }
+    out.write_char(' ')
+}
+
+fn allocation_of<'a>(
+    words: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+) -> Result<Option<hex_api::Allocation>, Stop> {
+    let Some(word) = words.peek().copied().filter(|word| word.starts_with("a1:")) else {
+        return Ok(None);
+    };
+    if word.len() > ALLOCATION_BYTES {
+        return Err(damaged(
+            "allocation receipt exceeds its fixed numeric width",
+        ));
+    }
+    words.next();
+    let mut fields = word.split(':');
+    if fields.next() != Some("a1") {
+        return Err(damaged("allocation receipt version"));
+    }
+    let digest = fields
+        .next()
+        .ok_or_else(|| damaged("allocation receipt identity"))?;
+    if digest.len() != 64 {
+        return Err(damaged("allocation receipt digest width"));
+    }
+    let mut id = [0; 32];
+    for (byte, pair) in id.iter_mut().zip(digest.as_bytes().chunks_exact(2)) {
+        let text =
+            std::str::from_utf8(pair).map_err(|_| damaged("allocation receipt digest encoding"))?;
+        if !pair
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+        {
+            return Err(damaged(
+                "allocation receipt digest is not canonical hexadecimal",
+            ));
+        }
+        *byte = u8::from_str_radix(text, 16)
+            .map_err(|_| damaged("allocation receipt digest encoding"))?;
+    }
+    let mut resource = || -> Result<hex_api::CapacityResources, Stop> {
+        Ok(hex_api::CapacityResources {
+            cpu_milli: number(&mut fields)?,
+            mem_bytes: number(&mut fields)?,
+            disk_bytes: number(&mut fields)?,
+        })
+    };
+    let allocation = hex_api::Allocation {
+        resources: resource()?,
+        cost: hex_api::RuntimeCost {
+            id,
+            floor: resource()?,
+            ceiling: resource()?,
+            quantum: resource()?,
+            guest_overhead: resource()?,
+            overhead: resource()?,
+        },
+    };
+    if fields.next().is_some() {
+        return Err(damaged("trailing allocation receipt fields"));
+    }
+    allocation
+        .cost
+        .check()
+        .map_err(|_| damaged("invalid initialized runtime cost receipt"))?;
+    Ok(Some(allocation))
+}
+
+fn admitted_demand<'a>(
+    words: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+    models: &[String],
+) -> Result<(Demand, Option<hex_api::Allocation>), Stop> {
+    let allocation = allocation_of(words)?;
+    let demand = demand_of(words, models)?;
+    crate::model::allocated_resources(demand.need, allocation)
+        .map_err(|_| damaged("allocation receipt differs from its original demand"))?;
+    Ok((demand, allocation))
+}
+
+/// The original full demand and its separate immutable charge from an existing own/ran row.
+pub fn recorded_demand(
+    row: &str,
+    models: &[String],
+) -> Result<(Demand, Option<hex_api::Allocation>), Stop> {
+    let mut words = row.split(' ').peekable();
+    words
+        .next()
+        .ok_or_else(|| damaged("record state/owner header"))?;
+    words
+        .next()
+        .ok_or_else(|| damaged("record state/owner header"))?;
+    admitted_demand(&mut words, models)
+}
+
 /// CP-T7.4: the one pure peer-message codec. The caller's common-wire byte budget bounds allocation;
 /// device models cross the boundary by name, never as a sender-local ModelId.
 pub fn encode_message(msg: &Msg, models: &[String], max_bytes: usize) -> Result<String, Stop> {
     let (tag, key) = match msg {
-        Msg::Start { key, demand } | Msg::Delete { key, demand } => {
+        Msg::Start { key, demand, .. } | Msg::Delete { key, demand } => {
             check_demand(demand, models)?;
             (
                 if matches!(msg, Msg::Start { .. }) {
@@ -428,7 +554,16 @@ pub fn encode_message(msg: &Msg, models: &[String], max_bytes: usize) -> Result<
     };
     write!(&mut out, "p1 {tag} {} {} {}", key.owner, key.epoch, key.seq).map_err(|_| full())?;
     match msg {
-        Msg::Start { demand, .. } | Msg::Delete { demand, .. } => {
+        Msg::Start {
+            demand, allocation, ..
+        } => {
+            crate::model::allocated_resources(demand.need, *allocation)
+                .map_err(|_| damaged("invalid peer allocation receipt"))?;
+            out.write_char(' ').map_err(|_| full())?;
+            write_allocation(&mut out, *allocation).map_err(|_| full())?;
+            write_demand(&mut out, demand, models).map_err(|_| full())?;
+        }
+        Msg::Delete { demand, .. } => {
             out.write_char(' ').map_err(|_| full())?;
             write_demand(&mut out, demand, models).map_err(|_| full())?;
         }
@@ -462,7 +597,7 @@ pub fn decode_message(text: &str, models: &[String], max_bytes: usize) -> Result
             bound: max_bytes,
         });
     }
-    let mut words = text.split(' ');
+    let mut words = text.split(' ').peekable();
     if words.next() != Some("p1") {
         return Err(damaged("a missing or unsupported peer message version"));
     }
@@ -476,10 +611,17 @@ pub fn decode_message(text: &str, models: &[String], max_bytes: usize) -> Result
     };
     let msg = match tag {
         "start" | "delete" => {
-            let demand = demand_of(&mut words, models)?;
+            let (demand, allocation) = admitted_demand(&mut words, models)?;
             return Ok(if tag == "start" {
-                Msg::Start { key, demand }
+                Msg::Start {
+                    key,
+                    demand,
+                    allocation,
+                }
             } else {
+                if allocation.is_some() {
+                    return Err(damaged("allocation receipt in Delete message"));
+                }
                 Msg::Delete { key, demand }
             });
         }
@@ -676,7 +818,7 @@ impl Node {
                 (epoch, start_rows) = epoch_of(&value, nodes.len())?;
                 continue;
             }
-            let mut words = value.split(' ');
+            let mut words = value.split(' ').peekable();
             let (kind, key) = parse_name(&name).ok_or_else(|| damaged("a record's name"))?;
             if !known(NodeId(key.owner)) {
                 return Err(damaged("a record's unknown owner"));
@@ -701,7 +843,20 @@ impl Node {
                         }
                         _ => return Err(damaged("an owned box's state")),
                     };
-                    let demand = demand_of(&mut words, models)?;
+                    let (demand, allocation) = admitted_demand(&mut words, models)?;
+                    if state == State::Asked && allocation.is_some() {
+                        return Err(damaged("unselected Asked row has an allocation receipt"));
+                    }
+                    if allocation.is_none()
+                        && let State::At(at) | State::Created(at) | State::Deleting(at) = state
+                        && nodes
+                            .iter()
+                            .find(|node| node.id == at)
+                            .and_then(|node| node.costs.get(demand.class.index()))
+                            .is_some_and(Option::is_some)
+                    {
+                        return Err(damaged("selected costed row has no immutable allocation"));
+                    }
                     let workload = workload(&mut next_workload)?;
                     if owned.len() >= budget.owned {
                         return Err(Stop::Full {
@@ -713,6 +868,7 @@ impl Node {
                         key,
                         Owned {
                             demand,
+                            allocation,
                             workload,
                             ready: false,
                             state,
@@ -738,7 +894,15 @@ impl Node {
                         Some("ended") => (true, true),
                         _ => return Err(damaged("a record's end")),
                     };
-                    let demand = demand_of(&mut words, models)?;
+                    let (demand, allocation) = admitted_demand(&mut words, models)?;
+                    if allocation.is_none()
+                        && spec
+                            .costs
+                            .get(demand.class.index())
+                            .is_some_and(Option::is_some)
+                    {
+                        return Err(damaged("costed runner row has no immutable allocation"));
+                    }
                     let binding = match binding {
                         Some(binding) => binding,
                         None if demand.need.gpus == 0
@@ -769,6 +933,7 @@ impl Node {
                             Ran {
                                 owner,
                                 demand,
+                                allocation,
                                 workload: workload(&mut next_workload)?,
                                 created,
                                 ended,
@@ -781,10 +946,11 @@ impl Node {
                 _ => return Err(damaged("a record's kind")),
             }
         }
-        if ran
-            .iter()
-            .any(|(key, (r, _))| owned.get(key).is_some_and(|o| o.demand != r.demand))
-        {
+        if ran.iter().any(|(key, (r, _))| {
+            owned
+                .get(key)
+                .is_some_and(|o| o.demand != r.demand || o.allocation != r.allocation)
+        }) {
             return Err(damaged("owned and runner rows disagree on the demand"));
         }
         view.restore_start_observations(&start_rows)
@@ -806,14 +972,18 @@ impl Node {
                 if at == id
                     && let Some((_, binding, Boxed::Running)) = ran.get(key)
                 {
-                    view.take_recovered(at, own.workload, &own.demand, binding)
-                        .map_err(|why| Stop::Damaged(format!("owner {key:?}: {why}")))?;
+                    view.take_recovered_allocated(
+                        at,
+                        own.workload,
+                        &own.demand,
+                        binding,
+                        own.allocation,
+                    )
+                    .map_err(|why| Stop::Damaged(format!("owner {key:?}: {why}")))?;
                 } else {
-                    // Remote/pending owner guesses are still fresh selection, not runtime truth.
-                    if view.verdict(at, &own.demand) != Ok(Verdict::Admits) {
-                        return Err(damaged("an owned box past its node's admission"));
-                    }
-                    view.take(at, own.workload, &own.demand)
+                    // The selected peer may still hold this box. Keep its old profile/charge
+                    // while asking Holds; current load or a new cost cannot authorize a repick.
+                    view.take_pending(at, &own.demand, own.allocation)
                         .map_err(|why| Stop::Damaged(why.to_string()))?;
                 }
             }
@@ -832,12 +1002,15 @@ impl Node {
                 }
                 (false, Boxed::Running) => {
                     admission
-                        .take_recovered(id, r.workload, &r.demand, &binding)
+                        .take_recovered_allocated(id, r.workload, &r.demand, &binding, r.allocation)
                         .map_err(|why| Stop::Damaged(format!("runner {key:?}: {why}")))?;
                     kept.push(lb::Kept {
                         owner: lb::OwnerId(r.owner.0),
                         run: lb::Handle::NONE,
-                        need: amounts(&r.demand.need),
+                        need: amounts(
+                            &crate::model::allocated_resources(r.demand.need, r.allocation)
+                                .map_err(|_| damaged("retained runner allocation is invalid"))?,
+                        ),
                     });
                     keys.push(key);
                     if !r.created {
@@ -1118,6 +1291,15 @@ impl Node {
             .map(|runner| self.admission.holds(self.id, runner.workload))
     }
 
+    /// The immutable effective charge persisted with this receiver's original workload.
+    pub fn assigned_allocation(&self, key: Key) -> Result<Option<hex_api::Allocation>, Stop> {
+        self.ran
+            .get(&key)
+            .filter(|runner| !runner.ended)
+            .map(|runner| runner.allocation)
+            .ok_or_else(|| damaged("allocation requested without an active runner"))
+    }
+
     /// Selected current device metadata, copied from the receiver's sole holder authority.
     pub fn assigned_device_specs(&self, key: Key) -> Result<Option<Vec<Device>>, Stop> {
         self.ran
@@ -1169,12 +1351,13 @@ impl Node {
             .ok_or_else(|| damaged("a box number"))?;
         records.put(
             &key.name("own"),
-            &own_text(State::Asked, &demand, &self.models)?,
+            &own_text(State::Asked, &demand, &self.models, None)?,
         )?;
         self.owned.insert(
             key,
             Owned {
                 demand,
+                allocation: None,
                 workload,
                 ready: false,
                 state: State::Asked,
@@ -1199,13 +1382,13 @@ impl Node {
         let Some(o) = self.owned.get(&key) else {
             return Err(damaged("deletion of a box this node does not own"));
         };
-        let (state, demand) = (o.state, o.demand);
+        let (state, demand, allocation) = (o.state, o.demand, o.allocation);
         let mut out = Vec::new();
         match state {
             State::Asked => {
                 records.put(
                     &key.name("own"),
-                    &own_text(State::Done(self.id), &demand, &self.models)?,
+                    &own_text(State::Done(self.id), &demand, &self.models, allocation)?,
                 )?;
                 if let Some(o) = self.owned.get_mut(&key) {
                     o.state = State::Done(self.id);
@@ -1215,7 +1398,7 @@ impl Node {
             State::At(peer) | State::Created(peer) => {
                 records.put(
                     &key.name("own"),
-                    &own_text(State::Deleting(peer), &demand, &self.models)?,
+                    &own_text(State::Deleting(peer), &demand, &self.models, allocation)?,
                 )?;
                 if let Some(o) = self.owned.get_mut(&key) {
                     o.state = State::Deleting(peer);
@@ -1251,17 +1434,29 @@ impl Node {
             return Ok(());
         };
         let (demand, to, workload) = (o.demand, best.node, o.workload);
+        let allocation = self
+            .view
+            .allocation(to, &demand)
+            .map_err(|why| Stop::Damaged(why.to_string()))?;
         records.put(
             &key.name("own"),
-            &own_text(State::At(to), &demand, &self.models)?,
+            &own_text(State::At(to), &demand, &self.models, allocation)?,
         )?;
         self.view
-            .take(to, workload, &d)
+            .take_allocated(to, workload, &d, allocation)
             .map_err(|e| Stop::Damaged(e.to_string()))?;
         if let Some(o) = self.owned.get_mut(&key) {
             o.state = State::At(to);
+            o.allocation = allocation;
         }
-        out.push((to, Msg::Start { key, demand }));
+        out.push((
+            to,
+            Msg::Start {
+                key,
+                demand,
+                allocation,
+            },
+        ));
         Ok(())
     }
 
@@ -1290,16 +1485,17 @@ impl Node {
         if !matches!(o.state, State::At(n) | State::Created(n) if n == from) {
             return Ok(());
         }
-        let (demand, workload) = (o.demand, o.workload);
+        let (demand, workload, allocation) = (o.demand, o.workload, o.allocation);
         records.put(
             &key.name("own"),
-            &own_text(State::Asked, &demand, &self.models)?,
+            &own_text(State::Asked, &demand, &self.models, None)?,
         )?;
         self.view
-            .give(from, workload, &demand)
+            .give_allocated(from, workload, &demand, allocation)
             .map_err(|e| Stop::Damaged(e.to_string()))?;
         if let Some(o) = self.owned.get_mut(&key) {
             o.state = State::Asked;
+            o.allocation = None;
             o.ready = false;
             o.tried.insert(from);
         }
@@ -1319,15 +1515,15 @@ impl Node {
             out.push((from, Msg::Forget { key }));
             return Ok(());
         };
-        let (demand, workload) = (o.demand, o.workload);
+        let (demand, workload, allocation) = (o.demand, o.workload, o.allocation);
         match o.state {
             State::At(n) | State::Created(n) | State::Deleting(n) if n == from => {
                 records.put(
                     &key.name("own"),
-                    &own_text(State::Done(from), &demand, &self.models)?,
+                    &own_text(State::Done(from), &demand, &self.models, allocation)?,
                 )?;
                 self.view
-                    .give(from, workload, &demand)
+                    .give_allocated(from, workload, &demand, allocation)
                     .map_err(|e| Stop::Damaged(e.to_string()))?;
             }
             State::Done(n) if n == from => {}
@@ -1354,7 +1550,7 @@ impl Node {
         match o.state {
             State::At(peer) if peer == from => records.put(
                 &key.name("own"),
-                &own_text(State::Created(from), &o.demand, &self.models)?,
+                &own_text(State::Created(from), &o.demand, &self.models, o.allocation)?,
             )?,
             State::Created(peer) if peer == from && !o.ready => {}
             State::Asked
@@ -1399,7 +1595,11 @@ impl Node {
         }
         let mut out = Vec::new();
         match msg {
-            Msg::Start { key, demand } => self.start(from, key, demand, records, &mut out)?,
+            Msg::Start {
+                key,
+                demand,
+                allocation,
+            } => self.start(from, key, demand, allocation, records, &mut out)?,
             Msg::Delete { key, demand } => {
                 check_demand(&demand, &self.models)?;
                 if self
@@ -1471,6 +1671,7 @@ impl Node {
         owner: NodeId,
         key: Key,
         demand: Demand,
+        allocation: Option<hex_api::Allocation>,
         records: &mut impl Records,
         out: &mut Vec<(NodeId, Msg)>,
     ) -> Result<(), Stop> {
@@ -1482,11 +1683,15 @@ impl Node {
             return Err(damaged("a start's owner"));
         }
         check_demand(&demand, &self.models)?;
-        if self.owned.get(&key).is_some_and(|o| o.demand != demand) {
+        if self
+            .owned
+            .get(&key)
+            .is_some_and(|o| o.demand != demand || o.allocation != allocation)
+        {
             return Err(damaged("a start disagrees with its owned demand"));
         }
         if let Some(r) = self.ran.get(&key) {
-            if r.owner != owner || r.demand != demand {
+            if r.owner != owner || r.demand != demand || r.allocation != allocation {
                 return Err(damaged("a start reuses a key with a different demand"));
             }
             out.push((
@@ -1508,15 +1713,18 @@ impl Node {
         }
         if self.ran.len() >= self.budget.ran
             || self.admission.verdict(self.id, &demand) != Ok(Verdict::Admits)
+            || self.admission.allocation(self.id, &demand).ok() != Some(allocation)
         {
             out.push((owner, Msg::Refused { key }));
             return Ok(());
         }
+        let charged = crate::model::allocated_resources(demand.need, allocation)
+            .map_err(|_| damaged("start allocation differs from the original demand"))?;
         let start = lb::Start {
             owner: lb::OwnerId(owner.0),
             run: lb::Handle::NONE,
             epoch: self.ledger.epoch(),
-            need: amounts(&demand.need),
+            need: amounts(&charged),
         };
         let lb::ToOwner::Started { at, .. } = self.ledger.start(start) else {
             out.push((owner, Msg::Refused { key }));
@@ -1524,11 +1732,12 @@ impl Node {
         };
         let workload = workload(&mut self.next_workload)?;
         self.admission
-            .take(self.id, workload, &demand)
+            .take_allocated(self.id, workload, &demand, allocation)
             .map_err(|e| Stop::Damaged(e.to_string()))?;
         let r = Ran {
             owner,
             demand,
+            allocation,
             workload,
             created: false,
             at: Some(at),
@@ -1604,7 +1813,7 @@ impl Node {
                 .end(at, &mut out)
                 .ok_or_else(|| damaged("a box the ledger didn't hold"))?;
             self.admission
-                .give(self.id, r.workload, &r.demand)
+                .give_allocated(self.id, r.workload, &r.demand, r.allocation)
                 .map_err(|e| Stop::Damaged(e.to_string()))?;
         }
         Ok(())
@@ -1741,7 +1950,12 @@ impl Node {
     }
 }
 
-fn own_text(state: State, demand: &Demand, models: &[String]) -> Result<String, Stop> {
+fn own_text(
+    state: State,
+    demand: &Demand,
+    models: &[String],
+    allocation: Option<hex_api::Allocation>,
+) -> Result<String, Stop> {
     let (word, n) = match state {
         State::Asked => ("asked", 0),
         State::At(n) => ("at", n.0),
@@ -1749,7 +1963,38 @@ fn own_text(state: State, demand: &Demand, models: &[String]) -> Result<String, 
         State::Deleting(n) => ("deleting", n.0),
         State::Done(n) => ("done", n.0),
     };
-    Ok(format!("{word} {n} {}", demand_text(demand, models)?))
+    crate::model::allocated_resources(demand.need, allocation)
+        .map_err(|_| damaged("owned allocation differs from original demand"))?;
+    let demand = demand_text(demand, models)?;
+    let width = usize::try_from(u32::MAX.ilog10())
+        .ok()
+        .and_then(|n| n.checked_add(1))
+        .ok_or_else(|| damaged("owner number width"))?;
+    let max = demand
+        .len()
+        .checked_add(word.len())
+        .and_then(|n| n.checked_add(width))
+        .and_then(|n| n.checked_add(2))
+        .and_then(|n| {
+            n.checked_add(if allocation.is_some() {
+                ALLOCATION_BYTES.checked_add(1)?
+            } else {
+                0
+            })
+        })
+        .ok_or_else(|| damaged("owned allocation row byte bound"))?;
+    let mut out = BoundedText {
+        text: String::new(),
+        max,
+    };
+    out.text
+        .try_reserve_exact(max)
+        .map_err(|_| damaged("owned allocation row storage"))?;
+    write!(&mut out, "{word} {n} ").map_err(|_| damaged("formatting owned row"))?;
+    write_allocation(&mut out, allocation).map_err(|_| damaged("formatting owned allocation"))?;
+    out.write_str(&demand)
+        .map_err(|_| damaged("formatting owned demand"))?;
+    Ok(out.text)
 }
 
 /// Chosen devices recorded in a runner row, using the same format parser as boot.
@@ -1834,6 +2079,8 @@ fn runner_owner(
 }
 
 fn ran_text(r: &Ran, models: &[String], devices: &[Device], held: &[u16]) -> Result<String, Stop> {
+    crate::model::allocated_resources(r.demand.need, r.allocation)
+        .map_err(|_| damaged("runner allocation differs from original demand"))?;
     let state = if r.ended {
         "ended"
     } else if r.created {
@@ -1866,6 +2113,13 @@ fn ran_text(r: &Ran, models: &[String], devices: &[Device], held: &[u16]) -> Res
         .checked_add("bindings1:: creating ".len())
         .and_then(|n| n.checked_add(number_bytes.checked_mul(2)?))
         .and_then(|n| n.checked_add(held.len().checked_mul(claim_bytes)?))
+        .and_then(|n| {
+            n.checked_add(if r.allocation.is_some() {
+                ALLOCATION_BYTES.checked_add(1)?
+            } else {
+                0
+            })
+        })
         .ok_or_else(|| damaged("runner row byte bound"))?;
     let count = u32::try_from(held.len()).map_err(|_| damaged("runner binding count"))?;
     let mut out = BoundedText {
@@ -1895,7 +2149,11 @@ fn ran_text(r: &Ran, models: &[String], devices: &[Device], held: &[u16]) -> Res
                 .map_err(|_| damaged("formatting synthetic runner binding"))?;
         }
     }
-    write!(&mut out, " {state} {demand}").map_err(|_| damaged("formatting runner row"))?;
+    write!(&mut out, " {state} ").map_err(|_| damaged("formatting runner row"))?;
+    write_allocation(&mut out, r.allocation)
+        .map_err(|_| damaged("formatting runner allocation"))?;
+    out.write_str(&demand)
+        .map_err(|_| damaged("formatting runner row"))?;
     Ok(out.text)
 }
 
@@ -2494,6 +2752,167 @@ mod adversarial_device_recovery_tests;
 mod tests {
     use super::*;
 
+    fn cost_fixture() -> hex_api::RuntimeCost {
+        let guest = hex_api::CapacityResources {
+            cpu_milli: 1_000,
+            mem_bytes: 200,
+            disk_bytes: 0,
+        };
+        hex_api::RuntimeCost {
+            id: [9; 32], // Explicitly synthetic; no native measurement is implied.
+            floor: guest,
+            ceiling: guest,
+            quantum: hex_api::CapacityResources {
+                cpu_milli: 1_000,
+                mem_bytes: 1,
+                disk_bytes: 1,
+            },
+            guest_overhead: hex_api::CapacityResources::default(),
+            overhead: hex_api::CapacityResources {
+                cpu_milli: 100,
+                mem_bytes: 50,
+                disk_bytes: 0,
+            },
+        }
+    }
+
+    /// AC-T7.4.1: owner commit, message, receiver row and reboot preserve one exact VM charge.
+    #[test]
+    fn runtime_allocation_survives_owner_receiver_and_profile_change() {
+        let mut spec = NodeSpec::new(NodeId(0), CAP);
+        spec.costs[Class::Shards.index()] = Some(cost_fixture());
+        let demand = Demand {
+            need: Resources {
+                cpu_milli: 100,
+                mem_bytes: 100,
+                ..Resources::default()
+            },
+            class: Class::Shards,
+            kind: Kind::Plain,
+            ask: Ask::default(),
+        };
+        let original = demand;
+        let mut records = Memory::default();
+        let mut node = Node::boot(
+            NodeId(0),
+            &[spec.clone()],
+            &[],
+            test_budget(),
+            Pick::default(),
+            &mut records,
+            |_| Boxed::Absent,
+        )
+        .unwrap();
+        let (key, starts) = node.submit(demand, &mut records).unwrap();
+        let receipt = cost_fixture()
+            .allocate(crate::model::capacity_resources(demand.need))
+            .unwrap();
+        assert_eq!(
+            starts,
+            [(
+                NodeId(0),
+                Msg::Start {
+                    key,
+                    demand,
+                    allocation: Some(receipt)
+                }
+            )]
+        );
+        let (_, saved) = recorded_demand(records.rows.get(&key.name("own")).unwrap(), &[]).unwrap();
+        assert_eq!(saved, Some(receipt));
+        node.hear(NodeId(0), starts[0].1, &mut records).unwrap();
+        assert_eq!(node.assigned_allocation(key).unwrap(), Some(receipt));
+        assert_eq!(node.admitted(), [1_100, 250, 0, 0]);
+        node.created(key, &mut records).unwrap();
+        let mut changed = cost_fixture();
+        changed.id = [10; 32];
+        changed.floor.cpu_milli = 2_000;
+        changed.ceiling.cpu_milli = 2_000;
+        spec.costs[Class::Shards.index()] = Some(changed);
+        let mut recovered = Node::boot(
+            NodeId(0),
+            &[spec],
+            &[],
+            test_budget(),
+            Pick::default(),
+            &mut records,
+            |_| Boxed::Running,
+        )
+        .unwrap();
+        assert_eq!(recovered.assigned_allocation(key).unwrap(), Some(receipt));
+        assert_eq!(recovered.admitted(), [1_100, 250, 0, 0]);
+        assert_eq!(recovered.demand(key), Some(original));
+        let wrong = changed
+            .allocate(crate::model::capacity_resources(demand.need))
+            .unwrap();
+        assert!(
+            recovered
+                .hear(
+                    NodeId(0),
+                    Msg::Start {
+                        key,
+                        demand,
+                        allocation: Some(wrong)
+                    },
+                    &mut records
+                )
+                .is_err()
+        );
+        recovered.end(key, &mut records).unwrap();
+        assert_eq!(recovered.admitted(), [0; lb::DIMS]);
+    }
+
+    /// AC-T7.4.1: immutable receipts are bounded, lossless and checked against the original need.
+    #[test]
+    fn allocation_message_and_record_codec_rejects_forged_charge() {
+        let key = Key {
+            owner: 0,
+            epoch: 1,
+            seq: 0,
+        };
+        let demand = Demand {
+            need: Resources {
+                cpu_milli: 100,
+                mem_bytes: 100,
+                ..Resources::default()
+            },
+            class: Class::Firecracker,
+            kind: Kind::Plain,
+            ask: Ask::default(),
+        };
+        let receipt = cost_fixture()
+            .allocate(crate::model::capacity_resources(demand.need))
+            .unwrap();
+        let message = Msg::Start {
+            key,
+            demand,
+            allocation: Some(receipt),
+        };
+        let text = encode_message(&message, &[], 1_024).unwrap();
+        assert_eq!(decode_message(&text, &[], text.len()).unwrap(), message);
+        assert!(decode_message(&text, &[], text.len() - 1).is_err());
+        let row = own_text(State::At(NodeId(0)), &demand, &[], Some(receipt)).unwrap();
+        assert_eq!(recorded_demand(&row, &[]).unwrap(), (demand, Some(receipt)));
+        let mut forged = receipt;
+        forged.resources.cpu_milli -= 1;
+        assert!(
+            encode_message(
+                &Msg::Start {
+                    key,
+                    demand,
+                    allocation: Some(forged)
+                },
+                &[],
+                1_024
+            )
+            .is_err()
+        );
+        let hostile = text.replace(":1100:250:", ":1099:250:");
+        assert_ne!(hostile, text);
+        assert!(decode_message(&hostile, &[], 1_024).is_err());
+        assert!(decode_message(&format!("{text} extra"), &[], 1_024).is_err());
+    }
+
     const CAP: Resources = Resources {
         cpu_milli: 4_000,
         mem_bytes: 1 << 30,
@@ -2601,6 +3020,7 @@ mod tests {
             .hear(
                 NodeId(0),
                 Msg::Start {
+                    allocation: None,
                     key,
                     demand: plain(Resources {
                         cpu_milli: 1,
@@ -2650,8 +3070,16 @@ mod tests {
         demand: Demand,
         records: &mut Memory,
     ) -> Vec<(NodeId, Msg)> {
-        node.hear(NodeId(0), Msg::Start { key, demand }, records)
-            .unwrap()
+        node.hear(
+            NodeId(0),
+            Msg::Start {
+                allocation: None,
+                key,
+                demand,
+            },
+            records,
+        )
+        .unwrap()
     }
 
     /// AC-T7.4.1: a real macOS/arm64 Shards-only laptop uses the same peer path, and admission
@@ -2681,7 +3109,17 @@ mod tests {
             ..requested()
         };
         let (key, out) = node.submit(demand, &mut records).unwrap();
-        assert_eq!(out, vec![(NodeId(0), Msg::Start { key, demand })]);
+        assert_eq!(
+            out,
+            vec![(
+                NodeId(0),
+                Msg::Start {
+                    allocation: None,
+                    key,
+                    demand
+                }
+            )]
+        );
         assert!(start(&mut node, key, demand, &mut records).is_empty());
         assert_eq!(
             std::mem::take(&mut node.told),
@@ -2933,7 +3371,17 @@ mod tests {
         let retry = owner
             .hear(NodeId(0), refused[0].1, &mut own_records)
             .unwrap();
-        assert_eq!(retry, vec![(NodeId(1), Msg::Start { key, demand })]);
+        assert_eq!(
+            retry,
+            vec![(
+                NodeId(1),
+                Msg::Start {
+                    allocation: None,
+                    key,
+                    demand
+                }
+            )]
+        );
         assert_eq!(owner.demand(key), Some(demand));
     }
 
@@ -3038,6 +3486,7 @@ mod tests {
                 node.hear(
                     NodeId(0),
                     Msg::Start {
+                        allocation: None,
                         key,
                         demand: requested()
                     },
@@ -3109,7 +3558,11 @@ mod tests {
         )
         .len();
         for msg in [
-            Msg::Start { key, demand },
+            Msg::Start {
+                allocation: None,
+                key,
+                demand,
+            },
             Msg::Delete { key, demand },
             Msg::Holds { key },
             Msg::Forget { key },
@@ -3148,13 +3601,23 @@ mod tests {
                 Err(Stop::Damaged(_))
             ));
         }
-        let text = encode_message(&Msg::Start { key, demand }, &models, budget).unwrap();
+        let text = encode_message(
+            &Msg::Start {
+                allocation: None,
+                key,
+                demand,
+            },
+            &models,
+            budget,
+        )
+        .unwrap();
         let swapped = vec![models[1].clone(), models[0].clone()];
         let mut remapped = demand;
         remapped.ask.gpu_model = Some(ModelId(1));
         assert_eq!(
             decode_message(&text, &swapped, text.len()).unwrap(),
             Msg::Start {
+                allocation: None,
                 key,
                 demand: remapped
             }
@@ -3271,7 +3734,17 @@ mod tests {
         let mut runner = receiver(&specs, &mut ran_records);
         let demand = requested();
         let (key, start) = owner.submit(demand, &mut owned_records).unwrap();
-        assert_eq!(start, vec![(NodeId(1), Msg::Start { key, demand })]);
+        assert_eq!(
+            start,
+            vec![(
+                NodeId(1),
+                Msg::Start {
+                    allocation: None,
+                    key,
+                    demand
+                }
+            )]
+        );
         runner
             .hear(NodeId(0), start[0].1, &mut ran_records)
             .unwrap();
@@ -3584,6 +4057,7 @@ mod tests {
                 node.hear(
                     NodeId(0),
                     Msg::Start {
+                        allocation: None,
                         key,
                         demand: requested(),
                     },

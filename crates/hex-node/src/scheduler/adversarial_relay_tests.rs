@@ -54,6 +54,7 @@ impl Runtime for RelayRuntime {
 fn relay_start(key: Key) -> Envelope {
     Envelope {
         msg: peer::Msg::Start {
+            allocation: None,
             key,
             demand: Demand {
                 need: Resources {
@@ -664,7 +665,14 @@ fn cancellation_reconciles_lost_start_reply_without_losing_either_queued_lane() 
     assert_eq!(
         trace,
         vec![
-            (1, peer::Msg::Start { key: first, demand }),
+            (
+                1,
+                peer::Msg::Start {
+                    allocation: None,
+                    key: first,
+                    demand
+                }
+            ),
             (2, peer::Msg::Delete { key: first, demand })
         ]
     );

@@ -213,6 +213,7 @@ struct Slot {
     benchmarks: u32,
     used_by_class: [Resources; Class::COUNT],
     runtime_pools: [Option<RuntimePool>; Class::COUNT],
+    costs: [Option<hex_api::RuntimeCost>; Class::COUNT],
 }
 
 /// A GPU's load as one share, in millionths: the larger of its utilisation and its memory in use, as
@@ -232,6 +233,19 @@ fn gpu_idle(devices: &[Device], held: &[u16]) -> u64 {
 }
 
 impl Slot {
+    fn allocation(&self, demand: &Demand) -> Result<Option<hex_api::Allocation>, hex_api::Refusal> {
+        self.costs
+            .get(demand.class.index())
+            .copied()
+            .flatten()
+            .map(|cost| cost.allocate(crate::model::capacity_resources(demand.need)))
+            .transpose()
+    }
+
+    fn charged(&self, demand: &Demand) -> Option<Resources> {
+        crate::model::allocated_resources(demand.need, self.allocation(demand).ok()?).ok()
+    }
+
     fn pool_used(&self, classes: Classes) -> Option<Resources> {
         let mut used = Resources::default();
         for class in Class::ALL {
@@ -264,10 +278,13 @@ impl Slot {
         devices: &[Device],
         free: impl Fn(usize) -> bool,
     ) -> Verdict {
-        let (need, ask, class, os) = (&demand.need, &demand.ask, demand.class, self.platform.os);
+        let (ask, class, os) = (&demand.ask, demand.class, self.platform.os);
         if !self.classes.has(class) {
             return Verdict::NoClass;
         }
+        let Some(need) = self.charged(demand) else {
+            return Verdict::NoRoom;
+        };
         // AC-T7.4.1: VM images describe their Linux guest, independently of the VMM host.
         let image_os = match class {
             Class::Oci => os,
@@ -285,7 +302,8 @@ impl Slot {
             kvm: false,
             ..*ask
         };
-        let exposed_device = |index| devices.get(index).is_some_and(|d| d.classes.has(class));
+        let exposed_device =
+            |index: usize| devices.get(index).is_some_and(|d| d.classes.has(class));
         if need.gpus > 0
             && (!class.exposes(os, DeviceKind::Gpu)
                 || !fits_devices(devices, exposed_device, need.gpus, &gpus_only))
@@ -305,7 +323,7 @@ impl Slot {
                 return Verdict::NoDevice;
             }
         }
-        if !self.free.holds(need) || !self.runtime_holds(class, need) {
+        if !self.free.holds(&need) || !self.runtime_holds(class, &need) {
             return Verdict::NoRoom;
         }
         if (need.gpus > 0 || ask.devices())
@@ -493,6 +511,7 @@ impl FitIndex {
                 benchmarks: 0,
                 used_by_class: [Resources::default(); Class::COUNT],
                 runtime_pools: runtime_pools(node)?,
+                costs: node.costs,
             });
             devices.push(node.devices.clone());
             held.push(vec![None; node.devices.len()]);
@@ -551,6 +570,17 @@ impl FitIndex {
     pub fn verdict(&self, node: NodeId, demand: &Demand) -> Result<Verdict, SimError> {
         let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
         Ok(self.judge(at, self.slot(node)?, demand))
+    }
+
+    /// The candidate's initialized immutable cost receipt, before owner commit or receiver effects.
+    pub fn allocation(
+        &self,
+        node: NodeId,
+        demand: &Demand,
+    ) -> Result<Option<hex_api::Allocation>, SimError> {
+        self.slot(node)?
+            .allocation(demand)
+            .map_err(|_| SimError::Resources(node))
     }
 
     /// The verdict on `demand` at node `at`, its slot `slot`.
@@ -730,6 +760,7 @@ impl FitIndex {
             benchmarks,
             used_by_class,
             runtime_pools,
+            costs: node.costs,
         };
         if let Some(devices) = self.devices.get_mut(at) {
             *devices = node.devices.clone();
@@ -915,12 +946,15 @@ impl FitIndex {
                 } else {
                     0
                 };
-                let score = (idle, slot.score(&demand.need, pick));
+                let Some(charged) = slot.charged(demand) else {
+                    continue;
+                };
+                let score = (idle, slot.score(&charged, pick));
                 if let Some(terms) = terms {
                     let finish = self.costs.finish(
                         NodeId(r),
                         demand.class,
-                        demand.need.cpu_milli,
+                        charged.cpu_milli,
                         slot.free.cpu_milli,
                         terms,
                     );
@@ -960,6 +994,9 @@ impl FitIndex {
                     if self.judge(lb::ix(r), slot, demand) != Verdict::Admits {
                         continue;
                     }
+                    let Some(charged) = slot.charged(demand) else {
+                        continue;
+                    };
                     let idle = if demand.need.gpus > 0 {
                         let devices = self.devices.get(lb::ix(r)).map_or(&[][..], Vec::as_slice);
                         self.bound(lb::ix(r), demand)
@@ -971,7 +1008,7 @@ impl FitIndex {
                         || self.costs.finish(
                             NodeId(r),
                             demand.class,
-                            demand.need.cpu_milli,
+                            charged.cpu_milli,
                             slot.free.cpu_milli,
                             terms,
                         ) > bound
@@ -979,7 +1016,7 @@ impl FitIndex {
                         continue;
                     }
                     let key = Key::of(NodeId(r), &slot.free);
-                    let score = slot.score(&demand.need, pick);
+                    let score = slot.score(&charged, pick);
                     if best.is_none_or(|k| score > packing || (score == packing && key < k)) {
                         best = Some(key);
                         packing = score;
@@ -1004,20 +1041,41 @@ impl FitIndex {
         workload: WorkloadId,
         demand: &Demand,
     ) -> Result<Key, SimError> {
+        self.take_allocated(node, workload, demand, None)
+    }
+
+    /// Charge the receipt already chosen and persisted by the owner. A receiver never quotes a
+    /// different profile silently; a changed initialized cost refuses before native creation.
+    pub fn take_allocated(
+        &mut self,
+        node: NodeId,
+        workload: WorkloadId,
+        demand: &Demand,
+        allocation: Option<hex_api::Allocation>,
+    ) -> Result<Key, SimError> {
         let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
         let slot = self.slot(node)?;
+        if allocation.map(|receipt| receipt.cost)
+            != slot.costs.get(demand.class.index()).copied().flatten()
+        {
+            return Err(SimError::Config(
+                "admitted runtime cost differs from the initialized profile",
+            ));
+        }
+        let charged = crate::model::allocated_resources(demand.need, allocation)
+            .map_err(|_| SimError::Resources(node))?;
         // Recovery also takes already-running work, whose policy filters may now differ.
         // Resource constraints are unconditional; policy selection remains verdict's job.
-        if !slot.free.holds(&demand.need) || !slot.runtime_holds(demand.class, &demand.need) {
+        if !slot.free.holds(&charged) || !slot.runtime_holds(demand.class, &charged) {
             return Err(SimError::Resources(node));
         }
         let held = self.bound(at, demand).ok_or(SimError::Resources(node))?;
         let key = self.change(
             node,
             demand,
-            |free| free.checked_sub(&demand.need),
+            |free| free.checked_sub(&charged),
             |n| n.checked_add(1),
-            |used| used.checked_add(&demand.need),
+            |used| used.checked_add(&charged),
         )?;
         if let Some(hs) = self.held.get_mut(at) {
             for i in held {
@@ -1027,6 +1085,29 @@ impl FitIndex {
             }
         }
         Ok(key)
+    }
+
+    /// The owner's pending remote row is resource authority only; the receiver alone retains its
+    /// exact physical binding. Recovery asks Holds without picking guessed replacement devices.
+    pub(crate) fn take_pending(
+        &mut self,
+        node: NodeId,
+        demand: &Demand,
+        allocation: Option<hex_api::Allocation>,
+    ) -> Result<Key, SimError> {
+        let charged = crate::model::allocated_resources(demand.need, allocation)
+            .map_err(|_| SimError::Resources(node))?;
+        let slot = self.slot(node)?;
+        if !slot.free.holds(&charged) || !slot.runtime_holds(demand.class, &charged) {
+            return Err(SimError::Resources(node));
+        }
+        self.change(
+            node,
+            demand,
+            |free| free.checked_sub(&charged),
+            |n| n.checked_add(1),
+            |used| used.checked_add(&charged),
+        )
     }
 
     /// Validate a durable binding against stable authority, not transient GPU utilisation.
@@ -1139,10 +1220,24 @@ impl FitIndex {
         demand: &Demand,
         held: &[u16],
     ) -> Result<Key, SimError> {
+        self.take_recovered_allocated(node, workload, demand, held, None)
+    }
+
+    /// Restore the old immutable charge, independently of the profile offered for new boxes.
+    pub(crate) fn take_recovered_allocated(
+        &mut self,
+        node: NodeId,
+        workload: WorkloadId,
+        demand: &Demand,
+        held: &[u16],
+        allocation: Option<hex_api::Allocation>,
+    ) -> Result<Key, SimError> {
         self.check_recovered_devices(node, demand, held)?;
+        let charged = crate::model::allocated_resources(demand.need, allocation)
+            .map_err(|_| SimError::Resources(node))?;
         let slot = self.slot(node)?;
-        if !slot.free.holds(&demand.need)
-            || !slot.runtime_holds(demand.class, &demand.need)
+        if !slot.free.holds(&charged)
+            || !slot.runtime_holds(demand.class, &charged)
             || matches!(demand.kind, Kind::Build) && slot.benchmarks > 0
             || matches!(demand.kind, Kind::Benchmark) && slot.builds > 0
         {
@@ -1162,9 +1257,9 @@ impl FitIndex {
         let key = self.change(
             node,
             demand,
-            |free| free.checked_sub(&demand.need),
+            |free| free.checked_sub(&charged),
             |n| n.checked_add(1),
-            |used| used.checked_add(&demand.need),
+            |used| used.checked_add(&charged),
         )?;
         let holders = self.held.get_mut(at).ok_or(SimError::UnknownNode(node))?;
         for &index in held {
@@ -1183,12 +1278,35 @@ impl FitIndex {
         workload: WorkloadId,
         demand: &Demand,
     ) -> Result<Key, SimError> {
+        if self
+            .slot(node)?
+            .costs
+            .get(demand.class.index())
+            .is_some_and(Option::is_some)
+        {
+            return Err(SimError::Config(
+                "costed release requires its immutable allocation receipt",
+            ));
+        }
+        self.give_allocated(node, workload, demand, None)
+    }
+
+    /// Return exactly the retained charge after native release, never today's recalculated cost.
+    pub fn give_allocated(
+        &mut self,
+        node: NodeId,
+        workload: WorkloadId,
+        demand: &Demand,
+        allocation: Option<hex_api::Allocation>,
+    ) -> Result<Key, SimError> {
+        let charged = crate::model::allocated_resources(demand.need, allocation)
+            .map_err(|_| SimError::Resources(node))?;
         let key = self.change(
             node,
             demand,
-            |free| free.checked_add(&demand.need),
+            |free| free.checked_add(&charged),
             |n| n.checked_sub(1),
-            |used| used.checked_sub(&demand.need),
+            |used| used.checked_sub(&charged),
         )?;
         let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
         for h in self.held.get_mut(at).into_iter().flatten() {
@@ -1237,6 +1355,135 @@ impl FitIndex {
 mod tests {
     use super::*;
     use crate::model::RuntimePool;
+
+    fn explicit_fixture_cost(cpu: u64) -> hex_api::RuntimeCost {
+        let guest = hex_api::CapacityResources {
+            cpu_milli: cpu,
+            mem_bytes: 500,
+            disk_bytes: 0,
+        };
+        hex_api::RuntimeCost {
+            id: [7; 32], // Synthetic fixture identity, never an initialized/measured host profile.
+            floor: guest,
+            ceiling: guest,
+            quantum: hex_api::CapacityResources {
+                cpu_milli: 1_000,
+                mem_bytes: 1,
+                disk_bytes: 1,
+            },
+            guest_overhead: hex_api::CapacityResources::default(),
+            overhead: hex_api::CapacityResources {
+                cpu_milli: 100,
+                mem_bytes: 50,
+                disk_bytes: 0,
+            },
+        }
+    }
+
+    /// AC-T7.4.1: a CPU-only dedicated VM pays its complete initialized envelope before selection.
+    #[test]
+    fn costed_vm_candidates_and_admission_charge_the_same_original_demand() {
+        let need = Resources {
+            cpu_milli: 100,
+            mem_bytes: 10,
+            ..Resources::default()
+        };
+        let demand = Demand {
+            need,
+            class: Class::Shards,
+            kind: Kind::Plain,
+            ask: crate::model::Ask::default(),
+        };
+        let mut small = NodeSpec::new(
+            NodeId(0),
+            Resources {
+                cpu_milli: 1_000,
+                mem_bytes: 1_000,
+                ..Resources::default()
+            },
+        );
+        small.costs[Class::Shards.index()] = Some(explicit_fixture_cost(1_000));
+        let index = FitIndex::new(&[small.clone()]).unwrap();
+        assert_eq!(index.verdict(NodeId(0), &demand).unwrap(), Verdict::NoRoom);
+        assert!(index.fit(&demand, &Pick::default()).best.is_none());
+        small.capacity.cpu_milli = 2_100;
+        let mut index = FitIndex::new(&[small]).unwrap();
+        let allocation = index.allocation(NodeId(0), &demand).unwrap().unwrap();
+        assert_eq!(allocation.resources.cpu_milli, 1_100);
+        assert_eq!(allocation.resources.mem_bytes, 550);
+        assert!(index.take(NodeId(0), WorkloadId(1), &demand).is_err());
+        let key = index
+            .take_allocated(NodeId(0), WorkloadId(1), &demand, Some(allocation))
+            .unwrap();
+        assert_eq!((key.cpu_milli, key.mem_bytes), (1_000, 450));
+        assert_eq!(index.verdict(NodeId(0), &demand).unwrap(), Verdict::NoRoom);
+        let native = Demand {
+            class: Class::Oci,
+            ..demand
+        };
+        assert_eq!(index.verdict(NodeId(0), &native).unwrap(), Verdict::Admits);
+        assert_eq!(demand.need, need, "original workload remains unchanged");
+    }
+
+    /// AC-T7.4.1: profile refresh affects new work; recovery and release use the old exact receipt.
+    #[test]
+    fn persisted_allocation_survives_cost_refresh_without_recalculation() {
+        let mut node = NodeSpec::new(
+            NodeId(0),
+            Resources {
+                cpu_milli: 5_000,
+                mem_bytes: 2_000,
+                ..Resources::default()
+            },
+        );
+        node.costs[Class::Shards.index()] = Some(explicit_fixture_cost(1_000));
+        let demand = Demand {
+            need: Resources {
+                cpu_milli: 100,
+                mem_bytes: 10,
+                ..Resources::default()
+            },
+            class: Class::Shards,
+            kind: Kind::Plain,
+            ask: crate::model::Ask::default(),
+        };
+        let mut old = FitIndex::new(&[node.clone()]).unwrap();
+        let receipt = old.allocation(NodeId(0), &demand).unwrap();
+        old.take_allocated(NodeId(0), WorkloadId(1), &demand, receipt)
+            .unwrap();
+        node.costs[Class::Shards.index()] = Some(explicit_fixture_cost(2_000));
+        old.refresh_node(&node).unwrap();
+        assert!(
+            old.take_allocated(NodeId(0), WorkloadId(2), &demand, receipt)
+                .is_err()
+        );
+        let mut recovered = FitIndex::new(&[node.clone()]).unwrap();
+        recovered
+            .take_recovered_allocated(NodeId(0), WorkloadId(1), &demand, &[], receipt)
+            .unwrap();
+        assert_eq!(
+            recovered.key(NodeId(0)).unwrap(),
+            old.key(NodeId(0)).unwrap()
+        );
+        let mut forged = receipt.unwrap();
+        forged.resources.cpu_milli -= 1;
+        assert!(
+            recovered
+                .give_allocated(NodeId(0), WorkloadId(1), &demand, Some(forged))
+                .is_err()
+        );
+        assert_eq!(
+            recovered.key(NodeId(0)).unwrap(),
+            old.key(NodeId(0)).unwrap()
+        );
+        let restored = recovered
+            .give_allocated(NodeId(0), WorkloadId(1), &demand, receipt)
+            .unwrap();
+        assert_eq!(
+            (restored.cpu_milli, restored.mem_bytes),
+            (node.capacity.cpu_milli, node.capacity.mem_bytes)
+        );
+    }
 
     fn res(cpu: u64, mem: u64, gpus: u32) -> Resources {
         Resources {

@@ -464,6 +464,7 @@ fn res(cpu: u64) -> Resources {
 fn two_nodes() -> Vec<NodeSpec> {
     vec![
         NodeSpec {
+            costs: [None; crate::model::Class::COUNT],
             runtime_pools: Vec::new(),
             id: NodeId(0),
             capacity: res(1000),
@@ -474,6 +475,7 @@ fn two_nodes() -> Vec<NodeSpec> {
             devices: Vec::new(),
         },
         NodeSpec {
+            costs: [None; crate::model::Class::COUNT],
             runtime_pools: Vec::new(),
             id: NodeId(1),
             capacity: res(4000),
