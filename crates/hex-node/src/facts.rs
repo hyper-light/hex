@@ -15,7 +15,7 @@ use std::path::Path;
 
 use hex_api::Refusal;
 use hex_sim::facts::{self, Cpu, Disk, Facts, Found, Mem};
-use hex_sim::model::Virt;
+use hex_sim::model::{Class, Classes, Virt};
 
 /// What an administrator gives Hex beside what the probe finds (kiln's `Declared`, W13-R02): block
 /// devices and network interfaces boxes may be given whole, by their kernel names (`nvme1n1`,
@@ -34,6 +34,8 @@ pub struct Prober {
     gpus: hex_gpu::Gpus,
     dir: std::path::PathBuf,
     declared: Declared,
+    classes: Classes,
+    available: Option<Classes>,
 }
 
 impl Prober {
@@ -44,12 +46,33 @@ impl Prober {
             gpus: hex_gpu::Gpus::open(),
             dir: dir.to_path_buf(),
             declared,
+            classes: Classes::NONE,
+            available: None,
         }
+    }
+
+    /// CP-T7.4: classes the caller's runtime registry initialized successfully. Platform probes further
+    /// restrict them; an optional feature or hypervisor interface alone never configures a backend.
+    pub fn with_classes(mut self, classes: Classes) -> Self {
+        self.classes = classes;
+        self
     }
 
     /// Every fact of this node, read now: its GPUs' load sampled.
     pub fn probe(&mut self) -> Result<Facts, Refusal> {
-        let mut f = machine(&self.dir, &self.declared)?;
+        let available = match self.available {
+            Some(available) => available,
+            None => {
+                let available = here::classes()?;
+                self.available = Some(available);
+                available
+            }
+        };
+        let classes = [Class::Oci, Class::Firecracker, Class::Shards]
+            .into_iter()
+            .filter(|&c| self.classes.has(c) && available.has(c))
+            .fold(Classes::NONE, Classes::with);
+        let mut f = machine(&self.dir, &self.declared, classes)?;
         (f.gpus, f.no_gpus) = gpus(&mut self.gpus);
         Ok(f)
     }
@@ -95,7 +118,7 @@ pub fn gpu_facts(inventory: &[hex_gpu::Gpu], loads: &[hex_gpu::Load]) -> Vec<fac
 }
 
 /// Every fact of this node but its GPUs, read now. `dir` is the folder boxes' disks go on.
-fn machine(dir: &Path, declared: &Declared) -> Result<Facts, Refusal> {
+fn machine(dir: &Path, declared: &Declared, initialized: Classes) -> Result<Facts, Refusal> {
     let (os, arch) =
         facts::platform(std::env::consts::OS, std::env::consts::ARCH).ok_or(Refusal::Platform {
             what: "a node's facts",
@@ -108,6 +131,7 @@ fn machine(dir: &Path, declared: &Declared) -> Result<Facts, Refusal> {
         })?;
     let threads = std::thread::available_parallelism()
         .map_or(0, |n| u32::try_from(n.get()).unwrap_or(u32::MAX));
+    let virt = here::virt();
     Ok(Facts {
         os,
         arch,
@@ -117,7 +141,8 @@ fn machine(dir: &Path, declared: &Declared) -> Result<Facts, Refusal> {
         },
         mem: here::memory(),
         disk: here::volume(dir),
-        virt: here::virt(),
+        virt,
+        classes: facts::classes(os, arch, virt, initialized),
         gpus: Vec::new(),
         no_gpus: None,
         devices: here::devices(declared),
@@ -128,7 +153,7 @@ fn machine(dir: &Path, declared: &Declared) -> Result<Facts, Refusal> {
 mod here {
     use std::fs;
 
-    use super::{Declared, Disk, Found, Mem, Virt, facts};
+    use super::{Classes, Declared, Disk, Found, Mem, Virt, facts};
     use hex_sim::model::DeviceKind;
 
     /// The most entries a probe reads of one directory of the kernel's: a PCI segment's functions
@@ -139,19 +164,44 @@ mod here {
         fs::read_to_string(path).ok()
     }
 
-    /// `/proc/meminfo`, no more than the agent's cgroup v2 `memory.max`.
+    /// `/proc/meminfo`, constrained by each cgroup ancestor's finite limit and current charge.
     pub fn memory() -> Mem {
         let (total, free) = read("/proc/meminfo")
             .as_deref()
             .and_then(facts::meminfo)
             .unwrap_or((0, 0));
-        let limit = read("/proc/self/cgroup")
-            .as_deref()
-            .and_then(facts::own_cgroup)
-            .and_then(|p| read(&format!("/sys/fs/cgroup{p}/memory.max")))
-            .as_deref()
-            .and_then(facts::cgroup_max);
-        facts::mem(total, free, limit)
+        let own = read("/proc/self/cgroup");
+        let Some(own) = own.as_deref().and_then(facts::own_cgroup) else {
+            return facts::mem(total, free, None);
+        };
+        let root = std::path::Path::new("/sys/fs/cgroup");
+        let mut group = root.join(own.trim_start_matches('/'));
+        let mut memory = facts::mem(total, free, None);
+        // The path's own ancestor count bounds this walk; the root has no memory.max of its own.
+        while group.starts_with(root) {
+            let limit = match fs::read_to_string(group.join("memory.max")) {
+                Ok(text) if text.trim() == "max" => None,
+                Ok(text) => match facts::cgroup_max(&text) {
+                    Some(limit) => Some(limit),
+                    None => return Mem { free: 0, ..memory },
+                },
+                // An ancestor without this controller adds no bound. An unread bound establishes no room.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(_) => return Mem { free: 0, ..memory },
+            };
+            let current = fs::read_to_string(group.join("memory.current"))
+                .ok()
+                .and_then(|s| s.trim().parse().ok());
+            memory = facts::within_cgroup(memory, limit, current);
+            if group == root || !group.pop() {
+                break;
+            }
+        }
+        memory
+    }
+
+    pub fn classes() -> Result<Classes, hex_api::Refusal> {
+        Ok(Classes::ALL)
     }
 
     /// Each online CPU's package and core (`/sys/devices/system/cpu/cpuN/topology`).
@@ -247,7 +297,7 @@ mod here {
 
 #[cfg(target_os = "macos")]
 mod here {
-    use super::{Declared, Disk, Found, Mem, Virt};
+    use super::{Classes, Declared, Disk, Found, Mem, Virt};
     use hex_runtime::macos::sys::sysctl_number;
 
     /// `hw.memsize`; free the free and speculative pages (`vm.page_free_count`,
@@ -280,6 +330,10 @@ mod here {
         }
     }
 
+    pub fn classes() -> Result<Classes, hex_api::Refusal> {
+        Ok(Classes::ALL)
+    }
+
     /// No device is given whole on macOS: its one class, Shards through shards-api, names none.
     pub fn devices(_: &Declared) -> Vec<Found> {
         Vec::new()
@@ -288,7 +342,7 @@ mod here {
 
 #[cfg(windows)]
 mod here {
-    use super::{Declared, Disk, Found, Mem, Virt};
+    use super::{Classes, Declared, Disk, Found, Mem, Virt};
     use hex_runtime::windows::sys;
 
     pub fn memory() -> Mem {
@@ -311,6 +365,18 @@ mod here {
         Virt::default()
     }
 
+    /// In-process WMI uses the installer's existing bounded feature query. An unread prerequisite is
+    /// refused by type; caller-verified initialization is still needed when the features are enabled.
+    pub fn classes() -> Result<Classes, hex_api::Refusal> {
+        use hex_core::setup::WindowsFeature;
+        hex_runtime::windows::features::off().map(|off| {
+            hex_sim::facts::windows_classes(
+                !off.contains(&WindowsFeature::Containers),
+                !off.contains(&WindowsFeature::HypervisorPlatform),
+            )
+        })
+    }
+
     /// No device is given whole on Windows: a process-isolated container is given a GPU by its
     /// device interface class (from hex-gpu), and nothing whole.
     pub fn devices(_: &Declared) -> Vec<Found> {
@@ -320,7 +386,7 @@ mod here {
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 mod here {
-    use super::{Declared, Disk, Found, Mem, Virt};
+    use super::{Classes, Declared, Disk, Found, Mem, Virt};
 
     pub fn memory() -> Mem {
         Mem::default()
@@ -333,6 +399,9 @@ mod here {
     }
     pub fn virt() -> Virt {
         Virt::default()
+    }
+    pub fn classes() -> Result<Classes, hex_api::Refusal> {
+        Ok(Classes::NONE)
     }
     pub fn devices(_: &Declared) -> Vec<Found> {
         Vec::new()
@@ -382,7 +451,11 @@ mod tests {
         let mut cluster = hex_sim::model::Cluster::single_owner(Vec::new(), Vec::new());
         let node = f.node(hex_sim::model::NodeId(0), &mut cluster).unwrap();
         assert_eq!(node.capacity.cpu_milli, u64::from(f.cpu.threads) * 1000);
-        assert!(node.classes.count() > 0, "{node:?}");
+        assert_eq!(
+            node.classes,
+            Classes::NONE,
+            "an unconfigured probe advertises no runtime"
+        );
     }
 
     /// CP-T7.4: CPU quota can offer fewer threads than the host has physical cores. Keep the
@@ -400,6 +473,31 @@ mod tests {
         let node = f.node(hex_sim::model::NodeId(0), &mut cluster).unwrap();
         assert_eq!(f.cpu.cores, Some(16));
         assert_eq!(node.capacity.cpu_milli, 4_000);
+    }
+
+    /// CP-T7.4: initialize only one fake backend, then probe. Advertisements retain only that
+    /// backend's platform prerequisites; a probe without a registry never configures one implicitly.
+    #[test]
+    fn a_probe_advertises_only_the_initialized_runtime_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let requested = Classes::NONE.with(Class::Shards);
+        let mut prober = Prober::open(dir.path(), Declared::default()).with_classes(requested);
+        let found = prober.probe().unwrap();
+        assert!(!found.classes.has(Class::Oci));
+        assert!(!found.classes.has(Class::Firecracker));
+        assert_eq!(
+            found.classes,
+            facts::classes(
+                found.os,
+                found.arch,
+                found.virt,
+                if prober.available.unwrap().has(Class::Shards) {
+                    requested
+                } else {
+                    Classes::NONE
+                }
+            )
+        );
     }
 
     /// CP-T7.4, GPU load from hex-gpu: do probe this machine's GPUs through the kept `Gpus`; expect
@@ -491,6 +589,7 @@ mod tests {
                 kvm: true,
                 ..Virt::default()
             },
+            classes: Classes::ALL,
             ..Facts::default()
         };
         let mut cluster = hex_sim::model::Cluster::single_owner(Vec::new(), Vec::new());
