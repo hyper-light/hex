@@ -744,11 +744,6 @@ impl Service {
                         why: format!("no authenticated route to node {}", node.0),
                     })
                     .and_then(|sender| {
-                        if matches!(envelope.msg, peer::Msg::Delete { .. }) {
-                            self.stopping.interrupt_peer(node.0).map_err(|e| {
-                                Refusal::os("interrupting a peer for deletion control", e)
-                            })?;
-                        }
                         self.queued
                             .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                                 n.checked_add(1).filter(|n| *n <= crate::records::MOST)
@@ -995,7 +990,17 @@ impl Service {
             }
             dto::Command::Delete { key: k } => {
                 requested = Some(key(k));
-                self.driver.delete(key(k)).map_err(failed)?
+                let step = self.driver.delete(key(k)).map_err(failed)?;
+                if let Some(status) = self.driver.status(key(k)).map_err(failed)?
+                    && let Some(node) = status.node.filter(|node| *node != self.id)
+                {
+                    // Interrupt only an explicit cancellation after durable intent. Replayed
+                    // Deletes must keep the fresh connection that will deliver them alive.
+                    self.stopping
+                        .interrupt_peer(node.0)
+                        .map_err(|e| Refusal::os("interrupting a peer for deletion control", e))?;
+                }
+                step
             }
             dto::Command::Status { key: k } => {
                 self.refresh_peers()?;

@@ -187,7 +187,7 @@ impl Stopping {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::process::{ChildStdin, ChildStdout, Command, Stdio};
@@ -204,7 +204,8 @@ mod tests {
         std::io::stdin().read_exact(&mut [0]).unwrap();
     }
 
-    fn waiting_child() -> (OwnedChild, ChildStdin, BufReader<ChildStdout>) {
+    pub(in crate::scheduler) fn waiting_child() -> (OwnedChild, ChildStdin, BufReader<ChildStdout>)
+    {
         let full = concat!(module_path!(), "::child_waits_for_owned_pipe");
         let test = full.split_once("::").map_or(full, |(_, test)| test);
         let mut child = Command::new(std::env::current_exe().unwrap())

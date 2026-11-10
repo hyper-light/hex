@@ -58,7 +58,7 @@ impl Order {
                     return Err(damaged("invalid peer fingerprint"));
                 }
                 let mut digest = [0u8; 32];
-                for (out, pair) in digest.iter_mut().zip(hex.as_bytes().chunks_exact(2)) {
+                for (out, pair) in digest.iter_mut().zip(hex.as_bytes().as_chunks::<2>().0) {
                     let pair = std::str::from_utf8(pair)
                         .map_err(|_| damaged("invalid peer fingerprint text"))?;
                     *out = u8::from_str_radix(pair, 16)
