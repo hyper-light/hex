@@ -1,0 +1,39 @@
+{
+  "bytes": 183762,
+  "sha256": "68ed136adb2d794a95ec90dc73a08fbc6d42357c73253a1d74f59fea533bb83f",
+  "members": {
+    "cohort-5e5a0f50-light-v1/wire.log": {
+      "bytes": 7709,
+      "sha256": "169c3522c4da3cf8c84d85ce23cd9e16a6ecf5f7cf9292257dc5191e1987efeb"
+    },
+    "cohort-5e5a0f50-light-v1/running.json": {
+      "bytes": 1735,
+      "sha256": "454344fabbbc26197c39eafb6061aa8ba63544507dcb177916a4d429ae3fe7e4"
+    },
+    "cohort-5e5a0f50-light-v1/report.log": {
+      "bytes": 1653,
+      "sha256": "8619bf4156ebc9fa16ec5212ac9a891b092122b2cf7fdad02fb7414bce585d32"
+    },
+    "cohort-5e5a0f50-light-v1/result.json": {
+      "bytes": 1986,
+      "sha256": "aa3bcbd1b0f4ca26a6cf7b1541ade24e72e33b9b4a52b16e674de44aa90ea563"
+    },
+    "cohort-5e5a0f50-light-v1/source-before.json": {
+      "bytes": 269651,
+      "sha256": "c2c2f26dc12675f2d65a9002fdfcd4b0a0b24b89dca4fa712ccbd17a28669f75"
+    },
+    "cohort-5e5a0f50-light-v1/source-after.json": {
+      "bytes": 269651,
+      "sha256": "c2c2f26dc12675f2d65a9002fdfcd4b0a0b24b89dca4fa712ccbd17a28669f75"
+    },
+    "cohort-5e5a0f50-light-v1/collected-binaries.json": {
+      "bytes": 1868,
+      "sha256": "a4558f88f13ed0bbadcf08c67edcfa145051eb50dac02c1dda2fa066b32f107c"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}
