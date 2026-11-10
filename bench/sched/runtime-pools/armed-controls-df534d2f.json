@@ -1,0 +1,393 @@
+{
+  "build_metadata": {
+    "bytes": 1982,
+    "path": "/Users/adalundhe/.cache/hex-lead/logs/cold-extension-host-probe-build-v2-265c1501.json",
+    "sha256": "fd3a9e60ffa00ab19b6266e936046078f7abb82ea67b3ed3e0d2845d98241b26"
+  },
+  "cases": [
+    {
+      "backend_cleanup_error": null,
+      "case": "armed-cold-debug",
+      "census": {
+        "enabled": false,
+        "files": 0,
+        "scope": "census disabled; no timing distributions, coverage or seed evidence"
+      },
+      "cleanup_error": null,
+      "cleanup_unproven": null,
+      "error": null,
+      "identity": {
+        "pid": 28701,
+        "started": 12430862695646,
+        "vsock": "/Users/adalundhe/.cache/hx/e-2gydiy32/guest-tmp/shards-api-90eebcb7fb531265-0/v"
+      },
+      "kind": "cold-node-seeded-validation",
+      "ledger": {
+        "bytes": 3823,
+        "path": "/Users/adalundhe/.cache/hx/e-2gydiy32/pids.jsonl",
+        "sha256": "500bb34fd10c658fba9a9523db5b26f8eea4c3cd167b8e044ec9f120e95c97ef"
+      },
+      "original_finish_failure": null,
+      "profile": "debug",
+      "raw_result": {
+        "bytes": 6330,
+        "path": "/Users/adalundhe/.cache/hx/e-2gydiy32/result.json",
+        "sha256": "f51ac3b9493e83c33aef04b4d94fb6da81df11a0151e96d245026d81bf02a7bc"
+      },
+      "receipt": {
+        "bytes": 615,
+        "path": "/Users/adalundhe/.cache/hx/e-2gydiy32/owned-guest.json",
+        "sha256": "ad6d6e88ab0f56426c87f730cd582ee37e16a54379dff0f85ce0d6387c877814"
+      },
+      "record": {
+        "bytes": 131,
+        "path": "/Users/adalundhe/.cache/hx/e-2gydiy32/cold-node.node-state/@guest",
+        "sha256": "be9c2533a3626996f0fcff77086638313a46fbd7ec14dbc1cc23f33e775bb864"
+      },
+      "retirement": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 28701,
+        "started": 12430862695646
+      },
+      "runtime": {
+        "bytes": 957,
+        "path": "/Users/adalundhe/.cache/hx/e-2gydiy32/runtime.json",
+        "sha256": "610499ab7bb94f70a16c1880f274fa661e0bddd1b25668a3a0b30d79d2271249"
+      },
+      "source_revision": "265c15016d1a47c07f28e55a2f352c166b94a4b2",
+      "status": "passed",
+      "wait_mode": "armed"
+    },
+    {
+      "backend_cleanup_error": null,
+      "case": "armed-cold-release",
+      "census": {
+        "enabled": false,
+        "files": 0,
+        "scope": "census disabled; no timing distributions, coverage or seed evidence"
+      },
+      "cleanup_error": null,
+      "cleanup_unproven": null,
+      "error": null,
+      "identity": {
+        "pid": 28717,
+        "started": 12430891610248,
+        "vsock": "/Users/adalundhe/.cache/hx/e-sk_q5nv8/guest-tmp/shards-api-604f87488706136d-0/v"
+      },
+      "kind": "cold-node-seeded-validation",
+      "ledger": {
+        "bytes": 3837,
+        "path": "/Users/adalundhe/.cache/hx/e-sk_q5nv8/pids.jsonl",
+        "sha256": "c4022378f265ad9d6fc15228693a70255b4b64ae4e8e646d8f5ba4ff801a4285"
+      },
+      "original_finish_failure": null,
+      "profile": "release",
+      "raw_result": {
+        "bytes": 6346,
+        "path": "/Users/adalundhe/.cache/hx/e-sk_q5nv8/result.json",
+        "sha256": "406885e05d5eda87682df5279ebe890b8038735068653f3c350780806b2441f2"
+      },
+      "receipt": {
+        "bytes": 617,
+        "path": "/Users/adalundhe/.cache/hx/e-sk_q5nv8/owned-guest.json",
+        "sha256": "6031ea1e5c74b37488bc5295fbe594252790f681cbfbe982bad62159d607385a"
+      },
+      "record": {
+        "bytes": 131,
+        "path": "/Users/adalundhe/.cache/hx/e-sk_q5nv8/cold-node.node-state/@guest",
+        "sha256": "03a648633c9b59b9ca661f4e16177f31c8f6277c23d7f4c2b3474a53ab0584b2"
+      },
+      "retirement": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 28717,
+        "started": 12430891610248
+      },
+      "runtime": {
+        "bytes": 963,
+        "path": "/Users/adalundhe/.cache/hx/e-sk_q5nv8/runtime.json",
+        "sha256": "e87cd6578c00b7508b068f91df5d57f8f0dbc114dc403fe70ba6256813ef4081"
+      },
+      "source_revision": "265c15016d1a47c07f28e55a2f352c166b94a4b2",
+      "status": "passed",
+      "wait_mode": "armed"
+    },
+    {
+      "backend_cleanup_error": null,
+      "case": "native-wrapper-compat",
+      "census": null,
+      "cleanup_error": null,
+      "cleanup_unproven": null,
+      "error": null,
+      "identity": {
+        "pid": 37574,
+        "started": 12434954824118,
+        "vsock": "/Users/adalundhe/.cache/hx/e-yed9e7zg/guest-tmp/shards-api-28b8af61f8a44b08-0/v"
+      },
+      "kind": "native-arm-linux-quota-unit-execution",
+      "ledger": {
+        "bytes": 21606,
+        "path": "/Users/adalundhe/.cache/hx/e-yed9e7zg/pids.jsonl",
+        "sha256": "2cdb41fe4e3da83e4650b638283c55df6bdb26faeff92e5af2b6617717392db5"
+      },
+      "original_finish_failure": null,
+      "profile": "release",
+      "raw_result": {
+        "bytes": 9900,
+        "path": "/Users/adalundhe/.cache/hx/e-yed9e7zg/result.json",
+        "sha256": "794f0c5e6e8f32d0be7b94f88cbad9c490f092b60cd6f92dc666b9fd6d7089ba"
+      },
+      "receipt": {
+        "bytes": 617,
+        "path": "/Users/adalundhe/.cache/hx/e-yed9e7zg/owned-guest.json",
+        "sha256": "35dc99aac5a439b8a138d652435c2b16902e74df2ccf70f01494212f8a2cff12"
+      },
+      "record": {
+        "bytes": 131,
+        "path": "/Users/adalundhe/.cache/hx/e-yed9e7zg/cold-node.node-state/@guest",
+        "sha256": "c476d86414865ad44c03ae73874add6f8d1cb225d191e179ca8530e1caa668cd"
+      },
+      "retirement": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 37574,
+        "started": 12434954824118
+      },
+      "runtime": {
+        "bytes": 967,
+        "path": "/Users/adalundhe/.cache/hx/e-yed9e7zg/runtime.json",
+        "sha256": "06a3f8dc1ef6ce0e192f00411f4dcc11e49ec42c4c133a2345ae1e58235309da"
+      },
+      "source_revision": "df534d2f20a32c404e62e8dd31aa70d9838f0267",
+      "status": "passed",
+      "unit_cases": [
+        {
+          "actual_exit": {
+            "Code": 0
+          },
+          "artifact": {
+            "facts_sha256": "f550939867a78a12372e82a72e1b9d2cd8e14dac08c9297f2729683bb17f7a76",
+            "label": "fixed",
+            "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/hex-node-quota-unit-fixed-v2-8f51140e-aarch64-musl",
+            "sha256": "b896ba4d87c7ee7229673bebf0104f9e5f90dc579541e93372a5d3aa37b07b2f",
+            "source": "/Users/adalundhe/.cache/hex-lead/snapshots/cold-census-8f51140e"
+          },
+          "baseline_restored": true,
+          "box_retained_after_init_exit": true,
+          "label": "fixed",
+          "physical_deleted": true
+        },
+        {
+          "actual_exit": {
+            "Code": 101
+          },
+          "artifact": {
+            "facts_sha256": "32771e12b61d8238ef0695142794085f026ad682567ec4e3fffe306f8e0ea029",
+            "label": "whole-cpu-truncation-mutant",
+            "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/hex-node-quota-unit-whole-cpu-truncation-mutant-v2-8f51140e-aarch64-musl",
+            "sha256": "19ff899774490c2dc13a467e15b16dc27f32d23b581f8699235a543401555f39",
+            "source": "/Users/adalundhe/.cache/hex-lead/snapshots/quota-milli-mutant-8f51140e"
+          },
+          "baseline_restored": true,
+          "box_retained_after_init_exit": true,
+          "label": "truncation-mutant",
+          "physical_deleted": true
+        },
+        {
+          "actual_exit": {
+            "Code": 0
+          },
+          "artifact": {
+            "facts_sha256": "f550939867a78a12372e82a72e1b9d2cd8e14dac08c9297f2729683bb17f7a76",
+            "label": "fixed",
+            "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/hex-node-quota-unit-fixed-v2-8f51140e-aarch64-musl",
+            "sha256": "b896ba4d87c7ee7229673bebf0104f9e5f90dc579541e93372a5d3aa37b07b2f",
+            "source": "/Users/adalundhe/.cache/hex-lead/snapshots/cold-census-8f51140e"
+          },
+          "baseline_restored": true,
+          "box_retained_after_init_exit": true,
+          "label": "fixed-restored",
+          "physical_deleted": true
+        }
+      ],
+      "wait_mode": "measuring"
+    },
+    {
+      "backend_cleanup_error": null,
+      "case": "armed-fault-pre-ready",
+      "census": {
+        "enabled": false,
+        "files": 0,
+        "scope": "census disabled; no timing distributions, coverage or seed evidence"
+      },
+      "cleanup_error": "iteration lacks ready/class/empty-baseline and exact Stopped closure proof",
+      "cleanup_unproven": null,
+      "error": "ROOT pre-ready parent receipt-boundary fault",
+      "identity": {
+        "pid": 78349,
+        "started": 12454476132543,
+        "vsock": "/Users/adalundhe/.cache/hx/e-kyt61qfz/guest-tmp/shards-api-a017b716b2be0b76-0/v"
+      },
+      "kind": "cold-node-seeded-validation",
+      "ledger": {
+        "bytes": 1567,
+        "path": "/Users/adalundhe/.cache/hx/e-kyt61qfz/pids.jsonl",
+        "sha256": "6c318c6f1c74815d0df55df33c12a8b9ead1947b5cbb5cbb6b20c2b2b1646382"
+      },
+      "original_finish_failure": null,
+      "profile": "release",
+      "raw_result": {
+        "bytes": 6489,
+        "path": "/Users/adalundhe/.cache/hx/e-kyt61qfz/result.json",
+        "sha256": "02770949b90197ece37e8f6942bb17f4c4b3df86313f066d849bc9f72ec2427f"
+      },
+      "receipt": {
+        "bytes": 617,
+        "path": "/Users/adalundhe/.cache/hx/e-kyt61qfz/cold-recovery-receipt.json",
+        "sha256": "e5cf1afe16d08524f648604eb697baec8acf69376304f85d9bbd6d4f1bba11e8"
+      },
+      "record": {
+        "bytes": 131,
+        "path": "/Users/adalundhe/.cache/hx/e-kyt61qfz/cold-node.node-state/@guest",
+        "sha256": "22f620c57e431ea3d19d549d8ef087c01b0fc33b163674dba07b104c0fc67401"
+      },
+      "retirement": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 78349,
+        "started": 12454476132543
+      },
+      "runtime": {
+        "bytes": 963,
+        "path": "/Users/adalundhe/.cache/hx/e-kyt61qfz/runtime.json",
+        "sha256": "a922e322f7cc7bb6a58d29da6e0baba511a6c36978b8e33a96e8386f05260f8c"
+      },
+      "source_revision": "df534d2f20a32c404e62e8dd31aa70d9838f0267",
+      "status": "failed",
+      "wait_mode": "armed"
+    },
+    {
+      "backend_cleanup_error": "ROOT post-ready finish snapshot fault",
+      "case": "armed-fault-post-ready",
+      "census": {
+        "enabled": false,
+        "files": 0,
+        "scope": "census disabled; no timing distributions, coverage or seed evidence"
+      },
+      "cleanup_error": "iteration lacks ready/class/empty-baseline and exact Stopped closure proof",
+      "cleanup_unproven": null,
+      "error": null,
+      "identity": {
+        "pid": 78390,
+        "started": 12454483761706,
+        "vsock": "/Users/adalundhe/.cache/hx/e-ygue0pxg/guest-tmp/shards-api-c5dfba2493834d0c-0/v"
+      },
+      "kind": "cold-node-seeded-validation",
+      "ledger": {
+        "bytes": 3343,
+        "path": "/Users/adalundhe/.cache/hx/e-ygue0pxg/pids.jsonl",
+        "sha256": "95b04e577af9881429b264d36adda8aaf517ef1e2c5b671bbfd13f4d350b6624"
+      },
+      "original_finish_failure": "ROOT post-ready finish snapshot fault",
+      "profile": "release",
+      "raw_result": {
+        "bytes": 7027,
+        "path": "/Users/adalundhe/.cache/hx/e-ygue0pxg/result.json",
+        "sha256": "3bebb94656a0078af4904935666aa2d601a409eeefb8eea390f839ece9711f1a"
+      },
+      "receipt": {
+        "bytes": 617,
+        "path": "/Users/adalundhe/.cache/hx/e-ygue0pxg/owned-guest.json",
+        "sha256": "1037ef394e07fd0e79ebbe401352c6b7e8a0a384f2483d6681f0af05ef174572"
+      },
+      "record": {
+        "bytes": 131,
+        "path": "/Users/adalundhe/.cache/hx/e-ygue0pxg/cold-node.node-state/@guest",
+        "sha256": "0e74efea31c21bd12e86ef19acfb04c214704f9d9e434cf6eb523926697cf29b"
+      },
+      "retirement": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 78390,
+        "started": 12454483761706
+      },
+      "runtime": {
+        "bytes": 963,
+        "path": "/Users/adalundhe/.cache/hx/e-ygue0pxg/runtime.json",
+        "sha256": "228d7a5a3e8670284c502d65b973d9b2d861a8d3d7aca335d77b9e708bea2e6d"
+      },
+      "source_revision": "df534d2f20a32c404e62e8dd31aa70d9838f0267",
+      "status": "failed",
+      "wait_mode": "armed"
+    },
+    {
+      "backend_baseline_restored": true,
+      "backend_cleanup_error": null,
+      "case": "release-admission-boundary",
+      "census": {
+        "enabled": false,
+        "files": 0,
+        "scope": "census disabled; no timing distributions, coverage or seed evidence"
+      },
+      "cleanup_error": null,
+      "cleanup_unproven": null,
+      "error": null,
+      "identity": {
+        "pid": 49608,
+        "started": 12438781882010,
+        "vsock": "/Users/adalundhe/.cache/hx/e-s9cye68z/guest-tmp/shards-api-48b3bc9f594951ac-0/v"
+      },
+      "kind": "actual-scheduler-seeded-validation",
+      "ledger": {
+        "bytes": 104811,
+        "path": "/Users/adalundhe/.cache/hx/e-s9cye68z/pids.jsonl",
+        "sha256": "cc592d4a47e7b749bf28a965dac4949158a334f42db8f9dca637121084fe9e96"
+      },
+      "original_finish_failure": null,
+      "profile": "release",
+      "raw_result": {
+        "bytes": 6127,
+        "path": "/Users/adalundhe/.cache/hx/e-s9cye68z/result.json",
+        "sha256": "58e61df87e9c1a2884ac16881a8b521666039ab82564ffe6abccb7ca0a74f0c5"
+      },
+      "receipt": {
+        "bytes": 612,
+        "path": "/Users/adalundhe/.cache/hx/e-s9cye68z/owned-guest.json",
+        "sha256": "bbc847150cdb4b39cdb23e7da94b143b8b8fd0fbb9398221a92f7fb50f147312"
+      },
+      "record": {
+        "bytes": 131,
+        "path": "/Users/adalundhe/.cache/hx/e-s9cye68z/real.node-state/@guest",
+        "sha256": "87b60f1e6e8d191a9bce6113fd2d777c0910ae51f57156ece3089243700da66e"
+      },
+      "retirement": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 49608,
+        "started": 12438781882010
+      },
+      "runtime": {
+        "bytes": 963,
+        "path": "/Users/adalundhe/.cache/hx/e-s9cye68z/runtime.json",
+        "sha256": "5c6a0ca75107b128ffc922ef4c450716326606e84410e3a0ea5716fe39749fe0"
+      },
+      "source_revision": "df534d2f20a32c404e62e8dd31aa70d9838f0267",
+      "status": "passed",
+      "verified_oversized_refusals": 2,
+      "verified_physical_created": 2,
+      "verified_physical_deleted": 2,
+      "wait_mode": "armed"
+    }
+  ],
+  "kind": "root-armed-boundary-failure-closure-compat-controls",
+  "larger_physical_run": "FAILED Submit456592000ns after106complete localcycles; armed-submit-negative-df534d2f.json",
+  "prior_build_driver": "four builds0 but rustc version metadata requested outside sourcecwd failed1; corrected same-source rechecks/buildreceipt0",
+  "requirement": "AC-T7.4.1; installed-record fixture validation",
+  "scope": "bounded actual controls plus independent record/receipt/runtime/ledger hashes; original failures stay failed; no live verifier API query, timing seed, whole-goal or complete large physical-run claim",
+  "source_equivalence": {
+    "bytes": 59532,
+    "path": "/Users/adalundhe/.cache/hex-lead/cold-extension-265c1501/receipts/source-equivalence-df534d2f.json",
+    "sha256": "4fea6429281ec619bc9e15c7e106751e2a3bba28bd848ef32e540e838027478b"
+  }
+}
