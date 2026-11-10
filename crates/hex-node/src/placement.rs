@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+use std::time::Instant;
 
 use hex_api::{BoxId, BoxInfo, BoxSpec, BoxState, Refusal, Runtime};
 use hex_sim::index::Pick;
@@ -376,6 +377,24 @@ impl Driver {
         result.map_err(Error::Core)
     }
 
+    /// Bounded node/class aggregates, never individual launch samples. The authenticated transport
+    /// publishes only the sender's cells and keeps the snapshot unchanged across packet retries.
+    pub fn start_observations(&self) -> Result<Vec<hex_sim::start_cost::StartObservation>, Error> {
+        Ok(self.lock()?.node.start_observations())
+    }
+
+    pub fn merge_peer_start_observations(
+        &self,
+        peer: NodeId,
+        observations: &[hex_sim::start_cost::StartObservation],
+    ) -> Result<(), Error> {
+        let _operation = self.operation()?;
+        let mut state = self.lock()?;
+        let State { node, rows, .. } = &mut *state;
+        let result = node.merge_peer_start_observations(peer, observations, rows);
+        finish(&mut state, result, false)
+    }
+
     pub fn retry(&self) -> Result<Step, Error> {
         self.change(|node, rows| {
             let mut out = Vec::new();
@@ -424,9 +443,16 @@ impl Driver {
             let id = physical_id(key)?;
             let mut spec = payload.spec.clone();
             spec.id = id.clone();
+            let mut launched = None;
             let made = match runtime.inspect(&id) {
                 Ok(info) => Ok(info),
-                Err(Refusal::NoSuchBox(_)) => runtime.create(spec),
+                Err(Refusal::NoSuchBox(_)) => {
+                    // Combined launch service includes any staging performed inside create.
+                    // Explicit modeled transfer/work costs omit this aggregate in the scorer.
+                    // Recovery/preexisting boxes do not create a second or partial sample.
+                    launched = Some(Instant::now());
+                    runtime.create(spec)
+                }
                 Err(why) => {
                     step.notices.push(Notice::Unknown {
                         key,
@@ -443,7 +469,19 @@ impl Driver {
                 Ok(())
             });
             match made {
-                Ok(()) => self.completed(key, None, &mut step)?,
+                Ok(()) => {
+                    let elapsed = launched
+                        .map(|at| u64::try_from(at.elapsed().as_nanos()))
+                        .transpose();
+                    match elapsed {
+                        Ok(elapsed) => self.completed(key, None, elapsed, &mut step)?,
+                        Err(why) => step.notices.push(Notice::Unknown {
+                            key,
+                            refusal: invalid(format!("combined launch duration: {why}")),
+                            cleanup: None,
+                        }),
+                    }
+                }
                 Err(why @ Refusal::Exists(_)) => step.notices.push(Notice::Unknown {
                     key,
                     refusal: why,
@@ -451,7 +489,7 @@ impl Driver {
                 }),
                 Err(why) => match runtime.delete(&id) {
                     Ok(()) | Err(Refusal::NoSuchBox(_)) => {
-                        self.completed(key, Some(why), &mut step)?
+                        self.completed(key, Some(why), None, &mut step)?
                     }
                     Err(cleanup) => step.notices.push(Notice::Unknown {
                         key,
@@ -464,13 +502,19 @@ impl Driver {
         Ok(step)
     }
 
-    fn completed(&self, key: Key, refusal: Option<Refusal>, step: &mut Step) -> Result<(), Error> {
+    fn completed(
+        &self,
+        key: Key,
+        refusal: Option<Refusal>,
+        elapsed: Option<u64>,
+        step: &mut Step,
+    ) -> Result<(), Error> {
         let mut state = self.lock()?;
         let State { node, rows, .. } = &mut *state;
-        let result = if refusal.is_some() {
-            node.create_refused(key, rows)
-        } else {
-            node.created(key, rows)
+        let result = match (refusal.is_some(), elapsed) {
+            (true, _) => node.create_refused(key, rows),
+            (false, Some(ns)) => node.created_with_start(key, ns, rows),
+            (false, None) => node.created(key, rows),
         };
         let out = finish(&mut state, result, false)?;
         let (mut next, create) = collect(&mut state, out)?;
