@@ -1,16 +1,22 @@
-//! What each node can take, and the fast path's sampled best fit over it.
+//! What each node can take, and the fast path's pick over it: the kernel's walk, ported from kiln.
 //!
 //! A node admits a workload when its hard filters pass (`scheduler-architecture.md` S3) and it has
-//! the room: GPU work only on a node with GPUs, a benchmark never beside a build nor a build beside a
-//! benchmark, and an agent session never on a node above 90% CPU (`AC-T7.6.3`). Among the nodes that
-//! admit it, best fit is the node with the least free CPU, then least free memory, then fewest free
-//! GPUs, then lowest id: one total order ([`Key`]), so the scheduler and its serial specification
-//! can't disagree on a tie. Best fit is the baseline the design scores against (Borg's, S1, CM[1]).
+//! the room: the image's platform the node's, GPUs and devices only where the node has them free and
+//! the workload's class can be given them on the node's OS ([`Class::exposes`]), a benchmark never
+//! beside a build nor a build beside a benchmark, and an agent session never on a node above 90% CPU
+//! (`AC-T7.6.3`). Among the nodes that admit it, best fit is the node with the least free CPU, then
+//! least free memory, then fewest free GPUs, then lowest id: one total order ([`Key`]), so the
+//! scheduler and its serial specification can't disagree on a tie. Best fit is the baseline the
+//! design scores against (Borg's, S1, CM[1]). GPU work goes first to the node whose GPUs are least
+//! loaded, as kiln's pick goes to the runner with the most CPU free.
 
 use crate::census;
 use crate::error::SimError;
-use crate::model::{Class, Classes, Demand, Kind, NodeId, NodeSpec, Resources};
-use crate::trace::TraceHash;
+use crate::lb::{self, BUCKETS, Index};
+use crate::model::{
+    Class, Classes, Demand, Device, DeviceKind, GpuLoad, Held, Kind, NodeId, NodeSpec, Platform,
+    Resources, WorkloadId, bind,
+};
 
 /// A session is refused a node whose CPU in use, background and placed, is above this share of
 /// its CPU, per mille: `AC-T7.6.3`'s 90%.
@@ -36,25 +42,19 @@ impl Key {
     }
 }
 
-/// How the fast path samples (`scheduler-architecture.md` S2): a class scans the nodes in id order
-/// from a start its demand and `seed` fix, and stops at the `want`-th node that admits it, choosing
-/// the best fit among those. `want` is at least `min_feasible` and at least `per_mille` of the nodes,
-/// never more than all of them: kube-scheduler's floors, `minFeasibleNodesToFind = 100` and
-/// `minFeasibleNodesPercentageToFind = 5` (pkg/scheduler/schedule_one.go:57,62 at v1.37.1), and Borg's
-/// relaxed randomization (EuroSys 2015 §3.4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Sample {
-    pub seed: u64,
-    pub min_feasible: u32,
-    pub per_mille: u32,
-    /// How the sampled nodes are ranked.
+/// How a pick ranks the nodes that admit a demand: its scorer, and the workload shapes
+/// [`Scorer::Fragment`] keeps usable. A pick reads every node with the room, from the least room that
+/// could hold the need up (the kernel's walk, [`crate::lb::Index`]): no sample, so no sample size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Pick {
+    /// How the nodes that admit the demand are ranked.
     pub scorer: Scorer,
     /// The workload shapes [`Scorer::Fragment`] keeps usable.
     pub shapes: Shapes,
 }
 
 /// At most [`Shapes::MAX`] workload shapes, each with the class that asks it, kept in a fixed array
-/// so a [`Sample`] stays a plain value. More is refused, typed: the shapes a sample keeps are
+/// so a [`Pick`] stays a plain value. More is refused, typed: the shapes a pick keeps are
 /// Pareto-minimal, none fitting wherever another does, so dropping one could leave a leftover only it
 /// fits read as stranded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -98,7 +98,7 @@ impl Shapes {
     }
 }
 
-/// How a decision ranks the nodes its sample admits.
+/// How a pick ranks the nodes that admit a demand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Scorer {
     /// The least free capacity first ([`Key`]'s order): best fit, the baseline (Borg's, S1).
@@ -114,7 +114,7 @@ pub enum Scorer {
     /// [`Key`]'s order.
     Align,
     /// Least stranded: the node whose leftover after placing the need is either nothing or still
-    /// fits one of the sample's [`Shapes`], so no CPU or memory is left that no workload can use;
+    /// fits one of the pick's [`Shapes`], so no CPU or memory is left that no workload can use;
     /// then the [`Tie`]; then [`Key`]'s order. [`Scorer::HEX`] is Hex's packing score.
     Fragment(Tie),
 }
@@ -142,78 +142,6 @@ pub enum Tie {
     Narrowest,
 }
 
-impl Default for Sample {
-    fn default() -> Self {
-        Self {
-            seed: 0,
-            min_feasible: 100,
-            per_mille: 50,
-            scorer: Scorer::BestFit,
-            shapes: Shapes::default(),
-        }
-    }
-}
-
-impl Sample {
-    /// A sample that scans every node: whole-cluster best fit.
-    pub fn whole() -> Self {
-        Self {
-            seed: 0,
-            min_feasible: u32::MAX,
-            per_mille: 0,
-            scorer: Scorer::BestFit,
-            shapes: Shapes::default(),
-        }
-    }
-
-    /// How many admitting nodes a scan over `nodes` stops at.
-    pub fn want(&self, nodes: usize) -> usize {
-        let share = nodes
-            .checked_mul(usize::try_from(self.per_mille).unwrap_or(usize::MAX))
-            .map_or(nodes, |x| x.div_ceil(1000));
-        let floor = usize::try_from(self.min_feasible).unwrap_or(usize::MAX);
-        share.max(floor).max(1).min(nodes)
-    }
-
-    /// Where `demand`'s class starts its scan over `nodes` (0 for none).
-    pub fn start(&self, demand: &Demand, nodes: usize) -> usize {
-        let mut h = TraceHash::default();
-        let need = &demand.need;
-        for word in [
-            self.seed,
-            need.cpu_milli,
-            need.mem_bytes,
-            u64::from(need.gpus),
-            kind_word(demand.kind),
-            class_word(demand.class),
-        ] {
-            h.word(word);
-        }
-        u64::try_from(nodes)
-            .ok()
-            .and_then(|n| h.finish().checked_rem(n))
-            .and_then(|at| usize::try_from(at).ok())
-            .unwrap_or(0)
-    }
-}
-
-fn class_word(class: Class) -> u64 {
-    match class {
-        Class::Oci => 0,
-        Class::Firecracker => 1,
-        Class::Shards => 2,
-    }
-}
-
-fn kind_word(kind: Kind) -> u64 {
-    match kind {
-        Kind::Plain => 0,
-        Kind::Build => 1,
-        Kind::Benchmark => 2,
-        Kind::Session => 3,
-    }
-}
-
 /// `part` as a share of `whole` in millionths; 0 of a whole of 0, and past u64 saturates.
 fn millionths(part: u64, whole: u64) -> u64 {
     u128::from(part)
@@ -225,8 +153,12 @@ fn millionths(part: u64, whole: u64) -> u64 {
 /// Nodes a scan passed over because a filter refused them though they had the room, by filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Refusals {
-    /// GPU work, a node without GPUs.
+    /// GPU work, a node without the GPUs it asks, or of a class that can't be given them there.
     pub gpu: u64,
+    /// An image built for another OS or architecture.
+    pub platform: u64,
+    /// Devices or KVM the node hasn't, or that the workload's class can't be given there.
+    pub device: u64,
     /// A benchmark and a build, one already running there.
     pub shares: u64,
     /// A session, a node above 90% CPU.
@@ -235,26 +167,14 @@ pub struct Refusals {
     pub class: u64,
 }
 
-/// A sampled decision: the best fit among the scanned nodes that admit the demand, the window
-/// scanned (`span` nodes from `start` in id order, wrapping), and what the filters refused in it.
+/// A pick: the best node that admits the demand, the nodes its walk read, and what the filters
+/// refused among them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Sampled {
+pub struct Fit {
     pub best: Option<Key>,
-    pub start: usize,
-    pub span: usize,
+    /// Nodes the walk read: every one with the CPU for the need.
+    pub walked: u64,
     pub refused: Refusals,
-}
-
-impl Sampled {
-    /// Whether `node` lies in the scanned window, of a cluster of `nodes`.
-    pub fn covers(&self, node: NodeId, nodes: usize) -> bool {
-        usize::try_from(node.0)
-            .ok()
-            .and_then(|at| at.checked_add(nodes))
-            .and_then(|x| x.checked_sub(self.start))
-            .and_then(|x| x.checked_rem(nodes))
-            .is_none_or(|offset| offset < self.span)
-    }
 }
 
 /// Why a node doesn't admit a demand, or that it does.
@@ -262,8 +182,13 @@ impl Sampled {
 pub enum Verdict {
     Admits,
     NoClass,
-    /// The need asks a GPU the node hasn't, or that its class can't be given ([`Class::takes_gpus`]).
+    /// The image is built for another OS or architecture.
+    NoPlatform,
+    /// The need asks GPUs the node hasn't, of the model and with the memory free asked, or that its
+    /// class can't be given on the node's OS ([`Class::exposes`]).
     NoGpu,
+    /// The ask names devices or KVM the node hasn't, or that its class can't be given there.
+    NoDevice,
     NoRoom,
     Shares,
     Hot,
@@ -275,20 +200,73 @@ struct Slot {
     free: Resources,
     background_milli: u64,
     classes: Classes,
+    platform: Platform,
+    kvm: bool,
     builds: u32,
     benchmarks: u32,
 }
 
+/// A GPU's load as one share, in millionths: the larger of its utilisation and its memory in use, as
+/// DRF takes a dominant share (Ghodsi et al., NSDI 2011).
+fn gpu_busy(d: &Device) -> u64 {
+    millionths(d.load.memory_used, d.size)
+        .max(u64::from(d.load.busy_per_mille).saturating_mul(1000))
+}
+
+/// How idle the GPUs `held` names are: the sum of each one's share free of its load, in millionths.
+fn gpu_idle(devices: &[Device], held: &[u16]) -> u64 {
+    held.iter()
+        .filter_map(|&i| devices.get(usize::from(i)))
+        .filter(|d| d.kind == DeviceKind::Gpu)
+        .map(|d| 1_000_000u64.saturating_sub(gpu_busy(d)))
+        .fold(0, u64::saturating_add)
+}
+
 impl Slot {
-    fn verdict(&self, demand: &Demand) -> Verdict {
-        let need = &demand.need;
-        if !self.classes.has(demand.class) {
+    /// The verdict on `demand` here, `devices` the node's and `free(i)` whether device `i` is free.
+    fn verdict(
+        &self,
+        demand: &Demand,
+        devices: &[Device],
+        free: impl Fn(usize) -> bool,
+    ) -> Verdict {
+        let (need, ask, class, os) = (&demand.need, &demand.ask, demand.class, self.platform.os);
+        if !self.classes.has(class) {
             return Verdict::NoClass;
         }
-        if need.gpus > 0 && (self.capacity.gpus == 0 || !demand.class.takes_gpus()) {
+        if ask.os.is_some_and(|o| o != os) || ask.arch.is_some_and(|a| a != self.platform.arch) {
+            return Verdict::NoPlatform;
+        }
+        let gpus_only = crate::model::Ask {
+            vfio: 0,
+            block: 0,
+            net: 0,
+            kvm: false,
+            ..*ask
+        };
+        if need.gpus > 0
+            && (!class.exposes(os, DeviceKind::Gpu)
+                || bind(devices, |_| true, need.gpus, &gpus_only).is_none())
+        {
             return Verdict::NoGpu;
         }
+        if ask.devices() {
+            let exposed = [
+                (ask.vfio, DeviceKind::Vfio),
+                (ask.block, DeviceKind::Block),
+                (ask.net, DeviceKind::Net),
+            ]
+            .iter()
+            .all(|&(n, kind)| n == 0 || class.exposes(os, kind));
+            let kvm = !ask.kvm || (self.kvm && class.gives_kvm(os));
+            if !exposed || !kvm || bind(devices, |_| true, 0, ask).is_none() {
+                return Verdict::NoDevice;
+            }
+        }
         if !self.free.holds(need) {
+            return Verdict::NoRoom;
+        }
+        if (need.gpus > 0 || ask.devices()) && bind(devices, free, need.gpus, ask).is_none() {
             return Verdict::NoRoom;
         }
         match demand.kind {
@@ -341,6 +319,36 @@ impl Slot {
         )
     }
 
+    /// What `pick`'s scorer gives placing `need` here: higher is better.
+    fn score(&self, need: &Resources, pick: &Pick) -> u128 {
+        match pick.scorer {
+            Scorer::BestFit => 0,
+            Scorer::MostAllocated => u128::from(self.allocated_after(need)),
+            Scorer::Align => u128::from(self.alignment(need)),
+            Scorer::Fragment(tie) => {
+                // Lexicographic in one number: least stranded capacity in the high word, then the tie
+                // in the low word.
+                let stranded = self.stranded_after(need, &pick.shapes);
+                let then = match tie {
+                    Tie::Align => self.alignment(need),
+                    Tie::LeastAllocated => u64::MAX.saturating_sub(self.allocated_after(need)),
+                    Tie::MostAllocated => self.allocated_after(need),
+                    // Fewer classes in the high bits; the allocation (at most 2,000,000) below.
+                    Tie::Narrowest => {
+                        u64::from(Classes::ALL.count().saturating_sub(self.classes.count()))
+                            .checked_shl(32)
+                            .unwrap_or(0)
+                            | self.allocated_after(need)
+                    }
+                };
+                u128::from(u64::MAX.saturating_sub(stranded))
+                    .checked_mul(1 << 64)
+                    .unwrap_or(0)
+                    | u128::from(then)
+            }
+        }
+    }
+
     /// CPU in use, background and placed, above 90% of the node's CPU. Compared as
     /// busy * 1000 > capacity * 900 in u128, where neither side can overflow; a busy count past u64
     /// is hot.
@@ -359,30 +367,92 @@ impl Slot {
     }
 }
 
+/// The nodes' room and filter state, and the kernel's index of them by free whole CPUs
+/// ([`crate::lb::Index`], kiln's `lb/index.rs`): a pick walks it from the need's bucket up, so it
+/// reads only nodes with the CPU for the need, every one of them.
 #[derive(Debug, Clone)]
 pub struct FitIndex {
     /// By node id; ids are dense from 0.
     slots: Vec<Slot>,
+    /// Each node's devices, by node id.
+    devices: Vec<Vec<Device>>,
+    /// The workload holding each of a node's devices, until it is deleted.
+    held: Vec<Vec<Option<WorkloadId>>>,
+    ix: Index,
+    /// The highest bucket: the most whole CPUs any node has.
+    last: u32,
+}
+
+/// A node's bucket in the kernel's index: its free whole CPUs, at most `last`.
+fn bucket(free: &Resources, last: u32) -> u32 {
+    let whole = free.cpu_milli.checked_div(lb::CPU).unwrap_or(0);
+    u32::try_from(whole).unwrap_or(u32::MAX).min(last)
+}
+
+/// A node's capacity as the kernel's amounts: CPU, memory, disk, GPUs.
+fn amounts(r: &Resources) -> lb::Amounts {
+    [r.cpu_milli, r.mem_bytes, r.disk_bytes, u64::from(r.gpus)]
 }
 
 impl FitIndex {
     /// Nodes' ids must be dense from 0, in order.
     pub fn new(nodes: &[NodeSpec]) -> Result<Self, SimError> {
         let mut slots = Vec::with_capacity(nodes.len());
+        let (mut devices, mut held) = (
+            Vec::with_capacity(nodes.len()),
+            Vec::with_capacity(nodes.len()),
+        );
         for (at, node) in nodes.iter().enumerate() {
             if usize::try_from(node.id.0).ok() != Some(at) {
                 return Err(SimError::Config("node ids must be dense from 0, in order"));
+            }
+            if !node.devices_agree() {
+                return Err(SimError::Config(
+                    "a node's GPUs listed aren't its capacity's, or it lists more devices than a PCI segment has",
+                ));
             }
             slots.push(Slot {
                 capacity: node.capacity,
                 free: node.capacity,
                 background_milli: node.background_milli,
                 classes: node.classes,
+                platform: node.platform,
+                kvm: node.virt.kvm,
                 builds: 0,
                 benchmarks: 0,
             });
+            devices.push(node.devices.clone());
+            held.push(vec![None; node.devices.len()]);
         }
-        Ok(Self { slots })
+        let whole = nodes
+            .iter()
+            .map(|n| n.capacity.cpu_milli.checked_div(lb::CPU).unwrap_or(0))
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let buckets = u32::try_from(whole).unwrap_or(BUCKETS).min(BUCKETS);
+        let last = buckets.saturating_sub(1);
+        let count = u32::try_from(nodes.len()).map_err(|_| SimError::Full {
+            what: "the index's nodes",
+            bound: usize::try_from(u32::MAX).unwrap_or(usize::MAX),
+        })?;
+        let mut ix = Index::new(0);
+        if !ix.grow(buckets, count) {
+            return Err(SimError::Config("the index can't grow to the cluster"));
+        }
+        for (slot, id) in slots.iter().zip(0u32..) {
+            if !ix.join(id, &amounts(&slot.capacity)) {
+                return Err(SimError::Config("the index can't hold the cluster"));
+            }
+            ix.push(id, bucket(&slot.free, last));
+        }
+        Ok(Self {
+            slots,
+            devices,
+            held,
+            ix,
+            last,
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -405,7 +475,61 @@ impl FitIndex {
     }
 
     pub fn verdict(&self, node: NodeId, demand: &Demand) -> Result<Verdict, SimError> {
-        Ok(self.slot(node)?.verdict(demand))
+        let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
+        Ok(self.judge(at, self.slot(node)?, demand))
+    }
+
+    /// The verdict on `demand` at node `at`, its slot `slot`.
+    fn judge(&self, at: usize, slot: &Slot, demand: &Demand) -> Verdict {
+        let (devices, held) = (
+            self.devices.get(at).map_or(&[][..], Vec::as_slice),
+            self.held.get(at).map_or(&[][..], Vec::as_slice),
+        );
+        slot.verdict(demand, devices, |i| {
+            held.get(i).is_some_and(Option::is_none)
+        })
+    }
+
+    /// The devices `demand` would hold on node `at` now, least loaded GPUs first.
+    fn bound(&self, at: usize, demand: &Demand) -> Option<Held> {
+        let devices = self.devices.get(at)?;
+        let held = self.held.get(at)?;
+        bind(
+            devices,
+            |i| held.get(i).is_some_and(Option::is_none),
+            demand.need.gpus,
+            &demand.ask,
+        )
+    }
+
+    /// The devices `workload` holds on `node`.
+    pub fn holds(&self, node: NodeId, workload: WorkloadId) -> Held {
+        let at = usize::try_from(node.0).unwrap_or(usize::MAX);
+        self.held
+            .get(at)
+            .into_iter()
+            .flatten()
+            .zip(0u16..)
+            .filter(|(h, _)| **h == Some(workload))
+            .map(|(_, i)| i)
+            .collect()
+    }
+
+    /// A GPU's load from what isn't Hex's, as its node's agent reads it (hex-gpu's `sample()`).
+    pub fn set_gpu_load(
+        &mut self,
+        node: NodeId,
+        device: usize,
+        load: GpuLoad,
+    ) -> Result<(), SimError> {
+        let d = usize::try_from(node.0)
+            .ok()
+            .and_then(|at| self.devices.get_mut(at))
+            .and_then(|ds| ds.get_mut(device))
+            .filter(|d| d.kind == DeviceKind::Gpu)
+            .ok_or(SimError::UnknownNode(node))?;
+        d.load = load;
+        Ok(())
     }
 
     /// Whether `node`'s CPU in use is above 90% of its CPU.
@@ -413,121 +537,141 @@ impl FitIndex {
         Ok(self.slot(node)?.hot())
     }
 
+    /// Whether `node` runs `class`: a change to it can change a pick for that class.
+    pub fn runs(&self, node: NodeId, class: Class) -> bool {
+        self.slot(node).is_ok_and(|s| s.classes.has(class))
+    }
+
     /// Whether any node admits `demand` now.
     pub fn admitted_anywhere(&self, demand: &Demand) -> bool {
         self.slots
             .iter()
-            .any(|slot| slot.verdict(demand) == Verdict::Admits)
+            .enumerate()
+            .any(|(at, slot)| self.judge(at, slot, demand) == Verdict::Admits)
     }
 
-    /// The sampled best fit for `demand` ([`Sample`]). It visits each node at most once, so the node
-    /// count bounds it; a demand no node admits scans them all and finds none.
-    pub fn sampled_fit(&self, demand: &Demand, sample: &Sample) -> Sampled {
-        let n = self.slots.len();
-        let start = sample.start(demand, n);
-        let want = sample.want(n);
-        let (mut best, mut best_score, mut found) = (None::<Key>, 0u128, 0usize);
+    /// The best node for `demand` by `pick`'s scorer, ties broken by [`Key`]'s order: the kernel's
+    /// walk ([`crate::lb::Index`], kiln's `owner.rs` walk) from the bucket of the need's whole CPUs up,
+    /// every node in it read and checked exactly. Kiln's walk stops at the first runner that fits,
+    /// the least loaded; Hex's reads them all, since the packing score (H11) ranks by what each node
+    /// would have left. Each node is read once, so the node count bounds it. GPU work ranks first by
+    /// how idle the GPUs it would hold are ([`gpu_busy`]), as kiln ranks by CPU free: the less-loaded
+    /// GPU wins.
+    pub fn fit(&self, demand: &Demand, pick: &Pick) -> Fit {
+        let floor = u32::try_from(demand.need.cpu_milli.checked_div(lb::CPU).unwrap_or(0))
+            .unwrap_or(u32::MAX);
+        let (mut best, mut best_score) = (None::<Key>, (0u64, 0u128));
         let mut refused = Refusals::default();
-        // found, offset and the refusals count nodes, so they stay below the node count.
-        for offset in 0..n {
-            let Some(at) = start.checked_add(offset).and_then(|x| x.checked_rem(n)) else {
-                break;
-            };
-            let (Some(slot), Ok(id)) = (self.slots.get(at), u32::try_from(at)) else {
-                break;
-            };
-            match slot.verdict(demand) {
-                Verdict::Admits => {}
-                Verdict::NoRoom => continue,
-                Verdict::NoClass => {
-                    refused.class = refused.class.saturating_add(1);
+        let mut walked = 0u64;
+        let mut b = self.ix.at_or_above(floor.min(self.last));
+        while let Some(bb) = b {
+            for r in self.ix.bucket(bb) {
+                walked = walked.saturating_add(1);
+                let Some(slot) = self.slots.get(lb::ix(r)) else {
                     continue;
-                }
-                Verdict::NoGpu => {
-                    refused.gpu = refused.gpu.saturating_add(1);
-                    continue;
-                }
-                Verdict::Shares => {
-                    refused.shares = refused.shares.saturating_add(1);
-                    continue;
-                }
-                Verdict::Hot => {
-                    refused.hot = refused.hot.saturating_add(1);
-                    continue;
-                }
-            }
-            let key = Key::of(NodeId(id), &slot.free);
-            let score = match sample.scorer {
-                Scorer::BestFit => 0,
-                Scorer::MostAllocated => u128::from(slot.allocated_after(&demand.need)),
-                Scorer::Align => u128::from(slot.alignment(&demand.need)),
-                Scorer::Fragment(tie) => {
-                    // Lexicographic in one number: least stranded capacity in the high word, then
-                    // the tie in the low word.
-                    let stranded = slot.stranded_after(&demand.need, &sample.shapes);
-                    let then = match tie {
-                        Tie::Align => slot.alignment(&demand.need),
-                        Tie::LeastAllocated => {
-                            u64::MAX.saturating_sub(slot.allocated_after(&demand.need))
-                        }
-                        Tie::MostAllocated => slot.allocated_after(&demand.need),
-                        // Fewer classes in the high bits; the allocation (at most 2,000,000) below.
-                        Tie::Narrowest => {
-                            u64::from(Classes::ALL.count().saturating_sub(slot.classes.count()))
-                                .checked_shl(32)
-                                .unwrap_or(0)
-                                | slot.allocated_after(&demand.need)
-                        }
-                    };
-                    u128::from(u64::MAX.saturating_sub(stranded))
-                        .checked_mul(1 << 64)
-                        .unwrap_or(0)
-                        | u128::from(then)
-                }
-            };
-            // A higher score wins; between equal scores, the least key.
-            let wins = best.is_none_or(|b| score > best_score || (score == best_score && key < b));
-            if wins {
-                best = Some(key);
-                best_score = score;
-            }
-            found = found.saturating_add(1);
-            if found >= want {
-                return Sampled {
-                    best,
-                    start,
-                    span: offset.saturating_add(1),
-                    refused,
                 };
+                match self.judge(lb::ix(r), slot, demand) {
+                    Verdict::Admits => {}
+                    Verdict::NoRoom => continue,
+                    Verdict::NoClass => {
+                        refused.class = refused.class.saturating_add(1);
+                        continue;
+                    }
+                    Verdict::NoPlatform => {
+                        refused.platform = refused.platform.saturating_add(1);
+                        continue;
+                    }
+                    Verdict::NoGpu => {
+                        refused.gpu = refused.gpu.saturating_add(1);
+                        continue;
+                    }
+                    Verdict::NoDevice => {
+                        refused.device = refused.device.saturating_add(1);
+                        continue;
+                    }
+                    Verdict::Shares => {
+                        refused.shares = refused.shares.saturating_add(1);
+                        continue;
+                    }
+                    Verdict::Hot => {
+                        refused.hot = refused.hot.saturating_add(1);
+                        continue;
+                    }
+                }
+                let key = Key::of(NodeId(r), &slot.free);
+                let idle = if demand.need.gpus > 0 {
+                    let devices = self.devices.get(lb::ix(r)).map_or(&[][..], Vec::as_slice);
+                    self.bound(lb::ix(r), demand)
+                        .map_or(0, |held| gpu_idle(devices, &held))
+                } else {
+                    0
+                };
+                let score = (idle, slot.score(&demand.need, pick));
+                // A higher score wins; between equal scores, the least key.
+                let wins =
+                    best.is_none_or(|k| score > best_score || (score == best_score && key < k));
+                if wins {
+                    best = Some(key);
+                    best_score = score;
+                }
             }
+            b = self.ix.above(bb);
         }
-        Sampled {
+        Fit {
             best,
-            start,
-            span: n,
+            walked,
             refused,
         }
     }
 
-    /// Places `demand` on `node`: its need taken from the free capacity, its kind counted; the
-    /// node's new key.
-    pub fn take(&mut self, node: NodeId, demand: &Demand) -> Result<Key, SimError> {
-        self.change(
+    /// Places `workload`, of `demand`, on `node`: its need taken from the free capacity, its devices
+    /// held by it ([`bind`]), its kind counted; the node's new key. Refused, changing nothing, where
+    /// the room or the devices aren't free.
+    pub fn take(
+        &mut self,
+        node: NodeId,
+        workload: WorkloadId,
+        demand: &Demand,
+    ) -> Result<Key, SimError> {
+        let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
+        self.slot(node)?;
+        let held = self.bound(at, demand).ok_or(SimError::Resources(node))?;
+        let key = self.change(
             node,
             demand,
             |free| free.checked_sub(&demand.need),
             |n| n.checked_add(1),
-        )
+        )?;
+        if let Some(hs) = self.held.get_mut(at) {
+            for i in held {
+                if let Some(h) = hs.get_mut(usize::from(i)) {
+                    *h = Some(workload);
+                }
+            }
+        }
+        Ok(key)
     }
 
-    /// Ends `demand` on `node`; the node's new key.
-    pub fn give(&mut self, node: NodeId, demand: &Demand) -> Result<Key, SimError> {
-        self.change(
+    /// Ends `workload`, of `demand`, on `node`: its devices free again; the node's new key.
+    pub fn give(
+        &mut self,
+        node: NodeId,
+        workload: WorkloadId,
+        demand: &Demand,
+    ) -> Result<Key, SimError> {
+        let key = self.change(
             node,
             demand,
             |free| free.checked_add(&demand.need),
             |n| n.checked_sub(1),
-        )
+        )?;
+        let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
+        for h in self.held.get_mut(at).into_iter().flatten() {
+            if *h == Some(workload) {
+                *h = None;
+            }
+        }
+        Ok(key)
     }
 
     fn change(
@@ -548,7 +692,9 @@ impl FitIndex {
             }
             Kind::Plain | Kind::Session => {}
         }
+        let (from, to) = (bucket(&slot.free, self.last), bucket(&next.free, self.last));
         *slot = next;
+        self.ix.relink(node.0, from, to);
         Ok(Key::of(node, &next.free))
     }
 }
@@ -562,26 +708,26 @@ mod tests {
             cpu_milli: cpu,
             mem_bytes: mem,
             gpus,
+            disk_bytes: 0,
         }
     }
+
+    /// A workload's id where only one is placed at a time.
+    const W: WorkloadId = WorkloadId(0);
 
     fn plain(need: Resources) -> Demand {
         Demand {
             need,
             kind: Kind::Plain,
             class: Class::Oci,
+            ask: Default::default(),
         }
     }
 
     fn nodes(caps: &[Resources]) -> Vec<NodeSpec> {
         caps.iter()
             .enumerate()
-            .map(|(i, c)| NodeSpec {
-                id: NodeId(u32::try_from(i).unwrap()),
-                capacity: *c,
-                background_milli: 0,
-                classes: Classes::ALL,
-            })
+            .map(|(i, c)| NodeSpec::new(NodeId(u32::try_from(i).unwrap()), *c))
             .collect()
     }
 
@@ -606,7 +752,7 @@ mod tests {
         .unwrap();
         let fit = |need| {
             index
-                .sampled_fit(&plain(need), &Sample::whole())
+                .fit(&plain(need), &Pick::default())
                 .best
                 .map(|k| k.node)
         };
@@ -628,13 +774,14 @@ mod tests {
             need: res(1_000, 1, 0),
             kind: Kind::Plain,
             class: Class::Firecracker,
+            ask: Default::default(),
         };
         assert_eq!(
             index.verdict(NodeId(0), &microvm).unwrap(),
             Verdict::NoClass
         );
         assert_eq!(index.verdict(NodeId(1), &microvm).unwrap(), Verdict::Admits);
-        let s = index.sampled_fit(&microvm, &Sample::whole());
+        let s = index.fit(&microvm, &Pick::default());
         assert_eq!(
             (s.best.map(|k| k.node), s.refused.class),
             (Some(NodeId(1)), 1)
@@ -657,6 +804,7 @@ mod tests {
             need: res(1_000, 1, 1),
             kind: Kind::Plain,
             class,
+            ask: Default::default(),
         };
         assert_eq!(
             index.verdict(NodeId(0), &asking(Class::Oci)).unwrap(),
@@ -683,6 +831,7 @@ mod tests {
             need: res(1_000, 1, 0),
             kind: Kind::Session,
             class: Class::Oci,
+            ask: Default::default(),
         };
         assert_eq!(index.verdict(NodeId(0), &session).unwrap(), Verdict::Hot);
         assert_eq!(index.verdict(NodeId(1), &session).unwrap(), Verdict::Admits);
@@ -692,22 +841,287 @@ mod tests {
             need: res(1, 1, 0),
             kind: Kind::Build,
             class: Class::Oci,
+            ask: Default::default(),
         };
         let bench = Demand {
             need: res(1, 1, 0),
             kind: Kind::Benchmark,
             class: Class::Oci,
+            ask: Default::default(),
         };
-        index.take(NodeId(1), &build).unwrap();
+        index.take(NodeId(1), W, &build).unwrap();
         assert_eq!(index.verdict(NodeId(1), &bench).unwrap(), Verdict::Shares);
-        index.give(NodeId(1), &build).unwrap();
-        index.take(NodeId(1), &bench).unwrap();
+        index.give(NodeId(1), W, &build).unwrap();
+        index.take(NodeId(1), W, &bench).unwrap();
         assert_eq!(index.verdict(NodeId(1), &build).unwrap(), Verdict::Shares);
-        let s = index.sampled_fit(&build, &Sample::whole());
+        let s = index.fit(&build, &Pick::default());
         assert_eq!(
             (s.best.map(|k| k.node), s.refused.shares),
             (Some(NodeId(0)), 1)
         );
+    }
+
+    fn gpu_node(id: u32, cpu: u64, os: crate::model::Os, gpus: &[(u32, u64, u16)]) -> NodeSpec {
+        use crate::model::{Device, GpuLoad, ModelId, Platform};
+        let mut n = NodeSpec::new(NodeId(id), res(cpu, 64, 0));
+        n.platform = Platform {
+            os,
+            arch: crate::model::Arch::X86_64,
+        };
+        n.classes = os.classes(crate::model::Virt {
+            kvm: true,
+            nested: false,
+            hvf: true,
+        });
+        n.devices = gpus
+            .iter()
+            .map(|&(model, memory, busy)| Device {
+                load: GpuLoad {
+                    busy_per_mille: busy,
+                    memory_used: 0,
+                },
+                ..Device::gpu(ModelId(model), memory)
+            })
+            .collect();
+        n.capacity.gpus = u32::try_from(gpus.len()).unwrap();
+        n
+    }
+
+    fn asking(gpus: u32, class: Class, ask: crate::model::Ask) -> Demand {
+        Demand {
+            need: res(1_000, 1, gpus),
+            kind: Kind::Plain,
+            class,
+            ask,
+        }
+    }
+
+    /// CP-T7.4, the needs model's filters: do ask an image's platform, a GPU by model and by memory,
+    /// and devices of each kind, of each class, on nodes of each OS; expect each node that can't give
+    /// it refused for the reason it can't (another platform; no GPU of the model or with the memory;
+    /// a class that can't be given the device there: Firecracker and Shards none, OCI on Windows only
+    /// a GPU), each refusal counted by the walk (non-vacuity), and the node that can admitting it.
+    #[test]
+    fn platform_gpus_and_devices_are_matched_against_node_and_class() {
+        use crate::model::{Arch, Ask, Device, DeviceKind, GpuLoad, ModelId, Os};
+        const GIB: u64 = 1 << 30;
+        let mut linux = gpu_node(0, 8_000, Os::Linux, &[(1, 8 * GIB, 0)]);
+        linux.devices.push(Device {
+            kind: DeviceKind::Vfio,
+            model: ModelId::UNNAMED,
+            size: 0,
+            load: GpuLoad::default(),
+        });
+        linux.devices.push(Device {
+            kind: DeviceKind::Block,
+            model: ModelId::UNNAMED,
+            size: 100 * GIB,
+            load: GpuLoad::default(),
+        });
+        let windows = gpu_node(1, 8_000, Os::Windows, &[(2, 16 * GIB, 0)]);
+        let mut index = FitIndex::new(&[linux, windows]).unwrap();
+        let verdicts = |index: &FitIndex, d: &Demand| {
+            [NodeId(0), NodeId(1)].map(|n| index.verdict(n, d).unwrap())
+        };
+        // The image's platform.
+        let arm = asking(
+            0,
+            Class::Oci,
+            Ask {
+                arch: Some(Arch::Aarch64),
+                ..Ask::default()
+            },
+        );
+        assert_eq!(
+            verdicts(&index, &arm),
+            [Verdict::NoPlatform, Verdict::NoPlatform]
+        );
+        let win = asking(
+            0,
+            Class::Oci,
+            Ask {
+                os: Some(Os::Windows),
+                ..Ask::default()
+            },
+        );
+        assert_eq!(
+            verdicts(&index, &win),
+            [Verdict::NoPlatform, Verdict::Admits]
+        );
+        // A GPU by model, by memory, and only to OCI.
+        let model1 = asking(
+            1,
+            Class::Oci,
+            Ask {
+                gpu_model: Some(ModelId(1)),
+                ..Ask::default()
+            },
+        );
+        assert_eq!(verdicts(&index, &model1), [Verdict::Admits, Verdict::NoGpu]);
+        let big = asking(
+            1,
+            Class::Oci,
+            Ask {
+                gpu_memory: 12 * GIB,
+                ..Ask::default()
+            },
+        );
+        assert_eq!(verdicts(&index, &big), [Verdict::NoGpu, Verdict::Admits]);
+        let shards_gpu = asking(1, Class::Shards, Ask::default());
+        assert_eq!(
+            verdicts(&index, &shards_gpu),
+            [Verdict::NoGpu, Verdict::NoGpu]
+        );
+        // Devices whole: OCI on Linux alone; Windows' OCI is given only a GPU.
+        let vfio = asking(
+            0,
+            Class::Oci,
+            Ask {
+                vfio: 1,
+                ..Ask::default()
+            },
+        );
+        assert_eq!(
+            verdicts(&index, &vfio),
+            [Verdict::Admits, Verdict::NoDevice]
+        );
+        for class in [Class::Firecracker, Class::Shards] {
+            assert_eq!(
+                index
+                    .verdict(
+                        NodeId(0),
+                        &asking(
+                            0,
+                            class,
+                            Ask {
+                                vfio: 1,
+                                ..Ask::default()
+                            }
+                        )
+                    )
+                    .unwrap(),
+                Verdict::NoDevice
+            );
+        }
+        let disk = asking(
+            0,
+            Class::Oci,
+            Ask {
+                block: 1,
+                block_size: 200 * GIB,
+                ..Ask::default()
+            },
+        );
+        assert_eq!(index.verdict(NodeId(0), &disk).unwrap(), Verdict::NoDevice);
+        let kvm = asking(
+            0,
+            Class::Oci,
+            Ask {
+                kvm: true,
+                ..Ask::default()
+            },
+        );
+        assert_eq!(verdicts(&index, &kvm), [Verdict::Admits, Verdict::NoDevice]);
+        // Held until deleted: the one VFIO function taken, the next ask finds no room; given back, it
+        // does.
+        index.take(NodeId(0), WorkloadId(7), &vfio).unwrap();
+        assert_eq!(index.holds(NodeId(0), WorkloadId(7)), vec![1]);
+        assert_eq!(index.verdict(NodeId(0), &vfio).unwrap(), Verdict::NoRoom);
+        assert_eq!(index.fit(&vfio, &Pick::default()).best, None);
+        index.give(NodeId(0), WorkloadId(7), &vfio).unwrap();
+        assert_eq!(index.holds(NodeId(0), WorkloadId(7)), Vec::<u16>::new());
+        assert_eq!(index.verdict(NodeId(0), &vfio).unwrap(), Verdict::Admits);
+        // The walk counts each refusal.
+        let f = index.fit(&vfio, &Pick::default());
+        assert_eq!(
+            (f.best.map(|k| k.node), f.refused.device),
+            (Some(NodeId(0)), 1)
+        );
+        let f = index.fit(&win, &Pick::default());
+        assert_eq!(
+            (f.best.map(|k| k.node), f.refused.platform),
+            (Some(NodeId(1)), 1)
+        );
+        let f = index.fit(&model1, &Pick::default());
+        assert_eq!(
+            (f.best.map(|k| k.node), f.refused.gpu),
+            (Some(NodeId(0)), 1)
+        );
+    }
+
+    /// CP-T7.4, GPU load: do place a GPU box where two nodes match it, the one packing prefers (less
+    /// CPU free) with its GPU 70% busy and the other 10%; expect the less-loaded GPU to win, then,
+    /// the loads swapped as hex-gpu's samples would say, the other; and within a node, the idlest of
+    /// its GPUs held, memory in use counting as load.
+    #[test]
+    fn the_less_loaded_gpu_wins() {
+        use crate::model::{Ask, GpuLoad, Os};
+        const GIB: u64 = 1 << 30;
+        let mut index = FitIndex::new(&[
+            gpu_node(0, 4_000, Os::Linux, &[(1, 8 * GIB, 700)]),
+            gpu_node(1, 8_000, Os::Linux, &[(1, 8 * GIB, 100)]),
+        ])
+        .unwrap();
+        let gpu = asking(1, Class::Oci, Ask::default());
+        let cpu_only = asking(0, Class::Oci, Ask::default());
+        let pick = Pick {
+            scorer: Scorer::HEX,
+            ..Pick::default()
+        };
+        // Packing alone sends work to node 0.
+        assert_eq!(
+            index.fit(&cpu_only, &pick).best.map(|k| k.node),
+            Some(NodeId(0))
+        );
+        assert_eq!(index.fit(&gpu, &pick).best.map(|k| k.node), Some(NodeId(1)));
+        index
+            .set_gpu_load(
+                NodeId(0),
+                0,
+                GpuLoad {
+                    busy_per_mille: 50,
+                    memory_used: 0,
+                },
+            )
+            .unwrap();
+        index
+            .set_gpu_load(
+                NodeId(1),
+                0,
+                GpuLoad {
+                    busy_per_mille: 900,
+                    memory_used: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(index.fit(&gpu, &pick).best.map(|k| k.node), Some(NodeId(0)));
+        // Memory in use is load too: node 0's GPU idle but 95% of its memory in use.
+        index
+            .set_gpu_load(
+                NodeId(0),
+                0,
+                GpuLoad {
+                    busy_per_mille: 0,
+                    memory_used: 8 * GIB / 20 * 19,
+                },
+            )
+            .unwrap();
+        assert_eq!(index.fit(&gpu, &pick).best.map(|k| k.node), Some(NodeId(1)));
+        // Within a node: the idlest GPU is held.
+        let mut two = FitIndex::new(&[gpu_node(
+            0,
+            8_000,
+            Os::Linux,
+            &[(1, 8 * GIB, 600), (1, 8 * GIB, 200)],
+        )])
+        .unwrap();
+        two.take(NodeId(0), WorkloadId(1), &gpu).unwrap();
+        assert_eq!(two.holds(NodeId(0), WorkloadId(1)), vec![1]);
+        two.take(NodeId(0), WorkloadId(2), &gpu).unwrap();
+        assert_eq!(two.holds(NodeId(0), WorkloadId(2)), vec![0]);
+        two.give(NodeId(0), WorkloadId(1), &gpu).unwrap();
+        assert_eq!(two.holds(NodeId(0), WorkloadId(2)), vec![0]);
+        assert_eq!(two.verdict(NodeId(0), &gpu).unwrap(), Verdict::Admits);
     }
 
     #[test]
@@ -721,43 +1135,14 @@ mod tests {
     fn taking_more_than_is_free_is_refused_and_changes_nothing() {
         let mut index = FitIndex::new(&nodes(&[res(1000, 10, 0)])).unwrap();
         assert_eq!(
-            index.take(NodeId(0), &plain(res(2000, 1, 0))),
+            index.take(NodeId(0), W, &plain(res(2000, 1, 0))),
             Err(SimError::Resources(NodeId(0)))
         );
         assert_eq!(index.key(NodeId(0)).unwrap().cpu_milli, 1000);
         assert_eq!(
-            index.take(NodeId(3), &plain(res(1, 1, 0))),
+            index.take(NodeId(3), W, &plain(res(1, 1, 0))),
             Err(SimError::UnknownNode(NodeId(3)))
         );
-    }
-
-    /// T-T7.4.1: a sample that wants one node takes the first from its class's start that admits it.
-    #[test]
-    fn the_sample_stops_at_its_wanted_admitting_node() {
-        let index = FitIndex::new(&nodes(&[
-            res(8000, 16, 0),
-            res(2000, 16, 0),
-            res(4000, 4, 1),
-            res(3000, 16, 0),
-        ]))
-        .unwrap();
-        let demand = plain(res(1000, 8, 0));
-        let one = Sample {
-            seed: 3,
-            min_feasible: 1,
-            per_mille: 0,
-            ..Sample::default()
-        };
-        let s = index.sampled_fit(&demand, &one);
-        let first = (0..4)
-            .map(|o| (s.start + o) % 4)
-            .map(|at| NodeId(u32::try_from(at).unwrap()))
-            .find(|&n| index.verdict(n, &demand).unwrap() == Verdict::Admits)
-            .unwrap();
-        assert_eq!(s.best.map(|k| k.node), Some(first));
-        assert!(s.covers(first, 4));
-        let none = index.sampled_fit(&plain(res(1, 100, 0)), &one);
-        assert_eq!((none.best, none.span), (None, 4));
     }
 
     /// CLAUDE.md §3: do give `Shapes::of` as many incomparable shapes as its bound, then one more;
@@ -785,15 +1170,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn want_follows_kube_schedulers_floors() {
-        let s = Sample::default();
-        assert_eq!(
-            (s.want(10), s.want(1_000), s.want(10_000), s.want(0)),
-            (10, 100, 500, 0)
-        );
-    }
-
     proptest::proptest! {
         /// T-T7.4.1 (oracle test): after any sequence of takes and gives of any kinds, the whole-cluster
         /// sampled fit equals the brute-force least admitting key.
@@ -811,11 +1187,11 @@ mod tests {
             let mut index = FitIndex::new(&ns).unwrap();
             for (node, c, m, g, k) in ops {
                 let node = NodeId(node % u32::try_from(caps.len()).unwrap());
-                let _ = index.take(node, &Demand { need: res(c, m, g), kind: kind(k), class: Class::Oci });
+                let _ = index.take(node, W, &Demand { need: res(c, m, g), kind: kind(k), class: Class::Oci, ask: Default::default(), });
             }
             for (c, m, g, k) in needs {
-                let demand = Demand { need: res(c, m, g), kind: kind(k), class: Class::Oci };
-                proptest::prop_assert_eq!(index.sampled_fit(&demand, &Sample::whole()).best, oracle(&index, &demand));
+                let demand = Demand { need: res(c, m, g), kind: kind(k), class: Class::Oci, ask: Default::default(), };
+                proptest::prop_assert_eq!(index.fit(&demand, &Pick::default()).best, oracle(&index, &demand));
             }
         }
     }

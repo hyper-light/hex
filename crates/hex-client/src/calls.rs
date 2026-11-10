@@ -1,22 +1,40 @@
-//! What every client of a node agent does whatever carries its messages: a call waits for its answer by
-//! its request's id, a program's end goes to its `Proc`, and the connection's end reaches every call and
-//! program still waiting. A [`Transport`] moves the bytes: the agent's local `SOCK_SEQPACKET` socket on
-//! Linux (`linux.rs`), or a byte stream to the node agent in a Shards guest (`guest.rs`).
+//! What every client of a node agent does whatever carries its messages: a call waits for its answer by its
+//! request's id, a program's end goes to its `Proc`, and the connection's end reaches every call and program still
+//! waiting. A [`Transport`] moves the bytes: the agent's local `SOCK_SEQPACKET` socket on Linux (`linux.rs`), its
+//! framed `SOCK_STREAM` socket on macOS or Windows (`macos.rs`, `windows.rs`), or a framed byte stream to the node agent in a Shards guest
+//! (`guest.rs`).
+//!
+//! No thread of the client's reads the connection: whoever waits on it reads, one at a time, the reader's turn (a
+//! call for its answer or for room to send in, a `Proc` for its program's end), handing each message to whoever it
+//! is for and the turn to another still waiting as it goes, so an answer wakes the thread it answers and no thread
+//! between (goal 16: the socket's per-call cost; decision 3's client, which compares this with a reading thread of the
+//! client's own). In the event form a node's loop holds the turn for good and reads as its connection turns ready
+//! ([`Core::begin`], the guest's `Pump`). Each message is sent whole under the connection's send lock, so a stream's
+//! frames never interleave; one that finds no room waits for it reading what the agent sends while it holds the turn,
+//! as the agent reads no request while its answers wait for room in the client's socket, else waits on the connection
+//! for room and on a wake of its own, which the turn's holder writes as it hands the turn to it. The core waits on
+//! every connection the same way (poll(2), Winsock's `WSAPoll`), through the handle its transport lends it.
+//!
+//! The word that a given answer's ends were taken ([`Request::Taken`]), which the agent waits for before it lets its
+//! own copies go, is owed from the read that hands the answer on, before its taker wakes: queued ahead of every later
+//! request, never sent from inside a read, so the reader never waits on itself, and never lost ([`Owed`]).
 
-use std::collections::BTreeMap;
-use std::sync::mpsc::{RecvTimeoutError, SyncSender, sync_channel};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+
+use rustix::event::{PollFd, PollFlags};
 
 use hex_api::{
     BoxId, BoxInfo, BoxSpec, Class, Exit, Proc, Program, Refusal, Runtime, Signal, Stdio, Usage,
 };
 use hex_core::netns;
-use hex_core::wire::{self, Answer, Call, Header, Limits, Request, Streams};
+use hex_core::patience::Patience;
+use hex_core::wire::{self, Answer, Call, Header, Limits, Received, Request, Streams};
 
-use crate::copy::copy;
-use crate::{ANSWER_PATIENCE, MAX_LIST};
+use crate::MAX_LIST;
+use crate::copy::{copy, copy_in};
 
 /// What takes a call's answer in the event form ([`Core::begin`]), with its request's id (an exec's names
 /// its program): run once, on the thread that reads the connection, after the client's lock is let go.
@@ -24,10 +42,42 @@ pub type Then = Box<dyn FnOnce(u64, Result<Answer, Refusal>) + Send>;
 /// What takes an exec'd program's end in the event form: run once, as [`Then`] is.
 pub type Ended = Box<dyn FnOnce(Result<Exit, Refusal>) + Send>;
 
+/// How many kinds of call a client waits for an answer to, one wait each ([`kind_of`]): a hello and each [`Call`].
+pub const KINDS: usize = 13;
+
+/// The wait of `request`'s kind in `waits`, a client's table of its call kinds' learned waits (decision 9: a client's
+/// call's wait for its answer and its send is learned per call kind, since a delete waits on its box's emptying and a
+/// list on its parts, so a fast inspect's answer says nothing of theirs); `None` for one that has no answer (a
+/// release). A table's order: hello, create, start, exec, signal, inspect, usage, list, delete, netns, then wire
+/// a program's kill, an exec asking for streams and a run.
+pub(crate) fn kind_of<'a>(waits: &'a [Patience; KINDS], request: &Request) -> Option<&'a Patience> {
+    let n = match request {
+        Request::Hello { .. } => 0,
+        Request::Call(call) => match call {
+            Call::Create(_) => 1,
+            Call::Start(_) => 2,
+            Call::Exec { .. } => 3,
+            Call::Signal { .. } => 4,
+            Call::Inspect(_) => 5,
+            Call::Usage(_) => 6,
+            Call::List => 7,
+            Call::Delete(_) => 8,
+            Call::Netns => 9,
+            Call::Kill { .. } => 10,
+            Call::ExecStreams { .. } => 11,
+            Call::Run { .. } => 12,
+        },
+        Request::Release | Request::Taken | Request::StreamsReady => return None,
+    };
+    waits.get(n)
+}
+
 /// Why a send didn't go.
 pub enum Sent {
-    /// The connection is gone: the reading side says why.
+    /// The connection is gone: the call's wait says why.
     Gone,
+    /// No room in the agent's socket in all the call's patience: the agent isn't reading.
+    Full(Refusal),
     Refused(Refusal),
 }
 
@@ -41,11 +91,142 @@ pub type Lent<'a> = std::os::windows::io::BorrowedHandle<'a>;
 /// No descriptors: what lends nothing to a message.
 const NONE: &[Lent<'static>] = &[];
 
-/// What carries a client's messages to its node agent.
+/// An OS handle the core waits on: a file descriptor on Unix, a Winsock socket on Windows.
+#[cfg(unix)]
+pub type Handle<'a> = std::os::fd::BorrowedFd<'a>;
+#[cfg(windows)]
+pub type Handle<'a> = std::os::windows::io::BorrowedSocket<'a>;
+
+/// What a wait on a connection found.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Ready {
+    /// Something to read, or its end.
+    read: bool,
+    /// Room to write.
+    write: bool,
+    /// The waiter's wake was written: the reader's turn was handed to it, or the connection ended.
+    woken: bool,
+}
+
+/// Waits until `conn` has something to read or has ended, or has room to write (with `write`), or `wake` is
+/// written, at most `wait` (none: until one does). An interrupted wait finds nothing.
+fn ready(
+    conn: Handle<'_>,
+    write: bool,
+    wake: Option<&Wake>,
+    wait: Option<Duration>,
+) -> Result<Ready, Refusal> {
+    let flags = if write {
+        PollFlags::IN | PollFlags::OUT
+    } else {
+        PollFlags::IN
+    };
+    let mut fds = vec![PollFd::from_borrowed_fd(conn, flags)];
+    if let Some(wake) = wake {
+        fds.push(PollFd::from_borrowed_fd(wake.handle(), PollFlags::IN));
+    }
+    match rustix::event::poll(&mut fds, wait.map(timespec).as_ref()) {
+        Ok(_) => {}
+        Err(e) if e == rustix::io::Errno::INTR => return Ok(Ready::default()),
+        Err(e) => {
+            return Err(Refusal::Broken(format!(
+                "waiting on the node agent's connection: {e}"
+            )));
+        }
+    }
+    let got = |n: usize| fds.get(n).map_or(PollFlags::empty(), PollFd::revents);
+    let (conn, woken) = (got(0), got(1));
+    Ok(Ready {
+        read: conn.intersects(PollFlags::IN | PollFlags::ERR | PollFlags::HUP),
+        write: conn.contains(PollFlags::OUT),
+        woken: !woken.is_empty(),
+    })
+}
+
+/// What wakes a send waiting for room on the connection when the reader's turn is handed to it, or the connection
+/// ends: one end of a pair the waiter polls beside the connection, made only when a send first waits with the turn
+/// another's, so a send that finds room pays nothing for it. A Unix socket pair, or on Windows (whose `WSAPoll` waits
+/// on sockets alone) a loopback datagram socket connected to itself, so no other socket can write it.
+struct Wake {
+    #[cfg(unix)]
+    read: std::os::unix::net::UnixStream,
+    #[cfg(unix)]
+    write: std::os::unix::net::UnixStream,
+    #[cfg(windows)]
+    sock: std::net::UdpSocket,
+}
+
+impl Wake {
+    #[cfg(unix)]
+    fn new() -> std::io::Result<Self> {
+        let (read, write) = std::os::unix::net::UnixStream::pair()?;
+        read.set_nonblocking(true)?;
+        write.set_nonblocking(true)?;
+        Ok(Self { read, write })
+    }
+
+    #[cfg(windows)]
+    fn new() -> std::io::Result<Self> {
+        let sock = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+        sock.connect(sock.local_addr()?)?;
+        sock.set_nonblocking(true)?;
+        Ok(Self { sock })
+    }
+
+    /// Wakes the waiter: a byte it reads as one wake, however many came.
+    fn wake(&self) {
+        #[cfg(unix)]
+        let _ = std::io::Write::write(&mut &self.write, &[1]);
+        #[cfg(windows)]
+        let _ = self.sock.send(&[1]);
+    }
+
+    /// What woke it, read, so it wakes no one until written again.
+    fn drain(&self) {
+        let mut buf = [0u8; 64];
+        #[cfg(unix)]
+        while matches!(std::io::Read::read(&mut &self.read, &mut buf), Ok(n) if n > 0) {}
+        #[cfg(windows)]
+        while self.sock.recv(&mut buf).is_ok() {}
+    }
+
+    fn handle(&self) -> Handle<'_> {
+        #[cfg(unix)]
+        return std::os::fd::AsFd::as_fd(&self.read);
+        #[cfg(windows)]
+        std::os::windows::io::AsSocket::as_socket(&self.sock)
+    }
+}
+
+/// What a transport's read hands each whole message to: the message, with the descriptors that came with it.
+pub(crate) type Take<'a> = dyn FnMut(&Received<'_>, Vec<hex_api::End>) -> Result<(), Refusal> + 'a;
+
+/// What carries a client's messages to its node agent. Its connection is read and written without waiting, and
+/// waited on through its handle ([`Transport::handle`]), by whoever holds the reader's turn.
 pub trait Transport: Send + Sync + 'static {
-    /// Sends one message, with the descriptors lent to it.
-    fn send(&self, bytes: &[u8], lent: &[Lent<'_>]) -> Result<(), Sent>;
-    /// Ends the connection both ways: the reading side sees the end.
+    /// What the turn's holder reads into, and what of a message has come so far: kept across reads and across
+    /// holders, so a frame cut across reads is whole when its last bytes come.
+    type Reading: Send;
+    /// Its call kinds' learned waits for an answer, by [`kind_of`]'s order: each its own record's, as its
+    /// transport and its agent answer it, measuring where none is recorded yet (decision 9).
+    fn answers() -> &'static [Patience; KINDS];
+    /// A read state for a fresh connection.
+    fn reading(&self) -> Self::Reading;
+    /// The connection's OS handle, lent for the core to wait on.
+    fn handle(&self) -> Handle<'_>;
+    /// Reads what has come, without waiting: each whole message, with the descriptors that came with it, handed to
+    /// `take`, a message cut across reads kept in `reading` for the next. Whether anything came; the connection's end,
+    /// or a message `take` refuses, is the error, saying why.
+    fn recv(&self, reading: &mut Self::Reading, take: &mut Take<'_>) -> Result<bool, Refusal>;
+    /// The bytes a message goes as: itself where the transport keeps messages whole, framed where it is a stream.
+    fn frame(message: Vec<u8>) -> Result<Vec<u8>, Refusal> {
+        Ok(message)
+    }
+    /// Writes what it can of `bytes` past `*at` without waiting, the descriptors lent riding with its first byte,
+    /// moving `at` on: whether all of it is out. The caller holds the connection's send lock across a message's
+    /// writes, so no other message's bytes come between them.
+    fn try_send(&self, bytes: &[u8], at: &mut usize, lent: &[Lent<'_>]) -> Result<bool, Sent>;
+    /// Ends the connection both ways: whoever reads next sees the end.
     fn shutdown(&self);
     /// Whether every stream of an exec is a connection of its own that it makes, and no descriptor rides with a
     /// message: a guest's. It makes those an exec asks for ([`Transport::asks`]) and takes the pipes the caller
@@ -62,6 +243,27 @@ pub trait Transport: Send + Sync + 'static {
     }
     /// The streams `ask` names for exec `exec`, made here, its program's ends the agent's to find (a
     /// guest's stdio connections, named for it): only where [`Transport::MAKES_ASKED`].
+    /// Opens an offered guest's named streams in this caller, never by importing a reserved remote socket.
+    /// The synchronous call temporarily hands off its reader turn while this bounded connect runs.
+    /// Names a reserved guest exec without opening any of its stdio connections here.
+    fn stream_offer(&self, exec: u64, streams: Streams) -> Result<wire::StreamOffer, Refusal> {
+        let _ = (exec, streams);
+        Err(Refusal::Invalid {
+            what: "stream offer",
+            why: "this transport passes native ends".to_owned(),
+        })
+    }
+
+    fn open_offer(&self, offer: &wire::StreamOffer) -> Result<hex_api::Given, Refusal> {
+        let _ = offer;
+        Err(Refusal::Platform {
+            what: "caller-owned guest streams",
+            platform: std::env::consts::OS,
+            why: "this transport receives native stream ends instead of guest connection offers"
+                .to_owned(),
+        })
+    }
+
     fn asks(&self, exec: u64, ask: hex_api::Ask) -> Result<hex_api::Given, Refusal> {
         let _ = (exec, ask);
         Err(Refusal::Broken(
@@ -74,10 +276,48 @@ pub(crate) fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
     Refusal::Broken("a lock of the node agent's client was poisoned".to_owned())
 }
 
-/// What the reading side and the callers share.
-pub struct Shared<T> {
+/// The longest one wait on a connection can be: `i32::MAX` milliseconds, the most poll(2) takes where it has no
+/// `ppoll` (macOS; Windows' `WSAPoll`), its timeout a C `int` of milliseconds. A longer wait waits this long at a
+/// time, its caller waiting again until its own deadline.
+const MOST_ONE_WAIT: Duration = Duration::from_millis(2_147_483_647);
+/// [`MOST_ONE_WAIT`] as poll(2) takes it.
+const MOST_ONE_WAIT_SPEC: rustix::event::Timespec = rustix::event::Timespec {
+    tv_sec: 2_147_483,
+    tv_nsec: 647_000_000,
+};
+
+/// `wait` as poll(2) takes it, at most [`MOST_ONE_WAIT`].
+fn timespec(wait: Duration) -> rustix::event::Timespec {
+    if wait >= MOST_ONE_WAIT {
+        return MOST_ONE_WAIT_SPEC;
+    }
+    rustix::event::Timespec::try_from(wait).unwrap_or(MOST_ONE_WAIT_SPEC)
+}
+
+/// What the callers and the `Proc`s share: the connection, what waits on it, what its reader's turn reads into, and
+/// its send lock.
+pub struct Shared<T: Transport> {
     pub(crate) transport: T,
     state: Mutex<State>,
+    /// The turn's holder's: one read at a time.
+    reading: Mutex<T::Reading>,
+    /// Held across one whole message's writes.
+    sending: Mutex<()>,
+    /// What the client owes the agent ahead of any request it sends from now.
+    owed: Mutex<Owed>,
+}
+
+/// The words a client owes its agent ahead of any later request: each given answer's [`Request::Taken`], framed,
+/// queued by the read that hands the answer on before its taker wakes, so a read never waits to send. They go out
+/// whole, in order, under the send lock: first by whoever sends next, before its own message, and by the reader's
+/// turn's holder, which waits for room for them beside what comes, so one goes as soon as the agent reads. None is
+/// dropped: an unsent one leaves the agent holding the given ends, and with them its program's stdin open, until the
+/// connection closes. At most `bound` wait: the agent's budget of programs (`Hello::budgets`), which counts the given
+/// ends not yet taken, so the queue can't grow past what the agent can give (CLAUDE.md §2).
+#[derive(Default)]
+struct Owed {
+    words: VecDeque<Vec<u8>>,
+    bound: usize,
 }
 
 #[derive(Default)]
@@ -95,17 +335,64 @@ struct State {
     /// guest's connections), or those its agent's answer gave as its descriptors. An exec refused has its ends
     /// closed with its answer.
     given: BTreeMap<u64, hex_api::Given>,
+    /// Whether a thread holds the reader's turn, or the event form's loop does for good.
+    reading: bool,
+    /// The execs whose `Proc` is in its wait, which the turn may be handed to.
+    waiting: BTreeSet<u64>,
+}
+
+impl State {
+    /// The reader's turn given up by its holder: handed to the oldest call that can take it (one whose request
+    /// went, or whose send waits for room), else to a `Proc` in its wait, else free, so while anyone waits on the
+    /// connection someone reads it. A call queued for the send lock can't read until it has it, so it is passed by.
+    fn pass_turn(&mut self) {
+        for waiting in self.calls.values() {
+            if waiting.reads
+                && let Taker::Wait(mail) = &waiting.answer
+                && mail.try_send(Mail::Turn).is_ok()
+            {
+                if let Some(wake) = &waiting.wake {
+                    wake.wake();
+                }
+                return;
+            }
+        }
+        for exec in &self.waiting {
+            if let Some(Watching::Proc(ending)) = self.programs.get(exec)
+                && let Ok(mut ended) = ending.state.lock()
+            {
+                ended.turn = true;
+                ending.came.notify_all();
+                return;
+            }
+        }
+        self.reading = false;
+    }
 }
 
 struct Waiting {
     answer: Taker,
+    /// At most one preparation precedes an exec's final answer.
+    offered: bool,
     /// A list's boxes from the parts that came so far.
     boxes: Vec<BoxInfo>,
+    /// Whether it can take the reader's turn: its request sent, or its send waiting for room with the send lock held.
+    reads: bool,
+    /// While its send waits for room with the reader's turn another's: the wake it waits on besides the connection,
+    /// written as the turn is handed to it or the connection ends.
+    wake: Option<Arc<Wake>>,
+}
+
+/// What a waiting call is handed: its answer, or the reader's turn. The answer is boxed, so a turn is no bigger than
+/// a pointer.
+enum Mail {
+    Answer(Box<Result<Answer, Refusal>>),
+    Turn,
 }
 
 /// What takes a call's answer: a caller waiting on it, or a completion ([`Then`]).
 enum Taker {
-    Wait(SyncSender<Result<Answer, Refusal>>),
+    Wait(SyncSender<Mail>),
     Then(Then),
 }
 
@@ -122,26 +409,36 @@ impl Taker {
     /// Gives `answer` to its taker: at once to a waiting caller, or as a completion run later.
     fn give(self, id: u64, answer: Result<Answer, Refusal>, due: &mut Vec<Due>) {
         match self {
-            Self::Wait(tx) => {
-                let _ = tx.try_send(answer);
+            Self::Wait(mail) => {
+                let _ = mail.try_send(Mail::Answer(Box::new(answer)));
             }
             Self::Then(then) => due.push(Box::new(move || then(id, answer))),
         }
     }
 }
 
-/// A program's end, once it has come.
+/// A program's end, once it has come, and its `Proc`'s waking: by its end, or by the reader's turn handed to its wait.
 #[derive(Default)]
 struct Ending {
-    exit: Mutex<Option<Result<Exit, Refusal>>>,
+    state: Mutex<EndState>,
     came: Condvar,
 }
 
-impl<T> Shared<T> {
+#[derive(Default)]
+struct EndState {
+    exit: Option<Result<Exit, Refusal>>,
+    turn: bool,
+}
+
+impl<T: Transport> Shared<T> {
     pub(crate) fn new(transport: T) -> Self {
+        let reading = transport.reading();
         Self {
             transport,
             state: Mutex::new(State::default()),
+            reading: Mutex::new(reading),
+            sending: Mutex::new(()),
+            owed: Mutex::new(Owed::default()),
         }
     }
 
@@ -149,53 +446,67 @@ impl<T> Shared<T> {
         self.state.lock().map_err(poisoned)
     }
 
-    /// Hands one message to whoever waits for it: an answer to its call, a program's end to its
-    /// `Proc` or completion. One nobody waits for (a call that gave up waiting, a program released) has no
-    /// taker. Completions run after the lock is let go, so one may call the client again.
-    pub(crate) fn deliver(&self, header: Header, answer: Answer) -> Result<(), Refusal> {
-        self.deliver_with(header, answer, Vec::new())
-    }
-
-    /// [`Shared::deliver`], with the descriptors that came with the message: a given answer's, one for each
-    /// stream it names, in order, kept for its exec.
-    #[cfg(unix)]
-    pub(crate) fn deliver_with(
+    /// Hands one message to whoever waits for it: an answer to its call, a program's end to its `Proc` or completion;
+    /// a given answer's descriptors, one for each stream it names, in order, kept for its exec. One nobody waits for (a
+    /// call that gave up waiting, a program released) has no taker. Completions run after the lock is let go, so one
+    /// may call the client again.
+    fn deliver(
         &self,
         header: Header,
         answer: Answer,
-        fds: Vec<std::os::fd::OwnedFd>,
+        fds: Vec<hex_api::End>,
     ) -> Result<(), Refusal> {
-        if let Answer::Given { given, .. } = &answer {
-            let mut fds = fds.into_iter();
-            let mut take = |on: bool| if on { fds.next() } else { None };
-            let ends = hex_api::Given {
-                stdin: take(given.stdin),
-                stdout: take(given.stdout),
-                stderr: take(given.stderr),
-            };
-            self.state()?.given.insert(header.id, ends);
+        if let Answer::Given { .. } = &answer {
+            // Owed before its taker wakes below, so the word goes ahead of anything its caller sends after.
+            self.owe(header.id, &Request::Taken)?;
         }
-        self.deliver_inner(header, answer)
-    }
-
-    #[cfg(not(unix))]
-    pub(crate) fn deliver_with(
-        &self,
-        header: Header,
-        answer: Answer,
-        _fds: Vec<()>,
-    ) -> Result<(), Refusal> {
-        self.deliver_inner(header, answer)
-    }
-
-    fn deliver_inner(&self, header: Header, answer: Answer) -> Result<(), Refusal> {
         let mut due: Vec<Due> = Vec::new();
         {
             let mut state = self.state()?;
+            if let Answer::Given { given, .. } = &answer {
+                let mut fds = fds.into_iter();
+                let mut take = |on: bool| if on { fds.next() } else { None };
+                let ends = hex_api::Given {
+                    stdin: take(given.stdin),
+                    stdout: take(given.stdout),
+                    stderr: take(given.stderr),
+                };
+                state.given.insert(header.id, ends);
+            }
             match answer {
+                Answer::Offered(offer) => {
+                    if !state.programs.contains_key(&header.id)
+                        || !state.calls.contains_key(&header.id)
+                    {
+                        // A legitimate answer can outlive its caller's patience. Cancel just its preparation,
+                        // under the same program-bound word queue as Taken, without ending unrelated programs.
+                        self.owe(header.id, &Request::Release)?;
+                        return Ok(());
+                    }
+                    let Some(waiting) = state.calls.get_mut(&header.id) else {
+                        return Ok(());
+                    };
+                    if waiting.offered {
+                        return Err(Refusal::Broken(
+                            "an exec was offered streams twice".to_owned(),
+                        ));
+                    }
+                    let Taker::Wait(mail) = &waiting.answer else {
+                        return Err(Refusal::Invalid {
+                            what: "event-form guest streams",
+                            why: "a connection offer must be opened by its synchronous caller"
+                                .to_owned(),
+                        });
+                    };
+                    mail.try_send(Mail::Answer(Box::new(Ok(Answer::Offered(offer)))))
+                        .map_err(|_| {
+                            Refusal::Broken("a stream offer has no waiting taker".to_owned())
+                        })?;
+                    waiting.offered = true;
+                }
                 Answer::Exited(exit) => match state.programs.remove(&header.id) {
                     Some(Watching::Proc(ending)) => {
-                        *ending.exit.lock().map_err(poisoned)? = Some(Ok(exit));
+                        ending.state.lock().map_err(poisoned)?.exit = Some(Ok(exit));
                         ending.came.notify_all();
                         // Its Proc forgets it when it is dropped or has its end.
                         state.programs.insert(header.id, Watching::Proc(ending));
@@ -223,8 +534,20 @@ impl<T> Shared<T> {
                     }
                 }
                 answer => {
-                    // An exec that started no program has no end to come, and no streams: a
-                    // completion waiting for its end is let go, and the ends made for it close.
+                    if matches!(&answer, Answer::Started { .. })
+                        && state
+                            .calls
+                            .get(&header.id)
+                            .is_some_and(|waiting| waiting.offered)
+                        && !state.given.contains_key(&header.id)
+                    {
+                        return Err(Refusal::Broken(
+                            "an offered exec started before its caller opened the streams"
+                                .to_owned(),
+                        ));
+                    }
+                    // An exec that started no program has no end to come, and no streams: a completion waiting for
+                    // its end is let go, and the ends made for it close.
                     if !matches!(answer, Answer::Started { .. } | Answer::Given { .. }) {
                         if matches!(state.programs.get(&header.id), Some(Watching::Then(_))) {
                             state.programs.remove(&header.id);
@@ -253,7 +576,76 @@ impl<T> Shared<T> {
         Ok(())
     }
 
-    /// The connection has ended: every call waiting and every program's `Proc` or completion hear why.
+    /// Owes the agent the word that exec `exec`'s given ends were taken, ahead of every later request ([`Owed`]). Past
+    /// the agent's budget of programs, which each given answer's ends hold until taken, the agent has given more than
+    /// it can, and the read that brought it ends the connection.
+    fn owe(&self, exec: u64, request: &Request) -> Result<(), Refusal> {
+        let word = wire::request(exec, request, wire::MAX_MESSAGE)
+            .map_err(Refusal::from)
+            .and_then(T::frame)?;
+        let mut owed = self.owed.lock().map_err(poisoned)?;
+        if owed.words.len() >= owed.bound {
+            return Err(Refusal::Exhausted {
+                what: "given ends and stream preparations awaiting the client's acknowledgement or cancellation, the node agent's programs",
+                bound: owed.bound,
+            });
+        }
+        owed.words.push_back(word);
+        Ok(())
+    }
+
+    /// Whether anything is owed ([`Owed`]).
+    fn owing(&self) -> bool {
+        self.owed.lock().is_ok_and(|owed| !owed.words.is_empty())
+    }
+
+    /// Writes what is owed, each word whole and in order, without waiting, the send lock held (`_whole`): whether all
+    /// of it is out. A word cut short on a stream keeps its rest first, so nothing comes between its bytes; one a
+    /// failed write cut short leaves the stream unable to carry another, and the connection goes.
+    fn send_owed(&self, _whole: &MutexGuard<'_, ()>) -> Result<bool, Sent> {
+        loop {
+            let word = self
+                .owed
+                .lock()
+                .map_err(|e| Sent::Refused(poisoned(e)))?
+                .words
+                .pop_front();
+            let Some(word) = word else {
+                return Ok(true);
+            };
+            let mut at = 0;
+            let sent = self.transport.try_send(&word, &mut at, NONE);
+            if !matches!(sent, Ok(true)) {
+                let rest = word.get(at..).unwrap_or_default().to_vec();
+                self.owed
+                    .lock()
+                    .map_err(|e| Sent::Refused(poisoned(e)))?
+                    .words
+                    .push_front(rest);
+            }
+            match sent {
+                Ok(true) => {}
+                Ok(false) => return Ok(false),
+                Err(e) => {
+                    if at > 0 {
+                        self.transport.shutdown();
+                    }
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    /// Writes what is owed now, if the send lock is free and there is room; whoever holds the lock writes it before its
+    /// own message and after it. The connection's end, should a word find it, is the next read's to see.
+    pub(crate) fn send_owed_now(&self) {
+        if let Ok(whole) = self.sending.try_lock() {
+            let _ = self.send_owed(&whole);
+        }
+    }
+
+    /// The connection has ended: every call waiting and every program's `Proc` or completion hear why, and no one
+    /// reads any more.
     pub(crate) fn close(&self, why: Refusal) {
         let mut due: Vec<Due> = Vec::new();
         {
@@ -261,8 +653,15 @@ impl<T> Shared<T> {
                 return;
             };
             let why = state.refused.take().unwrap_or(why);
+            // HEX-RT-17: an unanswered exec has not started, including an unsent Deferred. Its call alone
+            // gets the refusal; reporting an end too would invent a program and can orphan a remote early end.
+            // Snapshot before draining: at most the pending calls already held by this connection.
+            let pending: BTreeSet<u64> = state.calls.keys().copied().collect();
             for (id, waiting) in std::mem::take(&mut state.calls) {
                 waiting.answer.give(id, Err(why.clone()), &mut due);
+                if let Some(wake) = &waiting.wake {
+                    wake.wake();
+                }
             }
             let lost = Refusal::Broken(format!(
                 "the connection to the node agent closed before the program's end came: {why}"
@@ -270,13 +669,17 @@ impl<T> Shared<T> {
             for (exec, watching) in std::mem::take(&mut state.programs) {
                 match watching {
                     Watching::Proc(ending) => {
-                        if let Ok(mut exit) = ending.exit.lock()
-                            && exit.is_none()
+                        if let Ok(mut ended) = ending.state.lock()
+                            && ended.exit.is_none()
                         {
-                            *exit = Some(Err(lost.clone()));
+                            ended.exit = Some(Err(lost.clone()));
                             ending.came.notify_all();
                         }
                         state.programs.insert(exec, Watching::Proc(ending));
+                    }
+                    Watching::Then(ended) if pending.contains(&exec) => {
+                        // Release the callback's captures outside the state lock, without invoking it.
+                        due.push(Box::new(move || drop(ended)));
                     }
                     Watching::Then(ended) => {
                         let lost = lost.clone();
@@ -285,9 +688,357 @@ impl<T> Shared<T> {
                 }
             }
             state.closed = Some(why);
+            state.reading = false;
         }
         for run in due {
             run();
+        }
+    }
+
+    /// The connection ended for `why`: everyone waiting told ([`Shared::close`]), and why, as each is told.
+    fn end(&self, why: Refusal) -> Refusal {
+        self.transport.shutdown();
+        self.close(why.clone());
+        self.state()
+            .ok()
+            .and_then(|state| state.closed.clone())
+            .unwrap_or(why)
+    }
+
+    /// One wait and read by the turn's holder: the connection waited on at most `wait` (none: as long as it takes),
+    /// for what comes and, while words are owed ([`Owed`]), for room to send them, then what has come read and handed
+    /// to whoever it is for, and what is owed sent if it can go. Whether anything came; the connection's end is the
+    /// error, everyone waiting told why.
+    fn turn(&self, wait: Option<Duration>) -> Result<bool, Refusal> {
+        let owing = self.owing();
+        let ready = match ready(self.transport.handle(), owing, None, wait) {
+            Ok(ready) => ready,
+            Err(why) => return Err(self.end(why)),
+        };
+        let came = if ready.read { self.recv()? } else { false };
+        if owing || came {
+            self.send_owed_now();
+        }
+        Ok(came)
+    }
+
+    /// What has come, read by the turn's holder (or the event form's loop) without waiting and handed to whoever it
+    /// is for. Whether anything came; the connection's end, or a message that isn't an answer, is the error, everyone
+    /// waiting told why.
+    pub(crate) fn recv(&self) -> Result<bool, Refusal> {
+        // A lock poisoned mid-read leaves the connection's messages unknown: it ends, everyone waiting told.
+        let mut reading = match self.reading.lock() {
+            Ok(reading) => reading,
+            Err(e) => return Err(self.end(poisoned(e))),
+        };
+        let mut take = |msg: &Received<'_>, fds: Vec<hex_api::End>| -> Result<(), Refusal> {
+            let (header, answer) = wire::read_answer(msg, wire::MAX_MESSAGE).map_err(|fault| {
+                match fault {
+                    // An agent of another wire: refused by type, naming both wires and both builds.
+                    wire::Fault::Wire { .. } => Refusal::from(fault),
+                    fault => Refusal::Broken(format!(
+                        "the node agent sent a message that isn't an answer: {fault}"
+                    )),
+                }
+            })?;
+            self.deliver(header, answer, fds)
+        };
+        let got = self.transport.recv(&mut reading, &mut take);
+        drop(reading);
+        got.map_err(|why| self.end(why))
+    }
+
+    /// The event form: the connection is read by the caller's loop from now on ([`Shared::recv`]), never by a call
+    /// or a `Proc`, which wait for what the loop hands them.
+    pub(crate) fn read_by_loop(&self) -> Result<(), Refusal> {
+        self.state()?.reading = true;
+        Ok(())
+    }
+
+    /// Whether its connection has ended.
+    fn closed(&self) -> bool {
+        !self.state().is_ok_and(|state| state.closed.is_none())
+    }
+}
+
+/// A call while it is made: its place among the calls, its mailbox, its answer once come, and whether it holds the
+/// reader's turn. However it goes it hands on a turn it holds or was handed, and forgets the call if unanswered.
+struct Caller<'a, T: Transport> {
+    shared: &'a Shared<T>,
+    id: u64,
+    mail: Receiver<Mail>,
+    /// Whether it holds the reader's turn.
+    mine: bool,
+    /// Its answer, come to its mailbox and not yet returned.
+    answer: Option<Result<Answer, Refusal>>,
+    /// Answered: an exec's place for its program's end is then its `Proc`'s, and its streams' ends its exec's.
+    answered: bool,
+}
+
+impl<'a, T: Transport> Caller<'a, T> {
+    /// A call's place among the calls, with `program`, an exec's place for the end of the program it starts, made
+    /// before the exec goes, so the end can't come first.
+    fn new(shared: &'a Shared<T>, program: Option<Arc<Ending>>) -> Result<Self, Refusal> {
+        // An answer, and the reader's turn handed to it before that: never more at once.
+        let (tx, mail) = sync_channel(2);
+        let mut state = shared.state()?;
+        if let Some(why) = &state.closed {
+            return Err(why.clone());
+        }
+        let id = state
+            .next
+            .checked_add(1)
+            .ok_or_else(|| Refusal::Broken("the client's request ids ran out".to_owned()))?;
+        state.next = id;
+        state.calls.insert(
+            id,
+            Waiting {
+                answer: Taker::Wait(tx),
+                offered: false,
+                boxes: Vec::new(),
+                reads: false,
+                wake: None,
+            },
+        );
+        if let Some(program) = program {
+            state.programs.insert(id, Watching::Proc(program));
+        }
+        drop(state);
+        Ok(Self {
+            shared,
+            id,
+            mail,
+            mine: false,
+            answer: None,
+            answered: false,
+        })
+    }
+
+    /// What came to its mailbox: the reader's turn, its answer.
+    fn collect(&mut self) {
+        while let Ok(mail) = self.mail.try_recv() {
+            self.take(mail);
+        }
+    }
+
+    fn take(&mut self, mail: Mail) {
+        match mail {
+            Mail::Turn => self.mine = true,
+            Mail::Answer(answer) => self.answer = Some(*answer),
+        }
+    }
+
+    /// Whether it can take the reader's turn from now: its send under way with the send lock held, or its request
+    /// sent and its answer awaited.
+    fn reads(&self) -> Result<(), Refusal> {
+        if let Some(waiting) = self.shared.state()?.calls.get_mut(&self.id) {
+            waiting.reads = true;
+        }
+        Ok(())
+    }
+
+    /// Sends `bytes` whole with `lent`, under the send lock, waiting for room in the agent's socket until `deadline`
+    /// (none: as long as it takes), its call's learned wait (`patience`, named in a refusal). The node agent reads no
+    /// request while its answers wait for room in the client's socket, so a send waiting for room has someone reading:
+    /// itself while it holds the reader's turn, which it takes when free or is handed, reading what comes as it waits;
+    /// else the turn's holder, which hands the turn to it, waking it, as it goes.
+    fn send(
+        &mut self,
+        bytes: &[u8],
+        lent: &[Lent<'_>],
+        deadline: Option<Instant>,
+        patience: Option<Duration>,
+    ) -> Result<(), Sent> {
+        let shared = self.shared;
+        let whole = shared
+            .sending
+            .lock()
+            .map_err(|e| Sent::Refused(poisoned(e)))?;
+        self.reads().map_err(Sent::Refused)?;
+        let mut at = 0;
+        // Made the first time the send waits with the turn another's, so a send that finds room pays nothing for it.
+        let mut woken: Option<Arc<Wake>> = None;
+        let sent = loop {
+            // What is owed goes first, whole, before this message's first byte.
+            let owed = if at == 0 {
+                shared.send_owed(&whole)
+            } else {
+                Ok(true)
+            };
+            match owed {
+                Ok(true) => match shared.transport.try_send(bytes, &mut at, lent) {
+                    Ok(true) => break Ok(()),
+                    Ok(false) => {}
+                    Err(e) => break Err(e),
+                },
+                Ok(false) => {}
+                Err(e) => break Err(e),
+            }
+            let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+            if left.is_some_and(|l| l.is_zero()) {
+                break Err(Sent::Full(Refusal::Os {
+                    op: "sending to the node agent",
+                    why: format!(
+                        "no room in its socket for {:?}, twice the slowest answer to a call of its kind: it isn't \
+                         reading",
+                        patience.unwrap_or_default()
+                    ),
+                }));
+            }
+            if let Err(e) = self.wait_for_room(&mut woken, left) {
+                break Err(e);
+            }
+        };
+        if woken.is_some()
+            && let Ok(mut state) = shared.state()
+            && let Some(waiting) = state.calls.get_mut(&self.id)
+        {
+            waiting.wake = None;
+        }
+        // A message cut short on a stream leaves the connection unable to carry another: it goes.
+        if sent.is_err() && at > 0 {
+            shared.transport.shutdown();
+        }
+        // What came owed while it sent goes now if it can; the rest is the next sender's, or the reader's.
+        if sent.is_ok() {
+            let _ = shared.send_owed(&whole);
+        }
+        sent
+    }
+
+    /// One wait for room for its send, at most `left` (none: as long as it takes): reading what the agent sends as
+    /// it waits while it holds the reader's turn, which it takes when free or is handed; else waiting on the
+    /// connection for room and on its wake (`woken`, made once and kept with the call, where the holder handing the
+    /// turn on finds it) for the turn. The connection's end is [`Sent::Gone`], its why the call's answer.
+    fn wait_for_room(
+        &mut self,
+        woken: &mut Option<Arc<Wake>>,
+        left: Option<Duration>,
+    ) -> Result<(), Sent> {
+        let shared = self.shared;
+        let wake = {
+            let mut state = shared.state().map_err(Sent::Refused)?;
+            self.collect();
+            if self.answer.is_some() || state.closed.is_some() {
+                return Err(Sent::Gone);
+            }
+            if !self.mine && !state.reading {
+                state.reading = true;
+                self.mine = true;
+            }
+            if self.mine {
+                None
+            } else {
+                let wake = match woken {
+                    Some(wake) => Arc::clone(wake),
+                    None => {
+                        let made = Wake::new().map_err(|e| {
+                            Sent::Refused(Refusal::os(
+                                "making the wake a send waits on for the reader's turn",
+                                e,
+                            ))
+                        })?;
+                        Arc::clone(woken.insert(Arc::new(made)))
+                    }
+                };
+                if let Some(waiting) = state.calls.get_mut(&self.id) {
+                    waiting.wake = Some(Arc::clone(&wake));
+                }
+                Some(wake)
+            }
+        };
+        let handle = shared.transport.handle();
+        match wake {
+            // The turn its: what the agent sends read as it comes, until there's room.
+            None => {
+                let got =
+                    ready(handle, true, None, left).map_err(|e| Sent::Refused(shared.end(e)))?;
+                if got.read && shared.recv().is_err() {
+                    // The connection ended: every call waiting was told why, this one among them.
+                    self.mine = false;
+                    return Err(Sent::Gone);
+                }
+            }
+            // The turn another's: room waited for, and the turn, should it be handed to this call.
+            Some(wake) => {
+                let got = ready(handle, true, Some(&wake), left)
+                    .map_err(|e| Sent::Refused(shared.end(e)))?;
+                if got.woken {
+                    wake.drain();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Its answer, waited for until `deadline` (none: as long as it takes): read by this thread while it holds the
+    /// reader's turn, taken when free or handed to it, else handed to it by the thread that holds the turn (or the
+    /// event form's loop). `None` once the deadline has passed.
+    fn wait(&mut self, deadline: Option<Instant>) -> Option<Result<Answer, Refusal>> {
+        let shared = self.shared;
+        if let Err(why) = self.reads() {
+            return Some(Err(why));
+        }
+        loop {
+            self.collect();
+            if let Some(answer) = self.answer.take() {
+                self.answered = answer.is_ok();
+                return Some(answer);
+            }
+            if !self.mine {
+                match shared.state() {
+                    Ok(mut state) => {
+                        if !state.reading && state.closed.is_none() {
+                            state.reading = true;
+                            self.mine = true;
+                        }
+                    }
+                    Err(why) => return Some(Err(why)),
+                }
+            }
+            let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+            if left.is_some_and(|l| l.is_zero()) {
+                return None;
+            }
+            if self.mine {
+                if shared.turn(left).is_err() {
+                    // The connection ended: every call waiting was told why, this one among them.
+                    self.mine = false;
+                }
+            } else {
+                match self.mail.recv_timeout(left.unwrap_or(Duration::MAX)) {
+                    Ok(mail) => self.take(mail),
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => {
+                        return Some(Err(Refusal::Broken(
+                            "the node agent's answer was lost".to_owned(),
+                        )));
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<T: Transport> Drop for Caller<'_, T> {
+    /// Going: the call forgotten if unanswered, its streams' ends with it, and the reader's turn it holds, or was
+    /// handed as it went, handed on.
+    fn drop(&mut self) {
+        let Ok(mut state) = self.shared.state() else {
+            return;
+        };
+        if !self.answered {
+            state.calls.remove(&self.id);
+            state.programs.remove(&self.id);
+            state.given.remove(&self.id);
+        }
+        while let Ok(mail) = self.mail.try_recv() {
+            if matches!(mail, Mail::Turn) {
+                self.mine = true;
+            }
+        }
+        if self.mine && state.closed.is_none() {
+            state.pass_turn();
         }
     }
 }
@@ -295,34 +1046,377 @@ impl<T> Shared<T> {
 /// The connection, held by the client and by each `Proc` it returned: it closes when the last goes.
 pub(crate) struct Conn<T: Transport> {
     shared: Arc<Shared<T>>,
-    reader: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl<T: Transport> Drop for Conn<T> {
     fn drop(&mut self) {
-        // The reading side sees the end and goes; the agent sees the hang-up.
+        // The agent sees the hang-up.
         self.shared.transport.shutdown();
-        if let Some(reader) = self.reader.lock().ok().and_then(|mut r| r.take()) {
-            let _ = reader.join();
-        }
     }
 }
 
 impl<T: Transport> Conn<T> {
     /// Sends `request` with the descriptors `with` lends it, once `with` has made what its id names (an exec's
-    /// streams its transport makes), its answer to go to `answer` and an exec's program's end to `program`, whose
-    /// place is made before the exec goes, so the end can't come first. Its id, once sent (or gone with the
-    /// connection, whose end then reaches the taker); a request that can't be sent is refused and forgotten.
-    fn send<'l>(
+    /// streams its transport makes), and waits for its answer: at most twice the slowest answer this process has had
+    /// to a call of its kind ([`Transport::answers`]), past which the call is refused by type, the only way left to
+    /// it; as long as it takes while its kind's wait measures. With `program`, a `Proc`'s place for the end of the
+    /// program an exec starts is made before the exec goes, so the end can't come first.
+    fn call<'l>(
         &self,
-        version: u16,
         bound: usize,
         request: &Request,
         with: impl FnOnce(u64) -> Result<&'l [Lent<'l>], Refusal>,
-        answer: Taker,
+        program: Option<Arc<Ending>>,
+    ) -> Result<(u64, Answer), Refusal> {
+        let shared = &*self.shared;
+        let mut caller = Caller::new(shared, program)?;
+        let waits = kind_of(T::answers(), request);
+        let patience = waits.and_then(Patience::deadline);
+        let asked = Instant::now();
+        let deadline = patience.and_then(|p| asked.checked_add(p));
+        let bytes = wire::request(caller.id, request, bound)
+            .map_err(Refusal::from)
+            .and_then(T::frame)?;
+        let lent = with(caller.id)?;
+        match caller.send(&bytes, lent, deadline, patience) {
+            // Sent, or the agent has gone: why reaches the call as it waits, which sees the end.
+            Ok(()) | Err(Sent::Gone) => {}
+            // No room for the request in all the call's patience: its wait ran out, as an answer's would.
+            Err(Sent::Full(r)) => {
+                if let (Some(waits), Some(wait)) = (waits, patience) {
+                    waits.ran_out(wait);
+                }
+                return Err(r);
+            }
+            Err(Sent::Refused(r)) => return Err(r),
+        }
+        let mut offered = false;
+        loop {
+            match caller.wait(deadline) {
+                Some(Ok(Answer::Offered(offer))) => {
+                    offered = true;
+                    caller.answered = false;
+                    // No read turn is held across a guest dial: other calls and program ends keep progressing.
+                    {
+                        let mut state = shared.state()?;
+                        // A reader may have handed us its turn after the offer reached this mailbox.
+                        caller.collect();
+                        if let Some(waiting) = state.calls.get_mut(&caller.id) {
+                            waiting.reads = false;
+                        }
+                        if caller.mine {
+                            state.pass_turn();
+                            caller.mine = false;
+                        }
+                    }
+                    let opened = shared.transport.open_offer(&offer);
+                    // A guest may have refused/ended while this caller dialed without holding the turn.
+                    caller.collect();
+                    if caller.answer.is_some() {
+                        drop(opened);
+                        continue;
+                    }
+                    let given = match opened {
+                        Ok(given) => given,
+                        Err(why) => {
+                            shared.owe(caller.id, &Request::Release)?;
+                            shared.send_owed_now();
+                            return Err(why);
+                        }
+                    };
+                    shared.state()?.given.insert(caller.id, given);
+                    let bytes = wire::request(caller.id, &Request::StreamsReady, bound)
+                        .map_err(Refusal::from)
+                        .and_then(T::frame)?;
+                    if let Err(why) = caller.send(&bytes, NONE, deadline, patience) {
+                        shared.owe(caller.id, &Request::Release)?;
+                        shared.send_owed_now();
+                        return Err(match why {
+                            Sent::Full(why) | Sent::Refused(why) => why,
+                            Sent::Gone => Refusal::Broken(
+                                "the node ended before accepting the stream offer".to_owned(),
+                            ),
+                        });
+                    }
+                }
+                Some(Ok(answer)) => {
+                    if let Some(waits) = waits {
+                        waits.answered(asked.elapsed());
+                    }
+                    return Ok((caller.id, answer));
+                }
+                Some(Err(why)) => return Err(why),
+                None => {
+                    if offered {
+                        shared.owe(caller.id, &Request::Release)?;
+                        shared.send_owed_now();
+                    }
+                    if let (Some(waits), Some(wait)) = (waits, patience) {
+                        waits.ran_out(wait);
+                    }
+                    return Err(Refusal::Os {
+                        op: "waiting for the node agent's answer",
+                        why: format!(
+                            "none came in {:?}, twice the slowest answer to a call of its kind",
+                            patience.unwrap_or_default()
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Sends one message that has no answer (a release) now or not at all: a release that finds no room is the
+    /// agent's disconnect rule's to settle, so dropping a `Proc` never waits on the agent. One whose first bytes went
+    /// on a stream is sent whole, waiting for room as a send does, since a frame cut short would leave the connection
+    /// unable to carry another.
+    fn send_now(&self, bytes: &[u8]) {
+        let shared = &*self.shared;
+        let Ok(framed) = T::frame(bytes.to_vec()) else {
+            return;
+        };
+        let mut at = 0;
+        {
+            let Ok(whole) = shared.sending.lock() else {
+                return;
+            };
+            // What is owed goes first: if it can't go now, neither can this, which comes after it.
+            if !matches!(shared.send_owed(&whole), Ok(true)) {
+                return;
+            }
+            match shared.transport.try_send(&framed, &mut at, NONE) {
+                Ok(true) | Err(_) => return,
+                Ok(false) if at == 0 => return,
+                Ok(false) => {}
+            }
+        }
+        // Part of it went: the rest goes as a send does, the frame whole on the stream.
+        let Ok(mut caller) = Caller::new(shared, None) else {
+            shared.transport.shutdown();
+            return;
+        };
+        let rest = framed.get(at..).unwrap_or_default();
+        if caller.send(rest, NONE, None, None).is_err() {
+            shared.transport.shutdown();
+        }
+    }
+}
+
+/// A node agent, reached through a transport.
+pub struct Core<T: Transport> {
+    conn: Arc<Conn<T>>,
+    classes: Vec<Class>,
+    limits: Limits,
+    budgets: wire::Budgets,
+}
+
+/// An event-form call whose id and completions are reserved, but whose request has not gone (HEX-RT-17).
+/// The caller may first open guest streams named for [`Deferred::id`], then send the explicit call. Dropping it
+/// before a successful send cancels only its reservation; it sends no request or release and makes no stream.
+#[must_use = "a deferred call sends nothing until send is called"]
+pub struct Deferred<T: Transport> {
+    conn: Arc<Conn<T>>,
+    id: u64,
+    bytes: Vec<u8>,
+    reserved: bool,
+}
+
+#[cfg(test)]
+mod tests;
+
+impl<T: Transport> Deferred<T> {
+    /// The request's reserved id, also the name of the program an exec starts.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Sends the framed call now, through the same event-form path as [`Core::begin`]. A failure cancels its
+    /// reservation; a successful send leaves its answer and program's end to the existing reader's loop.
+    pub fn send(self) -> Result<(), Refusal> {
+        self.send_with(NONE)
+    }
+
+    fn send_with(mut self, lent: &[Lent<'_>]) -> Result<(), Refusal> {
+        let shared = &*self.conn.shared;
+        if let Some(why) = &shared.state()?.closed {
+            return Err(why.clone());
+        }
+        let whole = shared.sending.lock().map_err(poisoned)?;
+        let mut at = 0;
+        // What is owed goes first, as it does before any message.
+        let sent = match shared.send_owed(&whole) {
+            Ok(true) => shared.transport.try_send(&self.bytes, &mut at, lent),
+            Ok(false) => Ok(false),
+            Err(e) => Err(e),
+        };
+        match sent {
+            // The agent has gone: why reaches the completion through the loop, which sees the end.
+            Ok(true) | Err(Sent::Gone) => {
+                self.reserved = false;
+                Ok(())
+            }
+            Ok(false) => {
+                if at > 0 {
+                    shared.transport.shutdown();
+                }
+                Err(Refusal::Os {
+                    op: "sending to the node agent",
+                    why: "no room in its connection now, and the event form doesn't wait"
+                        .to_owned(),
+                })
+            }
+            Err(Sent::Full(r) | Sent::Refused(r)) => Err(r),
+        }
+    }
+}
+
+impl<T: Transport> Drop for Deferred<T> {
+    fn drop(&mut self) {
+        if self.reserved
+            && let Ok(mut state) = self.conn.shared.state()
+        {
+            state.calls.remove(&self.id);
+            state.programs.remove(&self.id);
+            state.given.remove(&self.id);
+        }
+    }
+}
+
+impl<T: Transport> Core<T> {
+    /// Says hello over `shared`, naming this build, and learns what the agent runs and its bounds. An agent of
+    /// another wire is refused here, by type, naming both wires and both builds (`hex_core::wire::Fault::Wire`):
+    /// two sides talk only when built from the same wire.
+    pub(crate) fn hello(shared: Arc<Shared<T>>) -> Result<Self, Refusal> {
+        let client = Self {
+            conn: Arc::new(Conn { shared }),
+            classes: Vec::new(),
+            limits: Limits {
+                connections: 1,
+                message_bytes: wire::MAX_MESSAGE,
+                in_flight: 1,
+                programs: 0,
+            },
+            budgets: wire::Budgets {
+                in_flight: 1,
+                programs: 0,
+            },
+        };
+        let hello = Request::Hello {
+            build: wire::build(),
+        };
+        let answer = client.call(&hello, |_| Ok(NONE), None)?.1;
+        client.greeted(answer)
+    }
+
+    /// Whether its connection has ended: no call it sends is answered.
+    pub fn closed(&self) -> bool {
+        self.conn.shared.closed()
+    }
+
+    /// This client, told by the hello's `answer` what its agent runs and its bounds.
+    fn greeted(mut self, answer: Answer) -> Result<Self, Refusal> {
+        match answer {
+            Answer::Hello(hello) => {
+                self.classes = hello.classes;
+                self.limits = Limits {
+                    message_bytes: hello.limits.message_bytes.min(wire::MAX_MESSAGE),
+                    ..hello.limits
+                };
+                self.conn.shared.owed.lock().map_err(poisoned)?.bound = hello.budgets.programs;
+                self.budgets = hello.budgets;
+                Ok(self)
+            }
+            Answer::Refused(r) => Err(r),
+            other => Err(unexpected("hello", &other)),
+        }
+    }
+
+    /// The event form of a call: sends `call`, an exec's with `stdio`, now, and returns its request's id at once.
+    /// `then` gets its answer on the thread that reads the connection (the event form's loop), and an exec's program's
+    /// end goes to `ended` once its start has come; the ends of the streams it asked for are taken with
+    /// [`Core::given`]. The event form copies no stream: where the transport makes an exec's streams (a guest's), each
+    /// is asked for, and a pipe of the caller's own is refused. A call that can't be sent now is refused here, and
+    /// `then` never runs.
+    pub fn begin(
+        &self,
+        call: Call,
+        stdio: Stdio,
+        then: Then,
+        ended: Ended,
+    ) -> Result<u64, Refusal> {
+        let (launch, program) = match call {
+            Call::Exec { id, program, .. } | Call::ExecStreams { id, program, .. } => {
+                (Launch::Exec(id), program)
+            }
+            Call::Run { spec, program, .. } => (Launch::Run(spec), program),
+            call => {
+                return self.begun(&Request::Call(call), |_| Ok(NONE), then, None);
+            }
+        };
+        stdio.check()?;
+        let (carried, asked) = (carried(&stdio), streams(stdio.ask));
+        let (request, made) = if T::MAKES_ASKED {
+            if carried != Streams::default() {
+                return Err(Refusal::Invalid {
+                    what: "stdio",
+                    why: "the event form copies no stream: ask for each of a guest program's streams, whose ends are the caller's".to_owned(),
+                });
+            }
+            (launch.call(program, asked, Streams::default()), asked)
+        } else {
+            (launch.call(program, carried, asked), Streams::default())
+        };
+        let lent = lend(&stdio);
+        let shared = &*self.conn.shared;
+        self.begun(
+            &Request::Call(request),
+            |exec| {
+                make(shared, exec, made)?;
+                Ok(&lent[..])
+            },
+            then,
+            Some(Watching::Then(ended)),
+        )
+    }
+
+    /// Reserves an event-form call's id, answer and (for an exec or run) program's end before sending it. The
+    /// explicit `call` is framed unchanged: no stdio is made, copied or lent, and [`Transport::MAKES_ASKED`] is
+    /// not used. A guest caller that has arranged its own named streams uses [`Call::Exec`] with their stream
+    /// bits, then calls [`Deferred::send`] only once those connections are open. Until then, drop cancels it.
+    pub fn defer(&self, call: Call, then: Then, ended: Ended) -> Result<Deferred<T>, Refusal> {
+        let program = matches!(
+            call,
+            Call::Exec { .. } | Call::ExecStreams { .. } | Call::Run { .. }
+        )
+        .then(|| Watching::Then(ended));
+        self.deferred(&Request::Call(call), then, program)
+    }
+
+    /// Sends `request` now with what `with` makes for its id and lends it, its answer to go to `then` and an exec's
+    /// program's end to `program`, each placed before the request goes; refused, and forgotten, when it can't go now.
+    fn begun<'l>(
+        &self,
+        request: &Request,
+        with: impl FnOnce(u64) -> Result<&'l [Lent<'l>], Refusal>,
+        then: Then,
         program: Option<Watching>,
     ) -> Result<u64, Refusal> {
-        let shared = &self.shared;
+        let deferred = self.deferred(request, then, program)?;
+        let id = deferred.id();
+        let lent = with(id)?;
+        deferred.send_with(lent)?;
+        Ok(id)
+    }
+
+    /// The common event-form reservation and framing path. The RAII value forgets its id if framing or a later
+    /// stream preparation fails before send, just as it does when a deferred caller cancels it.
+    fn deferred(
+        &self,
+        request: &Request,
+        then: Then,
+        program: Option<Watching>,
+    ) -> Result<Deferred<T>, Refusal> {
+        let shared = &*self.conn.shared;
         let id = {
             let mut state = shared.state()?;
             if let Some(why) = &state.closed {
@@ -336,8 +1430,11 @@ impl<T: Transport> Conn<T> {
             state.calls.insert(
                 id,
                 Waiting {
-                    answer,
+                    answer: Taker::Then(then),
+                    offered: false,
                     boxes: Vec::new(),
+                    reads: false,
+                    wake: None,
                 },
             );
             if let Some(program) = program {
@@ -345,244 +1442,16 @@ impl<T: Transport> Conn<T> {
             }
             id
         };
-        let sent = wire::request(version, id, request, bound)
-            .map_err(|fault| Sent::Refused(fault.into()))
-            .and_then(|bytes| {
-                let lent = with(id).map_err(Sent::Refused)?;
-                shared.transport.send(&bytes, lent)
-            });
-        match sent {
-            // The agent has gone, or closed the connection: why reaches the taker through the
-            // reading side, which sees the end.
-            Ok(()) | Err(Sent::Gone) => Ok(id),
-            Err(Sent::Refused(r)) => {
-                self.forget(id);
-                Err(r)
-            }
-        }
-    }
-
-    /// Forgets call `id`, its program's place and its streams' ends: no answer or end of it is taken from now.
-    fn forget(&self, id: u64) {
-        if let Ok(mut state) = self.shared.state() {
-            state.calls.remove(&id);
-            state.programs.remove(&id);
-            state.given.remove(&id);
-        }
-    }
-
-    /// Sends `request` and waits for its answer, as [`Conn::send`] does with a caller waiting.
-    fn call<'l>(
-        &self,
-        version: u16,
-        bound: usize,
-        request: &Request,
-        with: impl FnOnce(u64) -> Result<&'l [Lent<'l>], Refusal>,
-        program: Option<Arc<Ending>>,
-    ) -> Result<(u64, Answer), Refusal> {
-        let (tx, rx) = sync_channel(1);
-        let id = self.send(
-            version,
-            bound,
-            request,
-            with,
-            Taker::Wait(tx),
-            program.map(Watching::Proc),
-        )?;
-        let answer = match rx.recv_timeout(ANSWER_PATIENCE) {
-            Ok(answer) => answer,
-            Err(RecvTimeoutError::Timeout) => {
-                self.forget(id);
-                return Err(Refusal::Os {
-                    op: "waiting for the node agent's answer",
-                    why: format!("none came in {ANSWER_PATIENCE:?}"),
-                });
-            }
-            Err(RecvTimeoutError::Disconnected) => {
-                Err(self.shared.state()?.closed.clone().unwrap_or_else(|| {
-                    Refusal::Broken("the node agent's answer was lost".to_owned())
-                }))
-            }
+        let mut deferred = Deferred {
+            conn: Arc::clone(&self.conn),
+            id,
+            bytes: Vec::new(),
+            reserved: true,
         };
-        match answer {
-            Ok(answer) => Ok((id, answer)),
-            Err(r) => {
-                self.forget(id);
-                Err(r)
-            }
-        }
-    }
-}
-
-/// A node agent, reached through a transport.
-pub struct Core<T: Transport> {
-    conn: Arc<Conn<T>>,
-    classes: Vec<Class>,
-    limits: Limits,
-    /// The wire version this client writes: [`wire::FIRST`] for its hello, then the highest both it
-    /// and its agent speak.
-    version: u16,
-}
-
-impl<T: Transport> Core<T> {
-    /// Says hello over `shared`, whose reading side is `reader`, and learns what the agent runs and
-    /// its bounds.
-    pub(crate) fn hello(shared: Arc<Shared<T>>, reader: JoinHandle<()>) -> Result<Self, Refusal> {
-        let client = Self::unknown(shared, Some(reader));
-        let answer = client.call(&Request::Hello, |_| Ok(NONE), None)?.1;
-        client.greeted(answer)
-    }
-
-    /// Whether its connection has ended: no call it sends is answered.
-    pub fn closed(&self) -> bool {
-        !self
-            .conn
-            .shared
-            .state()
-            .is_ok_and(|state| state.closed.is_none())
-    }
-
-    /// Says hello over `shared` with no reading side of its own: `read` reads what has come on the
-    /// connection, waiting at most a bounded time, until the hello's answer is among it.
-    pub(crate) fn hello_inline(
-        shared: Arc<Shared<T>>,
-        mut read: impl FnMut(&Shared<T>) -> Result<(), Refusal>,
-    ) -> Result<Self, Refusal> {
-        let client = Self::unknown(Arc::clone(&shared), None);
-        let (tx, rx) = sync_channel(1);
-        client.conn.send(
-            wire::FIRST,
-            wire::MAX_MESSAGE,
-            &Request::Hello,
-            |_| Ok(NONE),
-            Taker::Wait(tx),
-            None,
-        )?;
-        let answer = loop {
-            match rx.try_recv() {
-                Ok(answer) => break answer?,
-                Err(std::sync::mpsc::TryRecvError::Empty) => read(&shared)?,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    return Err(shared.state()?.closed.clone().unwrap_or_else(|| {
-                        Refusal::Broken("the node agent's hello was lost".to_owned())
-                    }));
-                }
-            }
-        };
-        client.greeted(answer)
-    }
-
-    /// A client over `shared` that hasn't said hello: what the agent runs and its bounds are learned
-    /// from the hello's answer ([`Core::greeted`]). Its hello goes in the first version, which an agent of
-    /// any version reads.
-    pub(crate) fn unknown(shared: Arc<Shared<T>>, reader: Option<JoinHandle<()>>) -> Self {
-        Self {
-            conn: Arc::new(Conn {
-                shared,
-                reader: Mutex::new(reader),
-            }),
-            classes: Vec::new(),
-            limits: Limits {
-                connections: 1,
-                message_bytes: wire::MAX_MESSAGE,
-                in_flight: 1,
-                programs: 0,
-            },
-            version: wire::FIRST,
-        }
-    }
-
-    /// This client, told by the hello's `answer` what its agent runs, its bounds and its version.
-    pub(crate) fn greeted(mut self, answer: Answer) -> Result<Self, Refusal> {
-        match answer {
-            Answer::Hello(hello) if hello.version < wire::FIRST => Err(Refusal::Broken(format!(
-                "the node agent says it speaks wire version {}, below the first",
-                hello.version
-            ))),
-            Answer::Hello(hello) => {
-                self.classes = hello.classes;
-                self.limits = Limits {
-                    message_bytes: hello.limits.message_bytes.min(wire::MAX_MESSAGE),
-                    ..hello.limits
-                };
-                self.version = hello.version.min(wire::VERSION);
-                Ok(self)
-            }
-            Answer::Refused(r) => Err(r),
-            other => Err(unexpected("hello", &other)),
-        }
-    }
-
-    /// The event form of a call: sends `call`, an exec's with `stdio`, and returns its request's id at
-    /// once. `then` gets its answer on the thread that reads the connection, and an exec's program's end
-    /// goes to `ended` once its start has come; the ends of the streams it asked for are taken with
-    /// [`Core::given`]. The event form copies no stream: where the transport makes an exec's streams (a
-    /// guest's), each is asked for, and a pipe of the caller's own is refused. A call that can't be sent is
-    /// refused here, and `then` never runs.
-    pub fn begin(
-        &self,
-        call: Call,
-        stdio: Stdio,
-        then: Then,
-        ended: Ended,
-    ) -> Result<u64, Refusal> {
-        let shared = &self.conn.shared;
-        let (id, program) = match call {
-            Call::Exec { id, program, .. } | Call::ExecStreams { id, program, .. } => (id, program),
-            call => {
-                return self.conn.send(
-                    self.version,
-                    self.limits.message_bytes,
-                    &Request::Call(call),
-                    |_| Ok(NONE),
-                    Taker::Then(then),
-                    None,
-                );
-            }
-        };
-        stdio.check()?;
-        let (carried, asked) = (carried(&stdio), streams(stdio.ask));
-        let (request, made) = if T::MAKES_ASKED {
-            if carried != Streams::default() {
-                return Err(Refusal::Invalid {
-                    what: "stdio",
-                    why: "the event form copies no stream: ask for each of a guest program's streams, whose ends are the caller's".to_owned(),
-                });
-            }
-            let exec = Call::Exec {
-                id,
-                program,
-                streams: asked,
-            };
-            (exec, asked)
-        } else if asked == Streams::default() {
-            let exec = Call::Exec {
-                id,
-                program,
-                streams: carried,
-            };
-            (exec, Streams::default())
-        } else {
-            let exec = Call::ExecStreams {
-                id,
-                program,
-                streams: carried,
-                ask: asked,
-            };
-            (exec, Streams::default())
-        };
-        let lent = lend(&stdio);
-        self.conn.send(
-            self.version,
-            self.limits.message_bytes,
-            &Request::Call(request),
-            |exec| {
-                make(shared, exec, made)?;
-                Ok(&lent[..])
-            },
-            Taker::Then(then),
-            Some(Watching::Then(ended)),
-        )
+        deferred.bytes = wire::request(id, request, self.limits.message_bytes)
+            .map_err(Refusal::from)
+            .and_then(T::frame)?;
+        Ok(deferred)
     }
 
     /// The ends of exec `exec`'s streams once its start has come, taken once: those its transport made (a
@@ -592,21 +1461,29 @@ impl<T: Transport> Core<T> {
         self.conn.shared.state().ok()?.given.remove(&exec)
     }
 
+    /// The address and names of a reserved guest exec's streams; no stream is opened until its caller does so.
+    pub fn stream_offer(&self, exec: u64, streams: Streams) -> Result<wire::StreamOffer, Refusal> {
+        {
+            let state = self.conn.shared.state()?;
+            if !state.calls.contains_key(&exec) || !state.programs.contains_key(&exec) {
+                return Err(Refusal::Invalid {
+                    what: "stream offer",
+                    why: "no reserved exec has that id".to_owned(),
+                });
+            }
+        }
+        self.conn.shared.transport.stream_offer(exec, streams)
+    }
+
     /// The event form's release of exec `exec`'s program: its end is no longer taken, and the agent lets
     /// it run on, as dropping an in-process `Proc` does. One the connection can't carry needs none: the
     /// agent's disconnect rule has it.
     pub fn release(&self, exec: u64) {
-        let shared = &self.conn.shared;
-        if let Ok(mut state) = shared.state() {
+        if let Ok(mut state) = self.conn.shared.state() {
             state.programs.remove(&exec);
         }
-        if let Ok(bytes) = wire::request(
-            self.version,
-            exec,
-            &Request::Release,
-            self.limits.message_bytes,
-        ) {
-            let _ = shared.transport.send(&bytes, &[]);
+        if let Ok(bytes) = wire::request(exec, &Request::Release, self.limits.message_bytes) {
+            self.conn.send_now(&bytes);
         }
     }
 
@@ -620,9 +1497,13 @@ impl<T: Transport> Core<T> {
         self.limits
     }
 
+    /// The agent's budgets over all its connections together, as its hello told them.
+    pub fn budgets(&self) -> wire::Budgets {
+        self.budgets
+    }
+
     /// The agent's network namespace counts (decision 4), as `hex_node::Node::netns` reads them in
-    /// process. An agent of wire version 1 has none to give: the call is refused by type before it is
-    /// sent, as a kind version 1 doesn't define.
+    /// process.
     pub fn netns(&self) -> Result<netns::Counts, Refusal> {
         match self
             .call(&Request::Call(Call::Netns), |_| Ok(NONE), None)?
@@ -642,13 +1523,8 @@ impl<T: Transport> Core<T> {
         with: impl FnOnce(u64) -> Result<&'l [Lent<'l>], Refusal>,
         program: Option<Arc<Ending>>,
     ) -> Result<(u64, Answer), Refusal> {
-        self.conn.call(
-            self.version,
-            self.limits.message_bytes,
-            request,
-            with,
-            program,
-        )
+        self.conn
+            .call(self.limits.message_bytes, request, with, program)
     }
 
     /// A call that carries nothing beside its message.
@@ -673,8 +1549,136 @@ impl<T: Transport> Core<T> {
             other => Err(unexpected(name, &other)),
         }
     }
+
+    /// Starts `program` where `launch` says, an exec or a run, with `stdio` as [`Runtime::exec`] takes it: the
+    /// program's `Proc`, whose end comes later as a message.
+    fn spawn(
+        &self,
+        launch: Launch,
+        program: Program,
+        stdio: Stdio,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        program.fits(&WIRE_EXEC_LIMIT)?;
+        stdio.check()?;
+        let name = launch.name();
+        let (carried, asked) = (carried(&stdio), streams(stdio.ask));
+        let ending = Arc::new(Ending::default());
+        let shared = &*self.conn.shared;
+        let (exec, answer, kept) = if T::MAKES_ASKED {
+            let request =
+                Request::Call(launch.call(program, union(carried, asked), Streams::default()));
+            let Stdio {
+                stdin,
+                stdout,
+                stderr,
+                ask,
+            } = stdio;
+            let pipes = Stdio {
+                stdin,
+                stdout,
+                stderr,
+                ..Stdio::null()
+            };
+            let (exec, answer) = self.call(
+                &request,
+                |exec| {
+                    make(shared, exec, asked)?;
+                    shared.transport.carries(exec, pipes)?;
+                    Ok(NONE)
+                },
+                Some(Arc::clone(&ending)),
+            )?;
+            let kept = Stdio {
+                ask,
+                ..Stdio::null()
+            };
+            (exec, answer, kept)
+        } else {
+            let request = Request::Call(launch.call(program, carried, asked));
+            let (exec, answer) = {
+                let lent = lend(&stdio);
+                self.call(&request, |_| Ok(&lent[..]), Some(Arc::clone(&ending)))?
+            };
+            (exec, answer, stdio)
+        };
+        match answer {
+            Answer::Started { pid } | Answer::Given { pid, .. } => {
+                let ends = shared.state()?.given.remove(&exec).unwrap_or_default();
+                let mut proc = RemoteProc {
+                    conn: Arc::clone(&self.conn),
+                    bound: self.limits.message_bytes,
+                    exec,
+                    pid,
+                    ending,
+                    exit: None,
+                    given: None,
+                };
+                match settle(kept, ends) {
+                    Ok(given) => {
+                        proc.given = Some(given);
+                        Ok(Box::new(proc))
+                    }
+                    Err(why) => {
+                        let _ = proc.kill();
+                        Err(why)
+                    }
+                }
+            }
+            other => {
+                if let Ok(mut state) = shared.state() {
+                    state.programs.remove(&exec);
+                    state.given.remove(&exec);
+                }
+                match other {
+                    Answer::Refused(r) => Err(r),
+                    other => Err(unexpected(name, &other)),
+                }
+            }
+        }
+    }
 }
 
+/// Where a call that starts a program starts it: in a box there is (an exec), or in a `process` box made for its
+/// life (a run, decision 7).
+enum Launch {
+    Exec(BoxId),
+    Run(Box<BoxSpec>),
+}
+
+impl Launch {
+    /// The call that starts `program` here, the streams `streams` names carried and those `ask` names asked for.
+    fn call(self, program: Program, streams: Streams, ask: Streams) -> Call {
+        match self {
+            Self::Exec(id) if ask == Streams::default() => Call::Exec {
+                id,
+                program,
+                streams,
+            },
+            Self::Exec(id) => Call::ExecStreams {
+                id,
+                program,
+                streams,
+                ask,
+            },
+            Self::Run(spec) => Call::Run {
+                spec,
+                program,
+                streams,
+                ask,
+            },
+        }
+    }
+
+    /// What its refusals name it.
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Exec(_) => "exec",
+            Self::Run(_) => "run",
+        }
+    }
+}
+
+/// Why `answer` can't be the answer to a `call`.
 pub(crate) fn unexpected(call: &str, answer: &Answer) -> Refusal {
     let kind = match answer {
         Answer::Hello(_) => "a hello",
@@ -687,6 +1691,7 @@ pub(crate) fn unexpected(call: &str, answer: &Answer) -> Refusal {
         Answer::Exited(_) => "a program's end",
         Answer::Netns(_) => "network namespace counts",
         Answer::Given { .. } => "a started program with streams",
+        Answer::Offered(_) => "a guest stream preparation",
     };
     Refusal::Broken(format!("the node agent answered a {call} with {kind}"))
 }
@@ -790,7 +1795,7 @@ fn settle(stdio: Stdio, ends: hex_api::Given) -> Result<hex_api::Given, Refusal>
     };
     let mut given = hex_api::Given::default();
     match (stdin, ends.stdin) {
-        (Some(pipe), Some(end)) => copy(pipe, std::fs::File::from(end), end_sending)?,
+        (Some(pipe), Some(end)) => copy_in(pipe, hex_api::OwnedStream::from(end))?,
         (None, Some(end)) if ask.stdin => given.stdin = Some(end),
         (None, Some(_)) => return Err(unasked("stdin")),
         (_, None) => {}
@@ -800,21 +1805,13 @@ fn settle(stdio: Stdio, ends: hex_api::Given) -> Result<hex_api::Given, Refusal>
         (stderr, ends.stderr, ask.stderr, "stderr", &mut given.stderr),
     ] {
         match (pipe, end) {
-            (Some(pipe), Some(end)) => copy(std::fs::File::from(end), pipe, drop)?,
+            (Some(pipe), Some(end)) => copy(hex_api::OwnedStream::from(end), pipe, drop)?,
             (None, Some(end)) if asked => *to = Some(end),
             (None, Some(_)) => return Err(unasked(name)),
             (_, None) => {}
         }
     }
     Ok(given)
-}
-
-/// A stream's end its stdin was copied into: its sending half ends, so the program sees its stdin end even while
-/// another holds the connection.
-fn end_sending(to: std::fs::File) {
-    #[cfg(unix)]
-    let _ = rustix::net::shutdown(&to, rustix::net::Shutdown::Write);
-    drop(to);
 }
 
 impl<T: Transport> Runtime for Core<T> {
@@ -826,7 +1823,7 @@ impl<T: Transport> Runtime for Core<T> {
         if let hex_api::ClassSpec::Oci(oci) = &spec.class {
             oci.init.fits(&WIRE_EXEC_LIMIT)?;
         }
-        self.info(Call::Create(spec), "create")
+        self.info(Call::Create(Box::new(spec)), "create")
     }
 
     fn start(&self, id: &BoxId) -> Result<(), Refusal> {
@@ -835,105 +1832,18 @@ impl<T: Transport> Runtime for Core<T> {
 
     /// The caller's own pipes ride with the exec as descriptors, which a local program takes as its streams. A
     /// stream asked for is made where the program's streams are: by the transport, where they are connections of
-    /// its own (a guest's), or by the agent, which gives its end with its answer (wire version 3's
+    /// its own (a guest's), or by the agent, which gives its end with its answer (the wire's
     /// [`Call::ExecStreams`]). A program that can't take the caller's own pipe (a guest's) has its stream's
     /// connection copied to and from that pipe here: by the transport where it makes the connection, or once the
     /// agent's answer gives its end. The one copy left is this client's, the caller's, never the node's (native
     /// plan step 8).
     fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
-        program.fits(&WIRE_EXEC_LIMIT)?;
-        stdio.check()?;
-        let (carried, asked) = (carried(&stdio), streams(stdio.ask));
-        let ending = Arc::new(Ending::default());
-        let shared = &self.conn.shared;
-        let (exec, answer, kept) = if T::MAKES_ASKED {
-            let request = Request::Call(Call::Exec {
-                id: id.clone(),
-                program,
-                streams: union(carried, asked),
-            });
-            let Stdio {
-                stdin,
-                stdout,
-                stderr,
-                ask,
-            } = stdio;
-            let pipes = Stdio {
-                stdin,
-                stdout,
-                stderr,
-                ..Stdio::null()
-            };
-            let (exec, answer) = self.call(
-                &request,
-                |exec| {
-                    make(shared, exec, asked)?;
-                    shared.transport.carries(exec, pipes)?;
-                    Ok(NONE)
-                },
-                Some(Arc::clone(&ending)),
-            )?;
-            let kept = Stdio {
-                ask,
-                ..Stdio::null()
-            };
-            (exec, answer, kept)
-        } else {
-            let request = if asked == Streams::default() {
-                Request::Call(Call::Exec {
-                    id: id.clone(),
-                    program,
-                    streams: carried,
-                })
-            } else {
-                Request::Call(Call::ExecStreams {
-                    id: id.clone(),
-                    program,
-                    streams: carried,
-                    ask: asked,
-                })
-            };
-            let (exec, answer) = {
-                let lent = lend(&stdio);
-                self.call(&request, |_| Ok(&lent[..]), Some(Arc::clone(&ending)))?
-            };
-            (exec, answer, stdio)
-        };
-        match answer {
-            Answer::Started { pid } | Answer::Given { pid, .. } => {
-                let ends = shared.state()?.given.remove(&exec).unwrap_or_default();
-                let mut proc = RemoteProc {
-                    conn: Arc::clone(&self.conn),
-                    version: self.version,
-                    bound: self.limits.message_bytes,
-                    exec,
-                    pid,
-                    ending,
-                    exit: None,
-                    given: None,
-                };
-                match settle(kept, ends) {
-                    Ok(given) => {
-                        proc.given = Some(given);
-                        Ok(Box::new(proc))
-                    }
-                    Err(why) => {
-                        let _ = proc.kill();
-                        Err(why)
-                    }
-                }
-            }
-            other => {
-                if let Ok(mut state) = shared.state() {
-                    state.programs.remove(&exec);
-                    state.given.remove(&exec);
-                }
-                match other {
-                    Answer::Refused(r) => Err(r),
-                    other => Err(unexpected("exec", &other)),
-                }
-            }
-        }
+        self.spawn(Launch::Exec(id.clone()), program, stdio)
+    }
+
+    /// One request, [`Call::Run`], its stdio as an exec's; its program's end comes once the agent has removed the box.
+    fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        self.spawn(Launch::Run(Box::new(spec)), program, stdio)
     }
 
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
@@ -974,8 +1884,7 @@ impl<T: Transport> Runtime for Core<T> {
 /// A program a node agent started for this client: its end comes as a message.
 struct RemoteProc<T: Transport> {
     conn: Arc<Conn<T>>,
-    /// The wire version its client writes, which its release and kill go in, and the agent's message bound.
-    version: u16,
+    /// The agent's message bound, which its kill goes in.
     bound: usize,
     exec: u64,
     pid: u32,
@@ -986,38 +1895,101 @@ struct RemoteProc<T: Transport> {
 }
 
 impl<T: Transport> RemoteProc<T> {
-    /// Its end if it has come, waiting for it at most `timeout` (none: not at all).
+    /// Its end if it has come, waiting for it at most `timeout` (none: not at all, but what has come read now): read by
+    /// this wait itself while it holds the reader's turn, taken when free or handed to it, else handed to it by the
+    /// thread that reads; the turn handed on as it goes.
     fn wait(&mut self, timeout: Option<Duration>) -> Result<Option<Exit>, Refusal> {
         if let Some(exit) = self.exit {
             return Ok(Some(exit));
         }
+        let shared = Arc::clone(&self.conn.shared);
         let deadline = timeout.map(|t| Instant::now().checked_add(t));
-        let mut came = self.ending.exit.lock().map_err(poisoned)?;
-        loop {
-            match &*came {
-                Some(Ok(exit)) => {
-                    self.exit = Some(*exit);
-                    return Ok(Some(*exit));
+        shared.state()?.waiting.insert(self.exec);
+        let mut mine = false;
+        // Every way out of the loop goes through its end, so the wait is never left registered.
+        let got = loop {
+            {
+                let mut ended = match self.ending.state.lock() {
+                    Ok(ended) => ended,
+                    Err(e) => break Err(poisoned(e)),
+                };
+                match &ended.exit {
+                    Some(Ok(exit)) => break Ok(Some(*exit)),
+                    Some(Err(why)) => break Err(why.clone()),
+                    None => {}
                 }
-                Some(Err(why)) => return Err(why.clone()),
-                None => {}
+                if ended.turn {
+                    ended.turn = false;
+                    mine = true;
+                }
+            }
+            if !mine {
+                let mut state = match shared.state() {
+                    Ok(state) => state,
+                    Err(why) => break Err(why),
+                };
+                if !state.reading && state.closed.is_none() {
+                    state.reading = true;
+                    mine = true;
+                }
             }
             let left = match deadline {
-                None => return Ok(None),
+                None => Duration::ZERO,
                 // A timeout past what an instant holds waits as long as it can at a time.
                 Some(None) => timeout.unwrap_or(Duration::ZERO),
                 Some(Some(deadline)) => deadline.saturating_duration_since(Instant::now()),
             };
-            if left.is_zero() {
-                return Ok(None);
+            if mine {
+                match shared.turn(Some(left)) {
+                    Ok(true) => continue,
+                    Ok(false) if !left.is_zero() => continue,
+                    // Waited out: what came is its end, or none.
+                    Ok(false) => {
+                        let ended = match self.ending.state.lock() {
+                            Ok(ended) => ended,
+                            Err(e) => break Err(poisoned(e)),
+                        };
+                        break match &ended.exit {
+                            Some(Ok(exit)) => Ok(Some(*exit)),
+                            Some(Err(why)) => Err(why.clone()),
+                            None => Ok(None),
+                        };
+                    }
+                    // The connection ended: its `Proc`s were told, this one among them.
+                    Err(_) => mine = false,
+                }
+            } else {
+                if left.is_zero() {
+                    break Ok(None);
+                }
+                let ended = match self.ending.state.lock() {
+                    Ok(ended) => ended,
+                    Err(e) => break Err(poisoned(e)),
+                };
+                if ended.exit.is_none()
+                    && !ended.turn
+                    && let Err(e) = self.ending.came.wait_timeout(ended, left)
+                {
+                    break Err(poisoned(e));
+                }
             }
-            came = self
+        };
+        // Going: no longer waiting, and the turn it holds, or was handed as it went, given to another.
+        if let Ok(mut state) = shared.state() {
+            state.waiting.remove(&self.exec);
+            let handed = self
                 .ending
-                .came
-                .wait_timeout(came, left)
-                .map_err(poisoned)?
-                .0;
+                .state
+                .lock()
+                .is_ok_and(|mut ended| std::mem::take(&mut ended.turn));
+            if (mine || handed) && state.closed.is_none() {
+                state.pass_turn();
+            }
         }
+        if let Ok(Some(exit)) = got {
+            self.exit = Some(exit);
+        }
+        got
     }
 }
 
@@ -1035,17 +2007,13 @@ impl<T: Transport> Proc for RemoteProc<T> {
     }
 
     /// A kill request naming its exec, answered once the agent has sent KILL; its end then comes as any
-    /// end does. An agent of wire version 2 or earlier has no kill: refused by type before it is sent.
+    /// end does.
     fn kill(&mut self) -> Result<(), Refusal> {
         if self.wait(None)?.is_some() {
             return Ok(());
         }
         let kill = Request::Call(Call::Kill { exec: self.exec });
-        match self
-            .conn
-            .call(self.version, self.bound, &kill, |_| Ok(NONE), None)?
-            .1
-        {
+        match self.conn.call(self.bound, &kill, |_| Ok(NONE), None)?.1 {
             Answer::Done => Ok(()),
             Answer::Refused(r) => Err(r),
             other => Err(unexpected("kill", &other)),
@@ -1059,29 +2027,53 @@ impl<T: Transport> Proc for RemoteProc<T> {
 
 impl<T: Transport> Drop for RemoteProc<T> {
     /// Let go before its end came: the agent is told, and lets the program run on as dropping an
-    /// in-process `Proc` does. A release that can't be sent (the connection gone) needs none: the
+    /// in-process `Proc` does. A release that can't be sent now (no room, or the connection gone) needs none: the
     /// agent's disconnect rule has the program.
     fn drop(&mut self) {
         let shared = &self.conn.shared;
         let ended = self.exit.is_some()
             || self
                 .ending
-                .exit
+                .state
                 .lock()
-                .map(|exit| exit.is_some())
+                .map(|ended| ended.exit.is_some())
                 .unwrap_or(true);
         if let Ok(mut state) = shared.state() {
             state.programs.remove(&self.exec);
         }
-        if !ended
-            && let Ok(bytes) = wire::request(
-                self.version,
-                self.exec,
-                &Request::Release,
-                wire::MAX_MESSAGE,
-            )
+        if !ended && let Ok(bytes) = wire::request(self.exec, &Request::Release, wire::MAX_MESSAGE)
         {
-            let _ = shared.transport.send(&bytes, &[]);
+            self.conn.send_now(&bytes);
         }
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+impl<T: Transport> Core<T> {
+    /// The connection's shared state, for a test of a transport to reach its socket.
+    pub(crate) fn shared(&self) -> &Shared<T> {
+        &self.conn.shared
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+impl<T: Transport> Shared<T> {
+    /// How many calls wait for their answers.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn calls_waiting(&self) -> usize {
+        self.state().map_or(0, |state| state.calls.len())
+    }
+
+    /// What `f` makes of the reader's read state, between the turn's reads.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn with_reading<R>(&self, f: impl FnOnce(&T::Reading) -> R) -> R {
+        f(&self.reading.lock().unwrap())
+    }
+
+    /// A reading thread's step, as the event form's loop reads: one wait on the connection with no bound, then what
+    /// came handed on. For a test that sets this core beside a client with a reading thread of its own.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn read_as_a_thread_would(&self) -> Result<bool, Refusal> {
+        self.turn(None)
     }
 }

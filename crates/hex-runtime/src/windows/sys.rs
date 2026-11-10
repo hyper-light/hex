@@ -39,7 +39,7 @@ use windows_sys::Win32::System::Threading::{
     PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_DUP_HANDLE,
     PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, ResumeThread,
     STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, SetEvent, TerminateProcess,
-    WaitForMultipleObjects, WaitForSingleObject,
+    WaitForSingleObject,
 };
 
 use hex_core::job::Cpu;
@@ -51,6 +51,103 @@ pub fn active_processors() -> u32 {
     // documented argument for every group. A 0 return (no information) is treated as one processor.
     let n = unsafe { GetActiveProcessorCount(ALL_PROCESSOR_GROUPS) };
     n.max(1)
+}
+
+/// This process's memory budget and the system's physical-memory facts.
+fn memory_status() -> io::Result<windows_sys::Win32::System::SystemInformation::MEMORYSTATUSEX> {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut m: MEMORYSTATUSEX = zeroed_struct();
+    m.dwLength = u32::try_from(size_of::<MEMORYSTATUSEX>())
+        .map_err(|_| io::Error::other("MEMORYSTATUSEX's size past u32"))?;
+    // SAFETY: m names its actual size and outlives the call, which writes only that structure.
+    if unsafe { GlobalMemoryStatusEx(&raw mut m) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(m)
+}
+
+/// The machine's physical memory and how much is available: the node's facts.
+pub fn memory() -> io::Result<(u64, u64)> {
+    let m = memory_status()?;
+    Ok((m.ullTotalPhys, m.ullAvailPhys))
+}
+
+/// Bytes this process can still commit (MEMORYSTATUSEX::ullAvailPageFile), read at node startup.
+pub fn commit_available() -> io::Result<u64> {
+    memory_status().map(|m| m.ullAvailPageFile)
+}
+
+/// The calling thread's stack extent, as Windows reports it; the node measures a default worker.
+pub fn thread_stack_bytes() -> io::Result<usize> {
+    use windows_sys::Win32::System::Threading::GetCurrentThreadStackLimits;
+    let (mut low, mut high) = (0usize, 0usize);
+    // SAFETY: both outputs name writable usize values that outlive the call.
+    unsafe { GetCurrentThreadStackLimits(&raw mut low, &raw mut high) };
+    high.checked_sub(low)
+        .filter(|bytes| *bytes > 0)
+        .ok_or_else(|| io::Error::other("Windows reported no thread stack extent"))
+}
+
+/// The enclosing job's declared process ceiling, if it sets one. Kernel allocation failures remain
+/// authoritative when the current job has none, or another enclosing job is tighter.
+pub fn enclosing_process_limit() -> io::Result<Option<usize>> {
+    use windows_sys::Win32::System::JobObjects::{
+        IsProcessInJob, JOBOBJECT_BASIC_LIMIT_INFORMATION, JobObjectBasicLimitInformation,
+    };
+    let mut inside = 0;
+    // SAFETY: GetCurrentProcess is a pseudo-handle, NULL asks about any job, and inside outlives the call.
+    if unsafe { IsProcessInJob(GetCurrentProcess(), null_mut(), &raw mut inside) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if inside == 0 {
+        return Ok(None);
+    }
+    let mut info: JOBOBJECT_BASIC_LIMIT_INFORMATION = zeroed_struct();
+    let bytes = u32::try_from(size_of::<JOBOBJECT_BASIC_LIMIT_INFORMATION>())
+        .map_err(|_| io::Error::other("job limit information's size past u32"))?;
+    // SAFETY: NULL selects this process's immediate job. info is correctly typed, sized and alive.
+    if unsafe {
+        QueryInformationJobObject(
+            null_mut(),
+            JobObjectBasicLimitInformation,
+            (&raw mut info).cast(),
+            bytes,
+            null_mut(),
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    if info.LimitFlags & JOB_OBJECT_LIMIT_ACTIVE_PROCESS == 0 {
+        Ok(None)
+    } else {
+        usize::try_from(info.ActiveProcessLimit)
+            .map(Some)
+            .map_err(|_| io::Error::other("job's active-process ceiling past usize"))
+    }
+}
+
+/// The size of the volume `dir` is on and the bytes this user may still write there
+/// (`GetDiskFreeSpaceExW`): the node's facts.
+pub fn disk_space(dir: &std::path::Path) -> io::Result<(u64, u64)> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
+    let (mut caller, mut total, mut free) = (0u64, 0u64, 0u64);
+    // SAFETY: `wide` is a NUL-terminated UTF-16 path that outlives the call; the three outputs are u64s
+    // that outlive it, each written once.
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &raw mut caller,
+            &raw mut total,
+            &raw mut free,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((total, caller))
 }
 
 /// The users folder (`FOLDERID_UserProfiles`, `%SystemDrive%\\Users` unless moved), read from its known
@@ -417,6 +514,17 @@ pub struct Accounting {
     pub write_bytes: u64,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// HEX-INST-9: count this thread's process starts to detect a feature read spawning PowerShell.
+    static STARTED_HERE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn started_here() -> u64 {
+    STARTED_HERE.with(std::cell::Cell::get)
+}
+
 /// Starts `spawn` suspended in `jobs` (its box's job, and the node's where there is one), so it is a
 /// member of them from its creation and nothing runs outside them (`PROC_THREAD_ATTRIBUTE_JOB_LIST`).
 /// Only its three standard handles are inherited (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`). The caller
@@ -535,6 +643,8 @@ fn create_in(
     if ok == 0 {
         return Err(last_error());
     }
+    #[cfg(test)]
+    STARTED_HERE.with(|n| n.set(n.get().saturating_add(1)));
     // SAFETY: CreateProcessW succeeded, so pi holds a process handle this process now owns.
     let process = unsafe { Handle::own(pi.hProcess) };
     // SAFETY: and a thread handle this process now owns.
@@ -577,30 +687,6 @@ pub fn duplicate_into(source: usize, into: &Handle) -> io::Result<usize> {
         return Err(last_error());
     }
     Ok(theirs as usize)
-}
-
-/// A copy, in this process, of the handle `value` of `from`'s process, with the same access, owned here.
-pub fn duplicate_from(from: &Handle, value: usize) -> io::Result<Handle> {
-    let mut mine: HANDLE = null_mut();
-    // SAFETY: `from` is a process handle opened with PROCESS_DUP_HANDLE; `value` names a handle in it (a
-    // stale value is refused by the call, ERROR_INVALID_HANDLE, or names whatever handle has it, which the
-    // caller checks); the handle written is this process's, owned below.
-    let ok = unsafe {
-        DuplicateHandle(
-            from.raw(),
-            value as HANDLE,
-            GetCurrentProcess(),
-            &raw mut mine,
-            0,
-            0,
-            DUPLICATE_SAME_ACCESS,
-        )
-    };
-    if ok == 0 {
-        return Err(last_error());
-    }
-    // SAFETY: a handle this call made in this process, owned from here.
-    Ok(unsafe { Handle::own(mine) })
 }
 
 /// Closes the handle `value` in `into`'s process (`DUPLICATE_CLOSE_SOURCE`, no copy made).
@@ -693,17 +779,6 @@ pub fn set(event: &Handle) -> io::Result<()> {
         return Err(last_error());
     }
     Ok(())
-}
-
-/// Waits, without end, for the first of `a` and `b` to be signalled: `true` for `a`.
-pub fn first_of(a: &Handle, b: &Handle) -> io::Result<bool> {
-    let both = [a.raw(), b.raw()];
-    // SAFETY: two live handles, waited on without end for either.
-    match unsafe { WaitForMultipleObjects(2, both.as_ptr(), 0, u32::MAX) } {
-        WAIT_OBJECT_0 => Ok(true),
-        r if r == WAIT_OBJECT_0.saturating_add(1) => Ok(false),
-        _ => Err(last_error()),
-    }
 }
 
 /// Whether `process` ended within `timeout_ms` (`u32::MAX` is forever).

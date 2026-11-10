@@ -1,6 +1,6 @@
 //! The guest client's tests (docs/design/shards-guest.md §3, HEX-GUEST-4 and HEX-GUEST-5; native plan
 //! step 5, serving HEX-RT-1..13 through the seam): against a stand-in agent on loopback, the client says
-//! hello in the first version and calls in the highest both speak, framed; an exec's stdin and stdout
+//! hello with its build, then calls, framed, in its one wire; an exec's stdin and stdout
 //! ride connections of their own, named for it, and its end comes back; and an agent that sends bytes
 //! that aren't a message, or closes mid-message, refuses every waiting call by type.
 
@@ -52,8 +52,8 @@ fn next_request(conn: &mut TcpStream) -> (Header, Request) {
     }
 }
 
-fn send_answer(conn: &mut TcpStream, version: u16, id: u64, answer: &Answer) {
-    let bytes = wire::answer(version, id, answer, wire::MAX_MESSAGE).unwrap();
+fn send_answer(conn: &mut TcpStream, id: u64, answer: &Answer) {
+    let bytes = wire::answer(id, answer, wire::MAX_MESSAGE).unwrap();
     conn.write_all(&stream::frame(&bytes, wire::MAX_MESSAGE).unwrap())
         .unwrap();
 }
@@ -61,32 +61,40 @@ fn send_answer(conn: &mut TcpStream, version: u16, id: u64, answer: &Answer) {
 /// The relay's token for every stand-in connection.
 const TOKEN: u64 = 0x7465_7374;
 
+/// The stand-in agent's hello, of this wire and this build.
+fn agents_hello() -> wire::Hello {
+    wire::Hello {
+        build: wire::build(),
+        classes: vec![Class::Oci],
+        // The stand-in's own limits, inputs rather than tuning: past what any test here makes.
+        limits: Limits {
+            connections: 1,
+            message_bytes: wire::MAX_MESSAGE,
+            in_flight: 4,
+            programs: 4,
+        },
+        budgets: wire::Budgets {
+            in_flight: 4,
+            programs: 4,
+        },
+    }
+}
+
 fn hello(conn: &mut TcpStream) -> Header {
     conn.write_all(&TOKEN.to_le_bytes()).unwrap();
     let (h, request) = next_request(conn);
-    assert_eq!(request, Request::Hello);
-    send_answer(
-        conn,
-        wire::FIRST,
-        h.id,
-        &Answer::Hello(wire::Hello {
-            version: wire::VERSION,
-            classes: vec![Class::Oci],
-            // The stand-in's own limits, inputs rather than tuning: past what any test here makes.
-            limits: Limits {
-                connections: 1,
-                message_bytes: wire::MAX_MESSAGE,
-                in_flight: 4,
-                programs: 4,
-            },
-        }),
+    assert_eq!(
+        request,
+        Request::Hello {
+            build: wire::build()
+        }
     );
+    send_answer(conn, h.id, &Answer::Hello(agents_hello()));
     h
 }
 
-/// HEX-GUEST-4: connect, then inspect a box the agent doesn't hold: expect the hello in version 1 and
-/// the inspect in the highest version both speak, each framed, the classes the agent named, and its
-/// refusal returned typed.
+/// HEX-GUEST-4: connect, then inspect a box the agent doesn't hold: expect the hello and the inspect, each
+/// framed, the classes the agent named, and its refusal returned typed.
 #[test]
 fn a_call_goes_framed_and_its_refusal_comes_back_typed() {
     let (control, _stdio, link) = listeners();
@@ -97,22 +105,79 @@ fn a_call_goes_framed_and_its_refusal_comes_back_typed() {
         let Request::Call(Call::Inspect(id)) = request else {
             panic!("expected an inspect, got {request:?}");
         };
-        send_answer(
-            &mut conn,
-            h.version,
-            h.id,
-            &Answer::Refused(Refusal::NoSuchBox(id)),
-        );
-        [(first.version, first.kind), (h.version, h.kind)]
+        send_answer(&mut conn, h.id, &Answer::Refused(Refusal::NoSuchBox(id)));
+        [first.kind, h.kind]
     });
     let client = Client::connect(link).unwrap();
     assert_eq!(client.classes(), vec![Class::Oci]);
     let b = BoxId::new("b").unwrap();
     assert_eq!(client.inspect(&b), Err(Refusal::NoSuchBox(b)));
-    assert_eq!(
-        agent.join().unwrap(),
-        [(wire::FIRST, 0x0001), (wire::VERSION, 0x0006)]
+    assert_eq!(agent.join().unwrap(), [0x0001, 0x0006]);
+}
+
+/// One wire (the lead's word of 2026-11-09, which drops the append-only rule), over the guest's stream: a client
+/// refuses an agent of another wire at the hello, typed, naming both wires' identities and both builds, and sends it
+/// nothing more; an agent of its own wire it serves. Do: connect to a stand-in agent that answers the hello, framed,
+/// as an agent of another wire would (its own identity and build, in the hello's head every build lays out alike);
+/// then connect again, answered in this wire, and inspect a box. Expect: the first connect refused as
+/// `Invalid { what: "wire" }` naming both, its connection ended with nothing more sent; the second greeted and its
+/// inspect answered.
+#[test]
+fn an_agent_of_another_wire_is_refused_at_the_hello() {
+    let (control, _stdio, link) = listeners();
+    let theirs = !wire::IDENTITY;
+    let their_build = "hex 9.9.9 (another wire)";
+    let agent = std::thread::spawn(move || {
+        let (mut conn, _) = control.accept().unwrap();
+        conn.write_all(&TOKEN.to_le_bytes()).unwrap();
+        let (h, request) = next_request(&mut conn);
+        assert!(matches!(request, Request::Hello { .. }), "{request:?}");
+        let mut bytes = wire::answer(
+            h.id,
+            &Answer::Hello(wire::Hello {
+                build: their_build.to_owned(),
+                ..agents_hello()
+            }),
+            wire::MAX_MESSAGE,
+        )
+        .unwrap();
+        bytes[4..12].copy_from_slice(&theirs.to_le_bytes());
+        conn.write_all(&stream::frame(&bytes, wire::MAX_MESSAGE).unwrap())
+            .unwrap();
+        // Nothing more comes: the client's end of the connection, read as its close.
+        let mut rest = Vec::new();
+        conn.read_to_end(&mut rest).unwrap();
+        let (mut conn, _) = control.accept().unwrap();
+        hello(&mut conn);
+        let (h, request) = next_request(&mut conn);
+        let Request::Call(Call::Inspect(id)) = request else {
+            panic!("an inspect, not {request:?}")
+        };
+        send_answer(&mut conn, h.id, &Answer::Refused(Refusal::NoSuchBox(id)));
+        (rest, conn)
+    });
+    let refused = Client::connect(Arc::clone(&link)).err();
+    let Some(Refusal::Invalid { what: "wire", why }) = &refused else {
+        panic!("refused for its wire, not {refused:?}")
+    };
+    for named in [
+        format!("{theirs:016x}"),
+        format!("{:016x}", wire::IDENTITY),
+        their_build.to_owned(),
+        wire::build(),
+    ] {
+        assert!(why.contains(&named), "{why:?} names {named:?}");
+    }
+    let client = Client::connect(link).unwrap();
+    let b = BoxId::new("b").unwrap();
+    assert_eq!(client.inspect(&b), Err(Refusal::NoSuchBox(b.clone())));
+    let (rest, conn) = agent.join().unwrap();
+    assert!(
+        rest.is_empty(),
+        "the refused client sent {} bytes after its hello",
+        rest.len()
     );
+    drop(conn);
 }
 
 /// HEX-GUEST-4: exec a program with stdin and stdout whose agent echoes one into the other: expect two
@@ -145,12 +210,12 @@ fn an_execs_stdio_rides_named_connections_and_its_end_comes_back() {
             );
             named.insert(n.stream, s);
         }
-        send_answer(&mut conn, h.version, h.id, &Answer::Started { pid: 42 });
+        send_answer(&mut conn, h.id, &Answer::Started { pid: 42 });
         let mut stdin = named.remove(&stream::Stdio::In).unwrap();
         let mut stdout = named.remove(&stream::Stdio::Out).unwrap();
         std::io::copy(&mut stdin, &mut stdout).unwrap();
         drop(stdout);
-        send_answer(&mut conn, h.version, h.id, &Answer::Exited(Exit::Code(0)));
+        send_answer(&mut conn, h.id, &Answer::Exited(Exit::Code(0)));
         // Held open until the client has its end, as an agent's connection is.
         let _ = next_request(&mut conn);
     });
@@ -212,7 +277,7 @@ fn an_agent_closing_mid_message_is_refused() {
         let (mut conn, _) = control.accept().unwrap();
         hello(&mut conn);
         let (h, _) = next_request(&mut conn);
-        let bytes = wire::answer(h.version, h.id, &Answer::Done, wire::MAX_MESSAGE).unwrap();
+        let bytes = wire::answer(h.id, &Answer::Done, wire::MAX_MESSAGE).unwrap();
         let framed = stream::frame(&bytes, wire::MAX_MESSAGE).unwrap();
         conn.write_all(&framed[..framed.len() - 1]).unwrap();
     });
@@ -225,8 +290,16 @@ fn an_agent_closing_mid_message_is_refused() {
     assert!(why.contains("middle of a message"), "{why}");
 }
 
+/// How a connection's sends are bounded: by a timeout on its socket, or by the client's core, which writes it without
+/// waiting and waits on it within its call's learned wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Bound {
+    Socket(Option<Duration>),
+    Core,
+}
+
 /// Each send bound set on a connection, by the port it was dialed on.
-type SendBounds = Arc<std::sync::Mutex<Vec<(u32, Option<Duration>)>>>;
+type SendBounds = Arc<std::sync::Mutex<Vec<(u32, Bound)>>>;
 
 /// A connection that records each send bound set on it, by the port it was dialed on.
 struct Recorded {
@@ -265,7 +338,10 @@ impl Duplex for Recorded {
     }
 
     fn set_write_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
-        self.bounds.lock().unwrap().push((self.port, timeout));
+        self.bounds
+            .lock()
+            .unwrap()
+            .push((self.port, Bound::Socket(timeout)));
         self.conn.set_write_timeout(timeout)
     }
 
@@ -278,6 +354,9 @@ impl Duplex for Recorded {
     }
 
     fn set_nonblocking(&self, on: bool) -> std::io::Result<()> {
+        if on {
+            self.bounds.lock().unwrap().push((self.port, Bound::Core));
+        }
         self.conn.set_nonblocking(on)
     }
 }
@@ -305,7 +384,8 @@ impl Link for Recording {
 
 /// HEX-GUEST-32 (§3, CLAUDE.md §8): exec a program with stdin through the guest: expect its stdio
 /// connection given no send bound, as a local exec's stdin is the caller's own pipe, which waits on the
-/// program as long as it runs; only the control connection is bounded, as the local client's socket is.
+/// program as long as it runs; only the control connection is bounded, as the local client's socket is: written
+/// without waiting and waited on by the client's core, within its call's learned wait.
 #[test]
 fn a_stdio_connection_waits_on_its_program_as_a_local_pipe_does() {
     let (control, stdio) = (
@@ -323,8 +403,8 @@ fn a_stdio_connection_waits_on_its_program_as_a_local_pipe_does() {
         hello(&mut conn);
         let (h, _) = next_request(&mut conn);
         let (s, _) = stdio.accept().unwrap();
-        send_answer(&mut conn, h.version, h.id, &Answer::Started { pid: 7 });
-        send_answer(&mut conn, h.version, h.id, &Answer::Exited(Exit::Code(0)));
+        send_answer(&mut conn, h.id, &Answer::Started { pid: 7 });
+        send_answer(&mut conn, h.id, &Answer::Exited(Exit::Code(0)));
         let _ = next_request(&mut conn);
         drop(s);
     });
@@ -352,7 +432,7 @@ fn a_stdio_connection_waits_on_its_program_as_a_local_pipe_does() {
         "{bounds:?}"
     );
     assert!(
-        bounds.contains(&(stream::CONTROL_PORT, Some(ANSWER_PATIENCE))),
+        bounds.contains(&(stream::CONTROL_PORT, Bound::Core)),
         "{bounds:?}"
     );
 }
@@ -402,6 +482,14 @@ impl shards_api::Stream for Looped {
 
     fn set_write_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
         self.0.set_write_timeout(timeout)
+    }
+
+    /// Not asked of a guest's stream by Hex: refused, as loopback's are std's to keep.
+    fn buffer_sizes(&self) -> std::io::Result<(usize, usize)> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "a test's loopback stream reports no buffer sizes",
+        ))
     }
 }
 
@@ -458,6 +546,98 @@ fn the_first_dial_waits_for_the_guest_and_later_ones_try_once() {
     );
 }
 
+/// HEX-RT-17, HEX-GUEST-41: ask an actual Shards simulator for stdin and stdout, then use their raw descriptors as
+/// the caller's files. Expect blocking ends that echo to EOF, while the control connection remains non-blocking.
+/// Shards waits around its non-blocking kernel sockets in its Stream wrapper; that wrapper is gone at handoff.
+#[test]
+fn asked_shards_streams_wait_as_the_callers_files_do() {
+    use shards_api::Guests;
+
+    let guests = shards_api::sim::SimGuests::new(|host| {
+        host.listen(stream::CONTROL_PORT);
+        host.listen(stream::STDIO_PORT);
+        let (port, mut control) = host.accept().unwrap();
+        assert_eq!(port, stream::CONTROL_PORT);
+        control.write_all(&TOKEN.to_le_bytes()).unwrap();
+        let mut named = std::collections::BTreeMap::new();
+        for _ in 0..2 {
+            let (port, mut conn) = host.accept().unwrap();
+            assert_eq!(port, stream::STDIO_PORT);
+            let mut name = [0u8; stream::NAME_BYTES];
+            conn.read_exact(&mut name).unwrap();
+            let named_stream = stream::read_name(&name).unwrap();
+            assert_eq!(named_stream.exec, Exec { conn: TOKEN, id: 1 });
+            named.insert(named_stream.stream, conn);
+        }
+        let mut stdin = named.remove(&stream::Stdio::In).unwrap();
+        let mut stdout = named.remove(&stream::Stdio::Out).unwrap();
+        std::io::copy(&mut stdin, &mut stdout).unwrap();
+        shards_api::End::PowerOff
+    });
+    let guest = guests
+        .boot(&shards_api::GuestSpec {
+            kernel: "kernel".into(),
+            init: shards_api::Init::Executable("init".into()),
+            cmdline: String::new(),
+            vcpus: 1,
+            memory_mib: shards_api::min_memory_mib(std::env::consts::ARCH),
+            disks: vec![],
+            shares: vec![],
+            ports: vec![stream::CONTROL_PORT, stream::STDIO_PORT],
+            binary: None,
+        })
+        .unwrap();
+    let transport = Stream::dial(Arc::new(shards::ShardsLink::new(
+        Arc::from(guest),
+        Duration::MAX,
+    )))
+    .unwrap();
+    let given = transport
+        .asks(
+            1,
+            hex_api::Ask {
+                stdin: true,
+                stdout: true,
+                stderr: false,
+            },
+        )
+        .unwrap();
+    let (stdin, stdout) = (given.stdin.unwrap(), given.stdout.unwrap());
+    #[cfg(unix)]
+    for fd in [&stdin, &stdout] {
+        assert!(
+            !rustix::fs::fcntl_getfl(fd)
+                .unwrap()
+                .contains(rustix::fs::OFlags::NONBLOCK),
+            "a raw given end must wait without Shards' Stream wrapper"
+        );
+    }
+    #[cfg(unix)]
+    assert!(
+        rustix::fs::fcntl_getfl(transport.handle())
+            .unwrap()
+            .contains(rustix::fs::OFlags::NONBLOCK)
+    );
+    #[cfg(windows)]
+    {
+        assert!(stdin.socket().is_some());
+        assert!(stdout.socket().is_some());
+        // A retained transfer copy closing must not shut down the caller's socket stream.
+        let retained: hex_api::End = stdin.socket().unwrap().try_clone_to_owned().unwrap().into();
+        drop(retained);
+        let empty = hex_afunix::receive_socket(transport.handle(), &mut [0]).unwrap_err();
+        assert_eq!(empty.kind(), std::io::ErrorKind::WouldBlock);
+    }
+    let mut stdin = hex_api::OwnedStream::from(stdin);
+    stdin.write_all(b"round trip\n").unwrap();
+    drop(stdin);
+    let mut output = String::new();
+    hex_api::OwnedStream::from(stdout)
+        .read_to_string(&mut output)
+        .unwrap();
+    assert_eq!(output, "round trip\n");
+}
+
 /// Native plan step 8 (1), CLAUDE.md §2: the event form's writes queue behind a backlog bounded in bytes.
 /// To a peer that never reads, frames go while the socket and the backlog have room; the one that wouldn't
 /// fit is refused whole, `Exhausted` naming the backlog and its bound, nothing past the bound is ever
@@ -488,7 +668,7 @@ fn the_event_forms_writes_are_bounded_and_refused_whole_past_the_bound() {
                 refused = Some(why);
                 break;
             }
-            Err(Sent::Gone) => panic!("the peer went"),
+            Err(Sent::Gone | Sent::Full(_)) => panic!("the peer went, or the send waited"),
         }
     }
     assert_eq!(

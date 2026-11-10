@@ -1,10 +1,12 @@
 //! The macOS runtime: [`hex_api::Runtime`] over the `process` class (docs/design/runtime.md). A box is a
-//! process group under a QoS clamp, its bounds held by a watcher thread reading each member's footprint
-//! (`process`, `sys`, `watch`); the `oci` class is a Linux kernel's, refused by name here: a node
-//! runs it in its Shards guest by wrapping this in [`crate::guest::WithGuest`] (the native plan's step 5). This is the node's runtime seam on macOS; the records,
+//! process group at the QoS its declared weight asks, its bounds held by a watcher thread reading each
+//! member's footprint (`process`, `sys`, `watch`); the `oci` class is a Linux kernel's, refused by name
+//! here: a node runs it in its Shards guest by wrapping this in [`crate::guest::WithGuest`] (the native
+//! plan's step 5). This is the node's runtime seam on macOS; the records,
 //! recovery and socket that wrap it on Linux (`hex-node`) are not yet cross-OS, so this holds its boxes
 //! in memory and is driven in process.
 
+pub mod directory;
 pub mod helper_client;
 pub mod helper_daemon;
 pub mod helper_sys;
@@ -59,31 +61,69 @@ struct UserBox {
 struct BoxUser {
     /// Shared with each program it starts, which asks the helper for its end ([`proc::UserProc`]).
     helper: Arc<helper_client::Helper>,
-    boxes: Mutex<BTreeMap<BoxId, UserBox>>,
+    /// Shared with a run's thread, which removes its box through [`remove_user_box`] as `delete` does.
+    boxes: Arc<Mutex<BTreeMap<BoxId, UserBox>>>,
 }
 
 /// The macOS node's runtime over the `process` class. Rootless (`helper` `None`), a box is a process group
 /// under a watcher (step 1); with the privileged helper installed (`helper` `Some`), a box is a user of
 /// its own the helper starts and bounds in the kernel (step 2). `new` is rootless; `detect` picks box-user
 /// when the helper's socket answers. Holds its boxes in memory, keyed by id.
+/// This machine's model, `hw.model` (`Mac16,9`): its class, whose recorded growth rates seed its boxes'
+/// pacing (`hex_core::watch::seed`). Read once at node start by `/usr/sbin/sysctl`, by absolute path with
+/// a fixed argv and no shell, as the helper runs its directory tools.
+pub fn machine_model() -> Result<String, Refusal> {
+    let out = std::process::Command::new("/usr/sbin/sysctl")
+        .args(["-n", "hw.model"])
+        .output()
+        .map_err(|e| Refusal::os("reading the machine's model", e))?;
+    if !out.status.success() {
+        return Err(Refusal::os(
+            "reading the machine's model",
+            std::io::Error::other(format!("sysctl -n hw.model: {}", out.status)),
+        ));
+    }
+    String::from_utf8(out.stdout)
+        .map(|m| m.trim().to_owned())
+        .map_err(|e| Refusal::os("reading the machine's model", std::io::Error::other(e)))
+}
+
 pub struct MacRuntime {
     shared: Arc<Shared>,
-    boxes: Mutex<BTreeMap<BoxId, Arc<ProcessBox>>>,
+    /// Shared with a run's thread, which removes its box through [`remove_process_box`] as `delete` does.
+    boxes: Arc<Mutex<BTreeMap<BoxId, Arc<ProcessBox>>>>,
     helper: Option<BoxUser>,
     /// The kernel's bound on a program's arguments and environment, read at start (`kern.argmax`).
     exec_limit: ExecLimit,
 }
 
 impl MacRuntime {
+    /// The growth rates the node's boxes are paced at, as its watchers have learned them (observability:
+    /// what the watchers pace by).
+    pub fn pacing(&self) -> Result<hex_core::watch::Rates, Refusal> {
+        self.shared.rates()
+    }
+
+    /// How late the node's watchers have woken past their waits, at the latest (its class's record to
+    /// start; observability: what the boxes' holds reckon with).
+    pub fn lateness(&self) -> Result<std::time::Duration, Refusal> {
+        self.shared.lateness()
+    }
+
     /// A rootless runtime (no helper): boxes are process groups whose bounds a watcher holds, reckoned to
-    /// grow at `rate_bytes` bytes and `rate_processes` processes a second (the bound's pacing, CLAUDE.md §5:
-    /// measured at node start or cited, the caller says which).
-    pub fn new(rate_bytes: NonZeroU64, rate_processes: NonZeroU64) -> Result<Self, Refusal> {
-        let shared = Shared::new(rate_bytes, rate_processes)
+    /// grow at `rate_bytes` bytes and `rate_processes` processes a second, and its watchers to wake up to
+    /// `lateness` past their waits (the bound's pacing and its hold, CLAUDE.md §5: measured at node start or
+    /// cited, the caller says which).
+    pub fn new(
+        rate_bytes: NonZeroU64,
+        rate_processes: NonZeroU64,
+        lateness: std::time::Duration,
+    ) -> Result<Self, Refusal> {
+        let shared = Shared::new(rate_bytes, rate_processes, lateness)
             .map_err(|e| Refusal::os("reading the machine's timebase", e))?;
         Ok(Self {
             shared: Arc::new(shared),
-            boxes: Mutex::new(BTreeMap::new()),
+            boxes: Arc::new(Mutex::new(BTreeMap::new())),
             helper: None,
             exec_limit: exec_limit()?,
         })
@@ -94,23 +134,24 @@ impl MacRuntime {
     pub fn detect(
         rate_bytes: NonZeroU64,
         rate_processes: NonZeroU64,
+        lateness: std::time::Duration,
         helper_socket: &std::path::Path,
     ) -> Result<Self, Refusal> {
         match helper_client::Helper::connect(helper_socket)? {
             Some(helper) => {
-                let shared = Shared::new(rate_bytes, rate_processes)
+                let shared = Shared::new(rate_bytes, rate_processes, lateness)
                     .map_err(|e| Refusal::os("reading the machine's timebase", e))?;
                 Ok(Self {
                     shared: Arc::new(shared),
-                    boxes: Mutex::new(BTreeMap::new()),
+                    boxes: Arc::new(Mutex::new(BTreeMap::new())),
                     helper: Some(BoxUser {
                         helper: Arc::new(helper),
-                        boxes: Mutex::new(BTreeMap::new()),
+                        boxes: Arc::new(Mutex::new(BTreeMap::new())),
                     }),
                     exec_limit: exec_limit()?,
                 })
             }
-            None => Self::new(rate_bytes, rate_processes),
+            None => Self::new(rate_bytes, rate_processes, lateness),
         }
     }
 
@@ -141,12 +182,41 @@ impl MacRuntime {
         }
     }
 
+    /// Hands run box `id`'s program to its own thread ([`crate::run::Run`]), with the box's KILL and its removal,
+    /// each the mode's own.
+    fn watch_run(&self, proc: Box<dyn Proc>, id: &BoxId) -> Result<crate::run::Run, Refusal> {
+        if let Some(bu) = &self.helper {
+            let (killer, kill_id) = (Arc::clone(&bu.helper), id.clone());
+            let (helper, boxes, gone) = (Arc::clone(&bu.helper), Arc::clone(&bu.boxes), id.clone());
+            return crate::run::Run::start(
+                proc,
+                id,
+                Box::new(move || killer.signal(&kill_id, Signal::KILL.number())),
+                Box::new(move || remove_user_box(&helper, &boxes, &gone)),
+            );
+        }
+        let b = self.get(id)?;
+        let (boxes, gone) = (Arc::clone(&self.boxes), id.clone());
+        crate::run::Run::start(
+            proc,
+            id,
+            Box::new(move || b.signal(Signal::KILL)),
+            Box::new(move || remove_process_box(&boxes, &gone)),
+        )
+    }
+
     fn boxes(
         &self,
     ) -> Result<std::sync::MutexGuard<'_, BTreeMap<BoxId, Arc<ProcessBox>>>, Refusal> {
         self.boxes
             .lock()
             .map_err(|_| Refusal::Broken("the node's box map lock is poisoned".to_owned()))
+    }
+
+    /// Box `id` as its watcher last recorded it, why it ended included (observability: the footprint the
+    /// watcher read when it ended a box, beside the peak).
+    pub fn status(&self, id: &BoxId) -> Result<process::Status, Refusal> {
+        self.get(id)?.status()
     }
 
     fn get(&self, id: &BoxId) -> Result<Arc<ProcessBox>, Refusal> {
@@ -191,7 +261,8 @@ impl BoxUser {
         }
         let bound = spec.bounds.memory_max.unwrap_or(u64::MAX);
         let reserve = RESERVE_BYTES.min(bound / 4);
-        self.helper.acquire(&spec.id, bound, reserve)?;
+        self.helper
+            .acquire(&spec.id, bound, reserve, spec.bounds.pids_max)?;
         boxes.insert(
             spec.id.clone(),
             UserBox {
@@ -251,10 +322,38 @@ impl BoxUser {
     }
 
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
-        self.helper.end(id)?;
-        self.boxes()?.remove(id);
-        Ok(())
+        remove_user_box(&self.helper, &self.boxes, id)
     }
+}
+
+/// Ends box-user box `id` through the helper and forgets it: the runtime's delete and a run's thread take this one
+/// path.
+fn remove_user_box(
+    helper: &helper_client::Helper,
+    boxes: &Mutex<BTreeMap<BoxId, UserBox>>,
+    id: &BoxId,
+) -> Result<(), Refusal> {
+    helper.end(id)?;
+    boxes
+        .lock()
+        .map_err(|_| Refusal::Broken("the node's box-user map lock is poisoned".to_owned()))?
+        .remove(id);
+    Ok(())
+}
+
+/// Removes rootless box `id` and ends it (kill, drain, stop its watcher): the runtime's delete and a run's thread
+/// take this one path. Dropping the last Arc does the same, so removing a box a caller still holds through
+/// `list` is safe.
+fn remove_process_box(
+    boxes: &Mutex<BTreeMap<BoxId, Arc<ProcessBox>>>,
+    id: &BoxId,
+) -> Result<(), Refusal> {
+    let b = boxes
+        .lock()
+        .map_err(|_| Refusal::Broken("the node's box map lock is poisoned".to_owned()))?
+        .remove(id)
+        .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
+    b.delete()
 }
 
 /// A box-user box's [`BoxInfo`]: a `process` box, with box-user membership (the helper holds it), no init
@@ -278,7 +377,7 @@ impl Runtime for MacRuntime {
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
-        spec.bounds.check()?;
+        spec.check()?;
         let ClassSpec::Process = spec.class else {
             return Err(Refusal::Platform {
                 what: "the oci class",
@@ -353,6 +452,23 @@ impl Runtime for MacRuntime {
         Ok(Box::new(hex_api::Asked::new(proc, given)))
     }
 
+    /// A run's box goes once its program ends (decision 7): a thread of the run's own waits for the end and
+    /// removes the box through the delete's own path ([`crate::run::Run`]), whether or not its caller still holds
+    /// the run, and only then gives the caller the end. Its kill is the box's KILL, the box holding that program
+    /// alone. In both modes: a process group's and a box user's.
+    fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        spec.check_run()?;
+        let id = spec.id.clone();
+        self.create(spec)?;
+        let begun = self
+            .exec(&id, program, stdio)
+            .and_then(|proc| self.watch_run(proc, &id));
+        match begun {
+            Ok(run) => Ok(Box::new(run)),
+            Err(why) => Err(crate::run::undone(why, self.delete(&id), &id)),
+        }
+    }
+
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
         if let Some(bu) = &self.helper {
             return bu.helper.signal(id, signal.number());
@@ -388,13 +504,7 @@ impl Runtime for MacRuntime {
         if let Some(bu) = &self.helper {
             return bu.delete(id);
         }
-        let b = self
-            .boxes()?
-            .remove(id)
-            .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
-        // Ends the box (kill, drain, stop its watcher); dropping the last Arc does the same, so deleting a
-        // box a caller still holds through `list` is safe.
-        b.delete()
+        remove_process_box(&self.boxes, id)
     }
 }
 

@@ -94,6 +94,10 @@ pub fn run(argv: &[String]) -> Option<u8> {
                 .unwrap_or(0),
         )),
         "echo" => Some(echo()),
+        // open <r|w>:<path>...: opens each path to read or to write, creating nothing, and prints a line
+        // for each: "<path> ok", or "<path> errno <n>": which devices a box's device program lets it
+        // open, and which it refuses (EPERM) rather than finding no device (ENXIO).
+        "open" => Some(open_each(args)),
         // tree <dir> | tree --layers <lowest>:...: a manifest of everything under `dir`, or in the overlay
         // of a box's layers, for HEX-GUEST-21's comparison of a staged root with containerd's unpack of
         // the same image (selftest/tree.rs).
@@ -116,6 +120,18 @@ pub fn run(argv: &[String]) -> Option<u8> {
             args.first().map(String::as_str).unwrap_or(""),
             args.get(1).and_then(|n| n.parse().ok()).unwrap_or(10),
         )),
+        // escape <mode> <marker>: a root-escape attempt from inside a box, for goal 5 plan step 2's
+        // security criteria (the pruned-seed root). Exits 0 when the box held (secure). Linux only, as
+        // the runtime is (the whole `oci` class is behind `cfg(linux)`); elsewhere it isn't an act.
+        #[cfg(target_os = "linux")]
+        "escape" => Some(hex_runtime::linux::oci::escape::attempt(
+            args.first().map(String::as_str).unwrap_or(""),
+            args.get(1).map(String::as_str).unwrap_or(""),
+        )),
+        // netlink-to <portid>: sends one rtnetlink request from a socket of the box's to the netlink socket
+        // <portid> names (0, the kernel), and exits 0 if it went, else the send's errno: whether a box reaches
+        // the socket the node keeps in its network namespace (goal 5 extended, step 6).
+        "netlink-to" => Some(netlink_to(args.first().map(String::as_str).unwrap_or(""))),
         // win-breakaway: tries to start a child outside the box's job (CREATE_BREAKAWAY_FROM_JOB).
         // Prints whether Windows refused it and exits 0 when refused, 1 when the child escaped — the
         // Windows process class forbids breakaway, so a member asking for it is refused.
@@ -425,6 +441,74 @@ fn spawn(n: u32) -> u8 {
         let _ = child.wait();
     }
     u8::from(refused).saturating_mul(2)
+}
+
+/// Opens each `<r|w>:<path>` of `args`, to read or to write and without creating it, and prints each
+/// outcome on a line of its own; exits 2 for an argument of neither form.
+fn open_each(args: &[String]) -> u8 {
+    let mut out = String::new();
+    for arg in args {
+        let (write, path) = match arg.split_once(':') {
+            Some(("r", path)) => (false, path),
+            Some(("w", path)) => (true, path),
+            _ => return 2,
+        };
+        match std::fs::OpenOptions::new()
+            .read(!write)
+            .write(write)
+            .open(path)
+        {
+            Ok(_) => out.push_str(&format!("{path} ok\n")),
+            Err(e) => out.push_str(&format!("{path} errno {}\n", e.raw_os_error().unwrap_or(0))),
+        }
+    }
+    u8::from(write_all(&mut std::io::stdout(), out.as_bytes()).is_err())
+}
+
+/// `netlink-to`: an `RTM_GETLINK` request (`struct nlmsghdr` and a zeroed `struct ifinfomsg`,
+/// include/uapi/linux/rtnetlink.h) sent to `portid`. Exits 0 if it went, the send's errno if it was
+/// refused, and 255 for an argument that isn't a portid or a socket that couldn't be made.
+#[cfg(target_os = "linux")]
+fn netlink_to(portid: &str) -> u8 {
+    use rustix::net::{
+        AddressFamily, SendFlags, SocketFlags, SocketType, netlink::SocketAddrNetlink,
+    };
+    const RTM_GETLINK: u16 = 18;
+    const NLM_F_REQUEST: u16 = 1;
+    const LEN: usize = 32;
+    let Ok(pid) = portid.parse::<u32>() else {
+        return 255;
+    };
+    let Ok(fd) = rustix::net::socket_with(
+        AddressFamily::NETLINK,
+        SocketType::RAW,
+        SocketFlags::CLOEXEC,
+        None,
+    ) else {
+        return 255;
+    };
+    let mut request = Vec::with_capacity(LEN);
+    request.extend_from_slice(&u32::try_from(LEN).unwrap_or(u32::MAX).to_ne_bytes());
+    request.extend_from_slice(&RTM_GETLINK.to_ne_bytes());
+    request.extend_from_slice(&NLM_F_REQUEST.to_ne_bytes());
+    request.extend_from_slice(&1u32.to_ne_bytes());
+    request.extend_from_slice(&0u32.to_ne_bytes());
+    request.resize(LEN, 0);
+    match rustix::net::sendto(
+        &fd,
+        &request,
+        SendFlags::empty(),
+        &SocketAddrNetlink::new(pid, 0),
+    ) {
+        Ok(_) => 0,
+        Err(e) => u8::try_from(e.raw_os_error()).unwrap_or(255),
+    }
+}
+
+/// `netlink-to` on a platform with no netlink: refused, 255.
+#[cfg(not(target_os = "linux"))]
+fn netlink_to(_portid: &str) -> u8 {
+    255
 }
 
 /// Copies stdin to stdout until stdin ends.

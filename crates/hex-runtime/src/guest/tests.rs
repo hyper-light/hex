@@ -117,6 +117,7 @@ fn oci(rootfs: Rootfs, mounts: Vec<Mount>) -> BoxSpec {
             network: Network::Private,
             hosts: Vec::new(),
         })),
+        owner: None,
     }
 }
 
@@ -335,6 +336,7 @@ fn a_bundles_config_is_rewritten_to_the_guests_paths() {
         id: BoxId::new("box-1").unwrap(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(bundle.clone()),
+        owner: None,
     };
     let got = rewrite(spec.clone(), &shared, STAGED, &Known::new()).unwrap();
     assert_eq!(
@@ -434,6 +436,7 @@ fn where_shards_has_no_backend_the_class_is_refused_before_anything_boots() {
         id: BoxId::new("p").unwrap(),
         bounds: Bounds::default(),
         class: ClassSpec::Process,
+        owner: None,
     };
     assert!(matches!(
         runtime.create(process),
@@ -675,6 +678,14 @@ impl shards_api::Stream for Looped {
     fn set_write_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
         self.0.set_write_timeout(timeout)
     }
+
+    /// Not asked of a guest's stream by Hex: refused, as loopback's are std's to keep.
+    fn buffer_sizes(&self) -> std::io::Result<(usize, usize)> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "a test's loopback stream reports no buffer sizes",
+        ))
+    }
 }
 
 /// A relay and node agent in one: the connection's token, then the answer to its hello.
@@ -696,7 +707,7 @@ fn ready_relay() -> std::net::TcpStream {
         let (h, _) =
             hex_core::wire::read_request_apart(&message, hex_core::wire::MAX_MESSAGE).unwrap();
         let hello = hex_core::wire::Answer::Hello(hex_core::wire::Hello {
-            version: hex_core::wire::VERSION,
+            build: hex_core::wire::build(),
             classes: vec![hex_api::Class::Oci],
             limits: hex_core::wire::Limits {
                 connections: 1,
@@ -704,14 +715,12 @@ fn ready_relay() -> std::net::TcpStream {
                 in_flight: 1,
                 programs: 1,
             },
+            budgets: hex_core::wire::Budgets {
+                in_flight: 1,
+                programs: 1,
+            },
         });
-        let bytes = hex_core::wire::answer(
-            hex_core::wire::FIRST,
-            h.id,
-            &hello,
-            hex_core::wire::MAX_MESSAGE,
-        )
-        .unwrap();
+        let bytes = hex_core::wire::answer(h.id, &hello, hex_core::wire::MAX_MESSAGE).unwrap();
         conn.write_all(&stream::frame(&bytes, hex_core::wire::MAX_MESSAGE).unwrap())
             .unwrap();
         // Held until the client goes, as a relay's connection is.

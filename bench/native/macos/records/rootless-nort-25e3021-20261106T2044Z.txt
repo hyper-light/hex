@@ -1,0 +1,17 @@
+# What rootless polling holds with the watcher on a plain timeshare thread (its Mach time-constraint policy removed:
+# Ada's rule 2026-11-03, the lead 2026-11-06). crates/hex-bench/benches/macos_box.rs, a 256 MiB box, members
+# `hex selftest-box hog` (release build) allocating 4 GiB each at full speed; the bench waits on the members' ends
+# (no spinning reader). Release build of tree 25e3021 + the change, launchd one-shot hex-macos-nort2-20261106T204228Z,
+# adas-mac-studio-2 (Mac16,9, Apple M4 Max, 14 cores, macOS 26.2 25C56), 2026-11-06T20:44:44-20:47:01Z, load
+# 8.5-16.3 (other work on the machine), 3 passes. Overshoot past the bound, MiB:
+# members  pass 1   pass 2   pass 3
+1          0.0      0.0      0.0
+4          4.0      0.1      20.6
+8          28.8     103.9    46.1
+14         62.0     224.6    1028.4
+28         2982.8   2240.0   2341.4
+56         1746.5   3819.9   3261.5
+# With the time-constraint policy (records macos-box-ec3d08b, watcher-headroom-cpu-f18e6ee) up to one member per
+# core held within the bar. Without it, at load ~15, a timeshare watcher misses it from 8 members (one per core is
+# 14): polling alone no longer holds its recorded limit here. The lead's levers: less work per read, never
+# priority. (macos_process_box's rootless test passes because its hogs are the debug build's, far slower fillers.)

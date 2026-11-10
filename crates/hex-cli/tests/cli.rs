@@ -68,6 +68,35 @@ fn an_argument_that_isnt_unicode_is_refused_not_a_panic() {
     assert!(hex_cli::reply(&[None]).text.contains("isn't Unicode"));
 }
 
+/// Goal 6 step 6's HEX-INST-5 (Ada's 2026-11-06 constants rule): the descriptors a node needs are said by the node, at
+/// its own bounds on this host and for this process's owner, so an installer gives its service that and the install
+/// lab checks it, never a figure copied from one host's (the lab's 594,304 was fedora's before the constants changed).
+/// Do: run `hex node --descriptors`. Expect: `own N files M need T`, T the sum, N past the standard streams, and M some
+/// for a root node, which keeps namespaces with their `/proc/net` files, none for a rootless one, which keeps none.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_node_says_the_descriptors_it_needs() {
+    let out = run(&["node", "--descriptors"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let text = String::from_utf8(out.stdout).unwrap();
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let ["own", own, "files", files, "need", need] = words.as_slice() else {
+        panic!("{text:?}");
+    };
+    let (own, files, need): (u64, u64, u64) = (
+        own.parse().unwrap(),
+        files.parse().unwrap(),
+        need.parse().unwrap(),
+    );
+    assert_eq!(need, own + files, "{text:?}");
+    assert!(own > 3, "{text:?}");
+    assert_eq!(
+        files > 0,
+        rustix::process::geteuid().is_root(),
+        "a root node keeps namespaces with their files, a rootless one none: {text:?}"
+    );
+}
+
 /// The native bench's acts (native plan step 7): do `climb` 3 MiB, expect it to report the KiB it has
 /// touched after each 1 MiB step (its default, the instrument's resolution), one line each, and exit 0, so
 /// a bound's overshoot is read from the program itself.

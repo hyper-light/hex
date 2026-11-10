@@ -1,0 +1,114 @@
+# The lead's conditions on the hooks fix (2026-11-04 08:38Z and 09:09Z), on fedora: kiln-a094a12d.attlocal.net,
+# i9-14900HX, 6.19.10-300.fc44.x86_64, Docker 29.8.2, image registry.fedoraproject.org/fedora:44. Each unit is
+# MemoryHigh 6G, MemoryMax 8G, OOMScoreAdjust 1000, CPUs 16-31, started through hex-slot; containers --memory 8g
+# --oom-score-adj 1000. Load average 9.5-14 throughout, with about 100 other containers up (pgvector fleets,
+# a kind cluster, buildkit) and other agents' units. Nothing here is timed.
+#
+# 1. Crash points (T-T7.1.2), node_socket at 60fe2fc, unit hex-hooks-conditions-20261104T091625Z:
+#    crash-tmpfs-init            rootless, root  killed: record None, cgroup and state dir made, state not written;
+#                                                restarted: cleaned up, nothing left
+#    crash-disk-init             rootless        the same
+#    crash-tmpfs-createcontainer rootless, root  killed inside the createContainer hook, past the init's H stop:
+#                                                the same
+#    crash-disk-createcontainer  rootless        the same
+#    (A root node keeps its state under /run, so its disk cases SKIP, as every crash-disk case has as root.)
+#    Past createContainer, the init's next stop is its ready signal, which every create had before the change,
+#    so it has no point of its own.
+# 2. A hookless create is unchanged: hooks_trace.sh at c84a575, unit hex-hooks-trace-20261104T092519Z, before =
+#    ca6dc80's release hex (sha256 288ad31689303d1d), after = 60fe2fc's (4019f871c4ee952c), `hex oci create`
+#    (the shim path) as root:
+#    hookless create, sync-pipe lines   before: P R     after: P R     (no H at either)
+#    hooked create, after               P H R           (the trace sees the stop: not vacuous)
+#    strace -c, hookless create, five each, interleaved: 282 calls every time at both, and every syscall's
+#    count is the same before and after.
+#    (An earlier run, unit hex-hooks-trace-20261104T092446Z, had one ca6dc80 create making 287 calls,
+#    against 282 for the after binary: one more file write. So the check compares each syscall's least
+#    count over five creates.)
+#    The create breakdown A/B (the pruned path's parts) is not recorded here: at ca6dc80 the harness refuses
+#    every create ("lacks the cgroup's mkdir"), with ca6dc80's own binaries too (unit
+#    hex-hooks-abbase-20261104T092401Z). The lead has the question.
+# 3. The state's startContainer field is append-only: state.rs's
+#    the_start_container_field_is_read_by_an_old_reader_and_absent_reads_as_none passes (hex-runtime's lib, 131
+#    tests); and in hooks_trace.sh, ca6dc80's binary reads (status created) and deletes a container whose state
+#    the after binary wrote with "startContainer".
+# 4. A failing hook is a typed error naming it, never 'stopped', oci_box at 60fe2fc, rootless and as root:
+#    createContainer hook exits 3: create refused, Os { op: "container init", why: "createContainer hook failed: \"/bin/sh\" exited exit status: 3" }
+#    startContainer hook exits 3:  start refused,  Os { op: "start", why: "startContainer hook failed: \"/bin/sh\" exited exit status: 3" }
+# 5. runtime-tools before and after: hooks-20261104.txt (26 pass, 32 fail at both, no test differs).
+#
+# 6. A start cut in its startContainer hooks (the lead's follow-on): node_socket's At::StartContainer, unit
+#    hex-hooks-startpass-20261104T142208Z (fedora, as above; started through hex-slot):
+#    532cf5b (the test, before the handling)  rootless FAIL  as root FAIL: recovery took the box back as
+#        Created ("crash-tmpfs-startcontainer: the box killed mid-create is cleaned up", left: Ok(BoxInfo
+#        {.. state: Created ..})): it had no fact to tell a start cut in its hooks from a box waiting to start
+#    d45b160 (the handling)                   rootless PASS (tmpfs, disk)  as root PASS (tmpfs; disk SKIPs
+#        as every root disk case does): "killed with the record Some(Ready), its cgroup made, its container's
+#        state directory made and its state written; after the restart cleaned up, nothing left", the agent
+#        saying the start was interrupted in its startContainer hooks
+#    At d45b160: oci_box passes rootless and as root, its init's SigIgn holding SIGPIPE; hex-core's and
+#    hex-runtime's lib tests pass (take_start on a pipe whose reader closed is Abandoned; recovery decides
+#    StartInterrupted with the init alive or ended); and the 7 gates exit 0.
+#    The commit before the handling runs last: its expected failure leaves the cut box's state under the
+#    shared rootless runtime directory (/run/user/1000/hex-node), where an earlier order counted it in a
+#    later run's case (hex-hooks-startpass-20261104T141822Z, "(container states, the cgroup) at the kill":
+#    2 and 3, against 1). Those leftovers were the test's own, their inits ended, and were removed.
+#
+# 7. The breakdown's parts A/B, tried as the lead ordered (14:14Z), then (c).
+#    cp/t7-g5x-integrate 618b44a's bench/competitive, taken as a scratch copy, with ca6dc80's binaries as
+#    BEFORE_HEX/BEFORE_SEAM against f369f6f's, a probe pass (N=50 WARMUP=10 ROUNDS=1, CPUs 4-15, under the timed
+#    lock; unit hex-hooks-bdprobe-20261104T145058Z, load 45-58): its reader refuses every create both ways,
+#    "check probe: traced: create l000001 lacks the cgroup's mkdir", 0 of 2 traced creates cut whole:
+#      HEXBENCH_REUSE=1 (the default)  create-breakdown-20261104T145142Z
+#      HEXBENCH_REUSE=0                create-breakdown-20261104T150016Z
+#    (These probes name no owner, so reuse is off either way: the missing mkdir is something other than step
+#    6's reuse path. Unit hex-hooks-abbase-20261104T092401Z refused the same with ca6dc80's own binaries.)
+#    The parts are left to step 7's harness. So (c): an interleaved create p50/p99 A/B, ca6dc80 against
+#    f369f6f. exec_ab.sh at f369f6f: every build's seam_oci lifecycle phase (create, start, exec
+#    and delete, each timed alone) and libcrun's in process, in shuffled order each round; N=1000 WARMUP=100
+#    ROUNDS=5, the container on CPUs 4-15, root, so the pruned path; every round's errors {}. Static-glibc release
+#    binaries: before hex 66486e0e576e3d93 / seam_oci 504b8250ccc63883, after hex 0bf490040d4d57d1 / seam_oci
+#    cc3f8fb4d8bf0229. Under the timed lock, units started through hex-slot. fedora had rebooted at about
+#    10:00Z; load average 22-61 throughout (CPU pressure some avg10 about 25%), with the kind cluster, buildkit
+#    builders and other agents' units up. Nearest-rank, ms:
+#    UNCAPPED: both runs' containers had exec_ab.sh's hard-coded --memory=40g and no --oom-score-adj, not fedora's
+#    8g / 1000 (rule 5); the units themselves were capped (MemoryMax 8G, OOMScoreAdjust 1000), the containers dockerd
+#    started weren't. exec_ab.sh honors BENCH_MEMORY and BENCH_OOM from cp/t7-hooks f5c1a9d. Their state was on the
+#    container's overlay (no tmpfs /run), so their creates paid the record's fsyncs: create_load-20261104.md.
+#    Run 1, unit hex-hooks-abc-20261104T142625Z (exec-ab-20261104T142957Z, load 22-51):
+#      create p50/p99  before 18.825/40.275  after 19.868/41.497  libcrun 2.378/10.601 (pooled, n=5000 each)
+#      after/before    pooled p50 1.055 p99 1.030; by round p50 1.053 1.318 1.014 1.014 1.097
+#    Run 2, unit hex-hooks-abc2-20261104T143943Z (exec-ab-20261104T143943Z, load 37-61):
+#      create p50/p99  before 18.575/42.134  after 19.183/38.924  libcrun 2.244/44.600
+#      after/before    pooled p50 1.033 p99 0.924; by round p50 0.933 0.979 1.153 1.071 1.175
+#    Reading: the two runs' round ratios overlap both sides of 1 (p50 0.933-1.318, p99 0.637-1.366), so under this
+#    load the A/B resolves no difference finer than about ±15% a round. The pooled p50 is 3-5% higher after in
+#    both runs, which this host can't tell from noise; the trace (2.) shows a hookless create making the same calls
+#    at both. Hex's create here is about 19 ms, against 0.713 ms for the seam on this host on 2026-11-03 (load 2.8,
+#    create_breakdown.md), so the host's load sets these numbers, not the builds. A run at lower load, or the parts
+#    A/B once the reader is fixed, would resolve finer.
+#
+# 8. The breakdown's parts A/B, on the integration agent's reader (cp/t7-g5x-integrate f825ac0's bench/competitive,
+#    a scratch overlay on an export of f369f6f, not merged). create_breakdown.sh with ca6dc80's binaries staged as
+#    BEFORE_HEX/BEFORE_SEAM (hex 66486e0e576e3d93, seam_oci 504b8250ccc63883) against f369f6f's (hex
+#    0bf490040d4d57d1, seam_oci cc3f8fb4d8bf0229), both static-glibc; N=1000 WARMUP=100 ROUNDS=3, CPUs 4-15,
+#    HEXBENCH_DEVFS=1, no owner (reuse off), root: the pruned path. Each run under the timed lock; unit
+#    hex-hooks-parts-20261104T150143Z, through hex-slot. The kind cluster, buildkit builders and other agents'
+#    units up. Every probe and traced create cut whole (1,500 of 1,500 a run, the before binary's too), 0 events lost.
+#    create p50, ms, by round and pooled (p99 pooled):
+#      create-breakdown-20261104T150143Z (load 55.8 at the start, 27 at the end; CPU pressure avg10 37.7% at the start)
+#        seam (f369f6f)   0.497 0.465 0.427  pooled 0.467 (p99 1.296)
+#        before (ca6dc80) 0.490 0.463 0.435  pooled 0.469 (p99 1.490)
+#        libcrun          1.857 3.193 2.118  pooled 2.122 (p99 5.299)
+#        seam over before, in the same rounds: 1.015, 1.002, 0.982; pooled 0.997
+#        the parts summed 0.488 ms, 97.8% of the creates between (the probe's criterion, within 10%: met)
+#        bookkeeping (state and record writes, 7 parts) 2.3% under the before binary's (0.044 ms)
+#      create-breakdown-20261104T150257Z (load 27.1 at the start, 18.0 at the end)
+#        seam (f369f6f)   0.448 0.428 0.424  pooled 0.433 (p99 1.322)
+#        before (ca6dc80) 0.467 0.420 0.422  pooled 0.434 (p99 1.352)
+#        libcrun          1.812 1.927 2.562  pooled 1.978 (p99 4.562)
+#        seam over before: 0.959, 1.018, 1.006; pooled 0.998
+#        the parts summed 0.448 ms, 95.5% of the creates between: met; bookkeeping 0.0% under the before binary's (0.039 ms)
+#    Reading: a hookless create through the seam on the pruned path takes what it took at ca6dc80, within the rounds'
+#    spread (0.959-1.018) and 0.3% pooled in both runs; its parts are as step 3's final runs cut them (the
+#    init's set-up 40%, the cgroup 24%). (c)'s 19 ms creates (7.) were exec_ab's lifecycle under load 22-61, not
+#    this path.

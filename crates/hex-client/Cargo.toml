@@ -15,11 +15,13 @@ hex-core.workspace = true
 flate2.workspace = true
 shards-api.workspace = true
 tar.workspace = true
+# The reader's turn waits on the node agent's connection with poll(2), Winsock's WSAPoll on Windows (src/calls.rs).
+rustix.workspace = true
 # A layer tarball's digest, its name in the guest's layer store (docs/design/shards-guest.md §4a).
 sha2.workspace = true
 
-[target.'cfg(unix)'.dependencies]
-rustix.workspace = true
+[target.'cfg(windows)'.dependencies]
+hex-afunix.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

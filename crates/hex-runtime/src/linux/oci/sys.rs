@@ -87,8 +87,8 @@ pub fn fork_into_cgroup(cgroup: std::os::fd::BorrowedFd<'_>) -> Result<Option<Fo
 }
 
 /// `CLONE_PIDFD` (Linux 5.2, `include/uapi/linux/sched.h`): the kernel writes a pidfd for the child
-/// where `clone_args.pidfd` points. libc's constant is the same value, written here to match
-/// [`crate::linux::sys`]'s own.
+/// where `clone_args.pidfd` points. libc's constant is the same value, written here as
+/// [`crate::linux::sys`] writes `CLONE_INTO_CGROUP`.
 const CLONE_PIDFD: u64 = 0x1000;
 
 /// Forks into a cgroup with a pidfd for the child: `clone3(CLONE_INTO_CGROUP | CLONE_PIDFD)`, so the
@@ -179,18 +179,28 @@ pub fn clone_sibling(
     cgroup: Option<std::os::fd::BorrowedFd<'_>>,
     ns: u64,
 ) -> Result<Option<Sibling>, OciError> {
+    clone_sibling_errno(cgroup, ns)
+        .map_err(|e| OciError::os("clone3 the program into the container", e))
+}
+
+/// [`clone_sibling`], its refusal the kernel's errno, so a caller can tell one refusal from another: a
+/// create seed reads `EINVAL` for `CLONE_EMPTY_MNTNS` as a kernel without it (Linux 7.1,
+/// `docs/research/runtime/goal6-mntns.md` §6).
+pub fn clone_sibling_errno(
+    cgroup: Option<std::os::fd::BorrowedFd<'_>>,
+    ns: u64,
+) -> Result<Option<Sibling>, rustix::io::Errno> {
     use std::os::fd::{AsRawFd, FromRawFd};
     let (flags, cgroup) = match cgroup {
         Some(dir) => (
             CLONE_PARENT | CLONE_PIDFD | CLONE_INTO_CGROUP | ns,
-            u64::try_from(dir.as_raw_fd())
-                .map_err(|_| OciError::os("clone3 a sibling", "a negative file descriptor"))?,
+            u64::try_from(dir.as_raw_fd()).map_err(|_| rustix::io::Errno::BADF)?,
         ),
         None => (CLONE_PARENT | CLONE_PIDFD | ns, 0),
     };
     let mut pidfd: libc::c_int = -1;
-    let pidfd_ptr = u64::try_from((&raw mut pidfd).addr())
-        .map_err(|_| OciError::os("clone3 a sibling", "a pointer wider than 64 bits"))?;
+    let pidfd_ptr =
+        u64::try_from((&raw mut pidfd).addr()).map_err(|_| rustix::io::Errno::OVERFLOW)?;
     let args = CloneArgs {
         flags,
         pidfd: pidfd_ptr,
@@ -219,20 +229,17 @@ pub fn clone_sibling(
         )
     };
     match r {
-        -1 => {
-            let e = std::io::Error::last_os_error();
-            match e.raw_os_error() {
-                Some(libc::ENOSYS) | Some(libc::E2BIG) => Ok(None),
-                _ => Err(OciError::os("clone3 the program into the container", e)),
-            }
-        }
+        -1 => match rustix::io::Errno::from_io_error(&std::io::Error::last_os_error()) {
+            Some(rustix::io::Errno::NOSYS | rustix::io::Errno::TOOBIG) => Ok(None),
+            Some(e) => Err(e),
+            None => Err(rustix::io::Errno::INVAL),
+        },
         0 => Ok(Some(Sibling::Child)),
         child => {
             // SAFETY: the clone succeeded, so the kernel made `pidfd` for the child and nothing else
             // in this process owns it.
             let pidfd = unsafe { std::os::fd::OwnedFd::from_raw_fd(pidfd) };
-            let pid = i32::try_from(child)
-                .map_err(|_| OciError::os("clone3 a sibling", "a pid out of range"))?;
+            let pid = i32::try_from(child).map_err(|_| rustix::io::Errno::RANGE)?;
             Ok(Some(Sibling::Parent { pid, pidfd }))
         }
     }
@@ -357,7 +364,7 @@ impl Drop for ChildStack {
 }
 
 /// The size of a page.
-fn page_size() -> Result<usize, OciError> {
+pub(crate) fn page_size() -> Result<usize, OciError> {
     // SAFETY: sysconf(3) takes a constant and reads nothing of ours.
     let n = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
     usize::try_from(n).map_err(|_| OciError::os("the page size", "sysconf gave none"))
@@ -402,24 +409,23 @@ impl Drop for Blocked {
 /// CLONE_PIDFD)`, as posix_spawn clones. No page of this process is copied for the child, and its execve
 /// tears none down; the calling thread waits until the child has exec'd or exited. The caller blocks
 /// signals first ([`block_signals`]). `child` makes system calls alone on memory made before the clone,
-/// and returns only when one failed (the status to exit with, and what): it shares this process's memory
-/// with the process's other threads, so it may take no lock and allocate nothing. `None` on an
-/// architecture without the trampoline below, or a kernel or sandbox without clone3 into a cgroup
-/// (`ENOSYS`, `E2BIG`).
-pub fn clone_vfork<F: Fn() -> (u8, Failure)>(
+/// and returns only when one failed, the status to exit with, having reported why as its caller wants
+/// (the seed's exec writes it to the program's stderr, [`report`]; a process box's spawn leaves its errno
+/// in the memory it shares): it shares this process's memory with the process's other threads, so it may
+/// take no lock and allocate nothing. `None` on an architecture without the trampoline below, or a kernel
+/// or sandbox without clone3 into a cgroup (`ENOSYS`, `E2BIG`).
+pub fn clone_vfork<F: Fn() -> u8>(
     cgroup: std::os::fd::BorrowedFd<'_>,
     stack: &ChildStack,
     child: &F,
 ) -> Result<Option<(i32, std::os::fd::OwnedFd)>, OciError> {
     use std::os::fd::{AsRawFd, FromRawFd};
-    /// The child's start, on its own stack: `child`, then its failure reported and its exit.
-    extern "C" fn entry<F: Fn() -> (u8, Failure)>(arg: *mut libc::c_void) -> ! {
+    /// The child's start, on its own stack: `child`, then its exit.
+    extern "C" fn entry<F: Fn() -> u8>(arg: *mut libc::c_void) -> ! {
         // SAFETY: `arg` is `child`, borrowed by the clone below, alive until this child has exec'd or
         // exited, which the vfork makes its parent thread wait for.
         let child = unsafe { &*arg.cast::<F>().cast_const() };
-        let (code, failed) = child();
-        report(failed);
-        exit_child(code)
+        exit_child(child())
     }
     let page = page_size()?;
     let fd = u64::try_from(cgroup.as_raw_fd())
@@ -788,14 +794,17 @@ pub fn set_keepcaps(keep: bool) -> Result<(), rustix::io::Errno> {
 }
 
 /// Joins the namespace the open `fd` refers to, checking it is of type `nstype` (a `CLONE_NEW*`
-/// flag); `setns` fails if the fd's namespace is of another type.
-pub fn setns(fd: std::os::fd::BorrowedFd<'_>, nstype: i32) -> Result<(), OciError> {
+/// flag); `setns` fails if the fd's namespace is of another type. Refused with its errno.
+pub fn setns(fd: std::os::fd::BorrowedFd<'_>, nstype: i32) -> Result<(), Failure> {
     use std::os::fd::AsRawFd;
     // SAFETY: setns(2) with a file descriptor and a type flag; it takes no pointers and writes
     // nothing. The return value is checked.
     let r = unsafe { libc::setns(fd.as_raw_fd(), nstype) };
     if r == -1 {
-        Err(OciError::os("setns", std::io::Error::last_os_error()))
+        Err(Failure {
+            what: "setns",
+            errno: last_errno(),
+        })
     } else {
         Ok(())
     }
@@ -805,7 +814,7 @@ pub fn setns(fd: std::os::fd::BorrowedFd<'_>, nstype: i32) -> Result<(), OciErro
 /// `unshare` unsound (it can detach file descriptors another thread is using); its callers, the init
 /// (single-threaded after its re-exec) and the node agent's thread that makes network namespaces ahead
 /// ([`super::net::make_ahead`]), use only the `NEW*` namespace flags.
-pub fn unshare(flags: rustix::thread::UnshareFlags) -> Result<(), OciError> {
+pub fn unshare(flags: rustix::thread::UnshareFlags) -> Result<(), Failure> {
     // CLONE_FILES is the one flag that makes `unshare` unsound; clear it defensively (callers only
     // ever pass namespace flags) so the invariant below holds whatever the caller passed.
     let flags = flags.difference(rustix::thread::UnshareFlags::FILES);
@@ -814,7 +823,7 @@ pub fn unshare(flags: rustix::thread::UnshareFlags) -> Result<(), OciError> {
     }
     // SAFETY: the flags are namespace flags only (CLONE_FILES cleared above), so no file-descriptor
     // table is detached; the invariant `unshare_unsafe` documents holds.
-    unsafe { rustix::thread::unshare_unsafe(flags) }.map_err(|e| OciError::os("unshare", e))
+    unsafe { rustix::thread::unshare_unsafe(flags) }.map_err(Failure::of("unshare"))
 }
 
 /// Drops capability number `cap` from the process's bounding set (`PR_CAPBSET_DROP`).
@@ -873,11 +882,17 @@ const BPF_PROG_LOAD: libc::c_long = 5;
 const BPF_PROG_ATTACH: libc::c_long = 8;
 const BPF_PROG_GET_FD_BY_ID: libc::c_long = 13;
 const BPF_OBJ_GET_INFO_BY_FD: libc::c_long = 15;
-const BPF_PROG_TYPE_CGROUP_DEVICE: u32 = 15;
+const BPF_PROG_QUERY: libc::c_long = 16;
+pub const BPF_PROG_TYPE_CGROUP_DEVICE: u32 = 15;
 const BPF_CGROUP_DEVICE: u32 = 6;
+/// `BPF_F_ALLOW_OVERRIDE` (1 << 0): "the program in this cgroup yields to sub-cgroup program".
+pub const BPF_F_ALLOW_OVERRIDE: u32 = 1;
 /// `BPF_F_ALLOW_MULTI` (1 << 1): the program joins whatever the cgroup's ancestors attached, all of
 /// which must allow an access, as runc and crun attach theirs.
 const BPF_F_ALLOW_MULTI: u32 = 2;
+/// Most programs the kernel attaches to one cgroup for one attach type, `BPF_CGROUP_MAX_PROGS` (64,
+/// kernel/bpf/cgroup.c:794), past which it refuses an attach (`E2BIG`, :1009): every id a query reads.
+const BPF_CGROUP_MAX_PROGS: u32 = 64;
 /// Most bytes of the verifier's log kept when it refuses a program: enough for the refusing
 /// instruction and its context; the kernel truncates the log at the buffer's end.
 const VERIFIER_LOG_BYTES: usize = 65_536;
@@ -993,10 +1008,26 @@ pub fn load_device_program(
     ))
 }
 
-/// Attaches device program `prog` to the cgroup whose directory is open as `cgroup`.
+/// How a device program is attached to a cgroup, which decides how it composes with the programs above
+/// and below it (include/uapi/linux/bpf.h, "BPF_F_ALLOW_OVERRIDE" and "BPF_F_ALLOW_MULTI"; Linux v6.19
+/// kernel/bpf/cgroup.c, `compute_effective_progs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attach {
+    /// With `BPF_F_ALLOW_MULTI`, as a container's own program is: it runs with every MULTI program above.
+    Multi,
+    /// With `BPF_F_ALLOW_OVERRIDE`, as the oci boxes' root carries the default policy's: it decides for
+    /// each cgroup below that has no program of its own, and a cgroup that has one is decided by its own.
+    Override,
+}
+
+/// Attaches device program `prog` to the cgroup whose directory is open as `cgroup`, as `how` says. On
+/// a cgroup that already holds an OVERRIDE program, an OVERRIDE attach replaces it in one call
+/// (include/uapi/linux/bpf.h: "Attaching another program on top of NONE or BPF_F_ALLOW_OVERRIDE will
+/// release old program and attach the new one").
 pub fn attach_device_program(
     cgroup: std::os::fd::BorrowedFd<'_>,
     prog: std::os::fd::BorrowedFd<'_>,
+    how: Attach,
 ) -> Result<(), OciError> {
     use std::os::fd::AsRawFd;
     let fd = |f: std::os::fd::BorrowedFd<'_>| {
@@ -1006,7 +1037,10 @@ pub fn attach_device_program(
         target_fd: fd(cgroup)?,
         attach_bpf_fd: fd(prog)?,
         attach_type: BPF_CGROUP_DEVICE,
-        attach_flags: BPF_F_ALLOW_MULTI,
+        attach_flags: match how {
+            Attach::Multi => BPF_F_ALLOW_MULTI,
+            Attach::Override => BPF_F_ALLOW_OVERRIDE,
+        },
         replace_bpf_fd: 0,
     };
     // SAFETY: bpf(BPF_PROG_ATTACH) reads `attr`, a live, initialised repr(C) struct of the size
@@ -1027,6 +1061,96 @@ pub fn attach_device_program(
             std::io::Error::last_os_error(),
         ))
     }
+}
+
+/// The `union bpf_attr` member `BPF_PROG_QUERY` reads and writes, whole to `revision`: Linux v6.19
+/// writes `revision` back whatever the size passed (kernel/bpf/cgroup.c:1262), so a shorter struct would
+/// have it write past this one.
+#[repr(C)]
+#[derive(Default)]
+struct ProgQueryAttr {
+    target_fd: u32,
+    attach_type: u32,
+    query_flags: u32,
+    attach_flags: u32,
+    prog_ids: u64,
+    prog_cnt: u32,
+    _reserved: u32,
+    prog_attach_flags: u64,
+    link_ids: u64,
+    link_attach_flags: u64,
+    revision: u64,
+}
+
+/// The device programs attached to one cgroup itself, its ancestors' left out.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Attached {
+    /// The flags they were attached with (0 when none is).
+    pub flags: u32,
+    /// How many there are.
+    pub count: u32,
+    /// Their ids, every one of them up to the kernel's cap, [`BPF_CGROUP_MAX_PROGS`].
+    pub ids: Vec<u32>,
+}
+
+/// How many ids a query of a cgroup holding `count` device programs reads: all of them, at most the kernel's cap.
+fn ids_to_read(count: u32) -> usize {
+    usize::try_from(count.min(BPF_CGROUP_MAX_PROGS)).unwrap_or(0)
+}
+
+/// The device programs attached to the cgroup whose directory is open as `cgroup` (`BPF_PROG_QUERY`,
+/// which needs CAP_NET_ADMIN or CAP_SYS_ADMIN and takes the kernel's `cgroup_mutex`: a node asks it at
+/// its start, never per create). Asked twice: for the count first, then for that many ids, so every one is
+/// read; one attached between the two is counted and its id left out (`ENOSPC`).
+pub fn attached_device_programs(cgroup: std::os::fd::BorrowedFd<'_>) -> Result<Attached, OciError> {
+    let (_, count) = query_device_programs(cgroup, &mut [])?;
+    let mut ids = vec![0u32; ids_to_read(count)];
+    let (flags, count) = query_device_programs(cgroup, &mut ids)?;
+    ids.truncate(ids_to_read(count));
+    Ok(Attached { flags, count, ids })
+}
+
+/// One `BPF_PROG_QUERY` of the device programs attached to `cgroup`: their flags and count, and the first ids,
+/// as many as `ids` holds, written into it. With `ids` empty the kernel writes the count alone
+/// (kernel/bpf/cgroup.c:1494-1496).
+fn query_device_programs(
+    cgroup: std::os::fd::BorrowedFd<'_>,
+    ids: &mut [u32],
+) -> Result<(u32, u32), OciError> {
+    use std::os::fd::AsRawFd;
+    let mut attr = ProgQueryAttr {
+        target_fd: u32::try_from(cgroup.as_raw_fd())
+            .map_err(|_| OciError::os("bpf", "a negative descriptor"))?,
+        attach_type: BPF_CGROUP_DEVICE,
+        prog_ids: if ids.is_empty() {
+            0
+        } else {
+            user_ptr(ids.as_mut_ptr().cast_const())?
+        },
+        prog_cnt: u32::try_from(ids.len())
+            .map_err(|_| OciError::os("bpf", "more ids asked than a u32 counts"))?,
+        ..ProgQueryAttr::default()
+    };
+    // SAFETY: bpf(BPF_PROG_QUERY) reads `attr`, a live, initialised repr(C) struct of the size passed,
+    // and writes into it only its own fields (attach_flags, prog_cnt, revision), all within that size.
+    // Through `prog_ids` it writes at most `prog_cnt` u32s into `ids`, a live slice of exactly that many
+    // that outlives the call; with `ids` empty, `prog_ids` is null and `prog_cnt` 0, and it writes nothing
+    // through it (kernel/bpf/cgroup.c:1494-1496). `prog_attach_flags` and the link fields are zero, so
+    // nothing is written through them. Checked.
+    let r = unsafe {
+        libc::syscall(
+            libc::SYS_bpf,
+            BPF_PROG_QUERY,
+            &raw mut attr,
+            std::mem::size_of::<ProgQueryAttr>(),
+        )
+    };
+    let err = std::io::Error::last_os_error();
+    // ENOSPC: more are attached than `ids` holds; the count and the first ids are written all the same.
+    if r != 0 && err.raw_os_error() != Some(libc::ENOSPC) {
+        return Err(OciError::os("querying a cgroup's device programs", err));
+    }
+    Ok((attr.attach_flags, attr.prog_cnt))
 }
 
 /// Loads seccomp filter `program` on the calling thread and leaves no_new_privs as it is: the kernel
@@ -1227,4 +1351,203 @@ pub fn own_fd(fd: std::os::fd::RawFd) -> Result<std::os::fd::OwnedFd, OciError> 
     // SAFETY: the agent's spawn duplicated the seed's socket onto this number in this process alone, and
     // nothing else in the seed uses it, so this process is its sole owner.
     Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
+}
+
+/// A mount attribute to set on a mount named by a descriptor (`include/uapi/linux/mount.h`), for
+/// [`mount_setattr`]. `RDONLY` makes the mount read-only; the rest match a spec mount's `nosuid`,
+/// `nodev` and `noexec` options. These are the values `mount_attr`'s `attr_set` and `attr_clr` take.
+pub const MOUNT_ATTR_RDONLY: u64 = 0x0000_0001;
+pub const MOUNT_ATTR_NOSUID: u64 = 0x0000_0002;
+pub const MOUNT_ATTR_NODEV: u64 = 0x0000_0004;
+pub const MOUNT_ATTR_NOEXEC: u64 = 0x0000_0008;
+
+/// A mount's propagation, the one value `mount_attr`'s `propagation` field takes
+/// (`include/uapi/linux/fs.h`): a mount is unbindable, private, a slave (downstream) or shared, and
+/// exactly one at a time. `0` leaves it unchanged.
+pub const MS_UNBINDABLE: u64 = 1 << 17;
+pub const MS_PRIVATE: u64 = 1 << 18;
+pub const MS_SLAVE: u64 = 1 << 19;
+pub const MS_SHARED: u64 = 1 << 20;
+
+/// What [`mount_setattr`] sets on a mount: the attributes to set and to clear, and the propagation to
+/// apply (`0` for none). The init on the pruned-seed path has no `/proc/self/fd` to name a mount by
+/// path (its namespace holds no proc), so it names each mount by a descriptor and changes it here,
+/// where the classic path remounts by path.
+pub struct MountAttrs {
+    pub set: u64,
+    pub clr: u64,
+    pub propagation: u64,
+}
+
+/// `mount_setattr(target, "", AT_EMPTY_PATH[|AT_RECURSIVE], &attr, sizeof attr)`: changes the mount
+/// the descriptor `target` names (a mount fd from `fsmount`/`open_tree`, or an `O_PATH` descriptor of
+/// a mount point), recursively over its submounts when `recursive`. rustix doesn't wrap this call
+/// (`not_implemented!(mount_setattr)`), and the pruned-seed init needs it to make a mount read-only or
+/// set its propagation without a path (CLAUDE.md §12 names this file and this call). A read-only bind
+/// made recursive covers the submounts a recursive bind carried, so a recursive read-only bind of a
+/// host tree is read-only to the leaves (unlike a `MS_REMOUNT` of the top alone).
+pub fn mount_setattr(
+    target: std::os::fd::BorrowedFd<'_>,
+    recursive: bool,
+    attrs: &MountAttrs,
+) -> Result<(), OciError> {
+    use std::os::fd::AsRawFd;
+    /// `struct mount_attr` (`include/uapi/linux/mount.h`, `MOUNT_ATTR_SIZE_VER0`, 32 bytes): four
+    /// `__u64`s, the attributes to set and clear, the propagation, and a user-namespace descriptor
+    /// (unused here).
+    #[repr(C)]
+    struct MountAttr {
+        attr_set: u64,
+        attr_clr: u64,
+        propagation: u64,
+        userns_fd: u64,
+    }
+    let attr = MountAttr {
+        attr_set: attrs.set,
+        attr_clr: attrs.clr,
+        propagation: attrs.propagation,
+        userns_fd: 0,
+    };
+    // AT_EMPTY_PATH: operate on the descriptor itself, so the empty path names the mount `target` is.
+    let mut flags: libc::c_int = libc::AT_EMPTY_PATH;
+    if recursive {
+        flags |= libc::AT_RECURSIVE;
+    }
+    // SAFETY: mount_setattr(2) with a descriptor the caller owns, an empty path (AT_EMPTY_PATH, so no
+    // path is read), the exact size of the fully initialized `MountAttr` the kernel only reads, and
+    // flags the kernel validates. The return value is checked; nothing of ours is written.
+    let r = unsafe {
+        libc::syscall(
+            libc::SYS_mount_setattr,
+            target.as_raw_fd(),
+            c"".as_ptr(),
+            flags,
+            &raw const attr,
+            std::mem::size_of::<MountAttr>(),
+        )
+    };
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(OciError::os(
+            "mount_setattr",
+            std::io::Error::last_os_error(),
+        ))
+    }
+}
+
+// statmount(2) and listmount(2), Linux 6.8. On x86_64 and aarch64 they are the common table's 457 and 458 (v6.19
+// arch/x86/entry/syscalls/syscall_64.tbl:384-385; scripts/syscall.tbl:400-401, which arm64's table is made from);
+// the libc crate at 0.2.191 numbers them for m68k alone.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+const SYS_STATMOUNT: libc::c_long = 457;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+const SYS_LISTMOUNT: libc::c_long = 458;
+
+/// `struct mnt_id_req` as Linux 6.8 published it (`MNT_ID_REQ_SIZE_VER0`, 24 bytes, v6.19
+/// include/uapi/linux/mount.h:198-207), which every later kernel still takes: a mount by its unique id
+/// (`statx`'s `STATX_MNT_ID_UNIQUE`), and for `statmount` the fields asked, for `listmount` the last id
+/// listed. No namespace descriptor: the caller's own namespace.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[repr(C)]
+struct MntIdReq {
+    size: u32,
+    mnt_ns_fd: u32,
+    mnt_id: u64,
+    param: u64,
+}
+
+/// The size `MntIdReq` is, for its `size` field.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+const MNT_ID_REQ_SIZE: u32 = 24;
+
+/// `listmount`'s and `statmount`'s `flags`: none (`LISTMOUNT_REVERSE` lists the other way).
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+const NO_FLAGS: libc::c_uint = 0;
+
+/// The unique ids of the mounts beneath mount `parent` in this process's mount namespace, its own
+/// excluded, after the id `last` (0 for the first), written into `ids` (listmount(2): every mount
+/// reachable from `parent`, not only its children, in id order). How many it wrote: fewer than
+/// `ids.len()` when none is left. `ENOSYS` from a kernel before 6.8.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub fn listmount(parent: u64, last: u64, ids: &mut [u64]) -> Result<usize, rustix::io::Errno> {
+    let req = MntIdReq {
+        size: MNT_ID_REQ_SIZE,
+        mnt_ns_fd: 0,
+        mnt_id: parent,
+        param: last,
+    };
+    // SAFETY: listmount(2) reads `req`, a live, fully initialized repr(C) struct of the size its `size`
+    // field gives, and writes at most `ids.len()` u64s into `ids`, a live buffer of exactly that many
+    // that outlives the call; no flags. The return value is checked.
+    let r = unsafe {
+        libc::syscall(
+            SYS_LISTMOUNT,
+            &raw const req,
+            ids.as_mut_ptr(),
+            ids.len(),
+            NO_FLAGS,
+        )
+    };
+    if r < 0 {
+        Err(last_errno())
+    } else {
+        usize::try_from(r).map_err(|_| rustix::io::Errno::RANGE)
+    }
+}
+
+/// Mount `id`'s fields that `mask` asks for (statmount(2)), written into `buf`: the kernel's fixed
+/// `struct statmount`, then the strings asked, each at the offset its field gives past the fixed part.
+/// `ENOSYS` from a kernel before 6.8; `EOVERFLOW` when the strings don't fit.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub fn statmount(id: u64, mask: u64, buf: &mut [u8]) -> Result<(), rustix::io::Errno> {
+    let req = MntIdReq {
+        size: MNT_ID_REQ_SIZE,
+        mnt_ns_fd: 0,
+        mnt_id: id,
+        param: mask,
+    };
+    // SAFETY: statmount(2) reads `req`, a live, fully initialized repr(C) struct of the size its `size`
+    // field gives, and writes at most `buf.len()` bytes into `buf`, a live buffer of exactly that many
+    // that outlives the call (the kernel copies bytes, so it needs no alignment); no flags. The return
+    // value is checked.
+    let r = unsafe {
+        libc::syscall(
+            SYS_STATMOUNT,
+            &raw const req,
+            buf.as_mut_ptr(),
+            buf.len(),
+            NO_FLAGS,
+        )
+    };
+    if r < 0 { Err(last_errno()) } else { Ok(()) }
+}
+
+/// Where the kernel numbers no `listmount`, it is missing, as on a kernel before 6.8.
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+pub fn listmount(_parent: u64, _last: u64, _ids: &mut [u64]) -> Result<usize, rustix::io::Errno> {
+    Err(rustix::io::Errno::NOSYS)
+}
+
+/// Where the kernel numbers no `statmount`, it is missing, as on a kernel before 6.8.
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+pub fn statmount(_id: u64, _mask: u64, _buf: &mut [u8]) -> Result<(), rustix::io::Errno> {
+    Err(rustix::io::Errno::NOSYS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ada's 2026-11-06 rule (AC-T7.1.4, decision 2's device programs): do size a query for cgroups the kernel says
+    /// hold 1, 9 (past the 8 once picked) and 65 programs; expect room for every one of them, up to the kernel's own
+    /// cap on one cgroup's programs, 64, and no more.
+    #[test]
+    fn a_query_reads_every_program_the_kernel_can_attach() {
+        assert_eq!(ids_to_read(0), 0);
+        assert_eq!(ids_to_read(1), 1);
+        assert_eq!(ids_to_read(9), 9);
+        assert_eq!(ids_to_read(64), 64);
+        assert_eq!(ids_to_read(65), 64);
+    }
 }

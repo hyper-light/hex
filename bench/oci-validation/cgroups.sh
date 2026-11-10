@@ -13,6 +13,8 @@ set -euo pipefail
 HEX=$(realpath "${1:?hex binary}")
 IMAGE=${2:-registry.fedoraproject.org/fedora:44}
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
-docker run --rm --privileged --security-opt label=disable --cgroupns=private --network=none \
+. "$HERE/../competitive/containers.sh"
+bench_trap :
+docker run "${BENCH_LABELS[@]}" --rm --privileged --security-opt label=disable --cgroupns=private --network=none \
   -v /usr:/usr:ro -v "$HEX:/opt/hex:ro" -v "$HERE:/opt/lab:ro" \
   "$IMAGE" bash /opt/lab/cgroups_inside.sh

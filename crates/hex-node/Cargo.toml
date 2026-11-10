@@ -14,13 +14,26 @@ hex-client.workspace = true
 hex-core.workspace = true
 hex-health.workspace = true
 hex-runtime.workspace = true
+# The node's facts are the scheduler's (`src/facts.rs`, `hex_sim::facts`).
+hex-sim.workspace = true
+# The node's GPUs and their load, for its facts (`src/facts.rs`).
+hex-gpu.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+# Windows' AF_UNIX socket and completion port (CLAUDE.md §12).
+[target.'cfg(windows)'.dependencies]
+hex-afunix.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true
 
+[features]
+# The builders only hex-cli's tests call (scripts/check-production.sh keeps them out of production builds).
+test-controls = []
+
 [dev-dependencies]
+hex-testkit.workspace = true
 # The relay's end-to-end staging test builds its tarball (src/relay/tests.rs).
 tar.workspace = true
 tempfile.workspace = true
@@ -28,6 +41,10 @@ tempfile.workspace = true
 sha2.workspace = true
 # The guest loop test's stand-in for a Shards guest (tests/guest_loop.rs).
 shards-api.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+# guest_loop's Firecracker CONNECT fixture; no production stream or handle adapter.
+shards-afunix = { path = "../../vendor/shards-api-draft/crates/afunix" }
 
 [lints]
 workspace = true

@@ -65,6 +65,7 @@ pub fn quarter_cluster(day: &Cluster) -> Resources {
         cpu_milli: u64::try_from(cpu).unwrap(),
         mem_bytes: u64::try_from(mem).unwrap(),
         gpus: 0,
+        disk_bytes: 0,
     }
 }
 

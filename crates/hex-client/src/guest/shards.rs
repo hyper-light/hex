@@ -78,6 +78,12 @@ impl ShardsLink {
 }
 
 impl Link for ShardsLink {
+    fn identity(&self) -> Result<shards_api::Identity, Refusal> {
+        self.guest
+            .identity()
+            .map_err(|why| refusal("naming the guest's stream endpoint", &why))
+    }
+
     fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal> {
         let patience = if self.listened.load(Ordering::Acquire) {
             Duration::ZERO

@@ -17,14 +17,25 @@
 )]
 
 mod abandoned;
+pub mod census;
 pub mod disk_probe;
+mod emptying;
+pub mod facts;
 pub mod recorded;
+pub mod records;
 pub mod store;
+mod turns;
 
+#[cfg(target_os = "linux")]
+pub mod cgroups;
 #[cfg(target_os = "linux")]
 mod createpool;
 #[cfg(target_os = "linux")]
-mod netns;
+mod devfs;
+#[cfg(target_os = "linux")]
+mod ipcuts;
+#[cfg(target_os = "linux")]
+pub mod netns;
 #[cfg(target_os = "linux")]
 mod node;
 #[cfg(target_os = "linux")]
@@ -35,8 +46,12 @@ mod remove;
 mod seed;
 pub mod serve;
 #[cfg(target_os = "linux")]
+pub mod sizes;
+#[cfg(target_os = "linux")]
 pub mod supervise;
 
+#[cfg(all(target_os = "linux", debug_assertions))]
+pub use node::CrashPoint;
 #[cfg(target_os = "linux")]
-pub use node::Node;
+pub use node::{Node, OCI_BOXES, records_dir};
 pub use recorded::RecoverySummary;

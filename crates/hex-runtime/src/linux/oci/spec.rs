@@ -107,13 +107,20 @@ pub struct Process {
     pub no_new_privileges: bool,
     #[serde(default)]
     pub oom_score_adj: Option<i32>,
-    /// The AppArmor profile to switch to on exec. Hex does not yet apply it, so `Spec::check` refuses a
-    /// spec that sets it rather than run the container without the profile it asked for (CLAUDE.md §3).
+    /// The AppArmor profile the process takes at its `execve`, which `init::Becoming` applies, refused by name
+    /// where AppArmor isn't on ([`super::lsm`]). Read through [`Process::apparmor_profile`].
     #[serde(default)]
     pub apparmor_profile: Option<String>,
     /// The SELinux process label. Same: refused until Hex applies it, never silently dropped (§3).
     #[serde(default)]
     pub selinux_label: Option<String>,
+}
+
+impl Process {
+    /// The AppArmor profile, where one is set: an empty one is none.
+    pub fn apparmor_profile(&self) -> Option<&str> {
+        self.apparmor_profile.as_deref().filter(|p| !p.is_empty())
+    }
 }
 
 fn root_cwd() -> String {
@@ -200,7 +207,8 @@ pub struct Linux {
     /// is refused there, by name (CLAUDE.md §3), never run unfiltered.
     #[serde(default)]
     pub seccomp: Option<Seccomp>,
-    /// `linux.mountLabel`: the SELinux label for the container's mounts. Refused until applied (§3).
+    /// `linux.mountLabel`: the SELinux label of every filesystem the container's mounts make, refused by name
+    /// where the kernel can't apply it ([`super::lsm`]). Read through [`Spec::mount_label`].
     #[serde(default)]
     pub mount_label: Option<String>,
 }
@@ -513,17 +521,6 @@ impl Spec {
             // A spec that names a security control Hex can't yet apply is refused by name, never run
             // without it (CLAUDE.md §3: a dropped security control is a silent failure).
             if process
-                .apparmor_profile
-                .as_deref()
-                .is_some_and(|s| !s.is_empty())
-            {
-                return Err(OciError::Config(
-                    "process.apparmorProfile is set: Hex does not yet apply an AppArmor profile, and \
-                     refuses rather than run the container without the one it asked for"
-                        .to_owned(),
-                ));
-            }
-            if process
                 .selinux_label
                 .as_deref()
                 .is_some_and(|s| !s.is_empty())
@@ -537,19 +534,8 @@ impl Spec {
         }
         // linux.seccomp is honoured: the container init compiles it and loads the BPF filter before
         // execve (super::seccomp). A profile the compiler can't honour is refused there, by name, so
-        // the refusal is no longer blanket here.
-        if self
-            .linux
-            .mount_label
-            .as_deref()
-            .is_some_and(|s| !s.is_empty())
-        {
-            return Err(OciError::Config(
-                "linux.mountLabel is set: Hex does not yet apply a SELinux mount label, and refuses \
-                 rather than run without it"
-                    .to_owned(),
-            ));
-        }
+        // the refusal is no longer blanket here. linux.mountLabel and process.apparmorProfile are applied
+        // too, and refused where the host can't apply them (super::lsm).
         // A container in a user namespace that doesn't make a network namespace of its own can't mount a
         // sysfs (the network namespace's owner must), so its /sys is a bind of one, the host's where it
         // shares the host's network. Holding CAP_SYS_ADMIN, it could unmount the mounts over that bind
@@ -561,21 +547,98 @@ impl Spec {
             && self.holds_capability("CAP_SYS_ADMIN")
         {
             return Err(OciError::Config(
-                "a container in a user namespace that holds CAP_SYS_ADMIN without a network namespace \
-                 of its own could reach the host's cgroup tree through the /sys it must bind: give it \
-                 a network namespace of its own or drop CAP_SYS_ADMIN"
+                "a container in a user namespace that holds CAP_SYS_ADMIN (named, or kept from its \
+                 creator where the spec names no capabilities) without a network namespace of its own \
+                 could reach the host's cgroup tree through the /sys it must bind: give it a network \
+                 namespace of its own, or capabilities without CAP_SYS_ADMIN"
                     .to_owned(),
             ));
+        }
+        // Each hook's path is absolute and its timeout above zero (config.md:556, :559-560), and the
+        // startContainer hooks' timeouts sum to the seconds `start` waits on them besides its own.
+        let hooks = &self.hooks;
+        for (kind, list) in [
+            ("prestart", &hooks.prestart),
+            ("createRuntime", &hooks.create_runtime),
+            ("createContainer", &hooks.create_container),
+            ("startContainer", &hooks.start_container),
+            ("poststart", &hooks.poststart),
+            ("poststop", &hooks.poststop),
+        ] {
+            if let Some(hook) = list.iter().find(|h| !h.path.starts_with('/')) {
+                return Err(OciError::Config(format!(
+                    "a {kind} hook's path {:?} isn't absolute",
+                    hook.path
+                )));
+            }
+            super::hooks::budget(kind, list)?;
         }
         Ok(())
     }
 
-    /// Whether any of the process's capability sets names `cap`.
-    fn holds_capability(&self, cap: &str) -> bool {
-        self.process
+    /// Whether the container's process could change its own cgroup or what is attached to it, so a
+    /// cgroup it leaves behind isn't handed to another box (goal 5 extended, step 6): it may hold
+    /// CAP_SYS_ADMIN, which mounts a cgroup filesystem it can write (a spec that gives no capability
+    /// sets keeps its creator's, all of them for a root node's container), or it holds CAP_BPF with
+    /// CAP_NET_ADMIN, which load a cgroup device program (Linux v6.19, kernel/bpf/syscall.c:2930-2941)
+    /// and attach it to the cgroup it can open.
+    pub fn could_change_its_cgroup(&self) -> bool {
+        let given = self
+            .process
             .as_ref()
-            .and_then(|p| p.capabilities.as_ref())
-            .is_some_and(|c| {
+            .is_some_and(|p| p.capabilities.is_some());
+        !given
+            || self.holds_capability("CAP_SYS_ADMIN")
+            || (self.holds_capability("CAP_BPF") && self.holds_capability("CAP_NET_ADMIN"))
+    }
+
+    /// Whether the container may be given its owner's earlier box's network namespace, and hand its own on
+    /// to its owner's next box: only if it couldn't change it (goal 5 extended, step 6; Ada's call of
+    /// 2026-11-03; docs/research/runtime/goal5-netns-reuse.md). Refused, by why:
+    /// - [`Refused::NetAdmin`]: its spec gives no capability sets, so it keeps its creator's, all of them for
+    ///   a root node's container, or names CAP_NET_ADMIN or CAP_SYS_ADMIN in one. Every rtnetlink change, every
+    ///   interface ioctl, a tun device and a firewall table need CAP_NET_ADMIN (Linux v6.19
+    ///   net/core/rtnetlink.c:6885; net/ipv4/devinet.c:1099-1111; drivers/net/tun.c:2757;
+    ///   net/netfilter/nfnetlink.c:661), and CAP_SYS_ADMIN mounts a proc it can write;
+    /// - [`Refused::ProcSysWritable`]: it mounts a proc whose `/proc/sys` isn't read-only, through which a
+    ///   process running as the namespace's root writes its net sysctls without CAP_NET_ADMIN
+    ///   (net/sysctl_net.c:42-54, fs/proc/proc_sysctl.c:425-434);
+    /// - [`Refused::OwnUserNamespace`]: its network namespace would belong to a user namespace of its own,
+    ///   where the node's belong to the node's.
+    pub fn may_share_its_network(&self) -> Result<(), hex_core::netns_reuse::Refused> {
+        use hex_core::netns_reuse::Refused;
+        if self.in_user_namespace() {
+            return Err(Refused::OwnUserNamespace);
+        }
+        let given = self
+            .process
+            .as_ref()
+            .is_some_and(|p| p.capabilities.is_some());
+        if !given
+            || self.holds_capability("CAP_NET_ADMIN")
+            || self.holds_capability("CAP_SYS_ADMIN")
+        {
+            return Err(Refused::NetAdmin);
+        }
+        let proc_mounted = self
+            .mounts
+            .iter()
+            .any(|m| m.kind.as_deref() == Some("proc"));
+        let sys_read_only = self.linux.readonly_paths.iter().any(|p| {
+            let p = p.trim_end_matches('/');
+            p == "/proc/sys" || p == "/proc"
+        });
+        if proc_mounted && !sys_read_only {
+            return Err(Refused::ProcSysWritable);
+        }
+        Ok(())
+    }
+
+    /// Whether the process may hold `cap`: one of its capability sets names it, or the spec names no
+    /// capabilities, so the init changes none (init.rs, `caps`) and it keeps every one of its creator's.
+    fn holds_capability(&self, cap: &str) -> bool {
+        self.process.as_ref().is_some_and(|p| {
+            p.capabilities.as_ref().is_none_or(|c| {
                 [
                     &c.bounding,
                     &c.effective,
@@ -586,6 +649,7 @@ impl Spec {
                 .iter()
                 .any(|set| set.iter().any(|name| name == cap))
             })
+        })
     }
 
     /// Whether the spec asks for a namespace of `kind` (made fresh, no `path`).
@@ -599,6 +663,11 @@ impl Spec {
     /// Whether the container runs in a user namespace of its own or one it joins by `path`: either way
     /// it is outside the initial user namespace, where `mknod` of a device is refused and a device policy
     /// is enforced by construction rather than by a cgroup device program the runtime loads.
+    /// The mount label, where one is set: an empty one is none.
+    pub fn mount_label(&self) -> Option<&str> {
+        self.linux.mount_label.as_deref().filter(|l| !l.is_empty())
+    }
+
     pub fn in_user_namespace(&self) -> bool {
         self.linux.namespaces.iter().any(|n| n.kind == "user")
     }
@@ -663,36 +732,148 @@ mod tests {
         assert_eq!(spec.linux.masked_paths, ["/proc/kcore"]);
     }
 
+    /// Goal 5 extended, step 6 (decision 5, "Who never shares"): a box that could change its own cgroup
+    /// never shares one. Given no capability sets, it keeps its creator's, all of them; or it holds
+    /// CAP_SYS_ADMIN in any set; or CAP_BPF with CAP_NET_ADMIN (kernel/bpf/syscall.c:2930-2941, v6.19).
+    #[test]
+    fn a_box_that_could_change_its_cgroup_is_known_by_its_capability_sets() {
+        let with = |process: &str| {
+            let json = format!(
+                r#"{{"ociVersion":"1.3.0","root":{{"path":"rootfs"}},
+                    "process":{{"args":["/bin/sh"],"cwd":"/"{process}}},"linux":{{}}}}"#
+            );
+            Spec::parse(json.as_bytes())
+                .unwrap()
+                .could_change_its_cgroup()
+        };
+        let sets = |set: &str, names: &str| format!(r#","capabilities":{{"{set}":[{names}]}}"#);
+        assert!(with(""), "no capability sets: the creator's, all of them");
+        assert!(
+            !with(&sets("bounding", r#""CAP_CHOWN","CAP_NET_RAW","CAP_KILL""#)),
+            "sets that name neither"
+        );
+        assert!(
+            with(&sets("bounding", r#""CAP_SYS_ADMIN""#)),
+            "CAP_SYS_ADMIN, bounding"
+        );
+        assert!(
+            with(&sets("ambient", r#""CAP_SYS_ADMIN""#)),
+            "CAP_SYS_ADMIN, ambient"
+        );
+        assert!(
+            with(&sets("effective", r#""CAP_BPF","CAP_NET_ADMIN""#)),
+            "CAP_BPF with CAP_NET_ADMIN"
+        );
+        assert!(!with(&sets("effective", r#""CAP_BPF""#)), "CAP_BPF alone");
+        assert!(
+            !with(&sets("effective", r#""CAP_NET_ADMIN""#)),
+            "CAP_NET_ADMIN alone"
+        );
+    }
+
+    /// Goal 5 extended, step 6 (Ada's call of 2026-11-03): a box may share its owner's network namespaces
+    /// only if it couldn't have changed its own: capability sets given and naming neither CAP_NET_ADMIN nor
+    /// CAP_SYS_ADMIN, `/proc/sys` read-only (or no proc mounted), and no user namespace of its own.
+    #[test]
+    fn a_box_may_share_its_network_only_if_it_could_change_nothing_of_it() {
+        use hex_core::netns_reuse::Refused;
+        let docker = r#""capabilities":{"bounding":["CAP_CHOWN","CAP_NET_RAW","CAP_KILL"],"effective":["CAP_CHOWN","CAP_NET_RAW","CAP_KILL"]}"#;
+        let spec = |caps: &str, readonly: &str, proc_mounted: bool, user: bool| {
+            let mounts = if proc_mounted {
+                r#"[{"destination":"/proc","type":"proc","source":"proc"}]"#
+            } else {
+                "[]"
+            };
+            let user = if user { r#",{"type":"user"}"# } else { "" };
+            let json = format!(
+                r#"{{"ociVersion":"1.3.0","root":{{"path":"rootfs"}},
+                    "process":{{"args":["/bin/sh"],"cwd":"/"{caps}}},"mounts":{mounts},
+                    "linux":{{"namespaces":[{{"type":"pid"}},{{"type":"network"}}{user}],
+                              "readonlyPaths":{readonly}}}}}"#
+            );
+            Spec::parse(json.as_bytes()).unwrap()
+        };
+        let sys = r#"["/proc/sys"]"#;
+        let caps = format!(",{docker}");
+        assert_eq!(
+            spec(&caps, sys, true, false).may_share_its_network(),
+            Ok(())
+        );
+        assert_eq!(
+            spec("", sys, true, false).may_share_its_network(),
+            Err(Refused::NetAdmin),
+            "no capability sets: the creator's, all of them"
+        );
+        for held in ["CAP_NET_ADMIN", "CAP_SYS_ADMIN"] {
+            let c = format!(r#","capabilities":{{"ambient":["{held}"]}}"#);
+            assert_eq!(
+                spec(&c, sys, true, false).may_share_its_network(),
+                Err(Refused::NetAdmin),
+                "{held}"
+            );
+        }
+        assert_eq!(
+            spec(&caps, "[]", true, false).may_share_its_network(),
+            Err(Refused::ProcSysWritable)
+        );
+        assert_eq!(
+            spec(&caps, r#"["/proc/sys/"]"#, true, false).may_share_its_network(),
+            Ok(()),
+            "a trailing slash is the same path"
+        );
+        assert_eq!(
+            spec(&caps, r#"["/proc"]"#, true, false).may_share_its_network(),
+            Ok(()),
+            "all of /proc read-only"
+        );
+        assert_eq!(
+            spec(&caps, "[]", false, false).may_share_its_network(),
+            Ok(()),
+            "no proc mounted, and none it could mount"
+        );
+        assert_eq!(
+            spec(&caps, sys, true, true).may_share_its_network(),
+            Err(Refused::OwnUserNamespace)
+        );
+    }
+
     #[test]
     fn a_security_control_hex_cannot_yet_apply_is_refused_not_dropped() {
         // CLAUDE.md §3: a security control Hex can't honour is refused by name, never run without
-        // (a dropped LSM control is a silent security failure). Parse runs check. linux.seccomp is
-        // no longer here: Hex compiles and loads it (the compiler refuses an unsupported profile by
-        // name, super::seccomp), so a settable seccomp profile is honoured, not refused wholesale.
-        let cases = [
-            (
-                "process.apparmorProfile",
-                r#"{"ociVersion":"1.0.0","root":{"path":"rootfs"},
-                    "process":{"args":["/bin/sh"],"apparmorProfile":"docker-default"},"linux":{}}"#,
-            ),
-            (
-                "process.selinuxLabel",
-                r#"{"ociVersion":"1.0.0","root":{"path":"rootfs"},
-                    "process":{"args":["/bin/sh"],"selinuxLabel":"system_u:system_r:container_t:s0"}}"#,
-            ),
-            (
-                "linux.mountLabel",
-                r#"{"ociVersion":"1.0.0","root":{"path":"rootfs"},"process":{"args":["/bin/sh"]},
-                    "linux":{"mountLabel":"system_u:object_r:container_file_t:s0"}}"#,
-            ),
-        ];
-        for (field, json) in cases {
-            let r = Spec::parse(json.as_bytes());
-            assert!(
-                matches!(&r, Err(OciError::Config(why)) if why.contains(field)),
-                "{field} should be refused with a Config error naming it, got {r:?}"
-            );
-        }
+        // (a dropped LSM control is a silent security failure). Parse runs check. linux.seccomp,
+        // linux.mountLabel and process.apparmorProfile are no longer here: Hex applies them, and refuses
+        // where the host can't (super::lsm); process.selinuxLabel it doesn't yet apply.
+        let json = r#"{"ociVersion":"1.0.0","root":{"path":"rootfs"},
+            "process":{"args":["/bin/sh"],"selinuxLabel":"system_u:system_r:container_t:s0"}}"#;
+        let r = Spec::parse(json.as_bytes());
+        assert!(
+            matches!(&r, Err(OciError::Config(why)) if why.contains("process.selinuxLabel")),
+            "process.selinuxLabel should be refused with a Config error naming it, got {r:?}"
+        );
+    }
+
+    // AC-T7.1.4 (runtime-tools linux_mount_label, linux_process_apparmor_profile): parse a spec that sets
+    // linux.mountLabel or process.apparmorProfile, expect it accepted with the label kept for the init to
+    // apply, not refused as before (docs/design/runtime.md, "SELinux mount labels and AppArmor profiles").
+    #[test]
+    fn a_mount_label_and_an_apparmor_profile_are_parsed_to_be_applied() {
+        let json = r#"{"ociVersion":"1.0.0","root":{"path":"rootfs"},
+            "process":{"args":["/bin/sh"],"apparmorProfile":"acme_secure_profile"},
+            "linux":{"mountLabel":"system_u:object_r:svirt_sandbox_file_t:s0:c715,c811"}}"#;
+        let s = Spec::parse(json.as_bytes()).expect("both are applied, so the spec parses");
+        assert_eq!(
+            s.mount_label(),
+            Some("system_u:object_r:svirt_sandbox_file_t:s0:c715,c811")
+        );
+        assert_eq!(
+            s.process.as_ref().and_then(|p| p.apparmor_profile()),
+            Some("acme_secure_profile")
+        );
+        let empty = r#"{"ociVersion":"1.0.0","root":{"path":"rootfs"},
+            "process":{"args":["/bin/sh"],"apparmorProfile":""},"linux":{"mountLabel":""}}"#;
+        let s = Spec::parse(empty.as_bytes()).expect("empty is unset");
+        assert_eq!(s.mount_label(), None, "an empty label is no label");
+        assert_eq!(s.process.as_ref().and_then(|p| p.apparmor_profile()), None);
     }
 
     // T-T7.1.4: a container in a user namespace that doesn't make a network namespace of its own can't
@@ -735,6 +916,42 @@ mod tests {
             spec(own_network, "bounding", "CAP_SYS_ADMIN"),
             spec(host_network, "bounding", "CAP_CHOWN"),
             spec(no_user_namespace, "bounding", "CAP_SYS_ADMIN"),
+        ] {
+            assert!(Spec::parse(ok.as_bytes()).is_ok(), "{ok} should parse");
+        }
+    }
+
+    // T-T7.1.4: a process whose spec names no capabilities keeps every one of its creator's (the init
+    // changes none: init.rs, `caps`), CAP_SYS_ADMIN in its user namespace among them, so in a user
+    // namespace on a borrowed network it is refused as a spec naming CAP_SYS_ADMIN is. With a network
+    // namespace of its own, outside a user namespace, or with no process to run, it parses.
+    #[test]
+    fn a_user_namespaced_container_naming_no_capabilities_on_a_borrowed_network_is_refused() {
+        let spec = |namespaces: &str, process: &str| {
+            format!(
+                r#"{{"ociVersion":"1.0.0","root":{{"path":"rootfs"}}{process},
+                    "linux":{{"namespaces":[{namespaces}]}}}}"#
+            )
+        };
+        let runs = r#","process":{"args":["/bin/sh"]}"#;
+        for namespaces in [
+            r#"{"type":"user"},{"type":"pid"},{"type":"mount"}"#,
+            r#"{"type":"user"},{"type":"mount"},{"type":"network","path":"/proc/1/ns/net"}"#,
+        ] {
+            let r = Spec::parse(spec(namespaces, runs).as_bytes());
+            assert!(
+                matches!(&r, Err(OciError::Config(why))
+                    if why.contains("CAP_SYS_ADMIN") && why.contains("names no capabilities")),
+                "no capabilities with {namespaces} should be refused by name, got {r:?}"
+            );
+        }
+        for ok in [
+            spec(
+                r#"{"type":"user"},{"type":"network"},{"type":"mount"}"#,
+                runs,
+            ),
+            spec(r#"{"type":"pid"},{"type":"mount"}"#, runs),
+            spec(r#"{"type":"user"},{"type":"pid"},{"type":"mount"}"#, ""),
         ] {
             assert!(Spec::parse(ok.as_bytes()).is_ok(), "{ok} should parse");
         }

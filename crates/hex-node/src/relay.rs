@@ -13,8 +13,8 @@
 //!   connection read on, so its set waits on facts alone: its last stream, or its host's end.
 //!
 //! Each resource has a bound, refused past by type (CLAUDE.md §2, §3):
-//! - control connections ([`Limits::connections`], the node's own): one more is sent its token and a
-//!   refusal (`Exhausted`, as the node's socket refuses one) and closed;
+//! - control connections ([`Limits::connections`], the node's own, as its hello told them: [`Limits::of`]): one
+//!   more is sent its token and a refusal (`Exhausted`, as the node's socket refuses one) and closed;
 //! - execs and early streams waiting for each other ([`Limits::sets`]): one more is refused, the exec
 //!   answered `Invalid` naming the bound, the stream closed; a set goes when its host's connection ends,
 //!   which no exec of its can outlive, its streams closed;
@@ -26,7 +26,7 @@
 //! - **Files:** a box's bundle and root come on the staging port before its create
 //!   (docs/design/shards-guest.md §4a, [`files`]), written under the staged folder, and go with it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, IoSlice, IoSliceMut, PipeReader, PipeWriter, Read, Write};
 use std::mem::MaybeUninit;
 use std::net::Shutdown;
@@ -40,6 +40,7 @@ use hex_api::Refusal;
 use hex_client::guest::Duplex;
 use hex_core::stream::{self, Deframer, Exec, Gather, Stray};
 use hex_core::wire::{self, Answer, Call, Request};
+use rustix::event::{PollFd, PollFlags};
 use rustix::io::Errno;
 use rustix::net::{
     AddressFamily, RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, SendAncillaryBuffer,
@@ -59,17 +60,29 @@ pub struct Limits {
     pub files: hex_core::stream::files::Limits,
 }
 
-/// The relay's bounds unless set:
-/// - the node socket's own connections (`crate::serve::LIMITS`), as each holds one of the node's;
-/// - a connection's in-flight bound for every connection (`crate::serve::LIMITS`, the node's own), so no
-///   host that holds the node's bounds meets the sets' bound;
-/// - every stream of every set naming itself at once: [`STREAMS`] a set.
-pub const LIMITS: Limits = Limits {
-    connections: crate::serve::LIMITS.connections,
-    sets: crate::serve::LIMITS.connections * crate::serve::LIMITS.in_flight,
-    unnamed: crate::serve::LIMITS.connections * crate::serve::LIMITS.in_flight * STREAMS,
-    files: hex_core::stream::files::LIMITS,
-};
+impl Limits {
+    /// The relay's bounds over its node, as the node's hello told them (`node`, each connection's, and `budgets`,
+    /// over them all), so none is picked (Ada's rule, 2026-11-06) and none is the relay's own guess at the node's:
+    /// - the node's connections, as each control connection holds one of the node's;
+    /// - as many sets as the node's calls in flight together, so no host within the node's budgets meets the
+    ///   sets' bound;
+    /// - every stream of every set naming itself at once: [`STREAMS`] a set.
+    pub fn of(node: &wire::Limits, budgets: &wire::Budgets) -> Self {
+        Self {
+            connections: node.connections,
+            sets: budgets.in_flight,
+            unnamed: budgets.in_flight.saturating_mul(STREAMS),
+            files: hex_core::stream::files::LIMITS,
+        }
+    }
+
+    /// The relay's bounds over the node agent at `node`, asked of it in a hello of their own.
+    pub fn asked(node: &Path) -> Result<Self, Refusal> {
+        let told = hex_client::Client::connect(node)?;
+        Ok(Self::of(&told.limits(), &told.budgets()))
+    }
+}
+
 /// Where the guest's relay writes staged bundles and roots: the guest's tmpfs `/run`, charged to its
 /// memory (docs/design/shards-guest.md §4).
 pub const STAGED: &str = "/run/hex/staged";
@@ -111,8 +124,10 @@ pub struct Relay {
 /// and its connection closes.
 type Waiting = SyncSender<Copier>;
 
-/// Sets under way, and the execs parked until their sets are whole.
+/// Live controls, their sets under way, and the execs parked until their sets are whole.
 struct Sets {
+    /// Tokens whose controls can still supply execs, at most the admitted control connection limit.
+    active: BTreeSet<u64>,
     gather: Gather<Waiting>,
     parked: BTreeMap<Exec, Parked>,
 }
@@ -120,7 +135,6 @@ struct Sets {
 /// An exec whose streams haven't all come: what to send the node, and where, once they have.
 struct Parked {
     message: Vec<u8>,
-    version: u16,
     id: u64,
     streams: wire::Streams,
     node: Arc<OwnedFd>,
@@ -139,6 +153,7 @@ impl Relay {
             staged: staged.to_owned(),
             limits,
             sets: Mutex::new(Sets {
+                active: BTreeSet::new(),
                 gather: Gather::new(limits.sets),
                 parked: BTreeMap::new(),
             }),
@@ -157,6 +172,24 @@ impl Relay {
 
     fn sets(&self) -> Result<MutexGuard<'_, Sets>, Refusal> {
         self.sets.lock().map_err(poisoned)
+    }
+
+    /// Register before publishing the token, so even a stream that arrives before its exec belongs to a live
+    /// control. The guard closes registration and forgets its sets together on every control return (HEX-RT-17).
+    fn activate(&self, token: u64) -> Result<ActiveControl<'_>, Refusal> {
+        let mut sets = self.sets()?;
+        if sets.active.len() >= self.limits.connections {
+            return Err(Refusal::Exhausted {
+                what: crate::serve::CONNECTIONS,
+                bound: self.limits.connections,
+            });
+        }
+        if !sets.active.insert(token) {
+            return Err(Refusal::Broken(
+                "the guest relay reused a live control token".to_owned(),
+            ));
+        }
+        Ok(ActiveControl { relay: self, token })
     }
 
     /// Serves `control`, `stdio` and `files` until a listener fails, which is returned.
@@ -278,6 +311,11 @@ impl Relay {
         let (copier, copy) = std::sync::mpsc::sync_channel(1);
         let ready = {
             let Ok(mut sets) = self.sets() else { return };
+            // A control's guard removes registration and its sets under this same lock. No late stream can
+            // recreate a set after forget, nor can an unknown control reserve one (HEX-GUEST-7, HEX-RT-17).
+            if !sets.active.contains(&named.exec.conn) {
+                return;
+            }
             match sets.gather.arrive(named, copier) {
                 Ok(Some((exec, waiting))) => sets.parked.remove(&exec).map(|p| (p, waiting)),
                 Ok(None) => None,
@@ -295,19 +333,30 @@ impl Relay {
     /// Serves one host control connection until either side ends.
     fn control(self: Arc<Self>, mut host: Box<dyn Duplex>) {
         let token = self.tokens.fetch_add(1, Ordering::Relaxed);
-        if host.write_all(&token.to_le_bytes()).is_err() {
-            return;
-        }
         let held = self.connections.fetch_add(1, Ordering::AcqRel);
         let _release = Release(&self.connections);
         if held >= self.limits.connections {
-            refuse(
-                host.as_mut(),
-                Refusal::Exhausted {
-                    what: crate::serve::CONNECTIONS,
-                    bound: self.limits.connections,
-                },
-            );
+            if host.write_all(&token.to_le_bytes()).is_ok() {
+                refuse(
+                    host.as_mut(),
+                    Refusal::Exhausted {
+                        what: crate::serve::CONNECTIONS,
+                        bound: self.limits.connections,
+                    },
+                );
+            }
+            return;
+        }
+        let active = match self.activate(token) {
+            Ok(active) => active,
+            Err(why) => {
+                if host.write_all(&token.to_le_bytes()).is_ok() {
+                    refuse(host.as_mut(), why);
+                }
+                return;
+            }
+        };
+        if host.write_all(&token.to_le_bytes()).is_err() {
             return;
         }
         let node = match connect(&self.node) {
@@ -329,22 +378,7 @@ impl Relay {
         self.requests(token, host.as_mut(), &node, &writer);
         // The host has gone: its execs can't be answered, nor their streams come, so its sets go, their
         // streams' threads ending as their connections close.
-        if let Ok(mut sets) = self.sets() {
-            drop(sets.gather.forget(token));
-            let gone: Vec<Exec> = sets
-                .parked
-                .range(
-                    Exec { conn: token, id: 0 }..=Exec {
-                        conn: token,
-                        id: u64::MAX,
-                    },
-                )
-                .map(|(exec, _)| *exec)
-                .collect();
-            for exec in gone {
-                sets.parked.remove(&exec);
-            }
-        }
+        drop(active);
         // The node sees its connection end and applies its disconnect rule.
         let _ = rustix::net::shutdown(&*node, rustix::net::Shutdown::Both);
         let _ = answers.join();
@@ -383,9 +417,9 @@ impl Relay {
         }
     }
 
-    /// One request to the node: an exec with its streams' pipes, once they have all come, anything
-    /// else as it came (the node refuses what isn't a request itself). An exec whose streams haven't
-    /// all come is parked, and the host's connection read on.
+    /// One request to the node: an exec or a run (decision 7) with its streams' pipes, once they have all
+    /// come, anything else as it came (the node refuses what isn't a request itself). One whose streams
+    /// haven't all come is parked, and the host's connection read on.
     fn request(
         &self,
         token: u64,
@@ -394,7 +428,9 @@ impl Relay {
         writer: &Arc<Mutex<Box<dyn Duplex>>>,
     ) -> Result<(), Gone> {
         let exec = match wire::read_request_apart(message, wire::MAX_MESSAGE) {
-            Ok((header, Request::Call(Call::Exec { streams, .. }))) => Some((header, streams)),
+            Ok((header, Request::Call(Call::Exec { streams, .. } | Call::Run { streams, .. }))) => {
+                Some((header, streams))
+            }
             _ => None,
         };
         let Some((header, streams)) = exec else {
@@ -406,7 +442,6 @@ impl Relay {
         };
         let parked = Parked {
             message: message.to_vec(),
-            version: header.version,
             id: header.id,
             streams,
             node: Arc::clone(node),
@@ -433,6 +468,38 @@ impl Relay {
     }
 }
 
+/// A control's registration and pending streams have one lifetime, including setup failures after its token
+/// was published. Membership and Gather cleanup share one lock, so arrival cannot race behind forget.
+struct ActiveControl<'a> {
+    relay: &'a Relay,
+    token: u64,
+}
+
+impl Drop for ActiveControl<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut sets) = self.relay.sets() {
+            sets.active.remove(&self.token);
+            drop(sets.gather.forget(self.token));
+            let gone: Vec<Exec> = sets
+                .parked
+                .range(
+                    Exec {
+                        conn: self.token,
+                        id: 0,
+                    }..=Exec {
+                        conn: self.token,
+                        id: u64::MAX,
+                    },
+                )
+                .map(|(exec, _)| *exec)
+                .collect();
+            for exec in gone {
+                sets.parked.remove(&exec);
+            }
+        }
+    }
+}
+
 /// Gives back a connection's place in the bound when its thread ends.
 struct Release<'a>(&'a AtomicUsize);
 
@@ -448,7 +515,7 @@ struct Gone;
 /// Refuses a host connection whose token went: a refusal of no request (id 0), as the node's socket
 /// refuses one, which the host's hello returns.
 fn refuse(host: &mut dyn Duplex, why: Refusal) {
-    if let Some(bytes) = wire::answer(wire::FIRST, 0, &Answer::Refused(why), wire::MAX_MESSAGE)
+    if let Some(bytes) = wire::answer(0, &Answer::Refused(why), wire::MAX_MESSAGE)
         .ok()
         .and_then(|bytes| stream::frame(&bytes, wire::MAX_MESSAGE).ok())
     {
@@ -488,14 +555,9 @@ fn deliver(parked: &Parked, waiting: Vec<Waiting>) -> Result<(), Gone> {
 
 /// Answers the parked exec `parked` with `why` on its host's connection.
 fn refuse_exec(parked: &Parked, why: Refusal) -> Result<(), Gone> {
-    let answer = wire::answer(
-        parked.version,
-        parked.id,
-        &Answer::Refused(why),
-        wire::MAX_MESSAGE,
-    )
-    .ok()
-    .and_then(|bytes| stream::frame(&bytes, wire::MAX_MESSAGE).ok());
+    let answer = wire::answer(parked.id, &Answer::Refused(why), wire::MAX_MESSAGE)
+        .ok()
+        .and_then(|bytes| stream::frame(&bytes, wire::MAX_MESSAGE).ok());
     let mut w = parked.writer.lock().map_err(|_| Gone)?;
     w.write_all(&answer.unwrap_or_default()).map_err(|_| Gone)
 }
@@ -554,35 +616,110 @@ impl Copier {
     /// user space. Pipe to connection: the socket's `splice_write` (`splice_to_socket`, net/socket.c).
     /// Connection to pipe: the socket's `splice_read`, which for vsock, whose `vsock_stream_ops` names none
     /// (net/vmw_vsock/af_vsock.c), is the kernel's own copy into the pipe (`sock_splice_read` falls back to
-    /// `copy_splice_read`, net/socket.c, Linux 6.18). Each call moves at most the pipe's capacity
-    /// (`F_GETPIPE_SZ`, fcntl(2)), learned from the pipe itself.
+    /// `copy_splice_read`, net/socket.c, Linux 6.18). Either way the copier waits only in poll ([`feed`],
+    /// [`drain`]), never in a splice. Each call moves at most the pipe's capacity (`F_GETPIPE_SZ`, fcntl(2)),
+    /// learned from the pipe itself. Its connection closes as the copy ends.
     fn run(self, conn: Box<dyn Conn>) {
         match self {
             Self::In(to) => {
-                let _ = splice_all(conn.as_fd(), &to, &to);
+                let _ = feed(&*conn, &to);
             }
             Self::Out(from) => {
-                let _ = splice_all(&from, conn.as_fd(), &from);
+                let _ = drain(&from, &*conn);
                 let _ = conn.shutdown(Shutdown::Write);
             }
         }
     }
 }
 
-/// Splices from `from` into `to` until `from` ends, at most `pipe`'s capacity a call.
-fn splice_all(from: impl AsFd, to: impl AsFd, pipe: impl AsFd) -> io::Result<()> {
-    let unit = rustix::pipe::fcntl_getpipe_size(pipe)?;
+/// Moves the host's stdin from its connection into its program's pipe until either ends. A splice from a socket
+/// into a pipe holds the pipe's lock while it waits for the socket (fs/splice.c, `splice_file_to_pipe` around
+/// `do_splice_read`), and the program's close of its stdin, as its exit makes, takes that lock (fs/pipe.c,
+/// `pipe_release`); so the copier waits in poll(2) for the host's bytes and for the program's end together, and
+/// splices only what has come, its connection non-blocking, so no splice waits on the host holding the pipe. A
+/// splice into a full pipe waits for room with the lock let go (`wait_for_space`). The pipe's write end reports
+/// `POLLERR` once the program has no read end (`pipe_poll`): the copy then ends, and the stream's connection
+/// closes with it, so the host sees its program let its stdin go.
+fn feed(conn: &dyn Conn, to: &PipeWriter) -> io::Result<()> {
+    conn.set_nonblocking(true)?;
+    let unit = rustix::pipe::fcntl_getpipe_size(to)?;
     loop {
+        let (came, gone) = {
+            let from = conn.as_fd();
+            let mut ready = [
+                PollFd::new(&from, PollFlags::IN),
+                PollFd::new(to, PollFlags::empty()),
+            ];
+            match rustix::event::poll(&mut ready, None) {
+                Ok(_) => {}
+                Err(Errno::INTR) => continue,
+                Err(e) => return Err(e.into()),
+            }
+            let [came, gone] = &ready;
+            (came.revents(), gone.revents())
+        };
+        if !gone.is_empty() {
+            return Ok(());
+        }
+        if came.is_empty() {
+            continue;
+        }
         match rustix::pipe::splice(
-            &from,
+            conn.as_fd(),
             None,
-            &to,
+            to,
             None,
             unit,
             rustix::pipe::SpliceFlags::MOVE,
         ) {
+            // The host ended its stdin.
             Ok(0) => return Ok(()),
-            Ok(_) | Err(Errno::INTR) => {}
+            Ok(_) | Err(Errno::INTR | Errno::AGAIN) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
+/// Moves a program's stdout or stderr from its pipe into the host's connection until the program's end of the
+/// pipe is gone and the pipe drained. A splice from a pipe into a socket holds the pipe's lock while it waits for
+/// the socket's room (fs/splice.c, `splice_to_socket` around `sock_sendmsg`), and the program's close of its
+/// stream, as its exit makes, takes that lock (fs/pipe.c, `pipe_release`); so the copier waits in poll(2), for the
+/// pipe's bytes or, once the connection took none, for the connection's room, and splices only what fits,
+/// non-blocking both ways (the connection non-blocking, `SPLICE_F_NONBLOCK` for the pipe), so no splice waits
+/// holding the pipe. A splice that would wait says which wait comes next: after the pipe's bytes came, the
+/// connection is full; after the connection's room came, the pipe is empty.
+fn drain(from: &PipeReader, conn: &dyn Conn) -> io::Result<()> {
+    conn.set_nonblocking(true)?;
+    let unit = rustix::pipe::fcntl_getpipe_size(from)?;
+    // Whether the connection took none at the last splice: then the copier waits for its room.
+    let mut full = false;
+    loop {
+        {
+            let to = conn.as_fd();
+            let mut ready = [if full {
+                PollFd::new(&to, PollFlags::OUT)
+            } else {
+                PollFd::new(from, PollFlags::IN)
+            }];
+            match rustix::event::poll(&mut ready, None) {
+                Ok(_) => {}
+                Err(Errno::INTR) => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        match rustix::pipe::splice(
+            from,
+            None,
+            conn.as_fd(),
+            None,
+            unit,
+            rustix::pipe::SpliceFlags::MOVE | rustix::pipe::SpliceFlags::NONBLOCK,
+        ) {
+            // The program's end of the pipe is gone, and the pipe drained.
+            Ok(0) => return Ok(()),
+            Ok(_) => full = false,
+            Err(Errno::AGAIN) => full = !full,
+            Err(Errno::INTR) => {}
             Err(e) => return Err(e.into()),
         }
     }

@@ -36,7 +36,7 @@ use std::ops::Bound;
 
 use crate::error::SimError;
 use crate::fair::{self, Passed, Placed, Policy, Preemption, Queue, Shares};
-use crate::index::{FitIndex, Key, Refusals, Sample, Sampled};
+use crate::index::{Fit, FitIndex, Key, Pick, Refusals};
 use crate::model::{
     Class, Classes, Cluster, Demand, GangId, Group, GroupId, NodeId, NodeSpec, Owner, Time,
     WorkloadId, WorkloadSpec,
@@ -121,7 +121,7 @@ pub struct Config {
     pub max_steps: u64,
     pub nemesis: Nemesis,
     /// How deciders sample nodes; the serial specification samples the same way.
-    pub sample: Sample,
+    pub pick: Pick,
     /// How pending work is ordered; the serial specification orders the same way.
     pub policy: Policy,
     /// Workloads the control plane may preempt over the run (`docs/design/scheduler-fairness.md`
@@ -155,7 +155,7 @@ impl Default for Config {
             max_events: 1 << 22,
             max_steps: 1 << 32,
             nemesis: Nemesis::None,
-            sample: Sample::default(),
+            pick: Pick::default(),
             policy: Policy::default(),
             preemptions: 0,
             shards: 1,
@@ -193,7 +193,7 @@ pub struct Report {
     pub preemptions_refused: u64,
     /// Completion reports dropped because the store had preempted the run they report.
     pub reports_superseded: u64,
-    /// Sampled decisions made, by deciders and again at commit.
+    /// Fit decisions made, by deciders and again at commit.
     pub decisions: u64,
     /// Over those decisions' scans, nodes with room that a filter refused, by filter.
     pub refused: Refusals,
@@ -248,7 +248,7 @@ pub struct Run {
     /// Where and when each workload's first start ran, by id.
     pub ran: Vec<Option<Ran>>,
     /// The sampling the run's deciders used, for its serial specification.
-    pub sample: Sample,
+    pub pick: Pick,
     /// The order the run's committer took pending work in, and the owners it weighed.
     pub policy: Policy,
     pub owners: Vec<Owner>,
@@ -278,13 +278,16 @@ pub struct Ran {
 /// A decision: the best-fit key, or none, against the view after change `snap`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Decision {
-    sampled: Sampled,
+    fit: Fit,
+    /// The class it was made for: a change to a node that runs it can change what a pick would
+    /// choose now.
+    class: Class,
     snap: u64,
 }
 
 impl Decision {
     fn node(&self) -> Option<Key> {
-        self.sampled.best
+        self.fit.best
     }
 }
 
@@ -568,7 +571,7 @@ struct Plane {
     cursors: BTreeMap<Queue, u64>,
     /// In each queue, the first gang passed over since capacity last came back, by its first
     /// member's sequence: the cursor stays before it ([`Plane::pass`]). A gang's members are placed
-    /// one by one on a sampled best fit, which isn't monotone in the free capacity, so a placement
+    /// one by one on the pick's best, which isn't monotone in the free capacity, so a placement
     /// elsewhere can make a gang that held nowhere hold; a single workload can't.
     gang_floors: BTreeMap<Queue, u64>,
     /// Changes since which a commit already sent must be checked again: capacity given back (which
@@ -647,7 +650,9 @@ impl Plane {
                     let Some(local) = layout.local(s, node) else {
                         continue;
                     };
-                    plane.view.take(local, &record.spec.demand())?;
+                    plane
+                        .view
+                        .take(local, record.spec.id, &record.spec.demand())?;
                     plane
                         .shares
                         .take(record.spec.tenancy.owner, &record.spec.need)?;
@@ -743,10 +748,10 @@ impl Plane {
     }
 
     /// `spec` placed on `node` by write `write`: what its own placements change beyond the view
-    /// and shares. With preemption on, every other queue's cursor goes: a share that grew may make
-    /// work behind a cursor able to preempt now; and if the placement ended a disruption, its own
-    /// queue's goes too, as a group back under its budget may let work behind it preempt. Whether
-    /// it did: then the placing queue's cursor must not be set past the placement either.
+    /// and shares. AC-T7.5.3: with preemption on, every queue's cursor goes, including its own.
+    /// A larger own share can reorder borrowing-first victims so an earlier workload can preempt
+    /// within its disruption budgets now. A placement ending a disruption can reopen work too.
+    /// Return whether the caller must leave its placing queue open instead of passing it again.
     fn note_placed(
         &mut self,
         spec: &WorkloadSpec,
@@ -756,22 +761,19 @@ impl Plane {
     ) -> bool {
         self.placed.insert(spec.id, placed(spec, node, write));
         // A disrupted member placed again ends its disruption (the store's rule).
-        let mut ended = false;
         if self.preempted.remove(&spec.id)
             && let Some(g) = spec.tenancy.group
             && let Some(n) = self.disrupted.get_mut(&g)
         {
-            ended = true;
             *n = n.saturating_sub(1);
             if *n == 0 {
                 self.disrupted.remove(&g);
             }
         }
         if preemption {
-            let own = self.policy.queue(spec);
-            self.cursors.retain(|q, _| *q == own && !ended);
+            self.cursors.clear();
         }
-        preemption && ended
+        preemption
     }
 }
 
@@ -936,7 +938,7 @@ pub fn run(cluster: &Cluster, config: &Config) -> Result<Run, SimError> {
             ));
         }
     }
-    let gangs = gangs_of(cluster, &config.sample)?;
+    let gangs = gangs_of(cluster, &config.pick)?;
     let layout = Layout::new(&cluster.nodes, config.shards)?;
     let mut slices = Vec::with_capacity(layout.len());
     for s in 0..layout.len() {
@@ -1019,7 +1021,7 @@ pub fn run(cluster: &Cluster, config: &Config) -> Result<Run, SimError> {
         acked: sim.acked,
         refused: sim.refused,
         ran: sim.ran,
-        sample: sim.config.sample,
+        pick: sim.config.pick,
         policy: sim.config.policy,
         owners: sim.cluster.owners.clone(),
         gangs: sim
@@ -1047,7 +1049,7 @@ fn tally(n: &mut u64, by: u64, max_steps: u64) -> Result<(), SimError> {
 /// share one owner and band (one queue, so placed at one place in it) and one group.
 fn gangs_of(
     cluster: &Cluster,
-    sample: &Sample,
+    pick: &Pick,
 ) -> Result<BTreeMap<GangId, (Vec<WorkloadId>, bool)>, SimError> {
     let mut members: BTreeMap<GangId, Vec<&WorkloadSpec>> = BTreeMap::new();
     for w in &cluster.workloads {
@@ -1069,34 +1071,34 @@ fn gangs_of(
             ));
         }
         let mut empty = FitIndex::new(&cluster.nodes)?;
-        let demands: Vec<Demand> = ws.iter().map(|w| w.demand()).collect();
-        let fits = fit_whole(&mut empty, &demands, sample)?.is_some();
+        let demands: Vec<(WorkloadId, Demand)> = ws.iter().map(|w| (w.id, w.demand())).collect();
+        let fits = fit_whole(&mut empty, &demands, pick)?.is_some();
         out.insert(gang, (ws.iter().map(|w| w.id).collect(), fits));
     }
     Ok(out)
 }
 
-/// Where each of `demands`, in order, goes on `view` (each taking its room before the next is
-/// sought), or `None` if one fits nowhere; `view` is left as it was.
+/// Where each workload of `demands`, in order, goes on `view` (each taking its room and devices
+/// before the next is sought), or `None` if one fits nowhere; `view` is left as it was.
 pub fn fit_whole(
     view: &mut FitIndex,
-    demands: &[Demand],
-    sample: &Sample,
+    demands: &[(WorkloadId, Demand)],
+    pick: &Pick,
 ) -> Result<Option<Vec<NodeId>>, SimError> {
-    let mut taken: Vec<(NodeId, Demand)> = Vec::with_capacity(demands.len());
+    let mut taken: Vec<(NodeId, WorkloadId, Demand)> = Vec::with_capacity(demands.len());
     let mut whole = true;
-    for d in demands {
-        let Some(key) = view.sampled_fit(d, sample).best else {
+    for (w, d) in demands {
+        let Some(key) = view.fit(d, pick).best else {
             whole = false;
             break;
         };
-        view.take(key.node, d)?;
-        taken.push((key.node, *d));
+        view.take(key.node, *w, d)?;
+        taken.push((key.node, *w, *d));
     }
-    for (node, d) in &taken {
-        view.give(*node, d)?;
+    for (node, w, d) in &taken {
+        view.give(*node, *w, d)?;
     }
-    Ok(whole.then(|| taken.into_iter().map(|(n, _)| n).collect()))
+    Ok(whole.then(|| taken.into_iter().map(|(n, _, _)| n).collect()))
 }
 
 /// A gang member as its commit writes it: the workload, its node, the record version read and its
@@ -1194,16 +1196,16 @@ impl Sim<'_> {
         let members = self.members(gang)?;
         let mut demands = Vec::with_capacity(members.len());
         for (id, _) in &members {
-            demands.push(self.demand(*id)?);
+            demands.push((*id, self.demand(*id)?));
         }
         self.report.decisions = self
             .report
             .decisions
             .checked_add(u64::try_from(members.len()).unwrap_or(u64::MAX))
             .ok_or(SimError::StepBudget(self.config.max_steps))?;
-        let sample = self.config.sample;
+        let pick = self.config.pick;
         let plane = &mut slot(&mut self.slices, s)?.plane;
-        let Some(nodes) = fit_whole(&mut plane.view, &demands, &sample)? else {
+        let Some(nodes) = fit_whole(&mut plane.view, &demands, &pick)? else {
             return Ok(None);
         };
         let mut out = Vec::with_capacity(members.len());
@@ -1712,41 +1714,46 @@ impl Sim<'_> {
         self.sequence(s)
     }
 
-    /// A sampled decision against slice `s`'s view now.
+    /// A decision against slice `s`'s view now: the kernel's pick (`FitIndex::fit`).
     fn decide(&mut self, s: usize, need: &Demand) -> Result<Decision, SimError> {
         let max = self.config.max_steps;
         tally(&mut self.report.decisions, 1, max)?;
         let plane = &slot(&mut self.slices, s)?.plane;
-        let sampled = plane.view.sampled_fit(need, &self.config.sample);
+        let fit = plane.view.fit(need, &self.config.pick);
         let snap = plane.change_no;
         let r = &mut self.report.refused;
         for (total, now) in [
-            (&mut r.gpu, sampled.refused.gpu),
-            (&mut r.shares, sampled.refused.shares),
-            (&mut r.hot, sampled.refused.hot),
-            (&mut r.class, sampled.refused.class),
+            (&mut r.gpu, fit.refused.gpu),
+            (&mut r.shares, fit.refused.shares),
+            (&mut r.hot, fit.refused.hot),
+            (&mut r.class, fit.refused.class),
+            (&mut r.platform, fit.refused.platform),
+            (&mut r.device, fit.refused.device),
         ] {
             tally(total, now, max)?;
         }
-        Ok(Decision { sampled, snap })
+        Ok(Decision {
+            fit,
+            class: need.class,
+            snap,
+        })
     }
 
-    /// Whether `decision` is still what a scan now would choose: no node in the window it scanned
-    /// changed since. A change outside the window leaves the scan's stopping point and every key it saw
-    /// as they were, so the same nodes are found and the same one is best.
+    /// Whether `decision` is still what a pick now would choose: no node that runs its class changed
+    /// since. A pick reads every node with the room for its class, so a change to a node that doesn't
+    /// run the class leaves every node it read, and its choice, as they were.
     fn still_holds(&mut self, s: usize, decision: &Decision) -> Result<bool, SimError> {
         let plane = &slot(&mut self.slices, s)?.plane;
         if decision.snap < plane.forgotten {
             tally(&mut self.report.stale, 1, self.config.max_steps)?;
             return Ok(false);
         }
-        let nodes = plane.view.len();
         let voided = plane
             .changes
             .iter()
             .rev()
             .take_while(|(no, _)| *no > decision.snap)
-            .any(|(_, key)| decision.sampled.covers(key.node, nodes));
+            .any(|(_, key)| plane.view.runs(key.node, decision.class));
         Ok(!voided)
     }
 
@@ -1922,7 +1929,7 @@ impl Sim<'_> {
         let changed = slot(&mut self.slices, s)?
             .plane
             .view
-            .take(key.node, &need)?;
+            .take(key.node, id, &need)?;
         self.note_change(s, changed)?;
         let (spec, write) = self
             .store
@@ -1986,10 +1993,11 @@ impl Sim<'_> {
         let mut reopened = false;
         for (&(member, node, _, member_seq), version) in members.iter().zip(versions) {
             let spec = self.spec(member)?;
-            let changed = slot(&mut self.slices, s)?
-                .plane
-                .view
-                .take(node, &spec.demand())?;
+            let changed =
+                slot(&mut self.slices, s)?
+                    .plane
+                    .view
+                    .take(node, member, &spec.demand())?;
             self.note_change(s, changed)?;
             let write = self.store.record(member).map_or(0, |r| r.placed_write);
             let preemption = self.config.preemptions > 0;
@@ -2135,7 +2143,7 @@ impl Sim<'_> {
             let changed = slot(&mut self.slices, s)?
                 .plane
                 .view
-                .give(node, &spec.demand())?;
+                .give(node, v, &spec.demand())?;
             self.note_change(s, changed)?;
             let victim_seq = self
                 .store
@@ -2151,10 +2159,11 @@ impl Sim<'_> {
             tally(&mut self.report.preempted, 1, max)?;
         }
         let spec = self.spec(id)?;
-        let changed = slot(&mut self.slices, s)?
-            .plane
-            .view
-            .take(chosen.node, &spec.demand())?;
+        let changed =
+            slot(&mut self.slices, s)?
+                .plane
+                .view
+                .take(chosen.node, id, &spec.demand())?;
         self.note_change(s, changed)?;
         let write = self.store.record(id).map_or(0, |r| r.placed_write);
         let plane = &mut slot(&mut self.slices, s)?.plane;
@@ -2433,10 +2442,11 @@ impl Sim<'_> {
                     .layout
                     .local(s, node)
                     .ok_or(SimError::UnknownNode(node))?;
-                let changed = slot(&mut self.slices, s)?
-                    .plane
-                    .view
-                    .give(local, &spec.demand())?;
+                let changed =
+                    slot(&mut self.slices, s)?
+                        .plane
+                        .view
+                        .give(local, spec.id, &spec.demand())?;
                 self.note_change(s, changed)?;
                 let max = self.config.max_steps;
                 let plane = &mut slot(&mut self.slices, s)?.plane;

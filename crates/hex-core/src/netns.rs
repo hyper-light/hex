@@ -5,7 +5,8 @@
 //! whose container makes a network namespace of its own takes one, and its container joins it with `setns`. This
 //! decides which, and refuses by type what can't be done.
 //!
-//! - **The bound**: the pool holds at most its bound, decision 4's [`BOUND`] unless the node is given another. A
+//! - **The bound**: the pool holds at most its size: learned from its draws, up to the bound its shell derives,
+//!   unless the node is given a fixed one ([`Pool::learning`], [`Pool::new`]; Ada's rule, 2026-11-06). A
 //!   namespace made past it is refused ([`Refused::Full`]) and handed back for the shell to close.
 //! - **The refill**: the refill mark is one below the bound. The pool asks for more as soon as it holds fewer
 //!   than its bound ([`Pool::wanted`]), as decision 4's one thread refills whenever the pool is below it. A make
@@ -18,17 +19,192 @@
 //! - **Dry**: a take from an empty pool is answered [`Take::MakeOnPath`] and counted; the create makes its
 //!   namespace on the path, as with no pool. A create the pool can't serve, a container with a user namespace
 //!   of its own (decision 4), makes its namespace on the path too, and [`Pool::on_path`] counts it the same.
+//! - **Failed makes**: each is reported with the step of the make that failed ([`Step`]) and why ([`Reason`]: the
+//!   errno and the error's text), counted by step ([`FailedBy`]), and the latest reason kept for each step
+//!   ([`LastFailed`], one a step, so what is kept stays bounded), so a make the kernel refuses is never only a
+//!   number (CLAUDE.md §3).
+//! - **Refused**: a node that lacks a capability a make takes ([`Missing`]) starts no pool whose every make
+//!   would fail ([`Pool::refused`]): it holds none and asks for none, and every take is made on the path,
+//!   counted under that reason ([`Counts::refused_on_path`]).
 //! - **Shutdown**: [`Pool::shut_down`] hands back what the pool holds, counted as discarded, and every take after
 //!   it is refused ([`ShutDown`]); a namespace made after it is handed back ([`Refused::ShutDown`]).
 //!
 //! [`Counts`] is what the bench and the node's metrics read.
+//!
+//! The node's ipc and uts namespaces made ahead use this pool too (goal 5 extended, step 4): `T` is then a pair, and
+//! its size is learned from its draws ([`Pool::learning`]; Ada's rule, 2026-11-06).
 
 use std::collections::VecDeque;
 
-/// The most namespaces decision 4's pool holds: the most creates the bench's busiest phase has in flight at once
-/// (concurrency 32), so a burst of its whole width finds a namespace each, at most 24 MiB of kernel memory on
-/// the heavier machine measured (`bench/competitive/probes/netns_pool.md`).
-pub const BOUND: usize = 32;
+use crate::demand::Depth;
+
+/// The step of a make ahead that failed: why it failed, as the shell reports it ([`Pool::failed`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    /// Opening the making thread's own namespace, which it goes back to after each make.
+    Home,
+    /// `unshare(CLONE_NEWNET)`, which takes CAP_SYS_ADMIN (unshare(2)).
+    Unshare,
+    /// Opening the namespace made, the descriptor that keeps it alive.
+    Open,
+    /// Bringing its loopback up, an rtnetlink request that takes CAP_NET_ADMIN (rtnetlink(7)).
+    Loopback,
+    /// Going back to the thread's own namespace, `setns`, which takes CAP_SYS_ADMIN (setns(2)).
+    Back,
+}
+
+/// Failed makes, counted by the [`Step`] that failed; they sum to [`Counts::failed`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FailedBy {
+    pub home: u64,
+    pub unshare: u64,
+    pub open: u64,
+    pub loopback: u64,
+    pub back: u64,
+}
+
+impl FailedBy {
+    fn count(&mut self, step: Step) {
+        let n = match step {
+            Step::Home => &mut self.home,
+            Step::Unshare => &mut self.unshare,
+            Step::Open => &mut self.open,
+            Step::Loopback => &mut self.loopback,
+            Step::Back => &mut self.back,
+        };
+        *n = n.saturating_add(1);
+    }
+}
+
+impl std::fmt::Display for Step {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Step::Home => "opening its thread's own namespace",
+            Step::Unshare => "unshare",
+            Step::Open => "opening the namespace made",
+            Step::Loopback => "bringing its loopback up",
+            Step::Back => "setns back home",
+        })
+    }
+}
+
+/// The most bytes of a failed make's text a [`Reason`] keeps: a longer one is cut at a character boundary and
+/// the cut marked `…`. A stated bound, not a measured one: the longest text a make gives today, a loopback
+/// refusal with its OS error, is under 100 bytes, and 256 holds it with room to spare.
+pub const MAX_REASON: usize = 256;
+
+/// Why a make failed at its step: the errno the kernel gave, where there was one, and the error's text, at most
+/// [`MAX_REASON`] bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reason {
+    errno: Option<i32>,
+    text: String,
+}
+
+impl Reason {
+    /// The reason for `errno` and `text`, the text cut to [`MAX_REASON`] bytes.
+    pub fn new(errno: Option<i32>, text: &str) -> Self {
+        let text = if text.len() <= MAX_REASON {
+            text.to_owned()
+        } else {
+            let keep = MAX_REASON.saturating_sub('…'.len_utf8());
+            let cut = text
+                .char_indices()
+                .map(|(at, c)| at.saturating_add(c.len_utf8()))
+                .take_while(|end| *end <= keep)
+                .last()
+                .unwrap_or(0);
+            format!("{}…", text.get(..cut).unwrap_or_default())
+        };
+        Self { errno, text }
+    }
+
+    /// The errno, where the kernel gave one.
+    pub fn errno(&self) -> Option<i32> {
+        self.errno
+    }
+
+    /// The error's text.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+}
+
+impl std::fmt::Display for Reason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.errno {
+            Some(errno) => write!(f, "errno {errno}: {}", self.text),
+            None => f.write_str(&self.text),
+        }
+    }
+}
+
+/// The latest [`Reason`] a make failed for at each [`Step`]: one a step, replaced by the next.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LastFailed {
+    pub home: Option<Reason>,
+    pub unshare: Option<Reason>,
+    pub open: Option<Reason>,
+    pub loopback: Option<Reason>,
+    pub back: Option<Reason>,
+}
+
+impl LastFailed {
+    fn keep(&mut self, step: Step, reason: Reason) {
+        let slot = match step {
+            Step::Home => &mut self.home,
+            Step::Unshare => &mut self.unshare,
+            Step::Open => &mut self.open,
+            Step::Loopback => &mut self.loopback,
+            Step::Back => &mut self.back,
+        };
+        *slot = Some(reason);
+    }
+}
+
+/// What a node lacks of the capabilities a make ahead takes, in its own user namespace: CAP_SYS_ADMIN for
+/// `unshare` and `setns`, CAP_NET_ADMIN for loopback's rtnetlink request. At least one is missing: a node
+/// that holds both has none ([`Missing::of`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Missing {
+    sys_admin: bool,
+    net_admin: bool,
+}
+
+impl Missing {
+    /// What a node that holds CAP_SYS_ADMIN when `sys_admin` and CAP_NET_ADMIN when `net_admin` lacks, or
+    /// nothing when it holds both.
+    pub fn of(sys_admin: bool, net_admin: bool) -> Option<Self> {
+        if sys_admin && net_admin {
+            None
+        } else {
+            Some(Self {
+                sys_admin: !sys_admin,
+                net_admin: !net_admin,
+            })
+        }
+    }
+
+    /// Whether CAP_SYS_ADMIN is missing.
+    pub fn sys_admin(self) -> bool {
+        self.sys_admin
+    }
+
+    /// Whether CAP_NET_ADMIN is missing.
+    pub fn net_admin(self) -> bool {
+        self.net_admin
+    }
+}
+
+impl std::fmt::Display for Missing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match (self.sys_admin, self.net_admin) {
+            (true, true) => "CAP_SYS_ADMIN and CAP_NET_ADMIN",
+            (true, false) => "CAP_SYS_ADMIN",
+            _ => "CAP_NET_ADMIN",
+        })
+    }
+}
 
 /// What a take is answered with.
 #[derive(Debug, PartialEq, Eq)]
@@ -61,7 +237,7 @@ pub enum Refused<T> {
 /// in, so every one made ahead was taken, is held or was discarded: `made_ahead` is `taken`, plus
 /// [`Pool::held`], plus `discarded`. A count stops at `u64::MAX`, which at one a nanosecond takes 584 years to
 /// reach.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Counts {
     /// Namespaces made ahead and taken into the pool.
     pub made_ahead: u64,
@@ -74,13 +250,22 @@ pub struct Counts {
     pub discarded: u64,
     /// Makes that failed.
     pub failed: u64,
+    /// Makes that failed, by the step that failed.
+    pub failed_by: FailedBy,
+    /// The latest reason a make failed for, at each step.
+    pub last_failed: LastFailed,
+    /// What the node lacks, when its pool was refused for it ([`Pool::refused`]): it makes none ahead.
+    pub refused: Option<Missing>,
+    /// Of `made_on_path`, the takes made on the path because the pool was refused.
+    pub refused_on_path: u64,
 }
 
 /// The pool: the namespaces it holds as the shell's `T`, whether it asks for more, and what it has done. The
 /// shell keeps it behind its lock; a take neither allocates nor waits.
 #[derive(Debug)]
 pub struct Pool<T> {
-    bound: usize,
+    /// Its size: fixed ([`Pool::new`]) or learned from its draws ([`Pool::learning`]).
+    bound: Depth,
     /// Fresh namespaces, oldest first, never more than `bound`.
     held: VecDeque<T>,
     /// False from a failed make to the next take: the bound on the refill's retries.
@@ -93,8 +278,16 @@ impl<T> Pool<T> {
     /// An empty pool that holds at most `bound` namespaces and asks for all of them. With a bound of 0 it holds
     /// none, and every take is made on the path, as on a node without a pool.
     pub fn new(bound: usize) -> Self {
+        Self::learning(bound, bound)
+    }
+
+    /// An empty pool of `start` that learns its size from its draws, up to `cap` (Ada's rule, 2026-11-06): a take
+    /// that finds it empty raises it to the takes since it was last full plus one for each found short
+    /// ([`Depth`]), so the next draw as deep finds it full. It never falls, so no draw already seen runs it short
+    /// again.
+    pub fn learning(start: usize, cap: usize) -> Self {
         Self {
-            bound,
+            bound: Depth::new(start, cap),
             held: VecDeque::new(),
             asking: true,
             shut: false,
@@ -111,7 +304,7 @@ impl<T> Pool<T> {
             return 0;
         }
         // `held` never passes the bound, so this is the room left.
-        self.bound.saturating_sub(self.held.len())
+        self.bound.size().saturating_sub(self.held.len())
     }
 
     /// A namespace the shell made ahead: taken in and counted, or, past the bound or after shutdown, refused
@@ -120,20 +313,34 @@ impl<T> Pool<T> {
         if self.shut {
             return Err(Refused::ShutDown { ns });
         }
-        if self.held.len() >= self.bound {
+        if self.held.len() >= self.bound.size() {
             return Err(Refused::Full {
-                bound: self.bound,
+                bound: self.bound.size(),
                 ns,
             });
         }
         self.held.push_back(ns);
+        if self.held.len() >= self.bound.size() {
+            self.bound.full();
+        }
         self.counts.made_ahead = self.counts.made_ahead.saturating_add(1);
         Ok(())
     }
 
-    /// A make that failed (the shell reports why): counted, and the pool asks for no more until the next take.
-    pub fn failed(&mut self) {
+    /// A pool refused because the node lacks what a make takes (`missing`): it holds none and asks for none,
+    /// and every take is made on the path, counted under that reason.
+    pub fn refused(missing: Missing) -> Self {
+        let mut pool = Self::new(0);
+        pool.counts.refused = Some(missing);
+        pool
+    }
+
+    /// A make that failed at `step` for `reason`: counted by step, the reason kept as that step's latest, and the
+    /// pool asks for no more until the next take.
+    pub fn failed(&mut self, step: Step, reason: Reason) {
         self.counts.failed = self.counts.failed.saturating_add(1);
+        self.counts.failed_by.count(step);
+        self.counts.last_failed.keep(step, reason);
         self.asking = false;
     }
 
@@ -144,13 +351,18 @@ impl<T> Pool<T> {
             return Err(ShutDown);
         }
         self.asking = true;
-        Ok(match self.held.pop_front() {
+        let taken = self.held.pop_front();
+        self.bound.took(taken.is_none());
+        Ok(match taken {
             Some(ns) => {
                 self.counts.taken = self.counts.taken.saturating_add(1);
                 Take::Pooled(ns)
             }
             None => {
                 self.counts.made_on_path = self.counts.made_on_path.saturating_add(1);
+                if self.counts.refused.is_some() {
+                    self.counts.refused_on_path = self.counts.refused_on_path.saturating_add(1);
+                }
                 Take::MakeOnPath
             }
         })
@@ -179,6 +391,11 @@ impl<T> Pool<T> {
         held
     }
 
+    /// Its size now: the most it holds.
+    pub fn bound(&self) -> usize {
+        self.bound.size()
+    }
+
     /// How many namespaces the pool holds.
     pub fn held(&self) -> usize {
         self.held.len()
@@ -191,7 +408,7 @@ impl<T> Pool<T> {
 
     /// What the pool has done.
     pub fn counts(&self) -> Counts {
-        self.counts
+        self.counts.clone()
     }
 }
 

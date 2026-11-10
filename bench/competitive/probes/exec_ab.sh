@@ -6,9 +6,15 @@
 # traced (exec_ab.py sched reads it). Every binary is copied into the run's directory. On fedora:
 #   exec_ab.sh <name>=<hex release binary>:<seam_oci release binary> ...
 # Env: N (600), WARMUP (60), ROUNDS (3), TRACE (0), TRACE_N (300), CPUSET (4-31); BENCH_HOST_OK names another host,
-# as host.sh takes it. No load gate: the comparisons are within the run, as exec_breakdown.sh's LOAD_GATE=0.
+# as host.sh takes it; BENCH_MEMORY and BENCH_OOM set the container's --memory (40g) and --oom-score-adj (none), as
+# host.sh's do on a shared host. No load gate: the comparisons are within the run, as exec_breakdown.sh's LOAD_GATE=0.
+# Its /run is a tmpfs, as a host's is and host.sh's OCI pass and create_breakdown.sh have it (6f7ba39, goal 5 plan step
+# 2's method change). Runs before this change (exec-ab-20261104T161801Z and earlier) had /run on the image's overlay,
+# where a root node keeps its container state and fsyncs each box's record, which put two fsyncs on every create and
+# delete (bench/competitive/probes/create_load-20261104.md).
 set -euo pipefail
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")"); LAB=$(dirname "$HERE")
+. "$HERE/../containers.sh"
 [ $# -ge 1 ] || { echo "usage: exec_ab.sh <name>=<hex>:<seam_oci> ..." >&2; exit 2; }
 case "$(hostname)" in fedora*|"${BENCH_HOST_OK:-__none__}") ;; *) echo "refusing: the bench host is fedora, not $(hostname) (BENCH_HOST_OK=$(hostname) runs it here)" >&2; exit 2 ;; esac
 BASE=${HEX_BENCH:-$HOME/.cache/hex-bench}
@@ -27,6 +33,8 @@ for arg in "$@"; do
 done
 { echo "host: $(hostname)"; echo "date: $(date -u +%FT%TZ)"; echo "kernel: $(uname -r)"
   echo "cpu: $(lscpu | sed -n 's/^Model name: *//p') ($(nproc) cpus), pinned to ${CPUSET:-4-31}"
+  echo "container: --memory ${BENCH_MEMORY:-40g}, --oom-score-adj ${BENCH_OOM:-none}"
+  echo "probe: /run a tmpfs (size 1g), where the runtimes keep their state, as host.sh's OCI pass has it"
   echo "load at start: $(cat /proc/loadavg)"
   for r in cpu memory io; do echo "pressure at start, $r: $(head -1 "/proc/pressure/$r")"; done
   for name in "${NAMES[@]}"; do
@@ -36,9 +44,9 @@ done
   echo "harness: bench/competitive at $(git -C "$LAB" rev-parse --short HEAD)$(git -C "$LAB" diff --quiet HEAD -- . || echo ' with uncommitted changes')"
 } > "$OUT/env.txt"
 NAME=hexbench-execab-$$
-trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
-timeout 7200 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="${CPUSET:-4-31}" --memory=40g \
-  --privileged --security-opt label=disable --cgroupns=private --network=none \
+bench_trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true'
+timeout 7200 docker run --rm --name "$NAME" "${BENCH_LABELS[@]}" --cpuset-cpus="${CPUSET:-4-31}" --memory="${BENCH_MEMORY:-40g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
+  --privileged --security-opt label=disable --cgroupns=private --network=none --tmpfs /run:rw,exec,nosuid,size=1g \
   -v /usr:/usr:ro -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
   -e N -e WARMUP -e ROUNDS -e TRACE -e TRACE_N -e BUILDS="${NAMES[*]}" \
   registry.fedoraproject.org/fedora:44 bash /opt/lab/probes/exec_ab_inside.sh 2>&1 | tee "$OUT/run.log"

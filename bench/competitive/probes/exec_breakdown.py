@@ -61,6 +61,9 @@ def drain(pipe, out, stop):
 LINE = re.compile(r"^\s*(?P<comm>.*?)-(?P<pid>\d+)\s+\[(?P<cpu>\d+)\]\s+\S+\s+(?P<s>\d+)\.(?P<us>\d{6}):\s+(?P<body>.*)$")
 SYS_ENTER = re.compile(r"^sys_(?P<name>\w+)\((?P<args>.*)\)\s*$")
 SYS_EXIT = re.compile(r"^sys_(?P<name>\w+) -> (?P<ret>0x[0-9a-f]+|-?\d+)\s*$")
+# A kprobe on a system call's entry point that records nothing but where it fired (create_breakdown_inside.sh's
+# `<call>_in`): the call's entry, marked without fetching its arguments.
+PROBE = re.compile(r"^(?P<name>\w+)_in: \(")
 KV = re.compile(r"(\w+)=(\S+)")
 QUOTED = re.compile(r'"((?:[^"\\]|\\.)*)"')
 
@@ -96,6 +99,8 @@ def parse(path):
                 events.append(Event(ts, pid, "exit", e["name"], e["ret"]))
             elif (e := SYS_ENTER.match(body)):
                 events.append(Event(ts, pid, "enter", e["name"], e["args"]))
+            elif (e := PROBE.match(body)):
+                events.append(Event(ts, pid, "probe", e["name"], body))
             else:
                 unread += 1
     return events, unread
@@ -125,6 +130,11 @@ def enter(pid, *names):
 
 def exited(pid, *names):
     return lambda e: e.pid == pid and e.kind == "exit" and e.name in names
+
+
+def probed(pid, *names):
+    """A call's entry as its kprobe marked it (PROBE)."""
+    return lambda e: e.pid == pid and e.kind == "probe" and e.name in names
 
 
 def sched(pid, name):
@@ -308,6 +318,8 @@ def calls(trace, ops=OPS):
                 if any(b < a for a, b in zip(at, at[1:])) or len(at) != len(spec) + 1:
                     raise Missing("its cuts in order")
                 call["parts"] = [window[b].ts - window[a].ts for a, b in zip(at, at[1:])]
+                call["record_kinds"] = getattr(cuts, "record_kinds", [])
+                call["cgroups"] = getattr(cuts, "cgroups", [])
             except Missing as m:
                 call["missing"] = str(m)
             out.append(call)
@@ -447,7 +459,8 @@ def summarize(run):
         lines.append(f"| {kind} {op} | " + " | ".join(row) + f" | {ms3((v['best'] or {}).get('p50'))} |")
     lines.append("")
 
-    # The floor under exec, against a quarter of libcrun's exec p50: in each round, where the two ran back to
+    # The floor under exec, against a quarter of libcrun's exec p50 (req: runtime design goal 3's target, exec p50 at
+    # most a quarter of libcrun's, argument A3; docs/design/runtime-architecture.md): in each round, where the two ran back to
     # back, and best of the rounds.
     floors, pairs = {}, {}
     for rnd, path in rounds(run, "floor").items():

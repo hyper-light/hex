@@ -536,6 +536,371 @@ and 0.114 ms on the P-cores and 0.501 and 0.163 ms on the E-cores at rest (the i
 the pass, not after), 0.114 and 0.102, 0.165 and 0.181 held awake. No phase recorded an error. A pass begun at 00:42:58Z
 (`20261030T004258Z`) was stopped before any phase, since step 1's breakdown was measuring then; it is marked `ABORTED`.
 
+## Goal 5 of record (plan step 6): create and create+start of `true` against a quarter of libcrun's (2026-11-05, fedora)
+
+The bar (runtime design goal 5, decision 5): Hex's create p50 and create+start-of-`true` p50, and both p99.9, through
+the seam at most 0.25x libcrun's in-process ones in the same run, by host.sh's OCI pass (`PHASES=oci RUNTIMES=libcrun
+SEAM_OCI_BIN=...`), best of 2. The seam is both its columns, in process and over the node agent's socket, so a cell
+holds only where both are under (the lead, 2026-11-05T03:51Z); in process is the binding one. host.sh's pass runs with
+no owner unless `HEXBENCH_OWNER` names one, so the bar as written is the pass with none: no box's cgroup or network
+namespace is handed on (decision 5, step 6's reuse within one owner). The pass with an owner beside it.
+
+The tree: `cp/t7-g5-record` 70376d7, goal 5 extended's integrated tree (cp/t7-g5x-integrate b22a981) with goal 6
+(cp/t7-g6 fde0ec1), the state directories in shards (cp/t7-ext-s6-shards 7179907) and the tail cut, inits parked
+ahead in their cgroups so a create takes no `cgroup_mutex` (cp/t7-g5-tail 6b95c65, decision 8), with the merges' fixes.
+Gates 7/7, 360 tests, and the root lab 8/8 there (unit hex-g5rec-gates-20261105T133811Z). Unit
+hex-g5rec-pass-20261105T134425Z built hex (static-glibc, sha256 2c9e4b58aa55c980) and seam_oci (d6330e7307fafb75) at
+it; libcrun 1.30.1 in process. N=10000 after 100, phases `lifecycle start_true`, CPUs 4-15 under the shared timed lock,
+noisy (no load gate; about 23 containers of kiln CI beside it), `/run` a tmpfs. Every round's file holds its 10,000 in
+each phase with no error, and no round crashed (no `crashed.txt`; host.sh's crashed-round check, 0892f3c).
+Every pass in this section (fedora's, the Mac Studio's and jupiter's) ran at 70376d7, built before procs made ahead
+for parked inits came into this tree (off by default at c6a3ac4, on by default for a root node at the merge of
+cp/t7-g5-parkproc-default 3402c55): no node of these passes had them, so none of its figures rests on that setting.
+The two columns differ in one setting: with `HEXBENCH_NOFILE` unset, the in-process node runs at the container's
+soft descriptor limit, dockerd's 1,024, where it holds no `/proc/net` files (`oci_inside.sh:18-24`), while the
+socket's `hex node` raises its own to the hard limit as it starts (`raise_descriptor_limit`,
+`crates/hex-cli/src/node.rs:168`). The owner and its reuse reach both alike, in each box's spec.
+
+Best of 2, ms (Hex over libcrun in the same pass):
+
+| pass | | create p50 | create p99.9 | create+start of `true` p50 | create+start of `true` p99.9 |
+|---|---|---|---|---|---|
+| no owner, out/20261105T134534Z (load 16.30 to 16.82) | Hex in process | 0.36, 0.189x | 2.33, 0.463x | 0.33, 0.160x | 2.31, 0.406x |
+| | Hex over the socket | 0.38, 0.200x | 2.12, 0.421x | 0.41, 0.199x | 2.53, 0.445x |
+| | libcrun | 1.90 | 5.03 | 2.06 | 5.69 |
+| reuse on, `HEXBENCH_OWNER=g5rec-owner`, out/20261105T135855Z (load 14.03 to 11.38) | Hex in process | 0.30, 0.152x | 0.92, 0.060x | 0.28, 0.133x | 0.85, 0.064x |
+| | Hex over the socket | 0.31, 0.157x | 0.92, 0.060x | 0.33, 0.156x | 0.92, 0.069x |
+| | libcrun | 1.98 | 15.38 | 2.11 | 13.36 |
+
+- **With reuse on, every cell is under the bar in both columns.** Hex's own create p99.9 is under a millisecond in
+  each round (0.93 and 0.71 in process, 0.86 and 0.92 over the socket, read from each round's file at sample
+  floor(0.999 n)), so it holds against a quiet libcrun too: against the no-owner pass's 5.03 it would be 0.185x.
+  libcrun's tail in this pass was the noisier (create p99.9 18.07 and 6.03 by round).
+- **With no owner, the bar as written: both p50s are under in both columns, every p99.9 is over** (0.406x to 0.463x),
+  Hex's at about 2.3 ms against a quiet libcrun's 5.03 and 5.69. Not met.
+- **The tail cut is in every create.** In process, 10,099 of 10,107 and 10,098 of 10,106 lifecycle creates took an
+  init parked ahead (none failed, none ended unclaimed), and 10,100 of 10,100 in `start_true`; with reuse on, 10,099 of
+  10,100 in each round. No in-process create of either pass took over 8 ms, and the no-owner create's max fell to 3.08
+  ms (r1 3.00, r2 3.08), where at 15a3323, before the cut, it was 18.78; there, with reuse on, 7 and 19 creates a
+  round in process took over 8 ms (as 9 and 7 did at 2a91371), and none did here.
+- **What holds the no-owner p99.9 is mostly Hex's own lock, not the cgroup lock the tail cut removed, and no other
+  tenant's work** (`probes/goal16_ab.md` on cp/t7-g16-memslot acf45f9, "Whose work the no-owner tail waits on"): in
+  its slowest 0.1% the create's lookups of its cgroup's files queue behind Hex's own refill's `mkdir` (1.377 ms),
+  itself waiting on the host-wide cgroup-notification work; then the teardown of the pass's own boxes (0.3 to 0.85
+  ms). Reuse within one owner makes no cgroup on the create's path and tears none down, which is the gap between the
+  passes. This line read "the teardown of the box before it" until 2026-11-06 (superseded: below).
+- **That lock wait is gone, and what holds the tail now is the kernel's teardown of the pass's own earlier boxes**
+  (`probes/goal16_ab.md`, "No cgroupfs lookup on a no-owner create's path"; cp/t7-g16-prefetch 1190a2c, merged here at
+  309e62b). The refill now opens the slot's files when it makes the cgroup ahead, so a no-owner create looks up
+  nothing in cgroupfs (oci_reuse counted 20 lookups on the creating thread before, 0 after), and nothing a box sees
+  changes. Its A/B at the bar's conditions (host.sh, no owner, 2 rounds of 10,000, A B B A, fedora, noisy) moved
+  Hex's create p99.9 from a mean of 1.735 to 1.705 ms (2%) and create+start's from 2.54 to 2.45 (3.5%), both within
+  the passes' spread: 0.36x and 0.40x of libcrun's 4.50 and 4.58 ms in the fixed arm's passes, not 0.25x. Traced, the
+  fixed tree's slowest 0.1% have no cgroupfs lock wait; 1.40 ms of their mean is `css_killed_work_fn` preempting the
+  create to tear down the run's own boxes (1.26 ms in the unfixed arm's trace), the rest Hex running (0.53) and RCU.
+  So the bar as written stays unmet on fedora; that is now the kernel's teardown cost, 1.3 to 1.4 ms of the slowest
+  0.1%, which only fewer cgroups torn down (reuse) removes. No pass of record followed the fix.
+
+**Goal 16's finding: the kernel path that delays the slowest 0.1% of no-owner creates** (2026-11-06, fedora,
+Linux 6.19.10; not of record: the tracers cost some). It is CPU preemption by the deleted box's memory-cgroup offline,
+run by a per-CPU kworker on the next create's own CPU; not a lock the create waits on. Unit
+hex-g5rec-g16trace-20261106T130219Z at a186d35 (the prefetch fix in, parked procs on): `probes/create_tail.sh` at the
+bar's conditions (no owner, 2 x 10,000, CPUs 4-15 under the lock; out create-tail-20261106T130528Z, traced create p99.9
+1.926 ms), with a bpftrace program beside it in a privileged container on CPUs 16-31 (fedora has no host perf or
+bpftrace; the program and its maps under `~/.cache/hex-t7/g5rec/g16/` there). The path, in Linux v6.19:
+1. An earlier delete's `rmdir` runs on a create CPU: `cgroup_rmdir` → `kill_css` → `percpu_ref_kill_and_confirm`, which
+   calls `call_rcu_hurry` on that CPU (`lib/percpu-refcount.c:233`).
+2. After the grace period its RCU callback runs in softirq on the same CPU. Traced, every `css_killed_work_fn` item was
+   queued by `ksoftirqd/N` on CPUs 4-15 (11,900 to 14,300 a CPU on the even ones, 3,100 to 5,000 on the odd).
+3. `css_killed_ref_fn` queues the offline with `queue_work(cgroup_offline_wq)` (`kernel/cgroup/cgroup.c:6062-6070`), a
+   per-CPU workqueue (`alloc_workqueue("cgroup_offline", WQ_PERCPU, 1)`, `:6457`): a kworker bound to that create CPU.
+4. `css_killed_work_fn` (`:6044-6059`) takes `cgroup_mutex` and takes each controller offline. The memory controller's
+   `mem_cgroup_css_offline` is the cost: 128 to 256 us most often, 64 us to 1 ms, about 20,000 calls; cpu, blkcg and
+   lru_gen offline 0 to 1 us each. It kept each create CPU busy 0.25 to 0.94 s over the run.
+5. That kworker preempts the next create's thread (seam_oci, the seed, the init) on that CPU: 110 preemptions while it
+   ran, 256 us to 2 ms (most 512 us to 1 ms), against 2 to 16 us for most other preemptions.
+6. `create_tail_attr.py`'s per-create walk agrees: the slowest 0.1% add +1.368 ms of `css_*_work_fn` preemption over the
+   middle band, +0.271 ms run queue, +0.086 ms Hex's own runs, and nothing waiting on `cgroup_mutex`.
+
+**What's left of goal 16's tail, and why** (2026-11-06, fedora, Linux 6.19.10, and the 7.2.15 guest; not of record:
+kprobes and bpftrace cost each callback some, so the figures compare runs, they don't time them). `probes/css_cost.sh`
+at 53ac40d (2,000 boxes each, no owner, CPUs 4-15 under the lock), the same binaries throughout (pass g16-a186d35),
+with bpftrace beside it (`~/.cache/hex-t7/g5rec/g16/` on fedora: units hex-g5rec-g16sb-20261106T132322Z and
+hex-g5rec-g16c-20261106T135913Z).
+- The memory offline is the kernel's walk of every memcg-aware list_lru on the host. `mem_cgroup_css_offline` is 0.20 to
+  0.34 ms a box across four runs (load 8 to 24), `memcg_reparent_list_lrus` 85 to 87% of it,
+  `reparent_shrinker_deferred` 0.019 to 0.024 ms, the rest about 0.02. Linux visits each list_lru under
+  `list_lrus_mutex`, inside `css_killed_work_fn`'s `cgroup_mutex`: 6.19 takes the xarray's IRQ lock and stores for each
+  (`mm/list_lru.c` v6.19.10:467-503), 7.2 loads it lockless (v7.2:525-563, 98733f3f0bec). The box's own entries aren't
+  the cost: walks whose memcg held an entry in no list_lru took 355 us on average, those with 2 to 16 took 193 to 613
+  (the walk's `kvfree_call_rcu` calls counted, one per list_lru that held an entry).
+- Hex's share of those list_lrus is at most 2.5%. Fedora had 1,923 to 1,979 superblocks mounted (two memcg-aware
+  list_lrus each, so about 3,900) across the runs; Hex's pooled ones are inside that run-to-run spread. Each box makes and
+  destroys three (its proc, its `/dev` tmpfs, its ipc namespace's mqueue), the mounts its spec asks for: 12,204 to
+  12,222 list_lru inits and 12,218 to 12,252 destroys per 2,000 boxes, with Hex's pools on or off. With them off the
+  create's own thread waits on `list_lrus_mutex` behind other memcgs' walks (464 to 483 waits a run, 88 to 98 us each);
+  with them on only the pools' threads do. The A/B's walk times (0.17 ms off, 0.21 to 0.29 on) follow the host's load
+  (8 to 13 against 19 to 24), not the pools.
+- The cost per list_lru per offline: 43 to 75 ns on fedora's 6.19 (0.168 to 0.291 ms over about 3,900), rising with
+  load; 56 ns in the 7.2 guest, whose walk is 0.013 ms with its own 27 mounts and 0.230 ms with 1,950 tmpfs superblocks
+  added (fedora's count; offline 0.025 to 0.256 ms a box). So 7.2 is no cheaper at the same count: an upgrade alone
+  doesn't move this tail. No posted or merged kernel work (v7.2, master, mm-unstable, linux-next, to 2026-11-06) walks
+  only the dying memcg's lists; Waiman Long's skip of empty lists (405cc51fc104, 2022) was reverted over races
+  (b33e1044475a).
+- The release: `css_release_work_fn` 0.216 ms a box, of which `css_rstat_flush` 0.069 (about 11.5 calls a box) and the
+  rest its wait for `cgroup_mutex`; `cgroup_bpf_release` 0.058 ms a box beside it.
+- Re-split, the trace above's slowest 0.1% are 1.10 ms preempted by these offlines and 0.27 ms by these releases, all
+  of the pass's own boxes. What Hex could cut there is at most about 0.4 ms; 0.25x needs about 0.6 to 0.7 ms off. The
+  rest is the walk, sized by every tenant's superblocks.
+
+`cgroup_mutex`, which `css_killed_work_fn` holds across the memcg offline, is contended too: Hex's threads waited 925
+ms (seam_oci), 478 ms (the seed and inits) and 336 ms (the refill) in all, most 64 to 256 us, in `clone3`
+(`CLONE_INTO_CGROUP`, `cgroup_css_set_fork`, `:6694`), `cgroup_rmdir` and the refill's `cgroup_mkdir`: parks, execs,
+deletes and the refill, not the create, whose init is parked. `cgroup_threadgroup_rwsem`: 0.35 ms in all.
+
+**What the slowest 0.1% of no-owner creates wait on: the first reading, superseded** (the lead, 2026-11-05T14:20Z;
+not of record: the tracer costs each switch some). Its figures stand; its conclusion doesn't. `create_tail_attr.py`
+charged only the runtime thread's own state, so the runtime's wait in `ppoll` for its init (+0.552 ms below) hid what
+the init was waiting on. The tail agent's trace of 2026-11-06 followed that wait into the container's process
+(`probes/goal16_ab.md`, cp/t7-g16-memslot acf45f9, "Whose work the no-owner tail waits on"): the create's cgroupfs
+lookups queued behind Hex's own refill's `mkdir`, 1.377 ms of the slowest 0.1%, with the css teardown of the pass's
+own boxes 0.3 to 0.85 ms and no other tenant's. The first reading follows as it was. The tail agent's `probes/create_tail.sh` on this pass's own binaries (hex 2c9e4b58aa55c980, seam_oci
+d6330e7307fafb75), no owner, N=10000, 2 rounds, CPUs 4-15 under the lock, load 6.93 to 7.08: unit
+hex-g5rec-tailattr-20261105T144322Z, fedora `~/.cache/hex-bench/out/create-tail-20261105T144322Z`, 10,000 creates traced,
+each one's charges summing to its span. Traced creates p50 0.316, p99 1.039, p99.9 1.670, max 2.771 ms (the quieter
+host than the pass's). `create_tail_attr.py`'s grouping, the top 0.1% over the middle band (p45-p55), ms:
+
+| kind | top 1% over mid | top 0.1% over mid |
+|---|---|---|
+| preemption by the cgroup teardown work items (`css_*_work_fn`) | +0.557 | +0.786 |
+| other: the runtime blocked in `ppoll` until its init said it was ready | +0.221 | +0.552 |
+| the run queue, woken and not yet run | +0.127 | +0.315 |
+| the runtime's own runs | +0.047 | +0.048 |
+| RCU softirq | +0.027 | +0.040 |
+
+Of the ten slowest creates (1.670 to 2.771 ms), five were preempted on their CPU by `css_killed_work_fn` for 1.240 to
+1.940 ms, three waited 1.419 to 2.059 ms on their init (its own delay, seen from the runtime), and two sat 1.452 and
+1.700 ms on the run queue. The runtime's own work is about 0.3 ms in every band (0.286 mid, 0.334 in the top 0.1%).
+The slowest starts are the same: their top 0.1% is +0.414 and +0.210 ms of `css_killed_work_fn` preemption. Its
+conclusion then (superseded, above): "what holds the no-owner p99.9 is the teardown of the boxes deleted before, run on
+the CPUs the next creates use".
+
+The host's clock (`probes/host_clock.sh`) before: load 16.50, a short burst's p50 0.096 ms on the P-cores and 0.159 on
+the E-cores at rest, 0.107 and 0.172 held awake; after: load 11.27, 0.131 and 0.230 at rest, 0.120 and 0.171 held.
+
+**The same on the Mac Studio, through `docker_pass.sh`** (goal 5 plan step 6, 2026-11-06). Ada's Mac Studio (3)
+(kiln runner `adas-mac-studio-3.local`), Apple M4 Max, its containers in Docker Desktop's Linux VM (kernel
+6.12.65-linuxkit, aarch64, 14 CPUs, the pass pinned to 2-13, 31 GiB). docker_pass.sh (ade0653, 5c3aa9b: the owner
+and reuse handed through, crun's tarball given since that Mac has no route out, checked against the pinned sha256)
+built hex (static-glibc, sha256 9562fabc74ed450d) and seam_oci at 70376d7, the fedora pass's tree, in the pass image.
+A one-shot launchd job (hex.g5rec.pass.20261106T040214Z), no owner and then `HEXBENCH_OWNER=g5rec-owner
+HEXBENCH_REUSE=1`, phases `lifecycle start_true`, N=10000 after 100, best of 2. Every round's file holds its 10,000
+in each phase with no error, no round crashed, and the parked inits were claimed 10,099 times a round in process
+(none failed). Results on that Mac: `~/.cache/hexpass/g5rec-20261106T040214Z/{noowner,reuse}`.
+
+| pass | | create p50 | create p99.9 | create+start of `true` p50 | create+start of `true` p99.9 |
+|---|---|---|---|---|---|
+| no owner (VM load 3.41 to 5.68) | Hex in process | 0.20, 0.107x | 0.48, 0.127x | 0.25, 0.102x | 0.64, 0.103x |
+| | Hex over the socket | 0.28, 0.150x | 0.66, 0.175x | 0.39, 0.160x | 0.81, 0.131x |
+| | libcrun | 1.87 | 3.77 | 2.44 | 6.19 |
+| reuse on (VM load 3.26 to 6.30) | Hex in process | 0.20, 0.107x | 0.48, 0.122x | 0.24, 0.099x | 0.61, 0.108x |
+| | Hex over the socket | 0.26, 0.139x | 0.59, 0.151x | 0.37, 0.152x | 0.76, 0.134x |
+| | libcrun | 1.87 | 3.92 | 2.43 | 5.66 |
+
+- **On the Mac Studio every cell is under the bar, in both columns and both modes**, the bar as written (no owner)
+  included, with libcrun's tail quiet (create p99.9 3.77 and 3.92 ms). Hex's own create p99.9 there is about half a
+  millisecond (0.58 and 0.49 by round in process with no owner, read at sample floor(0.999 n)), against fedora's 2.33
+  with no owner. Why isn't measured here (no trace ran on the Mac). Fedora's no-owner tail is mostly the create's
+  cgroupfs lookups queued behind Hex's own refill's `mkdir`, that `mkdir` waiting on the host-wide cgroup-notification
+  work (above); what differs is the host around it: the VM ran nothing else (load 3.26 to 6.30 in 14 CPUs, against fedora's 16 to 17
+  with kiln CI beside the pass), and its kernel is 6.12, not 6.19.
+- The Mac's own load was 2.38 at the job's start and 2.73 at its end.
+
+**And on jupiter** (2026-11-06): Windows, AMD Ryzen AI MAX+ 395, Docker Desktop's WSL2 VM (kernel 6.18.54.1, x86_64,
+32 CPUs, the pass pinned to 4-31, 78 GiB), docker_pass.sh building hex (static-glibc, sha256 568e107e06b2d915) and
+seam_oci at 70376d7 in the pass image, N=10000, best of 2. Amphora's benchmark chain there last wrote on 2026-11-01
+and ran nothing; step 4's own Windows-container dockerd ran beside Docker Desktop, on its own pipe, and one container
+(`w28host`) not of this pass ran in Docker Desktop's engine.
+
+| pass | | create p50 | create p99.9 | create+start of `true` p50 | create+start of `true` p99.9 |
+|---|---|---|---|---|---|
+| no owner (VM load 3.16 to 3.51) | Hex in process | 0.81, 0.200x | 2.00, 0.310x | 0.89, 0.208x | 2.81, 0.342x |
+| | Hex over the socket | 0.98, 0.242x | 3.16, 0.489x | 1.23, 0.287x | 2.71, 0.330x |
+| | libcrun | 4.05 | 6.46 | 4.28 | 8.22 |
+| reuse on (VM load 1.27 to 2.47) | Hex in process | 0.80, 0.200x | 1.42, 0.182x | 0.88, 0.200x | 1.47, 0.166x |
+| | Hex over the socket | 0.94, 0.236x | 1.67, 0.214x | 1.17, 0.265x | 2.02, 0.228x |
+| | libcrun | 3.99 | 7.81 | 4.41 | 8.85 |
+
+Every round's file holds its 10,000 in each phase with no error and none crashed (checked with PowerShell, jupiter
+having no Python). With no owner, jupiter is as fedora is: both p50s under in process, both p99.9s over (and over the
+socket the create+start p50 too). With reuse on, every cell is under in process, and over the socket all but the
+create+start p50 (0.265x). The reuse-on pass ran at 09:15Z (hex sha256 568e107e06b2d915 again): the first try, at
+06:00Z, died when jupiter's C: drive, which holds Docker Desktop's VM disk, filled from other writers (67 MB free at
+06:27Z) and Docker Desktop stopped; its disk wasn't freed. Once the lead had freed room (34.5 GB at 09:12Z, idle build
+folders compressed in place), Docker Desktop was started again and the pass ran with C: at 36 to 38 GB free.
+
+The passes before it, on the way (same method, fedora, noisy; each round read whole): at 6eb38bd (goal 6 merged) no
+owner out/20261105T030924Z 0.286x, 0.191x, 0.255x, 0.251x (libcrun create p99.9 22.15) and reuse on
+out/20261105T034248Z 0.187x, 0.071x, 0.160x, 0.035x (the socket's create p99.9 0.898x); at 2a91371 no owner
+out/20261105T082351Z 0.219x, 0.043x, 0.236x, 0.126x (libcrun 65.19) and reuse on out/20261105T084842Z 0.212x, 0.369x,
+0.150x, 0.136x; at 15a3323 (the shards) no owner out/20261105T124235Z 0.245x, 0.502x, 0.221x, 0.635x (libcrun 5.62)
+and reuse on out/20261105T125319Z 0.190x, 3.20x, 0.166x, 0.659x. Each in the column order above, in process. The
+p99.9 ratios move with libcrun's own tail (5 to 65 ms across them) while Hex's held at 2 to 4 ms until the tail cut.
+
+## Goal 6 of record: mount namespaces without copying (2026-11-09, adacachy2)
+
+The bar (runtime design goal 6, decision 6; the lead's goal 17): on Linux 7.0 and later create builds the container's
+mount namespace from its tree (`OPEN_TREE_NAMESPACE`), and on 7.1 empty (`CLONE_EMPTY_MNTNS`), detected at runtime,
+the classic path remaining for older kernels, create-time hooks and user namespaces. Done when (1) goal 0's seam driver
+on a 7.0+ bench host shows create p50 on the new path below the classic path's in the same run; (2) the faster path is
+the default; (3) runtime-tools passes the 28 tests crun passes; (4) Ada's under-load bar: part 19's p99 at most 0.5 ms
+at 8 in flight with 8,000 idle threads, 6 and 12 busy loops at nice 0 on the same cores, Docker's default masked and
+read-only paths, the whole create's p99 improving with it, and no priority, nice, RT or slice change.
+
+The record: `mntns_record.sh host` at cp/t7-g6 0c29b3ec on adacachy2 (Linux 7.3.3-1-cachyos, both calls native; AMD
+Ryzen 9 9950X3D2; the cells on CPUs 8-15,24-31, the L3 domain without CPU 0), run mntns-host-20261109T171050Z, load1
+13.7-28 over its cells. In process through seam_oci's serve phase: rounds.py interleaves the arms round by round, each
+round's order rotated and the host's load read, 299 rounds after one warmup a cell (Ada's rule for a p99 claim at 95%),
+8 lifecycles at 8 in flight a burst, 8,000 idle threads, owner bundles with reuse on and Docker's masked and read-only
+paths, untraced and then traced (part 19 to the init's chdir). Two phases, each best of 2 at 6 and 12 loops:
+
+- **A**, the classic root and the three ways interleaved, for the verdicts against the classic root. The classic arm
+  is a root node built by hex-node's test control `Node::with_classic_roots`, its creates counted under
+  `ClassicReason::Baseline`. Its seeds keep the agent's mount namespace, so each init copies it, binds the rootfs and
+  its mounts, `pivot_root`s, detaches the old root, and makes its own `/dev` and masked directories, as the classic
+  path does. The record refuses an arm whose creates weren't all that.
+- **B**, the three ways alone, for part 19's bar and the default. The first record with the classic arm, rec17
+  (mntns-host-20261109T165122Z at 3c19be23, every arm in one phase), had every way's part 19 p99 at 2-6x the c45b03f
+  record's (empty 104/135 µs at 12 loops became 805/717). A probe over its traces put the slowest 1% at 12 loops 80%
+  blocked in `move_mount` and `mount_setattr` (switched out not runnable, where those wait on the mount lock, whose
+  holders the trace can't name: `kptr_restrict` hides `namespace_sem`), preempted 15%, on a CPU 3%. The classic arm's
+  whole-namespace copies and detached old roots on that lock were the suspect, so the bar and the default are read
+  without it. In this record the ways' part 19 p99 at 12 loops is 178-459 µs in phase A too, at the same load: rec17's
+  tails were mostly the host at the time.
+
+| phase | loads | arm | create p50, ms (p1 / p2) | create p99, ms (p1 / p2) | part 19 p99, µs (p1 / p2) |
+|---|---|---|---|---|---|
+| B | 6 | copy | 0.325 / 0.320 | 0.817 / 0.692 | 185 / 121 |
+| B | 6 | empty | 0.324 / 0.318 | 0.749 / 0.746 | 130 / 144 |
+| B | 6 | tree | 0.327 / 0.326 | 0.763 / 0.767 | 159 / 140 |
+| B | 12 | copy | 0.471 / 0.440 | 2.390 / 1.973 | 183 / 211 |
+| B | 12 | empty | 0.472 / 0.436 | 2.668 / 1.782 | 243 / 294 |
+| B | 12 | tree | 0.492 / 0.445 | 2.780 / 1.611 | 457 / 246 |
+| A | 6 | copy | 0.315 / 0.334 | 0.775 / 0.850 | 343 / 155 |
+| A | 6 | classic | 1.696 / 1.828 | 2.766 / 3.113 | 22,595 / 3,056 |
+| A | 12 | copy | 0.445 / 0.725 | 2.305 / 5.440 | 323 / 178 |
+| A | 12 | classic | 2.368 / 3.822 | 10.813 / 17.168 | 8,941 / 16,147 |
+
+- **(1) met.** In phase A the default (copy) against the classic root: create p50 0.315 / 0.334 ms against 1.696 /
+  1.828 at 6 loops, and 0.445 / 0.725 against 2.368 / 3.822 at 12, below it in 298, 298, 299 and 292 of 299 rounds.
+- **(2) met, by the default rule** (the lead's, 2026-11-09): p50 decides only where a one-sided sign test on the rounds
+  below, over every timed round of phase B, shows a difference at 95%; otherwise part 19 p99 at the heaviest load does,
+  then create p99 there. No way's p50 is below each other's (copy below tree in 658 of 1,196 rounds, below empty in 604,
+  tree below empty in 533; 627 needed). The ways tie at p50, as every run before had them: tree and empty below the copy
+  in 124-161 of 299 rounds, cell by cell, a coin flip that had picked the default by noise. Part 19 p99 at 12 loops,
+  best of 2: copy 183 µs, empty 243, tree 457 (the other pass 211, 294, 246). So the default is the copy, then empty,
+  then tree (mntns_default.txt; HEX-MNTNS-9, HEX-MNTNS-1, with `mntns::order` taking a measured record in its own
+  order). The new calls stay detected and a node's to ask for (`Node::with_mount_namespace`).
+- **(3) met.** runtime-tools: hex passes 28 of the 28 tests crun 1.27 passes.
+- **(4) met.** Phase B, the default (copy): part 19 p99 185 µs (the other pass 121) at 6 loops and 183 (211) at 12,
+  under the 500 µs bar; every way at most 457 µs at 12 loops. Against the classic root the whole create's p99 improved
+  in all four cells of phase A. No priority, nice, RT or slice change.
+- **The caveat.** Classic against the default measures goal 5's prune, with the node's `/dev` and masked-directory
+  pools the classic init makes its own of, and goal 6's ways together: it is the comparison the goal's text names. Goal
+  6's own record of the ways is each new way against the copy in phase B: tree's create p50 below the copy's in 0 of 2
+  passes at each load, empty's in 2 of 2 at 6 loops and 1 of 2 at 12, inside the tie the sign test reads. Phase A's
+  second pass at 12 loops met load1 25-27, the ways' create p99 at 5.4-7.3 ms there and the classic root's at 17.2.
+
+On the way:
+- **L1, taken** (red caddac84, green 9bee9c97). A parked init leads its session (`setsid`) once it has said it is
+  parked, before its claim, so neither the create that claims it nor the delete that parked it takes the reschedule its
+  move to a new autogroup forces (kernel/sched/core.c `sched_move_task`). In the c45b03f record's traces at 12 busy
+  loops it was a mean of 128.8 µs of every claimed create (p99 1,618), mostly preempted.
+- **Pre-faulting at park, measured and not taken.** A claimed init takes 23-26 page faults between its run and its
+  ready: 15-17 on text, which fork leaves unmapped in the child, 4-6 copy-on-write and 2-3 first touches, about 0.87 µs
+  each. `MADV_POPULATE_READ` of the binary's 587 text pages costs 28.4 µs median in a fresh process on adacachy2,
+  against the 10-14 µs the claim's text faults cost. That is CPU at park traded for latency at create, which loses
+  throughput (the lead, 2026-11-09).
+- **The init's second parse, measured and held in reserve.** bench spec_parse (46c95d30, release, 299 fresh processes,
+  the record's 1,567-byte spec; unit hex-g6-specparse-20261109T165100Z): the first parse and check 15.8 µs median (21.4
+  p99) with 9 faults, warm 8.2; `Spec::check` alone 0.08 µs; the claim's decode 0.67 µs first. A handoff the init reads
+  without JSON would save an estimated 8-10 µs a create. It needs a format beside Hex's own wire format and must survive
+  an upgrade between a node and a seed of another build, which JSON does by construction, so it waits (the lead,
+  2026-11-09).
+
+## Goal 7: the process class through the seam with no wrapper (2026-11-04, fedora)
+
+Implementation goal 7 (decision 7). A run of `true` through the `Runtime` seam is now one call:
+`Runtime::run`, then a wait for its end, which comes once the node agent has removed the box. The program is
+cloned vfork-class into its box's cgroup. host.sh ran box_bench.py (`hex box run`, a systemd scope, a systemd
+service) and seam_box in the same run, then the fork-class seam_box, round by round (`timed.sh` below). The binaries
+measured are `cp/t7-g7`'s (b82c7ff, and 8660a5e for the fork-class clone), from before goal 7 was carried onto the one
+client core and wire (`cp/t7-port-g7`, 2026-11-09), which is not measured here.
+
+- **Where.** fedora (kiln-a094a12d, Intel Core i9-14900HX, Linux 6.19.10-300.fc44), every method pinned to
+  CPUs 4-15, under the shared timed lock (`fedora-timed.lock`), 2026-11-04T08:54:41Z to 09:18:38Z.
+- **Noisy, by design.** Run with LOAD_GATE=0, as Ada asks of every bench (bars hold under load). The
+  1-minute load was 11.06, 10.62 and 15.93 at the three rounds' starts and 27.33 at the end. About 25 other
+  containers ran beside it the whole time (`cotenants.txt`).
+- **Binaries.** `hex` b82c7ff (sha256 e84fe970608bb352); seam_box b82c7ff (9ccb4f07884a6868); the
+  fork-class base, seam_box 8660a5e (e0ce1b07fd17cdc1).
+- **Runs.** `~/.cache/hex-t7/g7/bench/out/g7-20261104T085441Z` and `…-forkclone`. Each round: N 10,000
+  (100 warm-up), 2,000 lifecycles at each concurrency, density to 1,000 boxes. Best of 3.
+
+| Axis | Hex seam | systemd scope (same run) | systemd service | `hex box run` | Hex seam vs scope | Goal 7's bar |
+|---|---|---|---|---|---|---|
+| run of `true` p50 (ms) | 0.41 | 5.82 | 11.26 | 3.91 | 14.10x | at most a quarter of the scope's: **met** (also against 7.13 of record: 17.4x) |
+| run of `true` p99 / p99.9 / max (ms) | 2.78 / 4.86 / 24.93 | 8.33 / 12.75 / 30.77 | 35.78 / 49.59 / 133.74 | 7.03 / 9.16 / 13.81 | 3.00x / 2.62x / 1.23x | (decision 8's) |
+| runs/s at 1 / 8 / 32 | 1,683 / 2,526 / 2,583 | 197 / 170 / 157 | 79 / 148 / 179 | n/a (below) | 8.52x / 14.88x / 14.39x (vs the service at 32) | |
+| CPU per run (ms) | 0.55 | 6.39 | 12.97 | 3.53 | 11.59x | at most a quarter of the scope's: **met** (also against 7.81 of record: 14.2x) |
+| memory held per idle box (MiB) | 0.27 | 0.30 | 0.33 | 0.80 | 1.12x | at most the scope's: **met** (also against 0.28 of record) |
+| density (idle boxes per GiB held) | 3,800 | 3,384 | 3,100 | 1,282 | 1.12x | |
+
+By round, the seam's held memory per idle box was 0.2694, 0.2711 and 0.2730 MiB over 1,000 boxes. The scope's
+was 0.3037, 0.3026 and 0.3029.
+
+**The vfork-class clone, A/B in the same rounds** (seam_box 8660a5e is the same run path with the fork-class
+clone; round by round, vfork / fork):
+
+| Round (load at start) | run of `true` p50 (ms) | CPU per run, median (ms) | runs/s at 32 |
+|---|---|---|---|
+| 1 (11.06) | 0.413 / 0.471 | 0.447 / 0.515 | 2,583 / 1,993 |
+| 2 (10.62) | 0.441 / 0.529 | 0.475 / 0.579 | 2,294 / 1,638 |
+| 3 (15.93) | 0.794 / 0.862 | 0.834 / 0.958 | 1,444 / 1,385 |
+
+**cgroup_mutex, per run of `true`** (`probes/run_clone.sh`, `run-clone-20261104T091838Z`, b82c7ff, CPUs 4-15,
+load 27.3 at its start, right after the timed run; µs; `probes/run_clone.md` reads it):
+
+| | concurrency 1 (2,020 runs) | concurrency 32 (20,000 runs, 2,310/s) |
+|---|---|---|
+| clone into the cgroup, `cgroup_can_fork` to `cgroup_post_fork`'s return (the lock's wait and hold) | 51.9 | 262.7 |
+| `cgroup_mkdir`, whole | 154.3 | 217.3 |
+| `cgroup_rmdir`, whole | 52.0 | 100.7 |
+| `cgroup_kill_write`, whole (8% of runs at 1, 0.7% at 32) | 1.4 | 1.9 |
+| the runtime's own waits for the lock, within those | 139.8 (0.53 waits) | 434.5 (1.67 waits) |
+| everyone else's waits for it, over the same time | 437.4 (3.43 waits) | 2,758.3 (10.30 waits) |
+
+**`hex box run` at concurrency 32.** box_bench.py's own removal of a worker's cgroup failed with EBUSY at
+`.hexbox-run` in each round, so the CLI wrapper's throughput has no reading here. Goal 7 didn't change that
+path. The cause was the driver's: it removed the cgroup as soon as wait4 reaped the call. On Linux 6.19 a
+reaped task leaves its cgroup only at its final switch (`check_box_removal.py`), so the rmdir sometimes came
+first. Fixed on `cp/t7-boxrun-ebusy` (869712d): remove_tree waits for `cgroup.events` to read `populated 0`.
+
+The throughput phase again, with that fix (run `~/.cache/hex-t7/g7/bench/out/20261104T142342Z`, 2026-11-04T14:23:42Z,
+CPUs 4-15, under the timed lock, noisy: load 37.27 at the start and 28.90 at the end; `hex` b82c7ff, sha256
+e84fe970608bb352; 3 rounds of 2,000 lifecycles, best of 3; no phase error in any round):
+
+| runs/s at 1 / 8 / 32 | `hex box run` | systemd scope | systemd service |
+|---|---|---|---|
+| best of 3 | 260 / 585 / 529 | 143 / 145 / 113 | 67 / 149 / 164 |
+| by round, at 32 | 514, 466, 529 | 106, 113, 111 | 164, 162, 149 |
+
+**timed.sh** (on fedora, `~/.cache/hex-t7/g7/timed.sh`): for each of 3 rounds,
+`OUT_DIR=… ROUND_FIRST=r PHASES="box boxseam" SEAM_BIN=<seam_box b82c7ff> bash host.sh <hex b82c7ff>`, then
+`HEXBENCH_PHASES="latency throughput" OUT_DIR=…-forkclone ROUND_FIRST=r PHASES=boxseam SEAM_BIN=<seam_box
+8660a5e> bash host.sh <hex b82c7ff>`, with `CPUSET=4-15 LOAD_GATE=0 FETCH=0 N=10000 WARMUP=100 LIFECYCLES=2000
+CAP=1000 BOX_BUDGET_MIB=4096 ROUNDS=1`. The run's load and co-tenants were logged before each round.
+
 ## What the run shows
 
 - **OCI class: Hex misses the bar, and crun is the competitor to beat.**

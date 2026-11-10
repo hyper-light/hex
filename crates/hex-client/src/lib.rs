@@ -10,10 +10,11 @@
 //! its one connection, which closes once the client and the last `Proc` it returned are dropped; the
 //! agent then ends the programs it still watches for it (the disconnect rule).
 //!
-//! On Linux the socket is `SOCK_SEQPACKET` (unix(7)); macOS has none, so there each message is framed over
-//! a `SOCK_STREAM` socket, its descriptors at its first byte (native plan step 8). Elsewhere
-//! [`Client::connect`] refuses, naming the platform, until its transport lands. On every
-//! platform, [`guest::Client`] reaches a node agent in a Shards guest over a byte stream
+//! On Linux the socket is `SOCK_SEQPACKET` (unix(7)). macOS and Windows have only `SOCK_STREAM`, so each message
+//! is framed there: macOS's descriptors ride at its first byte; Windows' given handles ride in its envelope
+//! (native plan step 8). Every transport uses the same reader's turn (`calls.rs`): whoever waits reads, one at
+//! a time, and no client reader thread sits between. Elsewhere [`Client::connect`] refuses, naming the platform.
+//! On every platform, [`guest::Client`] reaches a node agent in a Shards guest over a byte stream
 //! (docs/design/shards-guest.md §3), the same calls on another transport.
 
 #![cfg_attr(
@@ -28,13 +29,11 @@
     )
 )]
 
-use std::time::Duration;
-
 mod calls;
 mod copy;
 pub mod guest;
 
-pub use calls::{Ended, Then};
+pub use calls::{Deferred, Ended, Then};
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -48,15 +47,15 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::Client;
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-mod other;
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub use other::Client;
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::Client;
 
-/// Longest a call waits for the node agent's answer, and a send for room in its socket: five times the
-/// agent's own longest wait (a delete's 60 s for its box to empty, `hex_node`'s `EMPTY_PATIENCE`), so
-/// only a wedged agent misses it, and a call to one is refused rather than waited on forever.
-pub const ANSWER_PATIENCE: Duration = Duration::from_secs(300);
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+mod other;
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+pub use other::Client;
 
 /// Most boxes one list takes, in however many messages they come: a node holding more is past any
 /// density Hex targets (10,560 idle containers per GiB held, docs/design/runtime-architecture.md),

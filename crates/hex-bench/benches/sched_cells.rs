@@ -34,7 +34,7 @@ use hex_sim::federation::{Capacity, Topology};
 use hex_sim::generate::{self, NodeModel};
 use std::collections::BTreeSet;
 
-use hex_sim::index::{Sample, Scorer, Shapes};
+use hex_sim::index::{Pick, Scorer, Shapes};
 use hex_sim::model::{
     Class, Cluster, Kind, NodeSpec, Resources, Tenancy, WorkloadId, WorkloadSpec,
 };
@@ -50,6 +50,7 @@ const POD: Resources = Resources {
     cpu_milli: 100,
     mem_bytes: 500 * MIB,
     gpus: 0,
+    disk_bytes: 0,
 };
 const BAR: Duration = Duration::from_micros(6_400);
 
@@ -70,6 +71,7 @@ fn workloads() -> Vec<WorkloadSpec> {
             runs_for: None,
             tenancy: Tenancy::default(),
             class: Class::Oci,
+            ask: Default::default(),
         })
         .collect();
     let mut c = Cluster::single_owner(Vec::new(), work);
@@ -122,7 +124,7 @@ fn main() {
     let mut best: Option<Duration> = None;
     for run in 0..runs {
         // Hex's packing score (H11), against each class's one need.
-        let sample = Sample {
+        let pick = Pick {
             scorer: Scorer::HEX,
             shapes: Shapes::of(
                 work.iter()
@@ -132,9 +134,8 @@ fn main() {
                     .collect(),
             )
             .unwrap(),
-            ..Sample::default()
         };
-        let mut capacity = Capacity::empty(&nodes, TOPOLOGY, sample).unwrap();
+        let mut capacity = Capacity::empty(&nodes, TOPOLOGY, pick).unwrap();
         let mut took = Vec::with_capacity(WORKLOADS as usize);
         let mut by_class: [Vec<Duration>; 3] = Default::default();
         let mut per_cell = vec![0u64; cells as usize];

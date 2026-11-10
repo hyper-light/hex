@@ -150,9 +150,13 @@ fn node(cpu: u64) -> NodeSpec {
             cpu_milli: cpu,
             mem_bytes: 100,
             gpus: 0,
+            disk_bytes: 0,
         },
         background_milli: 0,
         classes: Classes::ALL,
+        platform: Default::default(),
+        virt: Default::default(),
+        devices: Vec::new(),
     }
 }
 
@@ -163,6 +167,7 @@ fn work(id: u64, cpu: u64, band: u8, group: Option<u32>) -> WorkloadSpec {
             cpu_milli: cpu,
             mem_bytes: 1,
             gpus: 0,
+            disk_bytes: 0,
         },
         kind: Kind::Plain,
         class: Class::Oci,
@@ -173,6 +178,7 @@ fn work(id: u64, cpu: u64, band: u8, group: Option<u32>) -> WorkloadSpec {
             group: group.map(GroupId),
             ..Tenancy::default()
         },
+        ask: Default::default(),
     }
 }
 
@@ -184,7 +190,7 @@ fn run_of(store: Store, n: usize, groups: Vec<Group>) -> Run {
         acked: vec![true; n],
         refused: vec![false; n],
         ran: vec![None; n],
-        sample: Default::default(),
+        pick: Default::default(),
         policy: Default::default(),
         owners: vec![Owner::default()],
         gangs: Default::default(),
@@ -291,6 +297,25 @@ fn a_disruption_ended_by_a_placement_reopens_its_queue() {
 fn a_run_reported_done_as_it_is_preempted_is_dropped() {
     let crash = 1647584078049989115u64;
     let cluster = contested(2869266174429984972);
+    let nemesis = Nemesis::Random {
+        seed: crash,
+        first: crash % 40,
+        per_mille: 30,
+        max_crashes: 3,
+    };
+    let run = sim::run(&cluster, &preempting(nemesis)).unwrap();
+    assert_eq!(holds_up(&cluster, &run), Ok(()));
+}
+
+/// AC-T7.5.3: seed 17157580157969519194, crash seed 12065407125461531292. Placing 61
+/// grows owner 1's share and makes earlier work 58 able to preempt [23, 13, 8]. The retained
+/// own-queue cursor skipped it and placed 69. Keep this exact generated case independent of
+/// proptest's random seed and shrinker state; the unchanged serial oracle must accept its log.
+#[test]
+fn ac_t7_5_3_generated_preemption_seed_17157580157969519194_keeps_policy_order() {
+    let seed = 17157580157969519194u64;
+    let crash = 12065407125461531292u64;
+    let cluster = contested(seed);
     let nemesis = Nemesis::Random {
         seed: crash,
         first: crash % 40,

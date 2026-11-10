@@ -60,6 +60,12 @@ mod kind {
     pub const INSPECT: u16 = 0x0005;
     pub const SIGNAL: u16 = 0x0006;
     pub const WAIT: u16 = 0x0007;
+    /// An acquire naming the box's process limit: appended after the first version's kinds, so a helper
+    /// that predates it refuses it by kind.
+    pub const ACQUIRE_PIDS: u16 = 0x0008;
+    /// A kill of one program in a box: appended after every earlier kind, so a helper that predates it
+    /// refuses it by kind.
+    pub const KILL: u16 = 0x0009;
 
     pub const ANSWER: u16 = 0x8000;
     pub const A_HELLO: u16 = ANSWER | HELLO;
@@ -69,6 +75,7 @@ mod kind {
     pub const A_INSPECT: u16 = ANSWER | INSPECT;
     pub const A_SIGNAL: u16 = ANSWER | SIGNAL;
     pub const A_WAIT: u16 = ANSWER | WAIT;
+    pub const A_KILL: u16 = ANSWER | KILL;
     pub const A_REFUSED: u16 = ANSWER | 0x00ff;
 }
 
@@ -79,12 +86,14 @@ pub enum Request {
     /// Settle the version both sides speak, before anything else.
     Hello { version: u16 },
     /// Take a free pool user for a box with this memory bound and reserve (both in bytes); the helper binds
-    /// the user to the box and arms its exception handling. Refused when the box already has one, or the
-    /// pool is empty.
+    /// the user to the box and arms its exception handling. Its processes are capped at `pids_max` when the
+    /// box's spec names one, else at the platform's per-uid ceiling. Refused when the box already has one,
+    /// or the pool is empty. Encoded as [`kind::ACQUIRE`] without a limit, [`kind::ACQUIRE_PIDS`] with one.
     Acquire {
         box_id: BoxId,
         bound: u64,
         reserve: u64,
+        pids_max: Option<u32>,
     },
     /// Start `program` as the box's pool user, armed at its apportioned ledger limit, its three stdio
     /// descriptors riding with the message. `leader` is the box's first program (a new session); a later
@@ -109,6 +118,12 @@ pub enum Request {
     /// [`Answer::Waited`] with `None` while it runs, and its end only once: a program the helper didn't
     /// start in the box, or whose end was read already, is [`Exit::Unknown`].
     Wait { box_id: BoxId, pid: i32 },
+    /// End program `pid`, which the helper started in the box and holds running, with `SIGKILL`: one
+    /// program's own kill (HEX-RT-16), which the node can't send a pool user's process itself; the box and
+    /// its other programs run on, and the program's end is read by [`Request::Wait`] as any end is. A
+    /// program the box doesn't hold running (ended, its end read, or never started there) is sent nothing
+    /// and answered as killed, as a second kill of an ended program is done on every class.
+    Kill { box_id: BoxId, pid: i32 },
 }
 
 /// What the box holds now, as the helper reports it (`proc_listpids(PROC_UID_ONLY)` of the box's user, each
@@ -147,6 +162,8 @@ pub enum Answer {
     /// A [`Request::Wait`]'s program's end, `None` while it runs.
     Waited(Option<Exit>),
     Refused(Refused),
+    /// A [`Request::Kill`] done: the program is ended, or was already.
+    Killed,
 }
 
 /// Why the helper refused a request — each by name (CLAUDE.md §3), so the node learns what and why.
@@ -166,18 +183,25 @@ pub enum Refused {
     Malformed(String),
     #[error("the box {0} has no live member")]
     NotRunning(BoxId),
+    /// Growing the pool by an account failed: the directory read or write that did, named.
+    #[error("growing the box users' pool failed: {0}")]
+    GrowFailed(String),
 }
 
 impl Request {
     fn kind(&self) -> u16 {
         match self {
             Request::Hello { .. } => kind::HELLO,
-            Request::Acquire { .. } => kind::ACQUIRE,
+            Request::Acquire { pids_max: None, .. } => kind::ACQUIRE,
+            Request::Acquire {
+                pids_max: Some(_), ..
+            } => kind::ACQUIRE_PIDS,
             Request::Start { .. } => kind::START,
             Request::End { .. } => kind::END,
             Request::Inspect { .. } => kind::INSPECT,
             Request::Signal { .. } => kind::SIGNAL,
             Request::Wait { .. } => kind::WAIT,
+            Request::Kill { .. } => kind::KILL,
         }
     }
 
@@ -208,6 +232,7 @@ fn refused_tag(r: &Refused) -> u8 {
         Refused::NotPermitted(_) => 4,
         Refused::Malformed(_) => 5,
         Refused::NotRunning(_) => 6,
+        Refused::GrowFailed(_) => 7,
     }
 }
 
@@ -222,10 +247,14 @@ pub fn encode_request(version: u16, id: u64, request: &Request) -> Result<Vec<u8
             box_id,
             bound,
             reserve,
+            pids_max,
         } => {
             w.string(box_id.as_str())?;
             w.u64(*bound);
             w.u64(*reserve);
+            if let Some(n) = pids_max {
+                w.u32(*n);
+            }
         }
         Request::Start {
             box_id,
@@ -241,7 +270,7 @@ pub fn encode_request(version: u16, id: u64, request: &Request) -> Result<Vec<u8
             w.string(box_id.as_str())?;
             w.i32(*signal);
         }
-        Request::Wait { box_id, pid } => {
+        Request::Wait { box_id, pid } | Request::Kill { box_id, pid } => {
             w.string(box_id.as_str())?;
             w.i32(*pid);
         }
@@ -261,13 +290,14 @@ pub fn encode_answer(version: u16, id: u64, answer: &Answer) -> Result<Vec<u8>, 
         Answer::Signalled => kind::A_SIGNAL,
         Answer::Waited(_) => kind::A_WAIT,
         Answer::Refused(_) => kind::A_REFUSED,
+        Answer::Killed => kind::A_KILL,
     };
     put_header(&mut w, version, kind, id);
     match answer {
         Answer::Hello { version } => w.u16(*version),
         Answer::Acquired { uid } => w.u32(*uid),
         Answer::Started { pid } => w.i32(*pid),
-        Answer::Ended | Answer::Signalled => {}
+        Answer::Ended | Answer::Signalled | Answer::Killed => {}
         Answer::Waited(exit) => put_exit(&mut w, *exit),
         Answer::State(s) => {
             w.u32(s.members);
@@ -283,9 +313,10 @@ pub fn encode_answer(version: u16, id: u64, answer: &Answer) -> Result<Vec<u8>, 
                 Refused::UnknownBox(b) | Refused::AlreadyAcquired(b) | Refused::NotRunning(b) => {
                     w.string(b.as_str())?
                 }
-                Refused::StartFailed(m) | Refused::NotPermitted(m) | Refused::Malformed(m) => {
-                    w.string(m)?
-                }
+                Refused::StartFailed(m)
+                | Refused::NotPermitted(m)
+                | Refused::Malformed(m)
+                | Refused::GrowFailed(m) => w.string(m)?,
                 Refused::NoFreeUser => {}
             }
         }
@@ -332,6 +363,13 @@ pub fn read_request(bytes: &[u8], descriptors: usize) -> Result<(u16, u64, Reque
             box_id: wire::box_id(&mut r)?,
             bound: r.u64()?,
             reserve: r.u64()?,
+            pids_max: None,
+        },
+        kind::ACQUIRE_PIDS => Request::Acquire {
+            box_id: wire::box_id(&mut r)?,
+            bound: r.u64()?,
+            reserve: r.u64()?,
+            pids_max: Some(r.u32()?),
         },
         kind::START => Request::Start {
             box_id: wire::box_id(&mut r)?,
@@ -349,6 +387,10 @@ pub fn read_request(bytes: &[u8], descriptors: usize) -> Result<(u16, u64, Reque
             signal: r.i32()?,
         },
         kind::WAIT => Request::Wait {
+            box_id: wire::box_id(&mut r)?,
+            pid: r.i32()?,
+        },
+        kind::KILL => Request::Kill {
             box_id: wire::box_id(&mut r)?,
             pid: r.i32()?,
         },
@@ -396,6 +438,7 @@ pub fn read_answer(bytes: &[u8]) -> Result<(u16, u64, Answer), Fault> {
         }),
         kind::A_SIGNAL => Answer::Signalled,
         kind::A_WAIT => Answer::Waited(read_exit(&mut r)?),
+        kind::A_KILL => Answer::Killed,
         kind::A_REFUSED => Answer::Refused(read_refused(&mut r)?),
         other => {
             return Err(Fault::Kind {
@@ -445,6 +488,7 @@ fn read_refused(r: &mut Reader<'_>) -> Result<Refused, Fault> {
         4 => Refused::NotPermitted(r.string("reason")?),
         5 => Refused::Malformed(r.string("reason")?),
         6 => Refused::NotRunning(wire::box_id(r)?),
+        7 => Refused::GrowFailed(r.string("reason")?),
         t => return Err(Fault::value("refusal", format!("variant {t}"))),
     })
 }

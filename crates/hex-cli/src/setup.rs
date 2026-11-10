@@ -25,9 +25,7 @@ pub fn main(args: &[String]) -> u8 {
 /// The status and what to print for `hex setup features`.
 #[cfg(target_os = "windows")]
 fn features() -> (u8, String, String) {
-    let processors = std::num::NonZeroU32::new(hex_runtime::windows::sys::active_processors())
-        .unwrap_or(std::num::NonZeroU32::MIN);
-    match hex_runtime::windows::features::off(processors) {
+    match hex_runtime::windows::features::off() {
         Ok(off) => (0, hex_core::setup::render_features(&off), String::new()),
         Err(why) => (1, String::new(), format!("hex setup features: {why}\n")),
     }

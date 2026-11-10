@@ -6,17 +6,39 @@ its directory operations (@dirops[func, fs]: count). The off-CPU time is grouped
 (a directory's i_rwsem, cgroup_mutex, the mount namespace's lock, a futex of the runtime's own) and the waits for work
 (a socket, a pipe, a poll, a child), then come the top blocking sites, the directory operations and the profile.
 
+A MODE=offcpu run also times each futex call by the user stack that made it (@futex[ustack]: ns), named after the
+run from the bench process's mappings (maps.<label>.txt) and the binaries' symbols (syms.*.txt): each stack by the
+first of its frames past libc's and the standard library's own locking, the code that took or waited on the lock, with
+the libc call it waited in.
+
 A MODE=locks run: each directory's exclusive holds (@hold[vfs_mkdir or vfs_rmdir, fs, ino]: stats) beside the waits
 on its i_rwsem (@rw[slow path, fs, ino]: stats), each directory named from the run's dirs.<label>.txt; cgroup_mutex's
 takers, each timed whole, wait and hold (@fn[function, 1 if the runtime's own]: stats), the forks (@fork[1 if into a
-cgroup]: stats) and the waits for the lock alone (@cgm_wait[1 if the runtime's]: stats); the lookups that missed the
+cgroup]: stats) and the waits for the lock alone (@cgm_wait[1 if the runtime's]: stats); the lock's holder's times off
+its CPU while it held it (@holder_off[2 if the runtime's + 1 if preempted]: stats); the lookups that missed the
 dcache (@lookups[fs, directory, name]: count), with each name's digits and hex runs written as #; and the share of the
 time cgroup_mutex and the runtime's cgroup directory's i_rwsem were in each state (@cgm_state[bucket, 2 held, 1
 handed off, 0 free] and @dir_state[bucket, 3 write-held, 2 read-held, 1 handed off, 0 free]: samples), over the 100
 ms buckets in which the runtime made or removed at least half the median bucket's cgroups (@busy[bucket]: count).
 
+A MODE=checker run (and MODE=devfs, the same for the /dev pool's thread, per /dev made), each figure per namespace checked (its out.<label>.json's netns_reuse.checked, which stands in
+for <lifecycles>): the checker threads' system calls (@sys[number]: stats), their futex waits for the next namespace
+left out of the sum, and their on-CPU profile at the rate the run says (@profile_hz; @samples), by the system call each sample fell in or user
+mode (@on_sys[number], @on_user: count) and by the kernel work its stack names (@cpu[kstack, ustack]: count), and
+the samples allocating netlink's answers.
+
+A MODE=oncpu run, the same profile for the runtime's own processes (seam_oci, and hex: its seeds and inits before they
+exec), each figure per lifecycle: their system calls by number, their on-CPU samples by system call, user mode apart,
+and by kernel stack, and the samples spinning on a lock (an MCS or queued spinlock, a mutex's or an rwsem's optimistic
+spin) by the stack above the spin.
+
+A MODE=threads run, each figure per lifecycle: the runtime's threads' CPU by name, sampled at the rate the run says (@profile_hz; @thread[comm]:
+count), and the other tasks on the probe's CPUs by name (@beside[comm]: count).
+
   create_serial.py <label>=<bt file>:<lifecycles> ...
 """
+import bisect
+import json
 import os
 import re
 import sys
@@ -30,8 +52,11 @@ CLASSES = [
     ("a directory's i_rwsem", [r'rwsem_down_', r'(filename_create|do_rmdir|lookup_slow|open_last_lookups|'
                                               r'__start_renaming|do_unlinkat|iterate_dir|lock_rename)']),
     ("cgroup_mutex", [r'__mutex_lock', r'(cgroup_|cgroup_bpf)']),
+    # open_tree's clone and the dissolve at its file's last close take namespace_sem too (Linux v6.19
+    # fs/namespace.c:3017, :2307).
     ("the mount namespace's lock", [r'rwsem_down_', r'(do_lock_mount|copy_mnt_ns|path_mount|do_umount|do_loopback|'
-                                                   r'do_new_mount|__do_sys_pivot_root|lock_mount)']),
+                                                   r'do_new_mount|__do_sys_pivot_root|lock_mount|'
+                                                   r'open_detached_copy|get_detached_copy|dissolve_on_fput)']),
     ("an RCU grace period (umount)", [r'synchronize_rcu']),
     ("a futex (the runtime's own locks)", [r'futex_']),
     ("work: a socket", [r'(recvmsg|sock_)']),
@@ -45,6 +70,61 @@ FILESYSTEMS = {"cgroup2", "tmpfs", "overlay", "btrfs", "proc", "sysfs", "devtmpf
                "debugfs", "tracefs", "mqueue", "devpts", "cgroup"}
 # A stats() value as bpftrace 0.24 prints it, `{ .count = N, .average = N, .total = N }`, or as earlier ones did.
 STATS = r'\{? ?\.?count:? =? ?(\d+), \.?average:? =? ?(\d+), \.?total:? =? ?(\d+) ?\}?'
+
+
+# x86_64's numbers for the calls a checker and the runtime make (Linux v6.19 arch/x86/entry/syscalls/syscall_64.tbl).
+SYSCALLS = {0: "read", 1: "write", 2: "open", 3: "close", 7: "poll", 8: "lseek", 9: "mmap", 10: "mprotect",
+            11: "munmap", 12: "brk", 13: "rt_sigaction", 14: "rt_sigprocmask", 15: "rt_sigreturn", 16: "ioctl",
+            17: "pread64", 18: "pwrite64", 24: "sched_yield", 28: "madvise", 35: "nanosleep", 39: "getpid",
+            41: "socket", 44: "sendto", 45: "recvfrom", 46: "sendmsg", 47: "recvmsg", 49: "bind", 53: "socketpair",
+            54: "setsockopt", 56: "clone", 59: "execve", 61: "wait4", 62: "kill", 72: "fcntl", 74: "fsync",
+            75: "fdatasync", 80: "chdir", 81: "fchdir", 95: "umask", 112: "setsid", 116: "setgroups", 117: "setresuid",
+            119: "setresgid", 126: "capset", 131: "sigaltstack", 138: "fstatfs", 155: "pivot_root", 157: "prctl",
+            161: "chroot", 165: "mount", 166: "umount2", 170: "sethostname", 186: "gettid", 202: "futex",
+            204: "sched_getaffinity", 217: "getdents64", 230: "clock_nanosleep", 231: "exit_group", 232: "epoll_wait",
+            233: "epoll_ctl", 234: "tgkill", 247: "waitid", 257: "openat", 258: "mkdirat", 259: "mknodat",
+            262: "newfstatat", 263: "unlinkat", 265: "linkat", 266: "symlinkat", 267: "readlinkat", 268: "fchmodat",
+            271: "ppoll", 272: "unshare", 281: "epoll_pwait", 288: "accept4", 289: "signalfd4", 290: "eventfd2",
+            292: "dup3", 293: "pipe2", 302: "prlimit64", 308: "setns", 316: "renameat2", 317: "seccomp",
+            318: "getrandom", 319: "memfd_create", 321: "bpf", 332: "statx", 424: "pidfd_send_signal",
+            428: "open_tree", 429: "move_mount", 430: "fsopen", 431: "fsconfig", 432: "fsmount", 434: "pidfd_open",
+            435: "clone3", 436: "close_range", 437: "openat2", 439: "faccessat2", 441: "epoll_pwait2",
+            442: "mount_setattr", 452: "fchmodat2"}
+# A kernel frame that spins on a lock: an MCS lock's queue (osq_lock), a queued spinlock's or rwlock's slow path, a
+# mutex's or an rwsem's optimistic spin on its owner; a compiler's clone suffix (.constprop.0, .isra.0) cut first.
+SPIN = r'^(osq_lock|native_queued_spin_lock_slowpath|queued_spin_lock_slowpath|__pv_queued_spin_lock_slowpath|' \
+       r'mutex_spin_on_owner|mutex_optimistic_spin|rwsem_spin_on_owner|rwsem_optimistic_spin|' \
+       r'queued_read_lock_slowpath|queued_write_lock_slowpath)$'
+CLONE_SUFFIX = r'\.(constprop|isra|part|cold)(\.\d+)?$'
+
+
+def profile_hz(txt, before):
+    """The rate the run's profile sampled at, as its program says it (@profile_hz, create_serial_inside.sh's), so the
+    reader holds no copy of it (Ada's 2026-11-06 rule). A run made before the programs said it ran at `before`, the
+    rate its program was written with then (create_serial_inside.sh at 53ac40d: 4999 Hz for the checker's, devfs's
+    and oncpu's profile, 999 Hz for threads')."""
+    m = re.search(r'^@profile_hz: (\d+)$', txt, re.M)
+    return int(m.group(1)) if m else before
+
+# A checker's kernel stack's work, by the first rule any of whose frames match, innermost first.
+CHECKER_WORK = [
+    ("reading /proc/net/protocols", r'proto_seq_'),
+    ("reading /proc/net/dev", r'dev_seq_|dev_get_stats|loopback_get_stats'),
+    ("reading /proc/net/sockstat", r'sockstat_seq_show|sockstat6_seq_show'),
+    ("reading a seq_file, the rest", r'seq_read'),
+    ("opening a /proc/net file", r'do_sys_openat|path_openat|proc_lookup|proc_tgid_net_lookup|seq_open|do_filp_open'),
+    ("dumping routes", r'inet_dump_fib|inet6_dump_fib|fib6_dump|rt6_dump|fib_table_dump'),
+    ("dumping addresses", r'inet_dump_ifaddr|inet6_dump_addr|in6_dump|inet_fill_ifaddr|inet6_fill_ifaddr'),
+    ("dumping rules", r'fib_nl_dumprule|dump_rules|fib_nl_fill_rule'),
+    ("netlink, the rest", r'netlink_|rtnl_dump|rtnetlink_rcv|__sys_sendto|__sys_recvfrom|sock_recvmsg|skb_'),
+    ("making a socket", r'__sys_socket|sk_alloc'),
+    ("closing (releases)", r'__fput|fput|seq_release|sock_close|task_work_run'),
+    ("setns", r'setns|switch_task_namespaces|commit_nsset'),
+    ("faulting in or allocating pages", r'clear_page|handle_mm_fault|exc_page_fault|__alloc_pages|get_page_from_freelist'),
+    ("a futex (the next namespace's wait)", r'futex'),
+    ("mapping memory", r'vm_mmap|do_mmap|__vm_munmap|do_vmi_munmap|madvise'),
+    ("entering and leaving the kernel", r'entry_SYSCALL|syscall_exit|do_syscall_64|exit_to_user'),
+]
 
 
 def offcpu(txt):
@@ -147,6 +227,20 @@ def report_locks(label, n, txt, named):
         what = "into a cgroup (CLONE_INTO_CGROUP: cgroup_mutex held)" if into == '1' else "not into a cgroup"
         print(f"  {cnt / n:6.2f} x {tot / max(cnt, 1) / 1e3:8.1f} us = {tot / n / 1e6:7.3f} ms  fork {what}, "
               f"cgroup_can_fork to cgroup_post_fork's return")
+    # The holds taken for the boxes' own cgroups alone, those under the bench's oci boxes' root (@box, since goal 5
+    # extended step 1): the takers above count every kworker's on the host, and the node's start's cgroups. Per box
+    # the bench made a cgroup for, and per lifecycle: the same where every box makes one, and not where an owner's
+    # boxes are handed the cgroups their earlier boxes left (goal 5 extended step 6), whose criterion is per
+    # lifecycle.
+    box = {m.group(1): int(m.group(2)) for m in re.finditer(r'@box\[([^\]]+)\]: (\d+)', txt)}
+    if box:
+        made = box.get('cgroup_mkdir', 0)
+        each = ', '.join(f"{k} {v / max(made, 1):.3f}" for k, v in sorted(box.items()))
+        print(f"{label}: cgroup_mutex's holds for the boxes' own cgroups, per box made ({made} made): {each}; "
+              f"in all {sum(box.values()) / max(made, 1):.3f}")
+        each = ', '.join(f"{k} {v / n:.3f}" for k, v in sorted(box.items()))
+        print(f"{label}: cgroup_mutex's holds for the boxes' own cgroups, per lifecycle ({n} lifecycles): {each}; "
+              f"in all {sum(box.values()) / n:.3f}")
     busy = {int(m.group(1)): int(m.group(2)) for m in re.finditer(r'@busy\[(\d+)\]: (\d+)', txt)}
     if busy:
         counts = sorted(busy.values())
@@ -177,6 +271,14 @@ def report_locks(label, n, txt, named):
         who = "the runtime's" if own == '1' else "other processes'"
         print(f"{label}: waits for cgroup_mutex, {who}: {cnt / n:.2f} a lifecycle, {tot / max(cnt, 1) / 1e3:.1f} us "
               f"each on average, {tot / n / 1e6:.3f} ms a lifecycle")
+    holder = {3: "the runtime's, preempted", 2: "the runtime's, blocked", 1: "another's, preempted",
+              0: "another's, blocked"}
+    off = stats(txt, 'holder_off', 1)
+    if off:
+        print(f"{label}: cgroup_mutex's holder off its CPU while it held the lock, per lifecycle:")
+    for (kind,), (cnt, tot) in sorted(off.items(), key=lambda kv: -kv[1][1]):
+        print(f"  {cnt / n:6.3f} x {tot / max(cnt, 1) / 1e3:8.1f} us = {tot / n / 1e6:7.3f} ms  "
+              f"{holder.get(int(kind), kind)}")
     lookups = defaultdict(int)
     for m in re.finditer(r'@lookups\[([^,\]]*), ([^,\]]*), ([^\]]*)\]: (\d+)', txt):
         lookups[(m.group(1), pattern(m.group(2)), pattern(m.group(3)))] += int(m.group(4))
@@ -184,6 +286,215 @@ def report_locks(label, n, txt, named):
           f"{sum(lookups.values()) / n:.2f} in all")
     for (fs, d, name), v in sorted(lookups.items(), key=lambda kv: -kv[1])[:16]:
         print(f"  {v / n:6.2f}  {fs:8} {d[:40]:40} {name[:60]}")
+
+
+def symbolizer(run_dir, label):
+    """A function naming an address of the bench process's, from the run's maps and symbol files; None without them."""
+    maps_path = os.path.join(run_dir, f"maps.{label}.txt")
+    if not os.path.exists(maps_path):
+        return None
+    maps, bases = [], {}
+    for line in open(maps_path, errors="replace"):
+        parts = line.split()
+        if len(parts) < 6:
+            continue
+        lo, hi = (int(x, 16) for x in parts[0].split("-"))
+        maps.append((lo, hi, parts[5]))
+        if int(parts[2], 16) == 0:
+            bases.setdefault(parts[5], lo)
+    syms = {}
+    for module, name in (("seam_oci", "syms.seam_oci.txt"), ("libc", "syms.libc.txt")):
+        path = os.path.join(run_dir, name)
+        if os.path.exists(path):
+            table = []
+            for line in open(path, errors="replace"):
+                bits = line.rstrip("\n").split(" ", 2)
+                if len(bits) == 3 and bits[1] in "tTwW":
+                    table.append((int(bits[0], 16), bits[2]))
+            table.sort()
+            syms[module] = table
+
+    def name(frame):
+        if not frame.startswith("0x"):
+            return frame
+        addr = int(frame, 16)
+        for lo, hi, path in maps:
+            if lo <= addr < hi:
+                module = "seam_oci" if path.endswith("/seam_oci") else ("libc" if "libc.so" in path else None)
+                table = syms.get(module)
+                if not table or path not in bases:
+                    return f"{os.path.basename(path)}+{addr - lo:#x}"
+                vaddr = addr - bases[path]
+                i = bisect.bisect_right(table, (vaddr, chr(0x10FFFF))) - 1
+                return table[i][1] if i >= 0 else f"{module}+{vaddr:#x}"
+        return frame
+    return name
+
+
+# The standard library's own locking frames, and libc's, which are named by the nearest exported symbol and so may be
+# another function's: a futex stack is named by its first frame past them, with the libc call it waited in.
+LOCKING = re.compile(r'^<?(std::sys::|std::sync::|std::thread::|std::panicking|core::|alloc::)')
+LIBC = re.compile(r'@GLIBC|^libc\.so')
+
+
+def futex_site(frames):
+    """A futex stack's site: its first frame past the locking frames, with the libc call it waited in, if not syscall."""
+    for i, f in enumerate(frames):
+        if LOCKING.match(f) or LIBC.search(f):
+            continue
+        called = next((g.split('@')[0] for g in reversed(frames[:i]) if '@GLIBC' in g), None)
+        return f if called in (None, 'syscall') else f"{f} (in {called})"
+    return frames[-1] if frames else "?"
+
+
+def report_futex(label, n, path, txt):
+    """A MODE=offcpu run's futex calls, by the code that made them, per lifecycle."""
+    name = symbolizer(os.path.dirname(path), label) or (lambda f: f)
+    by_site, total = defaultdict(int), 0
+    for m in re.finditer(r'@futex\[\n(.*?)\n\]: (\d+)', txt, re.S):
+        frames = [name(re.sub(r'\+\d+$', '', line.strip())) for line in m.group(1).splitlines() if line.strip()]
+        site = futex_site(frames)
+        by_site[site] += int(m.group(2))
+        total += int(m.group(2))
+    print(f"\n{label}: futex calls, {total / n / 1e6:.3f} ms a lifecycle in all, by the code that made them")
+    for site, v in sorted(by_site.items(), key=lambda kv: -kv[1])[:14]:
+        print(f"  {v / n / 1e6:8.3f}  {site[:150]}")
+
+
+def counts(txt, name):
+    return {int(m.group(1)): int(m.group(2)) for m in re.finditer(rf'@{name}\[(\d+)\]: (\d+)', txt)}
+
+
+def report_checker(label, n, path, txt):
+    """A MODE=checker run, per namespace checked; a MODE=devfs run, per /dev the pool's thread made; a MODE=oncpu
+    run, per lifecycle."""
+    if label.startswith("oncpu."):
+        report_oncpu(label, n, txt)
+        return
+    out = json.load(open(os.path.join(os.path.dirname(path), f"out.{label}.json")))
+    if label.startswith("devfs."):
+        report_devfs(label, out, txt)
+        return
+    checked = sum(ph.get("netns_reuse", {}).get("checked", 0) for ph in out["phases"].values())
+    if not checked:
+        print(f"{label}: no namespace was checked")
+        return
+    samples = int(re.search(r'@samples: (\d+)', txt).group(1))
+    us = 1e6 / profile_hz(txt, 4999) / checked
+    work_of, user, skb, skb_clear = defaultdict(int), 0, 0, 0
+    for m in re.finditer(r'@cpu\[\n(.*?)\n\]: (\d+)', txt, re.S):
+        lines = m.group(1).split('\n')
+        cut = next((i for i, line in enumerate(lines) if line.strip() == ','), len(lines))
+        frames = [re.sub(r'\+\d+$', '', line.strip()) for line in lines[:cut] if line.strip()]
+        if not frames:
+            user += int(m.group(2))
+            continue
+        if '__alloc_skb' in frames:
+            skb += int(m.group(2))
+            skb_clear += int(m.group(2)) if any(f.startswith('clear_page') for f in frames) else 0
+        name = next((n for n, pat in CHECKER_WORK if any(re.search(pat, f) for f in frames)),
+                    'other: ' + ' < '.join(frames[:3]))
+        work_of[name] += int(m.group(2))
+    mean = [ph["netns_reuse"]["check_us_mean"] for ph in out["phases"].values() if "netns_reuse" in ph]
+    print(f"{label}: {checked} namespaces checked, {', '.join(f'{m:.1f}' for m in mean)} us each by the checker's "
+          f"own clock; on-CPU {samples * us:.1f} us a check ({samples} samples), user mode {user * us:.1f} us")
+    calls = {int(k[0]): v for k, v in stats(txt, 'sys', 1).items()}
+    work = {k: v for k, v in calls.items() if SYSCALLS.get(k) != "futex"}
+    print(f"  system calls a check, the futex waits left out: {sum(c for c, _ in work.values()) / checked:.1f} calls, "
+          f"{sum(t for _, t in work.values()) / 1e3 / checked:.1f} us")
+    for k, (c, t) in sorted(work.items(), key=lambda kv: -kv[1][1])[:10]:
+        print(f"  {c / checked:7.2f} calls {t / 1e3 / checked:7.1f} us  {SYSCALLS.get(k, k)}")
+    print("  on-CPU a check by the system call each sample fell in:")
+    for k, v in sorted(counts(txt, 'on_sys').items(), key=lambda kv: -kv[1])[:10]:
+        print(f"  {v * us:7.1f} us  {SYSCALLS.get(k, k)}")
+    print(f"  allocating netlink's answers (__alloc_skb anywhere in the stack): {skb * us:.1f} us a check, "
+          f"{skb_clear * us:.1f} of it clearing pages")
+    print("  on-CPU a check in the kernel, by its work:")
+    for name, v in sorted(work_of.items(), key=lambda kv: -kv[1])[:16]:
+        print(f"  {v * us:7.1f} us  {name[:110]}")
+
+
+def report_devfs(label, out, txt):
+    """A MODE=devfs run, per /dev the pool's thread made (its phases' dev_mounts.made): its system calls, the futex
+    waits and wakes among them, its on-CPU samples by the system call each fell in, and by kernel stack."""
+    made = sum(ph.get("dev_mounts", {}).get("made", 0) for ph in out["phases"].values())
+    taken = sum(ph.get("dev_mounts", {}).get("taken", 0) for ph in out["phases"].values())
+    if not made:
+        print(f"{label}: the pool made no /dev")
+        return
+    samples = int(re.search(r'@samples: (\d+)', txt).group(1))
+    us = 1e6 / profile_hz(txt, 4999) / made
+    calls = {int(k[0]): v for k, v in stats(txt, 'sys', 1).items()}
+    futex = calls.get(next((k for k, v in SYSCALLS.items() if v == "futex"), -1), (0, 0))
+    print(f"{label}: {made} /dev made, {taken} taken; on-CPU {samples * us:.1f} us a /dev made ({samples} samples); "
+          f"futex {futex[0] / made:.2f} calls a /dev, {futex[1] / 1e3 / made:.1f} us")
+    print(f"  system calls a /dev: {sum(c for c, _ in calls.values()) / made:.1f} calls, "
+          f"{sum(t for _, t in calls.values()) / 1e3 / made:.1f} us")
+    for k, (c, t) in sorted(calls.items(), key=lambda kv: -kv[1][1])[:12]:
+        print(f"  {c / made:7.2f} calls {t / 1e3 / made:7.1f} us  {SYSCALLS.get(k, k)}")
+    print("  on-CPU a /dev by the system call each sample fell in:")
+    for k, v in sorted(counts(txt, 'on_sys').items(), key=lambda kv: -kv[1])[:10]:
+        print(f"  {v * us:7.1f} us  {SYSCALLS.get(k, k)}")
+    tops = defaultdict(int)
+    for m in re.finditer(r'@cpu\[\n(.*?)\n\]: (\d+)', txt, re.S):
+        lines = m.group(1).split('\n')
+        cut = next((i for i, line in enumerate(lines) if line.strip() == ','), len(lines))
+        frames = [re.sub(r'\+\d+$', '', line.strip()) for line in lines[:cut] if line.strip()]
+        tops[' < '.join(frames[:4]) or '(user)'] += int(m.group(2))
+    print("  on-CPU a /dev by kernel stack:")
+    for name, v in sorted(tops.items(), key=lambda kv: -kv[1])[:12]:
+        print(f"  {v * us:7.1f} us  {name[:120]}")
+
+
+def kernel_frames(stack):
+    """A @cpu[kstack, ustack] key's kernel frames, innermost first, their offsets cut."""
+    lines = stack.split('\n')
+    cut = next((i for i, line in enumerate(lines) if line.strip() == ','), len(lines))
+    return [re.sub(r'\+\d+$', '', line.strip()) for line in lines[:cut] if line.strip()]
+
+
+def report_oncpu(label, n, txt):
+    """A MODE=oncpu run, per lifecycle: the runtime's own processes' system calls, their on-CPU samples by the system
+    call each fell in and by kernel stack, and the samples spinning on a lock by the stack above the spin."""
+    samples = int(re.search(r'@samples: (\d+)', txt).group(1))
+    user = int(m.group(1)) if (m := re.search(r'@on_user: (\d+)', txt)) else 0
+    us = 1e6 / profile_hz(txt, 4999) / n
+    print(f"{label}: on-CPU {samples * us:.1f} us a lifecycle ({samples} samples, {n} lifecycles), user mode "
+          f"{user * us:.1f} us")
+    calls = {int(k[0]): v for k, v in stats(txt, 'sys', 1).items()}
+    print(f"  system calls a lifecycle: {sum(c for c, _ in calls.values()) / n:.1f} calls, "
+          f"{sum(t for _, t in calls.values()) / 1e3 / n:.1f} us, waits among them")
+    for k, (c, t) in sorted(calls.items(), key=lambda kv: -kv[1][1])[:16]:
+        print(f"  {c / n:7.2f} calls {t / 1e3 / n:7.1f} us  {SYSCALLS.get(k, k)}")
+    print("  on-CPU a lifecycle by the system call each sample fell in:")
+    for k, v in sorted(counts(txt, 'on_sys').items(), key=lambda kv: -kv[1])[:16]:
+        print(f"  {v * us:7.1f} us  {SYSCALLS.get(k, k)}")
+    tops, spins = defaultdict(int), defaultdict(int)
+    for m in re.finditer(r'@cpu\[\n(.*?)\n\]: (\d+)', txt, re.S):
+        frames, v = kernel_frames(m.group(1)), int(m.group(2))
+        tops[' < '.join(frames[:4]) or '(user)'] += v
+        at = next((i for i, f in enumerate(frames) if re.match(SPIN, re.sub(CLONE_SUFFIX, '', f))), None)
+        if at is not None:
+            spins[' < '.join(frames[at:at + 5])] += v
+    print(f"  spinning on a lock: {sum(spins.values()) * us:.1f} us a lifecycle, by the stack from the spin out:")
+    for name, v in sorted(spins.items(), key=lambda kv: -kv[1])[:12]:
+        print(f"  {v * us:7.1f} us  {name[:140]}")
+    print("  on-CPU a lifecycle by kernel stack:")
+    for name, v in sorted(tops.items(), key=lambda kv: -kv[1])[:16]:
+        print(f"  {v * us:7.1f} us  {name[:140]}")
+
+
+def report_threads(label, n, txt):
+    """A MODE=threads run, per lifecycle."""
+    us = 1e6 / profile_hz(txt, 999) / n
+    thread = {m.group(1): int(m.group(2)) for m in re.finditer(r'@thread\[(.*?)\]: (\d+)', txt)}
+    beside = {m.group(1): int(m.group(2)) for m in re.finditer(r'@beside\[(.*?)\]: (\d+)', txt)}
+    print(f"{label}: {sum(thread.values()) * us:.1f} us of CPU a lifecycle in the runtime's threads ({n} lifecycles)")
+    for name, v in sorted(thread.items(), key=lambda kv: -kv[1]):
+        print(f"  {v * us:7.1f} us  {name}")
+    print(f"  beside them on the probe's CPUs, {sum(beside.values()) * us:.1f} us a lifecycle in all:")
+    for name, v in sorted(beside.items(), key=lambda kv: -kv[1])[:10]:
+        print(f"  {v * us:7.1f} us  {name}")
 
 
 runs = []
@@ -197,6 +508,14 @@ if not runs:
 off_runs = [(label, n, offcpu(txt)) for label, n, _p, txt in runs if '@off[' in txt]
 if off_runs:
     report_offcpu(off_runs)
+for label, n, path, txt in runs:
+    if '@futex[' in txt:
+        report_futex(label, n, path, txt)
+for label, n, path, txt in runs:
+    if '@samples:' in txt and '@sys[' in txt:
+        report_checker(label, n, path, txt)
+    elif '@thread[' in txt:
+        report_threads(label, n, txt)
 for label, n, path, txt in runs:
     if '@hold[' in txt or '@fn[' in txt:
         report_locks(label, n, txt, dirs(os.path.join(os.path.dirname(path), f"dirs.{label}.txt")))

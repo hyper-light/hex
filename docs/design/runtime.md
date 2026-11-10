@@ -491,6 +491,133 @@ overlayfs.
 runtime doesn't make. Whether OciSpec boxes get the default seccomp profile (Hex compiles containers/common's)
 is a security posture for the person to choose.
 
+## Decision: SELinux mount labels and AppArmor profiles are applied; where the module is off, skipped with a warning or refused under strict (goal 6, AC-T7.1.4)
+
+Sources and evidence: `docs/research/runtime/goal6-lsm.md`.
+
+- `linux.mountLabel` goes on every filesystem the container's mounts make, as crun and runc label them
+  (research §1). Hex sets it as the `context` parameter of the filesystem's context (`fsconfig`), so an MLS
+  label's commas need no quoting. mqueue takes it as the `security.selinux` xattr on its root. proc, sysfs and
+  cgroup2 take none, and binds make no filesystem. That covers the spec's own mounts, `/dev`, and the tmpfs
+  that masks a directory, on the pruned path and the classic one alike. The node's ready-made `/dev`s, procs
+  and its one empty masking tmpfs were made with no label, so a labelled container takes none of them. Each
+  miss is counted as `Unpooled::MountLabel`.
+- `process.apparmorProfile` is written to `/proc/thread-self/attr/apparmor/exec`, or to `attr/exec` on a kernel
+  without the scoped file, as `exec <profile>`. When no_new_privs is set and the process is already confined,
+  Hex writes `stack <profile>`, as crun does (research §2). The write is part of `init::Becoming`, which every
+  path runs before `execve`: the pruned and classic init, the shim's init, `hex oci exec` and the
+  vfork-style exec clone. It comes before the uid change, while the task still owns its `/proc` files. The
+  file is checked to be on procfs first. An `ENOENT` from the write is refused as "profile not loaded".
+- Where the host's kernel doesn't run the module a label names, the create follows a policy. By default it
+  skips the label: the container runs without it, as crun runs it (research §3), and the create writes a
+  warning naming the field, the value and why (`hex: warning: ...` on the CLI's or the node's stderr), so
+  nothing is dropped unseen (CLAUDE.md §3). Under `HEX_OCI_LSM=strict`, read by the command line and the
+  node (`lsm::ENV_POLICY`), it refuses the spec by name instead, as runc does, for an owner who wants
+  fail-closed. Where the module runs, a label it can't apply is refused under either policy. This is the
+  lead's bar for goal 17 (2026-11-06): the goal reads "all 28 tests crun passes" on each host, and no one
+  kernel runs both modules (research §4). Until then Hex refused under every policy.
+- How the kernel is asked. AppArmor through `/proc` alone, so the answer holds in a container's init, `/sys`
+  mounted there or not: its scoped `current` attribute reads `EINVAL` where the module isn't active
+  (`fs/proc/base.c:2915-2916`, `security/security.c:3764-3774`); on a kernel without the scoped attributes,
+  Hex reads `/sys/module/apparmor/parameters/enabled` (crun's and runc's test). SELinux by a tmpfs's
+  `seclabel` flag, which SELinux claims and ignores (`security/selinux/hooks.c:2851`, `:1016-1018`) and no
+  other module claims (`fs/fs_context.c:137-148`). The `context` key can't tell, since SELinux refuses an
+  invalid label there too (`:1059`). That test works in a container with no selinuxfs mounted, where crun's
+  `/proc/mounts` test gets it wrong. A rootless agent may make no filesystem in its own namespace (`fsopen`
+  is `EPERM` there), so it reads whether selinuxfs is mounted at `/sys/fs/selinux` instead.
+- The create decides, once, before it makes anything (`lsm::admit`). The init and the exec paths apply what
+  the kernel takes and skip a module it doesn't run, which the create has already warned of, or, under
+  strict, refused.
+- `process.selinuxLabel` is still refused by name: nothing in the suite checks it, and no step asks for it yet.
+- Falsified by a run in which a labelled container's tmpfs reads a label other than the spec's, or a
+  profiled container's `/proc/self/attr/current` names another profile, or a label is skipped with no
+  warning, or one is skipped under strict.
+
+## Decision: createContainer and startContainer hooks run in the container, at the spec's points (AC-T7.1.4)
+
+**What.** Before this decision, the runtime ran prestart, createRuntime, poststart and poststop, and parsed but
+never ran createContainer or startContainer: a silent drop (CLAUDE.md §3). Now every create- and
+start-time hook runs where the spec puts it:
+
+- The init makes its mounts and `/dev`, then stops before its root switch and says `H` on the sync pipe.
+  The runtime runs prestart, then createRuntime, in its own namespaces, given `created` and the init's
+  pid as the runtime sees it. Then it hands the init that state on the map pipe as a frame (a 4-byte
+  length, then the JSON; at most twice the config's bound). The init runs the createContainer hooks
+  itself, in its namespaces, given `created` and the pid it sees. Then it applies the masks and
+  read-only paths and switches root, as runc does.
+- At `start`, once the init's open of the exec FIFO returns, the init runs the startContainer hooks inside
+  the root, given `created`. Only then does it write the FIFO's byte and exec. A failing hook writes `h`
+  and the reason in place of the byte, and the init ends. `start` reads that without taking it
+  (`tee(2)`, so a second start at once sees what the first did) and fails with the reason. `start` waits
+  its own patience plus the hooks' timeouts, which create records in the state (`startContainer`, Hex's
+  own field, append-only).
+- A spec with any of these four hook lists takes the classic path (`ClassicReason::Hooks` as root,
+  `Rootless` rootless). The pruned init holds no map pipe; one handed such a spec anyway is refused.
+- A hook's path must be absolute and its timeout above zero, or the spec is refused by name. Each hook
+  holds only its stdio (the `sweep_on_exec` sweep). Its stdin is written without blocking, so a hook that
+  doesn't read it can't hold the runtime past its timeout.
+
+**Why.** createContainer "MUST be called … before the `pivot_root`" and "after the `createRuntime` hooks",
+and createRuntime also before the pivot (config.md:607, :618-619), so createRuntime moved too: Hex had
+run it after the switch. A container-namespace hook's pid is "the pid as seen by the container"
+(runtime.md:27), which only the init knows. Every create- and start-time hook is given `created`: the
+four lists are lifecycle steps 3 to 7, "after step 2", where `created` begins (runtime.md:19-20). crun
+gives the same (container.c:1074, :2664, :2672), and runtime-tools' `hooks_stdin` checks it for prestart.
+runc gives `creating`, and so did a first cut of this change, which failed `hooks_stdin`. The lifecycle orders startContainer, then the program, then
+poststart, and a failed startContainer hook makes the runtime "generate an error" (runtime.md:69-73).
+runc and crun answer `start` before their startContainer hooks run (runc v1.5.2
+`standard_init_linux.go:269`, `:283-289`; crun 1.30.1 `container.c:1309-1384`). So their poststart can
+run before startContainer ends, and a startContainer failure surfaces after `start` has already
+succeeded. Writing the byte after the hooks keeps the spec's order and reports the failure from `start`.
+Sources: `docs/research/runtime/oci-hooks.md`.
+
+**Two changes to what Hex did, each the spec's.**
+- prestart and createRuntime now run before the root switch, where they had run after it, with the container
+  at the exec FIFO and its state written. config.md:607 puts createRuntime before the pivot, and :619 puts
+  createContainer after it. So node_socket's `At::Init` crash point now holds a create whose state isn't
+  written. A new point, `At::CreateContainer`, holds it inside a createContainer hook, past the init's `H`
+  stop. Both recover with nothing of the box left (T-T7.1.2).
+- Every create- and start-time hook is given `created` (runtime.md:19-20), not runc's `creating`.
+
+**A start cut in its startContainer hooks.** The init holds its start byte until its hooks have run. So
+if the node agent stops meanwhile, the start's end of the FIFO is gone by the time the init writes.
+- The init is a `hex` process, which Rust's runtime starts with SIGPIPE ignored, so its write fails with
+  EPIPE. It then ends with status 122 (`hooks::START_ABANDONED`), not by the signal and not with its
+  127 for a failed set-up.
+- The restarted agent can't read that status: the init is no longer its child. So `start` marks a
+  container with startContainer hooks as starting (`start-begun` in its state directory) before it waits,
+  and removes the mark when it returns.
+- Recovery reads the mark beside a FIFO still named as a start that never took. It removes the box by
+  `Why::StartInterrupted`, says so, and leaves nothing (node_socket's `At::StartContainer`, T-T7.1.2).
+- A container without these hooks writes no mark: its start is unchanged.
+
+A spec with no create- or start-time hook takes the path it took before: the init never stops (`H`
+comes only from `Hooks::sync_init`), the shim closes the map pipe before its fork as before, and the
+pruned path's routing test is the same except that it now also sends startContainer classic.
+
+**Evidence.** `crates/hex-cli/tests/oci_box.rs`,
+`create_and_start_container_hooks_run_in_the_containers_namespaces` (AC-T7.1.4, T-T7.1.4). It fails at
+the test's commit and passes after the fix, rootless (the seed's classic path) and as root (the shim):
+fedora, 2026-11-04, unit hex-hooks-failpass-20261104T090150Z, `bench/oci-validation/hooks-20261104.txt`.
+Each hook's namespaces equal the init's, its state and pid are as the spec says, the order holds, each
+hook holds only its stdio, a startContainer hook alone routes classic, and each failing hook fails its
+operation by name. Two `run.rs` unit tests cover the shim's `P`/`H` race, and an init that is ready
+without stopping for its hooks, which is refused. runtime-tools bd3b0bd before and after: 26 pass and 32
+fail both, and no test's result differs (the same record).
+The lead's conditions, recorded in `bench/oci-validation/hooks-conditions-20261104.txt`:
+- `At::Init` and `At::CreateContainer` each recover with nothing left.
+- A hookless create writes the same sync lines (`P R`, no `H`) and makes the same calls per syscall at
+  ca6dc80 and after (`hooks_trace.sh`).
+- ca6dc80's binary reads and deletes the new state.
+- A failing createContainer hook and a failing startContainer hook each come back as an `Os` refusal
+  naming the hook.
+- The create breakdown A/B on the pruned path, ca6dc80 against the fix, shows a hookless create at
+  0.997x and 0.998x the earlier binary's p50, in the same rounds, in two runs.
+
+**What would falsify it.** A runtime-tools test that passed before and fails after. A hook that observes
+a namespace other than the init's. A startContainer hook that finishes after its program starts. Or a
+spec with create- or start-time hooks that creates and starts without running them.
+
 ## Decision (proposed 2026-10-31, for Ada): each OS runs its own boxes natively; a Linux guest only for Linux images
 
 Ada's requirement (2026-10-31): "Why can't we run natively on Windows and MacOS? This is a requirement." The
@@ -516,7 +643,7 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
     the spawn SPI the macOS SDK ships no prototype for; flags from `bsd/sys/spawn_internal.h`), so the kernel
     `SIGKILL`s a member the instant its footprint crosses the bound — 0 overshoot, no privilege. It bounds a
     single-member box, and any one runaway member, exactly, and lets the watcher read a fully-armed box
-    holding at most one member only at the ceiling (~0.1% of a core). The cap is per process, doesn't survive
+    holding at most one member only when it changes (a fork, an end). The cap is per process, doesn't survive
     a fork, and caps each member at the whole bound, so it does not bound a multi-member tree's footprint
     *sum* — layers two and three do. Layer two, the **primary** for a many-member box, is kernel-enforced and
     event-driven, armed by the privileged helper (step 2; root alone suffices, `kern_memorystatus.c:9192-9193`):
@@ -524,12 +651,16 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
     members so the limits sum to the bound, so the kernel fires a Mach `EXC_RESOURCE` the instant the tree
     crosses it (by pigeonhole some member crosses its share) — near-zero overshoot, ~zero watcher CPU,
     bounding the whole tree, and re-arming a forked child, which layer one can't. Layer three is
-    **defense-in-depth**, the whole bound on a node with no helper: Hex's own polling rule, a Mach
-    time-constraint thread that reads each member's footprint (`proc_pid_rusage`) on `NOTE_CRITICAL` kqueue
-    timers, every (bound - footprint) / the machine's measured allocation rate (floor 250 µs, ceiling 100 ms),
-    and ends the box past its bound (an eviction by a stated rule, CLAUDE.md §2). A rootless, kernel-enforced
-    per-process cap thus **does** exist — at spawn, layer one — but re-arming a *running* task and apportioning
-    a bound across members need root (`memorystatus_control` → `EPERM`, `task_set_phys_footprint_limit` →
+    **defense-in-depth**, the whole bound on a node with no helper: Hex's own polling rule, a timeshare
+    thread (no priority over other programs, Ada's rule 2026-11-03) that reads each member's footprint
+    (`proc_pid_rusage`) on `NOTE_CRITICAL` kqueue timers, every (bound + 64 MiB - footprint) / the node's
+    machine class's recorded worst aggregate rate, learned up as it sees faster growth (51.05 GB/s for the
+    M4 Max; floor 250 µs, no ceiling), and ends the box past its bound (an eviction by a stated rule,
+    CLAUDE.md §2). It holds step 1's 64 MiB bar up to one member per core, its recorded limit; past that its
+    thread doesn't run often enough, and the ledger layer holds the box (Ada's two-layer bound, 2026-11-01;
+    the lead, 2026-11-06). A rootless, kernel-enforced per-process cap thus **does** exist — at spawn, layer
+    one — but re-arming a *running* task and apportioning a bound across members need root
+    (`memorystatus_control` → `EPERM`, `task_set_phys_footprint_limit` →
     `KERN_NO_ACCESS` unprivileged; `RLIMIT_AS`/`RLIMIT_RSS` → `EINVAL` and unenforced, `EVFILT_MEMORYSTATUS`
     absent, `proc_rlimit_control` has no memory cap; `bench/native/macos/mem_bound_probe.c`,
     `docs/research/runtime/macos-spawn-jetsam-cap.md`). Built and measured on the Mac Studio through the
@@ -537,9 +668,40 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
     held at its bound (`bench/native/macos/RESULT.md`, record `macos-box-ext-b285d07-20261101T223556Z.txt`);
     layer three alone holds the bound to ≤48 MiB with up to one member per core (~12-15% of a core held) but,
     being an eviction by a rule, can't tightly bound a box filling more than every core (28 members spike) —
-    which is exactly what the step-2 ledger layer catches. CPU is bounded by priority alone: a
-    QoS class, and background priority where the box's weight is low. A box that asks for confinement gets App
-    Sandbox's, which every child inherits (§3). The class's own purpose is trusted code that must not starve
+    which is exactly what the step-2 ledger layer catches. Paced by headroom plus the bar at the recorded
+    worst aggregate rate (no ceiling, 2026-11-06), layer three costs a many-member 256 MiB box 1.5-2.5% of a
+    core far from its bound and 4-7.5% near it, and a one-member armed box nothing
+    (`records/watcher-headroom-cpu-f18e6ee-20261106T1737Z.txt`). Under load the watcher's wake comes late
+    (up to 79 ms past its wait on Mac16,9, its timeshare thread waiting for a core beside the box's own
+    members and other programs; `records/watcher-wakes-load-0cb6e11-20261108T2114Z.txt`), and a box filling
+    at the recorded rate passes its bar by what it grows meanwhile. So layer three holds what of such a box it
+    must (the graded hold: the lead, 2026-11-08, the box's own bound enforced, as Linux's `memory.high`
+    throttles a cgroup near its limit, slowing no other program; 2026-11-09, as many members running as the
+    bound allows): at each read, the members whose own rates over the wait and the lateness fit the box's
+    headroom run across the wait, each in turn, and the rest are held stopped (SIGSTOP), the box then read at
+    the floor (`hex_core::watch::Watch::runs`). Every input is measured: the headroom is the bound and the bar
+    less the read's footprint; the lateness is the latest the node's watchers have acted past their waits
+    (a wake, its read and its stops), learned from the reads' own delays from the class's record up; each
+    member's rate is what its own runs showed (what it grew across the last wait, or the fastest its runs for a
+    read have shown while they show it growing, 0 once one doesn't), one no run has shown yet at the recorded
+    rate, and a run that gave a member no core (a thread runnable, none of its own code run) shows nothing of
+    it. Each read runs one held member, stopped again first, so its rate shows. XNU stops a running process by
+    holding its threads, then waiting for each to leave its core (`place_task_hold`, `task_wait_locked`,
+    `thread_wait`), and the stopping thread then waits for a core of its own, so a stop of several running
+    members, one by one or from a thread each, lets those not yet held run on: on adas-mac-studio-3
+    (2026-11-09, launchd `hex-macos-stops-cmp-20261109T194931Z`, 8 hogs, 300 interleaved reads a way beside
+    0, 7 and 14 CPU-bound programs) a box's members grew 85-226 MiB past its read at p99 stopped one by one,
+    88-226 MiB stopped from a thread each, and at most 0.06 MiB with one member running. A member started
+    beside another waits stopped for the watcher's next read, and the watcher continues only what it stopped,
+    so a member the box's own programs stopped stays stopped. Light checks on the same machine (2026-11-09,
+    launchd `hex-macos-graded-20261109T200810Z`, host load about 15) held the bar beside 0, 7 and 14
+    CPU-bound programs, with 1, 4, 8 and 14 members three passes each and 28 and 56 once, the worst 3.4 MiB
+    past the bound; the bench and its record follow the merge. CPU follows the box's declared weight, as
+    `cpu.weight` sets a box's share on Linux: a box at the default weight runs unclamped, at the QoS the
+    node's own programs run at, and one whose weight is under the default runs at background QoS (darwin
+    background: lowest CPU priority, I/O throttled). No clamp keeps the watcher ahead of a box (the lead,
+    2026-11-06, under Ada's 2026-11-03 rule). A box that asks for confinement gets App Sandbox's, which every
+    child inherits (§3). The class's own purpose is trusted code that must not starve
     the machine, and that purpose doesn't need it. Under the helper the ledger limits sum to the bound less a
     reserve (`hex_core::boxuser`), the fork window's room; layer three there is event-driven, with no
     period (the lead's call, 2026-11-06, under Ada's rule that no constant is picked): the daemon watches every
@@ -551,7 +713,8 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
     watched; from then on every fork posts an event (`docs/research/runtime/macos-box-user-and-ledger.md`).
     The helper's privileged calls are `crates/hex-runtime/src/macos/helper_sys.rs`, CLAUDE.md §12: its lines
     `d4252f3` (the file and its fork, user drop, ledger and exception arming) and `a960732` (the `mach_msg`
-    crossing receive) were approved by Ada on 2026-11-06, as written. A node with no helper runs the
+    crossing receive) were approved by Ada on 2026-11-06, as written, and so was `caa6e9f` (the child's
+    `RLIMIT_NOFILE`). A node with no helper runs the
     class as step 1's, and says so in its inspect (`BoxInfo.membership`).
 
     **A program's end** is the helper's to collect, since it is the program's parent and `waitid` answers no
@@ -641,12 +804,13 @@ lacking any of it "refuses that class by name, saying what's missing", and "Unin
   113) and by its socket answering (§3.5). Without the helper the `process` class still runs, as a process
   group under step 1's watcher, and its inspect says so: Ada's call in the plan's step 2 (2026-11-01), "Both
   run on a node with the helper; polling alone runs on one without". The refusal by name covers only what
-  can't run without the helper. Concretely (`scripts/install/macos.sh`): the pool is `_hexbox1`..`_hexbox30` in
-  group `hexbox`, and the users whose nodes may reach the helper are put in a group `hexnode`; their ids start at
-  320 (`hexnode`'s gid, then `hexbox`'s, then the pool's uids 322-351), inside sysadminctl's 200-400 role-user
-  range and between Apple's own (300-308 on macOS 26.2) and Nix's (350-382), measured in §3.1, and any taken id,
-  name or a live process at a pool uid is refused by name before anything is made (`--first-id` moves the
-  range). The helper runs from a root-owned copy of `hex` in `/Library/PrivilegedHelperTools` (Docker's place
+  can't run without the helper. Concretely (`scripts/install/macos.sh`): the pool's group is `hexbox`, and the users
+  whose nodes may reach the helper are put in a group `hexnode`; the two gids are learned at install time:
+  the first run of 2 ids in Apple's role-account range, 450-499 (`sysadminctl`'s usage on macOS 26.4, §3.1),
+  that no user, group or process holds. The helper makes the pool's users (`_hexbox1`, `_hexbox2`, …) on
+  demand, each at the first role uid then free, recorded in the manifest before it is made (the lead's
+  call, 2026-11-06: no picked pool size; one account path, the helper's). Any taken name is refused by name before anything is made,
+  and so is a range with no free run (`--first-id` names a start instead). The helper runs from a root-owned copy of `hex` in `/Library/PrivilegedHelperTools` (Docker's place
   for its helper, §3.2), never from `/usr/local/bin`, which Homebrew gives the user on Intel Macs, so no user can
   replace what runs as root. Its socket is `/var/db/hex/box-helper.sock` (persistent, so launchd's start at boot
   finds its folder), in a folder `root:hexnode 0750`: a new file takes its folder's group (open(2)'s BSD
@@ -658,10 +822,12 @@ lacking any of it "refuses that class by name, saying what's missing", and "Unin
   controller, isn't the node's user's, or holds processes refuses the box root of both classes, naming what's
   missing and the installer (HEX-INST-1); on Windows, the `oci` class names each feature that's off and says
   the installer turns it on (HEX-INST-2), the state read without elevation from `Win32_OptionalFeature`
-  (§2.4: Microsoft lists no restriction on reading it, to be measured as a standard user on jupiter) by
-  PowerShell run as the member of a job-object box of its own, so its wait is the class's bounded one and the
-  box's end takes whatever it left, within `hex_core::setup::FEATURE_QUERY_PATIENCE` (twice the slowest
-  recorded run); `hex_core::setup::features_off` parses its listing and refuses anything else by name. The
+  (§2.4: Microsoft lists no restriction on reading it, to be measured as a standard user on jupiter) in
+  process, through WMI's COM interface (`windows/wmi.rs`, §2.6; the Hex lead's call, 2026-11-06, after the
+  PowerShell read it replaces ran past its bound for ~50 s on jupiter), each wait bounded by WMI's own
+  timeout and the caller's wait by `hex_core::setup::FEATURE_QUERY_PATIENCE` (twice the slowest recorded
+  feature read), at most one read in flight even if COM remains blocked, no process started;
+  `hex_core::setup::features_off` parses its rows and refuses anything else by name. The
   installer asks the same query through `hex setup features` (one `<name> on|off` line each) rather than
   querying Windows itself, so there is one query and one bound (HEX-INST-9).
 - **Done when** (the plan's criterion): on a machine fresh of Hex the one admin step leaves every class working
@@ -852,6 +1018,44 @@ before anything is spawned (`docs/research/runtime/exec-size-bounds.md`).
 - **What would falsify it:** a program the count admits that the OS's exec refuses with `E2BIG` (the count is short),
   or a kernel whose formula changes; either is fixed in the count or the read, and HEX-RT-14 re-run.
 
+## Decision (native plan step 8, 2026-11-08): a macOS rootless box outlives its node and is taken back with a new watcher
+
+T-T7.1.2 asks that a node restarted after a crash take each live box back, as Linux's does; the step names "macOS
+rootless boxes left with no watcher" as what must change to meet it. Linux's boxes are cgroups, which outlive the
+node by construction. A macOS rootless box is its process group (the leader's pid), held by a watcher thread in
+the node, so the node's death leaves the members running without a bound.
+
+- **What survives.** The members do: when a process's parent exits, XNU reparents its children to launchd
+  (`bsd/kern/kern_exit.c`, `proc_reparentlocked` to `initproc`), which reaps them, so they run on, unbounded,
+  until the node is back. Their process group is unchanged.
+- **What names them.** The group id with its leader's start time (`proc_pid_rusage`, `ri_proc_start_abstime`),
+  read at the leader's spawn while it is the node's unreaped child, and recorded with the box in the node's
+  state (the record's `init`, a `ProcId`, its `start_ticks` holding the Mach start time). The group is still the
+  box's when its leader runs with that start time, or when no process has the leader's pid. A live process with
+  that pid and another start time was given it since and leads a group of its own: the box is then taken back
+  empty, and the rootless gap the class already states (a recycled leader pid) is why box users close it.
+- **Taken back.** The restarted node runs Linux's decisions (`hex_core::recovery`) over its records
+  (`hex_node::recorded::Recorded::recover`). A record made is taken back: the class makes a box on the recorded
+  group (`ProcessBox::adopt`), and its watcher lists, measures and ends the members as it does its own, since none
+  of that needs parenthood. The members' own ends are launchd's to reap, and their exit statuses aren't the
+  node's. A record being made or removed is removed, and what its group still runs is killed
+  (`process::end_group`).
+- **The fact it waits on.** XNU's `EVFILT_PROC` catches only events after its attach (`bsd/kern/kern_event.c`,
+  `filt_procattach`). So the node's socket re-reads a watched program's `proc_pid_rusage` after attaching and
+  reports an end that came before. Measured on adas-mac-studio.local-2 through `hex node`: without it, 2 of 12
+  suite runs stalled 60 s on a lost end; with it, 0 of 12.
+- **Evidence.** crates/hex-cli/tests/macos_node_recovery.rs: `hex node` killed (SIGKILL) with a box running, one
+  empty, one mid-create (held in its record write by a FIFO at the write's temp path, and seen held there by
+  `sample(1)`) and one mid-delete (its record deleting, its member running). Restarted on the same state, it takes
+  back the running box with its member still running, which a delete then ends, and the empty one. It leaves
+  nothing of the others: no record, no temp file, no member. The tests failed on the tree before the change
+  (NoSuchBox; the temp file left; the member not ended) and pass after.
+- **What would falsify it.** A rootless member that changes its process group without `setsid` (`setpgid` into
+  another group) leaves the box as a daemonizing one does, and is lost to recovery as it is to the watcher. A
+  macOS that stopped reparenting orphans to launchd, or reaped a group's members with its leader, would end
+  boxes with their node. Box users name a box by its uid, which recovery reads the same way, so neither gap is
+  theirs.
+
 ## Decision (proposed, native plan step 8): the Windows node, on one completion port, its boxes outliving it
 
 Step 8 puts Hex's node agent on Windows over the one socket core every OS shares (`hex_node::serve`, its `Os`
@@ -859,16 +1063,23 @@ trait; step 8a, `cp/t7-native-s8` 6c900ccc). This proposes Windows' `Os`, how an
 and how a box outlives its node so a restarted node takes it back (T-T7.1.2). It's proposed: the parts marked
 *to measure* are checked on jupiter before the code lands, and the stdio part waits on its record.
 
-**Events: one I/O completion port, every source on it by a documented call.** The core's `Os::wait` is
+**Events: one I/O completion port, every source on it.** The core's `Os::wait` is
 level-triggered readiness (epoll, kqueue); a completion port reports finished operations. The Windows `Os`
 turns each source into a completion on the one port (`GetQueuedCompletionStatusEx`):
 - *Wake*: `PostQueuedCompletionStatus` with the wake's key.
-- *A program's end*: `RegisterWaitForSingleObject` on the member's process handle, its callback posting the
-  program's token to the port. Not the job's `JOBOBJECT_ASSOCIATE_COMPLETION_PORT` messages, which the plan
+- *A program's end*: a wait completion packet on the member's process handle (ntdll's
+  `NtCreateWaitCompletionPacket` and `NtAssociateWaitCompletionPacket`, undocumented in the SDK; the Windows
+  thread pool and Go's runtime use them), which the kernel queues to the port itself when the process ends,
+  with no thread between. Not the job's `JOBOBJECT_ASSOCIATE_COMPLETION_PORT` messages, which the plan
   names: Microsoft documents that, but for notification limits, their delivery "is not guaranteed", a lossy
   source CLAUDE.md §3 forbids (`docs/research/runtime/windows-job-objects.md` §4). The process handle's
   signal is the kernel's own end of the process, so no end is missed, and a pid given out again can't be
-  mistaken for it (the handle names the process, not the pid).
+  mistaken for it (the handle names the process, not the pid). *Measured* against
+  `RegisterWaitForSingleObject`, whose thread-pool callback posts to the port (jupiter, 2026-11-08,
+  `stdio_probe endwait`, `bench/native/records/endwait-jupiter-20261108T022608Z.txt`): from the signal on,
+  the packet was faster (p50 12.9 against 28.2 us, in 281 of 300 paired rounds), and a terminated program's
+  own teardown hid the difference. That run fell in jupiter's NTFS stall, so it is void as timing, and the
+  packet is provisional until the run is retaken on a clean jupiter.
 - *A connection readable*: one overlapped `WSARecv` into the connection's buffer, posted only while the
   core reads the connection and no message read from it waits, so a client the core has stopped reading
   holds one buffer and what was decoded from it. Its completion is the bytes (or the peer's end, a read of
@@ -887,6 +1098,21 @@ turns each source into a completion on the one port (`GetQueuedCompletionStatusE
   afunix.sys completes it on the port when a client connects, and the socket it took reads its peer's pid
   once `SO_UPDATE_ACCEPT_CONTEXT` is set. The accepted socket joins the port before the accept starts, and
   once only (a second join is refused, `ERROR_INVALID_PARAMETER`: `tests/windows_node.rs` found it).
+- *A host's own connection* (its guest's control connection, the core's `Source`, which reads and writes it
+  itself and never waits): its socket's network events, which Winsock records on an event of the watch's own
+  (`WSAEventSelect`: bytes or its end to read, and room to send while its writes wait), and a wait completion
+  packet on that event queues them to the port, as a program's end is queued. Not a zero-byte `WSARecv`: that
+  tells when bytes or the end came, never when room came back, and room reported at every ask would have the
+  core write, find none and ask again without end. Winsock records what holds as a watch is set (its
+  "persistence of network events"), so each watch reads afresh what holds, and one reported is reported at
+  each wait until the core watches it again: the level-triggered readiness the core takes. The socket never
+  joins the port, so it stays its owner's. `ProcessSocketNotifications` does this in one call, but from build
+  20348 on; afunix.sys's floor is 1803. *Measured* (jupiter, 2026-11-09, `hex_afunix`'s
+  `a_sockets_watch_reports_each_arm_once` and `serve/windows_tests.rs`, red at d3a300de, green at 2e490369):
+  each arm is reported once at most, at once when what it watches for holds as it is armed (a packet
+  associated with an event already set is queued at once, so nothing need post it again); a full connection
+  is reported for room only once it has room; and `tests/guest_loop.rs`' HEX-SOCK-5 holds through it, a guest
+  booted again included.
 - *Who the peer is*: `SIO_AF_UNIX_GETPEERPID`, then the process's user from its token, as Linux's
   `SO_PEERCRED`.
 Messages are framed over the stream (`hex_core::stream`), as on macOS: Windows' AF_UNIX is `SOCK_STREAM`
@@ -910,8 +1136,46 @@ each door's check, while the caller gets every byte; `hex node` refuses such a c
 2026-11-08, `stdio_probe refuse-as`, `bench/native/records/other-user-jupiter-20261108T0220Z.txt`).
 What no transport can stop: a process of the caller's own user may open the caller's process and take any
 handle in it (`PROCESS_DUP_HANDLE`), its own connection included, so "only the caller" means only through
-the node, as Linux's `SCM_RIGHTS` means it. The fastest candidate that passes is chosen when the timed run of
-record is in.
+the node, as Linux's `SCM_RIGHTS` means it. **The pick: dup** (the lead's ruling, 2026-11-09). A first timed
+run (the old Windows agent's, `cp/t7-native-windows` f84fbd88, 300 rounds a candidate of 4 MiB streams) put
+framed's first byte lowest (p50 15 us) and its throughput lowest too (p50 9.2 GB/s); a connection or a named
+pipe per stream gave the most throughput (p50 14.3 GB/s), each behind a handshake (first byte p50 100 and 50
+us) and a door; dup sat between (p50 32 us, 12.8 GB/s). Dup is chosen on the stream design's own rule: the
+caller gets a real OS pipe handle, what a program's stdio is, with no copy in the caller's client. Framed's
+faster first byte doesn't outweigh that, since framed makes the client copy every byte, at the lowest
+throughput. That run isn't of record: its batches of ten each ran in a fresh probe process younger than a
+second, so its load column holds no whole second's reading, and s4's criterion 2 ran beside it. The record is
+retaken on a jupiter free of other work by a probe that no longer hangs. Its rounds didn't hang in a handshake,
+as that run's note had it: each waited for its streams' ends, and a `conn` stream's end, its connection's
+graceful close, never reached the caller about once in 100 streams (afunix.sys's lost wakeup, the next
+paragraph's finding; traced on jupiter, 2026-11-09, every hang with the stream's bytes all in). The probe now
+reads the bytes it asked for and waits for no end (`tests/bench_ends.rs`, red at 831c09f1).
+
+**A connection's end: held, then reset, never an end-of-stream (the hostile-frame hang; Ada's ask and the
+lead's rulings, 2026-11-09).** A connection the node ends (a hostile frame, a refusal at the door, the
+disconnect rule) is to bring its last message and then its end. A graceful close on afunix.sys doesn't make
+that so. *Measured* on jupiter with a test that sends one node a hostile frame on each of 300 connections in
+turn: a client in another process that had read the node's whole refusal never saw the end on about 2% of
+them, in every graceful variant tried (close alone, `SD_SEND`, `SD_BOTH`, closed after the send completed,
+half-closed and held open until the peer closed; the client's socket overlapped or not), 2 to 30 a run of
+300 under four nodes' load, and never in-process (0 of 600); a probe of its own with blocking sockets on both
+sides lost 12 of 2,990 (`stdio_probe peerclose`). Traced: the node shut down and closed each connection, and
+the client's blocked `recv` was never woken. With `SD_SEND` first and a reset after the wait, 1 to 5 of 300
+connections per node still hung: the node reset each 24-34 ms in, but a read that had missed the
+end-of-stream stayed blocked through the reset, waking only on its own next call (a byte the client sent drew
+`ECONNRESET`). A reset with no end-of-stream before it (`SO_LINGER`, no linger) woke every read (0 of 3,000
+kept) but, done at once, discarded the refusal in 12 to 83% of rounds. So the Windows `Os` closes an ended
+connection in two phases and never sends it an end-of-stream: once its last send has completed it is held, a
+receive under way, and closed gracefully when the peer closes; one whose peer hasn't closed within a learned
+wait is reset. The wait gives the peer the time to read the last message, which the reset would discard. It
+is Hex's rule for learned waits: twice the slowest of the end-to-peer-close record and what the node has seen
+since, so it only rises. The record (`stdio_probe peerclose` at dac212ce, f6fd84a2,
+`bench/native/records/peerclose-jupiter-dac212ce-20261109T1834Z.txt`): a peer that reads to its end closes
+within 56 us on a quiet jupiter and within 2,883 us (p99.9 626 us) beside a workspace build holding a third
+of the machine, so the wait starts at 5.766 ms. With this shape, 0 of 3,000 connections were kept and 0
+refusals lost (two passes of 300 rounds alone and four nodes at once), each ended by the reset.
+`tests/windows_node.rs` holds it: each of 300 hostile connections must bring its whole refusal, then its end
+(red at 1426f7b6, green at beaf22ee).
 
 **Recovery: a box outlives its node through a keeper, and the restarted node takes it back (T-T7.1.2;
 the lead's decision, 2026-11-08).** Today a Windows box ends with the node's last handle: its job is
@@ -1000,44 +1264,6 @@ for the service to bring it back.
 **Falsifier:** the crash-restart tests (step 8's): the node killed with boxes running, mid-create and
 mid-delete, then restarted on the same state directory; each must fail on the tree before this change and
 pass after.
-
-## Decision (native plan step 8, 2026-11-08): a macOS rootless box outlives its node and is taken back with a new watcher
-
-T-T7.1.2 asks that a node restarted after a crash take each live box back, as Linux's does; the step names "macOS
-rootless boxes left with no watcher" as what must change to meet it. Linux's boxes are cgroups, which outlive the
-node by construction. A macOS rootless box is its process group (the leader's pid), held by a watcher thread in
-the node, so the node's death leaves the members running without a bound.
-
-- **What survives.** The members do: when a process's parent exits, XNU reparents its children to launchd
-  (`bsd/kern/kern_exit.c`, `proc_reparentlocked` to `initproc`), which reaps them, so they run on, unbounded,
-  until the node is back. Their process group is unchanged.
-- **What names them.** The group id with its leader's start time (`proc_pid_rusage`, `ri_proc_start_abstime`),
-  read at the leader's spawn while it is the node's unreaped child, and recorded with the box in the node's
-  state (the record's `init`, a `ProcId`, its `start_ticks` holding the Mach start time). The group is still the
-  box's when its leader runs with that start time, or when no process has the leader's pid. A live process with
-  that pid and another start time was given it since and leads a group of its own: the box is then taken back
-  empty, and the rootless gap the class already states (a recycled leader pid) is why box users close it.
-- **Taken back.** The restarted node runs Linux's decisions (`hex_core::recovery`) over its records
-  (`hex_node::recorded::Recorded::recover`). A record made is taken back: the class makes a box on the recorded
-  group (`ProcessBox::adopt`), and its watcher lists, measures and ends the members as it does its own, since none
-  of that needs parenthood. The members' own ends are launchd's to reap, and their exit statuses aren't the
-  node's. A record being made or removed is removed, and what its group still runs is killed
-  (`process::end_group`).
-- **The fact it waits on.** XNU's `EVFILT_PROC` catches only events after its attach (`bsd/kern/kern_event.c`,
-  `filt_procattach`). So the node's socket re-reads a watched program's `proc_pid_rusage` after attaching and
-  reports an end that came before. Measured on adas-mac-studio.local-2 through `hex node`: without it, 2 of 12
-  suite runs stalled 60 s on a lost end; with it, 0 of 12.
-- **Evidence.** crates/hex-cli/tests/macos_node_recovery.rs: `hex node` killed (SIGKILL) with a box running, one
-  empty, one mid-create (held in its record write by a FIFO at the write's temp path, and seen held there by
-  `sample(1)`) and one mid-delete (its record deleting, its member running). Restarted on the same state, it takes
-  back the running box with its member still running, which a delete then ends, and the empty one. It leaves
-  nothing of the others: no record, no temp file, no member. The tests failed on the tree before the change
-  (NoSuchBox; the temp file left; the member not ended) and pass after.
-- **What would falsify it.** A rootless member that changes its process group without `setsid` (`setpgid` into
-  another group) leaves the box as a daemonizing one does, and is lost to recovery as it is to the watcher. A
-  macOS that stopped reparenting orphans to launchd, or reaped a group's members with its leader, would end
-  boxes with their node. Box users name a box by its uid, which recovery reads the same way, so neither gap is
-  theirs.
 
 ## Open (STATUS.md)
 

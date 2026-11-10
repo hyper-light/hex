@@ -55,6 +55,7 @@ impl Fixture for BinFixture {
             id,
             bounds,
             class: ClassSpec::Process,
+            owner: None,
         }
     }
 
@@ -101,6 +102,7 @@ fn refused_bundle(config: &serde_json::Value) -> hex_api::Refusal {
             id: BoxId::new("oci-on-windows").unwrap(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(root.path().to_path_buf()),
+            owner: None,
         })
         .unwrap_err();
     assert!(rt.list().unwrap().is_empty(), "the refused box is left");
@@ -196,6 +198,7 @@ fn a_windows_image_stays_the_hosts_and_a_linux_image_goes_to_the_guest() {
             id: BoxId::new(name).unwrap(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(dir),
+            owner: None,
         }
     };
     let windows = bundle(
@@ -330,6 +333,7 @@ fn a_box_past_its_bound_is_refused_at_the_bound() {
             ..Bounds::default()
         },
         class: ClassSpec::Process,
+        owner: None,
     })
     .expect("create");
     let mut p = rt
@@ -361,6 +365,7 @@ fn a_box_under_its_bound_runs_and_reports_its_exit() {
             ..Bounds::default()
         },
         class: ClassSpec::Process,
+        owner: None,
     })
     .expect("create");
     let mut p = rt
@@ -455,6 +460,7 @@ fn a_node_started_process_past_the_bound_is_refused_and_counted() {
             ..Bounds::default()
         },
         class: ClassSpec::Process,
+        owner: None,
     })
     .expect("create");
     let mut held = Vec::new();

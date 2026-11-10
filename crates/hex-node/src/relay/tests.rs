@@ -114,22 +114,43 @@ fn next_request(conn: &OwnedFd) -> (Header, Request, Vec<OwnedFd>) {
 }
 
 fn answer(conn: &OwnedFd, h: Header, answer: &Answer) {
-    let bytes = wire::answer(h.version, h.id, answer, wire::MAX_MESSAGE).unwrap();
+    let bytes = wire::answer(h.id, answer, wire::MAX_MESSAGE).unwrap();
     rustix::net::send(conn, &bytes, SendFlags::NOSIGNAL).unwrap();
+}
+
+/// A node's bounds as this host's platform gives them ([`crate::serve::limits`]): what the stand-in node's hello
+/// tells.
+fn node_limits() -> wire::Limits {
+    crate::serve::limits(&crate::sizes::Sizes::now().unwrap().platform())
+}
+
+/// The stand-in node's budgets over all its connections: its bounds' own.
+fn budgets() -> wire::Budgets {
+    let node = node_limits();
+    wire::Budgets {
+        in_flight: node.in_flight,
+        programs: node.programs,
+    }
+}
+
+/// The relay's bounds over the stand-in node, as its hello tells them ([`Limits::of`]).
+fn limits() -> Limits {
+    Limits::of(&node_limits(), &budgets())
 }
 
 /// Accepts a connection and answers its hello.
 fn hello(node: &OwnedFd) -> OwnedFd {
     let conn = rustix::net::accept_with(node, SocketFlags::CLOEXEC).unwrap();
     let (h, r, _) = next_request(&conn);
-    assert_eq!(r, Request::Hello);
+    assert!(matches!(r, Request::Hello { .. }), "{r:?}");
     answer(
         &conn,
         h,
         &Answer::Hello(Hello {
-            version: wire::VERSION,
+            build: wire::build(),
             classes: vec![Class::Oci],
-            limits: crate::serve::LIMITS,
+            limits: node_limits(),
+            budgets: budgets(),
         }),
     );
     conn
@@ -149,7 +170,7 @@ fn readable(conn: impl AsFd) -> bool {
 /// classes and its refusal, typed, as the node's own socket gives them.
 #[test]
 fn a_hosts_calls_reach_the_node_and_its_answers_come_back() {
-    let lab = Lab::new(LIMITS);
+    let lab = Lab::new(limits());
     let node = lab.node.try_clone().unwrap();
     let agent = std::thread::spawn(move || {
         let conn = hello(&node);
@@ -173,7 +194,7 @@ fn a_hosts_calls_reach_the_node_and_its_answers_come_back() {
 /// node sent it.
 #[test]
 fn an_execs_streams_reach_the_node_as_pipe_ends() {
-    let lab = Lab::new(LIMITS);
+    let lab = Lab::new(limits());
     let node = lab.node.try_clone().unwrap();
     let agent = std::thread::spawn(move || {
         let conn = hello(&node);
@@ -323,7 +344,10 @@ fn exec_stdin(client: &Client) -> Result<Box<dyn hex_api::Proc>, Refusal> {
 /// the node, its set gone with its host (no clock), so a second host's exec takes the one set and runs.
 #[test]
 fn an_exec_whose_stream_never_comes_waits_for_its_host_and_goes_with_it() {
-    let lab = Lab::new(Limits { sets: 1, ..LIMITS });
+    let lab = Lab::new(Limits {
+        sets: 1,
+        ..limits()
+    });
     // Stdio goes to a socket nobody serves from: it connects, and nothing reads it.
     let nowhere = lab.dir.path().join("nowhere.sock");
     let nowhere_listener = UnixListener::bind(&nowhere).unwrap();
@@ -371,7 +395,7 @@ fn an_exec_whose_stream_never_comes_waits_for_its_host_and_goes_with_it() {
 /// one still open after (it waits on its host, not a clock).
 #[test]
 fn a_silent_stdio_connection_holds_no_other_exec_up() {
-    let lab = Lab::new(LIMITS);
+    let lab = Lab::new(limits());
     let silent = UnixStream::connect(lab.dir.path().join("stdio.sock")).unwrap();
     let node = lab.node.try_clone().unwrap();
     let agent = std::thread::spawn(move || {
@@ -458,6 +482,115 @@ fn until(mut look: impl FnMut() -> bool) {
     }
 }
 
+/// HEX-GUEST-7, HEX-RT-17: end a control before its stdio names arrive; expect no recreated set, waiter or
+/// socket. A second active control still accepts an early stream and passes its bytes to the node's pipe.
+#[test]
+fn late_streams_cannot_recreate_a_closed_controls_sets() {
+    let (lab, relay) = kept_lab(Limits {
+        sets: 1,
+        ..limits()
+    });
+    let mut first = UnixStream::connect(lab.dir.path().join("control.sock")).unwrap();
+    let mut token = [0u8; stream::TOKEN_BYTES];
+    first.read_exact(&mut token).unwrap();
+    let first_token = u64::from_le_bytes(token);
+    let first_node = rustix::net::accept_with(&lab.node, SocketFlags::CLOEXEC).unwrap();
+    drop(first);
+    // Control cleanup precedes its shutdown of the node connection: EOF proves forget already ran.
+    assert_eq!(rustix::io::read(&first_node, &mut [0u8; 1]).unwrap(), 0);
+    assert!(relay.sets().unwrap().gather.is_empty());
+    assert!(!relay.sets().unwrap().active.contains(&first_token));
+
+    let (mut late, incoming) = UnixStream::pair().unwrap();
+    relay.unnamed.fetch_add(1, Ordering::AcqRel);
+    let receiving = Arc::clone(&relay);
+    let late_thread = std::thread::spawn(move || receiving.stream(Box::new(incoming)));
+    late.write_all(&stream::name(stream::Named {
+        exec: Exec {
+            conn: first_token,
+            id: 7,
+        },
+        stream: stream::Stdio::In,
+    }))
+    .unwrap();
+    until(|| late_thread.is_finished() || !relay.sets().unwrap().gather.is_empty());
+    let retained = !relay.sets().unwrap().gather.is_empty();
+    if retained {
+        // The red repro releases and joins its own retained waiter before asserting the root cause.
+        drop(relay.sets().unwrap().gather.forget(first_token));
+    }
+    late_thread.join().unwrap();
+    assert_eq!(late.read(&mut [0u8; 1]).unwrap(), 0);
+    assert!(relay.sets().unwrap().parked.is_empty());
+    assert_eq!(relay.unnamed.load(Ordering::Acquire), 0);
+    assert!(
+        !retained,
+        "late stdio recreated a set for the ended control"
+    );
+
+    let mut active = UnixStream::connect(lab.dir.path().join("control.sock")).unwrap();
+    active.read_exact(&mut token).unwrap();
+    let active_token = u64::from_le_bytes(token);
+    assert_ne!(first_token, active_token);
+    assert!(relay.sets().unwrap().active.contains(&active_token));
+    let active_node = rustix::net::accept_with(&lab.node, SocketFlags::CLOEXEC).unwrap();
+    let (mut early, incoming) = UnixStream::pair().unwrap();
+    relay.unnamed.fetch_add(1, Ordering::AcqRel);
+    let receiving = Arc::clone(&relay);
+    let early_thread = std::thread::spawn(move || receiving.stream(Box::new(incoming)));
+    let exec = Exec {
+        conn: active_token,
+        id: 9,
+    };
+    early
+        .write_all(&stream::name(stream::Named {
+            exec,
+            stream: stream::Stdio::In,
+        }))
+        .unwrap();
+    until(|| early_thread.is_finished() || !relay.sets().unwrap().gather.is_empty());
+    assert!(
+        !relay.sets().unwrap().gather.is_empty(),
+        "an active control's early stream was refused"
+    );
+    let request = wire::request(
+        exec.id,
+        &Request::Call(Call::Exec {
+            id: BoxId::new("active").unwrap(),
+            program: Program::of(&["cat"]),
+            streams: wire::Streams {
+                stdin: true,
+                stdout: false,
+                stderr: false,
+            },
+        }),
+        wire::MAX_MESSAGE,
+    )
+    .unwrap();
+    active
+        .write_all(&stream::frame(&request, wire::MAX_MESSAGE).unwrap())
+        .unwrap();
+    let (header, request, mut fds) = next_request(&active_node);
+    assert_eq!(header.id, exec.id);
+    assert!(matches!(request, Request::Call(Call::Exec { .. })));
+    assert_eq!(fds.len(), 1);
+    early.write_all(b"still active").unwrap();
+    early.shutdown(Shutdown::Write).unwrap();
+    let mut bytes = String::new();
+    File::from(fds.pop().unwrap())
+        .read_to_string(&mut bytes)
+        .unwrap();
+    assert_eq!(bytes, "still active");
+    early_thread.join().unwrap();
+    assert!(relay.sets().unwrap().gather.is_empty());
+    assert!(relay.sets().unwrap().parked.is_empty());
+    drop(active);
+    assert_eq!(rustix::io::read(&active_node, &mut [0u8; 1]).unwrap(), 0);
+    until(|| relay.connections.load(Ordering::Acquire) == 0);
+    assert_eq!(relay.connections.load(Ordering::Acquire), 0);
+    assert!(relay.sets().unwrap().active.is_empty());
+}
+
 /// A stdio connection whose name reaches the relay only once its exec is parked there.
 struct Late {
     conn: UnixStream,
@@ -540,7 +673,7 @@ impl Link for LatePorts {
 /// expect the parked exec to reach the node with its pipe as soon as its set is whole, and to run.
 #[test]
 fn a_parked_exec_goes_to_the_node_when_its_set_is_whole() {
-    let (lab, relay) = kept_lab(LIMITS);
+    let (lab, relay) = kept_lab(limits());
     let node = lab.node.try_clone().unwrap();
     let agent = std::thread::spawn(move || {
         let conn = hello(&node);
@@ -652,7 +785,7 @@ fn stdio_crosses_the_relay_without_a_copy_through_user_space() {
     const MIB: usize = 1 << 20;
     let moved = Arc::new(Moved::default());
     let counted = Arc::clone(&moved);
-    let (lab, _relay) = kept_lab_with(LIMITS, move |listener| {
+    let (lab, _relay) = kept_lab_with(limits(), move |listener| {
         Box::new(Counting {
             listener,
             moved: counted,
@@ -706,7 +839,7 @@ fn stdio_crosses_the_relay_without_a_copy_through_user_space() {
 fn an_unnamed_connection_past_the_bound_is_refused() {
     let (lab, relay) = kept_lab(Limits {
         unnamed: 2,
-        ..LIMITS
+        ..limits()
     });
     let path = lab.dir.path().join("stdio.sock");
     let held = [
@@ -729,7 +862,7 @@ fn an_unnamed_connection_past_the_bound_is_refused() {
 fn a_connection_past_the_bound_is_refused() {
     let lab = Lab::new(Limits {
         connections: 1,
-        ..LIMITS
+        ..limits()
     });
     let node = lab.node.try_clone().unwrap();
     let agent = std::thread::spawn(move || hello(&node));
@@ -745,8 +878,24 @@ fn a_connection_past_the_bound_is_refused() {
     drop(held);
 }
 
+/// HEX-GUEST-7 (Ada's rule, 2026-11-06: no picked bound): a relay's bounds are its node's, asked in a hello of their
+/// own. Do ask the stand-in node, whose hello tells this host's platform's bounds and budgets; expect its
+/// connections, as many sets as its calls in flight together, and [`STREAMS`] unnamed connections a set.
+#[test]
+fn a_relays_bounds_are_its_nodes_as_its_hello_tells_them() {
+    let lab = Lab::new(limits());
+    let node = lab.node.try_clone().unwrap();
+    let agent = std::thread::spawn(move || hello(&node));
+    let asked = Limits::asked(&lab.dir.path().join("node.sock")).unwrap();
+    drop(agent.join().unwrap());
+    let (node, budgets) = (node_limits(), budgets());
+    assert_eq!(asked.connections, node.connections);
+    assert_eq!(asked.sets, budgets.in_flight);
+    assert_eq!(asked.unnamed, budgets.in_flight.saturating_mul(STREAMS));
+}
+
 fn staged_lab() -> (Lab, PathBuf) {
-    let lab = Lab::new(LIMITS);
+    let lab = Lab::new(limits());
     let staged = lab.dir.path().join("staged");
     (lab, staged)
 }
@@ -1838,4 +1987,161 @@ fn a_tarball_roots_owners_times_xattrs_and_hard_links_land_on_disk() {
         1_600_000_000,
         "the directory's mtime is set after its children"
     );
+}
+
+/// Whether the write end `w` of a pipe has lost every reader, waiting at most `within`: Linux's pipe poll reports
+/// `POLLERR` on a write end whose readers are gone (`pipe_poll`, fs/pipe.c), asked or not.
+fn readerless(w: &std::io::PipeWriter, within: Duration) -> bool {
+    let mut ready = [PollFd::new(w, PollFlags::empty())];
+    let ts = Timespec {
+        tv_sec: i64::try_from(within.as_secs()).unwrap(),
+        tv_nsec: 0,
+    };
+    rustix::event::poll(&mut ready, Some(&ts)).unwrap() == 1
+        && ready[0].revents().contains(PollFlags::ERR)
+}
+
+/// Native plan step 8, guest stdio (HEX-GUEST-41): exec a program with the caller's own stdin pipe through the
+/// relay; the program ends without reading its stdin, its stdin pipe's read end going with it: expect the relay
+/// to end that stream's connection, and the host's client to let the caller's pipe go with it, so the caller's
+/// stdin pipe has no reader once the program has ended, as a local program's has none.
+#[test]
+fn a_programs_stdin_lets_the_callers_pipe_go_when_the_program_ends() {
+    let lab = Lab::new(limits());
+    let node = lab.node.try_clone().unwrap();
+    let agent = std::thread::spawn(move || {
+        let conn = hello(&node);
+        let (h, r, fds) = next_request(&conn);
+        assert!(matches!(r, Request::Call(Call::Exec { .. })), "{r:?}");
+        assert_eq!(fds.len(), 1);
+        answer(&conn, h, &Answer::Started { pid: 7 });
+        // The program ends without reading its stdin: its pipe's read end goes with it.
+        drop(fds);
+        answer(&conn, h, &Answer::Exited(Exit::Code(0)));
+        conn
+    });
+    let client = Client::connect(lab.link()).unwrap();
+    let (in_r, in_w) = std::io::pipe().unwrap();
+    let mut proc = client
+        .exec(
+            &BoxId::new("b").unwrap(),
+            Program::of(&["true"]),
+            Stdio {
+                stdin: Some(in_r),
+                ..Stdio::null()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        proc.wait_for(Duration::from_secs(30)).unwrap(),
+        Some(Exit::Code(0))
+    );
+    assert!(
+        readerless(&in_w, Duration::from_secs(30)),
+        "the caller's stdin pipe is still read after its program ended"
+    );
+    drop(proc);
+    drop(agent.join().unwrap());
+}
+
+/// The system calls a stdin copier waits in, by this architecture's numbers: splice(2), and poll(2) or ppoll(2)
+/// (arch/x86/entry/syscalls/syscall_64.tbl; include/uapi/asm-generic/unistd.h, which has no poll).
+#[cfg(target_arch = "x86_64")]
+const WAITS: [i64; 3] = [275, 7, 271];
+#[cfg(target_arch = "aarch64")]
+const WAITS: [i64; 2] = [76, 73];
+
+/// Whether thread `tid` sleeps inside one of the copier's waits: the call `/proc/self/task/<tid>/syscall` names
+/// is one of [`WAITS`], and its state in `/proc/self/task/<tid>/stat` is 'S' (proc(5)), past the call's entry.
+fn waiting(tid: rustix::thread::Pid) -> bool {
+    let task = format!("/proc/self/task/{}", tid.as_raw_nonzero());
+    let call = std::fs::read_to_string(format!("{task}/syscall")).unwrap_or_default();
+    let inside = call
+        .split_whitespace()
+        .next()
+        .and_then(|nr| nr.parse::<i64>().ok())
+        .is_some_and(|nr| WAITS.contains(&nr));
+    let stat = std::fs::read_to_string(format!("{task}/stat")).unwrap_or_default();
+    let asleep = stat
+        .rsplit_once(')')
+        .is_some_and(|(_, after)| after.trim_start().starts_with('S'));
+    inside && asleep
+}
+
+/// Native plan step 8, guest stdio (HEX-GUEST-41): a program ends without reading its stdin while the host's stdin
+/// connection carries nothing and the relay's stdin copier waits on it: expect the program's close of its stdin
+/// pipe, as its exit makes, to complete, never held until the host writes, and the copier then to end the stream's
+/// connection, so the host sees it end.
+#[test]
+fn a_programs_stdin_close_is_held_by_no_copier() {
+    let (host, relay) = UnixStream::pair().unwrap();
+    let (r, w) = std::io::pipe().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        tx.send(rustix::thread::gettid()).unwrap();
+        Copier::In(w).run(Box::new(relay));
+    });
+    let tid = rx.recv().unwrap();
+    // The fact the test needs: the copier asleep inside its wait for the stream, not on its way to it.
+    until(|| waiting(tid));
+    let (closed, done) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        drop(r);
+        let _ = closed.send(());
+    });
+    assert!(
+        done.recv_timeout(Duration::from_secs(30)).is_ok(),
+        "the program's close of its stdin pipe waited on the relay's copier"
+    );
+    host.set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    let mut byte = [0u8; 1];
+    assert_eq!(
+        (&host).read(&mut byte).unwrap(),
+        0,
+        "the relay held the stream's connection after its program let its stdin go"
+    );
+}
+
+/// Native plan step 8, guest stdio (HEX-GUEST-41): a program exits with its stdout pipe full while the host isn't
+/// reading, its stream's connection full: expect the program's close of its stdout pipe, as its exit makes, to
+/// complete while the relay's copier waits for the host's room, never held until the host reads; then, as the host
+/// reads, every byte the program wrote to come, and the stream to end.
+#[test]
+fn a_programs_stdout_close_is_held_by_no_copier() {
+    // A connection that fills, as a guest's vsock connection does by its credit: TCP over loopback with the
+    // kernel's least buffers (SOCK_MIN_SNDBUF and SOCK_MIN_RCVBUF, include/net/sock.h). A Unix socket charges
+    // spliced pages to no buffer, so it never fills (on Linux 7.3.3 the pipe's whole 64 KiB went to a reader that
+    // read nothing).
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let relay = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (host, _) = listener.accept().unwrap();
+    rustix::net::sockopt::set_socket_send_buffer_size(&relay, 1).unwrap();
+    rustix::net::sockopt::set_socket_recv_buffer_size(&host, 1).unwrap();
+    let (r, mut w) = std::io::pipe().unwrap();
+    // The program's output, its pipe's whole capacity, written before the copier starts.
+    let wrote = vec![b'x'; rustix::pipe::fcntl_getpipe_size(&w).unwrap()];
+    w.write_all(&wrote).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        tx.send(rustix::thread::gettid()).unwrap();
+        Copier::Out(r).run(Box::new(relay));
+    });
+    let tid = rx.recv().unwrap();
+    // The fact the test needs: the copier asleep inside its wait for the host's room, not on its way to it.
+    until(|| waiting(tid));
+    let (closed, done) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        drop(w);
+        let _ = closed.send(());
+    });
+    assert!(
+        done.recv_timeout(Duration::from_secs(30)).is_ok(),
+        "the program's close of its stdout pipe waited on the relay's copier"
+    );
+    host.set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    let mut came = Vec::new();
+    (&host).read_to_end(&mut came).unwrap();
+    assert_eq!(came.len(), wrote.len(), "the stream lost bytes");
 }

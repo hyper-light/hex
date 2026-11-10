@@ -9,13 +9,17 @@
 # Env (defaults): RUNTIMES (libcrun), HEXBENCH_PHASES (lifecycle), ROUNDS (2), N (1000), WARMUP (100), LIFECYCLES
 # (2000), HEXBENCH_SUSTAINED (10000, the sustained phase's lifecycles), CAP (1000), BUDGET_MIB (8192), MEMORY (16g),
 # CPUSET (the VM's CPUs past an eighth of them, at least 2: fedora's 4-31 of 32), HOST_CPU (the machine's processor,
-# for env.txt). The VM's load is recorded at the pass's start and end, as host.sh records the host's, and so are
+# for env.txt), HEXBENCH_OWNER and HEXBENCH_REUSE (unset: boxes of no owner; as host.sh passes them), CRUN_TARBALL
+# (unset: crun's release downloaded; either way its bytes checked against the pinned sha256), CARGO_BUILD_JOBS (unset:
+# cargo's, one a CPU; a host short of memory bounds the build's jobs with it). The VM's load
+# is recorded at the pass's start and end, as host.sh records the host's, and so are
 # the pass's parameters as it ran them.
 set -euo pipefail
 COMMIT=${1:?commit}; RESULTS=${2:?results dir}
 # A Windows shell (Git Bash) is told to leave the containers' paths alone, and hands git a path git.exe reads.
 export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 HERE=$(cd "$(dirname "$0")" && { pwd -W 2>/dev/null || pwd; })
+. "$HERE/containers.sh"
 REPO=$(git -C "$HERE" rev-parse --show-toplevel)
 SHA=$(git -C "$REPO" rev-parse --short "$COMMIT")
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
@@ -23,12 +27,16 @@ PACKAGES="python3 procps-ng findutils diffutils util-linux coreutils gcc make ta
   glibc-static json-c-devel libcap-devel libseccomp-devel"
 IMG=hexbench/pass:44-$(printf '%s' "$PACKAGES" | cksum | cut -d' ' -f1)
 CRUN_VERSION=1.30.1
+# Its release tarball's sha256, as fetch.py pins it (CRUN_SRC): a tarball that isn't these bytes is refused.
+CRUN_SHA256=99d036d95113552b6df66c7c879432835504bf0e525fc0372745071df129527b
+# CRUN_TARBALL, a path on this machine: that tarball in place of the download, for a machine with no way out.
+CRUN_GIVEN=(); [ -n "${CRUN_TARBALL:-}" ] && CRUN_GIVEN=(-v "$CRUN_TARBALL:/crun-given.tar.gz:ro")
 NCPU=$(docker info --format '{{.NCPU}}')
 SKIP=$((NCPU / 8)); [ "$SKIP" -ge 2 ] || SKIP=2
 CPUSET=${CPUSET:-$SKIP-$((NCPU - 1))}
 SRC=hexpass-src-$SHA; BIN=hexpass-bin-$SHA; OUTV=hexpass-out-$STAMP; NAME=hexpass-$STAMP
 mkdir -p "$RESULTS"
-trap 'docker rm -f "$NAME" "$NAME-image" >/dev/null 2>&1 || true' EXIT
+bench_trap 'docker rm -f "$NAME" "$NAME-image" >/dev/null 2>&1 || true'
 say() { echo "$(date -u +%FT%TZ) $*"; }
 
 # The image is made by a container and a commit, not a build, so a machine's builder busy with other work
@@ -36,7 +44,7 @@ say() { echo "$(date -u +%FT%TZ) $*"; }
 say "image $IMG"
 if ! docker image inspect "$IMG" > /dev/null 2>&1; then
   docker rm -f "$NAME-image" > /dev/null 2>&1 || true
-  docker run --name "$NAME-image" registry.fedoraproject.org/fedora:44 \
+  docker run "${BENCH_LABELS[@]}" --name "$NAME-image" registry.fedoraproject.org/fedora:44 \
     sh -c "dnf -y -q install --setopt=install_weak_deps=False $PACKAGES && dnf clean all" > /dev/null
   docker commit "$NAME-image" "$IMG" > /dev/null
   docker rm "$NAME-image" > /dev/null
@@ -44,13 +52,18 @@ fi
 
 say "source $SHA into volume $SRC"
 docker volume create "$SRC" > /dev/null
-git -C "$REPO" -c core.autocrlf=false -c core.eol=lf archive "$SHA" | docker run -i --rm -v "$SRC:/src" "$IMG" sh -c 'find /src -mindepth 1 -delete && tar -x -C /src'
+# git archive stamps every file with its commit's time, and the build's target volume is shared by every commit a
+# pass builds: a commit older than the last build would read as unchanged to cargo, which would link the last
+# commit's crates into this one's (an A/B's arms alternate so). Each file is touched as it lands, so every commit
+# builds from its own tree.
+git -C "$REPO" -c core.autocrlf=false -c core.eol=lf archive "$SHA" | docker run "${BENCH_LABELS[@]}" -i --rm -v "$SRC:/src" "$IMG" sh -c 'find /src -mindepth 1 -delete && tar -x -C /src && find /src -type f -exec touch {} +'
 
 say "build hex, seam_oci and the libcrun driver into volume $BIN"
 docker volume create "$BIN" > /dev/null
-docker run --rm -v "$SRC:/src:ro" -v "$BIN:/out" -v hexpass-cargo:/cargo -v hexpass-rustup:/rustup -v hexpass-target:/target \
-  -e CARGO_HOME=/cargo -e RUSTUP_HOME=/rustup -e CARGO_TARGET_DIR=/target -e RUSTUP_TOOLCHAIN=1.99.1 \
-  -e PATH=/cargo/bin:/usr/bin:/bin -e CRUN_VERSION="$CRUN_VERSION" -w /src "$IMG" bash -euo pipefail -c '
+docker run "${BENCH_LABELS[@]}" --rm -v "$SRC:/src:ro" -v "$BIN:/out" -v hexpass-cargo:/cargo -v hexpass-rustup:/rustup -v hexpass-target:/target \
+  -e CARGO_HOME=/cargo -e RUSTUP_HOME=/rustup -e CARGO_TARGET_DIR=/target -e RUSTUP_TOOLCHAIN=1.99.1 -e CARGO_BUILD_JOBS \
+  -e PATH=/cargo/bin:/usr/bin:/bin -e CRUN_VERSION="$CRUN_VERSION" -e CRUN_SHA256="$CRUN_SHA256" "${CRUN_GIVEN[@]}" \
+  -w /src "$IMG" bash -euo pipefail -c '
     [ -x /cargo/bin/rustup ] || curl -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal --default-toolchain none
     for i in 1 2 3; do rustup toolchain install 1.99.1 --profile minimal && break; sleep 10; done
     triple=$(uname -m)-unknown-linux-gnu; flags=CARGO_TARGET_$(echo "$triple" | tr a-z- A-Z_)_RUSTFLAGS
@@ -58,17 +71,19 @@ docker run --rm -v "$SRC:/src:ro" -v "$BIN:/out" -v hexpass-cargo:/cargo -v hexp
     cp "/target/$triple/release/hex" /out/hex
     nice -n 10 cargo bench --locked --no-run -p hex-bench --bench seam_oci 2> /tmp/bench.log || { cat /tmp/bench.log; exit 1; }
     cp "$(ls -t /target/release/deps/seam_oci-* | grep -v "\.d$" | head -1)" /out/seam_oci
-    curl -fsSL -o /tmp/crun.tar.gz "https://github.com/containers/crun/releases/download/$CRUN_VERSION/crun-$CRUN_VERSION.tar.gz"
+    if [ -f /crun-given.tar.gz ]; then cp /crun-given.tar.gz /tmp/crun.tar.gz
+    else curl -fsSL -o /tmp/crun.tar.gz "https://github.com/containers/crun/releases/download/$CRUN_VERSION/crun-$CRUN_VERSION.tar.gz"; fi
+    echo "$CRUN_SHA256  /tmp/crun.tar.gz" | sha256sum -c --quiet - || { echo "refusing: crun $CRUN_VERSION'"'"'s tarball is not the pinned bytes" >&2; exit 1; }
     sha256sum /tmp/crun.tar.gz | cut -c1-16 > /out/crun-src.sha256
     BUILD_DIR=/tmp bash /src/bench/competitive/libcrun/build.sh /tmp/crun.tar.gz /out/libcrun-driver
     /out/hex --version > /out/hex.version'
 
 say "pass: RUNTIMES=${RUNTIMES:-libcrun} HEXBENCH_PHASES=${HEXBENCH_PHASES:-lifecycle} ROUNDS=${ROUNDS:-2} N=${N:-1000} on CPUs $CPUSET"
 docker volume create "$OUTV" > /dev/null
-docker run --rm -v "$BIN:/opt/bin:ro" -v "$OUTV:/opt/out" -e HOST="$(hostname)" -e HOST_CPU="${HOST_CPU:-}" -e SHA="$SHA" \
+docker run "${BENCH_LABELS[@]}" --rm -v "$BIN:/opt/bin:ro" -v "$OUTV:/opt/out" -e HOST="$(hostname)" -e HOST_CPU="${HOST_CPU:-}" -e SHA="$SHA" \
   -e CPUSET="$CPUSET" -e NCPU="$NCPU" -e RUNTIMES="${RUNTIMES:-libcrun}" -e ROUNDS="${ROUNDS:-2}" -e N="${N:-1000}" \
   -e WARMUP="${WARMUP:-100}" -e HEXBENCH_PHASES="${HEXBENCH_PHASES:-lifecycle}" -e HEXBENCH_SUSTAINED="${HEXBENCH_SUSTAINED:-10000}" \
-  "$IMG" bash -c '
+  -e HEXBENCH_OWNER -e HEXBENCH_REUSE "$IMG" bash -c '
   { echo "--- pass started $(date -u +%FT%TZ): PHASES=oci RUNTIMES=$RUNTIMES (docker_pass.sh)"
     echo "host: $HOST, its containers in a Linux VM (kernel $(uname -r), $(uname -m), $NCPU cpus)"
     echo "date: $(date -u +%FT%TZ)"; echo "kernel: $(uname -r)"
@@ -78,23 +93,23 @@ docker run --rm -v "$BIN:/opt/bin:ro" -v "$OUTV:/opt/out" -e HOST="$(hostname)" 
     echo "hex: $SHA $(cat /opt/bin/hex.version) ($(sha256sum /opt/bin/hex | cut -c1-16)), static-glibc, $(uname -m)"
     echo "seam_oci: $SHA ($(sha256sum /opt/bin/seam_oci | cut -c1-16))"
     echo "libcrun: crun-'"$CRUN_VERSION"'.tar.gz ($(cat /opt/bin/crun-src.sha256)), driver $(sha256sum /opt/bin/libcrun-driver | cut -c1-16)"
-    echo "params: ROUNDS=$ROUNDS N=$N WARMUP=$WARMUP HEXBENCH_PHASES=$HEXBENCH_PHASES HEXBENCH_SUSTAINED=$HEXBENCH_SUSTAINED"
+    echo "params: ROUNDS=$ROUNDS N=$N WARMUP=$WARMUP HEXBENCH_PHASES=$HEXBENCH_PHASES HEXBENCH_SUSTAINED=$HEXBENCH_SUSTAINED HEXBENCH_OWNER=${HEXBENCH_OWNER:-none} HEXBENCH_REUSE=${HEXBENCH_REUSE:-}"
     echo "oci pass: /run a tmpfs (size 1g), where the runtimes keep their state"
   } > /opt/out/env.txt'
 # The pass's /run is a tmpfs, as a host's is, where the runtimes keep their state (runc's and crun's, libcrun's, a
 # root Hex node's /run/hex-node), as host.sh gives its own: the image's /run is the container's overlayfs. From goal
 # 5 plan step 2 on; passes before it kept every runtime's state on overlayfs, so ratios across it compare unlike
 # setups.
-docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="$CPUSET" --memory="${MEMORY:-16g}" \
+docker run --rm --name "$NAME" "${BENCH_LABELS[@]}" --cpuset-cpus="$CPUSET" --memory="${MEMORY:-16g}" \
   --privileged --security-opt label=disable --cgroupns=private --network=none --tmpfs /run:rw,exec,nosuid,size=1g \
   -v "$BIN:/opt/bin:ro" -v "$SRC:/src:ro" -v "$OUTV:/opt/out" \
   -e RUNTIMES="${RUNTIMES:-libcrun}" -e ROUNDS="${ROUNDS:-2}" -e ROUND_FIRST=1 -e N="${N:-1000}" -e WARMUP="${WARMUP:-100}" \
   -e N_OVERRIDE="${N_OVERRIDE:-runsc:3000}" -e LIFECYCLES="${LIFECYCLES:-2000}" -e CAP="${CAP:-1000}" \
   -e BUDGET_MIB="${BUDGET_MIB:-8192}" -e HEXBENCH_PHASES="${HEXBENCH_PHASES:-lifecycle}" \
-  -e HEXBENCH_SUSTAINED="${HEXBENCH_SUSTAINED:-10000}" -e SEAM_OCI=/opt/bin/seam_oci \
+  -e HEXBENCH_SUSTAINED="${HEXBENCH_SUSTAINED:-10000}" -e SEAM_OCI=/opt/bin/seam_oci -e HEXBENCH_OWNER -e HEXBENCH_REUSE \
   "$IMG" bash -c 'ln -s /src/bench/competitive /opt/lab && bash /opt/lab/oci_inside.sh' 2>&1 | tee "$RESULTS/oci.log"
-docker run --rm -v "$SRC:/src:ro" -v "$OUTV:/opt/out" "$IMG" bash -c \
+docker run "${BENCH_LABELS[@]}" --rm -v "$SRC:/src:ro" -v "$OUTV:/opt/out" "$IMG" bash -c \
   'echo "load at end: $(cat /proc/loadavg)" >> /opt/out/env.txt && python3 -I /src/bench/competitive/summarize.py /opt/out > /opt/out/table.md'
-docker run --rm -v "$OUTV:/opt/out:ro" "$IMG" tar -C /opt/out -cz . | tar -xz -C "$RESULTS"
+docker run "${BENCH_LABELS[@]}" --rm -v "$OUTV:/opt/out:ro" "$IMG" tar -C /opt/out -cz . | tar -xz -C "$RESULTS"
 docker volume rm "$OUTV" > /dev/null
 say "results: $RESULTS"

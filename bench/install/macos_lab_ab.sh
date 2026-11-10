@@ -10,8 +10,8 @@
 #                                                macos_lab.sh on red and on green, and prints both records.
 #
 # Each lab run installs, tests and uninstalls (macos_lab.sh, its own watchdog and EXIT trap), so the Mac
-# ends as it began. The verdict: red's record fails only the box-user contract, on the descriptor limit;
-# green's passes.
+# ends as it began. The verdict: red's record fails only the box-user contract, on the descriptor limit
+# (and the oversubscribed box-user check, whose test red's tree predates); green's passes.
 set -u
 
 RED=b849699
@@ -72,7 +72,7 @@ GREEN_RECORD=$(run_lab green)
 
 RED_OK=0
 if [ -n "$RED_RECORD" ] && grep -q '^RESULT: FAIL' "$RED_RECORD" &&
-  [ "$(grep -c '^FAIL: ' "$RED_RECORD")" = 1 ] &&
+  [ "$(grep '^FAIL: ' "$RED_RECORD" | grep -vc "the helper's ledger holds a box of 2x and 4x")" = 1 ] &&
   grep -q '^FAIL: the box-user HEX-RT contract' "$RED_RECORD" &&
   grep -q "descriptor limits" "$RED_RECORD"; then
   RED_OK=1

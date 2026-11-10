@@ -6,7 +6,7 @@
 //! cgroup v2 files, written as given after the converted values, so they win.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::linux::oci::OciError;
 use crate::linux::oci::spec::{BlockIo, Cpu, DeviceRule, Memory, Resources};
@@ -40,6 +40,27 @@ pub struct Plan {
 }
 
 impl Plan {
+    /// Refuses a device policy a container in a user namespace of its own can't be held to. Such a
+    /// container gets no device program of its own: loading one needs CAP_BPF in the cgroup's owning
+    /// (initial) user namespace, which an unprivileged runtime lacks. A deny-by-default allow-list it
+    /// enforces by construction instead — only its devices get nodes, `mknod` is refused across the
+    /// user-namespace boundary (`init.rs`), and the mapped host uid's DAC governs access
+    /// (docs/design/runtime.md, "Rootless devices", measured on the running hardware). An
+    /// allow-by-default policy with denials has no such construction, so it's refused rather than
+    /// silently under-enforced (CLAUDE.md §3).
+    pub fn check_in_userns(&self) -> Result<(), OciError> {
+        if self.devices.is_some() && self.devices_allow_by_default {
+            return Err(OciError::Config(
+                "linux.resources.devices: a rootless container can't enforce an allow-by-default \
+                 device policy with denials — loading the cgroup device program needs CAP_BPF, which \
+                 an unprivileged runtime lacks; express the policy as a deny-by-default allow-list, \
+                 which a rootless container enforces by construction"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Adds a write; `controller` is empty for a `cgroup.*` core file, which needs none.
     fn write(&mut self, controller: &str, file: impl Into<String>, value: impl Into<String>) {
         if !controller.is_empty() {
@@ -569,6 +590,16 @@ pub struct Insn {
     pub imm: i32,
 }
 
+impl Insn {
+    /// The instruction's bytes as `struct bpf_insn` holds them in memory, which is how the kernel dumps
+    /// a loaded program's translated instructions (native byte order).
+    pub fn bytes(&self) -> [u8; 8] {
+        let [o0, o1] = self.off.to_ne_bytes();
+        let [i0, i1, i2, i3] = self.imm.to_ne_bytes();
+        [self.code, self.regs, o0, o1, i0, i1, i2, i3]
+    }
+}
+
 // The opcodes the device program uses (include/uapi/linux/bpf_common.h and bpf.h).
 pub const LDX_MEM_W: u8 = 0x61; // BPF_LDX | BPF_MEM | BPF_W: dst = *(u32 *)(src + off)
 pub const MOV32_X: u8 = 0xbc; // BPF_ALU | BPF_MOV | BPF_X: dst = (u32) src
@@ -602,6 +633,22 @@ pub fn devices(rules: &[DeviceRule]) -> Result<Option<Vec<Insn>>, OciError> {
         return Ok(None);
     }
     Ok(Some(compile(&st)))
+}
+
+/// The default policy's program: what a spec that lists no devices gets, and one that denies them all,
+/// since [`device_state`] allows [`DEFAULT_DEVICES`] after any list.
+pub fn default_program() -> Result<Vec<Insn>, OciError> {
+    Ok(compile(&device_state(&[])?))
+}
+
+/// The program for a policy that allows every device. Under the node's oci boxes' root, whose program is
+/// the default policy's, a box with such a policy carries this as its own, so it never takes the root's
+/// (goal 5 extended, step 1); elsewhere such a policy gets no program, as crun's does.
+pub fn allow_all() -> Vec<Insn> {
+    compile(&DeviceState {
+        allow_by_default: true,
+        exceptions: Vec::new(),
+    })
 }
 
 /// Compiles a device state: r1 points at `bpf_cgroup_dev_ctx`; the program returns 1 to allow.
@@ -682,9 +729,29 @@ pub fn cgroup_path(cgroups_path: Option<&str>, id: &str) -> Result<PathBuf, OciE
     Ok(out)
 }
 
+/// Where a container's cgroup goes, relative to the cgroup v2 mount point, for a runtime that runs as root
+/// (`rootless_own` `None`): [`cgroup_path`]'s place. For one that runs rootless (`rootless_own` its own cgroup, relative
+/// to the mount point), a spec that names no cgroupsPath puts it beside the runtime's own cgroup, the parent's child
+/// named by the id, as crun 1.30.1's cgroupfs driver makes it where the generated path can't be used
+/// (`make_new_sibling_cgroup`, src/libcrun/cgroup-cgroupfs.c:96-110, taken at :128-155): the hierarchy's root is
+/// root's alone, so `/<id>` there is refused to every rootless runtime, and a rootless runtime's own cgroup is beneath
+/// the one delegated to it. A cgroupsPath the spec names goes where [`cgroup_path`] puts it, either way.
+pub fn cgroup_path_for(
+    cgroups_path: Option<&str>,
+    id: &str,
+    rootless_own: Option<&Path>,
+) -> Result<PathBuf, OciError> {
+    let place = cgroup_path(cgroups_path, id)?;
+    Ok(match (cgroups_path, rootless_own.and_then(Path::parent)) {
+        (None, Some(beside)) => beside.join(place),
+        _ => place,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::linux::oci::devshare;
     use crate::linux::oci::spec::{HugepageLimit, Pids, Rdma, ThrottleDevice, WeightDevice};
     use proptest::prelude::*;
 
@@ -1096,6 +1163,8 @@ mod tests {
         assert_eq!(devices(&everything).unwrap(), None);
     }
 
+    /// A device rule. Its majors and minors are fixtures, kept small (majors 1-3, minors 0-2, beside the requests'
+    /// 0-4 and 0-3) so that rules and requests name the same devices often and the rules' order decides.
     fn arb_rule() -> impl Strategy<Value = DeviceRule> {
         (
             any::<bool>(),
@@ -1137,6 +1206,47 @@ mod tests {
                 Some(prog) => run(&prog, kind, access, major, minor),
             };
             prop_assert_eq!(got, want);
+        }
+
+        // AC-T7.1.4 (goal 5 extended, step 1), model-based: for any rule list, the program that decides for a box
+        // (its own, or the oci boxes' root's default where the box is given nothing: devshare::give)
+        // decides every request — each type, each access, majors and minors that the rules and the
+        // default devices name and some they don't — as the policy's oracle does; and so with no program
+        // at the root.
+        #[test]
+        fn the_program_that_decides_for_a_box_is_its_policys(
+            rules in proptest::collection::vec(arb_rule(), 0..12),
+        ) {
+            let st = device_state(&rules).unwrap();
+            let default = default_program().unwrap();
+            for root in [Some(default.as_slice()), None] {
+                let deciding = match devshare::give(devices(&rules).unwrap().as_deref(), root) {
+                    devshare::Give::Nothing => root.map(<[Insn]>::to_vec),
+                    devshare::Give::Program(p) => Some(p),
+                };
+                for kind in [DEV_BLOCK, DEV_CHAR] {
+                    // Every access: r, w and m (1, 2, 4) and each union of them.
+                    for access in 1u32..8 {
+                        // The majors and minors of the devices the default program allows
+                        // (Documentation/admin-guide/devices.txt: 1 mem, whose 3 null, 5 zero, 7 full, 8 random and
+                        // 9 urandom; 5 tty, whose 0 tty, 1 console and 2 ptmx; 136 the ptys; 10 misc, whose 200 tun),
+                        // those the rules name (majors 1-3, minors 0-2), and majors 0 and 4, which neither names.
+                        for major in [0u32, 1, 2, 3, 4, 5, 10, 136] {
+                            for minor in [0u32, 1, 2, 3, 5, 7, 8, 9, 200] {
+                                let got = deciding
+                                    .as_ref()
+                                    .is_none_or(|p| run(p, kind, access, major, minor));
+                                prop_assert_eq!(
+                                    got,
+                                    st.permits(kind, major, minor, access),
+                                    "root {}, type {} {}:{} access {}",
+                                    root.is_some(), kind, major, minor, access
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Hostile input (CLAUDE.md §6): any resources are a plan or a typed refusal, never a panic.
@@ -1182,6 +1292,46 @@ mod tests {
         ] {
             assert!(
                 matches!(cgroup_path(Some(bad), "c1"), Err(OciError::Config(_))),
+                "{bad:?}"
+            );
+        }
+    }
+
+    // AC-T7.1.4 (runtime-tools' rootless subset): a rootless runtime's container of a spec naming no cgroupsPath goes
+    // beside the runtime's own cgroup, as crun's does where the hierarchy's root can't be written; as root, and for a
+    // path the spec names, the place is cgroup_path's.
+    #[test]
+    fn a_rootless_runtimes_container_goes_beside_its_own_cgroup_and_roots_where_it_went() {
+        let own = Path::new("user.slice/user-1000.slice/user@1000.service/app.slice/s.scope/lab");
+        assert_eq!(
+            cgroup_path_for(None, "c1", None).unwrap(),
+            PathBuf::from("c1")
+        );
+        assert_eq!(
+            cgroup_path_for(None, "c1", Some(own)).unwrap(),
+            PathBuf::from("user.slice/user-1000.slice/user@1000.service/app.slice/s.scope/c1")
+        );
+        // A runtime at its cgroup namespace's root (its own cgroup `/`), and one a level below it.
+        assert_eq!(
+            cgroup_path_for(None, "c1", Some(Path::new(""))).unwrap(),
+            PathBuf::from("c1")
+        );
+        assert_eq!(
+            cgroup_path_for(None, "c1", Some(Path::new("lab"))).unwrap(),
+            PathBuf::from("c1")
+        );
+        for rootless in [None, Some(own)] {
+            assert_eq!(
+                cgroup_path_for(Some("/a/b"), "c1", rootless).unwrap(),
+                PathBuf::from("a/b")
+            );
+        }
+        for bad in ["..", "a:b", ""] {
+            assert!(
+                matches!(
+                    cgroup_path_for(None, bad, Some(own)),
+                    Err(OciError::Config(_))
+                ),
                 "{bad:?}"
             );
         }

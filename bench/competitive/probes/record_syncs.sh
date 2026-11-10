@@ -5,9 +5,11 @@
 # container has it unless it mounts one. Every binary is copied into the run's directory, so what ran is kept
 # beside what it counted. On fedora:
 #   record_syncs.sh <hex binary> <seam_oci binary> <strace binary>
-# Env: N (record_syncs_inside.sh's), CPUSET (4-31). A count, not a timing: no load gate.
+# Env: N (record_syncs_inside.sh's), CPUSET (4-31), BENCH_MEMORY and BENCH_OOM (each container's --memory, 40g, and
+# --oom-score-adj, none, as host.sh's). A count, not a timing: no load gate.
 set -euo pipefail
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")"); LAB=$(dirname "$HERE")
+. "$HERE/../containers.sh"
 HEX=$(realpath "${1:?hex binary}"); SEAM=$(realpath "${2:?seam_oci binary}"); STRACE=$(realpath "${3:?strace binary}")
 case "$(hostname)" in fedora*|"${BENCH_HOST_OK:-__none__}") ;; *) echo "refusing: the bench host is fedora, not $(hostname) (BENCH_HOST_OK=$(hostname) runs it here)" >&2; exit 2 ;; esac
 BASE=${HEX_BENCH:-$HOME/.cache/hex-bench}
@@ -21,10 +23,10 @@ cp "$HEX" "$OUT/bin/hex"; cp "$SEAM" "$OUT/bin/seam_oci"; cp "$STRACE" "$OUT/bin
   echo "harness: bench/competitive at $(git -C "$LAB" rev-parse --short HEAD)$(git -C "$LAB" diff --quiet HEAD -- . || echo ' with uncommitted changes')"
 } > "$OUT/env.txt"
 NAME=hexbench-recsync-$$
-trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
+bench_trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true'
 for run in tmpfs overlay; do
   RUNMOUNT=(); [ "$run" = tmpfs ] && RUNMOUNT=(--tmpfs /run:rw,exec,nosuid,size=1g)
-  timeout 1800 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="${CPUSET:-4-31}" --memory=40g \
+  timeout 1800 docker run --rm --name "$NAME" "${BENCH_LABELS[@]}" --cpuset-cpus="${CPUSET:-4-31}" --memory="${BENCH_MEMORY:-40g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
     --privileged --security-opt label=disable --cgroupns=private --network=none "${RUNMOUNT[@]}" \
     -v /usr:/usr:ro -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" -e N -e RUN="$run" \
     registry.fedoraproject.org/fedora:44 bash /opt/lab/probes/record_syncs_inside.sh 2>&1 | tee -a "$OUT/probe.out"

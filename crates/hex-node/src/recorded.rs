@@ -14,7 +14,7 @@ use hex_api::{
 };
 use hex_core::netns;
 use hex_core::record::{BoxRecord, Phase, ProcId};
-use hex_core::recovery::{self, Decision, Seen, Why};
+use hex_core::recovery::{self, Decision, Parts, Seen, Why};
 
 use crate::abandoned::Abandoned;
 use crate::serve::{self, Forward, Forwarded, Host, Loop, Reply};
@@ -28,6 +28,10 @@ pub struct RecoverySummary {
     pub adopted: Vec<BoxId>,
     /// Boxes removed, each with why.
     pub removed: Vec<(BoxId, String)>,
+    /// Slots removed that no box's record named: idle when the agent stopped, or a create's caught
+    /// before its record (goal 5 extended, step 6). Linux's node's alone: no other OS's hands a box's
+    /// cgroup on.
+    pub slots_removed: Vec<u64>,
 }
 
 /// Why a box was removed, for its summary.
@@ -36,9 +40,28 @@ pub(crate) fn why_text(why: &Why) -> String {
         Why::MidCreate => "the node agent stopped while it was being made".to_owned(),
         Why::MidDelete => "the node agent stopped while it was being removed".to_owned(),
         Why::InitGone => "its container's init had ended".to_owned(),
+        Why::RunEnded => "the program it was run for had ended".to_owned(),
         Why::NoCgroup => "its record had no cgroup".to_owned(),
-        Why::NoRecord => "its cgroup had no record".to_owned(),
+        Why::NoRecord(parts) => {
+            let left: Vec<&str> = [
+                (parts.cgroup, "its cgroup"),
+                (parts.state_dir, "its container's state"),
+                (parts.bundle, "its bundle"),
+            ]
+            .into_iter()
+            .filter(|(found, _)| *found)
+            .map(|(_, what)| what)
+            .collect();
+            format!(
+                "no record named it, made only in part: {} left",
+                left.join(", ")
+            )
+        }
         Why::Unreadable(w) => format!("its record couldn't be read: {w}"),
+        Why::StartInterrupted => {
+            "the node agent stopped while it started the box, in its startContainer hooks"
+                .to_owned()
+        }
     }
 }
 
@@ -71,15 +94,8 @@ pub trait Recover: Runtime {
         Ok(())
     }
     /// A call it answers later ([`Host::forward`]). By default every call runs on the worker.
-    fn forward(
-        &self,
-        call: Call,
-        stdio: Stdio,
-        ends: bool,
-        reply: Reply,
-        ended: serve::Ended,
-    ) -> Forward {
-        let _ = (ends, reply, ended);
+    fn forward(&self, call: Call, stdio: Stdio, reply: Reply, ended: serve::Ended) -> Forward {
+        let _ = (reply, ended);
         Forward::Back(Box::new((call, stdio)))
     }
 }
@@ -99,12 +115,14 @@ struct Books {
 }
 
 impl<R: Recover> Recorded<R> {
-    /// `runtime`'s boxes, their records in `state_dir`. Does not recover; call [`Recorded::recover`].
+    /// `runtime`'s boxes, their records in `state_dir`. Does not recover; call [`Recorded::recover`]. The records
+    /// that needn't outlive the host ([`crate::store`]) are kept beside the rest, in `@records` under it (`@` is in
+    /// no box id, so it is never read as a box's record): these OSes give the node no tmpfs runtime directory.
     pub fn open(runtime: R, state_dir: &Path) -> Result<Self, Refusal> {
         Ok(Self {
             runtime,
             books: Arc::new(Books {
-                store: Store::open(state_dir)?,
+                store: Store::open(state_dir, &state_dir.join("@records"))?,
                 abandoned: Abandoned::default(),
                 adopted: Mutex::new(BTreeSet::new()),
             }),
@@ -131,8 +149,14 @@ impl<R: Recover> Recorded<R> {
                 id.clone(),
                 Seen {
                     record: Some(record.clone()),
-                    cgroup: true,
+                    // A record is the box here, whatever runs in it now: its runtime's part stands for the
+                    // cgroup Linux's node finds.
+                    parts: Parts {
+                        cgroup: true,
+                        ..Parts::default()
+                    },
                     init_alive: alive,
+                    start_interrupted: false,
                 },
             );
         }
@@ -217,6 +241,13 @@ impl<R: Recover> Runtime for Recorded<R> {
         self.runtime.start(id)
     }
 
+    /// Its runtime's to refuse: none this wraps makes a box for one program's life (macOS's and Windows' refuse a
+    /// run, naming their platform, and an `oci` spec's is refused everywhere; decision 7), so there is no run's box
+    /// to record.
+    fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        self.runtime.run(spec, program, stdio)
+    }
+
     /// Runs `program`, and once the box has processes, records what names them after a crash.
     fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
         let proc = self.runtime.exec(id, program, stdio)?;
@@ -277,32 +308,28 @@ impl<R: Recover> Host for Recorded<R> {
     /// The calls its runtime answers later go there: an inspect's answer counted as any inspect's is
     /// ([`Books::counted`]). A create or a delete, which write the box's record and stage or remove its
     /// root, runs on the worker.
-    fn forward(
-        &self,
-        call: Call,
-        stdio: Stdio,
-        ends: bool,
-        reply: Reply,
-        ended: serve::Ended,
-    ) -> Forward {
+    fn forward(&self, call: Call, stdio: Stdio, reply: Reply, ended: serve::Ended) -> Forward {
         match call {
             Call::Inspect(_) => {
                 let books = Arc::clone(&self.books);
                 let counted: Reply = Box::new(move |got| {
                     reply(match got {
-                        Ok(Forwarded::Answer(Answer::Info(info))) => books
-                            .counted(info)
-                            .map(|info| Forwarded::Answer(Answer::Info(info))),
+                        Ok(Forwarded::Answer(answer)) => match *answer {
+                            Answer::Info(info) => books
+                                .counted(info)
+                                .map(|info| Forwarded::Answer(Box::new(Answer::Info(info)))),
+                            answer => Ok(Forwarded::Answer(Box::new(answer))),
+                        },
                         other => other,
                     })
                 });
-                self.runtime.forward(call, stdio, ends, counted, ended)
+                self.runtime.forward(call, stdio, counted, ended)
             }
             Call::Start(_)
             | Call::Signal { .. }
             | Call::Usage(_)
             | Call::Exec { .. }
-            | Call::ExecStreams { .. } => self.runtime.forward(call, stdio, ends, reply, ended),
+            | Call::ExecStreams { .. } => self.runtime.forward(call, stdio, reply, ended),
             call => Forward::Back(Box::new((call, stdio))),
         }
     }
@@ -346,6 +373,44 @@ impl Recover for hex_runtime::macos::MacRuntime {
 #[cfg(target_os = "macos")]
 fn group(trace: Option<ProcId>) -> Option<(i32, u64)> {
     trace.and_then(|t| Some((i32::try_from(t.pid).ok()?, t.start_ticks)))
+}
+
+/// The Windows node's boxes outlive it (native plan step 8, the decision "the Windows node, on one completion
+/// port"): each box's job is named for the node and the box and held by the node's keeper as well as the
+/// node, and an `oci` box's container outlives the node with it. The next node takes back each box its
+/// records name that is still there, and removes the rest with what is left of them.
+#[cfg(windows)]
+impl Recover for hex_runtime::windows::WinRuntime {
+    fn trace(&self, _id: &BoxId) -> Result<Option<ProcId>, Refusal> {
+        Ok(None)
+    }
+
+    /// For an `oci` box, whether its take-back would take it: its container still held by HCS, and its
+    /// init the very process its record names, still running, or not yet started
+    /// ([`hex_runtime::windows::WinRuntime::alive`]); a box whose init ended while no node ran is removed,
+    /// its container with it.
+    fn alive(&self, spec: &BoxSpec) -> Result<Option<bool>, Refusal> {
+        hex_runtime::windows::WinRuntime::alive(self, spec)
+    }
+
+    /// Takes box `spec` back on this node: a `process` box by its named job, an `oci` box with its
+    /// container, scratch and init ([`hex_runtime::windows::WinRuntime::adopt`]). A box's job is named for
+    /// the node and the box, so it needs no per-process trace to find.
+    fn adopt(&self, spec: &BoxSpec, _trace: Option<ProcId>) -> Result<(), Refusal> {
+        hex_runtime::windows::WinRuntime::adopt(self, spec)
+    }
+
+    /// Windows ends a box recovery removes by its name, in [`Recover::discard`], which has its spec; a
+    /// trace names nothing of a Windows box.
+    fn end(&self, _trace: Option<ProcId>) -> Result<(), Refusal> {
+        Ok(())
+    }
+
+    /// Ends box `spec` a recovery removes: its named job's members, and an `oci` box's container, scratch
+    /// and record ([`hex_runtime::windows::WinRuntime::end`]).
+    fn discard(&self, spec: &BoxSpec) -> Result<(), Refusal> {
+        hex_runtime::windows::WinRuntime::end(self, &spec.id)
+    }
 }
 
 /// A node whose Linux images are its Shards guest's: its `process` boxes are taken back through the host's
@@ -410,16 +475,8 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
     /// A guest program can't take the caller's own pipes, and the node copies no byte between them (native
     /// plan step 8): each stream an exec carries or asks for is the guest's own stdio connection, whose end
     /// goes to the caller's client with the answer, and the caller's pipes are let go here. Its client
-    /// copies between those it carried and their ends; one of a wire version that takes no ends with an
-    /// answer is refused before anything is sent.
-    fn forward(
-        &self,
-        call: Call,
-        stdio: Stdio,
-        ends: bool,
-        reply: Reply,
-        ended: serve::Ended,
-    ) -> Forward {
+    /// copies between those it carried and their ends.
+    fn forward(&self, call: Call, stdio: Stdio, reply: Reply, ended: serve::Ended) -> Forward {
         let id = match &call {
             Call::Inspect(id) | Call::Start(id) | Call::Usage(id) => id,
             Call::Signal { id, .. } | Call::Exec { id, .. } | Call::ExecStreams { id, .. } => id,
@@ -429,7 +486,20 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
             Err(Refusal::NoSuchBox(_)) => {}
             Ok(_) | Err(_) => return Forward::Back(Box::new((call, stdio))),
         }
-        let client = match self.guest().evented() {
+        let offer = cfg!(windows)
+            && matches!(&call, Call::Exec { .. } | Call::ExecStreams { .. })
+            && (stdio.ask.stdin
+                || stdio.ask.stdout
+                || stdio.ask.stderr
+                || stdio.stdin.is_some()
+                || stdio.stdout.is_some()
+                || stdio.stderr.is_some());
+        let connected = if offer {
+            self.guest().program_client()
+        } else {
+            self.guest().evented()
+        };
+        let client = match connected {
             Ok(Some(client)) => client,
             Ok(None) => return Forward::Refused(Refusal::NoSuchBox(id.clone())),
             Err(why) => return Forward::Refused(why),
@@ -444,12 +514,6 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
                     stdout: stdio.stdout.is_some() || stdio.ask.stdout,
                     stderr: stdio.stderr.is_some() || stdio.ask.stderr,
                 };
-                if ask != Ask::default() && !ends {
-                    return Forward::Refused(Refusal::Invalid {
-                        what: "stdio",
-                        why: "a program in the node's guest takes its streams as the guest's own connections, whose ends ride its answer from wire version 3 on; this client's exec is of an earlier version".to_owned(),
-                    });
-                }
                 // The caller's own pipes, let go here: its client keeps its own.
                 drop(stdio);
                 let streams = hex_core::wire::Streams::default();
@@ -478,9 +542,42 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
                     }),
                 }),
                 Ok(Answer::Refused(why)) | Err(why) => Err(why),
-                Ok(answer) => Ok(Forwarded::Answer(answer)),
+                Ok(answer) => Ok(Forwarded::Answer(Box::new(answer))),
             })
         });
+        if offer {
+            let streams = hex_core::wire::Streams {
+                stdin: stdio.ask.stdin,
+                stdout: stdio.ask.stdout,
+                stderr: stdio.ask.stderr,
+            };
+            let call = match call {
+                Call::Exec { id, program, .. } | Call::ExecStreams { id, program, .. } => {
+                    Call::Exec {
+                        id,
+                        program,
+                        streams,
+                    }
+                }
+                _ => {
+                    return Forward::Refused(Refusal::Broken(
+                        "only an exec can offer guest streams".to_owned(),
+                    ));
+                }
+            };
+            let pending = match client.defer(call, then, ended) {
+                Ok(pending) => pending,
+                Err(why) => return Forward::Refused(why),
+            };
+            let streams = match client.stream_offer(pending.id(), streams) {
+                Ok(streams) => streams,
+                Err(why) => return Forward::Refused(why),
+            };
+            return Forward::Offered(serve::Offering {
+                streams,
+                ready: Box::new(move || pending.send()),
+            });
+        }
         // Refused before it was sent: `then` is dropped unrun, and the caller hears why.
         match client.begin(call, stdio, then, ended) {
             Ok(_) => Forward::Taken,

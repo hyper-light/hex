@@ -35,7 +35,7 @@ use hex_api::{BoxId, Class, Exit, Program, Refusal, Runtime, Stdio};
 use hex_client::guest::{Client, Duplex, Link};
 use hex_core::stream;
 use hex_core::wire::{self, Answer, Call, Header, Hello, Received, Request};
-use hex_node::relay::{LIMITS, Relay};
+use hex_node::relay::{Limits, Relay};
 use rustix::net::{
     AddressFamily, RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, SendFlags, SocketAddrUnix,
     SocketFlags, SocketType,
@@ -88,8 +88,23 @@ fn next_request(conn: &OwnedFd) -> Option<(Header, Request, Vec<OwnedFd>)> {
 }
 
 fn answer(conn: &OwnedFd, h: Header, answer: &Answer) {
-    let bytes = wire::answer(h.version, h.id, answer, wire::MAX_MESSAGE).unwrap();
+    let bytes = wire::answer(h.id, answer, wire::MAX_MESSAGE).unwrap();
     rustix::net::send(conn, &bytes, SendFlags::NOSIGNAL).unwrap();
+}
+
+/// A node's bounds as this host's platform gives them (`hex_node::serve::limits`): what the stand-in node's hello
+/// tells, and the relay's own are taken from ([`Limits::of`]).
+fn node_limits() -> wire::Limits {
+    hex_node::serve::limits(&hex_node::sizes::Sizes::now().unwrap().platform())
+}
+
+/// The stand-in node's budgets over all its connections: its bounds' own.
+fn budgets() -> wire::Budgets {
+    let node = node_limits();
+    wire::Budgets {
+        in_flight: node.in_flight,
+        programs: node.programs,
+    }
 }
 
 /// A stand-in node: every exec is `cat`, its stdin copied to its stdout on a thread of its own.
@@ -97,13 +112,14 @@ fn node(listener: OwnedFd) {
     let conn = rustix::net::accept_with(&listener, SocketFlags::CLOEXEC).unwrap();
     while let Some((h, r, fds)) = next_request(&conn) {
         match r {
-            Request::Hello => answer(
+            Request::Hello { .. } => answer(
                 &conn,
                 h,
                 &Answer::Hello(Hello {
-                    version: wire::VERSION,
+                    build: wire::build(),
                     classes: vec![Class::Oci],
-                    limits: hex_node::serve::LIMITS,
+                    limits: node_limits(),
+                    budgets: budgets(),
                 }),
             ),
             Request::Call(Call::Exec { .. }) => {
@@ -143,7 +159,7 @@ fn relay_exec_start_and_throughput() {
     let files = UnixListener::bind(dir.path().join("files.sock")).unwrap();
     let staged = dir.path().join("staged");
     std::fs::create_dir(&staged).unwrap();
-    let relay = Relay::new(&node_path, &staged, LIMITS);
+    let relay = Relay::new(&node_path, &staged, Limits::of(&node_limits(), &budgets()));
     std::thread::spawn(move || relay.serve(Box::new(control), Box::new(stdio), Box::new(files)));
     std::thread::spawn(move || node(listener));
     let client = Client::connect(Arc::new(Ports(dir.path().to_owned()))).unwrap();

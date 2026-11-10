@@ -1,18 +1,18 @@
 //! What every [`Guests`] does, run against the simulator in this crate's tests and against
-//! [`Shards`](crate::Shards) on each backend: a spec past the bounds is refused before boot;
-//! a served port carries bytes both ways and a half-close; an unserved port is refused as
-//! `Channel` within its patience, one off the allowlist at once; `stop` ends a guest as
-//! `Stopped`, and every later `connect` is refused `Ended`; a guest that powers off ends as
-//! `PowerOff`; and the hosts without a backend are refused naming them.
+//! [`Shards`](crate::Shards) on each backend's real guests (`crates/shards/tests/boot.rs`
+//! `shards_api_conforms_on_real_guests`): a spec past the bounds is refused before boot,
+//! and one past the hypervisor's vCPUs as `Bounds`; a served port carries bytes both ways
+//! and a half-close; an unserved port is refused as `Channel` within its patience, one off
+//! the allowlist at once; `stop` ends a guest as `Stopped`, and every later `connect` is
+//! refused `Ended`; a guest that powers off ends as `PowerOff`; and the hosts without a
+//! backend are refused naming them.
 
 use std::io::{Read as _, Write as _};
 use std::net::Shutdown;
 use std::time::{Duration, Instant};
 
-use crate::record::Pending;
-use crate::{
-    Backend, End, Guest, GuestSpec, Guests, Identity, MAX_PORTS, Refusal, backend_of, max_vcpus, min_memory_mib,
-};
+use crate::record::Learned;
+use crate::{Backend, End, Guest, GuestSpec, Guests, Identity, Refusal, backend_of, min_memory_mib};
 
 /// What the suite runs against.
 pub struct Subject<'a> {
@@ -42,12 +42,19 @@ impl std::fmt::Debug for Subject<'_> {
 }
 
 /// A case that failed, and why.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{case}: {why}")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Failure {
     pub case: &'static str,
     pub why: String,
 }
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.case, self.why)
+    }
+}
+
+impl std::error::Error for Failure {}
 
 fn fail(case: &'static str, why: impl Into<String>) -> Failure {
     Failure {
@@ -63,6 +70,7 @@ pub fn run(s: &Subject<'_>) -> Result<(), Failure> {
     if s.guests.backend().is_err() {
         return Ok(());
     }
+    more_vcpus_than_the_hypervisor_runs_are_refused_as_bounds(s)?;
     a_served_port_carries_bytes_and_a_half_close(s)?;
     an_unserved_port_is_refused(s)?;
     stop_ends_it_and_later_connects_are_refused(s)?;
@@ -108,13 +116,6 @@ pub fn bounds_are_refused_before_boot(s: &Subject<'_>) -> Result<(), Failure> {
             },
         ),
         (
-            "more vCPUs than the host's",
-            GuestSpec {
-                vcpus: max_vcpus().saturating_add(1),
-                ..none.clone()
-            },
-        ),
-        (
             "odd memory",
             GuestSpec {
                 memory_mib: least.saturating_add(1),
@@ -137,6 +138,28 @@ pub fn bounds_are_refused_before_boot(s: &Subject<'_>) -> Result<(), Failure> {
         }
     }
     Ok(())
+}
+
+/// More vCPUs than any hypervisor runs are refused as `Bounds` naming the vCPUs: by `boot`,
+/// or, where the hypervisor's own limit is read as the VM starts (shards-vmm's
+/// `check_vcpus`), by the `connect` that finds the guest gone. An input: u32's most.
+pub fn more_vcpus_than_the_hypervisor_runs_are_refused_as_bounds(s: &Subject<'_>) -> Result<(), Failure> {
+    const CASE: &str = "more vCPUs than the hypervisor runs are refused as bounds";
+    let spec = GuestSpec {
+        vcpus: u32::MAX,
+        ..s.serving.clone()
+    };
+    let refused = match s.guests.boot(&spec) {
+        Err(refused) => refused,
+        Ok(guest) => match guest.connect(s.port, s.patience) {
+            Err(refused) => refused,
+            Ok(_) => return Err(fail(CASE, "connected")),
+        },
+    };
+    match refused {
+        Refusal::Bounds { what: "vcpus", .. } => Ok(()),
+        other => Err(fail(CASE, other.to_string())),
+    }
 }
 
 fn boot(case: &'static str, s: &Subject<'_>, spec: &GuestSpec) -> Result<Box<dyn Guest>, Failure> {
@@ -212,9 +235,9 @@ pub fn an_unserved_port_is_refused(s: &Subject<'_>) -> Result<(), Failure> {
             .connect(s.port, s.patience)
             .map_err(|e| fail(CASE, format!("connect to the served port: {e}")))?,
     );
-    // A spec allows at most MAX_PORTS ports, so one of the first MAX_PORTS + 1 is off it.
+    // A spec allows its ports alone, so one of the first of them plus one is off it.
     let off = (0..=u32::MAX)
-        .take(MAX_PORTS.saturating_add(1))
+        .take(s.serving.ports.len().saturating_add(1))
         .find(|p| !s.serving.ports.contains(p))
         .ok_or_else(|| fail(CASE, "every port is allowed"))?;
     match guest.connect(off, s.patience) {
@@ -236,30 +259,40 @@ pub fn an_unserved_port_is_refused(s: &Subject<'_>) -> Result<(), Failure> {
     }
     // A handshake under way when patience runs out ends at it (its timeouts are what is
     // left), so a refusal comes at the patience and its thread's wake.
-    let overshoot = OVERSHOOT.map_err(|pending| fail(CASE, pending.to_string()))?;
+    let overshoot = OVERSHOOT.get();
     if took < patience || took > patience.saturating_add(overshoot) {
         return Err(fail(
             CASE,
-            format!("refused after {took:?}, with patience {patience:?}"),
+            format!("refused after {took:?}, with patience {patience:?} and {overshoot:?} past it"),
         ));
     }
+    OVERSHOOT.saw(took.saturating_sub(patience));
     let _ = guest.stop();
     Ok(())
 }
+
+/// How long a real guest may take to boot and listen, to echo, or to end (`record::Learned`):
+/// a hang guard, each wait returning at its fact. Recorded, the slowest of those waits by
+/// the client as it is (`docs/research/platform-measurements.md` M463): macOS-HVF's, a boot
+/// to power-off, 134.161917 ms; Linux-KVM's, a boot to power-off, 478.557376 ms.
+pub static PATIENCE: Learned = Learned::new(
+    "conformance::PATIENCE",
+    &[
+        ("macOS-HVF", Duration::from_nanos(134_161_917)),
+        ("Linux-KVM", Duration::from_nanos(478_557_376)),
+    ],
+);
 
 /// The patience an unserved port is asked with: an input, as any shows the patience kept;
 /// short, so the case is.
 pub const UNSERVED_PATIENCE: Duration = Duration::from_millis(200);
 
-/// How long past its patience an unserved port's refusal may come, by host class (`record`).
-/// macOS-HVF: twice (the margin) the slowest recorded, 150.85425 ms (the simulator's, its
-/// timer leeway on a 200 ms wait; `docs/research/platform-measurements.md` M462, above
-/// M463's real guests' 138.7 ms). Linux-KVM and Windows-WHP: pending their records, and the
-/// case fails naming them.
-#[cfg(target_os = "macos")]
-pub const OVERSHOOT: Result<Duration, Pending> = Ok(Duration::from_nanos(2 * 150_854_250));
-#[cfg(not(target_os = "macos"))]
-pub const OVERSHOOT: Result<Duration, Pending> = Err(Pending::of("OVERSHOOT"));
+/// How long past its patience an unserved port's refusal may come (`record::Learned`).
+/// Recorded: macOS-HVF's slowest, 150.85425 ms, the simulator's, its timer leeway on a 200
+/// ms wait (`docs/research/platform-measurements.md` M515, above M463's real guests' 138.7
+/// ms).
+pub static OVERSHOOT: Learned =
+    Learned::new("OVERSHOOT", &[("macOS-HVF", Duration::from_nanos(150_854_250))]);
 
 /// `stop` ends a guest as `Stopped`, and a `connect` after it is refused `Ended(Stopped)`.
 pub fn stop_ends_it_and_later_connects_are_refused(s: &Subject<'_>) -> Result<(), Failure> {
@@ -285,14 +318,23 @@ pub fn stop_ends_it_and_later_connects_are_refused(s: &Subject<'_>) -> Result<()
 /// on) is taken back by `attach` of its identity: the attached guest serves its port and stops as
 /// any guest does; once it has ended, attach of it is refused `Ended` or `Gone`, and attach of an
 /// identity whose start time differs (its pid since given another process) is refused `Gone`. On
-/// Windows, where a guest's VM ends with its client's process (D141), no client survives to attach,
-/// but in one process the guest still runs, so the case holds there too.
+/// Windows a guest's VM ends with the process that booted it (D141), so none outlives its client to
+/// be taken back: attach of it answers `Gone`, the guest still its booter's.
 pub fn a_guest_its_client_lost_is_taken_back_by_attach(s: &Subject<'_>) -> Result<(), Failure> {
     const CASE: &str = "a guest its client lost is taken back by attach";
     let guest = boot(CASE, s, &s.serving)?;
     let identity = guest
         .identity()
         .map_err(|e| fail(CASE, format!("identity: {e}")))?;
+    // On Windows a guest's VM ends with the process that booted it (D141), so none outlives
+    // its client to be taken back: attach answers Gone, and the guest stays its booter's,
+    // ended as it drops here.
+    if cfg!(windows) {
+        return match s.guests.attach(&identity, &s.serving) {
+            Err(Refusal::Gone { .. }) => Ok(()),
+            other => Err(fail(CASE, format!("attach on Windows: {:?}", other.err()))),
+        };
+    }
     // The client's crash: its handle goes without its drop, which would end the guest.
     std::mem::forget(guest);
     let other = Identity {

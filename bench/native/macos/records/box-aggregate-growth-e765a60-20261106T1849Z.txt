@@ -1,0 +1,28 @@
+# A macOS box's worst aggregate growth at one, two and four members per core (the lead, 2026-11-06), every member
+# started together by one go byte, each a child process of crates/hex-bench/benches/macos_box.rs `fill`: fill =
+# each fills 256 MiB of fresh memory with an incompressible xorshift stream a u64 at a time; spawn = each spawns
+# and reaps /usr/bin/true 20 times. sum = the members' own rates added (every member overlapping); span = the
+# total over the slowest member's time. Release build of tree e765a60, launchd one-shot
+# hex-macos-late-20261106T184850Z, adas-mac-studio-2 (Mac16,9, Apple M4 Max, 14 cores, macOS 26.2 25C56),
+# 2026-11-06T18:49Z, load 6.12-10.59 (noisy, as runs here are; a quieter run can only be faster), 3 passes.
+pass=1 fill members=14 bytes_per_s_sum=45258843976 bytes_per_s_span=40709396268
+pass=1 spawn members=14 spawns_per_s_sum=9246.0 spawns_per_s_span=8835.9
+pass=1 fill members=28 bytes_per_s_sum=45283044843 bytes_per_s_span=41124124207
+pass=1 spawn members=28 spawns_per_s_sum=10573.5 spawns_per_s_span=9732.4
+pass=1 fill members=56 bytes_per_s_sum=27948594119 bytes_per_s_span=25763824743
+pass=1 spawn members=56 spawns_per_s_sum=10950.6 spawns_per_s_span=10080.7
+pass=2 fill members=14 bytes_per_s_sum=46533637679 bytes_per_s_span=42768903225
+pass=2 spawn members=14 spawns_per_s_sum=9740.5 spawns_per_s_span=9327.7
+pass=2 fill members=28 bytes_per_s_sum=49736468412 bytes_per_s_span=44530681629
+pass=2 spawn members=28 spawns_per_s_sum=10394.0 spawns_per_s_span=9845.7
+pass=2 fill members=56 bytes_per_s_sum=51052630611 bytes_per_s_span=44174711286
+pass=2 spawn members=56 spawns_per_s_sum=11316.5 spawns_per_s_span=10634.5
+pass=3 fill members=14 bytes_per_s_sum=49621930736 bytes_per_s_span=46202907886
+pass=3 spawn members=14 spawns_per_s_sum=10661.6 spawns_per_s_span=10059.1
+pass=3 fill members=28 bytes_per_s_sum=50974337676 bytes_per_s_span=39057178732
+pass=3 spawn members=28 spawns_per_s_sum=9818.8 spawns_per_s_span=9084.1
+pass=3 fill members=56 bytes_per_s_sum=30007400656 bytes_per_s_span=28093123153
+pass=3 spawn members=56 spawns_per_s_sum=10228.7 spawns_per_s_span=9450.1
+# Worst for Mac16,9 (with the earlier one-member-per-core record box-aggregate-growth-f83189c, 47,464,532,324 and
+# 10,436.4): fill 51,052,630,611 B/s and spawn 11,316.5/s, both at 56 members (four per core), sums.
+# hex_core::watch::CLASSES takes these for Mac16,9.

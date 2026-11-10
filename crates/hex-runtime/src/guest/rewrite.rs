@@ -36,7 +36,13 @@ pub fn rewrite(
     staged: &str,
     known: &Known,
 ) -> Result<Rewritten, Refusal> {
-    let BoxSpec { id, bounds, class } = spec;
+    // Its owner goes with it: the guest's node hands a box's cgroup on within its owner, as any node does.
+    let BoxSpec {
+        id,
+        bounds,
+        class,
+        owner,
+    } = spec;
     let mut items = Vec::new();
     let class = match class {
         ClassSpec::Process => ClassSpec::Process,
@@ -70,7 +76,12 @@ pub fn rewrite(
         }
     };
     Ok(Rewritten {
-        spec: BoxSpec { id, bounds, class },
+        spec: BoxSpec {
+            id,
+            bounds,
+            class,
+            owner,
+        },
         items,
     })
 }

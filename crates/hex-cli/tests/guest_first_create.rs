@@ -97,6 +97,7 @@ fn an_upgrades_first_create_is_timed() {
             network: Network::Private,
             hosts: Vec::new(),
         })),
+        owner: None,
     })
     .unwrap();
     let created = creating.elapsed().as_secs_f64() * 1e3;

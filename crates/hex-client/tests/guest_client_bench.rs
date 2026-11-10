@@ -74,7 +74,7 @@ fn next_request(
 }
 
 fn send_answer(conn: &mut TcpStream, h: Header, answer: &Answer) {
-    let bytes = wire::answer(h.version, h.id, answer, wire::MAX_MESSAGE).unwrap();
+    let bytes = wire::answer(h.id, answer, wire::MAX_MESSAGE).unwrap();
     conn.write_all(&stream::frame(&bytes, wire::MAX_MESSAGE).unwrap())
         .unwrap();
 }
@@ -88,18 +88,19 @@ fn agent(control: TcpListener, stdio: TcpListener) {
     let (mut d, mut buf) = (Deframer::new(wire::MAX_MESSAGE), Vec::new());
     while let Some((h, r)) = next_request(&mut conn, &mut d, &mut buf) {
         match r {
-            Request::Hello => send_answer(
+            Request::Hello { .. } => send_answer(
                 &mut conn,
-                Header {
-                    version: wire::FIRST,
-                    ..h
-                },
+                h,
                 &Answer::Hello(wire::Hello {
-                    version: wire::VERSION,
+                    build: wire::build(),
                     classes: vec![Class::Oci],
                     limits: Limits {
                         connections: 1,
                         message_bytes: wire::MAX_MESSAGE,
+                        in_flight: 4,
+                        programs: 4,
+                    },
+                    budgets: wire::Budgets {
                         in_flight: 4,
                         programs: 4,
                     },

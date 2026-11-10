@@ -13,11 +13,14 @@
 //! - the hex-api conformance suite (HEX-RT-1 to 13) on boxes made from OciSpecs;
 //! - a spec this node can't render (a root or a mount source that isn't there, a user a rootless
 //!   node can't map) is refused by the field's name, and nothing is made;
-//! - a crash mid-create leaves a rendered bundle that recovery removes, however its layer was left.
+//! - a crash mid-create leaves a rendered bundle that recovery removes, however its layer was left:
+//!   alone or with the box's cgroup, as today's node leaves it with no record yet, or with a record
+//!   saying the box was being made, as a node before goal 5 extended step 5 left it (T-T7.1.2).
 //!
 //! Rootless where the caller isn't root (overlayfs mounts unprivileged since Linux 5.11), as root in a
 //! privileged container otherwise (bench/oci-validation's setting); in a delegated cgroup v2 subtree,
-//! as oci_box.rs. Where none of that is possible it prints SKIP and why rather than pass falsely.
+//! as oci_box.rs. Where none of that is possible it records the skip and why (hex_testkit, which
+//! the gate prints) rather than pass falsely.
 #![cfg(target_os = "linux")]
 #![allow(
     clippy::unwrap_used,
@@ -39,9 +42,9 @@ use hex_api::{
     Bounds, BoxId, BoxSpec, BoxState, ClassSpec, Exit, Mount, Network, OciSpec, Program, Refusal,
     Rootfs, Runtime, Stdio, User,
 };
+use hex_core::patience::Patience;
 use hex_core::record::{BoxRecord, Phase};
-use hex_node::Node;
-use hex_node::store::Store;
+use hex_node::{Node, OCI_BOXES, records_dir};
 
 const TEST: &str = "oci_spec_boxes_run_from_the_bundles_the_node_renders";
 
@@ -58,9 +61,14 @@ fn oci_spec_boxes_run_from_the_bundles_the_node_renders() {
                 .map(|o| o.status.success())
                 .unwrap_or(false);
             if !has_systemd {
-                eprintln!(
-                    "SKIP: own cgroup isn't ours to subdivide ({direct}) and no systemd --user for a private scope"
-                );
+                hex_testkit::skip(
+                    "oci_spec_boxes_run_from_the_bundles_the_node_renders",
+                    "cgroup v2 delegation",
+                    &format!(
+                        "own cgroup isn't ours to subdivide ({direct}) and no systemd --user for a private scope"
+                    ),
+                )
+                .expect("recording the skip");
                 return;
             }
             let status = Command::new("systemd-run")
@@ -73,7 +81,12 @@ fn oci_spec_boxes_run_from_the_bundles_the_node_renders() {
             assert!(status.success(), "the delegated re-run failed");
         }
         Err(direct) => {
-            eprintln!("SKIP: no usable cgroup v2 delegation ({direct}); run on a cgroup-v2 host")
+            hex_testkit::skip(
+                "oci_spec_boxes_run_from_the_bundles_the_node_renders",
+                "cgroup v2 delegation",
+                &format!("none in the delegated scope either ({direct}); run on a cgroup-v2 host"),
+            )
+            .expect("recording the skip");
         }
     }
 }
@@ -155,6 +168,7 @@ impl Fixture for Lab {
             id,
             bounds,
             class: ClassSpec::Oci(Box::new(self.conformance_spec(&Self::act(&Act::Wait)))),
+            owner: None,
         }
     }
 
@@ -163,6 +177,7 @@ impl Fixture for Lab {
             id,
             bounds: Bounds::default(),
             class: ClassSpec::Oci(Box::new(self.conformance_spec(&Self::act(act)))),
+            owner: None,
         }
     }
 
@@ -185,7 +200,12 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     // A rootless container needs unprivileged user namespaces; a host without them can't run one,
     // which is a reason to skip, said. Past that, any failure is the lab's to report.
     if lab.rootless && !userns_available() {
-        eprintln!("SKIP: unprivileged user namespaces aren't available here");
+        hex_testkit::skip(
+            "oci_spec_boxes_run_from_the_bundles_the_node_renders",
+            "unprivileged user namespaces",
+            "this host makes none for an unprivileged user",
+        )
+        .expect("recording the skip");
         return;
     }
     layered_box(&lab, own);
@@ -194,6 +214,104 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     conformance_on_specs(&lab, own);
     refusals(&lab, own);
     recovery_removes_a_half_made_bundle(&lab, own);
+}
+
+/// AC-f (goal 5 plan step 2): a started pruned create seed's mount namespace is a read-only tmpfs
+/// holding nothing, on the namespace's root, and nothing of the host: no proc, sysfs or cgroup2. Since
+/// plan step 3 the init attaches the container's root on the tmpfs's own root, so the tmpfs needs no
+/// directory to attach it at. Its mountinfo lists the tmpfs alone, by the kernel's design. The namespace's root, the
+/// tmpfs's parent, lies outside the seed's root, and the kernel lists no mount it can't reach from the
+/// task's root: v6.19 `show_mountinfo` (fs/proc_namespace.c:150-151, "mountpoints outside of chroot jail
+/// will give SEQ_SKIP on this") skips what `seq_path_root` can't name (fs/seq_file.c:517-519), and
+/// `__d_path` names nothing unreachable from the root (fs/d_path.c:211-223). The node runs in this process
+/// and its create pool spawns `hex __oci-seed` children with `HEX_OCI_SEED_JOIN` set, each joining the node's
+/// one pruned namespace (`goal6-mntns.md` §12), so the seed is found among this process's children by that
+/// environment entry (an exec seed, unpruned, has none), and its mountinfo and root read. Run only as root,
+/// where the node prunes.
+fn pruned_seed_lists_its_read_only_root_tmpfs_alone() {
+    let me = std::process::id();
+    let mut seed = None;
+    for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        // proc_pid_stat(5): ppid is field 4, after the comm (field 2) in parens, which can hold spaces
+        // and parens — so read the fields after the last ')'.
+        let after = stat.rsplit_once(')').map(|(_, a)| a).unwrap_or("");
+        if after
+            .split_whitespace()
+            .nth(1)
+            .and_then(|p| p.parse::<u32>().ok())
+            != Some(me)
+        {
+            continue;
+        }
+        let environ = std::fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
+        if environ
+            .split(|&b| b == 0)
+            .any(|e| e.starts_with(b"HEX_OCI_SEED_JOIN="))
+        {
+            seed = Some(pid);
+            break;
+        }
+    }
+    let seed = seed.expect("a pruned create seed among this process's children");
+    let mountinfo =
+        std::fs::read_to_string(format!("/proc/{seed}/mountinfo")).expect("the seed's mountinfo");
+    // proc_pid_mountinfo(5): mount ID, parent ID, major:minor, root, mount point, mount options; after
+    // " - ", the filesystem type.
+    let mounts: Vec<(Vec<&str>, &str)> = mountinfo
+        .lines()
+        .map(|line| {
+            let (fields, fs) = line.split_once(" - ").expect("a mountinfo line");
+            let fstype = fs.split_whitespace().next().unwrap_or("");
+            (fields.split_whitespace().collect(), fstype)
+        })
+        .collect();
+    assert!(
+        mounts
+            .iter()
+            .all(|(_, fstype)| !matches!(*fstype, "proc" | "sysfs" | "cgroup2" | "cgroup")),
+        "a pruned create seed (pid {seed}) holds no proc, sysfs or cgroup:\n{mountinfo}"
+    );
+    assert_eq!(
+        mounts.len(),
+        1,
+        "a pruned create seed (pid {seed}) lists its root tmpfs alone, got {}:\n{mountinfo}",
+        mounts.len()
+    );
+    let (fields, fstype) = &mounts[0];
+    assert_eq!(
+        *fstype, "tmpfs",
+        "the seed's one mount is its tmpfs:\n{mountinfo}"
+    );
+    assert_eq!(fields[4], "/", "the tmpfs is the seed's /:\n{mountinfo}");
+    assert!(
+        fields[5].split(',').any(|o| o == "ro"),
+        "the seed's root tmpfs is mounted read-only:\n{mountinfo}"
+    );
+    // Its parent, the namespace's root, lies outside the seed's root, so no line lists it.
+    assert!(
+        mounts.iter().all(|(m, _)| m[0] != fields[1]),
+        "the tmpfs's parent (mount {}) isn't listed:\n{mountinfo}",
+        fields[1]
+    );
+    let root: Vec<String> = std::fs::read_dir(format!("/proc/{seed}/root"))
+        .expect("the seed's root")
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(root.is_empty(), "the seed's root holds nothing: {root:?}");
+    eprintln!(
+        "AC-f: the pruned create seed (pid {seed}) lists one mount, its read-only root tmpfs:"
+    );
+    eprint!("{mountinfo}");
 }
 
 /// The plan step's example: layers [base, app], `sleep infinity`, one read-only bind, a private
@@ -217,6 +335,7 @@ fn layered_box(lab: &Lab, own: &Path) {
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Oci(Box::new(spec)),
+        owner: None,
     });
     assert_eq!(made.expect("create").state, BoxState::Created);
     let _cleanup = Deleting(&node, id.clone());
@@ -229,6 +348,32 @@ fn layered_box(lab: &Lab, own: &Path) {
     );
     node.start(&id).expect("start");
     assert_eq!(node.inspect(&id).unwrap().state, BoxState::Running);
+    // Goal 5 plan step 2: an eligible box takes no shim fallback (no pid/user namespace by path, no
+    // user namespace of its own, no hooks). A root node makes it on the pruned root path (no
+    // `pivot_root`); a rootless node's seeds don't prune, so it takes the classic path in the init.
+    assert_eq!(
+        node.creates_through_shim(),
+        0,
+        "an eligible box falls back to no shim"
+    );
+    if lab.rootless {
+        assert_eq!(
+            node.pruned_creates(),
+            0,
+            "a rootless node's seeds don't prune their mount namespace"
+        );
+    } else {
+        assert!(
+            node.pruned_creates() >= 1,
+            "a root node makes an eligible box on the pruned root path, {} made",
+            node.pruned_creates()
+        );
+        // AC-f: a started pruned create seed's mount namespace is a read-only tmpfs on the namespace's
+        // root, which its mountinfo lists alone, and no proc, sysfs or cgroup2. The seed is a child of
+        // this process (the node runs in-process and its create pool spawns `hex __oci-seed`), so find
+        // it and read its mountinfo and root.
+        pruned_seed_lists_its_read_only_root_tmpfs_alone();
+    }
     let layer = state.join("bundles/layered");
 
     // Its root is the overlay, over the box's own writable layer; /usr is the bind, read-only.
@@ -336,6 +481,7 @@ fn in_place_box(lab: &Lab, own: &Path) {
             network: Network::Host,
             hosts: Vec::new(),
         })),
+        owner: None,
     })
     .expect("create");
     let _cleanup = Deleting(&node, id.clone());
@@ -407,6 +553,7 @@ fn links_in_a_layer_stay_in_the_box(lab: &Lab, own: &Path) {
         id: id.clone(),
         bounds: Bounds::default(),
         class: spec(&out),
+        owner: None,
     });
     let _cleanup = Deleting(&node, id.clone());
     assert_eq!(
@@ -426,6 +573,7 @@ fn links_in_a_layer_stay_in_the_box(lab: &Lab, own: &Path) {
         id: id.clone(),
         bounds: Bounds::default(),
         class: spec(&inside),
+        owner: None,
     })
     .expect("create");
     let _cleanup = Deleting(&node, id.clone());
@@ -483,6 +631,7 @@ fn refusals(lab: &Lab, own: &Path) {
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Oci(Box::new(spec)),
+            owner: None,
         });
         assert!(
             matches!(&got, Err(Refusal::Invalid { what: "oci spec", why }) if why.contains(field)),
@@ -492,48 +641,102 @@ fn refusals(lab: &Lab, own: &Path) {
     }
 }
 
-/// T-T7.1.2: the node stopped mid-create, after the record and the rendered bundle and before the
-/// cgroup; its layer already holds a directory of mode 0 and a deep tree, as a container can leave
-/// one, and its container's state directory is made. Recovery removes the box, its bundle and its
-/// container's state with it.
+/// T-T7.1.2 (goal 5 extended step 5): what a crash leaves of a box with a rendered bundle, the layer
+/// already holding a directory of mode 0 and a deep tree, as a container can leave one. Do: as today's
+/// node leaves a box with no record yet, leave a bundle with its cgroup (a create killed after
+/// rendering it, before the container's state directory); a bundle alone and a container's state
+/// directory alone (removals killed after the box's cgroup went, the cgroup removed first); as a node
+/// before step 5 left one, a bundle with its container's state directory and a record saying the box
+/// was being made; and a file among the bundles, which no box's part is. Expect: recovery removes each
+/// box, naming what it found of those with no record, nothing of any is left, and the file is.
 fn recovery_removes_a_half_made_bundle(lab: &Lab, own: &Path) {
     let (node, box_root, state) = lab.node(own, "recovery");
-    let id = BoxId::new("half-made").unwrap();
-    let container = node.container_dir(&id);
+    let id = |n: &str| BoxId::new(n).unwrap();
+    let (alone, with_cgroup, older) = (id("half-alone"), id("half-cgroup"), id("half-older"));
+    let state_only = id("half-state");
+    let container = node.container_dir(&older);
+    std::fs::create_dir_all(node.container_dir(&state_only)).unwrap();
     drop(node);
-    std::fs::create_dir_all(&container).unwrap();
-    let bundle = state.join("bundles/half-made");
-    let mut deep = bundle.join("upper");
-    for _ in 0..200 {
-        deep.push("d");
+    let half_made = |id: &BoxId| {
+        let bundle = state.join("bundles").join(id.as_str());
+        let mut deep = bundle.join("upper");
+        for _ in 0..200 {
+            deep.push("d");
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::create_dir_all(bundle.join("work/work")).unwrap();
+        std::fs::set_permissions(
+            bundle.join("work/work"),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+        bundle
+    };
+    for id in [&alone, &with_cgroup] {
+        half_made(id);
     }
-    std::fs::create_dir_all(&deep).unwrap();
-    std::fs::create_dir_all(bundle.join("work/work")).unwrap();
-    std::fs::set_permissions(
-        bundle.join("work/work"),
-        std::fs::Permissions::from_mode(0o000),
-    )
-    .unwrap();
+    std::fs::create_dir(box_root.join(OCI_BOXES).join(with_cgroup.as_str())).unwrap();
+    std::fs::create_dir_all(&container).unwrap();
     let spec = BoxSpec {
-        id: id.clone(),
+        id: older.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Oci(Box::new(lab.conformance_spec(&Lab::act(&Act::Wait)))),
+        owner: None,
     };
     let record = BoxRecord::new(
         spec,
         Phase::Creating,
-        vec![container.clone(), bundle.clone()],
+        vec![container.clone(), half_made(&older)],
     );
-    Store::open(&state).unwrap().put(&record).unwrap();
+    // Where that node kept every record: its state directory.
+    std::fs::write(
+        state.join(format!("{older}.json")),
+        record.encode().unwrap(),
+    )
+    .unwrap();
+    let stray = state.join("bundles/not-a-box");
+    std::fs::write(&stray, b"").unwrap();
     let (restarted, _, _) = lab.node(own, "recovery");
     let summary = restarted.recover().expect("recover");
+    let why = |id: &BoxId| {
+        summary
+            .removed
+            .iter()
+            .find(|(r, _)| r == id)
+            .map(|(_, why)| why.clone())
+            .unwrap_or_else(|| panic!("{id} not removed: {summary:?}"))
+    };
     assert!(
-        summary.removed.iter().any(|(r, _)| *r == id),
-        "not removed: {summary:?}"
+        why(&alone).ends_with(": its bundle left"),
+        "{}",
+        why(&alone)
     );
-    assert!(!bundle.exists(), "the half-made bundle is left");
+    assert!(
+        why(&with_cgroup).ends_with(": its cgroup, its bundle left"),
+        "{}",
+        why(&with_cgroup)
+    );
+    assert!(
+        why(&state_only).ends_with(": its container's state left"),
+        "{}",
+        why(&state_only)
+    );
+    assert!(why(&older).contains("being made"), "{}", why(&older));
     assert!(!container.exists(), "the half-made container state is left");
-    nothing_left(&restarted, &id, &box_root, &state);
+    for id in [&alone, &with_cgroup, &state_only, &older] {
+        nothing_left(&restarted, id, &box_root, &state);
+    }
+    assert!(
+        !summary
+            .removed
+            .iter()
+            .any(|(id, _)| id.as_str() == "not-a-box"),
+        "{summary:?}"
+    );
+    assert!(
+        stray.exists(),
+        "a file that's no box's part is left as it was"
+    );
 }
 
 /// Deletes its box when dropped, so a check that fails leaves no container running.
@@ -545,8 +748,8 @@ impl Drop for Deleting<'_> {
     }
 }
 
-/// Nothing of box `id` is left on the node: no bundle, no container state, no cgroup, no record, and
-/// no mount anywhere naming its bundle.
+/// Nothing of box `id` is left on the node: no bundle, no container state, no cgroup, no record in
+/// either place a node keeps them, and no mount anywhere naming its bundle.
 fn nothing_left(node: &Node, id: &BoxId, box_root: &Path, state: &Path) {
     let bundle = state.join("bundles").join(id.as_str());
     assert!(!bundle.exists(), "{id}'s bundle is left");
@@ -555,13 +758,20 @@ fn nothing_left(node: &Node, id: &BoxId, box_root: &Path, state: &Path) {
         "{id}'s container state is left"
     );
     assert!(
-        !box_root.join(id.as_str()).exists(),
+        !box_root.join(OCI_BOXES).join(id.as_str()).exists(),
         "{id}'s cgroup is left"
     );
-    assert!(
-        !state.join(format!("{id}.json")).exists(),
-        "{id}'s record is left"
-    );
+    let runtime = node.oci_root().to_owned();
+    for record in [
+        state.join(format!("{id}.json")),
+        hex_node::store::runtime_record(&records_dir(&runtime, state).unwrap(), id),
+    ] {
+        assert!(
+            !record.exists(),
+            "{id}'s record is left at {}",
+            record.display()
+        );
+    }
     assert_eq!(node.inspect(id), Err(Refusal::NoSuchBox(id.clone())));
     let mounts = std::fs::read_to_string("/proc/self/mountinfo").unwrap();
     assert!(
@@ -636,21 +846,20 @@ fn boxes_namespaces(node: &Node) -> (u64, u64) {
     (counts.taken, counts.made_on_path)
 }
 
+/// The pool's refill thread's make of a network namespace: the `netns.make` record (hex_testkit::waits).
+static POOL_HOLDS: Patience = Patience::seeded(
+    "test.oci_spec_box.pool_holds",
+    hex_testkit::waits::NETNS_MAKE,
+);
+
 /// Waits for the fact a create from the pool needs: a root node's pool holds a namespace, which its
 /// thread makes as soon as the node opens.
 fn pool_holds_one(node: &Node) {
-    let deadline = std::time::Instant::now() + conformance::PATIENCE;
-    while std::time::Instant::now() < deadline {
+    hex_testkit::waits::until(&POOL_HOLDS, "a namespace in the node's pool", || {
         let c = node.netns().unwrap();
-        if c.made_ahead > c.taken + c.discarded {
-            return;
-        }
-        std::thread::park_timeout(std::time::Duration::from_millis(1));
-    }
-    panic!(
-        "the node's pool made no namespace in {:?}",
-        conformance::PATIENCE
-    );
+        c.made_ahead > c.taken + c.discarded
+    })
+    .unwrap();
 }
 
 fn snapshot(dir: &Path) -> BTreeMap<PathBuf, (String, u32, Vec<u8>)> {

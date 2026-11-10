@@ -9,7 +9,9 @@
 #   3. with no further step the invoking user's boxes run as pool users: the box-user HEX-RT contract
 #      passes over the installed helper's socket as that ordinary user (HEX-INST-6), the helper is
 #      loaded in launchd's system domain, its socket is root's and hexnode's alone (a user outside
-#      hexnode can't connect), and the pool is listed;
+#      hexnode can't connect), and the pool is listed; and step 2's root checks run against the installed
+#      pool (its C1 membership and its caps, bench/native/macos/boxuser_probe.c), so this one admin run covers
+#      the installer, the pool's growth and step 2's helper together (the lead, 2026-11-06);
 #   4. uninstall leaves nothing of the plan on the machine, listed line by line and by dscl and launchctl
 #      on their own (HEX-INST-7).
 # On any exit before uninstall ran, its EXIT trap uninstalls by the manifest; a watchdog bounds the run.
@@ -51,7 +53,11 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' TERM INT
 MAINPID=$$
-WATCHDOG_SECS=1800
+# Twice the lab's recorded phases (18.950 s) plus each unrecorded phase's own guard: step 2's probe waits
+# (10.700 s) and the oversubscribed box-user test's six passes, each ended by its first hog's wait, bounded by
+# the test's HANG_GUARD (6 x 39.507 = 237.042 s): bench/native/macos/records/labphases-40454fe-20261106T165836Z.txt
+# (the lead's call 5, 2026-11-06). Ada's run prints every phase's time (TIME: lines); her record sets it after.
+WATCHDOG_SECS=266.692
 (sleep "$WATCHDOG_SECS"; echo "macos_lab: watchdog fired after ${WATCHDOG_SECS} s" >&2; kill -TERM "$MAINPID") &
 WATCHDOG_PID=$!
 
@@ -69,15 +75,35 @@ HEXBIN=$TARGET/debug/hex
 TESTBIN=$(find "$TARGET/debug/deps" -maxdepth 1 -name 'macos_process_box-*' -type f -perm +111 -print0 |
   xargs -0 ls -t | head -1)
 [ -n "$TESTBIN" ] || { echo "macos_lab: no test binary" >&2; exit 1; }
+# Step 2's root probe (bench/native/macos/boxuser_probe.c), built as the lab user: its membership and cap
+# checks run here against the installed pool, so Ada's one installer run covers step 2's helper too.
+PROBE=$TARGET/boxuser_probe
+as_user cc -O2 -Wall -Wextra -o "$PROBE" "$REPO/bench/native/macos/boxuser_probe.c" ||
+  { echo "macos_lab: probe build failed" >&2; exit 1; }
 
 FAIL=0
 step() { echo; echo "## $*"; }
-expect() { # <what> <command...>: records PASS when the command succeeds, else FAIL
-  local what=$1
+now() { perl -MTime::HiRes=time -e 'printf "%.6f", time'; }
+expect() { # <what> <command...>: records PASS when the command succeeds, else FAIL, and how long it took
+  local what=$1 t0 st
   shift
-  if "$@"; then echo "PASS: $what"; else echo "FAIL: $what"; FAIL=1; fi
+  t0=$(now)
+  if "$@"; then st=PASS; else st=FAIL; FAIL=1; fi
+  echo "$st: $what"
+  # Each phase's time, so a recorded run sets the watchdog for the next (the lead's call 5, 2026-11-06).
+  echo "TIME: $(perl -e "printf '%.3f', $(now) - $t0") s: $what"
 }
 box_user_contract() { as_user env HEX_BOX_HELPER_SOCK="$SOCK" "$TESTBIN" --exact --ignored box_user_boxes_hold_the_contract --test-threads 1 2>&1 | tail -n 15; return "${PIPESTATUS[0]}"; }
+# Ada's two-layer bound (2026-11-01): the helper's ledger holds a box of 2x and 4x the cores' hogs within 64
+# MiB of its bound (the lead, 2026-11-06), as the lab user over the installed helper.
+# It must run, not match nothing: libtest passes a filter that names no test.
+oversubscribed_box_user() {
+  local out st
+  out=$(as_user env HEX_BOX_HELPER_SOCK="$SOCK" "$TESTBIN" --exact --ignored a_box_user_box_holds_the_bar_oversubscribed --nocapture --test-threads 1 2>&1)
+  st=$?
+  grep -E 'OVERSHOOT|test result|panicked|passes past' <<<"$out"
+  [ "$st" = 0 ] && grep -q 'test result: ok. 1 passed' <<<"$out"
+}
 process_contract() { as_user "$TESTBIN" --exact macos_process_boxes_hold_the_contract 2>&1 | tail -n 3; return "${PIPESTATUS[0]}"; }
 nothing_left_listed() {
   local n
@@ -98,10 +124,50 @@ nothing_left_listed() {
     if [ -e "$p" ]; then echo "left: $p"; return 1; fi
   done
 }
-outsider_refused() { # a user outside hexnode (nobody) can't connect to the helper's socket
-  ! sudo -u nobody nc -U -z "$SOCK" 2>/dev/null
+# A connect(2) to the helper's socket, as its caller: prints "ok", or the refusal's errno text. macOS's
+# `nc -U -z` exits 1 even against a listening socket (measured on .local-2, 2026-11-06), so it can't probe.
+CONNECT='use IO::Socket::UNIX; IO::Socket::UNIX->new(Type => SOCK_STREAM(), Peer => $ARGV[0]) ? print "ok\n" : print "$!\n"'
+connect_as() { sudo -u "$1" perl -e "$CONNECT" "$SOCK"; }
+outsider_refused() { # a user outside hexnode (nobody) is refused the socket by its folder's mode (EACCES)
+  local got
+  got=$(connect_as nobody)
+  echo "nobody's connect: $got"
+  [ "$got" = "Permission denied" ]
 }
-member_connects() { as_user nc -U -z "$SOCK"; }
+pool_uid_of() { "$INSTALLED_DSCL" . -read "/Users/$1" UniqueID 2>/dev/null | awk '{print $2}'; }
+INSTALLED_DSCL=/usr/bin/dscl
+# Step 2's C1 (box membership): six members run as the installed pool's first user, one daemonized; the
+# user listing finds all six, RLIMIT_NPROC refuses a seventh in the kernel, and a kill-all leaves none.
+membership_c1() {
+  local uid out
+  uid=$(pool_uid_of _hexbox1)
+  [ -n "$uid" ] || { echo "no _hexbox1"; return 1; }
+  out=$("$PROBE" uid "$uid" 6)
+  echo "$out"
+  grep -q "started 6 members, proc_listpids(PROC_UID_ONLY) found 6" <<<"$out" &&
+    grep -q "bit -> a fork past the cap was refused" <<<"$out" &&
+    grep -q "after delete, 0 processes left" <<<"$out"
+}
+# Step 2's caps: the fatal footprint cap kills at 64 and 256 MiB (SIGKILL), and the soft one notifies
+# (EXC_RESOURCE), as root.
+caps() {
+  local mb out ok=0
+  for mb in 64 256; do
+    out=$("$PROBE" cap fatal "$mb")
+    echo "$out"
+    grep -q "killed by signal 9" <<<"$out" || ok=1
+  done
+  out=$("$PROBE" cap soft 64)
+  echo "$out"
+  grep -q "EXC_RESOURCE after" <<<"$out" || ok=1
+  return "$ok"
+}
+member_connects() { # the lab user, in hexnode, connects
+  local got
+  got=$(connect_as "$LABUSER")
+  echo "$LABUSER's connect: $got"
+  [ "$got" = ok ]
+}
 
 # The record takes everything from here, in this shell (not a pipeline's subshell), so the EXIT trap sees
 # whether install ran.
@@ -129,6 +195,9 @@ echo "$LABUSER's groups (a fresh login): $(as_user id -Gn)"
 expect "$LABUSER (hexnode) connects to the helper's socket" member_connects
 expect "nobody (outside hexnode) is refused the helper's socket" outsider_refused
 expect "the box-user HEX-RT contract passes for $LABUSER over the installed helper (HEX-INST-6)" box_user_contract
+expect "the helper's ledger holds a box of 2x and 4x the cores' hogs within 64 MiB of its bound, every pass" oversubscribed_box_user
+expect "step 2's C1: the installed pool's user holds its members, its cap bites, a kill-all empties it" membership_c1
+expect "step 2's caps: the fatal footprint cap kills at 64 and 256 MiB, the soft one notifies" caps
 expect "the process class still passes HEX-RT-1..9" process_contract
 
 step "4. uninstall"

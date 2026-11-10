@@ -22,6 +22,8 @@
 mod bounds;
 pub mod conformance;
 pub mod differential;
+#[cfg(windows)]
+mod end;
 mod id;
 mod runtime;
 pub mod sim;
@@ -33,6 +35,12 @@ pub use runtime::{
     Asked, BoxInfo, BoxState, Exit, Membership, Proc, Refusal, Runtime, Signal, Usage,
 };
 pub use spec::{
-    Ask, BlockCount, BoxSpec, Class, ClassSpec, End, ExecLimit, Given, Mount, Network, OciSpec,
-    Program, Rootfs, Stdio, StringUnit, User, drive_absolute,
+    Ask, BlockCount, BoxOwner, BoxSpec, Class, ClassSpec, End, ExecLimit, Given, Mount, Network,
+    OciSpec, Program, Rootfs, Stdio, StringUnit, User, drive_absolute,
 };
+
+/// A caller's owned stream: Unix's descriptor becomes a file; Windows keeps the handle's resource kind.
+#[cfg(unix)]
+pub type OwnedStream = std::fs::File;
+#[cfg(windows)]
+pub use end::OwnedStream;

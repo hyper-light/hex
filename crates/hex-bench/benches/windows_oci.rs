@@ -78,6 +78,7 @@ fn main() {
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(bundle(i)),
+            owner: None,
         };
         let t = Instant::now();
         rt.create(spec).expect("create");

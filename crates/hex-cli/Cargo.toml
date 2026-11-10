@@ -29,19 +29,24 @@ sha2.workspace = true
 socket2.workspace = true
 
 # macOS: the box helper daemon subcommand (`hex __box-helper`) drives hex-runtime's macOS daemon, and
-# `hex node` on macOS (native plan step 8b) runs the node over the macOS runtime and its Shards guest.
+# `hex node` on macOS (native plan step 8b) runs the node over the macOS runtime and its Shards guest,
+# seeding its boxes' pacing from its machine class's records (hex-core's watch).
 [target.'cfg(target_os = "macos")'.dependencies]
 hex-api.workspace = true
+hex-core.workspace = true
 hex-node.workspace = true
 hex-runtime.workspace = true
 rustix.workspace = true
 shards-api.workspace = true
 
-# The Windows oci class's launcher (`hex oci-launch`), which HCS runs inside each container
+# `hex node` on Windows (native plan step 8): the node over the Windows runtime, and `hex keep`, its
+# keeper. The Windows oci class's launcher (`hex oci-launch`), which HCS runs inside each container
 # (hex_runtime::windows::oci::launch), the selftest's device probe, and `hex setup features`, the Windows
 # node's own bounded feature query for the installer.
 [target.'cfg(target_os = "windows")'.dependencies]
+hex-api.workspace = true
 hex-core.workspace = true
+hex-node.workspace = true
 hex-runtime.workspace = true
 
 [dev-dependencies]
@@ -60,7 +65,8 @@ tar.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-hex-node.workspace = true
+hex-node = { workspace = true, features = ["test-controls"] }
+hex-testkit.workspace = true
 
 # The macOS process class's conformance test (tests/macos_process_box.rs) drives hex-runtime's macOS
 # runtime with the `hex selftest-box` programs this crate's binary provides.
@@ -73,6 +79,7 @@ hex-client.workspace = true
 # oci class's test (tests/windows_oci_box.rs) writes its bundles' config.json with serde_json.
 [target.'cfg(target_os = "windows")'.dev-dependencies]
 hex-core.workspace = true
+hex-afunix.workspace = true
 hex-client.workspace = true
 hex-runtime.workspace = true
 serde_json.workspace = true

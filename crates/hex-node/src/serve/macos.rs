@@ -40,12 +40,42 @@ use rustix::net::{
     AddressFamily, RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags, SendFlags,
     Shutdown, SocketAddrUnix, SocketType,
 };
-use rustix::process::{Pid, Signal};
 
-use super::{Accepted, EVENTS, Event, Interest, Os, Peer, Recv, Sent, Unwatched};
+use super::{Accepted, EVENTS, Event, Interest, Os, Peer, Platform, Recv, Sent, Unwatched};
 
-/// Connections waiting to be accepted: the I/O thread accepts them as they come.
-const BACKLOG: i32 = 64;
+/// What macOS lets the node hold ([`Platform`]), as it starts:
+/// - descriptors: its soft `RLIMIT_NOFILE` (raised to its hard limit where that is finite), within
+///   `kern.maxfilesperproc`, as XNU's open holds a process to the less of the two (`proc_limitgetcur_nofile`);
+/// - threads: `kern.num_taskthreads`, the most one process runs;
+/// - programs: each a process, so what `fork1` holds the node's user to (`bsd/kern/kern_fork.c`): `kern.maxproc`,
+///   and for any user but root its soft `RLIMIT_NPROC`.
+pub fn platform() -> Result<Platform, Refusal> {
+    let read =
+        |what: &'static str, got: std::io::Result<usize>| got.map_err(|e| Refusal::os(what, e));
+    let soft = |resource| {
+        rustix::process::getrlimit(resource)
+            .current
+            .map_or(usize::MAX, |n| usize::try_from(n).unwrap_or(usize::MAX))
+    };
+    let processes = read("reading kern.maxproc", sys::max_processes())?;
+    Ok(Platform {
+        descriptors: soft(rustix::process::Resource::Nofile).min(read(
+            "reading kern.maxfilesperproc",
+            sys::max_files_per_process(),
+        )?),
+        threads: read("reading kern.num_taskthreads", sys::max_threads_per_task())?,
+        programs: if rustix::process::getuid().is_root() {
+            processes
+        } else {
+            soft(rustix::process::Resource::Nproc).min(processes)
+        },
+    })
+}
+
+/// Connections waiting to be accepted, which the I/O thread accepts as they come: as many as the kernel queues for a
+/// socket, none picked (Ada's rule, 2026-11-06). listen(2) caps a larger backlog at the kernel's own, Linux's
+/// `net.core.somaxconn` and XNU's `kern.ipc.somaxconn` (`solisten`), so this asks for the most and gets the kernel's.
+const BACKLOG: i32 = i32::MAX;
 /// A frame's prefix, its body's length (`hex_core::stream`'s `u32`).
 const PREFIX: usize = size_of::<u32>();
 
@@ -157,10 +187,9 @@ impl MacOs {
     }
 }
 
-/// A watched program: its pid, and when it started, which with the pid names it.
+/// A watched program, by its pid.
 pub struct Watch {
     pid: i32,
-    started: u64,
 }
 
 impl Os for MacOs {
@@ -443,14 +472,13 @@ impl Os for MacOs {
     }
 
     fn watch_program(&self, pid: u32, token: u64) -> Result<Watch, Unwatched> {
-        let unwatched = |why: String| Unwatched {
-            why: Refusal::Os {
+        let unwatched = |why: String| {
+            Unwatched::Runs(Refusal::Os {
                 op: "watching a started program",
                 why: format!(
                     "{why}: it runs on unwatched by the socket, and the node's sweep reaps it"
                 ),
-            },
-            killed: false,
+            })
         };
         let pid = i32::try_from(pid).map_err(|_| unwatched(format!("pid {pid} isn't one")))?;
         let started = match sys::rusage(pid) {
@@ -479,18 +507,7 @@ impl Os for MacOs {
             }
             let _ = self.kq.trigger();
         }
-        Ok(Watch { pid, started })
-    }
-
-    fn kill(&self, watch: &Watch) {
-        // Only the process that pid named when it was watched: one given the pid since started later.
-        // An ended program not yet reaped keeps its pid and start time, and a kill of it does nothing.
-        if let Ok(Some(r)) = sys::rusage(watch.pid)
-            && r.started == watch.started
-            && let Some(pid) = Pid::from_raw(watch.pid)
-        {
-            let _ = rustix::process::kill_process(pid, Signal::KILL);
-        }
+        Ok(Watch { pid })
     }
 
     fn unwatch_program(&self, watch: Watch) {
@@ -617,8 +634,9 @@ fn read_some(fd: &OwnedFd, f: &mut Framing) -> Result<bool, Errno> {
         return Ok(false);
     }
     for fd in &fds {
-        // A descriptor that came is this process's now: close-on-exec, as every other.
-        let _ = rustix::io::fcntl_setfd(fd, FdFlags::CLOEXEC);
+        // A descriptor that came is this process's now: close-on-exec, as every other (macOS's recvmsg has no
+        // MSG_CMSG_CLOEXEC). A failure is the connection's, never dropped (CLAUDE.md §3).
+        rustix::io::fcntl_setfd(fd, FdFlags::CLOEXEC)?;
     }
     if !fds.is_empty() {
         // Descriptors begin a message; ones that come while a frame is under way are misplaced.

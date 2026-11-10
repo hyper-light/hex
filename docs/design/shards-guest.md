@@ -106,9 +106,35 @@ The node agent's socket is `SOCK_SEQPACKET` and carries an exec's stdio as `SCM_
   caller holds its socket and no byte is copied on the host. A pipe the caller gives of its own is copied between
   it and the connection in the caller's process, one bounded buffer per stream: by the guest client in process,
   or, through the host node's socket, by the caller's socket client, to which the node gives the connection's end
-  with the exec's answer (wire version 3's `Given`). The node copies no stream and keeps none of the caller's
-  pipes; a client of an earlier wire version carrying pipes to a guest's program is refused before the guest is
-  sent anything.
+  with the exec's answer (the wire's `Given`). The node copies no stream and keeps none of the caller's pipes.
+  The node keeps its own copy of each end it gives until the client says it took them (`Taken`, owed from the
+  read that brings the answer, ahead of anything the client sends after it) or the connection closes: XNU's
+  collector of descriptors in flight flushes a socket whose only reference is a message in flight, so an end sent
+  with no other reference can arrive reading nothing (a probe on macOS 26.4 lost 719 of 20,000 so, and none with
+  the sender's copy kept until received). Kept ends hold their program's place among the node's programs until
+  taken.
+- **Windows through a host node (HEX-RT-17):** the node reserves the exec and returns `Offered` with the VM's
+  PID/start/socket identity, a dedicated control token, the reserved guest request id and the wanted streams.
+  The caller opens and names each stream through `shards_api::connect_borrowed`, then sends `StreamsReady`
+  with the original outer request id. The node commits the reserved request and returns `Started`/`Exited`
+  on that same id. The common client retains the caller-owned socket ends through this preparation; its
+  reader turn is handed away while it dials. `OwnedStream` reads/writes Winsock sockets and closes them with
+  `closesocket`; native pipe ends keep their file ownership.
+
+  Each offer consumes the existing in-flight and program budgets. A guest answer, cancellation and disconnect
+  share one admission owner, including when the guest fails before the offer is registered. Failed/late offers
+  queue `Release` in the program-bounded acknowledgement queue. Cancelling an uncommitted offer drops its
+  dedicated control connection; the relay atomically removes that active token, its parked exec and early
+  streams, and refuses later streams naming the ended token. Other programs keep their own controls.
+
+  This choice follows the native Jupiter ownership probes in
+  `bench/native/windows/records/socket-transfer-20261109.md`: an unimported `WSADuplicateSocketW` offer
+  retained a recipient handle (99→100) after source close. Caller-initiated connections avoid that target-side
+  reservation. The borrowed connector holds only a query/exit-observation handle, verifies the process before
+  and after Shards' existing CONNECT handshake, and acquires no VM lifecycle. Positive patience bounds the
+  whole handshake; a zero-patience attempt keeps Shards' existing VM-bounded semantics. The exact API patch
+  against c55d85db is listed in `vendor/shards-api-draft/HEX-PATCHES.md`.
+
 - **In the guest**, a relay (`hex guest relay`) accepts the host's vsock connections and speaks the node's own
   socket, one node connection per host control connection, so the node, its wire and its disconnect rule stay
   as they are (CLAUDE.md §8). Its framing, stream names and gathering of an exec's streams are a sans-IO core
@@ -117,8 +143,9 @@ The node agent's socket is `SOCK_SEQPACKET` and carries an exec's stdio as `SCM_
   the family but no address type), so no `unsafe` is added.
 - **Bounds:** at most `wire::Limits`' calls in flight, as the local client; at most three stdio streams per exec;
   stdio connections that never name an exec within the answer patience are closed with a typed refusal logged on
-  `hex.guest` (`event = "stdio_unnamed"`). Shards' muxer holds at most 1023 connections (`muxer.rs:42`), so a
-  node's concurrent execs are bounded below that, and the next is refused by name.
+  `hex.guest` (`event = "stdio_unnamed"`). Shards enforces its running muxer's own connection bound;
+  a connection it cannot admit is refused through the API. Hex derives its relay budgets from the guest
+  node's hello and propagates that refusal instead of guessing a second muxer capacity.
 
 ### 3a. The channel's formats and ports
 
@@ -576,9 +603,13 @@ Hex's tests of the channel, each citing its ID:
   and the running guest is never booted again for it, which would end its boxes (`GuestRuntime`).
 - HEX-GUEST-41: a guest program's streams through the host node's socket are the guest's own stdio connections,
   whose ends ride the exec's answer to the caller's client: asked for, they are the caller's; given as the
-  caller's own pipes, the client copies between them, and the node keeps none of the caller's pipes; a client of
-  wire version 2 carrying pipes is refused before the guest is sent anything (`crates/hex-node/tests/guest_loop.rs`,
-  over a stand-in guest whose programs' pids name no host process; `hex_client`'s Linux tests, the client's copy).
+  caller's own pipes, the client copies between them, and the node keeps none of the caller's pipes
+  (`crates/hex-node/tests/guest_loop.rs`, over a stand-in guest whose programs' pids name no host process;
+  `hex_client`'s Linux tests, the client's copy). The node keeps its copies of the ends it gives until the client
+  says it took them, so none arrives dead while other Unix sockets close (`crates/hex-node/src/serve/unix_tests.rs`:
+  as many given sockets as the probe sent, 20,000, under the same churn, none dead; 10,861 dead on macOS before
+  the node kept them), and they hold their program's place until then; the client's word goes ahead of any later
+  request, and with both sockets full its reader doesn't wait on itself (`hex_client`'s Linux tests).
 - HEX-GUEST-42: the conformance suite on `oci` boxes through a host node's socket served over
   `Recorded<WithGuest<…>>`, as the macOS and Windows nodes serve their guests, HEX-GUEST-18's simulated guest
   behind it: the guest reached from the host's node through the seam (native plan step 5), both stdio forms

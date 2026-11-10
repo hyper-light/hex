@@ -6,23 +6,43 @@
 # Env: RUNTIMES ("hex runc crun youki runsc libcrun"), ROUNDS (3), ROUND_FIRST (1), N (10000), WARMUP (100),
 # N_OVERRIDE ("runsc:3000" lowers n for a slow runtime), LIFECYCLES (2000), CAP (1000), BUDGET_MIB (8192),
 # HEXBENCH_PHASES (oci_bench.py's and seam_oci's phases, all by default), HEXBENCH_SUSTAINED (the sustained phase's
-# lifecycles, 10000, read by both), STANDIN (1: the driver's own ceiling each round).
+# lifecycles, 10000, read by both), STANDIN (1: the driver's own ceiling each round), HEXBENCH_OWNER (one owner
+# for every box seam_oci makes, so a box's cgroup is handed to the owner's next box: goal 5 extended, step 6; the
+# bundles' processes then hold Docker's default capabilities, no CAP_SYS_ADMIN, every runtime's alike, since a box
+# that keeps all of root's never shares a cgroup), NETNS (1; 0 gives every bundle no network namespace of its own,
+# every runtime's alike: what the rates are with no network namespace made per container).
 set -uo pipefail
 RUNTIMES=${RUNTIMES:-"hex runc crun youki runsc libcrun"}; ROUNDS=${ROUNDS:-3}; ROUND_FIRST=${ROUND_FIRST:-1}; N=${N:-10000}; WARMUP=${WARMUP:-100}
 LIFECYCLES=${LIFECYCLES:-2000}; CAP=${CAP:-1000}; BUDGET_MIB=${BUDGET_MIB:-8192}; N_OVERRIDE=${N_OVERRIDE:-}
 OUT=/opt/out; mkdir -p /run/err
+# The soft descriptor limit everything here runs with (HEXBENCH_NOFILE): `hard` for the hard limit the container was
+# given, as Hex's installer sets a node's (the lead, 2026-11-04), a number for that, unset for the container's own
+# (dockerd's 1024), at which a Hex node holds no /proc/net files. Said here and in nofile.txt.
+case "${HEXBENCH_NOFILE:-given}" in
+  given) ;;
+  hard) ulimit -Sn "$(ulimit -Hn)" ;;
+  *) ulimit -Sn "$HEXBENCH_NOFILE" ;;
+esac
+echo "descriptor limit: soft $(ulimit -Sn), hard $(ulimit -Hn) (HEXBENCH_NOFILE=${HEXBENCH_NOFILE:-given})" | tee "$OUT/nofile.txt"
 
 ALL_NS='[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"}]'
+[ "${NETNS:-1}" = 0 ] && ALL_NS='[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}]'
+# Docker's default capabilities (moby's oci/caps/defaults.go), given every set when HEXBENCH_OWNER names an owner.
+CAPS='["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FSETID","CAP_FOWNER","CAP_MKNOD","CAP_NET_RAW","CAP_SETGID","CAP_SETUID","CAP_SETFCAP","CAP_SETPCAP","CAP_NET_BIND_SERVICE","CAP_SYS_CHROOT","CAP_KILL","CAP_AUDIT_WRITE"]'
+PROC_CAPS=""; [ -n "${HEXBENCH_OWNER:-}" ] && PROC_CAPS=",\"capabilities\":{\"bounding\":$CAPS,\"effective\":$CAPS,\"permitted\":$CAPS}"
+# With an owner, /proc/sys is read-only too, as Docker's default readonlyPaths make it, so a box may share its
+# owner's network namespaces (goal 5 extended, step 6: it could then change none of its namespace's sysctls).
+RO_PATHS=""; [ -n "${HEXBENCH_OWNER:-}" ] && RO_PATHS=',"readonlyPaths":["/proc/sys"]'
 bundle() { # bundle <dir> <args json> [namespaces json, all five by default]
   local B=$1 NS=${3:-$ALL_NS}; mkdir -p "$B/rootfs"/{usr,proc,dev,tmp}
   ( cd "$B/rootfs" && ln -sfn usr/bin bin && ln -sfn usr/lib lib && ln -sfn usr/lib64 lib64 && ln -sfn usr/sbin sbin )
   cat > "$B/config.json" <<JSON
 { "ociVersion":"1.0.2","root":{"path":"rootfs","readonly":false},"hostname":"b",
-  "process":{"cwd":"/","args":$2,"env":["PATH=/usr/bin:/usr/sbin"],"user":{"uid":0,"gid":0}},
+  "process":{"cwd":"/","args":$2,"env":["PATH=/usr/bin:/usr/sbin"],"user":{"uid":0,"gid":0}$PROC_CAPS},
   "mounts":[{"destination":"/usr","type":"bind","source":"/usr","options":["rbind","ro"]},
             {"destination":"/proc","type":"proc","source":"proc"},
             {"destination":"/dev","type":"tmpfs","source":"tmpfs","options":["nosuid","mode=755","size=65536k"]}],
-  "linux":{"namespaces":$NS} }
+  "linux":{"namespaces":$NS$RO_PATHS} }
 JSON
 }
 bundle /run/bundle-sleep '["/usr/bin/sleep","infinity"]'
@@ -91,13 +111,18 @@ mkdir -p /run/standin && ln -sfn /usr/bin/true /run/standin/crun
 # running box, whose difference between the drivers is the socket's cost per call); around each, seam_oci reads
 # the node's network namespace counts (decision 4), so the sustained phase says how often its creates found the
 # namespace pool dry.
+# A round that exits non-zero crashed: it's said in the log and named in crashed.txt (`<file> r<round> exited
+# <status>`), which summarize.py marks, taking no best of N beside it, and once every round has run this pass
+# exits non-zero naming each, so host.sh's caller never reads a crashed pass as a whole one (CLAUDE.md §3).
+CRASHED=()
+crashed() { echo "$1 round $2 exited $3"; echo "$1 r$2 exited $3" >> "$OUT/crashed.txt"; CRASHED+=("$1 r$2 exited $3"); }
 SEAM=""; [ -n "${SEAM_OCI:-}" ] && [ -x "$SEAM_OCI" ] && SEAM="hex-seam hex-seam-socket"
 for round in $(seq "$ROUND_FIRST" $((ROUND_FIRST + ROUNDS - 1))); do
   for rt in $(printf '%s\n' $ok_runtimes $([ "${STANDIN:-1}" = 1 ] && echo standin) $SEAM | shuf); do
     if [ "$rt" = standin ]; then
       echo "round $round: the stand-in (/usr/bin/true as crun)"
       HEXBENCH_BIN=/run/standin HEXBENCH_PHASES=throughput python3 /opt/lab/oci_bench.py crun "$OUT/ceiling.standin.r$round.json" \
-        1 0 "$LIFECYCLES" 0 64
+        1 0 "$LIFECYCLES" 0 64 || crashed ceiling.standin "$round" $?
       continue
     fi
     if [ "$rt" = hex-seam ] || [ "$rt" = hex-seam-socket ]; then
@@ -105,12 +130,14 @@ for round in $(seq "$ROUND_FIRST" $((ROUND_FIRST + ROUNDS - 1))); do
       echo "round $round: the oci class through the Runtime seam (seam_oci, $driver)"
       HEXBENCH_DRIVER=$driver "$SEAM_OCI" "$OUT/$file.r$round.json" "$N" "$WARMUP" "$LIFECYCLES" /opt/bin/hex \
         /run/bundle-sleep /run/bundle-true /run/bundle-sleep-nonet 2>&1 | tee -a "$OUT/$file.log" \
-        || echo "$file round $round exited $?"
+        || crashed "$file" "$round" $?
       continue
     fi
     n=$N; for o in $N_OVERRIDE; do [ "${o%%:*}" = "$rt" ] && n=${o#*:}; done
     echo "round $round: $rt (n=$n)"
-    python3 /opt/lab/oci_bench.py "$rt" "$OUT/$rt.r$round.json" "$n" "$WARMUP" "$LIFECYCLES" "$CAP" "$BUDGET_MIB"
+    python3 /opt/lab/oci_bench.py "$rt" "$OUT/$rt.r$round.json" "$n" "$WARMUP" "$LIFECYCLES" "$CAP" "$BUDGET_MIB" \
+      || crashed "$rt" "$round" $?
   done
 done
 echo done > $OUT/oci.done
+[ ${#CRASHED[@]} = 0 ] || { printf 'crashed round: %s\n' "${CRASHED[@]}" >&2; exit 1; }

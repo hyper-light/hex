@@ -23,8 +23,10 @@ use rustix::process::{Pid, PidfdFlags, Signal};
 
 use super::{Accepted, EVENTS, Event, Interest, Os, Peer, Recv, Sent, Unwatched};
 
-/// Connections waiting to be accepted: the I/O thread accepts them as they come.
-const BACKLOG: i32 = 64;
+/// Connections waiting to be accepted, which the I/O thread accepts as they come: as many as the kernel queues for a
+/// socket, none picked (Ada's rule, 2026-11-06). listen(2) caps a larger backlog at the kernel's own, Linux's
+/// `net.core.somaxconn` and XNU's `kern.ipc.somaxconn` (`solisten`), so this asks for the most and gets the kernel's.
+const BACKLOG: i32 = i32::MAX;
 
 /// The epoll tokens of the listener and the wake eventfd; the core's tokens start above them.
 const LISTENER: u64 = 0;
@@ -289,19 +291,25 @@ impl Os for Linux {
     }
 
     fn watch_program(&self, pid: u32, token: u64) -> Result<OwnedFd, Unwatched> {
-        let pidfd = i32::try_from(pid)
+        let raw = i32::try_from(pid)
             .ok()
             .and_then(Pid::from_raw)
-            .ok_or_else(|| Refusal::Broken(format!("a program's pid {pid} isn't one")))
-            .and_then(|pid| {
-                rustix::process::pidfd_open(pid, PidfdFlags::empty()).map_err(|e| Refusal::Os {
+            .ok_or_else(|| {
+                Unwatched::Runs(Refusal::Broken(format!("a program's pid {pid} isn't one")))
+            })?;
+        let pidfd = match rustix::process::pidfd_open(raw, PidfdFlags::empty()) {
+            Ok(pidfd) => pidfd,
+            // Ended and reaped already: a run's program, which its node reaps to remove its box (decision 7).
+            Err(Errno::SRCH) => return Err(Unwatched::Gone),
+            Err(e) => {
+                return Err(Unwatched::Runs(Refusal::Os {
                     op: "watching a started program",
                     why: format!(
                         "{e}: it runs on unwatched by the socket, and the node's sweep reaps it"
                     ),
-                })
-            })
-            .map_err(|why| Unwatched { why, killed: false })?;
+                }));
+            }
+        };
         if let Err(e) = epoll::add(
             &self.epoll,
             &pidfd,
@@ -310,20 +318,12 @@ impl Os for Linux {
         ) {
             // It can't be watched: ended now, and the exec refused saying so.
             let _ = rustix::process::pidfd_send_signal(&pidfd, Signal::KILL);
-            return Err(Unwatched {
-                why: Refusal::Os {
-                    op: "watching a started program",
-                    why: format!("{e}: the node agent ended it"),
-                },
-                killed: true,
-            });
+            return Err(Unwatched::Killed(Refusal::Os {
+                op: "watching a started program",
+                why: format!("{e}: the node agent ended it"),
+            }));
         }
         Ok(pidfd)
-    }
-
-    fn kill(&self, watch: &OwnedFd) {
-        // Fails only for one that has ended already, which is reaped and counted just the same.
-        let _ = rustix::process::pidfd_send_signal(watch, Signal::KILL);
     }
 
     fn unwatch_program(&self, watch: OwnedFd) {

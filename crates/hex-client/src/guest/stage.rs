@@ -12,12 +12,30 @@ use std::path::{Path, PathBuf};
 
 use hex_api::{BoxId, Refusal};
 use hex_core::bundle::MAX_LAYERS;
+use hex_core::patience::Patience;
 use hex_core::stream::Deframer;
 use hex_core::stream::files::{self, Entry, Limits, Meta, Mtime, Op, What, Xattr};
 use hex_core::wire::{self, Answer, Received};
 
 use super::{Duplex, Link};
-use crate::ANSWER_PATIENCE;
+
+/// How long a staging connection waits on the guest's relay, each read for its answer and each write for room
+/// (decision 9): twice the slowest answer to a stage's request this process has had, from its last byte sent to the
+/// relay's answer. MEASURING: no record of a relay's answers yet; the `guest.stage` rows of
+/// `bench/competitive/probes/waits_census.md` will seed it, and until then a staging connection waits for its relay
+/// alone.
+static STAGING: Patience = Patience::measuring("guest.stage");
+
+/// Reads the relay's answer to what was sent at `sent`, the time it took taught to [`STAGING`].
+fn relay_answer(
+    conn: &mut dyn Duplex,
+    deframer: &mut Deframer,
+    sent: std::time::Instant,
+) -> Result<Vec<u8>, Refusal> {
+    let got = message(conn, deframer)?;
+    STAGING.answered(sent.elapsed());
+    Ok(got)
+}
 
 /// Where the guest's relay stages each box: `<STAGED>/<box id>/` (`hex_node::relay::STAGED`).
 pub const STAGED: &str = "/run/hex/staged";
@@ -178,7 +196,7 @@ pub fn stage(
         .map_err(|e| Refusal::os("sending staged files", e))?;
     // The relay answers the opening with the stage's budget, what its file system has free and which of
     // the layers it already holds, or refuses.
-    let first = message(conn.as_mut(), &mut deframer)?;
+    let first = relay_answer(conn.as_mut(), &mut deframer, std::time::Instant::now())?;
     let Some(budget) = files::read_budget(&first) else {
         return Err(answer_of(&first).err().unwrap_or_else(|| {
             Refusal::Broken("the relay answered a stage's opening with no budget".to_owned())
@@ -210,10 +228,11 @@ pub fn stage(
     // The relay answers even when it refused part way, and its answer says why better than a broken
     // pipe: read it first.
     let _ = conn.shutdown(Shutdown::Write);
+    let ended = std::time::Instant::now();
     // The answer is read first, so the relay has removed a partial copy before this returns. Its
     // answer names a stream cut short when the packer refused part way; the packer's own refusal names
     // the entry, and is the one returned, unless it was only the connection failing.
-    let answered = message(conn.as_mut(), &mut deframer).and_then(|m| answer_of(&m));
+    let answered = relay_answer(conn.as_mut(), &mut deframer, ended).and_then(|m| answer_of(&m));
     match (answered, sent) {
         (_, Err(why)) if !matches!(&why, Refusal::Os { op, .. } if op.starts_with("sending")) => {
             Err(why)
@@ -233,14 +252,16 @@ pub fn unstage(link: &dyn Link, id: &BoxId) -> Result<(), Refusal> {
     conn.write_all(&open)
         .map_err(|e| Refusal::os("asking for a staged copy's removal", e))?;
     let _ = conn.shutdown(Shutdown::Write);
+    let sent = std::time::Instant::now();
     let mut deframer = Deframer::new(wire::MAX_MESSAGE);
-    message(conn.as_mut(), &mut deframer).and_then(|m| answer_of(&m))
+    relay_answer(conn.as_mut(), &mut deframer, sent).and_then(|m| answer_of(&m))
 }
 
 fn dial(link: &dyn Link) -> Result<Box<dyn Duplex>, Refusal> {
     let conn = link.dial(files::FILES_PORT)?;
-    conn.set_write_timeout(Some(ANSWER_PATIENCE))
-        .and_then(|()| conn.set_read_timeout(Some(ANSWER_PATIENCE)))
+    let patience = STAGING.deadline();
+    conn.set_write_timeout(patience)
+        .and_then(|()| conn.set_read_timeout(patience))
         .map_err(|e| Refusal::os("bounding a staging connection", e))?;
     Ok(conn)
 }

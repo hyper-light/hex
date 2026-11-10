@@ -3,9 +3,9 @@
 # "the installer, per OS"; sources in docs/research/runtime/installer-per-os.md §3). It sets up what the
 # process class's box-user mode needs (native plan step 2), so a user's boxes run as users of their own
 # with no further step:
-#   - the box users' pool, as Nix's installer makes its build users (§3.1): a group `hexbox` and hidden
-#     users `_hexbox1`..`_hexboxN` (shell /sbin/nologin, home /var/empty) in an id range checked free
-#     first, never reusing a taken id;
+#   - the box users' pool's group `hexbox` (§3.1), at an id learned free in Apple's role range; the helper
+#     makes the pool's users, as Nix's installer makes its build users, one when a box needs one and every
+#     user it has is busy, each recorded in the manifest before it is made (one account path, the helper's);
 #   - a group `hexnode` holding each --user: the users whose nodes may reach the helper;
 #   - the privileged helper (`hex __box-helper`) as a launchd daemon (§3.2-3.4): its binary in
 #     /Library/PrivilegedHelperTools (root's, so no user can replace what runs as root), a plain plist in
@@ -15,7 +15,7 @@
 # Every thing it makes is a line of its plan ("<kind> <target>"), written to the manifest before it is
 # made; uninstall undoes the manifest's lines and then lists what is left, which is nothing.
 #
-# usage: macos.sh install --binary <hex> [--user <name>]... [--count <n>] [--first-id <id>] [--dry-run]
+# usage: macos.sh install --binary <hex> [--user <name>]... [--first-id <id>] [--dry-run]
 #        macos.sh uninstall [--dry-run]
 #        macos.sh check [<plan file>]
 # `--dry-run` prints the plan and makes nothing. `check` lists what of a plan (default: the manifest's,
@@ -34,19 +34,38 @@ MANIFEST=$STATE/manifest
 NODE_GROUP=hexnode
 POOL_GROUP=hexbox
 POOL_PREFIX=_hexbox
-# The pool's size, as Nix's 32 build users (install-multi-user.sh:25): one box-user box per pool user.
-COUNT=30
-# The first id: hexnode's gid, then hexbox's, then the pool's uids. sysadminctl's role-user range is
-# 200-400 (Nix's note, install-darwin-multi-user.sh:9-11); Apple's own take 300-308 on macOS 26.2 and Nix's
-# 350-382, measured (§3.1), so Hex's default 320-351 sits between, and any taken id is refused by name.
-FIRST_ID=320
-# The most processes a box's user may hold (RLIMIT_NPROC, native plan step 2's helper default).
-NPROC=1024
-# How long launchd gets to start the helper: a bounded wait, counted in 0.1 s steps.
-WAIT_STEPS=300
-# dscl fails at times with eNotYetImplemented and succeeds when asked again (Nix's
-# install-darwin-multi-user.sh:149): each write is tried at most this many times.
-DSCL_TRIES=3
+# The ids install takes: hexnode's gid and hexbox's. The helper makes the pool's users on demand (the
+# lead's call, 2026-11-06: no picked pool size), each at a role uid free when it makes it.
+IDS=2
+# Apple's role-account range: sysadminctl's usage, macOS 26.4, "Role accounts require name starting with _
+# and UID in 450-499 range" (§3.1). The groups' ids, hexnode's gid then hexbox's, are learned at install time: the first run of IDS ids there that no user, group or process holds
+# (free_run), so no release's new system ids are reused. --first-id names a start instead.
+ROLE_FIRST=450
+ROLE_LAST=499
+FIRST_ID=
+# The tools uninstall ends a pool user's processes with, by absolute path.
+PGREP=/usr/bin/pgrep
+PKILL=/usr/bin/pkill
+# How long a user's processes get to end after SIGKILL: the measured kill-to-empty envelope, doubled, for the
+# user's size, the same bound as hex_core::drain::bound: 0.883 ms for one member and 0.298 ms for each past
+# it (bench/native/macos/records/killscale-a84e094-20261106T160339Z.txt; the x2 is the lead's margin).
+# The helper and the process class start from this bound and raise it as they see slower drains
+# (hex_core::drain::Learned); uninstall drains once, and a bound learned across installs would have to
+# outlive the uninstall that removes everything, so it keeps the record's.
+DRAIN_FIXED_S=0.000883
+DRAIN_PER_MEMBER_S=0.000298
+# The directory tool, by absolute path. A write is made once: any failure is refused naming dscl's own
+# error. Nix retries eNotYetImplemented (install-darwin-multi-user.sh:149), never seen here (§3.1); a
+# retry comes only with a measured case of it.
+DSCL=/usr/bin/dscl
+LAUNCHCTL=/bin/launchctl
+# The helper's start: twice the max of its measured bootstrap-to-accepting time, 37.680 ms over 20 starts of
+# a user LaunchAgent proxy at load ~35 (bench/native/macos/records/agentstart-40454fe-20261106T150233Z.txt;
+# the x2 is the lead's margin). It bounds only a helper running but never accepting: accepting is success
+# and launchd's report of an exit is failure, each a fact (wait_serving). Ada's lab records the real time.
+# Install waits for one start, so this bound is its whole learned bound: a bound learned across installs would
+# have to outlive the uninstall that removes everything.
+START_BOUND_S=0.075360
 
 die() { echo "macos.sh: $*" >&2; exit 1; }
 
@@ -56,21 +75,40 @@ usage() {
 }
 
 dscl_write() {
-  local i
-  for ((i = 1; i <= DSCL_TRIES; i++)); do
-    dscl . "$@" && return 0
+  local out
+  out=$("$DSCL" . "$@" 2>&1) || die "dscl . $* failed: $out"
+}
+
+# The first id f in [first, last] with f..f+need-1 all free of the taken ids (one per line on stdin), or a
+# failure when no such run fits. A counted walk over the range, no larger than it.
+free_run() { # <need> <first> <last>
+  local need=$1 first=$2 last=$3 taken f run=0 id
+  taken=$(sort -un)
+  f=$first
+  for ((id = first; id <= last; id++)); do
+    if grep -qx "$id" <<<"$taken"; then
+      run=0
+      f=$((id + 1))
+    else
+      run=$((run + 1))
+      if [ "$run" = "$need" ]; then
+        echo "$f"
+        return 0
+      fi
+    fi
   done
-  die "dscl . $* failed $DSCL_TRIES times"
+  return 1
+}
+
+# The ids the machine holds: every user's uid, group's gid and running process's uid.
+taken_ids() {
+  "$DSCL" . -list /Users UniqueID | awk '{print $2}'
+  "$DSCL" . -list /Groups PrimaryGroupID | awk '{print $2}'
+  ps -axo uid= | tr -d ' '
 }
 
 node_gid() { echo "$FIRST_ID"; }
 pool_gid() { echo $((FIRST_ID + 1)); }
-pool_uid() { echo $((FIRST_ID + 1 + $1)); }
-pool_uids() {
-  local i out=
-  for ((i = 1; i <= COUNT; i++)); do out=${out:+$out,}$(pool_uid "$i"); done
-  echo "$out"
-}
 
 # The plan: every thing install makes, one "<kind> <target>" line each.
 plan() {
@@ -80,7 +118,6 @@ plan() {
   done
   echo "group $NODE_GROUP"
   echo "group $POOL_GROUP"
-  for ((i = 1; i <= COUNT; i++)); do echo "user $POOL_PREFIX$i"; done
   echo "file $BIN"
   echo "file $HELPER"
   echo "dir $SOCKDIR"
@@ -97,8 +134,8 @@ present() {
   case $kind in
     file) [ -f "$target" ] ;;
     dir | folder) [ -d "$target" ] ;;
-    group) dscl . -read "/Groups/$target" PrimaryGroupID >/dev/null 2>&1 ;;
-    user) dscl . -read "/Users/$target" UniqueID >/dev/null 2>&1 ;;
+    group) "$DSCL" . -read "/Groups/$target" PrimaryGroupID >/dev/null 2>&1 ;;
+    user) "$DSCL" . -read "/Users/$target" UniqueID >/dev/null 2>&1 ;;
     # launchctl print's exit is 0 for a loaded service and 113 for none; its output is not API (§3.3).
     daemon) launchctl print "system/$target" >/dev/null 2>&1 ;;
     *) die "unknown plan line kind $kind" ;;
@@ -114,6 +151,13 @@ check() {
       left=1
     fi
   done <"$list"
+  # Pool users the helper made are the manifest's too; any pool user the directory still lists is left.
+  local name
+  while read -r name; do
+    grep -qx "user $name" "$list" && continue
+    echo "left: user $name"
+    left=1
+  done < <("$DSCL" . -list /Users 2>/dev/null | grep -E "^${POOL_PREFIX}[1-9][0-9]*\$" || true)
   [ "$left" = 0 ] && echo "nothing of Hex's is left"
   return "$left"
 }
@@ -122,23 +166,18 @@ check() {
 # reused (§3.1: the range Apple takes grows from release to release).
 preflight() {
   [ "$(uname -s)" = Darwin ] || die "this is macOS' installer; this machine is $(uname -s)"
-  local uids gids taken=0 id i name
-  uids=$(dscl . -list /Users UniqueID | awk '{print $2}')
-  gids=$(dscl . -list /Groups PrimaryGroupID | awk '{print $2}')
+  if [ -z "$FIRST_ID" ]; then
+    FIRST_ID=$(taken_ids | free_run "$IDS" "$ROLE_FIRST" "$ROLE_LAST") ||
+      die "no run of $IDS free ids in Apple's role range $ROLE_FIRST-$ROLE_LAST; name one with --first-id"
+  fi
+  echo "macos.sh: ids $FIRST_ID-$((FIRST_ID + IDS - 1)): gid $(node_gid) $NODE_GROUP, gid $(pool_gid) $POOL_GROUP" >&2
+  local gids taken=0 id name
+  gids=$("$DSCL" . -list /Groups PrimaryGroupID | awk '{print $2}')
   for id in "$(node_gid)" "$(pool_gid)"; do
-    if grep -qx "$id" <<<"$gids"; then echo "macos.sh: gid $id is taken: $(dscl . -search /Groups PrimaryGroupID "$id" | awk 'NR==1 {print $1}')" >&2; taken=1; fi
-  done
-  for ((i = 1; i <= COUNT; i++)); do
-    id=$(pool_uid "$i")
-    if grep -qx "$id" <<<"$uids"; then echo "macos.sh: uid $id is taken: $(dscl . -search /Users UniqueID "$id" | awk 'NR==1 {print $1}')" >&2; taken=1; fi
-    # A live process at a pool uid would be ended by a box's delete: the uid must be no one's.
-    if ps -axo uid= | tr -d ' ' | grep -qx "$id"; then echo "macos.sh: a process runs as uid $id" >&2; taken=1; fi
+    if grep -qx "$id" <<<"$gids"; then echo "macos.sh: gid $id is taken: $("$DSCL" . -search /Groups PrimaryGroupID "$id" | awk 'NR==1 {print $1}')" >&2; taken=1; fi
   done
   for name in "$NODE_GROUP" "$POOL_GROUP"; do
     if present group "$name"; then echo "macos.sh: group $name exists" >&2; taken=1; fi
-  done
-  for ((i = 1; i <= COUNT; i++)); do
-    if present user "$POOL_PREFIX$i"; then echo "macos.sh: user $POOL_PREFIX$i exists" >&2; taken=1; fi
   done
   [ "$taken" = 0 ] || die "the ids above are taken; pick a free range with --first-id"
 }
@@ -147,29 +186,43 @@ make_group() { # <name> <gid> <real name>
   dseditgroup -o create -r "$3" -i "$2" "$1" || die "making group $1"
 }
 
-make_pool_user() { # <index>
-  local name=$POOL_PREFIX$1 uid
-  uid=$(pool_uid "$1")
-  dscl_write -create "/Users/$name"
-  dscl_write -create "/Users/$name" UniqueID "$uid"
-  dscl_write -create "/Users/$name" PrimaryGroupID "$(pool_gid)"
-  dscl_write -create "/Users/$name" IsHidden 1
-  dscl_write -create "/Users/$name" NFSHomeDirectory /var/empty
-  dscl_write -create "/Users/$name" UserShell /sbin/nologin
-  dscl_write -create "/Users/$name" RealName "Hex box user $1"
-  dseditgroup -o edit -t user -a "$name" "$POOL_GROUP" || die "adding $name to $POOL_GROUP"
+now() { perl -MTime::HiRes=time -e 'printf "%.6f\n", time'; }
+
+# Whether the helper's socket accepts a connect(2). macOS's `nc -U -z` can't say: it exits 1 even against a
+# listening socket (measured, the record above).
+helper_accepts() {
+  perl -MIO::Socket::UNIX -e 'IO::Socket::UNIX->new(Type => SOCK_STREAM(), Peer => $ARGV[0]) or exit 1' "$SOCK"
 }
 
-# Waits (bounded) for a condition; says which and fails when it doesn't come.
-wait_for() {
-  local what=$1 i
-  shift
-  for ((i = 0; i < WAIT_STEPS; i++)); do
-    "$@" && return 0
-    sleep 0.1
+# Waits for the helper launchd just bootstrapped: succeeds when its socket accepts, fails when launchd shows
+# the job exited (with its status), and fails when it runs without accepting past START_BOUND_S.
+wait_serving() {
+  local t0 shown state code elapsed
+  t0=$(now)
+  while :; do
+    if helper_accepts; then
+      echo "macos.sh: the helper accepted after $(perl -e "printf '%.6f', $(now) - $t0") s"
+      return 0
+    fi
+    shown=$("$LAUNCHCTL" print "system/$LABEL" 2>/dev/null || true)
+    state=$(sed -n 's/^[[:space:]]state = //p' <<<"$shown" | head -1)
+    code=$(sed -n 's/^[[:space:]]last exit code = //p' <<<"$shown" | head -1)
+    if [ "$state" != running ] && [ -n "$code" ] && [ "$code" != "(never exited)" ]; then
+      echo "macos.sh: launchd reports the helper exited: last exit code $code" >&2
+      return 1
+    fi
+    elapsed=$(perl -e "printf '%.6f', $(now) - $t0")
+    if perl -e "exit !($elapsed >= $START_BOUND_S)"; then
+      echo "macos.sh: the helper runs but never accepted on $SOCK in $elapsed s (bound $START_BOUND_S s, twice its measured start)" >&2
+      return 1
+    fi
   done
-  echo "macos.sh: $what didn't happen within $((WAIT_STEPS / 10)) s" >&2
-  return 1
+}
+
+# The drain bound in seconds for a user of <members> processes (an empty listing counts one).
+drain_bound_s() { # <members>
+  perl -e 'my $n = $ARGV[0] > 1 ? $ARGV[0] : 1; printf "%.6f\n", 2 * ($ARGV[1] + $ARGV[2] * ($n - 1))' \
+    "$1" "$DRAIN_FIXED_S" "$DRAIN_PER_MEMBER_S"
 }
 
 install_hex() {
@@ -191,7 +244,6 @@ install_hex() {
     dseditgroup -o edit -t user -a "$u" "$NODE_GROUP" || die "adding $u to $NODE_GROUP"
   done
   make_group "$POOL_GROUP" "$(pool_gid)" "Hex box users"
-  for ((i = 1; i <= COUNT; i++)); do make_pool_user "$i"; done
   install -d -m 0755 "$(dirname "$BIN")" "$(dirname "$HELPER")"
   install -m 0755 -o root -g wheel "$BINARY" "$BIN"
   install -m 0755 -o root -g wheel "$BINARY" "$HELPER"
@@ -217,10 +269,14 @@ install_hex() {
     <string>__box-helper</string>
     <string>--socket</string>
     <string>$SOCK</string>
-    <string>--users</string>
-    <string>$(pool_uids)</string>
-    <string>--nproc</string>
-    <string>$NPROC</string>
+    <string>--pool-group</string>
+    <string>$POOL_GROUP</string>
+    <string>--pool-gid</string>
+    <string>$(pool_gid)</string>
+    <string>--manifest</string>
+    <string>$MANIFEST</string>
+    <string>--peak-file</string>
+    <string>$SOCKDIR/pool-peak</string>
   </array>
   <key>Umask</key>
   <integer>7</integer>
@@ -237,8 +293,8 @@ EOF
   chmod 0644 "$PLIST"
   plutil -lint "$PLIST" >/dev/null || die "$PLIST isn't a valid property list"
   # bootstrap's exit says whether it loaded, where load's is always 0 (launchctl.1:527-528, §3.3).
-  launchctl bootstrap system "$PLIST" || die "launchctl bootstrap system $PLIST failed"
-  if ! wait_for "the helper serving $SOCK" test -S "$SOCK"; then
+  "$LAUNCHCTL" bootstrap system "$PLIST" || die "launchctl bootstrap system $PLIST failed"
+  if ! wait_serving; then
     tail -n 5 "$LOG" >&2 || true
     die "the helper didn't come up (its log's last lines are above)"
   fi
@@ -246,11 +302,23 @@ EOF
   echo "installed; uninstall with: sudo bash $0 uninstall"
 }
 
-# Ends every process of a pool user (a box's members outlive the helper that started them), by uid, in
-# rounds counted against WAIT_STEPS. The uids are Hex's own, refused at install if anyone held them.
+# Ends every process of a pool user (a box's members outlive the helper that started them), by uid: kills
+# them and waits on the fact, pgrep finding none, within the drain bound for how many there were. The uids
+# are Hex's own, refused at install if anyone held them.
 end_pool_processes() { # <uid>
-  local uid=$1
-  wait_for "uid $uid's processes ending" sh -c "pkill -KILL -U $uid; ! pgrep -U $uid >/dev/null"
+  local uid=$1 members bound t0 elapsed
+  members=$("$PGREP" -U "$uid" | wc -l | tr -d ' ')
+  bound=$(drain_bound_s "$members")
+  t0=$(now)
+  while :; do
+    "$PKILL" -KILL -U "$uid" 2>/dev/null
+    "$PGREP" -U "$uid" >/dev/null || return 0
+    elapsed=$(perl -e "printf '%.6f', $(now) - $t0")
+    if perl -e "exit !($elapsed >= $bound)"; then
+      echo "macos.sh: uid $uid still holds processes $elapsed s after SIGKILL (bound $bound s for $members)" >&2
+      return 1
+    fi
+  done
 }
 
 uninstall_hex() {
@@ -261,13 +329,13 @@ uninstall_hex() {
   local kind target uid
   # The helper goes first, so no box starts while the pool empties.
   if present daemon "$LABEL"; then
-    launchctl bootout "system/$LABEL" || die "launchctl bootout system/$LABEL failed"
+    "$LAUNCHCTL" bootout "system/$LABEL" || die "launchctl bootout system/$LABEL failed"
   fi
   while read -r kind target; do
     [ "$kind" = user ] || continue
     case $target in "$POOL_PREFIX"*) ;; *) die "refusing to remove user $target: not one of Hex's" ;; esac
     if present user "$target"; then
-      uid=$(dscl . -read "/Users/$target" UniqueID | awk '{print $2}')
+      uid=$("$DSCL" . -read "/Users/$target" UniqueID | awk '{print $2}')
       end_pool_processes "$uid" || die "$target's processes didn't end"
       dscl_write -delete "/Users/$target"
     fi
@@ -301,6 +369,7 @@ uninstall_hex() {
   rm -f -- "${saved:?}"
 }
 
+main() {
 [ "$#" -ge 1 ] || usage
 VERB=$1
 shift
@@ -311,14 +380,12 @@ while [ "$#" -gt 0 ]; do
   case $1 in
     --binary) BINARY=${2:?--binary needs a path}; shift 2 ;;
     --user) USERS+=("${2:?--user needs a name}"); shift 2 ;;
-    --count) COUNT=${2:?--count needs a number}; shift 2 ;;
     --first-id) FIRST_ID=${2:?--first-id needs an id}; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     *) [ "$VERB" = check ] && [ "$#" = 1 ] && break; die "unknown argument $1" ;;
   esac
 done
-[[ $COUNT =~ ^[1-9][0-9]*$ ]] || die "--count must be a positive number"
-[[ $FIRST_ID =~ ^[1-9][0-9]*$ ]] || die "--first-id must be a positive number"
+[ -z "$FIRST_ID" ] || [[ $FIRST_ID =~ ^[1-9][0-9]*$ ]] || die "--first-id must be a positive number"
 
 case $VERB in
   install) install_hex ;;
@@ -339,3 +406,9 @@ case $VERB in
     ;;
   *) usage ;;
 esac
+}
+
+# Run as a command; sourced (bench/install/macos_ids_test.sh), it only defines its functions.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi

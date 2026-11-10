@@ -88,7 +88,8 @@ docker run --rm "${limits[@]}" --user "$user" -v "$hex:/hex:ro" -v "$out/target:
     "$image" bash -euo pipefail -c "
         cargo build --release --locked --target $target -p hex-cli --bin hex
         cp /target/$target/release/hex /out/hex
-        ldd /out/hex 2>&1 | grep -Eq 'not a dynamic executable|statically linked'
+        ldd /out/hex >/out/ldd.txt 2>&1 || true
+        grep -Eq 'not a dynamic executable|statically linked' /out/ldd.txt
         { rustc -vV; ldd --version | head -1; } > /out/toolchain-hex.txt
     "
 docker image inspect --format '{{index .RepoDigests 0}}' "$image" >>"$out/toolchain-hex.txt"

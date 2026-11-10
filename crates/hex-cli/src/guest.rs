@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use hex_client::guest::Duplex;
 use hex_core::stream;
-use hex_node::relay::{Conn, LIMITS, Listen, Relay, STAGED};
+use hex_node::relay::{Conn, Limits, Listen, Relay, STAGED};
 use socket2::{Domain, SockAddr, Socket, Type};
 
 /// Runs `hex guest`'s arguments (everything after `guest`); returns the exit status.
@@ -119,12 +119,15 @@ fn relay(args: &[String]) -> Result<(), (u8, String)> {
         .name("hex-relay-stamps".to_owned())
         .spawn(move || serve_stamps(stamps, line))
         .map_err(|e| (1, format!("starting the stamps thread: {e}")))?;
+    // Its bounds are its node's, which the guest's init started and saw ready before it: asked before it says ready.
+    let limits =
+        Limits::asked(&node).map_err(|why| (1, format!("asking the node its bounds: {why}")))?;
     let mut out = std::io::stdout().lock();
     out.write_all(b"ready\n")
         .and_then(|()| out.flush())
         .map_err(|e| (1, format!("saying it is ready: {e}")))?;
     drop(out);
-    Relay::new(&node, &staged, LIMITS)
+    Relay::new(&node, &staged, limits)
         .serve(control, stdio, files)
         .map_err(|why| (1, why.to_string()))
 }

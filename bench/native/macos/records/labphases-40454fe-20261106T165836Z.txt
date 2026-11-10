@@ -1,0 +1,33 @@
+# The macOS installer lab's non-root phases, timed (the lead's call 5, 2026-11-06): each command macos_lab.sh runs
+# as the lab user, against the prepared green tree (lab-ab/green at 40454fe, its target lab-ab/target-green), 5 runs
+# each, seconds. launchd one-shot hex-macos-labphases-20261106T165836Z, adas-mac-studio.local-2 (Mac15,14, Apple M3
+# Ultra, macOS 26.4), 2026-11-06T16:58:36-16:58:50Z, load 10.0-10.9.
+# phase                         runs (s)                                 max
+build_check                     0.128 0.102 0.089 0.098 0.093            0.128
+probe_build                     0.160 0.139 0.122 0.125 0.128            0.160
+installer_check                 0.569 0.473 0.444 0.460 0.474            0.569
+installer_dry_run               1.338 1.023 1.013 1.055 1.029            1.338
+process_contract                1.767 0.570 0.706 0.651 0.624            1.767
+box_user_contract_no_helper     0.014 0.011 0.011 0.012 0.012            0.014   (fails, as it must without the helper)
+uninstall_dry_run               0.018 0.015 0.015 0.017 0.016            0.018
+
+# One lab run (macos_lab.sh), its watchdog for Ada's first run (the lead's call 5, option (a)):
+# recorded or proxied by a record, x 2:
+#   build_check 0.128 + probe_build 0.160 + installer_check 0.569 + process_contract 1.767 x 2 (steps 1 and 3)
+#   + box_user_contract_no_helper 0.014 + installer_dry_run 1.338
+#   + install (root): its dry run 1.338 + the helper's start, 0.0377 (agentstart-40454fe-20261106T150233Z)
+#   + the box-user contract over the helper (root): the process contract's 1.767
+#   + uninstall (root): its dry run 0.018 + the drain bound for one member, 0.0018 (killscale-a84e094)
+#   + nothing_left_listed: the installer check's 0.569 (the same dscl and launchctl listings)
+#   = 9.475 s, x 2 = 18.950 s
+# unrecorded, each its own derived guard (bench/native/macos/boxuser_probe.c as it stands at this tree; step 2
+# derives these waits from Ada's record):
+#   C1 membership: two 300 ms waits = 0.600 s
+#   fatal caps at 64 and 256 MiB: a 2,000 x 1 ms poll each = 4.000 s
+#   soft cap at 64 MiB: 100 ms + a 5,000 ms receive + a 1,000 ms receive = 6.100 s
+#   = 10.700 s
+#   the oversubscribed box-user test (a_box_user_box_holds_the_bar_oversubscribed, added 2026-11-06): six passes,
+#   each ended by its first hog's wait, bounded by the test's HANG_GUARD = 6 x 39.507 = 237.042 s
+# watchdog = 18.950 + 10.700 + 237.042 = 266.692 s (was 29.650 s before the box-user test). The two connect probes and the dscl writes inside install and uninstall
+# have neither a record nor a guard of their own; the x 2 on the install and uninstall proxies is their margin.
+# Ada's run prints every phase's time (TIME: lines), and her record sets the watchdog after.

@@ -232,6 +232,79 @@ and the kworkers' 5 + 6 + 1 = 12.
   at all: the agent keeps it open per policy and only attaches it, as decision 5 already says
   (`docs/design/runtime-architecture.md:846`). (f60, inferred)
 
+## What step 6 rests on beyond the findings (Linux v6.19, read 2026-11-02)
+
+Read at the v6.19 tag from `https://raw.githubusercontent.com/torvalds/linux/v6.19/<path>`, retrieved 2026-11-02
+(sha256 of each file's first 16 hex digits: `kernel/exit.c` bc44f0b5489c871c, `kernel/sched/core.c` bd80c5a7f8094301,
+`kernel/cgroup/cgroup.c` 73dff34e37043b02, `mm/memcontrol.c` 42fe3732de9ad604, `kernel/bpf/syscall.c` 6063721f94861be7,
+`block/blk-iolatency.c` 9a1b56ebea7f7397, `kernel/pid_namespace.c` 1658cbd93fea367c). Each fact below is what the code
+there says; none is graded in kiln's research yet.
+
+- **When a dead task leaves its cgroup.** `do_exit` runs the controllers' exit callbacks, `cgroup_task_exit(tsk);`
+  (`kernel/exit.c:975`), before `exit_notify(tsk, group_dead);` (`:983`), which makes the task a zombie and its pidfd
+  readable. The task leaves its css_set, and `populated` falls, only at its last switch: `finish_task_switch` calls
+  `cgroup_task_dead(prev);` for a `TASK_DEAD` task (`kernel/sched/core.c:5156`), whose `do_cgroup_task_dead` moves it
+  off the css_set (`kernel/cgroup/cgroup.c:6998`). So an init's pidfd reads ended a moment before its cgroup can read
+  empty, and a delete waits on `cgroup.events` for that, rather than on a time.
+- **When a pid namespace's init has ended, its processes are gone.** `zap_pid_ns_processes` waits until
+  `pid_ns->pid_allocated == init_pids` (`kernel/pid_namespace.c:270-275`), for "EXIT_ZOMBIE process whose parents
+  processes are outside of the pid namespace. Such processes are created with setns()+fork()" (`:248-250`) as for the
+  rest, so "when the init process of a pid namespace is reaped all of the processes in the pid namespace are gone"
+  (`:262-265`). Anything still in the box's cgroup after its init's end is outside the namespace (f47).
+- **Listing a cgroup's tasks takes no `cgroup_mutex`.** `cgroup.procs` and `cgroup.threads` are read through
+  `__cgroup_procs_start` (`kernel/cgroup/cgroup.c:5241`), which walks the css_set lists with `css_task_iter_start`
+  (`:5256`, `:5260`) under `css_set_lock`, a spinlock. Only their writes check `cgroup_may_write` under the mutex
+  (`:5290-5295`).
+- **The check's reads take no lock either.** `cgroup_subtree_control_show` (`:3160`), `cgroup_type_show` (`:3691`),
+  `cgroup_events_show` (`:3815`) and `cgroup_freeze_show` (`:4144`) read fields of the cgroup; `cgroup_stat_show`
+  (`:3825`) reads under RCU; `memory_oom_group_show` (`mm/memcontrol.c:4564`) a `READ_ONCE`; `memory_current_read`
+  (`:4229`) a page counter (f61).
+- **A peak per descriptor.** `peak_write` (`mm/memcontrol.c:4283`) resets the peak a descriptor reads (f31).
+- **`io.latency` off.** A `target=max` write sets the latency target to 0, off (`block/blk-iolatency.c:873-874`), so a
+  cgroup handed on can have a bound its last box set taken off.
+- **Who can attach a device program to its own cgroup.** Loading a `BPF_PROG_TYPE_CGROUP_DEVICE` program needs
+  `CAP_BPF` (or CAP_SYS_ADMIN), `if (type != BPF_PROG_TYPE_SOCKET_FILTER && type != BPF_PROG_TYPE_CGROUP_SKB &&
+  !bpf_cap)` (`kernel/bpf/syscall.c:2935-2938`), and CAP_NET_ADMIN, since the type is one of
+  `is_net_admin_prog_type`'s (`:2765-2778`, checked at `:2940`). A box holding both could attach a program to the
+  cgroup it can open, which would outlive it there, so it never shares one.
+- **A cgroup `cgroup.kill` was written to kills every task later cloned into it.** `cgroup_css_set_fork` samples a
+  `CLONE_INTO_CGROUP` clone's `kill_seq` before it sets `kargs->cgrp`, so from the forking task's own cgroup
+  (`kernel/cgroup/cgroup.c:6702-6705`; `kargs->cgrp = dst_cgrp;` at `:6768`); `cgroup_post_fork` compares it with the
+  target's (`:6902`) and kills the child when they differ (`:6941`), and each `cgroup.kill` raises the target's
+  (`:4186`). Measured: a child cloned into a fresh cgroup lived, into one `cgroup.kill` had been written to died of
+  SIGKILL, twice, on adacachy (7.2.9) and fedora (6.19.10) (`bench/competitive/probes/kill_seq.md`). So a slot whose
+  box was ever killed so is never handed on.
+- **A write to a file is seen by a watch on its directory.** inotify(7): IN_MODIFY is among the events that "may occur
+  both for the directory itself and for objects inside the directory", reported with the object's name. The tests
+  watch a cgroup's directory, since `cgroup.kill` is write-only and inotify_add_watch(2) needs read access to what it
+  watches: "EACCES Read access to the given file is not permitted."
+
+## What holds concurrency 32 once the cgroup lock is free (Linux v6.19, read 2026-11-03)
+
+Read at the v6.19 tag as above, retrieved 2026-11-03 (sha256 first 16 hex digits: `fs/namespace.c` 9bf94300e1326c3f,
+`fs/fs_struct.c` 65ea0740630bfaab, `drivers/net/loopback.c` dcf721b20057b24a, `net/core/dev.c` 24f1d8a24ac03b8b,
+`net/core/rtnetlink.c` fa6c25afbf2e0679, `fs/proc/proc_sysctl.c` 268362f9043ecf61), for the waits
+`bench/competitive/probes/create_serial.md`'s runs 9 and 10 found.
+
+- **One mount lock for the host.** `static DECLARE_RWSEM(namespace_sem);` (`fs/namespace.c:89`). `namespace_lock`
+  takes it to write (`:1723-1725`); `do_lock_mount` calls it (`:2747`) for every mount, bind (`do_loopback`, `:2987`)
+  and `pivot_root` (`:4554`), and `LOCK_MOUNT` releases it only at the end of the caller's scope, through
+  `__cleanup(unlock_mount)` (`:2799-2801`). A namespace's copy takes it to write too (`copy_mnt_ns`, `:4117`), and a read
+  of a mount table takes it to read (`m_start`, `:1541`).
+- **`pivot_root` walks every thread inside that hold.** `chroot_fs_refs(&root, &new);` (`fs/namespace.c:4606`) runs
+  `for_each_process_thread` under `tasklist_lock`, taking each thread's `task_lock` and its `fs->seq` to write
+  (`fs/fs_struct.c:54-77`).
+- **One network lock for the host.** A new network namespace registers its loopback device (`loopback_net_init`,
+  `register_netdev(dev)`, `drivers/net/loopback.c:207`, `:218`), which takes RTNL: `rtnl_net_lock_killable(net)`
+  (`net/core/dev.c:11519`) is `rtnl_lock_killable()` then the namespace's own mutex (`net/core/rtnetlink.c:229-236`),
+  and `rtnl_lock_killable` is `mutex_lock_killable(&rtnl_mutex)` (`:89-91`) on `static DEFINE_MUTEX(rtnl_mutex);`
+  (`:76`). The init's request bringing that loopback up is an `RTM_NEWLINK`, handled by `rtnl_newlink` under the same
+  lock (`crates/hex-runtime/src/linux/oci/net.rs`).
+- **One sysctl lock for the host.** `static DEFINE_SPINLOCK(sysctl_lock);` (`fs/proc/proc_sysctl.c:88`) is taken by
+  `__register_sysctl_table` (`:1370`, at `:1389` and `:1398`), the call every sysctl table is registered through, and
+  by `sysctl_mkdir_p` (`:1299`) for each directory of the table's path, through `get_subdir` (`:995`, at `:1002` and
+  `:1011`). Run 10's samples spin there as the boxes' network namespaces are made.
+
 ## The probes (fedora, 2026-10-31, not of record)
 
 - **Host:** fedora (`kiln-a094a12d`, Intel Core i9-14900HX, 32 threads), Linux 6.19.10-300.fc44.x86_64, swap on
@@ -326,3 +399,69 @@ Sound for isolation and for Hex's own accounting, not transparent to the box (in
 Without reuse, the sound levers left are the root default program and the pidfd end, 17 to 15 holds, plus fewer
 controllers per box (each one an offline and a release, f23), which changes per-box isolation. A pool made ahead moves
 holds but doesn't remove them (`create_serial.md`, "What wouldn't").
+
+## The box's mount teardown on its exit path (Linux v6.19, read 2026-11-04)
+
+Read at the v6.19 tag, retrieved 2026-11-04 (sha256 first 16 hex digits: `kernel/exit.c` bc44f0b5489c871c,
+`kernel/nsproxy.c` 2332aa254bf3b569, `fs/namespace.c` 9bf94300e1326c3f, `fs/pidfs.c` 83b27c3d51dfa224,
+`include/uapi/linux/pidfd.h` 36821dd42e79f6e6), for the wait `create_serial.md` run 25 found on a lifecycle's path at
+concurrency 32 (an RCU grace period as the box's mount namespace goes, 0.051 ms a lifecycle at 32, 0.004 at 1) and the
+superblocks' teardown run 23 found spinning (`list_lru_destroy < deactivate_locked_super < cleanup_mnt`, 1.45% of
+32's samples).
+
+- **The init tears its mount namespace down before the agent hears it ended.** `do_exit` (`kernel/exit.c:896`) drops
+  its namespaces (`exit_nsproxy_namespaces`, `:970`), then runs its task work (`exit_task_work`, `:971`), and only then
+  `exit_notify` (`:983`), which wakes a pidfd's pollers (`do_notify_pidfd`, `:762`). Dropping them puts the mount
+  namespace (`nsproxy_free`, `kernel/nsproxy.c:63-65`); on its last reference `put_mnt_ns` takes the mount lock to write
+  and unmounts the whole tree (`fs/namespace.c:6031-6039`), and `namespace_unlock` lets the lock go and then waits out
+  an expedited grace period before it puts each mount (`synchronize_rcu_expedited`, `:1715`). Each mount's last put
+  queues its cleanup as the exiting task's work (`:1384-1385`), which `exit_task_work` runs: the box's `/dev` tmpfs and
+  `/proc` superblocks go there (`deactivate_locked_super`, each taking `list_lrus_mutex` and `shrinker_mutex`, run 23).
+  The agent, polling the init's pidfd, waits for all of it.
+- **A descriptor holds the namespace past the init.** `ioctl(pidfd, PIDFD_GET_MNT_NAMESPACE)`
+  (`include/uapi/linux/pidfd.h:109`) takes a reference to the task's mount namespace (`ns_ref_get`,
+  `fs/pidfs.c:533-536`) and returns an nsfs descriptor holding it; it needs ptrace read access to the task
+  (`PTRACE_MODE_READ_FSCREDS`, `:514`), which the agent has to its own boxes' inits, and answers `ESRCH` once the task has
+  dropped its namespaces (`:508`). Held by the agent, the init's exit no longer drops the last reference, so
+  `put_mnt_ns` returns at once and the teardown, the grace period and the superblocks wait for that descriptor's close.
+- **The lever.** The agent takes the descriptor as the box is made (by `open("/proc/<pid>/ns/mnt")`, which takes the same
+  nsfs reference as the ioctl through the same ptrace check, `proc_ns_get_link` and `ns_get_path`,
+  `fs/proc/namespaces.c:42-61`, sha256 72168761206b13f4, with no `unsafe` call: the pid is the agent's own unreaped
+  child, so no later process holds it), holds it while the box lives, and once its wait has
+  seen the init end hands it to a closer thread over a bounded channel; a full channel closes it inline, counted, never
+  dropped. The teardown then runs on the closer, off the lifecycle's path; it is the same work, moved, so it is measured
+  by each lifecycle's p50 and p99 at 1 and 32 as well as the three ratios, and by the closer's lag.
+- **What it holds meanwhile.** The box's mounts outlive its delete by the closer's lag: its root's clone pins the
+  bundle's root directory, which isn't a mount point in the host's namespace, so it can still be removed, renamed and
+  reused; its `/dev` tmpfs keeps its pages; its `/proc` keeps the pid namespace's structure. A test shows it: right
+  after delete returns, the bundle's directory and the volumes' sources are removed and reused, and the same id made
+  again from the same bundle. The descriptor is one more a live box holds, in the descriptor budget at its bounds (the
+  held files' arithmetic). An agent that dies holding them closes them as it goes, so the kernel tears each namespace
+  down then and recovery finds none (T-T7.1.2).
+- **What would falsify it:** a lifecycle at 32 no shorter on its path, its p50 or p99 at 1 or 32 higher, or a closer
+  whose lag grows without bound.
+- **What run 17 found: falsified as built** (`reuse_pass.md`). On 4-15 at the installed limit, 32's p50 rose from
+  3.62 to 3.90 ms and its p99 from 9.36 to 11.04, and the ratio fell in all three readings. The closer let go of 33 to
+  58% of the namespaces; the rest closed inline in the supervisor's thread. The grace period is why one closer can't
+  keep up. `synchronize_rcu_expedited` lets callers that wait at once share one grace period: one another task
+  completed satisfies the rest (`exp_funnel_lock`, `kernel/rcu/tree_exp.h:295-301`, `:955-957`, retrieved
+  2026-11-04, sha256 1fb29bc537c6b048). So inits exiting together waited out their grace periods side by side, where
+  one closer waits them one after another: the loop that function's comment advises against (`:912-915`). Reverted
+  on the step branch (0088603, the lead, 2026-11-05T00:12Z); the lever as built, with this finding, is kept on
+  `cp/t7-ext-s6-mntns` (0ac2da7).
+
+## The containers' state directories under one parent (Linux v6.19, read 2026-11-04)
+
+Read at the v6.19 tag, retrieved 2026-11-04 (`fs/namei.c` sha256 first 16 hex digits 2a7a5d9869d0baf0), for the wait
+on a directory's `i_rwsem` `create_serial.md` run 25 found on a lifecycle's path at concurrency 32 (0.043 ms, none at
+1), which runs 19 and 20 place on `/run/hex-node`, the containers' state, made and removed once a lifecycle each.
+
+- **A mkdir and an rmdir hold their parent to write.** `filename_create` (`fs/namei.c:4858`), which `mkdirat` takes, and
+  `do_rmdir` (`:5263`) both go through `start_dirop` (`:4888`, `:5293`), which locks the parent exclusively
+  (`__start_dirop`, `inode_lock_nested(dir, I_MUTEX_PARENT)`, `:2860-2873`), so every create's and delete's state
+  directory waits on every other's under one parent. Run 20 sharded the node's records the same way, by a hash of the
+  id over 64 parents, and that directory's waits went.
+- **The lever.** The state directories go under shards of the same kind; recovery reads both the one parent and the
+  shards, adopting or removing what each holds, with an upgrade test from a node holding boxes in the old layout; the
+  record and wire formats change only by what they add.
+- **What would falsify it:** the wait not falling at 32, or a lifecycle's p50 or p99 at 1 or 32 rising.

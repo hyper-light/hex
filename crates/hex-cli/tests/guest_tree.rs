@@ -283,6 +283,7 @@ impl Side for Guest {
                 id: walker.clone(),
                 bounds: Bounds::default(),
                 class: ClassSpec::Process,
+                owner: None,
             })
             .unwrap();
         let layers = box_layers(stage::STAGED, id, image);
@@ -305,11 +306,11 @@ impl Side for Guest {
             .unwrap();
         // The walk's output ends when it does (the fact); its end after that is recorded on every run, the
         // distribution its bound is to come from (the lead's rule for learned waits). Until that record
-        // exists, it waits within the node's own answer patience.
+        // exists, it waits within the suites' program-end patience, a program's end being its fact.
         let text = reader.join().unwrap();
         let after = std::time::Instant::now();
         let exit = p
-            .wait_for(hex_client::ANSWER_PATIENCE)
+            .wait_for(hex_api::conformance::PATIENCE)
             .unwrap()
             .expect("the walk ended");
         eprintln!(
@@ -442,6 +443,7 @@ impl Guest {
                 id: id.clone(),
                 bounds: Bounds::default(),
                 class: ClassSpec::Process,
+                owner: None,
             })
             .unwrap();
         let (mut r, w) = std::io::pipe().unwrap();
@@ -468,7 +470,7 @@ impl Guest {
             .unwrap();
         let text = reader.join().unwrap();
         let exit = p
-            .wait_for(hex_client::ANSWER_PATIENCE)
+            .wait_for(hex_api::conformance::PATIENCE)
             .unwrap()
             .expect("the room read ended");
         self.client.delete(&id).unwrap();

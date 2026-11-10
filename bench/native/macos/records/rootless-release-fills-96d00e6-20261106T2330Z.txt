@@ -1,0 +1,17 @@
+# What rootless polling holds (the lead, 2026-11-06): macos_process_box's rootless test, its hogs `hex
+# selftest-box hog` built at opt-level 3 (release-speed fills), a timeshare watcher (no time-constraint policy),
+# no QoS clamp at the default weight, per-class learned rates seeded from Mac16,9's record. Tree 96d00e6 + the
+# change, launchd one-shot hex-macos-ab-20261106T233003Z with ProcessType Interactive, adas-mac-studio-2 (Mac16,9,
+# Apple M4 Max, 14 cores, macOS 26.2 25C56), 2026-11-06T23:30Z, load 3.5-12.3 (integrate's relaunching jobs had
+# been removed by then). 3 runs of 3 passes; overshoot past the 256 MiB bound, MiB (peak; at_end = what the
+# watcher read when it ended the box):
+# members  run 1                run 2                 run 3
+1          0.0 0.0 0.0          0.0 0.0 0.0           0.0 0.0 0.0
+7          8.8 4.4 6.6          6.6 3.1 6.7           0.6 31.9 8.7
+14         5.9 3.3 204.4        106.4 54.2 247.0      104.6 202.4 287.4
+28         3024.7               1535.7                1660.6
+56         7.9 (at_end 7.9)     2087.0 (at_end 8.8)   264.6 (at_end 29.2)
+# Held: one member 0 (the kernel's _ext cap), half the cores' 31.9 MiB, one per core 287.4 MiB. Step 1's
+# criterion is 64 MiB at 1, 4, 8 and up to one member per core (the lead, 2026-11-07), so
+# a_rootless_box_holds_the_bar_up_to_one_member_per_core asserts 64 MiB at every size and is red at one per core:
+# that is the finding the overshoot breakdown starts from.

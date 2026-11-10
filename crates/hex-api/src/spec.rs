@@ -32,6 +32,104 @@ pub struct BoxSpec {
     pub id: BoxId,
     pub bounds: Bounds,
     pub class: ClassSpec,
+    /// Whose box it is, if the caller says ([`BoxOwner`]). Added after the spec's first fields, so a
+    /// spec without it names no owner (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<BoxOwner>,
+}
+
+impl BoxSpec {
+    /// Whether every value it names is well formed, before anything is made: its bounds, its owner and
+    /// a structured container's spec, each refused by its field's name (CLAUDE.md §3).
+    pub fn check(&self) -> Result<(), Refusal> {
+        self.bounds.check()?;
+        if let Some(owner) = &self.owner {
+            owner.check()?;
+        }
+        if let ClassSpec::Oci(oci) = &self.class {
+            oci.check()?;
+        }
+        Ok(())
+    }
+
+    /// Checks the spec of a run ([`crate::Runtime::run`]) as [`BoxSpec::check`] does, and refuses an `oci`
+    /// box's as `Invalid` naming the run: its init is created and started, and a run's box is the
+    /// `process` class's (decision 7 of docs/design/runtime-architecture.md).
+    pub fn check_run(&self) -> Result<(), Refusal> {
+        self.check()?;
+        if self.class.class() != Class::Process {
+            return Err(Refusal::Invalid {
+                what: "run",
+                why: format!(
+                    "box {} is an oci box, whose init is created and started",
+                    self.id
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Whose box it is (goal 5 extended, step 6). A node may give a box whose spec names an owner a cgroup
+/// an earlier box of that owner left, once reads that take no lock show it clean, unless the owner opts
+/// out; a box never gets another owner's, and a box with no owner always gets a fresh one. A cgroup
+/// handed on is the owner's environment rather than the box's: what the box reads of its cgroup through
+/// its own cgroup namespace, its predecessors' cumulative counters among it, is its owner's to see, as
+/// a reused Lambda environment is its function's (docs/research/runtime/goal5-cgroup-lock.md, f39).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct BoxOwner {
+    /// 1 to [`BoxOwner::MAX_NAME`] ASCII letters, digits and `_`, `+`, `-` or `.`, as a box id's.
+    pub name: String,
+    /// Whether the owner's boxes may be given a cgroup its earlier boxes left, or a network namespace: on
+    /// unless the owner opts out (Ada's calls, 2026-10-31 and 2026-11-03).
+    #[serde(default = "on", skip_serializing_if = "is_on")]
+    pub reuse: bool,
+}
+
+impl BoxOwner {
+    /// Longest owner name: a box id's longest.
+    pub const MAX_NAME: usize = BoxId::MAX_LEN;
+
+    /// The owner `name`, its boxes' cgroups handed on between them.
+    pub fn named(name: &str) -> Result<Self, Refusal> {
+        let owner = Self {
+            name: name.to_owned(),
+            reuse: true,
+        };
+        owner.check()?;
+        Ok(owner)
+    }
+
+    /// Whether its name is well formed, refused by the field's name when it isn't.
+    pub fn check(&self) -> Result<(), Refusal> {
+        let invalid = |why: String| Refusal::Invalid {
+            what: "box owner",
+            why,
+        };
+        if self.name.is_empty() || self.name.len() > Self::MAX_NAME {
+            return Err(invalid(format!(
+                "owner.name {:?} isn't 1 to {} characters",
+                self.name,
+                Self::MAX_NAME
+            )));
+        }
+        if let Some(c) = self
+            .name
+            .chars()
+            .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '+' | '-' | '.')))
+        {
+            return Err(invalid(format!("owner.name {:?} holds {c:?}", self.name)));
+        }
+        Ok(())
+    }
+}
+
+fn on() -> bool {
+    true
+}
+
+fn is_on(reuse: &bool) -> bool {
+    *reuse
 }
 
 /// The class a box is of, with what that class needs.
@@ -470,7 +568,7 @@ pub struct Ask {
 }
 
 /// The caller's ends of the streams it asked for ([`crate::Proc::streams`]): stdin's to write, stdout's and
-/// stderr's to read, each to its end as a pipe's end is.
+/// stderr's to read, each to its end as a pipe's end is. Use [`crate::OwnedStream`] for portable I/O on an end.
 #[derive(Debug, Default)]
 pub struct Given {
     pub stdin: Option<End>,
@@ -478,11 +576,11 @@ pub struct Given {
     pub stderr: Option<End>,
 }
 
-/// A stream's end the caller holds: a file descriptor on Unix (a pipe's or a socket's), a handle on Windows.
+/// A stream's end the caller holds: a file descriptor on Unix (a pipe's or a socket's).
 #[cfg(unix)]
 pub type End = std::os::fd::OwnedFd;
 #[cfg(windows)]
-pub type End = std::os::windows::io::OwnedHandle;
+pub use crate::end::End;
 
 impl Stdio {
     /// Every stream the null device.

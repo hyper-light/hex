@@ -1,6 +1,6 @@
 //! The node agent's local socket (decision 3 of docs/design/runtime-architecture.md): the `Runtime`
 //! seam served over a local socket to callers that don't link Hex, in [`hex_core::wire`]'s format, and
-//! from its version 2 the node's network namespace counts ([`Host::netns`]). An exec's stdio comes in
+//! the node's network namespace counts ([`Host::netns`]). An exec's stdio comes in
 //! with its request, and a program's end goes out as a message after its exec's answer.
 //!
 //! This is the one core for every OS (native plan step 8): the protocol, the bounds, the disconnect rule
@@ -13,23 +13,34 @@
 //!
 //! One thread does every connection's I/O and watches every exec'd program's end through the OS's event
 //! set; it never blocks but in [`Os::wait`]. The runtime's calls, which may block (a delete waits for its
-//! box to empty), run on a pool of workers, which answer their calls themselves.
+//! box to empty), run on a pool of workers, which answer their calls themselves. A run (decision 7) is
+//! answered as an exec is: its program's end comes once its node has removed its box, so an end its watch
+//! reports before the runtime can tell it is waited for on a worker, never on the I/O thread.
 //!
 //! Each resource has a bound (CLAUDE.md §2), refused past by type, naming it (§3):
 //! - connections ([`Limits::connections`]): one more is answered `Exhausted` and closed;
 //! - a message's size ([`Limits::message_bytes`]): a larger one is answered `Invalid`, naming it;
-//! - requests in flight on a connection ([`Limits::in_flight`]): one more is answered `Exhausted`;
-//! - programs a connection watches ([`Limits::programs`]): an exec past them is answered `Exhausted`;
+//! - requests in flight on the node's connections together ([`Limits::in_flight`]): one more is answered
+//!   `Exhausted`;
+//! - programs the node's connections watch together ([`Limits::programs`]), and given answers' ends whose
+//!   client hasn't yet said it took them (`Request::Taken`): an exec past them is answered `Exhausted`.
+//!
+//! Each is a budget for the node, never split among connections (the lead, 2026-11-06): the node's clients are
+//! its own control plane, so no fairness between them is owed. Each is its platform's own ([`limits`]). Of each
+//! budget the node keeps [`KEPT`] for every connection it admits, which is what a hello tells a client in its
+//! limits, so a client within what it was told is never refused; a connection the node can't keep that for is
+//! refused as it comes, naming the budget. A hello tells the budgets beside;
 //! - answers waiting for room in a connection's socket: while any wait, its requests aren't read, so a
 //!   client that doesn't read its answers stops being read rather than growing the agent's memory.
 //!   By construction they number at most `in_flight + programs + 1`: an answer for each call in
 //!   flight (a list's parts go one at a time), an end for each program, and the one refusal read
 //!   before reading stopped;
-//! - workers ([`WORKERS`]): a call past them waits in the queue its connections' in-flight bounds
-//!   hold.
+//! - workers (the platform's threads, [`Platform::threads`]): one for every call the connections' in-flight
+//!   bounds admit, where the kernel's thread limit allows; a call past them waits in the queue those
+//!   bounds hold.
 //!
 //! The disconnect rule (decision 3): when a connection closes, every program its execs started that it
-//! still watches is sent KILL through the OS's watch of it, reaped, and counted in its box ([`Host::abandoned`]),
+//! still watches is killed by its own runtime (`Proc::kill`), reaped, and counted in its box ([`Host::abandoned`]),
 //! which inspect reports; none is left running unwatched. A program the client released (it dropped
 //! the `Proc`) runs on, as a dropped in-process `Proc` does. A request the agent has read is carried
 //! out whether or not its client stays to take the answer; one it hadn't read is let go with the
@@ -37,13 +48,14 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use hex_api::{BoxId, Exit, Proc, Program, Refusal, Runtime, Stdio};
+use hex_api::{BoxId, BoxSpec, Exit, Proc, Program, Refusal, Runtime, Stdio};
 use hex_core::netns;
+use hex_core::patience::Patience;
 use hex_core::wire::{self, Answer, Call, Header, Hello, Received, Request, Streams};
 
 pub use hex_core::wire::Limits;
@@ -54,54 +66,82 @@ pub mod linux;
 pub mod macos;
 #[cfg(unix)]
 mod unix;
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 mod unsupported;
+#[cfg(windows)]
+pub mod windows;
 
 /// This OS's event sources and local socket.
 #[cfg(target_os = "linux")]
 pub type Native = linux::Linux;
 #[cfg(target_os = "macos")]
 pub type Native = macos::MacOs;
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
+pub type Native = windows::Windows;
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub type Native = unsupported::Unsupported;
 
-/// The node agent's bounds on its socket unless set ([`Server::bind`]'s `limits`):
-/// - 64 connections: a node's local callers are few (kiln's runner and executor, the command line),
-///   so this is far past them while holding each connection's cost to a known size;
-/// - messages of [`wire::MAX_MESSAGE`] bytes, the largest the format sends;
-/// - 64 requests in flight on a connection: twice the bench's most threads sharing one client (32,
-///   seam_oci's throughput phase), so a client's threads don't meet it in use;
-/// - 1,024 programs watched by a connection, each holding a watch here (a pidfd on Linux): 64
-///   connections' worth is 65,536 descriptors, the supervisor's `INIT_BUDGET`.
-pub const LIMITS: Limits = Limits {
-    connections: 64,
-    message_bytes: wire::MAX_MESSAGE,
-    in_flight: 64,
-    programs: 1_024,
-};
+/// What the node's platform lets it hold, read as the node starts: what its socket's bounds are ([`limits`]), and its
+/// workers. Linux's node reads it with its sizes ([`crate::sizes::Sizes::platform`]), macOS's from its kernel
+/// ([`macos::platform`]); none is picked (Ada's rule, 2026-11-06).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Platform {
+    /// The most descriptors the node may hold.
+    pub descriptors: usize,
+    /// The most threads the node may run.
+    pub threads: usize,
+    /// The most programs the node can watch at once.
+    pub programs: usize,
+}
 
-/// Most workers running calls at once, started as calls need them and kept: past them, calls wait in
-/// the queue. Twice [`LIMITS`]' in-flight bound, so one connection's calls never wait on another's.
-pub const WORKERS: usize = 128;
+/// The node's bounds on its socket ([`Server::bind`]'s `limits`), each a budget for the node and each its platform's
+/// own (Ada's rule and the lead's call, 2026-11-06; one rule on every OS, the lead's call of 2026-11-09 that unified
+/// the macOS line's admission with it); a hello tells its `in_flight` and `programs` as the node's budgets and
+/// [`KEPT`] as each connection's limits:
+/// - connections: the descriptors the node may hold, one each; the kernel refuses an accept past what remains of them
+///   (`EMFILE`), and the socket pauses accepting until one closes;
+/// - messages of [`wire::MAX_MESSAGE`] bytes, the largest the format sends;
+/// - calls in flight: the threads the node may run, its workers' bound (`Server::bind`'s `workers`), so a call
+///   admitted has a worker that can exist;
+/// - programs watched: the programs the node can watch at once.
+///
+/// Each is a ceiling the platform sets, not the room left under it now: what else holds the platform's room, the
+/// kernel refuses past as the node takes it (`EMFILE`, `EAGAIN`), typed, at no cost to an admission (the lead,
+/// 2026-11-09, over reading the room at each admission, which cost every exec a listing of the node's descriptors).
+pub fn limits(platform: &Platform) -> Limits {
+    Limits {
+        connections: platform.descriptors,
+        message_bytes: wire::MAX_MESSAGE,
+        in_flight: platform.threads,
+        programs: platform.programs,
+    }
+}
+
+/// What the node keeps for every connection it admits, of its calls in flight and of its programs watched: one of
+/// each, the fewest by which a connection can do anything (the lead's ruling, 2026-11-06). A hello tells a client
+/// this in its limits, each connection's own, so a client within it is never refused, however much of the budgets
+/// other connections hold. It is less than the 64 calls
+/// and 1,024 programs a hello told before 2026-11-06: those were per-connection caps, which the node no longer
+/// keeps, and keeping 64 and 1,024 for every connection would cap the connections at the budgets over them (64 at
+/// the supervisor's 65,536 pidfds). Past it, a connection's calls and programs share what the budgets leave.
+pub const KEPT: usize = 1;
 
 /// What [`Refusal::Exhausted`] names for each bound.
 pub const CONNECTIONS: &str = "connections to the node agent's socket";
-pub const IN_FLIGHT: &str = "requests in flight on one connection";
-pub const PROGRAMS: &str = "programs watched by one connection";
+pub const IN_FLIGHT: &str = "requests in flight on the node agent's connections together";
+pub const PROGRAMS: &str = "programs watched by the node agent's connections together";
 
 /// Messages read from one connection before the others get a turn: a fairness bound, so one busy
 /// client can't hold the I/O thread.
 const READS_PER_WAKE: usize = 64;
 /// Most events one wake takes; more come on the next.
 pub const EVENTS: usize = 256;
-/// Longest a list's worker waits for its client to read one part before it sends the next; past it
-/// the client has stopped reading, and its connection is closed. Five times the node's longest wait
-/// of its own (a delete's `EMPTY_PATIENCE`, 60 s), so a client busy with another call isn't taken for
-/// one that stopped.
-const READ_PATIENCE: Duration = Duration::from_secs(300);
-/// Longest a stopping server waits for the programs it ended to be reaped and recorded, as the node's
-/// `EMPTY_PATIENCE`: a killed process ends in milliseconds.
-const STOP_PATIENCE: Duration = Duration::from_secs(60);
+/// How long a list's worker waits for its client to read one part before it sends the next: twice the slowest
+/// such read this process has seen (decision 9; the lead's failure-bound rule); past it the client has stopped
+/// reading, and its connection is closed, the other calls on it refused by the close. MEASURING: the record to come is
+/// `bench/competitive/probes/waits_census.md`'s `serve.reads` row, which then seeds it. Until then the first part
+/// waited for is waited out.
+static READS: Patience = Patience::measuring("serve.reads");
 
 /// The first token a connection or program takes: below it are the listener's and the wake's.
 const FIRST_TOKEN: u64 = 2;
@@ -118,16 +158,25 @@ pub type Killed = Box<dyn FnOnce(Result<(), Refusal>) + Send>;
 pub enum Forward {
     /// Its answer comes later, through the reply it was given.
     Taken,
+    /// Caller-owned guest connections must be opened before this exec can be sent.
+    Offered(Offering),
     /// The host runs it itself, on the worker: the call and its exec's stdio, as they were given.
     Back(Box<(Call, Stdio)>),
     /// The host couldn't send it (its reply spent with the attempt): refused, saying why.
     Refused(Refusal),
 }
 
+/// A bounded program reservation whose guest streams will be opened by its caller (HEX-RT-17).
+/// Dropping `ready` cancels the unsent exec and closes its dedicated control connection.
+pub struct Offering {
+    pub streams: wire::StreamOffer,
+    pub ready: Box<dyn FnOnce() -> Result<(), Refusal> + Send>,
+}
+
 /// A forwarded call's answer.
 pub enum Forwarded {
-    /// Any call's answer but a started exec's.
-    Answer(Answer),
+    /// Any call's answer but a started exec's: boxed, as an answer is many times a started exec's size.
+    Answer(Box<Answer>),
     /// An exec's program started where the host isn't: its pid there, which names no process here, what
     /// kills it or lets it go, and the caller's ends of its streams (its guest's own connections, for those
     /// the exec carried or asked for), which go with its answer. Its end comes to the exec's [`Ended`].
@@ -201,11 +250,10 @@ pub trait Host: Runtime {
     /// worker. A host takes the calls about boxes a node behind a connection holds (the node's guest):
     /// what must be done here first (staging a box's root) is done on the worker, then the request goes
     /// without waiting for its answer, so the worker is free and no other client's call waits on that
-    /// node. An exec's program's end goes to `ended`. `ends` says whether the caller's client takes a
-    /// started program's streams' ends with its answer (wire version 3's [`Answer::Given`]). By default
-    /// every call runs here.
-    fn forward(&self, call: Call, stdio: Stdio, ends: bool, reply: Reply, ended: Ended) -> Forward {
-        let _ = (ends, reply, ended);
+    /// node. An exec's program's end goes to `ended`; the caller's client takes a started program's streams' ends
+    /// with its answer ([`Answer::Given`]). By default every call runs here.
+    fn forward(&self, call: Call, stdio: Stdio, reply: Reply, ended: Ended) -> Forward {
+        let _ = (reply, ended);
         Forward::Back(Box::new((call, stdio)))
     }
 
@@ -213,7 +261,7 @@ pub trait Host: Runtime {
     /// it closed (the disconnect rule): reported as [`hex_api::BoxInfo::abandoned`].
     fn abandoned(&self, id: &BoxId) -> Result<(), Refusal>;
 
-    /// The node's network namespace counts (decision 4), which a client of wire version 2 asks for.
+    /// The node's network namespace counts (decision 4).
     fn netns(&self) -> Result<netns::Counts, Refusal>;
 }
 
@@ -290,11 +338,15 @@ pub enum Sent {
     Gone,
 }
 
-/// Why a started program couldn't be watched, and whether the OS ended it (it could open a handle to the
-/// program but not watch it); one it couldn't open runs on, unwatched, for the node's sweep.
-pub struct Unwatched {
-    pub why: Refusal,
-    pub killed: bool,
+/// Why a started program couldn't be watched.
+pub enum Unwatched {
+    /// No handle to it could be opened: it runs on, unwatched, for the node's sweep.
+    Runs(Refusal),
+    /// A handle to it was opened but couldn't be watched, and the OS ended it through that handle.
+    Killed(Refusal),
+    /// It had ended and been reaped before it could be watched: a run's program, which its node reaps to remove
+    /// its box (decision 7). Its end is its runtime's to tell, through its `Proc`.
+    Gone,
 }
 
 /// One OS's event sources and local socket: everything the core does that isn't the same on every OS.
@@ -338,9 +390,6 @@ pub trait Os: Send + Sync + 'static {
     fn hung_up(&self, conn: &Self::Conn) -> bool;
     /// Watches the program `pid` under `token` until it ends.
     fn watch_program(&self, pid: u32, token: u64) -> Result<Self::Watch, Unwatched>;
-    /// Sends the watched program KILL, for the disconnect rule; one that has ended already is reaped and
-    /// counted just the same. A caller's own kill goes through the program's runtime instead (`Proc::kill`).
-    fn kill(&self, watch: &Self::Watch);
     /// Stops watching a program.
     fn unwatch_program(&self, watch: Self::Watch);
     /// A program's stdio from what its exec carried, in the order `streams` names them; anything that
@@ -400,9 +449,6 @@ impl<O: Os> Os for Arc<O> {
     fn watch_program(&self, pid: u32, token: u64) -> Result<Self::Watch, Unwatched> {
         (**self).watch_program(pid, token)
     }
-    fn kill(&self, watch: &Self::Watch) {
-        (**self).kill(watch);
-    }
     fn unwatch_program(&self, watch: Self::Watch) {
         (**self).unwatch_program(watch);
     }
@@ -433,6 +479,21 @@ struct Shared<O: Os> {
     workers: usize,
     path: PathBuf,
     stopping: AtomicBool,
+    /// Calls in flight on every connection together. With `idle_calls`, at most `limits.in_flight`: what is
+    /// in flight and what is kept for the open connections that have none in flight never pass the budget.
+    in_flight: AtomicUsize,
+    /// Open connections with no call in flight, each with its [`KEPT`] call kept for it.
+    idle_calls: AtomicUsize,
+    /// Open connections watching no program, each with its [`KEPT`] program kept for it; changed under the table's
+    /// lock, as the programs watched are.
+    idle_programs: AtomicUsize,
+    /// Execs under way holding a place among the programs watched, which with the table's watched programs are
+    /// at most `limits.programs`; changed under the table's lock.
+    reserving: AtomicUsize,
+    /// Given answers' ends kept for programs no longer watched ([`Out::kept`]), on every connection together, each a
+    /// place among the programs until its client says it took them; changed under the table's lock, as the programs
+    /// watched are.
+    kept: AtomicUsize,
     table: Mutex<Table<O>>,
     /// Signalled when a remote program's end is taken, for a stopping server that waits on them.
     remote_ended: Condvar,
@@ -488,6 +549,12 @@ struct Conn<O: Os> {
     drained: Condvar,
 }
 
+/// The single admission owner shared by an offer, its guest answer and cancellation.
+struct PendingOffer {
+    ready: Box<dyn FnOnce() -> Result<(), Refusal> + Send>,
+    completed: Arc<AtomicBool>,
+}
+
 struct Out {
     open: bool,
     in_flight: usize,
@@ -495,18 +562,48 @@ struct Out {
     programs: BTreeMap<u64, u64>,
     /// Places taken by execs under way.
     reserved: usize,
-    /// Answers waiting for room in the socket, oldest first.
-    backlog: VecDeque<(Vec<u8>, Vec<hex_api::End>)>,
+    /// At most one per reserved program; no stream handle has been exported to another process.
+    offered: BTreeMap<u64, PendingOffer>,
+    /// Answers waiting for room in the socket, oldest first, each with the descriptors riding with it and, for a given
+    /// answer, its exec's id, whose client is to say it took them.
+    backlog: VecDeque<(Vec<u8>, Vec<hex_api::End>, Option<u64>)>,
+    /// Its given answers whose client hasn't yet said it took their ends ([`Request::Taken`]), by their exec's id, each
+    /// with the node's own copies of the ends once the answer has gone: kept from its send until the word, or until
+    /// the connection closes, so none is ever in flight alone, as XNU's collector of descriptors in flight flushes a
+    /// socket whose only reference is a message in flight (HEX-GUEST-41). Each holds its program's place among the
+    /// programs until then ([`Out::places`]), so a client that never says it took them holds the node to no more
+    /// descriptors than its places.
+    given: BTreeMap<u64, Vec<hex_api::End>>,
+    /// Of `given`, those whose programs it no longer watches: each a place of its own.
+    kept: usize,
     /// Whether its requests are read ([`Interest::Read`]) or only its backlog written.
     reading: bool,
+}
+
+impl Out {
+    /// Its places among the programs: those it watches, those its execs under way hold, and those its given answers'
+    /// ends hold for programs it no longer watches.
+    fn places(&self) -> usize {
+        self.programs
+            .len()
+            .saturating_add(self.reserved)
+            .saturating_add(self.kept)
+    }
+
+    /// A message has gone with `ends` riding as its descriptors: a given answer's (`given`, its exec's id) kept until
+    /// its client says it took them, any other's let go.
+    fn sent(&mut self, ends: Vec<hex_api::End>, given: Option<u64>) {
+        if let Some(slot) = given.and_then(|exec| self.given.get_mut(&exec)) {
+            *slot = ends;
+        }
+    }
 }
 
 /// A program a connection's exec started.
 struct Watched<O: Os> {
     conn: Arc<Conn<O>>,
-    /// Its exec's id and version, which its end is sent with.
+    /// Its exec's id, which its end is sent with.
     exec: u64,
-    version: u16,
     box_id: BoxId,
     run: Run<O>,
     /// Sent KILL because its connection closed: its end is counted in its box, not sent.
@@ -623,6 +720,26 @@ enum Job<O: Os> {
         header: Header,
         infos: Vec<hex_api::BoxInfo>,
     },
+    /// A program here whose watch reported its end before its runtime could tell it: a run's, whose box its node
+    /// is removing (decision 7). Its end is waited for on a worker, so the I/O thread waits on no removal.
+    Collect(Box<Watched<O>>),
+}
+
+/// What a call that starts a program starts: a program in a box there is (an exec), or a `process` box made for
+/// the program's life, with it (a run, decision 7).
+enum Launch {
+    Exec(BoxId, Program),
+    Run(Box<BoxSpec>, Program),
+}
+
+impl Launch {
+    /// The box the program runs in.
+    fn box_id(&self) -> BoxId {
+        match self {
+            Self::Exec(id, _) => id.clone(),
+            Self::Run(spec, _) => spec.id.clone(),
+        }
+    }
 }
 
 fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
@@ -664,6 +781,11 @@ impl<O: Os> Server<O> {
             workers,
             path: path.to_owned(),
             stopping: AtomicBool::new(false),
+            in_flight: AtomicUsize::new(0),
+            idle_calls: AtomicUsize::new(0),
+            idle_programs: AtomicUsize::new(0),
+            reserving: AtomicUsize::new(0),
+            kept: AtomicUsize::new(0),
             table: Mutex::new(Table::default()),
             remote_ended: Condvar::new(),
             sources: Mutex::new(BTreeMap::new()),
@@ -892,6 +1014,31 @@ impl<O: Os> Shared<O> {
             );
             return Ok(());
         }
+        // A connection is admitted only if what it is kept fits in both budgets beside what is used and kept now.
+        let calls = self
+            .in_flight
+            .load(Ordering::Acquire)
+            .saturating_add(self.idle_calls.load(Ordering::Acquire))
+            .saturating_add(KEPT);
+        let programs = table
+            .watched
+            .len()
+            .saturating_add(self.reserving.load(Ordering::Acquire))
+            .saturating_add(self.idle_programs.load(Ordering::Acquire))
+            .saturating_add(self.kept.load(Ordering::Acquire))
+            .saturating_add(KEPT);
+        let spent = if calls > self.limits.in_flight {
+            Some((IN_FLIGHT, self.limits.in_flight))
+        } else if programs > self.limits.programs {
+            Some((PROGRAMS, self.limits.programs))
+        } else {
+            None
+        };
+        if let Some((what, bound)) = spent {
+            drop(table);
+            self.refuse(&sock, Refusal::Exhausted { what, bound });
+            return Ok(());
+        }
         let token = table.token()?;
         if let Err(e) = self.os.watch(&sock, token, Interest::Read) {
             // This connection can't be watched (the OS's watches are spent): refused, and the ones
@@ -910,21 +1057,24 @@ impl<O: Os> Shared<O> {
                     in_flight: 0,
                     programs: BTreeMap::new(),
                     reserved: 0,
+                    offered: BTreeMap::new(),
                     backlog: VecDeque::new(),
+                    given: BTreeMap::new(),
+                    kept: 0,
                     reading: true,
                 }),
                 drained: Condvar::new(),
             }),
         );
+        self.idle_calls.fetch_add(1, Ordering::AcqRel);
+        self.idle_programs.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
 
     /// Answers a connection that won't be served with why, as id 0 (its client hasn't asked anything
-    /// yet), in the first version, which a client of any version reads, then lets it go.
+    /// yet), then lets it go.
     fn refuse(&self, sock: &O::Conn, refusal: Refusal) {
-        if let Ok(bytes) =
-            wire::answer(wire::FIRST, 0, &Answer::Refused(refusal), wire::MAX_MESSAGE)
-        {
+        if let Ok(bytes) = wire::answer(0, &Answer::Refused(refusal), wire::MAX_MESSAGE) {
             let _ = self.os.send(sock, &bytes, &[]);
         }
         self.os.shutdown(sock);
@@ -952,7 +1102,8 @@ impl<O: Os> Shared<O> {
     }
 
     /// Reads a connection's requests until none wait, its answers back up, or it has had its turn;
-    /// or, once its client has gone (`gone`), every request it left. Whether its client has gone.
+    /// or, once its client has gone (`gone`), every request it left. Whether the connection ends: its client
+    /// has gone, or it sent a message of another wire.
     fn read(
         self: &Arc<Self>,
         conn: &Arc<Conn<O>>,
@@ -999,90 +1150,119 @@ impl<O: Os> Shared<O> {
                 descriptors: passed.len(),
                 descriptors_cut: cut,
             };
-            self.request(conn, &received, passed)?;
+            if self.request(conn, &received, passed)? {
+                return Ok(true);
+            }
         }
     }
 
+    /// This node's hello: its build, the classes it runs, what it keeps for each connection ([`KEPT`]) and its
+    /// budgets over them all.
+    fn hello(&self) -> Hello {
+        Hello {
+            build: wire::build(),
+            classes: self.classes.clone(),
+            limits: Limits {
+                in_flight: KEPT,
+                programs: KEPT,
+                ..self.limits
+            },
+            budgets: wire::Budgets {
+                in_flight: self.limits.in_flight,
+                programs: self.limits.programs,
+            },
+        }
+    }
+
+    /// Carries out a request a connection sent. Whether the connection ends with it: one of another wire ends it.
     fn request(
         self: &Arc<Self>,
         conn: &Arc<Conn<O>>,
         msg: &Received<'_>,
         passed: Vec<O::Passed>,
-    ) -> Result<(), Refusal> {
-        match wire::read_request(msg, self.limits.message_bytes) {
+    ) -> Result<bool, Refusal> {
+        let carried = match wire::read_request(msg, self.limits.message_bytes) {
+            // A client of another wire is refused at its hello: a message of another wire, its hello first, is
+            // answered with this node's hello, whose head (the header, then the build) every build reads, so the
+            // client refuses it naming both wires and both builds; then the connection ends, nothing more of it read.
+            Err(wire::Bad {
+                id,
+                fault: wire::Fault::Wire { .. },
+            }) => {
+                drop(passed);
+                self.answer(conn, id, &Answer::Hello(self.hello()))?;
+                return Ok(true);
+            }
             Err(bad) => {
                 drop(passed);
-                self.answer(
-                    conn,
-                    bad.version,
-                    bad.id,
-                    &Answer::Refused(bad.fault.into()),
-                )
+                self.answer(conn, bad.id, &Answer::Refused(bad.fault.into()))
             }
-            Ok((h, Request::Hello)) => self.answer(
-                conn,
-                h.version,
-                h.id,
-                &Answer::Hello(Hello {
-                    version: wire::VERSION,
-                    classes: self.classes.clone(),
-                    limits: self.limits,
-                }),
-            ),
+            Ok((h, Request::Hello { .. })) => self.answer(conn, h.id, &Answer::Hello(self.hello())),
             Ok((h, Request::Release)) => self.release(conn, h.id),
+            Ok((h, Request::Taken)) => self.taken(conn, h.id),
+            Ok((h, Request::StreamsReady)) => self.streams_ready(conn, h),
             Ok((header, Request::Call(call))) => {
                 let admitted = {
                     let mut out = conn.out.lock().map_err(poisoned)?;
-                    match out.in_flight.checked_add(1) {
-                        Some(n) if n <= self.limits.in_flight => {
-                            out.in_flight = n;
-                            true
+                    let admitted = if out.in_flight < KEPT {
+                        // Its kept call: always there, since what is kept and in flight never pass the budget.
+                        if out.open {
+                            self.idle_calls.fetch_sub(1, Ordering::AcqRel);
                         }
-                        _ => false,
+                        self.in_flight.fetch_add(1, Ordering::AcqRel);
+                        true
+                    } else {
+                        let kept = self.idle_calls.load(Ordering::Acquire);
+                        self.in_flight
+                            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                                n.checked_add(1)
+                                    .filter(|&m| m.saturating_add(kept) <= self.limits.in_flight)
+                            })
+                            .is_ok()
+                    };
+                    if admitted {
+                        out.in_flight = out.in_flight.saturating_add(1);
                     }
+                    admitted
                 };
-                if !admitted {
-                    return self.answer(
+                if admitted {
+                    self.enqueue(Job::Call {
+                        conn: Arc::clone(conn),
+                        header,
+                        call: Box::new(call),
+                        passed,
+                    })
+                } else {
+                    self.answer(
                         conn,
-                        header.version,
                         header.id,
                         &Answer::Refused(Refusal::Exhausted {
                             what: IN_FLIGHT,
                             bound: self.limits.in_flight,
                         }),
-                    );
+                    )
                 }
-                self.enqueue(Job::Call {
-                    conn: Arc::clone(conn),
-                    header,
-                    call: Box::new(call),
-                    passed,
-                })
             }
-        }
+        };
+        carried.map(|()| false)
     }
 
     /// Sends one answer on a connection, or keeps it until there is room; an answer that can't be
     /// written is refused to its request in its place.
-    fn answer(
-        &self,
-        conn: &Conn<O>,
-        version: u16,
-        id: u64,
-        answer: &Answer,
-    ) -> Result<(), Refusal> {
-        let bytes = wire::answer(version, id, answer, self.limits.message_bytes)
+    fn answer(&self, conn: &Conn<O>, id: u64, answer: &Answer) -> Result<(), Refusal> {
+        let bytes = wire::answer(id, answer, self.limits.message_bytes)
             .or_else(|fault| {
                 let refused = Answer::Refused(Refusal::Broken(format!(
                     "the node agent's answer couldn't be written: {fault}"
                 )));
-                wire::answer(version, id, &refused, self.limits.message_bytes)
+                wire::answer(id, &refused, self.limits.message_bytes)
             })
             .map_err(|e| Refusal::Broken(format!("a refusal couldn't be written: {e}")))?;
-        self.send(conn, bytes, Vec::new(), None)
+        self.send(conn, bytes, Vec::new(), None, false)
     }
 
-    /// Sends a given answer with the caller's ends of its streams riding as its descriptors.
+    /// Sends a given answer with the caller's ends of its streams riding as its descriptors, the node's own copies
+    /// kept once it has gone until its client says it took them ([`Out::given`]).
     fn answer_given(
         &self,
         conn: &Conn<O>,
@@ -1103,16 +1283,10 @@ impl<O: Os> Shared<O> {
             pid,
             given: streams,
         };
-        match wire::answer(
-            header.version,
-            header.id,
-            &answer,
-            self.limits.message_bytes,
-        ) {
-            Ok(bytes) => self.send(conn, bytes, fds, None),
+        match wire::answer(header.id, &answer, self.limits.message_bytes) {
+            Ok(bytes) => self.send(conn, bytes, fds, Some(header.id), false),
             Err(fault) => self.answer(
                 conn,
-                header.version,
                 header.id,
                 &Answer::Refused(Refusal::Broken(format!(
                     "the node agent's answer couldn't be written: {fault}"
@@ -1121,40 +1295,61 @@ impl<O: Os> Shared<O> {
         }
     }
 
-    /// Queues `bytes` after a connection's waiting answers, or sends them now when none wait. With a
-    /// `deadline`, first waits for the waiting ones to go (a list's next part), closing the connection
-    /// once it passes. Sending on a closed connection does nothing: its client is gone.
+    /// Queues `bytes` after a connection's waiting answers, or sends them now when none wait, `fds` riding as its
+    /// descriptors: a given answer's (`given`, its exec's id) kept once it has gone until its client says it took
+    /// them ([`Out::given`]). With an `after_read` (a list's next part), first waits for the waiting ones to go,
+    /// closing the connection once the wait passes [`READS`]' bound. Sending on a closed connection does nothing: its
+    /// client is gone.
     fn send(
         &self,
         conn: &Conn<O>,
         bytes: Vec<u8>,
         fds: Vec<hex_api::End>,
-        deadline: Option<Instant>,
+        given: Option<u64>,
+        after_read: bool,
     ) -> Result<(), Refusal> {
         let mut out = conn.out.lock().map_err(poisoned)?;
-        if let Some(deadline) = deadline {
+        if after_read {
+            let began = Instant::now();
+            let deadline = READS.deadline().and_then(|wait| began.checked_add(wait));
+            let waited = out.open && !out.backlog.is_empty();
             while out.open && !out.backlog.is_empty() {
-                let left = deadline.saturating_duration_since(Instant::now());
-                if left.is_zero() {
-                    drop(out);
-                    // The I/O thread sees the hang-up and closes it, by the disconnect rule.
-                    self.os.shutdown(&conn.sock);
-                    return Ok(());
-                }
-                out = conn.drained.wait_timeout(out, left).map_err(poisoned)?.0;
+                out = match deadline {
+                    None => conn.drained.wait(out).map_err(poisoned)?,
+                    Some(deadline) => {
+                        let left = deadline.saturating_duration_since(Instant::now());
+                        if left.is_zero() {
+                            drop(out);
+                            // The I/O thread sees the hang-up and closes it, by the disconnect rule. No sample.
+                            self.os.shutdown(&conn.sock);
+                            return Ok(());
+                        }
+                        conn.drained.wait_timeout(out, left).map_err(poisoned)?.0
+                    }
+                };
+            }
+            if waited && out.open {
+                READS.answered(began.elapsed());
             }
         }
         if !out.open {
             return Ok(());
         }
+        if let Some(exec) = given {
+            out.given.insert(exec, Vec::new());
+        }
         if out.backlog.is_empty() {
             match self.os.send(&conn.sock, &bytes, &fds) {
-                // Gone: its client is gone, and the I/O thread sees the hang-up and closes it.
-                Sent::Sent | Sent::Gone => return Ok(()),
+                Sent::Sent => {
+                    out.sent(fds, given);
+                    return Ok(());
+                }
+                // Its client is gone, and the I/O thread sees the hang-up and closes it.
+                Sent::Gone => return Ok(()),
                 Sent::WouldBlock => {}
             }
         }
-        out.backlog.push_back((bytes, fds));
+        out.backlog.push_back((bytes, fds, given));
         if out.reading {
             out.reading = false;
             self.os
@@ -1168,10 +1363,12 @@ impl<O: Os> Shared<O> {
     /// read again.
     fn flush(&self, conn: &Conn<O>) -> Result<(), Refusal> {
         let mut out = conn.out.lock().map_err(poisoned)?;
-        while let Some((front, fds)) = out.backlog.front() {
+        while let Some((front, fds, _)) = out.backlog.front() {
             match self.os.send(&conn.sock, front, fds) {
                 Sent::Sent => {
-                    out.backlog.pop_front();
+                    if let Some((_, fds, given)) = out.backlog.pop_front() {
+                        out.sent(fds, given);
+                    }
                 }
                 Sent::WouldBlock => return Ok(()),
                 Sent::Gone => {
@@ -1194,14 +1391,33 @@ impl<O: Os> Shared<O> {
     /// Closes a connection and applies the disconnect rule to the programs it still watches.
     fn close(&self, conn: &Conn<O>) -> Result<(), Refusal> {
         let mut table = self.table()?;
-        let programs: Vec<u64> = {
+        let (programs, offered): (Vec<u64>, _) = {
             let mut out = conn.out.lock().map_err(poisoned)?;
             if !out.open {
                 return Ok(());
             }
             out.open = false;
+            // What was kept for it is let go with it.
+            if out.in_flight == 0 {
+                self.idle_calls.fetch_sub(1, Ordering::AcqRel);
+            }
+            if out.places() == 0 {
+                self.idle_programs.fetch_sub(1, Ordering::AcqRel);
+            }
             out.backlog.clear();
-            out.programs.values().copied().collect()
+            // Its given ends go with it, and the places those of programs it no longer watches held.
+            self.kept.fetch_sub(out.kept, Ordering::AcqRel);
+            out.kept = 0;
+            out.given.clear();
+            let offered = std::mem::take(&mut out.offered);
+            for pending in offered.values() {
+                if !pending.completed.swap(true, Ordering::AcqRel) {
+                    self.reserving.fetch_sub(1, Ordering::AcqRel);
+                    out.reserved = out.reserved.saturating_sub(1);
+                    self.call_done(&mut out);
+                }
+            }
+            (out.programs.values().copied().collect(), offered)
         };
         conn.drained.notify_all();
         self.os.unwatch(&conn.sock);
@@ -1212,16 +1428,73 @@ impl<O: Os> Shared<O> {
                 self.end(w);
             }
         }
-        self.resume_accepting(&mut table)
+        self.resume_accepting(&mut table)?;
+        drop(table);
+        drop(offered);
+        Ok(())
+    }
+
+    /// The caller opened its named guest streams; commit its already-admitted exec without waiting here.
+    fn streams_ready(&self, conn: &Conn<O>, header: Header) -> Result<(), Refusal> {
+        let pending = conn
+            .out
+            .lock()
+            .map_err(poisoned)?
+            .offered
+            .remove(&header.id);
+        let Some(pending) = pending else {
+            // A terminal guest refusal may already have cancelled this exact offer and answered the exec.
+            return Ok(());
+        };
+        if pending.completed.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        match (pending.ready)() {
+            Ok(()) => Ok(()),
+            Err(why) => {
+                let owns = {
+                    let _out = conn.out.lock().map_err(poisoned)?;
+                    !pending.completed.swap(true, Ordering::AcqRel)
+                };
+                if owns {
+                    self.unreserve(conn)?;
+                    self.done(conn)?;
+                    self.answer(conn, header.id, &Answer::Refused(why))?;
+                }
+                Ok(())
+            }
+        }
     }
 
     /// The client no longer waits for exec `exec`'s program: it runs on, unwatched by the socket,
     /// and the node's sweep reaps it once it ends, as with a dropped in-process `Proc`; a remote one is let
     /// go by its host.
     fn release(&self, conn: &Conn<O>, exec: u64) -> Result<(), Refusal> {
+        let offered = {
+            let mut out = conn.out.lock().map_err(poisoned)?;
+            out.offered.remove(&exec).map(|pending| {
+                let owns = !pending.completed.swap(true, Ordering::AcqRel);
+                (pending, owns)
+            })
+        };
+        if let Some((pending, owns)) = offered {
+            if owns {
+                self.unreserve(conn)?;
+                self.done(conn)?;
+            }
+            drop(pending);
+            return Ok(());
+        }
         let remote = {
             let mut table = self.table()?;
-            let token = conn.out.lock().map_err(poisoned)?.programs.remove(&exec);
+            let token = {
+                let mut out = conn.out.lock().map_err(poisoned)?;
+                let token = out.programs.remove(&exec);
+                if token.is_some() {
+                    self.program_gone(&mut out, Some(exec));
+                }
+                token
+            };
             let remote = match token.and_then(|t| table.watched.remove(&t)).map(|w| w.run) {
                 Some(Run::Local {
                     watch: Some(watch), ..
@@ -1279,7 +1552,7 @@ impl<O: Os> Shared<O> {
                     Ok(_) => Answer::Done,
                     Err(why) => Answer::Refused(why),
                 };
-                return self.answer(conn, header.version, header.id, &answer);
+                return self.answer(conn, header.id, &answer);
             }
         };
         let shared = Arc::clone(self);
@@ -1291,7 +1564,7 @@ impl<O: Os> Shared<O> {
             };
             let _ = shared
                 .done(&conn)
-                .and_then(|()| shared.answer(&conn, header.version, header.id, &answer));
+                .and_then(|()| shared.answer(&conn, header.id, &answer));
         }));
         Ok(())
     }
@@ -1299,19 +1572,18 @@ impl<O: Os> Shared<O> {
     /// A watched program's watch is ready: it has ended. Reaped, and its end sent to its connection,
     /// or counted in its box when the connection closed (the disconnect rule).
     fn ended(self: &Arc<Self>, token: u64) -> Result<(), Refusal> {
-        let mut w = {
+        let (mut w, open) = {
             let mut table = self.table()?;
-            let Some(w) = table.watched.remove(&token) else {
+            let Some(taken) = self.take_watched(&mut table, token)? else {
                 return Ok(());
             };
             self.resume_accepting(&mut table)?;
-            w
+            taken
         };
         let exit = match &mut w.run {
             Run::Local { proc, .. } => match proc.try_wait() {
                 Ok(Some(exit)) => Some(exit),
-                // Ready but not yet waitable can't happen on an OS whose watch reports the end
-                // (pidfd_open(2)); watched again rather than lost.
+                // Ready but not yet told: a run's program, its box being removed (decision 7).
                 Ok(None) => None,
                 // Reaped elsewhere in this process: how it ended is no longer known.
                 Err(_) => Some(Exit::Unknown),
@@ -1320,7 +1592,30 @@ impl<O: Os> Shared<O> {
             Run::Remote(_) => None,
         };
         let Some(exit) = exit else {
-            self.table()?.watched.insert(token, w);
+            if let Run::Local { watch, .. } = &mut w.run {
+                // Ended, but its end not yet told: a run's, whose box its node is removing, which tells the end once
+                // the box is gone. Off the event set, its end is waited for on a worker.
+                if let Some(watch) = watch.take() {
+                    self.os.unwatch_program(watch);
+                }
+                return self.enqueue(Job::Collect(Box::new(w)));
+            }
+            let mut table = self.table()?;
+            {
+                let mut out = w.conn.out.lock().map_err(poisoned)?;
+                if out.open {
+                    if out.places() == 0 {
+                        self.idle_programs.fetch_sub(1, Ordering::AcqRel);
+                    }
+                    if out.given.contains_key(&w.exec) {
+                        // Watched again: its place is its program's, no longer its given ends'.
+                        out.kept = out.kept.saturating_sub(1);
+                        self.kept.fetch_sub(1, Ordering::AcqRel);
+                    }
+                    out.programs.insert(w.exec, token);
+                }
+            }
+            table.watched.insert(token, w);
             return Ok(());
         };
         if let Run::Local { watch, .. } = &mut w.run
@@ -1328,7 +1623,65 @@ impl<O: Os> Shared<O> {
         {
             self.os.unwatch_program(watch);
         }
-        self.finish(w, exit)
+        self.finish(w, open, exit)
+    }
+
+    /// Takes watched program `token` from the table (its lock held) and from its connection's programs, the
+    /// connection's count going with the node's under the same lock, so the two never disagree; with whether its
+    /// connection is open.
+    fn take_watched(
+        &self,
+        table: &mut Table<O>,
+        token: u64,
+    ) -> Result<Option<(Watched<O>, bool)>, Refusal> {
+        let Some(w) = table.watched.remove(&token) else {
+            return Ok(None);
+        };
+        let open = {
+            let mut out = w.conn.out.lock().map_err(poisoned)?;
+            if out.programs.remove(&w.exec).is_some() {
+                self.program_gone(&mut out, Some(w.exec));
+            }
+            out.open
+        };
+        Ok(Some((w, open)))
+    }
+
+    /// One of `out`'s programs (`exec`'s) is no longer watched, or an exec under way let its place go (`None`), the
+    /// table's lock held: a program whose given ends its client hasn't said it took keeps its place for them
+    /// ([`Out::given`]), and a connection left with no place has its kept program kept again.
+    fn program_gone(&self, out: &mut Out, exec: Option<u64>) {
+        if exec.is_some_and(|exec| out.given.contains_key(&exec)) {
+            out.kept = out.kept.saturating_add(1);
+            self.kept.fetch_add(1, Ordering::AcqRel);
+        } else if out.open && out.places() == 0 {
+            self.idle_programs.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    /// Its client took exec `exec`'s given ends ([`Request::Taken`]): the node lets its own copies go, so the streams'
+    /// ends are the client's and its program's alone (its stdin ends with the client's last copy of its end, its stdout
+    /// has no reader once the client lets its own go), and the place they held past their program's watch is free.
+    /// The descriptors they held are free too: accepting resumes if it had paused for want of them.
+    fn taken(&self, conn: &Conn<O>, exec: u64) -> Result<(), Refusal> {
+        let mut table = self.table()?;
+        let ends = {
+            let mut out = conn.out.lock().map_err(poisoned)?;
+            let ends = out.given.remove(&exec);
+            if ends.is_some() && !out.programs.contains_key(&exec) {
+                out.kept = out.kept.saturating_sub(1);
+                self.kept.fetch_sub(1, Ordering::AcqRel);
+                if out.open && out.places() == 0 {
+                    self.idle_programs.fetch_add(1, Ordering::AcqRel);
+                }
+            }
+            ends
+        };
+        if ends.is_some() {
+            drop(ends);
+            self.resume_accepting(&mut table)?;
+        }
+        Ok(())
     }
 
     /// A remote program's end came, on whichever thread its host reads it on: sent or counted as any end
@@ -1339,29 +1692,25 @@ impl<O: Os> Shared<O> {
         token: u64,
         end: Result<Exit, Refusal>,
     ) -> Result<(), Refusal> {
-        let w = {
+        let (w, open) = {
             let mut table = self.table()?;
-            let Some(w) = table.watched.remove(&token) else {
+            let Some(taken) = self.take_watched(&mut table, token)? else {
                 table.early.insert(token, end);
                 return Ok(());
             };
             self.resume_accepting(&mut table)?;
-            w
+            taken
         };
         self.remote_ended.notify_all();
-        self.finish(w, end.unwrap_or(Exit::Unknown))
+        self.finish(w, open, end.unwrap_or(Exit::Unknown))
     }
 
-    /// A program's end, taken from the table: sent to its connection, or counted in its box when the
-    /// connection closed or the disconnect rule killed it.
-    fn finish(self: &Arc<Self>, w: Watched<O>, exit: Exit) -> Result<(), Refusal> {
-        let open = {
-            let mut out = w.conn.out.lock().map_err(poisoned)?;
-            out.programs.remove(&w.exec);
-            out.open
-        };
+    /// A program's end, taken from the table and its connection's programs ([`Shared::take_watched`]): sent to its
+    /// connection while it is `open`, or counted in its box when the connection closed or the disconnect rule
+    /// killed it.
+    fn finish(self: &Arc<Self>, w: Watched<O>, open: bool, exit: Exit) -> Result<(), Refusal> {
         if open && !w.killed {
-            self.answer(&w.conn, w.version, w.exec, &Answer::Exited(exit))
+            self.answer(&w.conn, w.exec, &Answer::Exited(exit))
         } else {
             self.enqueue(Job::Abandoned(w.box_id))
         }
@@ -1377,15 +1726,16 @@ impl<O: Os> Shared<O> {
         Ok(())
     }
 
-    /// Ends a program whose connection closed: KILL through the OS's watch, so it can't reach a process
-    /// given its pid since, or by its host for a remote one; its end, when it comes, is counted in its box.
-    /// A remote kill its host can't send leaves the program to end of itself, counted then all the same.
+    /// Ends a program whose connection closed: by its own runtime's kill (its held `Proc::kill`, which can't
+    /// reach a process given its pid since and tells its box's bookkeeping first, as macOS's watcher needs to
+    /// tell it from its cap's), or by its host for a remote one; its end, when it comes, is counted in its
+    /// box. A kill its runtime refuses, or its host can't send, leaves the program to end of itself, counted
+    /// then all the same.
     fn end(&self, w: &mut Watched<O>) {
-        match &w.run {
-            Run::Local {
-                watch: Some(watch), ..
-            } => self.os.kill(watch),
-            Run::Local { watch: None, .. } => {}
+        match &mut w.run {
+            Run::Local { proc, .. } => {
+                let _ = proc.kill();
+            }
             Run::Remote(program) => program.kill(Box::new(|_| {})),
         }
         w.killed = true;
@@ -1395,7 +1745,9 @@ impl<O: Os> Shared<O> {
     fn enqueue(self: &Arc<Self>, job: Job<O>) -> Result<(), Refusal> {
         let mut jobs = self.jobs.lock().map_err(poisoned)?;
         jobs.queue.push_back(job);
-        if jobs.idle == 0 && jobs.workers < self.workers {
+        // Each job queued has a worker of its own: an idle worker counts once, for the job it is woken for, so two
+        // jobs queued before it wakes start a second (the waits census's run 5: a call left behind another's).
+        if jobs.queue.len() > jobs.idle && jobs.workers < self.workers {
             let shared = Arc::clone(self);
             match std::thread::Builder::new()
                 .name("hex-socket-worker".to_owned())
@@ -1412,7 +1764,6 @@ impl<O: Os> Shared<O> {
                             self.done(&conn)?;
                             self.answer(
                                 &conn,
-                                header.version,
                                 header.id,
                                 &Answer::Refused(Refusal::os("starting a worker for a call", e)),
                             )
@@ -1426,6 +1777,17 @@ impl<O: Os> Shared<O> {
                             header,
                             infos,
                         }) => self.list(&conn, header, &infos),
+                        // No worker to wait in: its end isn't known, and is sent so, or counted in its box as
+                        // `finish` counts one.
+                        Some(Job::Collect(w)) => {
+                            let open = w.conn.out.lock().is_ok_and(|out| out.open);
+                            if open && !w.killed {
+                                self.answer(&w.conn, w.exec, &Answer::Exited(Exit::Unknown))
+                            } else {
+                                let _ = self.host.abandoned(&w.box_id);
+                                Ok(())
+                            }
+                        }
                         None => Ok(()),
                     };
                 }
@@ -1481,6 +1843,21 @@ impl<O: Os> Shared<O> {
                 } => {
                     let _ = self.list(&conn, header, &infos);
                 }
+                Job::Collect(mut w) => {
+                    let exit = match &mut w.run {
+                        Run::Local { proc, .. } => {
+                            // Told once its box is gone: the node's learned wait for a box to empty bounds it, the
+                            // removal waiting on that emptying.
+                            match proc.wait_for(crate::emptying::empty_patience(Instant::now())) {
+                                Ok(Some(exit)) => exit,
+                                Ok(None) | Err(_) => Exit::Unknown,
+                            }
+                        }
+                        Run::Remote(_) => Exit::Unknown,
+                    };
+                    let open = w.conn.out.lock().is_ok_and(|out| out.open);
+                    let _ = self.finish(*w, open, exit);
+                }
             }
         }
     }
@@ -1498,24 +1875,31 @@ impl<O: Os> Shared<O> {
     ) -> Result<(), Refusal> {
         let reply = |answer: Answer| -> Result<(), Refusal> {
             self.done(conn)?;
-            self.answer(conn, header.version, header.id, &answer)
+            self.answer(conn, header.id, &answer)
         };
-        let (stdio, program) = match &call {
+        let starts = match &call {
             Call::Exec { id, streams, .. } | Call::ExecStreams { id, streams, .. } => {
+                Some((id, *streams))
+            }
+            Call::Run { spec, streams, .. } => Some((&spec.id, *streams)),
+            _ => None,
+        };
+        let (stdio, program) = match starts {
+            Some((id, streams)) => {
                 if !self.reserve(conn)? {
                     return reply(Answer::Refused(Refusal::Exhausted {
                         what: PROGRAMS,
                         bound: self.limits.programs,
                     }));
                 }
-                let mut stdio = match self.os.stdio(*streams, passed) {
+                let mut stdio = match self.os.stdio(streams, passed) {
                     Ok(stdio) => stdio,
                     Err(r) => {
                         self.unreserve(conn)?;
                         return reply(Answer::Refused(r));
                     }
                 };
-                if let Call::ExecStreams { ask, .. } = &call {
+                if let Call::ExecStreams { ask, .. } | Call::Run { ask, .. } = &call {
                     stdio.ask = hex_api::Ask {
                         stdin: ask.stdin,
                         stdout: ask.stdout,
@@ -1524,7 +1908,7 @@ impl<O: Os> Shared<O> {
                 }
                 (stdio, Some((self.table()?.token()?, id.clone())))
             }
-            _ => (Stdio::null(), None),
+            None => (Stdio::null(), None),
         };
         let ended: Ended = match &program {
             Some((token, _)) => {
@@ -1535,16 +1919,82 @@ impl<O: Os> Shared<O> {
             }
             None => Box::new(|_| {}),
         };
+        let completed = Arc::new(AtomicBool::new(false));
         let forwarded: Reply = {
-            let (shared, conn, program) = (Arc::clone(self), Arc::clone(conn), program.clone());
+            let (shared, conn, program, completed) = (
+                Arc::clone(self),
+                Arc::clone(conn),
+                program.clone(),
+                Arc::clone(&completed),
+            );
             Box::new(move |got| {
-                let _ = shared.forwarded(&conn, header, program, got);
+                let _ = shared.complete_forwarding(&conn, header, program, &completed, got);
             })
         };
-        let ends = wire::gives_ends(header.version);
-        let call = match self.host.forward(call, stdio, ends, forwarded, ended) {
+        let call = match self.host.forward(call, stdio, forwarded, ended) {
             Forward::Taken => return Ok(()),
+            Forward::Offered(offering) => {
+                if program.is_none() {
+                    return reply(Answer::Refused(Refusal::Broken(
+                        "a non-exec offered guest streams".to_owned(),
+                    )));
+                }
+                let encoded = wire::answer(
+                    header.id,
+                    &Answer::Offered(offering.streams),
+                    self.limits.message_bytes,
+                );
+                let mut out = conn.out.lock().map_err(poisoned)?;
+                if completed.load(Ordering::Acquire) {
+                    return Ok(());
+                }
+                if !out.open || encoded.is_err() {
+                    completed.store(true, Ordering::Release);
+                    drop(out);
+                    self.unreserve(conn)?;
+                    self.done(conn)?;
+                    return match encoded {
+                        Err(why) => self.answer(conn, header.id, &Answer::Refused(why.into())),
+                        Ok(_) => Ok(()),
+                    };
+                }
+                if out.offered.contains_key(&header.id) {
+                    completed.store(true, Ordering::Release);
+                    drop(out);
+                    self.unreserve(conn)?;
+                    self.done(conn)?;
+                    return self.answer(
+                        conn,
+                        header.id,
+                        &Answer::Refused(Refusal::Invalid {
+                            what: "stream offer",
+                            why: "its exec id already has an active preparation".to_owned(),
+                        }),
+                    );
+                }
+                out.offered.insert(
+                    header.id,
+                    PendingOffer {
+                        ready: offering.ready,
+                        completed,
+                    },
+                );
+                drop(out);
+                let bytes = encoded.map_err(Refusal::from)?;
+                if let Err(why) = self.send(conn, bytes, Vec::new(), None, false) {
+                    self.close(conn)?;
+                    return Err(why);
+                }
+                return Ok(());
+            }
             Forward::Refused(why) => {
+                let owns = {
+                    let _out = conn.out.lock().map_err(poisoned)?;
+                    !completed.swap(true, Ordering::AcqRel)
+                };
+                if !owns {
+                    return Ok(());
+                }
                 if program.is_some() {
                     self.unreserve(conn)?;
                 }
@@ -1552,29 +2002,32 @@ impl<O: Os> Shared<O> {
             }
             Forward::Back(back) => match (*back, program) {
                 ((Call::Exec { id, program, .. }, stdio), Some((token, _))) => {
-                    return self.exec(conn, header, token, id, program, stdio);
+                    return self.exec(conn, header, token, Launch::Exec(id, program), stdio);
                 }
                 ((Call::ExecStreams { id, program, .. }, stdio), Some((token, _))) => {
-                    return self.exec(conn, header, token, id, program, stdio);
+                    return self.exec(conn, header, token, Launch::Exec(id, program), stdio);
+                }
+                ((Call::Run { spec, program, .. }, stdio), Some((token, _))) => {
+                    return self.exec(conn, header, token, Launch::Run(spec, program), stdio);
                 }
                 ((call, _), _) => call,
             },
         };
         let host = &self.host;
         let answer = match call {
-            Call::Exec { .. } | Call::ExecStreams { .. } => Err(Refusal::Broken(
-                "an exec came back from its host without its place".to_owned(),
-            )),
+            Call::Exec { .. } | Call::ExecStreams { .. } | Call::Run { .. } => Err(
+                Refusal::Broken("an exec came back from its host without its place".to_owned()),
+            ),
             Call::Kill { exec } => return self.kill(conn, header, exec),
             Call::List => {
                 let listed = host.list();
                 self.done(conn)?;
                 return match listed {
                     Ok(infos) => self.list(conn, header, &infos),
-                    Err(r) => self.answer(conn, header.version, header.id, &Answer::Refused(r)),
+                    Err(r) => self.answer(conn, header.id, &Answer::Refused(r)),
                 };
             }
-            Call::Create(spec) => host.create(spec).map(Answer::Info),
+            Call::Create(spec) => host.create(*spec).map(Answer::Info),
             Call::Start(id) => host.start(&id).map(|()| Answer::Done),
             Call::Signal { id, signal } => host.signal(&id, signal).map(|()| Answer::Done),
             Call::Inspect(id) => host.inspect(&id).map(Answer::Info),
@@ -1583,6 +2036,40 @@ impl<O: Os> Shared<O> {
             Call::Netns => host.netns().map(Answer::Netns),
         };
         reply(answer.unwrap_or_else(Answer::Refused))
+    }
+
+    /// Claim an exec's original admission exactly once, atomically with offer registration/removal.
+    /// An error can arrive before the host returns its offer, while Ready runs, or after cancellation.
+    fn complete_forwarding(
+        self: &Arc<Self>,
+        conn: &Arc<Conn<O>>,
+        header: Header,
+        program: Option<(u64, BoxId)>,
+        completed: &AtomicBool,
+        got: Result<Forwarded, Refusal>,
+    ) -> Result<(), Refusal> {
+        let pending = {
+            let mut out = conn.out.lock().map_err(poisoned)?;
+            if completed.swap(true, Ordering::AcqRel) {
+                drop(out);
+                if let Ok(Forwarded::Started { program, .. }) = got {
+                    // A concurrently cancelled exec still obeys the disconnect rule.
+                    program.kill(Box::new(|_| {}));
+                }
+                return Ok(());
+            }
+            let mine = out
+                .offered
+                .get(&header.id)
+                .is_some_and(|pending| std::ptr::eq(&*pending.completed, completed));
+            if mine {
+                out.offered.remove(&header.id)
+            } else {
+                None
+            }
+        };
+        drop(pending);
+        self.forwarded(conn, header, program, got)
     }
 
     /// A forwarded call's answer, on whichever thread its host gives it: sent to its client, or, for a
@@ -1624,8 +2111,11 @@ impl<O: Os> Shared<O> {
                     self.unreserve(conn)?;
                     self.table()?.early.remove(&token);
                 }
-                match got {
-                    Ok(Forwarded::Answer(Answer::Boxes { infos, .. })) => {
+                match got.map(|f| match f {
+                    Forwarded::Answer(answer) => Ok(*answer),
+                    started @ Forwarded::Started { .. } => Err(started),
+                }) {
+                    Ok(Ok(Answer::Boxes { infos, .. })) => {
                         self.done(conn)?;
                         return self.enqueue(Job::List {
                             conn: Arc::clone(conn),
@@ -1633,8 +2123,8 @@ impl<O: Os> Shared<O> {
                             infos,
                         });
                     }
-                    Ok(Forwarded::Answer(answer)) => answer,
-                    Ok(Forwarded::Started { .. }) => Answer::Refused(Refusal::Broken(
+                    Ok(Ok(answer)) => answer,
+                    Ok(Err(_started)) => Answer::Refused(Refusal::Broken(
                         "the node's host started a program twice for one exec".to_owned(),
                     )),
                     Err(why) => Answer::Refused(why),
@@ -1642,30 +2132,62 @@ impl<O: Os> Shared<O> {
             }
         };
         self.done(conn)?;
-        self.answer(conn, header.version, header.id, &answer)
+        self.answer(conn, header.id, &answer)
     }
 
     fn done(&self, conn: &Conn<O>) -> Result<(), Refusal> {
         let mut out = conn.out.lock().map_err(poisoned)?;
-        out.in_flight = out.in_flight.saturating_sub(1);
+        self.call_done(&mut out);
         Ok(())
     }
 
-    /// Takes a place among the programs `conn` watches, before a program starts, so none starts that
-    /// can't be watched; false when none is left.
-    fn reserve(&self, conn: &Conn<O>) -> Result<bool, Refusal> {
-        let mut out = conn.out.lock().map_err(poisoned)?;
-        let held = out.programs.len().checked_add(out.reserved);
-        if held.is_none_or(|h| h >= self.limits.programs) {
-            return Ok(false);
+    /// One of `out`'s calls is done. A connection left with none has its kept call kept again, counted before the
+    /// call leaves the node's count, so the two together never read past the budget.
+    fn call_done(&self, out: &mut Out) {
+        out.in_flight = out.in_flight.saturating_sub(1);
+        if out.in_flight == 0 && out.open {
+            self.idle_calls.fetch_add(1, Ordering::AcqRel);
         }
+        let _ = self
+            .in_flight
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                Some(n.saturating_sub(1))
+            });
+    }
+
+    /// Takes a place among the programs the node's connections watch, before a program starts, so none starts
+    /// that can't be watched: under the table's lock, which every watch is added under; false when none is left.
+    fn reserve(&self, conn: &Conn<O>) -> Result<bool, Refusal> {
+        let table = self.table()?;
+        let mut out = conn.out.lock().map_err(poisoned)?;
+        let mine = out.places();
+        if mine < KEPT {
+            // Its kept program: always there, since what is kept and watched never pass the budget.
+            if out.open {
+                self.idle_programs.fetch_sub(1, Ordering::AcqRel);
+            }
+        } else {
+            let held = table
+                .watched
+                .len()
+                .saturating_add(self.reserving.load(Ordering::Acquire))
+                .saturating_add(self.idle_programs.load(Ordering::Acquire))
+                .saturating_add(self.kept.load(Ordering::Acquire));
+            if held >= self.limits.programs {
+                return Ok(false);
+            }
+        }
+        self.reserving.fetch_add(1, Ordering::AcqRel);
         out.reserved = out.reserved.saturating_add(1);
         Ok(true)
     }
 
     fn unreserve(&self, conn: &Conn<O>) -> Result<(), Refusal> {
+        let _table = self.table()?;
+        self.reserving.fetch_sub(1, Ordering::AcqRel);
         let mut out = conn.out.lock().map_err(poisoned)?;
         out.reserved = out.reserved.saturating_sub(1);
+        self.program_gone(&mut out, None);
         Ok(())
     }
 
@@ -1676,12 +2198,11 @@ impl<O: Os> Shared<O> {
         header: Header,
         infos: &[hex_api::BoxInfo],
     ) -> Result<(), Refusal> {
-        let parts = match wire::boxes(header.version, header.id, infos, self.limits.message_bytes) {
+        let parts = match wire::boxes(header.id, infos, self.limits.message_bytes) {
             Ok(parts) => parts,
             Err(fault) => {
                 return self.answer(
                     conn,
-                    header.version,
                     header.id,
                     &Answer::Refused(Refusal::Broken(format!(
                         "the node agent's list couldn't be written: {fault}"
@@ -1689,30 +2210,33 @@ impl<O: Os> Shared<O> {
                 );
             }
         };
-        let deadline = Instant::now().checked_add(READ_PATIENCE);
         for (n, part) in parts.into_iter().enumerate() {
-            self.send(conn, part, Vec::new(), if n == 0 { None } else { deadline })?;
+            self.send(conn, part, Vec::new(), None, n > 0)?;
         }
         Ok(())
     }
 
-    /// An exec the host runs here: the program started on its stdio, then watched by the OS, announced,
+    /// An exec, or a run, the host runs here: the program started on its stdio, then watched by the OS, announced,
     /// and its end sent after.
     fn exec(
         self: &Arc<Self>,
         conn: &Arc<Conn<O>>,
         header: Header,
         token: u64,
-        id: BoxId,
-        program: Program,
+        launch: Launch,
         stdio: Stdio,
     ) -> Result<(), Refusal> {
         let reply = |answer: Answer| -> Result<(), Refusal> {
             self.done(conn)?;
-            self.answer(conn, header.version, header.id, &answer)
+            self.answer(conn, header.id, &answer)
         };
         let asked = stdio.ask != hex_api::Ask::default();
-        let mut proc = match self.host.exec(&id, program, stdio) {
+        let id = launch.box_id();
+        let started = match launch {
+            Launch::Exec(b, program) => self.host.exec(&b, program, stdio),
+            Launch::Run(spec, program) => self.host.run(*spec, program, stdio),
+        };
+        let mut proc = match started {
             Ok(proc) => proc,
             Err(r) => {
                 self.unreserve(conn)?;
@@ -1737,12 +2261,20 @@ impl<O: Os> Shared<O> {
         let table = self.table()?;
         let watch = match self.os.watch_program(pid, token) {
             Ok(watch) => watch,
-            Err(Unwatched { why, killed }) => {
+            Err(Unwatched::Gone) => {
                 drop(table);
-                if killed {
-                    let mut proc = proc;
-                    let _ = proc.wait_for(STOP_PATIENCE);
-                }
+                return self.gone(conn, header, pid, given, proc);
+            }
+            Err(Unwatched::Killed(why)) => {
+                drop(table);
+                // A killed process's end: the node's learned wait for a killed box to empty, its kind of wait.
+                let killed = Instant::now();
+                let _ = proc.wait_for(crate::emptying::empty_patience(killed));
+                self.unreserve(conn)?;
+                return reply(Answer::Refused(why));
+            }
+            Err(Unwatched::Runs(why)) => {
+                drop(table);
                 self.unreserve(conn)?;
                 return reply(Answer::Refused(why));
             }
@@ -1760,6 +2292,31 @@ impl<O: Os> Shared<O> {
         self.started(table, conn, header, start, run)
     }
 
+    /// A program that had ended and been reaped before it could be watched: a run's, whose node reaps it to remove
+    /// its box (decision 7). With nothing left to watch, its end, its `Proc`'s to tell once its box is gone, is waited
+    /// for here on the worker, bounded by the node's learned wait for a box to empty, which the removal waits on; then
+    /// its start and its end are sent, one after the other.
+    fn gone(
+        &self,
+        conn: &Conn<O>,
+        header: Header,
+        pid: u32,
+        given: Option<hex_api::Given>,
+        mut proc: Box<dyn Proc>,
+    ) -> Result<(), Refusal> {
+        let exit = match proc.wait_for(crate::emptying::empty_patience(Instant::now())) {
+            Ok(Some(exit)) => exit,
+            Ok(None) | Err(_) => Exit::Unknown,
+        };
+        self.unreserve(conn)?;
+        self.done(conn)?;
+        match given {
+            Some(given) => self.answer_given(conn, header, pid, given)?,
+            None => self.answer(conn, header.id, &Answer::Started { pid })?,
+        }
+        self.answer(conn, header.id, &Answer::Exited(exit))
+    }
+
     /// A program started: watched from now under `table`, held since its watch began, its place among
     /// `conn`'s programs taken from its reservation, and announced; one whose connection closed while it
     /// started is ended by the disconnect rule. A remote end that came before is taken now.
@@ -1772,9 +2329,10 @@ impl<O: Os> Shared<O> {
         run: Run<O>,
     ) -> Result<(), Refusal> {
         let open = {
+            self.reserving.fetch_sub(1, Ordering::AcqRel);
             let mut out = conn.out.lock().map_err(poisoned)?;
             out.reserved = out.reserved.saturating_sub(1);
-            out.in_flight = out.in_flight.saturating_sub(1);
+            self.call_done(&mut out);
             if out.open {
                 out.programs.insert(header.id, start.token);
             }
@@ -1783,7 +2341,6 @@ impl<O: Os> Shared<O> {
         let mut watched = Watched {
             conn: Arc::clone(conn),
             exec: header.id,
-            version: header.version,
             box_id: start.box_id,
             run,
             killed: false,
@@ -1797,12 +2354,7 @@ impl<O: Os> Shared<O> {
         if open {
             match start.given {
                 Some(given) => self.answer_given(conn, header, start.pid, given)?,
-                None => self.answer(
-                    conn,
-                    header.version,
-                    header.id,
-                    &Answer::Started { pid: start.pid },
-                )?,
+                None => self.answer(conn, header.id, &Answer::Started { pid: start.pid })?,
             }
         }
         drop(table);
@@ -1821,15 +2373,15 @@ impl<O: Os> Shared<O> {
             Ok(table) => table.conns.values().cloned().collect(),
             Err(_) => Vec::new(),
         };
+        // The programs the closes end are waited for as a killed box's processes are: the node's learned wait
+        // for an emptying, from their kill.
+        let killed = Instant::now();
         for conn in &conns {
             let _ = self.close(conn);
         }
-        let deadline = Instant::now().checked_add(STOP_PATIENCE);
         let mut events = Vec::with_capacity(EVENTS);
         loop {
-            let left = deadline.map_or(Duration::ZERO, |d| {
-                d.saturating_duration_since(Instant::now())
-            });
+            let left = crate::emptying::empty_patience(killed);
             let Ok(table) = self.table() else { break };
             if table.watched.is_empty() || left.is_zero() {
                 break;
@@ -1884,3 +2436,7 @@ mod linux_tests;
 mod macos_tests;
 #[cfg(test)]
 mod sim_tests;
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod unix_tests;
+#[cfg(all(test, windows))]
+mod windows_tests;

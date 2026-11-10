@@ -41,7 +41,8 @@ def pct(sorted_values, q):
 def round_once(k, n):
     cg = f"/sys/fs/cgroup/netnspool-{os.getpid()}-{k}"
     os.mkdir(cg)
-    probe = subprocess.Popen(["/run/netns_pool"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    kind = [os.environ["POOL_KIND"]] if os.environ.get("POOL_KIND") else []
+    probe = subprocess.Popen(["/run/netns_pool"] + kind, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     try:
         with open(os.path.join(cg, "cgroup.procs"), "w") as f:
             f.write(str(probe.pid))

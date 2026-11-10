@@ -612,6 +612,14 @@ mod tests {
             ran.push(id.clone());
             self.sim.exec(id, p, s)
         }
+        fn run(
+            &self,
+            spec: crate::BoxSpec,
+            p: Program,
+            s: Stdio,
+        ) -> Result<Box<dyn Proc>, Refusal> {
+            self.sim.run(spec, p, s)
+        }
         fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
             match (self.lie, self.sim.signal(id, signal)) {
                 (Lie::SignalsNothing, Err(Refusal::NotRunning(..))) => Ok(()),
@@ -728,10 +736,8 @@ mod tests {
         }
         assert_eq!(seed_from(None), SLOWEST_RECORDED_END);
         assert_eq!(seed(None), SLOWEST_RECORDED_END);
-        assert_eq!(
-            conformance::PATIENCE,
-            seed(HostClass::THIS).saturating_mul(2)
-        );
+        let twice_this_hosts_seed = seed(HostClass::THIS).saturating_mul(2);
+        assert_eq!(conformance::PATIENCE, twice_this_hosts_seed);
     }
 
     /// The rule for a learned wait: before any sample its bound is twice the slowest answer on record;
@@ -844,6 +850,14 @@ mod tests {
                 after: Duration::from_millis(770),
             }))
         }
+        fn run(
+            &self,
+            spec: crate::BoxSpec,
+            p: Program,
+            s: Stdio,
+        ) -> Result<Box<dyn Proc>, Refusal> {
+            self.0.run(spec, p, s)
+        }
         fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
             self.0.signal(id, signal)
         }
@@ -921,6 +935,14 @@ mod tests {
             }
             fn exec(&self, id: &BoxId, p: Program, s: Stdio) -> Result<Box<dyn Proc>, Refusal> {
                 self.sim.exec(id, p, s)
+            }
+            fn run(
+                &self,
+                spec: crate::BoxSpec,
+                p: Program,
+                s: Stdio,
+            ) -> Result<Box<dyn Proc>, Refusal> {
+                self.sim.run(spec, p, s)
             }
             fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
                 self.sim.signal(id, signal)

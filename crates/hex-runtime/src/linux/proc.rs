@@ -50,6 +50,11 @@ impl PidfdProc {
         self.pidfd.as_fd()
     }
 
+    /// Its pid and pidfd, for a watcher of its own (the node agent's of a run, decision 7).
+    pub fn into_parts(self) -> (u32, OwnedFd) {
+        (self.pid, self.pidfd)
+    }
+
     fn reap(&mut self) -> Result<Option<Exit>, Refusal> {
         if self.exit.is_some() {
             return Ok(self.exit);

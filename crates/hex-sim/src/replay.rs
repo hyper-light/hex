@@ -17,8 +17,10 @@
 //! or none; a leg without them is owner 0's, band 0, alone and in no group, and a trace that names no
 //! owner has one, of weight 1, so a trace written before G4 reads as it did. A class (`oci`,
 //! `firecracker` or `shards`) follows a leg's tenancy, `oci` when absent; a node's classes are
-//! joined by `+` (`oci+firecracker`), every class when absent. A class's overhead, before the first
-//! leg, is the memory its runtime costs a node; each leg of that class needs it beside its own, none
+//! joined by `+` (`oci+firecracker`), every class when absent. Nodes use the original trace's Linux
+//! x86_64 platform; a declared microVM class implies KVM, which that platform needs to run it.
+//! A class's overhead, before the first leg, is the memory its runtime costs a node; each leg of
+//! that class needs it beside its own, none
 //! when absent. It is one row for the class, or one row per leg memory (`for_mem_bytes`) where it was
 //! measured by guest size, never both; then a leg of that class whose memory has no row is refused.
 //! The parser is a pure function
@@ -28,7 +30,7 @@
 use crate::census;
 use crate::model::{
     Class, Classes, Cluster, GangId, Group, GroupId, Kind, NodeId, NodeSpec, Overheads, Owner,
-    OwnerId, Resources, Tenancy, WorkloadId, WorkloadSpec,
+    OwnerId, Resources, Tenancy, Virt, WorkloadId, WorkloadSpec,
 };
 
 /// What a trace may hold. Past any bound the parse is refused, never truncated.
@@ -132,9 +134,16 @@ pub fn parse(text: &str, limits: &Limits) -> Result<Cluster, TraceError> {
                         cpu_milli,
                         mem_bytes,
                         gpus,
+                        disk_bytes: 0,
                     },
                     background_milli,
                     classes,
+                    platform: Default::default(),
+                    virt: Virt {
+                        kvm: classes.has(Class::Firecracker) || classes.has(Class::Shards),
+                        ..Virt::default()
+                    },
+                    devices: crate::model::unnamed_gpus(gpus),
                 });
             }
             Some("owner") => {
@@ -245,12 +254,14 @@ pub fn parse(text: &str, limits: &Limits) -> Result<Cluster, TraceError> {
                         cpu_milli,
                         mem_bytes,
                         gpus,
+                        disk_bytes: 0,
                     },
                     kind,
                     arrives,
                     runs_for: Some(runs_for),
                     tenancy,
                     class,
+                    ask: Default::default(),
                 });
             }
             Some(_) | None => {
@@ -270,6 +281,7 @@ pub fn parse(text: &str, limits: &Limits) -> Result<Cluster, TraceError> {
     Ok(Cluster {
         nodes,
         workloads,
+        models: Vec::new(),
         owners,
         groups,
         overheads,
@@ -387,6 +399,46 @@ mod tests {
             (6, 1)
         );
         assert_eq!(c.overheads.of(Class::Shards, 1), Some(5));
+    }
+
+    /// AC-T7.5.2: do legacy Linux trace nodes with no class field, OCI alone, Firecracker alone and
+    /// Shards alone; expect KVM exactly when a declared class needs it, with capacity and GPUs intact.
+    #[test]
+    fn ac_t7_5_2_linux_trace_nodes_derive_kvm_from_their_classes() {
+        for (classes, expected, kvm) in [
+            ("", Classes::ALL, true),
+            (",oci", Classes::NONE.with(Class::Oci), false),
+            (",firecracker", Classes::NONE.with(Class::Firecracker), true),
+            (",shards", Classes::NONE.with(Class::Shards), true),
+        ] {
+            let c = parse(
+                &format!("node,4000,1024,2,500{classes}\n"),
+                &Limits::default(),
+            )
+            .unwrap();
+            let node = &c.nodes[0];
+            assert_eq!(
+                node.virt,
+                Virt {
+                    kvm,
+                    ..Virt::default()
+                },
+                "{classes}"
+            );
+            assert_eq!(node.platform, crate::model::Platform::default());
+            assert_eq!(
+                node.capacity,
+                Resources {
+                    cpu_milli: 4000,
+                    mem_bytes: 1024,
+                    gpus: 2,
+                    disk_bytes: 0
+                }
+            );
+            assert_eq!(node.background_milli, 500);
+            assert_eq!(node.devices, crate::model::unnamed_gpus(2));
+            assert_eq!(node.classes, expected);
+        }
     }
 
     /// Do a class's overhead given by guest size (Shards' measured one): expect each leg of the class

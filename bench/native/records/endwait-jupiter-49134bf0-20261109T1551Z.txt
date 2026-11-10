@@ -1,0 +1,36 @@
+stdio_probe endwait 300 (native plan step 8, the lead's measurement on "the Windows node, on one completion
+port"): how soon a completion port hears a watched object was signalled, two ways:
+  pool:   RegisterWaitForSingleObject, its thread-pool callback posting to the port (a pool thread's hop)
+  packet: a wait completion packet (ntdll NtCreateWaitCompletionPacket + NtAssociateWaitCompletionPacket)
+          associated with the object and the port; the kernel queues it to the port itself (no hop)
+Each round, each method in turn (order alternating by round), two kinds: process = a program of the probe's
+ended by TerminateProcess at t0 (its teardown is in the time); event = an event set at t0 (the
+signal-to-notice path alone, the path a process handle also takes once its process has ended). Time: t0 to
+GetQueuedCompletionStatusEx's return. N = 300 per method per kind, interleaved.
+
+OF RECORD, on a clean jupiter (the lead called it clean 2026-11-09; up 17 h since the 02:51Z reboot, kernel
+1.0%, 502 System threads). This replaces the 2026-11-08T02:26Z run, which was void (NTFS stall).
+machine:  jupiter (AMD Ryzen AI MAX+ 395, 32 logical CPUs, Windows NT 10.0.26200)
+commit:   bench/native/windows/stdio_probe at 49134bf0 (cp/t7-native-windows), --release
+when:     2026-11-09 15:51-15:52Z, a kiln background run
+load:     the machine's CPU over the last second at each round: min 0.0, median 6.7, max 9.1 % (privileged
+          0.8% before and after; 540 System threads; s4's criterion 2 as co-tenant). Stall thresholds
+          (privileged 30%, the FreePage balloon) never neared.
+raw:      jupiter C:\Users\corph\.cache\hex-t7-windows\logs\endwait-20261109T155159Z.csv (1,200 rows)
+
+kind     method  n    p50       p99        max        mean   (us)
+event    pool    300     19.9      44.4       58.3      21.6
+event    packet  300     10.5      47.7       61.4      11.9
+process  pool    300    701.7   1,140.7    1,203.6     747.5
+process  packet  300    719.2   1,140.2    2,235.1     762.6
+
+paired by round (packet - pool, same kind):
+  event:   packet faster in 281 of 300 rounds; median difference -9.3 us
+  process: packet faster in 141 of 300 rounds; median difference +10.0 us
+
+Read: from the signal on, the direct packet is faster: event p50 1.9x (10.5 vs 19.9 us), faster in 94% of
+paired rounds. That is the thread-pool hop, ~9-10 us, gone. Ended by TerminateProcess, a program's time to
+notice is its teardown (~700 us on a clean host), and the hop is lost in it: p50 within 2.5%, the paired
+rounds a coin flip. The packet also needs no thread-pool wait thread per 63 watches. By the lead's bar (the
+direct packet faster is the design): the packet is the design, its ntdll calls' CLAUDE.md §12 line for Ada.
+This clean retake confirms the voided 2026-11-08 run's ranking.

@@ -17,9 +17,10 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   box; pidfd waits; the io bounds target the right disks. Real-cgroup conformance + crash recovery
   pass (`hex-cli/tests/process_box.rs`).
 - **The `oci` class** (`hex-runtime`, Linux): Hex's own OCI runtime (`hex oci …`), passing **every
-  opencontainers/runtime-tools test crun passes on fedora but two it refuses by decision** (26/58
-  against crun's 28, 2026-10-27, 92b3b91; AC-T7.1.4): a mount label and an AppArmor profile the
-  suite's container can't apply, which crun drops (below), recorded in `bench/oci-validation/`. Each container has its own cgroup, with `linux.resources` and
+  opencontainers/runtime-tools test crun passes, on each host** (AC-T7.1.4; goal 17's bar, 2026-11-06,
+  cp/t7-g6-lsm, built, not merged): 28 of crun's 28 on SELinux-enforcing fedora, 30 of crun 1.27's 30 in an Ubuntu
+  24.04 AppArmor guest. On each host one of the two LSM tests passes with its label applied, and the other
+  passes with the label skipped and warned of, as crun runs it; `HEX_OCI_LSM=strict` refuses it instead (below), recorded in `bench/oci-validation/`. Each container has its own cgroup, with `linux.resources` and
   its device list in force, and is born in it. `hex oci exec` runs a program in the foreground inside a
   created or running container: born in its cgroup, in its namespaces, as its process, with the
   program's status as exec's and the caller's signals passed on, also where cgroup2 is mounted
@@ -31,7 +32,7 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   recovery.
 - **The node agent's local socket** (goal 3, plan step 4; decision 3 of `docs/design/runtime-architecture.md`):
   `hex node --socket <path> --state <dir>` serves the `Runtime` seam on a Unix `SOCK_SEQPACKET` socket, in a
-  versioned wire format that changes append-only (`hex-core::wire`, a pure core with version 1's bytes recorded),
+  wire whose identity is a digest of its definitions, a peer of another wire refused at the hello (`hex-core::wire`, a pure core),
   exec's stdio crossing as `SCM_RIGHTS` descriptors and a program's end coming back as a message. `hex-client` is a
   `Runtime` over it, and the conformance suite (HEX-RT-1 to 13) passes against it over a live `hex node`, on `oci`
   and `process` boxes. Its bounds (connections, message size, requests in flight, programs watched) are refused
@@ -91,7 +92,7 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   (persistent container + `hex oci exec` per step, like the docker executor shells to `docker`).
   `hex oci exec` is built (2026-10-24); next come the re-vendor and the dispatch wiring (mapped in
   NOTES.md).
-- **Seccomp is applied; apparmor/SELinux/mountLabel are refused, not dropped** (CLAUDE.md §3; was: the
+- **Seccomp, the mount label and the AppArmor profile are applied; selinuxLabel is refused, not dropped** (CLAUDE.md §3; was: the
   `oci` class ignored all four, found 2026-10-24). `spec.rs` now reads all four. The class compiles a
   spec's `linux.seccomp` to a BPF program (vendored seccompiler, `oci/seccomp.rs`) and loads it in the
   container init before `execve`: before the user and capabilities change when the spec leaves
@@ -101,14 +102,16 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   `AF_NETLINK`+`NETLINK_AUDIT` with EINVAL while allowing every other `socket` — and a behavioral test
   proves a denied syscall is refused inside a rootless container while the rest run
   (`hex-cli/tests/oci_seccomp.rs`, through the seam: probe exits 42 with the profile, 10 without). An
-  unsupported profile is a typed refusal. `process.apparmorProfile`, `process.selinuxLabel` and
-  `linux.mountLabel` stay refused by name in `Spec::check` (their apply path is LSM-host-dependent,
-  unvalidatable on the bench hosts) — a typed refusal until each is implemented, never a silent drop.
-  That costs two runtime-tools tests crun passes on fedora, `linux_mount_label` and
-  `linux_process_apparmor_profile`: in the suite's container neither SELinux nor AppArmor is visible,
-  and crun runs the container without the label or profile. Ada's call (2026-10-27): keep refusing,
-  and count those two as deliberate differences. The competitive bench is unaffected: its bundles name
-  none of them.
+  unsupported profile is a typed refusal. `linux.mountLabel` goes on every filesystem the container's mounts
+  make, as the `context` of its fsconfig (mqueue by its `security.selinux` xattr), and
+  `process.apparmorProfile` is written to the AppArmor exec attribute before `execve`, on every path (goal 6,
+  `oci/lsm.rs`). Where the kernel runs the module, a label it can't apply is refused by name. Where it doesn't,
+  the create skips the label and warns, naming it, as crun runs such a container, and `HEX_OCI_LSM=strict`, read
+  by the command line and the node, refuses it by name instead. Hex's own test reads both labels back from
+  inside a container (`hex-cli/tests/oci_lsm.rs`), on fedora and in the AppArmor guest
+  (`bench/oci-validation/goal6-lsm.md`). `process.selinuxLabel` stays refused by name. Skipping by default is
+  the lead's bar for goal 17 (2026-11-06); Ada's 2026-10-27 call had counted the two tests as deliberate
+  differences.
 - **Rootless device policy, enforced by construction** (`docs/design/runtime.md`, "Rootless devices"):
   a rootless runtime can't load the cgroup device program (CAP_BPF, which it lacks), so a deny-by-default
   allow-list is enforced by construction instead — only its devices get nodes, `mknod` is refused across
@@ -126,10 +129,82 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   so a box that reached it would find a read-only host tree. Reads of that tree stayed open to such a box
   (the host cgroup submount is locked and can't be removed, only made read-only), so on Ada's call
   (2026-10-31) the spec's check now refuses the combination by name: a container in a user namespace
-  holding `CAP_SYS_ADMIN` without a network namespace of its own (`Spec::check`). The lab test
+  holding `CAP_SYS_ADMIN` without a network namespace of its own (`Spec::check`), named in a capability
+  set or kept from its creator where the spec names no capabilities (found 2026-11-03). The lab test
   (`a_rootless_host_network_box_cannot_change_another_boxs_cgroup`) expects that refusal, and a plain
   host-network box's carried host cgroup filesystem read-only. Built on cp/t7-seed, not merged: it
   reaches main with goal 5's merge, on Ada's call.
+
+- **Goal 5 extended, plan step 3, the init's mounts at the system calls' cost: closes on its written bars by Ada's ruling
+  (2026-11-03).** Built on `cp/t7-ext-s3`, not merged. Part 19's pooled p50 is at most 0.16 ms on both paths (fedora: pruned
+  0.044-0.055 ms, classic 0.132-0.133), validation is as before (26 pass, 32 fail, 0 differ), HEX-RT passes over the node and
+  the socket, and every mount kind is made on each path. Part 19's p99 at 8 in flight with 8,000 idle threads is under 0.5 ms
+  on the merged trees with step 6's reuse (0.280-0.432 ms) and over on step 3's tree alone (0.729-1.568). Her under-load bar is
+  now a written bar of runtime design goal 6: part 19's p99 at most 0.5 ms at 8 in flight with 8,000 idle threads, with 6 and 12
+  busy loops on the same cores and Docker's paths, the whole create's p99 improving with it, no priority, nice, RT or slice
+  change. Today it reads 1.081-1.835 ms at 6 loops and 1.519-2.313 at 12 (without Docker's paths 0.454-0.580 and 0.702-1.068;
+  `docs/research/runtime/goal5-mounts.md` §11). The masked directories' tmpfs made ahead was built and measured: part 19's p50
+  about 15% lower with Docker's paths, no gain on either p99 or the whole create, so it stays on `cp/t7-ext-s3-maskpool` (§13).
+
+- **Goal 5 of record, its pass on fedora** (2026-11-05, `cp/t7-g5-record` 70376d7, not merged; `bench/competitive/
+  RESULT.md`, "Goal 5 of record"; decision 5). The tree: goal 5 extended's integrated one, goal 6, the state directories
+  in shards and the tail cut (inits parked ahead, decision 8), gates 7/7 and the root lab 8/8. host.sh's OCI pass, best
+  of 2, Hex over libcrun in process (over the socket), every round read whole, none crashed, noisy (load 11 to 17):
+  - reuse on (out/20261105T135855Z): create p50 0.152x (0.157x), p99.9 0.060x (0.060x); create+start of `true` p50
+    0.133x (0.156x), p99.9 0.064x (0.069x). **Met in both columns**, Hex's create p99.9 under 1 ms in each round, so it
+    holds against a quiet libcrun too (libcrun's create p99.9 here 15.38 ms).
+  - no owner (out/20261105T134534Z), host.sh's default and so the bar as written: 0.189x (0.200x), 0.463x (0.421x),
+    0.160x (0.199x), 0.406x (0.445x). **Not met**: both p99.9 over, Hex's about 2.3 ms against a quiet libcrun's 5.03
+    and 5.69. What holds it is mostly Hex's own lock: the create's cgroupfs lookups queued behind Hex's own refill's
+    `mkdir` (1.377 ms of the slowest 0.1%), then the teardown of the pass's own boxes (0.3-0.85 ms), no other tenant's
+    (`probes/goal16_ab.md`, cp/t7-g16-memslot acf45f9). Reuse within one owner removes both. (The first reading, the
+    teardown alone, is superseded.) The lock wait is now gone (cp/t7-g16-prefetch 1190a2c, merged at 309e62b: a
+    no-owner create looks up nothing in cgroupfs); it moved the no-owner p99.9 about 2% (0.36x and 0.40x in its A/B),
+    so what holds the tail is the kernel's teardown of the pass's own earlier boxes, 1.3-1.4 ms of the slowest 0.1%.
+  - Goal 16's finding (2026-11-06, fedora 6.19.10; RESULT.md "Goal 16's finding"): the path is the deleted box's
+    memory-cgroup offline (`mem_cgroup_css_offline`, 128-256 us a box most often), run by a per-CPU kworker
+    (`cgroup_offline_wq`, `WQ_PERCPU`) on the very CPU whose RCU callback queued it, a create CPU, preempting the next
+    create there (256 us to 2 ms); not a lock the create waits on. Being cut by doing less (goal 16).
+  - What's left, measured (2026-11-06; RESULT.md "What's left of goal 16's tail"): the offline is the kernel's walk of
+    every memcg-aware list_lru on the host (85-87% of it), 43-75 ns a list_lru on 6.19 and 56 ns on 7.2 at the same
+    count, so 7.2 alone doesn't move it; Hex holds at most 2.5% of fedora's ~1,950 superblocks. Hex can cut at most
+    about 0.4 ms of the slowest 0.1% (its releases), against the 0.6-0.7 ms 0.25x needs. Open: the levers' pass, and a
+    guest-only kernel change that walks only the dying memcg's lists.
+  - The Mac Studio through `docker_pass.sh` (2026-11-06, Docker Desktop's VM, 6.12.65-linuxkit aarch64, the same tree):
+    **every cell under the bar in both columns and both modes**, no owner 0.107x (0.150x), 0.127x (0.175x), 0.102x
+    (0.160x), 0.103x (0.131x); reuse on 0.107x (0.139x), 0.122x (0.151x), 0.099x (0.152x), 0.108x (0.134x), libcrun's
+    create p99.9 3.77 and 3.92 ms.
+  - jupiter (2026-11-06, Docker Desktop's WSL2 VM, the same tree), no owner: 0.200x (0.242x), 0.310x (0.489x), 0.208x
+    (0.287x), 0.342x (0.330x): both p99.9 over, as on fedora. Reuse on: 0.200x (0.236x), 0.182x (0.214x), 0.200x
+    (0.265x), 0.166x (0.228x): every in-process cell under, the socket's create+start p50 just over.
+  - Open, Ada's: count the bar with an owner, reuse across boxes of no owner, or accept it unmet on 6.19 (fedora's
+    no-owner p99.9). Goal 5 lands from this tree on her word.
+- **Goal 5 extended, one integrated tree** (2026-11-04, `cp/t7-g5x-integrate`, not merged). Steps 1 to 6 of goal 5
+  extended in one tree, with main's fd-leak fix (c4963f9), the EAGAIN retry for a `..` in a container's root, the exec
+  FIFO's two ends held at start, the CAP_SYS_ADMIN refusal for a spec naming no capabilities, the rootless delete
+  flake's pidfd kill, a box's turn for a create or delete of a box being made (in place of step 6's claim), a
+  container made from the spec the runtime checked, and its execs and its start's and delete's hooks too (kept with its
+  state; nothing reads the bundle's config.json after create's check),
+  and createContainer and startContainer hooks run in the container (cp/t7-hooks a4e0261). The hook sweep (bc8684b) is in by a merge of its own, its CLAUDE.md §12 words held for Ada. The
+  seven gates pass at each merge and the root lab at the tip (fedora). It is the tree step 7 measures, and goal 5
+  lands from it once the native work is done, on Ada's word. Decision 5 lists what it holds.
+  - goal 5x step 7, goal 5's create against its bar on the final tree (f58a101, fedora, 2026-11-05, noisy;
+    `bench/competitive/probes/create_breakdown.md`, "Goal 5 extended step 7 again"; decision 5). host.sh's OCI pass,
+    best of 2, Hex over libcrun, every round read whole: reuse on (out/20261105T114658Z) create p50 0.160x, p99.9
+    0.656x, create+start of `true` p50 0.187x, p99.9 0.148x; reuse off (out/20261105T120118Z) 0.220x, 0.419x, 0.210x,
+    0.240x. Create's p99.9 in process is the one over the bar, in the round the table takes; the other round reads 3.54
+    and 2.91 ms, and the socket 0.99 and 3.48. Every box ended through its init, none by `cgroup.kill`. The breakdown,
+    four runs: the parts' p50s summed are 98.4% to 104.5% of create's p50 (step 7's 10% met by all four). The levers
+    for what's left are named for Ada: goal 6's 7.x namespace, the shared empty-directory masks (cp/t7-g6), the
+    record's fsync on disk, step 6's reuse.
+  - the tree since 1714f72: step 6's final code (a12e526) and records (e943880), the held files' bound counting both
+    pools of namespaces made ahead (e31256b), a delete reading its box's record again after forgetting the init
+    (3428ddc; 758afc9's Ended-path wait reverted by 2a4a806 on an A/B), host.sh's fetch from the pinned tarball and its
+    refusal of a pass with a crashed round. Gates 7 of 7, root lab 8 of 8 at f58a101.
+  - goal 5x step 4: ipc/uts pairs made ahead; part 16 0.727 of drained, create 17-37 us faster pairwise, dry <=0.30% at
+    c32; cp/t7-ext-s4 209cea4.
+  - goal 5x step 3: closed on its written bars by Ada's ruling (2026-11-03), with the under-load bar moved to goal 6;
+    tip a600107.
 
 ## Design decided, implementation under way (2026-10-24)
 
@@ -348,7 +423,24 @@ three different things (CLAUDE.md "Working here"):
     libcrun's 2.750; the container's root, its mounts and pivot_root, is 0.894 ms of it and the device program 0.276.
     Without the root, the device program and the cgroup's making, 0.825 ms is left, 1.2x goal 5's bar, so the bar
     needs a lever beyond the three added. Step 6 follows the added steps.
-  - goal 6 (mount namespaces without copying) — open.
+  - goal 6 (mount namespaces without copying) — met on its record (2026-11-09, adacachy2, Linux 7.3.3,
+    mntns-host-20261109T171050Z at cp/t7-g6 0c29b3ec; `RESULT.md`, "Goal 6 of record"), run in two phases, A the
+    classic root interleaved with the ways and B the ways alone, since the classic arm's mount work reaches the ways'
+    part 19: (1) the default's create p50 below the classic path's in every cell, 292-299 of 299 rounds; (2) the
+    default by the lead's rule, the copy: the ways tie at create p50 by a sign test at 95%, and the copy's part 19 p99
+    is the lowest; (3) runtime-tools 28 of 28; (4) part 19 p99 185 and 183 µs at 6 and 12 loops, and the whole create's
+    p99 lower than the classic path's in every cell. Classic against the default counts goal 5's prune and pools with
+    goal 6's ways. Held in reserve: the init's JSON parse of the checked spec (15.8 µs first, 8.2 warm). Closed once
+    merged and gated.
+  - **goal 7, the process class through the seam with no wrapper** — **met on fedora** (2026-11-04) at `cp/t7-g7`
+    (6ce0039); carried onto the one client core and wire on `cp/t7-port-g7` (2026-11-09; not merged, not measured
+    again). `Runtime::run` makes a process box for one program's life; the node agent clones the program in
+    vfork-class (`clone3` with `CLONE_VM | CLONE_VFORK | CLONE_INTO_CGROUP | CLONE_PIDFD`), supervises it by pidfd and
+    removes the box when it ends (HEX-RT-15; one request on the wire; recovery removes a run whose program ended);
+    macOS's and Windows' nodes refuse a run, naming their platform. Run `g7-20261104T085441Z`, 3 rounds, CPUs 4-15,
+    noisy, the scope in the same run: run of `true` p50 0.41 ms against the scope's 5.82 (14.10x), CPU 0.55 ms against
+    6.39 (11.59x), 0.27 MiB held per idle box against 0.30 (`bench/competitive/RESULT.md`, "Goal 7"). Its §12 wording
+    (e71daaf there, 712bdf8 here) waits on Ada.
 - **The scheduler's architecture** (`docs/design/scheduler-architecture.md`, decided): goodput over
   balance, a sampled fast path with an optimiser tier, suitability filters on declared needs, Vivaldi
   proximity on hyper-swim, priority/fair-share/gangs/preemption, correctness against a serial
@@ -530,7 +622,7 @@ this step's to build.
   seed the pool was starting (`probes/seed_path.md`), in the tail goal 5's p99.9 (plan step 6) reads. Closes with
   the pool keeping enough seeds started for the rate it serves, shown by a sustained phase with none waited.
 - **The create seeds' counts aren't on the socket.** `Node::create_seeds` reads them in process only. Closes with
-  an append-only wire call for them, as decision 4's counts got.
+  a wire call for them, as decision 4's counts got.
 - **A seed that dies after its clone but before it answers is untested.** Its cleanup is the shim path's. Closes
   with a crash test at that point.
 - **oci_spec_box fails in Docker Desktop's VM.** Its kernel (6.12.65-linuxkit) puts fallback tunnel devices in

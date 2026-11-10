@@ -7,6 +7,12 @@
 //! captures the `hex` process's output captures the program's transparently. On a normal exit it
 //! removes the box; it ignores SIGINT/SIGTERM so that when its caller signals the whole process
 //! group, the boxed program receives them and ends while this wrapper survives to clean up.
+//!
+//! It moves itself into a `.hexbox-run` leaf of the cgroup it starts in, and stays a member of it until the
+//! kernel's last switch away from it, after its caller has reaped it (Linux v6.19 kernel/exit.c:983, then
+//! cgroup_task_dead from finish_task_switch, kernel/sched/core.c:5156). A caller that removes that cgroup
+//! once this has exited waits for its `cgroup.events` to read `populated 0` first, as box_bench.py's
+//! remove_tree does; an rmdir before then is refused with EBUSY.
 
 use std::process::Command;
 

@@ -4,7 +4,9 @@
 //! and a regression is a changed number, not noise.
 //!
 //! - [`census`]: the most the recorded inputs hold, and the input-bound rule that bounds inputs by it.
-//! - [`model`]: nodes, workloads and their resources.
+//! - [`model`]: nodes, workloads and their resources; nodes' platforms and devices, workloads' asks.
+//! - [`needs`]: what a box needs of a node, in kiln's needs grammar adapted to boxes.
+//! - [`facts`]: what a node reports about itself, read from its OS's text, and the node it makes.
 //! - [`index`]: the best-fit index both the scheduler and its serial specification place with.
 //! - [`store`]: the control plane's durable records, committed by compare-and-set (S6).
 //! - [`sim`]: the cluster: clients, a control plane of parallel deciders and an in-order validating
@@ -24,6 +26,10 @@
 //! - [`swim`]: hyper-swim's own failure detector, the membership the design gives the node agent, vendored and
 //!   driven over a simulated LAN: the crash class's bound (S8, F1).
 //! - [`federation`]: cells and regions, a federation over independent cells (H64-H66).
+//! - [`peer`]: placement with no plane, each node owning the boxes asked of it and admitting the boxes
+//!   it runs, under kiln's restart rules: p2p, and a laptop alone.
+//! - [`lb`]: the placement kernel, ported from kiln's load balancer and adapted to boxes: an owner's
+//!   pick that packs, a node's ledger that admits, and the words between them.
 
 #![cfg_attr(
     test,
@@ -41,14 +47,18 @@ pub mod baseline;
 pub mod census;
 pub mod danger;
 pub mod error;
+pub mod facts;
 pub mod fair;
 pub mod faults;
 pub mod federation;
 pub mod generate;
 pub mod index;
+pub mod lb;
 pub mod membership;
 pub mod model;
+pub mod needs;
 pub mod packing;
+pub mod peer;
 pub mod proximity;
 pub mod replay;
 pub mod rng;

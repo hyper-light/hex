@@ -6,7 +6,8 @@
 //! the caller's process, one thread and one buffer per stream: here, or, through a node's socket, by the
 //! caller's socket client, which the node gives the connection's end (native plan step 8). The event form, a
 //! node's, copies none. A [`Link`] dials the guest's ports: vsock through Shards in production, a loopback
-//! socket in tests.
+//! socket in tests. The control connection is read as every client's is (`crate::calls`), by whoever waits on it, or
+//! in the event form by the node's loop ([`Pump`]), never by a thread of its own.
 
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
@@ -15,12 +16,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hex_api::{Refusal, Stdio};
+use hex_core::patience::Patience;
 use hex_core::stream::{self, Deframer, Exec, Named};
 use hex_core::wire::{self, Received};
 
-use crate::ANSWER_PATIENCE;
-use crate::calls::{Core, Lent, Sent, Shared, Transport, poisoned};
-use crate::copy::copy;
+use crate::calls::{Core, KINDS, Lent, Sent, Shared, Take, Transport, poisoned};
+use crate::copy::{copy, copy_in};
 
 /// The OS handle under a guest connection, which an event loop waits on: a file descriptor on Unix, a
 /// Winsock socket on Windows.
@@ -99,22 +100,60 @@ impl Duplex for std::os::unix::net::UnixStream {
 pub trait Link: Send + Sync + 'static {
     /// A new connection to the guest's `port`.
     fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal>;
+    /// An identity safe to lend to a caller that opens its own guest streams, without owning the VM.
+    fn identity(&self) -> Result<shards_api::Identity, Refusal> {
+        Err(Refusal::Invalid {
+            what: "guest stream identity",
+            why: "this link has no lendable VM identity".to_owned(),
+        })
+    }
 }
+
+/// How long a call waits for the guest's node agent's answer, one wait a kind of call (`crate::calls::kind_of`'s
+/// order), as the socket's client waits (decision 9): twice the slowest answer this process has had to a call of
+/// that kind, through the guest. MEASURING: no record of a guest's answers yet, whose creates stage a root through
+/// the guest's relay; each kind's `client.guest.answer.<kind>` rows of `bench/competitive/probes/waits_census.md` will
+/// seed it, and until then a call waits for its answer alone.
+static ANSWERS: [Patience; KINDS] = [
+    Patience::measuring("client.guest.answer.hello"),
+    Patience::measuring("client.guest.answer.create"),
+    Patience::measuring("client.guest.answer.start"),
+    Patience::measuring("client.guest.answer.exec"),
+    Patience::measuring("client.guest.answer.signal"),
+    Patience::measuring("client.guest.answer.inspect"),
+    Patience::measuring("client.guest.answer.usage"),
+    Patience::measuring("client.guest.answer.list"),
+    Patience::measuring("client.guest.answer.delete"),
+    Patience::measuring("client.guest.answer.netns"),
+    Patience::measuring("client.guest.answer.kill"),
+    Patience::measuring("client.guest.answer.exec_streams"),
+    Patience::measuring("client.guest.answer.run"),
+];
 
 /// A node agent in a guest, reached through a [`Link`].
 pub type Client = Core<Stream>;
 
-/// The control connection, as a client's transport.
+/// The control connection, as a client's transport: read and written without waiting, waited on by the core.
 pub struct Stream {
     link: Arc<dyn Link>,
     /// The token the relay sent first on the control connection, which its stdio connections name.
     token: u64,
-    /// The writing handle: one message at a time.
+    /// The writing handle, its messages one at a time under the core's send lock.
     write: Mutex<Box<dyn Duplex>>,
-    /// A handle to end the connection with while a send holds the writing one.
+    /// A handle to wait on and to end the connection with while a send holds the writing one.
     end: Box<dyn Duplex>,
-    /// In the event form, what waits to be written ([`Backlog`]); in the reading thread's, nothing.
+    /// The reading handle, until the core's read state takes it.
+    read: Mutex<Option<Box<dyn Duplex>>>,
+    /// In the event form, what waits to be written ([`Backlog`]); else nothing.
     backlog: Mutex<Option<Backlog>>,
+}
+
+/// What the turn's holder reads with and into, and what of a frame has come.
+pub struct Reading {
+    conn: Option<Box<dyn Duplex>>,
+    /// A read takes at most one whole frame, the most the deframer holds.
+    buf: Vec<u8>,
+    deframer: Deframer,
 }
 
 /// The event form's bytes waiting to be written, oldest first, flushed by its [`Pump`] as the
@@ -146,27 +185,77 @@ impl Stream {
 }
 
 impl Transport for Stream {
+    type Reading = Reading;
     const MAKES_ASKED: bool = true;
+
+    fn stream_offer(
+        &self,
+        exec: u64,
+        streams: wire::Streams,
+    ) -> Result<wire::StreamOffer, Refusal> {
+        let identity = self.link.identity()?;
+        Ok(wire::StreamOffer {
+            pid: identity.pid,
+            started: identity.started,
+            vsock: identity.vsock,
+            token: self.token,
+            exec,
+            streams,
+        })
+    }
+
+    fn answers() -> &'static [Patience; KINDS] {
+        &ANSWERS
+    }
+
+    fn reading(&self) -> Reading {
+        Reading {
+            conn: self.read.lock().ok().and_then(|mut r| r.take()),
+            buf: vec![0u8; stream::MAX_FRAME],
+            deframer: Deframer::new(wire::MAX_MESSAGE),
+        }
+    }
+
+    fn handle(&self) -> crate::calls::Handle<'_> {
+        self.end.handle()
+    }
 
     /// Each stream asked for is a stdio connection of its own to the guest, named for the exec, and the
     /// caller holds that connection's socket: the guest's relay splices it to the program, so no byte is
     /// copied on the host (native plan step 8).
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn asks(&self, exec: u64, ask: hex_api::Ask) -> Result<hex_api::Given, Refusal> {
         let exec = Exec {
             conn: self.token,
             id: exec,
         };
-        let dial = |on: bool, stream| -> Result<Option<std::os::fd::OwnedFd>, Refusal> {
+        let dial = |on: bool, stream| -> Result<Option<hex_api::End>, Refusal> {
             if !on {
                 return Ok(None);
             }
             let conn = self.dial_named(Named { exec, stream })?;
             // The caller's own descriptor of the connection; this side's closes as `conn` drops.
-            conn.handle()
+            let end = conn
+                .handle()
                 .try_clone_to_owned()
-                .map(Some)
-                .map_err(os("handing a stdio connection to its caller"))
+                .map_err(os("handing a stdio connection to its caller"))?;
+            // HEX-RT-17: Shards waits around a non-blocking socket in its Stream wrapper. Only the raw descriptor
+            // outlives this handoff, so its caller's OwnedStream must block itself; the control connection stays evented.
+            #[cfg(unix)]
+            {
+                let flags = rustix::fs::fcntl_getfl(&end)
+                    .map_err(|e| Refusal::os("reading a stdio connection's mode", e))?;
+                rustix::fs::fcntl_setfl(&end, flags & !rustix::fs::OFlags::NONBLOCK)
+                    .map_err(|e| Refusal::os("making a caller's stdio connection wait", e))?;
+                Ok(Some(end))
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::io::AsSocket;
+                hex_afunix::set_nonblocking(end.as_socket(), false)
+                    .map_err(os("making a caller's stdio connection wait"))?;
+                Ok(Some(end.into()))
+            }
         };
         Ok(hex_api::Given {
             stdin: dial(ask.stdin, stream::Stdio::In)?,
@@ -175,7 +264,7 @@ impl Transport for Stream {
         })
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     fn asks(&self, _exec: u64, _ask: hex_api::Ask) -> Result<hex_api::Given, Refusal> {
         Err(Refusal::Platform {
             what: "stdio streams made by the guest's transport",
@@ -193,10 +282,7 @@ impl Transport for Stream {
         };
         let named = |stream| Named { exec, stream };
         if let Some(r) = stdio.stdin {
-            let conn = self.dial_named(named(stream::Stdio::In))?;
-            copy(r, conn, |conn| {
-                let _ = conn.shutdown(Shutdown::Write);
-            })?;
+            copy_in(r, self.dial_named(named(stream::Stdio::In))?)?;
         }
         if let Some(w) = stdio.stdout {
             copy(self.dial_named(named(stream::Stdio::Out))?, w, drop)?;
@@ -207,51 +293,89 @@ impl Transport for Stream {
         Ok(())
     }
 
-    /// Sends one message framed. It carries no descriptor: its streams are connections of their own.
-    fn send(&self, bytes: &[u8], lent: &[Lent<'_>]) -> Result<(), Sent> {
+    /// What one read takes, each whole message in it handed on; a frame cut across reads stays in the deframer.
+    fn recv(&self, reading: &mut Reading, take: &mut Take<'_>) -> Result<bool, Refusal> {
+        let Reading {
+            conn,
+            buf,
+            deframer,
+        } = reading;
+        let Some(conn) = conn.as_mut() else {
+            return Err(Refusal::Broken(
+                "the guest's connection has no reading handle".to_owned(),
+            ));
+        };
+        let n = match conn.read(buf) {
+            Ok(0) => return Err(ended(deframer)),
+            Ok(n) => n,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) =>
+            {
+                return Ok(false);
+            }
+            Err(e) => {
+                return Err(Refusal::Broken(format!(
+                    "reading the node agent's connection: {e}"
+                )));
+            }
+        };
+        let mut input = buf.get(..n).unwrap_or_default();
+        while !input.is_empty() {
+            let (took, whole) = deframer.take(input).map_err(|fault| {
+                Refusal::Broken(format!(
+                    "the node agent sent bytes that aren't a message: {fault}"
+                ))
+            })?;
+            input = input.get(took..).unwrap_or_default();
+            let Some(message) = whole else { continue };
+            let received = Received {
+                bytes: &message,
+                size: message.len(),
+                descriptors: 0,
+                descriptors_cut: false,
+            };
+            take(&received, Vec::new())?;
+        }
+        Ok(true)
+    }
+
+    fn frame(message: Vec<u8>) -> Result<Vec<u8>, Refusal> {
+        stream::frame(&message, wire::MAX_MESSAGE).map_err(Refusal::from)
+    }
+
+    /// What the connection takes of the frame now. It carries no descriptor: its streams are connections of their
+    /// own. In the event form the frame is queued whole behind what waits ([`Backlog`]), for the loop to write.
+    fn try_send(&self, bytes: &[u8], at: &mut usize, lent: &[Lent<'_>]) -> Result<bool, Sent> {
         if !lent.is_empty() {
             return Err(Sent::Refused(Refusal::Broken(
                 "a guest's connection carries no descriptors".to_owned(),
             )));
         }
-        let framed =
-            stream::frame(bytes, wire::MAX_MESSAGE).map_err(|f| Sent::Refused(f.into()))?;
         let mut write = self.write.lock().map_err(|e| Sent::Refused(poisoned(e)))?;
         let mut backlog = self
             .backlog
             .lock()
             .map_err(|e| Sent::Refused(poisoned(e)))?;
         if let Some(backlog) = backlog.as_mut() {
-            return backlog.send(&mut **write, &framed);
+            backlog.send(&mut **write, bytes)?;
+            *at = bytes.len();
+            return Ok(true);
         }
         drop(backlog);
-        match write.write_all(&framed) {
-            Ok(()) => Ok(()),
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::BrokenPipe
-                        | io::ErrorKind::ConnectionReset
-                        | io::ErrorKind::NotConnected
-                ) =>
-            {
-                Err(Sent::Gone)
+        while let Some(rest) = bytes.get(*at..).filter(|r| !r.is_empty()) {
+            match write.write(rest) {
+                Ok(0) => return Err(Sent::Gone),
+                Ok(n) => *at = at.saturating_add(n),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+                Err(e) if gone(&e) => return Err(Sent::Gone),
+                Err(e) => return Err(Sent::Refused(Refusal::os("sending to the node agent", e))),
             }
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) =>
-            {
-                Err(Sent::Refused(Refusal::Os {
-                    op: "sending to the node agent",
-                    why: format!(
-                        "no room in its connection for {ANSWER_PATIENCE:?}: it isn't reading"
-                    ),
-                }))
-            }
-            Err(e) => Err(Sent::Refused(Refusal::os("sending to the node agent", e))),
         }
+        Ok(true)
     }
 
     fn shutdown(&self) {
@@ -324,25 +448,6 @@ fn gone(e: &io::Error) -> bool {
     )
 }
 
-/// The reading thread: every message the agent sends, until the connection ends.
-fn read(shared: &Shared<Stream>, mut conn: Box<dyn Duplex>) {
-    let mut deframer = Deframer::new(wire::MAX_MESSAGE);
-    // A read takes at most one whole frame, the most the deframer holds.
-    let mut buf = vec![0u8; stream::MAX_FRAME];
-    let why = loop {
-        let n = match conn.read(&mut buf) {
-            Ok(0) => break ended(&deframer),
-            Ok(n) => n,
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => break Refusal::Broken(format!("reading the node agent's connection: {e}")),
-        };
-        if let Err(why) = take(shared, &mut deframer, buf.get(..n).unwrap_or_default()) {
-            break why;
-        }
-    };
-    shared.close(why);
-}
-
 /// Why a connection that read its end ended: between messages, or in the middle of one.
 fn ended(deframer: &Deframer) -> Refusal {
     if deframer.at_boundary() {
@@ -354,45 +459,15 @@ fn ended(deframer: &Deframer) -> Refusal {
     }
 }
 
-/// Hands every whole message in `input`, with what came before it, to whoever waits for it.
-fn take(shared: &Shared<Stream>, deframer: &mut Deframer, mut input: &[u8]) -> Result<(), Refusal> {
-    while !input.is_empty() {
-        let (took, whole) = deframer.take(input).map_err(|fault| {
-            Refusal::Broken(format!(
-                "the node agent sent bytes that aren't a message: {fault}"
-            ))
-        })?;
-        input = input.get(took..).unwrap_or_default();
-        let Some(message) = whole else { continue };
-        let received = Received {
-            bytes: &message,
-            size: message.len(),
-            descriptors: 0,
-            descriptors_cut: false,
-        };
-        let (header, answer) =
-            wire::read_answer(&received, wire::MAX_MESSAGE).map_err(|fault| {
-                Refusal::Broken(format!(
-                    "the node agent sent a message that isn't an answer: {fault}"
-                ))
-            })?;
-        shared.deliver(header, answer)?;
-    }
-    Ok(())
-}
-
 /// Reads at most this many times on one [`Pump::ready`] before the loop's other sources get a turn: a
 /// fairness bound, as the node's socket's `READS_PER_WAKE`.
 const READS_PER_READY: usize = 64;
 
 /// The event form's reading side ([`Client::connect_evented`]): no thread, but the loop that waits on
 /// [`Pump::handle`] calls [`Pump::ready`] when it is ready, which reads what has come and hands each
-/// message to its call's completion, and writes what waits.
+/// message to its call's completion, and writes what waits. It holds the connection's reader's turn for good.
 pub struct Pump {
     shared: Arc<Shared<Stream>>,
-    conn: Box<dyn Duplex>,
-    deframer: Deframer,
-    buf: Vec<u8>,
     ended: bool,
 }
 
@@ -411,7 +486,7 @@ impl Pump {
     /// The connection's OS handle, borrowed, for the loop to wait on; out of the loop's set before the
     /// pump drops.
     pub fn handle(&self) -> Handle<'_> {
-        self.conn.handle()
+        self.shared.transport.end.handle()
     }
 
     /// Reads what has come, without waiting, and writes what waits as far as the connection takes it.
@@ -419,31 +494,20 @@ impl Pump {
         if self.ended {
             return Pumped::Ended;
         }
-        let mut reads = 0;
-        let outcome: Result<(), Refusal> = loop {
-            if reads >= READS_PER_READY {
-                break Ok(());
-            }
-            reads = reads.saturating_add(1);
-            match self.conn.read(&mut self.buf) {
-                Ok(0) => break Err(ended(&self.deframer)),
-                Ok(n) => {
-                    let input = self.buf.get(..n).unwrap_or_default();
-                    if let Err(why) = take(&self.shared, &mut self.deframer, input) {
-                        break Err(why);
-                    }
-                }
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break Ok(()),
-                Err(e) => {
-                    break Err(Refusal::Broken(format!(
-                        "reading the node agent's connection: {e}"
-                    )));
+        for _ in 0..READS_PER_READY {
+            match self.shared.recv() {
+                Ok(true) => {}
+                Ok(false) => break,
+                // The connection ended: every call and program waiting was told why.
+                Err(_) => {
+                    self.ended = true;
+                    return Pumped::Ended;
                 }
             }
-        };
-        let waiting = outcome.and_then(|()| self.flush());
-        match waiting {
+        }
+        // What the reads owe the agent goes behind what waits, and with it.
+        self.shared.send_owed_now();
+        match self.flush() {
             Ok(true) => Pumped::ReadWrite,
             Ok(false) => Pumped::Read,
             Err(why) => {
@@ -470,96 +534,62 @@ impl Pump {
 impl Client {
     /// Dials the guest's node agent through `link` and learns what it runs and its bounds.
     pub fn connect(link: Arc<dyn Link>) -> Result<Self, Refusal> {
-        let mut conn = link.dial(stream::CONTROL_PORT)?;
-        conn.set_write_timeout(Some(ANSWER_PATIENCE))
-            .map_err(os("bounding the node agent connection's sends"))?;
-        let mut token = [0u8; stream::TOKEN_BYTES];
-        conn.read_exact(&mut token)
-            .map_err(os("reading the relay's token for the connection"))?;
-        let token = u64::from_le_bytes(token);
-        let reading = conn
-            .try_clone()
-            .map_err(os("holding the node agent's connection"))?;
-        let end = conn
-            .try_clone()
-            .map_err(os("holding the node agent's connection"))?;
-        let shared = Arc::new(Shared::new(Stream {
-            link,
-            token,
-            write: Mutex::new(conn),
-            end,
-            backlog: Mutex::new(None),
-        }));
-        let reader = {
-            let shared = Arc::clone(&shared);
-            std::thread::Builder::new()
-                .name("hex-client-guest".to_owned())
-                .spawn(move || read(&shared, reading))
-                .map_err(os("starting the client's reading thread"))?
-        };
-        Core::hello(shared, reader)
+        Core::hello(Arc::new(Shared::new(Stream::dial(link)?)))
     }
 
-    /// The event form ([`Pump`]): dials the guest's node agent through `link`, says hello and waits,
-    /// bounded, for its answer, then hands back the client and its reading side, which no thread
-    /// reads: the caller's loop waits on [`Pump::handle`] and calls [`Pump::ready`]. Calls made with
-    /// [`Core::begin`] are answered from there. `wants_room` is told when bytes wait to be written, so
-    /// the loop watches for room too. Every connection's waits are the loop's from here: its reads and
-    /// writes never wait.
+    /// The event form ([`Pump`]): dials the guest's node agent through `link` and says hello, its answer read by
+    /// the hello itself, then hands back the client and its reading side, which no thread reads: the caller's loop
+    /// waits on [`Pump::handle`] and calls [`Pump::ready`]. Calls made with [`Core::begin`] are answered from there.
+    /// `wants_room` is told when bytes wait to be written, so the loop watches for room too. Every connection's
+    /// waits are the loop's from here: its reads and writes never wait.
     pub fn connect_evented(
         link: Arc<dyn Link>,
         wants_room: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<(Self, Pump), Refusal> {
-        let mut conn = link.dial(stream::CONTROL_PORT)?;
-        conn.set_write_timeout(Some(ANSWER_PATIENCE))
-            .map_err(os("bounding the node agent connection's sends"))?;
-        conn.set_read_timeout(Some(ANSWER_PATIENCE))
-            .map_err(os("bounding the wait for the node agent's hello"))?;
-        let mut token = [0u8; stream::TOKEN_BYTES];
-        conn.read_exact(&mut token)
-            .map_err(os("reading the relay's token for the connection"))?;
-        let token = u64::from_le_bytes(token);
-        let mut reading = conn
-            .try_clone()
-            .map_err(os("holding the node agent's connection"))?;
-        let end = conn
-            .try_clone()
-            .map_err(os("holding the node agent's connection"))?;
-        let shared = Arc::new(Shared::new(Stream {
-            link,
-            token,
-            write: Mutex::new(conn),
-            end,
-            backlog: Mutex::new(None),
-        }));
-        let mut deframer = Deframer::new(wire::MAX_MESSAGE);
-        let mut buf = vec![0u8; stream::MAX_FRAME];
-        let client = Core::hello_inline(Arc::clone(&shared), |shared| {
-            let n = reading
-                .read(&mut buf)
-                .map_err(os("reading the node agent's hello"))?;
-            if n == 0 {
-                return Err(ended(&deframer));
-            }
-            take(shared, &mut deframer, buf.get(..n).unwrap_or_default())
-        })?;
-        reading
-            .set_nonblocking(true)
-            .map_err(os("handing the node agent's connection to its loop"))?;
+        let shared = Arc::new(Shared::new(Stream::dial(link)?));
+        let client = Core::hello(Arc::clone(&shared))?;
         let limits = client.limits();
         *shared.transport.backlog.lock().map_err(poisoned)? = Some(Backlog {
             bytes: VecDeque::new(),
             bound: limits.in_flight.saturating_mul(limits.message_bytes),
             wants_room,
         });
-        let pump = Pump {
-            shared,
-            conn: reading,
-            deframer,
-            buf,
-            ended: false,
-        };
-        Ok((client, pump))
+        shared.read_by_loop()?;
+        Ok((
+            client,
+            Pump {
+                shared,
+                ended: false,
+            },
+        ))
+    }
+}
+
+impl Stream {
+    /// The guest's control port dialed through `link`, its relay's token read, and the connection made to read and
+    /// write without waiting, as the core waits on it.
+    fn dial(link: Arc<dyn Link>) -> Result<Self, Refusal> {
+        let mut conn = link.dial(stream::CONTROL_PORT)?;
+        let mut token = [0u8; stream::TOKEN_BYTES];
+        conn.read_exact(&mut token)
+            .map_err(os("reading the relay's token for the connection"))?;
+        let token = u64::from_le_bytes(token);
+        let read = conn
+            .try_clone()
+            .map_err(os("holding the node agent's connection"))?;
+        let end = conn
+            .try_clone()
+            .map_err(os("holding the node agent's connection"))?;
+        conn.set_nonblocking(true)
+            .map_err(os("reading the node agent's connection without waiting"))?;
+        Ok(Self {
+            link,
+            token,
+            write: Mutex::new(conn),
+            end,
+            read: Mutex::new(Some(read)),
+            backlog: Mutex::new(None),
+        })
     }
 }
 

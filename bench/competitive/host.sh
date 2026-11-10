@@ -8,13 +8,18 @@
 # "boxseam" for the process class through the Runtime seam, with SEAM_BIN naming seam_box's release binary).
 # A later pass in the same run directory: OUT_DIR names it, ROUND_FIRST (1) numbers its rounds after the
 # ones there, HEXBENCH_PHASES picks the drivers' phases (all), HEXBENCH_SUSTAINED sets the sustained phase's
-# lifecycles (10000), and FETCH=0 keeps the competitors' binaries
+# lifecycles (10000), HEXBENCH_INTERLEAVED_CPUS1 and _CPUS32 pin the interleaved phase's halves to their CPUs (seam_oci
+# says how), HEXBENCH_OWNER names one owner for every box seam_oci makes, HEXBENCH_NOFILE sets the soft descriptor
+# limit its node runs with (`hard`, as Hex's installer sets a node's, or a number; oci_inside.sh says how) and NETNS=0 gives the OCI pass's
+# bundles no network namespace of their own (oci_inside.sh says how), BENCH_MEMORY and BENCH_OOM set each container's
+# --memory (40g) and --oom-score-adj (none) on a shared host, as create_breakdown.sh's, and FETCH=0 keeps the competitors' binaries
 # already in $BASE/bin (their sha256 is recorded) rather than resolving each project's latest release again.
 # Another host only by name (BENCH_HOST_OK=<its hostname>): Ada's call for E2B's same-hardware rounds on adacachy
 # (2026-10-24). LOAD_GATE=0 skips the wait for load under 2: for those rounds, and for a density-only pass
 # (HEXBENCH_PHASES=density), whose held memory doesn't depend on load. env.txt records which, and the load.
 set -euo pipefail
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
+. "$HERE/containers.sh"
 HEX=$(realpath "${1:?hex release binary}")
 case "$(hostname)" in
   fedora*) ;;
@@ -52,7 +57,7 @@ done
   echo "cpu: $(lscpu | sed -n 's/^Model name: *//p') ($(nproc) cpus), pinned to $CPUSET"
   echo "memory: $(free -g | awk '/^Mem/ {print $2}') GiB"; echo "load at start: $(cat /proc/loadavg)"
   echo "hex: $HEX ($(sha256sum "$HEX" | cut -c1-16))"; [ -z "${SEAM:-}" ] || echo "seam_box: $SEAM ($(sha256sum "$SEAM" | cut -c1-16))"
-  echo "params: ROUNDS=$ROUNDS ROUND_FIRST=$ROUND_FIRST N=$N WARMUP=$WARMUP N_OVERRIDE=$N_OVERRIDE LIFECYCLES=$LIFECYCLES CAP=$CAP BUDGET_MIB=$BUDGET_MIB BOX_BUDGET_MIB=$BOX_BUDGET_MIB HEXBENCH_PHASES=${HEXBENCH_PHASES:-all} HEXBENCH_SUSTAINED=${HEXBENCH_SUSTAINED:-10000}"
+  echo "params: ROUNDS=$ROUNDS ROUND_FIRST=$ROUND_FIRST N=$N WARMUP=$WARMUP N_OVERRIDE=$N_OVERRIDE LIFECYCLES=$LIFECYCLES CAP=$CAP BUDGET_MIB=$BUDGET_MIB BOX_BUDGET_MIB=$BOX_BUDGET_MIB HEXBENCH_PHASES=${HEXBENCH_PHASES:-all} HEXBENCH_SUSTAINED=${HEXBENCH_SUSTAINED:-10000} HEXBENCH_INTERLEAVED_CPUS1=${HEXBENCH_INTERLEAVED_CPUS1:-all} HEXBENCH_INTERLEAVED_CPUS32=${HEXBENCH_INTERLEAVED_CPUS32:-all} HEXBENCH_OWNER=${HEXBENCH_OWNER:-none} HEXBENCH_REUSE=${HEXBENCH_REUSE:-1} HEXBENCH_NOFILE=${HEXBENCH_NOFILE:-given} NETNS=${NETNS:-1} BENCH_MEMORY=${BENCH_MEMORY:-40g} BENCH_OOM=${BENCH_OOM:-none}"
 } >> "$OUT/env.txt"
 
 if [ "${FETCH:-1}" = 0 ]; then
@@ -72,8 +77,9 @@ fi
 
 NAMES=()  # the bench's containers, removed however this script ends
 cleanup() { for n in "${NAMES[@]}"; do docker rm -f "$n" >/dev/null 2>&1 || true; done; }
-trap cleanup EXIT
+bench_trap cleanup
 
+oci_rc=0  # the OCI pass's exit: non-zero when a round crashed (oci_inside.sh), read once the table is written
 if [[ " $PHASES " == *" oci "* ]]; then
   NAME="hexbench-oci-$$"; NAMES+=("$NAME")
   KRUN=()  # krun (crun's libkrun handler) runs only when RUNTIMES names it; its libraries mount beside it
@@ -110,11 +116,13 @@ if [[ " $PHASES " == *" oci "* ]]; then
   # it compares unlike setups; a ratio within one pass compares like ones.
   SEAM_OCI_ENV=(); [ -x "$BASE/bin/seam_oci" ] && SEAM_OCI_ENV=(-e "SEAM_OCI=/opt/bin/seam_oci")
   echo "oci pass: /run a tmpfs (size 1g), where the runtimes keep their state" >> "$OUT/env.txt"
-  timeout 36000 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="$CPUSET" --memory=40g \
+  timeout 36000 docker run --rm --name "$NAME" "${BENCH_LABELS[@]}" --cpuset-cpus="$CPUSET" --memory="${BENCH_MEMORY:-40g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
     --privileged --security-opt label=disable --cgroupns=private --network=none --tmpfs /run:rw,exec,nosuid,size=1g \
     -v /usr:/usr:ro -v "$BASE/bin:/opt/bin:ro" "${KRUN[@]}" -v "$HERE:/opt/lab:ro" -v "$OUT:/opt/out" \
     -e RUNTIMES -e ROUNDS -e ROUND_FIRST -e N -e WARMUP -e N_OVERRIDE -e LIFECYCLES -e CAP -e BUDGET_MIB -e HEXBENCH_PHASES \
-    -e HEXBENCH_SUSTAINED -e STANDIN "${SEAM_OCI_ENV[@]}" registry.fedoraproject.org/fedora:44 bash /opt/lab/oci_inside.sh 2>&1 | tee "$OUT/oci.log"
+    -e HEXBENCH_SUSTAINED -e HEXBENCH_INTERLEAVED_CPUS1 -e HEXBENCH_INTERLEAVED_CPUS32 -e HEXBENCH_OWNER \
+    -e HEXBENCH_REUSE -e HEXBENCH_NOFILE -e NETNS -e STANDIN "${SEAM_OCI_ENV[@]}" registry.fedoraproject.org/fedora:44 bash /opt/lab/oci_inside.sh 2>&1 | tee "$OUT/oci.log" \
+    || oci_rc=$?
 fi
 
 # The lab image (sandboxes/Dockerfile): Fedora 44 with each process sandbox pinned, codex at a pinned tag
@@ -137,8 +145,8 @@ lab_image() {
 lab() {
   local pass=$1; shift
   NAMES+=("hexbench-$pass-$$")
-  timeout 36000 docker run --rm --name "hexbench-$pass-$$" --label hex.bench=competitive --cpuset-cpus="$CPUSET" \
-    --memory=40g --privileged --security-opt label=disable --cgroupns=private --network=none \
+  timeout 36000 docker run --rm --name "hexbench-$pass-$$" "${BENCH_LABELS[@]}" --cpuset-cpus="$CPUSET" \
+    --memory="${BENCH_MEMORY:-40g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} --privileged --security-opt label=disable --cgroupns=private --network=none \
     -v "$HERE:/opt/lab:ro" -v "$OUT:/opt/out" "$@" \
     -e ROUNDS -e ROUND_FIRST -e N -e WARMUP -e LIFECYCLES -e CAP -e BUDGET_MIB="$BOX_BUDGET_MIB" -e METHODS \
     -e HEXBENCH_PHASES hexbench/sandboxes:1 bash /opt/lab/lab_inside.sh "$pass" 2>&1 | tee "$OUT/$pass.log"
@@ -182,3 +190,8 @@ fi
 echo "load at end: $(cat /proc/loadavg)" >> "$OUT/env.txt"
 python3 -I "$HERE/summarize.py" "$OUT" > "$OUT/table.md"
 echo "results: $OUT"
+# A pass with a crashed round refuses, after its table is written with the round marked (CLAUDE.md §3).
+if [ "$oci_rc" != 0 ]; then
+  echo "refusing: the OCI pass exited $oci_rc; the run's crashed rounds: $(paste -sd, "$OUT/crashed.txt" 2>/dev/null || echo "none named")" >&2
+  exit 6
+fi

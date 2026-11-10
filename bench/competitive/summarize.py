@@ -30,7 +30,28 @@ def dist(samples):
             "p99.9": pct(samples, 0.999), "max": max(samples) if samples else None}
 
 
+def crashed(run):
+    """crashed.txt (oci_inside.sh's): {file prefix: its lines}, each `<prefix> r<round> exited <status>`; a line of
+    any other shape under None, since it may stand for any runtime's round."""
+    out = {}
+    try:
+        with open(os.path.join(run, "crashed.txt"), errors="replace") as f:
+            lines = [line.strip() for line in f if line.strip()]
+    except FileNotFoundError:
+        return out
+    for line in lines:
+        parts = line.split()
+        known = len(parts) == 4 and re.fullmatch(r"r\d+", parts[1]) and parts[2] == "exited"
+        out.setdefault(parts[0] if known else None, []).append(line)
+    return out
+
+
 def rounds(run, prefix):
+    """A runtime's rounds by number. None of them when one crashed (or crashed.txt holds a line it can't read): a
+    best of N beside a crashed round would read the pass as whole."""
+    gone = crashed(run)
+    if prefix in gone or None in gone:
+        return {}
     out = {}
     for path in sorted(glob.glob(os.path.join(run, prefix + ".r*.json"))):
         m = re.search(r"\.r(\d+)\.json$", path)
@@ -188,19 +209,32 @@ def dry(sustained):
 def netns_counts(data):
     """What the node counted of its containers' network namespaces in each phase of each round that reports it
     (seam_oci): made on a create's path (the pool dry, or none kept), taken from its pool, made ahead for it, and
-    makes that failed, against the phase's creates."""
+    makes that failed, against the phase's creates; and, where the node keeps its owners' namespaces (goal 5
+    extended, step 6), those handed from box to box of one owner, the boxes given a fresh one to keep, and each
+    refusal by its reason."""
     lines = []
     for n, rs in data.items():
         for rnd, r in sorted(rs.items()):
             bits = []
-            for phase in ("lifecycle", "lifecycle_nonet", "sustained"):
+            for phase in ("lifecycle", "lifecycle_nonet", "sustained", "interleaved"):
                 p = r["phases"].get(phase) or {}
                 c = p.get("netns")
                 if c is None:
                     continue
-                creates = p["lifecycles"] if phase == "sustained" else r["n"] + r["warmup"]
-                bits.append(f"{phase}: {c['made_on_path']:,} made on the path, {c['taken']:,} taken from the pool, "
-                            f"{c['made_ahead']:,} made ahead, {c['failed']:,} failed makes, of {creates:,} creates")
+                if phase == "sustained":
+                    creates = p["lifecycles"]
+                elif phase == "interleaved":
+                    creates = len(p["pairs"]) * (p["c1_lifecycles"] + p["c32_lifecycles"])
+                else:
+                    creates = r["n"] + r["warmup"]
+                bit = (f"{phase}: {c['made_on_path']:,} made on the path, {c['taken']:,} taken from the pool, "
+                       f"{c['made_ahead']:,} made ahead, {c['failed']:,} failed makes, of {creates:,} creates")
+                k = p.get("netns_reuse")
+                if k is not None:
+                    refused = ", ".join(f"{why} {count:,}" for why, count in sorted(k["refused"].items())) or "none"
+                    bit += (f"; kept for owners: {k['handed_on']:,} handed on, {k['fresh']:,} fresh, refused: "
+                            f"{refused}; {k['evicted']:,} evicted, {k['unchecked']:,} unchecked, {k['idle']:,} idle")
+                bits.append(bit)
             if bits:
                 lines.append(f"- {n}, round {rnd}: " + "; ".join(bits))
     if not lines:
@@ -245,6 +279,26 @@ def standin_ceiling(run):
             for c in ("1", "8", "32")]
     return (f"The driver's own ceiling, /usr/bin/true standing in for the runtime (best of {len(rs)}), lifecycles/s at "
             f"concurrency 1 / 8 / 32: {best[0]:.0f} / {best[1]:.0f} / {best[2]:.0f}\n")
+
+
+def interleaved_pairs(data):
+    """Each round's interleaved phase (seam_oci): concurrency 1 and 32 in turn, so both meet the host as it was;
+    the ratio of the pooled rates and each pair's (goal 5 extended step 6's second criterion, the lead,
+    2026-11-03T06:01Z). No best of N: each round stands as it was measured."""
+    lines = []
+    for n, rs in data.items():
+        for rnd, r in sorted(rs.items()):
+            i = r["phases"].get("interleaved")
+            if not i:
+                continue
+            pairs = ", ".join(f"{p['ratio']:.2f}x" for p in i["pairs"])
+            lines.append(f"- {n}, round {rnd}: concurrency 1 at {i['c1_per_s']:,.0f}/s, 32 at {i['c32_per_s']:,.0f}/s "
+                         f"pooled, {i['ratio']:.2f}x; by pair (median {i['ratio_median']:.2f}x, "
+                         f"{i['ratio_min']:.2f}x to {i['ratio_max']:.2f}x): {pairs}")
+    if not lines:
+        return ""
+    return ("Concurrency 1 and 32 interleaved, 32 over 1 (seam_oci's interleaved phase, "
+            f"{len(lines)} rounds):\n" + "\n".join(lines) + "\n")
 
 
 def sustained_windows(data):
@@ -448,9 +502,13 @@ def table(title, names, rows):
     return "\n".join(out) + "\n"
 
 
-def main():
-    run = sys.argv[1]
+def summary(run):
     parts = []
+    gone = crashed(run)
+    if gone:
+        parts.append("**Crashed rounds** (oci_inside.sh's crashed.txt): " + "; ".join(l for ls in gone.values() for l in ls)
+                     + ". No best of N is taken for their runtimes" + (", nor for any, since a line names no round"
+                                                                         if None in gone else "") + ".\n")
     names, rows, data = oci_section(run)
     if data:
         parts.append(table("OCI class (Hex `oci` against runc, crun, youki, gVisor runsc, crun+libkrun)" if "libcrun" not in names
@@ -462,6 +520,8 @@ def main():
             parts.append("Phase errors: " + json.dumps(errs) + "\n")
         if sustained_windows(data):
             parts.append(sustained_windows(data))
+        if interleaved_pairs(data):
+            parts.append(interleaved_pairs(data))
         if netns_counts(data):
             parts.append(netns_counts(data))
         if socket_cost(data):
@@ -486,8 +546,8 @@ def main():
         if lmethods:
             parts.append(table(title, lmethods, lrows))
             parts.append(lab_notes(lmethods, lrs))
-    print("\n".join(parts))
+    return "\n".join(parts)
 
 
 if __name__ == "__main__":
-    main()
+    print(summary(sys.argv[1]))

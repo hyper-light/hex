@@ -77,7 +77,7 @@ pub fn serve(mut conn: Box<dyn Duplex>, staged: &Path, limits: &Limits) {
         Err(why) => Answer::Refused(why),
     };
     let refused = matches!(answer, Answer::Refused(_));
-    if let Some(bytes) = wire::answer(wire::FIRST, 0, &answer, wire::MAX_MESSAGE)
+    if let Some(bytes) = wire::answer(0, &answer, wire::MAX_MESSAGE)
         .ok()
         .and_then(|bytes| stream::frame(&bytes, wire::MAX_MESSAGE).ok())
     {

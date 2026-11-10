@@ -57,6 +57,15 @@ impl Runtime for Client {
         match self.never {}
     }
 
+    fn run(
+        &self,
+        _spec: BoxSpec,
+        _program: Program,
+        _stdio: Stdio,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        match self.never {}
+    }
+
     fn signal(&self, _id: &BoxId, _signal: Signal) -> Result<(), Refusal> {
         match self.never {}
     }

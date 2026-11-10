@@ -16,15 +16,15 @@
 //! into `slices` contiguous ranges, and each workload is routed to the first slice, from slice
 //! `id mod slices` on, holding a node that would admit it empty. Every workload is submitted to the one store before the clock starts, so all
 //! 1,000,000 are pending at once and none ends. Then one thread per slice runs hex-sim's own fast path
-//! over its slice's pending workloads in submit order: the sampled best node by Hex's packing score
-//! (`FitIndex::sampled_fit` with `Scorer::HEX`, H11; kube-scheduler's floors of 100 nodes or 5%), the commit to the one store
+//! over its slice's pending workloads in submit order: the best node by Hex's packing score
+//! (`FitIndex::fit` with `Scorer::HEX`, H11; the kernel's walk over every node with the room), the commit to the one store
 //! by compare-and-set on the version the submit returned (`Store::apply`, behind a mutex: the store is
 //! the planes' one shared point, as Amphora's will be), and the index update. The time runs from the
 //! first decision to the last commit, wall-clock.
 //!
 //! With `check`, after each timed run (untimed), each slice's part of the store's log is replayed, in
 //! the store's order, into a store of that slice alone, and the serial specification judges it
-//! (`spec::check_log`, H4 per slice): each placement the slice's sampled choice at its point, no
+//! (`spec::check_log`, H4 per slice): each placement the slice's pick at its point, no
 //! queue jumped, nothing left pending that a node holds.
 //!
 //! Every workload is one of Hex's three classes by G2's rule (`docs/design/hex-sim.md` H69): owners
@@ -53,7 +53,7 @@ use std::time::{Duration, Instant};
 
 use hex_sim::fair::Policy;
 use hex_sim::generate::{self, NodeModel};
-use hex_sim::index::{FitIndex, Sample, Scorer, Shapes};
+use hex_sim::index::{FitIndex, Pick, Scorer, Shapes};
 use hex_sim::model::{
     Class, Cluster, Kind, NodeId, NodeSpec, Owner, Resources, Tenancy, WorkloadId, WorkloadSpec,
 };
@@ -103,6 +103,7 @@ fn recorded_needs() -> Vec<Resources> {
             cpu_milli: ((u128::from(c) * 100 / cpu_mean) as u64).max(1),
             mem_bytes: ((u128::from(m) * u128::from(500 * MIB) / mem_mean) as u64).max(1),
             gpus: 0,
+            disk_bytes: 0,
         })
         .collect()
 }
@@ -122,6 +123,7 @@ fn workloads(row: Row, seed: u64) -> Vec<WorkloadSpec> {
                         cpu_milli: 100,
                         mem_bytes: 500 * MIB,
                         gpus: 0,
+                        disk_bytes: 0,
                     },
                     Kind::Plain,
                 ),
@@ -138,6 +140,7 @@ fn workloads(row: Row, seed: u64) -> Vec<WorkloadSpec> {
                 runs_for: None,
                 tenancy: Tenancy::default(),
                 class: Class::Oci,
+                ask: Default::default(),
             }
         })
         .collect::<Vec<_>>();
@@ -169,6 +172,7 @@ fn shapes(work: &[WorkloadSpec]) -> Shapes {
                     cpu_milli: cpu,
                     mem_bytes: mem,
                     gpus: 0,
+                    disk_bytes: 0,
                 },
                 class,
             ));
@@ -227,13 +231,13 @@ fn setup(row: Row, seed: u64, slices: u32, model: NodeModel) -> (Vec<NodeSpec>, 
 }
 
 /// The fast path over one slice's pending workloads, in submit order.
-fn place(slice: &Slice, store: &Mutex<Store>, sample: &Sample) -> Placed {
+fn place(slice: &Slice, store: &Mutex<Store>, pick: &Pick) -> Placed {
     let mut index = FitIndex::new(&slice.nodes).unwrap();
     let began = Instant::now();
     let (mut placed, mut unplaced, mut by_class) = (0, 0, [0usize; 3]);
     for (spec, version) in &slice.pending {
         let demand = spec.demand();
-        let Some(best) = index.sampled_fit(&demand, sample).best else {
+        let Some(best) = index.fit(&demand, pick).best else {
             unplaced += 1;
             continue;
         };
@@ -249,7 +253,7 @@ fn place(slice: &Slice, store: &Mutex<Store>, sample: &Sample) -> Placed {
                 spec.id
             ),
         }
-        index.take(best.node, &demand).unwrap();
+        index.take(best.node, spec.id, &demand).unwrap();
         placed += 1;
         by_class[spec.class as usize] += 1;
     }
@@ -264,7 +268,7 @@ fn place(slice: &Slice, store: &Mutex<Store>, sample: &Sample) -> Placed {
 
 /// The serial specification over one slice's part of the store's log, replayed into a store of that
 /// slice alone; and every workload routed there placed.
-fn check(slice: &Slice, store: &Store, sample: Sample) -> Result<u64, String> {
+fn check(slice: &Slice, store: &Store, pick: Pick) -> Result<u64, String> {
     let hi = slice.base + slice.nodes.len() as u32;
     let ours = |w: WorkloadId| {
         slice
@@ -315,7 +319,7 @@ fn check(slice: &Slice, store: &Store, sample: Sample) -> Result<u64, String> {
         acked: Vec::new(),
         refused: Vec::new(),
         ran: Vec::new(),
-        sample,
+        pick,
         // The bench's own fast path takes each slice's work in submit order; that order weighs no
         // owner.
         policy: Policy::Fifo,
@@ -360,10 +364,9 @@ fn main() {
     // Hex's packing score (H11, `Scorer::HEX`), as `sched_fast_path.rs` measures it: least stranded
     // against each class's smallest needs, then the node running the fewest classes. With classes,
     // plain best fit puts OCI and Shards work on the Linux nodes Firecracker alone can use.
-    let sample = Sample {
+    let pick = Pick {
         scorer: Scorer::HEX,
         shapes: shapes(&workloads(row, 0)),
-        ..Sample::default()
     };
     println!(
         "sched_million: {WORKLOADS} pending {} on {NODES} nodes of {}, {slices} slices on {cpus} CPUs, {runs} runs, check={checking}",
@@ -385,8 +388,8 @@ fn main() {
             let handles: Vec<_> = parts
                 .iter()
                 .map(|part| {
-                    let (store, sample) = (&store, &sample);
-                    s.spawn(move || place(part, store, sample))
+                    let (store, pick) = (&store, &pick);
+                    s.spawn(move || place(part, store, pick))
                 })
                 .collect();
             handles.into_iter().map(|h| h.join().unwrap()).collect()
@@ -428,7 +431,7 @@ fn main() {
                     .iter()
                     .map(|part| {
                         let store = &store;
-                        s.spawn(move || check(part, store, sample))
+                        s.spawn(move || check(part, store, pick))
                     })
                     .collect();
                 handles.into_iter().map(|h| h.join().unwrap()).collect()

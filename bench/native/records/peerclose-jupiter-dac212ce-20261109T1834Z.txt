@@ -1,0 +1,42 @@
+stdio_probe peerclose (native plan step 8; the lead's ruling of 2026-11-09 on the hostile-frame hang): how
+soon a peer closes after the Windows node ends its connection by half-closing it. Each round the node reads
+a peer's hostile request (a frame prefix past the format's largest message), answers it (62 bytes, a
+refusal's size), shuts its sending side (SD_SEND, the end-of-stream) and times the peer's close; the peer, a
+caller process, reads to its end and closes at once, as Hex's client and its tests do. A round whose peer
+hasn't closed within the node's watch (the probe's own, 1 s; the caller's 2 s) is counted lost and reset
+(linger 0), never taken as a sample. 299 rounds a run (the p99 confidence rule's N).
+
+OF RECORD: the end-to-peer-close record, whose slowest seeds the node's learned wait for a peer's close
+(Hex's rule for learned waits: twice the slowest of the record and what the node has seen since).
+
+machine:  jupiter (AMD Ryzen AI MAX+ 395, 32 logical CPUs, Windows NT 10.0.26200), up 21 h since the 02:51Z reboot
+commit:   bench/native/windows/stdio_probe at dac212ce (cp/t7-native-s8-keeper), --release
+when:     2026-11-09 18:33-18:36Z, kiln background runs
+host:     no other session's work before, between or after (no cargo, rustc, hex, stdio_probe, docker or
+          containerd of anyone else's); System FreePage 42-43 throughout; privileged 1.1-2.1% outside the
+          busy runs, 10.2% at their start.
+load:     the machine's CPU over the last whole second at each round (the first reading a second before
+          the first round, so every reading spans one).
+raw:      jupiter C:\Users\corph\.cache\hex-t7-windows\logs\peerclose-busy-20261109T183435Z-all.csv
+          (2,990 rows: run, round, close_us, lost, load_pct_last_s; sha256
+          c72cafbf43e9231ff3c91514edc3dfdccb9cd07934f397ab63f50b1906c02b1e), and beside it
+          peerclose-quiet-20261109T183331Z.csv and peerclose-loaded-20261109T183331Z-{1..4}.csv
+
+condition                                   rounds  lost  close p50  p99    p99.9  slowest
+quiet (one run)                                299     0                               56 us
+four runs at once                            1,196     4                               73 us
+beside a workspace build (ten runs)          2,990    12      10 us  113 us  626 us  2,883 us
+
+The busy runs ran beside `cargo build --workspace --all-targets` of this tree into a fresh target folder:
+load p50 12.3%, p99 35.1%, max 35.6%. Per run (load mean / max): run 1 slowest 2,883 us, 5 lost (24.4 /
+32.0%); run 3 slowest 403 us, 3 lost (30.5 / 35.6%); runs 2 and 4-10 slowest 39-95 us (9.7-15.9%). The
+six slowest closes: 500, 512, 562, 626, 1,316 and 2,883 us (run 1, round 42, at 31.8% load). Lost: 12 of
+2,990 rounds (0.40%; runs 1, 2, 3 and 8), each reset, its peer's read ended by the reset.
+
+Read: a peer that reads to the end it is given closes within microseconds on a quiet host (slowest 56 us)
+and within 3 ms beside a build that keeps a third of the machine busy (slowest 2,883 us, p99.9 626 us).
+That slowest is the record: the node's wait before it resets a peer that hasn't closed starts at twice
+it, 5.766 ms, and rises with what the node sees. The lost rounds confirm, in a probe of its own and with
+blocking sockets on both sides, what the node's hostile-frame test showed: afunix.sys now and then never
+delivers a graceful end-of-stream to a peer in another process (0.4% here; ~2% for the node's
+overlapped sockets under four nodes' load), so the reset after the wait is what ends those connections.

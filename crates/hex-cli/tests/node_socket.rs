@@ -25,12 +25,23 @@
 //! - HEX-SOCK-6, the disconnect rule: a caller that goes away while its exec'd programs run (its
 //!   connection closes with no release, as when its process dies) has each program ended and reaped,
 //!   and counted in its box, which inspect reports; nothing it started is left running;
-//! - T-T7.1.2 (goal 5 plan step 2): kill the agent at each record write of a create, its boxes'
-//!   records durable and not, and restart it: the box killed mid-create is cleaned up, the one made is
-//!   taken back and deletes, and nothing of either is left.
+//! - T-T7.1.2 (goal 5 extended step 6): kill the agent while a box of an owner holds a slot and another
+//!   box's slot is idle, with a box of no owner beside them, and restart it: the idle slot is removed,
+//!   said so on stderr, the live boxes are taken back, the owner's in its recorded slot, and once they're
+//!   deleted nothing is left under the oci boxes' root;
+//! - T-T7.1.2 (goal 5 plan step 2; goal 5 extended step 5): kill the agent at each point of a create
+//!   (in a debug build, at its cgroup made and at its bundle rendered, where the agent armed by
+//!   `hex node --crash-at` kills itself; its cgroup and its container's state directory made; its
+//!   init cloned; inside its one record write; after it), its boxes' records durable and not, and
+//!   restart it: the box killed mid-create is cleaned up by what it left, the one made is taken back
+//!   and deletes, and nothing of either is left; and a box whose own spec names the crash point, on an
+//!   agent that armed none, is made whole, the agent living on. A case made to fail on purpose after the kill,
+//!   its box's init alive at the exec FIFO: expect every process that was in its cgroups ended, the cgroups and
+//!   its container's state removed, as the case unwinds (CLAUDE.md §2).
 //!
 //! Rootless where the caller isn't root, in a delegated cgroup v2 subtree, as oci_box.rs; where neither
-//! is possible it prints SKIP and why rather than pass falsely.
+//! is possible it records the skip and why (hex_testkit, which the gate prints) rather than pass
+//! falsely.
 #![cfg(target_os = "linux")]
 #![allow(
     clippy::unwrap_used,
@@ -41,19 +52,49 @@
     clippy::disallowed_macros
 )]
 
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio as Std};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
 
 use hex_api::conformance::{self, Act, Fixture};
 use hex_api::{
-    Bounds, BoxId, BoxSpec, BoxState, Class, ClassSpec, Exit, Program, Refusal, Runtime, Stdio,
+    Bounds, BoxId, BoxOwner, BoxSpec, BoxState, Class, ClassSpec, Exit, Program, Refusal, Runtime,
+    Stdio,
 };
+#[cfg(debug_assertions)]
+use hex_api::{Network, OciSpec, Rootfs};
 use hex_client::Client;
+use hex_core::patience::Patience;
 use hex_core::record::{BoxRecord, Phase, ProcId};
 use hex_core::stream;
 use hex_core::wire::{self, Answer, Call, Request, Streams};
+use hex_node::OCI_BOXES;
+use hex_testkit::waits::{CREATE, EMPTYING, EXEC, NETNS_MAKE, PROGRAM, START, until};
+
+/// Each wait here takes its own fact's record (hex_testkit::waits; the lead's rule of 2026-11-08), or measures where no
+/// recorded operation makes its fact. The pool's refill thread's make of a network namespace: `netns.make`.
+static POOL_HOLDS: Patience = Patience::seeded("test.node_socket.pool_holds", NETNS_MAKE);
+/// An exec's program in its box: made within the exec, before it answers, so the exec's record bounds it.
+static RUNNING: Patience = Patience::seeded("test.node_socket.running", EXEC);
+/// The agent's ending of a program whose caller went away, its kill, its reaping and its count in its box: a box's
+/// emptying's work, whose record the server's own wait for the programs it ends takes (decision 9: `node.emptying`).
+static ABANDONED: Patience = Patience::seeded("test.node_socket.abandoned", EMPTYING);
+/// A create's answer, and what a create makes within itself: its hooks holding it, the agent waiting opening its FIFO.
+static CREATING: Patience = Patience::seeded("test.node_socket.create", CREATE);
+/// A start's startContainer hook holding it, made within the start.
+static STARTING: Patience = Patience::seeded("test.node_socket.start", START);
+/// The crash hook, a program this test runs itself: its run to its end, and its pipe opened on the way.
+static HOOK: Patience = Patience::seeded("test.node_socket.hook", PROGRAM);
+/// A line the agent wrote before it answered or ended, delivered by this test's own stderr reader: no recorded
+/// operation makes the delivery, so measuring, for the fact alone, each answer recorded for the census to come.
+static SAID: Patience = Patience::measuring("test.node_socket.said");
+/// The agent's `READY=1` to its service manager once its socket listens: its start, its recovery and its bind, which
+/// no recorded operation makes, so measuring, for the fact alone, as [`SAID`] is.
+static READY: Patience = Patience::measuring("test.node_socket.ready");
+/// Longest the test waits for the agent's answer to an exec over a raw connection: twice the exec answer's record.
+const ANSWERED: std::time::Duration = EXEC.saturating_mul(2);
 
 const TEST: &str = "the_seam_holds_its_contract_over_the_node_agents_socket";
 
@@ -70,9 +111,14 @@ fn the_seam_holds_its_contract_over_the_node_agents_socket() {
                 .map(|o| o.status.success())
                 .unwrap_or(false);
             if !has_systemd {
-                eprintln!(
-                    "SKIP: own cgroup isn't ours to subdivide ({direct}) and no systemd --user for a private scope"
-                );
+                hex_testkit::skip(
+                    "the_seam_holds_its_contract_over_the_node_agents_socket",
+                    "cgroup v2 delegation",
+                    &format!(
+                        "own cgroup isn't ours to subdivide ({direct}) and no systemd --user for a private scope"
+                    ),
+                )
+                .expect("recording the skip");
                 return;
             }
             let status = Command::new("systemd-run")
@@ -85,7 +131,12 @@ fn the_seam_holds_its_contract_over_the_node_agents_socket() {
             assert!(status.success(), "the delegated re-run failed");
         }
         Err(direct) => {
-            eprintln!("SKIP: no usable cgroup v2 delegation ({direct}); run on a cgroup-v2 host")
+            hex_testkit::skip(
+                "the_seam_holds_its_contract_over_the_node_agents_socket",
+                "cgroup v2 delegation",
+                &format!("none in the delegated scope either ({direct}); run on a cgroup-v2 host"),
+            )
+            .expect("recording the skip");
         }
     }
 }
@@ -174,6 +225,7 @@ fn nofile_seen(client: &Client, class: ClassSpec) -> String {
             id: id.clone(),
             bounds: Bounds::default(),
             class,
+            owner: None,
         })
         .unwrap();
     if client.inspect(&id).unwrap().state == BoxState::Created {
@@ -211,9 +263,7 @@ fn ready_is_told_to_the_service_manager(own: &Path, cache: &Path, exe: &str) {
         .unwrap();
     let notify = dir.path().join("notify.sock");
     let manager = std::os::unix::net::UnixDatagram::bind(&notify).unwrap();
-    manager
-        .set_read_timeout(Some(conformance::PATIENCE))
-        .unwrap();
+    manager.set_nonblocking(true).unwrap();
     let socket = dir.path().join("node.sock");
     let mut node = Command::new(exe)
         .arg("node")
@@ -228,7 +278,17 @@ fn ready_is_told_to_the_service_manager(own: &Path, cache: &Path, exe: &str) {
         .spawn()
         .expect("start hex node");
     let mut said = [0u8; 64];
-    let n = manager.recv(&mut said).expect("READY=1 on $NOTIFY_SOCKET");
+    let mut n = 0;
+    wait_for(&READY, "READY=1 on $NOTIFY_SOCKET", || {
+        match manager.recv(&mut said) {
+            Ok(got) => {
+                n = got;
+                true
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => false,
+            Err(e) => panic!("reading $NOTIFY_SOCKET: {e}"),
+        }
+    });
     let said = String::from_utf8_lossy(&said[..n]).into_owned();
     assert!(
         said.lines().any(|l| l == "READY=1"),
@@ -245,6 +305,9 @@ struct Agent {
     socket: PathBuf,
     box_root: PathBuf,
     _dir: Option<tempfile::TempDir>,
+    /// The agent's stderr, drained by a thread as it is written so the pipe never fills: what it says
+    /// about the boxes it recovered, which a crash case reads to see why one was removed.
+    errors: Arc<Mutex<String>>,
 }
 
 impl Agent {
@@ -261,6 +324,17 @@ impl Agent {
     /// A `hex node` whose records are in `dir`'s `state` and whose socket is `dir`'s `node.sock`, its
     /// boxes under `box_root`, with `runtime` its `XDG_RUNTIME_DIR` when given; `dir` is the caller's.
     fn over(exe: &str, dir: &Path, box_root: PathBuf, runtime: Option<&Path>) -> Self {
+        Self::armed(exe, dir, box_root, runtime, None)
+    }
+
+    /// As [`Agent::over`], armed at a debug build's crash point (`hex node --crash-at`) when one's given.
+    fn armed(
+        exe: &str,
+        dir: &Path,
+        box_root: PathBuf,
+        runtime: Option<&Path>,
+        crash_at: Option<&str>,
+    ) -> Self {
         let socket = dir.join("node.sock");
         let mut command = Command::new(exe);
         command
@@ -271,11 +345,28 @@ impl Agent {
             .arg(dir.join("state"))
             .arg("--box-root")
             .arg(&box_root)
-            .stdout(Std::piped());
+            .stdout(Std::piped())
+            .stderr(Std::piped());
+        if let Some(point) = crash_at {
+            command.arg("--crash-at").arg(point);
+        }
         if let Some(runtime) = runtime {
             command.env("XDG_RUNTIME_DIR", runtime);
         }
         let mut child = command.spawn().expect("start hex node");
+        // Drain stderr as it comes so the pipe never fills and blocks the agent, and keep what it says
+        // for a crash case to read (the boxes it recovered, and why each was removed).
+        let errors = Arc::new(Mutex::new(String::new()));
+        let stderr = child.stderr.take().unwrap();
+        let sink = Arc::clone(&errors);
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stderr);
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                sink.lock().unwrap().push_str(&line);
+                line.clear();
+            }
+        });
         // The fact a client needs: the agent says it's ready once its socket listens.
         let mut line = String::new();
         BufReader::new(child.stdout.take().unwrap())
@@ -291,7 +382,14 @@ impl Agent {
             socket,
             box_root,
             _dir: None,
+            errors,
         }
+    }
+
+    /// What the agent has said on stderr so far: the boxes recovery removed, and why each
+    /// ([`Agent::errors`]).
+    fn errors(&self) -> String {
+        self.errors.lock().unwrap().clone()
     }
 
     fn client(&self) -> Client {
@@ -300,6 +398,18 @@ impl Agent {
 
     fn pid(&self) -> i32 {
         i32::try_from(self.child.id()).unwrap()
+    }
+
+    /// Waits for the agent to end, and how it ended.
+    #[cfg(debug_assertions)]
+    fn ended(&mut self) -> std::process::ExitStatus {
+        self.child.wait().unwrap()
+    }
+
+    /// Whether the agent still runs.
+    #[cfg(debug_assertions)]
+    fn runs(&mut self) -> bool {
+        self.child.try_wait().unwrap().is_none()
     }
 }
 
@@ -384,6 +494,7 @@ impl Lab {
     "args": {args:?},
     "env": ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"],
     "user": {{"uid": 0, "gid": 0}},
+    "capabilities": {capabilities},
     "noNewPrivileges": true
   }},
   "mounts": [
@@ -397,9 +508,24 @@ impl Lab {
 }}"#,
             rootfs = self.rootfs.display(),
             exe = self.exe,
+            capabilities = capabilities(),
         );
         std::fs::write(dir.join("config.json"), config).expect("config.json");
         dir
+    }
+
+    /// An `OciSpec` the node renders a bundle for: the lab's rootfs, the host's network, an init that
+    /// waits.
+    #[cfg(debug_assertions)]
+    fn spec(&self) -> OciSpec {
+        OciSpec {
+            rootfs: Rootfs::Dir(self.rootfs.clone()),
+            init: program(&Self::act(&Act::Wait)),
+            mounts: Vec::new(),
+            hostname: None,
+            network: Network::Host,
+            hosts: Vec::new(),
+        }
     }
 
     /// The `hex selftest-box` program for `act`, as a container sees the binary (`/hex`).
@@ -450,6 +576,7 @@ impl Fixture for OciBoxes<'_> {
             id,
             bounds,
             class: ClassSpec::Bundle(self.0.bundle_with(&Lab::act(&Act::Wait), self.1)),
+            owner: None,
         }
     }
 
@@ -458,6 +585,7 @@ impl Fixture for OciBoxes<'_> {
             id,
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(self.0.bundle_with(&Lab::act(act), self.1)),
+            owner: None,
         }
     }
 
@@ -478,6 +606,7 @@ impl Fixture for ProcessBoxes<'_> {
             id,
             bounds,
             class: ClassSpec::Process,
+            owner: None,
         }
     }
 
@@ -499,10 +628,16 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     let client = agent.client();
     assert_eq!(client.classes(), [Class::Process, Class::Oci]);
     if let Err(e) = example(&lab, &client) {
-        eprintln!("SKIP: rootless OCI unavailable here ({e})");
+        hex_testkit::skip(
+            "the_seam_holds_its_contract_over_the_node_agents_socket",
+            "unprivileged user namespaces",
+            &format!("rootless OCI unavailable here ({e})"),
+        )
+        .expect("recording the skip");
         return;
     }
     namespaces_counted(&lab, &client);
+    the_agent_parks_procs_as_root_and_none_rootless(&lab, own, cache, exe);
     let failures = hex_api::differential::run(&client, &OciBoxes(&lab, false));
     assert!(
         failures.is_empty(),
@@ -520,8 +655,26 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     through_a_simulated_guest(&lab, &agent, exe);
     through_a_host_nodes_socket(&lab, &agent, exe);
     disconnect(&lab, &agent, &client);
-    crash_at_each_record_write(&lab, own, exe);
+    a_crash_with_idle_cgroups_and_live_boxes_leaves_nothing(&lab, own, exe);
+    a_sigterm_says_the_parked_procs_and_leaves_the_boxes_as_a_sigkill_does(&lab, own, exe);
+    crash_at_each_point_of_a_create(&lab, own, exe);
     assert!(client.list().unwrap().is_empty(), "a box is left");
+}
+
+/// Parked procs are the socket agent's, with no switch to turn them off (decision 8, parked procs; the lead,
+/// 2026-11-06; Ada's 2026-11-06 rule removed `--parked-procs` once bench/competitive/probes/parked_procs_ab.md decided
+/// them on; AC-T7.1.3). Do: start an agent. Expect: it says on stderr, from its node's own state, that it parks procs
+/// (root) or that a rootless node parks none.
+fn the_agent_parks_procs_as_root_and_none_rootless(lab: &Lab, own: &Path, cache: &Path, exe: &str) {
+    let said = if lab.rootless {
+        "hex node: parked procs: off: a rootless node parks none"
+    } else {
+        "hex node: parked procs: on"
+    };
+    let agent = Agent::start(exe, cache, own.join("hex-sock-pp"));
+    wait_for(&SAID, &format!("hex node saying {said:?}"), || {
+        agent.errors().lines().any(|l| l.starts_with(said))
+    });
 }
 
 /// The guest's ports as Unix sockets in the relay's directory.
@@ -785,6 +938,14 @@ impl Runtime for HostBoxes {
     ) -> Result<Box<dyn hex_api::Proc>, Refusal> {
         self.0.exec(id, program, stdio)
     }
+    fn run(
+        &self,
+        spec: BoxSpec,
+        program: Program,
+        stdio: Stdio,
+    ) -> Result<Box<dyn hex_api::Proc>, Refusal> {
+        self.0.run(spec, program, stdio)
+    }
     fn signal(&self, id: &BoxId, signal: hex_api::Signal) -> Result<(), Refusal> {
         self.0.signal(id, signal)
     }
@@ -835,11 +996,13 @@ fn through_a_host_nodes_socket(lab: &Lab, agent: &Agent, exe: &str) {
     let node = WithGuest::new(HostBoxes(hex_api::sim::SimRuntime::new()), runtime).unwrap();
     let node = hex_node::recorded::Recorded::open(node, &dir.path().join("state")).unwrap();
     let socket = dir.path().join("host.sock");
+    // The host node's socket bounds, as a Linux node takes them from its host (goal 5's sizes).
+    let platform = hex_node::sizes::Sizes::now().unwrap().platform();
     let server = hex_node::serve::Server::bind(
         &socket,
         Arc::new(node),
-        hex_node::serve::LIMITS,
-        hex_node::serve::WORKERS,
+        hex_node::serve::limits(&platform),
+        platform.threads,
     )
     .unwrap();
     let client = Client::connect(&socket).unwrap();
@@ -869,6 +1032,7 @@ fn example(lab: &Lab, client: &Client) -> Result<(), String> {
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(lab.bundle(&Lab::act(&Act::Wait))),
+        owner: None,
     });
     let info = made.map_err(|e| e.to_string())?;
     assert_eq!((info.class, info.state), (Class::Oci, BoxState::Created));
@@ -926,7 +1090,7 @@ fn namespaces_counted(lab: &Lab, client: &Client) {
         "the example's box has no network namespace of its own"
     );
     if !lab.rootless {
-        wait_for("the agent's pool to hold a namespace", || {
+        wait_for(&POOL_HOLDS, "the agent's pool to hold a namespace", || {
             let c = client.netns().unwrap();
             c.made_ahead > c.taken + c.discarded
         });
@@ -937,6 +1101,7 @@ fn namespaces_counted(lab: &Lab, client: &Client) {
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(lab.bundle_with(&Lab::act(&Act::Wait), true)),
+            owner: None,
         })
         .unwrap();
     client.delete(&id).unwrap();
@@ -953,7 +1118,7 @@ fn namespaces_counted(lab: &Lab, client: &Client) {
 /// is made on its create's path and none is taken.
 fn conformance_with_namespaces(lab: &Lab, client: &Client) {
     if !lab.rootless {
-        wait_for("the agent's pool to hold a namespace", || {
+        wait_for(&POOL_HOLDS, "the agent's pool to hold a namespace", || {
             let c = client.netns().unwrap();
             c.made_ahead > c.taken + c.discarded
         });
@@ -987,6 +1152,7 @@ fn disconnect(lab: &Lab, agent: &Agent, client: &Client) {
             id: oci.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(lab.bundle(&Lab::act(&Act::Wait))),
+            owner: None,
         })
         .unwrap();
     client.start(&oci).unwrap();
@@ -995,9 +1161,11 @@ fn disconnect(lab: &Lab, agent: &Agent, client: &Client) {
             id: process.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Process,
+            owner: None,
         })
         .unwrap();
-    let init = procs(&agent.box_root, &oci);
+    let oci_cg = oci_cgroup(&agent.box_root.join(OCI_BOXES), &oci);
+    let init = procs_in(&oci_cg);
     assert_eq!(init.len(), 1, "the oci box holds its init alone: {init:?}");
     let caller = raw(&agent.socket);
     let mut pids = Vec::new();
@@ -1020,33 +1188,46 @@ fn disconnect(lab: &Lab, agent: &Agent, client: &Client) {
         };
         send(
             &caller,
-            &wire::request(wire::VERSION, n, &Request::Call(call), wire::MAX_MESSAGE).unwrap(),
+            &wire::request(n, &Request::Call(call), wire::MAX_MESSAGE).unwrap(),
         );
         match answer(&caller) {
             (h, Answer::Started { pid }) if h.id == n => pids.push(pid),
             other => panic!("exec in {id}: {other:?}"),
         }
     }
-    wait_for("each program to run in its box", || {
-        procs(&agent.box_root, &oci).len() == 2 && procs(&agent.box_root, &process).len() == 1
+    wait_for(&RUNNING, "each program to run in its box", || {
+        procs_in(&oci_cg).len() == 2 && procs(&agent.box_root, &process).len() == 1
     });
     drop(caller);
     for id in [&oci, &process] {
-        wait_for(&format!("{id} to count its abandoned program"), || {
-            client.inspect(id).unwrap().abandoned == 1
-        });
+        wait_for(
+            &ABANDONED,
+            &format!("{id} to count its abandoned program"),
+            || client.inspect(id).unwrap().abandoned == 1,
+        );
     }
-    wait_for("the programs to be ended", || {
-        procs(&agent.box_root, &oci) == init && procs(&agent.box_root, &process).is_empty()
+    // The count is the last of the agent's ending of a program, after its kill and reaping: once both are counted,
+    // each fact of that ending holds at its first look, made within it.
+    let ended = wait_for(&ABANDONED, "the programs to be ended", || {
+        procs_in(&oci_cg) == init && procs(&agent.box_root, &process).is_empty()
     });
+    assert_eq!(
+        ended, 1,
+        "a program counted abandoned was ended before its count"
+    );
     for pid in &pids {
-        wait_for(&format!("program {pid} to be reaped"), || {
+        let reaped = wait_for(&ABANDONED, &format!("program {pid} to be reaped"), || {
             !Path::new(&format!("/proc/{pid}")).exists()
         });
+        assert_eq!(
+            reaped, 1,
+            "a program counted abandoned was reaped before its count"
+        );
     }
-    wait_for("no zombie under the agent", || {
+    let reaped = wait_for(&ABANDONED, "no zombie under the agent", || {
         zombies_of(agent.pid()).is_empty()
     });
+    assert_eq!(reaped, 1, "no zombie is left once the programs are counted");
     assert_eq!(
         client.inspect(&oci).unwrap().state,
         BoxState::Running,
@@ -1057,43 +1238,176 @@ fn disconnect(lab: &Lab, agent: &Agent, client: &Client) {
 }
 
 /// Where a crash case keeps the agent's containers' state, and so whether its boxes' records are
-/// durable: on tmpfs, as the node keeps it in its runtime directory, the records not fsynced; or on
-/// disk (an `XDG_RUNTIME_DIR` on disk, as a rootless node with none keeps it in its state directory),
-/// every record fsynced.
+/// durable: on tmpfs, as the node keeps it in its runtime directory, the records beside it and not
+/// fsynced; or on disk (an `XDG_RUNTIME_DIR` on disk, as a rootless node with none keeps it in its
+/// state directory), every record in the state directory and fsynced.
 #[derive(Clone, Copy, Debug)]
 enum Kept {
     Tmpfs,
     Disk,
 }
 
-/// Where in a create a crash case kills the agent.
+/// Where in a create a crash case kills the agent. The box's record is written once, last (goal 5
+/// extended step 5), so before it the agent leaves only parts at the paths the box's id fixes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum At {
-    /// In the record write that marks the box creating, before anything of it is made.
-    Creating,
-    /// In the record write that marks it ready, its cgroup, container and init made.
+    /// Its cgroup made, nothing else of it: the agent armed to kill itself there (a debug build's crash
+    /// point), the box rendered from an `OciSpec`.
+    #[cfg(debug_assertions)]
+    CgroupMade,
+    /// Its bundle rendered after its cgroup, its container's state directory not made: likewise.
+    #[cfg(debug_assertions)]
+    BundleRendered,
+    /// Its cgroup and its container's state directory made: the create held reading its bundle's
+    /// config.json, a FIFO no one has opened.
+    StateDir,
+    /// Its init cloned and stopped before its root switch, its container's state not yet written: the
+    /// create held in its createRuntime hook, which runs there (OCI config.md:607).
+    Init,
+    /// Past that stop: the init handed its state and running its createContainer hook, in its own
+    /// namespaces before its root switch (config.md:618-622), the agent waiting for its ready signal; its
+    /// container's state not yet written. The create held in that hook.
+    CreateContainer,
+    /// In the record write that marks it ready, a durable record's (so one written to a temp file and
+    /// renamed): the box made, the write held opening its temp file, a FIFO no one has opened. A
+    /// non-durable record's first write takes no temp ([`At::TornRecord`]).
     Ready,
-    /// After both: the create done.
+    /// In the record write that marks it ready, a non-durable record's: the box made, the agent armed
+    /// to kill itself between opening the record's file and writing it (a debug build's crash point),
+    /// leaving a torn record. The first write to a non-durable record goes straight to its file, so no
+    /// FIFO can hold it there; a release build can't arm the point, so it has no such case.
+    #[cfg(debug_assertions)]
+    TornRecord,
+    /// After it: the create done.
     Made,
+    /// The box made, and its start under way in its startContainer hook, the start waiting on the exec
+    /// FIFO the init hands its byte to only once its hooks have run. The agent's restart finds the start
+    /// begun and never taken, and removes the box by that reason; its init, released, finds the start gone
+    /// and ends with its own status (hex_runtime's `hooks::START_ABANDONED`).
+    StartContainer,
 }
 
-/// T-T7.1.2 (goal 5 plan step 2): kill the node agent at each record write of a create, then restart
-/// it, with its boxes' records durable and not. The agent is held in a record write by its temp file, a
-/// FIFO no one has opened, and killed once the kernel shows it waiting there: in the write that marks
-/// the box creating, and in the one that marks it ready (the FIFO made while the box's createRuntime
-/// hook holds the create, its container made); and after both. Restarted, the agent cleans up the box
-/// killed mid-create and takes back the one made, which then deletes, so at every point nothing of the
-/// box is left: no record, temp file, cgroup or container state.
-fn crash_at_each_record_write(lab: &Lab, own: &Path, exe: &str) {
-    for kept in [Kept::Tmpfs, Kept::Disk] {
-        for at in [At::Creating, At::Ready, At::Made] {
-            crash_at(lab, own, exe, kept, at);
+impl At {
+    /// The crash point the agent is armed at to die at this point, as `hex node --crash-at` names it.
+    fn armed(self) -> Option<&'static str> {
+        match self {
+            #[cfg(debug_assertions)]
+            Self::CgroupMade => Some("cgroup-made"),
+            #[cfg(debug_assertions)]
+            Self::BundleRendered => Some("bundle-rendered"),
+            #[cfg(debug_assertions)]
+            Self::TornRecord => Some("record-first-write"),
+            Self::StateDir
+            | Self::Init
+            | Self::CreateContainer
+            | Self::Ready
+            | Self::Made
+            | Self::StartContainer => None,
         }
     }
 }
 
+/// T-T7.1.2 (goal 5 plan step 2; goal 5 extended step 5): kill the node agent at each point of a
+/// create, with its boxes' records kept on tmpfs and on disk, then restart it. In a debug build the
+/// agent is armed to kill itself once the box's cgroup is made, once its bundle is rendered, and —
+/// where its record is non-durable, written once straight to its file — between that file's open and
+/// the write, leaving a torn record: no file it opens can hold it at any of these. Elsewhere it is held
+/// at a point by a FIFO no one has opened, or by the box's createRuntime hook, and killed once the
+/// kernel shows it waiting there: with the cgroup and the container's state directory made; with the
+/// init cloned and stopped for its create-time hooks; with the init past that stop, in its createContainer
+/// hook; inside a durable record's write, opening the temp
+/// file it renames; after the create; and, the box made, with its start in its startContainer hook.
+/// Restarted, the agent removes the box killed mid-create by what it finds of it — a torn record it
+/// reads as unreadable, and says so — and the one whose start it cut, saying the start was interrupted in
+/// its startContainer hooks; and takes back the one made, which then deletes, so at every point nothing of
+/// the box is left: no record in either place, no temp file, no cgroup, no container state, no bundle.
+fn crash_at_each_point_of_a_create(lab: &Lab, own: &Path, exe: &str) {
+    for kept in [Kept::Tmpfs, Kept::Disk] {
+        let mut points = Vec::new();
+        #[cfg(debug_assertions)]
+        points.extend([At::CgroupMade, At::BundleRendered]);
+        points.extend([At::StateDir, At::Init, At::CreateContainer]);
+        // The record write that marks a box ready is held by where its record is kept: a durable
+        // record (on disk) is written to a temp file and renamed, so a FIFO holds the agent opening the
+        // temp ([`At::Ready`]); a non-durable record (on tmpfs) is written once, straight to its file,
+        // so only a debug build's crash point holds the agent there ([`At::TornRecord`]).
+        match kept {
+            Kept::Tmpfs => {
+                #[cfg(debug_assertions)]
+                points.push(At::TornRecord);
+            }
+            Kept::Disk => points.push(At::Ready),
+        }
+        points.extend([At::Made, At::StartContainer]);
+        for at in &points {
+            crash_at(lab, own, exe, kept, *at);
+        }
+    }
+    a_crash_case_that_fails_leaves_nothing_alive(lab, own, exe);
+    #[cfg(debug_assertions)]
+    a_box_cannot_arm_the_agents_crash_point(lab, own, exe);
+}
+
 fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
-    let name = format!("crash-{kept:?}-{at:?}").to_lowercase();
+    crash_case(lab, own, exe, kept, at, None);
+}
+
+/// The fifth crash case, the incident of 2026-11-05 on fedora (four inits left alive by rootless crash cases that
+/// failed partway, their state directories gone; CLAUDE.md §2): run the box-made case set to fail right after the
+/// kill, its box's init alive at the exec FIFO and the agent gone, holding a pidfd of each process in its cgroups.
+/// Expect: the case unwinds, and every one of them has ended, its cgroups and its container's state removed.
+fn a_crash_case_that_fails_leaves_nothing_alive(lab: &Lab, own: &Path, exe: &str) {
+    let kept = if lab.rootless {
+        Kept::Disk
+    } else {
+        Kept::Tmpfs
+    };
+    let mut held = Vec::new();
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crash_case(lab, own, exe, kept, At::Made, Some(&mut held))
+    }));
+    assert!(failed.is_err(), "the case failed on purpose");
+    assert!(
+        !held.is_empty(),
+        "non-vacuity: the failed case's cgroups held its init at the failure"
+    );
+    let alive = held.iter().filter(|fd| !has_ended(fd)).count();
+    assert_eq!(alive, 0, "processes the failed case left alive");
+    let name = format!("crash-{kept:?}-{:?}-failed", At::Made).to_lowercase();
+    assert!(
+        !own.join(&name).exists(),
+        "the failed case's cgroups are left"
+    );
+    eprintln!(
+        "{name}: failed on purpose with {} processes in its cgroups; each ended, nothing left",
+        held.len()
+    );
+}
+
+/// Whether the process `fd` is a pidfd of has ended: it reads ready once it has.
+fn has_ended(fd: &OwnedFd) -> bool {
+    let mut fds = [rustix::event::PollFd::new(fd, rustix::event::PollFlags::IN)];
+    let now = rustix::event::Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    rustix::event::poll(&mut fds, Some(&now)).is_ok_and(|n| n > 0)
+}
+
+/// A crash case, `fail` set to make it fail right after the kill (the box made, its init alive), with a pidfd of
+/// each process then in its cgroups pushed to it.
+fn crash_case(
+    lab: &Lab,
+    own: &Path,
+    exe: &str,
+    kept: Kept,
+    at: At,
+    fail: Option<&mut Vec<OwnedFd>>,
+) {
+    let name = match fail {
+        None => format!("crash-{kept:?}-{at:?}").to_lowercase(),
+        Some(_) => format!("crash-{kept:?}-{at:?}-failed").to_lowercase(),
+    };
     let dir = tempfile::Builder::new()
         .prefix(&format!("{name}-"))
         .tempdir_in(lab.bundles.path())
@@ -1125,84 +1439,259 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
     // container state, left or under way, as this one's.
     let id = BoxId::new(dir.path().file_name().and_then(|n| n.to_str()).unwrap()).unwrap();
     let state = dir.path().join("state");
-    let record = state.join(format!("{id}.json"));
-    let temp = state.join(format!(".{id}.tmp"));
-    let cgroup = own.join(&name).join(id.as_str());
+    let cgroup = own.join(&name).join(OCI_BOXES).join(id.as_str());
+    let rendered = state.join("bundles").join(id.as_str());
+    // Ends what the case made as it ends, passed or failed: declared before the agents, so it drops after them.
+    let _made = CaseMade {
+        boxes: own.join(&name),
+        oci_root: oci_root.clone(),
+        id: id.clone(),
+    };
     let (hooked, go) = (dir.path().join("hooked"), dir.path().join("go"));
-    let bundle = if at == At::Ready {
-        // The create waits in its createRuntime hook, its container made, until this test makes `go`.
-        let script = format!(
-            "touch {} && until [ -e {} ]; do sleep 0.01; done",
-            hooked.display(),
-            go.display()
-        );
-        let hooks = format!(
-            r#",
-  "hooks": {{"createRuntime": [{{"path": "/bin/sh", "args": ["sh", "-c", {script:?}], "env": ["PATH=/usr/bin:/bin"]}}]}}"#
-        );
-        lab.bundle_hooked(&Lab::act(&Act::Wait), false, &hooks)
-    } else {
-        lab.bundle(&Lab::act(&Act::Wait))
+    // Keep a writer open until the case ends, including unwinding: an orphaned hook reads EOF
+    // after an assertion failure. A polled release file can disappear with the TempDir before
+    // the hook observes it, leaving the hook and this test's output pipe alive forever.
+    let mut hook_release = None;
+    let class = match at {
+        #[cfg(debug_assertions)]
+        At::CgroupMade | At::BundleRendered => ClassSpec::Oci(Box::new(lab.spec())),
+        At::StateDir => {
+            let bundle = dir.path().join("bundle");
+            std::fs::create_dir(&bundle).unwrap();
+            mkfifo(&bundle.join("config.json"));
+            ClassSpec::Bundle(bundle)
+        }
+        At::Init | At::CreateContainer | At::Ready => {
+            mkfifo(&go);
+            hook_release = Some(
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&go)
+                    .unwrap(),
+            );
+            // The create waits in its createRuntime hook (or, past the init's stop for the hooks, in its
+            // createContainer hook), its container made, until this test writes a line, or closes the
+            // writer on an assertion failure.
+            let script = crash_hook_script(&hooked, &go);
+            let list = if at == At::CreateContainer {
+                "createContainer"
+            } else {
+                "createRuntime"
+            };
+            let hooks = format!(
+                r#",
+  "hooks": {{"{list}": [{{"path": "/bin/sh", "args": ["sh", "-c", {script:?}], "env": ["PATH=/usr/bin:/bin"]}}]}}"#
+            );
+            ClassSpec::Bundle(lab.bundle_hooked(&Lab::act(&Act::Wait), false, &hooks))
+        }
+        // Armed to crash at the record write, so it creates fully, like a box made; a bundle box's
+        // record names only its container's state (on tmpfs here), so it is non-durable.
+        #[cfg(debug_assertions)]
+        At::TornRecord => ClassSpec::Bundle(lab.bundle(&Lab::act(&Act::Wait))),
+        At::Made => ClassSpec::Bundle(lab.bundle(&Lab::act(&Act::Wait))),
+        At::StartContainer => {
+            mkfifo(&go);
+            hook_release = Some(
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&go)
+                    .unwrap(),
+            );
+            // The hook runs inside the box's root, so this case's directory is bound in at /crash, where
+            // it touches `hooked` and waits for a line on `go`.
+            let script = crash_hook_script(Path::new("/crash/hooked"), Path::new("/crash/go"));
+            let hooks = format!(
+                r#",
+  "hooks": {{"startContainer": [{{"path": "/bin/sh", "args": ["sh", "-c", {script:?}], "env": ["PATH=/usr/bin:/bin"]}}]}}"#
+            );
+            let bundle = lab.bundle_hooked(&Lab::act(&Act::Wait), false, &hooks);
+            std::fs::create_dir_all(lab.rootfs.join("crash")).unwrap();
+            let config = bundle.join("config.json");
+            let mut spec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+            spec["mounts"].as_array_mut().unwrap().push(serde_json::json!(
+                {"destination": "/crash", "type": "bind", "source": dir.path(), "options": ["rbind", "rw"]}
+            ));
+            std::fs::write(&config, spec.to_string()).unwrap();
+            ClassSpec::Bundle(bundle)
+        }
     };
     let spec = BoxSpec {
         id: id.clone(),
         bounds: Bounds::default(),
-        class: ClassSpec::Bundle(bundle),
+        class,
+        owner: None,
     };
-    let agent = Agent::over(exe, dir.path(), own.join(&name), runtime.as_deref());
+    #[cfg_attr(not(debug_assertions), allow(unused_mut))]
+    let mut agent = Agent::armed(
+        exe,
+        dir.path(),
+        own.join(&name),
+        runtime.as_deref(),
+        at.armed(),
+    );
     if on_tmpfs(&oci_root) != matches!(kept, Kept::Tmpfs) {
         eprintln!("SKIP {name}: {} isn't where it's kept", oci_root.display());
         return;
     }
-    // Made once the agent has recovered, which removes a temp file it finds.
-    if at == At::Creating {
-        mkfifo(&temp);
-    }
+    // The record's place, now the agent has made its state directory: the state directory for a
+    // durable one, else the node's own beside its containers' state.
+    let records = match kept {
+        Kept::Tmpfs => hex_node::records_dir(&oci_root, &state).unwrap(),
+        Kept::Disk => state.clone(),
+    };
+    // A non-durable record is kept in its shard of the runtime record directory (goal 5 extended, step 6).
+    let (record, temp) = match kept {
+        Kept::Tmpfs => (
+            hex_node::store::runtime_record(&records, &id),
+            hex_node::store::runtime_temp(&records, &id),
+        ),
+        Kept::Disk => (
+            records.join(format!("{id}.json")),
+            records.join(format!(".{id}.tmp")),
+        ),
+    };
     let socket = agent.socket.clone();
     let create = std::thread::spawn(move || Client::connect(&socket).and_then(|c| c.create(spec)));
+    let mut start = None;
     match at {
-        At::Creating => {}
+        #[cfg(debug_assertions)]
+        At::CgroupMade | At::BundleRendered | At::TornRecord => {
+            use std::os::unix::process::ExitStatusExt;
+            let ended = agent.ended();
+            assert_eq!(
+                ended.signal(),
+                Some(9),
+                "{name}: the agent killed itself at its crash point: {ended:?}"
+            );
+        }
+        At::StateDir => {}
+        At::Init | At::CreateContainer => {
+            wait_for(&CREATING, "the create's hook to hold it", || {
+                hooked.exists()
+            });
+            assert!(!create.is_finished(), "{name}: the hook holds the create");
+        }
         At::Ready => {
-            wait_for("the create's hook to hold it", || hooked.exists());
+            wait_for(&CREATING, "the create's hook to hold it", || {
+                hooked.exists()
+            });
+            assert!(!create.is_finished(), "{name}: the hook holds the create");
             mkfifo(&temp);
-            std::fs::write(&go, b"").unwrap();
+            hook_release.as_mut().unwrap().write_all(b"\n").unwrap();
         }
         At::Made => {
-            wait_for("the create", || create.is_finished());
+            wait_for(&CREATING, "the create", || create.is_finished());
+        }
+        At::StartContainer => {
+            wait_for(&CREATING, "the create", || create.is_finished());
+            // Connected and greeted first: the wait below is for what the start makes within itself, its record's,
+            // and a client's connect and hello are no part of a start (the waits census's run 5: this wait ran out at
+            // 15.220 ms in 3 of 53 loops, the hello's answers under the suites' load reaching 17.232 ms).
+            let client = Client::connect(&agent.socket).expect("connect for the start");
+            let id = id.clone();
+            start = Some(std::thread::spawn(move || client.start(&id)));
+            wait_for(
+                &STARTING,
+                "the start's startContainer hook to hold it",
+                || hooked.exists(),
+            );
+            assert!(
+                !start.as_ref().unwrap().is_finished(),
+                "{name}: the hook holds the start"
+            );
         }
     }
-    if at != At::Made {
-        wait_for("the agent to wait in its record write", || {
+    if matches!(at, At::StateDir | At::Ready) {
+        wait_for(&CREATING, "the agent to wait opening a FIFO", || {
             waits_opening_a_fifo(agent.pid())
         });
+        assert!(!create.is_finished(), "{name}: the FIFO holds the create");
     }
-    // What the kill leaves, as the point says.
-    let phase = || {
+    // What the kill leaves, as the point says: a record only once the box is made, its container's
+    // state directory from the runtime's create on, its state written once its init is past its hooks.
+    let containers = || containers_of(&oci_root, &id);
+    // A record counts as written only once it decodes whole: a crash between a non-durable record's
+    // open and its write leaves a torn file, which reads as no record (At::TornRecord).
+    let written = || {
         std::fs::read(&record)
             .ok()
-            .map(|bytes| BoxRecord::decode(&bytes).unwrap().phase)
+            .and_then(|bytes| BoxRecord::decode(&bytes).ok())
+            .map(|record| record.phase)
     };
-    let (written, made) = match at {
-        At::Creating => (None, 0),
-        At::Ready => (Some(Phase::Creating), 1),
-        At::Made => (Some(Phase::Ready), 1),
+    let made = if matches!(at, At::Made | At::StartContainer) {
+        Some(Phase::Ready)
+    } else {
+        None
     };
-    assert_eq!(phase(), written, "{name}: the record at the kill");
+    assert_eq!(written(), made, "{name}: the record at the kill");
+    // A box of no owner has its cgroup chosen once the runtime has read its spec, as an owner's has, since the
+    // node keeps cgroups made ahead for it (decision 8): the bundle is rendered, then the runtime makes the
+    // container's state directory, then the cgroup is made. So every point but the bundle rendered has the
+    // state directory, and every point past the state directory the cgroup; the record write that marks the
+    // box ready comes after it is all made.
+    let state_dir_made = match at {
+        #[cfg(debug_assertions)]
+        At::BundleRendered => false,
+        _ => true,
+    };
+    let cgroup_made = state_dir_made && at != At::StateDir;
     assert_eq!(
-        (
-            containers_of(&oci_root, &id).len(),
-            usize::from(cgroup.exists())
-        ),
-        (made, made),
-        "{name}: (container states, cgroups) at the kill"
+        (containers().len(), cgroup.exists()),
+        (usize::from(state_dir_made), cgroup_made),
+        "{name}: (container states, the cgroup) at the kill"
     );
+    #[cfg(debug_assertions)]
+    assert_eq!(
+        rendered.exists(),
+        matches!(at, At::BundleRendered | At::CgroupMade),
+        "{name}: the bundle at the kill"
+    );
+    let state_written = containers()
+        .first()
+        .is_some_and(|c| c.join("state.json").exists());
+    assert_eq!(
+        state_written,
+        state_dir_made
+            && !matches!(at, At::StateDir | At::Init | At::CreateContainer)
+            && !at_cgroup_made(at),
+        "{name}: the container's state at the kill"
+    );
+    if let Some(held) = fail {
+        held.extend(
+            processes_in(&own.join(&name))
+                .into_iter()
+                .filter_map(|pid| {
+                    rustix::process::pidfd_open(
+                        rustix::process::Pid::from_raw(pid)?,
+                        rustix::process::PidfdFlags::empty(),
+                    )
+                    .ok()
+                }),
+        );
+        panic!("{name}: failed on purpose after the kill");
+    }
     drop(agent);
+    if matches!(at, At::Init | At::CreateContainer | At::StartContainer) {
+        // The hook may outlive the agent it ran under; let it end. Released, a startContainer hook's init
+        // goes on to hand its byte to the start that is gone.
+        hook_release.as_mut().unwrap().write_all(b"\n").unwrap();
+    }
     let created = create.join().unwrap();
     assert_eq!(
         created.is_ok(),
-        at == At::Made,
+        matches!(at, At::Made | At::StartContainer),
         "{name}: the create: {created:?}"
     );
+    if let Some(start) = start {
+        let started = start.join().unwrap();
+        assert!(
+            started.is_err(),
+            "{name}: the start the kill cut: {started:?}"
+        );
+    }
 
     let agent = Agent::over(exe, dir.path(), own.join(&name), runtime.as_deref());
     let client = agent.client();
@@ -1217,16 +1706,54 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
             "{name}: the box killed mid-create is cleaned up"
         );
     }
+    // A torn first write leaves a record that can't be read; recovery removed its box and said so
+    // (hex_core::recovery's Why::Unreadable). The reason is the point of the case.
+    // A start cut in its startContainer hooks: recovery removed the box by that reason, and said so
+    // (hex_core::recovery's Why::StartInterrupted), never as a box merely stopped.
+    if at == At::StartContainer {
+        wait_for(
+            &SAID,
+            "recovery to report the box's start interrupted",
+            || {
+                agent
+                    .errors()
+                    .lines()
+                    .any(|l| l.contains(id.as_str()) && l.contains("startContainer hooks"))
+            },
+        );
+    }
+    #[cfg(debug_assertions)]
+    if at == At::TornRecord {
+        wait_for(
+            &SAID,
+            "recovery to report the box removed as unreadable",
+            || {
+                agent
+                    .errors()
+                    .lines()
+                    .any(|l| l.contains(id.as_str()) && l.contains("couldn't be read"))
+            },
+        );
+    }
     assert!(client.list().unwrap().is_empty(), "{name}: a box is left");
-    assert!(!record.exists(), "{name}: its record is left");
+    for place in [&state, &records] {
+        assert!(
+            !place.join(format!("{id}.json")).exists(),
+            "{name}: its record is left in {}",
+            place.display()
+        );
+    }
     assert!(!temp.exists(), "{name}: its record's temp file is left");
     assert!(
-        containers_of(&oci_root, &id).is_empty(),
+        containers().is_empty(),
         "{name}: its container's state is left"
     );
     assert!(!cgroup.exists(), "{name}: its cgroup is left");
+    assert!(!rendered.exists(), "{name}: its bundle is left");
     eprintln!(
-        "{name}: killed with the record {written:?} and {made} container made; after the restart {}, nothing left",
+        "{name}: killed with the record {made:?}, its cgroup made, its container's state directory {}made and its state {}written; after the restart {}, nothing left",
+        if state_dir_made { "" } else { "not " },
+        if state_written { "" } else { "not " },
         if at == At::Made {
             "taken back, then deleted"
         } else {
@@ -1235,13 +1762,421 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
     );
 }
 
+/// What a crash case makes outside its temporary directory: its boxes' cgroups under `boxes` and its container's
+/// state under `oci_root`. Dropped, as the case ends or unwinds from a failed assertion, it ends every process in
+/// those cgroups through `cgroup.kill`, waits for them to empty (bounded by the conformance suite's patience) and
+/// removes them, deepest first, and the container's state: a case that fails leaves nothing alive (CLAUDE.md §2).
+/// A case that passed has ended its boxes, so the drop finds their cgroups empty and removes them.
+struct CaseMade {
+    boxes: PathBuf,
+    oci_root: PathBuf,
+    id: BoxId,
+}
+
+impl Drop for CaseMade {
+    fn drop(&mut self) {
+        if self.boxes.exists() {
+            // Waited on cgroup.events' `populated`, as a delete waits for a box to empty, not polled on a picked
+            // period (Ada's 2026-11-06 rule).
+            let cg = hex_runtime::linux::cgroup::BoxCgroup::at(self.boxes.clone());
+            let _ = cg.kill();
+            let _ = cg.wait_empty(EMPTYING.saturating_mul(2));
+            let (mut walk, mut dirs) = (vec![self.boxes.clone()], Vec::new());
+            while let Some(dir) = walk.pop() {
+                if let Ok(entries) = std::fs::read_dir(&dir) {
+                    walk.extend(
+                        entries
+                            .flatten()
+                            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                            .map(|e| e.path()),
+                    );
+                }
+                dirs.push(dir);
+            }
+            for dir in dirs.iter().rev() {
+                let _ = std::fs::remove_dir(dir);
+            }
+        }
+        for state in containers_of(&self.oci_root, &self.id) {
+            let _ = std::fs::remove_dir_all(state);
+        }
+    }
+}
+
+/// Every process in the cgroup `root` and those under it: a flat walk (CLAUDE.md §11).
+fn processes_in(root: &Path) -> Vec<i32> {
+    let (mut dirs, mut pids) = (vec![root.to_path_buf()], Vec::new());
+    while let Some(dir) = dirs.pop() {
+        if let Ok(procs) = std::fs::read_to_string(dir.join("cgroup.procs")) {
+            pids.extend(procs.lines().filter_map(|l| l.trim().parse::<i32>().ok()));
+        }
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            dirs.extend(
+                entries
+                    .flatten()
+                    .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                    .map(|e| e.path()),
+            );
+        }
+    }
+    pids
+}
+
+fn crash_hook_script(hooked: &Path, go: &Path) -> String {
+    format!(
+        "touch {} && read -r release < {}",
+        hooked.display(),
+        go.display()
+    )
+}
+
+/// T-T7.1.2's fixture: a killed node's hook still waits for release, and ends even when its test
+/// unwinds without releasing it. No release filename can disappear before a polling hook sees it.
+#[test]
+fn a_crash_hook_waits_for_a_line_and_ends_when_its_writer_closes() {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    struct Hook(Child);
+    impl Drop for Hook {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    for release in [true, false] {
+        let dir = tempfile::tempdir_in(cache_dir()).unwrap();
+        let go = dir.path().join("go");
+        let ready = dir.path().join("ready");
+        mkfifo(&go);
+        let mut hook = Hook(
+            Command::new("/bin/sh")
+                .arg("-c")
+                .arg(crash_hook_script(&ready, &go))
+                .stdout(Std::null())
+                .stderr(Std::null())
+                .spawn()
+                .unwrap(),
+        );
+        let mut writer = None;
+        wait_for(&HOOK, "the hook to open its release pipe", || {
+            assert!(
+                hook.0.try_wait().unwrap().is_none(),
+                "the crash hook ended before its pipe was released"
+            );
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(i32::try_from(rustix::fs::OFlags::NONBLOCK.bits()).unwrap())
+                .open(&go)
+            {
+                Ok(f) => {
+                    writer = Some(f);
+                    true
+                }
+                // Opening a FIFO's writer without blocking succeeds only once a reader opened it.
+                Err(e) if e.raw_os_error() == Some(rustix::io::Errno::NXIO.raw_os_error()) => false,
+                Err(e) => panic!("opening the release pipe: {e}"),
+            }
+        });
+        if release {
+            writer.as_mut().unwrap().write_all(b"\n").unwrap();
+        }
+        drop(writer);
+        wait_for(
+            &HOOK,
+            "the hook to end after release or writer close",
+            || hook.0.try_wait().unwrap().is_some(),
+        );
+    }
+}
+
+/// T-T7.1.2's crash point is the agent's alone to arm (`hex node --crash-at`, from its own arguments):
+/// an agent started without it makes a box whose own spec names the point, in its init's environment as
+/// a variable might carry it, whole, and lives on. Debug builds only, where the point exists to be proven
+/// inert.
+#[cfg(debug_assertions)]
+fn a_box_cannot_arm_the_agents_crash_point(lab: &Lab, own: &Path, exe: &str) {
+    let dir = tempfile::Builder::new()
+        .prefix("crash-unarmed-")
+        .tempdir_in(lab.bundles.path())
+        .unwrap();
+    let mut agent = Agent::over(exe, dir.path(), own.join("crash-unarmed"), None);
+    let client = agent.client();
+    let id = BoxId::new("names-the-crash-point").unwrap();
+    let mut spec = lab.spec();
+    for (name, point) in [
+        ("HEX_CRASH_AT", "cgroup-made"),
+        ("CRASH_AT", "bundle-rendered"),
+    ] {
+        spec.init.env.push((name.to_owned(), point.to_owned()));
+    }
+    let made = client
+        .create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Oci(Box::new(spec)),
+            owner: None,
+        })
+        .expect("a box naming the crash point is made");
+    assert_eq!(made.state, BoxState::Created);
+    assert!(agent.runs(), "the agent lives on");
+    client.delete(&id).unwrap();
+    eprintln!(
+        "a box naming the crash point in its own spec: made whole, the unarmed agent living on"
+    );
+}
+
 /// The state directories under `oci_root` of box `id`'s container, whatever node's: each is named
 /// `<node key>-<box id>`, the key 16 hex digits.
-fn containers_of(oci_root: &Path, id: &BoxId) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(oci_root) else {
-        return Vec::new();
+/// The cgroups under the oci boxes' root `oci` that are slots ([`hex_core::reuse::slot_of`]).
+fn slots_under(oci: &Path) -> std::collections::BTreeSet<String> {
+    std::fs::read_dir(oci)
+        .unwrap()
+        .flatten()
+        .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+        .filter(|name| hex_core::reuse::slot_of(name).is_some())
+        .collect()
+}
+
+/// The slots under `oci` holding a process that isn't an init parked ahead (a fork of the create seed, `hex
+/// __oci-seed`, until claimed: decision 8): the slots boxes hold.
+fn box_slots(oci: &Path) -> std::collections::BTreeSet<String> {
+    let parked = |pid: &String| {
+        std::fs::read(format!("/proc/{pid}/cmdline"))
+            .is_ok_and(|b| b.split(|&c| c == 0).any(|a| a == b"__oci-seed"))
     };
-    entries
+    slots_under(oci)
+        .into_iter()
+        .filter(|name| {
+            let p = procs_in(&oci.join(name));
+            !p.is_empty() && !p.iter().all(parked)
+        })
+        .collect()
+}
+
+/// `hex node` ends on SIGTERM saying its parked procs (decision 8, parked procs; the lead, 2026-11-06, AC-T7.1.3,
+/// T-T7.1.2): one line of counts on stderr, then it exits 143, and nothing else of its end differs from a
+/// SIGKILL's. Do: over the socket, make and start A of owner O, delete A, make and start B of O; SIGTERM the
+/// agent; start it again over the same state. Expect: it said `parked procs at exit:` with made, hits, misses,
+/// dry, capped and alive, as root B's create a hit of the proc A's delete made (rootless none made); it exited 143;
+/// its socket's file and B's processes are left as a SIGKILL leaves them; the restarted agent takes B back
+/// running, and once B is deleted no box is listed.
+fn a_sigterm_says_the_parked_procs_and_leaves_the_boxes_as_a_sigkill_does(
+    lab: &Lab,
+    own: &Path,
+    exe: &str,
+) {
+    let dir = tempfile::Builder::new()
+        .prefix("agent-term-")
+        .tempdir_in(lab.bundles.path())
+        .unwrap();
+    let box_root = own.join("hex-sock-term");
+    let mut agent = Agent::over(exe, dir.path(), box_root.clone(), None);
+    let client = agent.client();
+    let o = BoxOwner::named("owner-term").unwrap();
+    let wait = Lab::act(&Act::Wait);
+    let id = |name: &str| BoxId::new(name).unwrap();
+    for name in ["term-a", "term-b"] {
+        client
+            .create(BoxSpec {
+                id: id(name),
+                bounds: Bounds::default(),
+                class: ClassSpec::Bundle(lab.bundle(&wait)),
+                owner: Some(o.clone()),
+            })
+            .unwrap();
+        client.start(&id(name)).unwrap();
+        if name == "term-a" {
+            client.delete(&id(name)).unwrap();
+        }
+    }
+    drop(client);
+    let term = Command::new("kill")
+        .args(["-TERM", &agent.pid().to_string()])
+        .status()
+        .unwrap();
+    assert!(term.success(), "kill -TERM {}", agent.pid());
+    let ended = agent.child.wait().unwrap();
+    assert_eq!(
+        ended.code(),
+        Some(143),
+        "hex node ended on SIGTERM: {ended:?}"
+    );
+    wait_for(&SAID, "the agent's parked procs line", || {
+        agent.errors().contains("hex node: parked procs at exit:")
+    });
+    let said = agent.errors();
+    let line = said
+        .lines()
+        .find_map(|l| l.strip_prefix("hex node: parked procs at exit: "))
+        .unwrap()
+        .to_owned();
+    let counts: Vec<(String, u64)> = line
+        .split(", ")
+        .map(|kv| {
+            let (k, v) = kv.split_once(' ').unwrap();
+            (k.to_owned(), v.parse().unwrap())
+        })
+        .collect();
+    let names: Vec<&str> = counts.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(
+        names,
+        ["made", "hits", "misses", "dry", "capped", "alive"],
+        "{line}"
+    );
+    let count = |k: &str| counts.iter().find(|(n, _)| n == k).unwrap().1;
+    if lab.rootless {
+        assert_eq!(
+            (count("made"), count("hits")),
+            (0, 0),
+            "a rootless node parks none: {line}"
+        );
+    } else {
+        assert!(
+            count("hits") >= 1 && count("made") >= count("hits"),
+            "B took A's delete's proc: {line}"
+        );
+    }
+    assert!(
+        agent.socket.exists(),
+        "the socket's file is left, as a SIGKILL leaves it"
+    );
+    assert!(
+        !procs_in(&oci_cgroup(&box_root.join(OCI_BOXES), &id("term-b"))).is_empty(),
+        "B runs on after its agent's SIGTERM"
+    );
+    drop(agent);
+    let again = Agent::over(exe, dir.path(), box_root.clone(), None);
+    let client = again.client();
+    assert_eq!(
+        client.inspect(&id("term-b")).unwrap().state,
+        BoxState::Running,
+        "B is taken back running"
+    );
+    client.delete(&id("term-b")).unwrap();
+    assert!(client.list().unwrap().is_empty(), "no box is listed");
+    eprintln!("T-T7.1.2, parked procs: SIGTERM said {line:?}, exited 143, B taken back");
+}
+
+/// Goal 5 extended, step 6 (T-T7.1.2). Do: over the socket, make and start boxes A and B of owner O and a
+/// box U of none, delete A (its slot goes idle), SIGKILL the agent, and start it again over the same
+/// state. Expect: the restarted agent removes A's idle slot and says so; takes B back in its recorded
+/// slot and U by its id, both running, B's usage read through its slot; and once both are deleted
+/// nothing is left under the oci boxes' root and no box is listed.
+fn a_crash_with_idle_cgroups_and_live_boxes_leaves_nothing(lab: &Lab, own: &Path, exe: &str) {
+    let dir = tempfile::Builder::new()
+        .prefix("agent-reuse-")
+        .tempdir_in(lab.bundles.path())
+        .unwrap();
+    let box_root = own.join("hex-sock-reuse");
+    let mut agent = Agent::over(exe, dir.path(), box_root.clone(), None);
+    let client = agent.client();
+    let o = BoxOwner::named("owner-crash").unwrap();
+    let wait = Lab::act(&Act::Wait);
+    let id = |name: &str| BoxId::new(name).unwrap();
+    for (name, owner) in [
+        ("crash-a", Some(&o)),
+        ("crash-b", Some(&o)),
+        ("crash-u", None),
+    ] {
+        client
+            .create(BoxSpec {
+                id: id(name),
+                bounds: Bounds::default(),
+                class: ClassSpec::Bundle(lab.bundle(&wait)),
+                owner: owner.cloned(),
+            })
+            .unwrap();
+        client.start(&id(name)).unwrap();
+    }
+    let oci = box_root.join(OCI_BOXES);
+    // The slots a box holds: those with a process in them that isn't an init parked ahead (decision 8), whose
+    // slots made ahead are slots too.
+    let slots = box_slots(&oci);
+    assert_eq!(slots.len(), 2, "A and B each hold a slot: {slots:?}");
+    assert!(
+        oci.join("crash-u").is_dir(),
+        "U's cgroup is its own, named by its id"
+    );
+    client.delete(&id("crash-a")).unwrap();
+    let b_slot = box_slots(&oci);
+    assert_eq!(b_slot.len(), 1, "B's slot alone holds a box: {b_slot:?}");
+    let a_slot = slots.difference(&b_slot).next().unwrap().clone();
+    assert!(
+        oci.join(&a_slot).is_dir(),
+        "A's slot is kept idle for its owner"
+    );
+    drop(client);
+    agent.child.kill().unwrap();
+    let ended = agent.child.wait().unwrap();
+    assert_eq!(
+        std::os::unix::process::ExitStatusExt::signal(&ended),
+        Some(9)
+    );
+    drop(agent);
+    let again = Agent::over(exe, dir.path(), box_root.clone(), None);
+    wait_for(
+        &SAID,
+        "the restarted agent to say it removed the idle slot",
+        || again.errors().contains("removed idle cgroup"),
+    );
+    let left = slots_under(&oci);
+    assert_eq!(
+        left, b_slot,
+        "A's idle slot is removed with every one made ahead, B's kept: {left:?}"
+    );
+    let client = again.client();
+    for name in ["crash-b", "crash-u"] {
+        let info = client.inspect(&id(name)).unwrap();
+        assert_eq!(
+            info.state,
+            BoxState::Running,
+            "{name} is taken back running"
+        );
+    }
+    client.usage(&id("crash-b")).unwrap();
+    for name in ["crash-b", "crash-u"] {
+        client.delete(&id(name)).unwrap();
+    }
+    let names: Vec<String> = std::fs::read_dir(&oci)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+        .collect();
+    assert!(
+        names.is_empty(),
+        "nothing is left under the oci boxes' root: {names:?}"
+    );
+    assert!(client.list().unwrap().is_empty(), "no box is listed");
+    eprintln!(
+        "T-T7.1.2, step 6: idle slot removed on restart ({}), B taken back in {left:?}, nothing left",
+        again
+            .errors()
+            .lines()
+            .filter(|l| l.contains("idle cgroup"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+}
+
+/// Whether `at` is the point the box's own cgroup is made at, before its state is written (a debug build's).
+fn at_cgroup_made(at: At) -> bool {
+    #[cfg(debug_assertions)]
+    if at == At::CgroupMade {
+        return true;
+    }
+    let _ = at;
+    false
+}
+
+fn containers_of(oci_root: &Path, id: &BoxId) -> Vec<PathBuf> {
+    // In the runtime directory's shards, or in the directory itself where a node before them kept them (goal 5
+    // extended, step 6).
+    (0..hex_runtime::linux::oci::state::SHARDS)
+        .map(|n| oci_root.join(format!("{n:02x}")))
+        .chain([oci_root.to_path_buf()])
+        .filter_map(|dir| std::fs::read_dir(dir).ok())
+        .flatten()
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| {
@@ -1299,8 +2234,8 @@ fn send(fd: &std::os::fd::OwnedFd, bytes: &[u8]) {
 fn answer(fd: &std::os::fd::OwnedFd) -> (wire::Header, Answer) {
     let mut ready = [rustix::event::PollFd::new(fd, rustix::event::PollFlags::IN)];
     let ts = rustix::event::Timespec {
-        tv_sec: 60,
-        tv_nsec: 0,
+        tv_sec: i64::try_from(ANSWERED.as_secs()).unwrap_or(i64::MAX),
+        tv_nsec: i64::from(ANSWERED.subsec_nanos()),
     };
     assert_eq!(
         rustix::event::poll(&mut ready, Some(&ts)).unwrap(),
@@ -1320,11 +2255,50 @@ fn answer(fd: &std::os::fd::OwnedFd) -> (wire::Header, Answer) {
 
 /// The processes in a box's cgroup (an ended one leaves it as it ends).
 fn procs(box_root: &Path, id: &BoxId) -> Vec<String> {
-    std::fs::read_to_string(box_root.join(id.as_str()).join("cgroup.procs"))
+    procs_in(&box_root.join(id.as_str()))
+}
+
+/// The processes in cgroup `dir`, by pid.
+fn procs_in(dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join("cgroup.procs"))
         .unwrap_or_default()
         .split_whitespace()
         .map(str::to_owned)
         .collect()
+}
+
+/// Started oci box `id`'s cgroup under the oci boxes' root `oci`: one named by its id, else the one slot holding a
+/// process that isn't an init parked ahead (a fork of the create seed, `hex __oci-seed`, until claimed; decision 8),
+/// the box's init having exec'd its program.
+fn oci_cgroup(oci: &Path, id: &BoxId) -> PathBuf {
+    let named = oci.join(id.as_str());
+    if named.exists() {
+        return named;
+    }
+    let parked = |pid: &String| {
+        std::fs::read(format!("/proc/{pid}/cmdline"))
+            .is_ok_and(|b| b.split(|&c| c == 0).any(|a| a == b"__oci-seed"))
+    };
+    let found: Vec<PathBuf> = std::fs::read_dir(oci)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| hex_core::reuse::slot_of(n).is_some())
+        })
+        .map(|e| e.path())
+        .filter(|dir| {
+            let p = procs_in(dir);
+            !p.is_empty() && !p.iter().all(parked)
+        })
+        .collect();
+    assert_eq!(
+        found.len(),
+        1,
+        "box {id}'s cgroup, by its processes: {found:?}"
+    );
+    found.into_iter().next().unwrap()
 }
 
 /// The agent's children that have ended and aren't reaped.
@@ -1348,15 +2322,17 @@ fn zombies_of(agent: i32) -> Vec<String> {
     out
 }
 
-fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = Instant::now() + conformance::PATIENCE;
-    while Instant::now() < deadline {
-        if cond() {
-            return;
-        }
-        std::thread::park_timeout(Duration::from_millis(10));
-    }
-    panic!("timed out waiting for {what}");
+/// Waits for `cond` on `wait`, its own fact's record or measuring (hex_testkit::waits): says how many looks it took.
+fn wait_for(wait: &Patience, what: &str, cond: impl FnMut() -> bool) -> u64 {
+    until(wait, what, cond).unwrap()
+}
+
+/// The capability sets the node renders a bundle with (Docker's defaults, `hex_core::bundle`). A spec
+/// naming none keeps its creator's, CAP_SYS_ADMIN among them, which a rootless box on the host's
+/// network may not hold (spec.rs refuses it).
+fn capabilities() -> String {
+    let set = format!("{:?}", hex_core::bundle::CAPABILITIES);
+    format!(r#"{{"bounding": {set}, "effective": {set}, "permitted": {set}}}"#)
 }
 
 /// A rootfs of the host's `/usr`, bound in by each bundle, with the host's top-level links into it.

@@ -1,20 +1,20 @@
 //! The `process` class on macOS (docs/design/runtime.md, decision "each OS runs its own boxes
-//! natively"): a box is a process group Hex spawns (posix_spawn, a new process group) under a QoS clamp,
-//! with background priority when its weight is low. macOS has no public cap on a process tree's memory or
+//! natively"): a box is a process group Hex spawns (posix_spawn, a new process group), at background QoS
+//! when its declared weight is under the default and unclamped otherwise. macOS has no public cap on a process tree's memory or
 //! its process count (docs/research/runtime/native-platforms.md §3), so a watcher thread holds the box's
 //! bounds by Hex's own rule ([`hex_core::watch`]): it lists the box's members (`proc_listpids` of its
 //! process group), reads each footprint (`proc_pid_rusage`), and ends the box (killpg, then the members'
 //! own waiters reap) once it passes a bound. The rule is the pure core; this shell does the listing, the
-//! reading, the waiting and the killing, from a Mach time-constraint thread on `NOTE_CRITICAL` kqueue
+//! reading, the waiting and the killing, from a timeshare thread on `NOTE_CRITICAL` kqueue
 //! timers so a box filling every core can't hold its watcher off (RESULT.md).
 //!
 //! Each member Hex spawns is also armed with a fatal per-process memory cap at the box's whole bound
 //! (`posix_spawnattr_setjetsam_ext`, rootless; `sys`, docs/research/runtime/macos-spawn-jetsam-cap.md):
 //! the kernel SIGKILLs it at the bound with no overshoot (native plan step 1's `_ext` backstop). So a box
-//! holding at most one armed member is bounded by the kernel, and the watcher reads it only at the
-//! ceiling (100 ms) to keep its accounting current and to notice a fork; any fork (an unarmed child) or
-//! any unarmed member reverts it to the polling pace at once (the watcher watches each member for its
-//! `NOTE_FORK`/`NOTE_EXIT`). The cap is per process, doesn't survive a fork, and caps each member at the
+//! holding at most one armed member is bounded by the kernel, and the watcher reads it only when it
+//! changes; any fork (an unarmed child) or any unarmed member reverts it to the polling pace at once (the
+//! watcher watches each member for its `NOTE_FORK`/`NOTE_EXIT`). [`ProcessBox::usage`] reads the box live,
+//! so its accounting is current however long the watcher waits. The cap is per process, doesn't survive a fork, and caps each member at the
 //! *whole* bound, not its share, so it doesn't bound a multi-member box's footprint sum — the watcher's
 //! rule still does that (step 2's privileged helper apportions a per-member share). A member killed at
 //! its cap dies by SIGKILL; the watcher tells that from an ordinary kill by the dead member's peak
@@ -36,11 +36,6 @@ use hex_api::{Bounds, BoxId, Refusal, Signal, Usage};
 use hex_core::watch::{self, Life, Limit, Member, Rates, Verdict, Watch};
 
 use super::sys::{self, Clamp, Event, Kqueue, Timebase};
-
-/// How long [`ProcessBox::delete`] waits for a killed box's members to die before it reports the kill
-/// didn't take: a `SIGKILL` to a process group ends its members in milliseconds, so missing a generous
-/// bound is a fault to report, not a limit to raise (CLAUDE.md §4).
-const DRAIN_PATIENCE: Duration = Duration::from_secs(10);
 
 /// Why a box ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +70,38 @@ pub struct Status {
     pub escaped: u64,
     /// Set once the box has ended, with why.
     pub ended: Option<Ended>,
+    /// Reads the watcher has made of the box.
+    pub reads: u64,
+    /// Reads that also redid the box's membership work (its kqueue watches, the escape check): one per
+    /// change in its running members, not one per read (observability: the watcher's work per read).
+    pub membership_passes: u64,
+    /// How the read that ended the box for a bound came about, once one has (observability: what an
+    /// overshoot is made of).
+    pub end_trace: Option<EndTrace>,
+    /// Reads that held any of the box's members stopped across their wait ([`watch::Watch::runs`];
+    /// observability: what the hold costs the box).
+    pub holds: u64,
+}
+
+/// The read that ended a box for a bound, taken apart: the wait armed before it, how long after the read
+/// before it it came, what it cost, the footprint at both, and how long the members took to end after it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EndTrace {
+    /// The wait the watcher armed after the read before (its headroom at the rates).
+    pub armed: Duration,
+    /// From the read before's start to this read's start: the armed wait plus how late the wake came.
+    pub gap: Duration,
+    /// This read's own time: the group listed and each member's rusage read.
+    pub read_cost: Duration,
+    /// The members this read listed.
+    pub members: u64,
+    /// The footprint the read before found, and this one.
+    pub footprint_before: u64,
+    pub footprint_at_end: u64,
+    /// From this read's decision to the read that found no member running; `None` until then.
+    pub to_empty: Option<Duration>,
+    /// Whether the read before held any of the box's members stopped across its wait.
+    pub held: bool,
 }
 
 /// What every box on the node shares, read once at node start: the machine's timebase and the allocation
@@ -82,27 +109,56 @@ pub struct Status {
 #[derive(Debug, Clone)]
 pub struct Shared {
     tb: Timebase,
-    rates: Rates,
+    /// The fastest a box is taken to grow, as this node learns it: seeded by the caller (its machine class's
+    /// record, hex_core::watch::seed), raised by any faster growth a watcher sees (watch::LearnedRates).
+    rates: Arc<Mutex<watch::LearnedRates>>,
+    /// How long a killed group gets to empty, as this node learns it: the record's to start, raised by every
+    /// slower drain any box sees (hex_core::drain::Learned; the learned-waits rule, 2026-11-06).
+    drain: Arc<Mutex<hex_core::drain::Learned>>,
+    /// How late the node's watchers act past their armed waits (a wake, its read and its stops), as it learns
+    /// it: seeded by the caller (its machine class's record, hex_core::watch::lateness_seed), raised by any
+    /// later act a watcher sees (watch::Lateness). What each box's hold reckons a member running across a
+    /// wait can run on for.
+    lateness: Arc<Mutex<watch::Lateness>>,
 }
 
 impl Shared {
-    /// The node's shared timing. `rate_bytes` and `rate_processes` are the fastest a box is taken to grow;
-    /// measured at node start or cited (CLAUDE.md §5), the caller says which.
+    /// The node's shared timing. `rate_bytes` and `rate_processes` seed the fastest a box is taken to grow:
+    /// the node's machine class's record (hex_core::watch::seed), which its watchers then raise as they see
+    /// faster growth; `lateness` seeds how late a watcher's wake is taken to come (hex_core::watch::
+    /// lateness_seed), raised the same way.
     pub fn new(
         rate_bytes: std::num::NonZeroU64,
         rate_processes: std::num::NonZeroU64,
+        lateness: Duration,
     ) -> io::Result<Self> {
         Ok(Self {
             tb: Timebase::get()?,
-            rates: Rates {
+            rates: Arc::new(Mutex::new(watch::LearnedRates::new(Rates {
                 bytes: rate_bytes,
                 processes: rate_processes,
-            },
+            }))),
+            drain: Arc::new(Mutex::new(hex_core::drain::Learned::default())),
+            lateness: Arc::new(Mutex::new(watch::Lateness::new(lateness))),
         })
     }
 
-    pub fn rates(&self) -> Rates {
-        self.rates
+    /// The latest watcher wake past its wait the node has seen (its record's to start).
+    pub fn lateness(&self) -> Result<Duration, Refusal> {
+        Ok(self
+            .lateness
+            .lock()
+            .map_err(|_| poisoned("the node's wake lateness"))?
+            .worst())
+    }
+
+    /// The rates as learned so far.
+    pub fn rates(&self) -> Result<Rates, Refusal> {
+        Ok(self
+            .rates
+            .lock()
+            .map_err(|_| poisoned("the node's growth rates"))?
+            .rates())
     }
 }
 
@@ -127,7 +183,7 @@ struct State {
     leader_started: Mutex<Option<u64>>,
     status: Mutex<Status>,
     /// The pids the box armed with the fatal per-process cap — members it spawned, each kernel-bounded.
-    /// The watcher reads it to pace a fully-armed one-member box at the ceiling and to attribute a
+    /// The watcher reads it to leave a fully-armed one-member box to its events and to attribute a
     /// member's death at its cap to memory; a pid is dropped once gone or accounted, so the set stays
     /// bounded by the box's live member count (CLAUDE.md §2).
     armed: Mutex<BTreeSet<i32>>,
@@ -137,6 +193,10 @@ struct State {
     ending: AtomicBool,
     /// Set by [`ProcessBox::delete`] to end the box; the watcher kills it and stops.
     stop: AtomicBool,
+    /// The members the watcher holds stopped (SIGSTOP) across its wait ([`watch::Watch::runs`]; the lead,
+    /// 2026-11-08 and 2026-11-09). It continues what it held and only that, so a member the box's own
+    /// programs stopped stays stopped.
+    held: Mutex<Hold>,
     /// The watcher waits on it; the node triggers it to make a read happen at once (a member started, or
     /// the box is stopped).
     kq: Kqueue,
@@ -147,24 +207,134 @@ impl State {
         self.status.lock().map_err(|_| poisoned("a box's status"))
     }
 
-    /// Wakes the watcher so it reads now rather than at its next timer.
-    fn wake(&self) {
-        let _ = self.kq.trigger();
+    /// Wakes the watcher so it reads now rather than at its next timer. A box with no bound to pace by has
+    /// no timer, so a wake that fails is the caller's refusal: the watcher wouldn't see the change.
+    fn wake(&self) -> Result<(), Refusal> {
+        self.kq
+            .trigger()
+            .map_err(|e| Refusal::os("waking a box's watcher", e))
+    }
+
+    fn held(&self) -> Result<std::sync::MutexGuard<'_, Hold>, Refusal> {
+        self.held.lock().map_err(|_| poisoned("a box's hold"))
+    }
+
+    /// Stops member `pid`, just started beside another, and holds it: the watcher's next read decides whether
+    /// it runs (the lead, 2026-11-08: that read can come late, and a member left running meanwhile grows
+    /// unread).
+    fn hold_new(&self, pid: i32) -> Result<(), Refusal> {
+        let mut held = self.held()?;
+        if signal_one(pid, rustix::process::Signal::STOP)? {
+            held.stopped.insert(pid);
+        }
+        Ok(())
+    }
+
+    /// Continues one held member for its watcher's read, the `turn`th of those still in group `pgid` (one gone
+    /// from it is no longer the watcher's to continue: its pid may be another process's), with its use before it
+    /// ran, whole as it was stopped. `None` when none is held. It stays held: the watcher stops it again after
+    /// the read, first, so nothing runs behind its stop.
+    fn run_one(
+        &self,
+        pgid: i32,
+        pids: &mut Vec<i32>,
+        turn: usize,
+    ) -> Result<Option<ReadRun>, Refusal> {
+        let mut held = self.held()?;
+        if held.stopped.is_empty() {
+            return Ok(None);
+        }
+        sys::group(pgid, pids).map_err(|e| Refusal::os("listing a box's group", e))?;
+        held.stopped.retain(|pid| pids.contains(pid));
+        let Some(&pid) = turn
+            .checked_rem(held.stopped.len())
+            .and_then(|at| held.stopped.iter().nth(at))
+        else {
+            return Ok(None);
+        };
+        // Gone since the listing (a pid no longer a process): not held, and nothing to run.
+        let Some(before) =
+            sys::rusage(pid).map_err(|e| Refusal::os("reading a member's rusage", e))?
+        else {
+            held.stopped.remove(&pid);
+            return Ok(None);
+        };
+        if !signal_one(pid, rustix::process::Signal::CONT)? {
+            held.stopped.remove(&pid);
+            return Ok(None);
+        }
+        Ok(Some(ReadRun {
+            pid,
+            user: before.user,
+            footprint: before.footprint,
+        }))
+    }
+
+    /// Stops member `pid` again after the read it ran for; it stays held. One the caller's own stop or continue
+    /// let go of since ([`ProcessBox::signal`]) is the box's own, left as it is.
+    fn stop_again(&self, pid: i32) -> Result<(), Refusal> {
+        let mut held = self.held()?;
+        if held.stopped.contains(&pid) && !signal_one(pid, rustix::process::Signal::STOP)? {
+            held.stopped.remove(&pid);
+        }
+        Ok(())
+    }
+
+    /// Holds the box as its watcher's read decided (the graded hold, the lead 2026-11-09): of `order`, its
+    /// running members, each in `run` runs across the wait, continued if the watcher held it, and the rest are
+    /// held, each stopped in turn. A member the box's own programs stopped is theirs, never held, so never
+    /// continued. Returns how many members it holds.
+    fn apply(&self, order: &[u32], run: &[u32]) -> Result<usize, Refusal> {
+        let mut held = self.held()?;
+        for &member in order {
+            let Ok(pid) = i32::try_from(member) else {
+                continue;
+            };
+            if run.contains(&member) {
+                if held.stopped.remove(&pid) {
+                    signal_one(pid, rustix::process::Signal::CONT)?;
+                }
+            } else if !held.stopped.contains(&pid)
+                && sys::run_state(pid)
+                    .map_err(|e| Refusal::os("reading a member's run state", e))?
+                    == Some(sys::Run::Live)
+                && signal_one(pid, rustix::process::Signal::STOP)?
+            {
+                held.stopped.insert(pid);
+            }
+        }
+        Ok(held.stopped.len())
+    }
+
+    /// Continues every member the watcher holds that is still in group `pgid`, and holds none: what a watcher
+    /// that stops watching leaves.
+    fn release_all(&self, pgid: i32, pids: &mut Vec<i32>) -> Result<(), Refusal> {
+        let mut held = self.held()?;
+        sys::group(pgid, pids).map_err(|e| Refusal::os("listing a box's group", e))?;
+        for pid in std::mem::take(&mut held.stopped) {
+            if pids.contains(&pid) {
+                signal_one(pid, rustix::process::Signal::CONT)?;
+            }
+        }
+        Ok(())
     }
 
     /// Counts member `pid`'s death as a memory end — once — if the box armed it with the fatal cap, isn't
     /// being deleted, and isn't being ended by the watcher's own rule (whose End verdict counts that
-    /// bound). The caller establishes the member died by the kernel's hand (a `SIGKILL`: its cap, or
-    /// memory pressure on a box member). `peak` is the member's footprint at death when known (its
-    /// zombie's, read before it was reaped), else the cap is a sound floor — reaching the fatal cap is
-    /// death. Dropping `pid` from the armed set makes the count idempotent across the member's waiter
-    /// (on reap) and the watcher (on the exit event): whoever removes it first counts it (native plan
-    /// step 1's `_ext` backstop; HEX-MAC-1, the figure HEX-RT-5's memory case and the overshoot bench read).
+    /// bound), and only when its `peak` (its zombie's lifetime peak, read before it was reaped) reached the
+    /// cap: the kernel's fatal cap kills a member at it, so a `SIGKILL` of a member under it was another
+    /// hand's (AppleSystemPolicy's refusal of an exec kills it so before it runs, CLAUDE.md §3: never a
+    /// memory kill it wasn't). Dropping `pid` from the armed set makes the count idempotent across the
+    /// member's waiter (on reap) and the watcher (on the exit event): whoever brings its peak first decides.
+    /// A call with no peak decides nothing and leaves `pid` armed: the watcher reads an exit event's member
+    /// when it wakes, which can be after the waiter reaped it, and the waiter read the zombie's peak before
+    /// that reap (native plan step 1's `_ext` backstop; HEX-MAC-1, the figure HEX-RT-5's memory case and the
+    /// overshoot bench read).
     fn killed_by_cap(&self, pid: i32, peak: Option<u64>) -> Result<(), Refusal> {
         if self.stop.load(Ordering::SeqCst) || self.ending.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let Some(cap) = self.cap_bytes else {
+        let (Some(cap), Some(peak)) = (self.cap_bytes, peak) else {
             return Ok(());
         };
         if !self
@@ -173,10 +343,12 @@ impl State {
             .map_err(|_| poisoned("a box's armed set"))?
             .remove(&pid)
         {
-            // Not an armed member, or already counted: the armed-set removal is the dedup point.
+            // Not an armed member, or already decided: the armed-set removal is the dedup point.
             return Ok(());
         }
-        let peak = peak.unwrap_or(cap).max(cap);
+        if peak < cap {
+            return Ok(());
+        }
         let bound = self.limit.memory.unwrap_or(peak);
         let mut status = self.status()?;
         status.memory_kills = status.memory_kills.saturating_add(1);
@@ -191,6 +363,22 @@ impl State {
     }
 }
 
+/// What the watcher holds of a box. Bounded by its members (CLAUDE.md §2): one gone from the box is dropped
+/// at the next read that runs a held member.
+#[derive(Debug, Default)]
+struct Hold {
+    /// The members the watcher stopped, each its to continue; one the box's own programs stopped is never
+    /// among them.
+    stopped: BTreeSet<i32>,
+}
+
+/// A held member continued for its watcher's read, and its use before it ran.
+struct ReadRun {
+    pid: i32,
+    user: u64,
+    footprint: u64,
+}
+
 /// A handle to a box's shared state that its members' waiters hold, so a member killed at the fatal cap
 /// is counted the instant its waiter reaps it — before the caller that waited reads the box's usage, not
 /// only when the watcher next polls (native plan step 1's `_ext` backstop). Cloneable.
@@ -198,12 +386,12 @@ impl State {
 pub struct Members(Arc<State>);
 
 impl Members {
-    /// Tells the box a member ended: when `sigkill` (the kernel killed it, at its cap or under memory
-    /// pressure), counts a memory end once ([`State::killed_by_cap`]). A clean exit or another signal is
-    /// not a memory end. The member is reaped, so its exact peak is gone and the cap is the floor.
-    pub fn ended(&self, pid: i32, sigkill: bool) -> Result<(), Refusal> {
+    /// Tells the box a member ended: when `sigkill` and its `peak` (read from its zombie before the reap)
+    /// reached the cap, counts a memory end once ([`State::killed_by_cap`]). A clean exit, another signal,
+    /// or a SIGKILL under the cap is not a memory end.
+    pub fn ended(&self, pid: i32, sigkill: bool, peak: Option<u64>) -> Result<(), Refusal> {
         if sigkill {
-            self.0.killed_by_cap(pid, None)
+            self.0.killed_by_cap(pid, peak)
         } else {
             Ok(())
         }
@@ -225,6 +413,10 @@ impl Members {
 pub struct ProcessBox {
     state: Arc<State>,
     watcher: Mutex<Option<JoinHandle<()>>>,
+    /// The node's learned drain bound, shared by every box ([`Shared`]).
+    drain: Arc<Mutex<hex_core::drain::Learned>>,
+    /// The machine's timebase, for a live read's CPU.
+    tb: Timebase,
 }
 
 impl ProcessBox {
@@ -269,14 +461,18 @@ impl ProcessBox {
             armed: Mutex::new(BTreeSet::new()),
             ending: AtomicBool::new(false),
             stop: AtomicBool::new(false),
+            held: Mutex::new(Hold::default()),
             kq: Kqueue::new().map_err(|e| Refusal::os("making a box's kqueue", e))?,
         });
         let watcher = Watcher::new(Arc::clone(&state), shared.clone())
+            .map_err(|e| Refusal::os("sizing a box's watcher", e))?
             .start()
             .map_err(|e| Refusal::os("starting a box's watcher", e))?;
         Ok(Self {
             state,
             watcher: Mutex::new(Some(watcher)),
+            drain: Arc::clone(&shared.drain),
+            tb: shared.tb,
         })
     }
 
@@ -337,7 +533,13 @@ impl ProcessBox {
                 .map_err(|_| poisoned("a box's armed set"))?
                 .insert(pid);
         }
-        self.state.wake();
+        // A member started beside another, whose sum no kernel cap bounds, waits stopped for the watcher's
+        // next read, which continues it: that read can come late (the lead, 2026-11-08), and a member left
+        // running meanwhile grows unread. A box's first member is its fatal cap's alone.
+        if group != 0 && self.state.limit.memory.is_some() {
+            self.state.hold_new(pid)?;
+        }
+        self.state.wake()?;
         Ok(pid)
     }
 
@@ -376,9 +578,29 @@ impl ProcessBox {
         }
     }
 
-    /// What the box has used and holds now, as a [`Usage`].
+    /// What the box has used and holds now, as a [`Usage`]: its members read live (the group listed, each
+    /// one's rusage), as the Linux class reads its cgroup's files, so it is current however long the
+    /// watcher waits (a box with no bound to pace by is read only when it changes). The kill counts and
+    /// the peak are the watcher's, the peak raised to what this read finds.
     pub fn usage(&self) -> Result<Usage, Refusal> {
-        let s = self.state.status()?;
+        let pgid = *self
+            .state
+            .pgid
+            .lock()
+            .map_err(|_| poisoned("a box's group"))?;
+        let live = match pgid {
+            Some(pgid) => Some(read_live(pgid)?),
+            None => None,
+        };
+        let mut s = self.state.status()?;
+        if let Some(live) = live {
+            s.footprint = live.footprint;
+            s.processes = live.processes;
+            s.peak = s.peak.max(live.footprint);
+            s.cpu_ticks = self.tb.nanos(live.cpu) / 1000;
+            s.read_bytes = s.read_bytes.max(live.read);
+            s.written_bytes = s.written_bytes.max(live.written);
+        }
         Ok(Usage {
             memory_bytes: s.footprint,
             memory_peak_bytes: s.peak,
@@ -408,6 +630,19 @@ impl ProcessBox {
             .map_err(|_| poisoned("a box's group"))?
         {
             Some(pgid) if live(pgid)? => {
+                // A stop or a continue the caller sends is the box's own: what the watcher held is no longer
+                // its to continue.
+                if [
+                    libc::SIGSTOP,
+                    libc::SIGTSTP,
+                    libc::SIGTTIN,
+                    libc::SIGTTOU,
+                    libc::SIGCONT,
+                ]
+                .contains(&macos)
+                {
+                    *self.state.held()? = Hold::default();
+                }
                 if killpg(pgid, macos)? {
                     Ok(())
                 } else {
@@ -422,7 +657,7 @@ impl ProcessBox {
     /// each member's own waiter to reap it. Idempotent.
     pub fn delete(&self) -> Result<(), Refusal> {
         self.state.stop.store(true, Ordering::SeqCst);
-        self.state.wake();
+        self.state.wake()?;
         if let Some(handle) = self
             .watcher
             .lock()
@@ -438,14 +673,27 @@ impl ProcessBox {
             .lock()
             .map_err(|_| poisoned("a box's group"))?
         {
+            let mut pids = sys::listing().map_err(|e| Refusal::os("listing a box's group", e))?;
+            // The group's size sets how long it gets to empty: the measured kill-to-empty envelope, doubled,
+            // as this node has learned it (hex_core::drain). Past it the kill didn't take, a fault named
+            // (CLAUDE.md §4); a delete has no other box to try, so the caller gets it.
+            let members = alive_in(pgid, &mut pids)?;
+            let patience = self
+                .drain
+                .lock()
+                .map_err(|_| poisoned("the node's drain bound"))?
+                .bound(members);
+            let killed = Instant::now();
             let _ = killpg(
                 pgid,
                 hex_core::darwin::signal_to_macos(Signal::KILL.number()).unwrap_or(9),
             );
-            let deadline = Instant::now().checked_add(DRAIN_PATIENCE);
-            let mut pids = Vec::with_capacity(sys::max_processes().unwrap_or(4096));
+            let deadline = killed.checked_add(patience);
             loop {
                 if alive_in(pgid, &mut pids)? == 0 {
+                    if let Ok(mut learned) = self.drain.lock() {
+                        learned.observe(members, killed.elapsed());
+                    }
                     return Ok(());
                 }
                 if deadline.is_none_or(|d| Instant::now() >= d) {
@@ -470,10 +718,70 @@ impl Drop for ProcessBox {
     }
 }
 
+/// A box's group as one live read finds it: its footprint and processes as the watcher's rule counts them,
+/// and its members' summed CPU (Mach ticks) and I/O.
+struct Live {
+    footprint: u64,
+    processes: u64,
+    cpu: u64,
+    read: u64,
+    written: u64,
+}
+
+/// Reads process group `pgid` now: each listed member's rusage, a pid gone since the listing (ESRCH) left
+/// out, and the leader's zombie not counted as a process while it is held for the group's id, as
+/// [`watch::Watch::read`] counts.
+fn read_live(pgid: i32) -> Result<Live, Refusal> {
+    let mut pids = sys::listing().map_err(|e| Refusal::os("listing a box's group", e))?;
+    sys::group(pgid, &mut pids).map_err(|e| Refusal::os("listing a box's group", e))?;
+    let mut live = Live {
+        footprint: 0,
+        processes: 0,
+        cpu: 0,
+        read: 0,
+        written: 0,
+    };
+    for &pid in &pids {
+        let Some(r) = sys::rusage(pid).map_err(|e| Refusal::os("reading a member's rusage", e))?
+        else {
+            continue;
+        };
+        if !(r.ended && pid == pgid) {
+            live.processes = live.processes.saturating_add(1);
+        }
+        live.footprint = live.footprint.saturating_add(r.footprint);
+        live.cpu = live.cpu.saturating_add(r.cpu);
+        live.read = live.read.saturating_add(r.read_bytes);
+        live.written = live.written.saturating_add(r.written_bytes);
+    }
+    Ok(live)
+}
+
+/// Watches `pids` for their forks and ends on `kq`; returns those already ended. XNU's `EVFILT_PROC` reports
+/// only what happens after it attaches (`filt_procattach`, `bsd/kern/kern_event.c`), and refuses a gone
+/// process (`ESRCH`) but not a zombie: a member that ended between the listing and its watch posts no exit
+/// event (c-route's finding on the node's socket, 2026-11-07).
+pub(crate) fn watch_members(kq: &Kqueue, pids: &[i32]) -> Result<Vec<i32>, Refusal> {
+    let mut ended = kq
+        .watch(pids, 0)
+        .map_err(|e| Refusal::os("watching a box's members", e))?;
+    // Read each one again after the attach: one ended (a zombie) or gone by now posted its end before the
+    // watch could see it. One that ends after this read posts its exit to the watch.
+    for &pid in pids {
+        if ended.contains(&pid) {
+            continue;
+        }
+        match sys::rusage(pid).map_err(|e| Refusal::os("reading a member's rusage", e))? {
+            Some(r) if !r.ended => {}
+            _ => ended.push(pid),
+        }
+    }
+    Ok(ended)
+}
+
 /// Whether process group `pgid` has a member alive (not a zombie).
 fn live(pgid: i32) -> Result<bool, Refusal> {
-    let max = sys::max_processes().map_err(|e| Refusal::os("reading kern.maxproc", e))?;
-    let mut pids = Vec::with_capacity(max);
+    let mut pids = sys::listing().map_err(|e| Refusal::os("listing a box's group", e))?;
     Ok(alive_in(pgid, &mut pids)? > 0)
 }
 
@@ -491,17 +799,20 @@ pub fn owned(pgid: i32, started: u64) -> Result<bool, Refusal> {
 }
 
 /// Ends what runs of box group `pgid` (its leader started at `started`), for a box its node's recovery
-/// removes: killpg KILL where the group is still the box's ([`owned`]), and its members waited out.
+/// removes: killpg KILL where the group is still the box's ([`owned`]), and its members waited out within
+/// the measured kill-to-empty envelope for the group's size (`hex_core::drain::bound`; a recovering node
+/// has learned none of its own yet). Past it the kill didn't take, a fault named (CLAUDE.md §4).
 pub fn end_group(pgid: i32, started: u64) -> Result<(), Refusal> {
     if !owned(pgid, started)? {
         return Ok(());
     }
+    let mut pids = sys::listing().map_err(|e| Refusal::os("listing a box's group", e))?;
+    let members = alive_in(pgid, &mut pids)?;
     let _ = killpg(
         pgid,
         hex_core::darwin::signal_to_macos(Signal::KILL.number()).unwrap_or(9),
     );
-    let deadline = Instant::now().checked_add(DRAIN_PATIENCE);
-    let mut pids = Vec::with_capacity(sys::max_processes().unwrap_or(4096));
+    let deadline = Instant::now().checked_add(hex_core::drain::bound(members));
     loop {
         if alive_in(pgid, &mut pids)? == 0 {
             return Ok(());
@@ -529,7 +840,7 @@ fn alive_in(pgid: i32, pids: &mut Vec<i32>) -> Result<usize, Refusal> {
     Ok(alive)
 }
 
-/// The watcher of one box: a Mach time-constraint thread that reads the box every (bound − footprint) /
+/// The watcher of one box: a thread that reads the box every (bound − footprint) /
 /// rate, holds its bounds, and ends it when it passes one.
 struct Watcher {
     state: Arc<State>,
@@ -544,22 +855,62 @@ struct Watcher {
     /// child) or a member's death wakes the watcher at once rather than at its next timer.
     watched: BTreeSet<i32>,
     pids: Vec<i32>,
+    /// The last read's listing, to tell whether this one changed.
+    last_listing: Vec<i32>,
     events: Vec<Event>,
+    /// When the last read was and what it found (footprint, processes): the growth to the next read is what
+    /// the node's rates learn from.
+    last_read: Option<(Instant, u64, u64)>,
+    /// The last read's start, the wait it armed, the footprint it found and whether it held the box across
+    /// that wait: the end trace's "before".
+    before: Option<(Instant, Duration, u64, bool)>,
+    /// When the watcher decided to end the box, until the read that finds it empty.
+    ending_since: Option<Instant>,
+    /// When the last wait was armed, and for how long: how late the watcher acted past it (its wake, its read
+    /// and its stops) is what the node's holds reckon with.
+    armed_at: Option<(Instant, Duration)>,
+    /// The members' user times at the last read, by `last`'s order: a member whose user time rose since had a
+    /// core in its run.
+    last_user: Vec<u64>,
+    /// When the last read's hold was in place: the members it let run have run across the wait since.
+    ran_from: Option<Instant>,
+    /// Advances each read: whose turn it is to run first, among the box's members, and among the held ones,
+    /// to run for the read.
+    turn: usize,
+    /// The running members in this read's turn, what each member's run showed, and which run across the wait:
+    /// kept between reads so a read allocates nothing for them.
+    order: Vec<u32>,
+    ran: Vec<watch::Run>,
+    run: Vec<u32>,
 }
 
 impl Watcher {
-    fn new(state: Arc<State>, shared: Shared) -> Self {
-        let watch = Watch::new(state.limit, shared.rates);
-        Self {
+    fn new(state: Arc<State>, shared: Shared) -> io::Result<Self> {
+        let rates = shared
+            .rates()
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        let watch = Watch::new(state.limit, rates);
+        Ok(Self {
             state,
             shared,
             watch,
             last: Vec::new(),
             last_sig: 0,
             watched: BTreeSet::new(),
-            pids: Vec::with_capacity(sys::max_processes().unwrap_or(4096)),
+            pids: sys::listing()?,
             events: Vec::with_capacity(sys::EVENTS),
-        }
+            last_listing: Vec::new(),
+            last_read: None,
+            before: None,
+            ending_since: None,
+            armed_at: None,
+            last_user: Vec::new(),
+            ran_from: None,
+            turn: 0,
+            order: Vec::new(),
+            ran: Vec::new(),
+            run: Vec::new(),
+        })
     }
 
     fn start(mut self) -> io::Result<JoinHandle<()>> {
@@ -569,20 +920,8 @@ impl Watcher {
     }
 
     fn run(&mut self) {
-        // Best-effort: a real-time thread reads on time even when the box fills every core (RESULT.md).
-        // Without it the watcher still runs, only later under full load, so a failure isn't fatal. The
-        // computation budget is 150 µs, not the floor's 50 µs: a read of a 28-member box (one
-        // `proc_listpids` and a `proc_pid_rusage` each) runs slower under the members' memory-bandwidth
-        // contention, and a budget below the read's cost gets the thread demoted mid-period and then
-        // starved behind the members, overshooting the bound by hundreds of MiB. At 150 µs (per 250 µs) a
-        // 28-member box held to ≤42 MiB, measured by `bench/native/macos/rtbudget` on adas-mac-studio-3,
-        // 2026-11-01 (CLAUDE.md §5).
-        let _ = sys::time_constraint(
-            &self.shared.tb,
-            watch::FLOOR,
-            Duration::from_micros(150),
-            watch::FLOOR,
-        );
+        // A plain timeshare thread: the watcher holds a box's bound by reading it, never by taking priority
+        // over other programs (Ada's rule, 2026-11-03; the lead, 2026-11-06).
         loop {
             if self.state.stop.load(Ordering::SeqCst) {
                 self.finish();
@@ -596,14 +935,19 @@ impl Watcher {
             let next = match self.step() {
                 Ok(next) => next,
                 // A read failed (a lock poisoned, a call errored): stop watching rather than spin. The box
-                // is left as it is for delete to clean up.
-                Err(_) => return,
+                // is left as it is for delete to clean up, its held members continued, since no read of this
+                // watcher will continue them.
+                Err(_) => {
+                    if let Ok(Some(pgid)) = self.state.pgid.lock().map(|g| *g) {
+                        let _ = self.state.release_all(pgid, &mut self.pids);
+                    }
+                    return;
+                }
             };
-            let _ = self.state.kq.wait(
-                next,
-                next.map_or(Some(watch::CEILING), |_| None),
-                &mut self.events,
-            );
+            // A timer only where a bound needs one; otherwise the box's next change wakes it: a member's
+            // fork or end, a start (exec) or a delete, each a kqueue event.
+            self.armed_at = next.map(|wait| (Instant::now(), wait));
+            let _ = self.state.kq.wait(next, None, &mut self.events);
         }
     }
 
@@ -618,15 +962,97 @@ impl Watcher {
         else {
             return Ok(None);
         };
-        let reading = self.read_members(pgid)?;
-        // The escape check diffs the member lists and allocates; run it only when the running set changed,
-        // so a box allocating hard with a steady set of members keeps each read lean enough to finish
-        // within the watcher's real-time budget (else it is demoted and overshoots; see process.rs run()).
-        if reading.sig != self.last_sig {
+        let armed = self.armed_at.take();
+        self.turn = self.turn.wrapping_add(1);
+        // One held member runs for this read, each in turn, so its own rate shows: the read's only run, it is
+        // stopped again first, so nothing runs behind its stop (XNU's stop waits on each running member's core
+        // before the next: the hold's stops compared, the lead 2026-11-09).
+        let read_run = self.state.run_one(pgid, &mut self.pids, self.turn)?;
+        let ran_since = Instant::now();
+        let rates = self.shared.rates()?;
+        self.watch.rated(rates);
+        let started = Instant::now();
+        let mut reading = self.read_members(pgid)?;
+        self.ran.clear();
+        if let Some(before) = read_run {
+            // Whether a thread of it ran or waited for a core while it was continued: with none it was asleep,
+            // which shows what it does.
+            let runnable = runnable(before.pid);
+            self.state.stop_again(before.pid)?;
+            let over = ran_since.elapsed();
+            // Stopped again, its use is whole: this read's footprint of it, and the user time it ran.
+            if let Some(after) =
+                sys::rusage(before.pid).map_err(|e| Refusal::os("reading a member's rusage", e))?
+            {
+                let pid = u32::try_from(before.pid).unwrap_or(0);
+                if let Some((m, user)) = reading
+                    .members
+                    .iter_mut()
+                    .zip(reading.users.iter_mut())
+                    .find(|(m, _)| m.pid == pid)
+                {
+                    m.footprint = after.footprint;
+                    *user = after.user;
+                }
+                self.ran.push(watch::Run {
+                    pid,
+                    over,
+                    across: false,
+                    shown: after.user > before.user
+                        || after.footprint > before.footprint
+                        || !runnable,
+                });
+            }
+        }
+        let read_cost = started.elapsed();
+        // The membership work (the escape check, which diffs the member lists and allocates, and the
+        // kqueue rewatch) runs only when the running set changed: a box with steady members costs a listing
+        // and a rusage a member per read, nothing more (the lead, 2026-11-06: less work per read).
+        let membership_changed = reading.sig != self.last_sig;
+        if membership_changed {
             self.count_escapes(&reading.members)?;
             self.last_sig = reading.sig;
         }
+        // Each member that ran across the wait since the last read's hold: its run is the time since. One the hold
+        // kept stopped ran only for this read (above), and one new since has no read before it to grow from.
+        if let Some(from) = self.ran_from {
+            let over = from.elapsed();
+            let held = self.state.held()?;
+            for (m, user) in reading.members.iter().zip(&reading.users) {
+                let pid = i32::try_from(m.pid).unwrap_or(-1);
+                if m.life != Life::Running || held.stopped.contains(&pid) {
+                    continue;
+                }
+                let Some((last, last_user)) = self
+                    .last
+                    .iter()
+                    .zip(&self.last_user)
+                    .find(|(l, _)| l.pid == m.pid && l.started == m.started)
+                else {
+                    continue;
+                };
+                self.ran.push(watch::Run {
+                    pid: m.pid,
+                    over,
+                    across: true,
+                    shown: m.footprint > last.footprint || *user > *last_user || !runnable(pid),
+                });
+            }
+        }
         let read = self.watch.read(&reading.members);
+        self.watch.ran(&self.ran);
+        // The growth since the last read: a box faster than the node's rates raises them.
+        let now = Instant::now();
+        if let Some((then, footprint, processes)) = self.last_read
+            && let Ok(mut learned) = self.shared.rates.lock()
+        {
+            learned.observe(
+                read.footprint.saturating_sub(footprint),
+                read.processes.saturating_sub(processes),
+                now.saturating_duration_since(then),
+            );
+        }
+        self.last_read = Some((now, read.footprint, read.processes));
         self.record(&read, &reading.totals)?;
         // Mirror the watcher's own ending for a member's waiter: a SIGKILL the watcher sent isn't a
         // separate kernel cap kill to count.
@@ -634,16 +1060,82 @@ impl Watcher {
             .ending
             .store(self.watch.ending().is_some(), Ordering::SeqCst);
         // Watch the current members for their forks and ends, so the next membership change wakes at once.
-        self.rewatch(&reading.members)?;
+        if membership_changed {
+            self.rewatch(&reading.members)?;
+        }
+        let members = u64::try_from(reading.members.len()).unwrap_or(u64::MAX);
         self.last = reading.members;
-        match read.verdict {
-            Verdict::Wait(d) => Ok(Some(d)),
+        self.last_user = reading.users;
+        if let Verdict::End(_) = read.verdict {
+            let (armed, gap, footprint_before, held) = self.before.map_or(
+                (Duration::ZERO, Duration::ZERO, 0, false),
+                |(at, armed, fp, held)| (armed, started.saturating_duration_since(at), fp, held),
+            );
+            self.state.status()?.end_trace = Some(EndTrace {
+                armed,
+                gap,
+                read_cost,
+                members,
+                footprint_before,
+                footprint_at_end: read.footprint,
+                to_empty: None,
+                held,
+            });
+            self.ending_since = Some(started);
+        }
+        if read.verdict == Verdict::Idle
+            && let Some(since) = self.ending_since.take()
+            && let Some(trace) = self.state.status()?.end_trace.as_mut()
+        {
+            trace.to_empty = Some(since.elapsed());
+        }
+        let next = match read.verdict {
+            Verdict::Wait(d) => Some(d),
             Verdict::End(_) | Verdict::Kill => {
                 let _ = killpg(pgid, kill_signal());
-                Ok(Some(watch::FLOOR))
+                Some(watch::FLOOR)
             }
-            Verdict::Idle => Ok(None),
+            Verdict::Idle | Verdict::Events => None,
+        };
+        // The graded hold (the lead, 2026-11-09): the members whose own rates over the wait and the lateness fit
+        // the box's headroom run across the wait, each in turn; the rest are held stopped, and a box none of whose
+        // members fits is read again at the floor.
+        self.order.clear();
+        self.order.extend(
+            self.last
+                .iter()
+                .filter(|m| m.life == Life::Running)
+                .map(|m| m.pid),
+        );
+        let first = self.turn.checked_rem(self.order.len()).unwrap_or(0);
+        self.order.rotate_left(first);
+        let floor = self
+            .watch
+            .runs(&read, &self.order, self.shared.lateness()?, &mut self.run);
+        let held = self.state.apply(&self.order, &self.run)?;
+        self.ran_from = Some(Instant::now());
+        let next = floor.or(next);
+        // How late the watcher acted past its wait: its wake, its read and its stops, through all of which a
+        // member running across the wait runs on (the lead, 2026-11-09: from the reads' own observed delays).
+        if let Some((at, wait)) = armed {
+            let late = at.elapsed().saturating_sub(wait);
+            self.shared
+                .lateness
+                .lock()
+                .map_err(|_| poisoned("the node's wake lateness"))?
+                .observe(late);
         }
+        if held > 0 {
+            let mut status = self.state.status()?;
+            status.holds = status.holds.saturating_add(1);
+        }
+        self.before = Some((
+            started,
+            next.unwrap_or(Duration::ZERO),
+            read.footprint,
+            held > 0,
+        ));
+        Ok(next)
     }
 
     /// The box's members now and their summed CPU and I/O: each listed pid with its footprint, start time,
@@ -652,17 +1144,23 @@ impl Watcher {
     /// gone, so it stays bounded by the live members (CLAUDE.md §2).
     fn read_members(&mut self, pgid: i32) -> Result<Reading, Refusal> {
         sys::group(pgid, &mut self.pids).map_err(|e| Refusal::os("listing a box's group", e))?;
-        let last_pids: BTreeSet<i32> = self
-            .last
-            .iter()
-            .filter_map(|m| i32::try_from(m.pid).ok())
-            .collect();
+        // The armed set's pruning needs the listing's pids as sets: built only when the listing changed.
+        let listing_changed = self.pids != self.last_listing;
+        let last_pids: BTreeSet<i32> = if listing_changed {
+            self.last
+                .iter()
+                .filter_map(|m| i32::try_from(m.pid).ok())
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
         let mut armed = self
             .state
             .armed
             .lock()
             .map_err(|_| poisoned("a box's armed set"))?;
         let mut members = Vec::with_capacity(self.pids.len());
+        let mut users = Vec::with_capacity(self.pids.len());
         let mut present = BTreeSet::new();
         let mut totals = Totals::default();
         let mut sig = 0u64;
@@ -672,7 +1170,9 @@ impl Watcher {
             else {
                 continue;
             };
-            present.insert(pid);
+            if listing_changed {
+                present.insert(pid);
+            }
             // The leader's zombie, while other members run, is the node holding the pid so the group id
             // can't be recycled: not the box's own process. Any other ended member is counted until reaped,
             // as Linux's `pids.max` counts a task until it is reaped.
@@ -686,7 +1186,8 @@ impl Watcher {
             totals.written = totals.written.saturating_add(r.written_bytes);
             if life == Life::Running {
                 // Order-independent so the listing's order doesn't matter; a member and its start time, so a
-                // recycled pid shifts it.
+                // recycled pid shifts it. The multiplier is Fibonacci hashing's 2^32/phi (Knuth, TAOCP vol. 3,
+                // §6.4), which spreads consecutive pids across the word.
                 sig = sig.wrapping_add(
                     (u64::try_from(pid).unwrap_or(0))
                         .wrapping_mul(0x9e37_79b9)
@@ -700,13 +1201,18 @@ impl Watcher {
                 life,
                 armed: armed.contains(&pid),
             });
+            users.push(r.user);
         }
         // Prune armed pids that were listed before and are gone now (reaped): keeps the set bounded by the
         // live members, without dropping a just-spawned pid the listing hasn't caught up with yet.
-        armed.retain(|p| present.contains(p) || !last_pids.contains(p));
+        if listing_changed {
+            armed.retain(|p| present.contains(p) || !last_pids.contains(p));
+            self.last_listing.clone_from(&self.pids);
+        }
         drop(armed);
         Ok(Reading {
             members,
+            users,
             totals,
             sig,
         })
@@ -740,8 +1246,9 @@ impl Watcher {
         status.footprint = read.footprint;
         // Max, not assignment: a member the kernel killed at its cap recorded its peak in account_jetsam
         // before this read, and the watcher's own peak (summed live footprints) can be lower — a box read
-        // only at the ceiling may never have seen the member near its cap while it was alive.
+        // only on its events may never have seen the member near its cap while it was alive.
         status.peak = status.peak.max(self.watch.peak());
+        status.reads = self.watch.reads();
         // In microseconds, from the machine's timebase (`cpu` is Mach ticks).
         status.cpu_ticks = self.shared.tb.nanos(totals.cpu) / 1000;
         // Monotonic: a member gone since last read no longer reports its I/O, so keep the most seen.
@@ -773,10 +1280,15 @@ impl Watcher {
             if let Event::Exit { pid, status, .. } = *e
                 && (status & 0x7f) == kill_signal()
             {
-                // The member is a fresh zombie (not yet reaped by its waiter): read its lifetime peak for
-                // the exact figure; `killed_by_cap` falls back to the cap when it is gone, and guards the
-                // box being deleted or the watcher's own kill, and counts each death once.
-                let peak = sys::rusage(pid).ok().flatten().map(|r| r.peak);
+                // Its zombie's lifetime peak, while its waiter hasn't reaped it: a pid gone, or already
+                // another process's, gives none, and `killed_by_cap` leaves the decision to the waiter,
+                // which read the peak before its reap. It guards the box being deleted or the watcher's own
+                // kill, and counts each death once.
+                let peak = sys::rusage(pid)
+                    .ok()
+                    .flatten()
+                    .filter(|r| r.ended)
+                    .map(|r| r.peak);
                 self.state.killed_by_cap(pid, peak)?;
             }
         }
@@ -784,11 +1296,15 @@ impl Watcher {
     }
 
     /// Watches the box's running members for their forks and ends on the box's kqueue, so a fork (an
-    /// unarmed child) or a death wakes the watcher at once — to revert a ceiling-paced box to headroom, or
+    /// unarmed child) or a death wakes the watcher at once — to put an events-paced box back on headroom, or
     /// to read a cap kill's peak before the member's own waiter reaps it — rather than at its next timer.
     /// Members gone since the last read are unwatched (the kernel already dropped an exited member's knote,
     /// so that unwatch is a no-op it tolerates).
     fn rewatch(&mut self, members: &[Member]) -> Result<(), Refusal> {
+        {
+            let mut status = self.state.status()?;
+            status.membership_passes = status.membership_passes.saturating_add(1);
+        }
         let running: BTreeSet<i32> = members
             .iter()
             .filter(|m| m.life == Life::Running)
@@ -796,10 +1312,12 @@ impl Watcher {
             .collect();
         let to_watch: Vec<i32> = running.difference(&self.watched).copied().collect();
         if !to_watch.is_empty() {
-            self.state
-                .kq
-                .watch(&to_watch, 0)
-                .map_err(|e| Refusal::os("watching a box's members", e))?;
+            let ended = watch_members(&self.state.kq, &to_watch)?;
+            // A member that ended before its watch attached posts no exit event: wake the watcher for a
+            // read that finds it ended, rather than wait for a change that already happened.
+            if !ended.is_empty() {
+                self.state.wake()?;
+            }
         }
         let to_unwatch: Vec<i32> = self.watched.difference(&running).copied().collect();
         for pid in to_unwatch {
@@ -837,6 +1355,8 @@ struct Totals {
 /// summed CPU/IO totals, and a signature of the running set (for the escape check).
 struct Reading {
     members: Vec<Member>,
+    /// Each member's user time, by `members`' order.
+    users: Vec<u64>,
     totals: Totals,
     sig: u64,
 }
@@ -850,11 +1370,13 @@ fn limit(bounds: &Bounds) -> Limit {
     }
 }
 
-/// A box's QoS clamp: background where its weight is low (under the default 100), utility otherwise.
+/// A box's QoS clamp, from its declared CPU weight as `cpu.weight` sets a box's share on Linux: background
+/// where its weight is under the default 100, none otherwise (the lead, 2026-11-06: no clamp to keep the
+/// watcher ahead of a box).
 fn clamp(bounds: &Bounds) -> Clamp {
     match bounds.cpu_weight {
         Some(w) if w < 100 => Clamp::Background,
-        _ => Clamp::Utility,
+        _ => Clamp::Unclamped,
     }
 }
 
@@ -865,6 +1387,25 @@ fn kill_signal() -> i32 {
 
 fn poisoned(what: &str) -> Refusal {
     Refusal::Broken(format!("{what} lock is poisoned"))
+}
+
+/// Whether process `pid` has a thread running or waiting for a core. Unread (gone, or another user's program),
+/// it may have: a run of it with no other sign shows nothing.
+fn runnable(pid: i32) -> bool {
+    sys::task(pid).map_or(true, |t| t.is_none_or(|t| t.runnable))
+}
+
+/// Signals process `pid`; false when it is gone (ESRCH).
+fn signal_one(pid: i32, signal: rustix::process::Signal) -> Result<bool, Refusal> {
+    let p = rustix::process::Pid::from_raw(pid).ok_or(Refusal::Invalid {
+        what: "pid",
+        why: format!("{pid} isn't a process id"),
+    })?;
+    match rustix::process::kill_process(p, signal) {
+        Ok(()) => Ok(true),
+        Err(rustix::io::Errno::SRCH) => Ok(false),
+        Err(e) => Err(Refusal::os("kill", e)),
+    }
 }
 
 /// Signals process group `pgid`; false when the group has no member left (ESRCH).

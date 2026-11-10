@@ -6,7 +6,9 @@
 //! the box's record. A box's other processes that are orphaned (a daemon a `process` box's program
 //! forks, a container's process without a pid namespace) become the agent's children too; a sweep
 //! each [`SWEEP_PERIOD`] reaps those that have ended, and only those: a zombie in one of the node's
-//! box cgroups that no [`Proc`] handle and no watched init owns.
+//! box cgroups that no [`Proc`] handle and no watched init owns. A box a run made for one program's life
+//! (decision 7) is watched through its program's pidfd in the same set, and removed once the program ends
+//! ([`run`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
@@ -24,17 +26,17 @@ use rustix::process::{Pid, PidfdFlags, WaitId, WaitIdOptions, WaitIdStatus};
 
 use crate::store::Store;
 
-/// Most inits whose pidfds one node agent holds: one fd per live `oci` box. Past it `create` refuses
-/// with [`Refusal::Exhausted`] before making anything. It sits under the fd limit systemd gives a
-/// service (`DefaultLimitNOFILE=1024:524288`, systemd-system.conf(5)) once the agent raises its soft
-/// limit to the hard one, with room left for the agent's own files; and above the density the
-/// runtime design targets on one node (10,560 idle containers per GiB held). An operator sets
-/// another with [`crate::Node::with_init_budget`].
-pub const INIT_BUDGET: usize = 65_536;
+mod run;
+pub use run::{Run, RunProc};
+
+/// What [`Refusal::Exhausted`] names the supervisor's budget: its pidfds, one for each live `oci` box's init and
+/// one for each run's program (decision 7), each box holding one at most.
+pub const PIDFDS: &str = "pidfds of containers' inits and runs' programs";
 
 /// Most exec'd programs the agent watches for one box at once (to reap on its delete), past which exec
 /// is refused ([`Refusal::Exhausted`]), so the per-box tracking is bounded (CLAUDE.md §2). A program
-/// the caller reaps is forgotten at once, so this bounds concurrent unreaped execs, not a box's total;
+/// the caller reaps is forgotten at once, and one let go once it has ended and been reaped (by the sweep, or
+/// by the box's next exec, which looks), so this bounds concurrent unreaped execs, not a box's total;
 /// it sits well above a box's steps, which run one at a time.
 pub const PROGRAM_BUDGET: usize = 1_024;
 
@@ -60,7 +62,7 @@ static SPAWNING: RwLock<()> = RwLock::new(());
 
 /// The pids some node in this process still reaps itself: programs whose [`Proc`] may wait on them,
 /// and watched inits. A sweep leaves them alone. Bounded by the live programs and inits, each held
-/// to its own bound ([`INIT_BUDGET`], a box's process bound).
+/// to its own bound (the supervisor's init budget, a box's process bound).
 static OWNED: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
 
 fn owned() -> Result<MutexGuard<'static, BTreeSet<u32>>, Refusal> {
@@ -90,6 +92,9 @@ struct Init {
 pub struct Container {
     pub bundle: String,
     pub cgroup: Option<String>,
+    /// Whether the init is the first process of a pid namespace its create made, so ending it ends the
+    /// whole namespace ([`Forgotten::kill`]).
+    pub pid_namespace: bool,
 }
 
 /// A box's running init, for an exec into it: its pid, a duplicate of its pidfd (by which the program
@@ -106,10 +111,25 @@ struct Inits {
     by_box: BTreeMap<BoxId, Init>,
     /// The epoll token each watched init's pidfd carries, back to its box.
     by_token: BTreeMap<u64, BoxId>,
+    /// The next epoll token, an init's or a run's.
     next_token: u64,
-    /// Creates under way that hold a place in the budget.
+    /// Creates and runs under way that hold a place in the budget.
     reserved: usize,
+    /// The most pidfds held at once, the inits' and the runs' together.
     budget: usize,
+    /// The boxes runs made, each watched through its program's pidfd ([`run`]).
+    runs: run::Runs,
+}
+
+impl Inits {
+    /// The next epoll token, refused once they have run out.
+    fn token(&mut self) -> Result<u64, Refusal> {
+        let token = self.next_token;
+        self.next_token = token
+            .checked_add(1)
+            .ok_or_else(|| Refusal::Broken("the supervisor's tokens ran out".to_owned()))?;
+        Ok(token)
+    }
 }
 
 /// The node's supervision of its boxes' processes.
@@ -134,6 +154,8 @@ struct Program {
     pid: u32,
     pidfd: OwnedFd,
     exit: Arc<Mutex<Option<Exit>>>,
+    /// Let go by its caller: no one waits for its exit, but the box's delete still reaps it.
+    released: bool,
 }
 
 fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
@@ -142,8 +164,12 @@ fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
 
 impl Supervisor {
     /// Makes this process a child subreaper and starts the supervising thread. `box_root` is the
-    /// node's box root under the cgroup root; records of reaped inits go to `store`.
-    pub fn start(box_root: &Path, store: Store) -> Result<Arc<Self>, Refusal> {
+    /// node's box root under the cgroup root; records of reaped inits go to `store`. `budget` is the most
+    /// pidfds it holds, one per live `oci` box's init or run's program, past which `create` and `run` refuse with
+    /// [`Refusal::Exhausted`] before making anything ([`crate::sizes::Sizes::inits`]: at most the node's boxes, each
+    /// holding one at most, within its hard `RLIMIT_NOFILE` read at run time, getrlimit(2)). It was 65,536, systemd's
+    /// figure copied (Ada's 2026-11-06 constants rule).
+    pub fn start(box_root: &Path, store: Store, budget: usize) -> Result<Arc<Self>, Refusal> {
         rustix::process::set_child_subreaper(Some(rustix::process::getpid()))
             .map_err(|e| Refusal::os("making the node agent a child subreaper", e))?;
         let rel = box_root
@@ -159,7 +185,7 @@ impl Supervisor {
         let supervisor = Arc::new(Self {
             epoll: Arc::clone(&epoll),
             inits: Mutex::new(Inits {
-                budget: INIT_BUDGET,
+                budget,
                 ..Inits::default()
             }),
             box_root: Path::new("/").join(rel).to_string_lossy().into_owned(),
@@ -179,24 +205,28 @@ impl Supervisor {
         self.inits.lock().map_err(poisoned)
     }
 
-    /// Sets the init budget.
+    /// Sets the budget, the inits' and the runs' pidfds together.
     pub fn set_budget(&self, budget: usize) -> Result<(), Refusal> {
         self.inits()?.budget = budget;
         Ok(())
     }
 
-    /// Takes a place in the init budget for a create, or refuses with [`Refusal::Exhausted`] naming
+    /// Takes a place in the budget for a create or a run, or refuses with [`Refusal::Exhausted`] naming
     /// the budget when none is left. The place is given back when the [`Slot`] is dropped, or turned
-    /// into the init's by [`Supervisor::watch`].
+    /// into the init's by [`Supervisor::watch`], or the run's by [`Supervisor::watch_run`].
     pub fn reserve(self: &Arc<Self>) -> Result<Slot, Refusal> {
         let mut inits = self.inits()?;
         if let Some(fault) = self.fault.lock().map_err(poisoned)?.as_ref() {
             return Err(Refusal::Broken(format!("the node's supervisor: {fault}")));
         }
-        let held = inits.by_box.len().checked_add(inits.reserved);
+        let held = inits
+            .by_box
+            .len()
+            .checked_add(inits.reserved)
+            .and_then(|h| h.checked_add(inits.runs.len()));
         if held.is_none_or(|h| h >= inits.budget) {
             return Err(Refusal::Exhausted {
-                what: "container init pidfds",
+                what: PIDFDS,
                 bound: inits.budget,
             });
         }
@@ -246,10 +276,7 @@ impl Supervisor {
             )));
         }
         let mut inits = self.inits()?;
-        let token = inits.next_token;
-        inits.next_token = token
-            .checked_add(1)
-            .ok_or_else(|| Refusal::Broken("the supervisor's tokens ran out".to_owned()))?;
+        let token = inits.token()?;
         epoll::add(
             self.epoll.as_fd(),
             pidfd.as_fd(),
@@ -298,16 +325,6 @@ impl Supervisor {
         }))
     }
 
-    /// Whether box `id`'s init is watched and runs ([`Supervisor::live`]), without a duplicate of its
-    /// pidfd.
-    pub fn runs(&self, id: &BoxId) -> Result<bool, Refusal> {
-        let inits = self.inits()?;
-        match inits.by_box.get(id).and_then(|init| init.pidfd.as_ref()) {
-            Some(pidfd) => Ok(!ended(pidfd.as_fd())?),
-            None => Ok(false),
-        }
-    }
-
     /// How box `id`'s init ended, if it is watched and has: reaped now if it has ended and the
     /// supervising thread hasn't come to it yet, so inspect never reads a stopped box without its
     /// exit. `None` when it runs or isn't watched.
@@ -315,9 +332,10 @@ impl Supervisor {
         self.collect(id)
     }
 
-    /// Stops watching box `id`'s init, which the box's delete is about to end; returns its pidfd, if
-    /// it hasn't been reaped, for the delete to reap it once the box is empty. An exit being recorded
-    /// as it's forgotten goes into this box's record alone, which the delete removes.
+    /// Stops watching box `id`'s init, which the box's delete is about to end; returns it, with its pidfd
+    /// if it hasn't been reaped, for the delete to end and reap once the box is empty. An exit being
+    /// recorded as it's forgotten goes into this box's record alone, which the delete removes. `None` for
+    /// a box whose init isn't watched: a `process` box, or one the node took back after a restart.
     pub fn forget(&self, id: &BoxId) -> Result<Option<Forgotten>, Refusal> {
         let mut inits = self.inits()?;
         inits.by_token.retain(|_, b| b != id);
@@ -333,10 +351,11 @@ impl Supervisor {
             epoll::delete(self.epoll.as_fd(), fd.as_fd())
                 .map_err(|e| Refusal::os("unwatching a deleted box's init", e))?;
         }
-        // Still owned: the delete reaps it ([`reap`]), which disowns it.
-        Ok(pidfd.map(|pidfd| Forgotten {
+        // Still owned while its pidfd is held: the delete reaps it ([`reap`]), which disowns it.
+        Ok(Some(Forgotten {
             pid: init.pid,
             pidfd,
+            pid_namespace: init.container.pid_namespace,
         }))
     }
 
@@ -367,6 +386,8 @@ impl Supervisor {
         {
             let mut programs = self.programs.lock().map_err(poisoned)?;
             let watched = programs.entry(id.clone()).or_default();
+            // A program let go that has ended is reaped here, or was by the sweep, and no longer counts.
+            watched.retain(|p| !p.released || !ended_and_reaped(p.pidfd.as_fd()));
             if watched.len() >= PROGRAM_BUDGET {
                 return Err(Refusal::Exhausted {
                     what: "exec'd programs watched for one box",
@@ -377,6 +398,7 @@ impl Supervisor {
                 pid,
                 pidfd,
                 exit: Arc::clone(&exit),
+                released: false,
             });
         }
         owned()?.insert(pid);
@@ -390,9 +412,12 @@ impl Supervisor {
         }))
     }
 
-    /// Reaps every exec'd program still watched for box `id`, recording each exit for its caller's
-    /// [`Proc`] to read. The box's delete calls this after `cgroup.kill`, so the programs — killed, in
-    /// the container's pid namespace — are reaped, letting the init finish exiting and the box empty.
+    /// Reaps every exec'd program of box `id` the agent still holds, those let go among them, recording each exit
+    /// for its caller's [`Proc`] to read. The box's delete calls this after its kill, so the programs — killed, in
+    /// the container's pid namespace — are reaped, letting the init finish exiting and the box empty: an init that is
+    /// its namespace's first process doesn't finish until every process in the namespace is reaped
+    /// (kernel/pid_namespace.c, `zap_pid_ns_processes`), so a program left to the sweep held the box for as long as
+    /// [`SWEEP_PERIOD`] (the waits census's run 5: `oci_box`'s delete "326.645366ms after SIGKILL" in every loop).
     pub fn reap_programs(&self, id: &BoxId, patience: Duration) -> Result<(), Refusal> {
         let watched = self
             .programs
@@ -424,8 +449,20 @@ impl Supervisor {
         Ok(())
     }
 
-    /// Stops watching a program the caller has reaped or let go, freeing the agent's pidfd for it, so
-    /// the box's delete no longer looks for it.
+    /// Keeps a program its caller let go unreaped for the box's delete to reap, its exit read by no one; the sweep
+    /// reaps it instead if it ends first.
+    fn let_go(&self, id: &BoxId, pid: u32) {
+        if let Ok(mut programs) = self.programs.lock()
+            && let Some(program) = programs
+                .get_mut(id)
+                .and_then(|watched| watched.iter_mut().find(|p| p.pid == pid))
+        {
+            program.released = true;
+        }
+    }
+
+    /// Stops watching a program the caller has reaped, freeing the agent's pidfd for it, so the box's delete no
+    /// longer looks for it.
     fn forget_program(&self, id: &BoxId, pid: u32) {
         if let Ok(mut programs) = self.programs.lock()
             && let Some(watched) = programs.get_mut(id)
@@ -484,16 +521,22 @@ impl Supervisor {
         Ok(exit)
     }
 
-    /// The supervising thread's pass over the inits whose pidfds turned readable.
+    /// The supervising thread's pass over the inits and runs whose pidfds turned readable.
     fn ready(&self, tokens: &[u64]) -> Result<(), Refusal> {
-        let ids: Vec<BoxId> = {
+        let (ids, runs): (Vec<BoxId>, Vec<Arc<Run>>) = {
             let inits = self.inits()?;
-            tokens
-                .iter()
-                .filter_map(|token| inits.by_token.get(token).cloned())
-                .collect()
+            (
+                tokens
+                    .iter()
+                    .filter_map(|token| inits.by_token.get(token).cloned())
+                    .collect(),
+                tokens
+                    .iter()
+                    .filter_map(|token| inits.runs.by_token(*token))
+                    .collect(),
+            )
         };
-        let mut first_error = None;
+        let mut first_error = self.runs_ready(&runs).err();
         for id in &ids {
             if let Err(e) = self.collect(id) {
                 first_error.get_or_insert(e);
@@ -623,7 +666,7 @@ fn supervise(epoll: &OwnedFd, supervisor: &Weak<Supervisor>) {
     }
 }
 
-/// A place in the init budget, given back on drop unless [`Supervisor::watch`] took it.
+/// A place in the budget, given back on drop unless [`Supervisor::watch`] or [`Supervisor::watch_run`] took it.
 pub struct Slot {
     supervisor: Arc<Supervisor>,
     held: bool,
@@ -697,7 +740,7 @@ impl Drop for Owned {
 
 /// A [`Proc`] for an exec'd program the agent watches for its box's delete. It reaps the program itself
 /// when the caller waits, unless a delete reaped it first — then it reads the exit the agent recorded.
-/// Dropped unreaped, it leaves the program to the sweep (it is the box's) and stops being watched.
+/// Dropped unreaped, it lets the program go: the sweep reaps it if it ends first, else the box's delete does.
 struct ProgramProc {
     supervisor: Arc<Supervisor>,
     id: BoxId,
@@ -778,13 +821,25 @@ impl Proc for ProgramProc {
 impl Drop for ProgramProc {
     fn drop(&mut self) {
         if !self.done {
-            // Let go unreaped: leave it to the sweep (it is the box's) and stop watching it.
-            self.supervisor.forget_program(&self.id, self.pid);
+            // Let go unreaped: the box's delete reaps it, its init's end waiting for that; the sweep may first, the
+            // program out of the owned set.
+            self.supervisor.let_go(&self.id, self.pid);
             if let Ok(mut owned) = OWNED.lock() {
                 owned.remove(&self.pid);
             }
         }
     }
+}
+
+/// Whether a program let go has ended and been reaped, by this look or by the sweep before it.
+fn ended_and_reaped(pidfd: BorrowedFd<'_>) -> bool {
+    matches!(
+        rustix::process::waitid(
+            WaitId::PidFd(pidfd),
+            WaitIdOptions::EXITED | WaitIdOptions::NOHANG,
+        ),
+        Ok(Some(_)) | Err(_)
+    )
 }
 
 /// Reaps `pidfd`'s process if it has ended and records how in `slot`, for the caller's [`Proc`]. The
@@ -812,16 +867,70 @@ fn exit_of(status: &WaitIdStatus) -> Exit {
     }
 }
 
-/// A deleted box's init, unwatched but still owned, for the delete to reap.
+/// A deleted box's init, unwatched but still owned until reaped, for the delete to end and reap.
 pub struct Forgotten {
     pid: i32,
-    pidfd: OwnedFd,
+    /// `None` once the supervisor reaped it.
+    pidfd: Option<OwnedFd>,
+    /// Whether ending it ends a pid namespace of its own ([`Container::pid_namespace`]).
+    pub pid_namespace: bool,
 }
 
-/// Reaps a deleted box's init, which has ended since its box is empty, and disowns it.
+impl Forgotten {
+    /// Its pid, in the node agent's pid namespace.
+    pub fn pid(&self) -> i32 {
+        self.pid
+    }
+
+    /// Sends the init SIGKILL through its pidfd, which ends its pid namespace with it: the kernel kills
+    /// every process in the namespace when its init ends (pid_namespaces(7); Linux v6.19
+    /// `zap_pid_ns_processes`, kernel/pid_namespace.c:231), and a SIGKILL from an ancestor namespace
+    /// reaches an init without a handler (kernel/signal.c:1190-1191). The signal takes no `cgroup_mutex`,
+    /// where `cgroup.kill`'s write does (research f45, f46, f50). An init that has ended already, or been
+    /// reaped, has nothing left to end.
+    pub fn kill(&self) -> Result<(), Refusal> {
+        let Some(pidfd) = &self.pidfd else {
+            return Ok(());
+        };
+        match rustix::process::pidfd_send_signal(pidfd, rustix::process::Signal::KILL) {
+            Ok(()) | Err(Errno::SRCH) => Ok(()),
+            Err(e) => Err(Refusal::os(
+                "killing a deleted box's init through its pidfd",
+                e,
+            )),
+        }
+    }
+
+    /// Waits until the init has ended, at most `patience`: its pidfd turns readable then
+    /// (pidfd_open(2)). Its pid namespace's processes are all gone by then, since its end waits for them
+    /// (kernel/pid_namespace.c:263-265). One reaped already has ended.
+    pub fn ended_within(&self, patience: Duration) -> Result<bool, Refusal> {
+        let Some(pidfd) = &self.pidfd else {
+            return Ok(true);
+        };
+        let ts = Timespec {
+            tv_sec: i64::try_from(patience.as_secs()).unwrap_or(i64::MAX),
+            tv_nsec: i64::from(patience.subsec_nanos()),
+        };
+        let mut fds = [PollFd::new(pidfd, PollFlags::IN)];
+        loop {
+            match rustix::event::poll(&mut fds, Some(&ts)) {
+                Ok(n) => return Ok(n > 0),
+                Err(Errno::INTR) => continue,
+                Err(e) => return Err(Refusal::os("waiting on a deleted box's init", e)),
+            }
+        }
+    }
+}
+
+/// Reaps a deleted box's init, which has ended since its box is empty, and disowns it. One the
+/// supervisor reaped already was disowned then.
 pub fn reap(init: &Forgotten) -> Result<(), Refusal> {
+    let Some(pidfd) = &init.pidfd else {
+        return Ok(());
+    };
     let reaped = match rustix::process::waitid(
-        WaitId::PidFd(init.pidfd.as_fd()),
+        WaitId::PidFd(pidfd.as_fd()),
         WaitIdOptions::EXITED | WaitIdOptions::NOHANG,
     ) {
         Ok(_) | Err(Errno::CHILD) => Ok(()),
@@ -952,6 +1061,56 @@ mod tests {
         assert_eq!(
             caught, 0,
             "{caught} of 200 children were reaped with their exit unrecorded"
+        );
+    }
+
+    /// The waits census's suites, every loop of run 5 (waits-census-20261109T184054Z): `oci_box`'s delete of a box whose
+    /// exec'd program its caller had let go ran out of the emptying wait, the box's init "still runs 326.645366ms after
+    /// SIGKILL". The init is its pid namespace's first process, which doesn't finish exiting until every process in the
+    /// namespace is reaped (kernel/pid_namespace.c, `zap_pid_ns_processes`); the program it killed is the agent's child,
+    /// and a program let go was forgotten by the box, left to the sweep, which reaps once in [`SWEEP_PERIOD`]. Do: own a
+    /// child as box `b`'s exec'd program, let its `Proc` go, kill the child, and reap box `b`'s programs as its delete
+    /// does. Expect: the child reaped by that, none of it left for the sweep.
+    #[test]
+    fn a_program_let_go_is_reaped_by_its_boxs_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("disk"), &dir.path().join("run")).unwrap();
+        // A box root no process of this test is in, so the sweep reaps none of them.
+        let supervisor = Supervisor::start(
+            Path::new(hex_runtime::linux::cgroup::CGROUP_ROOT)
+                .join("hex-supervise-test-none")
+                .as_path(),
+            store,
+            1,
+        )
+        .unwrap();
+        #[expect(
+            clippy::zombie_processes,
+            reason = "reaped by the box's delete, through the agent's pidfd: the reap this test looks for"
+        )]
+        let child = std::process::Command::new("sleep")
+            .arg("600")
+            .spawn()
+            .unwrap();
+        let pid = Pid::from_child(&child);
+        let id = BoxId::new("b").unwrap();
+        let proc = hex_runtime::linux::proc::PidfdProc::of_child(child.id()).unwrap();
+        let pidfd = rustix::process::pidfd_open(pid, PidfdFlags::empty()).unwrap();
+        let program = supervisor.own_program(&id, Box::new(proc), pidfd).unwrap();
+        drop(program);
+        let look = rustix::process::pidfd_open(pid, PidfdFlags::empty()).unwrap();
+        rustix::process::kill_process(pid, rustix::process::Signal::KILL).unwrap();
+        supervisor
+            .reap_programs(&id, hex_testkit::waits::EMPTYING)
+            .unwrap();
+        assert_eq!(
+            rustix::process::waitid(
+                WaitId::PidFd(look.as_fd()),
+                WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+            )
+            .map(|status| status.is_some()),
+            Err(Errno::CHILD),
+            "the program let go is still the agent's child after its box's delete reaped the box's programs"
         );
     }
 

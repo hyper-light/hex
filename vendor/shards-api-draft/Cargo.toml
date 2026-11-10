@@ -1,10 +1,13 @@
-# A copy of Shards' draft `shards-api` (crates/api) and the crates it needs (afunix on Windows, testdir
-# for its tests), at hyper-light/shards hex/shards-api-constants 6f56f881 (local, task A of native plan step 5),
-# so Hex builds against it on every machine before Shards lands it. It moves to vendor/shards, recorded
-# in vendor/MANIFEST.toml, once Shards lands the crate (docs/design/shards-guest.md Appendix A). Its own
-# workspace, Shards' settings below (its root Cargo.toml at that commit), so its lints are Shards'.
+# Shards' `shards-api` (crates/api) and the crates it needs (abi, afunix on Windows,
+# testdir for its tests), at hyper-light/shards p/integrate-1107 c55d85db9b8c88656b4fe4bd582f5ebe6500e959
+# (2026-11-09; SAID da8bcd272, vmm-round2 7ddceb974). D12: the kept console size is learned per kernel pin,
+# `--console-said N` is passed to Shards, and the client's refusal tail is derived from that size. Real guests
+# require a Shards binary that supports `--console-said` (this revision or a descendant); the guest kernel pin
+# is unchanged. Hex's borrowed connector patch is recorded in HEX-PATCHES.md; the root keeps Shards' settings below (its Cargo.toml
+# is unchanged since f2e5a8ca1), with only these four workspace members. It moves to vendor/shards, recorded in
+# vendor/MANIFEST.toml, once Shards lands the crate on main (docs/design/shards-guest.md Appendix A).
 [workspace]
-members = ["crates/api", "crates/afunix", "crates/testdir"]
+members = ["crates/abi", "crates/api", "crates/afunix", "crates/testdir"]
 resolver = "3"
 
 [workspace.package]
@@ -16,7 +19,6 @@ rust-version = "1.98.1"
 # Versions are pinned once here.
 [workspace.dependencies]
 libc = "0.2"
-thiserror = "2"
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Networking_WinSock",

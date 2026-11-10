@@ -17,6 +17,7 @@
 set -uo pipefail
 N=${N:-1000}; WARMUP=${WARMUP:-100}; ROUNDS=${ROUNDS:-2}; FLOOR_N=${FLOOR_N:-1000}; FLOOR_WARMUP=${FLOOR_WARMUP:-100}
 OUT=/opt/out; mkdir -p /run/err
+. "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/tracebuf.sh"
 
 # The OCI pass's bundles (oci_inside.sh): a `sleep` container to exec into, and the `true` one seam_oci names.
 ALL_NS='[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"}]'
@@ -48,9 +49,15 @@ for c in cpu memory pids io; do echo "+$c" > /sys/fs/cgroup/cgroup.subtree_contr
 # run's processes have: seam_oci; hex (the exec helper, the child it clones until that execs, and a container's
 # init until it execs its workload); true (the program), whose loader's opens aren't cuts. open as well as
 # openat: rustix opens with open(2) on x86_64. The clock is CLOCK_MONOTONIC's.
+# The instance is named by the tag exec_breakdown.sh gives the run (TRACE_TAG, its UTC stamp and its pid on the
+# host): this shell's own pid is 1 in every probe container, so a name of it would be every run's, and a killed run's
+# instance would refuse the next. UNTRACE_ONLY=1 takes the tag's instance down and ends: exec_breakdown.sh runs it
+# once its container is gone, for a run killed before its own trap ran.
+TAG=${TRACE_TAG:?exec_breakdown.sh gives the run its TRACE_TAG}
+case $TAG in *[!A-Za-z0-9_]*|"") echo "refusing: TRACE_TAG $TAG names no trace instance" >&2; exit 2 ;; esac
 T=/sys/kernel/tracing
 mountpoint -q "$T" || mount -t tracefs nodev "$T" || { echo "refusing: no tracefs at $T" >&2; exit 4; }
-I="$T/instances/hexbd-$$"
+I="$T/instances/hexbd-$TAG"
 EVENTS="sched/sched_process_fork sched/sched_process_exec sched/sched_process_exit
   syscalls/sys_exit_openat syscalls/sys_exit_open syscalls/sys_enter_setns syscalls/sys_exit_setns
   syscalls/sys_enter_clone3 syscalls/sys_exit_clone3 syscalls/sys_enter_clone syscalls/sys_exit_clone
@@ -70,14 +77,15 @@ untrace() { # the instance's events off and the instance gone, whatever state it
   rmdir "$I" 2>/dev/null || echo "the trace instance $I wouldn't go" >&2
 }
 trap untrace EXIT
+[ "${UNTRACE_ONLY:-0}" = 1 ] && exit 0
 
 # traced <out name> <n> <warmup> [detail]: seam_oci's lifecycle phase with the tracer on, its trace in
 # <out name>.txt and the instance's per-CPU counts in <out name>.stats (exec_breakdown.py refuses a trace that
 # lost events); `detail` adds the opens' entries.
-traced() {
+traced_once() {
   local name=$1 n=$2 warmup=$3 events=$EVENTS rc=0
   [ "${4:-}" = detail ] && events="$EVENTS $DETAIL"
-  mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo 4096 > "$I/buffer_size_kb" \
+  mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo "${TRACE_KB:?}" > "$I/buffer_size_kb" \
     || { echo "the trace instance $I couldn't be made" >&2; untrace; return 1; }
   for ev in $events; do
     { filter "$ev" > "$I/events/$ev/filter" && echo 1 > "$I/events/$ev/enable"; } \
@@ -95,6 +103,8 @@ traced() {
   untrace
   return $rc
 }
+# Its buffer starts at 4,096 KiB a CPU, the runs of record's, and grows while the trace lost events (tracebuf.sh).
+traced() { grown 4096 "$OUT/$1.stats" traced_once "$@"; }
 
 # floor <out name> <n> <warmup>: exec_floor against a running `sleep` container crun makes from the same
 # bundle, its init's pid from crun's state and its cgroup from the init's.

@@ -1,0 +1,52 @@
+# The macOS watcher's read cost and its event bursts (the lead's calls 1 and 2, 2026-11-06, Ada's rule):
+# crates/hex-bench/benches/macos_box.rs `readcost` and `events` passes, which drive the watcher's own calls
+# (hex_runtime::macos::sys) on a group of /bin/sleep members, so nothing else in the process spends CPU or
+# takes events. launchd one-shot hex-macos-measure-20261106T165609Z, adas-mac-studio-2 (Mac16,9, Apple M4 Max,
+# 14 cores, macOS 26.2 25C56), release build of tree a7d13c6 + the two passes, 2026-11-06T16:56-16:59Z, load
+# average 3.47-5.71 (noisy, as runs of record are here).
+
+## readcost: CPU against reads a second, 3 passes, 2 s each
+# Each read: a one-shot NOTE_CRITICAL timer of the pace, then the group listed (proc_listpids) and each
+# member's rusage read (proc_pid_rusage), on a Mach time-constraint thread (250/150/250 us), as the watcher
+# reads. CPU is the process's (getrusage), a percentage of one core; min and max of the 3 passes.
+# members pace_us reads_per_s cpu_pct_min cpu_pct_max cpu_us_per_read_max
+1 250 3358.2 11.3912 12.6884 37.8
+1 1000 940.1 4.3775 4.5461 48.4
+1 2500 388.0 2.2950 2.3288 60.0
+1 10000 98.9 0.8798 0.9865 99.7
+1 25000 39.8 0.4500 0.4571 114.8
+1 50000 19.9 0.2280 0.2359 118.5
+1 100000 10.0 0.1044 0.1214 121.4
+14 250 3079.9 17.7494 18.7558 60.9
+14 1000 909.2 6.0985 7.3484 80.8
+14 2500 379.5 3.2301 4.2476 111.9
+14 10000 98.4 1.2569 1.4166 144.0
+14 25000 39.7 0.5990 0.6450 162.5
+14 50000 19.9 0.3034 0.3623 182.1
+14 100000 10.0 0.1459 0.1714 171.4
+28 250 2904.9 22.5482 23.9664 82.5
+28 1000 906.8 8.1808 8.7619 96.6
+28 2500 379.9 4.3391 5.2034 137.0
+28 10000 98.1 1.6329 1.7162 174.9
+28 25000 39.6 0.8336 0.8497 214.6
+28 50000 19.9 0.4367 0.4530 227.6
+28 100000 10.0 0.2132 0.2476 247.6
+# A read costs more the longer the watcher slept before it (38 us at 250 us, 121 us at 100 ms, one member):
+# a cold wake. CPU is near linear in reads a second all the same: 0.12-0.25 % of a core at 10 reads/s,
+# 11-24 % at the 250 us floor.
+
+## events: the most events one kqueue wait takes, 5 passes
+# A group of `members`, each watched for its forks and end (NOTE_FORK | NOTE_EXIT | NOTE_EXITSTATUS) as the
+# watcher watches them, killed in one kill(2) (the overshoot pass's burst: its watcher kills the whole box);
+# first = what the first wait after the kill took, as the watcher's wake does; settled = what one wait took
+# once every member had ended. The wait's batch was sys::EVENTS = 64, above every count.
+# members first(p1..p5) settled(p1..p5) max
+1 1 1 1 1 1 1 1 1 1 1 1
+4 4 4 1 3 1 4 4 3 1 2 4
+8 5 5 3 8 5 1 2 8 8 2 8
+14 11 14 10 14 12 14 13 13 14 12 14
+28 28 12 14 27 28 13 28 24 25 28 28
+# The most: one event a member, 28 for the bench's largest box (EV_CLEAR coalesces a process's events into
+# one knote, bsd/kern/kern_event.c:1139). A settled count under the members is most likely a wait that met
+# the queue before every end was posted: the pass settles on rusage reading each member ended, which may come
+# before its exit knote fires. Not chased: the first waits already reach one event a member.

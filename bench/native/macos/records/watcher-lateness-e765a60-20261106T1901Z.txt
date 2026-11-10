@@ -1,0 +1,24 @@
+# How late the macOS watcher's wake comes, as the watcher wakes and reads (the lead's call, 2026-11-06): on a Mach
+# time-constraint thread (250/150/250 us, the watcher's), a one-shot NOTE_CRITICAL kqueue timer, then the group of
+# churning members read (proc_listpids of the group, proc_pid_rusage of each), the members meanwhile filling and
+# freeing 64 MiB of fresh memory round after round (the page-faulting load a box of hogs puts on the machine).
+# Lateness = the time past the timer to the end of the read, when the next wait is armed. 300 wakes at each of
+# the paces a 256 MiB box reads at under the highest recorded rate (at its bound, half full, empty), 900 a pass.
+# crates/hex-bench/benches/macos_box.rs `lateness`, release build of tree e765a60 + the pass, launchd one-shot
+# hex-macos-late2-20261106T190145Z, adas-mac-studio-2 (Mac16,9, Apple M4 Max, 14 cores, macOS 26.2 25C56),
+# 2026-11-06T19:01:51-19:02:39Z, load 6.8-29.9 (the churners' own).
+# pass churners p50_us p99_us p999_us max_us
+1 0  25 63  69  70
+1 14 32 72  112 114
+1 28 38 82  144 150
+1 56 53 95  164 172
+2 0  32 70  85  94
+2 14 35 71  170 317
+2 28 41 101 148 169
+2 56 57 129 300 328
+3 0  29 60  65  76
+3 14 33 103 176 218
+3 28 42 141 166 199
+3 56 73 263 446 457
+# The slowest under oversubscription: 457 us, four members per core (pass 3). hex_core::watch::RECORDED_LATENESS
+# seeds the learned lateness with it, whose bound is twice the slowest seen: 914 us to start.

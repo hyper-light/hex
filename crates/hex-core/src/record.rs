@@ -1,11 +1,16 @@
-//! The node agent's durable record of each box, and the steps that make and remove a box in the
-//! order the records make safe: a record says what a box is about to become before the machine
-//! changes, so after a crash at any step recovery knows what every leftover is (T-T7.1.2).
+//! The node agent's durable record of each box, and the steps that make and remove a box in an
+//! order a crash at any step leaves nothing unknown after (T-T7.1.2). A box's parts lie at paths its
+//! id fixes (its cgroup, made first, its rendered bundle, its container's state directory), so
+//! recovery finds what a box caught mid-create left by looking there, and its record is written once,
+//! when the box is whole (goal 5 extended, step 5). A delete marks the record before the machine
+//! changes, so a box caught mid-delete is known to be going.
 
 use std::path::PathBuf;
 
-use hex_api::{BoxSpec, Class, Exit, Refusal};
+use hex_api::{BoxSpec, ClassSpec, Exit, Refusal};
 use serde::{Deserialize, Serialize};
+
+use crate::cgroup::Baseline;
 
 /// The record format's version; a record of another is refused, never guessed at.
 pub const RECORD_VERSION: u32 = 1;
@@ -32,6 +37,26 @@ pub struct BoxRecord {
     /// record without it reads as 0 (append-only).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub abandoned: u64,
+    /// The slot its cgroup is named by, for a box given a cgroup that may be handed on to its owner's
+    /// next box (goal 5 extended, step 6; [`crate::reuse`]): a cgroup can't be renamed, so one that
+    /// outlives its box is named by its slot, never by a box's id (research f35, f64). Added within
+    /// version 1, so a record without it names a cgroup by its box's id (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<Slot>,
+    /// The program a run made this `process` box for ([`hex_api::Runtime::run`]): the box goes once
+    /// it has ended, by its node agent or, after a restart, by recovery (decision 7). Added within
+    /// version 1, so a record without it is a box made by create (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<ProcId>,
+}
+
+/// A cgroup that may be handed from box to box of one owner ([`crate::reuse`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Slot {
+    /// Its number, which names its cgroup ([`crate::reuse::name`]).
+    pub n: u64,
+    /// Its cumulative counters when this box was given it, which its usage is reported from.
+    pub baseline: Baseline,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -42,7 +67,9 @@ fn is_zero(n: &u64) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Phase {
-    /// Being made: its cgroup, directories and init may each exist or not.
+    /// Being made: its cgroup, directories and init may each exist or not. Written by node agents
+    /// before goal 5 extended step 5, which write no record until the box is made; recovery removes a
+    /// box whose record still says it.
     Creating,
     /// Made: what it holds runs, or may.
     Ready,
@@ -68,6 +95,8 @@ impl BoxRecord {
             dirs,
             exit: None,
             abandoned: 0,
+            slot: None,
+            run: None,
         }
     }
 
@@ -108,15 +137,15 @@ impl BoxRecord {
 /// One step that changes the machine or the records; the shell does them in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
-    /// Write the record, phase `Creating`.
-    MarkCreating,
+    /// Write the bundle rendered from the box's [`hex_api::OciSpec`] into a directory of its own.
+    RenderBundle,
     /// Make the box's cgroup and write its bounds.
     MakeCgroup,
-    /// Make the directories the box owns.
-    MakeDirs,
-    /// Start the container's init in the box (`oci`).
+    /// Make the container's state directory (`oci`).
+    MakeStateDir,
+    /// Start the container's init in the box (`oci`), or a run's program (`process`).
     StartInit,
-    /// Write the record, phase `Ready`, with the init it started.
+    /// Write the record, phase `Ready`, with the init it started: the box's first record.
     MarkReady,
     /// Write the record, phase `Deleting`.
     MarkDeleting,
@@ -130,19 +159,30 @@ pub enum Step {
     DropRecord,
 }
 
-/// The steps that make a box of `class`.
-pub fn create_steps(class: Class) -> &'static [Step] {
+/// The steps that make a box of `class`: no record before the last, each part made before it at a path
+/// the box's id fixes, the cgroup first, whose mkdir claims the id.
+pub fn create_steps(class: &ClassSpec) -> &'static [Step] {
     match class {
-        Class::Process => &[Step::MarkCreating, Step::MakeCgroup, Step::MarkReady],
-        Class::Oci => &[
-            Step::MarkCreating,
+        ClassSpec::Process => &[Step::MakeCgroup, Step::MarkReady],
+        ClassSpec::Bundle(_) => &[
             Step::MakeCgroup,
-            Step::MakeDirs,
+            Step::MakeStateDir,
+            Step::StartInit,
+            Step::MarkReady,
+        ],
+        ClassSpec::Oci(_) => &[
+            Step::MakeCgroup,
+            Step::RenderBundle,
+            Step::MakeStateDir,
             Step::StartInit,
             Step::MarkReady,
         ],
     }
 }
+
+/// The steps of a run ([`hex_api::Runtime::run`]): a `process` box's cgroup, its program cloned into it,
+/// then the record naming the program, so a box no record names yet is found by its cgroup and removed.
+pub const RUN_STEPS: &[Step] = &[Step::MakeCgroup, Step::StartInit, Step::MarkReady];
 
 /// The steps that remove a box its caller asked to delete.
 pub const DELETE_STEPS: &[Step] = &[
@@ -173,6 +213,7 @@ mod tests {
             id: BoxId::new("r1").unwrap(),
             bounds: Bounds::default(),
             class: ClassSpec::Process,
+            owner: None,
         };
         BoxRecord::new(
             spec,
@@ -191,6 +232,22 @@ mod tests {
         assert_eq!(BoxRecord::decode(&r.encode().unwrap()).unwrap(), r);
     }
 
+    /// Decision 7, append-only: a record written before `run` existed reads as a box made by create,
+    /// one with no run is written without the field, and a run's program round-trips.
+    #[test]
+    fn a_record_without_a_run_reads_and_writes_as_before() {
+        let r = record();
+        let text = String::from_utf8(r.encode().unwrap()).unwrap();
+        assert!(!text.contains("\"run\""), "{text}");
+        assert_eq!(BoxRecord::decode(text.as_bytes()).unwrap().run, None);
+        let mut ran = r;
+        ran.run = Some(ProcId {
+            pid: 7,
+            start_ticks: 99,
+        });
+        assert_eq!(BoxRecord::decode(&ran.encode().unwrap()).unwrap(), ran);
+    }
+
     /// HEX-SOCK-6, append-only: a record written before `abandoned` existed reads as 0, and a record
     /// with none is written as before, so an older node agent reads it.
     #[test]
@@ -206,6 +263,31 @@ mod tests {
                 .unwrap()
                 .abandoned,
             3
+        );
+    }
+
+    /// Goal 5 extended, step 6, append-only: a record of a box whose cgroup is its own reads and writes
+    /// as before, with no slot; one whose cgroup is a slot keeps the slot and its baseline.
+    #[test]
+    fn a_records_slot_is_kept_and_a_record_without_one_reads_as_before() {
+        let r = record();
+        let text = String::from_utf8(r.encode().unwrap()).unwrap();
+        assert!(!text.contains("slot"), "{text}");
+        assert_eq!(BoxRecord::decode(text.as_bytes()).unwrap().slot, None);
+        let mut slotted = r;
+        slotted.slot = Some(Slot {
+            n: 7,
+            baseline: Baseline {
+                cpu_usec: 1,
+                io_read_bytes: 2,
+                io_write_bytes: 3,
+                oom_kills: 4,
+                pids_refused: 5,
+            },
+        });
+        assert_eq!(
+            BoxRecord::decode(&slotted.encode().unwrap()).unwrap(),
+            slotted
         );
     }
 

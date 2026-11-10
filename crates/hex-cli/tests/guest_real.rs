@@ -10,7 +10,7 @@
 //! - `SHARDS_BIN`: the `shards` binary (on macOS the signed build, where it is installed);
 //! - `HEX_GUEST_LINUX_HEX`: a static Linux `hex` for the guest's architecture, put at `/hex` in each
 //!   box's root (a tarball, as §4a's roots may be on every host) so the suite's programs (`hex selftest-box`) run there;
-//! - optionally `HEX_GUEST_CPUS` and `HEX_GUEST_MEMORY_MIB` (else the host's CPUs, `shards_api::max_vcpus`, and Shards' least plus twice `PEAK_MIB`) and
+//! - optionally `HEX_GUEST_CPUS` and `HEX_GUEST_MEMORY_MIB` (else the host's CPUs and Shards' least plus twice `PEAK_MIB`) and
 //!   `HEX_GUEST_SHARES` (else the OS's default roots).
 //!
 //! Run: `cargo test -p hex-cli --test guest_real -- --nocapture` with those set.
@@ -65,6 +65,7 @@ impl OciBoxes {
                 network: Network::Private,
                 hosts: Vec::new(),
             })),
+            owner: None,
         }
     }
 }
@@ -139,10 +140,9 @@ fn the_oci_class_holds_its_contract_through_a_real_shards_guest() {
         binary: given("SHARDS_BIN").unwrap(),
         kernel: given("HEX_GUEST_KERNEL").unwrap(),
         initrd: given("HEX_GUEST_INITRD").unwrap(),
-        // Unset, every CPU Shards gives a guest here (`shards_api::max_vcpus`, the host's): the
-        // fastest run, as a vCPU costs nothing while it idles.
-        vcpus: std::env::var("HEX_GUEST_CPUS")
-            .map_or_else(|_| shards_api::max_vcpus(), |v| v.parse().unwrap()),
+        // Unset, the host's CPUs (`host_cpus`): the fastest run, as a vCPU costs nothing while it
+        // idles.
+        vcpus: std::env::var("HEX_GUEST_CPUS").map_or_else(|_| host_cpus(), |v| v.parse().unwrap()),
         // Unset, Shards' least guest and twice this workload's measured peak (PEAK_MIB): the margin
         // C's guest_tree takes, stated as a factor, never below what was measured.
         memory_mib: number(
@@ -223,7 +223,7 @@ impl GuestNode {
             .arg(&socket)
             .arg("--state")
             .arg(dir.join("state"))
-            .env("HEX_GUEST_CPUS", shards_api::max_vcpus().to_string())
+            .env("HEX_GUEST_CPUS", host_cpus().to_string())
             .env("HEX_GUEST_MEMORY_MIB", memory.to_string())
             .stdout(std::process::Stdio::piped())
             .spawn()
@@ -399,4 +399,10 @@ fn an_oci_box_in_the_guest_outlives_its_node_and_is_taken_back() {
         "the restarted node booted another guest ({booted_again:?}) rather than take back the one that \
          outlived it"
     );
+}
+
+/// The host's CPUs, as std reads them: a guest here has every one, as a vCPU costs nothing while
+/// it idles.
+fn host_cpus() -> u32 {
+    std::thread::available_parallelism().map_or(1, |n| u32::try_from(n.get()).unwrap())
 }

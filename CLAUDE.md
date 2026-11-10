@@ -80,18 +80,21 @@ depth-first on the call stack. Work is flat: loops with counted budgets and boun
 
 ## 12. Portable
 
-Linux, macOS and Windows, on x86_64 and aarch64. Platform code sits behind `cfg` with a portable path
+Linux (glibc and musl), macOS and Windows, on x86_64 and aarch64, but for macOS on x86_64 (Ada, 2026-11-09:
+"windows, macos, and linux (of most any major flavor) compatible. AMD 64 and ARM64 excepting MacOS x86_64"). Platform code sits behind `cfg` with a portable path
 beside it, or a typed refusal naming the platform. `unsafe` is denied; where an OS interface needs it,
 its file is named here with the reason, and every block carries a `// SAFETY:` comment stating its
 invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at its top):
 
 - `crates/hex-runtime/src/linux/sys.rs`: the `process` class clones a program straight into its box's
-  cgroup (`clone3` with `CLONE_INTO_CGROUP` and `CLONE_PIDFD`) and executes it in the child, or, where
+  cgroup (`clone3` with `CLONE_INTO_CGROUP` and `CLONE_PIDFD`, vfork-class on the trampoline below,
+  decision 7) and executes it in the child, which shares the agent's memory until its execve and leaves its
+  errno there when it can't, or, where
   the kernel refuses that clone, joins it to the cgroup in the forked child before `execve` (`pre_exec`);
   Rust can express neither safely. And the `close_range` call, with the walk of `/proc/self/fd` by borrowed raw
   descriptors where the kernel refuses it, by which every descriptor from 3 up is marked close-on-exec before
-  foreign code runs (those two children, a container's init, an exec'd program's child, a seed: CVE-2024-21626's
-  class), which rustix doesn't wrap.
+  foreign code runs (those two children, a hook's, a container's init, an exec'd program's child, a seed:
+  CVE-2024-21626's class), which rustix doesn't wrap.
 - `crates/hex-runtime/src/linux/oci/sys.rs`: the `oci` class's `fork`, the `clone3` calls that start a
   container in its cgroup (from the shim, or from a create seed as the node agent's own child, `CLONE_PARENT`
   with `exit_signal` 0, rootless and as root: decision 5) and that clone an exec'd program into it with a
@@ -101,12 +104,17 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   inherited-fd adoption, the `bpf` calls that load and attach a container's cgroup device program
   and that open a loaded one by id and read its identity and translated instructions (so containers
   with one device policy share one program), the `seccomp(2)` call that loads a container's filter
-  without no_new_privs when its spec doesn't ask for it, the signal mask and `signalfd` through which
+  without no_new_privs when its spec doesn't ask for it, the `listmount` and `statmount` calls by
+  which the classic init finds the cgroup filesystems a recursive read-only bind carries (the libc
+  crate numbers them for m68k alone), the `mount_setattr(2)` call by which the
+  pruned-seed init makes a mount read-only or sets its propagation by descriptor, there being no
+  `/proc/self/fd` to name it by path in its namespace (goal 5's pruned root, decision 5), the signal
+  mask and `signalfd` through which
   `hex oci exec` passes signals on, the signal-disposition reset and `raise` by which
   `hex oci exec` ends the way its program did when the node agent drives it (seam mode), the
   `_exit` by which a seed's forked intermediate and program end without running the seed's `atexit`
   handlers, and the vfork-style `clone3` (`CLONE_VM | CLONE_VFORK`) by which a node agent's thread starts
-  an exec'd program as posix_spawn does: an inline-assembly trampoline for x86_64 and aarch64 that runs
+  an exec'd program, or a `process` box's program, as posix_spawn does: an inline-assembly trampoline for x86_64 and aarch64 that runs
   the child on a stack of its own (mapped with a guard page), every signal blocked around the clone, and
   the child's `execve` and signal reset, none of which rustix wraps safely. The process is
   single-threaded (it re-exec'd) where that matters, but for the vfork-style clone's child, which runs in
@@ -120,15 +128,20 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   fatal per-process memory cap at the box's whole bound (step 1's `_ext` backstop: the kernel SIGKILLs a
   member that crosses it, rootless, with no overshoot), and `adddup2`/`addchdir` file actions);
   `proc_listpids(PROC_PGRP_ONLY)` lists the group (and `PROC_UID_ONLY` a user, for the box helper's
-  membership, step 2) and `proc_pid_rusage` reads each member's footprint, start time and exit; `thread_policy_set(THREAD_TIME_CONSTRAINT_POLICY)` makes the watcher a Mach
-  time-constraint thread; `kqueue`/`kevent` carry its one-shot `NOTE_CRITICAL` timer, a user event to wake
+  membership, step 2) and `proc_pid_rusage` reads each member's footprint, start time and exit, and
+  `proc_pidinfo(PROC_PIDTBSDINFO)` its run state, so a box's hold continues only the members it stopped,
+  and `proc_pidinfo(PROC_PIDTASKINFO)` whether a member has a thread running or waiting for a core, so a run
+  that gave it none shows nothing of its rate;
+  `kqueue`/`kevent` carry its one-shot `NOTE_CRITICAL` timer, a user event to wake
   it, and `EVFILT_PROC` (`NOTE_FORK`/`NOTE_EXIT`/`NOTE_EXITSTATUS`, the dead member's wait status in the
   event, so a cap kill is told from an ordinary SIGKILL without racing its reaper) on members, and, for the
   node's socket on macOS (native plan step 8, `hex-node`'s `serve::macos`, one kqueue on its I/O thread),
   level-triggered `EVFILT_READ`/`EVFILT_WRITE` on the listener and connections; `getpeereid` names the
   socket's peer, so only the node's user and root are served; `mach_timebase_info` converts Mach ticks;
-  `sysctlbyname("kern.maxproc")` bounds a listing and `sysctlbyname("kern.argmax")` a program's arguments
-  and environment; `getrusage`
+  `sysctlbyname("kern.maxproc")` bounds a listing, `sysctlbyname("kern.argmax")` a program's arguments
+  and environment, and `sysctlbyname("kern.maxprocperuid")` is a box-user box's default process cap, and the
+  node's facts read `hw.memsize`, `hw.physicalcpu`, `hw.pagesize`, `vm.page_free_count`,
+  `vm.page_speculative_count` and `kern.hv_support` by it (`hex-node`'s `facts`); `getrusage`
   and `getloadavg` read the node's own cost for the bench and observability. rustix wraps the `kqueue`,
   `kill`/`killpg` and `waitid` beside these, which the class calls through it; libc binds the rest as
   `unsafe` foreign functions, and `posix_spawnattr_set_qos_class_np` and `posix_spawnattr_setjetsam_ext`
@@ -154,30 +167,43 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   wrapper.
 - `crates/hex-runtime/src/windows/sys.rs`: the Windows `process` class, whose box is a job object nested
   under the node's. It creates the job (`CreateJobObjectW`), sets its hard limits
-  (`SetInformationJobObject`: the commit cap, active-process cap, kill-on-close and no breakaway, the CPU
-  weight or hard cap, and the memory notification the one class Windows guarantees), starts each member
+  (`SetInformationJobObject`: the commit cap, active-process cap, kill-on-close and no breakaway, and the
+  CPU weight or hard cap), starts each member
   suspended inside the job and nowhere else (`CreateProcessW` with `CREATE_SUSPENDED` and a
   `PROC_THREAD_ATTRIBUTE_JOB_LIST`, so it is a job member from creation, and a
   `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` so only its three standard handles are inherited —
   `InitializeProcThreadAttributeList`/`UpdateProcThreadAttribute`/`DeleteProcThreadAttributeList`),
   resumes it (`ResumeThread`), waits on it and reads its end (`WaitForSingleObject`,
   `GetExitCodeProcess`), marks its standard handles inheritable (`SetHandleInformation`), reads the job's
-  accounting and its guaranteed memory-limit violation (`QueryInformationJobObject`), ends the job
+  accounting (`QueryInformationJobObject`), ends the job
   (`TerminateJobObject`) or one member alone (`TerminateProcess`, a program's own kill) and closes its
   handles (`CloseHandle`), and reads the machine's processor count
-  (`GetActiveProcessorCount`). For the `oci` class's Shards guest it reads the default shared roots
+  (`GetActiveProcessorCount`), the measured worker stack extent (`GetCurrentThreadStackLimits`),
+  the enclosing job's process ceiling (`IsProcessInJob` and `QueryInformationJobObject`), and, for the node's facts (`hex-node`'s `facts`), its memory
+  (`GlobalMemoryStatusEx`, also its commit room for admission) and a volume's size and free space (`GetDiskFreeSpaceExW`). For the `oci` class's Shards guest it reads the default shared roots
   (docs/design/shards-guest.md §4a): the users folder from its known folder (`SHGetKnownFolderPath` with
   `FOLDERID_UserProfiles`, its string freed by `CoTaskMemFree`) and the temp folder (`GetTempPath2W`).
   Where its boxes outlive the node (the keeper, `super::keeper`; decision
   "the Windows node, on one completion port"), it names each box's job (`CreateJobObjectW` with a name,
   reopened by the next node with `OpenJobObjectW`), and a keeper holds a second handle to each: the node
   duplicates the job into the keeper and closes it there on delete (`DuplicateHandle` into another process
-  and with `DUPLICATE_CLOSE_SOURCE`, the keeper opened by `OpenProcess` with `PROCESS_DUP_HANDLE`), names
-  a process by its creation time (`GetProcessTimes`) so a reused pid is told apart, waits on a process or
-  the keeper's stop (`WaitForMultipleObjects`), and makes and signals that stop (`CreateEventW` named,
-  `SetEvent`). `windows-sys` binds these as `unsafe` foreign functions, and std's own
+  and with `DUPLICATE_CLOSE_SOURCE`, the keeper opened by `OpenProcess` with `PROCESS_DUP_HANDLE`), starts
+  the keeper as it starts a member but in no job (`CreateProcessW` with the `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`
+  alone, its three standard handles the NUL device), so the keeper, which outlives the node, holds none of
+  the node's handles, names a process by its creation time (`GetProcessTimes`) so a reused pid is told
+  apart, and makes and signals the keeper's stop (`CreateEventW` named, `SetEvent`). `windows-sys` binds these as `unsafe` foreign
+  functions, and std's own
   job-object support and its `PROC_THREAD_ATTRIBUTE_JOB_LIST`/`_HANDLE_LIST` process creation are
   unstable; Rust can express none of them safely.
+- `crates/hex-runtime/src/windows/wmi.rs`: the Windows node reads the optional features Hex's installer
+  turns on (Containers, HypervisorPlatform) from WMI in process rather than starting PowerShell for them.
+  On a thread of its own it initializes COM (`CoInitializeEx`, multithreaded, paired with
+  `CoUninitialize`), makes WMI's in-process locator (`CoCreateInstance` of `WbemLocator`), connects to
+  `ROOT\CIMV2` (`IWbemLocator::ConnectServer`), sets the proxy's security (`CoSetProxyBlanket`: Windows
+  authentication, call level, impersonate), runs one WQL query semisynchronously and forward-only
+  (`IWbemServices::ExecQuery`), reads its instances with `IEnumWbemClassObject::Next` bounded by the time
+  left, and each instance's properties with `IWbemClassObject::Get`. The `windows` crate binds these COM
+  methods and functions as `unsafe`, and Rust can express none of them safely.
 - `crates/hex-runtime/src/windows/oci/sys.rs`: the Windows `oci` class, a Windows image run process-isolated
   through the Host Compute Service with a job of Hex's nested in its silo (decision "the Windows `oci` class is
   an HCS silo holding a Hex job"). It resolves at run time (`LoadLibraryExW` from System32, `GetProcAddress`)
@@ -198,6 +224,62 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   (`CM_Get_Device_Interface_List_SizeW`, `CM_Get_Device_Interface_ListW`) and whether each opens from where
   it runs (`CreateFileW`, a query open). Rust can express none of these
   foreign calls, the function pointers resolved at run time, nor a handle value crossing processes, safely.
+- `crates/hex-gpu/src/nvml/sys.rs`: hex-gpu's NVIDIA telemetry (`docs/design/gpu-telemetry.md` G1). It loads
+  NVML at run time, so a node without NVIDIA's driver starts and says why it reads no NVIDIA GPU: `dlopen`,
+  `dlsym` and `dlerror` on Linux, `LoadLibraryExW` from System32 alone and `GetProcAddress` on Windows, each
+  resolved address transmuted to its NVML function's type (nvml.h); the same loader and transmute load ADL
+  for `adl/sys.rs`. Through those pointers it calls
+  `nvmlInit_v2`, `nvmlSystemGetDriverVersion`, `nvmlDeviceGetCount_v2`, `nvmlDeviceGetHandleByIndex_v2`,
+  `nvmlDeviceGetName`, `nvmlDeviceGetPciInfo_v3`, `nvmlDeviceGetMemoryInfo` and
+  `nvmlDeviceGetUtilizationRates`, each writing into the caller's frame. A device handle is `Send` and `Sync`
+  (`unsafe impl`): NVML is thread-safe, and a handle stays valid until `nvmlShutdown`, which Hex never calls.
+  Rust can express none of these foreign calls, the function pointers resolved at run time, nor an opaque
+  handle's thread-safety, safely. (Approved by Ada, 2026-11-09: "I approve that unsafe block.")
+- `crates/hex-gpu/src/adl/sys.rs`: hex-gpu's AMD telemetry on Windows (`docs/design/gpu-telemetry.md` G3).
+  It loads AMD's ADL (`atiadlxx.dll`, from System32 alone) at run time through `nvml/sys.rs`'s loader, so a
+  node without AMD's driver (ARM64 Windows among them) starts and says why it reads no AMD GPU; makes one ADL
+  context per `Gpus` with `ADL2_Main_Control_Create`, handed an allocator that refuses (every buffer is
+  Hex's own), and ends it with `ADL2_Main_Control_Destroy`; and through the resolved pointers calls
+  `ADL2_Adapter_NumberOfAdapters_Get`, `ADL2_Adapter_AdapterInfo_Get`, `ADL2_Adapter_MemoryInfo2_Get`,
+  `ADL2_Graphics_VersionsX2_Get`, `ADL2_New_QueryPMLogData_Get` and `ADL2_Adapter_VRAMUsage_Get`, each
+  writing into the caller's buffer (PMLog's with room behind it for a larger table than AMD's header
+  declares, the pointer the whole buffer's). A context is `Send` and `Sync` (`unsafe impl`): every call
+  through it takes `&mut`, so a shared reference reaches none. Rust can express none of these foreign
+  calls, the function pointers resolved at run time, nor a context's thread-safety, safely. (Approved by Ada,
+  2026-11-09: "go grab the AMD bits needed and the other unsafe is fine.")
+- `crates/hex-afunix/src/lib.rs`: the Windows node agent's socket and its client, an AF_UNIX stream on one
+  I/O completion port (decision "the Windows node, on one completion port"). It starts Winsock
+  (`WSAStartup`), borrows their sockets through `AsSocket`, sets blocking mode (`ioctlsocket`,
+  `FIONBIO`), makes, binds, listens on, connects, shuts down and closes AF_UNIX sockets (`WSASocketW`
+  overlapped and not inherited, `bind`, `listen`, `connect`, `shutdown`, `closesocket`), bounds a client's
+  makes the close of a connection the node has ended a reset
+  (`setsockopt` `SO_LINGER`, no linger: afunix.sys doesn't wake every peer's read with a graceful
+  end-of-stream) and sends and receives on a client's blocking socket (`send`, `recv`),
+  makes the port and puts sockets on it (`CreateIoCompletionPort`), posts a wake and waits on it
+  (`PostQueuedCompletionStatus`, `GetQueuedCompletionStatusEx`), starts a connection's overlapped accept,
+  receive and send (`AcceptEx` with `SO_UPDATE_ACCEPT_CONTEXT`, `WSARecv`, `WSASend`), each operation's
+  `OVERLAPPED` and buffer held on the heap by the kernel from its start until its completion is dequeued,
+  reads a peer's pid (`WSAIoctl` `SIO_AF_UNIX_GETPEERPID`) and whether its process runs as this user or
+  LocalSystem (`OpenProcess`, `OpenProcessToken`, `GetTokenInformation` `TokenUser`, `EqualSid`,
+  `IsWellKnownSid`), gives the peer's process handles of its own to an exec's asked streams and closes ones
+  it was never told of (`OpenProcess` with `PROCESS_DUP_HANDLE`, held for the connection; `DuplicateHandle`
+  into it, and with `DUPLICATE_CLOSE_SOURCE` and no target), and owns the handles the node gave this
+  process for a message (the values its envelope names), and watches a program's end (`OpenProcess`,
+  then ntdll's wait completion packet,
+  which the kernel queues to the port when the process ends, no thread between: `NtCreateWaitCompletionPacket`,
+  `NtAssociateWaitCompletionPacket`, `NtCancelWaitCompletionPacket`; undocumented in the SDK, used by the
+  Windows thread pool and Go's runtime, and chosen over `RegisterWaitForSingleObject` by measurement) and watches a host's own connection, a socket it borrows, by the network events
+  Winsock records on an event of its own (`WSAEventSelect`; the event made and reset by `CreateEventW` and
+  `ResetEvent`), whose signal such a packet queues to the port. `windows-sys` binds these as `unsafe` foreign
+  functions, but for the ntdll calls,
+  which Hex declares itself; std has no AF_UNIX socket or completion port on Windows, and a buffer the kernel
+  writes after the call returns is beyond Rust's borrow rules. Rust can express none of them safely.
+
+- `vendor/shards-api-draft/crates/api/src/borrowed.rs` (Windows module): the borrowed guest connector
+  opens only a non-inheritable query/synchronize process handle (`OpenProcess`), verifies its creation time
+  (`GetProcessTimes`) and current exit state (`WaitForSingleObject` with zero timeout), then closes only
+  that observation handle (`CloseHandle`). These Windows calls are unsafe foreign functions; the handle
+  owns no VM lifecycle and has no termination or duplication rights (HEX-RT-17).
 
 ## 13. Lean code
 
@@ -228,9 +310,9 @@ the first failure; kiln CI runs it on every push and pull request (`.kiln/ci.yam
 
 ```
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --locked --target x86_64-unknown-linux-gnu --target aarch64-unknown-linux-gnu --target aarch64-unknown-linux-musl -- -D warnings
-cargo clippy --workspace --all-targets --locked --target aarch64-apple-darwin --target x86_64-apple-darwin -- -D warnings
-cargo clippy --workspace --all-targets --locked --target x86_64-pc-windows-msvc -- -D warnings
+cargo clippy --workspace --all-targets --locked --target x86_64-unknown-linux-gnu --target aarch64-unknown-linux-gnu --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl -- -D warnings
+cargo clippy --workspace --all-targets --locked --target aarch64-apple-darwin -- -D warnings
+cargo clippy --workspace --all-targets --locked --target x86_64-pc-windows-msvc --target aarch64-pc-windows-msvc -- -D warnings
 bash scripts/check-production.sh
 cargo test --workspace --locked
 python3 scripts/vendor.py check
@@ -246,7 +328,8 @@ The person's standing rules (kiln's master plan §8):
 - Build with `nice -n 10` and your own `CARGO_TARGET_DIR`. Heavy builds and benchmarks go to fedora or
   jupiter: adacachy runs production. A benchmark takes its slot on kiln's bench calendar.
 - No bare `git stash`; rebase and squash only onto a fixed SHA; gate every push on every check's exit
-  code; wire formats change append-only.
+  code. The node's wire has one identity, a digest of its definitions (`hex_core::wire::IDENTITY`): change it
+  as the work needs, and a peer of another wire is refused at the hello, typed, naming both (Ada, 2026-11-09).
 - Built, merged and live are three different things: say which.
 
 ## Where things are

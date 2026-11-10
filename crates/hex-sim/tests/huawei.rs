@@ -85,6 +85,9 @@ fn four_workload_owners_on_the_largest_quarter_cluster() {
         capacity: node,
         background_milli: 0,
         classes: Classes::ALL,
+        platform: Default::default(),
+        virt: Default::default(),
+        devices: hex_sim::model::unnamed_gpus(node.gpus),
     }];
     eprintln!(
         "AC-T7.5.2 huawei r5 day 30: owners {four:?} (by userID index), {} workloads, one node of {} millicores and {:.2} GiB",
