@@ -329,7 +329,10 @@ def main():
 
     try:
         census.Harness = ColdHarness
-        result = campaign(options.n, one, lambda report: census.atomic_json(output, report), validate_seeds=options.validate_seeds)
+        if options.validate_seeds:
+            result = campaign(options.n, one, lambda report: census.atomic_json(output, report), validate_seeds=True)
+        else:
+            result = campaign(options.n, one, lambda report: census.atomic_json(output, report))
     finally:
         sys.argv, census.Harness = original_arguments, original_harness
     print("cold-boot-result " + str(output))

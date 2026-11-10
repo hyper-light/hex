@@ -369,6 +369,34 @@ class ArmedColdBoot(unittest.TestCase):
         self.assertNotIn("ambiguous_first_VM_cohorts", result)
         self.assertTrue(all(row["kind"] == result["kind"] for row in result["iterations"]))
 
+    def test_cp_t7_4_measuring_main_preserves_legacy_three_argument_campaign_hook(self):
+        output = self.root / "legacy-campaign.json"
+        forwarded, campaigns = [], []
+        original_campaign = cold.campaign
+
+        def legacy_campaign(count, one, save):
+            campaigns.append(count)
+            return original_campaign(count, one, save)
+
+        def existing_main():
+            forwarded.append(list(cold.sys.argv))
+            harness = SimpleNamespace(root=self.root / str(len(forwarded)), report={
+                "kind": "cold-node-boot-SDK-Hello-census", "status": "passed",
+                "cold_boot": {"stopped_receipt_verified": True}})
+            cold.ColdHarness.instances.append(harness)
+
+        arguments = ["synthetic-driver", "--n", "2", "--output", str(output)]
+        with patch.object(cold.sys, "argv", arguments), patch.object(cold.census, "main", existing_main), \
+                patch.object(cold, "campaign", legacy_campaign), redirect_stdout(io.StringIO()):
+            self.assertEqual(cold.main(), 0)
+        self.assertEqual(campaigns, [2])
+        self.assertEqual(len(forwarded), 2)
+        self.assertTrue(all("--validate-seeds" not in arguments for arguments in forwarded))
+        result = json.loads(output.read_text())
+        self.assertEqual(result["kind"], "cold-node-boot-SDK-Hello-census")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["ambiguous_first_VM_cohorts"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
