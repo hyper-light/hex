@@ -55,6 +55,7 @@ pub mod bounds;
 pub mod build;
 pub mod changes;
 pub mod emulate;
+pub mod gpu;
 pub mod run;
 
 include!(concat!(env!("OUT_DIR"), "/identity.rs"));

@@ -244,3 +244,21 @@ CLI16762 were reaped, temp0, source unchanged. L2 explicitly authorized the one-
 pub(super) correction on integrated57 and carries it in its successor. This changes
 module visibility only; no native behavior defect or passing guest result is claimed
 from the original failure. The next check uses a new private exact source.
+
+## Common Shards ABI physical type source
+
+Per Shards ROOT's explicit decision, upstream source42c3193e5432bb3c58db284989393467711cfb91
+moves the native identity, error, parser and selection check into one core+alloc
+`shards_abi::gpu` module. API reexports that same Rust type; OS argument formatting
+stays in API as physical::argument. ROOT ports only these API/ABI changes as
+incremental0009, retaining all prior vendor changes. This changes the source-derived
+ABI identity and requires matching rebuilt API/VMM/guest artifacts for native
+validation. It is not adoption of a tested VMM or physical UUID enforcement result.
+The earlier36/0008 checks remain source-specific earlier proof; this new shared
+source is untested at the checkpoint. Borrowed connector source is unchanged.
+
+The visibility-only runtime successor4d8bbf81 validation was refused before remote
+execution because the CLI could not connect to the Kiln server. CLI70486 ended1;
+no remote Cargo/native effect or passing result is inferred. Original refusal is
+retained in private cohort-4d8bbf81-light-v1. No runner/server change or admission
+bypass was attempted; source integration continues independently.

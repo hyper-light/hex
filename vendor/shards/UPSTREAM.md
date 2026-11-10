@@ -27,3 +27,5 @@ Five exact upstream Rust fixture sources referenced by API include!/path attribu
 | crates/api/tests/hex_borrowed_contract.rs | Place test safety invariants directly at nested native calls. | Native0116 Clippy requires the existing explanation immediately before unsafe; no behavior changes. | 0007-place-test-safety-invariants-at-each-native-call.patch |
 
 | crates/api/src/{lib,client,sim,physical}.rs and API fixtures | Carry exact native GPU identities through GuestSpec, validate the set, and forward canonical --gpu-device arguments. | AC-T7.4.1: reviewed upstream source36d9254 provides the typed physical-selector seam while all existing borrowed and backend patches remain intact. | 0008-carry-exact-native-gpu-selectors-through-the-public-api.patch |
+
+| crates/abi/src/{lib,gpu}.rs and crates/api/src/{physical,client}.rs | Share one core+alloc physical identity/parser type between API and VMM, retaining OS argument encoding in API. | AC-T7.4.1: Shards ROOT requires one actual type, not copied parsers; reviewed source42c3193 changes ABI identity and requires a matching rebuilt cohort. | 0009-share-exact-physical-gpu-identity-and-validation-through-abi.patch |
