@@ -1122,6 +1122,14 @@ fn put_box_spec(w: &mut Writer, spec: &BoxSpec) -> Result<(), Fault> {
             w.u8(2);
             w.path(path)?;
         }
+        ClassSpec::Firecracker(oci) => {
+            w.u8(3);
+            put_oci(w, oci)?;
+        }
+        ClassSpec::Shards(oci) => {
+            w.u8(4);
+            put_oci(w, oci)?;
+        }
     }
     w.option_with(spec.owner.as_ref(), |w, owner| {
         w.string(&owner.name)?;
@@ -1142,6 +1150,8 @@ fn box_spec(r: &mut Reader<'_>) -> Result<BoxSpec, Fault> {
         0 => ClassSpec::Process,
         1 => ClassSpec::Oci(Box::new(oci(r)?)),
         2 => ClassSpec::Bundle(r.path()?),
+        3 => ClassSpec::Firecracker(Box::new(oci(r)?)),
+        4 => ClassSpec::Shards(Box::new(oci(r)?)),
         t => return Err(Fault::value("class spec", format!("variant {t}"))),
     };
     let owner = r.option(|r| {
@@ -1332,6 +1342,8 @@ fn class_tag(c: Class) -> u8 {
     match c {
         Class::Process => 0,
         Class::Oci => 1,
+        Class::Firecracker => 2,
+        Class::Shards => 3,
     }
 }
 
@@ -1339,6 +1351,8 @@ fn class(r: &mut Reader<'_>) -> Result<Class, Fault> {
     match r.u8()? {
         0 => Ok(Class::Process),
         1 => Ok(Class::Oci),
+        2 => Ok(Class::Firecracker),
+        3 => Ok(Class::Shards),
         t => Err(Fault::value("class", format!("variant {t}"))),
     }
 }

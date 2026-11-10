@@ -361,6 +361,7 @@ dependencies = [
  "libc",
  "tempfile",
  "thiserror",
+ "windows",
  "windows-sys",
 ]
 

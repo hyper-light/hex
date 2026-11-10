@@ -389,6 +389,63 @@ fn runtime_capacity_roundtrip_and_invalid_room_refused() {
     assert!(answer(42, &Answer::Capacity(Some(bad)), MAX_MESSAGE).is_err());
 }
 
+/// AC-T7.4.1/HEX-SOCK-1: the chosen backend and exact host claims cross the socket together.
+#[test]
+fn device_backend_identity_survives_create_capacity_and_inspect() {
+    let ClassSpec::Oci(workload) = oci_spec().class else {
+        panic!("the fixture is an OCI workload");
+    };
+    for (class, tag, spec_tag, form) in [
+        (Class::Oci, 1, 1, ClassSpec::Oci(workload.clone())),
+        (
+            Class::Firecracker,
+            2,
+            3,
+            ClassSpec::Firecracker(workload.clone()),
+        ),
+        (Class::Shards, 3, 4, ClassSpec::Shards(workload.clone())),
+    ] {
+        let spec = BoxSpec {
+            class: form,
+            devices: device_claims(),
+            ..oci_spec()
+        };
+        let create = Request::Call(Call::Create(Box::new(spec.clone())));
+        let bytes = request(93, &create, MAX_MESSAGE).unwrap();
+        let decoded = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1;
+        assert_eq!(decoded, create);
+        let mut reader = Reader::new(&bytes[HEADER_BYTES..]);
+        assert_eq!(box_id(&mut reader).unwrap(), spec.id);
+        assert_eq!(super::bounds(&mut reader).unwrap(), spec.bounds);
+        assert_eq!(reader.u8().unwrap(), spec_tag);
+
+        let capacity = Request::Call(Call::Capacity(class));
+        let bytes = request(94, &capacity, MAX_MESSAGE).unwrap();
+        assert_eq!(&bytes[HEADER_BYTES..], &[tag]);
+        assert_eq!(
+            read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            capacity
+        );
+        let expected = Answer::Info(BoxInfo { class, ..info() });
+        let bytes = answer(95, &expected, MAX_MESSAGE).unwrap();
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            expected
+        );
+    }
+    for tag in [4, u8::MAX] {
+        let mut bytes =
+            request(94, &Request::Call(Call::Capacity(Class::Oci)), MAX_MESSAGE).unwrap();
+        bytes[HEADER_BYTES] = tag;
+        assert!(matches!(
+            read_request(&received(&bytes, 0), MAX_MESSAGE)
+                .unwrap_err()
+                .fault,
+            Fault::Value { what: "class", .. }
+        ));
+    }
+}
+
 fn id(s: &str) -> BoxId {
     BoxId::new(s).unwrap()
 }
@@ -1390,7 +1447,7 @@ fn any_spec() -> impl Strategy<Value = BoxSpec> {
         proptest::collection::vec((any_text(), any_text()), 0..3),
     )
         .prop_map(|(rootfs, init, mounts, hostname, host, hosts)| {
-            ClassSpec::Oci(Box::new(OciSpec {
+            Box::new(OciSpec {
                 rootfs,
                 init,
                 mounts: mounts
@@ -1408,12 +1465,17 @@ fn any_spec() -> impl Strategy<Value = BoxSpec> {
                     Network::Private
                 },
                 hosts,
-            }))
+            })
         });
+    let workload = (0u8..3, oci).prop_map(|(backend, spec)| match backend {
+        0 => ClassSpec::Oci(spec),
+        1 => ClassSpec::Firecracker(spec),
+        _ => ClassSpec::Shards(spec),
+    });
     let class = prop_oneof![
         Just(ClassSpec::Process),
         any_path().prop_map(ClassSpec::Bundle),
-        oci,
+        workload,
     ];
     let owner = proptest::option::of(("\\PC{0,16}", any::<bool>()));
     (any_id(), any_bounds(), class, owner).prop_map(|(id, bounds, class, owner)| BoxSpec {
@@ -1436,7 +1498,7 @@ fn any_exit() -> impl Strategy<Value = Exit> {
 fn any_info() -> impl Strategy<Value = BoxInfo> {
     (
         any_id(),
-        any::<bool>(),
+        0u8..4,
         0u8..3,
         any_bounds(),
         any::<bool>(),
@@ -1444,10 +1506,15 @@ fn any_info() -> impl Strategy<Value = BoxInfo> {
         any::<u64>(),
     )
         .prop_map(
-            |(id, oci, state, bounds, adopted, exit, abandoned)| BoxInfo {
+            |(id, backend, state, bounds, adopted, exit, abandoned)| BoxInfo {
                 membership: None,
                 id,
-                class: if oci { Class::Oci } else { Class::Process },
+                class: match backend {
+                    0 => Class::Process,
+                    1 => Class::Oci,
+                    2 => Class::Firecracker,
+                    _ => Class::Shards,
+                },
                 state: match state {
                     0 => BoxState::Empty,
                     1 => BoxState::Running,
