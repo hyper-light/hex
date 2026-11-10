@@ -374,6 +374,16 @@ struct NoGuest {
 }
 
 impl shards_api::Guests for NoGuest {
+    fn probe_gpu(
+        &self,
+        _: &shards_api::GuestSpec,
+        _: Duration,
+    ) -> Result<shards_api::GpuProbe, shards_api::Refusal> {
+        Err(shards_api::Refusal::GpuProbe(
+            shards_api::GpuProbeError::Unavailable,
+        ))
+    }
+
     fn backend(&self) -> Result<shards_api::Backend, shards_api::Refusal> {
         self.backend.clone()
     }
@@ -785,6 +795,10 @@ fn ready_relay_with_answer(answer: Option<hex_core::wire::Answer>) -> std::net::
 }
 
 impl shards_api::Guest for PlannedGuest {
+    fn process_exited(&self) -> Result<bool, shards_api::Refusal> {
+        Ok(false)
+    }
+
     fn connect(
         &self,
         _port: u32,
@@ -819,6 +833,16 @@ impl shards_api::Guest for PlannedGuest {
 }
 
 impl shards_api::Guests for Planned {
+    fn probe_gpu(
+        &self,
+        _: &shards_api::GuestSpec,
+        _: Duration,
+    ) -> Result<shards_api::GpuProbe, shards_api::Refusal> {
+        Err(shards_api::Refusal::GpuProbe(
+            shards_api::GpuProbeError::Unavailable,
+        ))
+    }
+
     fn backend(&self) -> Result<shards_api::Backend, shards_api::Refusal> {
         shards_api::backend()
     }
@@ -1143,6 +1167,10 @@ struct KeptGuest {
 }
 
 impl shards_api::Guest for KeptGuest {
+    fn process_exited(&self) -> Result<bool, shards_api::Refusal> {
+        Ok(!self.kept.running.lock().unwrap().contains(&self.pid))
+    }
+
     fn connect(
         &self,
         port: u32,
@@ -1182,6 +1210,16 @@ impl shards_api::Guest for KeptGuest {
 struct KeptGuests(Arc<Kept>);
 
 impl shards_api::Guests for KeptGuests {
+    fn probe_gpu(
+        &self,
+        _: &shards_api::GuestSpec,
+        _: Duration,
+    ) -> Result<shards_api::GpuProbe, shards_api::Refusal> {
+        Err(shards_api::Refusal::GpuProbe(
+            shards_api::GpuProbeError::Unavailable,
+        ))
+    }
+
     fn backend(&self) -> Result<shards_api::Backend, shards_api::Refusal> {
         shards_api::backend()
     }

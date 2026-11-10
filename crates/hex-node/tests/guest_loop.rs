@@ -708,6 +708,10 @@ mod windows_stdio {
 }
 
 impl shards_api::Guest for LoopGuest {
+    fn process_exited(&self) -> Result<bool, shards_api::Refusal> {
+        Ok(self.ended.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
     fn connect(
         &self,
         port: u32,
@@ -793,6 +797,16 @@ impl Drop for LoopGuests {
 struct Shared(Arc<LoopGuests>);
 
 impl shards_api::Guests for Shared {
+    fn probe_gpu(
+        &self,
+        _: &shards_api::GuestSpec,
+        _: Duration,
+    ) -> Result<shards_api::GpuProbe, shards_api::Refusal> {
+        Err(shards_api::Refusal::GpuProbe(
+            shards_api::GpuProbeError::Unavailable,
+        ))
+    }
+
     fn backend(&self) -> Result<shards_api::Backend, shards_api::Refusal> {
         shards_api::backend()
     }

@@ -185,6 +185,14 @@ struct Counted {
 }
 
 impl shards_api::Guests for Counted {
+    fn probe_gpu(
+        &self,
+        spec: &shards_api::GuestSpec,
+        patience: Duration,
+    ) -> Result<shards_api::GpuProbe, shards_api::Refusal> {
+        self.shards.probe_gpu(spec, patience)
+    }
+
     fn backend(&self) -> Result<shards_api::Backend, shards_api::Refusal> {
         self.shards.backend()
     }

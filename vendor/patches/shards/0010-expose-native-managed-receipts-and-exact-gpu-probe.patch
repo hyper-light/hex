@@ -1,0 +1,1728 @@
+Subject: Expose native managed receipts and exact GPU probe identities
+Why: AC-T7.4.1: signed API-only source b19c86d26c3d4c9f029118084f0461305808a4ad shares native envelope ownership and positive terminal scope with Hex, without changing the borrowed connector or introducing a second process record
+
+diff --git a/crates/abi/src/gpu.rs b/crates/abi/src/gpu.rs
+index 56d053b5923c228914ce4b2f37b7dbe21182e3c5..6e590f9018d4caa6a1affb562d12affed8e522ad 100644
+--- a/crates/abi/src/gpu.rs
++++ b/crates/abi/src/gpu.rs
+@@ -2,6 +2,9 @@
+ //! filters. This source is also used by the VM's command-line boundary so the
+ //! public client and the VMM have one checked grammar and one representation.
+ 
++mod probe;
++pub use probe::{GpuProbe, GpuProbeError, ResolvedGpu, probe_bytes, uuid_from_hex};
++
+ use alloc::vec::Vec;
+ use core::fmt;
+ use core::str::FromStr;
+@@ -147,6 +150,12 @@ impl fmt::Display for PhysicalGpuError {
+ impl core::error::Error for PhysicalGpuError {}
+ 
+ #[cfg(test)]
++#[allow(
++    clippy::unwrap_used,
++    clippy::panic,
++    clippy::indexing_slicing,
++    clippy::arithmetic_side_effects
++)]
+ mod tests {
+     use super::*;
+     use alloc::{string::ToString, vec};
+diff --git a/crates/abi/src/gpu/probe.rs b/crates/abi/src/gpu/probe.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..553739812fe8b9fa513503e31939ed68c2adb1ae
+--- /dev/null
++++ b/crates/abi/src/gpu/probe.rs
+@@ -0,0 +1,335 @@
++//! Bounded receipt from the carried GPU process after its exact context filter ACK.
++
++use super::{MAX_PHYSICAL_GPUS, PhysicalGpu, PhysicalGpuError, check_selection};
++use alloc::{string::String, vec::Vec};
++use core::fmt::{self, Write};
++
++const HEADER: &str = "shards-gpu-selection 2";
++const LINE_BYTES: usize =
++    "metal:ffffffffffffffff\tffffffffffffffffffffffffffffffff\tpci:ffffffff:ff:1f.7\tffffffffffffffff\n"
++        .len();
++const FIXED_BYTES: usize =
++    "shards-gpu-selection 2\nhost-visible 18446744073709551615\ndevices 65536\nend\n".len();
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct ResolvedGpu {
++    pub physical: PhysicalGpu,
++    pub uuid: [u8; 16],
++    /// Complete per-device PCI properties, never an ADL assumed segment.
++    pub pci: Option<PhysicalGpu>,
++    /// Exact native byte order from VkPhysicalDeviceIDProperties when valid.
++    pub luid: Option<[u8; 8]>,
++}
++
++#[derive(Debug, PartialEq, Eq)]
++pub struct GpuProbe {
++    pub devices: Vec<ResolvedGpu>,
++    pub host_visible_bytes: u64,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum GpuProbeError {
++    Selection(PhysicalGpuError),
++    Empty,
++    Syntax,
++    Count,
++    Identity,
++    Memory,
++    Allocation,
++    Unavailable,
++    Pending,
++}
++
++pub fn probe_bytes(count: usize) -> Result<usize, GpuProbeError> {
++    if count == 0 || count > MAX_PHYSICAL_GPUS {
++        return Err(GpuProbeError::Count);
++    }
++    count
++        .checked_mul(LINE_BYTES)
++        .and_then(|n| n.checked_add(FIXED_BYTES))
++        .ok_or(GpuProbeError::Count)
++}
++
++pub fn uuid_from_hex(text: &str) -> Result<[u8; 16], GpuProbeError> {
++    fixed_hex(text)
++}
++
++fn fixed_hex<const N: usize>(text: &str) -> Result<[u8; N], GpuProbeError> {
++    if N.checked_mul(2) != Some(text.len()) {
++        return Err(GpuProbeError::Syntax);
++    }
++    let nibble = |byte: u8| match byte {
++        b'0'..=b'9' => byte.checked_sub(b'0'),
++        b'a'..=b'f' => byte.checked_sub(b'a').and_then(|b| b.checked_add(10)),
++        b'A'..=b'F' => byte.checked_sub(b'A').and_then(|b| b.checked_add(10)),
++        _ => None,
++    };
++    let mut uuid = [0; N];
++    for (slot, pair) in uuid.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
++        let high = pair
++            .first()
++            .copied()
++            .and_then(nibble)
++            .ok_or(GpuProbeError::Syntax)?;
++        let low = pair
++            .get(1)
++            .copied()
++            .and_then(nibble)
++            .ok_or(GpuProbeError::Syntax)?;
++        *slot = (high << 4) | low;
++    }
++    Ok(uuid)
++}
++
++impl GpuProbe {
++    pub fn check(&self, selected: &[PhysicalGpu]) -> Result<(), GpuProbeError> {
++        check_selection(selected).map_err(GpuProbeError::Selection)?;
++        if selected.is_empty() || self.devices.len() != selected.len() {
++            return Err(GpuProbeError::Empty);
++        }
++        if self.host_visible_bytes == 0 {
++            return Err(GpuProbeError::Memory);
++        }
++        let mut uuids = Vec::new();
++        uuids
++            .try_reserve_exact(self.devices.len())
++            .map_err(|_| GpuProbeError::Allocation)?;
++        for (resolved, selected) in self.devices.iter().zip(selected) {
++            if resolved.physical != *selected || resolved.uuid == [0; 16] {
++                return Err(GpuProbeError::Identity);
++            }
++            if let Some(pci) = resolved.pci {
++                if !matches!(pci, PhysicalGpu::Pci { .. }) || pci.check().is_err() {
++                    return Err(GpuProbeError::Identity);
++                }
++            }
++            let matches = match resolved.physical {
++                PhysicalGpu::Pci { .. } => resolved.pci == Some(resolved.physical),
++                PhysicalGpu::MetalRegistry(id) => {
++                    resolved.luid.is_some_and(|raw| u64::from_be_bytes(raw) == id)
++                }
++                PhysicalGpu::Luid(id) => resolved.luid.is_some_and(|raw| u64::from_le_bytes(raw) == id),
++            };
++            if !matches {
++                return Err(GpuProbeError::Identity);
++            }
++            uuids.push(resolved.uuid);
++        }
++        uuids.sort_unstable();
++        if uuids.windows(2).any(|pair| pair.first() == pair.last()) {
++            return Err(GpuProbeError::Identity);
++        }
++        Ok(())
++    }
++
++    pub fn selectors(&self) -> Result<Vec<PhysicalGpu>, GpuProbeError> {
++        probe_bytes(self.devices.len())?;
++        let mut selected = Vec::new();
++        selected
++            .try_reserve_exact(self.devices.len())
++            .map_err(|_| GpuProbeError::Allocation)?;
++        selected.extend(self.devices.iter().map(|device| device.physical));
++        self.check(&selected)?;
++        Ok(selected)
++    }
++
++    pub fn try_clone(&self) -> Result<Self, GpuProbeError> {
++        self.selectors()?;
++        let mut devices = Vec::new();
++        devices
++            .try_reserve_exact(self.devices.len())
++            .map_err(|_| GpuProbeError::Allocation)?;
++        devices.extend_from_slice(&self.devices);
++        Ok(Self {
++            devices,
++            host_visible_bytes: self.host_visible_bytes,
++        })
++    }
++
++    fn render(&self, out: &mut impl Write) -> fmt::Result {
++        writeln!(out, "{HEADER}")?;
++        writeln!(out, "host-visible {}", self.host_visible_bytes)?;
++        writeln!(out, "devices {}", self.devices.len())?;
++        for device in &self.devices {
++            write!(out, "{}\t", device.physical)?;
++            for byte in device.uuid {
++                write!(out, "{byte:02x}")?;
++            }
++            out.write_char('\t')?;
++            match device.pci {
++                Some(pci) => write!(out, "{pci}")?,
++                None => out.write_char('-')?,
++            };
++            out.write_char('\t')?;
++            match device.luid {
++                Some(luid) => {
++                    for byte in luid {
++                        write!(out, "{byte:02x}")?;
++                    }
++                }
++                None => out.write_char('-')?,
++            };
++            out.write_char('\n')?;
++        }
++        writeln!(out, "end")
++    }
++
++    pub fn encode(&self) -> Result<String, GpuProbeError> {
++        self.selectors()?;
++        struct Count {
++            bytes: usize,
++            bound: usize,
++        }
++        impl Write for Count {
++            fn write_str(&mut self, text: &str) -> fmt::Result {
++                self.bytes = self
++                    .bytes
++                    .checked_add(text.len())
++                    .filter(|n| *n <= self.bound)
++                    .ok_or(fmt::Error)?;
++                Ok(())
++            }
++        }
++        let mut count = Count {
++            bytes: 0,
++            bound: probe_bytes(self.devices.len())?,
++        };
++        self.render(&mut count).map_err(|_| GpuProbeError::Count)?;
++        let mut text = String::new();
++        text.try_reserve_exact(count.bytes)
++            .map_err(|_| GpuProbeError::Allocation)?;
++        self.render(&mut text).map_err(|_| GpuProbeError::Count)?;
++        Ok(text)
++    }
++
++    pub fn parse(text: &str) -> Result<Self, GpuProbeError> {
++        if text.len() > probe_bytes(MAX_PHYSICAL_GPUS)? || !text.ends_with('\n') {
++            return Err(GpuProbeError::Syntax);
++        }
++        let mut lines = text.lines();
++        if lines.next() != Some(HEADER) {
++            return Err(GpuProbeError::Syntax);
++        }
++        fn field<'a>(line: Option<&'a str>, prefix: &str) -> Result<&'a str, GpuProbeError> {
++            line.and_then(|line| line.strip_prefix(prefix))
++                .ok_or(GpuProbeError::Syntax)
++        }
++        let number = |text: &str| {
++            if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
++                return Err(GpuProbeError::Syntax);
++            }
++            text.parse::<u64>().map_err(|_| GpuProbeError::Count)
++        };
++        let host_visible_bytes = number(field(lines.next(), "host-visible ")?)?;
++        let count =
++            usize::try_from(number(field(lines.next(), "devices ")?)?).map_err(|_| GpuProbeError::Count)?;
++        probe_bytes(count)?;
++        let mut devices = Vec::new();
++        devices
++            .try_reserve_exact(count)
++            .map_err(|_| GpuProbeError::Allocation)?;
++        for _ in 0..count {
++            let mut fields = lines.next().ok_or(GpuProbeError::Syntax)?.split('\t');
++            let native = fields.next().ok_or(GpuProbeError::Syntax)?;
++            let uuid = fields.next().ok_or(GpuProbeError::Syntax)?;
++            let pci = fields.next().ok_or(GpuProbeError::Syntax)?;
++            let luid = fields.next().ok_or(GpuProbeError::Syntax)?;
++            if fields.next().is_some() {
++                return Err(GpuProbeError::Syntax);
++            }
++            devices.push(ResolvedGpu {
++                physical: native.parse().map_err(GpuProbeError::Selection)?,
++                uuid: uuid_from_hex(uuid)?,
++                pci: if pci == "-" {
++                    None
++                } else {
++                    Some(pci.parse().map_err(GpuProbeError::Selection)?)
++                },
++                luid: if luid == "-" { None } else { Some(fixed_hex(luid)?) },
++            });
++        }
++        if lines.next() != Some("end") || lines.next().is_some() {
++            return Err(GpuProbeError::Syntax);
++        }
++        let probe = Self {
++            devices,
++            host_visible_bytes,
++        };
++        probe.selectors()?;
++        Ok(probe)
++    }
++}
++
++impl fmt::Display for GpuProbeError {
++    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::Selection(why) => why.fmt(out),
++            Self::Empty => out.write_str("GPU probe does not contain the exact requested nonempty set"),
++            Self::Syntax => out.write_str("GPU probe receipt is malformed or truncated"),
++            Self::Count => {
++                out.write_str("GPU probe count or byte budget overflows its physical address space")
++            }
++            Self::Identity => {
++                out.write_str("GPU probe native identities or UUIDs disagree, repeat or are unavailable")
++            }
++            Self::Memory => out.write_str("selected GPU has no host-visible memory for Venus"),
++            Self::Allocation => out.write_str("GPU probe storage is unavailable"),
++            Self::Unavailable => out.write_str("GPU probe capability has not been initialized"),
++            Self::Pending => {
++                out.write_str("GPU probe has no completed native result within the caller deadline")
++            }
++        }
++    }
++}
++impl core::error::Error for GpuProbeError {}
++
++#[cfg(test)]
++#[allow(
++    clippy::unwrap_used,
++    clippy::panic,
++    clippy::indexing_slicing,
++    clippy::arithmetic_side_effects
++)]
++mod tests {
++    use super::*;
++    use alloc::vec;
++
++    #[test]
++    fn completed_receipt_preserves_exact_identity_and_refuses_forgery_or_torn_output() {
++        let native = PhysicalGpu::Pci {
++            domain: u32::MAX,
++            bus: 196,
++            device: 0,
++            function: 0,
++        };
++        let probe = GpuProbe {
++            devices: vec![ResolvedGpu {
++                physical: native,
++                uuid: [7; 16],
++                pci: Some(native),
++                luid: Some(9u64.to_le_bytes()),
++            }],
++            host_visible_bytes: 4096,
++        };
++        let text = probe.encode().unwrap();
++        assert_eq!(GpuProbe::parse(&text).unwrap(), probe);
++        assert_eq!(
++            probe.check(&[PhysicalGpu::Luid(196)]),
++            Err(GpuProbeError::Identity)
++        );
++        for end in 0..text.len() {
++            assert!(GpuProbe::parse(text.get(..end).unwrap()).is_err());
++        }
++        for bad in [
++            text.replace("devices 1", "devices +1"),
++            text.replace("devices 1", "devices 65537"),
++            text.replace("host-visible 4096", "host-visible 0"),
++            text.replace(
++                "07070707070707070707070707070707",
++                "00000000000000000000000000000000",
++            ),
++        ] {
++            assert!(GpuProbe::parse(&bad).is_err());
++        }
++    }
++}
+diff --git a/crates/api/src/client.rs b/crates/api/src/client.rs
+index a1b205c6f5b0db8e23b6df17a389859dcf976309..99b306e633dc384e9e3c5d32ede18419c9e011c0 100644
+--- a/crates/api/src/client.rs
++++ b/crates/api/src/client.rs
+@@ -64,6 +64,50 @@ const ANSWER: usize = "OK ".len() + "4294967295".len() + "\n".len();
+ const REQUEST: usize = "CONNECT ".len() + "4294967295".len() + "\n".len();
+ 
+ impl Guests for Shards {
++    fn probe_gpu(&self, spec: &GuestSpec, patience: Duration) -> Result<crate::GpuProbe, Refusal> {
++        let began = Instant::now();
++        let deadline = began
++            .checked_add(patience)
++            .filter(|_| patience != Duration::MAX)
++            .ok_or(Refusal::GpuProbe(crate::GpuProbeError::Pending))?;
++        if patience.is_zero() {
++            return Err(Refusal::GpuProbe(crate::GpuProbeError::Pending));
++        }
++        let bound = crate::physical::probe_bytes(spec.gpu_devices.len()).map_err(Refusal::GpuProbe)?;
++        let guest = launch(spec, Some(bound))?;
++        let left = deadline
++            .checked_duration_since(Instant::now())
++            .ok_or(Refusal::GpuProbe(crate::GpuProbeError::Pending))?;
++        match guest.wait_for(left)? {
++            Some(End::PowerOff) => {}
++            Some(end) => return Err(Refusal::Ended(end)),
++            None => {
++                guest.stop()?;
++                return Err(Refusal::GpuProbe(crate::GpuProbeError::Pending));
++            }
++        }
++        if Instant::now() >= deadline {
++            return Err(Refusal::GpuProbe(crate::GpuProbeError::Pending));
++        }
++        if !guest.process_exited()? {
++            return Err(Refusal::GpuProbe(crate::GpuProbeError::Pending));
++        }
++        let mut tail = lock(&guest.shared.tail);
++        if let Some(why) = tail.probe_error {
++            return Err(Refusal::GpuProbe(why));
++        }
++        if tail.bytes.len() > bound {
++            return Err(Refusal::GpuProbe(crate::GpuProbeError::Count));
++        }
++        let text = std::str::from_utf8(tail.bytes.make_contiguous())
++            .map_err(|_| Refusal::GpuProbe(crate::GpuProbeError::Syntax))?;
++        let probe = crate::GpuProbe::parse(text).map_err(Refusal::GpuProbe)?;
++        probe.check(&spec.gpu_devices).map_err(Refusal::GpuProbe)?;
++        if Instant::now() >= deadline {
++            return Err(Refusal::GpuProbe(crate::GpuProbeError::Pending));
++        }
++        Ok(probe)
++    }
+     fn backend(&self) -> Result<crate::Backend, Refusal> {
+         backend()
+     }
+@@ -103,33 +147,42 @@ fn take_back(identity: &Identity, spec: &GuestSpec) -> Result<ShardsGuest, Refus
+     let shared = Arc::new(Shared {
+         state: Mutex::new(State {
+             exited: false,
++            observed_exited: false,
+             stopping: false,
+             ready: true,
+             end: None,
+             said: String::new(),
+             ended_as: String::new(),
+             status: None,
++            managed: None,
++            managed_ports: Vec::new(),
+         }),
+         changed: Condvar::new(),
+         tail: Mutex::new(Tail {
+             bytes: VecDeque::new(),
++            scratch: None,
++            probe_error: None,
+             keep: 0,
+             drained: true,
+             output: None,
+         }),
+         drained: Condvar::new(),
+         end_mark: end_mark(),
++        probe: false,
++        managed_owners: std::sync::atomic::AtomicUsize::new(0),
+     });
+     let (watched, watcher) = (process.clone(), shared.clone());
+     std::thread::Builder::new()
+         .name("shards-api-taken".into())
+         .spawn(move || {
+             let awaited = watched.exited();
++            let observed_exited = awaited.is_ok();
+             let mut state = lock(&watcher.state);
+             state.status = Some(Err(match awaited {
+                 Ok(()) => NOT_ITS_PARENT.into(),
+                 Err(e) => format!("waiting for it: {e}"),
+             }));
++            state.observed_exited = observed_exited;
+             state.exited = true;
+             watcher.changed.notify_all();
+         })
+@@ -161,13 +214,28 @@ fn take_back(identity: &Identity, _spec: &GuestSpec) -> Result<ShardsGuest, Refu
+ 
+ /// Boots `spec`'s guest through shards.
+ fn start(spec: &GuestSpec) -> Result<ShardsGuest, Refusal> {
++    launch(spec, None)
++}
++
++/// The same bounded output/watcher ownership as a guest; Some is an exact probe
++/// byte budget and selects the no-VM CLI mode, never a second process manager.
++fn launch(spec: &GuestSpec, probe: Option<usize>) -> Result<ShardsGuest, Refusal> {
+     check(spec)?;
+     backend()?;
+     let dir = PrivateDir::new()?;
+     let vsock = dir.0.join("v");
+     // What its console keeps to quote, as its kernel's records say (D12).
+-    let said = crate::said::kept(&spec.kernel);
+-    let args = arguments(spec, &vsock, said)?;
++    let said = probe.unwrap_or_else(|| crate::said::kept(&spec.kernel));
++    let mut args = arguments(spec, &vsock, said)?;
++    if probe.is_some() {
++        args.try_reserve_exact(1)
++            .map_err(|_| Refusal::GpuProbe(crate::GpuProbeError::Allocation))?;
++        let mut flag = OsString::new();
++        flag.try_reserve_exact("--gpu-probe".len())
++            .map_err(|_| Refusal::GpuProbe(crate::GpuProbeError::Allocation))?;
++        flag.push("--gpu-probe");
++        args.push(flag);
++    }
+     let binary = spec
+         .binary
+         .clone()
+@@ -181,6 +249,30 @@ fn start(spec: &GuestSpec) -> Result<ShardsGuest, Refusal> {
+         writer.try_clone().map_err(piped)?,
+         writer.try_clone().map_err(piped)?,
+     );
++    let marker = end_mark();
++    let probe_keep = probe
++        .map(|bound| {
++            bound
++                .checked_add(marker.len())
++                .ok_or(Refusal::GpuProbe(crate::GpuProbeError::Count))
++        })
++        .transpose()?;
++    let mut probe_scratch = None;
++    let mut retained = VecDeque::new();
++    if let Some(bound) = probe_keep {
++        let room = bound
++            .checked_mul(2)
++            .ok_or(Refusal::GpuProbe(crate::GpuProbeError::Count))?;
++        retained
++            .try_reserve_exact(room)
++            .map_err(|_| Refusal::GpuProbe(crate::GpuProbeError::Allocation))?;
++        let mut scratch = Vec::new();
++        scratch
++            .try_reserve_exact(bound)
++            .map_err(|_| Refusal::GpuProbe(crate::GpuProbeError::Allocation))?;
++        scratch.resize(bound, 0);
++        probe_scratch = Some(scratch);
++    }
+     let child = Command::new(&binary)
+         .args(&args)
+         .stdin(Stdio::null())
+@@ -192,22 +284,29 @@ fn start(spec: &GuestSpec) -> Result<ShardsGuest, Refusal> {
+     let shared = Arc::new(Shared {
+         state: Mutex::new(State {
+             exited: false,
++            observed_exited: false,
+             stopping: false,
+             ready: false,
+             end: None,
+             said: String::new(),
+             ended_as: String::new(),
+             status: None,
++            managed: None,
++            managed_ports: Vec::new(),
+         }),
+         changed: Condvar::new(),
+         tail: Mutex::new(Tail {
+-            bytes: VecDeque::new(),
+-            keep: tail(said),
++            bytes: retained,
++            scratch: probe_scratch,
++            probe_error: None,
++            keep: probe_keep.unwrap_or_else(|| tail(said)),
+             drained: false,
+             output: None,
+         }),
+         drained: Condvar::new(),
+-        end_mark: end_mark(),
++        end_mark: marker,
++        probe: probe.is_some(),
++        managed_owners: std::sync::atomic::AtomicUsize::new(0),
+     });
+     #[cfg(unix)]
+     let pid = child.id();
+@@ -237,60 +336,144 @@ fn start(spec: &GuestSpec) -> Result<ShardsGuest, Refusal> {
+ /// `shards run --kernel …` for `spec`, its vsock at `vsock`, its console's last `said` bytes
+ /// kept to quote. `--kernel` comes first, as the command line knows a direct boot by it
+ /// (`cli/mod.rs`).
++fn argument_copy(value: &std::ffi::OsStr) -> Result<OsString, Refusal> {
++    let mut copy = OsString::new();
++    copy.try_reserve_exact(value.len())
++        .map_err(|_| Refusal::Launch(crate::LaunchError::Allocation))?;
++    copy.push(value);
++    Ok(copy)
++}
++
++fn argument_push(args: &mut Vec<OsString>, value: impl AsRef<std::ffi::OsStr>) -> Result<(), Refusal> {
++    args.push(argument_copy(value.as_ref())?);
++    Ok(())
++}
++
++fn decimal(value: impl std::fmt::Display) -> Result<OsString, Refusal> {
++    let mut text = String::new();
++    // Every supplied value is a u32/u64 or a usize on the supported 64-bit hosts.
++    text.try_reserve_exact("18446744073709551615".len())
++        .map_err(|_| Refusal::Launch(crate::LaunchError::Allocation))?;
++    std::fmt::write(&mut text, format_args!("{value}"))
++        .map_err(|_| Refusal::Launch(crate::LaunchError::Allocation))?;
++    argument_copy(std::ffi::OsStr::new(&text))
++}
++
+ fn arguments(spec: &GuestSpec, vsock: &Path, said: usize) -> Result<Vec<OsString>, Refusal> {
+-    let mut args: Vec<OsString> = vec!["run".into(), "--kernel".into(), spec.kernel.clone().into()];
++    let enabled = spec.gpu || !spec.gpu_devices.is_empty();
++    // Existing fixed block: run/kernel, init, cmdline/cpus/memory and vsock/console.
++    let count = spec
++        .disks
++        .len()
++        .checked_add(spec.shares.len())
++        .and_then(|n| n.checked_add(spec.gpu_devices.len()))
++        .and_then(|n| n.checked_mul(2))
++        .and_then(|n| n.checked_add(16))
++        .and_then(|n| n.checked_add(usize::from(enabled)))
++        .ok_or(Refusal::Launch(crate::LaunchError::Count))?;
++    let mut args = Vec::new();
++    args.try_reserve_exact(count)
++        .map_err(|_| Refusal::Launch(crate::LaunchError::Allocation))?;
++    argument_push(&mut args, "run")?;
++    argument_push(&mut args, "--kernel")?;
++    argument_push(&mut args, &spec.kernel)?;
+     match &spec.init {
+-        Init::Initrd(path) => args.extend(["--initrd".into(), path.clone().into()]),
+-        Init::Executable(path) => args.extend(["--init".into(), path.clone().into()]),
+-    }
+-    args.extend([
+-        "--cmdline".into(),
+-        spec.cmdline.clone().into(),
+-        "--cpus".into(),
+-        spec.vcpus.to_string().into(),
+-        "--memory".into(),
+-        spec.memory_mib.to_string().into(),
+-    ]);
++        Init::Initrd(path) => {
++            argument_push(&mut args, "--initrd")?;
++            argument_push(&mut args, path)?;
++        }
++        Init::Executable(path) => {
++            argument_push(&mut args, "--init")?;
++            argument_push(&mut args, path)?;
++        }
++    }
++    argument_push(&mut args, "--cmdline")?;
++    argument_push(&mut args, &spec.cmdline)?;
++    argument_push(&mut args, "--cpus")?;
++    args.push(decimal(spec.vcpus)?);
++    argument_push(&mut args, "--memory")?;
++    args.push(decimal(spec.memory_mib)?);
+     for disk in &spec.disks {
+-        args.extend(["--disk".into(), with_mode("disk", &disk.path, disk.read_only)?]);
++        argument_push(&mut args, "--disk")?;
++        args.push(with_mode("disk", &disk.path, disk.read_only)?);
+     }
+     for share in &spec.shares {
+-        args.extend(["--share".into(), with_mode("share", &share.dir, share.read_only)?]);
+-    }
+-    args.extend([
+-        "--vsock".into(),
+-        vsock.into(),
+-        "--no-console".into(),
+-        "--console-said".into(),
+-        said.to_string().into(),
+-    ]);
+-    let enabled = spec.gpu || !spec.gpu_devices.is_empty();
+-    // One GPU enable argument, plus a flag/value pair per native identity.
+-    let extra = spec
+-        .gpu_devices
+-        .len()
+-        .checked_mul(2)
+-        .and_then(|count| count.checked_add(usize::from(enabled)))
+-        .ok_or(Refusal::Gpu(crate::PhysicalGpuError::Count))?;
+-    args.try_reserve_exact(extra)
+-        .map_err(|_| Refusal::Gpu(crate::PhysicalGpuError::Allocation))?;
+-    let flag = |value: &str| {
+-        let mut arg = OsString::new();
+-        arg.try_reserve_exact(value.len())
+-            .map_err(|_| Refusal::Gpu(crate::PhysicalGpuError::Allocation))?;
+-        arg.push(value);
+-        Ok::<_, Refusal>(arg)
+-    };
++        argument_push(&mut args, "--share")?;
++        args.push(with_mode("share", &share.dir, share.read_only)?);
++    }
++    argument_push(&mut args, "--vsock")?;
++    argument_push(&mut args, vsock)?;
++    argument_push(&mut args, "--no-console")?;
++    argument_push(&mut args, "--console-said")?;
++    args.push(decimal(said)?);
++    // Keep GPU flags contiguous AFTER the fixed CPU block and its byte golden.
+     if enabled {
+-        args.push(flag("--gpu")?);
++        argument_push(&mut args, "--gpu")?;
+     }
+     for device in &spec.gpu_devices {
+-        args.push(flag("--gpu-device")?);
++        argument_push(&mut args, "--gpu-device")?;
+         args.push(crate::physical::argument(*device).map_err(Refusal::Gpu)?);
+     }
+     Ok(args)
+ }
+ 
++/// Read the existing kernel console measurements separately from pure preparation.
++pub fn recorded_console_bytes(kernel: &Path) -> usize {
++    crate::said::kept(kernel)
++}
++
++pub fn prepare_boot(
++    spec: &GuestSpec,
++    binary: &Path,
++    vsock: &Path,
++    console_bytes: usize,
++) -> Result<crate::PreparedBoot, Refusal> {
++    check(spec)?;
++    if !binary.is_absolute() || binary.as_os_str().as_encoded_bytes().contains(&0) {
++        return Err(Refusal::Launch(crate::LaunchError::Binary));
++    }
++    if !vsock.is_absolute()
++        || vsock.as_os_str().len() > SOCKET_PATH
++        || vsock.as_os_str().as_encoded_bytes().contains(&0)
++    {
++        return Err(Refusal::Launch(crate::LaunchError::Socket));
++    }
++    u32::try_from(spec.ports.len()).map_err(|_| Refusal::Launch(crate::LaunchError::Count))?;
++    let mut ports = Vec::new();
++    ports
++        .try_reserve_exact(spec.ports.len())
++        .map_err(|_| Refusal::Launch(crate::LaunchError::Allocation))?;
++    ports.extend_from_slice(&spec.ports);
++    let output_bytes = console_bytes
++        .checked_mul(ESCAPED)
++        .and_then(|n| n.checked_add(tail(0)))
++        .ok_or(Refusal::Launch(crate::LaunchError::Count))?;
++    Ok(crate::PreparedBoot {
++        binary: PathBuf::from(argument_copy(binary.as_os_str())?),
++        arguments: arguments(spec, vsock, console_bytes)?,
++        vsock: PathBuf::from(argument_copy(vsock.as_os_str())?),
++        ports,
++        output_bytes,
++    })
++}
++
++/// Connect only after the native owner has established readiness. This is the
++/// existing one-shot borrowed connector; it starts no watcher/reaper or retry loop.
++pub fn connect_prepared(
++    plan: &crate::PreparedBoot,
++    identity: &Identity,
++    port: u32,
++    patience: Duration,
++) -> Result<Box<dyn Stream>, Refusal> {
++    if identity.vsock != plan.vsock {
++        return Err(Refusal::Launch(crate::LaunchError::Socket));
++    }
++    if !plan.ports.contains(&port) {
++        return Err(Refusal::Launch(crate::LaunchError::Port));
++    }
++    connect_borrowed(identity, port, patience)
++}
++
+ /// `path`, with `:ro` where read-only. One that ends in `:ro` itself is refused: shards
+ /// would read it as read-only, and the path as without it.
+ fn with_mode(what: &'static str, path: &Path, read_only: bool) -> Result<OsString, Refusal> {
+@@ -300,8 +483,10 @@ fn with_mode(what: &'static str, path: &Path, read_only: bool) -> Result<OsStrin
+             why: format!("{} ends in :ro, which shards reads as read-only", path.display()),
+         });
+     }
+-    let mut arg = OsString::from(path);
++    let mut arg = argument_copy(path.as_os_str())?;
+     if read_only {
++        arg.try_reserve_exact(":ro".len())
++            .map_err(|_| Refusal::Launch(crate::LaunchError::Allocation))?;
+         arg.push(":ro");
+     }
+     Ok(arg)
+@@ -409,12 +594,17 @@ struct Shared {
+     drained: Condvar,
+     /// What this process writes into shards' output once shards has ended ([`end_mark`]).
+     end_mark: Vec<u8>,
++    probe: bool,
++    /// API lifetime handles only, distinct from worker Arc refs and native holders.
++    managed_owners: std::sync::atomic::AtomicUsize,
+ }
+ 
+ #[derive(Debug)]
+ struct State {
+-    /// The process has exited and is reaped (both under this lock).
++    /// The watcher completed; a failed native observation can also complete it.
+     exited: bool,
++    /// Positive process-exit observation/reap, distinct from an End diagnostic.
++    observed_exited: bool,
+     /// `stop` or a drop is ending it: its end is `Stopped`.
+     stopping: bool,
+     /// A `CONNECT` has been answered `OK`.
+@@ -426,11 +616,16 @@ struct State {
+     ended_as: String,
+     /// Its exit status, as the watcher reaped it.
+     status: Option<Result<std::process::ExitStatus, String>>,
++    /// Pending None -> native completion or failed observer; never a release ledger.
++    managed: Option<Result<crate::ManagedEnd, Refusal>>,
++    managed_ports: Vec<u32>,
+ }
+ 
+ #[derive(Debug)]
+ struct Tail {
+     bytes: VecDeque<u8>,
++    scratch: Option<Vec<u8>>,
++    probe_error: Option<crate::GpuProbeError>,
+     /// How many of its last bytes are kept ([`tail`]).
+     keep: usize,
+     /// Read to the end mark, or to an end or error before it.
+@@ -481,7 +676,18 @@ fn drain(shared: &Shared, mut output: io::PipeReader) {
+     let mark = shared.end_mark.as_slice();
+     let keep = lock(&shared.tail).keep;
+     // A read never returns more than the tail keeps (never nothing: [`tail`]'s report).
+-    let mut buf = vec![0u8; keep];
++    let scratch = { lock(&shared.tail).scratch.take() };
++    let mut buf = match scratch {
++        Some(buffer) => buffer,
++        None if shared.probe => {
++            let mut tail = lock(&shared.tail);
++            tail.probe_error = Some(crate::GpuProbeError::Allocation);
++            tail.drained = true;
++            shared.drained.notify_all();
++            return;
++        }
++        None => vec![0u8; keep],
++    };
+     loop {
+         match output.read(&mut buf) {
+             Ok(0) => break,
+@@ -499,6 +705,9 @@ fn drain(shared: &Shared, mut output: io::PipeReader) {
+                     tail.bytes.truncate(from.saturating_add(at));
+                 }
+                 let over = tail.bytes.len().saturating_sub(keep);
++                if shared.probe && over != 0 {
++                    tail.probe_error = Some(crate::GpuProbeError::Count);
++                }
+                 tail.bytes.drain(..over);
+                 if at.is_some() {
+                     break;
+@@ -583,22 +792,16 @@ impl Exit {
+     /// Waits for the process to exit, then for its last words, and says how it ended. Its
+     /// words end at the end mark this writes after its exit: the drain reaches the mark
+     /// through what is in the pipe ahead of it, which is finite, with no clock.
+-    fn watch(self, shared: &Shared, mut writer: io::PipeWriter) {
++    fn watch(self, shared: &Shared, writer: io::PipeWriter) {
+         let awaited = self.awaited();
+-        let drained = lock(&shared.tail).drained;
+-        // Where the drain has ended (an error), the pipe holds the mark unread, as its
+-        // reader is kept open.
+-        if !drained && writer.write_all(&shared.end_mark).is_err() {
+-            lock(&shared.tail).drained = true;
+-        }
+-        drop(writer);
+-        let mut tail = lock(&shared.tail);
+-        while !tail.drained {
+-            tail = shared.drained.wait(tail).unwrap_or_else(PoisonError::into_inner);
+-        }
+-        let said = String::from_utf8_lossy(tail.bytes.make_contiguous())
+-            .trim()
+-            .to_string();
++        let mut tail = finish_drain(shared, writer);
++        let said = if shared.probe {
++            String::new()
++        } else {
++            String::from_utf8_lossy(tail.bytes.make_contiguous())
++                .trim()
++                .to_string()
++        };
+         drop(tail);
+         let mut state = lock(&shared.state);
+         if let Err(e) = awaited {
+@@ -608,12 +811,28 @@ impl Exit {
+         // Reaped under the state's lock as `exited` is set, so no signal sent while it is
+         // false reaches another process, and none is left a zombie, dropped or not.
+         state.status = Some(lock(&self.child).wait().map_err(|e| e.to_string()));
++        state.observed_exited = state.status.as_ref().is_some_and(Result::is_ok);
+         state.said = said;
+         state.exited = true;
+         shared.changed.notify_all();
+     }
+ }
+ 
++fn finish_drain(shared: &Shared, mut writer: io::PipeWriter) -> MutexGuard<'_, Tail> {
++    let drained = lock(&shared.tail).drained;
++    // Where the drain has ended (an error), the pipe holds the mark unread, as its
++    // reader is kept open.
++    if !drained && writer.write_all(&shared.end_mark).is_err() {
++        lock(&shared.tail).drained = true;
++    }
++    drop(writer);
++    let mut tail = lock(&shared.tail);
++    while !tail.drained {
++        tail = shared.drained.wait(tail).unwrap_or_else(PoisonError::into_inner);
++    }
++    tail
++}
++
+ /// A guest shards booted, or one taken back by [`Guests::attach`].
+ struct ShardsGuest {
+     ports: Vec<u32>,
+@@ -1122,55 +1341,412 @@ mod borrowed_windows {
+     }
+ }
+ 
+-impl Guest for ShardsGuest {
+-    fn connect(&self, port: u32, patience: Duration) -> Result<Box<dyn Stream>, Refusal> {
+-        allowed(&self.ports, port)?;
+-        // None: past `Instant`'s range (`Duration::MAX`), so no clock: until the guest
+-        // listens or ends.
+-        let began = Instant::now();
+-        let deadline = began.checked_add(patience);
+-        let left = || deadline.map(|d| d.saturating_duration_since(Instant::now()));
+-        let last = loop {
+-            if let Some(refusal) = self.gone(&mut lock(&self.shared.state)) {
+-                return Err(refusal);
++fn owned_text(text: &str) -> Result<String, Refusal> {
++    let mut copy = String::new();
++    copy.try_reserve_exact(text.len())
++        .map_err(|_| Refusal::Launch(crate::LaunchError::Allocation))?;
++    copy.push_str(text);
++    Ok(copy)
++}
++fn managed_io(operation: &'static str, why: io::Error) -> Refusal {
++    Refusal::ManagedIo {
++        operation,
++        kind: why.kind(),
++        code: why.raw_os_error(),
++    }
++}
++fn managed_marker() -> Result<Vec<u8>, Refusal> {
++    let nonce = RandomState::new().hash_one(std::process::id());
++    message(format_args!("\nshards-api: shards ended {nonce:016x}\n"))
++        .map(String::into_bytes)
++        .map_err(|()| Refusal::Launch(crate::LaunchError::Allocation))
++}
++
++/// The existing API protocol around a receipt the native owner already owns.
++pub struct ManagedGuest {
++    process: Arc<dyn crate::ManagedProcess>,
++    shared: triomphe::Arc<Shared>,
++}
++
++fn managed_shared(keep: usize, recovered: bool) -> Result<triomphe::Arc<Shared>, Refusal> {
++    let mut bytes = VecDeque::new();
++    bytes
++        .try_reserve_exact(
++            keep.checked_mul(2)
++                .ok_or(Refusal::Launch(crate::LaunchError::Count))?,
++        )
++        .map_err(|_| Refusal::Launch(crate::LaunchError::Allocation))?;
++    let mut scratch = Vec::new();
++    scratch
++        .try_reserve_exact(keep)
++        .map_err(|_| Refusal::Launch(crate::LaunchError::Allocation))?;
++    scratch.resize(keep, 0);
++    triomphe::Arc::try_new(Shared {
++        state: Mutex::new(State {
++            exited: false,
++            observed_exited: false,
++            stopping: false,
++            ready: recovered,
++            end: None,
++            said: String::new(),
++            ended_as: String::new(),
++            status: None,
++            managed: None,
++            managed_ports: Vec::new(),
++        }),
++        changed: Condvar::new(),
++        tail: Mutex::new(Tail {
++            bytes,
++            scratch: Some(scratch),
++            probe_error: None,
++            keep,
++            drained: recovered,
++            output: None,
++        }),
++        drained: Condvar::new(),
++        end_mark: managed_marker()?,
++        probe: false,
++        managed_owners: std::sync::atomic::AtomicUsize::new(1),
++    })
++    .map_err(|_| Refusal::Launch(crate::LaunchError::Allocation))
++}
++
++fn lossy_output(bytes: &[u8]) -> Result<String, Refusal> {
++    let mut text = String::new();
++    // Each invalid byte can require U+FFFD's three UTF-8 bytes.
++    text.try_reserve_exact(
++        bytes
++            .len()
++            .checked_mul("\u{fffd}".len())
++            .ok_or(Refusal::Launch(crate::LaunchError::Count))?,
++    )
++    .map_err(|_| Refusal::Launch(crate::LaunchError::Allocation))?;
++    let mut rest = bytes;
++    while !rest.is_empty() {
++        match std::str::from_utf8(rest) {
++            Ok(valid) => {
++                text.push_str(valid);
++                break;
+             }
+-            let mut cost = Duration::ZERO;
+-            // One dial is always made, its answer awaited for what patience has left, or,
+-            // with none left (a patience of zero) or no clock, for the guest's own answer.
+-            let wait = left().filter(|l| !l.is_zero());
+-            match handshake(&self.vsock, port, wait, &mut cost) {
+-                Ok(s) => {
+-                    lock(&self.shared.state).ready = true;
+-                    return s.boxed().map_err(|_| Refusal::Allocation {
+-                        what: "connection storage",
+-                    });
+-                }
+-                Err(Attempt::Allocation) => {
+-                    return Err(Refusal::Allocation {
+-                        what: "connection storage",
+-                    });
+-                }
+-                Err(Attempt::Refused(why)) => return Err(Refusal::Channel { port, why }),
+-                Err(Attempt::Again(why)) if left().is_some_and(|l| l.is_zero()) => break why,
+-                Err(Attempt::Again(_)) => {}
++            Err(why) => {
++                let valid = rest
++                    .get(..why.valid_up_to())
++                    .and_then(|b| std::str::from_utf8(b).ok())
++                    .ok_or(Refusal::Launch(crate::LaunchError::Observer))?;
++                text.push_str(valid);
++                text.push('\u{fffd}');
++                let skip = why
++                    .error_len()
++                    .unwrap_or_else(|| rest.len().saturating_sub(why.valid_up_to()));
++                let used = why
++                    .valid_up_to()
++                    .checked_add(skip)
++                    .filter(|n| *n > 0)
++                    .ok_or(Refusal::Launch(crate::LaunchError::Count))?;
++                rest = rest
++                    .get(used..)
++                    .ok_or(Refusal::Launch(crate::LaunchError::Observer))?;
+             }
+-            // Waits out the pause, woken at once by the process's end.
+-            let state = lock(&self.shared.state);
+-            if !state.exited {
+-                let pause = pause(cost, began.elapsed(), left().unwrap_or(Duration::MAX));
+-                let _ = self.shared.changed.wait_timeout(state, pause);
++        }
++    }
++    Ok(text)
++}
++
++fn watch_managed(
++    shared: triomphe::Arc<Shared>,
++    process: Arc<dyn crate::ManagedProcess>,
++    writer: Option<io::PipeWriter>,
++) {
++    // This subscribes to the existing native receipt; it opens/reaps no PID.
++    let observed = match process.wait_for(Duration::MAX) {
++        Ok(Some(end)) if end.scope == crate::TerminalScope::Released => Ok(end),
++        Ok(_) => Err(Refusal::Launch(crate::LaunchError::Observer)),
++        Err(why) => Err(why),
++    };
++    let said = match writer {
++        Some(writer) => lossy_output(finish_drain(&shared, writer).bytes.make_contiguous()),
++        None => Ok(String::new()),
++    };
++    let mut state = lock(&shared.state);
++    state.observed_exited = observed.is_ok();
++    state.managed = Some(match said {
++        Ok(said) => {
++            state.said = said;
++            observed
++        }
++        Err(why) => Err(why),
++    });
++    state.exited = true;
++    shared.changed.notify_all();
++}
++
++fn managed_watch(
++    shared: &triomphe::Arc<Shared>,
++    process: &Arc<dyn crate::ManagedProcess>,
++    writer: Option<io::PipeWriter>,
++    name: String,
++) -> Result<(), Refusal> {
++    let shared = shared.clone();
++    let process = process.clone();
++    std::thread::Builder::new()
++        .name(name)
++        .spawn(move || watch_managed(shared, process, writer))
++        .map(|_| ())
++        .map_err(|e| managed_io("observer thread", e))
++}
++
++pub fn boot_managed(
++    plan: crate::PreparedBoot,
++    launcher: &mut dyn crate::ManagedLauncher,
++) -> Result<ManagedGuest, Refusal> {
++    let shared = managed_shared(plan.output_bytes, false)?;
++    let drain_name = owned_text("shards-api-managed-drain")?;
++    let wait_name = owned_text("shards-api-managed-wait")?;
++    let (output, writer) = io::pipe().map_err(|e| managed_io("output pipe", e))?;
++    let stdout = writer
++        .try_clone()
++        .map_err(|e| managed_io("output writer clone", e))?;
++    let stderr = writer
++        .try_clone()
++        .map_err(|e| managed_io("output writer clone", e))?;
++    let process = launcher.launch(&plan, crate::LaunchIo { stdout, stderr })?;
++    let identity = match process.identity() {
++        Ok(identity) => identity,
++        Err(why) => {
++            process.stop()?;
++            return Err(why);
++        }
++    };
++    if identity.vsock != plan.vsock || identity.pid == 0 || identity.started == 0 {
++        process.stop()?;
++        return Err(Refusal::Launch(crate::LaunchError::Observer));
++    }
++    lock(&shared.state).managed_ports = plan.ports;
++    let drainer = shared.clone();
++    if let Err(error) = std::thread::Builder::new()
++        .name(drain_name)
++        .spawn(move || drain(&drainer, output))
++    {
++        process.stop()?;
++        return Err(managed_io("drain thread", error));
++    }
++    if let Err(why) = managed_watch(&shared, &process, Some(writer), wait_name) {
++        process.stop()?;
++        return Err(why);
++    }
++    Ok(ManagedGuest { process, shared })
++}
++
++pub fn attach_managed(
++    plan: crate::PreparedBoot,
++    identity: &Identity,
++    launcher: &mut dyn crate::ManagedLauncher,
++) -> Result<ManagedGuest, Refusal> {
++    if identity.vsock != plan.vsock {
++        return Err(Refusal::Launch(crate::LaunchError::Socket));
++    }
++    let shared = managed_shared(0, true)?;
++    let wait_name = owned_text("shards-api-managed-wait")?;
++    let process = launcher.attach(identity)?;
++    if process.identity()? != identity {
++        return Err(Refusal::Launch(crate::LaunchError::Observer));
++    }
++    lock(&shared.state).managed_ports = plan.ports;
++    managed_watch(&shared, &process, None, wait_name)?;
++    Ok(ManagedGuest { process, shared })
++}
++
++impl ManagedGuest {
++    /// Shares the existing protocol/native receipt with checked handle counting.
++    /// Worker references are not lifetime owners and cannot suppress last-drop stop.
++    pub fn try_clone(&self) -> Result<Self, Refusal> {
++        self.shared
++            .managed_owners
++            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_add(1))
++            .map_err(|_| Refusal::Launch(crate::LaunchError::Count))?;
++        Ok(Self {
++            process: Arc::clone(&self.process),
++            shared: self.shared.clone(),
++        })
++    }
++
++    fn end(&self, state: &mut State) -> Result<Option<End>, Refusal> {
++        let Some(result) = state.managed.as_mut() else {
++            return Ok(None);
++        };
++        let completed = match result {
++            Ok(end) => *end,
++            Err(why) => {
++                return Err(std::mem::replace(
++                    why,
++                    Refusal::Launch(crate::LaunchError::Observer),
++                ));
+             }
+         };
+-        if let Some(refusal) = self.gone(&mut lock(&self.shared.state)) {
+-            return Err(refusal);
++        if state.stopping {
++            return Ok(Some(End::Stopped));
+         }
+-        Err(Refusal::Channel {
++        Ok(Some(match completed.status {
++            crate::ManagedStatus::Code(0) => End::PowerOff,
++            crate::ManagedStatus::Code(3) => End::Reset,
++            status => End::Failed(
++                message(format_args!("native guest {status:?}: {}", state.said))
++                    .map_err(|()| Refusal::Launch(crate::LaunchError::Allocation))?,
++            ),
++        }))
++    }
++}
++
++impl Guest for ManagedGuest {
++    fn identity(&self) -> Result<Identity, Refusal> {
++        let id = self.process.identity()?;
++        Ok(Identity {
++            pid: id.pid,
++            started: id.started,
++            vsock: PathBuf::from(argument_copy(id.vsock.as_os_str())?),
++        })
++    }
++    fn process_exited(&self) -> Result<bool, Refusal> {
++        Ok(self.process.terminal()?.is_some())
++    }
++    fn terminal_scope(&self) -> Result<Option<crate::TerminalScope>, Refusal> {
++        Ok(self.process.terminal()?.map(|end| end.scope))
++    }
++    fn connect(&self, port: u32, patience: Duration) -> Result<Box<dyn Stream>, Refusal> {
++        allowed(&lock(&self.shared.state).managed_ports, port)?;
++        connect_owned(
++            &self.shared,
++            &self.process.identity()?.vsock,
+             port,
+-            why: message(format_args!("no OK within {patience:?}: {last}")).map_err(|()| {
+-                Refusal::Allocation {
+-                    what: "connection diagnostic",
++            patience,
++            || {
++                self.end(&mut lock(&self.shared.state))
++                    .map(|end| end.map(Refusal::Ended))
++            },
++        )
++    }
++    fn stop(&self) -> Result<(), Refusal> {
++        self.process.stop()?;
++        lock(&self.shared.state).stopping = true;
++        Ok(())
++    }
++    fn wait_for(&self, timeout: Duration) -> Result<Option<End>, Refusal> {
++        let deadline = Instant::now().checked_add(timeout);
++        let mut state = lock(&self.shared.state);
++        loop {
++            if let Some(end) = self.end(&mut state)? {
++                return Ok(Some(end));
++            }
++            state = match deadline.map(|d| d.saturating_duration_since(Instant::now())) {
++                Some(left) if left.is_zero() => return Ok(None),
++                Some(left) => {
++                    self.shared
++                        .changed
++                        .wait_timeout(state, left)
++                        .unwrap_or_else(PoisonError::into_inner)
++                        .0
+                 }
+-            })?,
++                None => self
++                    .shared
++                    .changed
++                    .wait(state)
++                    .unwrap_or_else(PoisonError::into_inner),
++            };
++        }
++    }
++}
++impl Drop for ManagedGuest {
++    fn drop(&mut self) {
++        match self
++            .shared
++            .managed_owners
++            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
++        {
++            Ok(1) => {}
++            Ok(_) => return,
++            Err(_) => {
++                lock(&self.shared.state).managed = Some(Err(Refusal::Launch(crate::LaunchError::Observer)));
++                self.shared.changed.notify_all();
++                return;
++            }
++        }
++        if !matches!(
++            self.process.terminal(),
++            Ok(Some(crate::ManagedEnd {
++                scope: crate::TerminalScope::Released,
++                ..
++            }))
++        ) {
++            // A failed stop cannot release the native owner's canonical record.
++            let _ = self.process.stop();
++        }
++    }
++}
++
++fn connect_owned(
++    shared: &Shared,
++    vsock: &Path,
++    port: u32,
++    patience: Duration,
++    mut gone: impl FnMut() -> Result<Option<Refusal>, Refusal>,
++) -> Result<Box<dyn Stream>, Refusal> {
++    // None: past `Instant`'s range (`Duration::MAX`), so no clock: until the guest
++    // listens or ends.
++    let began = Instant::now();
++    let deadline = began.checked_add(patience);
++    let left = || deadline.map(|d| d.saturating_duration_since(Instant::now()));
++    let last = loop {
++        if let Some(refusal) = gone()? {
++            return Err(refusal);
++        }
++        let mut cost = Duration::ZERO;
++        // One dial is always made, its answer awaited for what patience has left, or,
++        // with none left (a patience of zero) or no clock, for the guest's own answer.
++        let wait = left().filter(|l| !l.is_zero());
++        match handshake(vsock, port, wait, &mut cost) {
++            Ok(s) => {
++                lock(&shared.state).ready = true;
++                return s.boxed().map_err(|_| Refusal::Allocation {
++                    what: "connection storage",
++                });
++            }
++            Err(Attempt::Allocation) => {
++                return Err(Refusal::Allocation {
++                    what: "connection storage",
++                });
++            }
++            Err(Attempt::Refused(why)) => return Err(Refusal::Channel { port, why }),
++            Err(Attempt::Again(why)) if left().is_some_and(|l| l.is_zero()) => break why,
++            Err(Attempt::Again(_)) => {}
++        }
++        // Waits out the pause, woken at once by the process's end.
++        let state = lock(&shared.state);
++        if !state.exited {
++            let pause = pause(cost, began.elapsed(), left().unwrap_or(Duration::MAX));
++            let _ = shared.changed.wait_timeout(state, pause);
++        }
++    };
++    if let Some(refusal) = gone()? {
++        return Err(refusal);
++    }
++    Err(Refusal::Channel {
++        port,
++        why: message(format_args!("no OK within {patience:?}: {last}")).map_err(|()| {
++            Refusal::Allocation {
++                what: "connection diagnostic",
++            }
++        })?,
++    })
++}
++
++impl Guest for ShardsGuest {
++    fn process_exited(&self) -> Result<bool, Refusal> {
++        Ok(lock(&self.shared.state).observed_exited)
++    }
++    fn connect(&self, port: u32, patience: Duration) -> Result<Box<dyn Stream>, Refusal> {
++        allowed(&self.ports, port)?;
++        connect_owned(&self.shared, &self.vsock, port, patience, || {
++            Ok(self.gone(&mut lock(&self.shared.state)))
+         })
+     }
+ 
+@@ -1257,6 +1833,104 @@ mod tests {
+     use super::*;
+     use crate::{Disk, Share};
+ 
++    /// D215/AC-T7.4.1: pure preparation launches nothing and preserves the exact
++    /// native command/ports; wrong endpoint/port fail before borrowed observation.
++    #[test]
++    fn prepared_boot_is_pure_and_connections_stay_in_its_exact_grant() {
++        let directory = shards_testdir::TempDir::new("api-prepared").unwrap();
++        let binary = directory.0.join("never-started");
++        let socket = directory.0.join("v");
++        let mut spec = spec();
++        spec.gpu = true;
++        spec.gpu_devices = vec![crate::PhysicalGpu::MetalRegistry(7)];
++        let plan = prepare_boot(&spec, &binary, &socket, 17).unwrap();
++        assert_eq!(plan.binary(), binary);
++        assert_eq!(plan.vsock(), socket);
++        assert_eq!(plan.ports(), &[1024]);
++        assert_eq!(
++            std::fs::read_dir(&directory.0).unwrap().count(),
++            0,
++            "no mkdir/socket/process side effects"
++        );
++        let words: Vec<_> = plan.arguments().iter().map(|arg| arg.to_str().unwrap()).collect();
++        assert_eq!(
++            words.iter().rev().take(3).copied().collect::<Vec<_>>(),
++            ["metal:0000000000000007", "--gpu-device", "--gpu"]
++        );
++        let identity = Identity {
++            pid: 42,
++            started: 7,
++            vsock: socket.clone(),
++        };
++        assert!(matches!(
++            connect_prepared(&plan, &identity, 1025, Duration::ZERO),
++            Err(Refusal::Launch(crate::LaunchError::Port))
++        ));
++        let foreign = Identity {
++            vsock: directory.0.join("foreign"),
++            ..identity
++        };
++        assert!(matches!(
++            connect_prepared(&plan, &foreign, 1024, Duration::ZERO),
++            Err(Refusal::Launch(crate::LaunchError::Socket))
++        ));
++        assert!(matches!(
++            prepare_boot(&spec, Path::new("relative"), &socket, 0),
++            Err(Refusal::Launch(crate::LaunchError::Binary))
++        ));
++        assert!(matches!(
++            prepare_boot(&spec, &binary, &socket, usize::MAX),
++            Err(Refusal::Launch(crate::LaunchError::Count))
++        ));
++    }
++
++    /// D215/AC-T7.4.1: exercise real bounded pipe/watch/parse wiring with an owned
++    /// protocol fixture process. This is not a renderer/native GPU witness.
++    #[cfg(unix)]
++    #[test]
++    fn gpu_probe_protocol_requires_exact_completed_receipt() {
++        use std::os::unix::fs::PermissionsExt;
++        let directory = shards_testdir::TempDir::new("api-gpu-probe").unwrap();
++        let binary = directory.0.join("fixture");
++        let native = crate::PhysicalGpu::MetalRegistry(7);
++        let expected = crate::GpuProbe {
++            devices: vec![crate::ResolvedGpu {
++                physical: native,
++                uuid: [7; 16],
++                pci: None,
++                luid: Some(7u64.to_be_bytes()),
++            }],
++            host_visible_bytes: 4096,
++        };
++        let body = expected.encode().unwrap();
++        let mut spec = spec();
++        spec.binary = Some(binary.clone());
++        spec.gpu = true;
++        spec.gpu_devices = vec![native];
++        for (text, valid) in [
++            (body.clone(), true),
++            (
++                body.replace("metal:0000000000000007", "metal:0000000000000008"),
++                false,
++            ),
++            (body.replace("end\n", ""), false),
++        ] {
++            // Canonical protocol fields contain no shell quoting characters.
++            std::fs::write(&binary, format!("#!/bin/sh\nprintf '%s' '{text}'\n")).unwrap();
++            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
++            let result = Shards.probe_gpu(&spec, crate::conformance::PATIENCE.get());
++            if valid {
++                assert_eq!(result.unwrap(), expected);
++            } else {
++                assert!(matches!(result, Err(Refusal::GpuProbe(_))), "{result:?}");
++            }
++        }
++        assert!(matches!(
++            Shards.probe_gpu(&spec, Duration::ZERO),
++            Err(Refusal::GpuProbe(crate::GpuProbeError::Pending))
++        ));
++    }
++
+     /// Inputs, each only formatted into a flag: any values show the mapping.
+     fn spec() -> GuestSpec {
+         GuestSpec {
+diff --git a/crates/api/src/lib.rs b/crates/api/src/lib.rs
+index c9d1e2bce25c185beaf3f4a3c5e385fbc58b2422..2b4eae9aff429997ec4bd39c453544ce50f9959b 100644
+--- a/crates/api/src/lib.rs
++++ b/crates/api/src/lib.rs
+@@ -43,8 +43,11 @@ mod while_runs;
+ #[path = "../../../docs/research/measurements/managed-proc-main/allocation.rs"]
+ mod proc_allocation;
+ 
+-pub use client::{Shards, connect_borrowed};
+-pub use physical::{PhysicalGpu, PhysicalGpuError};
++pub use client::{
++    ManagedGuest, Shards, attach_managed, boot_managed, connect_borrowed, connect_prepared, prepare_boot,
++    recorded_console_bytes,
++};
++pub use physical::{GpuProbe, GpuProbeError, PhysicalGpu, PhysicalGpuError, ResolvedGpu};
+ 
+ /// A guest to boot.
+ #[derive(Debug, Clone, PartialEq, Eq)]
+@@ -77,6 +80,123 @@ pub struct GuestSpec {
+     pub binary: Option<PathBuf>,
+ }
+ 
++/// A pure checked boot plan. Its caller owns the private socket directory,
++/// native process/envelope, output drain and terminal receipt. Preparing never
++/// spawns, watches, creates files or assumes a native resource grant.
++#[derive(Debug)]
++pub struct PreparedBoot {
++    binary: PathBuf,
++    arguments: Vec<std::ffi::OsString>,
++    vsock: PathBuf,
++    ports: Vec<u32>,
++    output_bytes: usize,
++}
++impl PreparedBoot {
++    pub fn binary(&self) -> &std::path::Path {
++        &self.binary
++    }
++    pub fn arguments(&self) -> &[std::ffi::OsString] {
++        &self.arguments
++    }
++    pub fn vsock(&self) -> &std::path::Path {
++        &self.vsock
++    }
++    pub fn ports(&self) -> &[u32] {
++        &self.ports
++    }
++    pub fn output_bytes(&self) -> usize {
++        self.output_bytes
++    }
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum LaunchError {
++    Binary,
++    Socket,
++    Port,
++    Count,
++    Allocation,
++    Observer,
++    NativeRefused,
++}
++impl std::fmt::Display for LaunchError {
++    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        out.write_str(match self {
++            Self::Binary => "managed boot requires an explicit absolute native binary path",
++            Self::Socket => {
++                "managed boot socket is not an absolute bounded native path or disagrees with identity"
++            }
++            Self::Port => "managed boot connection port is outside the exact prepared set",
++            Self::Count => "managed boot argument/output count exceeds its native representation",
++            Self::Allocation => "managed boot preparation storage is unavailable",
++            Self::Observer => "native observation has no positive terminal receipt",
++            Self::NativeRefused => "the canonical native owner refused the managed operation",
++        })
++    }
++}
++impl std::error::Error for LaunchError {}
++
++/// Stdio created by the API's existing bounded drain path. The native owner
++/// consumes only these output handles; stdin is its native null device. No extra
++/// inherited handles, output socket export or post-spawn placement is permitted.
++pub struct LaunchIo {
++    pub stdout: std::io::PipeWriter,
++    pub stderr: std::io::PipeWriter,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum ManagedStatus {
++    Code(i32),
++    Signal(i32),
++    Unknown,
++}
++
++/// A positive native fact, independent of the presentation of an End. Released
++/// requires the complete owned VM envelope, including selected GPU/helper lifetime;
++/// process exit alone is only Process. An observation failure returns Err.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum TerminalScope {
++    Process,
++    Released,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct ManagedEnd {
++    pub status: ManagedStatus,
++    pub scope: TerminalScope,
++}
++
++/// An existing native receipt, not another PID opener/reaper or holder ledger.
++/// Its immutable identity is established under the canonical Creating turn before
++/// launch returns. wait_for subscribes to that receipt's sole terminal authority;
++/// stop can run concurrently without waiting behind its observation lock.
++pub trait ManagedProcess: Send + Sync {
++    /// A scope can exist before controller publication. Missing observation is
++    /// Observer, never pid/start zero; stop/wait/terminal still own cleanup.
++    fn identity(&self) -> Result<&Identity, Refusal>;
++    /// Wait for the complete native scope. Some must carry Released; a controller
++    /// exit with live helpers remains None until the deadline (terminal exposes
++    /// that partial Process fact). Duration::MAX subscribes until an event/error.
++    fn wait_for(&self, patience: Duration) -> Result<Option<ManagedEnd>, Refusal>;
++    fn stop(&self) -> Result<(), Refusal>;
++    fn terminal(&self) -> Result<Option<ManagedEnd>, Refusal>;
++}
++
++/// Borrowed synchronous launch/attach callbacks, usually over the caller's stack
++/// transaction. The returned Arc must come from existing native receipt ownership
++/// or fallible native storage, never a second process-box record/manager. The API
++/// owns draining/presentation, the native receipt alone owns observation/reaping.
++pub trait ManagedLauncher {
++    fn launch(
++        &mut self,
++        plan: &PreparedBoot,
++        io: LaunchIo,
++    ) -> Result<std::sync::Arc<dyn ManagedProcess>, Refusal>;
++    /// Reopen only this recorded identity/envelope, without creating a process or
++    /// replacing old stdio. Recovery has no historical output to manufacture.
++    fn attach(&mut self, identity: &Identity) -> Result<std::sync::Arc<dyn ManagedProcess>, Refusal>;
++}
++
+ /// What a guest's kernel runs first.
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub enum Init {
+@@ -380,6 +500,16 @@ pub enum Refusal {
+     Allocation { what: &'static str },
+     /// The exact native GPU request is malformed or exceeds its protocol bound.
+     Gpu(PhysicalGpuError),
++    /// The carried renderer has no completed exact native selection receipt.
++    GpuProbe(GpuProbeError),
++    /// Preparation failed before any native owner launches a process.
++    Launch(LaunchError),
++    /// Managed output/observer setup failed without allocating diagnostic text.
++    ManagedIo {
++        operation: &'static str,
++        kind: io::ErrorKind,
++        code: Option<i32>,
++    },
+ }
+ 
+ /// What names a booted guest beyond its client's process, so a client that restarts (crashed, say)
+@@ -400,6 +530,13 @@ pub struct Identity {
+ impl std::fmt::Display for Refusal {
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+         match self {
++            Refusal::ManagedIo {
++                operation,
++                kind,
++                code,
++            } => write!(f, "managed {operation}: {kind:?} (OS {code:?})"),
++            Refusal::Launch(why) => write!(f, "managed boot: {why}"),
++            Refusal::GpuProbe(why) => write!(f, "GPU probe: {why}"),
+             Refusal::Gpu(why) => write!(f, "physical GPU: {why}"),
+             Refusal::NoBackend { os, arch } => {
+                 write!(f, "shards boots no guest on {os} {arch}: it has no backend there")
+@@ -480,6 +617,10 @@ pub type Handle<'a> = std::os::windows::io::BorrowedSocket<'a>;
+ 
+ /// What boots guests.
+ pub trait Guests: Send + Sync {
++    /// Query exact native identities and selected host-visible memory through the
++    /// carried renderer's positive context filter ACK. No VM/workload is booted.
++    /// Patience is the caller's original finite deadline, never a retry budget.
++    fn probe_gpu(&self, spec: &GuestSpec, patience: Duration) -> Result<GpuProbe, Refusal>;
+     /// What this host boots with, or the refusal naming the backend it lacks.
+     fn backend(&self) -> Result<Backend, Refusal>;
+     /// Boots a guest; refused before boot past this host's bounds. It is the caller's
+@@ -501,6 +642,16 @@ pub trait Guests: Send + Sync {
+ 
+ /// A booted guest. Dropping it ends it.
+ pub trait Guest: Send + Sync {
++    /// Positive native process-exit observation, separate from wait_for's End.
++    /// False includes a failed observation. This alone does not certify external
++    /// renderer/helper resource reclamation.
++    fn process_exited(&self) -> Result<bool, Refusal>;
++    /// Only a managed native owner can strengthen process exit into Released.
++    /// Legacy standalone observation remains Process even after successful wait.
++    fn terminal_scope(&self) -> Result<Option<TerminalScope>, Refusal> {
++        Ok(self.process_exited()?.then_some(TerminalScope::Process))
++    }
++
+     /// A stream to its vsock `port` (`CONNECT <port>`), within `patience`: until the guest
+     /// listens there it is refused, and asked again, so the first that connects says the
+     /// guest is ready. One dial is always made, so a patience of zero is that one alone;
+diff --git a/crates/api/src/physical.rs b/crates/api/src/physical.rs
+index bb86f79699a97634f61dfe3cae14b806f6268a1c..17017485ef4c537911462216d8bfab1c928d2815 100644
+--- a/crates/api/src/physical.rs
++++ b/crates/api/src/physical.rs
+@@ -2,7 +2,10 @@
+ 
+ use std::fmt;
+ 
+-pub use shards_abi::gpu::{MAX_PHYSICAL_GPUS, PhysicalGpu, PhysicalGpuError, check_selection};
++pub use shards_abi::gpu::{
++    GpuProbe, GpuProbeError, MAX_PHYSICAL_GPUS, PhysicalGpu, PhysicalGpuError, ResolvedGpu, check_selection,
++    probe_bytes,
++};
+ 
+ /// Canonical ASCII grammar has a fixed maximum encoded length for each
+ /// native integer width; reserve both buffers before formatting/copying.
+diff --git a/crates/api/src/sim.rs b/crates/api/src/sim.rs
+index bfab6e4d00e60191d20ca3a33d64caf9459eb61f..bac914283f4239a49adc669e64ddfe05b15727f8 100644
+--- a/crates/api/src/sim.rs
++++ b/crates/api/src/sim.rs
+@@ -109,6 +109,7 @@ pub type Program = dyn Fn(&SimHost) -> End + Send + Sync;
+ pub struct SimGuests {
+     program: Arc<Program>,
+     booted: Mutex<Booted>,
++    gpu_probe: Option<crate::GpuProbe>,
+ }
+ 
+ /// The guests a simulator booted: each one's identity's start, and its state while anything holds
+@@ -126,10 +127,17 @@ impl std::fmt::Debug for SimGuests {
+ }
+ 
+ impl SimGuests {
++    /// Explicit model input; it is never a native device/ACK witness.
++    pub fn with_gpu_probe(mut self, probe: crate::GpuProbe) -> Result<Self, Refusal> {
++        probe.selectors().map_err(Refusal::GpuProbe)?;
++        self.gpu_probe = Some(probe);
++        Ok(self)
++    }
+     pub fn new(program: impl Fn(&SimHost) -> End + Send + Sync + 'static) -> SimGuests {
+         SimGuests {
+             program: Arc::new(program),
+             booted: Mutex::new(Booted::default()),
++            gpu_probe: None,
+         }
+     }
+ }
+@@ -199,6 +207,21 @@ impl SimHost {
+ }
+ 
+ impl Guests for SimGuests {
++    fn probe_gpu(&self, spec: &GuestSpec, patience: Duration) -> Result<crate::GpuProbe, Refusal> {
++        check(spec)?;
++        if patience.is_zero()
++            || patience == Duration::MAX
++            || std::time::Instant::now().checked_add(patience).is_none()
++        {
++            return Err(Refusal::GpuProbe(crate::GpuProbeError::Pending));
++        }
++        let probe = self
++            .gpu_probe
++            .as_ref()
++            .ok_or(Refusal::GpuProbe(crate::GpuProbeError::Unavailable))?;
++        probe.check(&spec.gpu_devices).map_err(Refusal::GpuProbe)?;
++        probe.try_clone().map_err(Refusal::GpuProbe)
++    }
+     fn backend(&self) -> Result<crate::Backend, Refusal> {
+         backend()
+     }
+@@ -300,6 +323,9 @@ struct SimGuest {
+ }
+ 
+ impl Guest for SimGuest {
++    fn process_exited(&self) -> Result<bool, Refusal> {
++        Ok(lock(&self.shared.state).end.is_some())
++    }
+     fn connect(&self, port: u32, patience: Duration) -> Result<Box<dyn Stream>, Refusal> {
+         allowed(&self.ports, port)?;
+         // None: past `Instant`'s range (`Duration::MAX`): until the guest listens or ends.

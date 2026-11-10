@@ -2,6 +2,9 @@
 //! filters. This source is also used by the VM's command-line boundary so the
 //! public client and the VMM have one checked grammar and one representation.
 
+mod probe;
+pub use probe::{GpuProbe, GpuProbeError, ResolvedGpu, probe_bytes, uuid_from_hex};
+
 use alloc::vec::Vec;
 use core::fmt;
 use core::str::FromStr;
@@ -147,6 +150,12 @@ impl fmt::Display for PhysicalGpuError {
 impl core::error::Error for PhysicalGpuError {}
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
     use alloc::{string::ToString, vec};

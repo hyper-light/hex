@@ -23,6 +23,10 @@ mod tests {
     }
 
     impl shards_api::Guest for Controlled {
+        fn process_exited(&self) -> Result<bool, shards_api::Refusal> {
+            Ok(self.ended.load(Ordering::SeqCst))
+        }
+
         fn connect(
             &self,
             port: u32,

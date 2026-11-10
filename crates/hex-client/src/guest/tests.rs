@@ -500,6 +500,10 @@ struct Patient {
 }
 
 impl shards_api::Guest for Patient {
+    fn process_exited(&self) -> Result<bool, shards_api::Refusal> {
+        Ok(false)
+    }
+
     fn connect(
         &self,
         _port: u32,

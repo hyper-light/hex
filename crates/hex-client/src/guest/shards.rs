@@ -62,15 +62,40 @@ impl Duplex for ShardsStream {
 /// `hex_runtime::guest::GuestRuntime::first_dial_bound`). Once one has, the guest's relay listens, so
 /// each later dial is one try (`Duration::ZERO`): a refusal then is the relay's end.
 pub struct ShardsLink {
-    guest: Arc<dyn shards_api::Guest>,
+    guest: ShardsGuest,
     first: Duration,
     listened: AtomicBool,
+}
+
+enum ShardsGuest {
+    Owned(Arc<dyn shards_api::Guest>),
+    Managed(shards_api::ManagedGuest),
+}
+
+impl ShardsGuest {
+    fn guest(&self) -> &dyn shards_api::Guest {
+        match self {
+            Self::Owned(guest) => guest.as_ref(),
+            Self::Managed(guest) => guest,
+        }
+    }
 }
 
 impl ShardsLink {
     pub fn new(guest: Arc<dyn shards_api::Guest>, first: Duration) -> Self {
         Self {
-            guest,
+            guest: ShardsGuest::Owned(guest),
+            first,
+            listened: AtomicBool::new(false),
+        }
+    }
+
+    /// AC-T7.4.1: retain the API's existing native/protocol receipt directly. The
+    /// caller uses ManagedGuest::try_clone when it also retains a boot handle;
+    /// adapting that handle needs no second Arc allocation or lifecycle owner.
+    pub fn managed(guest: shards_api::ManagedGuest, first: Duration) -> Self {
+        Self {
+            guest: ShardsGuest::Managed(guest),
             first,
             listened: AtomicBool::new(false),
         }
@@ -80,6 +105,7 @@ impl ShardsLink {
 impl Link for ShardsLink {
     fn identity(&self) -> Result<shards_api::Identity, Refusal> {
         self.guest
+            .guest()
             .identity()
             .map_err(|why| refusal("naming the guest's stream endpoint", &why))
     }
@@ -92,6 +118,7 @@ impl Link for ShardsLink {
         };
         let stream = self
             .guest
+            .guest()
             .connect(port, patience)
             .map_err(|why| refusal("connecting to the guest", &why))?;
         self.listened.store(true, Ordering::Release);
