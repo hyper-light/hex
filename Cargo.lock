@@ -403,6 +403,7 @@ dependencies = [
  "hex-api",
  "hex-client",
  "hex-core",
+ "hex-gpu",
  "libc",
  "proptest",
  "rustix",
