@@ -38,6 +38,11 @@ pub fn write(path: &Path, identity: &shards_api::Identity) -> Result<(), Refusal
         "{HEADER}\npid {}\nstarted {}\nvsock {vsock}\n",
         identity.pid, identity.started
     );
+    replace(path, text.as_bytes())
+}
+
+/// Replace one guest-owned record durably. The caller validates its bounded encoding first.
+pub(crate) fn replace(path: &Path, text: &[u8]) -> Result<(), Refusal> {
     let dir = path.parent().ok_or_else(|| broken(path, "has no folder"))?;
     let name = path
         .file_name()
@@ -48,7 +53,7 @@ pub fn write(path: &Path, identity: &shards_api::Identity) -> Result<(), Refusal
     let temp = dir.join(temp_name);
     let os = |op: &'static str| move |e: std::io::Error| Refusal::os(op, e);
     let mut file = std::fs::File::create(&temp).map_err(os("writing the node's guest record"))?;
-    file.write_all(text.as_bytes())
+    file.write_all(text)
         .and_then(|()| file.sync_all())
         .map_err(os("writing the node's guest record"))?;
     drop(file);
@@ -58,7 +63,7 @@ pub fn write(path: &Path, identity: &shards_api::Identity) -> Result<(), Refusal
 
 /// Makes the rename into `dir` durable: the folder's own fsync(2).
 #[cfg(unix)]
-fn sync_folder(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn sync_folder(dir: &Path) -> std::io::Result<()> {
     std::fs::File::open(dir).and_then(|d| d.sync_all())
 }
 
@@ -66,7 +71,7 @@ fn sync_folder(dir: &Path) -> std::io::Result<()> {
 /// itself, so a crash leaves the record before it or the one after, as the Windows class's own box records
 /// are left (`windows::oci`'s `write_marker`). The guest it names goes with the host in any case.
 #[cfg(not(unix))]
-fn sync_folder(_dir: &Path) -> std::io::Result<()> {
+pub(crate) fn sync_folder(_dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 

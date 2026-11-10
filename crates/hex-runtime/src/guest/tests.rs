@@ -1325,6 +1325,7 @@ fn capacity_runtime(capacity: Option<hex_api::Capacity>, config: GuestConfig) ->
         guest,
         link,
         client,
+        evented: Mutex::new(None),
     }));
     runtime
 }
