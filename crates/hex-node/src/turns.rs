@@ -10,14 +10,13 @@
 //! Each owner seeds its turns from the record of its holds, or, with none yet, measures ([`Patience::measuring`]):
 //! until the first sample a measuring wait is unarmed and lasts until the turn is let go.
 
-use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, PoisonError};
 #[cfg(test)]
 use std::time::Duration;
 use std::time::Instant;
 
-use hex_api::{BoxId, Refusal};
+use hex_api::{BoxId, DeviceId, Refusal};
 use hex_core::patience::Patience;
 
 /// The boxes whose turns are taken now, and what a refusal of one names.
@@ -39,8 +38,62 @@ pub struct Turns {
 #[derive(Debug)]
 struct Held {
     /// Each box whose turn is taken, with when its holder took it.
-    boxes: BTreeMap<BoxId, Instant>,
+    /// Sorted by identity; each addition fallibly reserves before inserting. BTreeMap::insert
+    /// cannot report allocation failure on stable Rust (R01).
+    boxes: Vec<HeldBox>,
     patience: Patience,
+}
+
+#[derive(Debug)]
+struct HeldBox {
+    id: BoxId,
+    since: Instant,
+    /// Ephemeral exclusion in this same method owner, never a physical holder ledger.
+    devices: Vec<DeviceId>,
+}
+
+impl Held {
+    fn position(&self, id: &BoxId) -> Result<usize, usize> {
+        self.boxes.binary_search_by(|held| held.id.cmp(id))
+    }
+
+    fn insert(
+        &mut self,
+        id: &BoxId,
+        devices: Vec<DeviceId>,
+        since: Instant,
+        what: &'static str,
+        bound: usize,
+    ) -> Result<BoxId, Refusal> {
+        let at = match self.position(id) {
+            Err(at) => at,
+            Ok(_) => {
+                return Err(Refusal::Broken(
+                    "a turn already owns this identity".to_owned(),
+                ));
+            }
+        };
+        if at > self.boxes.len() {
+            return Err(Refusal::Broken(
+                "a turn's insertion position is invalid".to_owned(),
+            ));
+        }
+        let entry = id.try_clone()?;
+        let receipt = id.try_clone()?;
+        self.boxes
+            .try_reserve(1)
+            .map_err(|_| Refusal::Exhausted { what, bound })?;
+        // binary_search's vacant position is checked above; the reservation covers this one entry.
+        self.boxes.insert(
+            at,
+            HeldBox {
+                id: entry,
+                since,
+                devices,
+            },
+        );
+        Ok(receipt)
+    }
 }
 
 /// Box `id`'s turn, given up when dropped.
@@ -50,29 +103,114 @@ pub struct Turn<'a> {
     since: Instant,
 }
 
+/// A non-clonable method receipt held by an asynchronous caller's existing Arc owner.
+pub(crate) struct Hold {
+    id: BoxId,
+    since: Instant,
+}
+
 impl Drop for Turn<'_> {
     fn drop(&mut self) {
-        // The set stays whole whoever held its lock (nothing panics holding it: CLAUDE.md §1), so a
-        // poisoned lock still lets the box go.
-        let mut held = self
-            .turns
-            .held
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        held.boxes.remove(&self.id);
-        held.patience.answered(self.since.elapsed());
-        drop(held);
-        self.turns.free.notify_all();
+        self.turns.release_parts(&self.id, self.since);
     }
 }
 
 impl Turns {
+    pub(crate) fn release(&self, hold: Hold) {
+        self.release_parts(&hold.id, hold.since);
+    }
+
+    fn release_parts(&self, id: &BoxId, since: Instant) {
+        // The set stays whole whoever held its lock (nothing panics holding it: CLAUDE.md §1), so a
+        // poisoned lock still lets the box go.
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        held.boxes.retain(|held| &held.id != id);
+        held.patience.answered(since.elapsed());
+        drop(held);
+        self.free.notify_all();
+    }
+}
+
+impl Turns {
+    /// Takes method-lifetime ownership without waiting. A native operation can complete on a
+    /// callback that needs this box again, so its callers must refuse overlap rather than wait on
+    /// themselves or retain a map lock across the native call.
+    pub(crate) fn try_take(&self, id: &BoxId) -> Result<Turn<'_>, Refusal> {
+        self.try_take_devices(id, &[])
+    }
+
+    pub(crate) fn try_take_devices(
+        &self,
+        id: &BoxId,
+        devices: &[DeviceId],
+    ) -> Result<Turn<'_>, Refusal> {
+        let hold = self.try_hold_devices(id, devices)?;
+        Ok(Turn {
+            turns: self,
+            id: hold.id,
+            since: hold.since,
+        })
+    }
+
+    pub(crate) fn try_hold(&self, id: &BoxId) -> Result<Hold, Refusal> {
+        self.try_hold_devices(id, &[])
+    }
+
+    pub(crate) fn try_hold_devices(
+        &self,
+        id: &BoxId,
+        devices: &[DeviceId],
+    ) -> Result<Hold, Refusal> {
+        if devices.len() > hex_api::MAX_DEVICES {
+            return Err(Refusal::Exhausted {
+                what: "method device exclusions",
+                bound: hex_api::MAX_DEVICES,
+            });
+        }
+        let mut selected = Vec::new();
+        selected
+            .try_reserve_exact(devices.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "method device exclusions",
+                bound: hex_api::MAX_DEVICES,
+            })?;
+        for device in devices {
+            device.check()?;
+            selected.push(*device);
+        }
+        selected.sort_unstable();
+        selected.dedup();
+        let mut held = self.held.lock().map_err(|e| self.poisoned(e))?;
+        if held.position(id).is_ok()
+            || held.boxes.iter().any(|active| {
+                active
+                    .devices
+                    .iter()
+                    .any(|device| selected.binary_search(device).is_ok())
+            })
+        {
+            return Err(Refusal::Lifecycle {
+                id: id.try_clone()?,
+                cause: hex_api::LifecycleCause::Busy,
+            });
+        }
+        if held.boxes.len() >= self.bound {
+            return Err(Refusal::Exhausted {
+                what: self.what,
+                bound: self.bound,
+            });
+        }
+        let since = Instant::now();
+        let owned = held.insert(id, selected, since, self.what, self.bound)?;
+        Ok(Hold { id: owned, since })
+    }
+
     /// Turns for `op`, a wait for one seeded as `patience` and learned from the turns held, at most `bound` of
     /// them (`what`) taken at once.
     pub fn new(op: &'static str, what: &'static str, bound: usize, patience: Patience) -> Self {
         Self {
             held: Mutex::new(Held {
-                boxes: BTreeMap::new(),
+                boxes: Vec::new(),
                 patience,
             }),
             free: Condvar::new(),
@@ -90,10 +228,14 @@ impl Turns {
     /// at once each wait for the one before theirs).
     pub fn take(&self, id: &BoxId) -> Result<Turn<'_>, Refusal> {
         let mut held = self.held.lock().map_err(|e| self.poisoned(e))?;
-        if held.boxes.contains_key(id) {
+        if held.position(id).is_ok() {
             self.waited.fetch_add(1, Ordering::Relaxed);
         }
-        while let Some(&since) = held.boxes.get(id) {
+        while let Some(since) = held
+            .position(id)
+            .ok()
+            .and_then(|at| held.boxes.get(at).map(|held| held.since))
+        {
             let patience = held.patience.deadline();
             held = match patience.and_then(|p| since.checked_add(p)) {
                 // Unarmed: measuring, and no turn has been let go; this wait is the first sample's.
@@ -127,10 +269,10 @@ impl Turns {
             });
         }
         let since = Instant::now();
-        held.boxes.insert(id.clone(), since);
+        let owned = held.insert(id, Vec::new(), since, self.what, self.bound)?;
         Ok(Turn {
             turns: self,
-            id: id.clone(),
+            id: owned,
             since,
         })
     }
@@ -213,6 +355,68 @@ mod tests {
         );
         assert_eq!(turns.waited(), 1);
         assert_eq!(turns.patience(), Some(Duration::from_millis(50)));
+    }
+
+    /// AC-T7.4.1/T-T7.1.2: overlap refuses without waiting or taking another box's ownership.
+    #[test]
+    fn nonblocking_method_ownership_refuses_overlap_and_releases_exact_owner() {
+        let turns = Turns::new(
+            "method",
+            "methods",
+            2,
+            Patience::seeded("test.method", Duration::ZERO),
+        );
+        let a = turns.try_take(&id("a")).unwrap();
+        assert!(matches!(
+            turns.try_take(&id("a")),
+            Err(Refusal::Lifecycle {
+                cause: hex_api::LifecycleCause::Busy,
+                ..
+            })
+        ));
+        let b = turns.try_take(&id("b")).unwrap();
+        assert!(matches!(
+            turns.try_take(&id("c")),
+            Err(Refusal::Exhausted { bound: 2, .. })
+        ));
+        assert_eq!(turns.waited(), 0);
+        drop(a);
+        let a = turns.try_take(&id("a")).unwrap();
+        assert!(turns.try_take(&id("b")).is_err());
+        drop((a, b));
+        assert!(turns.try_take(&id("c")).is_ok());
+    }
+
+    /// AC-T7.4.1: host and guest methods exclude the same physical keys in the same owner.
+    #[test]
+    fn device_exclusions_share_the_existing_method_owner_and_async_receipts() {
+        use hex_api::DeviceKind;
+        let a = DeviceId {
+            kind: DeviceKind::Gpu,
+            key: 1,
+        };
+        let b = DeviceId {
+            kind: DeviceKind::Gpu,
+            key: 2,
+        };
+        let turns = Turns::new("method", "methods", 3, Patience::measuring("test.devices"));
+        let first = turns.try_take_devices(&id("host"), &[b, a, a]).unwrap();
+        assert!(matches!(
+            turns.try_take_devices(&id("guest"), &[a]),
+            Err(Refusal::Lifecycle {
+                cause: hex_api::LifecycleCause::Busy,
+                ..
+            })
+        ));
+        let independent = turns.try_take(&id("cpu")).unwrap();
+        drop(first);
+        let callback = turns.try_hold_devices(&id("guest"), &[a]).unwrap();
+        assert!(turns.try_take_devices(&id("host"), &[a]).is_err());
+        assert!(turns.try_take(&id("guest")).is_err());
+        turns.release(callback);
+        assert!(turns.try_take_devices(&id("host"), &[a]).is_ok());
+        drop(independent);
+        assert_eq!(turns.waited(), 0);
     }
 
     /// Decision 9 (Ada's 2026-11-06 rule; T-T7.1.2): measuring, a wait for a turn lasts until it is let go, and the

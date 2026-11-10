@@ -39,7 +39,7 @@ use std::time::Duration;
 
 use hex_api::{BoxId, Refusal};
 use hex_core::patience::Patience;
-use hex_core::record::BoxRecord;
+use hex_core::record::{BoxRecord, Phase};
 
 use crate::turns::{Turn, Turns};
 
@@ -111,6 +111,11 @@ pub struct Syncs {
 }
 
 impl Store {
+    /// The existing owner's persistent state directory, also its native capacity volume.
+    pub(crate) fn directory(&self) -> &Path {
+        &self.disk
+    }
+
     /// Opens the store over the node's state directory `disk`, for the records that must outlive the
     /// host, and `run`, a directory of the node's own under its runtime directory for the rest, making
     /// each when it's missing. `run` is readable by the node alone: a record holds its box's spec, an
@@ -217,6 +222,105 @@ impl Store {
     pub fn put(&self, record: &BoxRecord) -> Result<(), Refusal> {
         let _turn = self.claim(&record.spec.id)?;
         self.write(record)
+    }
+
+    /// Claims an unused identity before a runtime effect. An unfinished or unreadable record owns
+    /// its name too: retrying create cannot replace the only durable cleanup/binding identity.
+    pub(crate) fn begin(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        let _turn = self.claim(&record.spec.id)?;
+        if self.get(&record.spec.id)?.is_some() {
+            return Err(Refusal::Exists(record.spec.id.try_clone()?));
+        }
+        self.write(record)
+    }
+
+    /// Publishes only the create still described by this immutable record. A concurrent delete's
+    /// durable intent wins; an old completion must never turn Deleting back into Ready.
+    pub(crate) fn made(&self, expected: &BoxRecord) -> Result<(), Refusal> {
+        let _turn = self.claim(&expected.spec.id)?;
+        let Some(Ok(mut record)) = self.get(&expected.spec.id)? else {
+            return Err(Refusal::Broken(
+                "a create lost its durable record".to_owned(),
+            ));
+        };
+        if record.spec != expected.spec || record.phase != Phase::Creating {
+            return Err(Refusal::Invalid {
+                what: "box lifecycle",
+                why: "create completion disagrees with the retained identity or deletion intent"
+                    .to_owned(),
+            });
+        }
+        record.phase = Phase::Ready;
+        self.write(&record)
+    }
+
+    /// The initialized adapters share this store under the node's existing method/device turns.
+    /// Record turns stay short and separate; none is reacquired through a public store mutation.
+    pub(crate) fn read_lifecycle(&self, id: &BoxId) -> Result<Option<BoxRecord>, Refusal> {
+        match self.get(id)? {
+            Some(Ok(record)) if &record.spec.id == id => Ok(Some(record)),
+            None => Ok(None),
+            Some(_) => Err(uncertain(id)),
+        }
+    }
+
+    /// Preserves the immutable cleanup authority and concurrent accounting when a backend advances
+    /// a record. A fresh native effect must first publish Creating; deletion never rolls back.
+    pub(crate) fn put_lifecycle(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        let _turn = self.claim(&record.spec.id)?;
+        if record.version != hex_core::record::RECORD_VERSION {
+            return Err(uncertain(&record.spec.id));
+        }
+        record.spec.check()?;
+        let Some(mut current) = self.read_lifecycle(&record.spec.id)? else {
+            return if record.phase == Phase::Creating {
+                self.write(record)
+            } else {
+                Err(uncertain(&record.spec.id))
+            };
+        };
+        if current.version != record.version
+            || current.spec != record.spec
+            || current.dirs != record.dirs
+            || !matches!(
+                (current.phase, record.phase),
+                (Phase::Creating, _)
+                    | (Phase::Ready, Phase::Ready | Phase::Deleting)
+                    | (Phase::Deleting, Phase::Deleting)
+            )
+        {
+            return Err(uncertain(&record.spec.id));
+        }
+        // A VMM's pid/start is introduced while Creating, before its guest is Ready (the
+        // Firecracker native create caller). Slot/run are likewise lifetime identities; their
+        // later removal or substitution cannot authorize cleanup of a different native object.
+        // Native process first-exec tracing uses Store::update and does not enter this VM seam.
+        let introducing = current.phase == Phase::Creating && record.phase != Phase::Deleting;
+        let init = lifecycle_fact(current.init, record.init, introducing, &record.spec.id)?;
+        let slot = lifecycle_fact(current.slot, record.slot, introducing, &record.spec.id)?;
+        let run = lifecycle_fact(current.run, record.run, introducing, &record.spec.id)?;
+        let exit = lifecycle_fact(current.exit, record.exit, true, &record.spec.id)?;
+        current.phase = record.phase;
+        current.init = init;
+        current.slot = slot;
+        current.run = run;
+        current.exit = exit;
+        // Both writers count monotonically: publishing a backend completion cannot discard a
+        // disconnect counted by the existing socket owner while native I/O was in flight.
+        current.abandoned = current.abandoned.max(record.abandoned);
+        self.write(&current)
+    }
+
+    /// The caller owns the shared native method/device receipts and has proved physical cleanup.
+    /// A retained Ready or unreadable record cannot be dropped by a delayed remove.
+    pub(crate) fn remove_lifecycle(&self, id: &BoxId) -> Result<(), Refusal> {
+        let _turn = self.claim(id)?;
+        if let Some(record) = self.read_lifecycle(id)?
+            && record.phase != Phase::Deleting
+        {
+            return Err(uncertain(id));
+        }
+        self.unlink(id)
     }
 
     /// Changes `id`'s record by `change`, which says whether it changed anything, and writes it if it
@@ -357,6 +461,10 @@ impl Store {
     /// recovery scrubs again.
     pub fn remove(&self, id: &BoxId) -> Result<(), Refusal> {
         let _turn = self.claim(id)?;
+        self.unlink(id)
+    }
+
+    fn unlink(&self, id: &BoxId) -> Result<(), Refusal> {
         for file in self.files(id) {
             match fs::remove_file(file) {
                 Ok(()) => {}
@@ -428,6 +536,31 @@ impl Store {
             .map_err(|e| Refusal::os("flushing the record directory", e))?;
         self.synced.dirs.fetch_add(1, Ordering::Relaxed);
         Ok(())
+    }
+}
+
+/// A stale absence preserves an observed fact; two different positive facts are uncertainty.
+fn lifecycle_fact<T: Copy + PartialEq>(
+    current: Option<T>,
+    proposed: Option<T>,
+    introducing: bool,
+    id: &BoxId,
+) -> Result<Option<T>, Refusal> {
+    match (current, proposed) {
+        (Some(known), Some(other)) if known != other => Err(uncertain(id)),
+        (None, Some(_)) if !introducing => Err(uncertain(id)),
+        (Some(known), _) => Ok(Some(known)),
+        (None, next) => Ok(next),
+    }
+}
+
+fn uncertain(id: &BoxId) -> Refusal {
+    match id.try_clone() {
+        Ok(id) => Refusal::Lifecycle {
+            id,
+            cause: hex_api::LifecycleCause::Uncertain,
+        },
+        Err(error) => error,
     }
 }
 
@@ -571,12 +704,12 @@ mod tests {
 
     fn record(id: &str) -> BoxRecord {
         let spec = BoxSpec {
-            allocation: None,
             devices: Vec::new(),
             id: BoxId::new(id).unwrap(),
             bounds: Bounds::default(),
             class: ClassSpec::Process,
             owner: None,
+            allocation: None,
         };
         BoxRecord::new(spec, Phase::Ready, vec![])
     }
@@ -584,6 +717,101 @@ mod tests {
     /// A store over `<dir>/state` and `<dir>/run`, its two places.
     fn store_in(dir: &Path) -> Store {
         Store::open(&dir.join("state"), &dir.join("run")).unwrap()
+    }
+
+    /// AC-T7.4.1/T-T7.1.2: a failed create retains its physical identity; neither an equal retry
+    /// nor a different payload at the same name may overwrite it before cleanup.
+    #[test]
+    fn lifecycle_begin_preserves_unfinished_identity_and_refuses_recycled_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        let mut first = record("retained");
+        first.phase = Phase::Creating;
+        store.begin(&first).unwrap();
+        let mut replacement = first.clone();
+        replacement.spec.bounds.memory_max = Some(4096);
+        for attempt in [&first, &replacement] {
+            assert!(matches!(store.begin(attempt), Err(Refusal::Exists(_))));
+            assert_eq!(store.get(&first.spec.id).unwrap(), Some(Ok(first.clone())));
+        }
+        store.remove(&first.spec.id).unwrap();
+        store.begin(&replacement).unwrap();
+        assert_eq!(store.get(&first.spec.id).unwrap(), Some(Ok(replacement)));
+    }
+
+    /// AC-T7.4.1/T-T7.1.2: a delayed native create cannot erase cancellation, and cannot publish a
+    /// changed physical payload. Independent fields recorded while it ran survive publication.
+    #[test]
+    fn lifecycle_completion_keeps_deletion_intent_and_immutable_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        let mut first = record("completing");
+        first.phase = Phase::Creating;
+        store.begin(&first).unwrap();
+        let mut wrong = first.clone();
+        wrong.spec.bounds.memory_max = Some(4096);
+        assert!(store.made(&wrong).is_err());
+        store
+            .update(&first.spec.id, |r| {
+                r.abandoned = 7;
+                true
+            })
+            .unwrap();
+        store.made(&first).unwrap();
+        let ready = store.get(&first.spec.id).unwrap().unwrap().unwrap();
+        assert_eq!(ready.phase, Phase::Ready);
+        assert_eq!(ready.abandoned, 7);
+        store
+            .update(&first.spec.id, |r| {
+                r.phase = Phase::Deleting;
+                true
+            })
+            .unwrap();
+        let deleting = store.get(&first.spec.id).unwrap();
+        assert!(store.made(&first).is_err());
+        assert_eq!(store.get(&first.spec.id).unwrap(), deleting);
+    }
+
+    /// AC-T7.4.1/T-T7.1.2: both VM adapters update the sole Store with unchanged payload/cleanup
+    /// authority. Metadata written by the socket while native I/O runs survives publication.
+    #[test]
+    fn lifecycle_transactions_preserve_authority_accounting_and_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        let mut original = record("shared-backend");
+        original.phase = Phase::Creating;
+        store.put_lifecycle(&original).unwrap();
+        store
+            .update(&original.spec.id, |r| {
+                r.abandoned = 11;
+                true
+            })
+            .unwrap();
+        let mut changed = original.clone();
+        changed.spec.bounds.memory_max = Some(8192);
+        assert!(store.put_lifecycle(&changed).is_err());
+        changed = original.clone();
+        changed.dirs.push(PathBuf::from("foreign-cleanup"));
+        assert!(store.put_lifecycle(&changed).is_err());
+        original.phase = Phase::Ready;
+        original.init = Some(hex_core::record::ProcId {
+            pid: 7,
+            start_ticks: 9,
+        });
+        store.put_lifecycle(&original).unwrap();
+        let ready = store.read_lifecycle(&original.spec.id).unwrap().unwrap();
+        assert_eq!(ready.spec, original.spec);
+        assert_eq!(ready.abandoned, 11);
+        assert_eq!(ready.init, original.init);
+        assert!(store.remove_lifecycle(&original.spec.id).is_err());
+        original.phase = Phase::Deleting;
+        store.put_lifecycle(&original).unwrap();
+        let deleting = store.get(&original.spec.id).unwrap();
+        original.phase = Phase::Ready;
+        assert!(store.put_lifecycle(&original).is_err());
+        assert_eq!(store.get(&original.spec.id).unwrap(), deleting);
+        store.remove_lifecycle(&original.spec.id).unwrap();
+        assert!(store.read_lifecycle(&original.spec.id).unwrap().is_none());
     }
 
     /// The names of the records in the runtime record directory `run`'s shards, sorted.
