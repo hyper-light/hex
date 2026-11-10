@@ -202,8 +202,27 @@ fn run_peer(lane: PeerLane, receive: Receiver<Queued>) {
 fn run_peer_with<C>(
     lane: PeerLane,
     receive: Receiver<Queued>,
+    open: impl FnMut(&Peer, &Arc<Stopping>) -> Result<C, Refusal>,
+    call: impl FnMut(&mut C, dto::Command) -> Result<Result<dto::Reply, Refusal>, Refusal>,
+) {
+    run_peer_with_time(
+        lane,
+        receive,
+        open,
+        call,
+        std::time::Instant::now,
+        |stopping, pace| stopping.wait_retry(pace),
+    )
+}
+
+// Tests advance only requested pauses; operation cost is fixed independently of those pauses.
+fn run_peer_with_time<C>(
+    lane: PeerLane,
+    receive: Receiver<Queued>,
     mut open: impl FnMut(&Peer, &Arc<Stopping>) -> Result<C, Refusal>,
     mut call: impl FnMut(&mut C, dto::Command) -> Result<Result<dto::Reply, Refusal>, Refusal>,
+    mut now: impl FnMut() -> std::time::Instant,
+    mut wait: impl FnMut(&Stopping, std::time::Duration) -> std::io::Result<bool>,
 ) {
     let PeerLane {
         peer,
@@ -224,15 +243,15 @@ fn run_peer_with<C>(
             if stopping.is_stopped() {
                 return;
             }
-            let began = std::time::Instant::now();
+            let began = now();
             let fresh = tunnel.is_none();
             if fresh {
                 match open(&peer, &stopping) {
                     Ok(connection) => tunnel = Some(connection),
                     Err(why) => {
                         report(NodeId(peer.node), &why.to_string());
-                        pace = pace.max(began.elapsed());
-                        if stopping.wait_retry(pace).unwrap_or(true) {
+                        pace = pace.max(now().saturating_duration_since(began));
+                        if wait(&stopping, pace).unwrap_or(true) {
                             return;
                         }
                         continue;
@@ -272,8 +291,8 @@ fn run_peer_with<C>(
                                         what: "scheduler command publication",
                                         ..
                                     }) => {
-                                        pace = pace.max(began.elapsed());
-                                        if stopping.wait_retry(pace).unwrap_or(true) {
+                                        pace = pace.max(now().saturating_duration_since(began));
+                                        if wait(&stopping, pace).unwrap_or(true) {
                                             return;
                                         }
                                     }
@@ -289,8 +308,8 @@ fn run_peer_with<C>(
                     Err(why) => {
                         report(NodeId(peer.node), &why.to_string());
                         tunnel = None;
-                        pace = pace.max(began.elapsed());
-                        if stopping.wait_retry(pace).unwrap_or(true) {
+                        pace = pace.max(now().saturating_duration_since(began));
+                        if wait(&stopping, pace).unwrap_or(true) {
                             return;
                         }
                         continue;
@@ -348,8 +367,8 @@ fn run_peer_with<C>(
                     what: "scheduler command publication",
                     ..
                 })) => {
-                    pace = pace.max(began.elapsed());
-                    if stopping.wait_retry(pace).unwrap_or(true) {
+                    pace = pace.max(now().saturating_duration_since(began));
+                    if wait(&stopping, pace).unwrap_or(true) {
                         return;
                     }
                     continue;
@@ -363,8 +382,8 @@ fn run_peer_with<C>(
                 Err(why) => {
                     report(NodeId(peer.node), &why.to_string());
                     tunnel = None;
-                    pace = pace.max(began.elapsed());
-                    if stopping.wait_retry(pace).unwrap_or(true) {
+                    pace = pace.max(now().saturating_duration_since(began));
+                    if wait(&stopping, pace).unwrap_or(true) {
                         return;
                     }
                     // Check the durable owner before any retry; cancellation or reassignment
@@ -376,7 +395,7 @@ fn run_peer_with<C>(
         drop(queued);
         if reconcile {
             loop {
-                let began = std::time::Instant::now();
+                let began = now();
                 let result = {
                     let Some(service) = source.lock().ok().and_then(|s| s.upgrade()) else {
                         return;
@@ -389,8 +408,8 @@ fn run_peer_with<C>(
                         what: "scheduler command publication",
                         ..
                     }) => {
-                        pace = pace.max(began.elapsed());
-                        if stopping.wait_retry(pace).unwrap_or(true) {
+                        pace = pace.max(now().saturating_duration_since(began));
+                        if wait(&stopping, pace).unwrap_or(true) {
                             return;
                         }
                     }
