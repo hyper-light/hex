@@ -482,6 +482,115 @@ fn until(mut look: impl FnMut() -> bool) {
     }
 }
 
+/// HEX-GUEST-7, HEX-RT-17: end a control before its stdio names arrive; expect no recreated set, waiter or
+/// socket. A second active control still accepts an early stream and passes its bytes to the node's pipe.
+#[test]
+fn late_streams_cannot_recreate_a_closed_controls_sets() {
+    let (lab, relay) = kept_lab(Limits {
+        sets: 1,
+        ..limits()
+    });
+    let mut first = UnixStream::connect(lab.dir.path().join("control.sock")).unwrap();
+    let mut token = [0u8; stream::TOKEN_BYTES];
+    first.read_exact(&mut token).unwrap();
+    let first_token = u64::from_le_bytes(token);
+    let first_node = rustix::net::accept_with(&lab.node, SocketFlags::CLOEXEC).unwrap();
+    drop(first);
+    // Control cleanup precedes its shutdown of the node connection: EOF proves forget already ran.
+    assert_eq!(rustix::io::read(&first_node, &mut [0u8; 1]).unwrap(), 0);
+    assert!(relay.sets().unwrap().gather.is_empty());
+    assert!(!relay.sets().unwrap().active.contains(&first_token));
+
+    let (mut late, incoming) = UnixStream::pair().unwrap();
+    relay.unnamed.fetch_add(1, Ordering::AcqRel);
+    let receiving = Arc::clone(&relay);
+    let late_thread = std::thread::spawn(move || receiving.stream(Box::new(incoming)));
+    late.write_all(&stream::name(stream::Named {
+        exec: Exec {
+            conn: first_token,
+            id: 7,
+        },
+        stream: stream::Stdio::In,
+    }))
+    .unwrap();
+    until(|| late_thread.is_finished() || !relay.sets().unwrap().gather.is_empty());
+    let retained = !relay.sets().unwrap().gather.is_empty();
+    if retained {
+        // The red repro releases and joins its own retained waiter before asserting the root cause.
+        drop(relay.sets().unwrap().gather.forget(first_token));
+    }
+    late_thread.join().unwrap();
+    assert_eq!(late.read(&mut [0u8; 1]).unwrap(), 0);
+    assert!(relay.sets().unwrap().parked.is_empty());
+    assert_eq!(relay.unnamed.load(Ordering::Acquire), 0);
+    assert!(
+        !retained,
+        "late stdio recreated a set for the ended control"
+    );
+
+    let mut active = UnixStream::connect(lab.dir.path().join("control.sock")).unwrap();
+    active.read_exact(&mut token).unwrap();
+    let active_token = u64::from_le_bytes(token);
+    assert_ne!(first_token, active_token);
+    assert!(relay.sets().unwrap().active.contains(&active_token));
+    let active_node = rustix::net::accept_with(&lab.node, SocketFlags::CLOEXEC).unwrap();
+    let (mut early, incoming) = UnixStream::pair().unwrap();
+    relay.unnamed.fetch_add(1, Ordering::AcqRel);
+    let receiving = Arc::clone(&relay);
+    let early_thread = std::thread::spawn(move || receiving.stream(Box::new(incoming)));
+    let exec = Exec {
+        conn: active_token,
+        id: 9,
+    };
+    early
+        .write_all(&stream::name(stream::Named {
+            exec,
+            stream: stream::Stdio::In,
+        }))
+        .unwrap();
+    until(|| early_thread.is_finished() || !relay.sets().unwrap().gather.is_empty());
+    assert!(
+        !relay.sets().unwrap().gather.is_empty(),
+        "an active control's early stream was refused"
+    );
+    let request = wire::request(
+        exec.id,
+        &Request::Call(Call::Exec {
+            id: BoxId::new("active").unwrap(),
+            program: Program::of(&["cat"]),
+            streams: wire::Streams {
+                stdin: true,
+                stdout: false,
+                stderr: false,
+            },
+        }),
+        wire::MAX_MESSAGE,
+    )
+    .unwrap();
+    active
+        .write_all(&stream::frame(&request, wire::MAX_MESSAGE).unwrap())
+        .unwrap();
+    let (header, request, mut fds) = next_request(&active_node);
+    assert_eq!(header.id, exec.id);
+    assert!(matches!(request, Request::Call(Call::Exec { .. })));
+    assert_eq!(fds.len(), 1);
+    early.write_all(b"still active").unwrap();
+    early.shutdown(Shutdown::Write).unwrap();
+    let mut bytes = String::new();
+    File::from(fds.pop().unwrap())
+        .read_to_string(&mut bytes)
+        .unwrap();
+    assert_eq!(bytes, "still active");
+    early_thread.join().unwrap();
+    assert!(relay.sets().unwrap().gather.is_empty());
+    assert!(relay.sets().unwrap().parked.is_empty());
+    drop(active);
+    assert_eq!(rustix::io::read(&active_node, &mut [0u8; 1]).unwrap(), 0);
+    until(|| relay.connections.load(Ordering::Acquire) == 0);
+    assert_eq!(relay.connections.load(Ordering::Acquire), 0);
+    assert!(relay.sets().unwrap().active.is_empty());
+}
+
 /// A stdio connection whose name reaches the relay only once its exec is parked there.
 struct Late {
     conn: UnixStream,
