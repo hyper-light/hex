@@ -1,0 +1,9 @@
+{
+  "base": "dc29e7dadb5d820bfa83e115280dc79574f9f68a",
+  "prior_private_source": "/Users/adalundhe/.cache/hex-adversarial-relay-01a1c640-v4/source",
+  "checked_in_leaf_sha256": "667b734a44c1ac87389e3dd8ebc56b522c7c753a39b9bda662a79ede59a9c7fb",
+  "registration": "same private-only parent registration as v1-v4; exact main leaf3, no candidate appendix; test unreachable macros replaced with permitted panic assertions",
+  "root": "/Users/adalundhe/.cache/hex-adversarial-relay-01a1c640-v5",
+  "jobs": 1,
+  "test_threads": 1
+}

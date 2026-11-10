@@ -1,0 +1,54 @@
+{
+  "build_exit": 0,
+  "binary": "/Users/adalundhe/.cache/hex-adversarial-relay-01a1c640-v2/target/debug/deps/hex_node-1028f62b4e94535b",
+  "binary_sha256": "5b83426f65ede9a2bfc12b63f449da131317a2b14b91c0f04bc0befd59a4214e",
+  "tests": [
+    {
+      "name": "scheduler::tests::adversarial_relay_tests::candidate_dc29::wrong_owner_start_does_not_consume_the_legitimate_peers_next_stamp",
+      "command": [
+        "/Users/adalundhe/.cache/hex-adversarial-relay-01a1c640-v2/target/debug/deps/hex_node-1028f62b4e94535b",
+        "--exact",
+        "scheduler::tests::adversarial_relay_tests::candidate_dc29::wrong_owner_start_does_not_consume_the_legitimate_peers_next_stamp",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 101,
+      "log": "test-0.log",
+      "log_sha256": "0ade3c97bc5e8105a8799aafcafa1af53a5a1f7a2ccb3aa9ed9a35ddf48170c4",
+      "log_bytes": 758
+    },
+    {
+      "name": "scheduler::tests::adversarial_relay_tests::delayed_start_stays_fenced_through_forget_restart_and_new_sender_epoch",
+      "command": [
+        "/Users/adalundhe/.cache/hex-adversarial-relay-01a1c640-v2/target/debug/deps/hex_node-1028f62b4e94535b",
+        "--exact",
+        "scheduler::tests::adversarial_relay_tests::delayed_start_stays_fenced_through_forget_restart_and_new_sender_epoch",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 101,
+      "log": "test-1.log",
+      "log_sha256": "86576981ecfc9c57c81263c647c0f5aa3f756fcd42eb3f012e72a64d6811065e",
+      "log_bytes": 722
+    },
+    {
+      "name": "scheduler::tests::adversarial_relay_tests::wrong_owner_start_has_no_effect_and_other_peer_and_later_stamp_progress",
+      "command": [
+        "/Users/adalundhe/.cache/hex-adversarial-relay-01a1c640-v2/target/debug/deps/hex_node-1028f62b4e94535b",
+        "--exact",
+        "scheduler::tests::adversarial_relay_tests::wrong_owner_start_has_no_effect_and_other_peer_and_later_stamp_progress",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 101,
+      "log": "test-2.log",
+      "log_sha256": "1aba66ef57ba1bbc4741babefba0e67c325bd1c9e3a107ef9fceaec593cea89b",
+      "log_bytes": 725
+    }
+  ],
+  "selected": 3,
+  "passes": 0,
+  "nonzero": 3,
+  "scope": "actual native macOS test binary; Service/Order/Driver with SimRuntime effects; no native runtime box, SSH or VM",
+  "candidate_note": "wrong-owner unchanged-order/same-stamp correction expectation is a spec candidate, not a production defect; ROOT noted commit-before-effects transport fencing contract"
+}

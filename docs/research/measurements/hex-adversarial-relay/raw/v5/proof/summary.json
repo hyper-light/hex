@@ -1,0 +1,67 @@
+{
+  "build_exit": 0,
+  "binary": "/Users/adalundhe/.cache/hex-adversarial-relay-01a1c640-v5/target/debug/deps/hex_node-1028f62b4e94535b",
+  "binary_sha256": "e607a3501e6ddaac576b90827e439d0d5e89893e6f12bfc33f3130ddf939f817",
+  "tests": [
+    {
+      "name": "scheduler::tests::adversarial_relay_tests::cancellation_reconciles_lost_start_reply_without_losing_either_queued_lane",
+      "command": [
+        "/Users/adalundhe/.cache/hex-adversarial-relay-01a1c640-v5/target/debug/deps/hex_node-1028f62b4e94535b",
+        "--exact",
+        "scheduler::tests::adversarial_relay_tests::cancellation_reconciles_lost_start_reply_without_losing_either_queued_lane",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "log": "test-0.log",
+      "log_sha256": "eb702a5a6557138eb10727e4cb93dd7273596167190484d22750e4cd06a9b73e",
+      "log_bytes": 975,
+      "pid": 3898,
+      "reaped": true,
+      "ran_one": true
+    },
+    {
+      "name": "scheduler::tests::adversarial_relay_tests::delayed_start_stays_fenced_through_forget_restart_and_new_sender_epoch",
+      "command": [
+        "/Users/adalundhe/.cache/hex-adversarial-relay-01a1c640-v5/target/debug/deps/hex_node-1028f62b4e94535b",
+        "--exact",
+        "scheduler::tests::adversarial_relay_tests::delayed_start_stays_fenced_through_forget_restart_and_new_sender_epoch",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "log": "test-1.log",
+      "log_sha256": "3850ba88263a280779c2b87713e5bf2c3f631d164e80858d92d1568ad878accb",
+      "log_bytes": 619,
+      "pid": 3899,
+      "reaped": true,
+      "ran_one": true
+    },
+    {
+      "name": "scheduler::tests::adversarial_relay_tests::wrong_owner_start_has_no_effect_and_other_peer_and_later_stamp_progress",
+      "command": [
+        "/Users/adalundhe/.cache/hex-adversarial-relay-01a1c640-v5/target/debug/deps/hex_node-1028f62b4e94535b",
+        "--exact",
+        "scheduler::tests::adversarial_relay_tests::wrong_owner_start_has_no_effect_and_other_peer_and_later_stamp_progress",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "log": "test-2.log",
+      "log_sha256": "211618d6635516ebbb265f356287be1c6cf72f634f9421b9f0a2fb8e4ed9a255",
+      "log_bytes": 716,
+      "pid": 3901,
+      "reaped": true,
+      "ran_one": true
+    }
+  ],
+  "selected": 3,
+  "passes": 3,
+  "nonzero": 0,
+  "scope": "actual native macOS test binary; Service/Order/Driver with SimRuntime effects; no native runtime box, SSH or VM",
+  "candidate_note": "original dc29 candidate retained separately in v3; final main leaf has 3 contract fixtures only",
+  "scoped_clippy_exit": 0,
+  "scoped_rustfmt_exit": 0,
+  "final_leaf_sha256": "667b734a44c1ac87389e3dd8ebc56b522c7c753a39b9bda662a79ede59a9c7fb",
+  "one_test_per_command": true
+}

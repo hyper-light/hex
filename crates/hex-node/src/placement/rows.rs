@@ -311,10 +311,18 @@ impl Rows {
                 if words.next().is_some() {
                     return Err(bad("record key suffix"));
                 }
-                Ok((
-                    Key { owner, epoch, seq },
-                    s.payload.clone().ok_or_else(|| bad("ran payload"))?,
-                ))
+                let key = Key { owner, epoch, seq };
+                // Recovery must validate the immutable local payload before any runtime callback.
+                if self
+                    .held
+                    .get(&name("own", key))
+                    .is_some_and(|own| own.payload != s.payload)
+                {
+                    return Err(bad(format!(
+                        "owned and runner rows disagree on payload for {key:?}"
+                    )));
+                }
+                Ok((key, s.payload.clone().ok_or_else(|| bad("ran payload"))?))
             })
             .collect()
     }

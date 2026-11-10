@@ -1,0 +1,7 @@
+
+running 1 test
+test scheduler::tests::adversarial_relay_tests::wrong_owner_start_has_no_effect_and_other_peer_and_later_stamp_progress ... wrong-owner refused=Err(Invalid { what: "placement", why: "start owner is not its known sender" }); order_unchanged=false; corrected=Err(Broken("a retried peer sequence changed its message")); other_reply=Ok(Reply { key: None, at: None, tracked: false, physical: None, created: false, ended: false, offer: None, observations: [], refusals: [] }); other_created=true; later_created=true; effects_after_refusal=(0, 0, 0); cleanup_boxes=0; cleanup_rows=(false,false); permits=0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 129 filtered out; finished in 0.40s
+

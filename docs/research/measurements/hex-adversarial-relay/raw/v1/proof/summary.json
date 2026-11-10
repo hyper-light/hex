@@ -1,0 +1,40 @@
+{
+  "build_exit": 0,
+  "binary": "/Users/adalundhe/.cache/hex-adversarial-relay-01a1c640-dc29-v1/target/debug/deps/hex_node-1028f62b4e94535b",
+  "binary_sha256": "e9916072f256ca42ff02c4950ae6a9bebf4b9bb1bc1c1b10cbbcf7b4d7e226e4",
+  "tests": [
+    {
+      "name": "scheduler::tests::adversarial_relay_tests::delayed_start_stays_fenced_through_forget_restart_and_new_sender_epoch",
+      "command": [
+        "/Users/adalundhe/.cache/hex-adversarial-relay-01a1c640-dc29-v1/target/debug/deps/hex_node-1028f62b4e94535b",
+        "--exact",
+        "scheduler::tests::adversarial_relay_tests::delayed_start_stays_fenced_through_forget_restart_and_new_sender_epoch",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 101,
+      "log": "test-0.log",
+      "log_sha256": "e991433d9d5364092248a9f46de836e683502eb866900e0ef9bf6a3c20a9e4d6",
+      "log_bytes": 722
+    },
+    {
+      "name": "scheduler::tests::adversarial_relay_tests::wrong_owner_start_does_not_consume_the_legitimate_peers_next_stamp",
+      "command": [
+        "/Users/adalundhe/.cache/hex-adversarial-relay-01a1c640-dc29-v1/target/debug/deps/hex_node-1028f62b4e94535b",
+        "--exact",
+        "scheduler::tests::adversarial_relay_tests::wrong_owner_start_does_not_consume_the_legitimate_peers_next_stamp",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 101,
+      "log": "test-1.log",
+      "log_sha256": "68a2e7cb88ea71dcd0f3a29340ffa7a54e9b88f6397dcd57a90097e2e08cd2c4",
+      "log_bytes": 710
+    }
+  ],
+  "selected": 2,
+  "passes": 0,
+  "nonzero": 2,
+  "scope": "actual native macOS test binary; Service/Order/Driver with SimRuntime effects; no native runtime box, SSH or VM",
+  "candidate_note": "wrong-owner unchanged-order/same-stamp correction expectation is a spec candidate, not a production defect; ROOT noted commit-before-effects transport fencing contract"
+}

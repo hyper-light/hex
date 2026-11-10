@@ -1,0 +1,15 @@
+
+running 1 test
+test scheduler::tests::adversarial_relay_tests::candidate_dc29::wrong_owner_start_does_not_consume_the_legitimate_peers_next_stamp ... 
+thread 'scheduler::tests::adversarial_relay_tests::candidate_dc29::wrong_owner_start_does_not_consume_the_legitimate_peers_next_stamp' (24725691) panicked at crates/hex-node/src/scheduler/adversarial_relay_tests.rs:414:55:
+called `Option::unwrap()` on a `None` value
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    scheduler::tests::adversarial_relay_tests::candidate_dc29::wrong_owner_start_does_not_consume_the_legitimate_peers_next_stamp
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 129 filtered out; finished in 0.13s
+

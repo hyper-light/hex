@@ -1,0 +1,18 @@
+
+running 1 test
+test scheduler::tests::adversarial_relay_tests::cancellation_reconciles_lost_start_reply_without_losing_either_queued_lane ... worker permits=2/2/2/1/0; deleting=true; recovered=(true,true); second_created=true; trace=[(1, Start { key: Key { owner: 0, epoch: 1, seq: 0 }, demand: Demand { need: Resources { cpu_milli: 10, mem_bytes: 1048576, gpus: 0, disk_bytes: 0 }, kind: Plain, class: Shards, ask: Ask { os: None, arch: None, gpu_model: None, gpu_memory: 0, vfio: 0, block: 0, block_size: 0, net: 0, kvm: false } } }), (2, Delete { key: Key { owner: 0, epoch: 1, seq: 0 }, demand: Demand { need: Resources { cpu_milli: 10, mem_bytes: 1048576, gpus: 0, disk_bytes: 0 }, kind: Plain, class: Shards, ask: Ask { os: None, arch: None, gpu_model: None, gpu_memory: 0, vfio: 0, block: 0, block_size: 0, net: 0, kvm: false } } })]; final_permits=0/0/0; boxes=0/0
+
+thread 'scheduler::tests::adversarial_relay_tests::cancellation_reconciles_lost_start_reply_without_losing_either_queued_lane' (24731474) panicked at crates/hex-node/src/scheduler/adversarial_relay_tests.rs:667:5:
+assertion `left == right` failed
+  left: ["the node agent's state is unusable: owned fixture lost Start reply"]
+ right: ["owned fixture lost Start reply"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    scheduler::tests::adversarial_relay_tests::cancellation_reconciles_lost_start_reply_without_losing_either_queued_lane
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 130 filtered out; finished in 0.61s
+

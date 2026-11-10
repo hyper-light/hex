@@ -1065,3 +1065,6 @@ fn dispatch_control_refuses_at_global_limit_and_returns_failed_send_permits() {
     );
     assert_eq!(service.queued.load(Ordering::Acquire), 0);
 }
+
+#[path = "adversarial_relay_tests.rs"]
+mod adversarial_relay_tests;

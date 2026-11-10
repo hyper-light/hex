@@ -1,0 +1,12 @@
+{
+  "base": "457f832ed4d98a17da3045e7edb5e0cf76660ead",
+  "production": "unchanged 8767f0d9c03f37c64c9c86301bceaa878f7eb495",
+  "fixture_sha256": "b02e662366dcbb44360db1c87a39f0c7410d3d7512e25ed2b3b32f68f3a7a54e",
+  "archive_sha256": "6316d5e56652661aa799583dfa546174a59c37797e6ae85e0efe1aeb42930f4d",
+  "archive_bytes": 5899899,
+  "runner_script_sha256": "dac02fe1062c01ec48b43fb9eec151f6bee4149dd5de78a0ca2df072c7624600",
+  "remote_root": "/Users/adalundhe/.cache/hex-adversarial-bounds/01a1c643-cp4-spec-before-457f-v1",
+  "needs": "cpus=1,mem=4g,disk=12g",
+  "transfer": "--no-sync --stdin",
+  "selector": "placement::tests::adversarial_bounds_tests::equal_start_spec_disagreement_refuses_before_callbacks_without_rendering_payload"
+}

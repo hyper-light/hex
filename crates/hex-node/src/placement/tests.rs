@@ -1259,3 +1259,12 @@ fn recovery_floor_cannot_admit_a_replacement_above_current_budget() {
         Some(Error::Core(Stop::Full { bound: 1, .. }))
     ));
 }
+
+#[path = "adversarial_lifetime_tests.rs"]
+mod adversarial_lifetime_tests;
+
+#[path = "adversarial_bounds_tests.rs"]
+mod adversarial_bounds_tests;
+
+#[path = "recovery_payload_guard_tests.rs"]
+mod recovery_payload_guard_tests;
