@@ -173,8 +173,9 @@ impl SimRuntime {
 /// How a simulated init ends once started: `fail N` with N, `say` with 0, anything else (and a
 /// bundle, whose program the simulator can't read) not until it is signalled.
 fn init_ends(class: &ClassSpec) -> Result<Option<Exit>, Refusal> {
-    let ClassSpec::Oci(spec) = class else {
-        return Ok(None);
+    let spec = match class {
+        ClassSpec::Oci(spec) | ClassSpec::Firecracker(spec) | ClassSpec::Shards(spec) => spec,
+        ClassSpec::Process | ClassSpec::Bundle(_) => return Ok(None),
     };
     match spec.init.args.first().map(String::as_str) {
         Some("fail") => Ok(Some(Exit::Code(arg(&spec.init, 1)?))),
@@ -202,13 +203,21 @@ fn write(to: Option<&mut std::io::PipeWriter>, bytes: &[u8]) {
 
 impl Runtime for SimRuntime {
     fn classes(&self) -> Vec<Class> {
-        vec![Class::Process, Class::Oci]
+        vec![
+            Class::Process,
+            Class::Oci,
+            Class::Firecracker,
+            Class::Shards,
+        ]
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
         spec.check_no_devices("sim")?;
-        if let ClassSpec::Oci(oci) = &spec.class {
-            oci.init.fits(&SIM_EXEC_LIMIT)?;
+        match &spec.class {
+            ClassSpec::Oci(oci) | ClassSpec::Firecracker(oci) | ClassSpec::Shards(oci) => {
+                oci.init.fits(&SIM_EXEC_LIMIT)?
+            }
+            ClassSpec::Process | ClassSpec::Bundle(_) => {}
         }
         let mut boxes = self.boxes()?;
         if boxes.contains_key(&spec.id) {
@@ -217,7 +226,7 @@ impl Runtime for SimRuntime {
         if boxes.len() >= SIM_BOXES {
             return Err(Refusal::Full(SIM_BOXES));
         }
-        let init = (spec.class.class() == Class::Oci).then(|| Arc::new(SimProc::default()));
+        let init = (spec.class.class() != Class::Process).then(|| Arc::new(SimProc::default()));
         let init_ends = init_ends(&spec.class)?;
         let b = SimBox {
             spec,

@@ -15,6 +15,10 @@ pub enum Class {
     Process,
     /// An OCI container: namespaces, cgroups, seccomp, rootless through user namespaces (Linux).
     Oci,
+    /// A Linux KVM microVM run by an initialized Firecracker backend.
+    Firecracker,
+    /// A microVM run by an initialized Shards backend.
+    Shards,
 }
 
 impl Class {
@@ -22,6 +26,8 @@ impl Class {
         match self {
             Self::Process => "process",
             Self::Oci => "oci",
+            Self::Firecracker => "firecracker",
+            Self::Shards => "shards",
         }
     }
 }
@@ -50,8 +56,11 @@ impl BoxSpec {
         if let Some(owner) = &self.owner {
             owner.check()?;
         }
-        if let ClassSpec::Oci(oci) = &self.class {
-            oci.check()?;
+        match &self.class {
+            ClassSpec::Oci(oci) | ClassSpec::Firecracker(oci) | ClassSpec::Shards(oci) => {
+                oci.check()?
+            }
+            ClassSpec::Process | ClassSpec::Bundle(_) => {}
         }
         Ok(())
     }
@@ -83,8 +92,9 @@ impl BoxSpec {
             return Err(Refusal::Invalid {
                 what: "run",
                 why: format!(
-                    "box {} is an oci box, whose init is created and started",
-                    self.id
+                    "box {} is a {} box, whose init is created and started",
+                    self.id,
+                    self.class.class().name()
                 ),
             });
         }
@@ -167,6 +177,11 @@ pub enum ClassSpec {
     /// that already speak the runtime-spec: kiln's executor, which unpacks images into bundles, and the
     /// bench, which runs one bundle under every runtime.
     Bundle(PathBuf),
+    /// A guest workload in its own Firecracker microVM. Host kernel, initrd, binary and physical
+    /// attachment configuration belong to the initialized backend, never this peer payload.
+    Firecracker(Box<OciSpec>),
+    /// A guest workload run by Shards, with host configuration owned by its initialized backend.
+    Shards(Box<OciSpec>),
 }
 
 impl ClassSpec {
@@ -174,6 +189,8 @@ impl ClassSpec {
         match self {
             Self::Process => Class::Process,
             Self::Oci(_) | Self::Bundle(_) => Class::Oci,
+            Self::Firecracker(_) => Class::Firecracker,
+            Self::Shards(_) => Class::Shards,
         }
     }
 }
@@ -915,6 +932,51 @@ mod tests {
         let mut s = spec();
         s.rootfs = Rootfs::Layers(vec![std::ffi::OsStr::from_bytes(b"/layers/\xff").into()]);
         refused_naming(&s, "rootfs.layers[0]");
+    }
+
+    /// AC-T7.4.1: explicit backend variants preserve the workload and exact host claims in JSON;
+    /// the simulator creates their init and validates the same workload before accepting them.
+    #[test]
+    fn explicit_microvm_backends_roundtrip_and_validate_the_guest_workload() {
+        use crate::{BoxState, Runtime};
+        for (class, make) in [
+            (
+                Class::Firecracker,
+                ClassSpec::Firecracker as fn(Box<OciSpec>) -> ClassSpec,
+            ),
+            (
+                Class::Shards,
+                ClassSpec::Shards as fn(Box<OciSpec>) -> ClassSpec,
+            ),
+        ] {
+            let mut boxed = BoxSpec {
+                id: BoxId::new(class.name()).unwrap(),
+                bounds: Bounds::default(),
+                class: make(Box::new(spec())),
+                owner: None,
+                devices: vec![DeviceId {
+                    kind: crate::DeviceKind::Gpu,
+                    key: u64::MAX,
+                }],
+            };
+            assert_eq!(boxed.class.class(), class);
+            boxed.check().unwrap();
+            assert!(boxed.check_run().is_err());
+            let bytes = serde_json::to_vec(&boxed).unwrap();
+            assert_eq!(serde_json::from_slice::<BoxSpec>(&bytes).unwrap(), boxed);
+            boxed.devices.clear();
+            let runtime = crate::sim::SimRuntime::new();
+            let made = runtime.create(boxed.clone()).unwrap();
+            assert_eq!((made.class, made.state), (class, BoxState::Created));
+            runtime.start(&boxed.id).unwrap();
+            runtime.delete(&boxed.id).unwrap();
+            let mut bad = spec();
+            bad.init.args.clear();
+            boxed.class = make(Box::new(bad));
+            assert!(boxed.check().is_err());
+            assert!(runtime.create(boxed).is_err());
+            assert!(runtime.list().unwrap().is_empty());
+        }
     }
 
     fn refused_naming(s: &OciSpec, field: &str) {
