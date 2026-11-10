@@ -25,10 +25,10 @@ pub mod box_run;
 pub mod guest;
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub mod node;
-#[cfg(any(target_os = "linux", target_os = "macos", windows))]
-pub mod schedule;
 #[cfg(target_os = "linux")]
 pub mod oci;
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+pub mod schedule;
 
 /// What `hex` prints for its arguments, where, and the exit status.
 #[derive(Debug, PartialEq, Eq)]
