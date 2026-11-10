@@ -1,0 +1,14 @@
+{
+  "original_source": "f07bc72bb152106322c844ef299e29e56eebba54",
+  "original_run": "r96",
+  "original_exit": 101,
+  "original_log_sha256": "c1789e127500676bfdba640d98cdb1fb0064b5353a32f04973ecde7719dd3864",
+  "status": "SOURCE_ONLY_SUCCESSOR_UNCOMPILED_UNRUN",
+  "changes": [
+    "HcsFailure Debug formatting fixes reproduced compiler E0277",
+    "post-denial foreign host positive control prevents disappearance as false isolation pass"
+  ],
+  "file": "crates/hex-cli/tests/windows_assigned_device.rs",
+  "bytes": 29289,
+  "sha256": "1813e39ea97a024e60470e1b9c8ed90d0bf25ccf7a4c8fc187f2d2bdb0e440e1"
+}

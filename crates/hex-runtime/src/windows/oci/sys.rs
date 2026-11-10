@@ -1235,6 +1235,10 @@ pub struct DeviceView {
     pub reachable: usize,
 }
 
+#[cfg(all(test, windows))]
+#[path = "assigned_native_tests.rs"]
+mod assigned_native_tests;
+
 #[cfg(test)]
 mod create_tests {
     use super::*;

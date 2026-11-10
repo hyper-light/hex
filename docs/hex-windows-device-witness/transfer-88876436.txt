@@ -1,0 +1,2 @@
+[2m[kiln] on d1323898b255a3ed435eb83fa0f7b0cf · macos/aarch64 · 30 of 32 cores idle · 47 GB free · room for 1 CPU, 4 GiB of memory, 12 GiB of disk[0m
+{"source_commit": "888764365adf0d54788a51a7699aed396d962e73", "archive_sha256": "1ffdb405e5c2766451f8d7e0880f6eb8c3a9ec680cf8599f99496ac2042442bf", "archive_bytes": 9391144, "files": 1795, "private": "/Users/adalundhe/.cache/hex-lead/lanes/windows-device-01a1c640-88876436-compile-v2"}

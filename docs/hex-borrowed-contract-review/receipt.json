@@ -1,0 +1,40 @@
+{
+  "review_source": "8e5703b13c8649c8cfbc95d6650163c173fad4ca",
+  "branch_base": "8e5703b13c8649c8cfbc95d6650163c173fad4ca",
+  "policy_revision": "a920c85b5c0c9d40aafc4f4cce32432c7c0aed79",
+  "role": "implementer, bounded read-only source review",
+  "implementer": "01a1c643e475709b8a829553d1100be1",
+  "coordinator": "01a1aa77778471339bea3beff90d6bbd",
+  "owned": [
+    "docs/hex-borrowed-contract-review/**"
+  ],
+  "policy_sha256": {
+    "AGENTS.md": "f66d304c033ad4001d3d7347b67faa3bb3137d637860793e8e74f1eb6266db41",
+    "docs/development-rules.md": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+    "docs/development-evidence.md": "61613a244106d95b2759b38c8b6660ff29a616983e7afd6e9faabdc38368fb63",
+    "CLAUDE.md": "fd1076b256516e0edab1b3655421d37cd934e93a8232f0125b96abcfb99ece5f"
+  },
+  "hex_claude_sha256": "358e8baa67af459463e2c8e06e90f106bcfdbe15a820875a1a37700703b953a0",
+  "reviewed_fixture": {
+    "path": "vendor/shards/crates/api/tests/hex_borrowed_contract.rs",
+    "sha256": "0439cbed32aade2ab8b19e106a87a6183a37a7da6d6dcb3bbe2c1b774c04cd13",
+    "lines": 288
+  },
+  "contract_revision": "33df95b08ad8f95bddeaa1c48acf0c64386e0eac",
+  "agent_builds": 0,
+  "agent_tests_executed": 0,
+  "agent_native_invocations": 0,
+  "agent_jobs": [],
+  "production_changes": false,
+  "root_reports_not_independently_replayed": {
+    "mac": "9663496d:12 selected passes",
+    "windows": "42042ccc: build0; 8 canonical + public lifetime + 64 steady rounds; 107 handles before/after; not cold/no Read branch claim"
+  },
+  "preserved_refs": {
+    "cp/t7-adversarial-bounds": "7d7307359befabec3d87a611fad45e6d19752762",
+    "cp/t7-hcs-device-instance": "d71a87ff3dee68913a622988df4aac2ed6a26b67",
+    "cp/t7-runtime-device-contract": "8c4777d639e8dc3cdc8359b6bf1403cec6905f1e",
+    "cp/t7-windows-device-attachment": "bd80d9c42d656c5ac2445054b4042cee1026e225",
+    "cp/t7-hcs-native-completion": "13fbf1bad875141882af8cc94576f895b6c71540"
+  }
+}

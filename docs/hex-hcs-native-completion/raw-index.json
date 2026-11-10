@@ -1,0 +1,63 @@
+{
+  "archive_sha256": "ed52112260bf8e5f2949fa4197e988774381fa1f89bfcae772ce4f107edb5753",
+  "archive_bytes": 125371,
+  "files": {
+    "v1-cli.log": {
+      "bytes": 8835,
+      "sha256": "ed3e8cdb843775ead2442ae0031df927a0548c838f1742d4d76c1992ae4ed39a"
+    },
+    "v1-collection.json": {
+      "bytes": 774,
+      "sha256": "fa6ce03e8e08527c904016e6228c9b3f8ff908935920fd59c242ec569c9cbf34"
+    },
+    "v1-result.json": {
+      "bytes": 1800,
+      "sha256": "2736ca5e7a255087e62b8b191f382f1e77e89aa2698aed219d27adf915444806"
+    },
+    "v1-run.json": {
+      "bytes": 1714,
+      "sha256": "c7c70dc77a9d5ae887305adef9597b90f216c42d60737abedcbf561d43814891"
+    },
+    "v1-source-hashes.json": {
+      "bytes": 137374,
+      "sha256": "17912d56dcf7b02cbd43311de072f064f796fcf06c53e93ce87b5180cffce38d"
+    },
+    "v1-transfer.json": {
+      "bytes": 8023,
+      "sha256": "487934849c1554b99414d4ad129be9ab4e5e0b00b56174a4c813d53d74cb3116"
+    },
+    "v1-windows-test-clippy.log": {
+      "bytes": 6878,
+      "sha256": "fe62006e132720c5376c32bd611e4777afb6078efdf99ab0a057fd17ae1da1ac"
+    },
+    "v2-cli.log": {
+      "bytes": 1954,
+      "sha256": "ff6db57b36ac2ec9e427b5d8c294cd8bbe5bc0233ad571cefdce72ca6411925a"
+    },
+    "v2-collection.json": {
+      "bytes": 774,
+      "sha256": "b42251b320a91f9a4b6124a6c7ca6ea75ca5cae87b9e9ae9912e00c98763f0af"
+    },
+    "v2-result.json": {
+      "bytes": 1798,
+      "sha256": "6798a3774e4f599315673a1e6104986031e5b215c6aa8473a2bc45fe511448e9"
+    },
+    "v2-run.json": {
+      "bytes": 1712,
+      "sha256": "2d7d4adabae66ddd3c88c1c9287a4d3adaf17f236b819d139fe4b2483c312d09"
+    },
+    "v2-source-hashes.json": {
+      "bytes": 137857,
+      "sha256": "8006c7702b9ddf9806ab7d7e7837e74be5132efc4c2b9354e418b49f3586ef45"
+    },
+    "v2-transfer.json": {
+      "bytes": 8023,
+      "sha256": "3c640568afdfeb1ae4c7ece5432b8928906f92b852e164a1abb38f96a66c4798"
+    },
+    "v2-windows-test-clippy.log": {
+      "bytes": 6239,
+      "sha256": "b9d2480d30c42230600e142bc73002f6ff9f0054e7d21d2ca51fc09d167b5c4f"
+    }
+  },
+  "raw_bytes_preserved": true
+}

@@ -1,0 +1,35 @@
+{
+  "revision": "a920c85b5c0c9d40aafc4f4cce32432c7c0aed79",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "read_full": [
+    "AGENTS.md",
+    "docs/development-rules.md R01\u2013R16",
+    "docs/development-evidence.md",
+    "CLAUDE.md",
+    "docs/design/managed-runtime-plan.md",
+    "Hex CLAUDE.md",
+    "Hex HANDOFF-codex.md",
+    "g121-handoff.md"
+  ],
+  "managed_plan_sha256": "11a0a65bc2984c51a7237c2ddb58b58127cf9bd70c8acf83878e80e2ac5acb9d",
+  "role": "implementer, compile-only native fixture; no native execution",
+  "implementer": "01a1c643e475709b8a829553d1100be1",
+  "coordinator": "01a1aa77778471339bea3beff90d6bbd",
+  "owned": [
+    "crates/hex-runtime/src/windows/oci/assigned_native_tests.rs",
+    "crates/hex-runtime/src/windows/oci/sys.rs ONE cfg test path registration only",
+    "docs/hex-hcs-native-completion/**"
+  ],
+  "upstream_sha256": {
+    "AGENTS.md": "f66d304c033ad4001d3d7347b67faa3bb3137d637860793e8e74f1eb6266db41",
+    "docs/development-rules.md": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+    "docs/development-evidence.md": "61613a244106d95b2759b38c8b6660ff29a616983e7afd6e9faabdc38368fb63",
+    "CLAUDE.md": "fd1076b256516e0edab1b3655421d37cd934e93a8232f0125b96abcfb99ece5f",
+    "docs/design/managed-runtime-plan.md": "11a0a65bc2984c51a7237c2ddb58b58127cf9bd70c8acf83878e80e2ac5acb9d"
+  },
+  "local_sha256": {
+    "CLAUDE.md": "8708b80967e5517ae9137eb642600668ac02d164a4c2145ad8462a37889d424e",
+    "/Users/adalundhe/.cache/hex-lead/HANDOFF-codex.md": "2d5ad38df33901e898b7279a4e627e7b318152a3145c4d8beaed129c704b7982",
+    "/Users/adalundhe/g121-handoff.md": "02c673d70e112d7f5cbf5474230d883befcbd785469740c29ccc0990fa45ba6f"
+  }
+}
