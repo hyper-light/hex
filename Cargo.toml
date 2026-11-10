@@ -61,6 +61,7 @@ ureq = "3"
 # Networking_WinSock and System_IO are the node agent's socket: AF_UNIX streams on one completion port
 # (crates/hex-afunix).
 windows-sys = { version = "0.61.2", features = [
+    "Wdk_Graphics_Direct3D",
     "Wdk_System_SystemServices",
     "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Foundation",

@@ -227,7 +227,9 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   the node gave it, and reads the host's build and kind (`RtlGetVersion`), an image's build from its base
   layer's `ntdll.dll` (`GetFileVersionInfoW`, `VerQueryValueW`), and a device interface class's members
   (`CM_Get_Device_Interface_List_SizeW`, `CM_Get_Device_Interface_ListW`) and whether each opens from where
-  it runs (`CreateFileW`, a query open). Rust can express none of these
+  it runs (`CreateFileW`, a query open). The exact present adapter interface for a PNP instance is
+  opened by `D3DKMTOpenAdapterFromDeviceName` to obtain its native full LUID and closed by
+  `D3DKMTCloseAdapter`; the existing Windows SDK types define that ABI. Rust can express none of these
   foreign calls, the function pointers resolved at run time, nor a handle value crossing processes, safely.
 - `crates/hex-gpu/src/apple/sys.rs`: Apple Silicon GPU identity and telemetry for the same
   `hex-gpu` inventory/sample seam. Metal's device registry identifiers and the native Objective-C,
