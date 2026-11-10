@@ -3,12 +3,14 @@
 
 use std::io::{Read, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 use hex_api::Refusal;
 use hex_core::{schedule, stream, wire};
 
 use super::Peer;
+use super::stopping::{OwnedChild, Stopping};
 
 fn io(op: &'static str) -> impl Fn(std::io::Error) -> Refusal {
     move |e| Refusal::os(op, e)
@@ -68,15 +70,26 @@ fn answer(bytes: &[u8]) -> Result<(wire::Header, wire::Answer), Refusal> {
 
 /// One bounded ordered command lane per configured peer. Runtime program messages and stdio keep
 /// using hex-client's common reader; this tunnel forwards only scheduler control to that reader.
+struct ChildGuard {
+    child: OwnedChild,
+    stopping: Arc<Stopping>,
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        self.stopping.finish_child(&self.child);
+    }
+}
+
 pub struct Connection {
-    child: Child,
+    owner: ChildGuard,
     input: ChildStdin,
     output: ChildStdout,
     next: u64,
 }
 
 impl Connection {
-    pub fn open(peer: &Peer) -> Result<Self, Refusal> {
+    pub fn open(peer: &Peer, stopping: &Arc<Stopping>) -> Result<Self, Refusal> {
         if peer.host.is_empty()
             || peer.host.starts_with('-')
             || peer.host.contains(['\n', '\r', '\0'])
@@ -87,7 +100,7 @@ impl Connection {
                 why: "needs a configured host and remote tunnel command".into(),
             });
         }
-        let mut child = Command::new("ssh")
+        let child = Command::new("ssh")
             .args([
                 "-T",
                 "-o",
@@ -103,18 +116,31 @@ impl Connection {
             .stderr(Stdio::inherit())
             .spawn()
             .map_err(io("opening authenticated peer tunnel"))?;
-        let Some(input) = child.stdin.take() else {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(Refusal::Broken("SSH stdin was not piped".into()));
+        let owner = ChildGuard {
+            child: Arc::new(Mutex::new(child)),
+            stopping: Arc::clone(stopping),
         };
-        let Some(output) = child.stdout.take() else {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(Refusal::Broken("SSH stdout was not piped".into()));
+        let (input, output) = {
+            let mut child = owner
+                .child
+                .lock()
+                .map_err(|_| Refusal::Broken("SSH child lock is poisoned".into()))?;
+            let input = child
+                .stdin
+                .take()
+                .ok_or_else(|| Refusal::Broken("SSH stdin was not piped".into()))?;
+            let output = child
+                .stdout
+                .take()
+                .ok_or_else(|| Refusal::Broken("SSH stdout was not piped".into()))?;
+            (input, output)
         };
+        // The service can cancel this child before either half of hello blocks on its pipes.
+        stopping
+            .register(peer.node, &owner.child)
+            .map_err(io("registering SSH peer child"))?;
         let mut conn = Self {
-            child,
+            owner,
             input,
             output,
             next: 0,
@@ -137,7 +163,18 @@ impl Connection {
         }
     }
 
-    pub fn call(&mut self, command: schedule::Command) -> Result<schedule::Reply, Refusal> {
+    /// Outer failures mean the connection is broken/uncertain; an inner refusal is a complete,
+    /// typed application response, so the worker can proceed to newer queued control.
+    pub fn call(
+        &mut self,
+        command: schedule::Command,
+    ) -> Result<Result<schedule::Reply, Refusal>, Refusal> {
+        if self.owner.stopping.is_stopped() {
+            return Err(Refusal::os(
+                "calling stopped scheduler tunnel",
+                std::io::Error::new(std::io::ErrorKind::Interrupted, "scheduler stopped"),
+            ));
+        }
         self.next = self.next.checked_add(1).ok_or(Refusal::Exhausted {
             what: "peer request IDs",
             bound: usize::MAX,
@@ -156,8 +193,8 @@ impl Connection {
             return Err(Refusal::Broken("peer answered a different request".into()));
         }
         match answer {
-            wire::Answer::Scheduled(reply) => Ok(*reply),
-            wire::Answer::Refused(why) => Err(why),
+            wire::Answer::Scheduled(reply) => Ok(Ok(*reply)),
+            wire::Answer::Refused(why) => Ok(Err(why)),
             _ => Err(Refusal::Broken(
                 "peer did not answer scheduler control".into(),
             )),
@@ -165,21 +202,29 @@ impl Connection {
     }
 }
 
-impl Drop for Connection {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
+/// SSH's forced command binds this sender to its credential. Local administration never crosses
+/// this endpoint, and a peer cannot claim another configured node's identity inside a command.
+fn peer_command_allowed(command: &schedule::Command, allowed_sender: u32) -> bool {
+    matches!(command,
+        schedule::Command::Hear { from, .. }
+        | schedule::Command::Describe { from }
+        | schedule::Command::Advertise { from, .. }
+        if *from == allowed_sender)
 }
 
 /// Remote end of SSH's authenticated stdio channel. The local socket enforces its normal owner
 /// credentials and every call uses hex-client's common reader and worker admission.
-pub fn serve(path: &Path, input: &mut impl Read, output: &mut impl Write) -> Result<(), Refusal> {
+pub fn serve(
+    path: &Path,
+    allowed_sender: u32,
+    input: &mut impl Read,
+    output: &mut impl Write,
+) -> Result<(), Refusal> {
     let client = hex_client::Client::connect(path)?;
     let mut greeted = false;
     while let Some(bytes) = read_frame(input)? {
         let (id, answer, finish) = match wire::read_request_apart(&bytes, wire::MAX_MESSAGE) {
-            Ok((header, wire::Request::Hello { .. })) => {
+            Ok((header, wire::Request::Hello { .. })) if !greeted => {
                 greeted = true;
                 (
                     header.id,
@@ -205,19 +250,25 @@ pub fn serve(path: &Path, input: &mut impl Read, output: &mut impl Write) -> Res
                 }),
                 true,
             ),
-            Ok((header, wire::Request::Call(wire::Call::Schedule(command)))) if greeted => (
-                header.id,
-                client
-                    .schedule(*command)
-                    .map(|reply| wire::Answer::Scheduled(Box::new(reply)))
-                    .unwrap_or_else(wire::Answer::Refused),
-                false,
-            ),
+            Ok((header, wire::Request::Call(wire::Call::Schedule(command))))
+                if greeted && peer_command_allowed(&command, allowed_sender) =>
+            {
+                (
+                    header.id,
+                    client
+                        .schedule(*command)
+                        .map(|reply| wire::Answer::Scheduled(Box::new(reply)))
+                        .unwrap_or_else(wire::Answer::Refused),
+                    false,
+                )
+            }
             Ok((header, _)) => (
                 header.id,
                 wire::Answer::Refused(Refusal::Invalid {
                     what: "scheduler tunnel",
-                    why: "hello then scheduler control are required".into(),
+                    why: format!(
+                        "hello then Hear, Describe or Advertise from credential-bound peer {allowed_sender} are required"
+                    ),
                 }),
                 true,
             ),
@@ -261,5 +312,64 @@ mod tests {
         write_frame(&mut framed, &bytes).unwrap();
         assert_eq!(framed, stream::frame(&bytes, wire::MAX_MESSAGE).unwrap());
         assert_eq!(read_frame(&mut &framed[..]).unwrap(), Some(bytes));
+    }
+
+    /// LB03: the credential permits peer control from exactly one sender. Local admin actions
+    /// cannot use this shell, even after hello, and a foreign sender cannot borrow its credential.
+    #[test]
+    fn lb03_tunnel_binds_peer_commands_to_the_authenticated_sender() {
+        for from in [7, 8] {
+            let commands = [
+                schedule::Command::Describe { from },
+                schedule::Command::Advertise {
+                    from,
+                    offer: schedule::Offer {
+                        spec: String::new(),
+                        models: Vec::new(),
+                    },
+                    observations: Vec::new(),
+                },
+                schedule::Command::Hear {
+                    from,
+                    packet: schedule::Packet {
+                        epoch: 1,
+                        seq: 1,
+                        observations: Vec::new(),
+                        message: String::new(),
+                        payload: None,
+                        refusal: None,
+                    },
+                },
+            ];
+            for command in commands {
+                assert_eq!(peer_command_allowed(&command, 7), from == 7);
+            }
+        }
+        let key = schedule::Key {
+            owner: 7,
+            epoch: 1,
+            seq: 1,
+        };
+        let payload = schedule::Payload {
+            spec: hex_api::BoxSpec {
+                id: hex_api::BoxId::new("tunnel-admin").unwrap(),
+                bounds: hex_api::Bounds::default(),
+                class: hex_api::ClassSpec::Process,
+                owner: None,
+            },
+            start: true,
+        };
+        for command in [
+            schedule::Command::Submit {
+                demand: String::new(),
+                payload,
+            },
+            schedule::Command::Delete { key },
+            schedule::Command::Status { key },
+            schedule::Command::Retry,
+            schedule::Command::LinkUp { peer: 7 },
+        ] {
+            assert!(!peer_command_allowed(&command, 7));
+        }
     }
 }
