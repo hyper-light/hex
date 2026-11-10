@@ -86,6 +86,9 @@ remote offer cannot force the receiving node to over-admit. Box reservations las
 deletion, including when an OCI init exits or a process box is empty.
 
 Core rows and immutable Runtime payloads share one atomic file replacement, under `placements`.
+A local owner and runner record for the same key must agree on the complete immutable payload.
+Recovery refuses a disagreement before inspecting or starting boxes, naming the key and cause
+without rendering the box's private content. It preserves the records for diagnosis.
 A state-directory file lease excludes a second writer. Transport ordering records live under
 `transport`: a sender commits a new epoch before sending; each peer lane numbers its messages;
 a receiver commits its high-water mark and holds its ordering lock across the physical effect.

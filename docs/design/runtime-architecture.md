@@ -2635,3 +2635,23 @@ restoration hashes, build identities, policy accounting and validation limits ar
 rows, admission before a failed ceiling commit, a new word beyond the shared bound, a lost permit,
 or a sender identity outside configured membership. Final publication still requires its current-tree
 gates and root lab; an older source's pass is not a new source's result.
+
+### 11. Recovery agrees on immutable local payloads before effects (AC-T7.4.1, LB03)
+
+The owner and runner rows for one local key carry the same immutable `Payload`: both the complete
+box specification and the requested start intent. Recovery cannot select one contradictory copy as
+authority. `Rows::running` checks equality while collecting all recovered runners, before the driver
+can inspect or start any Runtime box. A mismatch returns typed `Damaged` with the affected key and
+cause, preserving the records and physical state. Its diagnostic contains no payload content.
+This uses the existing record owner and recovery seam, without another cache, repair protocol or
+admission rule. A matching payload still permits its originally authorized init to resume.
+
+The bounds agent first reproduced a create-only owner's box becoming `Running` through a conflicting
+runner start flag, and separately an equal-start specification mismatch reaching inspection. ROOT's
+exact guard removals reproduce both failures and exact restores pass. Actual OCI before/after runs
+also confirm the forbidden start and its refusal, sibling progress, matching repair and owned guest
+cleanup. [Coordinator evidence](../research/measurements/hex-recovery-payload-guard/COORDINATOR.md)
+records the source, native/model distinction, all hashes and remaining gates. This decision is
+falsified by any callback before a mismatch refusal, changed record bytes, payload content in the
+diagnostic, or loss of authorized matching recovery. It establishes no cause for earlier unrelated
+Submit deadline failures and makes no performance claim.
