@@ -61,20 +61,27 @@ fn nvidia_minor(text: &str, expected: u64) -> Result<u32, Refusal> {
 
 fn bounded_text(path: &Path) -> Result<String, Refusal> {
     let bound = bundle::MAX_CONFIG_BYTES;
-    let length = u64::try_from(bound)
-        .ok()
-        .and_then(|n| n.checked_add(1))
-        .ok_or_else(|| full(bound))?;
-    let file = fs::File::open(path)
+    let room = bound.checked_add(1).ok_or_else(|| full(bound))?;
+    let mut file = fs::File::open(path)
         .map_err(|error| Refusal::os("opening a GPU identity report", error))?;
     let mut bytes = Vec::new();
-    bytes.try_reserve_exact(bound).map_err(|_| full(bound))?;
-    file.take(length)
-        .read_to_end(&mut bytes)
-        .map_err(|error| Refusal::os("reading a GPU identity report", error))?;
-    if bytes.len() > bound {
+    bytes.try_reserve_exact(room).map_err(|_| full(room))?;
+    bytes.resize(room, 0);
+    let mut used = 0usize;
+    while used < room {
+        let tail = bytes.get_mut(used..).ok_or_else(|| full(room))?;
+        let count = file
+            .read(tail)
+            .map_err(|error| Refusal::os("reading a GPU identity report", error))?;
+        if count == 0 {
+            break;
+        }
+        used = used.checked_add(count).ok_or_else(|| full(room))?;
+    }
+    if used > bound {
         return Err(full(bound));
     }
+    bytes.truncate(used);
     String::from_utf8(bytes).map_err(|_| invalid("GPU identity report is not UTF-8"))
 }
 
