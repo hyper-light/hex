@@ -81,8 +81,12 @@ pub struct Disk {
 pub struct Gpu {
     pub vendor: String,
     pub model: String,
-    /// Its memory in bytes; 0 where it shares the machine's (Apple silicon).
+    /// Usable GPU memory/budget in bytes: dedicated memory on PCI devices; Metal's native
+    /// working-set budget on Apple silicon, not total host RAM or a separate physical VRAM pool.
     pub memory: u64,
+    /// Native identity within this host boot/runtime pool: packed PCI or Metal registry ID.
+    /// None is retained for synthetic/legacy facts; it never fabricates a physical grant.
+    pub key: Option<u64>,
     /// Its PCI address (`0000:01:00.0`), where it has one.
     pub pci: Option<String>,
     pub driver: Option<String>,
@@ -258,6 +262,7 @@ impl Facts {
         if given(DeviceKind::Gpu) {
             for g in &self.gpus {
                 devices.push(Device {
+                    key: g.key,
                     load: g.load,
                     ..Device::gpu(cluster.model(&g.model)?, g.memory)
                 });
@@ -569,6 +574,7 @@ mod tests {
     fn facts_make_the_node_each_os_can_be() {
         let gpu = Gpu {
             vendor: "nvidia".into(),
+            key: None,
             model: "NVIDIA GeForce RTX 5060 Ti".into(),
             memory: 8_546_942_976,
             pci: Some("0000:01:00.0".into()),

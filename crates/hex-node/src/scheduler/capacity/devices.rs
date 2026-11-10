@@ -59,18 +59,7 @@ fn collect_offers(
                 let gpu = facts
                     .gpus
                     .iter()
-                    .find(|gpu| {
-                        gpu.pci
-                            .as_deref()
-                            .and_then(hex_gpu::PciAddress::parse)
-                            .is_some_and(|pci| {
-                                let key = (u64::from(pci.domain) << 16)
-                                    | (u64::from(pci.bus) << 8)
-                                    | (u64::from(pci.device) << 3)
-                                    | u64::from(pci.function);
-                                key == offer.id.key
-                            })
-                    })
+                    .find(|gpu| native_key(gpu, facts.os) == Some(offer.id.key))
                     .ok_or_else(|| {
                         invalid("a native GPU offer has no matching hardware identity")
                     })?;
@@ -113,4 +102,20 @@ fn collect_offers(
         }
     }
     Ok(devices)
+}
+
+fn native_key(gpu: &hex_sim::facts::Gpu, os: hex_sim::model::Os) -> Option<u64> {
+    match gpu.pci.as_deref() {
+        Some(text) => {
+            let pci = hex_gpu::PciAddress::parse(text)?;
+            let key = hex_gpu::Identity::Pci(pci).key();
+            if gpu.key.is_some_and(|native| native != key) {
+                None
+            } else {
+                Some(key)
+            }
+        }
+        None if os == hex_sim::model::Os::Macos && gpu.vendor == "apple" => gpu.key,
+        None => None,
+    }
 }

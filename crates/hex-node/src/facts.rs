@@ -101,11 +101,13 @@ pub fn gpu_facts(inventory: &[hex_gpu::Gpu], loads: &[hex_gpu::Load]) -> Vec<fac
             vendor: match g.vendor {
                 hex_gpu::Vendor::Nvidia => "nvidia",
                 hex_gpu::Vendor::Amd => "amd",
+                hex_gpu::Vendor::Apple => "apple",
             }
             .to_owned(),
             model: g.model.clone(),
             memory: g.memory_total_bytes,
-            pci: Some(g.pci.to_string()),
+            key: Some(g.key()),
+            pci: g.pci().map(|pci| pci.to_string()),
             driver: Some(g.driver_version.clone()),
             load: hex_sim::model::GpuLoad {
                 busy_per_mille: load
@@ -610,12 +612,12 @@ mod tests {
             vendor: hex_gpu::Vendor::Nvidia,
             model: model.to_owned(),
             memory_total_bytes: 8_546_942_976,
-            pci: hex_gpu::PciAddress {
+            identity: hex_gpu::Identity::Pci(hex_gpu::PciAddress {
                 domain: 0,
                 bus,
                 device: 0,
                 function: 0,
-            },
+            }),
             driver_version: "620.70.06".to_owned(),
         };
         let inventory = [gpu("NVIDIA GeForce RTX 5060 Ti", 1), gpu("NVIDIA L4", 2)];
@@ -706,5 +708,34 @@ mod capacity_tests {
         for bad in ["", "max", "1 0", "wat 100", "1 100 extra"] {
             assert!(super::here::quota_milli(bad).is_err(), "{bad}");
         }
+    }
+
+    /// AC-T7.4.1: Apple identities retain every native bit and never acquire a PCI placeholder.
+    #[test]
+    fn metal_facts_keep_the_full_native_registry_identity_and_budget() {
+        let gpu = hex_gpu::Gpu {
+            vendor: hex_gpu::Vendor::Apple,
+            model: "Apple fixture GPU".into(),
+            memory_total_bytes: hex_api::MIN_MEMORY,
+            identity: hex_gpu::Identity::Metal(u64::MAX),
+            driver_version: "fixture-native-Darwin".into(),
+        };
+        let load = hex_gpu::Load {
+            busy_percent: Ok(37),
+            memory_used_bytes: Ok(hex_api::MIN_MEMORY / 2),
+        };
+        let facts = gpu_facts(&[gpu], &[load]);
+        assert_eq!(facts.len(), 1);
+        assert_eq!(
+            (
+                facts[0].key,
+                facts[0].pci.as_deref(),
+                facts[0].vendor.as_str()
+            ),
+            (Some(u64::MAX), None, "apple")
+        );
+        assert_eq!(facts[0].memory, hex_api::MIN_MEMORY);
+        assert_eq!(facts[0].load.busy_per_mille, 370);
+        assert_eq!(facts[0].load.memory_used, hex_api::MIN_MEMORY / 2);
     }
 }
