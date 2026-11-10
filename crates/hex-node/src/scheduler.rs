@@ -243,7 +243,7 @@ fn run_peer_with_time<C>(
             if stopping.is_stopped() {
                 return;
             }
-            let began = now();
+            let mut began = now();
             let fresh = tunnel.is_none();
             if fresh {
                 match open(&peer, &stopping) {
@@ -295,6 +295,9 @@ fn run_peer_with_time<C>(
                                         if wait(&stopping, pace).unwrap_or(true) {
                                             return;
                                         }
+                                        // AC-T7.4.1/r423: this inner retry stays in the same
+                                        // outer attempt; its own pause is not operation cost.
+                                        began = now();
                                     }
                                     Err(why) => {
                                         report(NodeId(peer.node), &why.to_string());
