@@ -62,3 +62,33 @@ CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR="${TARGET:?}" nice -n 10 cargo build --relea
 
 Omit --release for the debug observer. Source-preserved cache copies were compiled
 and clippied by root; the packaged layout is separately checked before commit.
+
+## Acknowledgement diagnostics
+
+`status_pressure_e2e.py` imports these unchanged fixtures and adds an explicitly
+supplied positive `--status-readers` count. Root r423 and r439 used4readers, N1,
+the same633MiB/632MiB boundary,64MiB positive control and original120s outer
+cancellation budget. Each reader shares the primary operation's absolute deadline;
+all tracked Status children must be reaped and their threads joined. Only a valid
+reply or the exact publication-Busy result is accepted. No other control requests,
+new grace period, wait floor or readiness extension are introduced. Diagnostic
+census rows are never runtime seeds. Supply all the boundary invocation flags
+above, replacing the script with status_pressure_e2e.py and adding
+`--status-readers 4`.
+
+`pace_trace_report.py` reads an explicit result and explicit trace log paths and
+writes a new report only. Example:
+
+```sh
+python3 -I pace_trace_report.py --result "$RUN/result.json" --owner-log "$RUN/o.log" --owner-log "$RUN/r.log" --output "$RUN/new-pace-report.json"
+```
+
+The parser preserves raw tagged rows, exact nanoseconds and input hashes. It
+groups only at explicit queue-enter boundaries per log/node/peer/kind, labels
+ordinals inferred, and leaves absent real queue/attempt IDs null. Exact ordered
+comparisons are observations; remote Describe is legitimate outer work, and the
+parser does not decide causality, seed values or whether an old stall is fixed.
+Root reviewed this source and ran its syntax and both actual before/after reports;
+the durable results are in ../retry-reset-a98824f7.json. Production contains none
+of the temporary tagged trace instrumentation. The two new scripts are benchmark
+diagnostics, not installed helpers or a new scheduler code path.

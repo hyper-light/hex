@@ -150,3 +150,28 @@ both oversized admission checks passed; its guest was retired. The capacity
 record in docs/research/scheduler/runtime-pools.md states this unresolved limit.
 A root diagnostic repeat with4additional Status callers passed and proved all
 Status-child joins/reaps; those diagnostic rows are explicitly forbidden seeds.
+
+## Retry measurement correction
+
+Signed a98824f7 excludes a local Advertise retry's own pause from its next work
+sample. The regression was run red before the fix: virtual requested pauses grew
+[1,2,4]ns for equal work; after the reset they remain[1,1,1]ns. Root r430's
+uninstrumented debug boundary and five release boundaries all passed both
+oversized refusals, both valid physical lifecycles, baseline restoration and
+guest retirement. This is bounded replay evidence, not a competitive timing claim
+or proof of the original intermittent stall's sole cause.
+
+Root r423/r439 provide separate actual Status4 before/after traces. Before, one
+refresh's requested pauses grew4,802,584/16,732,875/62,724,209ns despite Busy calls
+of2,583/2,167/4,667ns. After, a refresh's first6,697,375ns actual outer sample
+remained its requested pause across eight subsequent1,125-1,875ns samples.
+Both traced runs passed their physical controls and joined/reaped every diagnostic
+Status child; both owned guests stopped. Initial remote Describe time is retained
+as real work. Source and ordered trace data are preserved in retry-reset-a98824f7.json
+and census/{status_pressure_e2e.py,pace_trace_report.py}. Missing real queue IDs stay
+null; group ordinals are derived only from explicit queue-enter boundaries.
+
+The trace binary is explicitly temporary cc+the same minimal fix+DEBUG, separate
+from exact uninstrumented a988 binaries. These pressure/trace rows are forbidden
+seed inputs. No runtime constant, deadline or grace interval was raised. Current
+combined gate/native Linux and remaining calibration checks are still owed.

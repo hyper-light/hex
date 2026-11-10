@@ -1,0 +1,2399 @@
+{
+  "full_root_report": {
+    "path": "/Users/adalundhe/.cache/hex-lead/retry-reset-root-evidence-a98824f7.json",
+    "sha256": "c269640c20056ac68df8adbc90e6fca5e81a3113a972c426f09921f8521d8552"
+  },
+  "kind": "root-retry-reset-replay-evidence",
+  "original_intermittent_stall_cause": "not proven solely by these bounded replays",
+  "root_coordinator": "01a1aa77778471339bea3beff90d6bbd",
+  "runner": "d1323898b255a3ed435eb83fa0f7b0cf",
+  "runs": [
+    {
+      "backend_baseline_restored": true,
+      "binary_and_artifact_hashes": {
+        "hex": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-scheduler-retry-a98824f7/aarch64-apple-darwin/debug/hex",
+          "sha256": "be9425d165ea4152b7f80bae462eb5cb1fc7e662bdfed40039e471469661a449"
+        },
+        "initrd": {
+          "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/initramfs-cc7c2190-debug-aarch64.cpio",
+          "sha256": "fcab9b12bb999fb0e7cf7f91ecd96011df0ede2f24cd46be5f30ddda0afbe68d"
+        },
+        "kernel": {
+          "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/Image-6.18.48-aarch64",
+          "sha256": "1b178851998d27b4c6c346ae391c26d675f81461fbaa19cbe514500291fe472d"
+        },
+        "linux_hex": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-scheduler-vm-cc7c2190/aarch64-unknown-linux-musl/debug/hex",
+          "sha256": "4706ad1c166de3d95342d8751145c2a975da3d79b7e24015f7f0504df2c560ab"
+        },
+        "runtime_probe": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-probe-runtime-pools-935f6b21/aarch64-apple-darwin/debug/hex-scheduler-runtime-probe",
+          "sha256": "76d5375a5fe38501995db085fc9483a9784d88e26c265e73fbfbf2a957e8c6d6"
+        },
+        "shards": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-shards-vm-tool/release/shards",
+          "sha256": "b9d74f0910a54593b66f604ffe36e39d588c89afea60d4643e37813200daa61e"
+        }
+      },
+      "environment": {
+        "box_cpu_milli": 1000,
+        "box_memory_mib": 633,
+        "cpu_count": 32,
+        "free_disk_bytes_before": 3023595991040,
+        "guest_cpus": 4,
+        "guest_memory_mib": 632,
+        "guest_shares_sha256": "f8f2ea3769f378425892a1b5b1741372a87b09ee02b8d5e2962a3a7c9dacb708",
+        "machine": "arm64",
+        "os": "macOS-26.4-arm64-arm-64bit-Mach-O",
+        "path_sha256": "66f027960372b4109885e775bc4d3d0f2e91b060fcf607f0aa12af74fe110864"
+      },
+      "kind": "actual-scheduler-wait-census",
+      "n": 1,
+      "owned_guest_retired": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 5435,
+        "started": 12172462451737
+      },
+      "profile": "debug",
+      "raw_report": "/Users/adalundhe/.cache/hx/e-jkhkhd50/result.json",
+      "raw_report_sha256": "05f702ed57073f89ac61d01551f536208bf2979a3cc9de11d72f72b5fe6c676b",
+      "receipts": {
+        "build": {
+          "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-cc7c2190/fixture/receipts/build-debug-a98824f7.json",
+          "sha256": "89cd9e98553655e49a6c642e8002950c018e634024597f4e3ae5199e8d8bf079"
+        },
+        "deadline": {
+          "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-cc7c2190/fixture/receipts/method-boundary-debug-a98824f7.json",
+          "sha256": "a970b75e7ad9256d51f1370d062e36b5a34cefd796e79c04cfa5c571138facc2"
+        },
+        "policy": {
+          "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-cc7c2190/fixture/receipts/policy-f5cec365.json",
+          "sha256": "31696dc363c96c1a61243910a603a179d1ddfe989fa69b0c505b5e1adc7f5bc6"
+        }
+      },
+      "source": "/Users/adalundhe/.cache/hex-lead/snapshots/runtime-pools-a98824f7",
+      "source_revision": "a98824f7f99adeaa83f8324ab9af65aa80a369e5",
+      "status": "passed",
+      "success_controls": {
+        "advertise": 2,
+        "delete": 4,
+        "describe": 2,
+        "link_up": 1,
+        "retry": 4,
+        "status": 183,
+        "submit": 4
+      },
+      "verified_oversized_refusals": 2,
+      "verified_physical_created": 2,
+      "verified_physical_deleted": 2
+    },
+    {
+      "backend_baseline_restored": true,
+      "binary_and_artifact_hashes": {
+        "hex": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-scheduler-retry-a98824f7/aarch64-apple-darwin/release/hex",
+          "sha256": "ce9eb1a6c46f5b04565197b80ce1b1d50c8c82189bb4e6a1f15a2d5930b77935"
+        },
+        "initrd": {
+          "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/initramfs-cc7c2190-release-aarch64.cpio",
+          "sha256": "5521b2304a5a6c2d9357fe4e1ac43f68ec817b685f8600115fa94f139eda778e"
+        },
+        "kernel": {
+          "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/Image-6.18.48-aarch64",
+          "sha256": "1b178851998d27b4c6c346ae391c26d675f81461fbaa19cbe514500291fe472d"
+        },
+        "linux_hex": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-scheduler-vm-cc7c2190/aarch64-unknown-linux-musl/release/hex",
+          "sha256": "e2670cf5cf0b4ac32fa30f55b7027b3f95a942205c51aafe26169f5a7b9a276d"
+        },
+        "runtime_probe": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-probe-runtime-pools-935f6b21/aarch64-apple-darwin/release/hex-scheduler-runtime-probe",
+          "sha256": "15fa9d2e8d892af44a05dd96e440e556f37de8dc68e315d1946ddda55e0acae9"
+        },
+        "shards": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-shards-vm-tool/release/shards",
+          "sha256": "b9d74f0910a54593b66f604ffe36e39d588c89afea60d4643e37813200daa61e"
+        }
+      },
+      "environment": {
+        "box_cpu_milli": 1000,
+        "box_memory_mib": 633,
+        "cpu_count": 32,
+        "free_disk_bytes_before": 3023564374016,
+        "guest_cpus": 4,
+        "guest_memory_mib": 632,
+        "guest_shares_sha256": "bc48812812a5d26459dab3046b3a8ad0be5b4d448633455df3748063f7764c56",
+        "machine": "arm64",
+        "os": "macOS-26.4-arm64-arm-64bit-Mach-O",
+        "path_sha256": "66f027960372b4109885e775bc4d3d0f2e91b060fcf607f0aa12af74fe110864"
+      },
+      "kind": "actual-scheduler-wait-census",
+      "n": 1,
+      "owned_guest_retired": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 5712,
+        "started": 12172524191843
+      },
+      "profile": "release",
+      "raw_report": "/Users/adalundhe/.cache/hx/e-itfft6_e/result.json",
+      "raw_report_sha256": "3a5763fa24d50d5d8632dec1ac5c7b13448f2e9da537554fa54d9d7ded16caef",
+      "receipts": {
+        "build": {
+          "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-cc7c2190/fixture/receipts/build-release-a98824f7.json",
+          "sha256": "685a7c3a140baacc608d2ddd59e47f81323db1124ee3049137328dc30a9e0ff9"
+        },
+        "deadline": {
+          "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-cc7c2190/fixture/receipts/method-boundary-release-a98824f7.json",
+          "sha256": "c3608988031ffd96ff610af17de95bbde5e34501ab27ab991b092d579379f5fa"
+        },
+        "policy": {
+          "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-cc7c2190/fixture/receipts/policy-f5cec365.json",
+          "sha256": "31696dc363c96c1a61243910a603a179d1ddfe989fa69b0c505b5e1adc7f5bc6"
+        }
+      },
+      "source": "/Users/adalundhe/.cache/hex-lead/snapshots/runtime-pools-a98824f7",
+      "source_revision": "a98824f7f99adeaa83f8324ab9af65aa80a369e5",
+      "status": "passed",
+      "success_controls": {
+        "advertise": 2,
+        "delete": 4,
+        "describe": 2,
+        "link_up": 1,
+        "retry": 4,
+        "status": 128,
+        "submit": 4
+      },
+      "verified_oversized_refusals": 2,
+      "verified_physical_created": 2,
+      "verified_physical_deleted": 2
+    },
+    {
+      "backend_baseline_restored": true,
+      "binary_and_artifact_hashes": {
+        "hex": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-scheduler-retry-a98824f7/aarch64-apple-darwin/release/hex",
+          "sha256": "ce9eb1a6c46f5b04565197b80ce1b1d50c8c82189bb4e6a1f15a2d5930b77935"
+        },
+        "initrd": {
+          "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/initramfs-cc7c2190-release-aarch64.cpio",
+          "sha256": "5521b2304a5a6c2d9357fe4e1ac43f68ec817b685f8600115fa94f139eda778e"
+        },
+        "kernel": {
+          "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/Image-6.18.48-aarch64",
+          "sha256": "1b178851998d27b4c6c346ae391c26d675f81461fbaa19cbe514500291fe472d"
+        },
+        "linux_hex": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-scheduler-vm-cc7c2190/aarch64-unknown-linux-musl/release/hex",
+          "sha256": "e2670cf5cf0b4ac32fa30f55b7027b3f95a942205c51aafe26169f5a7b9a276d"
+        },
+        "runtime_probe": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-probe-runtime-pools-935f6b21/aarch64-apple-darwin/release/hex-scheduler-runtime-probe",
+          "sha256": "15fa9d2e8d892af44a05dd96e440e556f37de8dc68e315d1946ddda55e0acae9"
+        },
+        "shards": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-shards-vm-tool/release/shards",
+          "sha256": "b9d74f0910a54593b66f604ffe36e39d588c89afea60d4643e37813200daa61e"
+        }
+      },
+      "environment": {
+        "box_cpu_milli": 1000,
+        "box_memory_mib": 633,
+        "cpu_count": 32,
+        "free_disk_bytes_before": 3023533027328,
+        "guest_cpus": 4,
+        "guest_memory_mib": 632,
+        "guest_shares_sha256": "67de4b26104cc461de69e7eff79f340759955c111b895089874ec1bf3fe88348",
+        "machine": "arm64",
+        "os": "macOS-26.4-arm64-arm-64bit-Mach-O",
+        "path_sha256": "66f027960372b4109885e775bc4d3d0f2e91b060fcf607f0aa12af74fe110864"
+      },
+      "kind": "actual-scheduler-wait-census",
+      "n": 1,
+      "owned_guest_retired": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 5935,
+        "started": 12172563550865
+      },
+      "profile": "release",
+      "raw_report": "/Users/adalundhe/.cache/hx/e-yqram8pu/result.json",
+      "raw_report_sha256": "f7a953354d7fa945226829d03b107f242965f1cc4e1ff25117e124895d8795ba",
+      "receipts": {
+        "build": {
+          "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-cc7c2190/fixture/receipts/build-release-a98824f7.json",
+          "sha256": "685a7c3a140baacc608d2ddd59e47f81323db1124ee3049137328dc30a9e0ff9"
+        },
+        "deadline": {
+          "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-cc7c2190/fixture/receipts/method-boundary-release-a98824f7.json",
+          "sha256": "c3608988031ffd96ff610af17de95bbde5e34501ab27ab991b092d579379f5fa"
+        },
+        "policy": {
+          "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-cc7c2190/fixture/receipts/policy-f5cec365.json",
+          "sha256": "31696dc363c96c1a61243910a603a179d1ddfe989fa69b0c505b5e1adc7f5bc6"
+        }
+      },
+      "source": "/Users/adalundhe/.cache/hex-lead/snapshots/runtime-pools-a98824f7",
+      "source_revision": "a98824f7f99adeaa83f8324ab9af65aa80a369e5",
+      "status": "passed",
+      "success_controls": {
+        "advertise": 2,
+        "delete": 4,
+        "describe": 2,
+        "link_up": 1,
+        "retry": 4,
+        "status": 167,
+        "submit": 4
+      },
+      "verified_oversized_refusals": 2,
+      "verified_physical_created": 2,
+      "verified_physical_deleted": 2
+    },
+    {
+      "backend_baseline_restored": true,
+      "binary_and_artifact_hashes": {
+        "hex": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-scheduler-retry-a98824f7/aarch64-apple-darwin/release/hex",
+          "sha256": "ce9eb1a6c46f5b04565197b80ce1b1d50c8c82189bb4e6a1f15a2d5930b77935"
+        },
+        "initrd": {
+          "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/initramfs-cc7c2190-release-aarch64.cpio",
+          "sha256": "5521b2304a5a6c2d9357fe4e1ac43f68ec817b685f8600115fa94f139eda778e"
+        },
+        "kernel": {
+          "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/Image-6.18.48-aarch64",
+          "sha256": "1b178851998d27b4c6c346ae391c26d675f81461fbaa19cbe514500291fe472d"
+        },
+        "linux_hex": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-scheduler-vm-cc7c2190/aarch64-unknown-linux-musl/release/hex",
+          "sha256": "e2670cf5cf0b4ac32fa30f55b7027b3f95a942205c51aafe26169f5a7b9a276d"
+        },
+        "runtime_probe": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-probe-runtime-pools-935f6b21/aarch64-apple-darwin/release/hex-scheduler-runtime-probe",
+          "sha256": "15fa9d2e8d892af44a05dd96e440e556f37de8dc68e315d1946ddda55e0acae9"
+        },
+        "shards": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-shards-vm-tool/release/shards",
+          "sha256": "b9d74f0910a54593b66f604ffe36e39d588c89afea60d4643e37813200daa61e"
+        }
+      },
+      "environment": {
+        "box_cpu_milli": 1000,
+        "box_memory_mib": 633,
+        "cpu_count": 32,
+        "free_disk_bytes_before": 3023501176832,
+        "guest_cpus": 4,
+        "guest_memory_mib": 632,
+        "guest_shares_sha256": "30f4bd18360ff0ae951ff40ce684d879ab3ff4a872042491d7412f748252851a",
+        "machine": "arm64",
+        "os": "macOS-26.4-arm64-arm-64bit-Mach-O",
+        "path_sha256": "66f027960372b4109885e775bc4d3d0f2e91b060fcf607f0aa12af74fe110864"
+      },
+      "kind": "actual-scheduler-wait-census",
+      "n": 1,
+      "owned_guest_retired": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 6269,
+        "started": 12172629788718
+      },
+      "profile": "release",
+      "raw_report": "/Users/adalundhe/.cache/hx/e-tqvy0tyi/result.json",
+      "raw_report_sha256": "7ddb67ea32edb89ddca4bdb2c262fca5003ec6cbd6dc565c5fe4bca8b76a2d6a",
+      "receipts": {
+        "build": {
+          "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-cc7c2190/fixture/receipts/build-release-a98824f7.json",
+          "sha256": "685a7c3a140baacc608d2ddd59e47f81323db1124ee3049137328dc30a9e0ff9"
+        },
+        "deadline": {
+          "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-cc7c2190/fixture/receipts/method-boundary-release-a98824f7.json",
+          "sha256": "c3608988031ffd96ff610af17de95bbde5e34501ab27ab991b092d579379f5fa"
+        },
+        "policy": {
+          "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-cc7c2190/fixture/receipts/policy-f5cec365.json",
+          "sha256": "31696dc363c96c1a61243910a603a179d1ddfe989fa69b0c505b5e1adc7f5bc6"
+        }
+      },
+      "source": "/Users/adalundhe/.cache/hex-lead/snapshots/runtime-pools-a98824f7",
+      "source_revision": "a98824f7f99adeaa83f8324ab9af65aa80a369e5",
+      "status": "passed",
+      "success_controls": {
+        "advertise": 2,
+        "delete": 4,
+        "describe": 2,
+        "link_up": 1,
+        "retry": 4,
+        "status": 149,
+        "submit": 4
+      },
+      "verified_oversized_refusals": 2,
+      "verified_physical_created": 2,
+      "verified_physical_deleted": 2
+    },
+    {
+      "backend_baseline_restored": true,
+      "binary_and_artifact_hashes": {
+        "hex": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-scheduler-retry-a98824f7/aarch64-apple-darwin/release/hex",
+          "sha256": "ce9eb1a6c46f5b04565197b80ce1b1d50c8c82189bb4e6a1f15a2d5930b77935"
+        },
+        "initrd": {
+          "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/initramfs-cc7c2190-release-aarch64.cpio",
+          "sha256": "5521b2304a5a6c2d9357fe4e1ac43f68ec817b685f8600115fa94f139eda778e"
+        },
+        "kernel": {
+          "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/Image-6.18.48-aarch64",
+          "sha256": "1b178851998d27b4c6c346ae391c26d675f81461fbaa19cbe514500291fe472d"
+        },
+        "linux_hex": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-scheduler-vm-cc7c2190/aarch64-unknown-linux-musl/release/hex",
+          "sha256": "e2670cf5cf0b4ac32fa30f55b7027b3f95a942205c51aafe26169f5a7b9a276d"
+        },
+        "runtime_probe": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-probe-runtime-pools-935f6b21/aarch64-apple-darwin/release/hex-scheduler-runtime-probe",
+          "sha256": "15fa9d2e8d892af44a05dd96e440e556f37de8dc68e315d1946ddda55e0acae9"
+        },
+        "shards": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-shards-vm-tool/release/shards",
+          "sha256": "b9d74f0910a54593b66f604ffe36e39d588c89afea60d4643e37813200daa61e"
+        }
+      },
+      "environment": {
+        "box_cpu_milli": 1000,
+        "box_memory_mib": 633,
+        "cpu_count": 32,
+        "free_disk_bytes_before": 3023469105152,
+        "guest_cpus": 4,
+        "guest_memory_mib": 632,
+        "guest_shares_sha256": "35ebe7083959f051b6636a2e481f9067861f6fb1e49c82a610b13cb9f37ccfa4",
+        "machine": "arm64",
+        "os": "macOS-26.4-arm64-arm-64bit-Mach-O",
+        "path_sha256": "66f027960372b4109885e775bc4d3d0f2e91b060fcf607f0aa12af74fe110864"
+      },
+      "kind": "actual-scheduler-wait-census",
+      "n": 1,
+      "owned_guest_retired": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 6544,
+        "started": 12172680746403
+      },
+      "profile": "release",
+      "raw_report": "/Users/adalundhe/.cache/hx/e-hpym8y4j/result.json",
+      "raw_report_sha256": "3f09320fb9674ea60c8842876bed68b156a9bea53cb390e2d5d73c157065104e",
+      "receipts": {
+        "build": {
+          "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-cc7c2190/fixture/receipts/build-release-a98824f7.json",
+          "sha256": "685a7c3a140baacc608d2ddd59e47f81323db1124ee3049137328dc30a9e0ff9"
+        },
+        "deadline": {
+          "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-cc7c2190/fixture/receipts/method-boundary-release-a98824f7.json",
+          "sha256": "c3608988031ffd96ff610af17de95bbde5e34501ab27ab991b092d579379f5fa"
+        },
+        "policy": {
+          "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-cc7c2190/fixture/receipts/policy-f5cec365.json",
+          "sha256": "31696dc363c96c1a61243910a603a179d1ddfe989fa69b0c505b5e1adc7f5bc6"
+        }
+      },
+      "source": "/Users/adalundhe/.cache/hex-lead/snapshots/runtime-pools-a98824f7",
+      "source_revision": "a98824f7f99adeaa83f8324ab9af65aa80a369e5",
+      "status": "passed",
+      "success_controls": {
+        "advertise": 2,
+        "delete": 4,
+        "describe": 2,
+        "link_up": 1,
+        "retry": 4,
+        "status": 127,
+        "submit": 4
+      },
+      "verified_oversized_refusals": 2,
+      "verified_physical_created": 2,
+      "verified_physical_deleted": 2
+    },
+    {
+      "backend_baseline_restored": true,
+      "binary_and_artifact_hashes": {
+        "hex": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-scheduler-retry-a98824f7/aarch64-apple-darwin/release/hex",
+          "sha256": "ce9eb1a6c46f5b04565197b80ce1b1d50c8c82189bb4e6a1f15a2d5930b77935"
+        },
+        "initrd": {
+          "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/initramfs-cc7c2190-release-aarch64.cpio",
+          "sha256": "5521b2304a5a6c2d9357fe4e1ac43f68ec817b685f8600115fa94f139eda778e"
+        },
+        "kernel": {
+          "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/Image-6.18.48-aarch64",
+          "sha256": "1b178851998d27b4c6c346ae391c26d675f81461fbaa19cbe514500291fe472d"
+        },
+        "linux_hex": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-scheduler-vm-cc7c2190/aarch64-unknown-linux-musl/release/hex",
+          "sha256": "e2670cf5cf0b4ac32fa30f55b7027b3f95a942205c51aafe26169f5a7b9a276d"
+        },
+        "runtime_probe": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-probe-runtime-pools-935f6b21/aarch64-apple-darwin/release/hex-scheduler-runtime-probe",
+          "sha256": "15fa9d2e8d892af44a05dd96e440e556f37de8dc68e315d1946ddda55e0acae9"
+        },
+        "shards": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-shards-vm-tool/release/shards",
+          "sha256": "b9d74f0910a54593b66f604ffe36e39d588c89afea60d4643e37813200daa61e"
+        }
+      },
+      "environment": {
+        "box_cpu_milli": 1000,
+        "box_memory_mib": 633,
+        "cpu_count": 32,
+        "free_disk_bytes_before": 3023436845056,
+        "guest_cpus": 4,
+        "guest_memory_mib": 632,
+        "guest_shares_sha256": "dd351b782ea24f9fb29290c2c0e2babafb9ed1773e8d7d20e6f3e7aa0c77f158",
+        "machine": "arm64",
+        "os": "macOS-26.4-arm64-arm-64bit-Mach-O",
+        "path_sha256": "66f027960372b4109885e775bc4d3d0f2e91b060fcf607f0aa12af74fe110864"
+      },
+      "kind": "actual-scheduler-wait-census",
+      "n": 1,
+      "owned_guest_retired": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 6771,
+        "started": 12172722146290
+      },
+      "profile": "release",
+      "raw_report": "/Users/adalundhe/.cache/hx/e-ct7vgf24/result.json",
+      "raw_report_sha256": "c321d22a472442a6fd01466ffbcf26b8fd2b9b1e366e2b87dfcffa346ff4fa40",
+      "receipts": {
+        "build": {
+          "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-cc7c2190/fixture/receipts/build-release-a98824f7.json",
+          "sha256": "685a7c3a140baacc608d2ddd59e47f81323db1124ee3049137328dc30a9e0ff9"
+        },
+        "deadline": {
+          "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-cc7c2190/fixture/receipts/method-boundary-release-a98824f7.json",
+          "sha256": "c3608988031ffd96ff610af17de95bbde5e34501ab27ab991b092d579379f5fa"
+        },
+        "policy": {
+          "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-cc7c2190/fixture/receipts/policy-f5cec365.json",
+          "sha256": "31696dc363c96c1a61243910a603a179d1ddfe989fa69b0c505b5e1adc7f5bc6"
+        }
+      },
+      "source": "/Users/adalundhe/.cache/hex-lead/snapshots/runtime-pools-a98824f7",
+      "source_revision": "a98824f7f99adeaa83f8324ab9af65aa80a369e5",
+      "status": "passed",
+      "success_controls": {
+        "advertise": 2,
+        "delete": 4,
+        "describe": 2,
+        "link_up": 1,
+        "retry": 4,
+        "status": 203,
+        "submit": 4
+      },
+      "verified_oversized_refusals": 2,
+      "verified_physical_created": 2,
+      "verified_physical_deleted": 2
+    },
+    {
+      "backend_baseline_restored": true,
+      "binary_and_artifact_hashes": {
+        "hex": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-cold-feedback-pace-trace/aarch64-apple-darwin/release/hex",
+          "sha256": "2ebf390bf5437ce6ada02a42eefc90dcb5d315969983de21eae097ebf9082a48"
+        },
+        "initrd": {
+          "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/initramfs-cc7c2190-release-aarch64.cpio",
+          "sha256": "5521b2304a5a6c2d9357fe4e1ac43f68ec817b685f8600115fa94f139eda778e"
+        },
+        "kernel": {
+          "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/Image-6.18.48-aarch64",
+          "sha256": "1b178851998d27b4c6c346ae391c26d675f81461fbaa19cbe514500291fe472d"
+        },
+        "linux_hex": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-scheduler-vm-cc7c2190/aarch64-unknown-linux-musl/release/hex",
+          "sha256": "e2670cf5cf0b4ac32fa30f55b7027b3f95a942205c51aafe26169f5a7b9a276d"
+        },
+        "runtime_probe": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-probe-runtime-pools-935f6b21/aarch64-apple-darwin/release/hex-scheduler-runtime-probe",
+          "sha256": "15fa9d2e8d892af44a05dd96e440e556f37de8dc68e315d1946ddda55e0acae9"
+        },
+        "shards": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-shards-vm-tool/release/shards",
+          "sha256": "b9d74f0910a54593b66f604ffe36e39d588c89afea60d4643e37813200daa61e"
+        }
+      },
+      "environment": {
+        "box_cpu_milli": 1000,
+        "box_memory_mib": 633,
+        "cpu_count": 32,
+        "free_disk_bytes_before": 3025433747456,
+        "guest_cpus": 4,
+        "guest_memory_mib": 632,
+        "guest_shares_sha256": "94ddbd31ad48a9ea41f9bad0b05789eb2d880817d5c4f3b95d2696fb2f186183",
+        "machine": "arm64",
+        "os": "macOS-26.4-arm64-arm-64bit-Mach-O",
+        "path_sha256": "66f027960372b4109885e775bc4d3d0f2e91b060fcf607f0aa12af74fe110864"
+      },
+      "kind": "actual-scheduler-status-pressure-diagnostic",
+      "n": 1,
+      "owned_guest_retired": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 98596,
+        "started": 12140327852287
+      },
+      "pacing_analysis": {
+        "actual_identity_rule": "missing queue/attempt IDs remain null; derived ordinals never replace actual identities",
+        "analysis_status": "parsed",
+        "counts": {
+          "busy_rows_without_actual_attempt_id": 6,
+          "busy_rows_without_actual_queue_id": 6,
+          "busy_rows_without_queue_enter_group": 0,
+          "inferred_groups_with_busy_samples": 3,
+          "inferred_queue_groups": 15,
+          "local_advertise_busy_rows": 6,
+          "malformed_items": 0,
+          "malformed_result_files": 0,
+          "malformed_rows": 0,
+          "missing_owner_logs": 0,
+          "missing_required_fields": 0,
+          "missing_result_fields": 0,
+          "missing_result_files": 0,
+          "owner_log_read_errors": 0,
+          "owner_logs": 2,
+          "owner_logs_without_local_advertise_busy": 1,
+          "owner_logs_without_trace_rows": 0,
+          "result_read_errors": 0,
+          "rows_missing_required_fields": 0,
+          "trace_rows": 79
+        },
+        "diagnostic_only": true,
+        "inferred_queues": [
+          {
+            "actual_queue_ids_seen": [],
+            "grouping": "inferred from explicit queue-enter in this log/context, not a unique queue ID",
+            "identity_limit": "same kind may recur/interleave; inferred ordinals and positional samples are not actual identities",
+            "inferred_queue_ordinal": 2,
+            "kind": "refresh",
+            "mixed_explicit_queue_ids": false,
+            "next_queue_enter_line": 25,
+            "node": 0,
+            "observations": {
+              "interpretation": "exact ordered observations only; neither a causal self-feedback proof nor an original-stall/fix verdict",
+              "ordered_samples": [
+                {
+                  "actual_call_ns": 1125,
+                  "derived_busy_sample_ordinal": 1,
+                  "line": 16,
+                  "outer_ns": 7178167,
+                  "requested_wait_ns": 7178167
+                }
+              ],
+              "outer_less_than_actual_call_samples": 0,
+              "pair_observations": [],
+              "requested_wait_equals_outer_samples": 1,
+              "sample_count": 1,
+              "sequences": {
+                "actual_call_ns": {
+                  "decreases": 0,
+                  "equal": 0,
+                  "non_decreasing": null,
+                  "strict_increases": 0,
+                  "values": [
+                    1125
+                  ]
+                },
+                "outer_ns": {
+                  "decreases": 0,
+                  "equal": 0,
+                  "non_decreasing": null,
+                  "strict_increases": 0,
+                  "values": [
+                    7178167
+                  ]
+                },
+                "requested_wait_ns": {
+                  "decreases": 0,
+                  "equal": 0,
+                  "non_decreasing": null,
+                  "strict_increases": 0,
+                  "values": [
+                    7178167
+                  ]
+                }
+              },
+              "wait_growth_with_non_growing_call_pairs": 0
+            },
+            "owner_log": "/Users/adalundhe/.cache/hx/e-qhgp8suy/o.log",
+            "peer": 1,
+            "queue_enter_line": 11,
+            "trace_lines": [
+              11,
+              12,
+              13,
+              14,
+              15,
+              16
+            ]
+          },
+          {
+            "actual_queue_ids_seen": [],
+            "grouping": "inferred from explicit queue-enter in this log/context, not a unique queue ID",
+            "identity_limit": "same kind may recur/interleave; inferred ordinals and positional samples are not actual identities",
+            "inferred_queue_ordinal": 3,
+            "kind": "refresh",
+            "mixed_explicit_queue_ids": false,
+            "next_queue_enter_line": 48,
+            "node": 0,
+            "observations": {
+              "interpretation": "exact ordered observations only; neither a causal self-feedback proof nor an original-stall/fix verdict",
+              "ordered_samples": [
+                {
+                  "actual_call_ns": 2583,
+                  "derived_busy_sample_ordinal": 1,
+                  "line": 30,
+                  "outer_ns": 4802584,
+                  "requested_wait_ns": 4802584
+                },
+                {
+                  "actual_call_ns": 2167,
+                  "derived_busy_sample_ordinal": 2,
+                  "line": 31,
+                  "outer_ns": 16732875,
+                  "requested_wait_ns": 16732875
+                },
+                {
+                  "actual_call_ns": 4667,
+                  "derived_busy_sample_ordinal": 3,
+                  "line": 32,
+                  "outer_ns": 62724209,
+                  "requested_wait_ns": 62724209
+                }
+              ],
+              "outer_less_than_actual_call_samples": 0,
+              "pair_observations": [
+                {
+                  "actual_call_non_increasing": true,
+                  "current_actual_call_ns": 2167,
+                  "current_line": 31,
+                  "current_outer_ns": 16732875,
+                  "current_requested_wait_ns": 16732875,
+                  "outer_ge_previous_wait_plus_current_call": true,
+                  "previous_actual_call_ns": 2583,
+                  "previous_line": 30,
+                  "previous_requested_wait_ns": 4802584,
+                  "requested_wait_delta_ns": 11930291,
+                  "wait_increased_while_actual_call_did_not": true,
+                  "wait_non_decreasing": true,
+                  "wait_strictly_increased": true
+                },
+                {
+                  "actual_call_non_increasing": false,
+                  "current_actual_call_ns": 4667,
+                  "current_line": 32,
+                  "current_outer_ns": 62724209,
+                  "current_requested_wait_ns": 62724209,
+                  "outer_ge_previous_wait_plus_current_call": true,
+                  "previous_actual_call_ns": 2167,
+                  "previous_line": 31,
+                  "previous_requested_wait_ns": 16732875,
+                  "requested_wait_delta_ns": 45991334,
+                  "wait_increased_while_actual_call_did_not": false,
+                  "wait_non_decreasing": true,
+                  "wait_strictly_increased": true
+                }
+              ],
+              "requested_wait_equals_outer_samples": 3,
+              "sample_count": 3,
+              "sequences": {
+                "actual_call_ns": {
+                  "decreases": 1,
+                  "equal": 0,
+                  "non_decreasing": false,
+                  "strict_increases": 1,
+                  "values": [
+                    2583,
+                    2167,
+                    4667
+                  ]
+                },
+                "outer_ns": {
+                  "decreases": 0,
+                  "equal": 0,
+                  "non_decreasing": true,
+                  "strict_increases": 2,
+                  "values": [
+                    4802584,
+                    16732875,
+                    62724209
+                  ]
+                },
+                "requested_wait_ns": {
+                  "decreases": 0,
+                  "equal": 0,
+                  "non_decreasing": true,
+                  "strict_increases": 2,
+                  "values": [
+                    4802584,
+                    16732875,
+                    62724209
+                  ]
+                }
+              },
+              "wait_growth_with_non_growing_call_pairs": 1
+            },
+            "owner_log": "/Users/adalundhe/.cache/hx/e-qhgp8suy/o.log",
+            "peer": 1,
+            "queue_enter_line": 25,
+            "trace_lines": [
+              25,
+              26,
+              27,
+              28,
+              29,
+              30,
+              31,
+              32
+            ]
+          },
+          {
+            "actual_queue_ids_seen": [],
+            "grouping": "inferred from explicit queue-enter in this log/context, not a unique queue ID",
+            "identity_limit": "same kind may recur/interleave; inferred ordinals and positional samples are not actual identities",
+            "inferred_queue_ordinal": 4,
+            "kind": "refresh",
+            "mixed_explicit_queue_ids": false,
+            "next_queue_enter_line": null,
+            "node": 0,
+            "observations": {
+              "interpretation": "exact ordered observations only; neither a causal self-feedback proof nor an original-stall/fix verdict",
+              "ordered_samples": [
+                {
+                  "actual_call_ns": 1292,
+                  "derived_busy_sample_ordinal": 1,
+                  "line": 53,
+                  "outer_ns": 7112833,
+                  "requested_wait_ns": 7112833
+                },
+                {
+                  "actual_call_ns": 3959,
+                  "derived_busy_sample_ordinal": 2,
+                  "line": 54,
+                  "outer_ns": 18285583,
+                  "requested_wait_ns": 18285583
+                }
+              ],
+              "outer_less_than_actual_call_samples": 0,
+              "pair_observations": [
+                {
+                  "actual_call_non_increasing": false,
+                  "current_actual_call_ns": 3959,
+                  "current_line": 54,
+                  "current_outer_ns": 18285583,
+                  "current_requested_wait_ns": 18285583,
+                  "outer_ge_previous_wait_plus_current_call": true,
+                  "previous_actual_call_ns": 1292,
+                  "previous_line": 53,
+                  "previous_requested_wait_ns": 7112833,
+                  "requested_wait_delta_ns": 11172750,
+                  "wait_increased_while_actual_call_did_not": false,
+                  "wait_non_decreasing": true,
+                  "wait_strictly_increased": true
+                }
+              ],
+              "requested_wait_equals_outer_samples": 2,
+              "sample_count": 2,
+              "sequences": {
+                "actual_call_ns": {
+                  "decreases": 0,
+                  "equal": 0,
+                  "non_decreasing": true,
+                  "strict_increases": 1,
+                  "values": [
+                    1292,
+                    3959
+                  ]
+                },
+                "outer_ns": {
+                  "decreases": 0,
+                  "equal": 0,
+                  "non_decreasing": true,
+                  "strict_increases": 1,
+                  "values": [
+                    7112833,
+                    18285583
+                  ]
+                },
+                "requested_wait_ns": {
+                  "decreases": 0,
+                  "equal": 0,
+                  "non_decreasing": true,
+                  "strict_increases": 1,
+                  "values": [
+                    7112833,
+                    18285583
+                  ]
+                }
+              },
+              "wait_growth_with_non_growing_call_pairs": 0
+            },
+            "owner_log": "/Users/adalundhe/.cache/hx/e-qhgp8suy/o.log",
+            "peer": 1,
+            "queue_enter_line": 48,
+            "trace_lines": [
+              48,
+              49,
+              50,
+              51,
+              52,
+              53,
+              54
+            ]
+          }
+        ],
+        "interpretation_limits": [
+          "No arbitrary ratio, duration or sample-count threshold is imposed.",
+          "outer_ns includes legitimate remote Describe/other outer work; outer vs local alone does not establish feedback.",
+          "Monotonic waits and exact carryover inequalities are observations, not causal/fix claims.",
+          "Stage logs may interleave; inferred contexts are not globally unique queues.",
+          "Each log is read only through its size at open, not followed or merged by fabricated timestamps."
+        ],
+        "kind": "hex-ack-pacing-trace-observations",
+        "original_stall_fixed": null,
+        "original_stall_status": "not determined by this analyzer",
+        "owner_logs": [
+          {
+            "captured_prefix_bytes": 3801,
+            "file_size_after_read": 3801,
+            "grew_after_snapshot": false,
+            "missing": false,
+            "non_trace_lines": 2,
+            "path": "/Users/adalundhe/.cache/hx/e-qhgp8suy/o.log",
+            "read_bytes": 3801,
+            "sha256_of_captured_prefix": "7b2ce02f1345cf3ee32b980de402a85161eb2f2f2817a4c42a6483fcc7a328d5"
+          },
+          {
+            "captured_prefix_bytes": 1663,
+            "file_size_after_read": 1663,
+            "grew_after_snapshot": false,
+            "missing": false,
+            "non_trace_lines": 0,
+            "path": "/Users/adalundhe/.cache/hx/e-qhgp8suy/r.log",
+            "read_bytes": 1663,
+            "sha256_of_captured_prefix": "bb6305651487ef5e12fd7fc979a757d0e4bfb2552c0362a5df648b6d919782cd"
+          }
+        ],
+        "queue_grouping_authority": "explicit queue-enter only, scoped to file/node/peer/kind; ordinal is inferred",
+        "result": {
+          "bytes": 372248,
+          "malformed": false,
+          "missing": false,
+          "missing_fields": [],
+          "path": "/Users/adalundhe/.cache/hx/e-qhgp8suy/result.json",
+          "sha256": "fa45de76bb82cb32723ac54f4161aa58ac1b0e4072a80e972ef656d343741927",
+          "summary": {
+            "backend_baseline_restored": true,
+            "kind": "actual-scheduler-status-pressure-diagnostic",
+            "owned_guest_retired": {
+              "end": "Stopped",
+              "guest_stopped": true,
+              "pid": 98596,
+              "started": 12140327852287
+            },
+            "profile": "release",
+            "source_revision": "cc7c2190+DEBUG-hex-ack-pace",
+            "status": "passed",
+            "verified_physical_created": 2,
+            "verified_physical_deleted": 2
+          }
+        },
+        "seed_generation": "not performed; diagnostic only",
+        "trace_evidence": "local Advertise Busy rows present",
+        "unit": "nanoseconds"
+      },
+      "profile": "release",
+      "raw_report": "/Users/adalundhe/.cache/hx/e-qhgp8suy/result.json",
+      "raw_report_sha256": "fa45de76bb82cb32723ac54f4161aa58ac1b0e4072a80e972ef656d343741927",
+      "receipts": {
+        "build": {
+          "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-cc7c2190/fixture/receipts/build-debug-ack-pace.json",
+          "sha256": "7988c4ce944005d48e2c3d10a09378566f3c493f7f6cc27cb27e9fb418839f5f"
+        },
+        "deadline": {
+          "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-cc7c2190/fixture/receipts/method-status-pressure-release.json",
+          "sha256": "5fd71ef2009848d613dc1833196698d63f79b10df736aa4cd17df496ba534b59"
+        },
+        "policy": {
+          "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-cc7c2190/fixture/receipts/policy-f5cec365.json",
+          "sha256": "31696dc363c96c1a61243910a603a179d1ddfe989fa69b0c505b5e1adc7f5bc6"
+        }
+      },
+      "source": "/Users/adalundhe/.cache/hex-lead/snapshots/cold-feedback-pace-trace-cc7c2190",
+      "source_revision": "cc7c2190+DEBUG-hex-ack-pace",
+      "status": "passed",
+      "status_pressure": {
+        "operator_declared_diagnostic_concurrency": true,
+        "scopes": [
+          {
+            "all_readers_joined": true,
+            "all_status_children_reaped": true,
+            "cleanup_budget_seconds": 120.0,
+            "errors": [],
+            "key": {
+              "epoch": 1,
+              "owner": 0,
+              "seq": 0
+            },
+            "launched": 10,
+            "operation_deadline_seconds": 120.0,
+            "phase": "local",
+            "readers": [
+              {
+                "cancelled": 1,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 1
+              },
+              {
+                "cancelled": 0,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 2
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 0,
+                "started": 3,
+                "valid": 2
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 1
+              }
+            ],
+            "reaped": 10,
+            "scope": 1,
+            "socket": "/Users/adalundhe/.cache/hx/e-qhgp8suy/l.sock",
+            "status_readers": 4
+          },
+          {
+            "all_readers_joined": true,
+            "all_status_children_reaped": true,
+            "cleanup_budget_seconds": 120.0,
+            "errors": [],
+            "key": {
+              "epoch": 1,
+              "owner": 0,
+              "seq": 1
+            },
+            "launched": 9,
+            "operation_deadline_seconds": 120.0,
+            "phase": "local",
+            "readers": [
+              {
+                "cancelled": 1,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 1
+              },
+              {
+                "cancelled": 0,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 2
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 1
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 1
+              }
+            ],
+            "reaped": 9,
+            "scope": 2,
+            "socket": "/Users/adalundhe/.cache/hx/e-qhgp8suy/l.sock",
+            "status_readers": 4
+          },
+          {
+            "all_readers_joined": true,
+            "all_status_children_reaped": true,
+            "cleanup_budget_seconds": 120.0,
+            "errors": [],
+            "key": {
+              "epoch": 1,
+              "owner": 0,
+              "seq": 1
+            },
+            "launched": 7,
+            "operation_deadline_seconds": 120.0,
+            "phase": "local",
+            "readers": [
+              {
+                "cancelled": 1,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 1
+              },
+              {
+                "cancelled": 0,
+                "publication_busy": 0,
+                "started": 1,
+                "valid": 1
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 1
+              },
+              {
+                "cancelled": 0,
+                "publication_busy": 0,
+                "started": 1,
+                "valid": 1
+              }
+            ],
+            "reaped": 7,
+            "scope": 3,
+            "socket": "/Users/adalundhe/.cache/hx/e-qhgp8suy/l.sock",
+            "status_readers": 4
+          },
+          {
+            "all_readers_joined": true,
+            "all_status_children_reaped": true,
+            "cleanup_budget_seconds": 120.0,
+            "errors": [],
+            "key": {
+              "epoch": 1,
+              "owner": 0,
+              "seq": 1
+            },
+            "launched": 8,
+            "operation_deadline_seconds": 120.0,
+            "phase": "local",
+            "readers": [
+              {
+                "cancelled": 0,
+                "publication_busy": 0,
+                "started": 1,
+                "valid": 1
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 1
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 1
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 1
+              }
+            ],
+            "reaped": 8,
+            "scope": 4,
+            "socket": "/Users/adalundhe/.cache/hx/e-qhgp8suy/l.sock",
+            "status_readers": 4
+          },
+          {
+            "all_readers_joined": true,
+            "all_status_children_reaped": true,
+            "cleanup_budget_seconds": 120.0,
+            "errors": [],
+            "key": {
+              "epoch": 1,
+              "owner": 0,
+              "seq": 0
+            },
+            "launched": 9,
+            "operation_deadline_seconds": 120.0,
+            "phase": "remote",
+            "readers": [
+              {
+                "cancelled": 1,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 1
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 1
+              },
+              {
+                "cancelled": 0,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 2
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 1
+              }
+            ],
+            "reaped": 9,
+            "scope": 5,
+            "socket": "/Users/adalundhe/.cache/hx/e-qhgp8suy/o.sock",
+            "status_readers": 4
+          },
+          {
+            "all_readers_joined": true,
+            "all_status_children_reaped": true,
+            "cleanup_budget_seconds": 120.0,
+            "errors": [],
+            "key": {
+              "epoch": 1,
+              "owner": 0,
+              "seq": 1
+            },
+            "launched": 133,
+            "operation_deadline_seconds": 120.0,
+            "phase": "remote",
+            "readers": [
+              {
+                "cancelled": 0,
+                "publication_busy": 1,
+                "started": 27,
+                "valid": 26
+              },
+              {
+                "cancelled": 0,
+                "publication_busy": 2,
+                "started": 26,
+                "valid": 24
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 1,
+                "started": 24,
+                "valid": 22
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 1,
+                "started": 29,
+                "valid": 27
+              }
+            ],
+            "reaped": 133,
+            "scope": 6,
+            "socket": "/Users/adalundhe/.cache/hx/e-qhgp8suy/o.sock",
+            "status_readers": 4
+          },
+          {
+            "all_readers_joined": true,
+            "all_status_children_reaped": true,
+            "cleanup_budget_seconds": 120.0,
+            "errors": [],
+            "key": {
+              "epoch": 1,
+              "owner": 0,
+              "seq": 1
+            },
+            "launched": 9,
+            "operation_deadline_seconds": 120.0,
+            "phase": "remote",
+            "readers": [
+              {
+                "cancelled": 0,
+                "publication_busy": 1,
+                "started": 2,
+                "valid": 1
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 1
+              },
+              {
+                "cancelled": 0,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 2
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 1
+              }
+            ],
+            "reaped": 9,
+            "scope": 7,
+            "socket": "/Users/adalundhe/.cache/hx/e-qhgp8suy/o.sock",
+            "status_readers": 4
+          },
+          {
+            "all_readers_joined": true,
+            "all_status_children_reaped": true,
+            "cleanup_budget_seconds": 120.0,
+            "errors": [],
+            "key": {
+              "epoch": 1,
+              "owner": 0,
+              "seq": 1
+            },
+            "launched": 113,
+            "operation_deadline_seconds": 120.0,
+            "phase": "remote",
+            "readers": [
+              {
+                "cancelled": 0,
+                "publication_busy": 3,
+                "started": 23,
+                "valid": 20
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 3,
+                "started": 25,
+                "valid": 21
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 4,
+                "started": 22,
+                "valid": 17
+              },
+              {
+                "cancelled": 0,
+                "publication_busy": 3,
+                "started": 22,
+                "valid": 19
+              }
+            ],
+            "reaped": 113,
+            "scope": 8,
+            "socket": "/Users/adalundhe/.cache/hx/e-qhgp8suy/o.sock",
+            "status_readers": 4
+          }
+        ],
+        "status_readers": 4
+      },
+      "success_controls": {
+        "advertise": 2,
+        "delete": 4,
+        "describe": 2,
+        "link_up": 1,
+        "retry": 4,
+        "status": 257,
+        "submit": 4
+      },
+      "verified_oversized_refusals": 2,
+      "verified_physical_created": 2,
+      "verified_physical_deleted": 2
+    },
+    {
+      "backend_baseline_restored": true,
+      "binary_and_artifact_hashes": {
+        "hex": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-cold-feedback-pace-fixed/aarch64-apple-darwin/release/hex",
+          "sha256": "7da47663b376612abd92921c40eea7bc6f3e6c1bd191805b4c5a0ed5bd53f020"
+        },
+        "initrd": {
+          "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/initramfs-cc7c2190-release-aarch64.cpio",
+          "sha256": "5521b2304a5a6c2d9357fe4e1ac43f68ec817b685f8600115fa94f139eda778e"
+        },
+        "kernel": {
+          "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/Image-6.18.48-aarch64",
+          "sha256": "1b178851998d27b4c6c346ae391c26d675f81461fbaa19cbe514500291fe472d"
+        },
+        "linux_hex": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-scheduler-vm-cc7c2190/aarch64-unknown-linux-musl/release/hex",
+          "sha256": "e2670cf5cf0b4ac32fa30f55b7027b3f95a942205c51aafe26169f5a7b9a276d"
+        },
+        "runtime_probe": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-probe-runtime-pools-935f6b21/aarch64-apple-darwin/release/hex-scheduler-runtime-probe",
+          "sha256": "15fa9d2e8d892af44a05dd96e440e556f37de8dc68e315d1946ddda55e0acae9"
+        },
+        "shards": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-shards-vm-tool/release/shards",
+          "sha256": "b9d74f0910a54593b66f604ffe36e39d588c89afea60d4643e37813200daa61e"
+        }
+      },
+      "environment": {
+        "box_cpu_milli": 1000,
+        "box_memory_mib": 633,
+        "cpu_count": 32,
+        "free_disk_bytes_before": 3023072620544,
+        "guest_cpus": 4,
+        "guest_memory_mib": 632,
+        "guest_shares_sha256": "b74db8e232f1c6366cc7b2c146382b5248e7c4bf030f08f844a5b5a260c472aa",
+        "machine": "arm64",
+        "os": "macOS-26.4-arm64-arm-64bit",
+        "path_sha256": "fc1eebdda3ae92cef120aebbddd33817c1f3239b1adb5984d94910cfb38b3bd7"
+      },
+      "kind": "actual-scheduler-status-pressure-diagnostic",
+      "n": 1,
+      "owned_guest_retired": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 8146,
+        "started": 12180467610293
+      },
+      "pacing_analysis": {
+        "actual_identity_rule": "missing queue/attempt IDs remain null; derived ordinals never replace actual identities",
+        "analysis_status": "parsed",
+        "counts": {
+          "busy_rows_without_actual_attempt_id": 15,
+          "busy_rows_without_actual_queue_id": 15,
+          "busy_rows_without_queue_enter_group": 0,
+          "inferred_groups_with_busy_samples": 4,
+          "inferred_queue_groups": 101,
+          "local_advertise_busy_rows": 15,
+          "malformed_items": 0,
+          "malformed_result_files": 0,
+          "malformed_rows": 0,
+          "missing_owner_logs": 0,
+          "missing_required_fields": 0,
+          "missing_result_fields": 0,
+          "missing_result_files": 0,
+          "owner_log_read_errors": 0,
+          "owner_logs": 2,
+          "owner_logs_without_local_advertise_busy": 0,
+          "owner_logs_without_trace_rows": 0,
+          "result_read_errors": 0,
+          "rows_missing_required_fields": 0,
+          "trace_rows": 459
+        },
+        "diagnostic_only": true,
+        "inferred_queues": [
+          {
+            "actual_queue_ids_seen": [],
+            "grouping": "inferred from explicit queue-enter in this log/context, not a unique queue ID",
+            "identity_limit": "same kind may recur/interleave; inferred ordinals and positional samples are not actual identities",
+            "inferred_queue_ordinal": 30,
+            "kind": "refresh",
+            "mixed_explicit_queue_ids": false,
+            "next_queue_enter_line": 302,
+            "node": 0,
+            "observations": {
+              "interpretation": "exact ordered observations only; neither a causal self-feedback proof nor an original-stall/fix verdict",
+              "ordered_samples": [
+                {
+                  "actual_call_ns": 708,
+                  "derived_busy_sample_ordinal": 1,
+                  "line": 273,
+                  "outer_ns": 6697375,
+                  "requested_wait_ns": 6697375
+                },
+                {
+                  "actual_call_ns": 1291,
+                  "derived_busy_sample_ordinal": 2,
+                  "line": 274,
+                  "outer_ns": 1875,
+                  "requested_wait_ns": 6697375
+                },
+                {
+                  "actual_call_ns": 1417,
+                  "derived_busy_sample_ordinal": 3,
+                  "line": 275,
+                  "outer_ns": 1834,
+                  "requested_wait_ns": 6697375
+                },
+                {
+                  "actual_call_ns": 1458,
+                  "derived_busy_sample_ordinal": 4,
+                  "line": 276,
+                  "outer_ns": 1792,
+                  "requested_wait_ns": 6697375
+                },
+                {
+                  "actual_call_ns": 1167,
+                  "derived_busy_sample_ordinal": 5,
+                  "line": 277,
+                  "outer_ns": 1375,
+                  "requested_wait_ns": 6697375
+                },
+                {
+                  "actual_call_ns": 1083,
+                  "derived_busy_sample_ordinal": 6,
+                  "line": 278,
+                  "outer_ns": 1458,
+                  "requested_wait_ns": 6697375
+                },
+                {
+                  "actual_call_ns": 1291,
+                  "derived_busy_sample_ordinal": 7,
+                  "line": 279,
+                  "outer_ns": 1625,
+                  "requested_wait_ns": 6697375
+                },
+                {
+                  "actual_call_ns": 791,
+                  "derived_busy_sample_ordinal": 8,
+                  "line": 280,
+                  "outer_ns": 1125,
+                  "requested_wait_ns": 6697375
+                },
+                {
+                  "actual_call_ns": 1166,
+                  "derived_busy_sample_ordinal": 9,
+                  "line": 281,
+                  "outer_ns": 1542,
+                  "requested_wait_ns": 6697375
+                }
+              ],
+              "outer_less_than_actual_call_samples": 0,
+              "pair_observations": [
+                {
+                  "actual_call_non_increasing": false,
+                  "current_actual_call_ns": 1291,
+                  "current_line": 274,
+                  "current_outer_ns": 1875,
+                  "current_requested_wait_ns": 6697375,
+                  "outer_ge_previous_wait_plus_current_call": false,
+                  "previous_actual_call_ns": 708,
+                  "previous_line": 273,
+                  "previous_requested_wait_ns": 6697375,
+                  "requested_wait_delta_ns": 0,
+                  "wait_increased_while_actual_call_did_not": false,
+                  "wait_non_decreasing": true,
+                  "wait_strictly_increased": false
+                },
+                {
+                  "actual_call_non_increasing": false,
+                  "current_actual_call_ns": 1417,
+                  "current_line": 275,
+                  "current_outer_ns": 1834,
+                  "current_requested_wait_ns": 6697375,
+                  "outer_ge_previous_wait_plus_current_call": false,
+                  "previous_actual_call_ns": 1291,
+                  "previous_line": 274,
+                  "previous_requested_wait_ns": 6697375,
+                  "requested_wait_delta_ns": 0,
+                  "wait_increased_while_actual_call_did_not": false,
+                  "wait_non_decreasing": true,
+                  "wait_strictly_increased": false
+                },
+                {
+                  "actual_call_non_increasing": false,
+                  "current_actual_call_ns": 1458,
+                  "current_line": 276,
+                  "current_outer_ns": 1792,
+                  "current_requested_wait_ns": 6697375,
+                  "outer_ge_previous_wait_plus_current_call": false,
+                  "previous_actual_call_ns": 1417,
+                  "previous_line": 275,
+                  "previous_requested_wait_ns": 6697375,
+                  "requested_wait_delta_ns": 0,
+                  "wait_increased_while_actual_call_did_not": false,
+                  "wait_non_decreasing": true,
+                  "wait_strictly_increased": false
+                },
+                {
+                  "actual_call_non_increasing": true,
+                  "current_actual_call_ns": 1167,
+                  "current_line": 277,
+                  "current_outer_ns": 1375,
+                  "current_requested_wait_ns": 6697375,
+                  "outer_ge_previous_wait_plus_current_call": false,
+                  "previous_actual_call_ns": 1458,
+                  "previous_line": 276,
+                  "previous_requested_wait_ns": 6697375,
+                  "requested_wait_delta_ns": 0,
+                  "wait_increased_while_actual_call_did_not": false,
+                  "wait_non_decreasing": true,
+                  "wait_strictly_increased": false
+                },
+                {
+                  "actual_call_non_increasing": true,
+                  "current_actual_call_ns": 1083,
+                  "current_line": 278,
+                  "current_outer_ns": 1458,
+                  "current_requested_wait_ns": 6697375,
+                  "outer_ge_previous_wait_plus_current_call": false,
+                  "previous_actual_call_ns": 1167,
+                  "previous_line": 277,
+                  "previous_requested_wait_ns": 6697375,
+                  "requested_wait_delta_ns": 0,
+                  "wait_increased_while_actual_call_did_not": false,
+                  "wait_non_decreasing": true,
+                  "wait_strictly_increased": false
+                },
+                {
+                  "actual_call_non_increasing": false,
+                  "current_actual_call_ns": 1291,
+                  "current_line": 279,
+                  "current_outer_ns": 1625,
+                  "current_requested_wait_ns": 6697375,
+                  "outer_ge_previous_wait_plus_current_call": false,
+                  "previous_actual_call_ns": 1083,
+                  "previous_line": 278,
+                  "previous_requested_wait_ns": 6697375,
+                  "requested_wait_delta_ns": 0,
+                  "wait_increased_while_actual_call_did_not": false,
+                  "wait_non_decreasing": true,
+                  "wait_strictly_increased": false
+                },
+                {
+                  "actual_call_non_increasing": true,
+                  "current_actual_call_ns": 791,
+                  "current_line": 280,
+                  "current_outer_ns": 1125,
+                  "current_requested_wait_ns": 6697375,
+                  "outer_ge_previous_wait_plus_current_call": false,
+                  "previous_actual_call_ns": 1291,
+                  "previous_line": 279,
+                  "previous_requested_wait_ns": 6697375,
+                  "requested_wait_delta_ns": 0,
+                  "wait_increased_while_actual_call_did_not": false,
+                  "wait_non_decreasing": true,
+                  "wait_strictly_increased": false
+                },
+                {
+                  "actual_call_non_increasing": false,
+                  "current_actual_call_ns": 1166,
+                  "current_line": 281,
+                  "current_outer_ns": 1542,
+                  "current_requested_wait_ns": 6697375,
+                  "outer_ge_previous_wait_plus_current_call": false,
+                  "previous_actual_call_ns": 791,
+                  "previous_line": 280,
+                  "previous_requested_wait_ns": 6697375,
+                  "requested_wait_delta_ns": 0,
+                  "wait_increased_while_actual_call_did_not": false,
+                  "wait_non_decreasing": true,
+                  "wait_strictly_increased": false
+                }
+              ],
+              "requested_wait_equals_outer_samples": 1,
+              "sample_count": 9,
+              "sequences": {
+                "actual_call_ns": {
+                  "decreases": 3,
+                  "equal": 0,
+                  "non_decreasing": false,
+                  "strict_increases": 5,
+                  "values": [
+                    708,
+                    1291,
+                    1417,
+                    1458,
+                    1167,
+                    1083,
+                    1291,
+                    791,
+                    1166
+                  ]
+                },
+                "outer_ns": {
+                  "decreases": 5,
+                  "equal": 0,
+                  "non_decreasing": false,
+                  "strict_increases": 3,
+                  "values": [
+                    6697375,
+                    1875,
+                    1834,
+                    1792,
+                    1375,
+                    1458,
+                    1625,
+                    1125,
+                    1542
+                  ]
+                },
+                "requested_wait_ns": {
+                  "decreases": 0,
+                  "equal": 8,
+                  "non_decreasing": true,
+                  "strict_increases": 0,
+                  "values": [
+                    6697375,
+                    6697375,
+                    6697375,
+                    6697375,
+                    6697375,
+                    6697375,
+                    6697375,
+                    6697375,
+                    6697375
+                  ]
+                }
+              },
+              "wait_growth_with_non_growing_call_pairs": 0
+            },
+            "owner_log": "/Users/adalundhe/.cache/hx/e-9y4eu3tx/o.log",
+            "peer": 1,
+            "queue_enter_line": 268,
+            "trace_lines": [
+              268,
+              269,
+              270,
+              271,
+              272,
+              273,
+              274,
+              275,
+              276,
+              277,
+              278,
+              279,
+              280,
+              281
+            ]
+          },
+          {
+            "actual_queue_ids_seen": [],
+            "grouping": "inferred from explicit queue-enter in this log/context, not a unique queue ID",
+            "identity_limit": "same kind may recur/interleave; inferred ordinals and positional samples are not actual identities",
+            "inferred_queue_ordinal": 30,
+            "kind": "control",
+            "mixed_explicit_queue_ids": false,
+            "next_queue_enter_line": 314,
+            "node": 0,
+            "observations": {
+              "interpretation": "exact ordered observations only; neither a causal self-feedback proof nor an original-stall/fix verdict",
+              "ordered_samples": [
+                {
+                  "actual_call_ns": 500,
+                  "derived_busy_sample_ordinal": 1,
+                  "line": 292,
+                  "outer_ns": 202175375,
+                  "requested_wait_ns": 202175375
+                }
+              ],
+              "outer_less_than_actual_call_samples": 0,
+              "pair_observations": [],
+              "requested_wait_equals_outer_samples": 1,
+              "sample_count": 1,
+              "sequences": {
+                "actual_call_ns": {
+                  "decreases": 0,
+                  "equal": 0,
+                  "non_decreasing": null,
+                  "strict_increases": 0,
+                  "values": [
+                    500
+                  ]
+                },
+                "outer_ns": {
+                  "decreases": 0,
+                  "equal": 0,
+                  "non_decreasing": null,
+                  "strict_increases": 0,
+                  "values": [
+                    202175375
+                  ]
+                },
+                "requested_wait_ns": {
+                  "decreases": 0,
+                  "equal": 0,
+                  "non_decreasing": null,
+                  "strict_increases": 0,
+                  "values": [
+                    202175375
+                  ]
+                }
+              },
+              "wait_growth_with_non_growing_call_pairs": 0
+            },
+            "owner_log": "/Users/adalundhe/.cache/hx/e-9y4eu3tx/o.log",
+            "peer": 1,
+            "queue_enter_line": 282,
+            "trace_lines": [
+              282,
+              283,
+              284,
+              286,
+              287,
+              288,
+              289,
+              290,
+              291,
+              292,
+              293
+            ]
+          },
+          {
+            "actual_queue_ids_seen": [],
+            "grouping": "inferred from explicit queue-enter in this log/context, not a unique queue ID",
+            "identity_limit": "same kind may recur/interleave; inferred ordinals and positional samples are not actual identities",
+            "inferred_queue_ordinal": 31,
+            "kind": "refresh",
+            "mixed_explicit_queue_ids": false,
+            "next_queue_enter_line": null,
+            "node": 0,
+            "observations": {
+              "interpretation": "exact ordered observations only; neither a causal self-feedback proof nor an original-stall/fix verdict",
+              "ordered_samples": [
+                {
+                  "actual_call_ns": 1125,
+                  "derived_busy_sample_ordinal": 1,
+                  "line": 307,
+                  "outer_ns": 4702292,
+                  "requested_wait_ns": 4702292
+                },
+                {
+                  "actual_call_ns": 1166,
+                  "derived_busy_sample_ordinal": 2,
+                  "line": 308,
+                  "outer_ns": 1583,
+                  "requested_wait_ns": 4702292
+                },
+                {
+                  "actual_call_ns": 958,
+                  "derived_busy_sample_ordinal": 3,
+                  "line": 309,
+                  "outer_ns": 1375,
+                  "requested_wait_ns": 4702292
+                }
+              ],
+              "outer_less_than_actual_call_samples": 0,
+              "pair_observations": [
+                {
+                  "actual_call_non_increasing": false,
+                  "current_actual_call_ns": 1166,
+                  "current_line": 308,
+                  "current_outer_ns": 1583,
+                  "current_requested_wait_ns": 4702292,
+                  "outer_ge_previous_wait_plus_current_call": false,
+                  "previous_actual_call_ns": 1125,
+                  "previous_line": 307,
+                  "previous_requested_wait_ns": 4702292,
+                  "requested_wait_delta_ns": 0,
+                  "wait_increased_while_actual_call_did_not": false,
+                  "wait_non_decreasing": true,
+                  "wait_strictly_increased": false
+                },
+                {
+                  "actual_call_non_increasing": true,
+                  "current_actual_call_ns": 958,
+                  "current_line": 309,
+                  "current_outer_ns": 1375,
+                  "current_requested_wait_ns": 4702292,
+                  "outer_ge_previous_wait_plus_current_call": false,
+                  "previous_actual_call_ns": 1166,
+                  "previous_line": 308,
+                  "previous_requested_wait_ns": 4702292,
+                  "requested_wait_delta_ns": 0,
+                  "wait_increased_while_actual_call_did_not": false,
+                  "wait_non_decreasing": true,
+                  "wait_strictly_increased": false
+                }
+              ],
+              "requested_wait_equals_outer_samples": 1,
+              "sample_count": 3,
+              "sequences": {
+                "actual_call_ns": {
+                  "decreases": 1,
+                  "equal": 0,
+                  "non_decreasing": false,
+                  "strict_increases": 1,
+                  "values": [
+                    1125,
+                    1166,
+                    958
+                  ]
+                },
+                "outer_ns": {
+                  "decreases": 2,
+                  "equal": 0,
+                  "non_decreasing": false,
+                  "strict_increases": 0,
+                  "values": [
+                    4702292,
+                    1583,
+                    1375
+                  ]
+                },
+                "requested_wait_ns": {
+                  "decreases": 0,
+                  "equal": 2,
+                  "non_decreasing": true,
+                  "strict_increases": 0,
+                  "values": [
+                    4702292,
+                    4702292,
+                    4702292
+                  ]
+                }
+              },
+              "wait_growth_with_non_growing_call_pairs": 0
+            },
+            "owner_log": "/Users/adalundhe/.cache/hx/e-9y4eu3tx/o.log",
+            "peer": 1,
+            "queue_enter_line": 302,
+            "trace_lines": [
+              302,
+              303,
+              304,
+              305,
+              306,
+              307,
+              308,
+              309
+            ]
+          },
+          {
+            "actual_queue_ids_seen": [],
+            "grouping": "inferred from explicit queue-enter in this log/context, not a unique queue ID",
+            "identity_limit": "same kind may recur/interleave; inferred ordinals and positional samples are not actual identities",
+            "inferred_queue_ordinal": 1,
+            "kind": "refresh",
+            "mixed_explicit_queue_ids": false,
+            "next_queue_enter_line": null,
+            "node": 1,
+            "observations": {
+              "interpretation": "exact ordered observations only; neither a causal self-feedback proof nor an original-stall/fix verdict",
+              "ordered_samples": [
+                {
+                  "actual_call_ns": 834,
+                  "derived_busy_sample_ordinal": 1,
+                  "line": 8,
+                  "outer_ns": 781691875,
+                  "requested_wait_ns": 781691875
+                },
+                {
+                  "actual_call_ns": 792,
+                  "derived_busy_sample_ordinal": 2,
+                  "line": 9,
+                  "outer_ns": 1167,
+                  "requested_wait_ns": 781691875
+                }
+              ],
+              "outer_less_than_actual_call_samples": 0,
+              "pair_observations": [
+                {
+                  "actual_call_non_increasing": true,
+                  "current_actual_call_ns": 792,
+                  "current_line": 9,
+                  "current_outer_ns": 1167,
+                  "current_requested_wait_ns": 781691875,
+                  "outer_ge_previous_wait_plus_current_call": false,
+                  "previous_actual_call_ns": 834,
+                  "previous_line": 8,
+                  "previous_requested_wait_ns": 781691875,
+                  "requested_wait_delta_ns": 0,
+                  "wait_increased_while_actual_call_did_not": false,
+                  "wait_non_decreasing": true,
+                  "wait_strictly_increased": false
+                }
+              ],
+              "requested_wait_equals_outer_samples": 1,
+              "sample_count": 2,
+              "sequences": {
+                "actual_call_ns": {
+                  "decreases": 1,
+                  "equal": 0,
+                  "non_decreasing": false,
+                  "strict_increases": 0,
+                  "values": [
+                    834,
+                    792
+                  ]
+                },
+                "outer_ns": {
+                  "decreases": 1,
+                  "equal": 0,
+                  "non_decreasing": false,
+                  "strict_increases": 0,
+                  "values": [
+                    781691875,
+                    1167
+                  ]
+                },
+                "requested_wait_ns": {
+                  "decreases": 0,
+                  "equal": 1,
+                  "non_decreasing": true,
+                  "strict_increases": 0,
+                  "values": [
+                    781691875,
+                    781691875
+                  ]
+                }
+              },
+              "wait_growth_with_non_growing_call_pairs": 0
+            },
+            "owner_log": "/Users/adalundhe/.cache/hx/e-9y4eu3tx/r.log",
+            "peer": 0,
+            "queue_enter_line": 1,
+            "trace_lines": [
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9
+            ]
+          }
+        ],
+        "interpretation_limits": [
+          "No arbitrary ratio, duration or sample-count threshold is imposed.",
+          "outer_ns includes legitimate remote Describe/other outer work; outer vs local alone does not establish feedback.",
+          "Monotonic waits and exact carryover inequalities are observations, not causal/fix claims.",
+          "Stage logs may interleave; inferred contexts are not globally unique queues.",
+          "Each log is read only through its size at open, not followed or merged by fabricated timestamps."
+        ],
+        "kind": "hex-ack-pacing-trace-observations",
+        "original_stall_fixed": null,
+        "original_stall_status": "not determined by this analyzer",
+        "owner_logs": [
+          {
+            "captured_prefix_bytes": 20902,
+            "file_size_after_read": 20902,
+            "grew_after_snapshot": false,
+            "missing": false,
+            "non_trace_lines": 1,
+            "path": "/Users/adalundhe/.cache/hx/e-9y4eu3tx/o.log",
+            "read_bytes": 20902,
+            "sha256_of_captured_prefix": "e3586199296dea69eb5d746057b0a193e561b6830bcdc898f157cd8c6931fe0a"
+          },
+          {
+            "captured_prefix_bytes": 9005,
+            "file_size_after_read": 9005,
+            "grew_after_snapshot": false,
+            "missing": false,
+            "non_trace_lines": 0,
+            "path": "/Users/adalundhe/.cache/hx/e-9y4eu3tx/r.log",
+            "read_bytes": 9005,
+            "sha256_of_captured_prefix": "f9e2b376025e2cd34611552b3516d7f301ddfe0de528635cdc2aa9b2b189c0ae"
+          }
+        ],
+        "queue_grouping_authority": "explicit queue-enter only, scoped to file/node/peer/kind; ordinal is inferred",
+        "result": {
+          "bytes": 841970,
+          "malformed": false,
+          "missing": false,
+          "missing_fields": [],
+          "path": "/Users/adalundhe/.cache/hx/e-9y4eu3tx/result.json",
+          "sha256": "cb1536d6a1de72ec324dbb2d12f6bc904385a9dd452c9d06de02317ba4ede32a",
+          "summary": {
+            "backend_baseline_restored": true,
+            "kind": "actual-scheduler-status-pressure-diagnostic",
+            "owned_guest_retired": {
+              "end": "Stopped",
+              "guest_stopped": true,
+              "pid": 8146,
+              "started": 12180467610293
+            },
+            "profile": "release",
+            "source_revision": "cc7c2190+same-a988-retry-fix+DEBUG-hex-ack-pace",
+            "status": "passed",
+            "verified_physical_created": 2,
+            "verified_physical_deleted": 2
+          }
+        },
+        "seed_generation": "not performed; diagnostic only",
+        "trace_evidence": "local Advertise Busy rows present",
+        "unit": "nanoseconds"
+      },
+      "profile": "release",
+      "raw_report": "/Users/adalundhe/.cache/hx/e-9y4eu3tx/result.json",
+      "raw_report_sha256": "cb1536d6a1de72ec324dbb2d12f6bc904385a9dd452c9d06de02317ba4ede32a",
+      "receipts": {
+        "build": {
+          "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-cc7c2190/fixture/receipts/build-debug-ack-pace-fixed-a988.json",
+          "sha256": "01115cb3f17f3f0a7de0b90ddc83e321f8a5b5bc0a5c9abad7cbadaf2cd22fe1"
+        },
+        "deadline": {
+          "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-cc7c2190/fixture/receipts/method-status-pressure-fixed-a988.json",
+          "sha256": "261fd02f8648dd4d72b8bdd2bd413dcce7d6be9a0e49e6d6bd031a9eae1b5bc6"
+        },
+        "policy": {
+          "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-cc7c2190/fixture/receipts/policy-f5-resume-pace-fixed.json",
+          "sha256": "ee0918988ab70b5404dd83c3af85310cc098e5e12e4851ad9138acdc27ac01ba"
+        }
+      },
+      "source": "/Users/adalundhe/.cache/hex-lead/snapshots/cold-feedback-pace-fixed-a98824f7",
+      "source_revision": "cc7c2190+same-a988-retry-fix+DEBUG-hex-ack-pace",
+      "status": "passed",
+      "status_pressure": {
+        "operator_declared_diagnostic_concurrency": true,
+        "scopes": [
+          {
+            "all_readers_joined": true,
+            "all_status_children_reaped": true,
+            "cleanup_budget_seconds": 120.0,
+            "errors": [],
+            "key": {
+              "epoch": 1,
+              "owner": 0,
+              "seq": 0
+            },
+            "launched": 11,
+            "operation_deadline_seconds": 120.0,
+            "phase": "local",
+            "readers": [
+              {
+                "cancelled": 0,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 2
+              },
+              {
+                "cancelled": 0,
+                "publication_busy": 0,
+                "started": 3,
+                "valid": 3
+              },
+              {
+                "cancelled": 0,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 2
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 0,
+                "started": 3,
+                "valid": 2
+              }
+            ],
+            "reaped": 11,
+            "scope": 1,
+            "socket": "/Users/adalundhe/.cache/hx/e-9y4eu3tx/l.sock",
+            "status_readers": 4
+          },
+          {
+            "all_readers_joined": true,
+            "all_status_children_reaped": true,
+            "cleanup_budget_seconds": 120.0,
+            "errors": [],
+            "key": {
+              "epoch": 1,
+              "owner": 0,
+              "seq": 1
+            },
+            "launched": 10,
+            "operation_deadline_seconds": 120.0,
+            "phase": "local",
+            "readers": [
+              {
+                "cancelled": 0,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 2
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 0,
+                "started": 3,
+                "valid": 2
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 1
+              },
+              {
+                "cancelled": 0,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 2
+              }
+            ],
+            "reaped": 10,
+            "scope": 2,
+            "socket": "/Users/adalundhe/.cache/hx/e-9y4eu3tx/l.sock",
+            "status_readers": 4
+          },
+          {
+            "all_readers_joined": true,
+            "all_status_children_reaped": true,
+            "cleanup_budget_seconds": 120.0,
+            "errors": [],
+            "key": {
+              "epoch": 1,
+              "owner": 0,
+              "seq": 1
+            },
+            "launched": 9,
+            "operation_deadline_seconds": 120.0,
+            "phase": "local",
+            "readers": [
+              {
+                "cancelled": 0,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 2
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 1
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 1
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 1
+              }
+            ],
+            "reaped": 9,
+            "scope": 3,
+            "socket": "/Users/adalundhe/.cache/hx/e-9y4eu3tx/l.sock",
+            "status_readers": 4
+          },
+          {
+            "all_readers_joined": true,
+            "all_status_children_reaped": true,
+            "cleanup_budget_seconds": 120.0,
+            "errors": [],
+            "key": {
+              "epoch": 1,
+              "owner": 0,
+              "seq": 1
+            },
+            "launched": 11,
+            "operation_deadline_seconds": 120.0,
+            "phase": "local",
+            "readers": [
+              {
+                "cancelled": 0,
+                "publication_busy": 0,
+                "started": 3,
+                "valid": 3
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 0,
+                "started": 3,
+                "valid": 2
+              },
+              {
+                "cancelled": 0,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 2
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 1
+              }
+            ],
+            "reaped": 11,
+            "scope": 4,
+            "socket": "/Users/adalundhe/.cache/hx/e-9y4eu3tx/l.sock",
+            "status_readers": 4
+          },
+          {
+            "all_readers_joined": true,
+            "all_status_children_reaped": true,
+            "cleanup_budget_seconds": 120.0,
+            "errors": [],
+            "key": {
+              "epoch": 1,
+              "owner": 0,
+              "seq": 0
+            },
+            "launched": 9,
+            "operation_deadline_seconds": 120.0,
+            "phase": "remote",
+            "readers": [
+              {
+                "cancelled": 0,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 2
+              },
+              {
+                "cancelled": 0,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 2
+              },
+              {
+                "cancelled": 0,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 2
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 0,
+                "started": 2,
+                "valid": 1
+              }
+            ],
+            "reaped": 9,
+            "scope": 5,
+            "socket": "/Users/adalundhe/.cache/hx/e-9y4eu3tx/o.sock",
+            "status_readers": 4
+          },
+          {
+            "all_readers_joined": true,
+            "all_status_children_reaped": true,
+            "cleanup_budget_seconds": 120.0,
+            "errors": [],
+            "key": {
+              "epoch": 1,
+              "owner": 0,
+              "seq": 1
+            },
+            "launched": 543,
+            "operation_deadline_seconds": 120.0,
+            "phase": "remote",
+            "readers": [
+              {
+                "cancelled": 1,
+                "publication_busy": 28,
+                "started": 110,
+                "valid": 81
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 25,
+                "started": 108,
+                "valid": 82
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 29,
+                "started": 107,
+                "valid": 77
+              },
+              {
+                "cancelled": 0,
+                "publication_busy": 25,
+                "started": 111,
+                "valid": 86
+              }
+            ],
+            "reaped": 543,
+            "scope": 6,
+            "socket": "/Users/adalundhe/.cache/hx/e-9y4eu3tx/o.sock",
+            "status_readers": 4
+          },
+          {
+            "all_readers_joined": true,
+            "all_status_children_reaped": true,
+            "cleanup_budget_seconds": 120.0,
+            "errors": [],
+            "key": {
+              "epoch": 1,
+              "owner": 0,
+              "seq": 1
+            },
+            "launched": 9,
+            "operation_deadline_seconds": 120.0,
+            "phase": "remote",
+            "readers": [
+              {
+                "cancelled": 0,
+                "publication_busy": 1,
+                "started": 2,
+                "valid": 1
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 1,
+                "started": 2,
+                "valid": 0
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 1,
+                "started": 2,
+                "valid": 0
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 1,
+                "started": 2,
+                "valid": 0
+              }
+            ],
+            "reaped": 9,
+            "scope": 7,
+            "socket": "/Users/adalundhe/.cache/hx/e-9y4eu3tx/o.sock",
+            "status_readers": 4
+          },
+          {
+            "all_readers_joined": true,
+            "all_status_children_reaped": true,
+            "cleanup_budget_seconds": 120.0,
+            "errors": [],
+            "key": {
+              "epoch": 1,
+              "owner": 0,
+              "seq": 1
+            },
+            "launched": 129,
+            "operation_deadline_seconds": 120.0,
+            "phase": "remote",
+            "readers": [
+              {
+                "cancelled": 1,
+                "publication_busy": 14,
+                "started": 26,
+                "valid": 11
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 15,
+                "started": 26,
+                "valid": 10
+              },
+              {
+                "cancelled": 1,
+                "publication_busy": 13,
+                "started": 26,
+                "valid": 12
+              },
+              {
+                "cancelled": 0,
+                "publication_busy": 18,
+                "started": 27,
+                "valid": 9
+              }
+            ],
+            "reaped": 129,
+            "scope": 8,
+            "socket": "/Users/adalundhe/.cache/hx/e-9y4eu3tx/o.sock",
+            "status_readers": 4
+          }
+        ],
+        "status_readers": 4
+      },
+      "success_controls": {
+        "advertise": 2,
+        "delete": 4,
+        "describe": 2,
+        "link_up": 1,
+        "retry": 4,
+        "status": 501,
+        "submit": 4
+      },
+      "verified_oversized_refusals": 2,
+      "verified_physical_created": 2,
+      "verified_physical_deleted": 2
+    }
+  ],
+  "scope": "six uninstrumented boundaries plus separate instrumented Status4 before/after; no seed or speed claim",
+  "source": "a98824f7f99adeaa83f8324ab9af65aa80a369e5"
+}

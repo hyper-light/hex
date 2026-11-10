@@ -115,6 +115,37 @@ so neither is claimed to fix the intermittent failure. The latter trace did
 expose retry measurement including its own earlier pauses: within one refresh
 queue,2-5microsecond Busy checks requested4.8/16.7/62.7ms delays. An isolated
 virtual-clock regression reproduces that sampling defect; its reset-after-pause
-fix still needs root actual replay/mutation and combined validation before a
-readiness claim. No wait seed or longer deadline was used to hide the stall.
+fix is signed in a98824f7. The test was first run red at94711111 (root96a86a73),
+with requested pauses [1,2,4]ns, and passes with the reset after each pause,
+requesting [1,1,1]ns. The cold-Busy regression and focused clippy also pass.
+
+Root r430 then replayed the unchanged real boundary fixture once in debug and
+five times in release using uninstrumented a98824f7 host binaries. All six runs
+passed both oversized refusals, both valid physical creates/deletes, the restored
+empty baseline and identity-checked guest shutdown. Root r429 passed the four
+focused scheduler cases and workspace native Windows clippy. The combined
+seven-target/workspace gate r427 is still running at this evidence checkpoint;
+its intermediate success is not a final gate result.
+
+Root r439 repeated the same four-reader diagnostic with only the retry reset
+added to the earlier trace source. The first owner refresh sampled6,697,375ns
+of real outer work; its next eight Busy attempts sampled1,125-1,875ns and kept
+the same6,697,375ns requested pause. A second sequence held4,702,292ns across
+subsequent1,583/1,375ns samples. The receiver similarly kept781,691,875ns after
+its next1,167ns sample. The reset excludes earlier pauses while preserving the
+maximum actual work. Both physical controls passed, all eight reader scopes
+joined/reaped every child, and VM8146/start12180467610293 ended Stopped.
+
+The trace source is a temporary cc7c2190 copy plus the same minimal reset and
+tagged instrumentation; it is not presented as the uninstrumented a988 artifact.
+The production source contains no debug trace. The exact summaries, input hashes,
+trace observations and source-preserved diagnostic tools are in
+[the retry record](../../../bench/sched/runtime-pools/retry-reset-a98824f7.json)
+and census/. Queue ordinals are explicitly inferred from queue-enter boundaries,
+not invented actual IDs. Initial Describe/open work remains legitimate outer time.
+
+These bounded replays verify the timing defect and its fix. They do not establish
+that it was the sole cause of the original intermittent acknowledgement stall.
+No wait seed or longer deadline was used to hide that failure; calibration and
+the native Linux/root-lab validation remain owed.
 The Windows arm64 VM remains paused. Firecracker/WHP/GPU VM coverage is unverified.
