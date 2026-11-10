@@ -11,8 +11,8 @@
 //! or removal, so the name change itself survives a host crash; Windows offers no directory flush
 //! through std, and NTFS journals the rename itself.
 //!
-//! Bounds (CLAUDE.md §2): a node keeps a record for each box it runs and each it owns, each at most
-//! [`hex_runtime::MAX_BOXES`], and its epoch: a directory holding more is refused, typed. Each
+//! Bounds (CLAUDE.md §2): the caller supplies its read/list record count. Each record can have one
+//! temporary beside it during replacement; more records or temporaries are refused, typed. Each
 //! value is at most [`MAX_BYTES`], the wire message bound, on write and before a persisted read allocates.
 
 use std::fs::{self, File};
@@ -21,7 +21,8 @@ use std::path::{Path, PathBuf};
 
 use hex_sim::peer::{Records, Stop};
 
-/// The most records a node keeps: a record for each box it runs and each it owns, and its epoch.
+/// Legacy compatibility only: callers still using `open` must move to their own admitted counts.
+/// Root's integration removes this bound and the default constructor after those callers port.
 pub const MOST: usize = hex_runtime::MAX_BOXES * 2 + 1;
 
 /// CP-T7.4: one durable placement record is bounded by the protocol message it represents.
@@ -34,17 +35,41 @@ const TEMP: &str = "tmp";
 #[derive(Debug)]
 pub struct Files {
     dir: PathBuf,
+    most: usize,
+    entries: usize,
 }
 
 fn io(op: &'static str) -> impl Fn(std::io::Error) -> Stop {
     move |e| Stop::Io(format!("{op}: {e}"))
 }
 
-/// A record's name is letters, digits and `-`: never a path, never a name Windows reserves (they are
-/// all letters, and every record's name but the epoch's has a `-` and digits).
+/// Full-width `own/ran-u32-u64-u64`, `peer-u32`, or `epoch`: the actual key grammar determines
+/// filename room, independently of caller record counts. Checked widths also cover narrow usize.
+fn name_bound() -> Result<usize, Stop> {
+    let owner = usize::try_from(u32::MAX.ilog10())
+        .ok()
+        .and_then(|n| n.checked_add(1));
+    let sequence = usize::try_from(u64::MAX.ilog10())
+        .ok()
+        .and_then(|n| n.checked_add(1));
+    owner
+        .zip(sequence)
+        .and_then(|(owner, sequence)| {
+            let key = "own---"
+                .len()
+                .max("ran---".len())
+                .checked_add(owner)?
+                .checked_add(sequence.checked_mul(2)?)?;
+            let peer = "peer-".len().checked_add(owner)?;
+            Some(key.max(peer).max("epoch".len()))
+        })
+        .ok_or_else(|| Stop::Damaged("record filename bound overflow".into()))
+}
+
+/// A record's name uses lowercase letters, digits and `-`, never path separators.
 fn checked(name: &str) -> Result<&str, Stop> {
     let ok = !name.is_empty()
-        && name.len() <= 128
+        && name.len() <= name_bound()?
         && name
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
@@ -78,11 +103,24 @@ fn read_record(reader: impl Read, path: &Path) -> Result<String, Stop> {
 }
 
 impl Files {
-    /// Opens the records in `dir`, made if missing; temp files a crash left are removed.
+    /// Temporary legacy delegate; callers must supply their admitted count with `open_with_limit`.
     pub fn open(dir: &Path) -> Result<Files, Stop> {
+        Self::open_with_limit(dir, MOST)
+    }
+
+    /// Opens a caller-bounded reader/listing, made if missing, removing crash temporaries.
+    /// Write admission remains the caller's responsibility; put does not scan or cache counts.
+    pub fn open_with_limit(dir: &Path, most: usize) -> Result<Files, Stop> {
+        // One durable record plus one temporary per admitted record is the structural limit.
+        let entries = most.checked_mul(2).ok_or(Stop::Full {
+            what: "placement record directory entry budget",
+            bound: most,
+        })?;
         fs::create_dir_all(dir).map_err(io("making the records' folder"))?;
         let files = Files {
             dir: dir.to_path_buf(),
+            most,
+            entries,
         };
         for path in files.listed()? {
             if path.extension().is_some_and(|e| e == TEMP) {
@@ -97,18 +135,34 @@ impl Files {
         self.dir.join(format!("{name}.{ext}"))
     }
 
-    /// Every file in the folder, at most [`MOST`] of them and the temp files beside.
+    /// At most the caller's records and temporaries, with a checked structural directory bound.
     fn listed(&self) -> Result<Vec<PathBuf>, Stop> {
         let mut out = Vec::new();
+        let (mut records, mut temps) = (0usize, 0usize);
         for entry in fs::read_dir(&self.dir).map_err(io("listing the records"))? {
             let entry = entry.map_err(io("listing the records"))?;
-            if out.len() >= MOST.saturating_mul(2) {
-                return Err(Stop::Damaged(format!(
-                    "more than {MOST} records in {}",
-                    self.dir.display()
-                )));
+            if out.len() >= self.entries {
+                return Err(Stop::Full {
+                    what: "placement record directory entries",
+                    bound: self.entries,
+                });
             }
-            out.push(entry.path());
+            let path = entry.path();
+            let counted = match path.extension() {
+                Some(ext) if ext == RECORD => Some((&mut records, "placement records")),
+                Some(ext) if ext == TEMP => Some((&mut temps, "placement record temporaries")),
+                _ => None,
+            };
+            if let Some((count, what)) = counted {
+                *count = count
+                    .checked_add(1)
+                    .filter(|n| *n <= self.most)
+                    .ok_or(Stop::Full {
+                        what,
+                        bound: self.most,
+                    })?;
+            }
+            out.push(path);
         }
         Ok(out)
     }
@@ -180,6 +234,85 @@ mod tests {
     use super::*;
     use hex_sim::model::{NodeId, NodeSpec, Resources};
     use hex_sim::peer::World;
+
+    /// AC-T7.4.1: caller record room admits the exact record+temp boundary, removes crash temps,
+    /// and rejects an extra durable record even below the structural total-entry bound.
+    #[test]
+    fn records_caller_limit_counts_records_and_crash_temporaries_separately() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["epoch", "own-0-1-0"] {
+            fs::write(dir.path().join(format!("{name}.rec")), "durable").unwrap();
+            fs::write(dir.path().join(format!("{name}.tmp")), "torn").unwrap();
+        }
+        let mut files = Files::open_with_limit(dir.path(), 2).unwrap();
+        assert_eq!(files.all().unwrap().len(), 2);
+        assert!(!dir.path().join("epoch.tmp").exists());
+        assert!(!dir.path().join("own-0-1-0.tmp").exists());
+        files.put("epoch", "replaced").unwrap();
+        assert_eq!(files.all().unwrap().len(), 2);
+        // Write admission belongs to the core/caller; this shell bounds read/list without scanning
+        // the directory on every put or retaining a second mutable count cache.
+        files.put("ran-0-1-0", "excess").unwrap();
+        assert!(matches!(files.all(), Err(Stop::Full { bound: 2, .. })));
+        assert!(matches!(
+            Files::open_with_limit(dir.path(), 2),
+            Err(Stop::Full { bound: 2, .. })
+        ));
+        let temps = tempfile::tempdir().unwrap();
+        for name in ["epoch", "own-0-1-0", "ran-0-1-0"] {
+            fs::write(temps.path().join(format!("{name}.tmp")), "torn").unwrap();
+        }
+        assert!(matches!(
+            Files::open_with_limit(temps.path(), 2),
+            Err(Stop::Full { bound: 2, .. })
+        ));
+        assert_eq!(fs::read_dir(temps.path()).unwrap().count(), 3);
+    }
+
+    /// AC-T7.4.1: checked structural entry-count overflow refuses before making a directory;
+    /// a zero-record reader permits only an empty directory and no hidden picked minimum.
+    #[test]
+    fn records_caller_limit_checks_overflow_and_zero_before_listing() {
+        let root = tempfile::tempdir().unwrap();
+        let absent = root.path().join("not-created");
+        assert!(matches!(
+            Files::open_with_limit(&absent, usize::MAX),
+            Err(Stop::Full { .. })
+        ));
+        assert!(!absent.exists());
+        let mut files = Files::open_with_limit(root.path(), 0).unwrap();
+        assert!(files.all().unwrap().is_empty());
+        files
+            .put("epoch", "caller exceeded zero write admission")
+            .unwrap();
+        assert!(matches!(files.all(), Err(Stop::Full { bound: 0, .. })));
+    }
+
+    /// AC-T7.4.1: the widest actual key and peer names fit; an additional byte and invalid path
+    /// characters refuse before write, and an oversized persisted record name is damaged.
+    #[test]
+    fn records_names_derive_their_limit_from_full_width_key_grammar() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut files = Files::open_with_limit(dir.path(), 3).unwrap();
+        let widest = format!("own-{}-{}-{}", u32::MAX, u64::MAX, u64::MAX);
+        let ran = format!("ran-{}-{}-{}", u32::MAX, u64::MAX, u64::MAX);
+        let peer = format!("peer-{}", u32::MAX);
+        for name in [&widest, &ran, &peer] {
+            files.put(name, "valid").unwrap();
+        }
+        assert_eq!(files.all().unwrap().len(), 3);
+        for invalid in [
+            format!("{widest}0"),
+            "../epoch".into(),
+            "own_0".into(),
+            "A".into(),
+        ] {
+            assert!(matches!(files.put(&invalid, "bad"), Err(Stop::Damaged(_))));
+        }
+        files.remove(&peer).unwrap();
+        fs::write(dir.path().join(format!("{widest}0.rec")), "hostile").unwrap();
+        assert!(matches!(files.all(), Err(Stop::Damaged(_))));
+    }
 
     /// CP-T7.4, laptop-only state in files: do write, replace and remove records, with one replaced
     /// while another handle has it open for reading, and a temp file a crash left beside them; expect
