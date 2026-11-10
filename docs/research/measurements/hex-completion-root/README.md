@@ -63,3 +63,36 @@ remain required. Each backend must execute its actual runtime. A shared Shards
 GPU flag, pure pass, successful compilation or unavailable-device refusal cannot
 close another backend's obligation. No main merge or push has occurred for this
 new batch.
+
+## Firecracker readiness integration source
+
+The guest-init notification is opt-in from the host kernel command line:
+`hex.firecracker-ready` paired with positive `u32` milliseconds in
+`hex.firecracker-ready-ms`. Duplicate, unpaired, zero, oversized and malformed
+parameters refuse before node creation. Parameters after `--` are init arguments
+and cannot enable notification. There is no environment/default budget.
+
+Only after existing node-ready and relay-ready receipts (all listeners bound)
+does init connect to vsock HOST CID2. L1 owns the host's private per-VM Unix
+listener, bound before VM creation. Both sides use shared `stream::GUEST_READY`
+(`HEX_READY 1` followed by newline). Its length is **12 bytes**, correcting the
+earlier coordination prose's mistaken11. Readiness grants no device authority.
+
+Primary-source review caught another coordination error before compilation:
+CONTROL_PORT0x48455800 lies in Firecracker's reserved [2^30,2^31) host-initiated
+range and cannot receive a guest-origin notification. GUEST_READY_PORT clears
+bit30 from the assigned control-port value (0x08455800), keeping its low HEX bits
+while placing this separate notification outside that reserved and privileged
+range. Host listener naming uses this port; ordinary control traffic is unchanged.
+[Pinned Firecracker protocol](https://github.com/firecracker-microvm/firecracker/blob/500efc6bb169705f5d9417cb411e3f6723e051fe/docs/vsock.md#guest-initiated-connections)
+describes the `_PORT` Unix socket mapping and reserved range;
+[vsock(7)](https://man7.org/linux/man-pages/man7/vsock.7.html) defines HOST CID2.
+
+Guest connect/write share one checked absolute deadline; each partial write uses
+the remaining configured budget and MSG_NOSIGNAL, so a gone host cannot terminate
+PID1 by SIGPIPE. Errors never trigger a second connection or VM boot here.
+The existing socket2 0.6.5 source was inspected: connect_timeout uses nonblocking
+connect and Unix poll, including EINTR handling; ordinary send accepts explicit
+flags. Linux rustix's safe send supplies NOSIGNAL. Existing kernel-command-line
+limits are reused. Native guest/host protocol effects and timeout/physical cleanup
+remain unrun; the new parser unit source is not yet an executed result.

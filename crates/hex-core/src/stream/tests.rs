@@ -10,6 +10,17 @@
 use super::*;
 use proptest::prelude::*;
 
+/// AC-T7.4.1: Firecracker rejects guest-origin connections in its host-origin port
+/// range. Readiness therefore has a separate nonprivileged port and exact versioned bytes.
+#[test]
+fn readiness_uses_a_guest_origin_port_and_complete_versioned_receipt() {
+    assert!((1u32 << 30..1u32 << 31).contains(&CONTROL_PORT));
+    assert!(!(1u32 << 30..1u32 << 31).contains(&GUEST_READY_PORT));
+    assert!(GUEST_READY_PORT >= 1024);
+    assert_eq!(GUEST_READY, b"HEX_READY 1\n");
+    assert_eq!(GUEST_READY.len(), 12);
+}
+
 fn message(n: usize) -> Vec<u8> {
     (0..n).map(|i| u8::try_from(i % 251).unwrap()).collect()
 }
