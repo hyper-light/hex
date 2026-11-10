@@ -581,6 +581,7 @@ fn asked_shards_streams_wait_as_the_callers_files_do() {
             cmdline: String::new(),
             vcpus: 1,
             gpu: false,
+            gpu_devices: Vec::new(),
             memory_mib: shards_api::min_memory_mib(std::env::consts::ARCH),
             disks: vec![],
             shares: vec![],

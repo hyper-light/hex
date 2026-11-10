@@ -96,3 +96,26 @@ connect and Unix poll, including EINTR handling; ordinary send accepts explicit
 flags. Linux rustix's safe send supplies NOSIGNAL. Existing kernel-command-line
 limits are reused. Native guest/host protocol effects and timeout/physical cleanup
 remain unrun; the new parser unit source is not yet an executed result.
+
+## Physical API composition and shared dependencies
+
+The focused Shards API port comes from L2 signed upstream source
+`36d9254f91325c3251582c6477bde5a83cffd9b3`. Vendored code remains pinned to33df
+plus its existing seven recorded patches and the new incremental0008. The new
+`physical.rs` blob is exact SHA-256
+`f0881866e1602755b43af19b6c77da9941fff09c2699507cff83fa3f592bc1d5`.
+It carries native PCI, Metal registry and Windows LUID identities, validates the
+bounded duplicate-free set and writes checked process arguments. It does not
+implement the VMM/native join by itself. Borrowed connection/handshake source and
+tests remain unchanged by this port. The complete runtime still awaits the
+separately owned L1 catalog and L2 guest integration; no full compile or native
+physical-selection result is claimed here.
+
+The Hex client maps selector-storage exhaustion to typed Exhausted and permanent
+selector errors to Invalid. Existing shared gpu=false literals get an empty
+selection. Core sha2 reuses pinned0.10.9 for L3's same-receipt queued-document
+commitment; runtime socket2 reuses the existing workspace pin for L1's bounded
+Unix connection. These are dependency edges, not new dependency versions. The
+stream readiness test's constant comparison was expressed as a range check after
+L3's exact core Clippy reproduced assertions_on_constants; no production port,
+protocol or wait changed in that correction.

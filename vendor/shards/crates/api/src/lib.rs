@@ -30,6 +30,7 @@ use std::time::Duration;
 
 mod client;
 pub mod conformance;
+pub mod physical;
 mod said;
 pub mod sim;
 mod stream;
@@ -43,6 +44,7 @@ mod while_runs;
 mod proc_allocation;
 
 pub use client::{Shards, connect_borrowed};
+pub use physical::{PhysicalGpu, PhysicalGpuError};
 
 /// A guest to boot.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,9 +58,11 @@ pub struct GuestSpec {
     pub vcpus: u32,
     /// Its memory, in MiB: even, at least [`min_memory_mib`].
     pub memory_mib: u64,
-    /// Enable Shards' shared Venus virtual GPU (`--gpu`). This does not select or
-    /// exclusively bind a physical host GPU.
+    /// Enable the shared Venus renderer. Exact selection below implies this.
     pub gpu: bool,
+    /// Immutable native physical selection; an empty set with gpu preserves the
+    /// explicitly requested shared renderer. Scheduler callers supply exact identities.
+    pub gpu_devices: Vec<PhysicalGpu>,
     /// Its disks, `/dev/vda` on, in order.
     pub disks: Vec<Disk>,
     /// Host directories it sees as virtio-fs `shards0`, `shards1`, ..., in order, fixed at
@@ -374,6 +378,8 @@ pub enum Refusal {
     Borrowed { port: u32, failure: BorrowFailure },
     /// A post-boot connection resource could not be allocated.
     Allocation { what: &'static str },
+    /// The exact native GPU request is malformed or exceeds its protocol bound.
+    Gpu(PhysicalGpuError),
 }
 
 /// What names a booted guest beyond its client's process, so a client that restarts (crashed, say)
@@ -394,6 +400,7 @@ pub struct Identity {
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Refusal::Gpu(why) => write!(f, "physical GPU: {why}"),
             Refusal::NoBackend { os, arch } => {
                 write!(f, "shards boots no guest on {os} {arch}: it has no backend there")
             }
@@ -546,6 +553,7 @@ pub fn min_memory_mib(arch: &str) -> u64 {
 /// host takes is its hypervisor's own limit, which shards reads as it starts the VM
 /// (`vm/runtime.rs:1059` `check_vcpus`); its refusal comes back as [`Refusal::Bounds`].
 pub fn check(spec: &GuestSpec) -> Result<(), Refusal> {
+    physical::check_selection(&spec.gpu_devices).map_err(Refusal::Gpu)?;
     if spec.vcpus == 0 {
         return Err(Refusal::Bounds {
             what: "vcpus",
@@ -591,6 +599,7 @@ mod tests {
             vcpus: 1,
             memory_mib: 256,
             gpu: false,
+            gpu_devices: Vec::new(),
             disks: vec![],
             shares: vec![],
             ports: vec![1],

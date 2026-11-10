@@ -16,6 +16,7 @@ hex-gpu.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 shards-api.workspace = true
+socket2.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -16,7 +16,7 @@ use proptest::prelude::*;
 fn readiness_uses_a_guest_origin_port_and_complete_versioned_receipt() {
     assert!((1u32 << 30..1u32 << 31).contains(&CONTROL_PORT));
     assert!(!(1u32 << 30..1u32 << 31).contains(&GUEST_READY_PORT));
-    assert!(GUEST_READY_PORT >= 1024);
+    assert!(!(0..1024).contains(&GUEST_READY_PORT));
     assert_eq!(GUEST_READY, b"HEX_READY 1\n");
     assert_eq!(GUEST_READY.len(), 12);
 }

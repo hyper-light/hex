@@ -114,6 +114,14 @@ pub fn refusal(op: &'static str, why: &shards_api::Refusal) -> Refusal {
             what: "the node's guest",
             why: format!("its {what}: {why}"),
         },
+        shards_api::Refusal::Gpu(shards_api::PhysicalGpuError::Allocation) => Refusal::Exhausted {
+            what: "physical GPU selection storage",
+            bound: shards_api::physical::MAX_PHYSICAL_GPUS,
+        },
+        shards_api::Refusal::Gpu(why) => Refusal::Invalid {
+            what: "physical GPU selection",
+            why: why.to_string(),
+        },
         other => Refusal::os(op, other),
     }
 }
