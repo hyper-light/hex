@@ -24,10 +24,13 @@
 //! One node is a laptop: its messages to itself are its own, and there is no plane at all.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fmt::Write;
 
-use crate::index::{FitIndex, Verdict};
+use crate::index::{FitIndex, Pick, Scorer, Verdict};
 use crate::lb;
-use crate::model::{Demand, Kind, NodeId, NodeSpec, Resources, WorkloadId};
+use crate::model::{
+    Arch, Ask, Class, Demand, Kind, ModelId, NodeId, NodeSpec, Os, Resources, WorkloadId,
+};
 use crate::rng::Rng;
 
 #[cfg(test)]
@@ -49,11 +52,6 @@ impl Key {
     fn name(&self, kind: &str) -> String {
         format!("{kind}-{}-{}-{}", self.owner, self.epoch, self.seq)
     }
-
-    /// The owner's view holds a box under this id: unique per owner and epoch's number.
-    fn workload(&self) -> WorkloadId {
-        WorkloadId(self.epoch.wrapping_shl(40) ^ self.seq)
-    }
 }
 
 /// Why a node stopped: its process crashed at a write (the nemesis), or its records can't be read.
@@ -62,6 +60,7 @@ pub enum Stop {
     Crashed,
     Damaged(String),
     Io(String),
+    Full { what: &'static str, bound: usize },
 }
 
 /// A node's durable records, by name: each written whole or not at all.
@@ -77,7 +76,7 @@ pub trait Records {
 pub enum Msg {
     Start {
         key: Key,
-        need: Resources,
+        demand: Demand,
     },
     /// A restarted owner, or one whose link came back: do you hold this box?
     Holds {
@@ -97,6 +96,7 @@ pub enum Msg {
         key: Key,
         holds: bool,
         ended: bool,
+        created: bool,
     },
     Ended {
         key: Key,
@@ -111,7 +111,7 @@ pub enum Told {
     /// To the client: its box ended.
     Ended(Key),
     /// To this node's runtime: create the box.
-    Create(Key),
+    Create(Key, Demand),
 }
 
 /// A box as its node's runtime has it.
@@ -132,7 +132,8 @@ enum State {
 
 #[derive(Debug, Clone)]
 struct Owned {
-    need: Resources,
+    demand: Demand,
+    workload: WorkloadId,
     state: State,
     /// Nodes that refused it since it last waited: in memory only.
     tried: BTreeSet<NodeId>,
@@ -141,7 +142,9 @@ struct Owned {
 #[derive(Debug, Clone, Copy)]
 struct Ran {
     owner: NodeId,
-    need: Resources,
+    demand: Demand,
+    workload: WorkloadId,
+    created: bool,
     at: Option<lb::Handle>,
     ended: bool,
 }
@@ -150,40 +153,337 @@ fn amounts(r: &Resources) -> lb::Amounts {
     [r.cpu_milli, r.mem_bytes, r.disk_bytes, u64::from(r.gpus)]
 }
 
-fn demand(need: Resources) -> Demand {
+/// The simulator's unconstrained OCI fixture; production callers submit an explicit Demand.
+fn plain(need: Resources) -> Demand {
     Demand {
         need,
         kind: Kind::Plain,
-        class: crate::model::Class::Oci,
-        ask: crate::model::Ask::default(),
+        class: Class::Oci,
+        ask: Ask::default(),
     }
-}
-
-fn need_text(r: &Resources) -> String {
-    format!(
-        "{} {} {} {}",
-        r.cpu_milli, r.mem_bytes, r.gpus, r.disk_bytes
-    )
 }
 
 fn damaged(what: &str) -> Stop {
     Stop::Damaged(what.to_owned())
 }
 
-/// A row or record's need: four numbers.
-fn need_of<'a>(words: &mut impl Iterator<Item = &'a str>) -> Result<Resources, Stop> {
-    let mut n = || -> Result<u64, Stop> {
+fn number<'a, T: std::str::FromStr>(words: &mut impl Iterator<Item = &'a str>) -> Result<T, Stop> {
+    words
+        .next()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| damaged("a demand's number"))
+}
+
+fn model_id(name: &str, models: &[String]) -> Result<Option<ModelId>, Stop> {
+    if name == "-" {
+        return Ok(None);
+    }
+    models
+        .iter()
+        .position(|m| m == name)
+        .and_then(|at| u32::try_from(at).ok())
+        .filter(|&at| at != ModelId::UNNAMED.0)
+        .map(|id| Some(ModelId(id)))
+        .ok_or_else(|| damaged("a demand's unknown GPU model"))
+}
+
+fn check_demand(d: &Demand, models: &[String]) -> Result<(), Stop> {
+    if let Some(model) = d.ask.gpu_model
+        && (model == ModelId::UNNAMED
+            || usize::try_from(model.0)
+                .ok()
+                .and_then(|at| models.get(at))
+                .is_none())
+    {
+        return Err(damaged("a demand's unknown GPU model"));
+    }
+    Ok(())
+}
+
+// AC-T7.4.1: versioned full-demand rows. Legacy amount-only rows cannot reconstruct a class or
+// platform safely and are refused. Models are named durably, so table order never changes an ask.
+fn demand_text(d: &Demand, models: &[String]) -> Result<String, Stop> {
+    check_demand(d, models)?;
+    let mut out = String::new();
+    write_demand(&mut out, d, models).map_err(|_| damaged("formatting a demand"))?;
+    Ok(out)
+}
+
+fn write_demand(out: &mut impl std::fmt::Write, d: &Demand, models: &[String]) -> std::fmt::Result {
+    let kind = match d.kind {
+        Kind::Plain => "plain",
+        Kind::Build => "build",
+        Kind::Benchmark => "benchmark",
+        Kind::Session => "session",
+    };
+    let class = match d.class {
+        Class::Oci => "oci",
+        Class::Firecracker => "firecracker",
+        Class::Shards => "shards",
+    };
+    let os = match d.ask.os {
+        None => "-",
+        Some(Os::Linux) => "linux",
+        Some(Os::Macos) => "macos",
+        Some(Os::Windows) => "windows",
+        Some(Os::Freebsd) => "freebsd",
+    };
+    let arch = match d.ask.arch {
+        None => "-",
+        Some(Arch::X86_64) => "x86_64",
+        Some(Arch::Aarch64) => "aarch64",
+        Some(Arch::X86) => "x86",
+        Some(Arch::Arm) => "arm",
+        Some(Arch::Riscv64) => "riscv64",
+    };
+    let model = d
+        .ask
+        .gpu_model
+        .and_then(|m| usize::try_from(m.0).ok().and_then(|at| models.get(at)))
+        .map_or("-", String::as_str);
+    write!(
+        out,
+        "d1 {kind} {class} {} {} {} {} {os} {arch} {model} {} {} {} {} {} {}",
+        d.need.cpu_milli,
+        d.need.mem_bytes,
+        d.need.gpus,
+        d.need.disk_bytes,
+        d.ask.gpu_memory,
+        d.ask.vfio,
+        d.ask.block,
+        d.ask.block_size,
+        d.ask.net,
+        u8::from(d.ask.kvm)
+    )
+}
+
+fn demand_of<'a>(
+    words: &mut impl Iterator<Item = &'a str>,
+    models: &[String],
+) -> Result<Demand, Stop> {
+    if words.next() != Some("d1") {
+        return Err(damaged("a missing or unsupported full-demand version"));
+    }
+    let kind = match words.next() {
+        Some("plain") => Kind::Plain,
+        Some("build") => Kind::Build,
+        Some("benchmark") => Kind::Benchmark,
+        Some("session") => Kind::Session,
+        _ => return Err(damaged("a demand's kind")),
+    };
+    let class = match words.next() {
+        Some("oci") => Class::Oci,
+        Some("firecracker") => Class::Firecracker,
+        Some("shards") => Class::Shards,
+        _ => return Err(damaged("a demand's class")),
+    };
+    let need = Resources {
+        cpu_milli: number(words)?,
+        mem_bytes: number(words)?,
+        gpus: number(words)?,
+        disk_bytes: number(words)?,
+    };
+    let os = match words.next() {
+        Some("-") => None,
+        Some(w) => Some(Os::named(w).ok_or_else(|| damaged("a demand's OS"))?),
+        None => return Err(damaged("a demand's OS")),
+    };
+    let arch = match words.next() {
+        Some("-") => None,
+        Some(w) => Some(Arch::named(w).ok_or_else(|| damaged("a demand's architecture"))?),
+        None => return Err(damaged("a demand's architecture")),
+    };
+    let gpu_model = model_id(
         words
             .next()
-            .and_then(|w| w.parse().ok())
-            .ok_or_else(|| damaged("a need"))
+            .ok_or_else(|| damaged("a demand's GPU model"))?,
+        models,
+    )?;
+    let ask = Ask {
+        os,
+        arch,
+        gpu_model,
+        gpu_memory: number(words)?,
+        vfio: number(words)?,
+        block: number(words)?,
+        block_size: number(words)?,
+        net: number(words)?,
+        kvm: match words.next() {
+            Some("0") => false,
+            Some("1") => true,
+            _ => return Err(damaged("a demand's KVM flag")),
+        },
     };
-    Ok(Resources {
-        cpu_milli: n()?,
-        mem_bytes: n()?,
-        gpus: u32::try_from(n()?).map_err(|_| damaged("a need's GPUs"))?,
-        disk_bytes: n()?,
+    if words.next().is_some() {
+        return Err(damaged("trailing demand fields"));
+    }
+    Ok(Demand {
+        need,
+        kind,
+        class,
+        ask,
     })
+}
+
+fn workload(next: &mut u64) -> Result<WorkloadId, Stop> {
+    let id = WorkloadId(*next);
+    *next = next
+        .checked_add(1)
+        .ok_or_else(|| damaged("the node's workload ids"))?;
+    Ok(id)
+}
+
+/// The full-demand representation used by shell envelopes; GPU models are names.
+pub fn encode_demand(demand: &Demand, models: &[String]) -> Result<String, Stop> {
+    demand_text(demand, models)
+}
+
+/// Decodes exactly one full demand, refusing legacy/trailing/unknown-model fields.
+pub fn decode_demand(text: &str, models: &[String]) -> Result<Demand, Stop> {
+    demand_of(&mut text.split(' '), models)
+}
+
+struct BoundedText {
+    text: String,
+    max: usize,
+}
+impl std::fmt::Write for BoundedText {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        let len = self
+            .text
+            .len()
+            .checked_add(text.len())
+            .ok_or(std::fmt::Error)?;
+        if len > self.max {
+            return Err(std::fmt::Error);
+        }
+        self.text
+            .try_reserve_exact(text.len())
+            .map_err(|_| std::fmt::Error)?;
+        self.text.push_str(text);
+        Ok(())
+    }
+}
+
+fn flag<'a>(words: &mut impl Iterator<Item = &'a str>) -> Result<bool, Stop> {
+    match words.next() {
+        Some("0") => Ok(false),
+        Some("1") => Ok(true),
+        _ => Err(damaged("a peer message's boolean")),
+    }
+}
+
+/// CP-T7.4: the one pure peer-message codec. The caller's common-wire byte budget bounds allocation;
+/// device models cross the boundary by name, never as a sender-local ModelId.
+pub fn encode_message(msg: &Msg, models: &[String], max_bytes: usize) -> Result<String, Stop> {
+    let (tag, key) = match msg {
+        Msg::Start { key, demand } => {
+            check_demand(demand, models)?;
+            ("start", key)
+        }
+        Msg::Holds { key } => ("holds", key),
+        Msg::Forget { key } => ("forget", key),
+        Msg::Started { key } => ("started", key),
+        Msg::Refused { key } => ("refused", key),
+        Msg::Held {
+            key,
+            holds,
+            ended,
+            created,
+        } => {
+            if (*created && !*holds) || (*ended && (!*holds || !*created)) {
+                return Err(damaged("an inconsistent Held message"));
+            }
+            ("held", key)
+        }
+        Msg::Ended { key } => ("ended", key),
+    };
+    let mut out = BoundedText {
+        text: String::new(),
+        max: max_bytes,
+    };
+    let full = || Stop::Full {
+        what: "peer message bytes",
+        bound: max_bytes,
+    };
+    write!(&mut out, "p1 {tag} {} {} {}", key.owner, key.epoch, key.seq).map_err(|_| full())?;
+    match msg {
+        Msg::Start { demand, .. } => {
+            out.write_char(' ').map_err(|_| full())?;
+            write_demand(&mut out, demand, models).map_err(|_| full())?;
+        }
+        Msg::Held {
+            holds,
+            ended,
+            created,
+            ..
+        } => write!(
+            &mut out,
+            " {} {} {}",
+            u8::from(*holds),
+            u8::from(*ended),
+            u8::from(*created)
+        )
+        .map_err(|_| full())?,
+        Msg::Holds { .. }
+        | Msg::Forget { .. }
+        | Msg::Started { .. }
+        | Msg::Refused { .. }
+        | Msg::Ended { .. } => {}
+    }
+    Ok(out.text)
+}
+
+/// Refuses oversized, incomplete, legacy and malformed messages before the state machine.
+pub fn decode_message(text: &str, models: &[String], max_bytes: usize) -> Result<Msg, Stop> {
+    if text.len() > max_bytes {
+        return Err(Stop::Full {
+            what: "peer message bytes",
+            bound: max_bytes,
+        });
+    }
+    let mut words = text.split(' ');
+    if words.next() != Some("p1") {
+        return Err(damaged("a missing or unsupported peer message version"));
+    }
+    let tag = words
+        .next()
+        .ok_or_else(|| damaged("a peer message's tag"))?;
+    let key = Key {
+        owner: number(&mut words)?,
+        epoch: number(&mut words)?,
+        seq: number(&mut words)?,
+    };
+    let msg = match tag {
+        "start" => {
+            return Ok(Msg::Start {
+                key,
+                demand: demand_of(&mut words, models)?,
+            });
+        }
+        "holds" => Msg::Holds { key },
+        "forget" => Msg::Forget { key },
+        "started" => Msg::Started { key },
+        "refused" => Msg::Refused { key },
+        "ended" => Msg::Ended { key },
+        "held" => {
+            let (holds, ended, created) = (flag(&mut words)?, flag(&mut words)?, flag(&mut words)?);
+            if (created && !holds) || (ended && (!holds || !created)) {
+                return Err(damaged("an inconsistent Held message"));
+            }
+            Msg::Held {
+                key,
+                holds,
+                ended,
+                created,
+            }
+        }
+        _ => return Err(damaged("an unknown peer message tag")),
+    };
+    if words.next().is_some() {
+        return Err(damaged("trailing peer message fields"));
+    }
+    Ok(msg)
 }
 
 /// A record's name read back: its kind and key.
@@ -196,7 +496,20 @@ fn parse_name(name: &str) -> Option<(&str, Key)> {
     if parts.next().is_some() {
         return None;
     }
-    Some((kind, Key { owner, epoch, seq }))
+    let key = Key { owner, epoch, seq };
+    if key.name(kind) == name {
+        Some((kind, key))
+    } else {
+        None
+    }
+}
+
+/// Caller-derived record budgets: the shell uses its runtime/host admission bound. Pending and
+/// terminal rows count too, until the owner acknowledges them; overflow is an explicit refusal.
+#[derive(Debug, Clone, Copy)]
+pub struct Budget {
+    pub owned: usize,
+    pub ran: usize,
 }
 
 /// One node: the boxes it owns, and the boxes it runs.
@@ -208,6 +521,12 @@ pub struct Node {
     ledger: lb::Runner,
     /// The owner's view: each node's room less what this owner placed there.
     view: FitIndex,
+    /// Actual receiver admissions, including device ownership, independent of owner guesses.
+    admission: FitIndex,
+    models: Vec<String>,
+    next_workload: u64,
+    budget: Budget,
+    pick: Pick,
     owned: BTreeMap<Key, Owned>,
     ran: BTreeMap<Key, Ran>,
     /// For the shell: what the node told its clients and its runtime.
@@ -220,133 +539,307 @@ impl Node {
     pub fn boot(
         id: NodeId,
         nodes: &[NodeSpec],
+        models: &[String],
+        budget: Budget,
+        pick: Pick,
         records: &mut impl Records,
         runtime: impl Fn(Key) -> Boxed,
     ) -> Result<Node, Stop> {
         let spec = usize::try_from(id.0)
             .ok()
             .and_then(|at| nodes.get(at))
+            .filter(|n| n.id == id)
             .ok_or_else(|| damaged("a node not in the cluster"))?;
-        let mut epoch = 0u64;
+        let mut names = BTreeSet::new();
+        for name in models {
+            if name.is_empty()
+                || name == "-"
+                || crate::model::model_name(name) != *name
+                || !names.insert(name)
+            {
+                return Err(damaged("the shared device model table"));
+            }
+        }
+        for device in nodes.iter().flat_map(|n| &n.devices) {
+            if device.model != ModelId::UNNAMED
+                && usize::try_from(device.model.0)
+                    .ok()
+                    .and_then(|at| models.get(at))
+                    .is_none()
+            {
+                return Err(damaged("a node device's unknown model"));
+            }
+        }
+        let mut view = FitIndex::new(nodes).map_err(|e| Stop::Damaged(e.to_string()))?;
+        let mut admission = view.clone();
+        let (mut epoch, mut next_workload) = (0u64, 0u64);
+        let mut epoch_seen = false;
         let (mut owned, mut ran) = (BTreeMap::new(), BTreeMap::new());
+        let known = |n: NodeId| {
+            usize::try_from(n.0)
+                .ok()
+                .and_then(|at| nodes.get(at))
+                .is_some_and(|s| s.id == n)
+        };
         for (name, value) in records.all()? {
-            let mut words = value.split(' ');
             if name == "epoch" {
+                if epoch_seen {
+                    return Err(damaged("a repeated epoch row"));
+                }
+                epoch_seen = true;
                 epoch = value.parse().map_err(|_| damaged("the epoch"))?;
                 continue;
             }
+            let mut words = value.split(' ');
             let (kind, key) = parse_name(&name).ok_or_else(|| damaged("a record's name"))?;
+            if !known(NodeId(key.owner)) {
+                return Err(damaged("a record's unknown owner"));
+            }
             match kind {
                 "own" => {
+                    if owned.contains_key(&key) {
+                        return Err(damaged("a repeated owned row"));
+                    }
+                    if key.owner != id.0 {
+                        return Err(damaged("a foreign owned row"));
+                    }
                     let state = match (words.next(), words.next().map(str::parse::<u32>)) {
-                        (Some("asked"), Some(Ok(_))) => State::Asked,
-                        (Some("at"), Some(Ok(n))) => State::At(NodeId(n)),
-                        (Some("done"), Some(Ok(n))) => State::Done(NodeId(n)),
+                        (Some("asked"), Some(Ok(0))) => State::Asked,
+                        (Some("at"), Some(Ok(n))) if known(NodeId(n)) => State::At(NodeId(n)),
+                        (Some("done"), Some(Ok(n))) if known(NodeId(n)) => State::Done(NodeId(n)),
                         _ => return Err(damaged("an owned box's state")),
                     };
-                    let need = need_of(&mut words)?;
+                    let demand = demand_of(&mut words, models)?;
+                    let workload = workload(&mut next_workload)?;
+                    if let State::At(n) = state {
+                        if view.verdict(n, &demand) != Ok(Verdict::Admits) {
+                            return Err(damaged("an owned box past its node's admission"));
+                        }
+                        view.take(n, workload, &demand)
+                            .map_err(|e| Stop::Damaged(e.to_string()))?;
+                    }
+                    if owned.len() >= budget.owned {
+                        return Err(Stop::Full {
+                            what: "owned records",
+                            bound: budget.owned,
+                        });
+                    }
                     owned.insert(
                         key,
                         Owned {
-                            need,
+                            demand,
+                            workload,
                             state,
                             tried: BTreeSet::new(),
                         },
                     );
                 }
                 "ran" => {
-                    let owner = words
-                        .next()
-                        .and_then(|w| w.parse().ok())
-                        .ok_or_else(|| damaged("a record's owner"))?;
-                    let ended = match words.next() {
-                        Some("running") => false,
-                        Some("ended") => true,
+                    if ran.contains_key(&key) {
+                        return Err(damaged("a repeated runner row"));
+                    }
+                    let owner = NodeId(number(&mut words)?);
+                    if owner.0 != key.owner || !known(owner) {
+                        return Err(damaged("a record's owner"));
+                    }
+                    let (created, ended) = match words.next() {
+                        Some("creating") => (false, false),
+                        Some("running") => (true, false),
+                        Some("ended") => (true, true),
                         _ => return Err(damaged("a record's end")),
                     };
-                    let need = need_of(&mut words)?;
+                    let demand = demand_of(&mut words, models)?;
+                    if ran.len() >= budget.ran {
+                        return Err(Stop::Full {
+                            what: "runner records",
+                            bound: budget.ran,
+                        });
+                    }
                     ran.insert(
                         key,
                         Ran {
-                            owner: NodeId(owner),
-                            need,
-                            at: None,
+                            owner,
+                            demand,
+                            workload: workload(&mut next_workload)?,
+                            created,
                             ended,
+                            at: None,
                         },
                     );
                 }
                 _ => return Err(damaged("a record's kind")),
             }
         }
-        let epoch = epoch.checked_add(1).ok_or_else(|| damaged("the epoch"))?;
-        records.put("epoch", &epoch.to_string())?;
-        let mut view = FitIndex::new(nodes).map_err(|e| Stop::Damaged(e.to_string()))?;
-        for (key, o) in &owned {
-            if let State::At(n) = o.state {
-                view.take(n, key.workload(), &demand(o.need))
-                    .map_err(|e| Stop::Damaged(e.to_string()))?;
-            }
+        if ran
+            .iter()
+            .any(|(key, r)| owned.get(key).is_some_and(|o| o.demand != r.demand))
+        {
+            return Err(damaged("owned and runner rows disagree on the demand"));
         }
+        if owned.keys().any(|k| k.epoch > epoch) {
+            return Err(damaged("an owned row ahead of its epoch"));
+        }
+        let epoch = epoch.checked_add(1).ok_or_else(|| damaged("the epoch"))?;
         let mut ledger = lb::Runner::new(lb::RunnerId(id.0), amounts(&spec.capacity), 1);
-        let mut node = Node {
-            id,
-            epoch,
-            next: 0,
-            ledger: lb::Runner::new(lb::RunnerId(id.0), [0; lb::DIMS], 1),
-            view,
-            owned,
-            ran: BTreeMap::new(),
-            told: Vec::new(),
-        };
-        // Each record against the runtime: running, it is kept (the agent outlived); exited while the
-        // agent was down, it ended; never created, its record goes and its owner places it again.
-        let mut kept = Vec::new();
-        let mut keys = Vec::new();
-        for (key, r) in ran {
-            let r = match (r.ended, runtime(key)) {
+        let (mut kept, mut keys, mut recovered) = (Vec::new(), Vec::new(), BTreeMap::new());
+        for (key, mut r) in ran {
+            match (r.ended, runtime(key)) {
+                (true, Boxed::Running) => {
+                    return Err(damaged("an ended record whose runtime still runs"));
+                }
                 (false, Boxed::Running) => {
+                    if admission.verdict(id, &r.demand) != Ok(Verdict::Admits) {
+                        return Err(damaged("a kept box past the node's admission"));
+                    }
+                    admission
+                        .take(id, r.workload, &r.demand)
+                        .map_err(|e| Stop::Damaged(e.to_string()))?;
                     kept.push(lb::Kept {
                         owner: lb::OwnerId(r.owner.0),
                         run: lb::Handle::NONE,
-                        need: amounts(&r.need),
+                        need: amounts(&r.demand.need),
                     });
                     keys.push(key);
-                    r
+                    if !r.created {
+                        r.created = true;
+                        records.put(&key.name("ran"), &ran_text(&r, models)?)?;
+                    }
                 }
                 (false, Boxed::Exited) => {
-                    records.put(&key.name("ran"), &ran_text(&r, true))?;
-                    Ran { ended: true, ..r }
+                    r.created = true;
+                    r.ended = true;
+                    records.put(&key.name("ran"), &ran_text(&r, models)?)?;
                 }
                 (false, Boxed::Absent) => {
                     records.remove(&key.name("ran"))?;
                     continue;
                 }
-                (true, _) => r,
-            };
-            node.ran.insert(key, r);
+                (true, _) => {}
+            }
+            recovered.insert(key, r);
         }
         for (key, at) in keys.iter().zip(ledger.recover(&kept)) {
-            let Some(at) = at else {
-                return Err(damaged("a kept box past the node's room"));
-            };
-            if let Some(r) = node.ran.get_mut(key) {
+            let at = at.ok_or_else(|| damaged("a kept box past the node's room"))?;
+            if let Some(r) = recovered.get_mut(key) {
                 r.at = Some(at);
             }
         }
-        node.ledger = ledger;
-        Ok(node)
+        records.put("epoch", &epoch.to_string())?;
+        Ok(Node {
+            id,
+            epoch,
+            next: 0,
+            ledger,
+            view,
+            admission,
+            models: models.to_vec(),
+            next_workload,
+            budget,
+            pick,
+            owned,
+            ran: recovered,
+            told: Vec::new(),
+        })
     }
 
     pub fn id(&self) -> NodeId {
         self.id
     }
 
+    /// Feeds the existing scorer/admission with a fresh GPU sample, retaining reservations.
+    pub fn set_gpu_load(
+        &mut self,
+        node: NodeId,
+        device: usize,
+        load: crate::model::GpuLoad,
+    ) -> Result<(), Stop> {
+        self.view
+            .set_gpu_load(node, device, load)
+            .map_err(|e| Stop::Damaged(e.to_string()))?;
+        self.admission
+            .set_gpu_load(node, device, load)
+            .map_err(|e| Stop::Damaged(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Updates the same picker from caller-learned policy inputs.
+    pub fn set_pick(&mut self, pick: Pick) {
+        self.pick = pick;
+    }
+
+    /// Refreshes live facts without forgetting reservations. Unsafe capacity/device shrink fails
+    /// atomically; the shell must refuse further admission until it resolves incompatible facts.
+    pub fn refresh_node(&mut self, spec: NodeSpec) -> Result<(), Stop> {
+        for device in &spec.devices {
+            if device.model != ModelId::UNNAMED
+                && usize::try_from(device.model.0)
+                    .ok()
+                    .and_then(|at| self.models.get(at))
+                    .is_none()
+            {
+                return Err(damaged("a refreshed device's model"));
+            }
+        }
+        // Both preflights are pure; this node cannot change between them and the updates below.
+        self.view
+            .check_refresh_node(&spec)
+            .map_err(|e| Stop::Damaged(e.to_string()))?;
+        self.admission
+            .check_refresh_node(&spec)
+            .map_err(|e| Stop::Damaged(e.to_string()))?;
+        self.view
+            .refresh_node(&spec)
+            .map_err(|e| Stop::Damaged(e.to_string()))?;
+        self.admission
+            .refresh_node(&spec)
+            .map_err(|e| Stop::Damaged(e.to_string()))?;
+        if spec.id == self.id {
+            self.ledger
+                .set_budget(amounts(&spec.capacity), &mut lb::RunnerOut::new());
+        }
+        Ok(())
+    }
+
+    /// The full durable request, for recovery of the shell's enveloped runtime payload.
+    pub fn demand(&self, key: Key) -> Option<Demand> {
+        self.owned
+            .get(&key)
+            .map(|o| o.demand)
+            .or_else(|| self.ran.get(&key).map(|r| r.demand))
+    }
+
+    /// At most Budget::owned entries. None means waiting; Some names the selected peer.
+    pub fn owned_keys(&self) -> impl Iterator<Item = (Key, Option<NodeId>)> + '_ {
+        self.owned.iter().map(|(&key, o)| {
+            (
+                key,
+                match o.state {
+                    State::Asked => None,
+                    State::At(n) | State::Done(n) => Some(n),
+                },
+            )
+        })
+    }
+
+    /// At most Budget::ran entries: (key, actually created, ended), including pending admissions.
+    pub fn ran_keys(&self) -> impl Iterator<Item = (Key, bool, bool)> + '_ {
+        self.ran.iter().map(|(&key, r)| (key, r.created, r.ended))
+    }
+
     /// A client asks a box: its row first, then its answer, then its place.
     pub fn submit(
         &mut self,
-        need: Resources,
+        demand: Demand,
         records: &mut impl Records,
     ) -> Result<(Key, Vec<(NodeId, Msg)>), Stop> {
+        check_demand(&demand, &self.models)?;
+        if self.owned.len() >= self.budget.owned {
+            return Err(Stop::Full {
+                what: "owned records",
+                bound: self.budget.owned,
+            });
+        }
+        let workload = workload(&mut self.next_workload)?;
         let key = Key {
             owner: self.id.0,
             epoch: self.epoch,
@@ -356,11 +849,15 @@ impl Node {
             .next
             .checked_add(1)
             .ok_or_else(|| damaged("a box number"))?;
-        records.put(&key.name("own"), &own_text(State::Asked, &need))?;
+        records.put(
+            &key.name("own"),
+            &own_text(State::Asked, &demand, &self.models)?,
+        )?;
         self.owned.insert(
             key,
             Owned {
-                need,
+                demand,
+                workload,
                 state: State::Asked,
                 tried: BTreeSet::new(),
             },
@@ -384,30 +881,22 @@ impl Node {
         if o.state != State::Asked {
             return Ok(());
         }
-        let d = demand(o.need);
-        let mut best: Option<crate::index::Key> = None;
-        for n in 0..self.view.len() {
-            let n = NodeId(u32::try_from(n).map_err(|_| damaged("a node id"))?);
-            if o.tried.contains(&n) || self.view.verdict(n, &d) != Ok(Verdict::Admits) {
-                continue;
-            }
-            let k = self.view.key(n).map_err(|e| Stop::Damaged(e.to_string()))?;
-            if best.is_none_or(|b| k < b) {
-                best = Some(k);
-            }
-        }
-        let Some(best) = best else {
+        let d = o.demand;
+        let Some(best) = self.view.fit_excluding(&d, &self.pick, &o.tried).best else {
             return Ok(());
         };
-        let (need, to) = (o.need, best.node);
-        records.put(&key.name("own"), &own_text(State::At(to), &need))?;
+        let (demand, to, workload) = (o.demand, best.node, o.workload);
+        records.put(
+            &key.name("own"),
+            &own_text(State::At(to), &demand, &self.models)?,
+        )?;
         self.view
-            .take(to, key.workload(), &d)
+            .take(to, workload, &d)
             .map_err(|e| Stop::Damaged(e.to_string()))?;
         if let Some(o) = self.owned.get_mut(&key) {
             o.state = State::At(to);
         }
-        out.push((to, Msg::Start { key, need }));
+        out.push((to, Msg::Start { key, demand }));
         Ok(())
     }
 
@@ -425,10 +914,13 @@ impl Node {
         if o.state != State::At(from) {
             return Ok(());
         }
-        let need = o.need;
-        records.put(&key.name("own"), &own_text(State::Asked, &need))?;
+        let (demand, workload) = (o.demand, o.workload);
+        records.put(
+            &key.name("own"),
+            &own_text(State::Asked, &demand, &self.models)?,
+        )?;
         self.view
-            .give(from, key.workload(), &demand(need))
+            .give(from, workload, &demand)
             .map_err(|e| Stop::Damaged(e.to_string()))?;
         if let Some(o) = self.owned.get_mut(&key) {
             o.state = State::Asked;
@@ -450,12 +942,15 @@ impl Node {
             out.push((from, Msg::Forget { key }));
             return Ok(());
         };
-        let need = o.need;
+        let (demand, workload) = (o.demand, o.workload);
         match o.state {
             State::At(n) if n == from => {
-                records.put(&key.name("own"), &own_text(State::Done(from), &need))?;
+                records.put(
+                    &key.name("own"),
+                    &own_text(State::Done(from), &demand, &self.models)?,
+                )?;
                 self.view
-                    .give(from, key.workload(), &demand(need))
+                    .give(from, workload, &demand)
                     .map_err(|e| Stop::Damaged(e.to_string()))?;
             }
             State::Done(n) if n == from => {}
@@ -478,9 +973,25 @@ impl Node {
         msg: Msg,
         records: &mut impl Records,
     ) -> Result<Vec<(NodeId, Msg)>, Stop> {
+        if usize::try_from(from.0)
+            .ok()
+            .is_none_or(|n| n >= self.view.len())
+        {
+            return Err(damaged("a message's unknown peer"));
+        }
+        let (key, owner_message) = match msg {
+            Msg::Start { key, .. } | Msg::Holds { key } | Msg::Forget { key } => (key, true),
+            Msg::Started { key }
+            | Msg::Refused { key }
+            | Msg::Held { key, .. }
+            | Msg::Ended { key } => (key, false),
+        };
+        if key.owner != if owner_message { from.0 } else { self.id.0 } {
+            return Err(damaged("a message's box owner"));
+        }
         let mut out = Vec::new();
         match msg {
-            Msg::Start { key, need } => self.start(from, key, need, records, &mut out)?,
+            Msg::Start { key, demand } => self.start(from, key, demand, records, &mut out)?,
             Msg::Holds { key } => {
                 let r = self.ran.get(&key);
                 out.push((
@@ -489,6 +1000,7 @@ impl Node {
                         key,
                         holds: r.is_some(),
                         ended: r.is_some_and(|r| r.ended),
+                        created: r.is_some_and(|r| r.created),
                     },
                 ));
             }
@@ -515,12 +1027,14 @@ impl Node {
                 key,
                 holds: true,
                 ended: true,
+                ..
             }
             | Msg::Ended { key } => self.ended(key, from, records, &mut out)?,
             Msg::Held {
                 key,
                 holds: true,
                 ended: false,
+                created: true,
             } => {
                 if self
                     .owned
@@ -530,6 +1044,12 @@ impl Node {
                     self.told.push(Told::Started(key, from));
                 }
             }
+            Msg::Held {
+                holds: true,
+                ended: false,
+                created: false,
+                ..
+            } => {}
         }
         Ok(out)
     }
@@ -540,41 +1060,124 @@ impl Node {
         &mut self,
         owner: NodeId,
         key: Key,
-        need: Resources,
+        demand: Demand,
         records: &mut impl Records,
         out: &mut Vec<(NodeId, Msg)>,
     ) -> Result<(), Stop> {
+        if owner.0 != key.owner
+            || usize::try_from(owner.0)
+                .ok()
+                .is_none_or(|n| n >= self.view.len())
+        {
+            return Err(damaged("a start's owner"));
+        }
+        check_demand(&demand, &self.models)?;
+        if self.owned.get(&key).is_some_and(|o| o.demand != demand) {
+            return Err(damaged("a start disagrees with its owned demand"));
+        }
         if let Some(r) = self.ran.get(&key) {
+            if r.owner != owner || r.demand != demand {
+                return Err(damaged("a start reuses a key with a different demand"));
+            }
             out.push((
                 owner,
                 if r.ended {
                     Msg::Ended { key }
-                } else {
+                } else if r.created {
                     Msg::Started { key }
+                } else {
+                    Msg::Held {
+                        key,
+                        holds: true,
+                        ended: false,
+                        created: false,
+                    }
                 },
             ));
+            return Ok(());
+        }
+        if self.ran.len() >= self.budget.ran
+            || self.admission.verdict(self.id, &demand) != Ok(Verdict::Admits)
+        {
+            out.push((owner, Msg::Refused { key }));
             return Ok(());
         }
         let start = lb::Start {
             owner: lb::OwnerId(owner.0),
             run: lb::Handle::NONE,
             epoch: self.ledger.epoch(),
-            need: amounts(&need),
+            need: amounts(&demand.need),
         };
         let lb::ToOwner::Started { at, .. } = self.ledger.start(start) else {
             out.push((owner, Msg::Refused { key }));
             return Ok(());
         };
+        let workload = workload(&mut self.next_workload)?;
+        self.admission
+            .take(self.id, workload, &demand)
+            .map_err(|e| Stop::Damaged(e.to_string()))?;
         let r = Ran {
             owner,
-            need,
+            demand,
+            workload,
+            created: false,
             at: Some(at),
             ended: false,
         };
-        records.put(&key.name("ran"), &ran_text(&r, false))?;
+        records.put(&key.name("ran"), &ran_text(&r, &self.models)?)?;
         self.ran.insert(key, r);
-        self.told.push(Told::Create(key));
-        out.push((owner, Msg::Started { key }));
+        self.told.push(Told::Create(key, demand));
+        Ok(())
+    }
+
+    /// Runtime feedback, after actual successful creation. Admission alone never publishes Started.
+    pub fn created(
+        &mut self,
+        key: Key,
+        records: &mut impl Records,
+    ) -> Result<Vec<(NodeId, Msg)>, Stop> {
+        let Some(mut r) = self.ran.get(&key).copied() else {
+            return Err(damaged("creation without an admission"));
+        };
+        if r.ended {
+            return Ok(vec![(r.owner, Msg::Ended { key })]);
+        }
+        if !r.created {
+            r.created = true;
+            records.put(&key.name("ran"), &ran_text(&r, &self.models)?)?;
+            self.ran.insert(key, r);
+        }
+        Ok(vec![(r.owner, Msg::Started { key })])
+    }
+
+    /// Runtime refused before creating anything: durable removal permits this owner's retry.
+    pub fn create_refused(
+        &mut self,
+        key: Key,
+        records: &mut impl Records,
+    ) -> Result<Vec<(NodeId, Msg)>, Stop> {
+        let Some(r) = self.ran.get(&key).copied() else {
+            return Ok(Vec::new());
+        };
+        if r.created || r.ended {
+            return Err(damaged("creation refusal after creation"));
+        }
+        records.remove(&key.name("ran"))?;
+        self.release(&r)?;
+        self.ran.remove(&key);
+        Ok(vec![(r.owner, Msg::Refused { key })])
+    }
+
+    fn release(&mut self, r: &Ran) -> Result<(), Stop> {
+        if let Some(at) = r.at {
+            let mut out = lb::RunnerOut::new();
+            self.ledger
+                .end(at, &mut out)
+                .ok_or_else(|| damaged("a box the ledger didn't hold"))?;
+            self.admission
+                .give(self.id, r.workload, &r.demand)
+                .map_err(|e| Stop::Damaged(e.to_string()))?;
+        }
         Ok(())
     }
 
@@ -588,14 +1191,15 @@ impl Node {
         let Some(r) = self.ran.get(&key).copied().filter(|r| !r.ended) else {
             return Ok(Vec::new());
         };
-        if let Some(at) = r.at {
-            let mut rout = lb::RunnerOut::new();
-            self.ledger
-                .end(at, &mut rout)
-                .ok_or_else(|| damaged("a box the ledger didn't hold"))?;
-        }
-        records.put(&key.name("ran"), &ran_text(&r, true))?;
+        let ended = Ran {
+            created: true,
+            ended: true,
+            ..r
+        };
+        records.put(&key.name("ran"), &ran_text(&ended, &self.models)?)?;
+        self.release(&r)?;
         if let Some(r) = self.ran.get_mut(&key) {
+            r.created = true;
             r.ended = true;
             r.at = None;
         }
@@ -685,18 +1289,28 @@ impl Node {
     }
 }
 
-fn own_text(state: State, need: &Resources) -> String {
+fn own_text(state: State, demand: &Demand, models: &[String]) -> Result<String, Stop> {
     let (word, n) = match state {
         State::Asked => ("asked", 0),
         State::At(n) => ("at", n.0),
         State::Done(n) => ("done", n.0),
     };
-    format!("{word} {n} {}", need_text(need))
+    Ok(format!("{word} {n} {}", demand_text(demand, models)?))
 }
 
-fn ran_text(r: &Ran, ended: bool) -> String {
-    let end = if ended { "ended" } else { "running" };
-    format!("{} {end} {}", r.owner.0, need_text(&r.need))
+fn ran_text(r: &Ran, models: &[String]) -> Result<String, Stop> {
+    let state = if r.ended {
+        "ended"
+    } else if r.created {
+        "running"
+    } else {
+        "creating"
+    };
+    Ok(format!(
+        "{} {state} {}",
+        r.owner.0,
+        demand_text(&r.demand, models)?
+    ))
 }
 
 /// Records in memory, for the simulator: what a node's disk keeps across its crashes.
@@ -817,6 +1431,7 @@ struct Link {
 /// laptop.
 pub struct World<R> {
     specs: Vec<NodeSpec>,
+    models: Vec<String>,
     nodes: Vec<Option<Node>>,
     records: Vec<Crashing<R>>,
     links: Vec<Link>,
@@ -832,6 +1447,15 @@ pub struct World<R> {
 impl<R: Records> World<R> {
     /// The cluster's nodes, each with its records, booted and linked.
     pub fn new(specs: Vec<NodeSpec>, records: Vec<R>, seed: u64) -> Result<Self, Stop> {
+        Self::with_models(specs, Vec::new(), records, seed)
+    }
+
+    pub fn with_models(
+        specs: Vec<NodeSpec>,
+        models: Vec<String>,
+        records: Vec<R>,
+        seed: u64,
+    ) -> Result<Self, Stop> {
         let n = specs.len();
         if records.len() != n || n == 0 {
             return Err(damaged("a node's records each"));
@@ -841,6 +1465,7 @@ impl<R: Records> World<R> {
             records: records.into_iter().map(Crashing::new).collect(),
             links: (0..n.saturating_mul(n)).map(|_| Link::default()).collect(),
             specs,
+            models,
             boxes: BTreeMap::new(),
             created: BTreeMap::new(),
             answered: BTreeSet::new(),
@@ -887,7 +1512,7 @@ impl<R: Records> World<R> {
         let id = NodeId(u32::try_from(i).map_err(|_| damaged("a node id"))?);
         for t in told {
             match t {
-                Told::Create(key) => {
+                Told::Create(key, _) => {
                     let c = self.created.entry(key).or_insert(0);
                     *c = c.saturating_add(1);
                     if *c > 1 {
@@ -895,6 +1520,21 @@ impl<R: Records> World<R> {
                     }
                     self.report.started = self.report.started.saturating_add(1);
                     self.boxes.insert(key, (id, Boxed::Running));
+                    let feedback = match (
+                        self.nodes.get_mut(i).and_then(Option::as_mut),
+                        self.records.get_mut(i),
+                    ) {
+                        (Some(node), Some(rec)) => node.created(key, rec),
+                        _ => return Err(damaged("runtime feedback to a missing node")),
+                    };
+                    match feedback {
+                        Ok(out) => self.send(i, out),
+                        Err(Stop::Crashed) => {
+                            self.crash(i);
+                            return Ok(());
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
                 Told::Ended(key) => {
                     let c = self.told_ended.entry(key).or_insert(0);
@@ -943,7 +1583,30 @@ impl<R: Records> World<R> {
             _ => Boxed::Absent,
         };
         let rec = self.records.get_mut(i).ok_or_else(|| damaged("records"))?;
-        match Node::boot(id, &self.specs, rec, runtime) {
+        let owned = self
+            .specs
+            .iter()
+            .try_fold(0u64, |sum, n| sum.checked_add(n.capacity.cpu_milli))
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or_else(|| damaged("the world's record budget"))?;
+        let ran = self
+            .specs
+            .get(i)
+            .and_then(|n| usize::try_from(n.capacity.cpu_milli).ok())
+            .ok_or_else(|| damaged("the world's runner budget"))?;
+        let pick = Pick {
+            scorer: Scorer::HEX,
+            ..Pick::default()
+        };
+        match Node::boot(
+            id,
+            &self.specs,
+            &self.models,
+            Budget { owned, ran },
+            pick,
+            rec,
+            runtime,
+        ) {
             Ok(node) => {
                 if let Some(slot) = self.nodes.get_mut(i) {
                     *slot = Some(node);
@@ -1011,7 +1674,7 @@ impl<R: Records> World<R> {
         let (Some(Some(node)), Some(rec)) = (self.nodes.get_mut(i), self.records.get_mut(i)) else {
             return Ok(());
         };
-        match node.submit(need, rec) {
+        match node.submit(plain(need), rec) {
             Ok((key, out)) => {
                 self.answered.insert(key);
                 self.report.asked = self.report.asked.saturating_add(1);
@@ -1229,6 +1892,14 @@ mod tests {
         disk_bytes: 0,
     };
 
+    fn test_budget() -> Budget {
+        let rows = usize::try_from(CAP.cpu_milli).unwrap();
+        Budget {
+            owned: rows,
+            ran: rows,
+        }
+    }
+
     fn run(nodes: u32, seed: u64, steps: u32) -> Report {
         let mut w = memory(nodes, CAP, seed).unwrap();
         for _ in 0..steps {
@@ -1292,29 +1963,706 @@ mod tests {
         assert!(all.started > 0 && all.crashes > 0, "{all:?}");
     }
 
+    /// AC-T7.4.1: receiver admission must enforce the runtime class, independently of the owner.
+    #[test]
+    fn a_receiver_refuses_oci_on_a_shards_only_macos_laptop() {
+        let mut spec = NodeSpec::new(NodeId(0), CAP);
+        spec.platform = crate::model::Platform {
+            os: crate::model::Os::Macos,
+            arch: crate::model::Arch::Aarch64,
+        };
+        spec.classes = crate::model::Classes::NONE.with(crate::model::Class::Shards);
+        let mut records = Memory::default();
+        let mut node = Node::boot(
+            NodeId(0),
+            &[spec],
+            &[],
+            test_budget(),
+            Pick::default(),
+            &mut records,
+            |_| Boxed::Absent,
+        )
+        .unwrap();
+        let key = Key {
+            owner: 0,
+            epoch: 1,
+            seq: 0,
+        };
+        let out = node
+            .hear(
+                NodeId(0),
+                Msg::Start {
+                    key,
+                    demand: plain(Resources {
+                        cpu_milli: 1,
+                        ..Resources::default()
+                    }),
+                },
+                &mut records,
+            )
+            .unwrap();
+        assert_eq!(out, vec![(NodeId(0), Msg::Refused { key })]);
+        assert!(node.told.is_empty());
+        assert_eq!(node.admitted(), [0; lb::DIMS]);
+    }
+
+    fn boot_test(specs: &[NodeSpec], models: &[String], records: &mut Memory) -> Node {
+        Node::boot(
+            NodeId(0),
+            specs,
+            models,
+            test_budget(),
+            Pick {
+                scorer: Scorer::HEX,
+                ..Pick::default()
+            },
+            records,
+            |_| Boxed::Absent,
+        )
+        .unwrap()
+    }
+
+    fn requested() -> Demand {
+        plain(Resources {
+            cpu_milli: 1,
+            ..Resources::default()
+        })
+    }
+    fn other_key(seq: u64) -> Key {
+        Key {
+            owner: 0,
+            epoch: 1,
+            seq,
+        }
+    }
+    fn start(
+        node: &mut Node,
+        key: Key,
+        demand: Demand,
+        records: &mut Memory,
+    ) -> Vec<(NodeId, Msg)> {
+        node.hear(NodeId(0), Msg::Start { key, demand }, records)
+            .unwrap()
+    }
+
+    /// AC-T7.4.1: a real macOS/arm64 Shards-only laptop uses the same peer path, and admission
+    /// publishes no Started until the runtime confirms successful creation.
+    #[test]
+    fn full_demand_macos_shards_laptop_waits_for_runtime_creation() {
+        let mut spec = NodeSpec::new(NodeId(0), CAP);
+        spec.platform = crate::model::Platform {
+            os: Os::Macos,
+            arch: Arch::Aarch64,
+        };
+        spec.virt = crate::model::Virt {
+            hvf: true,
+            ..crate::model::Virt::default()
+        };
+        spec.classes = spec.platform.os.classes(spec.virt);
+        let mut records = Memory::default();
+        let mut node = boot_test(&[spec], &[], &mut records);
+        let demand = Demand {
+            kind: Kind::Session,
+            class: Class::Shards,
+            ask: Ask {
+                os: Some(Os::Macos),
+                arch: Some(Arch::Aarch64),
+                ..Ask::default()
+            },
+            ..requested()
+        };
+        let (key, out) = node.submit(demand, &mut records).unwrap();
+        assert_eq!(out, vec![(NodeId(0), Msg::Start { key, demand })]);
+        assert!(start(&mut node, key, demand, &mut records).is_empty());
+        assert_eq!(
+            std::mem::take(&mut node.told),
+            vec![Told::Create(key, demand)]
+        );
+        let held = node
+            .hear(NodeId(0), Msg::Holds { key }, &mut records)
+            .unwrap();
+        assert_eq!(
+            held,
+            vec![(
+                NodeId(0),
+                Msg::Held {
+                    key,
+                    holds: true,
+                    ended: false,
+                    created: false
+                }
+            )]
+        );
+        node.hear(NodeId(0), held[0].1, &mut records).unwrap();
+        assert!(node.told.is_empty());
+        let out = node.created(key, &mut records).unwrap();
+        assert_eq!(out, vec![(NodeId(0), Msg::Started { key })]);
+        node.hear(NodeId(0), out[0].1, &mut records).unwrap();
+        assert_eq!(
+            std::mem::take(&mut node.told),
+            vec![Told::Started(key, NodeId(0))]
+        );
+        assert_eq!(node.demand(key), Some(demand));
+    }
+
+    /// AC-T7.4.1: receiving nodes recheck hard filters even when a stale/malicious owner sends Start.
+    #[test]
+    fn full_demand_receiver_rechecks_os_arch_and_class() {
+        let mut spec = NodeSpec::new(NodeId(0), CAP);
+        spec.classes = crate::model::Classes::NONE.with(Class::Oci);
+        let mut records = Memory::default();
+        let mut node = boot_test(&[spec], &[], &mut records);
+        for (seq, demand) in [
+            Demand {
+                ask: Ask {
+                    os: Some(Os::Windows),
+                    ..Ask::default()
+                },
+                ..requested()
+            },
+            Demand {
+                ask: Ask {
+                    arch: Some(Arch::Aarch64),
+                    ..Ask::default()
+                },
+                ..requested()
+            },
+            Demand {
+                class: Class::Shards,
+                ..requested()
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let key = other_key(u64::try_from(seq).unwrap());
+            assert_eq!(
+                start(&mut node, key, demand, &mut records),
+                vec![(NodeId(0), Msg::Refused { key })]
+            );
+        }
+        assert!(node.told.is_empty());
+        assert_eq!(node.records(), 0);
+        assert_eq!(node.admitted(), [0; lb::DIMS]);
+    }
+
+    /// AC-T7.4.1: VFIO functions are exclusive even though the amounts ledger has no VFIO dimension.
+    /// Keys that collided under epoch<<40 XOR seq must release only their own device.
+    #[test]
+    fn full_demand_receiver_reserves_devices_and_uses_lossless_local_ids() {
+        let mut spec = NodeSpec::new(NodeId(0), CAP);
+        spec.devices = vec![
+            crate::model::Device {
+                kind: crate::model::DeviceKind::Vfio,
+                model: ModelId::UNNAMED,
+                size: 0,
+                load: crate::model::GpuLoad::default()
+            };
+            2
+        ];
+        let mut records = Memory::default();
+        let mut node = boot_test(&[spec], &[], &mut records);
+        let demand = Demand {
+            ask: Ask {
+                vfio: 1,
+                ..Ask::default()
+            },
+            ..requested()
+        };
+        let a = Key {
+            owner: 0,
+            epoch: 1,
+            seq: 0,
+        };
+        let b = Key {
+            owner: 0,
+            epoch: 0,
+            seq: 1 << 40,
+        };
+        assert!(start(&mut node, a, demand, &mut records).is_empty());
+        assert!(start(&mut node, b, demand, &mut records).is_empty());
+        node.created(a, &mut records).unwrap();
+        node.created(b, &mut records).unwrap();
+        let c = other_key(2);
+        assert_eq!(
+            start(&mut node, c, demand, &mut records),
+            vec![(NodeId(0), Msg::Refused { key: c })]
+        );
+        node.end(a, &mut records).unwrap();
+        assert!(start(&mut node, c, demand, &mut records).is_empty());
+        assert_eq!(
+            start(&mut node, other_key(3), demand, &mut records),
+            vec![(NodeId(0), Msg::Refused { key: other_key(3) })]
+        );
+        node.end(b, &mut records).unwrap();
+        node.create_refused(c, &mut records).unwrap();
+        assert_eq!(node.admitted(), [0; lb::DIMS]);
+        assert!(start(&mut node, other_key(4), demand, &mut records).is_empty());
+    }
+
+    /// AC-T7.4.1: all fields survive own/ran records and reboot, including a remapped shared model
+    /// table. A recovered runtime hold still owns its GPU/VFIO/block/network devices.
+    #[test]
+    fn full_demand_reboot_preserves_every_constraint_and_device_hold() {
+        use crate::model::{Device, DeviceKind, GpuLoad};
+        let models = vec!["rtx-5060-ti".to_owned(), "other".to_owned()];
+        let mut spec = NodeSpec::new(NodeId(0), Resources { gpus: 2, ..CAP });
+        spec.devices = vec![
+            Device::gpu(ModelId(0), 16 << 30),
+            Device::gpu(ModelId(0), 16 << 30),
+        ];
+        spec.devices.extend(
+            [DeviceKind::Vfio, DeviceKind::Block, DeviceKind::Net].map(|kind| Device {
+                kind,
+                model: ModelId::UNNAMED,
+                size: 1 << 30,
+                load: GpuLoad::default(),
+            }),
+        );
+        let demand = Demand {
+            kind: Kind::Session,
+            need: Resources {
+                gpus: 1,
+                ..requested().need
+            },
+            ask: Ask {
+                os: Some(Os::Linux),
+                arch: Some(Arch::X86_64),
+                gpu_model: Some(ModelId(0)),
+                gpu_memory: 8 << 30,
+                vfio: 1,
+                block: 1,
+                block_size: 1 << 20,
+                net: 1,
+                kvm: true,
+            },
+            ..requested()
+        };
+        let mut records = Memory::default();
+        let mut node = boot_test(&[spec.clone()], &models, &mut records);
+        let (key, _) = node.submit(demand, &mut records).unwrap();
+        assert!(start(&mut node, key, demand, &mut records).is_empty());
+        let reordered = vec![models[1].clone(), models[0].clone()];
+        for d in &mut spec.devices {
+            if d.model == ModelId(0) {
+                d.model = ModelId(1);
+            }
+        }
+        let mut expected = demand;
+        expected.ask.gpu_model = Some(ModelId(1));
+        let mut node = Node::boot(
+            NodeId(0),
+            &[spec],
+            &reordered,
+            test_budget(),
+            Pick::default(),
+            &mut records,
+            |k| {
+                if k == key {
+                    Boxed::Running
+                } else {
+                    Boxed::Absent
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(node.demand(key), Some(expected));
+        assert_eq!(
+            node.ran_keys().collect::<Vec<_>>(),
+            vec![(key, true, false)]
+        );
+        assert_eq!(
+            start(&mut node, other_key(1), expected, &mut records),
+            vec![(NodeId(0), Msg::Refused { key: other_key(1) })]
+        );
+        let ended = node.end(key, &mut records).unwrap();
+        node.hear(NodeId(0), ended[0].1, &mut records).unwrap();
+        assert_eq!(node.owned(), 0);
+        assert_eq!(node.admitted(), [0; lb::DIMS]);
+        assert!(start(&mut node, other_key(2), expected, &mut records).is_empty());
+    }
+
+    /// AC-T7.4.1: a runtime refusal frees the actual devices and retains the owner's complete ask
+    /// while moving it to another peer. Silence/pending admission never permits replacement.
+    #[test]
+    fn full_demand_runtime_refusal_retries_without_erasing_constraints() {
+        let specs = vec![NodeSpec::new(NodeId(0), CAP), NodeSpec::new(NodeId(1), CAP)];
+        let mut own_records = Memory::default();
+        let mut run_records = Memory::default();
+        let mut owner = boot_test(&specs, &[], &mut own_records);
+        let mut receiver = boot_test(&specs, &[], &mut run_records);
+        let demand = Demand {
+            kind: Kind::Build,
+            ask: Ask {
+                os: Some(Os::Linux),
+                arch: Some(Arch::X86_64),
+                kvm: true,
+                ..Ask::default()
+            },
+            ..requested()
+        };
+        let (key, first) = owner.submit(demand, &mut own_records).unwrap();
+        assert_eq!(first[0].0, NodeId(0));
+        assert!(
+            receiver
+                .hear(NodeId(0), first[0].1, &mut run_records)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            owner.link_up(NodeId(0), &mut own_records).unwrap(),
+            vec![(NodeId(0), Msg::Holds { key })]
+        );
+        let refused = receiver.create_refused(key, &mut run_records).unwrap();
+        assert_eq!(receiver.admitted(), [0; lb::DIMS]);
+        let retry = owner
+            .hear(NodeId(0), refused[0].1, &mut own_records)
+            .unwrap();
+        assert_eq!(retry, vec![(NodeId(1), Msg::Start { key, demand })]);
+        assert_eq!(owner.demand(key), Some(demand));
+    }
+
+    /// AC-T7.4.1: peer placement uses the existing GPU-load scorer, not the lowest raw capacity key.
+    #[test]
+    fn full_demand_gpu_load_selects_the_idle_peer() {
+        let mut specs = vec![
+            NodeSpec::new(NodeId(0), Resources { gpus: 1, ..CAP }),
+            NodeSpec::new(NodeId(1), Resources { gpus: 1, ..CAP }),
+        ];
+        specs[0].devices[0].load.busy_per_mille = 1000;
+        let mut records = Memory::default();
+        let mut node = boot_test(&specs, &[], &mut records);
+        let demand = Demand {
+            need: Resources {
+                gpus: 1,
+                ..requested().need
+            },
+            ..requested()
+        };
+        let (key, out) = node.submit(demand, &mut records).unwrap();
+        assert_eq!(out[0].0, NodeId(1));
+        node.hear(NodeId(1), Msg::Ended { key }, &mut records)
+            .unwrap();
+        node.set_gpu_load(NodeId(0), 0, crate::model::GpuLoad::default())
+            .unwrap();
+        node.set_gpu_load(
+            NodeId(1),
+            0,
+            crate::model::GpuLoad {
+                busy_per_mille: 1000,
+                ..crate::model::GpuLoad::default()
+            },
+        )
+        .unwrap();
+        node.set_pick(Pick::default());
+        assert_eq!(node.submit(demand, &mut records).unwrap().1[0].0, NodeId(0));
+    }
+
+    /// AC-T7.4.1: full-demand rows reject legacy/trailing/unknown-model fields rather than silently
+    /// converting an incomplete request into default OCI. Caller budgets count pending rows.
+    #[test]
+    fn full_demand_codec_and_record_budgets_refuse_invalid_input() {
+        let demand = requested();
+        let text = demand_text(&demand, &[]).unwrap();
+        assert_eq!(demand_of(&mut text.split(' '), &[]).unwrap(), demand);
+        for text in [
+            "1 1 0 0".to_owned(),
+            format!("{text} trailing"),
+            text.replace(" - 0 0", " unknown-model 0 0"),
+        ] {
+            assert!(matches!(
+                demand_of(&mut text.split(' '), &[]),
+                Err(Stop::Damaged(_))
+            ));
+        }
+        let specs = vec![NodeSpec::new(NodeId(0), CAP)];
+        let mut records = Memory::default();
+        let mut node = Node::boot(
+            NodeId(0),
+            &specs,
+            &[],
+            Budget { owned: 1, ran: 1 },
+            Pick::default(),
+            &mut records,
+            |_| Boxed::Absent,
+        )
+        .unwrap();
+        let (key, _) = node.submit(demand, &mut records).unwrap();
+        assert!(matches!(
+            node.submit(demand, &mut records),
+            Err(Stop::Full {
+                what: "owned records",
+                bound: 1
+            })
+        ));
+        assert!(start(&mut node, key, demand, &mut records).is_empty());
+        assert_eq!(
+            start(&mut node, other_key(1), demand, &mut records),
+            vec![(NodeId(0), Msg::Refused { key: other_key(1) })]
+        );
+    }
+
+    /// CP-T7.4: crash before/after runtime-created publication; recovery never creates twice.
+    #[test]
+    fn full_demand_runtime_feedback_survives_each_created_write_crash() {
+        let specs = vec![NodeSpec::new(NodeId(0), CAP)];
+        for when in [When::Before, When::After] {
+            let mut rec = Crashing::new(Memory::default());
+            let mut node = Node::boot(
+                NodeId(0),
+                &specs,
+                &[],
+                test_budget(),
+                Pick::default(),
+                &mut rec,
+                |_| Boxed::Absent,
+            )
+            .unwrap();
+            let (key, _) = node.submit(requested(), &mut rec).unwrap();
+            assert!(
+                node.hear(
+                    NodeId(0),
+                    Msg::Start {
+                        key,
+                        demand: requested()
+                    },
+                    &mut rec
+                )
+                .unwrap()
+                .is_empty()
+            );
+            assert_eq!(
+                std::mem::take(&mut node.told),
+                vec![Told::Create(key, requested())]
+            );
+            rec.armed = Some(when);
+            assert_eq!(node.created(key, &mut rec), Err(Stop::Crashed));
+            let mut node = Node::boot(
+                NodeId(0),
+                &specs,
+                &[],
+                test_budget(),
+                Pick::default(),
+                &mut rec,
+                |_| Boxed::Running,
+            )
+            .unwrap();
+            assert!(
+                node.told.is_empty(),
+                "recovery re-created a runtime-owned box: {when:?}"
+            );
+            assert_eq!(
+                node.ran_keys().collect::<Vec<_>>(),
+                vec![(key, true, false)]
+            );
+            let held = node.hear(NodeId(0), Msg::Holds { key }, &mut rec).unwrap();
+            node.hear(NodeId(0), held[0].1, &mut rec).unwrap();
+            assert_eq!(
+                std::mem::take(&mut node.told),
+                vec![Told::Started(key, NodeId(0))]
+            );
+            let end = node.end(key, &mut rec).unwrap();
+            node.hear(NodeId(0), end[0].1, &mut rec).unwrap();
+            assert_eq!(node.admitted(), [0; lb::DIMS]);
+            assert_eq!(node.owned(), 0);
+            assert_eq!(rec.crashes, 1);
+        }
+    }
+
+    /// CP-T7.4: wire variants roundtrip, names remap, full-width ids and exact byte bounds survive.
+    #[test]
+    fn full_demand_peer_codec_is_bounded_complete_and_name_based() {
+        let models = vec!["gpu-a".to_owned(), "gpu-b".to_owned()];
+        let demand = Demand {
+            ask: Ask {
+                gpu_model: Some(ModelId(0)),
+                ..Ask::default()
+            },
+            ..requested()
+        };
+        let key = Key {
+            owner: u32::MAX,
+            epoch: u64::MAX,
+            seq: u64::MAX,
+        };
+        let budget = format!(
+            "p1 start {} {} {} {}",
+            key.owner,
+            key.epoch,
+            key.seq,
+            encode_demand(&demand, &models).unwrap()
+        )
+        .len();
+        for msg in [
+            Msg::Start { key, demand },
+            Msg::Holds { key },
+            Msg::Forget { key },
+            Msg::Started { key },
+            Msg::Refused { key },
+            Msg::Held {
+                key,
+                holds: true,
+                ended: false,
+                created: false,
+            },
+            Msg::Held {
+                key,
+                holds: true,
+                ended: true,
+                created: true,
+            },
+            Msg::Ended { key },
+        ] {
+            let text = encode_message(&msg, &models, budget).unwrap();
+            assert_eq!(decode_message(&text, &models, text.len()).unwrap(), msg);
+            assert!(matches!(
+                encode_message(&msg, &models, text.len() - 1),
+                Err(Stop::Full { .. })
+            ));
+            assert!(matches!(
+                decode_message(&text, &models, text.len() - 1),
+                Err(Stop::Full { .. })
+            ));
+            assert!(matches!(
+                decode_message(
+                    &format!("{text} extra"),
+                    &models,
+                    text.len() + " extra".len()
+                ),
+                Err(Stop::Damaged(_))
+            ));
+        }
+        let text = encode_message(&Msg::Start { key, demand }, &models, budget).unwrap();
+        let swapped = vec![models[1].clone(), models[0].clone()];
+        let mut remapped = demand;
+        remapped.ask.gpu_model = Some(ModelId(1));
+        assert_eq!(
+            decode_message(&text, &swapped, text.len()).unwrap(),
+            Msg::Start {
+                key,
+                demand: remapped
+            }
+        );
+        for bad in [
+            "p1 held 0 1 0 0 1 1",
+            "p1 held 0 1 0 1 0 2",
+            "p1 holds 4294967296 1 0",
+            "p1 holds 0 18446744073709551616 0",
+            "p1 whatever 0 1 0",
+            "holds 0 1 0",
+        ] {
+            assert!(
+                matches!(
+                    decode_message(bad, &models, bad.len()),
+                    Err(Stop::Damaged(_))
+                ),
+                "{bad}"
+            );
+        }
+    }
+
+    /// AC-T7.4.1: refresh preserves both reservations and their exclusive devices; unsafe shrink is
+    /// atomic, while changed classes/platform filter subsequent admissions through the same core.
+    #[test]
+    fn full_demand_live_facts_refresh_preserves_reservations_and_filters() {
+        use crate::model::{Device, DeviceKind, GpuLoad};
+        let mut spec = NodeSpec::new(NodeId(0), CAP);
+        spec.devices = vec![Device {
+            kind: DeviceKind::Vfio,
+            model: ModelId::UNNAMED,
+            size: 0,
+            load: GpuLoad::default(),
+        }];
+        let mut records = Memory::default();
+        let mut node = boot_test(&[spec.clone()], &[], &mut records);
+        let demand = Demand {
+            ask: Ask {
+                vfio: 1,
+                ..Ask::default()
+            },
+            ..requested()
+        };
+        let (key, _) = node.submit(demand, &mut records).unwrap();
+        start(&mut node, key, demand, &mut records);
+        let before = node.admitted();
+        let mut shrink = spec.clone();
+        shrink.capacity.cpu_milli = 0;
+        assert!(matches!(node.refresh_node(shrink), Err(Stop::Damaged(_))));
+        let mut remove = spec.clone();
+        remove.devices.clear();
+        assert!(matches!(node.refresh_node(remove), Err(Stop::Damaged(_))));
+        assert_eq!(node.admitted(), before);
+        assert_eq!(
+            start(&mut node, other_key(1), demand, &mut records),
+            vec![(NodeId(0), Msg::Refused { key: other_key(1) })]
+        );
+        spec.classes = crate::model::Classes::NONE;
+        node.refresh_node(spec.clone()).unwrap();
+        assert_eq!(
+            start(&mut node, other_key(2), requested(), &mut records),
+            vec![(NodeId(0), Msg::Refused { key: other_key(2) })]
+        );
+        node.end(key, &mut records).unwrap();
+        spec.classes = crate::model::Classes::NONE.with(Class::Shards);
+        spec.platform = crate::model::Platform {
+            os: Os::Macos,
+            arch: Arch::Aarch64,
+        };
+        node.refresh_node(spec).unwrap();
+        let shards = Demand {
+            class: Class::Shards,
+            ask: Ask {
+                os: Some(Os::Macos),
+                arch: Some(Arch::Aarch64),
+                ..Ask::default()
+            },
+            ..requested()
+        };
+        assert!(start(&mut node, other_key(3), shards, &mut records).is_empty());
+        assert_eq!(node.admitted(), amounts(&shards.need));
+    }
+
     /// kiln's `ReusedIdRan`: a box's name carries its owner's epoch, so a restarted owner's first box
     /// isn't read as the box its first number named before.
     #[test]
     fn a_restarted_owners_numbers_never_name_an_earlier_box() {
         let specs = vec![NodeSpec::new(NodeId(0), CAP)];
         let mut rec = Memory::default();
-        let mut a = Node::boot(NodeId(0), &specs, &mut rec, |_| Boxed::Absent).unwrap();
+        let mut a = Node::boot(
+            NodeId(0),
+            &specs,
+            &[],
+            test_budget(),
+            Pick::default(),
+            &mut rec,
+            |_| Boxed::Absent,
+        )
+        .unwrap();
         let (first, _) = a
             .submit(
-                Resources {
+                plain(Resources {
                     cpu_milli: 1,
                     ..Resources::default()
-                },
+                }),
                 &mut rec,
             )
             .unwrap();
-        let mut b = Node::boot(NodeId(0), &specs, &mut rec, |_| Boxed::Absent).unwrap();
+        let mut b = Node::boot(
+            NodeId(0),
+            &specs,
+            &[],
+            test_budget(),
+            Pick::default(),
+            &mut rec,
+            |_| Boxed::Absent,
+        )
+        .unwrap();
         let (again, _) = b
             .submit(
-                Resources {
+                plain(Resources {
                     cpu_milli: 1,
                     ..Resources::default()
-                },
+                }),
                 &mut rec,
             )
             .unwrap();
@@ -1337,7 +2685,15 @@ mod tests {
             rec.put(name, value).unwrap();
             assert!(
                 matches!(
-                    Node::boot(NodeId(0), &specs, &mut rec, |_| Boxed::Absent),
+                    Node::boot(
+                        NodeId(0),
+                        &specs,
+                        &[],
+                        test_budget(),
+                        Pick::default(),
+                        &mut rec,
+                        |_| Boxed::Absent
+                    ),
                     Err(Stop::Damaged(_))
                 ),
                 "{name} {value}"

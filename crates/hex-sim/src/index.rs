@@ -515,6 +515,87 @@ impl FitIndex {
             .collect()
     }
 
+    /// Live node facts, preserving reservations. Held devices retain their index/kind/model/size;
+    /// capacity cannot shrink below the amounts already held. Failure changes nothing.
+    pub(crate) fn check_refresh_node(&self, node: &NodeSpec) -> Result<(), SimError> {
+        let at = usize::try_from(node.id.0).map_err(|_| SimError::UnknownNode(node.id))?;
+        let old = self.slot(node.id)?;
+        if !node.devices_agree() {
+            return Err(SimError::Config("refreshed devices disagree with capacity"));
+        }
+        let used = old
+            .capacity
+            .checked_sub(&old.free)
+            .ok_or(SimError::Resources(node.id))?;
+        node.capacity
+            .checked_sub(&used)
+            .ok_or(SimError::Resources(node.id))?;
+        let old_devices = self.devices.get(at).ok_or(SimError::UnknownNode(node.id))?;
+        let holders = self.held.get(at).ok_or(SimError::UnknownNode(node.id))?;
+        for (i, holder) in holders.iter().enumerate() {
+            if holder.is_some()
+                && !old_devices
+                    .get(i)
+                    .zip(node.devices.get(i))
+                    .is_some_and(|(old, new)| {
+                        old.kind == new.kind && old.model == new.model && old.size == new.size
+                    })
+            {
+                return Err(SimError::Config(
+                    "refreshed facts replace or remove a held device",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn refresh_node(&mut self, node: &NodeSpec) -> Result<(), SimError> {
+        self.check_refresh_node(node)?;
+        let at = usize::try_from(node.id.0).map_err(|_| SimError::UnknownNode(node.id))?;
+        let old = self.slot(node.id)?;
+        let used = old
+            .capacity
+            .checked_sub(&old.free)
+            .ok_or(SimError::Resources(node.id))?;
+        let free = node
+            .capacity
+            .checked_sub(&used)
+            .ok_or(SimError::Resources(node.id))?;
+        let holders = self.held.get(at).ok_or(SimError::UnknownNode(node.id))?;
+        let mut held = vec![None; node.devices.len()];
+        for (new, old) in held.iter_mut().zip(holders) {
+            *new = *old;
+        }
+        let (old_capacity, old_bucket) = (old.capacity, bucket(&old.free, self.last));
+        let builds = old.builds;
+        let benchmarks = old.benchmarks;
+        let slot = self
+            .slots
+            .get_mut(at)
+            .ok_or(SimError::UnknownNode(node.id))?;
+        *slot = Slot {
+            capacity: node.capacity,
+            free,
+            background_milli: node.background_milli,
+            classes: node.classes,
+            platform: node.platform,
+            kvm: node.virt.kvm,
+            builds,
+            benchmarks,
+        };
+        if let Some(devices) = self.devices.get_mut(at) {
+            *devices = node.devices.clone();
+        }
+        if let Some(holders) = self.held.get_mut(at) {
+            *holders = held;
+        }
+        self.ix
+            .reshape(&amounts(&old_capacity), &amounts(&node.capacity));
+        self.ix
+            .relink(node.id.0, old_bucket, bucket(&free, self.last));
+        Ok(())
+    }
+
     /// A GPU's load from what isn't Hex's, as its node's agent reads it (hex-gpu's `sample()`).
     pub fn set_gpu_load(
         &mut self,
@@ -558,6 +639,16 @@ impl FitIndex {
     /// how idle the GPUs it would hold are ([`gpu_busy`]), as kiln ranks by CPU free: the less-loaded
     /// GPU wins.
     pub fn fit(&self, demand: &Demand, pick: &Pick) -> Fit {
+        self.fit_excluding(demand, pick, &std::collections::BTreeSet::new())
+    }
+
+    /// The same kernel walk and scoring, excluding peers that explicitly refused this attempt.
+    pub fn fit_excluding(
+        &self,
+        demand: &Demand,
+        pick: &Pick,
+        excluded: &std::collections::BTreeSet<NodeId>,
+    ) -> Fit {
         let floor = u32::try_from(demand.need.cpu_milli.checked_div(lb::CPU).unwrap_or(0))
             .unwrap_or(u32::MAX);
         let (mut best, mut best_score) = (None::<Key>, (0u64, 0u128));
@@ -566,6 +657,9 @@ impl FitIndex {
         let mut b = self.ix.at_or_above(floor.min(self.last));
         while let Some(bb) = b {
             for r in self.ix.bucket(bb) {
+                if excluded.contains(&NodeId(r)) {
+                    continue;
+                }
                 walked = walked.saturating_add(1);
                 let Some(slot) = self.slots.get(lb::ix(r)) else {
                     continue;
