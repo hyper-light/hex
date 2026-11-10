@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""AC-T7.3.1/4.1: fail-closed acceptance receipts; no native work is performed here."""
+
+import hashlib
+import json
+import math
+import re
+from pathlib import Path
+
+
+class InvalidEvidence(ValueError):
+    pass
+
+
+BACKENDS = ("oci", "firecracker", "shards")
+TARGETS = (
+    "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl",
+    "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc", "aarch64-apple-darwin",
+)
+STAGES = (
+    "capability", "binding", "compute", "foreign", "wrong-id",
+    "scheduler-recovery", "runtime-recovery", "cleanup", "complete",
+)
+POLICY = "0342b85d9c808e3ced041a6c3ef0e9bf70438272"
+RULES = "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3"
+
+
+def require(condition, why):
+    if not condition:
+        raise InvalidEvidence(why)
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        require(key not in result, f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def load_json(path, byte_limit):
+    with Path(path).open("rb") as source:
+        raw = source.read(byte_limit + 1)
+    require(len(raw) <= byte_limit, f"JSON exceeds admitted byte bound: {path}")
+    try:
+        return json.loads(raw, object_pairs_hook=unique_object,
+                          parse_constant=lambda value: (_ for _ in ()).throw(
+                              InvalidEvidence(f"nonfinite JSON: {value}")))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise InvalidEvidence(f"invalid JSON: {path}: {error}") from error
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def hex_digest(value, length=64):
+    return isinstance(value, str) and re.fullmatch(f"[0-9a-f]{{{length}}}", value) is not None
+
+
+def natural(value, positive=False):
+    return type(value) is int and value >= int(positive)
+
+
+def finite_positive(value):
+    return type(value) in (int, float) and math.isfinite(value) and value > 0
+
+
+def artifact(root, row):
+    """Only retained regular files within the receipt directory count as evidence."""
+    require(isinstance(row, dict), "missing artifact receipt")
+    name = row.get("path")
+    require(isinstance(name, str) and name, "missing artifact path")
+    relative = Path(name)
+    require(not relative.is_absolute() and ".." not in relative.parts, "artifact escaped run")
+    base = Path(root).resolve(strict=True)
+    path = base / relative
+    # Reject every symlink component, including one that currently resolves back into the run.
+    cursor = base
+    for part in relative.parts:
+        cursor = cursor / part
+        require(not cursor.is_symlink(), "symlink is not retained evidence")
+    require(path.is_file() and path.resolve(strict=True).is_relative_to(base), "artifact missing")
+    require(hex_digest(row.get("sha256")) and sha256(path) == row["sha256"], "artifact hash mismatch")
+    require(natural(row.get("bytes")) and path.stat().st_size == row["bytes"], "artifact size mismatch")
+    return path
+
+
+def libtest_result(raw, expected):
+    """Require one exact libtest invocation, with no ignored/skipped or filtered intended case."""
+    require(natural(expected, positive=True), "intended selected count must be positive")
+    summaries = re.findall(
+        r"^test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out;",
+        raw, flags=re.MULTILINE)
+    require(len(summaries) == 1, "missing/ambiguous libtest summary")
+    status, passed, failed, ignored, measured, _filtered = summaries[0]
+    require((status, int(passed), int(failed), int(ignored), int(measured)) ==
+            ("ok", expected, 0, 0, 0), "wrong selected count or nonpassing cases")
+    require(not re.search(r"\b(SKIP|UNVERIFIED|Unsupported|simulated|compile-only)\b", raw),
+            "native proof contains an unavailable/simulated path")
+
+
+def check_events(events, backend, topology):
+    require(backend in BACKENDS and topology in ("laptop", "peer"), "invalid case identity")
+    require([event.get("stage") for event in events] == list(STAGES), "missing/repeated/out-of-order native stage")
+    for event in events:
+        require(event.get("backend") == backend and event.get("topology") == topology,
+                "event case identity mismatch")
+        require(event.get("outcome") == "verified", f"unverified stage: {event.get('stage')}")
+    capability, binding, compute, foreign, wrong, scheduler, runtime, cleanup, complete = events
+    require(capability.get("runtime_class") == backend, "scheduler label is not a native Runtime class")
+    require(capability.get("native_process_verified") is True, "no independent native process witness")
+    require(hex_digest(capability.get("native_executable_sha256")), "native executable not pinned")
+    selected = binding.get("selected")
+    require(isinstance(selected, list) and len(selected) == 1, "fixture requires exactly one selected physical GPU")
+    require(binding.get("holder_count") == 1 and binding.get("durable_before_execution") is True,
+            "no single durable holder before execution")
+    require(hex_digest(compute.get("uuid"), 32), "no actual physical GPU UUID")
+    require(natural(compute.get("words"), positive=True) and compute.get("mismatches") == 0,
+            "vacuous or incorrect workload")
+    require(compute.get("prefill_mismatches") == compute["words"], "output was not poisoned before dispatch")
+    require(compute.get("hardware") is True and compute.get("dispatch_completed") is True,
+            "no completed hardware dispatch")
+    require(natural(foreign.get("host_accessible"), positive=True) and foreign.get("guest_accessible") == 0,
+            "foreign-device denial lacks a live positive host control")
+    require(wrong.get("dispatches") == 0 and wrong.get("refused") is True,
+            "wrong identity reached GPU dispatch")
+    for recovery in (scheduler, runtime):
+        require(recovery.get("selected") == selected and recovery.get("holder_count") == 1,
+                "recovery repicked or duplicated the physical holder")
+        require(recovery.get("compute_verified") is True and recovery.get("same_physical_box") is True,
+                "recovery did not retain the running workload")
+    require(runtime.get("catalog_reordered") is True and runtime.get("load_order_changed") is True,
+            "recovery never challenged catalog/load ordering")
+    require(cleanup.get("boxes") == 0 and cleanup.get("holders") == 0 and
+            cleanup.get("owned_native_processes") == 0 and cleanup.get("owned_artifacts") == 0,
+            "native cleanup incomplete")
+    require(complete.get("selected_stages") == len(STAGES), "vacuous completion")
+    return {"backend": backend, "topology": topology, "native_stages": len(STAGES)}
+
+
+def check_run(root, receipt, byte_limit):
+    require(receipt.get("schema") == "hex-completion-run-1", "unknown run schema")
+    require(hex_digest(receipt.get("source"), 40), "source revision missing")
+    require(receipt.get("policy") == POLICY and receipt.get("rules_sha256") == RULES, "stale policy")
+    require(receipt.get("scope") == "root-native", "light/model/compile receipt is not native proof")
+    require(receipt.get("exit") == 0 and receipt.get("timed_out") is False and receipt.get("reaped") is True,
+            "failed/unreaped native invocation")
+    binary = artifact(root, receipt.get("binary"))
+    require(binary.stat().st_size > 0, "empty binary")
+    log = artifact(root, receipt.get("log"))
+    libtest_result(log.read_text(encoding="utf-8"), 1)
+    event_file = artifact(root, receipt.get("events"))
+    events = load_json(event_file, byte_limit)
+    require(isinstance(events, list), "event array required")
+    return check_events(events, receipt.get("backend"), receipt.get("topology"))
+
+
+def matrix(rows):
+    """Compilation, native workloads and peer-routing are separate obligations."""
+    required = {(target, backend, topology) for target in TARGETS
+                for backend in BACKENDS for topology in ("laptop", "peer")}
+    seen = {}
+    for row in rows:
+        key = row.get("target"), row.get("backend"), row.get("topology")
+        require(key in required and key not in seen, "unexpected/duplicate matrix cell")
+        require(row.get("outcome") in ("verified", "failed", "unverified"), "invalid matrix outcome")
+        # Firecracker is a Linux KVM VMM. Non-Linux origin cells need actual peer execution on Linux.
+        if row.get("outcome") == "verified":
+            require(row.get("native_receipt_verified") is True, "matrix claims native from compile/metadata")
+            if key[1] == "firecracker":
+                require(row.get("execution_target") in TARGETS[:4], "Firecracker did not execute on Linux")
+                if key[0] not in TARGETS[:4]:
+                    require(row.get("routed_to_capable_peer") is True, "foreign origin not routed to initialized KVM peer")
+        seen[key] = row
+    missing = sorted(required - seen.keys())
+    gaps = [{"target": key[0], "backend": key[1], "topology": key[2], "outcome": "unverified",
+             "reason": "missing native receipt"} for key in missing]
+    gaps.extend(row for row in rows if row["outcome"] != "verified")
+    return {"required_cells": len(required), "verified_cells": len(required) - len(gaps),
+            "complete": not gaps, "gaps": gaps}
