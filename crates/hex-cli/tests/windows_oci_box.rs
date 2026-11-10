@@ -183,6 +183,16 @@ fn run(rt: &dyn Runtime, lab: &Lab, id: &BoxId, args: &[&str]) -> (Exit, String)
     (exit, out)
 }
 
+/// T-T7.1.2: the end of an init held by its native process handle, using the same measured program-end
+/// bound as a Proc's wait_for. The held process handle keeps the init's identity stable through the wait.
+fn exit_of(process: &hex_runtime::windows::sys::Handle, bound: std::time::Duration) {
+    let millis = u32::try_from(bound.as_millis()).unwrap();
+    assert!(
+        hex_runtime::windows::sys::wait(process, millis).expect("waiting for the init"),
+        "the box's init still runs {bound:?} after it was ended"
+    );
+}
+
 fn made(rt: &WinRuntime, spec: BoxSpec) -> BoxId {
     let id = spec.id.clone();
     let _ = rt.delete(&id);
@@ -1093,12 +1103,7 @@ fn a_recorded_nodes_oci_box_whose_init_ended_with_no_node_is_removed_by_the_next
         ended.status.success(),
         "taskkill didn't end the box's init: {ended:?}"
     );
-    let patience = u32::try_from(conformance::PATIENCE.as_millis()).unwrap();
-    assert!(
-        hex_runtime::windows::sys::wait(&process, patience).expect("waiting for the init"),
-        "the box's init still runs {:?} after it was ended",
-        conformance::PATIENCE
-    );
+    exit_of(&process, conformance::PATIENCE);
     drop(process);
     assert!(
         oci::sys::open_system(id.as_str())
