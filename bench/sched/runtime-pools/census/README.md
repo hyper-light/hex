@@ -97,3 +97,19 @@ diagnostics, not installed helpers or a new scheduler code path.
 Census completion outcomes now use `name nanos` for an answer, `name !nanos` for a completed typed wire refusal, and the unchanged `name >nanos` for a run-out. Refusals remain online learning samples with exactly the existing maximum/deadline rule, but parsers retain them separately (`refused`, `refused_rows_by_name`) and exclude them from successful-answer counts/distributions. Historical unmarked rows retain their original meaning: old mixed data cannot be retrospectively separated. No refusal text is matched, no runtime seed/deadline is changed, and root still validates actual native/VM outcomes before interpreting a capture.
 
 The marker identifies only wire `Answer::Refused`, not workload/application success. An unmarked `Answer::Scheduled` can describe pending work or contain typed refusal notices; the timing core does not reinterpret that payload. Actual physical lifecycle controls and per-call outcome provenance still determine seed eligibility. This commit makes no new seed decision and cannot retrospectively classify old unmarked rows.
+
+## Bounded reconstruction (coordinator execution only)
+
+`verify_census.py` reads an explicit completed run; it never starts a process/VM, queries a Runtime, installs a seed or decides eligibility. Example, with operator-selected storage budgets and the fixed code source supplying actual protocol/WaitKind bounds:
+
+```sh
+python3 -I verify_census.py --run "$RUN" --result "$RUN/result.json" --source "$HEX_SRC" \
+  --max-result-bytes "${RESULT_JSON_BYTE_BUDGET:?}" --max-ledger-rows "${LEDGER_ROW_BUDGET:?}" \
+  --output "${NEW_VERIFICATION_JSON:?}"
+```
+
+Result JSON and ledger bootstrap budgets are explicit because the existing schema supplies neither. Raw file byte ceilings derive from reported rows × actual MAX_MESSAGE; optional reported byte counts are checked too. Every raw/ledger/runtime/owned-record input uses directory-relative no-follow reads within the explicit run. Report-controlled source/binary paths are not followed; `--source` is separate explicit code authority. Inputs changing while open, symlinks, escapes, extra raw files, duplicate filename attribution, inconsistent counts/hash/flags, missing N targets or physical-control evidence are refused. Output is create-new mode0600; existing artifacts remain untouched. Interrupted writes can leave an incomplete new output, which the coordinator must treat as incomplete and retain for cancellation analysis.
+
+The output preserves nearest-rank nanosecond distributions for unmarked raw wire answers, marked wire refusals, run-outs and uniquely filename-attributed call/process exit success. These categories do not establish workload/application success. Legacy unmarked wire outcomes remain explicitly unclassified; missing filename attribution never falls back to PID. Owned guest records/receipts/retirement identities are compared exactly, without live PID/API checks. The coordinator retains responsibility for actual source/binary hashes, Runtime/VM cleanup evidence, cancellation checks and interpretation; packaging/synthetic tests are not an audit of any real capture.
+
+Synthetic tests only (ordinary imports, not `-I`): `python3 -B -m unittest -v test_verify_census.py`. Their scratch is `~/.cache/hex-lead/verifier-synthetic-tests`; no actual capture directory is read by the tests.
