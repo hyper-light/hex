@@ -72,6 +72,7 @@ fn an_upgrades_first_create_is_timed() {
         kernel,
         initrd,
         vcpus: 1,
+        gpu: false,
         // Shards' least and twice HEX-GUEST-19's measured peak, as guest_real sizes it.
         memory_mib: shards_api::min_memory_mib(std::env::consts::ARCH) + 2 * 284,
         shares: Vec::new(),

@@ -845,6 +845,7 @@ fn simulated_guest(agent: &Agent, exe: &str) -> SimulatedGuest {
         initrd: PathBuf::from("/nonexistent/initrd"),
         // Shards' least guest: one vCPU and its architecture's least memory (`shards_api::check`).
         vcpus: 1,
+        gpu: false,
         memory_mib: shards_api::min_memory_mib(std::env::consts::ARCH),
         shares: vec![Share {
             dir: PathBuf::from("/"),

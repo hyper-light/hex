@@ -36,6 +36,8 @@ pub struct GuestConfig {
     pub initrd: PathBuf,
     pub vcpus: u32,
     pub memory_mib: u64,
+    /// Enable Shards' existing shared Venus GPU; physical reservations still require mapping.
+    pub gpu: bool,
     pub shares: Vec<Share>,
     /// Where the guest's relay stages each box's root: [`stage::STAGED`], the guest's tmpfs.
     pub staged: String,
@@ -47,6 +49,8 @@ pub const ENV_KERNEL: &str = "HEX_GUEST_KERNEL";
 pub const ENV_INITRD: &str = "HEX_GUEST_INITRD";
 pub const ENV_CPUS: &str = "HEX_GUEST_CPUS";
 pub const ENV_MEMORY_MIB: &str = "HEX_GUEST_MEMORY_MIB";
+/// Explicit shared Venus enable; absent preserves the CPU-only guest configuration.
+pub const ENV_GPU: &str = "HEX_GUEST_GPU";
 
 impl GuestConfig {
     /// The guest named by the environment ([`GuestConfig::from_vars`] over the process's).
@@ -88,6 +92,17 @@ impl GuestConfig {
             initrd: path(ENV_INITRD),
             vcpus: number(&var, ENV_CPUS)?,
             memory_mib: number(&var, ENV_MEMORY_MIB)?,
+            gpu: match var(ENV_GPU) {
+                None => false,
+                Some(value) if value == "false" => false,
+                Some(value) if value == "true" => true,
+                Some(_) => {
+                    return Err(Refusal::Invalid {
+                        what: ENV_GPU,
+                        why: "expected true or false".to_owned(),
+                    });
+                }
+            },
             shares: shares::from_var(var(shares::ENV))?,
             staged: stage::STAGED.to_owned(),
         })
@@ -105,6 +120,7 @@ impl GuestConfig {
             cmdline: self.cmdline(),
             vcpus: self.vcpus,
             memory_mib: self.memory_mib,
+            gpu: self.gpu,
             disks: Vec::new(),
             binary: Some(self.binary.clone()),
             ports: vec![stream::CONTROL_PORT, stream::STDIO_PORT, files::FILES_PORT],

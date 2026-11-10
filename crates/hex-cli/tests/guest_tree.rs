@@ -411,6 +411,7 @@ fn boot_guest(kernel: &Path, initrd: &Path, binary: &Path, memory_mib: u64) -> G
         kernel: kernel.to_path_buf(),
         initrd: initrd.to_path_buf(),
         vcpus: 1,
+        gpu: false,
         memory_mib,
         shares: Vec::new(),
         staged: hex_client::guest::stage::STAGED.to_owned(),

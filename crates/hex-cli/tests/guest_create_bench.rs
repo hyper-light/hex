@@ -101,6 +101,7 @@ fn a_multi_layer_create_through_a_real_guest_is_timed() {
         kernel,
         initrd,
         vcpus: 1,
+        gpu: false,
         memory_mib: (shards_api::min_memory_mib(std::env::consts::ARCH)
             + (memx * unpacked).div_ceil(1 << 20))
         .next_multiple_of(2),

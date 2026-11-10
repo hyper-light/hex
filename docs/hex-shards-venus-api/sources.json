@@ -1,0 +1,44 @@
+{
+  "base": "0ba6a60f582d461e65673ad736b2ac658cee9b72",
+  "upstream": "33df95b08ad8f95bddeaa1c48acf0c64386e0eac",
+  "backend_of_0001_unchanged": true,
+  "backend_section_sha256": "b1b67b98e196cf41e6fffb54116d11d3732c617b88ab60ae185497c51a838cd1",
+  "files": {
+    "vendor/shards/crates/api/src/lib.rs": {
+      "base_sha256": "1f4d81467815d685e8182520cd6fb1aa4815d35c2efa6bbd72c4c546c22d08de",
+      "source_sha256": "62e96385f55cf1c8952381e10ba8e9ab48e2ed5a54701dd20b3aecdba9b5402d"
+    },
+    "vendor/shards/crates/api/src/client.rs": {
+      "base_sha256": "8d8b2dac91a3c419956bb41168705c5a15f21d51d7c043b6dd7f4f027443121b",
+      "source_sha256": "f830c727377592f51d0c9bafb4e68ccaa5db28b5e1475f6da2ae4f238857b1dc"
+    },
+    "vendor/shards/crates/api/src/sim.rs": {
+      "base_sha256": "910824d9a9fee4476bc9236958c38f90899fc67c4d9e19dff248efe4c711ba7f",
+      "source_sha256": "a800eed4b1644bbbd028df035a776efad24597e2cd5cb5106ebb3085c9900421"
+    },
+    "vendor/shards/crates/api/src/conformance.rs": {
+      "base_sha256": "aaa3c49a4c142614aed1562fae57fd8d762f95b128736648f298c53c12758d5b",
+      "source_sha256": "aaa3c49a4c142614aed1562fae57fd8d762f95b128736648f298c53c12758d5b"
+    },
+    "vendor/shards/crates/api/tests/sim.rs": {
+      "base_sha256": "5a3107bd204bd5a4cb75f9c9814b5e6473f8e0576d3893c017b45ef9785fb8b2",
+      "source_sha256": "3b42c713d373f9ab83530f49c0909b6de71f337c6f3ee70296beaadbc348b73f"
+    },
+    "vendor/shards/crates/api/tests/real.rs": {
+      "base_sha256": "c16f5c774667ce003b868f0f8250805427c2fa2d1cbbde06fe44d5053d6cc061",
+      "source_sha256": "1de50d92a613137aaba7c10acbd72d63be358d05c3dca3a33368cc2c232ed4fe"
+    },
+    "vendor/shards/crates/api/Cargo.toml": {
+      "base_sha256": "be062eb3430d2778f875cb1895fbc3ae50e6cd0633dd0fc23882165c7d2dd5e9",
+      "source_sha256": "be062eb3430d2778f875cb1895fbc3ae50e6cd0633dd0fc23882165c7d2dd5e9"
+    },
+    "vendor/shards/Cargo.toml": {
+      "base_sha256": "2cd2f0f787783a7716ed4f9b70b5aa0f634f95260389b9f9daa3e855d30299b1",
+      "source_sha256": "2cd2f0f787783a7716ed4f9b70b5aa0f634f95260389b9f9daa3e855d30299b1"
+    },
+    "Cargo.lock": {
+      "base_sha256": "23bab05c32aa57056110e7fadcb7f0a632aac03287383fb33f958e73a334ebe2",
+      "source_sha256": "23bab05c32aa57056110e7fadcb7f0a632aac03287383fb33f958e73a334ebe2"
+    }
+  }
+}

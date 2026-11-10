@@ -920,6 +920,7 @@ fn config() -> GuestConfig {
         initrd: PathBuf::from("/i"),
         vcpus: 1,
         memory_mib: shards_api::min_memory_mib(std::env::consts::ARCH),
+        gpu: false,
         shares: Vec::new(),
         staged: "/staged".to_owned(),
     }

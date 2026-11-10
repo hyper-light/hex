@@ -252,6 +252,7 @@ fn the_oci_runtime_spec_validation_passes_in_the_guest_as_on_linux() {
         // Unset, the host's CPUs (`host_cpus`): the fastest run, as a vCPU costs nothing while it
         // idles.
         vcpus: std::env::var("HEX_GUEST_CPUS").map_or_else(|_| host_cpus(), |v| v.parse().unwrap()),
+        gpu: false,
         // Unset, Shards' least guest and twice this workload's measured peak (PEAK_MIB): the margin
         // C's guest_tree takes, stated as a factor, never below what was measured.
         memory_mib: number(

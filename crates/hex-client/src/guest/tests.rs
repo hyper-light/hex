@@ -580,6 +580,7 @@ fn asked_shards_streams_wait_as_the_callers_files_do() {
             init: shards_api::Init::Executable("init".into()),
             cmdline: String::new(),
             vcpus: 1,
+            gpu: false,
             memory_mib: shards_api::min_memory_mib(std::env::consts::ARCH),
             disks: vec![],
             shares: vec![],

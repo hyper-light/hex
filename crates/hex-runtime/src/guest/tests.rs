@@ -406,6 +406,7 @@ fn config() -> GuestConfig {
         // Shards' least guest: one vCPU and its architecture's least memory (`shards_api::check`).
         vcpus: 1,
         memory_mib: shards_api::min_memory_mib(std::env::consts::ARCH),
+        gpu: false,
         shares: vec![share(0, "/", false)],
         staged: STAGED.to_owned(),
     }
@@ -468,6 +469,16 @@ fn the_guests_spec_names_its_init_ports_and_shares() {
     );
     assert_eq!(spec.shares.len(), 1);
     assert!(spec.disks.is_empty());
+    assert!(!spec.gpu);
+    let gpu = GuestConfig {
+        gpu: true,
+        ..config()
+    }
+    .spec();
+    assert!(gpu.gpu);
+    assert_eq!(gpu.cmdline, spec.cmdline);
+    assert_eq!(gpu.ports, spec.ports);
+    assert_eq!(gpu.shares, spec.shares);
 }
 
 /// HEX-GUEST-17: read the guest from variables with Shards' binary, the kernel and the initramfs
