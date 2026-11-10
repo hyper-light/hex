@@ -5,6 +5,8 @@ use hex_api::{DeviceId, DeviceKind};
 use hex_core::cdi::{DeviceType, Edits};
 use hex_runtime::devices::{Binding, Catalog};
 
+mod identity;
+
 impl Node {
     pub(super) fn hold_attachments(&self, devices: &[DeviceId]) -> Result<Vec<Turn<'_>>, Refusal> {
         let mut ordered = Vec::new();
@@ -139,6 +141,7 @@ fn resolve<'a>(
             why: "selected device nodes disagree with reserved block identities".into(),
         });
     }
+    identity::check(&nodes, devices)?;
     Ok(nodes)
 }
 
