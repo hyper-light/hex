@@ -232,3 +232,15 @@ actual render-node identity before create, and host metadata must not be inferre
 from a virtio ordinal or zero telemetry. That complete route and native effects
 are still in progress; no current Linux compile or VM result is claimed for this
 hook.
+
+## First composed guest compile result
+
+Exact d83ce73471505dfbe1965b28cf17437e9ab2b889 runtime light check compiled dependencies
+then stopped at three E0624 call sites: the parent guest module called child
+Booted::host_info while it was private. No tests or native effects executed.
+Original guest.log SHA2562f1dc6160e335cd9e6df8672ee15570471fff22ec064ccfd7bc42f854f052ef7
+and source are preserved in private cohort-d83ce734-light-v1. Cargo6868 and local
+CLI16762 were reaped, temp0, source unchanged. L2 explicitly authorized the one-line
+pub(super) correction on integrated57 and carries it in its successor. This changes
+module visibility only; no native behavior defect or passing guest result is claimed
+from the original failure. The next check uses a new private exact source.

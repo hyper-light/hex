@@ -354,7 +354,7 @@ fn absent(why: &shards_api::Refusal) -> bool {
 }
 
 impl Booted {
-    fn host_info(&self, mut info: BoxInfo) -> Result<BoxInfo, Refusal> {
+    pub(super) fn host_info(&self, mut info: BoxInfo) -> Result<BoxInfo, Refusal> {
         if let Some((id, class)) = &self.owner {
             if info.id != *id || info.class != Class::Oci {
                 return Err(invalid(
