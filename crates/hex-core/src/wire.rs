@@ -1146,13 +1146,11 @@ fn put_box_spec(w: &mut Writer, spec: &BoxSpec) -> Result<(), Fault> {
     for id in &spec.devices {
         put_device_id(w, id);
     }
-    w.reserve_fixed(
-        1 + if spec.allocation.is_some() {
-            ALLOCATION_BYTES
-        } else {
-            0
-        },
-    )?;
+    w.reserve_fixed(if spec.allocation.is_some() {
+        OPTIONAL_ALLOCATION_BYTES
+    } else {
+        1
+    })?;
     w.option_with(spec.allocation, |w, allocation| {
         put_resources(w, allocation.resources);
         put_cost(w, allocation.cost)
@@ -1201,7 +1199,8 @@ fn box_spec(r: &mut Reader<'_>) -> Result<BoxSpec, Fault> {
 // AC-T7.4.1: fixed native integer widths; new optional fields follow the complete old device tail.
 const RESOURCE_BYTES: usize = 3 * size_of::<u64>();
 const COST_BYTES: usize = 32 + 5 * RESOURCE_BYTES;
-const ALLOCATION_BYTES: usize = RESOURCE_BYTES + COST_BYTES;
+const OPTIONAL_COST_BYTES: usize = 1 + COST_BYTES;
+const OPTIONAL_ALLOCATION_BYTES: usize = 1 + RESOURCE_BYTES + COST_BYTES;
 
 fn workload_caps(spec: &BoxSpec) -> CapacityResources {
     CapacityResources {
@@ -1226,7 +1225,11 @@ fn resources(r: &mut Reader<'_>) -> Result<CapacityResources, Fault> {
 }
 
 fn put_cost_option(w: &mut Writer, cost: Option<RuntimeCost>) -> Result<(), Fault> {
-    w.reserve_fixed(1 + if cost.is_some() { COST_BYTES } else { 0 })?;
+    w.reserve_fixed(if cost.is_some() {
+        OPTIONAL_COST_BYTES
+    } else {
+        1
+    })?;
     w.option_with(cost, put_cost)
 }
 
