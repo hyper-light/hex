@@ -105,6 +105,7 @@ class ColdVerifierTests(unittest.TestCase):
         result = fixture.verify()
         self.assertEqual(result["status"], "consistent")
         self.assertEqual(result["cohorts"]["normal_iterations"], 2)
+        self.assertEqual(result["profiles_reported"], ["debug"])
         self.assertEqual(result["distributions_ns"]["normal_first_completed_sdk_hello"], {"n": 2, "p50": 11, "p90": 22, "p99": 22, "p999": 22, "max": 22})
         self.assertEqual(result["distributions_ns"]["subsequent_completed_sdk_hello"]["n"], 2)
         self.assertFalse(result["per_row_VM_identity_proven"])
@@ -213,6 +214,33 @@ class ColdVerifierTests(unittest.TestCase):
         receipt["declared_config"]["vcpus"] = True
         path.write_text(json.dumps(receipt))
         with self.assertRaisesRegex(verifier.Invalid, "integer"):
+            fixture.verify()
+
+        for number, field in enumerate(("pid", "started")):
+            fixture = self.fixture(name=f"typed-retirement-{number}")
+            fixture.reports[0]["owned_guest_retired"][field] = True
+            fixture.save()
+            with self.assertRaisesRegex(verifier.Invalid, "integer"):
+                fixture.verify()
+        fixture = self.fixture(name="typed-cohort-count")
+        fixture.campaign["ambiguous_first_VM_cohorts"] = False
+        fixture.save_campaign()
+        with self.assertRaisesRegex(verifier.Invalid, "integer"):
+            fixture.verify()
+
+    def test_cp_t7_4_different_capture_profiles_cannot_be_pooled(self):
+        fixture = self.fixture(count=2)
+        fixture.reports[1]["profile"] = "release"
+        fixture.reports[1]["cold_boot"]["producer"]["profile"] = "release"
+        for row in fixture.ledgers[1]:
+            if "profile" in row:
+                row["profile"] = "release"
+        path = fixture.roots[1] / "runtime.json"
+        runtime = json.loads(path.read_bytes())
+        runtime["profile"] = "release"
+        path.write_text(json.dumps(runtime))
+        fixture.save()
+        with self.assertRaisesRegex(verifier.Invalid, "mixes profiles"):
             fixture.verify()
 
 

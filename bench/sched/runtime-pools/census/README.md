@@ -206,7 +206,8 @@ python3 -I "$HEX_SRC/bench/sched/runtime-pools/census/verify_cold_census.py" \
   --expected-source-revision "${CAPTURE_SOURCE_REVISION:?}" --output "${NEW_VERIFICATION_JSON:?}"
 ```
 
-Positive N, exact ordinals/counts/unique roots, each original result/runtime/ledger, the exact backend
+Positive N, exact ordinals/counts/unique roots, one consistent declared debug/release profile,
+each original result/runtime/ledger, the exact backend
 filename producer and ordered recorded-Popen reap, ready OCI/empty baseline, guest PID/start/vsock,
 receipt/configuration and exact Stopped closure are checked. The supported configuration is this
 campaign's default private read-only `run/guest-shares`; explicit alternative shares are refused.

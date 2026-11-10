@@ -175,6 +175,8 @@ def configuration(reader, root, report, cold, maximum):
     same(env.get("guest_shares_sha256"), hashlib.sha256((str(root / "guest-shares") + ":ro").encode()).hexdigest(), "default private share authority")
     retired = report.get("owned_guest_retired")
     require(isinstance(retired, dict) and retired.get("guest_stopped") is True and retired.get("end") == "Stopped" and retired.get("already_gone") is not True, "exact Stopped closure is absent")
+    integer(retired.get("pid"), "retired PID", 1)
+    integer(retired.get("started"), "retired start identity", 1)
     same({name: retired.get(name) for name in ("pid", "started")}, {name: identity[name] for name in ("pid", "started")}, "Stopped guest identity")
     return identity, config
 
@@ -196,7 +198,7 @@ def verify(run, result_path, source, max_result_bytes, max_ledger_rows, expected
         same(campaign.get(field), value, "campaign claim scope")
     histograms = {name: Counter() for name in ("normal_first_completed_sdk_hello", "all_first_completed_sdk_hello", "subsequent_completed_sdk_hello", "wire_refused_sdk_hello", "run_out_sdk_hello")}
     cohorts = Counter({name: 0 for name in ("normal_iterations", "ambiguous_iterations", "first_completed_rows", "subsequent_completed_rows", "wire_refused_rows", "run_out_rows", "malformed_rows", "truncated_markers")})
-    roots, reconstructed, revisions = set(), [], set()
+    roots, reconstructed, revisions, profiles = set(), [], set(), set()
     for ordinal, item in enumerate(iterations, 1):
         require(isinstance(item, dict), "iteration is not an object")
         same(integer(item.get("ordinal"), "iteration ordinal", 1), ordinal, "iteration ordinal")
@@ -212,6 +214,8 @@ def verify(run, result_path, source, max_result_bytes, max_ledger_rows, expected
         require(not any(key in report for key in ("error", "cleanup_error", "backend_cleanup_error")), "raw result contains a failure")
         same(integer(report.get("n"), "inner N", 1), 1, "one fresh backend per iteration")
         require(report.get("comparison_or_performance_claim") is False, "unexpected performance claim")
+        require(report.get("profile") in ("debug", "release"), "capture profile is absent or unknown")
+        profiles.add(report["profile"])
         cold = report.get("cold_boot")
         require(isinstance(cold, dict), "cold backend evidence is absent")
         same(item.get("cold_boot"), cold, "aggregate cold evidence")
@@ -294,9 +298,10 @@ def verify(run, result_path, source, max_result_bytes, max_ledger_rows, expected
                               "identity": identity, "declared_config": config, "sdk_hello": hello,
                               "backend_reap_returncodes": [row["returncode"] for row in closure], "ledger_attributed_files": raw_files})
     require(len(revisions) == 1, "campaign mixes source revisions")
-    same(campaign.get("ambiguous_first_VM_cohorts"), cohorts["ambiguous_iterations"], "aggregate ambiguous cohort count")
+    require(len(profiles) == 1, "campaign mixes profiles")
+    same(integer(campaign.get("ambiguous_first_VM_cohorts"), "aggregate ambiguous cohort count"), cohorts["ambiguous_iterations"], "aggregate ambiguous cohort count")
     return {"status": "consistent", "kind": "cold-census-raw-reconstruction", "n": n,
-            "source_revisions_reported": sorted(revisions), "authority_inputs": reader.inputs,
+            "source_revisions_reported": sorted(revisions), "profiles_reported": sorted(profiles), "authority_inputs": reader.inputs,
             "cohorts": dict(cohorts), "distributions_ns": {name: shared.statistics(values) for name, values in histograms.items()},
             "iterations": reconstructed, "per_row_VM_identity_proven": False,
             "unobserved_pre_hello_boot_retries_possible": True, "seed_installation": "not performed",
