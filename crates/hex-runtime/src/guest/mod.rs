@@ -6,6 +6,7 @@
 //! hosts; the public seam recognizes them, and the actual backend checks host capabilities at boot.
 
 mod dedicated;
+pub mod gpu;
 pub mod held;
 pub mod rewrite;
 pub mod selected;
@@ -178,6 +179,7 @@ struct Booted {
     link: Arc<dyn Link>,
     client: Client,
     evented: Mutex<Option<Arc<Client>>>,
+    owner: Option<(BoxId, Class)>,
 }
 
 /// The slowest recorded value of each wait that seeds a bound, by host class
@@ -285,7 +287,7 @@ pub struct GuestRuntime {
     record: Option<PathBuf>,
     /// The event form's client of the guest's node: its answers are read by the node's loop, so a call
     /// through it holds no thread while the guest answers.
-    dedicated: Mutex<Vec<dedicated::Guest>>,
+    dedicated: Mutex<Vec<Arc<dedicated::Slot>>>,
     gpu_catalog: Option<Arc<crate::devices::Catalog>>,
     /// What joins each guest's evented connection to the node's loop ([`GuestRuntime::join_loop`]).
     joins: Mutex<Option<Arc<dyn Joins>>>,
@@ -446,6 +448,7 @@ impl GuestRuntime {
                     link,
                     client,
                     evented: Mutex::new(None),
+                    owner: None,
                 });
                 self.join(&b)?;
                 *self.lock()? = Some(b);
@@ -469,8 +472,10 @@ impl GuestRuntime {
             Some(b) => self.join(&b),
             None => Ok(()),
         }?;
-        for guest in self.dedicated.lock().map_err(poisoned)?.iter() {
-            self.join(&guest.booted)?;
+        for id in self.selected_ids()? {
+            if let Some(guest) = self.selected_running(&id)? {
+                self.join(&guest)?;
+            }
         }
         Ok(())
     }
@@ -644,6 +649,7 @@ impl GuestRuntime {
                         link,
                         client,
                         evented: Mutex::new(None),
+                        owner: None,
                     });
                     // The new guest's control connection joins the loop as the one before's did.
                     self.join(&b)?;
@@ -683,7 +689,11 @@ impl GuestRuntime {
         id: &BoxId,
         call: impl FnOnce(&Client) -> Result<T, Refusal>,
     ) -> Result<T, Refusal> {
-        match self.selected_running(id)?.or(self.running()?) {
+        let running = match self.selected_running(id)? {
+            Some(booted) => Some(booted),
+            None => self.running()?,
+        };
+        match running {
             Some(b) => call(&b.client),
             None => Err(Refusal::NoSuchBox(id.clone())),
         }
@@ -795,7 +805,7 @@ impl Runtime for GuestRuntime {
         if let ClassSpec::Oci(oci) | ClassSpec::Shards(oci) = &spec.class {
             rewrite::check(oci)?;
         }
-        if !spec.devices.is_empty() {
+        if !spec.devices.is_empty() || matches!(spec.class, ClassSpec::Shards(_)) {
             return self.create_selected(spec);
         }
         let b = self.guest()?;
@@ -830,6 +840,9 @@ impl Runtime for GuestRuntime {
     }
 
     fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
+        if let Some(guest) = self.selected_running(id)? {
+            return guest.host_info(guest.client.inspect(id)?);
+        }
         self.with(id, |c| c.inspect(id))
     }
 
@@ -858,7 +871,9 @@ impl Runtime for GuestRuntime {
                         what: "guest box listing",
                         bound: crate::MAX_BOXES,
                     })?;
-                boxes.extend(listed);
+                for info in listed {
+                    boxes.push(b.host_info(info)?);
+                }
             }
         }
         Ok(boxes)
@@ -905,11 +920,12 @@ impl GuestRuntime {
         }
         let staged = self.stage(b, &id, &rewritten.items)?;
         self.digests.lock().map_err(poisoned)?.learn(staged);
-        b.client.create(rewritten.spec).inspect_err(|_| {
+        let info = b.client.create(rewritten.spec).inspect_err(|_| {
             // The copy goes with the create that failed; a removal that fails leaves it for the
             // next stage of this id, which removes it (above).
             let _ = stage::unstage(b.link.as_ref(), &id);
-        })
+        })?;
+        b.host_info(info)
     }
 }
 
@@ -948,6 +964,10 @@ pub struct WithGuest<P> {
 }
 
 impl<P: Runtime> WithGuest<P> {
+    /// The configured backend route, shared with recovery; it never selects a device.
+    pub fn route(&self, class: &ClassSpec) -> Result<Side, Refusal> {
+        (self.route)(&self.process, class)
+    }
     /// The host's own runtime, which runs the `process` class: a node's recovery takes its boxes back
     /// through it (native plan step 8).
     pub fn host(&self) -> &P {
@@ -983,11 +1003,10 @@ impl<P: Runtime> WithGuest<P> {
     /// The runtime that makes a box of `spec`, as its `route` says. An id is one box's across both classes: the other
     /// side holding it refuses the box as [`Refusal::Exists`].
     fn maker(&self, spec: &BoxSpec) -> Result<&dyn Runtime, Refusal> {
-        let (this, other): (&dyn Runtime, &dyn Runtime) =
-            match (self.route)(&self.process, &spec.class)? {
-                Side::Host => (&self.process, &self.oci),
-                Side::Guest => (&self.oci, &self.process),
-            };
+        let (this, other): (&dyn Runtime, &dyn Runtime) = match self.route(&spec.class)? {
+            Side::Host => (&self.process, &self.oci),
+            Side::Guest => (&self.oci, &self.process),
+        };
         match other.inspect(&spec.id) {
             Ok(_) => Err(Refusal::Exists(spec.id.clone())),
             Err(Refusal::NoSuchBox(_)) => Ok(this),

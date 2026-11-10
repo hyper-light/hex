@@ -1326,8 +1326,15 @@ fn capacity_runtime(capacity: Option<hex_api::Capacity>, config: GuestConfig) ->
         link,
         client,
         evented: Mutex::new(None),
+        owner: None,
     }));
     runtime
+}
+
+pub(super) fn model_connection() -> (Arc<dyn Link>, Client) {
+    let link: Arc<dyn Link> = Arc::new(CapacityLink(None));
+    let client = Client::connect(Arc::clone(&link)).unwrap();
+    (link, client)
 }
 
 /// AC-T7.4.1/r329: the actual guest-node reply, not host RAM, supplies the pool; a 633MiB

@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use hex_api::{BoxId, BoxSpec, CapacityResources, DeviceId, DeviceKind, Refusal};
+use hex_api::{BoxId, BoxSpec, CapacityResources, Class, DeviceId, DeviceKind, Refusal};
 
 use super::{GuestConfig, held};
 
@@ -23,6 +23,7 @@ pub(super) enum Phase {
 pub(super) struct Record {
     pub id: BoxId,
     pub devices: Vec<DeviceId>,
+    pub class: Class,
     pub vcpus: u32,
     pub memory_mib: u64,
     pub phase: Phase,
@@ -61,7 +62,10 @@ impl Record {
     pub fn intent(spec: &BoxSpec, config: &GuestConfig) -> Result<Self, Refusal> {
         spec.check()?;
         let reserved = resources(config)?;
-        if spec.devices.is_empty() || spec.devices.iter().any(|id| id.kind != DeviceKind::Gpu) {
+        if (!matches!(spec.class.class(), Class::Oci | Class::Shards))
+            || (spec.devices.is_empty() && spec.class.class() != Class::Shards)
+            || spec.devices.iter().any(|id| id.kind != DeviceKind::Gpu)
+        {
             return Err(invalid("a dedicated guest requires exact GPU claims"));
         }
         if spec
@@ -84,6 +88,7 @@ impl Record {
         Ok(Self {
             id: spec.id.try_clone()?,
             devices,
+            class: spec.class.class(),
             vcpus: config.vcpus,
             memory_mib: config.memory_mib,
             phase: Phase::Intent,
@@ -94,6 +99,7 @@ impl Record {
         let expected = Self::intent(spec, config)?;
         if self.id != expected.id
             || self.devices != expected.devices
+            || self.class != expected.class
             || self.vcpus != expected.vcpus
             || self.memory_mib != expected.memory_mib
         {
@@ -130,6 +136,7 @@ impl Record {
     fn render(&self, text: &mut impl std::fmt::Write) -> std::fmt::Result {
         writeln!(text, "{HEADER}")?;
         writeln!(text, "box {}", self.id)?;
+        writeln!(text, "class {}", self.class.name())?;
         writeln!(text, "vcpus {}", self.vcpus)?;
         writeln!(text, "memory_mib {}", self.memory_mib)?;
         writeln!(text, "devices {}", self.devices.len())?;
@@ -224,6 +231,11 @@ fn parse(text: &str) -> Result<Record, Refusal> {
         return Err(invalid("unknown receipt version"));
     }
     let id = BoxId::new(field(lines.next(), "box ")?)?;
+    let class = match field(lines.next(), "class ")? {
+        "oci" => Class::Oci,
+        "shards" => Class::Shards,
+        _ => return Err(invalid("receipt names another backend")),
+    };
     let vcpus = field(lines.next(), "vcpus ")?
         .parse::<u32>()
         .map_err(|_| invalid("invalid vCPU count"))?;
@@ -233,7 +245,11 @@ fn parse(text: &str) -> Result<Record, Refusal> {
     let count = field(lines.next(), "devices ")?
         .parse::<usize>()
         .map_err(|_| invalid("invalid device count"))?;
-    if count == 0 || count > hex_api::MAX_DEVICES || vcpus == 0 || memory_mib == 0 {
+    if (count == 0 && class != Class::Shards)
+        || count > hex_api::MAX_DEVICES
+        || vcpus == 0
+        || memory_mib == 0
+    {
         return Err(invalid("empty or excessive selected guest envelope"));
     }
     let mut devices = Vec::new();
@@ -290,6 +306,7 @@ fn parse(text: &str) -> Result<Record, Refusal> {
     Ok(Record {
         id,
         devices,
+        class,
         vcpus,
         memory_mib,
         phase,
@@ -312,6 +329,7 @@ mod tests {
                 kind: DeviceKind::Gpu,
                 key: 256,
             }],
+            class: Class::Shards,
             vcpus: 1,
             memory_mib: 256,
             phase: Phase::Intent,
