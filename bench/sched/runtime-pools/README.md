@@ -351,3 +351,17 @@ answer. The original failed trace is retained in diagnostic-trace-controls-d4d91
 The next separate diagnostic revision limits client traces to typed Submit.
 A passing gate or fresh-node campaign does not certify the failed physical
 scheduler lifecycle or the whole goal.
+
+The physical diagnostic adapter now shares the existing cold fault hooks rather
+than owning another recovery path. Root injected both the pre-ready receipt
+boundary fault and the post-ready finish-snapshot fault. Each remained failed,
+retained its original error, reaped the saved original backend and joined its
+record/receipt to the recorded Stopped identity. The refactored standalone cold
+entrypoint also stopped after the first injected failure despite requesting two
+iterations. Generic failed-iteration cleanup messages remain visible. Independent
+hashes and identity joins are in diagnostic-physical-fault-controls-aa2f0bdd.json.
+That record also retains Submit-only client trace8cc99eb3's unrelated LinkUp
+289.25µs timeout; its Submit completed in110.665333ms. Both trace controls again
+retired their exact guests. Daemon traces are now being restricted to Submit's
+synchronous scope in a separate diagnostic checkout; no production change or
+new timing seed follows from these controls.
