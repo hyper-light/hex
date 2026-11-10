@@ -238,6 +238,12 @@ impl Lab {
                 path.starts_with(&scope),
                 "fixture may write only its own new scope"
             );
+            assert!(
+                !path
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir)),
+                "fixture path cannot escape through parent components"
+            );
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             if let Some(source) = file["copy_from"].as_str() {
                 assert_eq!(
@@ -511,6 +517,23 @@ impl Lab {
             .as_array()
             .expect("independent actual host inventory")
         {
+            if let Some(luid) = row["luid"].as_str() {
+                let mask = count(row, "node_mask");
+                assert!(
+                    mask > 0 && mask.is_power_of_two(),
+                    "linked LUID mask does not select one physical node"
+                );
+                assert_eq!(
+                    inventory["devices"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|device| device["luid"].as_str() == Some(luid))
+                        .count(),
+                    1,
+                    "LUID shared by multiple actual physical devices"
+                );
+            }
             if let Some(pci) = row["pci"].as_array() {
                 assert_eq!(pci.len(), 4);
                 let domain = pci[0].as_u64().unwrap();
@@ -595,6 +618,21 @@ impl Lab {
         let id = reply.physical.unwrap();
         let selected = self.selected(&id);
         self.holder(&id, &selected);
+        fs::write(
+            self.scope.join("placement.json"),
+            serde_json::to_vec(&json!({
+                "source":self.input["source"],"key":key,"physical":id,"runner":reply.at.unwrap()
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        if !self.input["origin_barrier"].is_null() {
+            let origin = self.host("origin_barrier", &[]);
+            assert_eq!(
+                origin["origin_verified"], true,
+                "actual peer origin must observe this physical box"
+            );
+        }
         let native = self.host("native_observer", &[("@BOX@", id.as_str().into())]);
         assert_eq!(native["backend"], self.backend);
         assert_eq!(native["native_process_verified"], true);
@@ -607,7 +645,7 @@ impl Lab {
             "native_process_verified":true,"native_executable_sha256":native["native_executable_sha256"]}));
         self.emit(
             "binding",
-            json!({"selected":selected,"holder_count":1,"durable_before_execution":true}),
+            json!({"selected":selected,"holder_count":1,"durable_before_execution":true,"physical":id,"key":key}),
         );
         let (uuid, native_inventory, translation) = self.native_join(&id, &selected);
         let mut compute = self.compute(&id, &uuid);
@@ -637,6 +675,16 @@ impl Lab {
             "UNVERIFIED second physical GPU absent; selected-only proof remains separate"
         );
         for row in &foreign {
+            let positive = self.host(
+                "foreign_host_compute",
+                &[("@UUID@", text(row, "uuid").into())],
+            );
+            assert_eq!(positive["uuid"], row["uuid"]);
+            assert_eq!(
+                positive["dispatch_completed"], true,
+                "foreign positive must dispatch on host"
+            );
+            assert_eq!(positive["mismatches"], 0);
             let denied = self.exec(&id, "reject", text(row, "uuid"));
             assert_eq!(denied["refused"], true);
             assert_eq!(denied["dispatches"], 0);

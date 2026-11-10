@@ -11,7 +11,7 @@ import sys
 import time
 from pathlib import Path
 
-from evidence import (BACKENDS, POLICY, RULES, InvalidEvidence, check_run,
+from evidence import (BACKENDS, TARGETS, POLICY, RULES, InvalidEvidence, check_run,
                       finite_positive, hex_digest, load_json, require, sha256)
 
 
@@ -28,6 +28,10 @@ def run(args):
     require(hex_digest(args.source, 40) and hex_digest(args.binary_sha256), "exact source/binary pins required")
     require(finite_positive(args.timeout) and finite_positive(args.cleanup_timeout), "finite run/cleanup budgets required")
     require(args.byte_limit > 0, "positive admitted artifact byte bound required")
+    architecture={"arm64":"aarch64","aarch64":"aarch64","x86_64":"x86_64","amd64":"x86_64"}.get(platform.machine().lower())
+    os_part="linux" if sys.platform.startswith("linux") else "apple-darwin" if sys.platform=="darwin" else "windows" if os.name=="nt" else None
+    require(args.target in TARGETS and architecture is not None and args.target.startswith(architecture+"-") and
+            os_part is not None and os_part in args.target,"requested execution target disagrees with actual native host")
     binary = args.binary.resolve(strict=True)
     require(sha256(binary) == args.binary_sha256, "input binary hash mismatch")
     config = args.config.resolve(strict=True)

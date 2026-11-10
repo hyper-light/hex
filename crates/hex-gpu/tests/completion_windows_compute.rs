@@ -507,7 +507,7 @@ fn transition(
     // SAFETY: transition union matches Type; resource remains live, with one known before/after state.
     unsafe { list.ResourceBarrier(std::slice::from_ref(&barrier)) };
     // SAFETY: only Transition was initialized; release exactly its temporary cloned reference once.
-    unsafe { ManuallyDrop::drop(&mut barrier.Anonymous.Transition.pResource) };
+    unsafe { ManuallyDrop::drop(&mut (*barrier.Anonymous.Transition).pResource) };
 }
 
 struct Work<'a> {

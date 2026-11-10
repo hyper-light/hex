@@ -188,6 +188,26 @@ static int inventory(const struct inputs *args, struct owned *own, VkPhysicalDev
         printf("{\"refused\":true,\"dispatches\":0}\n"); return 0;
     }
     if (matches != 1 || (!strcmp(args->mode, "compute") && count != 1)) return fail("selected_or_foreign_identity", 0);
+    if (!strcmp(args->mode, "compute")) {
+        uint32_t groups_count = 0;
+        result = vkEnumeratePhysicalDeviceGroups(own->instance, &groups_count, NULL);
+        if (result != VK_SUCCESS || groups_count == 0 || groups_count > args->max_items)
+            return fail("physical_group_count", result);
+        VkPhysicalDeviceGroupProperties *groups = calloc(groups_count, sizeof(*groups));
+        if (!groups) return fail("physical_group_allocation", 0);
+        for (uint32_t i = 0; i < groups_count; ++i) groups[i].sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GROUP_PROPERTIES;
+        uint32_t available = groups_count;
+        result = vkEnumeratePhysicalDeviceGroups(own->instance, &available, groups);
+        int bad = result != VK_SUCCESS || available != groups_count;
+        uint32_t occurrences = 0;
+        for (uint32_t i = 0; !bad && i < available; ++i) {
+            if (groups[i].physicalDeviceCount != 1) { bad = 1; break; }
+            if (groups[i].physicalDevices[0] != *chosen) { bad = 1; break; }
+            ++occurrences;
+        }
+        free(groups);
+        if (bad || occurrences != 1) return fail("foreign_or_linked_physical_group", result);
+    }
     if (properties->deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU ||
         properties->deviceType == VK_PHYSICAL_DEVICE_TYPE_OTHER) return fail("software_or_unknown_device", 0);
     if (properties->apiVersion < VK_API_VERSION_1_1) return fail("device_version", 0);

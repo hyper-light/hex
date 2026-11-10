@@ -1,0 +1,127 @@
+{
+  "cohort": "8c399c0b0c55914c6cf765348e5b8622860b4014",
+  "owned": "70945fe878f87e11acb5bde6e4dbf793dd726b8f",
+  "archive_sha256": "276a53533bce9dda940abaacb7b2564efe5451284cd3b43f7eaa36a68ef36d42",
+  "scope": "light static C/Rust native fixtures plus one pure Rust parser test ONLY; NO native dispatch/VM/HCS/profile",
+  "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+  "phases": [
+    {
+      "name": "vulkan-c-syntax",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/usr/bin/cc",
+        "-std=c11",
+        "-fsyntax-only",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-I",
+        "/Users/adalundhe/.cache/hex-completion-validation/compile-70945fe8-8c399c0b-a6863c4c/headers/Vulkan-Headers-vulkan-sdk-1.4.321.0/include",
+        "/Users/adalundhe/.cache/hex-completion-validation/compile-70945fe8-8c399c0b-a6863c4c/source/scripts/scheduler-completion/vulkan-witness.c"
+      ],
+      "pid": 80975,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "gpu-telemetry-clippy",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "clippy",
+        "-p",
+        "hex-gpu",
+        "--test",
+        "completion_telemetry",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 80977,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "97ee1010cdd3584a562c683e767c9c32e0743ff1dcf96b54aa308bc2cda7b4ad"
+    },
+    {
+      "name": "windows-compute-clippy",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "clippy",
+        "-p",
+        "hex-gpu",
+        "--test",
+        "completion_windows_compute",
+        "--locked",
+        "--target",
+        "x86_64-pc-windows-msvc",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 81078,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "309f786c4d82423755a3811c474c9a9d07ff701fbd7ebd87037abe48b15d3902"
+    },
+    {
+      "name": "backend-fixture-clippy",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "clippy",
+        "-p",
+        "hex-cli",
+        "--test",
+        "completion_backends",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 81381,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "5390ad6c9608b1a27f4bcda424bce7fda633c82af02f70b640a7a0183cc97fb8"
+    },
+    {
+      "name": "backend-pure-parser",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-cli",
+        "--test",
+        "completion_backends",
+        "--locked",
+        "completion_receipt_parser_uses_the_actual_last_json_result",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 81514,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "395b18d09500ae1970288ce9e6e5dabab20318324d9146be49844bb50affd540",
+      "selected_exact": false
+    }
+  ],
+  "source_unchanged": true,
+  "temp_entries": 0,
+  "exit": 1,
+  "binaries": {}
+}

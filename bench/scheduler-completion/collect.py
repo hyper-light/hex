@@ -81,7 +81,9 @@ def collect(args):
         before = counters(cgroup, args.byte_limit)
         began = time.monotonic_ns()
         cpu_began = time.process_time_ns()
-        row = command([str(pinned), *spec["args"]], args.output, f"sample-{index}", args.timeout, args.cleanup_timeout)
+        arguments=[part.replace("@SAMPLE@",str(index)).replace("@OUTPUT@",str(args.output))
+                   for part in spec["args"]]
+        row = command([str(pinned), *arguments], args.output, f"sample-{index}", args.timeout, args.cleanup_timeout)
         elapsed = (time.monotonic_ns() - began) / 1_000_000_000
         caller = (time.process_time_ns() - cpu_began) / 1_000_000_000
         after = counters(cgroup, args.byte_limit)

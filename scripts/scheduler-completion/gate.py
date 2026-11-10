@@ -35,7 +35,12 @@ def assess(manifest, byte_limit):
             require(origin.get("source") == source and origin.get("target") == key["target"] and
                     origin.get("scope") == "root-peer-origin" and origin.get("outcome") == "verified",
                     "no actual peer-origin control-path receipt")
-            require(origin.get("physical") == cell.get("physical") and
+            from evidence import artifact
+            artifact(origin_path.parent,origin["binary"])
+            reply_path=artifact(origin_path.parent,origin["reply_artifact"])
+            require(load_json(reply_path,byte_limit)==origin["reply"],"origin raw reply mismatch")
+            require(origin.get("physical") == verified["physical"] and
+                    origin["reply"].get("key") == verified["key"] and
                     origin.get("runner_receipt_sha256") == cell.get("runner_receipt_sha256"),
                     "origin/runner did not witness the same physical placement")
             from evidence import sha256

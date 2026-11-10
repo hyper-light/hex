@@ -39,7 +39,11 @@ def mac_process(pid, timeout, byte_limit):
     function.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
     function.restype = ctypes.c_int
     buffer = ctypes.create_string_buffer(byte_limit)
-    require(function(pid, buffer, byte_limit) > 0, "proc_pidpath failed")
+    if function(pid, buffer, byte_limit) <= 0:
+        error=ctypes.get_errno()
+        if error==3:
+            raise ProcessLookupError(error,"native process is absent")
+        raise OSError(error,"proc_pidpath failed; absence is unverified")
     class Usage(ctypes.Structure):
         _fields_ = [("uuid", ctypes.c_uint8 * 16)] + [(name, ctypes.c_uint64) for name in
             ("user", "system", "idle_wakeups", "interrupt_wakeups", "pageins", "wired", "resident",
@@ -48,7 +52,11 @@ def mac_process(pid, timeout, byte_limit):
     rusage = libproc.proc_pid_rusage
     rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
     rusage.restype = ctypes.c_int
-    require(rusage(pid, 0, ctypes.byref(usage)) == 0, "proc_pid_rusage failed")
+    if rusage(pid, 0, ctypes.byref(usage)) != 0:
+        error=ctypes.get_errno()
+        if error==3:
+            raise ProcessLookupError(error,"native process is absent")
+        raise OSError(error,"proc_pid_rusage failed; absence is unverified")
     path = Path(os.fsdecode(buffer.value)).resolve(strict=True)
     return {"pid": pid, "start_token": str(usage.started), "executable": str(path), "exe_handle": path}
 
@@ -67,7 +75,11 @@ def windows_process(pid, _timeout, byte_limit):
     kernel.QueryFullProcessImageNameW.restype = wintypes.BOOL
     # PROCESS_QUERY_LIMITED_INFORMATION only: no terminate, duplicate or inheritance authority.
     handle = kernel.OpenProcess(0x1000, False, pid)
-    require(bool(handle), "OpenProcess query refused")
+    if not handle:
+        error=ctypes.get_last_error()
+        if error==87: # ERROR_INVALID_PARAMETER: a valid positive PID names no process.
+            raise ProcessLookupError(error,"no process with this PID")
+        raise OSError(error,"OpenProcess query refused; absence is unverified")
     try:
         creation, end, system, user = (wintypes.FILETIME() for _ in range(4))
         require(bool(kernel.GetProcessTimes(handle, ctypes.byref(creation), ctypes.byref(end),

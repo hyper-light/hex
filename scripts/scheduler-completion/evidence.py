@@ -122,7 +122,7 @@ def check_events(events, backend, topology, proof="full"):
     require(hex_digest(capability.get("native_executable_sha256")), "native executable not pinned")
     selected = binding.get("selected")
     require(isinstance(selected, list) and len(selected) == 1, "fixture requires exactly one selected physical GPU")
-    require(binding.get("holder_count") == 1 and binding.get("durable_before_execution") is True,
+    require(type(binding.get("holder_count")) is int and binding.get("holder_count") == 1 and binding.get("durable_before_execution") is True,
             "no single durable holder before execution")
     require(hex_digest(compute.get("uuid"), 32), "no actual physical GPU UUID")
     require(compute.get("selected") == selected and compute.get("native_join_verified") is True,
@@ -141,6 +141,13 @@ def check_events(events, backend, topology, proof="full"):
         require(domain<=0xffffffff and bus<=255 and slot<=31 and function<=7,"invalid native host PCI")
         require((domain<<16)|(bus<<8)|(slot<<3)|function==selected[0]["key"],"wrong VMM host PCI key")
     for device in compute.get("native_inventory",[]):
+        luid=device.get("luid")
+        if luid is not None:
+            mask=device.get("node_mask")
+            require(hex_digest(luid,16) and natural(mask,positive=True) and mask&(mask-1)==0,
+                    "linked-node LUID does not identify one exact physical node")
+            require(sum(row.get("luid")==luid for row in compute["native_inventory"])==1,
+                    "LUID is shared by multiple physical Vulkan devices")
         pci=device.get("pci")
         if pci is not None:
             require(isinstance(pci,list) and len(pci)==4 and all(natural(part) for part in pci),
@@ -177,6 +184,7 @@ def check_events(events, backend, topology, proof="full"):
             "native cleanup incomplete")
     require(complete.get("selected_stages") == len(expected), "vacuous completion")
     return {"backend": backend, "topology": topology, "proof": proof, "native_stages": len(expected),
+            "physical":binding.get("physical"),"key":binding.get("key"),
             "remaining": [] if proof == "full" else ["foreign-device", "wrong-id", "scheduler-recovery", "runtime-recovery"]}
 
 

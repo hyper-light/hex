@@ -27,7 +27,7 @@ def prepare(lab, source):
     scoped_hex="@SCOPE@/helpers/hex"+(".exe" if lab.get("host_windows") else "")
     value["files"].append({"path":scoped_hex,"copy_from":lab["hex"]["path"],"sha256":lab["hex"]["sha256"]})
     value["hex"]={"path":scoped_hex,"sha256":lab["hex"]["sha256"]}
-    for name in ("evidence.py","native_probe.py","cleanup_probe.py","load_probe.py","firecracker_probe.py"):
+    for name in ("evidence.py","native_probe.py","cleanup_probe.py","load_probe.py","firecracker_probe.py","origin.py"):
         value["files"].append({"path":f"@SCOPE@/helpers/{name}","text":(root/name).read_text()})
     witness="@SCOPE@/helpers/vulkan-witness"+(".exe" if lab.get("host_windows") else "")
     value["files"].append({"path":witness,"copy_from":lab["vulkan"]["path"],"sha256":lab["vulkan"]["sha256"]})
@@ -36,6 +36,10 @@ def prepare(lab, source):
                 "args":[f"@SCOPE@/helpers/{script}",*args]}
     common=["--root-authorized","--timeout",str(lab["observer_timeout_seconds"]),
             "--byte-limit",str(lab["byte_limit"])]
+    if lab.get("require_remote_origin"):
+        value["origin_barrier"]=python_command("origin.py",["barrier",*common,
+            "--placement","@SCOPE@/placement.json","--address","@SCOPE@/origin-address.json",
+            "--output","@SCOPE@/origin-observed.json"])
     native=lab["native_identity"]
     value["native_observer"]=python_command("native_probe.py",[
         *common,"--identity",native["path"],"--format",native["format"],
@@ -65,6 +69,11 @@ def prepare(lab, source):
             *common,"--api",lab["firecracker_api"],"--host-sbdf",lab["selected_host_sbdf"],
             "--native-key","@KEY@"])
     if lab["proof"]=="full":
+        host_work=["--mode","host-compute","--max-items",str(lab["max_items"]),
+            "--uuid","@UUID@","--shader",lab["host_shader"],"--max-shader-bytes",str(lab["max_shader_bytes"]),
+            "--words",str(lab["words"]),"--rounds",str(lab["rounds"]),"--challenge",str(lab["challenge"]),
+            "--wait-ns",str(lab["gpu_wait_ns"])]
+        value["foreign_host_compute"]={"path":witness,"sha256":lab["vulkan"]["sha256"],"args":host_work}
         value["wrong_uuid"]=lab["wrong_uuid"]
         require(hex_digest(lab["wrong_uuid"],32),"wrong-ID control must supply an explicit UUID")
         value["catalog"]=lab["catalog"]

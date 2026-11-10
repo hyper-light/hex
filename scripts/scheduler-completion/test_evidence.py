@@ -61,6 +61,21 @@ class EvidenceBehavior(unittest.TestCase):
         value=full_events();value[6]["selected"]=[{"kind":"gpu","key":512}]
         with self.assertRaises(InvalidEvidence):check_events(value,"oci","laptop")
 
+    def test_hex_uuid_without_matching_native_identity_is_not_proof(self):
+        value=full_events();value[2]["native_inventory"][0]["pci"]=[0,2,0,0]
+        with self.assertRaises(InvalidEvidence):check_events(value,"oci","laptop")
+
+    def test_shared_luid_cannot_select_a_physical_linked_node(self):
+        value=full_events()
+        first=value[2]["native_inventory"][0]
+        first.update(luid="c"*16,node_mask=1)
+        value[2]["native_inventory"].append({"uuid":"d"*32,"pci":[0,2,0,0],"luid":"c"*16,"node_mask":2})
+        with self.assertRaises(InvalidEvidence):check_events(value,"oci","laptop")
+
+    def test_multibit_luid_node_mask_is_not_exact(self):
+        value=full_events();value[2]["native_inventory"][0].update(luid="c"*16,node_mask=3)
+        with self.assertRaises(InvalidEvidence):check_events(value,"oci","laptop")
+
     def test_rejects_foreign_access(self):
         value=full_events();value[3]["guest_accessible"]=1
         with self.assertRaises(InvalidEvidence):check_events(value,"oci","laptop")
