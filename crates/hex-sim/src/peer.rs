@@ -78,6 +78,11 @@ pub enum Msg {
         key: Key,
         demand: Demand,
     },
+    /// Durable owner cancellation; the receiver proves actual deletion before acknowledging it.
+    Delete {
+        key: Key,
+        demand: Demand,
+    },
     /// A restarted owner, or one whose link came back: do you hold this box?
     Holds {
         key: Key,
@@ -112,6 +117,8 @@ pub enum Told {
     Ended(Key),
     /// To this node's runtime: create the box.
     Create(Key, Demand),
+    /// Delete/inspect this exact backend, then call end only after actual deletion/absence proof.
+    Delete(Key, Demand),
 }
 
 /// A box as its node's runtime has it.
@@ -127,6 +134,8 @@ pub enum Boxed {
 enum State {
     Asked,
     At(NodeId),
+    Created(NodeId),
+    Deleting(NodeId),
     Done(NodeId),
 }
 
@@ -134,6 +143,8 @@ enum State {
 struct Owned {
     demand: Demand,
     workload: WorkloadId,
+    /// A persisted Created is reconfirmed against its peer after every owner boot.
+    ready: bool,
     state: State,
     /// Nodes that refused it since it last waited: in memory only.
     tried: BTreeSet<NodeId>,
@@ -377,9 +388,16 @@ fn flag<'a>(words: &mut impl Iterator<Item = &'a str>) -> Result<bool, Stop> {
 /// device models cross the boundary by name, never as a sender-local ModelId.
 pub fn encode_message(msg: &Msg, models: &[String], max_bytes: usize) -> Result<String, Stop> {
     let (tag, key) = match msg {
-        Msg::Start { key, demand } => {
+        Msg::Start { key, demand } | Msg::Delete { key, demand } => {
             check_demand(demand, models)?;
-            ("start", key)
+            (
+                if matches!(msg, Msg::Start { .. }) {
+                    "start"
+                } else {
+                    "delete"
+                },
+                key,
+            )
         }
         Msg::Holds { key } => ("holds", key),
         Msg::Forget { key } => ("forget", key),
@@ -408,7 +426,7 @@ pub fn encode_message(msg: &Msg, models: &[String], max_bytes: usize) -> Result<
     };
     write!(&mut out, "p1 {tag} {} {} {}", key.owner, key.epoch, key.seq).map_err(|_| full())?;
     match msg {
-        Msg::Start { demand, .. } => {
+        Msg::Start { demand, .. } | Msg::Delete { demand, .. } => {
             out.write_char(' ').map_err(|_| full())?;
             write_demand(&mut out, demand, models).map_err(|_| full())?;
         }
@@ -455,10 +473,12 @@ pub fn decode_message(text: &str, models: &[String], max_bytes: usize) -> Result
         seq: number(&mut words)?,
     };
     let msg = match tag {
-        "start" => {
-            return Ok(Msg::Start {
-                key,
-                demand: demand_of(&mut words, models)?,
+        "start" | "delete" => {
+            let demand = demand_of(&mut words, models)?;
+            return Ok(if tag == "start" {
+                Msg::Start { key, demand }
+            } else {
+                Msg::Delete { key, demand }
             });
         }
         "holds" => Msg::Holds { key },
@@ -606,12 +626,18 @@ impl Node {
                     let state = match (words.next(), words.next().map(str::parse::<u32>)) {
                         (Some("asked"), Some(Ok(0))) => State::Asked,
                         (Some("at"), Some(Ok(n))) if known(NodeId(n)) => State::At(NodeId(n)),
+                        (Some("created"), Some(Ok(n))) if known(NodeId(n)) => {
+                            State::Created(NodeId(n))
+                        }
                         (Some("done"), Some(Ok(n))) if known(NodeId(n)) => State::Done(NodeId(n)),
+                        (Some("deleting"), Some(Ok(n))) if known(NodeId(n)) => {
+                            State::Deleting(NodeId(n))
+                        }
                         _ => return Err(damaged("an owned box's state")),
                     };
                     let demand = demand_of(&mut words, models)?;
                     let workload = workload(&mut next_workload)?;
-                    if let State::At(n) = state {
+                    if let State::At(n) | State::Created(n) | State::Deleting(n) = state {
                         if view.verdict(n, &demand) != Ok(Verdict::Admits) {
                             return Err(damaged("an owned box past its node's admission"));
                         }
@@ -629,6 +655,7 @@ impl Node {
                         Owned {
                             demand,
                             workload,
+                            ready: false,
                             state,
                             tried: BTreeSet::new(),
                         },
@@ -808,6 +835,15 @@ impl Node {
             .or_else(|| self.ran.get(&key).map(|r| r.demand))
     }
 
+    /// Actual readiness confirmed by the selected peer. Persisted creation is queried again on boot;
+    /// admission alone, pending deletion, and ended boxes are never reported as ready.
+    pub fn is_created(&self, key: Key) -> bool {
+        if let Some(o) = self.owned.get(&key) {
+            return o.ready && matches!(o.state, State::Created(_));
+        }
+        self.ran.get(&key).is_some_and(|r| r.created && !r.ended)
+    }
+
     /// At most Budget::owned entries. None means waiting; Some names the selected peer.
     pub fn owned_keys(&self) -> impl Iterator<Item = (Key, Option<NodeId>)> + '_ {
         self.owned.iter().map(|(&key, o)| {
@@ -815,7 +851,9 @@ impl Node {
                 key,
                 match o.state {
                     State::Asked => None,
-                    State::At(n) | State::Done(n) => Some(n),
+                    State::At(n) | State::Created(n) | State::Deleting(n) | State::Done(n) => {
+                        Some(n)
+                    }
                 },
             )
         })
@@ -858,6 +896,7 @@ impl Node {
             Owned {
                 demand,
                 workload,
+                ready: false,
                 state: State::Asked,
                 tried: BTreeSet::new(),
             },
@@ -865,6 +904,48 @@ impl Node {
         let mut out = Vec::new();
         self.place(key, records, &mut out)?;
         Ok((key, out))
+    }
+
+    /// CP-T7.4: cancel at its single selected peer. Intent is durable before Delete, and neither
+    /// reservation nor ownership is released until that peer proves actual deletion/absence.
+    pub fn delete(
+        &mut self,
+        key: Key,
+        records: &mut impl Records,
+    ) -> Result<Vec<(NodeId, Msg)>, Stop> {
+        if key.owner != self.id.0 {
+            return Err(damaged("deletion by a different owner"));
+        }
+        let Some(o) = self.owned.get(&key) else {
+            return Err(damaged("deletion of a box this node does not own"));
+        };
+        let (state, demand) = (o.state, o.demand);
+        let mut out = Vec::new();
+        match state {
+            State::Asked => {
+                records.put(
+                    &key.name("own"),
+                    &own_text(State::Done(self.id), &demand, &self.models)?,
+                )?;
+                if let Some(o) = self.owned.get_mut(&key) {
+                    o.state = State::Done(self.id);
+                }
+                self.ended(key, self.id, records, &mut out)?;
+            }
+            State::At(peer) | State::Created(peer) => {
+                records.put(
+                    &key.name("own"),
+                    &own_text(State::Deleting(peer), &demand, &self.models)?,
+                )?;
+                if let Some(o) = self.owned.get_mut(&key) {
+                    o.state = State::Deleting(peer);
+                }
+                out.push((peer, Msg::Delete { key, demand }));
+            }
+            State::Deleting(peer) => out.push((peer, Msg::Delete { key, demand })),
+            State::Done(peer) => self.ended(key, peer, records, &mut out)?,
+        }
+        Ok(out)
     }
 
     /// Where `key` goes: the node the kernel's walk ranks first among those this owner's view admits
@@ -911,7 +992,18 @@ impl Node {
         let Some(o) = self.owned.get(&key) else {
             return Ok(());
         };
-        if o.state != State::At(from) {
+        if o.state == State::Deleting(from) {
+            // A missing core row (Held false) is not runtime absence proof for deletion.
+            out.push((
+                from,
+                Msg::Delete {
+                    key,
+                    demand: o.demand,
+                },
+            ));
+            return Ok(());
+        }
+        if !matches!(o.state, State::At(n) | State::Created(n) if n == from) {
             return Ok(());
         }
         let (demand, workload) = (o.demand, o.workload);
@@ -924,6 +1016,7 @@ impl Node {
             .map_err(|e| Stop::Damaged(e.to_string()))?;
         if let Some(o) = self.owned.get_mut(&key) {
             o.state = State::Asked;
+            o.ready = false;
             o.tried.insert(from);
         }
         self.place(key, records, out)
@@ -944,7 +1037,7 @@ impl Node {
         };
         let (demand, workload) = (o.demand, o.workload);
         match o.state {
-            State::At(n) if n == from => {
+            State::At(n) | State::Created(n) | State::Deleting(n) if n == from => {
                 records.put(
                     &key.name("own"),
                     &own_text(State::Done(from), &demand, &self.models)?,
@@ -954,7 +1047,11 @@ impl Node {
                     .map_err(|e| Stop::Damaged(e.to_string()))?;
             }
             State::Done(n) if n == from => {}
-            State::Asked | State::At(_) | State::Done(_) => return Ok(()),
+            State::Asked
+            | State::At(_)
+            | State::Created(_)
+            | State::Deleting(_)
+            | State::Done(_) => return Ok(()),
         }
         if let Some(o) = self.owned.get_mut(&key) {
             o.state = State::Done(from);
@@ -963,6 +1060,30 @@ impl Node {
         out.push((from, Msg::Forget { key }));
         records.remove(&key.name("own"))?;
         self.owned.remove(&key);
+        Ok(())
+    }
+
+    fn started(&mut self, key: Key, from: NodeId, records: &mut impl Records) -> Result<(), Stop> {
+        let Some(o) = self.owned.get(&key) else {
+            return Ok(());
+        };
+        match o.state {
+            State::At(peer) if peer == from => records.put(
+                &key.name("own"),
+                &own_text(State::Created(from), &o.demand, &self.models)?,
+            )?,
+            State::Created(peer) if peer == from && !o.ready => {}
+            State::Asked
+            | State::At(_)
+            | State::Created(_)
+            | State::Deleting(_)
+            | State::Done(_) => return Ok(()),
+        }
+        if let Some(o) = self.owned.get_mut(&key) {
+            o.state = State::Created(from);
+            o.ready = true;
+        }
+        self.told.push(Told::Started(key, from));
         Ok(())
     }
 
@@ -980,7 +1101,10 @@ impl Node {
             return Err(damaged("a message's unknown peer"));
         }
         let (key, owner_message) = match msg {
-            Msg::Start { key, .. } | Msg::Holds { key } | Msg::Forget { key } => (key, true),
+            Msg::Start { key, .. }
+            | Msg::Delete { key, .. }
+            | Msg::Holds { key }
+            | Msg::Forget { key } => (key, true),
             Msg::Started { key }
             | Msg::Refused { key }
             | Msg::Held { key, .. }
@@ -992,6 +1116,24 @@ impl Node {
         let mut out = Vec::new();
         match msg {
             Msg::Start { key, demand } => self.start(from, key, demand, records, &mut out)?,
+            Msg::Delete { key, demand } => {
+                check_demand(&demand, &self.models)?;
+                if self
+                    .ran
+                    .get(&key)
+                    .is_some_and(|r| r.demand != demand || r.owner != from)
+                {
+                    return Err(damaged("Delete disagrees with its admitted demand"));
+                }
+                if self.ran.get(&key).is_some_and(|r| r.ended) {
+                    out.push((from, Msg::Ended { key }));
+                } else {
+                    self.told.retain(
+                        |t| !matches!(t, Told::Create(k, _) | Told::Delete(k, _) if *k == key),
+                    );
+                    self.told.push(Told::Delete(key, demand));
+                }
+            }
             Msg::Holds { key } => {
                 let r = self.ran.get(&key);
                 out.push((
@@ -1010,15 +1152,7 @@ impl Node {
                     self.ran.remove(&key);
                 }
             }
-            Msg::Started { key } => {
-                if self
-                    .owned
-                    .get(&key)
-                    .is_some_and(|o| o.state == State::At(from))
-                {
-                    self.told.push(Told::Started(key, from));
-                }
-            }
+            Msg::Started { key } => self.started(key, from, records)?,
             Msg::Refused { key }
             | Msg::Held {
                 key, holds: false, ..
@@ -1035,15 +1169,7 @@ impl Node {
                 holds: true,
                 ended: false,
                 created: true,
-            } => {
-                if self
-                    .owned
-                    .get(&key)
-                    .is_some_and(|o| o.state == State::At(from))
-                {
-                    self.told.push(Told::Started(key, from));
-                }
-            }
+            } => self.started(key, from, records)?,
             Msg::Held {
                 holds: true,
                 ended: false,
@@ -1188,9 +1314,19 @@ impl Node {
         key: Key,
         records: &mut impl Records,
     ) -> Result<Vec<(NodeId, Msg)>, Stop> {
-        let Some(r) = self.ran.get(&key).copied().filter(|r| !r.ended) else {
-            return Ok(Vec::new());
+        if usize::try_from(key.owner)
+            .ok()
+            .is_none_or(|n| n >= self.view.len())
+        {
+            return Err(damaged("an end's unknown owner"));
+        }
+        let Some(r) = self.ran.get(&key).copied() else {
+            // Only the runtime shell calls end: no record alone is not absence proof.
+            return Ok(vec![(NodeId(key.owner), Msg::Ended { key })]);
         };
+        if r.ended {
+            return Ok(vec![(r.owner, Msg::Ended { key })]);
+        }
         let ended = Ran {
             created: true,
             ended: true,
@@ -1222,9 +1358,22 @@ impl Node {
             match o.state {
                 #[cfg(test)]
                 State::At(n) if n == peer && REPLACE_ON_SILENCE.get() => silent.push(*key),
-                State::At(n) if n == peer => out.push((peer, Msg::Holds { key: *key })),
+                State::At(n) | State::Created(n) if n == peer => {
+                    out.push((peer, Msg::Holds { key: *key }))
+                }
                 State::Done(n) if n == peer => done.push(*key),
-                State::Asked | State::At(_) | State::Done(_) => {}
+                State::Deleting(n) if n == peer => out.push((
+                    peer,
+                    Msg::Delete {
+                        key: *key,
+                        demand: o.demand,
+                    },
+                )),
+                State::Asked
+                | State::At(_)
+                | State::Created(_)
+                | State::Deleting(_)
+                | State::Done(_) => {}
             }
         }
         #[cfg(test)]
@@ -1293,6 +1442,8 @@ fn own_text(state: State, demand: &Demand, models: &[String]) -> Result<String, 
     let (word, n) = match state {
         State::Asked => ("asked", 0),
         State::At(n) => ("at", n.0),
+        State::Created(n) => ("created", n.0),
+        State::Deleting(n) => ("deleting", n.0),
         State::Done(n) => ("done", n.0),
     };
     Ok(format!("{word} {n} {}", demand_text(demand, models)?))
@@ -1526,6 +1677,26 @@ impl<R: Records> World<R> {
                     ) {
                         (Some(node), Some(rec)) => node.created(key, rec),
                         _ => return Err(damaged("runtime feedback to a missing node")),
+                    };
+                    match feedback {
+                        Ok(out) => self.send(i, out),
+                        Err(Stop::Crashed) => {
+                            self.crash(i);
+                            return Ok(());
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                Told::Delete(key, _) => {
+                    if self.boxes.get(&key).is_some_and(|(at, _)| *at == id) {
+                        self.boxes.insert(key, (id, Boxed::Exited));
+                    }
+                    let feedback = match (
+                        self.nodes.get_mut(i).and_then(Option::as_mut),
+                        self.records.get_mut(i),
+                    ) {
+                        (Some(node), Some(rec)) => node.end(key, rec),
+                        _ => return Err(damaged("deletion feedback to a missing node")),
                     };
                     match feedback {
                         Ok(out) => self.send(i, out),
@@ -2486,7 +2657,7 @@ mod tests {
             seq: u64::MAX,
         };
         let budget = format!(
-            "p1 start {} {} {} {}",
+            "p1 delete {} {} {} {}",
             key.owner,
             key.epoch,
             key.seq,
@@ -2495,6 +2666,7 @@ mod tests {
         .len();
         for msg in [
             Msg::Start { key, demand },
+            Msg::Delete { key, demand },
             Msg::Holds { key },
             Msg::Forget { key },
             Msg::Started { key },
@@ -2620,6 +2792,294 @@ mod tests {
         };
         assert!(start(&mut node, other_key(3), shards, &mut records).is_empty());
         assert_eq!(node.admitted(), amounts(&shards.need));
+    }
+
+    fn delete_specs() -> Vec<NodeSpec> {
+        vec![
+            NodeSpec::new(NodeId(0), Resources::default()),
+            NodeSpec::new(NodeId(1), requested().need),
+        ]
+    }
+
+    fn receiver(specs: &[NodeSpec], records: &mut Memory) -> Node {
+        Node::boot(
+            NodeId(1),
+            specs,
+            &[],
+            test_budget(),
+            Pick::default(),
+            records,
+            |_| Boxed::Absent,
+        )
+        .unwrap()
+    }
+
+    /// AC-T7.4.1: durable remote deletion survives owner/receiver restart, retains reservations on
+    /// failed or delayed runtime deletion, and never replaces the workload on another peer.
+    #[test]
+    fn remote_delete_keeps_reservations_until_actual_delete_and_recovers_intent() {
+        let specs = delete_specs();
+        let (mut owned_records, mut ran_records) = (Memory::default(), Memory::default());
+        let mut owner = boot_test(&specs, &[], &mut owned_records);
+        let mut runner = receiver(&specs, &mut ran_records);
+        let demand = requested();
+        let (key, start) = owner.submit(demand, &mut owned_records).unwrap();
+        assert_eq!(start, vec![(NodeId(1), Msg::Start { key, demand })]);
+        runner
+            .hear(NodeId(0), start[0].1, &mut ran_records)
+            .unwrap();
+        let started = runner.created(key, &mut ran_records).unwrap();
+        owner
+            .hear(NodeId(1), started[0].1, &mut owned_records)
+            .unwrap();
+        owner.told.clear();
+        runner.told.clear();
+        let deletion = owner.delete(key, &mut owned_records).unwrap();
+        assert_eq!(deletion, vec![(NodeId(1), Msg::Delete { key, demand })]);
+        assert!(owner.told.is_empty());
+        assert_eq!(owner.view.verdict(NodeId(1), &demand), Ok(Verdict::NoRoom));
+        assert!(
+            runner
+                .hear(NodeId(0), deletion[0].1, &mut ran_records)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            std::mem::take(&mut runner.told),
+            vec![Told::Delete(key, demand)]
+        );
+        assert_eq!(runner.admitted(), amounts(&demand.need));
+        let mut owner = Node::boot(
+            NodeId(0),
+            &specs,
+            &[],
+            test_budget(),
+            Pick::default(),
+            &mut owned_records,
+            |_| Boxed::Absent,
+        )
+        .unwrap();
+        let mut runner = Node::boot(
+            NodeId(1),
+            &specs,
+            &[],
+            test_budget(),
+            Pick::default(),
+            &mut ran_records,
+            |_| Boxed::Running,
+        )
+        .unwrap();
+        assert_eq!(
+            owner.link_up(NodeId(1), &mut owned_records).unwrap(),
+            deletion
+        );
+        let mut retry = Vec::new();
+        owner.retry(&mut owned_records, &mut retry).unwrap();
+        assert!(retry.is_empty());
+        assert_eq!(runner.admitted(), amounts(&demand.need));
+        assert_eq!(owner.owned(), 1);
+        assert!(owner.told.is_empty());
+        // The shell now proves the actual backend no longer holds this key.
+        let ended = runner.end(key, &mut ran_records).unwrap();
+        let forget = owner
+            .hear(NodeId(1), ended[0].1, &mut owned_records)
+            .unwrap();
+        assert_eq!(std::mem::take(&mut owner.told), vec![Told::Ended(key)]);
+        assert_eq!(owner.owned(), 0);
+        assert_eq!(runner.admitted(), [0; lb::DIMS]);
+        assert_eq!(owner.view.verdict(NodeId(1), &demand), Ok(Verdict::Admits));
+        assert_eq!(
+            runner
+                .hear(NodeId(0), deletion[0].1, &mut ran_records)
+                .unwrap(),
+            ended
+        );
+        assert!(runner.told.is_empty());
+        runner
+            .hear(NodeId(0), forget[0].1, &mut ran_records)
+            .unwrap();
+        assert!(
+            runner
+                .hear(NodeId(0), deletion[0].1, &mut ran_records)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            std::mem::take(&mut runner.told),
+            vec![Told::Delete(key, demand)]
+        );
+        assert_eq!(runner.end(key, &mut ran_records).unwrap(), ended);
+    }
+
+    /// AC-T7.4.1: cancelling an admitted-but-uncreated box supersedes its pending Create action,
+    /// but the receiver still requires actual backend absence proof before releasing admission.
+    #[test]
+    fn remote_delete_pending_create_waits_for_backend_absence_proof() {
+        let specs = delete_specs();
+        let (mut owned_records, mut ran_records) = (Memory::default(), Memory::default());
+        let mut owner = boot_test(&specs, &[], &mut owned_records);
+        let mut runner = receiver(&specs, &mut ran_records);
+        let (key, start) = owner.submit(requested(), &mut owned_records).unwrap();
+        runner
+            .hear(NodeId(0), start[0].1, &mut ran_records)
+            .unwrap();
+        let deletion = owner.delete(key, &mut owned_records).unwrap();
+        assert!(
+            runner
+                .hear(NodeId(0), deletion[0].1, &mut ran_records)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            std::mem::take(&mut runner.told),
+            vec![Told::Delete(key, requested())]
+        );
+        assert_eq!(runner.admitted(), amounts(&requested().need));
+        assert_eq!(owner.owned(), 1);
+        let ended = runner.end(key, &mut ran_records).unwrap();
+        owner
+            .hear(NodeId(1), ended[0].1, &mut owned_records)
+            .unwrap();
+        assert_eq!(owner.told, vec![Told::Ended(key)]);
+        assert_eq!(runner.admitted(), [0; lb::DIMS]);
+    }
+
+    /// AC-T7.4.1: an owner cancellation committed before a crash is replayed as Delete, never Start.
+    #[test]
+    fn remote_delete_committed_intent_is_not_lost_at_its_write() {
+        let specs = delete_specs();
+        let mut rec = Crashing::new(Memory::default());
+        let mut owner = Node::boot(
+            NodeId(0),
+            &specs,
+            &[],
+            test_budget(),
+            Pick::default(),
+            &mut rec,
+            |_| Boxed::Absent,
+        )
+        .unwrap();
+        let (key, _) = owner.submit(requested(), &mut rec).unwrap();
+        rec.armed = Some(When::After);
+        assert_eq!(owner.delete(key, &mut rec), Err(Stop::Crashed));
+        let mut owner = Node::boot(
+            NodeId(0),
+            &specs,
+            &[],
+            test_budget(),
+            Pick::default(),
+            &mut rec,
+            |_| Boxed::Absent,
+        )
+        .unwrap();
+        assert_eq!(
+            owner.link_up(NodeId(1), &mut rec).unwrap(),
+            vec![(
+                NodeId(1),
+                Msg::Delete {
+                    key,
+                    demand: requested()
+                }
+            )]
+        );
+        assert_eq!(owner.owned(), 1);
+        assert!(owner.told.is_empty());
+        assert_eq!(
+            owner.delete(Key { owner: 1, ..key }, &mut rec),
+            Err(damaged("deletion by a different owner"))
+        );
+    }
+
+    /// AC-T7.4.1: owner readiness is a durable peer acknowledgment, not merely At/admitted. A crash
+    /// around acknowledgment never publishes early; reboot queries the peer before reporting ready.
+    #[test]
+    fn remote_readiness_is_durable_and_reconfirmed_after_owner_restart() {
+        let specs = delete_specs();
+        for when in [When::Before, When::After] {
+            let mut rec = Crashing::new(Memory::default());
+            let mut owner = Node::boot(
+                NodeId(0),
+                &specs,
+                &[],
+                test_budget(),
+                Pick::default(),
+                &mut rec,
+                |_| Boxed::Absent,
+            )
+            .unwrap();
+            let (key, _) = owner.submit(requested(), &mut rec).unwrap();
+            assert!(!owner.is_created(key));
+            rec.armed = Some(when);
+            assert_eq!(
+                owner.hear(NodeId(1), Msg::Started { key }, &mut rec),
+                Err(Stop::Crashed)
+            );
+            assert!(owner.told.is_empty());
+            let mut owner = Node::boot(
+                NodeId(0),
+                &specs,
+                &[],
+                test_budget(),
+                Pick::default(),
+                &mut rec,
+                |_| Boxed::Absent,
+            )
+            .unwrap();
+            assert!(!owner.is_created(key));
+            assert_eq!(
+                owner.link_up(NodeId(1), &mut rec).unwrap(),
+                vec![(NodeId(1), Msg::Holds { key })]
+            );
+            owner
+                .hear(
+                    NodeId(1),
+                    Msg::Held {
+                        key,
+                        holds: true,
+                        ended: false,
+                        created: false,
+                    },
+                    &mut rec,
+                )
+                .unwrap();
+            assert!(!owner.is_created(key));
+            owner
+                .hear(
+                    NodeId(1),
+                    Msg::Held {
+                        key,
+                        holds: true,
+                        ended: false,
+                        created: true,
+                    },
+                    &mut rec,
+                )
+                .unwrap();
+            assert!(owner.is_created(key));
+            assert_eq!(
+                std::mem::take(&mut owner.told),
+                vec![Told::Started(key, NodeId(1))]
+            );
+            let row = rec.inner.rows.get(&key.name("own")).unwrap();
+            assert!(row.starts_with("created 1 d1 "), "{row}");
+            owner
+                .hear(NodeId(1), Msg::Started { key }, &mut rec)
+                .unwrap();
+            assert!(
+                owner.told.is_empty(),
+                "a duplicate acknowledgment republished Started"
+            );
+            owner.delete(key, &mut rec).unwrap();
+            assert!(!owner.is_created(key));
+            owner
+                .hear(NodeId(1), Msg::Started { key }, &mut rec)
+                .unwrap();
+            assert!(!owner.is_created(key));
+            assert!(
+                owner.told.is_empty(),
+                "late Started reversed deletion intent"
+            );
+        }
     }
 
     /// kiln's `ReusedIdRan`: a box's name carries its owner's epoch, so a restarted owner's first box
