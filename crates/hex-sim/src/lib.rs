@@ -64,6 +64,7 @@ pub mod replay;
 pub mod rng;
 pub mod sim;
 pub mod spec;
+pub mod start_cost;
 pub mod store;
 pub mod swim;
 pub mod trace;

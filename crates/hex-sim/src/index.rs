@@ -17,6 +17,7 @@ use crate::model::{
     Class, Classes, Demand, Device, DeviceKind, GpuLoad, Held, Kind, NodeId, NodeSpec, Platform,
     Resources, WorkloadId, bind,
 };
+use crate::start_cost::{self, Costs, Prepared, Rates, StartObservation, Terms};
 
 /// A session is refused a node whose CPU in use, background and placed, is above this share of
 /// its CPU, per mille: `AC-T7.6.3`'s 90%.
@@ -372,6 +373,7 @@ impl Slot {
 /// reads only nodes with the CPU for the need, every one of them.
 #[derive(Debug, Clone)]
 pub struct FitIndex {
+    costs: Costs,
     /// By node id; ids are dense from 0.
     slots: Vec<Slot>,
     /// Each node's devices, by node id.
@@ -447,6 +449,7 @@ impl FitIndex {
             ix.push(id, bucket(&slot.free, last));
         }
         Ok(Self {
+            costs: Costs::new(nodes.len()),
             slots,
             devices,
             held,
@@ -649,9 +652,71 @@ impl FitIndex {
         pick: &Pick,
         excluded: &std::collections::BTreeSet<NodeId>,
     ) -> Fit {
+        self.fit_scored(demand, pick, None, excluded)
+    }
+
+    /// CP-T7.4/B4: exact kiln per-ask terms, sharing the same admission and packing core. No
+    /// context uses the original path. Image identity stays in the caller's borrowed warm facts.
+    pub fn fit_with_terms(
+        &self,
+        demand: &Demand,
+        pick: &Pick,
+        terms: &Terms<'_>,
+    ) -> Result<Fit, SimError> {
+        self.fit_with_terms_excluding(demand, pick, terms, &std::collections::BTreeSet::new())
+    }
+
+    pub fn fit_with_terms_excluding(
+        &self,
+        demand: &Demand,
+        pick: &Pick,
+        terms: &Terms<'_>,
+        excluded: &std::collections::BTreeSet<NodeId>,
+    ) -> Result<Fit, SimError> {
+        let prepared = self.costs.prepare(terms)?;
+        Ok(self.fit_scored(demand, pick, Some(&prepared), excluded))
+    }
+
+    /// Measured rates, converted off the pick path just as kiln converts a node's new word/link.
+    pub fn set_rates(&mut self, node: NodeId, rates: Rates) -> Result<(), SimError> {
+        self.costs.set_rates(node, rates)
+    }
+
+    /// Observe actual post-image-staging create/start service for this node and initialized class.
+    /// The same service must not also be supplied as Terms.cpu_ns or transfer time.
+    pub fn observe_start(
+        &mut self,
+        node: NodeId,
+        class: Class,
+        elapsed_ns: u64,
+    ) -> Result<(), SimError> {
+        self.costs.observe(node, class, elapsed_ns)
+    }
+
+    pub fn start_observations(&self) -> Vec<StartObservation> {
+        self.costs.snapshot()
+    }
+
+    /// Atomically restore at most one checked aggregate per node/class from the shell's durable record.
+    pub fn restore_start_observations(
+        &mut self,
+        rows: &[StartObservation],
+    ) -> Result<(), SimError> {
+        self.costs.restore(rows)
+    }
+
+    fn fit_scored(
+        &self,
+        demand: &Demand,
+        pick: &Pick,
+        terms: Option<&Prepared<'_>>,
+        excluded: &std::collections::BTreeSet<NodeId>,
+    ) -> Fit {
         let floor = u32::try_from(demand.need.cpu_milli.checked_div(lb::CPU).unwrap_or(0))
             .unwrap_or(u32::MAX);
         let (mut best, mut best_score) = (None::<Key>, (0u64, 0u128));
+        let mut soonest = None::<u128>;
+        let mut gpu_rank = 0;
         let mut refused = Refusals::default();
         let mut walked = 0u64;
         let mut b = self.ix.at_or_above(floor.min(self.last));
@@ -701,6 +766,21 @@ impl FitIndex {
                     0
                 };
                 let score = (idle, slot.score(&demand.need, pick));
+                if let Some(terms) = terms {
+                    let finish = self.costs.finish(
+                        NodeId(r),
+                        demand.class,
+                        demand.need.cpu_milli,
+                        slot.free.cpu_milli,
+                        terms,
+                    );
+                    if soonest.is_none() || idle > gpu_rank {
+                        gpu_rank = idle;
+                        soonest = Some(finish);
+                    } else if idle == gpu_rank {
+                        soonest = soonest.map(|old| old.min(finish));
+                    }
+                }
                 // A higher score wins; between equal scores, the least key.
                 let wins =
                     best.is_none_or(|k| score > best_score || (score == best_score && key < k));
@@ -710,6 +790,53 @@ impl FitIndex {
                 }
             }
             b = self.ix.above(bb);
+        }
+        if let (Some(terms), Some(soonest)) = (terms, soonest) {
+            // Kiln's within_bound: packing decides inside the exact 1/64 finish band. Hex's
+            // established GPU-load preference remains first; no scalar weights join these units.
+            let bound = start_cost::within_bound(soonest);
+            best = None;
+            let mut packing = 0;
+            let mut b = self.ix.at_or_above(floor.min(self.last));
+            while let Some(bb) = b {
+                for r in self.ix.bucket(bb) {
+                    if excluded.contains(&NodeId(r)) {
+                        continue;
+                    }
+                    walked = walked.saturating_add(1);
+                    let Some(slot) = self.slots.get(lb::ix(r)) else {
+                        continue;
+                    };
+                    if self.judge(lb::ix(r), slot, demand) != Verdict::Admits {
+                        continue;
+                    }
+                    let idle = if demand.need.gpus > 0 {
+                        let devices = self.devices.get(lb::ix(r)).map_or(&[][..], Vec::as_slice);
+                        self.bound(lb::ix(r), demand)
+                            .map_or(0, |held| gpu_idle(devices, &held))
+                    } else {
+                        0
+                    };
+                    if idle != gpu_rank
+                        || self.costs.finish(
+                            NodeId(r),
+                            demand.class,
+                            demand.need.cpu_milli,
+                            slot.free.cpu_milli,
+                            terms,
+                        ) > bound
+                    {
+                        continue;
+                    }
+                    let key = Key::of(NodeId(r), &slot.free);
+                    let score = slot.score(&demand.need, pick);
+                    if best.is_none_or(|k| score > packing || (score == packing && key < k)) {
+                        best = Some(key);
+                        packing = score;
+                    }
+                }
+                b = self.ix.above(bb);
+            }
         }
         Fit {
             best,
@@ -854,6 +981,123 @@ mod tests {
         assert_eq!(fit(res(3000, 8, 0)), Some(NodeId(0)));
         assert_eq!(fit(res(1000, 1, 1)), Some(NodeId(2)));
         assert_eq!(fit(res(1000, 8, 1)), None);
+    }
+
+    /// CP-T7.4/B4: measured startup can move a pick, packing still wins inside kiln's 1/64
+    /// finish band, and the original no-context core is unaffected by learned timing state.
+    #[test]
+    fn start_cost_changes_the_actual_pick_but_retains_packing_ties() {
+        for (times, expected) in [([1000, 990], NodeId(0)), ([1000, 500], NodeId(1))] {
+            let mut index = FitIndex::new(&nodes(&[res(2000, 8, 0), res(4000, 8, 0)])).unwrap();
+            let demand = plain(res(1000, 1, 0));
+            for (node, ns) in [NodeId(0), NodeId(1)].into_iter().zip(times) {
+                index.observe_start(node, Class::Oci, ns).unwrap();
+            }
+            assert_eq!(
+                index
+                    .fit_with_terms(&demand, &Pick::default(), &Terms::default())
+                    .unwrap()
+                    .best
+                    .map(|k| k.node),
+                Some(expected)
+            );
+            assert_eq!(
+                index.fit(&demand, &Pick::default()).best.map(|k| k.node),
+                Some(NodeId(0))
+            );
+            let shards = Demand {
+                class: Class::Shards,
+                ..demand
+            };
+            assert_eq!(
+                index
+                    .fit_with_terms(&shards, &Pick::default(), &Terms::default())
+                    .unwrap()
+                    .best
+                    .map(|k| k.node),
+                Some(NodeId(0))
+            );
+        }
+    }
+
+    /// CP-T7.4: requested image warmth is borrowed per ask, never retained under a hash or
+    /// leaked to the next image; refused nodes remain excluded even when their start is free.
+    #[test]
+    fn start_cost_image_terms_and_exclusions_share_the_admission_core() {
+        use crate::start_cost::{Link, Warm};
+        let mut index = FitIndex::new(&nodes(&[res(2000, 8, 0), res(4000, 8, 0)])).unwrap();
+        for node in [NodeId(0), NodeId(1)] {
+            index
+                .set_rates(
+                    node,
+                    Rates {
+                        link: Link {
+                            rate: 1_000_000_000,
+                            ..Link::default()
+                        },
+                        ..Rates::default()
+                    },
+                )
+                .unwrap();
+        }
+        let demand = plain(res(1000, 1, 0));
+        let warm = [Warm {
+            node: NodeId(1),
+            ..Warm::default()
+        }];
+        let image = Terms {
+            bytes: 1000,
+            warm: &warm,
+            ..Terms::default()
+        };
+        assert_eq!(
+            index
+                .fit_with_terms(&demand, &Pick::default(), &image)
+                .unwrap()
+                .best
+                .map(|k| k.node),
+            Some(NodeId(1))
+        );
+        let excluded = [NodeId(1)].into_iter().collect();
+        assert_eq!(
+            index
+                .fit_with_terms_excluding(&demand, &Pick::default(), &image, &excluded)
+                .unwrap()
+                .best
+                .map(|k| k.node),
+            Some(NodeId(0))
+        );
+        let another_image = Terms { warm: &[], ..image };
+        assert_eq!(
+            index
+                .fit_with_terms(&demand, &Pick::default(), &another_image)
+                .unwrap()
+                .best
+                .map(|k| k.node),
+            Some(NodeId(0))
+        );
+    }
+
+    /// CP-T7.4: learned time never overrides Hex's existing least-loaded GPU preference.
+    #[test]
+    fn start_cost_preserves_the_existing_gpu_load_preference() {
+        use crate::model::{Ask, Os};
+        let mut index = FitIndex::new(&[
+            gpu_node(0, 4_000, Os::Linux, &[(1, 8 << 30, 700)]),
+            gpu_node(1, 8_000, Os::Linux, &[(1, 8 << 30, 100)]),
+        ])
+        .unwrap();
+        index.observe_start(NodeId(0), Class::Oci, 1).unwrap();
+        index.observe_start(NodeId(1), Class::Oci, 1000).unwrap();
+        let demand = asking(1, Class::Oci, Ask::default());
+        assert_eq!(
+            index
+                .fit_with_terms(&demand, &Pick::default(), &Terms::default())
+                .unwrap()
+                .best
+                .map(|k| k.node),
+            Some(NodeId(1))
+        );
     }
 
     /// S3's filters in Hex's kinds (AC-T7.4.3's workload): do a Firecracker microVM where one node
