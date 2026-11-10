@@ -485,3 +485,27 @@ fn failed_atomic_fact_refresh_does_not_poison_delete_or_later_recovery() {
     local(&driver, step);
     assert_eq!(rt.list().unwrap().len(), 1);
 }
+
+/// AC-T7.4.1: neither an owned request nor a receiver retry may silently replace its full spec.
+#[test]
+fn changed_start_payload_is_refused_before_first_create_and_on_receiver_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = Arc::new(Counting::default());
+    let driver = boot(dir.path(), rt.clone());
+    let (d, p) = request();
+    let (_, step) = driver.submit(d, p).unwrap();
+    let (_, original) = step.send.into_iter().next().unwrap();
+    let mut changed = original.clone();
+    changed.payload.as_mut().unwrap().spec.id = BoxId::new("changed-caller-id").unwrap();
+    assert!(matches!(
+        driver.hear(NodeId(0), changed.clone()),
+        Err(Error::Runtime(Refusal::Invalid { .. }))
+    ));
+    assert_eq!(rt.creates.load(Ordering::SeqCst), 0);
+    driver.hear(NodeId(0), original).unwrap();
+    assert!(matches!(
+        driver.hear(NodeId(0), changed),
+        Err(Error::Runtime(Refusal::Invalid { .. }))
+    ));
+    assert_eq!(rt.creates.load(Ordering::SeqCst), 1);
+}

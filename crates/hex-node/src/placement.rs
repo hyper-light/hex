@@ -151,6 +151,8 @@ enum Effect {
     Delete(Key, Demand),
 }
 
+type Collected = (Step, Vec<Effect>);
+
 pub struct Driver {
     state: Mutex<State>,
     // One operation owns physical effects, with no queued waiters: concurrent mutation is refused.
@@ -273,6 +275,11 @@ impl Driver {
                 .payload
                 .clone()
                 .ok_or_else(|| invalid("start has no payload"))?;
+            if state.node.owned_keys().any(|(k, _)| k == key)
+                && state.rows.payload("own", key)? != payload
+            {
+                return Err(invalid("start changed its owner's durable payload").into());
+            }
             // Runtime::classes is a backend call too: validate after dropping the core lock.
             let prior = state.node.ran_keys().any(|(k, _, _)| k == key);
             if !prior {
@@ -676,7 +683,7 @@ fn finish<T>(state: &mut State, result: Result<T, Stop>, submit: bool) -> Result
     })
 }
 
-fn collect(state: &mut State, out: Vec<(NodeId, Msg)>) -> Result<(Step, Vec<Effect>), Error> {
+fn collect(state: &mut State, out: Vec<(NodeId, Msg)>) -> Result<Collected, Error> {
     let mut step = Step::default();
     let mut create = Vec::new();
     for (node, msg) in out {
