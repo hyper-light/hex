@@ -10,6 +10,7 @@ struct Counting {
     creates: AtomicUsize,
     starts: AtomicUsize,
     deletes: AtomicUsize,
+    inspects: AtomicUsize,
     fail_create: AtomicBool,
     fail_start: AtomicBool,
     fail_delete: AtomicBool,
@@ -54,6 +55,7 @@ impl Runtime for Counting {
         self.sim.signal(id, s)
     }
     fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
+        self.inspects.fetch_add(1, Ordering::SeqCst);
         self.sim.inspect(id)
     }
     fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
@@ -102,7 +104,13 @@ fn request() -> (Demand, Payload) {
     (demand, payload)
 }
 
+const TEST_NAMESPACE: &str = "00112233445566778899aabbccddeeff";
+
 fn boot(dir: &Path, runtime: Arc<Counting>) -> Driver {
+    try_boot(dir, runtime).unwrap()
+}
+
+fn try_boot(dir: &Path, runtime: Arc<Counting>) -> Result<Driver, Error> {
     let (demand, _) = request();
     let nodes = [NodeSpec::new(
         NodeId(0),
@@ -121,7 +129,6 @@ fn boot(dir: &Path, runtime: Arc<Counting>) -> Driver {
         dir,
         Runtimes::new([(Class::Oci, runtime as Arc<dyn Runtime>)]).unwrap(),
     )
-    .unwrap()
 }
 
 fn local(driver: &Driver, step: Step) -> Step {
@@ -163,7 +170,7 @@ fn actual_create_and_delete_hold_empty_boxes_and_keep_caller_names_separate() {
         node: NodeId(0)
     }));
     assert_eq!(rt.creates.load(Ordering::SeqCst), 1);
-    let info = rt.inspect(&physical_id(key).unwrap()).unwrap();
+    let info = rt.inspect(&driver.physical_id(key).unwrap()).unwrap();
     assert_eq!(info.state, BoxState::Empty);
     assert_ne!(info.id, p.spec.id);
     let status = driver.poll_status().unwrap();
@@ -206,7 +213,7 @@ fn actual_oci_init_is_started_before_peer_acknowledgement() {
     assert_eq!(rt.creates.load(Ordering::SeqCst), 1);
     assert_eq!(rt.starts.load(Ordering::SeqCst), 1);
     assert_eq!(
-        rt.inspect(&physical_id(key).unwrap()).unwrap().state,
+        rt.inspect(&driver.physical_id(key).unwrap()).unwrap().state,
         BoxState::Running
     );
 }
@@ -357,8 +364,10 @@ fn owner_epoch_sequence_and_repeated_caller_ids_cannot_collide() {
             seq: u64::MAX,
         },
     ];
-    let ids: std::collections::BTreeSet<_> =
-        keys.into_iter().map(|k| physical_id(k).unwrap()).collect();
+    let ids: std::collections::BTreeSet<_> = keys
+        .into_iter()
+        .map(|k| physical_id(TEST_NAMESPACE, k).unwrap())
+        .collect();
     assert_eq!(ids.len(), keys.len());
     let dir = tempfile::tempdir().unwrap();
     let rt = Arc::new(Counting::default());
@@ -368,7 +377,10 @@ fn owner_epoch_sequence_and_repeated_caller_ids_cannot_collide() {
     local(&driver, s);
     let (b, s) = driver.submit(d, p).unwrap();
     local(&driver, s);
-    assert_ne!(physical_id(a).unwrap(), physical_id(b).unwrap());
+    assert_ne!(
+        driver.physical_id(a).unwrap(),
+        driver.physical_id(b).unwrap()
+    );
     assert_eq!(rt.list().unwrap().len(), 2);
 }
 
@@ -403,8 +415,11 @@ fn blocked_owner_without_guest_backend_sends_full_payload_to_capable_peer() {
     target.virt.hvf = true;
     let nodes = [owner, target];
     let budget = Budget { owned: 4, ran: 4 };
-    let owner = Driver::boot(
-        NodeId(0),
+    let owner = Driver::boot_in(
+        Identity {
+            namespace: TEST_NAMESPACE,
+            node: NodeId(0),
+        },
         &nodes,
         &[],
         budget,
@@ -413,8 +428,11 @@ fn blocked_owner_without_guest_backend_sends_full_payload_to_capable_peer() {
         Runtimes::default(),
     )
     .unwrap();
-    let target = Driver::boot(
-        NodeId(1),
+    let target = Driver::boot_in(
+        Identity {
+            namespace: TEST_NAMESPACE,
+            node: NodeId(1),
+        },
         &nodes,
         &[],
         budget,
@@ -442,6 +460,10 @@ fn blocked_owner_without_guest_backend_sends_full_payload_to_capable_peer() {
         key,
         node: NodeId(1)
     }));
+    assert_eq!(
+        owner.status(key).unwrap().unwrap().physical,
+        target.physical_id(key).unwrap()
+    );
     let deleting = owner.delete(key).unwrap();
     assert_eq!(rt.deletes.load(Ordering::SeqCst), 0);
     let (to, message) = deleting.send.into_iter().next().unwrap();
@@ -646,4 +668,169 @@ fn remote_fact_failure_does_not_block_local_start() {
         node: NodeId(0)
     }));
     assert_eq!(rt.creates.load(Ordering::SeqCst), 1);
+}
+
+/// AC-T7.4.1/LB03: independent state directories sharing one runtime never adopt/delete each other's
+/// equal owner/epoch/sequence keys, and recovery retains exactly the original physical identity.
+#[test]
+fn independent_state_namespaces_isolate_shared_runtime_boxes_and_survive_restart() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let rt = Arc::new(Counting::default());
+    let first = boot(a.path(), rt.clone());
+    let second = boot(b.path(), rt.clone());
+    let (d, p) = request();
+    let (key_a, step) = first.submit(d, p.clone()).unwrap();
+    local(&first, step);
+    let (key_b, step) = second.submit(d, p).unwrap();
+    local(&second, step);
+    assert_eq!(key_a, key_b);
+    assert_ne!(first.namespace(), second.namespace());
+    let physical_a = first.physical_id(key_a).unwrap();
+    let physical_b = second.physical_id(key_b).unwrap();
+    assert_ne!(physical_a, physical_b);
+    assert_eq!(rt.creates.load(Ordering::SeqCst), 2);
+    assert_eq!(rt.list().unwrap().len(), 2);
+    let namespace = second.namespace().to_owned();
+    local(&first, first.delete(key_a).unwrap());
+    assert!(matches!(
+        rt.inspect(&physical_a),
+        Err(Refusal::NoSuchBox(_))
+    ));
+    assert_eq!(rt.inspect(&physical_b).unwrap().id, physical_b);
+    assert_eq!(rt.list().unwrap().len(), 1);
+    drop(second);
+    let recovered = boot(b.path(), rt.clone());
+    assert_eq!(recovered.namespace(), namespace);
+    assert_eq!(
+        recovered.status(key_b).unwrap().unwrap().physical,
+        physical_b
+    );
+    assert_eq!(rt.creates.load(Ordering::SeqCst), 2);
+    local(&recovered, recovered.delete(key_b).unwrap());
+    assert!(rt.list().unwrap().is_empty());
+}
+
+/// AC-T7.4.1/LB03: a damaged or unnamespaced existing epoch is refused before any runtime inspect;
+/// it must never receive a replacement namespace that strands or adopts physical boxes.
+#[test]
+fn invalid_or_missing_durable_namespace_is_not_regenerated_before_inspect() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = Arc::new(Counting::default());
+    let driver = boot(dir.path(), rt.clone());
+    let (d, p) = request();
+    let (_, step) = driver.submit(d, p).unwrap();
+    local(&driver, step);
+    drop(driver);
+    let path = dir.path().join("epoch.rec");
+    let original: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let before = rt.inspects.load(Ordering::SeqCst);
+    for namespace in [
+        None,
+        Some(serde_json::json!("ABCDEF0123456789ABCDEF0123456789")),
+        Some(serde_json::json!("z".repeat(32))),
+        Some(serde_json::json!(false)),
+    ] {
+        let mut corrupt = original.clone();
+        match namespace {
+            Some(value) => {
+                corrupt["namespace"] = value;
+            }
+            None => {
+                corrupt.as_object_mut().unwrap().remove("namespace");
+            }
+        }
+        std::fs::write(&path, serde_json::to_vec(&corrupt).unwrap()).unwrap();
+        assert!(matches!(
+            try_boot(dir.path(), rt.clone()),
+            Err(Error::Core(Stop::Damaged(_)))
+        ));
+        assert_eq!(rt.inspects.load(Ordering::SeqCst), before);
+        let retained: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(retained, corrupt);
+    }
+    std::fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    assert!(matches!(
+        try_boot(dir.path(), rt.clone()),
+        Err(Error::Core(Stop::Damaged(_)))
+    ));
+    assert_eq!(rt.inspects.load(Ordering::SeqCst), before);
+}
+
+/// AC-T7.4.1/LB03: peers explicitly share identity; changing an existing state's realm is refused.
+#[test]
+fn explicit_shared_namespace_matches_remote_ids_and_cannot_rebind_existing_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = Arc::new(Counting::default());
+    let (d, p) = request();
+    let nodes = [NodeSpec::new(NodeId(0), d.need)];
+    let budget = Budget { owned: 4, ran: 4 };
+    let runtime = || Runtimes::new([(Class::Oci, rt.clone() as Arc<dyn Runtime>)]).unwrap();
+    let driver = Driver::boot_in(
+        Identity {
+            namespace: TEST_NAMESPACE,
+            node: NodeId(0),
+        },
+        &nodes,
+        &[],
+        budget,
+        Pick::default(),
+        dir.path(),
+        runtime(),
+    )
+    .unwrap();
+    assert_eq!(driver.namespace(), TEST_NAMESPACE);
+    let (key, step) = driver.submit(d, p).unwrap();
+    local(&driver, step);
+    drop(driver);
+    let before = rt.inspects.load(Ordering::SeqCst);
+    let different = "ffeeddccbbaa99887766554433221100";
+    assert!(matches!(
+        Driver::boot_in(
+            Identity {
+                namespace: different,
+                node: NodeId(0)
+            },
+            &nodes,
+            &[],
+            budget,
+            Pick::default(),
+            dir.path(),
+            runtime()
+        ),
+        Err(Error::Core(Stop::Damaged(_)))
+    ));
+    assert_eq!(rt.inspects.load(Ordering::SeqCst), before);
+    let driver = Driver::boot_in(
+        Identity {
+            namespace: TEST_NAMESPACE,
+            node: NodeId(0),
+        },
+        &nodes,
+        &[],
+        budget,
+        Pick::default(),
+        dir.path(),
+        runtime(),
+    )
+    .unwrap();
+    assert_eq!(driver.namespace(), TEST_NAMESPACE);
+    assert_eq!(
+        driver.status(key).unwrap().unwrap().physical,
+        physical_id(TEST_NAMESPACE, key).unwrap()
+    );
+    let longest = physical_id(
+        &"f".repeat(64),
+        Key {
+            owner: u32::MAX,
+            epoch: u64::MAX,
+            seq: u64::MAX,
+        },
+    )
+    .unwrap();
+    assert!(longest.as_str().len() <= BoxId::MAX_LEN);
+    assert_eq!(longest.as_str().len(), 127);
 }

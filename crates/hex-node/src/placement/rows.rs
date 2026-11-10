@@ -1,14 +1,16 @@
 //! AC-T7.4.1: payload and decision row share the existing atomic Files replacement.
 
 use std::collections::BTreeMap;
+use std::collections::hash_map::RandomState;
 use std::fs::{self, File};
+use std::hash::BuildHasher;
 use std::io::{Read, Write};
 use std::path::Path;
 
 use hex_sim::peer::{Budget, Key, Records, Stop};
 use serde_json::{Value, json};
 
-use super::{Payload, bad, name};
+use super::{Payload, bad, checked_namespace, name};
 use crate::records::Files;
 
 #[derive(Clone)]
@@ -27,6 +29,7 @@ pub(super) struct Rows {
     files: Files,
     held: BTreeMap<String, Stored>,
     bound: usize,
+    namespace: String,
     pub context: Context,
 }
 
@@ -77,7 +80,7 @@ fn payload_from(value: &Value) -> Result<Option<Payload>, Stop> {
 }
 
 impl Rows {
-    pub fn open(dir: &Path, budget: Budget) -> Result<Self, Stop> {
+    pub fn open(dir: &Path, budget: Budget, supplied: Option<&str>) -> Result<Self, Stop> {
         let bound = budget
             .owned
             .checked_add(budget.ran)
@@ -86,6 +89,7 @@ impl Rows {
             .ok_or_else(|| bad("placement record budget"))?;
         let files = Files::open(dir)?;
         let mut held = BTreeMap::new();
+        let mut namespace = None;
         for entry in fs::read_dir(dir).map_err(|e| Stop::Io(e.to_string()))? {
             let path = entry.map_err(|e| Stop::Io(e.to_string()))?.path();
             if path.extension().is_none_or(|e| e != "rec") {
@@ -121,17 +125,66 @@ impl Rows {
                 .ok_or_else(|| bad("record row"))?
                 .to_owned();
             let payload = payload_from(value.get("payload").ok_or_else(|| bad("record payload"))?)?;
+            if key == "epoch" {
+                let value = value
+                    .get("namespace")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| bad("epoch has no placement namespace"))?;
+                checked_namespace(value).map_err(|why| bad(why.to_string()))?;
+                if payload.is_some() {
+                    return Err(bad("epoch contains a box payload"));
+                }
+                namespace = Some(value.to_owned());
+            }
             if (key.starts_with("own-") || key.starts_with("ran-")) && payload.is_none() {
                 return Err(bad("placement row has no atomic payload"));
             }
             held.insert(key, Stored { row, payload });
         }
-        Ok(Self {
+        let fresh = held.is_empty();
+        let namespace = match namespace {
+            Some(namespace) => {
+                if supplied.is_some_and(|given| given != namespace) {
+                    return Err(bad(
+                        "configured placement namespace differs from durable epoch",
+                    ));
+                }
+                namespace
+            }
+            None if fresh => match supplied {
+                Some(namespace) => checked_namespace(namespace)
+                    .map_err(|why| bad(why.to_string()))?
+                    .to_owned(),
+                None => {
+                    // Standard UUID-width entropy, two domain-separated 64-bit hashes under the
+                    // standard library's OS-seeded RandomState. This is identity, not a tuning knob.
+                    let entropy = RandomState::new();
+                    format!(
+                        "{:016x}{:016x}",
+                        entropy.hash_one("hex-placement-namespace-first"),
+                        entropy.hash_one("hex-placement-namespace-second")
+                    )
+                }
+            },
+            None => return Err(bad("nonempty placement records have no namespaced epoch")),
+        };
+        let mut rows = Self {
             files,
             held,
             bound,
+            namespace,
             context: Context::None,
-        })
+        };
+        // No runtime inspect/create may precede this durable namespace. A failed first boot may
+        // leave epoch zero; the core's next boot advances it normally without changing identity.
+        if fresh {
+            rows.put("epoch", "0")?;
+        }
+        Ok(rows)
+    }
+
+    pub fn namespace(&self) -> &str {
+        &self.namespace
     }
 
     pub fn payload(&self, kind: &str, key: Key) -> Result<Payload, Stop> {
@@ -197,7 +250,12 @@ impl Records for Rows {
                 _ => return Err(bad("new placement row without atomic payload context")),
             }
         };
-        let value = json!({"row":row,"payload":payload.as_ref().map(payload_value).transpose()?});
+        let payload_value = payload.as_ref().map(payload_value).transpose()?;
+        let value = if key == "epoch" {
+            json!({"row":row,"payload":payload_value,"namespace":self.namespace})
+        } else {
+            json!({"row":row,"payload":payload_value})
+        };
         let mut bytes = Bounded(Vec::new());
         serde_json::to_writer(&mut bytes, &value).map_err(|e| bad(e.to_string()))?;
         let text = String::from_utf8(bytes.0).map_err(|e| bad(e.to_string()))?;

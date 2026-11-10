@@ -121,9 +121,24 @@ pub fn runtime_budget() -> Budget {
     }
 }
 
-pub fn physical_id(key: Key) -> Result<BoxId, Refusal> {
+fn checked_namespace(namespace: &str) -> Result<&str, Refusal> {
+    // 128-bit UUID-width nonce or a complete SHA-256 digest, in canonical hexadecimal.
+    if !matches!(namespace.len(), 32 | 64)
+        || !namespace
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(invalid(
+            "placement namespace must be 32 or 64 lowercase hexadecimal digits",
+        ));
+    }
+    Ok(namespace)
+}
+
+pub fn physical_id(namespace: &str, key: Key) -> Result<BoxId, Refusal> {
+    let namespace = checked_namespace(namespace)?;
     BoxId::new(&format!(
-        "hex-place-{}-{}-{}",
+        "hex-place-{namespace}-{}-{}-{}",
         key.owner, key.epoch, key.seq
     ))
 }
@@ -155,6 +170,12 @@ enum Effect {
 
 type Collected = (Step, Vec<Effect>);
 
+/// One node in an explicitly shared cluster namespace.
+pub struct Identity<'a> {
+    pub namespace: &'a str,
+    pub node: NodeId,
+}
+
 pub struct Driver {
     state: Mutex<State>,
     // One operation owns physical effects, with no queued waiters: concurrent mutation is refused.
@@ -162,9 +183,12 @@ pub struct Driver {
     operation: Mutex<()>,
     runtimes: Runtimes,
     peers: Vec<NodeId>,
+    namespace: String,
 }
 
 impl Driver {
+    /// Opens standalone state, generating its durable UUID-width namespace only when genuinely
+    /// empty. Peers must use boot_in with one explicitly shared cluster namespace.
     pub fn boot(
         id: NodeId,
         nodes: &[NodeSpec],
@@ -174,10 +198,47 @@ impl Driver {
         dir: &Path,
         runtimes: Runtimes,
     ) -> Result<Self, Error> {
+        Self::boot_scoped((id, None), nodes, models, budget, pick, dir, runtimes)
+    }
+
+    /// All peers in one cluster supply the same canonical namespace. Independent clusters may
+    /// share a physical Runtime without sharing physical BoxIds. Existing state must match.
+    pub fn boot_in(
+        identity: Identity<'_>,
+        nodes: &[NodeSpec],
+        models: &[String],
+        budget: Budget,
+        pick: Pick,
+        dir: &Path,
+        runtimes: Runtimes,
+    ) -> Result<Self, Error> {
+        checked_namespace(identity.namespace)?;
+        Self::boot_scoped(
+            (identity.node, Some(identity.namespace)),
+            nodes,
+            models,
+            budget,
+            pick,
+            dir,
+            runtimes,
+        )
+    }
+
+    fn boot_scoped(
+        identity: (NodeId, Option<&str>),
+        nodes: &[NodeSpec],
+        models: &[String],
+        budget: Budget,
+        pick: Pick,
+        dir: &Path,
+        runtimes: Runtimes,
+    ) -> Result<Self, Error> {
+        let (id, namespace) = identity;
         if budget.owned > hex_runtime::MAX_BOXES || budget.ran > hex_runtime::MAX_BOXES {
             return Err(invalid("placement budget exceeds runtime box bound").into());
         }
-        let mut rows = Rows::open(dir, budget)?;
+        let mut rows = Rows::open(dir, budget, namespace)?;
+        let namespace = rows.namespace().to_owned();
         let mut actual = BTreeMap::new();
         let mut start = Vec::new();
         for (key, payload) in rows.running()? {
@@ -187,7 +248,7 @@ impl Driver {
             let runtime = runtimes.get(demand.class)?;
             validate(&demand, &payload)?;
             validate_backend(&payload, &runtime)?;
-            let physical = physical_id(key)?;
+            let physical = physical_id(&namespace, key)?;
             let boxed = match runtime.inspect(&physical) {
                 Ok(info) => {
                     if !ended && payload.start && info.state == BoxState::Created {
@@ -217,7 +278,16 @@ impl Driver {
             operation: Mutex::new(()),
             runtimes,
             peers: nodes.iter().map(|n| n.id).collect(),
+            namespace,
         })
+    }
+
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    pub fn physical_id(&self, key: Key) -> Result<BoxId, Refusal> {
+        physical_id(&self.namespace, key)
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, State>, Error> {
@@ -449,7 +519,11 @@ impl Driver {
                 Effect::Delete(key, demand) => {
                     // The core verified full-key ownership and persisted Deleting at the owner.
                     // A missing ran row (e.g. dropped Start) is not itself an absence proof.
-                    match self.runtimes.get(demand.class)?.delete(&physical_id(key)?) {
+                    match self
+                        .runtimes
+                        .get(demand.class)?
+                        .delete(&self.physical_id(key)?)
+                    {
                         Ok(()) | Err(Refusal::NoSuchBox(_)) => {
                             let next = self.ended(key)?;
                             step.send.extend(next.send);
@@ -465,7 +539,7 @@ impl Driver {
                 }
             };
             let runtime = self.runtimes.get(demand.class)?;
-            let id = physical_id(key)?;
+            let id = self.physical_id(key)?;
             let mut spec = payload.spec.clone();
             spec.id = id.clone();
             let mut launched = None;
@@ -584,7 +658,7 @@ impl Driver {
             deleting: state.node.is_deleting(key),
             created: ran.is_some_and(|(_, c, _)| c) || state.node.is_created(key),
             ended: ran.is_some_and(|(_, _, e)| e) || state.node.is_ended(key),
-            physical: physical_id(key)?,
+            physical: self.physical_id(key)?,
         }))
     }
 
@@ -600,14 +674,18 @@ impl Driver {
             return self.drive(step, effects);
         }
         if !state.node.ran_keys().any(|(k, _, _)| k == key) {
-            return Err(Refusal::NoSuchBox(physical_id(key)?).into());
+            return Err(Refusal::NoSuchBox(self.physical_id(key)?).into());
         }
         let demand = state
             .node
             .demand(key)
             .ok_or_else(|| bad("ran demand missing"))?;
         drop(state);
-        match self.runtimes.get(demand.class)?.delete(&physical_id(key)?) {
+        match self
+            .runtimes
+            .get(demand.class)?
+            .delete(&self.physical_id(key)?)
+        {
             Ok(()) | Err(Refusal::NoSuchBox(_)) => self.ended(key),
             Err(why) => Err(why.into()),
         }
@@ -645,7 +723,11 @@ impl Driver {
         drop(state);
         let mut step = Step::default();
         for (key, demand) in keys {
-            match self.runtimes.get(demand.class)?.inspect(&physical_id(key)?) {
+            match self
+                .runtimes
+                .get(demand.class)?
+                .inspect(&self.physical_id(key)?)
+            {
                 Ok(info) => step.notices.push(Notice::Status { key, info }),
                 Err(Refusal::NoSuchBox(_)) => {
                     let next = self.ended(key)?;
@@ -683,7 +765,11 @@ impl Driver {
         drop(state);
         let mut resources = hex_sim::model::Resources::default();
         for (key, demand) in keys {
-            match self.runtimes.get(demand.class)?.usage(&physical_id(key)?) {
+            match self
+                .runtimes
+                .get(demand.class)?
+                .usage(&self.physical_id(key)?)
+            {
                 Ok(usage) => {
                     resources.mem_bytes = resources
                         .mem_bytes
