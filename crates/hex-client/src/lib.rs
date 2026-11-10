@@ -10,11 +10,11 @@
 //! its one connection, which closes once the client and the last `Proc` it returned are dropped; the
 //! agent then ends the programs it still watches for it (the disconnect rule).
 //!
-//! On Linux the socket is `SOCK_SEQPACKET` (unix(7)), and no thread of the client's reads it: whoever waits on it
-//! reads, one at a time (goal 16; `linux.rs`). macOS has none, so there each message is framed over a
-//! `SOCK_STREAM` socket, its descriptors at its first byte (native plan step 8), on the core every transport but
-//! Linux's shares (`calls.rs`). Elsewhere [`Client::connect`] refuses, naming the platform, until its transport
-//! lands. On every platform, [`guest::Client`] reaches a node agent in a Shards guest over a byte stream
+//! On Linux the socket is `SOCK_SEQPACKET` (unix(7)). macOS and Windows have only `SOCK_STREAM`, so each message
+//! is framed there: macOS's descriptors ride at its first byte; Windows' given handles ride in its envelope
+//! (native plan step 8). Every transport uses the same reader's turn (`calls.rs`): whoever waits reads, one at
+//! a time, and no client reader thread sits between. Elsewhere [`Client::connect`] refuses, naming the platform.
+//! On every platform, [`guest::Client`] reaches a node agent in a Shards guest over a byte stream
 //! (docs/design/shards-guest.md §3), the same calls on another transport.
 
 #![cfg_attr(
@@ -47,9 +47,14 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::Client;
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::Client;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 mod other;
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub use other::Client;
 
 /// Most boxes one list takes, in however many messages they come: a node holding more is past any

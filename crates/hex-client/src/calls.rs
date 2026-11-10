@@ -1,7 +1,7 @@
 //! What every client of a node agent does whatever carries its messages: a call waits for its answer by its
 //! request's id, a program's end goes to its `Proc`, and the connection's end reaches every call and program still
 //! waiting. A [`Transport`] moves the bytes: the agent's local `SOCK_SEQPACKET` socket on Linux (`linux.rs`), its
-//! framed `SOCK_STREAM` socket on macOS (`macos.rs`), or a framed byte stream to the node agent in a Shards guest
+//! framed `SOCK_STREAM` socket on macOS or Windows (`macos.rs`, `windows.rs`), or a framed byte stream to the node agent in a Shards guest
 //! (`guest.rs`).
 //!
 //! No thread of the client's reads the connection: whoever waits on it reads, one at a time, the reader's turn (a

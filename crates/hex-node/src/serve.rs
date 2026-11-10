@@ -66,15 +66,19 @@ pub mod linux;
 pub mod macos;
 #[cfg(unix)]
 mod unix;
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 mod unsupported;
+#[cfg(windows)]
+pub mod windows;
 
 /// This OS's event sources and local socket.
 #[cfg(target_os = "linux")]
 pub type Native = linux::Linux;
 #[cfg(target_os = "macos")]
 pub type Native = macos::MacOs;
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
+pub type Native = windows::Windows;
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub type Native = unsupported::Unsupported;
 
 /// What the node's platform lets it hold, read as the node starts: what its socket's bounds are ([`limits`]), and its
@@ -2256,3 +2260,5 @@ mod macos_tests;
 mod sim_tests;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod unix_tests;
+#[cfg(all(test, windows))]
+mod windows_tests;

@@ -8,7 +8,11 @@
 //! answer. Asked for, they are the caller's; given as the caller's own pipes, the client copies between them, and the
 //! node copies no byte and keeps none of the caller's pipes. The stand-in's programs echo their stdin to their stdout,
 //! under a pid no host process has, so their ends come as the guest's messages.
-#![cfg(any(target_os = "linux", target_os = "macos"))]
+//!
+//! On Windows (native plan step 8, `watch_source`), HEX-SOCK-5's two tests hold through the same pieces: the
+//! guest's control connection joins the node's completion port. Its guest programs' streams are Unix's here: a
+//! guest stream's end as the caller's own handle is still to add on Windows, and refused by name there.
+#![cfg(any(target_os = "linux", target_os = "macos", windows))]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -26,7 +30,9 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use hex_api::{Ask, Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Refusal, Runtime, Stdio};
+#[cfg(unix)]
+use hex_api::{Ask, Program, Stdio};
+use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Refusal, Runtime};
 use hex_core::record::ProcId;
 use hex_core::{stream, wire};
 use hex_node::recorded::{Recorded, Recover};
@@ -43,6 +49,12 @@ fn limits() -> wire::Limits {
 #[cfg(target_os = "macos")]
 fn limits() -> wire::Limits {
     hex_node::serve::limits(&hex_node::serve::macos::platform().unwrap())
+}
+
+/// The Windows node reads the same platform bounds used by `hex node`.
+#[cfg(windows)]
+fn limits() -> wire::Limits {
+    hex_node::serve::limits(&hex_node::serve::windows::platform().unwrap())
 }
 
 /// Longest a test waits for a fact it needs: a bound, so a node that never makes it true fails the test
@@ -192,6 +204,17 @@ fn echo(stdios: &Stdios, writer: &Mutex<TcpStream>, token: u64, h: wire::Header)
 }
 
 fn serve(conn: TcpStream, gate: &Gate, stdios: &Arc<Stdios>, token: u64) {
+    /// The connection's end on this side, once its client has ended it (or sent what isn't the control
+    /// protocol), as a guest's relay ends it: the relay's list of connections holds another handle on it, and
+    /// on Windows a client's own shutdown wakes no read of its that is blocked, so its reader goes only once
+    /// this side has ended too.
+    struct Ends(TcpStream);
+    impl Drop for Ends {
+        fn drop(&mut self) {
+            let _ = self.0.shutdown(Shutdown::Both);
+        }
+    }
+    let _ends = Ends(conn.try_clone().unwrap());
     let writer = Arc::new(Mutex::new(conn.try_clone().unwrap()));
     let mut conn = conn;
     writer
@@ -283,7 +306,10 @@ impl shards_api::Stream for Looped {
     }
 
     fn handle(&self) -> shards_api::Handle<'_> {
-        std::os::fd::AsFd::as_fd(&self.0)
+        #[cfg(unix)]
+        return std::os::fd::AsFd::as_fd(&self.0);
+        #[cfg(windows)]
+        std::os::windows::io::AsSocket::as_socket(&self.0)
     }
 
     fn set_nonblocking(&self, on: bool) -> std::io::Result<()> {
@@ -583,11 +609,12 @@ fn a_guest_booted_again_answers_on_the_loop_too() {
     let _server = Server::bind(&socket, Arc::new(node), limits(), 1).unwrap();
     held_holds_no_other(&socket, &gate, &here);
     // The guest ends; the next create boots another (and is then refused by the stand-in, which stages
-    // nothing: the boot is what the test needs).
+    // nothing: the boot is what the test needs). Its root is a tarball, which every OS's node takes as a Linux
+    // root (Windows refuses a directory as one, by name, before anything boots).
     guests.end_all();
     let client = hex_client::Client::connect(&socket).unwrap();
-    let rootfs = dir.path().join("root");
-    std::fs::create_dir_all(&rootfs).unwrap();
+    let rootfs = dir.path().join("root.tar");
+    std::fs::File::create(&rootfs).unwrap();
     let _ = client.create(BoxSpec {
         id: BoxId::new("anew").unwrap(),
         bounds: Bounds::default(),
@@ -608,6 +635,7 @@ fn a_guest_booted_again_answers_on_the_loop_too() {
 
 /// A node's socket over `Recorded<WithGuest<…>>`, its guest the stand-in behind `gate`: the test's folder, the
 /// socket's path and its server.
+#[cfg(unix)]
 fn node(gate: &Arc<Gate>) -> (tempfile::TempDir, PathBuf, Server) {
     let dir = tempfile::Builder::new().prefix("gl-").tempdir().unwrap();
     let node = WithGuest::new(
@@ -625,6 +653,7 @@ fn node(gate: &Arc<Gate>) -> (tempfile::TempDir, PathBuf, Server) {
 }
 
 /// A box the stand-in guest holds: none of the host's.
+#[cfg(unix)]
 fn there() -> BoxId {
     BoxId::new("there").unwrap()
 }
@@ -633,6 +662,7 @@ fn there() -> BoxId {
 /// echoes, asking for its stdin and stdout: expect their ends to be the guest's own stdio connections, what is
 /// written to the stdin end read back from the stdout end to its end, and the program's end as the guest sent it,
 /// its pid naming no host process.
+#[cfg(unix)]
 #[test]
 fn a_guest_programs_asked_streams_are_the_guests_own_connections_through_the_socket() {
     if shards_api::backend().is_err() {
@@ -677,6 +707,7 @@ fn a_guest_programs_asked_streams_are_the_guests_own_connections_through_the_soc
 /// echoes, its stdin and stdout the caller's own pipes: expect what the caller writes to its stdin pipe read back
 /// from its stdout pipe to its end (its client copies between them and the guest's connections), and the
 /// program's end as the guest sent it.
+#[cfg(unix)]
 #[test]
 fn a_guest_programs_streams_the_callers_own_pipes_carry_through_the_socket() {
     if shards_api::backend().is_err() {

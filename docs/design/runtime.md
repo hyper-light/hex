@@ -1016,6 +1016,44 @@ before anything is spawned (`docs/research/runtime/exec-size-bounds.md`).
 - **What would falsify it:** a program the count admits that the OS's exec refuses with `E2BIG` (the count is short),
   or a kernel whose formula changes; either is fixed in the count or the read, and HEX-RT-14 re-run.
 
+## Decision (native plan step 8, 2026-11-08): a macOS rootless box outlives its node and is taken back with a new watcher
+
+T-T7.1.2 asks that a node restarted after a crash take each live box back, as Linux's does; the step names "macOS
+rootless boxes left with no watcher" as what must change to meet it. Linux's boxes are cgroups, which outlive the
+node by construction. A macOS rootless box is its process group (the leader's pid), held by a watcher thread in
+the node, so the node's death leaves the members running without a bound.
+
+- **What survives.** The members do: when a process's parent exits, XNU reparents its children to launchd
+  (`bsd/kern/kern_exit.c`, `proc_reparentlocked` to `initproc`), which reaps them, so they run on, unbounded,
+  until the node is back. Their process group is unchanged.
+- **What names them.** The group id with its leader's start time (`proc_pid_rusage`, `ri_proc_start_abstime`),
+  read at the leader's spawn while it is the node's unreaped child, and recorded with the box in the node's
+  state (the record's `init`, a `ProcId`, its `start_ticks` holding the Mach start time). The group is still the
+  box's when its leader runs with that start time, or when no process has the leader's pid. A live process with
+  that pid and another start time was given it since and leads a group of its own: the box is then taken back
+  empty, and the rootless gap the class already states (a recycled leader pid) is why box users close it.
+- **Taken back.** The restarted node runs Linux's decisions (`hex_core::recovery`) over its records
+  (`hex_node::recorded::Recorded::recover`). A record made is taken back: the class makes a box on the recorded
+  group (`ProcessBox::adopt`), and its watcher lists, measures and ends the members as it does its own, since none
+  of that needs parenthood. The members' own ends are launchd's to reap, and their exit statuses aren't the
+  node's. A record being made or removed is removed, and what its group still runs is killed
+  (`process::end_group`).
+- **The fact it waits on.** XNU's `EVFILT_PROC` catches only events after its attach (`bsd/kern/kern_event.c`,
+  `filt_procattach`). So the node's socket re-reads a watched program's `proc_pid_rusage` after attaching and
+  reports an end that came before. Measured on adas-mac-studio.local-2 through `hex node`: without it, 2 of 12
+  suite runs stalled 60 s on a lost end; with it, 0 of 12.
+- **Evidence.** crates/hex-cli/tests/macos_node_recovery.rs: `hex node` killed (SIGKILL) with a box running, one
+  empty, one mid-create (held in its record write by a FIFO at the write's temp path, and seen held there by
+  `sample(1)`) and one mid-delete (its record deleting, its member running). Restarted on the same state, it takes
+  back the running box with its member still running, which a delete then ends, and the empty one. It leaves
+  nothing of the others: no record, no temp file, no member. The tests failed on the tree before the change
+  (NoSuchBox; the temp file left; the member not ended) and pass after.
+- **What would falsify it.** A rootless member that changes its process group without `setsid` (`setpgid` into
+  another group) leaves the box as a daemonizing one does, and is lost to recovery as it is to the watcher. A
+  macOS that stopped reparenting orphans to launchd, or reaped a group's members with its leader, would end
+  boxes with their node. Box users name a box by its uid, which recovery reads the same way, so neither gap is
+  theirs.
+
 ## Decision (proposed, native plan step 8): the Windows node, on one completion port, its boxes outliving it
 
 Step 8 puts Hex's node agent on Windows over the one socket core every OS shares (`hex_node::serve`, its `Os`
@@ -1023,16 +1061,23 @@ trait; step 8a, `cp/t7-native-s8` 6c900ccc). This proposes Windows' `Os`, how an
 and how a box outlives its node so a restarted node takes it back (T-T7.1.2). It's proposed: the parts marked
 *to measure* are checked on jupiter before the code lands, and the stdio part waits on its record.
 
-**Events: one I/O completion port, every source on it by a documented call.** The core's `Os::wait` is
+**Events: one I/O completion port, every source on it.** The core's `Os::wait` is
 level-triggered readiness (epoll, kqueue); a completion port reports finished operations. The Windows `Os`
 turns each source into a completion on the one port (`GetQueuedCompletionStatusEx`):
 - *Wake*: `PostQueuedCompletionStatus` with the wake's key.
-- *A program's end*: `RegisterWaitForSingleObject` on the member's process handle, its callback posting the
-  program's token to the port. Not the job's `JOBOBJECT_ASSOCIATE_COMPLETION_PORT` messages, which the plan
+- *A program's end*: a wait completion packet on the member's process handle (ntdll's
+  `NtCreateWaitCompletionPacket` and `NtAssociateWaitCompletionPacket`, undocumented in the SDK; the Windows
+  thread pool and Go's runtime use them), which the kernel queues to the port itself when the process ends,
+  with no thread between. Not the job's `JOBOBJECT_ASSOCIATE_COMPLETION_PORT` messages, which the plan
   names: Microsoft documents that, but for notification limits, their delivery "is not guaranteed", a lossy
   source CLAUDE.md §3 forbids (`docs/research/runtime/windows-job-objects.md` §4). The process handle's
   signal is the kernel's own end of the process, so no end is missed, and a pid given out again can't be
-  mistaken for it (the handle names the process, not the pid).
+  mistaken for it (the handle names the process, not the pid). *Measured* against
+  `RegisterWaitForSingleObject`, whose thread-pool callback posts to the port (jupiter, 2026-11-08,
+  `stdio_probe endwait`, `bench/native/records/endwait-jupiter-20261108T022608Z.txt`): from the signal on,
+  the packet was faster (p50 12.9 against 28.2 us, in 281 of 300 paired rounds), and a terminated program's
+  own teardown hid the difference. That run fell in jupiter's NTFS stall, so it is void as timing, and the
+  packet is provisional until the run is retaken on a clean jupiter.
 - *A connection readable*: one overlapped `WSARecv` into the connection's buffer, posted only while the
   core reads the connection and no message read from it waits, so a client the core has stopped reading
   holds one buffer and what was decoded from it. Its completion is the bytes (or the peer's end, a read of
@@ -1051,6 +1096,21 @@ turns each source into a completion on the one port (`GetQueuedCompletionStatusE
   afunix.sys completes it on the port when a client connects, and the socket it took reads its peer's pid
   once `SO_UPDATE_ACCEPT_CONTEXT` is set. The accepted socket joins the port before the accept starts, and
   once only (a second join is refused, `ERROR_INVALID_PARAMETER`: `tests/windows_node.rs` found it).
+- *A host's own connection* (its guest's control connection, the core's `Source`, which reads and writes it
+  itself and never waits): its socket's network events, which Winsock records on an event of the watch's own
+  (`WSAEventSelect`: bytes or its end to read, and room to send while its writes wait), and a wait completion
+  packet on that event queues them to the port, as a program's end is queued. Not a zero-byte `WSARecv`: that
+  tells when bytes or the end came, never when room came back, and room reported at every ask would have the
+  core write, find none and ask again without end. Winsock records what holds as a watch is set (its
+  "persistence of network events"), so each watch reads afresh what holds, and one reported is reported at
+  each wait until the core watches it again: the level-triggered readiness the core takes. The socket never
+  joins the port, so it stays its owner's. `ProcessSocketNotifications` does this in one call, but from build
+  20348 on; afunix.sys's floor is 1803. *Measured* (jupiter, 2026-11-09, `hex_afunix`'s
+  `a_sockets_watch_reports_each_arm_once` and `serve/windows_tests.rs`, red at d3a300de, green at 2e490369):
+  each arm is reported once at most, at once when what it watches for holds as it is armed (a packet
+  associated with an event already set is queued at once, so nothing need post it again); a full connection
+  is reported for room only once it has room; and `tests/guest_loop.rs`' HEX-SOCK-5 holds through it, a guest
+  booted again included.
 - *Who the peer is*: `SIO_AF_UNIX_GETPEERPID`, then the process's user from its token, as Linux's
   `SO_PEERCRED`.
 Messages are framed over the stream (`hex_core::stream`), as on macOS: Windows' AF_UNIX is `SOCK_STREAM`
@@ -1074,8 +1134,46 @@ each door's check, while the caller gets every byte; `hex node` refuses such a c
 2026-11-08, `stdio_probe refuse-as`, `bench/native/records/other-user-jupiter-20261108T0220Z.txt`).
 What no transport can stop: a process of the caller's own user may open the caller's process and take any
 handle in it (`PROCESS_DUP_HANDLE`), its own connection included, so "only the caller" means only through
-the node, as Linux's `SCM_RIGHTS` means it. The fastest candidate that passes is chosen when the timed run of
-record is in.
+the node, as Linux's `SCM_RIGHTS` means it. **The pick: dup** (the lead's ruling, 2026-11-09). A first timed
+run (the old Windows agent's, `cp/t7-native-windows` f84fbd88, 300 rounds a candidate of 4 MiB streams) put
+framed's first byte lowest (p50 15 us) and its throughput lowest too (p50 9.2 GB/s); a connection or a named
+pipe per stream gave the most throughput (p50 14.3 GB/s), each behind a handshake (first byte p50 100 and 50
+us) and a door; dup sat between (p50 32 us, 12.8 GB/s). Dup is chosen on the stream design's own rule: the
+caller gets a real OS pipe handle, what a program's stdio is, with no copy in the caller's client. Framed's
+faster first byte doesn't outweigh that, since framed makes the client copy every byte, at the lowest
+throughput. That run isn't of record: its batches of ten each ran in a fresh probe process younger than a
+second, so its load column holds no whole second's reading, and s4's criterion 2 ran beside it. The record is
+retaken on a jupiter free of other work by a probe that no longer hangs. Its rounds didn't hang in a handshake,
+as that run's note had it: each waited for its streams' ends, and a `conn` stream's end, its connection's
+graceful close, never reached the caller about once in 100 streams (afunix.sys's lost wakeup, the next
+paragraph's finding; traced on jupiter, 2026-11-09, every hang with the stream's bytes all in). The probe now
+reads the bytes it asked for and waits for no end (`tests/bench_ends.rs`, red at 831c09f1).
+
+**A connection's end: held, then reset, never an end-of-stream (the hostile-frame hang; Ada's ask and the
+lead's rulings, 2026-11-09).** A connection the node ends (a hostile frame, a refusal at the door, the
+disconnect rule) is to bring its last message and then its end. A graceful close on afunix.sys doesn't make
+that so. *Measured* on jupiter with a test that sends one node a hostile frame on each of 300 connections in
+turn: a client in another process that had read the node's whole refusal never saw the end on about 2% of
+them, in every graceful variant tried (close alone, `SD_SEND`, `SD_BOTH`, closed after the send completed,
+half-closed and held open until the peer closed; the client's socket overlapped or not), 2 to 30 a run of
+300 under four nodes' load, and never in-process (0 of 600); a probe of its own with blocking sockets on both
+sides lost 12 of 2,990 (`stdio_probe peerclose`). Traced: the node shut down and closed each connection, and
+the client's blocked `recv` was never woken. With `SD_SEND` first and a reset after the wait, 1 to 5 of 300
+connections per node still hung: the node reset each 24-34 ms in, but a read that had missed the
+end-of-stream stayed blocked through the reset, waking only on its own next call (a byte the client sent drew
+`ECONNRESET`). A reset with no end-of-stream before it (`SO_LINGER`, no linger) woke every read (0 of 3,000
+kept) but, done at once, discarded the refusal in 12 to 83% of rounds. So the Windows `Os` closes an ended
+connection in two phases and never sends it an end-of-stream: once its last send has completed it is held, a
+receive under way, and closed gracefully when the peer closes; one whose peer hasn't closed within a learned
+wait is reset. The wait gives the peer the time to read the last message, which the reset would discard. It
+is Hex's rule for learned waits: twice the slowest of the end-to-peer-close record and what the node has seen
+since, so it only rises. The record (`stdio_probe peerclose` at dac212ce, f6fd84a2,
+`bench/native/records/peerclose-jupiter-dac212ce-20261109T1834Z.txt`): a peer that reads to its end closes
+within 56 us on a quiet jupiter and within 2,883 us (p99.9 626 us) beside a workspace build holding a third
+of the machine, so the wait starts at 5.766 ms. With this shape, 0 of 3,000 connections were kept and 0
+refusals lost (two passes of 300 rounds alone and four nodes at once), each ended by the reset.
+`tests/windows_node.rs` holds it: each of 300 hostile connections must bring its whole refusal, then its end
+(red at 1426f7b6, green at beaf22ee).
 
 **Recovery: a box outlives its node through a keeper, and the restarted node takes it back (T-T7.1.2;
 the lead's decision, 2026-11-08).** Today a Windows box ends with the node's last handle: its job is
@@ -1164,44 +1262,6 @@ for the service to bring it back.
 **Falsifier:** the crash-restart tests (step 8's): the node killed with boxes running, mid-create and
 mid-delete, then restarted on the same state directory; each must fail on the tree before this change and
 pass after.
-
-## Decision (native plan step 8, 2026-11-08): a macOS rootless box outlives its node and is taken back with a new watcher
-
-T-T7.1.2 asks that a node restarted after a crash take each live box back, as Linux's does; the step names "macOS
-rootless boxes left with no watcher" as what must change to meet it. Linux's boxes are cgroups, which outlive the
-node by construction. A macOS rootless box is its process group (the leader's pid), held by a watcher thread in
-the node, so the node's death leaves the members running without a bound.
-
-- **What survives.** The members do: when a process's parent exits, XNU reparents its children to launchd
-  (`bsd/kern/kern_exit.c`, `proc_reparentlocked` to `initproc`), which reaps them, so they run on, unbounded,
-  until the node is back. Their process group is unchanged.
-- **What names them.** The group id with its leader's start time (`proc_pid_rusage`, `ri_proc_start_abstime`),
-  read at the leader's spawn while it is the node's unreaped child, and recorded with the box in the node's
-  state (the record's `init`, a `ProcId`, its `start_ticks` holding the Mach start time). The group is still the
-  box's when its leader runs with that start time, or when no process has the leader's pid. A live process with
-  that pid and another start time was given it since and leads a group of its own: the box is then taken back
-  empty, and the rootless gap the class already states (a recycled leader pid) is why box users close it.
-- **Taken back.** The restarted node runs Linux's decisions (`hex_core::recovery`) over its records
-  (`hex_node::recorded::Recorded::recover`). A record made is taken back: the class makes a box on the recorded
-  group (`ProcessBox::adopt`), and its watcher lists, measures and ends the members as it does its own, since none
-  of that needs parenthood. The members' own ends are launchd's to reap, and their exit statuses aren't the
-  node's. A record being made or removed is removed, and what its group still runs is killed
-  (`process::end_group`).
-- **The fact it waits on.** XNU's `EVFILT_PROC` catches only events after its attach (`bsd/kern/kern_event.c`,
-  `filt_procattach`). So the node's socket re-reads a watched program's `proc_pid_rusage` after attaching and
-  reports an end that came before. Measured on adas-mac-studio.local-2 through `hex node`: without it, 2 of 12
-  suite runs stalled 60 s on a lost end; with it, 0 of 12.
-- **Evidence.** crates/hex-cli/tests/macos_node_recovery.rs: `hex node` killed (SIGKILL) with a box running, one
-  empty, one mid-create (held in its record write by a FIFO at the write's temp path, and seen held there by
-  `sample(1)`) and one mid-delete (its record deleting, its member running). Restarted on the same state, it takes
-  back the running box with its member still running, which a delete then ends, and the empty one. It leaves
-  nothing of the others: no record, no temp file, no member. The tests failed on the tree before the change
-  (NoSuchBox; the temp file left; the member not ended) and pass after.
-- **What would falsify it.** A rootless member that changes its process group without `setsid` (`setpgid` into
-  another group) leaves the box as a daemonizing one does, and is lost to recovery as it is to the watcher. A
-  macOS that stopped reparenting orphans to launchd, or reaped a group's members with its leader, would end
-  boxes with their node. Box users name a box by its uid, which recovery reads the same way, so neither gap is
-  theirs.
 
 ## Open (STATUS.md)
 

@@ -85,52 +85,96 @@ impl Keeping {
     }
 
     fn spawn_at(state: &Path, command: &[String]) -> Result<keeper::NodeKeeper, Refusal> {
-        let (program, args) = command.split_first().ok_or_else(|| Refusal::Invalid {
-            what: "keeper",
-            why: "an empty keeper command".to_owned(),
-        })?;
         let ready = state.join(format!("keeper-ready-{}", std::process::id()));
         let _ = std::fs::remove_file(&ready);
-        // The keeper takes its state folder and ready path from the environment, so the command names only
-        // how to launch it (`hex keep`, or the test's own keeper body); `keeper::Args` reads flags or these.
-        let mut child = std::process::Command::new(program)
-            .args(args)
-            .env("HEX_KEEP_STATE", state)
-            .env("HEX_KEEP_READY", &ready)
-            .spawn()
-            .map_err(|e| Refusal::os("starting the keeper", e))?;
-        // Wait for the keeper to write its identity, waiting on the child itself between polls (no blocking
-        // sleep): a bound of the node's EMPTY_PATIENCE, 60 s, at ticks of 10 ms.
-        let watch = sys::open_process(child.id()).ok().flatten();
+        // The keeper outlives its node, so it inherits none of the node's handles. std's spawn hands a child
+        // every inheritable handle its parent holds, the node's own stdout and stderr among them (which it
+        // inherited), so the keeper is started as a box's member is ([`sys::create`]): only its three
+        // standard handles inherited, each the NUL device, and assigned to no job of Hex's. What reads the
+        // node's output (a supervisor, a test) then sees its end when the node ends. It says it is ready
+        // through its ready file.
+        let mut spawn = keeper_spawn(command, state, &ready)?;
+        let Started {
+            process, thread, ..
+        } = sys::create(&mut spawn, &[]).map_err(|e| Refusal::os("starting the keeper", e))?;
+        if let Err(e) = sys::resume(&thread) {
+            let _ = sys::terminate_process(&process, 1);
+            return Err(Refusal::os("starting the keeper", e));
+        }
+        drop(thread);
+        // Wait for the keeper to write its identity, waiting on it between polls (no blocking sleep): a bound
+        // of the node's EMPTY_PATIENCE, 60 s, at ticks of 10 ms.
         let mut ticks: u32 = 6_000;
         let (pid, created) = loop {
             if let Some((pid, created)) = read_ready(&ready) {
                 break (pid, created);
             }
-            if let Ok(Some(status)) = child.try_wait() {
+            if matches!(sys::wait(&process, 0), Ok(true)) {
+                let code = sys::exit_code(&process)
+                    .map_or_else(|e| format!("unread ({e})"), |c| c.to_string());
                 return Err(Refusal::Broken(format!(
-                    "the keeper exited before it was ready: {status}"
+                    "the keeper exited before it was ready: exit code {code}"
                 )));
             }
             ticks = match ticks.checked_sub(1) {
                 Some(n) => n,
                 None => {
-                    let _ = child.kill();
+                    let _ = sys::terminate_process(&process, 1);
                     return Err(Refusal::Os {
                         op: "starting the keeper",
                         why: "it didn't say it was ready in 60 s".to_owned(),
                     });
                 }
             };
-            // Wait up to 10 ms on the child; its ending wakes us, else the next poll reads the ready file.
-            if let Some(w) = watch.as_ref() {
-                let _ = sys::wait(w, 10);
-            }
+            // Wait up to 10 ms on the keeper; its ending wakes us, else the next poll reads the ready file.
+            let _ = sys::wait(&process, 10);
         };
         let k = keeper::NodeKeeper::open(pid, created, state)?;
         write_keeper(state, pid, created).map_err(|e| Refusal::os("recording the keeper", e))?;
         Ok(k)
     }
+}
+
+/// The keeper's spawn: `command` (`hex keep`, or a test's own keeper body) with the node's environment and
+/// the keeper's state folder and ready path added (`keeper::Args` reads them there, so the command names only
+/// how to launch it), the node's working folder, and the NUL device as its three standard handles. A variable
+/// whose name or value isn't Unicode, or whose name holds an `=` (Windows' per-drive folders, `=C:`), isn't
+/// passed on. Refused for an empty command, or a state folder or ready path that isn't Unicode.
+fn keeper_spawn(command: &[String], state: &Path, ready: &Path) -> Result<Spawn, Refusal> {
+    if command.is_empty() {
+        return Err(Refusal::Invalid {
+            what: "keeper",
+            why: "an empty keeper command".to_owned(),
+        });
+    }
+    let unicode = |what: &str, p: &Path| {
+        p.to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| Refusal::Invalid {
+                what: "keeper",
+                why: format!("its {what} {} isn't Unicode", p.display()),
+            })
+    };
+    let mut env: Vec<(String, String)> = std::env::vars_os()
+        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+        .filter(|(k, _)| {
+            !k.is_empty()
+                && !k.contains('=')
+                && !k.eq_ignore_ascii_case("HEX_KEEP_STATE")
+                && !k.eq_ignore_ascii_case("HEX_KEEP_READY")
+        })
+        .collect();
+    env.push(("HEX_KEEP_STATE".to_owned(), unicode("state folder", state)?));
+    env.push(("HEX_KEEP_READY".to_owned(), unicode("ready path", ready)?));
+    Ok(Spawn {
+        command_line: hex_core::job::command_line(command)
+            .encode_utf16()
+            .chain([0])
+            .collect(),
+        environment: hex_core::job::environment(&env),
+        cwd: None,
+        stdio: std_handles(Stdio::null())?,
+    })
 }
 
 fn read_ready(path: &Path) -> Option<(u32, u64)> {
@@ -209,11 +253,17 @@ impl Holding {
         // The old keeper is gone (that is why it is replaced); its stop event is shared by the state folder,
         // so signalling it would stop the new keeper too. Just replace it.
         *held = keeping.spawn()?;
-        // Re-duplicate every live box's job into the new keeper.
+        // Re-duplicate every live box's job into the new keeper, recorded against it.
         for (id, h) in self.boxes()?.iter() {
             let value = held.hold(h.job_token())?;
-            keeper::write_held(&keeping.state, id.as_str(), value)
-                .map_err(|e| Refusal::os("recording a box's keeper handle", e))?;
+            keeper::write_held(
+                &keeping.state,
+                id.as_str(),
+                held.pid(),
+                held.created(),
+                value,
+            )
+            .map_err(|e| Refusal::os("recording a box's keeper handle", e))?;
         }
         Ok(())
     }
@@ -231,13 +281,16 @@ impl Holding {
     /// after this the box's last handle is the node's, so kill-on-close ends it with the node.
     fn drop_from_keeper(&self, id: &BoxId) -> Result<(), Refusal> {
         if let Some(keeping) = self.keeping()?
-            && let Some(value) = keeper::read_held(&keeping.state, id.as_str())
+            && let Some(held) = keeper::read_held(&keeping.state, id.as_str())
         {
-            keeping
+            let keeper = keeping
                 .keeper
                 .lock()
-                .map_err(|_| Refusal::Broken("the node's keeper lock is poisoned".to_owned()))?
-                .drop_held(value)?;
+                .map_err(|_| Refusal::Broken("the node's keeper lock is poisoned".to_owned()))?;
+            // A recorded value belongs only to the keeper process whose identity was recorded with it.
+            if held.held_by(keeper.pid(), keeper.created()) {
+                keeper.drop_held(held.value)?;
+            }
             keeper::forget_held(&keeping.state, id.as_str());
         }
         Ok(())
@@ -334,6 +387,19 @@ impl WinRuntime {
             .map(|node| format!("Local\\hex-{node}-{id}"))
     }
 
+    /// Whether this node takes back box `spec` a node before it made (native plan step 8, T-T7.1.2; asked
+    /// by the node's recovery before it takes a box back or removes it): for an `oci` box, whether its
+    /// record names a box [`WinRuntime::adopt`] takes back ([`oci::alive`]); `None` for a `process` box,
+    /// which has no init.
+    pub fn alive(&self, spec: &BoxSpec) -> Result<Option<bool>, Refusal> {
+        match &spec.class {
+            ClassSpec::Process => Ok(None),
+            ClassSpec::Oci(_) | ClassSpec::Bundle(_) => {
+                oci::alive(&self.marker(&spec.id)).map(Some)
+            }
+        }
+    }
+
     /// Takes back box `spec` a node before this one made: a `process` box with whatever runs in it (made
     /// again, empty, where nothing does); an `oci` box with its container, scratch and init, refused by name
     /// where any of them is gone ([`OciBox::take_back`]), for recovery to end it. Refused for a runtime whose
@@ -360,19 +426,30 @@ impl WinRuntime {
                 Held::Oci(Arc::new(self.take_back_oci(spec, &name)?))
             }
         };
-        // The keeper already holds this box's job from the node that made it (the handle value is recorded
-        // under the state folder), so taking it back keeps that handle; where none is recorded (a box this
-        // runtime never kept), the current keeper holds it so a delete can close it.
-        if let Some(keeping) = self.keeping()?
-            && keeper::read_held(&keeping.state, spec.id.as_str()).is_none()
-        {
-            let value = keeping
+        // The current keeper must hold this box's job. Where a handle is recorded against this very keeper,
+        // it still holds it (the node that made the box and this one share the keeper), so nothing is done.
+        // Where none is recorded, or one is recorded against a keeper that isn't this one — a box taken back
+        // after node and keeper both went, its job outliving them (an `oci` box's; a `process` box's ends
+        // with them), so a fresh keeper holds nothing of it — the current keeper takes the job, recorded
+        // against it, so a later delete closes it in the keeper that has it.
+        if let Some(keeping) = self.keeping()? {
+            let keeper = keeping
                 .keeper
                 .lock()
-                .map_err(|_| Refusal::Broken("the node's keeper lock is poisoned".to_owned()))?
-                .hold(b.job_token())?;
-            keeper::write_held(&keeping.state, spec.id.as_str(), value)
+                .map_err(|_| Refusal::Broken("the node's keeper lock is poisoned".to_owned()))?;
+            let current = keeper::read_held(&keeping.state, spec.id.as_str())
+                .is_some_and(|h| h.held_by(keeper.pid(), keeper.created()));
+            if !current {
+                let value = keeper.hold(b.job_token())?;
+                keeper::write_held(
+                    &keeping.state,
+                    spec.id.as_str(),
+                    keeper.pid(),
+                    keeper.created(),
+                    value,
+                )
                 .map_err(|e| Refusal::os("recording a box's keeper handle", e))?;
+            }
         }
         let mut boxes = self.boxes()?;
         if boxes.contains_key(&spec.id) {
@@ -615,26 +692,44 @@ impl Runtime for WinRuntime {
             }
         };
         let info = self.info(&held)?;
-        let mut boxes = self.boxes()?;
-        if boxes.contains_key(&spec.id) {
+        // Hand the box's job to the keeper before the box is visible, holding no box-map lock across it: a
+        // keeper found dead is replaced, which reads the box map ([`WinRuntime::ensure_keeper`]), so doing
+        // this under the box lock would deadlock the runtime against itself (std's `Mutex` isn't reentrant).
+        if let Some(keeping) = self.keeping()? {
+            let keeper = keeping
+                .keeper
+                .lock()
+                .map_err(|_| Refusal::Broken("the node's keeper lock is poisoned".to_owned()))?;
+            let value = keeper.hold(held.job_token())?;
+            keeper::write_held(
+                &keeping.state,
+                spec.id.as_str(),
+                keeper.pid(),
+                keeper.created(),
+                value,
+            )
+            .map_err(|e| Refusal::os("recording a box's keeper handle", e))?;
+        }
+        // Insert under the box lock alone. A create that lost a race to the same id undoes its keeper hold
+        // and its box once the lock is released, so neither is done under it.
+        let dup = {
+            let mut boxes = self.boxes()?;
+            match boxes.entry(spec.id.clone()) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(held.clone());
+                    false
+                }
+                std::collections::btree_map::Entry::Occupied(_) => true,
+            }
+        };
+        if dup {
             // Made beside another create of the same id: this one is ended, the first kept.
+            self.drop_from_keeper(&spec.id)?;
             if let Held::Oci(b) = &held {
                 let _ = b.delete();
             }
             return Err(Refusal::Exists(spec.id));
         }
-        // Where the box outlives the node, the keeper holds a second handle to its job, so a crashed node
-        // leaves it running for the next node; its handle value is recorded for delete and for a restart.
-        if let Some(keeping) = self.keeping()? {
-            let value = keeping
-                .keeper
-                .lock()
-                .map_err(|_| Refusal::Broken("the node's keeper lock is poisoned".to_owned()))?
-                .hold(held.job_token())?;
-            keeper::write_held(&keeping.state, spec.id.as_str(), value)
-                .map_err(|e| Refusal::os("recording a box's keeper handle", e))?;
-        }
-        boxes.insert(spec.id, held);
         Ok(info)
     }
 
@@ -649,17 +744,16 @@ impl Runtime for WinRuntime {
         }
     }
 
-    fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
-        stdio.check()?;
-        if stdio.ask != hex_api::Ask::default() {
-            return Err(Refusal::Platform {
-                what: "stdio streams made by the runtime",
-                platform: "windows",
-                why: "the Windows classes take the caller's own handles; the stream form is the Windows \
-                      agent's to add, by its stdio record's winner"
-                    .to_owned(),
-            });
-        }
+    /// HEX-RT-17: the streams the caller asks for are made as pipes ([`Stdio::make_asked`]), the program's
+    /// ends handed to it as a caller's own handles are and the caller's given back once by the program's
+    /// [`Proc::streams`], so the host copies no byte between them, in either class.
+    fn exec(
+        &self,
+        id: &BoxId,
+        program: Program,
+        mut stdio: Stdio,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        let given = stdio.make_asked()?;
         match self.get(id)? {
             Held::Process(b) => {
                 let spawn = build_spawn(&program, stdio)?;
@@ -670,11 +764,13 @@ impl Runtime for WinRuntime {
                 } = b.exec(spawn)?;
                 // The initial thread is resumed; the node holds only the process handle to wait on.
                 drop(thread);
-                Ok(Box::new(proc::BoxProc::new(process, pid, b.shared())))
+                let proc = proc::BoxProc::new(process, pid, b.shared());
+                Ok(Box::new(hex_api::Asked::new(proc, given)))
             }
             Held::Oci(b) => {
                 let process = hex_core::hcs::process("program", &program)?;
-                b.exec(&process, std_handles(stdio)?)
+                let proc = b.exec(&process, std_handles(stdio)?)?;
+                Ok(Box::new(hex_api::Asked::new(proc, given)))
             }
         }
     }
@@ -1005,6 +1101,36 @@ mod tests {
         }
     }
 
+    /// T-T7.1.2 (native plan step 8): do end a node's keeper, then make a box on the node's runtime before
+    /// anything replaces the keeper; expect the create to finish, the box held by a new keeper, rather than
+    /// wait forever on its own runtime's box-map lock (found by s4), and the box to outlive the runtime.
+    #[test]
+    fn a_box_made_after_its_keeper_ended_is_made_and_held_by_a_new_keeper() {
+        let (name, state) = (node("late"), tempfile::tempdir().unwrap());
+        let spec = process_box("late");
+        let rt = Arc::new(WinRuntime::outliving(&name, state.path(), &keeper("late")).unwrap());
+        let first = rt.keeper_pid().expect("a keeper holds the node's boxes");
+        crash(first);
+        wait_for("the keeper to end", || !alive(first));
+        let (made, making) = std::sync::mpsc::channel();
+        let (runtime, asked) = (Arc::clone(&rt), spec.clone());
+        let maker = std::thread::spawn(move || {
+            let _ = made.send(runtime.create(asked).map(drop));
+        });
+        making
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("the create never finished: it waits on its own runtime's lock")
+            .unwrap();
+        maker.join().unwrap();
+        let pid = rt.exec(&spec.id, waiting(), Stdio::null()).unwrap().pid();
+        let second = rt.keeper_pid().expect("a new keeper holds the box");
+        assert_ne!(second, first);
+        drop(rt);
+        assert!(alive(pid), "the box's program ended with its runtime");
+        crash(second);
+        wait_for("kill-on-close to end the program", || !alive(pid));
+    }
+
     /// T-T7.1.2: do make a node's runtime on a state folder; expect its `oci` boxes' records and scratch
     /// kept inside that folder, so its start-time reclaim sweeps only its own boxes, not the machine's shared
     /// folder where a runtime driven in process (a bench's) keeps the records of boxes it is running.
@@ -1017,6 +1143,52 @@ mod tests {
             crash(k);
         }
         assert!(own, "the node keeps its records in {:?}", rt.scratch_root);
+    }
+
+    /// T-T7.1.2 (native plan step 8): a box taken back after its node AND its keeper both went — its job
+    /// outliving them, as an `oci` box's container does (a `process` box's is modelled here by a handle the
+    /// test holds, since kill-on-close would end a real one) — is re-held by the taking-back node's keeper,
+    /// which isn't the one its record names. Do: make a box, hold its job apart (the "survives both-gone"
+    /// stand-in), drop the node and crash its keeper, take the box back on a new node, then drop that node
+    /// and the stand-in handle. Expect: the box's program still runs, held by the new keeper; before the
+    /// re-holding fix the new keeper never held it, so it ended here.
+    #[test]
+    fn a_box_taken_back_after_a_both_gone_crash_is_re_held_by_the_new_keeper() {
+        let (name, state) = (node("regone"), tempfile::tempdir().unwrap());
+        let spec = process_box("regone");
+        let rt = WinRuntime::outliving(&name, state.path(), &keeper("regone")).unwrap();
+        rt.create(spec.clone()).unwrap();
+        let pid = rt.exec(&spec.id, waiting(), Stdio::null()).unwrap().pid();
+        let first = rt.keeper_pid().expect("a keeper holds the node's boxes");
+        // A third handle to the box's job, so it outlives node and keeper both going, as an oci container
+        // outlives them through HCS.
+        let held = sys::Job::open(&format!("Local\\hex-{name}-regone"))
+            .unwrap()
+            .expect("the box's named job");
+        drop(rt);
+        crash(first);
+        wait_for("the first keeper to end", || !alive(first));
+        assert!(
+            alive(pid),
+            "the box's program ended though its job was still held"
+        );
+        let rt = WinRuntime::outliving(&name, state.path(), &keeper("regone")).unwrap();
+        let second = rt
+            .keeper_pid()
+            .expect("a new keeper holds the node's boxes");
+        assert_ne!(second, first, "the new node adopted the gone keeper");
+        rt.adopt(&spec).unwrap();
+        assert_eq!(rt.inspect(&spec.id).unwrap().state, BoxState::Running);
+        // The stand-in handle and the new node both go: only the new keeper can keep the box now.
+        drop(held);
+        drop(rt);
+        assert!(
+            alive(pid),
+            "the taken-back box ended when its node went, so the new keeper never re-held its job"
+        );
+        // Ends the box: the new keeper's handle is its last, so crashing it ends the program.
+        crash(second);
+        wait_for("the new keeper's end to end the program", || !alive(pid));
     }
 
     /// A runtime driven in process keeps kill-on-close: do make a box, run a program, drop the runtime;

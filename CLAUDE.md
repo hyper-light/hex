@@ -167,29 +167,32 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   wrapper.
 - `crates/hex-runtime/src/windows/sys.rs`: the Windows `process` class, whose box is a job object nested
   under the node's. It creates the job (`CreateJobObjectW`), sets its hard limits
-  (`SetInformationJobObject`: the commit cap, active-process cap, kill-on-close and no breakaway, the CPU
-  weight or hard cap, and the memory notification the one class Windows guarantees), starts each member
+  (`SetInformationJobObject`: the commit cap, active-process cap, kill-on-close and no breakaway, and the
+  CPU weight or hard cap), starts each member
   suspended inside the job and nowhere else (`CreateProcessW` with `CREATE_SUSPENDED` and a
   `PROC_THREAD_ATTRIBUTE_JOB_LIST`, so it is a job member from creation, and a
   `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` so only its three standard handles are inherited —
   `InitializeProcThreadAttributeList`/`UpdateProcThreadAttribute`/`DeleteProcThreadAttributeList`),
   resumes it (`ResumeThread`), waits on it and reads its end (`WaitForSingleObject`,
   `GetExitCodeProcess`), marks its standard handles inheritable (`SetHandleInformation`), reads the job's
-  accounting and its guaranteed memory-limit violation (`QueryInformationJobObject`), ends the job
+  accounting (`QueryInformationJobObject`), ends the job
   (`TerminateJobObject`) or one member alone (`TerminateProcess`, a program's own kill) and closes its
   handles (`CloseHandle`), and reads the machine's processor count
-  (`GetActiveProcessorCount`) and, for the node's facts (`hex-node`'s `facts`), its memory
-  (`GlobalMemoryStatusEx`) and a volume's size and free space (`GetDiskFreeSpaceExW`). For the `oci` class's Shards guest it reads the default shared roots
+  (`GetActiveProcessorCount`), the measured worker stack extent (`GetCurrentThreadStackLimits`),
+  the enclosing job's process ceiling (`IsProcessInJob` and `QueryInformationJobObject`), and, for the node's facts (`hex-node`'s `facts`), its memory
+  (`GlobalMemoryStatusEx`, also its commit room for admission) and a volume's size and free space (`GetDiskFreeSpaceExW`). For the `oci` class's Shards guest it reads the default shared roots
   (docs/design/shards-guest.md §4a): the users folder from its known folder (`SHGetKnownFolderPath` with
   `FOLDERID_UserProfiles`, its string freed by `CoTaskMemFree`) and the temp folder (`GetTempPath2W`).
   Where its boxes outlive the node (the keeper, `super::keeper`; decision
   "the Windows node, on one completion port"), it names each box's job (`CreateJobObjectW` with a name,
   reopened by the next node with `OpenJobObjectW`), and a keeper holds a second handle to each: the node
   duplicates the job into the keeper and closes it there on delete (`DuplicateHandle` into another process
-  and with `DUPLICATE_CLOSE_SOURCE`, the keeper opened by `OpenProcess` with `PROCESS_DUP_HANDLE`), names
-  a process by its creation time (`GetProcessTimes`) so a reused pid is told apart, waits on a process or
-  the keeper's stop (`WaitForMultipleObjects`), and makes and signals that stop (`CreateEventW` named,
-  `SetEvent`). `windows-sys` binds these as `unsafe` foreign functions, and std's own
+  and with `DUPLICATE_CLOSE_SOURCE`, the keeper opened by `OpenProcess` with `PROCESS_DUP_HANDLE`), starts
+  the keeper as it starts a member but in no job (`CreateProcessW` with the `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`
+  alone, its three standard handles the NUL device), so the keeper, which outlives the node, holds none of
+  the node's handles, names a process by its creation time (`GetProcessTimes`) so a reused pid is told
+  apart, and makes and signals the keeper's stop (`CreateEventW` named, `SetEvent`). `windows-sys` binds these as `unsafe` foreign
+  functions, and std's own
   job-object support and its `PROC_THREAD_ATTRIBUTE_JOB_LIST`/`_HANDLE_LIST` process creation are
   unstable; Rust can express none of them safely.
 - `crates/hex-runtime/src/windows/oci/sys.rs`: the Windows `oci` class, a Windows image run process-isolated
@@ -235,6 +238,33 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   through it takes `&mut`, so a shared reference reaches none. Rust can express none of these foreign
   calls, the function pointers resolved at run time, nor a context's thread-safety, safely. (Approved by Ada,
   2026-11-09: "go grab the AMD bits needed and the other unsafe is fine.")
+- `crates/hex-afunix/src/lib.rs`: the Windows node agent's socket and its client, an AF_UNIX stream on one
+  I/O completion port (decision "the Windows node, on one completion port"). It starts Winsock
+  (`WSAStartup`), borrows their sockets through `AsSocket`, sets blocking mode (`ioctlsocket`,
+  `FIONBIO`), makes, binds, listens on, connects, shuts down and closes AF_UNIX sockets (`WSASocketW`
+  overlapped and not inherited, `bind`, `listen`, `connect`, `shutdown`, `closesocket`), bounds a client's
+  makes the close of a connection the node has ended a reset
+  (`setsockopt` `SO_LINGER`, no linger: afunix.sys doesn't wake every peer's read with a graceful
+  end-of-stream) and sends and receives on a client's blocking socket (`send`, `recv`),
+  makes the port and puts sockets on it (`CreateIoCompletionPort`), posts a wake and waits on it
+  (`PostQueuedCompletionStatus`, `GetQueuedCompletionStatusEx`), starts a connection's overlapped accept,
+  receive and send (`AcceptEx` with `SO_UPDATE_ACCEPT_CONTEXT`, `WSARecv`, `WSASend`), each operation's
+  `OVERLAPPED` and buffer held on the heap by the kernel from its start until its completion is dequeued,
+  reads a peer's pid (`WSAIoctl` `SIO_AF_UNIX_GETPEERPID`) and whether its process runs as this user or
+  LocalSystem (`OpenProcess`, `OpenProcessToken`, `GetTokenInformation` `TokenUser`, `EqualSid`,
+  `IsWellKnownSid`), gives the peer's process handles of its own to an exec's asked streams and closes ones
+  it was never told of (`OpenProcess` with `PROCESS_DUP_HANDLE`, held for the connection; `DuplicateHandle`
+  into it, and with `DUPLICATE_CLOSE_SOURCE` and no target), and owns the handles the node gave this
+  process for a message (the values its envelope names), and watches a program's end (`OpenProcess`,
+  then ntdll's wait completion packet,
+  which the kernel queues to the port when the process ends, no thread between: `NtCreateWaitCompletionPacket`,
+  `NtAssociateWaitCompletionPacket`, `NtCancelWaitCompletionPacket`; undocumented in the SDK, used by the
+  Windows thread pool and Go's runtime, and chosen over `RegisterWaitForSingleObject` by measurement) and watches a host's own connection, a socket it borrows, by the network events
+  Winsock records on an event of its own (`WSAEventSelect`; the event made and reset by `CreateEventW` and
+  `ResetEvent`), whose signal such a packet queues to the port. `windows-sys` binds these as `unsafe` foreign
+  functions, but for the ntdll calls,
+  which Hex declares itself; std has no AF_UNIX socket or completion port on Windows, and a buffer the kernel
+  writes after the call returns is beyond Rust's borrow rules. Rust can express none of them safely.
 
 ## 13. Lean code
 

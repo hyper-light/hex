@@ -21,11 +21,14 @@
 )]
 
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use hex_api::conformance::{self, Act, Fixture};
 use hex_api::differential;
-use hex_api::{Bounds, BoxId, BoxSpec, BoxState, ClassSpec, Exit, Program, Runtime, Stdio};
+use hex_api::{
+    Bounds, BoxId, BoxSpec, BoxState, ClassSpec, Exit, Program, Refusal, Runtime, Stdio,
+};
+use hex_node::recorded::Recorded;
 use hex_runtime::windows::{WinRuntime, oci};
 use serde_json::json;
 
@@ -153,7 +156,7 @@ impl Fixture for Lab {
 }
 
 /// Runs `hex selftest-box <args>` in started box `id` and returns its exit and stdout.
-fn run(rt: &WinRuntime, lab: &Lab, id: &BoxId, args: &[&str]) -> (Exit, String) {
+fn run(rt: &dyn Runtime, lab: &Lab, id: &BoxId, args: &[&str]) -> (Exit, String) {
     let (mut r, w) = std::io::pipe().unwrap();
     let mut program = lab.program(&Act::Wait);
     program.args = [r"C:\hex\hex.exe", "selftest-box"]
@@ -886,4 +889,351 @@ fn an_oci_box_no_node_takes_back_is_ended_with_its_container_and_scratch() {
         "the box's scratch folder outlived its end"
     );
     rt.end(&id).expect("a second end, of nothing");
+}
+
+/// A node opened as `hex node` opens one on Windows (crates/hex-cli/src/node.rs): its boxes' records in
+/// `state`, its runtime's boxes outliving it, held by the keeper whose state is `state\keeper` and the node
+/// named for that folder. Not yet recovered: the test calls [`Recorded::recover`].
+fn recorded(lab: &Lab, state: &Path) -> Recorded<WinRuntime> {
+    let keeping = state.join("keeper");
+    let runtime = WinRuntime::outliving(
+        &hex_runtime::windows::keeper::node_name(&keeping),
+        &keeping,
+        &keeper(),
+    )
+    .unwrap()
+    .with_launcher(lab.bin.clone());
+    Recorded::open(runtime, state).unwrap()
+}
+
+/// The keeper holding a recorded node's boxes, whichever one owns `state\keeper` when the test ends, asked
+/// to stop, so no box's job is held past the test (as tests/windows_node_recovery.rs's guard does).
+struct Keepers(PathBuf);
+
+impl Drop for Keepers {
+    fn drop(&mut self) {
+        let Ok(text) = std::fs::read_to_string(self.0.join("keeper.owner")) else {
+            return;
+        };
+        let mut words = text.split_whitespace();
+        let (Some(Ok(pid)), Some(Ok(created))) = (
+            words.next().map(str::parse::<u32>),
+            words.next().map(str::parse::<u64>),
+        ) else {
+            return;
+        };
+        if let Ok(keeper) = hex_runtime::windows::keeper::NodeKeeper::open(pid, created, &self.0) {
+            keeper.stop();
+        }
+    }
+}
+
+/// T-T7.1.2, native plan step 8 ("a box still alive is taken back, as on Linux"), through the records
+/// `hex node` keeps: do: make and start an `oci` box on a node opened as `hex node` opens one, and drop the
+/// node, every handle it held closed, as when it is killed; then open the next node on its state folder and
+/// recover. Expect: the container outlives the node; the recovery takes the box back, adopted and running,
+/// rather than removing it; a program runs in it; and its delete leaves no container, record or attached
+/// scratch.
+#[test]
+fn a_recorded_nodes_running_oci_box_is_taken_back_by_the_next_nodes_recovery() {
+    let Some(lab) = Lab::new() else {
+        eprintln!("SKIP: HEX_WINDOWS_LAYERS names no image layers");
+        return;
+    };
+    let _one = one_at_a_time();
+    let state = tempfile::tempdir().unwrap();
+    let id = BoxId::new("hex-oci-recovered").unwrap();
+    let spec = lab.spec(id.clone(), Bounds::default());
+    let markers = state.path().join("keeper").join("boxes");
+    let marker = markers.join(format!("{id}.scratch.json"));
+    let scratch = lab
+        .root
+        .path()
+        .join(format!("scratch-{id}"))
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let _left = Leftover {
+        id: &id,
+        markers: &markers,
+    };
+    let _keepers = Keepers(state.path().join("keeper"));
+    let node = recorded(&lab, state.path());
+    node.create(spec).expect("create");
+    node.start(&id).expect("start");
+    drop(node);
+    outlived(&id);
+    let node = recorded(&lab, state.path());
+    let summary = node.recover().expect("the next node recovers");
+    assert_eq!(summary.adopted, std::slice::from_ref(&id), "{summary:?}");
+    let info = node.inspect(&id).expect("inspect");
+    assert_eq!(
+        (info.state, info.adopted),
+        (BoxState::Running, true),
+        "{info:?}"
+    );
+    let after = run(&node, &lab, &id, &["say", "after"]);
+    assert_eq!(after.0, Exit::Code(0), "{after:?}");
+    node.delete(&id).expect("delete");
+    assert!(!hcs_holds(&id), "HCS still holds {id} after its delete");
+    assert!(!marker.exists(), "the box's record outlived its delete");
+    assert!(
+        oci::sys::layer_mount_path(&scratch).is_err(),
+        "the box's scratch is still attached after its delete"
+    );
+}
+
+/// T-T7.1.2, native plan step 8 (a box made and not started is taken back as made,
+/// `hex_core::hcs::TakeBack::Created`), through the records `hex node` keeps: do: make an `oci` box on a
+/// node opened as `hex node` opens one and drop the node before the box's start; then open the next node on
+/// its state folder, recover, and start the box there. Expect: the container outlives the node; the recovery
+/// takes the box back, adopted and waiting for its start, rather than removing it; its start on the next
+/// node runs its init, a program runs in it, and its delete leaves no container, record or attached scratch.
+#[test]
+fn a_recorded_nodes_oci_box_made_and_not_started_is_taken_back_as_made() {
+    let Some(lab) = Lab::new() else {
+        eprintln!("SKIP: HEX_WINDOWS_LAYERS names no image layers");
+        return;
+    };
+    let _one = one_at_a_time();
+    let state = tempfile::tempdir().unwrap();
+    let id = BoxId::new("hex-oci-made").unwrap();
+    let spec = lab.spec(id.clone(), Bounds::default());
+    let markers = state.path().join("keeper").join("boxes");
+    let marker = markers.join(format!("{id}.scratch.json"));
+    let scratch = lab
+        .root
+        .path()
+        .join(format!("scratch-{id}"))
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let _left = Leftover {
+        id: &id,
+        markers: &markers,
+    };
+    let _keepers = Keepers(state.path().join("keeper"));
+    let node = recorded(&lab, state.path());
+    node.create(spec).expect("create");
+    drop(node);
+    outlived(&id);
+    let node = recorded(&lab, state.path());
+    let summary = node.recover().expect("the next node recovers");
+    assert_eq!(summary.adopted, std::slice::from_ref(&id), "{summary:?}");
+    let info = node.inspect(&id).expect("inspect");
+    assert_eq!(
+        (info.state, info.adopted),
+        (BoxState::Created, true),
+        "{info:?}"
+    );
+    node.start(&id).expect("the next node starts the box");
+    assert_eq!(node.inspect(&id).expect("inspect").state, BoxState::Running);
+    let after = run(&node, &lab, &id, &["say", "after"]);
+    assert_eq!(after.0, Exit::Code(0), "{after:?}");
+    node.delete(&id).expect("delete");
+    assert!(!hcs_holds(&id), "HCS still holds {id} after its delete");
+    assert!(!marker.exists(), "the box's record outlived its delete");
+    assert!(
+        oci::sys::layer_mount_path(&scratch).is_err(),
+        "the box's scratch is still attached after its delete"
+    );
+}
+
+/// T-T7.1.2, native plan step 8 (recovery "cleans up each ended one ... and leaves nothing of an ended
+/// box"), through the records `hex node` keeps: do: make and start an `oci` box on a node opened as `hex
+/// node` opens one and drop the node; end the box's init while no node runs, its container left running (an
+/// outliving container doesn't end with its init); then open the next node on its state folder and recover.
+/// Expect: the recovery succeeds and removes the box, whose init ended
+/// (`hex_core::hcs::Lost::InitEnded`), rather than taking back a container with no init, and leaves no
+/// container, record, attached scratch or scratch folder.
+#[test]
+fn a_recorded_nodes_oci_box_whose_init_ended_with_no_node_is_removed_by_the_next_nodes_recovery() {
+    let Some(lab) = Lab::new() else {
+        eprintln!("SKIP: HEX_WINDOWS_LAYERS names no image layers");
+        return;
+    };
+    let _one = one_at_a_time();
+    let state = tempfile::tempdir().unwrap();
+    let id = BoxId::new("hex-oci-init-ended").unwrap();
+    let spec = lab.spec(id.clone(), Bounds::default());
+    let markers = state.path().join("keeper").join("boxes");
+    let marker = markers.join(format!("{id}.scratch.json"));
+    let folder = lab.root.path().join(format!("scratch-{id}"));
+    let scratch = folder.to_str().unwrap().to_owned();
+    let _left = Leftover {
+        id: &id,
+        markers: &markers,
+    };
+    let _keepers = Keepers(state.path().join("keeper"));
+    let node = recorded(&lab, state.path());
+    node.create(spec).expect("create");
+    node.start(&id).expect("start");
+    drop(node);
+    outlived(&id);
+    // The init ends while no node runs: the record's very process (its creation time told apart from a
+    // process given its pid since), ended as a crash ends it and waited for. The handle held on it keeps its
+    // pid from being given to another process before the end.
+    let init = oci::read_marker(&marker)
+        .expect("the box's record")
+        .init
+        .expect("a started box's record names its init");
+    let process = hex_runtime::windows::sys::open_process(init.pid)
+        .expect("opening the box's init")
+        .expect("the box's init runs");
+    assert_eq!(
+        hex_runtime::windows::sys::created(&process).expect("its creation time"),
+        init.created,
+        "the init's pid is another process's"
+    );
+    let ended = std::process::Command::new("taskkill")
+        .args(["/PID", &init.pid.to_string(), "/F"])
+        .output()
+        .expect("taskkill");
+    assert!(
+        ended.status.success(),
+        "taskkill didn't end the box's init: {ended:?}"
+    );
+    let patience = u32::try_from(conformance::PATIENCE.as_millis()).unwrap();
+    assert!(
+        hex_runtime::windows::sys::wait(&process, patience).expect("waiting for the init"),
+        "the box's init still runs {:?} after it was ended",
+        conformance::PATIENCE
+    );
+    drop(process);
+    assert!(
+        oci::sys::open_system(id.as_str())
+            .expect("asking HCS for the box's container")
+            .is_some(),
+        "the box's container ended with its init"
+    );
+    let node = recorded(&lab, state.path());
+    let summary = node.recover().expect("the next node recovers");
+    let removed: Vec<&BoxId> = summary.removed.iter().map(|(id, _)| id).collect();
+    assert_eq!(removed, [&id], "{summary:?}");
+    assert!(summary.adopted.is_empty(), "{summary:?}");
+    assert!(
+        matches!(node.inspect(&id), Err(Refusal::NoSuchBox(_))),
+        "the removed box is still listed"
+    );
+    assert!(
+        !hcs_holds(&id),
+        "HCS still holds {id} after its recovery removed it"
+    );
+    assert!(!marker.exists(), "the box's record outlived its removal");
+    assert!(
+        oci::sys::layer_mount_path(&scratch).is_err(),
+        "the box's scratch is still attached after its removal"
+    );
+    assert!(
+        !folder.exists(),
+        "the box's scratch folder outlived its removal"
+    );
+}
+
+/// A `hex node` of this build on `dir` (its state `dir\state`, its socket `dir\node.sock`), as
+/// tests/windows_node_recovery.rs starts one; dropped, it is ended by `TerminateProcess` (std's kill on
+/// Windows), as a crash ends it.
+struct HexNode {
+    child: std::process::Child,
+    socket: PathBuf,
+}
+
+impl HexNode {
+    fn start(dir: &Path) -> Self {
+        let socket = dir.join("node.sock");
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_hex"))
+            .arg("node")
+            .arg("--socket")
+            .arg(&socket)
+            .arg("--state")
+            .arg(dir.join("state"))
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("start hex node");
+        let mut line = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(child.stdout.take().unwrap()),
+            &mut line,
+        )
+        .unwrap();
+        assert_eq!(line.trim(), format!("ready {}", socket.display()));
+        Self { child, socket }
+    }
+
+    fn client(&self) -> hex_client::Client {
+        hex_client::Client::connect(&self.socket).expect("connect to hex node")
+    }
+}
+
+impl Drop for HexNode {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// T-T7.1.2, native plan step 8 ("a box still alive is taken back, as on Linux"), through `hex node`
+/// itself: do: start `hex node` on a state folder, make and start an `oci` box through its socket, and kill
+/// the node (`TerminateProcess`), as a crash ends it; then start `hex node` again on the same state folder.
+/// Expect: the container outlives the node; the next node takes the box back, adopted and running; a program
+/// runs in it through the socket (its exit code its own); and its delete leaves no container, record or
+/// attached scratch. The program's stdio is the null device: a Windows client lends no handles through the
+/// socket until the stdio record's winner carries them.
+#[test]
+fn an_oci_box_outlives_a_killed_hex_node_and_the_next_takes_it_back() {
+    let Some(lab) = Lab::new() else {
+        eprintln!("SKIP: HEX_WINDOWS_LAYERS names no image layers");
+        return;
+    };
+    let _one = one_at_a_time();
+    let dir = tempfile::tempdir().unwrap();
+    let id = BoxId::new("hex-oci-node").unwrap();
+    let spec = lab.spec(id.clone(), Bounds::default());
+    let keeping = dir.path().join("state").join("keeper");
+    let markers = keeping.join("boxes");
+    let marker = markers.join(format!("{id}.scratch.json"));
+    let scratch = lab
+        .root
+        .path()
+        .join(format!("scratch-{id}"))
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let _left = Leftover {
+        id: &id,
+        markers: &markers,
+    };
+    let _keepers = Keepers(keeping.clone());
+    let node = HexNode::start(dir.path());
+    let client = node.client();
+    client.create(spec).expect("create");
+    client.start(&id).expect("start");
+    drop(client);
+    drop(node);
+    outlived(&id);
+    let node = HexNode::start(dir.path());
+    let client = node.client();
+    let info = client
+        .inspect(&id)
+        .expect("the next node takes the box back");
+    assert_eq!(
+        (info.state, info.adopted),
+        (BoxState::Running, true),
+        "{info:?}"
+    );
+    let mut program = client
+        .exec(&id, lab.program(&Act::Fail(3)), Stdio::null())
+        .expect("exec");
+    let exit = program
+        .wait_for(conformance::PATIENCE)
+        .expect("wait")
+        .expect("the program ends");
+    assert_eq!(exit, Exit::Code(3));
+    client.delete(&id).expect("delete");
+    assert!(!hcs_holds(&id), "HCS still holds {id} after its delete");
+    assert!(!marker.exists(), "the box's record outlived its delete");
+    assert!(
+        oci::sys::layer_mount_path(&scratch).is_err(),
+        "the box's scratch is still attached after its delete"
+    );
 }

@@ -7,7 +7,9 @@
 //! records kept in `--state` ([`hex_node::recorded::Recorded`]), and, where a Shards guest is configured
 //! (`SHARDS_BIN`, `HEX_GUEST_KERNEL`, `HEX_GUEST_INITRD`, ...,
 //! [`hex_runtime::guest::GuestConfig::from_env`]), Linux images in that guest, booted before the node
-//! accepts a box (HEX-GUEST-39); `--box-root` (cgroups) is Linux's. On Linux:
+//! accepts a box (HEX-GUEST-39); `--box-root` (cgroups) is Linux's. On Windows (native plan step 8) the
+//! node is the Windows runtime's `process` class, its boxes' records kept in `--state` as macOS's are,
+//! its socket an AF_UNIX stream on one completion port (`hex_node::serve::windows`). On Linux:
 //!
 //! It opens the node, its boxes in cgroups under `--box-root` (else in a subtree beside its own
 //! cgroup), their records under `--state` and their containers' state on tmpfs under the runtime
@@ -38,6 +40,7 @@ use hex_node::CrashPoint;
 use hex_node::Node;
 use hex_node::RecoverySummary;
 use hex_node::serve::{Host, Limits, Server};
+#[cfg(unix)]
 use rustix::process::Resource;
 
 /// Runs `hex node`'s arguments (everything after `node`); returns the exit status.
@@ -155,6 +158,7 @@ fn serve(args: &[String]) -> Result<(), (u8, String)> {
     let term =
         hex_runtime::linux::oci::sys::forward_signals(&[rustix::process::Signal::TERM.as_raw()])
             .map_err(|e| (1, format!("reading SIGTERM: {e}")))?;
+    #[cfg(unix)]
     raise_descriptor_limit().map_err(failed)?;
     // The state's disk is what the boxes' io bounds apply to, so it exists before the node looks.
     std::fs::create_dir_all(&args.state)
@@ -418,10 +422,45 @@ fn refused_pool(counts: &Counts) -> Option<String> {
     })
 }
 
+/// The Windows node: the `process` and `oci` classes, its boxes outliving it through a keeper (`hex keep`,
+/// started apart from the node and holding a second handle to each box's job), their records in `--state`,
+/// taken back or cleaned up after a crash (T-T7.1.2, native plan step 8). The node and the box jobs are
+/// named for the state folder, so the next node on the same `--state` finds and takes back the keeper and
+/// the boxes. `--box-root` is Linux's.
+#[cfg(windows)]
+fn host(args: &Args) -> Result<Hosted, (u8, String)> {
+    use hex_node::recorded::Recorded;
+    use hex_runtime::windows::{WinRuntime, keeper};
+    let failed = |e: Refusal| (1, e.to_string());
+    if args.box_root.is_some() {
+        return Err((
+            2,
+            format!("--box-root names a cgroup directory, which is Linux's\n{USAGE}"),
+        ));
+    }
+    let exe = std::env::current_exe()
+        .map_err(|e| (1, format!("the node can't name its own binary: {e}")))?;
+    // `hex keep`, started by the runtime with its state folder and ready path in the environment.
+    let keep = vec![exe.to_string_lossy().into_owned(), "keep".to_owned()];
+    let keeper_dir = args.state.join("keeper");
+    let name = keeper::node_name(&keeper_dir);
+    let runtime = WinRuntime::outliving(&name, &keeper_dir, &keep).map_err(failed)?;
+    let node = Recorded::open(runtime, &args.state).map_err(failed)?;
+    say_recovered(&node.recover().map_err(failed)?);
+    let platform = hex_node::serve::windows::platform().map_err(failed)?;
+    Ok(Hosted {
+        host: Arc::new(node),
+        limits: hex_node::serve::limits(&platform),
+        workers: platform.threads,
+    })
+}
+
 /// Raises the soft limit on open descriptors to the hard one: each connection and watched program
 /// holds descriptors, and a service's soft limit stays 1,024 for `select(2)`'s sake while its hard
 /// limit is 524,288 (systemd-system.conf(5), `DefaultLimitNOFILE=`), which a program that needs
 /// more raises its soft limit to.
+#[cfg(unix)]
+#[cfg(unix)]
 fn raise_descriptor_limit() -> Result<(), Refusal> {
     let limit = rustix::process::getrlimit(Resource::Nofile);
     if limit.current < limit.maximum {

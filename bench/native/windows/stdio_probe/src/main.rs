@@ -9,7 +9,8 @@
 //!   naming the handle to it over the connection.
 //! `bench` runs the node and one caller, which asks for a stream of `bytes` from each candidate in turn, the
 //! order rotated each round, and prints a CSV row per stream: the time to its first byte and to its last,
-//! and the machine's CPU load over the round. `refuse` runs a second process of the caller's user against
+//! and the machine's CPU load over the round. Each stream is read to the bytes asked for, never to its end,
+//! which afunix.sys doesn't always deliver (`receive`). `refuse` runs a second process of the caller's user against
 //! the two candidates that have a node-facing door (`conn`, `pipe`), and says whether the node refused it.
 //! A probe, outside Hex's workspace: its `unsafe` is the Win32 calls only.
 
@@ -24,21 +25,25 @@ use std::time::Instant;
 mod endwait;
 mod iocp;
 mod other;
+mod peerclose;
 
 use shards_afunix::{UnixListener, UnixStream};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, DuplicateHandle, FILETIME, GENERIC_READ,
-    HANDLE, INVALID_HANDLE_VALUE,
+    CloseHandle, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, DuplicateHandle, FILETIME,
+    GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Networking::WinSock::{SOCKET, WSAIoctl};
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FlushFileBuffers, OPEN_EXISTING, PIPE_ACCESS_OUTBOUND,
+    CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FlushFileBuffers, OPEN_EXISTING,
+    PIPE_ACCESS_OUTBOUND,
 };
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, CreatePipe, DisconnectNamedPipe, GetNamedPipeClientProcessId,
-    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, CreatePipe, DisconnectNamedPipe,
+    GetNamedPipeClientProcessId, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetSystemTimes, OpenProcess, PROCESS_DUP_HANDLE};
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, GetSystemTimes, OpenProcess, PROCESS_DUP_HANDLE,
+};
 
 /// SIO_AF_UNIX_GETPEERPID: _WSAIOR(IOC_VENDOR, 256), afunix.h.
 const SIO_AF_UNIX_GETPEERPID: u32 = 0x5800_0100;
@@ -50,17 +55,37 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("bench") => bench(arg(&args, 1, 300), arg(&args, 2, 4 << 20)),
-        Some("caller") => caller(Path::new(&args[1]), arg(&args, 2, 300), arg(&args, 3, 4 << 20)),
+        Some("caller") => caller(
+            Path::new(&args[1]),
+            arg(&args, 2, 300),
+            arg(&args, 3, 4 << 20),
+        ),
         Some("refuse") => refuse(),
         Some("iocp") => iocp::iocp(),
-        Some("intrude") => intrude(&args[1], &args[2], &args[3], args.get(4).map(String::as_str)),
+        Some("intrude") => intrude(
+            &args[1],
+            &args[2],
+            &args[3],
+            args.get(4).map(String::as_str),
+        ),
         Some("refuse-as") => other::refuse_as(&args[1], args.get(2).map(String::as_str)),
         Some("knock") => other::knock(&args[1], &args[2]),
         Some("endwait") => endwait::endwait(arg(&args, 1, 300)),
+        Some("peerclose") => peerclose::peerclose(
+            arg(&args, 1, 299),
+            std::time::Duration::from_millis(arg(&args, 2, 1000) as u64),
+        ),
+        Some("peerclose-caller") => peerclose::caller(
+            Path::new(&args[1]),
+            arg(&args, 2, 299),
+            std::time::Duration::from_millis(arg(&args, 3, 2000) as u64),
+        ),
         Some("linger") => loop {
             std::thread::sleep(std::time::Duration::from_secs(3600));
         },
-        _ => eprintln!("usage: stdio_probe bench <rounds> <bytes> | refuse | iocp | refuse-as <user> [node socket] (password on stdin) | endwait <rounds>"),
+        _ => eprintln!(
+            "usage: stdio_probe bench <rounds> <bytes> | refuse | iocp | refuse-as <user> [node socket] (password on stdin) | endwait <rounds> | peerclose <rounds> [watch_ms]"
+        ),
     }
 }
 
@@ -73,7 +98,11 @@ fn socket_path() -> PathBuf {
 }
 
 fn spawn(args: &[&str]) -> Child {
-    Command::new(std::env::current_exe().unwrap()).args(args).stdout(Stdio::inherit()).spawn().unwrap()
+    Command::new(std::env::current_exe().unwrap())
+        .args(args)
+        .stdout(Stdio::inherit())
+        .spawn()
+        .unwrap()
 }
 
 /// The node: serves one caller's requests until it closes its connection.
@@ -81,7 +110,12 @@ fn bench(rounds: usize, bytes: usize) {
     let path = socket_path();
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path).unwrap();
-    let mut child = spawn(&["caller", path.to_str().unwrap(), &rounds.to_string(), &bytes.to_string()]);
+    let mut child = spawn(&[
+        "caller",
+        path.to_str().unwrap(),
+        &rounds.to_string(),
+        &bytes.to_string(),
+    ]);
     let (mut ctl, ()) = listener.accept().unwrap();
     let caller = peer_pid(&ctl);
     let payload = vec![0x5au8; CHUNK];
@@ -97,7 +131,10 @@ fn bench(rounds: usize, bytes: usize) {
 fn request(ctl: &mut UnixStream) -> Option<(u8, usize)> {
     let mut b = [0u8; 9];
     ctl.read_exact(&mut b).ok()?;
-    Some((b[0], u64::from_le_bytes(b[1..9].try_into().unwrap()) as usize))
+    Some((
+        b[0],
+        u64::from_le_bytes(b[1..9].try_into().unwrap()) as usize,
+    ))
 }
 
 /// One stream of `size` bytes to the caller through candidate `c`. `intruder`, in `refuse`, is told the
@@ -128,7 +165,11 @@ fn serve(
         }
         "conn" => {
             *n += 1;
-            let token = format!("{:016x}{:08x}", std::process::id() as u64 * 7919 + *n as u64, *n);
+            let token = format!(
+                "{:016x}{:08x}",
+                std::process::id() as u64 * 7919 + *n as u64,
+                *n
+            );
             // In `refuse`, the intruder gets the token first and its connection is taken before the
             // caller is told it, so the node's check is what stands between it and the stream.
             if let Some(f) = intruder {
@@ -170,7 +211,11 @@ fn serve(
                         null(),
                     )
                 };
-                assert!(h != INVALID_HANDLE_VALUE, "CreateNamedPipeW: {}", std::io::Error::last_os_error());
+                assert!(
+                    h != INVALID_HANDLE_VALUE,
+                    "CreateNamedPipeW: {}",
+                    std::io::Error::last_os_error()
+                );
                 // The pipe exists now: in `refuse` the intruder is told its name first, else the caller.
                 let mut intruding = None;
                 if tried {
@@ -210,7 +255,11 @@ fn serve(
             assert!(unsafe { CreatePipe(&mut r, &mut w, null(), CHUNK as u32) } != 0);
             // SAFETY: opens the caller's process for duplicating a handle into it.
             let proc = unsafe { OpenProcess(PROCESS_DUP_HANDLE, 0, caller) };
-            assert!(!proc.is_null(), "OpenProcess: {}", std::io::Error::last_os_error());
+            assert!(
+                !proc.is_null(),
+                "OpenProcess: {}",
+                std::io::Error::last_os_error()
+            );
             let mut theirs: HANDLE = null_mut();
             // SAFETY: r is ours and is closed by the duplication; theirs is the caller's handle value.
             let ok = unsafe {
@@ -224,10 +273,15 @@ fn serve(
                     DUPLICATE_SAME_ACCESS | DUPLICATE_CLOSE_SOURCE,
                 )
             };
-            assert!(ok != 0, "DuplicateHandle: {}", std::io::Error::last_os_error());
+            assert!(
+                ok != 0,
+                "DuplicateHandle: {}",
+                std::io::Error::last_os_error()
+            );
             // SAFETY: proc was opened above.
             unsafe { CloseHandle(proc) };
-            ctl.write_all(&(theirs as usize as u64).to_le_bytes()).unwrap();
+            ctl.write_all(&(theirs as usize as u64).to_le_bytes())
+                .unwrap();
             // SAFETY: w is ours; File takes it over and closes it, which ends the caller's read.
             let mut f = unsafe { File::from_raw_handle(w as _) };
             write_n(&mut f, size, payload);
@@ -277,7 +331,11 @@ fn peer_pid(s: &UnixStream) -> u32 {
             None,
         )
     };
-    assert!(rc == 0, "SIO_AF_UNIX_GETPEERPID: {}", std::io::Error::last_os_error());
+    assert!(
+        rc == 0,
+        "SIO_AF_UNIX_GETPEERPID: {}",
+        std::io::Error::last_os_error()
+    );
     pid
 }
 
@@ -316,7 +374,8 @@ fn caller(path: &Path, rounds: usize, bytes: usize) {
     let mut buf = vec![0u8; CHUNK];
     // The load over the last second at each round's end (a round is milliseconds, finer than the ~15 ms
     // tick GetSystemTimes counts in): samples kept back to the newest at least a second old.
-    let mut samples: std::collections::VecDeque<(Instant, u64, u64)> = std::collections::VecDeque::new();
+    let mut samples: std::collections::VecDeque<(Instant, u64, u64)> =
+        std::collections::VecDeque::new();
     for r in 0..rounds {
         let mut rows = Vec::new();
         for k in 0..CANDIDATES.len() {
@@ -324,8 +383,7 @@ fn caller(path: &Path, rounds: usize, bytes: usize) {
             let t0 = Instant::now();
             ctl.write_all(&[c as u8]).unwrap();
             ctl.write_all(&(bytes as u64).to_le_bytes()).unwrap();
-            let (first, got) = receive(&mut ctl, path, c, &mut buf, t0);
-            let last = t0.elapsed();
+            let (first, last, got) = receive(&mut ctl, path, c, bytes, &mut buf, t0);
             assert_eq!(got, bytes, "{} gave {got} of {bytes}", CANDIDATES[c]);
             rows.push((c, first, last));
         }
@@ -343,46 +401,65 @@ fn caller(path: &Path, rounds: usize, bytes: usize) {
     }
 }
 
-/// Reads one stream: when its first byte came, and how many bytes in all.
+/// Reads one stream of the `want` bytes the caller asked for: when its first byte came, when its last did,
+/// and how many came. No stream's end is waited for: a `conn` stream's end is its connection's graceful
+/// close, which afunix.sys now and then never delivers to a read in another process (the hostile-frame
+/// finding of docs/design/runtime.md; ~1 in 100 `conn` streams on a quiet jupiter, 2026-11-09, each with
+/// its bytes all in), so a round that waited for it hung.
 fn receive(
     ctl: &mut UnixStream,
     path: &Path,
     c: usize,
+    want: usize,
     buf: &mut [u8],
     t0: Instant,
-) -> (std::time::Duration, usize) {
+) -> (std::time::Duration, std::time::Duration, usize) {
     let mut first = None;
     let mut got = 0usize;
-    let mut drain = |r: &mut dyn Read, first: &mut Option<std::time::Duration>, got: &mut usize| loop {
-        let k = r.read(buf).unwrap();
-        if k == 0 {
-            break;
-        }
-        first.get_or_insert_with(|| t0.elapsed());
-        *got += k;
-    };
-    match CANDIDATES[c] {
-        "framed" => loop {
-            let mut l = [0u8; 4];
-            ctl.read_exact(&mut l).unwrap();
-            let k = u32::from_le_bytes(l) as usize;
+    let mut drain = |r: &mut dyn Read, first: &mut Option<std::time::Duration>, got: &mut usize| {
+        while *got < want {
+            let room = buf.len().min(want - *got);
+            let k = r.read(&mut buf[..room]).unwrap();
             if k == 0 {
                 break;
             }
-            ctl.read_exact(&mut buf[..k]).unwrap();
             first.get_or_insert_with(|| t0.elapsed());
-            got += k;
-        },
+            *got += k;
+        }
+    };
+    let last = match CANDIDATES[c] {
+        "framed" => {
+            let mut last = None;
+            loop {
+                let mut l = [0u8; 4];
+                ctl.read_exact(&mut l).unwrap();
+                let k = u32::from_le_bytes(l) as usize;
+                if k == 0 {
+                    // The end, a frame on the control connection: read, as the protocol has it, after the
+                    // last byte's time is taken.
+                    break;
+                }
+                ctl.read_exact(&mut buf[..k]).unwrap();
+                first.get_or_insert_with(|| t0.elapsed());
+                got += k;
+                if got >= want {
+                    last.get_or_insert_with(|| t0.elapsed());
+                }
+            }
+            last.unwrap_or_else(|| t0.elapsed())
+        }
         "conn" => {
             let token = recv_str(ctl);
             let mut s = UnixStream::connect(path).unwrap();
             s.write_all(token.as_bytes()).unwrap();
             drain(&mut s, &mut first, &mut got);
+            t0.elapsed()
         }
         "pipe" => {
             let name = recv_str(ctl);
             let mut f = open_pipe(&name).unwrap();
             drain(&mut f, &mut first, &mut got);
+            t0.elapsed()
         }
         "dup" => {
             let mut h = [0u8; 8];
@@ -390,16 +467,27 @@ fn receive(
             // SAFETY: the node duplicated this handle into this process for this read; File owns it now.
             let mut f = unsafe { File::from_raw_handle(u64::from_le_bytes(h) as usize as _) };
             drain(&mut f, &mut first, &mut got);
+            t0.elapsed()
         }
         _ => unreachable!(),
-    }
-    (first.unwrap_or_default(), got)
+    };
+    (first.unwrap_or_default(), last, got)
 }
 
 fn open_pipe(name: &str) -> std::io::Result<File> {
     let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
     // SAFETY: wide is a NUL-terminated name alive for the call.
-    let h = unsafe { CreateFileW(wide.as_ptr(), GENERIC_READ, 0, null(), OPEN_EXISTING, 0, null_mut()) };
+    let h = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_READ,
+            0,
+            null(),
+            OPEN_EXISTING,
+            0,
+            null_mut(),
+        )
+    };
     if h == INVALID_HANDLE_VALUE {
         return Err(std::io::Error::last_os_error());
     }
@@ -424,18 +512,40 @@ fn refuse() {
         assert_eq!(peer_pid(&ctl), me);
         let p = path.to_str().unwrap().to_owned();
         let name = CANDIDATES[c as usize];
-        let intruder = move |door: &str| -> Box<dyn Waits> { Box::new(spawn(&["intrude", name, &p, door])) };
+        let intruder =
+            move |door: &str| -> Box<dyn Waits> { Box::new(spawn(&["intrude", name, &p, door])) };
         let served = std::thread::scope(|sc| {
             let h = sc.spawn(|| {
                 let mut buf = vec![0u8; CHUNK];
-                receive(&mut mine, &path, c as usize, &mut buf, Instant::now()).1
+                receive(
+                    &mut mine,
+                    &path,
+                    c as usize,
+                    1 << 20,
+                    &mut buf,
+                    Instant::now(),
+                )
+                .2
             });
-            let refused = serve(&listener, &mut ctl, me, c, 1 << 20, &payload, &mut n, Some(&intruder));
+            let refused = serve(
+                &listener,
+                &mut ctl,
+                me,
+                c,
+                1 << 20,
+                &payload,
+                &mut n,
+                Some(&intruder),
+            );
             (refused, h.join().unwrap())
         });
         println!(
             "refuse {name}: a second process of the caller's user {} ; the caller got {} of {} bytes",
-            if served.0 { "was REFUSED" } else { "WAS NOT REFUSED" },
+            if served.0 {
+                "was REFUSED"
+            } else {
+                "WAS NOT REFUSED"
+            },
             served.1,
             1 << 20
         );
@@ -465,7 +575,9 @@ fn intrude(candidate: &str, path: &str, door: &str, result: Option<&str>) {
                 s.read(&mut buf)
             })
             .unwrap_or(0),
-        "pipe" => open_pipe(door).and_then(|mut f| f.read(&mut buf)).unwrap_or(0),
+        "pipe" => open_pipe(door)
+            .and_then(|mut f| f.read(&mut buf))
+            .unwrap_or(0),
         _ => 0,
     };
     let line = format!("intruder {candidate}: read {got} bytes");

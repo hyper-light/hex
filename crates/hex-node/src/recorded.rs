@@ -375,6 +375,44 @@ fn group(trace: Option<ProcId>) -> Option<(i32, u64)> {
     trace.and_then(|t| Some((i32::try_from(t.pid).ok()?, t.start_ticks)))
 }
 
+/// The Windows node's boxes outlive it (native plan step 8, the decision "the Windows node, on one completion
+/// port"): each box's job is named for the node and the box and held by the node's keeper as well as the
+/// node, and an `oci` box's container outlives the node with it. The next node takes back each box its
+/// records name that is still there, and removes the rest with what is left of them.
+#[cfg(windows)]
+impl Recover for hex_runtime::windows::WinRuntime {
+    fn trace(&self, _id: &BoxId) -> Result<Option<ProcId>, Refusal> {
+        Ok(None)
+    }
+
+    /// For an `oci` box, whether its take-back would take it: its container still held by HCS, and its
+    /// init the very process its record names, still running, or not yet started
+    /// ([`hex_runtime::windows::WinRuntime::alive`]); a box whose init ended while no node ran is removed,
+    /// its container with it.
+    fn alive(&self, spec: &BoxSpec) -> Result<Option<bool>, Refusal> {
+        hex_runtime::windows::WinRuntime::alive(self, spec)
+    }
+
+    /// Takes box `spec` back on this node: a `process` box by its named job, an `oci` box with its
+    /// container, scratch and init ([`hex_runtime::windows::WinRuntime::adopt`]). A box's job is named for
+    /// the node and the box, so it needs no per-process trace to find.
+    fn adopt(&self, spec: &BoxSpec, _trace: Option<ProcId>) -> Result<(), Refusal> {
+        hex_runtime::windows::WinRuntime::adopt(self, spec)
+    }
+
+    /// Windows ends a box recovery removes by its name, in [`Recover::discard`], which has its spec; a
+    /// trace names nothing of a Windows box.
+    fn end(&self, _trace: Option<ProcId>) -> Result<(), Refusal> {
+        Ok(())
+    }
+
+    /// Ends box `spec` a recovery removes: its named job's members, and an `oci` box's container, scratch
+    /// and record ([`hex_runtime::windows::WinRuntime::end`]).
+    fn discard(&self, spec: &BoxSpec) -> Result<(), Refusal> {
+        hex_runtime::windows::WinRuntime::end(self, &spec.id)
+    }
+}
+
 /// A node whose Linux images are its Shards guest's: its `process` boxes are taken back through the host's
 /// runtime. Its `oci` boxes live in its guest, which outlives the node's crash and which the node takes back
 /// when it starts (`GuestRuntime::recorded_at`): one the guest holds is taken back as it is, and one it

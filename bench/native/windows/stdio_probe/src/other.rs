@@ -138,7 +138,10 @@ pub fn refuse_as(user: &str, node: Option<&str>) {
     // neither (base64 and four characters, other_user.ps1).
     let given = pass.trim_start_matches('\u{feff}').trim();
     // Its length alone, so a password the pipe changed shows without the password being printed.
-    println!("refuse-as: a password of {} characters came on stdin", given.chars().count());
+    println!(
+        "refuse-as: a password of {} characters came on stdin",
+        given.chars().count()
+    );
     let password = wide(given);
     drop(pass);
     let dir = PathBuf::from(std::env::var("HEX_PROBE_DIR").expect("HEX_PROBE_DIR"));
@@ -185,7 +188,15 @@ pub fn refuse_as(user: &str, node: Option<&str>) {
         let served = std::thread::scope(|sc| {
             let h = sc.spawn(|| {
                 let mut buf = vec![0u8; CHUNK];
-                receive(&mut mine, &path, c as usize, &mut buf, Instant::now()).1
+                receive(
+                    &mut mine,
+                    &path,
+                    c as usize,
+                    1 << 20,
+                    &mut buf,
+                    Instant::now(),
+                )
+                .2
             });
             let refused = serve(
                 &listener,

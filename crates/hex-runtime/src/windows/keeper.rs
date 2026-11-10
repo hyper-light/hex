@@ -10,9 +10,9 @@
 //!   in a job no one can open.
 //!
 //! The keeper does nothing itself: the node duplicates job handles into it (`sys::duplicate_into`) and
-//! closes them there on delete (`sys::close_in`). It waits until its node ends or it is told to stop, then
-//! holds the handles for a bound time for the next node to take them, and exits. It is `hex keep`, started
-//! by the node ([`super::WinRuntime`]); this module is the keeper's body and the node's handle on it.
+//! closes them there on delete (`sys::close_in`). It holds them, with no timer, until its stop is asked. It
+//! is `hex keep`, started by the node ([`super::WinRuntime`]); this module is the keeper's body and the
+//! node's handle on it.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -78,13 +78,25 @@ pub fn run(args: &Args) -> Result<(), Refusal> {
 /// The keeper's stop event's name, one per state folder (`Local\hex-keep-<hash of path>-stop`): the node
 /// and its keeper reach the same event by the folder they share.
 fn stop_name(state: &Path) -> Vec<u16> {
-    let mut h: u64 = 1469598103934665603;
-    for b in state.to_string_lossy().bytes() {
-        h = (h ^ u64::from(b)).wrapping_mul(1099511628211);
-    }
-    format!("Local\\hex-keep-{h:016x}-stop\0")
+    format!("Local\\hex-keep-{:016x}-stop\0", path_hash(state))
         .encode_utf16()
         .collect()
+}
+
+/// A name for the node keeping its state in `dir`, apart from another node's in the session: a hash of the
+/// folder, so the same node (the same state folder) names the same box jobs across its restarts, and hex,
+/// so it is safe in a job object's name (`Local\hex-<node>-<box>`, [`super::WinRuntime::job_name`]).
+pub fn node_name(dir: &Path) -> String {
+    format!("{:016x}", path_hash(dir))
+}
+
+/// FNV-1a of a path's bytes, for the names a node and its keeper derive from the folder they share.
+fn path_hash(p: &Path) -> u64 {
+    let mut h: u64 = 1469598103934665603;
+    for b in p.to_string_lossy().bytes() {
+        h = (h ^ u64::from(b)).wrapping_mul(1099511628211);
+    }
+    h
 }
 
 fn write_ready(path: &Path, pid: u32, created: u64) -> io::Result<()> {
@@ -166,24 +178,52 @@ pub fn keeper_file(state: &Path) -> PathBuf {
     state.join("keeper.owner")
 }
 
-/// The file holding the handle value of box `id`'s job inside the keeper, so a delete or a restart can
-/// close or re-duplicate it.
+/// The file holding box `id`'s job inside the keeper: which keeper holds it (its pid and creation time) and
+/// the handle's value there, so a delete or a restart can close or re-duplicate it. The keeper is named
+/// because a handle value means nothing in another keeper: a node that finds a value recorded against a
+/// keeper that isn't its current one must re-duplicate the job into the one it has ([`super::WinRuntime`]).
 pub fn held_file(state: &Path, id: &str) -> PathBuf {
     state.join(format!("held-{id}"))
 }
 
-/// Writes box `id`'s keeper handle value (`held_file`).
-pub fn write_held(state: &Path, id: &str, value: usize) -> io::Result<()> {
-    std::fs::write(held_file(state, id), value.to_string())
+/// Box `id`'s job in the keeper: which keeper holds it, and its handle value there.
+pub struct Held {
+    pub keeper_pid: u32,
+    pub keeper_created: u64,
+    pub value: usize,
 }
 
-/// Box `id`'s keeper handle value, if recorded.
-pub fn read_held(state: &Path, id: &str) -> Option<usize> {
-    std::fs::read_to_string(held_file(state, id))
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
+impl Held {
+    /// Whether the keeper of pid `pid` and creation time `created` is the one holding this value.
+    pub fn held_by(&self, pid: u32, created: u64) -> bool {
+        self.keeper_pid == pid && self.keeper_created == created
+    }
+}
+
+/// Records box `id`'s job held by the keeper `keeper_pid` (creation time `keeper_created`) at handle
+/// `value` (`held_file`).
+pub fn write_held(
+    state: &Path,
+    id: &str,
+    keeper_pid: u32,
+    keeper_created: u64,
+    value: usize,
+) -> io::Result<()> {
+    std::fs::write(
+        held_file(state, id),
+        format!("{keeper_pid} {keeper_created} {value}"),
+    )
+}
+
+/// Box `id`'s recorded keeper handle, if any: which keeper holds it and its value there.
+pub fn read_held(state: &Path, id: &str) -> Option<Held> {
+    let text = std::fs::read_to_string(held_file(state, id)).ok()?;
+    let mut p = text.split_whitespace();
+    Some(Held {
+        keeper_pid: p.next()?.parse().ok()?,
+        keeper_created: p.next()?.parse().ok()?,
+        value: p.next()?.parse().ok()?,
+    })
 }
 
 /// Forgets box `id`'s keeper handle value (its job closed in the keeper).

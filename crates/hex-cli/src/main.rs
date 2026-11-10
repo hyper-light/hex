@@ -33,13 +33,24 @@ fn main() -> ExitCode {
         return ExitCode::from(hex_runtime::windows::oci::launch::serve());
     }
     // `hex node --socket …` serves the Runtime seam on the node agent's local socket.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     if let [Some(first), rest @ ..] = args.as_slice()
         && first == "node"
         && rest.iter().all(Option::is_some)
     {
         let rest: Vec<String> = rest.iter().flatten().cloned().collect();
         return ExitCode::from(hex_cli::node::main(&rest));
+    }
+    // `hex keep` is the Windows node's keeper, a passive process holding its boxes' job handles so they
+    // outlive the node (hex_runtime::windows::keeper); it takes its state folder and ready path from the
+    // environment the node starts it with.
+    #[cfg(windows)]
+    if let [Some(first), rest @ ..] = args.as_slice()
+        && first == "keep"
+        && rest.iter().all(Option::is_some)
+    {
+        let rest: Vec<String> = rest.iter().flatten().cloned().collect();
+        return ExitCode::from(hex_cli::keep(&rest));
     }
     // The `oci` class's command line and its re-exec'd container init (Linux only).
     #[cfg(target_os = "linux")]

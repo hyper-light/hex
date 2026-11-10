@@ -26,6 +26,7 @@ hex-testkit = { path = "crates/hex-testkit", version = "0.1.0" }
 hex-sim = { path = "crates/hex-sim", version = "0.1.0" }
 hex-health = { path = "crates/hex-health", version = "0.1.0" }
 hex-gpu = { path = "crates/hex-gpu", version = "0.1.0" }
+hex-afunix = { path = "crates/hex-afunix", version = "0.1.0" }
 # Shards' guests (docs/design/shards-guest.md §2, Appendix A): the oci class's Linux guest on macOS and
 # Windows. By name and version, patched below to a copy of Shards' draft until Shards lands it, then to
 # vendor/shards as every other vendored project (vendor/shards-api-draft/Cargo.toml says which).
@@ -57,10 +58,13 @@ ureq = "3"
 # disk's types (their calls are resolved at run time, docs/research/runtime/windows-hcs.md §7), the
 # loader, RtlGetVersion, file version resources, device interface lists and the job access rights. UI_Shell
 # and System_Com read the users folder from its known folder and free it, the oci guest's default share.
+# Networking_WinSock and System_IO are the node agent's socket: AF_UNIX streams on one completion port
+# (crates/hex-afunix).
 windows-sys = { version = "0.61.2", features = [
     "Wdk_System_SystemServices",
     "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Foundation",
+    "Win32_Networking_WinSock",
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
