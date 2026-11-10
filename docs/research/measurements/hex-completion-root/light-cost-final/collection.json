@@ -1,0 +1,47 @@
+{
+  "bytes": 182708,
+  "sha256": "4311ae1bcc4f79f39a73c10023b6bb9f962ed1cafce363928d1d4adf93c3550d",
+  "members": {
+    "cohort-5e291e07-light-v1/wire.log": {
+      "bytes": 6180,
+      "sha256": "969060df24a24a9f460905385ac6fbdd11e472f8cabf6ce2af680d2526b97602"
+    },
+    "cohort-5e291e07-light-v1/running.json": {
+      "bytes": 3156,
+      "sha256": "ad2db46dd9df890b91c35490efb16b8f7f6fb96801938af3b9c0576b081daa67"
+    },
+    "cohort-5e291e07-light-v1/result.json": {
+      "bytes": 3686,
+      "sha256": "20a857bb9b815b06230a257e223d92c26c1e4b84e1be89dbab730f3a4a9b1449"
+    },
+    "cohort-5e291e07-light-v1/arguments.log": {
+      "bytes": 1170,
+      "sha256": "61531f4fc2f192481ec3a966e734e8b7b5c81dd2ac227d0921b7506ee560c1d6"
+    },
+    "cohort-5e291e07-light-v1/source-before.json": {
+      "bytes": 266235,
+      "sha256": "8557a432b4ebc75435bcee99aad65fe29219b53b7b2e553f9561cf1aad5f0b87"
+    },
+    "cohort-5e291e07-light-v1/source-after.json": {
+      "bytes": 266333,
+      "sha256": "808c3e13d223e3f19a06c1e5f550dda47dbe41aa58fb233a655386f7fc7fb008"
+    },
+    "cohort-5e291e07-light-v1/clippy.log": {
+      "bytes": 2807,
+      "sha256": "a5a915d0c38a7f55d5dadd5367801c8dc79fdcf6decc2946fa3396e920a48b08"
+    },
+    "cohort-5e291e07-light-v1/physical.log": {
+      "bytes": 590,
+      "sha256": "8c73b381e1da4faad694f11f29b806d4635a8aa64a56408739b94ab325849c13"
+    },
+    "cohort-5e291e07-light-v1/collected-binaries.json": {
+      "bytes": 3423,
+      "sha256": "e4091b741c1f121d89c3039f05ccb350c930a3a60cf6c784a76fa85bbae41000"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}
