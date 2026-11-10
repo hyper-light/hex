@@ -118,6 +118,13 @@ virtual-clock regression reproduces that sampling defect; its reset-after-pause
 fix is signed in a98824f7. The test was first run red at94711111 (root96a86a73),
 with requested pauses [1,2,4]ns, and passes with the reset after each pause,
 requesting [1,1,1]ns. The cold-Busy regression and focused clippy also pass.
+Root independently repeated exact guard removal/restoration in r452: removing the
+reset restored the exact96a86a73 scheduler source and failed with [1,2,4]ns
+against [1,1,1]ns (cargo101,0.18s). Restoring exact a988 source passed (cargo0,
+0.21s). The earlier r449 removed the same guard while retaining two comments;
+it also failed/passed, but is not labeled byte-identical to96a86a73. Source
+hashes, commands and logs for the exact check are retained in
+bench/sched/runtime-pools/retry-reset-root-mutation-a98824f7.json.
 
 Root r430 then replayed the unchanged real boundary fixture once in debug and
 five times in release using uninstrumented a98824f7 host binaries. All six runs

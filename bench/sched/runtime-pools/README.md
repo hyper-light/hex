@@ -155,7 +155,10 @@ Status-child joins/reaps; those diagnostic rows are explicitly forbidden seeds.
 
 Signed a98824f7 excludes a local Advertise retry's own pause from its next work
 sample. The regression was run red before the fix: virtual requested pauses grew
-[1,2,4]ns for equal work; after the reset they remain[1,1,1]ns. Root r430's
+[1,2,4]ns for equal work; after the reset they remain[1,1,1]ns. The independent
+root mutation check r452 reproduced that exact red after removing the
+reset (source equal to96a86a73), then passed after restoring a988; see
+retry-reset-root-mutation-a98824f7.json. Root r430's
 uninstrumented debug boundary and five release boundaries all passed both
 oversized refusals, both valid physical lifecycles, baseline restoration and
 guest retirement. This is bounded replay evidence, not a competitive timing claim
