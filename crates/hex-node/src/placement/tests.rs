@@ -239,6 +239,17 @@ fn crash_after_create_before_ack_recovers_the_same_physical_box_once() {
     }));
     assert_eq!(rt.creates.load(Ordering::SeqCst), 1);
     assert_eq!(rt.list().unwrap().len(), 1);
+    // The aggregate lands before the failed Running write; reboot must not observe it again.
+    assert_eq!(
+        recovered
+            .start_observations()
+            .unwrap()
+            .as_slice()
+            .iter()
+            .map(|s| s.count)
+            .sum::<u64>(),
+        1
+    );
 }
 
 /// AC-T7.4.1: failed physical creation is acknowledged Refused only after cleanup succeeded.
@@ -264,6 +275,7 @@ fn failed_create_is_cleaned_and_refused_without_started() {
     assert!(rt.list().unwrap().is_empty());
     assert_eq!(rt.deletes.load(Ordering::SeqCst), 1);
     assert!(!driver.status(key).unwrap().unwrap().local);
+    assert!(driver.start_observations().unwrap().is_empty());
 }
 
 /// AC-T7.4.1: cleanup failure retains the live reservation and never permits reassignment.
@@ -508,5 +520,29 @@ fn changed_start_payload_is_refused_before_first_create_and_on_receiver_retry() 
         driver.hear(NodeId(0), changed),
         Err(Error::Runtime(Refusal::Invalid { .. }))
     ));
+    assert_eq!(rt.creates.load(Ordering::SeqCst), 1);
+}
+
+/// AC-T7.4.1: real combined launch is observed once; replay and recovery retain the same aggregate.
+#[test]
+fn combined_launch_sample_is_persisted_once_across_duplicate_start_and_reboot() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = Arc::new(Counting::default());
+    let driver = boot(dir.path(), rt.clone());
+    let (d, p) = request();
+    let (_, step) = driver.submit(d, p).unwrap();
+    let (_, start) = step.send.into_iter().next().unwrap();
+    driver.hear(NodeId(0), start.clone()).unwrap();
+    let before = driver.start_observations().unwrap();
+    assert_eq!(before.len(), 1);
+    let measured = before.first().unwrap();
+    assert_eq!(measured.node, NodeId(0));
+    assert_eq!(measured.class, Class::Oci);
+    assert_eq!(measured.count, 1);
+    driver.hear(NodeId(0), start).unwrap();
+    assert_eq!(driver.start_observations().unwrap(), before);
+    drop(driver);
+    let recovered = boot(dir.path(), rt.clone());
+    assert_eq!(recovered.start_observations().unwrap(), before);
     assert_eq!(rt.creates.load(Ordering::SeqCst), 1);
 }
