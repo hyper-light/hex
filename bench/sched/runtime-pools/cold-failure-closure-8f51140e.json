@@ -1,0 +1,134 @@
+{
+  "cases": [
+    {
+      "aggregate": {
+        "bytes": 2398,
+        "path": "/Users/adalundhe/.cache/hex-lead/cold-census-8f51140e/receipts/cold-debug-pre-ready-actual.json",
+        "sha256": "81b6cf6ee233aba9a9cbffdb735fd790e0669cbeb7388e3cf340da3ebcf6be0b"
+      },
+      "backend_cleanup_error": null,
+      "backend_ready": false,
+      "backend_reaped": true,
+      "cleanup_error": "iteration lacks ready/class/empty-baseline and exact Stopped closure proof",
+      "cleanup_unproven": null,
+      "identity": {
+        "pid": 95900,
+        "started": 12375496430200,
+        "vsock": "/Users/adalundhe/.cache/hx/e-9ei2ro9h/guest-tmp/shards-api-1c148e7f647ed45c-0/v"
+      },
+      "injection": {
+        "case": "pre-ready",
+        "known_record": "/Users/adalundhe/.cache/hx/e-9ei2ro9h/cold-node.node-state/@guest",
+        "trigger": "actual ready line read; before parent snapshot/receipt"
+      },
+      "ledger": {
+        "bytes": 1957,
+        "path": "/Users/adalundhe/.cache/hx/e-9ei2ro9h/pids.jsonl",
+        "sha256": "71bf5c387b8be84bcea79248a52f1fdaaa7a55a2a8b83c58b4cf23686222fa1e"
+      },
+      "original_and_recovery_receipt_equal": false,
+      "original_error": "ROOT pre-ready parent receipt-boundary fault",
+      "original_finish_failure": null,
+      "raw_result": {
+        "bytes": 7175,
+        "path": "/Users/adalundhe/.cache/hx/e-9ei2ro9h/result.json",
+        "sha256": "2240b96f571994211023e7ec45e8901fa146cbe8671c71825fb89ce9523886d4"
+      },
+      "receipt": {
+        "bytes": 615,
+        "path": "/Users/adalundhe/.cache/hx/e-9ei2ro9h/cold-recovery-receipt.json",
+        "sha256": "b78dd537e59f5289bc467d30ddc331d99ef9a855af508cdc0d01e3553190203a"
+      },
+      "record": {
+        "bytes": 131,
+        "path": "/Users/adalundhe/.cache/hx/e-9ei2ro9h/cold-node.node-state/@guest",
+        "sha256": "0c2ff5c71bce04ce1798ae8635203272cfe17d22ba6a099c2b644b4e5d7cb4a4"
+      },
+      "requested_iterations": 2,
+      "retirement": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 95900,
+        "started": 12375496430200
+      },
+      "runtime": {
+        "bytes": 951,
+        "path": "/Users/adalundhe/.cache/hx/e-9ei2ro9h/runtime.json",
+        "sha256": "02639c33f7f5047394c8354fabe890aa26991bae470fa03117c576cf140f6c08"
+      },
+      "started_iterations": 1,
+      "status": "failed as injected; no next guest",
+      "stopped_identity_basis": "recovery"
+    },
+    {
+      "aggregate": {
+        "bytes": 3182,
+        "path": "/Users/adalundhe/.cache/hex-lead/cold-census-8f51140e/receipts/cold-debug-post-ready-actual.json",
+        "sha256": "b6a94b4acb7d8b24ef0425e9f6caaa6f183ca43de6318f5d597cea253a337182"
+      },
+      "backend_cleanup_error": "ROOT post-ready finish snapshot fault",
+      "backend_ready": true,
+      "backend_reaped": true,
+      "cleanup_error": "iteration lacks ready/class/empty-baseline and exact Stopped closure proof",
+      "cleanup_unproven": null,
+      "identity": {
+        "pid": 95922,
+        "started": 12375511600209,
+        "vsock": "/Users/adalundhe/.cache/hx/e-1li680se/guest-tmp/shards-api-c1c90289ab5c2bdd-0/v"
+      },
+      "injection": {
+        "case": "post-ready",
+        "trigger": "first original finish snapshot after ready/class/live capacity verification"
+      },
+      "ledger": {
+        "bytes": 4207,
+        "path": "/Users/adalundhe/.cache/hx/e-1li680se/pids.jsonl",
+        "sha256": "2d4ed2a956ba2acba896afcd793e19d4a1020f2fc538bed6668e199f28555007"
+      },
+      "original_and_recovery_receipt_equal": true,
+      "original_error": null,
+      "original_finish_failure": "ROOT post-ready finish snapshot fault",
+      "raw_result": {
+        "bytes": 7776,
+        "path": "/Users/adalundhe/.cache/hx/e-1li680se/result.json",
+        "sha256": "62b388bf049616e450e32edba9211b359147ca7cbfcd7af9c9a2a03c41174f3f"
+      },
+      "receipt": {
+        "bytes": 615,
+        "path": "/Users/adalundhe/.cache/hx/e-1li680se/owned-guest.json",
+        "sha256": "630386661255e7253fb4fc21e07d3990427d4e032430054ad4a6b22c07802469"
+      },
+      "record": {
+        "bytes": 131,
+        "path": "/Users/adalundhe/.cache/hx/e-1li680se/cold-node.node-state/@guest",
+        "sha256": "27b48116761b415ed2d5ee6e8789fe95ac8f927977c489a5f773275fb1669e6b"
+      },
+      "requested_iterations": 2,
+      "retirement": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 95922,
+        "started": 12375511600209
+      },
+      "runtime": {
+        "bytes": 951,
+        "path": "/Users/adalundhe/.cache/hx/e-1li680se/runtime.json",
+        "sha256": "1ce8ee0ef1f23d7d4e1f6cef87f9805bda2b71c9b20f904f77c80352793394fa"
+      },
+      "started_iterations": 1,
+      "status": "failed as injected; no next guest",
+      "stopped_identity_basis": "ready"
+    }
+  ],
+  "kind": "actual-cold-node-parent-boundary-failure-controls",
+  "requirement": "AC-T7.4.1; root-owned cold fixture failure closure",
+  "runner": "d1323898b255a3ed435eb83fa0f7b0cf",
+  "scope": "Actual private HVF guest/node fault controls. Injected original and generic census errors remain failures, never healthy captures. Recorded receipt/record identities reconstructed without PID discovery or live verifier API query; actual fixture separately stopped/waited each guest. No seed/CDF/full-boot/performance/workload claim.",
+  "source_revision": "8f51140ef653d0b348597b02b241cc185a4aa54e",
+  "status": "both expected failures retained; exact guest closure verified",
+  "wrapper": {
+    "bytes": 1556,
+    "path": "/Users/adalundhe/.cache/hex-lead/fixtures/scheduler-backend/cold_fault_actual_8f51140e.py",
+    "sha256": "03bc01b07ea37d6aa54550aac61e46aced4c32cb7acd847cfc83d6f79c91a1ab"
+  }
+}

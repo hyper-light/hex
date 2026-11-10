@@ -271,3 +271,15 @@ preserved. The corrected dispatch required distinct artifact hashes first.
 This is one native ARM64 parser/guard execution with real scheduler lifecycle
 checks, not an AMD64 gate, cgroup-controller integration, root lab, timing seed,
 resource-return benchmark or whole-goal completion.
+
+Root also exercised cold-node failure closure at both parent boundaries: after
+the real ready line but before its original receipt, and at the first finish
+snapshot after verified readiness. Both requested two iterations and started
+only one. Each original failure and its generic census error remained a failed
+result; exact record/receipt reconstruction confirmed the guest ended Stopped
+and the saved backend child was reaped. The post-ready original and recovery
+receipts matched completely. cold-failure-closure-8f51140e.json retains those
+errors and identities. census/cold_fault_e2e.py is the exact actual wrapper;
+use --cold-driver PATH/TO/cold_boot_census.py, --fault pre-ready or post-ready,
+then the existing cold-census arguments with --n 2 and a new output path. These
+injected-failure rows are excluded from calibration and workload success.
