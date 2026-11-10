@@ -188,7 +188,7 @@ class ColdVerifierTests(unittest.TestCase):
             fixture.verify(max_ledger_rows=1)
         campaign = fixture.parent / "campaign.json"
         campaign.write_bytes(b'{"n":1,"n":1}')
-        with self.assertRaisesRegex(verifier.Invalid, "duplicate JSON"):
+        with self.assertRaisesRegex(verifier.Invalid, "invalid JSON input"):
             fixture.verify()
         fixture.save()
         raw = fixture.roots[0] / "census/backend.tsv"
