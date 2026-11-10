@@ -1338,6 +1338,7 @@ impl Runtime for WinRuntime {
             .map_err(|_| allocation(identity.len()))?;
         id.push_str(identity);
         let report = Capacity {
+            cost: None,
             id,
             total: CapacityResources {
                 cpu_milli: cpu,
@@ -1632,6 +1633,7 @@ mod tests {
 
     fn device_spec(name: &str, key: u64) -> BoxSpec {
         BoxSpec {
+            allocation: None,
             id: BoxId::new(name).unwrap(),
             bounds: hex_api::Bounds::default(),
             owner: None,
@@ -2084,6 +2086,7 @@ mod tests {
 
     fn process_box(id: &str) -> BoxSpec {
         BoxSpec {
+            allocation: None,
             devices: Vec::new(),
             id: BoxId::new(id).unwrap(),
             bounds: hex_api::Bounds::default(),

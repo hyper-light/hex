@@ -280,6 +280,7 @@ fn the_oci_runtime_spec_validation_passes_in_the_guest_as_on_linux() {
     let node = GuestRuntime::new(guests.clone(), config);
     let id = BoxId::new("oci-validation-lab").unwrap();
     node.create(BoxSpec {
+        allocation: None,
         devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds::default(),

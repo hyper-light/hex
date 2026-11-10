@@ -1447,6 +1447,7 @@ mod create_tests {
             reclaim_failures: Vec::new(),
         };
         let spec = BoxSpec {
+            allocation: None,
             id: BoxId::new("pending-runtime").unwrap(),
             bounds: hex_api::Bounds::default(),
             owner: None,
@@ -1515,6 +1516,7 @@ mod create_tests {
         CALLS.with_borrow(|calls| assert_eq!((calls.closed, calls.cancelled), (0, 1)));
 
         let sibling = BoxSpec {
+            allocation: None,
             id: BoxId::new("independent-empty-job").unwrap(),
             bounds: hex_api::Bounds::default(),
             owner: None,

@@ -401,6 +401,7 @@ impl Lab {
             scratch,
         });
         BoxSpec {
+            allocation: None,
             id,
             bounds: self.inputs.bounds.clone(),
             class: ClassSpec::Bundle(bundle),

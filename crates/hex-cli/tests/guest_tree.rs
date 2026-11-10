@@ -280,6 +280,7 @@ impl Side for Guest {
         let _ = self.client.delete(&walker);
         self.client
             .create(BoxSpec {
+                allocation: None,
                 devices: Vec::new(),
                 id: walker.clone(),
                 bounds: Bounds::default(),
@@ -442,6 +443,7 @@ impl Guest {
         let _ = self.client.delete(&id);
         self.client
             .create(BoxSpec {
+                allocation: None,
                 devices: Vec::new(),
                 id: id.clone(),
                 bounds: Bounds::default(),

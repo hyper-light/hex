@@ -65,6 +65,175 @@ pub struct CapacityResources {
     pub disk_bytes: u64,
 }
 
+impl CapacityResources {
+    pub fn holds(self, need: Self) -> bool {
+        self.cpu_milli >= need.cpu_milli
+            && self.mem_bytes >= need.mem_bytes
+            && self.disk_bytes >= need.disk_bytes
+    }
+
+    pub fn checked_add(self, other: Self) -> Option<Self> {
+        Some(Self {
+            cpu_milli: self.cpu_milli.checked_add(other.cpu_milli)?,
+            mem_bytes: self.mem_bytes.checked_add(other.mem_bytes)?,
+            disk_bytes: self.disk_bytes.checked_add(other.disk_bytes)?,
+        })
+    }
+
+    pub fn checked_sub(self, other: Self) -> Option<Self> {
+        Some(Self {
+            cpu_milli: self.cpu_milli.checked_sub(other.cpu_milli)?,
+            mem_bytes: self.mem_bytes.checked_sub(other.mem_bytes)?,
+            disk_bytes: self.disk_bytes.checked_sub(other.disk_bytes)?,
+        })
+    }
+}
+
+/// Initialized per-box cost, fixed to reviewed source/config/measurement evidence by `id`.
+/// Bounds describe the actual guest envelope. `guest_overhead` pays kernel/relay resources inside
+/// that envelope; `overhead` pays the VMM on its host, outside it. Neither has an invented default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeCost {
+    pub id: [u8; 32],
+    pub floor: CapacityResources,
+    pub ceiling: CapacityResources,
+    /// Explicit positive physical/API unit in every dimension, including unchanged units of one.
+    pub quantum: CapacityResources,
+    pub guest_overhead: CapacityResources,
+    pub overhead: CapacityResources,
+}
+
+/// The immutable host charge admitted for the original workload, with its exact cost profile.
+/// Persisted in BoxSpec and its existing BoxRecord, never a second resource ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Allocation {
+    pub resources: CapacityResources,
+    pub cost: RuntimeCost,
+}
+
+fn invalid_cost(why: &'static str) -> Refusal {
+    Refusal::Invalid {
+        what: "runtime allocation",
+        why: why.into(),
+    }
+}
+
+impl RuntimeCost {
+    pub fn check(self) -> Result<(), Refusal> {
+        if self.id == [0; 32]
+            || !self.ceiling.holds(self.floor)
+            || !self.ceiling.holds(self.guest_overhead)
+            || self.quantum.cpu_milli == 0
+            || self.quantum.mem_bytes == 0
+            || self.quantum.disk_bytes == 0
+        {
+            return Err(invalid_cost(
+                "missing cost identity, inconsistent bounds or zero quantum",
+            ));
+        }
+        self.ceiling
+            .checked_add(self.overhead)
+            .ok_or_else(|| invalid_cost("host ceiling overflows"))?;
+        Ok(())
+    }
+
+    /// One formula for candidate fit, receiver admission, durable recovery and runtime checks.
+    pub fn allocate(self, workload: CapacityResources) -> Result<Allocation, Refusal> {
+        self.check()?;
+        let inside = workload
+            .checked_add(self.guest_overhead)
+            .ok_or_else(|| invalid_cost("workload plus guest allowance overflows"))?;
+        let round = |value: u64, floor: u64, quantum: u64| {
+            let value = value.max(floor);
+            let remainder = value.checked_rem(quantum)?;
+            if remainder == 0 {
+                Some(value)
+            } else {
+                value.checked_add(quantum.checked_sub(remainder)?)
+            }
+        };
+        let guest = CapacityResources {
+            cpu_milli: round(
+                inside.cpu_milli,
+                self.floor.cpu_milli,
+                self.quantum.cpu_milli,
+            )
+            .ok_or_else(|| invalid_cost("CPU quantization overflows"))?,
+            mem_bytes: round(
+                inside.mem_bytes,
+                self.floor.mem_bytes,
+                self.quantum.mem_bytes,
+            )
+            .ok_or_else(|| invalid_cost("memory quantization overflows"))?,
+            disk_bytes: round(
+                inside.disk_bytes,
+                self.floor.disk_bytes,
+                self.quantum.disk_bytes,
+            )
+            .ok_or_else(|| invalid_cost("disk quantization overflows"))?,
+        };
+        if !self.ceiling.holds(guest) {
+            return Err(invalid_cost(
+                "workload and guest allowance exceed the initialized runtime ceiling",
+            ));
+        }
+        Ok(Allocation {
+            resources: guest
+                .checked_add(self.overhead)
+                .ok_or_else(|| invalid_cost("host charge overflows"))?,
+            cost: self,
+        })
+    }
+}
+
+impl Allocation {
+    /// Recheck the original durable demand rather than recalculating against a newer cost profile.
+    pub fn check(self, workload: CapacityResources) -> Result<(), Refusal> {
+        if self.cost.allocate(workload)? != self {
+            return Err(invalid_cost(
+                "charge disagrees with its immutable workload and cost profile",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Actual VM configuration is derived from the admitted host charge, paying host overhead once.
+    pub fn guest(self) -> Result<CapacityResources, Refusal> {
+        self.cost.check()?;
+        let guest = self
+            .resources
+            .checked_sub(self.cost.overhead)
+            .ok_or_else(|| invalid_cost("host charge cannot hold its VMM allowance"))?;
+        if !guest.holds(self.cost.floor)
+            || !self.cost.ceiling.holds(guest)
+            || guest.cpu_milli.checked_rem(self.cost.quantum.cpu_milli) != Some(0)
+            || guest.mem_bytes.checked_rem(self.cost.quantum.mem_bytes) != Some(0)
+            || guest.disk_bytes.checked_rem(self.cost.quantum.disk_bytes) != Some(0)
+        {
+            return Err(invalid_cost(
+                "admitted guest envelope violates the initialized bounds or units",
+            ));
+        }
+        Ok(guest)
+    }
+
+    /// BoxSpec has workload caps, while its scheduler row also retains the full original demand.
+    /// A reservation may exceed those caps; it may never shrink them to fit the VM.
+    pub fn covers(self, workload: CapacityResources) -> Result<(), Refusal> {
+        let inside = workload
+            .checked_add(self.cost.guest_overhead)
+            .ok_or_else(|| invalid_cost("workload plus guest allowance overflows"))?;
+        if !self.guest()?.holds(inside) {
+            return Err(invalid_cost(
+                "admitted guest envelope does not cover unchanged workload caps",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// A stable resource-pool identity and its physical ceiling/current room. Reservations remain the
 /// scheduler's authority; these facts do not grant resources or guess unread measurements.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +244,9 @@ pub struct Capacity {
     pub free: CapacityResources,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub devices: Vec<DeviceInfo>,
+    /// None is the legacy native identity cost. A VM adapter must supply its verified profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<RuntimeCost>,
 }
 
 impl Capacity {
@@ -88,6 +260,17 @@ impl Capacity {
                 what: "runtime capacity",
                 why: "pool identity is empty or free resources exceed their totals".to_owned(),
             });
+        }
+        if let Some(cost) = self.cost {
+            cost.check()?;
+            if !self
+                .total
+                .holds(cost.allocate(CapacityResources::default())?.resources)
+            {
+                return Err(invalid_cost(
+                    "minimum initialized runtime charge exceeds its physical pool",
+                ));
+            }
         }
         crate::devices::check_ids(self.devices.iter().map(|device| device.id))
     }
@@ -343,6 +526,97 @@ impl Refusal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn resources(cpu_milli: u64, mem_bytes: u64, disk_bytes: u64) -> CapacityResources {
+        CapacityResources {
+            cpu_milli,
+            mem_bytes,
+            disk_bytes,
+        }
+    }
+
+    fn cost() -> RuntimeCost {
+        // Fixture data exercises the formula, not measured hardware allowances.
+        RuntimeCost {
+            id: [1; 32],
+            floor: resources(1000, 64 << 20, 0),
+            ceiling: resources(4000, 256 << 20, 1 << 30),
+            quantum: resources(1000, 1 << 20, 1),
+            guest_overhead: resources(50, 3 << 20, 7),
+            overhead: resources(25, 5 << 20, 11),
+        }
+    }
+
+    /// AC-T7.4.1: admission and runtime pay guest/kernel and host/VMM costs once, preserving workload.
+    #[test]
+    fn runtime_cost_quantizes_guest_then_adds_host_allowance_exactly_once() {
+        let cost = cost();
+        let workload = resources(1500, (65 << 20) + 1, 100);
+        let allocation = cost.allocate(workload).unwrap();
+        assert_eq!(allocation.guest().unwrap(), resources(2000, 69 << 20, 107));
+        assert_eq!(allocation.resources, resources(2025, 74 << 20, 118));
+        allocation.check(workload).unwrap();
+        allocation.covers(workload).unwrap();
+        assert!(allocation.check(resources(1500, 65 << 20, 100)).is_err());
+        assert_eq!(workload, resources(1500, (65 << 20) + 1, 100));
+        let encoded = serde_json::to_vec(&allocation).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Allocation>(&encoded).unwrap(),
+            allocation
+        );
+        let mut changed = allocation;
+        changed.resources.mem_bytes += 1;
+        assert!(changed.guest().is_err());
+        assert!(changed.check(workload).is_err());
+    }
+
+    /// AC-T7.4.1: CPU-only dedicated Shards boxes pay the entire configured VM before placement.
+    #[test]
+    fn fixed_guest_floor_and_ceiling_refuse_workloads_that_cannot_fit_with_guest_overhead() {
+        let mut cost = cost();
+        cost.floor = resources(4000, 256 << 20, 1 << 30);
+        cost.ceiling = cost.floor;
+        let small = resources(10, 1 << 20, 0);
+        let allocation = cost.allocate(small).unwrap();
+        assert_eq!(allocation.guest().unwrap(), cost.floor);
+        assert_eq!(
+            allocation.resources,
+            resources(4025, 261 << 20, (1 << 30) + 11)
+        );
+        assert!(cost.allocate(cost.floor).is_err());
+        assert!(allocation.covers(cost.floor).is_err());
+    }
+
+    /// AC-T7.4.1: every absent/zero unit, ceiling violation and overflow is a typed refusal.
+    #[test]
+    fn runtime_cost_refuses_unknown_profile_bad_units_ceiling_and_arithmetic_overflow() {
+        for quantum in [resources(0, 1, 1), resources(1, 0, 1), resources(1, 1, 0)] {
+            let mut changed = cost();
+            changed.quantum = quantum;
+            assert!(matches!(
+                changed.allocate(resources(1, 1, 1)),
+                Err(Refusal::Invalid {
+                    what: "runtime allocation",
+                    ..
+                })
+            ));
+        }
+        let mut changed = cost();
+        changed.id = [0; 32];
+        assert!(changed.check().is_err());
+        changed = cost();
+        changed.floor.cpu_milli = 5000;
+        assert!(changed.check().is_err());
+        assert!(cost().allocate(resources(u64::MAX, 1, 1)).is_err());
+        assert!(cost().allocate(resources(4000, 1, 1)).is_err());
+        changed = cost();
+        changed.ceiling.disk_bytes = u64::MAX;
+        assert!(changed.check().is_err());
+        changed.overhead.disk_bytes = 0;
+        changed.guest_overhead.disk_bytes = 0;
+        changed.quantum.disk_bytes = 2;
+        assert!(changed.allocate(resources(1, 1, u64::MAX)).is_err());
+    }
 
     #[test]
     fn a_signal_number_outside_the_kernels_range_is_refused() {

@@ -262,3 +262,37 @@ execution because the CLI could not connect to the Kiln server. CLI70486 ended1;
 no remote Cargo/native effect or passing result is inferred. Original refusal is
 retained in private cohort-4d8bbf81-light-v1. No runner/server change or admission
 bypass was attempted; source integration continues independently.
+
+## Shared runtime-cost API and wire source
+
+ROOT imports exact API devices/runtime/sim/spec blobs from L1 signed
+cc4dae242599991de6c86419b7c166ffe425137e and exports RuntimeCost/Allocation.
+The cost has explicit evidence identity, floor/ceiling/positive physical quanta,
+guest kernel/relay overhead and host VMM overhead. The single checked formula
+rounds max(workload+guest overhead,floor) up to the declared unit, refuses above
+the initialized ceiling, and adds host overhead once. No numerical overhead or
+minimum is measured or invented by this source checkpoint. An immutable optional
+BoxSpec allocation stores the admitted resources and exact cost profile; its
+existing BoxRecord persists it without a duplicate charge field. Capacity.cost
+is optional for legacy native identity cost; VM adapters must supply verified
+initialized cost before placement.
+
+Wire messages append the optional cost/allocation AFTER the existing device
+fields. They retain every fixed-width resource and all32 identity bytes, reject
+invalid profiles/charges and truncated tails, and use the new source-derived
+wire identity. Fixed cost tails reserve fallibly before writing; a storage fault
+maps to typed Exhausted. Focused cost/allocation/truncation controls are source
+only. This is not proof of actual VM charging, measurement authenticity or native
+resource enforcement.
+
+The named compatibility manifest under cost-source records167 BoxSpec and11
+Capacity legacy literals in60 files. Only required None fields were added to
+newborn native/test specs and reports; struct-update expressions keep inherited
+values. The generic guest path rewrite explicitly preserves allocation along
+with identity/owner/devices. A backend may remove its already-paid outer host
+receipt only at its validated inner native-workload boundary, keeping the original
+receipt in the sole host record; generic rewriting must not silently discard it.
+L1 scheduler propagation, per-class initialized costs, retained exact charges and
+actual runtime constructors remain in progress. Runtime sha2 reuses workspace
+0.10.9 for the owner-supplied bounded boot binary/evidence hashing, adding no version.
+No compile/test/native result is yet claimed for this new API/wire cohort.

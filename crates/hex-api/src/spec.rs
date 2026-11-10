@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::runtime::{Allocation, CapacityResources};
 use crate::{Bounds, BoxId, DeviceId, Refusal};
 
 /// What a box holds.
@@ -45,6 +46,10 @@ pub struct BoxSpec {
     /// Exact identities requested from the runtime pool, never an implicit class-wide grant.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub devices: Vec<DeviceId>,
+    /// The original workload stays in `bounds`/`class`. This immutable receipt pays initialized
+    /// per-box runtime costs in the existing resource ledger until physical termination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allocation: Option<Allocation>,
 }
 
 impl BoxSpec {
@@ -53,6 +58,13 @@ impl BoxSpec {
     pub fn check(&self) -> Result<(), Refusal> {
         self.bounds.check()?;
         self.check_devices()?;
+        if let Some(allocation) = self.allocation {
+            allocation.covers(CapacityResources {
+                cpu_milli: self.bounds.cpu_max_milli.map_or(0, u64::from),
+                mem_bytes: self.bounds.memory_max.unwrap_or(0),
+                disk_bytes: 0,
+            })?;
+        }
         if let Some(owner) = &self.owner {
             owner.check()?;
         }
@@ -954,6 +966,7 @@ mod tests {
                 bounds: Bounds::default(),
                 class: make(Box::new(spec())),
                 owner: None,
+                allocation: None,
                 devices: vec![DeviceId {
                     kind: crate::DeviceKind::Gpu,
                     key: u64::MAX,

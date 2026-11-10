@@ -744,6 +744,7 @@ mod queued_deadline_probe {
             demand: "class:oci".into(),
             payload: schedule::Payload {
                 spec: BoxSpec {
+                    allocation: None,
                     devices: Vec::new(),
                     id: BoxId::new("queued-deadline-probe").unwrap(),
                     bounds: hex_api::Bounds::default(),

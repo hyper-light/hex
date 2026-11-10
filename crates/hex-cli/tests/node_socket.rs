@@ -222,6 +222,7 @@ fn nofile_seen(client: &Client, class: ClassSpec) -> String {
     let id = BoxId::new("nofile").unwrap();
     client
         .create(BoxSpec {
+            allocation: None,
             devices: Vec::new(),
             id: id.clone(),
             bounds: Bounds::default(),
@@ -574,6 +575,7 @@ impl Fixture for OciBoxes<'_> {
     }
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
         BoxSpec {
+            allocation: None,
             devices: Vec::new(),
             id,
             bounds,
@@ -584,6 +586,7 @@ impl Fixture for OciBoxes<'_> {
 
     fn init(&self, id: BoxId, act: &Act) -> BoxSpec {
         BoxSpec {
+            allocation: None,
             devices: Vec::new(),
             id,
             bounds: Bounds::default(),
@@ -606,6 +609,7 @@ impl Fixture for ProcessBoxes<'_> {
     }
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
         BoxSpec {
+            allocation: None,
             devices: Vec::new(),
             id,
             bounds,
@@ -1034,6 +1038,7 @@ fn through_a_host_nodes_socket(lab: &Lab, agent: &Agent, exe: &str) {
 fn example(lab: &Lab, client: &Client) -> Result<(), String> {
     let id = BoxId::new("example").unwrap();
     let made = client.create(BoxSpec {
+        allocation: None,
         devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds::default(),
@@ -1104,6 +1109,7 @@ fn namespaces_counted(lab: &Lab, client: &Client) {
     let id = BoxId::new("own-network").unwrap();
     client
         .create(BoxSpec {
+            allocation: None,
             devices: Vec::new(),
             id: id.clone(),
             bounds: Bounds::default(),
@@ -1156,6 +1162,7 @@ fn disconnect(lab: &Lab, agent: &Agent, client: &Client) {
     let process = BoxId::new("left-process").unwrap();
     client
         .create(BoxSpec {
+            allocation: None,
             devices: Vec::new(),
             id: oci.clone(),
             bounds: Bounds::default(),
@@ -1166,6 +1173,7 @@ fn disconnect(lab: &Lab, agent: &Agent, client: &Client) {
     client.start(&oci).unwrap();
     client
         .create(BoxSpec {
+            allocation: None,
             devices: Vec::new(),
             id: process.clone(),
             bounds: Bounds::default(),
@@ -1528,6 +1536,7 @@ fn crash_case(
         }
     };
     let spec = BoxSpec {
+        allocation: None,
         devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds::default(),
@@ -1921,6 +1930,7 @@ fn a_box_cannot_arm_the_agents_crash_point(lab: &Lab, own: &Path, exe: &str) {
     }
     let made = client
         .create(BoxSpec {
+            allocation: None,
             devices: Vec::new(),
             id: id.clone(),
             bounds: Bounds::default(),
@@ -1989,6 +1999,7 @@ fn a_sigterm_says_the_parked_procs_and_leaves_the_boxes_as_a_sigkill_does(
     for name in ["term-a", "term-b"] {
         client
             .create(BoxSpec {
+                allocation: None,
                 devices: Vec::new(),
                 id: id(name),
                 bounds: Bounds::default(),
@@ -2092,6 +2103,7 @@ fn a_crash_with_idle_cgroups_and_live_boxes_leaves_nothing(lab: &Lab, own: &Path
     ] {
         client
             .create(BoxSpec {
+                allocation: None,
                 devices: Vec::new(),
                 id: id(name),
                 bounds: Bounds::default(),

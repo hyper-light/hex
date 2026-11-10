@@ -190,6 +190,7 @@ impl Fixture<'_> {
             ClassSpec::Process
         };
         BoxSpec {
+            allocation: None,
             id: BoxId::new(name).unwrap(),
             devices: Vec::new(),
             bounds: self.bounds.clone(),

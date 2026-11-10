@@ -34,8 +34,8 @@ pub use bounds::{Bounds, IoRates, MIN_CPU_MILLI, MIN_MEMORY};
 pub use devices::{DeviceId, DeviceInfo, DeviceKind, MAX_DEVICES};
 pub use id::BoxId;
 pub use runtime::{
-    Asked, BoxInfo, BoxState, Capacity, CapacityResources, Exit, LifecycleCause, Membership, Proc,
-    Refusal, Runtime, Signal, Usage,
+    Allocation, Asked, BoxInfo, BoxState, Capacity, CapacityResources, Exit, LifecycleCause,
+    Membership, Proc, Refusal, Runtime, RuntimeCost, Signal, Usage,
 };
 pub use spec::{
     Ask, BlockCount, BoxOwner, BoxSpec, Class, ClassSpec, End, ExecLimit, Given, Mount, Network,

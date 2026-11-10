@@ -2436,6 +2436,7 @@ mod tests {
     fn ac_t7_1_3_a_reaped_init_keeps_its_identity_until_its_cgroup_drains() {
         let mut record = BoxRecord::new(
             BoxSpec {
+                allocation: None,
                 devices: Vec::new(),
                 id: BoxId::new("ended").unwrap(),
                 bounds: hex_api::Bounds::default(),

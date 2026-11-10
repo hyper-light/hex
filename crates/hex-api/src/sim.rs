@@ -555,6 +555,7 @@ impl Fixture for SimFixture {
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
         BoxSpec {
             devices: Vec::new(),
+            allocation: None,
             id,
             bounds,
             class: match self {
@@ -568,6 +569,7 @@ impl Fixture for SimFixture {
     fn init(&self, id: BoxId, act: &Act) -> BoxSpec {
         BoxSpec {
             devices: Vec::new(),
+            allocation: None,
             id,
             bounds: Bounds::default(),
             class: match self {

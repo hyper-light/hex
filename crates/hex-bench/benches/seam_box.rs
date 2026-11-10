@@ -57,6 +57,7 @@ mod linux {
 
     fn spec(id: &BoxId) -> BoxSpec {
         BoxSpec {
+            allocation: None,
             devices: Vec::new(),
             id: id.clone(),
             bounds: bounds(),

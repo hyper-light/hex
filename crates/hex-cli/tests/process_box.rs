@@ -45,6 +45,7 @@ impl Fixture for BinFixture {
     }
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
         BoxSpec {
+            allocation: None,
             devices: Vec::new(),
             id,
             bounds,

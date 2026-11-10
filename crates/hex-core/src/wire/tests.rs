@@ -31,6 +31,7 @@ fn device_claims() -> Vec<DeviceId> {
 
 fn device_spec(devices: Vec<DeviceId>) -> BoxSpec {
     BoxSpec {
+        allocation: None,
         id: id("device-wire"),
         bounds: Bounds::default(),
         class: ClassSpec::Process,
@@ -41,6 +42,7 @@ fn device_spec(devices: Vec<DeviceId>) -> BoxSpec {
 
 fn device_capacity(devices: Vec<DeviceInfo>) -> Capacity {
     Capacity {
+        cost: None,
         id: "physical-pool".to_owned(),
         total: CapacityResources::default(),
         free: CapacityResources::default(),
@@ -74,8 +76,11 @@ fn with_device_tail(offer: bool, tail: &[u8]) -> Vec<u8> {
         )
         .unwrap()
     };
-    bytes.truncate(bytes.len() - 4);
+    // The empty old device count and new optional cost/allocation tag are both replaced;
+    // malformed device input still carries a valid absent receipt after its device tail.
+    bytes.truncate(bytes.len() - 5);
     bytes.extend_from_slice(tail);
+    bytes.push(0);
     bytes
 }
 
@@ -378,6 +383,7 @@ fn runtime_capacity_roundtrip_and_invalid_room_refused() {
         request
     );
     let capacity = hex_api::Capacity {
+        cost: None,
         devices: Vec::new(),
         id: "guest:123:456".into(),
         total: hex_api::CapacityResources {
@@ -503,6 +509,7 @@ fn program() -> Program {
 
 fn oci_spec() -> BoxSpec {
     BoxSpec {
+        allocation: None,
         devices: Vec::new(),
         id: id("oci-1"),
         bounds: Bounds::default(),
@@ -543,6 +550,7 @@ fn requests() -> Vec<(u64, Request, usize)> {
         (
             2,
             Request::Call(Call::Create(Box::new(BoxSpec {
+                allocation: None,
                 devices: Vec::new(),
                 id: b.clone(),
                 bounds: bounds(),
@@ -555,6 +563,7 @@ fn requests() -> Vec<(u64, Request, usize)> {
         (
             4,
             Request::Call(Call::Create(Box::new(BoxSpec {
+                allocation: None,
                 devices: Vec::new(),
                 id: id("p"),
                 bounds: Bounds::default(),
@@ -620,6 +629,7 @@ fn requests() -> Vec<(u64, Request, usize)> {
 fn run() -> Request {
     Request::Call(Call::Run {
         spec: Box::new(BoxSpec {
+            allocation: None,
             devices: Vec::new(),
             id: id("r"),
             bounds: bounds(),
@@ -829,6 +839,118 @@ fn every_answer_reads_back_as_written() {
         let (h, back) = read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap();
         assert_eq!((h.id, &back), (n, &ans));
     }
+}
+
+fn example_runtime_cost() -> RuntimeCost {
+    let mib = 1 << 20;
+    RuntimeCost {
+        id: [7; 32],
+        floor: CapacityResources {
+            cpu_milli: 1000,
+            mem_bytes: 64 * mib,
+            disk_bytes: 0,
+        },
+        ceiling: CapacityResources {
+            cpu_milli: 4000,
+            mem_bytes: 1024 * mib,
+            disk_bytes: 1 << 30,
+        },
+        quantum: CapacityResources {
+            cpu_milli: 1000,
+            mem_bytes: mib,
+            disk_bytes: 1,
+        },
+        guest_overhead: CapacityResources {
+            cpu_milli: 0,
+            mem_bytes: mib,
+            disk_bytes: 0,
+        },
+        overhead: CapacityResources {
+            cpu_milli: 100,
+            mem_bytes: mib,
+            disk_bytes: 0,
+        },
+    }
+}
+
+/// AC-T7.4.1: peer capacity and admitted work retain the same exact cost profile/host charge;
+/// neither a truncated receipt nor an invalid profile may silently become native identity cost.
+#[test]
+fn runtime_cost_and_admitted_allocation_survive_the_wire() {
+    let cost = example_runtime_cost();
+    let allocation = cost
+        .allocate(CapacityResources {
+            cpu_milli: 250,
+            mem_bytes: 16 << 20,
+            disk_bytes: 3,
+        })
+        .unwrap();
+    let mut spec = device_spec(device_claims());
+    spec.allocation = Some(allocation);
+    let claimed = Request::Call(Call::Create(Box::new(spec.clone())));
+    let bytes = request(55, &claimed, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        claimed
+    );
+    for end in 0..bytes.len() {
+        assert!(read_request(&received(&bytes[..end], 0), MAX_MESSAGE).is_err());
+    }
+    let mut capacity = device_capacity(Vec::new());
+    capacity.total = CapacityResources {
+        cpu_milli: 8000,
+        mem_bytes: 2 << 30,
+        disk_bytes: 2 << 30,
+    };
+    capacity.free = capacity.total;
+    capacity.cost = Some(cost);
+    let offered = Answer::Capacity(Some(capacity.clone()));
+    let bytes = answer(55, &offered, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        offered
+    );
+    for end in 0..bytes.len() {
+        assert!(read_answer(&received(&bytes[..end], 0), MAX_MESSAGE).is_err());
+    }
+    for invalid in [
+        RuntimeCost {
+            id: [0; 32],
+            ..cost
+        },
+        RuntimeCost {
+            quantum: CapacityResources::default(),
+            ..cost
+        },
+    ] {
+        capacity.cost = Some(invalid);
+        assert!(answer(55, &Answer::Capacity(Some(capacity.clone())), MAX_MESSAGE).is_err());
+    }
+    spec.allocation = Some(Allocation {
+        resources: CapacityResources::default(),
+        cost,
+    });
+    assert!(matches!(
+        request(
+            55,
+            &Request::Call(Call::Create(Box::new(spec))),
+            MAX_MESSAGE
+        ),
+        Err(Fault::Value {
+            what: "allocation",
+            ..
+        })
+    ));
+    assert_eq!(
+        Refusal::from(Fault::Storage {
+            what: "wire allocation receipt",
+            bound: COST_BYTES
+        }),
+        Refusal::Exhausted {
+            what: "wire allocation receipt",
+            bound: COST_BYTES
+        }
+    );
 }
 
 /// AC-T7.4.1: retained-resource lifecycle causes survive the wire as distinct typed outcomes;
@@ -1544,6 +1666,7 @@ fn any_spec() -> impl Strategy<Value = BoxSpec> {
     ];
     let owner = proptest::option::of(("\\PC{0,16}", any::<bool>()));
     (any_id(), any_bounds(), class, owner).prop_map(|(id, bounds, class, owner)| BoxSpec {
+        allocation: None,
         devices: Vec::new(),
         id,
         bounds,

@@ -61,6 +61,7 @@ impl Fixture for BinFixture {
     }
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
         BoxSpec {
+            allocation: None,
             devices: Vec::new(),
             id,
             bounds,
@@ -230,6 +231,7 @@ fn a_box_past_its_bound_is_ended_as_memory() {
     let id = BoxId::new("mac-over").unwrap();
     let _ = rt.delete(&id);
     rt.create(BoxSpec {
+        allocation: None,
         devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds {
@@ -265,6 +267,7 @@ fn a_box_under_its_bound_runs_and_reports_its_exit() {
     let id = BoxId::new("mac-under").unwrap();
     let _ = rt.delete(&id);
     rt.create(BoxSpec {
+        allocation: None,
         devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds {
@@ -330,6 +333,7 @@ fn the_end_reason_is_memory() {
     let id = BoxId::new("mac-reason").unwrap();
     let _ = rt.delete(&id);
     rt.create(BoxSpec {
+        allocation: None,
         devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds {
@@ -399,6 +403,7 @@ fn hex_rt_5_one_bounded_program_reports_its_memory_end() {
     let fx = fixture();
     let id = BoxId::new("mac-one-bound-end").unwrap();
     rt.create(BoxSpec {
+        allocation: None,
         devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds {
@@ -428,6 +433,7 @@ fn hex_rt_6_one_process_tree_reports_its_bound_and_deletes() {
     let fx = fixture();
     let id = BoxId::new("mac-one-pids-end").unwrap();
     rt.create(BoxSpec {
+        allocation: None,
         devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds {
@@ -465,6 +471,7 @@ fn a_programs_end_is_seen_when_it_ends_not_at_the_waits_budget() {
     let id = BoxId::new("mac-end-seen").unwrap();
     let _ = rt.delete(&id);
     rt.create(BoxSpec {
+        allocation: None,
         devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds {
@@ -510,6 +517,7 @@ fn measure_exec_to_exit() {
     let id = BoxId::new("mac-measure").unwrap();
     let _ = rt.delete(&id);
     rt.create(BoxSpec {
+        allocation: None,
         devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds {
@@ -548,6 +556,7 @@ fn overshoot(rt: &MacRuntime, fx: &BinFixture, what: &str, members: usize, pass:
     let id = BoxId::new(&format!("mac-over-{what}-{members}-{pass}")).unwrap();
     let _ = rt.delete(&id);
     rt.create(BoxSpec {
+        allocation: None,
         devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds {
@@ -675,6 +684,7 @@ fn hex_mac_4_a_fast_grower_near_its_bound_is_held_while_its_idle_members_run() {
     let id = BoxId::new("mac-graded-hold").expect("an id");
     let _ = rt.delete(&id);
     rt.create(BoxSpec {
+        allocation: None,
         devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds {
@@ -787,6 +797,7 @@ fn the_watcher_takes_no_priority_over_other_programs() {
     let id = BoxId::new("mac-no-priority").unwrap();
     let _ = rt.delete(&id);
     rt.create(BoxSpec {
+        allocation: None,
         devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds {
@@ -846,6 +857,7 @@ fn a_steady_box_redoes_no_membership_work_per_read() {
     let id = BoxId::new("mac-steady-reads").unwrap();
     let _ = rt.delete(&id);
     rt.create(BoxSpec {
+        allocation: None,
         devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds {
@@ -919,6 +931,7 @@ fn a_box_runs_at_the_qos_its_declared_weight_asks() {
         let id = BoxId::new(&format!("mac-weight-{name}")).unwrap();
         let _ = rt.delete(&id);
         rt.create(BoxSpec {
+            allocation: None,
             devices: Vec::new(),
             id: id.clone(),
             bounds: Bounds {
@@ -971,6 +984,7 @@ fn measure_a_cpu_bound_members_work_rate() {
     let id = BoxId::new("mac-cpu-rate").unwrap();
     let _ = rt.delete(&id);
     rt.create(BoxSpec {
+        allocation: None,
         devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds::default(),
@@ -1046,6 +1060,7 @@ fn a_program_killed_outside_the_bound_is_no_bounds_end() {
     let id = BoxId::new("mac-not-the-bound").unwrap();
     let _ = rt.delete(&id);
     rt.create(BoxSpec {
+        allocation: None,
         devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds {
@@ -1395,6 +1410,7 @@ fn a_program_whose_caller_goes_is_no_memory_end_of_its_box() {
     let id = BoxId::new("mac-left").unwrap();
     client
         .create(BoxSpec {
+            allocation: None,
             devices: Vec::new(),
             id: id.clone(),
             bounds: Bounds {

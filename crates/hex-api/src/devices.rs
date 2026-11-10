@@ -155,6 +155,7 @@ mod tests {
             class: ClassSpec::Process,
             owner: None,
             devices,
+            allocation: None,
         }
     }
 
@@ -164,6 +165,7 @@ mod tests {
             total: CapacityResources::default(),
             free: CapacityResources::default(),
             devices,
+            cost: None,
         }
     }
 

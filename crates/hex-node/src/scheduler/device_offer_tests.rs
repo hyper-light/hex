@@ -77,6 +77,7 @@ fn report(devices: Vec<DeviceInfo>) -> Capacity {
         disk_bytes: 0,
     };
     Capacity {
+        cost: None,
         id: "fixture-native-pool".into(),
         total: room,
         free: room,

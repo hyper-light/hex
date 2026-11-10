@@ -83,6 +83,7 @@ mod linux {
         let victim = BoxId::new("victim").unwrap();
         let builder = BoxId::new("builder").unwrap();
         node.create(BoxSpec {
+            allocation: None,
             devices: Vec::new(),
             id: victim.clone(),
             bounds: Bounds {
@@ -94,6 +95,7 @@ mod linux {
         })
         .expect("victim box");
         node.create(BoxSpec {
+            allocation: None,
             devices: Vec::new(),
             id: builder.clone(),
             bounds: Bounds {

@@ -140,6 +140,7 @@ impl Runtime for DeviceRuntime {
             disk_bytes: 0,
         };
         let report = Capacity {
+            cost: None,
             id: "device-driver-model-pool".to_owned(),
             total: room,
             free: room,

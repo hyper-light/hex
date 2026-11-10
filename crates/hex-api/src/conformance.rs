@@ -906,6 +906,7 @@ fn unrenderable(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
         let mut spec = base.clone();
         break_it(&mut spec);
         let got = rt.create(BoxSpec {
+            allocation: None,
             devices: Vec::new(),
             id: id.clone(),
             bounds: Bounds::default(),
@@ -1089,6 +1090,7 @@ mod tests {
             };
             late.sim
                 .create(BoxSpec {
+                    allocation: None,
                     devices: Vec::new(),
                     id: id.clone(),
                     bounds: Bounds::default(),

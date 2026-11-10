@@ -119,6 +119,7 @@ fn request() -> (Demand, Payload) {
     };
     let payload = Payload {
         spec: BoxSpec {
+            allocation: None,
             devices: Vec::new(),
             id: BoxId::new("caller-name").unwrap(),
             bounds: Bounds {

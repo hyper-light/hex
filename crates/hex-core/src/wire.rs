@@ -42,9 +42,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use hex_api::{
-    Bounds, BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, Capacity, CapacityResources, Class,
-    ClassSpec, DeviceId, DeviceInfo, DeviceKind, Exit, IoRates, LifecycleCause, MAX_DEVICES, Mount,
-    Network, OciSpec, Program, Refusal, Rootfs, Signal, Usage, User,
+    Allocation, Bounds, BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, Capacity, CapacityResources,
+    Class, ClassSpec, DeviceId, DeviceInfo, DeviceKind, Exit, IoRates, LifecycleCause, MAX_DEVICES,
+    Mount, Network, OciSpec, Program, Refusal, Rootfs, RuntimeCost, Signal, Usage, User,
 };
 
 use crate::netns;
@@ -400,6 +400,8 @@ pub enum Fault {
     },
     #[error("it carries more descriptors than the {MAX_FDS} a message takes")]
     DescriptorsCut,
+    #[error("{what} storage for {bound} bytes is unavailable")]
+    Storage { what: &'static str, bound: usize },
 }
 
 impl Fault {
@@ -423,13 +425,18 @@ fn other_wire(theirs: u64, build: Option<&str>) -> String {
 
 impl From<Fault> for Refusal {
     fn from(fault: Fault) -> Self {
-        let what = match fault {
-            Fault::Wire { .. } => "wire",
-            _ => "message",
-        };
-        Refusal::Invalid {
-            what,
-            why: fault.to_string(),
+        match fault {
+            Fault::Storage { what, bound } => Refusal::Exhausted { what, bound },
+            fault => {
+                let what = match &fault {
+                    Fault::Wire { .. } => "wire",
+                    _ => "message",
+                };
+                Refusal::Invalid {
+                    what,
+                    why: fault.to_string(),
+                }
+            }
         }
     }
 }
@@ -517,7 +524,7 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
                     w.u64(device.size);
                     w.option_with(device.holder.as_ref(), |w, id| w.string(id.as_str()))?;
                 }
-                Ok(())
+                put_cost_option(w, capacity.cost)
             })?;
         }
         Answer::Info(info) => {
@@ -832,17 +839,10 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
         }
         kind::CAPACITY_ANSWER => Answer::Capacity(r.option(|r| {
             let id = r.string("capacity pool")?;
-            let mut resources = || -> Result<CapacityResources, Fault> {
-                Ok(CapacityResources {
-                    cpu_milli: r.u64()?,
-                    mem_bytes: r.u64()?,
-                    disk_bytes: r.u64()?,
-                })
-            };
             let capacity = Capacity {
                 id,
-                total: resources()?,
-                free: resources()?,
+                total: resources(r)?,
+                free: resources(r)?,
                 devices: r.device_list(22, |r| {
                     let id = device_id(r)?;
                     let model = r.device_string("devices.model")?;
@@ -861,6 +861,7 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
                         holder,
                     })
                 })?,
+                cost: r.option(runtime_cost)?,
             };
             capacity
                 .check()
@@ -1108,6 +1109,11 @@ fn put_call(w: &mut Writer, id: u64, call: &Call) -> Result<(), Fault> {
 }
 
 fn put_box_spec(w: &mut Writer, spec: &BoxSpec) -> Result<(), Fault> {
+    if let Some(allocation) = spec.allocation {
+        allocation
+            .covers(workload_caps(spec))
+            .map_err(|e| Fault::value("allocation", e.to_string()))?;
+    }
     spec.check_devices()
         .map_err(|e| Fault::value("devices", e.to_string()))?;
     w.string(spec.id.as_str())?;
@@ -1140,7 +1146,17 @@ fn put_box_spec(w: &mut Writer, spec: &BoxSpec) -> Result<(), Fault> {
     for id in &spec.devices {
         put_device_id(w, id);
     }
-    Ok(())
+    w.reserve_fixed(
+        1 + if spec.allocation.is_some() {
+            ALLOCATION_BYTES
+        } else {
+            0
+        },
+    )?;
+    w.option_with(spec.allocation, |w, allocation| {
+        put_resources(w, allocation.resources);
+        put_cost(w, allocation.cost)
+    })
 }
 
 fn box_spec(r: &mut Reader<'_>) -> Result<BoxSpec, Fault> {
@@ -1165,10 +1181,84 @@ fn box_spec(r: &mut Reader<'_>) -> Result<BoxSpec, Fault> {
         class,
         owner,
         devices: r.device_list(9, device_id)?,
+        allocation: r.option(|r| {
+            Ok(Allocation {
+                resources: resources(r)?,
+                cost: runtime_cost(r)?,
+            })
+        })?,
     };
     spec.check_devices()
         .map_err(|e| Fault::value("devices", e.to_string()))?;
+    if let Some(allocation) = spec.allocation {
+        allocation
+            .covers(workload_caps(&spec))
+            .map_err(|e| Fault::value("allocation", e.to_string()))?;
+    }
     Ok(spec)
+}
+
+// AC-T7.4.1: fixed native integer widths; new optional fields follow the complete old device tail.
+const RESOURCE_BYTES: usize = 3 * size_of::<u64>();
+const COST_BYTES: usize = 32 + 5 * RESOURCE_BYTES;
+const ALLOCATION_BYTES: usize = RESOURCE_BYTES + COST_BYTES;
+
+fn workload_caps(spec: &BoxSpec) -> CapacityResources {
+    CapacityResources {
+        cpu_milli: spec.bounds.cpu_max_milli.map_or(0, u64::from),
+        mem_bytes: spec.bounds.memory_max.unwrap_or(0),
+        disk_bytes: 0,
+    }
+}
+
+fn put_resources(w: &mut Writer, resources: CapacityResources) {
+    w.u64(resources.cpu_milli);
+    w.u64(resources.mem_bytes);
+    w.u64(resources.disk_bytes);
+}
+
+fn resources(r: &mut Reader<'_>) -> Result<CapacityResources, Fault> {
+    Ok(CapacityResources {
+        cpu_milli: r.u64()?,
+        mem_bytes: r.u64()?,
+        disk_bytes: r.u64()?,
+    })
+}
+
+fn put_cost_option(w: &mut Writer, cost: Option<RuntimeCost>) -> Result<(), Fault> {
+    w.reserve_fixed(1 + if cost.is_some() { COST_BYTES } else { 0 })?;
+    w.option_with(cost, put_cost)
+}
+
+fn put_cost(w: &mut Writer, cost: RuntimeCost) -> Result<(), Fault> {
+    cost.check()
+        .map_err(|e| Fault::value("runtime cost", e.to_string()))?;
+    w.reserve_fixed(COST_BYTES)?;
+    w.raw(&cost.id);
+    for resources in [
+        cost.floor,
+        cost.ceiling,
+        cost.quantum,
+        cost.guest_overhead,
+        cost.overhead,
+    ] {
+        put_resources(w, resources);
+    }
+    Ok(())
+}
+
+fn runtime_cost(r: &mut Reader<'_>) -> Result<RuntimeCost, Fault> {
+    let cost = RuntimeCost {
+        id: r.array::<32>()?,
+        floor: resources(r)?,
+        ceiling: resources(r)?,
+        quantum: resources(r)?,
+        guest_overhead: resources(r)?,
+        overhead: resources(r)?,
+    };
+    cost.check()
+        .map_err(|e| Fault::value("runtime cost", e.to_string()))?;
+    Ok(cost)
 }
 
 // Fixed tags independent of Rust discriminants; the catalog order is retained because scheduler
@@ -1564,6 +1654,23 @@ impl Writer {
         self.u64(IDENTITY);
         self.u16(kind);
         self.u64(id);
+    }
+
+    /// The new fixed-width cost/charge tail is checked and reserved before writing any of it.
+    fn reserve_fixed(&mut self, bytes: usize) -> Result<(), Fault> {
+        let after = self.out.len().checked_add(bytes);
+        if after.is_none_or(|after| after > self.bound) {
+            return Err(Fault::Oversized {
+                bytes: after.unwrap_or(usize::MAX),
+                bound: self.bound,
+            });
+        }
+        self.out
+            .try_reserve_exact(bytes)
+            .map_err(|_| Fault::Storage {
+                what: "wire allocation receipt",
+                bound: bytes,
+            })
     }
 
     /// Bytes as they are, with no length before them: another message's header.

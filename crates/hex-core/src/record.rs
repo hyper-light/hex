@@ -216,6 +216,7 @@ mod tests {
 
     fn record() -> BoxRecord {
         let spec = BoxSpec {
+            allocation: None,
             devices: Vec::new(),
             id: BoxId::new("r1").unwrap(),
             bounds: Bounds::default(),

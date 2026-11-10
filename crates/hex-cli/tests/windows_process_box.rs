@@ -52,6 +52,7 @@ impl BinFixture {
 impl Fixture for BinFixture {
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
         BoxSpec {
+            allocation: None,
             devices: Vec::new(),
             id,
             bounds,
@@ -100,6 +101,7 @@ fn refused_bundle(config: &serde_json::Value) -> hex_api::Refusal {
     let rt = runtime();
     let refused = rt
         .create(BoxSpec {
+            allocation: None,
             devices: Vec::new(),
             id: BoxId::new("oci-on-windows").unwrap(),
             bounds: Bounds::default(),
@@ -197,6 +199,7 @@ fn a_windows_image_stays_the_hosts_and_a_linux_image_goes_to_the_guest() {
         std::fs::create_dir_all(dir.join("rootfs")).unwrap();
         std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
         BoxSpec {
+            allocation: None,
             devices: Vec::new(),
             id: BoxId::new(name).unwrap(),
             bounds: Bounds::default(),
@@ -331,6 +334,7 @@ fn a_box_past_its_bound_is_refused_at_the_bound() {
     let _ = rt.delete(&id);
     let bound = 256 * MIB;
     rt.create(BoxSpec {
+        allocation: None,
         devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds {
@@ -364,6 +368,7 @@ fn a_box_under_its_bound_runs_and_reports_its_exit() {
     let id = BoxId::new("win-under").unwrap();
     let _ = rt.delete(&id);
     rt.create(BoxSpec {
+        allocation: None,
         devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds {
@@ -460,6 +465,7 @@ fn a_node_started_process_past_the_bound_is_refused_and_counted() {
     let id = BoxId::new("win-pids").unwrap();
     let _ = rt.delete(&id);
     rt.create(BoxSpec {
+        allocation: None,
         devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds {

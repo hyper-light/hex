@@ -40,6 +40,7 @@ fn replayed_deletion_does_not_interrupt_the_reconnected_peer() {
             },
             Payload {
                 spec: BoxSpec {
+                    allocation: None,
                     devices: Vec::new(),
                     id: BoxId::new("cancel-me").unwrap(),
                     bounds: Bounds {
@@ -177,6 +178,7 @@ fn laptop_dispatch_and_common_wire_keep_the_box_until_explicit_delete() {
     };
     let payload = Payload {
         spec: BoxSpec {
+            allocation: None,
             devices: Vec::new(),
             id: BoxId::new("caller-name").unwrap(),
             bounds: Bounds {
@@ -250,6 +252,7 @@ fn laptop_dispatch_and_common_wire_keep_the_box_until_explicit_delete() {
     assert_eq!(status.physical, Some(physical.clone()));
     assert!(matches!(
         client.create(BoxSpec {
+            allocation: None,
             devices: Vec::new(),
             id: BoxId::new("bypass").unwrap(),
             bounds: Bounds::default(),
@@ -362,6 +365,7 @@ fn cold_remote_creation_feedback_survives_owner_publication_busy() {
             },
             Payload {
                 spec: BoxSpec {
+                    allocation: None,
                     devices: Vec::new(),
                     id: BoxId::new("first-cold-feedback").unwrap(),
                     bounds: Bounds {
@@ -573,6 +577,7 @@ fn capacity_budget_request(boxes: u32) -> (Demand, Payload) {
         },
         Payload {
             spec: BoxSpec {
+                allocation: None,
                 devices: Vec::new(),
                 id: BoxId::new("capacity-budget").unwrap(),
                 bounds: Bounds {
@@ -841,6 +846,7 @@ fn local_advertise_retry_pace_does_not_learn_its_own_pauses() {
             },
             Payload {
                 spec: BoxSpec {
+                    allocation: None,
                     devices: Vec::new(),
                     id: BoxId::new("local-advertise-timing").unwrap(),
                     bounds: Bounds {
