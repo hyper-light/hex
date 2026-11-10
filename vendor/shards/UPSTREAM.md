@@ -24,3 +24,4 @@ Five exact upstream Rust fixture sources referenced by API include!/path attribu
 
 | crates/api/tests/hex_borrowed_contract.rs | Exercise finite overflow, target death during handshake and exact readiness observations. | AC-T7.4.1 adversarial regression coverage; production API unchanged. | 0005-exercise-finite-overflow-and-post-handshake-target-death.patch |
 | crates/api/src/conformance.rs | Check the sole excluded Intel Mac directly. | Native direct API Clippy at17c reproduces single_element_loop after0003; semantics unchanged. | 0006-check-the-sole-excluded-host-directly.patch |
+| crates/api/tests/hex_borrowed_contract.rs | Place test safety invariants directly at nested native calls. | Native0116 Clippy requires the existing explanation immediately before unsafe; no behavior changes. | 0007-place-test-safety-invariants-at-each-native-call.patch |

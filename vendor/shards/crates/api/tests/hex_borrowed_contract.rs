@@ -39,8 +39,8 @@ fn started(pid: u32, _child: Option<&Child>) -> u64 {
 fn started(pid: u32, _child: Option<&Child>) -> u64 {
     // SAFETY: rusage_info_v0 is plain writable output for this exact libproc flavor.
     let mut usage: libc::rusage_info_v0 = unsafe { std::mem::zeroed() };
-    // SAFETY: pid names this fixture's current process or its owned child, and usage matches V0.
     assert_eq!(
+        // SAFETY: pid names this fixture's current process or its owned child, and usage matches V0.
         unsafe {
             libc::proc_pid_rusage(
                 i32::try_from(pid).unwrap(),
@@ -58,14 +58,19 @@ fn started(_pid: u32, child: Option<&Child>) -> u64 {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Foundation::FILETIME;
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
-    // SAFETY: the pseudo-handle is borrowed; an owned Child's handle stays alive for this query.
-    let handle = child.map_or_else(|| unsafe { GetCurrentProcess() }, Child::as_raw_handle);
+    let handle = match child {
+        Some(child) => child.as_raw_handle(),
+        None => {
+            // SAFETY: this process's pseudo-handle is valid and remains borrowed.
+            unsafe { GetCurrentProcess() }
+        }
+    };
     let mut created = FILETIME::default();
     let mut ended = FILETIME::default();
     let mut kernel = FILETIME::default();
     let mut user = FILETIME::default();
-    // SAFETY: handle is query-capable and all four outputs are distinct writable FILETIMEs.
     assert_ne!(
+        // SAFETY: handle is query-capable and all four outputs are distinct writable FILETIMEs.
         unsafe { GetProcessTimes(handle, &mut created, &mut ended, &mut kernel, &mut user) },
         0
     );
@@ -241,8 +246,8 @@ fn root_borrowed_target_death_before_ok_is_refused() {
 fn handles() -> u32 {
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
     let mut count = 0;
-    // SAFETY: a borrowed current-process pseudo-handle, valid writable DWORD, no handle acquired.
     assert_ne!(
+        // SAFETY: a borrowed current-process pseudo-handle, valid writable DWORD, no handle acquired.
         unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) },
         0
     );
