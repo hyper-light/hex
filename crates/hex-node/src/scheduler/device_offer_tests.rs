@@ -121,6 +121,7 @@ fn exact_measured_pci_metadata_load_and_report_order_reach_offers() {
                 kind: DeviceKind::Gpu,
                 key: Some(0x0113),
                 available: true,
+                classes: hex_sim::model::Classes::NONE.with(hex_sim::model::Class::Oci),
                 model: amd,
                 size: facts.gpus[1].memory,
                 load: facts.gpus[1].load
@@ -129,6 +130,7 @@ fn exact_measured_pci_metadata_load_and_report_order_reach_offers() {
                 kind: DeviceKind::Gpu,
                 key: Some(0x1234_5678_0113),
                 available: true,
+                classes: hex_sim::model::Classes::NONE.with(hex_sim::model::Class::Oci),
                 model: nvidia,
                 size: facts.gpus[0].memory,
                 load: facts.gpus[0].load
@@ -278,7 +280,7 @@ fn report_key(reports: &Reports) -> u64 {
 }
 
 #[test]
-fn initialized_native_oci_routes_devices_and_unrelated_class_reports_refuse() {
+fn initialized_native_oci_routes_devices_and_uninitialized_class_reports_refuse() {
     for os in [Os::Linux, Os::Windows] {
         let (mut facts, reports) = inputs();
         facts.os = os;
@@ -350,4 +352,70 @@ fn late_refusal_does_not_publish_partial_model_interning() {
         after_cluster, before_cluster,
         "requested candidate invariant: an error publishes no partial model table; ROOT classifies/fixes separately after actual result"
     );
+}
+
+/// AC-T7.4.1: three initialized adapters alias one GPU slot, so one physical holder excludes
+/// all three backends and a class without an actual offer cannot take that slot.
+#[test]
+fn backend_aliases_share_one_slot_and_require_exact_class_capability() {
+    use hex_sim::index::{FitIndex, Verdict};
+    use hex_sim::model::{Demand, Kind, WorkloadId};
+    let (mut facts, mut reports) = inputs();
+    facts.classes = Classes::ALL;
+    facts.virt.kvm = true;
+    let mut native = reports[0].1.clone().unwrap();
+    native.devices.truncate(1);
+    reports = Route::ALL
+        .into_iter()
+        .map(|class| (class, Some(native.clone())))
+        .collect();
+    let mut cluster = service_cluster(&facts);
+    let devices = offered(&reports, &facts, &mut cluster);
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0].classes, Classes::ALL);
+    let mut node = cluster.nodes[0].clone();
+    node.devices = devices;
+    node.capacity.gpus = 1;
+    let mut index = FitIndex::new(&[node.clone()]).unwrap();
+    let mut demand = Demand {
+        need: node.capacity,
+        ask: Ask::default(),
+        class: Route::Firecracker,
+        kind: Kind::Plain,
+    };
+    assert_eq!(index.verdict(NodeId(0), &demand).unwrap(), Verdict::Admits);
+    index.take(NodeId(0), WorkloadId(0), &demand).unwrap();
+    for class in Route::ALL {
+        demand.class = class;
+        assert_eq!(index.verdict(NodeId(0), &demand).unwrap(), Verdict::NoRoom);
+    }
+    // Same identity survives; only the initialized adapter mask changes in this independent node.
+    node.devices[0].classes = Classes::NONE.with(Route::Oci);
+    let index = FitIndex::new(&[node]).unwrap();
+    demand.class = Route::Firecracker;
+    assert_eq!(index.verdict(NodeId(0), &demand).unwrap(), Verdict::NoGpu);
+    demand.class = Route::Oci;
+    assert_eq!(index.verdict(NodeId(0), &demand).unwrap(), Verdict::Admits);
+}
+
+/// AC-T7.4.1: backend aliases cannot disagree about a holder or redefine physical metadata.
+#[test]
+fn conflicting_backend_aliases_refuse_before_publishing_any_offer_or_model() {
+    let (mut facts, reports) = inputs();
+    facts.classes = Classes::ALL;
+    facts.virt.kvm = true;
+    for alter in [0, 1, 2] {
+        let mut alias = reports[0].1.clone().unwrap();
+        match alter {
+            0 => alias.devices[0].holder = Some(BoxId::new("foreign-holder").unwrap()),
+            1 => alias.devices[0].model = "wrong-model".into(),
+            _ => alias.devices[0].size += 1,
+        }
+        let mut both = reports.clone();
+        both.push((Route::Firecracker, Some(alias)));
+        let mut cluster = service_cluster(&facts);
+        let before = cluster.clone();
+        assert!(capacity::devices::offers(&both, &facts, &mut cluster, NAMESPACE).is_err());
+        assert_eq!(cluster, before);
+    }
 }

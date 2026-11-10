@@ -33,13 +33,14 @@ pub(super) fn physical(
 pub(super) fn verify(
     runtime: &Arc<dyn Runtime>,
     id: &BoxId,
+    class: hex_api::Class,
     expected: &[hex_api::DeviceId],
 ) -> Result<(), Error> {
     if expected.is_empty() {
         return Ok(());
     }
     let report = runtime
-        .capacity(hex_api::Class::Oci)?
+        .capacity(class)?
         .ok_or_else(|| invalid("device-bearing runtime reports no binding metadata"))?;
     report.check()?;
     if expected.iter().any(|claim| {

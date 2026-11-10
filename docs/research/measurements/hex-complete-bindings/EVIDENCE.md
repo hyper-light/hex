@@ -28,6 +28,32 @@ CLI registration and combined checks. L2/L3 own their downstream matches.
 
 ## Firecracker source research
 
+## Source checkpoint 2: one physical slot across initialized backends
+
+`model::Device.classes: Classes` records the actual adapter mask. Old JSON and
+synthetic constructors default to OCI only. The existing Index admits/binds only
+through this mask and retains it during recovery/held refresh. The native offer
+bridge coalesces matching `(kind,key)` aliases into one physical slot, unions
+their backend masks, and refuses holder or metadata disagreement. ROOT owns the
+independent oracle's corresponding mask predicate in `hex-sim/src/spec.rs`.
+
+Runtime registration checks its actual advertised classes; payload and demand
+must name the same backend; recovery/reuse checks the returned physical box's
+class. Device verification queries that specific API class, removing the OCI
+assumption. New pure controls exercise a single GPU across three backends,
+uninitialized attachment refusal, alias conflicts and endpoint/payload mismatch.
+Scoped rustfmt completed; **not yet compiled/tested**. Light checks will use
+ROOT's exact `9d9dccfbd82c8e7448d67166525114d2a41a8db5` cohort with these named
+owned changes and recorded integration overlays. No native effects claimed.
+
+R01–R16 status above remains applicable: no new wait/cache/picker/holder ledger,
+bounded temporary offer identity index, no measured tuning value. All native,
+mutation, profiling, performance and complete platform gates remain ROOT-owned
+and unverified. The new masks permit only real adapter ceilings; they do not
+establish that those native adapters are implemented or validated yet.
+
+## Firecracker source research (continued)
+
 Official main on 2026-11-10 was
 `778a26c0594c80025ed798088a66c2511ba618de` (API 1.19.0-dev), with PCI support
 but no device-passthrough endpoint in its Swagger file. Hardware inference

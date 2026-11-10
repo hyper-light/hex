@@ -2765,6 +2765,7 @@ mod tests {
                 kind: crate::model::DeviceKind::Vfio,
                 key: None,
                 available: true,
+                classes: crate::model::Classes::NONE.with(crate::model::Class::Oci),
                 model: ModelId::UNNAMED,
                 size: 0,
                 load: crate::model::GpuLoad::default()
@@ -2827,6 +2828,7 @@ mod tests {
                 kind,
                 key: None,
                 available: true,
+                classes: crate::model::Classes::NONE.with(crate::model::Class::Oci),
                 model: ModelId::UNNAMED,
                 size: 1 << 30,
                 load: GpuLoad::default(),
@@ -3185,6 +3187,7 @@ mod tests {
             kind: DeviceKind::Vfio,
             key: None,
             available: true,
+            classes: crate::model::Classes::NONE.with(crate::model::Class::Oci),
             model: ModelId::UNNAMED,
             size: 0,
             load: GpuLoad::default(),

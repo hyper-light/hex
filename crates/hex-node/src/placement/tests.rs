@@ -4,6 +4,35 @@ use hex_sim::model::{Ask, Kind, Resources};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+/// AC-T7.4.1: a Firecracker route needs a Firecracker endpoint even when other endpoints can
+/// execute the same guest workload. Registration cannot relabel an OCI or Shards implementation.
+#[test]
+fn initialized_endpoint_cannot_be_relabelled_as_another_backend() {
+    for backend in [hex_api::Class::Oci, hex_api::Class::Shards] {
+        let runtime = Arc::new(hex_api::sim::SimRuntime::for_backend(backend));
+        assert!(Runtimes::new([(Class::Firecracker, runtime as Arc<dyn Runtime>)]).is_err());
+    }
+    let runtime = Arc::new(hex_api::sim::SimRuntime::for_backend(
+        hex_api::Class::Firecracker,
+    ));
+    assert!(Runtimes::new([(Class::Firecracker, runtime as Arc<dyn Runtime>)]).is_ok());
+    let (mut demand, mut payload) = request();
+    demand.class = Class::Firecracker;
+    assert!(validate(&demand, &payload).is_err());
+    let oci = OciSpec {
+        rootfs: Rootfs::Dir("/rootfs".into()),
+        init: Program::of(&["wait"]),
+        mounts: Vec::new(),
+        hostname: None,
+        network: Network::Private,
+        hosts: Vec::new(),
+    };
+    payload.spec.class = ClassSpec::Shards(Box::new(oci.clone()));
+    assert!(validate(&demand, &payload).is_err());
+    payload.spec.class = ClassSpec::Firecracker(Box::new(oci));
+    assert!(validate(&demand, &payload).is_ok());
+}
+
 #[derive(Default)]
 struct Counting {
     sim: hex_api::sim::SimRuntime,
@@ -660,7 +689,7 @@ fn blocked_owner_without_guest_backend_sends_full_payload_to_capable_peer() {
     demand.class = Class::Shards;
     // The image is Linux; Shards runs it on the macOS host's Hypervisor.framework.
     demand.ask.os = Some(Os::Linux);
-    payload.spec.class = ClassSpec::Oci(Box::new(OciSpec {
+    payload.spec.class = ClassSpec::Shards(Box::new(OciSpec {
         rootfs: Rootfs::Dir("/rootfs".into()),
         init: Program::of(&["wait"]),
         mounts: Vec::new(),

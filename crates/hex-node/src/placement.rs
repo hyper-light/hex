@@ -100,6 +100,21 @@ impl Runtimes {
     ) -> Result<Self, Error> {
         let mut by_class = BTreeMap::new();
         for (class, runtime) in entries {
+            let supported = runtime.classes();
+            let initialized = match class {
+                Class::Oci => {
+                    supported.contains(&hex_api::Class::Oci)
+                        || supported.contains(&hex_api::Class::Process)
+                }
+                Class::Firecracker => supported.contains(&hex_api::Class::Firecracker),
+                Class::Shards => supported.contains(&hex_api::Class::Shards),
+            };
+            if !initialized {
+                return Err(invalid(
+                    "runtime endpoint does not implement its configured placement backend",
+                )
+                .into());
+            }
             if by_class.insert(class, runtime).is_some() {
                 return Err(invalid("duplicate runtime class").into());
             }
@@ -119,11 +134,20 @@ impl Runtimes {
         self.by_class
             .iter()
             .map(|(&class, runtime)| {
-                let form = if runtime.classes().contains(&hex_api::Class::Oci) {
-                    hex_api::Class::Oci
-                } else {
-                    hex_api::Class::Process
+                let form = match class {
+                    Class::Oci if runtime.classes().contains(&hex_api::Class::Oci) => {
+                        hex_api::Class::Oci
+                    }
+                    Class::Oci => hex_api::Class::Process,
+                    Class::Firecracker => hex_api::Class::Firecracker,
+                    Class::Shards => hex_api::Class::Shards,
                 };
+                if !runtime.classes().contains(&form) {
+                    return Err(invalid(
+                        "registered endpoint is not initialized for its placement backend",
+                    )
+                    .into());
+                }
                 Ok((class, runtime.capacity(form)?))
             })
             .collect()
@@ -263,13 +287,24 @@ impl Driver {
             let physical = physical_id(&namespace, key)?;
             let boxed = match runtime.inspect(&physical) {
                 Ok(info) => {
+                    if info.class != payload.spec.class.class() {
+                        return Err(bad(
+                            "surviving physical box belongs to another runtime backend",
+                        )
+                        .into());
+                    }
                     if !ended && device_request(&demand) {
                         let selected =
                             peer::recorded_device_specs(rows.row(key)?, &live_node.devices)?
                                 .ok_or_else(|| {
                                     bad("a surviving device-bearing box has no durable bindings")
                                 })?;
-                        devices::verify(&runtime, &physical, &devices::physical(selected)?)?;
+                        devices::verify(
+                            &runtime,
+                            &physical,
+                            payload.spec.class.class(),
+                            &devices::physical(selected)?,
+                        )?;
                     }
                     if !ended {
                         retained = retained
@@ -677,12 +712,19 @@ impl Driver {
                 }
             };
             let made = made.and_then(|info| {
-                devices::verify(&runtime, &id, &assigned).map_err(|error| match error {
-                    Error::Runtime(why) => why,
-                    Error::Core(_) => Refusal::Broken(
-                        "native device bindings disagree with their durable reservation".into(),
-                    ),
-                })?;
+                if info.class != payload.spec.class.class() {
+                    return Err(Refusal::Broken(
+                        "physical box belongs to another runtime backend".into(),
+                    ));
+                }
+                devices::verify(&runtime, &id, payload.spec.class.class(), &assigned).map_err(
+                    |error| match error {
+                        Error::Runtime(why) => why,
+                        Error::Core(_) => Refusal::Broken(
+                            "native device bindings disagree with their durable reservation".into(),
+                        ),
+                    },
+                )?;
                 if payload.start && info.state == BoxState::Created {
                     runtime.start(&id)?;
                 }
@@ -925,14 +967,27 @@ fn validate(demand: &Demand, payload: &Payload) -> Result<(), Error> {
     if !payload.spec.devices.is_empty() {
         return Err(invalid("the receiver selects physical devices from the demand").into());
     }
-    if device_request(demand) && !matches!(&payload.spec.class, hex_api::ClassSpec::Oci(_)) {
-        return Err(invalid("device placement requires a structured OCI payload").into());
+    if device_request(demand)
+        && !matches!(
+            &payload.spec.class,
+            hex_api::ClassSpec::Oci(_)
+                | hex_api::ClassSpec::Firecracker(_)
+                | hex_api::ClassSpec::Shards(_)
+        )
+    {
+        return Err(invalid("device placement requires a structured backend payload").into());
     }
-    if payload.start && payload.spec.class.class() != hex_api::Class::Oci {
-        return Err(invalid("only OCI boxes have an init to start").into());
+    let class = payload.spec.class.class();
+    if payload.start && class == hex_api::Class::Process {
+        return Err(invalid("process boxes have no init to start").into());
     }
-    if demand.class != Class::Oci && payload.spec.class.class() != hex_api::Class::Oci {
-        return Err(invalid("microVM placement requires an OCI guest payload").into());
+    if !matches!(
+        (demand.class, class),
+        (Class::Oci, hex_api::Class::Process | hex_api::Class::Oci)
+            | (Class::Firecracker, hex_api::Class::Firecracker)
+            | (Class::Shards, hex_api::Class::Shards)
+    ) {
+        return Err(invalid("placement backend and payload class disagree").into());
     }
     let value = rows::payload_value(payload)?;
     let text = serde_json::to_string(&value).map_err(|e| bad(e.to_string()))?;

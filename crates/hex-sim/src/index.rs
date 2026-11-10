@@ -285,9 +285,10 @@ impl Slot {
             kvm: false,
             ..*ask
         };
+        let exposed_device = |index| devices.get(index).is_some_and(|d| d.classes.has(class));
         if need.gpus > 0
             && (!class.exposes(os, DeviceKind::Gpu)
-                || !fits_devices(devices, |_| true, need.gpus, &gpus_only))
+                || !fits_devices(devices, exposed_device, need.gpus, &gpus_only))
         {
             return Verdict::NoGpu;
         }
@@ -300,14 +301,16 @@ impl Slot {
             .iter()
             .all(|&(n, kind)| n == 0 || class.exposes(os, kind));
             let kvm = !ask.kvm || (self.kvm && class.gives_kvm(os));
-            if !exposed || !kvm || !fits_devices(devices, |_| true, 0, ask) {
+            if !exposed || !kvm || !fits_devices(devices, exposed_device, 0, ask) {
                 return Verdict::NoDevice;
             }
         }
         if !self.free.holds(need) || !self.runtime_holds(class, need) {
             return Verdict::NoRoom;
         }
-        if (need.gpus > 0 || ask.devices()) && !fits_devices(devices, free, need.gpus, ask) {
+        if (need.gpus > 0 || ask.devices())
+            && !fits_devices(devices, |i| exposed_device(i) && free(i), need.gpus, ask)
+        {
             return Verdict::NoRoom;
         }
         match demand.kind {
@@ -570,6 +573,7 @@ impl FitIndex {
             |i| {
                 held.get(i).is_some_and(Option::is_none)
                     && devices.get(i).is_some_and(|d| d.available)
+                    && devices.get(i).is_some_and(|d| d.classes.has(demand.class))
             },
             demand.need.gpus,
             &demand.ask,
@@ -678,6 +682,7 @@ impl FitIndex {
                             && old.key == new.key
                             && old.model == new.model
                             && old.size == new.size
+                            && old.classes == new.classes
                     })
             {
                 return Err(SimError::Config(
@@ -1087,7 +1092,7 @@ impl FitIndex {
                 return Err(SimError::Config("duplicate recovered device index"));
             }
             *used = true;
-            if !class.exposes(os, device.kind) {
+            if !class.exposes(os, device.kind) || !device.classes.has(class) {
                 return Err(SimError::Config(
                     "recovered device is not exposed by its class",
                 ));
@@ -1984,6 +1989,7 @@ mod tests {
             kind: DeviceKind::Vfio,
             key: None,
             available: true,
+            classes: crate::model::Classes::NONE.with(crate::model::Class::Oci),
             model: ModelId::UNNAMED,
             size: 0,
             load: GpuLoad::default(),
@@ -1992,6 +1998,7 @@ mod tests {
             kind: DeviceKind::Block,
             key: None,
             available: true,
+            classes: crate::model::Classes::NONE.with(crate::model::Class::Oci),
             model: ModelId::UNNAMED,
             size: 100 * GIB,
             load: GpuLoad::default(),

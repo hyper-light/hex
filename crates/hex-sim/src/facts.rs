@@ -277,6 +277,7 @@ impl Facts {
                 kind: f.kind,
                 key: None,
                 available: true,
+                classes: crate::model::Classes::NONE.with(crate::model::Class::Oci),
                 model: ModelId::UNNAMED,
                 size: f.size,
                 load: GpuLoad::default(),

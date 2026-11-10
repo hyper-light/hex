@@ -56,6 +56,7 @@ fn device(kind: DeviceKind, size: u64) -> Device {
         kind,
         key: None,
         available: true,
+        classes: hex_sim::model::Classes::NONE.with(hex_sim::model::Class::Oci),
         model: ModelId::UNNAMED,
         size,
         load: GpuLoad::default(),

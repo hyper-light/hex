@@ -44,6 +44,8 @@ pub struct SimRuntime {
     /// Whether TERM ends an `oci` box's init, as [`Fixture::term_ends_init`] says of the class it
     /// stands for.
     term_ends_init: bool,
+    /// A specific initialized endpoint, when exercising routing between distinct backends.
+    backend: Option<Class>,
 }
 
 struct SimBox {
@@ -102,6 +104,14 @@ fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
 impl SimRuntime {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The same simulated implementation restricted to the initialized backend the caller names.
+    pub fn for_backend(class: Class) -> Self {
+        Self {
+            backend: Some(class),
+            ..Self::default()
+        }
     }
 
     /// A simulator whose `oci` inits end on TERM when `ends`, as the class whose oracle it is does.
@@ -203,16 +213,28 @@ fn write(to: Option<&mut std::io::PipeWriter>, bytes: &[u8]) {
 
 impl Runtime for SimRuntime {
     fn classes(&self) -> Vec<Class> {
-        vec![
-            Class::Process,
-            Class::Oci,
-            Class::Firecracker,
-            Class::Shards,
-        ]
+        match self.backend {
+            Some(class) => vec![class],
+            None => vec![
+                Class::Process,
+                Class::Oci,
+                Class::Firecracker,
+                Class::Shards,
+            ],
+        }
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
         spec.check_no_devices("sim")?;
+        if self
+            .backend
+            .is_some_and(|class| class != spec.class.class())
+        {
+            return Err(Refusal::Invalid {
+                what: "simulated backend",
+                why: "payload belongs to another initialized backend".into(),
+            });
+        }
         match &spec.class {
             ClassSpec::Oci(oci) | ClassSpec::Firecracker(oci) | ClassSpec::Shards(oci) => {
                 oci.init.fits(&SIM_EXEC_LIMIT)?

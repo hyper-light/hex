@@ -179,6 +179,10 @@ pub struct Device {
     /// Live backend room for a fresh holder; exact existing reservations remain authoritative.
     #[serde(default = "device_available")]
     pub available: bool,
+    /// Initialized attachment adapters for this exact identity. One physical slot and holder are
+    /// shared by all listed classes; an adapter never creates another slot for the same hardware.
+    #[serde(default = "legacy_device_classes")]
+    pub classes: Classes,
     pub model: ModelId,
     pub size: u64,
     pub load: GpuLoad,
@@ -188,6 +192,10 @@ fn device_available() -> bool {
     true
 }
 
+fn legacy_device_classes() -> Classes {
+    Classes::NONE.with(Class::Oci)
+}
+
 impl Device {
     /// A GPU of `model` with `memory` bytes, idle.
     pub fn gpu(model: ModelId, memory: u64) -> Self {
@@ -195,6 +203,7 @@ impl Device {
             kind: DeviceKind::Gpu,
             key: None,
             available: true,
+            classes: legacy_device_classes(),
             model,
             size: memory,
             load: GpuLoad::default(),
@@ -398,7 +407,12 @@ impl NodeSpec {
             .iter()
             .filter(|d| d.kind == DeviceKind::Gpu)
             .count();
-        self.devices.len() <= DEVICES && u32::try_from(gpus) == Ok(self.capacity.gpus)
+        self.devices.len() <= DEVICES
+            && u32::try_from(gpus) == Ok(self.capacity.gpus)
+            && self
+                .devices
+                .iter()
+                .all(|device| device.classes.0 != 0 && device.classes.0 & !Classes::ALL.0 == 0)
     }
 }
 
@@ -427,14 +441,17 @@ impl Class {
     /// the device in by CDI, as Kubernetes' device plugins do ([21][55] there), a VFIO group, a block
     /// device or a network device moved into its namespace. On Windows, a process-isolated container
     /// is given a GPU by its device interface class (the class Hex's Windows `oci` grants), and no
-    /// device whole. A Firecracker microVM can be given none: its mainline emulates six devices and
-    /// passes none through ([25]-[28] there). Nor, yet, can a Shards microVM placed by Hex: Shards'
-    /// VMM gives a guest a shared Venus GPU, or on Linux a PCI function by VFIO, but shards-api,
-    /// Hex's one seam to it, names no device ([58]-[60] there).
+    /// device whole. Firecracker's pinned VFIO adapter runs on Linux KVM; Shards' exact renderer
+    /// adapter also works on macOS and Windows. These are physical ceilings only: each Device's
+    /// classes mask must additionally name the initialized adapter for that identity.
     pub fn exposes(self, os: Os, kind: DeviceKind) -> bool {
         match (self, os) {
             (Class::Oci, Os::Linux) => true,
             (Class::Oci, Os::Windows) => kind == DeviceKind::Gpu,
+            (Class::Oci, Os::Macos) => kind == DeviceKind::Gpu,
+            (Class::Firecracker, Os::Linux) => matches!(kind, DeviceKind::Gpu | DeviceKind::Vfio),
+            (Class::Shards, Os::Linux) => matches!(kind, DeviceKind::Gpu | DeviceKind::Vfio),
+            (Class::Shards, Os::Macos | Os::Windows) => kind == DeviceKind::Gpu,
             _ => false,
         }
     }
