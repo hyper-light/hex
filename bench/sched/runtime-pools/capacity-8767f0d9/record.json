@@ -1,0 +1,1489 @@
+{
+  "requirement": "AC-T7.4.1",
+  "source_revision": "8767f0d9c03f37c64c9c86301bceaa878f7eb495",
+  "tree": "1be5e7a8765aa48854b0727d2e6cabc9685e9768",
+  "status": "capacity batch validated on native Mac/Windows and physical guests; final Linux gate and later recovery-guard batch remain open",
+  "policy": {
+    "role": "coordinator",
+    "task": "Hex capacity-derived scheduler admission and durable recovery",
+    "revision": "eb5654d6f5356cacaca536ff51f14a632fa7e801",
+    "hashes": {
+      "AGENTS.md": "5fd5c2bc14079994c7390926c8f3865efdfedf066faa9c33d7dc361697aeea28",
+      "docs/development-rules.md": "d634fcb944959ce1e40a9277d12b0905fcfcebf82d9da9832e826f790a349242",
+      "docs/development-evidence.md": "a84c60f20e3a06a294bd5b091c1f43cfd5cc4b33ef1bd22a50cd94cea07bb97b",
+      "CLAUDE.md": "54c3ad93162608248419fe54c42d14bd00ed3cf6aebaf99b78a1c4d83acd28a1"
+    },
+    "owned_paths": [
+      "crates/hex-node/src/placement*",
+      "crates/hex-node/src/scheduler*",
+      "crates/hex-sim/src/peer.rs"
+    ],
+    "at": "2026-11-10T15:44:08.798160+00:00"
+  },
+  "commits": {
+    "files_child": "8a3d40a3ffa26398778124486a268521f8a62e0c",
+    "budget_child": "b84e367622dccaf42abaf263ed575c1b322d594d",
+    "peer_count_child": "bd2bbe7fa97e298639b575184e93487461b3f91a",
+    "root_implementation": "be3d01cdde970694483968c1b12cbd72d3f467fa",
+    "recovery_tests_child": "e35a627c93df903bf76205ea479c1ecd8a90abd0",
+    "root_effect_witness": "16b0a5ae92382cb0bb390d32985144cc7bf93551",
+    "root_fixture_isolation": "8767f0d9c03f37c64c9c86301bceaa878f7eb495"
+  },
+  "focused": {
+    "source_revision": "8767f0d9c03f37c64c9c86301bceaa878f7eb495",
+    "source_tree": "1be5e7a8765aa48854b0727d2e6cabc9685e9768",
+    "source_archive_sha256": "e74686e3f56ece59993170ba0f3c477129cc238da1d28d721c8a7f2be3cfa917",
+    "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+    "driver_pid": 59807,
+    "resources": "cpus4 mem4g disk12g",
+    "commands": [
+      {
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "test",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked",
+          "--target",
+          "aarch64-apple-darwin"
+        ],
+        "exit": 0
+      },
+      {
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "clippy",
+          "-p",
+          "hex-node",
+          "--all-targets",
+          "--locked",
+          "--target",
+          "aarch64-apple-darwin",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit": 0
+      },
+      {
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "test",
+          "-p",
+          "hex-sim",
+          "--lib",
+          "--locked",
+          "--target",
+          "aarch64-apple-darwin",
+          "peer::"
+        ],
+        "exit": 0
+      }
+    ],
+    "exit": 0,
+    "log_sha256": "eee3cd7b67df74b31d7ab035ceeb0c54b66f6932f3aa5f42542dece104d472d4"
+  },
+  "focused_summaries": [
+    "test result: ok. 127 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 23.09s",
+    "test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 134 filtered out; finished in 0.11s"
+  ],
+  "mutations": {
+    "run": "r682",
+    "driver_exit": 0,
+    "phases": [
+      {
+        "phase": "fixed-placement",
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "test",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked",
+          "--target",
+          "aarch64-apple-darwin",
+          "placement::tests::",
+          "--",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "exit": 0,
+        "expected": 0,
+        "sha256": "4a73365c32ffa74bba7597ac5d5f02eb0a3d6afe16f94550ece6aaee561b8804"
+      },
+      {
+        "phase": "fixed-queued",
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "test",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked",
+          "--target",
+          "aarch64-apple-darwin",
+          "scheduler::tests::queued_control_limit_is_global_and_survives_shrink_and_disconnect",
+          "--",
+          "--nocapture",
+          "--test-threads=1",
+          "--exact"
+        ],
+        "exit": 0,
+        "expected": 0,
+        "sha256": "8ac5c5c730f942fac4af37562249dc611870f06ec5b0d8358204a9373de8382d"
+      },
+      {
+        "phase": "fixed-dispatch",
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "test",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked",
+          "--target",
+          "aarch64-apple-darwin",
+          "scheduler::tests::dispatch_control_refuses_at_global_limit_and_returns_failed_send_permits",
+          "--",
+          "--nocapture",
+          "--test-threads=1",
+          "--exact"
+        ],
+        "exit": 0,
+        "expected": 0,
+        "sha256": "8f1dc07c78d5654cf285bfa7d18ec213af2e9d7e59b13e96b0ec9ad8549d719b"
+      },
+      {
+        "phase": "mutant-recovery-floor",
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "test",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked",
+          "--target",
+          "aarch64-apple-darwin",
+          "placement::tests::recovery_floor_cannot_admit_a_replacement_above_current_budget",
+          "--",
+          "--nocapture",
+          "--test-threads=1",
+          "--exact"
+        ],
+        "exit": 101,
+        "expected": 101,
+        "sha256": "2a95b09ab905e11ddf06fe9bd7265f4065ec4239af3b05308fe5ee03a9390f4b"
+      },
+      {
+        "phase": "restored-recovery-floor",
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "test",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked",
+          "--target",
+          "aarch64-apple-darwin",
+          "placement::tests::recovery_floor_cannot_admit_a_replacement_above_current_budget",
+          "--",
+          "--nocapture",
+          "--test-threads=1",
+          "--exact"
+        ],
+        "exit": 0,
+        "expected": 0,
+        "sha256": "22b3f2858a2d01496007352b3e684eff19c844caea4d2b90e0190bd9890faf6b"
+      },
+      {
+        "phase": "mutant-uncommitted-growth",
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "test",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked",
+          "--target",
+          "aarch64-apple-darwin",
+          "placement::tests::failed_durable_budget_growth_does_not_admit_another_runtime_create",
+          "--",
+          "--nocapture",
+          "--test-threads=1",
+          "--exact"
+        ],
+        "exit": 101,
+        "expected": 101,
+        "sha256": "f410de5e1b76e47921014b36d383c0132984f433f60a12145c73b6a1a40c7f53"
+      },
+      {
+        "phase": "restored-uncommitted-growth",
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "test",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked",
+          "--target",
+          "aarch64-apple-darwin",
+          "placement::tests::failed_durable_budget_growth_does_not_admit_another_runtime_create",
+          "--",
+          "--nocapture",
+          "--test-threads=1",
+          "--exact"
+        ],
+        "exit": 0,
+        "expected": 0,
+        "sha256": "64fab41a13ce063326d2f40f539f9e60df4e80e6b1aeff2b82b643e6e5a32fd1"
+      },
+      {
+        "phase": "mutant-queue-permit-return",
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "test",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked",
+          "--target",
+          "aarch64-apple-darwin",
+          "scheduler::tests::queued_control_limit_is_global_and_survives_shrink_and_disconnect",
+          "--",
+          "--nocapture",
+          "--test-threads=1",
+          "--exact"
+        ],
+        "exit": 101,
+        "expected": 101,
+        "sha256": "ca8a104b17b90cbf6d221460c55e436a9832f87c5f5f7eb5fc690cf9824871c7"
+      },
+      {
+        "phase": "restored-queue-permit-return",
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "test",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked",
+          "--target",
+          "aarch64-apple-darwin",
+          "scheduler::tests::queued_control_limit_is_global_and_survives_shrink_and_disconnect",
+          "--",
+          "--nocapture",
+          "--test-threads=1",
+          "--exact"
+        ],
+        "exit": 0,
+        "expected": 0,
+        "sha256": "644144b3b654c36b7039102f1d10ebf9da0332f39811cd5c0cb0ea1457ee4337"
+      },
+      {
+        "phase": "mutant-queue-upper-bound",
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "test",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked",
+          "--target",
+          "aarch64-apple-darwin",
+          "scheduler::tests::dispatch_control_refuses_at_global_limit_and_returns_failed_send_permits",
+          "--",
+          "--nocapture",
+          "--test-threads=1",
+          "--exact"
+        ],
+        "exit": 101,
+        "expected": 101,
+        "sha256": "630672521893ca647b1c97f80c04fb56f1752ad0c5be933455daa9cc45b73df5"
+      },
+      {
+        "phase": "restored-queue-upper-bound",
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "test",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked",
+          "--target",
+          "aarch64-apple-darwin",
+          "scheduler::tests::dispatch_control_refuses_at_global_limit_and_returns_failed_send_permits",
+          "--",
+          "--nocapture",
+          "--test-threads=1",
+          "--exact"
+        ],
+        "exit": 0,
+        "expected": 0,
+        "sha256": "30fbf5b78b83da77860d961d25421a81aee66373a898271441b8fe3636a51476"
+      }
+    ],
+    "source_restore": {
+      "crates/hex-node/src/placement.rs": "4146cb447351386aeddcdb4bedf18418a3cef2a8af537a39dbc34d7a7df1df86",
+      "crates/hex-node/src/placement/rows.rs": "f0c584d23ac41bf0dff816d2a59d6419c9e6c09e9d7bba1ce1b2c47f1b07f58b",
+      "crates/hex-node/src/scheduler.rs": "63db21fb3050ee10212404f3a4897bbfd026b3a4f6ffad65ab2a838412290b9c"
+    },
+    "effects": "Recovery guard removal caused third Runtime.create with two live boxes after deleting one; skipping durable growth caused second Runtime.create with two live. Both cleaned up before final assertions. Queue-return/upper-bound guards each cause the corresponding invariant failure.",
+    "limits": "SimRuntime and actual in-process channels, not OS isolation/VM forbidden-effect evidence."
+  },
+  "windows": {
+    "tests": {
+      "argv": [
+        "+1.99.1",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "--target",
+        "x86_64-pc-windows-msvc"
+      ],
+      "source_revision": "8767f0d9c03f37c64c9c86301bceaa878f7eb495",
+      "exit": 0,
+      "stdout_sha256": "b7a951fcb5baf7d9db2016a85e2bc01afff310e729f932d53933dce86b9c6cba",
+      "stderr_sha256": "c1d97d24de440bf04ea86f8a42f497afe3389760a5e3ff4063243449d14a7793",
+      "summary": [
+        "test result: ok. 121 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.52s"
+      ]
+    },
+    "clippy": {
+      "argv": [
+        "+1.99.1",
+        "clippy",
+        "-p",
+        "hex-node",
+        "--all-targets",
+        "--locked",
+        "--target",
+        "x86_64-pc-windows-msvc",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "source_revision": "8767f0d9c03f37c64c9c86301bceaa878f7eb495",
+      "exit": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "a33354efedde522afc2c37f04593321c98b9acc9d939ef3886ff29ff5e1807c4",
+      "summary": []
+    }
+  },
+  "build": {
+    "source_revision": "8767f0d9c03f37c64c9c86301bceaa878f7eb495",
+    "source_tree": "1be5e7a8765aa48854b0727d2e6cabc9685e9768",
+    "exit": 0,
+    "commands": [
+      {
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "build",
+          "--locked",
+          "--manifest-path",
+          "/Users/adalundhe/.cache/hex-lead/snapshots/capacity-8767f0d9/Cargo.toml",
+          "--target",
+          "aarch64-apple-darwin",
+          "--bin",
+          "hex",
+          "-p",
+          "hex-cli"
+        ],
+        "exit": 0
+      },
+      {
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "build",
+          "--locked",
+          "--manifest-path",
+          "/Users/adalundhe/.cache/hex-lead/snapshots/capacity-8767f0d9/Cargo.toml",
+          "--target",
+          "aarch64-apple-darwin",
+          "--bin",
+          "hex",
+          "-p",
+          "hex-cli",
+          "--release"
+        ],
+        "exit": 0
+      },
+      {
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "build",
+          "--locked",
+          "--manifest-path",
+          "/Users/adalundhe/.cache/hex-lead/snapshots/capacity-8767f0d9/Cargo.toml",
+          "--target",
+          "aarch64-unknown-linux-musl",
+          "--bin",
+          "hex",
+          "-p",
+          "hex-cli",
+          "--release"
+        ],
+        "exit": 0
+      },
+      {
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "build",
+          "--locked",
+          "--manifest-path",
+          "/Users/adalundhe/.cache/hex-lead/snapshots/capacity-8767f0d9/bench/sched/runtime-pools/census/runtime-probe/Cargo.toml",
+          "--target",
+          "aarch64-apple-darwin",
+          "--bin",
+          "hex-scheduler-runtime-probe"
+        ],
+        "exit": 0
+      },
+      {
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "build",
+          "--locked",
+          "--manifest-path",
+          "/Users/adalundhe/.cache/hex-lead/snapshots/capacity-8767f0d9/bench/sched/runtime-pools/census/runtime-probe/Cargo.toml",
+          "--target",
+          "aarch64-apple-darwin",
+          "--bin",
+          "hex-scheduler-runtime-probe",
+          "--release"
+        ],
+        "exit": 0
+      },
+      {
+        "argv": [
+          "/Users/adalundhe/.cache/hex-lead/python-3.13.18-20261026/python/bin/python3",
+          "-I",
+          "/Users/adalundhe/.cache/hex-lead/snapshots/capacity-8767f0d9/scripts/guest/initramfs.py",
+          "/Users/adalundhe/.cache/hex-lead/target-capacity-8767f0d9-binaries/aarch64-unknown-linux-musl/release/hex",
+          "/Users/adalundhe/.cache/hex-lead/capacity-8767f0d9-build/initramfs-8767f0d9-aarch64.cpio"
+        ],
+        "exit": 0
+      }
+    ],
+    "artifacts": {
+      "hex_debug": {
+        "path": "/Users/adalundhe/.cache/hex-lead/target-capacity-8767f0d9-binaries/aarch64-apple-darwin/debug/hex",
+        "bytes": 19100568,
+        "sha256": "ff0a1cec8c8269c37de5a0000b3b8ad5346308eec339b4dcd1e5a8ec6d1c57e2"
+      },
+      "hex_release": {
+        "path": "/Users/adalundhe/.cache/hex-lead/target-capacity-8767f0d9-binaries/aarch64-apple-darwin/release/hex",
+        "bytes": 4574152,
+        "sha256": "9b2d293d666d76d79d65e56025c5f202c1ad25fab64a8738c41aa86729228051"
+      },
+      "linux_hex": {
+        "path": "/Users/adalundhe/.cache/hex-lead/target-capacity-8767f0d9-binaries/aarch64-unknown-linux-musl/release/hex",
+        "bytes": 29997880,
+        "sha256": "5caf88d7c6f5d904586e9857e0c58c0d59db07bb811e16632b1520ebbba6c564"
+      },
+      "runtime_probe_debug": {
+        "path": "/Users/adalundhe/.cache/hex-lead/target-capacity-8767f0d9-binaries/aarch64-apple-darwin/debug/hex-scheduler-runtime-probe",
+        "bytes": 4410480,
+        "sha256": "e3cc9b630489075be4b5cfd1c70aec99d055f1adbd60a36e003aa3be397d41e6"
+      },
+      "runtime_probe_release": {
+        "path": "/Users/adalundhe/.cache/hex-lead/target-capacity-8767f0d9-binaries/aarch64-apple-darwin/release/hex-scheduler-runtime-probe",
+        "bytes": 1383456,
+        "sha256": "f7f4e9094edea0a3a6f9b0d7201d3c3bceed40173da94c456df7524a943d7cbc"
+      },
+      "initrd": {
+        "path": "/Users/adalundhe/.cache/hex-lead/capacity-8767f0d9-build/initramfs-8767f0d9-aarch64.cpio",
+        "bytes": 29998360,
+        "sha256": "618f399b1e9018d45f5014ce18c5756405e8d05fbd43a65484236aebc21e36ba"
+      },
+      "kernel": {
+        "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/Image-6.18.48-aarch64",
+        "bytes": 19091968,
+        "sha256": "1b178851998d27b4c6c346ae391c26d675f81461fbaa19cbe514500291fe472d"
+      },
+      "shards": {
+        "path": "/Users/adalundhe/.cache/hex-lead/target-shards-vm-tool/release/shards",
+        "bytes": 33588600,
+        "sha256": "b9d74f0910a54593b66f604ffe36e39d588c89afea60d4643e37813200daa61e"
+      }
+    },
+    "wire_inputs": {
+      "crates/hex-core/src/wire.rs": "9084c6bd7fcc3269306c6cf7a500c6621cc084b9fb826b0dd4a748f889a7b03f",
+      "crates/hex-core/src/stream.rs": "b859ac75d4c609ad73c055e220d71a1d769e088573739e2093ccf840fcd98c97",
+      "crates/hex-core/src/schedule.rs": "7509faf7dc3b5cc034dd35bd932acfd1429c7ca3677c9394f012701065b67b0c",
+      "crates/hex-sim/src/peer.rs": "3bdec78b35be0c93c491ad65b5b268b312702c56a98202cae01bfe510903c120",
+      "crates/hex-sim/src/model.rs": "696cd6a34f5e0f7801955da1512ef942c1f84390f8f52a1f09a8e7dd7252f3ea",
+      "crates/hex-api/src/spec.rs": "e13ff2a7069d7f917ce42193184119e83b03b6167325af03055694d795cfde4d",
+      "crates/hex-api/src/id.rs": "b2691fa11fd8788fb8b013e67dcb441658708049e7b220dfdf5117588278dbe2",
+      "crates/hex-api/src/bounds.rs": "54876217b8f7494f7f23cedc2b4060dd14d884424a1d8192cd30f71dc0f030e8"
+    },
+    "log_sha256": "233e5a51b49d83c72c449b304085c05571e1e9d47899c787fa3c2f3618bbf82a",
+    "scope": "matching native host/probe/static Linux guest/initrd build only; no physical execution or timing claim"
+  },
+  "constructor_record": "../queue-constructor-allocation-09ef773b/result.json",
+  "raw_archives": {
+    "mac-focused-mutations-build.tar.gz": "f8fa1b19adb47e7754a7db694f82cf5a951896fe6aba3ba38bab594721b3d3bc",
+    "windows-node.tar.gz": "7353d11b2ad32766ebe9a27959e888f5636dad5a3e2f9e268cd962561ce62001",
+    "terminal-proof.tar.gz": "17f892373798fdb10b5d45a8b5778b9801e740db366ee95cde108f3d9180d05d"
+  },
+  "known_negatives": [
+    "Initial sourcef885 focused driver failed before checks because rustc version lookup ran outside the pinned toolchain cwd. V2 selected1.99.1 explicitly; original failure retained.",
+    "r679 source16 growth mutation encountered the injected epoch.tmp fault during later launch-observation persistence, before its intended effect assertion. Not accepted as growth proof. Source87 isolates that injection; r682 confirms actual excess creation.",
+    "Original r584 physical Submit expiry and old Delete/guest_loop failures remain historical negatives with their original receipts; no causal rewrite."
+  ],
+  "pending_checks": [
+    "native Linux AMD64 current-final-tree seven gates and rootlab under admitted12CPU40GiB",
+    "separate later immutable recovery-payload guard: combined tests, root mutation/native proof and current-source gates",
+    "full-goal evidence reconciliation and final gated main-first landing/push"
+  ],
+  "rules": {
+    "R01": {
+      "proof": "New count additions/multiplications/conversions are checked. The ID vector is fallibly reserved; configured peers are a sorted fallibly reserved vector. Reused mutex poison/error paths remain typed. No new unsafe or production panic macro. Native node Clippy passed on Mac/Windows.",
+      "limit": "Standard channel/map/JSON allocation failure and whole-process hard memory accounting are not certified by these tests."
+    },
+    "R02": {
+      "proof": "Root inspected the pinned Kiln LB/placement budget implementation; its tenant escrow authority is not a metadata population bound. This adaptation uses existing checked Hex finite resource minima, configured membership, persisted state and the same peer core. Rust1.99.1 official channel docs plus r671 live alternatives justify storage choice.",
+      "sources": [
+        "https://doc.rust-lang.org/1.99.1/std/sync/mpsc/fn.sync_channel.html",
+        "https://doc.rust-lang.org/1.99.1/std/sync/mpsc/fn.channel.html",
+        "https://doc.rust-lang.org/1.99.1/std/sync/mpsc/struct.Sender.html#method.send",
+        "kiln a63dd98ef6d7601c0d6fbd7a6abef4986e697d33:crates/kiln-ci/src/place/budget.rs"
+      ]
+    },
+    "R03": {
+      "proof": "Physical upper count=min(cpu/MIN_CPU_MILLI,memory/MIN_MEMORY), only for supported classes. Classes do not multiply shared room. Owner bound sums endpoints; absent facts retain one pending intent per configured endpoint, not a physical grant. Directory bound is one rec and one temp per row. One epoch row and one coalesced refresh per configured peer are structural. Names derive from u32/u64 key widths.",
+      "legacy": "65,536 per kind is ONLY a read migration ceiling for published main8d envelopes lacking metadata, never new admission. MOST/default Files constructor are test-only. All overflow/unknown/duplicate-ID cases refuse."
+    },
+    "R04": {
+      "proof": "Durable read-ceiling growth precedes core admission growth; failed writes leave active admission unchanged. Boot validates retained rows under a recovery floor then sets current admission. Reduction never erases rows. Queued/in-flight permits remain owned until word drop; shrink refuses new words, disconnect returns ownership. Typed failures remain through wire encoding."
+    },
+    "R05": {
+      "proof": "Existing Rows/peer Node remain authoritative; no count cache or second manager added. No per-put directory scans. Existing refresh flag coalesces one outstanding peer refresh; the existing global Permit owns all queued/in-flight words. Linked channel recv uses completion notification. Existing fact cache remains configured-peer-scoped with canonical/type checks and atomic replacement.",
+      "limit": "Retained-row scan cost at large populations and total induced parent/kernel storage cost are not measured here."
+    },
+    "R06": {
+      "proof": "Population arithmetic is isolated in the existing placement seam. Recovery metadata, count validation and current admission have focused helpers; scheduler updates them at existing fact refresh/advertise transitions."
+    },
+    "R07": {
+      "proof": "Comments explain minima, mixed retained-kind populations, durable ordering, read-only legacy format and shared permit/storage invariant; obsolete compatibility wrappers removed."
+    },
+    "R08": {
+      "proof": "Pinned same-binary bounded-vs-linked constructor comparison retained in queue-constructor-allocation-09ef773b/result.json with twelve raw samples.",
+      "limit": "No whole-scheduler competitive ratio, loaded throughput/latency result, or achievement of the broad4-5x target is claimed."
+    },
+    "R09": {
+      "proof": "Root r671 reproduced empty per-peer preallocation before replacing storage. Child focused count-bound RED results retained in returned records. Root r682 exercises actual forbidden extra SimRuntime.create under independent recovery and durable-growth guard removals; restores pass.",
+      "limit": "No cause of original physical Submit timeout is inferred. r679 growth mutation was fixture-confounded and is NOT accepted as effect proof."
+    },
+    "R10": {
+      "proof": "Signed source checkpoints, full raw focused/mutation/build logs, exact source readbacks and all11 phase log hashes are retained. Root verified one-guard differences/restoration against Git. Native Windows source and raw logs were independently hashed. ROOT also archived the terminal full workspace log and physical reconstructions: all453416 physical ledger rows independently checked, exact identities and saved backend reaps joined."
+    },
+    "R11": {
+      "proof": "Source87 native Mac127node+24peer and Clippy, native Windows121node+Clippy. Matching source87 host/probes/static ARM Linux/initrd built and4000 actual physical local/SSH lifecycles passed. Source16 full seven-target workspace gate exit0,931passed/0failed/13ignored; production inputs equal87/06. Source06 two Service regressions and native node Clippy exit0. No result applies automatically to the later recovery-payload production guard.",
+      "limit": "Not native AMD64 Linux/rootlab, real Windows ARM/HCS/WHP, actual GPU attachment, Firecracker or all libc/kernel variants. Paused Windows ARM VM untouched."
+    },
+    "R12": {
+      "proof": "Same pure budget/peer transition core and std channel/file implementation on all OSes; no new OS adapter or installed binary. Shards tool/kernel pins unchanged."
+    },
+    "R13": {
+      "proof": "Removed production default read/order wrappers and picked scheduler caps; existing Files/Rows/Node/Permit own the behavior. Historical fixture conveniences are cfg(test) only."
+    },
+    "R14": {
+      "proof": "Root alone ran constructor Rust layout counters and native time/fault/RSS collection, paired by count/mode with n3. Raw before/held/after data and nearest-rank summaries retained. No runtime number copied from measurement.",
+      "limit": "Requested layouts are not usable allocations or C/copy/parent/kernel charges. Empty constructor scope; n3 has little tail resolution. No leak-free/allocation-free/full-service fast claim."
+    },
+    "R15": {
+      "proof": "Children implemented Files, capacity helper, configured cache/order, test-only diagnostic and source-only recovery tests with required policy readbacks. Root reviewed/cherry-picked and owns integration, measurements, guard mutations, native suites, all gates and physical jobs. No children ran heavy E2E/audits/profiles or merged main."
+    },
+    "R16": {
+      "proof": "No laptop builds/tests/benches. Private remote targets and declared needs/nice10 used; cache/source/evidence preserved. Local free33,041,301,504B at collection exceeds30GiB; monitor other-session growth. No Fedora/headroom bypass/runner change/paused VM activity. Exact owned Popen/PID cleanup only."
+    }
+  },
+  "full_workspace_gate": {
+    "source_revision": "16b0a5ae92382cb0bb390d32985144cc7bf93551",
+    "source_tree": "39a0ebea373b4bb66f5fe169790cd47b663b5670",
+    "argv": [
+      "nice",
+      "-n",
+      "10",
+      "bash",
+      "scripts/gates.sh"
+    ],
+    "exit": 0,
+    "resources": "8cpu 24gmem 30gdisk",
+    "log_sha256": "2e3ffc3c4e5f8dee33b2aca2d4a5948611f0b059f2f96864de40e9ee039c0e8b",
+    "scope": "fmt/seven-target workspace lints/production/native Mac workspace/vendor; not native AMD64 Linux rootlab or Windows execution",
+    "counts": {
+      "passed": 931,
+      "failed": 0,
+      "ignored": 13
+    },
+    "summaries": [
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 35.65s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.30s",
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.22s",
+      "test result: ok. 17 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 16.56s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s",
+      "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 302 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 4.57s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 127 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.81s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 60 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s",
+      "test result: ok. 158 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.78s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.63s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.70s",
+      "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.10s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 699.90s",
+      "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.33s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.51s",
+      "test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 5.63s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 376.37s",
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s",
+      "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s",
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.60s",
+      "test result: ok. 4 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 63.70s",
+      "test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 138.81s",
+      "test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 25.62s",
+      "test result: ok. 10 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.42s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    ],
+    "root_run": "r678",
+    "production_equivalence": "Compiled production inputs equal8767/06; only tests differ. This is not validation of the later recovery-payload production guard."
+  },
+  "service_advertise_controls": {
+    "source_revision": "06e6dbeddebd1b910eed5bfdc7c04179989b46a5",
+    "source_tree": "abe0503b57de86ef5b0557b82ab80d88829cfc17",
+    "source_archive_sha256": "1e23d94a7a36210adf16cf2c2e079643021f9d1f094066660f7aef879c960909",
+    "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+    "driver_pid": 99106,
+    "resources": "cpus4 mem4g disk12g",
+    "commands": [
+      {
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "test",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked",
+          "--target",
+          "aarch64-apple-darwin",
+          "scheduler::tests::service_advertise_",
+          "--",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "exit": 0
+      },
+      {
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "clippy",
+          "-p",
+          "hex-node",
+          "--all-targets",
+          "--locked",
+          "--target",
+          "aarch64-apple-darwin",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit": 0
+      }
+    ],
+    "exit": 0,
+    "log_sha256": "433cf8e5a91a6256a3b6593aeb13ba51e6a5f5c618f927ed35b1ee6b11c67914",
+    "root_run": "r700",
+    "selected_passed": 2,
+    "failed": 0,
+    "scope": "Two exact Service advertisement regressions and native all-target node Clippy, source06 tests-only versus87."
+  },
+  "physical": {
+    "debug": {
+      "run": "r690",
+      "summary": {
+        "profile": "debug",
+        "exit": 0,
+        "result": "/Users/adalundhe/.cache/hx/e-2k8tsxgv/result.json",
+        "sha256": "d1b64b551865c4db8c8daaff9a4f3d8789c581ed8d1017511d9a8da364582420",
+        "status": "passed",
+        "retirement": {
+          "end": "Stopped",
+          "guest_stopped": true,
+          "pid": 54133,
+          "started": 12736793116744
+        },
+        "created": 2000,
+        "deleted": 2000,
+        "baseline": true,
+        "error": null,
+        "cleanup_error": null,
+        "backend_cleanup_error": null
+      },
+      "root_reconstruction": {
+        "actual_census_directory_entries": 0,
+        "authority_inputs": {
+          "call.log": {
+            "bytes": 3135888,
+            "sha256": "a176cf32d8ee1c9566132349ff4fe9531b02ceb4835d118462a8c036854964a8"
+          },
+          "hex-version.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "keygen-client-0.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "keygen-client-1.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "keygen-host-key.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "l.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "o.log": {
+            "bytes": 79560,
+            "sha256": "831614f98fe4e6442af91723d17d5f4f05590365a7658cd69337deb40ec4055b"
+          },
+          "owned-guest.json": {
+            "bytes": 618,
+            "sha256": "1a85bcbbdc58699cbab2e53b5d8173a3f48d7b94af9c9733ad2a76809cac0d06"
+          },
+          "pid-check.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "pids.jsonl": {
+            "bytes": 56110532,
+            "sha256": "830c0c245ad0ab27389e503bfb1802a2abb5d0c14936cd5f9158a7227bc21ade"
+          },
+          "r.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "real.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "real.node-state/@guest": {
+            "bytes": 131,
+            "sha256": "aea6cb63c331e54d4a02904d62817105eb518a97c1aba1015698792ea1a0b520"
+          },
+          "result.json": {
+            "bytes": 4782,
+            "sha256": "d1b64b551865c4db8c8daaff9a4f3d8789c581ed8d1017511d9a8da364582420"
+          },
+          "runtime-probe.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "runtime.json": {
+            "bytes": 952,
+            "sha256": "235add4a49f92c033facb1978edff31e5f94fd685d60ebaa1ccf4a5cbd6e0097"
+          },
+          "sshd-10.log": {
+            "bytes": 166,
+            "sha256": "5996283b716c21b31ae4a02898e4c61243e24ac4d050ccd69764022bed49c646"
+          },
+          "sshd-12.log": {
+            "bytes": 664,
+            "sha256": "f1b2a4325dfccd243d7ccd45374ed4e05df17c0943998219e82c0eae08001a59"
+          },
+          "sshd-13.log": {
+            "bytes": 581,
+            "sha256": "92ff5b5ee487df06c5a92b37738d96bfedc4afef3d8616310200cb4ab9811ee0"
+          },
+          "sshd-14.log": {
+            "bytes": 14442,
+            "sha256": "37dea45eef80eec6c8ae90e5c6a65e19e322d6b7039c611a3ea990f11c0f2661"
+          },
+          "sshd-4.log": {
+            "bytes": 27888,
+            "sha256": "7aaf4c9354d4c2ec86a8413a9ef788b987cac36103a09a07006dbd9a7b61255e"
+          },
+          "sshd-5.log": {
+            "bytes": 39425,
+            "sha256": "7326fd79c8a325a8878a1095973f19580b2cad95219b1f6e155ddad2a19daa4e"
+          },
+          "sshd-effective.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        },
+        "backend_baseline_restored": true,
+        "declared_config": {
+          "binary": "/Users/adalundhe/.cache/hex-lead/target-shards-vm-tool/release/shards",
+          "initrd": "/Users/adalundhe/.cache/hex-lead/capacity-8767f0d9-build/initramfs-8767f0d9-aarch64.cpio",
+          "kernel": "/Users/adalundhe/.cache/hex-lead/vm-assets/Image-6.18.48-aarch64",
+          "memory_mib": 632,
+          "shares": [
+            {
+              "dir": "/Users/adalundhe/.cache/hx/e-2k8tsxgv/guest-shares",
+              "read_only": true
+            }
+          ],
+          "vcpus": 4
+        },
+        "diagnostic_markers": 0,
+        "external_inputs": [
+          {
+            "bytes": 19100568,
+            "path": "/Users/adalundhe/.cache/hex-lead/target-capacity-8767f0d9-binaries/aarch64-apple-darwin/debug/hex",
+            "sha256": "ff0a1cec8c8269c37de5a0000b3b8ad5346308eec339b4dcd1e5a8ec6d1c57e2"
+          },
+          {
+            "bytes": 29998360,
+            "path": "/Users/adalundhe/.cache/hex-lead/capacity-8767f0d9-build/initramfs-8767f0d9-aarch64.cpio",
+            "sha256": "618f399b1e9018d45f5014ce18c5756405e8d05fbd43a65484236aebc21e36ba"
+          },
+          {
+            "bytes": 19091968,
+            "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/Image-6.18.48-aarch64",
+            "sha256": "1b178851998d27b4c6c346ae391c26d675f81461fbaa19cbe514500291fe472d"
+          },
+          {
+            "bytes": 29997880,
+            "path": "/Users/adalundhe/.cache/hex-lead/target-capacity-8767f0d9-binaries/aarch64-unknown-linux-musl/release/hex",
+            "sha256": "5caf88d7c6f5d904586e9857e0c58c0d59db07bb811e16632b1520ebbba6c564"
+          },
+          {
+            "bytes": 4410480,
+            "path": "/Users/adalundhe/.cache/hex-lead/target-capacity-8767f0d9-binaries/aarch64-apple-darwin/debug/hex-scheduler-runtime-probe",
+            "sha256": "e3cc9b630489075be4b5cfd1c70aec99d055f1adbd60a36e003aa3be397d41e6"
+          },
+          {
+            "bytes": 33588600,
+            "path": "/Users/adalundhe/.cache/hex-lead/target-shards-vm-tool/release/shards",
+            "sha256": "b9d74f0910a54593b66f604ffe36e39d588c89afea60d4643e37813200daa61e"
+          },
+          {
+            "bytes": 1924,
+            "path": "/Users/adalundhe/.cache/hex-lead/capacity-8767f0d9-physical-smoke/build-debug.json",
+            "sha256": "7cd49a4276b91b7d817fbd7c726504cb436cbe3d9bb1719982ea5b8a67ae4ca7"
+          },
+          {
+            "bytes": 362,
+            "path": "/Users/adalundhe/.cache/hex-lead/capacity-8767f0d9-physical-smoke/method-physical-debug-n1000.json",
+            "sha256": "173d0c6ae69954891e8ccd250bc3383415e03f0af024f0f04f03e4249b28a8d5"
+          },
+          {
+            "bytes": 1033,
+            "path": "/Users/adalundhe/.cache/hex-lead/capacity-8767f0d9-physical-smoke/policy-root.json",
+            "sha256": "b7c4e6401fed9da70b11458d65232f138728aa81df671088568f7d69b71271c3"
+          }
+        ],
+        "identity": {
+          "pid": 54133,
+          "started": 12736793116744,
+          "vsock": "/Users/adalundhe/.cache/hx/e-2k8tsxgv/guest-tmp/shards-api-ab504f05669002c0-0/v"
+        },
+        "kind": "root-capacity-derived-armed-physical-reconstruction",
+        "ledger_kinds": {
+          "call": 102962,
+          "census-call-exit": 102962,
+          "census-process-exit": 4011,
+          "forced-tunnel": 1002,
+          "forced-wrapper": 1002,
+          "hex-version": 1,
+          "keygen-client-0": 1,
+          "keygen-client-1": 1,
+          "keygen-host-key": 1,
+          "l": 1,
+          "o": 1,
+          "owned-guest": 1,
+          "pid-check": 3006,
+          "r": 1,
+          "real": 1,
+          "reaped": 8,
+          "runtime-probe": 4006,
+          "ssh-shim": 1002,
+          "sshd-10": 2,
+          "sshd-12": 8,
+          "sshd-13": 7,
+          "sshd-14": 174,
+          "sshd-4": 336,
+          "sshd-5": 475,
+          "sshd-effective": 1,
+          "verified-physical-lifecycle": 2000
+        },
+        "ledger_rows": 222973,
+        "logs": [
+          {
+            "bytes": 3135888,
+            "path": "/Users/adalundhe/.cache/hx/e-2k8tsxgv/call.log",
+            "sha256": "a176cf32d8ee1c9566132349ff4fe9531b02ceb4835d118462a8c036854964a8"
+          },
+          {
+            "bytes": 0,
+            "path": "/Users/adalundhe/.cache/hx/e-2k8tsxgv/hex-version.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "bytes": 0,
+            "path": "/Users/adalundhe/.cache/hx/e-2k8tsxgv/keygen-client-0.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "bytes": 0,
+            "path": "/Users/adalundhe/.cache/hx/e-2k8tsxgv/keygen-client-1.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "bytes": 0,
+            "path": "/Users/adalundhe/.cache/hx/e-2k8tsxgv/keygen-host-key.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "bytes": 0,
+            "path": "/Users/adalundhe/.cache/hx/e-2k8tsxgv/l.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "bytes": 79560,
+            "path": "/Users/adalundhe/.cache/hx/e-2k8tsxgv/o.log",
+            "sha256": "831614f98fe4e6442af91723d17d5f4f05590365a7658cd69337deb40ec4055b"
+          },
+          {
+            "bytes": 0,
+            "path": "/Users/adalundhe/.cache/hx/e-2k8tsxgv/pid-check.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "bytes": 0,
+            "path": "/Users/adalundhe/.cache/hx/e-2k8tsxgv/r.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "bytes": 0,
+            "path": "/Users/adalundhe/.cache/hx/e-2k8tsxgv/real.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "bytes": 0,
+            "path": "/Users/adalundhe/.cache/hx/e-2k8tsxgv/runtime-probe.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "bytes": 166,
+            "path": "/Users/adalundhe/.cache/hx/e-2k8tsxgv/sshd-10.log",
+            "sha256": "5996283b716c21b31ae4a02898e4c61243e24ac4d050ccd69764022bed49c646"
+          },
+          {
+            "bytes": 664,
+            "path": "/Users/adalundhe/.cache/hx/e-2k8tsxgv/sshd-12.log",
+            "sha256": "f1b2a4325dfccd243d7ccd45374ed4e05df17c0943998219e82c0eae08001a59"
+          },
+          {
+            "bytes": 581,
+            "path": "/Users/adalundhe/.cache/hx/e-2k8tsxgv/sshd-13.log",
+            "sha256": "92ff5b5ee487df06c5a92b37738d96bfedc4afef3d8616310200cb4ab9811ee0"
+          },
+          {
+            "bytes": 14442,
+            "path": "/Users/adalundhe/.cache/hx/e-2k8tsxgv/sshd-14.log",
+            "sha256": "37dea45eef80eec6c8ae90e5c6a65e19e322d6b7039c611a3ea990f11c0f2661"
+          },
+          {
+            "bytes": 27888,
+            "path": "/Users/adalundhe/.cache/hx/e-2k8tsxgv/sshd-4.log",
+            "sha256": "7aaf4c9354d4c2ec86a8413a9ef788b987cac36103a09a07006dbd9a7b61255e"
+          },
+          {
+            "bytes": 39425,
+            "path": "/Users/adalundhe/.cache/hx/e-2k8tsxgv/sshd-5.log",
+            "sha256": "7326fd79c8a325a8878a1095973f19580b2cad95219b1f6e155ddad2a19daa4e"
+          },
+          {
+            "bytes": 0,
+            "path": "/Users/adalundhe/.cache/hx/e-2k8tsxgv/sshd-effective.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        ],
+        "ordered_backend_reap": [
+          {
+            "kind": "reaped",
+            "parent": 54123,
+            "pid": 54131,
+            "recorded_by": 54123,
+            "returncode": -15,
+            "run": "/Users/adalundhe/.cache/hx/e-2k8tsxgv"
+          }
+        ],
+        "physical_phase_counts": {
+          "local": 1000,
+          "remote": 1000
+        },
+        "profile": "debug",
+        "raw_result": "/Users/adalundhe/.cache/hx/e-2k8tsxgv/result.json",
+        "retirement": {
+          "end": "Stopped",
+          "guest_stopped": true,
+          "pid": 54133,
+          "started": 12736793116744
+        },
+        "scope": "All ledger rows, physical phase keys/IDs/counts/namespaces, exact receipt/record/Stopped, declared configuration, ordered saved backend-Popen reap, artifact/receipt/log hashes checked. No independent live API query, no leak/timing/seed/performance or original Submit cause claim.",
+        "source_revision": "8767f0d9c03f37c64c9c86301bceaa878f7eb495",
+        "status": "consistent",
+        "unique_phase_keys": 2000,
+        "unique_physical_ids": 2000
+      },
+      "root_reconstruction_sha256": "dbbe5c0402f15fbdd351e136362ae716cfabea447833e166b6b7384ca6f2f380"
+    },
+    "release": {
+      "run": "r691",
+      "summary": {
+        "profile": "release",
+        "exit": 0,
+        "result": "/Users/adalundhe/.cache/hx/e-7idmmtkr/result.json",
+        "sha256": "22f4ab6ebd3f6eeab16fdc35b14e128ca3cbb61f214460c0fdcb787583c2c6f6",
+        "status": "passed",
+        "retirement": {
+          "end": "Stopped",
+          "guest_stopped": true,
+          "pid": 54224,
+          "started": 12736835004874
+        },
+        "created": 2000,
+        "deleted": 2000,
+        "baseline": true,
+        "error": null,
+        "cleanup_error": null,
+        "backend_cleanup_error": null
+      },
+      "root_reconstruction": {
+        "actual_census_directory_entries": 0,
+        "authority_inputs": {
+          "call.log": {
+            "bytes": 3282048,
+            "sha256": "54072277f250b10c94b6daf49fb78d9e89267451832f4d5d3265459115ec20a5"
+          },
+          "hex-version.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "keygen-client-0.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "keygen-client-1.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "keygen-host-key.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "l.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "o.log": {
+            "bytes": 79640,
+            "sha256": "1179889dd97cfecb75b8770fbc971d3ee462b9143fd6eccd5276bf6f6627fba8"
+          },
+          "owned-guest.json": {
+            "bytes": 618,
+            "sha256": "2d6ae55759b56c3de61577055fe6028abb86b71754bf3d952de5cea42b9ad181"
+          },
+          "pid-check.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "pids.jsonl": {
+            "bytes": 58217917,
+            "sha256": "a4a0a00a69ad8ae45653f08c2bbb4224abc2b0b4be1ef59805c054aaee417bf8"
+          },
+          "r.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "real.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "real.node-state/@guest": {
+            "bytes": 131,
+            "sha256": "f4e3279b1ca6fa0b53d503209f54e25911b0fa9251ac5782002ff22e37b4e180"
+          },
+          "result.json": {
+            "bytes": 4792,
+            "sha256": "22f4ab6ebd3f6eeab16fdc35b14e128ca3cbb61f214460c0fdcb787583c2c6f6"
+          },
+          "runtime-probe.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "runtime.json": {
+            "bytes": 958,
+            "sha256": "460ce5b5ff5c9ad7a068bae96e0a791769219efc013a4c813c489518ee103403"
+          },
+          "sshd-10.log": {
+            "bytes": 581,
+            "sha256": "92ff5b5ee487df06c5a92b37738d96bfedc4afef3d8616310200cb4ab9811ee0"
+          },
+          "sshd-12.log": {
+            "bytes": 415,
+            "sha256": "3a520e85dce3e13126c07a7a618dcde930f4c09465a2b01ed45c0154e10bf278"
+          },
+          "sshd-13.log": {
+            "bytes": 1245,
+            "sha256": "d62d2ef2b8dd5773daf8bc52a774d8b55b6b4a143c51c104b7683905ffb36300"
+          },
+          "sshd-14.log": {
+            "bytes": 13944,
+            "sha256": "d4a4cffe21aef58984894e2550a2aa8f79dc13fbb185a2a50aa4524a269ea12b"
+          },
+          "sshd-4.log": {
+            "bytes": 26145,
+            "sha256": "9e4f025f34d3a07edeeb99f940104867ccf69bd4062a6692cd8d8ee9883845b4"
+          },
+          "sshd-5.log": {
+            "bytes": 40836,
+            "sha256": "def7fac91e261a7611ffd9c073094515fdc727ff18431107a5493022fd9b0336"
+          },
+          "sshd-effective.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        },
+        "backend_baseline_restored": true,
+        "declared_config": {
+          "binary": "/Users/adalundhe/.cache/hex-lead/target-shards-vm-tool/release/shards",
+          "initrd": "/Users/adalundhe/.cache/hex-lead/capacity-8767f0d9-build/initramfs-8767f0d9-aarch64.cpio",
+          "kernel": "/Users/adalundhe/.cache/hex-lead/vm-assets/Image-6.18.48-aarch64",
+          "memory_mib": 632,
+          "shares": [
+            {
+              "dir": "/Users/adalundhe/.cache/hx/e-7idmmtkr/guest-shares",
+              "read_only": true
+            }
+          ],
+          "vcpus": 4
+        },
+        "diagnostic_markers": 0,
+        "external_inputs": [
+          {
+            "bytes": 4574152,
+            "path": "/Users/adalundhe/.cache/hex-lead/target-capacity-8767f0d9-binaries/aarch64-apple-darwin/release/hex",
+            "sha256": "9b2d293d666d76d79d65e56025c5f202c1ad25fab64a8738c41aa86729228051"
+          },
+          {
+            "bytes": 29998360,
+            "path": "/Users/adalundhe/.cache/hex-lead/capacity-8767f0d9-build/initramfs-8767f0d9-aarch64.cpio",
+            "sha256": "618f399b1e9018d45f5014ce18c5756405e8d05fbd43a65484236aebc21e36ba"
+          },
+          {
+            "bytes": 19091968,
+            "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/Image-6.18.48-aarch64",
+            "sha256": "1b178851998d27b4c6c346ae391c26d675f81461fbaa19cbe514500291fe472d"
+          },
+          {
+            "bytes": 29997880,
+            "path": "/Users/adalundhe/.cache/hex-lead/target-capacity-8767f0d9-binaries/aarch64-unknown-linux-musl/release/hex",
+            "sha256": "5caf88d7c6f5d904586e9857e0c58c0d59db07bb811e16632b1520ebbba6c564"
+          },
+          {
+            "bytes": 1383456,
+            "path": "/Users/adalundhe/.cache/hex-lead/target-capacity-8767f0d9-binaries/aarch64-apple-darwin/release/hex-scheduler-runtime-probe",
+            "sha256": "f7f4e9094edea0a3a6f9b0d7201d3c3bceed40173da94c456df7524a943d7cbc"
+          },
+          {
+            "bytes": 33588600,
+            "path": "/Users/adalundhe/.cache/hex-lead/target-shards-vm-tool/release/shards",
+            "sha256": "b9d74f0910a54593b66f604ffe36e39d588c89afea60d4643e37813200daa61e"
+          },
+          {
+            "bytes": 1929,
+            "path": "/Users/adalundhe/.cache/hex-lead/capacity-8767f0d9-physical-smoke/build-release.json",
+            "sha256": "9706067441f0b5b1d69c47d7baabae9128adecbbe2ce02a751fec27d890c4bb1"
+          },
+          {
+            "bytes": 364,
+            "path": "/Users/adalundhe/.cache/hex-lead/capacity-8767f0d9-physical-smoke/method-physical-release-n1000.json",
+            "sha256": "6fc573e362595627feb440ec0c68673fb6fa4c79ca284a0d9538e95ef988248e"
+          },
+          {
+            "bytes": 1033,
+            "path": "/Users/adalundhe/.cache/hex-lead/capacity-8767f0d9-physical-smoke/policy-root.json",
+            "sha256": "b7c4e6401fed9da70b11458d65232f138728aa81df671088568f7d69b71271c3"
+          }
+        ],
+        "identity": {
+          "pid": 54224,
+          "started": 12736835004874,
+          "vsock": "/Users/adalundhe/.cache/hx/e-7idmmtkr/guest-tmp/shards-api-45648f0a75fcf3ba-0/v"
+        },
+        "kind": "root-capacity-derived-armed-physical-reconstruction",
+        "ledger_kinds": {
+          "call": 106697,
+          "census-call-exit": 106697,
+          "census-process-exit": 4011,
+          "forced-tunnel": 1002,
+          "forced-wrapper": 1002,
+          "hex-version": 1,
+          "keygen-client-0": 1,
+          "keygen-client-1": 1,
+          "keygen-host-key": 1,
+          "l": 1,
+          "o": 1,
+          "owned-guest": 1,
+          "pid-check": 3006,
+          "r": 1,
+          "real": 1,
+          "reaped": 8,
+          "runtime-probe": 4006,
+          "ssh-shim": 1002,
+          "sshd-10": 7,
+          "sshd-12": 5,
+          "sshd-13": 15,
+          "sshd-14": 168,
+          "sshd-4": 315,
+          "sshd-5": 492,
+          "sshd-effective": 1,
+          "verified-physical-lifecycle": 2000
+        },
+        "ledger_rows": 230443,
+        "logs": [
+          {
+            "bytes": 3282048,
+            "path": "/Users/adalundhe/.cache/hx/e-7idmmtkr/call.log",
+            "sha256": "54072277f250b10c94b6daf49fb78d9e89267451832f4d5d3265459115ec20a5"
+          },
+          {
+            "bytes": 0,
+            "path": "/Users/adalundhe/.cache/hx/e-7idmmtkr/hex-version.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "bytes": 0,
+            "path": "/Users/adalundhe/.cache/hx/e-7idmmtkr/keygen-client-0.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "bytes": 0,
+            "path": "/Users/adalundhe/.cache/hx/e-7idmmtkr/keygen-client-1.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "bytes": 0,
+            "path": "/Users/adalundhe/.cache/hx/e-7idmmtkr/keygen-host-key.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "bytes": 0,
+            "path": "/Users/adalundhe/.cache/hx/e-7idmmtkr/l.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "bytes": 79640,
+            "path": "/Users/adalundhe/.cache/hx/e-7idmmtkr/o.log",
+            "sha256": "1179889dd97cfecb75b8770fbc971d3ee462b9143fd6eccd5276bf6f6627fba8"
+          },
+          {
+            "bytes": 0,
+            "path": "/Users/adalundhe/.cache/hx/e-7idmmtkr/pid-check.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "bytes": 0,
+            "path": "/Users/adalundhe/.cache/hx/e-7idmmtkr/r.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "bytes": 0,
+            "path": "/Users/adalundhe/.cache/hx/e-7idmmtkr/real.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "bytes": 0,
+            "path": "/Users/adalundhe/.cache/hx/e-7idmmtkr/runtime-probe.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "bytes": 581,
+            "path": "/Users/adalundhe/.cache/hx/e-7idmmtkr/sshd-10.log",
+            "sha256": "92ff5b5ee487df06c5a92b37738d96bfedc4afef3d8616310200cb4ab9811ee0"
+          },
+          {
+            "bytes": 415,
+            "path": "/Users/adalundhe/.cache/hx/e-7idmmtkr/sshd-12.log",
+            "sha256": "3a520e85dce3e13126c07a7a618dcde930f4c09465a2b01ed45c0154e10bf278"
+          },
+          {
+            "bytes": 1245,
+            "path": "/Users/adalundhe/.cache/hx/e-7idmmtkr/sshd-13.log",
+            "sha256": "d62d2ef2b8dd5773daf8bc52a774d8b55b6b4a143c51c104b7683905ffb36300"
+          },
+          {
+            "bytes": 13944,
+            "path": "/Users/adalundhe/.cache/hx/e-7idmmtkr/sshd-14.log",
+            "sha256": "d4a4cffe21aef58984894e2550a2aa8f79dc13fbb185a2a50aa4524a269ea12b"
+          },
+          {
+            "bytes": 26145,
+            "path": "/Users/adalundhe/.cache/hx/e-7idmmtkr/sshd-4.log",
+            "sha256": "9e4f025f34d3a07edeeb99f940104867ccf69bd4062a6692cd8d8ee9883845b4"
+          },
+          {
+            "bytes": 40836,
+            "path": "/Users/adalundhe/.cache/hx/e-7idmmtkr/sshd-5.log",
+            "sha256": "def7fac91e261a7611ffd9c073094515fdc727ff18431107a5493022fd9b0336"
+          },
+          {
+            "bytes": 0,
+            "path": "/Users/adalundhe/.cache/hx/e-7idmmtkr/sshd-effective.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        ],
+        "ordered_backend_reap": [
+          {
+            "kind": "reaped",
+            "parent": 54206,
+            "pid": 54222,
+            "recorded_by": 54206,
+            "returncode": -15,
+            "run": "/Users/adalundhe/.cache/hx/e-7idmmtkr"
+          }
+        ],
+        "physical_phase_counts": {
+          "local": 1000,
+          "remote": 1000
+        },
+        "profile": "release",
+        "raw_result": "/Users/adalundhe/.cache/hx/e-7idmmtkr/result.json",
+        "retirement": {
+          "end": "Stopped",
+          "guest_stopped": true,
+          "pid": 54224,
+          "started": 12736835004874
+        },
+        "scope": "All ledger rows, physical phase keys/IDs/counts/namespaces, exact receipt/record/Stopped, declared configuration, ordered saved backend-Popen reap, artifact/receipt/log hashes checked. No independent live API query, no leak/timing/seed/performance or original Submit cause claim.",
+        "source_revision": "8767f0d9c03f37c64c9c86301bceaa878f7eb495",
+        "status": "consistent",
+        "unique_phase_keys": 2000,
+        "unique_physical_ids": 2000
+      },
+      "root_reconstruction_sha256": "7a656f676a146f2e9e2a2b67434d8ba57ef4d4822a14c09d7bcad6de9f6e99bf"
+    }
+  }
+}

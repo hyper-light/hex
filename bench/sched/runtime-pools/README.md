@@ -420,3 +420,12 @@ Git/HOME/proc dependencies used elsewhere in the full suite, so those cases were
 not selected. No stdout, individual results or test count were captured. This
 is separate from the full Linux client/transport suite and AMD64 root lab; see
 native-linux-arm-client-calls-cd434fcb.json.
+
+
+The capacity-derived control update is recorded in
+[capacity-8767f0d9/record.json](capacity-8767f0d9/record.json). Its
+[empty channel comparison](queue-constructor-allocation-09ef773b/result.json)
+retains all twelve native constructor samples and their raw output. The existing
+global permit bounds linked storage; measured byte counts are never policy.
+These records distinguish native tests and guard mutations from physical guest
+proofs and the separately required final Linux/root-lab gate.

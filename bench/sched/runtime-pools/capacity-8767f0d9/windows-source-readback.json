@@ -1,0 +1,16 @@
+{
+  "source_revision": "8767f0d9c03f37c64c9c86301bceaa878f7eb495",
+  "source_sha256": {
+    "crates/hex-node/src/placement/rows.rs": "f0c584d23ac41bf0dff816d2a59d6419c9e6c09e9d7bba1ce1b2c47f1b07f58b",
+    "crates/hex-node/src/scheduler.rs": "63db21fb3050ee10212404f3a4897bbfd026b3a4f6ffad65ab2a838412290b9c",
+    "crates/hex-node/src/scheduler/cache.rs": "95f56618ac0e7c581d4ed7d74e467693d996745231da72eefdce413282f23d9e",
+    "crates/hex-sim/src/peer.rs": "3bdec78b35be0c93c491ad65b5b268b312702c56a98202cae01bfe510903c120",
+    "crates/hex-node/src/scheduler/tests.rs": "697e9c098a4d8689e22c765fb1ad445451c2bc0a72aa29407b403aeca642f697",
+    "crates/hex-node/src/placement/tests.rs": "00fb45393f5543e27ee1286e10a8a21657da45dea31f91055bf8443c154b2ea4",
+    "crates/hex-node/src/placement/budget.rs": "f2f490bae247e846c002d74319c56f22ff5bdb54bf7f13430579c25fd70f79ed",
+    "crates/hex-node/src/records.rs": "c5b9d353075c178fd7ccd4aa9774c2a6ab73f37afb02b3fea9e3ff237a0ec866",
+    "crates/hex-node/src/scheduler/order.rs": "aec2f43bca91fd3137b8aa8b9cf32930b34ac621fce981cde7da16b43ba9ffa7",
+    "crates/hex-node/src/placement.rs": "4146cb447351386aeddcdb4bedf18418a3cef2a8af537a39dbc34d7a7df1df86"
+  },
+  "sha256": "7353d11b2ad32766ebe9a27959e888f5636dad5a3e2f9e268cd962561ce62001"
+}

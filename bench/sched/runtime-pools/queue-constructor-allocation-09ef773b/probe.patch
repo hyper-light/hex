@@ -1,0 +1,298 @@
+From 09ef773b04161d1431737c6868d631a0aff2b218 Mon Sep 17 00:00:00 2001
+From: Ada Lundhe <adalundhe@lundhe.audio>
+Date: Tue, 10 Nov 2026 07:44:02 -0800
+Subject: [PATCH] CP-T7.3: add ignored actual queue allocation diagnostic
+
+Count cumulative successful Rust/System layout requests around bounded and linked channel constructors using the private scheduler Queued type. Keep the same pre-reserved endpoint vector through before/held/after-drop snapshots and format only afterward. The allocator and fixture are cfg(test)-only; no production behavior is changed.
+
+Validation: approved d132 native macOS arm64 cargo test -p hex-node --lib --locked cp_t7_3_actual_queued_channel_allocation_probe --no-run exited 0 (r90). The ignored probe was not executed; actual allocation/RSS/profiling and any optimization decision remain ROOT-owned.
+---
+ crates/hex-node/src/lib.rs                    |   4 +
+ crates/hex-node/src/queue_allocation_probe.rs | 162 ++++++++++++++++++
+ crates/hex-node/src/scheduler/tests.rs        |  86 ++++++++++
+ 3 files changed, 252 insertions(+)
+ create mode 100644 crates/hex-node/src/queue_allocation_probe.rs
+
+diff --git a/crates/hex-node/src/lib.rs b/crates/hex-node/src/lib.rs
+index 5b1a95f9..35888243 100644
+--- a/crates/hex-node/src/lib.rs
++++ b/crates/hex-node/src/lib.rs
+@@ -27,6 +27,10 @@ pub mod records;
+ pub mod store;
+ mod turns;
+ 
++// CP-T7.3: ROOT-only ignored channel allocation diagnostic; absent from production builds.
++#[cfg(test)]
++mod queue_allocation_probe;
++
+ #[cfg(target_os = "linux")]
+ pub mod cgroups;
+ #[cfg(target_os = "linux")]
+diff --git a/crates/hex-node/src/queue_allocation_probe.rs b/crates/hex-node/src/queue_allocation_probe.rs
+new file mode 100644
+index 00000000..d0624bda
+--- /dev/null
++++ b/crates/hex-node/src/queue_allocation_probe.rs
+@@ -0,0 +1,162 @@
++//! CP-T7.3: cumulative Rust/System layout accounting for the ignored real-Queued diagnostic.
++//! Adapted from bench/sched/runtime-pools/allocation-probe/benches/main.rs. No counter resets,
++//! allocator logging, OS queries or allocation inside these hooks. ROOT alone executes the probe.
++
++#![allow(unsafe_code)]
++
++use std::alloc::{GlobalAlloc, Layout, System};
++use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
++
++use serde_json::{Value, json};
++
++struct CountedSystem;
++
++#[global_allocator]
++static ALLOCATOR: CountedSystem = CountedSystem;
++static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
++static DEALLOCATIONS: AtomicU64 = AtomicU64::new(0);
++static REALLOCATIONS: AtomicU64 = AtomicU64::new(0);
++static REQUESTED_BYTES: AtomicU64 = AtomicU64::new(0);
++static DEALLOCATED_LAYOUT_BYTES: AtomicU64 = AtomicU64::new(0);
++static LIVE_BYTES: AtomicU64 = AtomicU64::new(0);
++static ALLOCATION_FAILURES: AtomicU64 = AtomicU64::new(0);
++static ACCOUNTING_INVALID: AtomicBool = AtomicBool::new(false);
++
++fn add(counter: &AtomicU64, value: u64) {
++    if counter
++        .try_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
++            old.checked_add(value)
++        })
++        .is_err()
++    {
++        ACCOUNTING_INVALID.store(true, Ordering::Relaxed);
++    }
++}
++
++fn subtract(counter: &AtomicU64, value: u64) {
++    if counter
++        .try_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
++            old.checked_sub(value)
++        })
++        .is_err()
++    {
++        ACCOUNTING_INVALID.store(true, Ordering::Relaxed);
++    }
++}
++
++fn bytes(size: usize) -> u64 {
++    match u64::try_from(size) {
++        Ok(value) => value,
++        Err(_) => {
++            ACCOUNTING_INVALID.store(true, Ordering::Relaxed);
++            0
++        }
++    }
++}
++
++// SAFETY: every pointer/layout is forwarded unchanged to System exactly once. Only nonallocating
++// atomics account for successful operations; accounting cannot change a returned block or unwind.
++unsafe impl GlobalAlloc for CountedSystem {
++    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
++        // SAFETY: GlobalAlloc's caller supplies a valid nonzero layout, forwarded unchanged.
++        let pointer = unsafe { System.alloc(layout) };
++        if pointer.is_null() {
++            add(&ALLOCATION_FAILURES, 1);
++        } else {
++            add(&ALLOCATIONS, 1);
++            let size = bytes(layout.size());
++            add(&REQUESTED_BYTES, size);
++            add(&LIVE_BYTES, size);
++        }
++        pointer
++    }
++
++    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
++        // SAFETY: the original allocation contract is preserved, including zero initialization.
++        let pointer = unsafe { System.alloc_zeroed(layout) };
++        if pointer.is_null() {
++            add(&ALLOCATION_FAILURES, 1);
++        } else {
++            add(&ALLOCATIONS, 1);
++            let size = bytes(layout.size());
++            add(&REQUESTED_BYTES, size);
++            add(&LIVE_BYTES, size);
++        }
++        pointer
++    }
++
++    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
++        // SAFETY: caller owns this live System block with its original layout. Nothing accesses
++        // the block after this one corresponding deallocation.
++        unsafe { System.dealloc(pointer, layout) };
++        add(&DEALLOCATIONS, 1);
++        let size = bytes(layout.size());
++        add(&DEALLOCATED_LAYOUT_BYTES, size);
++        subtract(&LIVE_BYTES, size);
++    }
++
++    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
++        // SAFETY: caller supplies a live System block with its original layout and a valid
++        // nonzero new size. Null leaves the original allocation live, as System specifies.
++        let replacement = unsafe { System.realloc(pointer, layout, new_size) };
++        if replacement.is_null() {
++            add(&ALLOCATION_FAILURES, 1);
++        } else {
++            add(&REALLOCATIONS, 1);
++            add(&REQUESTED_BYTES, bytes(new_size));
++            if let Some(growth) = new_size.checked_sub(layout.size()) {
++                add(&LIVE_BYTES, bytes(growth));
++            } else if let Some(shrink) = layout.size().checked_sub(new_size) {
++                subtract(&LIVE_BYTES, bytes(shrink));
++            }
++        }
++        replacement
++    }
++}
++
++/// Independent relaxed loads, not an atomic process-wide transaction. Other test threads would
++/// contaminate a measurement; ROOT must run only the exact ignored test with one test thread.
++#[derive(Clone, Copy)]
++pub(crate) struct Snapshot {
++    allocations: u64,
++    deallocations: u64,
++    reallocations: u64,
++    requested_bytes: u64,
++    deallocated_layout_bytes: u64,
++    live_bytes: u64,
++    allocation_failures: u64,
++    invalid: bool,
++}
++
++impl Snapshot {
++    pub(crate) fn now() -> Self {
++        Self {
++            allocations: ALLOCATIONS.load(Ordering::Relaxed),
++            deallocations: DEALLOCATIONS.load(Ordering::Relaxed),
++            reallocations: REALLOCATIONS.load(Ordering::Relaxed),
++            requested_bytes: REQUESTED_BYTES.load(Ordering::Relaxed),
++            deallocated_layout_bytes: DEALLOCATED_LAYOUT_BYTES.load(Ordering::Relaxed),
++            live_bytes: LIVE_BYTES.load(Ordering::Relaxed),
++            allocation_failures: ALLOCATION_FAILURES.load(Ordering::Relaxed),
++            invalid: ACCOUNTING_INVALID.load(Ordering::Relaxed),
++        }
++    }
++
++    pub(crate) fn valid(self) -> bool {
++        !self.invalid
++    }
++
++    /// Formatting allocates, so callers invoke this only after every measurement snapshot.
++    pub(crate) fn value(self) -> Value {
++        json!({
++            "allocations": self.allocations,
++            "deallocations": self.deallocations,
++            "reallocations": self.reallocations,
++            "requested_bytes": self.requested_bytes,
++            "deallocated_layout_bytes": self.deallocated_layout_bytes,
++            "live_bytes": self.live_bytes,
++            "allocation_failures": self.allocation_failures,
++            "accounting_invalid": self.invalid,
++        })
++    }
++}
+diff --git a/crates/hex-node/src/scheduler/tests.rs b/crates/hex-node/src/scheduler/tests.rs
+index 318328ce..54b6c245 100644
+--- a/crates/hex-node/src/scheduler/tests.rs
++++ b/crates/hex-node/src/scheduler/tests.rs
+@@ -2,6 +2,92 @@ use super::*;
+ use hex_api::{Bounds, ClassSpec};
+ use hex_sim::model::{Ask, Demand, Kind, Resources};
+ 
++/// CP-T7.3: ROOT-only constructor allocation diagnostic using the actual production queue item.
++/// Never run as a normal check: ROOT selects both mode and peer count and records native context.
++#[test]
++#[ignore = "ROOT-only allocation probe; requires explicit mode/count and one test thread"]
++fn cp_t7_3_actual_queued_channel_allocation_probe() -> Result<(), String> {
++    use crate::queue_allocation_probe::Snapshot;
++
++    // Both modes retain the same vector element type and storage for every snapshot.
++    enum ProbeSender {
++        Bounded {
++            _sender: SyncSender<Queued>,
++        },
++        Linked {
++            _sender: std::sync::mpsc::Sender<Queued>,
++        },
++    }
++    type Pair = (ProbeSender, Receiver<Queued>);
++
++    let mode = std::env::var("HEX_QUEUE_ALLOCATION_MODE")
++        .map_err(|e| format!("require HEX_QUEUE_ALLOCATION_MODE=bounded|linked: {e}"))?;
++    let bounded = match mode.as_str() {
++        "bounded" => true,
++        "linked" => false,
++        _ => return Err("HEX_QUEUE_ALLOCATION_MODE must be bounded or linked".into()),
++    };
++    let peer_text = std::env::var("HEX_QUEUE_ALLOCATION_PEERS")
++        .map_err(|e| format!("require explicit positive HEX_QUEUE_ALLOCATION_PEERS: {e}"))?;
++    let peers: usize = peer_text
++        .parse()
++        .map_err(|e| format!("invalid HEX_QUEUE_ALLOCATION_PEERS: {e}"))?;
++    if peers == 0 {
++        return Err("HEX_QUEUE_ALLOCATION_PEERS must be positive".into());
++    }
++    let mut pairs: Vec<Pair> = Vec::new();
++    pairs
++        .try_reserve_exact(peers)
++        .map_err(|e| format!("fixture pair vector reservation failed: {e}"))?;
++
++    let before_construct = Snapshot::now();
++    for _ in 0..peers {
++        let pair = if bounded {
++            let (sender, receiver) = sync_channel::<Queued>(crate::records::MOST);
++            (ProbeSender::Bounded { _sender: sender }, receiver)
++        } else {
++            let (sender, receiver) = std::sync::mpsc::channel::<Queued>();
++            (ProbeSender::Linked { _sender: sender }, receiver)
++        };
++        pairs.push(pair);
++    }
++    std::hint::black_box(&pairs);
++    let while_held = Snapshot::now();
++    pairs.clear(); // Drop both typed endpoints; retain the vector allocation through reporting.
++    let after_drop = Snapshot::now();
++
++    // No formatting/stdout work occurs until all snapshots have been collected.
++    println!(
++        "{}",
++        serde_json::json!({
++            "kind": "actual-scheduler-Queued-channel-constructor-allocation",
++            "mode": mode,
++            "peers": peers,
++            "queued_type": std::any::type_name::<Queued>(),
++            "queued_size_bytes": std::mem::size_of::<Queued>(),
++            "original_capacity": crate::records::MOST,
++            "pair_size_bytes": std::mem::size_of::<Pair>(),
++            "pair_vector_capacity": pairs.capacity(),
++            "debug_assertions": cfg!(debug_assertions),
++            "target_os": std::env::consts::OS,
++            "target_arch": std::env::consts::ARCH,
++            "before_construct": before_construct.value(),
++            "while_held": while_held.value(),
++            "after_drop": after_drop.value(),
++            "counter_scope": "process-global cumulative successful Rust/System layout requests; no resets",
++            "requested_bytes_semantics": "alloc/alloc_zeroed size plus full successful realloc new_size",
++            "deallocated_layout_bytes_semantics": "dealloc layouts only; realloc replacement is tracked in live_bytes",
++            "snapshot_scope": "independent relaxed loads; run this exact ignored test alone",
++            "scope_limit": "constructor mechanism only; no Service startup, RSS, kernel, copied-byte or leak proof",
++        })
++    );
++    std::hint::black_box((&mode, &peer_text, &pairs));
++    if !before_construct.valid() || !while_held.valid() || !after_drop.valid() {
++        return Err("allocator accounting overflowed/underflowed; snapshots are invalid".into());
++    }
++    Ok(())
++}
++
+ /// LB03: a reconnect republishes durable cancellation without killing that new connection.
+ #[test]
+ fn replayed_deletion_does_not_interrupt_the_reconnected_peer() {
+-- 
+2.50.1 (Apple Git-155)
+
