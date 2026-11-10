@@ -29,9 +29,11 @@ libc.workspace = true
 rustix.workspace = true
 
 # The Windows `process` class: job objects and suspended, job-listed process creation
-# (crates/hex-runtime/src/windows). windows-sys binds these as unsafe foreign functions.
+# (crates/hex-runtime/src/windows). windows-sys binds the OS calls; windows binds the in-process WMI
+# COM query for the installer features (windows/wmi.rs).
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys.workspace = true
+windows.workspace = true
 
 [dev-dependencies]
 proptest = "1.12.0"

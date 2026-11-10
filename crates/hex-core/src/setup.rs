@@ -141,21 +141,22 @@ const fn line_size(f: WindowsFeature) -> usize {
     f.name().len().saturating_add(LINE_TAIL)
 }
 
-/// The slowest recorded run of [`FEATURE_QUERY`], over both of jupiter's records (2026-11-06, 50 runs):
+/// The slowest recorded feature read (the PowerShell predecessor of [`FEATURE_QUERY`]), over both of
+/// jupiter's records (2026-11-06, 50 runs):
 /// 2,421 ms, of the Windows agent's 30 (bench/install/records/windows-jupiter-20261105.txt entry 19 on
 /// cp/t7-native-windows: min 1,048, p50 1,183, p90 1,398 ms); step 6's 20 peaked at 1,683 ms at 79% CPU
 /// (bench/install/records/windows-feature-query-jupiter-20261106.txt). Measured, not picked: a slower
 /// recorded run raises it.
 pub const FEATURE_QUERY_SLOWEST: std::time::Duration = std::time::Duration::from_millis(2_421);
 
-/// The longest the node waits for [`FEATURE_QUERY`] before ending it and refusing by name: the swarm's
+/// The longest the node waits for [`FEATURE_QUERY`] before refusing it by name: the swarm's
 /// failure-bound rule, twice the slowest recorded run, the factor being the false-alarm margin (the Hex
 /// lead, 2026-11-06). A slower machine is a new record, not a longer guess.
 pub const FEATURE_QUERY_PATIENCE: std::time::Duration = FEATURE_QUERY_SLOWEST.saturating_mul(2);
 
-/// The query an unprivileged node runs (PowerShell) for the installer's features' state:
-/// `Win32_OptionalFeature`, one `<name> <InstallState>` line per feature Windows lists.
-pub const FEATURE_QUERY: &str = "Get-CimInstance -ClassName Win32_OptionalFeature -Filter \"Name='Containers' OR Name='HypervisorPlatform'\" | ForEach-Object { '{0} {1}' -f $_.Name, $_.InstallState }";
+/// The query an unprivileged node makes of WMI, in process, for the installer's features' state (WQL on
+/// `ROOT\CIMV2`'s `Win32_OptionalFeature`): each feature's `Name` and `InstallState`.
+pub const FEATURE_QUERY: &str = "SELECT Name, InstallState FROM Win32_OptionalFeature WHERE Name = 'Containers' OR Name = 'HypervisorPlatform'";
 
 /// The features of [`WindowsFeature::ALL`] that are off, from [`FEATURE_QUERY`]'s output: a feature is
 /// on only when listed with `InstallState` 1 (Enabled; 2 Disabled, 3 Absent, 4 Unknown); one Windows

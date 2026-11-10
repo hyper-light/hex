@@ -26,7 +26,7 @@
 //! - **Files:** a box's bundle and root come on the staging port before its create
 //!   (docs/design/shards-guest.md §4a, [`files`]), written under the staged folder, and go with it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, IoSlice, IoSliceMut, PipeReader, PipeWriter, Read, Write};
 use std::mem::MaybeUninit;
 use std::net::Shutdown;
@@ -124,8 +124,10 @@ pub struct Relay {
 /// and its connection closes.
 type Waiting = SyncSender<Copier>;
 
-/// Sets under way, and the execs parked until their sets are whole.
+/// Live controls, their sets under way, and the execs parked until their sets are whole.
 struct Sets {
+    /// Tokens whose controls can still supply execs, at most the admitted control connection limit.
+    active: BTreeSet<u64>,
     gather: Gather<Waiting>,
     parked: BTreeMap<Exec, Parked>,
 }
@@ -151,6 +153,7 @@ impl Relay {
             staged: staged.to_owned(),
             limits,
             sets: Mutex::new(Sets {
+                active: BTreeSet::new(),
                 gather: Gather::new(limits.sets),
                 parked: BTreeMap::new(),
             }),
@@ -169,6 +172,24 @@ impl Relay {
 
     fn sets(&self) -> Result<MutexGuard<'_, Sets>, Refusal> {
         self.sets.lock().map_err(poisoned)
+    }
+
+    /// Register before publishing the token, so even a stream that arrives before its exec belongs to a live
+    /// control. The guard closes registration and forgets its sets together on every control return (HEX-RT-17).
+    fn activate(&self, token: u64) -> Result<ActiveControl<'_>, Refusal> {
+        let mut sets = self.sets()?;
+        if sets.active.len() >= self.limits.connections {
+            return Err(Refusal::Exhausted {
+                what: crate::serve::CONNECTIONS,
+                bound: self.limits.connections,
+            });
+        }
+        if !sets.active.insert(token) {
+            return Err(Refusal::Broken(
+                "the guest relay reused a live control token".to_owned(),
+            ));
+        }
+        Ok(ActiveControl { relay: self, token })
     }
 
     /// Serves `control`, `stdio` and `files` until a listener fails, which is returned.
@@ -290,6 +311,11 @@ impl Relay {
         let (copier, copy) = std::sync::mpsc::sync_channel(1);
         let ready = {
             let Ok(mut sets) = self.sets() else { return };
+            // A control's guard removes registration and its sets under this same lock. No late stream can
+            // recreate a set after forget, nor can an unknown control reserve one (HEX-GUEST-7, HEX-RT-17).
+            if !sets.active.contains(&named.exec.conn) {
+                return;
+            }
             match sets.gather.arrive(named, copier) {
                 Ok(Some((exec, waiting))) => sets.parked.remove(&exec).map(|p| (p, waiting)),
                 Ok(None) => None,
@@ -307,19 +333,30 @@ impl Relay {
     /// Serves one host control connection until either side ends.
     fn control(self: Arc<Self>, mut host: Box<dyn Duplex>) {
         let token = self.tokens.fetch_add(1, Ordering::Relaxed);
-        if host.write_all(&token.to_le_bytes()).is_err() {
-            return;
-        }
         let held = self.connections.fetch_add(1, Ordering::AcqRel);
         let _release = Release(&self.connections);
         if held >= self.limits.connections {
-            refuse(
-                host.as_mut(),
-                Refusal::Exhausted {
-                    what: crate::serve::CONNECTIONS,
-                    bound: self.limits.connections,
-                },
-            );
+            if host.write_all(&token.to_le_bytes()).is_ok() {
+                refuse(
+                    host.as_mut(),
+                    Refusal::Exhausted {
+                        what: crate::serve::CONNECTIONS,
+                        bound: self.limits.connections,
+                    },
+                );
+            }
+            return;
+        }
+        let active = match self.activate(token) {
+            Ok(active) => active,
+            Err(why) => {
+                if host.write_all(&token.to_le_bytes()).is_ok() {
+                    refuse(host.as_mut(), why);
+                }
+                return;
+            }
+        };
+        if host.write_all(&token.to_le_bytes()).is_err() {
             return;
         }
         let node = match connect(&self.node) {
@@ -341,22 +378,7 @@ impl Relay {
         self.requests(token, host.as_mut(), &node, &writer);
         // The host has gone: its execs can't be answered, nor their streams come, so its sets go, their
         // streams' threads ending as their connections close.
-        if let Ok(mut sets) = self.sets() {
-            drop(sets.gather.forget(token));
-            let gone: Vec<Exec> = sets
-                .parked
-                .range(
-                    Exec { conn: token, id: 0 }..=Exec {
-                        conn: token,
-                        id: u64::MAX,
-                    },
-                )
-                .map(|(exec, _)| *exec)
-                .collect();
-            for exec in gone {
-                sets.parked.remove(&exec);
-            }
-        }
+        drop(active);
         // The node sees its connection end and applies its disconnect rule.
         let _ = rustix::net::shutdown(&*node, rustix::net::Shutdown::Both);
         let _ = answers.join();
@@ -442,6 +464,38 @@ impl Relay {
         match ready {
             Ok(waiting) => deliver(&parked, waiting),
             Err(why) => refuse_exec(&parked, why),
+        }
+    }
+}
+
+/// A control's registration and pending streams have one lifetime, including setup failures after its token
+/// was published. Membership and Gather cleanup share one lock, so arrival cannot race behind forget.
+struct ActiveControl<'a> {
+    relay: &'a Relay,
+    token: u64,
+}
+
+impl Drop for ActiveControl<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut sets) = self.relay.sets() {
+            sets.active.remove(&self.token);
+            drop(sets.gather.forget(self.token));
+            let gone: Vec<Exec> = sets
+                .parked
+                .range(
+                    Exec {
+                        conn: self.token,
+                        id: 0,
+                    }..=Exec {
+                        conn: self.token,
+                        id: u64::MAX,
+                    },
+                )
+                .map(|(exec, _)| *exec)
+                .collect();
+            for exec in gone {
+                sets.parked.remove(&exec);
+            }
         }
     }
 }
