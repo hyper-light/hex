@@ -1,0 +1,74 @@
+{
+  "dir-root.config": {
+    "same": true,
+    "baseline_sha256": "d2bf19543e0e60b8e8cece3d41b8b8ebb39e780a432574c3360cde976cc83382",
+    "current_sha256": "d2bf19543e0e60b8e8cece3d41b8b8ebb39e780a432574c3360cde976cc83382",
+    "bytes": 4343
+  },
+  "dir-root.dirs": {
+    "same": true,
+    "baseline_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "current_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "bytes": 2
+  },
+  "dir-root.hosts": {
+    "same": true,
+    "baseline_sha256": "799fa34528baf236556b661d5d64ae6be3f3830c5c12e4938edd6c48b6a26f3e",
+    "current_sha256": "799fa34528baf236556b661d5d64ae6be3f3830c5c12e4938edd6c48b6a26f3e",
+    "bytes": 179
+  },
+  "dir-rootless.config": {
+    "same": true,
+    "baseline_sha256": "53f14a44fd684d1a75e7d608f3a8a04be6867c554069136a21585f14d1a5a99f",
+    "current_sha256": "53f14a44fd684d1a75e7d608f3a8a04be6867c554069136a21585f14d1a5a99f",
+    "bytes": 4722
+  },
+  "dir-rootless.dirs": {
+    "same": true,
+    "baseline_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "current_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "bytes": 2
+  },
+  "dir-rootless.hosts": {
+    "same": true,
+    "baseline_sha256": "799fa34528baf236556b661d5d64ae6be3f3830c5c12e4938edd6c48b6a26f3e",
+    "current_sha256": "799fa34528baf236556b661d5d64ae6be3f3830c5c12e4938edd6c48b6a26f3e",
+    "bytes": 179
+  },
+  "layers-root.config": {
+    "same": true,
+    "baseline_sha256": "014b73f7810f44b4ae1cf54caa6ac15574e038bca579aa99e00f9e5a4a796d2c",
+    "current_sha256": "014b73f7810f44b4ae1cf54caa6ac15574e038bca579aa99e00f9e5a4a796d2c",
+    "bytes": 4365
+  },
+  "layers-root.dirs": {
+    "same": true,
+    "baseline_sha256": "9d68825ef199c53ffc245a532be7de062ec8cbfef9c10b837030fd5b458ab6ce",
+    "current_sha256": "9d68825ef199c53ffc245a532be7de062ec8cbfef9c10b837030fd5b458ab6ce",
+    "bytes": 106
+  },
+  "layers-root.hosts": {
+    "same": true,
+    "baseline_sha256": "ba0a20158b52d3a04aecb4882f66ea5f6b1074a292c5102baae85f8d74ec0580",
+    "current_sha256": "ba0a20158b52d3a04aecb4882f66ea5f6b1074a292c5102baae85f8d74ec0580",
+    "bytes": 148
+  },
+  "layers-rootless.config": {
+    "same": true,
+    "baseline_sha256": "637db23f4af7415ef15592636a1c5bb8f323f64888cf754e25f5c2bcb5e2d1c6",
+    "current_sha256": "637db23f4af7415ef15592636a1c5bb8f323f64888cf754e25f5c2bcb5e2d1c6",
+    "bytes": 4633
+  },
+  "layers-rootless.dirs": {
+    "same": true,
+    "baseline_sha256": "9d68825ef199c53ffc245a532be7de062ec8cbfef9c10b837030fd5b458ab6ce",
+    "current_sha256": "9d68825ef199c53ffc245a532be7de062ec8cbfef9c10b837030fd5b458ab6ce",
+    "bytes": 106
+  },
+  "layers-rootless.hosts": {
+    "same": true,
+    "baseline_sha256": "ba0a20158b52d3a04aecb4882f66ea5f6b1074a292c5102baae85f8d74ec0580",
+    "current_sha256": "ba0a20158b52d3a04aecb4882f66ea5f6b1074a292c5102baae85f8d74ec0580",
+    "bytes": 148
+  }
+}

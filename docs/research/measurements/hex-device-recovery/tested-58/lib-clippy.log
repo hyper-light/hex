@@ -1,0 +1,8 @@
+    Checking thiserror v2.0.21
+    Checking serde_core v1.0.229
+    Checking hyper-timing v0.1.0 (/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-identity-01a1c640-9bbb62b2-v2/source/vendor/hyper-raft/crates/hyper-timing)
+    Checking hyper-swim v0.1.0 (/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-identity-01a1c640-9bbb62b2-v2/source/vendor/hyper-raft/crates/hyper-swim)
+    Checking serde v1.0.229
+    Checking hex-health v0.1.0 (/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-identity-01a1c640-9bbb62b2-v2/source/crates/hex-health)
+    Checking hex-sim v0.1.0 (/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-identity-01a1c640-9bbb62b2-v2/source/crates/hex-sim)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.08s

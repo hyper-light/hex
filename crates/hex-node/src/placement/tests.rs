@@ -1269,3 +1269,6 @@ mod adversarial_bounds_tests;
 
 #[path = "recovery_payload_guard_tests.rs"]
 mod recovery_payload_guard_tests;
+
+#[path = "device_binding_tests.rs"]
+mod device_binding_tests;

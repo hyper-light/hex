@@ -1,0 +1,19 @@
+{
+  "run": "r17",
+  "runner": "d1323898b255a3ed435eb83fa0f7b0cf",
+  "needs": "cpus=1,mem=4g,disk=12g",
+  "source": "661cbd8140bdcc5510b20e6535790690997ca33e",
+  "private_root": "~/.cache/hex-cdi-render-01a1c640-661cbd81-v1",
+  "command": "nice -n 10 python3 \"$HOME/.cache/hex-cdi-render-01a1c640-661cbd81-v1/driver.py\"",
+  "status_at_start": "running",
+  "sync": false,
+  "jobs": 1,
+  "threads": 1,
+  "status": "terminal",
+  "exit_code": 1,
+  "tests_pass": 27,
+  "tests_fail": 0,
+  "lib_clippy": 101,
+  "test_clippy": 101,
+  "legacy_byte_files_equal": 12
+}

@@ -1,0 +1,24 @@
+{
+  "baseline": {
+    "before": {
+      "lib": "040e51eb13da41c9d4a7bfb4bf94e18065ba3b6c491edd2ad58e39e2763035a1",
+      "bundle": "833a7418e7a7313295c375eaa44a2243d327c480651409b9cc66344780387f26"
+    },
+    "after": {
+      "lib": "bd43106b1bc3be61e84ff5ee37fa909cc2d8c2e8a3068d211768ca9a1214d4f9",
+      "bundle": "28fdf1da0bdc19c181df80f5624252c830f6b864640e5fac76bfd7b7ccd095dc"
+    },
+    "private_changes": "lib.rs pub mod cdi; bundle::tests::render_legacy_capture (source retained)"
+  },
+  "current": {
+    "before": {
+      "lib": "040e51eb13da41c9d4a7bfb4bf94e18065ba3b6c491edd2ad58e39e2763035a1",
+      "bundle": "95988ff43a18fb6d8a86d6a6774bd573526a21771ffbc9d00c9a58c6f32137d0"
+    },
+    "after": {
+      "lib": "bd43106b1bc3be61e84ff5ee37fa909cc2d8c2e8a3068d211768ca9a1214d4f9",
+      "bundle": "1a77e1dba64023f15727fde4b4f96da11244c2a6143f5858cfef009cc0a002c0"
+    },
+    "private_changes": "lib.rs pub mod cdi; bundle::tests::render_legacy_capture (source retained)"
+  }
+}

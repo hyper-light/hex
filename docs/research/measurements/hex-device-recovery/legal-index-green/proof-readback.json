@@ -1,0 +1,64 @@
+{
+  "source_revision": "9628f7dac0e8ac66686589317f5a1663827eb247",
+  "archive": "/Users/adalundhe/.cache/hex-lead/transfers/device-recovery-max-fixed-01a1c640-9628f7da-v4/proof-bundle.tar.gz",
+  "archive_bytes": 111719,
+  "archive_sha256": "1a688bd60b3749cf75ee431717864ba51c1a265d70fff4f2e20c4b6576b6ecec",
+  "member_count": 10,
+  "all_member_hashes_verified": true,
+  "source_unchanged": true,
+  "source_files": 1096,
+  "source_manifest_before_sha256": "ae97ac359409ca0940801a06dc15eb79cc1edf1b5537fb9ffebc072be788faf6",
+  "source_manifest_after_sha256": "ae97ac359409ca0940801a06dc15eb79cc1edf1b5537fb9ffebc072be788faf6",
+  "phases": [
+    {
+      "name": "max-index",
+      "counts": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 167
+      },
+      "exit_code": 0,
+      "log_sha256": "2200dc24dbfd7d5737e9f2358df0fdf3537876bd57d1690aa04f42f548f024dc"
+    }
+  ],
+  "chunks": [
+    {
+      "offset": 0,
+      "bytes": 16000,
+      "sha256": "507f1ff89ef00133aac911b46e3bf24ea4264cfc2c2fb65233c6b715e44b978a"
+    },
+    {
+      "offset": 16000,
+      "bytes": 16000,
+      "sha256": "625a3d3425890c1ff57622c8b5dafc452a7dad6155d5afc8597310bf6acf3bf8"
+    },
+    {
+      "offset": 32000,
+      "bytes": 16000,
+      "sha256": "6bb647c05c62daab0b718cf1399a1bd3e6c243997e80ebf1cc6ccb0f045ea037"
+    },
+    {
+      "offset": 48000,
+      "bytes": 16000,
+      "sha256": "f178aaceb98d8c7b1de1e21278979c17a1dfa1c1f4febdec21be2205f75006af"
+    },
+    {
+      "offset": 64000,
+      "bytes": 16000,
+      "sha256": "14313ca282c9bdb692da06ef96b9a91d3f169dd0e71a0252c1679c5481ac8f4e"
+    },
+    {
+      "offset": 80000,
+      "bytes": 16000,
+      "sha256": "9c28ed86595a75b12497950958e504d7e4120be07647fe25e7f17c629a7afad9"
+    },
+    {
+      "offset": 96000,
+      "bytes": 15719,
+      "sha256": "b0acccfcc74d607144f3befc4a20db28ac0cbd8f662acab01bf1a192ee1f194a"
+    }
+  ],
+  "native_gpu_effect": false
+}

@@ -1,0 +1,9 @@
+diff --git a/crates/hex-node/src/placement/tests.rs b/crates/hex-node/src/placement/tests.rs
+--- a/crates/hex-node/src/placement/tests.rs
++++ b/crates/hex-node/src/placement/tests.rs
+@@ -1270,2 +1270,5 @@
+ #[path = "recovery_payload_guard_tests.rs"]
+ mod recovery_payload_guard_tests;
++
++#[path = "device_binding_tests.rs"]
++mod device_binding_tests;

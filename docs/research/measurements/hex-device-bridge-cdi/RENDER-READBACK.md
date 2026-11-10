@@ -110,3 +110,25 @@ stat race, hardware, OS portability, full gate, performance or complete-live-dev
 claim. ROOT owes combined registration/caller review and all those real runs.
 Local free-space observation27,239,680KiB (25.98GiB) reported ROOT; no local build
 or test, no other-lane cleanup, large transfers held below required30GiB.
+
+
+## Checkpoint progression (originals retained)
+
+`661cbd8140bdcc5510b20e6535790690997ca33e` is the signed source-first snapshot;
+r17 later executed27 pure test/capture processes with0failures and12 exact byte
+comparisons, but BOTH core Clippy invocations failed101 on two forbidden
+bool::then_some calls. Those original errors remain in raw-render-v1 and the
+original proof archive. This is a lint failure, not an actual native device bug.
+`558acc15d777579f072633c60772342462d32617` changes only those calls to lazy then.
+`74f889be4a7022163e7cf1f7f6edddfebfcf1f73` also makes the new extensible initial
+deny-rule allocation fallible. r18 uses NEW source/target/cache and the frozen
+r17 d4d capture bytes read-only; baseline is not rebuilt/re-executed.
+The source-first marker above describes its original status, not a passing claim.
+Final exact results/raw hashes and owed ROOT runs are in RENDER-RESULTS.md.
+
+`2a059b5c56f9561a225c8172c808679c269e8ea1` uses plain conditional Options after
+r18 exposed the separate unnecessary_lazy_evaluations lint for then closures.
+The r18 raw101 results remain retained independently. r19 at2a059b5c ran25focused
+pure tests plus1current capture,26passed/0failed/0ignored; core lib/testClippy and
+scopedfmt all0,12/12 d4d output files byte-equal. Final actual raw evidence and
+source hashes follow in RENDER-RESULTS.md. No lint exception was added.

@@ -1,0 +1,521 @@
+{
+  "source": "661cbd8140bdcc5510b20e6535790690997ca33e",
+  "baseline": "d4d96083c83f88ff3e9b9447598a3b95f461b680",
+  "binaries": {
+    "baseline": {
+      "path": "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/baseline-target/debug/deps/hex_core-20ae9c8214162dc5",
+      "sha256": "96e2d39bbb271ecbd330cce79cf73e7e63f5bf4e6a72eb12083bda6dc44fb32c"
+    },
+    "current": {
+      "path": "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/current-target/debug/deps/hex_core-20ae9c8214162dc5",
+      "sha256": "363509208a3f28464249139b4e364761936b1928ee112613ccba46f6a382bc8d"
+    }
+  },
+  "tests": [
+    {
+      "name": "bundle::tests::render_legacy_capture",
+      "label": "baseline-capture",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/baseline-target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "bundle::tests::render_legacy_capture",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 22730,
+      "reaped": true,
+      "ran_one": true,
+      "log": "baseline-capture.log",
+      "log_sha256": "cb945f7615ca8cd2ee45a96d963982caca98ae34edea025e3cca9dba324bde77",
+      "passed": true
+    },
+    {
+      "name": "bundle::device_edits::tests::added_input_and_encoded_output_are_bounded_with_exact_writer_boundary",
+      "label": "current-test-0",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/current-target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "bundle::device_edits::tests::added_input_and_encoded_output_are_bounded_with_exact_writer_boundary",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 22847,
+      "reaped": true,
+      "ran_one": true,
+      "log": "current-test-0.log",
+      "log_sha256": "04232b6fefced192d15d2d2b474f4f5aa4723bc975ab6106f9f3c3175155a229",
+      "passed": true
+    },
+    {
+      "name": "bundle::device_edits::tests::all_hook_phases_and_additional_groups_reach_the_oci_config",
+      "label": "current-test-1",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/current-target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "bundle::device_edits::tests::all_hook_phases_and_additional_groups_reach_the_oci_config",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 22848,
+      "reaped": true,
+      "ran_one": true,
+      "log": "current-test-1.log",
+      "log_sha256": "daa57f83853e2eb53c4102bb33f781c48d4d951c540ec88bd96e3b3be6ff4f6f",
+      "passed": true
+    },
+    {
+      "name": "bundle::device_edits::tests::empty_edits_use_the_existing_renderer_and_preserve_auxiliary_data",
+      "label": "current-test-2",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/current-target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "bundle::device_edits::tests::empty_edits_use_the_existing_renderer_and_preserve_auxiliary_data",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 22849,
+      "reaped": true,
+      "ran_one": true,
+      "log": "current-test-2.log",
+      "log_sha256": "a38f5a0e39cbe585d72e8bf0612c169f8e9eb9c2cb66d1b6207b4d14f5cd1148",
+      "passed": true
+    },
+    {
+      "name": "bundle::device_edits::tests::errors_and_resolution_debug_do_not_render_private_content",
+      "label": "current-test-3",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/current-target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "bundle::device_edits::tests::errors_and_resolution_debug_do_not_render_private_content",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 22850,
+      "reaped": true,
+      "ran_one": true,
+      "log": "current-test-3.log",
+      "log_sha256": "216cb545167071296913a64e35db64508b7d5870fb28fdef0e243db0c15ad794",
+      "passed": true
+    },
+    {
+      "name": "bundle::device_edits::tests::mounts_replace_first_match_and_sort_stably_by_linux_cleaned_depth",
+      "label": "current-test-4",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/current-target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "bundle::device_edits::tests::mounts_replace_first_match_and_sort_stably_by_linux_cleaned_depth",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 22851,
+      "reaped": true,
+      "ran_one": true,
+      "log": "current-test-4.log",
+      "log_sha256": "3b9561728129c591fa9aaf5ef7ce712a22b714b9a2d6cbe35fbba1261a99b790",
+      "passed": true
+    },
+    {
+      "name": "bundle::device_edits::tests::nodes_preserve_explicit_fields_defaults_replacement_and_precise_grants",
+      "label": "current-test-5",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/current-target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "bundle::device_edits::tests::nodes_preserve_explicit_fields_defaults_replacement_and_precise_grants",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 22852,
+      "reaped": true,
+      "ran_one": true,
+      "log": "current-test-5.log",
+      "log_sha256": "b0475d5d99f168037afd200d131de8ba13599119fe06c8698fb85e04451da625",
+      "passed": true
+    },
+    {
+      "name": "bundle::device_edits::tests::resolution_count_order_identity_type_and_mode_refuse_before_output",
+      "label": "current-test-6",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/current-target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "bundle::device_edits::tests::resolution_count_order_identity_type_and_mode_refuse_before_output",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 22853,
+      "reaped": true,
+      "ran_one": true,
+      "log": "current-test-6.log",
+      "log_sha256": "a906b8edb2917ee52f7d7fc3a41fdabaed892b059888b8aec3467457cad38e19",
+      "passed": true
+    },
+    {
+      "name": "bundle::device_edits::tests::selected_globals_and_env_follow_the_pinned_generator",
+      "label": "current-test-7",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/current-target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "bundle::device_edits::tests::selected_globals_and_env_follow_the_pinned_generator",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 22854,
+      "reaped": true,
+      "ran_one": true,
+      "log": "current-test-7.log",
+      "log_sha256": "d84087cc919817d57d8c1982027a9aba5d70c190749d2b3cb531d629b7adef25",
+      "passed": true
+    },
+    {
+      "name": "bundle::device_edits::tests::unsupported_native_edits_refuse_instead_of_emitting_ignored_fields",
+      "label": "current-test-8",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/current-target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "bundle::device_edits::tests::unsupported_native_edits_refuse_instead_of_emitting_ignored_fields",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 22855,
+      "reaped": true,
+      "ran_one": true,
+      "log": "current-test-8.log",
+      "log_sha256": "2f4115ca3b01e7e43037abdc3a7d12f5e609a7bc5561257d894c01201dac42b5",
+      "passed": true
+    },
+    {
+      "name": "bundle::tests::a_bundle_directory_that_isnt_utf8_is_refused",
+      "label": "current-test-9",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/current-target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "bundle::tests::a_bundle_directory_that_isnt_utf8_is_refused",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 22856,
+      "reaped": true,
+      "ran_one": true,
+      "log": "current-test-9.log",
+      "log_sha256": "51ddb254a63710f66c502e8af2b294f7cfe137c291e7fb46f3616454be961d0f",
+      "passed": true
+    },
+    {
+      "name": "bundle::tests::a_directory_on_the_hosts_network_renders_as_root_to_its_golden_config",
+      "label": "current-test-10",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/current-target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "bundle::tests::a_directory_on_the_hosts_network_renders_as_root_to_its_golden_config",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 22857,
+      "reaped": true,
+      "ran_one": true,
+      "log": "current-test-10.log",
+      "log_sha256": "7322df0fffe84fe16f50262cdc5d565be7e17d17a9d981bd229b73b3c41eba38",
+      "passed": true
+    },
+    {
+      "name": "bundle::tests::a_directory_on_the_hosts_network_renders_rootless_to_its_golden_config",
+      "label": "current-test-11",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/current-target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "bundle::tests::a_directory_on_the_hosts_network_renders_rootless_to_its_golden_config",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 22858,
+      "reaped": true,
+      "ran_one": true,
+      "log": "current-test-11.log",
+      "log_sha256": "9649ada0be8b8f9ece6d146303e21a7b9e315444f1c1039196b93a88cf01eeef",
+      "passed": true
+    },
+    {
+      "name": "bundle::tests::hostile_values_are_refused_by_name",
+      "label": "current-test-12",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/current-target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "bundle::tests::hostile_values_are_refused_by_name",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 22859,
+      "reaped": true,
+      "ran_one": true,
+      "log": "current-test-12.log",
+      "log_sha256": "ab83034f42d689d40d55fdfc663df9ebc2b2bc77f4e23cc2076ef5e5bceaa209",
+      "passed": true
+    },
+    {
+      "name": "bundle::tests::layers_at_overlayfs_bounds_render",
+      "label": "current-test-13",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/current-target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "bundle::tests::layers_at_overlayfs_bounds_render",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 22860,
+      "reaped": true,
+      "ran_one": true,
+      "log": "current-test-13.log",
+      "log_sha256": "8d902a9ea2e203caae13b4f3322518cbb3d34aedf5d6b618444522bf7b00b222",
+      "passed": true
+    },
+    {
+      "name": "bundle::tests::layers_with_a_private_network_render_as_root_to_their_golden_config",
+      "label": "current-test-14",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/current-target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "bundle::tests::layers_with_a_private_network_render_as_root_to_their_golden_config",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 22861,
+      "reaped": true,
+      "ran_one": true,
+      "log": "current-test-14.log",
+      "log_sha256": "f1036b1c8ffbf5971269c3b06b58c07e139ca73ca68cfd0de7a51c18a1ce6190",
+      "passed": true
+    },
+    {
+      "name": "bundle::tests::layers_with_a_private_network_render_rootless_to_their_golden_config",
+      "label": "current-test-15",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/current-target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "bundle::tests::layers_with_a_private_network_render_rootless_to_their_golden_config",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 22862,
+      "reaped": true,
+      "ran_one": true,
+      "log": "current-test-15.log",
+      "log_sha256": "4e5e25475f25f78d52c439facca4f8dc491f9b0ef3eb8d7d29bcc21c5ca75a44",
+      "passed": true
+    },
+    {
+      "name": "bundle::tests::render_legacy_capture",
+      "label": "current-test-16",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/current-target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "bundle::tests::render_legacy_capture",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 22863,
+      "reaped": true,
+      "ran_one": true,
+      "log": "current-test-16.log",
+      "log_sha256": "c368cef2d176c0ed2beb32995a06d464cd06eadd4c3887c8dea38063b7131e77",
+      "passed": true
+    },
+    {
+      "name": "bundle::tests::the_hosts_file_is_dockers_lines_then_the_specs",
+      "label": "current-test-17",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/current-target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "bundle::tests::the_hosts_file_is_dockers_lines_then_the_specs",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 22864,
+      "reaped": true,
+      "ran_one": true,
+      "log": "current-test-17.log",
+      "log_sha256": "4f37e9e5e60839d0a277221badf6a7fffa2d4fb19832cf163307aca11f565852",
+      "passed": true
+    },
+    {
+      "name": "cdi::tests::caller_bounds_are_exact_and_selection_failure_is_atomic",
+      "label": "current-test-18",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/current-target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "cdi::tests::caller_bounds_are_exact_and_selection_failure_is_atomic",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 22865,
+      "reaped": true,
+      "ran_one": true,
+      "log": "current-test-18.log",
+      "log_sha256": "f2e25a3013341bd8ddc657a4ab26553ce6090760e90b0143f3688ff82bc836af",
+      "passed": true
+    },
+    {
+      "name": "cdi::tests::edit_validation_does_not_invent_cross_object_conflicts",
+      "label": "current-test-19",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/current-target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "cdi::tests::edit_validation_does_not_invent_cross_object_conflicts",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 22866,
+      "reaped": true,
+      "ran_one": true,
+      "log": "current-test-19.log",
+      "log_sha256": "ef864b60c19045b82b6f4d2b815526c94efe6fda221c2781f700f962b63d2097",
+      "passed": true
+    },
+    {
+      "name": "cdi::tests::private_content_is_absent_from_error_and_debug_ergonomics",
+      "label": "current-test-20",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/current-target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "cdi::tests::private_content_is_absent_from_error_and_debug_ergonomics",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 22867,
+      "reaped": true,
+      "ran_one": true,
+      "log": "current-test-20.log",
+      "log_sha256": "2f8239b454efcea8be12d44f98febf4f6352c6fc0086c75b14112b772f8315e3",
+      "passed": true
+    },
+    {
+      "name": "cdi::tests::qualified_grammar_membership_and_duplicates_are_checked",
+      "label": "current-test-21",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/current-target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "cdi::tests::qualified_grammar_membership_and_duplicates_are_checked",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 22868,
+      "reaped": true,
+      "ran_one": true,
+      "log": "current-test-21.log",
+      "log_sha256": "4c8383e5ce53d853aa8816bc873439aaea31f42f48eeae085dca063a0f21610a",
+      "passed": true
+    },
+    {
+      "name": "cdi::tests::request_order_globals_once_and_last_rdt_match_go_append",
+      "label": "current-test-22",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/current-target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "cdi::tests::request_order_globals_once_and_last_rdt_match_go_append",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 22869,
+      "reaped": true,
+      "ran_one": true,
+      "log": "current-test-22.log",
+      "log_sha256": "1e1640cd63b479fc291363830b786dca376214660d3e5e6c27c097678e8c761d",
+      "passed": true
+    },
+    {
+      "name": "cdi::tests::selection_retains_all_edits_and_only_requested_devices",
+      "label": "current-test-23",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/current-target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "cdi::tests::selection_retains_all_edits_and_only_requested_devices",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 22870,
+      "reaped": true,
+      "ran_one": true,
+      "log": "current-test-23.log",
+      "log_sha256": "97dbeb56345bf612c9155100a5e48e1850736e5e7988240360b05312d5bf1718",
+      "passed": true
+    },
+    {
+      "name": "cdi::tests::unknown_duplicate_and_wrong_json_types_are_typed",
+      "label": "current-test-24",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/current-target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "cdi::tests::unknown_duplicate_and_wrong_json_types_are_typed",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 22871,
+      "reaped": true,
+      "ran_one": true,
+      "log": "current-test-24.log",
+      "log_sha256": "25b54ff2325e2ac538c6550aa7c8e99576460e5743403df952b730a85934feb2",
+      "passed": true
+    },
+    {
+      "name": "cdi::tests::versions_and_minimum_feature_gates_match_the_pinned_source",
+      "label": "current-test-25",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/current-target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "cdi::tests::versions_and_minimum_feature_gates_match_the_pinned_source",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 22872,
+      "reaped": true,
+      "ran_one": true,
+      "log": "current-test-25.log",
+      "log_sha256": "b61d8db6e2896b3ab687a388303b607963dd9620d45d5c4111e304b45640206f",
+      "passed": true
+    }
+  ],
+  "passes": 27,
+  "failed": 0,
+  "checks": {
+    "baseline-build": 0,
+    "current-build": 0,
+    "legacy-byte-comparison": 0,
+    "clippy-lib": 101,
+    "clippy-tests": 101,
+    "rustfmt": 0
+  },
+  "counts": {
+    "new_renderer": 9,
+    "existing_renderer": 8,
+    "cdi": 8,
+    "private_capture_current": 1,
+    "private_capture_baseline": 1
+  },
+  "legacy_files": 12,
+  "scope": "Pure render/CDI; private proof-file writes only. No native stat/mount/device/hook/VM/SSH effects."
+}

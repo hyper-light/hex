@@ -1,0 +1,15 @@
+{
+  "commit": "2a059b5c56f9561a225c8172c808679c269e8ea1",
+  "files": {
+    "crates/hex-core/src/bundle.rs": "e9f2eb4fc2cee296bb884e38c5de2e505814a6105627a4866ac609b2296cc022",
+    "crates/hex-core/src/bundle/device_edits.rs": "ed9878f9eabd3678bbfc5bb78d63879785ef8ab5dd88dc9b9481a6f31a73bd3b",
+    "crates/hex-core/src/bundle/device_edits/tests.rs": "854b0986c80e899a7772e588582e977a7a6772d011b33cfcfaee76a698185a5f",
+    "crates/hex-core/src/cdi.rs": "7ca46313f6c581c4194a9ba4a295cdda11435a285aacca8b304f41e77b6ce740",
+    "crates/hex-core/src/cdi/tests.rs": "ec66c85d14110a3c1aae9304f5ff6d095b92197552e70b6c4258cabd12ed5d30",
+    "crates/hex-core/src/lib.rs": "040e51eb13da41c9d4a7bfb4bf94e18065ba3b6c491edd2ad58e39e2763035a1"
+  },
+  "baseline_bundle_sha256": "833a7418e7a7313295c375eaa44a2243d327c480651409b9cc66344780387f26",
+  "driver_sha256": "233f4f683068a5f6c33bee6c70f5c8f31ecbb49fb787ffb4c7abcc498ec2317d",
+  "policy": "cbd39284937d024640c56db6f8d8ef2bd9b0ee24",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3"
+}

@@ -1,0 +1,79 @@
+{
+  "source_revision": "90230466c3e157855ee7639adb196637dc708530",
+  "fixed_base": "37021c35e64b2a8bab1d35f20f92a0042d874a44",
+  "runner": "d1323898b255a3ed435eb83fa0f7b0cf",
+  "platform": "macOS-26.4-arm64-arm-64bit",
+  "machine": "arm64",
+  "driver_pid": 18396,
+  "nice": "20",
+  "environment": {
+    "CARGO_HOME": "/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-impl-01a1c640-90230466-before-v1/cargo-home",
+    "CARGO_TARGET_DIR": "/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-impl-01a1c640-90230466-before-v1/target",
+    "CARGO_BUILD_JOBS": "1",
+    "RUST_TEST_THREADS": "1",
+    "RUSTUP_HOME": "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy",
+    "TMPDIR": "/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-impl-01a1c640-90230466-before-v1/tmp"
+  },
+  "selected_test": "peer::adversarial_device_recovery_tests::retained_gpu_recovery_ignores_transient_memory_and_session_hotness",
+  "expected_selected_count": 1,
+  "native_gpu_effect": false,
+  "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "argv": [
+    "/Users/adalundhe/.cargo/bin/cargo",
+    "test",
+    "-p",
+    "hex-sim",
+    "--lib",
+    "--locked",
+    "peer::adversarial_device_recovery_tests::retained_gpu_recovery_ignores_transient_memory_and_session_hotness",
+    "--",
+    "--exact",
+    "--test-threads=1",
+    "--nocapture"
+  ],
+  "exit_code": 101,
+  "counts": {
+    "passed": 0,
+    "failed": 1,
+    "ignored": 0,
+    "measured": 0,
+    "filtered_out": 159
+  },
+  "log": "/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-impl-01a1c640-90230466-before-v1/proof/selected-device-recovery.log",
+  "log_bytes": 5307,
+  "log_sha256": "32d31800b3761033e9b8fadd0eabbaa444c6f46345f3de62dc245f0eb609fe5d",
+  "source_unchanged": true,
+  "child_reaped": true,
+  "owned": {
+    "pid": 18402,
+    "start": "Tue Nov 10 09:37:48 2026",
+    "argv": [
+      "/Users/adalundhe/.cargo/bin/cargo",
+      "test",
+      "-p",
+      "hex-sim",
+      "--lib",
+      "--locked",
+      "peer::adversarial_device_recovery_tests::retained_gpu_recovery_ignores_transient_memory_and_session_hotness",
+      "--",
+      "--exact",
+      "--test-threads=1",
+      "--nocapture"
+    ],
+    "driver_pid": 18396
+  },
+  "witnesses": [
+    "test peer::adversarial_device_recovery_tests::retained_gpu_recovery_ignores_transient_memory_and_session_hotness ... retained-transient runner_only=false memory_pressure=true expected=bootOk/held0 observed_refusal=Some(Damaged(\"an owned box past its node's admission\")) recovered_held=[0] fresh_verdict=None cleanup_assignments=0 cleanup_rows=epoch_only cleanup_charge=0",
+    "retained-transient runner_only=false memory_pressure=false expected=bootOk/held0 observed_refusal=Some(Damaged(\"an owned box past its node's admission\")) recovered_held=[0] fresh_verdict=None cleanup_assignments=0 cleanup_rows=epoch_only cleanup_charge=0",
+    "retained-transient runner_only=true memory_pressure=true expected=bootOk/held0 observed_refusal=Some(Damaged(\"a kept box past the node's admission\")) recovered_held=[0] fresh_verdict=None cleanup_assignments=0 cleanup_rows=epoch_only cleanup_charge=0",
+    "retained-transient runner_only=true memory_pressure=false expected=bootOk/held0 observed_refusal=Some(Damaged(\"a kept box past the node's admission\")) recovered_held=[0] fresh_verdict=None cleanup_assignments=0 cleanup_rows=epoch_only cleanup_charge=0"
+  ],
+  "binaries": [
+    {
+      "path": "/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-impl-01a1c640-90230466-before-v1/target/debug/deps/hex_sim-9ebd5bc0b4cd9747",
+      "sha256": "c61a75b5de4eb8397f2ec3950f00dd1e1033fa170b53308ad3081d5a125bb597",
+      "bytes": 13902504
+    }
+  ]
+}

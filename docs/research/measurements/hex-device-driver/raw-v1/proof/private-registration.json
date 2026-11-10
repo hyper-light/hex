@@ -1,0 +1,7 @@
+{
+  "parent": "crates/hex-node/src/placement/tests.rs",
+  "before_sha256": "0cdf5d751719274f5c9e5c92709895e73231263d9aabc04cecf7a20ec0e47e87",
+  "after_sha256": "f2b76cf344e88de2b85eb2dd5bcec119f0ee5aad508caff085b0a1dc904e7dd4",
+  "only_appended": "\n#[path = \"device_binding_tests.rs\"]\nmod device_binding_tests;\n",
+  "scope": "PRIVATE copy only; actual worktree parent unchanged"
+}

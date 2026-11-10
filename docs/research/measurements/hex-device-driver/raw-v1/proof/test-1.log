@@ -1,0 +1,7 @@
+
+running 1 test
+test placement::tests::device_binding_tests::model_driver_refuses_recovered_metadata_disagreement_before_rows_or_init_then_repairs ... model-driver-metadata expected=Damaged/before_rows/before_init observed_typed=true files_unchanged=true counts_before=(1, 1, 1)/after=(1, 1, 1) target_key=Key { owner: 0, epoch: 1, seq: 0 } target_id=hex-place-00112233445566778899aabbccddeeff-0-1-0 claims=[DeviceId { kind: Gpu, key: 256 }]/[DeviceId { kind: Gpu, key: 256 }] state=Created/Created/Running cpu_key=Key { owner: 0, epoch: 1, seq: 0 } cpu_id=hex-place-ffeeddccbbaa99887766554433221100-0-1-0 cpu_exit=Some(Code(0)) counts=(2, 2, 3) cleanup_boxes=0 cleanup_claims=0 hardware_effect=false
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 141 filtered out; finished in 0.26s
+

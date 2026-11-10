@@ -1,0 +1,189 @@
+{
+  "transient-original-red/input-receipt.json": {
+    "bytes": 932,
+    "sha256": "44fa301b1524f28b3818c14af9da90f0218ca50f3383cc729e38630b0f08c9bb"
+  },
+  "transient-original-red/light-command.sh": {
+    "bytes": 3569,
+    "sha256": "e9885db6d52a880913bf29b7bdefd764bf9cedaf5af3a730ba6e9a0ded3e12a7"
+  },
+  "transient-original-red/light-result.json": {
+    "bytes": 3723,
+    "sha256": "f3a3ec4124dc4170f40f79324a6fd52c2531eaed1e6db82180fc8feda643d2d8"
+  },
+  "transient-original-red/proof-readback.json": {
+    "bytes": 1961,
+    "sha256": "18d7c5ff5fc1c42199fd84032568f0435cb414835d12700177b7c70379fc09e1"
+  },
+  "transient-original-red/selected-device-recovery.log": {
+    "bytes": 5307,
+    "sha256": "32d31800b3761033e9b8fadd0eabbaa444c6f46345f3de62dc245f0eb609fe5d"
+  },
+  "first-fixed-lint-failure/index-units.log.gz": {
+    "bytes": 930,
+    "sha256": "f77a9753f34aadc34b6bc0af04e21221b705c861905e2d4350d5f094fcfecd70",
+    "raw_sha256": "918054fca355045f7ca82a2736457da16a8a6130ca39fa412a355e0b3c0ec28e"
+  },
+  "first-fixed-lint-failure/input-receipt.json": {
+    "bytes": 1554,
+    "sha256": "02cca080124f5000d6367bbbbc530ae81a79421592f1bfb93c05a37722e16e79"
+  },
+  "first-fixed-lint-failure/lane-leaf.log.gz": {
+    "bytes": 2590,
+    "sha256": "cedcb2d42e07395642e255b0ead59219e9c5b9ab8eefd6830275eb56eca3ce41",
+    "raw_sha256": "e0b1d1b3be42a8ef2fc356a6d2b1f922e8e7cc7a97ffc81ea437728a97a16fce"
+  },
+  "first-fixed-lint-failure/lib-clippy.log": {
+    "bytes": 1359,
+    "sha256": "1284d0716be57a4319e265564edbd23d62657bec0715e216f11bd318ccd1ebe7"
+  },
+  "first-fixed-lint-failure/light-command.sh": {
+    "bytes": 4974,
+    "sha256": "6af4ab4a040df6df129c91559b6cf9d69b857dacbd6257918009337b8205e50a"
+  },
+  "first-fixed-lint-failure/light-driver.py": {
+    "bytes": 4652,
+    "sha256": "0a3220c577adf0fe3298f2be40d5f48b00cc44c77b60bc7c2a75dd77241bac1d"
+  },
+  "first-fixed-lint-failure/light-result.json": {
+    "bytes": 14873,
+    "sha256": "7a4eddc6192de42ea3d0af457d922499530e1678b56012e1349ffb10c6aa4305"
+  },
+  "first-fixed-lint-failure/peer-units.log.gz": {
+    "bytes": 888,
+    "sha256": "e6ea096954ea084f9d6f62ba802b801669646b8ad0c48f1aeb475bea1094c1a8",
+    "raw_sha256": "7e29253cea7aecd9d57f5a3a9f412d3ffc9d2eec55c8551330d5b1ac1edba875"
+  },
+  "first-fixed-lint-failure/proof-readback.json": {
+    "bytes": 3410,
+    "sha256": "6e530cf9ddbd8205038b66ecb0edf15267bb7924e6146c995620581984192261"
+  },
+  "tested-58/index-units.log.gz": {
+    "bytes": 931,
+    "sha256": "37c5eba2468e11149528c83ff5ee7d8ec8f92503279b3dbc105ceff773677034",
+    "raw_sha256": "358afb8398018d88e85d310eb2addf277e5bb1f68a9070ffb17e7cdbd95f6e08"
+  },
+  "tested-58/input-receipt.json": {
+    "bytes": 1554,
+    "sha256": "fcdb18f494f70f37b2b4dd305cd438f37e6f02f2a97addfa94d8cd0b38aef723"
+  },
+  "tested-58/lane-leaf.log.gz": {
+    "bytes": 2590,
+    "sha256": "d808fa843a54ca0e5d99e6a536bd53d6e22bbfa0c55a8a22b2e702441ce912a6",
+    "raw_sha256": "17cc88d385823f49cbdacd25e5da5fbc78bb02903a389cbf303b8d9cba8a8c9f"
+  },
+  "tested-58/lib-clippy.log": {
+    "bytes": 770,
+    "sha256": "b4e870bdb9ba2b14be3a32861f395fe3e0542c571b2b17fea888d91b4e7c2627"
+  },
+  "tested-58/light-command.sh": {
+    "bytes": 4974,
+    "sha256": "887757eef8317adba886ce2fdcfc32153cae457e7db4cbe3173b9f178ab5f1ee"
+  },
+  "tested-58/light-driver.py": {
+    "bytes": 4652,
+    "sha256": "b77449024146bb370e441bc08834e7a7c161133b1dd737b5cc18a66eeee83b97"
+  },
+  "tested-58/light-result.json": {
+    "bytes": 14868,
+    "sha256": "830cf7df6033626b1980f96e52c79476019d538aca3bf93c83361e42e3560282"
+  },
+  "tested-58/peer-units.log.gz": {
+    "bytes": 889,
+    "sha256": "2c0cdfe75662839d32a1b6b6036d80e7efdd8d50e8a0ce683e28c212009973b6",
+    "raw_sha256": "da2595461cfba6b70d924b4bcf40d0fccf611d18cce0fbab9193e169faad0d58"
+  },
+  "tested-58/proof-readback.json": {
+    "bytes": 3387,
+    "sha256": "cd72aece811bdf0621832d717cb04f5384aca1b6adb8664366eca3cffc168098"
+  },
+  "legal-index-red/input-receipt.json": {
+    "bytes": 1555,
+    "sha256": "6460c33e02ae24433878703866d9de33b742102c4ff108a0073f34ae4ba2f702"
+  },
+  "legal-index-red/light-command.sh": {
+    "bytes": 4723,
+    "sha256": "d2175ac4d426e583ea6dd793f439cf0cd20713313ddbda24e394e4b7ba464059"
+  },
+  "legal-index-red/light-driver.py": {
+    "bytes": 4403,
+    "sha256": "e7affd7a37acfa9074944f3f9b36957e848e01e1b2d155296892cf7e815cb959"
+  },
+  "legal-index-red/light-result.json": {
+    "bytes": 3400,
+    "sha256": "e0f35ce9a11b688f91f4d8cd0f06b50aff5726f2227817602c8845939947022e"
+  },
+  "legal-index-red/max-index.log.gz": {
+    "bytes": 1426,
+    "sha256": "ffdb6b3c4bdcb8e46cd2c7abb104b5d0d96930553b4b0940a5e1cc9d3cbde753",
+    "raw_sha256": "19a406b559ed805c95366c25cc9878d96e25e792eb25994c8092db672b70073e"
+  },
+  "legal-index-red/proof-readback.json": {
+    "bytes": 1968,
+    "sha256": "2965be18ffdbd9577cb12105b5ae8d891d13b4e23811283be88542a6c8c8a544"
+  },
+  "legal-index-green/input-receipt.json": {
+    "bytes": 1590,
+    "sha256": "6b444ce445fe92230c6a85bd875dadc0ec60cba17c6d7256324d8cadec8e981a"
+  },
+  "legal-index-green/light-command.sh": {
+    "bytes": 4723,
+    "sha256": "3796492f17d9e4fd07ff83751c847a07db7e5a4751aa30c94b14d52293907d72"
+  },
+  "legal-index-green/light-driver.py": {
+    "bytes": 4403,
+    "sha256": "3a0d1f71b66b99c74e1d6efdbdaf486d3583036391a666fe311998bbc2414b9d"
+  },
+  "legal-index-green/light-result.json": {
+    "bytes": 3554,
+    "sha256": "4fbb8206c6aa4279475f8be71e8db5cb714641da35a79b9e7fa245a94fc01db3"
+  },
+  "legal-index-green/max-index.log.gz": {
+    "bytes": 1151,
+    "sha256": "c3d855455ecae8fcbb3b183a82f76b91562373a333e692c9a1a9763f566ef5ad",
+    "raw_sha256": "2200dc24dbfd7d5737e9f2358df0fdf3537876bd57d1690aa04f42f548f024dc"
+  },
+  "legal-index-green/proof-readback.json": {
+    "bytes": 1966,
+    "sha256": "c729d97254a03013d3c882407ee30fb7eb698a8a90534cd1f149536bb64cbdec"
+  },
+  "final-light/index-units.log.gz": {
+    "bytes": 930,
+    "sha256": "1f1ffe525f1f0ef5c20f08fffe05be3cf9f9c5042a3d5e3fca1f014c60c30d55",
+    "raw_sha256": "83a26bc363000f3a6617bf1b1583c3eb4ea19d69f852a13609a570d9defd28dc"
+  },
+  "final-light/input-receipt.json": {
+    "bytes": 1586,
+    "sha256": "73c5665749c1c69e4255d3cc3be9572766ba2c53417ebbe17f2e737bb5913d7a"
+  },
+  "final-light/lane-leaf.log.gz": {
+    "bytes": 2882,
+    "sha256": "6ea89fe6762db8a48d36672bd98d54076637c0e6aafe778e2002b577a559a876",
+    "raw_sha256": "0b04504e8a13082a04ed70fbe62befdda24aeb0cd738e72dc17d4ff7cd8ac81a"
+  },
+  "final-light/lib-clippy.log": {
+    "bytes": 758,
+    "sha256": "01dca4f4248ba550ec2c29df360b5a01d69dcda3a2f9422db0d731b6fc68be9e"
+  },
+  "final-light/light-command.sh": {
+    "bytes": 5024,
+    "sha256": "bd4e737feb36787fdfc1002c87316671d6899225794dd9a651e4820fc019cc2f"
+  },
+  "final-light/light-driver.py": {
+    "bytes": 4705,
+    "sha256": "1574ad18c2ed0325ef9eb348033e02bd8c00327275fb7d011b0d7a247bc592d8"
+  },
+  "final-light/light-result.json": {
+    "bytes": 15874,
+    "sha256": "e988c07b0edd79e1aa9782586d169b2c18874e3257e85b70e59246106492f69e"
+  },
+  "final-light/peer-units.log.gz": {
+    "bytes": 887,
+    "sha256": "27c8dd00644b447724cbd9cc5ea7c2ac7c17aa599f2a31e4e09684951ae6173d",
+    "raw_sha256": "8d3be5fae1670735838474ba994649e98c4ff35ee28d6dec20b34043df99db2f"
+  },
+  "final-light/proof-readback.json": {
+    "bytes": 2863,
+    "sha256": "8cbedfb0bfd8984f5ed549f43421d07561434fef74ac752275d2c20e71055087"
+  }
+}

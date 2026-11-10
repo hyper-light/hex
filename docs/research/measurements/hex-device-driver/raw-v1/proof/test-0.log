@@ -1,0 +1,7 @@
+
+running 1 test
+test placement::tests::device_binding_tests::model_driver_keeps_exact_gpu_binding_across_reboot_inventory_reorder_and_load_swap ... model-driver-reboot expected_old=DeviceId { kind: Gpu, key: 256 } observed_old=[DeviceId { kind: Gpu, key: 256 }]/[DeviceId { kind: Gpu, key: 256 }] key=Key { owner: 0, epoch: 1, seq: 0 } id=hex-place-00112233445566778899aabbccddeeff-0-1-0 fresh_key=Key { owner: 0, epoch: 2, seq: 0 } fresh_id=hex-place-00112233445566778899aabbccddeeff-0-2-0 fresh_claims=[DeviceId { kind: Gpu, key: 512 }] counts=(2, 2, 2) cleanup_boxes=0 cleanup_claims=0 hardware_effect=false
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 141 filtered out; finished in 0.29s
+

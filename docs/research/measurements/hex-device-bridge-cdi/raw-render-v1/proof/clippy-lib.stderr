@@ -1,0 +1,29 @@
+    Checking serde_core v1.0.229
+    Checking thiserror v2.0.21
+    Checking serde v1.0.229
+    Checking zmij v1.0.23
+    Checking memchr v2.8.3
+    Checking itoa v1.0.18
+    Checking serde_json v1.0.154
+    Checking hex-api v0.1.0 (/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/source/crates/hex-api)
+    Checking hex-core v0.1.0 (/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/source/crates/hex-core)
+error: use of a disallowed method `bool::then_some`
+   --> crates/hex-core/src/bundle/device_edits.rs:260:45
+    |
+260 |         uid: node.uid.or_else(|| (uid != 0).then_some(uid)),
+    |                                             ^^^^^^^^^
+    |
+    = note: builds its argument even when false; use `then(|| ..)` or if/else
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#disallowed_methods
+    = note: requested on the command line with `-D clippy::disallowed-methods`
+
+error: use of a disallowed method `bool::then_some`
+   --> crates/hex-core/src/bundle/device_edits.rs:261:45
+    |
+261 |         gid: node.gid.or_else(|| (gid != 0).then_some(gid)),
+    |                                             ^^^^^^^^^
+    |
+    = note: builds its argument even when false; use `then(|| ..)` or if/else
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#disallowed_methods
+
+error: could not compile `hex-core` (lib) due to 2 previous errors

@@ -1,0 +1,13 @@
+{
+  "source_revision": "90230466c3e157855ee7639adb196637dc708530",
+  "fixed_base": "37021c35e64b2a8bab1d35f20f92a0042d874a44",
+  "archive_sha256": "8122626ab469c10635594b45bb3ce3eda80333bfe99e886854d8162f92b838b2",
+  "archive_bytes": 6478145,
+  "leaf_sha256": "5433ba2a4e957d47a83d48df38faaf5d09e3f4233e957bda37dae48ede0adf0e",
+  "parent_original_sha256": "3bdec78b35be0c93c491ad65b5b268b312702c56a98202cae01bfe510903c120",
+  "selected_test": "peer::adversarial_device_recovery_tests::retained_gpu_recovery_ignores_transient_memory_and_session_hotness",
+  "parent_registered_sha256": "9de0915a302a0582d6683ee95528054c83d79300d829e172d52f17a265009d5c",
+  "temporary_registration": "\n#[cfg(test)]\n#[path = \"peer/adversarial_device_recovery_tests.rs\"]\nmod adversarial_device_recovery_tests;\n",
+  "source_members": 1321,
+  "remote_base": "/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-impl-01a1c640-90230466-before-v1"
+}

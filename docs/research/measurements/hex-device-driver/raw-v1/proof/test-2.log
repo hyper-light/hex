@@ -1,0 +1,7 @@
+
+running 1 test
+test placement::tests::device_binding_tests::model_driver_rejects_forged_caller_claims_before_records_and_runtime_then_progresses ... model-driver-forgery expected=Invalid/no_files/no_runtime observed=Err(Runtime(Invalid { what: "placement", why: "the receiver selects physical devices from the demand" })) files_unchanged=true runtime_unchanged=true gpu_key=Key { owner: 0, epoch: 1, seq: 0 } gpu_id=hex-place-00112233445566778899aabbccddeeff-0-1-0 claims=[DeviceId { kind: Gpu, key: 256 }] cpu_key=Key { owner: 0, epoch: 1, seq: 1 } cpu_id=hex-place-00112233445566778899aabbccddeeff-0-1-1 cpu_exit=Some(Code(0)) counts=(2, 1, 2) cleanup_boxes=0 cleanup_claims=0 hardware_effect=false
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 141 filtered out; finished in 0.24s
+

@@ -1,0 +1,18 @@
+{
+  "command": [
+    "/Users/adalundhe/.local/bin/kiln",
+    "run",
+    "--on",
+    "d1323898b255a3ed435eb83fa0f7b0cf",
+    "--needs",
+    "cpus=1,mem=4g,disk=12g",
+    "--no-sync",
+    "--timeout",
+    "120",
+    "--",
+    "nice -n 10 python3 -c 'import gzip,hashlib,io,json,pathlib,tarfile\nroot=pathlib.Path.home()/'\"'\"'.cache/hex-cdi-render-01a1c640-74f889be-v2'\"'\"'\nproof=root/'\"'\"'proof'\"'\"'\ndef sha(blob):return hashlib.sha256(blob).hexdigest()\ndata={}\nfor p in sorted(proof.rglob('\"'\"'*'\"'\"')):\n    if p.is_file():data['\"'\"'proof/'\"'\"'+p.relative_to(proof).as_posix()]=p.read_bytes()\nfor rel in ['\"'\"'driver.py'\"'\"','\"'\"'baseline-bundle.rs'\"'\"']:\n    data['\"'\"'retained-source/'\"'\"'+rel]=(root/rel).read_bytes()\nfor rel in ['\"'\"'crates/hex-core/src/bundle/device_edits.rs'\"'\"','\"'\"'crates/hex-core/src/bundle/device_edits/tests.rs'\"'\"','\"'\"'crates/hex-core/src/cdi.rs'\"'\"','\"'\"'crates/hex-core/src/cdi/tests.rs'\"'\"']:\n    data['\"'\"'retained-source/'\"'\"'+rel]=(root/'\"'\"'source'\"'\"'/rel).read_bytes()\nmanifest={name:{'\"'\"'bytes'\"'\"':len(raw),'\"'\"'sha256'\"'\"':sha(raw)} for name,raw in sorted(data.items())}\ndata['\"'\"'MANIFEST.json'\"'\"']=(json.dumps(manifest,indent=2)+'\"'\"'\\n'\"'\"').encode()\nout=io.BytesIO()\nwith gzip.GzipFile(fileobj=out,mode='\"'\"'wb'\"'\"',mtime=0) as gz,tarfile.open(fileobj=gz,mode='\"'\"'w'\"'\"') as archive:\n    for name,raw in sorted(data.items()):\n        member=tarfile.TarInfo(name);member.size=len(raw);member.mode=0o644;archive.addfile(member,io.BytesIO(raw))\nraw=out.getvalue();retained=root/'\"'\"'retained'\"'\"';retained.mkdir(exist_ok=True)\np=retained/'\"'\"'proof-v2.tar.gz'\"'\"'\nwith p.open('\"'\"'xb'\"'\"') as f:f.write(raw)\nprint(json.dumps({'\"'\"'path'\"'\"':str(p),'\"'\"'bytes'\"'\"':len(raw),'\"'\"'sha256'\"'\"':sha(raw),'\"'\"'members'\"'\"':len(data)}))\n'"
+  ],
+  "exit_code": 0,
+  "stdout": "{\"path\": \"/Users/adalundhe/.cache/hex-cdi-render-01a1c640-74f889be-v2/retained/proof-v2.tar.gz\", \"bytes\": 77420, \"sha256\": \"5dc79163b7a30962780af3d241c8e2e0056ef17874a08d7db23a54a6996ab4bd\", \"members\": 109}\n",
+  "stderr": "\u001b[2m[kiln] on d1323898b255a3ed435eb83fa0f7b0cf \u00b7 macos/aarch64 \u00b7 30 of 32 cores idle \u00b7 48 GB free \u00b7 room for 1 CPU, 4 GiB of memory, 12 GiB of disk\u001b[0m\n"
+}
