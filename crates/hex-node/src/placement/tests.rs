@@ -359,3 +359,73 @@ fn owner_epoch_sequence_and_repeated_caller_ids_cannot_collide() {
     assert_ne!(physical_id(a).unwrap(), physical_id(b).unwrap());
     assert_eq!(rt.list().unwrap().len(), 2);
 }
+
+/// AC-T7.4.1: the owner needs no local backend for a class another peer genuinely runs.
+#[test]
+fn owner_without_guest_backend_sends_full_payload_to_capable_peer() {
+    use hex_sim::model::{Arch, Classes, Os, Platform};
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let rt = Arc::new(Counting::default());
+    let (mut demand, mut payload) = request();
+    demand.class = Class::Shards;
+    demand.ask.os = Some(Os::Macos);
+    payload.spec.class = ClassSpec::Oci(Box::new(OciSpec {
+        rootfs: Rootfs::Dir("/rootfs".into()),
+        init: Program::of(&["wait"]),
+        mounts: Vec::new(),
+        hostname: None,
+        network: Network::Private,
+        hosts: Vec::new(),
+    }));
+    payload.start = true;
+    let mut owner = NodeSpec::new(NodeId(0), demand.need);
+    owner.classes = Classes::NONE.with(Class::Oci);
+    let mut target = NodeSpec::new(NodeId(1), demand.need);
+    target.classes = Classes::NONE.with(Class::Shards);
+    target.platform = Platform {
+        os: Os::Macos,
+        arch: Arch::Aarch64,
+    };
+    target.virt.hvf = true;
+    let nodes = [owner, target];
+    let budget = Budget { owned: 4, ran: 4 };
+    let owner = Driver::boot(
+        NodeId(0),
+        &nodes,
+        &[],
+        budget,
+        Pick::default(),
+        a.path(),
+        Runtimes::default(),
+    )
+    .unwrap();
+    let target = Driver::boot(
+        NodeId(1),
+        &nodes,
+        &[],
+        budget,
+        Pick::default(),
+        b.path(),
+        Runtimes::new([(Class::Shards, rt.clone() as Arc<dyn Runtime>)]).unwrap(),
+    )
+    .unwrap();
+    let (key, step) = owner.submit(demand, payload.clone()).unwrap();
+    let (to, start) = step.send.into_iter().next().unwrap();
+    assert_eq!(to, NodeId(1));
+    assert_eq!(start.payload, Some(payload));
+    let step = target.hear(NodeId(0), start).unwrap();
+    assert_eq!(rt.starts.load(Ordering::SeqCst), 1);
+    let (to, started) = step.send.into_iter().next().unwrap();
+    assert_eq!(to, NodeId(0));
+    let step = owner.hear(NodeId(1), started).unwrap();
+    assert!(step.notices.contains(&Notice::Started {
+        key,
+        node: NodeId(1)
+    }));
+    assert!(matches!(
+        owner.delete(key),
+        Err(Error::Runtime(Refusal::NoSuchBox(_)))
+    ));
+    assert_eq!(rt.deletes.load(Ordering::SeqCst), 0);
+}
