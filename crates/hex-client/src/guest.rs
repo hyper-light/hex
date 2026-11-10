@@ -100,6 +100,13 @@ impl Duplex for std::os::unix::net::UnixStream {
 pub trait Link: Send + Sync + 'static {
     /// A new connection to the guest's `port`.
     fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal>;
+    /// An identity safe to lend to a caller that opens its own guest streams, without owning the VM.
+    fn identity(&self) -> Result<shards_api::Identity, Refusal> {
+        Err(Refusal::Invalid {
+            what: "guest stream identity",
+            why: "this link has no lendable VM identity".to_owned(),
+        })
+    }
 }
 
 /// How long a call waits for the guest's node agent's answer, one wait a kind of call (`crate::calls::kind_of`'s
@@ -180,6 +187,22 @@ impl Stream {
 impl Transport for Stream {
     type Reading = Reading;
     const MAKES_ASKED: bool = true;
+
+    fn stream_offer(
+        &self,
+        exec: u64,
+        streams: wire::Streams,
+    ) -> Result<wire::StreamOffer, Refusal> {
+        let identity = self.link.identity()?;
+        Ok(wire::StreamOffer {
+            pid: identity.pid,
+            started: identity.started,
+            vsock: identity.vsock,
+            token: self.token,
+            exec,
+            streams,
+        })
+    }
 
     fn answers() -> &'static [Patience; KINDS] {
         &ANSWERS

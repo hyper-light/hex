@@ -306,24 +306,26 @@ copy there shows ~20 bench scripts as modified: line endings from the sync, no c
 
 23. how slow a program's end is in a first run after a rebuild, for the learned wait's Windows record
    (hex_api::conformance::HostClass::Windows).
-   NOT OF RECORD (the lead, 2026-11-08): these runs, 2026-11-08T00:40-01:05Z, overlap the NTFS stall's
-   onset. D's run of Shards' Windows suite (00:12-00:41Z) set the stall off again, kernel time 66-71% by
-   00:41Z, so runs after 00:12Z aren't of record. The 1.8% below was D's reading at the 00:06Z boot, not
-   during these runs. The patience stands either way: Windows' record is Process Governor's 6,239 ms
-   (bench/native/RESULT.md, 2026-11-05), and these runs' slowest end (2,495 ms) is below it, so patience is
-   2 x 6,239 = 12.5 s. A retake on a clean jupiter waits on the lead's word. The correctness results stand
-   (only HEX-RT-14 failed; the feature query didn't time out).
-   Taken 2026-11-08T00:40-01:05Z on jupiter, after D's reboot at 00:06Z (kernel time 1.8%, D's reading at
-   the boot; the System process at 613 threads): 4 cycles at ac08c9b3, each a relink of hex.exe and the test exe then the whole
-   suite, in a copy whose LearnedWait::saw printed every answer and whose own five ends could wait 300 s.
-     cycle 1: CPU 35% before, 49 answers, slowest 764 ms (the hog 750 ms)
-     cycle 2: CPU 9%, 49 answers, slowest 2,305 ms (the hog 784 ms)
-     cycle 3: CPU 100%, 45 answers, slowest 2,132 ms (the hog 2,132 ms)
-     cycle 4: CPU 100%, 49 answers, slowest 2,495 ms (the hog 2,495 ms)
-   Every cycle failed only HEX-RT-14 (waits on step 4's 3c35f15); the feature query didn't time out. The
-   slowest first-run end is 2,495 ms, under Process Governor's 6,239 ms on jupiter (bench/native/RESULT.md),
-   so Windows' record is 6,239 ms (patience 12.5 s before any sample). Each suite took ~285 s, its
-   negative watches waiting out the 69.7 s bound the provisional 34,837 ms record gave.
+   OF RECORD, retaken on a clean jupiter 2026-11-09T15:45-15:49Z (the lead called it clean at 20:24Z the day
+   before: up 17 h since the 02:51Z reboot, kernel 1.0%, 502 System threads). 4 cycles on cp/t7-native-windows
+   51890881, each a relink of hex.exe and windows_process_box then that suite (the differential contract),
+   in a copy whose LearnedWait::saw printed every answer and whose patience was raised to 300 s so no end was
+   truncated. Load recorded before each cycle (privileged %, System threads, free-page MB), s4's criterion 2
+   as co-tenant; the stall thresholds (privileged 30%, the FreePage balloon) were never neared:
+     cycle 1: privileged 0.9%, 508 threads, 43,569 MB free; 49 answers, slowest 726 ms
+     cycle 2: privileged 1.1%, 516 threads, 42,756 MB free; 49 answers, slowest 693 ms
+     cycle 3: privileged 1.1%, 517 threads, 42,699 MB free; 49 answers, slowest 686 ms
+     cycle 4: privileged 3.1%, 518 threads, 42,688 MB free; 49 answers, slowest 700 ms
+   Every cycle failed only HEX-RT-14 (the program's exec-bound case, waits on step 4's 3c35f15); the feature
+   query didn't time out. The slowest first-run end across the four cycles is 726 ms, well under Process
+   Governor's 6,239 ms on jupiter (bench/native/RESULT.md), so Windows' record is 6,239 ms (patience 12.5 s
+   before any sample). Each suite took ~59 s (its negative watches wait out the 300 s copy's bound only where
+   a program really stays up; the real ends came in under a second).
+
+   Superseded (not of record): 2026-11-08T00:40-01:05Z, 4 cycles at ac08c9b3, slowest 2,495 ms — those runs
+   overlapped the NTFS stall's onset (D's Shards suite 00:12-00:41Z, kernel 66-71% by 00:41Z), so they were
+   not of record; the 2026-11-09 retake above replaces them. The patience was 12.5 s either way (2,495 and
+   726 both under 6,239).
    Not of record: 2026-11-07T07:34-09:10Z, the same method beside D's orphaned whole-suite lane on jupiter
    (16:21Z to ~20:00Z, our own load, the kernel at ~97%; the lead, 2026-11-08). It measured 8,701 / 14,507 /
    24,411 / 34,837 ms and the feature query timing out every cycle, and gave the provisional 34,837 ms

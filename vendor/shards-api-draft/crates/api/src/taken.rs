@@ -49,6 +49,11 @@ impl Held {
         self.os.exited(true).map(drop)
     }
 
+    /// Whether this held process has exited, without waiting or taking ownership of its life.
+    pub(crate) fn try_exited(&self) -> io::Result<bool> {
+        self.os.exited(false)
+    }
+
     /// Kills it (SIGKILL): on Linux through its pidfd, which no process given its pid since
     /// receives; on macOS, which has none, by its pid, which its caller sends only while its
     /// exit has not been seen.

@@ -1,0 +1,44 @@
+stdio_probe bench (native plan step 8, the decision "the Windows node, on one completion port" — an exec's
+stdio transport, chosen by measurement). Windows' AF_UNIX passes no handles, so four candidates carry an
+exec's stdout (4 MiB) from the node to the caller, measured for first byte and throughput, interleaved (the
+order rotated each round), the machine's load recorded each round:
+  framed:  the stream framed over the caller's own control connection (length-prefixed chunks)
+  conn:    a second AF_UNIX connection per stream, taken only from the caller's pid (SIO_AF_UNIX_GETPEERPID)
+  pipe:    a named pipe per stream, first instance only, remote clients refused, taken only from the caller's
+           pid (GetNamedPipeClientProcessId)
+  dup:     an anonymous pipe whose read end the node duplicates into the caller's process (DuplicateHandle),
+           the caller named by SIO_AF_UNIX_GETPEERPID
+All four give the stream to the caller only: framed and dup have no door a second process can knock on (the
+caller's own connection or a handle in its process); conn and pipe are doors the node refuses from any pid
+but the caller's (shown 2026-11-08, stdio_probe refuse / refuse-as: another user and another process of the
+same user both refused, the caller served every byte).
+
+OF RECORD, on a clean jupiter (the lead called it clean 2026-11-09; up 17 h since the 02:51Z reboot,
+kernel 1.0%). 300 rounds per candidate.
+machine:  jupiter (AMD Ryzen AI MAX+ 395, 32 logical CPUs, Windows NT 10.0.26200)
+commit:   bench/native/windows/stdio_probe at aa05c3b5 (cp/t7-native-windows), --release
+when:     2026-11-09 16:39-16:5xZ, a kiln background run
+load:     per-round CPU over the last second: p50 4.8%, one 80% blip (a co-tenant round); privileged 1.3-3.9%
+          across the run, 553-570 System threads, 26-35 GB free — the stall thresholds never neared. s4's
+          criterion 2 as co-tenant. Method note: the probe's per-round connection handshake hangs
+          intermittently (~8% of rounds, a conn/pipe accept race — a probe bug, not a host one), so the 300
+          rounds were collected in batches of 10 (a hung batch timed out at 25 s and was retried, 25 of 105
+          batches). The completed rounds' timings are clean.
+raw:      jupiter C:\Users\corph\.cache\hex-t7-windows\logs\stdio-batched-20261109T163906Z.csv (1,200 rows)
+
+candidate  n    first byte (us)      throughput (MiB/s)
+                p50     p99          p50       p99-high
+framed     300    15      63          9,195     11,093
+conn       300   100     214         14,260     15,656
+pipe       300    50     160         14,255     15,860
+dup        300    32      73         12,792     15,072
+
+Read: framed has the lowest first byte (15 us: no handshake, it rides the control connection) but the lowest
+throughput (9.2 GB/s: framing and the one connection). conn and pipe have the highest throughput (14.3 GB/s)
+but pay a handshake first byte (conn 100 us a new connection + token; pipe 50 us). dup is the balance: 32 us
+first byte (2nd lowest) and 12.8 GB/s (close to the top), and it is the only candidate that hands the caller
+a real OS pipe handle — what a program's stdio is — caller-only by construction (a handle in the caller's
+process, no door), needing no per-pid refusal. Recommended: dup. framed is the fallback where the caller
+reads bytes rather than a handle (lowest latency, multiplexed over the control connection); conn and pipe
+cost a handshake and a door for no throughput gain over dup that matters to stdio. The node builds dup with
+DuplicateHandle (its CLAUDE.md §12 is the socket's, already covering a handle crossing processes).

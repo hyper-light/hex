@@ -42,5 +42,9 @@ sha2.workspace = true
 # The guest loop test's stand-in for a Shards guest (tests/guest_loop.rs).
 shards-api.workspace = true
 
+[target.'cfg(windows)'.dev-dependencies]
+# guest_loop's Firecracker CONNECT fixture; no production stream or handle adapter.
+shards-afunix = { path = "../../vendor/shards-api-draft/crates/afunix" }
+
 [lints]
 workspace = true

@@ -1,3 +1,4 @@
+SUPERSEDED by endwait-jupiter-49134bf0-20261109T1551Z.txt (clean jupiter, of record).
 VOID AS TIMING (the lead, 2026-11-08 ~02:50Z): jupiter's NTFS stall was on (kernel 75-95%) and every timing
 on jupiter from 00:12Z on is void; this run (02:26Z) is in that window. The numbers below are kept as what
 was seen. The method choice they support (packet over pool) is provisional until a retake on a clean

@@ -1,9 +1,9 @@
-# A byte-for-byte copy of Shards' `shards-api` (crates/api) and the crates it needs (abi, afunix on Windows,
+# Shards' `shards-api` (crates/api) and the crates it needs (abi, afunix on Windows,
 # testdir for its tests), at hyper-light/shards p/integrate-1107 c55d85db9b8c88656b4fe4bd582f5ebe6500e959
 # (2026-11-09; SAID da8bcd272, vmm-round2 7ddceb974). D12: the kept console size is learned per kernel pin,
 # `--console-said N` is passed to Shards, and the client's refusal tail is derived from that size. Real guests
 # require a Shards binary that supports `--console-said` (this revision or a descendant); the guest kernel pin
-# is unchanged. The source crates have no Hex patches; the root keeps Shards' settings below (its Cargo.toml
+# is unchanged. Hex's borrowed connector patch is recorded in HEX-PATCHES.md; the root keeps Shards' settings below (its Cargo.toml
 # is unchanged since f2e5a8ca1), with only these four workspace members. It moves to vendor/shards, recorded in
 # vendor/MANIFEST.toml, once Shards lands the crate on main (docs/design/shards-guest.md Appendix A).
 [workspace]

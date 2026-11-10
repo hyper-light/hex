@@ -106,9 +106,8 @@ impl HostClass {
     /// counting a first run after a rebuild (every upgrade's first run is one, and a fresh binary is
     /// scanned before it runs), or `None` where no record holds one yet.
     /// - Windows: Process Governor's 6,239 ms on jupiter (bench/native/RESULT.md, Windows, pass 1). It is
-    ///   above every end in four first runs of windows_process_box after a rebuild there, the slowest
-    ///   2,495 ms, though those runs overlap the NTFS stall's onset and aren't of record
-    ///   (bench/install/records/windows-jupiter-20261105.txt entry 23).
+    ///   above every end in four first runs of windows_process_box after a rebuild on a clean jupiter, the
+    ///   slowest 726 ms (bench/install/records/windows-jupiter-20261105.txt entry 23, retaken 2026-11-09).
     /// - Linux: 957 ms, the slowest of 294 answers in each of three first runs of process_box, oci_box,
     ///   oci_spec_box and node_socket after a rebuild on fedora at load 20-108
     ///   (bench/native/records/firstrun-linux-e34d48d-20261107T173109Z.txt). It is above the waits census's

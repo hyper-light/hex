@@ -746,7 +746,7 @@ fn pause(dialed: Duration, waited: Duration, left: Duration) -> Duration {
 }
 
 /// Why a handshake failed: worth asking again, or not.
-enum Attempt {
+pub(crate) enum Attempt {
     Again(String),
     Refused(String),
 }
@@ -757,16 +757,29 @@ enum Attempt {
 /// `CONN_REQUEST_TIMEOUT_MS` (`crates/vmm/src/devices/virtio/vsock/conn.rs:26-27`), and the
 /// connection with the VM's process.
 /// `cost` is set to its own work, the connect and the ask, for `pause`.
-fn handshake(
+pub(crate) fn handshake(
     vsock: &Path,
     port: u32,
     wait: Option<Duration>,
     cost: &mut Duration,
 ) -> Result<Socket, Attempt> {
     let began = Instant::now();
+    // One handshake's budget, including a partial request or answer, rather than a fresh timeout per byte.
+    let deadline = wait.and_then(|wait| began.checked_add(wait));
+    let left = || match deadline {
+        Some(deadline) => {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                Err(Attempt::Again("the handshake's patience elapsed".into()))
+            } else {
+                Ok(Some(remaining))
+            }
+        }
+        None => Ok(None),
+    };
     // Its own work, the connect and the ask, as far as it got: not its wait for the answer.
     let done = |cost: &mut Duration| *cost = began.elapsed();
-    let mut s = stream::connect(vsock, wait).map_err(|e| {
+    let mut s = stream::connect(vsock, left()?).map_err(|e| {
         done(cost);
         match e.kind() {
             // Not yet bound, or bound and not yet listening: the VM is starting. Or its
@@ -784,13 +797,23 @@ fn handshake(
             _ => Attempt::Refused(format!("{}: {e}", vsock.display())),
         }
     })?;
-    if wait.is_some() {
-        let timeouts = Stream::set_write_timeout(&s, wait).and_then(|()| Stream::set_read_timeout(&s, wait));
-        timeouts.map_err(|e| Attempt::Refused(format!("its timeouts: {e}")))?;
-    }
-    let asked = s.write_all(format!("CONNECT {port}\n").as_bytes());
+    let request = format!("CONNECT {port}\n");
+    let asked = (|| {
+        let mut unsent = request.as_bytes();
+        while !unsent.is_empty() {
+            Stream::set_write_timeout(&s, left()?)
+                .map_err(|e| Attempt::Refused(format!("its write timeout: {e}")))?;
+            match s.write(unsent) {
+                Ok(0) => return Err(Attempt::Again("closed while asking".into())),
+                Ok(n) => unsent = unsent.get(n..).unwrap_or_default(),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(Attempt::Again(format!("asking: {e}"))),
+            }
+        }
+        Ok(())
+    })();
     done(cost);
-    asked.map_err(|e| Attempt::Again(format!("asking: {e}")))?;
+    asked?;
     let mut line = Vec::with_capacity(ANSWER);
     let mut byte = [0u8; 1];
     while line.last() != Some(&b'\n') {
@@ -800,6 +823,8 @@ fn handshake(
                 String::from_utf8_lossy(&line)
             )));
         }
+        Stream::set_read_timeout(&s, left()?)
+            .map_err(|e| Attempt::Refused(format!("its read timeout: {e}")))?;
         match s.read(&mut byte) {
             // The guest did not accept: its device closes the connection.
             Ok(0) => {
@@ -812,6 +837,7 @@ fn handshake(
             Err(e) => return Err(Attempt::Again(format!("awaiting its answer: {e}"))),
         }
     }
+    left()?;
     let answer = String::from_utf8_lossy(&line);
     let ok = answer
         .strip_prefix("OK ")

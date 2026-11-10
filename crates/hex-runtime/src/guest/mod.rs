@@ -469,6 +469,27 @@ impl GuestRuntime {
         Ok(self.evented.lock().map_err(poisoned)?.clone())
     }
 
+    /// A program's own evented control connection, held until its start/end or cancellation.
+    /// Windows' caller-owned sockets cannot be lent through another process. Keeping their offered exec on
+    /// its own control connection makes cancellation close every early stream without affecting other programs.
+    pub fn program_client(&self) -> Result<Option<Arc<Client>>, Refusal> {
+        let Some(b) = self.running()? else {
+            return Ok(None);
+        };
+        let joins = self
+            .joins
+            .lock()
+            .map_err(poisoned)?
+            .clone()
+            .ok_or_else(|| {
+                Refusal::Broken("the guest program has no node event loop".to_owned())
+            })?;
+        let (token, room) = joins.reserve()?;
+        let (client, pump) = Client::connect_evented(Arc::clone(&b.link), room)?;
+        joins.join(token, pump)?;
+        Ok(Some(Arc::new(client)))
+    }
+
     /// Records `guest` as the one this node holds, where a record is kept: one whose identity Shards can't
     /// give leaves no record, so a node after a crash finds none to take back.
     fn record(&self, guest: &dyn shards_api::Guest) -> Result<(), Refusal> {

@@ -126,6 +126,8 @@ mod kind {
     pub const GIVEN: u16 = 0x800a;
     pub const TAKEN: u16 = 0x000e;
     pub const RUN: u16 = 0x000f;
+    pub const STREAMS_READY: u16 = 0x0010;
+    pub const OFFERED: u16 = 0x800b;
 }
 
 /// A message's header, once its wire identity is read as this side's.
@@ -150,6 +152,9 @@ pub enum Request {
     /// The client took the ends of the streams its header's id's exec was given ([`Answer::Given`]), so the node
     /// agent lets its own copies go. Not answered.
     Taken,
+    /// The caller opened every connection in an Offered answer. The original exec may now start.
+    /// Not answered separately; the exec's Started/Refused and Exited keep its original header id.
+    StreamsReady,
 }
 
 /// A call of the node agent: the `Runtime` seam's, its network namespace counts, and a program's kill.
@@ -271,6 +276,22 @@ pub enum Answer {
         pid: u32,
         given: Streams,
     },
+    /// HEX-RT-17: open these guest connections in the caller before acknowledging StreamsReady.
+    /// A preparation, not a started program; no descriptor or cross-process socket reservation rides with it.
+    Offered(StreamOffer),
+}
+
+/// A Shards guest's identity and the names of an exec's caller-owned streams (HEX-RT-17).
+/// The node holds a dedicated control connection until the offer is committed or cancelled, so dropping an
+/// uncommitted offer removes only its own early streams and cannot end another caller's program.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamOffer {
+    pub pid: u32,
+    pub started: u64,
+    pub vsock: PathBuf,
+    pub token: u64,
+    pub exec: u64,
+    pub streams: Streams,
 }
 
 /// The answer to a hello.
@@ -421,6 +442,7 @@ pub fn request(id: u64, request: &Request, bound: usize) -> Result<Vec<u8>, Faul
         }
         Request::Release => w.header(kind::RELEASE, id),
         Request::Taken => w.header(kind::TAKEN, id),
+        Request::StreamsReady => w.header(kind::STREAMS_READY, id),
         Request::Call(call) => put_call(&mut w, id, call)?,
     }
     w.done()
@@ -456,6 +478,15 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
         Answer::Started { pid } => {
             w.header(kind::STARTED, id);
             w.u32(*pid);
+        }
+        Answer::Offered(offer) => {
+            w.header(kind::OFFERED, id);
+            w.u32(offer.pid);
+            w.u64(offer.started);
+            w.path(&offer.vsock)?;
+            w.u64(offer.token);
+            w.u64(offer.exec);
+            w.u8(offer.streams.bits());
         }
         Answer::Given { pid, given } => {
             w.header(kind::GIVEN, id);
@@ -609,6 +640,7 @@ fn parse_request(
         },
         kind::RELEASE => Request::Release,
         kind::TAKEN => Request::Taken,
+        kind::STREAMS_READY => Request::StreamsReady,
         kind::CREATE => Request::Call(Call::Create(Box::new(box_spec(&mut r).map_err(bad)?))),
         kind::START => Request::Call(Call::Start(box_id(&mut r).map_err(bad)?)),
         kind::EXEC => {
@@ -736,6 +768,14 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
         kind::INFO => Answer::Info(info(&mut r)?),
         kind::DONE => Answer::Done,
         kind::STARTED => Answer::Started { pid: r.u32()? },
+        kind::OFFERED => Answer::Offered(StreamOffer {
+            pid: r.u32()?,
+            started: r.u64()?,
+            vsock: r.path()?,
+            token: r.u64()?,
+            exec: r.u64()?,
+            streams: r.u8().and_then(Streams::of)?,
+        }),
         kind::USAGE_ANSWER => Answer::Usage(Usage {
             memory_bytes: r.u64()?,
             memory_peak_bytes: r.u64()?,

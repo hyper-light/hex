@@ -67,7 +67,7 @@ pub(crate) fn kind_of<'a>(waits: &'a [Patience; KINDS], request: &Request) -> Op
             Call::ExecStreams { .. } => 11,
             Call::Run { .. } => 12,
         },
-        Request::Release | Request::Taken => return None,
+        Request::Release | Request::Taken | Request::StreamsReady => return None,
     };
     waits.get(n)
 }
@@ -243,6 +243,27 @@ pub trait Transport: Send + Sync + 'static {
     }
     /// The streams `ask` names for exec `exec`, made here, its program's ends the agent's to find (a
     /// guest's stdio connections, named for it): only where [`Transport::MAKES_ASKED`].
+    /// Opens an offered guest's named streams in this caller, never by importing a reserved remote socket.
+    /// The synchronous call temporarily hands off its reader turn while this bounded connect runs.
+    /// Names a reserved guest exec without opening any of its stdio connections here.
+    fn stream_offer(&self, exec: u64, streams: Streams) -> Result<wire::StreamOffer, Refusal> {
+        let _ = (exec, streams);
+        Err(Refusal::Invalid {
+            what: "stream offer",
+            why: "this transport passes native ends".to_owned(),
+        })
+    }
+
+    fn open_offer(&self, offer: &wire::StreamOffer) -> Result<hex_api::Given, Refusal> {
+        let _ = offer;
+        Err(Refusal::Platform {
+            what: "caller-owned guest streams",
+            platform: std::env::consts::OS,
+            why: "this transport receives native stream ends instead of guest connection offers"
+                .to_owned(),
+        })
+    }
+
     fn asks(&self, exec: u64, ask: hex_api::Ask) -> Result<hex_api::Given, Refusal> {
         let _ = (exec, ask);
         Err(Refusal::Broken(
@@ -351,6 +372,8 @@ impl State {
 
 struct Waiting {
     answer: Taker,
+    /// At most one preparation precedes an exec's final answer.
+    offered: bool,
     /// A list's boxes from the parts that came so far.
     boxes: Vec<BoxInfo>,
     /// Whether it can take the reader's turn: its request sent, or its send waiting for room with the send lock held.
@@ -435,7 +458,7 @@ impl<T: Transport> Shared<T> {
     ) -> Result<(), Refusal> {
         if let Answer::Given { .. } = &answer {
             // Owed before its taker wakes below, so the word goes ahead of anything its caller sends after.
-            self.owe(header.id)?;
+            self.owe(header.id, &Request::Taken)?;
         }
         let mut due: Vec<Due> = Vec::new();
         {
@@ -451,6 +474,36 @@ impl<T: Transport> Shared<T> {
                 state.given.insert(header.id, ends);
             }
             match answer {
+                Answer::Offered(offer) => {
+                    if !state.programs.contains_key(&header.id)
+                        || !state.calls.contains_key(&header.id)
+                    {
+                        // A legitimate answer can outlive its caller's patience. Cancel just its preparation,
+                        // under the same program-bound word queue as Taken, without ending unrelated programs.
+                        self.owe(header.id, &Request::Release)?;
+                        return Ok(());
+                    }
+                    let Some(waiting) = state.calls.get_mut(&header.id) else {
+                        return Ok(());
+                    };
+                    if waiting.offered {
+                        return Err(Refusal::Broken(
+                            "an exec was offered streams twice".to_owned(),
+                        ));
+                    }
+                    let Taker::Wait(mail) = &waiting.answer else {
+                        return Err(Refusal::Invalid {
+                            what: "event-form guest streams",
+                            why: "a connection offer must be opened by its synchronous caller"
+                                .to_owned(),
+                        });
+                    };
+                    mail.try_send(Mail::Answer(Box::new(Ok(Answer::Offered(offer)))))
+                        .map_err(|_| {
+                            Refusal::Broken("a stream offer has no waiting taker".to_owned())
+                        })?;
+                    waiting.offered = true;
+                }
                 Answer::Exited(exit) => match state.programs.remove(&header.id) {
                     Some(Watching::Proc(ending)) => {
                         ending.state.lock().map_err(poisoned)?.exit = Some(Ok(exit));
@@ -481,6 +534,18 @@ impl<T: Transport> Shared<T> {
                     }
                 }
                 answer => {
+                    if matches!(&answer, Answer::Started { .. })
+                        && state
+                            .calls
+                            .get(&header.id)
+                            .is_some_and(|waiting| waiting.offered)
+                        && !state.given.contains_key(&header.id)
+                    {
+                        return Err(Refusal::Broken(
+                            "an offered exec started before its caller opened the streams"
+                                .to_owned(),
+                        ));
+                    }
                     // An exec that started no program has no end to come, and no streams: a completion waiting for
                     // its end is let go, and the ends made for it close.
                     if !matches!(answer, Answer::Started { .. } | Answer::Given { .. }) {
@@ -514,14 +579,14 @@ impl<T: Transport> Shared<T> {
     /// Owes the agent the word that exec `exec`'s given ends were taken, ahead of every later request ([`Owed`]). Past
     /// the agent's budget of programs, which each given answer's ends hold until taken, the agent has given more than
     /// it can, and the read that brought it ends the connection.
-    fn owe(&self, exec: u64) -> Result<(), Refusal> {
-        let word = wire::request(exec, &Request::Taken, wire::MAX_MESSAGE)
+    fn owe(&self, exec: u64, request: &Request) -> Result<(), Refusal> {
+        let word = wire::request(exec, request, wire::MAX_MESSAGE)
             .map_err(Refusal::from)
             .and_then(T::frame)?;
         let mut owed = self.owed.lock().map_err(poisoned)?;
         if owed.words.len() >= owed.bound {
             return Err(Refusal::Exhausted {
-                what: "given answers whose ends the client owes the word it took, the node agent's programs",
+                what: "given ends and stream preparations awaiting the client's acknowledgement or cancellation, the node agent's programs",
                 bound: owed.bound,
             });
         }
@@ -588,6 +653,10 @@ impl<T: Transport> Shared<T> {
                 return;
             };
             let why = state.refused.take().unwrap_or(why);
+            // HEX-RT-17: an unanswered exec has not started, including an unsent Deferred. Its call alone
+            // gets the refusal; reporting an end too would invent a program and can orphan a remote early end.
+            // Snapshot before draining: at most the pending calls already held by this connection.
+            let pending: BTreeSet<u64> = state.calls.keys().copied().collect();
             for (id, waiting) in std::mem::take(&mut state.calls) {
                 waiting.answer.give(id, Err(why.clone()), &mut due);
                 if let Some(wake) = &waiting.wake {
@@ -607,6 +676,10 @@ impl<T: Transport> Shared<T> {
                             ending.came.notify_all();
                         }
                         state.programs.insert(exec, Watching::Proc(ending));
+                    }
+                    Watching::Then(ended) if pending.contains(&exec) => {
+                        // Release the callback's captures outside the state lock, without invoking it.
+                        due.push(Box::new(move || drop(ended)));
                     }
                     Watching::Then(ended) => {
                         let lost = lost.clone();
@@ -721,6 +794,7 @@ impl<'a, T: Transport> Caller<'a, T> {
             id,
             Waiting {
                 answer: Taker::Wait(tx),
+                offered: false,
                 boxes: Vec::new(),
                 reads: false,
                 wake: None,
@@ -1016,26 +1090,78 @@ impl<T: Transport> Conn<T> {
             }
             Err(Sent::Refused(r)) => return Err(r),
         }
-        match caller.wait(deadline) {
-            Some(Ok(answer)) => {
-                if let Some(waits) = waits {
-                    waits.answered(asked.elapsed());
+        let mut offered = false;
+        loop {
+            match caller.wait(deadline) {
+                Some(Ok(Answer::Offered(offer))) => {
+                    offered = true;
+                    caller.answered = false;
+                    // No read turn is held across a guest dial: other calls and program ends keep progressing.
+                    {
+                        let mut state = shared.state()?;
+                        // A reader may have handed us its turn after the offer reached this mailbox.
+                        caller.collect();
+                        if let Some(waiting) = state.calls.get_mut(&caller.id) {
+                            waiting.reads = false;
+                        }
+                        if caller.mine {
+                            state.pass_turn();
+                            caller.mine = false;
+                        }
+                    }
+                    let opened = shared.transport.open_offer(&offer);
+                    // A guest may have refused/ended while this caller dialed without holding the turn.
+                    caller.collect();
+                    if caller.answer.is_some() {
+                        drop(opened);
+                        continue;
+                    }
+                    let given = match opened {
+                        Ok(given) => given,
+                        Err(why) => {
+                            shared.owe(caller.id, &Request::Release)?;
+                            shared.send_owed_now();
+                            return Err(why);
+                        }
+                    };
+                    shared.state()?.given.insert(caller.id, given);
+                    let bytes = wire::request(caller.id, &Request::StreamsReady, bound)
+                        .map_err(Refusal::from)
+                        .and_then(T::frame)?;
+                    if let Err(why) = caller.send(&bytes, NONE, deadline, patience) {
+                        shared.owe(caller.id, &Request::Release)?;
+                        shared.send_owed_now();
+                        return Err(match why {
+                            Sent::Full(why) | Sent::Refused(why) => why,
+                            Sent::Gone => Refusal::Broken(
+                                "the node ended before accepting the stream offer".to_owned(),
+                            ),
+                        });
+                    }
                 }
-                Ok((caller.id, answer))
-            }
-            Some(Err(why)) => Err(why),
-            None => {
-                // No sample (Karn's point), but the census is told the answer took longer than its bound.
-                if let (Some(waits), Some(wait)) = (waits, patience) {
-                    waits.ran_out(wait);
+                Some(Ok(answer)) => {
+                    if let Some(waits) = waits {
+                        waits.answered(asked.elapsed());
+                    }
+                    return Ok((caller.id, answer));
                 }
-                Err(Refusal::Os {
-                    op: "waiting for the node agent's answer",
-                    why: format!(
-                        "none came in {:?}, twice the slowest answer to a call of its kind",
-                        patience.unwrap_or_default()
-                    ),
-                })
+                Some(Err(why)) => return Err(why),
+                None => {
+                    if offered {
+                        shared.owe(caller.id, &Request::Release)?;
+                        shared.send_owed_now();
+                    }
+                    if let (Some(waits), Some(wait)) = (waits, patience) {
+                        waits.ran_out(wait);
+                    }
+                    return Err(Refusal::Os {
+                        op: "waiting for the node agent's answer",
+                        why: format!(
+                            "none came in {:?}, twice the slowest answer to a call of its kind",
+                            patience.unwrap_or_default()
+                        ),
+                    });
+                }
             }
         }
     }
@@ -1305,6 +1431,7 @@ impl<T: Transport> Core<T> {
                 id,
                 Waiting {
                     answer: Taker::Then(then),
+                    offered: false,
                     boxes: Vec::new(),
                     reads: false,
                     wake: None,
@@ -1332,6 +1459,20 @@ impl<T: Transport> Core<T> {
     /// here; `None` when there are none, or they were taken.
     pub fn given(&self, exec: u64) -> Option<hex_api::Given> {
         self.conn.shared.state().ok()?.given.remove(&exec)
+    }
+
+    /// The address and names of a reserved guest exec's streams; no stream is opened until its caller does so.
+    pub fn stream_offer(&self, exec: u64, streams: Streams) -> Result<wire::StreamOffer, Refusal> {
+        {
+            let state = self.conn.shared.state()?;
+            if !state.calls.contains_key(&exec) || !state.programs.contains_key(&exec) {
+                return Err(Refusal::Invalid {
+                    what: "stream offer",
+                    why: "no reserved exec has that id".to_owned(),
+                });
+            }
+        }
+        self.conn.shared.transport.stream_offer(exec, streams)
     }
 
     /// The event form's release of exec `exec`'s program: its end is no longer taken, and the agent lets
@@ -1550,6 +1691,7 @@ pub(crate) fn unexpected(call: &str, answer: &Answer) -> Refusal {
         Answer::Exited(_) => "a program's end",
         Answer::Netns(_) => "network namespace counts",
         Answer::Given { .. } => "a started program with streams",
+        Answer::Offered(_) => "a guest stream preparation",
     };
     Refusal::Broken(format!("the node agent answered a {call} with {kind}"))
 }

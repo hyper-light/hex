@@ -158,10 +158,19 @@ pub type Killed = Box<dyn FnOnce(Result<(), Refusal>) + Send>;
 pub enum Forward {
     /// Its answer comes later, through the reply it was given.
     Taken,
+    /// Caller-owned guest connections must be opened before this exec can be sent.
+    Offered(Offering),
     /// The host runs it itself, on the worker: the call and its exec's stdio, as they were given.
     Back(Box<(Call, Stdio)>),
     /// The host couldn't send it (its reply spent with the attempt): refused, saying why.
     Refused(Refusal),
+}
+
+/// A bounded program reservation whose guest streams will be opened by its caller (HEX-RT-17).
+/// Dropping `ready` cancels the unsent exec and closes its dedicated control connection.
+pub struct Offering {
+    pub streams: wire::StreamOffer,
+    pub ready: Box<dyn FnOnce() -> Result<(), Refusal> + Send>,
 }
 
 /// A forwarded call's answer.
@@ -540,6 +549,12 @@ struct Conn<O: Os> {
     drained: Condvar,
 }
 
+/// The single admission owner shared by an offer, its guest answer and cancellation.
+struct PendingOffer {
+    ready: Box<dyn FnOnce() -> Result<(), Refusal> + Send>,
+    completed: Arc<AtomicBool>,
+}
+
 struct Out {
     open: bool,
     in_flight: usize,
@@ -547,6 +562,8 @@ struct Out {
     programs: BTreeMap<u64, u64>,
     /// Places taken by execs under way.
     reserved: usize,
+    /// At most one per reserved program; no stream handle has been exported to another process.
+    offered: BTreeMap<u64, PendingOffer>,
     /// Answers waiting for room in the socket, oldest first, each with the descriptors riding with it and, for a given
     /// answer, its exec's id, whose client is to say it took them.
     backlog: VecDeque<(Vec<u8>, Vec<hex_api::End>, Option<u64>)>,
@@ -1040,6 +1057,7 @@ impl<O: Os> Shared<O> {
                     in_flight: 0,
                     programs: BTreeMap::new(),
                     reserved: 0,
+                    offered: BTreeMap::new(),
                     backlog: VecDeque::new(),
                     given: BTreeMap::new(),
                     kept: 0,
@@ -1182,6 +1200,7 @@ impl<O: Os> Shared<O> {
             Ok((h, Request::Hello { .. })) => self.answer(conn, h.id, &Answer::Hello(self.hello())),
             Ok((h, Request::Release)) => self.release(conn, h.id),
             Ok((h, Request::Taken)) => self.taken(conn, h.id),
+            Ok((h, Request::StreamsReady)) => self.streams_ready(conn, h),
             Ok((header, Request::Call(call))) => {
                 let admitted = {
                     let mut out = conn.out.lock().map_err(poisoned)?;
@@ -1372,7 +1391,7 @@ impl<O: Os> Shared<O> {
     /// Closes a connection and applies the disconnect rule to the programs it still watches.
     fn close(&self, conn: &Conn<O>) -> Result<(), Refusal> {
         let mut table = self.table()?;
-        let programs: Vec<u64> = {
+        let (programs, offered): (Vec<u64>, _) = {
             let mut out = conn.out.lock().map_err(poisoned)?;
             if !out.open {
                 return Ok(());
@@ -1390,7 +1409,15 @@ impl<O: Os> Shared<O> {
             self.kept.fetch_sub(out.kept, Ordering::AcqRel);
             out.kept = 0;
             out.given.clear();
-            out.programs.values().copied().collect()
+            let offered = std::mem::take(&mut out.offered);
+            for pending in offered.values() {
+                if !pending.completed.swap(true, Ordering::AcqRel) {
+                    self.reserving.fetch_sub(1, Ordering::AcqRel);
+                    out.reserved = out.reserved.saturating_sub(1);
+                    self.call_done(&mut out);
+                }
+            }
+            (out.programs.values().copied().collect(), offered)
         };
         conn.drained.notify_all();
         self.os.unwatch(&conn.sock);
@@ -1401,13 +1428,63 @@ impl<O: Os> Shared<O> {
                 self.end(w);
             }
         }
-        self.resume_accepting(&mut table)
+        self.resume_accepting(&mut table)?;
+        drop(table);
+        drop(offered);
+        Ok(())
+    }
+
+    /// The caller opened its named guest streams; commit its already-admitted exec without waiting here.
+    fn streams_ready(&self, conn: &Conn<O>, header: Header) -> Result<(), Refusal> {
+        let pending = conn
+            .out
+            .lock()
+            .map_err(poisoned)?
+            .offered
+            .remove(&header.id);
+        let Some(pending) = pending else {
+            // A terminal guest refusal may already have cancelled this exact offer and answered the exec.
+            return Ok(());
+        };
+        if pending.completed.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        match (pending.ready)() {
+            Ok(()) => Ok(()),
+            Err(why) => {
+                let owns = {
+                    let _out = conn.out.lock().map_err(poisoned)?;
+                    !pending.completed.swap(true, Ordering::AcqRel)
+                };
+                if owns {
+                    self.unreserve(conn)?;
+                    self.done(conn)?;
+                    self.answer(conn, header.id, &Answer::Refused(why))?;
+                }
+                Ok(())
+            }
+        }
     }
 
     /// The client no longer waits for exec `exec`'s program: it runs on, unwatched by the socket,
     /// and the node's sweep reaps it once it ends, as with a dropped in-process `Proc`; a remote one is let
     /// go by its host.
     fn release(&self, conn: &Conn<O>, exec: u64) -> Result<(), Refusal> {
+        let offered = {
+            let mut out = conn.out.lock().map_err(poisoned)?;
+            out.offered.remove(&exec).map(|pending| {
+                let owns = !pending.completed.swap(true, Ordering::AcqRel);
+                (pending, owns)
+            })
+        };
+        if let Some((pending, owns)) = offered {
+            if owns {
+                self.unreserve(conn)?;
+                self.done(conn)?;
+            }
+            drop(pending);
+            return Ok(());
+        }
         let remote = {
             let mut table = self.table()?;
             let token = {
@@ -1842,15 +1919,82 @@ impl<O: Os> Shared<O> {
             }
             None => Box::new(|_| {}),
         };
+        let completed = Arc::new(AtomicBool::new(false));
         let forwarded: Reply = {
-            let (shared, conn, program) = (Arc::clone(self), Arc::clone(conn), program.clone());
+            let (shared, conn, program, completed) = (
+                Arc::clone(self),
+                Arc::clone(conn),
+                program.clone(),
+                Arc::clone(&completed),
+            );
             Box::new(move |got| {
-                let _ = shared.forwarded(&conn, header, program, got);
+                let _ = shared.complete_forwarding(&conn, header, program, &completed, got);
             })
         };
         let call = match self.host.forward(call, stdio, forwarded, ended) {
             Forward::Taken => return Ok(()),
+            Forward::Offered(offering) => {
+                if program.is_none() {
+                    return reply(Answer::Refused(Refusal::Broken(
+                        "a non-exec offered guest streams".to_owned(),
+                    )));
+                }
+                let encoded = wire::answer(
+                    header.id,
+                    &Answer::Offered(offering.streams),
+                    self.limits.message_bytes,
+                );
+                let mut out = conn.out.lock().map_err(poisoned)?;
+                if completed.load(Ordering::Acquire) {
+                    return Ok(());
+                }
+                if !out.open || encoded.is_err() {
+                    completed.store(true, Ordering::Release);
+                    drop(out);
+                    self.unreserve(conn)?;
+                    self.done(conn)?;
+                    return match encoded {
+                        Err(why) => self.answer(conn, header.id, &Answer::Refused(why.into())),
+                        Ok(_) => Ok(()),
+                    };
+                }
+                if out.offered.contains_key(&header.id) {
+                    completed.store(true, Ordering::Release);
+                    drop(out);
+                    self.unreserve(conn)?;
+                    self.done(conn)?;
+                    return self.answer(
+                        conn,
+                        header.id,
+                        &Answer::Refused(Refusal::Invalid {
+                            what: "stream offer",
+                            why: "its exec id already has an active preparation".to_owned(),
+                        }),
+                    );
+                }
+                out.offered.insert(
+                    header.id,
+                    PendingOffer {
+                        ready: offering.ready,
+                        completed,
+                    },
+                );
+                drop(out);
+                let bytes = encoded.map_err(Refusal::from)?;
+                if let Err(why) = self.send(conn, bytes, Vec::new(), None, false) {
+                    self.close(conn)?;
+                    return Err(why);
+                }
+                return Ok(());
+            }
             Forward::Refused(why) => {
+                let owns = {
+                    let _out = conn.out.lock().map_err(poisoned)?;
+                    !completed.swap(true, Ordering::AcqRel)
+                };
+                if !owns {
+                    return Ok(());
+                }
                 if program.is_some() {
                     self.unreserve(conn)?;
                 }
@@ -1892,6 +2036,40 @@ impl<O: Os> Shared<O> {
             Call::Netns => host.netns().map(Answer::Netns),
         };
         reply(answer.unwrap_or_else(Answer::Refused))
+    }
+
+    /// Claim an exec's original admission exactly once, atomically with offer registration/removal.
+    /// An error can arrive before the host returns its offer, while Ready runs, or after cancellation.
+    fn complete_forwarding(
+        self: &Arc<Self>,
+        conn: &Arc<Conn<O>>,
+        header: Header,
+        program: Option<(u64, BoxId)>,
+        completed: &AtomicBool,
+        got: Result<Forwarded, Refusal>,
+    ) -> Result<(), Refusal> {
+        let pending = {
+            let mut out = conn.out.lock().map_err(poisoned)?;
+            if completed.swap(true, Ordering::AcqRel) {
+                drop(out);
+                if let Ok(Forwarded::Started { program, .. }) = got {
+                    // A concurrently cancelled exec still obeys the disconnect rule.
+                    program.kill(Box::new(|_| {}));
+                }
+                return Ok(());
+            }
+            let mine = out
+                .offered
+                .get(&header.id)
+                .is_some_and(|pending| std::ptr::eq(&*pending.completed, completed));
+            if mine {
+                out.offered.remove(&header.id)
+            } else {
+                None
+            }
+        };
+        drop(pending);
+        self.forwarded(conn, header, program, got)
     }
 
     /// A forwarded call's answer, on whichever thread its host gives it: sent to its client, or, for a

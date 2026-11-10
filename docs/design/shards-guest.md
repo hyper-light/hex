@@ -113,6 +113,28 @@ The node agent's socket is `SOCK_SEQPACKET` and carries an exec's stdio as `SCM_
   with no other reference can arrive reading nothing (a probe on macOS 26.4 lost 719 of 20,000 so, and none with
   the sender's copy kept until received). Kept ends hold their program's place among the node's programs until
   taken.
+- **Windows through a host node (HEX-RT-17):** the node reserves the exec and returns `Offered` with the VM's
+  PID/start/socket identity, a dedicated control token, the reserved guest request id and the wanted streams.
+  The caller opens and names each stream through `shards_api::connect_borrowed`, then sends `StreamsReady`
+  with the original outer request id. The node commits the reserved request and returns `Started`/`Exited`
+  on that same id. The common client retains the caller-owned socket ends through this preparation; its
+  reader turn is handed away while it dials. `OwnedStream` reads/writes Winsock sockets and closes them with
+  `closesocket`; native pipe ends keep their file ownership.
+
+  Each offer consumes the existing in-flight and program budgets. A guest answer, cancellation and disconnect
+  share one admission owner, including when the guest fails before the offer is registered. Failed/late offers
+  queue `Release` in the program-bounded acknowledgement queue. Cancelling an uncommitted offer drops its
+  dedicated control connection; the relay atomically removes that active token, its parked exec and early
+  streams, and refuses later streams naming the ended token. Other programs keep their own controls.
+
+  This choice follows the native Jupiter ownership probes in
+  `bench/native/windows/records/socket-transfer-20261109.md`: an unimported `WSADuplicateSocketW` offer
+  retained a recipient handle (99→100) after source close. Caller-initiated connections avoid that target-side
+  reservation. The borrowed connector holds only a query/exit-observation handle, verifies the process before
+  and after Shards' existing CONNECT handshake, and acquires no VM lifecycle. Positive patience bounds the
+  whole handshake; a zero-patience attempt keeps Shards' existing VM-bounded semantics. The exact API patch
+  against c55d85db is listed in `vendor/shards-api-draft/HEX-PATCHES.md`.
+
 - **In the guest**, a relay (`hex guest relay`) accepts the host's vsock connections and speaks the node's own
   socket, one node connection per host control connection, so the node, its wire and its disconnect rule stay
   as they are (CLAUDE.md §8). Its framing, stream names and gathering of an exec's streams are a sans-IO core
@@ -121,8 +143,9 @@ The node agent's socket is `SOCK_SEQPACKET` and carries an exec's stdio as `SCM_
   the family but no address type), so no `unsafe` is added.
 - **Bounds:** at most `wire::Limits`' calls in flight, as the local client; at most three stdio streams per exec;
   stdio connections that never name an exec within the answer patience are closed with a typed refusal logged on
-  `hex.guest` (`event = "stdio_unnamed"`). Shards' muxer holds at most 1023 connections (`muxer.rs:42`), so a
-  node's concurrent execs are bounded below that, and the next is refused by name.
+  `hex.guest` (`event = "stdio_unnamed"`). Shards enforces its running muxer's own connection bound;
+  a connection it cannot admit is refused through the API. Hex derives its relay budgets from the guest
+  node's hello and propagates that refusal instead of guessing a second muxer capacity.
 
 ### 3a. The channel's formats and ports
 

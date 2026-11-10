@@ -10,8 +10,8 @@
 //! under a pid no host process has, so their ends come as the guest's messages.
 //!
 //! On Windows (native plan step 8, `watch_source`), HEX-SOCK-5's two tests hold through the same pieces: the
-//! guest's control connection joins the node's completion port. Its guest programs' streams are Unix's here: a
-//! guest stream's end as the caller's own handle is still to add on Windows, and refused by name there.
+//! guest's control connection joins the node's completion port. Its caller-direct stdio connects through the
+//! stand-in's AF_UNIX Firecracker CONNECT endpoint; only this test fixture bridges that endpoint to TCP.
 #![cfg(any(target_os = "linux", target_os = "macos", windows))]
 #![allow(
     clippy::unwrap_used,
@@ -30,7 +30,6 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-#[cfg(unix)]
 use hex_api::{Ask, Program, Stdio};
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Refusal, Runtime};
 use hex_core::record::ProcId;
@@ -339,7 +338,374 @@ impl shards_api::Stream for Looped {
 
 /// A guest whose ports are the stand-in relay's: its stdio port, and its control port for every other; ended
 /// once the test says so.
-struct LoopGuest(SocketAddr, SocketAddr, Arc<std::sync::atomic::AtomicBool>);
+struct LoopGuest {
+    control: SocketAddr,
+    stdio: SocketAddr,
+    ended: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(windows)]
+    mux: Arc<windows_stdio::Mux>,
+}
+
+/// HEX-RT-17's Windows fixture owns an AF_UNIX endpoint like Shards' vsock muxer. The real caller
+/// connects there directly; the node never hosts the fixture's TCP bridge.
+#[cfg(windows)]
+mod windows_stdio {
+    use super::*;
+    use hex_afunix::{Port, SourceWatch};
+    use shards_afunix::{UnixListener, UnixStream};
+    use std::os::windows::io::{AsSocket, BorrowedSocket};
+    use std::sync::atomic::AtomicBool;
+    use std::thread::JoinHandle;
+
+    type Listener = JoinHandle<Vec<JoinHandle<()>>>;
+
+    #[derive(Default)]
+    struct Connections {
+        unix: Vec<UnixStream>,
+        tcp: Vec<TcpStream>,
+        wakes: Vec<Port>,
+    }
+
+    pub struct Mux {
+        _dir: tempfile::TempDir,
+        identity: shards_api::Identity,
+        ended: Arc<AtomicBool>,
+        connections: Arc<Mutex<Connections>>,
+        listener: Mutex<Option<Listener>>,
+    }
+
+    impl Mux {
+        pub fn new(stdio: SocketAddr, ended: Arc<AtomicBool>) -> Self {
+            let dir = tempfile::Builder::new().prefix("glm-").tempdir().unwrap();
+            let vsock = dir.path().join("s");
+            let listener = UnixListener::bind(&vsock).unwrap();
+            let pid = std::process::id();
+            let process = hex_runtime::windows::sys::open_process(pid)
+                .unwrap()
+                .unwrap();
+            let started = hex_runtime::windows::sys::created(&process).unwrap();
+            let connections = Arc::new(Mutex::new(Connections::default()));
+            let (done, conns) = (Arc::clone(&ended), Arc::clone(&connections));
+            let listener = std::thread::spawn(move || {
+                let mut workers = Vec::new();
+                loop {
+                    let (conn, ()) = listener.accept().unwrap();
+                    if done.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let wake = Port::new().unwrap();
+                    {
+                        let mut conns = conns.lock().unwrap();
+                        conns.unix.push(conn.try_clone().unwrap());
+                        conns.wakes.push(wake.clone());
+                    }
+                    let (done, conns) = (Arc::clone(&done), Arc::clone(&conns));
+                    workers.push(std::thread::spawn(move || {
+                        let result = bridge(conn, stdio, &done, &conns, wake);
+                        if !done.load(Ordering::SeqCst) {
+                            result.unwrap();
+                        }
+                    }));
+                }
+                workers
+            });
+            Self {
+                _dir: dir,
+                identity: shards_api::Identity {
+                    pid,
+                    started,
+                    vsock,
+                },
+                ended,
+                connections,
+                listener: Mutex::new(Some(listener)),
+            }
+        }
+
+        pub fn identity(&self) -> shards_api::Identity {
+            self.identity.clone()
+        }
+
+        /// Wake accept, close both sides of every bridge, and join all owned threads before removing
+        /// the endpoint's directory. No listener or copy survives its fake guest.
+        pub fn stop(&self) {
+            let Some(listener) = self.listener.lock().unwrap().take() else {
+                return;
+            };
+            self.ended.store(true, Ordering::SeqCst);
+            drop(UnixStream::connect(&self.identity.vsock).unwrap());
+            let workers = listener.join().unwrap();
+            let mut conns = self.connections.lock().unwrap();
+            for wake in conns.wakes.drain(..) {
+                wake.wake().unwrap();
+            }
+            for conn in conns.unix.drain(..) {
+                let _ = conn.shutdown(Shutdown::Both);
+            }
+            for conn in conns.tcp.drain(..) {
+                let _ = conn.shutdown(Shutdown::Both);
+            }
+            drop(conns);
+            for worker in workers {
+                worker.join().unwrap();
+            }
+        }
+    }
+
+    impl Drop for Mux {
+        fn drop(&mut self) {
+            // The directory field drops only after every listener/bridge handle has closed.
+            self.stop();
+        }
+    }
+
+    /// One worker owns each stdio connection. Its reads/writes never block in Winsock: readiness and
+    /// guest end share this port, so stopping the fixture wakes exactly the wait it owns.
+    struct Ready<'a> {
+        watch: SourceWatch,
+        port: &'a Port,
+        ended: &'a AtomicBool,
+    }
+
+    impl Ready<'_> {
+        fn waiting(&self, socket: BorrowedSocket<'_>, write: bool) -> std::io::Result<()> {
+            self.watch.arm(self.port, socket, write)?;
+            let mut done = Vec::new();
+            // Only one operation is waiting in this worker; one completion suffices to read afresh.
+            self.port.wait(&mut done, None, 1)
+        }
+
+        fn check(&self) -> std::io::Result<()> {
+            if self.ended.load(Ordering::SeqCst) {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "the test guest ended",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn read<S: Read + AsSocket>(
+            &self,
+            source: &mut S,
+            buf: &mut [u8],
+        ) -> std::io::Result<usize> {
+            loop {
+                self.check()?;
+                match source.read(buf) {
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        self.waiting(source.as_socket(), false)?
+                    }
+                    got => return got,
+                }
+            }
+        }
+
+        fn exact<S: Read + AsSocket>(
+            &self,
+            source: &mut S,
+            mut buf: &mut [u8],
+        ) -> std::io::Result<()> {
+            while !buf.is_empty() {
+                let n = self.read(source, buf)?;
+                if n == 0 {
+                    return Err(std::io::ErrorKind::UnexpectedEof.into());
+                }
+                buf = &mut buf[n..];
+            }
+            Ok(())
+        }
+
+        fn write<S: Write + AsSocket>(
+            &self,
+            target: &mut S,
+            mut buf: &[u8],
+        ) -> std::io::Result<()> {
+            while !buf.is_empty() {
+                self.check()?;
+                match target.write(buf) {
+                    Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+                    Ok(n) => buf = &buf[n..],
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        self.waiting(target.as_socket(), true)?
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(())
+        }
+    }
+
+    fn copy<S: Read + AsSocket, T: Write + AsSocket>(
+        from: &mut S,
+        to: &mut T,
+        read: &Ready<'_>,
+        write: &Ready<'_>,
+        room: usize,
+    ) -> std::io::Result<()> {
+        let mut buf = vec![0; room];
+        loop {
+            let n = read.read(from, &mut buf)?;
+            if n == 0 {
+                return Ok(());
+            }
+            write.write(to, &buf[..n])?;
+        }
+    }
+
+    fn bridge(
+        mut conn: UnixStream,
+        stdio: SocketAddr,
+        ended: &AtomicBool,
+        connections: &Mutex<Connections>,
+        wake: Port,
+    ) -> std::io::Result<()> {
+        conn.set_nonblocking(true)?;
+        let unix = Ready {
+            watch: SourceWatch::new(0)?,
+            port: &wake,
+            ended,
+        };
+        let result = (|| {
+            // Firecracker's request is one line and a u32 port, so its grammar bounds the read.
+            let mut line = Vec::new();
+            let longest = "CONNECT ".len() + u32::MAX.to_string().len() + "\n".len();
+            while line.len() < longest {
+                let mut byte = [0];
+                unix.exact(&mut conn, &mut byte)?;
+                line.push(byte[0]);
+                if byte[0] == b'\n' {
+                    break;
+                }
+            }
+            if line != format!("CONNECT {}\n", stream::STDIO_PORT).as_bytes() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "the test guest accepts CONNECT STDIO_PORT only",
+                ));
+            }
+            let mut relay = TcpStream::connect(stdio)?;
+            relay.set_nonblocking(true)?;
+            {
+                let mut conns = connections.lock().unwrap();
+                if ended.load(Ordering::SeqCst) {
+                    return Ok(());
+                }
+                conns.tcp.push(relay.try_clone()?);
+            }
+            unix.write(&mut conn, format!("OK {}\n", stream::STDIO_PORT).as_bytes())?;
+            let tcp = Ready {
+                watch: SourceWatch::new(1)?,
+                port: &wake,
+                ended,
+            };
+            let result = (|| {
+                let mut name = [0; stream::NAME_BYTES];
+                unix.exact(&mut conn, &mut name)?;
+                let named = stream::read_name(&name).map_err(std::io::Error::other)?;
+                tcp.write(&mut relay, &name)?;
+                // A stdio name fixes this connection's direction. No unused reverse reader is started.
+                if named.stream == stream::Stdio::In {
+                    let room = conn.recv_buffer_size()?;
+                    copy(&mut conn, &mut relay, &unix, &tcp, room)?;
+                    relay.shutdown(Shutdown::Write)
+                } else {
+                    let room = conn.send_buffer_size()?;
+                    copy(&mut relay, &mut conn, &tcp, &unix, room)?;
+                    conn.shutdown(Shutdown::Write)
+                }
+            })();
+            tcp.watch.stop(relay.as_socket());
+            result
+        })();
+        unix.watch.stop(conn.as_socket());
+        result
+    }
+
+    /// HEX-RT-17: the fixture performs Firecracker's handshake, passes both directions and half-close,
+    /// and releases its listener and bridge threads when the fake guest ends.
+    #[test]
+    fn hex_rt_17_windows_fixture_connects_stdio_and_ends_its_mux() {
+        let relay = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = relay.local_addr().unwrap();
+        let echo = std::thread::spawn(move || {
+            for _ in ["caller half-close", "guest ends while caller stays open"] {
+                let (mut input, _) = relay.accept().unwrap();
+                let mut name = [0; stream::NAME_BYTES];
+                input.read_exact(&mut name).unwrap();
+                assert_eq!(stream::read_name(&name).unwrap().stream, stream::Stdio::In);
+                let (mut output, _) = relay.accept().unwrap();
+                output.read_exact(&mut name).unwrap();
+                assert_eq!(stream::read_name(&name).unwrap().stream, stream::Stdio::Out);
+                std::io::copy(&mut input, &mut output).unwrap();
+                output.shutdown(Shutdown::Write).unwrap();
+            }
+        });
+        let mux = Mux::new(addr, Arc::new(AtomicBool::new(false)));
+        let identity = mux.identity();
+        assert_eq!(identity.pid, std::process::id());
+        let process = hex_runtime::windows::sys::open_process(identity.pid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            identity.started,
+            hex_runtime::windows::sys::created(&process).unwrap()
+        );
+        let dial = |which, id| {
+            let mut conn = UnixStream::connect(&identity.vsock).unwrap();
+            conn.set_read_timeout(Some(PATIENCE)).unwrap();
+            conn.set_write_timeout(Some(PATIENCE)).unwrap();
+            conn.write_all(format!("CONNECT {}\n", stream::STDIO_PORT).as_bytes())
+                .unwrap();
+            let expected = format!("OK {}\n", stream::STDIO_PORT);
+            let mut answer = vec![0; expected.len()];
+            conn.read_exact(&mut answer).unwrap();
+            assert_eq!(answer, expected.as_bytes());
+            conn.write_all(&stream::name(stream::Named {
+                exec: stream::Exec { conn: 1, id },
+                stream: which,
+            }))
+            .unwrap();
+            conn
+        };
+        let mut stdin = dial(stream::Stdio::In, 1);
+        let mut stdout = dial(stream::Stdio::Out, 1);
+        stdin.write_all(b"round trip\n").unwrap();
+        stdin.shutdown(Shutdown::Write).unwrap();
+        let mut got = String::new();
+        stdout.read_to_string(&mut got).unwrap();
+        assert_eq!(got, "round trip\n");
+        drop((stdin, stdout));
+
+        // A live caller stays open in both directions. Ending the guest must still join the mux's
+        // blocked copies, and the caller must see EOF without being needed to wake its server.
+        let mut held_input = dial(stream::Stdio::In, 2);
+        let mut held_output = dial(stream::Stdio::Out, 2);
+        held_input.write_all(b"held").unwrap();
+        let mut came = [0; b"held".len()];
+        held_output.read_exact(&mut came).unwrap();
+        assert_eq!(&came, b"held");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let stopping = std::thread::spawn(move || {
+            mux.stop();
+            tx.send(()).unwrap();
+            mux
+        });
+        assert_eq!(
+            rx.recv_timeout(PATIENCE),
+            Ok(()),
+            "the mux kept a blocked bridge"
+        );
+        assert_eq!(held_output.read(&mut came).unwrap(), 0);
+        drop((held_input, held_output));
+        let mux = stopping.join().unwrap();
+        echo.join().unwrap();
+        assert!(UnixStream::connect(&identity.vsock).is_err());
+        drop(mux);
+        assert!(!identity.vsock.exists());
+    }
+}
 
 impl shards_api::Guest for LoopGuest {
     fn connect(
@@ -348,19 +714,21 @@ impl shards_api::Guest for LoopGuest {
         _patience: Duration,
     ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
         let to = if port == stream::STDIO_PORT {
-            self.1
+            self.stdio
         } else {
-            self.0
+            self.control
         };
         Ok(Box::new(Looped(TcpStream::connect(to).unwrap())))
     }
 
     fn stop(&self) -> Result<(), shards_api::Refusal> {
+        #[cfg(windows)]
+        self.mux.stop();
         Ok(())
     }
 
     fn wait_for(&self, _: Duration) -> Result<Option<shards_api::End>, shards_api::Refusal> {
-        Ok(if self.2.load(std::sync::atomic::Ordering::SeqCst) {
+        Ok(if self.ended.load(std::sync::atomic::Ordering::SeqCst) {
             Some(shards_api::End::Stopped)
         } else {
             None
@@ -368,6 +736,9 @@ impl shards_api::Guest for LoopGuest {
     }
 
     fn identity(&self) -> Result<shards_api::Identity, shards_api::Refusal> {
+        #[cfg(windows)]
+        return Ok(self.mux.identity());
+        #[cfg(unix)]
         Err(shards_api::Refusal::Unsupported {
             what: "identity",
             why: "a loopback stand-in names no VM".into(),
@@ -376,10 +747,12 @@ impl shards_api::Guest for LoopGuest {
 }
 
 /// One booted stand-in guest: whether it has ended, and its relay's connections, which end with it.
-type Booted = (
-    Arc<std::sync::atomic::AtomicBool>,
-    Arc<Mutex<Vec<TcpStream>>>,
-);
+struct Booted {
+    ended: Arc<std::sync::atomic::AtomicBool>,
+    conns: Arc<Mutex<Vec<TcpStream>>>,
+    #[cfg(windows)]
+    mux: Arc<windows_stdio::Mux>,
+}
 
 /// Guests each on a stand-in relay of its own, behind one gate; each one's end the test can bring about,
 /// as a guest that dies: its connections end with it.
@@ -392,16 +765,27 @@ impl LoopGuests {
 
     /// Ends every guest booted so far, and its connections.
     fn end_all(&self) {
-        for (ended, conns) in self.1.lock().unwrap().iter() {
-            ended.store(true, std::sync::atomic::Ordering::SeqCst);
-            for conn in conns.lock().unwrap().drain(..) {
+        for booted in self.1.lock().unwrap().iter() {
+            booted
+                .ended
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            for conn in booted.conns.lock().unwrap().drain(..) {
                 let _ = conn.shutdown(Shutdown::Both);
             }
+            #[cfg(windows)]
+            booted.mux.stop();
         }
     }
 
     fn boots(&self) -> usize {
         self.1.lock().unwrap().len()
+    }
+}
+
+#[cfg(windows)]
+impl Drop for LoopGuests {
+    fn drop(&mut self) {
+        self.end_all();
     }
 }
 
@@ -420,8 +804,21 @@ impl shards_api::Guests for Shared {
         let ended = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let conns = Arc::new(Mutex::new(Vec::new()));
         let (control, stdio) = relay(Arc::clone(&self.0.0), Arc::clone(&conns));
-        self.0.1.lock().unwrap().push((Arc::clone(&ended), conns));
-        Ok(Box::new(LoopGuest(control, stdio, ended)))
+        #[cfg(windows)]
+        let mux = Arc::new(windows_stdio::Mux::new(stdio, Arc::clone(&ended)));
+        self.0.1.lock().unwrap().push(Booted {
+            ended: Arc::clone(&ended),
+            conns,
+            #[cfg(windows)]
+            mux: Arc::clone(&mux),
+        });
+        Ok(Box::new(LoopGuest {
+            control,
+            stdio,
+            ended,
+            #[cfg(windows)]
+            mux,
+        }))
     }
 
     fn attach(
@@ -635,7 +1032,6 @@ fn a_guest_booted_again_answers_on_the_loop_too() {
 
 /// A node's socket over `Recorded<WithGuest<…>>`, its guest the stand-in behind `gate`: the test's folder, the
 /// socket's path and its server.
-#[cfg(unix)]
 fn node(gate: &Arc<Gate>) -> (tempfile::TempDir, PathBuf, Server) {
     let dir = tempfile::Builder::new().prefix("gl-").tempdir().unwrap();
     let node = WithGuest::new(
@@ -653,7 +1049,6 @@ fn node(gate: &Arc<Gate>) -> (tempfile::TempDir, PathBuf, Server) {
 }
 
 /// A box the stand-in guest holds: none of the host's.
-#[cfg(unix)]
 fn there() -> BoxId {
     BoxId::new("there").unwrap()
 }
@@ -662,7 +1057,6 @@ fn there() -> BoxId {
 /// echoes, asking for its stdin and stdout: expect their ends to be the guest's own stdio connections, what is
 /// written to the stdin end read back from the stdout end to its end, and the program's end as the guest sent it,
 /// its pid naming no host process.
-#[cfg(unix)]
 #[test]
 fn a_guest_programs_asked_streams_are_the_guests_own_connections_through_the_socket() {
     if shards_api::backend().is_err() {
@@ -691,11 +1085,11 @@ fn a_guest_programs_asked_streams_are_the_guests_own_connections_through_the_soc
     let (Some(stdin), Some(stdout)) = (given.stdin, given.stdout) else {
         panic!("the streams asked for weren't given");
     };
-    let mut stdin = std::fs::File::from(stdin);
+    let mut stdin = hex_api::OwnedStream::from(stdin);
     stdin.write_all(b"round trip\n").unwrap();
     drop(stdin);
     let mut out = String::new();
-    std::fs::File::from(stdout)
+    hex_api::OwnedStream::from(stdout)
         .read_to_string(&mut out)
         .unwrap();
     assert_eq!(out, "round trip\n");

@@ -132,6 +132,7 @@ fn requests() -> Vec<(u64, Request, usize)> {
         (12, Request::Call(Call::Netns), 0),
         (13, Request::Call(Call::Kill { exec: 6 }), 0),
         (14, Request::Taken, 0),
+        (16, Request::StreamsReady, 0),
         (
             14,
             Request::Call(Call::ExecStreams {
@@ -300,6 +301,21 @@ fn answers() -> Vec<(u64, Answer)> {
             },
         ),
     ];
+    out.push((
+        16,
+        Answer::Offered(StreamOffer {
+            pid: 42,
+            started: u64::MAX,
+            vsock: PathBuf::from("guest/vsock"),
+            token: 7,
+            exec: 19,
+            streams: Streams {
+                stdin: true,
+                stdout: true,
+                stderr: false,
+            },
+        }),
+    ));
     out.extend(refusals().into_iter().map(|r| (11, Answer::Refused(r))));
     for exit in [
         Exit::Code(0),
@@ -711,7 +727,7 @@ fn a_run_is_a_create_and_an_exec_in_one_request() {
 #[test]
 fn unknown_kinds_are_refused() {
     let hello = request(5, &Request::Hello { build: build() }, MAX_MESSAGE).unwrap();
-    for kind in [0u16, 0x0010, 0x7fff, 0x8001, 0x8009, 0xffff] {
+    for kind in [0u16, 0x0011, 0x7fff, 0x8001, 0x8009, 0xffff] {
         let mut bytes = hello.clone();
         bytes[12..14].copy_from_slice(&kind.to_le_bytes());
         let got = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
@@ -720,7 +736,7 @@ fn unknown_kinds_are_refused() {
             "{got:?}"
         );
     }
-    for kind in [0u16, 0x0001, 0x000b, 0x8000, 0x800b, 0xffff] {
+    for kind in [0u16, 0x0001, 0x000b, 0x8000, 0x800c, 0xffff] {
         let mut bytes = answer(5, &Answer::Done, MAX_MESSAGE).unwrap();
         bytes[12..14].copy_from_slice(&kind.to_le_bytes());
         assert!(matches!(
@@ -1113,7 +1129,7 @@ proptest! {
     /// HEX-SOCK-1: bodies of random bytes behind a valid header, so every kind's decoder meets them, are a
     /// message or a typed refusal, never a panic.
     #[test]
-    fn any_body_behind_a_header_is_read_or_refused(kind in prop_oneof![0u16..0x0010, 0x8000u16..0x800c], body in proptest::collection::vec(any::<u8>(), 0..256), fds in 0usize..4) {
+    fn any_body_behind_a_header_is_read_or_refused(kind in prop_oneof![0u16..0x0011, 0x8000u16..0x800c], body in proptest::collection::vec(any::<u8>(), 0..256), fds in 0usize..4) {
         let mut bytes = header(kind, 3);
         bytes.extend_from_slice(&body);
         let _ = read_request(&received(&bytes, fds), MAX_MESSAGE);

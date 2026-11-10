@@ -450,6 +450,101 @@ impl Remote for GuestProgram {
     }
 }
 
+/// HEX-RT-17: the guest can fail before its host returns the offer, after the wire offer, or inside
+/// Ready's send. The deferred closure owns a cancellation guard, just as a guest control connection
+/// owns the unsent exec; the real server decides when to run or drop it.
+#[derive(Clone, Copy)]
+enum OfferFailure {
+    BeforeRegistration,
+    AfterOffered,
+    DuringReadySend,
+    ReadySendFailureFirst,
+    RefusedBeforeGuestError,
+}
+
+struct OfferedGuest {
+    failure: OfferFailure,
+    reply: Mutex<Option<Reply>>,
+    cancellations: Mutex<Vec<()>>,
+    ready_calls: Mutex<Vec<()>>,
+}
+
+impl OfferedGuest {
+    fn new(failure: OfferFailure) -> Arc<Self> {
+        Arc::new(Self {
+            failure,
+            reply: Mutex::new(None),
+            cancellations: Mutex::new(Vec::new()),
+            ready_calls: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn refusal() -> Refusal {
+        Refusal::os("simulated guest reply", "the guest connection failed")
+    }
+
+    fn host_refusal() -> Refusal {
+        Refusal::os("simulated offer identity", "the guest changed")
+    }
+
+    fn fail(&self) {
+        let reply = self.reply.lock().unwrap().take().unwrap();
+        reply(Err(Self::refusal()));
+    }
+
+    fn offer(self: &Arc<Self>, pid: u32, reply: Reply) -> Forward {
+        assert!(self.reply.lock().unwrap().replace(reply).is_none());
+        let cancelled = CancelOffered(Arc::clone(self));
+        let guest = Arc::clone(self);
+        let offering = Offering {
+            streams: wire::StreamOffer {
+                pid,
+                started: u64::from(pid),
+                vsock: PathBuf::from("/simulated/guest-vsock"),
+                token: u64::from(pid),
+                exec: u64::from(pid),
+                streams: Streams::default(),
+            },
+            ready: Box::new(move || {
+                let _cancelled = cancelled;
+                guest.ready_calls.lock().unwrap().push(());
+                if matches!(guest.failure, OfferFailure::DuringReadySend) {
+                    // The guest's terminal answer wins inside a send that itself reports failure.
+                    guest.fail();
+                    Err(Refusal::os(
+                        "simulated Ready send",
+                        "the control connection closed",
+                    ))
+                } else if matches!(guest.failure, OfferFailure::ReadySendFailureFirst) {
+                    Err(Refusal::os(
+                        "simulated Ready send",
+                        "the control connection closed",
+                    ))
+                } else {
+                    Ok(())
+                }
+            }),
+        };
+        if matches!(self.failure, OfferFailure::BeforeRegistration) {
+            self.fail();
+        }
+        if matches!(self.failure, OfferFailure::RefusedBeforeGuestError) {
+            // A deferred callback exists, but checking the offer's guest identity failed locally.
+            drop(offering);
+            return Forward::Refused(Self::host_refusal());
+        }
+        Forward::Offered(offering)
+    }
+}
+
+struct CancelOffered(Arc<OfferedGuest>);
+
+impl Drop for CancelOffered {
+    fn drop(&mut self) {
+        self.0.cancellations.lock().unwrap().push(());
+    }
+}
+
 /// Boxes in the simulator; each exec a [`SimProc`]; inspect held shut on purpose to keep calls in flight.
 struct SimHost {
     sim: SimRuntime,
@@ -459,6 +554,7 @@ struct SimHost {
     opened: Condvar,
     abandoned: Mutex<Vec<BoxId>>,
     guest: Arc<Guest>,
+    offered: Mutex<Option<Arc<OfferedGuest>>>,
 }
 
 impl SimHost {
@@ -471,6 +567,7 @@ impl SimHost {
             opened: Condvar::new(),
             abandoned: Mutex::new(Vec::new()),
             guest: Arc::default(),
+            offered: Mutex::new(None),
         });
         for id in [b(), g()] {
             host.sim
@@ -541,6 +638,14 @@ impl Runtime for SimHost {
 impl Host for SimHost {
     /// Box [`g`]'s inspects and execs are its guest's; every other call runs here.
     fn forward(&self, call: Call, stdio: Stdio, reply: Reply, ended: Ended) -> Forward {
+        let offered = self.offered.lock().unwrap().clone();
+        if matches!(&call, Call::Exec { id, .. } if *id == g())
+            && let Some(guest) = offered
+        {
+            let pid =
+                u32::try_from(self.next_pid.fetch_add(1, Ordering::SeqCst)).unwrap() + GUEST_PIDS;
+            return guest.offer(pid, reply);
+        }
         match call {
             Call::Inspect(id) if id == g() => {
                 let info = self.sim.inspect(&id);
@@ -592,12 +697,16 @@ impl Lab {
     }
 
     fn with_workers(workers: usize) -> Self {
+        Self::with_limits(workers, limits())
+    }
+
+    fn with_limits(workers: usize, limits: Limits) -> Self {
         let os = Arc::new(SimOs::default());
         let host = SimHost::new(&os);
         let server = Server::with_os(
             Arc::clone(&os),
             Arc::clone(&host) as Arc<dyn Host>,
-            limits(),
+            limits,
             workers,
             Path::new("/nonexistent/hex-sim.sock"),
         )
@@ -1157,4 +1266,408 @@ fn accepting_pauses_when_descriptors_are_spent_and_resumes_on_a_close() {
     });
     lab.os.put(&second, hello());
     assert!(matches!(answer_of(&second).1, Answer::Hello(_)));
+}
+
+/// A real Server over SimOs with one worker, a held guest offer and an unrelated live host program.
+/// Calls have room beyond the program budget, so the capacity probe reaches PROGRAMS, not IN_FLIGHT.
+struct OfferedLab {
+    lab: Lab,
+    guest: Arc<OfferedGuest>,
+    caller: Arc<Sock>,
+    other: Arc<Sock>,
+    other_pid: u32,
+}
+
+impl OfferedLab {
+    fn new(failure: OfferFailure) -> Self {
+        Self::with_programs(failure, limits().programs)
+    }
+
+    fn with_programs(failure: OfferFailure, programs: usize) -> Self {
+        let budgets = Limits {
+            programs,
+            ..limits()
+        };
+        let lab = Lab::with_limits(
+            1,
+            Limits {
+                in_flight: budgets.programs + budgets.connections,
+                ..budgets
+            },
+        );
+        let guest = OfferedGuest::new(failure);
+        *lab.host.offered.lock().unwrap() = Some(Arc::clone(&guest));
+        let other = lab.os.connect(true, usize::MAX);
+        lab.os.put(&other, exec(20));
+        let other_pid = match answer_of(&other).1 {
+            Answer::Started { pid } => pid,
+            answer => panic!("the unrelated program did not start: {answer:?}"),
+        };
+        let caller = lab.os.connect(true, usize::MAX);
+        lab.os.put(&caller, exec_in(7, g()));
+        Self {
+            lab,
+            guest,
+            caller,
+            other,
+            other_pid,
+        }
+    }
+
+    fn control(&self, sock: &Sock, id: u64, request: Request) {
+        self.lab.os.put(
+            sock,
+            wire::request(id, &request, wire::MAX_MESSAGE).unwrap(),
+        );
+    }
+
+    /// An inspect queued after control messages is a barrier through the real connection reader.
+    fn barrier(&self, sock: &Sock) {
+        self.lab.os.put(sock, request(90, Call::Inspect(b())));
+        assert!(matches!(
+            answer_of(sock),
+            (Header { id: 90, .. }, Answer::Info(_))
+        ));
+    }
+
+    fn offered(&self) {
+        assert!(matches!(
+            answer_of(&self.caller),
+            (Header { id: 7, .. }, Answer::Offered(_))
+        ));
+        let table = self.lab.server.shared.table.lock().unwrap();
+        let conn = table
+            .conns
+            .values()
+            .find(|c| Arc::ptr_eq(&c.sock.0, &self.caller))
+            .unwrap();
+        let out = conn.out.lock().unwrap();
+        assert_eq!(out.reserved, 1);
+        assert_eq!(out.in_flight, 1);
+        assert_eq!(out.offered.len(), 1);
+        assert_eq!(self.lab.server.shared.reserving.load(Ordering::Acquire), 1);
+    }
+
+    /// The real pending entry's admission owner, retained across a hostile duplicate outer id.
+    fn pending(&self) -> Option<Arc<AtomicBool>> {
+        let table = self.lab.server.shared.table.lock().unwrap();
+        let conn = table
+            .conns
+            .values()
+            .find(|c| Arc::ptr_eq(&c.sock.0, &self.caller))
+            .unwrap();
+        conn.out
+            .lock()
+            .unwrap()
+            .offered
+            .get(&7)
+            .map(|pending| Arc::clone(&pending.completed))
+    }
+
+    fn refused(&self) {
+        let (h, answer) = answer_of(&self.caller);
+        assert_eq!(
+            (h.id, answer),
+            (7, Answer::Refused(OfferedGuest::refusal()))
+        );
+    }
+
+    fn reclaimed(&self) {
+        assert_eq!(
+            self.lab.server.shared.reserving.load(Ordering::Acquire),
+            0,
+            "the real global reservation count leaked or underflowed"
+        );
+        assert_eq!(self.lab.server.shared.in_flight.load(Ordering::Acquire), 0);
+        let table = self.lab.server.shared.table.lock().unwrap();
+        for conn in table.conns.values() {
+            let out = conn.out.lock().unwrap();
+            assert_eq!(out.reserved, 0);
+            assert_eq!(out.in_flight, 0);
+            assert!(out.offered.is_empty());
+        }
+        drop(table);
+        assert_eq!(
+            self.guest.cancellations.lock().unwrap().len(),
+            1,
+            "the deferred closure must be cancelled once"
+        );
+        assert!(
+            !self.lab.os.ended(self.other_pid),
+            "the other client's program was ended"
+        );
+        assert_eq!(self.lab.watched(), 1);
+    }
+
+    fn stale_controls(&self) {
+        for request in [
+            Request::StreamsReady,
+            Request::Release,
+            Request::StreamsReady,
+            Request::Release,
+        ] {
+            self.control(&self.caller, 7, request);
+        }
+        self.barrier(&self.caller);
+    }
+
+    /// Reuse the actual capacity, then disconnect that caller; the unrelated program still runs.
+    fn reuse_and_disconnect(&self, caller: &Arc<Sock>) {
+        self.lab.os.put(caller, exec(11));
+        assert!(matches!(
+            answer_of(caller),
+            (Header { id: 11, .. }, Answer::Started { .. })
+        ));
+        assert_eq!(self.lab.watched(), self.lab.server.shared.limits.programs);
+        self.lab.os.leave(caller);
+        wait_until("the caller and its new program to leave", || {
+            self.lab.connections() == 1 && self.lab.watched() == 1
+        });
+        self.reclaimed();
+        // This is the other client's second program, beyond its kept place: admission must use
+        // the global capacity the disconnected caller returned, not its own guaranteed first slot.
+        self.lab.os.put(&self.other, exec(21));
+        assert!(matches!(
+            answer_of(&self.other),
+            (Header { id: 21, .. }, Answer::Started { .. })
+        ));
+        assert_eq!(self.lab.watched(), self.lab.server.shared.limits.programs);
+        assert!(!self.lab.os.ended(self.other_pid));
+    }
+}
+
+/// HEX-RT-17 / HEX-SOCK-6: a guest error may run its reply before Host::forward returns Offered.
+/// No offer is registered afterward; late Ready/Release and disconnect cannot return its admission twice.
+#[test]
+fn an_offered_guest_error_before_registration_reclaims_admission_once() {
+    let offered = OfferedLab::new(OfferFailure::BeforeRegistration);
+    offered.refused();
+    offered.stale_controls();
+    offered.reclaimed();
+    assert!(offered.guest.ready_calls.lock().unwrap().is_empty());
+    offered.reuse_and_disconnect(&offered.caller);
+}
+
+/// HEX-RT-17 / HEX-SOCK-6: an already-sent Offered is cancelled by the guest's error before Ready.
+/// The refusal, closure cancellation and returned program place occur once, leaving the other client live.
+#[test]
+fn an_offered_guest_error_before_ready_reclaims_admission_once() {
+    let offered = OfferedLab::new(OfferFailure::AfterOffered);
+    offered.offered();
+    offered.guest.fail();
+    offered.refused();
+    offered.stale_controls();
+    offered.reclaimed();
+    assert!(offered.guest.ready_calls.lock().unwrap().is_empty());
+    offered.reuse_and_disconnect(&offered.caller);
+}
+
+/// HEX-RT-17 / HEX-SOCK-6: Ready's send receives the guest's terminal error and itself fails.
+/// Both completion paths contend for the same real admission; only the guest refusal is answered.
+#[test]
+fn an_offered_guest_error_racing_ready_send_failure_reclaims_admission_once() {
+    let offered = OfferedLab::new(OfferFailure::DuringReadySend);
+    offered.offered();
+    offered.control(&offered.caller, 7, Request::StreamsReady);
+    offered.refused();
+    offered.stale_controls();
+    offered.reclaimed();
+    assert_eq!(offered.guest.ready_calls.lock().unwrap().len(), 1);
+    offered.reuse_and_disconnect(&offered.caller);
+}
+
+/// HEX-RT-17 / HEX-SOCK-6: an unsent exec consumes a real program place. Release cancels its deferred
+/// closure and frees that place; a late guest error, duplicate Ready/Release and disconnect are harmless.
+#[test]
+fn an_offered_exec_holds_capacity_until_release_then_reclaims_it_once() {
+    let offered = OfferedLab::new(OfferFailure::AfterOffered);
+    offered.offered();
+    offered.lab.os.put(&offered.caller, exec(8));
+    assert_eq!(
+        answer_of(&offered.caller).1,
+        Answer::Refused(Refusal::Exhausted {
+            what: PROGRAMS,
+            bound: offered.lab.server.shared.limits.programs,
+        })
+    );
+    offered.control(&offered.caller, 7, Request::Release);
+    offered.barrier(&offered.caller);
+    offered.guest.fail();
+    offered.stale_controls();
+    offered.reclaimed();
+    assert!(offered.guest.ready_calls.lock().unwrap().is_empty());
+    offered.reuse_and_disconnect(&offered.caller);
+}
+
+/// HEX-RT-17 / HEX-SOCK-6: disconnect while Offered drops its deferred closure and returns admission.
+/// The guest's later error cannot underflow it; another client reuses the actual freed capacity.
+#[test]
+fn an_offered_exec_disconnected_before_ready_reclaims_capacity_once() {
+    let offered = OfferedLab::new(OfferFailure::AfterOffered);
+    offered.offered();
+    offered.lab.os.leave(&offered.caller);
+    wait_until("the offered connection to leave", || {
+        offered.lab.connections() == 1
+    });
+    offered.guest.fail();
+    offered.barrier(&offered.other);
+    offered.reclaimed();
+    assert!(offered.guest.ready_calls.lock().unwrap().is_empty());
+    let replacement = offered.lab.os.connect(true, usize::MAX);
+    offered.reuse_and_disconnect(&replacement);
+}
+
+/// HEX-RT-17 / HEX-SOCK-6: the opposite completion order also returns admission once. Ready's failed
+/// send answers first; a later terminal guest error must neither answer again nor underflow the reservation.
+#[test]
+fn an_offered_ready_send_failure_before_guest_error_reclaims_admission_once() {
+    let offered = OfferedLab::new(OfferFailure::ReadySendFailureFirst);
+    offered.offered();
+    offered.control(&offered.caller, 7, Request::StreamsReady);
+    let (h, answer) = answer_of(&offered.caller);
+    assert_eq!(
+        (h.id, answer),
+        (
+            7,
+            Answer::Refused(Refusal::os(
+                "simulated Ready send",
+                "the control connection closed",
+            ))
+        )
+    );
+    offered.guest.fail();
+    offered.stale_controls();
+    offered.reclaimed();
+    assert_eq!(offered.guest.ready_calls.lock().unwrap().len(), 1);
+    offered.reuse_and_disconnect(&offered.caller);
+}
+
+/// HEX-RT-17 / HEX-SOCK-6: a second Offered with the same outer exec id cannot replace the first
+/// preparation. Only the duplicate's newly acquired place is returned; the original closure stays pending.
+#[test]
+fn an_offered_duplicate_exec_id_preserves_the_original_pending_offer() {
+    let offered = OfferedLab::with_programs(OfferFailure::AfterOffered, limits().programs + KEPT);
+    offered.offered();
+    let original = offered.pending().unwrap();
+    let duplicate = OfferedGuest::new(OfferFailure::AfterOffered);
+    *offered.lab.host.offered.lock().unwrap() = Some(Arc::clone(&duplicate));
+    offered.lab.os.put(&offered.caller, exec_in(7, g()));
+    let (h, answer) = answer_of(&offered.caller);
+    offered.barrier(&offered.caller);
+    let preserved = offered
+        .pending()
+        .is_some_and(|pending| Arc::ptr_eq(&pending, &original));
+    let original_cancelled = offered.guest.cancellations.lock().unwrap().len();
+    let duplicate_cancelled = duplicate.cancellations.lock().unwrap().len();
+    let reserving = offered.lab.server.shared.reserving.load(Ordering::Acquire);
+    let in_flight = offered.lab.server.shared.in_flight.load(Ordering::Acquire);
+    // Complete both callbacks before asserting, so the old broken snapshot leaves no deferred task.
+    duplicate.fail();
+    offered.guest.fail();
+    assert!(
+        matches!(
+            (h.id, answer),
+            (
+                7,
+                Answer::Refused(Refusal::Invalid {
+                    what: "stream offer",
+                    ..
+                })
+            )
+        ),
+        "the duplicate offer must be refused without replacing its predecessor"
+    );
+    assert!(
+        preserved,
+        "the duplicate replaced the original pending admission owner"
+    );
+    assert_eq!(
+        (
+            original_cancelled,
+            duplicate_cancelled,
+            reserving,
+            in_flight
+        ),
+        (0, 1, 1, 1)
+    );
+    assert!(
+        original.load(Ordering::Acquire),
+        "the original completion never claimed its place"
+    );
+    offered.refused();
+    offered.stale_controls();
+    offered.reclaimed();
+    assert!(offered.guest.ready_calls.lock().unwrap().is_empty());
+    assert!(duplicate.ready_calls.lock().unwrap().is_empty());
+    offered.lab.os.leave(&offered.caller);
+    wait_until("the duplicate-id caller to leave", || {
+        offered.lab.connections() == 1
+    });
+    offered.reclaimed();
+}
+
+/// HEX-RT-17 / HEX-SOCK-6: a new duplicate's guest error arrives before that new offer registers.
+/// Its callback may reclaim its own slot, but cannot remove the older pending entry sharing its header id.
+#[test]
+fn an_offered_duplicate_guest_error_cannot_remove_the_original_pending_offer() {
+    let offered = OfferedLab::with_programs(OfferFailure::AfterOffered, limits().programs + KEPT);
+    offered.offered();
+    let original = offered.pending().unwrap();
+    let duplicate = OfferedGuest::new(OfferFailure::BeforeRegistration);
+    *offered.lab.host.offered.lock().unwrap() = Some(Arc::clone(&duplicate));
+    offered.lab.os.put(&offered.caller, exec_in(7, g()));
+    offered.refused();
+    offered.barrier(&offered.caller);
+    let preserved = offered
+        .pending()
+        .is_some_and(|pending| Arc::ptr_eq(&pending, &original));
+    let original_cancelled = offered.guest.cancellations.lock().unwrap().len();
+    let duplicate_cancelled = duplicate.cancellations.lock().unwrap().len();
+    let reserving = offered.lab.server.shared.reserving.load(Ordering::Acquire);
+    let in_flight = offered.lab.server.shared.in_flight.load(Ordering::Acquire);
+    offered.guest.fail();
+    assert!(
+        preserved,
+        "the duplicate's early error removed the original pending admission owner"
+    );
+    assert_eq!(
+        (
+            original_cancelled,
+            duplicate_cancelled,
+            reserving,
+            in_flight
+        ),
+        (0, 1, 1, 1)
+    );
+    assert!(original.load(Ordering::Acquire));
+    offered.refused();
+    offered.stale_controls();
+    offered.reclaimed();
+    assert!(offered.guest.ready_calls.lock().unwrap().is_empty());
+    assert!(duplicate.ready_calls.lock().unwrap().is_empty());
+    offered.lab.os.leave(&offered.caller);
+    wait_until("the duplicate-error caller to leave", || {
+        offered.lab.connections() == 1
+    });
+    offered.reclaimed();
+}
+
+/// HEX-RT-17 / HEX-SOCK-6: the host refuses after arranging a deferred guest callback. Its local
+/// refusal owns admission first; the queued guest error must not answer or reclaim that place again.
+#[test]
+fn an_offered_host_refusal_before_queued_guest_error_reclaims_admission_once() {
+    let offered = OfferedLab::new(OfferFailure::RefusedBeforeGuestError);
+    let (h, answer) = answer_of(&offered.caller);
+    assert_eq!(
+        (h.id, answer),
+        (7, Answer::Refused(OfferedGuest::host_refusal()))
+    );
+    offered.barrier(&offered.caller);
+    offered.reclaimed();
+    offered.guest.fail();
+    offered.reclaimed();
+    offered.stale_controls();
+    offered.reclaimed();
+    assert!(offered.guest.ready_calls.lock().unwrap().is_empty());
+    offered.reuse_and_disconnect(&offered.caller);
 }

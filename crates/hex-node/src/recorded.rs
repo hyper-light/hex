@@ -486,7 +486,20 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
             Err(Refusal::NoSuchBox(_)) => {}
             Ok(_) | Err(_) => return Forward::Back(Box::new((call, stdio))),
         }
-        let client = match self.guest().evented() {
+        let offer = cfg!(windows)
+            && matches!(&call, Call::Exec { .. } | Call::ExecStreams { .. })
+            && (stdio.ask.stdin
+                || stdio.ask.stdout
+                || stdio.ask.stderr
+                || stdio.stdin.is_some()
+                || stdio.stdout.is_some()
+                || stdio.stderr.is_some());
+        let connected = if offer {
+            self.guest().program_client()
+        } else {
+            self.guest().evented()
+        };
+        let client = match connected {
             Ok(Some(client)) => client,
             Ok(None) => return Forward::Refused(Refusal::NoSuchBox(id.clone())),
             Err(why) => return Forward::Refused(why),
@@ -532,6 +545,39 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
                 Ok(answer) => Ok(Forwarded::Answer(Box::new(answer))),
             })
         });
+        if offer {
+            let streams = hex_core::wire::Streams {
+                stdin: stdio.ask.stdin,
+                stdout: stdio.ask.stdout,
+                stderr: stdio.ask.stderr,
+            };
+            let call = match call {
+                Call::Exec { id, program, .. } | Call::ExecStreams { id, program, .. } => {
+                    Call::Exec {
+                        id,
+                        program,
+                        streams,
+                    }
+                }
+                _ => {
+                    return Forward::Refused(Refusal::Broken(
+                        "only an exec can offer guest streams".to_owned(),
+                    ));
+                }
+            };
+            let pending = match client.defer(call, then, ended) {
+                Ok(pending) => pending,
+                Err(why) => return Forward::Refused(why),
+            };
+            let streams = match client.stream_offer(pending.id(), streams) {
+                Ok(streams) => streams,
+                Err(why) => return Forward::Refused(why),
+            };
+            return Forward::Offered(serve::Offering {
+                streams,
+                ready: Box::new(move || pending.send()),
+            });
+        }
         // Refused before it was sent: `then` is dropped unrun, and the caller hears why.
         match client.begin(call, stdio, then, ended) {
             Ok(_) => Forward::Taken,

@@ -387,6 +387,7 @@ dependencies = [
  "rustix",
  "serde_json",
  "sha2 0.10.9",
+ "shards-afunix",
  "shards-api",
  "tar",
  "tempfile",
