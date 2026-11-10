@@ -372,9 +372,9 @@ fn owner_epoch_sequence_and_repeated_caller_ids_cannot_collide() {
     assert_eq!(rt.list().unwrap().len(), 2);
 }
 
-/// AC-T7.4.1: the owner needs no local backend for a class another peer genuinely runs.
+/// AC-T7.4.1: a locally blocked owner needs no backend for a class another peer genuinely runs.
 #[test]
-fn owner_without_guest_backend_sends_full_payload_to_capable_peer() {
+fn blocked_owner_without_guest_backend_sends_full_payload_to_capable_peer() {
     use hex_sim::model::{Arch, Classes, Os, Platform};
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
@@ -423,6 +423,12 @@ fn owner_without_guest_backend_sends_full_payload_to_capable_peer() {
         Runtimes::new([(Class::Shards, rt.clone() as Arc<dyn Runtime>)]).unwrap(),
     )
     .unwrap();
+    owner
+        .block_admission(Refusal::Exhausted {
+            what: "test local room",
+            bound: 0,
+        })
+        .unwrap();
     let (key, step) = owner.submit(demand, payload.clone()).unwrap();
     let (to, start) = step.send.into_iter().next().unwrap();
     assert_eq!(to, NodeId(1));
@@ -481,7 +487,15 @@ fn failed_atomic_fact_refresh_does_not_poison_delete_or_later_recovery() {
             .refresh_node(NodeSpec::new(NodeId(0), Resources::default()))
             .is_err()
     );
-    assert!(driver.submit(d, p.clone()).is_err());
+    let (waiting, step) = driver.submit(d, p.clone()).unwrap();
+    let rejected = local(&driver, step);
+    assert!(
+        rejected
+            .notices
+            .iter()
+            .any(|n| matches!(n,Notice::Refused{key,..} if *key==waiting))
+    );
+    assert_eq!(rt.list().unwrap().len(), 1);
     local(&driver, driver.delete(key).unwrap());
     assert!(rt.list().unwrap().is_empty());
     driver
@@ -593,5 +607,43 @@ fn typed_probe_refusal_releases_only_unheld_start_and_keeps_control_available() 
             }
         )]
     ));
+    assert_eq!(rt.creates.load(Ordering::SeqCst), 1);
+}
+
+/// AC-T7.4.1: a rejected remote shrink neither blocks nor clears local receiver admission.
+#[test]
+fn remote_fact_failure_does_not_block_local_start() {
+    use hex_sim::model::Os;
+    let dir = tempfile::tempdir().unwrap();
+    let rt = Arc::new(Counting::default());
+    let (d, p) = request();
+    let local_node = NodeSpec::new(NodeId(0), d.need);
+    let mut remote = NodeSpec::new(NodeId(1), d.need);
+    remote.platform.os = Os::Windows;
+    let driver = Driver::boot(
+        NodeId(0),
+        &[local_node, remote],
+        &[],
+        Budget { owned: 4, ran: 4 },
+        Pick::default(),
+        dir.path(),
+        Runtimes::new([(Class::Oci, rt.clone() as Arc<dyn Runtime>)]).unwrap(),
+    )
+    .unwrap();
+    let mut remote_demand = d;
+    remote_demand.ask.os = Some(Os::Windows);
+    let (_, remote_start) = driver.submit(remote_demand, p.clone()).unwrap();
+    assert_eq!(remote_start.send.first().unwrap().0, NodeId(1));
+    let mut shrink = NodeSpec::new(NodeId(1), Resources::default());
+    shrink.platform.os = Os::Windows;
+    assert!(driver.refresh_node(shrink).is_err());
+    let mut local_demand = d;
+    local_demand.ask.os = Some(Os::Linux);
+    let (key, local_start) = driver.submit(local_demand, p).unwrap();
+    let step = local(&driver, local_start);
+    assert!(step.notices.contains(&Notice::Started {
+        key,
+        node: NodeId(0)
+    }));
     assert_eq!(rt.creates.load(Ordering::SeqCst), 1);
 }

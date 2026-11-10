@@ -249,9 +249,6 @@ impl Driver {
         let _operation = self.operation()?;
         validate(&demand, &payload)?;
         let mut state = self.lock()?;
-        if let Some(why) = &state.admission {
-            return Err(why.clone().into());
-        }
         state.rows.context = Context::NextOwned(payload);
         let State { node, rows, .. } = &mut *state;
         let result = node.submit(demand, rows);
@@ -365,8 +362,11 @@ impl Driver {
     pub fn refresh_node(&self, spec: NodeSpec) -> Result<(), Error> {
         let _operation = self.operation()?;
         let mut state = self.lock()?;
+        let local = spec.id == state.node.id();
         let result = state.node.refresh_node(spec);
-        state.admission = result.as_ref().err().map(admission_refusal);
+        if local {
+            state.admission = result.as_ref().err().map(admission_refusal);
+        }
         result.map_err(Error::Core)
     }
 
@@ -393,7 +393,9 @@ impl Driver {
         let _operation = self.operation()?;
         let mut state = self.lock()?;
         let result = state.node.set_gpu_load(node, device, load);
-        if let Err(why) = &result {
+        if node == state.node.id()
+            && let Err(why) = &result
+        {
             state.admission = Some(admission_refusal(why));
         }
         result.map_err(Error::Core)
