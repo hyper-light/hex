@@ -41,7 +41,14 @@ struct Mounted {
     /// Set once the box's container exists and outlives its node: dropped without a delete (the node going
     /// down), its scratch stays the container's, for the next node to take back. Until then a failed create
     /// undoes it as any box's, so no create leaves a scratch attached without a container.
-    outlives: bool,
+    owner: ScratchOwner,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScratchOwner {
+    Node,
+    Container,
+    Uncertain,
 }
 
 /// The scratch markers under `root`, one per box, `<id>.scratch.json`.
@@ -69,13 +76,21 @@ fn write_marker(marker: &Path, record: &hcs::BoxRecord) -> Result<(), Refusal> {
 /// Reads the box's record at `marker`, at most [`hcs::MAX_RECORD`] bytes: what a node taking the box back
 /// reopens ([`OciBox::take_back`]).
 pub fn read_marker(marker: &Path) -> Result<hcs::BoxRecord, Refusal> {
+    let bound = hcs::record_bound()?;
     let mut bytes = Vec::new();
+    let room = bound
+        .checked_add(1)
+        .ok_or_else(|| super::allocation(bound))?;
+    bytes
+        .try_reserve_exact(room)
+        .map_err(|_| super::allocation(room))?;
     std::fs::File::open(marker)
         .and_then(|f| {
             f.take(
-                u64::try_from(hcs::MAX_RECORD)
-                    .unwrap_or(u64::MAX)
-                    .saturating_add(1),
+                u64::try_from(bound)
+                    .map_err(std::io::Error::other)?
+                    .checked_add(1)
+                    .ok_or_else(|| std::io::Error::other("native marker read bound overflows"))?,
             )
             .read_to_end(&mut bytes)
         })
@@ -94,41 +109,49 @@ impl Mounted {
     /// every step is still tried. `UnprepareLayer` answering `ERROR_FLT_DO_NOT_DETACH` is the container's
     /// end having taken the filter (note §3), matched alone; `DeactivateLayer` then detaches the volume.
     fn undo(&mut self) -> Result<(), Refusal> {
-        let mut first = None;
-        if let Some(scratch) = self.activated.take() {
-            if std::mem::take(&mut self.prepared)
-                && let Err(f) = sys::unprepare_layer(&scratch)
-                && hcs::hcs_error(f.code) != HcsError::FilterHeld
-            {
-                first.get_or_insert(failure(
-                    "taking the storage filter off a container's scratch",
-                    f,
-                ));
+        if let Some(scratch) = self.activated.as_ref() {
+            if self.prepared {
+                match sys::unprepare_layer(scratch) {
+                    Ok(()) => {}
+                    Err(f) if hcs::hcs_error(f.code) == HcsError::FilterHeld => {}
+                    Err(f) => {
+                        return Err(failure(
+                            "taking the storage filter off a container's scratch",
+                            f,
+                        ));
+                    }
+                }
+                self.prepared = false;
             }
-            if let Err(f) = sys::deactivate_layer(&scratch) {
-                first.get_or_insert(failure("detaching a container's scratch", f));
-            }
+            sys::deactivate_layer(scratch)
+                .map_err(|f| failure("detaching a container's scratch", f))?;
+            self.activated = None;
         }
-        for p in self.made.drain(..).rev() {
-            let gone = if p.is_dir() {
-                std::fs::remove_dir(&p)
-            } else {
-                std::fs::remove_file(&p)
+        for _ in 0..self.made.len() {
+            let Some(path) = self.made.last() else {
+                break;
             };
-            if let Err(e) = gone
-                && e.kind() != std::io::ErrorKind::NotFound
-            {
-                first.get_or_insert(Refusal::os("removing a container's scratch", e));
+            let gone = if path.is_dir() {
+                std::fs::remove_dir(path)
+            } else {
+                std::fs::remove_file(path)
+            };
+            match gone {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(Refusal::os("removing a container's scratch", e)),
             }
+            self.made.pop();
         }
-        if first.is_none()
-            && let Some(m) = self.marker.take()
-            && let Err(e) = std::fs::remove_file(&m)
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            first.get_or_insert(Refusal::os("removing a container's scratch marker", e));
+        if let Some(marker) = self.marker.as_ref() {
+            match std::fs::remove_file(marker) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(Refusal::os("removing a container's scratch marker", e)),
+            }
+            self.marker = None;
         }
-        first.map_or(Ok(()), Err)
+        Ok(())
     }
 }
 
@@ -280,6 +303,32 @@ pub fn end(marker: &Path) -> Result<(), Refusal> {
     remove_scratch(&m, marker)
 }
 
+/// A missing marker is not absence. Only the existing HCS open result can establish that outcome.
+pub(crate) fn require_absent(id: &BoxId) -> Result<(), Refusal> {
+    match sys::open_system(id.as_str())
+        .map_err(|f| failure("establishing an uncertain container's absence", f))?
+    {
+        None => Ok(()),
+        Some(_) => Err(Refusal::Broken(
+            "native create outcome has no marker but its system still exists; claims remain held"
+                .to_owned(),
+        )),
+    }
+}
+
+fn copy_bindings(bindings: &[hcs::DeviceBinding]) -> Result<Vec<hcs::DeviceBinding>, Refusal> {
+    let mut copy = Vec::new();
+    copy.try_reserve_exact(bindings.len())
+        .map_err(|_| super::allocation(bindings.len()))?;
+    for binding in bindings {
+        copy.push(hcs::DeviceBinding {
+            id: binding.id,
+            location: super::copy_text(&binding.location)?,
+        });
+    }
+    Ok(copy)
+}
+
 /// Removes the scratch record `m` names and then its marker: detaches the volume where it is still
 /// attached (UnprepareLayer, then DeactivateLayer, which detaches it whether or not the unprepare took:
 /// jupiter, 2026-11-06), removes what Hex made, the marker's unfinished next record, and the marker.
@@ -326,7 +375,7 @@ impl Drop for Mounted {
     fn drop(&mut self) {
         // The backstop for a box dropped without its delete; delete reports these failures. An outliving
         // box's scratch is its container's while that runs on.
-        if !self.outlives {
+        if self.owner == ScratchOwner::Node {
             let _ = self.undo();
         }
     }
@@ -366,6 +415,7 @@ pub struct OciBox {
     user: Option<String>,
     init: Process,
     life: Mutex<Life>,
+    devices: Vec<hcs::DeviceBinding>,
 }
 
 /// Whether HCS is here; `Err` is the class refused by name, saying the installer turns it on.
@@ -414,6 +464,17 @@ impl OciBox {
         marker: Option<PathBuf>,
         lifetime: hcs::Lifetime,
     ) -> Result<Self, Refusal> {
+        Self::create_assigned(job, container, launcher, marker, lifetime, Vec::new())
+    }
+
+    pub(crate) fn create_assigned(
+        job: JobBox,
+        container: &Container,
+        launcher: &Path,
+        marker: Option<PathBuf>,
+        lifetime: hcs::Lifetime,
+        devices: Vec<hcs::DeviceBinding>,
+    ) -> Result<Self, Refusal> {
         available()?;
         let host = sys::host();
         let base = container.layers.last().ok_or_else(|| Refusal::Invalid {
@@ -425,7 +486,7 @@ impl OciBox {
             .map_err(|e| Refusal::os("reading the image's Windows build from its base layer", e))?;
         hcs::image_runs(host, image)?;
         let id = job.id().clone();
-        let mut mounted = scratch(container, base, marker, &id, lifetime)?;
+        let mut mounted = scratch(container, base, marker, &id, lifetime, &devices)?;
         if !container.hosts.is_empty() {
             append_hosts(&mounted.volume, &hcs::hosts_lines(&container.hosts))?;
         }
@@ -441,16 +502,31 @@ impl OciBox {
             .to_str()
             .ok_or_else(|| Refusal::os("naming the launcher's folder", "not UTF-8"))?;
         let document = hcs::document(container, &storage, launcher, lifetime).to_string();
+        // The marker already owns the exact system ID and bindings. A returned failure or a closed
+        // handle does not prove cancellation completed; retain the scratch for explicit cleanup.
+        if !devices.is_empty() {
+            mounted.owner = ScratchOwner::Uncertain;
+        }
         let system = match sys::create_system(id.as_str(), &document, launch::PATIENCE) {
             Ok(s) => s,
             Err(f) => {
-                let refused = failure("creating a container", f);
-                let _ = mounted.undo();
+                let refused = if devices.is_empty() {
+                    failure("creating a container", f)
+                } else {
+                    hcs::refusal("creating an assigned container", f.code, host, None)
+                };
+                if devices.is_empty() {
+                    mounted.undo()?;
+                }
                 return Err(refused);
             }
         };
         // From here the scratch is the container's: where it outlives its node, a node going down leaves both.
-        mounted.outlives = lifetime == hcs::Lifetime::Outlives;
+        mounted.owner = if lifetime == hcs::Lifetime::Outlives {
+            ScratchOwner::Container
+        } else {
+            ScratchOwner::Node
+        };
         Ok(Self {
             job,
             system: Mutex::new(Some(system)),
@@ -462,7 +538,12 @@ impl OciBox {
                 init: None,
                 exit: None,
             }),
+            devices,
         })
+    }
+
+    pub(crate) fn device_bindings(&self) -> &[hcs::DeviceBinding] {
+        &self.devices
     }
 
     pub fn id(&self) -> &BoxId {
@@ -507,7 +588,7 @@ impl OciBox {
             .lock()
             .map_err(|_| Refusal::Broken("an oci box's scratch lock is poisoned".to_owned()))?
             .as_ref()
-            .is_some_and(|m| m.outlives))
+            .is_some_and(|m| m.owner == ScratchOwner::Container))
     }
 
     /// Rewrites an outliving box's record with `change`; a box that ends with its node keeps its first.
@@ -517,7 +598,7 @@ impl OciBox {
             .lock()
             .map_err(|_| Refusal::Broken("an oci box's scratch lock is poisoned".to_owned()))?;
         if let Some(m) = mounted.as_mut()
-            && m.outlives
+            && m.owner == ScratchOwner::Container
             && let (Some(marker), Some(record)) = (m.marker.as_ref(), m.record.as_mut())
         {
             change(record);
@@ -542,6 +623,24 @@ impl OciBox {
         marker: PathBuf,
         record: hcs::BoxRecord,
     ) -> Result<Self, Refusal> {
+        Self::take_back_assigned(job, container, marker, record, Vec::new())
+    }
+
+    pub(crate) fn take_back_assigned(
+        job: JobBox,
+        container: &Container,
+        marker: PathBuf,
+        record: hcs::BoxRecord,
+        devices: Vec<hcs::DeviceBinding>,
+    ) -> Result<Self, Refusal> {
+        if record.devices != devices
+            || (!devices.is_empty() && record.system.as_ref() != Some(job.id()))
+        {
+            return Err(Refusal::Invalid {
+                what: "native device recovery",
+                why: "recorded exact bindings or system identity disagree".to_owned(),
+            });
+        }
         let id = job.id().clone();
         let Reopened {
             system,
@@ -569,7 +668,7 @@ impl OciBox {
             made: record.made.iter().map(PathBuf::from).collect(),
             marker: Some(marker),
             record: Some(record),
-            outlives: true,
+            owner: ScratchOwner::Container,
         };
         Ok(Self {
             job,
@@ -582,6 +681,7 @@ impl OciBox {
                 init,
                 exit: None,
             }),
+            devices,
         })
     }
 
@@ -670,13 +770,12 @@ impl OciBox {
     /// Ends the box's programs, terminates its container, and removes its scratch.
     pub fn delete(&self) -> Result<(), Refusal> {
         self.job.delete()?;
-        let system = self
+        let mut system = self
             .system
             .lock()
-            .map_err(|_| Refusal::Broken("an oci box's system lock is poisoned".to_owned()))?
-            .take();
-        if let Some(system) = system {
-            match system.terminate(launch::PATIENCE) {
+            .map_err(|_| Refusal::Broken("an oci box's system lock is poisoned".to_owned()))?;
+        if let Some(held) = system.as_ref() {
+            match held.terminate(launch::PATIENCE) {
                 Ok(()) => {}
                 Err(f)
                     if matches!(
@@ -685,13 +784,18 @@ impl OciBox {
                     ) => {}
                 Err(f) => return Err(failure("ending a container", f)),
             }
+            system.take();
         }
-        let mounted = self
+        let mut mounted = self
             .mounted
             .lock()
-            .map_err(|_| Refusal::Broken("an oci box's scratch lock is poisoned".to_owned()))?
-            .take();
-        mounted.map_or(Ok(()), |mut m| m.undo())
+            .map_err(|_| Refusal::Broken("an oci box's scratch lock is poisoned".to_owned()))?;
+        if let Some(held) = mounted.as_mut() {
+            held.owner = ScratchOwner::Node;
+            held.undo()?;
+            mounted.take();
+        }
+        Ok(())
     }
 }
 
@@ -706,10 +810,18 @@ fn scratch(
     marker: Option<PathBuf>,
     id: &BoxId,
     lifetime: hcs::Lifetime,
+    devices: &[hcs::DeviceBinding],
 ) -> Result<Mounted, Refusal> {
     let outlives = lifetime == hcs::Lifetime::Outlives;
     let folder = match &container.scratch {
         Scratch::Volume(v) => {
+            if !devices.is_empty() {
+                return Err(Refusal::Platform {
+                    what: "device attachment",
+                    platform: "windows OCI",
+                    why: "assigned devices require an owned scratch-folder marker".to_owned(),
+                });
+            }
             return Ok(Mounted {
                 volume: v.clone(),
                 activated: None,
@@ -717,7 +829,7 @@ fn scratch(
                 made: Vec::new(),
                 marker: None,
                 record: None,
-                outlives: false,
+                owner: ScratchOwner::Node,
             });
         }
         Scratch::Folder(f) => PathBuf::from(f),
@@ -729,7 +841,7 @@ fn scratch(
         made: Vec::new(),
         marker: None,
         record: None,
-        outlives: false,
+        owner: ScratchOwner::Node,
     };
     let sandbox = folder.join(SANDBOX);
     // The marker first, naming what Hex is about to make, so a node killed at any later point leaves
@@ -754,9 +866,14 @@ fn scratch(
                 .map(|p| path(p.as_path()))
                 .collect::<Result<_, _>>()?,
             outlives,
-            system: outlives.then(|| id.clone()),
+            system: if outlives || !devices.is_empty() {
+                Some(id.try_clone()?)
+            } else {
+                None
+            },
             started: false,
             init: None,
+            devices: copy_bindings(devices)?,
         };
         if let Some(dir) = m.parent() {
             std::fs::create_dir_all(dir).map_err(|e| Refusal::os("writing a scratch marker", e))?;

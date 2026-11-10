@@ -1241,7 +1241,20 @@ pub struct BoxRecord {
     pub started: bool,
     #[serde(default)]
     pub init: Option<InitRecord>,
+    /// Exact physical bindings selected before HCS create; recovery never rebinds an ID by lookup alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<DeviceBinding>,
 }
+
+/// The immutable administrator binding used by one native container, retained in its scratch marker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceBinding {
+    pub id: hex_api::DeviceId,
+    pub location: String,
+}
+
+#[cfg(test)]
+mod device_binding_record_tests;
 
 /// A box's init as its record names it: its pid and its creation time (100 ns units since 1601, as
 /// `GetProcessTimes` gives it), so a process given that pid since is never taken for it.
@@ -1265,12 +1278,127 @@ pub const RECORD_FIXED: usize = 130;
 /// more.
 pub const MAX_RECORD: usize = RECORD_FIXED + 3 * 6 * FOLDER_UNITS + hex_api::BoxId::MAX_LEN;
 
-/// A box's record as its marker holds it, refused by name past [`MAX_RECORD`]: such a box names a path
-/// past Windows' longest, so it can't be made, and no node would read its record back.
+/// The legacy marker budget plus one existing OCI configuration budget for the complete new field.
+/// Both read and write use this checked sum; neither device count nor a location selects a new limit.
+pub fn record_bound() -> Result<usize, Refusal> {
+    MAX_RECORD
+        .checked_add(crate::bundle::MAX_CONFIG_BYTES)
+        .ok_or_else(|| Refusal::Invalid {
+            what: "box record",
+            why: "native marker byte bound overflows this platform".to_owned(),
+        })
+}
+
+struct RecordBytes {
+    bytes: Vec<u8>,
+    bound: usize,
+    failure: Option<std::io::ErrorKind>,
+}
+
+impl std::io::Write for RecordBytes {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let size = self.bytes.len().checked_add(bytes.len());
+        let kind = if size.is_none_or(|size| size > self.bound) {
+            Some(std::io::ErrorKind::FileTooLarge)
+        } else if self.bytes.try_reserve(bytes.len()).is_err() {
+            Some(std::io::ErrorKind::OutOfMemory)
+        } else {
+            None
+        };
+        if let Some(kind) = kind {
+            self.failure = Some(kind);
+            return Err(kind.into());
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn record_json(value: &impl Serialize, bound: usize) -> Result<Vec<u8>, Refusal> {
+    let mut out = RecordBytes {
+        bytes: Vec::new(),
+        bound,
+        failure: None,
+    };
+    if serde_json::to_writer(&mut out, value).is_err() {
+        return Err(match out.failure {
+            Some(std::io::ErrorKind::OutOfMemory) => Refusal::Exhausted {
+                what: "box record bytes",
+                bound,
+            },
+            Some(std::io::ErrorKind::FileTooLarge) => Refusal::Invalid {
+                what: "box record",
+                why: "encoded record exceeds its derived byte bound".to_owned(),
+            },
+            _ => Refusal::Broken("native scratch record could not encode".to_owned()),
+        });
+    }
+    Ok(out.bytes)
+}
+
+fn record_devices(record: &BoxRecord) -> Result<usize, Refusal> {
+    if record.devices.is_empty() {
+        return Ok(0);
+    }
+    if record.devices.len() > hex_api::MAX_DEVICES {
+        return Err(Refusal::Invalid {
+            what: "box record devices",
+            why: "count exceeds the u16 device index space".to_owned(),
+        });
+    }
+    let mut ids = Vec::new();
+    ids.try_reserve_exact(record.devices.len())
+        .map_err(|_| Refusal::Exhausted {
+            what: "box record device identities",
+            bound: record.devices.len(),
+        })?;
+    for device in &record.devices {
+        device.id.check()?;
+        if device.location.is_empty() || device.location.contains('\0') {
+            return Err(Refusal::Invalid {
+                what: "box record devices",
+                why: "location is empty or contains NUL".to_owned(),
+            });
+        }
+        ids.push(device.id);
+    }
+    ids.sort_unstable();
+    if ids.windows(2).any(|pair| pair.first() == pair.last()) {
+        return Err(Refusal::Invalid {
+            what: "box record devices",
+            why: "duplicate physical identity".to_owned(),
+        });
+    }
+    // The field key, comma and colon are part of the additional configuration budget too.
+    let extra = record_json(&record.devices, crate::bundle::MAX_CONFIG_BYTES)?
+        .len()
+        .checked_add(b",\"devices\":".len())
+        .ok_or_else(|| Refusal::Invalid {
+            what: "box record devices",
+            why: "encoded field size overflows".to_owned(),
+        })?;
+    if extra > crate::bundle::MAX_CONFIG_BYTES {
+        return Err(Refusal::Invalid {
+            what: "box record devices",
+            why: "encoded bindings exceed the configuration byte bound".to_owned(),
+        });
+    }
+    Ok(extra)
+}
+
+/// A box's marker: its original path budget and a separate configuration budget for exact bindings.
 pub fn write_record(record: &BoxRecord) -> Result<Vec<u8>, Refusal> {
-    let bytes = serde_json::to_vec(record)
-        .map_err(|e| Refusal::Broken(format!("a box record didn't encode: {e}")))?;
-    if bytes.len() > MAX_RECORD {
+    let extra = record_devices(record)?;
+    let bytes = record_json(record, record_bound()?)?;
+    if bytes
+        .len()
+        .checked_sub(extra)
+        .is_none_or(|size| size > MAX_RECORD)
+    {
         return Err(Refusal::Invalid {
             what: "oci spec",
             why: format!(
@@ -1282,18 +1410,29 @@ pub fn write_record(record: &BoxRecord) -> Result<Vec<u8>, Refusal> {
     Ok(bytes)
 }
 
-/// Reads a box's record from `bytes`, refused past [`MAX_RECORD`] or malformed.
+/// Reads a box's record from `bytes`, refused past [`record_bound`] or malformed.
 pub fn read_record(bytes: &[u8]) -> Result<BoxRecord, Refusal> {
-    if bytes.len() > MAX_RECORD {
+    let bound = record_bound()?;
+    if bytes.len() > bound {
         return Err(Refusal::Invalid {
             what: "box record",
-            why: format!("past {MAX_RECORD} bytes"),
+            why: format!("past {bound} bytes"),
         });
     }
-    serde_json::from_slice(bytes).map_err(|e| Refusal::Invalid {
+    let record: BoxRecord = serde_json::from_slice(bytes).map_err(|_| Refusal::Invalid {
         what: "box record",
-        why: e.to_string(),
-    })
+        why: "malformed native scratch record".to_owned(),
+    })?;
+    // The same per-field budgets apply to reads. Canonicalization validates sizes without changing
+    // the durable input bytes or granting a different binding.
+    write_record(&record).map_err(|error| match error {
+        Refusal::Invalid { .. } => Refusal::Invalid {
+            what: "box record",
+            why: format!("invalid fields or past {MAX_RECORD} legacy bytes"),
+        },
+        other => other,
+    })?;
+    Ok(record)
 }
 
 /// What a starting node does with a box's record before it reads its own: reclaim the scratch (its box
@@ -1456,6 +1595,7 @@ mod tests {
     /// The record of an outliving box `x` whose node made its scratch folder and sandbox.
     fn outliving(init: Option<InitRecord>) -> BoxRecord {
         BoxRecord {
+            devices: Vec::new(),
             folder: r"C:\b\x-scratch".to_owned(),
             made: vec![
                 r"C:\b\x-scratch".to_owned(),
@@ -1506,6 +1646,7 @@ mod tests {
     #[test]
     fn a_box_whose_start_its_node_didnt_finish_isnt_taken_back() {
         let r = BoxRecord {
+            devices: Vec::new(),
             started: true,
             ..outliving(None)
         };
@@ -1567,6 +1708,7 @@ mod tests {
     fn the_longest_record_a_box_writes_is_its_bound() {
         let path = "\u{1}".repeat(FOLDER_UNITS);
         let worst = BoxRecord {
+            devices: Vec::new(),
             folder: path.clone(),
             made: vec![path.clone(), path.clone()],
             outlives: false,
@@ -2268,6 +2410,7 @@ mod tests {
             seen in proptest::option::of((0u64..3, any::<bool>())),
         ) {
             let record = BoxRecord {
+                devices: Vec::new(),
                 folder: r"C:\b\x".to_owned(),
                 made: vec![],
                 outlives,
@@ -2308,6 +2451,7 @@ mod tests {
             init in proptest::option::of((any::<u32>(), any::<u64>())),
         ) {
             let record = BoxRecord {
+                devices: Vec::new(),
                 folder,
                 made,
                 outlives,

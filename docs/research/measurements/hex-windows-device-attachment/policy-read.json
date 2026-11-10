@@ -1,0 +1,32 @@
+{
+  "policy_revision": "0e024f8ed615eadfda70f9192ea79cd851977e55",
+  "policy_sha256": {
+    "AGENTS.md": "f66d304c033ad4001d3d7347b67faa3bb3137d637860793e8e74f1eb6266db41",
+    "docs/development-rules.md": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+    "docs/development-evidence.md": "61613a244106d95b2759b38c8b6660ff29a616983e7afd6e9faabdc38368fb63",
+    "CLAUDE.md": "fd1076b256516e0edab1b3655421d37cd934e93a8232f0125b96abcfb99ece5f",
+    "docs/design/managed-runtime-plan.md": "f90f01fdb6048efde8e0cc466fcb8753910c389cf308fca6844c93b6400abead"
+  },
+  "implementer": "01a1c643e475709b8a829553d1100be1",
+  "coordinator": "01a1aa77778471339bea3beff90d6bbd",
+  "role": "implementation and focused light only",
+  "base": "a03657d18add6343b9b5d9da55c7aefdc71a10c9",
+  "branch": "cp/t7-windows-device-attachment",
+  "preserved_api_checkpoint": "8c4777d639e8dc3cdc8359b6bf1403cec6905f1e",
+  "preserved_api_tested_source": "0429d0849e6661a6f2c78d9d1ef68526edc3e115",
+  "owned": [
+    "crates/hex-runtime/src/windows/mod.rs native config/assignment/holding/tests",
+    "crates/hex-runtime/src/windows/oci/mod.rs native metadata/cleanup/tests",
+    "crates/hex-cli/src/node.rs Windows host constructor lines only",
+    "crates/hex-core/src/hcs.rs BoxRecord metadata/serde/bounds/associated pure tests ONLY",
+    "crates/hex-core/src/hcs/device_binding_record_tests.rs",
+    "docs/research/measurements/hex-windows-device-attachment/"
+  ],
+  "shared_catalog_sha256": "f22b8d459a8c0b392e90fce4dea313611283065200374487ef9baec1d6fdd048",
+  "scope_status": "source in progress, zero executed checks in this scope, no active job",
+  "other_full_read_sha256": {
+    "CLAUDE.md": "8708b80967e5517ae9137eb642600668ac02d164a4c2145ad8462a37889d424e",
+    "/Users/adalundhe/.cache/hex-lead/HANDOFF-codex.md": "9b780baaa9ff3dc1d491624d99a217ceb7a2b7cc913c1f56e0598f6d8f8694c1",
+    "/Users/adalundhe/g121-handoff.md": "b27c3cb42658e41c5d7538212ef0a7bd3ae581daa258957389d765d0202d9bb0"
+  }
+}

@@ -444,7 +444,9 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
     let keep = vec![exe.to_string_lossy().into_owned(), "keep".to_owned()];
     let keeper_dir = args.state.join("keeper");
     let name = keeper::node_name(&keeper_dir);
-    let runtime = WinRuntime::outliving(&name, &keeper_dir, &keep).map_err(failed)?;
+    let runtime =
+        WinRuntime::outliving_with_devices(&name, &keeper_dir, &keep, &args.state.join("devices"))
+            .map_err(failed)?;
     let node = Recorded::open(runtime, &args.state).map_err(failed)?;
     say_recovered(&node.recover().map_err(failed)?);
     let platform = hex_node::serve::windows::platform().map_err(failed)?;

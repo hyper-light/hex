@@ -15,17 +15,18 @@ pub mod process;
 pub mod sys;
 mod wmi;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 use std::os::windows::io::OwnedHandle;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use hex_api::{
-    BoxId, BoxInfo, BoxSpec, BoxState, Class, ClassSpec, Proc, Program, Refusal, Rootfs, Runtime,
-    Signal, Stdio, Usage,
+    BoxId, BoxInfo, BoxSpec, BoxState, Capacity, CapacityResources, Class, ClassSpec, DeviceId,
+    DeviceInfo, Proc, Program, Refusal, Rootfs, Runtime, Signal, Stdio, Usage,
 };
 
+use crate::devices::{Binding, Catalog};
 use crate::guest::Side;
 use hex_core::setup::{self, WindowsFeature};
 use oci::OciBox;
@@ -47,6 +48,92 @@ impl Held {
             Held::Oci(b) => b.job_token(),
         }
     }
+}
+
+/// One entry in the existing native holding table, including work not yet safe to publish or forget.
+struct Slot {
+    devices: Vec<DeviceId>,
+    marker: Option<PathBuf>,
+    keeper: KeeperHold,
+    state: SlotState,
+}
+
+impl Slot {
+    fn physical(&self) -> Option<&Held> {
+        match &self.state {
+            SlotState::Finishing(held)
+            | SlotState::CancelFinishing(held)
+            | SlotState::Ready(held)
+            | SlotState::Removing(held)
+            | SlotState::CleanupPending(held) => Some(held),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct KeeperReceipt {
+    pid: u32,
+    created: u64,
+    value: usize,
+}
+
+#[derive(Clone, Copy)]
+enum KeeperHold {
+    Unheld,
+    Held(KeeperReceipt),
+    Closed,
+    Uncertain,
+}
+
+enum SlotState {
+    Creating,
+    Cancelled,
+    Finishing(Held),
+    CancelFinishing(Held),
+    Ready(Held),
+    Removing(Held),
+    CleanupPending(Held),
+    Uncertain,
+    RemovingUncertain,
+}
+
+fn allocation(bound: usize) -> Refusal {
+    Refusal::Exhausted {
+        what: "Windows device state",
+        bound,
+    }
+}
+
+fn pending(why: &'static str) -> Refusal {
+    Refusal::Invalid {
+        what: "native box lifecycle",
+        why: why.to_owned(),
+    }
+}
+
+fn inconsistent_slots() -> Refusal {
+    Refusal::Broken("native holding entry changed during its owned operation".to_owned())
+}
+
+fn slot_index(boxes: &[(BoxId, Slot)], id: &BoxId) -> Result<usize, usize> {
+    boxes.binary_search_by(|(key, _)| key.cmp(id))
+}
+
+fn copy_devices(devices: &[DeviceId]) -> Result<Vec<DeviceId>, Refusal> {
+    let mut copy = Vec::new();
+    copy.try_reserve_exact(devices.len())
+        .map_err(|_| allocation(devices.len()))?;
+    copy.extend_from_slice(devices);
+    Ok(copy)
+}
+
+fn copy_text(value: &str) -> Result<String, Refusal> {
+    let mut copy = String::new();
+    copy.try_reserve_exact(value.len())
+        .map_err(|_| allocation(value.len()))?;
+    copy.push_str(value);
+    Ok(copy)
 }
 
 /// A node's keeper and the state folder its boxes' jobs are recorded in. The keeper is started by
@@ -201,6 +288,7 @@ const LINUX_IN_GUEST: &str = "a Linux image runs in the node's Shards guest thro
 pub struct WinRuntime {
     /// The machine's logical processors, the CPU hard cap's denominator (read once at node start).
     processors: NonZeroU32,
+    catalog: Catalog,
     /// Where an `oci` box made from an `OciSpec` keeps its scratch, one folder per box.
     scratch_root: PathBuf,
     /// The folder holding the `hex` binary every `oci` box maps read-only as its launcher: the node's
@@ -228,48 +316,169 @@ pub struct WinRuntime {
 /// A runtime's boxes and the keeper holding their jobs: shared with a run's thread, which removes its box
 /// through [`Holding::remove`] as the runtime's delete does.
 struct Holding {
-    boxes: Mutex<BTreeMap<BoxId, Held>>,
+    boxes: Mutex<Vec<(BoxId, Slot)>>,
     /// Where its boxes outlive it: the keeper holding a second handle to each box's job, and the state
     /// folder their handle values are kept in. `None` for a runtime driven in process.
     keeper: Option<Keeping>,
 }
 
 impl Holding {
-    fn boxes(&self) -> Result<std::sync::MutexGuard<'_, BTreeMap<BoxId, Held>>, Refusal> {
+    fn boxes(&self) -> Result<std::sync::MutexGuard<'_, Vec<(BoxId, Slot)>>, Refusal> {
         self.boxes
             .lock()
             .map_err(|_| Refusal::Broken("the node's box map lock is poisoned".to_owned()))
     }
 
-    /// Ensures the keeper is alive: one found dead is started again and every live box's job duplicated
-    /// into it, its handle value rewritten. The node does this when it sees the keeper's end.
+    fn reserve(
+        &self,
+        id: &BoxId,
+        devices: &[DeviceId],
+        marker: Option<PathBuf>,
+    ) -> Result<(), Refusal> {
+        let key = id.try_clone()?;
+        let owned = copy_devices(devices)?;
+        let mut selected = copy_devices(devices)?;
+        selected.sort_unstable();
+        let mut boxes = self.boxes()?;
+        let at = match slot_index(&boxes, id) {
+            Ok(_) => return Err(Refusal::Exists(key)),
+            Err(at) => at,
+        };
+        if boxes.len() >= crate::MAX_BOXES {
+            return Err(Refusal::Full(crate::MAX_BOXES));
+        }
+        // Every retained ID is visited once, with binary lookup in the temporary sorted selection.
+        // No prefix scan, stored reverse index or second holder ledger is introduced.
+        for (_, slot) in boxes.iter() {
+            if slot
+                .devices
+                .iter()
+                .any(|id| selected.binary_search(id).is_ok())
+            {
+                return Err(pending("requested physical device is already held"));
+            }
+        }
+        boxes
+            .try_reserve(1)
+            .map_err(|_| allocation(crate::MAX_BOXES))?;
+        if at > boxes.len() {
+            return Err(inconsistent_slots());
+        }
+        boxes.insert(
+            at,
+            (
+                key,
+                Slot {
+                    devices: owned,
+                    marker,
+                    keeper: KeeperHold::Unheld,
+                    state: SlotState::Creating,
+                },
+            ),
+        );
+        Ok(())
+    }
+
+    fn unmade(&self, id: &BoxId) -> Result<(), Refusal> {
+        let mut boxes = self.boxes()?;
+        let at = slot_index(&boxes, id).map_err(|_| inconsistent_slots())?;
+        let (_, slot) = boxes.get(at).ok_or_else(inconsistent_slots)?;
+        if !slot.devices.is_empty()
+            || !matches!(slot.state, SlotState::Creating | SlotState::Cancelled)
+        {
+            return Err(inconsistent_slots());
+        }
+        boxes.remove(at);
+        Ok(())
+    }
+
+    fn made(&self, id: &BoxId, held: Held) -> Result<bool, Refusal> {
+        let mut boxes = self.boxes()?;
+        let at = slot_index(&boxes, id).map_err(|_| inconsistent_slots())?;
+        let (_, slot) = boxes.get_mut(at).ok_or_else(inconsistent_slots)?;
+        let cancelled = match slot.state {
+            SlotState::Creating => false,
+            SlotState::Cancelled => true,
+            _ => return Err(inconsistent_slots()),
+        };
+        slot.state = if cancelled {
+            SlotState::CleanupPending(held)
+        } else {
+            SlotState::Finishing(held)
+        };
+        Ok(cancelled)
+    }
+
+    fn ready(&self, id: &BoxId) -> Result<bool, Refusal> {
+        let mut boxes = self.boxes()?;
+        let at = slot_index(&boxes, id).map_err(|_| inconsistent_slots())?;
+        let (_, slot) = boxes.get_mut(at).ok_or_else(inconsistent_slots)?;
+        match &slot.state {
+            SlotState::Finishing(held) => {
+                slot.state = SlotState::Ready(held.clone());
+                Ok(true)
+            }
+            SlotState::CancelFinishing(held) => {
+                slot.state = SlotState::CleanupPending(held.clone());
+                Ok(false)
+            }
+            _ => Err(inconsistent_slots()),
+        }
+    }
+
+    fn uncertain(&self, id: &BoxId) -> Result<(), Refusal> {
+        let mut boxes = self.boxes()?;
+        let at = slot_index(&boxes, id).map_err(|_| inconsistent_slots())?;
+        let (_, slot) = boxes.get_mut(at).ok_or_else(inconsistent_slots)?;
+        slot.state = match &slot.state {
+            SlotState::Creating | SlotState::Cancelled => SlotState::Uncertain,
+            SlotState::Finishing(held) | SlotState::CancelFinishing(held) => {
+                SlotState::CleanupPending(held.clone())
+            }
+            _ => return Err(inconsistent_slots()),
+        };
+        Ok(())
+    }
+
+    fn keeper_receipt(&self, id: &BoxId, receipt: KeeperHold) -> Result<(), Refusal> {
+        let mut boxes = self.boxes()?;
+        let at = slot_index(&boxes, id).map_err(|_| inconsistent_slots())?;
+        boxes.get_mut(at).ok_or_else(inconsistent_slots)?.1.keeper = receipt;
+        Ok(())
+    }
+
+    /// Only fully published boxes are re-held. A creator hands its own Finishing box over once.
     fn ensure_keeper(&self, keeping: &Keeping) -> Result<(), Refusal> {
-        let mut held = keeping
+        let mut keeper = keeping
             .keeper
             .lock()
             .map_err(|_| Refusal::Broken("the node's keeper lock is poisoned".to_owned()))?;
-        if held.alive() {
+        if keeper.alive() {
             return Ok(());
         }
-        // The old keeper is gone (that is why it is replaced); its stop event is shared by the state folder,
-        // so signalling it would stop the new keeper too. Just replace it.
-        *held = keeping.spawn()?;
-        // Re-duplicate every live box's job into the new keeper, recorded against it.
-        for (id, h) in self.boxes()?.iter() {
-            let value = held.hold(h.job_token())?;
-            keeper::write_held(
-                &keeping.state,
-                id.as_str(),
-                held.pid(),
-                held.created(),
-                value,
-            )
-            .map_err(|e| Refusal::os("recording a box's keeper handle", e))?;
+        *keeper = keeping.spawn()?;
+        for (id, slot) in self.boxes()?.iter_mut() {
+            if let SlotState::Ready(held) = &slot.state {
+                let value = keeper.hold(held.job_token())?;
+                let receipt = KeeperReceipt {
+                    pid: keeper.pid(),
+                    created: keeper.created(),
+                    value,
+                };
+                slot.keeper = KeeperHold::Held(receipt);
+                keeper::write_held(
+                    &keeping.state,
+                    id.as_str(),
+                    receipt.pid,
+                    receipt.created,
+                    value,
+                )
+                .map_err(|e| Refusal::os("recording a box's keeper handle", e))?;
+            }
         }
         Ok(())
     }
 
-    /// Gives the keeper's handle after making sure it is alive.
     fn keeping(&self) -> Result<Option<&Keeping>, Refusal> {
         let Some(keeping) = self.keeper.as_ref() else {
             return Ok(None);
@@ -278,42 +487,222 @@ impl Holding {
         Ok(Some(keeping))
     }
 
-    /// Closes box `id`'s job in the keeper and forgets its value (its delete or its removal by recovery):
-    /// after this the box's last handle is the node's, so kill-on-close ends it with the node.
+    fn keep(&self, id: &BoxId, held: &Held) -> Result<(), Refusal> {
+        let Some(keeping) = self.keeping()? else {
+            return Ok(());
+        };
+        let keeper = keeping
+            .keeper
+            .lock()
+            .map_err(|_| Refusal::Broken("the node's keeper lock is poisoned".to_owned()))?;
+        let receipt = match keeper::read_held(&keeping.state, id.as_str()) {
+            Some(old) if old.held_by(keeper.pid(), keeper.created()) => KeeperReceipt {
+                pid: old.keeper_pid,
+                created: old.keeper_created,
+                value: old.value,
+            },
+            _ => KeeperReceipt {
+                pid: keeper.pid(),
+                created: keeper.created(),
+                value: keeper.hold(held.job_token())?,
+            },
+        };
+        // Save the exact owned remote handle before the file write: an error cannot lose its cleanup.
+        self.keeper_receipt(id, KeeperHold::Held(receipt))?;
+        keeper::write_held(
+            &keeping.state,
+            id.as_str(),
+            receipt.pid,
+            receipt.created,
+            receipt.value,
+        )
+        .map_err(|e| Refusal::os("recording a box's keeper handle", e))
+    }
+
     fn drop_from_keeper(&self, id: &BoxId) -> Result<(), Refusal> {
-        if let Some(keeping) = self.keeping()?
-            && let Some(held) = keeper::read_held(&keeping.state, id.as_str())
-        {
+        let Some(keeping) = self.keeping()? else {
+            return Ok(());
+        };
+        let known = {
+            let boxes = self.boxes()?;
+            slot_index(&boxes, id)
+                .ok()
+                .and_then(|at| boxes.get(at))
+                .map(|(_, slot)| slot.keeper)
+        };
+        let receipt = match known {
+            Some(KeeperHold::Uncertain) => {
+                return Err(pending(
+                    "keeper close outcome is uncertain; resources remain held",
+                ));
+            }
+            Some(KeeperHold::Closed | KeeperHold::Unheld) => None,
+            Some(KeeperHold::Held(receipt)) => Some(receipt),
+            None => keeper::read_held(&keeping.state, id.as_str()).map(|old| KeeperReceipt {
+                pid: old.keeper_pid,
+                created: old.keeper_created,
+                value: old.value,
+            }),
+        };
+        if let Some(receipt) = receipt {
             let keeper = keeping
                 .keeper
                 .lock()
                 .map_err(|_| Refusal::Broken("the node's keeper lock is poisoned".to_owned()))?;
-            // A recorded value belongs only to the keeper process whose identity was recorded with it.
-            if held.held_by(keeper.pid(), keeper.created()) {
-                keeper.drop_held(held.value)?;
+            if receipt.pid == keeper.pid()
+                && receipt.created == keeper.created()
+                && let Err(error) = keeper.drop_held(receipt.value)
+            {
+                if known.is_some() {
+                    self.keeper_receipt(id, KeeperHold::Uncertain)?;
+                }
+                return Err(error);
             }
-            keeper::forget_held(&keeping.state, id.as_str());
+            if known.is_some() {
+                self.keeper_receipt(id, KeeperHold::Closed)?;
+            }
         }
-        Ok(())
+        match std::fs::remove_file(keeper::held_file(&keeping.state, id.as_str())) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(Refusal::os("removing a box's keeper handle record", e)),
+        }
     }
 
-    /// Removes box `id` and ends it: the runtime's delete and a run's thread take this one path.
+    /// Keep the slot through every external cleanup operation; only an actual successful removal
+    /// releases claims. Concurrent cancellation requests never remove a creator's slot underneath it.
     fn remove(&self, id: &BoxId) -> Result<(), Refusal> {
-        let b = self
-            .boxes()?
-            .remove(id)
-            .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
-        // Close the keeper's handle to this box's job first, so the node's TerminateJobObject and the
-        // dropped Arc leave nothing holding it.
-        self.drop_from_keeper(id)?;
-        // Ends the box; dropping the last Arc closes its job (kill-on-close) and, for an oci box, its
-        // container's last handle (terminate-on-close) as a backstop, so deleting a box a caller still
-        // holds through `list` is safe.
-        match b {
-            Held::Process(b) => b.delete(),
-            Held::Oci(b) => b.delete(),
+        let (held, marker) = {
+            let mut boxes = self.boxes()?;
+            let at = slot_index(&boxes, id).map_err(|_| Refusal::NoSuchBox(id.clone()))?;
+            let (_, slot) = boxes.get_mut(at).ok_or_else(inconsistent_slots)?;
+            let held = match &slot.state {
+                SlotState::Creating => {
+                    slot.state = SlotState::Cancelled;
+                    return Err(pending(
+                        "creation cancellation requested; cleanup is pending",
+                    ));
+                }
+                SlotState::Cancelled | SlotState::CancelFinishing(_) => {
+                    return Err(pending("creation cancellation is pending"));
+                }
+                SlotState::Finishing(held) => {
+                    slot.state = SlotState::CancelFinishing(held.clone());
+                    return Err(pending(
+                        "creation cancellation requested; keeper handoff is pending",
+                    ));
+                }
+                SlotState::Ready(held) | SlotState::CleanupPending(held) => Some(held.clone()),
+                SlotState::Uncertain => None,
+                SlotState::Removing(_) | SlotState::RemovingUncertain => {
+                    return Err(pending("physical cleanup is already in progress"));
+                }
+            };
+            let marker = slot.marker.as_deref().map(copy_path).transpose()?;
+            slot.state = match &held {
+                Some(held) => SlotState::Removing(held.clone()),
+                None => SlotState::RemovingUncertain,
+            };
+            (held, marker)
+        };
+        let result = (|| {
+            self.drop_from_keeper(id)?;
+            match &held {
+                Some(Held::Process(boxed)) => boxed.delete(),
+                Some(Held::Oci(boxed)) => boxed.delete(),
+                None => {
+                    let marker = marker.as_deref().ok_or_else(|| {
+                        pending("no durable native marker establishes the create outcome")
+                    })?;
+                    if marker.exists() {
+                        let record = oci::read_marker(marker)?;
+                        if !record.devices.is_empty() && record.system.as_ref() != Some(id) {
+                            return Err(pending(
+                                "native marker system identity disagrees; cleanup is uncertain",
+                            ));
+                        }
+                        oci::end(marker)
+                    } else {
+                        oci::require_absent(id)
+                    }
+                }
+            }
+        })();
+        let mut boxes = self.boxes()?;
+        let at = slot_index(&boxes, id).map_err(|_| inconsistent_slots())?;
+        let (_, slot) = boxes.get_mut(at).ok_or_else(inconsistent_slots)?;
+        if result.is_ok() {
+            if boxes.get(at).is_none() {
+                return Err(inconsistent_slots());
+            }
+            boxes.remove(at);
+        } else {
+            slot.state = match held {
+                Some(held) => SlotState::CleanupPending(held),
+                None => SlotState::Uncertain,
+            };
         }
+        result
     }
+
+    fn report(&self, catalog: &Catalog) -> Result<Vec<DeviceInfo>, Refusal> {
+        let boxes = self.boxes()?;
+        let count = boxes.iter().try_fold(0usize, |n, (_, slot)| {
+            n.checked_add(slot.devices.len())
+                .ok_or_else(|| allocation(hex_api::MAX_DEVICES))
+        })?;
+        if count > hex_api::MAX_DEVICES {
+            return Err(inconsistent_slots());
+        }
+        let mut holders = Vec::new();
+        holders
+            .try_reserve_exact(count)
+            .map_err(|_| allocation(count))?;
+        for (id, slot) in boxes.iter() {
+            if let Some(Held::Oci(boxed)) = slot.physical() {
+                let selected = boxed.device_bindings();
+                if selected.len() != slot.devices.len()
+                    || !selected
+                        .iter()
+                        .zip(&slot.devices)
+                        .all(|(binding, id)| binding.id == *id)
+                {
+                    return Err(inconsistent_slots());
+                }
+            }
+            holders.extend(slot.devices.iter().map(|device| (*device, id)));
+        }
+        holders.sort_unstable_by_key(|(device, _)| *device);
+        if holders
+            .windows(2)
+            .any(|pair| pair.first().map(|p| p.0) == pair.last().map(|p| p.0))
+        {
+            return Err(inconsistent_slots());
+        }
+        let mut report = Vec::new();
+        report
+            .try_reserve_exact(catalog.entries().len())
+            .map_err(|_| allocation(catalog.entries().len()))?;
+        for entry in catalog.entries() {
+            if matches!(entry.binding, Binding::Hcs { .. }) {
+                let holder = holders
+                    .binary_search_by_key(&entry.info.id, |(device, _)| *device)
+                    .ok()
+                    .and_then(|at| holders.get(at))
+                    .map(|(_, id)| *id);
+                report.push(entry.report(holder)?);
+            }
+        }
+        Ok(report)
+    }
+}
+
+fn copy_path(path: &Path) -> Result<PathBuf, Refusal> {
+    let mut copy = std::ffi::OsString::new();
+    copy.try_reserve_exact(path.as_os_str().len())
+        .map_err(|_| allocation(path.as_os_str().len()))?;
+    copy.push(path.as_os_str());
+    Ok(PathBuf::from(copy))
 }
 
 impl WinRuntime {
@@ -333,10 +722,11 @@ impl WinRuntime {
         let reclaim_failures = oci::reclaim(&scratch_root);
         let runtime = Self {
             processors: NonZeroU32::new(processors).unwrap_or(NonZeroU32::MIN),
+            catalog: Catalog::default(),
             scratch_root,
             launcher: None,
             holding: Arc::new(Holding {
-                boxes: Mutex::new(BTreeMap::new()),
+                boxes: Mutex::new(Vec::new()),
                 keeper: None,
             }),
             node: None,
@@ -372,6 +762,103 @@ impl WinRuntime {
         Ok(runtime)
     }
 
+    /// Loads the shared administrator catalog before starting a keeper or creating native state.
+    pub fn outliving_with_devices(
+        node: &str,
+        dir: &Path,
+        keeper: &[String],
+        path: &Path,
+    ) -> Result<Self, Refusal> {
+        let catalog = Catalog::open(path)?;
+        if catalog
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry.binding, Binding::Hcs { .. }))
+        {
+            std::fs::create_dir_all(dir.join("boxes"))
+                .map_err(|e| Refusal::os("making the native scratch root", e))?;
+        }
+        let mut runtime = Self::outliving(node, dir, keeper)?;
+        runtime.catalog = catalog;
+        Ok(runtime)
+    }
+
+    fn bindings(&self, spec: &BoxSpec) -> Result<Vec<hex_core::hcs::DeviceBinding>, Refusal> {
+        spec.check()?;
+        if matches!(spec.class, ClassSpec::Process) {
+            spec.check_no_devices("windows process")?;
+        }
+        let mut index: Vec<&crate::devices::Entry> = Vec::new();
+        index
+            .try_reserve_exact(self.catalog.entries().len())
+            .map_err(|_| allocation(self.catalog.entries().len()))?;
+        index.extend(self.catalog.entries());
+        index.sort_unstable_by_key(|entry| entry.info.id);
+        let mut bindings = Vec::new();
+        bindings
+            .try_reserve_exact(spec.devices.len())
+            .map_err(|_| allocation(spec.devices.len()))?;
+        for id in &spec.devices {
+            let at = index
+                .binary_search_by_key(id, |entry| entry.info.id)
+                .map_err(|_| Refusal::Invalid {
+                    what: "device attachment",
+                    why: "requested identity has no configured native binding".to_owned(),
+                })?;
+            let entry = index.get(at).ok_or_else(inconsistent_slots)?;
+            let Binding::Hcs { location } = &entry.binding else {
+                return Err(Refusal::Platform {
+                    what: "device attachment",
+                    platform: "windows OCI",
+                    why: "selected binding is not an exact HCS location".to_owned(),
+                });
+            };
+            bindings.push(hex_core::hcs::DeviceBinding {
+                id: *id,
+                location: copy_text(location)?,
+            });
+        }
+        Ok(bindings)
+    }
+
+    fn validate_bindings(
+        &self,
+        spec: &BoxSpec,
+        record: &hex_core::hcs::BoxRecord,
+    ) -> Result<(), Refusal> {
+        let configured = self.bindings(spec)?;
+        if record.devices != configured
+            || (!record.devices.is_empty() && record.system.as_ref() != Some(&spec.id))
+        {
+            return Err(Refusal::Invalid{what:"native device recovery",why:"recorded physical identity or exact location disagrees with the current configuration".to_owned()});
+        }
+        Ok(())
+    }
+
+    fn retain_recovery(
+        &self,
+        spec: &BoxSpec,
+        record: &hex_core::hcs::BoxRecord,
+    ) -> Result<(), Refusal> {
+        // Contradictory or absent native metadata cannot free either recorded or declared claims.
+        // The temporary union is bounded by the two existing u16-index lists, not a new admission cap.
+        let count = record
+            .devices
+            .len()
+            .checked_add(spec.devices.len())
+            .ok_or_else(|| allocation(hex_api::MAX_DEVICES))?;
+        let mut ids = Vec::new();
+        ids.try_reserve_exact(count)
+            .map_err(|_| allocation(count))?;
+        ids.extend(record.devices.iter().map(|binding| binding.id));
+        ids.extend_from_slice(&spec.devices);
+        ids.sort_unstable();
+        ids.dedup();
+        self.holding
+            .reserve(&spec.id, &ids, Some(self.marker(&spec.id)))?;
+        self.holding.uncertain(&spec.id)
+    }
+
     /// The pid of the keeper holding this node's boxes' jobs, where its boxes outlive it; a keeper found
     /// dead is replaced first (the node's own watch does this on its port; here, for a runtime driven in
     /// process, it is done when asked).
@@ -393,10 +880,28 @@ impl WinRuntime {
     /// record names a box [`WinRuntime::adopt`] takes back ([`oci::alive`]); `None` for a `process` box,
     /// which has no init.
     pub fn alive(&self, spec: &BoxSpec) -> Result<Option<bool>, Refusal> {
+        spec.check()?;
         match &spec.class {
-            ClassSpec::Process => Ok(None),
+            ClassSpec::Process => {
+                spec.check_no_devices("windows process")?;
+                Ok(None)
+            }
             ClassSpec::Oci(_) | ClassSpec::Bundle(_) => {
-                oci::alive(&self.marker(&spec.id)).map(Some)
+                let marker = self.marker(&spec.id);
+                if marker.exists() {
+                    let record = oci::read_marker(&marker)?;
+                    if let Err(error) = self.validate_bindings(spec, &record) {
+                        if slot_index(self.boxes()?.as_slice(), &spec.id).is_err() {
+                            self.retain_recovery(spec, &record)?;
+                        }
+                        return Err(error);
+                    }
+                } else if !spec.devices.is_empty() {
+                    return Err(pending(
+                        "device-bearing recovery has no native marker; absence is unproved",
+                    ));
+                }
+                oci::alive(&marker).map(Some)
             }
         }
     }
@@ -406,70 +911,64 @@ impl WinRuntime {
     /// where any of them is gone ([`OciBox::take_back`]), for recovery to end it. Refused for a runtime whose
     /// boxes don't outlive it.
     pub fn adopt(&self, spec: &BoxSpec) -> Result<(), Refusal> {
-        let Some(name) = self.job_name(&spec.id) else {
-            return Err(Refusal::Invalid {
-                what: "adopt",
-                why: format!(
-                    "box {}: this runtime's boxes end with it, so none outlives a node to take back",
-                    spec.id
-                ),
-            });
-        };
         spec.check()?;
-        let b = match &spec.class {
-            ClassSpec::Process => Held::Process(Arc::new(JobBox::take_back(
-                spec.id.clone(),
-                &spec.bounds,
-                self.processors,
-                &name,
-            )?)),
-            ClassSpec::Oci(_) | ClassSpec::Bundle(_) => {
-                Held::Oci(Arc::new(self.take_back_oci(spec, &name)?))
+        if matches!(spec.class, ClassSpec::Process) {
+            spec.check_no_devices("windows process")?;
+        }
+        let name = self
+            .job_name(&spec.id)
+            .ok_or_else(|| pending("this runtime has no outliving boxes to adopt"))?;
+        let marker = (!matches!(spec.class, ClassSpec::Process)).then(|| self.marker(&spec.id));
+        if let Some(marker) = marker.as_ref() {
+            let record = oci::read_marker(marker)?;
+            if let Err(error) = self.validate_bindings(spec, &record) {
+                self.retain_recovery(spec, &record)?;
+                return Err(error);
             }
+        }
+        self.holding.reserve(&spec.id, &spec.devices, marker)?;
+        let made = match &spec.class {
+            ClassSpec::Process => {
+                JobBox::take_back(spec.id.try_clone()?, &spec.bounds, self.processors, &name)
+                    .map(|b| Held::Process(Arc::new(b)))
+            }
+            _ => self
+                .take_back_oci(spec, &name)
+                .map(|b| Held::Oci(Arc::new(b))),
         };
-        // The current keeper must hold this box's job. Where a handle is recorded against this very keeper,
-        // it still holds it (the node that made the box and this one share the keeper), so nothing is done.
-        // Where none is recorded, or one is recorded against a keeper that isn't this one — a box taken back
-        // after node and keeper both went, its job outliving them (an `oci` box's; a `process` box's ends
-        // with them), so a fresh keeper holds nothing of it — the current keeper takes the job, recorded
-        // against it, so a later delete closes it in the keeper that has it.
-        if let Some(keeping) = self.keeping()? {
-            let keeper = keeping
-                .keeper
-                .lock()
-                .map_err(|_| Refusal::Broken("the node's keeper lock is poisoned".to_owned()))?;
-            let current = keeper::read_held(&keeping.state, spec.id.as_str())
-                .is_some_and(|h| h.held_by(keeper.pid(), keeper.created()));
-            if !current {
-                let value = keeper.hold(b.job_token())?;
-                keeper::write_held(
-                    &keeping.state,
-                    spec.id.as_str(),
-                    keeper.pid(),
-                    keeper.created(),
-                    value,
-                )
-                .map_err(|e| Refusal::os("recording a box's keeper handle", e))?;
-            }
-        }
-        let mut boxes = self.boxes()?;
-        if boxes.contains_key(&spec.id) {
-            return Err(Refusal::Exists(spec.id.clone()));
-        }
-        boxes.insert(spec.id.clone(), b);
-        Ok(())
+        self.finish_make(&spec.id, made).map(drop)
     }
 
     /// Ends what still runs of box `id` a node before this one made, for a box recovery removes: its job's
     /// members, and an `oci` box's container, scratch and record too ([`oci::end`]); one that left nothing
     /// has nothing to end. A runtime whose boxes end with it has none to end.
     pub fn end(&self, id: &BoxId) -> Result<(), Refusal> {
+        if slot_index(self.boxes()?.as_slice(), id).is_ok() {
+            return self.holding.remove(id);
+        }
         match self.job_name(id) {
             Some(name) => {
+                let marker = self.marker(id);
+                if marker.exists() {
+                    let record = oci::read_marker(&marker)?;
+                    if !record.devices.is_empty() {
+                        if record.system.as_ref() != Some(id) {
+                            return Err(pending(
+                                "native marker system identity disagrees; cleanup is uncertain",
+                            ));
+                        }
+                        let mut devices = Vec::new();
+                        devices
+                            .try_reserve_exact(record.devices.len())
+                            .map_err(|_| allocation(record.devices.len()))?;
+                        devices.extend(record.devices.iter().map(|binding| binding.id));
+                        self.holding.reserve(id, &devices, Some(marker))?;
+                        self.holding.uncertain(id)?;
+                        return self.holding.remove(id);
+                    }
+                }
                 JobBox::end_named(&name)?;
                 oci::end(&self.marker(id))?;
-                // Close the keeper's handle too, so nothing holds the ended job; idempotent (a second end
-                // finds no recorded value).
                 self.drop_from_keeper(id)
             }
             None => Ok(()),
@@ -546,12 +1045,8 @@ impl WinRuntime {
         Self::with(processors, default_scratch_root())
     }
 
-    fn boxes(&self) -> Result<std::sync::MutexGuard<'_, BTreeMap<BoxId, Held>>, Refusal> {
+    fn boxes(&self) -> Result<std::sync::MutexGuard<'_, Vec<(BoxId, Slot)>>, Refusal> {
         self.holding.boxes()
-    }
-
-    fn keeping(&self) -> Result<Option<&Keeping>, Refusal> {
-        self.holding.keeping()
     }
 
     fn drop_from_keeper(&self, id: &BoxId) -> Result<(), Refusal> {
@@ -559,10 +1054,13 @@ impl WinRuntime {
     }
 
     fn get(&self, id: &BoxId) -> Result<Held, Refusal> {
-        self.boxes()?
-            .get(id)
-            .cloned()
-            .ok_or_else(|| Refusal::NoSuchBox(id.clone()))
+        let boxes = self.boxes()?;
+        let at = slot_index(&boxes, id).map_err(|_| Refusal::NoSuchBox(id.clone()))?;
+        let (_, slot) = boxes.get(at).ok_or_else(inconsistent_slots)?;
+        match &slot.state {
+            SlotState::Ready(held) => Ok(held.clone()),
+            _ => Err(pending("box is not ready; its resources remain held")),
+        }
     }
 
     fn info(&self, b: &Held) -> Result<BoxInfo, Refusal> {
@@ -588,7 +1086,7 @@ impl WinRuntime {
 
     /// The container `oci` box `spec` asks for, refused by name where a feature it needs is off.
     fn container(&self, spec: &BoxSpec) -> Result<hex_core::hcs::Container, Refusal> {
-        Ok(match &spec.class {
+        let mut container = match &spec.class {
             ClassSpec::Oci(o) => {
                 self.refused_without(WindowsFeature::Containers)?;
                 hex_core::hcs::from_spec(o, &oci::scratch_folder(&self.scratch_root, &spec.id)?)?
@@ -606,7 +1104,27 @@ impl WinRuntime {
                     "a process spec reached the oci class".to_owned(),
                 ));
             }
-        })
+        };
+        let bindings = self.bindings(spec)?;
+        if !bindings.is_empty() && matches!(container.scratch, hex_core::hcs::Scratch::Volume(_)) {
+            return Err(Refusal::Platform {
+                what: "device attachment",
+                platform: "windows OCI",
+                why: "assigned devices require an owned scratch-folder marker".to_owned(),
+            });
+        }
+        container
+            .devices
+            .try_reserve_exact(bindings.len())
+            .map_err(|_| allocation(bindings.len()))?;
+        for binding in bindings {
+            container
+                .devices
+                .push(hex_core::hcs::AssignedDevice::LocationPath(
+                    binding.location,
+                ));
+        }
+        Ok(container)
     }
 
     /// The folder holding the `hex` every `oci` box maps read-only as its launcher.
@@ -628,26 +1146,74 @@ impl WinRuntime {
     /// The `oci` box `spec` asks for, made. Where this node's boxes outlive it, its job is the one named for
     /// the node and the box (the keeper holds it too: [`Runtime::create`]) and its container outlives the
     /// node with it; otherwise both end with the node.
-    fn create_oci(&self, spec: &BoxSpec) -> Result<OciBox, Refusal> {
-        let container = self.container(spec)?;
+    fn create_oci(
+        &self,
+        spec: &BoxSpec,
+        container: &hex_core::hcs::Container,
+    ) -> Result<OciBox, Refusal> {
         let launcher = self.launcher()?;
+        let bindings = self.bindings(spec)?;
+        let physical_id = spec.id.try_clone()?;
         let (job, lifetime) = match self.job_name(&spec.id) {
             Some(name) => (
-                JobBox::create_named(spec.id.clone(), &spec.bounds, self.processors, &name)?,
+                JobBox::create_named(physical_id, &spec.bounds, self.processors, &name)?,
                 hex_core::hcs::Lifetime::Outlives,
             ),
             None => (
-                JobBox::create(spec.id.clone(), &spec.bounds, self.processors)?,
+                JobBox::create(physical_id, &spec.bounds, self.processors)?,
                 hex_core::hcs::Lifetime::EndsWithNode,
             ),
         };
-        OciBox::create(
+        OciBox::create_assigned(
             job,
-            &container,
+            container,
             &launcher,
             Some(self.marker(&spec.id)),
             lifetime,
+            bindings,
         )
+    }
+
+    fn finish_make(&self, id: &BoxId, made: Result<Held, Refusal>) -> Result<BoxInfo, Refusal> {
+        let held = match made {
+            Ok(held) => held,
+            Err(error) => {
+                self.holding.uncertain(id)?;
+                return match self.holding.remove(id) {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(Refusal::Broken(format!(
+                        "native creation failed ({error}); cleanup remains uncertain ({cleanup})"
+                    ))),
+                };
+            }
+        };
+        if self.holding.made(id, held.clone())? {
+            self.holding.remove(id)?;
+            return Err(pending(
+                "creation was cancelled and its physical box was removed",
+            ));
+        }
+        let result = self
+            .info(&held)
+            .and_then(|info| self.holding.keep(id, &held).map(|()| info));
+        match result {
+            Ok(info) if self.holding.ready(id)? => Ok(info),
+            Ok(_) => {
+                self.holding.remove(id)?;
+                Err(pending(
+                    "creation was cancelled and its physical box was removed",
+                ))
+            }
+            Err(error) => {
+                self.holding.uncertain(id)?;
+                match self.holding.remove(id) {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(Refusal::Broken(format!(
+                        "native publication failed ({error}); cleanup remains uncertain ({cleanup})"
+                    ))),
+                }
+            }
+        }
     }
 
     /// Takes back `oci` box `spec` a node before this one made on the same name: its record from its
@@ -656,8 +1222,9 @@ impl WinRuntime {
         let container = self.container(spec)?;
         let marker = self.marker(&spec.id);
         let record = oci::read_marker(&marker)?;
+        self.validate_bindings(spec, &record)?;
         let job = JobBox::take_back(spec.id.clone(), &spec.bounds, self.processors, name)?;
-        OciBox::take_back(job, &container, marker, record)
+        OciBox::take_back_assigned(job, &container, marker, record, self.bindings(spec)?)
     }
 }
 
@@ -668,6 +1235,53 @@ impl Default for WinRuntime {
 }
 
 impl Runtime for WinRuntime {
+    fn capacity(&self, class: Class) -> Result<Option<Capacity>, Refusal> {
+        if !self
+            .catalog
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry.binding, Binding::Hcs { .. }))
+        {
+            return Ok(None);
+        }
+        let (memory, free_memory) =
+            sys::memory().map_err(|e| Refusal::os("reading native memory capacity", e))?;
+        let (disk, free_disk) = sys::disk_space(&self.scratch_root)
+            .map_err(|e| Refusal::os("reading native disk capacity", e))?;
+        let cpu = u64::from(self.processors.get())
+            .checked_mul(1000)
+            .ok_or_else(|| allocation(usize::MAX))?;
+        let identity = self
+            .node
+            .as_deref()
+            .or_else(|| self.scratch_root.to_str())
+            .ok_or_else(|| pending("native pool identity is not Unicode"))?;
+        let mut id = copy_text("windows:")?;
+        id.try_reserve_exact(identity.len())
+            .map_err(|_| allocation(identity.len()))?;
+        id.push_str(identity);
+        let report = Capacity {
+            id,
+            total: CapacityResources {
+                cpu_milli: cpu,
+                mem_bytes: memory,
+                disk_bytes: disk,
+            },
+            free: CapacityResources {
+                cpu_milli: cpu,
+                mem_bytes: free_memory,
+                disk_bytes: free_disk,
+            },
+            devices: if class == Class::Oci {
+                self.holding.report(&self.catalog)?
+            } else {
+                Vec::new()
+            },
+        };
+        report.check()?;
+        Ok(Some(report))
+    }
+
     fn classes(&self) -> Vec<Class> {
         if oci::available().is_ok() {
             vec![Class::Process, Class::Oci]
@@ -677,61 +1291,43 @@ impl Runtime for WinRuntime {
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
-        spec.check_no_devices("windows")?;
-        if self.boxes()?.contains_key(&spec.id) {
+        spec.check()?;
+        if matches!(spec.class, ClassSpec::Process) {
+            spec.check_no_devices("windows process")?;
+        }
+        // Refuse invalid/missing/native-incompatible bindings before taking a slot or creating jobs.
+        self.bindings(&spec)?;
+        let container = if matches!(spec.class, ClassSpec::Process) {
+            None
+        } else {
+            Some(self.container(&spec)?)
+        };
+        let marker = (!matches!(spec.class, ClassSpec::Process)).then(|| self.marker(&spec.id));
+        if marker.as_ref().is_some_and(|path| path.exists()) {
             return Err(Refusal::Exists(spec.id));
         }
-        let held = match spec.class {
-            ClassSpec::Process => Held::Process(Arc::new(match self.job_name(&spec.id) {
+        let physical_id = spec.id.try_clone()?;
+        self.holding.reserve(&spec.id, &spec.devices, marker)?;
+        let held = match &spec.class {
+            ClassSpec::Process => match self.job_name(&spec.id) {
                 Some(name) => {
-                    JobBox::create_named(spec.id.clone(), &spec.bounds, self.processors, &name)?
+                    JobBox::create_named(physical_id, &spec.bounds, self.processors, &name)
                 }
-                None => JobBox::create(spec.id.clone(), &spec.bounds, self.processors)?,
-            })),
-            ClassSpec::Oci(_) | ClassSpec::Bundle(_) => {
-                Held::Oci(Arc::new(self.create_oci(&spec)?))
+                None => JobBox::create(physical_id, &spec.bounds, self.processors),
             }
+            .map(|boxed| Held::Process(Arc::new(boxed))),
+            _ => match container.as_ref() {
+                Some(container) => self
+                    .create_oci(&spec, container)
+                    .map(|boxed| Held::Oci(Arc::new(boxed))),
+                None => Err(inconsistent_slots()),
+            },
         };
-        let info = self.info(&held)?;
-        // Hand the box's job to the keeper before the box is visible, holding no box-map lock across it: a
-        // keeper found dead is replaced, which reads the box map ([`WinRuntime::ensure_keeper`]), so doing
-        // this under the box lock would deadlock the runtime against itself (std's `Mutex` isn't reentrant).
-        if let Some(keeping) = self.keeping()? {
-            let keeper = keeping
-                .keeper
-                .lock()
-                .map_err(|_| Refusal::Broken("the node's keeper lock is poisoned".to_owned()))?;
-            let value = keeper.hold(held.job_token())?;
-            keeper::write_held(
-                &keeping.state,
-                spec.id.as_str(),
-                keeper.pid(),
-                keeper.created(),
-                value,
-            )
-            .map_err(|e| Refusal::os("recording a box's keeper handle", e))?;
+        if held.is_err() && matches!(spec.class, ClassSpec::Process) {
+            self.holding.unmade(&spec.id)?;
+            return held.and_then(|boxed| self.info(&boxed));
         }
-        // Insert under the box lock alone. A create that lost a race to the same id undoes its keeper hold
-        // and its box once the lock is released, so neither is done under it.
-        let dup = {
-            let mut boxes = self.boxes()?;
-            match boxes.entry(spec.id.clone()) {
-                std::collections::btree_map::Entry::Vacant(slot) => {
-                    slot.insert(held.clone());
-                    false
-                }
-                std::collections::btree_map::Entry::Occupied(_) => true,
-            }
-        };
-        if dup {
-            // Made beside another create of the same id: this one is ended, the first kept.
-            self.drop_from_keeper(&spec.id)?;
-            if let Held::Oci(b) = &held {
-                let _ = b.delete();
-            }
-            return Err(Refusal::Exists(spec.id));
-        }
-        Ok(info)
+        self.finish_make(&spec.id, held)
     }
 
     fn start(&self, id: &BoxId) -> Result<(), Refusal> {
@@ -829,8 +1425,20 @@ impl Runtime for WinRuntime {
     }
 
     fn list(&self) -> Result<Vec<BoxInfo>, Refusal> {
-        let boxes: Vec<Held> = self.boxes()?.values().cloned().collect();
-        boxes.iter().map(|b| self.info(b)).collect()
+        let held = {
+            let boxes = self.boxes()?;
+            let mut held = Vec::new();
+            held.try_reserve_exact(boxes.len())
+                .map_err(|_| allocation(boxes.len()))?;
+            for (_, slot) in boxes.iter() {
+                match &slot.state {
+                    SlotState::Ready(boxed) => held.push(boxed.clone()),
+                    _ => return Err(pending("native boxes have pending lifecycle work")),
+                }
+            }
+            held
+        };
+        held.iter().map(|boxed| self.info(boxed)).collect()
     }
 
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
@@ -915,6 +1523,264 @@ fn handle(given: Option<OwnedHandle>) -> Result<OwnedHandle, Refusal> {
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    fn device_runtime(scratch: &Path) -> WinRuntime {
+        let catalog=Catalog::parse(b"hex-devices-1\ngpu\t256\tfixture-a\t4096\thcs\tPCIROOT(0)#PCI(0100)\t\ngpu\t512\tfixture-b\t8192\thcs\tPCIROOT(0)#PCI(0200)\t\ngpu\t768\tfixture-c\t4096\tcdi\t/private/fixture.json\tfixture.test/gpu=c\n").unwrap();
+        WinRuntime {
+            processors: NonZeroU32::MIN,
+            catalog,
+            scratch_root: scratch.to_path_buf(),
+            launcher: None,
+            holding: Arc::new(Holding {
+                boxes: Mutex::new(Vec::new()),
+                keeper: None,
+            }),
+            node: None,
+            features_off: OnceLock::from(BTreeSet::new()),
+            feature_reads: std::sync::atomic::AtomicU32::new(0),
+            reclaim_failures: Vec::new(),
+        }
+    }
+
+    fn device_spec(name: &str, key: u64) -> BoxSpec {
+        BoxSpec {
+            id: BoxId::new(name).unwrap(),
+            bounds: hex_api::Bounds::default(),
+            owner: None,
+            class: ClassSpec::Oci(Box::new(hex_api::OciSpec {
+                rootfs: Rootfs::Layers(vec![PathBuf::from(r"C:\fixture\base")]),
+                init: Program::of(&["cmd.exe", "/c", "exit", "0"]),
+                mounts: Vec::new(),
+                hostname: None,
+                network: hex_api::Network::Private,
+                hosts: Vec::new(),
+            })),
+            devices: vec![DeviceId {
+                kind: hex_api::DeviceKind::Gpu,
+                key,
+            }],
+        }
+    }
+
+    /// AC-T7.4.1: exercise the exact container builder used by native create, without HCS or WMI.
+    #[test]
+    fn device_selected_binding_reaches_the_existing_hcs_document_with_schema22() {
+        let scratch = tempfile::tempdir().unwrap();
+        let rt = device_runtime(scratch.path());
+        let spec = device_spec("selected", 512);
+        let container = rt.container(&spec).unwrap();
+        assert_eq!(
+            container.devices,
+            vec![hex_core::hcs::AssignedDevice::LocationPath(
+                "PCIROOT(0)#PCI(0200)".to_owned()
+            )]
+        );
+        let storage = hex_core::hcs::Storage {
+            volume: "fixture-volume".to_owned(),
+            layers: Vec::new(),
+        };
+        let document = hex_core::hcs::document(
+            &container,
+            &storage,
+            r"C:\fixture\launcher",
+            hex_core::hcs::Lifetime::Outlives,
+        );
+        assert_eq!(
+            document["SchemaVersion"],
+            serde_json::json!({"Major":2,"Minor":2})
+        );
+        assert_eq!(
+            document["Container"]["AssignedDevices"],
+            serde_json::json!([{"Type":"DeviceInstance","LocationPath":"PCIROOT(0)#PCI(0200)"}])
+        );
+        assert!(!document.to_string().contains("PCI(0100)"));
+        let mut legacy = spec;
+        legacy.devices.clear();
+        let document = hex_core::hcs::document(
+            &rt.container(&legacy).unwrap(),
+            &storage,
+            r"C:\fixture\launcher",
+            hex_core::hcs::Lifetime::Outlives,
+        );
+        assert_eq!(
+            document["SchemaVersion"],
+            serde_json::json!({"Major":2,"Minor":1})
+        );
+        assert!(document["Container"].get("AssignedDevices").is_none());
+        assert_eq!(rt.feature_reads.load(Ordering::SeqCst), 0);
+    }
+
+    /// AC-T7.4.1: unsupported and missing bindings refuse before any native job or pending slot.
+    #[test]
+    fn device_missing_cdi_and_process_requests_refuse_before_native_creation() {
+        let scratch = tempfile::tempdir().unwrap();
+        let rt = device_runtime(scratch.path());
+        assert!(matches!(
+            rt.create(device_spec("unknown", 1024)),
+            Err(Refusal::Invalid {
+                what: "device attachment",
+                ..
+            })
+        ));
+        assert!(matches!(
+            rt.create(device_spec("cdi", 768)),
+            Err(Refusal::Platform {
+                what: "device attachment",
+                ..
+            })
+        ));
+        let mut process = device_spec("process", 256);
+        process.class = ClassSpec::Process;
+        assert!(matches!(
+            rt.create(process),
+            Err(Refusal::Platform {
+                what: "devices",
+                platform: "windows process",
+                ..
+            })
+        ));
+        assert!(rt.boxes().unwrap().is_empty());
+        assert_eq!(rt.feature_reads.load(Ordering::SeqCst), 0);
+    }
+
+    /// AC-T7.4.1: reservations/cancel/unknown cleanup retain the same ID; a sibling remains independent.
+    #[test]
+    fn device_pending_cancel_and_unknown_cleanup_never_publish_free_capacity() {
+        let scratch = tempfile::tempdir().unwrap();
+        let rt = device_runtime(scratch.path());
+        let first = device_spec("first", 256);
+        let sibling = device_spec("sibling", 512);
+        rt.holding.reserve(&first.id, &first.devices, None).unwrap();
+        assert!(matches!(
+            rt.holding.reserve(&first.id, &first.devices, None),
+            Err(Refusal::Exists(_))
+        ));
+        assert!(
+            rt.holding
+                .reserve(&BoxId::new("overlap").unwrap(), &first.devices, None)
+                .is_err()
+        );
+        rt.holding
+            .reserve(&sibling.id, &sibling.devices, None)
+            .unwrap();
+        assert!(matches!(
+            rt.delete(&first.id),
+            Err(Refusal::Invalid {
+                what: "native box lifecycle",
+                ..
+            })
+        ));
+        assert!(!matches!(rt.inspect(&first.id), Err(Refusal::NoSuchBox(_))));
+        rt.holding.uncertain(&first.id).unwrap();
+        assert!(rt.delete(&first.id).is_err()); // No marker/absence witness: cannot release it.
+        let report = rt.holding.report(&rt.catalog).unwrap();
+        assert_eq!(report[0].holder, Some(first.id.clone()));
+        assert_eq!(report[1].holder, Some(sibling.id));
+        assert_eq!(rt.boxes().unwrap().len(), 2);
+        assert!(
+            rt.holding
+                .reserve(&BoxId::new("still-overlap").unwrap(), &first.devices, None)
+                .is_err()
+        );
+    }
+
+    /// T-T7.1.2: changed exact mapping is refused before native adoption, with durable bytes intact.
+    #[test]
+    fn device_recovery_refuses_changed_or_missing_mapping_without_rewriting_the_marker() {
+        let scratch = tempfile::tempdir().unwrap();
+        let mut rt = device_runtime(scratch.path());
+        rt.node = Some("owned-fixture".to_owned());
+        let spec = device_spec("recorded", 256);
+        let mut record = hex_core::hcs::BoxRecord {
+            folder: scratch.path().to_str().unwrap().to_owned(),
+            made: Vec::new(),
+            outlives: true,
+            system: Some(spec.id.clone()),
+            started: false,
+            init: None,
+            devices: rt.bindings(&spec).unwrap(),
+        };
+        assert_eq!(rt.validate_bindings(&spec, &record), Ok(())); // Matching positive data control.
+        record.devices[0].location = "synthetic-private-old-location".to_owned();
+        let bytes = hex_core::hcs::write_record(&record).unwrap();
+        let marker = rt.marker(&spec.id);
+        std::fs::write(&marker, &bytes).unwrap();
+        let error = rt.adopt(&spec).unwrap_err();
+        assert!(matches!(
+            error,
+            Refusal::Invalid {
+                what: "native device recovery",
+                ..
+            }
+        ));
+        assert!(!error.to_string().contains("synthetic-private"));
+        assert_eq!(std::fs::read(&marker).unwrap(), bytes);
+        assert_eq!(
+            rt.holding.report(&rt.catalog).unwrap()[0].holder,
+            Some(spec.id.clone())
+        );
+        assert!(!matches!(rt.inspect(&spec.id), Err(Refusal::NoSuchBox(_))));
+        let mut missing = device_spec("missing", 1024);
+        missing.id = spec.id.clone();
+        assert!(rt.validate_bindings(&missing, &record).is_err());
+        assert_eq!(std::fs::read(&marker).unwrap(), bytes);
+        let other_scratch = tempfile::tempdir().unwrap();
+        let mut missing_metadata = device_runtime(other_scratch.path());
+        missing_metadata.node = Some("owned-missing-metadata".to_owned());
+        let mut old_record = record;
+        old_record.devices.clear();
+        let old_bytes = hex_core::hcs::write_record(&old_record).unwrap();
+        let old_marker = missing_metadata.marker(&spec.id);
+        std::fs::write(&old_marker, &old_bytes).unwrap();
+        assert!(missing_metadata.adopt(&spec).is_err());
+        assert_eq!(
+            missing_metadata
+                .holding
+                .report(&missing_metadata.catalog)
+                .unwrap()[0]
+                .holder,
+            Some(spec.id)
+        );
+        assert_eq!(std::fs::read(old_marker).unwrap(), old_bytes);
+        assert_eq!(rt.feature_reads.load(Ordering::SeqCst), 0);
+    }
+
+    /// AC-T7.4.1: keeper-close uncertainty is retained as ownership, without repeating a handle close.
+    #[test]
+    fn device_keeper_uncertainty_and_removal_state_still_report_the_holder() {
+        let scratch = tempfile::tempdir().unwrap();
+        let rt = device_runtime(scratch.path());
+        let spec = device_spec("keeper-uncertain", 256);
+        rt.holding.reserve(&spec.id, &spec.devices, None).unwrap();
+        rt.holding.uncertain(&spec.id).unwrap();
+        rt.holding
+            .keeper_receipt(&spec.id, KeeperHold::Uncertain)
+            .unwrap();
+        assert_eq!(
+            rt.holding.report(&rt.catalog).unwrap()[0].holder,
+            Some(spec.id.clone())
+        );
+        assert!(!matches!(rt.inspect(&spec.id), Err(Refusal::NoSuchBox(_))));
+        assert!(
+            rt.holding
+                .reserve(&BoxId::new("contender").unwrap(), &spec.devices, None)
+                .is_err()
+        );
+    }
+
+    /// Ordinary Windows job smoke only: empty claims still create/delete through the same holding table.
+    #[test]
+    fn device_empty_claims_keep_ordinary_native_job_create_and_delete_working() {
+        let scratch = tempfile::tempdir().unwrap();
+        let rt = device_runtime(scratch.path());
+        let spec = process_box("owned-empty-device-smoke");
+        let info = rt.create(spec.clone()).unwrap();
+        assert_eq!(info.state, BoxState::Empty);
+        assert_eq!(rt.list().unwrap().len(), 1);
+        rt.delete(&spec.id).unwrap();
+        assert!(rt.list().unwrap().is_empty());
+        assert!(matches!(rt.inspect(&spec.id), Err(Refusal::NoSuchBox(_))));
+    }
 
     /// HEX-INST-9 (native plan step 6): the installer's features are read when the runtime is made, so
     /// a box's create doesn't wait on PowerShell's query. Do: make a runtime, then route a Linux image's
