@@ -267,6 +267,8 @@ fn oracle_of(fx: &dyn Fixture) -> Result<SimFixture, String> {
         ClassSpec::Process => SimFixture::Process,
         ClassSpec::Bundle(_) => SimFixture::Bundle,
         ClassSpec::Oci(_) => SimFixture::Spec,
+        ClassSpec::Firecracker(_) => SimFixture::Firecracker,
+        ClassSpec::Shards(_) => SimFixture::Shards,
     })
 }
 
@@ -399,7 +401,7 @@ impl Play<'_> {
                 let spec = self.fx.spec(id.clone(), bound.bounds());
                 let class = spec.class.class();
                 done(rt.create(spec).and_then(|_| {
-                    if class == Class::Oci {
+                    if class != Class::Process {
                         rt.start(&id)
                     } else {
                         Ok(())
@@ -566,7 +568,13 @@ mod tests {
     /// HEX-DIFF-1..6: the simulator agrees with itself for each class and each way to make an oci box.
     #[test]
     fn the_simulator_passes_the_differential_suite() {
-        for fx in [SimFixture::Process, SimFixture::Bundle, SimFixture::Spec] {
+        for fx in [
+            SimFixture::Process,
+            SimFixture::Bundle,
+            SimFixture::Spec,
+            SimFixture::Firecracker,
+            SimFixture::Shards,
+        ] {
             let failures = run(&SimRuntime::new(), &fx);
             assert!(failures.is_empty(), "{fx:?}: {failures:#?}");
         }

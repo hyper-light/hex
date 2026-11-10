@@ -325,7 +325,7 @@ fn ensure(ok: bool, why: impl FnOnce() -> String) -> Result<(), String> {
     if ok { Ok(()) } else { Err(why()) }
 }
 
-/// A fresh box of the fixture's class, started when it is an `oci` box.
+/// A fresh box of the fixture's class, starting every class whose workload has an init.
 fn made(rt: &dyn Runtime, fx: &dyn Fixture, name: &str, bounds: Bounds) -> Result<BoxId, String> {
     let id = id(name)?;
     // A box left by an earlier run of the suite is removed first; absent is the usual case.
@@ -333,7 +333,7 @@ fn made(rt: &dyn Runtime, fx: &dyn Fixture, name: &str, bounds: Bounds) -> Resul
     let spec = fx.spec(id.clone(), bounds);
     let class = spec.class.class();
     rt.create(spec).map_err(|e| format!("create: {e}"))?;
-    if class == Class::Oci {
+    if class != Class::Process {
         rt.start(&id).map_err(|e| format!("start: {e}"))?;
     }
     Ok(id)
@@ -863,12 +863,17 @@ fn init_killed(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
 type Break = fn(&mut OciSpec);
 
 /// HEX-RT-13: each spec breaks one value no runtime can render; create refuses it before it makes
-/// anything, naming the field (CLAUDE.md §3). Runtimes without the `oci` class have nothing to check.
+/// anything, naming the field (CLAUDE.md §3). Use the fixture's backend so a VM-only
+/// endpoint cannot pass by skipping structured-workload validation.
 fn unrenderable(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
-    if !rt.classes().contains(&Class::Oci) {
-        return Ok(());
-    }
     let id = id("unrenderable")?;
+    let class = fx.spec(id.clone(), Bounds::default()).class.class();
+    let make: fn(Box<OciSpec>) -> ClassSpec = match class {
+        Class::Process if !rt.classes().contains(&Class::Oci) => return Ok(()),
+        Class::Process | Class::Oci => ClassSpec::Oci,
+        Class::Firecracker => ClassSpec::Firecracker,
+        Class::Shards => ClassSpec::Shards,
+    };
     let _ = rt.delete(&id);
     let base = OciSpec {
         rootfs: Rootfs::Dir("/hex-conformance/rootfs".into()),
@@ -904,7 +909,7 @@ fn unrenderable(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
             devices: Vec::new(),
             id: id.clone(),
             bounds: Bounds::default(),
-            class: ClassSpec::Oci(Box::new(spec)),
+            class: make(Box::new(spec)),
             owner: None,
         });
         ensure(
@@ -950,7 +955,7 @@ fn owned(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
         let class = spec.class.class();
         rt.create(spec)
             .map_err(|e| format!("create of the {round} owned box: {e}"))?;
-        if class == Class::Oci {
+        if class != Class::Process {
             rt.start(&id)
                 .map_err(|e| format!("start of the {round} owned box: {e}"))?;
         }
@@ -989,8 +994,8 @@ fn run_removes(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     let _ = rt.delete(&id);
     let spec = fx.spec(id.clone(), Bounds::default());
     let gone = Err(Refusal::NoSuchBox(id.clone()));
-    let oci = spec.class.class() == Class::Oci;
-    if oci {
+    let has_init = spec.class.class() != Class::Process;
+    if has_init {
         let got = rt.run(spec, fx.program(&Act::Say("no")), Stdio::null());
         let refused = matches!(&got, Err(Refusal::Invalid { what: "run", .. }));
         ensure(refused, || {
