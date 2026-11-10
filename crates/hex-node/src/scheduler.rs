@@ -189,6 +189,22 @@ struct PeerLane {
 }
 
 fn run_peer(lane: PeerLane, receive: Receiver<Queued>) {
+    run_peer_with(
+        lane,
+        receive,
+        tunnel::Connection::open,
+        tunnel::Connection::call,
+    )
+}
+
+// The factory/call seam keeps the production worker and its retry transitions under deterministic
+// publication-gate tests without opening SSH or replacing transport policy.
+fn run_peer_with<C>(
+    lane: PeerLane,
+    receive: Receiver<Queued>,
+    mut open: impl FnMut(&Peer, &Arc<Stopping>) -> Result<C, Refusal>,
+    mut call: impl FnMut(&mut C, dto::Command) -> Result<Result<dto::Reply, Refusal>, Refusal>,
+) {
     let PeerLane {
         peer,
         id,
@@ -211,7 +227,7 @@ fn run_peer(lane: PeerLane, receive: Receiver<Queued>) {
             let began = std::time::Instant::now();
             let fresh = tunnel.is_none();
             if fresh {
-                match tunnel::Connection::open(&peer, &stopping) {
+                match open(&peer, &stopping) {
                     Ok(connection) => tunnel = Some(connection),
                     Err(why) => {
                         report(NodeId(peer.node), &why.to_string());
@@ -227,10 +243,13 @@ fn run_peer(lane: PeerLane, receive: Receiver<Queued>) {
                 return;
             };
             if fresh || queued.envelope.is_none() {
-                match connection.call(dto::Command::Describe {
-                    from: id.0,
-                    cluster: realm.clone(),
-                }) {
+                match call(
+                    connection,
+                    dto::Command::Describe {
+                        from: id.0,
+                        cluster: realm.clone(),
+                    },
+                ) {
                     Ok(Ok(reply)) => {
                         if let Some(offer) = reply.offer {
                             loop {
@@ -323,7 +342,7 @@ fn run_peer(lane: PeerLane, receive: Receiver<Queued>) {
             let Some(connection) = tunnel.as_mut() else {
                 return;
             };
-            match connection.call(dto::Command::Hear { from: id.0, packet }) {
+            match call(connection, dto::Command::Hear { from: id.0, packet }) {
                 Ok(Ok(_)) => break,
                 Ok(Err(Refusal::Exhausted {
                     what: "scheduler command publication",
