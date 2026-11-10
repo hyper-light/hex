@@ -44,6 +44,7 @@ fn four_recorded_repositories_on_the_largest_quarter_cluster() {
         );
     }
     day.nodes = vec![NodeSpec {
+        runtime_pools: Vec::new(),
         id: NodeId(0),
         capacity: node,
         background_milli: 0,

@@ -276,6 +276,7 @@ impl Facts {
             });
         }
         let node = NodeSpec {
+            runtime_pools: Vec::new(),
             id,
             capacity: Resources {
                 cpu_milli: u64::from(self.cpu.threads).saturating_mul(crate::lb::CPU),

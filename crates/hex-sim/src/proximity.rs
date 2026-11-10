@@ -193,6 +193,7 @@ impl Study {
         let mut nodes = Vec::with_capacity(wan.len());
         for (at, row) in recorded.nodes.iter().enumerate() {
             nodes.push(NodeSpec {
+                runtime_pools: Vec::new(),
                 id: node_id(at)?,
                 ..row.clone()
             });

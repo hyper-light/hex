@@ -284,6 +284,12 @@ pub fn matches(d: &Device, ask: &Ask) -> bool {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimePool {
+    pub classes: Classes,
+    pub capacity: Resources,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeSpec {
     pub id: NodeId,
@@ -297,6 +303,10 @@ pub struct NodeSpec {
     pub virt: Virt,
     /// What boxes may be given whole; its GPUs are [`Resources::gpus`] of its capacity.
     pub devices: Vec<Device>,
+    /// Additional capacity of a shared runtime (e.g. one fixed guest). Host capacity still applies.
+    /// Missing pools retain the host-backed model used by earlier records/configuration.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_pools: Vec<RuntimePool>,
 }
 
 impl NodeSpec {
@@ -314,6 +324,7 @@ impl NodeSpec {
                 ..Virt::default()
             },
             devices: unnamed_gpus(capacity.gpus),
+            runtime_pools: Vec::new(),
         }
     }
 
@@ -337,6 +348,7 @@ pub fn unnamed_gpus(n: u32) -> Vec<Device> {
 /// What runs a workload. Hex places three: OCI containers, Firecracker microVMs and Shards
 /// microVMs (Ada, 2026-11-06), each only on a node that can run it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[repr(usize)]
 pub enum Class {
     #[default]
     Oci,
@@ -345,6 +357,8 @@ pub enum Class {
 }
 
 impl Class {
+    pub const COUNT: usize = Self::Shards as usize + 1;
+    pub const ALL: [Self; Self::COUNT] = [Self::Oci, Self::Firecracker, Self::Shards];
     /// Whether it can be given a device of `kind` on a node of `os`
     /// (docs/research/scheduler/agentic-workloads.md §6 and finding 8: device access is a property of
     /// the node and the class). An OCI container on Linux can be given each kind: its runtime passes

@@ -269,6 +269,7 @@ mod tests {
         Cluster::single_owner(
             (0..nodes)
                 .map(|i| NodeSpec {
+                    runtime_pools: Vec::new(),
                     id: NodeId(i),
                     capacity: node,
                     background_milli: 0,

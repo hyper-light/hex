@@ -449,6 +449,7 @@ mod tests {
 
     fn node(cpu: u64, mem: u64) -> NodeSpec {
         NodeSpec {
+            runtime_pools: Vec::new(),
             id: NodeId(0),
             capacity: Resources {
                 cpu_milli: cpu,

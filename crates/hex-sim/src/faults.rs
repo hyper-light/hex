@@ -644,6 +644,7 @@ pub fn dangerous(seed: u64, kind: Class) -> Result<Dangerous, FaultError> {
             capacity.gpus = capacity.gpus.max(need.gpus);
         }
         specs.push(NodeSpec {
+            runtime_pools: Vec::new(),
             id: node_id(id)?,
             capacity,
             background_milli: 0,
@@ -862,6 +863,7 @@ pub fn correlated(seed: u64, mutant: Mutant) -> Result<Correlated, FaultError> {
     for id in 0..nodes {
         let (classes, capacity) = g2_node(&mut rng);
         specs.push(NodeSpec {
+            runtime_pools: Vec::new(),
             id: node_id(id)?,
             capacity,
             background_milli: 0,

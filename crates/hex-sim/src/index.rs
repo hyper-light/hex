@@ -935,6 +935,7 @@ impl FitIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::RuntimePool;
 
     fn res(cpu: u64, mem: u64, gpus: u32) -> Resources {
         Resources {
@@ -962,6 +963,213 @@ mod tests {
             .enumerate()
             .map(|(i, c)| NodeSpec::new(NodeId(u32::try_from(i).unwrap()), *c))
             .collect()
+    }
+
+    fn pool_node(classes: Classes, mem: u64) -> NodeSpec {
+        let mut node = NodeSpec::new(NodeId(0), res(4_000, 1_024 << 20, 0));
+        node.runtime_pools = vec![RuntimePool {
+            classes,
+            capacity: res(4_000, mem, 0),
+        }];
+        node
+    }
+
+    fn pool_demand(class: Class, mem: u64) -> Demand {
+        Demand {
+            class,
+            ..plain(res(100, mem, 0))
+        }
+    }
+
+    /// AC-T7.4.1: the real 633MiB-in-632MiB counterexample must fail before a guest create.
+    #[test]
+    fn runtime_pool_r329_guest_bound_refuses_633_mib_but_admits_64() {
+        let node = pool_node(Classes::NONE.with(Class::Shards), 632 << 20);
+        let mut index = FitIndex::new(&[node]).unwrap();
+        let before = index.key(NodeId(0)).unwrap();
+        let oversized = pool_demand(Class::Shards, 633 << 20);
+        assert_eq!(
+            index.verdict(NodeId(0), &oversized).unwrap(),
+            Verdict::NoRoom
+        );
+        assert!(index.fit(&oversized, &Pick::default()).best.is_none());
+        assert!(index.take(NodeId(0), W, &oversized).is_err());
+        assert_eq!(index.key(NodeId(0)).unwrap(), before);
+        let valid = pool_demand(Class::Shards, 64 << 20);
+        index.take(NodeId(0), W, &valid).unwrap();
+        index.give(NodeId(0), W, &valid).unwrap();
+        assert_eq!(index.key(NodeId(0)).unwrap(), before);
+    }
+
+    /// AC-T7.4.1: a guest cap does not strand unrelated native host capacity; both budgets apply.
+    #[test]
+    fn runtime_pool_keeps_unpooled_native_room_and_global_host_limit() {
+        let node = pool_node(Classes::NONE.with(Class::Shards), 632 << 20);
+        let mut index = FitIndex::new(&[node]).unwrap();
+        let native = pool_demand(Class::Oci, 900 << 20);
+        assert_eq!(index.verdict(NodeId(0), &native).unwrap(), Verdict::Admits);
+        index.take(NodeId(0), WorkloadId(1), &native).unwrap();
+        assert_eq!(
+            index
+                .verdict(NodeId(0), &pool_demand(Class::Shards, 128 << 20))
+                .unwrap(),
+            Verdict::NoRoom
+        );
+        assert_eq!(
+            index
+                .verdict(NodeId(0), &pool_demand(Class::Shards, 64 << 20))
+                .unwrap(),
+            Verdict::Admits
+        );
+    }
+
+    /// AC-T7.4.1: two class names backed by one runtime share one total, and a refused take is atomic.
+    #[test]
+    fn runtime_pool_shared_classes_aggregate_and_delete_frees_exactly() {
+        let classes = Classes::NONE.with(Class::Shards).with(Class::Firecracker);
+        let mut index = FitIndex::new(&[pool_node(classes, 100 << 20)]).unwrap();
+        let original = index.key(NodeId(0)).unwrap();
+        let shards = pool_demand(Class::Shards, 60 << 20);
+        index.take(NodeId(0), WorkloadId(1), &shards).unwrap();
+        let before = index.key(NodeId(0)).unwrap();
+        let mut fail = pool_demand(Class::Firecracker, 41 << 20);
+        fail.kind = Kind::Build;
+        assert!(index.take(NodeId(0), WorkloadId(2), &fail).is_err());
+        assert_eq!(index.key(NodeId(0)).unwrap(), before);
+        let benchmark = Demand {
+            kind: Kind::Benchmark,
+            ..pool_demand(Class::Oci, 1)
+        };
+        assert_eq!(
+            index.verdict(NodeId(0), &benchmark).unwrap(),
+            Verdict::Admits
+        );
+        let firecracker = pool_demand(Class::Firecracker, 40 << 20);
+        index.take(NodeId(0), WorkloadId(3), &firecracker).unwrap();
+        assert_eq!(
+            index
+                .verdict(NodeId(0), &pool_demand(Class::Shards, 1))
+                .unwrap(),
+            Verdict::NoRoom
+        );
+        index.give(NodeId(0), WorkloadId(1), &shards).unwrap();
+        assert_eq!(index.verdict(NodeId(0), &shards).unwrap(), Verdict::Admits);
+        index.give(NodeId(0), WorkloadId(3), &firecracker).unwrap();
+        assert_eq!(index.key(NodeId(0)).unwrap(), original);
+        assert!(index.give(NodeId(0), WorkloadId(3), &firecracker).is_err());
+        assert_eq!(index.key(NodeId(0)).unwrap(), original);
+    }
+
+    /// AC-T7.4.1: refresh may split a shared pool, but never remove/shrink a held runtime budget.
+    #[test]
+    fn runtime_pool_refresh_preserves_class_charges_and_refuses_invalid_shrink_atomically() {
+        let classes = Classes::NONE.with(Class::Shards).with(Class::Firecracker);
+        let mut node = pool_node(classes, 100 << 20);
+        let mut index = FitIndex::new(&[node.clone()]).unwrap();
+        let shards = pool_demand(Class::Shards, 60 << 20);
+        let firecracker = pool_demand(Class::Firecracker, 30 << 20);
+        index.take(NodeId(0), WorkloadId(1), &shards).unwrap();
+        index.take(NodeId(0), WorkloadId(2), &firecracker).unwrap();
+        node.runtime_pools = vec![
+            RuntimePool {
+                classes: Classes::NONE.with(Class::Shards),
+                capacity: res(4_000, 70 << 20, 0),
+            },
+            RuntimePool {
+                classes: Classes::NONE.with(Class::Firecracker),
+                capacity: res(4_000, 30 << 20, 0),
+            },
+        ];
+        index.refresh_node(&node).unwrap();
+        let before = index.key(NodeId(0)).unwrap();
+        let mut shrink = node.clone();
+        shrink.capacity.cpu_milli = 10_000;
+        shrink.runtime_pools[0].capacity.mem_bytes = 59 << 20;
+        assert!(index.refresh_node(&shrink).is_err());
+        assert_eq!(index.key(NodeId(0)).unwrap(), before);
+        assert_eq!(
+            index
+                .verdict(NodeId(0), &pool_demand(Class::Shards, 10 << 20))
+                .unwrap(),
+            Verdict::Admits
+        );
+        assert_eq!(
+            index
+                .verdict(NodeId(0), &pool_demand(Class::Firecracker, 1))
+                .unwrap(),
+            Verdict::NoRoom
+        );
+        let mut removed = node.clone();
+        removed.runtime_pools.clear();
+        assert!(index.refresh_node(&removed).is_err());
+        index.give(NodeId(0), WorkloadId(1), &shards).unwrap();
+        index.give(NodeId(0), WorkloadId(2), &firecracker).unwrap();
+        index.refresh_node(&removed).unwrap();
+        assert_eq!(
+            index
+                .verdict(NodeId(0), &pool_demand(Class::Shards, 900 << 20))
+                .unwrap(),
+            Verdict::Admits
+        );
+    }
+
+    /// AC-T7.4.1: a newly declared pool must cover already held amounts of every included class.
+    #[test]
+    fn runtime_pool_new_pool_checks_preexisting_host_backed_class_holds() {
+        let mut node = NodeSpec::new(NodeId(0), res(4_000, 1_024 << 20, 0));
+        let mut index = FitIndex::new(&[node.clone()]).unwrap();
+        let demand = pool_demand(Class::Oci, 64 << 20);
+        index.take(NodeId(0), W, &demand).unwrap();
+        let before = index.key(NodeId(0)).unwrap();
+        node.runtime_pools = vec![RuntimePool {
+            classes: Classes::NONE.with(Class::Oci),
+            capacity: res(4_000, 63 << 20, 0),
+        }];
+        assert!(index.refresh_node(&node).is_err());
+        assert_eq!(index.key(NodeId(0)).unwrap(), before);
+        node.runtime_pools[0].capacity.mem_bytes = 64 << 20;
+        index.refresh_node(&node).unwrap();
+        assert_eq!(
+            index
+                .verdict(NodeId(0), &pool_demand(Class::Oci, 1))
+                .unwrap(),
+            Verdict::NoRoom
+        );
+    }
+
+    /// AC-T7.4.1: pool masks are nonempty, disjoint and within the node's declared class set.
+    #[test]
+    fn runtime_pool_invalid_masks_and_excess_count_are_typed_refusals() {
+        let one = RuntimePool {
+            classes: Classes::NONE.with(Class::Shards),
+            capacity: res(4_000, 100 << 20, 0),
+        };
+        let mut node = pool_node(Classes::NONE, 100 << 20);
+        assert!(FitIndex::new(&[node.clone()]).is_err());
+        node.runtime_pools = vec![one, one];
+        assert!(FitIndex::new(&[node.clone()]).is_err());
+        node.runtime_pools = vec![one];
+        node.classes = Classes::NONE.with(Class::Oci);
+        assert!(FitIndex::new(&[node.clone()]).is_err());
+        node.classes = Classes::ALL;
+        node.runtime_pools = vec![one; Class::COUNT + 1];
+        assert!(matches!(FitIndex::new(&[node]), Err(SimError::Full { .. })));
+    }
+
+    /// AC-T7.4.1: absent pools retain existing host-backed admission, including after reconstruction.
+    #[test]
+    fn runtime_pool_empty_defaults_keep_host_model_and_replay_charges_on_restart() {
+        let node = NodeSpec::new(NodeId(0), res(4_000, 1_024 << 20, 0));
+        assert!(node.runtime_pools.is_empty());
+        let demand = pool_demand(Class::Shards, 633 << 20);
+        let mut first = FitIndex::new(&[node.clone()]).unwrap();
+        first.take(NodeId(0), W, &demand).unwrap();
+        let mut rebooted = FitIndex::new(&[node]).unwrap();
+        rebooted.take(NodeId(0), W, &demand).unwrap();
+        assert_eq!(
+            first.key(NodeId(0)).unwrap(),
+            rebooted.key(NodeId(0)).unwrap()
+        );
     }
 
     /// Brute force: the least key among the nodes that admit the demand.
