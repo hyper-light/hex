@@ -2167,6 +2167,7 @@ fn a_node_past_its_files_bound_checks_by_entering_counted(lab: &Lab, own: &Path)
     };
     let open_fds = || std::fs::read_dir("/proc/self/fd").unwrap().count();
     let box_root = own.join("hex-reuse-files-bound");
+    let before_warm = open_fds();
     let (first_node, _first_state) = lab.node(&box_root);
     // Take the bound from the live startup path, which has opened the keeper and supervisor already.
     let warm = first_node
@@ -2191,6 +2192,13 @@ fn a_node_past_its_files_bound_checks_by_entering_counted(lab: &Lab, own: &Path)
         .expect("a root node has kept namespace capacity");
     let soft = warm.own + 2 * files_a_kept;
     drop(first_node);
+    // The supervisor's weak watching thread releases its epoll after it observes the node's drop.
+    // Wait for that descriptor too, so the next startup is measured beside the same live descriptors.
+    wait_for(
+        &RELEASED,
+        || open_fds() <= before_warm,
+        "the warm node's descriptors closing",
+    );
     let Some(_limit) = soft_limit(soft) else {
         eprintln!("SKIP held files' bound: the hard descriptor limit is under the node's own");
         return;
