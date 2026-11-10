@@ -685,7 +685,49 @@ impl Drop for GuestRuntime {
     }
 }
 
+/// AC-T7.4.1: configured vCPU/memory are ceilings, never host-room substitutes. Disk remains the
+/// actual guest's backing writable filesystem; PID plus start fences a replacement guest's pool.
+fn guest_capacity(
+    mut capacity: hex_api::Capacity,
+    config: &GuestConfig,
+    identity: &shards_api::Identity,
+) -> Result<hex_api::Capacity, Refusal> {
+    capacity.check()?;
+    let cpu = u64::from(config.vcpus)
+        .checked_mul(1000)
+        .ok_or_else(|| Refusal::Broken("guest CPU milli overflow".to_owned()))?;
+    let memory = config
+        .memory_mib
+        .checked_mul(1 << 20)
+        .ok_or_else(|| Refusal::Broken("guest memory bytes overflow".to_owned()))?;
+    capacity.id = format!("guest:{}:{}", identity.pid, identity.started);
+    capacity.total.cpu_milli = capacity.total.cpu_milli.min(cpu);
+    capacity.total.mem_bytes = capacity.total.mem_bytes.min(memory);
+    capacity.free.cpu_milli = capacity.free.cpu_milli.min(capacity.total.cpu_milli);
+    capacity.free.mem_bytes = capacity.free.mem_bytes.min(capacity.total.mem_bytes);
+    capacity.check()?;
+    Ok(capacity)
+}
+
 impl Runtime for GuestRuntime {
+    fn capacity(&self, class: Class) -> Result<Option<hex_api::Capacity>, Refusal> {
+        if class != Class::Oci {
+            return Err(Refusal::Invalid {
+                what: "capacity class",
+                why: "the guest runs only oci".to_owned(),
+            });
+        }
+        let booted = self.guest()?;
+        let capacity = booted.client.capacity(class)?.ok_or_else(|| {
+            Refusal::Broken("the guest node reported no resource pool".to_owned())
+        })?;
+        let identity = booted
+            .guest
+            .identity()
+            .map_err(|why| refusal("reading the guest pool identity", &why))?;
+        guest_capacity(capacity, &self.config, &identity).map(Some)
+    }
+
     fn classes(&self) -> Vec<Class> {
         vec![Class::Oci]
     }
@@ -876,6 +918,13 @@ impl<P: Runtime> WithGuest<P> {
 }
 
 impl<P: Runtime> Runtime for WithGuest<P> {
+    fn capacity(&self, class: Class) -> Result<Option<hex_api::Capacity>, Refusal> {
+        match class {
+            Class::Process => self.process.capacity(class),
+            Class::Oci => self.oci.capacity(class),
+        }
+    }
+
     fn classes(&self) -> Vec<Class> {
         vec![Class::Process, Class::Oci]
     }

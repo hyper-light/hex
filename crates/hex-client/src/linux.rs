@@ -96,6 +96,7 @@ static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.answer.schedule.retry"),
     Patience::measuring("client.answer.schedule.delete"),
     Patience::measuring("client.answer.schedule.status"),
+    Patience::measuring("client.answer.capacity"),
 ];
 
 /// A node agent, reached through its socket.

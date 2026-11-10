@@ -690,6 +690,10 @@ impl shards_api::Stream for Looped {
 
 /// A relay and node agent in one: the connection's token, then the answer to its hello.
 fn ready_relay() -> std::net::TcpStream {
+    ready_relay_with_answer(None)
+}
+
+fn ready_relay_with_answer(answer: Option<hex_core::wire::Answer>) -> std::net::TcpStream {
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -723,6 +727,24 @@ fn ready_relay() -> std::net::TcpStream {
         let bytes = hex_core::wire::answer(h.id, &hello, hex_core::wire::MAX_MESSAGE).unwrap();
         conn.write_all(&stream::frame(&bytes, hex_core::wire::MAX_MESSAGE).unwrap())
             .unwrap();
+        if let Some(answer) = answer {
+            let message = loop {
+                conn.read_exact(&mut byte).unwrap();
+                if let (_, Some(m)) = d.take(&byte).unwrap() {
+                    break m;
+                }
+            };
+            let (header, request) =
+                hex_core::wire::read_request_apart(&message, hex_core::wire::MAX_MESSAGE).unwrap();
+            assert_eq!(
+                request,
+                hex_core::wire::Request::Call(hex_core::wire::Call::Capacity(Class::Oci))
+            );
+            let bytes =
+                hex_core::wire::answer(header.id, &answer, hex_core::wire::MAX_MESSAGE).unwrap();
+            conn.write_all(&stream::frame(&bytes, hex_core::wire::MAX_MESSAGE).unwrap())
+                .unwrap();
+        }
         // Held until the client goes, as a relay's connection is.
         let _ = conn.read(&mut byte);
     });
@@ -1250,4 +1272,108 @@ fn a_node_that_stops_its_guest_leaves_no_record() {
     drop(node);
     assert_eq!(held::read(&record).unwrap(), None);
     assert!(kept.running.lock().unwrap().is_empty());
+}
+
+struct CapacityLink(Option<hex_api::Capacity>);
+impl Link for CapacityLink {
+    fn dial(&self, port: u32) -> Result<Box<dyn hex_client::guest::Duplex>, Refusal> {
+        assert_eq!(port, stream::CONTROL_PORT);
+        Ok(Box::new(ready_relay_with_answer(Some(
+            hex_core::wire::Answer::Capacity(self.0.clone()),
+        ))))
+    }
+}
+
+fn capacity_runtime(capacity: Option<hex_api::Capacity>, config: GuestConfig) -> GuestRuntime {
+    let kept = Kept::new(true);
+    kept.running.lock().unwrap().insert(123);
+    let guest: Arc<dyn shards_api::Guest> = kept.guest(123).into();
+    let link: Arc<dyn Link> = Arc::new(CapacityLink(capacity));
+    let client = Client::connect(Arc::clone(&link)).unwrap();
+    let runtime = GuestRuntime::new(Arc::new(KeptGuests(kept)), config);
+    *runtime.booted.lock().unwrap() = Some(Arc::new(Booted {
+        guest,
+        link,
+        client,
+    }));
+    runtime
+}
+
+/// AC-T7.4.1/r329: the actual guest-node reply, not host RAM, supplies the pool; a 633MiB
+/// request cannot gain authority from a guest configured with only632MiB.
+#[test]
+fn runtime_capacity_forwards_guest_room_clamps_config_and_preserves_guest_disk() {
+    let mut config = config();
+    config.vcpus = 2;
+    config.memory_mib = 632;
+    let reported = hex_api::Capacity {
+        id: "inner-node".into(),
+        total: hex_api::CapacityResources {
+            cpu_milli: 4_000,
+            mem_bytes: 1024 << 20,
+            disk_bytes: 8 << 30,
+        },
+        free: hex_api::CapacityResources {
+            cpu_milli: 3_000,
+            mem_bytes: 900 << 20,
+            disk_bytes: 7 << 30,
+        },
+    };
+    let runtime = capacity_runtime(Some(reported.clone()), config);
+    let actual = runtime.capacity(Class::Oci).unwrap().unwrap();
+    assert_eq!(actual.id, "guest:123:1230");
+    assert_eq!(
+        (actual.total.cpu_milli, actual.free.cpu_milli),
+        (2_000, 2_000)
+    );
+    assert_eq!(
+        (actual.total.mem_bytes, actual.free.mem_bytes),
+        (632 << 20, 632 << 20)
+    );
+    assert_eq!(
+        (actual.total.disk_bytes, actual.free.disk_bytes),
+        (reported.total.disk_bytes, reported.free.disk_bytes)
+    );
+    assert!(runtime.capacity(Class::Process).is_err());
+}
+
+/// AC-T7.4.1: no guest capacity is a refusal; native Process still explicitly uses host facts.
+#[test]
+fn runtime_capacity_guest_missing_is_refused_native_default_is_host_fallback() {
+    let guest = capacity_runtime(None, config());
+    let combined = WithGuest::new(hex_api::sim::SimRuntime::new(), guest).unwrap();
+    assert_eq!(combined.capacity(Class::Process).unwrap(), None);
+    assert!(matches!(
+        combined.capacity(Class::Oci),
+        Err(Refusal::Broken(_))
+    ));
+}
+
+/// AC-T7.4.1: a configured ceiling never inflates a smaller actual guest or its free room.
+#[test]
+fn runtime_capacity_keeps_smaller_actual_guest_room() {
+    let mut configured = config();
+    configured.vcpus = 4;
+    configured.memory_mib = 632;
+    let room = hex_api::CapacityResources {
+        cpu_milli: 500,
+        mem_bytes: 500 << 20,
+        disk_bytes: 1 << 30,
+    };
+    let free = hex_api::CapacityResources {
+        cpu_milli: 250,
+        mem_bytes: 400 << 20,
+        disk_bytes: 512 << 20,
+    };
+    let actual = guest_capacity(
+        hex_api::Capacity {
+            id: "inner".into(),
+            total: room,
+            free,
+        },
+        &configured,
+        &kept_identity(123),
+    )
+    .unwrap();
+    assert_eq!((actual.total, actual.free), (room, free));
 }

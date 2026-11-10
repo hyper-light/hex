@@ -117,6 +117,33 @@ pub fn gpu_facts(inventory: &[hex_gpu::Gpu], loads: &[hex_gpu::Load]) -> Vec<fac
         .collect()
 }
 
+/// AC-T7.4.1: basic runtime room without device discovery or GPU driver initialization. The caller
+/// supplies its stable pool identity and actual writable-bundles volume, including inside a guest.
+pub fn capacity(dir: &Path, id: String) -> Result<hex_api::Capacity, Refusal> {
+    let memory = here::memory();
+    let disk = here::volume(dir);
+    let cpu = std::thread::available_parallelism()
+        .ok()
+        .and_then(|n| u64::try_from(n.get()).ok())
+        .and_then(|n| n.checked_mul(1000))
+        .unwrap_or(0);
+    #[cfg(target_os = "linux")]
+    let cpu = here::cpu_milli(cpu);
+    let total = hex_api::CapacityResources {
+        cpu_milli: cpu,
+        mem_bytes: memory.total,
+        disk_bytes: disk.total,
+    };
+    let free = hex_api::CapacityResources {
+        cpu_milli: cpu,
+        mem_bytes: memory.free.min(memory.total),
+        disk_bytes: disk.free.min(disk.total),
+    };
+    let capacity = hex_api::Capacity { id, total, free };
+    capacity.check()?;
+    Ok(capacity)
+}
+
 /// Every fact of this node but its GPUs, read now. `dir` is the folder boxes' disks go on.
 fn machine(dir: &Path, declared: &Declared, initialized: Classes) -> Result<Facts, Refusal> {
     let (os, arch) =
@@ -198,6 +225,53 @@ mod here {
             }
         }
         memory
+    }
+
+    /// cgroup v2 cpu.max is quota/period, in microseconds; keep fractional CPUs as milli,
+    /// intersecting every ancestor. Unread/malformed finite authority grants no CPU room.
+    pub fn cpu_milli(mut offered: u64) -> u64 {
+        let Some(own) = read("/proc/self/cgroup")
+            .as_deref()
+            .and_then(facts::own_cgroup)
+            .map(str::to_owned)
+        else {
+            return 0;
+        };
+        let root = std::path::Path::new("/sys/fs/cgroup");
+        let mut group = root.join(own.trim_start_matches('/'));
+        while group.starts_with(root) {
+            match fs::read_to_string(group.join("cpu.max")) {
+                Ok(text) => match quota_milli(&text) {
+                    Ok(Some(quota)) => offered = offered.min(quota),
+                    Ok(None) => {}
+                    Err(()) => return 0,
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return 0,
+            }
+            if group == root || !group.pop() {
+                break;
+            }
+        }
+        offered
+    }
+
+    pub(super) fn quota_milli(text: &str) -> Result<Option<u64>, ()> {
+        let mut words = text.split_whitespace();
+        let quota = words.next().ok_or(())?;
+        let period: u64 = words.next().ok_or(())?.parse().map_err(|_| ())?;
+        if period == 0 || words.next().is_some() {
+            return Err(());
+        }
+        if quota == "max" {
+            return Ok(None);
+        }
+        let quota: u64 = quota.parse().map_err(|_| ())?;
+        let milli = u128::from(quota)
+            .checked_mul(1000)
+            .and_then(|n| n.checked_div(u128::from(period)))
+            .ok_or(())?;
+        u64::try_from(milli).map(Some).map_err(|_| ())
     }
 
     pub fn classes() -> Result<Classes, hex_api::Refusal> {
@@ -615,5 +689,17 @@ mod tests {
                 .all(|d| d.name != "hex-no-such-disk" && d.name != "hex-no-such-if"),
             "{f:?}"
         );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod capacity_tests {
+    #[test]
+    fn runtime_capacity_cpu_quota_preserves_fractional_milli_and_refuses_bad_authority() {
+        assert_eq!(super::here::quota_milli("50000 100000"), Ok(Some(500)));
+        assert_eq!(super::here::quota_milli("max 100000"), Ok(None));
+        for bad in ["", "max", "1 0", "wat 100", "1 100 extra"] {
+            assert!(super::here::quota_milli(bad).is_err(), "{bad}");
+        }
     }
 }

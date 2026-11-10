@@ -42,8 +42,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use hex_api::{
-    Bounds, BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, Class, ClassSpec, Exit, IoRates, Mount,
-    Network, OciSpec, Program, Refusal, Rootfs, Signal, Usage, User,
+    Bounds, BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, Capacity, CapacityResources, Class,
+    ClassSpec, Exit, IoRates, Mount, Network, OciSpec, Program, Refusal, Rootfs, Signal, Usage,
+    User,
 };
 
 use crate::netns;
@@ -139,6 +140,8 @@ mod kind {
     pub const SCHEDULE: u16 = 0x0011;
     pub const SCHEDULED: u16 = 0x800c;
     pub const OFFERED: u16 = 0x800b;
+    pub const CAPACITY: u16 = 0x0012;
+    pub const CAPACITY_ANSWER: u16 = 0x800d;
 }
 
 /// A message's header, once its wire identity is read as this side's.
@@ -216,6 +219,7 @@ pub enum Call {
         streams: Streams,
         ask: Streams,
     },
+    Capacity(Class),
 }
 
 /// Which of a program's standard streams travel with its exec, in this order; the rest are the null
@@ -293,6 +297,7 @@ pub enum Answer {
     /// HEX-RT-17: open these guest connections in the caller before acknowledging StreamsReady.
     /// A preparation, not a started program; no descriptor or cross-process socket reservation rides with it.
     Offered(StreamOffer),
+    Capacity(Option<Capacity>),
 }
 
 /// A Shards guest's identity and the names of an exec's caller-owned streams (HEX-RT-17).
@@ -491,6 +496,21 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
                     .map_err(|e| Fault::value("scheduler reply", e.to_string()))?,
             )?;
         }
+        Answer::Capacity(capacity) => {
+            w.header(kind::CAPACITY_ANSWER, id);
+            w.option_with(capacity.as_ref(), |w, capacity| {
+                capacity
+                    .check()
+                    .map_err(|e| Fault::value("capacity", e.to_string()))?;
+                w.string(&capacity.id)?;
+                for room in [capacity.total, capacity.free] {
+                    w.u64(room.cpu_milli);
+                    w.u64(room.mem_bytes);
+                    w.u64(room.disk_bytes);
+                }
+                Ok(())
+            })?;
+        }
         Answer::Info(info) => {
             w.header(kind::INFO, id);
             put_info(&mut w, info)?;
@@ -669,6 +689,7 @@ fn parse_request(
                     .map_err(|e| bad(Fault::value("scheduler command", e.to_string())))?,
             )))
         }
+        kind::CAPACITY => Request::Call(Call::Capacity(class(&mut r).map_err(bad)?)),
         kind::CREATE => Request::Call(Call::Create(Box::new(box_spec(&mut r).map_err(bad)?))),
         kind::START => Request::Call(Call::Start(box_id(&mut r).map_err(bad)?)),
         kind::EXEC => {
@@ -800,6 +821,25 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
                     .map_err(|e| Fault::value("scheduler reply", e.to_string()))?,
             ))
         }
+        kind::CAPACITY_ANSWER => Answer::Capacity(r.option(|r| {
+            let id = r.string("capacity pool")?;
+            let mut resources = || -> Result<CapacityResources, Fault> {
+                Ok(CapacityResources {
+                    cpu_milli: r.u64()?,
+                    mem_bytes: r.u64()?,
+                    disk_bytes: r.u64()?,
+                })
+            };
+            let capacity = Capacity {
+                id,
+                total: resources()?,
+                free: resources()?,
+            };
+            capacity
+                .check()
+                .map_err(|e| Fault::value("capacity", e.to_string()))?;
+            Ok(capacity)
+        })?),
         kind::INFO => Answer::Info(info(&mut r)?),
         kind::DONE => Answer::Done,
         kind::STARTED => Answer::Started { pid: r.u32()? },
@@ -947,6 +987,11 @@ fn request_name(kind: u16) -> &'static str {
 
 fn put_call(w: &mut Writer, id: u64, call: &Call) -> Result<(), Fault> {
     match call {
+        Call::Capacity(class) => {
+            w.header(kind::CAPACITY, id);
+            w.u8(class_tag(*class));
+            Ok(())
+        }
         Call::Schedule(command) => {
             w.header(kind::SCHEDULE, id);
             w.string(

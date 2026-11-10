@@ -1616,6 +1616,11 @@ impl Node {
 }
 
 impl Runtime for Node {
+    fn capacity(&self, _class: Class) -> Result<Option<hex_api::Capacity>, Refusal> {
+        // node_key is stable across this state directory's recovery, shared by both native classes.
+        crate::facts::capacity(&self.bundles, format!("node:{}", self.key)).map(Some)
+    }
+
     fn classes(&self) -> Vec<Class> {
         vec![Class::Process, Class::Oci]
     }

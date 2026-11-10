@@ -451,10 +451,10 @@ fn hostile_messages_are_refused_and_the_connection_is_served_after() {
         ),
         Hostile(
             "unknown kind",
-            with(12, [0x12, 0]),
+            with(12, [0x13, 0]),
             vec![],
             9,
-            "kind 0x0012 isn't a request this wire defines",
+            "kind 0x0013 isn't a request this wire defines",
         ),
         Hostile(
             "an answer kind",

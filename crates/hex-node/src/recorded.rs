@@ -216,6 +216,10 @@ fn poisoned() -> Refusal {
 }
 
 impl<R: Recover> Runtime for Recorded<R> {
+    fn capacity(&self, class: Class) -> Result<Option<hex_api::Capacity>, Refusal> {
+        self.runtime.capacity(class)
+    }
+
     fn classes(&self) -> Vec<Class> {
         self.runtime.classes()
     }

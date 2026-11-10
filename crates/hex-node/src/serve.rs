@@ -2041,6 +2041,7 @@ impl<O: Os> Shared<O> {
             Call::Schedule(command) => host
                 .schedule(*command)
                 .map(|reply| Answer::Scheduled(Box::new(reply))),
+            Call::Capacity(class) => host.capacity(class).map(Answer::Capacity),
             Call::Create(spec) => host.create(*spec).map(Answer::Info),
             Call::Start(id) => host.start(&id).map(|()| Answer::Done),
             Call::Signal { id, signal } => host.signal(&id, signal).map(|()| Answer::Done),

@@ -8,6 +8,46 @@ use super::*;
 use hex_api::{Bounds, BoxOwner, BoxSpec, IoRates, Mount, Network, OciSpec, Program, Rootfs, User};
 use proptest::prelude::*;
 
+/// AC-T7.4.1: capacity travels as a typed call/answer, including native host fallback.
+#[test]
+fn runtime_capacity_roundtrip_and_invalid_room_refused() {
+    let request = Request::Call(Call::Capacity(Class::Oci));
+    let bytes = super::request(42, &request, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        request
+    );
+    let capacity = hex_api::Capacity {
+        id: "guest:123:456".into(),
+        total: hex_api::CapacityResources {
+            cpu_milli: 2_000,
+            mem_bytes: 632 << 20,
+            disk_bytes: 8 << 30,
+        },
+        free: hex_api::CapacityResources {
+            cpu_milli: 2_000,
+            mem_bytes: 600 << 20,
+            disk_bytes: 7 << 30,
+        },
+    };
+    for value in [None, Some(capacity.clone())] {
+        let expected = Answer::Capacity(value);
+        let bytes = answer(42, &expected, MAX_MESSAGE).unwrap();
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            expected
+        );
+    }
+    let mut malformed = answer(42, &Answer::Capacity(Some(capacity.clone())), MAX_MESSAGE).unwrap();
+    let free_memory = malformed.len() - 16;
+    malformed[free_memory..free_memory + 8]
+        .copy_from_slice(&(capacity.total.mem_bytes + 1).to_le_bytes());
+    assert!(read_answer(&received(&malformed, 0), MAX_MESSAGE).is_err());
+    let mut bad = capacity;
+    bad.free.mem_bytes = bad.total.mem_bytes + 1;
+    assert!(answer(42, &Answer::Capacity(Some(bad)), MAX_MESSAGE).is_err());
+}
+
 fn id(s: &str) -> BoxId {
     BoxId::new(s).unwrap()
 }
@@ -746,7 +786,7 @@ fn a_run_is_a_create_and_an_exec_in_one_request() {
 #[test]
 fn unknown_kinds_are_refused() {
     let hello = request(5, &Request::Hello { build: build() }, MAX_MESSAGE).unwrap();
-    for kind in [0u16, 0x0012, 0x7fff, 0x8001, 0x8009, 0xffff] {
+    for kind in [0u16, 0x0013, 0x7fff, 0x8001, 0x8009, 0xffff] {
         let mut bytes = hello.clone();
         bytes[12..14].copy_from_slice(&kind.to_le_bytes());
         let got = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
@@ -1148,7 +1188,7 @@ proptest! {
     /// HEX-SOCK-1: bodies of random bytes behind a valid header, so every kind's decoder meets them, are a
     /// message or a typed refusal, never a panic.
     #[test]
-    fn any_body_behind_a_header_is_read_or_refused(kind in prop_oneof![0u16..0x0012, 0x8000u16..0x800d], body in proptest::collection::vec(any::<u8>(), 0..256), fds in 0usize..4) {
+    fn any_body_behind_a_header_is_read_or_refused(kind in prop_oneof![0u16..0x0013, 0x8000u16..0x800e], body in proptest::collection::vec(any::<u8>(), 0..256), fds in 0usize..4) {
         let mut bytes = header(kind, 3);
         bytes.extend_from_slice(&body);
         let _ = read_request(&received(&bytes, fds), MAX_MESSAGE);

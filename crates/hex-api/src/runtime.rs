@@ -11,6 +11,12 @@ pub trait Runtime: Send + Sync {
     /// The classes it runs.
     fn classes(&self) -> Vec<Class>;
 
+    /// AC-T7.4.1: the resource pool backing this class. `None` explicitly selects the caller's
+    /// same-host physical budget; a guest must report its own pool rather than host capacity.
+    fn capacity(&self, _class: Class) -> Result<Option<Capacity>, Refusal> {
+        Ok(None)
+    }
+
     /// Makes a box with its bounds in force. A `process` box is empty when this returns; an `oci`
     /// box's init is made and waits for [`Runtime::start`], [`BoxState::Created`].
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal>;
@@ -48,6 +54,41 @@ pub trait Runtime: Send + Sync {
 
     /// Ends every process in the box and removes it, with any writable layer it owns.
     fn delete(&self, id: &BoxId) -> Result<(), Refusal>;
+}
+
+/// CPU milli, memory bytes and writable-volume bytes; devices are not inferred from a pool.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapacityResources {
+    pub cpu_milli: u64,
+    pub mem_bytes: u64,
+    pub disk_bytes: u64,
+}
+
+/// A stable resource-pool identity and its physical ceiling/current room. Reservations remain the
+/// scheduler's authority; these facts do not grant resources or guess unread measurements.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Capacity {
+    pub id: String,
+    pub total: CapacityResources,
+    pub free: CapacityResources,
+}
+
+impl Capacity {
+    pub fn check(&self) -> Result<(), Refusal> {
+        if self.id.is_empty()
+            || self.free.cpu_milli > self.total.cpu_milli
+            || self.free.mem_bytes > self.total.mem_bytes
+            || self.free.disk_bytes > self.total.disk_bytes
+        {
+            return Err(Refusal::Invalid {
+                what: "runtime capacity",
+                why: "pool identity is empty or free resources exceed their totals".to_owned(),
+            });
+        }
+        Ok(())
+    }
 }
 
 /// A program started in a box.

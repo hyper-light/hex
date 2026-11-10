@@ -32,7 +32,8 @@ mod spec;
 pub use bounds::{Bounds, IoRates, MIN_CPU_MILLI, MIN_MEMORY};
 pub use id::BoxId;
 pub use runtime::{
-    Asked, BoxInfo, BoxState, Exit, Membership, Proc, Refusal, Runtime, Signal, Usage,
+    Asked, BoxInfo, BoxState, Capacity, CapacityResources, Exit, Membership, Proc, Refusal,
+    Runtime, Signal, Usage,
 };
 pub use spec::{
     Ask, BlockCount, BoxOwner, BoxSpec, Class, ClassSpec, End, ExecLimit, Given, Mount, Network,

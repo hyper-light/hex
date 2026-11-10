@@ -604,3 +604,46 @@ fn a_failed_offer_open_releases_the_remote_preparation_and_local_reservation() {
     assert!(state.programs.is_empty());
     assert!(state.given.is_empty());
 }
+
+/// AC-T7.4.1: a new capacity wait appends after every historical runtime/scheduler wait.
+#[test]
+fn runtime_capacity_wait_appends_without_moving_existing_indexes() {
+    let waits = <Memory as Transport>::answers();
+    assert_eq!(KINDS, 24);
+    for (request, index) in [
+        (
+            Request::Hello {
+                build: String::new(),
+            },
+            0,
+        ),
+        (Request::Call(Call::List), 7),
+        (
+            Request::Call(Call::Schedule(Box::new(
+                hex_core::schedule::Command::Describe {
+                    from: 0,
+                    cluster: "pool".into(),
+                },
+            ))),
+            13,
+        ),
+        (
+            Request::Call(Call::Schedule(Box::new(
+                hex_core::schedule::Command::Status {
+                    key: hex_core::schedule::Key {
+                        owner: 0,
+                        epoch: 1,
+                        seq: 0,
+                    },
+                },
+            ))),
+            22,
+        ),
+        (Request::Call(Call::Capacity(Class::Oci)), 23),
+    ] {
+        assert!(
+            std::ptr::eq(kind_of(waits, &request).unwrap(), &waits[index]),
+            "{request:?}"
+        );
+    }
+}

@@ -65,7 +65,7 @@ impl LegacyKind {
 }
 
 /// One learned wait per legacy operation plus each scheduler operation; no shared scheduler seed.
-pub const KINDS: usize = LegacyKind::COUNT + WaitKind::COUNT;
+pub const KINDS: usize = LegacyKind::COUNT + WaitKind::COUNT + 1;
 
 /// The wait of `request`'s kind in `waits`, a client's table of its call kinds' learned waits (decision 9: a client's
 /// call's wait for its answer and its send is learned per call kind, since a delete waits on its box's emptying and a
@@ -77,6 +77,7 @@ pub(crate) fn kind_of<'a>(waits: &'a [Patience; KINDS], request: &Request) -> Op
     let n = match request {
         Request::Hello { .. } => LegacyKind::Hello as usize,
         Request::Call(call) => match call {
+            Call::Capacity(_) => LegacyKind::COUNT.checked_add(WaitKind::COUNT)?,
             Call::Create(_) => LegacyKind::Create as usize,
             Call::Start(_) => LegacyKind::Start as usize,
             Call::Exec { .. } => LegacyKind::Exec as usize,
@@ -1731,6 +1732,7 @@ pub(crate) fn unexpected(call: &str, answer: &Answer) -> Refusal {
         Answer::Given { .. } => "a started program with streams",
         Answer::Offered(_) => "a guest stream preparation",
         Answer::Scheduled(_) => "a scheduler reply",
+        Answer::Capacity(_) => "a runtime capacity",
     };
     Refusal::Broken(format!("the node agent answered a {call} with {kind}"))
 }
@@ -1854,6 +1856,19 @@ fn settle(stdio: Stdio, ends: hex_api::Given) -> Result<hex_api::Given, Refusal>
 }
 
 impl<T: Transport> Runtime for Core<T> {
+    fn capacity(&self, class: Class) -> Result<Option<hex_api::Capacity>, Refusal> {
+        match self.plain(Call::Capacity(class))? {
+            Answer::Capacity(capacity) => {
+                if let Some(capacity) = &capacity {
+                    capacity.check()?;
+                }
+                Ok(capacity)
+            }
+            Answer::Refused(r) => Err(r),
+            other => Err(unexpected("capacity", &other)),
+        }
+    }
+
     fn classes(&self) -> Vec<Class> {
         self.classes.clone()
     }
