@@ -129,7 +129,7 @@ def forced(runtime_path, sender, receiver_socket):
         child = subprocess.Popen([runtime["hex"], "schedule", "tunnel", "--socket", receiver_socket,
                                   "--from", str(sender)], stdin=subprocess.PIPE,
                                  stdout=subprocess.PIPE, stderr=errors, bufsize=0, env=child_environment)
-        record(runtime, "forced-tunnel", child.pid, sender=sender, census=str(census_path), profile=runtime["profile"], source_revision=runtime.get("source_revision"), hex_sha256=runtime.get("hex_sha256"))
+        record(runtime, "forced-tunnel", child.pid, sender=sender, census=None if census_path is None else str(census_path), profile=runtime["profile"], source_revision=runtime.get("source_revision"), hex_sha256=runtime.get("hex_sha256"))
         faults = []
 
         def incoming():
@@ -219,6 +219,13 @@ def digest_file(path, chunk):
 
 
 def census_environment(runtime, environment, label):
+    mode = runtime.get("wait_mode", "measuring")
+    require(mode in ("armed", "measuring"), "unknown harness wait mode")
+    if mode == "armed":
+        # Installing the census calls measure_all; seeded validation must not install it.
+        for name in ("HEX_WAITS_CENSUS", "HEX_WAITS_CENSUS_MAX"):
+            environment.pop(name, None)
+        return environment, None
     fd, path = tempfile.mkstemp(prefix=label + "-", suffix=".tsv", dir=Path(runtime["root"]) / "census")
     os.close(fd)
     environment["HEX_WAITS_CENSUS"] = path
@@ -254,6 +261,7 @@ class Harness:
                         "ledger": str(self.root / "pids.jsonl"), "hex": str(Path(args.hex).resolve()),
                         "runtime_client": str(Path(args.runtime_client).resolve()),
                         "profile": args.profile, "max_census_lines": args.max_census_lines,
+                        "wait_mode": "armed" if args.validate_seeds else "measuring",
                         "bootstrap": args.deadline_seconds, "wait": args.deadline_seconds,
                         "wait_ns": math.ceil(args.deadline_seconds * 1_000_000_000),
                         "wait_rule": "operator outer cancellation budget; never a runtime timing seed",
@@ -290,6 +298,11 @@ class Harness:
                        "profile_authority": "operator-declared; preserve build receipt and binary hash",
                        "n": args.n, "max_rows_per_process": args.max_census_lines,
                        "comparison_or_performance_claim": False}
+        if self.runtime["wait_mode"] == "armed":
+            self.report["kind"] = "actual-scheduler-seeded-validation"
+            self.report["scope"] = "installed-seed lifecycle validation; no timing distributions, coverage or seed evidence"
+            self.report.pop("max_rows_per_process")
+        self.report["wait_mode"] = self.runtime["wait_mode"]
         self.wait_kinds = [re.sub(r"(?<!^)(?=[A-Z])", "_", word).lower() for word in re.findall(r"^    ([A-Za-z]+),$", (self.source / "crates/hex-core/src/schedule/waits.rs").read_text(), re.MULTILINE)]
         require(self.wait_kinds and len(set(self.wait_kinds)) == len(self.wait_kinds), "cannot derive actual WaitKind set")
         require(args.cpu_milli >= self.runtime["min_cpu"] and args.box_memory_mib * (1 << 20) >= self.runtime["min_memory"], "requested real box is below actual API minima")
@@ -667,6 +680,11 @@ class Harness:
             self.report["owned_guest_retired"] = stopped
 
     def census_report(self):
+        if self.runtime.get("wait_mode", "measuring") == "armed":
+            require(not any((self.root / "census").iterdir()), "seeded validation unexpectedly produced census files")
+            self.report["census"] = {"enabled": False, "files": 0,
+                                     "scope": "census disabled; no timing distributions, coverage or seed evidence"}
+            return
         counts, refused_counts, per_process, cut, malformed = {}, {}, [], [], []
         ledger_path = Path(self.runtime["ledger"])
         ledger = [] if not ledger_path.exists() else [json.loads(line) for line in ledger_path.read_text().splitlines()]
@@ -785,6 +803,7 @@ def main():
     parser.add_argument("--profile", choices=("debug", "release"), required=True)
     parser.add_argument("--n", type=int, required=True, help="operator's successful trials per local and remote phase")
     parser.add_argument("--max-census-lines", type=int, required=True)
+    parser.add_argument("--validate-seeds", action="store_true", help="leave installed waits armed; disable census measurement for local and SSH children")
     parser.add_argument("--cpu-milli", type=int, required=True)
     parser.add_argument("--box-memory-mib", type=int, required=True)
     parser.add_argument("--deadline-seconds", type=float, required=True, help="operator outer cancellation budget, not a runtime seed")
