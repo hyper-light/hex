@@ -107,7 +107,10 @@ impl Transport for Socket {
                 descriptors: ends.len(),
                 descriptors_cut: false,
             };
-            take(&received, ends)?;
+            take(
+                &received,
+                ends.into_iter().map(hex_api::End::from).collect(),
+            )?;
         }
         Ok(true)
     }

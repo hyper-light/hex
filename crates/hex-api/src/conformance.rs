@@ -533,13 +533,13 @@ fn streams(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
         rt.delete(&id).map_err(|e| e.to_string())?;
         return Err("the streams asked for weren't given".to_owned());
     };
-    let mut stdin = std::fs::File::from(stdin);
+    let mut stdin = crate::OwnedStream::from(stdin);
     stdin
         .write_all(b"round trip\n")
         .map_err(|e| format!("write: {e}"))?;
     drop(stdin);
     let mut out = String::new();
-    std::fs::File::from(stdout)
+    crate::OwnedStream::from(stdout)
         .read_to_string(&mut out)
         .map_err(|e| format!("read: {e}"))?;
     let exit = ended(&mut p)?;

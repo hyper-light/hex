@@ -200,13 +200,13 @@ impl Transport for Stream {
     /// Each stream asked for is a stdio connection of its own to the guest, named for the exec, and the
     /// caller holds that connection's socket: the guest's relay splices it to the program, so no byte is
     /// copied on the host (native plan step 8).
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn asks(&self, exec: u64, ask: hex_api::Ask) -> Result<hex_api::Given, Refusal> {
         let exec = Exec {
             conn: self.token,
             id: exec,
         };
-        let dial = |on: bool, stream| -> Result<Option<std::os::fd::OwnedFd>, Refusal> {
+        let dial = |on: bool, stream| -> Result<Option<hex_api::End>, Refusal> {
             if !on {
                 return Ok(None);
             }
@@ -217,12 +217,22 @@ impl Transport for Stream {
                 .try_clone_to_owned()
                 .map_err(os("handing a stdio connection to its caller"))?;
             // HEX-RT-17: Shards waits around a non-blocking socket in its Stream wrapper. Only the raw descriptor
-            // outlives this handoff, so its caller's File must block itself; the control connection stays evented.
-            let flags = rustix::fs::fcntl_getfl(&end)
-                .map_err(|e| Refusal::os("reading a stdio connection's mode", e))?;
-            rustix::fs::fcntl_setfl(&end, flags & !rustix::fs::OFlags::NONBLOCK)
-                .map_err(|e| Refusal::os("making a caller's stdio connection wait", e))?;
-            Ok(Some(end))
+            // outlives this handoff, so its caller's OwnedStream must block itself; the control connection stays evented.
+            #[cfg(unix)]
+            {
+                let flags = rustix::fs::fcntl_getfl(&end)
+                    .map_err(|e| Refusal::os("reading a stdio connection's mode", e))?;
+                rustix::fs::fcntl_setfl(&end, flags & !rustix::fs::OFlags::NONBLOCK)
+                    .map_err(|e| Refusal::os("making a caller's stdio connection wait", e))?;
+                Ok(Some(end))
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::io::AsSocket;
+                hex_afunix::set_nonblocking(end.as_socket(), false)
+                    .map_err(os("making a caller's stdio connection wait"))?;
+                Ok(Some(end.into()))
+            }
         };
         Ok(hex_api::Given {
             stdin: dial(ask.stdin, stream::Stdio::In)?,
@@ -231,7 +241,7 @@ impl Transport for Stream {
         })
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     fn asks(&self, _exec: u64, _ask: hex_api::Ask) -> Result<hex_api::Given, Refusal> {
         Err(Refusal::Platform {
             what: "stdio streams made by the guest's transport",

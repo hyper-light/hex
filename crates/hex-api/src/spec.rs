@@ -568,7 +568,7 @@ pub struct Ask {
 }
 
 /// The caller's ends of the streams it asked for ([`crate::Proc::streams`]): stdin's to write, stdout's and
-/// stderr's to read, each to its end as a pipe's end is.
+/// stderr's to read, each to its end as a pipe's end is. Use [`crate::OwnedStream`] for portable I/O on an end.
 #[derive(Debug, Default)]
 pub struct Given {
     pub stdin: Option<End>,
@@ -576,11 +576,11 @@ pub struct Given {
     pub stderr: Option<End>,
 }
 
-/// A stream's end the caller holds: a file descriptor on Unix (a pipe's or a socket's), a handle on Windows.
+/// A stream's end the caller holds: a file descriptor on Unix (a pipe's or a socket's).
 #[cfg(unix)]
 pub type End = std::os::fd::OwnedFd;
 #[cfg(windows)]
-pub type End = std::os::windows::io::OwnedHandle;
+pub use crate::end::End;
 
 impl Stdio {
     /// Every stream the null device.

@@ -40,7 +40,7 @@ pub(crate) trait Feed: Write + Send + 'static {
 }
 
 /// A stream's end the caller's client holds: a guest's connection, which its node gave with the exec's answer.
-impl Feed for std::fs::File {
+impl Feed for hex_api::OwnedStream {
     #[cfg(unix)]
     fn waited(&self) -> std::os::fd::BorrowedFd<'_> {
         std::os::fd::AsFd::as_fd(self)
@@ -49,6 +49,8 @@ impl Feed for std::fs::File {
     fn end_sending(&self) {
         #[cfg(unix)]
         let _ = rustix::net::shutdown(self, rustix::net::Shutdown::Write);
+        #[cfg(windows)]
+        let _ = self.shutdown(std::net::Shutdown::Write);
     }
 }
 

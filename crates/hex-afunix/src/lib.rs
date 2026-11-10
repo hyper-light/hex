@@ -50,11 +50,11 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Networking::WinSock::{
     AF_UNIX, AcceptEx, FD_CLOSE, FD_READ, FD_WRITE, FIONBIO, INVALID_SOCKET, LINGER, SD_BOTH,
-    SO_LINGER, SO_UPDATE_ACCEPT_CONTEXT, SOCK_STREAM, SOCKADDR_UN, SOCKET, SOCKET_ERROR,
-    SOL_SOCKET, WSA_FLAG_NO_HANDLE_INHERIT, WSA_FLAG_OVERLAPPED, WSA_IO_PENDING, WSABUF, WSADATA,
-    WSAECONNABORTED, WSAECONNRESET, WSAEMFILE, WSAENOBUFS, WSAEventSelect, WSAGetLastError,
-    WSAIoctl, WSARecv, WSASend, WSASocketW, WSAStartup, bind, closesocket, connect, ioctlsocket,
-    listen, recv, send, setsockopt, shutdown,
+    SD_RECEIVE, SD_SEND, SO_LINGER, SO_UPDATE_ACCEPT_CONTEXT, SOCK_STREAM, SOCKADDR_UN, SOCKET,
+    SOCKET_ERROR, SOL_SOCKET, WSA_FLAG_NO_HANDLE_INHERIT, WSA_FLAG_OVERLAPPED, WSA_IO_PENDING,
+    WSABUF, WSADATA, WSAECONNABORTED, WSAECONNRESET, WSAEMFILE, WSAENOBUFS, WSAEventSelect,
+    WSAGetLastError, WSAIoctl, WSARecv, WSASend, WSASocketW, WSAStartup, bind, closesocket,
+    connect, ioctlsocket, listen, recv, send, setsockopt, shutdown,
 };
 use windows_sys::Win32::Security::{
     EqualSid, GetTokenInformation, IsWellKnownSid, TOKEN_QUERY, TOKEN_USER, TokenUser,
@@ -198,6 +198,54 @@ pub fn set_nonblocking(socket: BorrowedSocket<'_>, on: bool) -> io::Result<()> {
     Ok(())
 }
 
+/// Receives directly into the caller's buffer on an owned stream's socket (HEX-RT-17).
+pub fn receive_socket(socket: BorrowedSocket<'_>, bytes: &mut [u8]) -> io::Result<usize> {
+    let raw = SOCKET::try_from(socket.as_raw_socket()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a socket value past Winsock's width",
+        )
+    })?;
+    let len = i32::try_from(bytes.len()).unwrap_or(i32::MAX);
+    // SAFETY: the socket is borrowed live; len bytes of this caller's buffer are writable for the call.
+    let n = unsafe { recv(raw, bytes.as_mut_ptr(), len, 0) };
+    usize::try_from(n).map_err(|_| wsa_error())
+}
+
+/// Sends directly from the caller's buffer on an owned stream's socket (HEX-RT-17).
+pub fn send_socket(socket: BorrowedSocket<'_>, bytes: &[u8]) -> io::Result<usize> {
+    let raw = SOCKET::try_from(socket.as_raw_socket()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a socket value past Winsock's width",
+        )
+    })?;
+    let len = i32::try_from(bytes.len()).unwrap_or(i32::MAX);
+    // SAFETY: the socket is borrowed live; len readable bytes of the caller's buffer outlive the call.
+    let n = unsafe { send(raw, bytes.as_ptr(), len, 0) };
+    usize::try_from(n).map_err(|_| wsa_error())
+}
+
+/// Ends the requested halves of a stream socket without changing who owns it (HEX-RT-17).
+pub fn shutdown_socket(socket: BorrowedSocket<'_>, how: std::net::Shutdown) -> io::Result<()> {
+    let raw = SOCKET::try_from(socket.as_raw_socket()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a socket value past Winsock's width",
+        )
+    })?;
+    let how = match how {
+        std::net::Shutdown::Read => SD_RECEIVE,
+        std::net::Shutdown::Write => SD_SEND,
+        std::net::Shutdown::Both => SD_BOTH,
+    };
+    // SAFETY: a live borrowed socket and a documented shutdown direction.
+    if unsafe { shutdown(raw, how) } == SOCKET_ERROR {
+        return Err(wsa_error());
+    }
+    Ok(())
+}
+
 impl Socket {
     /// A new socket: overlapped (so it can be on a port), never inherited by a child.
     fn new() -> io::Result<Socket> {
@@ -265,20 +313,14 @@ impl Socket {
         set_nonblocking(self.as_socket(), on)
     }
 
-    /// Sends what it can of `bytes`, blocking until some goes or its patience ends.
+    /// Sends what it can of `bytes`, blocking unless this socket is non-blocking.
     pub fn send(&self, bytes: &[u8]) -> io::Result<usize> {
-        let len = i32::try_from(bytes.len()).unwrap_or(i32::MAX);
-        // SAFETY: `len` bytes of `bytes`, alive for the call.
-        let n = unsafe { send(self.0, bytes.as_ptr(), len, 0) };
-        usize::try_from(n).map_err(|_| wsa_error())
+        send_socket(self.as_socket(), bytes)
     }
 
-    /// Receives into `buf`, blocking until some comes or the peer ends (0).
+    /// Receives into `buf`, blocking unless this socket is non-blocking; zero is its peer's end.
     pub fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
-        let len = i32::try_from(buf.len()).unwrap_or(i32::MAX);
-        // SAFETY: `len` writable bytes of `buf`, alive for the call.
-        let n = unsafe { recv(self.0, buf.as_mut_ptr(), len, 0) };
-        usize::try_from(n).map_err(|_| wsa_error())
+        receive_socket(self.as_socket(), buf)
     }
 
     /// Shuts the socket both ways: its peer sees the end, and its own pending receive completes.

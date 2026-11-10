@@ -1587,7 +1587,7 @@ fn settle(stdio: Stdio, ends: hex_api::Given) -> Result<hex_api::Given, Refusal>
     };
     let mut given = hex_api::Given::default();
     match (stdin, ends.stdin) {
-        (Some(pipe), Some(end)) => copy_in(pipe, std::fs::File::from(end))?,
+        (Some(pipe), Some(end)) => copy_in(pipe, hex_api::OwnedStream::from(end))?,
         (None, Some(end)) if ask.stdin => given.stdin = Some(end),
         (None, Some(_)) => return Err(unasked("stdin")),
         (_, None) => {}
@@ -1597,7 +1597,7 @@ fn settle(stdio: Stdio, ends: hex_api::Given) -> Result<hex_api::Given, Refusal>
         (stderr, ends.stderr, ask.stderr, "stderr", &mut given.stderr),
     ] {
         match (pipe, end) {
-            (Some(pipe), Some(end)) => copy(std::fs::File::from(end), pipe, drop)?,
+            (Some(pipe), Some(end)) => copy(hex_api::OwnedStream::from(end), pipe, drop)?,
             (None, Some(end)) if asked => *to = Some(end),
             (None, Some(_)) => return Err(unasked(name)),
             (_, None) => {}
