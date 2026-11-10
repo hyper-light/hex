@@ -160,3 +160,15 @@ that it was the sole cause of the original intermittent acknowledgement stall.
 No wait seed or longer deadline was used to hide that failure; calibration and
 the native Linux/root-lab validation remain owed.
 The Windows arm64 VM remains paused. Firecracker/WHP/GPU VM coverage is unverified.
+
+## Wait calibration remains unvalidated
+
+After the classified bba3d814 captures, root installed a macOS-only candidate
+response record in bbb3ef21 and checked it with measuring census disabled. The
+short debug/release physical boundaries passed, but the larger armed release
+run failed a local Delete deadline and the combined gate failed a guest-loop
+reboot-count assertion. The latter has not reproduced in isolated controlled
+repeats; no speculative remedy or raised limit is accepted. Source identities,
+terminal guest proofs and the explicit failed status are retained in
+bench/sched/runtime-pools/mac-seeds-validation-e2fb4f17.json. Neither the earlier
+unarmed captures nor the passing short controls certify this candidate for main.

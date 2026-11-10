@@ -1,7 +1,7 @@
 {
   "requirement": "AC-T7.4.1 / decision9",
   "kind": "root-reviewed-macos-client-wait-seeds",
-  "status": "installed in source; root armed and combined validation owed",
+  "status": "candidate installed in source; broader validation FAILED; not ready to land",
   "host": "macOS arm64 d1323898b255a3ed435eb83fa0f7b0cf",
   "source": "bba3d814cfa8373d589482dfbaa38b9bfa792d03",
   "helper_source": "fa5c7e4eb1fe47b1f4c2b3d31cd00cd473badf72",
@@ -690,5 +690,6 @@
     "log_sha256": "82113e20118b25b8b03b31e640c88b8aa895b9680ed4d4fc21d4747379afe465",
     "earlier_attempt": "r498 patch96915ac8 failed compile because new macOS Duration use lacked its import; corrected before this check; earlier log retained; no tests ran in that failed compile",
     "unverified": "actual armed seed behavior and final combined workspace/root lab"
-  }
+  },
+  "validation_record": "mac-seeds-validation-e2fb4f17.json"
 }

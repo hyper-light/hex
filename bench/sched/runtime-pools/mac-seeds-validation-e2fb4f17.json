@@ -1,0 +1,168 @@
+{
+  "boundary_and_release_negative": [
+    {
+      "report": "/Users/adalundhe/.cache/hx/e-0g5cj7xd/result.json",
+      "sha256": "ed6f4638e227d740b34fbdd4cc1ec91992c81bfc37f42b1c8e5275e859fe12fa",
+      "kind": "actual-scheduler-seeded-validation",
+      "status": "passed",
+      "profile": "debug",
+      "source_revision": "e2fb4f174cdc20097ebccdf693668a0c62e8e991",
+      "n": 1,
+      "wait_mode": "armed",
+      "verified_physical_created": 2,
+      "verified_physical_deleted": 2,
+      "verified_oversized_refusals": 2,
+      "backend_baseline_restored": true,
+      "owned_guest_retired": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 46592,
+        "started": 12320511005806
+      },
+      "census": {
+        "enabled": false,
+        "files": 0,
+        "scope": "census disabled; no timing distributions, coverage or seed evidence"
+      }
+    },
+    {
+      "report": "/Users/adalundhe/.cache/hx/e-4h8830u3/result.json",
+      "sha256": "16342dd65f4fc8a8f195aa50a38f0acc7f1889fdddc45cf30352187fdfe773be",
+      "kind": "actual-scheduler-seeded-validation",
+      "status": "passed",
+      "profile": "release",
+      "source_revision": "e2fb4f174cdc20097ebccdf693668a0c62e8e991",
+      "n": 1,
+      "wait_mode": "armed",
+      "verified_physical_created": 2,
+      "verified_physical_deleted": 2,
+      "verified_oversized_refusals": 2,
+      "backend_baseline_restored": true,
+      "owned_guest_retired": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 49115,
+        "started": 12321633196281
+      },
+      "census": {
+        "enabled": false,
+        "files": 0,
+        "scope": "census disabled; no timing distributions, coverage or seed evidence"
+      }
+    },
+    {
+      "report": "/Users/adalundhe/.cache/hx/e-nwsm3n4y/result.json",
+      "sha256": "534da960b9b0d2bc0f966d8a29143c5056eff261c29d3bf3f14158529faeddb4",
+      "kind": "actual-scheduler-seeded-validation",
+      "status": "failed",
+      "profile": "release",
+      "source_revision": "e2fb4f174cdc20097ebccdf693668a0c62e8e991",
+      "n": 1000,
+      "wait_mode": "armed",
+      "owned_guest_retired": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 49815,
+        "started": 12324007619492
+      },
+      "census": {
+        "enabled": false,
+        "files": 0,
+        "scope": "census disabled; no timing distributions, coverage or seed evidence"
+      },
+      "error": "call failed; see call.log in the private run directory"
+    }
+  ],
+  "source_equivalence": {
+    "compiled_inputs_compared": 441,
+    "mismatches": [],
+    "build_source_base": "bba3d814cfa8373d589482dfbaa38b9bfa792d03",
+    "build_patch": "8dffdca89bee66b54cca558c666a199130ef5b5500c6594fd3139448c73c0940",
+    "integration": "e2fb4f174cdc20097ebccdf693668a0c62e8e991",
+    "scope": "crates/vendor regular files and Cargo root/toolchain inputs; bench tooling separately revisioned"
+  },
+  "armed_discrimination": {
+    "kind": "root-actual-cli-armed-mode-discrimination",
+    "integration": "e2fb4f174cdc20097ebccdf693668a0c62e8e991",
+    "root": "/Users/adalundhe/.cache/hx/armed-qzb6v3zk",
+    "scope": "actual SDK Hello to private held-open Unix peer that sends no bytes; env mutation disarms seeded waits; no Runtime/VM/workload/census eligibility or latency benchmark claim",
+    "cases": [
+      {
+        "case": "armed-debug",
+        "profile": "debug",
+        "measuring_mutation": false,
+        "binary": "/Users/adalundhe/.cache/hex-lead/target-mac-seeds-host-8dffdca8/aarch64-apple-darwin/debug/hex",
+        "binary_sha256": "7263e6173079320b8e2ab01dbdbd03b01f011893323d590d4819f35fe91def9f",
+        "owned_child_pid": 49549,
+        "exit": 1,
+        "operator_outer_seconds": 120,
+        "operator_cancelled": false,
+        "exact_child_reaped": true,
+        "peer_sent_bytes": 0,
+        "client_hello_bytes": 56,
+        "elapsed_ns_diagnostic_only": 19840916,
+        "stderr": "hex schedule: waiting for the node agent's answer failed: none came in 5.215168ms, twice the slowest answer to a call of its kind\n",
+        "census_env_installed": false
+      },
+      {
+        "case": "armed-release",
+        "profile": "release",
+        "measuring_mutation": false,
+        "binary": "/Users/adalundhe/.cache/hex-lead/target-mac-seeds-host-8dffdca8/aarch64-apple-darwin/release/hex",
+        "binary_sha256": "3c48d103fc75e6cee3fa012452e9305a8edc05d9e1327ff3923a0a5a2220c710",
+        "owned_child_pid": 49550,
+        "exit": 1,
+        "operator_outer_seconds": 120,
+        "operator_cancelled": false,
+        "exact_child_reaped": true,
+        "peer_sent_bytes": 0,
+        "client_hello_bytes": 56,
+        "elapsed_ns_diagnostic_only": 7397750,
+        "stderr": "hex schedule: waiting for the node agent's answer failed: none came in 1.659ms, twice the slowest answer to a call of its kind\n",
+        "census_env_installed": false
+      },
+      {
+        "case": "measuring-debug-mutation",
+        "profile": "debug",
+        "measuring_mutation": true,
+        "binary": "/Users/adalundhe/.cache/hex-lead/target-mac-seeds-host-8dffdca8/aarch64-apple-darwin/debug/hex",
+        "binary_sha256": "7263e6173079320b8e2ab01dbdbd03b01f011893323d590d4819f35fe91def9f",
+        "owned_child_pid": 49551,
+        "exit": -9,
+        "operator_outer_seconds": 120,
+        "operator_cancelled": true,
+        "exact_child_reaped": true,
+        "peer_sent_bytes": 0,
+        "client_hello_bytes": 56,
+        "elapsed_ns_diagnostic_only": 120014638625,
+        "stderr": "",
+        "census_env_installed": true
+      }
+    ],
+    "status": "passed"
+  },
+  "combined_gate": {
+    "exit": 101,
+    "source": "e2fb4f174cdc20097ebccdf693668a0c62e8e991",
+    "log": "/Users/adalundhe/.cache/hex-lead/logs/mac-seeds-seven-gates-e2fb4f17.log",
+    "log_sha256": "826f197ed13c14515b2175e8f734b7a165a2c3e440f86fd4d78a98de3a891318",
+    "seven_target_clippy": "completed before test failure",
+    "failed_test": "a_guest_booted_again_answers_on_the_loop_too; got3 boots, expected2; guest_loop3pass1fail",
+    "not_run": "remaining workspace cases and vendor gate after cargo test failure"
+  },
+  "status": "candidate failed broader validation; not ready to land",
+  "reproduction_notes": {
+    "driver_v1": "r508 replaced the -I argument incorrectly; argparse exit2 before any Runtime/VM execution; retained log",
+    "driver_v2": "r510 debug armed boundary passed; wrapper then failed to locate release build receipt before release dispatch; debug VM Stopped; r512 separately prepared release receipt and passed",
+    "isolated_guest_loop": "r519 exact e2fb single failing test five times all0; r523 all four tests ten times original and ten times only guest Hello measuring all0, no causal discrimination; r526 one error-only DEBUG line in cache,100 four-test runs all0/no DEBUG branch hit; no fix inferred",
+    "real_release_negative": "r516 failed local Delete after180 complete physical cycles at166.381084ms (twice recorded83.190542ms); guest49815/start12324007619492 Stopped; report has no cleanup_error or backend_cleanup_error; complete baseline/count fields absent and not invented",
+    "current_work": "r515 debug armed N1000 perlocal/SSH phase active; r530 fresh bba release measuring N1000 perlocal/SSH phase active; no increases to seeds/deadlines"
+  },
+  "artifacts": {
+    "production_source": "bbb3ef2114641d82742e153c98665ea6639b9a60",
+    "integration": "e2fb4f174cdc20097ebccdf693668a0c62e8e991",
+    "host_build_run": "r503",
+    "source_root_patch_sha256": "8dffdca89bee66b54cca558c666a199130ef5b5500c6594fd3139448c73c0940",
+    "full_snapshot_patch_sha256": "542d1e541ee18686190ea577a769117c27a34c16ab263481b3465491ac13ce3e"
+  }
+}

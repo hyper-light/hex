@@ -207,3 +207,30 @@ Windows core/client checks and the real classifier mutation passed separately.
 Native Linux/root-lab, calibration and other unrun platform/resource checks
 remain unverified. No current capture guest remains live and no seed was
 installed by this evidence batch.
+
+## Candidate wait seeds: broader validation failed
+
+Signed bbb3ef21 selected exact macOS-specific per-profile maxima for 14 response
+waits; calibration-macos-bba3d814.json retains the operation/sample provenance.
+Root r500 passed51 client cases and seven-target client lint. Root r503 built
+both profiles; source-equivalence checks compared441 crate/vendor/root build
+inputs against integration e2fb4f17 with no mismatch. These results do not make
+the candidate ready for main.
+
+Both armed N1 capacity boundaries passed (r510 debug and r512 release): two
+oversized refusals, two valid physical cycles and empty baseline per profile,
+with each guest Stopped and no census installed. A private held-open Unix peer
+control also distinguished the modes: actual debug/release CLI calls refused
+without a reply when armed; re-enabling measuring census left the same debug
+call waiting until the unchanged120s administrative cancellation reaped it.
+This is timeout-mode sensitivity evidence, not a workload or speed claim.
+
+The larger armed release run r516 failed local Delete after180 complete physical
+cycles, at166.381084ms (twice the recorded83.190542ms). Its guest ended Stopped;
+complete-run count/baseline fields are absent and are not invented. The full
+e2fb4f17 gate r505 separately failed guest_loop's reboot-count assertion (three
+boots instead of two). Isolated original and single-variable diagnostic repeats
+did not reproduce that symptom, so neither a timing cause nor a fix is claimed.
+No seed/deadline was increased. mac-seeds-validation-e2fb4f17.json preserves
+positive and negative results and the scope of those diagnostics. Further root
+diagnosis/calibration and a passing final combined gate remain required.
