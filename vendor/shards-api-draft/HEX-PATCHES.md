@@ -20,6 +20,8 @@ Modified source files:
   connect, partial request writes and answer reads. The owning Guest client uses this same handshake.
 
 The other source files, including ABI, afunix and testdir, remain byte-for-byte at the base revision.
+The root `rustfmt.toml` is copied byte-for-byte from that same revision (`max_width = 110`), so Cargo's
+recursive path-dependency format check uses the upstream style without rewriting the ABI sources.
 
 Windows process APIs are documented by Microsoft:
 [OpenProcess](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocess),
