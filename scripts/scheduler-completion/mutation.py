@@ -36,6 +36,17 @@ def command(argv, root, name, timeout, cleanup_timeout):
             except subprocess.TimeoutExpired:
                 child.kill()
                 child.wait(timeout=cleanup_timeout)
+        except BaseException:
+            # Preserve cancellation while stopping only this exact owned child.
+            # Its descendants/VMs still require the native fixture's cleanup witnesses.
+            if child.poll() is None:
+                child.terminate()
+                try:
+                    child.wait(timeout=cleanup_timeout)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=cleanup_timeout)
+            raise
         finally:
             row.update(exit=child.returncode, reaped=child.poll() is not None, log=str(path),
                        sha256=sha256(path), native_cleanup="requires fixture's own native observers")

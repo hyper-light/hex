@@ -636,6 +636,11 @@ impl Lab {
         let native = self.host("native_observer", &[("@BOX@", id.as_str().into())]);
         assert_eq!(native["backend"], self.backend);
         assert_eq!(native["native_process_verified"], true);
+        journal(
+            json!({"event":"native-observed","box":id,"pid":native["pid"],
+            "start_token":native["start_token"],"backend":self.backend,
+            "authority":"observe only; ordinary Runtime deletion owns native termination"}),
+        );
         fs::write(
             self.scope.join("native-proof.json"),
             serde_json::to_vec(&native).unwrap(),

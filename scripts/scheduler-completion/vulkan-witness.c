@@ -178,7 +178,7 @@ static int inventory(const struct inputs *args, struct owned *own, VkPhysicalDev
             uint64_t registry = ((uint64_t (*)(void *, SEL))objc_msgSend)(metal, sel_registerName("registryID"));
             printf(",\"metal_registry_id\":%" PRIu64, registry);
 #endif
-            printf("}\n");
+            printf("}");
         }
     }
     free(devices);
