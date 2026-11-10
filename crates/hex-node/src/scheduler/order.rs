@@ -14,7 +14,7 @@ use crate::records::Files;
 pub struct Order {
     files: Files,
     pub epoch: u64,
-    received: BTreeMap<u32, (u64, u64)>,
+    received: BTreeMap<u32, (u64, u64, [u8; 32])>,
 }
 
 fn damaged(why: impl Into<String>) -> Refusal {
@@ -37,13 +37,34 @@ impl Order {
                     .map_err(|_| damaged("invalid peer sender epoch"))?;
             } else if let Some(id) = name.strip_prefix("peer-") {
                 let id: u32 = id.parse().map_err(|_| damaged("invalid peer order ID"))?;
-                let (epoch, seq) = value
-                    .split_once(' ')
-                    .ok_or_else(|| damaged("invalid peer order tuple"))?;
-                let stamp = (
-                    epoch.parse().map_err(|_| damaged("invalid peer epoch"))?,
-                    seq.parse().map_err(|_| damaged("invalid peer sequence"))?,
-                );
+                let mut words = value.split_whitespace();
+                if words.next() != Some("o1") {
+                    return Err(damaged("invalid peer order version"));
+                }
+                let epoch = words
+                    .next()
+                    .ok_or_else(|| damaged("missing peer epoch"))?
+                    .parse()
+                    .map_err(|_| damaged("invalid peer epoch"))?;
+                let seq = words
+                    .next()
+                    .ok_or_else(|| damaged("missing peer sequence"))?
+                    .parse()
+                    .map_err(|_| damaged("invalid peer sequence"))?;
+                let hex = words
+                    .next()
+                    .ok_or_else(|| damaged("missing peer fingerprint"))?;
+                if hex.len() != 64 || words.next().is_some() {
+                    return Err(damaged("invalid peer fingerprint"));
+                }
+                let mut digest = [0u8; 32];
+                for (out, pair) in digest.iter_mut().zip(hex.as_bytes().chunks_exact(2)) {
+                    let pair = std::str::from_utf8(pair)
+                        .map_err(|_| damaged("invalid peer fingerprint text"))?;
+                    *out = u8::from_str_radix(pair, 16)
+                        .map_err(|_| damaged("invalid peer fingerprint hex"))?;
+                }
+                let stamp = (epoch, seq, digest);
                 received.insert(id, stamp);
             } else {
                 return Err(damaged("unknown peer order record"));
@@ -64,16 +85,26 @@ impl Order {
 
     /// Caller holds its mutex until the matching driver operation has returned. This serializes
     /// old/new connections across physical effects, including a request already queued at reconnect.
-    pub fn accept(&mut self, peer: u32, epoch: u64, seq: u64) -> Result<bool, Refusal> {
+    pub fn accept(
+        &mut self,
+        peer: u32,
+        epoch: u64,
+        seq: u64,
+        digest: [u8; 32],
+    ) -> Result<bool, Refusal> {
         if epoch == 0 || seq == 0 {
             return Err(damaged("zero peer message epoch or sequence"));
         }
         let stamp = (epoch, seq);
-        if let Some(&last) = self.received.get(&peer) {
+        if let Some(&(last_epoch, last_seq, last_digest)) = self.received.get(&peer) {
+            let last = (last_epoch, last_seq);
             if stamp < last {
                 return Ok(false);
             }
             if stamp == last {
+                if digest != last_digest {
+                    return Err(damaged("a retried peer sequence changed its message"));
+                }
                 return Ok(true);
             }
         } else if self.received.len() >= crate::records::MOST.saturating_sub(1) {
@@ -82,10 +113,18 @@ impl Order {
                 bound: crate::records::MOST.saturating_sub(1),
             });
         }
+        use std::fmt::Write;
+        let mut fingerprint = String::new();
+        for byte in digest {
+            write!(&mut fingerprint, "{byte:02x}").map_err(|e| damaged(e.to_string()))?;
+        }
         self.files
-            .put(&format!("peer-{peer}"), &format!("{epoch} {seq}"))
+            .put(
+                &format!("peer-{peer}"),
+                &format!("o1 {epoch} {seq} {fingerprint}"),
+            )
             .map_err(|e| damaged(format!("committing peer message order: {e:?}")))?;
-        self.received.insert(peer, stamp);
+        self.received.insert(peer, (epoch, seq, digest));
         Ok(true)
     }
 }
@@ -98,16 +137,17 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut order = Order::open(temp.path()).unwrap();
         let sender_epoch = order.epoch;
-        assert!(order.accept(4, 1, 1).unwrap()); // Start.
-        assert!(order.accept(4, 1, 2).unwrap()); // Delete, with physical deletion completed under lock.
-        assert!(order.accept(4, 1, 3).unwrap()); // Forget.
-        assert!(!order.accept(4, 1, 1).unwrap());
+        assert!(order.accept(4, 1, 1, [0; 32]).unwrap()); // Start.
+        assert!(order.accept(4, 1, 2, [0; 32]).unwrap()); // Delete, with physical deletion completed under lock.
+        assert!(order.accept(4, 1, 3, [0; 32]).unwrap()); // Forget.
+        assert!(!order.accept(4, 1, 1, [0; 32]).unwrap());
         drop(order);
         let mut order = Order::open(temp.path()).unwrap();
         assert!(order.epoch > sender_epoch);
-        assert!(!order.accept(4, 1, 1).unwrap());
-        assert!(order.accept(4, 2, 1).unwrap()); // New connection generation after owner reboot.
-        assert!(!order.accept(4, 1, u64::MAX).unwrap());
-        assert!(order.accept(4, 2, 1).unwrap()); // Current delivery can repeat after a lost response.
+        assert!(!order.accept(4, 1, 1, [0; 32]).unwrap());
+        assert!(order.accept(4, 2, 1, [0; 32]).unwrap()); // New connection generation after owner reboot.
+        assert!(!order.accept(4, 1, u64::MAX, [0; 32]).unwrap());
+        assert!(order.accept(4, 2, 1, [1; 32]).is_err());
+        assert!(order.accept(4, 2, 1, [0; 32]).unwrap()); // Current delivery can repeat after a lost response.
     }
 }

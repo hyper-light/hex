@@ -581,7 +581,7 @@ impl Driver {
                 .or_else(|| own.and_then(|(_, n)| n)),
             local: ran.is_some(),
             created: ran.is_some_and(|(_, c, _)| c) || state.node.is_created(key),
-            ended: ran.is_some_and(|(_, _, e)| e),
+            ended: ran.is_some_and(|(_, _, e)| e) || state.node.is_ended(key),
             physical: physical_id(key)?,
         }))
     }

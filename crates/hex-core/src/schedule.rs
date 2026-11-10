@@ -51,14 +51,32 @@ pub struct Packet {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum Command {
-    Describe { from: u32 },
-    Advertise { from: u32, offer: Offer, observations: Vec<LaunchObservation> },
-    Submit { demand: String, payload: Payload },
-    Hear { from: u32, packet: Packet },
-    LinkUp { peer: u32 },
+    Describe {
+        from: u32,
+    },
+    Advertise {
+        from: u32,
+        offer: Offer,
+        observations: Vec<LaunchObservation>,
+    },
+    Submit {
+        demand: String,
+        payload: Payload,
+    },
+    Hear {
+        from: u32,
+        packet: Packet,
+    },
+    LinkUp {
+        peer: u32,
+    },
     Retry,
-    Delete { key: Key },
-    Status { key: Key },
+    Delete {
+        key: Key,
+    },
+    Status {
+        key: Key,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +84,7 @@ pub enum Command {
 pub struct Reply {
     pub key: Option<Key>,
     pub at: Option<u32>,
+    pub tracked: bool,
     pub physical: Option<BoxId>,
     pub created: bool,
     pub ended: bool,

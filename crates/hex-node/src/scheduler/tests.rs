@@ -31,8 +31,17 @@ fn laptop_dispatch_and_common_wire_keep_the_box_until_explicit_delete() {
         .unwrap(),
     )
     .unwrap();
+    let cache = cache::Cache::open(
+        &dir.path().join("peers"),
+        &std::collections::BTreeSet::new(),
+        &mut cluster.clone(),
+    )
+    .unwrap();
     let service = Arc::new(Service {
         id: NodeId(0),
+        command: Mutex::new(()),
+        fault: Mutex::new(None),
+        cache: Mutex::new(cache),
         _lease: std::fs::File::create(dir.path().join("lease")).unwrap(),
         order: Mutex::new(order::Order::open(&dir.path().join("transport")).unwrap()),
         driver,
@@ -44,6 +53,7 @@ fn laptop_dispatch_and_common_wire_keep_the_box_until_explicit_delete() {
         stopping: Arc::new(Stopping::default()),
         queued: Arc::new(AtomicUsize::new(0)),
         senders: BTreeMap::new(),
+        refreshing: BTreeMap::new(),
     });
     let demand = Demand {
         need,
@@ -95,9 +105,21 @@ fn laptop_dispatch_and_common_wire_keep_the_box_until_explicit_delete() {
     )
     .unwrap();
     let client = hex_client::Client::connect(&socket).unwrap();
+    // A second worker cannot publish Delete ahead of an in-progress command's Start.
+    let gate = service.command.lock().unwrap();
+    assert!(matches!(
+        client.schedule(dto::Command::Delete { key: external(key) }),
+        Err(Refusal::Exhausted {
+            what: "scheduler command publication",
+            ..
+        })
+    ));
+    assert_eq!(runtime.list().unwrap().len(), 1);
+    drop(gate);
     let status = client
         .schedule(dto::Command::Status { key: external(key) })
         .unwrap();
+    assert!(status.tracked);
     assert!(status.created);
     assert!(!status.ended);
     assert_eq!(status.physical, Some(physical.clone()));

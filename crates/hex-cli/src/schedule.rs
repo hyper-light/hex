@@ -7,7 +7,7 @@ use std::sync::Arc;
 use hex_api::Refusal;
 use hex_core::{schedule::Command, wire};
 
-const USAGE: &str = "usage: hex schedule serve --config <file> | hex schedule call --socket <path> --request <file> | hex schedule tunnel --socket <path>";
+const USAGE: &str = "usage: hex schedule serve --config <file> | hex schedule call --socket <path> --request <file> | hex schedule tunnel --socket <path> --from <node>";
 
 pub fn main(args: &[String]) -> u8 {
     match run(args) {
@@ -43,7 +43,7 @@ fn run(args: &[String]) -> Result<(), Refusal> {
             let platform = hex_node::serve::macos::platform()?;
             #[cfg(windows)]
             let platform = hex_node::serve::windows::platform()?;
-            let host = service as Arc<dyn hex_node::serve::Host>;
+            let host = Arc::clone(&service) as Arc<dyn hex_node::serve::Host>;
             let mut server = hex_node::serve::Server::bind(
                 &config.socket,
                 host,
@@ -52,7 +52,9 @@ fn run(args: &[String]) -> Result<(), Refusal> {
             )?;
             writeln!(std::io::stdout(), "ready {}", config.socket.display())
                 .map_err(|e| Refusal::os("reporting scheduler readiness", e))?;
-            match server.wait() {
+            let fault = server.wait();
+            service.shutdown()?;
+            match fault {
                 Some(why) => Err(Refusal::Broken(why)),
                 None => Ok(()),
             }
@@ -69,9 +71,23 @@ fn run(args: &[String]) -> Result<(), Refusal> {
                 .and_then(|()| output.write_all(b"\n"))
                 .map_err(|e| Refusal::os("writing scheduler reply", e))
         }
-        [verb, flag, socket] if verb == "tunnel" && flag == "--socket" => {
+        [verb, flag, socket, from_flag, from]
+            if verb == "tunnel" && flag == "--socket" && from_flag == "--from" =>
+        {
+            if std::env::var_os("SSH_ORIGINAL_COMMAND").is_none() {
+                return Err(Refusal::Invalid {
+                    what: "peer identity",
+                    why: "use an SSH key whose forced tunnel command fixes --from for that peer"
+                        .into(),
+                });
+            }
+            let from = from.parse::<u32>().map_err(|e| Refusal::Invalid {
+                what: "peer identity",
+                why: e.to_string(),
+            })?;
             hex_node::scheduler::tunnel::serve(
                 Path::new(socket),
+                from,
                 &mut std::io::stdin().lock(),
                 &mut std::io::stdout().lock(),
             )

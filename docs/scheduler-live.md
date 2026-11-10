@@ -51,22 +51,30 @@ mount paths name files on the selected backend; peer control does not copy image
 must stage those files before submitting a spec that names them.
 
 The reply includes its durable `{owner, epoch, seq}` key and, once known, its selected node and
-namespaced physical box ID. A pending placement has no confirmed creation. A `Status` or `Delete`
+namespaced physical box ID. `tracked` distinguishes a retained record from an unknown/retired
+key. A pending placement has no confirmed creation; a supplied key is not itself proof that a
+record exists. After accepted deletion, the owner's record is retired only after the runner proves
+physical deletion/absence. A pending placement has no confirmed creation. A `Status` or `Delete`
 request carries that key, for example `{"Status":{"key":{"owner":0,"epoch":1,"seq":1}}}`.
 `"Retry"` reconsiders pending work; `{"LinkUp":{"peer":1}}` reconciles a restored peer link.
 Attempt refusals remain typed wire refusals in the reply; one rejected receiver does not mean
 that another compatible receiver cannot accept the box.
 
-For peers, configure a dense `nodes` list of previously exchanged `NodeSpec` facts and its shared
-`models` name table, and one `peers` entry per remote node:
+For peers, give every node a dense ID from zero and configure one `peers` entry per remote node.
+The receiver's live description supplies its facts; `nodes` and `models` may optionally seed known
+facts. Applied peer facts are cached in files for crash recovery. A peer entry is:
 
 ```json
-{"node": 1, "host": "hex-worker", "command": "hex schedule tunnel --socket /run/hex/scheduler.sock"}
+{"node": 1, "host": "hex-worker", "command": "hex schedule tunnel --socket /run/hex/scheduler.sock --from 0"}
 ```
 
 The entry goes inside the configuration's `peers` array. `host` names an SSH configuration with
 the correct user and identity. SSH runs in batch mode with strict host-key checking; trust and
-keys must already be configured. The remote command is administrator configuration, never text
+keys must already be configured. Give each peer a distinct authorized key with an SSH forced
+command fixing `--from` to that peer's ID, for example
+`restrict,command="hex schedule tunnel --socket /run/hex/scheduler.sock --from 0"` before its
+public key in `authorized_keys`. The CLI requires this forced-command form; the tunnel permits
+only that sender's peer controls, never local administration calls. The remote command is administrator configuration, never text
 from a submitted box. Each node re-probes its own current room before new admission; a stale
 remote offer cannot force the receiving node to over-admit. Box reservations last until physical
 deletion, including when an OCI init exits or a process box is empty.
