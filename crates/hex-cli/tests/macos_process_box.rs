@@ -387,6 +387,65 @@ fn a_box_takes_a_named_signal() {
     assert_eq!(exit, Exit::Signal(15), "TERM is 15 on both kernels");
 }
 
+/// HEX-RT-5, HEX-MAC-1: do one program past its box's memory bound; expect its end and the
+/// memory kill to be visible within the contract's learned patience, without warming it up in a loop.
+#[test]
+fn hex_rt_5_one_bounded_program_reports_its_memory_end() {
+    let rt = runtime();
+    let fx = fixture();
+    let id = BoxId::new("mac-one-bound-end").unwrap();
+    rt.create(BoxSpec {
+        id: id.clone(),
+        bounds: Bounds {
+            memory_max: Some(256 * MIB),
+            ..Bounds::default()
+        },
+        class: ClassSpec::Process,
+        owner: None,
+    })
+    .expect("create");
+    let end = bound_end(&rt, &id, fx.act(&Act::Hog(GIB)), conformance::patience());
+    let status = rt.status(&id).expect("watcher status");
+    let usage = rt.usage(&id).expect("usage");
+    let deleted = rt.delete(&id);
+    assert!(
+        end.is_ok(),
+        "{end:?}; {status:?}; {usage:?}; deleted {deleted:?}"
+    );
+    deleted.expect("delete");
+}
+
+/// HEX-RT-6: do one process tree past its box's process bound; expect a counted process kill,
+/// its leader's end and successful deletion of every surviving member.
+#[test]
+fn hex_rt_6_one_process_tree_reports_its_bound_and_deletes() {
+    let rt = runtime();
+    let fx = fixture();
+    let id = BoxId::new("mac-one-pids-end").unwrap();
+    rt.create(BoxSpec {
+        id: id.clone(),
+        bounds: Bounds {
+            pids_max: Some(8),
+            ..Bounds::default()
+        },
+        class: ClassSpec::Process,
+        owner: None,
+    })
+    .expect("create");
+    let mut program = rt
+        .exec(&id, fx.act(&Act::Spawn(32)), Stdio::null())
+        .expect("exec");
+    let end = program.wait_for(conformance::patience());
+    let usage = rt.usage(&id).expect("usage");
+    let deleted = rt.delete(&id);
+    assert!(
+        matches!(end, Ok(Some(Exit::Signal(9)))),
+        "{end:?}; {usage:?}; deleted {deleted:?}"
+    );
+    assert!(usage.pids_refused > 0, "{usage:?}");
+    deleted.expect("delete");
+}
+
 /// HEX-RT-3, HEX-DIFF-5 (AC-T7.1.1): do 60 programs killed at their box's bound, one after another,
 /// expect each wait to return when the program ends, never at the wait's budget. XNU posts a child's
 /// `NOTE_EXIT` before it is a zombie (`bsd/kern/kern_exit.c:2594-2595`, then `p_stat = SZOMB` at :2664),
@@ -950,9 +1009,16 @@ fn bound_end(
     let after = kills(rt)?;
     match exit {
         Some(Exit::Signal(_)) if after == before + 1 => Ok(took),
-        other => Err(format!(
-            "ended {other:?} after {took:?}, memory kills {before} -> {after}"
-        )),
+        other => {
+            let pid = i32::try_from(p.pid()).map_err(|_| "pid past i32".to_owned())?;
+            let run = hex_runtime::macos::sys::run_state(pid);
+            let used = hex_runtime::macos::sys::rusage(pid);
+            let watcher = rt.status(id);
+            Err(format!(
+                "ended {other:?} after {took:?}, memory kills {before} -> {after}; \
+                 pid {pid}, run {run:?}, use {used:?}, watcher {watcher:?}"
+            ))
+        }
     }
 }
 

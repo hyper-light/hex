@@ -1140,20 +1140,20 @@ impl Node {
     /// since the init's end waits for them (f48), and once the init has ended anything still in the cgroup
     /// with a process of its own is outside the namespace (f47): then, and for every other box, ended
     /// by `cgroup.kill` as before (f49). An `oci` box whose init ended and was reaped before its delete
-    /// needs no kill when its cgroup holds nothing: a pid namespace of its own ended with it. Each way is
-    /// counted ([`Node::kills`]). Says whether it wrote `cgroup.kill`, after which the cgroup can't be
+    /// waits for the same cgroup drain, checking its recorded init identity: a last switch may still be pending.
+    /// Each way is counted ([`Node::kills`]). Says whether it wrote `cgroup.kill`, after which the cgroup can't be
     /// handed on ([`cgroups::Held`]'s `killed`).
     fn end(&self, id: &BoxId, cg: &BoxCgroup, ending: &Ending<'_>) -> Result<bool, Refusal> {
-        if let Ending::Ended = ending
+        if let Ending::Ended(_) = ending
             && !cg.populated()?
         {
             self.cgroups.ended_through_init();
             return Ok(false);
         }
+        let killed = Instant::now();
         if let Ending::Init(init) = ending
             && init.pid_namespace
         {
-            let killed = Instant::now();
             init.kill()?;
             self.supervisor.reap_programs(id, empty_patience(killed))?;
             if !init.ended_within(empty_patience(killed))? {
@@ -1165,9 +1165,11 @@ impl Node {
                     ),
                 });
             }
+        }
+        if let Some((pid, start_ticks)) = ending.drain_init() {
             // The init leaves its cgroup at its last switch, after its pidfd reads as ended (Linux v6.19,
             // kernel/sched/core.c:5156), so a cgroup that holds nothing else empties without a kill.
-            if !cg.populated()? || (!outsiders(cg, init.pid()) && wait_empty(cg, killed)?.0) {
+            if !cg.populated()? || (!outsiders(cg, pid, start_ticks) && wait_empty(cg, killed)?.0) {
                 self.cgroups.ended_through_init();
                 return Ok(false);
             }
@@ -1839,20 +1841,13 @@ impl Node {
             (None, Some(_)) => self.record(id)?,
             (_, record) => record,
         };
-        let ended = record
-            .as_ref()
-            .is_some_and(|r| r.spec.class.class() == Class::Oci && r.exit.is_some());
+        let ending = Ending::of(init.as_ref(), record.as_ref());
         if let Some(mut record) = record {
             record.phase = Phase::Deleting;
             self.store.put(&record)?;
         }
         // The box's slot, if it holds one, goes back to its owner once the box is gone.
         let held = self.cgroups.release(id)?;
-        let ending = match &init {
-            Some(init) => Ending::Init(init),
-            None if ended => Ending::Ended,
-            None => Ending::Kill,
-        };
         self.scrub_ending(id, &ending, held)?;
         self.abandoned.forget(id);
         // The box is empty, so its init has ended: reaped here, leaving no zombie of it.
@@ -1987,11 +1982,37 @@ enum Ending<'a> {
     /// Through the box's watched init, its pidfd's SIGKILL when the init made a pid namespace of its own;
     /// `cgroup.kill` otherwise.
     Init(&'a Forgotten),
-    /// The box's init ended and was reaped before the delete, its exit in the box's record: nothing to
-    /// kill when the cgroup holds nothing more, else `cgroup.kill`.
-    Ended,
+    /// The box's init ended and was reaped before the delete, its exit and identity in the box's record. Its cgroup
+    /// may still be draining; with no recorded identity, only an empty cgroup can avoid `cgroup.kill`.
+    Ended(Option<ProcId>),
     /// `cgroup.kill`.
     Kill,
+}
+
+impl<'a> Ending<'a> {
+    fn of(init: Option<&'a Forgotten>, record: Option<&BoxRecord>) -> Self {
+        match (init, record) {
+            (Some(init), _) => Self::Init(init),
+            (None, Some(record))
+                if record.spec.class.class() == Class::Oci && record.exit.is_some() =>
+            {
+                Self::Ended(record.init)
+            }
+            _ => Self::Kill,
+        }
+    }
+
+    /// The init whose end may still be draining from its cgroup, with its start time when only its record remains
+    /// and no pidfd pins its identity. A live replacement of that pid must be treated as an outsider.
+    fn drain_init(&self) -> Option<(i32, Option<u64>)> {
+        match self {
+            Self::Init(init) if init.pid_namespace => Some((init.pid(), None)),
+            Self::Ended(Some(init)) => i32::try_from(init.pid)
+                .ok()
+                .map(|pid| (pid, Some(init.start_ticks))),
+            _ => None,
+        }
+    }
 }
 
 /// A create's turn for box `id` ([`Node::turns`]): past the turns' bound, [`MAX_BOXES`] creates and deletes at once,
@@ -2032,11 +2053,12 @@ fn pid_max() -> Option<usize> {
 /// Whether `cg`'s subtree holds a thread of a live process other than `init`, whose own threads may
 /// stay listed until each is gone: once a pid namespace's init has ended, the namespace's processes
 /// have all been released (Linux v6.19, kernel/pid_namespace.c:263-265), so such a thread is outside it
-/// (research f47). A listed thread whose process is gone from /proc is on its way out. A flat walk,
-/// bounded in cgroups and threads (CLAUDE.md §11, §2): in cgroups as the kill sweep is (hex-runtime's
+/// (research f47). With only a reaped init's record, a matching pid must also match its recorded start time, since
+/// no held pidfd keeps that pid from being reused. A listed thread whose process is gone from /proc is on its way out.
+/// A flat walk, bounded in cgroups and threads (CLAUDE.md §11, §2): in cgroups as the kill sweep is (hex-runtime's
 /// `subtree_budget`, from its `cgroup.stat`, past which a delete is refused anyway), in threads by the pids the host has
 /// ([`pid_max`]). Past either it says there are, so the box is ended by `cgroup.kill` as before.
-fn outsiders(cg: &BoxCgroup, init: i32) -> bool {
+fn outsiders(cg: &BoxCgroup, init: i32, start_ticks: Option<u64>) -> bool {
     let Some(most_threads) = pid_max() else {
         return true;
     };
@@ -2066,7 +2088,11 @@ fn outsiders(cg: &BoxCgroup, init: i32) -> bool {
                         .find_map(|l| l.strip_prefix("Tgid:"))
                         .and_then(|v| v.trim().parse::<i32>().ok())
                 });
-            if tgid.is_some_and(|tgid| tgid != init) {
+            if tgid.is_some_and(|tgid| {
+                tgid != init
+                    || start_ticks
+                        .is_some_and(|ticks| ticks == 0 || start_time(tgid) != Some(ticks))
+            }) {
                 return true;
             }
         }
@@ -2336,6 +2362,61 @@ fn seed_prune_for(owner: &Owner, oci_root: &Path, classic_roots: bool) -> Prune 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AC-T7.1.3, decision 8: deleting an OCI box after its init was reaped still waits for that init's cgroup to
+    /// drain. Do: choose deletion from an init+exit record with no watched init. Expect its identity retained for
+    /// the same outsider check and empty wait a watched init takes, rather than a cgroup-wide kill.
+    #[test]
+    fn ac_t7_1_3_a_reaped_init_keeps_its_identity_until_its_cgroup_drains() {
+        let mut record = BoxRecord::new(
+            BoxSpec {
+                id: BoxId::new("ended").unwrap(),
+                bounds: hex_api::Bounds::default(),
+                class: ClassSpec::Bundle(PathBuf::from("bundle")),
+                owner: None,
+            },
+            Phase::Ready,
+            Vec::new(),
+        );
+        record.init = Some(ProcId {
+            pid: 17,
+            start_ticks: 29,
+        });
+        record.exit = Some(hex_api::Exit::Code(0));
+        assert_eq!(
+            Ending::of(None, Some(&record)).drain_init(),
+            Some((17, Some(29)))
+        );
+
+        record.exit = None;
+        assert_eq!(Ending::of(None, Some(&record)).drain_init(), None);
+        record.exit = Some(hex_api::Exit::Code(0));
+        record.spec.class = ClassSpec::Process;
+        assert_eq!(Ending::of(None, Some(&record)).drain_init(), None);
+        record.spec.class = ClassSpec::Bundle(PathBuf::from("bundle"));
+        record.init = None;
+        assert_eq!(Ending::of(None, Some(&record)).drain_init(), None);
+        assert!(matches!(Ending::of(None, None), Ending::Kill));
+    }
+
+    /// AC-T7.1.3: a reaped init's numeric pid may be reused before its cgroup drains. Do: list this live thread in a
+    /// stand-in cgroup and compare its real start time, another identity and an unrecorded one. Expect only the
+    /// matching identity excluded; a live replacement or unknown identity requires the cgroup-wide kill fallback.
+    #[test]
+    fn ac_t7_1_3_a_reused_init_pid_is_still_an_outsider() {
+        let dir = tempfile::tempdir().unwrap();
+        let me = i32::try_from(std::process::id()).unwrap();
+        let ticks = start_time(me).unwrap();
+        fs::write(dir.path().join("cgroup.threads"), me.to_string()).unwrap();
+        fs::write(dir.path().join("cgroup.stat"), "nr_descendants 0\n").unwrap();
+        fs::write(dir.path().join("cgroup.max.descendants"), "max\n").unwrap();
+        let cg = BoxCgroup::at(dir.path().to_path_buf());
+        assert!(!outsiders(&cg, me, Some(ticks)));
+        assert!(outsiders(&cg, me, Some(ticks.wrapping_add(1))));
+        assert!(outsiders(&cg, me, Some(0)));
+        fs::write(dir.path().join("cgroup.threads"), "").unwrap();
+        assert!(!outsiders(&cg, me, Some(ticks.wrapping_add(1))));
+    }
 
     /// Goal 17's baseline arm (the lead's ruling of 2026-11-09): where a node's create seeds work. Do: ask for a root
     /// node's, a root node's built for the classic root, and a rootless node's, asked for the classic root or not.
