@@ -131,3 +131,61 @@ diagnostic follow-up to its full-Payload guard. After the one exact green check
 and signed evidence with final rows hash, this lane must hold further source/jobs
 while ROOT composes and owns mutation/native/combined gates. No new fixtures or
 redundant campaign are authorized by that steering.
+
+## Actual final-guard exact green and hold
+
+Lifetime actor's final signed guard:
+`ee64211cfa2ccd2c8bc0d9bc7104059543c2b00d` (on f0887076).
+Exact final rows.rs SHA256:
+`72c113b9f160efc8d82d0c3dd4aa5b74dc9c81e0aebd58deee7d8f9fb5531160`.
+Its only follow-up change renders the parsed Key alongside the payload-disagreement
+cause. No payload fields are formatted. This lane read/verified that exact signed
+Git blob and projected only that file into a new private source archive over
+signed red-evidence base `15e18760a1ed6ca72cc1b6edfda37bdd03c8ec29`.
+Local/shared production and parent files remain untouched/unregistered.
+
+The fixture stayed byte-for-byte identical to source-first457, SHA256
+`b02e662366dcbb44360db1c87a39f0c7410d3d7512e25ed2b3b32f68f3a7a54e`.
+Comparison of the before/after full source-hash manifests finds exactly one
+non-documentation input difference: rows.rs, from the f0c584d2 hash above to
+72c113b9. Temporary parent registration has the same c1b7e1d5 hash in both copies.
+No lifetime fixture, unrelated actor source or other production fix was composed.
+
+One final exact selected check on approved d132, same declared resource/toolchain
+scope: **1 passed, 0 failed, 0 ignored, 130 filtered out**, Cargo exit0.
+Observed typed Core(Damaged), key=true, payload cause=true, content-hidden=true
+in both Display and Debug checks. Counting (inspect,start,create,delete) remained
+exactly (2,0,2,0) before/after rejection. Full durable record-byte equality, target
+Created BoxInfo equality and sibling box/record equality assertions passed.
+Restoring original runner bytes then produced matching recovery with exactly one
+inspect, no new create/start, retained physical identity and legitimate cleanup.
+Both boxes were deleted before final rejection assertions; epoch-only records
+and zero remaining fixture temp entries were checked. This is native macOS
+libtest/private filesystem/SimRuntime evidence, not native OCI/VM effects.
+
+New private root, original artifacts retained and inactive:
+`/Users/adalundhe/.cache/hex-adversarial-bounds/01a1c643-cp4-spec-after-ee64211c-v1`.
+Local CLI PID5434 and remote Cargo PID13836 completed normally. No stop action or
+owned active handle remains. Byte/hash-verified local copies:
+
+| Artifact | Bytes | SHA256 |
+| --- | ---: | --- |
+| cp4-spec-after-test.log | 5416 | a830deb70c5f06387bc503ea84b876ee3273a7694f4364abce62badb2e64388d |
+| cp4-spec-after-result.json | 3053 | dce968f6786c75812d5e8b2cf9b68eb45d34ac8a0c27efc7c0fe97ed2935fea9 |
+| cp4-spec-after-run.json | 1908 | c4dfc98faa5e2d4b7d0da0fc6144d59316f37f2d13bba85a7178a3a93d2d2364 |
+| cp4-spec-after-source-hashes.json | 112775 | 4e4dca1fbe891db3d53063d10e7e16de797f6b1d7166a040854eace6d125c198 |
+
+After archive SHA256:
+`042e812e3cc0e1fec81f226831b0a36fe977cc42b0b355700355d62a43f4d639`.
+Exact invocation/guard projection are in cp4-spec-after-transfer.json and the
+recorded command in cp4-spec-after-result.json. All baseline red and earlier
+red807/max-ceiling originals remain unchanged. Other test names were compiled
+but not re-executed by this exact check; no all-green combined-tree claim.
+
+R09/R10 now include exact new baseline red/final-guard light green and completed
+fixture cleanup; R01–R16 scope accounting above still applies. No extra campaign
+or Clippy run was dispatched here. ROOT retains source composition/registration,
+native forbidden effects, meaningful guard mutations/restoration, aggregate
+review, applicable format/Clippy/vendor/production/seven-target gates and merge.
+After signing this evidence, this implementer holds all further source/jobs as
+explicitly instructed. The broader lane/scheduler goal is not marked complete.

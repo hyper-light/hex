@@ -618,7 +618,8 @@
   },
   "raw_archives": {
     "root-mac-unit-mutation-native.tar.gz": "6f8c7234a50aff7297b82f56c78f5337395037cf03bf6ab48fe4a8830486099f",
-    "native-windows.tar.gz": "cb6a2008584f0f567ec3bc6f9b765e7067293415ddfb6cf49a640225450b848d"
+    "native-windows.tar.gz": "cb6a2008584f0f567ec3bc6f9b765e7067293415ddfb6cf49a640225450b848d",
+    "seven-target-workspace-f3.tar.gz": "6369aa6893199b668ee792f39f98cac05888093b211408cd3336c667abab9ecb"
   },
   "known_negatives": [
     "Original bounds807 recovered create-only init as Running through SimRuntime; equal-start BoxSpec mismatch also booted and inspected before fix. Both original reds preserved in parent lane record.",
@@ -631,9 +632,9 @@
     "bench/sched/runtime-pools/census/verify_census.py": "a1b650dafee625f17d619fffe47afd3bc97fb920d5e17717c48b98a93fb8987a"
   },
   "pending": [
-    "r703 full seven-target/workspace gate terminal result at f3",
     "final native Linux AMD64 gates and rootlab on final integration",
-    "full scheduler goal acceptance and main-first gated push"
+    "full scheduler goal acceptance and main-first gated push",
+    "live device bridge and newly reproduced device-identity recovery gap, tracked in separate implementation lanes; these completed gates do not establish that feature"
   ],
   "limits": [
     "Native effect proof is OCI inside owned ARM Linux guests, not native AMD64, Firecracker, WHP or GPU attachment.",
@@ -674,8 +675,8 @@
       "proof": "Original source/logs, fixed combined139, independent guard-removal101 and restored0, actual OCI before/after, all133 native ledger rows, artifact/record/config/receipt hashes and exact owned backend reaps retained."
     },
     "R11": {
-      "proof": "Native Mac139 units and Clippy; native Windows133 and Clippy; actual OCI in ARM guest.",
-      "limit": "Current seven-target gate still pending at this record. Final native Linux/rootlab, WindowsARM and other backend VM coverage unverified."
+      "proof": "Native Mac139 units and Clippy; native Windows133 and Clippy; actual OCI in ARM guest. ROOT r703 exactf3 full seven-target lint/format/production/native workspace/vendor completed0:943passed/0failed/13ignored; all named crash/filter/nonvacuity/packing assertions passed.",
+      "limit": "Final native Linux/rootlab remains required. The live device bridge is incomplete; the class/device model passes do not prove native attachment. Other actual backend/WindowsARM coverage remains unverified."
     },
     "R12": {
       "proof": "One portable Rows path, unchanged API/wire/runtime adapters. No OS-specific duplicate or installed helper."
@@ -714,5 +715,102 @@
       "deleted_files": 11038,
       "logical_bytes": 3892674718
     }
+  },
+  "seven_target_workspace_gate": {
+    "source_revision": "f3f19c07e658dcd8097bba3dbb2bcbc484d9d8d7",
+    "tree": "e52cf09b8455d4f370bfc80d98ebf4bad8c1dcea",
+    "exit": 0,
+    "counts": {
+      "passed": 943,
+      "failed": 0,
+      "ignored": 13
+    },
+    "summaries": [
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 35.91s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.57s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.40s",
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.25s",
+      "test result: ok. 17 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 16.51s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s",
+      "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 302 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 4.55s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 139 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.63s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 60 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s",
+      "test result: ok. 158 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.73s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.43s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.42s",
+      "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.83s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 650.60s",
+      "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.01s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.09s",
+      "test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 5.49s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 330.61s",
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s",
+      "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s",
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.60s",
+      "test result: ok. 4 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 58.40s",
+      "test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 129.51s",
+      "test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 22.56s",
+      "test result: ok. 10 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.03s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    ],
+    "named_assertion_tests": {
+      "p2p_keeps_every_box_once_through_crashes_and_dropped_links": true,
+      "a_laptop_keeps_every_box_once_through_crashes": true,
+      "replacing_on_silence_is_caught": true,
+      "ten_thousand_crash_seeds_lose_and_double_nothing": true,
+      "the_hard_filters_keep_every_placement_in_bounds": true,
+      "boxes_land_only_where_their_platform_class_and_devices_are": true,
+      "the_recorded_workload_strands_at_least_30_percent_less_than_best_fit": true
+    },
+    "scope": "Full seven-target lint/format/production/native Mac workspace/vendor at exactf3. Not actual AMD64 Linux/rootlab. Passing class/filter model assertions do not prove the live device attachment bridge."
   }
 }

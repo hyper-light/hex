@@ -1,0 +1,18 @@
+{
+  "base": "15e18760a1ed6ca72cc1b6edfda37bdd03c8ec29",
+  "production_override": {
+    "revision": "ee64211cfa2ccd2c8bc0d9bc7104059543c2b00d",
+    "path": "crates/hex-node/src/placement/rows.rs",
+    "sha256": "72c113b9f160efc8d82d0c3dd4aa5b74dc9c81e0aebd58deee7d8f9fb5531160",
+    "signed_commit_header_present": true,
+    "scope": "only this exact file in NEW PRIVATE source archive; local production untouched"
+  },
+  "fixture_sha256": "b02e662366dcbb44360db1c87a39f0c7410d3d7512e25ed2b3b32f68f3a7a54e",
+  "archive_sha256": "042e812e3cc0e1fec81f226831b0a36fe977cc42b0b355700355d62a43f4d639",
+  "archive_bytes": 6004740,
+  "runner_script_sha256": "dac02fe1062c01ec48b43fb9eec151f6bee4149dd5de78a0ca2df072c7624600",
+  "remote_root": "/Users/adalundhe/.cache/hex-adversarial-bounds/01a1c643-cp4-spec-after-ee64211c-v1",
+  "needs": "cpus=1,mem=4g,disk=12g",
+  "transfer": "--no-sync --stdin",
+  "selector": "placement::tests::adversarial_bounds_tests::equal_start_spec_disagreement_refuses_before_callbacks_without_rendering_payload"
+}

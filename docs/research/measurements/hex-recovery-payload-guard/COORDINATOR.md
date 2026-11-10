@@ -25,8 +25,10 @@ The host was rebuilt at f3; guest, static Linux binary, probe and initrd were
 intentionally retained from 8767. All eight wire inputs are byte-identical.
 Shards and kernel pins did not change. These are functional OCI results, with
 no performance, exploit, Firecracker, WHP or device-attachment claim. Windows ARM
-remains paused and unverified. Final Linux gates/root lab and the full scheduler
-goal remain open.
+remains paused and unverified. The exact f3 seven-target/workspace gate also passed: 943 tests, zero failures and
+13 ignored. Final Linux gates/root lab and the full scheduler goal remain open;
+completion auditing identified a separate live device bridge and device-recovery
+identity gap, so these passing checks are not whole-goal completion.
 
 The `coordinator/` drivers are the exact executed/collection sources. Their cache
 paths are recorded inputs, not installed product requirements. The native verifier
