@@ -368,3 +368,13 @@ trace-off had no markers; trace-on had94, limited to Submit. Root independently
 joined both local/remote physical events and each record/receipt/Stopped identity.
 See diagnostic-submit-trace-n1-1467ca67.json. Larger reproduction remains separate;
 no production change or new timing seed follows from these controls.
+
+For the original local Submit symptom, `physical_trace_e2e.py --local-only`
+uses the same local phase, `one_box` controls, completion guard and ColdHarness
+cleanup as the full fixture. It reports `diagnostic-local-physical-armed-trace`
+and explicitly supplies no SSH coverage. Root checked the refactored default
+path, local trace off/on, and local pre/post-ready faults on real guests; all
+five exact identities ended Stopped, with injected failures preserved. The
+root-verified inputs, ledger events and hashes are in
+diagnostic-local-fixture-controls-05b0bacf.json. Active pressure reproductions
+are separate diagnostic captures; these bounded controls establish no cause or fix.
