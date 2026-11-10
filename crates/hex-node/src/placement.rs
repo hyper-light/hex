@@ -66,6 +66,7 @@ pub struct Status {
     pub node: Option<NodeId>,
     pub local: bool,
     pub created: bool,
+    pub deleting: bool,
     pub ended: bool,
     pub physical: BoxId,
 }
@@ -580,6 +581,7 @@ impl Driver {
                 .map(|_| state.node.id())
                 .or_else(|| own.and_then(|(_, n)| n)),
             local: ran.is_some(),
+            deleting: state.node.is_deleting(key),
             created: ran.is_some_and(|(_, c, _)| c) || state.node.is_created(key),
             ended: ran.is_some_and(|(_, _, e)| e) || state.node.is_ended(key),
             physical: physical_id(key)?,

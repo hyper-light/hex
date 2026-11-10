@@ -1006,6 +1006,13 @@ impl Node {
 
     /// Actual readiness confirmed by the selected peer. Persisted creation is queried again on boot;
     /// admission alone, pending deletion, and ended boxes are never reported as ready.
+    /// An unpublished or interrupted Start must not overtake durable deletion intent.
+    pub fn is_deleting(&self, key: Key) -> bool {
+        self.owned
+            .get(&key)
+            .is_some_and(|own| matches!(own.state, State::Deleting(_)))
+    }
+
     pub fn is_created(&self, key: Key) -> bool {
         if self.is_ended(key) {
             return false;

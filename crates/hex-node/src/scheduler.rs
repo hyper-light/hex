@@ -95,7 +95,7 @@ fn encoded_refusal(why: &Refusal) -> Result<Vec<u8>, Refusal> {
 }
 
 fn packet(
-    envelope: Envelope,
+    envelope: &Envelope,
     models: &[String],
     epoch: u64,
     seq: u64,
@@ -107,8 +107,8 @@ fn packet(
         observations,
         message: peer::encode_message(&envelope.msg, models, wire::MAX_MESSAGE)
             .map_err(|e| Refusal::Broken(format!("encoding placement message: {e:?}")))?,
-        payload: envelope.payload.map(|p| dto::Payload {
-            spec: p.spec,
+        payload: envelope.payload.as_ref().map(|p| dto::Payload {
+            spec: p.spec.clone(),
             start: p.start,
         }),
         refusal: envelope.refusal.as_ref().map(encoded_refusal).transpose()?,
@@ -194,7 +194,8 @@ fn run_peer(lane: PeerLane, receive: Receiver<Queued>) {
     } = lane;
     let mut tunnel = None;
     let mut seq = 0u64;
-    while let Ok(mut queued) = receive.recv() {
+    while let Ok(queued) = receive.recv() {
+        let mut reconcile = false;
         let mut pace = std::time::Duration::ZERO;
         loop {
             if stopping.is_stopped() {
@@ -211,11 +212,6 @@ fn run_peer(lane: PeerLane, receive: Receiver<Queued>) {
                         if stopping.wait_retry(pace).unwrap_or(true) {
                             return;
                         }
-                        // Core records, including a newer Delete, are authoritative after reconnect.
-                        for old in receive.try_iter() {
-                            drop(old);
-                        }
-                        queued.envelope = None;
                         continue;
                     }
                 }
@@ -267,17 +263,33 @@ fn run_peer(lane: PeerLane, receive: Receiver<Queued>) {
                         if stopping.wait_retry(pace).unwrap_or(true) {
                             return;
                         }
-                        for old in receive.try_iter() {
-                            drop(old);
-                        }
-                        queued.envelope = None;
                         continue;
                     }
                 }
             }
-            let Some(envelope) = queued.envelope.take() else {
+            let Some(envelope) = queued.envelope.as_ref() else {
                 break;
             };
+            if let peer::Msg::Start { key, .. } = envelope.msg {
+                let status = {
+                    let Some(service) = source.lock().ok().and_then(|s| s.upgrade()) else {
+                        return;
+                    };
+                    service.driver.status(key)
+                };
+                match status {
+                    Ok(Some(status))
+                        if !status.deleting && status.node == Some(NodeId(peer.node)) => {}
+                    Ok(_) => {
+                        reconcile = true;
+                        break;
+                    }
+                    Err(why) => {
+                        report(NodeId(peer.node), &why.to_string());
+                        break;
+                    }
+                }
+            }
             let Some(next) = seq.checked_add(1) else {
                 report(NodeId(peer.node), "peer sequence exhausted");
                 return;
@@ -295,6 +307,16 @@ fn run_peer(lane: PeerLane, receive: Receiver<Queued>) {
             };
             match connection.call(dto::Command::Hear { from: id.0, packet }) {
                 Ok(Ok(_)) => break,
+                Ok(Err(Refusal::Exhausted {
+                    what: "scheduler command publication",
+                    ..
+                })) => {
+                    pace = pace.max(began.elapsed());
+                    if stopping.wait_retry(pace).unwrap_or(true) {
+                        return;
+                    }
+                    continue;
+                }
                 Ok(Err(why)) => {
                     // A typed application refusal is not a transport retry. Keep ownership and let
                     // later Delete/Holds progress; it alone is not proof that the box is absent.
@@ -308,12 +330,37 @@ fn run_peer(lane: PeerLane, receive: Receiver<Queued>) {
                     if stopping.wait_retry(pace).unwrap_or(true) {
                         return;
                     }
-                    for old in receive.try_iter() {
-                        drop(old);
-                    }
-                    // The next Describe feedback reconstructs intents from durable state, rather
-                    // than replaying a stale Start ahead of a committed deletion.
+                    // Check the durable owner before any retry; cancellation or reassignment
+                    // suppresses an obsolete queued Start, while newer control remains queued.
                     continue;
+                }
+            }
+        }
+        drop(queued);
+        if reconcile {
+            loop {
+                let began = std::time::Instant::now();
+                let result = {
+                    let Some(service) = source.lock().ok().and_then(|s| s.upgrade()) else {
+                        return;
+                    };
+                    service.command(dto::Command::LinkUp { peer: peer.node })
+                };
+                match result {
+                    Ok(_) => break,
+                    Err(Refusal::Exhausted {
+                        what: "scheduler command publication",
+                        ..
+                    }) => {
+                        pace = pace.max(began.elapsed());
+                        if stopping.wait_retry(pace).unwrap_or(true) {
+                            return;
+                        }
+                    }
+                    Err(why) => {
+                        report(NodeId(peer.node), &why.to_string());
+                        break;
+                    }
                 }
             }
         }
@@ -524,9 +571,17 @@ impl Service {
             .lock()
             .map_err(|_| Refusal::Broken("peer feedback lock poisoned".into()))? =
             Arc::downgrade(&service);
-        service.refresh_peers()?;
-        let recovered = service.driver.take_recovered().map_err(failed)?;
-        service.dispatch(recovered)?;
+        {
+            // Bootstrap follows the same transition-through-publication rule before peer feedback
+            // or a bound listener can start another operation.
+            let _initial = service
+                .command
+                .lock()
+                .map_err(|_| Refusal::Broken("scheduler command lock poisoned".into()))?;
+            service.refresh_peers()?;
+            let recovered = service.driver.take_recovered().map_err(failed)?;
+            service.dispatch(recovered)?;
+        }
         Ok(service)
     }
 
@@ -649,7 +704,10 @@ impl Service {
     fn dispatch(&self, step: Step) -> Result<Dispatch, Refusal> {
         let mut result = Dispatch::default();
         let mut work = VecDeque::from([step]);
-        while let Some(step) = work.pop_front() {
+        while let Some(mut step) = work.pop_front() {
+            // Independent boxes' deletion controls take freed transport room before new work.
+            step.send
+                .sort_by_key(|(_, envelope)| !matches!(envelope.msg, peer::Msg::Delete { .. }));
             for notice in step.notices {
                 match &notice {
                     Notice::Refused { refusal, .. } => {
