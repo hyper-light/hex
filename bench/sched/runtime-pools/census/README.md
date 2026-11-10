@@ -190,3 +190,45 @@ Final driver SHA256 `38cfb6a2148e3a05b37773e6523eaa3b9a25a4ec48f9666a09d6c1cb77e
 `8fdad8b9b3710f983e065c977caf5256f193b6b1c4e643b7e202dcd2d7f7e0bd`; local/remote match.
 These are synthetic-only results; every actual lifecycle/failure/mutation/provenance check remains
 root-owned and unrun by this implementer. No additional source scope or seed change is included.
+
+## Cold-campaign raw reconstruction (root execution only)
+
+`verify_cold_census.py` reconstructs a completed cold campaign using the shared verifier's
+nonblocking, no-follow, regular-file reader, duplicate-key JSON decoder and integer nearest ranks.
+Supply the explicit common parent containing the campaign JSON and its unique direct-child run
+directories, plus operator storage budgets. It opens no reported external artifact/source paths,
+starts no subprocess/VM/API call and makes no eligibility decision:
+
+```sh
+python3 -I "$HEX_SRC/bench/sched/runtime-pools/census/verify_cold_census.py" \
+  --run "${COLD_CAMPAIGN_PARENT:?}" --result "${COLD_CAMPAIGN_JSON:?}" --source "${HEX_SRC:?}" \
+  --max-result-bytes "${RESULT_JSON_BYTE_BUDGET:?}" --max-ledger-rows "${LEDGER_ROW_BUDGET:?}" \
+  --expected-source-revision "${CAPTURE_SOURCE_REVISION:?}" --output "${NEW_VERIFICATION_JSON:?}"
+```
+
+Positive N, exact ordinals/counts/unique roots, each original result/runtime/ledger, the exact backend
+filename producer and ordered recorded-Popen reap, ready OCI/empty baseline, guest PID/start/vsock,
+receipt/configuration and exact Stopped closure are checked. The supported configuration is this
+campaign's default private read-only `run/guest-shares`; explicit alternative shares are refused.
+Guest binary/kernel/initrd paths and vCPU/memory declarations are compared with the recorded artifact
+and environment authorities. Root still independently verifies artifact bytes, build/policy receipts
+and live retirement; this reader does not follow those external paths or query a process/socket.
+
+Every opened authority input receives SHA256/byte counts. Ledger and raw files stream within explicit
+ledger-row budgets and each run's source-checked max_frame/max_rows bounds. All ledger-attributed
+census files are reconstructed, but directory extras are not enumerated; unrelated observer files
+never enter the backend first-Hello distribution. SDK first-completed, normal-source-order,
+subsequent, wire-refused and run-out cohorts remain separate. Passed captures with missing, malformed
+or truncated backend rows are refused, and aggregate cohort summaries must match raw reconstruction.
+Normal counts retain `per_row_VM_identity_proven: false` and
+`unobserved_pre_hello_boot_retries_possible: true`. Recorded no-workload/empty-baseline facts are not
+an independent Runtime.create effect counter. No whole-boot latency, workload, seed or performance
+claim follows from this output. Existing results are never replaced; interrupted create-new output
+remains incomplete evidence for root's cancellation review.
+
+Synthetic-only focused check, with ordinary imports and private cache scratch:
+`nice -n 10 "$PRIVATE_PYTHON" -B -m unittest -v test_verify_cold_census.py` from this directory.
+Scratch is `~/.cache/hex-lead/cold-verifier-synthetic`; fixtures use invented rows/identities only,
+never measurements or seeds. Root owns all actual reconstruction/hash/provenance/cleanup/cancellation
+checks, mutation interpretation and combined validation. No actual capture was read by this scoped
+implementation.
