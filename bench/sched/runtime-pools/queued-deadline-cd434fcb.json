@@ -1,4 +1,5 @@
 {
+  "additional_native_common_calls": "native-linux-arm-client-calls-cd434fcb.json; selected common module binary exit0 inside owned Linux ARM64 guest, exact closure/retention/deletion; not full client/Linux native transport/count or AMD64/root-lab proof",
   "baseline": {
     "classification": "expected targeted failure plus3controls; driver formatting assertion failed because --nocapture splits label/panic/FAILED",
     "kind": "root independent expected-red readback",

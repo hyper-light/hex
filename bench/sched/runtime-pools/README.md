@@ -411,3 +411,12 @@ the explicitly retained cc7 static Linux guest, Shards6bf, kernel and initrd;
 they are not native execution of a rebuilt cd434fcb Linux guest. See
 queued-deadline-cd434fcb.json and gates-cd434fcb.json. Native Linux AMD64/root-lab
 checks remain owed; no performance or overall readiness claim follows.
+
+The current cd434fcb client libtest binary also ran the selected `calls::tests::`
+module as an OCI init inside an owned Linux ARM64 guest and returned Code0. Its
+box stayed tracked after init exit until explicit deletion; the empty baseline
+and exact guest Stopped closure were checked. The minimal one-binary rootfs lacks
+Git/HOME/proc dependencies used elsewhere in the full suite, so those cases were
+not selected. No stdout, individual results or test count were captured. This
+is separate from the full Linux client/transport suite and AMD64 root lab; see
+native-linux-arm-client-calls-cd434fcb.json.
