@@ -207,7 +207,7 @@ impl Connection {
 fn peer_command_allowed(command: &schedule::Command, allowed_sender: u32) -> bool {
     matches!(command,
         schedule::Command::Hear { from, .. }
-        | schedule::Command::Describe { from }
+        | schedule::Command::Describe { from, .. }
         | schedule::Command::Advertise { from, .. }
         if *from == allowed_sender)
 }
@@ -320,8 +320,12 @@ mod tests {
     fn lb03_tunnel_binds_peer_commands_to_the_authenticated_sender() {
         for from in [7, 8] {
             let commands = [
-                schedule::Command::Describe { from },
+                schedule::Command::Describe {
+                    from,
+                    cluster: "test".into(),
+                },
                 schedule::Command::Advertise {
+                    cluster: "test".into(),
                     from,
                     offer: schedule::Offer {
                         spec: String::new(),
@@ -332,6 +336,7 @@ mod tests {
                 schedule::Command::Hear {
                     from,
                     packet: schedule::Packet {
+                        cluster: "test".into(),
                         epoch: 1,
                         seq: 1,
                         observations: Vec::new(),

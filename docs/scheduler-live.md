@@ -9,11 +9,17 @@ Start the ordinary runtime node first. A minimal Linux scheduler configuration i
 
 ```json
 {
+  "cluster": "my-hex-laptop",
   "state": "/var/lib/hex/scheduler",
   "socket": "/run/hex/scheduler.sock",
   "backends": [{"class": "oci", "socket": "/run/hex/node.sock"}]
 }
 ```
+
+Every node of one cluster must declare the same exact `cluster` identity. Use a distinct identity
+for independent clusters sharing a backend. Its SHA256 scopes physical box IDs; the durable epoch
+envelope rejects rebinding existing records to a different namespace before runtime inspection.
+Peer messages from another cluster are refused before their ordering or runtime effects.
 
 The backend class describes the runtime the administrator actually initialized. A Shards endpoint
 must have a working configured guest; selecting its name does not install or enable a hypervisor.

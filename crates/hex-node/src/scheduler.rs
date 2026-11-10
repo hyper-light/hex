@@ -53,6 +53,8 @@ pub struct Peer {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// Shared, explicit cluster identity; its SHA256 scopes physical boxes and peer messages.
+    pub cluster: String,
     #[serde(default)]
     pub node: u32,
     pub state: PathBuf,
@@ -100,8 +102,10 @@ fn packet(
     epoch: u64,
     seq: u64,
     observations: Vec<dto::LaunchObservation>,
+    realm: &str,
 ) -> Result<dto::Packet, Refusal> {
     Ok(dto::Packet {
+        cluster: realm.into(),
         epoch,
         seq,
         observations,
@@ -175,6 +179,7 @@ impl Drop for RefreshPermit {
 struct PeerLane {
     peer: Peer,
     id: NodeId,
+    realm: String,
     models: Vec<String>,
     epoch: u64,
     stopping: Arc<Stopping>,
@@ -186,6 +191,7 @@ fn run_peer(lane: PeerLane, receive: Receiver<Queued>) {
     let PeerLane {
         peer,
         id,
+        realm,
         models,
         epoch,
         stopping,
@@ -220,7 +226,10 @@ fn run_peer(lane: PeerLane, receive: Receiver<Queued>) {
                 return;
             };
             if fresh || queued.envelope.is_none() {
-                match connection.call(dto::Command::Describe { from: id.0 }) {
+                match connection.call(dto::Command::Describe {
+                    from: id.0,
+                    cluster: realm.clone(),
+                }) {
                     Ok(Ok(reply)) => {
                         if let Some(offer) = reply.offer {
                             loop {
@@ -232,6 +241,7 @@ fn run_peer(lane: PeerLane, receive: Receiver<Queued>) {
                                     };
                                     service.command(dto::Command::Advertise {
                                         from: peer.node,
+                                        cluster: realm.clone(),
                                         offer: offer.clone(),
                                         observations: reply.observations.clone(),
                                     })
@@ -295,7 +305,14 @@ fn run_peer(lane: PeerLane, receive: Receiver<Queued>) {
                 return;
             };
             seq = next;
-            let packet = match packet(envelope, &models, epoch, seq, queued.observations.clone()) {
+            let packet = match packet(
+                envelope,
+                &models,
+                epoch,
+                seq,
+                queued.observations.clone(),
+                &realm,
+            ) {
                 Ok(packet) => packet,
                 Err(why) => {
                     report(NodeId(peer.node), &why.to_string());
@@ -377,6 +394,7 @@ struct Dispatch {
 /// endpoints, so a caller cannot bypass placement admission by calling Create on this socket.
 pub struct Service {
     id: NodeId,
+    realm: String,
     command: Mutex<()>,
     fault: Mutex<Option<Refusal>>,
     cache: Mutex<cache::Cache>,
@@ -393,6 +411,15 @@ pub struct Service {
 
 impl Service {
     pub fn open(config: &Config, report: Report) -> Result<Arc<Self>, Refusal> {
+        if config.cluster.trim().is_empty() || config.cluster.trim() != config.cluster {
+            return Err(Refusal::Invalid {
+                what: "scheduler cluster",
+                why: "declare a nonempty shared cluster identity without surrounding whitespace"
+                    .into(),
+            });
+        }
+        use sha2::Digest;
+        let namespace = format!("{:x}", sha2::Sha256::digest(config.cluster.as_bytes()));
         std::fs::create_dir_all(&config.state)
             .map_err(|e| Refusal::os("creating scheduler state", e))?;
         let lease = std::fs::OpenOptions::new()
@@ -497,8 +524,11 @@ impl Service {
         if let Some(slot) = cluster.nodes.iter_mut().find(|node| node.id == id) {
             *slot = local;
         }
-        let driver = Driver::boot(
-            id,
+        let driver = Driver::boot_in(
+            crate::placement::Identity {
+                namespace: &namespace,
+                node: id,
+            },
             &cluster.nodes,
             &cluster.models,
             Budget {
@@ -528,6 +558,7 @@ impl Service {
             }
             let (send, receive) = sync_channel::<Queued>(crate::records::MOST);
             let peer = peer.clone();
+            let realm = config.cluster.clone();
             let models = cluster.models.clone();
             let stopping = Arc::clone(&stopping);
             let report = Arc::clone(&report);
@@ -539,6 +570,7 @@ impl Service {
                         PeerLane {
                             peer,
                             id,
+                            realm,
                             models,
                             epoch,
                             stopping,
@@ -554,6 +586,7 @@ impl Service {
         }
         let service = Arc::new(Self {
             id,
+            realm: config.cluster.clone(),
             command: Mutex::new(()),
             fault: Mutex::new(None),
             cache: Mutex::new(cache),
@@ -590,6 +623,17 @@ impl Service {
         self.stopping
             .stop()
             .map_err(|e| Refusal::os("stopping scheduler peer connections", e))
+    }
+
+    fn check_realm(&self, realm: &str) -> Result<(), Refusal> {
+        if realm == self.realm {
+            Ok(())
+        } else {
+            Err(Refusal::Invalid {
+                what: "scheduler cluster",
+                why: "peer belongs to a different configured cluster".into(),
+            })
+        }
     }
 
     fn observations(&self) -> Result<Vec<dto::LaunchObservation>, Refusal> {
@@ -828,7 +872,11 @@ impl Service {
 
         let mut requested = None;
         let step = match command {
-            dto::Command::Describe { from } => {
+            dto::Command::Describe {
+                from,
+                cluster: realm,
+            } => {
+                self.check_realm(&realm)?;
                 if !self.senders.contains_key(&NodeId(from)) {
                     return Err(Refusal::Invalid {
                         what: "peer description",
@@ -853,9 +901,11 @@ impl Service {
             }
             dto::Command::Advertise {
                 from,
+                cluster: realm,
                 offer: incoming,
                 observations,
             } => {
+                self.check_realm(&realm)?;
                 if !self.senders.contains_key(&NodeId(from)) {
                     return Err(Refusal::Invalid {
                         what: "peer advertisement",
@@ -940,6 +990,7 @@ impl Service {
                 step
             }
             dto::Command::Hear { from, packet } => {
+                self.check_realm(&packet.cluster)?;
                 if from != self.id.0 && !self.senders.contains_key(&NodeId(from)) {
                     return Err(Refusal::Invalid {
                         what: "scheduler sender",

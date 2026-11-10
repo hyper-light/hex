@@ -40,6 +40,7 @@ pub struct Offer {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Packet {
+    pub cluster: String,
     pub epoch: u64,
     pub seq: u64,
     pub observations: Vec<LaunchObservation>,
@@ -53,9 +54,11 @@ pub struct Packet {
 pub enum Command {
     Describe {
         from: u32,
+        cluster: String,
     },
     Advertise {
         from: u32,
+        cluster: String,
         offer: Offer,
         observations: Vec<LaunchObservation>,
     },

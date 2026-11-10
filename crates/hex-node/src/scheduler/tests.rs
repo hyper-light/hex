@@ -64,6 +64,7 @@ fn replayed_deletion_does_not_interrupt_the_reconnected_peer() {
     .unwrap();
     let service = Service {
         id: NodeId(0),
+        realm: "test".into(),
         command: Mutex::new(()),
         fault: Mutex::new(None),
         cache: Mutex::new(cache),
@@ -132,6 +133,7 @@ fn laptop_dispatch_and_common_wire_keep_the_box_until_explicit_delete() {
     .unwrap();
     let service = Arc::new(Service {
         id: NodeId(0),
+        realm: "test".into(),
         command: Mutex::new(()),
         fault: Mutex::new(None),
         cache: Mutex::new(cache),
@@ -212,6 +214,16 @@ fn laptop_dispatch_and_common_wire_keep_the_box_until_explicit_delete() {
     let status = client
         .schedule(dto::Command::Status { key: external(key) })
         .unwrap();
+    assert!(matches!(
+        client.schedule(dto::Command::Describe {
+            from: 0,
+            cluster: "another-cluster".into()
+        }),
+        Err(Refusal::Invalid {
+            what: "scheduler cluster",
+            ..
+        })
+    ));
     assert!(status.tracked);
     assert!(status.created);
     assert!(!status.ended);
