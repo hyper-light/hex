@@ -55,10 +55,15 @@ Earlier source 70945fe8 passed native telemetry fixture Clippy, while the Window
 draft exposed a real ManuallyDrop union compile error; the error is preserved
 under light-70945fe8 and the owned port contains the explicit-dereference fix.
 The original dirty draft remains byte-identical to its recorded original hash.
-The combined Rust fixture's first compile attempt stopped in ROOT's older
-record.rs at missing new class arms; that failure is preserved. ROOT holds the
-dependent rerun until its exact combined cohort is published. Those compile
-checks are not native execution results. All actual backend/VM/foreign-device,
+On exact ROOT source b1de3c7edf385b5a1b752746aae0eefd001dcee7, the fixed
+completion_windows_compute leaf passed x86_64-pc-windows-msvc Clippy with warnings
+denied. This one compile-only check executed zero tests, GPU dispatches or VMs;
+its exact receipt/log hashes are in windows-b1de3c7e. The original 70945fe8
+compile red remains unchanged. The combined Rust fixture's first compile attempt
+stopped in ROOT's older record.rs at missing new class arms; that failure is
+preserved. ROOT still holds the dependent combined-fixture rerun until its exact
+coherent cohort is published. These compile checks are not native execution
+results. All actual backend/VM/foreign-device,
 crash/recovery, mutation/restoration, allocation/copy/fault, competing-baseline
 and supported-target results remain owed by ROOT. Light harness self-checks will
 run only on admitted d132 with one CPU, 4 GiB memory, 12 GiB disk, nice 10,

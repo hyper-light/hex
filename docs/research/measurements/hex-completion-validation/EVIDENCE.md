@@ -30,8 +30,32 @@ focused compile result is recorded; no old draft/native result is attributed to
 the new integrated revision. Its first Windows cross-Clippy exposed the old
 draft's implicit ManuallyDrop union dereference. The red is preserved and the
 owned copy now uses the explicit dereference required by Rust; the original
-dirty draft is unchanged. Rechecking that fix awaits ROOT's exact combined
-cohort along with the integrated socket fixture compile.
+dirty draft is unchanged. ROOT subsequently admitted exactly the independent
+Windows leaf Clippy check on fixed source b1de3c7edf385b5a1b752746aae0eefd001dcee7.
+It passed on x86_64-pc-windows-msvc with warnings denied. The integrated socket
+fixture compile remains held for the coherent L1/L2/L3 cohort.
+
+| Exact cohort | Scoped result | Actual execution |
+|---|---|---|
+| ROOT 8c399c0b plus L4 70945fe8 overlay | Windows leaf Clippy red: implicit ManuallyDrop union dereference. Original red retained under light-70945fe8. | Zero native tests/GPU/VM calls. |
+| ROOT b1de3c7edf385b5a1b752746aae0eefd001dcee7, no overlay | Windows completion_windows_compute Clippy green, x86_64-pc-windows-msvc, warnings denied. | Zero tests/GPU/VM calls. |
+| L4 85ee0ce8 code, retained through f0dbe5ab | Prior 27 pure passes, syntax14 and C syntax green; not rerun during the b1 scope. | Pure/static only. |
+| Final coherent backend cohort | completion_backends check held by ROOT instruction. | Native matrix, ABI/runtime, GPU compute/isolation/recovery/cleanup unverified. |
+
+The b1 check used admitted d132 one CPU/4 GiB/12 GiB with explicit nice10,
+jobs1/testthreads1, private no-sync source/target/cache/temp. Source archive SHA256
+cdba6daf917756a6515a264823ae0fdfe9a296da80a6e05a6fc95e2d2033cb24;
+source manifest SHA256
+9ccaf289f2c6c5f0bb0cf052f8260ddbe38bc94a9c0812fd06ee7c742ce899f8;
+fixed leaf SHA256
+c77f3fa077dc4f05372ce7b21523f09e2d9c725069005ff394c549d90914aab8;
+Clippy log SHA256
+f5f885a78b40365c79d705cbc144cabce9dbe1dc8ffcbd4fe7cc2ec07dbcace4
+(1991 bytes). Compiler command PID95604 exited0, was reaped, did not time out;
+source hashes remained unchanged and private temp entries were zero. Local
+submission PID9927 was also reaped with exit0. Compiler metadata hashes are
+retained in windows-b1de3c7e/result.json; Clippy emitted no native test executable,
+and an empty .rmeta is not treated as a binary or native witness.
 
 Pure/light result: source 85ee0ce83fad8d7becdcfc2d97b7625a94ee68c9, admitted d132,
 one CPU/4 GiB/12 GiB, nice10/jobs1/threads1, private no-sync source/target/cache/temp.
