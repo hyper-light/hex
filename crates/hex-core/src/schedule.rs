@@ -2,6 +2,8 @@
 //! Peer messages use `hex_sim::peer`'s bounded codec, including GPU model names rather than
 //! process-local model IDs. Refusals use a complete `wire::Answer::Refused` message, retaining type.
 
+pub mod waits;
+
 use hex_api::{BoxId, BoxSpec};
 use serde::{Deserialize, Serialize};
 

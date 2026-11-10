@@ -20,6 +20,7 @@ pub fn main(args: &[String]) -> u8 {
 }
 
 fn run(args: &[String]) -> Result<(), Refusal> {
+    hex_node::census::install_from_env()?;
     let invalid = || Refusal::Invalid {
         what: "schedule arguments",
         why: USAGE.into(),

@@ -134,7 +134,7 @@ fn try_boot(dir: &Path, runtime: Arc<Counting>) -> Result<Driver, Error> {
 fn local(driver: &Driver, step: Step) -> Step {
     let mut send = std::collections::VecDeque::from(step.send);
     let mut notices = step.notices;
-    for _ in 0..128 {
+    for _ in 0..crate::records::MOST {
         let Some((to, envelope)) = send.pop_front() else {
             return Step {
                 send: Vec::new(),
