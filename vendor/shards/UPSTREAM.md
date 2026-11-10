@@ -20,3 +20,4 @@ borrowed implementation. See docs/research/measurements/hex-shards-api-33df.
 | crates/api/src/conformance.rs | Keep only Intel Mac in the explicit excluded-host fixture | Public conformance must agree with Windows ARM64 WHP recognition; actual regression df9f6633 failed. | 0003-align-backend-conformance-with-supported-windows-arm64-whp.patch |
 
 Five exact upstream Rust fixture sources referenced by API include!/path attributes are also copied so the API test targets compile without disabling or stubbing their modules. Their paths are in vendor/MANIFEST.toml; the upstream revision is unchanged.
+| crates/api/tests/hex_borrowed_contract.rs | Add ignored coordinator-owned public lifetime and repeated Windows handle checks | Validate the current borrowed contract without reviving the obsolete c55 implementation. | 0004-exercise-public-borrowed-process-lifetime-and-windows-handle.patch |

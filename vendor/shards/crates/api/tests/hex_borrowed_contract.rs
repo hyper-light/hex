@@ -1,0 +1,288 @@
+//! ROOT-owned public borrowed-connector contract. No real VM is booted here.
+//! Run only selected ignored cases with the coordinator's external process guard.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::print_stderr
+)]
+
+use std::io::{Read, Write};
+use std::path::Path;
+#[cfg(windows)]
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+#[cfg(windows)]
+use std::time::Duration;
+
+#[cfg(windows)]
+use shards_afunix::UnixListener;
+use shards_api::{Identity, Refusal, connect_borrowed};
+#[cfg(unix)]
+use std::os::unix::net::UnixListener;
+
+const PORT: u32 = 1234; // A protocol input, matching the canonical echo fixture.
+const REQUEST: &[u8] = b"CONNECT 1234\n";
+
+#[cfg(target_os = "linux")]
+fn started(pid: u32, _child: Option<&Child>) -> u64 {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    stat.rsplit_once(')')
+        .unwrap()
+        .1
+        .split_whitespace()
+        .nth(19)
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+#[cfg(target_os = "macos")]
+fn started(pid: u32, _child: Option<&Child>) -> u64 {
+    // SAFETY: rusage_info_v0 is plain writable output for this exact libproc flavor.
+    let mut usage: libc::rusage_info_v0 = unsafe { std::mem::zeroed() };
+    // SAFETY: pid names this fixture's current process or its owned child, and usage matches V0.
+    assert_eq!(
+        unsafe {
+            libc::proc_pid_rusage(
+                i32::try_from(pid).unwrap(),
+                libc::RUSAGE_INFO_V0,
+                (&raw mut usage).cast(),
+            )
+        },
+        0
+    );
+    usage.ri_proc_start_abstime
+}
+
+#[cfg(windows)]
+fn started(_pid: u32, child: Option<&Child>) -> u64 {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+    // SAFETY: the pseudo-handle is borrowed; an owned Child's handle stays alive for this query.
+    let handle = child.map_or_else(|| unsafe { GetCurrentProcess() }, Child::as_raw_handle);
+    let mut created = FILETIME::default();
+    let mut ended = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // SAFETY: handle is query-capable and all four outputs are distinct writable FILETIMEs.
+    assert_ne!(
+        unsafe { GetProcessTimes(handle, &mut created, &mut ended, &mut kernel, &mut user) },
+        0
+    );
+    (u64::from(created.dwHighDateTime) << u32::BITS) | u64::from(created.dwLowDateTime)
+}
+
+#[cfg(windows)]
+fn own_identity(path: PathBuf) -> Identity {
+    let pid = std::process::id();
+    Identity {
+        pid,
+        started: started(pid, None),
+        vsock: path,
+    }
+}
+
+fn echo_once(listener: &UnixListener) {
+    let (mut peer, _) = listener.accept().unwrap();
+    let mut request = [0; REQUEST.len()];
+    peer.read_exact(&mut request).unwrap();
+    assert_eq!(request, REQUEST);
+    peer.write_all(b"OK 7\n").unwrap();
+    assert_eq!(
+        peer.read(&mut [0; 1]).unwrap(),
+        0,
+        "all borrowed stream clones must close"
+    );
+}
+
+struct Target(Child);
+
+impl Target {
+    fn new() -> Self {
+        Self(
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "root_borrowed_target_waits_for_stdin",
+                    "--test-threads=1",
+                ])
+                .env("HEX_BORROWED_TARGET", "1")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        )
+    }
+
+    fn identity(&self, path: &Path) -> Identity {
+        let pid = self.0.id();
+        Identity {
+            pid,
+            started: started(pid, Some(&self.0)),
+            vsock: path.to_owned(),
+        }
+    }
+}
+
+impl Drop for Target {
+    fn drop(&mut self) {
+        self.0.stdin.take();
+        if self.0.try_wait().unwrap().is_none() {
+            let _ = self.0.kill(); // Only this fixture's recorded owned child.
+        }
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+#[ignore = "ROOT child fixture only; requires HEX_BORROWED_TARGET=1 and an external guard"]
+fn root_borrowed_target_waits_for_stdin() {
+    assert_eq!(std::env::var("HEX_BORROWED_TARGET").as_deref(), Ok("1"));
+    assert_eq!(std::io::stdin().read(&mut [0; 1]).unwrap(), 0);
+}
+
+#[test]
+#[ignore = "ROOT process/socket lifetime contract; externally guard the entire invocation"]
+fn root_borrowed_drop_preserves_target_and_socket_and_dead_target_refuses() {
+    let dir = shards_testdir::TempDir::new("hb-life").unwrap();
+    let path = dir.join("v");
+    let listener = UnixListener::bind(&path).unwrap();
+    let mut target = Target::new();
+    let identity = target.identity(&path);
+    let server = std::thread::spawn(move || {
+        echo_once(&listener);
+        echo_once(&listener);
+    });
+    for _ in 0..2 {
+        // Drop, then reconnect to the same still-owned target/socket.
+        let stream = connect_borrowed(&identity, PORT, shards_api::conformance::UNSERVED_PATIENCE).unwrap();
+        let clone = stream.try_clone().unwrap();
+        drop(stream);
+        assert!(target.0.try_wait().unwrap().is_none());
+        drop(clone);
+        assert!(target.0.try_wait().unwrap().is_none());
+        assert!(path.exists() && dir.path().is_dir());
+    }
+    server.join().unwrap();
+    target.0.stdin.take();
+    assert!(target.0.wait().unwrap().success());
+    assert!(
+        matches!(connect_borrowed(&identity, PORT, shards_api::conformance::UNSERVED_PATIENCE), Err(Refusal::Process { pid, expected_started, .. }) if pid == identity.pid && expected_started == identity.started)
+    );
+    assert!(path.exists() && dir.path().is_dir());
+    eprintln!(
+        "borrowed_lifetime live_after_both_drops=true reconnects=2 dead_target_process_refusal=true socket_directory_preserved=true"
+    );
+}
+
+#[cfg(windows)]
+fn handles() -> u32 {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+    let mut count = 0;
+    // SAFETY: a borrowed current-process pseudo-handle, valid writable DWORD, no handle acquired.
+    assert_ne!(
+        unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) },
+        0
+    );
+    count
+}
+
+#[cfg(windows)]
+fn one_handle_round(dir: &Path, bit: u32) {
+    let path = dir.join("v");
+    let id = own_identity(path.clone());
+    let mut wrong = id.clone();
+    wrong.started ^= 1_u64 << bit;
+    assert!(matches!(
+        connect_borrowed(&wrong, PORT, Duration::ZERO),
+        Err(Refusal::Process { .. })
+    ));
+    let missing = Identity {
+        vsock: dir.join("missing"),
+        ..id.clone()
+    };
+    assert!(matches!(
+        connect_borrowed(&missing, PORT, shards_api::conformance::UNSERVED_PATIENCE),
+        Err(Refusal::Borrowed { .. })
+    ));
+    let invalid = Identity {
+        pid: 0,
+        started: 0,
+        ..id.clone()
+    };
+    assert!(matches!(
+        connect_borrowed(&invalid, PORT, Duration::MAX),
+        Err(Refusal::Bounds { what: "patience", .. })
+    ));
+
+    let listener = UnixListener::bind(&path).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    // No peer accepts or answers before the zero-patience call returns.
+    let refused = connect_borrowed(&id, PORT, Duration::ZERO);
+    assert!(
+        matches!(&refused, Err(Refusal::Borrowed { .. })),
+        "zero withheld reply: {:?}",
+        refused.err()
+    );
+    match listener.accept() {
+        Ok((mut peer, _)) => {
+            peer.set_nonblocking(true).unwrap();
+            let mut bytes = [0; REQUEST.len()];
+            match peer.read(&mut bytes) {
+                Ok(n) => assert!(REQUEST.starts_with(&bytes[..n])),
+                Err(error) => assert!(matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::ConnectionReset
+                )),
+            }
+        }
+        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock),
+    }
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "zero patience must not retry"
+    );
+    drop(listener);
+    std::fs::remove_file(&path).unwrap();
+
+    let listener = UnixListener::bind(&path).unwrap();
+    let server = std::thread::spawn(move || echo_once(&listener));
+    let stream = connect_borrowed(&id, PORT, shards_api::conformance::UNSERVED_PATIENCE).unwrap();
+    let clone = stream.try_clone().unwrap();
+    drop(stream);
+    drop(clone);
+    server.join().unwrap();
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "ROOT repeated native handle contract; required rounds and external process guard"]
+fn root_borrowed_failures_and_drops_return_windows_handles() {
+    let rounds: u32 = std::env::var("HEX_BORROWED_CASE_ROUNDS")
+        .expect("ROOT supplies workload rounds")
+        .parse()
+        .unwrap();
+    assert!(rounds > 0 && rounds <= u64::BITS, "one wrong-start bit per round");
+    let dir = shards_testdir::TempDir::new("hb-handles").unwrap();
+    one_handle_round(dir.path(), 0); // Initialize each path once before measuring resource return.
+    let before = handles();
+    for bit in 0..rounds {
+        one_handle_round(dir.path(), bit);
+        assert_eq!(
+            handles(),
+            before,
+            "native handle count after complete round {bit}"
+        );
+    }
+    eprintln!(
+        "borrowed_windows_handles rounds={rounds} before={before} after={} all_rounds_equal=true",
+        handles()
+    );
+}
