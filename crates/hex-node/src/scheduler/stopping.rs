@@ -43,9 +43,9 @@ fn reap(child: &OwnedChild) -> io::Result<()> {
     match child.try_wait() {
         Ok(Some(_)) => return failure.map_or(Ok(()), Err),
         Ok(None) => {}
-        Err(e) => {
-            failure.get_or_insert(e);
-        }
+        // If another reaper already consumed this child, its numeric PID could be reused.
+        // An unsuccessful ownership check must never be followed by a signal to that PID.
+        Err(e) => return Err(failure.unwrap_or(e)),
     }
     if let Err(e) = child.kill() {
         // Ending between try_wait and kill is ordinary; try_wait also reaps that child.
