@@ -128,7 +128,16 @@ static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.guest.answer.kill"),
     Patience::measuring("client.guest.answer.exec_streams"),
     Patience::measuring("client.guest.answer.run"),
-    Patience::measuring("client.guest.answer.schedule"),
+    Patience::measuring("client.guest.answer.schedule.describe"),
+    Patience::measuring("client.guest.answer.schedule.advertise"),
+    Patience::measuring("client.guest.answer.schedule.submit"),
+    Patience::measuring("client.guest.answer.schedule.hear_create"),
+    Patience::measuring("client.guest.answer.schedule.hear_delete"),
+    Patience::measuring("client.guest.answer.schedule.hear_control"),
+    Patience::measuring("client.guest.answer.schedule.link_up"),
+    Patience::measuring("client.guest.answer.schedule.retry"),
+    Patience::measuring("client.guest.answer.schedule.delete"),
+    Patience::measuring("client.guest.answer.schedule.status"),
 ];
 
 /// A node agent in a guest, reached through a [`Link`].

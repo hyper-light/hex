@@ -31,6 +31,7 @@ use hex_api::{
 };
 use hex_core::netns;
 use hex_core::patience::Patience;
+use hex_core::schedule::waits::WaitKind;
 use hex_core::wire::{self, Answer, Call, Header, Limits, Received, Request, Streams};
 
 use crate::MAX_LIST;
@@ -42,31 +43,55 @@ pub type Then = Box<dyn FnOnce(u64, Result<Answer, Refusal>) + Send>;
 /// What takes an exec'd program's end in the event form: run once, as [`Then`] is.
 pub type Ended = Box<dyn FnOnce(Result<Exit, Refusal>) + Send>;
 
-/// How many kinds of call a client waits for an answer to, one wait each ([`kind_of`]): a hello and each [`Call`].
-pub const KINDS: usize = 14;
+/// Historical answer-table order, retained exactly for the existing per-operation census seeds.
+#[repr(usize)]
+enum LegacyKind {
+    Hello,
+    Create,
+    Start,
+    Exec,
+    Signal,
+    Inspect,
+    Usage,
+    List,
+    Delete,
+    Netns,
+    Kill,
+    ExecStreams,
+    Run,
+}
+impl LegacyKind {
+    const COUNT: usize = Self::Run as usize + 1;
+}
+
+/// One learned wait per legacy operation plus each scheduler operation; no shared scheduler seed.
+pub const KINDS: usize = LegacyKind::COUNT + WaitKind::COUNT;
 
 /// The wait of `request`'s kind in `waits`, a client's table of its call kinds' learned waits (decision 9: a client's
 /// call's wait for its answer and its send is learned per call kind, since a delete waits on its box's emptying and a
 /// list on its parts, so a fast inspect's answer says nothing of theirs); `None` for one that has no answer (a
 /// release). A table's order: hello, create, start, exec, signal, inspect, usage, list, delete, netns, then wire
-/// a program's kill, an exec asking for streams and a run.
+/// a program's kill, an exec asking for streams and a run, followed by scheduler operations in
+/// [`WaitKind`] order.
 pub(crate) fn kind_of<'a>(waits: &'a [Patience; KINDS], request: &Request) -> Option<&'a Patience> {
     let n = match request {
-        Request::Hello { .. } => 0,
+        Request::Hello { .. } => LegacyKind::Hello as usize,
         Request::Call(call) => match call {
-            Call::Create(_) => 1,
-            Call::Start(_) => 2,
-            Call::Exec { .. } => 3,
-            Call::Signal { .. } => 4,
-            Call::Inspect(_) => 5,
-            Call::Usage(_) => 6,
-            Call::List => 7,
-            Call::Delete(_) => 8,
-            Call::Netns => 9,
-            Call::Kill { .. } => 10,
-            Call::ExecStreams { .. } => 11,
-            Call::Run { .. } => 12,
-            Call::Schedule(_) => 13,
+            Call::Create(_) => LegacyKind::Create as usize,
+            Call::Start(_) => LegacyKind::Start as usize,
+            Call::Exec { .. } => LegacyKind::Exec as usize,
+            Call::Signal { .. } => LegacyKind::Signal as usize,
+            Call::Inspect(_) => LegacyKind::Inspect as usize,
+            Call::Usage(_) => LegacyKind::Usage as usize,
+            Call::List => LegacyKind::List as usize,
+            Call::Delete(_) => LegacyKind::Delete as usize,
+            Call::Netns => LegacyKind::Netns as usize,
+            Call::Kill { .. } => LegacyKind::Kill as usize,
+            Call::ExecStreams { .. } => LegacyKind::ExecStreams as usize,
+            Call::Run { .. } => LegacyKind::Run as usize,
+            Call::Schedule(command) => {
+                LegacyKind::COUNT.checked_add(WaitKind::classify(command).index())?
+            }
         },
         Request::Release | Request::Taken | Request::StreamsReady => return None,
     };

@@ -33,7 +33,16 @@ static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.answer.kill"),
     Patience::measuring("client.answer.exec_streams"),
     Patience::measuring("client.answer.run"),
-    Patience::measuring("client.answer.schedule"),
+    Patience::measuring("client.answer.schedule.describe"),
+    Patience::measuring("client.answer.schedule.advertise"),
+    Patience::measuring("client.answer.schedule.submit"),
+    Patience::measuring("client.answer.schedule.hear_create"),
+    Patience::measuring("client.answer.schedule.hear_delete"),
+    Patience::measuring("client.answer.schedule.hear_control"),
+    Patience::measuring("client.answer.schedule.link_up"),
+    Patience::measuring("client.answer.schedule.retry"),
+    Patience::measuring("client.answer.schedule.delete"),
+    Patience::measuring("client.answer.schedule.status"),
 ];
 
 pub type Client = Core<Socket>;
