@@ -120,7 +120,10 @@ pub fn runtime_budget() -> Budget {
 }
 
 pub fn physical_id(key: Key) -> Result<BoxId, Refusal> {
-    BoxId::new(&format!("hex-place-{}-{}-{}", key.owner, key.epoch, key.seq))
+    BoxId::new(&format!(
+        "hex-place-{}-{}-{}",
+        key.owner, key.epoch, key.seq
+    ))
 }
 
 fn invalid(why: impl Into<String>) -> Refusal {
@@ -140,6 +143,12 @@ struct State {
     node: peer::Node,
     rows: Rows,
     stopped: Option<Stop>,
+    admission: Option<Stop>,
+}
+
+enum Effect {
+    Create(Key, Demand, Box<Payload>),
+    Delete(Key, Demand),
 }
 
 pub struct Driver {
@@ -199,6 +208,7 @@ impl Driver {
                 node,
                 rows,
                 stopped: None,
+                admission: None,
             }),
             operation: Mutex::new(()),
             runtimes,
@@ -236,6 +246,9 @@ impl Driver {
         let _operation = self.operation()?;
         validate(&demand, &payload)?;
         let mut state = self.lock()?;
+        if let Some(why) = &state.admission {
+            return Err(why.clone().into());
+        }
         state.rows.context = Context::NextOwned(payload);
         let State { node, rows, .. } = &mut *state;
         let result = node.submit(demand, rows);
@@ -262,6 +275,11 @@ impl Driver {
                 .ok_or_else(|| invalid("start has no payload"))?;
             // Runtime::classes is a backend call too: validate after dropping the core lock.
             let prior = state.node.ran_keys().any(|(k, _, _)| k == key);
+            if !prior {
+                if let Some(why) = &state.admission {
+                    return Err(why.clone().into());
+                }
+            }
             if prior && state.rows.payload("ran", key)? != payload {
                 return Err(invalid("repeated start changed its payload").into());
             }
@@ -328,7 +346,8 @@ impl Driver {
         let _operation = self.operation()?;
         let mut state = self.lock()?;
         let result = state.node.refresh_node(spec);
-        finish(&mut state, result, false)
+        state.admission = result.as_ref().err().cloned();
+        result.map_err(Error::Core)
     }
 
     pub fn set_pick(&self, pick: Pick) -> Result<(), Error> {
@@ -346,7 +365,10 @@ impl Driver {
         let _operation = self.operation()?;
         let mut state = self.lock()?;
         let result = state.node.set_gpu_load(node, device, load);
-        finish(&mut state, result, false)
+        if let Err(why) = &result {
+            state.admission = Some(why.clone());
+        }
+        result.map_err(Error::Core)
     }
 
     pub fn retry(&self) -> Result<Step, Error> {
@@ -371,8 +393,28 @@ impl Driver {
         self.drive(step, create)
     }
 
-    fn drive(&self, mut step: Step, create: Vec<(Key, Demand, Payload)>) -> Result<Step, Error> {
-        for (key, demand, payload) in create {
+    fn drive(&self, mut step: Step, effects: Vec<Effect>) -> Result<Step, Error> {
+        for effect in effects {
+            let (key, demand, payload) = match effect {
+                Effect::Create(key, demand, payload) => (key, demand, payload),
+                Effect::Delete(key, demand) => {
+                    // The core verified full-key ownership and persisted Deleting at the owner.
+                    // A missing ran row (e.g. dropped Start) is not itself an absence proof.
+                    match self.runtimes.get(demand.class)?.delete(&physical_id(key)?) {
+                        Ok(()) | Err(Refusal::NoSuchBox(_)) => {
+                            let next = self.ended(key)?;
+                            step.send.extend(next.send);
+                            step.notices.extend(next.notices);
+                        }
+                        Err(why) => step.notices.push(Notice::Unknown {
+                            key,
+                            refusal: why,
+                            cleanup: None,
+                        }),
+                    }
+                    continue;
+                }
+            };
             let runtime = self.runtimes.get(demand.class)?;
             let id = physical_id(key)?;
             let mut spec = payload.spec.clone();
@@ -465,7 +507,7 @@ impl Driver {
                 .map(|_| state.node.id())
                 .or_else(|| own.and_then(|(_, n)| n)),
             local: ran.is_some(),
-            created: ran.is_some_and(|(_, c, _)| c),
+            created: ran.is_some_and(|(_, c, _)| c) || state.node.is_created(key),
             ended: ran.is_some_and(|(_, _, e)| e),
             physical: physical_id(key)?,
         }))
@@ -473,7 +515,15 @@ impl Driver {
 
     pub fn delete(&self, key: Key) -> Result<Step, Error> {
         let _operation = self.operation()?;
-        let state = self.lock()?;
+        let mut state = self.lock()?;
+        if state.node.owned_keys().any(|(k, _)| k == key) {
+            let State { node, rows, .. } = &mut *state;
+            let result = node.delete(key, rows);
+            let out = finish(&mut state, result, false)?;
+            let (step, effects) = collect(&mut state, out)?;
+            drop(state);
+            return self.drive(step, effects);
+        }
         if !state.node.ran_keys().any(|(k, _, _)| k == key) {
             return Err(Refusal::NoSuchBox(physical_id(key)?).into());
         }
@@ -626,10 +676,7 @@ fn finish<T>(state: &mut State, result: Result<T, Stop>, submit: bool) -> Result
     })
 }
 
-fn collect(
-    state: &mut State,
-    out: Vec<(NodeId, Msg)>,
-) -> Result<(Step, Vec<(Key, Demand, Payload)>), Error> {
+fn collect(state: &mut State, out: Vec<(NodeId, Msg)>) -> Result<(Step, Vec<Effect>), Error> {
     let mut step = Step::default();
     let mut create = Vec::new();
     for (node, msg) in out {
@@ -650,9 +697,12 @@ fn collect(
         match told {
             Told::Started(key, node) => step.notices.push(Notice::Started { key, node }),
             Told::Ended(key) => step.notices.push(Notice::Ended { key }),
-            Told::Create(key, demand) => {
-                create.push((key, demand, state.rows.payload("ran", key)?))
-            }
+            Told::Create(key, demand) => create.push(Effect::Create(
+                key,
+                demand,
+                Box::new(state.rows.payload("ran", key)?),
+            )),
+            Told::Delete(key, demand) => create.push(Effect::Delete(key, demand)),
         }
     }
     Ok((step, create))

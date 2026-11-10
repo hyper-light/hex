@@ -423,9 +423,65 @@ fn owner_without_guest_backend_sends_full_payload_to_capable_peer() {
         key,
         node: NodeId(1)
     }));
-    assert!(matches!(
-        owner.delete(key),
-        Err(Error::Runtime(Refusal::NoSuchBox(_)))
-    ));
+    let deleting = owner.delete(key).unwrap();
     assert_eq!(rt.deletes.load(Ordering::SeqCst), 0);
+    let (to, message) = deleting.send.into_iter().next().unwrap();
+    assert_eq!(to, NodeId(1));
+    let ended = target.hear(NodeId(0), message).unwrap();
+    assert_eq!(rt.deletes.load(Ordering::SeqCst), 1);
+    let (to, message) = ended.send.into_iter().next().unwrap();
+    assert_eq!(to, NodeId(0));
+    let ended = owner.hear(NodeId(1), message).unwrap();
+    assert!(ended.notices.contains(&Notice::Ended { key }));
+    assert!(rt.list().unwrap().is_empty());
+}
+
+/// AC-T7.4.1: a dropped Start requires the exact backend's absence proof before deletion ends.
+#[test]
+fn deleting_before_start_delivery_checks_runtime_before_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = Arc::new(Counting::default());
+    let driver = boot(dir.path(), rt.clone());
+    let (d, p) = request();
+    let (key, dropped) = driver.submit(d, p).unwrap();
+    assert_eq!(dropped.send.len(), 1);
+    let step = driver.delete(key).unwrap();
+    assert_eq!(rt.deletes.load(Ordering::SeqCst), 0);
+    let ended = local(&driver, step);
+    assert!(ended.notices.contains(&Notice::Ended { key }));
+    assert_eq!(rt.creates.load(Ordering::SeqCst), 0);
+    assert_eq!(rt.deletes.load(Ordering::SeqCst), 1);
+    assert!(driver.status(key).unwrap().is_none());
+}
+
+/// AC-T7.4.1: live capacity shrink refuses new admission without disabling physical cleanup.
+#[test]
+fn failed_atomic_fact_refresh_does_not_poison_delete_or_later_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = Arc::new(Counting::default());
+    let driver = boot(dir.path(), rt.clone());
+    let (d, p) = request();
+    let (key, step) = driver.submit(d, p.clone()).unwrap();
+    local(&driver, step);
+    assert!(
+        driver
+            .refresh_node(NodeSpec::new(NodeId(0), Resources::default()))
+            .is_err()
+    );
+    assert!(driver.submit(d, p.clone()).is_err());
+    local(&driver, driver.delete(key).unwrap());
+    assert!(rt.list().unwrap().is_empty());
+    driver
+        .refresh_node(NodeSpec::new(
+            NodeId(0),
+            Resources {
+                cpu_milli: d.need.cpu_milli * 2,
+                mem_bytes: d.need.mem_bytes * 2,
+                ..Resources::default()
+            },
+        ))
+        .unwrap();
+    let (_, step) = driver.submit(d, p).unwrap();
+    local(&driver, step);
+    assert_eq!(rt.list().unwrap().len(), 1);
 }
