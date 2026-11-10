@@ -322,6 +322,9 @@ pub enum ProcessOperation {
     OpenProcess,
     GetProcessTimes,
     WaitForExit,
+    GetExitCode,
+    QueryScope,
+    StopScope,
 }
 
 /// A failure of the concrete process-identity producers. Observation failure is
@@ -358,6 +361,9 @@ pub enum ProcessFailure {
         operation: ProcessOperation,
         kind: io::ErrorKind,
     },
+    Poisoned {
+        what: &'static str,
+    },
 }
 
 impl std::fmt::Display for ProcessFailure {
@@ -381,6 +387,7 @@ impl std::fmt::Display for ProcessFailure {
             Self::UnrepresentedIo { operation, kind } => {
                 write!(f, "{operation:?}: unrepresented I/O cause ({kind:?})")
             }
+            Self::Poisoned { what } => write!(f, "{what}: poisoned native scope state"),
         }
     }
 }
@@ -510,6 +517,9 @@ pub enum Refusal {
         kind: io::ErrorKind,
         code: Option<i32>,
     },
+    /// Native scope observation or cleanup failed before a controller identity
+    /// was published. This never fabricates a process identity.
+    Scope(ProcessFailure),
 }
 
 /// What names a booted guest beyond its client's process, so a client that restarts (crashed, say)
@@ -530,6 +540,7 @@ pub struct Identity {
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Refusal::Scope(failure) => write!(f, "managed scope: {failure}"),
             Refusal::ManagedIo {
                 operation,
                 kind,
@@ -562,7 +573,7 @@ impl std::fmt::Display for Refusal {
 impl std::error::Error for Refusal {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Process { failure, .. } => std::error::Error::source(failure),
+            Self::Process { failure, .. } | Self::Scope(failure) => Some(failure),
             Self::Borrowed { failure, .. } => Some(failure),
             _ => None,
         }
