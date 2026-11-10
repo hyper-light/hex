@@ -64,8 +64,8 @@ impl LegacyKind {
     const COUNT: usize = Self::Run as usize + 1;
 }
 
-/// One learned wait per legacy operation plus each scheduler operation; no shared scheduler seed.
-pub const KINDS: usize = LegacyKind::COUNT + WaitKind::COUNT + 1;
+/// Legacy, scheduler, capacity, then native physical report: new waits append without moving seeds.
+pub const KINDS: usize = LegacyKind::COUNT + WaitKind::COUNT + 2;
 
 /// The wait of `request`'s kind in `waits`, a client's table of its call kinds' learned waits (decision 9: a client's
 /// call's wait for its answer and its send is learned per call kind, since a delete waits on its box's emptying and a
@@ -78,6 +78,9 @@ pub(crate) fn kind_of<'a>(waits: &'a [Patience; KINDS], request: &Request) -> Op
         Request::Hello { .. } => LegacyKind::Hello as usize,
         Request::Call(call) => match call {
             Call::Capacity(_) => LegacyKind::COUNT.checked_add(WaitKind::COUNT)?,
+            Call::PhysicalReport => LegacyKind::COUNT
+                .checked_add(WaitKind::COUNT)?
+                .checked_add(1)?,
             Call::Create(_) => LegacyKind::Create as usize,
             Call::Start(_) => LegacyKind::Start as usize,
             Call::Exec { .. } => LegacyKind::Exec as usize,
@@ -106,6 +109,87 @@ pub enum Sent {
     /// No room in the agent's socket in all the call's patience: the agent isn't reading.
     Full(Refusal),
     Refused(Refusal),
+}
+
+/// One operation's absolute reply/setup deadline. The caller's authority and the learned answer
+/// wait stay distinct: exhausting caller authority is not a slower-answer calibration sample.
+#[derive(Clone, Copy, Debug)]
+pub struct ReplyDeadline {
+    at: Instant,
+    source: ReplyBound,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ReplyBound {
+    Caller(Duration),
+    Learned(Duration),
+}
+
+impl ReplyDeadline {
+    pub(crate) fn caller(budget: Option<Duration>) -> Result<Option<Self>, Refusal> {
+        let Some(budget) = budget else {
+            return Ok(None);
+        };
+        let at = (!budget.is_zero())
+            .then(|| Instant::now().checked_add(budget))
+            .flatten()
+            .ok_or_else(|| Refusal::Invalid {
+                what: "client reply budget",
+                why: "it must be positive and fit a monotonic deadline".to_owned(),
+            })?;
+        Ok(Some(Self {
+            at,
+            source: ReplyBound::Caller(budget),
+        }))
+    }
+
+    /// The same instant may be lent to a connector; partial progress must never replace it.
+    pub fn at(self) -> Instant {
+        self.at
+    }
+
+    /// Remaining authority for protocol setup, or a refusal naming the bound that expired.
+    pub fn remaining(self, op: &'static str) -> Result<Duration, Refusal> {
+        let left = self.at.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            Err(self.refusal(op))
+        } else {
+            Ok(left)
+        }
+    }
+
+    fn combine(caller: Option<Self>, asked: Instant, patience: Option<Duration>) -> Option<Self> {
+        let learned = patience.and_then(|wait| {
+            asked.checked_add(wait).map(|at| Self {
+                at,
+                source: ReplyBound::Learned(wait),
+            })
+        });
+        match (caller, learned) {
+            // A tie belongs to caller authority, so it cannot enlarge the calibration census.
+            (Some(caller), Some(learned)) if learned.at < caller.at => Some(learned),
+            (Some(caller), _) => Some(caller),
+            (None, learned) => learned,
+        }
+    }
+
+    fn refusal(self, op: &'static str) -> Refusal {
+        let why = match self.source {
+            ReplyBound::Caller(budget) => {
+                format!("the caller's explicit reply budget of {budget:?} expired")
+            }
+            ReplyBound::Learned(wait) => {
+                format!("none came in {wait:?}, twice the slowest answer to a call of its kind")
+            }
+        };
+        Refusal::Os { op, why }
+    }
+
+    fn ran_out(self, waits: Option<&Patience>) {
+        if let (ReplyBound::Learned(wait), Some(waits)) = (self.source, waits) {
+            waits.ran_out(wait);
+        }
+    }
 }
 
 /// A descriptor lent to a message as it is sent (an exec's stdio, a pipe's end of the caller's): the agent gets
@@ -148,6 +232,33 @@ fn ready(
     } else {
         PollFlags::IN
     };
+    poll_for(conn, flags, wake, wait)
+}
+
+/// Protocol setup waits for only the direction that can advance it. Waiting for IN while a
+/// naming write needs OUT would repeatedly wake on unrelated peer bytes without making progress.
+pub(crate) fn protocol_ready(
+    conn: Handle<'_>,
+    write: bool,
+    deadline: ReplyDeadline,
+    op: &'static str,
+) -> Result<(), Refusal> {
+    loop {
+        let left = deadline.remaining(op)?;
+        let flags = if write { PollFlags::OUT } else { PollFlags::IN };
+        let got = poll_for(conn, flags, None, Some(left))?;
+        if got.read || got.write {
+            return Ok(());
+        }
+    }
+}
+
+fn poll_for(
+    conn: Handle<'_>,
+    flags: PollFlags,
+    wake: Option<&Wake>,
+    wait: Option<Duration>,
+) -> Result<Ready, Refusal> {
     let mut fds = vec![PollFd::from_borrowed_fd(conn, flags)];
     if let Some(wake) = wake {
         fds.push(PollFd::from_borrowed_fd(wake.handle(), PollFlags::IN));
@@ -237,6 +348,11 @@ pub trait Transport: Send + Sync + 'static {
     /// Its call kinds' learned waits for an answer, by [`kind_of`]'s order: each its own record's, as its
     /// transport and its agent answer it, measuring where none is recorded yet (decision 9).
     fn answers() -> &'static [Patience; KINDS];
+    /// Optional caller policy for one synchronous reply, separate from learned calibration.
+    /// None preserves the transport's existing wait behavior.
+    fn reply_budget(&self) -> Option<Duration> {
+        None
+    }
     /// A read state for a fresh connection.
     fn reading(&self) -> Self::Reading;
     /// The connection's OS handle, lent for the core to wait on.
@@ -268,6 +384,17 @@ pub trait Transport: Send + Sync + 'static {
             "this transport lends an exec's pipes to its message".to_owned(),
         ))
     }
+    /// Deadline-aware setup for a transport that opts into [`Transport::reply_budget`].
+    /// The default refuses before making streams rather than claiming an unbounded adapter is bounded.
+    fn carries_before(
+        &self,
+        exec: u64,
+        stdio: Stdio,
+        deadline: ReplyDeadline,
+    ) -> Result<(), Refusal> {
+        let _ = (exec, stdio, deadline);
+        Err(unbounded_setup("carried streams"))
+    }
     /// The streams `ask` names for exec `exec`, made here, its program's ends the agent's to find (a
     /// guest's stdio connections, named for it): only where [`Transport::MAKES_ASKED`].
     /// Opens an offered guest's named streams in this caller, never by importing a reserved remote socket.
@@ -291,11 +418,37 @@ pub trait Transport: Send + Sync + 'static {
         })
     }
 
+    fn open_offer_before(
+        &self,
+        offer: &wire::StreamOffer,
+        deadline: ReplyDeadline,
+    ) -> Result<hex_api::Given, Refusal> {
+        let _ = (offer, deadline);
+        Err(unbounded_setup("offered streams"))
+    }
+
     fn asks(&self, exec: u64, ask: hex_api::Ask) -> Result<hex_api::Given, Refusal> {
         let _ = (exec, ask);
         Err(Refusal::Broken(
             "this transport asks the agent for an exec's streams".to_owned(),
         ))
+    }
+
+    fn asks_before(
+        &self,
+        exec: u64,
+        ask: hex_api::Ask,
+        deadline: ReplyDeadline,
+    ) -> Result<hex_api::Given, Refusal> {
+        let _ = (exec, ask, deadline);
+        Err(unbounded_setup("asked streams"))
+    }
+}
+
+fn unbounded_setup(what: &'static str) -> Refusal {
+    Refusal::Invalid {
+        what,
+        why: "this transport has no deadline-aware stream setup".to_owned(),
     }
 }
 
@@ -329,9 +482,57 @@ pub struct Shared<T: Transport> {
     /// The turn's holder's: one read at a time.
     reading: Mutex<T::Reading>,
     /// Held across one whole message's writes.
-    sending: Mutex<()>,
+    sending: SendLock,
     /// What the client owes the agent ahead of any request it sends from now.
     owed: Mutex<Owed>,
+}
+
+/// The existing whole-message send authority. Only its acquisition changes: a queued caller can
+/// wait on the current sender's release with its own deadline instead of blocking inside Mutex::lock.
+#[derive(Default)]
+struct SendLock {
+    busy: Mutex<bool>,
+    released: Condvar,
+}
+
+struct Whole<'a>(&'a SendLock);
+
+impl SendLock {
+    fn lock(&self, deadline: Option<Instant>) -> Result<Option<Whole<'_>>, Refusal> {
+        let mut busy = self.busy.lock().map_err(poisoned)?;
+        while *busy {
+            busy = match deadline {
+                Some(at) => {
+                    let left = at.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return Ok(None);
+                    }
+                    self.released.wait_timeout(busy, left).map_err(poisoned)?.0
+                }
+                None => self.released.wait(busy).map_err(poisoned)?,
+            };
+        }
+        *busy = true;
+        Ok(Some(Whole(self)))
+    }
+
+    fn try_lock(&self) -> Result<Option<Whole<'_>>, Refusal> {
+        let mut busy = self.busy.lock().map_err(poisoned)?;
+        if *busy {
+            return Ok(None);
+        }
+        *busy = true;
+        Ok(Some(Whole(self)))
+    }
+}
+
+impl Drop for Whole<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut busy) = self.0.busy.lock() {
+            *busy = false;
+            self.0.released.notify_one();
+        }
+    }
 }
 
 /// The words a client owes its agent ahead of any later request: each given answer's [`Request::Taken`], framed,
@@ -464,7 +665,7 @@ impl<T: Transport> Shared<T> {
             transport,
             state: Mutex::new(State::default()),
             reading: Mutex::new(reading),
-            sending: Mutex::new(()),
+            sending: SendLock::default(),
             owed: Mutex::new(Owed::default()),
         }
     }
@@ -629,7 +830,7 @@ impl<T: Transport> Shared<T> {
     /// Writes what is owed, each word whole and in order, without waiting, the send lock held (`_whole`): whether all
     /// of it is out. A word cut short on a stream keeps its rest first, so nothing comes between its bytes; one a
     /// failed write cut short leaves the stream unable to carry another, and the connection goes.
-    fn send_owed(&self, _whole: &MutexGuard<'_, ()>) -> Result<bool, Sent> {
+    fn send_owed(&self, _whole: &Whole<'_>) -> Result<bool, Sent> {
         loop {
             let word = self
                 .owed
@@ -666,7 +867,7 @@ impl<T: Transport> Shared<T> {
     /// Writes what is owed now, if the send lock is free and there is room; whoever holds the lock writes it before its
     /// own message and after it. The connection's end, should a word find it, is the next read's to see.
     pub(crate) fn send_owed_now(&self) {
-        if let Ok(whole) = self.sending.try_lock() {
+        if let Ok(Some(whole)) = self.sending.try_lock() {
             let _ = self.send_owed(&whole);
         }
     }
@@ -877,15 +1078,26 @@ impl<'a, T: Transport> Caller<'a, T> {
         patience: Option<Duration>,
     ) -> Result<(), Sent> {
         let shared = self.shared;
+        let no_room = || Refusal::Os {
+            op: "sending to the node agent",
+            why: format!(
+                "no room in its socket for {:?}, twice the slowest answer to a call of its kind: it isn't reading",
+                patience.unwrap_or_default()
+            ),
+        };
         let whole = shared
             .sending
-            .lock()
-            .map_err(|e| Sent::Refused(poisoned(e)))?;
+            .lock(deadline)
+            .map_err(Sent::Refused)?
+            .ok_or_else(|| Sent::Full(no_room()))?;
         self.reads().map_err(Sent::Refused)?;
         let mut at = 0;
         // Made the first time the send waits with the turn another's, so a send that finds room pays nothing for it.
         let mut woken: Option<Arc<Wake>> = None;
         let sent = loop {
+            if deadline.is_some_and(|at| at <= Instant::now()) {
+                break Err(Sent::Full(no_room()));
+            }
             // What is owed goes first, whole, before this message's first byte.
             let owed = if at == 0 {
                 shared.send_owed(&whole)
@@ -903,14 +1115,7 @@ impl<'a, T: Transport> Caller<'a, T> {
             }
             let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
             if left.is_some_and(|l| l.is_zero()) {
-                break Err(Sent::Full(Refusal::Os {
-                    op: "sending to the node agent",
-                    why: format!(
-                        "no room in its socket for {:?}, twice the slowest answer to a call of its kind: it isn't \
-                         reading",
-                        patience.unwrap_or_default()
-                    ),
-                }));
+                break Err(Sent::Full(no_room()));
             }
             if let Err(e) = self.wait_for_room(&mut woken, left) {
                 break Err(e);
@@ -1108,31 +1313,53 @@ impl<T: Transport> Conn<T> {
         with: impl FnOnce(u64) -> Result<&'l [Lent<'l>], Refusal>,
         program: Option<Arc<Ending>>,
     ) -> Result<(u64, Answer), Refusal> {
+        let caller = ReplyDeadline::caller(self.shared.transport.reply_budget())?;
+        self.call_before(bound, request, |id, _| with(id), program, caller)
+    }
+
+    fn call_before<'l>(
+        &self,
+        bound: usize,
+        request: &Request,
+        with: impl FnOnce(u64, Option<ReplyDeadline>) -> Result<&'l [Lent<'l>], Refusal>,
+        program: Option<Arc<Ending>>,
+        cap: Option<ReplyDeadline>,
+    ) -> Result<(u64, Answer), Refusal> {
         let shared = &*self.shared;
-        let mut caller = Caller::new(shared, program)?;
+        if let Some(cap) = cap {
+            cap.remaining("starting a client operation")?;
+        }
         let waits = kind_of(T::answers(), request);
         let patience = waits.and_then(Patience::deadline);
         let asked = Instant::now();
-        let deadline = patience.and_then(|p| asked.checked_add(p));
+        let budget = ReplyDeadline::combine(cap, asked, patience);
+        let deadline = budget.map(ReplyDeadline::at);
+        let mut caller = Caller::new(shared, program)?;
         let bytes = wire::request(caller.id, request, bound)
             .map_err(Refusal::from)
             .and_then(T::frame)?;
-        let lent = with(caller.id)?;
+        // Legacy transports retain their existing setup path. An explicit cap requires an adapter
+        // that consumes the same effective caller/learned deadline before any request is sent.
+        let lent = with(caller.id, cap.and(budget))?;
+        let mut pending = None;
         match caller.send(&bytes, lent, deadline, patience) {
             // Sent, or the agent has gone: why reaches the call as it waits, which sees the end.
             Ok(()) | Err(Sent::Gone) => {}
             // No room for the request in all the call's patience: its wait ran out, as an answer's would.
             Err(Sent::Full(r)) => {
-                if let (Some(waits), Some(wait)) = (waits, patience) {
-                    waits.ran_out(wait);
+                pending = caller.wait(Some(Instant::now()));
+                if pending.is_none() {
+                    if let Some(budget) = budget {
+                        budget.ran_out(waits);
+                    }
+                    return Err(budget.map_or(r, |d| d.refusal("sending to the node agent")));
                 }
-                return Err(r);
             }
             Err(Sent::Refused(r)) => return Err(r),
         }
         let mut offered = false;
         loop {
-            match caller.wait(deadline) {
+            match pending.take().or_else(|| caller.wait(deadline)) {
                 Some(Ok(Answer::Offered(offer))) => {
                     offered = true;
                     caller.answered = false;
@@ -1149,7 +1376,12 @@ impl<T: Transport> Conn<T> {
                             caller.mine = false;
                         }
                     }
-                    let opened = shared.transport.open_offer(&offer);
+                    let opened = match cap.and(budget) {
+                        Some(deadline) => deadline
+                            .remaining("opening offered streams")
+                            .and_then(|_| shared.transport.open_offer_before(&offer, deadline)),
+                        None => shared.transport.open_offer(&offer),
+                    };
                     // A guest may have refused/ended while this caller dialed without holding the turn.
                     caller.collect();
                     if caller.answer.is_some() {
@@ -1169,10 +1401,20 @@ impl<T: Transport> Conn<T> {
                         .map_err(Refusal::from)
                         .and_then(T::frame)?;
                     if let Err(why) = caller.send(&bytes, NONE, deadline, patience) {
+                        pending = caller.wait(Some(Instant::now()));
+                        if pending.is_some() {
+                            continue;
+                        }
                         shared.owe(caller.id, &Request::Release)?;
                         shared.send_owed_now();
                         return Err(match why {
-                            Sent::Full(why) | Sent::Refused(why) => why,
+                            Sent::Full(why) => {
+                                if let Some(budget) = budget {
+                                    budget.ran_out(waits);
+                                }
+                                budget.map_or(why, |d| d.refusal("accepting offered streams"))
+                            }
+                            Sent::Refused(why) => why,
                             Sent::Gone => Refusal::Broken(
                                 "the node ended before accepting the stream offer".to_owned(),
                             ),
@@ -1196,16 +1438,17 @@ impl<T: Transport> Conn<T> {
                         shared.owe(caller.id, &Request::Release)?;
                         shared.send_owed_now();
                     }
-                    if let (Some(waits), Some(wait)) = (waits, patience) {
-                        waits.ran_out(wait);
+                    if let Some(budget) = budget {
+                        budget.ran_out(waits);
                     }
-                    return Err(Refusal::Os {
-                        op: "waiting for the node agent's answer",
-                        why: format!(
-                            "none came in {:?}, twice the slowest answer to a call of its kind",
-                            patience.unwrap_or_default()
-                        ),
-                    });
+                    return Err(budget.map_or_else(
+                        || {
+                            Refusal::Broken(
+                                "the node agent's unbounded answer wait ended".to_owned(),
+                            )
+                        },
+                        |d| d.refusal("waiting for the node agent's answer"),
+                    ));
                 }
             }
         }
@@ -1217,12 +1460,15 @@ impl<T: Transport> Conn<T> {
     /// unable to carry another.
     fn send_now(&self, bytes: &[u8]) {
         let shared = &*self.shared;
+        let Ok(budget) = ReplyDeadline::caller(shared.transport.reply_budget()) else {
+            return;
+        };
         let Ok(framed) = T::frame(bytes.to_vec()) else {
             return;
         };
         let mut at = 0;
         {
-            let Ok(whole) = shared.sending.lock() else {
+            let Ok(Some(whole)) = shared.sending.lock(budget.map(ReplyDeadline::at)) else {
                 return;
             };
             // What is owed goes first: if it can't go now, neither can this, which comes after it.
@@ -1241,7 +1487,10 @@ impl<T: Transport> Conn<T> {
             return;
         };
         let rest = framed.get(at..).unwrap_or_default();
-        if caller.send(rest, NONE, None, None).is_err() {
+        if caller
+            .send(rest, NONE, budget.map(ReplyDeadline::at), None)
+            .is_err()
+        {
             shared.transport.shutdown();
         }
     }
@@ -1269,6 +1518,10 @@ pub struct Deferred<T: Transport> {
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+#[path = "calls/budget_tests.rs"]
+mod budget_tests;
+
 impl<T: Transport> Deferred<T> {
     /// The request's reserved id, also the name of the program an exec starts.
     pub fn id(&self) -> u64 {
@@ -1281,12 +1534,33 @@ impl<T: Transport> Deferred<T> {
         self.send_with(NONE)
     }
 
-    fn send_with(mut self, lent: &[Lent<'_>]) -> Result<(), Refusal> {
+    fn send_with(self, lent: &[Lent<'_>]) -> Result<(), Refusal> {
+        let deadline = ReplyDeadline::caller(self.conn.shared.transport.reply_budget())?;
+        self.send_before(lent, deadline)
+    }
+
+    fn send_before(
+        mut self,
+        lent: &[Lent<'_>],
+        deadline: Option<ReplyDeadline>,
+    ) -> Result<(), Refusal> {
         let shared = &*self.conn.shared;
+        if let Some(deadline) = deadline {
+            deadline.remaining("sending an event-form call")?;
+        }
         if let Some(why) = &shared.state()?.closed {
             return Err(why.clone());
         }
-        let whole = shared.sending.lock().map_err(poisoned)?;
+        let whole = shared
+            .sending
+            .lock(deadline.map(ReplyDeadline::at))?
+            .ok_or_else(|| match deadline {
+                Some(deadline) => deadline.refusal("queuing an event-form call"),
+                None => Refusal::Broken("an unbounded send lock wait ended".to_owned()),
+            })?;
+        if let Some(deadline) = deadline {
+            deadline.remaining("sending an event-form call")?;
+        }
         let mut at = 0;
         // What is owed goes first, as it does before any message.
         let sent = match shared.send_owed(&whole) {
@@ -1332,6 +1606,14 @@ impl<T: Transport> Core<T> {
     /// another wire is refused here, by type, naming both wires and both builds (`hex_core::wire::Fault::Wire`):
     /// two sides talk only when built from the same wire.
     pub(crate) fn hello(shared: Arc<Shared<T>>) -> Result<Self, Refusal> {
+        let deadline = ReplyDeadline::caller(shared.transport.reply_budget())?;
+        Self::hello_before(shared, deadline)
+    }
+
+    pub(crate) fn hello_before(
+        shared: Arc<Shared<T>>,
+        deadline: Option<ReplyDeadline>,
+    ) -> Result<Self, Refusal> {
         let client = Self {
             conn: Arc::new(Conn { shared }),
             classes: Vec::new(),
@@ -1349,7 +1631,16 @@ impl<T: Transport> Core<T> {
         let hello = Request::Hello {
             build: wire::build(),
         };
-        let answer = client.call(&hello, |_| Ok(NONE), None)?.1;
+        let answer = client
+            .conn
+            .call_before(
+                client.limits.message_bytes,
+                &hello,
+                |_, _| Ok(NONE),
+                None,
+                deadline,
+            )?
+            .1;
         client.greeted(answer)
     }
 
@@ -1389,13 +1680,14 @@ impl<T: Transport> Core<T> {
         then: Then,
         ended: Ended,
     ) -> Result<u64, Refusal> {
+        let deadline = ReplyDeadline::caller(self.conn.shared.transport.reply_budget())?;
         let (launch, program) = match call {
             Call::Exec { id, program, .. } | Call::ExecStreams { id, program, .. } => {
                 (Launch::Exec(id), program)
             }
             Call::Run { spec, program, .. } => (Launch::Run(spec), program),
             call => {
-                return self.begun(&Request::Call(call), |_| Ok(NONE), then, None);
+                return self.begun(&Request::Call(call), |_| Ok(NONE), then, None, deadline);
             }
         };
         stdio.check()?;
@@ -1416,11 +1708,12 @@ impl<T: Transport> Core<T> {
         self.begun(
             &Request::Call(request),
             |exec| {
-                make(shared, exec, made)?;
+                make(shared, exec, made, deadline)?;
                 Ok(&lent[..])
             },
             then,
             Some(Watching::Then(ended)),
+            deadline,
         )
     }
 
@@ -1445,11 +1738,12 @@ impl<T: Transport> Core<T> {
         with: impl FnOnce(u64) -> Result<&'l [Lent<'l>], Refusal>,
         then: Then,
         program: Option<Watching>,
+        deadline: Option<ReplyDeadline>,
     ) -> Result<u64, Refusal> {
         let deferred = self.deferred(request, then, program)?;
         let id = deferred.id();
         let lent = with(id)?;
-        deferred.send_with(lent)?;
+        deferred.send_before(lent, deadline)?;
         Ok(id)
     }
 
@@ -1636,14 +1930,22 @@ impl<T: Transport> Core<T> {
                 stderr,
                 ..Stdio::null()
             };
-            let (exec, answer) = self.call(
+            let cap = ReplyDeadline::caller(shared.transport.reply_budget())?;
+            let (exec, answer) = self.conn.call_before(
+                self.limits.message_bytes,
                 &request,
-                |exec| {
-                    make(shared, exec, asked)?;
-                    shared.transport.carries(exec, pipes)?;
+                |exec, deadline| {
+                    make(shared, exec, asked, deadline)?;
+                    if let Some(deadline) = deadline {
+                        deadline.remaining("opening carried streams")?;
+                        shared.transport.carries_before(exec, pipes, deadline)?;
+                    } else {
+                        shared.transport.carries(exec, pipes)?;
+                    }
                     Ok(NONE)
                 },
                 Some(Arc::clone(&ending)),
+                cap,
             )?;
             let kept = Stdio {
                 ask,
@@ -1751,6 +2053,7 @@ pub(crate) fn unexpected(call: &str, answer: &Answer) -> Refusal {
         Answer::Offered(_) => "a guest stream preparation",
         Answer::Scheduled(_) => "a scheduler reply",
         Answer::Capacity(_) => "a runtime capacity",
+        Answer::PhysicalReport(_) => "a native physical report",
     };
     Refusal::Broken(format!("the node agent answered a {call} with {kind}"))
 }
@@ -1795,7 +2098,12 @@ fn union(a: Streams, b: Streams) -> Streams {
 
 /// Makes the streams `made` names for exec `exec`, where its transport makes them (a guest's connections), kept
 /// for its exec to take once its start comes; nothing when it names none.
-fn make<T: Transport>(shared: &Shared<T>, exec: u64, made: Streams) -> Result<(), Refusal> {
+fn make<T: Transport>(
+    shared: &Shared<T>,
+    exec: u64,
+    made: Streams,
+    deadline: Option<ReplyDeadline>,
+) -> Result<(), Refusal> {
     if made == Streams::default() {
         return Ok(());
     }
@@ -1804,7 +2112,13 @@ fn make<T: Transport>(shared: &Shared<T>, exec: u64, made: Streams) -> Result<()
         stdout: made.stdout,
         stderr: made.stderr,
     };
-    let given = shared.transport.asks(exec, ask)?;
+    let given = match deadline {
+        Some(deadline) => {
+            deadline.remaining("opening asked streams")?;
+            shared.transport.asks_before(exec, ask, deadline)?
+        }
+        None => shared.transport.asks(exec, ask)?,
+    };
     shared.state()?.given.insert(exec, given);
     Ok(())
 }
@@ -1874,6 +2188,17 @@ fn settle(stdio: Stdio, ends: hex_api::Given) -> Result<hex_api::Given, Refusal>
 }
 
 impl<T: Transport> Runtime for Core<T> {
+    fn physical_report(&self) -> Result<hex_api::PhysicalReport, Refusal> {
+        match self.plain(Call::PhysicalReport)? {
+            Answer::PhysicalReport(report) => {
+                report.check()?;
+                Ok(report)
+            }
+            Answer::Refused(why) => Err(why),
+            other => Err(unexpected("native physical report", &other)),
+        }
+    }
+
     fn capacity(&self, class: Class) -> Result<Option<hex_api::Capacity>, Refusal> {
         match self.plain(Call::Capacity(class))? {
             Answer::Capacity(capacity) => {

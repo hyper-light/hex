@@ -13,14 +13,16 @@ use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hex_api::{Refusal, Stdio};
 use hex_core::patience::Patience;
 use hex_core::stream::{self, Deframer, Exec, Named};
 use hex_core::wire::{self, Received};
 
-use crate::calls::{Core, KINDS, Lent, Sent, Shared, Take, Transport, poisoned};
+use crate::calls::{
+    Core, KINDS, Lent, ReplyDeadline, Sent, Shared, Take, Transport, poisoned, protocol_ready,
+};
 use crate::copy::{copy, copy_in};
 
 /// The OS handle under a guest connection, which an event loop waits on: a file descriptor on Unix, a
@@ -100,6 +102,25 @@ impl Duplex for std::os::unix::net::UnixStream {
 pub trait Link: Send + Sync + 'static {
     /// A new connection to the guest's `port`.
     fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal>;
+    /// Optional caller budget for one control/setup operation; never a connection lifetime.
+    fn reply_budget(&self) -> Option<Duration> {
+        None
+    }
+    /// Dials within the operation's remaining absolute deadline. A link opting into a reply
+    /// budget must override this; an unbounded legacy dial cannot truthfully implement the cap.
+    fn dial_before(
+        &self,
+        port: u32,
+        deadline: Option<Instant>,
+    ) -> Result<Box<dyn Duplex>, Refusal> {
+        if deadline.is_some() {
+            return Err(Refusal::Invalid {
+                what: "guest dial deadline",
+                why: "this link has no deadline-aware dial".to_owned(),
+            });
+        }
+        self.dial(port)
+    }
     /// An identity safe to lend to a caller that opens its own guest streams, without owning the VM.
     fn identity(&self) -> Result<shards_api::Identity, Refusal> {
         Err(Refusal::Invalid {
@@ -155,6 +176,7 @@ static ANSWERS: [Patience; KINDS] = [
     ),
     #[cfg(not(target_os = "macos"))]
     Patience::measuring("client.guest.answer.capacity"),
+    Patience::measuring("client.guest.answer.physical_report"),
 ];
 
 /// A node agent in a guest, reached through a [`Link`].
@@ -163,6 +185,8 @@ pub type Client = Core<Stream>;
 /// The control connection, as a client's transport: read and written without waiting, waited on by the core.
 pub struct Stream {
     link: Arc<dyn Link>,
+    /// Configuration, not a connection-lifetime deadline: each operation starts its own cap.
+    reply_budget: Option<Duration>,
     /// The token the relay sent first on the control connection, which its stdio connections name.
     token: u64,
     /// The writing handle, its messages one at a time under the core's send lock.
@@ -200,58 +224,109 @@ fn os(op: &'static str) -> impl Fn(io::Error) -> Refusal {
     move |e| Refusal::os(op, e)
 }
 
+/// Protocol bytes use readiness rather than per-read socket timeouts: partial reads/writes and
+/// interruptions consume one deadline, and no timeout is left behind on a workload's stdio.
+fn protocol_read(
+    conn: &mut dyn Duplex,
+    mut bytes: &mut [u8],
+    deadline: ReplyDeadline,
+    op: &'static str,
+) -> Result<(), Refusal> {
+    while !bytes.is_empty() {
+        deadline.remaining(op)?;
+        match conn.read(bytes) {
+            Ok(0) => return Err(Refusal::os(op, io::ErrorKind::UnexpectedEof)),
+            Ok(n) => {
+                bytes = bytes.get_mut(n..).ok_or_else(|| {
+                    Refusal::Broken("a guest stream read more bytes than it was lent".to_owned())
+                })?;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                protocol_ready(conn.handle(), false, deadline, op)?;
+            }
+            Err(e) => return Err(Refusal::os(op, e)),
+        }
+    }
+    Ok(())
+}
+
+fn protocol_write(
+    conn: &mut dyn Duplex,
+    mut bytes: &[u8],
+    deadline: ReplyDeadline,
+    op: &'static str,
+) -> Result<(), Refusal> {
+    while !bytes.is_empty() {
+        deadline.remaining(op)?;
+        match conn.write(bytes) {
+            Ok(0) => return Err(Refusal::os(op, io::ErrorKind::WriteZero)),
+            Ok(n) => {
+                bytes = bytes.get(n..).ok_or_else(|| {
+                    Refusal::Broken("a guest stream wrote more bytes than it was lent".to_owned())
+                })?;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                protocol_ready(conn.handle(), true, deadline, op)?;
+            }
+            Err(e) => return Err(Refusal::os(op, e)),
+        }
+    }
+    Ok(())
+}
+
 impl Stream {
     /// A stdio connection of its own to the guest, named for `named`, so the guest's relay hands it to that exec's
     /// program as its stream.
     fn dial_named(&self, named: Named) -> Result<Box<dyn Duplex>, Refusal> {
-        let mut conn = self.link.dial(stream::STDIO_PORT)?;
-        conn.write_all(&stream::name(named))
-            .map_err(os("naming a stdio connection"))?;
+        self.dial_named_before(named, None)
+    }
+
+    fn dial_named_before(
+        &self,
+        named: Named,
+        deadline: Option<ReplyDeadline>,
+    ) -> Result<Box<dyn Duplex>, Refusal> {
+        if let Some(deadline) = deadline {
+            deadline.remaining("dialing a stdio connection")?;
+        }
+        let mut conn = self
+            .link
+            .dial_before(stream::STDIO_PORT, deadline.map(ReplyDeadline::at))?;
+        match deadline {
+            Some(deadline) => {
+                conn.set_nonblocking(true)
+                    .map_err(os("naming a stdio connection without waiting"))?;
+                protocol_write(
+                    &mut *conn,
+                    &stream::name(named),
+                    deadline,
+                    "naming a stdio connection",
+                )?;
+                // The deadline ends with setup. Copies and caller-owned descriptors are workload I/O.
+                conn.set_nonblocking(false)
+                    .map_err(os("handing off a named stdio connection"))?;
+            }
+            None => conn
+                .write_all(&stream::name(named))
+                .map_err(os("naming a stdio connection"))?,
+        }
         Ok(conn)
     }
 }
 
-impl Transport for Stream {
-    type Reading = Reading;
-    const MAKES_ASKED: bool = true;
-
-    fn stream_offer(
-        &self,
-        exec: u64,
-        streams: wire::Streams,
-    ) -> Result<wire::StreamOffer, Refusal> {
-        let identity = self.link.identity()?;
-        Ok(wire::StreamOffer {
-            pid: identity.pid,
-            started: identity.started,
-            vsock: identity.vsock,
-            token: self.token,
-            exec,
-            streams,
-        })
-    }
-
-    fn answers() -> &'static [Patience; KINDS] {
-        &ANSWERS
-    }
-
-    fn reading(&self) -> Reading {
-        Reading {
-            conn: self.read.lock().ok().and_then(|mut r| r.take()),
-            buf: vec![0u8; stream::MAX_FRAME],
-            deframer: Deframer::new(wire::MAX_MESSAGE),
-        }
-    }
-
-    fn handle(&self) -> crate::calls::Handle<'_> {
-        self.end.handle()
-    }
-
+impl Stream {
     /// Each stream asked for is a stdio connection of its own to the guest, named for the exec, and the
     /// caller holds that connection's socket: the guest's relay splices it to the program, so no byte is
     /// copied on the host (native plan step 8).
     #[cfg(any(unix, windows))]
-    fn asks(&self, exec: u64, ask: hex_api::Ask) -> Result<hex_api::Given, Refusal> {
+    fn asked(
+        &self,
+        exec: u64,
+        ask: hex_api::Ask,
+        deadline: Option<ReplyDeadline>,
+    ) -> Result<hex_api::Given, Refusal> {
         let exec = Exec {
             conn: self.token,
             id: exec,
@@ -260,7 +335,7 @@ impl Transport for Stream {
             if !on {
                 return Ok(None);
             }
-            let conn = self.dial_named(Named { exec, stream })?;
+            let conn = self.dial_named_before(Named { exec, stream }, deadline)?;
             // The caller's own descriptor of the connection; this side's closes as `conn` drops.
             let end = conn
                 .handle()
@@ -290,6 +365,62 @@ impl Transport for Stream {
             stderr: dial(ask.stderr, stream::Stdio::Err)?,
         })
     }
+}
+
+impl Transport for Stream {
+    type Reading = Reading;
+    const MAKES_ASKED: bool = true;
+
+    fn stream_offer(
+        &self,
+        exec: u64,
+        streams: wire::Streams,
+    ) -> Result<wire::StreamOffer, Refusal> {
+        let identity = self.link.identity()?;
+        Ok(wire::StreamOffer {
+            pid: identity.pid,
+            started: identity.started,
+            vsock: identity.vsock,
+            token: self.token,
+            exec,
+            streams,
+        })
+    }
+
+    fn answers() -> &'static [Patience; KINDS] {
+        &ANSWERS
+    }
+
+    fn reply_budget(&self) -> Option<Duration> {
+        self.reply_budget
+    }
+
+    fn reading(&self) -> Reading {
+        Reading {
+            conn: self.read.lock().ok().and_then(|mut r| r.take()),
+            buf: vec![0u8; stream::MAX_FRAME],
+            deframer: Deframer::new(wire::MAX_MESSAGE),
+        }
+    }
+
+    fn handle(&self) -> crate::calls::Handle<'_> {
+        self.end.handle()
+    }
+
+    #[cfg(any(unix, windows))]
+    fn asks(&self, exec: u64, ask: hex_api::Ask) -> Result<hex_api::Given, Refusal> {
+        self.asked(exec, ask, None)
+    }
+
+    #[cfg(any(unix, windows))]
+    fn asks_before(
+        &self,
+        exec: u64,
+        ask: hex_api::Ask,
+        deadline: ReplyDeadline,
+    ) -> Result<hex_api::Given, Refusal> {
+        self.asked(exec, ask, Some(deadline))
+    }
 
     #[cfg(not(any(unix, windows)))]
     fn asks(&self, _exec: u64, _ask: hex_api::Ask) -> Result<hex_api::Given, Refusal> {
@@ -316,6 +447,46 @@ impl Transport for Stream {
         }
         if let Some(w) = stdio.stderr {
             copy(self.dial_named(named(stream::Stdio::Err))?, w, drop)?;
+        }
+        Ok(())
+    }
+
+    fn carries_before(
+        &self,
+        exec: u64,
+        stdio: Stdio,
+        deadline: ReplyDeadline,
+    ) -> Result<(), Refusal> {
+        let exec = Exec {
+            conn: self.token,
+            id: exec,
+        };
+        let dial = |stream| self.dial_named_before(Named { exec, stream }, Some(deadline));
+        // Finish all fallible protocol setup before starting any workload copy. A timeout while
+        // naming a later stream then drops exactly the connections already made, with no copy left waiting.
+        let input = stdio
+            .stdin
+            .as_ref()
+            .map(|_| dial(stream::Stdio::In))
+            .transpose()?;
+        let output = stdio
+            .stdout
+            .as_ref()
+            .map(|_| dial(stream::Stdio::Out))
+            .transpose()?;
+        let error = stdio
+            .stderr
+            .as_ref()
+            .map(|_| dial(stream::Stdio::Err))
+            .transpose()?;
+        if let (Some(r), Some(conn)) = (stdio.stdin, input) {
+            copy_in(r, conn)?;
+        }
+        if let (Some(w), Some(conn)) = (stdio.stdout, output) {
+            copy(conn, w, drop)?;
+        }
+        if let (Some(w), Some(conn)) = (stdio.stderr, error) {
+            copy(conn, w, drop)?;
         }
         Ok(())
     }
@@ -561,7 +732,12 @@ impl Pump {
 impl Client {
     /// Dials the guest's node agent through `link` and learns what it runs and its bounds.
     pub fn connect(link: Arc<dyn Link>) -> Result<Self, Refusal> {
-        Core::hello(Arc::new(Shared::new(Stream::dial(link)?)))
+        let budget = link.reply_budget();
+        let deadline = ReplyDeadline::caller(budget)?;
+        Core::hello_before(
+            Arc::new(Shared::new(Stream::dial_before(link, budget, deadline)?)),
+            deadline,
+        )
     }
 
     /// The event form ([`Pump`]): dials the guest's node agent through `link` and says hello, its answer read by
@@ -573,8 +749,10 @@ impl Client {
         link: Arc<dyn Link>,
         wants_room: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<(Self, Pump), Refusal> {
-        let shared = Arc::new(Shared::new(Stream::dial(link)?));
-        let client = Core::hello(Arc::clone(&shared))?;
+        let budget = link.reply_budget();
+        let deadline = ReplyDeadline::caller(budget)?;
+        let shared = Arc::new(Shared::new(Stream::dial_before(link, budget, deadline)?));
+        let client = Core::hello_before(Arc::clone(&shared), deadline)?;
         let limits = client.limits();
         *shared.transport.backlog.lock().map_err(poisoned)? = Some(Backlog {
             bytes: VecDeque::new(),
@@ -595,11 +773,38 @@ impl Client {
 impl Stream {
     /// The guest's control port dialed through `link`, its relay's token read, and the connection made to read and
     /// write without waiting, as the core waits on it.
-    fn dial(link: Arc<dyn Link>) -> Result<Self, Refusal> {
-        let mut conn = link.dial(stream::CONTROL_PORT)?;
+    #[cfg(test)]
+    pub(crate) fn dial(link: Arc<dyn Link>) -> Result<Self, Refusal> {
+        let budget = link.reply_budget();
+        let deadline = ReplyDeadline::caller(budget)?;
+        Self::dial_before(link, budget, deadline)
+    }
+
+    fn dial_before(
+        link: Arc<dyn Link>,
+        budget: Option<Duration>,
+        deadline: Option<ReplyDeadline>,
+    ) -> Result<Self, Refusal> {
+        if let Some(deadline) = deadline {
+            deadline.remaining("dialing the guest control connection")?;
+        }
+        let mut conn = link.dial_before(stream::CONTROL_PORT, deadline.map(ReplyDeadline::at))?;
         let mut token = [0u8; stream::TOKEN_BYTES];
-        conn.read_exact(&mut token)
-            .map_err(os("reading the relay's token for the connection"))?;
+        match deadline {
+            Some(deadline) => {
+                conn.set_nonblocking(true)
+                    .map_err(os("reading the relay token without waiting"))?;
+                protocol_read(
+                    &mut *conn,
+                    &mut token,
+                    deadline,
+                    "reading the relay's token for the connection",
+                )?;
+            }
+            None => conn
+                .read_exact(&mut token)
+                .map_err(os("reading the relay's token for the connection"))?,
+        }
         let token = u64::from_le_bytes(token);
         let read = conn
             .try_clone()
@@ -611,6 +816,7 @@ impl Stream {
             .map_err(os("reading the node agent's connection without waiting"))?;
         Ok(Self {
             link,
+            reply_budget: budget,
             token,
             write: Mutex::new(conn),
             end,

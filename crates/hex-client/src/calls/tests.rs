@@ -202,6 +202,49 @@ fn exec() -> Call {
     }
 }
 
+/// AC-T7.4.1: factual native RPC preserves unknown counters, refuses the wrong reply type and
+/// propagates uncertainty without allocating a program or granting a physical holder.
+#[test]
+fn physical_report_uses_one_factual_rpc_and_preserves_typed_refusal() {
+    let client = client();
+    let report = hex_api::PhysicalReport {
+        authority: "native-store".into(),
+        devices: vec![hex_api::PhysicalDevice {
+            info: hex_api::DeviceInfo {
+                id: hex_api::DeviceId {
+                    kind: hex_api::DeviceKind::Gpu,
+                    key: u64::MAX,
+                },
+                model: "native-model".into(),
+                size: 4096,
+                holder: None,
+            },
+            busy_per_mille: None,
+            memory_used_bytes: Some(0),
+        }],
+    };
+    let transport = &client.conn.shared.transport;
+    *transport.reply.lock().unwrap() = Some(Answer::PhysicalReport(report.clone()));
+    assert_eq!(client.physical_report().unwrap(), report);
+    assert_eq!(
+        sent_request(&transport.outbound.lock().unwrap()[0]).1,
+        Request::Call(Call::PhysicalReport)
+    );
+    *transport.reply.lock().unwrap() = Some(Answer::Done);
+    assert!(matches!(client.physical_report(), Err(Refusal::Broken(_))));
+    let refusal = Refusal::Lifecycle {
+        id: BoxId::new("uncertain-device").unwrap(),
+        cause: hex_api::LifecycleCause::Uncertain,
+    };
+    *transport.reply.lock().unwrap() = Some(Answer::Refused(refusal.clone()));
+    assert_eq!(client.physical_report().unwrap_err(), refusal);
+    assert_eq!(transport.outbound.lock().unwrap().len(), 3);
+    let state = client.conn.shared.state().unwrap();
+    assert!(state.calls.is_empty());
+    assert!(state.programs.is_empty());
+    assert!(state.given.is_empty());
+}
+
 /// HEX-RT-17: cancel one unsent exec; expect no outbound request or completions, and only its reservation removed.
 #[test]
 fn dropping_a_deferred_call_cancels_only_its_reservation_and_sends_nothing() {
@@ -620,7 +663,7 @@ fn a_failed_offer_open_releases_the_remote_preparation_and_local_reservation() {
 #[test]
 fn runtime_capacity_wait_appends_without_moving_existing_indexes() {
     let waits = <Memory as Transport>::answers();
-    assert_eq!(KINDS, 24);
+    assert_eq!(KINDS, 25);
     for (request, index) in [
         (
             Request::Hello {
@@ -651,6 +694,7 @@ fn runtime_capacity_wait_appends_without_moving_existing_indexes() {
             22,
         ),
         (Request::Call(Call::Capacity(Class::Oci)), 23),
+        (Request::Call(Call::PhysicalReport), 24),
     ] {
         assert!(
             std::ptr::eq(kind_of(waits, &request).unwrap(), &waits[index]),
