@@ -32,6 +32,7 @@ use crate::model::{
     Arch, Ask, Class, Demand, Kind, ModelId, NodeId, NodeSpec, Os, Resources, WorkloadId,
 };
 use crate::rng::Rng;
+use crate::start_cost::{Rates, StartObservation, Terms};
 
 #[cfg(test)]
 thread_local! {
@@ -506,6 +507,69 @@ pub fn decode_message(text: &str, models: &[String], max_bytes: usize) -> Result
     Ok(msg)
 }
 
+// Combined Runtime.create+start observations have a semantic version independent of numeric epoch.
+// One cell per node/class bounds storage; no raw sample log, per-key history, or extra Files rows.
+fn epoch_text(epoch: u64, rows: &[StartObservation]) -> Result<String, Stop> {
+    let mut text = format!("launch1 {epoch} {}", rows.len());
+    for row in rows {
+        let class = match row.class {
+            Class::Oci => "oci",
+            Class::Firecracker => "firecracker",
+            Class::Shards => "shards",
+        };
+        write!(
+            &mut text,
+            " {} {class} {} {}",
+            row.node.0, row.sum_ns, row.count
+        )
+        .map_err(|_| damaged("formatting combined launch observations"))?;
+    }
+    Ok(text)
+}
+
+fn epoch_of(text: &str, nodes: usize) -> Result<(u64, Vec<StartObservation>), Stop> {
+    if let Ok(epoch) = text.parse::<u64>() {
+        return Ok((epoch, Vec::new()));
+    }
+    let mut words = text.split(' ');
+    if words.next() != Some("launch1") {
+        return Err(damaged("the epoch's combined launch observation version"));
+    }
+    let epoch = number(&mut words)?;
+    let count: usize = number(&mut words)?;
+    let classes = usize::try_from(crate::model::Classes::ALL.count())
+        .map_err(|_| damaged("the runtime class count"))?;
+    let bound = nodes
+        .checked_mul(classes)
+        .ok_or_else(|| damaged("the combined launch observation bound"))?;
+    if count > bound {
+        return Err(Stop::Full {
+            what: "combined launch observation cells",
+            bound,
+        });
+    }
+    let mut rows = Vec::with_capacity(count);
+    for _ in 0..count {
+        let node = NodeId(number(&mut words)?);
+        let class = match words.next() {
+            Some("oci") => Class::Oci,
+            Some("firecracker") => Class::Firecracker,
+            Some("shards") => Class::Shards,
+            _ => return Err(damaged("a combined launch observation's class")),
+        };
+        rows.push(StartObservation {
+            node,
+            class,
+            sum_ns: number(&mut words)?,
+            count: number(&mut words)?,
+        });
+    }
+    if words.next().is_some() {
+        return Err(damaged("trailing combined launch observation cells"));
+    }
+    Ok((epoch, rows))
+}
+
 /// A record's name read back: its kind and key.
 fn parse_name(name: &str) -> Option<(&str, Key)> {
     let mut parts = name.split('-');
@@ -594,6 +658,7 @@ impl Node {
         let mut admission = view.clone();
         let (mut epoch, mut next_workload) = (0u64, 0u64);
         let mut epoch_seen = false;
+        let mut start_rows = Vec::new();
         let (mut owned, mut ran) = (BTreeMap::new(), BTreeMap::new());
         let known = |n: NodeId| {
             usize::try_from(n.0)
@@ -607,7 +672,7 @@ impl Node {
                     return Err(damaged("a repeated epoch row"));
                 }
                 epoch_seen = true;
-                epoch = value.parse().map_err(|_| damaged("the epoch"))?;
+                (epoch, start_rows) = epoch_of(&value, nodes.len())?;
                 continue;
             }
             let mut words = value.split(' ');
@@ -703,6 +768,11 @@ impl Node {
         {
             return Err(damaged("owned and runner rows disagree on the demand"));
         }
+        view.restore_start_observations(&start_rows)
+            .map_err(|e| Stop::Damaged(e.to_string()))?;
+        admission
+            .restore_start_observations(&start_rows)
+            .map_err(|e| Stop::Damaged(e.to_string()))?;
         if owned.keys().any(|k| k.epoch > epoch) {
             return Err(damaged("an owned row ahead of its epoch"));
         }
@@ -751,7 +821,7 @@ impl Node {
                 r.at = Some(at);
             }
         }
-        records.put("epoch", &epoch.to_string())?;
+        records.put("epoch", &epoch_text(epoch, &start_rows)?)?;
         Ok(Node {
             id,
             epoch,
@@ -771,6 +841,105 @@ impl Node {
 
     pub fn id(&self) -> NodeId {
         self.id
+    }
+
+    /// Live measured rates feed the same kiln scorer; unobserved terms stay uniform.
+    pub fn set_rates(&mut self, node: NodeId, rates: Rates) -> Result<(), Stop> {
+        self.view
+            .set_rates(node, rates)
+            .map_err(|e| Stop::Damaged(e.to_string()))?;
+        self.admission
+            .set_rates(node, rates)
+            .map_err(|e| Stop::Damaged(e.to_string()))?;
+        Ok(())
+    }
+
+    /// In-memory measured combined launch update. Actual physical creation uses created_with_start
+    /// so the observation and acknowledgment are persisted before publication.
+    pub fn observe_start(
+        &mut self,
+        node: NodeId,
+        class: Class,
+        elapsed_ns: u64,
+    ) -> Result<(), Stop> {
+        self.view
+            .observe_start(node, class, elapsed_ns)
+            .map_err(|e| Stop::Damaged(e.to_string()))?;
+        self.admission
+            .observe_start(node, class, elapsed_ns)
+            .map_err(|e| Stop::Damaged(e.to_string()))?;
+        Ok(())
+    }
+
+    /// At most nodes × initialized classes exact aggregate rows, including measured zero duration.
+    pub fn start_observations(&self) -> Vec<StartObservation> {
+        self.view.start_observations()
+    }
+
+    /// Restore the caller's checked aggregate snapshot and persist it in the existing epoch row.
+    pub fn restore_start_observations(
+        &mut self,
+        rows: &[StartObservation],
+        records: &mut impl Records,
+    ) -> Result<(), Stop> {
+        self.view
+            .restore_start_observations(rows)
+            .map_err(|e| Stop::Damaged(e.to_string()))?;
+        self.admission
+            .restore_start_observations(rows)
+            .map_err(|e| Stop::Damaged(e.to_string()))?;
+        self.persist_starts(records)
+    }
+
+    /// Sender-owned facts replace only that peer's cells; retries never add a sample. The local
+    /// node is authoritative for its own measurements, so loopback snapshots cannot regress them.
+    pub fn merge_peer_start_observations(
+        &mut self,
+        peer: NodeId,
+        rows: &[StartObservation],
+        records: &mut impl Records,
+    ) -> Result<(), Stop> {
+        if usize::try_from(peer.0)
+            .ok()
+            .is_none_or(|n| n >= self.view.len())
+        {
+            return Err(damaged("an observation's unknown peer"));
+        }
+        let bound = usize::try_from(crate::model::Classes::ALL.count())
+            .map_err(|_| damaged("the runtime class count"))?;
+        if rows.len() > bound {
+            return Err(Stop::Full {
+                what: "sender-owned combined launch cells",
+                bound,
+            });
+        }
+        let mut classes = BTreeSet::new();
+        for row in rows {
+            if row.node != peer
+                || row.count == 0
+                || !classes.insert(row.class)
+                || row.sum_ns
+                    > u128::from(row.count)
+                        .checked_mul(u128::from(u64::MAX))
+                        .ok_or_else(|| damaged("a combined launch sum"))?
+            {
+                return Err(damaged("invalid sender-owned combined launch cells"));
+            }
+        }
+        if peer == self.id {
+            return Ok(());
+        }
+        let mut merged = self.start_observations();
+        merged.retain(|row| row.node != peer);
+        merged.extend_from_slice(rows);
+        self.restore_start_observations(&merged, records)
+    }
+
+    fn persist_starts(&self, records: &mut impl Records) -> Result<(), Stop> {
+        records.put(
+            "epoch",
+            &epoch_text(self.epoch, &self.start_observations())?,
+        )
     }
 
     /// Feeds the existing scorer/admission with a fresh GPU sample, retaining reservations.
@@ -838,10 +1007,21 @@ impl Node {
     /// Actual readiness confirmed by the selected peer. Persisted creation is queried again on boot;
     /// admission alone, pending deletion, and ended boxes are never reported as ready.
     pub fn is_created(&self, key: Key) -> bool {
+        if self.is_ended(key) {
+            return false;
+        }
         if let Some(o) = self.owned.get(&key) {
             return o.ready && matches!(o.state, State::Created(_));
         }
         self.ran.get(&key).is_some_and(|r| r.created && !r.ended)
+    }
+
+    /// Known terminal proof; unknown/forgotten keys return false without retaining new tombstones.
+    pub fn is_ended(&self, key: Key) -> bool {
+        self.owned
+            .get(&key)
+            .is_some_and(|o| matches!(o.state, State::Done(_)))
+            || self.ran.get(&key).is_some_and(|r| r.ended)
     }
 
     /// At most Budget::owned entries. None means waiting; Some names the selected peer.
@@ -963,7 +1143,11 @@ impl Node {
             return Ok(());
         }
         let d = o.demand;
-        let Some(best) = self.view.fit_excluding(&d, &self.pick, &o.tried).best else {
+        let fit = self
+            .view
+            .fit_with_terms_excluding(&d, &self.pick, &Terms::default(), &o.tried)
+            .map_err(|e| Stop::Damaged(e.to_string()))?;
+        let Some(best) = fit.best else {
             return Ok(());
         };
         let (demand, to, workload) = (o.demand, best.node, o.workload);
@@ -1254,6 +1438,25 @@ impl Node {
         self.ran.insert(key, r);
         self.told.push(Told::Create(key, demand));
         Ok(())
+    }
+
+    /// Actual whole opaque Runtime.create+start elapsed time (including any staging). One full key
+    /// is sampled at most once: durable aggregate first, then Running, then Started. After a crash
+    /// between writes, boot proves runtime ownership and never re-observes a recovered box.
+    pub fn created_with_start(
+        &mut self,
+        key: Key,
+        elapsed_ns: u64,
+        records: &mut impl Records,
+    ) -> Result<Vec<(NodeId, Msg)>, Stop> {
+        let Some(r) = self.ran.get(&key).copied() else {
+            return Err(damaged("creation without an admission"));
+        };
+        if !r.created && !r.ended {
+            self.observe_start(self.id, r.demand.class, elapsed_ns)?;
+            self.persist_starts(records)?;
+        }
+        self.created(key, records)
     }
 
     /// Runtime feedback, after actual successful creation. Admission alone never publishes Started.
@@ -3080,6 +3283,264 @@ mod tests {
                 "late Started reversed deletion intent"
             );
         }
+    }
+
+    struct LaunchCrash {
+        records: Crashing<Memory>,
+        after: Option<(usize, When)>,
+    }
+    impl LaunchCrash {
+        fn before_write(&mut self) {
+            if let Some((skip, when)) = self.after {
+                if skip == 0 {
+                    self.records.armed = Some(when);
+                    self.after = None;
+                } else {
+                    self.after = Some((skip - 1, when));
+                }
+            }
+        }
+    }
+    impl Records for LaunchCrash {
+        fn put(&mut self, name: &str, value: &str) -> Result<(), Stop> {
+            self.before_write();
+            self.records.put(name, value)
+        }
+        fn remove(&mut self, name: &str) -> Result<(), Stop> {
+            self.before_write();
+            self.records.remove(name)
+        }
+        fn all(&mut self) -> Result<Vec<(String, String)>, Stop> {
+            self.records.all()
+        }
+    }
+
+    /// AC-T7.4.1/B4: whole launch samples are durable before Started, deduplicated by the existing
+    /// full-key Created transition, and never fabricated for recovered/preexisting runtimes.
+    #[test]
+    fn combined_launch_survives_each_write_crash_without_resampling() {
+        let specs = vec![NodeSpec::new(NodeId(0), CAP)];
+        for write in 0..2 {
+            for when in [When::Before, When::After] {
+                let mut rec = LaunchCrash {
+                    records: Crashing::new(Memory::default()),
+                    after: None,
+                };
+                let mut node = Node::boot(
+                    NodeId(0),
+                    &specs,
+                    &[],
+                    test_budget(),
+                    Pick::default(),
+                    &mut rec,
+                    |_| Boxed::Absent,
+                )
+                .unwrap();
+                let (key, _) = node.submit(requested(), &mut rec).unwrap();
+                node.hear(
+                    NodeId(0),
+                    Msg::Start {
+                        key,
+                        demand: requested(),
+                    },
+                    &mut rec,
+                )
+                .unwrap();
+                node.told.clear();
+                rec.after = Some((write, when));
+                assert_eq!(
+                    node.created_with_start(key, 0, &mut rec),
+                    Err(Stop::Crashed)
+                );
+                assert!(node.told.is_empty());
+                let mut node = Node::boot(
+                    NodeId(0),
+                    &specs,
+                    &[],
+                    test_budget(),
+                    Pick::default(),
+                    &mut rec,
+                    |_| Boxed::Running,
+                )
+                .unwrap();
+                let expected = if write == 0 && when == When::Before {
+                    vec![]
+                } else {
+                    vec![StartObservation {
+                        node: NodeId(0),
+                        class: Class::Oci,
+                        sum_ns: 0,
+                        count: 1,
+                    }]
+                };
+                assert_eq!(
+                    node.start_observations(),
+                    expected,
+                    "write {write}, {when:?}"
+                );
+                assert!(node.told.is_empty(), "boot must not Create again");
+                let started = node.created_with_start(key, 999, &mut rec).unwrap();
+                node.hear(NodeId(0), started[0].1, &mut rec).unwrap();
+                node.hear(
+                    NodeId(0),
+                    Msg::Held {
+                        key,
+                        holds: true,
+                        ended: false,
+                        created: true,
+                    },
+                    &mut rec,
+                )
+                .unwrap();
+                assert_eq!(
+                    node.start_observations(),
+                    expected,
+                    "replay sampled an existing runtime"
+                );
+                assert!(node.is_created(key));
+                let ended = node.end(key, &mut rec).unwrap();
+                assert!(node.is_ended(key));
+                assert!(!node.is_created(key));
+                node.hear(NodeId(0), ended[0].1, &mut rec).unwrap();
+            }
+        }
+    }
+
+    /// AC-T7.4.1/B4: production submit actually uses the shared learned scorer; with no observations
+    /// it keeps the old uniform packing choice, then picks the faster class peer and preserves it
+    /// across reboot without counting a remote aggregate twice.
+    #[test]
+    fn combined_launch_changes_real_submit_and_persists_remote_aggregates() {
+        let specs = vec![NodeSpec::new(NodeId(0), CAP), NodeSpec::new(NodeId(1), CAP)];
+        let mut rec = Memory::default();
+        let mut node = boot_test(&specs, &[], &mut rec);
+        node.set_rates(NodeId(0), Rates::default()).unwrap();
+        let (first, out) = node.submit(requested(), &mut rec).unwrap();
+        assert_eq!(out[0].0, NodeId(0));
+        node.hear(NodeId(0), out[0].1, &mut rec).unwrap();
+        node.created_with_start(first, 800, &mut rec).unwrap();
+        let peer = [StartObservation {
+            node: NodeId(1),
+            class: Class::Oci,
+            sum_ns: 100,
+            count: 1,
+        }];
+        node.merge_peer_start_observations(NodeId(1), &peer, &mut rec)
+            .unwrap();
+        let snapshot = node.start_observations();
+        node.merge_peer_start_observations(NodeId(1), &peer, &mut rec)
+            .unwrap();
+        assert_eq!(node.start_observations(), snapshot);
+        assert_eq!(
+            node.submit(requested(), &mut rec).unwrap().1[0].0,
+            NodeId(1)
+        );
+        assert!(rec.rows.get("epoch").unwrap().starts_with("launch1 "));
+        let mut node = Node::boot(
+            NodeId(0),
+            &specs,
+            &[],
+            test_budget(),
+            Pick::default(),
+            &mut rec,
+            |key| {
+                if key == first {
+                    Boxed::Running
+                } else {
+                    Boxed::Absent
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(node.start_observations(), snapshot);
+        assert_eq!(
+            node.submit(requested(), &mut rec).unwrap().1[0].0,
+            NodeId(1)
+        );
+    }
+
+    /// AC-T7.4.1/B4: aggregate authority is the authenticated sender, and loopback retries cannot
+    /// replace a newly measured local sample with an older immutable outgoing snapshot.
+    #[test]
+    fn combined_launch_merge_is_bounded_authoritative_and_idempotent() {
+        let specs = vec![NodeSpec::new(NodeId(0), CAP), NodeSpec::new(NodeId(1), CAP)];
+        let mut rec = Memory::default();
+        let mut node = boot_test(&specs, &[], &mut rec);
+        let old = [StartObservation {
+            node: NodeId(0),
+            class: Class::Oci,
+            sum_ns: 0,
+            count: 1,
+        }];
+        node.restore_start_observations(&old, &mut rec).unwrap();
+        node.observe_start(NodeId(0), Class::Oci, 100).unwrap();
+        let snapshot = node.start_observations();
+        node.merge_peer_start_observations(NodeId(0), &old, &mut rec)
+            .unwrap();
+        assert_eq!(node.start_observations(), snapshot);
+        let foreign = StartObservation {
+            node: NodeId(0),
+            class: Class::Shards,
+            sum_ns: 1,
+            count: 1,
+        };
+        assert!(matches!(
+            node.merge_peer_start_observations(NodeId(1), &[foreign], &mut rec),
+            Err(Stop::Damaged(_))
+        ));
+        let peer = StartObservation {
+            node: NodeId(1),
+            ..foreign
+        };
+        assert!(matches!(
+            node.merge_peer_start_observations(NodeId(1), &[peer, peer], &mut rec),
+            Err(Stop::Damaged(_))
+        ));
+        assert_eq!(node.start_observations(), snapshot);
+        node.merge_peer_start_observations(NodeId(1), &[peer], &mut rec)
+            .unwrap();
+        assert_eq!(
+            node.start_observations()
+                .iter()
+                .find(|r| r.node == NodeId(0)),
+            snapshot.first()
+        );
+    }
+
+    /// CLAUDE.md §6/B4: hostile aggregate metadata cannot erase requirements or allocate more than
+    /// the node/class-derived cell bound; legacy numeric epochs remain readable without samples.
+    #[test]
+    fn combined_launch_epoch_refuses_invalid_or_incompatible_observations() {
+        let specs = vec![NodeSpec::new(NodeId(0), CAP)];
+        for text in [
+            "poststage1 1 0",
+            "launch1 1 4",
+            "launch1 1 1 1 oci 1 1",
+            "launch1 1 1 0 oci 0 0",
+            "launch1 1 2 0 oci 1 1 0 oci 1 1",
+            "launch1 1 0 extra",
+        ] {
+            let mut rec = Memory::default();
+            rec.put("epoch", text).unwrap();
+            assert!(
+                Node::boot(
+                    NodeId(0),
+                    &specs,
+                    &[],
+                    test_budget(),
+                    Pick::default(),
+                    &mut rec,
+                    |_| Boxed::Absent
+                )
+                .is_err(),
+                "{text}"
+            );
+        }
+        let mut rec = Memory::default();
+        rec.put("epoch", "1").unwrap();
+        let node = boot_test(&specs, &[], &mut rec);
+        assert!(node.start_observations().is_empty());
+        assert!(rec.rows.get("epoch").unwrap().starts_with("launch1 2 0"));
     }
 
     /// kiln's `ReusedIdRan`: a box's name carries its owner's epoch, so a restarted owner's first box
