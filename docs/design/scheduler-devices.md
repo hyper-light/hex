@@ -126,3 +126,33 @@ establish macOS GPU support. macOS/guest support and appropriate non-PCI physica
 identity must be implemented at the existing seams, with native evidence. The
 Shards coordinator has been asked for the existing tested GPU/guest API, to avoid
 introducing an independent VMM or duplicating its Venus/VFIO mechanisms.
+
+
+## Linux PCI identity readback
+
+ROOT's native create now resolves every selected CDI character device through the
+kernel's `/sys/dev/char/<major>:<minor>/device` link and uses the closest PCI
+function of its canonical path. NVIDIA's driver also publishes independently
+matching PCI location and device minor in
+[nv-procfs.c at e6a2e015](https://github.com/NVIDIA/open-gpu-kernel-modules/blob/e6a2e01579fbbd1ca2ed43fef2ee2589e9bd8bd9/kernel-open/nvidia/nv-procfs.c#L145).
+The reported minor selects the actual `/dev/nvidiaN` object; host stat supplies
+its character major/minor. Conflicting interfaces refuse; no minor/index or
+PCI bridge substitutes for the selected physical function. These are checked
+create inputs, not a second picker, ownership ledger, or telemetry cache.
+
+Every reserved GPU must have an actual matching node, and any identified GPU
+outside those reservations refuses before the Creating record or physical
+creation. Shared control/uvm/kfd nodes remain vendor CDI operations; identity
+verification does not by itself prove isolation of their driver-specific ioctls,
+CUDA/ROCm compatibility, or working vendor user-space libraries. Those require
+actual workload validation. The existing native configuration byte limit bounds
+each report, and the existing u16 device index space bounds enumeration. Text
+storage is fallibly reserved before reading; overflow and malformed fields are
+typed refusals. The added pure tests exercise exact coverage, extra/wrong IDs,
+closest PCI function, disagreement, duplicate fields and minor overflow.
+
+At exact40d5c644, ROOT cross node all-target Clippy on aarch64-linux-musl passed,
+and all three combined native-Mac model Driver controls passed (no ignored).
+This establishes compilation and model behavior, not actual GPU effects. Original
+40d5 source/archive/logs and child reaps are retained in
+~/.cache/hex-lead/device-current-40d5c644-compile-v1 on ROOT and d132.
