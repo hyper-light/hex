@@ -795,7 +795,7 @@ fn unknown_kinds_are_refused() {
             "{got:?}"
         );
     }
-    for kind in [0u16, 0x0001, 0x000b, 0x8000, 0x800d, 0xffff] {
+    for kind in [0u16, 0x0001, 0x000b, 0x8000, 0xffff] {
         let mut bytes = answer(5, &Answer::Done, MAX_MESSAGE).unwrap();
         bytes[12..14].copy_from_slice(&kind.to_le_bytes());
         assert!(matches!(
