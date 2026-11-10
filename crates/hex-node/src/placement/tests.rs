@@ -361,6 +361,9 @@ fn failed_durable_budget_growth_does_not_admit_another_runtime_create() {
     let blocked = dir.path().join("epoch.tmp");
     std::fs::create_dir(&blocked).unwrap();
     let growth = driver.set_budget(Budget { owned: 2, ran: 2 });
+    // The injection targets the budget commit only; later launch-observation writes also
+    // use the epoch and must not mask an erroneously enlarged admission ceiling.
+    std::fs::remove_dir(blocked).unwrap();
     // Drive an accidental admission through actual Runtime.create before asserting, so removing
     // the durability guard exposes its forbidden physical effect rather than only a wrong result.
     let (extra, refusal) = match driver.submit(d, p) {
@@ -374,7 +377,6 @@ fn failed_durable_budget_growth_does_not_admit_another_runtime_create() {
     let creates = rt.creates.load(Ordering::SeqCst);
     let live = rt.list().unwrap().len();
     assert_eq!(rt.sim.inspect(&physical).unwrap().id, physical);
-    std::fs::remove_dir(blocked).unwrap();
     if let Some(extra) = extra {
         local(&driver, driver.delete(extra).unwrap());
     }
