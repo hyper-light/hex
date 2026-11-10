@@ -1,11 +1,14 @@
 """Synthetic only: no original Harness construction, process creation, CLI, VM or capture reads."""
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
+import threading
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import patch
 
 
@@ -219,6 +222,152 @@ class SyntheticRecovery(unittest.TestCase):
         self.assertTrue(report["backend_reaped"])
         self.assertFalse(report["backend_ready"])
         self.assertFalse(report.get("ready_class_verified", False))
+
+
+class ArmedColdBoot(unittest.TestCase):
+    def setUp(self):
+        parent = Path(os.environ["COLD_BOOT_SYNTHETIC_ROOT"])
+        parent.mkdir(parents=True, exist_ok=True)
+        temporary = tempfile.TemporaryDirectory(prefix="armed-unit-", dir=parent)
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        (self.root / "census").mkdir()
+
+    def closed(self):
+        harness = object.__new__(cold.ColdHarness)
+        harness.root = self.root
+        harness.runtime = {"wait_mode": "armed", "ledger": str(self.root / "pids.jsonl"), "profile": "synthetic",
+                           "source_revision": "synthetic-source", "max_frame": 1 << 20}
+        harness.cold_process = SimpleNamespace(pid=31415, returncode=0, hex_census_path=None)
+        harness.report = {"kind": "cold-node-seeded-validation", "cold_boot": {"backend_ready": True,
+            "ready_class_verified": True, "identity": {"pid": 27182, "started": 7, "vsock": "synthetic-owned"}},
+            "owned_guest_retired": {"guest_stopped": True, "end": "Stopped", "pid": 27182, "started": 7}}
+        return harness
+
+    def test_cp_t7_4_armed_constructor_preserves_measuring_default_report(self):
+        def original(harness, args):
+            harness.root = self.root
+            harness.runtime = {"wait_mode": "armed" if args.validate_seeds else "measuring"}
+            harness.report = {}
+
+        args = SimpleNamespace(mode="guest", deadline_seconds=120, validate_seeds=False, run_parent=str(self.root))
+        with patch.object(cold.census.Harness, "__init__", original), patch.object(cold.ColdHarness, "instances", []):
+            measuring = cold.ColdHarness(args)
+            self.assertEqual(measuring.report, {"kind": "cold-node-boot-SDK-Hello-census", "cold_boot": {
+                "backend_ready": False, "cohort": "FIRST-BOOT backend-process first SDK Hello",
+                "seed_installation": "not performed", "boxes_created": False,
+                "workload_success": "not exercised", "full_boot_latency": "not measured"}})
+            args.validate_seeds = True
+            armed = cold.ColdHarness(args)
+        self.assertEqual(armed.runtime["wait_mode"], "armed")
+        self.assertEqual(armed.report["kind"], "cold-node-seeded-validation")
+        self.assertNotIn("cohort", armed.report["cold_boot"])
+        self.assertNotIn("sdk_hello", armed.report["cold_boot"])
+
+    def test_cp_t7_4_armed_backend_and_probe_spawns_remove_both_census_variables(self):
+        runtime = {"root": str(self.root), "wait_mode": "armed", "hex": "/synthetic/hex",
+                   "runtime_client": "/synthetic/probe", "ledger": str(self.root / "pids.jsonl"), "profile": "synthetic"}
+        environment = {"HEX_WAITS_CENSUS": "/unrelated/inherited.tsv", "HEX_WAITS_CENSUS_MAX": "123", "KEEP": "same"}
+        harness = SimpleNamespace(root=self.root, runtime=runtime, phase="synthetic", environment=environment,
+                                  children=[], children_lock=threading.Lock(), child_bound=2)
+        opened = []
+
+        def popen(argv, **options):
+            opened.append((argv, options["env"]))
+            return SimpleNamespace(pid=len(opened), poll=lambda: None)
+
+        with patch.object(cold.census.subprocess, "Popen", popen):
+            for name, binary in (("cold-node", runtime["hex"]), ("probe", runtime["runtime_client"])):
+                child = cold.census.Harness.spawn(harness, name, [binary])
+                self.assertIsNone(child.hex_census_path)
+        self.assertEqual([env for _, env in opened], [{"KEEP": "same"}, {"KEEP": "same"}])
+        self.assertEqual(environment["HEX_WAITS_CENSUS_MAX"], "123")
+        self.assertEqual(list((self.root / "census").iterdir()), [])
+        ledger = [json.loads(line) for line in Path(runtime["ledger"]).read_text().splitlines()]
+        self.assertEqual([row["census"] for row in ledger], [None, None])
+
+    def test_cp_t7_4_armed_report_requires_no_census_and_never_parses_samples(self):
+        harness = self.closed()
+        with patch.object(cold, "classify_hellos", side_effect=AssertionError("armed must not classify")):
+            harness.census_report()
+        self.assertEqual(harness.report["census"]["files"], 0)
+        self.assertFalse(harness.report["census"]["enabled"])
+        self.assertTrue(harness.report["cold_boot"]["stopped_receipt_verified"])
+        self.assertTrue(harness.report["cold_boot"]["backend_reaped"])
+        self.assertNotIn("sdk_hello", harness.report["cold_boot"])
+        self.assertNotIn("cohort", harness.report["cold_boot"])
+
+    def test_cp_t7_4_armed_rejects_any_census_file_without_reading_it(self):
+        (self.root / "census" / "unexpected.tsv").write_bytes(b"synthetic; must not parse\n")
+        with patch.object(cold, "classify_hellos", side_effect=AssertionError("armed must not classify")):
+            with self.assertRaisesRegex(cold.census.Failed, "unexpectedly produced census files"):
+                self.closed().census_report()
+
+    def test_cp_t7_4_armed_closure_and_ready_guards_remain_required(self):
+        for fault in ("not-ready", "wrong-class", "not-reaped", "wrong-identity", "not-stopped",
+                      "backend_cleanup_error", "cleanup_error", "cleanup_unproven"):
+            with self.subTest(fault=fault):
+                harness = self.closed()
+                if fault == "not-ready":
+                    harness.report["cold_boot"]["backend_ready"] = False
+                elif fault == "wrong-class":
+                    harness.report["cold_boot"]["ready_class_verified"] = False
+                elif fault == "not-reaped":
+                    harness.cold_process.returncode = None
+                elif fault == "wrong-identity":
+                    harness.report["owned_guest_retired"]["started"] += 1
+                elif fault == "not-stopped":
+                    harness.report["owned_guest_retired"]["end"] = "unknown"
+                elif fault == "cleanup_unproven":
+                    harness.report["cold_boot"][fault] = "synthetic failure"
+                else:
+                    harness.report[fault] = "synthetic failure"
+                with self.assertRaises(cold.census.Failed):
+                    harness.census_report()
+
+    def test_cp_t7_4_armed_campaign_keeps_mode_and_aborts_before_another_guest(self):
+        calls = []
+
+        def one(number):
+            calls.append(number)
+            return {"run": f"/synthetic/{number}", "kind": "cold-node-seeded-validation", "status": "passed",
+                    "stopped_receipt_verified": number == 1}
+
+        report = cold.campaign(3, one, lambda _: None, validate_seeds=True)
+        self.assertEqual(calls, [1, 2])
+        self.assertEqual(report["kind"], "cold-node-seeded-validation")
+        self.assertEqual(report["status"], "failed")
+        self.assertNotIn("ambiguous_first_VM_cohorts", report)
+        report = cold.campaign(1, one, lambda _: None, validate_seeds=True)
+        self.assertEqual(report["status"], "completed")
+        self.assertNotIn("ambiguous_first_VM_cohorts", report)
+        wrong_mode = lambda _: {**one(1), "kind": "cold-node-boot-SDK-Hello-census"}
+        self.assertEqual(cold.campaign(1, wrong_mode, lambda _: None, validate_seeds=True)["status"], "failed")
+
+    def test_cp_t7_4_main_forwards_armed_flag_to_existing_harness(self):
+        output = self.root / "campaign.json"
+        forwarded = []
+
+        def existing_main():
+            forwarded.append(list(cold.sys.argv))
+            armed = "--validate-seeds" in cold.sys.argv
+            kind = "cold-node-seeded-validation" if armed else "cold-node-boot-SDK-Hello-census"
+            harness = SimpleNamespace(root=self.root / str(len(forwarded)), report={"kind": kind, "status": "passed",
+                "cold_boot": {"stopped_receipt_verified": True}})
+            cold.ColdHarness.instances.append(harness)
+
+        arguments = ["synthetic-driver", "--n", "2", "--output", str(output), "--validate-seeds"]
+        with patch.object(cold.sys, "argv", arguments), patch.object(cold.census, "main", existing_main), redirect_stdout(io.StringIO()):
+            self.assertEqual(cold.main(), 0)
+        self.assertEqual(len(forwarded), 2)
+        for arguments in forwarded:
+            self.assertEqual(arguments.count("--validate-seeds"), 1)
+            self.assertEqual(arguments[-2:], ["--n", "1"])
+        result = json.loads(output.read_text())
+        self.assertEqual(result["kind"], "cold-node-seeded-validation")
+        self.assertEqual(result["status"], "completed")
+        self.assertNotIn("ambiguous_first_VM_cohorts", result)
+        self.assertTrue(all(row["kind"] == result["kind"] for row in result["iterations"]))
 
 
 if __name__ == "__main__":

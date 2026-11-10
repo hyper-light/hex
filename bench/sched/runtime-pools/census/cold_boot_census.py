@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ROOT ONLY: fresh ordinary node/guest per iteration; first completed SDK Hello cohort.
+"""ROOT ONLY: fresh ordinary node/guest; measuring Hello cohort or armed validation.
 
 No boxes, workload, full-boot timing, benchmark result or seed installation is produced. Root owns
 all real execution, data review, cancellation and retirement. Synthetic tests inject no live guests.
@@ -29,6 +29,10 @@ HELLO = "client.guest.answer.hello"
 # Recorded::attach->join_loop->join Client::connect_evented. One Hello at each call site normally.
 # The phase count is a source-derived consistency check, not proof of a particular VM identity.
 NORMAL_HELLO_PHASES = ("GuestRuntime.guest initial client", "Recorded.attach evented join")
+
+
+def report_kind(validate_seeds):
+    return "cold-node-seeded-validation" if validate_seeds else "cold-node-boot-SDK-Hello-census"
 
 
 def classify_hellos(lines, row_bound, line_bound):
@@ -159,17 +163,19 @@ class ColdHarness(census.Harness):
     instances = None
 
     def __init__(self, args):
-        census.require(args.mode == "guest" and args.deadline_seconds == 120 and not args.validate_seeds,
-                       "cold census requires guest mode, original explicit120s budget and measuring waits")
+        census.require(args.mode == "guest" and args.deadline_seconds == 120,
+                       "cold census requires guest mode and original explicit120s budget")
         parent = Path(args.run_parent).expanduser().resolve()
         census.require(not any((parent / name).exists() for name in ("runtime.json", "pids.jsonl", "result.json")),
                        "run parent is an existing capture directory; use its owned cache parent")
         super().__init__(args)
         self.cold_process = None
-        self.report["kind"] = "cold-node-boot-SDK-Hello-census"
+        self.report["kind"] = report_kind(args.validate_seeds)
         self.report["cold_boot"] = {"backend_ready": False, "cohort": "FIRST-BOOT backend-process first SDK Hello",
                                     "seed_installation": "not performed", "boxes_created": False,
                                     "workload_success": "not exercised", "full_boot_latency": "not measured"}
+        if args.validate_seeds:
+            self.report["cold_boot"].pop("cohort")
         self.instances.append(self)
 
     def exercise(self):
@@ -217,9 +223,15 @@ class ColdHarness(census.Harness):
         process = self.cold_process
         cold = self.report["cold_boot"]
         cold["ledger"] = str(self.runtime["ledger"])
+        armed = self.runtime.get("wait_mode", "measuring") == "armed"
         if process is not None:
             cold["producer"] = {"kind": "cold-node", "pid": process.pid, "census": process.hex_census_path,
                                 "profile": self.runtime["profile"], "source_revision": self.runtime.get("source_revision")}
+        if armed:
+            # The existing armed reporter only verifies an empty directory; it never reads samples.
+            super().census_report()
+            census.require(process is None or process.hex_census_path is None, "armed backend unexpectedly has a census filename")
+        elif process is not None:
             census.require(process.hex_census_path is not None, "backend node has no unique census filename")
             path = Path(process.hex_census_path)
             census.require(path.parent == self.root / "census", "backend census is outside its exact private census directory")
@@ -236,14 +248,18 @@ class ColdHarness(census.Harness):
         census.require(cold["backend_ready"] and cold.get("ready_class_verified") and cold["backend_reaped"]
                        and cold["stopped_receipt_verified"] and "backend_cleanup_error" not in self.report,
                        "iteration lacks ready/class/empty-baseline and exact Stopped closure proof")
+        if armed:
+            census.require("cleanup_error" not in self.report and "cleanup_unproven" not in cold,
+                           "armed iteration has an unproved cleanup")
+            return
         hello = cold.get("sdk_hello", {})
         census.require(hello.get("first_sdk_hello") is not None and not hello.get("malformed") and not hello.get("full_markers"),
                        "backend first SDK Hello census is missing, malformed or truncated")
 
 
-def campaign(count, run_one, save):
+def campaign(count, run_one, save, *, validate_seeds=False):
     census.require(type(count) is int and 0 < count <= (1 << 64) - 1, "explicit positive representable N required")
-    report = {"kind": "cold-node-boot-SDK-Hello-census", "n": count, "iterations": [], "status": "running",
+    report = {"kind": report_kind(validate_seeds), "n": count, "iterations": [], "status": "running",
               "seed_installation": "not performed", "workload_success": "not exercised", "full_boot_latency": "not measured"}
     roots = set()
     for ordinal in range(1, count + 1):
@@ -253,16 +269,18 @@ def campaign(count, run_one, save):
         fresh = root is not None and root not in roots
         if root is not None:
             roots.add(root)
-        if not fresh or row.get("status") != "passed" or not row.get("stopped_receipt_verified"):
+        matching_mode = not validate_seeds or row.get("kind") == report["kind"]
+        if not fresh or not matching_mode or row.get("status") != "passed" or not row.get("stopped_receipt_verified"):
             report["status"] = "failed"
             report["error"] = "iteration failed/fresh-root or Stopped closure unproved; no next guest"
             save(report)
             return report
         save(report)
     report["status"] = "completed"
-    report["ambiguous_first_VM_cohorts"] = sum(
-        row.get("cold_boot", {}).get("sdk_hello", {}).get("attribution") == "ambiguous/excluded from first-VM cohort"
-        for row in report["iterations"])
+    if not validate_seeds:
+        report["ambiguous_first_VM_cohorts"] = sum(
+            row.get("cold_boot", {}).get("sdk_hello", {}).get("attribution") == "ambiguous/excluded from first-VM cohort"
+            for row in report["iterations"])
     save(report)
     return report
 
@@ -271,12 +289,15 @@ def main():
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     parser.add_argument("--n", type=int, required=True, help="positive fresh node/guest iterations")
     parser.add_argument("--output", type=Path, required=True, help="new aggregate JSON path")
+    parser.add_argument("--validate-seeds", action="store_true", help="validate installed waits armed; disable census measurement")
     options, rest = parser.parse_known_args()
+    if options.validate_seeds:
+        rest.append("--validate-seeds")  # The existing Harness owns wait_mode and both child census variables.
     census.require(options.n > 0, "N must be positive")
     os.umask(0o077)
     output = options.output.expanduser().resolve()
     with output.open("x", encoding="utf-8") as initial:
-        json.dump({"status": "starting", "kind": "cold-node-boot-SDK-Hello-census", "n": options.n}, initial)
+        json.dump({"status": "starting", "kind": report_kind(options.validate_seeds), "n": options.n}, initial)
         initial.write("\n")
     original_arguments, original_harness = sys.argv, census.Harness
 
@@ -297,15 +318,18 @@ def main():
                     "stopped_receipt_verified": False, "cleanup": "no backend is started before Harness construction completes"}
         harness = instances[0]
         cold = harness.report["cold_boot"]
-        return {"ordinal": ordinal, "run": str(harness.root), "result": str(harness.root / "result.json"),
+        row = {"ordinal": ordinal, "run": str(harness.root), "result": str(harness.root / "result.json"),
                 "status": "failed" if fault else harness.report.get("status"), "error": fault or harness.report.get("error"),
                 "stopped_receipt_verified": cold.get("stopped_receipt_verified", False),
                 "identity": cold.get("identity"), "retirement": harness.report.get("owned_guest_retired"),
                 "cold_boot": cold}
+        if options.validate_seeds:
+            row["kind"] = harness.report.get("kind")
+        return row
 
     try:
         census.Harness = ColdHarness
-        result = campaign(options.n, one, lambda report: census.atomic_json(output, report))
+        result = campaign(options.n, one, lambda report: census.atomic_json(output, report), validate_seeds=options.validate_seeds)
     finally:
         sys.argv, census.Harness = original_arguments, original_harness
     print("cold-boot-result " + str(output))
