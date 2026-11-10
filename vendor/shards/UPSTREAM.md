@@ -21,3 +21,5 @@ borrowed implementation. See docs/research/measurements/hex-shards-api-33df.
 
 Five exact upstream Rust fixture sources referenced by API include!/path attributes are also copied so the API test targets compile without disabling or stubbing their modules. Their paths are in vendor/MANIFEST.toml; the upstream revision is unchanged.
 | crates/api/tests/hex_borrowed_contract.rs | Add ignored coordinator-owned public lifetime and repeated Windows handle checks | Validate the current borrowed contract without reviving the obsolete c55 implementation. | 0004-exercise-public-borrowed-process-lifetime-and-windows-handle.patch |
+
+| crates/api/tests/hex_borrowed_contract.rs | Exercise finite overflow, target death during handshake and exact readiness observations. | AC-T7.4.1 adversarial regression coverage; production API unchanged. | 0005-exercise-finite-overflow-and-post-handshake-target-death.patch |
