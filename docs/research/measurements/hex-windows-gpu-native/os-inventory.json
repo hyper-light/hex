@@ -1,0 +1,14 @@
+{
+  "runner": "f766f09294f2e17e3b8a631ffd4e6a4b",
+  "run": "r724",
+  "query": "Get-CimInstance Win32_VideoController | Select-Object Name,PNPDeviceID,AdapterRAM",
+  "exit": 0,
+  "devices": [
+    {
+      "name": "AMD Radeon(TM) 8060S Graphics",
+      "pnp_id": "PCI\\VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1\\4&35FE04F8&0&0041",
+      "wmi_adapter_ram": 4293918720
+    }
+  ],
+  "scope": "Actual read-only OS inventory; WMI32bit AdapterRAM is not authoritative GPU memory. One GPU reported; no driver/Metal/HCS/compute/assignment effects."
+}
