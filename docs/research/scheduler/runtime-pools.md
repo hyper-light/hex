@@ -131,8 +131,12 @@ five times in release using uninstrumented a98824f7 host binaries. All six runs
 passed both oversized refusals, both valid physical creates/deletes, the restored
 empty baseline and identity-checked guest shutdown. Root r429 passed the four
 focused scheduler cases and workspace native Windows clippy. The combined
-seven-target/workspace gate r427 is still running at this evidence checkpoint;
-its intermediate success is not a final gate result.
+seven-target/workspace gate r427 finished0 at exact a98824f7: all seven target
+clippies, formatting/production checks, the native macOS workspace and vendoring
+passed. Its output reports910pass executions including four focused reruns,
+zero failures and13ignored-test lines; ignored cases are not claimed executed.
+The command/exit/log-hash record is bench/sched/runtime-pools/gates-a98824f7.json.
+This is not a native Linux/root-lab or other-architecture execution result.
 
 Root r439 repeated the same four-reader diagnostic with only the retry reset
 added to the earlier trace source. The first owner refresh sampled6,697,375ns

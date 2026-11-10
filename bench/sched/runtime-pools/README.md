@@ -176,5 +176,8 @@ null; group ordinals are derived only from explicit queue-enter boundaries.
 
 The trace binary is explicitly temporary cc+the same minimal fix+DEBUG, separate
 from exact uninstrumented a988 binaries. These pressure/trace rows are forbidden
-seed inputs. No runtime constant, deadline or grace interval was raised. Current
-combined gate/native Linux and remaining calibration checks are still owed.
+seed inputs. No runtime constant, deadline or grace interval was raised. Root r427
+passed the complete seven-target/workspace/vendor gate at exact a98824f7; see
+gates-a98824f7.json for command/exit/log hashes and ignored cases. Native Linux
+and remaining calibration checks are still owed. Later census-outcome source
+changes require their own validation; this gate is not relabeled to that source.
