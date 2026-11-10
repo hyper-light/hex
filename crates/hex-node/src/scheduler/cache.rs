@@ -14,7 +14,7 @@ use hex_sim::peer::{Records, Stop};
 use serde::Serialize;
 
 use super::{dto, offer};
-use crate::records::{Files, MOST};
+use crate::records::Files;
 
 fn invalid(why: impl Into<String>) -> Refusal {
     Refusal::Invalid {
@@ -104,10 +104,10 @@ fn checked_folder(path: &Path) -> Result<(), Refusal> {
     }
 }
 
-fn checked_records(path: &Path) -> Result<(), Refusal> {
+fn checked_records(path: &Path, most: usize) -> Result<(), Refusal> {
     // Files already applies this directory bound. Check record types before its reader opens one,
     // so a record symlink cannot redirect the bounded read outside the leased state directory.
-    let bound = MOST
+    let bound = most
         .checked_mul(2)
         .ok_or_else(|| invalid("record directory bound overflow"))?;
     for (at, entry) in fs::read_dir(path).map_err(io)?.enumerate() {
@@ -154,12 +154,6 @@ impl Cache {
         configured: &BTreeSet<u32>,
         cluster: &mut Cluster,
     ) -> Result<Self, Refusal> {
-        if configured.len() > MOST {
-            return Err(Refusal::Exhausted {
-                what: "peer offer cache peers",
-                bound: MOST,
-            });
-        }
         checked_models(&cluster.models)?;
         for peer in configured {
             if usize::try_from(*peer)
@@ -171,8 +165,8 @@ impl Cache {
             }
         }
         checked_folder(path)?;
-        let mut files = Files::open(path).map_err(storage)?;
-        checked_records(path)?;
+        let mut files = Files::open_with_limit(path, configured.len()).map_err(storage)?;
+        checked_records(path, configured.len())?;
         let mut staged = Cluster::single_owner(cluster.nodes.clone(), Vec::new());
         staged.models = cluster.models.clone();
         for (record, value) in files.all().map_err(storage)? {
@@ -247,6 +241,42 @@ mod tests {
             Device::gpu(ModelId(1), 16 << 30),
         ];
         offer::from_local(&spec, &["nvidia-rtx".into(), "amd-radeon".into()]).unwrap()
+    }
+
+    /// AC-T7.4.1/LB03: exactly one durable offer and temporary per configured peer fit; an extra
+    /// record refuses before model/fact staging, preserving every valid persistent offer.
+    #[test]
+    fn cache_read_count_is_configured_peer_cardinality() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut facts = cluster();
+        facts
+            .nodes
+            .push(NodeSpec::new(NodeId(2), Resources::default()));
+        let peers = BTreeSet::from([1, 2]);
+        let mut cache = Cache::open(dir.path(), &peers, &mut facts).unwrap();
+        cache.put(NodeId(1), &advertised()).unwrap();
+        let second = offer::from_local(&facts.nodes[2], &[]).unwrap();
+        cache.put(NodeId(2), &second).unwrap();
+        drop(cache);
+        let before = fs::read(dir.path().join("peer-1.rec")).unwrap();
+        for peer in &peers {
+            fs::write(dir.path().join(format!("peer-{peer}.tmp")), "torn").unwrap();
+        }
+        Cache::open(dir.path(), &peers, &mut facts).unwrap();
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), peers.len());
+        fs::write(dir.path().join("peer-3.rec"), "unexpected").unwrap();
+        let original = facts.clone();
+        assert!(matches!(
+            Cache::open(dir.path(), &peers, &mut facts),
+            Err(Refusal::Exhausted { bound: 2, .. })
+        ));
+        assert_eq!(facts, original);
+        assert_eq!(fs::read(dir.path().join("peer-1.rec")).unwrap(), before);
+        assert!(dir.path().join("peer-3.rec").is_file());
+        let empty = tempfile::tempdir().unwrap();
+        let mut zero = Cache::open(empty.path(), &BTreeSet::new(), &mut cluster()).unwrap();
+        assert!(zero.put(NodeId(1), &advertised()).is_err());
+        assert!(fs::read_dir(empty.path()).unwrap().next().is_none());
     }
 
     /// AC-T7.4.1/LB03: the latest applied offer survives reboot and replaces zero placeholders with
