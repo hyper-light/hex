@@ -615,8 +615,28 @@ class Harness:
         self.verified_deleted += 1
         record(self.runtime, "verified-physical-lifecycle", key=key, physical=physical, phase=self.phase)
 
-    def exercise(self):
-        self.setup_ssh()
+    def local_phase(self, backend):
+        cls = "shards" if self.mode == "guest" else "oci"
+        self.phase = "local"
+        local, socket_path, _ = self.scheduler("l", 0, [{"class": cls, "socket": str(backend)}], [], self.root.name + "-local")
+        for index in range(self.args.n):
+            self.one_box(socket_path, f"local-{index}", 0)
+        self.stop(local)
+
+    def complete_physical(self, phases):
+        require(self.snapshot()["boxes"] == self.baseline, "physical cleanup baseline was not restored")
+        self.report["verified_physical_created"] = self.verified_created
+        self.report["verified_physical_deleted"] = self.verified_deleted
+        self.report["backend_baseline_restored"] = True
+        self.report["backend_eager_boot"] = self.mode == "guest"
+        self.report["success_controls"] = self.success_controls
+        expected = self.args.n * len(phases)
+        require(self.verified_created == expected and self.verified_deleted == expected,
+                "not all " + " and ".join(phases) + " real lifecycles completed")
+
+    def exercise(self, *, local_only=False):
+        if not local_only:
+            self.setup_ssh()
         marker = self.source / "SOURCE_REVISION"
         self.report["source_revision"] = marker.read_text().strip() if marker.is_file() else self.command("source-revision", ["git", "-C", str(self.source), "rev-parse", "HEAD"]).decode().strip()
         self.report["hex_version"] = self.command("hex-version", [self.runtime["hex"], "--version"]).decode().strip()
@@ -625,12 +645,11 @@ class Harness:
         atomic_json(self.runtime_path, self.runtime)
         atomic_json(self.root / "provenance.json", self.report)
         backend = self.backend("real")
+        self.local_phase(backend)
+        if local_only:
+            self.complete_physical(("local",))
+            return
         cls = "shards" if self.mode == "guest" else "oci"
-        self.phase = "local"
-        local, socket_path, _ = self.scheduler("l", 0, [{"class": cls, "socket": str(backend)}], [], self.root.name + "-local")
-        for index in range(self.args.n):
-            self.one_box(socket_path, f"local-{index}", 0)
-        self.stop(local)
         self.phase = "remote"
         realm = self.root.name + "-peer"
         route0 = [{"node": 1, "host": "fixture-1", "command": "forced-tunnel"}]
@@ -649,14 +668,7 @@ class Harness:
             self.one_box(owner_socket, f"remote-{index}", 1, link=True)
         self.stop(owner)
         self.stop(remote)
-        require(self.snapshot()["boxes"] == self.baseline, "physical cleanup baseline was not restored")
-        self.report["verified_physical_created"] = self.verified_created
-        self.report["verified_physical_deleted"] = self.verified_deleted
-        self.report["backend_baseline_restored"] = True
-        self.report["backend_eager_boot"] = self.mode == "guest"
-        self.report["success_controls"] = self.success_controls
-        require(self.verified_created == self.args.n * 2 and self.verified_deleted == self.args.n * 2,
-                "not all local and remote real lifecycles completed")
+        self.complete_physical(("local", "remote"))
 
     def finish_backend(self):
         if self.backend_process is None:

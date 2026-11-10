@@ -38,13 +38,13 @@ class PhysicalTrace(unittest.TestCase):
         harness.report = {}
         harness.backend_process = harness.backend_socket = harness.backend_state = harness.guest_receipt = None
 
-    def construct(self, trace=False):
-        adapter = fixture.trace_harness(self.cold, trace)
+    def construct(self, trace=False, local_only=False):
+        adapter = fixture.trace_harness(self.cold, trace, local_only)
         with patch.object(self.base, "__init__", lambda harness, args: self.initialize(harness, args)):
             return adapter(self.args)
 
-    def ready(self):
-        harness = self.construct()
+    def ready(self, local_only=False):
+        harness = self.construct(local_only=local_only)
         harness.backend_process = harness.cold_process = SimpleNamespace(poll=lambda: None)
         harness.backend_state = self.root / "cold-node.node-state"
         harness.backend_socket = self.root / "cold-node.sock"
@@ -327,6 +327,103 @@ class PhysicalTrace(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIs(self.cold.census.Harness, self.base)
         self.assertIs(self.cold.ColdHarness.instances, original_instances)
+
+    def physical_flow(self, local_only, *, failure=None, skip_delete=False):
+        flow_root = Path(tempfile.mkdtemp(prefix="flow-", dir=self.root))
+        with patch.object(self, "root", flow_root):
+            harness = self.ready(local_only)
+        harness.source, harness.runtime_path = flow_root, flow_root / "runtime.json"
+        (flow_root / "SOURCE_REVISION").write_text("synthetic-source")
+        harness.runtime = {"hex": "/synthetic/hex"}
+        harness.report["binary_and_artifact_hashes"] = {"hex": {"sha256": "synthetic-hash"}}
+        harness.verified_created = harness.verified_deleted = 0
+        harness.success_controls, harness.baseline = {}, []
+        events = []
+        self.flow_harness, self.flow_events = harness, events
+
+        def scheduler(name, node, backends, peers, realm):
+            events.append(("scheduler", name, node, backends, peers, realm))
+            return name, flow_root / (name + ".sock"), None
+
+        def one_box(socket, label, target, link=False):
+            events.append(("box", harness.phase, label, target, link))
+            if failure is not None:
+                raise failure
+            harness.verified_created += 1
+            if not skip_delete:
+                harness.verified_deleted += 1
+
+        def call(socket, command):
+            events.append(("call", command))
+            return {"offer": "synthetic", "observations": []}
+
+        harness.setup_ssh = lambda: events.append(("ssh",))
+        harness.command = lambda name, argv: b"synthetic-hex-version\n"
+        harness.scheduler, harness.one_box, harness.call = scheduler, one_box, call
+        harness.stop = lambda process: events.append(("stop", process))
+        harness.snapshot = lambda: {"boxes": []}
+        self.base.exercise(harness, local_only=local_only)
+        return harness, events
+
+    def test_ac_t7_4_default_and_local_only_share_physical_phase_and_exact_counts(self):
+        for local_only in (False, True):
+            with self.subTest(local_only=local_only):
+                harness, events = self.physical_flow(local_only)
+                phases = ["local"] if local_only else ["local", "remote"]
+                self.assertEqual([event[1] for event in events if event[0] == "scheduler"], ["l"] if local_only else ["l", "r", "o"])
+                self.assertEqual(events.count(("ssh",)), 0 if local_only else 1)
+                boxes = [event for event in events if event[0] == "box"]
+                self.assertEqual([event[1] for event in boxes], [phase for phase in phases for _ in range(self.args.n)])
+                self.assertEqual([event[3] for event in boxes], [0] * self.args.n if local_only else [0] * self.args.n + [1] * self.args.n)
+                self.assertEqual(harness.report["verified_physical_created"], self.args.n * len(phases))
+                self.assertEqual(harness.report["verified_physical_deleted"], self.args.n * len(phases))
+                self.assertTrue(harness.report["backend_baseline_restored"])
+                self.assertEqual(harness.report["source_revision"], "synthetic-source")
+                self.assertEqual(harness.report["hex_version"], "synthetic-hex-version")
+                self.assertEqual(json.loads(harness.runtime_path.read_text())["hex_sha256"], "synthetic-hash")
+                self.assertEqual(json.loads((harness.root / "provenance.json").read_text())["source_revision"], "synthetic-source")
+                self.assertEqual(harness.report["calibration_eligibility"], False)
+                if local_only:
+                    self.assertEqual(harness.report["kind"], "diagnostic-local-physical-armed-trace")
+                    self.assertEqual(harness.report["physical_phases"], ["local"])
+                    self.assertEqual(harness.report["ssh_coverage"], "not exercised")
+                    self.assertFalse(any(event[0] == "call" for event in events))
+                else:
+                    self.assertEqual(harness.report["kind"], "diagnostic-physical-armed-trace")
+                    self.assertNotIn("ssh_coverage", harness.report)
+                    self.assertTrue(all(event[4] for event in boxes if event[1] == "remote"))
+
+    def test_ac_t7_4_local_only_preserves_failure_and_strict_completion_guard(self):
+        failure = self.cold.census.Failed("synthetic local create failure")
+        with self.assertRaises(self.cold.census.Failed) as observed:
+            self.physical_flow(True, failure=failure)
+        self.assertIs(observed.exception, failure)
+        self.assertEqual(len([event for event in self.flow_events if event[0] == "box"]), 1)
+        self.assertFalse(any(event[0] == "ssh" for event in self.flow_events))
+        self.assertNotIn("verified_physical_created", self.flow_harness.report)
+        with self.assertRaisesRegex(self.cold.census.Failed, "not all local real lifecycles completed"):
+            self.physical_flow(True, skip_delete=True)
+
+    def test_ac_t7_4_local_only_wrapper_forwards_flag_after_cold_verification(self):
+        arguments = ["synthetic-trace", "--cold-driver", str(self.root / "cold.py"), "--local-only",
+                     "--validate-seeds", "--mode", "guest", "--n", "3"]
+        events = []
+
+        def original_main():
+            self.assertNotIn("--local-only", fixture.sys.argv)
+            instance = self.cold.census.Harness(self.args)
+            instance.exercise()
+            self.assertEqual(instance.report["kind"], "diagnostic-local-physical-armed-trace")
+
+        def physical(instance, *, local_only=False):
+            events.append(("physical", local_only, instance.args.n))
+
+        with patch.object(fixture, "load_cold", return_value=self.cold), patch.object(fixture.sys, "argv", arguments), \
+                patch.object(self.base, "__init__", lambda harness, args: self.initialize(harness, args)), \
+                patch.object(self.cold.ColdHarness, "exercise", lambda _: events.append("cold")), \
+                patch.object(self.base, "exercise", physical), patch.object(self.cold.census, "main", original_main):
+            self.assertEqual(fixture.main(), 0)
+        self.assertEqual(events, ["cold", ("physical", True, 3)])
 
 
 if __name__ == "__main__":

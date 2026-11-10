@@ -27,7 +27,7 @@ def load_cold(path):
     return load_module(path, "physical_trace_cold_driver")
 
 
-def trace_harness(cold, trace):
+def trace_harness(cold, trace, local_only=False):
     # Capture the original class before main replaces the module's Harness binding.
     base = cold.census.Harness
 
@@ -46,10 +46,16 @@ def trace_harness(cold, trace):
                                physical_results="ordinary verified physical counters/controls and owned ledger")
             self.report["cold_boot"].pop("boxes_created")
             self.report["cold_boot"].pop("workload_success")
+            if local_only:
+                self.report.update(kind="diagnostic-local-physical-armed-trace", physical_phases=["local"],
+                                   ssh_coverage="not exercised", startup_order="cold readiness before local physical phase; no SSH setup")
 
         def exercise(self):
             cold.ColdHarness.exercise(self)
-            base.exercise(self)
+            if local_only:
+                base.exercise(self, local_only=True)
+            else:
+                base.exercise(self)
 
         def backend(self, name):
             if name == "cold-node":
@@ -77,6 +83,7 @@ def main():
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     parser.add_argument("--cold-driver", type=Path, required=True, help="reviewed cold_boot_census.py path")
     parser.add_argument("--trace", action="store_true", help="enable the cache diagnostic binary's child trace")
+    parser.add_argument("--local-only", action="store_true", help="diagnostic local physical cycles only; no SSH coverage")
     parser.add_argument("--fault", choices=("pre-ready", "post-ready"), help="ROOT-only existing cold cleanup fault control")
     options, rest = parser.parse_known_args()
     cold = load_cold(options.cold_driver.expanduser().resolve())
@@ -86,7 +93,7 @@ def main():
         faults = load_module(Path(__file__).with_name("cold_fault_e2e.py"), "physical_trace_fault_control") if options.fault else None
         with faults.inject_fault(cold, options.fault) if faults else nullcontext():
             cold.ColdHarness.instances = []
-            cold.census.Harness = trace_harness(cold, options.trace)
+            cold.census.Harness = trace_harness(cold, options.trace, options.local_only)
             sys.argv = [original_arguments[0], *rest]
             cold.census.main()  # One backend; --n retains ordinary physical trials per phase.
     finally:
