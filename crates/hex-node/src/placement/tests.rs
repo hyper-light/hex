@@ -360,21 +360,37 @@ fn failed_durable_budget_growth_does_not_admit_another_runtime_create() {
     let before = durable_placement_files(dir.path());
     let blocked = dir.path().join("epoch.tmp");
     std::fs::create_dir(&blocked).unwrap();
-    assert!(matches!(
-        driver.set_budget(Budget { owned: 2, ran: 2 }),
-        Err(Error::Core(Stop::Io(_)))
-    ));
-    assert_eq!(durable_placement_files(dir.path()), before);
-    assert!(matches!(
-        driver.submit(d, p),
-        Err(Error::Core(Stop::Full { bound: 1, .. }))
-    ));
-    assert_eq!(rt.creates.load(Ordering::SeqCst), 1);
-    assert_eq!(rt.list().unwrap().len(), 1);
+    let growth = driver.set_budget(Budget { owned: 2, ran: 2 });
+    // Drive an accidental admission through actual Runtime.create before asserting, so removing
+    // the durability guard exposes its forbidden physical effect rather than only a wrong result.
+    let (extra, refusal) = match driver.submit(d, p) {
+        Ok((extra, step)) => {
+            local(&driver, step);
+            (Some(extra), None)
+        }
+        Err(why) => (None, Some(why)),
+    };
+    let after = durable_placement_files(dir.path());
+    let creates = rt.creates.load(Ordering::SeqCst);
+    let live = rt.list().unwrap().len();
     assert_eq!(rt.sim.inspect(&physical).unwrap().id, physical);
     std::fs::remove_dir(blocked).unwrap();
+    if let Some(extra) = extra {
+        local(&driver, driver.delete(extra).unwrap());
+    }
     local(&driver, driver.delete(key).unwrap());
     assert!(rt.list().unwrap().is_empty());
+    assert_eq!(
+        creates, 1,
+        "failed persistence allowed another Runtime.create; live={live}"
+    );
+    assert_eq!(live, 1);
+    assert_eq!(after, before);
+    assert!(matches!(growth, Err(Error::Core(Stop::Io(_)))));
+    assert!(matches!(
+        refusal,
+        Some(Error::Core(Stop::Full { bound: 1, .. }))
+    ));
 }
 
 fn local(driver: &Driver, step: Step) -> Step {
@@ -1199,4 +1215,45 @@ fn restart_with_less_room(pool_limited: bool) {
     } else {
         assert_eq!(nodes.first().unwrap().capacity, live);
     }
+}
+
+/// AC-T7.4.1: after reboot below the retained population, deleting only one box must not
+/// reactivate the old read ceiling. A mutant is driven through physical creation and cleaned up.
+#[test]
+fn recovery_floor_cannot_admit_a_replacement_above_current_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = Arc::new(Counting::default());
+    let driver = try_boot_with_budget(dir.path(), rt.clone(), Budget { owned: 2, ran: 2 }).unwrap();
+    let (d, p) = request();
+    let (first, step) = driver.submit(d, p.clone()).unwrap();
+    local(&driver, step);
+    let (second, step) = driver.submit(d, p.clone()).unwrap();
+    local(&driver, step);
+    drop(driver);
+    let driver = try_boot_with_budget(dir.path(), rt.clone(), Budget { owned: 1, ran: 1 }).unwrap();
+    local(&driver, driver.take_recovered().unwrap());
+    local(&driver, driver.delete(first).unwrap());
+    let (extra, refusal) = match driver.submit(d, p) {
+        Ok((extra, step)) => {
+            local(&driver, step);
+            (Some(extra), None)
+        }
+        Err(why) => (None, Some(why)),
+    };
+    let creates = rt.creates.load(Ordering::SeqCst);
+    let live = rt.list().unwrap().len();
+    if let Some(extra) = extra {
+        local(&driver, driver.delete(extra).unwrap());
+    }
+    local(&driver, driver.delete(second).unwrap());
+    assert!(rt.list().unwrap().is_empty());
+    assert_eq!(
+        creates, 2,
+        "recovery read floor allowed another Runtime.create; live={live}"
+    );
+    assert_eq!(live, 1);
+    assert!(matches!(
+        refusal,
+        Some(Error::Core(Stop::Full { bound: 1, .. }))
+    ));
 }
