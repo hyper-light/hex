@@ -1,0 +1,105 @@
+{
+    "root":  "C:\\Users\\corph\\.cache\\hex-native-s4",
+    "exists":  true,
+    "entries":  [
+                    {
+                        "Name":  "containerd",
+                        "Mode":  "d-----",
+                        "Length":  null
+                    },
+                    {
+                        "Name":  "ctrd",
+                        "Mode":  "d-----",
+                        "Length":  null
+                    },
+                    {
+                        "Name":  "docker",
+                        "Mode":  "d-----",
+                        "Length":  null
+                    },
+                    {
+                        "Name":  "docker-data",
+                        "Mode":  "d-----",
+                        "Length":  null
+                    },
+                    {
+                        "Name":  "docker-exec",
+                        "Mode":  "d-----",
+                        "Length":  null
+                    },
+                    {
+                        "Name":  "armleak-hex.json",
+                        "Mode":  "-a----",
+                        "Length":  872
+                    },
+                    {
+                        "Name":  "containerd-2.4.2-windows-amd64.tar.gz",
+                        "Mode":  "-a----",
+                        "Length":  42100467
+                    },
+                    {
+                        "Name":  "containerd.log",
+                        "Mode":  "-a----",
+                        "Length":  15908
+                    },
+                    {
+                        "Name":  "docker-29.9.3.zip",
+                        "Mode":  "-a----",
+                        "Length":  49715375
+                    },
+                    {
+                        "Name":  "dockerd.log",
+                        "Mode":  "-a----",
+                        "Length":  0
+                    },
+                    {
+                        "Name":  "dockerd.out.log",
+                        "Mode":  "-a----",
+                        "Length":  12268
+                    },
+                    {
+                        "Name":  "hex-round.json",
+                        "Mode":  "-a----",
+                        "Length":  982
+                    },
+                    {
+                        "Name":  "layers.txt",
+                        "Mode":  "-a----",
+                        "Length":  96
+                    },
+                    {
+                        "Name":  "mismatch-layers.txt",
+                        "Mode":  "-a----",
+                        "Length":  96
+                    },
+                    {
+                        "Name":  "versions.txt",
+                        "Mode":  "-a----",
+                        "Length":  8824
+                    }
+                ],
+    "layers":  [
+                   {
+                       "name":  "layers.txt",
+                       "exists":  true,
+                       "value":  "C:\\Users\\corph\\.cache\\hex-native-s4\\ctrd\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1",
+                       "paths":  [
+                                     {
+                                         "exists":  true,
+                                         "path":  "C:\\Users\\corph\\.cache\\hex-native-s4\\ctrd\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1"
+                                     }
+                                 ]
+                   },
+                   {
+                       "name":  "mismatch-layers.txt",
+                       "exists":  true,
+                       "value":  "C:\\Users\\corph\\.cache\\hex-native-s4\\ctrd\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\3",
+                       "paths":  [
+                                     {
+                                         "exists":  true,
+                                         "path":  "C:\\Users\\corph\\.cache\\hex-native-s4\\ctrd\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\3"
+                                     }
+                                 ]
+                   }
+               ]
+}

@@ -1,0 +1,118 @@
+{
+  "source": "d9d547c7d9211f6c42f1c2c884017a3981032889",
+  "proof_sha256": "c936b51b1c5ee200bc5df111c3db7ec9e804ab7a6499cc51e87dcb7137415ba8",
+  "proof_bytes": 198541,
+  "signed_original_sources_equal": true,
+  "source_files": 1915,
+  "collector_exit": 0,
+  "collector_reaped": true,
+  "readback": {
+    "device-native-fixtures-winboth-d9d547c7-checks-v1": {
+      "source": "d9d547c7d9211f6c42f1c2c884017a3981032889",
+      "archive_sha256": "48b096f35d68336407ca111666e9c36798b40693294c9475a2d43912d901e27a",
+      "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+      "arch": "arm64",
+      "scope": "ROOT combined Windows completion/core markers with current API/native GPU model: both Windows targets CLI/runtime all-target Clippy including combined ignored native fixtures, no test execution or native HCS/GPU attachment effect",
+      "phases": [
+        {
+          "name": "cli-runtime-winboth-clippy",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+            "clippy",
+            "-p",
+            "hex-cli",
+            "-p",
+            "hex-runtime",
+            "--all-targets",
+            "--locked",
+            "--target",
+            "x86_64-pc-windows-msvc",
+            "--target",
+            "aarch64-pc-windows-msvc",
+            "--",
+            "-D",
+            "warnings"
+          ],
+          "pid": 60011,
+          "exit": 0,
+          "reaped": true,
+          "sha256": "00778d9f90ce19a15e7e9ff1fd4b3129300d1b167327545a8a6dd6c8f8486d52",
+          "bytes": 7306
+        }
+      ],
+      "exit": 0,
+      "temp_entries": 0
+    },
+    "borrowed-observed-mutation-d9-v2": {
+      "source": "d9d547c7d9211f6c42f1c2c884017a3981032889",
+      "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+      "guard_seconds": 151.0,
+      "changed_files": [
+        "vendor/shards/crates/api/src/client.rs"
+      ],
+      "before_sha256": "f830c727377592f51d0c9bafb4e68ccaa5db28b5e1475f6da2ae4f238857b1dc",
+      "after_sha256": "f3eb3e277337638b5482da8b35fb0a171da25fb1a65479dd489fd31373003f38",
+      "phases": [
+        {
+          "name": "build",
+          "command": [
+            "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--manifest-path",
+            "vendor/shards/Cargo.toml",
+            "-p",
+            "shards-api",
+            "--test",
+            "hex_borrowed_contract",
+            "--no-run",
+            "--message-format=json"
+          ],
+          "pid": 60376,
+          "exit": 0,
+          "reaped": true,
+          "sha256": "bb49ef102009fe2169976dc9fc1577867ca1622fb7f54140c132720522b24565"
+        },
+        {
+          "name": "missing-final-guard-observed",
+          "command": [
+            "/Users/adalundhe/.cache/hex-lead/borrowed-observed-mutation-d9-v2/target/debug/deps/hex_borrowed_contract-a190507c43aeed8d",
+            "--ignored",
+            "--exact",
+            "root_borrowed_target_death_before_ok_is_refused",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "pid": 60495,
+          "exit": 101,
+          "reaped": true,
+          "sha256": "b2fe06e8573e47b4e70261f397ead6a8b9e932b9f7abdac45c2a06f4543aeebb"
+        }
+      ],
+      "forbidden_stream_return_observed": true,
+      "exit": 0,
+      "original_source_unchanged": true,
+      "temp_entries": 0
+    },
+    "vendor-check-d9-root-v1": {
+      "source": "d9d547c7d9211f6c42f1c2c884017a3981032889",
+      "exit": 1,
+      "pid": 59726,
+      "reaped": true,
+      "source_unchanged": true,
+      "sha256": "99a3d3c50a582a2e1872fc0839c1f795f92825ef88e33b9dbd8c67da39647aaa",
+      "bytes": 260
+    },
+    "vendor-check-d9-root-v2": {
+      "source": "d9d547c7d9211f6c42f1c2c884017a3981032889",
+      "exit": 0,
+      "pid": 60425,
+      "reaped": true,
+      "source_unchanged": true,
+      "sha256": "e4982238fd17bf58cce12a57edc95ad9e650fa79950bf1672a765e1c5893acf2",
+      "bytes": 107
+    }
+  }
+}

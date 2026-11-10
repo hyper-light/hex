@@ -1,5 +1,7 @@
 # Current borrowed connector contract
 
+Latest actual results, red histories, cold-handle uncertainty and upstream disposition: [RESULTS.md](RESULTS.md).
+
 ROOT Hex coordinator01a1aa77778471339bea3beff90d6bbd. Full current Shards policy
 at a920c85b5c0c9d40aafc4f4cce32432c7c0aed79 read; R01–R16 hash
 df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3.
@@ -75,8 +77,8 @@ claim follows from steady-state handle equality.
 Read-only adversarial review identified missing finite non-MAX overflow, target
 death between CONNECT and OK, first-use handle accounting and precise zero-readiness
 phase classification. The follow-up source adds those tests/observations. Its
-new results and the post-handshake-guard mutation are PENDING, not covered by the
-8e proof. Cold handle deltas are explicitly reported; a nonzero cold delta remains
+new results and the post-handshake-guard mutation are recorded separately at d9
+in RESULTS.md; the8e proof does not cover them. Cold handle deltas are explicitly reported; a nonzero cold delta remains
 uncertainty requiring attribution, never an allowed drift or a leak-free claim.
 Linux native and seven-target combined checks remain unrun: approvedadacachy2 is
 offline andadacachy currently has no admitted idle CPU. No Fedora/laptop checks,
@@ -88,4 +90,4 @@ failed on conformance.rs:88 single_element_loop, before new native tests ran.
 That loop came from Hex0003 narrowing the excluded set to Intel Mac. The small
 0006 correction checks the same pair directly, without a lint allowance; no
 backend or borrowed semantics change. Raw red runs remain in their private
-source/target roots. New native tests/mutation and corrected Clippy are pending.
+source/target roots. New native tests/mutation and corrected Clippy subsequently pass at d9; see RESULTS.md.
