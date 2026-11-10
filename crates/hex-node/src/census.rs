@@ -1,5 +1,6 @@
 //! The waits census (`bench/competitive/probes/waits_census.md`; decision 9): with [`ENV_FILE`] naming a file, every
-//! answer every named wait in this process records ([`hex_core::patience`]) is appended to it as a line `name nanos`,
+//! answer every named wait in this process records ([`hex_core::patience`]) is appended as `name nanos`
+//! (completed wire refusals: `name !nanos`),
 //! from the waits' own timing points, so the probe reads each wait's distribution without re-implementing it. With
 //! it unset nothing is installed and a wait's answer costs one atomic load more. A bench's switch: the probe sets it.
 //!
@@ -54,7 +55,7 @@ pub fn install_from_env() -> Result<bool, Refusal> {
     Ok(hex_core::patience::census(record))
 }
 
-/// One answer, appended as `name nanos`, or a run-out, `name >nanos`; past the bound, one line saying the census is
+/// An answer `name nanos`, typed refusal `name !nanos`, or run-out `name >nanos`; past the bound, one line saying the census is
 /// full, then nothing.
 fn record(name: &'static str, sample: hex_core::patience::Sample) {
     let Some(out) = OUT.get() else {

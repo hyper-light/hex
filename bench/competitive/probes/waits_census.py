@@ -1,6 +1,9 @@
 """Reads waits_census.sh's run: each census file's lines `name nanos`, by wait name, as a table of p50, p99, p99.9, max
 and n in milliseconds, one table an arm. A census cut at its bound says so. A row seeds its wait (its max) only with
 n of at least SEEDABLE: fewer samples than that can't have seen the p99.9, so the tail the seed must cover is unknown.
+A completed wire typed refusal, `name !nanos`, is retained separately, excluded from answer statistics.
+An answered wire row alone does not prove workload success; physical/per-call provenance remains required.
+Legacy unmarked rows keep their original interpretation; historical refusals cannot be inferred.
 A wait that ran out is no sample (Karn's point), but its line, `name >nanos`, says its slowest is at least the bound it
 ran out at, which a row's record is never under, however few its answers ([`seed`]): a censored row's patience doubles
 each census until nothing runs out (decision 9; the lead, 2026-11-09)."""
@@ -20,8 +23,8 @@ def quantile(sorted_ns, q):
 
 
 def read(path):
-    """A census file's answers and run-outs, each by wait name in nanoseconds, and the line saying it was cut, if any."""
-    waits, ran_out, cut = {}, {}, None
+    """A census file's answers, run-outs and typed refusals, each by wait name in nanoseconds, and the line saying it was cut, if any."""
+    waits, ran_out, refused, cut = {}, {}, {}, None
     for line in path.read_text().splitlines():
         if line.startswith("census full at"):
             cut = line
@@ -31,7 +34,9 @@ def read(path):
             waits.setdefault(name, []).append(int(ns))
         elif ns.startswith(">") and ns[1:].isdigit():
             ran_out.setdefault(name, []).append(int(ns[1:]))
-    return waits, ran_out, cut
+        elif ns.startswith("!") and ns[1:].isdigit():
+            refused.setdefault(name, []).append(int(ns[1:]))
+    return waits, ran_out, refused, cut
 
 
 def seed(answers, ran_out):
@@ -59,24 +64,26 @@ def main(out):
     print(Path(out / "env.txt").read_text())
     for census in sorted(out.glob("census-*.txt")):
         place = census.stem.removeprefix("census-")
-        waits, ran_out, cut = read(census)
+        waits, ran_out, refused, cut = read(census)
         waits.update(seam_rows(out, place))
         print(f"## Arm: {place}\n")
         if cut:
             print(f"**Cut:** {cut}; raise HEX_WAITS_CENSUS_MAX.\n")
-        print("| wait | p50 (ms) | p99 | p99.9 | max | n | ran out | seed |")
-        print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |")
-        for name in sorted(set(waits) | set(ran_out)):
+        print("| wait | p50 (ms) | p99 | p99.9 | max | n | ran out | refused | seed |")
+        print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |")
+        for name in sorted(set(waits) | set(ran_out) | set(refused)):
             ns, out_at = sorted(waits.get(name, [])), ran_out.get(name, [])
             ms = [quantile(ns, q) / 1e6 for q in (0.5, 0.99, 0.999)] + [ns[-1] / 1e6] if ns else []
             row = " | ".join(f"{v:.3f}" for v in ms) if ms else "n/a | n/a | n/a | n/a"
             outs = f"{len(out_at)} at {max(out_at) / 1e6:.3f} ms" if out_at else "0"
+            refusals = refused.get(name, [])
+            refused_at = f"{len(refusals)} at {max(refusals) / 1e6:.3f} ms" if refusals else "0"
             record = seed(ns, out_at)
             if record is None:
                 why = f"none: n {len(ns)} < {SEEDABLE:,}"
             else:
                 why = f"record {record / 1e6:.3f} ms" + (" (ran out)" if out_at and record == max(out_at) else " (max)")
-            print(f"| {name} | {row} | {len(ns)} | {outs} | {why} |")
+            print(f"| {name} | {row} | {len(ns)} | {outs} | {refused_at} | {why} |")
         print()
 
 

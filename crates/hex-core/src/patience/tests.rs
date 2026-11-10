@@ -161,3 +161,34 @@ fn a_debug_build_reads_the_debug_record() {
     q.answered(ms(1));
     assert_eq!(q.deadline(), None);
 }
+
+/// AC-T7.4.1: typed refusal census identity must not alter the existing online learning rule.
+#[test]
+fn refusal_census_preserves_learning_and_marks_only_the_optional_record() {
+    let answered = Patience::seeded("outcome.answer", ms(1));
+    let refused = Patience::seeded("outcome.refused", ms(1));
+    for took in [ms(7), ms(3), ms(12)] {
+        answered.answered(took);
+        refused.refused(took);
+        assert_eq!(answered.slowest(), refused.slowest());
+        assert_eq!(answered.deadline(), refused.deadline());
+    }
+    assert_eq!(refused.slowest(), Some(ms(12)));
+    assert_eq!(refused.deadline(), Some(ms(24)));
+    let measuring = Patience::measuring("outcome.measuring");
+    measuring.refused(ms(9));
+    assert_eq!(measuring.slowest(), Some(ms(9)));
+    assert_eq!(measuring.deadline(), None);
+    assert_eq!(
+        census_line("a.wait", Sample::Refused(Duration::from_nanos(41))),
+        "a.wait !41\n"
+    );
+    assert_eq!(
+        census_line("a.wait", Sample::Answered(Duration::from_nanos(41))),
+        "a.wait 41\n"
+    );
+    assert_eq!(
+        census_line("a.wait", Sample::RanOut(Duration::from_nanos(41))),
+        "a.wait >41\n"
+    );
+}

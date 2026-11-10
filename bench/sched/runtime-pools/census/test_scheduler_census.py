@@ -94,5 +94,35 @@ class CensusIdentityTests(unittest.TestCase):
             self.assertEqual(result["answer_rows_by_name"], {"client.answer.capacity": 2, "client.answer.schedule.delete": 1})
 
 
+    def test_refusal_census_retains_marked_refusals_outside_success_rows(self):
+        parent = Path.home() / ".cache/hex-lead/census-report-tests"
+        parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="synthetic-refusals-", dir=parent) as temporary:
+            root = Path(temporary)
+            (root / "census").mkdir()
+            path = root / "census/multiplexed.tsv"
+            rows = "client.answer.schedule.hear_control 1\nclient.answer.schedule.hear_control !900\nclient.answer.schedule.hear_control >3\n"
+            path.write_text(rows)
+            ledger_path = root / "pids.jsonl"
+            ledger_path.write_text(json.dumps({"kind": "forced-tunnel", "pid": 123, "census": str(path)}) + "\n")
+            harness = object.__new__(census.Harness)
+            harness.root = root
+            harness.runtime = {"root": str(root), "ledger": str(ledger_path), "max_frame": len(rows.encode())}
+            harness.args = SimpleNamespace(n=1, max_census_lines=3)
+            harness.wait_kinds = ["hear_control"]
+            harness.report = {}
+            harness.census_report()
+            result = harness.report["census"]
+            name = "client.answer.schedule.hear_control"
+            self.assertEqual(result["answer_rows_by_name"], {name: 1})
+            self.assertEqual(result["refused_rows_by_name"], {name: 1})
+            self.assertEqual(result["per_process"][0]["answers"], {name: 1})
+            self.assertEqual(result["per_process"][0]["refused"], {name: 1})
+            self.assertEqual(result["per_process"][0]["ran_out"], {name: 1})
+            self.assertEqual(result["successful_single_call_rows"], {})
+            self.assertEqual(result["successful_process_rows"], {})
+            self.assertEqual(result["malformed_files"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

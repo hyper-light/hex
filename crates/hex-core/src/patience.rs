@@ -39,6 +39,8 @@ pub const TIMES_SLOWEST: u32 = 2;
 pub enum Sample {
     Answered(Duration),
     RanOut(Duration),
+    /// A completed typed refusal: learned exactly as an answer, separately marked for census analysis.
+    Refused(Duration),
 }
 
 /// Where every named wait's answers and run-outs go besides its own maximum, once a shell installs it: none unless one
@@ -62,13 +64,14 @@ pub fn census(sink: fn(&'static str, Sample)) -> bool {
     CENSUS.set(sink).is_ok()
 }
 
-/// One sample as the census's file keeps it, an answer `name nanos` and a run-out `name >nanos`, and a newline: the
+/// One sample as the census's file keeps it, an answer `name nanos`, refusal `name !nanos`, or run-out `name >nanos`, and a newline: the
 /// line every census sink writes (the node's, `hex_node::census`, and the tests', `hex_testkit::waits`), so
 /// `waits_census.py` reads one form.
 pub fn census_line(name: &str, sample: Sample) -> String {
     match sample {
         Sample::Answered(took) => format!("{name} {}\n", took.as_nanos()),
         Sample::RanOut(after) => format!("{name} >{}\n", after.as_nanos()),
+        Sample::Refused(took) => format!("{name} !{}\n", took.as_nanos()),
     }
 }
 
@@ -134,6 +137,15 @@ impl Patience {
         self.seen.fetch_max(stored(took), Ordering::Relaxed);
         if let Some(sink) = CENSUS.get() {
             sink(self.name, Sample::Answered(took));
+        }
+    }
+
+    /// AC-T7.4.1: a completed typed refusal keeps exactly the same online maximum/deadline update
+    /// as an answer. Only the optional census distinguishes it from successful completions.
+    pub fn refused(&self, took: Duration) {
+        self.seen.fetch_max(stored(took), Ordering::Relaxed);
+        if let Some(sink) = CENSUS.get() {
+            sink(self.name, Sample::Refused(took));
         }
     }
 

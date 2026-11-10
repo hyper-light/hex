@@ -92,3 +92,8 @@ Root reviewed this source and ran its syntax and both actual before/after report
 the durable results are in ../retry-reset-a98824f7.json. Production contains none
 of the temporary tagged trace instrumentation. The two new scripts are benchmark
 diagnostics, not installed helpers or a new scheduler code path.
+
+
+Census completion outcomes now use `name nanos` for an answer, `name !nanos` for a completed typed wire refusal, and the unchanged `name >nanos` for a run-out. Refusals remain online learning samples with exactly the existing maximum/deadline rule, but parsers retain them separately (`refused`, `refused_rows_by_name`) and exclude them from successful-answer counts/distributions. Historical unmarked rows retain their original meaning: old mixed data cannot be retrospectively separated. No refusal text is matched, no runtime seed/deadline is changed, and root still validates actual native/VM outcomes before interpreting a capture.
+
+The marker identifies only wire `Answer::Refused`, not workload/application success. An unmarked `Answer::Scheduled` can describe pending work or contain typed refusal notices; the timing core does not reinterpret that payload. Actual physical lifecycle controls and per-call outcome provenance still determine seed eligibility. This commit makes no new seed decision and cannot retrospectively classify old unmarked rows.

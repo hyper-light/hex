@@ -25,10 +25,23 @@ class Reading(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "census-suites.txt"
             path.write_text("a 10\na 30\nb >440000000\na >50\nb 7\ncensus full at 6 lines\n")
-            answers, ran_out, cut = wc.read(path)
+            answers, ran_out, refused, cut = wc.read(path)
         self.assertEqual(answers, {"a": [10, 30], "b": [7]})
         self.assertEqual(ran_out, {"b": [440_000_000], "a": [50]})
+        self.assertEqual(refused, {})
         self.assertEqual(cut, "census full at 6 lines")
+
+
+    def test_refusal_census_keeps_refusals_out_of_success_distributions(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "census-suites.txt"
+            path.write_text("a 10\na !900\nb !0\na >40\n")
+            answers, ran_out, refused, cut = wc.read(path)
+        self.assertEqual(answers, {"a": [10]})
+        self.assertEqual(ran_out, {"a": [40]})
+        self.assertEqual(refused, {"a": [900], "b": [0]})
+        self.assertIsNone(cut)
+        self.assertIsNone(wc.seed(answers.get("b", []), ran_out.get("b", [])))
 
 
 class SeedRule(unittest.TestCase):

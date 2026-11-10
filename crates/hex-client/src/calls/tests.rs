@@ -2,6 +2,7 @@
 
 use super::*;
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 type Opening = Box<dyn FnOnce(&wire::StreamOffer) + Send>;
 
@@ -10,6 +11,7 @@ struct Memory {
     outbound: Mutex<Vec<Vec<u8>>>,
     inbound: Mutex<VecDeque<Vec<u8>>>,
     offer: Mutex<Option<Result<(), Refusal>>>,
+    reply: Mutex<Option<Answer>>,
     opened: Mutex<Vec<wire::StreamOffer>>,
     program_stdio: Mutex<Option<Stdio>>,
     opening: Mutex<Option<Opening>>,
@@ -30,8 +32,12 @@ impl Transport for Memory {
     const MAKES_ASKED: bool = true;
 
     fn answers() -> &'static [Patience; KINDS] {
-        static ANSWERS: [Patience; KINDS] =
-            [const { Patience::measuring("test.deferred.answer") }; KINDS];
+        static ANSWERS: [Patience; KINDS] = {
+            let mut answers = [const { Patience::measuring("test.deferred.answer") }; KINDS];
+            answers[LegacyKind::COUNT + WaitKind::COUNT] =
+                Patience::measuring("test.refusal.capacity");
+            answers
+        };
         &ANSWERS
     }
 
@@ -72,6 +78,10 @@ impl Transport for Memory {
         assert!(lent.is_empty(), "a deferred guest call lends no handles");
         self.outbound.lock().unwrap().push(bytes.to_vec());
         *at = bytes.len();
+        if let Some(answer) = self.reply.lock().unwrap().clone() {
+            let (header, _) = sent_request(bytes);
+            self.queue(header.id, answer);
+        }
         if self.offer.lock().unwrap().is_some() {
             let (header, request) = sent_request(bytes);
             match request {
@@ -126,6 +136,7 @@ fn client() -> Core<Memory> {
                 outbound: Mutex::new(Vec::new()),
                 inbound: Mutex::new(VecDeque::new()),
                 offer: Mutex::new(None),
+                reply: Mutex::new(None),
                 opened: Mutex::new(Vec::new()),
                 program_stdio: Mutex::new(None),
                 opening: Mutex::new(None),
@@ -646,4 +657,40 @@ fn runtime_capacity_wait_appends_without_moving_existing_indexes() {
             "{request:?}"
         );
     }
+}
+
+/// AC-T7.4.1: the common synchronous timing point distinguishes an actual typed wire refusal.
+#[test]
+fn refusal_census_common_call_records_the_typed_wire_outcome() {
+    static REFUSED: AtomicBool = AtomicBool::new(false);
+    fn sink(name: &'static str, sample: hex_core::patience::Sample) {
+        if name == "test.refusal.capacity"
+            && matches!(sample, hex_core::patience::Sample::Refused(_))
+        {
+            REFUSED.store(true, Ordering::SeqCst);
+        }
+    }
+    assert!(hex_core::patience::census(sink));
+    let client = client();
+    let expected = Refusal::Exhausted {
+        what: "scheduler command publication",
+        bound: 1,
+    };
+    *client.conn.shared.transport.reply.lock().unwrap() = Some(Answer::Refused(expected.clone()));
+    assert_eq!(client.capacity(Class::Oci), Err(expected));
+    assert!(REFUSED.load(Ordering::SeqCst));
+    let patience = kind_of(
+        <Memory as Transport>::answers(),
+        &Request::Call(Call::Capacity(Class::Oci)),
+    )
+    .unwrap();
+    assert!(
+        patience.slowest().is_some(),
+        "refusals still update online learning"
+    );
+    assert_eq!(
+        patience.deadline(),
+        None,
+        "a measuring wait remains measuring"
+    );
 }

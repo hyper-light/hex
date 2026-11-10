@@ -667,7 +667,7 @@ class Harness:
             self.report["owned_guest_retired"] = stopped
 
     def census_report(self):
-        counts, per_process, cut, malformed = {}, [], [], []
+        counts, refused_counts, per_process, cut, malformed = {}, {}, [], [], []
         ledger_path = Path(self.runtime["ledger"])
         ledger = [] if not ledger_path.exists() else [json.loads(line) for line in ledger_path.read_text().splitlines()]
         producers = {Path(row["census"]).name: row for row in ledger if row.get("census") and row["kind"] not in ("census-call-exit", "census-process-exit")}
@@ -675,7 +675,7 @@ class Harness:
         process_outcomes = {Path(row["census"]).name: row for row in ledger if row["kind"] == "census-process-exit" and row.get("census")}
         successful_cli_counts, successful_process_counts = {}, {}
         for path in sorted((self.root / "census").glob("*.tsv")):
-            rows, answers, ran_out = 0, {}, {}
+            rows, answers, ran_out, refused = 0, {}, {}, {}
             with path.open(encoding="utf-8") as source:
                 while True:
                     line = source.readline(self.runtime["max_frame"] + 1)
@@ -688,14 +688,16 @@ class Harness:
                     if line.startswith("census full at "):
                         cut.append(path.name)
                         continue
-                    match = re.fullmatch(r"(\S+) (>?)\s*(\d+)\n?", line)
+                    match = re.fullmatch(r"(\S+) ([>!]?)\s*(\d+)\n?", line)
                     if match is None:
                         malformed.append(path.name)
                         continue
-                    name, timed_out, _ = match.groups()
-                    target = ran_out if timed_out else answers
+                    name, outcome, _ = match.groups()
+                    target = ran_out if outcome == ">" else refused if outcome == "!" else answers
                     target[name] = target.get(name, 0) + 1
-                    if not timed_out:
+                    if outcome == "!":
+                        refused_counts[name] = refused_counts.get(name, 0) + 1
+                    elif not outcome:
                         counts[name] = counts.get(name, 0) + 1
             producer = producers.get(path.name, {})
             outcome = outcomes.get(path.name, {})
@@ -706,13 +708,13 @@ class Harness:
             if producer.get("kind") == "call" and outcome.get("success"):
                 for name, count in answers.items():
                     successful_cli_counts[name] = successful_cli_counts.get(name, 0) + count
-            per_process.append({"file": path.name, "rows": rows, "answers": answers, "ran_out": ran_out,
+            per_process.append({"file": path.name, "rows": rows, "answers": answers, "ran_out": ran_out, "refused": refused,
                                 "producer": producer, "call_outcome": outcome, "process_outcome": process_outcome,
                                 "sha256": digest_file(path, self.runtime["max_frame"])})
         missing = {kind: counts.get("client.answer.schedule." + kind, 0) for kind in self.wait_kinds
                    if counts.get("client.answer.schedule." + kind, 0) < self.args.n}
         single_call_missing = {kind: successful_cli_counts.get("client.answer.schedule." + kind, 0) for kind in self.wait_kinds if not kind.startswith("hear_") and successful_cli_counts.get("client.answer.schedule." + kind, 0) < self.args.n}
-        self.report["census"] = {"per_process": per_process, "answer_rows_by_name": counts, "successful_single_call_rows": successful_cli_counts,
+        self.report["census"] = {"per_process": per_process, "answer_rows_by_name": counts, "refused_rows_by_name": refused_counts, "successful_single_call_rows": successful_cli_counts,
                                  "successful_process_rows": successful_process_counts,
                                  "required_raw_answer_rows_per_kind": self.args.n,
                                  "required_verified_successful_trials": self.args.n,

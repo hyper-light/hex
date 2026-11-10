@@ -1168,7 +1168,12 @@ impl<T: Transport> Conn<T> {
                 }
                 Some(Ok(answer)) => {
                     if let Some(waits) = waits {
-                        waits.answered(asked.elapsed());
+                        let took = asked.elapsed();
+                        if matches!(&answer, Answer::Refused(_)) {
+                            waits.refused(took);
+                        } else {
+                            waits.answered(took);
+                        }
                     }
                     return Ok((caller.id, answer));
                 }
