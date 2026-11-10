@@ -1,0 +1,10 @@
+{
+  "origin": "/Users/adalundhe/.cache/hex-lead/worktrees/adversarial-lifetime/crates/hex-gpu/tests/windows_compute.rs",
+  "origin_head": "d9d547c7d9211f6c42f1c2c884017a3981032889",
+  "origin_state": "untracked dirty draft; original and its dirty Cargo metadata preserved",
+  "sha256_at_copy": "bc0d7657f7fde116e8a5c8872524fbe3a27b6cded6eb2e5d658e59c1fddfd2a1",
+  "lines_at_copy": 501,
+  "destination": "crates/hex-gpu/tests/completion_windows_compute.rs",
+  "initial_copy_byte_identical": true,
+  "status": "source-first native fixture, no native result; ROOT must integrate Windows dev features and validate"
+}

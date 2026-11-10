@@ -1,0 +1,14 @@
+#version 450
+// AC-T7.3.1 deterministic fixture; uint operations are specified modulo 2^32.
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) buffer Words { uint words[]; };
+layout(push_constant) uniform Input { uint challenge; uint rounds; } input_value;
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    uint value = index ^ input_value.challenge;
+    for (uint round = 0; round < input_value.rounds; ++round) {
+        value = (value << 7 | value >> 25) ^ (index + round + 1u);
+    }
+    // ROOT's no-store mutation removes exactly this assignment; every prefilled word is wrong.
+    words[index] = value;
+}

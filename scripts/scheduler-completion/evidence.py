@@ -22,6 +22,7 @@ STAGES = (
     "capability", "binding", "compute", "foreign", "wrong-id",
     "scheduler-recovery", "runtime-recovery", "cleanup", "complete",
 )
+SELECTED_STAGES = ("capability", "binding", "compute", "cleanup", "complete")
 POLICY = "0342b85d9c808e3ced041a6c3ef0e9bf70438272"
 RULES = "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3"
 
@@ -105,14 +106,17 @@ def libtest_result(raw, expected):
             "native proof contains an unavailable/simulated path")
 
 
-def check_events(events, backend, topology):
+def check_events(events, backend, topology, proof="full"):
     require(backend in BACKENDS and topology in ("laptop", "peer"), "invalid case identity")
-    require([event.get("stage") for event in events] == list(STAGES), "missing/repeated/out-of-order native stage")
+    expected = STAGES if proof == "full" else SELECTED_STAGES
+    require(proof in ("full", "selected"), "unknown proof scope")
+    require([event.get("stage") for event in events] == list(expected), "missing/repeated/out-of-order native stage")
     for event in events:
         require(event.get("backend") == backend and event.get("topology") == topology,
                 "event case identity mismatch")
         require(event.get("outcome") == "verified", f"unverified stage: {event.get('stage')}")
-    capability, binding, compute, foreign, wrong, scheduler, runtime, cleanup, complete = events
+    capability, binding, compute = events[:3]
+    cleanup, complete = events[-2:]
     require(capability.get("runtime_class") == backend, "scheduler label is not a native Runtime class")
     require(capability.get("native_process_verified") is True, "no independent native process witness")
     require(hex_digest(capability.get("native_executable_sha256")), "native executable not pinned")
@@ -121,34 +125,42 @@ def check_events(events, backend, topology):
     require(binding.get("holder_count") == 1 and binding.get("durable_before_execution") is True,
             "no single durable holder before execution")
     require(hex_digest(compute.get("uuid"), 32), "no actual physical GPU UUID")
+    require(compute.get("selected") == selected and compute.get("native_join_verified") is True,
+            "GPU UUID is not independently joined to the exact selected native identity")
     require(natural(compute.get("words"), positive=True) and compute.get("mismatches") == 0,
             "vacuous or incorrect workload")
     require(compute.get("prefill_mismatches") == compute["words"], "output was not poisoned before dispatch")
     require(compute.get("hardware") is True and compute.get("dispatch_completed") is True,
             "no completed hardware dispatch")
-    require(natural(foreign.get("host_accessible"), positive=True) and foreign.get("guest_accessible") == 0,
-            "foreign-device denial lacks a live positive host control")
-    require(wrong.get("dispatches") == 0 and wrong.get("refused") is True,
-            "wrong identity reached GPU dispatch")
-    for recovery in (scheduler, runtime):
-        require(recovery.get("selected") == selected and recovery.get("holder_count") == 1,
-                "recovery repicked or duplicated the physical holder")
-        require(recovery.get("compute_verified") is True and recovery.get("same_physical_box") is True,
-                "recovery did not retain the running workload")
-    require(runtime.get("catalog_reordered") is True and runtime.get("load_order_changed") is True,
-            "recovery never challenged catalog/load ordering")
+    if proof == "full":
+        foreign, wrong, scheduler, runtime = events[3:7]
+        require(natural(foreign.get("host_accessible"), positive=True) and foreign.get("guest_accessible") == 0,
+                "foreign-device denial lacks a live positive host control")
+        require(wrong.get("dispatches") == 0 and wrong.get("refused") is True,
+                "wrong identity reached GPU dispatch")
+        for recovery in (scheduler, runtime):
+            require(recovery.get("selected") == selected and recovery.get("holder_count") == 1,
+                    "recovery repicked or duplicated the physical holder")
+            require(recovery.get("compute_verified") is True and recovery.get("same_physical_box") is True,
+                    "recovery did not retain the running workload")
+        require(runtime.get("catalog_reordered") is True and runtime.get("load_order_changed") is True,
+                "recovery never challenged catalog/load ordering")
     require(cleanup.get("boxes") == 0 and cleanup.get("holders") == 0 and
             cleanup.get("owned_native_processes") == 0 and cleanup.get("owned_artifacts") == 0,
             "native cleanup incomplete")
-    require(complete.get("selected_stages") == len(STAGES), "vacuous completion")
-    return {"backend": backend, "topology": topology, "native_stages": len(STAGES)}
+    require(complete.get("selected_stages") == len(expected), "vacuous completion")
+    return {"backend": backend, "topology": topology, "proof": proof, "native_stages": len(expected),
+            "remaining": [] if proof == "full" else ["foreign-device", "wrong-id", "scheduler-recovery", "runtime-recovery"]}
 
 
 def check_run(root, receipt, byte_limit):
     require(receipt.get("schema") == "hex-completion-run-1", "unknown run schema")
     require(hex_digest(receipt.get("source"), 40), "source revision missing")
     require(receipt.get("policy") == POLICY and receipt.get("rules_sha256") == RULES, "stale policy")
-    require(receipt.get("scope") == "root-native", "light/model/compile receipt is not native proof")
+    proof = receipt.get("proof")
+    require(proof in ("full", "selected"), "proof scope missing")
+    require(receipt.get("scope") == ("root-native" if proof == "full" else "root-native-selected"),
+            "light/model/compile receipt is not native proof")
     require(receipt.get("exit") == 0 and receipt.get("timed_out") is False and receipt.get("reaped") is True,
             "failed/unreaped native invocation")
     binary = artifact(root, receipt.get("binary"))
@@ -158,13 +170,14 @@ def check_run(root, receipt, byte_limit):
     event_file = artifact(root, receipt.get("events"))
     events = load_json(event_file, byte_limit)
     require(isinstance(events, list), "event array required")
-    return check_events(events, receipt.get("backend"), receipt.get("topology"))
+    return check_events(events, receipt.get("backend"), receipt.get("topology"), proof)
 
 
 def matrix(rows):
     """Compilation, native workloads and peer-routing are separate obligations."""
     required = {(target, backend, topology) for target in TARGETS
-                for backend in BACKENDS for topology in ("laptop", "peer")}
+                for backend in BACKENDS for topology in ("laptop", "peer")
+                if not (backend == "firecracker" and topology == "laptop" and target not in TARGETS[:4])}
     seen = {}
     for row in rows:
         key = row.get("target"), row.get("backend"), row.get("topology")

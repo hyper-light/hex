@@ -32,33 +32,39 @@ def run(args):
     require(sha256(binary) == args.binary_sha256, "input binary hash mismatch")
     config = args.config.resolve(strict=True)
     value = load_json(config, args.byte_limit)
-    require(value.get("source") == args.source and value.get("backend") == args.backend and
+    require(value.get("proof") == args.proof and value.get("source") == args.source and value.get("backend") == args.backend and
             value.get("topology") == args.topology, "fixture source/case mismatch")
     # No generic command or shell string can accidentally select a stale fixture or cargo build.
-    test_name = f"completion_{args.backend}_{args.topology}"
-    command = [str(binary), "--ignored", "--exact", test_name, "--nocapture", "--test-threads=1"]
+    test_name = f"completion_{args.backend}_{args.topology}" + ("_selected" if args.proof == "selected" else "")
     root = args.output.resolve()
     require(not root.exists(), "unique new output directory required")
     root.mkdir(parents=True)
     pinned = root / ("test-binary.exe" if os.name == "nt" else "test-binary")
     shutil.copy2(binary, pinned)
     shutil.copy2(config, root / "fixture.json")
+    require(sha256(pinned) == args.binary_sha256, "copied binary hash mismatch")
+    require(sha256(config) == sha256(root / "fixture.json"), "config changed during copy")
+    command = [str(pinned), "--ignored", "--exact", test_name, "--nocapture", "--test-threads=1"]
     events = root / "events.json"
     env = dict(os.environ)
     # No admin credentials are copied into receipts. Only this scope's fixture path is recorded.
-    env.update(HEX_COMPLETION_CONFIG=str(config), HEX_COMPLETION_EVENTS=str(events),
+    env.update(HEX_COMPLETION_CONFIG=str(root / "fixture.json"), HEX_COMPLETION_EVENTS=str(events),
                HEX_COMPLETION_ROOT_AUTHORIZED="1", RUST_TEST_THREADS="1",
                CARGO_BUILD_JOBS="1", RAYON_NUM_THREADS="1")
     for name in list(env):
         if name.startswith(("DYLD_", "HEX_DEBUG_", "SHARDS_DEBUG_")):
             del env[name]
-    receipt = {"schema": "hex-completion-run-1", "scope": "root-native", "policy": POLICY,
+    receipt = {"schema": "hex-completion-run-1", "scope": "root-native" if args.proof == "full" else "root-native-selected",
+               "proof": args.proof, "policy": POLICY,
                "rules_sha256": RULES, "source": args.source, "backend": args.backend,
                "topology": args.topology, "target": args.target, "command": command,
                "timeout_seconds": args.timeout, "cleanup_timeout_seconds": args.cleanup_timeout,
                "environment": {"platform": platform.platform(), "machine": platform.machine()},
                "binary": file_receipt(root, pinned), "fixture": file_receipt(root, root / "fixture.json"),
-               "timed_out": False, "reaped": False, "exit": None}
+               "timed_out": False, "reaped": False, "exit": None,
+               "native_cleanup": "unverified until fixture cleanup stage and PID journal agree",
+               "owned_pid_journal": str(root / "owned-pids.jsonl")}
+    env["HEX_COMPLETION_PID_JOURNAL"] = receipt["owned_pid_journal"]
     log_path = root / "test.log"
     began = time.monotonic_ns()
     with log_path.open("xb") as log:
@@ -106,6 +112,7 @@ def main():
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--backend", choices=BACKENDS, required=True)
     parser.add_argument("--topology", choices=("laptop", "peer"), required=True)
+    parser.add_argument("--proof", choices=("full", "selected"), required=True)
     parser.add_argument("--target", required=True)
     parser.add_argument("--timeout", type=float, required=True)
     parser.add_argument("--cleanup-timeout", type=float, required=True)
