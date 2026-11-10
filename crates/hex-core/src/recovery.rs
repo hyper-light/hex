@@ -77,11 +77,18 @@ pub fn decide(seen: &Seen) -> Decision {
         Some(Ok(r)) => match r.phase {
             Phase::Creating => Decision::Remove(Why::MidCreate),
             Phase::Deleting => Decision::Remove(Why::MidDelete),
-            Phase::Ready if !seen.parts.cgroup => Decision::Remove(Why::NoCgroup),
-            Phase::Ready if r.spec.class.class() == Class::Oci && seen.start_interrupted => {
+            Phase::Ready
+                if matches!(r.spec.class.class(), Class::Process | Class::Oci)
+                    && !seen.parts.cgroup =>
+            {
+                Decision::Remove(Why::NoCgroup)
+            }
+            Phase::Ready if r.spec.class.class() != Class::Process && seen.start_interrupted => {
                 Decision::Remove(Why::StartInterrupted)
             }
-            Phase::Ready if r.spec.class.class() == Class::Oci && seen.init_alive != Some(true) => {
+            Phase::Ready
+                if r.spec.class.class() != Class::Process && seen.init_alive != Some(true) =>
+            {
                 Decision::Remove(Why::InitGone)
             }
             Phase::Ready if r.run.is_some() && seen.init_alive != Some(true) => {
@@ -204,6 +211,8 @@ mod tests {
         Rendered,
         /// A `process` box made by a run, for its program's life (decision 7).
         Run,
+        Firecracker,
+        Shards,
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -223,14 +232,21 @@ mod tests {
         let class = match kind {
             Kind::Process | Kind::Run => ClassSpec::Process,
             Kind::Bundle => ClassSpec::Bundle(PathBuf::from("/srv/bundle")),
-            Kind::Rendered => ClassSpec::Oci(Box::new(OciSpec {
-                rootfs: Rootfs::Layers(vec![]),
-                init: Program::of(&["sleep", "infinity"]),
-                mounts: vec![],
-                hostname: None,
-                network: Network::Host,
-                hosts: vec![],
-            })),
+            Kind::Rendered | Kind::Firecracker | Kind::Shards => {
+                let guest = Box::new(OciSpec {
+                    rootfs: Rootfs::Layers(vec![]),
+                    init: Program::of(&["sleep", "infinity"]),
+                    mounts: vec![],
+                    hostname: None,
+                    network: Network::Host,
+                    hosts: vec![],
+                });
+                match kind {
+                    Kind::Firecracker => ClassSpec::Firecracker(guest),
+                    Kind::Shards => ClassSpec::Shards(guest),
+                    _ => ClassSpec::Oci(guest),
+                }
+            }
         };
         BoxSpec {
             devices: Vec::new(),
@@ -249,6 +265,12 @@ mod tests {
         *budget -= 1;
         m.steps += 1;
         match step {
+            Step::MarkCreating => {
+                m.records.insert(
+                    id.clone(),
+                    BoxRecord::new(spec.clone(), Phase::Creating, vec![]),
+                );
+            }
             Step::RenderBundle => {
                 m.bundles.insert(id.clone());
             }
@@ -344,13 +366,20 @@ mod tests {
             .filter(|(id, r)| {
                 let made = |parts: &BTreeSet<BoxId>| parts.contains(*id);
                 r.phase == Phase::Ready
-                    && made(&m.cgroups)
                     && match r.spec.class {
-                        ClassSpec::Process => r.run.is_none() || made(&m.inits),
-                        ClassSpec::Bundle(_) => made(&m.inits) && made(&m.state_dirs),
-                        ClassSpec::Oci(_) => {
-                            made(&m.inits) && made(&m.state_dirs) && made(&m.bundles)
+                        ClassSpec::Process => {
+                            made(&m.cgroups) && (r.run.is_none() || made(&m.inits))
                         }
+                        ClassSpec::Bundle(_) => {
+                            made(&m.cgroups) && made(&m.inits) && made(&m.state_dirs)
+                        }
+                        ClassSpec::Oci(_) => {
+                            made(&m.cgroups)
+                                && made(&m.inits)
+                                && made(&m.state_dirs)
+                                && made(&m.bundles)
+                        }
+                        ClassSpec::Firecracker(_) | ClassSpec::Shards(_) => made(&m.inits),
                     }
             })
             .map(|(id, _)| id.clone())
@@ -410,7 +439,9 @@ mod tests {
             Just(Kind::Process),
             Just(Kind::Bundle),
             Just(Kind::Rendered),
-            Just(Kind::Run)
+            Just(Kind::Run),
+            Just(Kind::Firecracker),
+            Just(Kind::Shards)
         ];
         prop_oneof![
             (0u8..4, kind).prop_map(|(n, k)| Op::Create(n, k)),
@@ -450,7 +481,14 @@ mod tests {
     #[test]
     fn a_create_killed_after_each_step_is_removed_by_what_it_made_or_taken_back() {
         let b = id(0);
-        for kind in [Kind::Process, Kind::Bundle, Kind::Rendered, Kind::Run] {
+        for kind in [
+            Kind::Process,
+            Kind::Bundle,
+            Kind::Rendered,
+            Kind::Run,
+            Kind::Firecracker,
+            Kind::Shards,
+        ] {
             let spec = spec(&b, kind);
             let steps = match kind {
                 Kind::Run => RUN_STEPS,
@@ -468,6 +506,7 @@ mod tests {
                 let want = match crash_after {
                     0 => None,
                     n if n == steps.len() => Some(Decision::Adopt),
+                    _ if m.records.contains_key(&b) => Some(Decision::Remove(Why::MidCreate)),
                     _ => Some(Decision::Remove(Why::NoRecord(made))),
                 };
                 let got = plan(&look(&m))
@@ -481,7 +520,11 @@ mod tests {
                     (m.records.len(), m.cgroups.len(), m.inits.len()),
                     (
                         kept,
-                        kept,
+                        if matches!(kind, Kind::Firecracker | Kind::Shards) {
+                            0
+                        } else {
+                            kept
+                        },
                         if matches!(kind, Kind::Process) {
                             0
                         } else {
@@ -493,7 +536,7 @@ mod tests {
                 assert_eq!(
                     m.state_dirs.len() + m.bundles.len(),
                     match kind {
-                        Kind::Process | Kind::Run => 0,
+                        Kind::Process | Kind::Run | Kind::Firecracker | Kind::Shards => 0,
                         Kind::Bundle => kept,
                         Kind::Rendered => 2 * kept,
                     },
@@ -537,7 +580,9 @@ mod tests {
                 start_ticks: 9,
             });
             match kind {
-                Kind::Bundle | Kind::Rendered => r.init = program,
+                Kind::Bundle | Kind::Rendered | Kind::Firecracker | Kind::Shards => {
+                    r.init = program
+                }
                 Kind::Run => r.run = program,
                 Kind::Process => {}
             }

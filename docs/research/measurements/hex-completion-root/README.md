@@ -129,3 +129,14 @@ has checked tags0..2, and hostile unknown tags refuse. The differential classifi
 retains this outcome as Lifecycle. Deterministic and generated wire coverage now
 includes all causes and the exact BoxId. These source tests are not yet executed;
 physical absence/terminality remains a native backend obligation.
+
+## Shared guest record/recovery integration
+
+ROOT imports only exact `record.rs` and `recovery.rs` from L3 signed
+`bb205dbf76c5106a3375782cfaedbe328778cdeb`. Explicit Firecracker/Shards
+creation records intent before StartInit, and recovery checks the guest init
+without requiring an OCI host cgroup for the guest backend. L3 reported four
+focused model crash/recovery controls passing on its recorded composite with
+ROOT8c399; that is prior-source model evidence, not this full candidate or a
+native VM recovery pass. The separately owned HCS keeper source remains pending
+its publication/error controls and is not included in this selective import.

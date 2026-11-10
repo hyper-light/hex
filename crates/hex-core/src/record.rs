@@ -137,6 +137,9 @@ impl BoxRecord {
 /// One step that changes the machine or the records; the shell does them in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
+    /// Persist exact backend intent before dispatching a guest create whose native effects may
+    /// survive the caller. Its runtime owns the guest, not an OCI cgroup/state directory here.
+    MarkCreating,
     /// Write the bundle rendered from the box's [`hex_api::OciSpec`] into a directory of its own.
     RenderBundle,
     /// Make the box's cgroup and write its bounds.
@@ -177,6 +180,9 @@ pub fn create_steps(class: &ClassSpec) -> &'static [Step] {
             Step::StartInit,
             Step::MarkReady,
         ],
+        ClassSpec::Firecracker(_) | ClassSpec::Shards(_) => {
+            &[Step::MarkCreating, Step::StartInit, Step::MarkReady]
+        }
     }
 }
 
