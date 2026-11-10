@@ -644,7 +644,6 @@ fn a_kind_no_surviving_node_runs_is_refused_typed() {
             _ => 3 + k % 7, // macOS
         };
         *node = hex_sim::model::NodeSpec {
-            runtime_pools: Vec::new(),
             id: node.id,
             ..NodeModel::Fleet.node(host)
         };

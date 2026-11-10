@@ -21,7 +21,7 @@ use crate::error::SimError;
 use crate::fair::{self, Passed, Placed, Preemption, Queue, Shares};
 use crate::index::{FitIndex, Pick};
 use crate::model::{
-    Cluster, Demand, DeviceKind, GroupId, Kind, NodeId, NodeSpec, Resources, WorkloadId,
+    Class, Cluster, Demand, DeviceKind, GroupId, Kind, NodeId, NodeSpec, Resources, WorkloadId,
     WorkloadSpec, bind,
 };
 use crate::sim::{Layout, Run};
@@ -67,6 +67,8 @@ pub enum Violation {
         node: NodeId,
         slice: usize,
     },
+    #[error("{workload:?} exceeded a runtime pool on {node:?}")]
+    RuntimePoolExceeded { workload: WorkloadId, node: NodeId },
     #[error("the replay itself failed: {0}")]
     Replay(SimError),
 }
@@ -182,6 +184,7 @@ fn in_slice(layout: &Layout, run: &Run, s: usize, op: Op) -> Result<Option<Op>, 
 /// [`check_log`] over `log`, a run's whole log or one slice's part of it, its nodes `nodes`.
 fn check_entries(nodes: &[NodeSpec], run: &Run, log: &[Entry]) -> Result<LogReport, Violation> {
     let mut index = FitIndex::new(nodes)?;
+    let mut pools = PoolLedger::new(nodes);
     let mut shares = Shares::new(nodes, run.owners.iter().map(|o| o.weight).collect())?;
     let mut pending: Pending = BTreeMap::new();
     let mut seq_of: BTreeMap<WorkloadId, u64> = BTreeMap::new();
@@ -263,6 +266,14 @@ fn check_entries(nodes: &[NodeSpec], run: &Run, log: &[Entry]) -> Result<LogRepo
                 for (w, _) in &write {
                     demands.push((*w, spec_of(run, *w)?.demand()));
                 }
+                for ((w, node), (_, demand)) in write.iter().zip(&demands) {
+                    if !pools.change(nodes, *node, demand, true)? {
+                        return Err(Violation::RuntimePoolExceeded {
+                            workload: *w,
+                            node: *node,
+                        });
+                    }
+                }
                 let chosen = crate::sim::fit_whole(&mut index, &demands, &run.pick)?;
                 for (i, ((w, node), (_, need))) in write.iter().zip(&demands).enumerate() {
                     let spec = chosen.as_ref().and_then(|c| c.get(i)).copied();
@@ -334,6 +345,7 @@ fn check_entries(nodes: &[NodeSpec], run: &Run, log: &[Entry]) -> Result<LogRepo
                         return Err(Violation::NotSerialPreemption(id));
                     }
                     let victim = spec_of(run, w)?;
+                    pools.change(nodes, n, &victim.demand(), false)?;
                     index.give(n, victim.id, &victim.demand())?;
                     shares.give(victim.tenancy.owner, &victim.need)?;
                     let s = *seq_of.get(&w).ok_or(Violation::NotSubmitted(w))?;
@@ -354,6 +366,9 @@ fn check_entries(nodes: &[NodeSpec], run: &Run, log: &[Entry]) -> Result<LogRepo
                 }
                 if !run.preemption || serial != Some(want) {
                     return Err(Violation::NotSerialPreemption(id));
+                }
+                if !pools.change(nodes, node, &need, true)? {
+                    return Err(Violation::RuntimePoolExceeded { workload: id, node });
                 }
                 let chosen = crate::sim::fit_whole(&mut index, &[(id, need)], &run.pick)?;
                 let spec_node = chosen.as_ref().and_then(|c| c.first()).copied();
@@ -376,6 +391,7 @@ fn check_entries(nodes: &[NodeSpec], run: &Run, log: &[Entry]) -> Result<LogRepo
                     return Err(Violation::CompletedElsewhere(workload));
                 }
                 let need = spec_of(run, workload)?.demand();
+                pools.change(nodes, node, &need, false)?;
                 index.give(node, workload, &need)?;
                 shares.give(owner_of(run, workload)?, &need.need)?;
                 report.completions = report.completions.saturating_add(1);
@@ -688,6 +704,8 @@ pub struct FilterReport {
     pub device_off: u64,
     /// Placements that held a device or were given KVM: the device filter's non-vacuity.
     pub with_devices: u64,
+    /// A placement past its matching runtime pool, replayed independently of FitIndex.
+    pub runtime_pool_off: u64,
 }
 
 impl FilterReport {
@@ -698,6 +716,7 @@ impl FilterReport {
             .saturating_add(self.class_off_node)
             .saturating_add(self.platform_off)
             .saturating_add(self.device_off)
+            .saturating_add(self.runtime_pool_off)
     }
 }
 
@@ -708,6 +727,65 @@ struct Seen {
     benchmarks: u64,
 }
 
+/// Independent invariant ledger: replay class amounts from writes, never query Slot/verdict.
+/// Older host-only clusters allocate no extra ledger, retaining their original replay path.
+struct PoolLedger {
+    by_node: Vec<[Resources; Class::COUNT]>,
+}
+
+impl PoolLedger {
+    fn new(nodes: &[NodeSpec]) -> Self {
+        Self {
+            by_node: if nodes.iter().any(|node| !node.runtime_pools.is_empty()) {
+                vec![[Resources::default(); Class::COUNT]; nodes.len()]
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    fn change(
+        &mut self,
+        nodes: &[NodeSpec],
+        node: NodeId,
+        demand: &Demand,
+        placing: bool,
+    ) -> Result<bool, Violation> {
+        if self.by_node.is_empty() {
+            return Ok(true);
+        }
+        let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
+        let facts = nodes.get(at).ok_or(SimError::UnknownNode(node))?;
+        let row = self
+            .by_node
+            .get_mut(at)
+            .ok_or(SimError::UnknownNode(node))?;
+        let amount = row
+            .get_mut(demand.class.index())
+            .ok_or(SimError::Resources(node))?;
+        *amount = if placing {
+            amount.checked_add(&demand.need)
+        } else {
+            amount.checked_sub(&demand.need)
+        }
+        .ok_or(SimError::Resources(node))?;
+        for pool in &facts.runtime_pools {
+            let mut total = Resources::default();
+            for class in Class::ALL {
+                if pool.classes.has(class) {
+                    total = total
+                        .checked_add(row.get(class.index()).ok_or(SimError::Resources(node))?)
+                        .ok_or(SimError::Resources(node))?;
+                }
+            }
+            if !pool.capacity.holds(&total) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+
 /// Above 90%: busy * 10 > capacity * 9, in u128 so neither side can overflow.
 fn over_ninety(capacity: &NodeSpec, used: &Resources) -> bool {
     let busy = u128::from(used.cpu_milli).saturating_add(u128::from(capacity.background_milli));
@@ -715,6 +793,10 @@ fn over_ninety(capacity: &NodeSpec, used: &Resources) -> bool {
 }
 
 pub fn check_filters(cluster: &Cluster, run: &Run) -> Result<FilterReport, Violation> {
+    for node in &cluster.nodes {
+        node.check_runtime_pools()?;
+    }
+    let mut pools = PoolLedger::new(&cluster.nodes);
     let mut seen = vec![Seen::default(); cluster.nodes.len()];
     // Each node's devices' holders, replayed from the log: a device is held from its workload's
     // placement until its completion or preemption.
@@ -745,6 +827,9 @@ pub fn check_filters(cluster: &Cluster, run: &Run) -> Result<FilterReport, Viola
             .nodes
             .get(i)
             .ok_or(Violation::Replay(SimError::UnknownNode(node)))?;
+        if !pools.change(&cluster.nodes, node, &spec.demand(), placing)? && placing {
+            r.runtime_pool_off = r.runtime_pool_off.saturating_add(1);
+        }
         if placing {
             let now = seen.get(i).copied().unwrap_or_default();
             r.placements = r.placements.saturating_add(1);

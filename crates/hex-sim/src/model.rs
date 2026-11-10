@@ -229,6 +229,38 @@ impl Ask {
 /// The devices a workload holds on its node, by their places in the node's devices.
 pub type Held = Vec<u16>;
 
+fn device_needs(gpus: u32, ask: &Ask) -> impl Iterator<Item = (DeviceKind, u64)> {
+    [
+        (DeviceKind::Gpu, u64::from(gpus)),
+        (DeviceKind::Vfio, u64::from(ask.vfio)),
+        (DeviceKind::Block, u64::from(ask.block)),
+        (DeviceKind::Net, u64::from(ask.net)),
+    ]
+    .into_iter()
+}
+
+/// The admission half of bind, without selecting/sorting identities or allocating a Held vector.
+/// Device kinds are disjoint, so enough matching free devices of every kind is sufficient.
+pub fn fits_devices(
+    devices: &[Device],
+    free: impl Fn(usize) -> bool,
+    gpus: u32,
+    ask: &Ask,
+) -> bool {
+    device_needs(gpus, ask).all(|(kind, n)| {
+        let Ok(n) = usize::try_from(n) else {
+            return false;
+        };
+        devices
+            .iter()
+            .enumerate()
+            .filter(|&(i, d)| d.kind == kind && free(i) && matches(d, ask))
+            .take(n)
+            .count()
+            == n
+    })
+}
+
 /// The devices `ask` and `gpus` take of `devices`, where `free(i)` says whether device `i` is free:
 /// for each kind, that many free devices of the kind that match the ask. GPUs go least loaded first
 /// (utilisation, then memory in use), so the box gets the idlest; block devices smallest that hold
@@ -241,13 +273,7 @@ pub fn bind(
     ask: &Ask,
 ) -> Option<Held> {
     let mut held = Held::new();
-    let wants = [
-        (DeviceKind::Gpu, u64::from(gpus)),
-        (DeviceKind::Vfio, u64::from(ask.vfio)),
-        (DeviceKind::Block, u64::from(ask.block)),
-        (DeviceKind::Net, u64::from(ask.net)),
-    ];
-    for (kind, n) in wants {
+    for (kind, n) in device_needs(gpus, ask) {
         if n == 0 {
             continue;
         }
@@ -310,6 +336,30 @@ pub struct NodeSpec {
 }
 
 impl NodeSpec {
+    /// Runtime pools are bounded by the runtime class set: each class belongs to at most one pool.
+    pub fn check_runtime_pools(&self) -> Result<(), crate::SimError> {
+        if self.runtime_pools.len() > Class::COUNT {
+            return Err(crate::SimError::Full {
+                what: "a node's runtime pools",
+                bound: Class::COUNT,
+            });
+        }
+        let mut covered = 0;
+        for pool in &self.runtime_pools {
+            let mask = pool.classes.0;
+            if mask == 0
+                || mask & !Classes::ALL.0 != 0
+                || mask & !self.classes.0 != 0
+                || covered & mask != 0
+            {
+                return Err(crate::SimError::Config(
+                    "runtime pool masks must be nonempty, disjoint and within the node's classes",
+                ));
+            }
+            covered |= mask;
+        }
+        Ok(())
+    }
     /// A Linux x86_64 node with KVM and `capacity`, running every class, its GPUs unnamed and idle,
     /// with nothing outside Hex.
     pub fn new(id: NodeId, capacity: Resources) -> Self {
