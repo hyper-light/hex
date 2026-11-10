@@ -1,0 +1,798 @@
+{
+  "baseline": {
+    "classification": "expected targeted failure plus3controls; driver formatting assertion failed because --nocapture splits label/panic/FAILED",
+    "kind": "root independent expected-red readback",
+    "log": "/Users/adalundhe/.cache/hex-lead/logs/queued-deadline-baseline-4763991c.log",
+    "log_sha256": "4bf34ae6acc47009a30a534b0da7f171ca89d20c18daf74aa78cd009f0fc3a46",
+    "original_driver_exit": 1,
+    "scope": "native real-stream queue precedence regression; not oldphysicalcauseproof",
+    "source_revision": "4763991c9105e9b4c6471fe7e249d59eab9fe784",
+    "target": "calls::tests::queued_deadline_probe::cp_t7_4_complete_submit_reply_queued_before_expired_native_wait_is_available",
+    "test_exit": 101
+  },
+  "combined_gate": {
+    "exit": 0,
+    "log": {
+      "bytes": 109610,
+      "path": "/Users/adalundhe/.cache/hex-lead/logs/queued-deadline-seven-gates-cd434fcb.log",
+      "sha256": "c4cbddb77c3814af449bcd2329946ddbca171d9430977b2d1d1be659b989f7ee"
+    },
+    "metadata": {
+      "bytes": 356,
+      "path": "/Users/adalundhe/.cache/hex-lead/logs/queued-deadline-seven-gates-cd434fcb.json",
+      "sha256": "ac3edd29d6c94805bd8050baa9e1c2ea96b4c911d5189589ef20584cbcc37c24"
+    },
+    "record": {
+      "build_jobs": 8,
+      "exit": 0,
+      "gate_exit": 0,
+      "log_sha256": "c4cbddb77c3814af449bcd2329946ddbca171d9430977b2d1d1be659b989f7ee",
+      "rust_test_threads": 8,
+      "scope": "full scripts/gates7targetlint/fmt/production/nativeMacworkspace/vendor; nativeLinuxAMD64/rootlab/WinARMnotimplied",
+      "source_revision": "cd434fcbb2013ad3ae7a01c9cd67121e9c8cb83a"
+    },
+    "scope_limits": "Full seven-target workspace lint, format, production, native Mac workspace and vendor; passing-test stderr hides internal hardware skips, not native Linux AMD64/rootlab or Windows ARM proof.",
+    "test_counts": {
+      "failed": 0,
+      "ignored": 13,
+      "passed": 910
+    },
+    "test_results": [
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 35.28s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s",
+      "ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s",
+      "ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s",
+      "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.29s",
+      "ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.24s",
+      "ok. 17 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 17.36s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s",
+      "ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 302 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 4.58s",
+      "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s",
+      "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 39 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s",
+      "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 106 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.65s",
+      "ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 60 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s",
+      "ok. 158 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.78s",
+      "ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.37s",
+      "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.41s",
+      "ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.96s",
+      "ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s",
+      "ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 692.77s",
+      "ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.50s",
+      "ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.90s",
+      "ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 5.83s",
+      "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 373.53s",
+      "ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s",
+      "ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s",
+      "ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.62s",
+      "ok. 4 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 65.03s",
+      "ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 140.70s",
+      "ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 25.93s",
+      "ok. 10 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.21s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    ]
+  },
+  "current_host_probe_build": {
+    "exit": 0,
+    "log": {
+      "bytes": 13113,
+      "path": "/Users/adalundhe/.cache/hex-lead/logs/queued-deadline-host-probe-build-cd434fcb.log",
+      "sha256": "3dd1256f240258349aa1396b911c3190f075008535c33f47555a6d45af5b48e2"
+    },
+    "metadata": {
+      "bytes": 1984,
+      "path": "/Users/adalundhe/.cache/hex-lead/logs/queued-deadline-host-probe-build-cd434fcb.json",
+      "sha256": "ff6fbdc7cb53e41006088d28be8ab928d9fd6a6395c8d7efbf99535c2d33ceb7"
+    },
+    "record": {
+      "artifacts": [
+        {
+          "name": "host",
+          "path": "/Users/adalundhe/.cache/hex-lead/target-queued-deadline-host-cd434fcb/aarch64-apple-darwin/debug/hex",
+          "profile": "debug",
+          "sha256": "e9fc46666f00c6e7227bd46ce67cfb2e04c46cf3ee8bf3509023202fc1b303d2",
+          "source_revision": "cd434fcbb2013ad3ae7a01c9cd67121e9c8cb83a"
+        },
+        {
+          "name": "host",
+          "path": "/Users/adalundhe/.cache/hex-lead/target-queued-deadline-host-cd434fcb/aarch64-apple-darwin/release/hex",
+          "profile": "release",
+          "sha256": "07f4ce329095f22398bf96b6ef3e4a18cca05ca77331fefbad52e9a8ca7a21c8",
+          "source_revision": "cd434fcbb2013ad3ae7a01c9cd67121e9c8cb83a"
+        },
+        {
+          "name": "probe",
+          "path": "/Users/adalundhe/.cache/hex-lead/target-queued-deadline-probe-cd434fcb/aarch64-apple-darwin/debug/hex-scheduler-runtime-probe",
+          "profile": "debug",
+          "sha256": "c7a36b58cfe73e161242d4340b2396fca50d25ebe864c1c4a439deeb60bf2cff",
+          "source_revision": "cd434fcbb2013ad3ae7a01c9cd67121e9c8cb83a"
+        },
+        {
+          "name": "probe",
+          "path": "/Users/adalundhe/.cache/hex-lead/target-queued-deadline-probe-cd434fcb/aarch64-apple-darwin/release/hex-scheduler-runtime-probe",
+          "profile": "release",
+          "sha256": "5f338eac81707ccf0ad304b7147101204a7ec4847e21ce938b47ad98424703ac",
+          "source_revision": "cd434fcbb2013ad3ae7a01c9cd67121e9c8cb83a"
+        }
+      ],
+      "limits": "build only; no armed physical/cold/gate completion claim",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "scope": "build only; source-equivalence and armed/full gates owed",
+      "source": "/Users/adalundhe/.cache/hex-lead/snapshots/queued-deadline-fixed-cd434fcb",
+      "source_derivation": [
+        "df534d2f snapshot",
+        "patch18b0194d4470feae50f3191aa173e001ccc5eee275d87637e9c10d162f02255a",
+        "patchfb96f02e8d4919ec55eac12ec72094bdb438730807af8d30cf94c6d9fccb017a"
+      ],
+      "source_revision": "cd434fcbb2013ad3ae7a01c9cd67121e9c8cb83a",
+      "status": "built"
+    }
+  },
+  "decision": {
+    "alternatives": [
+      "Keep inconsistent transport-dependent deadline precedence.",
+      "Extend the deadline or wait for a partial frame; unnecessary and changes the bound."
+    ],
+    "choice": "Collect mail, then one existing zero-time turn only while owning the reader and lacking an answer, then collect or return without waiting.",
+    "literal_derivation": "Duration::ZERO is the nonblocking poll contract already implemented by Shared::turn and its transports; no wait or response seed changed.",
+    "primary_source": "https://github.com/rust-lang/rust/blob/1.85.1/library/std/src/sync/mpmc/list.rs#L380",
+    "primary_source_sha256": "b14a00c6d63796a5ec0dee41f320d731f0f2581d1fe1d7c9cf4410720c0c440b",
+    "problem": "Identical complete replies were accepted from the decoded mailbox but ignored in a readable native socket at an expired wait."
+  },
+  "earlier_fair_pressure": {
+    "log": {
+      "bytes": 1671,
+      "path": "/Users/adalundhe/.cache/hex-lead/logs/submit-pressure-fair-df534d2f.log",
+      "sha256": "d26bbd3d29efc69d5366c28c2e24198e73c4c3ff7a5cae3f4c101d6b83166101"
+    },
+    "metadata": {
+      "bytes": 668,
+      "path": "/Users/adalundhe/.cache/hex-lead/logs/submit-pressure-fair-df534d2f.json",
+      "sha256": "01c9704c68d6ed67e7f7d2d71104355b8bbe732d71e1b00051f157d0b796c074"
+    },
+    "record": {
+      "cold_completed_at_start": 598,
+      "difference": "4 test threads vs original fullgate8; not exact original gate overlap or quiet performance; root3otherjobs totaldeclaredCPU24 plus this4=28 on32coreStudio",
+      "exit": 0,
+      "full_trace_root": "/Users/adalundhe/.cache/hx/e-7vc4d83a",
+      "kind": "root added original fair integration pressure",
+      "local_trace_root": "/Users/adalundhe/.cache/hx/e-ibpsorcp",
+      "log_sha256": "d26bbd3d29efc69d5366c28c2e24198e73c4c3ff7a5cae3f4c101d6b83166101",
+      "resources": {
+        "cpus": 4,
+        "disk_gib": 12,
+        "memory_gib": 8
+      },
+      "source_revision": "df534d2f20a32c404e62e8dd31aa70d9838f0267",
+      "wall_ns": 1794319135661787000
+    }
+  },
+  "fixed": {
+    "log": {
+      "bytes": 11262,
+      "path": "/Users/adalundhe/.cache/hex-lead/logs/queued-deadline-fixed-checks-cd434fcb.log",
+      "sha256": "b8c63b6a16c7770db9864e09fe8ce02491e142e35f7a9f9e113ffcb8069f7bae"
+    },
+    "metadata": {
+      "bytes": 1566,
+      "path": "/Users/adalundhe/.cache/hex-lead/logs/queued-deadline-fixed-checks-cd434fcb.json",
+      "sha256": "c8e40f7bbb213ace71670e370ac04191b4348631c32429225b03ec8a08587b64"
+    },
+    "record": {
+      "commands": [
+        {
+          "argv": [
+            "nice",
+            "-n",
+            "10",
+            "cargo",
+            "test",
+            "-p",
+            "hex-client",
+            "--lib",
+            "--locked",
+            "--target",
+            "aarch64-apple-darwin",
+            "calls::tests::queued_deadline_probe::",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "exit": 0
+        },
+        {
+          "argv": [
+            "nice",
+            "-n",
+            "10",
+            "cargo",
+            "test",
+            "-p",
+            "hex-client",
+            "--lib",
+            "--locked",
+            "--target",
+            "aarch64-apple-darwin"
+          ],
+          "exit": 0
+        },
+        {
+          "argv": [
+            "nice",
+            "-n",
+            "10",
+            "cargo",
+            "clippy",
+            "-p",
+            "hex-client",
+            "--all-targets",
+            "--locked",
+            "--target",
+            "x86_64-unknown-linux-gnu",
+            "--target",
+            "aarch64-unknown-linux-gnu",
+            "--target",
+            "x86_64-unknown-linux-musl",
+            "--target",
+            "aarch64-unknown-linux-musl",
+            "--target",
+            "aarch64-apple-darwin",
+            "--target",
+            "x86_64-pc-windows-msvc",
+            "--target",
+            "aarch64-pc-windows-msvc",
+            "--",
+            "-D",
+            "warnings"
+          ],
+          "exit": 0
+        }
+      ],
+      "exit": 0,
+      "log_sha256": "b8c63b6a16c7770db9864e09fe8ce02491e142e35f7a9f9e113ffcb8069f7bae",
+      "scope": "focused native4, client55, clientalltargets7clippy; not finalworkspace/rootlab/physicalproof",
+      "source_revision": "cd434fcbb2013ad3ae7a01c9cd67121e9c8cb83a"
+    }
+  },
+  "fixed_production_physical": [
+    {
+      "actual_census_directory_entries": 0,
+      "authority_inputs_hashed": 23,
+      "backend_baseline_restored": true,
+      "diagnostic_markers": 0,
+      "external_inputs_hashed": 9,
+      "identity": {
+        "pid": 62556,
+        "started": 12601649117259,
+        "vsock": "/Users/adalundhe/.cache/hx/e-bn612rzf/guest-tmp/shards-api-4e53201dd4d92fa2-0/v"
+      },
+      "kind": "root-fixed-production-armed-physical-reconstruction",
+      "ledger_kinds": {
+        "call": 131395,
+        "census-call-exit": 131395,
+        "census-process-exit": 4011,
+        "forced-tunnel": 1002,
+        "forced-wrapper": 1002,
+        "hex-version": 1,
+        "keygen-client-0": 1,
+        "keygen-client-1": 1,
+        "keygen-host-key": 1,
+        "l": 1,
+        "o": 1,
+        "owned-guest": 1,
+        "pid-check": 3006,
+        "r": 1,
+        "real": 1,
+        "reaped": 8,
+        "runtime-probe": 4006,
+        "ssh-shim": 1002,
+        "sshd-10": 4,
+        "sshd-12": 4,
+        "sshd-13": 10,
+        "sshd-14": 160,
+        "sshd-4": 356,
+        "sshd-5": 468,
+        "sshd-effective": 1,
+        "verified-physical-lifecycle": 2000
+      },
+      "ledger_rows": 279839,
+      "logs_hashed": 18,
+      "ordered_backend_reap": [
+        {
+          "kind": "reaped",
+          "parent": 62546,
+          "pid": 62554,
+          "recorded_by": 62546,
+          "returncode": -15,
+          "run": "/Users/adalundhe/.cache/hx/e-bn612rzf"
+        }
+      ],
+      "physical_phase_counts": {
+        "local": 1000,
+        "remote": 1000
+      },
+      "profile": "debug",
+      "raw_result": "/Users/adalundhe/.cache/hx/e-bn612rzf/result.json",
+      "raw_result_sha256": "d312d1f3ec4a22129c3a6b17bde71b1122ddb0e40a916c40b1957d21992d559f",
+      "reconstruction": {
+        "bytes": 10846,
+        "path": "/Users/adalundhe/.cache/hex-lead/queued-deadline-cd434fcb/receipts/root-physical-debug-n1000-verified.json",
+        "sha256": "7f00a56dcd3399a3ae7885f90ce2e719e738b66e5b31a3c5c7c54032bab6560f"
+      },
+      "retirement": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 62556,
+        "started": 12601649117259
+      },
+      "scope": "All ledger rows, physical phase keys/IDs/counts/namespaces, exact receipt/record/Stopped, declared configuration, ordered saved backend-Popen reap, artifact/receipt/log hashes checked. No independent live API query, no leak/timing/seed/performance or original Submit cause claim.",
+      "source_revision": "cd434fcbb2013ad3ae7a01c9cd67121e9c8cb83a",
+      "status": "consistent",
+      "unique_phase_keys": 2000,
+      "unique_physical_ids": 2000
+    },
+    {
+      "actual_census_directory_entries": 0,
+      "authority_inputs_hashed": 23,
+      "backend_baseline_restored": true,
+      "diagnostic_markers": 0,
+      "external_inputs_hashed": 9,
+      "identity": {
+        "pid": 62607,
+        "started": 12601687749692,
+        "vsock": "/Users/adalundhe/.cache/hx/e-mugg157v/guest-tmp/shards-api-c7227efb77e9b909-0/v"
+      },
+      "kind": "root-fixed-production-armed-physical-reconstruction",
+      "ledger_kinds": {
+        "call": 108487,
+        "census-call-exit": 108487,
+        "census-process-exit": 4011,
+        "forced-tunnel": 1002,
+        "forced-wrapper": 1002,
+        "hex-version": 1,
+        "keygen-client-0": 1,
+        "keygen-client-1": 1,
+        "keygen-host-key": 1,
+        "l": 1,
+        "o": 1,
+        "owned-guest": 1,
+        "pid-check": 3006,
+        "r": 1,
+        "real": 1,
+        "reaped": 8,
+        "runtime-probe": 4006,
+        "ssh-shim": 1002,
+        "sshd-10": 8,
+        "sshd-12": 6,
+        "sshd-13": 2,
+        "sshd-14": 173,
+        "sshd-4": 330,
+        "sshd-5": 483,
+        "sshd-effective": 1,
+        "verified-physical-lifecycle": 2000
+      },
+      "ledger_rows": 234023,
+      "logs_hashed": 18,
+      "ordered_backend_reap": [
+        {
+          "kind": "reaped",
+          "parent": 62589,
+          "pid": 62605,
+          "recorded_by": 62589,
+          "returncode": -15,
+          "run": "/Users/adalundhe/.cache/hx/e-mugg157v"
+        }
+      ],
+      "physical_phase_counts": {
+        "local": 1000,
+        "remote": 1000
+      },
+      "profile": "release",
+      "raw_result": "/Users/adalundhe/.cache/hx/e-mugg157v/result.json",
+      "raw_result_sha256": "4eb1879414c7512fb2ea202c6e79a022ca5398c448880a749ffc4a0da7d734e2",
+      "reconstruction": {
+        "bytes": 10854,
+        "path": "/Users/adalundhe/.cache/hex-lead/queued-deadline-cd434fcb/receipts/root-physical-release-n1000-verified.json",
+        "sha256": "244636af122da98728bafd15812b031fc3290ec121511dee85512aa99f65060b"
+      },
+      "retirement": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 62607,
+        "started": 12601687749692
+      },
+      "scope": "All ledger rows, physical phase keys/IDs/counts/namespaces, exact receipt/record/Stopped, declared configuration, ordered saved backend-Popen reap, artifact/receipt/log hashes checked. No independent live API query, no leak/timing/seed/performance or original Submit cause claim.",
+      "source_revision": "cd434fcbb2013ad3ae7a01c9cd67121e9c8cb83a",
+      "status": "consistent",
+      "unique_phase_keys": 2000,
+      "unique_physical_ids": 2000
+    }
+  ],
+  "kind": "root-queued-complete-answer-deadline-regression",
+  "limits": [
+    "This isolates real native Unix-stream reader-state precedence at an explicit expired Caller deadline. No Runtime or physical creation is invoked.",
+    "The earlier physical Submit timeout is not causally attributed. Diagnostic physical1467captures passed but are not new fixed production validation.",
+    "No deadline/seed increase, periodic probe, cache, new platform path, public API or unsafe code.",
+    "No performance, allocation, leak-free, whole-plan readiness or publication claim.",
+    "Final native Linux AMD64 workspace/root-lab execution remains owed; approved hosts currently lack declared headroom. Cross-target lint is not native execution. Windows ARM VM remains paused and unverified.",
+    "Windows native regression tests exclude the four macOS Unix-stream probes. The physical runs use rebuilt cd434fcb host/probes and explicitly retained source-compatible cc7 static Linux guest plus unchanged Shards6bf/kernel/initrd; this is not execution of a rebuilt cd434fcb Linux guest.",
+    "Earlier calibration manifests remain historical failed candidates and are preserved. Passing the new candidate does not establish the cause of either earlier physical timeout."
+  ],
+  "mutation_and_restoration": {
+    "log": {
+      "bytes": 1914,
+      "path": "/Users/adalundhe/.cache/hex-lead/logs/queued-deadline-mutation-cd434fcb.log",
+      "sha256": "e0e25a61fda9e773ce41223d04e7518e5417527947a03725a9a296f7b805a982"
+    },
+    "metadata": {
+      "bytes": 2708,
+      "path": "/Users/adalundhe/.cache/hex-lead/logs/queued-deadline-mutation-cd434fcb.json",
+      "sha256": "143d3dfc33bbc6e2ce134807b72b239aa9efb3783812f2bc45f032fb2b98bd54"
+    },
+    "record": {
+      "cases": [
+        {
+          "argv": [
+            "nice",
+            "-n",
+            "10",
+            "cargo",
+            "test",
+            "--manifest-path",
+            "/Users/adalundhe/.cache/hex-lead/snapshots/queued-deadline-mutant-cd434fcb/Cargo.toml",
+            "-p",
+            "hex-client",
+            "--lib",
+            "--locked",
+            "--target",
+            "aarch64-apple-darwin",
+            "calls::tests::queued_deadline_probe::",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "binary": "/Users/adalundhe/.cache/hex-lead/target-queued-deadline-mutant-cd434fcb/aarch64-apple-darwin/debug/deps/hex_client-a865101108434e24",
+          "binary_sha256": "4251382e572cf93dcec1ba4c1edee02a3e9ca13ce1a13e7dacec3b4a59abd833",
+          "exit": 101,
+          "label": "guard-removed",
+          "log": "/Users/adalundhe/.cache/hex-lead/logs/queued-deadline-mutation-cd434fcb-guard-removed.log",
+          "log_sha256": "6eeb26ebbd2ffee370dd961d8574de6292a10fc59ba9b4ddc3997e7fc085b5e1",
+          "source_calls_sha256": "6273acbaf742079190669c919ea7179c0a7b1da8e1846d2a73ff945c38201833",
+          "source_tests_sha256": "919840541dc7af7259ea8997c93b65fe1ca074f270c414f48e3f6439a263f021"
+        },
+        {
+          "argv": [
+            "nice",
+            "-n",
+            "10",
+            "cargo",
+            "test",
+            "--manifest-path",
+            "/Users/adalundhe/.cache/hex-lead/snapshots/queued-deadline-fixed-cd434fcb/Cargo.toml",
+            "-p",
+            "hex-client",
+            "--lib",
+            "--locked",
+            "--target",
+            "aarch64-apple-darwin",
+            "calls::tests::queued_deadline_probe::",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "binary": "/Users/adalundhe/.cache/hex-lead/target-queued-deadline-fixed-cd434fcb/aarch64-apple-darwin/debug/deps/hex_client-a865101108434e24",
+          "binary_sha256": "773ec15109931c2d2a44c78da79f1870fb40c50aa0df92d72e33aed8b3322b6c",
+          "exit": 0,
+          "label": "canonical-fixed-restored",
+          "log": "/Users/adalundhe/.cache/hex-lead/logs/queued-deadline-mutation-cd434fcb-canonical-fixed-restored.log",
+          "log_sha256": "95f7a3652b90e4352601dc702d5d0043b7cd6c91d92c390851ddb89e26fdcf67",
+          "source_calls_sha256": "5346247fdd96a55ee9df136141e1d730e306124caa698170f17be177b32c5c83",
+          "source_tests_sha256": "919840541dc7af7259ea8997c93b65fe1ca074f270c414f48e3f6439a263f021"
+        }
+      ],
+      "exit": 0,
+      "kind": "root native guard-removal and canonical-fixed restoration",
+      "log_sha256": "e0e25a61fda9e773ce41223d04e7518e5417527947a03725a9a296f7b805a982",
+      "scope": "same native real-stream tests, only production expired-read guard removed; not original physical cause proof",
+      "source_revision": "cd434fcbb2013ad3ae7a01c9cd67121e9c8cb83a"
+    }
+  },
+  "native_windows": {
+    "calls_sha256": "5346247fdd96a55ee9df136141e1d730e306124caa698170f17be177b32c5c83",
+    "kind": "root native Windows client compact independent readback",
+    "original_metadata_limit": "Original tests.json retained including accidental PowerShell provider metadata expansion; summary reconstructed from plain IO strings",
+    "scope": "Native Windows x86_64 45 client tests and all-target Clippy; four macOS probes excluded, no WHP/HCS/ARM or physical lifecycle proof",
+    "source_revision": "cd434fcbb2013ad3ae7a01c9cd67121e9c8cb83a",
+    "stages": [
+      {
+        "argv": [
+          "+1.99.1",
+          "test",
+          "-p",
+          "hex-client",
+          "--lib",
+          "--locked",
+          "--target",
+          "x86_64-pc-windows-msvc"
+        ],
+        "exit": 0,
+        "metadata": {
+          "bytes": 3936942,
+          "path": "C:\\Users\\corph\\.cache\\hex-lead\\queued-deadline-native-cd434fcb\\tests.json",
+          "sha256": "f020fbf1828e18e4fc9d4f69aef77063dbb7751068cb50864082e5d2accf05a7"
+        },
+        "source": "C:\\Users\\corph\\.cache\\hex-lead\\snapshots\\queued-deadline-cd434fcb-v2",
+        "stage": "tests",
+        "stderr": {
+          "bytes": 2503,
+          "path": "C:\\Users\\corph\\.cache\\hex-lead\\queued-deadline-native-cd434fcb\\tests.stderr",
+          "sha256": "b6b08e2053af35ef86181ba175d53aa780eb1819bae8dac8990e1d4cae2848c7"
+        },
+        "stdout": {
+          "bytes": 4298,
+          "path": "C:\\Users\\corph\\.cache\\hex-lead\\queued-deadline-native-cd434fcb\\tests.stdout",
+          "sha256": "099d0879b37e7f16573bc9c38804b97f40a9e6388f45f8727d929b83f5c595a4"
+        },
+        "summary": [
+          "test result: ok. 45 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.65s"
+        ]
+      },
+      {
+        "argv": [
+          "+1.99.1",
+          "clippy",
+          "-p",
+          "hex-client",
+          "--all-targets",
+          "--locked",
+          "--target",
+          "x86_64-pc-windows-msvc",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit": 0,
+        "metadata": {
+          "bytes": 1075,
+          "path": "C:\\Users\\corph\\.cache\\hex-lead\\queued-deadline-native-cd434fcb\\clippy.json",
+          "sha256": "a4e8b0c6388e4883d9e816c40ab84dd1e04c8f7d7aad62d395b6962c8a0fed97"
+        },
+        "source": "C:\\Users\\corph\\.cache\\hex-lead\\snapshots\\queued-deadline-cd434fcb-v2",
+        "stage": "clippy",
+        "stderr": {
+          "bytes": 2105,
+          "path": "C:\\Users\\corph\\.cache\\hex-lead\\queued-deadline-native-cd434fcb\\clippy.stderr",
+          "sha256": "b0d96ff3529821f0ec79eaaae8932d4c630940b803db3c895740bcfb1c719254"
+        },
+        "stdout": {
+          "bytes": 0,
+          "path": "C:\\Users\\corph\\.cache\\hex-lead\\queued-deadline-native-cd434fcb\\clippy.stdout",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "summary": []
+      }
+    ],
+    "tests_sha256": "919840541dc7af7259ea8997c93b65fe1ca074f270c414f48e3f6439a263f021"
+  },
+  "policy": {
+    "content": "All four policy files byte-identical to fully read24f; current handoff and managed plan reread",
+    "revalidated_revision": "7c26e5292161fc891a7c6c6525305464a3a044be",
+    "revision": "24f48ee5ebf198485117aa93bf47685ad7d7d53f",
+    "role": "coordinator",
+    "rules_sha256": "d634fcb944959ce1e40a9277d12b0905fcfcebf82d9da9832e826f790a349242"
+  },
+  "production_smoke": {
+    "cases": [
+      {
+        "baseline": null,
+        "created": null,
+        "deleted": null,
+        "exit": 0,
+        "oversized_refusals": null,
+        "profile": "debug",
+        "result": "/Users/adalundhe/.cache/hx/e-_qumg6hj/result.json",
+        "retirement": {
+          "end": "Stopped",
+          "guest_stopped": true,
+          "pid": 60821,
+          "started": 12599481359468
+        },
+        "sha256": "5da529a43827d52c5bf1e92b3a133e1663d36cecb6f15d8542c59e7f5bd0f560",
+        "stage": "cold-smoke",
+        "status": "passed"
+      },
+      {
+        "baseline": true,
+        "created": 2,
+        "deleted": 2,
+        "exit": 0,
+        "oversized_refusals": 2,
+        "profile": "debug",
+        "result": "/Users/adalundhe/.cache/hx/e-d21g4_wg/result.json",
+        "retirement": {
+          "end": "Stopped",
+          "guest_stopped": true,
+          "pid": 60841,
+          "started": 12599501207768
+        },
+        "sha256": "55f78cefe1f343b3fa487efc27a78b6f3db96c883764c7da5ab8eddca5687907",
+        "stage": "boundary",
+        "status": "passed"
+      },
+      {
+        "baseline": true,
+        "created": 2,
+        "deleted": 2,
+        "exit": 0,
+        "oversized_refusals": null,
+        "profile": "debug",
+        "result": "/Users/adalundhe/.cache/hx/e-xgnofal4/result.json",
+        "retirement": {
+          "end": "Stopped",
+          "guest_stopped": true,
+          "pid": 61497,
+          "started": 12599604846157
+        },
+        "sha256": "ebf6621a4da37ffd172c9387429a79eff63ef6afe5a4ba02ff7751b5be295bee",
+        "stage": "physical-smoke",
+        "status": "passed"
+      },
+      {
+        "baseline": null,
+        "created": null,
+        "deleted": null,
+        "exit": 0,
+        "oversized_refusals": null,
+        "profile": "release",
+        "result": "/Users/adalundhe/.cache/hx/e-ycw6p2wb/result.json",
+        "retirement": {
+          "end": "Stopped",
+          "guest_stopped": true,
+          "pid": 61825,
+          "started": 12599666541038
+        },
+        "sha256": "bc1bec2771321b1a5700df2fd3654335416acfdaf682d3e0e785eeac989ec778",
+        "stage": "cold-smoke",
+        "status": "passed"
+      },
+      {
+        "baseline": true,
+        "created": 2,
+        "deleted": 2,
+        "exit": 0,
+        "oversized_refusals": 2,
+        "profile": "release",
+        "result": "/Users/adalundhe/.cache/hx/e-4p4r7y90/result.json",
+        "retirement": {
+          "end": "Stopped",
+          "guest_stopped": true,
+          "pid": 61845,
+          "started": 12599678654077
+        },
+        "sha256": "1a959cabcb4bd8e9c043dbee0964970b42f35d8506dd4868ee19d76b2e569b18",
+        "stage": "boundary",
+        "status": "passed"
+      },
+      {
+        "baseline": true,
+        "created": 2,
+        "deleted": 2,
+        "exit": 0,
+        "oversized_refusals": null,
+        "profile": "release",
+        "result": "/Users/adalundhe/.cache/hx/e-6hqpmi8j/result.json",
+        "retirement": {
+          "end": "Stopped",
+          "guest_stopped": true,
+          "pid": 62092,
+          "started": 12599718799105
+        },
+        "sha256": "d1a11cdd67c17e59eddeafad0dd93787b21982f4273b3460924df2e9fc9cf59d",
+        "stage": "physical-smoke",
+        "status": "passed"
+      }
+    ],
+    "exit": 0,
+    "limit": "Driver outcomes plus independent exact result hashes only here; full raw smoke lifecycle/closure reconstruction recorded separately.",
+    "log": {
+      "bytes": 10556,
+      "path": "/Users/adalundhe/.cache/hex-lead/logs/queued-deadline-production-smoke-cd434fcb.log",
+      "sha256": "12de92482c41dd31680acecb71e95d867ef04527bb5b483ae94e556bb54282d9"
+    },
+    "summary": {
+      "bytes": 2833,
+      "path": "/Users/adalundhe/.cache/hex-lead/queued-deadline-cd434fcb/receipts/production-smoke-summary.json",
+      "sha256": "36736718e4c88fd2dd68c762e4117b9e85469fc17c1e5bab16f15593432ea61d"
+    }
+  },
+  "requirement": "AC-T7.4.1",
+  "rule_accounting": {
+    "R01": "Production diff adds no panic, unchecked arithmetic/conversions or new allocation API. Existing fallible shared turn/error path; check-production and seven-target Clippy pass. No universal panic-free certification.",
+    "R02": "Pinned Rust source and two alternatives in decision; native baseline and mutation data distinguish this concrete queue-precedence defect. Original physical cause remains unknown.",
+    "R03": "Only Duration::ZERO, the existing nonblocking transport contract. No deadline/seed/runtime tuning value changed.",
+    "R04": "Expired-wait state transition and existing reader ownership/terminal paths described in state_and_wait_review; typed answer/error preserved.",
+    "R05": "One existing zero-time readiness attempt at expiry; no periodic probe or cache. Existing registered call/mailbox/framing remain authoritative; broader borrowed deadline gaps explicitly open.",
+    "R06": "One local branch in Caller.wait; no new loop or cross-module manager. Root reviewed exact production diff and same-test mutation.",
+    "R07": "Two comments explain deadline scheduling/complete-frame invariant. Source/provenance recorded in D9.",
+    "R08": "No performance improvement or competitive target claim. Older measured side-storage candidate rejected after worse tail; misses remain in runtime-pools records.",
+    "R09": "Native real Unix-stream complete reply ignored before fix, decoded control accepted. Exact baseline and original parser-driver failure retained. Not original physical Submit cause proof.",
+    "R10": "Baseline101/fixed0/guard-removed101/canonical-restored0, immutable source/test/binary identities and raw logs retained.",
+    "R11": "Seven-target lints, native Mac workspace and Windows client checks pass. Linux AMD64/root-lab owed and Windows ARM paused. Actual physical guests are Linux ARM64 on HVF with retained static guest revision identified.",
+    "R12": "One portable Caller implementation using existing Shared.turn and transport seam; no per-OS production duplicate.",
+    "R13": "Minimum queued-answer change, no new framework/API/ownership system.",
+    "R14": "New client fix is functional validation, not quantitative CPU/allocation/copy/fault or leak evidence. Prior diagnostic native profiles are source-specific and excluded from calibration/performance claims.",
+    "R15": "Root performed all baseline, fixed, guard mutation, combined gates, actual VM cycles and reconstruction. Implementer prepared test-only source and prose patch; root reviewed/composed signed production commit.",
+    "R16": "Local builds/tests prohibited. Root reclaimed only3,747 old inactive Mach-O object intermediates after exclusive Cargo lock/no-open-file checks; later filesystem33,717,215,232B above30GiB. Plan/result in lead cache; source/final binaries/evidence preserved."
+  },
+  "source": {
+    "baseline_production_calls_sha256": "6273acbaf742079190669c919ea7179c0a7b1da8e1846d2a73ff945c38201833",
+    "baseline_tests_revision": "4763991c9105e9b4c6471fe7e249d59eab9fe784",
+    "fixed_calls_sha256": "5346247fdd96a55ee9df136141e1d730e306124caa698170f17be177b32c5c83",
+    "fixed_revision": "cd434fcbb2013ad3ae7a01c9cd67121e9c8cb83a",
+    "fixed_tests_sha256": "919840541dc7af7259ea8997c93b65fe1ca074f270c414f48e3f6439a263f021",
+    "guard_patch": {
+      "bytes": 1781,
+      "path": "/Users/adalundhe/.cache/hex-lead/transfers/queued-deadline-guard-cd434fcb.patch",
+      "sha256": "c910a4680f246f41684d25611f02f209f60807409bab81530628e56bbbab1ab1"
+    }
+  },
+  "state_and_wait_review": {
+    "caller_error_cleanup": "Existing error/drop/cancel path remains authoritative; four native controls join peer thread and bound partial/absent behavior. Physical closure records are functional evidence, not a general resource-leak proof.",
+    "existing_owner": "Caller owns one registered request; mine records reader-turn ownership; common Shared core owns framing and mailbox delivery.",
+    "expired_transition": "Collect decoded answer; if absent and reader turn owned, perform one zero-time existing turn, collect; complete answer/error uses ordinary terminal path; incomplete/absent returns None. Reader without ownership cannot steal it.",
+    "scope": "No deadline, response record, periodic loop, cache, transport-specific adapter, public API or unsafe change. Existing stream-offer/borrowed whole-operation deadline gaps are outside this fix."
+  },
+  "validation": {
+    "baseline_native": "one intended raw-queued failure; decoded/partial/absent controls pass3",
+    "canonical_fixed_restored": "all4pass0, unchanged test bytes, distinct source/target/binary identities",
+    "client_compile": "all-target Clippy7supportedtargets passes",
+    "combined_gate": "910 native macOS workspace passes, zero failed, 13 ignored; format, all seven target workspace lints, production and vendor checks pass",
+    "fixed_native": "4 focused and all55client tests pass",
+    "fixed_production_physical": "Each profile completes 1,000 local plus 1,000 forced-SSH actual lifecycles, all phase keys/physical IDs independently checked; exact guests Stopped, empty backend baselines restored, zero census entries or diagnostic markers",
+    "guard_removed": "same tests, sole queued-complete failure101,3controls pass",
+    "native_windows": "45 client tests and native all-target client Clippy pass, macOS-only four probes excluded"
+  }
+}

@@ -378,3 +378,36 @@ five exact identities ended Stopped, with injected failures preserved. The
 root-verified inputs, ledger events and hashes are in
 diagnostic-local-fixture-controls-05b0bacf.json. Active pressure reproductions
 are separate diagnostic captures; these bounded controls establish no cause or fix.
+
+The narrowed1467ca67 trace completed 1,000 local and 1,000 forced-SSH cycles;
+the separate local-only capture completed 1,000 local cycles under the recorded
+cold-node background, with fairness pressure added partway through. Root
+reconstructed all275,833 and17,023 ledger rows, respectively, and joined all
+3,000 unique phase keys/physical IDs to their namespaces, inputs and exact
+Stopped closures. Submit's observed diagnostic maxima were125,952,041ns and
+358,237,583ns. Neither reproduced the original456.592ms expiry. These traces
+remain excluded from calibration and performance claims; see
+diagnostic-submit-trace-large-1467ca67.json. The background's1,000 fresh nodes
+were independently reconstructed from5,001 authority inputs and16,000 ledger
+rows, with1,000 unique PID/start pairs and all recorded Stopped closures;
+diagnostic-pressure-cold-debug-265c1501.json retains that separate scope.
+
+Source `cd434fcbb2013ad3ae7a01c9cd67121e9c8cb83a` fixes a complete queued
+native socket reply ignored at an already-expired `Caller::wait`, while a decoded
+mailbox reply was accepted. It uses one existing zero-time reader turn; deadlines
+and seeds are unchanged. Baseline and guard-removal runs each had only the intended
+case exit 101 and three controls exit 0; byte-identical fixed restore passed all four.
+Root passed 55 native macOS client tests, client seven-target Clippy and the full
+combined seven-target/workspace/vendor gate. Native Windows x64 passed 45 client
+tests and Clippy; four macOS probes were excluded. The evidence is
+[queued-deadline-cd434fcb.json](queued-deadline-cd434fcb.json).
+This isolated bug does not establish the cause of the original physical Submit
+timeout. Both fixed profiles separately completed 1,000 local plus 1,000 forced-SSH
+physical lifecycles. Root reconstructed all 513,862 ledger rows, checked 4,000
+unique phase keys/physical IDs and joined the exact recorded Stopped closures,
+configuration, artifact/receipt hashes and restored empty baselines. Census and
+diagnostic markers were absent. These runs use rebuilt cd434fcb host/probes with
+the explicitly retained cc7 static Linux guest, Shards6bf, kernel and initrd;
+they are not native execution of a rebuilt cd434fcb Linux guest. See
+queued-deadline-cd434fcb.json and gates-cd434fcb.json. Native Linux AMD64/root-lab
+checks remain owed; no performance or overall readiness claim follows.

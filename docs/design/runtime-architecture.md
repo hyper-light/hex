@@ -2460,6 +2460,26 @@ decision covers the node's waits for an answer whose time it can observe (source
 RFC 6298's timer was this decision's first draft and calibration reads its second; the lead ruled out both (the
 RFC's floor and constants are TCP's clocks'; a calibration read leaves the first wait unbounded).
 
+**An available answer at the deadline (AC-T7.4.1, 2026-11-10).** A caller can resume after its deadline with a
+complete reply already queued. The common client already collected decoded mailbox answers before checking
+time, but refused an identical reply still in its native socket without reading it. Root reproduced that
+inconsistency with a real macOS Unix stream: the queued complete reply failed, while the identical decoded reply,
+a partial frame and an empty open peer gave their expected results. At expiry, collect mail and, only while
+owning the reader turn and lacking an answer, make one existing zero-time turn. Collect a complete answer or
+return without waiting. Partial data stays subject to the existing framing and ownership rules; no deadline or
+record changes. This is ready-first queue handling, also used by
+[Rust 1.85.1's channel receive](https://github.com/rust-lang/rust/blob/1.85.1/library/std/src/sync/mpmc/list.rs#L380).
+Retaining the transport-dependent behavior leaves the reproduced inconsistency; extending the deadline or
+waiting to finish a partial frame changes the wait contract and is unnecessary. Root's guard-removal mutation
+restores the single failure and the canonical fixed source passes all four controls. Exact sources, commands,
+hashes, seven-target client lint and limits are in `bench/sched/runtime-pools/queued-deadline-cd434fcb.json`.
+This isolated regression does not establish the cause of the earlier physical Submit timeout. The fixed
+tree passed all seven target lints, the native macOS workspace (910 passes, 13 ignored), and native Windows
+client checks (45 passes). Both profiles completed 1,000 local plus 1,000 forced-SSH physical lifecycles;
+root reconstructed all 513,862 ledger rows and 4,000 unique phase keys/physical IDs, matched exact Stopped
+closures and checked empty baselines. Native Linux AMD64/root-lab validation remains owed. These are
+functional checks, with no new seed, timing, leak-freedom or performance claim.
+
 | Wait | Was | Now | Seed |
 | --- | --- | --- | --- |
 | a seed's hang bound and the shell's wait for its answer (createpool `ANSWER_PATIENCE`) | 30 s, copied | 2 × max(record, seen) | `seeds::CLONE_SLOWEST`, the `seeds.hang` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 29.565 ms, debug 652.938 ms<!-- /record --> |

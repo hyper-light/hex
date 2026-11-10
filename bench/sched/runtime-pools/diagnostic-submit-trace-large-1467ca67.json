@@ -1,0 +1,261 @@
+{
+  "captures": [
+    {
+      "calibration_eligibility": false,
+      "completed_Submit_trace_calls_including_refusals": 2000,
+      "external_inputs_hashed": 9,
+      "identity": {
+        "pid": 85178,
+        "started": 12539924349186,
+        "vsock": "/Users/adalundhe/.cache/hx/e-7vc4d83a/guest-tmp/shards-api-fed054b15e083874-0/v"
+      },
+      "inputs_hashed": 24,
+      "kind": "root-diagnostic-armed-physical-trace-reconstruction",
+      "label": "full",
+      "ledger_kinds": {
+        "call": 129391,
+        "census-call-exit": 129391,
+        "census-process-exit": 4012,
+        "cold-node": 1,
+        "forced-tunnel": 1002,
+        "forced-wrapper": 1002,
+        "hex-version": 1,
+        "keygen-client-0": 1,
+        "keygen-client-1": 1,
+        "keygen-host-key": 1,
+        "l": 1,
+        "o": 1,
+        "owned-guest": 1,
+        "pid-check": 3006,
+        "r": 1,
+        "reaped": 8,
+        "runtime-probe": 4007,
+        "ssh-shim": 1002,
+        "sshd-10": 3,
+        "sshd-12": 2,
+        "sshd-13": 18,
+        "sshd-14": 188,
+        "sshd-4": 425,
+        "sshd-6": 366,
+        "sshd-effective": 1,
+        "verified-physical-lifecycle": 2000
+      },
+      "ledger_rows": 275833,
+      "marker_counts": {
+        "call_asked": 2000,
+        "call_returned": 2000,
+        "call_sent": 2000,
+        "command_dispatch_begin": 2000,
+        "command_dispatch_complete": 2000,
+        "command_driver_submit_begin": 2000,
+        "command_driver_submit_done": 2000,
+        "command_enter": 2000,
+        "command_refresh_begin": 2000,
+        "command_refresh_done": 2000,
+        "command_reply_ready": 2000,
+        "driver_completed_begin": 1000,
+        "driver_completed_end": 1000,
+        "driver_completed_record_begin": 1000,
+        "driver_completed_record_end": 1000,
+        "driver_create_begin": 1000,
+        "driver_create_end": 1000,
+        "driver_inspect_begin": 1000,
+        "driver_inspect_end": 1000,
+        "driver_key_allocated": 2000,
+        "driver_start_begin": 1000,
+        "driver_start_end": 1000,
+        "driver_submit_begin": 2000,
+        "driver_submit_drive_complete": 2000,
+        "record_directory_sync_begin": 8000,
+        "record_directory_sync_end": 8000,
+        "record_file_sync_begin": 8000,
+        "record_file_sync_end": 8000,
+        "record_put_begin": 8000,
+        "record_rename_begin": 8000,
+        "record_rename_end": 8000
+      },
+      "max_observed_Submit_trace_return_ns": 125952041,
+      "ordered_backend_reap": [
+        {
+          "kind": "reaped",
+          "parent": 85173,
+          "pid": 85176,
+          "recorded_by": 85173,
+          "returncode": -15,
+          "run": "/Users/adalundhe/.cache/hx/e-7vc4d83a"
+        }
+      ],
+      "original_timeout_reproduced": false,
+      "performance_claim": false,
+      "physical_phase_counts": {
+        "local": 1000,
+        "remote": 1000
+      },
+      "pressure_context": [
+        {
+          "path": "/Users/adalundhe/.cache/hx/e-7vc4d83a/pressure-cold-start.json",
+          "record": {
+            "background_source": "265c15016d1a47c07f28e55a2f352c166b94a4b2",
+            "cold_task": "submit-pressure-cold-debug-n1000-265c1501",
+            "compiled_SUT": "1467ca67cdf66ded550c2fcd7e10bb2b6d3a8bd3",
+            "declaration": "separate8CPU8GiB12GiB job; no attribution until root trace review",
+            "initial_SUT_phase": "local1000 already completed; forcedSSH in progress",
+            "kind": "root diagnostic background-pressure event",
+            "wall_ns": 1794318576569120000
+          },
+          "sha256": "662098827b0df6188a44ca943bb93d2fc86cd18ea03f35ec403c27079253bb33"
+        }
+      ],
+      "raw_result": "/Users/adalundhe/.cache/hx/e-7vc4d83a/result.json",
+      "raw_result_sha256": "d85dcb89ca4c8f69208e8f43e9ee3b41fb718e8d2e78ac37c53b2c6f652d9612",
+      "reconstruction": {
+        "bytes": 12889,
+        "path": "/Users/adalundhe/.cache/hex-lead/submit-trace-1467ca67/receipts/root-verified-full-n1000.json",
+        "sha256": "c572d70c24534af56714e68da0282f0a025278396580172409ff34b656b61d61"
+      },
+      "retirement": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 85178,
+        "started": 12539924349186
+      },
+      "scope": "Every ledger row and physical identity/count checked, ready/config/record/receipt/recorded Stopped joined, artifacts/receipts/logs hashed. No live verifier API query or resource-leak proof. Traces alter timing; no seed/performance/cause claim.",
+      "source_revision": "1467ca67cdf66ded550c2fcd7e10bb2b6d3a8bd3",
+      "status": "consistent",
+      "unique_phase_keys": 2000,
+      "unique_physical_ids": 2000
+    },
+    {
+      "calibration_eligibility": false,
+      "completed_Submit_trace_calls_including_refusals": 1000,
+      "external_inputs_hashed": 9,
+      "identity": {
+        "pid": 81915,
+        "started": 12555867231519,
+        "vsock": "/Users/adalundhe/.cache/hx/e-ibpsorcp/guest-tmp/shards-api-df2f5eb274266e02-0/v"
+      },
+      "inputs_hashed": 11,
+      "kind": "root-diagnostic-armed-physical-trace-reconstruction",
+      "label": "local-pressure",
+      "ledger_kinds": {
+        "call": 6000,
+        "census-call-exit": 6000,
+        "census-process-exit": 2008,
+        "cold-node": 1,
+        "hex-version": 1,
+        "l": 1,
+        "owned-guest": 1,
+        "reaped": 4,
+        "runtime-probe": 2007,
+        "verified-physical-lifecycle": 1000
+      },
+      "ledger_rows": 17023,
+      "marker_counts": {
+        "call_asked": 1000,
+        "call_returned": 1000,
+        "call_sent": 1000,
+        "command_dispatch_begin": 1000,
+        "command_dispatch_complete": 1000,
+        "command_driver_submit_begin": 1000,
+        "command_driver_submit_done": 1000,
+        "command_enter": 1000,
+        "command_refresh_begin": 1000,
+        "command_refresh_done": 1000,
+        "command_reply_ready": 1000,
+        "driver_completed_begin": 1000,
+        "driver_completed_end": 1000,
+        "driver_completed_record_begin": 1000,
+        "driver_completed_record_end": 1000,
+        "driver_create_begin": 1000,
+        "driver_create_end": 1000,
+        "driver_inspect_begin": 1000,
+        "driver_inspect_end": 1000,
+        "driver_key_allocated": 1000,
+        "driver_start_begin": 1000,
+        "driver_start_end": 1000,
+        "driver_submit_begin": 1000,
+        "driver_submit_drive_complete": 1000,
+        "record_directory_sync_begin": 6000,
+        "record_directory_sync_end": 6000,
+        "record_file_sync_begin": 6000,
+        "record_file_sync_end": 6000,
+        "record_put_begin": 6000,
+        "record_rename_begin": 6000,
+        "record_rename_end": 6000
+      },
+      "max_observed_Submit_trace_return_ns": 358237583,
+      "ordered_backend_reap": [
+        {
+          "kind": "reaped",
+          "parent": 81885,
+          "pid": 81909,
+          "recorded_by": 81885,
+          "returncode": -15,
+          "run": "/Users/adalundhe/.cache/hx/e-ibpsorcp"
+        }
+      ],
+      "original_timeout_reproduced": false,
+      "performance_claim": false,
+      "physical_phase_counts": {
+        "local": 1000
+      },
+      "pressure_context": [
+        {
+          "path": "/Users/adalundhe/.cache/hx/e-ibpsorcp/pressure-fair-start.json",
+          "record": {
+            "cold_completed_at_start": 598,
+            "difference": "4 test threads vs original fullgate8; not exact original gate overlap or quiet performance; root3otherjobs totaldeclaredCPU24 plus this4=28 on32coreStudio",
+            "full_trace_root": "/Users/adalundhe/.cache/hx/e-7vc4d83a",
+            "kind": "root added original fair integration pressure",
+            "local_trace_root": "/Users/adalundhe/.cache/hx/e-ibpsorcp",
+            "resources": {
+              "cpus": 4,
+              "disk_gib": 12,
+              "memory_gib": 8
+            },
+            "source_revision": "df534d2f20a32c404e62e8dd31aa70d9838f0267",
+            "wall_ns": 1794319135661787000
+          },
+          "sha256": "60dc2f25a7fbb14ef67798fc9d34edaebfa28895bf37f4c832c1fbf1d2c54f4c"
+        },
+        {
+          "bytes": 576,
+          "path": "/Users/adalundhe/.cache/hex-lead/physical-local-05b0bacf/receipts/pressure-at-start-local-n1000.json",
+          "record": {
+            "cold_aggregate": "/Users/adalundhe/.cache/hex-lead/cold-extension-265c1501/receipts/pressure-cold-debug-n1000.json",
+            "cold_completed_at_launch": 434,
+            "cold_status": "running",
+            "fixture": "05b0bacf98a6ba49bf373dd50fc863df9600a869",
+            "kind": "root fact-based local pressure launch",
+            "original_observed_cold_progress_precondition": 316,
+            "other_owned_SUT_root": "/Users/adalundhe/.cache/hx/e-7vc4d83a",
+            "scope": "co-resident diagnostic, not quiet timing or calibration",
+            "source": "1467ca67cdf66ded550c2fcd7e10bb2b6d3a8bd3",
+            "wall_ns": 1794318943166182000
+          },
+          "sha256": "48553f2c3929db2c5a66a72f18629cfb1be16d341a27a1c336cbd5cfd7de5770"
+        }
+      ],
+      "raw_result": "/Users/adalundhe/.cache/hx/e-ibpsorcp/result.json",
+      "raw_result_sha256": "12750f630da3cbd69685b274ffe5de026c4077401740e6cc131a66c19b198bb1",
+      "reconstruction": {
+        "bytes": 9470,
+        "path": "/Users/adalundhe/.cache/hex-lead/submit-trace-1467ca67/receipts/root-verified-local-pressure-n1000.json",
+        "sha256": "527379b519f2f6bc6d7fde28e9f6cf241d23786207141e344718dfc70a449029"
+      },
+      "retirement": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 81915,
+        "started": 12555867231519
+      },
+      "scope": "Every ledger row and physical identity/count checked, ready/config/record/receipt/recorded Stopped joined, artifacts/receipts/logs hashed. No live verifier API query or resource-leak proof. Traces alter timing; no seed/performance/cause claim.",
+      "source_revision": "1467ca67cdf66ded550c2fcd7e10bb2b6d3a8bd3",
+      "status": "consistent",
+      "unique_phase_keys": 1000,
+      "unique_physical_ids": 1000
+    }
+  ],
+  "kind": "root-large-Submit-trace-controls",
+  "original_failure": "armed-submit-negative-df534d2f.json remains unresolved; no production fix/candidate readiness/seed claim"
+}
