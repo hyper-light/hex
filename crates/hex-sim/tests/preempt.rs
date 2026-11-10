@@ -306,3 +306,22 @@ fn a_run_reported_done_as_it_is_preempted_is_dropped() {
     let run = sim::run(&cluster, &preempting(nemesis)).unwrap();
     assert_eq!(holds_up(&cluster, &run), Ok(()));
 }
+
+/// AC-T7.5.3: seed 17157580157969519194, crash seed 12065407125461531292. Placing 61
+/// grows owner 1's share and makes earlier work 58 able to preempt [23, 13, 8]. The retained
+/// own-queue cursor skipped it and placed 69. Keep this exact generated case independent of
+/// proptest's random seed and shrinker state; the unchanged serial oracle must accept its log.
+#[test]
+fn ac_t7_5_3_generated_preemption_seed_17157580157969519194_keeps_policy_order() {
+    let seed = 17157580157969519194u64;
+    let crash = 12065407125461531292u64;
+    let cluster = contested(seed);
+    let nemesis = Nemesis::Random {
+        seed: crash,
+        first: crash % 40,
+        per_mille: 30,
+        max_crashes: 3,
+    };
+    let run = sim::run(&cluster, &preempting(nemesis)).unwrap();
+    assert_eq!(holds_up(&cluster, &run), Ok(()));
+}

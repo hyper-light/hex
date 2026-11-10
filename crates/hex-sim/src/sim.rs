@@ -748,10 +748,10 @@ impl Plane {
     }
 
     /// `spec` placed on `node` by write `write`: what its own placements change beyond the view
-    /// and shares. With preemption on, every other queue's cursor goes: a share that grew may make
-    /// work behind a cursor able to preempt now; and if the placement ended a disruption, its own
-    /// queue's goes too, as a group back under its budget may let work behind it preempt. Whether
-    /// it did: then the placing queue's cursor must not be set past the placement either.
+    /// and shares. AC-T7.5.3: with preemption on, every queue's cursor goes, including its own.
+    /// A larger own share can reorder borrowing-first victims so an earlier workload can preempt
+    /// within its disruption budgets now. A placement ending a disruption can reopen work too.
+    /// Return whether the caller must leave its placing queue open instead of passing it again.
     fn note_placed(
         &mut self,
         spec: &WorkloadSpec,
@@ -761,22 +761,19 @@ impl Plane {
     ) -> bool {
         self.placed.insert(spec.id, placed(spec, node, write));
         // A disrupted member placed again ends its disruption (the store's rule).
-        let mut ended = false;
         if self.preempted.remove(&spec.id)
             && let Some(g) = spec.tenancy.group
             && let Some(n) = self.disrupted.get_mut(&g)
         {
-            ended = true;
             *n = n.saturating_sub(1);
             if *n == 0 {
                 self.disrupted.remove(&g);
             }
         }
         if preemption {
-            let own = self.policy.queue(spec);
-            self.cursors.retain(|q, _| *q == own && !ended);
+            self.cursors.clear();
         }
-        preemption && ended
+        preemption
     }
 }
 
