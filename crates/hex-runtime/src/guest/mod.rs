@@ -922,7 +922,16 @@ impl<P: Runtime> Runtime for WithGuest<P> {
     fn capacity(&self, class: Class) -> Result<Option<hex_api::Capacity>, Refusal> {
         match class {
             Class::Process => self.process.capacity(class),
-            Class::Oci => self.oci.capacity(class),
+            Class::Oci => {
+                // Windows runs its own OCI images as well as guest Linux images. Its initialized
+                // native pool (including exact device holders) must not disappear behind the guest.
+                if self.process.classes().contains(&Class::Oci)
+                    && let Some(native) = self.process.capacity(class)?
+                {
+                    return Ok(Some(native));
+                }
+                self.oci.capacity(class)
+            }
         }
     }
 

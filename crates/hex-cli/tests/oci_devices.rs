@@ -749,3 +749,9 @@ fn cache_dir() -> PathBuf {
     std::fs::create_dir_all(&cache).expect("cache dir");
     cache
 }
+
+#[path = "oci_devices/native_devices.rs"]
+mod native_devices;
+
+#[path = "oci_devices/native_scheduler.rs"]
+mod native_scheduler;
