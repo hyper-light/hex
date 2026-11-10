@@ -43,6 +43,18 @@ impl Node {
                     why: "configured native binding is unsupported".into(),
                 });
             }
+            if entry.info.id.kind == DeviceKind::Block {
+                let major = entry.info.id.key >> u32::BITS;
+                let minor = entry.info.id.key & u64::from(u32::MAX);
+                let size = fs::read_to_string(format!("/sys/dev/block/{major}:{minor}/size"))
+                    .map_err(|error| Refusal::os("reading native block device capacity", error))?;
+                if hex_sim::facts::block_size(&size) != Some(entry.info.size) {
+                    return Err(Refusal::Invalid {
+                        what: "native block device",
+                        why: "configured size disagrees with the kernel device".into(),
+                    });
+                }
+            }
             let holder = self.attachments.holder(entry.info.id, &records)?;
             reports.push(entry.report(holder)?);
         }
@@ -57,7 +69,7 @@ impl Node {
     ) -> Result<Bundle, Refusal> {
         let plan = self.attachments.cdi(devices)?;
         let edits = plan.edits()?;
-        let resolved = resolve(&edits)?;
+        let resolved = resolve(&edits, devices)?;
         bundle::render_with_devices(spec, place, &edits, &resolved)
     }
 }
@@ -69,7 +81,10 @@ fn full(bound: usize) -> Refusal {
     }
 }
 
-fn resolve<'a>(edits: &Edits<'a>) -> Result<Vec<bundle::ResolvedNode<'a>>, Refusal> {
+fn resolve<'a>(
+    edits: &Edits<'a>,
+    devices: &[DeviceId],
+) -> Result<Vec<bundle::ResolvedNode<'a>>, Refusal> {
     let mut nodes = Vec::new();
     nodes
         .try_reserve_exact(edits.device_nodes.len())
@@ -100,6 +115,28 @@ fn resolve<'a>(edits: &Edits<'a>) -> Result<Vec<bundle::ResolvedNode<'a>>, Refus
             minor: rustix::fs::minor(stat.st_rdev),
             // POSIX permission/setid/sticky bits; file type is represented separately above.
             file_mode: stat.st_mode & 0o7777,
+        });
+    }
+    let block_key = |node: &bundle::ResolvedNode<'_>| {
+        if node.kind == DeviceType::Block {
+            Some((u64::from(node.major) << u32::BITS) | u64::from(node.minor))
+        } else {
+            None
+        }
+    };
+    if devices
+        .iter()
+        .filter(|device| device.kind == DeviceKind::Block)
+        .any(|device| !nodes.iter().any(|node| block_key(node) == Some(device.key)))
+        || nodes.iter().filter_map(block_key).any(|key| {
+            !devices
+                .iter()
+                .any(|device| device.kind == DeviceKind::Block && device.key == key)
+        })
+    {
+        return Err(Refusal::Invalid {
+            what: "CDI block device assignment",
+            why: "selected device nodes disagree with reserved block identities".into(),
         });
     }
     Ok(nodes)
