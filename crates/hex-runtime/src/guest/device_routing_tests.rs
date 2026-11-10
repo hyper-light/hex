@@ -125,3 +125,30 @@ fn native_oci_device_capacity_remains_visible_with_a_guest_configured() {
     };
     assert_eq!(node.capacity(Class::Oci).unwrap(), Some(native));
 }
+
+/// AC-T7.4.1: the public seam recognizes the existing KVM/HVF/WHP implementations on every
+/// supported host. Hardware capability/boot checks remain with the real backend; Intel Mac excluded.
+#[test]
+fn every_supported_host_reaches_its_existing_shards_backend() {
+    for (os, arch, backend) in [
+        ("linux", "x86_64", shards_api::Backend::Kvm),
+        ("linux", "aarch64", shards_api::Backend::Kvm),
+        ("macos", "aarch64", shards_api::Backend::HypervisorFramework),
+        (
+            "windows",
+            "x86_64",
+            shards_api::Backend::WindowsHypervisorPlatform,
+        ),
+        (
+            "windows",
+            "aarch64",
+            shards_api::Backend::WindowsHypervisorPlatform,
+        ),
+    ] {
+        assert_eq!(shards_api::backend_of(os, arch), Ok(backend), "{os}/{arch}");
+    }
+    assert!(matches!(
+        shards_api::backend_of("macos", "x86_64"),
+        Err(shards_api::Refusal::NoBackend { .. })
+    ));
+}
