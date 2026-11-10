@@ -12,8 +12,24 @@ use hex_core::record::BoxRecord;
 /// A trusted administrator binds one physical resource to an existing native adapter.
 /// CDI hooks/paths and HCS location paths are backend configuration, never peer payloads.
 pub enum Binding {
-    Cdi { file: String, qualified: String },
-    Hcs { location: String },
+    Cdi {
+        file: String,
+        qualified: String,
+    },
+    Hcs {
+        location: String,
+    },
+    /// Exact native selector through the existing Shards API; the initialized provider must
+    /// establish native correspondence before advertising an attachment capability.
+    ShardsGpu {
+        physical: shards_api::PhysicalGpu,
+    },
+    /// Prebound Linux PCI function and its administrator-declared IOMMU isolation group.
+    Vfio {
+        sbdf: String,
+        group: u32,
+        companions: Vec<String>,
+    },
 }
 
 pub struct Entry {
@@ -43,6 +59,51 @@ pub struct CdiPlan<'a> {
 }
 
 pub type Records = BTreeMap<BoxId, Result<BoxRecord, String>>;
+
+/// The existing native record owner, shared by OCI, Firecracker and Shards. The callback is
+/// synchronous and invoked exactly once while concrete existing box/device turns live on stack.
+/// It performs no implicit commit: every physical/record transition remains explicit to its caller.
+pub trait Books: Send + Sync {
+    fn records(&self) -> Result<Records, Refusal>;
+    fn capacity(&self) -> Result<hex_api::Capacity, Refusal>;
+    fn with_transaction(
+        &self,
+        id: &BoxId,
+        devices: &[DeviceId],
+        callback: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
+    ) -> Result<(), Refusal>;
+}
+
+pub trait Transaction {
+    fn records(&self) -> Result<Records, Refusal>;
+    fn read(&self, id: &BoxId) -> Result<Option<BoxRecord>, Refusal>;
+    fn put(&self, record: &BoxRecord) -> Result<(), Refusal>;
+    /// Called only after physical termination/absence and owned state removal are proved.
+    fn remove(&self, id: &BoxId) -> Result<(), Refusal>;
+}
+
+/// Upgrade the same Node authority without allocating an owner or transaction. The operation's
+/// result stays on the caller's stack; a bad provider cannot invoke a physical effect twice.
+pub fn with_transaction<T>(
+    books: &std::sync::Weak<dyn Books>,
+    id: &BoxId,
+    devices: &[DeviceId],
+    operation: impl FnOnce(&dyn Transaction) -> Result<T, Refusal>,
+) -> Result<T, Refusal> {
+    let books = books
+        .upgrade()
+        .ok_or_else(|| Refusal::Broken("native record authority is gone".into()))?;
+    let mut operation = Some(operation);
+    let mut result = None;
+    books.with_transaction(id, devices, &mut |transaction| {
+        let operation = operation.take().ok_or_else(|| {
+            Refusal::Broken("record transaction callback invoked more than once".into())
+        })?;
+        result = Some(operation(transaction));
+        Ok(())
+    })?;
+    result.ok_or_else(|| Refusal::Broken("record transaction callback was not invoked".into()))?
+}
 
 fn invalid(why: &'static str) -> Refusal {
     Refusal::Invalid {
@@ -168,6 +229,59 @@ impl Catalog {
                         location: copy(source)?,
                     }
                 }
+                "shards-gpu" if kind == DeviceKind::Gpu && selector.is_empty() => {
+                    let physical = source
+                        .parse::<shards_api::PhysicalGpu>()
+                        .map_err(|_| invalid("invalid Shards physical GPU selector"))?;
+                    let native_key = match physical {
+                        shards_api::PhysicalGpu::Pci {
+                            domain,
+                            bus,
+                            device,
+                            function,
+                        } => {
+                            (u64::from(domain) << 16)
+                                | (u64::from(bus) << 8)
+                                | (u64::from(device) << 3)
+                                | u64::from(function)
+                        }
+                        shards_api::PhysicalGpu::MetalRegistry(id)
+                        | shards_api::PhysicalGpu::Luid(id) => id,
+                    };
+                    if native_key != key {
+                        return Err(invalid(
+                            "Shards selector differs from its physical catalog identity",
+                        ));
+                    }
+                    Binding::ShardsGpu { physical }
+                }
+                "vfio"
+                    if !source.is_empty() && matches!(kind, DeviceKind::Gpu | DeviceKind::Vfio) =>
+                {
+                    let mut functions = source.split(',');
+                    let sbdf = copy(
+                        functions
+                            .next()
+                            .ok_or_else(|| invalid("missing VFIO primary function"))?,
+                    )?;
+                    let mut companions = Vec::new();
+                    for function in functions {
+                        if function.is_empty() || companions.len() >= hex_api::MAX_DEVICES {
+                            return Err(invalid("invalid or excessive VFIO companion functions"));
+                        }
+                        companions
+                            .try_reserve(1)
+                            .map_err(|_| allocation(source.len()))?;
+                        companions.push(copy(function)?);
+                    }
+                    Binding::Vfio {
+                        sbdf,
+                        companions,
+                        group: selector
+                            .parse::<u32>()
+                            .map_err(|_| invalid("invalid VFIO isolation group"))?,
+                    }
+                }
                 _ => return Err(invalid("unsupported or malformed native binding")),
             };
             let info = DeviceInfo {
@@ -196,6 +310,60 @@ impl Catalog {
 
     pub fn entries(&self) -> &[Entry] {
         &self.entries
+    }
+
+    /// Canonical existing turn keys for a selection, including every catalogued alias of an
+    /// inseparable IOMMU group. Acquire these BEFORE holder inspection and Creating publication.
+    /// This expands locks only; the durable BoxRecord remains the sole holder authority.
+    pub fn conflict_ids(&self, devices: &[DeviceId]) -> Result<Vec<DeviceId>, Refusal> {
+        if devices.len() > hex_api::MAX_DEVICES {
+            return Err(invalid("selection exceeds the device address space"));
+        }
+        let mut selected = Vec::new();
+        selected
+            .try_reserve_exact(devices.len())
+            .map_err(|_| allocation(devices.len()))?;
+        for id in devices {
+            id.check()?;
+            selected.push(*id);
+        }
+        selected.sort_unstable();
+        if selected.windows(2).any(|pair| pair.first() == pair.last()) {
+            return Err(invalid("duplicate selected device identity"));
+        }
+        let mut indexed = Vec::new();
+        indexed
+            .try_reserve_exact(self.entries.len())
+            .map_err(|_| allocation(self.entries.len()))?;
+        indexed.extend(self.entries.iter());
+        indexed.sort_unstable_by_key(|entry| entry.info.id);
+        let mut groups = Vec::new();
+        groups
+            .try_reserve_exact(selected.len())
+            .map_err(|_| allocation(selected.len()))?;
+        for id in &selected {
+            let at = indexed
+                .binary_search_by_key(id, |entry| entry.info.id)
+                .map_err(|_| invalid("selected physical identity has no binding"))?;
+            let entry = indexed
+                .get(at)
+                .ok_or_else(|| invalid("device identity index disagrees"))?;
+            if let Binding::Vfio { group, .. } = &entry.binding {
+                groups.push(*group);
+            }
+        }
+        groups.sort_unstable();
+        groups.dedup();
+        let mut keys = Vec::new();
+        keys.try_reserve_exact(indexed.len())
+            .map_err(|_| allocation(indexed.len()))?;
+        for entry in indexed {
+            let group_alias = matches!(&entry.binding, Binding::Vfio { group, .. } if groups.binary_search(group).is_ok());
+            if group_alias || selected.binary_search(&entry.info.id).is_ok() {
+                keys.push(entry.info.id);
+            }
+        }
+        Ok(keys)
     }
 
     /// Each file is read once per create; all selected files share the native config byte budget.
@@ -275,7 +443,12 @@ impl Catalog {
                     "cannot establish device holders from an inconsistent box record".into(),
                 ));
             }
-            if record.spec.devices.contains(&id) {
+            if record
+                .spec
+                .devices
+                .iter()
+                .any(|claim| self.conflicts(*claim, id))
+            {
                 if holder.is_some() {
                     return Err(Refusal::Broken(
                         "a physical device has multiple recorded holders".into(),
@@ -285,6 +458,24 @@ impl Catalog {
             }
         }
         Ok(holder)
+    }
+
+    /// Physical identities may be in one inseparable IOMMU group. The same recorded claims then
+    /// retain the entire group; a second backend cannot assign another function from it.
+    fn conflicts(&self, first: DeviceId, second: DeviceId) -> bool {
+        if first == second {
+            return true;
+        }
+        let group = |id| {
+            self.entries
+                .iter()
+                .find(|entry| entry.info.id == id)
+                .and_then(|entry| match entry.binding {
+                    Binding::Vfio { group, .. } => Some(group),
+                    _ => None,
+                })
+        };
+        group(first).zip(group(second)).is_some_and(|(a, b)| a == b)
     }
 
     /// Called while the existing per-device turns are held, before a Creating record or OS effects.
@@ -376,3 +567,142 @@ fn read_bounded(path: &Path, bound: usize) -> Result<Vec<u8>, Refusal> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod authority_tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    enum Mode {
+        Once,
+        Missing,
+        Double,
+        Refused,
+    }
+    struct Owner(Mode);
+    struct TransactionView;
+    impl Transaction for TransactionView {
+        fn records(&self) -> Result<Records, Refusal> {
+            Ok(Records::new())
+        }
+        fn read(&self, _: &BoxId) -> Result<Option<BoxRecord>, Refusal> {
+            Ok(None)
+        }
+        fn put(&self, _: &BoxRecord) -> Result<(), Refusal> {
+            Ok(())
+        }
+        fn remove(&self, _: &BoxId) -> Result<(), Refusal> {
+            Ok(())
+        }
+    }
+    impl Books for Owner {
+        fn records(&self) -> Result<Records, Refusal> {
+            Ok(Records::new())
+        }
+        fn capacity(&self) -> Result<hex_api::Capacity, Refusal> {
+            Err(invalid("fixture has no hardware"))
+        }
+        fn with_transaction(
+            &self,
+            id: &BoxId,
+            _: &[DeviceId],
+            callback: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
+        ) -> Result<(), Refusal> {
+            match self.0 {
+                Mode::Once => callback(&TransactionView),
+                Mode::Missing => Ok(()),
+                Mode::Double => {
+                    callback(&TransactionView)?;
+                    callback(&TransactionView)
+                }
+                Mode::Refused => Err(Refusal::NoSuchBox(id.try_clone()?)),
+            }
+        }
+    }
+
+    /// AC-T7.4.1: no callback protocol failure may duplicate a physical operation or mask refusal.
+    #[test]
+    fn shared_transaction_keeps_one_owner_and_exactly_one_effect() {
+        let id = BoxId::new("callback").unwrap();
+        for (mode, calls, succeeds) in [
+            (Mode::Once, 1, true),
+            (Mode::Missing, 0, false),
+            (Mode::Double, 1, false),
+            (Mode::Refused, 0, false),
+        ] {
+            let owner: Arc<dyn Books> = Arc::new(Owner(mode));
+            let effects = AtomicUsize::new(0);
+            let result = with_transaction(&Arc::downgrade(&owner), &id, &[], |_| {
+                effects.fetch_add(1, Ordering::SeqCst);
+                Ok(7)
+            });
+            assert_eq!(effects.load(Ordering::SeqCst), calls);
+            assert_eq!(result.is_ok(), succeeds);
+        }
+        let owner: Arc<dyn Books> = Arc::new(Owner(Mode::Once));
+        let weak = Arc::downgrade(&owner);
+        drop(owner);
+        assert!(
+            with_transaction(&weak, &id, &[], |_| -> Result<(), Refusal> {
+                panic!("dead owner invoked operation")
+            })
+            .is_err()
+        );
+        let owner: Arc<dyn Books> = Arc::new(Owner(Mode::Once));
+        let refusal = Refusal::Exists(id.clone());
+        assert_eq!(
+            with_transaction(
+                &Arc::downgrade(&owner),
+                &id,
+                &[],
+                |_| -> Result<(), Refusal> { Err(refusal.clone()) }
+            ),
+            Err(refusal)
+        );
+    }
+
+    /// AC-T7.4.1: all same-group identities use the same sorted existing turn keys.
+    #[test]
+    fn isolation_group_aliases_expand_to_identical_turn_keys() {
+        let catalog = Catalog::parse(b"hex-devices-1\ngpu\t256\ta\t4096\tvfio\t0000:01:00.0\t7\ngpu\t512\tb\t4096\tvfio\t0000:02:00.0\t7\ngpu\t768\tc\t4096\tvfio\t0000:03:00.0\t8\n").unwrap();
+        let id = |key| DeviceId {
+            kind: DeviceKind::Gpu,
+            key,
+        };
+        assert_eq!(
+            catalog.conflict_ids(&[id(256)]).unwrap(),
+            vec![id(256), id(512)]
+        );
+        assert_eq!(
+            catalog.conflict_ids(&[id(512)]).unwrap(),
+            vec![id(256), id(512)]
+        );
+        assert_eq!(catalog.conflict_ids(&[id(768)]).unwrap(), vec![id(768)]);
+        assert!(catalog.conflict_ids(&[id(256), id(256)]).is_err());
+    }
+
+    /// AC-T7.4.1: adapter selectors preserve native identity widths and never accept ordinals.
+    #[test]
+    fn shards_selector_uses_checked_native_identity_grammar() {
+        for (key, source) in [
+            (u64::MAX, "metal:ffffffffffffffff"),
+            (u64::MAX, "luid:ffffffffffffffff"),
+            (0xffff_ffff_ffff, "pci:ffffffff:ff:1f.7"),
+        ] {
+            let text =
+                format!("hex-devices-1\ngpu\t{key}\tfixture\t4096\tshards-gpu\t{source}\t\n");
+            let catalog = Catalog::parse(text.as_bytes()).unwrap();
+            assert!(matches!(
+                catalog.entries().first().unwrap().binding,
+                Binding::ShardsGpu { .. }
+            ));
+        }
+        for source in ["0", "NVIDIA", "metal:0", "pci:0000:01:20.0", "metal:2"] {
+            let text = format!("hex-devices-1\ngpu\t1\tfixture\t4096\tshards-gpu\t{source}\t\n");
+            assert!(Catalog::parse(text.as_bytes()).is_err());
+        }
+    }
+}

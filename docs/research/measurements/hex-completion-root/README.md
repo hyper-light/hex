@@ -210,3 +210,13 @@ before copying it, with typed Exhausted fallback. Permanent selector errors and
 storage exhaustion remain different public categories. A focused adapter test
 covers both categories without booting a guest. This follow-up is source-only
 until its exact client check; prior API/core results keep their original pins.
+
+## Catalog authority source boundary
+
+ROOT imports exact `devices.rs` from L1 signed56a84a6ef59408b37f8c697193f6f411b80a25c2.
+It contains the agreed weak Books/stack Transaction callback seam, canonical
+conflict IDs and typed Shards/VFIO configuration. Its new controls remain unrun
+at this input pin. This selective import includes no Firecracker adapter, Node
+registration or native capability proof. The owner is extending normalized
+per-backend routes in a successor; mixed-route and boot authority semantics must
+be coherent before the real CLI is ready.
