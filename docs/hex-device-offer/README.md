@@ -1,9 +1,10 @@
 # Device offer bridge fixture
 
-Original source-first c5e806ed now has [actual r21 results](RESULTS-r21.md): six
-selected pure tests,5pass/1candidate fail/0ignored, plus one fixture lint failure.
-The next one-line test-only Copy correction has not yet been executed. The original
-candidate red is retained; ROOT owns classification. No native/hardware effect is claimed.
+Original source-first c5e806ed has [actual r21 results](RESULTS-r21.md): six
+selected pure tests,5pass/1accepted pure fail/0ignored, plus one fixture lint failure.
+The one-line test-only Copy correction a69 now has testClippy0 with zero repeated
+tests. [Final results](RESULTS.md) retain interrupted r22, Clippy-only r23 and the
+original red. Source/jobs are held for ROOT's exact fixed source. No native claim.
 
 ## POLICY_READ, source and ownership
 
@@ -89,9 +90,9 @@ Private-copy registration is recorded byte-for-byte if focused checks execute.
 No unregistered or zero-filter result will be counted as a pass. Planned commands:
 node lib test compilation, six exact-name binary invocations with nocapture and
 one thread, node lib/tests Clippy with warnings denied, scoped leaf rustfmt.
-Source-first actual result: formatting0; compilation0invocations/tests0invocations.
-No job is active at this checkpoint. Source/log hashes and exact selected results
-will be recorded in RESULTS.md after the admitted private run, including any red.
+Source-first c5 originally had formatting0 with compilation/tests unrun. Subsequent
+actual results, including every red/interruption and zero repeated cases after
+ROOT's scope narrowing, are now recorded in RESULTS.md. No check job remains active.
 
 ROOT owes parent registration, independent classification/source/evidence review,
 production fixes if warranted, combined gates and the actual full device path on

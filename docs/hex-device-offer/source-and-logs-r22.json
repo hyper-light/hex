@@ -1,0 +1,122 @@
+{
+  "driver-clippy-only.py": {
+    "bytes": 2897,
+    "sha256": "f7e0679605b22f4db7659935c13399d5c90ac5dc4fecb99e69d0b253559a9347"
+  },
+  "driver.py": {
+    "bytes": 7026,
+    "sha256": "c07103d0476185d24818f3278a6ae836b1ea8c5208daea638a402ef50305a52f"
+  },
+  "proof-clippy/clippy.pid": {
+    "bytes": 6,
+    "sha256": "a9ee75e5517d2b632a45676f93b3f6ce53dba983e4ce58c2ec8c2718f78c681a"
+  },
+  "proof-clippy/clippy.stderr": {
+    "bytes": 2817,
+    "sha256": "0aa69f226453aaa2a6ff89e9708ac72bac8f386dd68558cc32190143d97b16ec"
+  },
+  "proof-clippy/clippy.stdout": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "proof-clippy/command.json": {
+    "bytes": 218,
+    "sha256": "85031f027e3b8bd6d6c54a080f704b7f47b43549a01e8b247908c896b36f8b0a"
+  },
+  "proof-clippy/summary.json": {
+    "bytes": 230513,
+    "sha256": "79fb7a43a222d540c1b98de5695fcdd6d3d19b90248b87fec56eef6d01af60e4"
+  },
+  "proof/build-command.json": {
+    "bytes": 205,
+    "sha256": "3981190a5ad8589ba7d297c4565e817a8ab06309764d7eef6473f8c4526799c1"
+  },
+  "proof/build.jsonl": {
+    "bytes": 66200,
+    "sha256": "474ecaa8a37e196999907d407ebb1839d455e1e1e2361b1366889f01fe139aa7"
+  },
+  "proof/build.pid": {
+    "bytes": 6,
+    "sha256": "86f2022b6ad8864f4b62c20bee9cee7504a4636101812c9bde84031f41daccf4"
+  },
+  "proof/build.stderr": {
+    "bytes": 2495,
+    "sha256": "e9fa0fdf299256ddb458d69b32cc80273e3e60ec65c7e51751b0c73eded8250a"
+  },
+  "proof/environment.json": {
+    "bytes": 270,
+    "sha256": "db14334497b9e1c43bd41c1b0789d23585d517b0123117731984fa67b7ff552e"
+  },
+  "proof/parent-before.rs": {
+    "bytes": 39039,
+    "sha256": "44880daeca4b965320e6314e0d59786cd1533f712007ae4c14c1388384a230a3"
+  },
+  "proof/parent-private.rs": {
+    "bytes": 39098,
+    "sha256": "15138583a472477840ccc3c97bdd44225e58f921451e249d386129996b72db2b"
+  },
+  "proof/private-registration.json": {
+    "bytes": 383,
+    "sha256": "8e0fc943f497bdb3e65af9cf1dce64603982e5a9c5889a9a500eac31e1278942"
+  },
+  "proof/registry-copy.stderr": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "proof/registry-copy.stdout": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "proof/source-after.json": {
+    "bytes": 229593,
+    "sha256": "2c1b7edd5348274f0d17f881ad61b40e72d52406997feba87d0992af6466292f"
+  },
+  "proof/source.json": {
+    "bytes": 229854,
+    "sha256": "87e729b7ec5a0f8b70004ba3608c22e50078caa00fdf014b4767caf0b6df1c7f"
+  },
+  "proof/steering-stop.json": {
+    "bytes": 375,
+    "sha256": "e8beaad15b27c7e79f825affcf2f2e4d464dd3db0cc60607a6e3479b4470096e"
+  },
+  "source/crates/hex-api/src/devices.rs": {
+    "bytes": 12901,
+    "sha256": "20b347ced241ddd3dc8e7afc759f9e974c281f3c2152b0cbc65ec35babe845e6"
+  },
+  "source/crates/hex-api/src/runtime.rs": {
+    "bytes": 14328,
+    "sha256": "8feda42c9efcaaea1ce9b81c4946766a1ea4d6330a5f2d8f6f016b3b9b8fa4c9"
+  },
+  "source/crates/hex-node/src/placement.rs": {
+    "bytes": 37290,
+    "sha256": "63e45acba5cca6688f6730f37f681670a7b9fe9ad98ebe335001727fa4928e5e"
+  },
+  "source/crates/hex-node/src/scheduler.rs": {
+    "bytes": 49324,
+    "sha256": "aa7153cabf90516163dd9abf955453364081da2599d1161eb9fbd2f47603f963"
+  },
+  "source/crates/hex-node/src/scheduler/capacity.rs": {
+    "bytes": 7486,
+    "sha256": "1c92096118ad8750c5064193ea01ad55815f35eef1b7c0040d7ed839fc1fa8ee"
+  },
+  "source/crates/hex-node/src/scheduler/capacity/devices.rs": {
+    "bytes": 3819,
+    "sha256": "c272a3c2c2259a2e843ad8b2ce804e134724765997314a9fe72c49afbb29b65a"
+  },
+  "source/crates/hex-node/src/scheduler/device_offer_tests.rs": {
+    "bytes": 13333,
+    "sha256": "524a93d8c81e5b1a8e6d78af4562acbf3ca71224aef6b195b85c0d8d96b01ff8"
+  },
+  "source/crates/hex-node/src/scheduler/tests.rs": {
+    "bytes": 39098,
+    "sha256": "15138583a472477840ccc3c97bdd44225e58f921451e249d386129996b72db2b"
+  },
+  "source/crates/hex-sim/src/facts.rs": {
+    "bytes": 22910,
+    "sha256": "345b47e22454eb2d67884d13e355040012262c487ea8900104e8b7f10d872e5d"
+  },
+  "source/crates/hex-sim/src/model.rs": {
+    "bytes": 25688,
+    "sha256": "83fed13bdefe107745ae2e76ed700249586141f792265caa46d2665c086e013c"
+  }
+}

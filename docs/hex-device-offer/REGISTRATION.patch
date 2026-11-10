@@ -1,0 +1,8 @@
+--- a/crates/hex-node/src/scheduler/tests.rs
++++ b/crates/hex-node/src/scheduler/tests.rs
+@@ -1075,2 +1075,5 @@
+ #[path = "adversarial_relay_tests.rs"]
+ mod adversarial_relay_tests;
++
++#[path = "device_offer_tests.rs"]
++mod device_offer_tests;

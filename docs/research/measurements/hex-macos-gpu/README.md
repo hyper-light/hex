@@ -1,6 +1,8 @@
 # Apple Silicon GPU adapter — scoped source and light-check record
 
-Status at first checkpoint: **source only, no compilation/test/native reading yet**. No hardware,
+Latest result: signed source `0e625a452827f4e09ca77eec7e16fb491582b45b` has **18 pure unit passes,
+0 failures/ignored/filtered and native all-target Clippy exit 0** on admitted d132. The first
+checkpoint was source only; actual results below supersede its explicitly unrun check status. No hardware,
 Metal/IOReport effect, attachment, performance or complete-platform claim. `AC-T7.3.1` supplies the
 existing inventory/sample seam. ROOT owns native effects, attachment/catalog integration, mutations,
 combined gates, audits, profiling/benchmarks and merges. This lane implements and checks only the
@@ -118,24 +120,72 @@ hardware fixture explicitly reports Apple's native-snapshot allocation distincti
 No new tuning literal: 100 is percent, 1001/UTF8/SInt64 are cited SDK enums, 0/null are native default
 allocator/query arguments, one GPUPH is the exact attribution contract rather than a count ceiling.
 
-## Planned narrow checks and current outcomes
+## Source-first controls and actual narrow checks
 
 New pure controls: high-bit Metal identity/no fake PCI/unchanged maximal PCI packing; observed
 residency scale invariance; idle vs zero-window; negative/reset and maximum signed counters;
 flooring/full-busy; zero/one/multiple device attribution. Existing ADL/parser tests remain real
-matching controls. **All tests are UNRUN at source-first checkpoint.** Only scoped rustfmt and
-`git diff --check` ran locally (exit 0); no local build, test or native probe. No active light job.
+matching controls. All were unrun at the source-first checkpoint. Only scoped rustfmt and
+`git diff --check` ran locally (exit 0); no local build, test or native probe at any point.
 
-Next admitted private check will execute `cargo test -p hex-gpu --lib --locked -- --test-threads=1`
-(pure fixtures only; no Gpus::open), then native `cargo clippy -p hex-gpu --all-targets --locked -- -D
-warnings` as compile-only. Exact source/log hashes, selected pass/fail/ignored counts, PIDs/reaps,
-storage and cleanup will be appended from actual results. No hardware integration test execution.
+Actual chronology, preserving the failed setup rather than calling it a test red:
 
-## R01–R16 disposition at source-first checkpoint
+1. Exact signed source archive SHA256
+   `fec3668fa3dfe435267d7df3069bafee0d034128e33ed52bfdce9ef01b1e9155`, 7626349 bytes, 1707 regular
+   files streamed in memory with `--no-sync` to NEW private d132
+   `~/.cache/hex-lead/lanes/macos-gpu-01a1c640-0e625a45-light-v1`. Local CLI PID77812 reaped, exit0.
+   Run **r39 exit1 before Cargo**: version-query subprocess ran from runner home, outside the
+   checkout's toolchain pin, and the private rustup copy has no default. **0 selected tests, no
+   compilation/native GPU call.** `run_light-r39.py`, `light-r39-submission.json`, exact
+   `r39-preflight-failure.txt` and compressed original tool output preserve it. No default/toolchain
+   install, runner setting or source change was made to work around it.
+2. Corrected only the harness: query tool versions in source cwd and explicitly retain the
+   checkout's exact `RUSTUP_TOOLCHAIN=1.99.1`. Same byte-identical signed source archive streamed to
+   separate NEW `macos-gpu-01a1c640-0e625a45-light-v2` source/target/cargo-home/tmp/proof paths.
+   Local CLI PID84458 reaped, exit0. Original v1 source/partial proof remains intact.
+3. **r40 terminal0**, d132 macOS26.4/arm64, Rust1.99.1 (`58cf8f9c35b355199727627d07ae34a4e2846d67`),
+   Cargo1.99.1 (`5f94df478`). Admitted cpus1/mem4g/disk12g; `nice -n 10`, inherited measured nice20,
+   jobs1/test-threads1; no priority raised. Commands in `run_light.py` and `light-r40-submission.json`:
+   - `cargo test -p hex-gpu --lib --locked -- --test-threads=1`: **18 pass, 0 fail, 0 ignored,
+     0 measured, 0 filtered**, Cargo PID42142 reaped. 4 new pure controls + 14 existing pure controls;
+     no `Gpus::open` or hardware fixture. Raw log 2646 bytes, SHA256
+     `e349e73ccb21816c8658c1847e8d15fe756a6255ee37c94b51a42d887966258b`.
+   - `cargo clippy -p hex-gpu --all-targets --locked -- -D warnings`: **exit0**, Cargo PID42378
+     reaped. Native type checking includes the hardware leaf; it is never executed. Raw log 513
+     bytes, SHA256 `43acfb665e78d93d6e342d0de845b89a74194c8c36d40d1fc42a8e4c99c0b081`.
+
+All 1707 source files before/after match one another AND the exact local signed Git archive (including
+byte-identical Cargo.lock). Private TMPDIR contains **0 entries**. Pure test executable
+`hex_gpu-30be2fb99e73668f`, 1486776 bytes, SHA256
+`42dc4d1e9b8e672291a0baab6be4d327b6284800f429336d632ef1cce066de85`. Linking/running pure tests
+proves the native adapter compiles/links; it does **not** prove any foreign GPU method was called.
+No active source/check job, child process or guest remains from this lane. All private source,
+targets, caches, transfer receipts and frozen proof are retained; no other lane path was touched.
+
+Raw collection: [light-r39-r40-proof.tar.gz](light-r39-r40-proof.tar.gz), **382995 bytes / 12 files**,
+SHA256 `5348f6dd62ed54abde20c741713ccfcac11b322781e1805cdd76ec7b3b207dd6`.
+The bundle preserves each original byte with member size/SHA in bundle-members.json, both transfer
+receipts, first partial proof, successful environment/commands/owner identities/results/raw logs and
+full source manifests. Collection used bounded <=12000 raw-byte reads, admitted no-sync, and checked
+each chunk/archive/member hash; no encoded data was printed. Verified raw extraction retained under
+`~/.cache/hex-lead/transfers/macos-gpu-01a1c640-0e625a45-light-v2/`. Local collection receipt:
+[light-r39-r40-collection.json](light-r39-r40-collection.json). Original tool-output bytes are stored
+losslessly compressed, with raw/stored identities in [tool-output-storage.json](tool-output-storage.json).
+No raw-log whitespace normalization or broad format exemption.
+
+Explicitly owed ROOT: actual Metal inventory identity/model/native budget and exact IOKit service
+join/mapped-memory semantics; IOReport missing/zero/idle/busy/ambiguous/read failure behavior and
+native reference cleanup; actual attachment/access/recovery/catalog effects; guard removals and
+restores; all seven-target and combined integration gates; launch/CF allocation/counter overhead,
+kernel/parent cost, profiles/benchmarks/comparisons. A service identity lookup failure is currently
+Skipped; a missing memory **counter** preserves inventory and returns the typed counter error. ROOT
+received this exact distinction. No platform-wide refusal is claimed as completion on a valid Mac.
+
+## R01–R16 disposition after the scoped light check
 
 | Rule | Scoped evidence / explicit remaining work |
 | --- | --- |
-| R01 | New math checked; no indexing/unwrap/panic in new production; vectors reserve fallibly; FFI confined with SAFETY. Compile/lint and ROOT native failure proof owed. |
+| R01 | New math checked; no indexing/unwrap/panic in new production; vectors reserve fallibly; FFI confined with SAFETY. 18 pure passes and native all-target Clippy0; ROOT native failure/ABI proof owed. |
 | R02 | Pinned all-smi/macmon and official Apple identity/memory/SDK interfaces; alternative memory sources rejected as above. Actual Apple counter provenance still ROOT owed. |
 | R03 | Enums/unit/default/count-derived bounds documented; no timer, interval or arbitrary device ceiling. |
 | R04 | Inventory/skipped vs per-counter typed failure; zero window/idle/ambiguous/gone distinct; owned native refs and replace/drop baseline explicit. Native error paths unexecuted. |
@@ -144,10 +194,10 @@ storage and cleanup will be appended from actual results. No hardware integratio
 | R07 | Native ownership/ABI/counter provenance comments retained; no telemetry narration layer. |
 | R08 | No comparative performance claim. ROOT owns equivalent measurements and remaining 4–5x target. |
 | R09 | New platform implementation from explicit requirement; no reproduced native defect claimed from source. No native red or fix campaign run. |
-| R10 | This durable source/decision record; source-only vs planned checks explicit; native effects/mutation evidence ROOT owed. |
-| R11 | macOS arm64 implementation; owned NVIDIA/AMD/ADL API migration preserves other platforms. Seven-target and hardware matrix unrun/ROOT owed. Intel Mac excluded. |
+| R10 | Signed source-first record and exact r39 setup failure/r40 raw success, manifests and cleanup retained. Native effects/mutation evidence ROOT owed. |
+| R11 | macOS arm64 pure tests/native compile passed; owned NVIDIA/AMD/ADL API migration is source-preserving. Seven-target and hardware matrix unrun/ROOT owed. Intel Mac excluded. |
 | R12 | Necessary Metal/IOKit/IOReport OS adapter isolated; existing workspace libc only new target use. No sensor executable/API dependency. ROOT CLAUDE registration required. |
 | R13 | Only GPU inventory/identity/memory/busy; no CPU/power/frequency/thermal metrics or broad framework. |
 | R14 | No performance/allocation/leak claim; ROOT profiles native/process/kernel cost. |
-| R15 | Explicit scoped implementer; signed source-first then light private checks; ROOT integration/native/gates/merge. No delegated child. |
+| R15 | Explicit scoped implementer; signed0e source-first then admitted r40 light check after preserved r39 setup failure. No active job or delegated child. ROOT integration/native/gates/merge owed. |
 | R16 | Floor checked; preserved all earlier work/artifacts; no deletions or laptop builds. Private check paths only when admitted. |

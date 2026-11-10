@@ -1,0 +1,2 @@
+[2m[kiln] on d1323898b255a3ed435eb83fa0f7b0cf · macos/aarch64 · 30 of 32 cores idle · 47 GB free · room for 1 CPU, 4 GiB of memory, 12 GiB of disk[0m
+{"source_commit": "0e625a452827f4e09ca77eec7e16fb491582b45b", "archive_sha256": "fec3668fa3dfe435267d7df3069bafee0d034128e33ed52bfdce9ef01b1e9155", "archive_bytes": 7626349, "files": 1707, "private": "/Users/adalundhe/.cache/hex-lead/lanes/macos-gpu-01a1c640-0e625a45-light-v2"}
