@@ -2,8 +2,8 @@
 //! guest per node, booted on the node's first `oci` create, running Hex's own Linux node agent, unchanged
 //! (CLAUDE.md §8). This runtime is a client of that node: it stages each box's root into the guest
 //! ([`hex_client::guest::stage`]), rewrites the spec to the guest's paths ([`rewrite`]), and forwards every
-//! call over [`hex_client::guest::Client`]. Where Shards has no backend (macOS x86_64, Windows arm64) the
-//! class is refused by name before anything is booted.
+//! call over [`hex_client::guest::Client`]. Shards' existing KVM/HVF/WHP adapters cover the supported
+//! hosts; the public seam recognizes them, and the actual backend checks host capabilities at boot.
 
 pub mod held;
 pub mod rewrite;

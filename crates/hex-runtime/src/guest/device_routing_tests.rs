@@ -110,20 +110,20 @@ fn native_oci_device_capacity_remains_visible_with_a_guest_configured() {
             holder: None,
         }],
     };
-    let guest = hex_api::Capacity {
-        id: "model-guest-pool".into(),
-        devices: Vec::new(),
-        ..native.clone()
-    };
+    let guest = Arc::new(NoGuest {
+        backend: Ok(shards_api::Backend::Kvm),
+        boots: AtomicUsize::new(0),
+    });
     let node = WithGuest {
         process: NativeReporting {
             inner: hex_api::sim::SimRuntime::new(),
             report: native.clone(),
         },
-        oci: capacity_runtime(Some(guest), config()),
+        oci: GuestRuntime::new(guest.clone(), config()),
         route: |_runtime, _class| Ok(Side::Host),
     };
     assert_eq!(node.capacity(Class::Oci).unwrap(), Some(native));
+    assert_eq!(guest.boots.load(Ordering::SeqCst), 0);
 }
 
 /// AC-T7.4.1: the public seam recognizes the existing KVM/HVF/WHP implementations on every

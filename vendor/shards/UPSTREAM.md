@@ -13,4 +13,6 @@ borrowed implementation. See docs/research/measurements/hex-shards-api-33df.
 
 ## Recorded changes
 
-No source patches at this checkpoint.
+| File | Change | Why | Patch |
+| --- | --- | --- | --- |
+| crates/api/src/lib.rs | Recognize Windows ARM64 WHP and update its backend regression | Existing VMM implements hv/whp_arm64; supported API must reach it, then let it check real host capability. | 0001-recognize-existing-windows-arm64-whp-backend.patch |
