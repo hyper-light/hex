@@ -2141,7 +2141,8 @@ fn a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(lab: &Lab, o
 /// in the second round two checks through files and two more entered, counted; none failed; after the release no
 /// file held; and every descriptor back to the count before the node.
 fn a_node_past_its_files_bound_checks_by_entering_counted(lab: &Lab, own: &Path) {
-    use rustix::process::{Resource, getrlimit};
+    use hex_node::netns::{FilesBound, Pools};
+    use rustix::process::{Resource, Rlimit, getrlimit};
 
     if lab.rootless {
         eprintln!("SKIP held files' bound: a rootless node keeps no network namespaces");
@@ -2167,13 +2168,29 @@ fn a_node_past_its_files_bound_checks_by_entering_counted(lab: &Lab, own: &Path)
     let open_fds = || std::fs::read_dir("/proc/self/fd").unwrap().count();
     let box_root = own.join("hex-reuse-files-bound");
     let (first_node, _first_state) = lab.node(&box_root);
+    // Take the bound from the live startup path, which has opened the keeper and supervisor already.
+    let warm = first_node
+        .netns_reuse()
+        .unwrap()
+        .expect("a root node keeps namespaces")
+        .files_bound
+        .expect("a root node's bound");
+    let pools = Pools::root(first_node.sizes());
+    let unlimited = FilesBound::of(
+        &Rlimit {
+            current: None,
+            maximum: None,
+        },
+        pools,
+        0,
+    );
+    // Both pure APIs count the same kept namespaces; their ratio is the policy's file charge for one.
+    let files_a_kept = FilesBound::needed(pools, 0)
+        .files
+        .checked_div(unlimited.namespaces)
+        .expect("a root node has kept namespace capacity");
+    let soft = warm.own + 2 * files_a_kept;
     drop(first_node);
-    let soft = hex_node::netns::FilesBound::now(hex_node::netns::Pools::root(
-        hex_node::sizes::Sizes::now().unwrap(),
-    ))
-    .unwrap()
-    .own + 2 * 4
-        + 3;
     let Some(_limit) = soft_limit(soft) else {
         eprintln!("SKIP held files' bound: the hard descriptor limit is under the node's own");
         return;
