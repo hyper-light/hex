@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, Weak};
 
 use hex_api::{
@@ -14,7 +14,7 @@ use hex_api::{
 use hex_core::{schedule as dto, wire};
 use hex_sim::index::Pick;
 use hex_sim::model::{Classes, Cluster, NodeId, NodeSpec};
-use hex_sim::peer::{self, Budget, Key};
+use hex_sim::peer::{self, Key};
 use serde::{Deserialize, Serialize};
 
 use crate::placement::{Driver, Envelope, Error, Notice, Payload, Runtimes, Step};
@@ -84,6 +84,14 @@ fn key(k: dto::Key) -> Key {
         epoch: k.epoch,
         seq: k.seq,
     }
+}
+
+/// A word per admitted/recovered record, plus each peer's one coalesced fact refresh.
+fn control_bound(records: usize, peers: usize) -> Result<usize, Refusal> {
+    records.checked_add(peers).ok_or_else(|| Refusal::Invalid {
+        what: "scheduler control budget",
+        why: "record and peer counts exceed usize".into(),
+    })
 }
 fn external(k: Key) -> dto::Key {
     dto::Key {
@@ -448,7 +456,8 @@ pub struct Service {
     prober: Mutex<crate::facts::Prober>,
     stopping: Arc<Stopping>,
     queued: Arc<AtomicUsize>,
-    senders: BTreeMap<NodeId, SyncSender<Queued>>,
+    control_limit: AtomicUsize,
+    senders: BTreeMap<NodeId, Sender<Queued>>,
     refreshing: BTreeMap<NodeId, Arc<AtomicBool>>,
 }
 
@@ -477,8 +486,6 @@ impl Service {
                 "scheduler state is already held or cannot be locked: {e}"
             ))
         })?;
-        let order = order::Order::open(&config.state.join("transport"))?;
-        let epoch = order.epoch;
         let mut cluster = Cluster::single_owner(config.nodes.clone(), Vec::new());
         cluster.models = config.models.clone();
         let id = NodeId(config.node);
@@ -524,12 +531,8 @@ impl Service {
                 why: "configure exactly one authenticated route for every remote node".into(),
             });
         }
-        if routes.len() >= crate::records::MOST {
-            return Err(Refusal::Exhausted {
-                what: "configured peer records",
-                bound: crate::records::MOST.saturating_sub(1),
-            });
-        }
+        let order = order::Order::open_with_peers(&config.state.join("transport"), &routes)?;
+        let epoch = order.epoch;
         let cache = cache::Cache::open(&config.state.join("peers"), &routes, &mut cluster)?;
         let mut classes = Classes::NONE;
         let mut backends = Vec::new();
@@ -577,15 +580,14 @@ impl Service {
             },
             &cluster.nodes,
             &cluster.models,
-            Budget {
-                owned: hex_runtime::MAX_BOXES,
-                ran: hex_runtime::MAX_BOXES,
-            },
+            crate::placement::budget::runtime_budget(id, &cluster.nodes)?,
             Pick::default(),
             &config.state.join("placements"),
             runtimes.clone(),
         )
         .map_err(failed)?;
+        let control_limit =
+            control_bound(driver.control_bound().map_err(failed)?, config.peers.len())?;
         let mut senders = BTreeMap::new();
         let mut refreshing = BTreeMap::new();
         let queued = Arc::new(AtomicUsize::new(0));
@@ -602,7 +604,9 @@ impl Service {
                     why: format!("invalid or duplicate node {}", peer.node),
                 });
             }
-            let (send, receive) = sync_channel::<Queued>(crate::records::MOST);
+            // One global Permit bounds queued and in-flight words across every peer. Linked
+            // storage avoids reserving that full population separately for each idle peer.
+            let (send, receive) = channel::<Queued>();
             let peer = peer.clone();
             let realm = config.cluster.clone();
             let models = cluster.models.clone();
@@ -644,6 +648,7 @@ impl Service {
             prober: Mutex::new(prober),
             stopping,
             queued,
+            control_limit: AtomicUsize::new(control_limit),
             senders,
             refreshing,
         });
@@ -758,6 +763,7 @@ impl Service {
     }
 
     fn refresh_peers(&self) -> Result<(), Refusal> {
+        let limit = self.control_limit.load(Ordering::Acquire);
         for (node, sender) in &self.senders {
             let refreshing = self
                 .refreshing
@@ -772,11 +778,11 @@ impl Service {
             let refresh = RefreshPermit(Arc::clone(refreshing));
             self.queued
                 .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                    n.checked_add(1).filter(|n| *n <= crate::records::MOST)
+                    n.checked_add(1).filter(|n| *n <= limit)
                 })
                 .map_err(|_| Refusal::Exhausted {
                     what: "queued peer messages",
-                    bound: crate::records::MOST,
+                    bound: limit,
                 })?;
             let queued = Queued {
                 envelope: None,
@@ -784,15 +790,15 @@ impl Service {
                 _permit: Permit(Arc::clone(&self.queued)),
                 _refresh: Some(refresh),
             };
-            sender.try_send(queued).map_err(|_| Refusal::Exhausted {
-                what: "queued peer messages",
-                bound: crate::records::MOST,
-            })?;
+            sender
+                .send(queued)
+                .map_err(|_| Refusal::Broken("scheduler peer worker disconnected".into()))?;
         }
         Ok(())
     }
 
     fn dispatch(&self, step: Step) -> Result<Dispatch, Refusal> {
+        let limit = self.control_limit.load(Ordering::Acquire);
         let mut result = Dispatch::default();
         let mut work = VecDeque::from([step]);
         while let Some(mut step) = work.pop_front() {
@@ -818,10 +824,10 @@ impl Service {
             }
             for (node, envelope) in step.send {
                 if node == self.id {
-                    if work.len() >= crate::records::MOST {
+                    if work.len() >= limit {
                         return Err(Refusal::Exhausted {
                             what: "local placement transitions",
-                            bound: crate::records::MOST,
+                            bound: limit,
                         });
                     }
                     work.push_back(self.driver.hear(self.id, envelope).map_err(failed)?);
@@ -837,11 +843,11 @@ impl Service {
                     .and_then(|sender| {
                         self.queued
                             .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                                n.checked_add(1).filter(|n| *n <= crate::records::MOST)
+                                n.checked_add(1).filter(|n| *n <= limit)
                             })
                             .map_err(|_| Refusal::Exhausted {
                                 what: "queued peer messages",
-                                bound: crate::records::MOST,
+                                bound: limit,
                             })?;
                         let permit = Permit(Arc::clone(&self.queued));
                         let observations = self.observations()?;
@@ -851,9 +857,8 @@ impl Service {
                             _permit: permit,
                             _refresh: None,
                         };
-                        sender.try_send(queued).map_err(|_| Refusal::Exhausted {
-                            what: "queued peer messages",
-                            bound: crate::records::MOST,
+                        sender.send(queued).map_err(|_| {
+                            Refusal::Broken("scheduler peer worker disconnected".into())
                         })?;
                         Ok(())
                     });
@@ -894,6 +899,26 @@ impl Service {
         if let Some(node) = cluster.nodes.iter_mut().find(|n| n.id == self.id) {
             *node = local;
         }
+        self.rebudget(&cluster)
+    }
+
+    fn rebudget(&self, cluster: &Cluster) -> Result<(), Refusal> {
+        let budget = crate::placement::budget::runtime_budget(self.id, &cluster.nodes)?;
+        let candidate = budget
+            .owned
+            .checked_add(budget.ran)
+            .and_then(|n| n.checked_add(1))
+            .ok_or_else(|| Refusal::Invalid {
+                what: "scheduler control budget",
+                why: "record counts exceed usize".into(),
+            })?;
+        // Refuse an unrepresentable control ceiling before changing admission.
+        let previous = self.driver.control_bound().map_err(failed)?;
+        control_bound(control_bound(candidate, previous)?, self.senders.len())?;
+        let records = self.driver.set_budget(budget).map_err(failed)?;
+        let limit = control_bound(records, self.senders.len())?;
+        // Outstanding permits survive a reduction; producers resume below the new ceiling.
+        self.control_limit.store(limit, Ordering::Release);
         Ok(())
     }
 
@@ -990,6 +1015,7 @@ impl Service {
                 if let Some(slot) = cluster.nodes.iter_mut().find(|n| n.id == NodeId(from)) {
                     *slot = spec;
                 }
+                self.rebudget(&cluster)?;
                 drop(cluster);
                 self.merge_observations(from, &observations)?;
                 let mut step = self.driver.link_up(NodeId(from)).map_err(failed)?;

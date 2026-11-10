@@ -21,8 +21,8 @@ use std::path::{Path, PathBuf};
 
 use hex_sim::peer::{Records, Stop};
 
-/// Legacy compatibility only: callers still using `open` must move to their own admitted counts.
-/// Root's integration removes this bound and the default constructor after those callers port.
+/// Historical fixture population; production readers always supply their own count.
+#[cfg(test)]
 pub const MOST: usize = hex_runtime::MAX_BOXES * 2 + 1;
 
 /// CP-T7.4: one durable placement record is bounded by the protocol message it represents.
@@ -82,7 +82,7 @@ fn checked(name: &str) -> Result<&str, Stop> {
 
 /// Limit the reader before allocating. The extra byte distinguishes an exact-size value from an
 /// oversized file even if it grows after open; decoding happens only after the size is established.
-fn read_record(reader: impl Read, path: &Path) -> Result<String, Stop> {
+pub(crate) fn read_record(reader: impl Read, path: &Path) -> Result<String, Stop> {
     let mut bytes = Vec::new();
     reader
         .take(
@@ -103,7 +103,8 @@ fn read_record(reader: impl Read, path: &Path) -> Result<String, Stop> {
 }
 
 impl Files {
-    /// Temporary legacy delegate; callers must supply their admitted count with `open_with_limit`.
+    /// Historical fixtures only; production callers supply their admitted read count.
+    #[cfg(test)]
     pub fn open(dir: &Path) -> Result<Files, Stop> {
         Self::open_with_limit(dir, MOST)
     }

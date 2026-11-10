@@ -129,14 +129,6 @@ impl Runtimes {
     }
 }
 
-/// Legacy shim until the shell wires [`budget::runtime_budget`] with retained recovery ceilings.
-pub fn runtime_budget() -> Budget {
-    Budget {
-        owned: hex_runtime::MAX_BOXES,
-        ran: hex_runtime::MAX_BOXES,
-    }
-}
-
 fn checked_namespace(namespace: &str) -> Result<&str, Refusal> {
     // 128-bit UUID-width nonce or a complete SHA-256 digest, in canonical hexadecimal.
     if !matches!(namespace.len(), 32 | 64)
@@ -250,9 +242,6 @@ impl Driver {
         runtimes: Runtimes,
     ) -> Result<Self, Error> {
         let (id, namespace) = identity;
-        if budget.owned > hex_runtime::MAX_BOXES || budget.ran > hex_runtime::MAX_BOXES {
-            return Err(invalid("placement budget exceeds runtime box bound").into());
-        }
         let mut rows = Rows::open(dir, budget, namespace)?;
         let namespace = rows.namespace().to_owned();
         let mut actual = BTreeMap::new();
@@ -334,15 +323,17 @@ impl Driver {
         } else {
             None
         };
-        let node = peer::Node::boot(
+        let recovery_budget = rows.recovery_budget();
+        let mut node = peer::Node::boot(
             id,
             recovery_nodes.as_deref().unwrap_or(nodes),
             models,
-            budget,
+            recovery_budget,
             pick,
             &mut rows,
             |key| actual.get(&key).copied().unwrap_or(Boxed::Absent),
         )?;
+        node.set_budget(budget);
         // Only validated, recovered records may resume an init; no acknowledgement has escaped.
         for (runtime, id) in start {
             runtime.start(&id)?;
@@ -521,6 +512,25 @@ impl Driver {
             state.admission = result.as_ref().err().map(admission_refusal);
         }
         result.map_err(Error::Core)
+    }
+
+    /// Admission changes never erase retained rows. A larger persisted read ceiling
+    /// precedes any new core row; a smaller current ceiling only refuses new work.
+    pub fn set_budget(&self, budget: Budget) -> Result<usize, Error> {
+        let _operation = self.operation()?;
+        let mut state = self.lock()?;
+        let bound = state.rows.control_bound(budget)?;
+        state.rows.grow_budget(budget)?;
+        state.node.set_budget(budget);
+        Ok(bound)
+    }
+
+    pub fn control_bound(&self) -> Result<usize, Error> {
+        let state = self.lock()?;
+        state
+            .rows
+            .control_bound(state.node.budget())
+            .map_err(Error::Core)
     }
 
     /// A probe that cannot establish current room blocks new reservations, while already held

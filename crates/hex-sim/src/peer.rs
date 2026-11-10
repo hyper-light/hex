@@ -839,6 +839,16 @@ impl Node {
         })
     }
 
+    /// Current caller admission ceilings. Existing rows can exceed a lowered ceiling;
+    /// they remain owned until the ordinary terminal/acknowledgement transitions remove them.
+    pub fn budget(&self) -> Budget {
+        self.budget
+    }
+
+    pub fn set_budget(&mut self, budget: Budget) {
+        self.budget = budget;
+    }
+
     pub fn id(&self) -> NodeId {
         self.id
     }

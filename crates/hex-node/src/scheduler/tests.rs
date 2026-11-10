@@ -1,6 +1,8 @@
 use super::*;
 use hex_api::{Bounds, ClassSpec};
 use hex_sim::model::{Ask, Demand, Kind, Resources};
+use hex_sim::peer::Budget;
+use std::sync::mpsc::sync_channel;
 
 /// LB03: a reconnect republishes durable cancellation without killing that new connection.
 #[test]
@@ -55,7 +57,7 @@ fn replayed_deletion_does_not_interrupt_the_reconnected_peer() {
     let stopping = Arc::new(Stopping::new([1]));
     let (child, _input, _output) = stopping::tests::waiting_child();
     stopping.register(1, &child).unwrap();
-    let (sender, receiver) = sync_channel(crate::records::MOST);
+    let (sender, receiver) = channel();
     let cache = cache::Cache::open(
         &dir.path().join("peers"),
         &std::collections::BTreeSet::from([1]),
@@ -69,7 +71,13 @@ fn replayed_deletion_does_not_interrupt_the_reconnected_peer() {
         fault: Mutex::new(None),
         cache: Mutex::new(cache),
         _lease: std::fs::File::create(dir.path().join("lease")).unwrap(),
-        order: Mutex::new(order::Order::open(&dir.path().join("transport")).unwrap()),
+        order: Mutex::new(
+            order::Order::open_with_peers(
+                &dir.path().join("transport"),
+                &std::collections::BTreeSet::from([1]),
+            )
+            .unwrap(),
+        ),
         driver,
         runtimes: Runtimes::default(),
         cluster: Mutex::new(cluster),
@@ -79,6 +87,7 @@ fn replayed_deletion_does_not_interrupt_the_reconnected_peer() {
         )),
         stopping,
         queued: Arc::new(AtomicUsize::new(0)),
+        control_limit: AtomicUsize::new(crate::records::MOST),
         senders: BTreeMap::from([(NodeId(1), sender)]),
         refreshing: BTreeMap::from([(NodeId(1), Arc::new(AtomicBool::new(false)))]),
     };
@@ -139,7 +148,13 @@ fn laptop_dispatch_and_common_wire_keep_the_box_until_explicit_delete() {
         fault: Mutex::new(None),
         cache: Mutex::new(cache),
         _lease: std::fs::File::create(dir.path().join("lease")).unwrap(),
-        order: Mutex::new(order::Order::open(&dir.path().join("transport")).unwrap()),
+        order: Mutex::new(
+            order::Order::open_with_peers(
+                &dir.path().join("transport"),
+                &std::collections::BTreeSet::from([]),
+            )
+            .unwrap(),
+        ),
         driver,
         runtimes: Runtimes::default(),
         cluster: Mutex::new(cluster),
@@ -149,6 +164,7 @@ fn laptop_dispatch_and_common_wire_keep_the_box_until_explicit_delete() {
         )),
         stopping: Arc::new(Stopping::default()),
         queued: Arc::new(AtomicUsize::new(0)),
+        control_limit: AtomicUsize::new(crate::records::MOST),
         senders: BTreeMap::new(),
         refreshing: BTreeMap::new(),
     });
@@ -297,7 +313,7 @@ fn cold_remote_creation_feedback_survives_owner_publication_busy() {
         .unwrap(),
     )
     .unwrap();
-    let (owner_send, owner_receive) = sync_channel(crate::records::MOST);
+    let (owner_send, owner_receive) = channel();
     let owner = Arc::new(Service {
         id: NodeId(0),
         realm: "cold-feedback".into(),
@@ -312,7 +328,13 @@ fn cold_remote_creation_feedback_survives_owner_publication_busy() {
             .unwrap(),
         ),
         _lease: std::fs::File::create(dir.path().join("lease")).unwrap(),
-        order: Mutex::new(order::Order::open(&dir.path().join("transport")).unwrap()),
+        order: Mutex::new(
+            order::Order::open_with_peers(
+                &dir.path().join("transport"),
+                &std::collections::BTreeSet::from([1]),
+            )
+            .unwrap(),
+        ),
         driver: owner_driver,
         runtimes: Runtimes::default(),
         cluster: Mutex::new(cluster),
@@ -322,6 +344,7 @@ fn cold_remote_creation_feedback_survives_owner_publication_busy() {
         )),
         stopping: Arc::new(Stopping::new([1])),
         queued: Arc::new(AtomicUsize::new(0)),
+        control_limit: AtomicUsize::new(crate::records::MOST),
         senders: BTreeMap::from([(NodeId(1), owner_send)]),
         refreshing: BTreeMap::from([(NodeId(1), Arc::new(AtomicBool::new(false)))]),
     });
@@ -459,7 +482,7 @@ fn advertise_timing_service(
     dir: &Path,
     mut cluster: Cluster,
     runtimes: Runtimes,
-    sender: SyncSender<Queued>,
+    sender: Sender<Queued>,
 ) -> Arc<Service> {
     std::fs::create_dir_all(dir).unwrap();
     let other = cluster.nodes.iter().find(|node| node.id != id).unwrap().id;
@@ -490,7 +513,13 @@ fn advertise_timing_service(
             .unwrap(),
         ),
         _lease: std::fs::File::create(dir.join("lease")).unwrap(),
-        order: Mutex::new(order::Order::open(&dir.join("transport")).unwrap()),
+        order: Mutex::new(
+            order::Order::open_with_peers(
+                &dir.join("transport"),
+                &std::collections::BTreeSet::from([other.0]),
+            )
+            .unwrap(),
+        ),
         driver,
         runtimes,
         cluster: Mutex::new(cluster),
@@ -500,6 +529,7 @@ fn advertise_timing_service(
         )),
         stopping: Arc::new(Stopping::new([other.0])),
         queued: Arc::new(AtomicUsize::new(0)),
+        control_limit: AtomicUsize::new(crate::records::MOST),
         senders: BTreeMap::from([(other, sender)]),
         refreshing: BTreeMap::from([(other, Arc::new(AtomicBool::new(false)))]),
     })
@@ -520,7 +550,7 @@ fn local_advertise_retry_pace_does_not_learn_its_own_pauses() {
     let mut local = NodeSpec::new(NodeId(0), Resources::default());
     local.classes = Classes::NONE;
     let cluster = Cluster::single_owner(vec![local, NodeSpec::new(NodeId(1), need)], Vec::new());
-    let (owner_send, owner_receive) = sync_channel(crate::records::MOST);
+    let (owner_send, owner_receive) = channel();
     let owner = advertise_timing_service(
         NodeId(0),
         &dir.path().join("owner"),
@@ -529,7 +559,7 @@ fn local_advertise_retry_pace_does_not_learn_its_own_pauses() {
         owner_send,
     );
     let runtime = Arc::new(hex_api::sim::SimRuntime::default());
-    let (source_send, source_receive) = sync_channel(crate::records::MOST);
+    let (source_send, source_receive) = channel();
     let source = advertise_timing_service(
         NodeId(1),
         &dir.path().join("source"),
@@ -667,4 +697,118 @@ fn local_advertise_retry_pace_does_not_learn_its_own_pauses() {
         observed, [work; 3],
         "only fixed operation work may determine retry pace"
     );
+}
+
+/// AC-T7.4.1: all peer queues and a worker's held word share one admission count.
+/// Lowering that count preserves outstanding work; disconnect/drop returns both permits.
+#[test]
+fn queued_control_limit_is_global_and_survives_shrink_and_disconnect() {
+    let dir = tempfile::tempdir().unwrap();
+    let cluster = Cluster::single_owner(
+        (0..3)
+            .map(|id| NodeSpec::new(NodeId(id), Resources::default()))
+            .collect(),
+        Vec::new(),
+    );
+    let (first_send, first_receive) = channel();
+    let mut service = advertise_timing_service(
+        NodeId(0),
+        dir.path(),
+        cluster,
+        Runtimes::default(),
+        first_send,
+    );
+    let (second_send, second_receive) = channel();
+    let owned = Arc::get_mut(&mut service).unwrap();
+    owned.senders.insert(NodeId(2), second_send);
+    owned
+        .refreshing
+        .insert(NodeId(2), Arc::new(AtomicBool::new(false)));
+    owned.control_limit.store(2, Ordering::Release);
+    service.refresh_peers().unwrap();
+    assert_eq!(service.queued.load(Ordering::Acquire), 2);
+    let in_flight = first_receive.try_recv().unwrap();
+    // Receiving alone does not release the worker's admission; it owns the word until completion.
+    assert_eq!(service.queued.load(Ordering::Acquire), 2);
+    service.control_limit.store(1, Ordering::Release);
+    service.refresh_peers().unwrap(); // Existing per-peer refreshes coalesce even above the limit.
+    assert_eq!(service.queued.load(Ordering::Acquire), 2);
+    drop(in_flight);
+    assert_eq!(service.queued.load(Ordering::Acquire), 1);
+    assert!(matches!(
+        service.refresh_peers(),
+        Err(Refusal::Exhausted { bound: 1, .. })
+    ));
+    assert!(!service.refreshing[&NodeId(1)].load(Ordering::Acquire));
+    drop(second_receive); // Drops a queued word as well as that endpoint.
+    assert_eq!(service.queued.load(Ordering::Acquire), 0);
+    service.control_limit.store(2, Ordering::Release);
+    assert!(matches!(service.refresh_peers(), Err(Refusal::Broken(_))));
+    // Peer1's successful send remains admitted; peer2's failed send returns its permits.
+    assert_eq!(service.queued.load(Ordering::Acquire), 1);
+    assert!(!service.refreshing[&NodeId(2)].load(Ordering::Acquire));
+    drop(first_receive);
+    assert_eq!(service.queued.load(Ordering::Acquire), 0);
+    assert!(!service.refreshing[&NodeId(1)].load(Ordering::Acquire));
+}
+
+/// AC-T7.4.1: durable placement words cannot bypass the same global queue authority.
+#[test]
+fn dispatch_control_refuses_at_global_limit_and_returns_failed_send_permits() {
+    let dir = tempfile::tempdir().unwrap();
+    let cluster = Cluster::single_owner(
+        (0..2)
+            .map(|id| NodeSpec::new(NodeId(id), Resources::default()))
+            .collect(),
+        Vec::new(),
+    );
+    let (sender, receiver) = channel();
+    let service =
+        advertise_timing_service(NodeId(0), dir.path(), cluster, Runtimes::default(), sender);
+    service.control_limit.store(1, Ordering::Release);
+    let step = || Step {
+        send: vec![(
+            NodeId(1),
+            Envelope {
+                msg: peer::Msg::Holds {
+                    key: Key {
+                        owner: 0,
+                        epoch: 1,
+                        seq: 0,
+                    },
+                },
+                payload: None,
+                refusal: None,
+            },
+        )],
+        notices: Vec::new(),
+    };
+    assert!(service.dispatch(step()).unwrap().refusals.is_empty());
+    assert_eq!(service.queued.load(Ordering::Acquire), 1);
+    let refused = service.dispatch(step()).unwrap();
+    assert_eq!(refused.refusals.len(), 1);
+    assert_eq!(
+        refused.refusals[0],
+        encoded_refusal(&Refusal::Exhausted {
+            what: "queued peer messages",
+            bound: 1,
+        })
+        .unwrap()
+    );
+    assert_eq!(service.queued.load(Ordering::Acquire), 1);
+    let word = receiver.try_recv().unwrap();
+    assert_eq!(service.queued.load(Ordering::Acquire), 1);
+    drop(word);
+    assert_eq!(service.queued.load(Ordering::Acquire), 0);
+    drop(receiver);
+    let refused = service.dispatch(step()).unwrap();
+    assert_eq!(refused.refusals.len(), 1);
+    assert_eq!(
+        refused.refusals[0],
+        encoded_refusal(&Refusal::Broken(
+            "scheduler peer worker disconnected".into(),
+        ))
+        .unwrap()
+    );
+    assert_eq!(service.queued.load(Ordering::Acquire), 0);
 }

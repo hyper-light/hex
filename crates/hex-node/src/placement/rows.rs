@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::collections::hash_map::RandomState;
 use std::fs::{self, File};
 use std::hash::BuildHasher;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::Path;
 
 use hex_sim::peer::{Budget, Key, Records, Stop};
@@ -29,8 +29,65 @@ pub(super) struct Rows {
     files: Files,
     held: BTreeMap<String, Stored>,
     bound: usize,
+    ceiling: Budget,
     namespace: String,
     pub context: Context,
+}
+
+pub(super) fn record_bound(budget: Budget) -> Result<usize, Stop> {
+    budget
+        .owned
+        .checked_add(budget.ran)
+        .and_then(|n| n.checked_add(1))
+        .filter(|n| n.checked_mul(2).is_some())
+        .ok_or_else(|| bad("placement record budget is not representable"))
+}
+
+fn read_value(path: &Path) -> Result<Value, Stop> {
+    let text =
+        crate::records::read_record(File::open(path).map_err(|e| Stop::Io(e.to_string()))?, path)?;
+    serde_json::from_str(&text).map_err(|e| bad(e.to_string()))
+}
+
+fn read_ceiling(dir: &Path, current: Budget) -> Result<usize, Stop> {
+    let epoch = dir.join("epoch.rec");
+    let value = match File::open(&epoch) {
+        Ok(file) => {
+            let text = crate::records::read_record(file, &epoch)?;
+            serde_json::from_str::<Value>(&text).map_err(|e| bad(e.to_string()))?
+        }
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => {
+            return record_bound(current);
+        }
+        Err(why) => return Err(Stop::Io(why.to_string())),
+    };
+    let saved = match value.get("read_budget") {
+        Some(saved) => {
+            let count = |key| {
+                saved
+                    .get(key)
+                    .and_then(Value::as_u64)
+                    .and_then(|n| usize::try_from(n).ok())
+                    .ok_or_else(|| bad("invalid persisted placement read budget"))
+            };
+            Budget {
+                owned: count("owned")?,
+                ran: count("ran")?,
+            }
+        }
+        None => {
+            // Compatibility with the published 8d2a66cd epoch envelope: both row kinds
+            // were capped at 65,536. This bounds only the legacy read, never new admission.
+            Budget {
+                owned: 65_536,
+                ran: 65_536,
+            }
+        }
+    };
+    record_bound(Budget {
+        owned: current.owned.max(saved.owned),
+        ran: current.ran.max(saved.ran),
+    })
 }
 
 pub(super) fn payload_value(payload: &Payload) -> Result<Value, Stop> {
@@ -81,13 +138,8 @@ fn payload_from(value: &Value) -> Result<Option<Payload>, Stop> {
 
 impl Rows {
     pub fn open(dir: &Path, budget: Budget, supplied: Option<&str>) -> Result<Self, Stop> {
-        let bound = budget
-            .owned
-            .checked_add(budget.ran)
-            .and_then(|n| n.checked_add(1))
-            .filter(|&n| n <= crate::records::MOST)
-            .ok_or_else(|| bad("placement record budget"))?;
-        let files = Files::open(dir)?;
+        let bound = read_ceiling(dir, budget)?;
+        let files = Files::open_with_limit(dir, bound)?;
         let mut held = BTreeMap::new();
         let mut namespace = None;
         for entry in fs::read_dir(dir).map_err(|e| Stop::Io(e.to_string()))? {
@@ -106,19 +158,7 @@ impl Rows {
                 .and_then(|s| s.to_str())
                 .ok_or_else(|| bad("record name"))?
                 .to_owned();
-            let max = hex_core::wire::MAX_MESSAGE;
-            let take = u64::try_from(max)
-                .ok()
-                .and_then(|n| n.checked_add(1))
-                .ok_or_else(|| bad("record byte bound"))?;
-            let mut text = String::new();
-            File::open(&path)
-                .and_then(|f| f.take(take).read_to_string(&mut text))
-                .map_err(|e| Stop::Io(e.to_string()))?;
-            if text.len() > max {
-                return Err(bad("placement record exceeds wire byte bound"));
-            }
-            let value: Value = serde_json::from_str(&text).map_err(|e| bad(e.to_string()))?;
+            let value = read_value(&path)?;
             let row = value
                 .get("row")
                 .and_then(Value::as_str)
@@ -168,10 +208,21 @@ impl Rows {
             },
             None => return Err(bad("nonempty placement records have no namespaced epoch")),
         };
+        // Loading existing rows does not grant new admission. The core validates their
+        // identities/states under this recovery floor, then adopts the current ceiling.
+        let ceiling = Budget {
+            owned: budget
+                .owned
+                .max(held.keys().filter(|n| n.starts_with("own-")).count()),
+            ran: budget
+                .ran
+                .max(held.keys().filter(|n| n.starts_with("ran-")).count()),
+        };
         let mut rows = Self {
             files,
             held,
-            bound,
+            bound: record_bound(ceiling)?,
+            ceiling,
             namespace,
             context: Context::None,
         };
@@ -185,6 +236,52 @@ impl Rows {
 
     pub fn namespace(&self) -> &str {
         &self.namespace
+    }
+
+    pub fn recovery_budget(&self) -> Budget {
+        self.ceiling
+    }
+
+    pub fn control_bound(&self, budget: Budget) -> Result<usize, Stop> {
+        // Retained owners and newly admitted runners (or the reverse) can coexist.
+        // Taking a maximum of the totals would omit that cross-kind population.
+        record_bound(Budget {
+            owned: budget
+                .owned
+                .max(self.held.keys().filter(|n| n.starts_with("own-")).count()),
+            ran: budget
+                .ran
+                .max(self.held.keys().filter(|n| n.starts_with("ran-")).count()),
+        })
+    }
+
+    /// Commit a larger read ceiling before the core can create a row under it.
+    /// A restart compacts it to current admission plus the actual retained rows.
+    pub fn grow_budget(&mut self, budget: Budget) -> Result<(), Stop> {
+        let next = Budget {
+            owned: self.ceiling.owned.max(budget.owned),
+            ran: self.ceiling.ran.max(budget.ran),
+        };
+        if next.owned == self.ceiling.owned && next.ran == self.ceiling.ran {
+            return Ok(());
+        }
+        let bound = record_bound(next)?;
+        let epoch = self
+            .held
+            .get("epoch")
+            .ok_or_else(|| bad("placement epoch absent while growing read ceiling"))?
+            .row
+            .clone();
+        let old = self.ceiling;
+        let old_bound = self.bound;
+        self.ceiling = next;
+        self.bound = bound;
+        if let Err(why) = self.put("epoch", &epoch) {
+            self.ceiling = old;
+            self.bound = old_bound;
+            return Err(why);
+        }
+        Ok(())
     }
 
     pub fn payload(&self, kind: &str, key: Key) -> Result<Payload, Stop> {
@@ -252,7 +349,8 @@ impl Records for Rows {
         };
         let payload_value = payload.as_ref().map(payload_value).transpose()?;
         let value = if key == "epoch" {
-            json!({"row":row,"payload":payload_value,"namespace":self.namespace})
+            json!({"row":row,"payload":payload_value,"namespace":self.namespace,
+                "read_budget":{"owned":self.ceiling.owned,"ran":self.ceiling.ran}})
         } else {
             json!({"row":row,"payload":payload_value})
         };

@@ -15,8 +15,7 @@ pub struct Order {
     files: Files,
     pub epoch: u64,
     received: BTreeMap<u32, (u64, u64, [u8; 32])>,
-    configured: Option<Vec<u32>>,
-    max_peers: usize,
+    configured: Vec<u32>,
 }
 
 fn damaged(why: impl Into<String>) -> Refusal {
@@ -30,8 +29,8 @@ fn storage(op: &str, why: Stop) -> Refusal {
     }
 }
 
-fn checked_peer(peer: u32, configured: Option<&[u32]>) -> Result<(), Refusal> {
-    if configured.is_some_and(|peers| peers.binary_search(&peer).is_err()) {
+fn checked_peer(peer: u32, configured: &[u32]) -> Result<(), Refusal> {
+    if configured.binary_search(&peer).is_err() {
         return Err(Refusal::Invalid {
             what: "peer ordering sender",
             why: format!("unconfigured peer {peer}"),
@@ -43,34 +42,16 @@ fn checked_peer(peer: u32, configured: Option<&[u32]>) -> Result<(), Refusal> {
 impl Order {
     /// Configured senders bound the receive ledger, plus one local sender-epoch row.
     pub fn open_with_peers(path: &Path, configured: &BTreeSet<u32>) -> Result<Self, Refusal> {
-        Self::open_records(path, Some(configured), configured.len())
-    }
-
-    /// Temporary compatibility while scheduler callers port to explicit configured peer sets.
-    pub fn open(path: &Path) -> Result<Self, Refusal> {
-        Self::open_records(path, None, crate::records::MOST.saturating_sub(1))
-    }
-
-    fn open_records(
-        path: &Path,
-        configured: Option<&BTreeSet<u32>>,
-        max_peers: usize,
-    ) -> Result<Self, Refusal> {
-        let configured = configured
-            .map(|peers| {
-                let mut ids = Vec::new();
-                ids.try_reserve_exact(peers.len())
-                    .map_err(|_| Refusal::Exhausted {
-                        what: "peer ordering configured senders",
-                        bound: peers.len(),
-                    })?;
-                // BTreeSet order gives binary-search membership; reserve covers every push.
-                for peer in peers {
-                    ids.push(*peer);
-                }
-                Ok::<_, Refusal>(ids)
-            })
-            .transpose()?;
+        let mut ids = Vec::new();
+        ids.try_reserve_exact(configured.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "peer ordering configured senders",
+                bound: configured.len(),
+            })?;
+        // BTreeSet order gives binary-search membership; reserve covers every push.
+        ids.extend(configured.iter().copied());
+        let configured = ids;
+        let max_peers = configured.len();
         let most = max_peers.checked_add(1).ok_or(Refusal::Exhausted {
             what: "peer ordering records including sender epoch",
             bound: max_peers,
@@ -89,7 +70,7 @@ impl Order {
                 if name != format!("peer-{id}") {
                     return Err(damaged("noncanonical peer order ID"));
                 }
-                checked_peer(id, configured.as_deref())?;
+                checked_peer(id, &configured)?;
                 let mut words = value.split_whitespace();
                 if words.next() != Some("o1") {
                     return Err(damaged("invalid peer order version"));
@@ -137,7 +118,6 @@ impl Order {
             epoch,
             received,
             configured,
-            max_peers,
         })
     }
 
@@ -150,7 +130,7 @@ impl Order {
         seq: u64,
         digest: [u8; 32],
     ) -> Result<bool, Refusal> {
-        checked_peer(peer, self.configured.as_deref())?;
+        checked_peer(peer, &self.configured)?;
         if epoch == 0 || seq == 0 {
             return Err(damaged("zero peer message epoch or sequence"));
         }
@@ -166,10 +146,10 @@ impl Order {
                 }
                 return Ok(true);
             }
-        } else if self.received.len() >= self.max_peers {
+        } else if self.received.len() >= self.configured.len() {
             return Err(Refusal::Exhausted {
                 what: "peer ordering records",
-                bound: self.max_peers,
+                bound: self.configured.len(),
             });
         }
         use std::fmt::Write;
@@ -271,14 +251,14 @@ mod tests {
     #[test]
     fn lb03_delayed_old_start_stays_fenced_after_restart() {
         let temp = tempfile::tempdir().unwrap();
-        let mut order = Order::open(temp.path()).unwrap();
+        let mut order = Order::open_with_peers(temp.path(), &BTreeSet::from([4])).unwrap();
         let sender_epoch = order.epoch;
         assert!(order.accept(4, 1, 1, [0; 32]).unwrap()); // Start.
         assert!(order.accept(4, 1, 2, [0; 32]).unwrap()); // Delete, with physical deletion completed under lock.
         assert!(order.accept(4, 1, 3, [0; 32]).unwrap()); // Forget.
         assert!(!order.accept(4, 1, 1, [0; 32]).unwrap());
         drop(order);
-        let mut order = Order::open(temp.path()).unwrap();
+        let mut order = Order::open_with_peers(temp.path(), &BTreeSet::from([4])).unwrap();
         assert!(order.epoch > sender_epoch);
         assert!(!order.accept(4, 1, 1, [0; 32]).unwrap());
         assert!(order.accept(4, 2, 1, [0; 32]).unwrap()); // New connection generation after owner reboot.
