@@ -1,5 +1,6 @@
 """Synthetic only: no original construction, subprocess, API, VM or capture access."""
 import importlib.util
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -173,6 +174,157 @@ class PhysicalTrace(unittest.TestCase):
                 fixture.main()
             self.assertIs(observed.exception, failure)
             self.assertIs(fixture.sys.argv, arguments)
+        self.assertIs(self.cold.census.Harness, self.base)
+        self.assertIs(self.cold.ColdHarness.instances, original_instances)
+
+    def exercise_fault(self, fault):
+        harness = self.construct()
+        (self.root / "census").mkdir()
+        (self.root / "SOURCE_REVISION").write_text("synthetic-source")
+        harness.source, harness.runtime_path = self.root, self.root / "runtime.json"
+        harness.runtime = {"wait_mode": "armed", "max_frame": 1 << 20, "wait_ns": 120_000_000_000,
+                           "ledger": str(self.root / "pids.jsonl"), "profile": "synthetic"}
+        harness.report["binary_and_artifact_hashes"] = {"hex": {"sha256": "synthetic-input"}}
+        harness.scheduler_processes, harness.children, harness.baseline = [], [], []
+        process = SimpleNamespace(pid=31415, returncode=None, hex_census_path=None)
+        process.poll = lambda: process.returncode
+        state, owner = self.root / "cold-node.node-state", self.root / "owned-guest.json"
+        identity = {"record": str(state / "@guest"), "pid": 27182, "started": 7,
+                    "vsock": str(self.root / "v"), "declared_config": {"synthetic": True}}
+        events = []
+
+        def create(instance, name):
+            events.append("create-" + name)
+            self.assertEqual(name, "cold-node")
+            state.mkdir()
+            (state / "@guest").write_text("synthetic exact private record; no OS identity")
+            instance.backend_process, instance.backend_state = process, state
+            instance.backend_socket = self.root / "cold-node.sock"
+            instance.children.append((name, process))
+            instance.ready(process, instance.backend_socket)
+            instance.guest_receipt = owner
+            owner.write_text(json.dumps(identity))
+            return instance.backend_socket
+
+        def snapshot(instance, inspect=None):
+            if inspect is not None:
+                events.append("physical-inspect-" + inspect)
+            return {"classes": ["oci"], "boxes": [], "capacity": {"id": "guest:27182:7"}}
+
+        def physical(instance):
+            events.append("physical-phase")
+            self.assertEqual(instance.backend("real"), self.root / "cold-node.sock")
+            instance.snapshot(inspect="owned-key")
+
+        def stop(child, crash):
+            self.assertIs(child, process)
+            self.assertTrue(crash)
+            events.append("reap-original-backend")
+            child.returncode = -9
+            harness.children = []
+
+        def probe(*arguments):
+            self.assertIsNotNone(process.returncode)
+            self.assertEqual(arguments[1], str(state / "@guest"))
+            self.assertEqual(arguments[arguments.index("--owned-root") + 1], str(self.root))
+            selected = Path(arguments[arguments.index("--receipt") + 1])
+            events.append(arguments[0])
+            if arguments[0] == "--remember-guest":
+                with selected.open("x") as data:
+                    json.dump(identity, data)
+                return {"remembered": True, "pid": identity["pid"], "started": identity["started"]}
+            self.assertEqual(arguments[0], "--stop-owned-guest")
+            self.assertEqual(json.loads(selected.read_text()), identity)
+            return {"guest_stopped": True, "end": "Stopped", "pid": identity["pid"], "started": identity["started"]}
+
+        harness.stop, harness.probe = stop, probe
+        faults = fixture.load_module(Path(__file__).with_name("cold_fault_e2e.py"), "synthetic_faults")
+        with patch.object(self.base, "backend", create), patch.object(self.base, "ready", lambda *_: events.append("ready-line")), \
+                patch.object(self.base, "snapshot", snapshot), patch.object(self.base, "exercise", physical):
+            with faults.inject_fault(self.cold, fault):
+                if fault == "pre-ready":
+                    with self.assertRaises(self.cold.census.Failed) as observed:
+                        harness.exercise()
+                    error = str(observed.exception)
+                    self.assertEqual(error, "ROOT pre-ready parent receipt-boundary fault")
+                    harness.report.update(status="failed", error=error)
+                    self.assertIs(harness.cold_process, process)
+                    harness.finish_backend()
+                    self.assertEqual(harness.report["error"], error)
+                    self.assertNotIn("physical-phase", events)
+                else:
+                    harness.exercise()
+                    self.assertIn("physical-inspect-owned-key", events)
+                    with self.assertRaises(self.cold.census.Failed) as observed:
+                        harness.finish_backend()
+                    error = str(observed.exception)
+                    self.assertEqual(error, "ROOT post-ready finish snapshot fault")
+                    self.assertEqual(harness.report["cold_boot"]["original_finish_failure"], error)
+                    harness.report["backend_cleanup_error"] = error
+                with self.assertRaises(self.cold.census.Failed):
+                    harness.census_report()
+        self.assertEqual(events.count("create-cold-node"), 1)
+        self.assertEqual(events[-3:], ["reap-original-backend", "--remember-guest", "--stop-owned-guest"])
+        self.assertIs(harness.cold_process, process)
+        self.assertIsNone(harness.backend_process)
+        self.assertEqual(harness.report["status"], "failed")
+        self.assertTrue(harness.report["cold_boot"]["backend_reaped"])
+        self.assertTrue(harness.report["cold_boot"]["stopped_receipt_verified"])
+        self.assertEqual(harness.report["owned_guest_retired"]["pid"], identity["pid"])
+        self.assertEqual(harness.guest_receipt, owner if fault == "post-ready" else self.root / "cold-recovery-receipt.json")
+        if fault == "post-ready":
+            self.assertEqual(json.loads(owner.read_text()), identity)
+
+    def test_ac_t7_4_pre_ready_fault_keeps_original_error_and_exact_recovered_closure(self):
+        self.exercise_fault("pre-ready")
+
+    def test_ac_t7_4_post_ready_fault_forwards_inspect_and_preserves_original_finish_error(self):
+        self.exercise_fault("post-ready")
+
+    def test_ac_t7_4_recovery_cannot_guess_an_identity_from_another_run(self):
+        harness = self.construct()
+        process = SimpleNamespace(pid=31415, returncode=None)
+        harness.backend_process = harness.cold_process = process
+        harness.backend_state = self.root / "other-run.node-state"
+        harness.runtime = {"max_frame": 1 << 20}
+        harness.children = []
+        stopped = []
+
+        def stop(child, crash):
+            self.assertIs(child, process)
+            self.assertTrue(crash)
+            child.returncode = -9
+            stopped.append(child)
+
+        harness.stop = stop
+        harness.probe = lambda *_: self.fail("no guessed guest probe")
+        with self.assertRaisesRegex(self.cold.census.Failed, "unexpected private backend state"):
+            harness.finish_backend()
+        self.assertEqual(stopped, [process])
+        self.assertNotIn("owned_guest_retired", harness.report)
+        self.assertIn("cleanup_unproven", harness.report["cold_boot"])
+
+    def test_ac_t7_4_main_fault_scope_aborts_without_next_guest(self):
+        arguments = ["synthetic-trace", "--cold-driver", str(self.root / "cold.py"), "--fault", "pre-ready",
+                     "--validate-seeds", "--mode", "guest", "--n", "3"]
+        original_instances = self.cold.ColdHarness.instances
+        calls = []
+
+        def original_main():
+            instance = self.cold.census.Harness(self.args)
+            calls.append(instance)
+            instance.backend_process = SimpleNamespace()
+            instance.backend_state = self.root / "cold-node.node-state"
+            instance.ready(instance.backend_process, self.root / "cold-node.sock")
+            self.fail("fault must abort before physical work or another construction")
+
+        with patch.object(fixture, "load_cold", return_value=self.cold), patch.object(fixture.sys, "argv", arguments), \
+                patch.object(self.base, "__init__", lambda harness, args: self.initialize(harness, args)), \
+                patch.object(self.base, "ready", lambda *_: None), patch.object(self.cold.census, "main", original_main):
+            with self.assertRaisesRegex(self.cold.census.Failed, "ROOT pre-ready parent receipt-boundary fault"):
+                fixture.main()
+            self.assertIs(fixture.sys.argv, arguments)
+        self.assertEqual(len(calls), 1)
         self.assertIs(self.cold.census.Harness, self.base)
         self.assertIs(self.cold.ColdHarness.instances, original_instances)
 

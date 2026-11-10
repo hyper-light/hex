@@ -5,6 +5,7 @@ Cold readiness precedes ordinary SSH setup, a deliberate diagnostic ordering dif
 No production fix, timing calibration, SDK census or seed eligibility is implied.
 """
 import argparse
+from contextlib import nullcontext
 import importlib.util
 from pathlib import Path
 import sys
@@ -13,13 +14,17 @@ import sys
 DEBUG = "HEX_DEBUG_SUBMIT_DF534D2F"
 
 
-def load_cold(path):
-    spec = importlib.util.spec_from_file_location("physical_trace_cold_driver", path)
+def load_module(path, name):
+    spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
-        raise RuntimeError("the explicitly supplied cold driver could not be loaded")
+        raise RuntimeError("the supplied fixture module could not be loaded")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def load_cold(path):
+    return load_module(path, "physical_trace_cold_driver")
 
 
 def trace_harness(cold, trace):
@@ -72,16 +77,18 @@ def main():
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     parser.add_argument("--cold-driver", type=Path, required=True, help="reviewed cold_boot_census.py path")
     parser.add_argument("--trace", action="store_true", help="enable the cache diagnostic binary's child trace")
+    parser.add_argument("--fault", choices=("pre-ready", "post-ready"), help="ROOT-only existing cold cleanup fault control")
     options, rest = parser.parse_known_args()
     cold = load_cold(options.cold_driver.expanduser().resolve())
     original_arguments, original_harness = sys.argv, cold.census.Harness
     original_instances = cold.ColdHarness.instances
-    adapter = trace_harness(cold, options.trace)
     try:
-        cold.ColdHarness.instances = []
-        cold.census.Harness = adapter
-        sys.argv = [original_arguments[0], *rest]
-        cold.census.main()  # One backend; --n retains ordinary physical trials per phase.
+        faults = load_module(Path(__file__).with_name("cold_fault_e2e.py"), "physical_trace_fault_control") if options.fault else None
+        with faults.inject_fault(cold, options.fault) if faults else nullcontext():
+            cold.ColdHarness.instances = []
+            cold.census.Harness = trace_harness(cold, options.trace)
+            sys.argv = [original_arguments[0], *rest]
+            cold.census.main()  # One backend; --n retains ordinary physical trials per phase.
     finally:
         sys.argv, cold.census.Harness = original_arguments, original_harness
         cold.ColdHarness.instances = original_instances
