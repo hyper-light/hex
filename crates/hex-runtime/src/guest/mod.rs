@@ -287,7 +287,7 @@ pub struct GuestRuntime {
     record: Option<PathBuf>,
     /// The event form's client of the guest's node: its answers are read by the node's loop, so a call
     /// through it holds no thread while the guest answers.
-    dedicated: Mutex<Vec<Arc<dedicated::Slot>>>,
+    dedicated: Mutex<Vec<dedicated::Slot>>,
     gpu_catalog: Option<Arc<crate::devices::Catalog>>,
     /// What joins each guest's evented connection to the node's loop ([`GuestRuntime::join_loop`]).
     joins: Mutex<Option<Arc<dyn Joins>>>,
@@ -687,14 +687,14 @@ impl GuestRuntime {
     fn with<T>(
         &self,
         id: &BoxId,
-        call: impl FnOnce(&Client) -> Result<T, Refusal>,
+        call: impl FnOnce(&Booted) -> Result<T, Refusal>,
     ) -> Result<T, Refusal> {
         let running = match self.selected_running(id)? {
             Some(booted) => Some(booted),
             None => self.running()?,
         };
         match running {
-            Some(b) => call(&b.client),
+            Some(b) => call(&b),
             None => Err(Refusal::NoSuchBox(id.clone())),
         }
     }
@@ -808,17 +808,18 @@ impl Runtime for GuestRuntime {
         if !spec.devices.is_empty() || matches!(spec.class, ClassSpec::Shards(_)) {
             return self.create_selected(spec);
         }
+        let rewritten = self.rewrite_spec(spec)?;
         let b = self.guest()?;
         self.warm_if_changed()?;
-        self.create_in(&b, spec)
+        self.create_in(&b, rewritten)
     }
 
     fn start(&self, id: &BoxId) -> Result<(), Refusal> {
-        self.with(id, |c| c.start(id))
+        self.with(id, |b| b.client.start(id))
     }
 
     fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
-        self.with(id, |c| c.exec(id, program, stdio))
+        self.with(id, |b| b.client.exec(id, program, stdio))
     }
 
     fn run(
@@ -836,18 +837,15 @@ impl Runtime for GuestRuntime {
     }
 
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
-        self.with(id, |c| c.signal(id, signal))
+        self.with(id, |b| b.client.signal(id, signal))
     }
 
     fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
-        if let Some(guest) = self.selected_running(id)? {
-            return guest.host_info(guest.client.inspect(id)?);
-        }
-        self.with(id, |c| c.inspect(id))
+        self.with(id, |b| b.host_info(b.client.inspect(id)?))
     }
 
     fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
-        self.with(id, |c| c.usage(id))
+        self.with(id, |b| b.client.usage(id))
     }
 
     fn list(&self) -> Result<Vec<BoxInfo>, Refusal> {
@@ -895,14 +893,13 @@ impl Runtime for GuestRuntime {
 }
 
 impl GuestRuntime {
-    fn create_in(&self, b: &Booted, mut spec: BoxSpec) -> Result<BoxInfo, Refusal> {
+    fn rewrite_spec(&self, mut spec: BoxSpec) -> Result<rewrite::Rewritten, Refusal> {
         // The guest's native runtime executes the same OCI payload. The backend-explicit
         // class belongs to the host endpoint and is retained by its durable BoxRecord.
         spec.class = match spec.class {
             ClassSpec::Shards(oci) => ClassSpec::Oci(oci),
             other => other,
         };
-        let id = spec.id.clone();
         let known = match &spec.class {
             ClassSpec::Oci(oci) => match &oci.rootfs {
                 Rootfs::Layers(paths) => self.digests.lock().map_err(poisoned)?.known(paths),
@@ -910,7 +907,11 @@ impl GuestRuntime {
             },
             _ => rewrite::Known::new(),
         };
-        let rewritten = rewrite::rewrite(spec, &self.config.shares, &self.config.staged, &known)?;
+        rewrite::rewrite(spec, &self.config.shares, &self.config.staged, &known)
+    }
+
+    fn create_in(&self, b: &Booted, rewritten: rewrite::Rewritten) -> Result<BoxInfo, Refusal> {
+        let id = rewritten.spec.id.try_clone()?;
         // An id the guest's node already holds is refused as the node refuses it, before anything is
         // staged: staging first would send a box's whole root only to be refused (CLAUDE.md §3).
         match b.client.inspect(&id) {

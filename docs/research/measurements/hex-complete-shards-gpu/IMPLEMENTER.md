@@ -90,8 +90,10 @@ the exact shared source cohort rather than inserting production stubs:
   Shards/Firecracker variants and wire integration. Original owned source remains
   based on b06; any private check overlay must record these exact blobs.
 - Proposed upstream API `PhysicalGpu` (PCI, Metal registry ID, LUID),
-  `GuestSpec.gpu_devices`, real renderer native-identity join, context setter/ACK,
-  selected memory and Windows ARM renderer remain upstream partition work.
+  `GuestSpec.gpu_devices`: API signed source327424a1 followed by corrected
+  36d9254f is now available. Both ROOTs released the exact upstream partition.
+  Real renderer native-identity join, context setter/ACK, selected memory and
+  Windows ARM renderer remain in progress on private `hex/physical-gpu-0342`.
 - L1 catalog `Binding::ShardsGpu { physical }` supplies trusted native bindings;
   guest-only `Binding::GuestGpu` maps trusted boot host IDs to actual virtio GPU
   DRM nodes. Peer payloads cannot create that mapping. The actual guest startup
@@ -117,3 +119,52 @@ R15/R16: signed named-path checkpoints; light checks only admitted d132
 CPU1/memory4GiB/disk12GiB, nice10/jobs1/threads1, private source/target/cache/temp,
 precise no-sync. No local builds/tests or native actors, no runner changes or
 foreign data/PID changes. No active check/job; originals/evidence preserved.
+
+## Successor source and focused API result
+
+Hex a16d5bf3 supplies the concrete `WithGuest::route`, `evented_for(id)` and
+`program_client_for(id)` interfaces consumed by L3. The successor removes the
+new unchecked Arc allocation for route slots: one fallibly reserved `Vec<Slot>`
+contains the existing route state, and a stack reservation moves its prior
+Guest out while native/file/channel work runs. The table lock protects only
+claim/publish/remove. The same BoxId is excluded; sibling/CPU calls remain
+independent. Existing Arc<Booted>, Arc<dyn Guest> and Link constructors are
+pre-existing public/lifetime seams, not claimed fallible by this change.
+
+The durable receipt now retains the original backend class and exact typed
+native physical selectors as well as host IDs. A changed native catalog binding
+refuses adoption instead of reinterpreting a retained ID. Explicit CPU Shards
+boxes also use a dedicated VM; generic CPU OCI compatibility remains shared.
+Only the exact receipt owner's inner OCI BoxInfo is normalized to its original
+host class. Foreign IDs/classes refuse, including in a dedicated listing.
+
+ROOT's common Node owner/weak Books transaction seam is the integration target:
+one Store, method/device Turns, records and admission authority. No
+Recorded<Node> wrapper, strong owner cycle, parallel picker or holder ledger.
+VM envelope charging still needs this actual shared admission path. Per-VM
+receipts/connection routes are not that accounting authority.
+
+API36d9254f's focused d132 run selected exactly3 tests:3 passed,0 failed,0 ignored;
+strict API library Clippy0 and mechanical policy0. The private scaffold contains
+all actual API/ABI/afunix/testdir sources and required test includes with the
+original workspace's package/dependency/lint definitions. Workspace membership
+and irrelevant TLS path patches alone are narrowed in that scaffold. Cargo's
+first --locked refusal was retained; `cargo update --workspace --offline`
+pruned unused lock entries with no new/changed package tuple or registry pin.
+The passing test binary SHA256 is
+`61c980eabe9b3721dc26c3cf8d5f484538c3bb5f7d73531a463f13b26dc8b67c`.
+All child PIDs were waited/reaped; private TMPDIR entries0. API parsing and
+argument checks are not native selection or VMM/VM proof. Raw proof collection
+is pending under `~/.cache/hex-complete-shards/light-api-36d9254f-v3` locally
+and the same-named runner scope. Original full-archive transfer timeout,
+Python extractor-version refusal and original lock refusal remain preserved.
+
+Source trace of the existing API: stop sends a kill; wait_for consumes shared
+end state. Exit::watch waits for/reaps the child but also records error paths;
+End::Stopped can mask a wait-status observation error when stopping is set.
+Thus a normal or failed End is not independent native GPU/helper reclamation
+proof. Linux uses a render-server thread with thread workers in the same VM
+process; macOS/Windows render in process, with Windows launcher/job semantics
+also relevant. Exact kernel/process/job/driver resource witnesses and the error
+case remain ROOT-owned and unverified. No complete cleanup/absence claim follows
+from model End values or source inspection.

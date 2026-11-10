@@ -2,6 +2,7 @@
 //! kernel parameters grant this mapping; a box payload, environment or CDI label
 //! cannot assert that an arbitrary character device is a selected physical GPU.
 
+#[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
 
 use hex_api::{BoxId, BoxSpec, DeviceId, DeviceKind, Refusal};

@@ -2,7 +2,6 @@
 //! device-holder authority; this receipt names the VM which must end before that holder
 //! can be released. An intent with no process identity is uncertainty, never absence.
 
-use std::fmt::Write as _;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -24,6 +23,7 @@ pub(super) struct Record {
     pub id: BoxId,
     pub devices: Vec<DeviceId>,
     pub class: Class,
+    pub physical: Vec<shards_api::PhysicalGpu>,
     pub vcpus: u32,
     pub memory_mib: u64,
     pub phase: Phase,
@@ -89,6 +89,7 @@ impl Record {
             id: spec.id.try_clone()?,
             devices,
             class: spec.class.class(),
+            physical: Vec::new(),
             vcpus: config.vcpus,
             memory_mib: config.memory_mib,
             phase: Phase::Intent,
@@ -140,8 +141,12 @@ impl Record {
         writeln!(text, "vcpus {}", self.vcpus)?;
         writeln!(text, "memory_mib {}", self.memory_mib)?;
         writeln!(text, "devices {}", self.devices.len())?;
-        for id in &self.devices {
+        if self.devices.len() != self.physical.len() {
+            return Err(std::fmt::Error);
+        }
+        for (id, physical) in self.devices.iter().zip(&self.physical) {
             writeln!(text, "gpu {}", id.key)?;
+            writeln!(text, "native {physical}")?;
         }
         match &self.phase {
             Phase::Intent => writeln!(text, "intent"),
@@ -253,6 +258,10 @@ fn parse(text: &str) -> Result<Record, Refusal> {
         return Err(invalid("empty or excessive selected guest envelope"));
     }
     let mut devices = Vec::new();
+    let mut physical = Vec::new();
+    physical
+        .try_reserve_exact(count)
+        .map_err(|_| allocation(count))?;
     devices
         .try_reserve_exact(count)
         .map_err(|_| allocation(count))?;
@@ -268,7 +277,13 @@ fn parse(text: &str) -> Result<Record, Refusal> {
             return Err(invalid("GPU identities are repeated or unordered"));
         }
         devices.push(id);
+        let native = field(lines.next(), "native ")?
+            .parse::<shards_api::PhysicalGpu>()
+            .map_err(|_| invalid("invalid native GPU selector"))?;
+        physical.push(native);
     }
+    shards_api::physical::check_selection(&physical)
+        .map_err(|_| invalid("native selectors repeat or exceed their representation"))?;
     let phase = match lines.next() {
         Some("intent") => Phase::Intent,
         Some(phase @ ("running" | "stopping")) => {
@@ -307,6 +322,7 @@ fn parse(text: &str) -> Result<Record, Refusal> {
         id,
         devices,
         class,
+        physical,
         vcpus,
         memory_mib,
         phase,
@@ -330,6 +346,12 @@ mod tests {
                 key: 256,
             }],
             class: Class::Shards,
+            physical: vec![shards_api::PhysicalGpu::Pci {
+                domain: 0,
+                bus: 1,
+                device: 0,
+                function: 0,
+            }],
             vcpus: 1,
             memory_mib: 256,
             phase: Phase::Intent,

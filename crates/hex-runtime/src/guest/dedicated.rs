@@ -79,6 +79,7 @@ mod tests {
             id: id.clone(),
             devices: Vec::new(),
             class: Class::Shards,
+            physical: Vec::new(),
             vcpus: 1,
             memory_mib: 256,
             phase: Phase::Running(shards_api::Identity {
@@ -250,16 +251,24 @@ enum Operation {
     Stopping,
 }
 
+impl Operation {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Loading => "same-box guest recovery in flight",
+            Self::Creating => "same-box guest create in flight",
+            Self::Stopping => "same-box guest stop in flight",
+        }
+    }
+}
+
 enum Route {
-    Idle,
     Busy(Operation),
     Ready(Guest),
-    Retired,
 }
 
 pub(super) struct Slot {
     id: BoxId,
-    route: Mutex<Route>,
+    route: Route,
 }
 
 /// Owning a reservation excludes a second same-ID operation without keeping a
@@ -267,7 +276,7 @@ pub(super) struct Slot {
 /// its on-disk receipt still decides whether physical absence is proved.
 struct Reservation<'a> {
     runtime: &'a GuestRuntime,
-    slot: Arc<Slot>,
+    id: BoxId,
     previous: Option<Guest>,
     finished: bool,
 }
@@ -280,14 +289,18 @@ impl Reservation<'_> {
     }
 
     fn restore(&self, next: Option<Guest>) -> Result<(), Refusal> {
-        let empty = next.is_none();
-        *self.slot.route.lock().map_err(poisoned)? = next.map_or(Route::Retired, Route::Ready);
-        if empty {
-            self.runtime
-                .dedicated
-                .lock()
-                .map_err(poisoned)?
-                .retain(|slot| !Arc::ptr_eq(slot, &self.slot));
+        let mut routes = self.runtime.dedicated.lock().map_err(poisoned)?;
+        let index = routes
+            .iter()
+            .position(|slot| slot.id == self.id)
+            .ok_or_else(|| invalid("guest reservation lost its route"))?;
+        if let Some(next) = next {
+            routes
+                .get_mut(index)
+                .ok_or_else(|| invalid("guest route index changed"))?
+                .route = Route::Ready(next);
+        } else {
+            routes.swap_remove(index);
         }
         Ok(())
     }
@@ -298,22 +311,24 @@ impl Drop for Reservation<'_> {
         if self.finished {
             return;
         }
-        // Restore ownership even after an unrelated test panic poisoned a lock.
-        // This destructor neither starts a VM nor deletes a durable receipt.
-        let next = self.previous.take();
-        let empty = next.is_none();
-        *self
-            .slot
-            .route
+        // A failed operation restores its last owned route even after a test panic;
+        // this destructor performs no native effect or durable receipt removal.
+        let mut routes = self
+            .runtime
+            .dedicated
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            next.map_or(Route::Retired, Route::Ready);
-        if empty {
-            self.runtime
-                .dedicated
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .retain(|slot| !Arc::ptr_eq(slot, &self.slot));
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(index) = routes.iter().position(|slot| slot.id == self.id) {
+            match self.previous.take() {
+                Some(previous) => {
+                    if let Some(slot) = routes.get_mut(index) {
+                        slot.route = Route::Ready(previous);
+                    }
+                }
+                None => {
+                    routes.swap_remove(index);
+                }
+            }
         }
     }
 }
@@ -365,49 +380,40 @@ impl GuestRuntime {
     }
 
     fn reserve(&self, id: &BoxId, operation: Operation) -> Result<Reservation<'_>, Refusal> {
-        let slot = {
-            let mut routes = self.dedicated.lock().map_err(poisoned)?;
-            if let Some(slot) = routes.iter().find(|slot| slot.id == *id) {
-                Arc::clone(slot)
-            } else {
-                if routes.len() >= crate::MAX_BOXES {
-                    return Err(Refusal::Full(crate::MAX_BOXES));
-                }
-                routes.try_reserve(1).map_err(|_| Refusal::Exhausted {
-                    what: "guest routes",
-                    bound: crate::MAX_BOXES,
-                })?;
-                let slot = Arc::new(Slot {
-                    id: id.try_clone()?,
-                    route: Mutex::new(Route::Idle),
-                });
-                routes.push(Arc::clone(&slot));
-                slot
-            }
-        };
-        let previous = {
-            let mut route = slot.route.lock().map_err(poisoned)?;
-            match std::mem::replace(&mut *route, Route::Busy(operation)) {
-                Route::Idle => None,
-                Route::Ready(guest) => Some(guest),
+        let owned = id.try_clone()?;
+        let mut routes = self.dedicated.lock().map_err(poisoned)?;
+        let previous = if let Some(slot) = routes.iter_mut().find(|slot| slot.id == *id) {
+            match &slot.route {
                 Route::Busy(existing) => {
-                    *route = Route::Busy(existing);
-                    // One in-flight lifecycle operation per BoxId is the ownership
-                    // invariant, not a tuning/concurrency allowance.
                     return Err(Refusal::Exhausted {
-                        what: "same-box guest operation in flight",
+                        what: existing.name(),
                         bound: 1,
                     });
                 }
-                Route::Retired => {
-                    *route = Route::Retired;
-                    return Err(invalid("the previous guest route retired during admission"));
-                }
+                Route::Ready(_) => {}
             }
+            match std::mem::replace(&mut slot.route, Route::Busy(operation)) {
+                Route::Ready(guest) => Some(guest),
+                Route::Busy(_) => return Err(invalid("guest reservation changed under its lock")),
+            }
+        } else {
+            if routes.len() >= crate::MAX_BOXES {
+                return Err(Refusal::Full(crate::MAX_BOXES));
+            }
+            routes.try_reserve(1).map_err(|_| Refusal::Exhausted {
+                what: "guest routes",
+                bound: crate::MAX_BOXES,
+            })?;
+            routes.push(Slot {
+                id: id.try_clone()?,
+                route: Route::Busy(operation),
+            });
+            None
         };
+        drop(routes);
         Ok(Reservation {
             runtime: self,
-            slot,
+            id: owned,
             previous,
             finished: false,
         })
@@ -483,7 +489,7 @@ impl GuestRuntime {
                 what: "selected Shards GPU identities",
                 bound: receipt.devices.len(),
             })?;
-        for id in &receipt.devices {
+        for (id, recorded) in receipt.devices.iter().zip(&receipt.physical) {
             let entry = catalog
                 .entries()
                 .iter()
@@ -492,7 +498,15 @@ impl GuestRuntime {
             let crate::devices::Binding::ShardsGpu { physical } = &entry.binding else {
                 return Err(invalid("recorded GPU is not bound to the Shards renderer"));
             };
-            spec.gpu_devices.push(physical.clone());
+            if physical != recorded {
+                return Err(invalid(
+                    "configured physical binding changed since guest launch",
+                ));
+            }
+            spec.gpu_devices.push(*recorded);
+        }
+        if receipt.physical.len() != receipt.devices.len() {
+            return Err(invalid("receipt lost a physical selector"));
         }
         use std::fmt::Write as _;
         write!(spec.cmdline, " hex.gpu.box={} hex.gpu=", receipt.id)
@@ -505,6 +519,40 @@ impl GuestRuntime {
                 .map_err(|_| invalid("cannot encode GPU boot authority"))?;
         }
         Ok(spec)
+    }
+
+    fn physical_for(
+        &self,
+        devices: &[hex_api::DeviceId],
+    ) -> Result<Vec<shards_api::PhysicalGpu>, Refusal> {
+        if devices.is_empty() {
+            return Ok(Vec::new());
+        }
+        let catalog = self
+            .gpu_catalog
+            .as_ref()
+            .ok_or_else(|| invalid("no initialized exact Shards GPU catalog"))?;
+        let mut physical = Vec::new();
+        physical
+            .try_reserve_exact(devices.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "native guest bindings",
+                bound: devices.len(),
+            })?;
+        for id in devices {
+            let entry = catalog
+                .entries()
+                .iter()
+                .find(|entry| entry.info.id == *id)
+                .ok_or_else(|| invalid("selected GPU is not in the initialized catalog"))?;
+            let crate::devices::Binding::ShardsGpu { physical: native } = &entry.binding else {
+                return Err(invalid("selected GPU has another backend binding"));
+            };
+            physical.push(*native);
+        }
+        shards_api::physical::check_selection(&physical)
+            .map_err(|_| invalid("native GPU binding aliases or exceeds its representation"))?;
+        Ok(physical)
     }
 
     pub fn validate_binding(&self, spec: &BoxSpec) -> Result<(), Refusal> {
@@ -607,7 +655,9 @@ impl GuestRuntime {
             return Err(Refusal::Exists(spec.id));
         }
         let mut receipt = Record::intent(&spec, &self.config)?;
+        receipt.physical = self.physical_for(&receipt.devices)?;
         let guest_spec = self.selected_spec(&receipt)?;
+        let rewritten = self.rewrite_spec(spec)?;
         let dir = self.selected_dir()?;
         std::fs::create_dir_all(&dir)
             .map_err(|e| Refusal::os("creating selected guest receipt directory", e))?;
@@ -630,7 +680,7 @@ impl GuestRuntime {
         let booted = self.booted(guest, &receipt)?;
         // The same-ID reservation also covers staging/create; callbacks cannot
         // delete/recreate this slot while its first box is still being made.
-        let created = self.create_in(&booted, spec);
+        let created = self.create_in(&booted, rewritten);
         reservation.publish(Some(Guest { receipt, booted }))?;
         created
     }
