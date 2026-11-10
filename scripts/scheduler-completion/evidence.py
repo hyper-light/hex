@@ -127,6 +127,33 @@ def check_events(events, backend, topology, proof="full"):
     require(hex_digest(compute.get("uuid"), 32), "no actual physical GPU UUID")
     require(compute.get("selected") == selected and compute.get("native_join_verified") is True,
             "GPU UUID is not independently joined to the exact selected native identity")
+    require(selected[0].get("kind") == "gpu" and natural(selected[0].get("key")),
+            "selected identity is not a native GPU")
+    joins=[]
+    translation=compute.get("physical_translation")
+    if backend=="firecracker":
+        require(isinstance(translation,dict) and translation.get("native_key")==selected[0]["key"],
+                "no actual VMM host-to-guest translation")
+        host=translation.get("host_pci")
+        require(isinstance(host,list) and len(host)==4 and all(natural(part) for part in host),
+                "missing native host PCI")
+        domain,bus,slot,function=host
+        require(domain<=0xffffffff and bus<=255 and slot<=31 and function<=7,"invalid native host PCI")
+        require((domain<<16)|(bus<<8)|(slot<<3)|function==selected[0]["key"],"wrong VMM host PCI key")
+    for device in compute.get("native_inventory",[]):
+        pci=device.get("pci")
+        if pci is not None:
+            require(isinstance(pci,list) and len(pci)==4 and all(natural(part) for part in pci),
+                    "malformed native PCI correlation")
+            domain,bus,slot,function=pci
+            require(domain<=0xffffffff and bus<=255 and slot<=31 and function<=7,"invalid PCI domain")
+            key=(domain<<16)|(bus<<8)|(slot<<3)|function
+        else:
+            key=device.get("metal_registry_id")
+        matches=(key==selected[0]["key"]) if backend!="firecracker" else (pci==translation.get("guest_pci"))
+        if matches:
+            joins.append(device.get("uuid"))
+    require(joins==[compute["uuid"]],"UUID/native physical join missing, ambiguous or inconsistent")
     require(natural(compute.get("words"), positive=True) and compute.get("mismatches") == 0,
             "vacuous or incorrect workload")
     require(compute.get("prefill_mismatches") == compute["words"], "output was not poisoned before dispatch")

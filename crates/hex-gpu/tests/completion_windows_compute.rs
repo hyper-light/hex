@@ -128,7 +128,11 @@ impl Inputs {
                 "require a positive finite caller budget below Win32 INFINITE".into(),
             ));
         }
-        Ok(Self { interface, expected, wait_ms })
+        Ok(Self {
+            interface,
+            expected,
+            wait_ms,
+        })
     }
 }
 
@@ -161,11 +165,15 @@ struct Kmt<'a> {
 
 impl Drop for Kmt<'_> {
     fn drop(&mut self) {
-        let close = D3DKMT_CLOSEADAPTER { hAdapter: self.handle };
+        let close = D3DKMT_CLOSEADAPTER {
+            hAdapter: self.handle,
+        };
         // SAFETY: this is the nonzero handle returned by our successful KMT open, closed once.
         let status = unsafe { D3DKMTCloseAdapter(&close) };
         if status.0 == 0 {
-            self.cleanup.kmt_closed.set(self.cleanup.kmt_closed.get() + 1);
+            self.cleanup
+                .kmt_closed
+                .set(self.cleanup.kmt_closed.get() + 1);
         } else {
             self.cleanup.failed.set(true);
         }
@@ -182,7 +190,10 @@ impl Drop for Event<'_> {
     fn drop(&mut self) {
         // SAFETY: our anonymous non-inheritable event is owned here, never duplicated or closed elsewhere.
         match unsafe { CloseHandle(self.handle) } {
-            Ok(()) => self.cleanup.event_closed.set(self.cleanup.event_closed.get() + 1),
+            Ok(()) => self
+                .cleanup
+                .event_closed
+                .set(self.cleanup.event_closed.get() + 1),
             Err(error) => {
                 self.cleanup.failed.set(true);
                 eprintln!("windows_compute_event_close_error {error:?}");
@@ -200,23 +211,42 @@ fn device(args: &Inputs, cleanup: &Cleanup) -> Result<ID3D12Device> {
         };
         // SAFETY: SDK layout, writable out-structure and NUL-terminated path remain live through the call.
         let status = unsafe { D3DKMTOpenAdapterFromDeviceName(&mut open) };
-        eprintln!("windows_compute_kmt_open interface={:?} status={:#x}", args.interface, status.0);
+        eprintln!(
+            "windows_compute_kmt_open interface={:?} status={:#x}",
+            args.interface, status.0
+        );
         if status.0 != 0 {
             return Err(Failure::Nt("KMT open", status.0));
         }
-        require(open.hAdapter != 0, "KMT open", "successful open returned a zero handle")?;
+        require(
+            open.hAdapter != 0,
+            "KMT open",
+            "successful open returned a zero handle",
+        )?;
         cleanup.kmt_open.set(cleanup.kmt_open.get() + 1);
-        let _adapter = Kmt { handle: open.hAdapter, cleanup };
-        eprintln!("windows_compute_kmt_luid actual={:016x}", luid_bits(open.AdapterLuid));
+        let _adapter = Kmt {
+            handle: open.hAdapter,
+            cleanup,
+        };
+        eprintln!(
+            "windows_compute_kmt_luid actual={:016x}",
+            luid_bits(open.AdapterLuid)
+        );
         // ROOT wrong-ID control: supply a different expected LUID; refusal precedes DXGI/GPU work.
         same_luid("KMT identity", args.expected, open.AdapterLuid)?;
         open.AdapterLuid
     };
-    require(!cleanup.failed.get(), "KMT cleanup", "close failed; no GPU work will be submitted")?;
+    require(
+        !cleanup.failed.get(),
+        "KMT cleanup",
+        "close failed; no GPU work will be submitted",
+    )?;
     // SAFETY: SDK creates a new owned factory. No ordinal/default/WARP enumeration is used.
     let factory: IDXGIFactory4 = native("DXGI factory", unsafe { CreateDXGIFactory1() })?;
     // SAFETY: the LUID came from our exact interface; returned COM reference is owned by adapter.
-    let adapter: IDXGIAdapter1 = native("DXGI exact LUID", unsafe { factory.EnumAdapterByLuid(luid) })?;
+    let adapter: IDXGIAdapter1 = native("DXGI exact LUID", unsafe {
+        factory.EnumAdapterByLuid(luid)
+    })?;
     // SAFETY: adapter is a live owned SDK COM interface; GetDesc1 writes its own descriptor.
     let description = native("DXGI descriptor", unsafe { adapter.GetDesc1() })?;
     same_luid("DXGI identity", args.expected, description.AdapterLuid)?;
@@ -230,12 +260,21 @@ fn device(args: &Inputs, cleanup: &Cleanup) -> Result<ID3D12Device> {
     native("D3D12 device", unsafe {
         D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_11_0, &mut selected)
     })?;
-    let selected: ID3D12Device = selected.ok_or_else(|| Failure::Check("D3D12 device", "null result".into()))?;
+    let selected: ID3D12Device =
+        selected.ok_or_else(|| Failure::Check("D3D12 device", "null result".into()))?;
     // SAFETY: live D3D12 device; both calls return plain native values and retain no pointers.
     let (actual, nodes) = unsafe { (selected.GetAdapterLuid(), selected.GetNodeCount()) };
     same_luid("D3D12 identity", args.expected, actual)?;
-    require(nodes == 1, "D3D12 physical node", format!("nodes={nodes}; exact linked-node mapping is UNVERIFIED"))?;
-    eprintln!("windows_compute_selected luid={:016x} nodes={nodes} dxgi_flags={}", luid_bits(actual), description.Flags);
+    require(
+        nodes == 1,
+        "D3D12 physical node",
+        format!("nodes={nodes}; exact linked-node mapping is UNVERIFIED"),
+    )?;
+    eprintln!(
+        "windows_compute_selected luid={:016x} nodes={nodes} dxgi_flags={}",
+        luid_bits(actual),
+        description.Flags
+    );
     Ok(selected)
 }
 
@@ -250,23 +289,41 @@ fn shader() -> Result<ID3DBlob> {
     // SAFETY: immutable embedded source and literal strings remain live; no include callback/files.
     let compiled = unsafe {
         D3DCompile(
-            SHADER.as_ptr().cast(), SHADER.len(), s!("hex_windows_compute"), None,
-            None::<&ID3DInclude>, s!("main"), s!("cs_5_0"),
-            D3DCOMPILE_ENABLE_STRICTNESS, 0, &mut code, Some(&mut diagnostics),
+            SHADER.as_ptr().cast(),
+            SHADER.len(),
+            s!("hex_windows_compute"),
+            None,
+            None::<&ID3DInclude>,
+            s!("main"),
+            s!("cs_5_0"),
+            D3DCOMPILE_ENABLE_STRICTNESS,
+            0,
+            &mut code,
+            Some(&mut diagnostics),
         )
     };
     if let Some(diagnostics) = diagnostics {
-        eprintln!("windows_compute_shader_diagnostics {}", String::from_utf8_lossy(blob_bytes(&diagnostics)));
+        eprintln!(
+            "windows_compute_shader_diagnostics {}",
+            String::from_utf8_lossy(blob_bytes(&diagnostics))
+        );
     }
     native("shader compilation", compiled)?;
     code.ok_or_else(|| Failure::Check("shader compilation", "null bytecode".into()))
 }
 
 fn pipeline(device: &ID3D12Device) -> Result<(ID3D12RootSignature, ID3D12PipelineState)> {
-    let parameters = [D3D12_ROOT_PARAMETER_TYPE_SRV, D3D12_ROOT_PARAMETER_TYPE_UAV].map(|kind| D3D12_ROOT_PARAMETER {
-        ParameterType: kind,
-        Anonymous: D3D12_ROOT_PARAMETER_0 { Descriptor: D3D12_ROOT_DESCRIPTOR { ShaderRegister: 0, RegisterSpace: 0 } },
-        ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+    let parameters = [D3D12_ROOT_PARAMETER_TYPE_SRV, D3D12_ROOT_PARAMETER_TYPE_UAV].map(|kind| {
+        D3D12_ROOT_PARAMETER {
+            ParameterType: kind,
+            Anonymous: D3D12_ROOT_PARAMETER_0 {
+                Descriptor: D3D12_ROOT_DESCRIPTOR {
+                    ShaderRegister: 0,
+                    RegisterSpace: 0,
+                },
+            },
+            ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+        }
     });
     let description = D3D12_ROOT_SIGNATURE_DESC {
         NumParameters: u32::try_from(parameters.len()).unwrap(),
@@ -276,18 +333,34 @@ fn pipeline(device: &ID3D12Device) -> Result<(ID3D12RootSignature, ID3D12Pipelin
     let mut serialized = None;
     let mut diagnostics = None;
     // SAFETY: both SDK root descriptors and output slots remain live until serialization returns.
-    let result = unsafe { D3D12SerializeRootSignature(&description, D3D_ROOT_SIGNATURE_VERSION_1, &mut serialized, Some(&mut diagnostics)) };
+    let result = unsafe {
+        D3D12SerializeRootSignature(
+            &description,
+            D3D_ROOT_SIGNATURE_VERSION_1,
+            &mut serialized,
+            Some(&mut diagnostics),
+        )
+    };
     if let Some(diagnostics) = diagnostics {
-        eprintln!("windows_compute_root_diagnostics {}", String::from_utf8_lossy(blob_bytes(&diagnostics)));
+        eprintln!(
+            "windows_compute_root_diagnostics {}",
+            String::from_utf8_lossy(blob_bytes(&diagnostics))
+        );
     }
     native("root serialization", result)?;
-    let serialized = serialized.ok_or_else(|| Failure::Check("root serialization", "null result".into()))?;
+    let serialized =
+        serialized.ok_or_else(|| Failure::Check("root serialization", "null result".into()))?;
     // SAFETY: immutable serialized bytes remain held through the creation call; one physical node was checked.
-    let root: ID3D12RootSignature = native("root signature", unsafe { device.CreateRootSignature(0, blob_bytes(&serialized)) })?;
+    let root: ID3D12RootSignature = native("root signature", unsafe {
+        device.CreateRootSignature(0, blob_bytes(&serialized))
+    })?;
     let shader = shader()?;
     let mut description = D3D12_COMPUTE_PIPELINE_STATE_DESC {
         pRootSignature: ManuallyDrop::new(Some(root.clone())),
-        CS: D3D12_SHADER_BYTECODE { pShaderBytecode: blob_bytes(&shader).as_ptr().cast(), BytecodeLength: blob_bytes(&shader).len() },
+        CS: D3D12_SHADER_BYTECODE {
+            pShaderBytecode: blob_bytes(&shader).as_ptr().cast(),
+            BytecodeLength: blob_bytes(&shader).len(),
+        },
         ..Default::default()
     };
     // SAFETY: root/bytecode remain live; SDK returns an independently owned pipeline reference.
@@ -297,17 +370,46 @@ fn pipeline(device: &ID3D12Device) -> Result<(ID3D12RootSignature, ID3D12Pipelin
     Ok((root, native("compute pipeline", result)?))
 }
 
-fn buffer(device: &ID3D12Device, bytes: usize, heap: D3D12_HEAP_TYPE, state: D3D12_RESOURCE_STATES, flags: D3D12_RESOURCE_FLAGS) -> Result<ID3D12Resource> {
-    let properties = D3D12_HEAP_PROPERTIES { Type: heap, CreationNodeMask: 1, VisibleNodeMask: 1, ..Default::default() };
+fn buffer(
+    device: &ID3D12Device,
+    bytes: usize,
+    heap: D3D12_HEAP_TYPE,
+    state: D3D12_RESOURCE_STATES,
+    flags: D3D12_RESOURCE_FLAGS,
+) -> Result<ID3D12Resource> {
+    let properties = D3D12_HEAP_PROPERTIES {
+        Type: heap,
+        CreationNodeMask: 1,
+        VisibleNodeMask: 1,
+        ..Default::default()
+    };
     let description = D3D12_RESOURCE_DESC {
         Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
-        Width: u64::try_from(bytes).unwrap(), Height: 1, DepthOrArraySize: 1, MipLevels: 1,
-        Format: DXGI_FORMAT_UNKNOWN, SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR, Flags: flags, ..Default::default()
+        Width: u64::try_from(bytes).unwrap(),
+        Height: 1,
+        DepthOrArraySize: 1,
+        MipLevels: 1,
+        Format: DXGI_FORMAT_UNKNOWN,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        Flags: flags,
+        ..Default::default()
     };
     let mut resource = None;
     // SAFETY: SDK descriptors name a byte buffer on the single checked node; output is owned.
-    native("buffer creation", unsafe { device.CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &description, state, None, &mut resource) })?;
+    native("buffer creation", unsafe {
+        device.CreateCommittedResource(
+            &properties,
+            D3D12_HEAP_FLAG_NONE,
+            &description,
+            state,
+            None,
+            &mut resource,
+        )
+    })?;
     resource.ok_or_else(|| Failure::Check("buffer creation", "null resource".into()))
 }
 
@@ -320,12 +422,29 @@ struct Mapping<'a> {
 
 impl<'a> Mapping<'a> {
     fn open(resource: &'a ID3D12Resource, bytes: usize, writing: bool) -> Result<Self> {
-        let range = D3D12_RANGE { Begin: 0, End: if writing { 0 } else { bytes } };
+        let range = D3D12_RANGE {
+            Begin: 0,
+            End: if writing { 0 } else { bytes },
+        };
         let mut pointer: *mut c_void = null_mut();
         // SAFETY: resource owns this known byte buffer; range/output are writable and in bounds.
-        native("buffer map", unsafe { resource.Map(0, Some(&range), Some(&mut pointer)) })?;
-        let mapped = Self { resource, pointer: pointer.cast(), words: bytes / size_of::<u32>(), written: D3D12_RANGE { Begin: 0, End: if writing { bytes } else { 0 } } };
-        require(!pointer.is_null() && mapped.pointer.is_aligned(), "buffer map", "null or unaligned mapped buffer")?;
+        native("buffer map", unsafe {
+            resource.Map(0, Some(&range), Some(&mut pointer))
+        })?;
+        let mapped = Self {
+            resource,
+            pointer: pointer.cast(),
+            words: bytes / size_of::<u32>(),
+            written: D3D12_RANGE {
+                Begin: 0,
+                End: if writing { bytes } else { 0 },
+            },
+        };
+        require(
+            !pointer.is_null() && mapped.pointer.is_aligned(),
+            "buffer map",
+            "null or unaligned mapped buffer",
+        )?;
         Ok(mapped)
     }
 
@@ -346,9 +465,17 @@ impl<'a> Mapping<'a> {
         // SAFETY: readback Map succeeded after fence completion and device health checks; GPU writes ended.
         let words = unsafe { std::slice::from_raw_parts(self.pointer, self.words) };
         for (index, (actual, expected)) in words.iter().zip(expected).enumerate() {
-            require(actual == expected, "GPU oracle", format!("index={index} expected={expected} actual={actual}"))?;
+            require(
+                actual == expected,
+                "GPU oracle",
+                format!("index={index} expected={expected} actual={actual}"),
+            )?;
         }
-        require(words.len() == expected.len(), "GPU oracle", "output extent mismatch")
+        require(
+            words.len() == expected.len(),
+            "GPU oracle",
+            "output extent mismatch",
+        )
     }
 }
 
@@ -359,11 +486,23 @@ impl Drop for Mapping<'_> {
     }
 }
 
-fn transition(list: &ID3D12GraphicsCommandList, resource: &ID3D12Resource, before: D3D12_RESOURCE_STATES, after: D3D12_RESOURCE_STATES) {
+fn transition(
+    list: &ID3D12GraphicsCommandList,
+    resource: &ID3D12Resource,
+    before: D3D12_RESOURCE_STATES,
+    after: D3D12_RESOURCE_STATES,
+) {
     let mut barrier = D3D12_RESOURCE_BARRIER {
         Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
         Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
-        Anonymous: D3D12_RESOURCE_BARRIER_0 { Transition: ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER { pResource: ManuallyDrop::new(Some(resource.clone())), Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, StateBefore: before, StateAfter: after }) },
+        Anonymous: D3D12_RESOURCE_BARRIER_0 {
+            Transition: ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
+                pResource: ManuallyDrop::new(Some(resource.clone())),
+                Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                StateBefore: before,
+                StateAfter: after,
+            }),
+        },
     };
     // SAFETY: transition union matches Type; resource remains live, with one known before/after state.
     unsafe { list.ResourceBarrier(std::slice::from_ref(&barrier)) };
@@ -392,11 +531,18 @@ impl Drop for Work<'_> {
     fn drop(&mut self) {
         if self.submitted && !self.complete {
             // SAFETY: fence/device are still owned; a single cleanup observation is not a polling loop.
-            let (completed, healthy) = unsafe { (self.fence.GetCompletedValue(), self.device.GetDeviceRemovedReason()) };
+            let (completed, healthy) = unsafe {
+                (
+                    self.fence.GetCompletedValue(),
+                    self.device.GetDeviceRemovedReason(),
+                )
+            };
             if completed == 1 && healthy.is_ok() {
                 eprintln!("windows_compute_cleanup completed_after_error=true");
             } else {
-                eprintln!("windows_compute_cleanup_uncertain submitted=true fence={completed} device={healthy:?}; aborting ONLY own fixture process before releasing in-flight resources; ROOT must verify process/native cleanup");
+                eprintln!(
+                    "windows_compute_cleanup_uncertain submitted=true fence={completed} device={healthy:?}; aborting ONLY own fixture process before releasing in-flight resources; ROOT must verify process/native cleanup"
+                );
                 // D3D12 command lists retain no resource references. Returning/unwinding here could
                 // free GPU-visible memory still in flight. ROOT owns this disposable test process;
                 // process exit preserves the original logged error without a wait/retry/leak claim.
@@ -412,32 +558,96 @@ fn witness(args: &Inputs, cleanup: &Cleanup) -> Result<()> {
     // SAFETY: SDK writes one complete SYSTEM_INFO; only its native page-size field is read.
     unsafe { GetNativeSystemInfo(&mut system) };
     let bytes = usize::try_from(system.dwPageSize).unwrap();
-    require(bytes != 0 && bytes % size_of::<u32>() == 0, "OS page", "invalid u32 page extent")?;
+    require(
+        bytes != 0 && bytes % size_of::<u32>() == 0,
+        "OS page",
+        "invalid u32 page extent",
+    )?;
     let elements = bytes / size_of::<u32>();
-    let groups = u32::try_from(elements).map_err(|e| Failure::Check("dispatch extent", e.to_string()))?;
-    require(groups <= D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION, "dispatch extent", "native page exceeds D3D12 dispatch limit")?;
-    let upload_bytes = bytes.checked_mul(2).ok_or_else(|| Failure::Check("upload extent", "overflow".into()))?;
+    let groups =
+        u32::try_from(elements).map_err(|e| Failure::Check("dispatch extent", e.to_string()))?;
+    require(
+        groups <= D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION,
+        "dispatch extent",
+        "native page exceeds D3D12 dispatch limit",
+    )?;
+    let upload_bytes = bytes
+        .checked_mul(2)
+        .ok_or_else(|| Failure::Check("upload extent", "overflow".into()))?;
     let (root, pipeline) = pipeline(&device)?;
-    let input = buffer(&device, bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE)?;
-    let output = buffer(&device, bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)?;
-    let upload = buffer(&device, upload_bytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE)?;
-    let readback = buffer(&device, bytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE)?;
+    let input = buffer(
+        &device,
+        bytes,
+        D3D12_HEAP_TYPE_DEFAULT,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        D3D12_RESOURCE_FLAG_NONE,
+    )?;
+    let output = buffer(
+        &device,
+        bytes,
+        D3D12_HEAP_TYPE_DEFAULT,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+    )?;
+    let upload = buffer(
+        &device,
+        upload_bytes,
+        D3D12_HEAP_TYPE_UPLOAD,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        D3D12_RESOURCE_FLAG_NONE,
+    )?;
+    let readback = buffer(
+        &device,
+        bytes,
+        D3D12_HEAP_TYPE_READBACK,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        D3D12_RESOURCE_FLAG_NONE,
+    )?;
     let oracle = Mapping::open(&upload, upload_bytes, true)?.initialize(elements);
-    eprintln!("windows_compute_init page_bytes={bytes} elements={elements} uploaded_words={} output_sentinel={} oracle_words={}", elements * 2, u32::MAX, oracle.len());
-    let description = D3D12_COMMAND_QUEUE_DESC { Type: D3D12_COMMAND_LIST_TYPE_COMPUTE, ..Default::default() };
+    eprintln!(
+        "windows_compute_init page_bytes={bytes} elements={elements} uploaded_words={} output_sentinel={} oracle_words={}",
+        elements * 2,
+        u32::MAX,
+        oracle.len()
+    );
+    let description = D3D12_COMMAND_QUEUE_DESC {
+        Type: D3D12_COMMAND_LIST_TYPE_COMPUTE,
+        ..Default::default()
+    };
     // SAFETY: SDK creates owned command objects with matching compute type, allocator and pipeline.
-    let queue: ID3D12CommandQueue = native("queue", unsafe { device.CreateCommandQueue(&description) })?;
+    let queue: ID3D12CommandQueue =
+        native("queue", unsafe { device.CreateCommandQueue(&description) })?;
     // SAFETY: single owned device; compute allocator remains live in Work until GPU completion.
-    let allocator: ID3D12CommandAllocator = native("allocator", unsafe { device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE) })?;
+    let allocator: ID3D12CommandAllocator = native("allocator", unsafe {
+        device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE)
+    })?;
     // SAFETY: allocator/pipeline are live and matching compute objects; this creates an open list.
-    let list: ID3D12GraphicsCommandList = native("command list", unsafe { device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE, &allocator, &pipeline) })?;
+    let list: ID3D12GraphicsCommandList = native("command list", unsafe {
+        device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE, &allocator, &pipeline)
+    })?;
     // SAFETY: all byte regions are within their actual committed extents, with correct COPY states.
     unsafe {
         list.CopyBufferRegion(&input, 0, &upload, 0, u64::try_from(bytes).unwrap());
-        list.CopyBufferRegion(&output, 0, &upload, u64::try_from(bytes).unwrap(), u64::try_from(bytes).unwrap());
+        list.CopyBufferRegion(
+            &output,
+            0,
+            &upload,
+            u64::try_from(bytes).unwrap(),
+            u64::try_from(bytes).unwrap(),
+        );
     }
-    transition(&list, &input, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    transition(&list, &output, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    transition(
+        &list,
+        &input,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+    );
+    transition(
+        &list,
+        &output,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+    );
     // SAFETY: root slots match embedded shader SRV/UAV; buffers remain owned through submission completion.
     unsafe {
         list.SetComputeRootSignature(&root);
@@ -446,38 +656,83 @@ fn witness(args: &Inputs, cleanup: &Cleanup) -> Result<()> {
         list.Dispatch(groups, 1, 1);
     }
     // The UAV->COPY_SOURCE transition orders/completes the shader writes before readback copy.
-    transition(&list, &output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    transition(
+        &list,
+        &output,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+        D3D12_RESOURCE_STATE_COPY_SOURCE,
+    );
     // SAFETY: output/readback are live full-page buffers in COPY_SOURCE/COPY_DEST respectively.
     unsafe { list.CopyBufferRegion(&readback, 0, &output, 0, u64::try_from(bytes).unwrap()) };
     // SAFETY: exactly this open list has finished recording and is not submitted yet.
     native("command close", unsafe { list.Close() })?;
     // SAFETY: zero initial fence value and no sharing; one queue signal will advance it to one.
-    let fence: ID3D12Fence = native("fence creation", unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_NONE) })?;
+    let fence: ID3D12Fence = native("fence creation", unsafe {
+        device.CreateFence(0, D3D12_FENCE_FLAG_NONE)
+    })?;
     // SAFETY: anonymous initially nonsignaled auto-reset event, no inheritance/security/name.
-    let handle = native("event creation", unsafe { CreateEventW(None, false, false, PCWSTR::null()) })?;
+    let handle = native("event creation", unsafe {
+        CreateEventW(None, false, false, PCWSTR::null())
+    })?;
     cleanup.event_open.set(cleanup.event_open.get() + 1);
-    let mut work = Work { device, queue, _allocator: allocator, list, _root: root, _pipeline: pipeline, _input: input, _output: output, _upload: upload, readback, fence, event: Event { handle, cleanup }, submitted: false, complete: false };
+    let mut work = Work {
+        device,
+        queue,
+        _allocator: allocator,
+        list,
+        _root: root,
+        _pipeline: pipeline,
+        _input: input,
+        _output: output,
+        _upload: upload,
+        readback,
+        fence,
+        event: Event { handle, cleanup },
+        submitted: false,
+        complete: false,
+    };
     let command: ID3D12CommandList = native("command interface", work.list.cast())?;
     work.submitted = true;
     // SAFETY: one closed matching list; Work owns all referenced objects through proven completion.
     unsafe { work.queue.ExecuteCommandLists(&[Some(command)]) };
     // SAFETY: live queue/fence; signal follows the list in the same queue and cannot precede its work.
-    native("queue fence signal", unsafe { work.queue.Signal(&work.fence, 1) })?;
+    native("queue fence signal", unsafe {
+        work.queue.Signal(&work.fence, 1)
+    })?;
     // SAFETY: non-null live event is kept until completion; no blocking null-event variant is used.
-    native("fence event", unsafe { work.fence.SetEventOnCompletion(1, work.event.handle) })?;
+    native("fence event", unsafe {
+        work.fence.SetEventOnCompletion(1, work.event.handle)
+    })?;
     // SAFETY: owned event and caller's validated finite budget. Exactly one wait, no polling/retry.
     let waited = unsafe { WaitForSingleObject(work.event.handle, args.wait_ms) };
     // SAFETY: both objects remain owned; read actual completion/removal before any readback mapping.
-    let (completed, healthy) = unsafe { (work.fence.GetCompletedValue(), work.device.GetDeviceRemovedReason()) };
-    eprintln!("windows_compute_fence wait={:#x} value={completed} device={healthy:?} wait_ms={}", waited.0, args.wait_ms);
-    require(waited == WAIT_OBJECT_0 && completed == 1, "GPU completion", "finite event wait did not prove exact fence completion")?;
+    let (completed, healthy) = unsafe {
+        (
+            work.fence.GetCompletedValue(),
+            work.device.GetDeviceRemovedReason(),
+        )
+    };
+    eprintln!(
+        "windows_compute_fence wait={:#x} value={completed} device={healthy:?} wait_ms={}",
+        waited.0, args.wait_ms
+    );
+    require(
+        waited == WAIT_OBJECT_0 && completed == 1,
+        "GPU completion",
+        "finite event wait did not prove exact fence completion",
+    )?;
     native("GPU device health", healthy)?;
     work.complete = true;
     eprintln!("windows_compute_map readback=true bytes={bytes} fence_complete=true");
     Mapping::open(&work.readback, bytes, false)?.verify(&oracle)?;
-    eprintln!("windows_compute_verified luid={:016x} elements={elements} mismatches=0", args.expected);
+    eprintln!(
+        "windows_compute_verified luid={:016x} elements={elements} mismatches=0",
+        args.expected
+    );
     drop(work);
-    eprintln!("windows_compute_cleanup com_scope_dropped=true (RAII calls, not OS/driver leak proof)");
+    eprintln!(
+        "windows_compute_cleanup com_scope_dropped=true (RAII calls, not OS/driver leak proof)"
+    );
     Ok(())
 }
 
@@ -488,11 +743,19 @@ fn witness(args: &Inputs, cleanup: &Cleanup) -> Result<()> {
 fn root_windows_exact_adapter_executes_checked_kernel() {
     let args = Inputs::read().unwrap_or_else(|why| panic!("{why}"));
     let cleanup = Cleanup::default();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| witness(&args, &cleanup)));
+    let result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| witness(&args, &cleanup)));
     let balanced = cleanup.kmt_open.get() == cleanup.kmt_closed.get()
         && cleanup.event_open.get() == cleanup.event_closed.get()
         && !cleanup.failed.get();
-    eprintln!("windows_compute_handles kmt={}/{} events={}/{} close_failed={} (owned wrapper calls only)", cleanup.kmt_closed.get(), cleanup.kmt_open.get(), cleanup.event_closed.get(), cleanup.event_open.get(), cleanup.failed.get());
+    eprintln!(
+        "windows_compute_handles kmt={}/{} events={}/{} close_failed={} (owned wrapper calls only)",
+        cleanup.kmt_closed.get(),
+        cleanup.kmt_open.get(),
+        cleanup.event_closed.get(),
+        cleanup.event_open.get(),
+        cleanup.failed.get()
+    );
     match result {
         Err(original) => std::panic::resume_unwind(original),
         Ok(Err(original)) => panic!("{original}; owned_handle_cleanup_balanced={balanced}"),

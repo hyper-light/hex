@@ -11,6 +11,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __APPLE__
+#include <objc/message.h>
+#include <objc/runtime.h>
+#endif
 
 struct inputs {
     const char *mode, *shader;
@@ -93,7 +97,7 @@ static int parse(int argc, char **argv, struct inputs *out) {
     }
     if (!out->mode || !out->max_items) return fail("required_inventory_arguments", 0);
     if (!strcmp(out->mode, "inventory")) return 0;
-    if (strcmp(out->mode, "compute") && strcmp(out->mode, "reject")) return fail("mode", 0);
+    if (strcmp(out->mode, "compute") && strcmp(out->mode, "host-compute") && strcmp(out->mode, "reject")) return fail("mode", 0);
     if (!(seen & 2)) return fail("required_uuid", 0);
     if (!strcmp(out->mode, "reject")) return 0;
     if (!out->words || !out->rounds || !out->wait_ns || out->wait_ns == UINT64_MAX ||
@@ -124,6 +128,12 @@ static int inventory(const struct inputs *args, struct owned *own, VkPhysicalDev
                      VkPhysicalDeviceProperties *properties) {
     VkApplicationInfo app = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .apiVersion = VK_API_VERSION_1_1 };
     VkInstanceCreateInfo config = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app };
+#ifdef __APPLE__
+    const char *portability = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
+    config.flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+    config.enabledExtensionCount = 1;
+    config.ppEnabledExtensionNames = &portability;
+#endif
     VkResult result = vkCreateInstance(&config, NULL, &own->instance);
     if (result != VK_SUCCESS) return fail("create_instance", result);
     uint32_t count = 0;
@@ -155,7 +165,20 @@ static int inventory(const struct inputs *args, struct owned *own, VkPhysicalDev
             printf(",\"luid\":");
             if (id.deviceLUIDValid) { printf("\""); hex(id.deviceLUID, VK_LUID_SIZE); printf("\""); }
             else printf("null");
-            printf(",\"node_mask\":%u}\n", id.deviceLUIDValid ? id.deviceNodeMask : 0);
+            printf(",\"node_mask\":%u", id.deviceLUIDValid ? id.deviceNodeMask : 0);
+#ifdef __APPLE__
+            /* MoltenVK's official borrowed-MTLDevice API; native registryID is
+             * joined directly, never inferred from Vulkan's device name/LUID. */
+            typedef void (VKAPI_PTR *metal_device_fn)(VkPhysicalDevice, void **);
+            metal_device_fn get_metal = (metal_device_fn)vkGetInstanceProcAddr(own->instance, "vkGetMTLDeviceMVK");
+            void *metal = NULL;
+            if (!get_metal) { free(devices); return fail("native_metal_join_api", 0); }
+            get_metal(devices[i], &metal);
+            if (!metal) { free(devices); return fail("native_metal_join_device", 0); }
+            uint64_t registry = ((uint64_t (*)(void *, SEL))objc_msgSend)(metal, sel_registerName("registryID"));
+            printf(",\"metal_registry_id\":%" PRIu64, registry);
+#endif
+            printf("}\n");
         }
     }
     free(devices);
@@ -164,7 +187,7 @@ static int inventory(const struct inputs *args, struct owned *own, VkPhysicalDev
         if (matches) return fail("wrong_id_visible", 0);
         printf("{\"refused\":true,\"dispatches\":0}\n"); return 0;
     }
-    if (matches != 1 || count != 1) return fail("selected_or_foreign_identity", 0);
+    if (matches != 1 || (!strcmp(args->mode, "compute") && count != 1)) return fail("selected_or_foreign_identity", 0);
     if (properties->deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU ||
         properties->deviceType == VK_PHYSICAL_DEVICE_TYPE_OTHER) return fail("software_or_unknown_device", 0);
     if (properties->apiVersion < VK_API_VERSION_1_1) return fail("device_version", 0);
@@ -202,6 +225,11 @@ static int compute(const struct inputs *args, struct owned *own, VkPhysicalDevic
         .queueFamilyIndex = family, .queueCount = 1, .pQueuePriorities = &priority };
     VkDeviceCreateInfo device_info = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .queueCreateInfoCount = 1, .pQueueCreateInfos = &queue_info };
+#ifdef __APPLE__
+    const char *subset = "VK_KHR_portability_subset";
+    device_info.enabledExtensionCount = 1;
+    device_info.ppEnabledExtensionNames = &subset;
+#endif
     VK_DO("create_device", vkCreateDevice(physical, &device_info, NULL, &own->device));
     VkQueue queue;
     vkGetDeviceQueue(own->device, family, 0, &queue);
@@ -292,6 +320,8 @@ static int compute(const struct inputs *args, struct owned *own, VkPhysicalDevic
     VkSubmitInfo submit = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &command };
     VK_DO("submit", vkQueueSubmit(queue, 1, &submit, own->fence));
     own->submitted = 1;
+    printf("{\"event\":\"dispatch_started\"}\n");
+    fflush(stdout);
     VK_DO("finite_fence_wait", vkWaitForFences(own->device, 1, &own->fence, VK_TRUE, args->wait_ns));
     own->complete = 1;
     uint32_t mismatches = 0;
@@ -333,7 +363,8 @@ int main(int argc, char **argv) {
     VkPhysicalDevice physical = VK_NULL_HANDLE;
     VkPhysicalDeviceProperties properties = {0};
     int result = inventory(&args, &own, &physical, &properties);
-    if (!result && !strcmp(args.mode, "compute")) result = compute(&args, &own, physical, &properties);
+    if (!result && (!strcmp(args.mode, "compute") || !strcmp(args.mode, "host-compute")))
+        result = compute(&args, &own, physical, &properties);
     cleanup(&own);
     return result;
 }
