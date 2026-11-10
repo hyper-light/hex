@@ -705,7 +705,7 @@ fn answer_to(peer: &mut TcpStream, id: u64, answer: Answer) -> io::Result<()> {
 enum ControlPhase {
     Start,
     Delete,
-    Release,
+    Disconnected,
     Stop,
 }
 
@@ -795,9 +795,9 @@ fn named_streams_share_one_operation_cap_without_a_workload_or_connection_timer(
                 "client_budget_named phase=agent_exited_written id={}",
                 exec.id
             );
-            pending_control(&peer, &pending, ControlPhase::Release)?;
-            let (_, release) = next_request(&mut peer)?;
-            assert_eq!(release, Request::Release);
+            pending_control(&peer, &pending, ControlPhase::Disconnected)?;
+            // A completed Proc sends no Release; dropping the last client closes this control.
+            assert_eq!(peer.read(&mut [0])?, 0);
             Ok(())
         })();
         let _ = agent_finished.send(());
@@ -880,11 +880,16 @@ fn named_streams_share_one_operation_cap_without_a_workload_or_connection_timer(
             .map_err(|error| Refusal::os("announcing pending fixture delete", error))?;
         client.delete(&id)?;
         let ended = proc.wait_for(OBSERVE)?;
-        phase
-            .send(ControlPhase::Release)
-            .map_err(|error| Refusal::os("announcing fixture release", error))?;
         drop(proc);
-        Ok((deadlines, pending, bytes, ended))
+        let clean = {
+            let state = client.conn.shared.state()?;
+            state.calls.is_empty() && state.programs.is_empty() && state.given.is_empty()
+        };
+        phase
+            .send(ControlPhase::Disconnected)
+            .map_err(|error| Refusal::os("announcing fixture disconnect", error))?;
+        drop(client);
+        Ok((deadlines, pending, bytes, ended, clean))
     })();
     let _ = phase.send(ControlPhase::Stop);
     let _ = late.send(StreamPhase::Stop);
@@ -907,7 +912,7 @@ fn named_streams_share_one_operation_cap_without_a_workload_or_connection_timer(
         names.as_ref().map(Vec::len)
     );
     // No assertion can strand either owned accept/read actor.
-    let (deadlines, pending, bytes, ended) = result.unwrap();
+    let (deadlines, pending, bytes, ended, clean) = result.unwrap();
     natural_agent_end.unwrap();
     let names = names.unwrap();
     agent_result.unwrap();
@@ -924,6 +929,7 @@ fn named_streams_share_one_operation_cap_without_a_workload_or_connection_timer(
     assert_eq!(pending, None);
     assert_eq!(&bytes, b"late");
     assert_eq!(ended, Some(Exit::Code(0)));
+    assert!(clean);
     assert_eq!(names.len(), 3);
     assert!(
         names

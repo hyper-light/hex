@@ -1,0 +1,9 @@
+{
+  "source": "e29c4dd5eccf1faa2bbf59568cebef77c47d0103",
+  "path": "crates/hex-client/src/calls/budget_tests.rs",
+  "sha256": "772754e2d6add9ab3631209dc1f950e620c383dcb181e825a50bf6672857a9ec",
+  "change": "fixture only: completed RemoteProc has no Release; require empty ledger and EOF after last client drop",
+  "production_unchanged": true,
+  "preceding_696_result": "8 of 9 parents passed and fresh census child passed; named cleanup expectation failed",
+  "changed_case_execution_pending": true
+}
