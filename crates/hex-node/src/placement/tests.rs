@@ -369,7 +369,8 @@ fn owner_without_guest_backend_sends_full_payload_to_capable_peer() {
     let rt = Arc::new(Counting::default());
     let (mut demand, mut payload) = request();
     demand.class = Class::Shards;
-    demand.ask.os = Some(Os::Macos);
+    // The image is Linux; Shards runs it on the macOS host's Hypervisor.framework.
+    demand.ask.os = Some(Os::Linux);
     payload.spec.class = ClassSpec::Oci(Box::new(OciSpec {
         rootfs: Rootfs::Dir("/rootfs".into()),
         init: Program::of(&["wait"]),
