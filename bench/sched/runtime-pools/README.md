@@ -234,3 +234,40 @@ did not reproduce that symptom, so neither a timing cause nor a fix is claimed.
 No seed/deadline was increased. mac-seeds-validation-e2fb4f17.json preserves
 positive and negative results and the scope of those diagnostics. Further root
 diagnosis/calibration and a passing final combined gate remain required.
+
+## Completed extension and native Linux quota guard
+
+The debug armed N1000 run completed 1,000 local and 1,000 forced-SSH physical
+create/delete cycles, restored its empty baseline and stopped its exact guest.
+Root reconstructed all 272,257 ledger rows and confirmed census remained absent;
+armed-debug-e2fb4f17.json preserves that bounded validation. It does not override
+the separate failed release validation or combined gate above.
+
+The fresh unarmed release extension also completed 2,000 physical cycles and
+stopped its guest. Root reconstructed all 86,530 files and 262,641 census rows;
+census-release-round2-bba3d814.json preserves the distributions. Completed Delete
+answers reached 150.082083ms. The existing decision9 rule also retains the earlier
+166.381084ms run-out as a censored lower bound; the fresh completed maximum does
+not erase it. This batch changes no wait values or eligibility decision.
+
+Root additionally cross-built the exact hex-node Linux ARM64 musl library test
+and ran it as an OCI init through the production laptop scheduler in a real
+Shards/HVF guest. The fractional CPU-quota test passed; changing only the quota
+arithmetic to truncate whole CPUs before multiplying failed with exit101; the
+byte-identical restored fixed binary passed again. Each exited init's box stayed
+tracked until explicit deletion, the empty physical baseline returned, and guest
+25719/start12412173209405 ended Stopped. The record is
+native-linux-arm-quota-8f51140e.json; census/native_quota_e2e.py is the exact live
+wrapper. Invoke it with the existing cold-census arguments plus --cold-driver
+PATH/TO/cold_boot_census.py and --unit-artifacts BUILD-METADATA.json. That metadata
+names the fixed and whole-cpu-truncation-mutant artifacts, their source/binary
+SHA256s and the exact filtered test; build each source with an explicit manifest
+and a separate private CARGO_TARGET_DIR before dispatch.
+
+The first attempt retained an invalid control: Cargo reused the fixed artifact
+for the mutated source in a shared target directory. Both saved hashes were the
+same, and the mutant exited0. The failed result and its Stopped receipt are
+preserved. The corrected dispatch required distinct artifact hashes first.
+This is one native ARM64 parser/guard execution with real scheduler lifecycle
+checks, not an AMD64 gate, cgroup-controller integration, root lab, timing seed,
+resource-return benchmark or whole-goal completion.
