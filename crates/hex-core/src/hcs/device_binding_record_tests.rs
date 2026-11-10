@@ -11,6 +11,8 @@ fn record() -> BoxRecord {
         started: false,
         init: None,
         devices: Vec::new(),
+        storage: RecordStorage::OwnedFolder,
+        creation: NativeCreate::Created,
     }
 }
 
@@ -90,6 +92,8 @@ fn the_combined_marker_bound_is_derived_and_each_field_keeps_its_own_budget() {
             created: u64::MAX,
         }),
         devices: Vec::new(),
+        storage: RecordStorage::OwnedFolder,
+        creation: NativeCreate::Created,
     };
     assert_eq!(write_record(&maximum).unwrap().len(), MAX_RECORD);
     maximum.devices.push(binding());
