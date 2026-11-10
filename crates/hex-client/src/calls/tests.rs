@@ -694,3 +694,188 @@ fn refusal_census_common_call_records_the_typed_wire_outcome() {
         "a measuring wait remains measuring"
     );
 }
+
+#[cfg(target_os = "macos")]
+mod queued_deadline_probe {
+    use super::*;
+    use crate::macos::{Client, Socket};
+    use hex_core::{schedule, stream};
+    use std::os::unix::net::{UnixListener, UnixStream};
+
+    #[derive(Clone, Copy)]
+    enum Queued {
+        Complete,
+        Decoded,
+        PrefixOnly,
+        Absent,
+    }
+
+    fn next_native_request(peer: &mut UnixStream) -> (Header, Request) {
+        let mut prefix = [0u8; size_of::<u32>()];
+        peer.read_exact(&mut prefix).unwrap();
+        let length = usize::try_from(u32::from_be_bytes(prefix)).unwrap();
+        assert!(length <= wire::MAX_MESSAGE);
+        let mut bytes = prefix.to_vec();
+        bytes.resize(prefix.len() + length, 0);
+        peer.read_exact(&mut bytes[prefix.len()..]).unwrap();
+        sent_request(&bytes)
+    }
+
+    fn framed_answer(id: u64, answer: &Answer) -> Vec<u8> {
+        stream::frame(
+            &wire::answer(id, answer, wire::MAX_MESSAGE).unwrap(),
+            wire::MAX_MESSAGE,
+        )
+        .unwrap()
+    }
+
+    /// No Runtime is invoked: the stand-in negotiates the real native transport and echoes a typed reply.
+    fn expired_native_submit(queued: Queued) -> Option<Result<Answer, Refusal>> {
+        let cache = std::path::PathBuf::from(std::env::var_os("HOME").unwrap())
+            .join(".cache/hex-t7/client");
+        std::fs::create_dir_all(&cache).unwrap();
+        let directory = tempfile::Builder::new()
+            .prefix("qd-")
+            .tempdir_in(&cache)
+            .unwrap();
+        let path = directory.path().join("node.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let request = Request::Call(Call::Schedule(Box::new(schedule::Command::Submit {
+            demand: "class:oci".into(),
+            payload: schedule::Payload {
+                spec: BoxSpec {
+                    id: BoxId::new("queued-deadline-probe").unwrap(),
+                    bounds: hex_api::Bounds::default(),
+                    class: hex_api::ClassSpec::Bundle(directory.path().join("unused-bundle")),
+                    owner: None,
+                },
+                start: true,
+            },
+        })));
+        let expected_request = request.clone();
+        let answer = Answer::Scheduled(Box::new(schedule::Reply {
+            key: Some(schedule::Key {
+                owner: 0,
+                epoch: 1,
+                seq: 0,
+            }),
+            tracked: true,
+            created: true,
+            ..schedule::Reply::default()
+        }));
+        let (written, queued_bytes) = std::sync::mpsc::sync_channel(1);
+        let (release, held) = std::sync::mpsc::sync_channel(1);
+        let agent = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            let (header, hello) = next_native_request(&mut peer);
+            assert_eq!(
+                hello,
+                Request::Hello {
+                    build: wire::build()
+                }
+            );
+            let limits = Limits {
+                connections: 1,
+                message_bytes: wire::MAX_MESSAGE,
+                in_flight: 1,
+                programs: 1,
+            };
+            peer.write_all(&framed_answer(
+                header.id,
+                &Answer::Hello(wire::Hello {
+                    build: wire::build(),
+                    classes: vec![Class::Oci],
+                    limits,
+                    budgets: wire::Budgets {
+                        in_flight: 1,
+                        programs: 1,
+                    },
+                }),
+            ))
+            .unwrap();
+            let (header, submitted) = next_native_request(&mut peer);
+            assert_eq!(submitted, expected_request);
+            let frame = framed_answer(header.id, &answer);
+            match queued {
+                Queued::Complete | Queued::Decoded => peer.write_all(&frame).unwrap(),
+                Queued::PrefixOnly => peer.write_all(&frame[..size_of::<u32>()]).unwrap(),
+                Queued::Absent => {}
+            }
+            // This event is after the actual complete/partial write, never before it.
+            written.send((header.id, answer)).unwrap();
+            held.recv().unwrap(); // Keep the real peer open until Caller::wait has returned.
+        });
+        let client = Client::connect(&path).unwrap();
+        let shared = client.shared();
+        let mut caller = Caller::new(shared, None).unwrap();
+        let frame =
+            Socket::frame(wire::request(caller.id, &request, wire::MAX_MESSAGE).unwrap()).unwrap();
+        assert!(caller.send(&frame, NONE, None, None).is_ok());
+        let (response_id, expected) = queued_bytes.recv().unwrap();
+        let observed = ready(shared.transport.handle(), false, None, Some(Duration::ZERO));
+        let decoded = if matches!(queued, Queued::Decoded) {
+            // The sole registered caller owns the otherwise free reader turn, as wait() would claim it.
+            let mut state = shared.state().unwrap();
+            assert!(!state.reading);
+            state.reading = true;
+            caller.mine = true;
+            drop(state);
+            assert!(shared.recv().unwrap());
+            !shared.state().unwrap().calls.contains_key(&caller.id)
+        } else {
+            false
+        };
+        // Evaluated after the write-completion event: at wait entry this deadline cannot be in the future.
+        let deadline = Instant::now();
+        let actual = caller.wait(Some(deadline));
+        let request_id = caller.id;
+        drop(caller);
+        release.send(()).unwrap();
+        agent.join().unwrap();
+        assert_eq!(response_id, request_id);
+        assert_eq!(observed.unwrap().read, !matches!(queued, Queued::Absent));
+        if matches!(queued, Queued::Decoded) {
+            assert!(
+                decoded,
+                "the real framed reply must have reached the caller's mailbox before wait"
+            );
+        }
+        if let Some(Ok(answer)) = &actual {
+            assert_eq!(answer, &expected);
+        }
+        actual
+    }
+
+    /// AC-T7.4.1: queue a complete native Submit reply before an expired wait; expect immediate completion,
+    /// as for an already decoded reply. Root's unchanged production baseline returns None here. This does
+    /// not establish the cause of the earlier physical Submit timeout.
+    #[test]
+    fn cp_t7_4_complete_submit_reply_queued_before_expired_native_wait_is_available() {
+        assert!(matches!(
+            expired_native_submit(Queued::Complete),
+            Some(Ok(Answer::Scheduled(_)))
+        ));
+    }
+
+    /// AC-T7.4.1: the identical native reply, decoded by the owned reader before wait, is collected even
+    /// with an expired deadline. Contrast raw queued bytes without changing its message or peer lifetime.
+    #[test]
+    fn cp_t7_4_decoded_submit_reply_is_collected_before_expired_native_deadline() {
+        assert!(matches!(
+            expired_native_submit(Queued::Decoded),
+            Some(Ok(Answer::Scheduled(_)))
+        ));
+    }
+
+    /// AC-T7.4.1: readable length bytes alone are not a complete reply and must not extend an expired wait.
+    #[test]
+    fn cp_t7_4_incomplete_native_reply_does_not_extend_expired_wait() {
+        assert!(expired_native_submit(Queued::PrefixOnly).is_none());
+    }
+
+    /// AC-T7.4.1: no queued bytes and an open peer yield no answer at an already expired deadline.
+    #[test]
+    fn cp_t7_4_absent_native_reply_does_not_extend_expired_wait() {
+        assert!(expired_native_submit(Queued::Absent).is_none());
+    }
+}

@@ -1000,7 +1000,7 @@ impl<'a, T: Transport> Caller<'a, T> {
 
     /// Its answer, waited for until `deadline` (none: as long as it takes): read by this thread while it holds the
     /// reader's turn, taken when free or handed to it, else handed to it by the thread that holds the turn (or the
-    /// event form's loop). `None` once the deadline has passed.
+    /// event form's loop). At the deadline, an already queued complete answer still wins; no further wait begins.
     fn wait(&mut self, deadline: Option<Instant>) -> Option<Result<Answer, Refusal>> {
         let shared = self.shared;
         if let Err(why) = self.reads() {
@@ -1025,6 +1025,19 @@ impl<'a, T: Transport> Caller<'a, T> {
             }
             let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
             if left.is_some_and(|l| l.is_zero()) {
+                // AC-T7.4.1: scheduling can resume after the deadline with the reply already queued.
+                // Match mailbox precedence without extending the wait or accepting an incomplete frame.
+                self.collect();
+                if self.answer.is_none() && self.mine {
+                    if shared.turn(Some(Duration::ZERO)).is_err() {
+                        self.mine = false;
+                    }
+                    self.collect();
+                }
+                if let Some(answer) = self.answer.take() {
+                    self.answered = answer.is_ok();
+                    return Some(answer);
+                }
                 return None;
             }
             if self.mine {
