@@ -1,0 +1,492 @@
+{
+  "backend_baseline_restored": true,
+  "backend_eager_boot": true,
+  "binary_and_artifact_hashes": {
+    "hex": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-scheduler-vm-935f6b21/aarch64-apple-darwin/debug/hex",
+      "sha256": "50e318b1c6c00c452dbcd089c1e5a4e37b8644012ad1d49479fd7cba3c497973"
+    },
+    "initrd": {
+      "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/initramfs-935f6b21-debug-aarch64.cpio",
+      "sha256": "6d4b5c85e4d6820f5b8cbfa0e3df16468fe565ac8e2f58f89de2d9418e278a87"
+    },
+    "kernel": {
+      "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/Image-6.18.48-aarch64",
+      "sha256": "1b178851998d27b4c6c346ae391c26d675f81461fbaa19cbe514500291fe472d"
+    },
+    "linux_hex": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-scheduler-vm-935f6b21/aarch64-unknown-linux-musl/debug/hex",
+      "sha256": "0e6bb64c9ae9967feed145e5af1392a71dffd47d7db01c2a8652a0c688461575"
+    },
+    "runtime_probe": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-probe-runtime-pools-935f6b21/aarch64-apple-darwin/debug/hex-scheduler-runtime-probe",
+      "sha256": "76d5375a5fe38501995db085fc9483a9784d88e26c265e73fbfbf2a957e8c6d6"
+    },
+    "shards": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-shards-vm-tool/release/shards",
+      "sha256": "b9d74f0910a54593b66f604ffe36e39d588c89afea60d4643e37813200daa61e"
+    }
+  },
+  "comparison_or_performance_claim": false,
+  "environment": {
+    "box_cpu_milli": 1000,
+    "box_memory_mib": 64,
+    "cpu_count": 32,
+    "free_disk_bytes_before": 3031934005248,
+    "guest_cpus": 4,
+    "guest_memory_mib": 632,
+    "guest_shares_sha256": "e9c4fad2ee45338a9b98b0fdaab949bc65dbfee4d8bb75bcd3d6640d7b45b376",
+    "machine": "arm64",
+    "os": "macOS-26.4-arm64-arm-64bit-Mach-O",
+    "path_sha256": "66f027960372b4109885e775bc4d3d0f2e91b060fcf607f0aa12af74fe110864"
+  },
+  "execution_policy": {
+    "execution_owner": "Hex root01a1aa77778471339bea3beff90d6bbd",
+    "immutable_shards_tool_source": "6bf5b15da904931b984ecd25662a8b8c571268bf",
+    "read_in_full": [
+      "AGENTS.md",
+      "docs/development-rules.md",
+      "docs/development-evidence.md",
+      "CLAUDE.md",
+      "/Users/adalundhe/g121-handoff.md"
+    ],
+    "receipt": "POLICY_READ",
+    "revision": "b39906bc7400d2917ea015680780afff1fb561c9",
+    "role": "coordinator",
+    "rules_sha256": "1ed0b1ad00e9228d813d1892d6f55cf330a5485647aff19527843ff8bf616b3d",
+    "task": "Hex actual runtime scheduler integration and census; no upstream Shards source edits",
+    "time_utc": "2026-11-10T08:03:15.875281+00:00"
+  },
+  "hex_version": "hex 0.1.0 (unknown commit)",
+  "kind": "actual-scheduler-wait-census",
+  "max_rows_per_process": 1048576,
+  "mode": "guest",
+  "n": 1000,
+  "native_ssh_login_grace_seconds": 120.0,
+  "outer_cancellation_policy": {
+    "bootstrap": 120.0,
+    "policy_sha256": "8708b80967e5517ae9137eb642600668ac02d164a4c2145ad8462a37889d424e",
+    "wait": 120.0,
+    "wait_rule": "operator outer cancellation budget; never a runtime timing seed"
+  },
+  "owned_guest_retired": {
+    "end": "Stopped",
+    "guest_stopped": true,
+    "pid": 27382,
+    "started": 12055358926801
+  },
+  "preparation_policy": {
+    "revision": "6bf5b15da904931b984ecd25662a8b8c571268bf",
+    "role": "implementer",
+    "rules_sha256": "0d936117dbc6663eb02829c3e921879cecdad3a8f503047588baa21dc82da936"
+  },
+  "profile": "debug",
+  "profile_authority": "operator-declared; preserve build receipt and binary hash",
+  "receipts": {
+    "build": {
+      "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-935f6b21/fixture/receipts/build-debug-935f6b21.json",
+      "sha256": "01a55b1f8a51068db79f7e927d7aa166dea31344095ef62e8baf472afdc82b3f"
+    },
+    "deadline": {
+      "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-935f6b21/fixture/receipts/method-census-debug-935f6b21.json",
+      "sha256": "709f36c531dedf3866a93303e09d7e90a20fc7e0f55467c5430db7cecf4417c3"
+    },
+    "policy": {
+      "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-935f6b21/fixture/receipts/policy-current.json",
+      "sha256": "fc7fa4d14a56ca75cf12eff0f1eee24c78b54a620d6920095d7080ee2230cf43"
+    }
+  },
+  "source": "/Users/adalundhe/.cache/hex-lead/snapshots/runtime-pools-935f6b21",
+  "source_revision": "935f6b21f98ebb11a58a605dc2447c0f6770910b",
+  "status": "passed",
+  "success_controls": {
+    "advertise": 2000,
+    "delete": 2000,
+    "describe": 2000,
+    "link_up": 1000,
+    "retry": 2000,
+    "status": 93836,
+    "submit": 2000
+  },
+  "transport": {
+    "address": "127.0.0.1",
+    "forced_senders": [
+      0,
+      1
+    ],
+    "host_key_pinned": true,
+    "os_assigned_port": 58156
+  },
+  "verified_physical_created": 2000,
+  "verified_physical_deleted": 2000,
+  "raw_report": "/Users/adalundhe/.cache/hx/e-5ayi0vra/result.json",
+  "raw_report_sha256": "2b58b6092082671f656afeb273299d2c5221c71d8c2d4f1cf10b9015ec2af6d1",
+  "verified_census_files": 129854,
+  "census": {
+    "answer_rows_by_name": {
+      "client.answer.capacity": 11835,
+      "client.answer.create": 2000,
+      "client.answer.delete": 2000,
+      "client.answer.hello": 129849,
+      "client.answer.inspect": 6000,
+      "client.answer.list": 4004,
+      "client.answer.schedule.advertise": 2962,
+      "client.answer.schedule.delete": 2759,
+      "client.answer.schedule.describe": 6664,
+      "client.answer.schedule.hear_control": 14297,
+      "client.answer.schedule.hear_create": 1003,
+      "client.answer.schedule.hear_delete": 2964,
+      "client.answer.schedule.link_up": 1500,
+      "client.answer.schedule.retry": 2423,
+      "client.answer.schedule.status": 109767,
+      "client.answer.schedule.submit": 2620,
+      "client.answer.start": 2000,
+      "client.answer.usage": 3735,
+      "client.guest.answer.capacity": 11835,
+      "client.guest.answer.create": 2000,
+      "client.guest.answer.delete": 2000,
+      "client.guest.answer.hello": 2,
+      "client.guest.answer.inspect": 4000,
+      "client.guest.answer.list": 4004,
+      "guest.stage": 6000,
+      "store.turns": 8000
+    },
+    "malformed_files": [],
+    "missing_row_targets": {},
+    "missing_successful_single_call_rows": {},
+    "raw_multiplexed_rows_may_include_refusals": true,
+    "required_raw_answer_rows_per_kind": 1000,
+    "required_verified_successful_trials": 1000,
+    "seed_generation": "not performed; coordinator must review success/attempt provenance",
+    "successful_process_rows": {
+      "client.answer.capacity": 4004,
+      "client.answer.hello": 4004,
+      "client.answer.inspect": 2000,
+      "client.answer.list": 4004
+    },
+    "successful_single_call_rows": {
+      "client.answer.hello": 104836,
+      "client.answer.schedule.advertise": 2000,
+      "client.answer.schedule.delete": 2000,
+      "client.answer.schedule.describe": 2000,
+      "client.answer.schedule.link_up": 1000,
+      "client.answer.schedule.retry": 2000,
+      "client.answer.schedule.status": 93836,
+      "client.answer.schedule.submit": 2000
+    },
+    "truncated_files": []
+  },
+  "all_answer_distributions": {
+    "client.answer.capacity": {
+      "n": 11835,
+      "p50_ns": 479250,
+      "p90_ns": 5171917,
+      "p99_ns": 7137166,
+      "p999_ns": 8454875,
+      "max_ns": 13299375
+    },
+    "client.answer.create": {
+      "n": 2000,
+      "p50_ns": 205677000,
+      "p90_ns": 224106791,
+      "p99_ns": 241237375,
+      "p999_ns": 250340208,
+      "max_ns": 255981709
+    },
+    "client.answer.delete": {
+      "n": 2000,
+      "p50_ns": 8074458,
+      "p90_ns": 18139917,
+      "p99_ns": 30330333,
+      "p999_ns": 37925375,
+      "max_ns": 47917125
+    },
+    "client.answer.hello": {
+      "n": 129849,
+      "p50_ns": 91250,
+      "p90_ns": 125958,
+      "p99_ns": 178500,
+      "p999_ns": 356125,
+      "max_ns": 2510875
+    },
+    "client.answer.inspect": {
+      "n": 6000,
+      "p50_ns": 492417,
+      "p90_ns": 689125,
+      "p99_ns": 1170500,
+      "p999_ns": 1499375,
+      "max_ns": 1709041
+    },
+    "client.answer.list": {
+      "n": 4004,
+      "p50_ns": 587042,
+      "p90_ns": 5212000,
+      "p99_ns": 7037083,
+      "p999_ns": 7824250,
+      "max_ns": 10769250
+    },
+    "client.answer.schedule.advertise": {
+      "n": 2962,
+      "p50_ns": 21886958,
+      "p90_ns": 46942916,
+      "p99_ns": 64341834,
+      "p999_ns": 75867333,
+      "max_ns": 79539542
+    },
+    "client.answer.schedule.delete": {
+      "n": 2759,
+      "p50_ns": 19480250,
+      "p90_ns": 80656709,
+      "p99_ns": 112401125,
+      "p999_ns": 125894375,
+      "max_ns": 135430250
+    },
+    "client.answer.schedule.describe": {
+      "n": 6664,
+      "p50_ns": 1095875,
+      "p90_ns": 9373709,
+      "p99_ns": 14310958,
+      "p999_ns": 18524834,
+      "max_ns": 24865792
+    },
+    "client.answer.schedule.hear_control": {
+      "n": 14297,
+      "p50_ns": 38156542,
+      "p90_ns": 63950333,
+      "p99_ns": 94944292,
+      "p999_ns": 108921041,
+      "max_ns": 125820917
+    },
+    "client.answer.schedule.hear_create": {
+      "n": 1003,
+      "p50_ns": 284833042,
+      "p90_ns": 338395333,
+      "p99_ns": 369001750,
+      "p999_ns": 388026667,
+      "max_ns": 404437917
+    },
+    "client.answer.schedule.hear_delete": {
+      "n": 2964,
+      "p50_ns": 44454667,
+      "p90_ns": 78068375,
+      "p99_ns": 115152000,
+      "p999_ns": 136909000,
+      "max_ns": 166829833
+    },
+    "client.answer.schedule.link_up": {
+      "n": 1500,
+      "p50_ns": 104583,
+      "p90_ns": 156166,
+      "p99_ns": 198250,
+      "p999_ns": 233833,
+      "max_ns": 268458
+    },
+    "client.answer.schedule.retry": {
+      "n": 2423,
+      "p50_ns": 187084,
+      "p90_ns": 1274250,
+      "p99_ns": 10464000,
+      "p999_ns": 12578167,
+      "max_ns": 18897000
+    },
+    "client.answer.schedule.status": {
+      "n": 109767,
+      "p50_ns": 117875,
+      "p90_ns": 169417,
+      "p99_ns": 712833,
+      "p999_ns": 4810958,
+      "max_ns": 7853833
+    },
+    "client.answer.schedule.submit": {
+      "n": 2620,
+      "p50_ns": 39173041,
+      "p90_ns": 312169500,
+      "p99_ns": 359605458,
+      "p999_ns": 384515792,
+      "max_ns": 393830542
+    },
+    "client.answer.start": {
+      "n": 2000,
+      "p50_ns": 319250,
+      "p90_ns": 383167,
+      "p99_ns": 443791,
+      "p999_ns": 512042,
+      "max_ns": 540000
+    },
+    "client.answer.usage": {
+      "n": 3735,
+      "p50_ns": 405875,
+      "p90_ns": 536708,
+      "p99_ns": 827333,
+      "p999_ns": 1260209,
+      "max_ns": 1400166
+    },
+    "client.guest.answer.capacity": {
+      "n": 11835,
+      "p50_ns": 264417,
+      "p90_ns": 477209,
+      "p99_ns": 1029750,
+      "p999_ns": 1431208,
+      "max_ns": 7993417
+    },
+    "client.guest.answer.create": {
+      "n": 2000,
+      "p50_ns": 1409583,
+      "p90_ns": 1493167,
+      "p99_ns": 1567625,
+      "p999_ns": 1701333,
+      "max_ns": 1971959
+    },
+    "client.guest.answer.delete": {
+      "n": 2000,
+      "p50_ns": 723750,
+      "p90_ns": 1033375,
+      "p99_ns": 1330750,
+      "p999_ns": 1459958,
+      "max_ns": 1834625
+    },
+    "client.guest.answer.hello": {
+      "n": 2,
+      "p50_ns": 148417,
+      "p90_ns": 183333,
+      "p99_ns": 183333,
+      "p999_ns": 183333,
+      "max_ns": 183333
+    },
+    "client.guest.answer.inspect": {
+      "n": 4000,
+      "p50_ns": 325500,
+      "p90_ns": 566834,
+      "p99_ns": 904375,
+      "p999_ns": 1051166,
+      "max_ns": 1085542
+    },
+    "client.guest.answer.list": {
+      "n": 4004,
+      "p50_ns": 362792,
+      "p90_ns": 474875,
+      "p99_ns": 632791,
+      "p999_ns": 1278667,
+      "max_ns": 5130417
+    },
+    "guest.stage": {
+      "n": 6000,
+      "p50_ns": 202000,
+      "p90_ns": 3760375,
+      "p99_ns": 5548750,
+      "p999_ns": 7054083,
+      "max_ns": 9141167
+    },
+    "store.turns": {
+      "n": 8000,
+      "p50_ns": 288625,
+      "p90_ns": 3866291,
+      "p99_ns": 10668667,
+      "p999_ns": 16256958,
+      "max_ns": 23534667
+    }
+  },
+  "verified_single_call_success_distributions": {
+    "client.answer.hello": {
+      "n": 104836,
+      "p50_ns": 91334,
+      "p90_ns": 125875,
+      "p99_ns": 178334,
+      "p999_ns": 353792,
+      "max_ns": 2510875
+    },
+    "client.answer.schedule.advertise": {
+      "n": 2000,
+      "p50_ns": 33770917,
+      "p90_ns": 51508666,
+      "p99_ns": 65683000,
+      "p999_ns": 75867333,
+      "max_ns": 79539542
+    },
+    "client.answer.schedule.delete": {
+      "n": 2000,
+      "p50_ns": 43941083,
+      "p90_ns": 86542584,
+      "p99_ns": 116318250,
+      "p999_ns": 125894375,
+      "max_ns": 135430250
+    },
+    "client.answer.schedule.describe": {
+      "n": 2000,
+      "p50_ns": 543500,
+      "p90_ns": 4605292,
+      "p99_ns": 8294958,
+      "p999_ns": 12460166,
+      "max_ns": 14373250
+    },
+    "client.answer.schedule.link_up": {
+      "n": 1000,
+      "p50_ns": 114208,
+      "p90_ns": 165083,
+      "p99_ns": 206500,
+      "p999_ns": 233833,
+      "max_ns": 268458
+    },
+    "client.answer.schedule.retry": {
+      "n": 2000,
+      "p50_ns": 448708,
+      "p90_ns": 1414084,
+      "p99_ns": 10528292,
+      "p999_ns": 12578167,
+      "max_ns": 18897000
+    },
+    "client.answer.schedule.status": {
+      "n": 93836,
+      "p50_ns": 121875,
+      "p90_ns": 174084,
+      "p99_ns": 744791,
+      "p999_ns": 5039334,
+      "max_ns": 7853833
+    },
+    "client.answer.schedule.submit": {
+      "n": 2000,
+      "p50_ns": 76175750,
+      "p90_ns": 320387625,
+      "p99_ns": 362625375,
+      "p999_ns": 384515792,
+      "max_ns": 393830542
+    }
+  },
+  "verified_process_success_distributions": {
+    "client.answer.capacity": {
+      "n": 4004,
+      "p50_ns": 440958,
+      "p90_ns": 4901083,
+      "p99_ns": 6600166,
+      "p999_ns": 7673792,
+      "max_ns": 11642750
+    },
+    "client.answer.hello": {
+      "n": 4004,
+      "p50_ns": 88667,
+      "p90_ns": 126708,
+      "p99_ns": 168958,
+      "p999_ns": 223334,
+      "max_ns": 367708
+    },
+    "client.answer.inspect": {
+      "n": 2000,
+      "p50_ns": 538209,
+      "p90_ns": 791041,
+      "p99_ns": 1086166,
+      "p999_ns": 1179417,
+      "max_ns": 1199334
+    },
+    "client.answer.list": {
+      "n": 4004,
+      "p50_ns": 587042,
+      "p90_ns": 5212000,
+      "p99_ns": 7037083,
+      "p999_ns": 7824250,
+      "max_ns": 10769250
+    }
+  },
+  "runouts": {},
+  "seed_generation": "NOT PERFORMED; root must review candidate935 versus restored63/cc, and current release-stall root cause first",
+  "claim": "actual capacity fix + healthy wait samples at named935 source under loaded host; no competitive timing result"
+}

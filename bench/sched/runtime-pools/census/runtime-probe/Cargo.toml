@@ -1,0 +1,31 @@
+[package]
+name = "hex-scheduler-runtime-probe"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.0"
+publish = false
+autobenches = false
+
+[workspace]
+
+[[bin]]
+name = "hex-scheduler-runtime-probe"
+path = "benches/main.rs"
+
+[dependencies]
+hex-api = { path = "../../../../../crates/hex-api" }
+hex-client = { path = "../../../../../crates/hex-client" }
+hex-core = { path = "../../../../../crates/hex-core" }
+hex-node = { path = "../../../../../crates/hex-node" }
+hex-runtime = { path = "../../../../../crates/hex-runtime" }
+# Existing API seam only, for the coordinator-authorized attach/stop of this run's recorded guest.
+shards-api = { path = "../../../../../vendor/shards-api-draft/crates/api" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+# The existing Hex workspace's resolution; no dependency or vendored source is changed.
+[patch.crates-io]
+seccompiler = { path = "../../../../../vendor/seccompiler" }
+hyper-swim = { path = "../../../../../vendor/hyper-raft/crates/hyper-swim" }
+hyper-timing = { path = "../../../../../vendor/hyper-raft/crates/hyper-timing" }
+shards-api = { path = "../../../../../vendor/shards-api-draft/crates/api" }

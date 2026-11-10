@@ -1,0 +1,1219 @@
+{
+  "baseline": {
+    "summary": {
+      "method": "constructor/drop allocation census, no competitive speed claim",
+      "nodes": 10000,
+      "node_basis": "AC-T7.4.2 nodecount",
+      "cpu_milli": 48000,
+      "mem_bytes": 412316860416,
+      "shape_basis": "/Users/adalundhe/.cache/hex-lead/snapshots/scheduler-b9489761/bench/sched/huawei-r5-day30.trace",
+      "trace_sha256": "9c19ac542cea51a2e965ae2a62670d2fd5fc0076aa7565f17e0cc3cf7a32e351",
+      "rounds": 5,
+      "round_basis": "same5round existingfast_path record method, rawsamples notconfidenceguarantee",
+      "host": "macOS-26.4-arm64-arm-64bit-Mach-O",
+      "machine": "arm64",
+      "concurrent_work": "root realVMcensus +workspacegate; timings/faults are diagnostic underload, notquiet-record performance",
+      "source_baseline": "b948976184b73f047565cd873d83144ed8a05f52",
+      "source_pooled": "63ec2758d8f2ef89cde84d48bb566485eeb60e36",
+      "results": {
+        "baseline": {
+          "exit": 0,
+          "binary_sha256": "a5b48c1432197503bca8ab527ad11dcc3349ecf6b557eca467d2fdf3f7655531",
+          "constructor_allocations": [
+            10,
+            10,
+            10,
+            10,
+            10
+          ],
+          "constructor_reallocations": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "retained_bytes": [
+            3504724,
+            3504724,
+            3504724,
+            3504724,
+            3504724
+          ],
+          "constructor_ns": [
+            "339250",
+            "152875",
+            "154958",
+            "156125",
+            "157000"
+          ],
+          "after_drop_bytes": [
+            "0",
+            "0",
+            "0",
+            "0",
+            "0"
+          ],
+          "raw": "/Users/adalundhe/.cache/hex-lead/runtime-pools-63ec2758/profile-results/baseline.jsonl",
+          "whole_process_time_faults_rss": "/Users/adalundhe/.cache/hex-lead/runtime-pools-63ec2758/profile-results/baseline.time.txt"
+        },
+        "pooled": {
+          "exit": 0,
+          "binary_sha256": "936a7ffca765c0e8de4a1e3a6200425128beff79f4a3a38113274ce4e1cbff90",
+          "constructor_allocations": [
+            10,
+            10,
+            10,
+            10,
+            10
+          ],
+          "constructor_reallocations": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "retained_bytes": [
+            5904724,
+            5904724,
+            5904724,
+            5904724,
+            5904724
+          ],
+          "constructor_ns": [
+            "622584",
+            "256125",
+            "229125",
+            "227125",
+            "226375"
+          ],
+          "after_drop_bytes": [
+            "0",
+            "0",
+            "0",
+            "0",
+            "0"
+          ],
+          "raw": "/Users/adalundhe/.cache/hex-lead/runtime-pools-63ec2758/profile-results/pooled.jsonl",
+          "whole_process_time_faults_rss": "/Users/adalundhe/.cache/hex-lead/runtime-pools-63ec2758/profile-results/pooled.time.txt"
+        }
+      }
+    },
+    "rows": [
+      {
+        "accounting_valid": true,
+        "after_constructor": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 27,
+          "deallocations": 10,
+          "live_bytes": 4306440,
+          "reallocations": 0,
+          "requested_bytes": 4306834
+        },
+        "after_drop": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 27,
+          "deallocations": 20,
+          "live_bytes": 801716,
+          "reallocations": 0,
+          "requested_bytes": 4306834
+        },
+        "after_drop_live_bytes_delta": "0",
+        "before": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 17,
+          "deallocations": 10,
+          "live_bytes": 801716,
+          "reallocations": 0,
+          "requested_bytes": 802110
+        },
+        "constructor": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 10,
+          "deallocations": 0,
+          "duration_ns": "339250",
+          "live_bytes_delta": "3504724",
+          "reallocations": 0,
+          "requested_bytes": 3504724
+        },
+        "constructor_retained_live_bytes": 3504724,
+        "copied_bytes": null,
+        "copy_measurement": "unmeasured",
+        "drop": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 0,
+          "deallocations": 10,
+          "duration_ns": "10625",
+          "live_bytes_delta": "-3504724",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "event": "round",
+        "inputs": {
+          "cpu_milli": 48000,
+          "mem_bytes": 412316860416,
+          "nodes": 10000,
+          "rounds": 5
+        },
+        "panic": null,
+        "round": 0,
+        "status": "ok"
+      },
+      {
+        "accounting_valid": true,
+        "after_constructor": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 161,
+          "deallocations": 144,
+          "live_bytes": 4306440,
+          "reallocations": 0,
+          "requested_bytes": 7821957
+        },
+        "after_drop": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 161,
+          "deallocations": 154,
+          "live_bytes": 801716,
+          "reallocations": 0,
+          "requested_bytes": 7821957
+        },
+        "after_drop_live_bytes_delta": "0",
+        "before": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 151,
+          "deallocations": 144,
+          "live_bytes": 801716,
+          "reallocations": 0,
+          "requested_bytes": 4317233
+        },
+        "constructor": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 10,
+          "deallocations": 0,
+          "duration_ns": "152875",
+          "live_bytes_delta": "3504724",
+          "reallocations": 0,
+          "requested_bytes": 3504724
+        },
+        "constructor_retained_live_bytes": 3504724,
+        "copied_bytes": null,
+        "copy_measurement": "unmeasured",
+        "drop": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 0,
+          "deallocations": 10,
+          "duration_ns": "7375",
+          "live_bytes_delta": "-3504724",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "event": "round",
+        "inputs": {
+          "cpu_milli": 48000,
+          "mem_bytes": 412316860416,
+          "nodes": 10000,
+          "rounds": 5
+        },
+        "panic": null,
+        "round": 1,
+        "status": "ok"
+      },
+      {
+        "accounting_valid": true,
+        "after_constructor": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 295,
+          "deallocations": 278,
+          "live_bytes": 4306440,
+          "reallocations": 0,
+          "requested_bytes": 11337077
+        },
+        "after_drop": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 295,
+          "deallocations": 288,
+          "live_bytes": 801716,
+          "reallocations": 0,
+          "requested_bytes": 11337077
+        },
+        "after_drop_live_bytes_delta": "0",
+        "before": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 285,
+          "deallocations": 278,
+          "live_bytes": 801716,
+          "reallocations": 0,
+          "requested_bytes": 7832353
+        },
+        "constructor": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 10,
+          "deallocations": 0,
+          "duration_ns": "154958",
+          "live_bytes_delta": "3504724",
+          "reallocations": 0,
+          "requested_bytes": 3504724
+        },
+        "constructor_retained_live_bytes": 3504724,
+        "copied_bytes": null,
+        "copy_measurement": "unmeasured",
+        "drop": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 0,
+          "deallocations": 10,
+          "duration_ns": "8458",
+          "live_bytes_delta": "-3504724",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "event": "round",
+        "inputs": {
+          "cpu_milli": 48000,
+          "mem_bytes": 412316860416,
+          "nodes": 10000,
+          "rounds": 5
+        },
+        "panic": null,
+        "round": 2,
+        "status": "ok"
+      },
+      {
+        "accounting_valid": true,
+        "after_constructor": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 429,
+          "deallocations": 412,
+          "live_bytes": 4306440,
+          "reallocations": 0,
+          "requested_bytes": 14852197
+        },
+        "after_drop": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 429,
+          "deallocations": 422,
+          "live_bytes": 801716,
+          "reallocations": 0,
+          "requested_bytes": 14852197
+        },
+        "after_drop_live_bytes_delta": "0",
+        "before": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 419,
+          "deallocations": 412,
+          "live_bytes": 801716,
+          "reallocations": 0,
+          "requested_bytes": 11347473
+        },
+        "constructor": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 10,
+          "deallocations": 0,
+          "duration_ns": "156125",
+          "live_bytes_delta": "3504724",
+          "reallocations": 0,
+          "requested_bytes": 3504724
+        },
+        "constructor_retained_live_bytes": 3504724,
+        "copied_bytes": null,
+        "copy_measurement": "unmeasured",
+        "drop": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 0,
+          "deallocations": 10,
+          "duration_ns": "7458",
+          "live_bytes_delta": "-3504724",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "event": "round",
+        "inputs": {
+          "cpu_milli": 48000,
+          "mem_bytes": 412316860416,
+          "nodes": 10000,
+          "rounds": 5
+        },
+        "panic": null,
+        "round": 3,
+        "status": "ok"
+      },
+      {
+        "accounting_valid": true,
+        "after_constructor": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 563,
+          "deallocations": 546,
+          "live_bytes": 4306440,
+          "reallocations": 0,
+          "requested_bytes": 18367317
+        },
+        "after_drop": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 563,
+          "deallocations": 556,
+          "live_bytes": 801716,
+          "reallocations": 0,
+          "requested_bytes": 18367317
+        },
+        "after_drop_live_bytes_delta": "0",
+        "before": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 553,
+          "deallocations": 546,
+          "live_bytes": 801716,
+          "reallocations": 0,
+          "requested_bytes": 14862593
+        },
+        "constructor": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 10,
+          "deallocations": 0,
+          "duration_ns": "157000",
+          "live_bytes_delta": "3504724",
+          "reallocations": 0,
+          "requested_bytes": 3504724
+        },
+        "constructor_retained_live_bytes": 3504724,
+        "copied_bytes": null,
+        "copy_measurement": "unmeasured",
+        "drop": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 0,
+          "deallocations": 10,
+          "duration_ns": "6875",
+          "live_bytes_delta": "-3504724",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "event": "round",
+        "inputs": {
+          "cpu_milli": 48000,
+          "mem_bytes": 412316860416,
+          "nodes": 10000,
+          "rounds": 5
+        },
+        "panic": null,
+        "round": 4,
+        "status": "ok"
+      }
+    ],
+    "external_time": "        0.01 real         0.00 user         0.00 sys\n             6389760  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 762  page reclaims\n                   1  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                  12  involuntary context switches\n            40687010  instructions retired\n            14642300  cycles elapsed\n             5767552  peak memory footprint\n"
+  },
+  "inline": {
+    "summary": {
+      "method": "constructor/drop allocation census, no competitive speed claim",
+      "nodes": 10000,
+      "node_basis": "AC-T7.4.2 nodecount",
+      "cpu_milli": 48000,
+      "mem_bytes": 412316860416,
+      "shape_basis": "/Users/adalundhe/.cache/hex-lead/snapshots/scheduler-b9489761/bench/sched/huawei-r5-day30.trace",
+      "trace_sha256": "9c19ac542cea51a2e965ae2a62670d2fd5fc0076aa7565f17e0cc3cf7a32e351",
+      "rounds": 5,
+      "round_basis": "same5round existingfast_path record method, rawsamples notconfidenceguarantee",
+      "host": "macOS-26.4-arm64-arm-64bit-Mach-O",
+      "machine": "arm64",
+      "concurrent_work": "root realVMcensus +workspacegate; timings/faults are diagnostic underload, notquiet-record performance",
+      "source_baseline": "b948976184b73f047565cd873d83144ed8a05f52",
+      "source_pooled": "63ec2758d8f2ef89cde84d48bb566485eeb60e36",
+      "results": {
+        "baseline": {
+          "exit": 0,
+          "binary_sha256": "a5b48c1432197503bca8ab527ad11dcc3349ecf6b557eca467d2fdf3f7655531",
+          "constructor_allocations": [
+            10,
+            10,
+            10,
+            10,
+            10
+          ],
+          "constructor_reallocations": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "retained_bytes": [
+            3504724,
+            3504724,
+            3504724,
+            3504724,
+            3504724
+          ],
+          "constructor_ns": [
+            "339250",
+            "152875",
+            "154958",
+            "156125",
+            "157000"
+          ],
+          "after_drop_bytes": [
+            "0",
+            "0",
+            "0",
+            "0",
+            "0"
+          ],
+          "raw": "/Users/adalundhe/.cache/hex-lead/runtime-pools-63ec2758/profile-results/baseline.jsonl",
+          "whole_process_time_faults_rss": "/Users/adalundhe/.cache/hex-lead/runtime-pools-63ec2758/profile-results/baseline.time.txt"
+        },
+        "pooled": {
+          "exit": 0,
+          "binary_sha256": "936a7ffca765c0e8de4a1e3a6200425128beff79f4a3a38113274ce4e1cbff90",
+          "constructor_allocations": [
+            10,
+            10,
+            10,
+            10,
+            10
+          ],
+          "constructor_reallocations": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "retained_bytes": [
+            5904724,
+            5904724,
+            5904724,
+            5904724,
+            5904724
+          ],
+          "constructor_ns": [
+            "622584",
+            "256125",
+            "229125",
+            "227125",
+            "226375"
+          ],
+          "after_drop_bytes": [
+            "0",
+            "0",
+            "0",
+            "0",
+            "0"
+          ],
+          "raw": "/Users/adalundhe/.cache/hex-lead/runtime-pools-63ec2758/profile-results/pooled.jsonl",
+          "whole_process_time_faults_rss": "/Users/adalundhe/.cache/hex-lead/runtime-pools-63ec2758/profile-results/pooled.time.txt"
+        }
+      }
+    },
+    "rows": [
+      {
+        "accounting_valid": true,
+        "after_constructor": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 27,
+          "deallocations": 10,
+          "live_bytes": 6946440,
+          "reallocations": 0,
+          "requested_bytes": 6946832
+        },
+        "after_drop": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 27,
+          "deallocations": 20,
+          "live_bytes": 1041716,
+          "reallocations": 0,
+          "requested_bytes": 6946832
+        },
+        "after_drop_live_bytes_delta": "0",
+        "before": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 17,
+          "deallocations": 10,
+          "live_bytes": 1041716,
+          "reallocations": 0,
+          "requested_bytes": 1042108
+        },
+        "constructor": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 10,
+          "deallocations": 0,
+          "duration_ns": "622584",
+          "live_bytes_delta": "5904724",
+          "reallocations": 0,
+          "requested_bytes": 5904724
+        },
+        "constructor_retained_live_bytes": 5904724,
+        "copied_bytes": null,
+        "copy_measurement": "unmeasured",
+        "drop": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 0,
+          "deallocations": 10,
+          "duration_ns": "11750",
+          "live_bytes_delta": "-5904724",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "event": "round",
+        "inputs": {
+          "cpu_milli": 48000,
+          "mem_bytes": 412316860416,
+          "nodes": 10000,
+          "rounds": 5
+        },
+        "panic": null,
+        "round": 0,
+        "status": "ok"
+      },
+      {
+        "accounting_valid": true,
+        "after_constructor": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 161,
+          "deallocations": 144,
+          "live_bytes": 6946440,
+          "reallocations": 0,
+          "requested_bytes": 12861955
+        },
+        "after_drop": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 161,
+          "deallocations": 154,
+          "live_bytes": 1041716,
+          "reallocations": 0,
+          "requested_bytes": 12861955
+        },
+        "after_drop_live_bytes_delta": "0",
+        "before": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 151,
+          "deallocations": 144,
+          "live_bytes": 1041716,
+          "reallocations": 0,
+          "requested_bytes": 6957231
+        },
+        "constructor": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 10,
+          "deallocations": 0,
+          "duration_ns": "256125",
+          "live_bytes_delta": "5904724",
+          "reallocations": 0,
+          "requested_bytes": 5904724
+        },
+        "constructor_retained_live_bytes": 5904724,
+        "copied_bytes": null,
+        "copy_measurement": "unmeasured",
+        "drop": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 0,
+          "deallocations": 10,
+          "duration_ns": "7167",
+          "live_bytes_delta": "-5904724",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "event": "round",
+        "inputs": {
+          "cpu_milli": 48000,
+          "mem_bytes": 412316860416,
+          "nodes": 10000,
+          "rounds": 5
+        },
+        "panic": null,
+        "round": 1,
+        "status": "ok"
+      },
+      {
+        "accounting_valid": true,
+        "after_constructor": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 295,
+          "deallocations": 278,
+          "live_bytes": 6946440,
+          "reallocations": 0,
+          "requested_bytes": 18777075
+        },
+        "after_drop": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 295,
+          "deallocations": 288,
+          "live_bytes": 1041716,
+          "reallocations": 0,
+          "requested_bytes": 18777075
+        },
+        "after_drop_live_bytes_delta": "0",
+        "before": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 285,
+          "deallocations": 278,
+          "live_bytes": 1041716,
+          "reallocations": 0,
+          "requested_bytes": 12872351
+        },
+        "constructor": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 10,
+          "deallocations": 0,
+          "duration_ns": "229125",
+          "live_bytes_delta": "5904724",
+          "reallocations": 0,
+          "requested_bytes": 5904724
+        },
+        "constructor_retained_live_bytes": 5904724,
+        "copied_bytes": null,
+        "copy_measurement": "unmeasured",
+        "drop": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 0,
+          "deallocations": 10,
+          "duration_ns": "6625",
+          "live_bytes_delta": "-5904724",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "event": "round",
+        "inputs": {
+          "cpu_milli": 48000,
+          "mem_bytes": 412316860416,
+          "nodes": 10000,
+          "rounds": 5
+        },
+        "panic": null,
+        "round": 2,
+        "status": "ok"
+      },
+      {
+        "accounting_valid": true,
+        "after_constructor": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 429,
+          "deallocations": 412,
+          "live_bytes": 6946440,
+          "reallocations": 0,
+          "requested_bytes": 24692195
+        },
+        "after_drop": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 429,
+          "deallocations": 422,
+          "live_bytes": 1041716,
+          "reallocations": 0,
+          "requested_bytes": 24692195
+        },
+        "after_drop_live_bytes_delta": "0",
+        "before": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 419,
+          "deallocations": 412,
+          "live_bytes": 1041716,
+          "reallocations": 0,
+          "requested_bytes": 18787471
+        },
+        "constructor": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 10,
+          "deallocations": 0,
+          "duration_ns": "227125",
+          "live_bytes_delta": "5904724",
+          "reallocations": 0,
+          "requested_bytes": 5904724
+        },
+        "constructor_retained_live_bytes": 5904724,
+        "copied_bytes": null,
+        "copy_measurement": "unmeasured",
+        "drop": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 0,
+          "deallocations": 10,
+          "duration_ns": "6458",
+          "live_bytes_delta": "-5904724",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "event": "round",
+        "inputs": {
+          "cpu_milli": 48000,
+          "mem_bytes": 412316860416,
+          "nodes": 10000,
+          "rounds": 5
+        },
+        "panic": null,
+        "round": 3,
+        "status": "ok"
+      },
+      {
+        "accounting_valid": true,
+        "after_constructor": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 563,
+          "deallocations": 546,
+          "live_bytes": 6946440,
+          "reallocations": 0,
+          "requested_bytes": 30607315
+        },
+        "after_drop": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 563,
+          "deallocations": 556,
+          "live_bytes": 1041716,
+          "reallocations": 0,
+          "requested_bytes": 30607315
+        },
+        "after_drop_live_bytes_delta": "0",
+        "before": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 553,
+          "deallocations": 546,
+          "live_bytes": 1041716,
+          "reallocations": 0,
+          "requested_bytes": 24702591
+        },
+        "constructor": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 10,
+          "deallocations": 0,
+          "duration_ns": "226375",
+          "live_bytes_delta": "5904724",
+          "reallocations": 0,
+          "requested_bytes": 5904724
+        },
+        "constructor_retained_live_bytes": 5904724,
+        "copied_bytes": null,
+        "copy_measurement": "unmeasured",
+        "drop": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 0,
+          "deallocations": 10,
+          "duration_ns": "6375",
+          "live_bytes_delta": "-5904724",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "event": "round",
+        "inputs": {
+          "cpu_milli": 48000,
+          "mem_bytes": 412316860416,
+          "nodes": 10000,
+          "rounds": 5
+        },
+        "panic": null,
+        "round": 4,
+        "status": "ok"
+      }
+    ],
+    "external_time": "        0.01 real         0.00 user         0.00 sys\n             9043968  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 924  page reclaims\n                   1  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                   9  involuntary context switches\n            44918220  instructions retired\n            16961991  cycles elapsed\n             8454552  peak memory footprint\n"
+  },
+  "side": {
+    "summary": {
+      "source": "935f6b21f98ebb11a58a605dc2447c0f6770910b",
+      "same_inputs_as": "/Users/adalundhe/.cache/hex-lead/runtime-pools-63ec2758/profile-results/summary.json",
+      "retained_bytes": [
+        4704724,
+        4704724,
+        4704724,
+        4704724,
+        4704724
+      ],
+      "allocations": [
+        11,
+        11,
+        11,
+        11,
+        11
+      ],
+      "reallocations": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "constructor_ns": [
+        "441083",
+        "185125",
+        "184500",
+        "181833",
+        "180000"
+      ],
+      "drop_live_delta": [
+        "0",
+        "0",
+        "0",
+        "0",
+        "0"
+      ],
+      "timing_caveat": "loaded diagnostic, no competitive performance claim",
+      "raw": "/Users/adalundhe/.cache/hex-lead/pool-side-storage/profile-results/side.jsonl",
+      "whole_process_time_faults_rss": "/Users/adalundhe/.cache/hex-lead/pool-side-storage/profile-results/side.time.txt"
+    },
+    "rows": [
+      {
+        "accounting_valid": true,
+        "after_constructor": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 28,
+          "deallocations": 10,
+          "live_bytes": 5746440,
+          "reallocations": 0,
+          "requested_bytes": 5746830
+        },
+        "after_drop": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 28,
+          "deallocations": 21,
+          "live_bytes": 1041716,
+          "reallocations": 0,
+          "requested_bytes": 5746830
+        },
+        "after_drop_live_bytes_delta": "0",
+        "before": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 17,
+          "deallocations": 10,
+          "live_bytes": 1041716,
+          "reallocations": 0,
+          "requested_bytes": 1042106
+        },
+        "constructor": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 11,
+          "deallocations": 0,
+          "duration_ns": "441083",
+          "live_bytes_delta": "4704724",
+          "reallocations": 0,
+          "requested_bytes": 4704724
+        },
+        "constructor_retained_live_bytes": 4704724,
+        "copied_bytes": null,
+        "copy_measurement": "unmeasured",
+        "drop": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 0,
+          "deallocations": 11,
+          "duration_ns": "24667",
+          "live_bytes_delta": "-4704724",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "event": "round",
+        "inputs": {
+          "cpu_milli": 48000,
+          "mem_bytes": 412316860416,
+          "nodes": 10000,
+          "rounds": 5
+        },
+        "panic": null,
+        "round": 0,
+        "status": "ok"
+      },
+      {
+        "accounting_valid": true,
+        "after_constructor": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 163,
+          "deallocations": 145,
+          "live_bytes": 5746440,
+          "reallocations": 0,
+          "requested_bytes": 10461953
+        },
+        "after_drop": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 163,
+          "deallocations": 156,
+          "live_bytes": 1041716,
+          "reallocations": 0,
+          "requested_bytes": 10461953
+        },
+        "after_drop_live_bytes_delta": "0",
+        "before": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 152,
+          "deallocations": 145,
+          "live_bytes": 1041716,
+          "reallocations": 0,
+          "requested_bytes": 5757229
+        },
+        "constructor": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 11,
+          "deallocations": 0,
+          "duration_ns": "185125",
+          "live_bytes_delta": "4704724",
+          "reallocations": 0,
+          "requested_bytes": 4704724
+        },
+        "constructor_retained_live_bytes": 4704724,
+        "copied_bytes": null,
+        "copy_measurement": "unmeasured",
+        "drop": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 0,
+          "deallocations": 11,
+          "duration_ns": "17792",
+          "live_bytes_delta": "-4704724",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "event": "round",
+        "inputs": {
+          "cpu_milli": 48000,
+          "mem_bytes": 412316860416,
+          "nodes": 10000,
+          "rounds": 5
+        },
+        "panic": null,
+        "round": 1,
+        "status": "ok"
+      },
+      {
+        "accounting_valid": true,
+        "after_constructor": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 298,
+          "deallocations": 280,
+          "live_bytes": 5746440,
+          "reallocations": 0,
+          "requested_bytes": 15177076
+        },
+        "after_drop": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 298,
+          "deallocations": 291,
+          "live_bytes": 1041716,
+          "reallocations": 0,
+          "requested_bytes": 15177076
+        },
+        "after_drop_live_bytes_delta": "0",
+        "before": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 287,
+          "deallocations": 280,
+          "live_bytes": 1041716,
+          "reallocations": 0,
+          "requested_bytes": 10472352
+        },
+        "constructor": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 11,
+          "deallocations": 0,
+          "duration_ns": "184500",
+          "live_bytes_delta": "4704724",
+          "reallocations": 0,
+          "requested_bytes": 4704724
+        },
+        "constructor_retained_live_bytes": 4704724,
+        "copied_bytes": null,
+        "copy_measurement": "unmeasured",
+        "drop": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 0,
+          "deallocations": 11,
+          "duration_ns": "17333",
+          "live_bytes_delta": "-4704724",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "event": "round",
+        "inputs": {
+          "cpu_milli": 48000,
+          "mem_bytes": 412316860416,
+          "nodes": 10000,
+          "rounds": 5
+        },
+        "panic": null,
+        "round": 2,
+        "status": "ok"
+      },
+      {
+        "accounting_valid": true,
+        "after_constructor": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 433,
+          "deallocations": 415,
+          "live_bytes": 5746440,
+          "reallocations": 0,
+          "requested_bytes": 19892199
+        },
+        "after_drop": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 433,
+          "deallocations": 426,
+          "live_bytes": 1041716,
+          "reallocations": 0,
+          "requested_bytes": 19892199
+        },
+        "after_drop_live_bytes_delta": "0",
+        "before": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 422,
+          "deallocations": 415,
+          "live_bytes": 1041716,
+          "reallocations": 0,
+          "requested_bytes": 15187475
+        },
+        "constructor": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 11,
+          "deallocations": 0,
+          "duration_ns": "181833",
+          "live_bytes_delta": "4704724",
+          "reallocations": 0,
+          "requested_bytes": 4704724
+        },
+        "constructor_retained_live_bytes": 4704724,
+        "copied_bytes": null,
+        "copy_measurement": "unmeasured",
+        "drop": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 0,
+          "deallocations": 11,
+          "duration_ns": "16750",
+          "live_bytes_delta": "-4704724",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "event": "round",
+        "inputs": {
+          "cpu_milli": 48000,
+          "mem_bytes": 412316860416,
+          "nodes": 10000,
+          "rounds": 5
+        },
+        "panic": null,
+        "round": 3,
+        "status": "ok"
+      },
+      {
+        "accounting_valid": true,
+        "after_constructor": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 568,
+          "deallocations": 550,
+          "live_bytes": 5746440,
+          "reallocations": 0,
+          "requested_bytes": 24607322
+        },
+        "after_drop": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 568,
+          "deallocations": 561,
+          "live_bytes": 1041716,
+          "reallocations": 0,
+          "requested_bytes": 24607322
+        },
+        "after_drop_live_bytes_delta": "0",
+        "before": {
+          "accounting_invalid": false,
+          "allocation_failures": 0,
+          "allocations": 557,
+          "deallocations": 550,
+          "live_bytes": 1041716,
+          "reallocations": 0,
+          "requested_bytes": 19902598
+        },
+        "constructor": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 11,
+          "deallocations": 0,
+          "duration_ns": "180000",
+          "live_bytes_delta": "4704724",
+          "reallocations": 0,
+          "requested_bytes": 4704724
+        },
+        "constructor_retained_live_bytes": 4704724,
+        "copied_bytes": null,
+        "copy_measurement": "unmeasured",
+        "drop": {
+          "accounting_valid": true,
+          "allocation_failures": 0,
+          "allocations": 0,
+          "deallocations": 11,
+          "duration_ns": "16709",
+          "live_bytes_delta": "-4704724",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "event": "round",
+        "inputs": {
+          "cpu_milli": 48000,
+          "mem_bytes": 412316860416,
+          "nodes": 10000,
+          "rounds": 5
+        },
+        "panic": null,
+        "round": 4,
+        "status": "ok"
+      }
+    ],
+    "external_time": "        0.47 real         0.00 user         0.00 sys\n             7864320  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                 852  page reclaims\n                   1  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                  11  involuntary context switches\n            44984461  instructions retired\n            21738108  cycles elapsed\n             7242112  peak memory footprint\n"
+  }
+}

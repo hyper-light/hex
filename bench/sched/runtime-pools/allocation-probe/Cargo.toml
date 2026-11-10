@@ -1,0 +1,30 @@
+[package]
+name = "hex-index-allocation-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+autobenches = false
+
+# This cache artifact is an independent profiling workspace, never part of Hex's production tree.
+[workspace]
+
+[[bin]]
+name = "hex-index-allocation-probe"
+path = "benches/main.rs"
+
+[dependencies]
+hex-sim = { path = "../../../../crates/hex-sim" }
+serde_json = "=1.0.154"
+
+# Dependency workspaces do not supply patches to this workspace. Match the selected Hex snapshot.
+[patch.crates-io]
+hyper-swim = { path = "../../../../vendor/hyper-raft/crates/hyper-swim" }
+hyper-timing = { path = "../../../../vendor/hyper-raft/crates/hyper-timing" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+overflow-checks = true
+debug = "line-tables-only"
+# Catch ordinary SUT panics separately from process-aborting allocation failures.
+panic = "unwind"

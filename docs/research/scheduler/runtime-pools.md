@@ -67,13 +67,54 @@ found alive, including their class pools. That floor is never advertised as free
 room; new local admission remains blocked until an actual refresh succeeds.
 Deletion and duplicate handling retain their cleanup authority.
 
-## Validation still owed
+## Validation and remaining work
 
-The implementation is in progress. Focused pure-core red tests and the live r329
-counterexample are retained; no combined fixed-tree pass is claimed here yet.
-The lead must run the fixed real 633/632 refusal case, valid local/SSH lifecycles,
-restart and shared-pool cases, guard-removal evidence, all seven gates, native
-Windows checks and the Linux root lab when approved headroom is available.
-New capacity-call waits and scheduler waits require real debug/release census
-records before seeding. Allocation, fault, CPU and latency comparisons remain
-unmeasured for this change. The Windows arm64 VM remains paused.
+The original actual633/632 admission counterexample is fixed. Root r338 atcfc54769
+and both debug/release boundaries at935f6b21 each refused both oversized demands,
+ran/deleted both valid64MiB controls and stopped the owned guest. The same
+constraints remain after rejecting the storage-only candidate: signedcc7c2190's
+production tree is exactly63ec2758's6b87c98d4b982aaf16b3a441138b5ad1689019a6.
+
+Root r347 passed all seven target clippies, production checks, the full macOS
+workspace and vendoring at63ec; root r363 passed those at935f too. Windows root
+r342 passed531tests with0failures/3ignored and workspace native clippy at962;
+r351 passed158sim tests/native clippy at63ec; r367 passed160sim tests/native
+clippy at935f. Ignored cases are not claimed executed. Native Linux/root-lab
+validation remains owed while the approved runners lack declared CPU headroom.
+
+The actual935f release and debug censuses each completed1,000local+1,000SSH
+physical creates/deletes, empty baselines and identity-checked guest shutdown.
+Their107,546+129,854census files were SHA256-verified, all named scheduler rows
+met their1,000sample targets, each profile had4,004capacity observer answers
+attributed to successful processes, and no malformed/truncated rows or recorded
+wait expirations occurred. Reports separate raw multiplexed rows from successful
+single-call/process outcomes. These records name935f, whose storage candidate
+was subsequently reverted; they are not mislabeled ascc runs or installed seeds.
+
+The allocation/quiet latency comparison and exact standalone harnesses are in
+[the benchmark record](../../../bench/sched/runtime-pools/README.md). Although
+side storage saved800,000bytes with10,000finite pools, quiet50,000sample/version
+fit p99 rose from162,875to189,292ns. Four of five paired p99 values worsened.
+Root restored inline state under the user's latency-first instruction. No speed
+improvement or external competitor ratio is claimed.
+
+## Open acknowledgement defect
+
+Freshcc debug boundary r410 passed. The release case refused both633MiB asks but
+its remote64MiB control remained unconfirmed until the original120s operator
+cancellation deadline. Receiver row was running; owner row remainedat1 and its
+inboundpeer-1order record was absent. Both the failed release guest and passed
+debug guest were stopped with exact identity proofs. The reported cleanup_error
+was incomplete census controls after the failure, not missing VM retirement.
+Raw release evidence: root runnerd132 ~/.cache/hx/e-i37a7f_n/result.json and
+its o.state/r.state. This run is failed, not a passing final E2E.
+
+A targeted cold remote-Busy regression passed, falsifying that condition alone.
+A traced real repeat and a four-extra-reader Status-pressure repeat also passed,
+so neither is claimed to fix the intermittent failure. The latter trace did
+expose retry measurement including its own earlier pauses: within one refresh
+queue,2-5microsecond Busy checks requested4.8/16.7/62.7ms delays. An isolated
+virtual-clock regression reproduces that sampling defect; its reset-after-pause
+fix still needs root actual replay/mutation and combined validation before a
+readiness claim. No wait seed or longer deadline was used to hide the stall.
+The Windows arm64 VM remains paused. Firecracker/WHP/GPU VM coverage is unverified.
