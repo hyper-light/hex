@@ -90,6 +90,7 @@ fn request() -> (Demand, Payload) {
     };
     let payload = Payload {
         spec: BoxSpec {
+            devices: Vec::new(),
             id: BoxId::new("caller-name").unwrap(),
             bounds: Bounds {
                 cpu_max_milli: Some(100),

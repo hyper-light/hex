@@ -733,13 +733,13 @@ impl Runtime for GuestRuntime {
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
+        spec.check_no_devices("shards-guest")?;
         if let ClassSpec::Process = spec.class {
             return Err(Refusal::Invalid {
                 what: "class",
                 why: "the node's guest runs the oci class; process boxes are the host's".to_owned(),
             });
         }
-        spec.check()?;
         // Refused as on any node, naming the field, before anything is mapped, staged or booted.
         if let ClassSpec::Oci(oci) = &spec.class {
             rewrite::check(oci)?;
@@ -787,6 +787,7 @@ impl Runtime for GuestRuntime {
         _program: Program,
         _stdio: Stdio,
     ) -> Result<Box<dyn Proc>, Refusal> {
+        spec.check_no_devices("shards-guest")?;
         spec.check_run()?;
         Err(Refusal::Invalid {
             what: "class",
@@ -930,6 +931,7 @@ impl<P: Runtime> Runtime for WithGuest<P> {
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
+        spec.check_no_devices(std::env::consts::OS)?;
         self.maker(&spec)?.create(spec)
     }
 
@@ -943,6 +945,7 @@ impl<P: Runtime> Runtime for WithGuest<P> {
 
     /// A run's box is a `process` box ([`BoxSpec::check_run`]), made where a create of its spec would be.
     fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        spec.check_no_devices(std::env::consts::OS)?;
         spec.check_run()?;
         self.maker(&spec)?.run(spec, program, stdio)
     }

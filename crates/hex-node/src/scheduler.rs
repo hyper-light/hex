@@ -564,11 +564,17 @@ impl Service {
         let local = facts
             .node(id, &mut cluster)
             .map_err(|e| Refusal::Broken(e.to_string()))?;
-        // The generic Runtime seam has no device-attachment call. Its driver refuses device asks,
-        // and therefore this endpoint offers none until an attachment-capable backend is installed.
         let mut local = local;
-        local.capacity.gpus = 0;
-        local.devices.clear();
+        local.devices =
+            capacity::devices::offers(&runtime_capacity, &facts, &mut cluster, &namespace)?;
+        local.capacity.gpus = u32::try_from(
+            local
+                .devices
+                .iter()
+                .filter(|device| device.kind == hex_sim::model::DeviceKind::Gpu)
+                .count(),
+        )
+        .map_err(|_| Refusal::Broken("GPU count exceeds resource representation".into()))?;
         local.runtime_pools = capacity::pools(runtime_capacity, &BTreeMap::new(), local.classes)?;
         if let Some(slot) = cluster.nodes.iter_mut().find(|node| node.id == id) {
             *slot = local;
@@ -892,8 +898,20 @@ impl Service {
         let mut local = facts
             .node_with_owned(self.id, &mut cluster, owned)
             .map_err(|e| Refusal::Broken(e.to_string()))?;
-        local.capacity.gpus = 0;
-        local.devices.clear();
+        local.devices = capacity::devices::offers(
+            &runtime_capacity,
+            &facts,
+            &mut cluster,
+            self.driver.namespace(),
+        )?;
+        local.capacity.gpus = u32::try_from(
+            local
+                .devices
+                .iter()
+                .filter(|device| device.kind == hex_sim::model::DeviceKind::Gpu)
+                .count(),
+        )
+        .map_err(|_| Refusal::Broken("GPU count exceeds resource representation".into()))?;
         local.runtime_pools = capacity::pools(runtime_capacity, &owned_by_class, local.classes)?;
         self.driver.refresh_node(local.clone()).map_err(failed)?;
         if let Some(node) = cluster.nodes.iter_mut().find(|n| n.id == self.id) {

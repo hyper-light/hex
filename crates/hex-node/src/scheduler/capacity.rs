@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 use hex_api::{Capacity, Refusal};
 use hex_sim::model::{Class, Classes, Resources, RuntimePool};
 
+pub(super) mod devices;
+
 fn invalid(why: impl Into<String>) -> Refusal {
     Refusal::Invalid {
         what: "runtime capacity",
@@ -13,13 +15,14 @@ fn invalid(why: impl Into<String>) -> Refusal {
     }
 }
 
-fn amounts(value: &hex_api::CapacityResources) -> Resources {
+fn amounts(value: &hex_api::CapacityResources, gpus: u32) -> Resources {
     Resources {
         cpu_milli: value.cpu_milli,
         mem_bytes: value.mem_bytes,
         disk_bytes: value.disk_bytes,
-        // The generic Runtime has no device-attachment seam.
-        gpus: 0,
+        // Exclusive availability comes from each offered device's holder; the pool counts its
+        // configured physical identities, then the existing Index subtracts local reservations.
+        gpus,
     }
 }
 
@@ -58,8 +61,16 @@ pub(super) fn pools(
         if report.id.len() > hex_core::wire::MAX_MESSAGE {
             return Err(invalid("runtime pool identity exceeds the wire byte bound"));
         }
-        let total = amounts(&report.total);
-        let free = amounts(&report.free);
+        let gpus = u32::try_from(
+            report
+                .devices
+                .iter()
+                .filter(|device| device.id.kind == hex_api::DeviceKind::Gpu)
+                .count(),
+        )
+        .map_err(|_| invalid("GPU count exceeds resource representation"))?;
+        let total = amounts(&report.total, gpus);
+        let free = amounts(&report.free, gpus);
         if !available.has(class) {
             continue;
         }
@@ -98,6 +109,7 @@ mod tests {
 
     fn report(id: &str, total: u64, free: u64) -> Capacity {
         Capacity {
+            devices: Vec::new(),
             id: id.into(),
             total: CapacityResources {
                 cpu_milli: 4_000,

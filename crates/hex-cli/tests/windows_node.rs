@@ -97,6 +97,7 @@ impl Drop for Node {
 
 fn spec(id: &BoxId) -> BoxSpec {
     BoxSpec {
+        devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Process,

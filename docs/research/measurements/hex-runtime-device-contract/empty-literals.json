@@ -1,0 +1,822 @@
+[
+  {
+    "path": "crates/hex-api/src/conformance.rs",
+    "type": "BoxSpec",
+    "original_line": 903
+  },
+  {
+    "path": "crates/hex-api/src/conformance.rs",
+    "type": "BoxSpec",
+    "original_line": 1085
+  },
+  {
+    "path": "crates/hex-api/src/sim.rs",
+    "type": "BoxSpec",
+    "original_line": 518
+  },
+  {
+    "path": "crates/hex-api/src/sim.rs",
+    "type": "BoxSpec",
+    "original_line": 530
+  },
+  {
+    "path": "crates/hex-bench/benches/macos_box.rs",
+    "type": "BoxSpec",
+    "original_line": 104
+  },
+  {
+    "path": "crates/hex-bench/benches/macos_box.rs",
+    "type": "BoxSpec",
+    "original_line": 152
+  },
+  {
+    "path": "crates/hex-bench/benches/native_box.rs",
+    "type": "BoxSpec",
+    "original_line": 248
+  },
+  {
+    "path": "crates/hex-bench/benches/node_memory.rs",
+    "type": "BoxSpec",
+    "original_line": 109
+  },
+  {
+    "path": "crates/hex-bench/benches/node_memory.rs",
+    "type": "BoxSpec",
+    "original_line": 120
+  },
+  {
+    "path": "crates/hex-bench/benches/seam_box.rs",
+    "type": "BoxSpec",
+    "original_line": 59
+  },
+  {
+    "path": "crates/hex-bench/benches/seam_oci.rs",
+    "type": "BoxSpec",
+    "original_line": 167
+  },
+  {
+    "path": "crates/hex-bench/benches/windows_oci.rs",
+    "type": "BoxSpec",
+    "original_line": 77
+  },
+  {
+    "path": "crates/hex-cli/benches/noisy_neighbor.rs",
+    "type": "BoxSpec",
+    "original_line": 85
+  },
+  {
+    "path": "crates/hex-cli/benches/noisy_neighbor.rs",
+    "type": "BoxSpec",
+    "original_line": 95
+  },
+  {
+    "path": "crates/hex-cli/tests/guest_create_bench.rs",
+    "type": "BoxSpec",
+    "original_line": 129
+  },
+  {
+    "path": "crates/hex-cli/tests/guest_first_create.rs",
+    "type": "BoxSpec",
+    "original_line": 89
+  },
+  {
+    "path": "crates/hex-cli/tests/guest_real.rs",
+    "type": "BoxSpec",
+    "original_line": 57
+  },
+  {
+    "path": "crates/hex-cli/tests/guest_tree.rs",
+    "type": "BoxSpec",
+    "original_line": 282
+  },
+  {
+    "path": "crates/hex-cli/tests/guest_tree.rs",
+    "type": "BoxSpec",
+    "original_line": 442
+  },
+  {
+    "path": "crates/hex-cli/tests/guest_validation.rs",
+    "type": "BoxSpec",
+    "original_line": 281
+  },
+  {
+    "path": "crates/hex-cli/tests/macos_node_recovery.rs",
+    "type": "BoxSpec",
+    "original_line": 85
+  },
+  {
+    "path": "crates/hex-cli/tests/macos_process_box.rs",
+    "type": "BoxSpec",
+    "original_line": 63
+  },
+  {
+    "path": "crates/hex-cli/tests/macos_process_box.rs",
+    "type": "BoxSpec",
+    "original_line": 231
+  },
+  {
+    "path": "crates/hex-cli/tests/macos_process_box.rs",
+    "type": "BoxSpec",
+    "original_line": 265
+  },
+  {
+    "path": "crates/hex-cli/tests/macos_process_box.rs",
+    "type": "BoxSpec",
+    "original_line": 329
+  },
+  {
+    "path": "crates/hex-cli/tests/macos_process_box.rs",
+    "type": "BoxSpec",
+    "original_line": 397
+  },
+  {
+    "path": "crates/hex-cli/tests/macos_process_box.rs",
+    "type": "BoxSpec",
+    "original_line": 425
+  },
+  {
+    "path": "crates/hex-cli/tests/macos_process_box.rs",
+    "type": "BoxSpec",
+    "original_line": 461
+  },
+  {
+    "path": "crates/hex-cli/tests/macos_process_box.rs",
+    "type": "BoxSpec",
+    "original_line": 505
+  },
+  {
+    "path": "crates/hex-cli/tests/macos_process_box.rs",
+    "type": "BoxSpec",
+    "original_line": 542
+  },
+  {
+    "path": "crates/hex-cli/tests/macos_process_box.rs",
+    "type": "BoxSpec",
+    "original_line": 668
+  },
+  {
+    "path": "crates/hex-cli/tests/macos_process_box.rs",
+    "type": "BoxSpec",
+    "original_line": 779
+  },
+  {
+    "path": "crates/hex-cli/tests/macos_process_box.rs",
+    "type": "BoxSpec",
+    "original_line": 837
+  },
+  {
+    "path": "crates/hex-cli/tests/macos_process_box.rs",
+    "type": "BoxSpec",
+    "original_line": 909
+  },
+  {
+    "path": "crates/hex-cli/tests/macos_process_box.rs",
+    "type": "BoxSpec",
+    "original_line": 960
+  },
+  {
+    "path": "crates/hex-cli/tests/macos_process_box.rs",
+    "type": "BoxSpec",
+    "original_line": 1034
+  },
+  {
+    "path": "crates/hex-cli/tests/macos_process_box.rs",
+    "type": "BoxSpec",
+    "original_line": 1382
+  },
+  {
+    "path": "crates/hex-cli/tests/node_socket.rs",
+    "type": "BoxSpec",
+    "original_line": 224
+  },
+  {
+    "path": "crates/hex-cli/tests/node_socket.rs",
+    "type": "BoxSpec",
+    "original_line": 575
+  },
+  {
+    "path": "crates/hex-cli/tests/node_socket.rs",
+    "type": "BoxSpec",
+    "original_line": 584
+  },
+  {
+    "path": "crates/hex-cli/tests/node_socket.rs",
+    "type": "BoxSpec",
+    "original_line": 605
+  },
+  {
+    "path": "crates/hex-cli/tests/node_socket.rs",
+    "type": "BoxSpec",
+    "original_line": 1031
+  },
+  {
+    "path": "crates/hex-cli/tests/node_socket.rs",
+    "type": "BoxSpec",
+    "original_line": 1100
+  },
+  {
+    "path": "crates/hex-cli/tests/node_socket.rs",
+    "type": "BoxSpec",
+    "original_line": 1151
+  },
+  {
+    "path": "crates/hex-cli/tests/node_socket.rs",
+    "type": "BoxSpec",
+    "original_line": 1160
+  },
+  {
+    "path": "crates/hex-cli/tests/node_socket.rs",
+    "type": "BoxSpec",
+    "original_line": 1521
+  },
+  {
+    "path": "crates/hex-cli/tests/node_socket.rs",
+    "type": "BoxSpec",
+    "original_line": 1913
+  },
+  {
+    "path": "crates/hex-cli/tests/node_socket.rs",
+    "type": "BoxSpec",
+    "original_line": 1980
+  },
+  {
+    "path": "crates/hex-cli/tests/node_socket.rs",
+    "type": "BoxSpec",
+    "original_line": 2082
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 446
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 456
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 490
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 499
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 721
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 1020
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 1415
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 1562
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 1739
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 2040
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 2219
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 2341
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 2467
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 2673
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 2788
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 3020
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 3048
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 3205
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 3325
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 3438
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 3641
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 3697
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 4257
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 4374
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 4550
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 4591
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 4713
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 4762
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 4878
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 4892
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 4983
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 5122
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 5220
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_cgroupfs_box.rs",
+    "type": "BoxSpec",
+    "original_line": 132
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_cgroupfs_box.rs",
+    "type": "BoxSpec",
+    "original_line": 154
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_cgroupfs_box.rs",
+    "type": "BoxSpec",
+    "original_line": 250
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_cgroupfs_box.rs",
+    "type": "BoxSpec",
+    "original_line": 276
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_devices.rs",
+    "type": "BoxSpec",
+    "original_line": 157
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_devices.rs",
+    "type": "BoxSpec",
+    "original_line": 493
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_ipcuts.rs",
+    "type": "BoxSpec",
+    "original_line": 338
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_lsm.rs",
+    "type": "BoxSpec",
+    "original_line": 274
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_reuse.rs",
+    "type": "BoxSpec",
+    "original_line": 248
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_reuse.rs",
+    "type": "BoxSpec",
+    "original_line": 506
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_reuse.rs",
+    "type": "BoxSpec",
+    "original_line": 540
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_reuse.rs",
+    "type": "BoxSpec",
+    "original_line": 605
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_reuse.rs",
+    "type": "BoxSpec",
+    "original_line": 1064
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_reuse.rs",
+    "type": "BoxSpec",
+    "original_line": 1619
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_reuse.rs",
+    "type": "BoxSpec",
+    "original_line": 1923
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_reuse.rs",
+    "type": "BoxSpec",
+    "original_line": 2210
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_reuse.rs",
+    "type": "BoxSpec",
+    "original_line": 2328
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_seccomp.rs",
+    "type": "BoxSpec",
+    "original_line": 136
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_spec_box.rs",
+    "type": "BoxSpec",
+    "original_line": 167
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_spec_box.rs",
+    "type": "BoxSpec",
+    "original_line": 176
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_spec_box.rs",
+    "type": "BoxSpec",
+    "original_line": 334
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_spec_box.rs",
+    "type": "BoxSpec",
+    "original_line": 473
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_spec_box.rs",
+    "type": "BoxSpec",
+    "original_line": 552
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_spec_box.rs",
+    "type": "BoxSpec",
+    "original_line": 572
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_spec_box.rs",
+    "type": "BoxSpec",
+    "original_line": 630
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_spec_box.rs",
+    "type": "BoxSpec",
+    "original_line": 680
+  },
+  {
+    "path": "crates/hex-cli/tests/process_box.rs",
+    "type": "BoxSpec",
+    "original_line": 47
+  },
+  {
+    "path": "crates/hex-cli/tests/windows_node.rs",
+    "type": "BoxSpec",
+    "original_line": 99
+  },
+  {
+    "path": "crates/hex-cli/tests/windows_node_recovery.rs",
+    "type": "BoxSpec",
+    "original_line": 80
+  },
+  {
+    "path": "crates/hex-cli/tests/windows_oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 113
+  },
+  {
+    "path": "crates/hex-cli/tests/windows_oci_box.rs",
+    "type": "BoxSpec",
+    "original_line": 545
+  },
+  {
+    "path": "crates/hex-cli/tests/windows_process_box.rs",
+    "type": "BoxSpec",
+    "original_line": 54
+  },
+  {
+    "path": "crates/hex-cli/tests/windows_process_box.rs",
+    "type": "BoxSpec",
+    "original_line": 101
+  },
+  {
+    "path": "crates/hex-cli/tests/windows_process_box.rs",
+    "type": "BoxSpec",
+    "original_line": 197
+  },
+  {
+    "path": "crates/hex-cli/tests/windows_process_box.rs",
+    "type": "BoxSpec",
+    "original_line": 329
+  },
+  {
+    "path": "crates/hex-cli/tests/windows_process_box.rs",
+    "type": "BoxSpec",
+    "original_line": 361
+  },
+  {
+    "path": "crates/hex-cli/tests/windows_process_box.rs",
+    "type": "BoxSpec",
+    "original_line": 456
+  },
+  {
+    "path": "crates/hex-client/src/calls/tests.rs",
+    "type": "BoxSpec",
+    "original_line": 746
+  },
+  {
+    "path": "crates/hex-core/src/record.rs",
+    "type": "BoxSpec",
+    "original_line": 212
+  },
+  {
+    "path": "crates/hex-core/src/recovery.rs",
+    "type": "BoxSpec",
+    "original_line": 132
+  },
+  {
+    "path": "crates/hex-core/src/recovery.rs",
+    "type": "BoxSpec",
+    "original_line": 234
+  },
+  {
+    "path": "crates/hex-core/src/schedule/waits.rs",
+    "type": "BoxSpec",
+    "original_line": 81
+  },
+  {
+    "path": "crates/hex-core/src/wire/tests.rs",
+    "type": "Capacity",
+    "original_line": 20
+  },
+  {
+    "path": "crates/hex-core/src/wire/tests.rs",
+    "type": "BoxSpec",
+    "original_line": 87
+  },
+  {
+    "path": "crates/hex-core/src/wire/tests.rs",
+    "type": "BoxSpec",
+    "original_line": 126
+  },
+  {
+    "path": "crates/hex-core/src/wire/tests.rs",
+    "type": "BoxSpec",
+    "original_line": 137
+  },
+  {
+    "path": "crates/hex-core/src/wire/tests.rs",
+    "type": "BoxSpec",
+    "original_line": 201
+  },
+  {
+    "path": "crates/hex-core/src/wire/tests.rs",
+    "type": "BoxSpec",
+    "original_line": 1072
+  },
+  {
+    "path": "crates/hex-node/src/abandoned.rs",
+    "type": "BoxSpec",
+    "original_line": 96
+  },
+  {
+    "path": "crates/hex-node/src/facts.rs",
+    "type": "Capacity",
+    "original_line": 142
+  },
+  {
+    "path": "crates/hex-node/src/node.rs",
+    "type": "BoxSpec",
+    "original_line": 2389
+  },
+  {
+    "path": "crates/hex-node/src/placement/tests.rs",
+    "type": "BoxSpec",
+    "original_line": 92
+  },
+  {
+    "path": "crates/hex-node/src/scheduler/adversarial_relay_tests.rs",
+    "type": "BoxSpec",
+    "original_line": 70
+  },
+  {
+    "path": "crates/hex-node/src/scheduler/capacity.rs",
+    "type": "Capacity",
+    "original_line": 100
+  },
+  {
+    "path": "crates/hex-node/src/scheduler/tests.rs",
+    "type": "BoxSpec",
+    "original_line": 42
+  },
+  {
+    "path": "crates/hex-node/src/scheduler/tests.rs",
+    "type": "BoxSpec",
+    "original_line": 178
+  },
+  {
+    "path": "crates/hex-node/src/scheduler/tests.rs",
+    "type": "BoxSpec",
+    "original_line": 250
+  },
+  {
+    "path": "crates/hex-node/src/scheduler/tests.rs",
+    "type": "BoxSpec",
+    "original_line": 361
+  },
+  {
+    "path": "crates/hex-node/src/scheduler/tests.rs",
+    "type": "BoxSpec",
+    "original_line": 571
+  },
+  {
+    "path": "crates/hex-node/src/scheduler/tests.rs",
+    "type": "BoxSpec",
+    "original_line": 838
+  },
+  {
+    "path": "crates/hex-node/src/scheduler/tunnel.rs",
+    "type": "BoxSpec",
+    "original_line": 359
+  },
+  {
+    "path": "crates/hex-node/src/serve/linux_tests.rs",
+    "type": "BoxSpec",
+    "original_line": 209
+  },
+  {
+    "path": "crates/hex-node/src/serve/linux_tests.rs",
+    "type": "BoxSpec",
+    "original_line": 875
+  },
+  {
+    "path": "crates/hex-node/src/serve/macos_tests.rs",
+    "type": "BoxSpec",
+    "original_line": 136
+  },
+  {
+    "path": "crates/hex-node/src/serve/sim_tests.rs",
+    "type": "BoxSpec",
+    "original_line": 614
+  },
+  {
+    "path": "crates/hex-node/src/serve/sim_tests.rs",
+    "type": "BoxSpec",
+    "original_line": 814
+  },
+  {
+    "path": "crates/hex-node/src/serve/unix_tests.rs",
+    "type": "BoxSpec",
+    "original_line": 129
+  },
+  {
+    "path": "crates/hex-node/src/store.rs",
+    "type": "BoxSpec",
+    "original_line": 573
+  },
+  {
+    "path": "crates/hex-node/tests/guest_loop.rs",
+    "type": "BoxSpec",
+    "original_line": 942
+  },
+  {
+    "path": "crates/hex-node/tests/guest_loop.rs",
+    "type": "BoxSpec",
+    "original_line": 992
+  },
+  {
+    "path": "crates/hex-node/tests/guest_loop.rs",
+    "type": "BoxSpec",
+    "original_line": 1015
+  },
+  {
+    "path": "crates/hex-runtime/src/guest/tests.rs",
+    "type": "BoxSpec",
+    "original_line": 109
+  },
+  {
+    "path": "crates/hex-runtime/src/guest/tests.rs",
+    "type": "BoxSpec",
+    "original_line": 335
+  },
+  {
+    "path": "crates/hex-runtime/src/guest/tests.rs",
+    "type": "BoxSpec",
+    "original_line": 435
+  },
+  {
+    "path": "crates/hex-runtime/src/guest/tests.rs",
+    "type": "Capacity",
+    "original_line": 1309
+  },
+  {
+    "path": "crates/hex-runtime/src/guest/tests.rs",
+    "type": "Capacity",
+    "original_line": 1369
+  },
+  {
+    "path": "crates/hex-runtime/src/macos/tests.rs",
+    "type": "BoxSpec",
+    "original_line": 159
+  },
+  {
+    "path": "crates/hex-runtime/src/macos/tests.rs",
+    "type": "BoxSpec",
+    "original_line": 376
+  },
+  {
+    "path": "crates/hex-runtime/src/macos/tests.rs",
+    "type": "BoxSpec",
+    "original_line": 435
+  },
+  {
+    "path": "crates/hex-runtime/src/macos/tests.rs",
+    "type": "BoxSpec",
+    "original_line": 566
+  },
+  {
+    "path": "crates/hex-runtime/src/macos/tests.rs",
+    "type": "BoxSpec",
+    "original_line": 704
+  },
+  {
+    "path": "crates/hex-runtime/src/windows/mod.rs",
+    "type": "BoxSpec",
+    "original_line": 970
+  }
+]

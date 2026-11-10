@@ -57,6 +57,8 @@ use crate::store::Store;
 use crate::supervise::{self, Forgotten, Live, Supervisor};
 use crate::turns::{Turn, Turns};
 
+mod attachments;
+
 /// overlayfs's magic number (include/uapi/linux/magic.h): a node whose state is on overlayfs can't
 /// keep a layered box's writable layer there, since overlayfs can't be an overlay's upper layer.
 const OVERLAYFS_SUPER_MAGIC: i128 = 0x794c_7630;
@@ -131,6 +133,8 @@ pub const OCI_BOXES: &str = ".oci";
 
 /// A node agent over the `process` and `oci` classes.
 pub struct Node {
+    attachments: hex_runtime::devices::Catalog,
+    attachment_turns: Turns,
     /// The `process` boxes' cgroups, and the `oci` boxes' root among them ([`OCI_BOXES`]).
     root: BoxRoot,
     /// The `oci` boxes' cgroups: under the box root, but apart from the `process` boxes.
@@ -314,7 +318,10 @@ impl Node {
         // Parked procs are a root node's, always (decision 8, parked procs; the lead, 2026-11-06; their off path went
         // by Ada's 2026-11-06 rule once bench/competitive/probes/parked_procs_ab.md decided them on): a rootless node's
         // devfs makes none, so it parks none.
+        let (attachments, attachment_turns) = attachments::catalog(&state_dir.join("devices"))?;
         let node = Self {
+            attachments,
+            attachment_turns,
             root,
             oci_boxes,
             devices,
@@ -1392,15 +1399,21 @@ impl Node {
     /// checked against this host before anything is made: its root and each mount's source are there,
     /// and a layered root's writable layer can go where the node keeps bundles. What can't be is
     /// refused by name (CLAUDE.md §3).
-    fn render(&self, id: &BoxId, spec: &OciSpec) -> Result<Source, Refusal> {
+    fn render(
+        &self,
+        id: &BoxId,
+        spec: &OciSpec,
+        devices: &[hex_api::DeviceId],
+    ) -> Result<Source, Refusal> {
         let dir = self.bundles.join(id.as_str());
-        let rendered = bundle::render(
+        let rendered = self.render_attachments(
             spec,
             &Place {
                 dir: &dir,
                 owner: self.owner,
                 masked: &self.masked,
             },
+            devices,
         )?;
         match &spec.rootfs {
             Rootfs::Dir(root) => a_dir("rootfs.dir", root)?,
@@ -1616,9 +1629,13 @@ impl Node {
 }
 
 impl Runtime for Node {
-    fn capacity(&self, _class: Class) -> Result<Option<hex_api::Capacity>, Refusal> {
+    fn capacity(&self, class: Class) -> Result<Option<hex_api::Capacity>, Refusal> {
         // node_key is stable across this state directory's recovery, shared by both native classes.
-        crate::facts::capacity(&self.bundles, format!("node:{}", self.key)).map(Some)
+        let mut capacity = crate::facts::capacity(&self.bundles, format!("node:{}", self.key))?;
+        if class == Class::Oci {
+            capacity.devices = self.attachment_capacity()?;
+        }
+        Ok(Some(capacity))
     }
 
     fn classes(&self) -> Vec<Class> {
@@ -1630,6 +1647,13 @@ impl Runtime for Node {
         // and an owner not well formed, is refused by name whether or not the id is taken (HEX-RT-13,
         // HEX-RT-18); then an oci box's init is held to its class's exec bound (HEX-RT-14).
         spec.check()?;
+        if !spec.devices.is_empty() && !matches!(&spec.class, ClassSpec::Oci(_)) {
+            return Err(Refusal::Platform {
+                what: "device attachment",
+                platform: "Linux node",
+                why: "physical claims require a structured OCI payload".into(),
+            });
+        }
         if let ClassSpec::Oci(oci) = &spec.class {
             oci.init.fits(&process::exec_limit())?;
         }
@@ -1639,12 +1663,33 @@ impl Runtime for Node {
         if self.record(&spec.id)?.is_some() || self.cgroup(&spec.id).is_some() {
             return Err(Refusal::Exists(spec.id));
         }
+        let _devices = self.hold_attachments(&spec.devices)?;
+        if !spec.devices.is_empty() {
+            self.attachments.prepare(&spec, &self.store.all()?)?;
+        }
         let source = match &spec.class {
             ClassSpec::Process => return self.create_process(spec),
             ClassSpec::Bundle(bundle) => Source::Given(bundle.clone()),
-            ClassSpec::Oci(oci) => self.render(&spec.id, oci)?,
+            ClassSpec::Oci(oci) => self.render(&spec.id, oci, &spec.devices)?,
         };
+        let id = spec.id.clone();
+        let assigned = !spec.devices.is_empty();
+        if assigned {
+            self.store.put(&BoxRecord::new(
+                spec.clone(),
+                Phase::Creating,
+                vec![self.container_dir(&id), self.bundles.join(id.as_str())],
+            ))?;
+        }
         let made = self.create_oci(spec, source);
+        if assigned
+            && made.is_err()
+            && let Err(cleanup) = self.scrub(&id)
+        {
+            return Err(Refusal::Broken(format!(
+                "device-bearing create failed and physical cleanup remains uncertain: {cleanup}"
+            )));
+        }
         self.keep_peaks();
         made
     }
@@ -1709,6 +1754,7 @@ impl Runtime for Node {
         program: Program,
         mut stdio: Stdio,
     ) -> Result<Box<dyn Proc>, Refusal> {
+        spec.check_no_devices("linux")?;
         spec.check_run()?;
         let id = spec.id.clone();
         // Held until the run's box is whole and watched, as a create's turn is.
@@ -1843,6 +1889,10 @@ impl Node {
     /// is taken.
     fn delete_box(&self, id: &BoxId) -> Result<(), Refusal> {
         let record = self.record(id)?;
+        let devices = record
+            .as_ref()
+            .map_or(&[][..], |record| record.spec.devices.as_slice());
+        let _devices = self.hold_attachments(devices)?;
         if record.is_none() && self.cgroup(id).is_none() {
             return Err(Refusal::NoSuchBox(id.clone()));
         }
@@ -2386,6 +2436,7 @@ mod tests {
     fn ac_t7_1_3_a_reaped_init_keeps_its_identity_until_its_cgroup_drains() {
         let mut record = BoxRecord::new(
             BoxSpec {
+                devices: Vec::new(),
                 id: BoxId::new("ended").unwrap(),
                 bounds: hex_api::Bounds::default(),
                 class: ClassSpec::Bundle(PathBuf::from("bundle")),

@@ -42,6 +42,7 @@ pub fn rewrite(
         bounds,
         class,
         owner,
+        devices,
     } = spec;
     let mut items = Vec::new();
     let class = match class {
@@ -81,6 +82,7 @@ pub fn rewrite(
             bounds,
             class,
             owner,
+            devices,
         },
         items,
     })

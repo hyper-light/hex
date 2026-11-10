@@ -1,0 +1,10 @@
+{
+  "revision": "e273db87b40e2e020d74b8b3231ef75cbbea7e6f",
+  "archive_sha256": "40bfbb4744b9df9a696fbfe8012350cd3efa06c4edf90d85369c1dbf800aece3",
+  "archive_bytes": 6362253,
+  "runner_sha256": "e9c31e5d9f3907717b2846e4ea3edc12c8032b240507bfa5da8332ad95c0c768",
+  "remote_root": "/Users/adalundhe/.cache/hex-device-bridge-windows/01a1c643-e273db87-light-v1",
+  "runner": "d1323898b255a3ed435eb83fa0f7b0cf",
+  "needs": "cpus=1,mem=4g,disk=12g",
+  "transfer": "--no-sync --stdin"
+}

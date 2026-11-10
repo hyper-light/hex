@@ -165,6 +165,7 @@ impl Fixture for Lab {
     }
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
         BoxSpec {
+            devices: Vec::new(),
             id,
             bounds,
             class: ClassSpec::Oci(Box::new(self.conformance_spec(&Self::act(&Act::Wait)))),
@@ -174,6 +175,7 @@ impl Fixture for Lab {
 
     fn init(&self, id: BoxId, act: &Act) -> BoxSpec {
         BoxSpec {
+            devices: Vec::new(),
             id,
             bounds: Bounds::default(),
             class: ClassSpec::Oci(Box::new(self.conformance_spec(&Self::act(act)))),
@@ -332,6 +334,7 @@ fn layered_box(lab: &Lab, own: &Path) {
         hosts: vec![("db_main".to_owned(), "10.1.2.3".to_owned())],
     };
     let made = node.create(BoxSpec {
+        devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Oci(Box::new(spec)),
@@ -471,6 +474,7 @@ fn in_place_box(lab: &Lab, own: &Path) {
     build_base(&dir);
     let id = BoxId::new("in-place").unwrap();
     node.create(BoxSpec {
+        devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Oci(Box::new(OciSpec {
@@ -550,6 +554,7 @@ fn links_in_a_layer_stay_in_the_box(lab: &Lab, own: &Path) {
 
     let id = BoxId::new("link-out").unwrap();
     let made = node.create(BoxSpec {
+        devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds::default(),
         class: spec(&out),
@@ -570,6 +575,7 @@ fn links_in_a_layer_stay_in_the_box(lab: &Lab, own: &Path) {
 
     let id = BoxId::new("link-inside").unwrap();
     node.create(BoxSpec {
+        devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds::default(),
         class: spec(&inside),
@@ -628,6 +634,7 @@ fn refusals(lab: &Lab, own: &Path) {
     }
     for (field, spec) in cases {
         let got = node.create(BoxSpec {
+            devices: Vec::new(),
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Oci(Box::new(spec)),
@@ -678,6 +685,7 @@ fn recovery_removes_a_half_made_bundle(lab: &Lab, own: &Path) {
     std::fs::create_dir(box_root.join(OCI_BOXES).join(with_cgroup.as_str())).unwrap();
     std::fs::create_dir_all(&container).unwrap();
     let spec = BoxSpec {
+        devices: Vec::new(),
         id: older.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Oci(Box::new(lab.conformance_spec(&Lab::act(&Act::Wait)))),

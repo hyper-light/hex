@@ -1,0 +1,8 @@
+{
+  "command": "git diff --cached --check",
+  "exit_code": 2,
+  "stdout_exact": "docs/research/measurements/hex-runtime-device-contract/light-v1-api-unit.log:41: trailing whitespace.\n+test devices::tests::device_json_preserves_legacy_empty_fields_and_lowercase_kinds ... \ndocs/research/measurements/hex-runtime-device-contract/light-v1-cli.log:194: trailing whitespace.\n+test devices::tests::device_json_preserves_legacy_empty_fields_and_lowercase_kinds ... \ndocs/research/measurements/hex-runtime-device-contract/light-v1-cli.log:237: new blank line at EOF.\ndocs/research/measurements/hex-runtime-device-contract/light-v2-api-device-unit.log:40: new blank line at EOF.\ndocs/research/measurements/hex-runtime-device-contract/light-v2-api-id-unit.log:8: new blank line at EOF.\ndocs/research/measurements/hex-runtime-device-contract/light-v2-wire-unit.log:100: new blank line at EOF.\n",
+  "original_diagnostic_path": "/Users/adalundhe/.cache/hex-lead/transfers/runtime-device-contract-01a1c643-0429d084-v2/raw-staged-whitespace-check.txt",
+  "original_diagnostic_sha256": "57bb5a764e6cb729ce7daa20f0f7225fb119fd9799f2ba7e2b19461cf0f6aa84",
+  "disposition": "Raw bytes preserved; six exact warnings recorded, no ignore rule or normalization."
+}

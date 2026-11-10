@@ -40,6 +40,18 @@ impl BoxId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Copies an already validated identity when a feature's ownership transfer must be fallible.
+    pub fn try_clone(&self) -> Result<Self, Refusal> {
+        let mut copy = String::new();
+        copy.try_reserve_exact(self.0.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "box id",
+                bound: self.0.len(),
+            })?;
+        copy.push_str(&self.0);
+        Ok(Self(copy))
+    }
 }
 
 impl std::fmt::Display for BoxId {
@@ -64,6 +76,15 @@ impl From<BoxId> for String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AC-T7.3.1: a runtime offer can own its record's validated holder without infallible cloning.
+    #[test]
+    fn try_clone_preserves_the_exact_validated_identity() {
+        let original = BoxId::new("device-holder.1_2+3").unwrap();
+        let copy = original.try_clone().unwrap();
+        assert_eq!(copy, original);
+        assert_eq!(copy.as_str(), "device-holder.1_2+3");
+    }
 
     #[test]
     fn an_id_is_never_a_path_or_empty() {

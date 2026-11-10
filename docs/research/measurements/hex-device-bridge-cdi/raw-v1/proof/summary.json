@@ -1,0 +1,149 @@
+{
+  "build_exit": 0,
+  "binary": "/Users/adalundhe/.cache/hex-cdi-01a1c640-9cb5953c-v1/target/debug/deps/hex_core-20ae9c8214162dc5",
+  "binary_sha256": "36180025962547a46e5176853409e6e2e7a8c3249af3bade879323f03ec74653",
+  "tests": [
+    {
+      "name": "cdi::tests::caller_bounds_are_exact_and_selection_failure_is_atomic",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-01a1c640-9cb5953c-v1/target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "cdi::tests::caller_bounds_are_exact_and_selection_failure_is_atomic",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 18623,
+      "reaped": true,
+      "ran_one": true,
+      "log": "test-0.log",
+      "log_sha256": "cd1a07c8f3748b50ed4e992b980a8ebc10b701be891a5e5364c9a91a2ae26a48"
+    },
+    {
+      "name": "cdi::tests::edit_validation_does_not_invent_cross_object_conflicts",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-01a1c640-9cb5953c-v1/target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "cdi::tests::edit_validation_does_not_invent_cross_object_conflicts",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 18624,
+      "reaped": true,
+      "ran_one": true,
+      "log": "test-1.log",
+      "log_sha256": "c321b0aecb365765266b03097adacd1da1c102a4ea80a620c94e4194f356ae71"
+    },
+    {
+      "name": "cdi::tests::private_content_is_absent_from_error_and_debug_ergonomics",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-01a1c640-9cb5953c-v1/target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "cdi::tests::private_content_is_absent_from_error_and_debug_ergonomics",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 18625,
+      "reaped": true,
+      "ran_one": true,
+      "log": "test-2.log",
+      "log_sha256": "f0b2b5cd3ee9c31db6044fc4d823576329e48044d1a8c6807aace71ea663b207"
+    },
+    {
+      "name": "cdi::tests::qualified_grammar_membership_and_duplicates_are_checked",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-01a1c640-9cb5953c-v1/target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "cdi::tests::qualified_grammar_membership_and_duplicates_are_checked",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 18626,
+      "reaped": true,
+      "ran_one": true,
+      "log": "test-3.log",
+      "log_sha256": "05610cae5d07ff907fa0bd6bcfd239d2d9c485eb2a5981253bc568dcf56875e4"
+    },
+    {
+      "name": "cdi::tests::request_order_globals_once_and_last_rdt_match_go_append",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-01a1c640-9cb5953c-v1/target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "cdi::tests::request_order_globals_once_and_last_rdt_match_go_append",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 18627,
+      "reaped": true,
+      "ran_one": true,
+      "log": "test-4.log",
+      "log_sha256": "49e7e4ea27a576ba8de0b59b73528ff8d562688e011831a1825f34b28bb56889"
+    },
+    {
+      "name": "cdi::tests::selection_retains_all_edits_and_only_requested_devices",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-01a1c640-9cb5953c-v1/target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "cdi::tests::selection_retains_all_edits_and_only_requested_devices",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 18628,
+      "reaped": true,
+      "ran_one": true,
+      "log": "test-5.log",
+      "log_sha256": "ba53fb899706f2a2ef4e2a9498d115563b3e867f370c3c44b1b8d7e986adcd78"
+    },
+    {
+      "name": "cdi::tests::unknown_duplicate_and_wrong_json_types_are_typed",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-01a1c640-9cb5953c-v1/target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "cdi::tests::unknown_duplicate_and_wrong_json_types_are_typed",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 18629,
+      "reaped": true,
+      "ran_one": true,
+      "log": "test-6.log",
+      "log_sha256": "cfad071644886451ce28478952ffa6680d3ff71a00c2716733b57e5c2b45ee82"
+    },
+    {
+      "name": "cdi::tests::versions_and_minimum_feature_gates_match_the_pinned_source",
+      "command": [
+        "/Users/adalundhe/.cache/hex-cdi-01a1c640-9cb5953c-v1/target/debug/deps/hex_core-20ae9c8214162dc5",
+        "--exact",
+        "cdi::tests::versions_and_minimum_feature_gates_match_the_pinned_source",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 18630,
+      "reaped": true,
+      "ran_one": true,
+      "log": "test-7.log",
+      "log_sha256": "f5b4718f478c096697c67ac15e0dc90ffa8de4b8ee44895066aa061c4301f858"
+    }
+  ],
+  "selected": 8,
+  "passes": 8,
+  "nonzero": 0,
+  "one_test_per_command": true,
+  "checks": {
+    "clippy-lib": 0,
+    "clippy-tests": 0,
+    "rustfmt": 0
+  },
+  "hashes": {
+    "cdi_sha256": "7ca46313f6c581c4194a9ba4a295cdda11435a285aacca8b304f41e77b6ce740",
+    "tests_sha256": "ec66c85d14110a3c1aae9304f5ff6d095b92197552e70b6c4258cabd12ed5d30"
+  },
+  "scope": "Pure CDI parser/select tests in native arm64 macOS harness; no IO/registry/OCI/native device effects"
+}

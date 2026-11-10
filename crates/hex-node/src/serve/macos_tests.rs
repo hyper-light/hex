@@ -134,6 +134,7 @@ impl Lab {
         let host = Arc::new(TestHost::default());
         host.sim
             .create(BoxSpec {
+                devices: Vec::new(),
                 id: b(),
                 bounds: Bounds::default(),
                 class: ClassSpec::Process,

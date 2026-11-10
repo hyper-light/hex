@@ -1,0 +1,79 @@
+{
+  "source_revision": "44a2df3bb8aeac1ed8ae405c3e933b88ee3f6abe",
+  "fixed_base": "37021c35e64b2a8bab1d35f20f92a0042d874a44",
+  "bundle": {
+    "path": "/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-01a1c640-44a2df3b-v1/proof-bundle.tar.gz",
+    "bytes": 110137,
+    "sha256": "b41259576db34206e56374e2a862ed7ab9dca8b0d9844ad4bc49c532532cda30",
+    "files": 10
+  },
+  "local_proof": "/Users/adalundhe/.cache/hex-lead/transfers/device-recovery-01a1c640-44a2df3b-v1/proof",
+  "core_source_sha256": {
+    "crates/hex-sim/src/peer/adversarial_device_recovery_tests.rs": "c98b6f1e9017e7d1152c4248c8006011389467d4139d455ea198201e95ff89d7",
+    "crates/hex-sim/src/peer.rs": "9de0915a302a0582d6683ee95528054c83d79300d829e172d52f17a265009d5c",
+    "crates/hex-sim/src/index.rs": "a4a59b18b0d45d94c799f0501ac761150d180b9f8797c56b18cca7bd3073c2b7",
+    "crates/hex-sim/src/model.rs": "696cd6a34f5e0f7801955da1512ef942c1f84390f8f52a1f09a8e7dd7252f3ea"
+  },
+  "parent_original_sha256": "3bdec78b35be0c93c491ad65b5b268b312702c56a98202cae01bfe510903c120",
+  "counts": {
+    "passed": 0,
+    "failed": 1,
+    "ignored": 0,
+    "measured": 0,
+    "filtered_out": 158
+  },
+  "exit_code": 101,
+  "selected_test": "peer::adversarial_device_recovery_tests::reboot_with_swapped_gpu_load_keeps_surviving_assignment_and_never_grants_it_twice",
+  "log_sha256": "6cbaa37df4769f9a3a4471561eaff2b9c52f5c0585161f3fa4f4b1db9c9b8a52",
+  "source_unchanged": true,
+  "all_member_hashes_verified": true,
+  "owned_child_reaped": true,
+  "expected_holds": {
+    "old": [
+      0
+    ],
+    "fresh": [
+      1
+    ]
+  },
+  "observed_holds": {
+    "old_before": [
+      0
+    ],
+    "old_after_recovery": [
+      1
+    ],
+    "fresh": [
+      0
+    ]
+  },
+  "model_assignment_collision": [
+    0
+  ],
+  "cleanup": {
+    "assignments": 0,
+    "owned": 0,
+    "ran": 0,
+    "charge": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "records": "epoch_only"
+  },
+  "sibling_survived": true,
+  "cpu_progress_confirmed": true,
+  "native_gpu_effect": false,
+  "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "platform": "macOS-26.4-arm64-arm-64bit",
+  "nice": "20",
+  "binaries": [
+    {
+      "path": "/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-01a1c640-44a2df3b-v1/target/debug/deps/hex_sim-9ebd5bc0b4cd9747",
+      "sha256": "b27e191583ee83b9c7f953aa8c8824410a0dbd1a804208319299e1e94d799e2c",
+      "bytes": 13872808
+    }
+  ]
+}

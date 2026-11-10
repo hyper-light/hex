@@ -29,7 +29,8 @@ use std::fmt::Write;
 use crate::index::{FitIndex, Pick, Scorer, Verdict};
 use crate::lb;
 use crate::model::{
-    Arch, Ask, Class, Demand, Kind, ModelId, NodeId, NodeSpec, Os, Resources, WorkloadId,
+    Arch, Ask, Class, Demand, Device, DeviceKind, Kind, ModelId, NodeId, NodeSpec, Os, Resources,
+    WorkloadId,
 };
 use crate::rng::Rng;
 use crate::start_cost::{Rates, StartObservation, Terms};
@@ -702,13 +703,6 @@ impl Node {
                     };
                     let demand = demand_of(&mut words, models)?;
                     let workload = workload(&mut next_workload)?;
-                    if let State::At(n) | State::Created(n) | State::Deleting(n) = state {
-                        if view.verdict(n, &demand) != Ok(Verdict::Admits) {
-                            return Err(damaged("an owned box past its node's admission"));
-                        }
-                        view.take(n, workload, &demand)
-                            .map_err(|e| Stop::Damaged(e.to_string()))?;
-                    }
                     if owned.len() >= budget.owned {
                         return Err(Stop::Full {
                             what: "owned records",
@@ -730,7 +724,11 @@ impl Node {
                     if ran.contains_key(&key) {
                         return Err(damaged("a repeated runner row"));
                     }
-                    let owner = NodeId(number(&mut words)?);
+                    let (owner, binding) = runner_owner(
+                        words.next().ok_or_else(|| damaged("a record's owner"))?,
+                        &spec.devices,
+                    )
+                    .map_err(|why| Stop::Damaged(format!("runner {key:?}: {why:?}")))?;
                     if owner.0 != key.owner || !known(owner) {
                         return Err(damaged("a record's owner"));
                     }
@@ -741,6 +739,24 @@ impl Node {
                         _ => return Err(damaged("a record's end")),
                     };
                     let demand = demand_of(&mut words, models)?;
+                    let binding = match binding {
+                        Some(binding) => binding,
+                        None if demand.need.gpus == 0
+                            && demand.ask.vfio == 0
+                            && demand.ask.block == 0
+                            && demand.ask.net == 0 =>
+                        {
+                            Vec::new()
+                        }
+                        None => {
+                            return Err(Stop::Damaged(format!(
+                                "runner {key:?} has no durable chosen-device binding"
+                            )));
+                        }
+                    };
+                    admission
+                        .check_recovered_devices(id, &demand, &binding)
+                        .map_err(|why| Stop::Damaged(format!("runner {key:?}: {why}")))?;
                     if ran.len() >= budget.ran {
                         return Err(Stop::Full {
                             what: "runner records",
@@ -749,14 +765,17 @@ impl Node {
                     }
                     ran.insert(
                         key,
-                        Ran {
-                            owner,
-                            demand,
-                            workload: workload(&mut next_workload)?,
-                            created,
-                            ended,
-                            at: None,
-                        },
+                        (
+                            Ran {
+                                owner,
+                                demand,
+                                workload: workload(&mut next_workload)?,
+                                created,
+                                ended,
+                                at: None,
+                            },
+                            binding,
+                        ),
                     );
                 }
                 _ => return Err(damaged("a record's kind")),
@@ -764,7 +783,7 @@ impl Node {
         }
         if ran
             .iter()
-            .any(|(key, r)| owned.get(key).is_some_and(|o| o.demand != r.demand))
+            .any(|(key, (r, _))| owned.get(key).is_some_and(|o| o.demand != r.demand))
         {
             return Err(damaged("owned and runner rows disagree on the demand"));
         }
@@ -777,20 +796,44 @@ impl Node {
             return Err(damaged("an owned row ahead of its epoch"));
         }
         let epoch = epoch.checked_add(1).ok_or_else(|| damaged("the epoch"))?;
+        // Only temporary decoded claims/facts live here. The indices own all restored holders.
+        let ran: BTreeMap<_, _> = ran
+            .into_iter()
+            .map(|(key, (runner, binding))| (key, (runner, binding, runtime(key))))
+            .collect();
+        for (key, own) in &owned {
+            if let State::At(at) | State::Created(at) | State::Deleting(at) = own.state {
+                if at == id
+                    && let Some((_, binding, Boxed::Running)) = ran.get(key)
+                {
+                    view.take_recovered(at, own.workload, &own.demand, binding)
+                        .map_err(|why| Stop::Damaged(format!("owner {key:?}: {why}")))?;
+                } else {
+                    // Remote/pending owner guesses are still fresh selection, not runtime truth.
+                    if view.verdict(at, &own.demand) != Ok(Verdict::Admits) {
+                        return Err(damaged("an owned box past its node's admission"));
+                    }
+                    view.take(at, own.workload, &own.demand)
+                        .map_err(|why| Stop::Damaged(why.to_string()))?;
+                }
+            }
+        }
         let mut ledger = lb::Runner::new(lb::RunnerId(id.0), amounts(&spec.capacity), 1);
         let (mut kept, mut keys, mut recovered) = (Vec::new(), Vec::new(), BTreeMap::new());
-        for (key, mut r) in ran {
-            match (r.ended, runtime(key)) {
+        // Invalid later bindings must not leave earlier recovered rows rewritten or removed.
+        let mut changes = Vec::new();
+        changes
+            .try_reserve_exact(ran.len())
+            .map_err(|_| damaged("recovery write allocation"))?;
+        for (key, (mut r, binding, actual)) in ran {
+            match (r.ended, actual) {
                 (true, Boxed::Running) => {
                     return Err(damaged("an ended record whose runtime still runs"));
                 }
                 (false, Boxed::Running) => {
-                    if admission.verdict(id, &r.demand) != Ok(Verdict::Admits) {
-                        return Err(damaged("a kept box past the node's admission"));
-                    }
                     admission
-                        .take(id, r.workload, &r.demand)
-                        .map_err(|e| Stop::Damaged(e.to_string()))?;
+                        .take_recovered(id, r.workload, &r.demand, &binding)
+                        .map_err(|why| Stop::Damaged(format!("runner {key:?}: {why}")))?;
                     kept.push(lb::Kept {
                         owner: lb::OwnerId(r.owner.0),
                         run: lb::Handle::NONE,
@@ -799,16 +842,16 @@ impl Node {
                     keys.push(key);
                     if !r.created {
                         r.created = true;
-                        records.put(&key.name("ran"), &ran_text(&r, models)?)?;
+                        changes.push((key, Some(ran_text(&r, models, &spec.devices, &binding)?)));
                     }
                 }
                 (false, Boxed::Exited) => {
                     r.created = true;
                     r.ended = true;
-                    records.put(&key.name("ran"), &ran_text(&r, models)?)?;
+                    changes.push((key, Some(ran_text(&r, models, &spec.devices, &binding)?)));
                 }
                 (false, Boxed::Absent) => {
-                    records.remove(&key.name("ran"))?;
+                    changes.push((key, None));
                     continue;
                 }
                 (true, _) => {}
@@ -819,6 +862,12 @@ impl Node {
             let at = at.ok_or_else(|| damaged("a kept box past the node's room"))?;
             if let Some(r) = recovered.get_mut(key) {
                 r.at = Some(at);
+            }
+        }
+        for (key, row) in changes {
+            match row {
+                Some(row) => records.put(&key.name("ran"), &row)?,
+                None => records.remove(&key.name("ran"))?,
             }
         }
         records.put("epoch", &epoch_text(epoch, &start_rows)?)?;
@@ -1059,6 +1108,40 @@ impl Node {
     /// At most Budget::ran entries: (key, actually created, ended), including pending admissions.
     pub fn ran_keys(&self) -> impl Iterator<Item = (Key, bool, bool)> + '_ {
         self.ran.iter().map(|(&key, r)| (key, r.created, r.ended))
+    }
+
+    /// Exact receiver-side choices for a known active local runner; no fresh picker runs.
+    pub fn assigned_devices(&self, key: Key) -> Option<crate::model::Held> {
+        self.ran
+            .get(&key)
+            .filter(|runner| !runner.ended)
+            .map(|runner| self.admission.holds(self.id, runner.workload))
+    }
+
+    /// Selected current device metadata, copied from the receiver's sole holder authority.
+    pub fn assigned_device_specs(&self, key: Key) -> Result<Option<Vec<Device>>, Stop> {
+        self.ran
+            .get(&key)
+            .filter(|runner| !runner.ended)
+            .map(|runner| {
+                self.admission
+                    .held_devices(self.id, runner.workload)
+                    .map_err(|why| Stop::Damaged(why.to_string()))
+            })
+            .transpose()
+    }
+
+    fn runner_text(&self, runner: &Ran) -> Result<String, Stop> {
+        let devices = self
+            .admission
+            .devices(self.id)
+            .map_err(|why| Stop::Damaged(why.to_string()))?;
+        ran_text(
+            runner,
+            &self.models,
+            devices,
+            &self.admission.holds(self.id, runner.workload),
+        )
     }
 
     /// A client asks a box: its row first, then its answer, then its place.
@@ -1451,7 +1534,7 @@ impl Node {
             at: Some(at),
             ended: false,
         };
-        records.put(&key.name("ran"), &ran_text(&r, &self.models)?)?;
+        records.put(&key.name("ran"), &self.runner_text(&r)?)?;
         self.ran.insert(key, r);
         self.told.push(Told::Create(key, demand));
         Ok(())
@@ -1490,7 +1573,7 @@ impl Node {
         }
         if !r.created {
             r.created = true;
-            records.put(&key.name("ran"), &ran_text(&r, &self.models)?)?;
+            records.put(&key.name("ran"), &self.runner_text(&r)?)?;
             self.ran.insert(key, r);
         }
         Ok(vec![(r.owner, Msg::Started { key })])
@@ -1552,7 +1635,7 @@ impl Node {
             ended: true,
             ..r
         };
-        records.put(&key.name("ran"), &ran_text(&ended, &self.models)?)?;
+        records.put(&key.name("ran"), &self.runner_text(&ended)?)?;
         self.release(&r)?;
         if let Some(r) = self.ran.get_mut(&key) {
             r.created = true;
@@ -1669,7 +1752,88 @@ fn own_text(state: State, demand: &Demand, models: &[String]) -> Result<String, 
     Ok(format!("{word} {n} {}", demand_text(demand, models)?))
 }
 
-fn ran_text(r: &Ran, models: &[String]) -> Result<String, Stop> {
+/// Chosen devices recorded in a runner row, using the same format parser as boot.
+/// Legacy rows return None; explicit CPU-only bindings return Some(empty).
+pub fn recorded_device_specs(row: &str, devices: &[Device]) -> Result<Option<Vec<Device>>, Stop> {
+    let word = row
+        .split(' ')
+        .next()
+        .ok_or_else(|| damaged("a record's owner"))?;
+    let (_, binding) = runner_owner(word, devices)?;
+    let Some(indices) = binding else {
+        return Ok(None);
+    };
+    let mut selected = Vec::new();
+    selected
+        .try_reserve_exact(indices.len())
+        .map_err(|_| damaged("recorded device allocation"))?;
+    for index in indices {
+        let device = devices
+            .get(usize::from(index))
+            .copied()
+            .ok_or_else(|| damaged("recorded device index out of range"))?;
+        selected.push(device);
+    }
+    Ok(Some(selected))
+}
+
+fn runner_owner(
+    word: &str,
+    devices: &[Device],
+) -> Result<(NodeId, Option<crate::model::Held>), Stop> {
+    let Some(binding) = word.strip_prefix("bindings1:") else {
+        return word
+            .parse()
+            .map(|owner| (NodeId(owner), None))
+            .map_err(|_| damaged("invalid runner owner or binding version"));
+    };
+    let mut words = binding.split(':');
+    let owner = NodeId(number(&mut words)?);
+    let count: usize = number(&mut words)?;
+    if count > devices.len() {
+        return Err(damaged("runner binding count exceeds node devices"));
+    }
+    let mut held = Vec::new();
+    held.try_reserve_exact(count)
+        .map_err(|_| damaged("runner binding allocation"))?;
+    for _ in 0..count {
+        let index = match words.next() {
+            Some("s") => {
+                let index: u16 = number(&mut words)?;
+                if devices
+                    .get(usize::from(index))
+                    .is_none_or(|device| device.key.is_some())
+                {
+                    return Err(damaged("synthetic binding has no matching synthetic slot"));
+                }
+                index
+            }
+            Some("p") => {
+                let kind = match words.next() {
+                    Some("gpu") => DeviceKind::Gpu,
+                    Some("vfio") => DeviceKind::Vfio,
+                    Some("block") => DeviceKind::Block,
+                    Some("net") => DeviceKind::Net,
+                    _ => return Err(damaged("a physical binding's device kind")),
+                };
+                let key: u64 = number(&mut words)?;
+                let at = devices
+                    .iter()
+                    .position(|device| device.kind == kind && device.key == Some(key))
+                    .ok_or_else(|| damaged("a physical binding's device is missing"))?;
+                u16::try_from(at).map_err(|_| damaged("physical binding index overflow"))?
+            }
+            _ => return Err(damaged("a runner binding's representation")),
+        };
+        held.push(index);
+    }
+    if words.next().is_some() {
+        return Err(damaged("trailing runner bindings"));
+    }
+    Ok((owner, Some(held)))
+}
+
+fn ran_text(r: &Ran, models: &[String], devices: &[Device], held: &[u16]) -> Result<String, Stop> {
     let state = if r.ended {
         "ended"
     } else if r.created {
@@ -1677,11 +1841,62 @@ fn ran_text(r: &Ran, models: &[String]) -> Result<String, Stop> {
     } else {
         "creating"
     };
-    Ok(format!(
-        "{} {state} {}",
-        r.owner.0,
-        demand_text(&r.demand, models)?
-    ))
+    let demand = demand_text(&r.demand, models)?;
+    let number_bytes = usize::try_from(u32::MAX.ilog10())
+        .ok()
+        .and_then(|n| n.checked_add(1))
+        .ok_or_else(|| damaged("runner number width"))?;
+    let index_bytes = usize::try_from(u16::MAX.ilog10())
+        .ok()
+        .and_then(|n| n.checked_add(1))
+        .ok_or_else(|| damaged("runner index width"))?;
+    let key_bytes = usize::try_from(u64::MAX.ilog10())
+        .ok()
+        .and_then(|n| n.checked_add(1))
+        .ok_or_else(|| damaged("runner physical key width"))?;
+    let claim_bytes = ":p:block:"
+        .len()
+        .checked_add(key_bytes)
+        .zip(":s:".len().checked_add(index_bytes))
+        .map(|(physical, synthetic)| physical.max(synthetic))
+        .ok_or_else(|| damaged("runner binding width"))?;
+    // Actual device count and u16/u64 decimal widths bound explicit slot/physical claims.
+    let max = demand
+        .len()
+        .checked_add("bindings1:: creating ".len())
+        .and_then(|n| n.checked_add(number_bytes.checked_mul(2)?))
+        .and_then(|n| n.checked_add(held.len().checked_mul(claim_bytes)?))
+        .ok_or_else(|| damaged("runner row byte bound"))?;
+    let count = u32::try_from(held.len()).map_err(|_| damaged("runner binding count"))?;
+    let mut out = BoundedText {
+        text: String::new(),
+        max,
+    };
+    out.text
+        .try_reserve_exact(max)
+        .map_err(|_| damaged("runner row allocation"))?;
+    write!(&mut out, "bindings1:{}:{count}", r.owner.0)
+        .map_err(|_| damaged("formatting runner bindings"))?;
+    for index in held {
+        let device = devices
+            .get(usize::from(*index))
+            .ok_or_else(|| damaged("runner binding index out of range"))?;
+        if let Some(key) = device.key {
+            let kind = match device.kind {
+                DeviceKind::Gpu => "gpu",
+                DeviceKind::Vfio => "vfio",
+                DeviceKind::Block => "block",
+                DeviceKind::Net => "net",
+            };
+            write!(&mut out, ":p:{kind}:{key}")
+                .map_err(|_| damaged("formatting physical runner binding"))?;
+        } else {
+            write!(&mut out, ":s:{index}")
+                .map_err(|_| damaged("formatting synthetic runner binding"))?;
+        }
+    }
+    write!(&mut out, " {state} {demand}").map_err(|_| damaged("formatting runner row"))?;
+    Ok(out.text)
 }
 
 /// Records in memory, for the simulator: what a node's disk keeps across its crashes.
@@ -2273,6 +2488,9 @@ pub fn memory(nodes: u32, capacity: Resources, seed: u64) -> Result<World<Memory
 }
 
 #[cfg(test)]
+mod adversarial_device_recovery_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -2545,6 +2763,8 @@ mod tests {
         spec.devices = vec![
             crate::model::Device {
                 kind: crate::model::DeviceKind::Vfio,
+                key: None,
+                available: true,
                 model: ModelId::UNNAMED,
                 size: 0,
                 load: crate::model::GpuLoad::default()
@@ -2605,6 +2825,8 @@ mod tests {
         spec.devices.extend(
             [DeviceKind::Vfio, DeviceKind::Block, DeviceKind::Net].map(|kind| Device {
                 kind,
+                key: None,
+                available: true,
                 model: ModelId::UNNAMED,
                 size: 1 << 30,
                 load: GpuLoad::default(),
@@ -2961,6 +3183,8 @@ mod tests {
         let mut spec = NodeSpec::new(NodeId(0), CAP);
         spec.devices = vec![Device {
             kind: DeviceKind::Vfio,
+            key: None,
+            available: true,
             model: ModelId::UNNAMED,
             size: 0,
             load: GpuLoad::default(),

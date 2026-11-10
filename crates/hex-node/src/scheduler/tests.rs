@@ -40,6 +40,7 @@ fn replayed_deletion_does_not_interrupt_the_reconnected_peer() {
             },
             Payload {
                 spec: BoxSpec {
+                    devices: Vec::new(),
                     id: BoxId::new("cancel-me").unwrap(),
                     bounds: Bounds {
                         cpu_max_milli: Some(hex_api::MIN_CPU_MILLI),
@@ -176,6 +177,7 @@ fn laptop_dispatch_and_common_wire_keep_the_box_until_explicit_delete() {
     };
     let payload = Payload {
         spec: BoxSpec {
+            devices: Vec::new(),
             id: BoxId::new("caller-name").unwrap(),
             bounds: Bounds {
                 cpu_max_milli: Some(hex_api::MIN_CPU_MILLI),
@@ -248,6 +250,7 @@ fn laptop_dispatch_and_common_wire_keep_the_box_until_explicit_delete() {
     assert_eq!(status.physical, Some(physical.clone()));
     assert!(matches!(
         client.create(BoxSpec {
+            devices: Vec::new(),
             id: BoxId::new("bypass").unwrap(),
             bounds: Bounds::default(),
             class: ClassSpec::Process,
@@ -359,6 +362,7 @@ fn cold_remote_creation_feedback_survives_owner_publication_busy() {
             },
             Payload {
                 spec: BoxSpec {
+                    devices: Vec::new(),
                     id: BoxId::new("first-cold-feedback").unwrap(),
                     bounds: Bounds {
                         cpu_max_milli: Some(hex_api::MIN_CPU_MILLI),
@@ -569,6 +573,7 @@ fn capacity_budget_request(boxes: u32) -> (Demand, Payload) {
         },
         Payload {
             spec: BoxSpec {
+                devices: Vec::new(),
                 id: BoxId::new("capacity-budget").unwrap(),
                 bounds: Bounds {
                     cpu_max_milli: Some(cpu),
@@ -836,6 +841,7 @@ fn local_advertise_retry_pace_does_not_learn_its_own_pauses() {
             },
             Payload {
                 spec: BoxSpec {
+                    devices: Vec::new(),
                     id: BoxId::new("local-advertise-timing").unwrap(),
                     bounds: Bounds {
                         cpu_max_milli: Some(hex_api::MIN_CPU_MILLI),

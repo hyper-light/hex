@@ -270,6 +270,8 @@ impl Facts {
         for f in self.devices.iter().filter(|f| given(f.kind)) {
             devices.push(Device {
                 kind: f.kind,
+                key: None,
+                available: true,
                 model: ModelId::UNNAMED,
                 size: f.size,
                 load: GpuLoad::default(),

@@ -1,0 +1,108 @@
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded chacha20 v0.10.2
+  Downloaded errno v0.3.14
+  Downloaded rand_xorshift v0.5.0
+  Downloaded cfg-if v1.0.5
+  Downloaded proc-macro-crate v3.5.0
+  Downloaded cfg_aliases v0.2.2
+  Downloaded cap v0.1.2
+  Downloaded equivalent v1.0.3
+  Downloaded quick-error v1.2.3
+  Downloaded wait-timeout v0.2.1
+  Downloaded fnv v1.0.7
+  Downloaded bit-vec v0.10.1
+  Downloaded thiserror v2.0.21
+  Downloaded bit-set v0.11.1
+  Downloaded rusty-fork v0.3.1
+  Downloaded autocfg v1.5.1
+  Downloaded core_detect v1.0.0
+  Downloaded thiserror-impl v2.0.21
+  Downloaded rand_core v0.10.1
+  Downloaded fastrand v2.5.0
+  Downloaded unarray v0.1.4
+  Downloaded quote v1.0.47
+  Downloaded borsh-derive v1.8.1
+  Downloaded once_cell v1.21.4
+  Downloaded unicode-ident v1.0.27
+  Downloaded toml_datetime v1.1.2+spec-1.1.0
+  Downloaded tempfile v3.27.0
+  Downloaded bitflags v2.13.2
+  Downloaded serde_core v1.0.229
+  Downloaded toml_parser v1.1.5+spec-1.1.0
+  Downloaded getrandom v0.4.3
+  Downloaded toml_edit v0.25.17+spec-1.1.0
+  Downloaded serde_derive v1.0.229
+  Downloaded num-traits v0.2.19
+  Downloaded bytes v1.12.1
+  Downloaded borsh v1.8.1
+  Downloaded proc-macro2 v1.0.107
+  Downloaded serde v1.0.229
+  Downloaded memchr v2.8.3
+  Downloaded rand v0.10.3
+  Downloaded indexmap v2.14.2
+  Downloaded hashbrown v0.17.1
+  Downloaded winnow v1.0.4
+  Downloaded proptest v1.12.0
+  Downloaded syn v3.0.9
+  Downloaded rustix v1.1.5
+  Downloaded regex-syntax v0.8.11
+  Downloaded libc v0.2.191
+   Compiling libc v0.2.191
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.27
+   Compiling quote v1.0.47
+   Compiling rand_core v0.10.1
+   Compiling cfg-if v1.0.5
+   Compiling getrandom v0.4.3
+   Compiling syn v3.0.9
+   Compiling rustix v1.1.5
+   Compiling errno v0.3.14
+   Compiling bitflags v2.13.2
+   Compiling autocfg v1.5.1
+   Compiling num-traits v0.2.19
+   Compiling thiserror v2.0.21
+   Compiling serde_core v1.0.229
+   Compiling once_cell v1.21.4
+   Compiling fastrand v2.5.0
+   Compiling tempfile v3.27.0
+   Compiling thiserror-impl v2.0.21
+   Compiling wait-timeout v0.2.1
+   Compiling bit-vec v0.10.1
+   Compiling quick-error v1.2.3
+   Compiling serde v1.0.229
+   Compiling fnv v1.0.7
+   Compiling rusty-fork v0.3.1
+   Compiling bit-set v0.11.1
+   Compiling rand v0.10.3
+   Compiling serde_derive v1.0.229
+   Compiling chacha20 v0.10.2
+   Compiling rand_xorshift v0.5.0
+   Compiling hyper-timing v0.1.0 (/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-01a1c640-44a2df3b-v1/source/vendor/hyper-raft/crates/hyper-timing)
+   Compiling regex-syntax v0.8.11
+   Compiling unarray v0.1.4
+   Compiling core_detect v1.0.0
+   Compiling proptest v1.12.0
+   Compiling hyper-swim v0.1.0 (/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-01a1c640-44a2df3b-v1/source/vendor/hyper-raft/crates/hyper-swim)
+   Compiling hex-health v0.1.0 (/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-01a1c640-44a2df3b-v1/source/crates/hex-health)
+   Compiling cap v0.1.2
+   Compiling hex-sim v0.1.0 (/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-01a1c640-44a2df3b-v1/source/crates/hex-sim)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 55.13s
+     Running unittests src/lib.rs (/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-01a1c640-44a2df3b-v1/target/debug/deps/hex_sim-9ebd5bc0b4cd9747)
+
+running 1 test
+test peer::adversarial_device_recovery_tests::reboot_with_swapped_gpu_load_keeps_surviving_assignment_and_never_grants_it_twice ... device-recovery PURE expected_old=[0] expected_fresh=[1] old=Key { owner: 0, epoch: 1, seq: 0 } fresh=Key { owner: 0, epoch: 2, seq: 0 } sibling=Key { owner: 0, epoch: 1, seq: 1 } progress=Key { owner: 0, epoch: 2, seq: 1 } before_held=[0] recovered_held=[1] old_after_fresh=[1] fresh_held=[0] collisions=[0] before_assignments={Key { owner: 0, epoch: 1, seq: 0 }: [0], Key { owner: 0, epoch: 1, seq: 1 }: []} after_assignments={Key { owner: 0, epoch: 1, seq: 0 }: [0], Key { owner: 0, epoch: 1, seq: 1 }: [], Key { owner: 0, epoch: 2, seq: 0 }: [0], Key { owner: 0, epoch: 2, seq: 1 }: []} runtime_observations=[(Key { owner: 0, epoch: 1, seq: 0 }, [0]), (Key { owner: 0, epoch: 1, seq: 1 }, [])] sibling_survived=true progress_confirmed=true admitted_before_cleanup=[400, 2048, 0, 2] creates=4 deletes=4 cleanup_assignments=0 cleanup_own=0 cleanup_ran=0 cleanup_charge=0 cleanup_records=epoch_only old_runner_record="0 running d1 session oci 100 512 1 0 linux x86_64 fixture-gpu 1024 0 0 0 0 0" native_gpu_effect=false
+
+thread 'peer::adversarial_device_recovery_tests::reboot_with_swapped_gpu_load_keeps_surviving_assignment_and_never_grants_it_twice' (24828150) panicked at crates/hex-sim/src/peer/adversarial_device_recovery_tests.rs:215:5:
+recovery re-granted a surviving fixture assignment: [0]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    peer::adversarial_device_recovery_tests::reboot_with_swapped_gpu_load_keeps_surviving_assignment_and_never_grants_it_twice
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 158 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p hex-sim --lib`

@@ -207,6 +207,7 @@ impl Lab {
         let host = Arc::new(TestHost::default());
         host.sim
             .create(BoxSpec {
+                devices: Vec::new(),
                 id: BoxId::new("b").unwrap(),
                 bounds: Bounds::default(),
                 class: ClassSpec::Process,
@@ -873,6 +874,7 @@ fn a_list_longer_than_one_message_comes_whole() {
         lab.host
             .sim
             .create(BoxSpec {
+                devices: Vec::new(),
                 id: BoxId::new(&format!("many-{n:04}")).unwrap(),
                 bounds: Bounds::default(),
                 class: ClassSpec::Process,

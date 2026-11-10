@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Bounds, BoxId, Refusal};
+use crate::{Bounds, BoxId, DeviceId, Refusal};
 
 /// What a box holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -36,6 +36,9 @@ pub struct BoxSpec {
     /// spec without it names no owner (append-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<BoxOwner>,
+    /// Exact identities requested from the runtime pool, never an implicit class-wide grant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<DeviceId>,
 }
 
 impl BoxSpec {
@@ -43,11 +46,30 @@ impl BoxSpec {
     /// a structured container's spec, each refused by its field's name (CLAUDE.md §3).
     pub fn check(&self) -> Result<(), Refusal> {
         self.bounds.check()?;
+        self.check_devices()?;
         if let Some(owner) = &self.owner {
             owner.check()?;
         }
         if let ClassSpec::Oci(oci) = &self.class {
             oci.check()?;
+        }
+        Ok(())
+    }
+
+    /// The physical claims alone, also checked by the wire without changing its other field codecs.
+    pub fn check_devices(&self) -> Result<(), Refusal> {
+        crate::devices::check_ids(self.devices.iter().copied())
+    }
+
+    /// An adapter without device attachment refuses before creating any physical or durable state.
+    pub fn check_no_devices(&self, platform: &'static str) -> Result<(), Refusal> {
+        self.check()?;
+        if !self.devices.is_empty() {
+            return Err(Refusal::Platform {
+                what: "devices",
+                platform,
+                why: "this runtime does not attach physical device claims".to_owned(),
+            });
         }
         Ok(())
     }

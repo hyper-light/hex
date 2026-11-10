@@ -8,6 +8,346 @@ use super::*;
 use hex_api::{Bounds, BoxOwner, BoxSpec, IoRates, Mount, Network, OciSpec, Program, Rootfs, User};
 use proptest::prelude::*;
 
+fn device_claims() -> Vec<DeviceId> {
+    vec![
+        DeviceId {
+            kind: DeviceKind::Net,
+            key: u64::from(u32::MAX),
+        },
+        DeviceId {
+            kind: DeviceKind::Gpu,
+            key: 0x1234_5678_abcd,
+        },
+        DeviceId {
+            kind: DeviceKind::Block,
+            key: u64::MAX,
+        },
+        DeviceId {
+            kind: DeviceKind::Vfio,
+            key: 0,
+        },
+    ]
+}
+
+fn device_spec(devices: Vec<DeviceId>) -> BoxSpec {
+    BoxSpec {
+        id: id("device-wire"),
+        bounds: Bounds::default(),
+        class: ClassSpec::Process,
+        owner: None,
+        devices,
+    }
+}
+
+fn device_capacity(devices: Vec<DeviceInfo>) -> Capacity {
+    Capacity {
+        id: "physical-pool".to_owned(),
+        total: CapacityResources::default(),
+        free: CapacityResources::default(),
+        devices,
+    }
+}
+
+fn device_offer(device: DeviceId) -> DeviceInfo {
+    DeviceInfo {
+        id: device,
+        model: "synthetic-private-model-é".to_owned(),
+        size: u64::MAX,
+        holder: Some(id("synthetic-private-holder")),
+    }
+}
+
+// Keep all preceding fields exactly as the real codec writes them; replace only the device tail.
+fn with_device_tail(offer: bool, tail: &[u8]) -> Vec<u8> {
+    let mut bytes = if offer {
+        answer(
+            91,
+            &Answer::Capacity(Some(device_capacity(Vec::new()))),
+            MAX_MESSAGE,
+        )
+        .unwrap()
+    } else {
+        request(
+            91,
+            &Request::Call(Call::Create(Box::new(device_spec(Vec::new())))),
+            MAX_MESSAGE,
+        )
+        .unwrap()
+    };
+    bytes.truncate(bytes.len() - 4);
+    bytes.extend_from_slice(tail);
+    bytes
+}
+
+fn read_device_tail(offer: bool, tail: &[u8]) -> Fault {
+    let bytes = with_device_tail(offer, tail);
+    if offer {
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap_err()
+    } else {
+        read_request(&received(&bytes, 0), MAX_MESSAGE)
+            .unwrap_err()
+            .fault
+    }
+}
+
+/// AC-T7.3.1/HEX-SOCK-1: fixed device tags and LE keys; catalog/claim order and shared kinds survive.
+#[test]
+fn device_claims_and_offers_roundtrip_with_explicit_tags_and_catalog_order() {
+    let devices = device_claims();
+    let mut encoded = Writer::new(MAX_MESSAGE);
+    for device in &devices {
+        put_device_id(&mut encoded, device);
+    }
+    let mut expected = Vec::new();
+    for (tag, key) in [
+        (3, u64::from(u32::MAX)),
+        (0, 0x1234_5678_abcd),
+        (2, u64::MAX),
+        (1, 0),
+    ] {
+        expected.push(tag);
+        expected.extend_from_slice(&key.to_le_bytes());
+    }
+    assert_eq!(encoded.done().unwrap(), expected);
+    let claimed = Request::Call(Call::Create(Box::new(device_spec(devices.clone()))));
+    let bytes = request(91, &claimed, MAX_MESSAGE).unwrap();
+    assert_eq!(&bytes[12..14], &kind::CREATE.to_le_bytes());
+    assert_eq!(
+        read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        claimed
+    );
+    assert_eq!(
+        request(
+            91,
+            &read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            MAX_MESSAGE
+        )
+        .unwrap(),
+        bytes
+    );
+    let mut offers: Vec<_> = devices.into_iter().map(device_offer).collect();
+    offers[1].holder = None;
+    offers[2].model.clear(); // Opaque metadata has no invented naming grammar.
+    let offered = Answer::Capacity(Some(device_capacity(offers)));
+    let bytes = answer(91, &offered, MAX_MESSAGE).unwrap();
+    assert_eq!(&bytes[12..14], &kind::CAPACITY_ANSWER.to_le_bytes());
+    let decoded = read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1;
+    assert_eq!(decoded, offered);
+    assert_eq!(answer(91, &decoded, MAX_MESSAGE).unwrap(), bytes);
+}
+
+/// AC-T7.3.1: malformed claims and offers refuse on both sides, rather than narrowing an identity.
+#[test]
+fn device_codecs_refuse_invalid_keys_and_duplicate_ids_without_private_values() {
+    for device in [
+        DeviceId {
+            kind: DeviceKind::Gpu,
+            key: 1 << 48,
+        },
+        DeviceId {
+            kind: DeviceKind::Vfio,
+            key: 1 << 32,
+        },
+        DeviceId {
+            kind: DeviceKind::Net,
+            key: 0,
+        },
+        DeviceId {
+            kind: DeviceKind::Net,
+            key: 1 << 32,
+        },
+    ] {
+        let claimed = Request::Call(Call::Create(Box::new(device_spec(vec![device]))));
+        assert!(matches!(
+            request(91, &claimed, MAX_MESSAGE),
+            Err(Fault::Value {
+                what: "devices",
+                ..
+            })
+        ));
+        let offered = Answer::Capacity(Some(device_capacity(vec![device_offer(device)])));
+        assert!(matches!(
+            answer(91, &offered, MAX_MESSAGE),
+            Err(Fault::Value {
+                what: "capacity",
+                ..
+            })
+        ));
+        for offer in [false, true] {
+            let mut tail = Writer::new(MAX_MESSAGE);
+            tail.u32(1);
+            put_device_id(&mut tail, &device);
+            if offer {
+                tail.string("synthetic-private-model").unwrap();
+                tail.u64(1);
+                tail.u8(0);
+            }
+            let error = read_device_tail(offer, &tail.done().unwrap());
+            assert!(matches!(
+                error,
+                Fault::Value {
+                    what: "devices.id",
+                    ..
+                }
+            ));
+            assert!(!error.to_string().contains("synthetic-private"));
+            assert!(!error.to_string().contains(&device.key.to_string()));
+        }
+    }
+    let device = device_claims()[0];
+    let claimed = Request::Call(Call::Create(Box::new(device_spec(vec![device, device]))));
+    assert!(request(91, &claimed, MAX_MESSAGE).is_err());
+    let offered = Answer::Capacity(Some(device_capacity(vec![device_offer(device); 2])));
+    assert!(answer(91, &offered, MAX_MESSAGE).is_err());
+    for offer in [false, true] {
+        let mut tail = Writer::new(MAX_MESSAGE);
+        tail.u32(2);
+        for _ in 0..2 {
+            put_device_id(&mut tail, &device);
+            if offer {
+                tail.string("synthetic-private-model").unwrap();
+                tail.u64(1);
+                tail.u8(0);
+            }
+        }
+        let error = read_device_tail(offer, &tail.done().unwrap());
+        assert!(matches!(error, Fault::Value { ref why, .. } if why.contains("duplicate")));
+        assert!(!error.to_string().contains("synthetic-private"));
+    }
+}
+
+/// AC-T7.3.1/HEX-SOCK-2: reject hostile counts before reserving or visiting list elements.
+#[test]
+fn device_lists_refuse_oversized_and_truncated_counts_before_visiting_elements() {
+    for offer in [false, true] {
+        for count in [u32::try_from(MAX_DEVICES + 1).unwrap(), u32::MAX] {
+            assert!(matches!(
+                read_device_tail(offer, &count.to_le_bytes()),
+                Fault::Value {
+                    what: "devices",
+                    ..
+                }
+            ));
+            let bytes = count.to_le_bytes();
+            let mut reader = Reader::new(&bytes);
+            let mut visits = 0;
+            assert!(
+                reader
+                    .device_list::<DeviceId>(if offer { 22 } else { 9 }, |_| {
+                        visits += 1;
+                        panic!("oversized count visited an element")
+                    })
+                    .is_err()
+            );
+            assert_eq!(visits, 0);
+            assert_eq!(reader.at(), 4);
+        }
+        for count in [1, u32::try_from(MAX_DEVICES).unwrap()] {
+            assert!(matches!(
+                read_device_tail(offer, &count.to_le_bytes()),
+                Fault::Truncated { .. }
+            ));
+        }
+        let oversized: Vec<_> = (0..=MAX_DEVICES)
+            .map(|key| DeviceId {
+                kind: DeviceKind::Block,
+                key: key as u64,
+            })
+            .collect();
+        let error = if offer {
+            answer(
+                91,
+                &Answer::Capacity(Some(device_capacity(
+                    oversized.into_iter().map(device_offer).collect(),
+                ))),
+                MAX_MESSAGE,
+            )
+            .unwrap_err()
+        } else {
+            request(
+                91,
+                &Request::Call(Call::Create(Box::new(device_spec(oversized)))),
+                MAX_MESSAGE,
+            )
+            .unwrap_err()
+        };
+        assert!(matches!(error, Fault::Value { .. }));
+    }
+    // A valid API list can exceed this transport's independent byte bound; the writer refuses early.
+    let claimed = Request::Call(Call::Create(Box::new(device_spec(
+        (0..MAX_DEVICES)
+            .map(|key| DeviceId {
+                kind: DeviceKind::Block,
+                key: key as u64,
+            })
+            .collect(),
+    ))));
+    assert!(matches!(
+        request(91, &claimed, MAX_MESSAGE),
+        Err(Fault::Oversized {
+            bound: MAX_MESSAGE,
+            ..
+        })
+    ));
+}
+
+/// AC-T7.3.1/HEX-SOCK-2: unknown tags/invalid holder data are refusals, never default grants or echoes.
+#[test]
+fn device_unknown_tags_and_invalid_metadata_diagnostics_are_redacted() {
+    for offer in [false, true] {
+        for tag in [4, u8::MAX] {
+            let mut tail = Writer::new(MAX_MESSAGE);
+            tail.u32(1);
+            tail.u8(tag);
+            tail.u64(1);
+            if offer {
+                tail.string("synthetic-private-model").unwrap();
+                tail.u64(1);
+                tail.u8(0);
+            }
+            let error = read_device_tail(offer, &tail.done().unwrap());
+            assert!(matches!(
+                error,
+                Fault::Value {
+                    what: "devices.kind",
+                    ..
+                }
+            ));
+            assert!(!error.to_string().contains("synthetic-private"));
+        }
+    }
+    let device = device_claims()[0];
+    let mut tail = Writer::new(MAX_MESSAGE);
+    tail.u32(1);
+    put_device_id(&mut tail, &device);
+    tail.string("synthetic-private-model").unwrap();
+    tail.u64(1);
+    tail.u8(1);
+    tail.string("../synthetic-private-holder").unwrap();
+    let error = read_device_tail(true, &tail.done().unwrap());
+    assert!(matches!(
+        error,
+        Fault::Value {
+            what: "devices.holder",
+            ..
+        }
+    ));
+    assert!(!error.to_string().contains("synthetic-private"));
+    let mut tail = Writer::new(MAX_MESSAGE);
+    tail.u32(1);
+    put_device_id(&mut tail, &device);
+    tail.bytes(&[0xff]).unwrap();
+    tail.u64(1);
+    tail.u8(0);
+    assert!(matches!(
+        read_device_tail(true, &tail.done().unwrap()),
+        Fault::Value {
+            what: "devices.model",
+            ..
+        }
+    ));
+}
+
 /// AC-T7.4.1: capacity travels as a typed call/answer, including native host fallback.
 #[test]
 fn runtime_capacity_roundtrip_and_invalid_room_refused() {
@@ -18,6 +358,7 @@ fn runtime_capacity_roundtrip_and_invalid_room_refused() {
         request
     );
     let capacity = hex_api::Capacity {
+        devices: Vec::new(),
         id: "guest:123:456".into(),
         total: hex_api::CapacityResources {
             cpu_milli: 2_000,
@@ -39,7 +380,7 @@ fn runtime_capacity_roundtrip_and_invalid_room_refused() {
         );
     }
     let mut malformed = answer(42, &Answer::Capacity(Some(capacity.clone())), MAX_MESSAGE).unwrap();
-    let free_memory = malformed.len() - 16;
+    let free_memory = malformed.len() - 20; // The trailing empty device list contributes four bytes.
     malformed[free_memory..free_memory + 8]
         .copy_from_slice(&(capacity.total.mem_bytes + 1).to_le_bytes());
     assert!(read_answer(&received(&malformed, 0), MAX_MESSAGE).is_err());
@@ -85,6 +426,7 @@ fn program() -> Program {
 
 fn oci_spec() -> BoxSpec {
     BoxSpec {
+        devices: Vec::new(),
         id: id("oci-1"),
         bounds: Bounds::default(),
         class: ClassSpec::Oci(Box::new(OciSpec {
@@ -124,6 +466,7 @@ fn requests() -> Vec<(u64, Request, usize)> {
         (
             2,
             Request::Call(Call::Create(Box::new(BoxSpec {
+                devices: Vec::new(),
                 id: b.clone(),
                 bounds: bounds(),
                 class: ClassSpec::Bundle(PathBuf::from("/run/bundle-sleep")),
@@ -135,6 +478,7 @@ fn requests() -> Vec<(u64, Request, usize)> {
         (
             4,
             Request::Call(Call::Create(Box::new(BoxSpec {
+                devices: Vec::new(),
                 id: id("p"),
                 bounds: Bounds::default(),
                 class: ClassSpec::Process,
@@ -199,6 +543,7 @@ fn requests() -> Vec<(u64, Request, usize)> {
 fn run() -> Request {
     Request::Call(Call::Run {
         spec: Box::new(BoxSpec {
+            devices: Vec::new(),
             id: id("r"),
             bounds: bounds(),
             class: ClassSpec::Process,
@@ -590,6 +935,8 @@ fn the_wire_identity_is_its_definitions_digest_line_endings_aside() {
         "../../hex-api/src/spec.rs",
         "../../hex-api/src/id.rs",
         "../../hex-api/src/bounds.rs",
+        "../../hex-api/src/devices.rs",
+        "../../hex-api/src/runtime.rs",
     ];
     let mut sources: Vec<Vec<u8>> = paths
         .iter()
@@ -1070,6 +1417,7 @@ fn any_spec() -> impl Strategy<Value = BoxSpec> {
     ];
     let owner = proptest::option::of(("\\PC{0,16}", any::<bool>()));
     (any_id(), any_bounds(), class, owner).prop_map(|(id, bounds, class, owner)| BoxSpec {
+        devices: Vec::new(),
         id,
         bounds,
         class,

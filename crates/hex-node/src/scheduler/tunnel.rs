@@ -357,6 +357,7 @@ mod tests {
         };
         let payload = schedule::Payload {
             spec: hex_api::BoxSpec {
+                devices: Vec::new(),
                 id: hex_api::BoxId::new("tunnel-admin").unwrap(),
                 bounds: hex_api::Bounds::default(),
                 class: hex_api::ClassSpec::Process,

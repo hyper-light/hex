@@ -227,12 +227,43 @@ impl<R: Recover> Runtime for Recorded<R> {
     /// Records the box as being made before anything is made, so a crash leaves a half-made box known as
     /// one (T-T7.1.2), then as made once the runtime has made it; a refused create leaves no record.
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
+        spec.check()?;
+        let devices = !spec.devices.is_empty();
+        if devices {
+            if self.books.store.get(&spec.id)?.is_some() {
+                return Err(Refusal::Exists(spec.id));
+            }
+            let report =
+                self.runtime
+                    .capacity(spec.class.class())?
+                    .ok_or_else(|| Refusal::Platform {
+                        what: "devices",
+                        platform: std::env::consts::OS,
+                        why: "runtime reports no native attachment catalog".into(),
+                    })?;
+            report.check()?;
+            if spec.devices.iter().any(|id| {
+                !report
+                    .devices
+                    .iter()
+                    .any(|offer| offer.id == *id && offer.holder.is_none())
+            }) {
+                return Err(Refusal::Invalid {
+                    what: "devices",
+                    why: "requested physical identity is unavailable in the native catalog".into(),
+                });
+            }
+        }
         let mut record = BoxRecord::new(spec.clone(), Phase::Creating, Vec::new());
         self.books.store.put(&record)?;
         let info = match self.runtime.create(spec) {
             Ok(info) => info,
             Err(why) => {
-                let _ = self.books.store.remove(&record.spec.id);
+                // A failed device create may have left a native system/keeper handle. Keep its
+                // existing Creating record until delete or recovery proves physical removal.
+                if !devices {
+                    let _ = self.books.store.remove(&record.spec.id);
+                }
                 return Err(why);
             }
         };
@@ -249,6 +280,7 @@ impl<R: Recover> Runtime for Recorded<R> {
     /// run, naming their platform, and an `oci` spec's is refused everywhere; decision 7), so there is no run's box
     /// to record.
     fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        spec.check_no_devices(std::env::consts::OS)?;
         self.runtime.run(spec, program, stdio)
     }
 
@@ -290,11 +322,17 @@ impl<R: Recover> Runtime for Recorded<R> {
     /// Records the box as being deleted, deletes it, then removes its record: a crash between leaves a
     /// record recovery finishes.
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
+        let mut devices = false;
         if let Some(Ok(mut record)) = self.books.store.get(id)? {
+            devices = !record.spec.devices.is_empty();
             record.phase = Phase::Deleting;
             self.books.store.put(&record)?;
         }
-        self.runtime.delete(id)?;
+        match self.runtime.delete(id) {
+            Ok(()) => {}
+            Err(Refusal::NoSuchBox(_)) if devices => {}
+            Err(why) => return Err(why),
+        }
         self.books.store.remove(id)?;
         self.books.abandoned.forget(id);
         if let Ok(mut adopted) = self.books.adopted.lock() {

@@ -1,0 +1,53 @@
+{
+  "pin": "98a7d735d9592c1ccca0130e06b0709f4b65ecbf",
+  "files": [
+    {
+      "path": "SPEC.md",
+      "url": "https://raw.githubusercontent.com/cncf-tags/container-device-interface/98a7d735d9592c1ccca0130e06b0709f4b65ecbf/SPEC.md",
+      "sha256": "014eece66eb577b250ca733a64c086c9fa07abf61e8989eded727f2618e4fc56",
+      "bytes": 16050
+    },
+    {
+      "path": "specs-go/config.go",
+      "url": "https://raw.githubusercontent.com/cncf-tags/container-device-interface/98a7d735d9592c1ccca0130e06b0709f4b65ecbf/specs-go/config.go",
+      "sha256": "abf026b7b89188a39936bd40ce22ff5b4267bb3eb20731fcc2b7cbb024dc5b92",
+      "bytes": 4415
+    },
+    {
+      "path": "specs-go/version.go",
+      "url": "https://raw.githubusercontent.com/cncf-tags/container-device-interface/98a7d735d9592c1ccca0130e06b0709f4b65ecbf/specs-go/version.go",
+      "sha256": "2fc5469032dfe056546266965277fcb62978fcb7765c301fcefa3145844b6312",
+      "bytes": 7415
+    },
+    {
+      "path": "pkg/parser/parser.go",
+      "url": "https://raw.githubusercontent.com/cncf-tags/container-device-interface/98a7d735d9592c1ccca0130e06b0709f4b65ecbf/pkg/parser/parser.go",
+      "sha256": "1e6d283c90b6f3413d4686450705ec39090093229840a5e76fe08ce8c5cf40d3",
+      "bytes": 6481
+    },
+    {
+      "path": "pkg/cdi/spec.go",
+      "url": "https://raw.githubusercontent.com/cncf-tags/container-device-interface/98a7d735d9592c1ccca0130e06b0709f4b65ecbf/pkg/cdi/spec.go",
+      "sha256": "78711929138347a3a00e4a3a82cdbcd3a72246a9bd90b994da6851d940667acb",
+      "bytes": 10283
+    },
+    {
+      "path": "pkg/cdi/device.go",
+      "url": "https://raw.githubusercontent.com/cncf-tags/container-device-interface/98a7d735d9592c1ccca0130e06b0709f4b65ecbf/pkg/cdi/device.go",
+      "sha256": "652d1d6cd6be61b2b16831cd60a6e8bca50ad0d6127ffa329afa80c39999d9ab",
+      "bytes": 2335
+    },
+    {
+      "path": "pkg/cdi/cache.go",
+      "url": "https://raw.githubusercontent.com/cncf-tags/container-device-interface/98a7d735d9592c1ccca0130e06b0709f4b65ecbf/pkg/cdi/cache.go",
+      "sha256": "178611b15cf14b2e1c6ce30faebc72a5a3d27b1bbee7844d46027225e2d429cb",
+      "bytes": 14991
+    },
+    {
+      "path": "pkg/cdi/container-edits.go",
+      "url": "https://raw.githubusercontent.com/cncf-tags/container-device-interface/98a7d735d9592c1ccca0130e06b0709f4b65ecbf/pkg/cdi/container-edits.go",
+      "sha256": "5bc83f07a076ae4d781ae0190c64216629dfe34d00d700ddf034ba4f0785266e",
+      "bytes": 12400
+    }
+  ]
+}

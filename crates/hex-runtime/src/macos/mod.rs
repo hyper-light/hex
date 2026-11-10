@@ -377,7 +377,7 @@ impl Runtime for MacRuntime {
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
-        spec.check()?;
+        spec.check_no_devices("macos")?;
         let ClassSpec::Process = spec.class else {
             return Err(Refusal::Platform {
                 what: "the oci class",
@@ -457,6 +457,7 @@ impl Runtime for MacRuntime {
     /// the run, and only then gives the caller the end. Its kill is the box's KILL, the box holding that program
     /// alone. In both modes: a process group's and a box user's.
     fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        spec.check_no_devices("macos")?;
         spec.check_run()?;
         let id = spec.id.clone();
         self.create(spec)?;

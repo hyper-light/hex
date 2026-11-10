@@ -68,6 +68,7 @@ fn relay_start(key: Key) -> Envelope {
         },
         payload: Some(Payload {
             spec: BoxSpec {
+                devices: Vec::new(),
                 id: BoxId::new("relay-caller").unwrap(),
                 bounds: Bounds {
                     cpu_max_milli: Some(hex_api::MIN_CPU_MILLI),

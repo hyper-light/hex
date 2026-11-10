@@ -13,6 +13,7 @@ use hex_sim::model::{Class, Demand, NodeId, NodeSpec, Resources};
 use hex_sim::peer::{self, Boxed, Budget, Key, Msg, Stop, Told};
 
 pub mod budget;
+mod devices;
 mod rows;
 use rows::{Context, Rows};
 
@@ -248,6 +249,10 @@ impl Driver {
         let mut start = Vec::new();
         let mut retained = Resources::default();
         let mut retained_by_class = BTreeMap::<Class, Resources>::new();
+        let live_node = nodes
+            .iter()
+            .find(|node| node.id == id)
+            .ok_or_else(|| bad("recovery node is not configured"))?;
         for (key, payload) in rows.running()? {
             // Core demand is durable beside this payload; decode it through core boot below.
             // Select its runtime using the shared model codec, without a second decision format.
@@ -258,6 +263,14 @@ impl Driver {
             let physical = physical_id(&namespace, key)?;
             let boxed = match runtime.inspect(&physical) {
                 Ok(info) => {
+                    if !ended && device_request(&demand) {
+                        let selected =
+                            peer::recorded_device_specs(rows.row(key)?, &live_node.devices)?
+                                .ok_or_else(|| {
+                                    bad("a surviving device-bearing box has no durable bindings")
+                                })?;
+                        devices::verify(&runtime, &physical, &devices::physical(selected)?)?;
+                    }
                     if !ended {
                         retained = retained
                             .checked_add(&demand.need)
@@ -277,10 +290,6 @@ impl Driver {
             };
             actual.insert(key, boxed);
         }
-        let live_node = nodes
-            .iter()
-            .find(|node| node.id == id)
-            .ok_or_else(|| bad("recovery node is not configured"))?;
         let live = live_node.capacity;
         let pool_use = |classes: hex_sim::model::Classes| {
             retained_by_class
@@ -634,6 +643,20 @@ impl Driver {
             let id = self.physical_id(key)?;
             let mut spec = payload.spec.clone();
             spec.id = id.clone();
+            let selected = self
+                .lock()?
+                .node
+                .assigned_device_specs(key)?
+                .ok_or_else(|| bad("physical create has no active receiver reservation"))?;
+            spec.devices = devices::physical(selected)?;
+            let mut assigned = Vec::new();
+            assigned
+                .try_reserve_exact(spec.devices.len())
+                .map_err(|_| Refusal::Exhausted {
+                    what: "physical device assignments",
+                    bound: spec.devices.len(),
+                })?;
+            assigned.extend_from_slice(&spec.devices);
             let mut launched = None;
             let made = match runtime.inspect(&id) {
                 Ok(info) => Ok(info),
@@ -654,6 +677,12 @@ impl Driver {
                 }
             };
             let made = made.and_then(|info| {
+                devices::verify(&runtime, &id, &assigned).map_err(|error| match error {
+                    Error::Runtime(why) => why,
+                    Error::Core(_) => Refusal::Broken(
+                        "native device bindings disagree with their durable reservation".into(),
+                    ),
+                })?;
                 if payload.start && info.state == BoxState::Created {
                     runtime.start(&id)?;
                 }
@@ -893,13 +922,11 @@ fn validate(demand: &Demand, payload: &Payload) -> Result<(), Error> {
     if u64::from(cpu) > demand.need.cpu_milli || mem > demand.need.mem_bytes {
         return Err(invalid("box limits exceed placement reservation").into());
     }
-    if demand.need.gpus > 0
-        || demand.ask.devices()
-        || demand.ask.gpu_model.is_some()
-        || demand.ask.gpu_memory > 0
-        || demand.ask.block_size > 0
-    {
-        return Err(invalid("runtime seam cannot attach assigned scheduler devices").into());
+    if !payload.spec.devices.is_empty() {
+        return Err(invalid("the receiver selects physical devices from the demand").into());
+    }
+    if device_request(demand) && !matches!(&payload.spec.class, hex_api::ClassSpec::Oci(_)) {
+        return Err(invalid("device placement requires a structured OCI payload").into());
     }
     if payload.start && payload.spec.class.class() != hex_api::Class::Oci {
         return Err(invalid("only OCI boxes have an init to start").into());
@@ -913,6 +940,14 @@ fn validate(demand: &Demand, payload: &Payload) -> Result<(), Error> {
         return Err(invalid("placement payload exceeds wire bound").into());
     }
     Ok(())
+}
+
+fn device_request(demand: &Demand) -> bool {
+    demand.need.gpus > 0
+        || demand.ask.devices()
+        || demand.ask.gpu_model.is_some()
+        || demand.ask.gpu_memory > 0
+        || demand.ask.block_size > 0
 }
 
 fn validate_backend(payload: &Payload, runtime: &Arc<dyn Runtime>) -> Result<(), Error> {

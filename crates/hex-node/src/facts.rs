@@ -139,7 +139,12 @@ pub fn capacity(dir: &Path, id: String) -> Result<hex_api::Capacity, Refusal> {
         mem_bytes: memory.free.min(memory.total),
         disk_bytes: disk.free.min(disk.total),
     };
-    let capacity = hex_api::Capacity { id, total, free };
+    let capacity = hex_api::Capacity {
+        devices: Vec::new(),
+        id,
+        total,
+        free,
+    };
     capacity.check()?;
     Ok(capacity)
 }

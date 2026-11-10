@@ -94,6 +94,7 @@ mod tests {
         store
             .put(&BoxRecord::new(
                 BoxSpec {
+                    devices: Vec::new(),
                     id: kept.clone(),
                     bounds: Bounds::default(),
                     class: ClassSpec::Process,

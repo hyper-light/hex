@@ -677,7 +677,7 @@ impl Runtime for WinRuntime {
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
-        spec.check()?;
+        spec.check_no_devices("windows")?;
         if self.boxes()?.contains_key(&spec.id) {
             return Err(Refusal::Exists(spec.id));
         }
@@ -781,6 +781,7 @@ impl Runtime for WinRuntime {
     /// keeper's handle with it), whether or not its caller still holds the run, and only then gives the caller
     /// the end. Its kill is the box's KILL, the box's job holding that program alone.
     fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        spec.check_no_devices("windows")?;
         spec.check_run()?;
         let id = spec.id.clone();
         self.create(spec)?;
@@ -967,6 +968,7 @@ mod tests {
 
     fn process_box(id: &str) -> BoxSpec {
         BoxSpec {
+            devices: Vec::new(),
             id: BoxId::new(id).unwrap(),
             bounds: hex_api::Bounds::default(),
             class: ClassSpec::Process,

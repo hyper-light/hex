@@ -1,0 +1,47 @@
+{
+  "full_diff_check_exit": 2,
+  "nonraw_diff_check_exit": 0,
+  "classification": "Original raw libtest emitted bytes preserved; no source/global whitespace exception",
+  "diagnostics": [
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-v1/proof/test-0.log",
+      "line": 6,
+      "kind": "new blank line at EOF."
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-v1/proof/test-1.log",
+      "line": 6,
+      "kind": "new blank line at EOF."
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-v1/proof/test-2.log",
+      "line": 6,
+      "kind": "new blank line at EOF."
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-v1/proof/test-3.log",
+      "line": 6,
+      "kind": "new blank line at EOF."
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-v1/proof/test-4.log",
+      "line": 6,
+      "kind": "new blank line at EOF."
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-v1/proof/test-5.log",
+      "line": 6,
+      "kind": "new blank line at EOF."
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-v1/proof/test-6.log",
+      "line": 6,
+      "kind": "new blank line at EOF."
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-v1/proof/test-7.log",
+      "line": 6,
+      "kind": "new blank line at EOF."
+    }
+  ]
+}

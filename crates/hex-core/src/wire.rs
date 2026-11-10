@@ -43,8 +43,8 @@ use std::sync::Mutex;
 
 use hex_api::{
     Bounds, BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, Capacity, CapacityResources, Class,
-    ClassSpec, Exit, IoRates, Mount, Network, OciSpec, Program, Refusal, Rootfs, Signal, Usage,
-    User,
+    ClassSpec, DeviceId, DeviceInfo, DeviceKind, Exit, IoRates, MAX_DEVICES, Mount, Network,
+    OciSpec, Program, Refusal, Rootfs, Signal, Usage, User,
 };
 
 use crate::netns;
@@ -63,6 +63,8 @@ pub const IDENTITY: u64 = identity(&[
     include_bytes!("../../hex-api/src/spec.rs"),
     include_bytes!("../../hex-api/src/id.rs"),
     include_bytes!("../../hex-api/src/bounds.rs"),
+    include_bytes!("../../hex-api/src/devices.rs"),
+    include_bytes!("../../hex-api/src/runtime.rs"),
 ]);
 /// The header's length: magic, wire identity, kind and id.
 pub const HEADER_BYTES: usize = 22;
@@ -508,6 +510,13 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
                     w.u64(room.mem_bytes);
                     w.u64(room.disk_bytes);
                 }
+                w.device_count(capacity.devices.len(), 22)?;
+                for device in &capacity.devices {
+                    put_device_id(w, &device.id);
+                    w.string(&device.model)?;
+                    w.u64(device.size);
+                    w.option_with(device.holder.as_ref(), |w, id| w.string(id.as_str()))?;
+                }
                 Ok(())
             })?;
         }
@@ -834,6 +843,24 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
                 id,
                 total: resources()?,
                 free: resources()?,
+                devices: r.device_list(22, |r| {
+                    let id = device_id(r)?;
+                    let model = r.device_string("devices.model")?;
+                    let size = r.u64()?;
+                    let holder = r.option(|r| {
+                        let bytes = r.bytes()?;
+                        let text = std::str::from_utf8(bytes)
+                            .map_err(|_| Fault::value("devices.holder", "is not UTF-8"))?;
+                        BoxId::new(text)
+                            .map_err(|_| Fault::value("devices.holder", "is not a valid box id"))
+                    })?;
+                    Ok(DeviceInfo {
+                        id,
+                        model,
+                        size,
+                        holder,
+                    })
+                })?,
             };
             capacity
                 .check()
@@ -1081,6 +1108,8 @@ fn put_call(w: &mut Writer, id: u64, call: &Call) -> Result<(), Fault> {
 }
 
 fn put_box_spec(w: &mut Writer, spec: &BoxSpec) -> Result<(), Fault> {
+    spec.check_devices()
+        .map_err(|e| Fault::value("devices", e.to_string()))?;
     w.string(spec.id.as_str())?;
     put_bounds(w, &spec.bounds);
     match &spec.class {
@@ -1098,7 +1127,12 @@ fn put_box_spec(w: &mut Writer, spec: &BoxSpec) -> Result<(), Fault> {
         w.string(&owner.name)?;
         w.bool(owner.reuse);
         Ok(())
-    })
+    })?;
+    w.device_count(spec.devices.len(), 9)?;
+    for id in &spec.devices {
+        put_device_id(w, id);
+    }
+    Ok(())
 }
 
 fn box_spec(r: &mut Reader<'_>) -> Result<BoxSpec, Fault> {
@@ -1115,12 +1149,46 @@ fn box_spec(r: &mut Reader<'_>) -> Result<BoxSpec, Fault> {
         let reuse = r.bool("owner.reuse")?;
         Ok(BoxOwner { name, reuse })
     })?;
-    Ok(BoxSpec {
+    let spec = BoxSpec {
         id,
         bounds,
         class,
         owner,
-    })
+        devices: r.device_list(9, device_id)?,
+    };
+    spec.check_devices()
+        .map_err(|e| Fault::value("devices", e.to_string()))?;
+    Ok(spec)
+}
+
+// Fixed tags independent of Rust discriminants; the catalog order is retained because scheduler
+// indices refer to it. DeviceId is one tag plus eight key bytes, DeviceInfo at least 22 bytes
+// (identity, model length, size and holder-option tag), before any model or holder bytes.
+fn put_device_id(w: &mut Writer, id: &DeviceId) {
+    w.u8(match id.kind {
+        DeviceKind::Gpu => 0,
+        DeviceKind::Vfio => 1,
+        DeviceKind::Block => 2,
+        DeviceKind::Net => 3,
+    });
+    w.u64(id.key);
+}
+
+fn device_id(r: &mut Reader<'_>) -> Result<DeviceId, Fault> {
+    let kind = match r.u8()? {
+        0 => DeviceKind::Gpu,
+        1 => DeviceKind::Vfio,
+        2 => DeviceKind::Block,
+        3 => DeviceKind::Net,
+        _ => return Err(Fault::value("devices.kind", "unsupported tag")),
+    };
+    let id = DeviceId {
+        kind,
+        key: r.u64()?,
+    };
+    id.check()
+        .map_err(|e| Fault::value("devices.id", e.to_string()))?;
+    Ok(id)
 }
 
 fn put_bounds(w: &mut Writer, b: &Bounds) {
@@ -1585,6 +1653,26 @@ impl Writer {
         }
         Ok(())
     }
+
+    fn device_count(&mut self, count: usize, minimum_bytes: usize) -> Result<(), Fault> {
+        if count > MAX_DEVICES {
+            return Err(Fault::value(
+                "devices",
+                "count exceeds the u16 device index address space",
+            ));
+        }
+        let after = count
+            .checked_mul(minimum_bytes)
+            .and_then(|bytes| self.out.len().checked_add(4)?.checked_add(bytes));
+        if after.is_none_or(|after| after > self.bound) {
+            return Err(Fault::Oversized {
+                bytes: after.unwrap_or(usize::MAX),
+                bound: self.bound,
+            });
+        }
+        self.u32(u32::try_from(count).map_err(|_| Fault::value("devices", "count exceeds u32"))?);
+        Ok(())
+    }
 }
 
 /// A message being read, from the front.
@@ -1742,6 +1830,50 @@ impl<'a> Reader<'a> {
         let mut out = Vec::with_capacity(n.min(16));
         for _ in 0..n {
             out.push(get(self)?);
+        }
+        Ok(out)
+    }
+
+    fn device_string(&mut self, what: &'static str) -> Result<String, Fault> {
+        let bytes = self.bytes()?;
+        let text = std::str::from_utf8(bytes).map_err(|_| Fault::value(what, "is not UTF-8"))?;
+        let mut out = String::new();
+        out.try_reserve_exact(text.len())
+            .map_err(|_| Fault::value(what, "cannot reserve string"))?;
+        out.push_str(text);
+        Ok(out)
+    }
+
+    fn device_list<T>(
+        &mut self,
+        minimum_bytes: usize,
+        mut get: impl FnMut(&mut Self) -> Result<T, Fault>,
+    ) -> Result<Vec<T>, Fault> {
+        let count = usize::try_from(self.u32()?)
+            .map_err(|_| Fault::value("devices", "count exceeds this platform"))?;
+        if count > MAX_DEVICES {
+            return Err(Fault::value(
+                "devices",
+                "count exceeds the u16 device index address space",
+            ));
+        }
+        let bytes = count
+            .checked_mul(minimum_bytes)
+            .ok_or_else(|| Fault::value("devices", "encoded list size overflows"))?;
+        if bytes > self.rest.len() {
+            return Err(Fault::Truncated {
+                need: self.at().saturating_add(bytes),
+                have: self.len,
+            });
+        }
+        let mut out = Vec::new();
+        for _ in 0..count {
+            // Invalid tags/identities are refused before making room for that item. The count
+            // preflight bounds work, but does not allocate a full caller-selected list up front.
+            let item = get(self)?;
+            out.try_reserve(1)
+                .map_err(|_| Fault::value("devices", "cannot reserve list"))?;
+            out.push(item);
         }
         Ok(out)
     }

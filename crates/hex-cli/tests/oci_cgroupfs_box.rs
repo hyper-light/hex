@@ -130,6 +130,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     render_attacker_bundle(&bundle_dir, &attacker_rootfs, Owner::Rootless { uid, gid });
     let attacker = BoxId::new("attacker").unwrap();
     let made = node.create(BoxSpec {
+        devices: Vec::new(),
         id: attacker.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(bundle_dir),
@@ -152,6 +153,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     // A plain rootless host-network box reads its mount table into /out.
     let plain = BoxId::new("plain").unwrap();
     node.create(BoxSpec {
+        devices: Vec::new(),
         id: plain.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Oci(Box::new(OciSpec {
@@ -248,6 +250,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     // fresh one. Neither view reaches the victim's cgroup.
     let victim = BoxId::new("victim-cgfs").unwrap();
     node.create(BoxSpec {
+        devices: Vec::new(),
         id: victim.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Oci(Box::new(OciSpec {
@@ -274,6 +277,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     );
     let prober = BoxId::new("prober-cgfs").unwrap();
     node.create(BoxSpec {
+        devices: Vec::new(),
         id: prober.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(prober_dir),

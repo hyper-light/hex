@@ -54,6 +54,8 @@ const SPELLINGS: [&str; 14] = [
 fn device(kind: DeviceKind, size: u64) -> Device {
     Device {
         kind,
+        key: None,
+        available: true,
         model: ModelId::UNNAMED,
         size,
         load: GpuLoad::default(),

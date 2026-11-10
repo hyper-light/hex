@@ -165,6 +165,7 @@ mod linux {
 
     fn spec(id: &BoxId, bundle: &Path) -> BoxSpec {
         BoxSpec {
+            devices: Vec::new(),
             id: id.clone(),
             bounds: bounds(),
             class: ClassSpec::Bundle(bundle.to_path_buf()),

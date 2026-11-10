@@ -612,6 +612,7 @@ impl SimHost {
         for id in [b(), g()] {
             host.sim
                 .create(BoxSpec {
+                    devices: Vec::new(),
                     id,
                     bounds: Bounds::default(),
                     class: ClassSpec::Process,
@@ -812,6 +813,7 @@ fn run(id: u64, name: &str) -> Vec<u8> {
         id,
         Call::Run {
             spec: Box::new(BoxSpec {
+                devices: Vec::new(),
                 id: BoxId::new(name).unwrap(),
                 bounds: Bounds::default(),
                 class: ClassSpec::Process,

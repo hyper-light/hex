@@ -130,6 +130,7 @@ mod strays_tests {
         let mut seen = BTreeMap::new();
         let mut held = BoxRecord::new(
             BoxSpec {
+                devices: Vec::new(),
                 id: id("b1"),
                 bounds: Bounds::default(),
                 class: ClassSpec::Process,
@@ -232,6 +233,7 @@ mod tests {
             })),
         };
         BoxSpec {
+            devices: Vec::new(),
             id: id.clone(),
             bounds: Bounds::default(),
             class,

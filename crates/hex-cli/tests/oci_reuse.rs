@@ -246,6 +246,7 @@ impl Lab {
     /// An `oci` box of `owner` (none when `None`) whose init waits, holding `caps`, bounded by `bounds`.
     fn oci(&self, id: &str, owner: Option<&BoxOwner>, caps: Caps, bounds: Bounds) -> BoxSpec {
         BoxSpec {
+            devices: Vec::new(),
             id: BoxId::new(id).unwrap(),
             bounds,
             class: ClassSpec::Bundle(self.bundle(caps)),
@@ -504,6 +505,7 @@ fn a_delete_ends_a_box_through_its_inits_pidfd(lab: &Lab, own: &Path) {
     // The third: a process box.
     let id = BoxId::new("process").unwrap();
     node.create(BoxSpec {
+        devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Process,
@@ -538,6 +540,7 @@ fn a_delete_ends_a_box_through_its_inits_pidfd(lab: &Lab, own: &Path) {
     // The fourth: an oci box whose init ended on its own and was reaped before the delete, its exit read.
     let id = BoxId::new("ended").unwrap();
     node.create(BoxSpec {
+        devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(
@@ -603,6 +606,7 @@ fn a_delete_ends_a_box_through_its_inits_pidfd(lab: &Lab, own: &Path) {
                 for n in 0..each {
                     let id = BoxId::new(&format!("ends-{t}-{n}")).unwrap();
                     node.create(BoxSpec {
+                        devices: Vec::new(),
                         id: id.clone(),
                         bounds: Bounds::default(),
                         class: ClassSpec::Bundle(bundle.clone()),
@@ -1062,6 +1066,7 @@ fn a_parked_init_made_with_other_namespaces_is_ended_and_counted(lab: &Lab, own:
     let before = node.cgroup_reuse().unwrap().parked;
     let b = BoxId::new("fb").unwrap();
     node.create(BoxSpec {
+        devices: Vec::new(),
         id: b.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(bundle),
@@ -1617,6 +1622,7 @@ fn a_boxs_network_namespace_is_reused_within_its_owner_when_clean(lab: &Lab, own
     let o = BoxOwner::named("owner-net").unwrap();
     let wait = ["/hex", "selftest-box", "wait"];
     let make = |id: &str, owner: Option<&BoxOwner>, caps: Caps, readonly_sys: bool| BoxSpec {
+        devices: Vec::new(),
         id: BoxId::new(id).unwrap(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(lab.bundle_with(caps, &wait, true, readonly_sys)),
@@ -1921,6 +1927,7 @@ fn a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(lab: &Lab, o
     let o = BoxOwner::named("owner-files").unwrap();
     let wait = ["/hex", "selftest-box", "wait"];
     let make = |id: &str| BoxSpec {
+        devices: Vec::new(),
         id: BoxId::new(id).unwrap(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(lab.bundle_with(Caps::Docker, &wait, true, true)),
@@ -2208,6 +2215,7 @@ fn a_node_past_its_files_bound_checks_by_entering_counted(lab: &Lab, own: &Path)
     let o = BoxOwner::named("owner-files-bound").unwrap();
     let wait = ["/hex", "selftest-box", "wait"];
     let make = |id: &str| BoxSpec {
+        devices: Vec::new(),
         id: BoxId::new(id).unwrap(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(lab.bundle_with(Caps::Docker, &wait, true, true)),
@@ -2326,6 +2334,7 @@ fn a_box_can_not_send_to_the_socket_the_check_keeps_in_its_namespace(lab: &Lab, 
     let o = BoxOwner::named("owner-netsock").unwrap();
     let wait = ["/hex", "selftest-box", "wait"];
     let make = |id: &str| BoxSpec {
+        devices: Vec::new(),
         id: BoxId::new(id).unwrap(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(lab.bundle_with(Caps::Docker, &wait, true, true)),

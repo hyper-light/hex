@@ -55,6 +55,7 @@ fn act(act: &Act) -> Program {
 impl OciBoxes {
     fn box_spec(&self, id: BoxId, bounds: Bounds, init: &Act) -> BoxSpec {
         BoxSpec {
+            devices: Vec::new(),
             id,
             bounds,
             class: ClassSpec::Oci(Box::new(OciSpec {

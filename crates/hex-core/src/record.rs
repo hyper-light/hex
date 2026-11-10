@@ -210,6 +210,7 @@ mod tests {
 
     fn record() -> BoxRecord {
         let spec = BoxSpec {
+            devices: Vec::new(),
             id: BoxId::new("r1").unwrap(),
             bounds: Bounds::default(),
             class: ClassSpec::Process,

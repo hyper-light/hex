@@ -11,11 +11,17 @@
 //! mounts in its own mount namespace over a writable layer in the bundle, so nothing is mounted on the
 //! host and the layer goes when the bundle does.
 
+use std::borrow::Cow;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use hex_api::{Network, OciSpec, Refusal, Rootfs};
 use serde::Serialize;
+
+use crate::cdi;
+
+mod device_edits;
+pub use device_edits::ResolvedNode;
 
 /// The runtime-spec version the rendered `config.json` is written to.
 pub const OCI_VERSION: &str = "1.3.0";
@@ -134,9 +140,11 @@ struct Config<'a> {
     root: Root,
     #[serde(skip_serializing_if = "Option::is_none")]
     hostname: Option<&'a str>,
-    mounts: Vec<Mount>,
+    mounts: Vec<Mount<'a>>,
     process: Process<'a>,
-    linux: Linux,
+    linux: Linux<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hooks: Option<device_edits::Hooks<'a>>,
 }
 
 #[derive(Serialize)]
@@ -146,12 +154,16 @@ struct Root {
 }
 
 #[derive(Serialize)]
-struct Mount {
-    destination: String,
-    #[serde(rename = "type")]
-    kind: &'static str,
-    source: String,
-    options: Vec<String>,
+struct Mount<'a> {
+    destination: Cow<'a, str>,
+    #[serde(rename = "type", skip_serializing_if = "str::is_empty")]
+    kind: &'a str,
+    source: Cow<'a, str>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    options: Cow<'a, [String]>,
+    /// Temporary stable-sort keys; never serialized or retained beyond rendering.
+    #[serde(skip)]
+    order: (usize, usize),
 }
 
 #[derive(Serialize)]
@@ -160,7 +172,7 @@ struct Process<'a> {
     terminal: bool,
     user: User<'a>,
     args: &'a [String],
-    env: Vec<String>,
+    env: Vec<Cow<'a, str>>,
     cwd: &'a str,
     capabilities: Capabilities,
     no_new_privileges: bool,
@@ -172,7 +184,7 @@ struct User<'a> {
     uid: u32,
     gid: u32,
     #[serde(skip_serializing_if = "<[u32]>::is_empty")]
-    additional_gids: &'a [u32],
+    additional_gids: Cow<'a, [u32]>,
 }
 
 #[derive(Serialize)]
@@ -184,15 +196,17 @@ struct Capabilities {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Linux {
+struct Linux<'a> {
     namespaces: Vec<Namespace>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     uid_mappings: Vec<IdMapping>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     gid_mappings: Vec<IdMapping>,
-    resources: Resources,
+    resources: Resources<'a>,
     masked_paths: Vec<String>,
     readonly_paths: [&'static str; 5],
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    devices: Vec<device_edits::Device<'a>>,
 }
 
 #[derive(Serialize)]
@@ -211,14 +225,20 @@ struct IdMapping {
 }
 
 #[derive(Serialize)]
-struct Resources {
-    devices: [DeviceRule; 1],
+struct Resources<'a> {
+    devices: Vec<DeviceRule<'a>>,
 }
 
 #[derive(Serialize)]
-struct DeviceRule {
+struct DeviceRule<'a> {
     allow: bool,
-    access: &'static str,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    kind: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    major: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    minor: Option<i64>,
+    access: &'a str,
 }
 
 /// `spec` as a bundle in `at.dir`: `config.json`, the container's `/etc/hosts`, and the directories a
@@ -226,6 +246,18 @@ struct DeviceRule {
 /// [`OciSpec::check`] refuses, a user a rootless node can't map, a layered root past overlayfs's
 /// bounds, or a config past the runtime's.
 pub fn render(spec: &OciSpec, at: &Place<'_>) -> Result<Bundle, Refusal> {
+    render_with_devices(spec, at, &cdi::Edits::default(), &[])
+}
+
+/// Render selected CDI edits using caller-owned host metadata. This performs no device lookup,
+/// mount or hook execution. Unsupported native edits and invalid resolutions return no bundle.
+pub fn render_with_devices(
+    spec: &OciSpec,
+    at: &Place<'_>,
+    edits: &cdi::Edits<'_>,
+    resolved: &[ResolvedNode<'_>],
+) -> Result<Bundle, Refusal> {
+    device_edits::check(edits, resolved)?;
     spec.check()?;
     let dir = utf8(at.dir, "the bundle directory")?;
     let rootless = matches!(at.owner, Owner::Rootless { .. });
@@ -249,23 +281,26 @@ pub fn render(spec: &OciSpec, at: &Place<'_>) -> Result<Bundle, Refusal> {
     };
     mounts.extend(default_mounts(at.owner, spec.network));
     mounts.push(Mount {
-        destination: "/etc/hosts".to_owned(),
+        destination: "/etc/hosts".into(),
         kind: "bind",
-        source: format!("{dir}/{HOSTS}"),
-        options: vec!["bind".to_owned()],
+        source: format!("{dir}/{HOSTS}").into(),
+        options: vec!["bind".to_owned()].into(),
+        order: (0, 0),
     });
     for m in &spec.mounts {
         mounts.push(Mount {
-            destination: m.destination.clone(),
+            destination: m.destination.clone().into(),
             kind: "bind",
-            source: utf8(&m.source, "a mount source")?.to_owned(),
+            source: utf8(&m.source, "a mount source")?.to_owned().into(),
             // A read-only mount binds the source's own mount alone: a recursive bind remounted
             // read-only would leave the mounts beneath it writable.
             options: if m.read_only {
                 vec!["bind".to_owned(), "ro".to_owned()]
             } else {
                 vec!["rbind".to_owned()]
-            },
+            }
+            .into(),
+            order: (0, 0),
         });
     }
 
@@ -289,7 +324,7 @@ pub fn render(spec: &OciSpec, at: &Place<'_>) -> Result<Bundle, Refusal> {
     let mut masked_paths: Vec<String> = MASKED_PATHS.iter().map(|p| (*p).to_owned()).collect();
     masked_paths.extend(at.masked.iter().cloned());
 
-    let config = Config {
+    let mut config = Config {
         oci_version: OCI_VERSION,
         root: Root {
             path: root,
@@ -302,14 +337,14 @@ pub fn render(spec: &OciSpec, at: &Place<'_>) -> Result<Bundle, Refusal> {
             user: User {
                 uid: user.uid,
                 gid: user.gid,
-                additional_gids: &user.groups,
+                additional_gids: Cow::Borrowed(&user.groups),
             },
             args: &spec.init.args,
             env: spec
                 .init
                 .env
                 .iter()
-                .map(|(k, v)| format!("{k}={v}"))
+                .map(|(k, v)| Cow::Owned(format!("{k}={v}")))
                 .collect(),
             cwd: spec.init.cwd.as_deref().unwrap_or("/"),
             capabilities: Capabilities {
@@ -327,23 +362,16 @@ pub fn render(spec: &OciSpec, at: &Place<'_>) -> Result<Bundle, Refusal> {
             // Deny by default; the runtime allows the devices every container has after it, as runc
             // and crun do.
             resources: Resources {
-                devices: [DeviceRule {
-                    allow: false,
-                    access: "rwm",
-                }],
+                devices: device_edits::default_rules()?,
             },
             masked_paths,
             readonly_paths: READONLY_PATHS,
+            devices: Vec::new(),
         },
+        hooks: None,
     };
-    let config = serde_json::to_vec_pretty(&config)
-        .map_err(|e| Refusal::Broken(format!("encoding config.json: {e}")))?;
-    if config.len() > MAX_CONFIG_BYTES {
-        return Err(invalid(format!(
-            "it renders to a config.json of {} bytes, over the {MAX_CONFIG_BYTES} the runtime reads",
-            config.len()
-        )));
-    }
+    device_edits::apply(&mut config, edits, resolved)?;
+    let config = device_edits::encode(&config)?;
     Ok(Bundle {
         config,
         hosts: hosts(&spec.hosts)?,
@@ -360,7 +388,7 @@ fn overlay(
     layers: &[PathBuf],
     bundle: &Path,
     rootless: bool,
-) -> Result<(Mount, Vec<PathBuf>), Refusal> {
+) -> Result<(Mount<'static>, Vec<PathBuf>), Refusal> {
     if layers.len() > MAX_LAYERS {
         return Err(invalid(format!(
             "rootfs.layers holds {} layers, over overlayfs's {MAX_LAYERS}",
@@ -396,10 +424,11 @@ fn overlay(
         )));
     }
     let mount = Mount {
-        destination: "/".to_owned(),
+        destination: "/".into(),
         kind: "overlay",
-        source: "overlay".to_owned(),
-        options,
+        source: "overlay".into(),
+        options: options.into(),
+        order: (0, 0),
     };
     Ok((mount, vec![rootfs, upper, work]))
 }
@@ -431,13 +460,18 @@ fn linux_join(dir: &Path, name: &str) -> PathBuf {
 /// sees its own box's cgroups and no other's, with a read-only tmpfs between: mount(2) refuses a
 /// filesystem over the same filesystem's root (fs/namespace.c, "Refuse the same filesystem on the
 /// same mount point").
-fn default_mounts(owner: Owner, network: Network) -> Vec<Mount> {
+fn default_mounts(owner: Owner, network: Network) -> Vec<Mount<'static>> {
     let rootless = matches!(owner, Owner::Rootless { .. });
     let fs = |destination: &str, kind: &'static str, source: &str, options: &[&str]| Mount {
-        destination: destination.to_owned(),
+        destination: destination.to_owned().into(),
         kind,
-        source: source.to_owned(),
-        options: options.iter().map(|o| (*o).to_owned()).collect(),
+        source: source.to_owned().into(),
+        options: options
+            .iter()
+            .map(|o| (*o).to_owned())
+            .collect::<Vec<_>>()
+            .into(),
+        order: (0, 0),
     };
     let mut pts = vec![
         "nosuid",

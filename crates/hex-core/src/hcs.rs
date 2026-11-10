@@ -231,6 +231,18 @@ pub fn containers_off(what_is_missing: &str) -> Refusal {
     }
 }
 
+/// The HCS device assignment forms: a whole interface class or one exact device location.
+/// HCS Device/DeviceType schema 2.2 and hcsshim 7d4e89bc's hcsoci/hcsdoc_wcow.go distinguish
+/// DeviceInstance/LocationPath from ClassGuid/InterfaceClassGuid; neither implies GpuMirror.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssignedDevice {
+    ClassGuid(String),
+    LocationPath(String),
+}
+
+#[cfg(test)]
+mod device_instance_tests;
+
 /// A Windows container, every value checked: what its HCS document and its init need.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Container {
@@ -240,8 +252,8 @@ pub struct Container {
     pub scratch: Scratch,
     /// Host folders mapped in, in order.
     pub mounts: Vec<MappedDir>,
-    /// Device interface classes granted, each a GUID in upper case without braces.
-    pub devices: Vec<String>,
+    /// Device assignments in caller order; class GUIDs normalized, location paths kept exact.
+    pub devices: Vec<AssignedDevice>,
     pub hostname: Option<String>,
     /// Lines to add to the container's `hosts` file, a name and its address.
     pub hosts: Vec<(String, String)>,
@@ -406,10 +418,34 @@ pub fn class_guid(field: &str, id: &str) -> Result<String, Refusal> {
             .all(|(g, n)| g.len() == n && g.chars().all(|c| c.is_ascii_hexdigit()));
     if !ok {
         return Err(invalid(format!(
-            "{field} {id:?} isn't a device interface class GUID"
+            "{field} isn't a device interface class GUID"
         )));
     }
     Ok(bare.to_ascii_uppercase())
+}
+
+/// LocationPath is an opaque HCS string, not a filesystem path. Its caller-owned text must fit
+/// the existing config byte budget before duplication; HCS validates the actual device identity.
+fn location_path(field: &str, id: &str) -> Result<String, Refusal> {
+    if id.len() > crate::bundle::MAX_CONFIG_BYTES {
+        return Err(invalid(format!(
+            "{field} exceeds the config.json byte bound"
+        )));
+    }
+    if id.is_empty() || id.contains('\0') {
+        return Err(invalid(format!(
+            "{field} must be nonempty and contain no NUL"
+        )));
+    }
+    let mut exact = String::new();
+    exact
+        .try_reserve_exact(id.len())
+        .map_err(|_| Refusal::Exhausted {
+            what: "HCS device location path bytes",
+            bound: id.len(),
+        })?;
+    exact.push_str(id);
+    Ok(exact)
 }
 
 /// The container a [`Program`] runs as in a Windows container: its command line quoted as the C runtime
@@ -655,16 +691,20 @@ pub fn from_bundle(config: &Value) -> Result<Container, Refusal> {
                     &format!("{field}.idType"),
                     d.get("idType").unwrap_or(&Value::Null),
                 )?;
-                if id_type != "class" && id_type != "vpci-class-guid" {
-                    return Err(unsupported(
+                let id_field = format!("{field}.id");
+                let id = d.get("id").unwrap_or(&Value::Null);
+                match id_type {
+                    "class" | "vpci-class-guid" => {
+                        class_guid(&id_field, string(&id_field, id)?).map(AssignedDevice::ClassGuid)
+                    }
+                    // hcsshim 7d4e89bc internal/uvm/virtual_device.go's exact OCI extension.
+                    "vpci-location-path" => location_path(&id_field, string(&id_field, id)?)
+                        .map(AssignedDevice::LocationPath),
+                    _ => Err(unsupported(
                         &format!("{field}.idType"),
-                        "a device is granted only by its interface class (config-windows.md:31)",
-                    ));
+                        "a device assignment requires a class GUID or an exact location path",
+                    )),
                 }
-                class_guid(
-                    &format!("{field}.id"),
-                    string(&format!("{field}.id"), d.get("id").unwrap_or(&Value::Null))?,
-                )
             })
             .collect::<Result<Vec<_>, _>>()?,
         None => Vec::new(),
@@ -996,8 +1036,8 @@ pub enum Lifetime {
 }
 
 /// The HCS v2 document for `container` on `storage`, Hex's launcher folder `launcher` mapped read-only at
-/// [`LAUNCHER_DIR`] (note §2): schema 2.1, no hosting system, terminated when its last handle closes
-/// unless it outlives its node (`lifetime`).
+/// [`LAUNCHER_DIR`] (note §2): schema 2.1, or 2.2 when an exact DeviceInstance needs it; no hosting
+/// system, terminated when its last handle closes unless it outlives its node (`lifetime`).
 pub fn document(
     container: &Container,
     storage: &Storage,
@@ -1029,7 +1069,14 @@ pub fn document(
                 container
                     .devices
                     .iter()
-                    .map(|g| json!({"Type": "ClassGuid", "InterfaceClassGuid": g}))
+                    .map(|device| match device {
+                        AssignedDevice::ClassGuid(guid) => {
+                            json!({"Type": "ClassGuid", "InterfaceClassGuid": guid})
+                        }
+                        AssignedDevice::LocationPath(path) => {
+                            json!({"Type": "DeviceInstance", "LocationPath": path})
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .into(),
             );
@@ -1046,9 +1093,20 @@ pub fn document(
             obj.insert("Processor".to_owned(), json!({ k: v }));
         }
     }
+    // DeviceInstance and LocationPath first appear in HCS schema 2.2. Existing class-only and
+    // device-free documents keep their established 2.1 output (Microsoft HCS schema reference).
+    let minor = if container
+        .devices
+        .iter()
+        .any(|device| matches!(device, AssignedDevice::LocationPath(_)))
+    {
+        2
+    } else {
+        1
+    };
     json!({
         "Owner": OWNER,
-        "SchemaVersion": {"Major": 2, "Minor": 1},
+        "SchemaVersion": {"Major": 2, "Minor": minor},
         "ShouldTerminateOnLastHandleClosed": lifetime == Lifetime::EndsWithNode,
         "Container": c,
     })
@@ -1637,7 +1695,12 @@ mod tests {
         let c = from_bundle(&bundle()).unwrap();
         assert_eq!(c.layers, vec![r"D:\layers\app", r"D:\layers\base"]);
         assert_eq!(c.scratch, Scratch::Folder(r"D:\boxes\b1".to_owned()));
-        assert_eq!(c.devices, vec!["5B45201D-F2F2-4F3B-85BB-30FF1F953599"]);
+        assert_eq!(
+            c.devices,
+            vec![AssignedDevice::ClassGuid(
+                "5B45201D-F2F2-4F3B-85BB-30FF1F953599".to_owned()
+            )]
+        );
         assert_eq!(
             c.mounts,
             vec![
@@ -1707,7 +1770,7 @@ mod tests {
                 b["windows"]["resources"]["memory"]["limit"] = json!(4096)
             }),
             ("windows.devices[0].idType", |b| {
-                b["windows"]["devices"][0]["idType"] = json!("vpci-location-path")
+                b["windows"]["devices"][0]["idType"] = json!("vpci-instance-id")
             }),
             ("windows.devices[0].id", |b| {
                 b["windows"]["devices"][0]["id"] = json!("COM1")

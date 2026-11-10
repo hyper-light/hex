@@ -107,6 +107,7 @@ fn main() {
     for i in 0..16 {
         let id = BoxId::new(&format!("warm{i}")).unwrap();
         node.create(BoxSpec {
+            devices: Vec::new(),
             id,
             bounds: Bounds::default(),
             class: ClassSpec::Process,
@@ -118,6 +119,7 @@ fn main() {
     for i in 0..BOXES {
         let id = BoxId::new(&format!("mem{i}")).unwrap();
         node.create(BoxSpec {
+            devices: Vec::new(),
             id,
             bounds: Bounds {
                 memory_max: Some(64 << 20),

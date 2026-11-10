@@ -1,0 +1,91 @@
+{
+  "source_revision": "0429d0849e6661a6f2c78d9d1ef68526edc3e115",
+  "all_62_source_hashes_match": true,
+  "source_manifest_sha256": "950eb3c4aac98cc74f2253640a582899c4b7d73c9bdd262f8b51c7f2a67c95d5",
+  "wire_identity_source_derived": "9c193cfad967ea75",
+  "wire_identity_sources": [
+    "wire.rs",
+    "stream.rs",
+    "schedule.rs",
+    "../../hex-sim/src/peer.rs",
+    "../../hex-sim/src/model.rs",
+    "../../hex-api/src/spec.rs",
+    "../../hex-api/src/id.rs",
+    "../../hex-api/src/bounds.rs",
+    "../../hex-api/src/devices.rs",
+    "../../hex-api/src/runtime.rs"
+  ],
+  "raw_collection_archive_sha256": "61952d0f439e8fb8830f6a2183d9dd9e550880fddec8d57c4dbf5dc67dbabd7c",
+  "actual_unique_selected_v2_tests": 33,
+  "new_feature_tests_selected": 9,
+  "phases": [
+    {
+      "name": "api-device-unit",
+      "owned_pid": 23775,
+      "exit_code": 0,
+      "child_reaped": true,
+      "log_sha256": "4dd4cdaf9f62919221f1d247bc25d5bb8b3f3e6da99285501025ba41ef10e259",
+      "summaries": [
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.07s"
+      ],
+      "required_selected": true
+    },
+    {
+      "name": "api-id-unit",
+      "owned_pid": 24114,
+      "exit_code": 0,
+      "child_reaped": true,
+      "log_sha256": "12ad6bf09d7db67d40656960c7a9bcbe652a7dbc373f347e462e9c02441a5580",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.00s"
+      ],
+      "required_selected": true
+    },
+    {
+      "name": "wire-unit",
+      "owned_pid": 24117,
+      "exit_code": 0,
+      "child_reaped": true,
+      "log_sha256": "ac34b0f95fda80de22b4203f587931ba124222bd03f89a55fa4a628d31c1aff7",
+      "summaries": [
+        "test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 289 filtered out; finished in 0.42s"
+      ],
+      "required_selected": true
+    },
+    {
+      "name": "api-clippy",
+      "owned_pid": 24207,
+      "exit_code": 0,
+      "child_reaped": true,
+      "log_sha256": "37f42dbf8a4e5fa29ffcd8f7a644951bc59ef8b3c121d899abb8091c8d7fe33b"
+    },
+    {
+      "name": "core-clippy",
+      "owned_pid": 24223,
+      "exit_code": 0,
+      "child_reaped": true,
+      "log_sha256": "8edf4ea560d8dd81df2fed653bc6dc4bcd7a29b892a560dc8e5f7c4331a288ad"
+    }
+  ],
+  "cleanup": {
+    "local_cli_pid": 42279,
+    "local_cli_exit": 0,
+    "recorded_child_pids_reaped": [
+      23775,
+      24114,
+      24117,
+      24207,
+      24223
+    ],
+    "remaining_temp_entries": 0,
+    "private_source_target_cache_archives_retained": true,
+    "native_vm_device_effects": "not invoked"
+  },
+  "owed_root": [
+    "Native/guest unsupported guards and mechanical literal compilation outside API/core",
+    "Catalog/scheduler/runtime attachment integration and native effects/cleanup",
+    "Guard-removal mutations and supported seven-target/full gates",
+    "Real Windows/HCS/Linux/hardware/guest attachment matrix",
+    "Profiling, benchmarks, aggregate evidence review and merges"
+  ]
+}

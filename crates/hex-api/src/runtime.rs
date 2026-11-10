@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Bounds, BoxId, BoxSpec, Class, Program, Stdio};
+use crate::{Bounds, BoxId, BoxSpec, Class, DeviceInfo, Program, Stdio};
 
 /// A runtime: boxes of one or more classes on one node. Calls are synchronous and short (a create
 /// takes milliseconds); waiting for a program is [`Proc`]'s, with a deadline. Every refusal is
@@ -73,6 +73,8 @@ pub struct Capacity {
     pub id: String,
     pub total: CapacityResources,
     pub free: CapacityResources,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<DeviceInfo>,
 }
 
 impl Capacity {
@@ -87,7 +89,7 @@ impl Capacity {
                 why: "pool identity is empty or free resources exceed their totals".to_owned(),
             });
         }
-        Ok(())
+        crate::devices::check_ids(self.devices.iter().map(|device| device.id))
     }
 }
 

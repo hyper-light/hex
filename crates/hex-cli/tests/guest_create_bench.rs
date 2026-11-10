@@ -127,6 +127,7 @@ fn a_multi_layer_create_through_a_real_guest_is_timed() {
         for (i, name) in names.iter().enumerate() {
             let id = BoxId::new(&format!("b{round}-{i}")).unwrap();
             let spec = BoxSpec {
+                devices: Vec::new(),
                 id: id.clone(),
                 bounds: Bounds::default(),
                 class: ClassSpec::Oci(Box::new(OciSpec {

@@ -21,6 +21,7 @@
 
 mod bounds;
 pub mod conformance;
+mod devices;
 pub mod differential;
 #[cfg(windows)]
 mod end;
@@ -30,6 +31,7 @@ pub mod sim;
 mod spec;
 
 pub use bounds::{Bounds, IoRates, MIN_CPU_MILLI, MIN_MEMORY};
+pub use devices::{DeviceId, DeviceInfo, DeviceKind, MAX_DEVICES};
 pub use id::BoxId;
 pub use runtime::{
     Asked, BoxInfo, BoxState, Capacity, CapacityResources, Exit, Membership, Proc, Refusal,

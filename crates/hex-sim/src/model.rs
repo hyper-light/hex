@@ -173,9 +173,19 @@ impl ModelId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Device {
     pub kind: DeviceKind,
+    /// Stable physical identity within `kind`; `None` denotes a synthetic indexed device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<u64>,
+    /// Live backend room for a fresh holder; exact existing reservations remain authoritative.
+    #[serde(default = "device_available")]
+    pub available: bool,
     pub model: ModelId,
     pub size: u64,
     pub load: GpuLoad,
+}
+
+fn device_available() -> bool {
+    true
 }
 
 impl Device {
@@ -183,6 +193,8 @@ impl Device {
     pub fn gpu(model: ModelId, memory: u64) -> Self {
         Self {
             kind: DeviceKind::Gpu,
+            key: None,
+            available: true,
             model,
             size: memory,
             load: GpuLoad::default(),

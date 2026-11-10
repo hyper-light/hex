@@ -206,7 +206,7 @@ impl Runtime for SimRuntime {
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
-        spec.check()?;
+        spec.check_no_devices("sim")?;
         if let ClassSpec::Oci(oci) = &spec.class {
             oci.init.fits(&SIM_EXEC_LIMIT)?;
         }
@@ -359,6 +359,7 @@ impl Runtime for SimRuntime {
     }
 
     fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        spec.check_no_devices("sim")?;
         spec.check_run()?;
         let id = spec.id.clone();
         self.create(spec)?;
@@ -515,6 +516,7 @@ impl Fixture for SimFixture {
     }
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
         BoxSpec {
+            devices: Vec::new(),
             id,
             bounds,
             class: match self {
@@ -527,6 +529,7 @@ impl Fixture for SimFixture {
     }
     fn init(&self, id: BoxId, act: &Act) -> BoxSpec {
         BoxSpec {
+            devices: Vec::new(),
             id,
             bounds: Bounds::default(),
             class: match self {

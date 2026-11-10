@@ -445,6 +445,22 @@ fn runtime_pools(node: &NodeSpec) -> Result<[Option<RuntimePool>; Class::COUNT],
     Ok(pools)
 }
 
+fn check_device_keys(node: &NodeSpec) -> Result<(), SimError> {
+    let mut keys = Vec::new();
+    keys.try_reserve_exact(node.devices.len())
+        .map_err(|_| SimError::Resources(node.id))?;
+    keys.extend(
+        node.devices
+            .iter()
+            .filter_map(|device| device.key.map(|key| (device.kind, key))),
+    );
+    keys.sort_unstable();
+    if keys.windows(2).any(|pair| matches!(pair, [a, b] if a == b)) {
+        return Err(SimError::Config("duplicate physical device identity"));
+    }
+    Ok(())
+}
+
 impl FitIndex {
     /// Nodes' ids must be dense from 0, in order.
     pub fn new(nodes: &[NodeSpec]) -> Result<Self, SimError> {
@@ -462,6 +478,7 @@ impl FitIndex {
                     "a node's GPUs listed aren't its capacity's, or it lists more devices than a PCI segment has",
                 ));
             }
+            check_device_keys(node)?;
             slots.push(Slot {
                 capacity: node.capacity,
                 free: node.capacity,
@@ -540,7 +557,7 @@ impl FitIndex {
             self.held.get(at).map_or(&[][..], Vec::as_slice),
         );
         slot.verdict(demand, devices, |i| {
-            held.get(i).is_some_and(Option::is_none)
+            held.get(i).is_some_and(Option::is_none) && devices.get(i).is_some_and(|d| d.available)
         })
     }
 
@@ -550,7 +567,10 @@ impl FitIndex {
         let held = self.held.get(at)?;
         bind(
             devices,
-            |i| held.get(i).is_some_and(Option::is_none),
+            |i| {
+                held.get(i).is_some_and(Option::is_none)
+                    && devices.get(i).is_some_and(|d| d.available)
+            },
             demand.need.gpus,
             &demand.ask,
         )
@@ -563,13 +583,45 @@ impl FitIndex {
             .get(at)
             .into_iter()
             .flatten()
-            .zip(0u16..)
+            .zip(0u16..=u16::MAX)
             .filter(|(h, _)| **h == Some(workload))
             .map(|(_, i)| i)
             .collect()
     }
 
-    /// Live node facts, preserving reservations. Held devices retain their index/kind/model/size;
+    pub(crate) fn devices(&self, node: NodeId) -> Result<&[Device], SimError> {
+        usize::try_from(node.0)
+            .ok()
+            .and_then(|at| self.devices.get(at))
+            .map(Vec::as_slice)
+            .ok_or(SimError::UnknownNode(node))
+    }
+
+    pub(crate) fn held_devices(
+        &self,
+        node: NodeId,
+        workload: WorkloadId,
+    ) -> Result<Vec<Device>, SimError> {
+        let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
+        let holders = self.held.get(at).ok_or(SimError::UnknownNode(node))?;
+        let devices = self.devices(node)?;
+        let count = holders
+            .iter()
+            .filter(|holder| **holder == Some(workload))
+            .count();
+        let mut selected = Vec::new();
+        selected
+            .try_reserve_exact(count)
+            .map_err(|_| SimError::Resources(node))?;
+        for (holder, device) in holders.iter().zip(devices) {
+            if *holder == Some(workload) {
+                selected.push(*device);
+            }
+        }
+        Ok(selected)
+    }
+
+    /// Live node facts, preserving reservations. Held devices retain index/kind/key/model/size;
     /// capacity cannot shrink below the amounts already held. Failure changes nothing.
     pub(crate) fn check_refresh_node(&self, node: &NodeSpec) -> Result<(), SimError> {
         let at = usize::try_from(node.id.0).map_err(|_| SimError::UnknownNode(node.id))?;
@@ -606,6 +658,7 @@ impl FitIndex {
         if !node.devices_agree() {
             return Err(SimError::Config("refreshed devices disagree with capacity"));
         }
+        check_device_keys(node)?;
         let used = old
             .capacity
             .checked_sub(&old.free)
@@ -621,7 +674,10 @@ impl FitIndex {
                     .get(i)
                     .zip(node.devices.get(i))
                     .is_some_and(|(old, new)| {
-                        old.kind == new.kind && old.model == new.model && old.size == new.size
+                        old.kind == new.kind
+                            && old.key == new.key
+                            && old.model == new.model
+                            && old.size == new.size
                     })
             {
                 return Err(SimError::Config(
@@ -964,6 +1020,153 @@ impl FitIndex {
                     *h = Some(workload);
                 }
             }
+        }
+        Ok(key)
+    }
+
+    /// Validate a durable binding against stable authority, not transient GPU utilisation.
+    pub(crate) fn check_recovered_devices(
+        &self,
+        node: NodeId,
+        demand: &Demand,
+        held: &[u16],
+    ) -> Result<(), SimError> {
+        let slot = self.slot(node)?;
+        let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
+        let devices = self.devices.get(at).ok_or(SimError::UnknownNode(node))?;
+        let class = demand.class;
+        let os = slot.platform.os;
+        let image_os = match class {
+            Class::Oci => os,
+            Class::Shards | Class::Firecracker => crate::model::Os::Linux,
+        };
+        if !slot.classes.has(class)
+            || demand.ask.os.is_some_and(|asked| asked != image_os)
+            || demand
+                .ask
+                .arch
+                .is_some_and(|asked| asked != slot.platform.arch)
+            || (demand.ask.kvm && (!slot.kvm || !class.gives_kvm(os)))
+        {
+            return Err(SimError::Config(
+                "recovered binding class or platform differs",
+            ));
+        }
+        let expected = [
+            usize::try_from(demand.need.gpus).map_err(|_| SimError::Resources(node))?,
+            usize::from(demand.ask.vfio),
+            usize::from(demand.ask.block),
+            usize::from(demand.ask.net),
+        ];
+        let count = expected
+            .iter()
+            .try_fold(0usize, |n, more| n.checked_add(*more))
+            .ok_or(SimError::Resources(node))?;
+        if held.len() != count || held.len() > devices.len() {
+            return Err(SimError::Config(
+                "recovered binding count differs from demand",
+            ));
+        }
+        if held.is_empty() {
+            return Ok(());
+        }
+        let mut seen = Vec::new();
+        seen.try_reserve_exact(devices.len())
+            .map_err(|_| SimError::Resources(node))?;
+        seen.resize(devices.len(), false);
+        let mut counts = [0usize; 4];
+        for &index in held {
+            let index = usize::from(index);
+            let device = devices
+                .get(index)
+                .ok_or(SimError::Config("recovered device index out of range"))?;
+            let used = seen
+                .get_mut(index)
+                .ok_or(SimError::Config("recovered device index out of range"))?;
+            if *used {
+                return Err(SimError::Config("duplicate recovered device index"));
+            }
+            *used = true;
+            if !class.exposes(os, device.kind) {
+                return Err(SimError::Config(
+                    "recovered device is not exposed by its class",
+                ));
+            }
+            let kind = match device.kind {
+                DeviceKind::Gpu => {
+                    if demand
+                        .ask
+                        .gpu_model
+                        .is_some_and(|model| model != device.model)
+                        || device.size < demand.ask.gpu_memory
+                    {
+                        return Err(SimError::Config(
+                            "recovered GPU model or total size differs",
+                        ));
+                    }
+                    0
+                }
+                DeviceKind::Vfio => 1,
+                DeviceKind::Block => {
+                    if device.size < demand.ask.block_size {
+                        return Err(SimError::Config("recovered block device is too small"));
+                    }
+                    2
+                }
+                DeviceKind::Net => 3,
+            };
+            let count = counts.get_mut(kind).ok_or(SimError::Resources(node))?;
+            *count = count.checked_add(1).ok_or(SimError::Resources(node))?;
+        }
+        if counts != expected {
+            return Err(SimError::Config(
+                "recovered device kinds differ from demand",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Reserve the exact surviving devices. No picker or load-based bind runs here.
+    pub(crate) fn take_recovered(
+        &mut self,
+        node: NodeId,
+        workload: WorkloadId,
+        demand: &Demand,
+        held: &[u16],
+    ) -> Result<Key, SimError> {
+        self.check_recovered_devices(node, demand, held)?;
+        let slot = self.slot(node)?;
+        if !slot.free.holds(&demand.need)
+            || !slot.runtime_holds(demand.class, &demand.need)
+            || matches!(demand.kind, Kind::Build) && slot.benchmarks > 0
+            || matches!(demand.kind, Kind::Benchmark) && slot.builds > 0
+        {
+            return Err(SimError::Resources(node));
+        }
+        let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
+        let holders = self.held.get(at).ok_or(SimError::UnknownNode(node))?;
+        if holders.contains(&Some(workload))
+            || held
+                .iter()
+                .any(|index| holders.get(usize::from(*index)).is_none_or(Option::is_some))
+        {
+            return Err(SimError::Config(
+                "recovered device overlaps an existing reservation",
+            ));
+        }
+        let key = self.change(
+            node,
+            demand,
+            |free| free.checked_sub(&demand.need),
+            |n| n.checked_add(1),
+            |used| used.checked_add(&demand.need),
+        )?;
+        let holders = self.held.get_mut(at).ok_or(SimError::UnknownNode(node))?;
+        for &index in held {
+            let holder = holders
+                .get_mut(usize::from(index))
+                .ok_or(SimError::Resources(node))?;
+            *holder = Some(workload);
         }
         Ok(key)
     }
@@ -1779,12 +1982,16 @@ mod tests {
         let mut linux = gpu_node(0, 8_000, Os::Linux, &[(1, 8 * GIB, 0)]);
         linux.devices.push(Device {
             kind: DeviceKind::Vfio,
+            key: None,
+            available: true,
             model: ModelId::UNNAMED,
             size: 0,
             load: GpuLoad::default(),
         });
         linux.devices.push(Device {
             kind: DeviceKind::Block,
+            key: None,
+            available: true,
             model: ModelId::UNNAMED,
             size: 100 * GIB,
             load: GpuLoad::default(),

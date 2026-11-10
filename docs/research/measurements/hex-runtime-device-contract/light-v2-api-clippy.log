@@ -1,0 +1,9 @@
+    Checking serde_core v1.0.229
+    Checking serde v1.0.229
+    Checking thiserror v2.0.21
+    Checking zmij v1.0.23
+    Checking itoa v1.0.18
+    Checking memchr v2.8.3
+    Checking serde_json v1.0.154
+    Checking hex-api v0.1.0 (/Users/adalundhe/.cache/hex-runtime-device-contract/01a1c643-0429d084-light-v2/source/crates/hex-api)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.00s
