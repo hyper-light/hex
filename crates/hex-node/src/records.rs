@@ -12,16 +12,20 @@
 //! through std, and NTFS journals the rename itself.
 //!
 //! Bounds (CLAUDE.md §2): a node keeps a record for each box it runs and each it owns, each at most
-//! [`hex_runtime::MAX_BOXES`], and its epoch: a directory holding more is refused, typed.
+//! [`hex_runtime::MAX_BOXES`], and its epoch: a directory holding more is refused, typed. Each
+//! value is at most [`MAX_BYTES`], the wire message bound, on write and before a persisted read allocates.
 
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use hex_sim::peer::{Records, Stop};
 
 /// The most records a node keeps: a record for each box it runs and each it owns, and its epoch.
 pub const MOST: usize = hex_runtime::MAX_BOXES * 2 + 1;
+
+/// CP-T7.4: one durable placement record is bounded by the protocol message it represents.
+pub const MAX_BYTES: usize = hex_core::wire::MAX_MESSAGE;
 
 const RECORD: &str = "rec";
 const TEMP: &str = "tmp";
@@ -49,6 +53,28 @@ fn checked(name: &str) -> Result<&str, Stop> {
     } else {
         Err(Stop::Damaged(format!("a record named {name:?}")))
     }
+}
+
+/// Limit the reader before allocating. The extra byte distinguishes an exact-size value from an
+/// oversized file even if it grows after open; decoding happens only after the size is established.
+fn read_record(reader: impl Read, path: &Path) -> Result<String, Stop> {
+    let mut bytes = Vec::new();
+    reader
+        .take(
+            u64::try_from(MAX_BYTES)
+                .unwrap_or(u64::MAX)
+                .saturating_add(1),
+        )
+        .read_to_end(&mut bytes)
+        .map_err(io("reading a record"))?;
+    if bytes.len() > MAX_BYTES {
+        return Err(Stop::Damaged(format!(
+            "record {} exceeds its {MAX_BYTES}-byte bound",
+            path.display()
+        )));
+    }
+    String::from_utf8(bytes)
+        .map_err(|e| Stop::Damaged(format!("record {} is not UTF-8: {e}", path.display())))
 }
 
 impl Files {
@@ -105,6 +131,12 @@ impl Files {
 impl Records for Files {
     fn put(&mut self, name: &str, value: &str) -> Result<(), Stop> {
         let name = checked(name)?;
+        if value.len() > MAX_BYTES {
+            return Err(Stop::Full {
+                what: "a placement record's bytes",
+                bound: MAX_BYTES,
+            });
+        }
         let (temp, record) = (self.path(name, TEMP), self.path(name, RECORD));
         {
             let mut f = File::create(&temp).map_err(io("making a temp record"))?;
@@ -135,7 +167,7 @@ impl Records for Files {
                 return Err(Stop::Damaged(format!("a record at {}", path.display())));
             };
             let name = checked(name)?.to_owned();
-            let value = fs::read_to_string(&path).map_err(io("reading a record"))?;
+            let value = read_record(File::open(&path).map_err(io("opening a record"))?, &path)?;
             out.push((name, value));
         }
         out.sort_unstable();
@@ -181,6 +213,74 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    /// CP-T7.4: oversized input is refused before opening a temporary or replacing durable state;
+    /// the wire bound itself still round-trips exactly, measured in bytes.
+    #[test]
+    fn records_refuse_oversized_put_without_changing_durable_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut files = Files::open(dir.path()).unwrap();
+        files.put("epoch", "old").unwrap();
+        let oversized = "x".repeat(MAX_BYTES + 1);
+        assert!(matches!(
+            files.put("epoch", &oversized),
+            Err(Stop::Full {
+                bound: MAX_BYTES,
+                ..
+            })
+        ));
+        assert!(matches!(
+            files.put("own-0-1-0", &oversized),
+            Err(Stop::Full {
+                bound: MAX_BYTES,
+                ..
+            })
+        ));
+        assert_eq!(files.all().unwrap(), [("epoch".into(), "old".into())]);
+        for name in ["epoch.tmp", "own-0-1-0.tmp", "own-0-1-0.rec"] {
+            assert!(!dir.path().join(name).exists());
+        }
+        let exact = "x".repeat(MAX_BYTES);
+        files.put("epoch", &exact).unwrap();
+        assert_eq!(files.all().unwrap(), [("epoch".into(), exact)]);
+    }
+
+    /// CP-T7.4: hostile persisted bytes are damaged records, not unbounded allocations or UTF-8 I/O
+    /// failures. A reader spy proves only the bound plus its sentinel byte is consumed.
+    #[test]
+    fn records_bound_hostile_reads_before_decoding() {
+        struct Counted {
+            input: std::io::Cursor<Vec<u8>>,
+            consumed: usize,
+        }
+        impl Read for Counted {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = self.input.read(buf)?;
+                self.consumed += n;
+                Ok(n)
+            }
+        }
+        let mut source = Counted {
+            input: std::io::Cursor::new(vec![b'x'; MAX_BYTES * 2]),
+            consumed: 0,
+        };
+        assert!(matches!(
+            read_record(&mut source, Path::new("hostile.rec")),
+            Err(Stop::Damaged(_))
+        ));
+        assert_eq!(source.consumed, MAX_BYTES + 1);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("epoch.rec");
+        let hostile = File::create(&path).unwrap();
+        hostile
+            .set_len(u64::try_from(MAX_BYTES + 1).unwrap())
+            .unwrap();
+        drop(hostile);
+        let mut files = Files::open(dir.path()).unwrap();
+        assert!(matches!(files.all(), Err(Stop::Damaged(_))));
+        fs::write(&path, [0xff]).unwrap();
+        assert!(matches!(files.all(), Err(Stop::Damaged(_))));
     }
 
     /// CP-T7.4, laptop-only: do run one node with no plane and no Amphora, its records in files, for 6
