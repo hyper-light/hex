@@ -136,14 +136,34 @@ fn device_claims_and_offers_roundtrip_with_explicit_tags_and_catalog_order() {
     assert_eq!(answer(91, &decoded, MAX_MESSAGE).unwrap(), bytes);
 }
 
+/// AC-T7.4.1: a native Metal registry identity uses all64 bits; the wire does not reinterpret
+/// it as a narrow PCI address. The initialized adapter validates the physical correspondence.
+#[test]
+fn native_gpu_keys_roundtrip_without_pci_width_assumptions() {
+    for key in [1 << 48, 1 << 63, u64::MAX] {
+        let gpu = DeviceId {
+            kind: DeviceKind::Gpu,
+            key,
+        };
+        let claimed = Request::Call(Call::Create(Box::new(device_spec(vec![gpu]))));
+        let bytes = request(91, &claimed, MAX_MESSAGE).unwrap();
+        assert_eq!(
+            read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            claimed
+        );
+        let offered = Answer::Capacity(Some(device_capacity(vec![device_offer(gpu)])));
+        let bytes = answer(91, &offered, MAX_MESSAGE).unwrap();
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            offered
+        );
+    }
+}
+
 /// AC-T7.3.1: malformed claims and offers refuse on both sides, rather than narrowing an identity.
 #[test]
 fn device_codecs_refuse_invalid_keys_and_duplicate_ids_without_private_values() {
     for device in [
-        DeviceId {
-            kind: DeviceKind::Gpu,
-            key: 1 << 48,
-        },
         DeviceId {
             kind: DeviceKind::Vfio,
             key: 1 << 32,

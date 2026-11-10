@@ -140,3 +140,45 @@ focused model crash/recovery controls passing on its recorded composite with
 ROOT8c399; that is prior-source model evidence, not this full candidate or a
 native VM recovery pass. The separately owned HCS keeper source remains pending
 its publication/error controls and is not included in this selective import.
+
+## Exact c478 light result and stale wire oracle
+
+ROOT's admitted d132 private source `c478931d123d621671efe7f6eb7a316766b2e375`
+passed all36 API units. The wire suite executed30:29 passed,1 failed,0 ignored.
+The new lifecycle roundtrip/hostile-cause control passed. The old malformed-key
+fixture still classified GPU key2^48 as invalid, although accepted source62a679c0
+already changed the public GPU identity to native64-bit PCI/Metal keys. API
+`DeviceId::check` accepts that value by design. This was a stale fixture
+expectation, not a reproduced production attachment defect. The correction
+removes only that obsolete invalid input and adds positive request/capacity
+roundtrips at2^48,2^63 and u64::MAX. Existing malformed VFIO/network, duplicates,
+unknown tags and redaction controls remain intact. No production validation or
+limit is weakened. Original API/wire logs and source manifests are retained in
+private `cohort-c478931d-light-v1`; API log SHA372746189ac4ff6d402b9d06c63b99e8c0b3d92697390545b5cea198b558e048,
+wire log SHA1b2a441c17a1a0f3a14632bb52a2fca9bac98e7bd049752027557608535f69bd.
+Both recorded Cargo children93811/94525 were reaped, source unchanged, temp0;
+CLI51482 ended1. Later phases did not execute. The successor is source-only until
+its check; this failure is not counted as a passing wire suite.
+
+## Single Linux authority decision
+
+Source review found Linux CLI already serves one Arc<Node> with the native Store,
+method turns and device turns. Nesting another Recorded would duplicate payload
+and holder authority. The adapters instead keep a weak reference to that same
+Node; the native Node routes persisted classes before cgroup cleanup. A stack
+transaction callback keeps concrete turn receipts local and avoids introducing
+per-operation boxed owners. This design is for the actual Firecracker and Shards
+adapters, not a general scheduler framework. Existing kernel/VM effects remain
+owned by their native adapter and witnessed separately.
+
+Alternatives rejected: a second Recorded/store (conflicting recovery authority),
+a strong Arc back-reference (ownership cycle), or new boxed transactions (unchecked
+per-operation allocation). Rust1.99.1 documents [Weak as non-owning and intended
+for cycle-free back-references](https://doc.rust-lang.org/1.99.1/std/sync/struct.Weak.html);
+[Box::try_new remains nightly-only](https://doc.rust-lang.org/1.99.1/std/boxed/struct.Box.html#method.try_new).
+A borrowed [FnMut callback](https://doc.rust-lang.org/1.99.1/std/ops/trait.FnMut.html)
+can mutate the caller's stack result without a boxed closure. The concrete owner
+must invoke it exactly once, reject missing/dead authority, and release every
+acquired turn on every return. No allocation-free, lifetime or native-cleanup
+performance claim follows from this source design; ROOT owes fault/mutation and
+profile proof.
