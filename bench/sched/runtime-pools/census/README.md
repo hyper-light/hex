@@ -233,3 +233,22 @@ Scratch is `~/.cache/hex-lead/cold-verifier-synthetic`; fixtures use invented ro
 never measurements or seeds. Root owns all actual reconstruction/hash/provenance/cleanup/cancellation
 checks, mutation interpretation and combined validation. No actual capture was read by this scoped
 implementation.
+
+## Fresh-node armed validation
+
+Pass `--validate-seeds` to `cold_boot_census.py` with the same explicit guest,
+build and policy inputs, positive `--n`, and original `--deadline-seconds 120`.
+Each iteration uses a fresh private ordinary backend. The existing armed Harness
+removes both census variables from backend and probe children. Result and
+aggregate kind is `cold-node-seeded-validation`; readiness requires live class,
+capacity and an empty physical baseline. Success also requires the exact backend
+reaped, matching Stopped receipt, no cleanup errors and an empty census directory.
+This mode reads no census rows and reports no timing distributions, first-SDK
+attribution or seed evidence. A failed iteration or unproved closure stops before
+another guest. The measuring default retains its three-argument campaign hook,
+including the existing native quota wrapper; only armed mode passes its new flag.
+
+The scoped implementer passed21 synthetic cases after the legacy-hook regression
+failed before its fix. These checks execute no real CLI, guest or API and inspect
+no actual captures. Root alone runs and reviews actual armed/failure-closure
+validation, source equivalence, artifact hashes and final combined gates.
