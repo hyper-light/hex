@@ -834,3 +834,92 @@ fn explicit_shared_namespace_matches_remote_ids_and_cannot_rebind_existing_state
     assert!(longest.as_str().len() <= BoxId::MAX_LEN);
     assert_eq!(longest.as_str().len(), 127);
 }
+
+/// AC-T7.4.1/LB03: low live FREE room cannot strand an existing empty box's durable reservation.
+/// Recovery retains cleanup authority, refuses fresh local admission, and later uses real facts.
+#[test]
+fn restart_with_less_live_room_than_held_reservations_restores_cleanup_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = Arc::new(Counting::default());
+    let driver = boot(dir.path(), rt.clone());
+    let (d, p) = request();
+    let (key, step) = driver.submit(d, p.clone()).unwrap();
+    local(&driver, step);
+    let physical = driver.physical_id(key).unwrap();
+    assert_eq!(rt.inspect(&physical).unwrap().state, BoxState::Empty);
+    drop(driver);
+    let live = Resources {
+        cpu_milli: d.need.cpu_milli,
+        mem_bytes: d.need.mem_bytes / 2,
+        ..Resources::default()
+    };
+    let nodes = [NodeSpec::new(NodeId(0), live)];
+    let recovered = Driver::boot(
+        NodeId(0),
+        &nodes,
+        &[],
+        Budget { owned: 4, ran: 4 },
+        Pick::default(),
+        dir.path(),
+        Runtimes::new([(Class::Oci, rt.clone() as Arc<dyn Runtime>)]).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(recovered.status(key).unwrap().unwrap().physical, physical);
+    assert_eq!(rt.creates.load(Ordering::SeqCst), 1);
+    let duplicate = Envelope {
+        msg: Msg::Start { key, demand: d },
+        payload: Some(p.clone()),
+        refusal: None,
+    };
+    let held = recovered.hear(NodeId(0), duplicate).unwrap();
+    assert!(matches!(
+        held.send.as_slice(),
+        [(
+            _,
+            Envelope {
+                msg: Msg::Started { .. },
+                ..
+            }
+        )]
+    ));
+    // Owner submission is still valid; any attempt at new local runtime admission remains refused.
+    let foreign = Key {
+        owner: 0,
+        epoch: u64::MAX,
+        seq: 0,
+    };
+    let refused = recovered
+        .hear(
+            NodeId(0),
+            Envelope {
+                msg: Msg::Start {
+                    key: foreign,
+                    demand: d,
+                },
+                payload: Some(p.clone()),
+                refusal: None,
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        refused.send.as_slice(),
+        [(
+            _,
+            Envelope {
+                msg: Msg::Refused { .. },
+                refusal: Some(_),
+                ..
+            }
+        )]
+    ));
+    assert_eq!(rt.creates.load(Ordering::SeqCst), 1);
+    local(&recovered, recovered.delete(key).unwrap());
+    assert!(rt.list().unwrap().is_empty());
+    recovered
+        .refresh_node(NodeSpec::new(NodeId(0), d.need))
+        .unwrap();
+    let (_, step) = recovered.submit(d, p).unwrap();
+    local(&recovered, step);
+    assert_eq!(rt.creates.load(Ordering::SeqCst), 2);
+    assert_eq!(nodes.first().unwrap().capacity, live);
+}
