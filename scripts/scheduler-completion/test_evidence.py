@@ -7,8 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from evidence import (BACKENDS, STAGES, TARGETS, InvalidEvidence, artifact,
-                      check_events, libtest_result, load_json, matrix, sha256)
+from evidence import (BACKENDS, POLICY, RULES, STAGES, TARGETS, InvalidEvidence, artifact,
+                      check_events, check_run, libtest_result, load_json, matrix, sha256)
 from mutation import replacement
 
 compare_path=Path(__file__).resolve().parents[2]/"bench/scheduler-completion/compare.py"
@@ -155,6 +155,42 @@ class EvidenceBehavior(unittest.TestCase):
     def test_profiles_reject_nan_and_negative_values(self):
         for values in ([float("nan")],[float("inf")],[-1],[True]):
             with self.assertRaises(ValueError):comparison.distribution(values)
+
+    def test_light_scope_cannot_be_promoted_to_native_run(self):
+        receipt={"schema":"hex-completion-run-1","source":"a"*40,"policy":POLICY,"rules_sha256":RULES,
+                 "proof":"full","scope":"light-unit"}
+        with self.assertRaises(InvalidEvidence):check_run(Path("."),receipt,1000)
+
+    def profiles(self):
+        candidate={field:"same" for field in comparison.EQUIVALENT}
+        candidate.update(schema="hex-completion-profile-1",build="release",scope="root-profile",
+            source="a"*40,intended_samples=8,coverage=["caller","runtime","guest","induced-kernel"])
+        baseline=copy.deepcopy(candidate);baseline["source"]="b"*40
+        for label,row in (("candidate",candidate),("baseline",baseline)):
+            metrics={name:8 if (direction=="higher")== (label=="candidate") else 1
+                     for name,direction in comparison.METRICS.items()}
+            row["samples"]=[{"run":str(index),"verified":True,"metrics":dict(metrics)} for index in range(8)]
+        return candidate,baseline
+
+    def test_missing_copy_measurements_cannot_claim_a_profile_target(self):
+        candidate,baseline=self.profiles()
+        candidate["samples"][0]["metrics"]["copied_bytes"]=None
+        report=comparison.compare(candidate,baseline,4)
+        self.assertFalse(report["all_targets_achieved"])
+        self.assertIsNone(report["metrics"]["copied_bytes"]["ratio"])
+        self.assertTrue(any("copied_bytes" in gap for gap in report["gaps"]))
+
+    def test_profile_refuses_different_hardware(self):
+        candidate,baseline=self.profiles();baseline["hardware"]="other"
+        with self.assertRaises(ValueError):comparison.compare(candidate,baseline,4)
+
+    def test_profile_target_misses_are_retained(self):
+        candidate,baseline=self.profiles()
+        for row in baseline["samples"]:row["metrics"]["latency_seconds"]=2
+        report=comparison.compare(candidate,baseline,4)
+        self.assertEqual(report["metrics"]["latency_seconds"]["ratio"],2)
+        self.assertFalse(report["metrics"]["latency_seconds"]["achieved"])
+        self.assertFalse(report["all_targets_achieved"])
 
 
 if __name__=="__main__":

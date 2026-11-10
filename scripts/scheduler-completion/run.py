@@ -11,7 +11,7 @@ import sys
 import time
 from pathlib import Path
 
-from evidence import (BACKENDS, TARGETS, POLICY, RULES, InvalidEvidence, check_run,
+from evidence import (BACKENDS, TARGETS, POLICY, RULES, InvalidEvidence, artifact, check_run,
                       finite_positive, hex_digest, load_json, require, sha256)
 
 
@@ -34,6 +34,14 @@ def run(args):
             os_part is not None and os_part in args.target,"requested execution target disagrees with actual native host")
     binary = args.binary.resolve(strict=True)
     require(sha256(binary) == args.binary_sha256, "input binary hash mismatch")
+    build_path=args.build_receipt.resolve(strict=True)
+    build=load_json(build_path,args.byte_limit)
+    require(build.get("schema")=="hex-completion-build-1" and build.get("source")==args.source and
+            build.get("target")==args.target and build.get("test")=="completion_backends" and
+            build.get("exit")==0 and build.get("reaped") is True and build.get("timed_out") is False and
+            build.get("source_unchanged") is True,"missing actual successful fixed-source fixture build")
+    artifact(build_path.parent,build["binary"])
+    require(build["binary"]["sha256"]==args.binary_sha256,"run binary is not the recorded build artifact")
     config = args.config.resolve(strict=True)
     value = load_json(config, args.byte_limit)
     require(value.get("proof") == args.proof and value.get("source") == args.source and value.get("backend") == args.backend and
@@ -46,6 +54,7 @@ def run(args):
     pinned = root / ("test-binary.exe" if os.name == "nt" else "test-binary")
     shutil.copy2(binary, pinned)
     shutil.copy2(config, root / "fixture.json")
+    shutil.copy2(build_path,root/"build.json")
     require(sha256(pinned) == args.binary_sha256, "copied binary hash mismatch")
     require(sha256(config) == sha256(root / "fixture.json"), "config changed during copy")
     command = [str(pinned), "--ignored", "--exact", test_name, "--nocapture", "--test-threads=1"]
@@ -65,6 +74,7 @@ def run(args):
                "timeout_seconds": args.timeout, "cleanup_timeout_seconds": args.cleanup_timeout,
                "environment": {"platform": platform.platform(), "machine": platform.machine()},
                "binary": file_receipt(root, pinned), "fixture": file_receipt(root, root / "fixture.json"),
+               "build":file_receipt(root,root/"build.json"),
                "timed_out": False, "reaped": False, "exit": None,
                "native_cleanup": "unverified until fixture cleanup stage and PID journal agree",
                "owned_pid_journal": str(root / "owned-pids.jsonl")}
@@ -113,6 +123,7 @@ def main():
     parser.add_argument("--source", required=True)
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--binary-sha256", required=True)
+    parser.add_argument("--build-receipt",type=Path,required=True)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--backend", choices=BACKENDS, required=True)
     parser.add_argument("--topology", choices=("laptop", "peer"), required=True)

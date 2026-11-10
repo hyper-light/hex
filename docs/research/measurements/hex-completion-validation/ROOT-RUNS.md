@@ -6,6 +6,13 @@ Run admission/resource/pause instructions from CHARTER.md continue to apply.
 Build the owned standalone fixtures from the final integrated source, retaining
 the exact Cargo JSON compiler-artifact record and hashing the resulting binary:
 
+The build.py helper records the actual clean fixed source tree, compiler command,
+selected target, exit/reap, Cargo artifact and copied binary. run.py requires this
+receipt and ties its binary hash to that successful build. All output/cache/temp
+paths must be unique and outside the signed source checkout:
+
+    python3 scripts/scheduler-completion/build.py --root-authorized --repo /ABS/integrated --source FINAL_SHA --cargo /ABS/cargo --package hex-cli --test completion_backends --target aarch64-apple-darwin --output /ABS/new-build --timeout ROOT_SECONDS --cleanup-timeout ROOT_SECONDS --byte-limit ROOT_BOUND
+
     nice -n 10 cargo test -p hex-cli --test completion_backends --locked --no-run --message-format=json -j1
     nice -n 10 cargo test -p hex-gpu --test completion_telemetry --locked --no-run --message-format=json -j1
     nice -n 10 cargo test -p hex-gpu --test completion_windows_compute --locked --no-run --message-format=json -j1 --target x86_64-pc-windows-msvc
@@ -55,7 +62,7 @@ The independent OS observer then checks the actual process start/image/hash,
 Linux container namespaces or KVM VM descriptor where applicable.
 
     python3 scripts/scheduler-completion/prepare.py --lab /ABS/lab.json --source FINAL_SHA --byte-limit ROOT_BOUND --output /ABS/new-fixture.json
-    python3 scripts/scheduler-completion/run.py --root-authorized --source FINAL_SHA --binary /ABS/completion_backends --binary-sha256 SHA256 --config /ABS/new-fixture.json --backend oci --topology laptop --proof full --target x86_64-unknown-linux-gnu --timeout ROOT_SECONDS --cleanup-timeout ROOT_SECONDS --byte-limit ROOT_BOUND --output /ABS/new-run
+    python3 scripts/scheduler-completion/run.py --root-authorized --source FINAL_SHA --binary /ABS/completion_backends --binary-sha256 SHA256 --build-receipt /ABS/new-build/build.json --config /ABS/new-fixture.json --backend oci --topology laptop --proof full --target x86_64-unknown-linux-gnu --timeout ROOT_SECONDS --cleanup-timeout ROOT_SECONDS --byte-limit ROOT_BOUND --output /ABS/new-run
 
 Repeat with actual firecracker/shards and peer configurations. A selected-only
 invocation records five stages and explicitly leaves foreign/wrong-ID/recovery
@@ -76,6 +83,22 @@ records the actual origin control path and its same physical placement/runner
 receipt hash. It is a routed Linux execution proof; no local non-Linux GPU or
 Firecracker support is inferred. The matrix excludes impossible non-Linux local
 Firecracker cells and retains the peer-routing obligations.
+
+For a real remote origin, set require_remote_origin in the lab input. The fixture
+writes placement.json and opens an event barrier before executing its checks.
+ROOT transfers that small placement/address artifact to the actual origin host;
+an existing authorized port forward may carry the test-only loopback barrier.
+origin.py invokes the actual ordinary origin scheduler socket with Status and
+requires the same physical box, key, runner, tracked/created state and no refusals.
+The response releases the fixture's barrier. After the backend run, finalize
+joins its receipt hash; gate rechecks the retained origin binary and raw reply.
+
+    python3 scripts/scheduler-completion/origin.py observe --root-authorized --placement /ABS/placement.json --address /ABS/origin-address.json --hex /ABS/hex --hex-sha256 SHA256 --socket /ABS/origin-scheduler.sock --target aarch64-apple-darwin --output /ABS/new-origin --timeout ROOT_SECONDS --byte-limit ROOT_BOUND
+    python3 scripts/scheduler-completion/origin.py finalize --root-authorized --runner-receipt /ABS/native-run/run.json --output /ABS/new-origin/origin.json --timeout ROOT_SECONDS --byte-limit ROOT_BOUND
+
+This helper is a bounded test event rendezvous, not a production GPU provider,
+selection authority, peer relay or installed broker. Missing actual origin
+evidence cannot be replaced by a requested target string or compile result.
 
 Build a matrix manifest with source and cells of target/backend/topology/receipt.
 Missing hardware cells carry an explicit reason. Gate verifies full native

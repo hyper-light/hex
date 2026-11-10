@@ -200,6 +200,14 @@ def check_run(root, receipt, byte_limit):
             "failed/unreaped native invocation")
     binary = artifact(root, receipt.get("binary"))
     require(binary.stat().st_size > 0, "empty binary")
+    build_path=artifact(root,receipt.get("build"))
+    build=load_json(build_path,byte_limit)
+    require(build.get("schema")=="hex-completion-build-1" and build.get("source")==receipt["source"] and
+            build.get("target")==receipt["target"] and build.get("test")=="completion_backends" and
+            build.get("exit")==0 and build.get("timed_out") is False and build.get("reaped") is True and
+            build.get("source_unchanged") is True and
+            build.get("binary",{}).get("sha256")==receipt["binary"]["sha256"],
+            "run is not tied to its actual successful pinned-source build")
     log = artifact(root, receipt.get("log"))
     libtest_result(log.read_text(encoding="utf-8"), 1)
     event_file = artifact(root, receipt.get("events"))
