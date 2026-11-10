@@ -596,7 +596,13 @@ mod tests {
 
     #[test]
     fn the_simulator_passes_the_conformance_suite() {
-        for fixture in [SimFixture::Process, SimFixture::Bundle, SimFixture::Spec] {
+        for fixture in [
+            SimFixture::Process,
+            SimFixture::Bundle,
+            SimFixture::Spec,
+            SimFixture::Firecracker,
+            SimFixture::Shards,
+        ] {
             let failures = conformance::run(&SimRuntime::new(), &fixture);
             assert!(failures.is_empty(), "{fixture:?}: {failures:#?}");
         }

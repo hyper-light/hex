@@ -313,6 +313,21 @@ pub enum Refusal {
     Os { op: &'static str, why: String },
     #[error("the node agent's state is unusable: {0}")]
     Broken(String),
+    /// The named box retains its resources while an operation is pending or its physical result
+    /// is uncertain. Busy names exclusive lifecycle ownership, never absence or completion.
+    #[error("box {id}: {cause}")]
+    Lifecycle { id: BoxId, cause: LifecycleCause },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(rename_all = "lowercase")]
+pub enum LifecycleCause {
+    #[error("native operation is pending")]
+    Pending,
+    #[error("physical termination or absence has not been proved")]
+    Uncertain,
+    #[error("another operation owns this box's lifecycle")]
+    Busy,
 }
 
 impl Refusal {
