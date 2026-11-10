@@ -202,3 +202,11 @@ sets runtime cost at admission and includes it in scheduling and cgroup limits.
 Its example numbers are not Hex constants. Exact fixed-VM versus within-reservation
 semantics, actual measurements and native enforcement remain open implementation
 and validation work here.
+
+## Client refusal adapter follow-up source
+
+The new physical-selector refusal adapter reserves fixed diagnostic text fallibly
+before copying it, with typed Exhausted fallback. Permanent selector errors and
+storage exhaustion remain different public categories. A focused adapter test
+covers both categories without booting a guest. This follow-up is source-only
+until its exact client check; prior API/core results keep their original pins.

@@ -789,3 +789,25 @@ fn the_event_form_takes_no_pipe_of_the_callers_own() {
         Request::Call(Call::Inspect(BoxId::new("b").unwrap()))
     );
 }
+
+/// AC-T7.4.1: permanent selector mistakes and temporary storage exhaustion retain distinct
+/// public categories; the adapter never turns either into an opaque operating-system retry.
+#[test]
+fn physical_gpu_refusals_preserve_retry_category() {
+    for cause in [
+        shards_api::PhysicalGpuError::Syntax,
+        shards_api::PhysicalGpuError::Duplicate,
+    ] {
+        assert!(matches!(
+            shards::refusal("booting", &shards_api::Refusal::Gpu(cause)),
+            Refusal::Invalid {
+                what: "physical GPU selection",
+                ..
+            }
+        ));
+    }
+    assert!(
+        matches!(shards::refusal("booting", &shards_api::Refusal::Gpu(shards_api::PhysicalGpuError::Allocation)),
+        Refusal::Exhausted { what: "physical GPU selection storage", bound } if bound == shards_api::physical::MAX_PHYSICAL_GPUS)
+    );
+}

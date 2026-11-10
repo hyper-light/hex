@@ -114,14 +114,34 @@ pub fn refusal(op: &'static str, why: &shards_api::Refusal) -> Refusal {
             what: "the node's guest",
             why: format!("its {what}: {why}"),
         },
-        shards_api::Refusal::Gpu(shards_api::PhysicalGpuError::Allocation) => Refusal::Exhausted {
-            what: "physical GPU selection storage",
-            bound: shards_api::physical::MAX_PHYSICAL_GPUS,
-        },
-        shards_api::Refusal::Gpu(why) => Refusal::Invalid {
-            what: "physical GPU selection",
-            why: why.to_string(),
-        },
+        shards_api::Refusal::Gpu(why) => {
+            use shards_api::PhysicalGpuError;
+            let message = match why {
+                PhysicalGpuError::Syntax => "malformed native GPU selector",
+                PhysicalGpuError::PciAddress => "GPU PCI address fields are out of range",
+                PhysicalGpuError::MetalRegistry => "Metal registry identity is unavailable",
+                PhysicalGpuError::Count => "GPU count exceeds the native device address space",
+                PhysicalGpuError::Duplicate => "GPU selection repeats a native identity",
+                PhysicalGpuError::Allocation => {
+                    return Refusal::Exhausted {
+                        what: "physical GPU selection storage",
+                        bound: shards_api::physical::MAX_PHYSICAL_GPUS,
+                    };
+                }
+            };
+            let mut reason = String::new();
+            if reason.try_reserve_exact(message.len()).is_err() {
+                return Refusal::Exhausted {
+                    what: "physical GPU refusal text",
+                    bound: message.len(),
+                };
+            }
+            reason.push_str(message);
+            Refusal::Invalid {
+                what: "physical GPU selection",
+                why: reason,
+            }
+        }
         other => Refusal::os(op, other),
     }
 }
