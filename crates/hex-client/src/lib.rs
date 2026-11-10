@@ -33,7 +33,7 @@ mod calls;
 mod copy;
 pub mod guest;
 
-pub use calls::{Ended, Then};
+pub use calls::{Deferred, Ended, Then};
 
 #[cfg(target_os = "linux")]
 mod linux;

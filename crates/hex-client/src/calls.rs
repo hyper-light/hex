@@ -1084,6 +1084,78 @@ pub struct Core<T: Transport> {
     budgets: wire::Budgets,
 }
 
+/// An event-form call whose id and completions are reserved, but whose request has not gone (HEX-RT-17).
+/// The caller may first open guest streams named for [`Deferred::id`], then send the explicit call. Dropping it
+/// before a successful send cancels only its reservation; it sends no request or release and makes no stream.
+#[must_use = "a deferred call sends nothing until send is called"]
+pub struct Deferred<T: Transport> {
+    conn: Arc<Conn<T>>,
+    id: u64,
+    bytes: Vec<u8>,
+    reserved: bool,
+}
+
+#[cfg(test)]
+mod tests;
+
+impl<T: Transport> Deferred<T> {
+    /// The request's reserved id, also the name of the program an exec starts.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Sends the framed call now, through the same event-form path as [`Core::begin`]. A failure cancels its
+    /// reservation; a successful send leaves its answer and program's end to the existing reader's loop.
+    pub fn send(self) -> Result<(), Refusal> {
+        self.send_with(NONE)
+    }
+
+    fn send_with(mut self, lent: &[Lent<'_>]) -> Result<(), Refusal> {
+        let shared = &*self.conn.shared;
+        if let Some(why) = &shared.state()?.closed {
+            return Err(why.clone());
+        }
+        let whole = shared.sending.lock().map_err(poisoned)?;
+        let mut at = 0;
+        // What is owed goes first, as it does before any message.
+        let sent = match shared.send_owed(&whole) {
+            Ok(true) => shared.transport.try_send(&self.bytes, &mut at, lent),
+            Ok(false) => Ok(false),
+            Err(e) => Err(e),
+        };
+        match sent {
+            // The agent has gone: why reaches the completion through the loop, which sees the end.
+            Ok(true) | Err(Sent::Gone) => {
+                self.reserved = false;
+                Ok(())
+            }
+            Ok(false) => {
+                if at > 0 {
+                    shared.transport.shutdown();
+                }
+                Err(Refusal::Os {
+                    op: "sending to the node agent",
+                    why: "no room in its connection now, and the event form doesn't wait"
+                        .to_owned(),
+                })
+            }
+            Err(Sent::Full(r) | Sent::Refused(r)) => Err(r),
+        }
+    }
+}
+
+impl<T: Transport> Drop for Deferred<T> {
+    fn drop(&mut self) {
+        if self.reserved
+            && let Ok(mut state) = self.conn.shared.state()
+        {
+            state.calls.remove(&self.id);
+            state.programs.remove(&self.id);
+            state.given.remove(&self.id);
+        }
+    }
+}
+
 impl<T: Transport> Core<T> {
     /// Says hello over `shared`, naming this build, and learns what the agent runs and its bounds. An agent of
     /// another wire is refused here, by type, naming both wires and both builds (`hex_core::wire::Fault::Wire`):
@@ -1181,6 +1253,19 @@ impl<T: Transport> Core<T> {
         )
     }
 
+    /// Reserves an event-form call's id, answer and (for an exec or run) program's end before sending it. The
+    /// explicit `call` is framed unchanged: no stdio is made, copied or lent, and [`Transport::MAKES_ASKED`] is
+    /// not used. A guest caller that has arranged its own named streams uses [`Call::Exec`] with their stream
+    /// bits, then calls [`Deferred::send`] only once those connections are open. Until then, drop cancels it.
+    pub fn defer(&self, call: Call, then: Then, ended: Ended) -> Result<Deferred<T>, Refusal> {
+        let program = matches!(
+            call,
+            Call::Exec { .. } | Call::ExecStreams { .. } | Call::Run { .. }
+        )
+        .then(|| Watching::Then(ended));
+        self.deferred(&Request::Call(call), then, program)
+    }
+
     /// Sends `request` now with what `with` makes for its id and lends it, its answer to go to `then` and an exec's
     /// program's end to `program`, each placed before the request goes; refused, and forgotten, when it can't go now.
     fn begun<'l>(
@@ -1190,6 +1275,21 @@ impl<T: Transport> Core<T> {
         then: Then,
         program: Option<Watching>,
     ) -> Result<u64, Refusal> {
+        let deferred = self.deferred(request, then, program)?;
+        let id = deferred.id();
+        let lent = with(id)?;
+        deferred.send_with(lent)?;
+        Ok(id)
+    }
+
+    /// The common event-form reservation and framing path. The RAII value forgets its id if framing or a later
+    /// stream preparation fails before send, just as it does when a deferred caller cancels it.
+    fn deferred(
+        &self,
+        request: &Request,
+        then: Then,
+        program: Option<Watching>,
+    ) -> Result<Deferred<T>, Refusal> {
         let shared = &*self.conn.shared;
         let id = {
             let mut state = shared.state()?;
@@ -1215,50 +1315,16 @@ impl<T: Transport> Core<T> {
             }
             id
         };
-        let forget = || {
-            if let Ok(mut state) = shared.state() {
-                state.calls.remove(&id);
-                state.programs.remove(&id);
-                state.given.remove(&id);
-            }
+        let mut deferred = Deferred {
+            conn: Arc::clone(&self.conn),
+            id,
+            bytes: Vec::new(),
+            reserved: true,
         };
-        let sent = wire::request(id, request, self.limits.message_bytes)
+        deferred.bytes = wire::request(id, request, self.limits.message_bytes)
             .map_err(Refusal::from)
-            .and_then(T::frame)
-            .and_then(|bytes| {
-                let lent = with(id)?;
-                let whole = shared.sending.lock().map_err(poisoned)?;
-                let mut at = 0;
-                // What is owed goes first, as it does before any message.
-                let owed = shared.send_owed(&whole);
-                let sent = match owed {
-                    Ok(true) => shared.transport.try_send(&bytes, &mut at, lent),
-                    Ok(false) => Ok(false),
-                    Err(e) => Err(e),
-                };
-                match sent {
-                    // The agent has gone: why reaches the completion through the loop, which sees the end.
-                    Ok(true) | Err(Sent::Gone) => Ok(()),
-                    Ok(false) => {
-                        if at > 0 {
-                            shared.transport.shutdown();
-                        }
-                        Err(Refusal::Os {
-                            op: "sending to the node agent",
-                            why: "no room in its connection now, and the event form doesn't wait"
-                                .to_owned(),
-                        })
-                    }
-                    Err(Sent::Full(r) | Sent::Refused(r)) => Err(r),
-                }
-            });
-        match sent {
-            Ok(()) => Ok(id),
-            Err(r) => {
-                forget();
-                Err(r)
-            }
-        }
+            .and_then(T::frame)?;
+        Ok(deferred)
     }
 
     /// The ends of exec `exec`'s streams once its start has come, taken once: those its transport made (a
