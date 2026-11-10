@@ -425,6 +425,7 @@ name = "hex-sim"
 version = "0.1.0"
 dependencies = [
  "cap",
+ "hex-api",
  "hex-health",
  "hyper-swim",
  "hyper-timing",

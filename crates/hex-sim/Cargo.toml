@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+hex-api.workspace = true
 serde.workspace = true
 hex-health.workspace = true
 hyper-swim.workspace = true
