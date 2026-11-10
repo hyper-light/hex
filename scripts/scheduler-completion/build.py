@@ -9,7 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from evidence import InvalidEvidence, TARGETS, hex_digest, require, sha256
+from evidence import InvalidEvidence, TARGETS, finite_positive, hex_digest, require, sha256
 from mutation import command
 
 
@@ -21,7 +21,8 @@ def build(args):
     require(args.root_authorized,"ROOT owns final integrated builds")
     require(hex_digest(args.source,40) and args.target in TARGETS,"exact source/target required")
     repo=args.repo.resolve(strict=True)
-    require(args.timeout>0 and args.cleanup_timeout>0 and args.byte_limit>0,"finite build envelope required")
+    require(finite_positive(args.timeout) and finite_positive(args.cleanup_timeout) and args.byte_limit>0,
+            "finite build envelope required")
     require(not args.output.resolve().is_relative_to(repo),"private build output must be outside the source checkout")
     require(git(repo,"rev-parse","HEAD")==args.source,"build checkout is not the fixed source")
     require(git(repo,"status","--porcelain")=="","build source must be clean and signed before execution")

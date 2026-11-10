@@ -10,7 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from evidence import InvalidEvidence, hex_digest, load_json, require, sha256
+from evidence import InvalidEvidence, finite_positive, hex_digest, load_json, require, sha256
 
 
 def linux_process(pid, byte_limit):
@@ -136,7 +136,8 @@ def main():
     parser.add_argument("--timeout", type=float, required=True)
     parser.add_argument("--byte-limit", type=int, required=True)
     args = parser.parse_args()
-    require(args.root_authorized and args.timeout > 0 and args.byte_limit > 0, "ROOT authorization/budgets required")
+    require(args.root_authorized and finite_positive(args.timeout) and 0 < args.byte_limit <= 0xffffffff,
+            "ROOT finite envelope and native u32 buffer bound required")
     pid,start=args.pid,args.start_token
     if args.identity:
         require(pid is None and start is None,"identity source is exclusive")

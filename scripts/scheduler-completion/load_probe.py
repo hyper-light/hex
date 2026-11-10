@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from evidence import InvalidEvidence, require, sha256
+from evidence import InvalidEvidence, finite_positive, require, sha256
 
 
 def main():
@@ -20,7 +20,7 @@ def main():
     parser.add_argument("--output",type=Path,required=True)
     parser.add_argument("--byte-limit",type=int,required=True)
     args=parser.parse_args()
-    require(args.root_authorized and args.timeout>0 and args.byte_limit>0,"ROOT finite envelope required")
+    require(args.root_authorized and finite_positive(args.timeout) and args.byte_limit>0,"ROOT finite envelope required")
     require(sha256(args.binary)==args.sha256,"source-pinned telemetry binary required")
     env=dict(os.environ,HEX_COMPLETION_ROOT_AUTHORIZED="1",HEX_COMPLETION_LOAD_SAMPLES="2",RUST_TEST_THREADS="1")
     argv=[str(args.binary),"--ignored","--exact","completion_native_load_samples","--nocapture","--test-threads=1"]

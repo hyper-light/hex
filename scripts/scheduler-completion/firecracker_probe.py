@@ -10,7 +10,7 @@ import sys
 import time
 from pathlib import Path
 
-from evidence import InvalidEvidence, require
+from evidence import InvalidEvidence, finite_positive, require
 
 
 def pci_tuple(text):
@@ -61,7 +61,7 @@ def main():
     parser.add_argument("--timeout",type=float,required=True)
     parser.add_argument("--byte-limit",type=int,required=True)
     args=parser.parse_args()
-    require(args.root_authorized and args.timeout>0 and args.byte_limit>0,"ROOT finite envelope required")
+    require(args.root_authorized and finite_positive(args.timeout) and args.byte_limit>0,"ROOT finite envelope required")
     print(json.dumps(witness(args.api,args.host_sbdf,args.native_key,args.timeout,args.byte_limit)))
 
 

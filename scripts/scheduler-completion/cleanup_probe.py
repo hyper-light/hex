@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from evidence import InvalidEvidence, load_json, require
+from evidence import InvalidEvidence, finite_positive, load_json, require
 from native_probe import linux_process, mac_process, windows_process
 
 
@@ -46,7 +46,8 @@ def main():
     parser.add_argument("--timeout",type=float,required=True)
     parser.add_argument("--byte-limit",type=int,required=True)
     args=parser.parse_args()
-    require(args.root_authorized and args.timeout>0 and args.byte_limit>0,"ROOT finite envelope required")
+    require(args.root_authorized and finite_positive(args.timeout) and 0<args.byte_limit<=0xffffffff,
+            "ROOT finite envelope required")
     scope=args.scope.resolve(strict=True)
     living=[]
     for path in args.identity:
