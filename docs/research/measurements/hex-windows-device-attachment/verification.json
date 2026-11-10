@@ -1,0 +1,292 @@
+{
+  "tested_source": "edffbd22e0d45e2237875949aa2fb47c23dfca2a",
+  "source_sha256": {
+    "crates/hex-runtime/src/windows/mod.rs": "2a0b293a743b9a2562b61af4889b895a1e68cedc09698c981b68961ab9ed6d43",
+    "crates/hex-runtime/src/windows/oci/mod.rs": "91f70a9c648b4baf76b529641d18f145b990c458434195f0a01b6d5b94d25210",
+    "crates/hex-cli/src/node.rs": "53651ecbf4b0f491b7b64f93d909d3f284c0c6bebb419f975e153401b8e0f8c6",
+    "crates/hex-core/src/hcs.rs": "3565076ac006986a805f5112957dbd781f3f99c015de8a58b2ae7bdc1f0d94ad",
+    "crates/hex-core/src/hcs/device_binding_record_tests.rs": "fe927012e1623fd65186be67f7f89bf64c05d2ad904baad942068de07cfbc567",
+    "crates/hex-runtime/src/windows/oci/sys.rs": "092a4ac23ca04169e8d3f4197b51ad8069b189af6a8f6d22c18992097fb455b7"
+  },
+  "current_source_matches": true,
+  "final_checks": {
+    "light-v1": {
+      "source_revision": "147312f7ee0fdc0b02f19b7720e6636c3bb03041",
+      "exit_code": 1,
+      "phases": [
+        {
+          "name": "hcs-unit",
+          "owned_pid": 31270,
+          "exit_code": 0,
+          "child_reaped": true,
+          "log_sha256": "f72e30ce291ce67ad2fe2a4c810f1bae24e56b001fc298647a42f52d95e91e14",
+          "summaries": [
+            "test result: ok. 48 passed; 0 failed; 0 ignored; 0 measured; 282 filtered out; finished in 0.66s"
+          ],
+          "required_selected": true
+        },
+        {
+          "name": "core-clippy",
+          "owned_pid": 31579,
+          "exit_code": 0,
+          "child_reaped": true,
+          "log_sha256": "fc8c7dfb3905282ccb05a3591a9d8f616683de754339910423fa42b83ba5efbb"
+        },
+        {
+          "name": "windows-runtime-clippy",
+          "owned_pid": 31619,
+          "exit_code": 101,
+          "child_reaped": true,
+          "log_sha256": "c30f95794d0c93f61593bde130157dd571e6aca2447e158e72c685baeed7917c"
+        }
+      ],
+      "remaining_temp_entries": 0
+    },
+    "light-v2": {
+      "source_revision": "67f98335456a8501e6a5f82ec9f98770531d70ba",
+      "exit_code": 0,
+      "phases": [
+        {
+          "name": "windows-runtime-clippy",
+          "owned_pid": 32590,
+          "exit_code": 0,
+          "child_reaped": true,
+          "log_sha256": "282e930319dca8ab1dfe18dfc51d2dd9611b9382f8484b69d148324d415e6865"
+        },
+        {
+          "name": "windows-cli-check",
+          "owned_pid": 32938,
+          "exit_code": 0,
+          "child_reaped": true,
+          "log_sha256": "87455746fd37158902885cb09ac831e9bec130daa18ffe3d74ac8279bf586f42"
+        }
+      ],
+      "remaining_temp_entries": 0
+    },
+    "native-v2": {
+      "source_revision": "67f98335456a8501e6a5f82ec9f98770531d70ba",
+      "exit_code": 0,
+      "phases": [
+        {
+          "name": "windows-unit",
+          "owned_pid": 171416,
+          "exit_code": 0,
+          "child_reaped": true,
+          "stdout_sha256": "9a334db1dea019f611aa4e2e01a87632775c0459a8f3401567d05fc01d93a0b2",
+          "stderr_sha256": "91274142ce907ae467c52413041522521f33616889002c345c614b103ee0eb80",
+          "summaries": [
+            "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 57 filtered out; finished in 0.03s"
+          ],
+          "six_selected_ok": true
+        },
+        {
+          "name": "windows-runtime-clippy",
+          "owned_pid": 251388,
+          "exit_code": 0,
+          "child_reaped": true,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderr_sha256": "0f28467b71d6ceb89c1ee7d72a83b2d8f615408968a7696a1f6c3f8783328121"
+        }
+      ],
+      "remaining_temp_entries": 0
+    },
+    "reclaim-red-v3": {
+      "source_revision": "ce99413f",
+      "exit_code": 1,
+      "phases": [
+        {
+          "name": "windows-unit",
+          "owned_pid": 284644,
+          "exit_code": 101,
+          "child_reaped": true,
+          "stdout_sha256": "d314a150743858e9f278e63ec18013b43c3e64fbf3a0f57e2452172e99e47f8d",
+          "stderr_sha256": "60b761e90e0ed8c017d672d76bb4133b68a9b67b0be24121559f6650b6553ab9",
+          "summaries": [
+            "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 63 filtered out; finished in 0.01s"
+          ],
+          "expected_selected_ok": false
+        }
+      ],
+      "remaining_temp_entries": 0
+    },
+    "reclaim-green-v4": {
+      "source_revision": "e75121e4",
+      "exit_code": 1,
+      "phases": [
+        {
+          "name": "windows-unit",
+          "owned_pid": 172132,
+          "exit_code": 0,
+          "child_reaped": true,
+          "stdout_sha256": "43516abaae1e2833255375fc9a843d1b088a2aa4ef6ad9f36c4acfc29742c6ba",
+          "stderr_sha256": "9ea43d03658166c7f038009ef70487af182074337a228c5d5b24428519ddbf14",
+          "summaries": [
+            "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 56 filtered out; finished in 0.04s"
+          ],
+          "expected_selected_ok": true
+        },
+        {
+          "name": "windows-runtime-clippy",
+          "owned_pid": 320376,
+          "exit_code": 101,
+          "child_reaped": true,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderr_sha256": "f1bc3d4471bc2445bdacfbd79175efb8037f79cdf7a57ef85aea02a9e1c4191d"
+        }
+      ],
+      "remaining_temp_entries": 0
+    },
+    "light-v5": {
+      "source_revision": "57dc65400e2debf9950de2f28c2b749de685a1d0",
+      "exit_code": 1,
+      "phases": [
+        {
+          "name": "hcs-unit",
+          "owned_pid": 41777,
+          "exit_code": 0,
+          "child_reaped": true,
+          "log_sha256": "f6434928acb58b0843b6a681007ee4d99432848d6d129545d0057d9ea99051c7",
+          "summaries": [
+            "test result: ok. 50 passed; 0 failed; 0 ignored; 0 measured; 282 filtered out; finished in 0.83s"
+          ],
+          "required_selected": true
+        },
+        {
+          "name": "core-clippy",
+          "owned_pid": 41892,
+          "exit_code": 0,
+          "child_reaped": true,
+          "log_sha256": "1c6f93697b230329054de0fc0ab4b4d6e4ae54c89b65d2305d147ce9d2d12519"
+        },
+        {
+          "name": "windows-runtime-clippy",
+          "owned_pid": 42132,
+          "exit_code": 101,
+          "child_reaped": true,
+          "log_sha256": "fc0986a714510a78758132a7c3befe26388d85036666626e871d605bdf2bffbc"
+        }
+      ],
+      "remaining_temp_entries": 0
+    },
+    "light-v6": {
+      "source_revision": "HEAD",
+      "exit_code": 1,
+      "phases": [
+        {
+          "name": "windows-runtime-clippy",
+          "owned_pid": 42558,
+          "exit_code": 101,
+          "child_reaped": true,
+          "log_sha256": "73716b0b63f4c16d98ad09a2d217fb5054afa09bc6209d08d97c965e068d9267"
+        }
+      ],
+      "remaining_temp_entries": 0
+    },
+    "native-v7": {
+      "source_revision": "8a29dfd30fa9131a94a977e7c87a8b616fed77d2",
+      "exit_code": 0,
+      "phases": [
+        {
+          "name": "windows-unit",
+          "owned_pid": 322176,
+          "exit_code": 0,
+          "child_reaped": true,
+          "stdout_sha256": "9d11104cf4d595f77e34b46465051fe9449fa9fde11498bf27712be0046b3dd9",
+          "stderr_sha256": "a8272dbfe4a3b39f21e46ea1fd67816527228344201c71a8fa48483767f5dd60",
+          "summaries": [
+            "test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 56 filtered out; finished in 0.10s"
+          ],
+          "expected_selected_ok": true
+        }
+      ],
+      "remaining_temp_entries": 0
+    },
+    "light-v8": {
+      "source_revision": "4d215cce0e8315e004dce103a38f0180b08ee371",
+      "exit_code": 1,
+      "phases": [
+        {
+          "name": "windows-runtime-clippy",
+          "owned_pid": 45965,
+          "exit_code": 101,
+          "child_reaped": true,
+          "log_sha256": "698460bf56d588f4e1e98808d71b0498ecddc96fdd91ad734e78739667af9116"
+        }
+      ],
+      "remaining_temp_entries": 0
+    },
+    "light-v10": {
+      "source_revision": "edffbd22e0d45e2237875949aa2fb47c23dfca2a",
+      "exit_code": 0,
+      "phases": [
+        {
+          "name": "windows-runtime-clippy",
+          "owned_pid": 47117,
+          "exit_code": 0,
+          "child_reaped": true,
+          "log_sha256": "90e896279ca4129123dbcd2b51af8b6c7cc5455216dceb430d025bd52a64a3e2"
+        },
+        {
+          "name": "windows-cli-check",
+          "owned_pid": 47580,
+          "exit_code": 0,
+          "child_reaped": true,
+          "log_sha256": "5d6c5b31970a9bcbd51dad9819f0f995961deb3f5dae045c30bd76608b918f10"
+        }
+      ],
+      "remaining_temp_entries": 0
+    },
+    "native-v9": {
+      "source_revision": "edffbd22e0d45e2237875949aa2fb47c23dfca2a",
+      "exit_code": 0,
+      "phases": [
+        {
+          "name": "windows-unit",
+          "owned_pid": 324244,
+          "exit_code": 0,
+          "child_reaped": true,
+          "stdout_sha256": "2e2cdc6f3fa8ff32de4bccd04cf1f7220a9deb1cbc72d8bfc8ad1b9f4537f4e2",
+          "stderr_sha256": "ab0ba7232b35bb8d199131d02ef1457529035e67d8b8fe8279f0cd9b766e1c98",
+          "summaries": [
+            "test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 56 filtered out; finished in 0.10s"
+          ],
+          "expected_selected_ok": true
+        },
+        {
+          "name": "windows-runtime-clippy",
+          "owned_pid": 321956,
+          "exit_code": 0,
+          "child_reaped": true,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderr_sha256": "727028f025e9b4ac7bd60dd0e5fdce5033a8fc634bf1a53b64cd0723d9053860"
+        },
+        {
+          "name": "windows-cli-check",
+          "owned_pid": 324452,
+          "exit_code": 0,
+          "child_reaped": true,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderr_sha256": "8abbecfbc96132ab6ea920ef8ee5b47b70fc6b88cb08247c4af84bd3dc52dde9"
+        }
+      ],
+      "remaining_temp_entries": 0
+    }
+  },
+  "core_hcs_and_dependencies_identical_to_actual50_unit_and_core_clippy_revision": "57dc65400e2debf9950de2f28c2b749de685a1d0",
+  "legacy_operation_and_legacy_create_source_unchanged_from_a036": true,
+  "wrapper_failure_native_v1": {
+    "selected_tests": 0,
+    "local_cli_exit": 1,
+    "cause": "PowerShell parser before any cargo/test/native effect",
+    "raw_cli_sha256": "c203338e868153177b0f3d16c8cdad5c0fff7969987d4c25759a3eb8d525d205"
+  },
+  "active_owned_build_test_jobs": [],
+  "owned_cleanup": "All recorded Cargo children waited/reaped; all final temp counts0. Ordinary Job fixtures delete their own boxes; fake contexts assert one close and one deallocation. No HCS/GPU/VM/keeper actor launched. No unrelated data or process touched.",
+  "owed_ROOT": [
+    "Compose with ROOT guest/router/capacity and Linux/macOS integration; this branch remains pinned a036 plus assigned source only.",
+    "Actual HCS callback/synchronous failure/late completion/physical absence and hardware attachment proof.",
+    "GPU/VFIO/block/net and all required supported OS/architectures; no platform Unsupported completion claim.",
+    "Native faults/mutations, full seven-target and workspace gates, audits/profiles/benchmarks/merges."
+  ],
+  "raw_policy": "Exact bytes retained and hashed; source and executed counts remain separate."
+}

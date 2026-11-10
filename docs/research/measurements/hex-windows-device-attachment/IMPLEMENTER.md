@@ -1,3 +1,5 @@
+> Historical source-first record for147/67. Current tested source and limits are in [RESULTS.md](RESULTS.md); assigned borrowed-volume support and callback ownership supersede the initial source-only restrictions below.
+
 # Windows exact device attachment — source checkpoint
 
 Implementer01a1c643e475709b8a829553d1100be1, coordinator01a1aa77778471339bea3beff90d6bbd.
