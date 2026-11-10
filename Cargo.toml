@@ -29,7 +29,7 @@ hex-gpu = { path = "crates/hex-gpu", version = "0.1.0" }
 hex-afunix = { path = "crates/hex-afunix", version = "0.1.0" }
 # Shards' guests (docs/design/shards-guest.md §2, Appendix A): the oci class's Linux guest on macOS and
 # Windows. By name and version, patched below to a copy of Shards' draft until Shards lands it, then to
-# vendor/shards as every other vendored project (vendor/shards-api-draft/Cargo.toml says which).
+# vendor/shards as every other vendored project (vendor/shards/Cargo.toml says which).
 shards-api = "0.1"
 flate2 = "1.1.10"
 # hyper-swim's failure detector and the timing it runs on, for hex-sim's crash class (hyper-raft,
@@ -142,4 +142,4 @@ opt-level = 3
 seccompiler = { path = "vendor/seccompiler" }
 hyper-swim = { path = "vendor/hyper-raft/crates/hyper-swim" }
 hyper-timing = { path = "vendor/hyper-raft/crates/hyper-timing" }
-shards-api = { path = "vendor/shards-api-draft/crates/api" }
+shards-api = { path = "vendor/shards/crates/api" }

@@ -283,7 +283,7 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   which Hex declares itself; std has no AF_UNIX socket or completion port on Windows, and a buffer the kernel
   writes after the call returns is beyond Rust's borrow rules. Rust can express none of them safely.
 
-- `vendor/shards-api-draft/crates/api/src/borrowed.rs` (Windows module): the borrowed guest connector
+- `vendor/shards/crates/api/src/client.rs` (Windows module): the borrowed guest connector
   opens only a non-inheritable query/synchronize process handle (`OpenProcess`), verifies its creation time
   (`GetProcessTimes`) and current exit state (`WaitForSingleObject` with zero timeout), then closes only
   that observation handle (`CloseHandle`). These Windows calls are unsafe foreign functions; the handle

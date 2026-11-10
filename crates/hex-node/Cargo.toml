@@ -47,7 +47,7 @@ shards-api.workspace = true
 
 [target.'cfg(windows)'.dev-dependencies]
 # guest_loop's Firecracker CONNECT fixture; no production stream or handle adapter.
-shards-afunix = { path = "../../vendor/shards-api-draft/crates/afunix" }
+shards-afunix = { path = "../../vendor/shards/crates/afunix" }
 
 [lints]
 workspace = true
