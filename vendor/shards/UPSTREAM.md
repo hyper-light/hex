@@ -16,3 +16,4 @@ borrowed implementation. See docs/research/measurements/hex-shards-api-33df.
 | File | Change | Why | Patch |
 | --- | --- | --- | --- |
 | crates/api/src/lib.rs | Recognize Windows ARM64 WHP and update its backend regression | Existing VMM implements hv/whp_arm64; supported API must reach it, then let it check real host capability. | 0001-recognize-existing-windows-arm64-whp-backend.patch |
+| crates/api/src/{lib,client,sim}.rs and API fixtures | Add GuestSpec.gpu and forward existing --gpu only when true | Expose the existing shared Venus path through the public seam; physical binding still requires runtime mapping. | 0002-expose-existing-shared-venus-gpu-enable-through-guestspec.patch |

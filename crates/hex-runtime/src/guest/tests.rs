@@ -526,6 +526,22 @@ fn every_missing_guest_input_is_named_in_one_refusal() {
     assert_eq!((config.vcpus, config.memory_mib), (2, 1024));
     assert_eq!(config.spec().binary, Some(PathBuf::from("/opt/shards")));
     assert_eq!(config.shares.len(), 1);
+    assert!(!config.gpu);
+    for (value, enabled) in [("false", false), ("true", true)] {
+        let mut vars = all.clone();
+        vars.push((ENV_GPU, value));
+        let selected = read(&vars).unwrap();
+        assert_eq!(selected.spec().gpu, enabled);
+        assert_eq!(selected.spec().ports, config.spec().ports);
+    }
+    for value in ["", "TRUE", "1", "yes"] {
+        let mut vars = all.clone();
+        vars.push((ENV_GPU, value));
+        assert!(matches!(
+            read(&vars),
+            Err(Refusal::Invalid { what: ENV_GPU, .. })
+        ));
+    }
 }
 
 /// One value of a spec broken, as HEX-RT-13 breaks them.

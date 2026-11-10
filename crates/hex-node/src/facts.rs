@@ -709,6 +709,11 @@ mod capacity_tests {
             assert!(super::here::quota_milli(bad).is_err(), "{bad}");
         }
     }
+}
+
+#[cfg(test)]
+mod gpu_identity_tests {
+    use super::gpu_facts;
 
     /// AC-T7.4.1: Apple identities retain every native bit and never acquire a PCI placeholder.
     #[test]
