@@ -152,3 +152,22 @@ fn every_supported_host_reaches_its_existing_shards_backend() {
         Err(shards_api::Refusal::NoBackend { .. })
     ));
 }
+
+/// AC-T7.4.1: the conformance suite must agree with supported-host backend recognition.
+#[test]
+fn conformance_accepts_every_supported_host_backend() {
+    let guests = shards_api::sim::SimGuests::new(|_| shards_api::End::PowerOff);
+    let serving = config().spec();
+    let subject = shards_api::conformance::Subject {
+        guests: &guests,
+        serving: serving.clone(),
+        port: stream::CONTROL_PORT,
+        unserved: stream::STDIO_PORT,
+        powering_off: serving,
+        patience: Duration::ZERO,
+    };
+    assert_eq!(
+        shards_api::conformance::hosts_without_a_backend_are_named(&subject),
+        Ok(())
+    );
+}
