@@ -4,6 +4,7 @@ from collections import Counter
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -177,6 +178,13 @@ class VerifyTests(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             verifier.create_output(output, {"overwrite": "forbidden"})
         self.assertEqual(output.read_bytes(), original)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "owned FIFO control requires Unix")
+    def test_nonregular_input_is_rejected_without_waiting_for_a_writer(self):
+        fifo = self.run / "no-writer.json"
+        os.mkfifo(fifo, 0o600)
+        with self.assertRaisesRegex(verifier.Invalid, "regular"):
+            verifier.read_bytes(self.run, fifo, 1)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,57 @@
+{
+  "deadline_seconds": 120,
+  "source_revision": "bba3d814cfa8373d589482dfbaa38b9bfa792d03",
+  "root": "C:\\Users\\corph\\.cache\\hx\\wire-marker-f91566cd5d5d49bcb58ff1d40444f325",
+  "seed_generation": "forbidden: focused protocol controls",
+  "answered": {
+    "pid": 304752,
+    "census": "C:\\Users\\corph\\.cache\\hx\\wire-marker-f91566cd5d5d49bcb58ff1d40444f325\\answered.tsv",
+    "rows": [
+      {
+        "marker": "",
+        "name": "client.answer.hello",
+        "nanos": 355300
+      },
+      {
+        "marker": "",
+        "name": "client.answer.schedule.status",
+        "nanos": 482900
+      }
+    ],
+    "census_sha256": "ac4d408226e448318b580799a952f9786506a327de6147ee4f847f13ed302cbe",
+    "exit": 0
+  },
+  "vm_count": 0,
+  "kind": "actual-native-wire-refusal-marker",
+  "server_pid": 312272,
+  "refused": {
+    "pid": 308028,
+    "census": "C:\\Users\\corph\\.cache\\hx\\wire-marker-f91566cd5d5d49bcb58ff1d40444f325\\refused.tsv",
+    "rows": [
+      {
+        "marker": "",
+        "name": "client.answer.hello",
+        "nanos": 231500
+      },
+      {
+        "marker": "!",
+        "name": "client.answer.schedule.describe",
+        "nanos": 157500
+      }
+    ],
+    "census_sha256": "390c3fea3023fc90e6ac9d017cbe8fe179dec05b8da771538188651c45a85927",
+    "exit": 1
+  },
+  "profile": "debug",
+  "deadline_basis": "Existing120s administrative cancellation policy, not a runtime seed",
+  "binary": {
+    "sha256": "e6d19e7878b06a77e04ef6423a24595724d304d57fa5064213c37ffa728b6a8e",
+    "path": "C:\\Users\\corph\\.cache\\hex-lead\\target-scheduler-refusal-bba3d814\\debug\\hex.exe"
+  },
+  "cleanup_reaped": true,
+  "max_rows": 1048576,
+  "status": "passed",
+  "backend_count": 0,
+  "root_run": "r467",
+  "runner": "f766f09294f2e17e3b8a631ffd4e6a4b"
+}

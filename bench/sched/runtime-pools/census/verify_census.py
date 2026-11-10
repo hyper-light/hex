@@ -71,7 +71,8 @@ def input_file(run, value):
             next_directory = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
             os.close(directory)
             directory = next_directory
-        descriptor = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+        # Inspect type before reading; a FIFO must not wait for a writer just to be rejected.
+        descriptor = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
         with os.fdopen(descriptor, "rb") as source:
             before = os.fstat(source.fileno())
             require(stat.S_ISREG(before.st_mode), "input must be a regular file")

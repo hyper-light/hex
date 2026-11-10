@@ -98,6 +98,12 @@ Census completion outcomes now use `name nanos` for an answer, `name !nanos` for
 
 The marker identifies only wire `Answer::Refused`, not workload/application success. An unmarked `Answer::Scheduled` can describe pending work or contain typed refusal notices; the timing core does not reinterpret that payload. Actual physical lifecycle controls and per-call outcome provenance still determine seed eligibility. This commit makes no new seed decision and cannot retrospectively classify old unmarked rows.
 
+Root actual marker, mutation, complete capture and verifier evidence is recorded
+in [wire-refusals.md](../wire-refusals.md). The root verifier opens leaf inputs
+nonblocking before checking regular-file type: an owned FIFO without a writer is
+rejected, rather than waiting at open. Source/fixed controls and exact raw-file
+verification are separate from an eligibility decision or seed installation.
+
 ## Bounded reconstruction (coordinator execution only)
 
 `verify_census.py` reads an explicit completed run; it never starts a process/VM, queries a Runtime, installs a seed or decides eligibility. Example, with operator-selected storage budgets and the fixed code source supplying actual protocol/WaitKind bounds:

@@ -2,7 +2,8 @@
 
 The side-storage candidate was rejected and reverted incc7c2190 after the quiet
 comparison below. The capacity fix remains; the effective production tree is
-identical to63ec2758. These are coordinator measurements of the single FitIndex
+identical to63ec2758 at cc7c2190. Later retry/census changes and their exact
+revisions are recorded below. These are coordinator measurements of the single FitIndex
 admission/placement path, not external competitive performance results. All runs used the arm64 Mac Studio, macOS26.4,
 Rust1.99.1 release builds with the same18 resolved dependencies, thin LTO, one codegen
 unit and overflow checks. Root ran the builds and measurements; implementers prepared
@@ -181,3 +182,28 @@ passed the complete seven-target/workspace/vendor gate at exact a98824f7; see
 gates-a98824f7.json for command/exit/log hashes and ignored cases. Native Linux
 and remaining calibration checks are still owed. Later census-outcome source
 changes require their own validation; this gate is not relabeled to that source.
+
+## Current classified captures
+
+Root completed fresh debug/release captures at bba3d814 after the retry timing
+correction and typed refusal census marker. Each profile passed 1,000 local and
+1,000 SSH physical create/delete cycles, restored the empty baseline and retired
+its exact guest. Root reconstructed every SHA, marker/count and filename join in
+194,912 files and 567,541 rows. The records are
+census-{debug,release}-bba3d814.json; wire-refusals.md explains classification and
+mutation checks. These loaded measuring runs do not certify installed seeds.
+
+Separate fresh guests provided 1,000 class-validated SDK Hellos per profile. A
+post-borrower-drop capacity RPC still named the same live guest, then the normal
+boundary controls passed and each guest ended Stopped. See
+guest-hello-{debug,release}-fa5c7e4e.json. This proves the stated identity/lifetime
+checks, not FD/task/allocator leak freedom. The SDK sample begins after dial/token
+setup and does not measure CONNECT or VM boot latency. Root's FIFO reproduction
+and verifier correction are in verifier-nonregular-controls.json.
+
+Root r462 passed seven-target lint, native macOS workspace checks and vendoring
+at exact bba3d814; gates-bba3d814.json retains exits and ignored cases. Native
+Windows core/client checks and the real classifier mutation passed separately.
+Native Linux/root-lab, calibration and other unrun platform/resource checks
+remain unverified. No current capture guest remains live and no seed was
+installed by this evidence batch.
