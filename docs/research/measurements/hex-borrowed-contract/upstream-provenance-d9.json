@@ -15,5 +15,12 @@
   },
   "linux_native": "UNVERIFIED, no approved admitted CPU",
   "scope": "test-only patch for current upstream API; obsolete c55 production patch not resubmitted",
-  "signed_test_commit_has_gpgsig": true
+  "signed_test_commit_has_gpgsig": true,
+  "patch_check": {
+    "upstream_test_path_absent": true,
+    "git_apply_check_exit": 0,
+    "private_apply_exit": 0,
+    "applied_test_sha256": "94fbbfecdbd2268430408b7df2144b1bfee377685f5c61da11ec4a9f6c66dea1",
+    "same_as_signed_d9_test": true
+  }
 }
