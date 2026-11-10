@@ -50,3 +50,78 @@ fn physical_claims_reach_the_configured_backend_route_for_create_and_run() {
     }
     assert!(node.process.list().unwrap().is_empty());
 }
+
+struct NativeReporting {
+    inner: hex_api::sim::SimRuntime,
+    report: hex_api::Capacity,
+}
+
+impl Runtime for NativeReporting {
+    fn classes(&self) -> Vec<Class> {
+        vec![Class::Process, Class::Oci]
+    }
+    fn capacity(&self, _: Class) -> Result<Option<hex_api::Capacity>, Refusal> {
+        Ok(Some(self.report.clone()))
+    }
+    fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
+        self.inner.create(spec)
+    }
+    fn start(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.inner.start(id)
+    }
+    fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        self.inner.exec(id, program, stdio)
+    }
+    fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        self.inner.run(spec, program, stdio)
+    }
+    fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
+        self.inner.signal(id, signal)
+    }
+    fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
+        self.inner.inspect(id)
+    }
+    fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
+        self.inner.usage(id)
+    }
+    fn list(&self) -> Result<Vec<BoxInfo>, Refusal> {
+        self.inner.list()
+    }
+    fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.inner.delete(id)
+    }
+}
+
+/// AC-T7.4.1: configuring the Linux-image guest cannot hide the native Windows OCI device pool.
+/// Real HCS attachment is separately validated; these capacity replies are explicit model inputs.
+#[test]
+fn native_oci_device_capacity_remains_visible_with_a_guest_configured() {
+    let native = hex_api::Capacity {
+        id: "model-native-pool".into(),
+        total: hex_api::CapacityResources::default(),
+        free: hex_api::CapacityResources::default(),
+        devices: vec![hex_api::DeviceInfo {
+            id: hex_api::DeviceId {
+                kind: hex_api::DeviceKind::Gpu,
+                key: 256,
+            },
+            model: "fixture-native".into(),
+            size: 4096,
+            holder: None,
+        }],
+    };
+    let guest = hex_api::Capacity {
+        id: "model-guest-pool".into(),
+        devices: Vec::new(),
+        ..native.clone()
+    };
+    let node = WithGuest {
+        process: NativeReporting {
+            inner: hex_api::sim::SimRuntime::new(),
+            report: native.clone(),
+        },
+        oci: capacity_runtime(Some(guest), config()),
+        route: |_runtime, _class| Ok(Side::Host),
+    };
+    assert_eq!(node.capacity(Class::Oci).unwrap(), Some(native));
+}
