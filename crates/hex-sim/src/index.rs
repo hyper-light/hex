@@ -235,7 +235,14 @@ impl Slot {
         if !self.classes.has(class) {
             return Verdict::NoClass;
         }
-        if ask.os.is_some_and(|o| o != os) || ask.arch.is_some_and(|a| a != self.platform.arch) {
+        // AC-T7.4.1: VM images describe their Linux guest, independently of the VMM host.
+        let image_os = match class {
+            Class::Oci => os,
+            Class::Shards | Class::Firecracker => crate::model::Os::Linux,
+        };
+        if ask.os.is_some_and(|o| o != image_os)
+            || ask.arch.is_some_and(|a| a != self.platform.arch)
+        {
             return Verdict::NoPlatform;
         }
         let gpus_only = crate::model::Ask {
@@ -1268,6 +1275,74 @@ mod tests {
             class,
             ask,
         }
+    }
+
+    /// AC-T7.4.1: image OS follows the initialized class; host capability classes stay unchanged.
+    #[test]
+    fn image_os_matches_vm_guest_and_oci_host() {
+        use crate::model::{Arch, Ask, Os, Virt};
+        let mut mac = NodeSpec::new(NodeId(0), res(4_000, 16, 0));
+        mac.platform = Platform {
+            os: Os::Macos,
+            arch: Arch::Aarch64,
+        };
+        mac.virt = Virt {
+            hvf: true,
+            ..Virt::default()
+        };
+        mac.classes = Os::Macos.classes(mac.virt);
+        let mut windows = NodeSpec::new(NodeId(1), res(4_000, 16, 0));
+        windows.platform.os = Os::Windows;
+        windows.classes = Os::Windows.classes(windows.virt);
+        let linux = NodeSpec::new(NodeId(2), res(4_000, 16, 0));
+        let ix = FitIndex::new(&[mac, windows, linux]).unwrap();
+        let guest = |os, arch| {
+            asking(
+                0,
+                Class::Shards,
+                Ask {
+                    os: Some(os),
+                    arch: Some(arch),
+                    ..Ask::default()
+                },
+            )
+        };
+        assert_eq!(
+            ix.verdict(NodeId(0), &guest(Os::Linux, Arch::Aarch64))
+                .unwrap(),
+            Verdict::Admits
+        );
+        assert_eq!(
+            ix.verdict(NodeId(0), &guest(Os::Macos, Arch::Aarch64))
+                .unwrap(),
+            Verdict::NoPlatform
+        );
+        assert_eq!(
+            ix.verdict(NodeId(0), &guest(Os::Linux, Arch::X86_64))
+                .unwrap(),
+            Verdict::NoPlatform
+        );
+        let win = asking(
+            0,
+            Class::Oci,
+            Ask {
+                os: Some(Os::Windows),
+                ..Ask::default()
+            },
+        );
+        assert_eq!(ix.verdict(NodeId(1), &win).unwrap(), Verdict::Admits);
+        assert_eq!(ix.verdict(NodeId(2), &win).unwrap(), Verdict::NoPlatform);
+        let mut firecracker = guest(Os::Linux, Arch::X86_64);
+        firecracker.class = Class::Firecracker;
+        assert_eq!(
+            ix.verdict(NodeId(2), &firecracker).unwrap(),
+            Verdict::Admits
+        );
+        firecracker.ask.os = Some(Os::Macos);
+        assert_eq!(
+            ix.verdict(NodeId(2), &firecracker).unwrap(),
+            Verdict::NoPlatform
+        );
     }
 
     /// CP-T7.4, the needs model's filters: do ask an image's platform, a GPU by model and by memory,

@@ -2236,7 +2236,7 @@ mod tests {
             kind: Kind::Session,
             class: Class::Shards,
             ask: Ask {
-                os: Some(Os::Macos),
+                os: Some(Os::Linux),
                 arch: Some(Arch::Aarch64),
                 ..Ask::default()
             },
@@ -2784,7 +2784,7 @@ mod tests {
         let shards = Demand {
             class: Class::Shards,
             ask: Ask {
-                os: Some(Os::Macos),
+                os: Some(Os::Linux),
                 arch: Some(Arch::Aarch64),
                 ..Ask::default()
             },

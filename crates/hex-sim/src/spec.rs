@@ -681,7 +681,7 @@ pub struct FilterReport {
     pub hot_sessions: u64,
     /// A workload placed on a node that can't run its class.
     pub class_off_node: u64,
-    /// A workload placed on a node of another OS or architecture than its image's.
+    /// A workload placed where its class cannot run the image OS or native architecture.
     pub platform_off: u64,
     /// A workload placed where the devices it asks weren't free and matching (one held twice, one of
     /// another model or with too little memory), or of a class that can't be given them there.
@@ -758,7 +758,14 @@ pub fn check_filters(cluster: &Cluster, run: &Run) -> Result<FilterReport, Viola
                 r.class_off_node = r.class_off_node.saturating_add(1);
             }
             let (ask, os) = (&spec.ask, facts.platform.os);
-            if ask.os.is_some_and(|o| o != os) || ask.arch.is_some_and(|a| a != facts.platform.arch)
+            // Independent hard-filter oracle: containers share their host OS; VM images run Linux.
+            let image_os = if spec.class == crate::model::Class::Oci {
+                os
+            } else {
+                crate::model::Os::Linux
+            };
+            if ask.os.is_some_and(|o| o != image_os)
+                || ask.arch.is_some_and(|a| a != facts.platform.arch)
             {
                 r.platform_off = r.platform_off.saturating_add(1);
             }

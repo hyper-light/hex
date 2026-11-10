@@ -204,6 +204,7 @@ pub const DEVICES: usize = 1 << 16;
 /// ([`Resources::gpus`]); `gpu_model` and `gpu_memory` constrain each of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Ask {
+    /// Image OS: host OS for OCI, Linux guest for Shards/Firecracker; not the VMM host's OS.
     pub os: Option<Os>,
     pub arch: Option<Arch>,
     pub gpu_model: Option<ModelId>,
