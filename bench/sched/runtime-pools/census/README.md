@@ -123,3 +123,55 @@ Result JSON and ledger bootstrap budgets are explicit because the existing schem
 The output preserves nearest-rank nanosecond distributions for unmarked raw wire answers, marked wire refusals, run-outs and uniquely filename-attributed call/process exit success. These categories do not establish workload/application success. Legacy unmarked wire outcomes remain explicitly unclassified; missing filename attribution never falls back to PID. Owned guest records/receipts/retirement identities are compared exactly, without live PID/API checks. The coordinator retains responsibility for actual source/binary hashes, Runtime/VM cleanup evidence, cancellation checks and interpretation; packaging/synthetic tests are not an audit of any real capture.
 
 Synthetic tests only (ordinary imports, not `-I`): `python3 -B -m unittest -v test_verify_census.py`. Their scratch is `~/.cache/hex-lead/verifier-synthetic-tests`; no actual capture directory is read by the tests.
+
+## Fresh-node first SDK Hello cohort (root execution only)
+
+`cold_boot_census.py --n N --output NEW_JSON` composes the existing `scheduler_census.py` Harness.
+Pass its original explicit guest/profile/source/binary/resource/policy/build/deadline inputs,
+`--deadline-seconds 120` and an owned short `--run-parent` cache directory. `--validate-seeds` is
+refused. N is positive and explicit; each iteration constructs a separate Harness/private run root,
+starts one ordinary node/guest backend, verifies ready API/classes/live guest capacity and an empty
+physical baseline, then uses the original finish_backend/cleanup paths. It runs no scheduler,
+boxes or workload. Every iteration must retain a matching Stopped receipt and reaped backend before
+the next starts. Output is a create-new aggregate plus each original run's raw census/ledger/receipts/
+result. Existing capture directories/VMs and r515/r530 are not reused. No seed/timer changes occur.
+
+The selected producer is the exact new backend Popen's unique census filename, not observer files,
+PID fallback or warm-borrower data. Only its first completed unmarked `client.guest.answer.hello`
+row is the first-SDK candidate; subsequent Hellos, refusals and run-outs remain separate. Source075fd:
+`WithGuest::routing` boots through `GuestRuntime::guest`'s ordinary `Client::connect` before node
+`Server::with_os` calls `Recorded::attach`/`join_loop`/`join` for its evented client. The two named
+call phases derive the normal count; they are not a guessed sample threshold. Unexpected counts or
+refusal/run-out evidence make the first-VM cohort ambiguous/excluded. Even normal counts do not prove
+per-row VM identity or absence of pre-Hello boot retries: the final recorded guest and SDK row order
+are distinct facts. Root reviews that attribution and decides any eligibility. SDK timing begins
+after dial/token setup; this is cold-node-boot cohort collection, not full-boot latency.
+
+Pre-readiness failure is an explicit ownership gap in the original Harness: its normal finish path
+first queries a possibly unavailable socket. The new driver stops/reaps only its exact saved backend
+child, requires an existing bounded regular private `backend_state/@guest`, and uses the existing
+remember/stop-owned-guest helpers. A create-new recovery receipt must match any existing receipt's
+entire identity/configuration before stop is requested; an existing receipt is never replaced.
+Missing/invalid/mismatched records or receipts, or unproved retirement, retain cleanup-unproven and
+halt the campaign without another guest. No PID discovery, scan or guessed stop is added. Root must
+review this path before any live campaign and still owns all actual failure/cancel/retirement proof.
+
+Synthetic only, on approved d132 with 1CPU/1GiB/2GiB, nice10/private Python:
+`COLD_BOOT_SYNTHETIC_ROOT="$OWNED_SYNTHETIC_CACHE" nice -n 10 "$PRIVATE_PYTHON" -I -B test_cold_boot_census.py`.
+Tests use fake Harness operations and synthetic files; no real CLI/process/VM or actual captures.
+POLICY_READ implementer: Shards origin/main `f5cec365d2e435afae5e6f613c92d9d3759ef60f`, full R01–R16
+rules SHA256 `d634fcb944959ce1e40a9277d12b0905fcfcebf82d9da9832e826f790a349242`, current AGENTS/evidence/
+CLAUDE/handoff and Hex CLAUDE read before edits. Root owns all actual data, guest/E2E/resource/timeout/
+provenance/gate review. No FD/task/allocator, competitive-performance or original-failure-cause claim.
+
+Implementer evidence: approved d132/private Python3.13.18, 1CPU/1GiB/2GiB, nice10; the command above
+passed all10 synthetic tests (exit0). The new saved-Popen/pruned-live-list regression first failed
+against the initial driver, then passed after preserving that exact Popen authority; no process
+lookup was added. Own logs are `~/.cache/hex-lead/cold-boot-census-synthetic/{pruned-red,tests-final}.log`.
+Tested source SHA256 `b2c6c9031e39a2b9f0554fc618e4dc39bafcdd048e6eae48db23952fab0ede4d`, tests
+`e96ebf649c7c9c7f9ef3f9707823788cf5c31377bbabb4908050980e8074d55f`; local/remote hashes match.
+No actual Harness construction, CLI, guest, capture/hash review, VM/E2E/benchmark/profile or seeds
+were executed by the implementer. Root still owes review before any live run, actual fresh-guest
+cohort/normal-count/identity attribution, malformed/no-ready/cancellation/receipt/retirement cases,
+all child/VM closure and resource-return observations, immutable provenance reconstruction and any
+later eligibility decision. The existing base Harness and production sources are unchanged.
