@@ -1,0 +1,138 @@
+{
+  "exit": 0,
+  "reaped": true,
+  "archive_sha256": "ceb8e20645d4264826491cf6c15b9a5884a3e2b54032624f12a7b9c728ef6114",
+  "bytes": 117818,
+  "readback": {
+    "device-catalog-a03657d1-light-v1": {
+      "revision": "a03657d18add6343b9b5d9da55c7aefdc71a10c9",
+      "source_files": 1128,
+      "source_unchanged": true,
+      "result": {
+        "source": "a03657d18add6343b9b5d9da55c7aefdc71a10c9",
+        "archive_sha256": "68ee8c30cf99eebb38205ebbff9b91c9dacf7ffbe21dc89e38d3021f1d2ff1e1",
+        "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+        "arch": "arm64",
+        "scope": "ROOT focused shared-catalog units and runtime Clippy only; no native box/GPU/VM effects",
+        "phases": [
+          {
+            "name": "catalog-unit",
+            "command": [
+              "nice",
+              "-n",
+              "10",
+              "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+              "test",
+              "-p",
+              "hex-runtime",
+              "--lib",
+              "--locked",
+              "devices::tests::",
+              "--",
+              "--nocapture",
+              "--test-threads=1"
+            ],
+            "pid": 26623,
+            "exit": 0,
+            "reaped": true,
+            "sha256": "5bb96633aab8414a44afc12dbe2c3b148fe9dcd2ecbcdb5f30c99deca4819c56",
+            "bytes": 5705,
+            "summaries": [
+              "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 60 filtered out; finished in 0.03s"
+            ],
+            "required_selected": true
+          },
+          {
+            "name": "runtime-clippy",
+            "command": [
+              "nice",
+              "-n",
+              "10",
+              "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+              "clippy",
+              "-p",
+              "hex-runtime",
+              "--all-targets",
+              "--locked",
+              "--",
+              "-D",
+              "warnings"
+            ],
+            "pid": 26878,
+            "exit": 0,
+            "reaped": true,
+            "sha256": "d93a0ebc4ed4320f387c2882cfdcc874fcb6043afd80bf7262b32670c712203e",
+            "bytes": 2430,
+            "summaries": []
+          }
+        ],
+        "exit": 0,
+        "temp_entries": 0
+      },
+      "signed_source_equal": true
+    },
+    "device-node-5e2cfbe7-compile-v1": {
+      "revision": "5e2cfbe7e09256ff6a7d979564717cfc6d8041f6",
+      "source_files": 1196,
+      "source_unchanged": true,
+      "result": {
+        "source": "5e2cfbe7e09256ff6a7d979564717cfc6d8041f6",
+        "archive_sha256": "46ec9ee9b53d19ac5e9f3d1fb0e079e6412fbcf31e3a074145e07b42d2e474c2",
+        "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+        "arch": "arm64",
+        "scope": "ROOT combined node native+Linux compile/lint only; no native box/GPU/VM effects",
+        "phases": [
+          {
+            "name": "node-native-clippy",
+            "command": [
+              "nice",
+              "-n",
+              "10",
+              "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+              "clippy",
+              "-p",
+              "hex-node",
+              "--all-targets",
+              "--locked",
+              "--",
+              "-D",
+              "warnings"
+            ],
+            "pid": 28174,
+            "exit": 0,
+            "reaped": true,
+            "sha256": "ef267f315326c26373bf55e4efbb639dbc1acdfa8697acf85b5cbe46467dac33",
+            "bytes": 4519
+          },
+          {
+            "name": "node-linux-clippy",
+            "command": [
+              "nice",
+              "-n",
+              "10",
+              "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+              "clippy",
+              "-p",
+              "hex-node",
+              "--all-targets",
+              "--locked",
+              "--target",
+              "aarch64-unknown-linux-musl",
+              "--",
+              "-D",
+              "warnings"
+            ],
+            "pid": 28810,
+            "exit": 0,
+            "reaped": true,
+            "sha256": "64fc9394b7f9ae099116cdac9b28f70d4602928b2e29b7c64d34bacedc2067e9",
+            "bytes": 3273
+          }
+        ],
+        "exit": 0,
+        "temp_entries": 0
+      },
+      "signed_source_equal": true
+    }
+  }
+}
