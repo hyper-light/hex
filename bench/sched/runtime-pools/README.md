@@ -326,7 +326,28 @@ data mtimes alone cannot locate a delay or establish fsync completion. The guest
 ended Stopped; final full-run baseline/count fields are absent and not invented.
 armed-submit-negative-df534d2f.json retains exact input hashes and the failure.
 The calibration manifest is explicitly failed again. No further record value or
-deadline changed. Root is profiling the same binaries to distinguish durable
-record flushes, runtime staging/start and reply publication; all profiled rows
-are diagnostic and excluded from calibration. A passing fresh-node campaign
-does not certify the physical scheduler lifecycle or the whole goal.
+deadline changed. The separate profiled run completed 1,000 local and 1,000
+forced-SSH physical cycles. Root reconstructed 103,238 raw files, 296,104 rows
+and 213,502 ledger rows. Submit's maximum observed call-exit time was
+118,030,084ns; the timeout was not reproduced. The three retained native stack
+samples include ordinary runtime creation and directory synchronization, which
+do not establish the earlier failure's cause. These data have unquantified
+profiling overhead and remain excluded from calibration and performance claims;
+diagnostic-submit-profile-df534d2f.json records the exact sources and hashes.
+
+The exact df534d2f combined gate passed all seven target lints, format,
+production checks, native macOS workspace tests and vendoring. Its 957 passing
+test executions include a separate focused 51-test client run; 13 were ignored.
+Passing test stderr is hidden, so internally skipped hardware cases are not
+claimed as live coverage. Native Linux AMD64/root-lab and Windows ARM VM proof
+remain outside this result; see gates-df534d2f.json.
+
+Diagnostic d4d91e3a's trace-off N1 control passed both physical cycles with no
+markers. Trace-on failed during an unrelated CLI Hello wait after sending took
+longer than its 1.659ms budget. Both exact guest identities ended Stopped with
+the original backend reaped. This is distinct from the armed Submit failure;
+socket readiness includes error/hangup and does not prove a complete queued
+answer. The original failed trace is retained in diagnostic-trace-controls-d4d91e3a.json.
+The next separate diagnostic revision limits client traces to typed Submit.
+A passing gate or fresh-node campaign does not certify the failed physical
+scheduler lifecycle or the whole goal.

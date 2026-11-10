@@ -1,0 +1,83 @@
+{
+  "calibration_eligibility": false,
+  "kind": "root-diagnostic-submit-profile",
+  "ledger": {
+    "bytes": 67737420,
+    "physical_control_events": {
+      "local": 1000,
+      "remote": 1000
+    },
+    "rows": 213502,
+    "sha256": "662a0e1898e4b9066d6f4d07cde3d8adc894ba77ad38caf43fb64bb673521a7a"
+  },
+  "limits": [
+    "Profiling overhead is unquantified; diagnostic timing cannot seed waits or establish quiet performance.",
+    "Submit timeout not reproduced; ordinary Files.sync_dir/Runtime.create samples do not establish the cause of the earlier armed failure."
+  ],
+  "performance_claim": false,
+  "physical_created": 2000,
+  "physical_deleted": 2000,
+  "raw_files_verified": 103238,
+  "raw_result": {
+    "bytes": 95355238,
+    "path": "/Users/adalundhe/.cache/hx/e-_j44jcld/result.json",
+    "sha256": "348453499659ea727b5f40cb5d791ed971e65416a9cb36ca9152bdc6ccf80304"
+  },
+  "raw_rows_verified": 296104,
+  "reader_diagnostic": {
+    "change": "only admitted input kind changed to diagnostic-scheduler-submit-profile; raw report intact; all original structural/hash/count/outcome checks remain",
+    "path": "/Users/adalundhe/.cache/hex-lead/snapshots/profile-verifier-root-df534d2f/verify_diagnostic_census.py",
+    "sha256": "7bf02de0367b616142ea31fa82918e490005d4155164c0ab7e133b230252fe3e"
+  },
+  "reader_original_sha256": "a1b650dafee625f17d619fffe47afd3bc97fb920d5e17717c48b98a93fb8987a",
+  "reconstruction": {
+    "bytes": 25585087,
+    "path": "/Users/adalundhe/.cache/hx/e-_j44jcld/root-verified-diagnostic-profile-df534d2f.json",
+    "sha256": "0792230560f0f8c4ad095d401567a8be540784e4d8b7be6df96c6a011c7cd3a8"
+  },
+  "retirement": {
+    "live_API_check": "not performed by verifier",
+    "pid": 58479,
+    "receipt_sha256": "e6341c4b9f7932fef34752a0f734e974b42abeb688d2fbad1e007c0064d611d5",
+    "record_sha256": "161f50c845fba0f1af1f04b5f2ecddb61853ab9c63eccda688b86d3c1142be60",
+    "recorded_terminal": "Stopped",
+    "started": 12448284880372,
+    "vsock": "/Users/adalundhe/.cache/hx/e-_j44jcld/guest-tmp/shards-api-3b8ec840094a5472-0/v"
+  },
+  "sample_tool_help": {
+    "bytes": 771,
+    "path": "/Users/adalundhe/.cache/hex-lead/cold-extension-265c1501/receipts/sample-tool-help-df534d2f.txt",
+    "sha256": "8715ea43582eb3457151800309e565d173241286e9db7311c41147b0c504d7d1"
+  },
+  "samples": [
+    {
+      "bytes": 81726,
+      "path": "/Users/adalundhe/.cache/hx/e-_j44jcld/l.sample.txt",
+      "sha256": "cc03f66226671e23e2fa7a9bdf22bfbeb40708d1055ddef1fbbc8d6af3aac561"
+    },
+    {
+      "bytes": 127685,
+      "path": "/Users/adalundhe/.cache/hx/e-_j44jcld/o.sample.txt",
+      "sha256": "e6b144bcac24c640ecdc45d23f29569842094eb74872bcb803387203ed3f7d93"
+    },
+    {
+      "bytes": 112893,
+      "path": "/Users/adalundhe/.cache/hx/e-_j44jcld/r.sample.txt",
+      "sha256": "3b492d72d73533780b05eb3eeab6842925d16042d66ef447f6ab510ac9236350"
+    }
+  ],
+  "source_revision": "df534d2f20a32c404e62e8dd31aa70d9838f0267",
+  "submit_call_exit_success_ns": {
+    "max": 118030084,
+    "n": 2000,
+    "p50": 49280500,
+    "p90": 101212333,
+    "p99": 107143542,
+    "p999": 111024042
+  },
+  "summary": {
+    "bytes": 15902,
+    "path": "/Users/adalundhe/.cache/hex-lead/cold-extension-265c1501/receipts/root-profile-verification-summary-df534d2f.json",
+    "sha256": "3226c7b75ac8b7aee38c8ec90eb0fd7dedf91bfb38cb8c5cc86a761dbe8ce7bd"
+  }
+}
