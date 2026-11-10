@@ -53,8 +53,10 @@ impl<'de> Deserialize<'de> for DeviceKind {
     }
 }
 
-/// A physical identity within its runtime pool. GPU keys pack PCI domain:32, bus:8, device:5,
-/// function:3 in the low 48 bits. VFIO keys are `u32` IOMMU group numbers; block keys pack
+/// A physical identity within its runtime pool. A GPU key is the native unsigned 64-bit
+/// identity: packed PCI domain:32/bus:8/device:5/function:3 on PCI hosts, Metal registry ID on
+/// Apple silicon. Its runtime validates that native correspondence without narrowing. VFIO
+/// keys are `u32` IOMMU group numbers; block keys pack
 /// major:32/minor:32; network keys are nonzero `u32` interface indices. Pool identity remains
 /// necessary: a key from one node or guest never names another pool's device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -67,9 +69,6 @@ pub struct DeviceId {
 impl DeviceId {
     pub fn check(&self) -> Result<(), Refusal> {
         let why = match self.kind {
-            DeviceKind::Gpu if self.key >> 48 != 0 => {
-                Some("gpu key exceeds the 48-bit PCI address")
-            }
             DeviceKind::Vfio if u32::try_from(self.key).is_err() => {
                 Some("vfio key exceeds the 32-bit isolation group")
             }
@@ -182,6 +181,8 @@ mod tests {
     fn physical_key_domains_are_checked_without_truncation() {
         for device in [
             id(DeviceKind::Gpu, 0),
+            // Metal registry identities are u64; PCI-only narrowing loses valid native IDs.
+            id(DeviceKind::Gpu, u64::MAX),
             id(DeviceKind::Gpu, (u64::from(u32::MAX) << 16) | 0xffff),
             id(DeviceKind::Vfio, 0),
             id(DeviceKind::Vfio, u64::from(u32::MAX)),
@@ -196,7 +197,6 @@ mod tests {
             assert_eq!(capacity(vec![info(device)]).check(), Ok(()));
         }
         for device in [
-            id(DeviceKind::Gpu, 1 << 48),
             id(DeviceKind::Vfio, 1 << 32),
             id(DeviceKind::Net, 0),
             id(DeviceKind::Net, 1 << 32),
