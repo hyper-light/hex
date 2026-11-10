@@ -546,3 +546,52 @@ fn combined_launch_sample_is_persisted_once_across_duplicate_start_and_reboot() 
     assert_eq!(recovered.start_observations().unwrap(), before);
     assert_eq!(rt.creates.load(Ordering::SeqCst), 1);
 }
+
+/// AC-T7.4.1: unavailable admission refuses an unheld Start but cannot hide an existing box.
+#[test]
+fn typed_probe_refusal_releases_only_unheld_start_and_keeps_control_available() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = Arc::new(Counting::default());
+    let driver = boot(dir.path(), rt.clone());
+    let (d, p) = request();
+    let (key, step) = driver.submit(d, p).unwrap();
+    let (_, start) = step.send.into_iter().next().unwrap();
+    let why = Refusal::Exhausted {
+        what: "test probe",
+        bound: 0,
+    };
+    driver.block_admission(why.clone()).unwrap();
+    let refused = driver.hear(NodeId(0), start).unwrap();
+    assert!(
+        matches!(refused.send.as_slice(),[(_,Envelope{msg:Msg::Refused{key:k},refusal:Some(r),..})] if *k==key&&*r==why)
+    );
+    assert_eq!(rt.creates.load(Ordering::SeqCst), 0);
+    local(&driver, driver.delete(key).unwrap());
+    driver
+        .refresh_node(NodeSpec::new(
+            NodeId(0),
+            Resources {
+                cpu_milli: d.need.cpu_milli * 2,
+                mem_bytes: d.need.mem_bytes * 2,
+                ..Resources::default()
+            },
+        ))
+        .unwrap();
+    let (d, p) = request();
+    let (_, step) = driver.submit(d, p).unwrap();
+    let (_, start) = step.send.into_iter().next().unwrap();
+    driver.hear(NodeId(0), start.clone()).unwrap();
+    driver.block_admission(why).unwrap();
+    let held = driver.hear(NodeId(0), start).unwrap();
+    assert!(matches!(
+        held.send.as_slice(),
+        [(
+            _,
+            Envelope {
+                msg: Msg::Started { .. },
+                ..
+            }
+        )]
+    ));
+    assert_eq!(rt.creates.load(Ordering::SeqCst), 1);
+}

@@ -144,7 +144,7 @@ struct State {
     node: peer::Node,
     rows: Rows,
     stopped: Option<Stop>,
-    admission: Option<Stop>,
+    admission: Option<Refusal>,
 }
 
 enum Effect {
@@ -284,7 +284,21 @@ impl Driver {
             // Runtime::classes is a backend call too: validate after dropping the core lock.
             let prior = state.node.ran_keys().any(|(k, _, _)| k == key);
             if !prior && let Some(why) = &state.admission {
-                return Err(why.clone().into());
+                return Ok(Step {
+                    send: vec![(
+                        from,
+                        Envelope {
+                            msg: Msg::Refused { key },
+                            payload: None,
+                            refusal: Some(why.clone()),
+                        },
+                    )],
+                    notices: vec![Notice::Refused {
+                        key,
+                        node: state.node.id(),
+                        refusal: why.clone(),
+                    }],
+                });
             }
             if prior && state.rows.payload("ran", key)? != payload {
                 return Err(invalid("repeated start changed its payload").into());
@@ -352,8 +366,16 @@ impl Driver {
         let _operation = self.operation()?;
         let mut state = self.lock()?;
         let result = state.node.refresh_node(spec);
-        state.admission = result.as_ref().err().cloned();
+        state.admission = result.as_ref().err().map(admission_refusal);
         result.map_err(Error::Core)
+    }
+
+    /// A probe that cannot establish current room blocks new reservations, while already held
+    /// keys and deletion/control remain available. The refusal remains typed across peer replies.
+    pub fn block_admission(&self, why: Refusal) -> Result<(), Error> {
+        let _operation = self.operation()?;
+        self.lock()?.admission = Some(why);
+        Ok(())
     }
 
     pub fn set_pick(&self, pick: Pick) -> Result<(), Error> {
@@ -372,7 +394,7 @@ impl Driver {
         let mut state = self.lock()?;
         let result = state.node.set_gpu_load(node, device, load);
         if let Err(why) = &result {
-            state.admission = Some(why.clone());
+            state.admission = Some(admission_refusal(why));
         }
         result.map_err(Error::Core)
     }
@@ -723,6 +745,16 @@ fn finish<T>(state: &mut State, result: Result<T, Stop>, submit: bool) -> Result
         }
         Error::Core(stop)
     })
+}
+
+fn admission_refusal(why: &Stop) -> Refusal {
+    match why {
+        Stop::Full { what, bound } => Refusal::Exhausted {
+            what,
+            bound: *bound,
+        },
+        _ => Refusal::Broken(format!("current placement facts: {why:?}")),
+    }
 }
 
 fn collect(state: &mut State, out: Vec<(NodeId, Msg)>) -> Result<Collected, Error> {
