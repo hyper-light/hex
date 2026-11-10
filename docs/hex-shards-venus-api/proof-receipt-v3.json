@@ -1,0 +1,56 @@
+{
+  "source": "3f2e9fb10e4caca0de5114e1dd5471540b17e217",
+  "production_pin": "0ba6a60f582d461e65673ad736b2ac658cee9b72",
+  "archive": {
+    "path": "/Users/adalundhe/.cache/hex-shards-venus-api-01a1c640-3f2e9fb1-v3/retained/proof.tar.gz",
+    "bytes": 88737,
+    "sha256": "cebc6d7b067525e51d164c81574034d0c4f0c9e4b1edbed19062ecc48eaaf7e6",
+    "members": 39
+  },
+  "safe_regular_members_verified": 39,
+  "all_member_hashes_verified": true,
+  "source_matches_signed_commit": true,
+  "api_code_matches_signed_source": true,
+  "private_fixture_files": {
+    "vendor/shards/docs/research/measurements/managed-borrowed-nowait/focused.rs": "84ae94fefbd4ca3b9bb3e813a24ce1e81750efa748f70662cf0d42caffe2f010",
+    "vendor/shards/docs/research/measurements/managed-borrowed-nowait/contract.rs": "306245f3f9b444d1333ef36ee80e326202198ba9c1bb6791efc16817330ddce1"
+  },
+  "only_private_generated_source_file": "vendor/shards/Cargo.lock",
+  "selected": 4,
+  "passed": 4,
+  "failed": 0,
+  "checks": {
+    "build": 0
+  },
+  "binaries": {
+    "sim": {
+      "path": "/Users/adalundhe/.cache/hex-shards-venus-api-01a1c640-3f2e9fb1-v3/target/debug/deps/sim-96aa4fb0c1739b82",
+      "sha256": "00e5f103b83d096022d2312fce7104458c7b3eb93281e9be00af596e687b54be"
+    },
+    "real": {
+      "path": "/Users/adalundhe/.cache/hex-shards-venus-api-01a1c640-3f2e9fb1-v3/target/debug/deps/real-ecaafbcebbe80e01",
+      "sha256": "2d2832fe464f8143541fe4a7fb31cc510d96f480513d639acb9a23e7f3647935"
+    },
+    "shards_api": {
+      "path": "/Users/adalundhe/.cache/hex-shards-venus-api-01a1c640-3f2e9fb1-v3/target/debug/deps/shards_api-7ff633c7b382e1e6",
+      "sha256": "3b89abfcc5ffd38a658ade9a92da2f3628df8867e23fe53e546190c0af9edc75"
+    }
+  },
+  "real_vm_tests_executed": 0,
+  "native_gpu_effects": 0,
+  "local_free_kib": 218204692,
+  "transport_command": [
+    "/Users/adalundhe/.local/bin/kiln",
+    "run",
+    "--on",
+    "d1323898b255a3ed435eb83fa0f7b0cf",
+    "--needs",
+    "cpus=1,mem=4g,disk=12g",
+    "--no-sync",
+    "--timeout",
+    "120",
+    "--",
+    "nice -n 10 python3 -c 'import base64,pathlib\nraw=pathlib.Path('\"'\"'/Users/adalundhe/.cache/hex-shards-venus-api-01a1c640-3f2e9fb1-v3/retained/proof.tar.gz'\"'\"').read_bytes();text=base64.b64encode(raw).decode()\nfor i in range(0,len(text),1000):print(text[i:i+1000])\n'"
+  ],
+  "transport_stderr": "\u001b[2m[kiln] on d1323898b255a3ed435eb83fa0f7b0cf \u00b7 macos/aarch64 \u00b7 29 of 32 cores idle \u00b7 47 GB free \u00b7 room for 1 CPU, 4 GiB of memory, 12 GiB of disk\u001b[0m\n"
+}

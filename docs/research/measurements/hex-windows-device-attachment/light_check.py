@@ -91,14 +91,15 @@ def phase(name, args, required=()):
     return item['exit_code'] == 0 and not item.get('timed_out',False) and item.get('required_selected',True) and item.get('nonzero_selection',True)
 
 
-# HCS/core sources and dependencies are byte-identical to the preserved48/0 +coreClippy0 run.
-# This follow-up checks only the changed Windows implementation and real CLI constructor.
+# Core HCS bytes/dependencies are unchanged from exact57:50 units and coreClippy0 retained.
+# This successor checks only the changed Windows code and its real CLI consumer.
+okay=True
 installed=(toolchain.parent/'lib/rustlib/x86_64-pc-windows-msvc/lib').is_dir()
 result['windows_std_installed']=installed
-if not installed:
+if okay and not installed:
     result['windows_compile_unrun']='existing Windows std absent; no install attempted'
     okay=False
-else:
+elif okay:
     okay=phase('windows-runtime-clippy',['clippy','-p','hex-runtime','--all-targets','--locked','--target','x86_64-pc-windows-msvc','--','-D','warnings'])
     if okay:
         okay=phase('windows-cli-check',['check','-p','hex-cli','--bin','hex','--locked','--target','x86_64-pc-windows-msvc'])

@@ -48,6 +48,8 @@ struct Mounted {
 enum ScratchOwner {
     Node,
     Container,
+    /// Assigned EndsWithNode boxes keep their marker until physical termination is observed.
+    Retained,
     Uncertain,
 }
 
@@ -105,6 +107,24 @@ pub fn read_marker(marker: &Path) -> Result<hcs::BoxRecord, Refusal> {
 }
 
 impl Mounted {
+    fn mark(&mut self, marker: PathBuf, record: hcs::BoxRecord) -> Result<(), Refusal> {
+        if let Some(dir) = marker.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| Refusal::os("writing a scratch marker", e))?;
+        }
+        write_marker(&marker, &record)?;
+        self.marker = Some(marker);
+        self.record = Some(record);
+        Ok(())
+    }
+
+    fn creation(&mut self, state: hcs::NativeCreate) -> Result<(), Refusal> {
+        let (Some(marker), Some(record)) = (self.marker.as_ref(), self.record.as_mut()) else {
+            return Err(creation_uncertain());
+        };
+        record.creation = state;
+        write_marker(marker, record)
+    }
+
     /// Takes the filter off, detaches the volume and removes what Hex made; the first failure is returned,
     /// every step is still tried. `UnprepareLayer` answering `ERROR_FLT_DO_NOT_DETACH` is the container's
     /// end having taken the filter (note §3), matched alone; `DeactivateLayer` then detaches the volume.
@@ -205,18 +225,36 @@ pub fn reclaim(root: &Path) -> Vec<Refusal> {
 }
 
 fn reclaim_one(marker: &Path) -> Result<(), Refusal> {
+    reclaim_one_using(
+        marker,
+        |record| match &record.system {
+            Some(id) => sys::open_system(id.as_str())
+                .map(|system| system.is_some())
+                .map_err(|f| failure("reopening a killed node's container", f)),
+            None => Ok(false),
+        },
+        remove_scratch,
+    )
+}
+
+fn reclaim_one_using(
+    marker: &Path,
+    system_exists: impl FnOnce(&hcs::BoxRecord) -> Result<bool, Refusal>,
+    cleanup: impl FnOnce(&hcs::BoxRecord, &Path) -> Result<(), Refusal>,
+) -> Result<(), Refusal> {
     let m = read_marker(marker)?;
-    // An outliving box whose container HCS still runs is the next node's recovery's to take back or end.
-    let system_runs = match &m.system {
-        Some(id) => sys::open_system(id.as_str())
-            .map_err(|f| failure("reopening a killed node's container", f))?
-            .is_some(),
-        None => false,
-    };
-    if hcs::at_start(&m, system_runs) == hcs::AtStart::Leave {
+    // An assigned create may still own a live system after a returned error or closed handle.
+    // Its marker is the only durable exact binding/cleanup identity, even for EndsWithNode.
+    let system_runs = system_exists(&m)?;
+    if (!m.devices.is_empty() && system_runs)
+        || hcs::at_start(&m, system_runs) == hcs::AtStart::Leave
+    {
         return Ok(());
     }
-    remove_scratch(&m, marker)
+    if m.creation == hcs::NativeCreate::Pending {
+        return Err(creation_uncertain());
+    }
+    cleanup(&m, marker)
 }
 
 /// What a node finds of the box a record names (native plan step 8, T-T7.1.2): its compute system, reopened
@@ -273,6 +311,9 @@ pub fn alive(marker: &Path) -> Result<bool, Refusal> {
         return Ok(false);
     }
     let record = read_marker(marker)?;
+    if record.creation == hcs::NativeCreate::Pending {
+        return Err(creation_uncertain());
+    }
     let found = reopen(&record)?.found;
     Ok(hcs::take_back(&record, found).is_ok())
 }
@@ -282,10 +323,33 @@ pub fn alive(marker: &Path) -> Result<bool, Refusal> {
 /// still holds it, then its scratch and its record, as [`reclaim`] removes a killed node's. A record
 /// already gone has nothing left to end.
 pub fn end(marker: &Path) -> Result<(), Refusal> {
+    end_using(marker, end_system, remove_scratch)
+}
+
+fn creation_uncertain() -> Refusal {
+    Refusal::Invalid {
+        what: "native box lifecycle",
+        why: "assigned create has no terminal cancellation or physical removal witness; claims remain held".to_owned(),
+    }
+}
+
+fn end_using(
+    marker: &Path,
+    terminate: impl FnOnce(&hcs::BoxRecord) -> Result<bool, Refusal>,
+    cleanup: impl FnOnce(&hcs::BoxRecord, &Path) -> Result<(), Refusal>,
+) -> Result<(), Refusal> {
     if !marker.exists() {
         return Ok(());
     }
     let m = read_marker(marker)?;
+    if !terminate(&m)? {
+        return Err(creation_uncertain());
+    }
+    cleanup(&m, marker)
+}
+
+/// True only after actual termination or absence of a create already known terminal.
+fn end_system(m: &hcs::BoxRecord) -> Result<bool, Refusal> {
     if let Some(id) = &m.system
         && let Some(system) = sys::open_system(id.as_str())
             .map_err(|f| failure("reopening a box's container to end it", f))?
@@ -299,8 +363,9 @@ pub fn end(marker: &Path) -> Result<(), Refusal> {
                 ) => {}
             Err(f) => return Err(failure("ending a box's container", f)),
         }
+        return Ok(true);
     }
-    remove_scratch(&m, marker)
+    Ok(m.creation == hcs::NativeCreate::Created)
 }
 
 /// A missing marker is not absence. Only the existing HCS open result can establish that outcome.
@@ -312,6 +377,22 @@ pub(crate) fn require_absent(id: &BoxId) -> Result<(), Refusal> {
         Some(_) => Err(Refusal::Broken(
             "native create outcome has no marker but its system still exists; claims remain held"
                 .to_owned(),
+        )),
+    }
+}
+
+/// A fresh create that never entered HCS owns only its prepared storage/marker. In particular it must
+/// not open or terminate some pre-existing compute system with the same textual ID.
+pub(crate) fn discard_prepared(marker: &Path) -> Result<(), Refusal> {
+    if marker.exists() {
+        return remove_scratch(&read_marker(marker)?, marker);
+    }
+    match std::fs::remove_file(next_of(marker)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Refusal::os(
+            "removing a prepared scratch marker's unfinished record",
+            error,
         )),
     }
 }
@@ -333,6 +414,36 @@ fn copy_bindings(bindings: &[hcs::DeviceBinding]) -> Result<Vec<hcs::DeviceBindi
 /// attached (UnprepareLayer, then DeactivateLayer, which detaches it whether or not the unprepare took:
 /// jupiter, 2026-11-06), removes what Hex made, the marker's unfinished next record, and the marker.
 fn remove_scratch(m: &hcs::BoxRecord, marker: &Path) -> Result<(), Refusal> {
+    remove_scratch_using(m, marker, remove_owned_scratch)
+}
+
+fn remove_scratch_using(
+    m: &hcs::BoxRecord,
+    marker: &Path,
+    owned: impl FnOnce(&hcs::BoxRecord) -> Result<(), Refusal>,
+) -> Result<(), Refusal> {
+    match m.storage {
+        hcs::RecordStorage::OwnedFolder => owned(m)?,
+        hcs::RecordStorage::BorrowedVolume if m.made.is_empty() => {}
+        hcs::RecordStorage::BorrowedVolume => {
+            return Err(Refusal::Invalid {
+                what: "box record storage",
+                why: "borrowed volume cannot own created paths".to_owned(),
+            });
+        }
+    }
+    if let Err(e) = std::fs::remove_file(next_of(marker))
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(Refusal::os(
+            "removing a scratch marker's unfinished record",
+            e,
+        ));
+    }
+    std::fs::remove_file(marker).map_err(|e| Refusal::os("removing a scratch marker", e))
+}
+
+fn remove_owned_scratch(m: &hcs::BoxRecord) -> Result<(), Refusal> {
     if sys::layer_mount_path(&m.folder).is_ok() {
         let unprepared = sys::unprepare_layer(&m.folder);
         sys::deactivate_layer(&m.folder).map_err(|f| {
@@ -360,15 +471,23 @@ fn remove_scratch(m: &hcs::BoxRecord, marker: &Path) -> Result<(), Refusal> {
             return Err(Refusal::os("removing a killed node's scratch", e));
         }
     }
-    if let Err(e) = std::fs::remove_file(next_of(marker))
-        && e.kind() != std::io::ErrorKind::NotFound
-    {
-        return Err(Refusal::os(
-            "removing a scratch marker's unfinished record",
-            e,
-        ));
+    Ok(())
+}
+
+/// Storage ownership is revalidated before any native recovery callback.
+pub(crate) fn validate_storage(record: &hcs::BoxRecord, scratch: &Scratch) -> Result<(), Refusal> {
+    match (record.storage, scratch) {
+        (hcs::RecordStorage::OwnedFolder, Scratch::Folder(_)) => Ok(()),
+        (hcs::RecordStorage::BorrowedVolume, Scratch::Volume(volume))
+            if record.folder == *volume && record.made.is_empty() =>
+        {
+            Ok(())
+        }
+        _ => Err(Refusal::Invalid {
+            what: "native storage recovery",
+            why: "recorded storage ownership or exact borrowed volume disagrees".to_owned(),
+        }),
     }
-    std::fs::remove_file(marker).map_err(|e| Refusal::os("removing a scratch marker", e))
 }
 
 impl Drop for Mounted {
@@ -405,12 +524,98 @@ struct Life {
     exit: Option<Exit>,
 }
 
+enum NativeSystem {
+    Creating(sys::PendingCreate),
+    Created(System),
+    Failed {
+        system: Option<System>,
+        failure: HcsFailure,
+    },
+    Removed,
+}
+
+impl NativeSystem {
+    fn observe(&mut self) {
+        if let Self::Creating(create) = self
+            && let Some(terminal) = create.query()
+        {
+            *self = match (terminal.result, terminal.system) {
+                (Ok(()), Some(system)) => Self::Created(system),
+                (Ok(()), None) => Self::Failed {
+                    system: None,
+                    failure: HcsFailure {
+                        code: u32::from_ne_bytes(
+                            windows_sys::Win32::Foundation::E_UNEXPECTED.to_ne_bytes(),
+                        ),
+                        message: None,
+                    },
+                },
+                (Err(failure), system) => Self::Failed { system, failure },
+            };
+        }
+    }
+
+    fn ready(&self) -> Result<&System, Refusal> {
+        match self {
+            Self::Created(system) => Ok(system),
+            Self::Creating(create) => Err(match create.cancellation() {
+                sys::CreateCancellation::Refused(code) => Refusal::Invalid {
+                    what: "native box lifecycle",
+                    why: format!(
+                        "assigned create remains pending; cancellation refused ({code:#010x}); claims remain held"
+                    ),
+                },
+                _ => creation_uncertain(),
+            }),
+            Self::Failed { failure, .. } => Err(hcs::refusal(
+                "creating an assigned container",
+                failure.code,
+                sys::host(),
+                None,
+            )),
+            Self::Removed => Err(Refusal::Invalid {
+                what: "native box lifecycle",
+                why: "the compute system has been physically removed".to_owned(),
+            }),
+        }
+    }
+
+    fn remove(&mut self) -> Result<(), Refusal> {
+        if let Self::Creating(create) = self {
+            create.cancel();
+        }
+        self.observe();
+        let system = match self {
+            Self::Created(system)
+            | Self::Failed {
+                system: Some(system),
+                ..
+            } => Some(system),
+            Self::Failed { system: None, .. } | Self::Removed => None,
+            Self::Creating(_) => return self.ready().map(|_| ()),
+        };
+        if let Some(system) = system {
+            match system.terminate(launch::PATIENCE) {
+                Ok(()) => {}
+                Err(f)
+                    if matches!(
+                        hcs::hcs_error(f.code),
+                        HcsError::AlreadyStopped | HcsError::NotFound
+                    ) => {}
+                Err(f) => return Err(failure("ending a container", f)),
+            }
+        }
+        *self = Self::Removed;
+        Ok(())
+    }
+}
+
 /// A Windows `oci` box.
 pub struct OciBox {
     job: JobBox,
     /// Dropped before the scratch: closing its last handle ends the container where it ends with its node
     /// (it was created to), and leaves it running where it outlives it.
-    system: Mutex<Option<System>>,
+    system: Mutex<NativeSystem>,
     mounted: Mutex<Option<Mounted>>,
     user: Option<String>,
     init: Process,
@@ -505,31 +710,45 @@ impl OciBox {
         // The marker already owns the exact system ID and bindings. A returned failure or a closed
         // handle does not prove cancellation completed; retain the scratch for explicit cleanup.
         if !devices.is_empty() {
+            mounted.creation(hcs::NativeCreate::Pending)?;
             mounted.owner = ScratchOwner::Uncertain;
         }
-        let system = match sys::create_system(id.as_str(), &document, launch::PATIENCE) {
-            Ok(s) => s,
-            Err(f) => {
-                let refused = if devices.is_empty() {
-                    failure("creating a container", f)
-                } else {
-                    hcs::refusal("creating an assigned container", f.code, host, None)
-                };
-                if devices.is_empty() {
+        let system = if devices.is_empty() {
+            match sys::create_system(id.as_str(), &document, launch::PATIENCE) {
+                Ok(system) => NativeSystem::Created(system),
+                Err(f) => {
                     mounted.undo()?;
+                    return Err(failure("creating a container", f));
                 }
-                return Err(refused);
+            }
+        } else {
+            match sys::create_system_owned(id.as_str(), &document, launch::PATIENCE) {
+                Ok(create) => NativeSystem::Creating(create),
+                Err(f) => {
+                    // This API returns Err only before HcsCreateComputeSystem was called.
+                    // Returned native failures/pending operations remain owned by Creating instead.
+                    mounted.owner = ScratchOwner::Node;
+                    mounted.creation(hcs::NativeCreate::Created)?;
+                    mounted.undo()?;
+                    return Err(hcs::refusal(
+                        "preparing an assigned container",
+                        f.code,
+                        host,
+                        None,
+                    ));
+                }
             }
         };
-        // From here the scratch is the container's: where it outlives its node, a node going down leaves both.
-        mounted.owner = if lifetime == hcs::Lifetime::Outlives {
-            ScratchOwner::Container
-        } else {
-            ScratchOwner::Node
-        };
+        if devices.is_empty() {
+            mounted.owner = if lifetime == hcs::Lifetime::Outlives {
+                ScratchOwner::Container
+            } else {
+                ScratchOwner::Node
+            };
+        }
         Ok(Self {
             job,
-            system: Mutex::new(Some(system)),
+            system: Mutex::new(system),
             mounted: Mutex::new(Some(mounted)),
             user: container.init.user.clone(),
             init: container.init.clone(),
@@ -560,20 +779,53 @@ impl OciBox {
             .map_err(|_| Refusal::Broken("an oci box's state lock is poisoned".to_owned()))
     }
 
+    fn ready_system(&self) -> Result<std::sync::MutexGuard<'_, NativeSystem>, Refusal> {
+        let mut system = self
+            .system
+            .lock()
+            .map_err(|_| Refusal::Broken("an oci box's system lock is poisoned".to_owned()))?;
+        system.observe();
+        system.ready()?;
+        if !self.devices.is_empty() {
+            let mut mounted = self
+                .mounted
+                .lock()
+                .map_err(|_| Refusal::Broken("an oci box's scratch lock is poisoned".to_owned()))?;
+            let mounted = mounted.as_mut().ok_or_else(creation_uncertain)?;
+            if mounted
+                .record
+                .as_ref()
+                .is_some_and(|record| record.creation == hcs::NativeCreate::Pending)
+            {
+                mounted.creation(hcs::NativeCreate::Created)?;
+                mounted.owner = if mounted
+                    .record
+                    .as_ref()
+                    .is_some_and(|record| record.outlives)
+                {
+                    ScratchOwner::Container
+                } else {
+                    ScratchOwner::Retained
+                };
+            }
+        }
+        Ok(system)
+    }
+
     /// Starts `process` in the box through Hex's launcher: its process handle and pid.
     fn launch_member(
         &self,
         process: &Process,
         stdio: [OwnedHandle; 3],
     ) -> Result<(Handle, u32), Refusal> {
-        let system = self
-            .system
-            .lock()
-            .map_err(|_| Refusal::Broken("an oci box's system lock is poisoned".to_owned()))?;
-        let system = system
-            .as_ref()
-            .ok_or_else(|| Refusal::NotRunning(self.id().clone(), "exec"))?;
-        launch::start(system, &self.job, self.user.as_deref(), process, stdio)
+        let system = self.ready_system()?;
+        launch::start(
+            system.ready()?,
+            &self.job,
+            self.user.as_deref(),
+            process,
+            stdio,
+        )
     }
 
     fn launch(&self, process: &Process, stdio: [OwnedHandle; 3]) -> Result<BoxProc, Refusal> {
@@ -633,7 +885,9 @@ impl OciBox {
         record: hcs::BoxRecord,
         devices: Vec<hcs::DeviceBinding>,
     ) -> Result<Self, Refusal> {
+        validate_storage(&record, &container.scratch)?;
         if record.devices != devices
+            || record.creation != hcs::NativeCreate::Created
             || (!devices.is_empty() && record.system.as_ref() != Some(job.id()))
         {
             return Err(Refusal::Invalid {
@@ -659,12 +913,19 @@ impl OciBox {
                 )));
             }
         };
-        let volume = sys::layer_mount_path(&record.folder)
-            .map_err(|f| failure("reading a taken-back box's scratch volume", f))?;
+        let (volume, activated, prepared) = match record.storage {
+            hcs::RecordStorage::OwnedFolder => (
+                sys::layer_mount_path(&record.folder)
+                    .map_err(|f| failure("reading a taken-back box's scratch volume", f))?,
+                Some(super::copy_text(&record.folder)?),
+                true,
+            ),
+            hcs::RecordStorage::BorrowedVolume => (super::copy_text(&record.folder)?, None, false),
+        };
         let mounted = Mounted {
             volume,
-            activated: Some(record.folder.clone()),
-            prepared: true,
+            activated,
+            prepared,
             made: record.made.iter().map(PathBuf::from).collect(),
             marker: Some(marker),
             record: Some(record),
@@ -672,7 +933,7 @@ impl OciBox {
         };
         Ok(Self {
             job,
-            system: Mutex::new(Some(system)),
+            system: Mutex::new(NativeSystem::Created(system)),
             mounted: Mutex::new(Some(mounted)),
             user: container.init.user.clone(),
             init: container.init.clone(),
@@ -699,13 +960,9 @@ impl OciBox {
         let outlives = self.outlives()?;
         self.record(|r| r.started = true)?;
         {
-            let system = self
-                .system
-                .lock()
-                .map_err(|_| Refusal::Broken("an oci box's system lock is poisoned".to_owned()))?;
+            let system = self.ready_system()?;
             system
-                .as_ref()
-                .ok_or_else(|| Refusal::NoSuchBox(self.id().clone()))?
+                .ready()?
                 .start(launch::PATIENCE)
                 .map_err(|f| failure("starting a container", f))?;
         }
@@ -737,6 +994,7 @@ impl OciBox {
 
     /// The box's state: `Created` until its start, `Running` while its init runs, `Empty` once it ended.
     pub fn state(&self) -> Result<BoxState, Refusal> {
+        drop(self.ready_system()?);
         let exit = self.exit()?;
         Ok(if !self.life()?.started {
             BoxState::Created
@@ -774,23 +1032,19 @@ impl OciBox {
             .system
             .lock()
             .map_err(|_| Refusal::Broken("an oci box's system lock is poisoned".to_owned()))?;
-        if let Some(held) = system.as_ref() {
-            match held.terminate(launch::PATIENCE) {
-                Ok(()) => {}
-                Err(f)
-                    if matches!(
-                        hcs::hcs_error(f.code),
-                        HcsError::AlreadyStopped | HcsError::NotFound
-                    ) => {}
-                Err(f) => return Err(failure("ending a container", f)),
-            }
-            system.take();
-        }
+        system.remove()?;
         let mut mounted = self
             .mounted
             .lock()
             .map_err(|_| Refusal::Broken("an oci box's scratch lock is poisoned".to_owned()))?;
         if let Some(held) = mounted.as_mut() {
+            if held
+                .record
+                .as_ref()
+                .is_some_and(|record| record.creation == hcs::NativeCreate::Pending)
+            {
+                held.creation(hcs::NativeCreate::Created)?;
+            }
             held.owner = ScratchOwner::Node;
             held.undo()?;
             mounted.take();
@@ -815,22 +1069,34 @@ fn scratch(
     let outlives = lifetime == hcs::Lifetime::Outlives;
     let folder = match &container.scratch {
         Scratch::Volume(v) => {
-            if !devices.is_empty() {
-                return Err(Refusal::Platform {
-                    what: "device attachment",
-                    platform: "windows OCI",
-                    why: "assigned devices require an owned scratch-folder marker".to_owned(),
-                });
-            }
-            return Ok(Mounted {
-                volume: v.clone(),
+            let mut mounted = Mounted {
+                volume: super::copy_text(v)?,
                 activated: None,
                 prepared: false,
                 made: Vec::new(),
                 marker: None,
                 record: None,
                 owner: ScratchOwner::Node,
-            });
+            };
+            if !devices.is_empty() {
+                let marker = marker.ok_or_else(|| Refusal::Invalid {
+                    what: "native device marker",
+                    why: "assigned borrowed volume requires its existing native marker".to_owned(),
+                })?;
+                let record = hcs::BoxRecord {
+                    folder: super::copy_text(v)?,
+                    made: Vec::new(),
+                    outlives,
+                    system: Some(id.try_clone()?),
+                    started: false,
+                    init: None,
+                    devices: copy_bindings(devices)?,
+                    storage: hcs::RecordStorage::BorrowedVolume,
+                    creation: hcs::NativeCreate::Created,
+                };
+                mounted.mark(marker, record)?;
+            }
+            return Ok(mounted);
         }
         Scratch::Folder(f) => PathBuf::from(f),
     };
@@ -860,6 +1126,8 @@ fn scratch(
                 .ok_or_else(|| Refusal::os("naming a container's scratch", "not UTF-8"))
         };
         let record = hcs::BoxRecord {
+            storage: hcs::RecordStorage::OwnedFolder,
+            creation: hcs::NativeCreate::Created,
             folder: path(&folder)?,
             made: made
                 .iter()
@@ -875,12 +1143,7 @@ fn scratch(
             init: None,
             devices: copy_bindings(devices)?,
         };
-        if let Some(dir) = m.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| Refusal::os("writing a scratch marker", e))?;
-        }
-        write_marker(&m, &record)?;
-        mounted.marker = Some(m);
-        mounted.record = Some(record);
+        mounted.mark(m, record)?;
     }
     if !folder.exists() {
         std::fs::create_dir_all(&folder)
@@ -969,4 +1232,239 @@ pub fn scratch_folder(root: &Path, id: &BoxId) -> Result<String, Refusal> {
         .to_str()
         .map(str::to_owned)
         .ok_or_else(|| Refusal::os("naming a box's scratch folder", "not UTF-8"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    /// T-T7.1.2: reclaim must not discard an assigned marker while its own system still exists.
+    /// Private files and counted native callbacks only; this does not reproduce an HCS effect.
+    #[test]
+    fn device_retained_marker_survives_live_system_reclaim_and_absent_cleanup_is_owned() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("assigned.scratch.json");
+        let scratch = root.path().join("assigned-owned");
+        std::fs::create_dir(&scratch).unwrap();
+        let sibling = root.path().join("sibling.scratch.json");
+        let sibling_bytes = b"unrelated private sibling marker";
+        std::fs::write(&sibling, sibling_bytes).unwrap();
+        let record = hcs::BoxRecord {
+            storage: hcs::RecordStorage::OwnedFolder,
+            creation: hcs::NativeCreate::Created,
+            folder: scratch.to_str().unwrap().to_owned(),
+            made: vec![scratch.to_str().unwrap().to_owned()],
+            outlives: false,
+            system: Some(BoxId::new("assigned").unwrap()),
+            started: false,
+            init: None,
+            devices: vec![hcs::DeviceBinding {
+                id: hex_api::DeviceId {
+                    kind: hex_api::DeviceKind::Gpu,
+                    key: 256,
+                },
+                location: "PCIROOT(0)#PCI(0100)".to_owned(),
+            }],
+        };
+        let bytes = hcs::write_record(&record).unwrap();
+        std::fs::write(&marker, &bytes).unwrap();
+        let opened = Cell::new(0);
+        let removed = Cell::new(0);
+        reclaim_one_using(
+            &marker,
+            |seen| {
+                assert_eq!(seen.system, record.system);
+                opened.set(opened.get() + 1);
+                Ok(true)
+            },
+            |_, _| {
+                removed.set(removed.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(opened.get(), 1);
+        assert_eq!(
+            removed.get(),
+            0,
+            "live assigned system must retain its durable cleanup identity"
+        );
+        assert_eq!(std::fs::read(&marker).unwrap(), bytes);
+        assert!(scratch.is_dir());
+        assert_eq!(std::fs::read(&sibling).unwrap(), sibling_bytes);
+
+        reclaim_one_using(
+            &marker,
+            |_| Ok(false),
+            |seen, owned_marker| {
+                assert_eq!(seen, &record);
+                assert_eq!(owned_marker, marker);
+                removed.set(removed.get() + 1);
+                std::fs::remove_dir(&scratch).unwrap();
+                std::fs::remove_file(owned_marker).unwrap();
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(removed.get(), 1);
+        assert!(!marker.exists());
+        assert!(!scratch.exists());
+        assert_eq!(std::fs::read(&sibling).unwrap(), sibling_bytes);
+    }
+
+    #[test]
+    fn device_borrowed_volume_keeps_same_marker_and_never_cleans_owned_storage() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("borrowed.scratch.json");
+        let unowned = root.path().join("caller-volume-sentinel");
+        std::fs::write(&unowned, b"caller retains this storage").unwrap();
+        let volume = r"\\?\Volume{ec84d99e-3f02-11e7-ac6c-00155d7682cf}\".to_owned();
+        let expected = hcs::BoxRecord {
+            folder: volume.clone(),
+            made: Vec::new(),
+            outlives: true,
+            system: Some(BoxId::new("borrowed").unwrap()),
+            started: false,
+            init: None,
+            devices: vec![hcs::DeviceBinding {
+                id: hex_api::DeviceId {
+                    kind: hex_api::DeviceKind::Gpu,
+                    key: 256,
+                },
+                location: "PCIROOT(0)#PCI(0100)".to_owned(),
+            }],
+            storage: hcs::RecordStorage::BorrowedVolume,
+            creation: hcs::NativeCreate::Created,
+        };
+        let config = serde_json::json!({
+            "ociVersion":"1.2.0", "root":{"path":volume},
+            "process":{"args":["cmd.exe"],"cwd":"C:\\"},
+            "windows":{"layerFolders":["C:\\fixture\\base","C:\\fixture\\caller-scratch"]}
+        });
+        let container = hcs::from_bundle(&config).unwrap();
+        let mounted = scratch(
+            &container,
+            "unused-borrowed-base",
+            Some(marker.clone()),
+            expected.system.as_ref().unwrap(),
+            hcs::Lifetime::Outlives,
+            &expected.devices,
+        )
+        .unwrap();
+        assert_eq!(mounted.volume, volume);
+        assert!(mounted.activated.is_none());
+        assert!(!mounted.prepared);
+        assert!(mounted.made.is_empty());
+        let mut record = read_marker(&marker).unwrap();
+        assert_eq!(record, expected);
+        let bytes = std::fs::read(&marker).unwrap();
+        assert!(validate_storage(&record, &Scratch::Volume(volume.clone())).is_ok());
+        assert!(validate_storage(&record, &Scratch::Folder(volume.clone())).is_err());
+        assert!(
+            validate_storage(
+                &record,
+                &Scratch::Volume("synthetic-private-other-volume".to_owned())
+            )
+            .is_err()
+        );
+        let owned_calls = Cell::new(0);
+        record.made.push(unowned.to_str().unwrap().to_owned());
+        assert!(
+            remove_scratch_using(&record, &marker, |_| {
+                owned_calls.set(owned_calls.get() + 1);
+                Ok(())
+            })
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&marker).unwrap(), bytes);
+        assert_eq!(owned_calls.get(), 0);
+        record.made.clear();
+        remove_scratch_using(&record, &marker, |_| {
+            owned_calls.set(owned_calls.get() + 1);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(owned_calls.get(), 0);
+        assert!(!marker.exists());
+        assert_eq!(
+            std::fs::read(unowned).unwrap(),
+            b"caller retains this storage"
+        );
+    }
+
+    #[test]
+    fn device_pending_marker_refuses_absent_cleanup_until_owned_terminal_observation() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("pending.scratch.json");
+        let sibling = root.path().join("sibling");
+        std::fs::write(&sibling, b"unaffected").unwrap();
+        let record = hcs::BoxRecord {
+            folder: r"\\?\Volume{ec84d99e-3f02-11e7-ac6c-00155d7682cf}\".to_owned(),
+            made: Vec::new(),
+            outlives: false,
+            system: Some(BoxId::new("pending").unwrap()),
+            started: false,
+            init: None,
+            devices: vec![hcs::DeviceBinding {
+                id: hex_api::DeviceId {
+                    kind: hex_api::DeviceKind::Gpu,
+                    key: 256,
+                },
+                location: "synthetic-private-location".to_owned(),
+            }],
+            storage: hcs::RecordStorage::BorrowedVolume,
+            creation: hcs::NativeCreate::Pending,
+        };
+        write_marker(&marker, &record).unwrap();
+        let bytes = std::fs::read(&marker).unwrap();
+        let cleaned = Cell::new(0);
+        let error = reclaim_one_using(
+            &marker,
+            |_| Ok(false),
+            |_, _| {
+                cleaned.set(cleaned.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            Refusal::Invalid {
+                what: "native box lifecycle",
+                ..
+            }
+        ));
+        assert!(!error.to_string().contains("synthetic-private"));
+        assert!(
+            end_using(
+                &marker,
+                |_| Ok(false),
+                |_, _| {
+                    cleaned.set(cleaned.get() + 1);
+                    Ok(())
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(cleaned.get(), 0);
+        assert_eq!(std::fs::read(&marker).unwrap(), bytes);
+        end_using(
+            &marker,
+            |seen| {
+                assert_eq!(seen.system, record.system);
+                Ok(true)
+            },
+            |seen, path| {
+                remove_scratch_using(seen, path, |_| {
+                    cleaned.set(cleaned.get() + 1);
+                    Ok(())
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(cleaned.get(), 0); // No owned storage operation for the borrowed volume.
+        assert!(!marker.exists());
+        assert_eq!(std::fs::read(sibling).unwrap(), b"unaffected");
+    }
 }

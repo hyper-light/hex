@@ -1244,6 +1244,41 @@ pub struct BoxRecord {
     /// Exact physical bindings selected before HCS create; recovery never rebinds an ID by lookup alone.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub devices: Vec<DeviceBinding>,
+    /// `folder` names either Hex's prepared folder or the caller's already-mounted volume.
+    #[serde(default, skip_serializing_if = "RecordStorage::is_owned")]
+    pub storage: RecordStorage,
+    /// A pending native create is not proven cancelled by a temporarily absent system.
+    #[serde(default, skip_serializing_if = "NativeCreate::is_created")]
+    pub creation: NativeCreate,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordStorage {
+    #[default]
+    OwnedFolder,
+    BorrowedVolume,
+}
+
+impl RecordStorage {
+    fn is_owned(&self) -> bool {
+        *self == Self::OwnedFolder
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeCreate {
+    /// Legacy markers predate pending-create retention and keep their existing semantics.
+    #[default]
+    Created,
+    Pending,
+}
+
+impl NativeCreate {
+    fn is_created(&self) -> bool {
+        *self == Self::Created
+    }
 }
 
 /// The immutable administrator binding used by one native container, retained in its scratch marker.
@@ -1390,9 +1425,48 @@ fn record_devices(record: &BoxRecord) -> Result<usize, Refusal> {
     Ok(extra)
 }
 
+fn record_extra(record: &BoxRecord) -> Result<usize, Refusal> {
+    let mut extra = record_devices(record)?;
+    let mut add = |value: usize| -> Result<(), Refusal> {
+        extra = extra.checked_add(value).ok_or_else(|| Refusal::Invalid {
+            what: "box record",
+            why: "native metadata byte count overflows".to_owned(),
+        })?;
+        Ok(())
+    };
+    if record.storage == RecordStorage::BorrowedVolume {
+        if !record.made.is_empty() || record.folder.is_empty() || record.folder.contains('\0') {
+            return Err(Refusal::Invalid {
+                what: "box record storage",
+                why: "borrowed volume cannot own created paths and must name a nonempty NUL-free volume".to_owned(),
+            });
+        }
+        add(record_json(&record.storage, crate::bundle::MAX_CONFIG_BYTES)?.len())?;
+        add(b",\"storage\":".len())?;
+    }
+    if record.creation == NativeCreate::Pending {
+        if record.devices.is_empty() || record.system.is_none() {
+            return Err(Refusal::Invalid {
+                what: "box record creation",
+                why: "pending assigned create requires exact bindings and its system identity"
+                    .to_owned(),
+            });
+        }
+        add(record_json(&record.creation, crate::bundle::MAX_CONFIG_BYTES)?.len())?;
+        add(b",\"creation\":".len())?;
+    }
+    if extra > crate::bundle::MAX_CONFIG_BYTES {
+        return Err(Refusal::Invalid {
+            what: "box record",
+            why: "native metadata exceeds the configuration byte bound".to_owned(),
+        });
+    }
+    Ok(extra)
+}
+
 /// A box's marker: its original path budget and a separate configuration budget for exact bindings.
 pub fn write_record(record: &BoxRecord) -> Result<Vec<u8>, Refusal> {
-    let extra = record_devices(record)?;
+    let extra = record_extra(record)?;
     let bytes = record_json(record, record_bound()?)?;
     if bytes
         .len()
@@ -1595,6 +1669,8 @@ mod tests {
     /// The record of an outliving box `x` whose node made its scratch folder and sandbox.
     fn outliving(init: Option<InitRecord>) -> BoxRecord {
         BoxRecord {
+            storage: RecordStorage::OwnedFolder,
+            creation: NativeCreate::Created,
             devices: Vec::new(),
             folder: r"C:\b\x-scratch".to_owned(),
             made: vec![
@@ -1646,6 +1722,8 @@ mod tests {
     #[test]
     fn a_box_whose_start_its_node_didnt_finish_isnt_taken_back() {
         let r = BoxRecord {
+            storage: RecordStorage::OwnedFolder,
+            creation: NativeCreate::Created,
             devices: Vec::new(),
             started: true,
             ..outliving(None)
@@ -1708,6 +1786,8 @@ mod tests {
     fn the_longest_record_a_box_writes_is_its_bound() {
         let path = "\u{1}".repeat(FOLDER_UNITS);
         let worst = BoxRecord {
+            storage: RecordStorage::OwnedFolder,
+            creation: NativeCreate::Created,
             devices: Vec::new(),
             folder: path.clone(),
             made: vec![path.clone(), path.clone()],
@@ -2410,6 +2490,8 @@ mod tests {
             seen in proptest::option::of((0u64..3, any::<bool>())),
         ) {
             let record = BoxRecord {
+                storage: RecordStorage::OwnedFolder,
+                creation: NativeCreate::Created,
                 devices: Vec::new(),
                 folder: r"C:\b\x".to_owned(),
                 made: vec![],
@@ -2451,6 +2533,8 @@ mod tests {
             init in proptest::option::of((any::<u32>(), any::<u64>())),
         ) {
             let record = BoxRecord {
+                storage: RecordStorage::OwnedFolder,
+                creation: NativeCreate::Created,
                 devices: Vec::new(),
                 folder,
                 made,

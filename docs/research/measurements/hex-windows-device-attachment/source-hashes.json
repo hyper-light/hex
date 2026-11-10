@@ -1,7 +1,8 @@
 {
-  "crates/hex-runtime/src/windows/mod.rs": "0c1c51a4e16c367847bc8046621c70bb4452e7758035d0f4a111bfd01b46ce28",
-  "crates/hex-runtime/src/windows/oci/mod.rs": "b16aa7d9fec1791eb374d77f776e39bb361df7cb31b1295a4f649f5c82c7c050",
+  "crates/hex-runtime/src/windows/mod.rs": "2a0b293a743b9a2562b61af4889b895a1e68cedc09698c981b68961ab9ed6d43",
+  "crates/hex-runtime/src/windows/oci/mod.rs": "91f70a9c648b4baf76b529641d18f145b990c458434195f0a01b6d5b94d25210",
   "crates/hex-cli/src/node.rs": "53651ecbf4b0f491b7b64f93d909d3f284c0c6bebb419f975e153401b8e0f8c6",
-  "crates/hex-core/src/hcs.rs": "0be1a3ee3ead80bfb2476775d4e862c86f96703999090a8259a225ff46cb11fd",
-  "crates/hex-core/src/hcs/device_binding_record_tests.rs": "184d419f25ea9dbcef0713dd10ff6576122a8aa9f7ca7786db384af3c8ed9101"
+  "crates/hex-core/src/hcs.rs": "3565076ac006986a805f5112957dbd781f3f99c015de8a58b2ae7bdc1f0d94ad",
+  "crates/hex-core/src/hcs/device_binding_record_tests.rs": "fe927012e1623fd65186be67f7f89bf64c05d2ad904baad942068de07cfbc567",
+  "crates/hex-runtime/src/windows/oci/sys.rs": "092a4ac23ca04169e8d3f4197b51ad8069b189af6a8f6d22c18992097fb455b7"
 }

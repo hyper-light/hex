@@ -1,7 +1,9 @@
 # Ignored native Metal compute witness
 
-Status: **source-first; UNCOMPILED, UNRUN**. This lane will only compile the new test, never invoke
-it. No native Metal operation, hardware test, campaign, benchmark or production change is authorized
+Latest status: **native Rust test compiled/linked and scoped Clippy exit0; ZERO tests executed**.
+Signed source `18eccf40bad6c9b85241036cf72161e372255176` is unchanged after the checks. Its historical
+source-first checkpoint was explicitly uncompiled/unrun. This lane only compiled the new test,
+never invoked it. No native Metal operation, hardware test, campaign, benchmark or production change is authorized
 here. ROOT owns actual effects, native cleanup, integration, audits, profiling and main.
 
 Base `c2da38cc363e7d53f6df8fb82ab7bbda5e2f1efe`; branch `cp/t7-macos-gpu-witness`. Owned paths
@@ -121,13 +123,55 @@ wrongness; 1/31/32 are one-bit rotation of a u32, dimensions1 describe the reque
 grid, 0/1/2 are explicit shader argument bindings, and 4 is the SDK terminal-completion enum.
 All workload size/rounds come from required ROOT inputs and native limits, without an invented ceiling.
 
-## Source-first checks and owed work
+## Source-first and actual compile-only checks
 
-Local scoped rustfmt and git diff --check: exit0. No build/test/native call yet. Planned admitted
-compile-only commands: `cargo test -p hex-gpu --test apple_compute --no-run --locked` and
-`cargo clippy -p hex-gpu --test apple_compute --locked -- -D warnings`. No test execution, no
---ignored, no Gpus::open. Exact source/log hashes, compiler exits, owned PIDs/reaps and temporary
-storage witness will be appended from actual results. No active job at this source checkpoint.
+Local scoped rustfmt and git diff --check: exit0. No local build/test/native call. Source-first was
+signed before submitting any remote check. Exact source archive **8182231B**, SHA256
+`614d17c54358e0650ed32bb5e2b209b995b814821eb8e608d282b032da10393e`, 1744 regular files, streamed
+in memory/no-sync to NEW d132 private
+`~/.cache/hex-lead/lanes/apple-compute-01a1c640-18eccf40-compile-v1/{source,target,cargo-home,tmp,proof}`.
+Local CLI85068 reaped/exit0; source/caches from0e/r40 and every ROOT path untouched.
+
+**r74 terminal0**, admitted1CPU/4GiB/12GiB, nice10 (inherited measured nice20, no priority increase),
+jobs1/threads1. Rust1.99.1 pinned by source/explicit environment, native macOS26.4 arm64. Exact
+controller: [compile_only.py](compile_only.py), submission/PID identity in
+[compile-submission.json](compile-submission.json) and raw proof:
+
+- `cargo test -p hex-gpu --test apple_compute --no-run --locked`: **exit0**, Cargo47037 reaped,
+  log1368B SHA256 `b5fb4af4b9eedcdcd2ef554c5d8b60f86ff23f28525bdec4c36c32bfc01a71de`.
+- `cargo clippy -p hex-gpu --test apple_compute --locked -- -D warnings`: **exit0**, Cargo47215
+  reaped, log519B SHA256 `34c7375a3a1d8b3dc0918e530119d741ce47dc599bd9d6e6e2f65de80d25d9ff`.
+
+**Executed tests0; pass/fail/ignored counts were not emitted because no test harness ran.** One
+explicitly ignored test exists in source and remains UNRUN. No --ignored, Gpus::open, shader
+compilation, Objective-C/Metal fixture call or GPU command executed. Rust native linkage is not
+evidence that the embedded MSL kernel compiled or ran. No post-check source correction was needed.
+
+All **1744** source files before/after match the exact signed Git archive, including Cargo.lock and
+the leaf SHA256 `7762d5a476ec827a768d68d503217041806c6566cae65501f0a515d7f735cdbb`.
+Private TMPDIR has **0 entries**. Compiled but unexecuted binary
+`target/debug/deps/apple_compute-eaad80c70827c01d`, 1421024B, SHA256
+`2fd16f23f91401719c1cad9deecb17656f249419d3fa5a2688461942e4c0acdd`.
+No active compiler/job/guest/native fixture handle. Private source/target/cache/binary/proof retained;
+no stop/delete/host setting change was used.
+
+Raw proof [compile-r74-proof.tar.gz](compile-r74-proof.tar.gz): **234796B /10 files**, SHA256
+`90c2abbe3cfaef526b2384e535fdce26ddd61b5e33e184f702c49ca55e2e3404`.
+Contains original source/transfer manifests, environment, exact Cargo owner/PID/argv identities,
+raw logs and result/binary hashes; every raw member has a size/hash in bundle-members.json.
+Collected with <=12000B raw chunks/no encoded-data output; each chunk/archive/member and the
+whole source identity checked. [compile-r74-collection.json](compile-r74-collection.json) records
+the result; extracted originals retained at
+`~/.cache/hex-lead/transfers/apple-compute-01a1c640-18eccf40-compile-v1/`.
+No log normalization. The failed web PDF retrieval (size limit) was resolved by reading the official
+14564497B PDF in memory with existing pdftotext, without installation, GPU call or local build;
+source hash and relevant uint32 references are in [msl-spec-receipt.json](msl-spec-receipt.json).
+
+ROOT still owes actual externally guarded native invocation, its measured ID/work/deadline,
+successful MSL compilation/device command/output, failure controls and actual driver/resource
+cleanup (including timeout/abort uncertainty), native attachment/isolation/telemetry integration,
+cross-lane and seven-target gates, audits/profiles/benchmarks/main. Prior0e's18 pure passes are a
+different check and are not counted as execution of this witness.
 
 | R01–R16 | Applicable evidence / remaining obligation |
 | --- | --- |

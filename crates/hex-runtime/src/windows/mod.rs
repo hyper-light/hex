@@ -89,6 +89,7 @@ enum KeeperHold {
 enum SlotState {
     Creating,
     Cancelled,
+    PreparedCleanupPending,
     Finishing(Held),
     CancelFinishing(Held),
     Ready(Held),
@@ -96,6 +97,14 @@ enum SlotState {
     CleanupPending(Held),
     Uncertain,
     RemovingUncertain,
+    RemovingPrepared,
+}
+
+enum Removal {
+    Physical(Held),
+    Prepared,
+    UnknownAssigned,
+    UnknownLegacy,
 }
 
 fn allocation(bound: usize) -> Refusal {
@@ -440,6 +449,19 @@ impl Holding {
         Ok(())
     }
 
+    /// Only a fresh assigned create returning before HcsCreateComputeSystem can take this path.
+    /// Pending/terminal native attempts return an owned OciBox, even when publication must refuse.
+    fn preparation_failed(&self, id: &BoxId) -> Result<(), Refusal> {
+        let mut boxes = self.boxes()?;
+        let at = slot_index(&boxes, id).map_err(|_| inconsistent_slots())?;
+        let (_, slot) = boxes.get_mut(at).ok_or_else(inconsistent_slots)?;
+        if !matches!(slot.state, SlotState::Creating | SlotState::Cancelled) {
+            return Err(inconsistent_slots());
+        }
+        slot.state = SlotState::PreparedCleanupPending;
+        Ok(())
+    }
+
     fn keeper_receipt(&self, id: &BoxId, receipt: KeeperHold) -> Result<(), Refusal> {
         let mut boxes = self.boxes()?;
         let at = slot_index(&boxes, id).map_err(|_| inconsistent_slots())?;
@@ -457,24 +479,54 @@ impl Holding {
             return Ok(());
         }
         *keeper = keeping.spawn()?;
-        for (id, slot) in self.boxes()?.iter_mut() {
-            if let SlotState::Ready(held) = &slot.state {
-                let value = keeper.hold(held.job_token())?;
-                let receipt = KeeperReceipt {
-                    pid: keeper.pid(),
-                    created: keeper.created(),
-                    value,
-                };
-                slot.keeper = KeeperHold::Held(receipt);
+        self.rehold_ready_using(
+            keeper.pid(),
+            keeper.created(),
+            |held| keeper.hold(held.job_token()),
+            |id, receipt| {
                 keeper::write_held(
                     &keeping.state,
                     id.as_str(),
                     receipt.pid,
                     receipt.created,
-                    value,
+                    receipt.value,
                 )
-                .map_err(|e| Refusal::os("recording a box's keeper handle", e))?;
+                .map_err(|e| Refusal::os("recording a box's keeper handle", e))
+            },
+        )
+    }
+
+    /// The caller holds the keeper mutex through replacement and handoff. Removal may mark a slot
+    /// Removing meanwhile, but must acquire that same keeper before closing any remote receipt.
+    fn rehold_ready_using(
+        &self,
+        pid: u32,
+        created: u64,
+        mut hold: impl FnMut(&Held) -> Result<usize, Refusal>,
+        mut record: impl FnMut(&BoxId, KeeperReceipt) -> Result<(), Refusal>,
+    ) -> Result<(), Refusal> {
+        let ready = {
+            let boxes = self.boxes()?;
+            let mut ready = Vec::new();
+            ready
+                .try_reserve_exact(boxes.len())
+                .map_err(|_| allocation(boxes.len()))?;
+            for (id, slot) in boxes.iter() {
+                if let SlotState::Ready(held) = &slot.state {
+                    ready.push((id.try_clone()?, held.clone()));
+                }
             }
+            ready
+        };
+        for (id, held) in ready {
+            let receipt = KeeperReceipt {
+                pid,
+                created,
+                value: hold(&held)?,
+            };
+            // Store ownership before disk I/O. A failed record write retains the exact remote handle.
+            self.keeper_receipt(&id, KeeperHold::Held(receipt))?;
+            record(&id, receipt)?;
         }
         Ok(())
     }
@@ -572,11 +624,19 @@ impl Holding {
     /// Keep the slot through every external cleanup operation; only an actual successful removal
     /// releases claims. Concurrent cancellation requests never remove a creator's slot underneath it.
     fn remove(&self, id: &BoxId) -> Result<(), Refusal> {
-        let (held, marker) = {
+        self.remove_using(id, oci::end)
+    }
+
+    fn remove_using(
+        &self,
+        id: &BoxId,
+        end: impl FnOnce(&Path) -> Result<(), Refusal>,
+    ) -> Result<(), Refusal> {
+        let (removal, marker) = {
             let mut boxes = self.boxes()?;
             let at = slot_index(&boxes, id).map_err(|_| Refusal::NoSuchBox(id.clone()))?;
             let (_, slot) = boxes.get_mut(at).ok_or_else(inconsistent_slots)?;
-            let held = match &slot.state {
+            let removal = match &slot.state {
                 SlotState::Creating => {
                     slot.state = SlotState::Cancelled;
                     return Err(pending(
@@ -592,38 +652,60 @@ impl Holding {
                         "creation cancellation requested; keeper handoff is pending",
                     ));
                 }
-                SlotState::Ready(held) | SlotState::CleanupPending(held) => Some(held.clone()),
-                SlotState::Uncertain => None,
-                SlotState::Removing(_) | SlotState::RemovingUncertain => {
+                SlotState::Ready(held) | SlotState::CleanupPending(held) => {
+                    Removal::Physical(held.clone())
+                }
+                SlotState::PreparedCleanupPending => Removal::Prepared,
+                SlotState::Uncertain if slot.devices.is_empty() => Removal::UnknownLegacy,
+                SlotState::Uncertain => Removal::UnknownAssigned,
+                SlotState::Removing(_)
+                | SlotState::RemovingUncertain
+                | SlotState::RemovingPrepared => {
                     return Err(pending("physical cleanup is already in progress"));
                 }
             };
             let marker = slot.marker.as_deref().map(copy_path).transpose()?;
-            slot.state = match &held {
-                Some(held) => SlotState::Removing(held.clone()),
-                None => SlotState::RemovingUncertain,
+            slot.state = match &removal {
+                Removal::Physical(held) => SlotState::Removing(held.clone()),
+                Removal::Prepared => SlotState::RemovingPrepared,
+                Removal::UnknownAssigned | Removal::UnknownLegacy => SlotState::RemovingUncertain,
             };
-            (held, marker)
+            (removal, marker)
         };
         let result = (|| {
             self.drop_from_keeper(id)?;
-            match &held {
-                Some(Held::Process(boxed)) => boxed.delete(),
-                Some(Held::Oci(boxed)) => boxed.delete(),
-                None => {
+            match &removal {
+                Removal::Physical(Held::Process(boxed)) => boxed.delete(),
+                Removal::Physical(Held::Oci(boxed)) => boxed.delete(),
+                Removal::Prepared => oci::discard_prepared(
+                    marker
+                        .as_deref()
+                        .ok_or_else(|| pending("prepared native cleanup has no marker path"))?,
+                ),
+                Removal::UnknownAssigned | Removal::UnknownLegacy => {
                     let marker = marker.as_deref().ok_or_else(|| {
                         pending("no durable native marker establishes the create outcome")
                     })?;
                     if marker.exists() {
                         let record = oci::read_marker(marker)?;
-                        if !record.devices.is_empty() && record.system.as_ref() != Some(id) {
+                        if (matches!(removal, Removal::UnknownAssigned)
+                            || !record.devices.is_empty())
+                            && record.system.as_ref() != Some(id)
+                        {
                             return Err(pending(
                                 "native marker system identity disagrees; cleanup is uncertain",
                             ));
                         }
-                        oci::end(marker)
+                        end(marker)
                     } else {
-                        oci::require_absent(id)
+                        oci::require_absent(id)?;
+                        if matches!(removal, Removal::UnknownAssigned) {
+                            Err(pending(
+                                "assigned native marker is missing; terminal create state is unproved",
+                            ))
+                        } else {
+                            Ok(())
+                        }
                     }
                 }
             }
@@ -637,9 +719,10 @@ impl Holding {
             }
             boxes.remove(at);
         } else {
-            slot.state = match held {
-                Some(held) => SlotState::CleanupPending(held),
-                None => SlotState::Uncertain,
+            slot.state = match removal {
+                Removal::Physical(held) => SlotState::CleanupPending(held),
+                Removal::Prepared => SlotState::PreparedCleanupPending,
+                Removal::UnknownAssigned | Removal::UnknownLegacy => SlotState::Uncertain,
             };
         }
         result
@@ -828,11 +911,12 @@ impl WinRuntime {
     ) -> Result<(), Refusal> {
         let configured = self.bindings(spec)?;
         if record.devices != configured
+            || record.creation != hex_core::hcs::NativeCreate::Created
             || (!record.devices.is_empty() && record.system.as_ref() != Some(&spec.id))
         {
             return Err(Refusal::Invalid{what:"native device recovery",why:"recorded physical identity or exact location disagrees with the current configuration".to_owned()});
         }
-        Ok(())
+        oci::validate_storage(record, &self.container(spec)?.scratch)
     }
 
     fn retain_recovery(
@@ -1106,13 +1190,6 @@ impl WinRuntime {
             }
         };
         let bindings = self.bindings(spec)?;
-        if !bindings.is_empty() && matches!(container.scratch, hex_core::hcs::Scratch::Volume(_)) {
-            return Err(Refusal::Platform {
-                what: "device attachment",
-                platform: "windows OCI",
-                why: "assigned devices require an owned scratch-folder marker".to_owned(),
-            });
-        }
         container
             .devices
             .try_reserve_exact(bindings.len())
@@ -1326,6 +1403,17 @@ impl Runtime for WinRuntime {
         if held.is_err() && matches!(spec.class, ClassSpec::Process) {
             self.holding.unmade(&spec.id)?;
             return held.and_then(|boxed| self.info(&boxed));
+        }
+        if let Err(error) = held.as_ref()
+            && !spec.devices.is_empty()
+        {
+            self.holding.preparation_failed(&spec.id)?;
+            return match self.holding.remove(&spec.id) {
+                Ok(()) => held.and_then(|boxed| self.info(&boxed)),
+                Err(cleanup) => Err(Refusal::Broken(format!(
+                    "native preparation failed ({error}); owned scratch cleanup remains pending ({cleanup})"
+                ))),
+            };
         }
         self.finish_make(&spec.id, held)
     }
@@ -1610,6 +1698,63 @@ mod tests {
         assert_eq!(rt.feature_reads.load(Ordering::SeqCst), 0);
     }
 
+    /// AC-T7.4.1: the real native bundle builder accepts an already-mounted root with exact assignment.
+    #[test]
+    fn device_borrowed_volume_bundle_keeps_precise_assignment_and_same_native_marker() {
+        let scratch = tempfile::tempdir().unwrap();
+        let bundle = tempfile::tempdir().unwrap();
+        let rt = device_runtime(scratch.path());
+        let volume = r"\\?\Volume{ec84d99e-3f02-11e7-ac6c-00155d7682cf}\";
+        let config = serde_json::json!({
+            "ociVersion":"1.2.0", "root":{"path":volume},
+            "process":{"args":["cmd.exe","/c","exit","0"],"cwd":"C:\\"},
+            "windows":{"layerFolders":["C:\\fixture\\base","C:\\fixture\\caller-scratch"]}
+        });
+        std::fs::write(
+            bundle.path().join("config.json"),
+            serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+        let mut spec = device_spec("borrowed-bundle", 512);
+        spec.class = ClassSpec::Bundle(bundle.path().to_path_buf());
+        let container = rt.container(&spec).unwrap();
+        assert_eq!(
+            container.scratch,
+            hex_core::hcs::Scratch::Volume(volume.to_owned())
+        );
+        assert_eq!(
+            container.devices,
+            vec![hex_core::hcs::AssignedDevice::LocationPath(
+                "PCIROOT(0)#PCI(0200)".to_owned()
+            )]
+        );
+        let marker = rt.marker(&spec.id);
+        assert_eq!(marker, scratch.path().join("borrowed-bundle.scratch.json"));
+        let record = hex_core::hcs::BoxRecord {
+            folder: volume.to_owned(),
+            made: Vec::new(),
+            outlives: true,
+            system: Some(spec.id.clone()),
+            started: false,
+            init: None,
+            devices: rt.bindings(&spec).unwrap(),
+            storage: hex_core::hcs::RecordStorage::BorrowedVolume,
+            creation: hex_core::hcs::NativeCreate::Created,
+        };
+        assert!(rt.validate_bindings(&spec, &record).is_ok());
+        let mut wrong = record;
+        wrong.storage = hex_core::hcs::RecordStorage::OwnedFolder;
+        assert!(matches!(
+            rt.validate_bindings(&spec, &wrong),
+            Err(Refusal::Invalid {
+                what: "native storage recovery",
+                ..
+            })
+        ));
+        assert_eq!(rt.feature_reads.load(Ordering::SeqCst), 0);
+        assert!(!marker.exists()); // Container construction does not create a native system/marker.
+    }
+
     /// AC-T7.4.1: unsupported and missing bindings refuse before any native job or pending slot.
     #[test]
     fn device_missing_cdi_and_process_requests_refuse_before_native_creation() {
@@ -1692,6 +1837,8 @@ mod tests {
         rt.node = Some("owned-fixture".to_owned());
         let spec = device_spec("recorded", 256);
         let mut record = hex_core::hcs::BoxRecord {
+            storage: hex_core::hcs::RecordStorage::OwnedFolder,
+            creation: hex_core::hcs::NativeCreate::Created,
             folder: scratch.path().to_str().unwrap().to_owned(),
             made: Vec::new(),
             outlives: true,
@@ -1768,6 +1915,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn device_missing_native_metadata_cannot_redirect_retained_claim_cleanup() {
+        let scratch = tempfile::tempdir().unwrap();
+        let rt = device_runtime(scratch.path());
+        let spec = device_spec("retained-declared", 256);
+        let marker = rt.marker(&spec.id);
+        let sibling = scratch.path().join("sibling-sentinel");
+        std::fs::write(&sibling, b"unaffected").unwrap();
+        let record = hex_core::hcs::BoxRecord {
+            folder: scratch.path().to_str().unwrap().to_owned(),
+            made: Vec::new(),
+            outlives: true,
+            system: Some(BoxId::new("unrelated-system").unwrap()),
+            started: false,
+            init: None,
+            devices: Vec::new(),
+            storage: hex_core::hcs::RecordStorage::OwnedFolder,
+            creation: hex_core::hcs::NativeCreate::Created,
+        };
+        let bytes = hex_core::hcs::write_record(&record).unwrap();
+        std::fs::write(&marker, &bytes).unwrap();
+        rt.holding
+            .reserve(&spec.id, &spec.devices, Some(marker.clone()))
+            .unwrap();
+        rt.holding.uncertain(&spec.id).unwrap();
+        let calls = std::cell::Cell::new(0);
+        let error = rt
+            .holding
+            .remove_using(&spec.id, |_| {
+                calls.set(calls.get() + 1);
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Refusal::Invalid {
+                what: "native box lifecycle",
+                ..
+            }
+        ));
+        assert_eq!(calls.get(), 0);
+        assert_eq!(std::fs::read(marker).unwrap(), bytes);
+        assert_eq!(std::fs::read(sibling).unwrap(), b"unaffected");
+        assert_eq!(
+            rt.holding.report(&rt.catalog).unwrap()[0].holder,
+            Some(spec.id.clone())
+        );
+        assert!(!matches!(rt.inspect(&spec.id), Err(Refusal::NoSuchBox(_))));
+    }
+
     /// Ordinary Windows job smoke only: empty claims still create/delete through the same holding table.
     #[test]
     fn device_empty_claims_keep_ordinary_native_job_create_and_delete_working() {
@@ -1780,6 +1977,59 @@ mod tests {
         rt.delete(&spec.id).unwrap();
         assert!(rt.list().unwrap().is_empty());
         assert!(matches!(rt.inspect(&spec.id), Err(Refusal::NoSuchBox(_))));
+    }
+
+    /// T-T7.1.2: native handoff/durable writes run without the holding-map mutex; errors keep ownership.
+    #[test]
+    fn device_keeper_rehold_callbacks_release_map_mutex_and_keep_failed_write_receipt() {
+        let scratch = tempfile::tempdir().unwrap();
+        let rt = device_runtime(scratch.path());
+        let spec = process_box("owned-rehold-smoke");
+        rt.create(spec.clone()).unwrap();
+        let held_calls = std::cell::Cell::new(0);
+        let write_calls = std::cell::Cell::new(0);
+        let result = rt.holding.rehold_ready_using(
+            11,
+            22,
+            |_| {
+                assert!(rt.holding.boxes.try_lock().is_ok());
+                assert_eq!(rt.list().unwrap().len(), 1);
+                held_calls.set(held_calls.get() + 1);
+                Ok(33) // Synthetic receipt, never a native remote handle.
+            },
+            |id, receipt| {
+                assert!(rt.holding.boxes.try_lock().is_ok());
+                assert_eq!(id, &spec.id);
+                assert_eq!((receipt.pid, receipt.created, receipt.value), (11, 22, 33));
+                write_calls.set(write_calls.get() + 1);
+                Err(Refusal::os(
+                    "recording a box's keeper handle",
+                    "owned injected write refusal",
+                ))
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(Refusal::Os {
+                op: "recording a box's keeper handle",
+                ..
+            })
+        ));
+        assert_eq!((held_calls.get(), write_calls.get()), (1, 1));
+        {
+            let boxes = rt.boxes().unwrap();
+            let at = slot_index(&boxes, &spec.id).unwrap();
+            assert!(matches!(
+                boxes[at].1.keeper,
+                KeeperHold::Held(KeeperReceipt {
+                    pid: 11,
+                    created: 22,
+                    value: 33
+                })
+            ));
+        }
+        rt.delete(&spec.id).unwrap(); // No keeper exists; no synthetic remote value is closed.
+        assert!(rt.list().unwrap().is_empty());
     }
 
     /// HEX-INST-9 (native plan step 6): the installer's features are read when the runtime is made, so

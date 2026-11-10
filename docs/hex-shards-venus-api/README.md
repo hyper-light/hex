@@ -1,8 +1,10 @@
 # Existing shared Venus enable at the Shards API
 
-SOURCE FIRST; compilation/tests unrun. This exposes the existing shared Venus
-enable bit. **It does not select, reserve or exclusively attach a physical GPU.**
-All supported-platform attachment and exact host/guest identity mapping remain required.
+Signed source-first3f now has [actual focused results](RESULTS.md): API harness
+compile0 and4selected/4pass/0fail/0ignored, with both earlier preparation failures
+retained. This exposes the existing shared Venus enable bit. **It does not select,
+reserve or exclusively attach a physical GPU.** All supported-platform attachment
+and exact host/guest identity mapping remain required.
 
 ## POLICY_READ and scope
 

@@ -420,6 +420,382 @@ pub fn create_system(id: &str, document: &str, patience: Duration) -> Result<Sys
     Ok(System(system))
 }
 
+/// The assigned-device create owns its operation, system and input storage until a terminal fact.
+/// Other HCS operations keep their existing implementation above.
+pub(crate) struct PendingCreate {
+    context: std::ptr::NonNull<CreateContext>,
+}
+
+struct CreateContext {
+    // Exactly two physical owners: PendingCreate and the registered HCS completion receipt.
+    owners: std::sync::atomic::AtomicUsize,
+    callback_owned: std::sync::atomic::AtomicBool,
+    completed: std::sync::atomic::AtomicBool,
+    calls: CreateCalls,
+    data: std::sync::Mutex<CreateData>,
+}
+
+struct CreateInputs {
+    id: Vec<u16>,
+    document: Vec<u16>,
+}
+
+struct CreateData {
+    operation: Option<HCS_OPERATION>,
+    inputs: Option<CreateInputs>,
+    system: Option<System>,
+    state: CreateOperationState,
+    cancellation: CreateCancellation,
+}
+
+enum CreateOperationState {
+    NotStarted,
+    Active,
+    Terminal(Result<(), HcsFailure>),
+    Released,
+}
+
+#[derive(Clone, Copy)]
+struct CreateCalls {
+    wait: WaitResult,
+    cancel: CancelOperation,
+    close: CloseOperation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CreateCancellation {
+    NotRequested,
+    Requested,
+    Refused(u32),
+}
+
+pub(crate) struct TerminalCreate {
+    pub system: Option<System>,
+    pub result: Result<(), HcsFailure>,
+}
+
+// SAFETY: HCS handles are process-wide. CreateData is accessed only under its context mutex;
+// the native callback uses try_lock, so an inline completion never waits on the creating thread.
+unsafe impl Send for CreateData {}
+// SAFETY: this unique runtime receipt owns a reference to that synchronized stable context.
+unsafe impl Send for PendingCreate {}
+
+fn create_fault(code: HRESULT) -> HcsFailure {
+    HcsFailure {
+        code: u32::from_ne_bytes(code.to_ne_bytes()),
+        message: None,
+    }
+}
+
+fn create_wide(text: &str) -> Result<Vec<u16>, HcsFailure> {
+    let exhausted = || create_fault(windows_sys::Win32::Foundation::E_OUTOFMEMORY);
+    let units = text
+        .encode_utf16()
+        .count()
+        .checked_add(1)
+        .ok_or_else(exhausted)?;
+    let mut wide = Vec::new();
+    wide.try_reserve_exact(units).map_err(|_| exhausted())?;
+    wide.extend(text.encode_utf16());
+    wide.push(0);
+    Ok(wide)
+}
+
+fn create_incomplete(hr: HRESULT) -> bool {
+    hcs::hcs_error(u32::from_ne_bytes(hr.to_ne_bytes())) == hcs::HcsError::Timeout
+        || hr == windows_sys::Win32::Foundation::HCS_E_OPERATION_PENDING
+}
+
+impl CreateData {
+    fn advance(&mut self, calls: CreateCalls, patience: Duration) {
+        if !matches!(self.state, CreateOperationState::Active) {
+            return;
+        }
+        let Some(operation) = self.operation else {
+            return;
+        };
+        let mut document: PWSTR = null_mut();
+        // SAFETY: this still-owned operation is serialized by the context mutex; output is valid.
+        let hr = unsafe { (calls.wait)(operation, millis(patience), &mut document) };
+        let document = take(document);
+        if !create_incomplete(hr) {
+            self.state = CreateOperationState::Terminal(if hr < 0 {
+                Err(HcsFailure::of(hr, document))
+            } else {
+                Ok(())
+            });
+        }
+    }
+
+    fn close(&mut self, calls: CreateCalls) {
+        if let Some(operation) = self.operation.take() {
+            // SAFETY: called only after the completion callback's terminal fact, or a synchronous
+            // refusal before the operation started. Microsoft permits closing inside this callback.
+            unsafe { (calls.close)(operation) };
+        }
+        self.inputs = None;
+    }
+
+    fn cancel(&mut self, calls: CreateCalls) -> CreateCancellation {
+        if self.cancellation == CreateCancellation::NotRequested
+            && matches!(self.state, CreateOperationState::Active)
+            && let Some(operation) = self.operation
+        {
+            // SAFETY: the context owns this active operation; cancellation is only a request.
+            let hr = unsafe { (calls.cancel)(operation) };
+            self.cancellation = if hr < 0 {
+                CreateCancellation::Refused(u32::from_ne_bytes(hr.to_ne_bytes()))
+            } else {
+                CreateCancellation::Requested
+            };
+        }
+        self.cancellation
+    }
+}
+
+impl CreateContext {
+    fn allocate(inputs: CreateInputs, calls: CreateCalls) -> Result<PendingCreate, HcsFailure> {
+        let layout = std::alloc::Layout::new::<Self>();
+        // SAFETY: this exact nonzero layout is deallocated once by release_create's last owner.
+        let raw = unsafe { std::alloc::alloc(layout) }.cast::<Self>();
+        let pointer = std::ptr::NonNull::new(raw)
+            .ok_or_else(|| create_fault(windows_sys::Win32::Foundation::E_OUTOFMEMORY))?;
+        // SAFETY: pointer owns suitably aligned, uninitialized storage for exactly one Self.
+        unsafe {
+            pointer.as_ptr().write(Self {
+                owners: std::sync::atomic::AtomicUsize::new(2),
+                callback_owned: std::sync::atomic::AtomicBool::new(true),
+                completed: std::sync::atomic::AtomicBool::new(false),
+                calls,
+                data: std::sync::Mutex::new(CreateData {
+                    operation: None,
+                    inputs: Some(inputs),
+                    system: None,
+                    state: CreateOperationState::NotStarted,
+                    cancellation: CreateCancellation::NotRequested,
+                }),
+            })
+        };
+        Ok(PendingCreate { context: pointer })
+    }
+}
+
+/// Releases one of the two non-clonable physical receipts. No general reference-counted manager is
+/// introduced; checked subtraction never wraps, and only its last owner frees the exact allocation.
+fn release_create(pointer: std::ptr::NonNull<CreateContext>) {
+    // SAFETY: the caller holds one of the runtime/callback receipts through this final access.
+    let context = unsafe { pointer.as_ref() };
+    let previous = context.owners.try_update(
+        std::sync::atomic::Ordering::AcqRel,
+        std::sync::atomic::Ordering::Acquire,
+        |owners| owners.checked_sub(1),
+    );
+    if previous == Ok(1) {
+        #[cfg(test)]
+        create_tests::released();
+        // SAFETY: both receipts are released; no caller/callback may access the context again.
+        unsafe {
+            std::ptr::drop_in_place(pointer.as_ptr());
+            std::alloc::dealloc(
+                pointer.as_ptr().cast(),
+                std::alloc::Layout::new::<CreateContext>(),
+            );
+        }
+    }
+}
+
+fn release_create_callback(pointer: std::ptr::NonNull<CreateContext>) {
+    // SAFETY: callback or the not-started creator still owns the callback receipt at entry.
+    let context = unsafe { pointer.as_ref() };
+    if context
+        .callback_owned
+        .swap(false, std::sync::atomic::Ordering::AcqRel)
+    {
+        release_create(pointer);
+    }
+}
+
+unsafe extern "system" fn create_completed(_: HCS_OPERATION, opaque: *const c_void) {
+    let Some(pointer) = std::ptr::NonNull::new(opaque.cast_mut().cast::<CreateContext>()) else {
+        return;
+    };
+    // SAFETY: HcsCreateOperation received this stable context and owns its completion receipt.
+    let context = unsafe { pointer.as_ref() };
+    context
+        .completed
+        .store(true, std::sync::atomic::Ordering::Release);
+    match context.data.try_lock() {
+        Ok(mut data) => {
+            data.advance(context.calls, Duration::ZERO);
+            data.close(context.calls);
+        }
+        Err(std::sync::TryLockError::Poisoned(error)) => {
+            let mut data = error.into_inner();
+            data.advance(context.calls, Duration::ZERO);
+            data.close(context.calls);
+        }
+        // An inline callback or a simultaneous query/drop never blocks. Its live runtime owner
+        // observes completed after its native call returns, or at the context's final drop.
+        Err(std::sync::TryLockError::WouldBlock) => {}
+    }
+    // Last access: this can free the context if its runtime was already dropped.
+    release_create_callback(pointer);
+}
+
+impl Drop for CreateContext {
+    fn drop(&mut self) {
+        let data = match self.data.get_mut() {
+            Ok(data) => data,
+            Err(error) => error.into_inner(),
+        };
+        if self.completed.load(std::sync::atomic::Ordering::Acquire) {
+            // The native completion receipt supplies the terminal fact even if it ran inline
+            // while the creating/querying thread held the mutex.
+            data.close(self.calls);
+        }
+    }
+}
+
+impl PendingCreate {
+    fn context(&self) -> &CreateContext {
+        // SAFETY: this unique runtime receipt keeps the stable context alive until Drop.
+        unsafe { self.context.as_ref() }
+    }
+
+    pub(crate) fn cancel(&mut self) -> CreateCancellation {
+        let context = self.context();
+        match context.data.lock() {
+            Ok(mut data) => data.cancel(context.calls),
+            Err(_) => CreateCancellation::Refused(u32::from_ne_bytes(
+                windows_sys::Win32::Foundation::E_UNEXPECTED.to_ne_bytes(),
+            )),
+        }
+    }
+
+    pub(crate) fn cancellation(&self) -> CreateCancellation {
+        match self.context().data.lock() {
+            Ok(data) => data.cancellation,
+            Err(_) => CreateCancellation::Refused(u32::from_ne_bytes(
+                windows_sys::Win32::Foundation::E_UNEXPECTED.to_ne_bytes(),
+            )),
+        }
+    }
+
+    pub(crate) fn query(&mut self) -> Option<TerminalCreate> {
+        let context = self.context();
+        let mut data = context.data.lock().ok()?;
+        data.advance(context.calls, Duration::ZERO);
+        if context.completed.load(std::sync::atomic::Ordering::Acquire) {
+            data.close(context.calls);
+        }
+        if !matches!(data.state, CreateOperationState::Terminal(_)) {
+            return None;
+        }
+        match std::mem::replace(&mut data.state, CreateOperationState::Released) {
+            CreateOperationState::Terminal(result) => Some(TerminalCreate {
+                system: data.system.take(),
+                result,
+            }),
+            state => {
+                data.state = state;
+                None
+            }
+        }
+    }
+}
+
+impl Drop for PendingCreate {
+    fn drop(&mut self) {
+        release_create(self.context);
+    }
+}
+
+/// Only the assigned-create path uses the callback; legacy HCS operations remain unchanged.
+pub(crate) fn create_system_owned(
+    id: &str,
+    document: &str,
+    patience: Duration,
+) -> Result<PendingCreate, HcsFailure> {
+    let api = api().map_err(|m| HcsFailure {
+        code: 0x8037_0114,
+        message: Some(m.to_owned()),
+    })?;
+    let inputs = CreateInputs {
+        id: create_wide(id)?,
+        document: create_wide(document)?,
+    };
+    let owned = CreateContext::allocate(
+        inputs,
+        CreateCalls {
+            wait: api.wait_result,
+            cancel: api.cancel_operation,
+            close: api.close_operation,
+        },
+    )?;
+    // SAFETY: this stable context owns a distinct callback receipt, released exactly once at completion
+    // or below when allocation/start failed and no operation/callback was started.
+    let operation =
+        unsafe { (api.create_operation)(owned.context.as_ptr().cast(), Some(create_completed)) };
+    if operation.is_null() {
+        release_create_callback(owned.context);
+        return Err(HcsFailure {
+            code: 0x8037_011A,
+            message: None,
+        });
+    }
+    let context = owned.context();
+    let mut data = match context.data.lock() {
+        Ok(data) => data,
+        Err(_) => {
+            // SAFETY: HcsCreateComputeSystem has not been called; no completion can be pending.
+            unsafe { (api.close_operation)(operation) };
+            release_create_callback(owned.context);
+            return Err(create_fault(windows_sys::Win32::Foundation::E_UNEXPECTED));
+        }
+    };
+    data.operation = Some(operation);
+    let Some(inputs) = data.inputs.as_ref() else {
+        data.close(context.calls);
+        drop(data);
+        release_create_callback(owned.context);
+        return Err(create_fault(windows_sys::Win32::Foundation::E_UNEXPECTED));
+    };
+    let mut system: HCS_SYSTEM = null_mut();
+    // SAFETY: inputs remain stable through terminal completion; the reserved descriptor is null;
+    // system receives its handle on this call's return. An inline callback uses try_lock only.
+    let hr = unsafe {
+        (api.create_system)(
+            inputs.id.as_ptr(),
+            inputs.document.as_ptr(),
+            operation,
+            null(),
+            &mut system,
+        )
+    };
+    if !system.is_null() {
+        data.system = Some(System(system));
+    }
+    if hr < 0 {
+        // A synchronous refusal did not start the operation, so no future completion is registered.
+        data.state = CreateOperationState::Terminal(Err(HcsFailure::of(hr, None)));
+        data.close(context.calls);
+        drop(data);
+        release_create_callback(owned.context);
+    } else {
+        data.state = CreateOperationState::Active;
+        data.advance(context.calls, patience);
+        if matches!(data.state, CreateOperationState::Active) {
+            data.cancel(context.calls);
+            data.advance(context.calls, patience);
+        }
+        if context.completed.load(std::sync::atomic::Ordering::Acquire) {
+            data.close(context.calls);
+        }
+        drop(data);
+    }
+    Ok(owned)
+}
+
 /// Opens compute system `id` a node before this one made, where it still runs (`HcsOpenComputeSystem`,
 /// with `GENERIC_ALL` as HCS's own sample reopens one: `VD/hcs/Reference/ComputeSystemSample.md:24-38`);
 /// `None` where HCS has no system of that id. The handle takes every call the creating node's did.
@@ -857,4 +1233,312 @@ pub fn device_interfaces(class: &GUID) -> io::Result<DeviceView> {
 pub struct DeviceView {
     pub listed: usize,
     pub reachable: usize,
+}
+
+#[cfg(test)]
+mod create_tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+
+    #[derive(Default)]
+    struct Calls {
+        waits: VecDeque<HRESULT>,
+        budgets: Vec<u32>,
+        closed: usize,
+        cancelled: usize,
+        released: usize,
+    }
+    thread_local! { static CALLS: RefCell<Calls> = RefCell::new(Calls::default()); }
+
+    pub(super) fn released() {
+        CALLS.with_borrow_mut(|calls| calls.released += 1);
+    }
+
+    unsafe extern "system" fn wait(_: HCS_OPERATION, budget: u32, _: *mut PWSTR) -> HRESULT {
+        CALLS.with_borrow_mut(|calls| {
+            calls.budgets.push(budget);
+            calls.waits.pop_front().unwrap()
+        })
+    }
+    unsafe extern "system" fn cancel(_: HCS_OPERATION) -> HRESULT {
+        CALLS.with_borrow_mut(|calls| calls.cancelled += 1);
+        windows_sys::Win32::Foundation::E_NOTIMPL
+    }
+    unsafe extern "system" fn close(_: HCS_OPERATION) {
+        CALLS.with_borrow_mut(|calls| calls.closed += 1);
+    }
+
+    fn pending(waits: &[HRESULT]) -> PendingCreate {
+        CALLS.with_borrow_mut(|calls| {
+            *calls = Calls {
+                waits: waits.iter().copied().collect(),
+                ..Calls::default()
+            }
+        });
+        let owned = CreateContext::allocate(
+            CreateInputs {
+                id: create_wide("owned-synthetic-id").unwrap(),
+                document: create_wide("synthetic-private-document").unwrap(),
+            },
+            CreateCalls {
+                wait,
+                cancel,
+                close,
+            },
+        )
+        .unwrap();
+        {
+            let mut data = owned.context().data.lock().unwrap();
+            data.operation = Some(std::ptr::without_provenance_mut(1)); // Synthetic callback ID only.
+            data.state = CreateOperationState::Active;
+        }
+        owned
+    }
+
+    fn complete(pointer: std::ptr::NonNull<CreateContext>) {
+        // SAFETY: the fixture owns the one synthetic native completion receipt, with fake calls only.
+        unsafe { create_completed(std::ptr::without_provenance_mut(1), pointer.as_ptr().cast()) };
+    }
+
+    /// T-T7.1.2: fake existing calls, no native HCS; completion alone releases owned input/operation.
+    #[test]
+    fn device_create_pending_keeps_inputs_and_closes_once_after_terminal_result() {
+        let mut create = pending(&[
+            windows_sys::Win32::Foundation::HCS_E_OPERATION_TIMEOUT,
+            windows_sys::Win32::Foundation::HCS_E_OPERATION_PENDING,
+            windows_sys::Win32::Foundation::E_ABORT,
+        ]);
+        assert!(create.query().is_none());
+        assert!(create.query().is_none());
+        {
+            let data = create.context().data.lock().unwrap();
+            assert!(matches!(data.state, CreateOperationState::Active));
+            let inputs = data.inputs.as_ref().unwrap();
+            assert_eq!(inputs.id, create_wide("owned-synthetic-id").unwrap());
+            assert_eq!(
+                inputs.document,
+                create_wide("synthetic-private-document").unwrap()
+            );
+        }
+        CALLS.with_borrow(|calls| assert_eq!(calls.closed, 0));
+        let terminal = create.query().unwrap();
+        assert!(terminal.result.is_err());
+        assert!(terminal.system.is_none());
+        assert!(create.query().is_none());
+        CALLS.with_borrow(|calls| assert_eq!(calls.closed, 0)); // A query must not cancel a queued callback.
+        complete(create.context);
+        drop(create);
+        CALLS.with_borrow(|calls| {
+            assert_eq!(calls.closed, 1);
+            assert_eq!(calls.released, 1);
+            assert_eq!(calls.budgets, vec![0, 0, 0]);
+        });
+    }
+
+    #[test]
+    fn device_create_cancel_refusal_is_not_completion_and_does_not_repeat_or_close_pending() {
+        let mut create = pending(&[
+            windows_sys::Win32::Foundation::HCS_E_OPERATION_TIMEOUT,
+            windows_sys::Win32::Foundation::E_ABORT,
+        ]);
+        let code = u32::from_ne_bytes(windows_sys::Win32::Foundation::E_NOTIMPL.to_ne_bytes());
+        assert_eq!(create.cancel(), CreateCancellation::Refused(code));
+        assert_eq!(create.cancel(), CreateCancellation::Refused(code));
+        assert!(create.query().is_none());
+        CALLS.with_borrow(|calls| assert_eq!((calls.cancelled, calls.closed), (1, 0)));
+        assert!(create.query().unwrap().result.is_err());
+        complete(create.context);
+        drop(create);
+        CALLS.with_borrow(|calls| assert_eq!((calls.cancelled, calls.closed), (1, 1)));
+    }
+
+    #[test]
+    fn device_create_callback_before_native_return_never_waits_on_creator_mutex() {
+        let mut create = pending(&[windows_sys::Win32::Foundation::E_ABORT]);
+        let pointer = create.context;
+        {
+            let mut data = create.context().data.lock().unwrap();
+            data.state = CreateOperationState::NotStarted;
+            complete(pointer); // Inline native callback while the creating thread owns its inputs.
+            assert!(data.inputs.is_some());
+            CALLS.with_borrow(|calls| assert_eq!((calls.closed, calls.released), (0, 0)));
+            data.state = CreateOperationState::Active; // The native create call has now returned.
+        }
+        assert!(create.query().unwrap().result.is_err());
+        drop(create);
+        CALLS.with_borrow(|calls| assert_eq!((calls.closed, calls.released), (1, 1)));
+    }
+
+    #[test]
+    fn device_create_drop_before_completion_keeps_callback_owner_then_reclaims_exact_context() {
+        let create = pending(&[windows_sys::Win32::Foundation::E_ABORT]);
+        let pointer = create.context;
+        drop(create);
+        CALLS.with_borrow(|calls| assert_eq!((calls.closed, calls.released), (0, 0)));
+        complete(pointer);
+        CALLS.with_borrow(|calls| {
+            assert_eq!((calls.closed, calls.released), (1, 1));
+            assert_eq!(calls.budgets, vec![0]);
+        });
+    }
+
+    #[test]
+    fn device_create_synchronous_refusal_releases_unused_completion_receipt_once() {
+        let mut create = pending(&[]);
+        let pointer = create.context;
+        {
+            let context = create.context();
+            let mut data = context.data.lock().unwrap();
+            data.state = CreateOperationState::Terminal(Err(create_fault(
+                windows_sys::Win32::Foundation::E_INVALIDARG,
+            )));
+            data.close(context.calls);
+        }
+        release_create_callback(pointer); // Native create never started, so no future callback exists.
+        assert!(create.query().unwrap().result.is_err());
+        drop(create);
+        CALLS.with_borrow(|calls| {
+            assert_eq!((calls.closed, calls.released), (1, 1));
+            assert!(calls.budgets.is_empty());
+        });
+    }
+
+    /// Actual Runtime/Holding callbacks over a synthetic HCS operation and one ordinary owned Job.
+    /// No HCS, WMI, container, GPU, child program or keeper is launched.
+    #[test]
+    fn device_create_pending_runtime_retains_claims_then_terminal_cleanup_releases_marker() {
+        use crate::devices::Catalog;
+        use crate::windows as win;
+        use hex_api::{BoxId, BoxSpec, Class, ClassSpec, DeviceId, DeviceKind, Runtime};
+        use std::sync::{Arc, Mutex};
+        let root = tempfile::tempdir().unwrap();
+        let bundle = root.path().join("bundle");
+        std::fs::create_dir(&bundle).unwrap();
+        let config = serde_json::json!({
+            "ociVersion":"1.2.0", "root":{"path":r"\\?\Volume{ec84d99e-3f02-11e7-ac6c-00155d7682cf}\"},
+            "process":{"args":["cmd.exe"],"cwd":"C:\\"},
+            "windows":{"layerFolders":["C:\\fixture\\base","C:\\fixture\\caller-scratch"]}
+        });
+        std::fs::write(
+            bundle.join("config.json"),
+            serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+        let rt = win::WinRuntime {
+            processors: std::num::NonZeroU32::MIN,
+            catalog: Catalog::parse(
+                b"hex-devices-1\ngpu\t256\tfixture\t4096\thcs\tPCIROOT(0)#PCI(0100)\t\n",
+            )
+            .unwrap(),
+            scratch_root: root.path().to_path_buf(),
+            launcher: None,
+            holding: Arc::new(win::Holding {
+                boxes: Mutex::new(Vec::new()),
+                keeper: None,
+            }),
+            node: None,
+            features_off: OnceLock::from(std::collections::BTreeSet::new()),
+            feature_reads: std::sync::atomic::AtomicU32::new(0),
+            reclaim_failures: Vec::new(),
+        };
+        let spec = BoxSpec {
+            id: BoxId::new("pending-runtime").unwrap(),
+            bounds: hex_api::Bounds::default(),
+            owner: None,
+            class: ClassSpec::Bundle(bundle),
+            devices: vec![DeviceId {
+                kind: DeviceKind::Gpu,
+                key: 256,
+            }],
+        };
+        let bindings = rt.bindings(&spec).unwrap();
+        let container = rt.container(&spec).unwrap();
+        let marker = rt.marker(&spec.id);
+        let mut mounted = super::super::scratch(
+            &container,
+            "unused-borrowed-base",
+            Some(marker.clone()),
+            &spec.id,
+            hcs::Lifetime::EndsWithNode,
+            &bindings,
+        )
+        .unwrap();
+        mounted.creation(hcs::NativeCreate::Pending).unwrap();
+        mounted.owner = super::super::ScratchOwner::Uncertain;
+        let bytes = std::fs::read(&marker).unwrap();
+        let create = pending(&[
+            windows_sys::Win32::Foundation::HCS_E_OPERATION_TIMEOUT,
+            windows_sys::Win32::Foundation::HCS_E_OPERATION_TIMEOUT,
+            windows_sys::Win32::Foundation::E_ABORT,
+        ]);
+        let completion = create.context;
+        let job =
+            win::process::JobBox::create(spec.id.clone(), &spec.bounds, std::num::NonZeroU32::MIN)
+                .unwrap();
+        let boxed = super::super::OciBox {
+            job,
+            system: Mutex::new(super::super::NativeSystem::Creating(create)),
+            mounted: Mutex::new(Some(mounted)),
+            user: None,
+            init: container.init,
+            life: Mutex::new(super::super::Life {
+                started: false,
+                init: None,
+                exit: None,
+            }),
+            devices: bindings,
+        };
+        rt.holding
+            .reserve(&spec.id, &spec.devices, Some(marker.clone()))
+            .unwrap();
+        let error = rt
+            .finish_make(&spec.id, Ok(win::Held::Oci(Arc::new(boxed))))
+            .unwrap_err();
+        assert!(!error.to_string().contains("synthetic-private-document"));
+        assert!(!matches!(
+            rt.inspect(&spec.id),
+            Err(hex_api::Refusal::NoSuchBox(_))
+        ));
+        assert_eq!(std::fs::read(&marker).unwrap(), bytes);
+        let offer = rt.capacity(Class::Oci).unwrap().unwrap();
+        assert_eq!(offer.devices[0].holder, Some(spec.id.clone()));
+        assert!(
+            rt.holding
+                .reserve(&BoxId::new("contender").unwrap(), &spec.devices, None)
+                .is_err()
+        );
+        CALLS.with_borrow(|calls| assert_eq!((calls.closed, calls.cancelled), (0, 1)));
+
+        let sibling = BoxSpec {
+            id: BoxId::new("independent-empty-job").unwrap(),
+            bounds: hex_api::Bounds::default(),
+            owner: None,
+            class: ClassSpec::Process,
+            devices: Vec::new(),
+        };
+        rt.create(sibling.clone()).unwrap();
+        assert_eq!(
+            rt.inspect(&sibling.id).unwrap().state,
+            hex_api::BoxState::Empty
+        );
+        rt.delete(&spec.id).unwrap(); // The next fake observation is terminal E_ABORT, with no system.
+        complete(completion);
+        assert!(!marker.exists());
+        assert_eq!(
+            rt.capacity(Class::Oci).unwrap().unwrap().devices[0].holder,
+            None
+        );
+        assert!(matches!(
+            rt.inspect(&spec.id),
+            Err(hex_api::Refusal::NoSuchBox(_))
+        ));
+        rt.delete(&sibling.id).unwrap();
+        assert!(rt.boxes().unwrap().is_empty());
+        CALLS.with_borrow(|calls| {
+            assert_eq!((calls.closed, calls.cancelled), (1, 1));
+            assert_eq!(calls.released, 1);
+            assert_eq!(calls.budgets, vec![0, 0, 0]);
+        });
+    }
 }

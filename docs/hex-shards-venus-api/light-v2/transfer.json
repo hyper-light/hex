@@ -1,0 +1,25 @@
+{
+  "command": [
+    "/Users/adalundhe/.local/bin/kiln",
+    "run",
+    "--on",
+    "d1323898b255a3ed435eb83fa0f7b0cf",
+    "--needs",
+    "cpus=1,mem=4g,disk=12g",
+    "--no-sync",
+    "--stdin",
+    "--timeout",
+    "120",
+    "--",
+    "nice -n 10 python3 -c 'import pathlib,sys,io,tarfile,hashlib,json\nroot=pathlib.Path.home()/'\"'\"'.cache/hex-shards-venus-api-01a1c640-3f2e9fb1-v2'\"'\"'\nassert not root.exists()\nraw=sys.stdin.buffer.read();assert hashlib.sha256(raw).hexdigest()=='\"'\"'61217bdd33da6e0a480bd927c5155d96e108d342151156a6fce452cd6c086b4a'\"'\"'\nroot.mkdir(parents=True);(root/'\"'\"'source-input.tar.gz'\"'\"').write_bytes(raw)\nnames=set()\nwith tarfile.open(fileobj=io.BytesIO(raw),mode='\"'\"'r:gz'\"'\"') as archive:\n for member in archive.getmembers():\n  path=pathlib.PurePosixPath(member.name)\n  assert member.isfile() and not path.is_absolute() and '\"'\"'..'\"'\"' not in path.parts and member.name not in names\n  names.add(member.name);target=root/member.name;target.parent.mkdir(parents=True,exist_ok=True)\n  with target.open('\"'\"'xb'\"'\"') as f:f.write(archive.extractfile(member).read())\n  target.chmod(member.mode)\nprint(json.dumps({'\"'\"'root'\"'\"':str(root),'\"'\"'archive_bytes'\"'\"':len(raw),'\"'\"'archive_sha256'\"'\"':hashlib.sha256(raw).hexdigest(),'\"'\"'members'\"'\"':len(names)}))\n'"
+  ],
+  "source": "3f2e9fb10e4caca0de5114e1dd5471540b17e217",
+  "production_pin": "0ba6a60f582d461e65673ad736b2ac658cee9b72",
+  "archive_bytes": 155487,
+  "archive_sha256": "61217bdd33da6e0a480bd927c5155d96e108d342151156a6fce452cd6c086b4a",
+  "local_free_kib": 218532360,
+  "upstream_lock_sha256": "1ecb41e738c4c4133a1968873e424efce5b2a65899dd8f40f37ac6aaffec8133",
+  "exit": 0,
+  "stdout": "{\"root\": \"/Users/adalundhe/.cache/hex-shards-venus-api-01a1c640-3f2e9fb1-v2\", \"archive_bytes\": 155487, \"archive_sha256\": \"61217bdd33da6e0a480bd927c5155d96e108d342151156a6fce452cd6c086b4a\", \"members\": 41}\n",
+  "stderr": "\u001b[2m[kiln] on d1323898b255a3ed435eb83fa0f7b0cf \u00b7 macos/aarch64 \u00b7 30 of 32 cores idle \u00b7 47 GB free \u00b7 room for 1 CPU, 4 GiB of memory, 12 GiB of disk\u001b[0m\n"
+}
