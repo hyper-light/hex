@@ -581,11 +581,7 @@ impl FitIndex {
                 .get(class.index())
                 .ok_or(SimError::Resources(node.id))?;
             if *used != Resources::default() {
-                if !node.classes.has(class) {
-                    return Err(SimError::Config(
-                        "refreshed facts remove a held runtime class",
-                    ));
-                }
+                // Availability gates new admission; existing boxes keep their cleanup authority.
                 let was_pooled = old
                     .runtime_pools
                     .iter()
