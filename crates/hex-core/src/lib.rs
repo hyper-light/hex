@@ -47,6 +47,7 @@ pub mod pool;
 pub mod record;
 pub mod recovery;
 pub mod reuse;
+pub mod schedule;
 pub mod seed;
 pub mod seeds;
 pub mod setup;

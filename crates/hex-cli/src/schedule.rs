@@ -1,0 +1,95 @@
+//! CP-T7.4/LB03: the live scheduler, with the same driver in laptop and peer modes.
+
+use std::io::{Read, Write};
+use std::path::Path;
+use std::sync::Arc;
+
+use hex_api::Refusal;
+use hex_core::{schedule::Command, wire};
+
+const USAGE: &str = "usage: hex schedule serve --config <file> | hex schedule call --socket <path> --request <file> | hex schedule tunnel --socket <path>";
+
+pub fn main(args: &[String]) -> u8 {
+    match run(args) {
+        Ok(()) => 0,
+        Err(why) => {
+            let _ = writeln!(std::io::stderr(), "hex schedule: {why}");
+            1
+        }
+    }
+}
+
+fn run(args: &[String]) -> Result<(), Refusal> {
+    let invalid = || Refusal::Invalid {
+        what: "schedule arguments",
+        why: USAGE.into(),
+    };
+    match args {
+        [verb, flag, file] if verb == "serve" && flag == "--config" => {
+            let config = hex_node::scheduler::read_config(Path::new(file))?;
+            let service = hex_node::scheduler::Service::open(&config)?;
+            #[cfg(target_os = "linux")]
+            let platform = hex_node::sizes::Sizes::now()?.platform();
+            #[cfg(target_os = "macos")]
+            let platform = hex_node::serve::macos::platform()?;
+            #[cfg(windows)]
+            let platform = hex_node::serve::windows::platform()?;
+            let host = service as Arc<dyn hex_node::serve::Host>;
+            let mut server = hex_node::serve::Server::bind(
+                &config.socket,
+                host,
+                hex_node::serve::limits(&platform),
+                platform.threads,
+            )?;
+            writeln!(std::io::stdout(), "ready {}", config.socket.display())
+                .map_err(|e| Refusal::os("reporting scheduler readiness", e))?;
+            match server.wait() {
+                Some(why) => Err(Refusal::Broken(why)),
+                None => Ok(()),
+            }
+        }
+        [verb, socket_flag, socket, request_flag, request]
+            if verb == "call" && socket_flag == "--socket" && request_flag == "--request" =>
+        {
+            let command: Command = read_command(Path::new(request))?;
+            let reply = hex_client::Client::connect(Path::new(socket))?.schedule(command)?;
+            let text = serde_json::to_vec(&reply).map_err(|e| Refusal::Broken(e.to_string()))?;
+            let mut output = std::io::stdout().lock();
+            output
+                .write_all(&text)
+                .and_then(|()| output.write_all(b"\n"))
+                .map_err(|e| Refusal::os("writing scheduler reply", e))
+        }
+        [verb, flag, socket] if verb == "tunnel" && flag == "--socket" => {
+            hex_node::scheduler::tunnel::serve(
+                Path::new(socket),
+                &mut std::io::stdin().lock(),
+                &mut std::io::stdout().lock(),
+            )
+        }
+        _ => Err(invalid()),
+    }
+}
+
+fn read_command(path: &Path) -> Result<Command, Refusal> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(|e| Refusal::os("opening scheduler request", e))?
+        .take(
+            u64::try_from(wire::MAX_MESSAGE)
+                .unwrap_or(u64::MAX)
+                .saturating_add(1),
+        )
+        .read_to_end(&mut bytes)
+        .map_err(|e| Refusal::os("reading scheduler request", e))?;
+    if bytes.len() > wire::MAX_MESSAGE {
+        return Err(Refusal::Exhausted {
+            what: "scheduler request bytes",
+            bound: wire::MAX_MESSAGE,
+        });
+    }
+    serde_json::from_slice(&bytes).map_err(|e| Refusal::Invalid {
+        what: "scheduler request",
+        why: e.to_string(),
+    })
+}

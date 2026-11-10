@@ -128,6 +128,7 @@ static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.guest.answer.kill"),
     Patience::measuring("client.guest.answer.exec_streams"),
     Patience::measuring("client.guest.answer.run"),
+    Patience::measuring("client.guest.answer.schedule"),
 ];
 
 /// A node agent in a guest, reached through a [`Link`].

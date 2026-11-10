@@ -17,6 +17,10 @@ path = "src/main.rs"
 name = "noisy_neighbor"
 harness = false
 
+[dependencies]
+serde_json.workspace = true
+hex-client.workspace = true
+
 [target.'cfg(target_os = "linux")'.dependencies]
 hex-api.workspace = true
 hex-client.workspace = true

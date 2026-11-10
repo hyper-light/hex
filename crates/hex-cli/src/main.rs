@@ -41,6 +41,14 @@ fn main() -> ExitCode {
         let rest: Vec<String> = rest.iter().flatten().cloned().collect();
         return ExitCode::from(hex_cli::node::main(&rest));
     }
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    if let [Some(first), rest @ ..] = args.as_slice()
+        && first == "schedule"
+        && rest.iter().all(Option::is_some)
+    {
+        let rest: Vec<String> = rest.iter().flatten().cloned().collect();
+        return ExitCode::from(hex_cli::schedule::main(&rest));
+    }
     // `hex keep` is the Windows node's keeper, a passive process holding its boxes' job handles so they
     // outlive the node (hex_runtime::windows::keeper); it takes its state folder and ready path from the
     // environment the node starts it with.

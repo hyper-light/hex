@@ -1,10 +1,12 @@
 //! What a simulated cluster is made of: nodes with a capacity, a platform and devices, workloads with
 //! a need and an ask of their node.
 
+use serde::{Deserialize, Serialize};
+
 /// Virtual nanoseconds since the run began.
 pub type Time = u64;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -13,7 +15,7 @@ pub struct WorkloadId(pub u64);
 /// What a node reserves for a workload until it is deleted: CPU, memory, disk and GPUs (kiln's needs,
 /// `crates/kiln-ci/src/sched/needs.rs`: `cpus=`, `mem=`, `disk=`, `gpus=`). Ordered field by field, so
 /// a need can key an equivalence class.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub struct Resources {
     pub cpu_milli: u64,
     pub mem_bytes: u64,
@@ -50,7 +52,9 @@ impl Resources {
 }
 
 /// An operating system, as Rust names it (kiln `crates/kiln-ci/src/sched/needs.rs` `os_name`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
 pub enum Os {
     #[default]
     Linux,
@@ -87,7 +91,9 @@ impl Os {
 }
 
 /// A processor architecture, as Rust names it (kiln's `arch_name`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
 pub enum Arch {
     #[default]
     X86_64,
@@ -113,7 +119,9 @@ impl Arch {
 
 /// A node's OS and architecture. The default is EC2 m5d.metal's, G2's main node model: Linux on
 /// x86_64.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
 pub struct Platform {
     pub os: Os,
     pub arch: Arch,
@@ -121,7 +129,7 @@ pub struct Platform {
 
 /// The virtualization a node offers (kiln's facts' `virt`): `/dev/kvm` usable, nested virtualization
 /// on (its guests may use KVM themselves), and macOS's Hypervisor.framework supported.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Virt {
     pub kvm: bool,
     pub nested: bool,
@@ -129,7 +137,7 @@ pub struct Virt {
 }
 
 /// A device a box holds alone, from its start until it is deleted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum DeviceKind {
     Gpu,
     /// A PCI function bound to `vfio-pci`, given whole.
@@ -142,7 +150,9 @@ pub enum DeviceKind {
 
 /// A GPU's load from what isn't Hex's (hex-gpu's `sample()`): its utilisation in per mille, and its
 /// memory in use. Injected in the simulator; a node's agent reads it from hex-gpu.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
 pub struct GpuLoad {
     pub busy_per_mille: u16,
     pub memory_used: u64,
@@ -150,7 +160,7 @@ pub struct GpuLoad {
 
 /// A device model's name, interned in its cluster ([`Cluster::model`]): GPU models are compared by
 /// it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ModelId(pub u32);
 
 impl ModelId {
@@ -160,7 +170,7 @@ impl ModelId {
 
 /// One of a node's devices: its kind, its model, its size (a GPU's memory, a block device's bytes) and,
 /// for a GPU, its load.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Device {
     pub kind: DeviceKind,
     pub model: ModelId,
@@ -273,7 +283,7 @@ pub fn matches(d: &Device, ask: &Ask) -> bool {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeSpec {
     pub id: NodeId,
     pub capacity: Resources,
@@ -371,7 +381,7 @@ impl Class {
 }
 
 /// The classes a node can run, a bit each.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Classes(u8);
 
 impl Classes {

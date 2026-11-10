@@ -375,6 +375,7 @@ dependencies = [
 name = "hex-node"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "hex-afunix",
  "hex-api",
  "hex-client",
@@ -418,6 +419,7 @@ dependencies = [
 name = "hex-sim"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "cap",
  "hex-health",
  "hyper-swim",

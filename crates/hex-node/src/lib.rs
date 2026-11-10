@@ -55,3 +55,6 @@ pub use node::CrashPoint;
 #[cfg(target_os = "linux")]
 pub use node::{Node, OCI_BOXES, records_dir};
 pub use recorded::RecoverySummary;
+
+/// The live file-backed scheduler socket and authenticated peer shell.
+pub mod scheduler;

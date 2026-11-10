@@ -33,6 +33,7 @@ static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.answer.kill"),
     Patience::measuring("client.answer.exec_streams"),
     Patience::measuring("client.answer.run"),
+    Patience::measuring("client.answer.schedule"),
 ];
 
 pub type Client = Core<Socket>;

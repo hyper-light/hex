@@ -53,7 +53,13 @@ pub const MAGIC: [u8; 4] = *b"HEXW";
 /// This build's wire identity: FNV-1a (64-bit) of the wire definitions' source, this module's and
 /// [`crate::stream`]'s, made at compile time, carriage returns skipped so a checkout's line endings can't split it.
 /// Two builds talk only when theirs are the same.
-pub const IDENTITY: u64 = identity(&[include_bytes!("wire.rs"), include_bytes!("stream.rs")]);
+pub const IDENTITY: u64 = identity(&[
+    include_bytes!("wire.rs"),
+    include_bytes!("stream.rs"),
+    include_bytes!("schedule.rs"),
+    include_bytes!("../../hex-sim/src/peer.rs"),
+    include_bytes!("../../hex-sim/src/model.rs"),
+]);
 /// The header's length: magic, wire identity, kind and id.
 pub const HEADER_BYTES: usize = 22;
 /// Largest message either side sends or reads. It sits under the kernel's own bound on a
@@ -127,6 +133,8 @@ mod kind {
     pub const TAKEN: u16 = 0x000e;
     pub const RUN: u16 = 0x000f;
     pub const STREAMS_READY: u16 = 0x0010;
+    pub const SCHEDULE: u16 = 0x0011;
+    pub const SCHEDULED: u16 = 0x800c;
     pub const OFFERED: u16 = 0x800b;
 }
 
@@ -160,6 +168,8 @@ pub enum Request {
 /// A call of the node agent: the `Runtime` seam's, its network namespace counts, and a program's kill.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Call {
+    /// Scheduler control, using the same bounded connection and reader as Runtime calls.
+    Schedule(Box<crate::schedule::Command>),
     Create(Box<BoxSpec>),
     Start(BoxId),
     /// `program` in box `id`, with the streams `streams` names as the message's descriptors, in order.
@@ -248,6 +258,7 @@ impl Streams {
 /// What the node agent sends.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Answer {
+    Scheduled(Box<crate::schedule::Reply>),
     Hello(Hello),
     /// create's and inspect's.
     Info(BoxInfo),
@@ -470,6 +481,13 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
             w.usize(h.budgets.in_flight)?;
             w.usize(h.budgets.programs)?;
         }
+        Answer::Scheduled(reply) => {
+            w.header(kind::SCHEDULED, id);
+            w.string(
+                &serde_json::to_string(reply)
+                    .map_err(|e| Fault::value("scheduler reply", e.to_string()))?,
+            )?;
+        }
         Answer::Info(info) => {
             w.header(kind::INFO, id);
             put_info(&mut w, info)?;
@@ -641,6 +659,13 @@ fn parse_request(
         kind::RELEASE => Request::Release,
         kind::TAKEN => Request::Taken,
         kind::STREAMS_READY => Request::StreamsReady,
+        kind::SCHEDULE => {
+            let json = r.string("scheduler command").map_err(bad)?;
+            Request::Call(Call::Schedule(Box::new(
+                serde_json::from_str(&json)
+                    .map_err(|e| bad(Fault::value("scheduler command", e.to_string())))?,
+            )))
+        }
         kind::CREATE => Request::Call(Call::Create(Box::new(box_spec(&mut r).map_err(bad)?))),
         kind::START => Request::Call(Call::Start(box_id(&mut r).map_err(bad)?)),
         kind::EXEC => {
@@ -764,6 +789,13 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
                 limits,
                 budgets,
             })
+        }
+        kind::SCHEDULED => {
+            let json = r.string("scheduler reply")?;
+            Answer::Scheduled(Box::new(
+                serde_json::from_str(&json)
+                    .map_err(|e| Fault::value("scheduler reply", e.to_string()))?,
+            ))
         }
         kind::INFO => Answer::Info(info(&mut r)?),
         kind::DONE => Answer::Done,
@@ -912,6 +944,13 @@ fn request_name(kind: u16) -> &'static str {
 
 fn put_call(w: &mut Writer, id: u64, call: &Call) -> Result<(), Fault> {
     match call {
+        Call::Schedule(command) => {
+            w.header(kind::SCHEDULE, id);
+            w.string(
+                &serde_json::to_string(command)
+                    .map_err(|e| Fault::value("scheduler command", e.to_string()))?,
+            )
+        }
         Call::Create(spec) => {
             w.header(kind::CREATE, id);
             put_box_spec(w, spec)

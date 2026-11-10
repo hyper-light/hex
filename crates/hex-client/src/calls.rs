@@ -43,7 +43,7 @@ pub type Then = Box<dyn FnOnce(u64, Result<Answer, Refusal>) + Send>;
 pub type Ended = Box<dyn FnOnce(Result<Exit, Refusal>) + Send>;
 
 /// How many kinds of call a client waits for an answer to, one wait each ([`kind_of`]): a hello and each [`Call`].
-pub const KINDS: usize = 13;
+pub const KINDS: usize = 14;
 
 /// The wait of `request`'s kind in `waits`, a client's table of its call kinds' learned waits (decision 9: a client's
 /// call's wait for its answer and its send is learned per call kind, since a delete waits on its box's emptying and a
@@ -66,6 +66,7 @@ pub(crate) fn kind_of<'a>(waits: &'a [Patience; KINDS], request: &Request) -> Op
             Call::Kill { .. } => 10,
             Call::ExecStreams { .. } => 11,
             Call::Run { .. } => 12,
+            Call::Schedule(_) => 13,
         },
         Request::Release | Request::Taken | Request::StreamsReady => return None,
     };
@@ -1527,6 +1528,18 @@ impl<T: Transport> Core<T> {
             .call(self.limits.message_bytes, request, with, program)
     }
 
+    /// CP-T7.4: scheduler control through this connection's existing bounded reader.
+    pub fn schedule(
+        &self,
+        command: hex_core::schedule::Command,
+    ) -> Result<hex_core::schedule::Reply, Refusal> {
+        match self.plain(Call::Schedule(Box::new(command)))? {
+            Answer::Scheduled(reply) => Ok(*reply),
+            Answer::Refused(why) => Err(why),
+            other => Err(unexpected("schedule", &other)),
+        }
+    }
+
     /// A call that carries nothing beside its message.
     fn plain(&self, call: Call) -> Result<Answer, Refusal> {
         Ok(self.call(&Request::Call(call), |_| Ok(NONE), None)?.1)
@@ -1692,6 +1705,7 @@ pub(crate) fn unexpected(call: &str, answer: &Answer) -> Refusal {
         Answer::Netns(_) => "network namespace counts",
         Answer::Given { .. } => "a started program with streams",
         Answer::Offered(_) => "a guest stream preparation",
+        Answer::Scheduled(_) => "a scheduler reply",
     };
     Refusal::Broken(format!("the node agent answered a {call} with {kind}"))
 }

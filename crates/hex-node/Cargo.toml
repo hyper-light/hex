@@ -19,6 +19,7 @@ hex-sim.workspace = true
 # The node's GPUs and their load, for its facts (`src/facts.rs`).
 hex-gpu.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 
 # Windows' AF_UNIX socket and completion port (CLAUDE.md §12).
