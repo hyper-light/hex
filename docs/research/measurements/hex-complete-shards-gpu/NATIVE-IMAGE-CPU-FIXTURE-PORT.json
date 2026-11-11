@@ -1,0 +1,16 @@
+{
+  "source": "786775e3b119c5163d49aa12662c0207cb25cc29",
+  "role": "coordinator",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "cause": "original included process reader test initializer missed legacy GPU field defaults; actual E0063 before selected tests",
+  "original_log": {
+    "path": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/native-image-786-failures-results-proof/cohort-786775e3-linux-native-image-producer-v2/new-sdk-native-image3.log",
+    "bytes": 1337,
+    "sha256": "7584f63d850a8867c0b52b031f1f0a158d1ec3390929cc86d33aec81440c7244"
+  },
+  "before_sha256": "7bf0273668a4e946801a38713ee1def8884673a9183106d3db1608e51ba187e2",
+  "after_sha256": "ebbfd55e831bb91931563ecdee9665e90c9deb13929e83348298358a684dbcda",
+  "change": "only gpu:false/gpu_devices empty in same original CPU-only fixture; production/oracles unchanged",
+  "after": "UNRUN; SDK3+Hex2 still unexecuted, not failed semantic controls"
+}
