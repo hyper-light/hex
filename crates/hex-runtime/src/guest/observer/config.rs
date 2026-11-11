@@ -36,7 +36,8 @@ pub struct GpuArtifact {
 }
 
 /// All fields are explicit reviewed inputs; there is no program/PATH, loader,
-/// artifact, queue, memory, diagnostic or execution-context default.
+/// artifact, queue, memory or execution-context default. The Program's stderr
+/// bound is no input: the node sizes it ([`super::stderr_room`]).
 pub struct GpuObserverInput {
     /// Hash of ROOT's reviewed complete source/build/ABI/loader/context evidence.
     pub evidence: [u8; 32],
@@ -46,12 +47,14 @@ pub struct GpuObserverInput {
     pub launch: Vec<String>,
     pub max_queue_families: u32,
     pub max_allocation_bytes: usize,
-    pub stderr_bytes: usize,
     pub bounds: Bounds,
 }
 
 pub struct GpuObserver {
     input: GpuObserverInput,
+    /// The most of the Program's stderr kept and shown: [`super::stderr_room`]. A launch keeps
+    /// less where its receipt holds less beside all else.
+    stderr: usize,
     identity: [u8; 32],
 }
 
@@ -137,7 +140,6 @@ impl GpuObserver {
         if input.evidence == [0; 32]
             || input.max_queue_families == 0
             || input.max_allocation_bytes == 0
-            || input.stderr_bytes == 0
             || input.artifacts.is_empty()
             || input.launch.is_empty()
         {
@@ -190,6 +192,7 @@ impl GpuObserver {
                 "observer native thread/process limit is not initialized",
             ));
         }
+        let stderr = super::stderr_room()?;
         let mut encoded = 0usize;
         let mut hash = Sha256::new();
         let mut part = |bytes: &[u8]| -> Result<(), Refusal> {
@@ -209,7 +212,7 @@ impl GpuObserver {
         part(b"hex-shards-guest-observer/v2-work-ready")?;
         part(&input.evidence)?;
         part(&input.max_queue_families.to_be_bytes())?;
-        for count in [input.max_allocation_bytes, input.stderr_bytes] {
+        for count in [input.max_allocation_bytes, stderr] {
             part(
                 &u64::try_from(count)
                     .map_err(|_| exhausted(count))?
@@ -311,7 +314,11 @@ impl GpuObserver {
             part(word.as_bytes())?;
         }
         let identity = hash.finalize().into();
-        let observer = Self { input, identity };
+        let observer = Self {
+            input,
+            stderr,
+            identity,
+        };
         observer.check_allocation(allocation)?;
         observer.verify(config)?;
         Ok(observer)
@@ -356,7 +363,7 @@ impl GpuObserver {
     }
 
     pub fn stderr_bytes(&self) -> usize {
-        self.input.stderr_bytes
+        self.stderr
     }
 
     pub fn bounds(&self) -> &Bounds {
@@ -444,7 +451,7 @@ impl GpuObserver {
     pub fn output_bytes(&self, expected: usize) -> Result<usize, Refusal> {
         let output = driver::output_bound(expected)?;
         let combined = output
-            .checked_add(self.input.stderr_bytes)
+            .checked_add(self.stderr)
             .and_then(|bytes| u64::try_from(bytes).ok())
             .ok_or_else(|| exhausted(output))?;
         if self
@@ -585,7 +592,6 @@ pub(in crate::guest) mod tests {
             launch: vec!["/run/hex/shares/0/inventory".into()],
             max_queue_families: 8,
             max_allocation_bytes: 4096,
-            stderr_bytes: 4096,
             bounds: Bounds {
                 cpu_max_milli: Some(hex_api::MIN_CPU_MILLI),
                 memory_max: Some(hex_api::MIN_MEMORY),
