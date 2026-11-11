@@ -1466,12 +1466,15 @@ mod route_tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static VISITED: AtomicUsize = AtomicUsize::new(0);
         #[derive(Debug)]
-        struct Counted;
+        struct Counted {
+            _value: u64,
+        }
         impl<'de> Deserialize<'de> for Counted {
             fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
                 VISITED.fetch_add(1, Ordering::SeqCst);
-                u64::deserialize(deserializer)?;
-                Ok(Self)
+                Ok(Self {
+                    _value: u64::deserialize(deserializer)?,
+                })
             }
         }
         let empty: Vec<Counted> = bounded_values(

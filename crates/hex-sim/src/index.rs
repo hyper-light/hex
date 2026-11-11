@@ -1916,7 +1916,7 @@ impl FitIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::RuntimePool;
+    use crate::model::{RuntimePool, bind, fits_devices};
 
     fn explicit_fixture_cost(cpu: u64) -> hex_api::RuntimeCost {
         let guest = hex_api::CapacityResources {

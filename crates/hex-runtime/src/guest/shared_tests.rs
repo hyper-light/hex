@@ -305,6 +305,26 @@ fn shared_offer_prepares_before_grant_without_a_boot_or_fake_workload_row() {
 }
 
 #[test]
+fn shared_retained_preflight_rejects_replaced_profile_key_or_generation_before_effects() {
+    let dir = tempfile::tempdir().unwrap();
+    let (runtime, owner) = configured(dir.path());
+    runtime.prepare_backing().unwrap();
+    runtime.preflight_backing(&owner.row()).unwrap();
+    let mut changed = owner.row();
+    changed.key.pool = [8; 32];
+    assert!(runtime.preflight_backing(&changed).is_err());
+    changed = owner.row();
+    changed.key.generation = [8; 16];
+    assert!(runtime.preflight_backing(&changed).is_err());
+    changed = owner.row();
+    changed.cost.id = [8; 32];
+    assert!(runtime.preflight_backing(&changed).is_err());
+    assert_eq!(owner.launches.load(Ordering::SeqCst), 0);
+    assert!(owner.boxes.lock().unwrap().is_empty());
+    assert!(pool::read(&dir.path().join("@guest")).unwrap().is_none());
+}
+
+#[test]
 fn interrupted_shared_launch_keeps_the_exact_charge_and_never_reboots_an_intent() {
     let dir = tempfile::tempdir().unwrap();
     let (runtime, owner) = configured(dir.path());

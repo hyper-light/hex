@@ -1119,6 +1119,7 @@ fn read_live(pgid: i32) -> Result<Live, Refusal> {
 /// only what happens after it attaches (`filt_procattach`, `bsd/kern/kern_event.c`), and refuses a gone
 /// process (`ESRCH`) but not a zombie: a member that ended between the listing and its watch posts no exit
 /// event (c-route's finding on the node's socket, 2026-11-07).
+#[cfg(test)]
 pub(crate) fn watch_members(kq: &Kqueue, pids: &[i32]) -> Result<Vec<i32>, Refusal> {
     let mut ended = kq
         .watch(pids, 0)

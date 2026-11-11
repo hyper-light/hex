@@ -1,0 +1,39 @@
+{
+  "changes": [
+    "eight missing commas before route:None in test-only Msg::Start literals; rustfmt those macro bodies",
+    "test-only fits_devices/bind imports",
+    "test-only Counted private u64 scalar; expectations unchanged"
+  ],
+  "checks": {
+    "compile": "unrun",
+    "diff": "pass",
+    "native": "unrun",
+    "scoped_format": "pass",
+    "tests": "unrun"
+  },
+  "kind": "source-only/test-fixture-compile-correction",
+  "policy": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "production_functions_changed": false,
+  "reported_original": {
+    "bounds_fixture": "route_sequence_bounds uses zero-sized Counted; Vec empty capacity is usize::MAX, not zero",
+    "compile_exit": 101,
+    "other_two_api_bounds_controls": "reported pass; do not repeat unchanged",
+    "owner": "ROOT",
+    "peer_cases_executed": 0,
+    "raw_prefixes": [
+      "7d949759",
+      "3151fc9c",
+      "612555c7"
+    ],
+    "route_cases_executed": 0,
+    "source_abbreviation": "a53"
+  },
+  "role": "implementer",
+  "route_selection_or_grant_remedy": false,
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "source_sha256": {
+    "crates/hex-api/src/runtime.rs": "b5498d9f2991e3780f82a3f5f53b797648c698aa0bbb1fb106dceb72a9fd89c6",
+    "crates/hex-sim/src/index.rs": "cb3ade8ef324e65255f67d2bdd5fe03c33942b2634103424780225c689d472a3",
+    "crates/hex-sim/src/peer.rs": "2134e452e0f80dae0b341cdd329c02ab38345946e953dbba6656d60ce29b47cd"
+  }
+}

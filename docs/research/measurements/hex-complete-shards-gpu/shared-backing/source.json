@@ -1,12 +1,12 @@
 {
   "kind": "source-only",
   "role": "implementer",
-  "parent": "703469ec96157f9a75388eb3e70b9699bcbe6b74",
+  "parent": "eb52d2a6b7b1fc38cc5ef164dec1547fc53b8545",
   "known_ROOT_receipt": "378192b78b09cec7b8ad088d5a9eb8ae32389888",
   "policy": {
-    "current": "0c598386ca1f7c65c6e0634dba77983e4abffff2",
+    "current": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
     "full_read": "0c598386ca1f7c65c6e0634dba77983e4abffff2",
-    "four_blob_diff": "empty, exit0",
+    "four_blob_diff": "empty vs fully read0c598386, exit0",
     "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
     "prior_full_read": "ca3ab10c151aa5539e757f1cc76029746ccbb561"
   },
@@ -30,15 +30,15 @@
     "crates/hex-runtime/src/guest/physical.rs": "12398fcf7dc87c8dc3f4588b01dedeec4dc953d6eb3bb673c441c823332fd7ab",
     "crates/hex-runtime/src/guest/pool.rs": "5c3f42d0a6bf5f2f462a2adfa3fa871e1d972ad87297ea92f0804961f295c768",
     "crates/hex-runtime/src/guest/selected.rs": "4ca118df66f65af216a12d1b3f70e71fff4dacd46186a79e2ded69222def5ca3",
-    "crates/hex-runtime/src/guest/shared.rs": "965b18efa83b0988ac25b55e21ca733b7df5426a7d9fb5170f0e94f708413c44",
-    "crates/hex-runtime/src/guest/shared_tests.rs": "7bfcfd5c23b83bdec151a1bdd816167663af5adb27a1cda4ecd1744f48dfd6cd",
+    "crates/hex-runtime/src/guest/shared.rs": "b9bc4380160bb1b1d6c8522c47394f38c5424c94fd325d1717f21c53667103d3",
+    "crates/hex-runtime/src/guest/shared_tests.rs": "600808770cffafacaccf142448eeffc9fcaeeb171e4683bc47bf9b7d3c0b813a",
     "crates/hex-runtime/src/guest/tests.rs": "8aad06a9219517f657a02e73abf441a4bc83be95f03ea05c2abe35dfca17c7c4"
   },
   "checks": {
     "scoped_rustfmt": "pass",
     "diff_check": "pass",
     "joined_compile": "unrun",
-    "new_shared_controls": "unrun: 5 entrypoint models +2 receipt codec controls",
+    "new_shared_controls": "unrun: 6 entrypoint models +2 receipt codec controls",
     "native": "unrun"
   },
   "open": [
@@ -47,5 +47,6 @@
     "GPU observer actual VMM-private identity/metadata report, grant/complete-set handoff and exact Scope join still open",
     "Existing Link/Client std Arc allocation and serde decoder seams not newly proven allocation-safe",
     "Cold Mac process-group/escape/native scope proof, all actual native/full/portability gates ROOT"
-  ]
+  ],
+  "preflight": "GuestRuntime::preflight_backing(&PoolRecord): pure configured execution/profile/key/envelope validation; canonical all-record/overlap owner preflight L3/L1/ROOT required before any native recovery"
 }

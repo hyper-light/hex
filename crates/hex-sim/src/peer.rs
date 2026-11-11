@@ -3322,17 +3322,17 @@ mod tests {
             .allocate(crate::model::capacity_resources(demand.need))
             .unwrap();
         assert_eq!(
-                    starts,
-                    [(
-                        NodeId(0),
-                        Msg::Start {
-                            key,
-                            demand,
-                            allocation: Some(receipt)
-                        route: None,
-        }
-                    )]
-                );
+            starts,
+            [(
+                NodeId(0),
+                Msg::Start {
+                    key,
+                    demand,
+                    allocation: Some(receipt),
+                    route: None,
+                }
+            )]
+        );
         let (_, saved) = recorded_demand(records.rows.get(&key.name("own")).unwrap(), &[]).unwrap();
         assert_eq!(saved, Some(receipt));
         node.hear(NodeId(0), starts[0].1, &mut records).unwrap();
@@ -3361,19 +3361,19 @@ mod tests {
             .allocate(crate::model::capacity_resources(demand.need))
             .unwrap();
         assert!(
-                    recovered
-                        .hear(
-                            NodeId(0),
-                            Msg::Start {
-                                key,
-                                demand,
-                                allocation: Some(wrong)
-                            route: None,
-        },
-                            &mut records
-                        )
-                        .is_err()
-                );
+            recovered
+                .hear(
+                    NodeId(0),
+                    Msg::Start {
+                        key,
+                        demand,
+                        allocation: Some(wrong),
+                        route: None,
+                    },
+                    &mut records
+                )
+                .is_err()
+        );
         recovered.end(key, &mut records).unwrap();
         assert_eq!(recovered.admitted(), [0; lb::DIMS]);
     }
@@ -3413,18 +3413,18 @@ mod tests {
         let mut forged = receipt;
         forged.resources.cpu_milli -= 1;
         assert!(
-                    encode_message(
-                        &Msg::Start {
-                            key,
-                            demand,
-                            allocation: Some(forged)
-                        route: None,
-        },
-                        &[],
-                        1_024
-                    )
-                    .is_err()
-                );
+            encode_message(
+                &Msg::Start {
+                    key,
+                    demand,
+                    allocation: Some(forged),
+                    route: None,
+                },
+                &[],
+                1_024
+            )
+            .is_err()
+        );
         let hostile = text.replace(":1100:250:", ":1099:250:");
         assert_ne!(hostile, text);
         assert!(decode_message(&hostile, &[], 1_024).is_err());
@@ -3632,14 +3632,14 @@ mod tests {
         assert_eq!(
             out,
             vec![(
-                            NodeId(0),
-                            Msg::Start {
-                                allocation: None,
-                                key,
-                                demand
-                            route: None,
-            }
-                        )]
+                NodeId(0),
+                Msg::Start {
+                    allocation: None,
+                    key,
+                    demand,
+                    route: None,
+                }
+            )]
         );
         assert!(start(&mut node, key, demand, &mut records).is_empty());
         assert_eq!(
@@ -3897,14 +3897,14 @@ mod tests {
         assert_eq!(
             retry,
             vec![(
-                            NodeId(1),
-                            Msg::Start {
-                                allocation: None,
-                                key,
-                                demand
-                            route: None,
-            }
-                        )]
+                NodeId(1),
+                Msg::Start {
+                    allocation: None,
+                    key,
+                    demand,
+                    route: None,
+                }
+            )]
         );
         assert_eq!(owner.demand(key), Some(demand));
     }
@@ -4014,19 +4014,19 @@ mod tests {
             .unwrap();
             let (key, _) = node.submit(requested(), &mut rec).unwrap();
             assert!(
-                            node.hear(
-                                NodeId(0),
-                                Msg::Start {
-                                    allocation: None,
-                                    key,
-                                    demand: requested()
-                                route: None,
-            },
-                                &mut rec
-                            )
-                            .unwrap()
-                            .is_empty()
-                        );
+                node.hear(
+                    NodeId(0),
+                    Msg::Start {
+                        allocation: None,
+                        key,
+                        demand: requested(),
+                        route: None,
+                    },
+                    &mut rec
+                )
+                .unwrap()
+                .is_empty()
+            );
             assert_eq!(
                 std::mem::take(&mut node.told),
                 vec![Told::Create(key, requested())]
@@ -4149,14 +4149,14 @@ mod tests {
         let mut remapped = demand;
         remapped.ask.gpu_model = Some(ModelId(1));
         assert_eq!(
-                    decode_message(&text, &swapped, text.len()).unwrap(),
-                    Msg::Start {
-                        allocation: None,
-                        key,
-                        demand: remapped
-                    route: None,
-        }
-                );
+            decode_message(&text, &swapped, text.len()).unwrap(),
+            Msg::Start {
+                allocation: None,
+                key,
+                demand: remapped,
+                route: None,
+            }
+        );
         for bad in [
             "p1 held 0 1 0 0 1 1",
             "p1 held 0 1 0 1 0 2",
@@ -4272,14 +4272,14 @@ mod tests {
         assert_eq!(
             start,
             vec![(
-                            NodeId(1),
-                            Msg::Start {
-                                allocation: None,
-                                key,
-                                demand
-                            route: None,
-            }
-                        )]
+                NodeId(1),
+                Msg::Start {
+                    allocation: None,
+                    key,
+                    demand,
+                    route: None,
+                }
+            )]
         );
         runner
             .hear(NodeId(0), start[0].1, &mut ran_records)

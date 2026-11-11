@@ -19,6 +19,34 @@ pub(super) struct Binding {
 }
 
 impl GuestRuntime {
+    /// Read-only route/profile validation for the SAME owner's retained-record
+    /// preflight. This performs no GPU query, file cleanup, launch or adoption.
+    pub fn preflight_backing(&self, record: &PoolRecord) -> Result<(), Refusal> {
+        record.check()?;
+        let key = record.key;
+        if record.execution != Execution::ShardsShared
+            || !record.devices.is_empty()
+            || self.shared_pool.get().is_some_and(|bound| *bound != key)
+            || key.pool != self.pool_configuration(record.cost)?
+        {
+            return Err(refused(key, LifecycleCause::Uncertain));
+        }
+        let allocation = record
+            .cost
+            .allocate(hex_api::CapacityResources::default())?;
+        let guest = allocation.guest()?;
+        let configured = selected::resources(&self.config)?;
+        if record
+            .allocation
+            .is_some_and(|retained| retained != allocation)
+            || guest.cpu_milli != configured.cpu_milli
+            || guest.mem_bytes != configured.mem_bytes
+        {
+            return Err(refused(key, LifecycleCause::Uncertain));
+        }
+        Ok(())
+    }
+
     pub(super) fn managed_shared(&self) -> bool {
         self.uses_books() || self.runtime_cost.is_some()
     }
@@ -58,6 +86,7 @@ impl GuestRuntime {
             let key = receipt.original.key;
             let record = self.pool_record(key)?;
             receipt.matches(&record)?;
+            self.preflight_backing(&record)?;
             if record.phase == BackingPhase::Released {
                 if !matches!(receipt.phase, Phase::Released { .. }) {
                     return Err(refused(key, LifecycleCause::Uncertain));
@@ -90,6 +119,7 @@ impl GuestRuntime {
         if offer.key.pool != pool || offer.cost != allocation.cost || !offer.devices.is_empty() {
             return Err(refused(offer.key, LifecycleCause::Uncertain));
         }
+        self.preflight_backing(&self.pool_record(offer.key)?)?;
         self.bind_pool(offer.key)?;
         Ok(offer)
     }
@@ -167,6 +197,7 @@ impl GuestRuntime {
             .get()
             .ok_or_else(|| route::invalid("prepare the shared backing before recovery"))?;
         let mut record = self.pool_record(key)?;
+        self.preflight_backing(&record)?;
         if matches!(
             record.phase,
             BackingPhase::Granted | BackingPhase::Live | BackingPhase::Draining
@@ -257,6 +288,7 @@ impl GuestRuntime {
             .ok_or_else(|| refused(key, LifecycleCause::Pending))?;
         devices::with_pool_transaction(books, &key, &[], |transaction| {
             let record = transaction.grant_pool(&grant)?;
+            self.preflight_backing(&record)?;
             if record.execution != Execution::ShardsShared || !record.devices.is_empty() {
                 return Err(refused(key, LifecycleCause::Uncertain));
             }
