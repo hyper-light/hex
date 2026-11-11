@@ -1,0 +1,33 @@
+{
+  "base": "a1a3a19011e1dbb889d21118dc8875b9e1f49d2d",
+  "original_observation_source": "128d084cae79abb20f435a0bbc4b54bbbcd4fa9a",
+  "root_original_source": "829b55b33896428370f847e9c7db695fa3b27277",
+  "root_original_native_log": {
+    "bytes": 966,
+    "sha256": "430882517ae142bd4482d2d99f76bfee834b0e595ff5cde334ba714430ad65fd",
+    "independently_verified": true,
+    "result": "parent5111+trampoline5112 samefd10/6 flags1 errno0 ->EBADF9 beforeexec/exit127; exactchildbirth14456434443329 REAPED; parent limitsunchanged; later3UNEXECUTED"
+  },
+  "scope": "MEASUREMENTONLY child-COW clearFD_CLOEXEC on exactly2preparedsourceFDs; preserveparentflags/actions/otherbits; typedbefore/after+failure evidence",
+  "production_SDK_worker_changes": false,
+  "new_native_symbols": [],
+  "unchanged_blocks_sha256": {
+    "attributes_fileactions": "d78e4d420418adf3175974c86be0273b4b063399890d88ea75a9ec9edaa1cd6b",
+    "foreign_image_oracles": "da3b5688b08d29aecef0fc4a5365c10796f86d1a3cbc58ce04c53bdf8b1c99e9"
+  },
+  "files": {
+    "docs/research/measurements/hex-complete-lifecycle/macos_setexec_preseal_control.c": {
+      "bytes": 38244,
+      "sha256": "faf228e20cbda6410123caa3135b40882195749c35b38eb52eef589c5d934bbd"
+    },
+    "docs/research/measurements/hex-complete-lifecycle/macos-setexec-child-cloexec.md": {
+      "bytes": 4281,
+      "sha256": "28b0a7fc1ee40568583f8d304c6124cc2ac23be4e1d44c8bb3ca8f9dd95567f2"
+    }
+  },
+  "new_checks": "UNCOMPILED/UNRUN; ROOT executes once after review; no L3 nativejob",
+  "source_check": "git diff --check0",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "implementer L3"
+}

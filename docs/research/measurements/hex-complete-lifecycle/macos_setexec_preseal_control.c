@@ -1,5 +1,5 @@
 // TEST/MEASUREMENT ONLY. ROOT builds/runs on admitted macOS arm64; no production adapter.
-// Read macos-setexec-preseal-control.md before execution. All child-trampoline storage,
+// Read macos-setexec-preseal-control.md and macos-setexec-child-cloexec.md before execution. All child-trampoline storage,
 // attributes/actions/argv/env are prepared before COW fork; no child heap/format/lock/destructor.
 #if !defined(__APPLE__) || !defined(__aarch64__)
 #error This measurement is for the supported macOS arm64 target only
@@ -40,7 +40,7 @@ extern int posix_spawnattr_setjetsam_ext(posix_spawnattr_t *, short, int, int, i
 #define FRAME_VERSION UINT32_C(1)
 
 enum kind { READY = 1, PREEXEC_ERROR = 2, CANARY = 3, IMAGE_RESULT = 4, MEMORY_START = 5, UNEXPECTED_CHILD = 6,
-    SPAWN_RETURNED = 7, RETURNED_CHILD_END = 8, FD_SOURCE = 9 };
+    SPAWN_RETURNED = 7, RETURNED_CHILD_END = 8, FD_SOURCE = 9, FD_SOURCE_CLEARED = 10 };
 enum descriptor_role { STDIO_SOURCE = 1, REPORT_WRITER = 2 };
 enum scenario { NORMAL = 0, MISSING = 1, BAD_SESSION = 2, MEMORY = 3 };
 struct frame {
@@ -141,6 +141,10 @@ static int read_frame(int fd, struct frame *frame, uint64_t deadline) {
     }
     if (frame->magic != FRAME_MAGIC || frame->version != FRAME_VERSION) return EPROTO;
     fprintf(stderr, "FRAME kind=%u pid=%d birth=%" PRIu64 " failure=%u errno=%d\n", frame->kind, frame->pid, frame->birth, frame->failure, frame->operation_errno);
+    if (frame->kind == PREEXEC_ERROR && frame->descriptor_role != 0)
+        fprintf(stderr, "FD_CLEAR_FAILURE pid=%d role=%d fd=%d flags=%d query_errno=%d operation_errno=%d\n",
+            frame->pid, frame->descriptor_role, frame->descriptor, frame->descriptor_flags,
+            frame->descriptor_errno, frame->operation_errno);
     return 0;
 }
 // Read only the two prepared private source descriptors. No flag, file action or authority changes.
@@ -276,6 +280,22 @@ static void trampoline(const struct prepared *p, enum scenario which) {
     for (int at = 0; at < 2; ++at) {
         struct frame source = p->fd_sources[at];
         observe_source(&source);
+        if (send_frame(p->ready[1], &source, p->deadline)) _exit(126);
+        int wanted = source.descriptor_flags & ~FD_CLOEXEC;
+        int changed = source.descriptor_flags < 0 ? source.descriptor_errno :
+            (fcntl(source.descriptor, F_SETFD, wanted) != 0 ? errno : 0);
+        if (!changed) {
+            source.kind = FD_SOURCE_CLEARED;
+            observe_source(&source);
+            changed = source.descriptor_flags < 0 ? source.descriptor_errno :
+                (source.descriptor_flags == wanted ? 0 : EPROTO);
+        }
+        if (changed) {
+            source.kind = PREEXEC_ERROR; source.failure = 1; source.operation_errno = changed;
+            (void)send_frame(p->ready[1], &source, p->deadline); _exit(126);
+        }
+        // Only these two prepared sources in this COW child's own descriptor table change.
+        // Original CLOEXEC_DEFAULT/actions still define the final foreign-image allowlist.
         if (send_frame(p->ready[1], &source, p->deadline)) _exit(126);
     }
     pid_t returned = -1;
@@ -507,7 +527,12 @@ static int run_case(enum scenario which, int memory_mib, uint64_t deadline, cons
         if (source.kind != FD_SOURCE || source.pid != pid ||
             source.descriptor_role != p.fd_sources[at].descriptor_role ||
             source.descriptor != p.fd_sources[at].descriptor) { error = EPROTO; goto done; }
-        print_source("trampoline-pre-spawn", &source); // Values are diagnostic, not new pass criteria.
+        print_source("trampoline-before-child-clear", &source);
+        if ((error = read_frame(p.ready[0], &source, deadline))) goto done;
+        if (source.kind != FD_SOURCE_CLEARED || source.pid != pid ||
+            source.descriptor_role != p.fd_sources[at].descriptor_role ||
+            source.descriptor != p.fd_sources[at].descriptor) { error = EPROTO; goto done; }
+        print_source("trampoline-pre-spawn", &source);
     }
     int ready_error = read_frame(p.ready[0], &preexec, deadline);
     if (ready_error == 0) {
@@ -586,6 +611,19 @@ static int run_case(enum scenario which, int memory_mib, uint64_t deadline, cons
     fprintf(stderr, "EXIT_FLAGS case=%d fflags=%u memory_detail=%d\n", which, exit_flags, (exit_flags & NOTE_EXIT_MEMORY) != 0);
     fprintf(stderr, "TERMINAL case=%d pid=%d status=%d peak=%" PRIu64 " memory_mib=%d relevant=%d reaped=1\n", which, pid, status, peak, memory_mib, relevant);
 done:
+    for (int at = 0; at < 2; ++at) {
+        // NORMAL/MEMORY closes its parent report writer only AFTER the unchanged HELD flag
+        // comparison. Otherwise both exact parent sources remain available for this witness.
+        if (at == 1 && p.report[1] < 0) continue;
+        struct frame source = p.fd_sources[at];
+        observe_source(&source);
+        print_source("parent-after", &source);
+        if (source.descriptor_flags != p.fd_sources[at].descriptor_flags || source.descriptor_errno) {
+            fprintf(stderr, "PARENT_SOURCE_FAILURE role=%d before=%d after=%d errno=%d\n", source.descriptor_role,
+                p.fd_sources[at].descriptor_flags, source.descriptor_flags, source.descriptor_errno);
+            if (!error) error = source.descriptor_errno ? source.descriptor_errno : EPROTO;
+        }
+    }
     if (!reaped) {
         int cleaned = cleanup(pid, birth, p.kq, deadline, &reaped);
         fprintf(stderr, "FAILED case=%d original_error=%d cleanup_error=%d reaped=%d\n", which, error, cleaned, reaped);
