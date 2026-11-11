@@ -1,5 +1,5 @@
 use super::*;
-use hex_api::{Network, OciSpec, Rootfs};
+use hex_api::{Capacity, CapacityResources, Network, OciSpec, Rootfs, RuntimeCost};
 
 fn relay_class() -> hex_sim::model::Class {
     if cfg!(target_os = "macos") {
@@ -7,6 +7,60 @@ fn relay_class() -> hex_sim::model::Class {
     } else {
         hex_sim::model::Class::Oci
     }
+}
+
+// Placement refuses a payload of another class than its placement's (placement::validate).
+fn relay_payload_class(spec: OciSpec) -> ClassSpec {
+    let spec = Box::new(spec);
+    match relay_class() {
+        hex_sim::model::Class::Oci => ClassSpec::Oci(spec),
+        hex_sim::model::Class::Firecracker => ClassSpec::Firecracker(spec),
+        hex_sim::model::Class::Shards => ClassSpec::Shards(spec),
+    }
+}
+
+fn relay_need() -> Resources {
+    Resources {
+        cpu_milli: u64::from(hex_api::MIN_CPU_MILLI),
+        mem_bytes: hex_api::MIN_MEMORY,
+        ..Resources::default()
+    }
+}
+
+// An initialized microVM class reports its verified per-box cost (capacity::profiles), and a
+// runner admits only a Start carrying the receipt that cost allocates. This identity charge keeps
+// each box at its demand; OCI keeps the uncosted path.
+fn relay_cost() -> Option<RuntimeCost> {
+    if relay_class() == hex_sim::model::Class::Oci {
+        return None;
+    }
+    let need = hex_sim::model::capacity_resources(relay_need());
+    Some(RuntimeCost {
+        id: [0x72; 32],
+        floor: need,
+        ceiling: need,
+        quantum: CapacityResources {
+            cpu_milli: 1,
+            mem_bytes: 1,
+            disk_bytes: 1,
+        },
+        guest_overhead: CapacityResources::default(),
+        overhead: CapacityResources::default(),
+    })
+}
+
+fn relay_allocation() -> Option<hex_api::Allocation> {
+    relay_cost().map(|cost| {
+        cost.allocate(hex_sim::model::capacity_resources(relay_need()))
+            .unwrap()
+    })
+}
+
+// A runner as its owner sees it: room for one relay box, charged at the runner's own cost.
+fn relay_peer(id: NodeId) -> NodeSpec {
+    let mut node = NodeSpec::new(id, relay_need());
+    node.costs[relay_class().index()] = relay_cost();
+    node
 }
 
 #[derive(Default)]
@@ -19,6 +73,21 @@ struct RelayRuntime {
 impl Runtime for RelayRuntime {
     fn physical_report(&self) -> Result<hex_api::PhysicalReport, Refusal> {
         self.sim.physical_report()
+    }
+    fn capacity(&self, _: hex_api::Class) -> Result<Option<Capacity>, Refusal> {
+        // Room for the two relay boxes one runner holds at once.
+        let need = hex_sim::model::capacity_resources(relay_need());
+        let room = need.checked_add(need).unwrap();
+        Ok(relay_cost().map(|cost| Capacity {
+            id: "relay-fixture-pool".into(),
+            total: room,
+            free: room,
+            devices: Vec::new(),
+            cost: Some(cost),
+            routes: Vec::new(),
+            device_routes: Vec::new(),
+            backings: Vec::new(),
+        }))
     }
     fn classes(&self) -> Vec<hex_api::Class> {
         self.sim.classes()
@@ -58,14 +127,10 @@ fn relay_start(key: Key) -> Envelope {
     Envelope {
         msg: peer::Msg::Start {
             route: None,
-            allocation: None,
+            allocation: relay_allocation(),
             key,
             demand: Demand {
-                need: Resources {
-                    cpu_milli: u64::from(hex_api::MIN_CPU_MILLI),
-                    mem_bytes: hex_api::MIN_MEMORY,
-                    ..Resources::default()
-                },
+                need: relay_need(),
                 kind: Kind::Plain,
                 class: relay_class(),
                 ask: Ask::default(),
@@ -82,15 +147,14 @@ fn relay_start(key: Key) -> Envelope {
                     memory_max: Some(hex_api::MIN_MEMORY),
                     ..Bounds::default()
                 },
-                // A simulated OCI payload satisfies the existing microVM-class validation too.
-                class: ClassSpec::Oci(Box::new(OciSpec {
+                class: relay_payload_class(OciSpec {
                     rootfs: Rootfs::Dir(std::env::current_dir().unwrap()),
                     init: Program::of(&["wait"]),
                     mounts: Vec::new(),
                     hostname: None,
                     network: Network::Private,
                     hosts: Vec::new(),
-                })),
+                }),
                 owner: None,
             },
             start: false,
@@ -102,21 +166,9 @@ fn relay_start(key: Key) -> Envelope {
 fn relay_receiver(dir: &Path, runtime: Arc<RelayRuntime>) -> (Arc<Service>, [Receiver<Queued>; 2]) {
     let mut owner = NodeSpec::new(NodeId(0), Resources::default());
     owner.classes = Classes::NONE;
-    let peer::Msg::Start { demand, .. } = relay_start(Key {
-        owner: 0,
-        epoch: 1,
-        seq: 1,
-    })
-    .msg
-    else {
-        panic!("fixture constructed a non-Start message")
-    };
     let mut other = NodeSpec::new(NodeId(2), Resources::default());
     other.classes = Classes::NONE;
-    let cluster = Cluster::single_owner(
-        vec![owner, NodeSpec::new(NodeId(1), demand.need), other],
-        Vec::new(),
-    );
+    let cluster = Cluster::single_owner(vec![owner, relay_peer(NodeId(1)), other], Vec::new());
     let (send, receive) = channel();
     let mut service = advertise_timing_service(
         NodeId(1),
@@ -452,11 +504,7 @@ fn cancellation_reconciles_lost_start_reply_without_losing_either_queued_lane() 
     let mut local = NodeSpec::new(NodeId(0), Resources::default());
     local.classes = Classes::NONE;
     let cluster = Cluster::single_owner(
-        vec![
-            local,
-            NodeSpec::new(NodeId(1), demand.need),
-            NodeSpec::new(NodeId(2), demand.need),
-        ],
+        vec![local, relay_peer(NodeId(1)), relay_peer(NodeId(2))],
         Vec::new(),
     );
     let owner_dir = dir.path().join("owner");
@@ -680,7 +728,7 @@ fn cancellation_reconciles_lost_start_reply_without_losing_either_queued_lane() 
                 1,
                 peer::Msg::Start {
                     route: None,
-                    allocation: None,
+                    allocation: relay_allocation(),
                     key: first,
                     demand: durable
                 }
