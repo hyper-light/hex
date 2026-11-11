@@ -257,6 +257,19 @@ impl Record {
         Ok(readiness)
     }
 
+    /// Work-ready admission is stronger than legacy diagnostic receipt checks.
+    /// The legacy payload remains available for the original scope's cleanup.
+    pub fn checked_work_ready(&self) -> Result<&super::observer::Evidence, Refusal> {
+        let readiness = self.checked_readiness()?;
+        readiness
+            .report
+            .require_work_ready(self.physical.len(), readiness.max_queues)
+            .map_err(|_| {
+                super::books::uncertain(&self.id).unwrap_or_else(std::convert::identity)
+            })?;
+        Ok(readiness)
+    }
+
     pub(super) fn encode(&self) -> Result<String, Refusal> {
         let bound = hex_core::bundle::MAX_CONFIG_BYTES;
         let report = self
@@ -942,6 +955,18 @@ mod tests {
             status: shards_api::ManagedStatus::Unknown,
         };
         assert_eq!(parse(&legacy.encode().unwrap()).unwrap(), legacy);
+    }
+
+    /// AC-T7.4.1: inventory completion stays cleanup-readable but cannot authorize
+    /// the new queue/fence work-ready contract, even with successful exit/EOF.
+    #[test]
+    fn selected_inventory_receipt_cannot_authorize_work_ready_payload() {
+        let receipt = observed_record();
+        receipt.checked_readiness().unwrap();
+        assert!(receipt.checked_work_ready().is_err());
+        let retained = parse(&receipt.encode().unwrap()).unwrap();
+        assert_eq!(retained, receipt);
+        assert!(retained.checked_work_ready().is_err());
     }
 
     /// AC-T7.4.1: malformed/reordered/foreign diagnostics never become usable

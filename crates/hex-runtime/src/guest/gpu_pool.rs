@@ -321,7 +321,7 @@ impl GuestRuntime {
                     receipt.matches(&record)?;
                     receipt.checked_report()?;
                     self.check_pool_native_report(&receipt)?;
-                    receipt.checked_readiness()?;
+                    receipt.checked_work_ready()?;
                     triomphe::Arc::clone(&known.booted)
                 }
                 None => self.boot_gpu_pool(transaction, &definition, record, budget)?,
@@ -333,7 +333,7 @@ impl GuestRuntime {
             let receipt = pool::read(&definition.path)?
                 .ok_or_else(|| refused(grant.key, LifecycleCause::Uncertain))?;
             receipt.matches(&record)?;
-            receipt.checked_readiness()?;
+            receipt.checked_work_ready()?;
             self.pool_alive(&booted, grant.key)?;
             budget.remaining()?;
             if record.phase == BackingPhase::Granted {
@@ -427,7 +427,7 @@ impl GuestRuntime {
             Phase::Running(identity) => {
                 receipt.checked_report()?;
                 self.check_pool_native_report(&receipt)?;
-                receipt.checked_readiness()?;
+                receipt.checked_work_ready()?;
                 let canonical = transaction
                     .read_pool(&key)?
                     .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
@@ -470,7 +470,7 @@ impl GuestRuntime {
                 .ok_or_else(|| refused(key, LifecycleCause::Pending))?;
             observer::observe(observer, &booted, &mut receipt, &definition.path, budget)?;
         }
-        receipt.checked_readiness()?;
+        receipt.checked_work_ready()?;
         self.check_pool_native_report(&receipt)?;
         budget.remaining()?;
         Ok(booted)
@@ -1154,8 +1154,9 @@ mod tests {
             },
         });
         let inventory = format!(
-            "hex-vulkan-guest-inventory 1 1\ndevice 0 4202496 22 1 1 2 2 {} 677075 76656e7573 4d657361 2 1 1 2 1\nheap 0 0 1 4096\n",
-            "03".repeat(16)
+            "hex-vulkan-guest-readiness 1 1\ndevice 0 4202496 22 1 1 2 2 {} 677075 76656e7573 4d657361 2 1 1 2 1\ndriver 0 {} 1 3 0 0\nheap 0 0 1 4096\nready 1\n",
+            "03".repeat(16),
+            "04".repeat(16)
         );
         let observer = runtime.gpu_observer.as_ref().unwrap();
         receipt.readiness = Some(observer::Evidence {
@@ -1188,7 +1189,7 @@ mod tests {
         row.phase = BackingPhase::Live;
         pool::write(&definition.path, &receipt).unwrap();
         runtime.preflight_backing(&row).unwrap();
-        receipt.checked_readiness().unwrap();
+        receipt.checked_work_ready().unwrap();
         let original = row.encode().unwrap();
         *owner.row.lock().unwrap() = Some(row);
         let observed = runtime.physical_observations();
@@ -1390,8 +1391,9 @@ mod tests {
             },
         });
         let inventory = format!(
-            "hex-vulkan-guest-inventory 1 1\ndevice 0 4202496 22 1 1 2 2 {} 677075 76656e7573 4d657361 2 1 1 2 1\nheap 0 0 1 4096\n",
-            "03".repeat(16)
+            "hex-vulkan-guest-readiness 1 1\ndevice 0 4202496 22 1 1 2 2 {} 677075 76656e7573 4d657361 2 1 1 2 1\ndriver 0 {} 1 3 0 0\nheap 0 0 1 4096\nready 1\n",
+            "03".repeat(16),
+            "04".repeat(16)
         );
         let observer = runtime.gpu_observer.as_ref().unwrap();
         receipt.readiness = Some(observer::Evidence {
@@ -1424,7 +1426,7 @@ mod tests {
         row.phase = BackingPhase::Live;
         pool::write(&definition.path, &receipt).unwrap();
         runtime.preflight_backing(&row).unwrap();
-        receipt.checked_readiness().unwrap();
+        receipt.checked_work_ready().unwrap();
         *owner.row.lock().unwrap() = Some(row);
         // Prove the actual charged observer/provider/catalog join succeeds before
         // exercising the composite entrypoint; missing readiness is not this oracle.

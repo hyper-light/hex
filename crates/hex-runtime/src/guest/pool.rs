@@ -165,6 +165,17 @@ impl Receipt {
         Ok(readiness)
     }
 
+    /// Work-ready admission is stronger than legacy diagnostic receipt checks.
+    /// The legacy payload remains available for the original scope's cleanup.
+    pub fn checked_work_ready(&self) -> Result<&super::observer::Evidence, Refusal> {
+        let readiness = self.checked_readiness()?;
+        readiness
+            .report
+            .require_work_ready(self.physical.len(), readiness.max_queues)
+            .map_err(|_| refused(self.original.key, LifecycleCause::Uncertain))?;
+        Ok(readiness)
+    }
+
     fn readiness_payload(&self) -> Result<&super::observer::Evidence, Refusal> {
         self.check()?;
         if !matches!(self.phase, Phase::Running(_)) {
