@@ -63,17 +63,24 @@ fn pool(phase: hex_api::BackingPhase) -> PoolRecord {
             key: 256,
         }],
         phase,
-        init: matches!(
+        init: if matches!(
             phase,
             hex_api::BackingPhase::Live
                 | hex_api::BackingPhase::Draining
                 | hex_api::BackingPhase::Released
-        )
-        .then_some(hex_core::record::ProcId {
-            pid: 1,
-            start_ticks: 1,
-        }),
-        exit: (phase == hex_api::BackingPhase::Released).then_some(hex_api::Exit::Unknown),
+        ) {
+            Some(hex_core::record::ProcId {
+                pid: 1,
+                start_ticks: 1,
+            })
+        } else {
+            None
+        },
+        exit: if phase == hex_api::BackingPhase::Released {
+            Some(hex_api::Exit::Unknown)
+        } else {
+            None
+        },
     }
 }
 
@@ -103,8 +110,11 @@ fn canonical_pool_holder_retains_grant_until_released_and_fences_exact_handoff()
         let holder = catalog.holder(id, &Records::new(), &records).unwrap();
         assert_eq!(
             holder,
-            (!matches!(phase, BackingPhase::Prepared | BackingPhase::Released))
-                .then_some(DeviceHolder::Backing(key))
+            if !matches!(phase, BackingPhase::Prepared | BackingPhase::Released) {
+                Some(DeviceHolder::Backing(key))
+            } else {
+                None
+            }
         );
     }
     let live = pool(BackingPhase::Live);
