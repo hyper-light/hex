@@ -1,0 +1,28 @@
+{
+  "cohort-1233804b-linux-vendor-1233-linux": {
+    "scope": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-vendor-1233-linux.scope",
+    "scope_absent": true,
+    "owners": [
+      {
+        "kind": "driver",
+        "recorded": {
+          "pid": 2033047,
+          "ppid": 2032988,
+          "start_ticks": 32868495
+        },
+        "owned_birth_absent": true,
+        "absent": true
+      },
+      {
+        "kind": "phase:vendor-source-consistency",
+        "recorded": {
+          "pid": 2042204,
+          "ppid": 2033047,
+          "start_ticks": 32868704
+        },
+        "owned_birth_absent": true,
+        "absent": true
+      }
+    ]
+  }
+}

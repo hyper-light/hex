@@ -1,0 +1,59 @@
+{
+  "source": "1233804bd8a306651a9b28eb8dd049f9f7e3a5a1",
+  "archive_sha256": "7c9fce8bede34b352bce340a0a1c0d61c0154fa4ae38951b19f558fa329573f5",
+  "scope": "ROOT vendored exact-source/pin/patch check only, private cache; no Cargo, gates, native runtime, VM or GPU",
+  "platform": "Linux-7.3.3-1-cachyos-x86_64-with-glibc2.44",
+  "driver": {
+    "pid": 2033047,
+    "ppid": 2032988,
+    "start_ticks": 32868495
+  },
+  "phases": [
+    {
+      "name": "vendor-source-consistency",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/usr/bin/python3",
+        "-B",
+        "scripts/vendor.py",
+        "check"
+      ],
+      "observation": {
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "/usr/bin/python3",
+          "-B",
+          "scripts/vendor.py",
+          "check"
+        ],
+        "both_eof": true,
+        "reaped": true,
+        "error": null,
+        "created_pid": 2042204,
+        "identity": {
+          "pid": 2042204,
+          "ppid": 2033047,
+          "start_ticks": 32868704
+        },
+        "returncode": 0
+      },
+      "stdout": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stderr": {
+        "bytes": 547,
+        "sha256": "4110824741df5a27dc543239464e95733d9d653e035cbea2e39be688779284f5"
+      }
+    }
+  ],
+  "source_changes": [],
+  "temp_entries": 0,
+  "native_invocations": 0,
+  "event_errors": [],
+  "exit": 0
+}

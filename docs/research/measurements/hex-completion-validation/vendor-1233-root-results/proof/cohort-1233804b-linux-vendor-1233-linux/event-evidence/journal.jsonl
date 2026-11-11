@@ -1,0 +1,2 @@
+{"argv": ["nice", "-n", "10", "/usr/bin/python3", "-B", "scripts/vendor.py", "check"], "event": "owned-child-created", "monotonic": 217290.607111816, "pid": 2042204}
+{"argv": ["nice", "-n", "10", "/usr/bin/python3", "-B", "scripts/vendor.py", "check"], "event": "owned-child", "monotonic": 217290.623351585, "pid": 2042204, "ppid": 2033047, "start_ticks": 32868704}

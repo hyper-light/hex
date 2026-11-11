@@ -1,0 +1,131 @@
+{
+  "source": "1233804bd8a306651a9b28eb8dd049f9f7e3a5a1",
+  "archive_sha256": "7c9fce8bede34b352bce340a0a1c0d61c0154fa4ae38951b19f558fa329573f5",
+  "scope": "ROOT opt-in trusted-entry new8 pure controls and affected feature/default strict; no dispatch/run/native launch or old passes replayed",
+  "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver_pid": 35900,
+  "phases": [
+    {
+      "name": "entry-error-cause-pure1",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "--offline",
+        "--features",
+        "native-trusted-entry-measurement",
+        "macos::process::trusted_entry::tests::bounded_error_record_preserves_primary_cleanup_and_raw_write_failure",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 36354,
+      "pgid": 36354,
+      "native_identity": {
+        "query_exit": 0,
+        "row": "36354 36354 Wed Nov 11 06:57:10 2026",
+        "error": ""
+      },
+      "native_wait": {
+        "pid": 36354,
+        "code": 1,
+        "status": 0
+      },
+      "exit": 0,
+      "reaped": true,
+      "owned_group_absent": true,
+      "bytes": 3329,
+      "sha256": "faa3988989dcbb905d2cacf3959a31afe57907736bc666f6c2b347d2f0c380cd",
+      "actual_counts": [
+        [
+          "1",
+          "0",
+          "0"
+        ]
+      ],
+      "selection_verified": true,
+      "qualified": true
+    },
+    {
+      "name": "entry-runtime-feature-strict",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "clippy",
+        "-p",
+        "hex-runtime",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "--features",
+        "native-trusted-entry-measurement",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 36626,
+      "pgid": 36626,
+      "native_identity": {
+        "query_exit": 0,
+        "row": "36626 36626 Wed Nov 11 06:57:52 2026",
+        "error": ""
+      },
+      "native_wait": {
+        "pid": 36626,
+        "code": 1,
+        "status": 0
+      },
+      "exit": 0,
+      "reaped": true,
+      "owned_group_absent": true,
+      "bytes": 2683,
+      "sha256": "775626a4f4978f13e218ce761c357cee56739c111a907e3c1237625d652a1f5a",
+      "qualified": true
+    },
+    {
+      "name": "ordinary-mac-runtime-strict",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "clippy",
+        "-p",
+        "hex-runtime",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 36696,
+      "pgid": 36696,
+      "native_identity": {
+        "query_exit": 0,
+        "row": "36696 36696 Wed Nov 11 06:58:12 2026",
+        "error": ""
+      },
+      "native_wait": {
+        "pid": 36696,
+        "code": 1,
+        "status": 0
+      },
+      "exit": 0,
+      "reaped": true,
+      "owned_group_absent": true,
+      "bytes": 208,
+      "sha256": "60a37f2268b9e307b9d2a9b34a6d7700ec61d5b32a427a11febddf26c496c4c0",
+      "qualified": true
+    }
+  ]
+}

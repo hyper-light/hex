@@ -1,0 +1,5 @@
+vendor.py: all-smi: 4 files at fe479ae675e39475a2eab1cfbb3f5432f705e12b, 2 recorded changes, 0 differences
+vendor.py: cuda-rust: 2 files at a0a4dc78a20e06ec90827f597e950bdc49f723e2, 1 recorded changes, 0 differences
+vendor.py: hyper-raft: 23 files at 6a236ae4c73e10013b149699ca8ec6802d919476, 0 recorded changes, 0 differences
+vendor.py: seccompiler: 33 files at c3cf77d65815037931ae5bc2fca010713defdc8c, 1 recorded changes, 0 differences
+vendor.py: shards: 48 files at 33df95b08ad8f95bddeaa1c48acf0c64386e0eac, 26 recorded changes, 0 differences
