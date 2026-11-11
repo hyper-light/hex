@@ -40,13 +40,15 @@ extern int posix_spawnattr_setjetsam_ext(posix_spawnattr_t *, short, int, int, i
 #define FRAME_VERSION UINT32_C(1)
 
 enum kind { READY = 1, PREEXEC_ERROR = 2, CANARY = 3, IMAGE_RESULT = 4, MEMORY_START = 5, UNEXPECTED_CHILD = 6,
-    SPAWN_RETURNED = 7, RETURNED_CHILD_END = 8 };
+    SPAWN_RETURNED = 7, RETURNED_CHILD_END = 8, FD_SOURCE = 9 };
+enum descriptor_role { STDIO_SOURCE = 1, REPORT_WRITER = 2 };
 enum scenario { NORMAL = 0, MISSING = 1, BAD_SESSION = 2, MEMORY = 3 };
 struct frame {
     uint32_t magic, version, kind, failure;
     int32_t pid, operation_errno, fork_errno, spawn_errno, raise_errno, denied_errno;
     int32_t thread_create, thread_join, qos_self;
     int32_t cleanup_errno, child_status;
+    int32_t descriptor_role, descriptor, descriptor_flags, descriptor_errno;
     uint32_t child_reaped;
     uint64_t birth, nproc_soft, nproc_hard;
 };
@@ -57,6 +59,7 @@ struct prepared {
     bool attr_ready, actions_ready;
     int ready[2], report[2], gate[2], denied, nullfd, kq;
     struct kevent child_signal;
+    struct frame fd_sources[2]; // Exactly the dup2 source and the explicit report inherit source.
     uint64_t deadline;
     char path[PATH_MAX], missing_path[PATH_MAX], fd_text[32], denied_text[32], deadline_text[32], memory_text[32];
     char *argv[8], *env[3];
@@ -140,6 +143,18 @@ static int read_frame(int fd, struct frame *frame, uint64_t deadline) {
     fprintf(stderr, "FRAME kind=%u pid=%d birth=%" PRIu64 " failure=%u errno=%d\n", frame->kind, frame->pid, frame->birth, frame->failure, frame->operation_errno);
     return 0;
 }
+// Read only the two prepared private source descriptors. No flag, file action or authority changes.
+static void observe_source(struct frame *frame) {
+    int saved_errno = errno;
+    frame->pid = getpid();
+    frame->descriptor_flags = fcntl(frame->descriptor, F_GETFD);
+    frame->descriptor_errno = frame->descriptor_flags < 0 ? errno : 0;
+    errno = saved_errno;
+}
+static void print_source(const char *stage, const struct frame *frame) {
+    fprintf(stderr, "FD_SOURCE stage=%s pid=%d role=%d fd=%d getfd=%d errno=%d\n", stage,
+        frame->pid, frame->descriptor_role, frame->descriptor, frame->descriptor_flags, frame->descriptor_errno);
+}
 static int private_pipe(int pair[2], bool nonblocking_reader) {
     if (pipe(pair) != 0) return errno;
     // SAFETY: only these newly created private descriptors; no later writer CLOEXEC mutation.
@@ -219,6 +234,11 @@ static int prepare(struct prepared *p, enum scenario which, int memory_mib, uint
     p->argv[2] = p->fd_text; p->argv[3] = p->denied_text; p->argv[4] = p->deadline_text;
     p->argv[5] = p->memory_text; p->argv[6] = NULL;
     p->env[0] = "PATH=/usr/bin:/bin"; p->env[1] = "LANG=C"; p->env[2] = NULL;
+    p->fd_sources[0] = (struct frame){ .magic = FRAME_MAGIC, .version = FRAME_VERSION,
+        .kind = FD_SOURCE, .descriptor_role = STDIO_SOURCE, .descriptor = p->nullfd };
+    p->fd_sources[1] = (struct frame){ .magic = FRAME_MAGIC, .version = FRAME_VERSION,
+        .kind = FD_SOURCE, .descriptor_role = REPORT_WRITER, .descriptor = p->report[1] };
+    for (int at = 0; at < 2; ++at) observe_source(&p->fd_sources[at]);
     return 0;
 }
 
@@ -253,6 +273,11 @@ static void trampoline(const struct prepared *p, enum scenario which) {
     if (n != 1 || permit != 'R') _exit(126);
     (void)close(p->gate[0]);
     const char *path = which == MISSING ? p->missing_path : p->path;
+    for (int at = 0; at < 2; ++at) {
+        struct frame source = p->fd_sources[at];
+        observe_source(&source);
+        if (send_frame(p->ready[1], &source, p->deadline)) _exit(126);
+    }
     pid_t returned = -1;
     int error = posix_spawn(&returned, path, &p->actions, &p->attr, p->argv, p->env);
     if (error == 0 || returned > 0) {
@@ -444,6 +469,7 @@ static int run_case(enum scenario which, int memory_mib, uint64_t deadline, cons
     struct prepared p;
     int error = prepare(&p, which, memory_mib, deadline, self);
     if (error) { fprintf(stderr, "SETUP case=%d error=%d\n", which, error); dispose(&p); return 1; }
+    for (int at = 0; at < 2; ++at) print_source("parent-prepared", &p.fd_sources[at]);
     int before_flags = fcntl(p.report[1], F_GETFD);
     pid_t pid = fork();
     if (pid == 0) trampoline(&p, which);
@@ -475,6 +501,14 @@ static int run_case(enum scenario which, int memory_mib, uint64_t deadline, cons
     // its SAME direct-parent trampoline owns the finite native cleanup, before controller exit.
     struct frame preexec = {0};
     bool have_preexec = false, unexpected_return = false;
+    for (int at = 0; at < 2; ++at) {
+        struct frame source;
+        if ((error = read_frame(p.ready[0], &source, deadline))) goto done;
+        if (source.kind != FD_SOURCE || source.pid != pid ||
+            source.descriptor_role != p.fd_sources[at].descriptor_role ||
+            source.descriptor != p.fd_sources[at].descriptor) { error = EPROTO; goto done; }
+        print_source("trampoline-pre-spawn", &source); // Values are diagnostic, not new pass criteria.
+    }
     int ready_error = read_frame(p.ready[0], &preexec, deadline);
     if (ready_error == 0) {
         if (preexec.kind == SPAWN_RETURNED) {

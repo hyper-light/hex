@@ -1,0 +1,55 @@
+{
+  "base": "771930828d1e34c9f60b2dcf0581f0ef0ffc60de",
+  "original_measurement_body": "6b525ebc21e1c3c75cce88fd2b2b159e403f20e3",
+  "root_native_source": "13d334ee464040fcbbf693dec3271cb9f18cfe42",
+  "root_native_log": {
+    "bytes": 581,
+    "sha256": "65d7e37920d23c892c14e62afe15b44fa7a58cfa483aaa2efbbbe82e49ccd5a6",
+    "result": "NORMAL preexec errno9/exit127, exact controller2916 birth14443012091384 REAPED; no returned-child frame; later3UNEXECUTED"
+  },
+  "scope": "read-only F_GETFD exactly2preparedsources in parent and immediate trampoline pre-spawn; typedrole/fd/result/errno only",
+  "pinned_XNU_vs_installed": "source inference only, installed kernel attribution unverified",
+  "primary_sources": [
+    {
+      "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/kern_exec.c",
+      "bytes": 251651,
+      "sha256": "89531d33618b8361064236189212c3c96be1b32e098690b17802b6b15d932d1a"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/kern_fork.c",
+      "bytes": 47686,
+      "sha256": "73b578159deebc71434185d3638ab1468f995a19c882e1902d001994bb0391c3"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/kern_descrip.c",
+      "bytes": 147011,
+      "sha256": "480cfed4e987be874bd71fb6933c254adf9fb1f36de8496dee8f351b18da13b1"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/libsyscall/wrappers/spawn/posix_spawn.c",
+      "bytes": 80627,
+      "sha256": "15392bdbd233e899de34b238afdb2f991a71a24583dec92ae503cb42bc5f9fad"
+    }
+  ],
+  "unchanged_body_sha256": {
+    "native_attributes_and_file_actions": "d78e4d420418adf3175974c86be0273b4b063399890d88ea75a9ec9edaa1cd6b",
+    "foreign_image_oracles": "da3b5688b08d29aecef0fc4a5365c10796f86d1a3cbc58ce04c53bdf8b1c99e9"
+  },
+  "files": {
+    "docs/research/measurements/hex-complete-lifecycle/macos_setexec_preseal_control.c": {
+      "bytes": 35764,
+      "sha256": "8e469c9863058e6f6ebd730da5e2a9959bda7874e05de880e6838c8f4ada5e82"
+    },
+    "docs/research/measurements/hex-complete-lifecycle/macos-setexec-ebadf-observation.md": {
+      "bytes": 5887,
+      "sha256": "3265de02d7afacd661334e40989dea64fd432796a4f008874745f82a623d2919"
+    }
+  },
+  "flag_mutation": false,
+  "new_native_symbols": [],
+  "compile_native": "UNRUN, ROOTonly diagnostic dispatch after source review",
+  "source_check": "git diff --check0",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "implementer L3"
+}
