@@ -783,7 +783,10 @@ fn an_uncertain_refusals_causes_never_nest() {
     };
     assert!(matches!(
         answer(1, &Answer::Refused(nested), MAX_MESSAGE),
-        Err(Fault::Value { what: "uncertain refusal", .. })
+        Err(Fault::Value {
+            what: "uncertain refusal",
+            ..
+        })
     ));
     let mut bytes = answer(1, &Answer::Refused(flat), MAX_MESSAGE).unwrap();
     // The header, the refusal's tag, then the id's length and bytes: the first cause's tag follows.
@@ -798,7 +801,10 @@ fn an_uncertain_refusals_causes_never_nest() {
     };
     assert!(matches!(
         read_answer(&received, MAX_MESSAGE),
-        Err(Fault::Value { what: "uncertain refusal", .. })
+        Err(Fault::Value {
+            what: "uncertain refusal",
+            ..
+        })
     ));
 }
 

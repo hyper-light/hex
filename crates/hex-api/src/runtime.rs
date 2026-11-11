@@ -1390,7 +1390,9 @@ pub enum Refusal {
     /// termination or absence unproved, as `Lifecycle`'s `Uncertain` says, and neither cause is dropped: the
     /// create's own refusal first, then its cleanup's, each typed. Neither is itself an `Uncertain`, which the
     /// wire refuses, so its depth is one.
-    #[error("box {id}: physical termination or absence has not been proved: {refusal}; its cleanup: {cleanup}")]
+    #[error(
+        "box {id}: physical termination or absence has not been proved: {refusal}; its cleanup: {cleanup}"
+    )]
     Uncertain {
         id: BoxId,
         refusal: Box<Refusal>,

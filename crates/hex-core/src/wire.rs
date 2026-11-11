@@ -2196,7 +2196,10 @@ fn put_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
 /// One of an `Uncertain` refusal's causes: any refusal but another `Uncertain`, so its depth is one.
 fn put_cause(w: &mut Writer, cause: &Refusal) -> Result<(), Fault> {
     if matches!(cause, Refusal::Uncertain { .. }) {
-        return Err(Fault::value("uncertain refusal", "a cause is itself uncertain"));
+        return Err(Fault::value(
+            "uncertain refusal",
+            "a cause is itself uncertain",
+        ));
     }
     put_refusal(w, cause)
 }

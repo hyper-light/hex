@@ -487,7 +487,9 @@ pub(super) fn uncertain_after(id: BoxId, refusal: Refusal, cleanup: Refusal) -> 
         cleanup: Box::new(cleanup),
     };
     let room = hex_core::wire::snapshot_refusal(&whole, hex_core::wire::MAX_MESSAGE)
-        .map_or(0, |bytes| hex_core::wire::MAX_MESSAGE.saturating_sub(bytes.len()));
+        .map_or(0, |bytes| {
+            hex_core::wire::MAX_MESSAGE.saturating_sub(bytes.len())
+        });
     if let Refusal::Uncertain { refusal: kept, .. } = &mut whole {
         **kept = readiness(output, room);
     }
@@ -1013,7 +1015,10 @@ mod tests {
     /// refusal of any other kind kept as it was.
     #[test]
     fn an_uncertain_refusal_keeps_both_causes_within_one_wire_answer() {
-        let output = format!("{}the last words\n", "x".repeat(hex_core::wire::MAX_MESSAGE * 2));
+        let output = format!(
+            "{}the last words\n",
+            "x".repeat(hex_core::wire::MAX_MESSAGE * 2)
+        );
         let refusal = readiness(&output, usize::MAX);
         let cleanup = Refusal::Os {
             op: "attaching the box's native scope",
@@ -1022,7 +1027,12 @@ mod tests {
         let whole = uncertain_after(BoxId::new("unclean").unwrap(), refusal, cleanup.clone());
         let bytes = hex_core::wire::snapshot_refusal(&whole, hex_core::wire::MAX_MESSAGE).unwrap();
         assert!(bytes.len() <= hex_core::wire::MAX_MESSAGE);
-        let Refusal::Uncertain { id, refusal, cleanup: kept } = &whole else {
+        let Refusal::Uncertain {
+            id,
+            refusal,
+            cleanup: kept,
+        } = &whole
+        else {
             panic!("{whole:?}");
         };
         assert_eq!(id.as_str(), "unclean");
@@ -1036,7 +1046,11 @@ mod tests {
             op: "creating private VM directory",
             why: "ENOENT".to_owned(),
         };
-        let whole = uncertain_after(BoxId::new("unclean").unwrap(), other.clone(), cleanup.clone());
+        let whole = uncertain_after(
+            BoxId::new("unclean").unwrap(),
+            other.clone(),
+            cleanup.clone(),
+        );
         assert_eq!(
             whole,
             Refusal::Uncertain {

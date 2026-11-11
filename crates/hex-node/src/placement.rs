@@ -1305,13 +1305,15 @@ impl Driver {
                         }),
                     }
                 }
-                Err(why @ (Refusal::Exists(_) | Refusal::Lifecycle { .. } | Refusal::Uncertain { .. })) => {
-                    step.notices.push(Notice::Unknown {
-                        key,
-                        refusal: why,
-                        cleanup: None,
-                    })
-                }
+                Err(
+                    why @ (Refusal::Exists(_)
+                    | Refusal::Lifecycle { .. }
+                    | Refusal::Uncertain { .. }),
+                ) => step.notices.push(Notice::Unknown {
+                    key,
+                    refusal: why,
+                    cleanup: None,
+                }),
                 Err(why) => match runtime.delete(&id) {
                     Ok(()) | Err(Refusal::NoSuchBox(_)) => {
                         self.completed(key, Some(why), None, &mut step)?

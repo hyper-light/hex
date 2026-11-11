@@ -749,7 +749,11 @@ impl FirecrackerRuntime {
         });
         match cleanup {
             Ok(()) => Err(refusal),
-            Err(cleanup) => Err(transport::uncertain_after(id.try_clone()?, refusal, cleanup)),
+            Err(cleanup) => Err(transport::uncertain_after(
+                id.try_clone()?,
+                refusal,
+                cleanup,
+            )),
         }
     }
 
@@ -1840,7 +1844,8 @@ mod cleanup_tests {
         (config.binary, config.binary_sha256) = pinned("firecracker", b"a stand-in VMM, never run");
         (config.cost_evidence, config.cost.id) = pinned("evidence", b"a stand-in cost's evidence");
         config.state_dir = dir.path().join("absent");
-        let catalog = Catalog::parse(b"hex-devices-1\ngpu\t256\ta\t1\tvfio\t0000:01:00.0\t7\n").unwrap();
+        let catalog =
+            Catalog::parse(b"hex-devices-1\ngpu\t256\ta\t1\tvfio\t0000:01:00.0\t7\n").unwrap();
         let owner: Arc<dyn Books> = Arc::new(super::handoff_tests::NoOwnerCalls);
         let allocation = config
             .cost
@@ -1903,7 +1908,13 @@ mod cleanup_tests {
         };
         assert_eq!(named, &id);
         assert!(
-            matches!(&**refusal, Refusal::Os { op: "creating private VM directory", .. }),
+            matches!(
+                &**refusal,
+                Refusal::Os {
+                    op: "creating private VM directory",
+                    ..
+                }
+            ),
             "{refusal:?}"
         );
         assert_eq!(
