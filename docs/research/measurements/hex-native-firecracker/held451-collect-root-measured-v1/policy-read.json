@@ -1,0 +1,56 @@
+{
+  "ROOT": "01a1aa77778471339bea3beff90d6bbd",
+  "ROOT_owns_R14_fullgates_integration_main": true,
+  "agent": "01a1c8aa92c87129a300ab8f333113bd",
+  "authorizing_task": "ROOT source-only frozen83586 collect proposal for actual completed measured export; new ROOT review and actual LB window required before any execution",
+  "base_Hex": "2c8855b220a36c57685e456a7b8c98d8368f7899",
+  "current_change_ownership": "NEW docs/research/measurements/hex-native-firecracker/held451-collect-root-measured-v1/** only",
+  "local_policy": [
+    {
+      "bytes": 29698,
+      "read_in_full": true,
+      "sha256": "0ea49a206966eb9484b4ce566a647e16c32a05f05db339e0a1f963c5c26a877e",
+      "source": "/Users/adalundhe/.cache/hex-lead/worktrees/native-firecracker-validation/CLAUDE.md"
+    },
+    {
+      "bytes": 13649,
+      "read_in_full": true,
+      "sha256": "77c1179007294d2a0a29434c3f848e79e67ab3ffc2048f7ba4fbd5a6e55f8aa8",
+      "source": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/CHARTER.md"
+    }
+  ],
+  "new_agents_goals_plans": false,
+  "no_stage_query_collect_profile_build_or_native": true,
+  "ownership": [
+    "NEW docs/research/measurements/hex-native-firecracker/**",
+    "NEW standalone crates/hex-cli/tests/native_firecracker_* leaves"
+  ],
+  "parent_checkpoint": "7d436e58d60d68158a27a02540ba4e453284631f",
+  "policy": {
+    "AGENTS.md": {
+      "bytes": 1793,
+      "read_in_full": true,
+      "sha256": "f66d304c033ad4001d3d7347b67faa3bb3137d637860793e8e74f1eb6266db41"
+    },
+    "CLAUDE.md": {
+      "bytes": 17012,
+      "read_in_full": true,
+      "sha256": "fd1076b256516e0edab1b3655421d37cd934e93a8232f0125b96abcfb99ece5f"
+    },
+    "docs/development-evidence.md": {
+      "bytes": 3325,
+      "read_in_full": true,
+      "sha256": "61613a244106d95b2759b38c8b6660ff29a616983e7afd6e9faabdc38368fb63"
+    },
+    "docs/development-rules.md": {
+      "bytes": 11604,
+      "read_in_full": true,
+      "sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3"
+    }
+  },
+  "revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "role": "assigned adversarial native Firecracker lane; current task SOURCE ONLY",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "schema": "hex-native-fc-source-collect-policy-read-v1",
+  "source_only": true
+}

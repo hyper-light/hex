@@ -1,0 +1,12 @@
+{
+  "actual_exit_code": 1,
+  "correction": "read each existing prior-seal schema key explicitly in corrected metadata-only check; do not change prior seals or runtime bodies",
+  "failed_expression": "blob(path.parent/row['bundle'])",
+  "failure_kind": "local metadata checker assumed prior seal member key bundle; two retained prior seals use file",
+  "no_owned_code_import_or_remote_staging_query_collection_profile_build": true,
+  "not_native_or_export_or_SDK_failure": true,
+  "original_source_and_raw_unchanged": true,
+  "passed_up_to": "source/body pins, AST/JSON, actual receipt joins, proposed argv/guards/false template, local tool pins and existing stage inline; old-seal loop incomplete",
+  "raw_stderr": "Traceback (most recent call last):\n  File \"<stdin>\", line 100, in <module>\nKeyError: 'bundle'\n",
+  "schema": "hex-native-fc-source-metadata-validation-failure-v1"
+}

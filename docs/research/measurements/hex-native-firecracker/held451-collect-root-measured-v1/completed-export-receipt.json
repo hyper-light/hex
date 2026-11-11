@@ -1,0 +1,30 @@
+{
+  "archive": {
+    "bytes": 474576896,
+    "sha256": "b5919c38358cbe1c57cd9b4968a04fe447c431356b4a7a4ca21ccb1c3bcd1507",
+    "source": "/home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-v1-01/output/held1596.tar"
+  },
+  "execution_kind": "readonly object acquisition; no executable payload dispatch",
+  "import_manifest": {
+    "bytes": 592303,
+    "sha256": "d61ad9b2b3e360c064ce04a0680d455e7158255e5ad7d9dc3aedcc228ce4f314",
+    "source": "/home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-v1-01/output/manifest.json"
+  },
+  "meaning": "byte acquisition only; launcher-final exit/absence required separately",
+  "object_bytes": 472712455,
+  "object_count": 1596,
+  "operator_not_after_unix_ns": 1794400698731940000,
+  "quiet_window_receipt": {
+    "bytes": 1000,
+    "sha256": "3d7d8e0cacd61f26e336e05b204ef82b4db15f3c49f3790ef5fea2de9abbfb15",
+    "source": "/home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-bundle-v1/peer-quiet-window.receipt"
+  },
+  "schema": "hex-native-fc-held451-export-receipt-v1",
+  "source_input_sha256": "14e35dbed0d79273b963f8f27c1973d53ff997e6a02bd8b99fbe6c00deb91412",
+  "source_receipts": {
+    "bytes": 2549650,
+    "sha256": "3b3a6143405fc2edfb433b2803646672740a2b85479ba8862a1b8b0b98d377bf",
+    "source": "/home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-v1-01/raw/source-records.jsonl"
+  },
+  "state": "complete"
+}

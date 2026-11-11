@@ -1,0 +1,21 @@
+{
+  "actual_ROOT_metadata_directory": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/fc-profile-measured-451-v1/metadata",
+  "actual_profile_producer_source": "changed measurement source intaken by ROOT; collection source83586 non-profiling; no timing/speedup/wholecost inference",
+  "derivation": "parse actual launcher using Python integers, add only launcher_final_pin verified from actual native2852B bytes; original actual JSON bytes preserved",
+  "derived_receiver_input": {
+    "bundle": "export-result.client-input.json",
+    "bytes": 3096,
+    "sha256": "db37450b99b2e3eba574fe90a93b4fe3142c4c55b105c81efd50032f4c2c91c7"
+  },
+  "exact_copied_native_launcher": {
+    "bundle": "completed-launcher-final.json",
+    "bytes": 2852,
+    "sha256": "547bcc96f6dfbd25ed147f00d08407406871164be29d9cb57ef75f256511b662"
+  },
+  "exact_copied_native_receipt": {
+    "bundle": "completed-export-receipt.json",
+    "bytes": 1437,
+    "sha256": "93a93fbb1a8f00f9e213a338248178a79d5cde3c746eb8f385c450af41ce6b6c"
+  },
+  "old_export_quiet_receipt_and_deadline": "historical fields inside completed receipt only, not new authority; new collect template remains false/null"
+}
