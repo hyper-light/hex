@@ -1,0 +1,41 @@
+{
+  "status": "ORIGINAL SOURCE ONLY; append-only test leaf, production unchanged, UNRUN/no native or own check",
+  "parent": "6fda9054bc0cbab3a57c79703df4109839e136d9",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "source": {
+    "path": "crates/hex-runtime/src/guest/shared_tests.rs",
+    "sha256": "d7588a9d6b2405625db5170ea98e54d287bfbc123dc83dc2f9e6d381ae74e411"
+  },
+  "new_control": "guest::shared::tests::checked_gpu_facts_create_a_missing_capacity_slot_and_refuse_conflicting_metadata",
+  "requirements": [
+    "a real checked renderer/native DeviceInfo reaching the publication seam must produce the same canonical device+route eligibility when host driver resource plane lacks its slot",
+    "same ID and metadata coalesce without losing prior native route prefix or canonical backing holder",
+    "same ID conflicting measured metadata refuses; catalog values and unknown metadata never fabricate a slot"
+  ],
+  "inputs": "explicit model checked-facts and PoolRecord/BackingOffer; actual renderer join, driver readiness, native calls and measurements are outside this pure control",
+  "oracle": "empty resource plane +positive checked GPU facts publishes exact DeviceInfo and bit for the new initialized selected route; empty is not successful publication",
+  "cases": [
+    "missing native slot",
+    "equal native metadata",
+    "conflicting native metadata"
+  ],
+  "nonvacuity": [
+    "positive known checked-facts input",
+    "native Process route prefix",
+    "canonical Live P backing and exact holder",
+    "no mock launch/Store row creation"
+  ],
+  "preserved": [
+    "entire earlier shared_tests.rs prefix byte-identical",
+    "all guest production and other prior originals unchanged",
+    "no native/prober/cache/holder manager added"
+  ],
+  "dependencies": {
+    "matched_hex_API": "d87bcf9b6a6bb6d6e669d5179b666a2ef38041c4 DeviceInfo/BackingOffer try_clone and DeviceHolder",
+    "companion_composite_original": "6fda9054bc0cbab3a57c79703df4109839e136d9"
+  },
+  "root_command": "cargo test -p hex-runtime --lib --locked -- guest::shared::tests::checked_gpu_facts_create_a_missing_capacity_slot_and_refuse_conflicting_metadata --exact --test-threads=1 (within immutable admitted ROOT cohort only)",
+  "after": "UNRUN; seal before any owned push_offer remedy; not an actual reproduction"
+}

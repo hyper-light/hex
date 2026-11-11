@@ -482,3 +482,114 @@ fn ended_shared_scope_allows_inner_cleanup_while_the_original_grant_stays_charge
         "recovery never boots another VM"
     );
 }
+
+/// AC-T7.4.1: a checked renderer/native join can supply a factual device when
+/// the host resource plane has no native-driver slot. No catalog placeholder
+/// may replace it, and a conflicting existing identity must remain a refusal.
+/// Original production is unchanged until this source control is reproduced.
+#[test]
+fn checked_gpu_facts_create_a_missing_capacity_slot_and_refuse_conflicting_metadata() {
+    use hex_api::{
+        DeviceHolder, DeviceId, DeviceInfo, DeviceKind, GpuEligibility, ImageOs, ImagePlatform,
+        RouteKey, RouteOffer,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (runtime, owner) = configured(dir.path());
+    let allocation = runtime.configured_allocation().unwrap();
+    let id = DeviceId {
+        kind: DeviceKind::Gpu,
+        key: 256,
+    };
+    let key = BackingKey {
+        pool: [8; 32],
+        generation: [9; 16],
+    };
+    let backing = PoolRecord {
+        version: RECORD_VERSION,
+        key,
+        execution: Execution::ShardsDedicated,
+        cost: allocation.cost,
+        allocation: Some(allocation),
+        devices: vec![id],
+        phase: BackingPhase::Live,
+        init: Some(hex_core::record::ProcId {
+            pid: 42,
+            start_ticks: 7,
+        }),
+        exit: None,
+    }
+    .offer()
+    .unwrap();
+    let image = ImagePlatform {
+        os: ImageOs::Linux,
+        arch: route::host_platform().unwrap().arch,
+    };
+    let native = RouteOffer {
+        key: RouteKey {
+            class: Class::Process,
+            image,
+            execution: Execution::Native,
+            gpu: GpuEligibility::None,
+        },
+        cost: None,
+        backing: None,
+    };
+    let selected = RouteOffer {
+        key: RouteKey {
+            class: Class::Shards,
+            image,
+            execution: Execution::ShardsDedicated,
+            gpu: GpuEligibility::Required,
+        },
+        cost: Some(allocation.cost),
+        backing: Some(key),
+    };
+    // Explicit input from the checked-facts boundary, not a catalog or native
+    // renderer invocation. This unit tests publication of those exact values.
+    let observed = DeviceInfo {
+        id,
+        model: "checked renderer model input".into(),
+        size: hex_api::MIN_MEMORY,
+        holder: Some(DeviceHolder::Backing(key)),
+    };
+    observed.check().unwrap();
+    for previous in [
+        None,
+        Some(observed.try_clone().unwrap()),
+        Some(DeviceInfo {
+            model: "conflicting native model input".into(),
+            ..observed.try_clone().unwrap()
+        }),
+    ] {
+        let conflict = previous
+            .as_ref()
+            .is_some_and(|info| info.model != observed.model);
+        let mut capacity = Books::capacity(owner.as_ref()).unwrap();
+        capacity.routes = vec![native];
+        capacity.backings = vec![backing.try_clone().unwrap()];
+        capacity.devices = previous.into_iter().collect();
+        capacity.device_routes = vec![0; capacity.devices.len()];
+        capacity.check().unwrap();
+        let result = push_offer(&mut capacity, selected, &[observed.try_clone().unwrap()]);
+        if conflict {
+            assert!(
+                result.is_err(),
+                "the same physical identity accepted conflicting measured metadata"
+            );
+        } else {
+            result.unwrap();
+            assert_eq!(capacity.routes, vec![native, selected]);
+            assert_eq!(
+                capacity.devices,
+                vec![observed.try_clone().unwrap()],
+                "checked factual GPU disappeared because the host resource plane had no slot"
+            );
+            assert_eq!(capacity.device_routes, vec![2]);
+            assert_eq!(capacity.backings, vec![backing.try_clone().unwrap()]);
+            capacity.check().unwrap();
+        }
+    }
+    assert_eq!(owner.launches.load(Ordering::SeqCst), 0);
+    assert!(owner.pool.lock().unwrap().is_none());
+    assert!(owner.boxes.lock().unwrap().is_empty());
+}

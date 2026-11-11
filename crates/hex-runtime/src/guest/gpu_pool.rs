@@ -759,6 +759,10 @@ mod tests {
         let catalog = devices::Catalog::parse(b"hex-devices-1\ngpu\t256\tunmeasured\t777\tshards-gpu\tpci:0000:01:00.0\t\ngpu\t512\tunmeasured\t777\tshards-gpu\tpci:0000:02:00.0\t\n").unwrap();
         let runtime = GuestRuntime::new(standalone.clone(), config)
             .recorded_at(dir.path().join("guest"))
+            .with_runtime_paths(
+                shards_api::RuntimePaths::new(dir.path().join("cache"), dir.path().join("home"))
+                    .unwrap(),
+            )
             .with_runtime_cost(allocation.cost)
             .unwrap()
             .with_gpu_catalog(triomphe::Arc::try_new(catalog).unwrap())
@@ -920,6 +924,208 @@ mod tests {
         assert_eq!(source.allocation, Some(allocation));
         assert_eq!(standalone.0.load(Ordering::SeqCst), 0);
         assert!(runtime.dedicated.lock().unwrap().is_empty());
+    }
+
+    /// AC-T7.4.1: an unavailable VM observation cannot erase an initialized
+    /// native CPU route or its already-retained backing charge. This original
+    /// calls the real composition seam; production stays unchanged until run.
+    #[test]
+    fn native_oci_routes_and_canonical_claims_survive_qualified_shards_capacity_failure() {
+        use hex_api::{
+            Class, Execution, GpuEligibility, ImageOs, ImagePlatform, RouteKey, RouteOffer,
+        };
+        use std::fmt::Write as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (config, input, allocation) = observer::config::tests::fixture(dir.path());
+        let standalone = Arc::new(NoEffects(AtomicUsize::new(0)));
+        let catalog = devices::Catalog::parse(
+            b"hex-devices-1\ngpu\t256\tunmeasured\t777\tshards-gpu\tpci:0000:01:00.0\t\n",
+        )
+        .unwrap();
+        let runtime = GuestRuntime::new(standalone.clone(), config)
+            .recorded_at(dir.path().join("guest"))
+            .with_runtime_paths(
+                shards_api::RuntimePaths::new(dir.path().join("cache"), dir.path().join("home"))
+                    .unwrap(),
+            )
+            .with_runtime_cost(allocation.cost)
+            .unwrap()
+            .with_gpu_catalog(triomphe::Arc::try_new(catalog).unwrap())
+            .with_gpu_observer(input)
+            .unwrap();
+        let native = triomphe::Arc::try_new(RecoveringNative {
+            identity: shards_api::Identity {
+                pid: 42,
+                started: 7,
+                vsock: "/model/v".into(),
+            },
+            release_on_stop: false,
+            released: std::sync::atomic::AtomicBool::new(false),
+            attaches: AtomicUsize::new(0),
+            stops: AtomicUsize::new(0),
+        })
+        .unwrap();
+        let owner = Arc::new(Cold {
+            row: Mutex::new(None),
+            effects: AtomicUsize::new(0),
+            queries: AtomicUsize::new(0),
+            native: Some(native.clone()),
+            finalized: AtomicUsize::new(0),
+            luid: None,
+            launches: AtomicUsize::new(0),
+        });
+        let books: Arc<dyn Books> = owner.clone();
+        runtime.bind_books(Arc::downgrade(&books)).unwrap();
+        let prepared = runtime.prepare_gpu_backing().unwrap().unwrap();
+        let mut row = owner.row.lock().unwrap().take().unwrap();
+        row.accept_grant(&BackingGrant {
+            key: prepared.key,
+            allocation,
+            devices: prepared.devices.clone(),
+        })
+        .unwrap();
+        let definition = runtime.gpu_backing_definition().unwrap().unwrap();
+        let mut receipt = Receipt::intent(
+            PoolRecord::decode(&row.encode().unwrap()).unwrap(),
+            definition.physical,
+            &runtime.config,
+        )
+        .unwrap();
+        let scope = row.scope();
+        let physical = receipt.physical[0];
+        receipt.report = Some(shards_api::physical::GpuReport {
+            scope: *scope.bytes(),
+            probe: shards_api::GpuProbe {
+                devices: vec![shards_api::ResolvedGpu {
+                    physical,
+                    pci: Some(physical),
+                    luid: None,
+                    uuid: [3; 16],
+                    name: None,
+                    device_local_bytes: None,
+                }],
+                host_visible_bytes: 1,
+            },
+        });
+        let inventory = format!(
+            "hex-vulkan-guest-inventory 1 1\ndevice 0 4202496 22 1 1 2 2 {} 677075 76656e7573 4d657361 2 1 1 2 1\nheap 0 0 1 4096\n",
+            "03".repeat(16)
+        );
+        let observer = runtime.gpu_observer.as_ref().unwrap();
+        receipt.readiness = Some(observer::Evidence {
+            scope,
+            configuration: observer.identity(),
+            max_queues: observer.queues(),
+            report: observer::Report::parse(inventory.as_bytes(), 1, observer.queues()).unwrap(),
+        });
+        let mut configuration = String::new();
+        for byte in observer.identity() {
+            write!(&mut configuration, "{byte:02x}").unwrap();
+        }
+        let mut stdout = String::new();
+        for byte in inventory.as_bytes() {
+            write!(&mut stdout, "{byte:02x}").unwrap();
+        }
+        receipt.attempt = observer::Attempt::parse(&format!(
+            "{configuration} {} complete eof {} {stdout} eof {} -",
+            observer.queues(),
+            observer.output_bytes(1).unwrap(),
+            observer.stderr_bytes(),
+        ))
+        .unwrap();
+        receipt.phase =
+            Phase::Running(super::super::shared::copy_identity(&native.identity).unwrap());
+        row.init = Some(hex_core::record::ProcId {
+            pid: native.identity.pid,
+            start_ticks: native.identity.started,
+        });
+        row.phase = BackingPhase::Live;
+        pool::write(&definition.path, &receipt).unwrap();
+        runtime.preflight_backing(&row).unwrap();
+        receipt.checked_readiness().unwrap();
+        let original = row.encode().unwrap();
+        *owner.row.lock().unwrap() = Some(row);
+        let observed = runtime.physical_observations();
+        assert!(
+            matches!(observed, Err(Refusal::Backing { key, cause: LifecycleCause::Uncertain }) if key == prepared.key)
+        );
+        assert_eq!(native.attaches.load(Ordering::SeqCst), 1);
+
+        let mut capacity = Books::capacity(owner.as_ref()).unwrap();
+        let image = ImagePlatform {
+            os: ImageOs::Windows,
+            arch: super::super::route::host_platform().unwrap().arch,
+        };
+        capacity.routes = vec![
+            RouteOffer {
+                key: RouteKey {
+                    class: Class::Process,
+                    image,
+                    execution: Execution::Native,
+                    gpu: GpuEligibility::None,
+                },
+                cost: None,
+                backing: None,
+            },
+            RouteOffer {
+                key: RouteKey {
+                    class: Class::Oci,
+                    image,
+                    execution: Execution::Native,
+                    gpu: GpuEligibility::Any,
+                },
+                cost: None,
+                backing: None,
+            },
+        ];
+        capacity.check().unwrap();
+        let prefix = capacity.try_clone().unwrap();
+        let composed = runtime.add_offers(&mut capacity, Class::Shards);
+        assert_eq!(native.attaches.load(Ordering::SeqCst), 2);
+        assert_eq!(capacity.id, prefix.id);
+        assert_eq!(capacity.total, prefix.total);
+        assert_eq!(capacity.free, prefix.free);
+        assert_eq!(capacity.routes.get(..2), Some(prefix.routes.as_slice()));
+        let backing = capacity
+            .backings
+            .iter()
+            .find(|backing| backing.key == prepared.key)
+            .unwrap();
+        assert_eq!(backing.devices, prepared.devices);
+        assert_eq!(backing.cost, allocation.cost);
+        assert_eq!(backing.phase, BackingPhase::Live);
+        assert_eq!(
+            owner
+                .row
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .encode()
+                .unwrap(),
+            original
+        );
+        assert_eq!(owner.queries.load(Ordering::SeqCst), 0);
+        assert_eq!(owner.launches.load(Ordering::SeqCst), 0);
+        assert_eq!(owner.finalized.load(Ordering::SeqCst), 0);
+        assert_eq!(standalone.0.load(Ordering::SeqCst), 0);
+        assert!(
+            composed.is_ok(),
+            "qualified GPU observation failure erased an initialized native CPU report: {composed:?}"
+        );
+        assert!(
+            capacity
+                .routes
+                .iter()
+                .any(|offer| offer.key.gpu == GpuEligibility::Required
+                    && offer.backing == Some(prepared.key))
+        );
+        assert!(
+            capacity.devices.is_empty(),
+            "no actual fresh GPU metadata was observed"
+        );
+        capacity.check().unwrap();
     }
 
     struct Cold {
@@ -1120,12 +1326,16 @@ mod tests {
             identity: Option<&shards_api::Identity>,
         ) -> Result<shards_api::ManagedReceipt, Refusal> {
             let native = self.native.as_ref().ok_or_else(refused_model)?;
-            assert!(
-                identity.is_none(),
-                "the retained Intent has no local controller publication"
-            );
             let row = self.row.lock().unwrap();
             let row = row.as_ref().unwrap();
+            if row.phase == BackingPhase::Live {
+                assert_eq!(identity, Some(&native.identity));
+            } else {
+                assert!(
+                    identity.is_none(),
+                    "the retained Intent has no local controller publication"
+                );
+            }
             managed::same_native(NativeRecord::Pool(row), &native.identity)?;
             native.attaches.fetch_add(1, Ordering::SeqCst);
             Ok(shards_api::managed_receipt(native.clone()))
