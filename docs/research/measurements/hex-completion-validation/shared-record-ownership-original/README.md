@@ -1,3 +1,5 @@
+Current result: [actual fix, falsifier and restoration](RESULTS-F522.md). The historical original proposal below is retained for source attribution.
+
 # Shared CPU outer-record original and dedicated owner control
 
 SOURCE ONLY, UNCOMPILED/UNRUN. ROOT coordinator original against fixedaaca22b9c05ce0b9011d2d3096611cfab01f71c6; policy7d7e0855/rulesdf2acf47 retained. Production Recorded/Guest/Store bytes remain unchanged; the only existing-file edit registers this cfg(test) leaf. This is separate from L3's trusted-entry/native component and asks for no platform/ABI change.

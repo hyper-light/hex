@@ -1,0 +1,13 @@
+    Checking hex-api v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-f522a9a4-linux-shared-owner-after-f522/source/crates/hex-api)
+    Checking hex-core v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-f522a9a4-linux-shared-owner-after-f522/source/crates/hex-core)
+    Checking hex-client v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-f522a9a4-linux-shared-owner-after-f522/source/crates/hex-client)
+    Checking hex-gpu v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-f522a9a4-linux-shared-owner-after-f522/source/crates/hex-gpu)
+    Checking hex-health v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-f522a9a4-linux-shared-owner-after-f522/source/crates/hex-health)
+    Checking hex-runtime v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-f522a9a4-linux-shared-owner-after-f522/source/crates/hex-runtime)
+    Checking hex-sim v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-f522a9a4-linux-shared-owner-after-f522/source/crates/hex-sim)
+    Checking hex-node v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-f522a9a4-linux-shared-owner-after-f522/source/crates/hex-node)
+    Checking hex-cli v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-f522a9a4-linux-shared-owner-after-f522/source/crates/hex-cli)
+    Checking hex-bench v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-f522a9a4-linux-shared-owner-after-f522/source/crates/hex-bench)
+    Checking hex-testkit v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-f522a9a4-linux-shared-owner-after-f522/source/crates/hex-testkit)
+    Checking hex-afunix v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-f522a9a4-linux-shared-owner-after-f522/source/crates/hex-afunix)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 13.87s

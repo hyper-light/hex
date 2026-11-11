@@ -1,0 +1,165 @@
+{
+  "source": "f522a9a4e14a8654567fb19aa7ed85471910d9dd",
+  "driver": {
+    "pid": 2531587,
+    "ppid": 2531572,
+    "start_ticks": 32769736
+  },
+  "phases": [
+    {
+      "name": "after-shared1",
+      "owner_kind": "Cargo",
+      "identity": {
+        "pid": 2539238,
+        "ppid": 2531587,
+        "start_ticks": 32770011
+      },
+      "exit": 0,
+      "counts": [
+        [
+          "ok",
+          "1",
+          "0",
+          "0"
+        ]
+      ],
+      "stdout": {
+        "bytes": 240,
+        "sha256": "f6256239d6492c32d98f104371d7a55dfd146500b1c05f8e88b13be15edec612"
+      },
+      "stderr": {
+        "bytes": 3648,
+        "sha256": "de0c7b8a20837d397c11b74778d81d5d29482cfb7f2d545b3ae471e5ac8c9bf0"
+      },
+      "binary": {
+        "path": "/home/adalundhe/.cache/hex-lead/cohort-f522a9a4-linux-shared-owner-after-f522/target/debug/deps/hex_node-d6283f30893b31f3",
+        "bytes": 189645800,
+        "sha256": "65fd70761cfc3518a49bcd6ac455ef7cad5ac5c3b78c3d817802e830c79aff00"
+      }
+    },
+    {
+      "name": "after-node-strict",
+      "owner_kind": "Cargo",
+      "identity": {
+        "pid": 2857609,
+        "ppid": 2531587,
+        "start_ticks": 32777911
+      },
+      "exit": 0,
+      "counts": [],
+      "stdout": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stderr": {
+        "bytes": 3236,
+        "sha256": "221f877e89c38c45018152cea0d876274f77fa622895b8eaa2405e3b43acf8e4"
+      },
+      "binary": null
+    },
+    {
+      "name": "after-production",
+      "owner_kind": "bash production gate",
+      "identity": {
+        "pid": 2950976,
+        "ppid": 2531587,
+        "start_ticks": 32780062
+      },
+      "exit": 0,
+      "counts": [],
+      "stdout": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stderr": {
+        "bytes": 1675,
+        "sha256": "ebb50088f8a967721455038617108ca839fe860c809154a195ccae555b866571"
+      },
+      "binary": null
+    },
+    {
+      "name": "mutant-shared1",
+      "owner_kind": "Cargo",
+      "identity": {
+        "pid": 3029584,
+        "ppid": 2531587,
+        "start_ticks": 32781457
+      },
+      "exit": 101,
+      "counts": [
+        [
+          "FAILED",
+          "0",
+          "1",
+          "0"
+        ]
+      ],
+      "stdout": {
+        "bytes": 388,
+        "sha256": "e52d0566d8d5dc468f054a99c95e5ac968fcce7caafcafe59dc44361581ac36b"
+      },
+      "stderr": {
+        "bytes": 4254,
+        "sha256": "74757a3e8d1f4dceca70771e79962e11cddc0c64fdb87284e1035df31ebc16f5"
+      },
+      "binary": {
+        "path": "/home/adalundhe/.cache/hex-lead/cohort-f522a9a4-linux-shared-owner-after-f522/mutant/target/debug/deps/hex_node-d6283f30893b31f3",
+        "bytes": 189650680,
+        "sha256": "024d7a031d3fac1f36314ea36f3b132208aa584641bb9f059edc61318c066414"
+      }
+    },
+    {
+      "name": "restored-shared1",
+      "owner_kind": "Cargo",
+      "identity": {
+        "pid": 3271680,
+        "ppid": 2531587,
+        "start_ticks": 32789560
+      },
+      "exit": 0,
+      "counts": [
+        [
+          "ok",
+          "1",
+          "0",
+          "0"
+        ]
+      ],
+      "stdout": {
+        "bytes": 240,
+        "sha256": "f6256239d6492c32d98f104371d7a55dfd146500b1c05f8e88b13be15edec612"
+      },
+      "stderr": {
+        "bytes": 3783,
+        "sha256": "bc31935ee792a4779e234409fe13fdc55758a98398583fa50ddaf8d98ced0e9b"
+      },
+      "binary": {
+        "path": "/home/adalundhe/.cache/hex-lead/cohort-f522a9a4-linux-shared-owner-after-f522/restored/target/debug/deps/hex_node-d6283f30893b31f3",
+        "bytes": 189652096,
+        "sha256": "ca1555c808842d01b24e2340393128e0a5bf36696084a47034dfaaa6ec5591cd"
+      }
+    }
+  ],
+  "raw": {
+    "bytes": 1343628,
+    "sha256": "a9cf0745b621873daa79d635a866afb72e55f67f86f33e3303ef38506aa0c8fc"
+  },
+  "all_logs_full_read": true,
+  "all_members_and_source_archives_independently_verified": true,
+  "all_three_binaries_rehashed_by_collector": true,
+  "restored_source_exact": true,
+  "source_changes": {
+    "after": [],
+    "mutant": [],
+    "restored": []
+  },
+  "temp_entries": {
+    "after": 0,
+    "mutant": 0,
+    "restored": 0
+  },
+  "event_errors": [],
+  "native_runtime_VM_GPU": 0,
+  "outer_scope_and_all_recorded_births_absent": true,
+  "collector_label_note": "outer-closures kind cargo is generic in original raw for every phase; after-production PID2950976 is bash, not Cargo. Exact command/identity and absence proof are correct; raw retained unchanged."
+}
