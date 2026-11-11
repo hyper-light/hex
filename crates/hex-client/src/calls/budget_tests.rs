@@ -2121,8 +2121,8 @@ fn absolute_run_settle_error_does_not_renew_kill_answer_budget() {
         .ok()
         .or_else(|| after_cleanup.as_ref().ok());
     assert!(
-        matches!(returned_error, Some((_, Err(Refusal::Broken(why)))) if why.contains("stdout") && why.contains("neither carried nor asked")),
-        "the original bounded setup refusal must survive cleanup"
+        matches!(returned_error, Some((_, Err(Refusal::Lifecycle { id, cause: hex_api::LifecycleCause::Uncertain }))) if *id == absolute_spec().id),
+        "a Kill unanswered within the original authority leaves the run's end uncertain"
     );
     assert!(
         before_cleanup.is_ok(),
@@ -2855,8 +2855,8 @@ fn prepared_actor_settle_error_retains_original_kill_answer_authority() {
         .ok()
         .or_else(|| after_cleanup.as_ref().ok());
     assert!(
-        matches!(returned_error, Some((_, Err(Refusal::Broken(why)))) if why.contains("stdout") && why.contains("neither carried nor asked")),
-        "the exact original stream-settlement refusal must survive cleanup"
+        matches!(returned_error, Some((_, Err(Refusal::Lifecycle { id, cause: hex_api::LifecycleCause::Uncertain }))) if *id == absolute_spec().id),
+        "a Kill unanswered within the original authority leaves the run's end uncertain"
     );
     assert!(
         before_cleanup.is_ok(),
