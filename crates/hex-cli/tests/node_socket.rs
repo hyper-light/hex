@@ -978,6 +978,14 @@ impl Runtime for HostBoxes {
 }
 
 impl hex_node::recorded::Recover for HostBoxes {
+    // A simulator keeps no native metadata: it has no names to join to the retained cohort.
+    fn preflight_retained(
+        &self,
+        _records: &hex_runtime::devices::Records,
+        _pools: &[hex_core::record::PoolRecord],
+    ) -> Result<(), Refusal> {
+        Ok(())
+    }
     fn trace(&self, _id: &BoxId) -> Result<Option<ProcId>, Refusal> {
         Ok(None)
     }

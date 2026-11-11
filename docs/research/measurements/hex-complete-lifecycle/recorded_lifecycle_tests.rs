@@ -81,6 +81,14 @@ impl Recover for Backend {
             call => Forward::Back(Box::new((call, stdio))),
         }
     }
+    // SimRuntime keeps no native metadata: it has no names to join to the retained cohort.
+    fn preflight_retained(
+        &self,
+        _: &hex_runtime::devices::Records,
+        _: &[PoolRecord],
+    ) -> Result<(), Refusal> {
+        Ok(())
+    }
     fn trace(&self, _: &BoxId) -> Result<Option<ProcId>, Refusal> {
         Ok(None)
     }
