@@ -2671,3 +2671,206 @@ fn prepared_actor_settle_error_retains_original_kill_answer_authority() {
     assert!(returned >= original.unwrap());
     assert!(returned <= cleanup_at);
 }
+
+/// A call that gave up waiting: its late answers have no taker.
+const GAVE_UP: u64 = u64::MAX;
+/// Messages for others before the fuse ends the connection, the only way a poll that keeps reading
+/// comes back: far more than these tests' polls and calls read (one each).
+const FUSE: usize = 1_000;
+
+/// Answers for others that keep coming: each read hands on one message, as one `SOCK_SEQPACKET` read
+/// does, and leaves another ready.
+struct Chatter {
+    socket: UdpSocket,
+    /// The agent's next messages, ahead of the traffic: answers to the test's calls, a program's end.
+    next: Mutex<VecDeque<Vec<u8>>>,
+    /// Whether the traffic is on: one late answer to [`GAVE_UP`] per read.
+    chatting: AtomicBool,
+    /// Turns taken: each waits on the connection through its handle once.
+    turns: AtomicUsize,
+    /// Messages for others handed on.
+    others: AtomicUsize,
+    sent: Mutex<Vec<(u64, Request)>>,
+}
+
+impl Chatter {
+    fn new() -> Self {
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        socket.connect(socket.local_addr().unwrap()).unwrap();
+        socket.set_nonblocking(true).unwrap();
+        Self {
+            socket,
+            next: Mutex::new(VecDeque::new()),
+            chatting: AtomicBool::new(false),
+            turns: AtomicUsize::new(0),
+            others: AtomicUsize::new(0),
+            sent: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// `answer` to `id` is the agent's next message, ahead of the traffic.
+    fn queue(&self, id: u64, answer: &Answer) {
+        self.next
+            .lock()
+            .unwrap()
+            .push_back(wire::answer(id, answer, wire::MAX_MESSAGE).unwrap());
+        self.socket.send(&[1]).unwrap();
+    }
+
+    fn chat(&self) {
+        self.chatting.store(true, Ordering::SeqCst);
+        self.socket.send(&[1]).unwrap();
+    }
+
+    /// What `poll` returned, with the turns it took and the messages for others it read.
+    fn counted<R>(&self, poll: impl FnOnce() -> R) -> (R, usize, usize) {
+        let (turns, others) = (
+            self.turns.load(Ordering::SeqCst),
+            self.others.load(Ordering::SeqCst),
+        );
+        let got = poll();
+        (
+            got,
+            self.turns.load(Ordering::SeqCst) - turns,
+            self.others.load(Ordering::SeqCst) - others,
+        )
+    }
+}
+
+impl Transport for Chatter {
+    type Reading = ();
+    fn answers() -> &'static [Patience; KINDS] {
+        static WAITS: [Patience; KINDS] =
+            [const { Patience::measuring("test.client_poll.unarmed") }; KINDS];
+        &WAITS
+    }
+    fn reading(&self) {}
+    fn handle(&self) -> Handle<'_> {
+        self.turns.fetch_add(1, Ordering::SeqCst);
+        #[cfg(unix)]
+        return std::os::fd::AsFd::as_fd(&self.socket);
+        #[cfg(windows)]
+        std::os::windows::io::AsSocket::as_socket(&self.socket)
+    }
+    fn recv(&self, _: &mut (), take: &mut Take<'_>) -> Result<bool, Refusal> {
+        while self.socket.recv(&mut [0]).is_ok() {}
+        let next = self.next.lock().unwrap().pop_front();
+        let message = match next {
+            Some(message) => message,
+            None if self.chatting.load(Ordering::SeqCst) => {
+                if self.others.load(Ordering::SeqCst) >= FUSE {
+                    return Err(Refusal::Broken(
+                        "the fuse: a poll kept reading answers for others".into(),
+                    ));
+                }
+                self.others.fetch_add(1, Ordering::SeqCst);
+                wire::answer(GAVE_UP, &Answer::Done, wire::MAX_MESSAGE).unwrap()
+            }
+            None => return Ok(false),
+        };
+        take(
+            &Received {
+                size: message.len(),
+                bytes: &message,
+                descriptors: 0,
+                descriptors_cut: false,
+            },
+            Vec::new(),
+        )?;
+        if self.chatting.load(Ordering::SeqCst) || !self.next.lock().unwrap().is_empty() {
+            self.socket.send(&[1]).unwrap();
+        }
+        Ok(true)
+    }
+    fn try_send(&self, bytes: &[u8], at: &mut usize, _: &[Lent<'_>]) -> Result<bool, Sent> {
+        let (header, request) = wire::read_request_apart(bytes, wire::MAX_MESSAGE).unwrap();
+        match &request {
+            Request::Call(Call::Exec { .. }) => self.queue(header.id, &Answer::Started { pid: 7 }),
+            Request::Call(Call::Kill { .. }) => self.queue(header.id, &Answer::Done),
+            _ => {}
+        }
+        self.sent.lock().unwrap().push((header.id, request));
+        *at = bytes.len();
+        Ok(true)
+    }
+    fn shutdown(&self) {}
+}
+
+/// A program started through the real exec call, and its exec's id.
+fn chatting_program(client: &Core<Chatter>) -> (Box<dyn Proc>, u64) {
+    let proc = client
+        .exec(
+            &BoxId::new("poll-bound").unwrap(),
+            Program::of(&["poll-bound"]),
+            Stdio::null(),
+        )
+        .unwrap();
+    let sent = client.conn.shared.transport.sent.lock().unwrap();
+    assert!(matches!(sent[..], [(_, Request::Call(Call::Exec { .. }))]));
+    (proc, sent[0].0)
+}
+
+/// AC-T7.4.1: do `try_wait`, then `wait_for(0)`, on a remote program while answers for others keep
+/// coming; expect each to take one turn, read one message and return `Ok(None)` with more still
+/// coming. Then with its end next: expect the end from one turn, then from none.
+#[test]
+fn a_poll_reads_once_while_answers_for_others_keep_coming() {
+    let client = configured(Chatter::new());
+    let (mut proc, exec) = chatting_program(&client);
+    let chatter = &client.conn.shared.transport;
+    chatter.chat();
+    let polled = chatter.counted(|| proc.try_wait());
+    let zero = chatter.counted(|| proc.wait_for(Duration::ZERO));
+    chatter.queue(exec, &Answer::Exited(Exit::Code(7)));
+    let ended = chatter.counted(|| proc.try_wait());
+    let again = chatter.counted(|| proc.try_wait());
+    let others = chatter.others.load(Ordering::SeqCst);
+    let state = client.conn.shared.state().unwrap();
+    let handed_on = !state.reading && state.waiting.is_empty() && state.closed.is_none();
+    drop(state);
+    eprintln!(
+        "client_poll_bound phase=try_wait polled={polled:?} zero={zero:?} ended={ended:?} again={again:?} others={others} fuse={FUSE} handed_on={handed_on}"
+    );
+    assert_eq!(
+        polled,
+        (Ok(None), 1, 1),
+        "a poll must take one turn and read once while answers for others keep coming"
+    );
+    assert_eq!(zero, (Ok(None), 1, 1));
+    assert_eq!(ended, (Ok(Some(Exit::Code(7))), 1, 0));
+    assert_eq!(again, (Ok(Some(Exit::Code(7))), 0, 0));
+    assert!(others < FUSE, "answers for others were still coming");
+    assert!(handed_on, "each poll handed the reader's turn on");
+}
+
+/// AC-T7.4.1: do `kill` on a remote program while answers for others keep coming; expect its check
+/// for an end to take one turn and read once, then exactly one Kill, answered in one more turn.
+#[test]
+fn kill_checks_once_for_an_end_while_answers_for_others_keep_coming() {
+    let client = configured(Chatter::new());
+    let (mut proc, exec) = chatting_program(&client);
+    let chatter = &client.conn.shared.transport;
+    chatter.chat();
+    let killed = chatter.counted(|| proc.kill());
+    let kills: Vec<u64> = chatter
+        .sent
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|(_, request)| match request {
+            Request::Call(Call::Kill { exec }) => Some(*exec),
+            _ => None,
+        })
+        .collect();
+    let others = chatter.others.load(Ordering::SeqCst);
+    eprintln!(
+        "client_poll_bound phase=kill killed={killed:?} kills={kills:?} exec={exec} others={others} fuse={FUSE}"
+    );
+    assert_eq!(
+        killed,
+        (Ok(()), 2, 1),
+        "kill's check for an end must take one turn and read once, then one turn for its answer"
+    );
+    assert_eq!(kills, [exec]);
+    assert!(others < FUSE, "answers for others were still coming");
+}
