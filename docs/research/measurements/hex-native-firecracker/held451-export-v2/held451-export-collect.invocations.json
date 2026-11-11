@@ -1,0 +1,145 @@
+{
+  "schema": "hex-native-fc-held451-reviewed-command-candidate-v2",
+  "source_checkpoint_parent": "c5ab0a20a6f1510ebffd33cbf90f02c42bb6e48d",
+  "dispatch_authorized": false,
+  "source_seal_sha256": "02bab67d6d60b1371b205a27b9456b8fd3703a51d0b2bd7a2e0035d0676de5cb",
+  "maximum_operator_window_seconds": 600,
+  "old_deadline_and_ACK_reusable": false,
+  "stages": [
+    {
+      "stage": "export",
+      "admitted": false,
+      "fresh_bundle": "/home/adalundhe/.cache/hex-native-firecracker/held451-export-bundle-2359-v2",
+      "fresh_root": "/home/adalundhe/.cache/hex-native-firecracker/held451-export-2359-v2-01",
+      "fresh_unit": "hex-native-fc-held451-export-2359-v2-01",
+      "admission_template": {
+        "bundle": "held451-admission.export.template.json",
+        "bytes": 1162,
+        "sha256": "d53c0df03656686920c8f166ac4f3a7591bf0de8521f64a37d5ea0bb8c779839"
+      },
+      "remote_argv": [
+        "/usr/bin/timeout",
+        "--signal=TERM",
+        "--kill-after=3s",
+        "200s",
+        "/usr/bin/nice",
+        "-n",
+        "10",
+        "/usr/bin/python3",
+        "-B",
+        "/home/adalundhe/.cache/hex-native-firecracker/held451-export-bundle-2359-v2/export_held451_objects.py",
+        "--stage",
+        "export",
+        "--admission",
+        "/home/adalundhe/.cache/hex-native-firecracker/held451-export-bundle-2359-v2/reviewed.export.json",
+        "--root",
+        "/home/adalundhe/.cache/hex-native-firecracker/held451-export-2359-v2-01",
+        "--seal",
+        "/home/adalundhe/.cache/hex-native-firecracker/held451-export-bundle-2359-v2/held451-export.seal.json"
+      ],
+      "remote_shell_text": "/usr/bin/timeout --signal=TERM --kill-after=3s 200s /usr/bin/nice -n 10 /usr/bin/python3 -B /home/adalundhe/.cache/hex-native-firecracker/held451-export-bundle-2359-v2/export_held451_objects.py --stage export --admission /home/adalundhe/.cache/hex-native-firecracker/held451-export-bundle-2359-v2/reviewed.export.json --root /home/adalundhe/.cache/hex-native-firecracker/held451-export-2359-v2-01 --seal /home/adalundhe/.cache/hex-native-firecracker/held451-export-bundle-2359-v2/held451-export.seal.json",
+      "normal_kiln_argv": [
+        "/Users/adalundhe/.local/bin/kiln",
+        "run",
+        "--quiet",
+        "--on",
+        "451397fcc585f7f7cb9aaf00e42064bb",
+        "--needs",
+        "linux/amd64,cpus=1,mem=4g,disk=12g",
+        "--no-sync",
+        "--timeout",
+        "210",
+        "--",
+        "/usr/bin/timeout --signal=TERM --kill-after=3s 200s /usr/bin/nice -n 10 /usr/bin/python3 -B /home/adalundhe/.cache/hex-native-firecracker/held451-export-bundle-2359-v2/export_held451_objects.py --stage export --admission /home/adalundhe/.cache/hex-native-firecracker/held451-export-bundle-2359-v2/reviewed.export.json --root /home/adalundhe/.cache/hex-native-firecracker/held451-export-2359-v2-01 --seal /home/adalundhe/.cache/hex-native-firecracker/held451-export-bundle-2359-v2/held451-export.seal.json"
+      ],
+      "normal_kiln_shell_text": "/Users/adalundhe/.local/bin/kiln run --quiet --on 451397fcc585f7f7cb9aaf00e42064bb --needs linux/amd64,cpus=1,mem=4g,disk=12g --no-sync --timeout 210 -- '/usr/bin/timeout --signal=TERM --kill-after=3s 200s /usr/bin/nice -n 10 /usr/bin/python3 -B /home/adalundhe/.cache/hex-native-firecracker/held451-export-bundle-2359-v2/export_held451_objects.py --stage export --admission /home/adalundhe/.cache/hex-native-firecracker/held451-export-bundle-2359-v2/reviewed.export.json --root /home/adalundhe/.cache/hex-native-firecracker/held451-export-2359-v2-01 --seal /home/adalundhe/.cache/hex-native-firecracker/held451-export-bundle-2359-v2/held451-export.seal.json'",
+      "kiln_input": {
+        "on": "451397fcc585f7f7cb9aaf00e42064bb",
+        "needs": "linux/amd64,cpus=1,mem=4g,disk=12g",
+        "sync": false,
+        "timeout_s": 210,
+        "command": "/usr/bin/timeout --signal=TERM --kill-after=3s 200s /usr/bin/nice -n 10 /usr/bin/python3 -B /home/adalundhe/.cache/hex-native-firecracker/held451-export-bundle-2359-v2/export_held451_objects.py --stage export --admission /home/adalundhe/.cache/hex-native-firecracker/held451-export-bundle-2359-v2/reviewed.export.json --root /home/adalundhe/.cache/hex-native-firecracker/held451-export-2359-v2-01 --seal /home/adalundhe/.cache/hex-native-firecracker/held451-export-bundle-2359-v2/held451-export.seal.json"
+      },
+      "code_run_program": "return await kiln.machines.run(input);",
+      "code_run_timeout_s": 220,
+      "finite_guards": {
+        "worker_deadline_seconds": 175,
+        "owned_scope_RuntimeMaxSec": 180,
+        "outer_timeout_seconds": 200,
+        "outer_TERM_to_KILL_seconds": 3,
+        "kiln_caller_seconds": 210,
+        "code_run_caller_seconds": 220
+      },
+      "content_transport_authorized": false
+    },
+    {
+      "stage": "collect",
+      "admitted": false,
+      "fresh_bundle": "/home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v2",
+      "fresh_root": "/home/adalundhe/.cache/hex-native-firecracker/held451-collect-2359-v2-01",
+      "fresh_unit": "hex-native-fc-held451-collect-2359-v2-01",
+      "admission_template": {
+        "bundle": "held451-admission.collect.template.json",
+        "bytes": 1327,
+        "sha256": "837f3a7df069425b7f80281a1f0a03da8786b0a728210c5cc5ab07bfe58d2962"
+      },
+      "remote_argv": [
+        "/usr/bin/timeout",
+        "--signal=TERM",
+        "--kill-after=3s",
+        "200s",
+        "/usr/bin/nice",
+        "-n",
+        "10",
+        "/usr/bin/python3",
+        "-B",
+        "/home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v2/export_held451_objects.py",
+        "--stage",
+        "collect",
+        "--admission",
+        "/home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v2/reviewed.collect.json",
+        "--root",
+        "/home/adalundhe/.cache/hex-native-firecracker/held451-collect-2359-v2-01",
+        "--seal",
+        "/home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v2/held451-export.seal.json"
+      ],
+      "remote_shell_text": "/usr/bin/timeout --signal=TERM --kill-after=3s 200s /usr/bin/nice -n 10 /usr/bin/python3 -B /home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v2/export_held451_objects.py --stage collect --admission /home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v2/reviewed.collect.json --root /home/adalundhe/.cache/hex-native-firecracker/held451-collect-2359-v2-01 --seal /home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v2/held451-export.seal.json",
+      "normal_kiln_argv": [
+        "/Users/adalundhe/.local/bin/kiln",
+        "run",
+        "--quiet",
+        "--on",
+        "451397fcc585f7f7cb9aaf00e42064bb",
+        "--needs",
+        "linux/amd64,cpus=1,mem=4g,disk=12g",
+        "--no-sync",
+        "--timeout",
+        "210",
+        "--",
+        "/usr/bin/timeout --signal=TERM --kill-after=3s 200s /usr/bin/nice -n 10 /usr/bin/python3 -B /home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v2/export_held451_objects.py --stage collect --admission /home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v2/reviewed.collect.json --root /home/adalundhe/.cache/hex-native-firecracker/held451-collect-2359-v2-01 --seal /home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v2/held451-export.seal.json"
+      ],
+      "normal_kiln_shell_text": "/Users/adalundhe/.local/bin/kiln run --quiet --on 451397fcc585f7f7cb9aaf00e42064bb --needs linux/amd64,cpus=1,mem=4g,disk=12g --no-sync --timeout 210 -- '/usr/bin/timeout --signal=TERM --kill-after=3s 200s /usr/bin/nice -n 10 /usr/bin/python3 -B /home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v2/export_held451_objects.py --stage collect --admission /home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v2/reviewed.collect.json --root /home/adalundhe/.cache/hex-native-firecracker/held451-collect-2359-v2-01 --seal /home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v2/held451-export.seal.json'",
+      "kiln_input": {
+        "on": "451397fcc585f7f7cb9aaf00e42064bb",
+        "needs": "linux/amd64,cpus=1,mem=4g,disk=12g",
+        "sync": false,
+        "timeout_s": 210,
+        "command": "/usr/bin/timeout --signal=TERM --kill-after=3s 200s /usr/bin/nice -n 10 /usr/bin/python3 -B /home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v2/export_held451_objects.py --stage collect --admission /home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v2/reviewed.collect.json --root /home/adalundhe/.cache/hex-native-firecracker/held451-collect-2359-v2-01 --seal /home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v2/held451-export.seal.json"
+      },
+      "code_run_program": "return await kiln.machines.run(input);",
+      "code_run_timeout_s": 220,
+      "finite_guards": {
+        "worker_deadline_seconds": 175,
+        "owned_scope_RuntimeMaxSec": 180,
+        "outer_timeout_seconds": 200,
+        "outer_TERM_to_KILL_seconds": 3,
+        "kiln_caller_seconds": 210,
+        "code_run_caller_seconds": 220
+      },
+      "content_transport_authorized": false
+    }
+  ],
+  "collector_body_sha256": "8f5f5a9a0624c9b2815f8bbaff87a51448e2541b28f264ebf668288c5ec338f5",
+  "collector_local_caller_admitted": false,
+  "collector_local_caller_note": "Unchanged8f5 body hardcodes the v1 collect bundle. No v2 local caller invocation/alias/patch is provided or admitted. Recorded collect API argv below uses the unchanged exporter directly; actual binary collection remains a separate later ROOT review."
+}

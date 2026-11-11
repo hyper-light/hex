@@ -1,0 +1,27 @@
+{
+  "schema": "hex-native-fc-held451-source-seal-v1",
+  "parent_checkpoint": "c5ab0a20a6f1510ebffd33cbf90f02c42bb6e48d",
+  "files": [
+    {
+      "bundle": "export_held451_objects.py",
+      "bytes": 24608,
+      "sha256": "83586fc225fbe7209eb250a6c8d21b8fb70dff97f82dd7dccb1f4f47bde00ad3"
+    },
+    {
+      "bundle": "held451-export-inputs.json",
+      "bytes": 630519,
+      "sha256": "14e35dbed0d79273b963f8f27c1973d53ff997e6a02bd8b99fbe6c00deb91412"
+    },
+    {
+      "bundle": "held451-export-controls.json",
+      "bytes": 2031149,
+      "sha256": "d5e8cc65e999c435c17efb5afe584233217b1a9fd164f5d6809aaefe9aa932de"
+    },
+    {
+      "bundle": "alternate_00aad_io.py",
+      "bytes": 5902,
+      "sha256": "e9a19c06d94bcac09930e89ed6e0823264e4a3697c883a4a70289be7931937c2"
+    }
+  ],
+  "status": "v2 SOURCE ONLY: exactly one CURRENT non-executable transport control appended; fresh review/window/deadline required"
+}

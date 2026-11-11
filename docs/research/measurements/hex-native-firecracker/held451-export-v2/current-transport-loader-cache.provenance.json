@@ -1,0 +1,86 @@
+{
+  "bytes": 188195,
+  "cache_content_output": false,
+  "classification": "CURRENT transport-only non-executable loader-cache provenance",
+  "evidence_integer_parser": "Python arbitrary-precision json integers from untouched raw output string; rounded unsent drafts retained separately",
+  "export_or_collector_admission": false,
+  "fd_after": {
+    "st_ctime_ns": 1792424222078927350,
+    "st_dev": 36,
+    "st_gid": 0,
+    "st_ino": 46159537,
+    "st_mode": 33188,
+    "st_mtime_ns": 1792424222072927350,
+    "st_size": 188195,
+    "st_uid": 0
+  },
+  "fd_before": {
+    "st_ctime_ns": 1792424222078927350,
+    "st_dev": 36,
+    "st_gid": 0,
+    "st_ino": 46159537,
+    "st_mode": 33188,
+    "st_mtime_ns": 1792424222072927350,
+    "st_size": 188195,
+    "st_uid": 0
+  },
+  "host_after": {
+    "boot_sha256": "b888bfd52a5b1b9951490ebcfbc5f5689ccd0c2eca554e01624606bc2b9741a5",
+    "kernel": "7.2.9-2-cachyos",
+    "machine_sha256": "098e190424c5fb1a95d09e15e2edf8013a5d3f57062773bc881b7ee0113ce449",
+    "uid": 1000
+  },
+  "host_before": {
+    "boot_sha256": "b888bfd52a5b1b9951490ebcfbc5f5689ccd0c2eca554e01624606bc2b9741a5",
+    "kernel": "7.2.9-2-cachyos",
+    "machine_sha256": "098e190424c5fb1a95d09e15e2edf8013a5d3f57062773bc881b7ee0113ce449",
+    "uid": 1000
+  },
+  "old_export_deadline_closed": true,
+  "original_SDK_or_source_cohort": false,
+  "path_after": {
+    "st_ctime_ns": 1792424222078927350,
+    "st_dev": 36,
+    "st_gid": 0,
+    "st_ino": 46159537,
+    "st_mode": 33188,
+    "st_mtime_ns": 1792424222072927350,
+    "st_size": 188195,
+    "st_uid": 0
+  },
+  "path_before": {
+    "st_ctime_ns": 1792424222078927350,
+    "st_dev": 36,
+    "st_gid": 0,
+    "st_ino": 46159537,
+    "st_mode": 33188,
+    "st_mtime_ns": 1792424222072927350,
+    "st_size": 188195,
+    "st_uid": 0
+  },
+  "query_exit": 0,
+  "query_source_commit": "288e3cd0d9666b54ec79bbb3f455945d633c5e15",
+  "query_source_sha256": "57f20dd984452527cf001d2896d593c68fb15276643cb05fa122206a813c3637",
+  "schema": "hex-native-fc-current-transport-control-pin-v1",
+  "scope_receipt": {
+    "PID": 3865718,
+    "birth": "54078327",
+    "limits": {
+      "cpu.max": "100000 100000",
+      "memory.max": "4294967296",
+      "memory.swap.max": "0",
+      "pids.max": "256"
+    },
+    "nice": 19,
+    "owned_birth_absent": true,
+    "reaped": true,
+    "scope_absent": true,
+    "scope_members": [],
+    "scope_path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-native-fc-ld-cache-query-c2f668-01.scope"
+  },
+  "sha256": "72329fd8bc8d2af6b4a155582fe979f15f2e4ea4fa01ec410d3682fae750d774",
+  "source": "/etc/ld.so.cache",
+  "stable": true,
+  "successor_requires": "ROOT source/pin review and new actual bounded peer quiet window; recheck control on that future run",
+  "tuning_default": false
+}
