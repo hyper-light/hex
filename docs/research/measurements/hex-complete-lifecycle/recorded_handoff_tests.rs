@@ -58,6 +58,7 @@ fn live(store: &Store) -> PoolRecord {
         pid: 11,
         start_ticks: 13,
     });
+    store.put_pool(&pool).unwrap(); // Held native identity is canonical while still Granted.
     pool.phase = BackingPhase::Live;
     store.put_pool(&pool).unwrap();
     pool

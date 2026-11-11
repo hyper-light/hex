@@ -1883,6 +1883,7 @@ impl Transport for SettleOriginal {
             take(message, fds)?;
             match answer {
                 Answer::Started { .. } => {
+                    eprintln!("client_settle_phase phase=started id={}", header.id);
                     let _ = self.started.try_send((header.id, Instant::now()));
                 }
                 Answer::Exited(_) => {
@@ -1892,14 +1893,27 @@ impl Transport for SettleOriginal {
             }
             Ok(())
         };
-        self.io.recv(reading, &mut observed)
+        let got = self.io.recv(reading, &mut observed)?;
+        // The wake is only a datagram, not persistent EOF. Drain actual queued
+        // answers first, then preserve the same terminal condition as Stalled.
+        if self.io.io.closed.load(Ordering::Acquire) {
+            eprintln!("client_settle_phase phase=transport_closed");
+            Err(Refusal::Broken("owned settle transport closed".into()))
+        } else {
+            Ok(got)
+        }
     }
 
     fn try_send(&self, bytes: &[u8], at: &mut usize, _: &[Lent<'_>]) -> Result<bool, Sent> {
         let (header, request) = wire::read_request_apart(bytes, wire::MAX_MESSAGE).unwrap();
+        eprintln!(
+            "client_settle_phase phase=send kind={:#06x} id={}",
+            header.kind, header.id
+        );
         match &request {
             Request::Call(Call::Run { .. }) => self.io.queue(header.id, Answer::Started { pid: 7 }),
             Request::Call(Call::Kill { exec }) => {
+                eprintln!("client_settle_phase phase=kill_request exec={exec}");
                 // The real Kill reached the sender after wait(None). Withhold only its answer.
                 let _ = self.kill.try_send((header.id, *exec, Instant::now()));
             }
@@ -1934,6 +1948,10 @@ impl Transport for SettleOriginal {
         };
         let given = program.make_asked()?;
         *self.io.program.lock().unwrap() = Some(program);
+        eprintln!(
+            "client_settle_phase phase=setup_ends_returned exec={exec} deadline={:?}",
+            deadline.at()
+        );
         Ok(given)
     }
 
@@ -1978,6 +1996,7 @@ fn absolute_run_settle_error_does_not_renew_kill_answer_budget() {
     let worker = std::thread::Builder::new()
         .name("owned-settle-original".into())
         .spawn(move || {
+            eprintln!("client_settle_phase phase=run_begin original={original:?}");
             let result = control
                 .run_before(
                     absolute_spec(),
@@ -1992,6 +2011,7 @@ fn absolute_run_settle_error_does_not_renew_kill_answer_budget() {
                     original,
                 )
                 .map(drop);
+            eprintln!("client_settle_phase phase=worker_return result={result:?}");
             let _ = finished.send((Instant::now(), result));
         })
         .unwrap();
@@ -2003,10 +2023,14 @@ fn absolute_run_settle_error_does_not_renew_kill_answer_budget() {
     let expired = until(original);
     let before_cleanup = answer.recv_timeout(OBSERVE);
     let cleanup_at = Instant::now();
+    eprintln!(
+        "client_settle_phase phase=cleanup_begin started={actual_started:?} kill={actual_kill:?} before={before_cleanup:?}"
+    );
     client
         .conn
         .shared
         .end(Refusal::Broken("owned settle-original cleanup".into()));
+    eprintln!("client_settle_phase phase=end_returned");
     let (pipe, pipe_poisoned) = match client.conn.shared.transport.io.program.lock() {
         Ok(mut program) => (program.take(), false),
         // Cleanup may recover only this test-owned guard so a poisoned fixture
@@ -2015,7 +2039,9 @@ fn absolute_run_settle_error_does_not_renew_kill_answer_budget() {
     };
     let pipe_was_owned = pipe.is_some();
     drop(pipe);
+    eprintln!("client_settle_phase phase=pipe_closed join=begin");
     let joined = worker.join();
+    eprintln!("client_settle_phase phase=joined ok={}", joined.is_ok());
     let after_cleanup = answer.try_recv();
     let transport = &client.conn.shared.transport;
     let setup = *transport.setup.lock().unwrap();
@@ -2084,4 +2110,254 @@ fn absolute_run_settle_error_does_not_renew_kill_answer_budget() {
     );
     let (returned, _) = before_cleanup.unwrap();
     assert!(returned <= cleanup_at);
+}
+
+/// AC-T7.4.1 control A: actual selection chooses the existing private smaller
+/// learned policy, consumed at the existing setup seam before any send is attempted.
+#[test]
+fn selected_smaller_learned_setup_expiry_prevents_send() {
+    let (transport, writes) = stalled(None);
+    let client = Arc::new(configured(Calibrated::<false>(transport)));
+    let control = Arc::clone(&client);
+    let hello = Request::Hello {
+        build: wire::build(),
+    };
+    let (selected, selection) = mpsc::sync_channel(1);
+    let (finished, answer) = mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || {
+        let original = Instant::now().checked_add(CAP).unwrap();
+        let cap = ReplyDeadline::caller_before(original).unwrap();
+        let result = control
+            .conn
+            .call_before(
+                wire::MAX_MESSAGE,
+                &hello,
+                |_, deadline| {
+                    let deadline = deadline.ok_or_else(|| {
+                        Refusal::Broken("selected setup deadline was absent".into())
+                    })?;
+                    selected
+                        .try_send((original, deadline))
+                        .map_err(|why| Refusal::os("observing selected setup authority", why))?;
+                    // Deliberately consume exactly the selected authority, without
+                    // replacing it or changing a seed. Caller::send must now emit nothing.
+                    until(deadline.at())?;
+                    Ok(NONE)
+                },
+                None,
+                Some(cap),
+            )
+            .map(drop);
+        let _ = finished.send((Instant::now(), result));
+    });
+    let selected = selection.recv_timeout(OBSERVE);
+    let observed = answer.recv_timeout(OBSERVE);
+    client.conn.shared.end(Refusal::Broken(
+        "owned selected-deadline observation cleanup".into(),
+    ));
+    let joined = worker.join();
+    let writes = writes.try_recv();
+    let clean =
+        client.conn.shared.state().map(|state| {
+            state.calls.is_empty() && state.programs.is_empty() && state.given.is_empty()
+        });
+    eprintln!(
+        "client_hello_phase_a selected={selected:?} observed={observed:?} writes={writes:?} joined={} clean={clean:?}",
+        joined.is_ok()
+    );
+    joined.unwrap();
+    let (original, selected) = selected.unwrap();
+    assert!(matches!(selected.source, ReplyBound::Learned(_)));
+    assert!(selected.at() < original);
+    let (returned, result) = observed.unwrap();
+    assert!(returned >= selected.at());
+    assert!(matches!(
+        result,
+        Err(Refusal::Os { op: "sending to the node agent", why }) if why.contains("twice")
+    ));
+    // This Stalled transport commits its whole nonempty input on its first try_send;
+    // no notification therefore independently witnesses zero send calls/bytes.
+    assert!(matches!(writes, Err(mpsc::TryRecvError::Empty)));
+    assert!(clean.unwrap());
+}
+
+struct UnarmedOrdinaryHello {
+    stream: guest::Stream,
+    writes: Arc<Mutex<Vec<(usize, Instant)>>>,
+}
+
+impl Transport for UnarmedOrdinaryHello {
+    type Reading = guest::Reading;
+    const MAKES_ASKED: bool = <guest::Stream as Transport>::MAKES_ASKED;
+
+    fn answers() -> &'static [Patience; KINDS] {
+        static WAITS: [Patience; KINDS] =
+            [const { Patience::measuring("test.ordinary_hello_phase.unarmed") }; KINDS];
+        &WAITS
+    }
+    fn reply_budget(&self) -> Option<Duration> {
+        self.stream.reply_budget()
+    }
+    fn reading(&self) -> Self::Reading {
+        self.stream.reading()
+    }
+    fn handle(&self) -> Handle<'_> {
+        self.stream.handle()
+    }
+    fn frame(message: Vec<u8>) -> Result<Vec<u8>, Refusal> {
+        <guest::Stream as Transport>::frame(message)
+    }
+    fn recv(&self, reading: &mut Self::Reading, take: &mut Take<'_>) -> Result<bool, Refusal> {
+        self.stream.recv(reading, take)
+    }
+    fn try_send(&self, bytes: &[u8], at: &mut usize, lent: &[Lent<'_>]) -> Result<bool, Sent> {
+        let before = *at;
+        let result = self.stream.try_send(bytes, at, lent);
+        if *at > before {
+            self.writes
+                .lock()
+                .unwrap()
+                .push((*at - before, Instant::now()));
+        }
+        result
+    }
+    fn shutdown(&self) {
+        self.stream.shutdown();
+    }
+}
+
+/// One actual TCP frame, using the existing readiness helper and one original
+/// deadline for every wait. No per-read timeout reset can extend this observation.
+fn ordinary_hello_frame(
+    peer: &mut TcpStream,
+    deadline: ReplyDeadline,
+) -> Result<(Header, Request, Vec<u8>), Refusal> {
+    use hex_core::stream::Deframer;
+
+    peer.set_nonblocking(true)
+        .map_err(|why| Refusal::os("observing ordinary Hello without waiting", why))?;
+    let mut decoder = Deframer::new(wire::MAX_MESSAGE);
+    let mut buffer = vec![0; hex_core::stream::MAX_FRAME];
+    let mut captured = Vec::new();
+    loop {
+        // Already available data is evidence even if observation is scheduled late;
+        // only a new readiness wait consumes the remaining original authority.
+        let n = match peer.read(&mut buffer) {
+            Ok(0) => {
+                return Err(Refusal::Broken(
+                    "ordinary Hello peer ended mid-frame".into(),
+                ));
+            }
+            Ok(n) => n,
+            Err(why) if why.kind() == io::ErrorKind::Interrupted => {
+                deadline.remaining("observing ordinary Hello")?;
+                continue;
+            }
+            Err(why) if why.kind() == io::ErrorKind::WouldBlock => {
+                protocol_ready(
+                    Duplex::handle(peer),
+                    false,
+                    deadline,
+                    "observing ordinary Hello",
+                )?;
+                continue;
+            }
+            Err(why) => return Err(Refusal::os("reading ordinary Hello", why)),
+        };
+        if captured.len() + n > hex_core::stream::MAX_FRAME {
+            return Err(Refusal::Broken("ordinary Hello exceeded one frame".into()));
+        }
+        captured.extend_from_slice(&buffer[..n]);
+        let mut input = &buffer[..n];
+        while !input.is_empty() {
+            let (took, message) = decoder.take(input).map_err(Refusal::from)?;
+            if took == 0 || took > input.len() {
+                return Err(Refusal::Broken(
+                    "ordinary Hello parser made no progress".into(),
+                ));
+            }
+            input = &input[took..];
+            if let Some(message) = message {
+                if !input.is_empty() || !decoder.at_boundary() {
+                    return Err(Refusal::Broken("bytes after ordinary Hello frame".into()));
+                }
+                let (header, request) =
+                    wire::read_request_apart(&message, wire::MAX_MESSAGE).map_err(Refusal::from)?;
+                return Ok((header, request, captured));
+            }
+        }
+    }
+}
+
+/// AC-T7.4.1 control B: the SAME ordinary Stream/Core Hello path under a private
+/// unarmed test census sends a full actual frame, gets no answer, and exhausts the
+/// caller's original cap. This is NOT the public calibrated constructor fixture.
+#[test]
+fn isolated_ordinary_stream_hello_withheld_answer_uses_original_cap() {
+    let (socket, mut peer) = absolute_pair();
+    peer.write_all(&11u64.to_le_bytes()).unwrap();
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let link = guest::own_link(AbsoluteNamedLink {
+        control: Mutex::new(Some(socket)),
+        stdio: Mutex::new(VecDeque::new()),
+        deadlines: Arc::clone(&recorded),
+    })
+    .unwrap();
+    // The existing test-only dial consumes a complete prequeued token before the
+    // isolated Hello operation. It makes no claim about the public factory's dial phase.
+    let stream = guest::Stream::dial(link).unwrap();
+    let writes = Arc::new(Mutex::new(Vec::new()));
+    let shared = Shared::try_new(UnarmedOrdinaryHello {
+        stream,
+        writes: Arc::clone(&writes),
+    })
+    .unwrap();
+    let control = triomphe::Arc::clone(&shared);
+    let (starting, started) = mpsc::sync_channel(1);
+    let (finished, answer) = mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || {
+        let original = Instant::now().checked_add(CAP).unwrap();
+        let deadline = ReplyDeadline::caller_before(original).unwrap();
+        let _ = starting.try_send(deadline);
+        let result = Core::hello_before(control, Some(deadline)).map(drop);
+        let _ = finished.send((Instant::now(), result));
+    });
+    let deadline = started.recv_timeout(OBSERVE);
+    let frame = match &deadline {
+        Ok(deadline) => ordinary_hello_frame(&mut peer, *deadline),
+        Err(why) => Err(Refusal::os("observing isolated Hello authority", why)),
+    };
+    // The peer has sent the token only: no Hello response is queued or synthesized.
+    let observed = answer.recv_timeout(OBSERVE);
+    let stopped = peer.shutdown(Shutdown::Both);
+    drop(peer);
+    shared.end(Refusal::Broken("owned ordinary-Hello cleanup".into()));
+    let joined = worker.join();
+    let committed = writes.lock().unwrap();
+    let clean = shared
+        .state()
+        .map(|state| state.calls.is_empty() && state.programs.is_empty() && state.given.is_empty());
+    eprintln!(
+        "client_hello_phase_b scope=isolated_ordinary_seam public_constructor_proof=false deadline={deadline:?} frame={frame:?} writes={committed:?} observed={observed:?} stopped={stopped:?} joined={} clean={clean:?}",
+        joined.is_ok()
+    );
+    joined.unwrap();
+    let deadline = deadline.unwrap();
+    let (header, request, bytes) = frame.expect("full actual Hello is a required phase witness");
+    assert_eq!((header.kind, header.id), (1, 1));
+    assert!(matches!(request, Request::Hello { build } if build == wire::build()));
+    assert_eq!(
+        committed.iter().map(|(n, _)| *n).sum::<usize>(),
+        bytes.len()
+    );
+    assert!(!committed.is_empty());
+    let (returned, result) = observed.unwrap();
+    assert!(returned >= deadline.at());
+    assert!(matches!(
+        result,
+        Err(Refusal::Os { op: "waiting for the node agent's answer", why })
+            if why.contains("absolute") && !why.contains("twice")
+    ));
+    assert_eq!(shared.transport.reply_budget(), None);
+    assert!(clean.unwrap());
 }

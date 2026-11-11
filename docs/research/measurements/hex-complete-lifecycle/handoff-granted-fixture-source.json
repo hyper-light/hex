@@ -1,0 +1,22 @@
+{
+  "role": "implementer",
+  "base": "f2c75f1083fa8fb6ef455d98746f56ebfe44fcc3",
+  "path": "docs/research/measurements/hex-complete-lifecycle/recorded_handoff_tests.rs",
+  "old_sha256": "c171f214322dc988f1b2139aff51b3a5ae6cdecdd9423abe8527f2dd5a9cd391",
+  "sha256": "afe6782ade8ab4295405eb461ba87358388a396d28de6a1e83ce8d5dc53460f2",
+  "actual_original": {
+    "cohort": "df29",
+    "selected": 7,
+    "passed": 0,
+    "failed": 7,
+    "ignored": 0,
+    "point": "live fixture Granted.initSome ->Live in one put; no guard assertion reached",
+    "logs": {
+      "handoff-recorded-new-seven.log": "86550d954f2ddec24789970bf4d5f6d1b3acded88ca7139f3109ece8e3ec912c",
+      "store-reference-original-after.log": "fd8e2ba8ebd31e160e2e5175686bf4db40059679de2b2fbedaba1d5c736e10b5"
+    }
+  },
+  "change": "one additional test-only Granted put persists introduced init before phaseLive; Pool production rules/oracle/limits unchanged",
+  "separate_original_c9b": "unchanged; df29 after1 preconditionfailed at new factual receipt topology validation, not green; actual7197 guard red preserved",
+  "validation": "scopedfmt0; no own tests/compile/native; six prior passing df29 controls not repeated"
+}

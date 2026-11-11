@@ -1,0 +1,16 @@
+{
+  "role": "implementer",
+  "base": "4689ef77a31c51f00858611e016feaecf315852f",
+  "path": "crates/hex-core/src/cgroup.rs",
+  "base_sha256": "1cb1047272a1c9010fe04d6fda6c24eb9ba9502ca9dbe91fdd879cb29ee03e01",
+  "sha256": "22a5875dacbd1e99cf10d6f56fc6e8891066d6b1682accdf5ae4d7ba9c4c0f2c",
+  "change": "test-only explicit panic diagnostic replacing denied unreachable!, same counter fields/input/oracle/limits",
+  "actual_original": {
+    "cohort": "50758",
+    "log": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/wire-snapshots-5075-results-proof/cohort-50758ba4-linux-wire-snapshots-5075/joined-strict-clippy.log",
+    "log_sha256": "5e600132950ea43d83cd5727cd06894089dd9144d070bdfadaa937287270ad86",
+    "compiler_clippy_exit": 101,
+    "attribution": "test lint only, no production/native defect"
+  },
+  "validation": "scoped rustfmt0; no own checks/new execution; Root retains original and joins change"
+}

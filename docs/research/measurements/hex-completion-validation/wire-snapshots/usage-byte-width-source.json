@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "01fe011d72c6801e4494e903af6353baaf0688d4",
+  "source": {
+    "path": "crates/hex-core/src/wire/tests.rs",
+    "parent_sha256": "0cbed043633e35d474fc4863b6fae8dc4e60c8e9f28319fc00f9249b10a8351c",
+    "sha256": "0a629f855bd3c95186898a497d89dc94769dc226972f10290da78f555e187b07"
+  },
+  "change": "Represent eight u64 fields as size_of::<[u64; 8]>() instead of multiplication. Expected body length remains 64 bytes. No production or oracle change.",
+  "root_result_attribution": {
+    "cohort": "50758",
+    "snapshot_controls": {
+      "passed": 3,
+      "failed": 0
+    },
+    "strict_clippy": "101; this test expression and separately owned cgroup issue",
+    "raw_sha256": "2319585caead14faa16ff4cd808a8ecb718913a8cce10e3429995749c01fbc2d",
+    "verification": "Result relayed by ROOT; no owner replay."
+  },
+  "builds_executed": 0,
+  "tests_executed": 0,
+  "native_executed": 0
+}

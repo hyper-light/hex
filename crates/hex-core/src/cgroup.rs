@@ -450,7 +450,7 @@ mod managed_usage_tests {
                     4 => &mut files.pids_events,
                     5 => &mut files.cpu_stat,
                     6 => &mut files.io_stat,
-                    _ => unreachable!(),
+                    _ => panic!("required-counter fixture index outside 0..7: {field}"),
                 };
                 *target = damaged.into();
                 assert!(managed_usage(&files).is_err(), "field {field}: {damaged:?}");

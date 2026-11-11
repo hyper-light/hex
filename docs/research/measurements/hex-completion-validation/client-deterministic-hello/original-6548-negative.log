@@ -1,0 +1,77 @@
+   Compiling libc v0.2.191
+   Compiling typenum v1.20.1
+   Compiling proc-macro2 v1.0.107
+   Compiling cfg-if v1.0.5
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.27
+   Compiling version_check v0.9.5
+   Compiling generic-array v0.14.7
+   Compiling syn v3.0.9
+   Compiling serde_core v1.0.229
+   Compiling autocfg v1.5.1
+   Compiling unsize v1.1.0
+   Compiling hybrid-array v0.4.15
+   Compiling rustix v1.1.5
+   Compiling errno v0.3.14
+   Compiling thiserror v2.0.21
+   Compiling zmij v1.0.23
+   Compiling bitflags v2.13.2
+   Compiling serde v1.0.229
+   Compiling block-buffer v0.12.1
+   Compiling crypto-common v0.2.2
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling thiserror-impl v2.0.21
+   Compiling serde_derive v1.0.229
+   Compiling crc32fast v1.5.4
+   Compiling serde_json v1.0.154
+   Compiling getrandom v0.4.3
+   Compiling shards-abi v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-65482a81-mac-backing-and-constructors-v2/source/vendor/shards/crates/abi)
+   Compiling const-oid v0.10.2
+   Compiling digest v0.11.3
+   Compiling digest v0.10.7
+   Compiling triomphe v0.1.17
+   Compiling cpufeatures v0.2.17
+   Compiling cpufeatures v0.3.1
+   Compiling itoa v1.0.18
+   Compiling memchr v2.8.3
+   Compiling simd-adler32 v0.3.10
+   Compiling adler2 v2.0.1
+   Compiling miniz_oxide v0.9.1
+   Compiling sha2 v0.11.1
+   Compiling sha2 v0.10.9
+   Compiling hex-api v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-65482a81-mac-backing-and-constructors-v2/source/crates/hex-api)
+   Compiling xattr v1.6.1
+   Compiling filetime v0.2.29
+   Compiling once_cell v1.21.4
+   Compiling fastrand v2.5.0
+   Compiling tempfile v3.27.0
+   Compiling tar v0.4.46
+   Compiling shards-api v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-65482a81-mac-backing-and-constructors-v2/source/vendor/shards/crates/api)
+   Compiling flate2 v1.1.11
+   Compiling hex-core v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-65482a81-mac-backing-and-constructors-v2/source/crates/hex-core)
+   Compiling hex-client v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-65482a81-mac-backing-and-constructors-v2/source/crates/hex-client)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 38.82s
+     Running unittests src/lib.rs (/Users/adalundhe/.cache/hex-lead/cohort-65482a81-mac-backing-and-constructors-v2/target/debug/deps/hex_client-9867643a47bd7572)
+
+running 1 test
+test guest::tests::absolute_connect_caps_partial_token_and_unanswered_hello ... client_connect_absolute form=Ordinary whole_token=false at=Instant { tv_sec: 286741, tv_nsec: 857235083 } observed=Ok((Instant { tv_sec: 286741, tv_nsec: 859815291 }, Err(Os { op: "reading the relay's token for the connection", why: "the caller's explicit absolute reply deadline expired" }))) read=1 stopped=Err(Os { code: 57, kind: NotConnected, message: "Socket is not connected" }) joined=true hello=ConstructorHello { header: None, written: [], pending: false, buffered: 0 }
+client_connect_absolute form=Ordinary whole_token=true at=Instant { tv_sec: 286741, tv_nsec: 886982750 } observed=Ok((Instant { tv_sec: 286741, tv_nsec: 864481083 }, Err(Os { op: "sending to the node agent", why: "none came in 590.582µs, twice the slowest answer to a call of its kind" }))) read=8 stopped=Err(Os { code: 57, kind: NotConnected, message: "Socket is not connected" }) joined=true hello=ConstructorHello { header: None, written: [], pending: false, buffered: 0 }
+client_connect_hello form=Ordinary phase=learned_before_send withheld_answer_proof=false status=UNVERIFIED written=[]
+client_connect_absolute form=Evented whole_token=false at=Instant { tv_sec: 286741, tv_nsec: 889813708 } observed=Ok((Instant { tv_sec: 286741, tv_nsec: 892025416 }, Err(Os { op: "reading the relay's token for the connection", why: "the caller's explicit absolute reply deadline expired" }))) read=1 stopped=Err(Os { code: 57, kind: NotConnected, message: "Socket is not connected" }) joined=true hello=ConstructorHello { header: None, written: [], pending: false, buffered: 0 }
+client_connect_absolute form=Evented whole_token=true at=Instant { tv_sec: 286741, tv_nsec: 917409166 } observed=Ok((Instant { tv_sec: 286741, tv_nsec: 894437333 }, Err(Os { op: "waiting for the node agent's answer", why: "none came in 590.582µs, twice the slowest answer to a call of its kind" }))) read=8 stopped=Err(Os { code: 57, kind: NotConnected, message: "Socket is not connected" }) joined=true hello=ConstructorHello { header: Some(Header { kind: 1, id: 1 }), written: [0, 0, 0, 52, 72, 69, 88, 87, 52, 184, 240, 122, 74, 193, 14, 60, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 26, 0, 0, 0, 104, 101, 120, 32, 48, 46, 49, 46, 48, 32, 40, 117, 110, 107, 110, 111, 119, 110, 32, 99, 111, 109, 109, 105, 116, 41], pending: false, buffered: 0 }
+client_connect_hello form=Evented phase=committed_hello withheld_answer_proof=true
+
+thread 'guest::tests::absolute_connect_caps_partial_token_and_unanswered_hello' (8168713) panicked at crates/hex-client/src/guest/tests.rs:1220:5:
+UNVERIFIED withheld-answer phase: no complete actual Hello; harness witness miss, not a production timeout failure: [(Ordinary, "learned_before_send")]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    guest::tests::absolute_connect_caps_partial_token_and_unanswered_hello
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 79 filtered out; finished in 0.07s
+
+error: test failed, to rerun pass `-p hex-client --lib`

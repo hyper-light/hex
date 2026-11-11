@@ -503,6 +503,108 @@ mod tests {
         }
     }
 
+    /// Original AC-T7.4.1 retry control: local durable Released without a
+    /// controller identity must permit only cleanup of the SAME canonical scope.
+    /// No production preflight remedy is included in this checkpoint.
+    #[test]
+    fn released_gpu_receipt_without_identity_finishes_original_published_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, input, allocation) = observer::config::tests::fixture(dir.path());
+        let standalone = Arc::new(NoEffects(AtomicUsize::new(0)));
+        let catalog = devices::Catalog::parse(
+            b"hex-devices-1\ngpu\t256\tunmeasured\t777\tshards-gpu\tpci:0000:01:00.0\t\n",
+        )
+        .unwrap();
+        let runtime = GuestRuntime::new(standalone.clone(), config)
+            .recorded_at(dir.path().join("guest"))
+            .with_runtime_cost(allocation.cost)
+            .unwrap()
+            .with_gpu_catalog(triomphe::Arc::try_new(catalog).unwrap())
+            .with_gpu_observer(input)
+            .unwrap();
+        let native = triomphe::Arc::try_new(RecoveringNative {
+            identity: shards_api::Identity {
+                pid: 42,
+                started: 7,
+                vsock: "/model/v".into(),
+            },
+            release_on_stop: false,
+            released: std::sync::atomic::AtomicBool::new(true),
+            attaches: AtomicUsize::new(0),
+            stops: AtomicUsize::new(0),
+        })
+        .unwrap();
+        let owner = Arc::new(Cold {
+            row: Mutex::new(None),
+            effects: AtomicUsize::new(0),
+            queries: AtomicUsize::new(0),
+            native: Some(native.clone()),
+            finalized: AtomicUsize::new(0),
+            luid: None,
+            launches: AtomicUsize::new(0),
+        });
+        let books: Arc<dyn Books> = owner.clone();
+        runtime.bind_books(Arc::downgrade(&books)).unwrap();
+        let prepared = runtime.prepare_gpu_backing().unwrap().unwrap();
+        let mut canonical = Books::pool_records(owner.as_ref()).unwrap().pop().unwrap();
+        canonical
+            .accept_grant(&BackingGrant {
+                key: prepared.key,
+                allocation,
+                devices: prepared.devices.clone(),
+            })
+            .unwrap();
+        let definition = runtime.gpu_backing_definition().unwrap().unwrap();
+        let mut receipt = Receipt::intent(
+            PoolRecord::decode(&canonical.encode().unwrap()).unwrap(),
+            definition.physical,
+            &runtime.config,
+        )
+        .unwrap();
+        receipt.phase = Phase::Released {
+            identity: None,
+            status: shards_api::ManagedStatus::Code(7),
+        };
+        pool::write(&definition.path, &receipt).unwrap();
+        canonical.phase = BackingPhase::Draining;
+        canonical.init = Some(hex_core::record::ProcId {
+            pid: 42,
+            start_ticks: 7,
+        });
+        *owner.row.lock().unwrap() = Some(canonical);
+        // Exact crash cut: local Released durable; canonical native init is
+        // already published; finalization/canonical Released has not completed.
+        let retained = pool::read(&definition.path).unwrap().unwrap();
+        let before = Books::pool_records(owner.as_ref()).unwrap().pop().unwrap();
+        retained.matches(&before).unwrap();
+        assert!(matches!(
+            retained.phase,
+            Phase::Released { identity: None, .. }
+        ));
+        assert_eq!(before.phase, BackingPhase::Draining);
+        assert!(before.init.is_some());
+        assert_eq!(before.key, prepared.key);
+        assert_eq!(before.allocation, Some(allocation));
+        let recovered = runtime.recover_gpu_backing();
+        let after = Books::pool_records(owner.as_ref()).unwrap().pop().unwrap();
+        assert!(
+            native.attaches.load(Ordering::SeqCst) > 0,
+            "Released without local identity blocked cleanup of the SAME published scope"
+        );
+        assert!(recovered.is_ok(), "{recovered:?}");
+        assert_eq!(owner.finalized.load(Ordering::SeqCst), 1);
+        assert_eq!(after.phase, BackingPhase::Released);
+        assert_eq!(after.key, before.key);
+        assert_eq!(after.devices, before.devices);
+        assert_eq!(after.allocation, before.allocation);
+        assert_eq!(after.init, before.init);
+        assert_eq!(after.exit, Some(hex_api::Exit::Code(7)));
+        assert_eq!(native.stops.load(Ordering::SeqCst), 0);
+        assert_eq!(standalone.0.load(Ordering::SeqCst), 0);
+        assert_eq!(owner.queries.load(Ordering::SeqCst), 0);
+        assert_eq!(owner.launches.load(Ordering::SeqCst), 0);
+    }
+
     struct Cold {
         row: Mutex<Option<PoolRecord>>,
         effects: AtomicUsize,

@@ -1,0 +1,74 @@
+{
+  "schema": 1,
+  "parent": "9b44967ee57b0fc22ea18b6844e6780c4639b632",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "hex_claude_full_read_sha256": "a093d49f0e51a0c9026996cb170980696dc375364b8d9f13866200c6232e0c2b",
+  "source": {
+    "path": "crates/hex-client/src/calls/budget_tests.rs",
+    "bytes": 88557,
+    "sha256": "7b08b0838bb23034254190357d6feac84947d673928266aead024b72ce651552",
+    "prefix_bytes": 78193,
+    "prefix_sha256": "b1cdd41e299e101736138d499a3ce171ae27a28ef2b1600a3d1b2af28c5e053e",
+    "append_only": true
+  },
+  "test_names": [
+    "calls::budget_tests::selected_smaller_learned_setup_expiry_prevents_send",
+    "calls::budget_tests::isolated_ordinary_stream_hello_withheld_answer_uses_original_cap"
+  ],
+  "tests_defined": 2,
+  "tests_executed": 0,
+  "builds_executed": 0,
+  "native_executed": 0,
+  "protected": [
+    {
+      "path": "crates/hex-client/src/calls.rs",
+      "sha256": "38ae331369187698244c8d679e944e39937b27915f4c7612191e9d65604f3fc1",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/guest.rs",
+      "sha256": "893c281be8a3d4907d81bcffc36c0991a1d614108e3e68ecf7500e130887c6b3",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/guest/tests.rs",
+      "sha256": "68ba6db123682e110827cd02315097edb61576fa51acb650bdefe2b9dab21626",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-core/src/patience.rs",
+      "sha256": "3b0b0902568a369dd8ae345f91f043c7cac5bf4b3c886accfb8d4aa3b6ea5709",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-core/src/stream.rs",
+      "sha256": "a84b35c48613018101e045179e3aea40768ecb1fabfb3c5a0cd1a2ecc7cf6c33",
+      "unchanged": true
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "a8f51f83a7b8ed2c43e0824f3af7aff5e967ba77159dde320841183559ea29b8",
+      "unchanged": true
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "e8453e60847d551d658cebff88a757ce6bee2043058b9cd9e5a3b94ea791a304",
+      "unchanged": true
+    }
+  ],
+  "strict_public_original": {
+    "source": "65482a81c4990fe024856df7d768ed3c27e43077",
+    "negative_raw_sha256": "527d6fa93f69e4d5a34d3bfe5e31a7952c62462120add64d32a9ab4e221ff5bd",
+    "negative_raw_copy": "original-6548-negative.log",
+    "root_actual_result": "0/1/0; Ordinary learned-before-send/empty bytes UNVERIFIED, Evented committed Hello/withheld answer witnessed",
+    "unchanged": true,
+    "rerun_requested": false
+  },
+  "A": "actual existing private Calibrated(false) seeded 1ms/learned2ms table, observed selected cap consumed by existing setup callback; zero memory transport send notification",
+  "B": "same ordinary guest Stream/Core delegated transport; private Measuring answer census; prequeued token outside isolated Hello operation; full TCP frame observed; original caller cap, no reply",
+  "B_public_constructor_proof": false,
+  "bounds": "existing CAP25ms OBSERVE100ms; existing until/protocol_ready; no new timer, retry, seed modification or budget increase",
+  "status": "source-only, ROOT two controls/contract review pending; strict public phase not demoted"
+}

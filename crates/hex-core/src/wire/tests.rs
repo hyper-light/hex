@@ -2352,7 +2352,7 @@ fn route_wire_backing_calls_and_all_phases_roundtrip() {
     });
     let bytes = answer(203, &expected, MAX_MESSAGE).unwrap();
     assert_eq!(&bytes[12..14], &0x8005u16.to_le_bytes());
-    assert_eq!(bytes.len(), HEADER_BYTES + 8 * size_of::<u64>());
+    assert_eq!(bytes.len(), HEADER_BYTES + size_of::<[u64; 8]>());
     assert_eq!(
         read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
         expected
