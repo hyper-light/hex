@@ -1,0 +1,22 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src/lib.rs (/Users/adalundhe/.cache/hex-lead/cohort-718105e7-mac-trusted-entry-7181-mac/target/debug/deps/hex_runtime-2f15a26ff7c2fd7c)
+
+running 5 tests
+test macos::process::trusted_entry::tests::bounded_error_record_preserves_primary_cleanup_and_raw_write_failure ... 
+thread 'macos::process::trusted_entry::tests::bounded_error_record_preserves_primary_cleanup_and_raw_write_failure' (26355320) panicked at crates/hex-runtime/src/macos/process/trusted_entry/tests.rs:193:5:
+assertion failed: text.contains("original native expiry")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test macos::process::trusted_entry::tests::fixed_carrier_preserves_original_typed_rights_and_deadline ... ok
+test macos::process::trusted_entry::tests::malformed_carrier_cannot_select_defaults_or_gain_extra_rights ... ok
+test macos::process::trusted_entry::tests::native_exec_budget_counts_pointer_arrays_and_both_terminators ... ok
+test macos::process::trusted_entry::tests::report_requires_exact_identity_scope_seal_and_unique_fd_observations ... ok
+
+failures:
+
+failures:
+    macos::process::trusted_entry::tests::bounded_error_record_preserves_primary_cleanup_and_raw_write_failure
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 182 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p hex-runtime --lib`

@@ -1,0 +1,146 @@
+{
+  "source": "718105e7818622d98cf43503a32a35f05db6ae14",
+  "archive_sha256": "b6f6cc146a46790bd28f2976b97c22d36fa323cfd64ef14dbac44a4df6b17f37",
+  "scope": "ROOT opt-in trusted-entry new8 pure controls and affected feature/default strict; no dispatch/run/native launch or old passes replayed",
+  "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver_pid": 34679,
+  "phases": [
+    {
+      "name": "entry-feature-strict",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "clippy",
+        "-p",
+        "hex-runtime",
+        "-p",
+        "hex-node",
+        "-p",
+        "hex-cli",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "--features",
+        "hex-runtime/native-trusted-entry-measurement,hex-cli/native-trusted-entry-measurement",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 35419,
+      "pgid": 35419,
+      "native_identity": {
+        "query_exit": 0,
+        "row": "35419 35419 Wed Nov 11 06:51:41 2026",
+        "error": ""
+      },
+      "native_wait": {
+        "pid": 35419,
+        "code": 1,
+        "status": 0
+      },
+      "exit": 0,
+      "reaped": true,
+      "owned_group_absent": true,
+      "bytes": 3900,
+      "sha256": "c108a0afd01465e91465bb8b3a02b1e6241534978f5005ac637178096ac00263",
+      "qualified": true
+    },
+    {
+      "name": "native-component-pure3",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "--offline",
+        "--features",
+        "native-trusted-entry-measurement",
+        "macos::sys::trusted_entry_native::controls::",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 35813,
+      "pgid": 35813,
+      "native_identity": {
+        "query_exit": 0,
+        "row": "35813 35813 Wed Nov 11 06:52:18 2026",
+        "error": ""
+      },
+      "native_wait": {
+        "pid": 35813,
+        "code": 1,
+        "status": 0
+      },
+      "exit": 0,
+      "reaped": true,
+      "owned_group_absent": true,
+      "bytes": 3303,
+      "sha256": "9d7114f19ec9c6ab16b0f17b51469ffeb109a2057d0122da2d2c73bb017c3cbf",
+      "actual_counts": [
+        [
+          "3",
+          "0",
+          "0"
+        ]
+      ],
+      "selection_verified": true,
+      "qualified": true
+    },
+    {
+      "name": "entry-caller-pure5",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "--offline",
+        "--features",
+        "native-trusted-entry-measurement",
+        "macos::process::trusted_entry::tests::",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 35890,
+      "pgid": 35890,
+      "native_identity": {
+        "query_exit": 0,
+        "row": "35890 35890 Wed Nov 11 06:52:49 2026",
+        "error": ""
+      },
+      "native_wait": {
+        "pid": 35890,
+        "code": 1,
+        "status": 101
+      },
+      "exit": 101,
+      "reaped": true,
+      "owned_group_absent": true,
+      "bytes": 1459,
+      "sha256": "ee592e74af05fdd0ad6383f0f66c444a322ba8f87e3bbb3d37ee5e571053c38a",
+      "actual_counts": [
+        [
+          "4",
+          "1",
+          "0"
+        ]
+      ],
+      "selection_verified": false,
+      "qualified": false
+    }
+  ]
+}

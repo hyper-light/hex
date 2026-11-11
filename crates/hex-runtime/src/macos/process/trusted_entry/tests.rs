@@ -190,7 +190,10 @@ fn bounded_error_record_preserves_primary_cleanup_and_raw_write_failure() {
     let failure = Failure { details };
     let text = failure.to_string();
     assert!(text.contains("91"));
-    assert!(text.contains("original native expiry"));
+    assert!(matches!(
+        failure.details[0].cleanup.as_ref(),
+        Some(Fault::Native(native::Error::Deadline))
+    ));
     assert!(text.contains("recording receipt"));
     assert!(
         matches!(failure.details[0].diagnostic[0],Some(Fault::Io{ref source,..}) if source.raw_os_error()==Some(libc::ENOSPC))

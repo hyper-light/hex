@@ -1,0 +1,73 @@
+   Compiling libc v0.2.191
+   Compiling cfg-if v1.0.5
+   Compiling typenum v1.20.1
+   Compiling errno v0.3.14
+   Compiling rand_core v0.10.1
+   Compiling bitflags v2.13.2
+   Compiling rustix v1.1.5
+   Compiling generic-array v0.14.7
+   Compiling hybrid-array v0.4.15
+   Compiling serde_core v1.0.229
+   Compiling thiserror v2.0.21
+   Compiling unsize v1.1.0
+   Compiling getrandom v0.4.3
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.1
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling const-oid v0.10.2
+   Compiling digest v0.11.3
+   Compiling serde v1.0.229
+   Compiling digest v0.10.7
+   Compiling triomphe v0.1.17
+   Compiling zmij v1.0.23
+   Compiling cpufeatures v0.3.1
+   Compiling cpufeatures v0.2.17
+   Compiling once_cell v1.21.4
+   Compiling fastrand v2.5.0
+   Compiling memchr v2.8.3
+   Compiling itoa v1.0.18
+   Compiling simd-adler32 v0.3.10
+   Compiling adler2 v2.0.1
+   Compiling miniz_oxide v0.9.1
+   Compiling serde_json v1.0.154
+   Compiling tempfile v3.27.0
+   Compiling sha2 v0.10.9
+   Compiling sha2 v0.11.1
+   Compiling hex-api v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-718105e7-mac-trusted-entry-7181-mac/source/crates/hex-api)
+   Compiling crc32fast v1.5.4
+   Compiling shards-abi v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-718105e7-mac-trusted-entry-7181-mac/source/vendor/shards/crates/abi)
+   Compiling xattr v1.6.1
+   Compiling filetime v0.2.29
+   Compiling wait-timeout v0.2.1
+   Compiling quick-error v1.2.3
+   Compiling fnv v1.0.7
+   Compiling bit-vec v0.10.1
+   Compiling bit-set v0.11.1
+   Compiling rusty-fork v0.3.1
+   Compiling tar v0.4.46
+   Compiling shards-api v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-718105e7-mac-trusted-entry-7181-mac/source/vendor/shards/crates/api)
+   Compiling flate2 v1.1.11
+   Compiling hex-core v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-718105e7-mac-trusted-entry-7181-mac/source/crates/hex-core)
+   Compiling num-traits v0.2.19
+   Compiling rand v0.10.3
+   Compiling rand_xorshift v0.5.0
+   Compiling chacha20 v0.10.2
+   Compiling unarray v0.1.4
+   Compiling regex-syntax v0.8.11
+   Compiling core_detect v1.0.0
+   Compiling proptest v1.12.0
+   Compiling hex-client v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-718105e7-mac-trusted-entry-7181-mac/source/crates/hex-client)
+   Compiling hex-gpu v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-718105e7-mac-trusted-entry-7181-mac/source/crates/hex-gpu)
+   Compiling socket2 v0.6.5
+   Compiling hex-runtime v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-718105e7-mac-trusted-entry-7181-mac/source/crates/hex-runtime)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 29.91s
+     Running unittests src/lib.rs (/Users/adalundhe/.cache/hex-lead/cohort-718105e7-mac-trusted-entry-7181-mac/target/debug/deps/hex_runtime-2f15a26ff7c2fd7c)
+
+running 3 tests
+test macos::sys::trusted_entry_native::controls::changed_member_during_token_capture_never_yields_a_receipt ... ok
+test macos::sys::trusted_entry_native::controls::initial_argument_pointer_budget_is_checked_before_access ... ok
+test macos::sys::trusted_entry_native::controls::transported_expiry_retains_original_authority_without_rebase ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 184 filtered out; finished in 0.00s
+

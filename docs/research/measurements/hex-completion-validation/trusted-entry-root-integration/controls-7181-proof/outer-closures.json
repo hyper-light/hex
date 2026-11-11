@@ -1,0 +1,56 @@
+{
+  "cohort-718105e7-mac-trusted-entry-7181-mac": {
+    "owners": [
+      {
+        "kind": "driver",
+        "pid": 34679,
+        "pid_absent": true,
+        "query_exit": 1,
+        "observed": "",
+        "error": ""
+      },
+      {
+        "kind": "phase:entry-feature-strict",
+        "pid": 35419,
+        "pid_absent": true,
+        "query_exit": 1,
+        "observed": "",
+        "error": ""
+      },
+      {
+        "kind": "phase:native-component-pure3",
+        "pid": 35813,
+        "pid_absent": true,
+        "query_exit": 1,
+        "observed": "",
+        "error": ""
+      },
+      {
+        "kind": "phase:entry-caller-pure5",
+        "pid": 35890,
+        "pid_absent": true,
+        "query_exit": 1,
+        "observed": "",
+        "error": ""
+      }
+    ],
+    "groups": [
+      {
+        "phase": "entry-feature-strict",
+        "pgid": 35419,
+        "group_absent": true
+      },
+      {
+        "phase": "native-component-pure3",
+        "pgid": 35813,
+        "group_absent": true
+      },
+      {
+        "phase": "entry-caller-pure5",
+        "pgid": 35890,
+        "group_absent": true
+      }
+    ],
+    "scope_note": "Mac admitted build has no Linux hard Scope; exact owned Popen groups queried, no whole nativeScope proof"
+  }
+}
