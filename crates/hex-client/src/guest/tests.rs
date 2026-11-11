@@ -916,6 +916,8 @@ struct ConnectTrace {
     dials: Mutex<Vec<(u32, Option<Instant>)>>,
     read: std::sync::atomic::AtomicUsize,
     written: Mutex<Vec<u8>>,
+    native_clones: std::sync::atomic::AtomicUsize,
+    facade_drops: std::sync::atomic::AtomicUsize,
 }
 
 struct ConnectLink {
@@ -953,6 +955,14 @@ struct ConnectSocket {
     trace: Arc<ConnectTrace>,
 }
 
+impl Drop for ConnectSocket {
+    fn drop(&mut self) {
+        self.trace
+            .facade_drops
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 impl Read for ConnectSocket {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
         let n = self.socket.read(bytes)?;
@@ -981,6 +991,9 @@ impl Write for ConnectSocket {
 
 impl Duplex for ConnectSocket {
     fn try_clone(&self) -> io::Result<DuplexOwner> {
+        self.trace
+            .native_clones
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         own_duplex(Self {
             socket: self.socket.try_clone()?,
             trace: Arc::clone(&self.trace),
@@ -1308,4 +1321,69 @@ fn shards_link_carries_the_original_absolute_deadline_and_bytes() {
     peer.read_exact(&mut bytes).unwrap();
     assert_eq!(&bytes, b"exact operation authority");
     assert_eq!(*guest.absolute.lock().unwrap(), [at]);
+}
+
+/// AC-T7.4.1: moving the unique facade through the existing copier adapter clones
+/// no native stream; an explicit native clone retains I/O until its own final drop.
+#[test]
+fn duplex_owner_preserves_io_and_explicit_native_clone_lifetime() {
+    use std::sync::atomic::Ordering;
+
+    let (socket, mut peer) = connect_pair();
+    socket.set_read_timeout(Some(CONNECT_OBSERVE)).unwrap();
+    socket.set_write_timeout(Some(CONNECT_OBSERVE)).unwrap();
+    peer.set_read_timeout(Some(CONNECT_OBSERVE)).unwrap();
+    peer.set_write_timeout(Some(CONNECT_OBSERVE)).unwrap();
+    let trace = Arc::new(ConnectTrace::default());
+    let owner = own_duplex(ConnectSocket {
+        socket,
+        trace: Arc::clone(&trace),
+    })
+    .unwrap();
+    let before_move = std::ptr::from_ref(&*owner);
+    let mut moved = DuplexIo(owner);
+    let same_facade = std::ptr::addr_eq(before_move, std::ptr::from_ref(&*moved.0));
+    let clones_before = trace.native_clones.load(Ordering::SeqCst);
+    let input_sent = peer.write_all(b"in");
+    let mut input = [0; 2];
+    let input_read = moved.read_exact(&mut input);
+    let output_sent = moved.write_all(b"out");
+    let mut output = [0; 3];
+    let output_read = peer.read_exact(&mut output);
+    let clone = moved.0.try_clone();
+    drop(moved);
+    let first_drop = trace.facade_drops.load(Ordering::SeqCst);
+    let final_write = match clone {
+        Ok(mut clone) => {
+            let sent = clone.write_all(b"last");
+            drop(clone);
+            sent
+        }
+        Err(why) => Err(why),
+    };
+    let mut last = [0; 4];
+    let last_read = peer.read_exact(&mut last);
+    let eof = peer.read(&mut [0]);
+    drop(peer);
+    let clones = trace.native_clones.load(Ordering::SeqCst);
+    let drops = trace.facade_drops.load(Ordering::SeqCst);
+    eprintln!(
+        "client_duplex_owner same={same_facade} clones_before={clones_before} clones={clones} first_drop={first_drop} drops={drops} eof={eof:?}"
+    );
+    // All owned facade/peer handles are gone before any result assertion.
+    input_sent.unwrap();
+    input_read.unwrap();
+    output_sent.unwrap();
+    output_read.unwrap();
+    final_write.unwrap();
+    last_read.unwrap();
+    assert!(same_facade);
+    assert_eq!(clones_before, 0);
+    assert_eq!(clones, 1);
+    assert_eq!(first_drop, 1);
+    assert_eq!(drops, 2);
+    assert_eq!(input, *b"in");
+    assert_eq!(output, *b"out");
+    assert_eq!(last, *b"last");
+    assert_eq!(eof.unwrap(), 0);
 }

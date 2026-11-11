@@ -1,0 +1,92 @@
+{
+  "schema": 1,
+  "requirement": "AC-T7.4.1",
+  "status": "SOURCE_ONLY_UNRUN",
+  "at_utc": "2026-11-11T18:27:19.136695+00:00",
+  "role": "coordinator",
+  "parent": "d92faeaf24e2c847b781aadb3fefdefeb2cfd451",
+  "original_source_commit": "c0a767db0ecdb0087eb6864da19e6bb1d537f449",
+  "source_path": "crates/hex-client/src/guest/tests.rs",
+  "preimage_sha256": "68ba6db123682e110827cd02315097edb61576fa51acb650bdefe2b9dab21626",
+  "source_sha256": "6206a12c7b75c6c64d50fefcfba24803cca137823ca76abd111822d0705aff07",
+  "original_source_file_sha256": "482ef0f66b8a32ba6f5b3c28828f09cf41d2fdbc8a39414c3cb9856f6b453a57",
+  "original_test_function_sha256": "556d2f580892f25ead4a0172a840d84b9b5961d142d885982187541e7f107cf1",
+  "test_function_byte_equal_original": true,
+  "reversing_only_instrumentation_and_append_restores_parent": true,
+  "production_files_byte_equal_parent": {
+    "crates/hex-client/src/guest.rs": "893c281be8a3d4907d81bcffc36c0991a1d614108e3e68ecf7500e130887c6b3",
+    "crates/hex-client/src/copy.rs": "ee30ad82c52ea5ce5af5cf5da1ba0d6a9dc30304389642686451e67023fb325d",
+    "crates/hex-client/src/guest/shards.rs": "3343ae45c24fd5eae4d4b7e4a4777783078cd5f74d5da8a917874a9f061013f1",
+    "crates/hex-client/src/calls.rs": "2274b7d480ab9291716b0ea257f750e0e9c53fb8e86ab20bf600cbcc51b1dd59"
+  },
+  "selector": "guest::tests::duplex_owner_preserves_io_and_explicit_native_clone_lifetime",
+  "guards": "Existing CONNECT_OBSERVE read/write timeouts; no actors; all owned handles dropped before result assertions",
+  "scope": "Test helper clone/drop counters plus exact original lifetime test; current deadline and Shards tests retained",
+  "policy": {
+    "role": "coordinator",
+    "revision": "bff3015182ad754274f1048ce393ac12cb6cd91f",
+    "full_read_retained_from_resumed_turn": true,
+    "hashes": {
+      "AGENTS.md": "f66d304c033ad4001d3d7347b67faa3bb3137d637860793e8e74f1eb6266db41",
+      "docs/development-rules.md": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+      "docs/development-evidence.md": "61613a244106d95b2759b38c8b6660ff29a616983e7afd6e9faabdc38368fb63",
+      "CLAUDE.md": "fd1076b256516e0edab1b3655421d37cd934e93a8232f0125b96abcfb99ece5f"
+    },
+    "hex_claude_sha256": "fe9c0ec842967bc38bd40c8072713c070905a05ef18852f465e9818dc3106517"
+  },
+  "source_checks": {
+    "reversible_delta": true,
+    "production_byte_equality": true,
+    "original_function_byte_equality": true,
+    "rustfmt": {
+      "command": "RUSTUP_AUTO_INSTALL=0 rustfmt +1.99.1 --check --edition 2024 --config skip_children=true crates/hex-client/src/guest/tests.rs",
+      "exit": 0,
+      "scope": "Named file only; no compilation or test"
+    },
+    "diff_check": {
+      "command": "git diff --check",
+      "exit": 0
+    },
+    "historical_rustfmt_path_attempt": {
+      "result": "Executable absent; no formatting/build/test ran",
+      "path": "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/rustfmt"
+    }
+  },
+  "execution": {
+    "builds": 0,
+    "tests": 0,
+    "native_vm_gpu": 0,
+    "remote_dispatches": 0
+  },
+  "unproved": [
+    "allocator-failure injection",
+    "native VM/GPU lifecycle",
+    "final-tree compile/test/gates"
+  ],
+  "next_check": {
+    "where": "normal Kiln admitted Linux runner; no laptop build/test",
+    "needs": "linux/amd64,cpus=1,mem=4g,disk=12g",
+    "command": "cargo test -p hex-client --lib --locked guest::tests::duplex_owner_preserves_io_and_explicit_native_clone_lifetime -- --exact --nocapture",
+    "requirements": "Exact signed source capsule; fresh private source/target/cache/temp, finite original guard, retained raw/exit/reap/source/temp receipts before acceptance"
+  },
+  "transport_observation": {
+    "agent_reads": "Earlier 403 retained in resume receipt; subsequent MCP reads recovered and existing L4 source result was received",
+    "credential_or_service_changes": false
+  },
+  "signing": {
+    "initial_attempt": {
+      "status": "FAILED_NO_COMMIT_WRITTEN",
+      "supported_wrapper": "/Users/adalundhe/.kiln-run/bin/gits",
+      "exit": 128,
+      "cause": "KILN_HARNESS_SOCK is not set in the restarted shell; native node session also reports absent",
+      "unsigned_commit_or_signing_bypass": false
+    },
+    "supported_native_route": {
+      "socket": "/Users/adalundhe/.kiln-run/kiln/harness-adas-macbook-pro-2_local-e46fdd2e.sock",
+      "source": "L4 metadata readback of earlier ROOT restoration instruction",
+      "socket_stat": "Existing socket; current uid owner; mode 0600",
+      "authorization": "Existing signer authenticates actual peer ancestry/session; no asserted agent identity or key/certificate change",
+      "outcome": "Git object/signature is authoritative; this source manifest does not pre-assert commit success"
+    }
+  }
+}
