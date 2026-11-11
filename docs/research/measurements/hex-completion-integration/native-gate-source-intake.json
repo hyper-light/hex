@@ -1,0 +1,19 @@
+{
+  "owner_source": "a129023848f0f88b83bf1f7e67b1a68c4e6e00c6",
+  "leaf": "crates/hex-node/src/supervise/completion_native_gate_tests.rs",
+  "leaf_sha256": "81542ea334f88a43021628df7851b1df2d232b589ed5f1ddfddffd6f3df0e719",
+  "parent_registration": "ROOT only cfg(all(test,target_os=linux)) path module",
+  "coherent_scope_source": "25fd0744 with 1fdf StorePath correction and SDK0015",
+  "scope": "three ignored ROOT-only actual Supervisor/Store/cgroup/native held exec stand-in controls; noGPU/VM/container claim",
+  "source_review": [
+    "firstCreating actual Storebegin plus retained bytes before native reserve",
+    "publication-refusal has exacttypedcause thennoexecmarker/Released beforecleanup",
+    "publication-success requiresfile+directorysync increments and fullrecordreadback before gate release",
+    "parentdeath uses exactpidfd/birth/parent, stopped sibling, earlierthan anygatedeadline and marker absence",
+    "cleanup uses originalscope/speccommitment and sameownerlease beforecgroup/Store removal",
+    "configuredstandin and explicitfiniteROOTguards; unresolvedcleanupretainslab/artifacts"
+  ],
+  "compile": "notrun at source checkpoint",
+  "native_invocations": 0,
+  "still_owed": "compile, own guarded native invocation, meaningful guard-removal/restoration and resource witnesses"
+}

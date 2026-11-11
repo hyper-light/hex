@@ -1855,3 +1855,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "supervise/completion_native_gate_tests.rs"]
+mod completion_native_gate_tests;
