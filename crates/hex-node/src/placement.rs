@@ -53,7 +53,7 @@ pub enum Notice {
     },
     Status {
         key: Key,
-        info: BoxInfo,
+        info: triomphe::Arc<BoxInfo>,
     },
 }
 
@@ -941,7 +941,19 @@ impl Driver {
                 .get(demand.class)?
                 .inspect(&self.physical_id(key)?)
             {
-                Ok(info) => step.notices.push(Notice::Status { key, info }),
+                Ok(info) => {
+                    let info = triomphe::Arc::try_new(info).map_err(|_| Refusal::Exhausted {
+                        what: "placement status ownership",
+                        bound: 1,
+                    })?;
+                    step.notices
+                        .try_reserve(1)
+                        .map_err(|_| Refusal::Exhausted {
+                            what: "placement status notice entries",
+                            bound: 1,
+                        })?;
+                    step.notices.push(Notice::Status { key, info });
+                }
                 Err(Refusal::NoSuchBox(_)) => {
                     let next = self.ended(key)?;
                     step.send.extend(next.send);
