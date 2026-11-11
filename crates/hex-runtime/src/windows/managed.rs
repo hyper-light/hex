@@ -372,10 +372,10 @@ pub(super) fn launch(
         Ok(shards_api::managed_receipt(Arc::clone(&boxed)))
     })();
     if let Err(error) = &result {
-        // On every failure the original slot/job/keeper keep the exact claims, marked for cleanup; a
-        // refused mark returns beside the failure. No error is promoted to scope absence; the
-        // caller's same Creating row remains durable.
-        runtime.holding.uncertain_after(record.owner(), error)?;
+        // On every failure this creator's own slot/job/keeper keep the exact claims, marked for
+        // cleanup; a refused mark returns beside the failure. No error is promoted to scope
+        // absence; the caller's same Creating row remains durable.
+        runtime.holding.uncertain_vm_after(&boxed, error)?;
     }
     result
 }
@@ -537,27 +537,34 @@ fn cold(
     runtime.holding.reserve(record.owner(), &[], None, None)?;
     let retained = Held::Process(Arc::clone(&boxed));
     let cancelled = runtime.holding.made(record.owner(), retained)?;
-    runtime.holding.keeper_receipt(
-        record.owner(),
-        super::KeeperHold::Held(super::KeeperReceipt {
-            pid: held.pid,
-            created: held.started,
-            value: held.value,
-        }),
-    )?;
-    if let (Some(identity), Some(vsock)) = (identity, vsock) {
-        match controller(&boxed, identity, vsock) {
-            Ok(receipt) => boxed.managed.set(receipt).map_err(|_| uncertain(record))?,
-            Err(error) => boxed
-                .observation_failure
-                .set(error)
-                .map_err(|_| uncertain(record))?,
+    let result = (|| {
+        runtime.holding.keeper_receipt(
+            record.owner(),
+            super::KeeperHold::Held(super::KeeperReceipt {
+                pid: held.pid,
+                created: held.started,
+                value: held.value,
+            }),
+        )?;
+        if let (Some(identity), Some(vsock)) = (identity, vsock) {
+            match controller(&boxed, identity, vsock) {
+                Ok(receipt) => boxed.managed.set(receipt).map_err(|_| uncertain(record))?,
+                Err(error) => boxed
+                    .observation_failure
+                    .set(error)
+                    .map_err(|_| uncertain(record))?,
+            }
         }
+        if cancelled || !runtime.holding.ready(record.owner())? {
+            return Err(uncertain(record));
+        }
+        Ok(())
+    })();
+    if let Err(error) = &result {
+        // The adopted job is this slot's from `made` on: any later failure hands it to cleanup.
+        runtime.holding.uncertain_vm_after(&boxed, error)?;
     }
-    if cancelled || !runtime.holding.ready(record.owner())? {
-        return Err(uncertain(record));
-    }
-    Ok(boxed)
+    result.map(|()| boxed)
 }
 
 pub(super) fn finalize(
