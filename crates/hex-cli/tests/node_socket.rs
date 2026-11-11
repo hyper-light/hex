@@ -889,7 +889,13 @@ fn through_a_simulated_guest(lab: &Lab, agent: &Agent, exe: &str) {
         boots,
         stages,
     } = simulated_guest(agent, exe);
-    let node = WithGuest::new(hex_api::sim::SimRuntime::new(), runtime).unwrap();
+    // Routed by class as macOS's node is, over a host runtime of `process` boxes alone, as macOS's is: a
+    // host that ran `oci` itself would leave an unrouted `oci` box ambiguous (`WithGuest::route_for`).
+    let node = WithGuest::new(
+        hex_api::sim::SimRuntime::for_backend(Class::Process),
+        runtime,
+    )
+    .unwrap();
     assert_eq!(node.classes(), [Class::Process, Class::Oci]);
     let failures = conformance::run(&node, &OciBoxes(lab, false));
     assert!(
@@ -1015,7 +1021,12 @@ fn through_a_host_nodes_socket(lab: &Lab, agent: &Agent, exe: &str) {
         boots,
         stages: _stages,
     } = simulated_guest(agent, exe);
-    let node = WithGuest::new(HostBoxes(hex_api::sim::SimRuntime::new()), runtime).unwrap();
+    // The host's own `process` boxes alone, as `through_a_simulated_guest`'s.
+    let node = WithGuest::new(
+        HostBoxes(hex_api::sim::SimRuntime::for_backend(Class::Process)),
+        runtime,
+    )
+    .unwrap();
     let node = hex_node::recorded::Recorded::open(node, &dir.path().join("state")).unwrap();
     let socket = dir.path().join("host.sock");
     // The host node's socket bounds, as a Linux node takes them from its host (goal 5's sizes).

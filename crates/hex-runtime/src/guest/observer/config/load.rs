@@ -522,8 +522,8 @@ fn parse(text: &str) -> Result<GpuObserverInput, Refusal> {
         bytes: text.len(),
     };
     let mut fields = Members::begin(&mut json, '{', '}')?;
-    let (mut evidence, mut files, mut prefix, mut queues, mut allocation, mut stderr, mut limits) =
-        (None, None, None, None, None, None, None);
+    let (mut evidence, mut files, mut prefix, mut queues, mut allocation, mut limits) =
+        (None, None, None, None, None, None);
     while let Some(field) = fields.field(&mut json)? {
         match field.as_str() {
             "evidence" => put(&mut evidence, digest(&json.string()?)?)?,
@@ -531,7 +531,6 @@ fn parse(text: &str) -> Result<GpuObserverInput, Refusal> {
             "launch" => put(&mut prefix, launch(&mut json)?)?,
             "max_queue_families" => put(&mut queues, narrow(json.number()?)?)?,
             "max_allocation_bytes" => put(&mut allocation, narrow(json.number()?)?)?,
-            "stderr_bytes" => put(&mut stderr, narrow(json.number()?)?)?,
             "bounds" => put(&mut limits, bounds(&mut json)?)?,
             _ => return Err(invalid("observer JSON input field is unknown")),
         }
@@ -546,7 +545,6 @@ fn parse(text: &str) -> Result<GpuObserverInput, Refusal> {
         launch: required(prefix)?,
         max_queue_families: required(queues)?,
         max_allocation_bytes: required(allocation)?,
-        stderr_bytes: required(stderr)?,
         bounds: required(limits)?,
     })
 }

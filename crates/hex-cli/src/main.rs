@@ -20,6 +20,17 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
+    // The macOS node's persistent managed-VM owner, the same binary started only by its node, before
+    // any other CLI work; its paths are native bytes, so it reads them as such (AC-T7.4.1).
+    #[cfg(target_os = "macos")]
+    {
+        let words: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+        if let [first, rest @ ..] = words.as_slice()
+            && first == "native-managed-helper"
+        {
+            return ExitCode::from(hex_cli::managed_helper::main(rest));
+        }
+    }
     let args: Vec<Option<String>> = std::env::args_os()
         .skip(1)
         .map(|a| a.into_string().ok())

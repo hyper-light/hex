@@ -38,9 +38,9 @@ impl MacRuntime {
     }
 
     /// The host half of a pending dedicated handoff's no-Intent proof (AC-T7.4.1). A Box's launch,
-    /// scope and receipt live only in this owner's native table, so any slot of its id contradicts
-    /// "never submitted", and an unreadable table proves nothing. Nothing is opened, adopted or
-    /// stopped; absence is not a Released fact.
+    /// scope and receipt live only in this owner's native table and its persistent helper, so a
+    /// slot of its id in either contradicts "never submitted", and an unreadable one proves
+    /// nothing. Nothing is opened, adopted or stopped; absence is not a Released fact.
     pub fn preflight_unsubmitted(&self, record: &BoxRecord) -> Result<(), Refusal> {
         let native = NativeRecord::Box(record);
         let bad = || native.refusal(LifecycleCause::Uncertain);
@@ -54,13 +54,17 @@ impl MacRuntime {
         {
             return Err(bad());
         }
-        // The envelope a launch of this row would take: Shards, its admitted allocation and cost.
+        // The envelope a launch of this row would take: Shards, its admitted allocation and cost,
+        // checked against the measured CPU control and the configured persistent owner.
         host_bounds(native)?;
-        let boxes = self.boxes().map_err(|_| bad())?;
-        if native_owner_index(&boxes, native.owner()).is_ok() {
-            return Err(bad());
+        self.check_vm_cost(&record.spec.allocation.ok_or_else(bad)?.cost)?;
+        {
+            let boxes = self.boxes().map_err(|_| bad())?;
+            if native_owner_index(&boxes, native.owner()).is_ok() {
+                return Err(bad());
+            }
         }
-        Ok(())
+        super::remote::preflight_unsubmitted(self, record)
     }
 
     pub fn preflight_managed(&self, record: NativeRecord<'_>) -> Result<(), Refusal> {
@@ -68,6 +72,9 @@ impl MacRuntime {
         record.scope().ok_or_else(bad)?;
         if record.class()? != Class::Shards {
             return Err(bad());
+        }
+        if self.managed_helper.is_some() {
+            return super::remote::preflight(self, record);
         }
         let boxes = self.boxes()?;
         let Ok(at) = native_owner_index(&boxes, record.owner()) else {
@@ -86,7 +93,7 @@ impl MacRuntime {
         };
         let boxed = boxes.get(at).map(|(_, boxed)| boxed).ok_or_else(bad)?;
         let scope = boxed.scope().ok_or_else(bad)?;
-        if scope.ownership != Ownership::Child || !scope.matches(record, record.commitment()?) {
+        if !scope.matches(record, record.commitment()?) {
             return Err(bad());
         }
         if let Some(init) = record.init()
@@ -96,10 +103,7 @@ impl MacRuntime {
         {
             return Err(bad());
         }
-        if matches!(
-            *scope.lock().map_err(|_| bad())?,
-            Phase::Uncertain(_) | Phase::Observing
-        ) {
+        if matches!(*scope.lock().map_err(|_| bad())?, Phase::Uncertain(_)) {
             return Err(bad());
         }
         Ok(())
@@ -150,7 +154,8 @@ impl MacRuntime {
                 _ => return Err(record.refusal(LifecycleCause::Uncertain)),
             }
         }
-        Ok(())
+        drop(boxes);
+        super::remote::preflight_retained(self, records, pools)
     }
 }
 
@@ -176,13 +181,32 @@ mod tests {
     };
     use hex_core::record::ProcId;
 
-    fn runtime() -> MacRuntime {
+    /// The configured runtime a launch needs: the source's measured cost identity (the response
+    /// is a test fixture; no enforcement conclusion) and its persistent helper's private paths in
+    /// `dir`. Configuring either starts and reads nothing.
+    fn runtime(dir: &std::path::Path) -> MacRuntime {
+        std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
         let model = crate::macos::machine_model().unwrap();
         let rates = hex_core::watch::seed(&model);
         MacRuntime::new(
             rates.bytes,
             rates.processes,
             hex_core::watch::lateness_seed(&model),
+        )
+        .unwrap()
+        .with_cpu_control(crate::macos::CpuControl {
+            cost_id: source().cost.id,
+            response: std::time::Duration::from_nanos(1),
+        })
+        .unwrap()
+        .with_managed_helper(
+            crate::macos::ManagedHelper::new(
+                dir.join("hex"),
+                dir.join("helper.sock"),
+                dir.join("helper.receipt"),
+                std::time::Duration::from_secs(1),
+            )
+            .unwrap(),
         )
         .unwrap()
     }
@@ -277,8 +301,14 @@ mod tests {
     /// spawn.
     fn retained(native: &MacRuntime, record: NativeRecord<'_>) -> Arc<ProcessBox> {
         let bounds = host_bounds(record).unwrap();
-        let boxed =
-            ProcessBox::prepare_managed(record, &bounds, &native.shared, Ownership::Child).unwrap();
+        let boxed = ProcessBox::prepare_managed(
+            record,
+            &bounds,
+            &native.shared,
+            native.cpu_control,
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
         retain(native, record, &boxed).unwrap();
         boxed
     }
@@ -295,7 +325,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let source = source();
         let record = pending(root.path(), &source);
-        let native = runtime();
+        let native = runtime(root.path());
         native.preflight_unsubmitted(&record).unwrap();
         assert!(native.boxes().unwrap().is_empty());
 
@@ -314,7 +344,7 @@ mod tests {
         assert_eq!(launch.group().unwrap(), None);
         assert_eq!(native.boxes().unwrap().len(), 1);
 
-        let held = runtime();
+        let held = runtime(root.path());
         let _source = retained(&held, NativeRecord::Pool(&source));
         held.preflight_unsubmitted(&record).unwrap();
         assert_eq!(held.boxes().unwrap().len(), 1);
@@ -326,7 +356,7 @@ mod tests {
     fn unsubmitted_handoff_refuses_submitted_metadata_and_an_unreadable_table() {
         let root = tempfile::tempdir().unwrap();
         let pending = pending(root.path(), &source());
-        let native = runtime();
+        let native = runtime(root.path());
         let trace = ProcId {
             pid: 51,
             start_ticks: 53,

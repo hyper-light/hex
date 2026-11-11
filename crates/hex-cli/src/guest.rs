@@ -10,8 +10,9 @@
 //! initramfs ("EINVAL The current root directory is on the rootfs"). It then mounts what a Linux node
 //! needs (`/proc`, `/sys`, cgroup2, `/dev`, a tmpfs `/run` and `/tmp`; the node's state is under `/run`,
 //! as the guest has no disk: docs/design/shards-guest.md §4), mounts the Shards shares the kernel's
-//! command line names (`hex.shares=rw,ro,…`, §4a) at `/run/hex/shares/<i>`, starts `hex node` and then
-//! `hex guest relay --vsock`, says `hex guest ready` on the console, and reaps every process that ends,
+//! command line names (`hex.shares=rw,ro,…`, §4a) at `/run/hex/shares/<i>`, gives the node the descriptor
+//! limit `hex node --descriptors` counts (soft and hard, `fs.nr_open` raised to it where lower), starts `hex node`
+//! and then `hex guest relay --vsock`, says `hex guest ready` on the console, and reaps every process that ends,
 //! as PID 1 must. When the node or the relay ends, it says why and powers the guest off, so the host sees
 //! the guest end.
 //!
@@ -27,6 +28,7 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use hex_api::Refusal;
 use hex_client::guest::Duplex;
 use hex_core::stream;
 use hex_node::relay::{Conn, Limits, Listen, Relay, STAGED};
@@ -305,6 +307,8 @@ fn init() -> Result<(), (u8, String)> {
     // guest catalog; do this before the node reads its configured attachment routes.
     let _ = hex_runtime::guest::gpu::initialize(state)
         .map_err(|why| fail(format!("initializing guest GPU authority: {why}")))?;
+    give_descriptors(state)
+        .map_err(|why| fail(format!("giving the node its descriptor limit: {why}")))?;
     let node = start(
         &exe,
         &[
@@ -352,6 +356,83 @@ fn init() -> Result<(), (u8, String)> {
         .write_all(format!("hex guest: {why}; powering off\n").as_bytes());
     rustix::system::reboot(rustix::system::RebootCommand::PowerOff)
         .map_err(|e| fail(format!("powering off: {e}")))
+}
+
+/// What init gives the node of RLIMIT_NOFILE, as the guest's service manager.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NodeDescriptors {
+    /// The soft and hard limit init sets before it starts the node, which the node inherits.
+    limit: u64,
+    /// `fs.nr_open` raised to this first, where it was lower.
+    nr_open: Option<u64>,
+}
+
+/// The kernel's ceiling on any process's descriptor limit: setrlimit(2) refuses a hard RLIMIT_NOFILE past it
+/// (EPERM), and root may raise it (proc_sys_fs(5), `nr_open`).
+const NR_OPEN: &str = "/proc/sys/fs/nr_open";
+
+/// `fs.nr_open` now: a decimal count and its newline, read within a `u64`'s digits and that newline.
+fn read_nr_open() -> Result<u64, Refusal> {
+    let mut text = String::new();
+    let bound = u64::try_from(u64::MAX.to_string().len().saturating_add(1)).unwrap_or(u64::MAX);
+    std::fs::File::open(NR_OPEN)
+        .and_then(|file| file.take(bound).read_to_string(&mut text))
+        .map_err(|e| Refusal::os("reading fs.nr_open", e))?;
+    text.trim_end()
+        .parse()
+        .map_err(|_| Refusal::Invalid {
+            what: "fs.nr_open",
+            why: format!("{text:?} isn't a count"),
+        })
+}
+
+/// The node's descriptor limit, from its `need` (`hex_node::netns::needed_on_this_host`'s total, the one count, which
+/// `hex node --descriptors` says), what init was `given` and the kernel's `nr_open` now: soft and hard alike the need,
+/// or a hard limit init was given past it, kept; `fs.nr_open` raised to it first where lower, as no hard limit passes
+/// it.
+fn node_descriptors(need: u64, given: &rustix::process::Rlimit, nr_open: u64) -> NodeDescriptors {
+    let limit = given.maximum.filter(|hard| *hard > need).unwrap_or(need);
+    NodeDescriptors {
+        limit,
+        nr_open: if limit > nr_open { Some(limit) } else { None },
+    }
+}
+
+/// Gives the node, its state under `state`, its descriptor limit before init starts it, as a service manager gives one
+/// (`LimitNOFILE=`): init's own, which the node inherits, as [`node_descriptors`] says (AC-T7.4.1). Refused by type,
+/// with the numbers, where `fs.nr_open` or the limit can't be set, so init says why and starts no node rather than one
+/// that refuses silently.
+fn give_descriptors(state: &Path) -> Result<NodeDescriptors, Refusal> {
+    use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+    let need = hex_node::netns::needed_on_this_host(state)?.total();
+    let nr_open = read_nr_open()?;
+    let given = node_descriptors(need, &getrlimit(Resource::Nofile), nr_open);
+    let refused = |why: String| Refusal::Platform {
+        what: "the guest node's descriptor limit",
+        platform: "linux",
+        why,
+    };
+    if let Some(raised) = given.nr_open {
+        std::fs::write(NR_OPEN, raised.to_string()).map_err(|e| {
+            refused(format!(
+                "the node needs {need} descriptors, past fs.nr_open's {nr_open}, which init couldn't raise to {raised}: {e}"
+            ))
+        })?;
+    }
+    setrlimit(
+        Resource::Nofile,
+        Rlimit {
+            current: Some(given.limit),
+            maximum: Some(given.limit),
+        },
+    )
+    .map_err(|e| {
+        refused(format!(
+            "the node needs {need} descriptors; init couldn't set RLIMIT_NOFILE's soft and hard limits to {}: {e}",
+            given.limit
+        ))
+    })?;
+    Ok(given)
 }
 
 /// One file system `init` mounts: its source, target, type and flags.
@@ -738,6 +819,38 @@ fn reap(node: u32, relay: u32) -> String {
 mod tests {
     use super::*;
     use rustix::mount::MountFlags;
+
+    /// AC-T7.4.1 (original): the guest's kernel starts init under RLIMIT_NOFILE 1024 soft and 4096 hard (its
+    /// INR_OPEN_CUR and INR_OPEN_MAX), under which the node refused to start: "its own 271062 descriptors at its pools'
+    /// bounds exceed RLIMIT_NOFILE: the hard limit of 4096" (native_firecracker_smoke at c1f89439, the VMM's tail). Do:
+    /// count the node's need as `hex node --descriptors` does, then what init gives the node from the guest kernel's
+    /// limit, under this host's `fs.nr_open` and under one below the need. Expect soft and hard both the need, and
+    /// `fs.nr_open` raised to it first only where it was lower.
+    #[test]
+    fn original_the_limit_init_gives_the_node_holds_its_need() {
+        let need = hex_node::netns::needed_on_this_host(Path::new("/"))
+            .unwrap()
+            .total();
+        let guest = rustix::process::Rlimit {
+            current: Some(1024),
+            maximum: Some(4096),
+        };
+        let nr_open = read_nr_open().unwrap();
+        assert_eq!(
+            node_descriptors(need, &guest, nr_open),
+            NodeDescriptors {
+                limit: need,
+                nr_open: if need > nr_open { Some(need) } else { None },
+            }
+        );
+        assert_eq!(
+            node_descriptors(need, &guest, need - 1),
+            NodeDescriptors {
+                limit: need,
+                nr_open: Some(need),
+            }
+        );
+    }
 
     /// AC-T7.4.1: only the host's paired kernel parameters authorize a bounded readiness
     /// notification; init arguments and environment defaults never enable it.

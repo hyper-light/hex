@@ -160,11 +160,14 @@ struct Seen {
     control: Option<UnixStream>,
 }
 
+/// The guest's side of one observer run whose Program writes a refusal to stderr and exits 7; its
+/// Delete is answered done where `deleted`, else refused as uncertain.
 fn failed_workload(
     mut control: UnixStream,
     mut stdout: UnixStream,
     mut stderr: UnixStream,
     budget: managed::Budget,
+    deleted: bool,
 ) -> Result<Seen, String> {
     write_all(&mut control, &7u64.to_le_bytes(), budget)?;
     let (hello, request_hello) = request(&mut control, budget)?;
@@ -242,15 +245,15 @@ fn failed_workload(
         match next {
             wire::Request::Taken | wire::Request::StreamsReady => {}
             wire::Request::Call(wire::Call::Delete(gone)) if gone == id => {
-                answer(
-                    &mut control,
-                    header.id,
-                    &wire::Answer::Refused(Refusal::Lifecycle {
+                let done = if deleted {
+                    wire::Answer::Done
+                } else {
+                    wire::Answer::Refused(Refusal::Lifecycle {
                         id: id.try_clone().map_err(|why| why.to_string())?,
                         cause: LifecycleCause::Uncertain,
-                    }),
-                    budget,
-                )?;
+                    })
+                };
+                answer(&mut control, header.id, &done, budget)?;
                 return Ok(Seen {
                     run: id,
                     deletes: 1,
@@ -274,12 +277,23 @@ fn hex(bytes: &[u8]) -> String {
     text
 }
 
-/// AC-T7.4.1: known guest exit and typed failed cleanup survive observer error
-/// in the SAME durable VM receipt. This original control adds no v5 implementation.
-#[test]
-fn known_guest_exit_and_typed_cleanup_failure_survive_the_same_vm_receipt() {
-    let dir = tempfile::tempdir().unwrap();
-    let (config, input, allocation) = config::tests::fixture(dir.path());
+/// What one observer run against `failed_workload` left: its result, the time left, its receipt as
+/// read back and as written, what the model saw, the run's scope and allocation, and native calls.
+struct Observed {
+    result: Result<(), Refusal>,
+    remaining: Result<Duration, Refusal>,
+    retained: Result<Option<pool::Receipt>, Refusal>,
+    durable: std::io::Result<String>,
+    seen: Seen,
+    scope: record::NativeScope,
+    allocation: hex_api::Allocation,
+    native_calls: usize,
+}
+
+/// One observer run through the actual Client, named sockets and RemoteProc against
+/// `failed_workload`, its Delete answered as `deleted` says. Every peer is shut before it returns.
+fn observed(dir: &std::path::Path, deleted: bool) -> Observed {
+    let (config, input, allocation) = config::tests::fixture(dir);
     let configured = config::GpuObserver::new(input, &config, allocation).unwrap();
     let original = record::PoolRecord {
         version: record::RECORD_VERSION,
@@ -317,7 +331,7 @@ fn known_guest_exit_and_typed_cleanup_failure_survive_the_same_vm_receipt() {
         started: 7,
         vsock: "/model/v".into(),
     });
-    let path = dir.path().join("receipt");
+    let path = dir.join("receipt");
     let (control, peer) = UnixStream::pair().unwrap();
     let closer = control.try_clone().unwrap();
     let (out, stdout) = UnixStream::pair().unwrap();
@@ -332,7 +346,7 @@ fn known_guest_exit_and_typed_cleanup_failure_survive_the_same_vm_receipt() {
         managed::Budget::new(crate::guest::recorded_boot().unwrap().saturating_mul(2)).unwrap();
     let worker = std::thread::Builder::new()
         .name("observer-known-facts".into())
-        .spawn(move || failed_workload(peer, stdout, stderr, budget))
+        .spawn(move || failed_workload(peer, stdout, stderr, budget, deleted))
         .unwrap();
     let connected = Client::connect_before(triomphe::Arc::clone(&link), budget.deadline());
     let setup_ok = connected.is_ok();
@@ -366,7 +380,33 @@ fn known_guest_exit_and_typed_cleanup_failure_survive_the_same_vm_receipt() {
         setup_ok,
         "actual Client setup failed before the observer behavior: {result:?}"
     );
-    let seen = joined.unwrap().unwrap();
+    Observed {
+        result,
+        remaining,
+        retained,
+        durable,
+        seen: joined.unwrap().unwrap(),
+        scope,
+        allocation,
+        native_calls: native_calls.load(Ordering::SeqCst),
+    }
+}
+
+/// AC-T7.4.1: known guest exit and typed failed cleanup survive observer error
+/// in the SAME durable VM receipt. This original control adds no v5 implementation.
+#[test]
+fn known_guest_exit_and_typed_cleanup_failure_survive_the_same_vm_receipt() {
+    let dir = tempfile::tempdir().unwrap();
+    let Observed {
+        result,
+        remaining,
+        retained,
+        durable,
+        seen,
+        scope,
+        allocation,
+        native_calls,
+    } = observed(dir.path(), false);
     assert_eq!(seen.deletes, 1);
     assert_eq!(seen.stdout.stream, stream::Stdio::Out);
     assert_eq!(seen.stderr.stream, stream::Stdio::Err);
@@ -378,7 +418,7 @@ fn known_guest_exit_and_typed_cleanup_failure_survive_the_same_vm_receipt() {
         remaining.is_ok(),
         "expiry must not masquerade as known exit failure"
     );
-    assert_eq!(native_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(native_calls, 0);
     assert!(matches!(
         result,
         Err(Refusal::Backing {
@@ -428,4 +468,30 @@ fn known_guest_exit_and_typed_cleanup_failure_survive_the_same_vm_receipt() {
         durable.contains(&cleanup_fact),
         "known typed failed Delete was lost from the same receipt"
     );
+}
+
+/// AC-T7.4.1: run an observer whose Program writes its refusal to stderr and exits 7, its cleanup
+/// done; expect the observer refused with that stderr, in one wire answer, for the person to read.
+#[test]
+fn an_unsuccessful_observer_is_refused_with_its_programs_stderr() {
+    let dir = tempfile::tempdir().unwrap();
+    let observed = observed(dir.path(), true);
+    assert_eq!(observed.seen.deletes, 1);
+    assert!(observed.remaining.is_ok());
+    let Err(refusal) = observed.result else {
+        panic!("an exit 7 was taken as ready");
+    };
+    assert_eq!(
+        refusal,
+        Refusal::Invalid {
+            what: "Shards guest GPU readiness",
+            why:
+                "actual guest observer exited unsuccessfully; its stderr:\nvkCreateDevice refused\n"
+                    .into(),
+        }
+    );
+    assert!(wire::answer(0, &wire::Answer::Refused(refusal), wire::MAX_MESSAGE).is_ok());
+    let retained = observed.retained.unwrap().unwrap();
+    let attempt = retained.attempt.as_ref().unwrap();
+    assert_eq!(attempt.stderr.bytes().unwrap(), b"vkCreateDevice refused\n");
 }
