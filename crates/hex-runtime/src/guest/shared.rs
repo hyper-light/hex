@@ -1238,6 +1238,79 @@ fn push_offer(
             bound: hex_api::MAX_RUNTIME_ROUTES,
         });
     }
+    if capacity.device_routes.len() != capacity.devices.len() {
+        return Err(route::invalid(
+            "route eligibility is not paired with canonical devices",
+        ));
+    }
+    if capacity.devices.len() > hex_api::MAX_DEVICES || eligible.len() > hex_api::MAX_DEVICES {
+        return Err(Refusal::Full(hex_api::MAX_DEVICES));
+    }
+    let exhausted = || Refusal::Exhausted {
+        what: "checked physical capacity slots",
+        bound: hex_api::MAX_DEVICES,
+    };
+    let mut additional = Vec::new();
+    if !eligible.is_empty() {
+        if eligible
+            .windows(2)
+            .any(|pair| matches!(pair, [left, right] if left.id >= right.id))
+        {
+            return Err(route::invalid(
+                "checked physical facts are not canonical sorted unique identities",
+            ));
+        }
+        let mut existing = Vec::new();
+        existing
+            .try_reserve_exact(capacity.devices.len())
+            .map_err(|_| exhausted())?;
+        for (at, device) in capacity.devices.iter().enumerate() {
+            device.check()?;
+            existing.push((device.id, at));
+        }
+        existing.sort_unstable_by_key(|(id, _)| *id);
+        if existing
+            .windows(2)
+            .any(|pair| matches!(pair, [left, right] if left.0 == right.0))
+        {
+            return Err(route::invalid("capacity repeated a physical identity"));
+        }
+        let mut absent = 0usize;
+        for device in eligible {
+            device.check()?;
+            if let Ok(at) = existing.binary_search_by_key(&device.id, |(id, _)| *id) {
+                let (_, at) = existing
+                    .get(at)
+                    .ok_or_else(|| route::invalid("physical capacity index changed"))?;
+                if capacity.devices.get(*at) != Some(device) {
+                    return Err(route::invalid(
+                        "checked physical metadata or holder conflicts with capacity",
+                    ));
+                }
+            } else {
+                absent = absent.checked_add(1).ok_or_else(exhausted)?;
+            }
+        }
+        if capacity
+            .devices
+            .len()
+            .checked_add(absent)
+            .is_none_or(|count| count > hex_api::MAX_DEVICES)
+        {
+            return Err(Refusal::Full(hex_api::MAX_DEVICES));
+        }
+        additional
+            .try_reserve_exact(absent)
+            .map_err(|_| exhausted())?;
+        for device in eligible {
+            if existing
+                .binary_search_by_key(&device.id, |(id, _)| *id)
+                .is_err()
+            {
+                additional.push(device.try_clone()?);
+            }
+        }
+    }
     let bit = u32::try_from(capacity.routes.len())
         .ok()
         .and_then(|position| 1u64.checked_shl(position))
@@ -1249,11 +1322,20 @@ fn push_offer(
             what: "initialized runtime routes",
             bound: hex_api::MAX_RUNTIME_ROUTES,
         })?;
+    // Complete every fallible clone/reservation before publishing any slot,
+    // route or mask. Existing native order, metadata and holders stay exact.
+    capacity
+        .devices
+        .try_reserve_exact(additional.len())
+        .map_err(|_| exhausted())?;
+    capacity
+        .device_routes
+        .try_reserve_exact(additional.len())
+        .map_err(|_| exhausted())?;
     capacity.routes.push(offer);
-    if capacity.device_routes.len() != capacity.devices.len() {
-        return Err(route::invalid(
-            "route eligibility is not paired with canonical devices",
-        ));
+    for device in additional {
+        capacity.devices.push(device);
+        capacity.device_routes.push(0);
     }
     for (device, mask) in capacity.devices.iter().zip(&mut capacity.device_routes) {
         if eligible
