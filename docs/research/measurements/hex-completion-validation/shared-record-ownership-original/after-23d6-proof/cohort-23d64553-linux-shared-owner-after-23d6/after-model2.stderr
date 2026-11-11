@@ -1,0 +1,70 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling typenum v1.20.1
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.27
+   Compiling cfg-if v1.0.5
+   Compiling syn v3.0.9
+   Compiling libc v0.2.191
+   Compiling version_check v0.9.5
+   Compiling generic-array v0.14.7
+   Compiling autocfg v1.5.1
+   Compiling serde_core v1.0.229
+   Compiling thiserror v2.0.21
+   Compiling unsize v1.1.0
+   Compiling thiserror-impl v2.0.21
+   Compiling serde v1.0.229
+   Compiling serde_derive v1.0.229
+   Compiling hybrid-array v0.4.15
+   Compiling rustix v1.1.5
+   Compiling zmij v1.0.23
+   Compiling triomphe v0.1.17
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling bitflags v2.13.2
+   Compiling linux-raw-sys v0.12.1
+   Compiling serde_json v1.0.154
+   Compiling digest v0.10.7
+   Compiling hex-api v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-23d64553-linux-shared-owner-after-23d6/source/crates/hex-api)
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.1
+   Compiling itoa v1.0.18
+   Compiling memchr v2.8.3
+   Compiling const-oid v0.10.2
+   Compiling shards-abi v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-23d64553-linux-shared-owner-after-23d6/source/vendor/shards/crates/abi)
+   Compiling cpufeatures v0.2.17
+   Compiling crc32fast v1.5.4
+   Compiling sha2 v0.10.9
+   Compiling digest v0.11.3
+   Compiling cpufeatures v0.3.1
+   Compiling simd-adler32 v0.3.10
+   Compiling adler2 v2.0.1
+   Compiling miniz_oxide v0.9.1
+   Compiling sha2 v0.11.1
+   Compiling hex-core v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-23d64553-linux-shared-owner-after-23d6/source/crates/hex-core)
+   Compiling xattr v1.6.1
+   Compiling filetime v0.2.29
+   Compiling getrandom v0.4.3
+   Compiling tar v0.4.46
+   Compiling flate2 v1.1.11
+   Compiling shards-api v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-23d64553-linux-shared-owner-after-23d6/source/vendor/shards/crates/api)
+   Compiling hyper-timing v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-23d64553-linux-shared-owner-after-23d6/source/vendor/hyper-raft/crates/hyper-timing)
+   Compiling hyper-swim v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-23d64553-linux-shared-owner-after-23d6/source/vendor/hyper-raft/crates/hyper-swim)
+   Compiling hex-client v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-23d64553-linux-shared-owner-after-23d6/source/crates/hex-client)
+   Compiling hex-health v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-23d64553-linux-shared-owner-after-23d6/source/crates/hex-health)
+   Compiling hex-gpu v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-23d64553-linux-shared-owner-after-23d6/source/crates/hex-gpu)
+   Compiling seccompiler v0.5.0 (/home/adalundhe/.cache/hex-lead/cohort-23d64553-linux-shared-owner-after-23d6/source/vendor/seccompiler)
+   Compiling socket2 v0.6.5
+   Compiling once_cell v1.21.4
+   Compiling fastrand v2.5.0
+   Compiling tempfile v3.27.0
+   Compiling hex-runtime v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-23d64553-linux-shared-owner-after-23d6/source/crates/hex-runtime)
+   Compiling hex-sim v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-23d64553-linux-shared-owner-after-23d6/source/crates/hex-sim)
+   Compiling hex-testkit v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-23d64553-linux-shared-owner-after-23d6/source/crates/hex-testkit)
+   Compiling hex-node v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-23d64553-linux-shared-owner-after-23d6/source/crates/hex-node)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 18s
+     Running unittests src/lib.rs (/home/adalundhe/.cache/hex-lead/cohort-23d64553-linux-shared-owner-after-23d6/target/debug/deps/hex_node-d6283f30893b31f3)
+
+thread 'recorded::shared_outer_original_tests::original_shared_create_uncertainty_keeps_outer_box_and_same_pool_reference' (2323174) panicked at crates/hex-node/src/../../../docs/research/measurements/hex-completion-validation/shared-record-ownership-original/recorded_shared_outer_tests.rs:226:5:
+assertion failed: retained.native_scope.is_some()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+error: test failed, to rerun pass `-p hex-node --lib`

@@ -223,7 +223,10 @@ fn original_shared_create_uncertainty_keeps_outer_box_and_same_pool_reference() 
     let retained = retained.unwrap();
     assert_eq!(retained.phase, Phase::Creating);
     assert_eq!(retained.spec, spec);
-    assert!(retained.native_scope.is_some());
+    // The native VM scope belongs to the SAME shared Pool, not to each CPU payload.
+    assert!(retained.native_scope.is_none());
+    assert!(retained.spec.allocation.is_none());
+    assert_eq!(retained.spec.route.unwrap().backing, Some(pool.key));
     assert!(retained.init.is_none() && retained.exit.is_none());
     let references = node.books.store.all().unwrap();
     assert_eq!(references.values().filter(|row| matches!(row, Ok(row) if row.spec.route.and_then(|r| r.backing) == Some(pool.key))).count(), 1);

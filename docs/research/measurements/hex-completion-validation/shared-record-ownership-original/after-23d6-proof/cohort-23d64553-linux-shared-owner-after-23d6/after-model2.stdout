@@ -1,0 +1,12 @@
+
+running 2 tests
+test recorded::shared_outer_original_tests::dedicated_owner_refusal_keeps_one_canonical_box_without_outer_reentry ... ok
+test recorded::shared_outer_original_tests::original_shared_create_uncertainty_keeps_outer_box_and_same_pool_reference ... FAILED
+
+failures:
+
+failures:
+    recorded::shared_outer_original_tests::original_shared_create_uncertainty_keeps_outer_box_and_same_pool_reference
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 379 filtered out; finished in 0.10s
+

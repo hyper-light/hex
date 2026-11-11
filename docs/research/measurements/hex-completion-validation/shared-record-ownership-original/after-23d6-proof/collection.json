@@ -1,0 +1,98 @@
+{
+  "bytes": 1335109,
+  "sha256": "64402859c832e5e5e252f5686357a0ebc8493c7ad887c3f7156d9e54a7fcb9f6",
+  "members": {
+    "cohort-23d64553-linux-shared-owner-after-23d6/source-before.json": {
+      "bytes": 615007,
+      "sha256": "7dbc84651299611d1d423f2a0c94d3f9075fe6009cb370ca20368d7dbaac5a4f"
+    },
+    "cohort-23d64553-linux-shared-owner-after-23d6/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-23d64553-linux-shared-owner-after-23d6/owned-scope-limits.json": {
+      "bytes": 260,
+      "sha256": "fd51c1123acb91ed9d373d7caf749f0031edd1db55e01e9e333cb029e8d3b0a6"
+    },
+    "cohort-23d64553-linux-shared-owner-after-23d6/after-source-before.json": {
+      "bytes": 615007,
+      "sha256": "7dbc84651299611d1d423f2a0c94d3f9075fe6009cb370ca20368d7dbaac5a4f"
+    },
+    "cohort-23d64553-linux-shared-owner-after-23d6/mutant-source-before.json": {
+      "bytes": 615007,
+      "sha256": "61afbe076e3eaf47c697eef85d8ff8337e4eb3fabcb325818838cde6a8f7d9ed"
+    },
+    "cohort-23d64553-linux-shared-owner-after-23d6/restored-source-before.json": {
+      "bytes": 615007,
+      "sha256": "7dbc84651299611d1d423f2a0c94d3f9075fe6009cb370ca20368d7dbaac5a4f"
+    },
+    "cohort-23d64553-linux-shared-owner-after-23d6/after-model2.stdout": {
+      "bytes": 510,
+      "sha256": "9c9a8b2b144271a659e663efc3e71ffcb8a7438b8efa6ddd92b82ba59ef894c6"
+    },
+    "cohort-23d64553-linux-shared-owner-after-23d6/after-model2.stderr": {
+      "bytes": 4129,
+      "sha256": "0c32b2c7a704b8e1a8bfc25fe0cd2834d8c2d8d1bb80642863ffcb88b52a98b3"
+    },
+    "cohort-23d64553-linux-shared-owner-after-23d6/running.json": {
+      "bytes": 3019,
+      "sha256": "f5dd9b55cbae30ab0e071f1d5d37e5f01657ee24b6560fd390c493feb13dfcd1"
+    },
+    "cohort-23d64553-linux-shared-owner-after-23d6/after-source-after.json": {
+      "bytes": 615007,
+      "sha256": "7dbc84651299611d1d423f2a0c94d3f9075fe6009cb370ca20368d7dbaac5a4f"
+    },
+    "cohort-23d64553-linux-shared-owner-after-23d6/mutant-source-after.json": {
+      "bytes": 615007,
+      "sha256": "61afbe076e3eaf47c697eef85d8ff8337e4eb3fabcb325818838cde6a8f7d9ed"
+    },
+    "cohort-23d64553-linux-shared-owner-after-23d6/restored-source-after.json": {
+      "bytes": 615007,
+      "sha256": "7dbc84651299611d1d423f2a0c94d3f9075fe6009cb370ca20368d7dbaac5a4f"
+    },
+    "cohort-23d64553-linux-shared-owner-after-23d6/result.json": {
+      "bytes": 3271,
+      "sha256": "e431442a1867a8223d2fb4578e4203db0f433f38f280ce7f7eb5730eb7926622"
+    },
+    "cohort-23d64553-linux-shared-owner-after-23d6/event-evidence/journal.jsonl": {
+      "bytes": 698,
+      "sha256": "3754ab64b761006a884c2f9687254928c237e5862f8abbbdb88c59ff217d2080"
+    },
+    "outer-closures.json": {
+      "bytes": 676,
+      "sha256": "dc3b5d1a75c1b24435b762c0e367bdcc868f3dbf84f191b2618051088c6cbcd1"
+    }
+  },
+  "closures": {
+    "cohort-23d64553-linux-shared-owner-after-23d6": {
+      "scope": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-shared-owner-after-23d6.scope",
+      "scope_absent": true,
+      "owners": [
+        {
+          "kind": "driver",
+          "recorded": {
+            "pid": 2082353,
+            "ppid": 2082280,
+            "start_ticks": 32751756
+          },
+          "owned_birth_absent": true,
+          "absent": true
+        },
+        {
+          "kind": "cargo",
+          "recorded": {
+            "pid": 2091598,
+            "ppid": 2082353,
+            "start_ticks": 32752151
+          },
+          "owned_birth_absent": true,
+          "absent": true
+        }
+      ]
+    }
+  },
+  "collector_exit": 0,
+  "collector_reaped": true,
+  "all_members_verified": true,
+  "source_archives_verified": true
+}

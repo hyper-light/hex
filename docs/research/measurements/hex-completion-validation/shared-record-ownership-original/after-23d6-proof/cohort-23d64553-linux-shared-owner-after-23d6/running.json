@@ -1,0 +1,99 @@
+{
+  "source": "23d6455354d90e07993ce7e3a674f8a807ff5c05",
+  "archive_sha256": "99474424f2d87e3db3d9645deb9596b99b998df4a0ad93ad0d1c02d3ff4b675e",
+  "scope": "ROOT shared outer owner AFTER / meaningful prior-predicate mutation / independently built restoration; pure model, no native runtime/VM/GPU",
+  "platform": "Linux-7.3.3-1-cachyos-x86_64-with-glibc2.44",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver": {
+    "pid": 2082353,
+    "ppid": 2082280,
+    "start_ticks": 32751756
+  },
+  "phases": [
+    {
+      "name": "after-model2",
+      "cell": "after",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "--offline",
+        "recorded::shared_outer_original_tests",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "observation": {
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+          "test",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked",
+          "--offline",
+          "recorded::shared_outer_original_tests",
+          "--",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "both_eof": true,
+        "reaped": true,
+        "error": null,
+        "created_pid": 2091598,
+        "identity": {
+          "pid": 2091598,
+          "ppid": 2082353,
+          "start_ticks": 32752151
+        },
+        "returncode": 101
+      },
+      "actual_counts": [
+        [
+          "FAILED",
+          "1",
+          "1",
+          "0"
+        ]
+      ],
+      "expected_exit": 0,
+      "exact_completed": true,
+      "expected_semantic_outcome": false,
+      "stdout": {
+        "bytes": 510,
+        "sha256": "9c9a8b2b144271a659e663efc3e71ffcb8a7438b8efa6ddd92b82ba59ef894c6"
+      },
+      "stderr": {
+        "bytes": 4129,
+        "sha256": "0c32b2c7a704b8e1a8bfc25fe0cd2834d8c2d8d1bb80642863ffcb88b52a98b3"
+      },
+      "binary": {
+        "path": "/home/adalundhe/.cache/hex-lead/cohort-23d64553-linux-shared-owner-after-23d6/target/debug/deps/hex_node-d6283f30893b31f3",
+        "bytes": 189644896,
+        "sha256": "173da6eff5c277b7f2fb26090a369c6cc4bc15216d2708f2dbd4759c8c48a987"
+      },
+      "qualified": false
+    }
+  ],
+  "source_cell_delta": {
+    "after": [],
+    "mutant": [
+      "crates/hex-node/src/recorded.rs"
+    ],
+    "restored": []
+  },
+  "source_hashes": {
+    "after": "0b072315087e20b1a407d41b2b53c81bbc73b1d17fd02152b473267e532fff82",
+    "mutant": "e4d63ef6328ddc498b1c8e74a5040080fe1c97c2cdb735dc69d6da05ca9553a5",
+    "restored": "0b072315087e20b1a407d41b2b53c81bbc73b1d17fd02152b473267e532fff82"
+  }
+}
