@@ -1,0 +1,64 @@
+{
+  "source": "ee917b21368727de51b0d74e9c5e6af42655fc15",
+  "root_before": "dae0687b4fe1708d0fcd9b24b1b92172bd6b411d",
+  "files": {
+    "crates/hex-runtime/src/devices.rs": {
+      "before": "c9aa29dbae5abd105b06a9dcedf276e0cdc35256fb9f3117ad0612961e62c6c5",
+      "after": "019211c10dfcfde74a2826f6deac31f4298d5da967c77adacf1b89d404b01b23"
+    },
+    "crates/hex-node/src/facts.rs": {
+      "before": "b61adfe5b6b4618bf70cafec419898eef20c8d4d1f1b509357f762e3f504e8d5",
+      "after": "f96478b3ee0f0e42598b699214e030b845c72e7e14f2e6b4b3318510c78b8f7f"
+    },
+    "crates/hex-node/src/node.rs": {
+      "before": "416de436feb6b2e82d76862e1d239d1b01cc48ce61b545631c6a3383c2707377",
+      "after": "30aad80667456e5f41568f217e5239710430d747484720f793ea306cdcd4056d"
+    },
+    "crates/hex-node/src/node/backends.rs": {
+      "before": null,
+      "after": "e4750f6e43c56970600c04e271045aeaaaa13b539176f81ebe265e5eca53918b"
+    },
+    "crates/hex-node/src/supervise.rs": {
+      "before": "264a4b9acb0aa44c90b5b0b0e7d0353694c0c41fa8d2b6ca4d86b0fa5bf4ef37",
+      "after": "b47aaff39042a33a45db3d974cf067d7f1b63b03158a871828d42af174c26217"
+    },
+    "crates/hex-runtime/src/linux/process.rs": {
+      "before": "d68d1d366e2b1c12a3e8499c2e489b41c89ed0cf4b768740b42096755bf1cdf0",
+      "after": "ed5051e8c55c8f3b309334a093eabec9eaa42f5c87e58e9b29a51c7f5a71392c"
+    },
+    "crates/hex-runtime/src/linux/sys.rs": {
+      "before": "a0032050fcb06180770de1772fdb6317d55c31e6b8cae21407f087a951978074",
+      "after": "a45faa4951fee75cf0ddf2d6d1c2a98ddfd05f128f07935190753f3841c4256a"
+    },
+    "crates/hex-runtime/src/firecracker/config.rs": {
+      "before": null,
+      "after": "63faa33c2e1e17c8bda5016ab2a6169f55a7d637df1548160cfabd361ddcb68d"
+    },
+    "crates/hex-runtime/src/firecracker/mod.rs": {
+      "before": null,
+      "after": "ebe76e0f91a1affbe395d3e26ca1d9f48dcf76421b213e24d93cc09f531e3256"
+    },
+    "crates/hex-runtime/src/firecracker/native.rs": {
+      "before": null,
+      "after": "d79d72361053bfbcaf9103dde6c5fe33ea78d2855f2bdf3d42e42597b10e2c8c"
+    },
+    "crates/hex-runtime/src/firecracker/transport.rs": {
+      "before": null,
+      "after": "0ce19e87a06cd9a10aaa6f9cdbf2c37d82f577d2f0f90d727b457fa4d1bf4b1d"
+    },
+    "crates/hex-runtime/src/firecracker/vfio.rs": {
+      "before": null,
+      "after": "439bc300a0108ffe89a916133a0871a713bbe32f74bb7c9f9f9fa0bc2fe84088"
+    }
+  },
+  "status": "SOURCE ONLY; joined compiler/native checks pending",
+  "open": [
+    "canonical native scope and cold adoption",
+    "Firecracker same common native launch and initialized guest facts/admission",
+    "Firecracker stale pool-id/physical-authority check",
+    "native R01 tables and renderer environment",
+    "Service unread-counter actual red before quality remedy"
+  ],
+  "full_BoxSpec_render_preserved_sha256": "331fbb679a974bd14bb1fa80ea5f92b85da89723d6a5fc7b7a8c2c965b0f03e2",
+  "normalized_catalog_route_blocks_preserved": true
+}

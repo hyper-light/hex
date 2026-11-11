@@ -5,11 +5,12 @@
 #![allow(unsafe_code)]
 
 use std::ffi::{CString, c_char, c_int};
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::time::Duration;
 
 use rustix::process::{Resource, Rlimit, WaitId, WaitIdOptions};
 
@@ -207,6 +208,432 @@ impl Spawn {
     }
 }
 
+/// The single parent-side execution gate. Its byte is sent only after the existing native owner
+/// holds the child and the canonical identity is durable. Closing it cancels before execve.
+pub struct HeldGate {
+    socket: OwnedFd,
+    deadline: libc::timespec,
+}
+
+impl HeldGate {
+    pub fn release(self) -> std::io::Result<()> {
+        // Acknowledges the child-side cgroup join and inherited-writer closure, including on the
+        // legacy-clone fallback. The caller already owns the pidfd before any wait can fail.
+        held_wait(self.socket.as_raw_fd(), self.deadline, 2)?;
+        match rustix::net::send(
+            &self.socket,
+            &[1],
+            rustix::net::SendFlags::NOSIGNAL | rustix::net::SendFlags::DONTWAIT,
+        )? {
+            1 => Ok(()),
+            _ => Err(std::io::Error::from(rustix::io::Errno::IO)),
+        }
+    }
+}
+
+/// A child plus its atomically created pidfd. This is transferred, without allocation or narrowing
+/// the native PID, into the SAME preallocated Supervisor receipt before fallible observation.
+pub struct HeldChild {
+    pid: libc::c_long,
+    pidfd: OwnedFd,
+    gate: HeldGate,
+}
+
+struct HeldStart<'a> {
+    spawn: &'a Spawn,
+    argv: &'a [*const c_char],
+    envp: &'a [*const c_char],
+    reader: RawFd,
+    deadline: libc::timespec,
+}
+
+impl HeldChild {
+    pub fn pidfd(&self) -> BorrowedFd<'_> {
+        self.pidfd.as_fd()
+    }
+
+    pub fn into_parts(self) -> (libc::c_long, OwnedFd, HeldGate) {
+        (self.pid, self.pidfd, self.gate)
+    }
+}
+
+/// Unlike the ordinary vfork exec path, a held child has COW memory and returns immediately with a
+/// pidfd while foreign code is still gated. Clone3 places it in the cgroup atomically. A kernel or
+/// sandbox without that operation uses clone(CLONE_PIDFD), then joins in the child before the gate;
+/// it never launches a foreign instruction outside the admitted native envelope.
+pub fn spawn_held(
+    cgroup: BorrowedFd<'_>,
+    procs: BorrowedFd<'_>,
+    spawn: Spawn,
+    gate_budget: Duration,
+) -> std::io::Result<HeldChild> {
+    let deadline = held_deadline(gate_budget)?;
+    let argv = held_pointers(&spawn.argv)?;
+    let envp = held_pointers(&spawn.envp)?;
+    let (reader, writer) = rustix::net::socketpair(
+        rustix::net::AddressFamily::UNIX,
+        rustix::net::SocketType::STREAM,
+        rustix::net::SocketFlags::CLOEXEC,
+        None,
+    )?;
+    // stdio sources and both gate ends must stay above the dup2 targets even if this agent started
+    // with a standard descriptor closed. There are no descriptor allocations after the clone.
+    let above = |fd: OwnedFd| -> rustix::io::Result<OwnedFd> {
+        if fd.as_raw_fd() > 2 {
+            Ok(fd)
+        } else {
+            rustix::io::fcntl_dupfd_cloexec(&fd, 3)
+        }
+    };
+    let reader = above(reader)?;
+    let writer = above(writer)?;
+    let blocked = block_signals().map_err(|error| std::io::Error::other(error.to_string()))?;
+    // SAFETY: spawn and both pointer arrays were prepared before cloning and live until this call
+    // returns. The COW child touches only that prepared memory and async-signal-safe system calls,
+    // then execve or _exit; no child returns to Rust ownership/destructor paths.
+    let child = unsafe {
+        held_clone(
+            cgroup,
+            procs,
+            &HeldStart {
+                spawn: &spawn,
+                argv: &argv,
+                envp: &envp,
+                reader: reader.as_raw_fd(),
+                deadline,
+            },
+        )
+    };
+    drop(blocked);
+    let (pid, pidfd) = child?;
+    Ok(HeldChild {
+        pid,
+        pidfd,
+        gate: HeldGate {
+            socket: writer,
+            deadline,
+        },
+    })
+}
+
+fn held_pointers(strings: &[CString]) -> std::io::Result<Vec<*const c_char>> {
+    let room = strings
+        .len()
+        .checked_add(1)
+        .ok_or(rustix::io::Errno::OVERFLOW)?;
+    let mut pointers = Vec::new();
+    pointers
+        .try_reserve_exact(room)
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::OutOfMemory))?;
+    for string in strings {
+        pointers.push(string.as_ptr());
+    }
+    pointers.push(std::ptr::null());
+    Ok(pointers)
+}
+
+/// A protocol deadline, derived solely from the caller's explicit remaining create budget. The
+/// nanoseconds/second conversion is the POSIX timespec unit, not a guessed timeout constant.
+fn held_deadline(budget: Duration) -> std::io::Result<libc::timespec> {
+    held_deadline_at(
+        rustix::time::clock_gettime(rustix::time::ClockId::Monotonic),
+        budget,
+    )
+}
+
+fn held_deadline_at(
+    now: rustix::time::Timespec,
+    budget: Duration,
+) -> std::io::Result<libc::timespec> {
+    if budget.is_zero() {
+        return Err(std::io::Error::from(rustix::io::Errno::TIMEDOUT));
+    }
+    let nanos = now
+        .tv_nsec
+        .checked_add(i64::from(budget.subsec_nanos()))
+        .ok_or(rustix::io::Errno::OVERFLOW)?;
+    let seconds = now
+        .tv_sec
+        .checked_add(i64::try_from(budget.as_secs()).map_err(|_| rustix::io::Errno::OVERFLOW)?)
+        .and_then(|seconds| seconds.checked_add(nanos.checked_div(1_000_000_000)?))
+        .ok_or(rustix::io::Errno::OVERFLOW)?;
+    Ok(libc::timespec {
+        tv_sec: seconds,
+        tv_nsec: nanos
+            .checked_rem(1_000_000_000)
+            .ok_or(rustix::io::Errno::OVERFLOW)?,
+    })
+}
+
+/// # Safety
+/// Only from spawn_held with fully prepared, immutable C strings and pointers. The child must never
+/// return, allocate, access a lock or run a Rust destructor after either clone returns zero.
+unsafe fn held_clone(
+    cgroup: BorrowedFd<'_>,
+    procs: BorrowedFd<'_>,
+    start: &HeldStart<'_>,
+) -> std::io::Result<(libc::c_long, OwnedFd)> {
+    let mut pidfd: c_int = -1;
+    let args = CloneArgs {
+        flags: u64::from(libc::CLONE_PIDFD as u32) | CLONE_INTO_CGROUP,
+        pidfd: std::ptr::from_mut(&mut pidfd).addr() as u64,
+        child_tid: 0,
+        parent_tid: 0,
+        exit_signal: u64::from(libc::SIGCHLD as u32),
+        stack: 0,
+        stack_size: 0,
+        tls: 0,
+        set_tid: 0,
+        set_tid_size: 0,
+        cgroup: u64::try_from(cgroup.as_raw_fd()).map_err(|_| rustix::io::Errno::BADF)?,
+    };
+    // SAFETY: clone_args has Linux's size/alignment and only a live output pointer and cgroup fd.
+    // No VM/FILES/VFORK sharing: the child keeps this thread's COW stack and runs held_child only.
+    let pid = unsafe { libc::syscall(libc::SYS_clone3, &args, std::mem::size_of::<CloneArgs>()) };
+    if pid == 0 {
+        // SAFETY: this is the newly created COW child and every referenced object predates it.
+        unsafe { held_child(start, None) }
+    }
+    let pid = if pid == -1 {
+        let error = std::io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::ENOSYS | libc::E2BIG | libc::EINVAL | libc::EPERM) => {}
+            _ => return Err(error),
+        }
+        // x86_64 and arm64 place parent_tid (the CLONE_PIDFD output) in argument three. stack=0
+        // preserves the copied stack; the unused child_tid and tls arguments are both zero.
+        // SAFETY: CLONE_PIDFD is atomic with child creation, unlike fork + pidfd_open. All pointers
+        // are live on this thread's stack. The COW child immediately takes the no-return branch.
+        let pid = unsafe {
+            libc::syscall(
+                libc::SYS_clone,
+                libc::CLONE_PIDFD | libc::SIGCHLD,
+                0usize,
+                std::ptr::from_mut(&mut pidfd),
+                0usize,
+                0usize,
+            )
+        };
+        if pid == 0 {
+            // SAFETY: same prepared COW child; it must join procs before any foreign execution.
+            unsafe { held_child(start, Some(procs)) }
+        }
+        if pid == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        pid
+    } else {
+        pid
+    };
+    // SAFETY: either successful CLONE_PIDFD call installed exactly one owned descriptor in pidfd.
+    // No conversion or fallible operation intervenes between native creation and this ownership.
+    Ok((pid, unsafe { OwnedFd::from_raw_fd(pidfd) }))
+}
+
+/// # Safety
+/// Only in the held COW child, with buffers and descriptors prepared before creation. Never returns.
+unsafe fn held_child(start: &HeldStart<'_>, procs: Option<BorrowedFd<'_>>) -> ! {
+    let joined = procs.is_none_or(|procs| matches!(rustix::io::write(procs, b"0"), Ok(1)));
+    let [stdin, stdout, stderr] = &start.spawn.stdio;
+    let mut keep = [
+        stdin.as_raw_fd(),
+        stdout.as_raw_fd(),
+        stderr.as_raw_fd(),
+        start.reader,
+    ];
+    keep.sort_unstable();
+    // Closing, not merely CLOEXEC, is necessary here: a concurrently cloned sibling must not keep
+    // this gate's writer alive while it too waits. EOF after parent death then cancels every child.
+    if joined
+        && held_close_unexpected(&keep).is_ok()
+        && held_ready(start.reader).is_ok()
+        && held_wait(start.reader, start.deadline, 1).is_ok()
+    {
+        // SAFETY: same prepared exec arguments as ordinary child; the gate and native envelope
+        // have now been established. child does only signal/descriptor/limit/cwd/execve syscalls.
+        let _ = unsafe { child(start.spawn, start.argv, start.envp) };
+    }
+    // SAFETY: _exit ends only this child without inherited Rust destructors or atexit handlers.
+    unsafe { libc::_exit(127) }
+}
+
+fn held_ready(reader: RawFd) -> rustix::io::Result<()> {
+    let byte = 2u8;
+    // SAFETY: the one prepared gate endpoint and one readable stack byte; this cannot block or
+    // raise SIGPIPE. Byte 2 acknowledges joining/descriptor isolation, byte 1 authorizes exec.
+    let sent = unsafe {
+        libc::send(
+            reader,
+            std::ptr::from_ref(&byte).cast(),
+            1,
+            libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT,
+        )
+    };
+    if sent == 1 {
+        Ok(())
+    } else {
+        Err(if sent < 0 {
+            held_errno()
+        } else {
+            rustix::io::Errno::IO
+        })
+    }
+}
+
+fn held_wait(reader: RawFd, deadline: libc::timespec, expected: u8) -> rustix::io::Result<()> {
+    let remaining = held_remaining(deadline)?;
+    let mut fd = libc::pollfd {
+        fd: reader,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one live pollfd and a valid finite relative timespec; no signal-mask change. Every
+    // signal was blocked before clone, so an interrupted wait is cancellation rather than a retry.
+    let ready = unsafe { libc::ppoll(&mut fd, 1, &remaining, std::ptr::null()) };
+    if ready != 1 {
+        return Err(if ready == 0 {
+            rustix::io::Errno::TIMEDOUT
+        } else {
+            held_errno()
+        });
+    }
+    held_remaining(deadline)?;
+    let mut byte = 0u8;
+    // SAFETY: a single stack byte is writable; this is the retained gate reader. DONTWAIT bounds
+    // the read even on an unexpected readiness transition; EOF or any other byte cancels.
+    let read = unsafe {
+        libc::recv(
+            reader,
+            std::ptr::from_mut(&mut byte).cast(),
+            1,
+            libc::MSG_DONTWAIT,
+        )
+    };
+    if read == 1 && byte == expected {
+        Ok(())
+    } else {
+        Err(if read < 0 {
+            held_errno()
+        } else {
+            rustix::io::Errno::CANCELED
+        })
+    }
+}
+
+fn held_remaining(deadline: libc::timespec) -> rustix::io::Result<libc::timespec> {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: CLOCK_MONOTONIC writes exactly this live stack timespec and takes no lock/allocator.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) } != 0 {
+        return Err(held_errno());
+    }
+    held_remaining_at(deadline, now)
+}
+
+fn held_remaining_at(
+    deadline: libc::timespec,
+    now: libc::timespec,
+) -> rustix::io::Result<libc::timespec> {
+    let seconds = deadline
+        .tv_sec
+        .checked_sub(now.tv_sec)
+        .ok_or(rustix::io::Errno::OVERFLOW)?;
+    let nanos = deadline
+        .tv_nsec
+        .checked_sub(now.tv_nsec)
+        .ok_or(rustix::io::Errno::OVERFLOW)?;
+    let remaining = if nanos < 0 {
+        libc::timespec {
+            tv_sec: seconds.checked_sub(1).ok_or(rustix::io::Errno::OVERFLOW)?,
+            tv_nsec: nanos
+                .checked_add(1_000_000_000)
+                .ok_or(rustix::io::Errno::OVERFLOW)?,
+        }
+    } else {
+        libc::timespec {
+            tv_sec: seconds,
+            tv_nsec: nanos,
+        }
+    };
+    if remaining.tv_sec < 0 || remaining.tv_sec == 0 && remaining.tv_nsec == 0 {
+        return Err(rustix::io::Errno::TIMEDOUT);
+    }
+    Ok(remaining)
+}
+
+fn held_errno() -> rustix::io::Errno {
+    // SAFETY: errno is this thread's (in the COW child, no other thread can mutate it).
+    rustix::io::Errno::from_raw_os_error(unsafe { *libc::__errno_location() })
+}
+
+fn held_close_unexpected(keep: &[RawFd; 4]) -> rustix::io::Result<()> {
+    let mut first = 3u32;
+    for fd in keep {
+        let fd = u32::try_from(*fd).map_err(|_| rustix::io::Errno::BADF)?;
+        if fd > first
+            && !held_close_range(first, fd.checked_sub(1).ok_or(rustix::io::Errno::OVERFLOW)?)?
+        {
+            return held_close_by_proc(keep);
+        }
+        first = fd.checked_add(1).ok_or(rustix::io::Errno::OVERFLOW)?;
+    }
+    if held_close_range(first, u32::MAX)? {
+        Ok(())
+    } else {
+        held_close_by_proc(keep)
+    }
+}
+
+fn held_close_range(first: u32, last: u32) -> rustix::io::Result<bool> {
+    // SAFETY: no shared fd table (CLONE_FILES absent). These ranges exclude all four retained
+    // descriptors and 0..=2. Only this no-return child loses the other inherited descriptors.
+    if unsafe { libc::syscall(libc::SYS_close_range, first, last, 0u32) } == 0 {
+        return Ok(true);
+    }
+    match held_errno() {
+        rustix::io::Errno::NOSYS | rustix::io::Errno::INVAL | rustix::io::Errno::PERM => Ok(false),
+        error => Err(error),
+    }
+}
+
+fn held_close_by_proc(keep: &[RawFd; 4]) -> rustix::io::Result<()> {
+    let dir = rustix::fs::open(
+        c"/proc/self/fd",
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )?;
+    // The existing descriptor sweep's getdents buffer. No child heap allocation; Linux's signed
+    // descriptor namespace bounds the finite listing, and the child opens no other descriptors.
+    let mut buffer = [std::mem::MaybeUninit::<u8>::uninit(); 4096];
+    let mut entries = rustix::fs::RawDir::new(&dir, &mut buffer);
+    for _ in 0..=c_int::MAX {
+        let Some(entry) = entries.next() else {
+            return Ok(());
+        };
+        let entry = entry?;
+        let Some(fd) = entry
+            .file_name()
+            .to_str()
+            .ok()
+            .and_then(|name| name.parse::<RawFd>().ok())
+        else {
+            continue;
+        };
+        if fd < 3 || fd == dir.as_raw_fd() || keep.contains(&fd) {
+            continue;
+        }
+        // SAFETY: the fd is open in this child's private copied table and is excluded from the
+        // retained set. No Rust owner is subsequently dropped in this no-return child. Linux closes
+        // even on EINTR; an error cancels, never retries a potentially reused descriptor.
+        if unsafe { libc::close(fd) } != 0 {
+            return Err(held_errno());
+        }
+    }
+    Err(rustix::io::Errno::OVERFLOW)
+}
+
 /// What [`clone_into_cgroup`] did.
 pub enum Cloned {
     /// The program runs: its pid, and the pidfd the clone made for it.
@@ -327,6 +754,43 @@ unsafe fn child(spawn: &Spawn, argv: &[*const c_char], envp: &[*const c_char]) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AC-T7.4.1: the launch gate is finite, uses the caller's budget and never wraps a timespec.
+    #[test]
+    fn a_held_launch_carries_one_finite_deadline_across_the_handshake() {
+        let now = rustix::time::Timespec {
+            tv_sec: 17,
+            tv_nsec: 999_999_999,
+        };
+        assert!(held_deadline_at(now, Duration::ZERO).is_err());
+        assert!(held_deadline_at(now, Duration::MAX).is_err());
+        let deadline = held_deadline_at(now, Duration::from_nanos(2)).unwrap();
+        assert_eq!((deadline.tv_sec, deadline.tv_nsec), (18, 1));
+        let remaining = held_remaining_at(
+            deadline,
+            libc::timespec {
+                tv_sec: 17,
+                tv_nsec: 999_999_999,
+            },
+        )
+        .unwrap();
+        assert_eq!((remaining.tv_sec, remaining.tv_nsec), (0, 2));
+        for now in [
+            libc::timespec {
+                tv_sec: 18,
+                tv_nsec: 1,
+            },
+            libc::timespec {
+                tv_sec: 19,
+                tv_nsec: 0,
+            },
+        ] {
+            assert_eq!(
+                held_remaining_at(deadline, now).unwrap_err(),
+                rustix::io::Errno::TIMEDOUT
+            );
+        }
+    }
 
     /// Before a foreign execve every descriptor from 3 up is close-on-exec, one opened without the flag
     /// included (CVE-2024-21626's class), by `close_range` and by the walk of `/proc/self/fd` a kernel

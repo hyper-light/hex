@@ -113,6 +113,9 @@ pub type Records = BTreeMap<BoxId, Result<BoxRecord, String>>;
 pub trait Books: Send + Sync {
     fn records(&self) -> Result<Records, Refusal>;
     fn capacity(&self) -> Result<hex_api::Capacity, Refusal>;
+    /// Direct current native observations from this Node's SAME facts provider. Never reenter
+    /// capacity/attachment_offers here: those consumers validate routes against this view.
+    fn physical_devices(&self) -> Result<Vec<DeviceInfo>, Refusal>;
     fn with_transaction(
         &self,
         id: &BoxId,
@@ -127,6 +130,23 @@ pub trait Transaction {
     fn put(&self, record: &BoxRecord) -> Result<(), Refusal>;
     /// Called only after physical termination/absence and owned state removal are proved.
     fn remove(&self, id: &BoxId) -> Result<(), Refusal>;
+    /// Launch in the original record's admitted native envelope from the first instruction.
+    /// The existing native receipt alone owns observation/reaping; no Process record is added.
+    fn launch_managed(
+        &self,
+        plan: &shards_api::PreparedBoot,
+        io: shards_api::LaunchIo,
+    ) -> Result<shards_api::ManagedReceipt, Refusal>;
+    /// Reattach the exact persisted native identity and envelope without creating a process.
+    /// None is cleanup-only for Creating/Deleting before identity publication, never a usable
+    /// guest. A controller exit cannot prove that helpers or physical grants have been released.
+    fn attach_managed(
+        &self,
+        identity: Option<&shards_api::Identity>,
+    ) -> Result<shards_api::ManagedReceipt, Refusal>;
+    /// Dispose the same native receipt only after the backend durably records its positive whole
+    /// scope release. A controller exit alone is insufficient; matching identity/owner guards ABA.
+    fn finalize_managed(&self, identity: Option<&shards_api::Identity>) -> Result<(), Refusal>;
 }
 
 /// Upgrade the same Node authority without allocating an owner or transaction. The operation's
@@ -718,6 +738,22 @@ mod authority_tests {
         fn remove(&self, _: &BoxId) -> Result<(), Refusal> {
             Ok(())
         }
+        fn launch_managed(
+            &self,
+            _: &shards_api::PreparedBoot,
+            _: shards_api::LaunchIo,
+        ) -> Result<shards_api::ManagedReceipt, Refusal> {
+            Err(invalid("fixture has no native launcher"))
+        }
+        fn attach_managed(
+            &self,
+            _: Option<&shards_api::Identity>,
+        ) -> Result<shards_api::ManagedReceipt, Refusal> {
+            Err(invalid("fixture has no native launcher"))
+        }
+        fn finalize_managed(&self, _: Option<&shards_api::Identity>) -> Result<(), Refusal> {
+            Err(invalid("fixture has no native launcher"))
+        }
     }
     impl Books for Owner {
         fn records(&self) -> Result<Records, Refusal> {
@@ -725,6 +761,9 @@ mod authority_tests {
         }
         fn capacity(&self) -> Result<hex_api::Capacity, Refusal> {
             Err(invalid("fixture has no hardware"))
+        }
+        fn physical_devices(&self) -> Result<Vec<DeviceInfo>, Refusal> {
+            Ok(Vec::new())
         }
         fn with_transaction(
             &self,

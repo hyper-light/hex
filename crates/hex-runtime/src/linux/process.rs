@@ -4,10 +4,11 @@
 //! joined to it before they execute.
 
 use std::ffi::CString;
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::process::{Command, Stdio as StdStdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use hex_api::{ExecLimit, Program, Refusal, Stdio};
 use rustix::fs::{Mode, OFlags};
@@ -163,6 +164,130 @@ pub fn exec(cg: &BoxCgroup, program: &Program, stdio: Stdio) -> Result<PidfdProc
     }
 }
 
+/// A managed VM controller created in its native envelope but held before foreign execution.
+/// The caller transfers this receipt into its preallocated Supervisor slot before reading or
+/// publishing its identity. Dropping the gate cancels execution; the SAME slot still reaps it.
+pub struct HeldExec(sys::HeldChild);
+
+impl HeldExec {
+    pub fn pidfd(&self) -> BorrowedFd<'_> {
+        self.0.pidfd()
+    }
+
+    /// The kernel's native return width is retained until the native owner has this receipt.
+    /// Identity conversion/observation must not discard an already-created child on failure.
+    pub fn into_parts(self) -> (libc::c_long, OwnedFd, sys::HeldGate) {
+        self.0.into_parts()
+    }
+}
+
+/// Start an explicitly configured VM binary, without executing it until its native identity and
+/// canonical record have been published. `gate_budget` is the caller's remaining finite create
+/// budget, never a process-completion timer. Ordinary `exec` retains its existing vfork path.
+pub fn exec_held(
+    cg: &BoxCgroup,
+    program: &Program,
+    stdio: Stdio,
+    gate_budget: Duration,
+) -> Result<HeldExec, Refusal> {
+    program.check()?;
+    program.fits(&exec_limit())?;
+    if program.user.is_some() || !program.args.first().is_some_and(|arg| arg.starts_with('/')) {
+        return Err(held_invalid(
+            "a managed VM requires an absolute configured binary and the node's own user",
+        ));
+    }
+    let mut paths = Vec::new();
+    paths.try_reserve_exact(1).map_err(|_| held_storage(1))?;
+    let first = program
+        .args
+        .first()
+        .ok_or_else(|| held_invalid("managed VM has no binary"))?;
+    paths.push(held_string(&[first])?);
+    let mut argv = Vec::new();
+    argv.try_reserve_exact(program.args.len())
+        .map_err(|_| held_storage(program.args.len()))?;
+    for arg in &program.args {
+        argv.push(held_string(&[arg])?);
+    }
+    let mut envp = Vec::new();
+    envp.try_reserve_exact(program.env.len())
+        .map_err(|_| held_storage(program.env.len()))?;
+    for (key, value) in &program.env {
+        envp.push(held_string(&[key, "=", value])?);
+    }
+    let cwd = program
+        .cwd
+        .as_deref()
+        .map(|cwd| held_string(&[cwd]))
+        .transpose()?;
+    let stdio = [
+        stdio
+            .stdin
+            .map_or_else(|| null(OFlags::RDONLY), |pipe| Ok(OwnedFd::from(pipe)))?,
+        stdio
+            .stdout
+            .map_or_else(|| null(OFlags::WRONLY), |pipe| Ok(OwnedFd::from(pipe)))?,
+        stdio
+            .stderr
+            .map_or_else(|| null(OFlags::WRONLY), |pipe| Ok(OwnedFd::from(pipe)))?,
+    ];
+    let spawn = sys::Spawn::new(paths, argv, envp, cwd, stdio, super::default_nofile())
+        .map_err(|error| Refusal::os("preparing held VM descriptors", error))?;
+    let dir = cg.open_dir()?;
+    let procs = cg.procs_for_joining()?;
+    sys::spawn_held(dir.as_fd(), procs.as_fd(), spawn, gate_budget)
+        .map(HeldExec)
+        .map_err(|error| Refusal::os("creating a held VM in its native envelope", error))
+}
+
+fn held_storage(bound: usize) -> Refusal {
+    Refusal::Exhausted {
+        what: "held VM launch storage",
+        bound,
+    }
+}
+
+fn held_invalid(message: &'static str) -> Refusal {
+    let mut why = String::new();
+    if why.try_reserve_exact(message.len()).is_err() {
+        return held_storage(message.len());
+    }
+    why.push_str(message);
+    Refusal::Invalid {
+        what: "held VM program",
+        why,
+    }
+}
+
+/// Reserve the complete NUL-terminated string before constructing CString. Rust 1.99's
+/// from_vec_with_nul calls into_boxed_slice: equality of capacity/length prevents a hidden shrink
+/// allocation there (library/alloc/src/ffi/c_str.rs and vec/mod.rs, pinned in the evidence note).
+fn held_string(parts: &[&str]) -> Result<CString, Refusal> {
+    let mut room = 1usize;
+    for part in parts {
+        if part.contains('\0') {
+            return Err(held_invalid("a managed VM argument contains NUL"));
+        }
+        room = room
+            .checked_add(part.len())
+            .ok_or_else(|| held_storage(usize::MAX))?;
+    }
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(room)
+        .map_err(|_| held_storage(room))?;
+    for part in parts {
+        bytes.extend_from_slice(part.as_bytes());
+    }
+    bytes.push(0);
+    if bytes.capacity() != bytes.len() {
+        return Err(held_storage(room));
+    }
+    CString::from_vec_with_nul(bytes)
+        .map_err(|_| held_invalid("a managed VM argument is not a single C string"))
+}
+
 /// Where the kernel or a seccomp profile refuses a clone into a cgroup: forked by std's `Command`,
 /// which then joins the cgroup by migration in the child before it executes.
 fn exec_forked(
@@ -253,6 +378,21 @@ pub fn join_on_exec(cg: &BoxCgroup, cmd: &mut Command) -> Result<(), Refusal> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AC-T7.4.1: prepared VM arguments preserve exact bytes and reject embedded terminators.
+    #[test]
+    fn held_vm_arguments_are_exact_and_nul_checked_before_creation() {
+        assert_eq!(
+            held_string(&["KEY", "=", "a b"]).unwrap().as_bytes(),
+            b"KEY=a b"
+        );
+        assert_eq!(held_string(&[""]).unwrap().as_bytes_with_nul(), b"\0");
+        assert!(held_string(&["bad\0argument"]).is_err());
+        assert_eq!(
+            held_string(&["/absolute/", "vm"]).unwrap().as_bytes(),
+            b"/absolute/vm"
+        );
+    }
 
     /// HEX-RT-14: the bound a box's exec is held to comes from the box's own RLIMIT_STACK, and reading it
     /// takes no system call: the node reads its own limit once. Do: the bound for a box whose spec sets a

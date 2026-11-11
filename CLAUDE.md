@@ -93,7 +93,11 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   decision 7) and executes it in the child, which shares the agent's memory until its execve and leaves its
   errno there when it can't, or, where
   the kernel refuses that clone, joins it to the cgroup in the forked child before `execve` (`pre_exec`);
-  Rust can express neither safely. And the `close_range` call, with the walk of `/proc/self/fd` by borrowed raw
+  Rust can express neither safely. Its managed-VM launch also uses a COW clone with atomic pidfd
+  ownership and a finite private pipe gate: the trusted child joins the cgroup and isolates inherited
+  descriptors, then waits until the canonical identity is durable before foreign exec; EOF cancels.
+  This held child uses prepared memory and signal-safe syscalls alone, with no vfork sharing.
+  And the `close_range` call, with the walk of `/proc/self/fd` by borrowed raw
   descriptors where the kernel refuses it, by which every descriptor from 3 up is marked close-on-exec before
   foreign code runs (those two children, a hook's, a container's init, an exec'd program's child, a seed:
   CVE-2024-21626's class), which rustix doesn't wrap.

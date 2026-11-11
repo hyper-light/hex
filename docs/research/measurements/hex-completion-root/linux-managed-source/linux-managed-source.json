@@ -1,0 +1,28 @@
+{
+  "status": "SOURCE ONLY; not compiled or natively tested",
+  "role": "implementer bindings-firecracker",
+  "public_contract": "628591f7c356503161cbd617f2530c4e1d2821f4",
+  "lane_parent": "106745e8bae1819ff47737746621acd4456dfc6e",
+  "policy": "ca3ab10c151aa5539e757f1cc76029746ccbb561",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "source": {
+    "crates/hex-runtime/src/devices.rs": "019211c10dfcfde74a2826f6deac31f4298d5da967c77adacf1b89d404b01b23",
+    "crates/hex-node/src/facts.rs": "f96478b3ee0f0e42598b699214e030b845c72e7e14f2e6b4b3318510c78b8f7f",
+    "crates/hex-node/src/node.rs": "30aad80667456e5f41568f217e5239710430d747484720f793ea306cdcd4056d",
+    "crates/hex-node/src/node/backends.rs": "e4750f6e43c56970600c04e271045aeaaaa13b539176f81ebe265e5eca53918b",
+    "crates/hex-node/src/supervise.rs": "b47aaff39042a33a45db3d974cf067d7f1b63b03158a871828d42af174c26217",
+    "crates/hex-runtime/src/linux/process.rs": "ed5051e8c55c8f3b309334a093eabec9eaa42f5c87e58e9b29a51c7f5a71392c",
+    "crates/hex-runtime/src/linux/sys.rs": "a45faa4951fee75cf0ddf2d6d1c2a98ddfd05f128f07935190753f3841c4256a"
+  },
+  "required_successors": [
+    "canonical NativeScope128 before Intent/effects and cold ownership proof",
+    "Firecracker common native receipt + actual initialized guest facts/admission",
+    "Service native-report RPC consumer after actual frozen unread red",
+    "L2 exact renderer host environment agreement"
+  ],
+  "checks": {
+    "local": "scoped rustfmt, git diff --check only",
+    "pure_units": "added, UNRUN",
+    "native": "ROOT-owned, UNRUN"
+  }
+}

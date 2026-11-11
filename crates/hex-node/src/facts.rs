@@ -12,10 +12,21 @@
 //! is refused, typed, naming it.
 
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use hex_api::Refusal;
 use hex_sim::facts::{self, Cpu, Disk, Facts, Found, Mem};
 use hex_sim::model::{Class, Classes, Virt};
+
+/// One explicitly initialized provider shared inside the native runtime owner.
+pub type SharedProber = Arc<Mutex<Prober>>;
+
+pub fn physical_devices(provider: &SharedProber) -> Result<Vec<hex_api::DeviceInfo>, Refusal> {
+    provider
+        .lock()
+        .map_err(|_| Refusal::Broken("physical facts provider lock poisoned".into()))?
+        .physical_devices()
+}
 
 /// What an administrator gives Hex beside what the probe finds (kiln's `Declared`, W13-R02): block
 /// devices and network interfaces boxes may be given whole, by their kernel names (`nvme1n1`,
@@ -58,6 +69,66 @@ impl Prober {
         self
     }
 
+    pub fn set_classes(&mut self, classes: Classes) {
+        self.classes = classes;
+    }
+
+    /// Current native correspondence, not catalog declarations or another Gpus allocation.
+    /// Gone samples withhold that device. An unread independent counter does not erase its native
+    /// metadata or become a known zero; DeviceInfo itself carries no load/grant/holder authority.
+    pub fn physical_devices(&mut self) -> Result<Vec<hex_api::DeviceInfo>, Refusal> {
+        let sampled = match self.gpus.sample() {
+            Ok(sampled) => sampled,
+            Err(_) => return Ok(Vec::new()),
+        };
+        if sampled.len() > hex_api::MAX_DEVICES {
+            return Err(physical_full());
+        }
+        let mut loads = Vec::new();
+        loads
+            .try_reserve_exact(sampled.len())
+            .map_err(|_| physical_full())?;
+        loads.extend_from_slice(sampled);
+        let inventory = self.gpus.inventory().map_err(|why| Refusal::Platform {
+            what: "native physical device observation",
+            platform: std::env::consts::OS,
+            why: why.to_string(),
+        })?;
+        physical_snapshot(inventory, &loads)
+    }
+
+    /// The same provider's factual RPC snapshot, including independent unknown counters.
+    /// Open-time identities remain observable during transient counter loss; this grants no holder.
+    pub fn physical_report(
+        &mut self,
+        authority: String,
+    ) -> Result<hex_api::PhysicalReport, Refusal> {
+        let sampled = match self.gpus.sample() {
+            Ok(sampled) => sampled,
+            // NoGpus means this provider has no readable inventory, rather than a measured idle GPU.
+            Err(why) => return observed_report(authority, Err(why), &[]),
+        };
+        if sampled.len() > hex_api::MAX_DEVICES {
+            return Err(physical_full());
+        }
+        let mut loads = Vec::new();
+        loads
+            .try_reserve_exact(sampled.len())
+            .map_err(|_| physical_full())?;
+        loads.extend_from_slice(sampled);
+        let inventory = self
+            .gpus
+            .inventory()
+            .map_err(|_| Refusal::Broken("sampled native provider lost its inventory".into()))?;
+        observed_report(authority, Ok(inventory), &loads)
+    }
+
+    /// Open-time absence remains inspectable even though a CPU-only factual report is successful.
+    /// This reads retained provider state; it neither opens nor samples a second provider.
+    pub fn gpu_diagnostic(&self) -> Option<&hex_gpu::NoGpus> {
+        self.gpus.inventory().err()
+    }
+
     /// Every fact of this node, read now: its GPUs' load sampled.
     pub fn probe(&mut self) -> Result<Facts, Refusal> {
         let available = match self.available {
@@ -76,6 +147,135 @@ impl Prober {
         (f.gpus, f.no_gpus) = gpus(&mut self.gpus);
         Ok(f)
     }
+}
+
+fn observed_report(
+    authority: String,
+    inventory: Result<&[hex_gpu::Gpu], &hex_gpu::NoGpus>,
+    loads: &[hex_gpu::Load],
+) -> Result<hex_api::PhysicalReport, Refusal> {
+    let devices = match inventory {
+        Ok(inventory) => physical_readings(inventory, loads)?,
+        Err(_) if loads.is_empty() => Vec::new(),
+        Err(_) => {
+            return Err(Refusal::Broken(
+                "absent native inventory carries unexpected samples".into(),
+            ));
+        }
+    };
+    let report = hex_api::PhysicalReport { authority, devices };
+    report.check()?;
+    Ok(report)
+}
+
+fn physical_full() -> Refusal {
+    Refusal::Exhausted {
+        what: "native physical device observations",
+        bound: hex_api::MAX_DEVICES,
+    }
+}
+
+fn physical_info(gpu: &hex_gpu::Gpu) -> Result<hex_api::DeviceInfo, Refusal> {
+    let mut model = String::new();
+    model
+        .try_reserve_exact(gpu.model.len())
+        .map_err(|_| physical_full())?;
+    model.push_str(&gpu.model);
+    let info = hex_api::DeviceInfo {
+        id: hex_api::DeviceId {
+            kind: hex_api::DeviceKind::Gpu,
+            key: gpu.key(),
+        },
+        model,
+        size: gpu.memory_total_bytes,
+        holder: None,
+    };
+    info.check()?;
+    Ok(info)
+}
+
+fn physical_readings(
+    inventory: &[hex_gpu::Gpu],
+    loads: &[hex_gpu::Load],
+) -> Result<Vec<hex_api::PhysicalDevice>, Refusal> {
+    if inventory.len() > hex_api::MAX_DEVICES || inventory.len() != loads.len() {
+        return Err(Refusal::Broken(
+            "native inventory and sample counts disagree".into(),
+        ));
+    }
+    let mut devices = Vec::new();
+    devices
+        .try_reserve_exact(inventory.len())
+        .map_err(|_| physical_full())?;
+    for (gpu, load) in inventory.iter().zip(loads) {
+        #[cfg(windows)]
+        if gpu.vendor == hex_gpu::Vendor::Amd {
+            continue;
+        }
+        if load.busy_percent.is_ok_and(|busy| busy > 100) {
+            return Err(Refusal::Invalid {
+                what: "native GPU reading",
+                why: "utilization exceeds its native percent unit".into(),
+            });
+        }
+        devices.push(hex_api::PhysicalDevice {
+            info: physical_info(gpu)?,
+            busy_per_mille: load
+                .busy_percent
+                .ok()
+                .and_then(|busy| u16::from(busy).checked_mul(10)),
+            memory_used_bytes: load.memory_used_bytes.ok(),
+        });
+    }
+    Ok(devices)
+}
+
+fn physical_snapshot(
+    inventory: &[hex_gpu::Gpu],
+    loads: &[hex_gpu::Load],
+) -> Result<Vec<hex_api::DeviceInfo>, Refusal> {
+    if inventory.len() > hex_api::MAX_DEVICES || inventory.len() != loads.len() {
+        return Err(Refusal::Broken(
+            "native device inventory and current samples disagree".into(),
+        ));
+    }
+    let mut devices = Vec::new();
+    devices
+        .try_reserve_exact(inventory.len())
+        .map_err(|_| physical_full())?;
+    for (gpu, load) in inventory.iter().zip(loads) {
+        // DeviceInfo carries metadata only, but a failed/gone current reading cannot certify that
+        // a retained open-time inventory still describes available hardware.
+        if matches!(load.busy_percent, Err(hex_gpu::Unread::Gone))
+            || matches!(load.memory_used_bytes, Err(hex_gpu::Unread::Gone))
+        {
+            continue;
+        }
+        // ADL reports BDF without its PCI segment. Until the existing Windows provider proves
+        // the full current-boot PNP/interface/KMT/UUID join, domain0 is not a native grant.
+        #[cfg(windows)]
+        if gpu.vendor == hex_gpu::Vendor::Amd {
+            continue;
+        }
+        if load.busy_percent.is_ok_and(|busy| busy > 100) || gpu.memory_total_bytes == 0 {
+            return Err(Refusal::Invalid {
+                what: "native physical GPU observation",
+                why: "native utilization or memory total is invalid".into(),
+            });
+        }
+        devices.push(physical_info(gpu)?);
+    }
+    let mut ids = Vec::new();
+    ids.try_reserve_exact(devices.len())
+        .map_err(|_| physical_full())?;
+    ids.extend(devices.iter().map(|device| device.id));
+    ids.sort_unstable();
+    if ids.windows(2).any(|pair| pair.first() == pair.last()) {
+        return Err(Refusal::Broken(
+            "native facts provider repeats a physical identity".into(),
+        ));
+    }
+    Ok(devices)
 }
 
 /// The GPUs hex-gpu reads, each with its load now; or none, and why.
@@ -142,8 +342,8 @@ pub fn capacity(dir: &Path, id: String) -> Result<hex_api::Capacity, Refusal> {
         disk_bytes: disk.free.min(disk.total),
     };
     let capacity = hex_api::Capacity {
-        cost: None,
         devices: Vec::new(),
+        cost: None,
         id,
         total,
         free,
@@ -743,5 +943,137 @@ mod gpu_identity_tests {
         assert_eq!(facts[0].memory, hex_api::MIN_MEMORY);
         assert_eq!(facts[0].load.busy_per_mille, 370);
         assert_eq!(facts[0].load.memory_used, hex_api::MIN_MEMORY / 2);
+    }
+
+    /// AC-T7.4.1: direct native views preserve identity/metadata, never catalog holders or unknown load.
+    #[test]
+    fn physical_snapshot_requires_current_native_observation_and_keeps_one_full_identity() {
+        use super::physical_snapshot;
+        let gpu = |key| hex_gpu::Gpu {
+            vendor: hex_gpu::Vendor::Apple,
+            model: "actual native fixture".into(),
+            memory_total_bytes: hex_api::MIN_MEMORY,
+            identity: hex_gpu::Identity::Metal(key),
+            driver_version: "fixture".into(),
+        };
+        let inventory = [gpu(u64::MAX), gpu(1)];
+        let known = hex_gpu::Load {
+            busy_percent: Ok(0),
+            memory_used_bytes: Ok(0),
+        };
+        for unknown in [
+            hex_gpu::Unread::Gone,
+            hex_gpu::Unread::NoSample,
+            hex_gpu::Unread::Unsupported,
+        ] {
+            let loads = [
+                known,
+                hex_gpu::Load {
+                    busy_percent: Err(unknown),
+                    memory_used_bytes: Ok(0),
+                },
+            ];
+            let devices = physical_snapshot(&inventory, &loads).unwrap();
+            assert_eq!(
+                devices.len(),
+                if unknown == hex_gpu::Unread::Gone {
+                    1
+                } else {
+                    2
+                }
+            );
+            assert_eq!(devices[0].id.key, u64::MAX);
+            assert_eq!(devices[0].model, "actual native fixture");
+            assert_eq!(devices[0].size, hex_api::MIN_MEMORY);
+            assert_eq!(devices[0].holder, None);
+        }
+        assert!(physical_snapshot(&inventory, &[known]).is_err());
+        assert!(physical_snapshot(&[gpu(1), gpu(1)], &[known, known]).is_err());
+        let malformed = hex_gpu::Load {
+            busy_percent: Ok(101),
+            ..known
+        };
+        assert!(physical_snapshot(&[gpu(1)], &[malformed]).is_err());
+    }
+
+    /// AC-T7.4.1: the RPC snapshot retains both identities, independent knowledge and real pressure.
+    #[test]
+    fn physical_readings_keep_unknown_counters_without_erasing_identity_or_pressure() {
+        let gpu = |key| hex_gpu::Gpu {
+            vendor: hex_gpu::Vendor::Apple,
+            model: "native fixture".into(),
+            identity: hex_gpu::Identity::Metal(key),
+            memory_total_bytes: hex_api::MIN_MEMORY,
+            driver_version: "fixture".into(),
+        };
+        let loads = [
+            hex_gpu::Load {
+                busy_percent: Err(hex_gpu::Unread::Unsupported),
+                memory_used_bytes: Ok(hex_api::MIN_MEMORY + 1),
+            },
+            hex_gpu::Load {
+                busy_percent: Ok(50),
+                memory_used_bytes: Err(hex_gpu::Unread::NoSample),
+            },
+        ];
+        let devices = super::physical_readings(&[gpu(u64::MAX), gpu(1)], &loads).unwrap();
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].info.id.key, u64::MAX);
+        assert_eq!(devices[0].busy_per_mille, None);
+        assert_eq!(devices[0].memory_used_bytes, Some(hex_api::MIN_MEMORY + 1));
+        assert_eq!(devices[1].busy_per_mille, Some(500));
+        assert_eq!(devices[1].memory_used_bytes, None);
+        hex_api::PhysicalReport {
+            authority: "same-store-owner".into(),
+            devices,
+        }
+        .check()
+        .unwrap();
+    }
+
+    /// AC-T7.4.1: an initialized provider's absence is factual, not a CPU admission failure.
+    #[test]
+    fn an_empty_native_report_keeps_authority_diagnostic_and_cpu_progress() {
+        use hex_sim::index::{FitIndex, Verdict};
+        use hex_sim::model::{Ask, Demand, Kind, NodeId, Resources};
+        let why = hex_gpu::NoGpus {
+            nvidia: hex_gpu::Absent::NoGpu,
+            amd: hex_gpu::Absent::NoGpu,
+            apple: hex_gpu::Absent::Unsupported,
+        };
+        let before = why.clone();
+        let report = super::observed_report("native-store-owner".into(), Err(&why), &[]).unwrap();
+        assert_eq!(report.authority, "native-store-owner");
+        assert!(report.devices.is_empty());
+        assert_eq!(why, before, "source absence diagnostic remains retained");
+        let facts = hex_sim::facts::Facts {
+            cpu: hex_sim::facts::Cpu {
+                threads: 1,
+                cores: Some(1),
+            },
+            mem: hex_sim::facts::Mem {
+                total: hex_api::MIN_MEMORY,
+                free: hex_api::MIN_MEMORY,
+            },
+            classes: hex_sim::model::Classes::NONE.with(hex_sim::model::Class::Oci),
+            ..hex_sim::facts::Facts::default()
+        };
+        let mut cluster = hex_sim::model::Cluster::single_owner(Vec::new(), Vec::new());
+        let node = facts.node(NodeId(0), &mut cluster).unwrap();
+        let index = FitIndex::new(&[node]).unwrap();
+        let mut demand = Demand {
+            need: Resources {
+                cpu_milli: u64::from(hex_api::MIN_CPU_MILLI),
+                mem_bytes: hex_api::MIN_MEMORY,
+                ..Resources::default()
+            },
+            kind: Kind::Plain,
+            class: hex_sim::model::Class::Oci,
+            ask: Ask::default(),
+        };
+        assert_eq!(index.verdict(NodeId(0), &demand).unwrap(), Verdict::Admits);
+        demand.need.gpus = 1;
+        assert_eq!(index.verdict(NodeId(0), &demand).unwrap(), Verdict::NoGpu);
+        assert!(super::observed_report(String::new(), Err(&why), &[]).is_err());
     }
 }
