@@ -37,9 +37,9 @@ use windows_sys::Win32::System::Threading::{
     GetActiveProcessorCount, GetCurrentProcess, GetExitCodeProcess, GetProcessTimes,
     InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcess,
     PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_DUP_HANDLE,
-    PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, ResumeThread,
-    STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, SetEvent, TerminateProcess,
-    WaitForSingleObject,
+    PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, ResetEvent,
+    ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, SetEvent, TerminateProcess,
+    WaitForMultipleObjects, WaitForSingleObject,
 };
 
 use hex_core::job::Cpu;
@@ -779,6 +779,32 @@ pub fn set(event: &Handle) -> io::Result<()> {
         return Err(last_error());
     }
     Ok(())
+}
+
+pub(crate) fn reset(event: &Handle) -> io::Result<()> {
+    // SAFETY: event is an owned kernel event, alive for the call.
+    if unsafe { ResetEvent(event.raw()) } == 0 {
+        return Err(last_error());
+    }
+    Ok(())
+}
+
+/// Event-driven keeper wake/stop. Exactly these two owned handles remain alive across the wait.
+pub(crate) fn wait_either(first: &Handle, second: &Handle) -> io::Result<bool> {
+    let handles = [first.raw(), second.raw()];
+    // SAFETY: this fixed two-element array outlives the call; FALSE waits for any event, without polling.
+    match unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, u32::MAX) } {
+        WAIT_OBJECT_0 => Ok(true),
+        value
+            if value
+                == WAIT_OBJECT_0
+                    .checked_add(1)
+                    .ok_or_else(|| io::Error::other("wait index overflows"))? =>
+        {
+            Ok(false)
+        }
+        _ => Err(last_error()),
+    }
 }
 
 /// Whether `process` ended within `timeout_ms` (`u32::MAX` is forever).

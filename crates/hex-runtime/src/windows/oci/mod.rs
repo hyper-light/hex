@@ -7,6 +7,7 @@
 //! What the spec asks is decided in `hex_core::hcs`; this does the calls.
 
 pub mod launch;
+pub(crate) mod service;
 pub mod sys;
 
 use std::io::Read;
@@ -129,6 +130,9 @@ impl Mounted {
     /// every step is still tried. `UnprepareLayer` answering `ERROR_FLT_DO_NOT_DETACH` is the container's
     /// end having taken the filter (note §3), matched alone; `DeactivateLayer` then detaches the volume.
     fn undo(&mut self) -> Result<(), Refusal> {
+        if let Some(marker) = self.marker.as_ref() {
+            service::remove(marker)?;
+        }
         if let Some(scratch) = self.activated.as_ref() {
             if self.prepared {
                 match sys::unprepare_layer(scratch) {
@@ -225,6 +229,7 @@ pub fn reclaim(root: &Path) -> Vec<Refusal> {
 }
 
 fn reclaim_one(marker: &Path) -> Result<(), Refusal> {
+    service::reconcile(marker, false)?;
     reclaim_one_using(
         marker,
         |record| match &record.system {
@@ -310,9 +315,13 @@ pub fn alive(marker: &Path) -> Result<bool, Refusal> {
     if !marker.exists() {
         return Ok(false);
     }
+    service::reconcile(marker, false)?;
     let record = read_marker(marker)?;
     if record.creation == hcs::NativeCreate::Pending {
         return Err(creation_uncertain());
+    }
+    if matches!(record.creation, hcs::NativeCreate::Failed { .. }) {
+        return Ok(false);
     }
     let found = reopen(&record)?.found;
     Ok(hcs::take_back(&record, found).is_ok())
@@ -323,6 +332,9 @@ pub fn alive(marker: &Path) -> Result<bool, Refusal> {
 /// still holds it, then its scratch and its record, as [`reclaim`] removes a killed node's. A record
 /// already gone has nothing left to end.
 pub fn end(marker: &Path) -> Result<(), Refusal> {
+    if marker.exists() {
+        service::reconcile(marker, true)?;
+    }
     end_using(marker, end_system, remove_scratch)
 }
 
@@ -350,6 +362,13 @@ fn end_using(
 
 /// True only after actual termination or absence of a create already known terminal.
 fn end_system(m: &hcs::BoxRecord) -> Result<bool, Refusal> {
+    if let hcs::NativeCreate::Failed { owner, .. } = m.creation {
+        match owner {
+            hcs::create::SystemOwner::NotSubmitted => return Ok(true),
+            hcs::create::SystemOwner::Unknown => return Err(creation_uncertain()),
+            hcs::create::SystemOwner::Returned => {}
+        }
+    }
     if let Some(id) = &m.system
         && let Some(system) = sys::open_system(id.as_str())
             .map_err(|f| failure("reopening a box's container to end it", f))?
@@ -365,7 +384,7 @@ fn end_system(m: &hcs::BoxRecord) -> Result<bool, Refusal> {
         }
         return Ok(true);
     }
-    Ok(m.creation == hcs::NativeCreate::Created)
+    Ok(m.creation.terminal())
 }
 
 /// A missing marker is not absence. Only the existing HCS open result can establish that outcome.
@@ -422,6 +441,7 @@ fn remove_scratch_using(
     marker: &Path,
     owned: impl FnOnce(&hcs::BoxRecord) -> Result<(), Refusal>,
 ) -> Result<(), Refusal> {
+    service::remove(marker)?;
     match m.storage {
         hcs::RecordStorage::OwnedFolder => owned(m)?,
         hcs::RecordStorage::BorrowedVolume if m.made.is_empty() => {}
@@ -507,6 +527,8 @@ fn failure(op: &'static str, f: HcsFailure) -> Refusal {
 /// Why box `id` isn't taken back, by name, for the node's recovery to end what is left of it.
 fn lost_refusal(id: &BoxId, lost: hcs::Lost) -> Refusal {
     let why = match lost {
+        hcs::Lost::CreationPending => "its native create has no terminal receipt",
+        hcs::Lost::CreationFailed(_) => "its native create completed with a failure",
         hcs::Lost::EndsWithNode => "it ended with the node that made it",
         hcs::Lost::NoSystem => "HCS holds no container of it",
         hcs::Lost::InitEnded => "its init has ended, or its start wasn't finished",
@@ -526,6 +548,7 @@ struct Life {
 
 enum NativeSystem {
     Creating(sys::PendingCreate),
+    ServiceCreating(service::Pending),
     Created(System),
     Failed {
         system: Option<System>,
@@ -535,10 +558,13 @@ enum NativeSystem {
 }
 
 impl NativeSystem {
-    fn observe(&mut self) {
-        if let Self::Creating(create) = self
-            && let Some(terminal) = create.query()
-        {
+    fn observe(&mut self) -> Result<(), Refusal> {
+        let terminal = match self {
+            Self::Creating(create) => create.query(),
+            Self::ServiceCreating(create) => create.query()?,
+            _ => None,
+        };
+        if let Some(terminal) = terminal {
             *self = match (terminal.result, terminal.system) {
                 (Ok(()), Some(system)) => Self::Created(system),
                 (Ok(()), None) => Self::Failed {
@@ -553,11 +579,13 @@ impl NativeSystem {
                 (Err(failure), system) => Self::Failed { system, failure },
             };
         }
+        Ok(())
     }
 
     fn ready(&self) -> Result<&System, Refusal> {
         match self {
             Self::Created(system) => Ok(system),
+            Self::ServiceCreating(_) => Err(creation_uncertain()),
             Self::Creating(create) => Err(match create.cancellation() {
                 sys::CreateCancellation::Refused(code) => Refusal::Invalid {
                     what: "native box lifecycle",
@@ -584,7 +612,12 @@ impl NativeSystem {
         if let Self::Creating(create) = self {
             create.cancel();
         }
-        self.observe();
+        if let Self::ServiceCreating(create) = self {
+            // Cancellation can refuse while the keeper owns the native operation. Still observe
+            // its durable terminal result; cancellation itself is never the terminal fact.
+            let _ = create.cancel();
+        }
+        self.observe()?;
         let system = match self {
             Self::Created(system)
             | Self::Failed {
@@ -592,7 +625,7 @@ impl NativeSystem {
                 ..
             } => Some(system),
             Self::Failed { system: None, .. } | Self::Removed => None,
-            Self::Creating(_) => return self.ready().map(|_| ()),
+            Self::Creating(_) | Self::ServiceCreating(_) => return self.ready().map(|_| ()),
         };
         if let Some(system) = system {
             match system.terminate(launch::PATIENCE) {
@@ -680,6 +713,18 @@ impl OciBox {
         lifetime: hcs::Lifetime,
         devices: Vec<hcs::DeviceBinding>,
     ) -> Result<Self, Refusal> {
+        Self::create_assigned_at(job, container, launcher, marker, lifetime, devices, None)
+    }
+
+    pub(crate) fn create_assigned_at(
+        job: JobBox,
+        container: &Container,
+        launcher: &Path,
+        marker: Option<PathBuf>,
+        lifetime: hcs::Lifetime,
+        devices: Vec<hcs::DeviceBinding>,
+        keeper_state: Option<&Path>,
+    ) -> Result<Self, Refusal> {
         available()?;
         let host = sys::host();
         let base = container.layers.last().ok_or_else(|| Refusal::Invalid {
@@ -721,6 +766,14 @@ impl OciBox {
                     return Err(failure("creating a container", f));
                 }
             }
+        } else if let Some(state) = keeper_state {
+            let marker = mounted.marker.as_ref().ok_or_else(creation_uncertain)?;
+            NativeSystem::ServiceCreating(service::submit(
+                state,
+                marker,
+                &document,
+                launch::PATIENCE,
+            )?)
         } else {
             match sys::create_system_owned(id.as_str(), &document, launch::PATIENCE) {
                 Ok(create) => NativeSystem::Creating(create),
@@ -784,7 +837,7 @@ impl OciBox {
             .system
             .lock()
             .map_err(|_| Refusal::Broken("an oci box's system lock is poisoned".to_owned()))?;
-        system.observe();
+        system.observe()?;
         system.ready()?;
         if !self.devices.is_empty() {
             let mut mounted = self
@@ -1186,7 +1239,6 @@ fn append_hosts(volume: &str, lines: &str) -> Result<(), Refusal> {
 /// A box's state for the runtime's `BoxInfo`.
 pub fn info(b: &OciBox) -> Result<hex_api::BoxInfo, Refusal> {
     Ok(hex_api::BoxInfo {
-        allocation: None,
         id: b.id().clone(),
         class: hex_api::Class::Oci,
         state: b.state()?,
@@ -1195,6 +1247,7 @@ pub fn info(b: &OciBox) -> Result<hex_api::BoxInfo, Refusal> {
         membership: None,
         exit: b.exit()?,
         abandoned: 0,
+        allocation: None,
     })
 }
 

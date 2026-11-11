@@ -1273,13 +1273,26 @@ pub enum NativeCreate {
     #[default]
     Created,
     Pending,
+    /// The owned operation completed with a native error. A system handle may still have been
+    /// returned; cleanup must terminate that exact system before releasing its physical claims.
+    Failed {
+        code: u32,
+        #[serde(default)]
+        owner: create::SystemOwner,
+    },
 }
 
 impl NativeCreate {
     fn is_created(&self) -> bool {
         *self == Self::Created
     }
+
+    pub fn terminal(self) -> bool {
+        !matches!(self, Self::Pending)
+    }
 }
+
+pub mod create;
 
 /// The immutable administrator binding used by one native container, retained in its scratch marker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1444,7 +1457,7 @@ fn record_extra(record: &BoxRecord) -> Result<usize, Refusal> {
         add(record_json(&record.storage, crate::bundle::MAX_CONFIG_BYTES)?.len())?;
         add(b",\"storage\":".len())?;
     }
-    if record.creation == NativeCreate::Pending {
+    if record.creation != NativeCreate::Created {
         if record.devices.is_empty() || record.system.is_none() {
             return Err(Refusal::Invalid {
                 what: "box record creation",
@@ -1557,6 +1570,8 @@ pub enum TakeBack {
 /// Why a recorded box isn't taken back, so the node's recovery ends what is left of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lost {
+    CreationPending,
+    CreationFailed(u32),
     /// It ended with the node that made it: that runtime's boxes don't outlive their node.
     EndsWithNode,
     /// HCS holds no compute system of its id.
@@ -1570,6 +1585,11 @@ pub enum Lost {
 /// T-T7.1.2): only while HCS holds its system; as made only if no start was asked; and once started, only
 /// with the very init it recorded, told from a process given that pid since by its creation time.
 pub fn take_back(record: &BoxRecord, found: Found) -> Result<TakeBack, Lost> {
+    match record.creation {
+        NativeCreate::Pending => return Err(Lost::CreationPending),
+        NativeCreate::Failed { code, .. } => return Err(Lost::CreationFailed(code)),
+        NativeCreate::Created => {}
+    }
     if !record.outlives {
         return Err(Lost::EndsWithNode);
     }

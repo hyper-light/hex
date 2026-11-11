@@ -19,6 +19,7 @@ use std::ptr::{null, null_mut};
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use windows_sys::Wdk::Graphics::Direct3D::{D3DKMT_CLOSEADAPTER, D3DKMT_OPENADAPTERFROMDEVICENAME};
 use windows_sys::Wdk::System::SystemServices::RtlGetVersion;
 use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
     CM_GET_DEVICE_INTERFACE_LIST_PRESENT, CM_Get_Device_Interface_List_SizeW,
@@ -48,6 +49,7 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::core::{GUID, HRESULT, PCWSTR, PWSTR};
 
+use hex_api::Refusal;
 use hex_core::hcs::{self, Host, HostKind};
 
 use crate::windows::sys::Handle;
@@ -446,6 +448,7 @@ struct CreateData {
     system: Option<System>,
     state: CreateOperationState,
     cancellation: CreateCancellation,
+    durable: Option<super::service::TerminalOwner>,
 }
 
 enum CreateOperationState {
@@ -507,6 +510,19 @@ fn create_incomplete(hr: HRESULT) -> bool {
 }
 
 impl CreateData {
+    fn publish(&mut self) {
+        if let CreateOperationState::Terminal(result) = &self.state
+            && let Some(durable) = self.durable.as_mut()
+        {
+            if self.system.is_some() {
+                durable.owns_system();
+            }
+            // A failed durable write leaves Dispatched on disk and signals explicit uncertainty.
+            // Native completion is never fabricated from that failure or from creator death.
+            let _ = durable.complete(result);
+        }
+    }
+
     fn advance(&mut self, calls: CreateCalls, patience: Duration) {
         if !matches!(self.state, CreateOperationState::Active) {
             return;
@@ -524,6 +540,7 @@ impl CreateData {
             } else {
                 Ok(())
             });
+            self.publish();
         }
     }
 
@@ -573,6 +590,7 @@ impl CreateContext {
                     system: None,
                     state: CreateOperationState::NotStarted,
                     cancellation: CreateCancellation::NotRequested,
+                    durable: None,
                 }),
             })
         };
@@ -649,6 +667,7 @@ impl Drop for CreateContext {
             Err(error) => error.into_inner(),
         };
         if self.completed.load(std::sync::atomic::Ordering::Acquire) {
+            data.publish();
             // The native completion receipt supplies the terminal fact even if it ran inline
             // while the creating/querying thread held the mutex.
             data.close(self.calls);
@@ -660,6 +679,26 @@ impl PendingCreate {
     fn context(&self) -> &CreateContext {
         // SAFETY: this unique runtime receipt keeps the stable context alive until Drop.
         unsafe { self.context.as_ref() }
+    }
+
+    /// The existing keeper keeps this runtime receipt until the terminal result is durable.
+    /// A failed write keeps both that exact result and its file-lock owner for a later external wake.
+    pub(crate) fn publish_terminal(&mut self) -> Result<bool, Refusal> {
+        let context = self.context();
+        let mut data = context
+            .data
+            .lock()
+            .map_err(|_| Refusal::Broken("native create owner lock was poisoned".to_owned()))?;
+        data.advance(context.calls, Duration::ZERO);
+        data.publish();
+        if context.completed.load(std::sync::atomic::Ordering::Acquire) {
+            data.close(context.calls);
+        }
+        Ok(matches!(data.state, CreateOperationState::Terminal(_))
+            && data
+                .durable
+                .as_ref()
+                .is_some_and(super::service::TerminalOwner::published))
     }
 
     pub(crate) fn cancel(&mut self) -> CreateCancellation {
@@ -716,6 +755,23 @@ pub(crate) fn create_system_owned(
     document: &str,
     patience: Duration,
 ) -> Result<PendingCreate, HcsFailure> {
+    create_system_inner(id, document, patience, &mut None)
+}
+
+pub(crate) fn create_system_durable(
+    id: &str,
+    document: &str,
+    durable: &mut Option<super::service::TerminalOwner>,
+) -> Result<PendingCreate, HcsFailure> {
+    create_system_inner(id, document, Duration::ZERO, durable)
+}
+
+fn create_system_inner(
+    id: &str,
+    document: &str,
+    patience: Duration,
+    durable: &mut Option<super::service::TerminalOwner>,
+) -> Result<PendingCreate, HcsFailure> {
     let api = api().map_err(|m| HcsFailure {
         code: 0x8037_0114,
         message: Some(m.to_owned()),
@@ -732,52 +788,73 @@ pub(crate) fn create_system_owned(
             close: api.close_operation,
         },
     )?;
+    match owned.context().data.lock() {
+        Ok(mut data) => data.durable = durable.take(),
+        Err(_) => {
+            release_create_callback(owned.context);
+            return Err(create_fault(windows_sys::Win32::Foundation::E_UNEXPECTED));
+        }
+    }
     // SAFETY: this stable context owns a distinct callback receipt, released exactly once at completion
     // or below when allocation/start failed and no operation/callback was started.
     let operation =
         unsafe { (api.create_operation)(owned.context.as_ptr().cast(), Some(create_completed)) };
     if operation.is_null() {
+        if let Ok(mut data) = owned.context().data.lock() {
+            data.state = CreateOperationState::Terminal(Err(HcsFailure {
+                code: 0x8037_011A,
+                message: None,
+            }));
+            data.publish();
+        }
         release_create_callback(owned.context);
-        return Err(HcsFailure {
-            code: 0x8037_011A,
-            message: None,
-        });
+        return Ok(owned);
     }
     let context = owned.context();
     let mut data = match context.data.lock() {
         Ok(data) => data,
-        Err(_) => {
+        Err(error) => {
             // SAFETY: HcsCreateComputeSystem has not been called; no completion can be pending.
             unsafe { (api.close_operation)(operation) };
+            let mut data = error.into_inner();
+            data.state = CreateOperationState::Terminal(Err(create_fault(
+                windows_sys::Win32::Foundation::E_UNEXPECTED,
+            )));
+            data.publish();
+            drop(data);
             release_create_callback(owned.context);
-            return Err(create_fault(windows_sys::Win32::Foundation::E_UNEXPECTED));
+            return Ok(owned);
         }
     };
     data.operation = Some(operation);
-    let Some(inputs) = data.inputs.as_ref() else {
+    let Some((id, document)) = data
+        .inputs
+        .as_ref()
+        .map(|inputs| (inputs.id.as_ptr(), inputs.document.as_ptr()))
+    else {
+        data.state = CreateOperationState::Terminal(Err(create_fault(
+            windows_sys::Win32::Foundation::E_UNEXPECTED,
+        )));
+        data.publish();
         data.close(context.calls);
         drop(data);
         release_create_callback(owned.context);
-        return Err(create_fault(windows_sys::Win32::Foundation::E_UNEXPECTED));
+        return Ok(owned);
     };
+    if let Some(durable) = data.durable.as_mut() {
+        durable.submitted();
+    }
     let mut system: HCS_SYSTEM = null_mut();
     // SAFETY: inputs remain stable through terminal completion; the reserved descriptor is null;
     // system receives its handle on this call's return. An inline callback uses try_lock only.
-    let hr = unsafe {
-        (api.create_system)(
-            inputs.id.as_ptr(),
-            inputs.document.as_ptr(),
-            operation,
-            null(),
-            &mut system,
-        )
-    };
+    let hr = unsafe { (api.create_system)(id, document, operation, null(), &mut system) };
     if !system.is_null() {
         data.system = Some(System(system));
     }
     if hr < 0 {
         // A synchronous refusal did not start the operation, so no future completion is registered.
         data.state = CreateOperationState::Terminal(Err(HcsFailure::of(hr, None)));
+        data.publish();
         data.close(context.calls);
         drop(data);
         release_create_callback(owned.context);
@@ -1226,6 +1303,293 @@ pub fn device_interfaces(class: &GUID) -> io::Result<DeviceView> {
     Ok(view)
 }
 
+type OpenAdapter = unsafe extern "system" fn(*mut D3DKMT_OPENADAPTERFROMDEVICENAME) -> i32;
+type CloseAdapter = unsafe extern "system" fn(*const D3DKMT_CLOSEADAPTER) -> i32;
+
+struct AdapterCalls {
+    open: OpenAdapter,
+    close: CloseAdapter,
+}
+
+#[derive(Clone, Copy)]
+struct AdapterLoadFailure {
+    op: &'static str,
+    code: u32,
+}
+
+fn adapter_failure(op: &'static str, namespace: &'static str, code: u32) -> Refusal {
+    use std::fmt::Write;
+    // Prefix plus " 0x" and the complete eight hexadecimal digits of a Windows status.
+    let Some(bytes) = namespace
+        .len()
+        .checked_add(" 0x".len())
+        .and_then(|n| n.checked_add(size_of::<u32>().checked_mul(2)?))
+    else {
+        return Refusal::Exhausted {
+            what: "native GPU status bytes",
+            bound: usize::MAX,
+        };
+    };
+    let mut why = String::new();
+    if why.try_reserve_exact(bytes).is_err() || write!(why, "{namespace} {code:#010x}").is_err() {
+        return Refusal::Exhausted {
+            what: "native GPU status bytes",
+            bound: bytes,
+        };
+    }
+    Refusal::Os { op, why }
+}
+
+fn adapter_invalid(message: &'static str) -> Refusal {
+    let mut why = String::new();
+    if why.try_reserve_exact(message.len()).is_err() {
+        return Refusal::Exhausted {
+            what: "native GPU refusal bytes",
+            bound: message.len(),
+        };
+    }
+    why.push_str(message);
+    Refusal::Invalid {
+        what: "GPU PNP identity",
+        why,
+    }
+}
+
+impl AdapterCalls {
+    fn load() -> Result<Self, AdapterLoadFailure> {
+        // SAFETY: a static terminated DLL name, System32 only, no inherited file handle.
+        let library = unsafe {
+            LoadLibraryExW(
+                windows_sys::core::w!("gdi32.dll"),
+                null_mut(),
+                LOAD_LIBRARY_SEARCH_SYSTEM32,
+            )
+        };
+        if library.is_null() {
+            // SAFETY: captures this thread's last error immediately after the failed load.
+            return Err(AdapterLoadFailure {
+                op: "loading native GPU adapter queries",
+                code: unsafe { GetLastError() },
+            });
+        }
+        // SAFETY: both static names are terminated and library remains loaded for the function
+        // pointers' whole process lifetime, as the existing HCS loader does.
+        let open = unsafe {
+            GetProcAddress(
+                library,
+                windows_sys::core::s!("D3DKMTOpenAdapterFromDeviceName"),
+            )
+        };
+        let Some(open) = open else {
+            // SAFETY: immediate capture of this thread's export lookup failure.
+            return Err(AdapterLoadFailure {
+                op: "resolving D3DKMTOpenAdapterFromDeviceName",
+                code: unsafe { GetLastError() },
+            });
+        };
+        // SAFETY: same static name and module lifetime as above.
+        let close = unsafe { GetProcAddress(library, windows_sys::core::s!("D3DKMTCloseAdapter")) };
+        let Some(close) = close else {
+            // SAFETY: immediate capture of this thread's export lookup failure.
+            return Err(AdapterLoadFailure {
+                op: "resolving D3DKMTCloseAdapter",
+                code: unsafe { GetLastError() },
+            });
+        };
+        Ok(Self {
+            // SAFETY: documented Gdi32 signatures, using Microsoft's generated SDK structures.
+            open: unsafe {
+                std::mem::transmute::<unsafe extern "system" fn() -> isize, OpenAdapter>(open)
+            },
+            // SAFETY: documented Gdi32 close signature; a KMT handle is never a Win32 HANDLE.
+            close: unsafe {
+                std::mem::transmute::<unsafe extern "system" fn() -> isize, CloseAdapter>(close)
+            },
+        })
+    }
+}
+
+/// Re-resolves one exact PNP instance to its current-boot adapter LUID. No catalog, holder or
+/// ordinal is inferred here. The initialized provider must also prove full PCI/UUID correspondence.
+/// Microsoft GUID_DISPLAY_DEVICE_ARRIVAL explicitly supports this D3DKMT open; the similarly named
+/// 5B452 display-view interface is not substituted (docs/hex-windows-gpu-compute-mapping).
+pub fn adapter_luid_for_instance(instance: &str) -> Result<[u8; 8], Refusal> {
+    const ARRIVAL: GUID = GUID::from_u128(0x1ca05180_a699_450a_9a0c_de4fbe3ddd89);
+    if instance.is_empty() || instance.contains('\0') {
+        return Err(adapter_invalid(
+            "an exact nonempty instance without NUL is required",
+        ));
+    }
+    let bound = usize::try_from(MAX_INTERFACE_UNITS).map_err(|_| Refusal::Exhausted {
+        what: "GPU interface units",
+        bound: usize::MAX,
+    })?;
+    let units = instance
+        .encode_utf16()
+        .count()
+        .checked_add(1)
+        .filter(|n| *n <= bound)
+        .ok_or(Refusal::Exhausted {
+            what: "GPU instance units",
+            bound,
+        })?;
+    let mut identity = Vec::new();
+    identity
+        .try_reserve_exact(units)
+        .map_err(|_| Refusal::Exhausted {
+            what: "GPU instance units",
+            bound,
+        })?;
+    identity.extend(instance.encode_utf16());
+    identity.push(0);
+    let mut len = 0u32;
+    // SAFETY: initialized output and static interface GUID; this non-null terminated instance
+    // filters the query to that exact device rather than enumerating all graphics adapters.
+    let status = unsafe {
+        CM_Get_Device_Interface_List_SizeW(
+            &mut len,
+            &ARRIVAL,
+            identity.as_ptr(),
+            CM_GET_DEVICE_INTERFACE_LIST_PRESENT,
+        )
+    };
+    if status != CR_SUCCESS {
+        return Err(adapter_failure(
+            "sizing exact GPU interfaces",
+            "CONFIGRET",
+            status,
+        ));
+    }
+    if len > MAX_INTERFACE_UNITS {
+        return Err(Refusal::Exhausted {
+            what: "GPU interface units",
+            bound,
+        });
+    }
+    let len_usize = usize::try_from(len).map_err(|_| Refusal::Exhausted {
+        what: "GPU interface units",
+        bound,
+    })?;
+    let mut names = Vec::new();
+    names
+        .try_reserve_exact(len_usize)
+        .map_err(|_| Refusal::Exhausted {
+            what: "GPU interface units",
+            bound,
+        })?;
+    names.resize(len_usize, 0u16);
+    if names.len() < [0u16, 0].len() {
+        return Err(adapter_invalid(
+            "native interface list cannot hold a double NUL",
+        ));
+    }
+    // SAFETY: same exact filter and GUID, a fully initialized output sized by CM. A changing
+    // list returns its raw error, with no retry or substitute adapter.
+    let status = unsafe {
+        CM_Get_Device_Interface_ListW(
+            &ARRIVAL,
+            identity.as_ptr(),
+            names.as_mut_ptr(),
+            len,
+            CM_GET_DEVICE_INTERFACE_LIST_PRESENT,
+        )
+    };
+    if status != CR_SUCCESS {
+        return Err(adapter_failure(
+            "reading exact GPU interfaces",
+            "CONFIGRET",
+            status,
+        ));
+    }
+    static CALLS: OnceLock<Result<AdapterCalls, AdapterLoadFailure>> = OnceLock::new();
+    let calls = CALLS
+        .get_or_init(AdapterCalls::load)
+        .as_ref()
+        .map_err(|f| adapter_failure(f.op, "Win32", f.code))?;
+    adapter_luid_in(&names, calls)
+}
+
+fn adapter_luid_in(names: &[u16], calls: &AdapterCalls) -> Result<[u8; 8], Refusal> {
+    if !names.ends_with(&[0, 0]) {
+        return Err(adapter_invalid(
+            "native interface list is not double-NUL terminated",
+        ));
+    }
+    let mut found = None;
+    let mut at = 0usize;
+    while at < names.len() {
+        let tail = names
+            .get(at..)
+            .ok_or_else(|| adapter_invalid("native interface offset escapes its buffer"))?;
+        let Some(end) = tail.iter().position(|unit| *unit == 0) else {
+            return Err(adapter_invalid("native interface has no terminating NUL"));
+        };
+        if end == 0 {
+            if tail.iter().any(|unit| *unit != 0) {
+                return Err(adapter_invalid(
+                    "native interface list has data after its terminator",
+                ));
+            }
+            break;
+        }
+        let mut adapter = D3DKMT_OPENADAPTERFROMDEVICENAME {
+            pDeviceName: tail.as_ptr(),
+            ..Default::default()
+        };
+        // SAFETY: tail contains a terminating NUL and outlives this synchronous query; the
+        // generated SDK structure holds all initialized input and output fields.
+        let status = unsafe { (calls.open)(&mut adapter) };
+        if status < 0 {
+            return Err(adapter_failure(
+                "mapping exact GPU interface",
+                "NTSTATUS",
+                u32::from_ne_bytes(status.to_ne_bytes()),
+            ));
+        }
+        if adapter.hAdapter == 0 {
+            return Err(adapter_failure(
+                "mapping exact GPU interface returned no handle",
+                "NTSTATUS",
+                u32::from_ne_bytes(status.to_ne_bytes()),
+            ));
+        }
+        let luid = adapter.AdapterLuid;
+        // SAFETY: this successful open owns exactly this KMT handle; it is closed once through
+        // D3DKMTCloseAdapter, never CloseHandle. Failure is surfaced, not a successful mapping.
+        let closed = unsafe {
+            (calls.close)(&D3DKMT_CLOSEADAPTER {
+                hAdapter: adapter.hAdapter,
+            })
+        };
+        if closed < 0 {
+            return Err(adapter_failure(
+                "closing exact GPU adapter query",
+                "NTSTATUS",
+                u32::from_ne_bytes(closed.to_ne_bytes()),
+            ));
+        }
+        let [a, b, c, d] = luid.LowPart.to_le_bytes();
+        let [e, f, g, h] = luid.HighPart.to_le_bytes();
+        let current = [a, b, c, d, e, f, g, h];
+        if found.is_some_and(|previous| previous != current) {
+            return Err(adapter_invalid(
+                "present aliases disagree on the complete current adapter LUID",
+            ));
+        }
+        found = Some(current);
+        at = at
+            .checked_add(end)
+            .and_then(|n| n.checked_add(1))
+            .ok_or(Refusal::Exhausted {
+                what: "GPU interface units",
+                bound: names.len(),
+            })?;
+    }
+    found.ok_or_else(|| {
+        adapter_invalid("the exact instance has no present adapter-arrival interface")
+    })
+}
+
 /// A device interface class as seen from where this process runs: how many of its interfaces are listed,
 /// and how many of those open (a process-isolated container lists the host's, and opens only those its
 /// grant plumbed in: the lead's ruling on "visible", 2026-11-06).
@@ -1447,7 +1811,6 @@ mod create_tests {
             reclaim_failures: Vec::new(),
         };
         let spec = BoxSpec {
-            allocation: None,
             id: BoxId::new("pending-runtime").unwrap(),
             bounds: hex_api::Bounds::default(),
             owner: None,
@@ -1516,7 +1879,6 @@ mod create_tests {
         CALLS.with_borrow(|calls| assert_eq!((calls.closed, calls.cancelled), (0, 1)));
 
         let sibling = BoxSpec {
-            allocation: None,
             id: BoxId::new("independent-empty-job").unwrap(),
             bounds: hex_api::Bounds::default(),
             owner: None,

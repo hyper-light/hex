@@ -26,7 +26,7 @@ use hex_api::{
     DeviceInfo, Proc, Program, Refusal, Rootfs, Runtime, Signal, Stdio, Usage,
 };
 
-use crate::devices::{Binding, Catalog};
+use crate::devices::{Binding, Catalog, Route};
 use crate::guest::Side;
 use hex_core::setup::{self, WindowsFeature};
 use oci::OciBox;
@@ -111,6 +111,17 @@ fn allocation(bound: usize) -> Refusal {
     Refusal::Exhausted {
         what: "Windows device state",
         bound,
+    }
+}
+
+fn wrong_backend(spec: &BoxSpec) -> Refusal {
+    Refusal::Platform {
+        what: "runtime class",
+        platform: "windows native OCI",
+        why: format!(
+            "{} belongs to its initialized microVM adapter",
+            spec.class.class().name()
+        ),
     }
 }
 
@@ -767,7 +778,7 @@ impl Holding {
             .try_reserve_exact(catalog.entries().len())
             .map_err(|_| allocation(catalog.entries().len()))?;
         for entry in catalog.entries() {
-            if matches!(entry.binding, Binding::Hcs { .. }) {
+            if entry.binding(Route::Hcs).is_some() {
                 let holder = holders
                     .binary_search_by_key(&entry.info.id, |(device, _)| *device)
                     .ok()
@@ -856,7 +867,7 @@ impl WinRuntime {
         if catalog
             .entries()
             .iter()
-            .any(|entry| matches!(entry.binding, Binding::Hcs { .. }))
+            .any(|entry| entry.binding(Route::Hcs).is_some())
         {
             std::fs::create_dir_all(dir.join("boxes"))
                 .map_err(|e| Refusal::os("making the native scratch root", e))?;
@@ -889,7 +900,7 @@ impl WinRuntime {
                     why: "requested identity has no configured native binding".to_owned(),
                 })?;
             let entry = index.get(at).ok_or_else(inconsistent_slots)?;
-            let Binding::Hcs { location } = &entry.binding else {
+            let Some(Binding::Hcs { location }) = entry.binding(Route::Hcs) else {
                 return Err(Refusal::Platform {
                     what: "device attachment",
                     platform: "windows OCI",
@@ -911,7 +922,6 @@ impl WinRuntime {
     ) -> Result<(), Refusal> {
         let configured = self.bindings(spec)?;
         if record.devices != configured
-            || record.creation != hex_core::hcs::NativeCreate::Created
             || (!record.devices.is_empty() && record.system.as_ref() != Some(&spec.id))
         {
             return Err(Refusal::Invalid{what:"native device recovery",why:"recorded physical identity or exact location disagrees with the current configuration".to_owned()});
@@ -987,6 +997,7 @@ impl WinRuntime {
                 }
                 oci::alive(&marker).map(Some)
             }
+            ClassSpec::Firecracker(_) | ClassSpec::Shards(_) => Err(wrong_backend(spec)),
         }
     }
 
@@ -1094,6 +1105,14 @@ impl WinRuntime {
             ClassSpec::Process => true,
             ClassSpec::Bundle(dir) => oci::bundle_config(dir)?.get("windows").is_some(),
             ClassSpec::Oci(o) => matches!(o.rootfs, Rootfs::Layers(_)),
+            ClassSpec::Shards(_) => false,
+            ClassSpec::Firecracker(_) => {
+                return Err(Refusal::Platform {
+                    what: "Firecracker runtime",
+                    platform: "windows native",
+                    why: "Firecracker requires an initialized Linux KVM endpoint".to_owned(),
+                });
+            }
         };
         if windows {
             return Ok(Side::Host);
@@ -1150,7 +1169,6 @@ impl WinRuntime {
     fn info(&self, b: &Held) -> Result<BoxInfo, Refusal> {
         match b {
             Held::Process(b) => Ok(BoxInfo {
-                allocation: None,
                 id: b.id().clone(),
                 class: Class::Process,
                 state: if b.running()? {
@@ -1164,6 +1182,7 @@ impl WinRuntime {
                 // A process box has no init, so no container exit to report (HEX-RT-11).
                 exit: None,
                 abandoned: 0,
+                allocation: None,
             }),
             Held::Oci(b) => oci::info(b),
         }
@@ -1189,6 +1208,7 @@ impl WinRuntime {
                     "a process spec reached the oci class".to_owned(),
                 ));
             }
+            ClassSpec::Firecracker(_) | ClassSpec::Shards(_) => return Err(wrong_backend(spec)),
         };
         let bindings = self.bindings(spec)?;
         container
@@ -1242,13 +1262,20 @@ impl WinRuntime {
                 hex_core::hcs::Lifetime::EndsWithNode,
             ),
         };
-        OciBox::create_assigned(
+        if let Some(keeping) = self.holding.keeper.as_ref() {
+            self.holding.ensure_keeper(keeping)?;
+        }
+        OciBox::create_assigned_at(
             job,
             container,
             &launcher,
             Some(self.marker(&spec.id)),
             lifetime,
             bindings,
+            self.holding
+                .keeper
+                .as_ref()
+                .map(|keeping| keeping.state.as_path()),
         )
     }
 
@@ -1318,7 +1345,7 @@ impl Runtime for WinRuntime {
             .catalog
             .entries()
             .iter()
-            .any(|entry| matches!(entry.binding, Binding::Hcs { .. }))
+            .any(|entry| entry.binding(Route::Hcs).is_some())
         {
             return Ok(None);
         }
@@ -1634,10 +1661,10 @@ mod tests {
 
     fn device_spec(name: &str, key: u64) -> BoxSpec {
         BoxSpec {
-            allocation: None,
             id: BoxId::new(name).unwrap(),
             bounds: hex_api::Bounds::default(),
             owner: None,
+            allocation: None,
             class: ClassSpec::Oci(Box::new(hex_api::OciSpec {
                 rootfs: Rootfs::Layers(vec![PathBuf::from(r"C:\fixture\base")]),
                 init: Program::of(&["cmd.exe", "/c", "exit", "0"]),
@@ -2087,12 +2114,12 @@ mod tests {
 
     fn process_box(id: &str) -> BoxSpec {
         BoxSpec {
-            allocation: None,
             devices: Vec::new(),
             id: BoxId::new(id).unwrap(),
             bounds: hex_api::Bounds::default(),
             class: ClassSpec::Process,
             owner: None,
+            allocation: None,
         }
     }
 

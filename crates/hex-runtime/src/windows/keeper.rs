@@ -14,7 +14,7 @@
 //! is `hex keep`, started by the node ([`super::WinRuntime`]); this module is the keeper's body and the
 //! node's handle on it.
 
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use hex_api::Refusal;
@@ -68,11 +68,35 @@ pub fn run(args: &Args) -> Result<(), Refusal> {
         sys::created(&me).map_err(|e| Refusal::os("reading the keeper's start time", e))?;
     write_ready(&args.ready, std::process::id(), created)
         .map_err(|e| Refusal::os("saying the keeper is ready", e))?;
-    // Until the stop is asked. No deadline: parity with Linux, where a box waits for its node.
-    if sys::wait(&stop, u32::MAX).map_err(|e| Refusal::os("waiting on the keeper's stop", e))? {
-        return Ok(());
+    let wake = super::oci::service::wake(&args.state)?;
+    let owner = hex_core::hcs::InitRecord {
+        pid: std::process::id(),
+        created,
+    };
+    let mut native = super::oci::service::Service::new();
+    loop {
+        // Reset before the scan: a request arriving during the scan retains its signal. Startup
+        // also drains requests a node committed before it could signal the keeper.
+        sys::reset(&wake).map_err(|e| Refusal::os("arming the keeper's native wake", e))?;
+        if let Err(error) = native.dispatch(&args.state, owner) {
+            // Preserve the keeper's existing job ownership on a service/storage refusal. This is
+            // a latest-error diagnostic, not a retry queue or a claim; the next request wakes us.
+            if std::fs::write(args.state.join("native-create.refusal"), error.to_string()).is_err()
+            {
+                // The requester also gets typed uncertainty when its receipt cannot be read.
+                // Diagnostic storage loss must not close unrelated boxes' keeper handles.
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "native create failed and its diagnostic could not be stored; claims remain held"
+                );
+            }
+        }
+        if sys::wait_either(&stop, &wake)
+            .map_err(|e| Refusal::os("waiting on keeper work or stop", e))?
+        {
+            return Ok(());
+        }
     }
-    Ok(())
 }
 
 /// The keeper's stop event's name, one per state folder (`Local\hex-keep-<hash of path>-stop`): the node
