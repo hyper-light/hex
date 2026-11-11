@@ -44,10 +44,11 @@ use std::sync::Mutex;
 use hex_api::{
     Allocation, BackendUnavailable, BackingGrant, BackingKey, BackingOffer, BackingPhase, Bounds,
     BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, Capacity, CapacityResources, Class, ClassSpec,
-    DeviceHolder, DeviceId, DeviceInfo, DeviceKind, Execution, Exit, GpuEligibility, ImageArch,
-    ImageOs, ImagePlatform, IoRates, LifecycleCause, MAX_DEVICES, MAX_RUNTIME_ROUTES, Mount,
-    Network, OciSpec, PhysicalDevice, PhysicalReport, Program, Refusal, Rootfs, RouteKey,
-    RouteOffer, RouteReceipt, RuntimeCost, Signal, Usage, User,
+    ConnectFailure, ConnectPhase, ConnectReply, DeviceHolder, DeviceId, DeviceInfo, DeviceKind,
+    Execution, Exit, GpuEligibility, ImageArch, ImageOs, ImagePlatform, IoKind, IoRates,
+    LifecycleCause, MAX_DEVICES, MAX_RUNTIME_ROUTES, Mount, Network, OciSpec, PhysicalDevice,
+    PhysicalReport, Program, Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost,
+    Signal, Usage, User,
 };
 
 use crate::netns;
@@ -2170,6 +2171,11 @@ fn put_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
             });
             Ok(())
         }
+        Refusal::Connect { port, failure } => {
+            w.u8(11);
+            w.u32(*port);
+            put_connect_failure(w, *failure)
+        }
     }
 }
 
@@ -2215,8 +2221,100 @@ fn refusal(r: &mut Reader<'_>) -> Result<Refusal, Fault> {
                 _ => return Err(Fault::value("backing.cause", "unsupported tag")),
             },
         },
+        11 => Refusal::Connect {
+            port: r.u32()?,
+            failure: connect_failure(r)?,
+        },
         t => return Err(Fault::value("refusal", format!("variant {t}"))),
     })
+}
+
+fn put_connect_failure(w: &mut Writer, failure: ConnectFailure) -> Result<(), Fault> {
+    match failure {
+        ConnectFailure::Expired { phase } => {
+            w.u8(0);
+            w.u8(connect_phase_tag(phase));
+        }
+        ConnectFailure::Io { phase, kind, code } => {
+            w.u8(1);
+            w.u8(connect_phase_tag(phase));
+            put_io_kind(w, kind)?;
+            w.option(code, |w, code| w.i32(code));
+        }
+        ConnectFailure::Closed => w.u8(2),
+        ConnectFailure::Reply(reply) => {
+            w.u8(3);
+            w.u8(match reply {
+                ConnectReply::TooLong => 0,
+                ConnectReply::NotOk => 1,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn connect_phase_tag(phase: ConnectPhase) -> u8 {
+    match phase {
+        ConnectPhase::Dial => 0,
+        ConnectPhase::Write => 1,
+        ConnectPhase::Read => 2,
+        ConnectPhase::ClearTimeouts => 3,
+    }
+}
+
+/// Fixed-width fields alone: no string copied, no name kept.
+fn connect_failure(r: &mut Reader<'_>) -> Result<ConnectFailure, Fault> {
+    Ok(match r.u8()? {
+        0 => ConnectFailure::Expired {
+            phase: connect_phase(r)?,
+        },
+        1 => ConnectFailure::Io {
+            phase: connect_phase(r)?,
+            kind: io_kind(r)?,
+            code: r.option(|r| r.i32())?,
+        },
+        2 => ConnectFailure::Closed,
+        3 => ConnectFailure::Reply(match r.u8()? {
+            0 => ConnectReply::TooLong,
+            1 => ConnectReply::NotOk,
+            t => return Err(Fault::value("connect reply", format!("variant {t}"))),
+        }),
+        t => return Err(Fault::value("connect failure", format!("variant {t}"))),
+    })
+}
+
+fn connect_phase(r: &mut Reader<'_>) -> Result<ConnectPhase, Fault> {
+    Ok(match r.u8()? {
+        0 => ConnectPhase::Dial,
+        1 => ConnectPhase::Write,
+        2 => ConnectPhase::Read,
+        3 => ConnectPhase::ClearTimeouts,
+        t => return Err(Fault::value("connect phase", format!("variant {t}"))),
+    })
+}
+
+/// A named kind is its place in [`IoKind::NAMED`]; an unnamed one is none.
+fn put_io_kind(w: &mut Writer, kind: IoKind) -> Result<(), Fault> {
+    w.option_with(kind.named(), |w, kind| {
+        let tag = IoKind::NAMED
+            .iter()
+            .position(|named| *named == kind)
+            .and_then(|at| u8::try_from(at).ok())
+            .ok_or_else(|| Fault::value("io kind", format!("{kind:?} has no tag")))?;
+        w.u8(tag);
+        Ok(())
+    })
+}
+
+fn io_kind(r: &mut Reader<'_>) -> Result<IoKind, Fault> {
+    let named = r.option(|r| {
+        let tag = r.u8()?;
+        IoKind::NAMED
+            .get(usize::from(tag))
+            .copied()
+            .ok_or_else(|| Fault::value("io kind", format!("variant {tag}")))
+    })?;
+    Ok(named.map_or(IoKind::UNNAMED, IoKind::new))
 }
 
 /// Most distinct refusal names a process keeps, and the longest: a node agent's refusals name what

@@ -144,14 +144,18 @@ pub trait Recover: Runtime {
         Err(record.refusal(hex_api::LifecycleCause::Uncertain))
     }
 
-    /// Read-only cross-check of native metadata names against the complete retained cohort.
+    /// Read-only cross-check of native metadata names against the complete retained cohort. Every
+    /// runtime implements its own, one with no native metadata saying so: left to this default,
+    /// recovery is refused rather than go on unchecked (AC-T7.4.1).
     fn preflight_retained(
         &self,
         records: &hex_runtime::devices::Records,
         pools: &[PoolRecord],
     ) -> Result<(), Refusal> {
         let _ = (records, pools);
-        Ok(())
+        Err(broken(
+            "runtime has no cross-check of its native metadata against the retained cohort",
+        ))
     }
 
     /// Deferred native initialization is entered only after the complete read-only barrier.
