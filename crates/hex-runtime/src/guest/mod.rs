@@ -837,14 +837,19 @@ impl GuestRuntime {
         for _ in 0..BOOTS {
             let bound = self.first_dial_bound()?;
             let began = Instant::now();
+            // HEX-GUEST-34: the boot and its first dial spend one deadline: a boot that spends it is refused
+            // by type before a dial, never left a zero patience, whose answer Shards awaits without a bound.
+            let ready_by = began.checked_add(bound).ok_or_else(|| Refusal::Invalid {
+                what: "the guest's boot bound",
+                why: format!("{bound:?} from now is past a monotonic deadline"),
+            })?;
             let guest: Arc<dyn shards_api::Guest> = self
                 .guests
                 .boot(&self.cpu_spec())
                 .map_err(|why| refusal("booting the node's guest", &why))?
                 .into();
-            let patience = bound.saturating_sub(began.elapsed());
-            let link: LinkOwner = own_link(ShardsLink::new(Arc::clone(&guest), patience))?;
-            match Client::connect(triomphe::Arc::clone(&link)) {
+            let link: LinkOwner = own_link(ShardsLink::new(Arc::clone(&guest), bound))?;
+            match Client::connect_before(triomphe::Arc::clone(&link), ready_by) {
                 Ok(client) => {
                     self.learn(began.elapsed());
                     if let Err(why) = self.record(guest.as_ref()) {

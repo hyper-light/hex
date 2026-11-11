@@ -715,7 +715,7 @@ fn counts() -> netns::Counts {
 }
 
 fn refusals() -> Vec<Refusal> {
-    vec![
+    let mut out = vec![
         Refusal::Invalid {
             what: "cpu_weight",
             why: "0 is outside 1..=10000".to_owned(),
@@ -750,7 +750,50 @@ fn refusals() -> Vec<Refusal> {
             id: id("retained-box"),
             cause: LifecycleCause::Busy,
         },
-    ]
+    ];
+    out.extend(connect_refusals());
+    out
+}
+
+/// Every CONNECT cause in every phase, every named I/O kind and an unnamed one, and codes at their
+/// edges, on ports at theirs.
+fn connect_refusals() -> Vec<Refusal> {
+    let codes = [None, Some(0), Some(-1), Some(i32::MIN), Some(i32::MAX)];
+    let mut failures = vec![
+        ConnectFailure::Closed,
+        ConnectFailure::Reply(ConnectReply::TooLong),
+        ConnectFailure::Reply(ConnectReply::NotOk),
+    ];
+    for phase in [
+        ConnectPhase::Dial,
+        ConnectPhase::Write,
+        ConnectPhase::Read,
+        ConnectPhase::ClearTimeouts,
+    ] {
+        failures.push(ConnectFailure::Expired { phase });
+        for code in codes {
+            failures.push(ConnectFailure::Io {
+                phase,
+                kind: IoKind::UNNAMED,
+                code,
+            });
+        }
+    }
+    for (n, kind) in IoKind::NAMED.into_iter().enumerate() {
+        failures.push(ConnectFailure::Io {
+            phase: ConnectPhase::Read,
+            kind: IoKind::new(kind),
+            code: codes[n % codes.len()],
+        });
+    }
+    failures
+        .into_iter()
+        .enumerate()
+        .map(|(n, failure)| Refusal::Connect {
+            port: [0, 1024, u32::MAX][n % 3],
+            failure,
+        })
+        .collect()
 }
 
 fn answers() -> Vec<(u64, Answer)> {
@@ -1946,6 +1989,31 @@ fn any_refusal() -> impl Strategy<Value = Refusal> {
             ])
         )
             .prop_map(|(id, cause)| Refusal::Lifecycle { id, cause }),
+        (any::<u32>(), any_connect_failure())
+            .prop_map(|(port, failure)| Refusal::Connect { port, failure }),
+    ]
+}
+
+fn any_connect_failure() -> impl Strategy<Value = ConnectFailure> {
+    let phase = proptest::sample::select(vec![
+        ConnectPhase::Dial,
+        ConnectPhase::Write,
+        ConnectPhase::Read,
+        ConnectPhase::ClearTimeouts,
+    ]);
+    let kind = prop_oneof![
+        proptest::sample::select(IoKind::NAMED.to_vec()).prop_map(IoKind::new),
+        Just(IoKind::UNNAMED),
+    ];
+    prop_oneof![
+        phase
+            .clone()
+            .prop_map(|phase| ConnectFailure::Expired { phase }),
+        (phase, kind, proptest::option::of(any::<i32>()))
+            .prop_map(|(phase, kind, code)| ConnectFailure::Io { phase, kind, code }),
+        Just(ConnectFailure::Closed),
+        Just(ConnectFailure::Reply(ConnectReply::TooLong)),
+        Just(ConnectFailure::Reply(ConnectReply::NotOk)),
     ]
 }
 
@@ -3563,4 +3631,117 @@ fn physical_report_unavailable_preserves_legacy_bytes_and_message_bounds() {
             ..
         })
     ));
+}
+
+/// AC-T7.4.1 (Shards R04): a Connect refusal whose failure, phase, I/O kind or reply tag is unknown,
+/// whose option byte is neither 0 nor 1, that is cut short, or that has a byte past its end: expect
+/// each refused by type.
+#[test]
+fn connect_refusal_hostile_tags_cuts_and_trailing_bytes_are_refused() {
+    let io = Refusal::Connect {
+        port: 9,
+        failure: ConnectFailure::Io {
+            phase: ConnectPhase::Read,
+            kind: IoKind::new(std::io::ErrorKind::ConnectionRefused),
+            code: Some(111),
+        },
+    };
+    let bytes = answer(5, &Answer::Refused(io), MAX_MESSAGE).unwrap();
+    // Refusal tag, port, failure tag, phase, the kind's option and tag, the code's option and bytes.
+    let body = HEADER_BYTES;
+    assert_eq!(bytes.len(), body + 14);
+    assert_eq!(&bytes[body..body + 10], &[11, 9, 0, 0, 0, 1, 2, 1, 2, 1]);
+    let what = |bytes: &[u8]| match read_answer(&received(bytes, 0), MAX_MESSAGE) {
+        Err(Fault::Value { what, .. }) => what,
+        other => panic!("{other:?}"),
+    };
+    let past_named = u8::try_from(IoKind::NAMED.len()).unwrap();
+    for (at, byte, expected) in [
+        (5, 4, "connect failure"),
+        (5, u8::MAX, "connect failure"),
+        (6, 4, "connect phase"),
+        (7, 2, "option"),
+        (8, past_named, "io kind"),
+        (8, u8::MAX, "io kind"),
+        (9, 2, "option"),
+    ] {
+        let mut hostile = bytes.clone();
+        hostile[body + at] = byte;
+        assert_eq!(what(&hostile), expected, "body byte {at} set to {byte}");
+    }
+    let reply = Refusal::Connect {
+        port: 9,
+        failure: ConnectFailure::Reply(ConnectReply::NotOk),
+    };
+    let mut hostile = answer(5, &Answer::Refused(reply), MAX_MESSAGE).unwrap();
+    *hostile.last_mut().unwrap() = 2;
+    assert_eq!(what(&hostile), "connect reply");
+    for cut in body..bytes.len() {
+        assert!(
+            matches!(
+                read_answer(&received(&bytes[..cut], 0), MAX_MESSAGE),
+                Err(Fault::Truncated { .. })
+            ),
+            "cut at {cut}"
+        );
+    }
+    let mut long = bytes;
+    long.push(0);
+    assert_eq!(
+        read_answer(&received(&long, 0), MAX_MESSAGE).unwrap_err(),
+        Fault::Leftover {
+            bytes: 1,
+            kind: kind::REFUSED,
+        }
+    );
+}
+
+/// AC-T7.4.1 (Shards R04): take each kind std's own errno mapping gives that Hex has no tag for (on
+/// Linux with Rust 1.99.1, `Uncategorized`, `InputOutputError`, `TooManyOpenFiles`, `FilesystemLoop`
+/// and `InProgress`) as a CONNECT's I/O cause: expect it unnamed and apart from `Other`, read back
+/// whole with its OS code exact, its bytes apart from the same cause named `Other`; and expect each
+/// named kind to be its own tag.
+#[test]
+fn an_untagged_io_kind_reads_back_unnamed_and_apart_from_other_with_its_code() {
+    for (tag, kind) in IoKind::NAMED.iter().enumerate() {
+        assert_eq!(IoKind::NAMED.iter().position(|k| k == kind), Some(tag));
+    }
+    let untagged: Vec<(i32, std::io::ErrorKind)> = (1..=200)
+        .map(|code| (code, std::io::Error::from_raw_os_error(code).kind()))
+        .filter(|(_, kind)| !IoKind::NAMED.contains(kind))
+        .collect();
+    assert!(
+        !untagged.is_empty(),
+        "no errno here maps to an untagged kind"
+    );
+    let other = IoKind::new(std::io::ErrorKind::Other);
+    let connect = |kind, code| {
+        Answer::Refused(Refusal::Connect {
+            port: 3,
+            failure: ConnectFailure::Io {
+                phase: ConnectPhase::Dial,
+                kind,
+                code: Some(code),
+            },
+        })
+    };
+    for (code, kind) in untagged {
+        let unnamed = IoKind::new(kind);
+        assert_eq!(
+            (unnamed, unnamed.named()),
+            (IoKind::UNNAMED, None),
+            "{kind:?}"
+        );
+        assert_ne!(unnamed, other);
+        let sent = connect(unnamed, code);
+        let bytes = answer(4, &sent, MAX_MESSAGE).unwrap();
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            sent
+        );
+        assert_ne!(
+            bytes,
+            answer(4, &connect(other, code), MAX_MESSAGE).unwrap()
+        );
+    }
 }

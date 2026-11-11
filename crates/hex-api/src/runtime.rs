@@ -1381,6 +1381,11 @@ pub enum Refusal {
     /// is uncertain. Busy names exclusive lifecycle ownership, never absence or completion.
     #[error("box {id}: {cause}")]
     Lifecycle { id: BoxId, cause: LifecycleCause },
+    /// A CONNECT to a guest's vsock port failed (Firecracker's CONNECT/OK handshake, which Shards
+    /// speaks too): its port, phase and cause stay typed, never text (AC-T7.4.1, Shards R04). It
+    /// says nothing of whether the guest ended.
+    #[error("connecting to the guest's port {port} failed: {failure}")]
+    Connect { port: u32, failure: ConnectFailure },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
@@ -1392,6 +1397,120 @@ pub enum LifecycleCause {
     Uncertain,
     #[error("another operation owns this box's lifecycle")]
     Busy,
+}
+
+/// Why a CONNECT handshake failed: the phase it failed in and what it saw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ConnectFailure {
+    /// The caller's deadline passed.
+    #[error("{phase:?}: handshake deadline expired")]
+    Expired { phase: ConnectPhase },
+    /// An I/O failure, with the OS's own code where there was one.
+    #[error("{phase:?}: {kind} (OS {code:?})")]
+    Io {
+        phase: ConnectPhase,
+        kind: IoKind,
+        code: Option<i32>,
+    },
+    /// Closed with no answer: nothing listens on the port.
+    #[error("closed unanswered (the guest does not listen there)")]
+    Closed,
+    /// An answer outside the CONNECT/OK grammar.
+    #[error("{0}")]
+    Reply(ConnectReply),
+}
+
+/// A CONNECT handshake's steps: dial the vsock socket, write `CONNECT <port>`, read the answer,
+/// clear the socket's timeouts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectPhase {
+    Dial,
+    Write,
+    Read,
+    ClearTimeouts,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ConnectReply {
+    #[error("answered past the longest OK, no line")]
+    TooLong,
+    #[error("answered not OK")]
+    NotOk,
+}
+
+/// An I/O failure's [`std::io::ErrorKind`] where Hex names it ([`IoKind::NAMED`]). Any other kind is
+/// [`IoKind::UNNAMED`]: apart from every named kind, `Other` included, and never guessed back into
+/// one. The OS code that travels beside it stays exact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IoKind(Option<std::io::ErrorKind>);
+
+impl IoKind {
+    /// Every kind stable in Rust 1.99.1 (rust-toolchain.toml), each tagged on the node's wire by its
+    /// place here (hex-core's wire.rs), so append only. The unstable ones std reports, such as
+    /// `Uncategorized`, `InputOutputError` and `InProgress`, can't be named.
+    pub const NAMED: [std::io::ErrorKind; 39] = [
+        std::io::ErrorKind::NotFound,
+        std::io::ErrorKind::PermissionDenied,
+        std::io::ErrorKind::ConnectionRefused,
+        std::io::ErrorKind::ConnectionReset,
+        std::io::ErrorKind::HostUnreachable,
+        std::io::ErrorKind::NetworkUnreachable,
+        std::io::ErrorKind::ConnectionAborted,
+        std::io::ErrorKind::NotConnected,
+        std::io::ErrorKind::AddrInUse,
+        std::io::ErrorKind::AddrNotAvailable,
+        std::io::ErrorKind::NetworkDown,
+        std::io::ErrorKind::BrokenPipe,
+        std::io::ErrorKind::AlreadyExists,
+        std::io::ErrorKind::WouldBlock,
+        std::io::ErrorKind::NotADirectory,
+        std::io::ErrorKind::IsADirectory,
+        std::io::ErrorKind::DirectoryNotEmpty,
+        std::io::ErrorKind::ReadOnlyFilesystem,
+        std::io::ErrorKind::StaleNetworkFileHandle,
+        std::io::ErrorKind::InvalidInput,
+        std::io::ErrorKind::InvalidData,
+        std::io::ErrorKind::TimedOut,
+        std::io::ErrorKind::WriteZero,
+        std::io::ErrorKind::StorageFull,
+        std::io::ErrorKind::NotSeekable,
+        std::io::ErrorKind::QuotaExceeded,
+        std::io::ErrorKind::FileTooLarge,
+        std::io::ErrorKind::ResourceBusy,
+        std::io::ErrorKind::ExecutableFileBusy,
+        std::io::ErrorKind::Deadlock,
+        std::io::ErrorKind::CrossesDevices,
+        std::io::ErrorKind::TooManyLinks,
+        std::io::ErrorKind::InvalidFilename,
+        std::io::ErrorKind::ArgumentListTooLong,
+        std::io::ErrorKind::Interrupted,
+        std::io::ErrorKind::Unsupported,
+        std::io::ErrorKind::UnexpectedEof,
+        std::io::ErrorKind::OutOfMemory,
+        std::io::ErrorKind::Other,
+    ];
+    pub const UNNAMED: Self = Self(None);
+
+    pub fn new(kind: std::io::ErrorKind) -> Self {
+        if Self::NAMED.contains(&kind) {
+            Self(Some(kind))
+        } else {
+            Self::UNNAMED
+        }
+    }
+
+    pub fn named(self) -> Option<std::io::ErrorKind> {
+        self.0
+    }
+}
+
+impl std::fmt::Display for IoKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(kind) => write!(f, "{kind:?}"),
+            None => f.write_str("an unnamed I/O kind"),
+        }
+    }
 }
 
 impl Refusal {

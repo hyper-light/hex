@@ -413,6 +413,11 @@ impl GuestRuntime {
         let plan = self.managed_plan(&spec, &socket)?;
         let guest = match &receipt.phase {
             Phase::Intent if fresh => {
+                self.check_current_luids(
+                    &receipt.original.devices,
+                    &receipt.physical,
+                    refused(key, LifecycleCause::Uncertain),
+                )?;
                 let plan = plan
                     .with_gpu_report(*receipt.original.scope().bytes(), budget.deadline())
                     .map_err(|why| refusal("preparing charged GPU observer report", &why))?;
@@ -2186,8 +2191,11 @@ mod tests {
             *row = Some(PoolRecord::decode(&next.encode()?)?);
             Ok(())
         }
-        fn grant_pool(&self, _: &BackingGrant) -> Result<PoolRecord, Refusal> {
-            Err(refused_model())
+        fn grant_pool(&self, grant: &BackingGrant) -> Result<PoolRecord, Refusal> {
+            let mut row = Transaction::read_pool(self, &grant.key)?.ok_or_else(refused_model)?;
+            row.accept_grant(grant)?;
+            Transaction::put_pool(self, &row)?;
+            Ok(row)
         }
         fn remove_pool(&self, _: &BackingKey) -> Result<(), Refusal> {
             Err(refused_model())
@@ -2387,6 +2395,111 @@ mod tests {
                     "controller-only exit cannot release physical claims"
                 );
             }
+        }
+    }
+
+    /// AC-T7.4.1: grant a backing configured by a current-boot LUID while the
+    /// SAME provider reports a stale, an unknown or the matching LUID for its
+    /// stable claim; expect the launcher reached only on the match.
+    #[cfg(unix)]
+    #[test]
+    fn current_luid_join_precedes_charged_native_gpu_launch() {
+        for current in [Some(10u64.to_le_bytes()), None, Some(9u64.to_le_bytes())] {
+            // Short fixture: the prepared pool socket obeys the sun_path bound.
+            let dir = tempfile::tempdir_in("/tmp").unwrap();
+            let (config, input, allocation) = observer::config::tests::fixture(dir.path());
+            let standalone = Arc::new(NoEffects(AtomicUsize::new(0)));
+            let catalog = devices::Catalog::parse(
+                b"hex-devices-1\ngpu\t256\tunmeasured\t777\tshards-gpu\tluid:0000000000000009\t\n",
+            )
+            .unwrap();
+            let runtime = GuestRuntime::new(standalone.clone(), config)
+                .recorded_at(dir.path().join("g"))
+                .with_runtime_cost(allocation.cost)
+                .unwrap()
+                .with_runtime_paths(
+                    shards_api::RuntimePaths::new(
+                        dir.path().join("cache"),
+                        dir.path().join("home"),
+                    )
+                    .unwrap(),
+                )
+                .with_gpu_catalog(triomphe::Arc::try_new(catalog).unwrap())
+                .with_gpu_observer(input)
+                .unwrap();
+            let owner = Arc::new(Cold {
+                row: Mutex::new(None),
+                shared: Mutex::new(None),
+                native_report: None,
+                physical: None,
+                effects: AtomicUsize::new(0),
+                queries: AtomicUsize::new(0),
+                native: Some(
+                    triomphe::Arc::try_new(RecoveringNative {
+                        identity: shards_api::Identity {
+                            pid: 42,
+                            started: 7,
+                            vsock: "/model/v".into(),
+                        },
+                        release_on_stop: false,
+                        active: false,
+                        released: std::sync::atomic::AtomicBool::new(false),
+                        attaches: AtomicUsize::new(0),
+                        stops: AtomicUsize::new(0),
+                    })
+                    .unwrap(),
+                ),
+                finalized: AtomicUsize::new(0),
+                luid: current,
+                launches: AtomicUsize::new(0),
+            });
+            let books: Arc<dyn Books> = owner.clone();
+            runtime.bind_books(Arc::downgrade(&books)).unwrap();
+            let prepared = runtime.prepare_gpu_backing().unwrap().unwrap();
+            assert_eq!(
+                owner.queries.load(Ordering::SeqCst),
+                0,
+                "cold preparation cannot query an ungranted GPU"
+            );
+            assert_eq!(owner.launches.load(Ordering::SeqCst), 0);
+            let result = runtime.initialize_gpu_pool(BackingGrant {
+                key: prepared.key,
+                allocation,
+                devices: prepared.devices.clone(),
+            });
+            let row = Books::pool_records(owner.as_ref()).unwrap().pop().unwrap();
+            let allowed = current == Some(9u64.to_le_bytes());
+            assert_eq!(
+                owner.launches.load(Ordering::SeqCst),
+                usize::from(allowed),
+                "stale or unknown LUID reached the canonical native launcher"
+            );
+            assert_eq!(
+                owner.queries.load(Ordering::SeqCst),
+                1,
+                "the SAME initialized provider must establish the preboot join"
+            );
+            if allowed {
+                // The model launcher refuses after the join: no VM or readiness.
+                assert_eq!(result, Err(refused_model()));
+            } else {
+                assert_eq!(
+                    result,
+                    Err(refused(prepared.key, LifecycleCause::Uncertain))
+                );
+                assert!(
+                    pool::read(&runtime.gpu_backing_definition().unwrap().unwrap().path)
+                        .unwrap()
+                        .is_none(),
+                    "a refused join leaves no local launch Intent"
+                );
+            }
+            assert_eq!(row.phase, BackingPhase::Granted);
+            assert_eq!(row.init, None);
+            assert_eq!(row.allocation, Some(allocation));
+            assert_eq!(row.devices, prepared.devices);
+            assert_eq!(standalone.0.load(Ordering::SeqCst), 0);
+            assert_eq!(owner.finalized.load(Ordering::SeqCst), 0);
         }
     }
 
