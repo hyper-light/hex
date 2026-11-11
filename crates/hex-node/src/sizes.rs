@@ -67,9 +67,9 @@ pub struct Host {
     /// The most threads the node may have: the least of its soft `RLIMIT_NPROC`, which counts its user's threads
     /// (getrlimit(2)), and `/proc/sys/kernel/threads-max`, the host's (proc(5)); `u64::MAX` where neither bounds it.
     pub threads: u64,
-    /// The most descriptors the node may hold: its hard `RLIMIT_NOFILE`, which the agent raises its soft limit to
-    /// (getrlimit(2)), or where that is unlimited `/proc/sys/fs/nr_open`, the most the kernel lets any process
-    /// open (proc(5)); `u64::MAX` where neither can be read.
+    /// The most descriptors the node may hold: its hard `RLIMIT_NOFILE`, which the node's start raises its soft limit
+    /// to (getrlimit(2), `netns::hold_descriptors`), or where that is unlimited `/proc/sys/fs/nr_open`, the most the
+    /// kernel lets any process open (proc(5)); `u64::MAX` where neither can be read.
     pub descriptors: u64,
 }
 
