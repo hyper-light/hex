@@ -367,6 +367,9 @@ int main(int argc, char **argv)
     struct observation *rows = NULL;
     VkQueueFamilyProperties *queues = NULL;
     const char *stage = "enumerate-count";
+    /* What a refusal says after its stage: the Vulkan result, or at "queue-families" the device's
+     * own count, which --max-queue-families must hold (the census's record of a bound run out). */
+    int64_t said;
     uint32_t count = 0;
     result = vkEnumeratePhysicalDevices(instance, &count, NULL);
     if (result != VK_SUCCESS)
@@ -407,6 +410,11 @@ int main(int argc, char **argv)
         }
         rows[i].physical = physical[i];
         result = observe(&rows[i], queues, limit.queues);
+        if (result != VK_SUCCESS && rows[i].queues > limit.queues) {
+            stage = "queue-families";
+            said = rows[i].queues;
+            goto refuse;
+        }
         if (result != VK_SUCCESS)
             goto fail;
         stage = "bounded-output";
@@ -448,9 +456,11 @@ int main(int argc, char **argv)
 memory:
     result = VK_ERROR_OUT_OF_HOST_MEMORY;
 fail:
+    said = result;
+refuse:
     free(queues);
     free(rows);
     free(physical);
     vkDestroyInstance(instance, NULL);
-    return refused(stage, result);
+    return refused(stage, said);
 }
