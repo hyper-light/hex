@@ -220,3 +220,22 @@ fn a_wait_that_ran_out_waits_longer_next() {
     measuring.ran_out(ms(7));
     assert_eq!(measuring.deadline(), None);
 }
+
+/// AC-T7.4.1 (decision 9, by build profile): a debug build's answers are no faster than a release build's under the
+/// same conditions, so the release record's cohorts bound a debug build's slowest from below, and a debug seed is never
+/// under its release one. Do: in this build, a debug one, make a wait whose release record is 3.022291 ms and whose
+/// debug record is 295.291 us (macOS's `client.guest.answer.hello`: the release campaign met cold first hellos the debug
+/// one never did, and a suite's hello ran out at the debug seed's 590.582 us bound), and one whose debug record is the
+/// larger. Expect: the first armed at twice the release record, 6.044582 ms; the second at twice its debug record.
+#[cfg(debug_assertions)]
+#[test]
+fn a_debug_seed_is_never_under_its_release_record() {
+    let hello = Patience::by_profile(
+        "test",
+        Duration::from_nanos(3_022_291),
+        Some(Duration::from_nanos(295_291)),
+    );
+    assert_eq!(hello.deadline(), Some(Duration::from_nanos(6_044_582)));
+    let slower = Patience::by_profile("test", ms(5), Some(ms(7)));
+    assert_eq!(slower.deadline(), Some(ms(14)));
+}
