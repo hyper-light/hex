@@ -214,6 +214,19 @@ mod tests {
         }
     }
 
+    /// AC-T7.4.1: decode the frame the built Program wrote in scripts/guest/vulkan-ready.sh's
+    /// self-test, run through its closure's own dynamic linker, libc and Vulkan loader against a fake
+    /// Venus ICD of one device with one queue family; expect one complete work-ready device.
+    #[test]
+    #[ignore = "decodes a built artifact: HEX_GUEST_READY_FRAME names vulkan-ready.sh's selftest/frame.txt"]
+    fn built_program_frame_is_work_ready() {
+        let path = std::env::var_os("HEX_GUEST_READY_FRAME").expect("HEX_GUEST_READY_FRAME is set");
+        let frame = std::fs::read(path).unwrap();
+        let report = Report::parse(&frame, 1, 8).unwrap();
+        report.require_work_ready(1, 8).unwrap();
+        assert!(report.text().ends_with("ready 1\n"), "{}", report.text());
+    }
+
     /// AC-T7.4.1: hostile/partial data cannot become a smaller ready device set.
     #[test]
     fn cpu_unknown_partial_or_unbounded_driver_frame_never_admits() {
