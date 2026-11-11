@@ -149,7 +149,7 @@ mod tests {
         let final_words = report_arguments([3; 16], &transferred).unwrap();
         assert_eq!(final_words[0], "--gpu-report");
         assert_eq!(final_words[2], "--gpu-report-scope");
-        assert_eq!(final_words[3], "03".repeat(16));
+        assert_eq!(final_words[3], std::ffi::OsString::from("03".repeat(16)));
         assert_ne!(original[1], final_words[1]);
         assert!(report_arguments([0; 16], &transferred).is_err());
         drop((reader, writer, transferred));

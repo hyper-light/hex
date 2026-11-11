@@ -494,7 +494,7 @@ impl core::error::Error for GpuProbeError {}
 )]
 mod tests {
     use super::*;
-    use alloc::vec;
+    use alloc::{format, vec};
 
     #[test]
     fn managed_report_binds_native_scope_and_exact_set_without_console_authority() {
